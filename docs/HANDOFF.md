@@ -129,9 +129,12 @@ vblank pacing was fixed (patch 0034).
      half-resolution buffer upsampled wrongly; moiré from a mis-decoded
      texture. Compare a frame dump against reference screenshots, then bisect
      the frame's passes (`RSX_ENGINE_PASS_DUMP_TRIGGER`).
-   - **Colours look washed out by default.** The game's own Display menu has
-     a colour slider; raising it made the picture look right. Check whether
-     the default really is that dull on hardware, or whether we lose
+   - **Colours look washed out by default.** The opening prologue is meant to
+     be washed out: a "vision of the past", `sepia_tone = 0.60` in the game's
+     playerParam.lua.eu. Only muted colour *after* the prologue would be a bug.
+     The game's own Display menu has a colour slider; raising it made the
+     picture look right. Compare the same scene in RPCS3: does the default
+     really look that dull, or do we lose
      saturation somewhere: gamma/sRGB handling in render targets or the
      present blit (swapchain format 44, `B8G8R8A8_UNORM`), or a colour-matrix
      constant.
