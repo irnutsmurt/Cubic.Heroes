@@ -45,6 +45,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <condition_variable>
+#include <string>
 #include <mutex>
 #include <thread>
 
@@ -467,11 +468,101 @@ static int run_guest(uint32_t entry, uint32_t stack_top) { return ppu_run(entry,
 
 extern "C" void dotheroes_configure_patches(void);
 
+/* ---------------------------------------------------------------------------
+ * Installed layout
+ * -----------------------------------------------------------------------*/
+/* The setup app installs the game as
+ *     <install>/dotheroes[.exe]
+ *     <install>/data/disc/PS3_GAME/...    the player's disc, EBOOT.elf decrypted
+ *     <install>/data/gamedata/            saves (dev_hdd0, dev_hdd1)
+ * and its shortcuts start it with no arguments. Then the ELF and every root
+ * default to that layout, wherever the shortcut's working directory is, and
+ * it opens a window. Run with an ELF argument (developers, tests) nothing is
+ * assumed: the environment and the working directory decide, as before. */
+static std::string exe_dir(void)
+{
+    char buf[4096];
+#ifdef _WIN32
+    DWORD n = GetModuleFileNameA(NULL, buf, sizeof buf);
+    if (!n || n >= sizeof buf) return ".";
+#else
+    ssize_t n = readlink("/proc/self/exe", buf, sizeof buf - 1);
+    if (n <= 0) return ".";
+#endif
+    buf[n] = 0;
+    std::string p(buf);
+    const size_t cut = p.find_last_of("/\\");
+    return cut == std::string::npos ? std::string(".") : p.substr(0, cut);
+}
+
+static void set_default_env(const char* name, const std::string& value)
+{
+    if (getenv(name)) return;
+#ifdef _WIN32
+    _putenv_s(name, value.c_str());
+#else
+    setenv(name, value.c_str(), 0);
+#endif
+}
+
+static std::string s_installed_elf;
+
+/* <install>/dotheroes.cfg: the player's settings, written by the setup app, as
+ * NAME=value lines (# comments). They are environment defaults: a variable
+ * already set wins (DOTHEROES_FPS=30, PS3RECOMP_VK_FULLSCREEN=1, ...). */
+static void read_settings(const std::string& path)
+{
+    FILE* f = fopen(path.c_str(), "r");
+    if (!f) return;
+    char line[512];
+    while (fgets(line, sizeof line, f)) {
+        char* s = line;
+        while (*s == ' ' || *s == '\t') s++;
+        if (*s == '#' || !*s) continue;
+        char* eq = strchr(s, '=');
+        if (!eq) continue;
+        *eq = 0;
+        char* v = eq + 1;
+        v[strcspn(v, "\r\n")] = 0;
+        char* k_end = eq;
+        while (k_end > s && (k_end[-1] == ' ' || k_end[-1] == '\t')) *--k_end = 0;
+        if (*s) set_default_env(s, v);
+    }
+    fclose(f);
+}
+
+static const char* installed_defaults(void)
+{
+    const std::string dir = exe_dir();
+    const std::string data = dir + "/data";
+    read_settings(dir + "/dotheroes.cfg");
+    /* No console: started from a shortcut. The log goes next to the data. */
+    if (!getenv("DOTHEROES_LOG_TO_CONSOLE")) {
+        const std::string log = data + "/dotheroes.log";
+        if (freopen(log.c_str(), "w", stdout)) setvbuf(stdout, NULL, _IOLBF, 0);
+        freopen(log.c_str(), "a", stderr);
+    }
+    s_installed_elf = data + "/disc/PS3_GAME/USRDIR/EBOOT.elf";
+    set_default_env("PS3_GAMEDATA_ROOT", data + "/gamedata");
+    set_default_env("PS3_HDD0_ROOT", data + "/gamedata/dev_hdd0");
+    set_default_env("PS3_HDD1_ROOT", data + "/gamedata/dev_hdd1");
+    set_default_env("PS3_DEV_FLASH", data + "/dev_flash");
+    set_default_env("PS3RECOMP_VK_WINDOW", "1");
+    set_default_env("PS3_TITLE", "3D Dot Game Heroes");
+    return s_installed_elf.c_str();
+}
+
 int main(int argc, char** argv)
 {
+    const char* elf = argc >= 2 ? argv[1] : installed_defaults();
     if (argc < 2) {
-        printf("usage: %s <PPU ELF>\n", argv[0]);
-        return 2;
+        FILE* f = fopen(elf, "rb");
+        if (!f) {
+            fprintf(stderr, "No game data at %s.\nRun the setup app to install the game, or: %s <PPU ELF>\n",
+                    elf, argv[0]);
+            return 2;
+        }
+        fclose(f);
     }
 
     /* Before the runtime installs its own fault handlers, so they chain here. */
@@ -523,13 +614,13 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    uint32_t entry = ppu_load_elf(argv[1]);
+    uint32_t entry = ppu_load_elf(elf);
     if (!entry) {
-        fprintf(stderr, "ERROR: could not load %s\n", argv[1]);
+        fprintf(stderr, "ERROR: could not load %s\n", elf);
         return 1;
     }
 
-    derive_vfs_root(argv[1]);
+    derive_vfs_root(elf);
     printf("[boot] VFS root: %s\n", ppu_vfs_root);
 
     ppu_recomp_register();   /* lifted function table -> address map */

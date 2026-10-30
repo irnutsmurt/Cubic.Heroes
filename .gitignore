@@ -8,3 +8,5 @@ EBOOT.BIN
 /keys/
 __pycache__/
 *.pyc
+*.o
+*.obj

@@ -6,7 +6,7 @@ results. Compiling is not evidence.
 | # | Milestone | Status |
 |---|---|---|
 | 1 | Analysis and feasibility | **Complete**, see FEASIBILITY.md |
-| 2 | Native executable with diagnostics | **In progress** (boot criteria met; debug console, golden log, Windows build open) |
+| 2 | Native executable with diagnostics | **In progress** (boot criteria met; Windows build compiles, not yet run; debug console, golden log open) |
 | 3 | Initial Vulkan rendering and native audio | **In progress**: renders and plays through Vulkan on Linux, audio mixed natively; frame cap lifted: menus ~60 fps, gameplay ~31 fps |
 | 4 | Menus and new-game startup | **In progress**: title → new game → opening → free movement, driven by `tests/scripts/new_game.drive` |
 | 5 | Core gameplay | Not started |
@@ -214,3 +214,13 @@ Tracked in FEASIBILITY.md §6 and the `[unknown]` markers there.
   - windowed play with a launcher;
   - save/load;
   - Windows build.
+
+## Windows port and setup app (2026-10-30, handed over: see HANDOFF.md)
+
+- The runtime builds for Windows with Zig's clang (MinGW ABI), Vulkan backend
+  included (patch 0035); the full Windows game build had not linked yet.
+- SFA3-style setup app written (`setup_app.py`, `tools/setup_pipeline.py`,
+  `tools/zig_build.py`, `tools/build_deps.py`, `tools/make_bundle.py`); not
+  yet run end to end.
+- Linux re-checked after these changes: boots and plays the intro route,
+  strict-clean, guest shaders on.

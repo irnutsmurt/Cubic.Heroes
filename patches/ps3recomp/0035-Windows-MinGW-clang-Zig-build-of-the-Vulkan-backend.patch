@@ -1,0 +1,452 @@
+From 4900e605f85a4658270b292c1919299d599586da Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Fri, 30 Oct 2026 08:35:58 -0700
+Subject: [PATCH] Windows (MinGW clang / Zig) build of the Vulkan backend
+
+- rsx_vulkan_backend.c: no longer Linux-only. Its POSIX calls (dlopen,
+  pthread mutexes, clock_gettime) go through small backend-local wrappers:
+  LoadLibrary(vulkan-1.dll), SRW locks and the performance counter on Win32.
+- CMakeLists: PS3RECOMP_RSX_VULKAN allowed on Windows; there it links SDL2
+  (window) and selects the SDL2 pad and audio backends, so input (keyboard
+  included) and audio match Linux. glslang is looked up whenever Vulkan is on.
+- cellPad: the SDL keyboard fallback is compiled with the SDL2 backend on
+  any platform.
+- rsx_shader_spirv: the translation cache key is a hash of the translator's
+  source and header (passed by CMake) instead of __DATE__/__TIME__, which
+  Zig rejects and which made builds unreproducible. Its COMPILE_DEFINITIONS
+  are appended, not replaced.
+- ppu_loader: builds with clang in MinGW mode (no SEH: the stack sampler
+  bounds its reads with VirtualQuery; a forward declaration matched to its
+  static definition).
+---
+ CMakeLists.txt                  |  35 ++++++++--
+ libs/input/cellPad.c            |   4 +-
+ libs/video/rsx_shader_spirv.cpp |  13 ++--
+ libs/video/rsx_vulkan_backend.c | 112 +++++++++++++++++++++-----------
+ runtime/ppu/ppu_loader.cpp      |  16 ++++-
+ 5 files changed, 129 insertions(+), 51 deletions(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 250d8d2..79fa174 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -47,11 +47,11 @@ list(FILTER HLE_SOURCES EXCLUDE REGEX "/tests/")
+ # The Vulkan RSX backend is opt-in while it grows (stage V0: clear + present).
+ # It loads libvulkan at run time, so building needs only the Vulkan headers --
+ # no target-architecture libvulkan, which keeps cross-compiling simple.
+-option(PS3RECOMP_RSX_VULKAN "Build the Vulkan RSX backend (Linux)" OFF)
++option(PS3RECOMP_RSX_VULKAN "Build the Vulkan RSX backend (Linux, Windows)" OFF)
+ list(FILTER HLE_SOURCES EXCLUDE REGEX "rsx_vulkan_backend\\.c$")
+ if(PS3RECOMP_RSX_VULKAN)
+-    if(WIN32 OR APPLE)
+-        message(FATAL_ERROR "PS3RECOMP_RSX_VULKAN is Linux-only for now")
++    if(APPLE)
++        message(FATAL_ERROR "PS3RECOMP_RSX_VULKAN: macOS has the Metal backend")
+     endif()
+     find_path(PS3RECOMP_VULKAN_INCLUDE_DIR vulkan/vulkan.h)
+     if(NOT PS3RECOMP_VULKAN_INCLUDE_DIR)
+@@ -62,6 +62,17 @@ if(PS3RECOMP_RSX_VULKAN)
+     list(APPEND HLE_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/libs/video/rsx_vulkan_backend.c")
+     # HLSL -> SPIR-V for guest programs: a stub unless glslang is found below.
+     list(APPEND HLE_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/libs/video/rsx_shader_spirv.cpp")
++    # Its on-disk cache is keyed on the translator's own source (see
++    # kTranslatorBuild): 23 hex digits of a hash of the file and its header.
++    file(SHA256 "${CMAKE_CURRENT_SOURCE_DIR}/libs/video/rsx_shader_spirv.cpp" _spv_a)
++    file(SHA256 "${CMAKE_CURRENT_SOURCE_DIR}/libs/video/rsx_shader_spirv.h" _spv_b)
++    string(SHA256 _spv_id "${_spv_a}${_spv_b}")
++    string(SUBSTRING "${_spv_id}" 0 23 _spv_id)
++    set_property(SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/libs/video/rsx_shader_spirv.cpp"
++                 APPEND PROPERTY COMPILE_DEFINITIONS "RSX_SPIRV_TRANSLATOR_ID=\"${_spv_id}\"")
++    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
++                 "${CMAKE_CURRENT_SOURCE_DIR}/libs/video/rsx_shader_spirv.cpp"
++                 "${CMAKE_CURRENT_SOURCE_DIR}/libs/video/rsx_shader_spirv.h")
+ endif()
+ 
+ # The Metal backend is Objective-C and Apple-only, so it is added explicitly
+@@ -135,6 +146,16 @@ if(WIN32)
+         ole32       # COM for WASAPI audio
+         bcrypt      # BCryptGenRandom for SSL RNG
+     )
++    # With the Vulkan backend, SDL2 opens its window -- and then serves input
++    # (keyboard and every controller SDL knows, not only XInput pads) and
++    # audio as it does on Linux, so both platforms run the same backends.
++    if(PS3RECOMP_RSX_VULKAN)
++        find_package(SDL2 REQUIRED)
++        target_link_libraries(ps3recomp_runtime PUBLIC SDL2::SDL2)
++        target_compile_definitions(ps3recomp_runtime PRIVATE
++            PS3RECOMP_PAD_USE_SDL2 PS3RECOMP_AUDIO_USE_SDL2)
++        message(STATUS "  SDL2:         window, input and audio (Vulkan backend)")
++    endif()
+ else()
+     # cellPad and cellAudio select their SDL2 backends unconditionally off
+     # Windows (see PAD_BACKEND_SDL2 / AUDIO_BACKEND_SDL2), so SDL2 is required
+@@ -220,7 +241,8 @@ endif()
+ #           the standalone binary as an imported target and fails to load
+ #           without it)
+ set(PS3RECOMP_MSL_TRANSLATION OFF)
+-if(UNIX)
++# Windows needs glslang too once the Vulkan backend is on (guest shaders).
++if(UNIX OR PS3RECOMP_RSX_VULKAN)
+     find_package(glslang CONFIG QUIET)
+ 
+     # spirv-cross's C API. Debian ships it as a shared library and Homebrew as
+@@ -291,9 +313,8 @@ endif()
+ # its fixed-function path.
+ if(PS3RECOMP_RSX_VULKAN)
+     if(glslang_FOUND AND TARGET glslang::glslang AND TARGET glslang::SPIRV)
+-        set_source_files_properties(
+-            "${CMAKE_CURRENT_SOURCE_DIR}/libs/video/rsx_shader_spirv.cpp"
+-            PROPERTIES COMPILE_DEFINITIONS PS3RECOMP_HAVE_SPIRV_TRANSLATION=1)
++        set_property(SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/libs/video/rsx_shader_spirv.cpp"
++            APPEND PROPERTY COMPILE_DEFINITIONS PS3RECOMP_HAVE_SPIRV_TRANSLATION=1)
+         target_link_libraries(ps3recomp_runtime PRIVATE glslang::glslang glslang::SPIRV)
+         if(TARGET glslang::glslang-default-resource-limits)
+             target_link_libraries(ps3recomp_runtime PRIVATE
+diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
+index c0cda82..e577bcf 100644
+--- a/libs/input/cellPad.c
++++ b/libs/input/cellPad.c
+@@ -627,8 +627,8 @@ static void pad_poll_sdl2(void)
+     }
+ }
+ 
+-#if !defined(_WIN32) && PAD_BACKEND_SDL2
+-/* Keyboard fallback off Windows: the same key map as the Windows one above,
++#if PAD_BACKEND_SDL2
++/* Keyboard fallback with the SDL2 backend: the same key map as the XInput one above,
+  * read from SDL's keyboard state while one of this process's SDL windows (the
+  * Vulkan backend's, PS3RECOMP_VK_WINDOW=1) has keyboard focus. That window's
+  * event pump keeps the state current. PAD_NO_KEYBOARD=1 turns it off. */
+diff --git a/libs/video/rsx_shader_spirv.cpp b/libs/video/rsx_shader_spirv.cpp
+index 4aa4a17..df893a6 100644
+--- a/libs/video/rsx_shader_spirv.cpp
++++ b/libs/video/rsx_shader_spirv.cpp
+@@ -121,10 +121,15 @@ int translate(const char* hlsl, int stage, std::vector<unsigned int>& spirv,
+ 
+ const u32 kCacheFormat = 1;
+ const u32 kCacheMagic = 0x56505352u;   /* "RSPV" */
+-/* This file's compile time stands for translate()'s options and the binding
+- * contract in rsx_shader_spirv.h: when either changes, this file is rebuilt,
+- * and the files an older build wrote become misses. */
+-const char kTranslatorBuild[24] = __DATE__ " " __TIME__;
++/* Stands for translate()'s options and the binding contract in
++ * rsx_shader_spirv.h: the build passes a hash of this file and that header
++ * (CMakeLists.txt), so when either changes the files an older build wrote
++ * become misses. A hash rather than the compile time: the build stays
++ * reproducible. */
++#ifndef RSX_SPIRV_TRANSLATOR_ID
++#define RSX_SPIRV_TRANSLATOR_ID "unversioned"
++#endif
++const char kTranslatorBuild[24] = RSX_SPIRV_TRANSLATOR_ID;
+ 
+ struct Cache {
+     std::mutex lock;
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index f33c061..1332593 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -2,7 +2,7 @@
+  * ps3recomp - Vulkan RSX Backend. See rsx_vulkan_backend.h.
+  *
+  * The file, in order:
+- *   loader and device      libvulkan by dlopen, Vulkan 1.0 entry points only;
++ *   loader and device      libvulkan by dlopen (vulkan-1.dll on Windows), Vulkan 1.0 entry points only;
+  *                          device choice, BC textures when the device has them
+  *   memory, images, submit helpers
+  *   vtable fallback path   the null backend's fixed-function contract:
+@@ -38,8 +38,6 @@
+  * with spaces.
+  */
+ 
+-#ifndef _WIN32
+-
+ #define VK_NO_PROTOTYPES
+ #include <vulkan/vulkan.h>
+ 
+@@ -53,18 +51,58 @@
+ #include "vulkan/rsx_vk_fallback_vert.spv.h"
+ #include "vulkan/rsx_vk_fallback_frag.spv.h"
+ 
+-/* SDL2 is already required off Windows (cellPad, cellAudio); here it only
+- * opens the optional window. Same include style as those two. */
++/* SDL2 opens the optional window (and is the input/audio backend off
++ * Windows). Same include style as cellPad and cellAudio. */
+ #include <SDL2/SDL.h>
+ #include <SDL2/SDL_vulkan.h>
+ 
+-#include <dlfcn.h>
+-#include <pthread.h>
+ #include <stddef.h>
+ #include <stdint.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
++#include <time.h>
++
++#ifdef _WIN32
++/* The few POSIX calls this file makes, on Win32: the loader by LoadLibrary,
++ * two locks as SRW locks, a monotonic clock from the performance counter.
++ * Backend-local names, so MinGW's own pthread headers cannot clash. */
++#define WIN32_LEAN_AND_MEAN
++#include <windows.h>
++typedef SRWLOCK vk_mutex_t;
++static inline void vk_mutex_init(vk_mutex_t* m)    { InitializeSRWLock(m); }
++static inline void vk_mutex_lock(vk_mutex_t* m)    { AcquireSRWLockExclusive(m); }
++static inline void vk_mutex_unlock(vk_mutex_t* m)  { ReleaseSRWLockExclusive(m); }
++static inline void vk_mutex_destroy(vk_mutex_t* m) { (void)m; }
++static inline void vk_monotonic(struct timespec* t)
++{
++    static LARGE_INTEGER f;
++    LARGE_INTEGER n;
++    if (!f.QuadPart) QueryPerformanceFrequency(&f);
++    QueryPerformanceCounter(&n);
++    t->tv_sec = (time_t)(n.QuadPart / f.QuadPart);
++    t->tv_nsec = (long)((n.QuadPart % f.QuadPart) * 1000000000LL / f.QuadPart);
++}
++static void* vk_lib_open(const char* name) { return (void*)LoadLibraryA(name); }
++static void* vk_lib_sym(void* lib, const char* name) { return (void*)GetProcAddress((HMODULE)lib, name); }
++static void vk_lib_close(void* lib) { FreeLibrary((HMODULE)lib); }
++static const char* vk_lib_error(void) { static char b[32]; snprintf(b, sizeof b, "error %lu", (unsigned long)GetLastError()); return b; }
++#define VK_LOADER_NAMES { "vulkan-1.dll" }
++#else
++#include <dlfcn.h>
++#include <pthread.h>
++typedef pthread_mutex_t vk_mutex_t;
++static inline void vk_mutex_init(vk_mutex_t* m)    { pthread_mutex_init(m, NULL); }
++static inline void vk_mutex_lock(vk_mutex_t* m)    { pthread_mutex_lock(m); }
++static inline void vk_mutex_unlock(vk_mutex_t* m)  { pthread_mutex_unlock(m); }
++static inline void vk_mutex_destroy(vk_mutex_t* m) { pthread_mutex_destroy(m); }
++static inline void vk_monotonic(struct timespec* t) { clock_gettime(CLOCK_MONOTONIC, t); }
++static void* vk_lib_open(const char* name) { return dlopen(name, RTLD_NOW | RTLD_LOCAL); }
++static void* vk_lib_sym(void* lib, const char* name) { return dlsym(lib, name); }
++static void vk_lib_close(void* lib) { dlclose(lib); }
++static const char* vk_lib_error(void) { return dlerror(); }
++#define VK_LOADER_NAMES { "libvulkan.so.1", "libvulkan.so" }
++#endif
+ 
+ /* ---------------------------------------------------------------------------
+  * Run-time loaded entry points (Vulkan 1.0 core only)
+@@ -207,8 +245,8 @@ typedef struct vk_state {
+     int              present_inflight;/* copy submitted, not yet finished      */
+     int              present_split;   /* inside rsx_vulkan_backend_present_begin */
+     int              present_order;   /* the walker's next command buffer waits */
+-    pthread_mutex_t  queue_mu;
+-    pthread_mutex_t  present_mu;
++    vk_mutex_t  queue_mu;
++    vk_mutex_t  present_mu;
+ 
+     /* Optional window (PS3RECOMP_VK_WINDOW=1). Rendering stays offscreen
+      * either way -- readback and the tests are unchanged -- and a present
+@@ -253,15 +291,15 @@ static vk_state s_vk;
+  * -------------------------------------------------------------------------*/
+ static int vk_load_library(void)
+ {
+-    static const char* names[] = { "libvulkan.so.1", "libvulkan.so" };
++    static const char* names[] = VK_LOADER_NAMES;
+     for (size_t i = 0; i < sizeof names / sizeof names[0] && !s_vk.lib; i++)
+-        s_vk.lib = dlopen(names[i], RTLD_NOW | RTLD_LOCAL);
++        s_vk.lib = vk_lib_open(names[i]);
+     if (!s_vk.lib) {
+-        VK_LOG("no Vulkan loader found (dlopen libvulkan.so.1: %s)\n", dlerror());
++        VK_LOG("no Vulkan loader found (%s: %s)\n", names[0], vk_lib_error());
+         return -1;
+     }
+     pvkGetInstanceProcAddr =
+-        (PFN_vkGetInstanceProcAddr)dlsym(s_vk.lib, "vkGetInstanceProcAddr");
++        (PFN_vkGetInstanceProcAddr)vk_lib_sym(s_vk.lib, "vkGetInstanceProcAddr");
+     if (!pvkGetInstanceProcAddr) { VK_LOG("libvulkan has no vkGetInstanceProcAddr\n"); return -1; }
+ #define LOAD_G(name) \
+     if (!(p##name = (PFN_##name)pvkGetInstanceProcAddr(VK_NULL_HANDLE, #name))) \
+@@ -587,26 +625,26 @@ static void vk_invalidate(vk_buffer* b)
+  * -------------------------------------------------------------------------*/
+ static VkResult vk_queue_submit(const VkSubmitInfo* si, VkFence fence)
+ {
+-    pthread_mutex_lock(&s_vk.queue_mu);
++    vk_mutex_lock(&s_vk.queue_mu);
+     const VkResult r = pvkQueueSubmit(s_vk.queue, 1, si, fence);
+-    pthread_mutex_unlock(&s_vk.queue_mu);
++    vk_mutex_unlock(&s_vk.queue_mu);
+     return r;
+ }
+ 
+ static VkResult vk_queue_present(const VkPresentInfoKHR* pi)
+ {
+-    pthread_mutex_lock(&s_vk.queue_mu);
++    vk_mutex_lock(&s_vk.queue_mu);
+     const VkResult r = pvkQueuePresentKHR(s_vk.queue, pi);
+-    pthread_mutex_unlock(&s_vk.queue_mu);
++    vk_mutex_unlock(&s_vk.queue_mu);
+     return r;
+ }
+ 
+ static void vk_device_idle(void)
+ {
+     if (!s_vk.device || !pvkDeviceWaitIdle) return;
+-    pthread_mutex_lock(&s_vk.queue_mu);
++    vk_mutex_lock(&s_vk.queue_mu);
+     pvkDeviceWaitIdle(s_vk.device);
+-    pthread_mutex_unlock(&s_vk.queue_mu);
++    vk_mutex_unlock(&s_vk.queue_mu);
+ }
+ 
+ /* A full execution and memory dependency on everything submitted before
+@@ -681,7 +719,7 @@ static void vk_gt_collect(VkCommandBuffer cb)   /* after its fence */
+     if (pvkGetQueryPoolResults(s_vk.device, s_gt.pool, b, 2, sizeof ts, ts, sizeof ts[0],
+                                VK_QUERY_RESULT_64_BIT) != VK_SUCCESS) return;
+     s_gt.ms += (double)(ts[1] - ts[0]) * s_gt.period_ns * 1e-6; s_gt.n++;
+-    struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
++    struct timespec t; vk_monotonic(&t);
+     const double now = t.tv_sec + t.tv_nsec * 1e-9;
+     if (!s_gt.t0) s_gt.t0 = now;
+     if (now - s_gt.t0 >= 5.0) {
+@@ -734,7 +772,7 @@ static void vk_wait_stat(int line, double ms)
+     int i = 0;
+     while (i < 64 && s_ws[i].line && s_ws[i].line != line) i++;
+     if (i < 64) { s_ws[i].line = line; s_ws[i].n++; s_ws[i].ms += ms; }
+-    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
++    struct timespec ts; vk_monotonic(&ts);
+     const double now = ts.tv_sec + ts.tv_nsec * 1e-9;
+     if (!t0) t0 = now;
+     if (now - t0 >= 5.0) {
+@@ -753,10 +791,10 @@ static int vk_submit_and_wait_at(int line)
+     VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                         .commandBufferCount = 1, .pCommandBuffers = &s_vk.cmd };
+     VK_CHECK(pvkResetFences(s_vk.device, 1, &s_vk.fence), "vkResetFences");
+-    struct timespec a, b; clock_gettime(CLOCK_MONOTONIC, &a);
++    struct timespec a, b; vk_monotonic(&a);
+     VK_CHECK(vk_queue_submit(&si, s_vk.fence), "vkQueueSubmit");
+     VK_CHECK(pvkWaitForFences(s_vk.device, 1, &s_vk.fence, VK_TRUE, UINT64_MAX), "vkWaitForFences");
+-    clock_gettime(CLOCK_MONOTONIC, &b);
++    vk_monotonic(&b);
+     vk_gt_collect(s_vk.cmd);
+     vk_wait_stat(s_flush_line ? -s_flush_line : line,
+                  (b.tv_sec - a.tv_sec) * 1e3 + (b.tv_nsec - a.tv_nsec) * 1e-6);
+@@ -2208,10 +2246,10 @@ static void vk_cb_present(void* ud, u32 buffer_id)
+ {
+     (void)ud; (void)buffer_id;
+     if (!s_vk.device) return;
+-    pthread_mutex_lock(&s_vk.present_mu);
++    vk_mutex_lock(&s_vk.present_mu);
+     VkCommandBuffer cb = vk_present_record_begin();
+     if (cb) vk_present_record_end(cb);
+-    pthread_mutex_unlock(&s_vk.present_mu);
++    vk_mutex_unlock(&s_vk.present_mu);
+     s_g.last_draws = s_g.draws;
+     s_g.draws = 0;
+ }
+@@ -2585,7 +2623,7 @@ static void vk_eng_present(void* user, u32 surface)
+     if (!s_vk.device) return;
+     if (s_eb_pending) vk_eng_flush();   /* the present records on its own buffer */
+     vk_eng_obj* o = vk_eng_get(surface, VK_ENG_COLOR);
+-    pthread_mutex_lock(&s_vk.present_mu);
++    vk_mutex_lock(&s_vk.present_mu);
+     VkCommandBuffer cb = vk_present_record_begin();
+     if (cb) {
+         if (o) {
+@@ -2604,7 +2642,7 @@ static void vk_eng_present(void* user, u32 surface)
+         }
+         vk_present_record_end(cb);
+     }
+-    pthread_mutex_unlock(&s_vk.present_mu);
++    vk_mutex_unlock(&s_vk.present_mu);
+     s_g.last_draws = s_g.draws;
+     s_g.draws = 0;
+ }
+@@ -3738,9 +3776,9 @@ static int vk_eb_upload(VkImage img, VkBufferImageCopy* region, const void* src,
+ static void vk_wait_inflight(void)
+ {
+     if (!s_eb.inflight) return;
+-    struct timespec a, b; clock_gettime(CLOCK_MONOTONIC, &a);
++    struct timespec a, b; vk_monotonic(&a);
+     pvkWaitForFences(s_vk.device, 1, &s_eb.alt_fence, VK_TRUE, UINT64_MAX);
+-    clock_gettime(CLOCK_MONOTONIC, &b);
++    vk_monotonic(&b);
+     vk_gt_collect(s_eb.alt_cmd);
+     vk_wait_stat(s_flush_line ? -s_flush_line : 1, (b.tv_sec - a.tv_sec) * 1e3 + (b.tv_nsec - a.tv_nsec) * 1e-6);
+     s_eb.inflight = 0;
+@@ -4069,8 +4107,8 @@ static rsx_backend s_vulkan_backend = {
+  * -------------------------------------------------------------------------*/
+ static int vk_init_all(u32 width, u32 height, const char* title)
+ {
+-    pthread_mutex_init(&s_vk.queue_mu, NULL);
+-    pthread_mutex_init(&s_vk.present_mu, NULL);
++    vk_mutex_init(&s_vk.queue_mu);
++    vk_mutex_init(&s_vk.present_mu);
+     s_vk.width  = width  ? width  : 1280;
+     s_vk.height = height ? height : 720;
+     s_vk.dump_path = getenv("PS3RECOMP_VK_DUMP");
+@@ -4282,10 +4320,10 @@ void rsx_vulkan_backend_shutdown(void)
+         pvkDestroyDevice(s_vk.device, NULL);
+     }
+     if (s_vk.instance && pvkDestroyInstance) pvkDestroyInstance(s_vk.instance, NULL);
+-    if (s_vk.lib) dlclose(s_vk.lib);
++    if (s_vk.lib) vk_lib_close(s_vk.lib);
+     free(s_vk.cpu_verts);
+-    pthread_mutex_destroy(&s_vk.queue_mu);
+-    pthread_mutex_destroy(&s_vk.present_mu);
++    vk_mutex_destroy(&s_vk.queue_mu);
++    vk_mutex_destroy(&s_vk.present_mu);
+     memset(&s_vk, 0, sizeof s_vk);
+ }
+ 
+@@ -4319,9 +4357,9 @@ void rsx_vulkan_backend_present_begin(void)
+ void rsx_vulkan_backend_present_finish(void)
+ {
+     if (!s_vk.device) return;
+-    pthread_mutex_lock(&s_vk.present_mu);
++    vk_mutex_lock(&s_vk.present_mu);
+     vk_present_complete_locked();
+-    pthread_mutex_unlock(&s_vk.present_mu);
++    vk_mutex_unlock(&s_vk.present_mu);
+ }
+ 
+ u32 rsx_vulkan_backend_presented_center(void)
+@@ -4347,4 +4385,4 @@ int rsx_vulkan_backend_depth_bounds(void)
+     return s_vk.eng_active && s_vk.depth_bounds_ok;
+ }
+ 
+-#endif /* !_WIN32 */
++
+diff --git a/runtime/ppu/ppu_loader.cpp b/runtime/ppu/ppu_loader.cpp
+index 2fd4b36..20055e3 100644
+--- a/runtime/ppu/ppu_loader.cpp
++++ b/runtime/ppu/ppu_loader.cpp
+@@ -632,12 +632,26 @@ static uint32_t samp_stack_guest(HANDLE h, const CONTEXT* c)
+ {
+     (void)h;
+     const uintptr_t* sp = (const uintptr_t*)c->Rsp;
++#if defined(_MSC_VER)
+     for (int i = 0; i < 512; i++) {          /* 4 KB of stack */
+         uintptr_t v;
+         __try { v = sp[i]; } __except (1) { return 0; }
+         uint32_t g = samp_lookup(v);
+         if (g) return g;
+     }
++#else
++    /* No SEH outside MSVC mode (MinGW): read only as far as the committed,
++     * readable region the stack pointer is in. */
++    MEMORY_BASIC_INFORMATION mbi;
++    if (!VirtualQuery(sp, &mbi, sizeof mbi) || mbi.State != MEM_COMMIT ||
++        !(mbi.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE)))
++        return 0;
++    const uintptr_t end = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
++    for (int i = 0; i < 512 && (uintptr_t)(sp + i + 1) <= end; i++) {   /* 4 KB of stack */
++        uint32_t g = samp_lookup(sp[i]);
++        if (g) return g;
++    }
++#endif
+     return 0;
+ }
+ 
+@@ -790,7 +804,7 @@ static DWORD WINAPI samp_thread(LPVOID p)
+  * Writing the word leaves memory self-consistent: lwarx, the CAS and the
+  * polling reader all see the same thing, so the guest behaves as it would if
+  * whatever should have cleared the counter had done so. */
+-extern "C" void ppu_resv_break(uint64_t ea);
++static inline void ppu_resv_break(uint64_t addr);   /* defined below */
+ static DWORD WINAPI poke_thread(LPVOID p)
+ {
+     const uint32_t ea  = (uint32_t)(uintptr_t)p;
+-- 
+2.56.0
+
