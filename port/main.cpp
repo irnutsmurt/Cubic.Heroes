@@ -265,7 +265,10 @@ static DWORD WINAPI frame_clock(LPVOID)
     ULONGLONG next_tick = GetTickCount64();
 
     for (;;) {
-        Sleep(4);
+        /* 1 ms: the guest's FIFO writes are not signalled, so this poll is
+         * how soon the walker sees them. At 4 ms the waits added up over a
+         * frame's command waves (~1 fps in gameplay). */
+        Sleep(1);
         ULONGLONG now = GetTickCount64();
 
         int fired = 0;

@@ -7,7 +7,7 @@ results. Compiling is not evidence.
 |---|---|---|
 | 1 | Analysis and feasibility | **Complete**, see FEASIBILITY.md |
 | 2 | Native executable with diagnostics | **In progress** (boot criteria met; debug console, golden log, Windows build open) |
-| 3 | Initial Vulkan rendering and native audio | **In progress**: renders and plays through Vulkan on Linux, audio mixed natively; ~26 fps in gameplay (target 30) |
+| 3 | Initial Vulkan rendering and native audio | **In progress**: renders and plays through Vulkan on Linux, audio mixed natively; ~28 fps in gameplay (target 30) |
 | 4 | Menus and new-game startup | **In progress**: title → new game → opening → free movement, driven by `tests/scripts/new_game.drive` |
 | 5 | Core gameplay | Not started |
 | 6 | Full-game coverage | Not started |
@@ -154,6 +154,9 @@ Tracked in FEASIBILITY.md §6 and the `[unknown]` markers there.
       vertex decode made branchless (0029, bit-identical).
     - The port now defaults `PS3RECOMP_VK_GUEST_PROGRAMS=1` and
       `VK_DRAW_BATCH=1`; the environment overrides them.
+    - Then ~28 fps: the frame clock polls the FIFO every 1 ms (was 4), and
+      the vertex fetch runs in 128-vertex chunks with SSE2 half and float
+      decode (0031; bit-identical, tested exhaustively for halves).
     - Validation layer, with sync validation enabled: no messages over
       the intro route.
     - `VK_GPU_TIME=1`: the GPU is busy ~22 ms a frame, 50-57% of the wall
@@ -174,8 +177,8 @@ Tracked in FEASIBILITY.md §6 and the `[unknown]` markers there.
   - `boot_smoke.sh` refreshes `frame.ppm` every 15th present by default.
     Dumping every frame cost several fps and skewed measurements.
 - Next:
-  - reach 30 fps: walker CPU (vertex conversion ~1/3 of it), the frame
-    clock's 4 ms poll, the GPU's ~22 ms per frame;
+  - reach 30 fps: walker CPU (vertex conversion), the GPU's ~22 ms per
+    frame;
   - the beige quad;
   - windowed play with a launcher;
   - save/load;

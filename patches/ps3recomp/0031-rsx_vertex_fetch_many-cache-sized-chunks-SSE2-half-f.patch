@@ -1,0 +1,166 @@
+From cd9fcff238aa05e7e190f3655cb5d2a1e9c5b183 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Fri, 30 Oct 2026 02:56:25 -0700
+Subject: [PATCH] rsx_vertex_fetch_many: cache-sized chunks, SSE2 half/float
+ decode
+
+Attributes are fetched per 128-vertex chunk, so each attribute pass finds
+the source vertices and output rows of the previous one in cache. Half and
+float attributes decode a whole vertex with SSE2 (one load, lane-wise byte
+swap and conversion, one store); results are bit-identical to the scalar
+decoders (all half values x sizes 1-4, 8M random floats). The vector path
+is used only where its full-width read stays inside the attribute's source
+range; other targets keep the scalar loop.
+---
+ libs/video/rsx_vertex_compact.c | 105 +++++++++++++++++++++++++++++++-
+ 1 file changed, 102 insertions(+), 3 deletions(-)
+
+diff --git a/libs/video/rsx_vertex_compact.c b/libs/video/rsx_vertex_compact.c
+index 365284a..3096ff1 100644
+--- a/libs/video/rsx_vertex_compact.c
++++ b/libs/video/rsx_vertex_compact.c
+@@ -32,6 +32,41 @@ static inline float rsx_compact_be_f16(const u8* p)
+     return f;
+ }
+ 
++#if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64)
++#include <emmintrin.h>
++#define RSX_FETCH_SSE2 1
++/* Whole-vertex forms of the two decoders above for the fetch loop: one load,
++ * lanes byte-swapped and converted exactly as the scalar code does, lanes at
++ * or past the attribute's size taken from `dflt` (0,0,0,1) where `keep` is
++ * clear. They read 8 (half) or 16 (float) bytes whatever the size; the loop
++ * uses them only where that stays inside the attribute's source range. */
++static inline __m128 rsx_sse_keep(__m128i o, __m128i keep, __m128 dflt)
++{
++    const __m128 k = _mm_castsi128_ps(keep);
++    return _mm_or_ps(_mm_and_ps(k, _mm_castsi128_ps(o)), _mm_andnot_ps(k, dflt));
++}
++static inline __m128 rsx_sse_be_f16x4(const u8* p, __m128i keep, __m128 dflt)
++{
++    __m128i h = _mm_loadl_epi64((const __m128i*)p);
++    h = _mm_or_si128(_mm_slli_epi16(h, 8), _mm_srli_epi16(h, 8));
++    h = _mm_unpacklo_epi16(h, _mm_setzero_si128());
++    const __m128i em = _mm_and_si128(h, _mm_set1_epi32(0x7FFF));
++    const __m128i bias = _mm_set1_epi32(0x38000000);
++    __m128i o = _mm_add_epi32(_mm_slli_epi32(em, 13), bias);
++    o = _mm_add_epi32(o, _mm_and_si128(_mm_cmpgt_epi32(em, _mm_set1_epi32(0x7BFF)), bias));
++    o = _mm_andnot_si128(_mm_cmplt_epi32(em, _mm_set1_epi32(0x0400)), o);
++    o = _mm_or_si128(o, _mm_slli_epi32(_mm_and_si128(h, _mm_set1_epi32(0x8000)), 16));
++    return rsx_sse_keep(o, keep, dflt);
++}
++static inline __m128 rsx_sse_be_f32x4(const u8* p, __m128i keep, __m128 dflt)
++{
++    __m128i x = _mm_loadu_si128((const __m128i*)p);
++    x = _mm_or_si128(_mm_slli_epi16(x, 8), _mm_srli_epi16(x, 8));
++    x = _mm_or_si128(_mm_slli_epi32(x, 16), _mm_srli_epi32(x, 16));
++    return rsx_sse_keep(x, keep, dflt);
++}
++#endif
++
+ int rsx_vertex_decode_element(
+     u32 type, u32 size, const u8* source, float out[4])
+ {
+@@ -338,12 +373,46 @@ int rsx_vertex_fetch_one(
+         for (u32 c = 0; c < n; c++) { decode; }                                 \
+     }
+ 
+-int rsx_vertex_fetch_many(
++#ifdef RSX_FETCH_SSE2
++/* RSX_FETCH_LOOP with a whole-vertex decoder `vdecode(src, keep, dflt)` that
++ * reads `load` bytes; elements whose read would leave the source range take
++ * the scalar `decode`. */
++#define RSX_FETCH_LOOP_SSE(load, vdecode, decode)                               \
++    {                                                                           \
++        const u64 avail = (u64)span * fstride + fetch->elem_size;               \
++        const int vok = avail >= (load);                                        \
++        const u32 vlim = !vok ? 0 : fstride                                     \
++            ? (u32)((avail - (load)) / fstride) : UINT_MAX;                     \
++        const __m128i keep = _mm_cmpgt_epi32(_mm_set1_epi32((int)n),            \
++                                             _mm_setr_epi32(0, 1, 2, 3));       \
++        const __m128 dflt = _mm_setr_ps(0.0f, 0.0f, 0.0f, 1.0f);                \
++        for (u32 i = 0; i < count; i++) {                                       \
++            float* v = (float*)(out + (size_t)i * stride + slot * 16u);         \
++            const u32 element = plain                                           \
++                ? ((refs[i].vertex_id + refs[i].base_index) & 0x000FFFFFu)      \
++                : rsx_vertex_element_index(refs[i].vertex_id,                   \
++                      refs[i].base_index, fetch->desc.frequency, modulo);       \
++            const u32 rel = element - first;                                    \
++            if (rel > span) {                                                   \
++                if (!rsx_vertex_fetch_attr_value(plan, attr, &refs[i], v))      \
++                    return 0;                                                   \
++                continue;                                                       \
++            }                                                                   \
++            const u8* src = base + (u64)rel * fstride;                          \
++            if (vok && rel <= vlim) {                                           \
++                _mm_storeu_ps(v, vdecode(src, keep, dflt));                     \
++                continue;                                                       \
++            }                                                                   \
++            v[0] = v[1] = v[2] = 0.0f; v[3] = 1.0f;                             \
++            for (u32 c = 0; c < n; c++) { decode; }                             \
++        }                                                                       \
++    }
++#endif
++
++static int rsx_vertex_fetch_chunk(
+     const rsx_vertex_fetch_plan* plan, const rsx_vertex_ref* refs, u32 count,
+     u8* out)
+ {
+-    if (!plan || (!refs && count) || (!out && plan->layout.stride && count))
+-        return 0;
+     const u32 stride = plan->layout.stride;
+     for (u32 slot = 0; slot < plan->layout.count; slot++) {
+         const u32 attr = plan->layout.attrs[slot];
+@@ -365,12 +434,21 @@ int rsx_vertex_fetch_many(
+         const int plain = rsx_vertex_freq_plain(fetch->desc.frequency, modulo);
+         const u32 n = fetch->desc.size < 4 ? fetch->desc.size : 4;
+         switch (type) {
++#ifdef RSX_FETCH_SSE2
++        case RSX_VTX_TYPE_FLOAT:
++            RSX_FETCH_LOOP_SSE(16u, rsx_sse_be_f32x4, v[c] = rsx_compact_be_f32(src + c * 4))
++            break;
++        case RSX_VTX_TYPE_HALF:
++            RSX_FETCH_LOOP_SSE(8u, rsx_sse_be_f16x4, v[c] = rsx_compact_be_f16(src + c * 2))
++            break;
++#else
+         case RSX_VTX_TYPE_FLOAT:
+             RSX_FETCH_LOOP(v[c] = rsx_compact_be_f32(src + c * 4))
+             break;
+         case RSX_VTX_TYPE_HALF:
+             RSX_FETCH_LOOP(v[c] = rsx_compact_be_f16(src + c * 2))
+             break;
++#endif
+         case RSX_VTX_TYPE_UNORM8:
+             RSX_FETCH_LOOP(v[c] = src[c] / 255.0f)
+             break;
+@@ -394,6 +472,27 @@ int rsx_vertex_fetch_many(
+     return 1;
+ }
+ #undef RSX_FETCH_LOOP
++#undef RSX_FETCH_LOOP_SSE
++
++/* In chunks: each attribute pass of a chunk then reads source vertices and
++ * writes output rows the previous pass left in cache. One pass per attribute
++ * over the whole draw streamed a megabyte-sized output once per attribute. */
++#define RSX_FETCH_CHUNK 128u
++
++int rsx_vertex_fetch_many(
++    const rsx_vertex_fetch_plan* plan, const rsx_vertex_ref* refs, u32 count,
++    u8* out)
++{
++    if (!plan || (!refs && count) || (!out && plan->layout.stride && count))
++        return 0;
++    const u32 stride = plan->layout.stride;
++    for (u32 i = 0; i < count; i += RSX_FETCH_CHUNK) {
++        const u32 n = count - i < RSX_FETCH_CHUNK ? count - i : RSX_FETCH_CHUNK;
++        if (!rsx_vertex_fetch_chunk(plan, refs + i, n, out ? out + (size_t)i * stride : out))
++            return 0;
++    }
++    return 1;
++}
+ 
+ static u64 rsx_vertex_remap_hash(u64 value)
+ {
+-- 
+2.56.0
+
