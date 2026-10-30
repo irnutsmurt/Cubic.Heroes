@@ -95,6 +95,30 @@ vblank pacing was fixed (patch 0034).
    `patches/ps3recomp/*.patch`, extracts, decrypts, lifts into `build/gen/`):
    `python tools/pipeline.py --iso "3D DOT GAME HEROES [BLUS-30490].iso" --keys build/keys/self_keys.txt`
 
+## Reference tools and saves on the Windows PC
+
+The owner set these up on the PC; ask them for the locations (keep them in
+your local notes, never in this public repo):
+
+- **Vulkan SDK** (validation layers, `vulkaninfo`, Vulkan Configurator),
+  **NVIDIA Nsight Systems** (CPU/GPU timelines) and **Nsight Graphics**
+  (single-frame capture: walk the frame's passes to find the swirl).
+- **RPCS3**, outside the project folder, with the PS3 firmware installed and
+  the game booting from the owner's disc. Offline reference only (never part
+  of the port): compare the same scene for colour and the swirl, see what
+  "Install Game Data" should do, capture frames from it with Nsight Graphics
+  or RenderDoc and compare pass by pass with ours. Its firmware and files
+  must never enter this repo or a release. For stability it needs
+  *Advanced -> PPU Event Wake-Up Delay = 35* (its fix for this game's
+  random crashes).
+- **Saves past the opening**, made by the owner, so testing can skip it.
+  RPCS3 and the port use the same layout,
+  `dev_hdd0/home/00000001/savedata/<save folder>`: copy a save folder into
+  the port's `PS3_GAMEDATA_ROOT/dev_hdd0/home/00000001/savedata/`
+  (`tests/boot_smoke.sh` gives each run its own root: seed it from a copy,
+  never from the owner's originals). Saves are personal data: keep them out
+  of git.
+
 ## Next steps, in order
 
 1. **Make the developer tooling work on a Windows host.** `zig_build.cmake_toolchain()`
