@@ -121,7 +121,31 @@ vblank pacing was fixed (patch 0034).
    (`make_bundle.tool_imports()`), multiprocessing in the frozen lifter, the
    exact flag groups in `zig_build` vs the CMake build, link libraries.
 5. **First GitHub release** (v0.1.0) with both downloads, like SFA3's.
-6. Open issues: a flat beige quad over the castle path at ~180 s of
+6. Found by the owner playing on Linux (Xbox controller, 2026-10-30):
+   - **A "swirl" / CRT-like pattern over the whole picture** that real-hardware
+     screenshots of the game don't show. Not the game's intended vignette and
+     tilt-shift blur (those are real). Suspects: a post-process pass sampling a
+     noise/dither texture with the wrong filtering, addressing or swizzle; a
+     half-resolution buffer upsampled wrongly; moiré from a mis-decoded
+     texture. Compare a frame dump against reference screenshots, then bisect
+     the frame's passes (`RSX_ENGINE_PASS_DUMP_TRIGGER`).
+   - **Colours look washed out by default.** The game's own Display menu has
+     a colour slider; raising it made the picture look right. Check whether
+     the default really is that dull on hardware, or whether we lose
+     saturation somewhere: gamma/sRGB handling in render targets or the
+     present blit (swapchain format 44, `B8G8R8A8_UNORM`), or a colour-matrix
+     constant.
+   - **"Install Game Data onto the HDD?" -> Yes crashes.** The install thread
+     calls an unimplemented system function (unresolved NID `0x0D5B4A14`),
+     then the game exits and the shutdown aborts. The half-written
+     `dev_hdd0/game/BLUS30490DATA` it leaves makes the next start exit at
+     once. Implement the function; make the shutdown path clean.
+   - **No window on Wayland:** the swapchain could not be created and the
+     backend went headless. `SDL_VIDEODRIVER=x11` (XWayland) works; fall back
+     to X11 automatically.
+   - Linux laptop with GameMode: 20-30 fps in the overworld, dips to 6-12 at
+     scene changes. Too slow to enjoy there.
+7. Open issues: a flat beige quad over the castle path at ~180 s of
    `intro.drive` (pre-existing, both present modes); remaining walker cost
    (vertex data could stay in GPU buffers instead of being copied each
    frame); save/load untested; debug console and golden boot log (M2).
