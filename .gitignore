@@ -1,0 +1,10 @@
+# Everything derived from the game, keys, toolchains and build output stays local.
+/build/
+*.iso
+*.ISO
+*.elf
+*.self
+EBOOT.BIN
+/keys/
+__pycache__/
+*.pyc

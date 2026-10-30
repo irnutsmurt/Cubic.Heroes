@@ -1,0 +1,55 @@
+From 8e606ee61ea1b3686562ed865e478e2afbfcc07b Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Thu, 29 Oct 2026 18:18:27 -0700
+Subject: [PATCH 17/28] cellGcmSys: GCM_BADBRANCH_REREAD=1 re-reads a bad FIFO
+ word
+
+Tells a title that published put ahead of (or overwrote) its commands
+from the walker mis-decoding: the word is read again at +1..16 ms.
+---
+ libs/video/cellGcmSys.c | 15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
+
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index 29fba1a..7d4b56d 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -774,6 +774,7 @@ static atomic_flag s_gcm_pumping = ATOMIC_FLAG_INIT;
+ /* Called by the vblank ticker thread. NO guest code -- advance the vblank count
+  * and mark a vblank+flip tick pending for the main thread to deliver. */
+ static u32 s_fifo_getoff;   /* tentative: defined below */
++u32 s_fifo_getoff_pub(void);
+ 
+ void cellGcm_request_tick(void)
+ {
+@@ -978,6 +979,7 @@ static unsigned long long gcm_park_grace_ms(void)
+ #define GCM_RECYCLE_MARGIN 0x20000u
+ static u32 gcm_ea2io(u32 ea);   /* defined with the wrap callback below */
+ static u32 s_fifo_getoff  = 0;
++u32 s_fifo_getoff_pub(void) { return s_fifo_getoff; }   /* diagnostics */
+ /* Backward JUMPs the walker has taken. The ring recycle waits for this to move:
+  * it is the walker following the JUMP-to-begin the recycle wrote, i.e. having
+  * consumed the whole tail. g_gcm_fifo_drained_ea == begin cannot say that on its
+@@ -1480,6 +1482,19 @@ static void gcm_fifo_bad_branch(const char* kind, u32 target, u32 word)
+     if (PS3_LOG_FIRST(n, 8))
+         fprintf(stderr, "[cellGcmSys] FIFO %s to unmapped IO 0x%08X (word 0x%08X) "
+                 "-- not taken, drain stops here\n", kind, target, word);
++    /* GCM_BADBRANCH_REREAD=1: read the word again a little later. If it has
++     * become a valid command, the title published `put` ahead of the data
++     * (or overwrote it), rather than the walker mis-decoding. */
++    { static int rr = -1; if (rr < 0) rr = getenv("GCM_BADBRANCH_REREAD") ? 1 : 0;
++      extern u32 s_fifo_getoff_pub(void);
++      if (rr) {
++          u32 io = s_fifo_getoff_pub(), ea = gcm_io2ea(io);
++          for (int ms = 1; ms <= 16 && ea; ms *= 2) {
++              Sleep((DWORD)ms);
++              fprintf(stderr, "[badbranch] +%2dms io=0x%08X word=0x%08X put=0x%08X\n", ms, io,
++                      vm_read32(ea), vm_read32(GCM_CONTROL_GUEST_ADDR + 0));
++          }
++      } }
+ }
+ 
+ /* A bad branch nearly always means the walker mis-counted a method batch a few
+-- 
+2.56.0
+

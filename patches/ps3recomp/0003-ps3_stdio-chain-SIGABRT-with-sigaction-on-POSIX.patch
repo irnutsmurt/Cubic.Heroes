@@ -1,0 +1,89 @@
+From e260d9584bf44575efbb661122c3d86b3084fea4 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Thu, 29 Oct 2026 16:23:42 -0700
+Subject: [PATCH 03/28] ps3_stdio: chain SIGABRT with sigaction on POSIX
+
+signal() returned a port's SA_SIGINFO crash handler as a one-argument
+pointer and ps3_stdio_on_abort called it that way, handing it garbage
+siginfo/ucontext pointers. The handler then faulted while writing its
+report. Install with sigaction and call the previous handler with the
+same three arguments it was registered for.
+---
+ runtime/platform/ps3_stdio.c | 31 +++++++++++++++++++++++++++++++
+ 1 file changed, 31 insertions(+)
+
+diff --git a/runtime/platform/ps3_stdio.c b/runtime/platform/ps3_stdio.c
+index 994da63..91c2135 100644
+--- a/runtime/platform/ps3_stdio.c
++++ b/runtime/platform/ps3_stdio.c
+@@ -16,6 +16,7 @@
+ #include <signal.h>
+ #include <stdio.h>
+ #include <stdlib.h>
++#include <string.h>
+ 
+ #define PS3_STDIO_BUF_BYTES        (64u * 1024u)
+ #define PS3_STDIO_FLUSH_MS_DEFAULT 50u
+@@ -34,7 +35,9 @@ static long     s_flush_req;            /* crash flushes asked for */
+ static long     s_flush_done;           /* value of s_flush_req the last flush covered */
+ 
+ static LPTOP_LEVEL_EXCEPTION_FILTER s_prev_filter;
++#ifdef _WIN32
+ static void (*s_prev_abort)(int);
++#endif
+ 
+ static DWORD WINAPI ps3_stdio_flusher(LPVOID arg)
+ {
+@@ -75,12 +78,28 @@ static void ps3_stdio_at_exit(void)
+ 
+ /* abort(): flush, then whatever was installed before. Returning lets abort()
+  * end the process as it would have. */
++#ifdef _WIN32
+ static void ps3_stdio_on_abort(int sig)
+ {
+     ps3_stdio_flush_crash();
+     if (s_prev_abort && s_prev_abort != SIG_DFL && s_prev_abort != SIG_IGN)
+         s_prev_abort(sig);
+ }
++#else
++/* POSIX: chain with sigaction. A previous SA_SIGINFO handler (a port's crash
++ * reporter) takes three arguments; calling it through signal()'s one-argument
++ * pointer handed it garbage siginfo/ucontext pointers and it faulted. */
++static struct sigaction s_prev_abort_sa;
++static void ps3_stdio_on_abort(int sig, siginfo_t* si, void* uc)
++{
++    ps3_stdio_flush_crash();
++    if ((s_prev_abort_sa.sa_flags & SA_SIGINFO) && s_prev_abort_sa.sa_sigaction)
++        s_prev_abort_sa.sa_sigaction(sig, si, uc);
++    else if (s_prev_abort_sa.sa_handler && s_prev_abort_sa.sa_handler != SIG_DFL &&
++             s_prev_abort_sa.sa_handler != SIG_IGN)
++        s_prev_abort_sa.sa_handler(sig);
++}
++#endif
+ 
+ /* A crash: flush what the run printed before it, let the previous filter
+  * report, then flush its report too (unless it resolved the exception). */
+@@ -139,8 +158,20 @@ void ps3_stdio_init(void)
+     __atomic_store_n(&s_buffered, 1, __ATOMIC_RELEASE);
+ 
+     atexit(ps3_stdio_at_exit);
++#ifdef _WIN32
+     void (*prev)(int) = signal(SIGABRT, ps3_stdio_on_abort);
+     s_prev_abort = (prev == SIG_ERR) ? NULL : prev;
++#else
++    {
++        struct sigaction sa;
++        memset(&sa, 0, sizeof sa);
++        sa.sa_sigaction = ps3_stdio_on_abort;
++        sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
++        sigemptyset(&sa.sa_mask);
++        if (sigaction(SIGABRT, &sa, &s_prev_abort_sa) != 0)
++            memset(&s_prev_abort_sa, 0, sizeof s_prev_abort_sa);
++    }
++#endif
+     s_prev_filter = SetUnhandledExceptionFilter(ps3_stdio_on_crash);
+ 
+     fprintf(stderr, "[stdio] stdout/stderr buffered (%u KB each), flushed every %u ms"
+-- 
+2.56.0
+

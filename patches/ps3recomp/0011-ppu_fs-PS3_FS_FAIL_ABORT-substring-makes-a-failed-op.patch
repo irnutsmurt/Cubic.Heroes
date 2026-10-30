@@ -1,0 +1,41 @@
+From 841b12506804cc5f1457f09acaf89074fcd42af6 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Thu, 29 Oct 2026 17:41:21 -0700
+Subject: [PATCH 11/28] ppu_fs: PS3_FS_FAIL_ABORT=<substring> makes a failed
+ open fatal
+
+A failed cellFsOpen of a matching guest path goes through
+ps3_strict_fail, so the crash report carries the guest call chain that
+built the path.
+---
+ runtime/ppu/ppu_fs.cpp | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/runtime/ppu/ppu_fs.cpp b/runtime/ppu/ppu_fs.cpp
+index f73907c..043b947 100644
+--- a/runtime/ppu/ppu_fs.cpp
++++ b/runtime/ppu/ppu_fs.cpp
+@@ -14,6 +14,7 @@
+  * through vm_base in big-endian.
+  */
+ #define PPU_NO_INLINE_STORES   /* declares its own out-of-line vm_write32/64 below */
++#include "ps3emu/ps3_strict.h"
+ #include "ppu_recomp.h"      /* ppu_context */
+ #include "../../libs/filesystem/edat.h"
+ #include "ps3emu/nid.h"      /* ps3_compute_nid */
+@@ -304,6 +305,12 @@ static void cellFsOpen(ppu_context* ctx)
+     int hfd = open(hpath, oflags | O_BINARY, 0666);
+     if (hfd < 0) {
+         fprintf(stderr, "[fs] open FAIL '%s' -> '%s' (flags=0x%X)\n", gpath, hpath, flags);
++        /* PS3_FS_FAIL_ABORT=<substring>: a failed open of a matching guest path
++         * is fatal, so the crash report shows the guest call chain that built
++         * the path (a debugging aid; an unset variable costs one getenv). */
++        { const char* m = getenv("PS3_FS_FAIL_ABORT");
++          if (m && *m && strstr(gpath, m))
++              ps3_strict_fail("fs-open-fail", "'%s' (PS3_FS_FAIL_ABORT=%s)", gpath, m); }
+         ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_ENOENT; return;
+     }
+     const char* fmode = (acc == CELL_FS_O_RDWR)
+-- 
+2.56.0
+

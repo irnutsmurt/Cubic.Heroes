@@ -1,0 +1,295 @@
+From eb7ea269c9f9c4772f2350c927f7c10f1da72e53 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Thu, 29 Oct 2026 17:58:23 -0700
+Subject: [PATCH 12/28] lv2: SPU thread receive-event service and
+ sys_spu_thread_bind_queue
+
+sys_spu_thread_bind_queue/unbind_queue (193/194) were a stub that
+recorded nothing, and a lifted SPU thread's stop 0x110/0x111 just
+returned, so the dispatcher re-entered it forever. FMOD's SPU mixer
+(3D Dot Game Heroes) takes its work that way: 300M mailbox writes, and
+the PPU thread waiting for its reply held a lock the main thread needed.
+
+bind_queue now records spuq_num -> queue per thread (lv2 errors: ESRCH,
+EINVAL for a non-SPU queue, EBUSY, EAGAIN). spu_stop calls
+g_spu_stop_service_hook, which lv2 installs: 0x100 yield continues;
+0x110/0x111 pop the spuq number from the outbound mailbox, wait on (or
+poll) the bound queue via sys_event_queue_pop_host, and reply through
+the inbound mailbox with {CELL_OK, data1, data2, data3} or one error
+word, as RPCS3 does. A stop request ends the wait.
+---
+ runtime/spu/spu_channels.c      |  15 ++++
+ runtime/syscalls/lv2_register.c | 118 +++++++++++++++++++++++++++++++-
+ runtime/syscalls/sys_event.c    |  50 +++++++++++++-
+ runtime/syscalls/sys_event.h    |  11 +++
+ 4 files changed, 191 insertions(+), 3 deletions(-)
+
+diff --git a/runtime/spu/spu_channels.c b/runtime/spu/spu_channels.c
+index cd1e1cc..1a91c70 100644
+--- a/runtime/spu/spu_channels.c
++++ b/runtime/spu/spu_channels.c
+@@ -222,6 +222,12 @@ void spu_dbg_e60(spu_context* ctx)
+  * host SPU thread (longjmp to spu_run_with_halt) so the job stops AT the stop,
+  * with ctx->status + the outbound mailbox value available for the dispatcher to
+  * service. Env YDKJ_STOP_NOHALT restores the old (looping) behavior for A/B. */
++/* Installed by lv2 (lv2_register.c): services an lv2 SPU thread's
++ * stop-and-signal. 0 = not a service stop (or not an lv2 thread), 1 =
++ * serviced (continue), 2 = a stop was requested while waiting. */
++int (*g_spu_stop_service_hook)(spu_context* ctx) = NULL;
++static void spu_honour_stop_request(spu_context* ctx);
++
+ void spu_stop(spu_context* ctx)
+ {
+     /* A lifted `stop` sets status and RETURNS to its caller -- for a SPURS
+@@ -235,6 +241,15 @@ void spu_stop(spu_context* ctx)
+     static int s_halt = -1;
+     if (s_halt < 0) s_halt = getenv("YDKJ_STOP_HALT") ? 1 : 0;
+     ctx->status = SPU_STATUS_STOPPED_BY_STOP;
++    /* lv2 SPU threads: stop-and-signal codes the kernel services in place
++     * (0x100 yield, 0x110/0x111 receive event). The SPU continues past the
++     * stop with the reply in its inbound mailbox, so the lifted code's
++     * `if (ctx->status != SPU_STATUS_RUNNING) return;` falls through. */
++    if (g_spu_stop_service_hook) {
++        int r = g_spu_stop_service_hook(ctx);
++        if (r == 1) { ctx->status = SPU_STATUS_RUNNING; return; }
++        if (r == 2) { spu_honour_stop_request(ctx); return; }
++    }
+     if (s_halt) spu_halt(ctx);
+ }
+ 
+diff --git a/runtime/syscalls/lv2_register.c b/runtime/syscalls/lv2_register.c
+index 1b052bf..98ae611 100644
+--- a/runtime/syscalls/lv2_register.c
++++ b/runtime/syscalls/lv2_register.c
+@@ -340,6 +340,11 @@ typedef struct {
+      * waiting on the command queue never woke. */
+     struct { uint32_t spup; uint32_t queue; } evt_bind[8];
+     int                 evt_bind_n;
++    /* sys_spu_thread_bind_queue(id, spuq, spuq_num): the PPU-side event queues
++     * this SPU thread receives from with sys_spu_thread_receive_event (stop
++     * 0x110/0x111), keyed by the number the SPU names. lv2 allows 32. */
++    struct { uint32_t num; uint32_t queue; } spuq_bind[32];
++    int                 spuq_bind_n;
+ } spu_thread_t;
+ 
+ typedef struct {
+@@ -2438,6 +2443,113 @@ extern void vm_write64(uint64_t a, uint64_t v);
+ 
+ 
+ 
++/* sys_spu_thread_bind_queue (193): spuq_num -> event queue spuq for this
++ * thread's receive-event service. Errors as lv2 (RPCS3 sys_spu.cpp). */
++static int64_t sys_spu_thread_bind_queue_handler(ppu_context* ctx)
++{
++    uint32_t tid  = (uint32_t)ctx->gpr[3];
++    uint32_t spuq = (uint32_t)ctx->gpr[4];
++    uint32_t num  = (uint32_t)ctx->gpr[5];
++    spu_thread_t* t = spu_find_thread(tid);
++    int64_t rc = CELL_OK;
++    if (!t) rc = (int64_t)(int32_t)CELL_ESRCH;
++    else if (sys_event_queue_type(spuq) != SYS_SPU_QUEUE) rc = (int64_t)(int32_t)CELL_EINVAL;
++    else {
++        AcquireSRWLockExclusive(&s_spu_port_lock);
++        for (int i = 0; i < t->spuq_bind_n && rc == CELL_OK; i++)
++            if (t->spuq_bind[i].num == num) rc = (int64_t)(int32_t)CELL_EBUSY;
++        if (rc == CELL_OK && t->spuq_bind_n >= 32) rc = (int64_t)(int32_t)CELL_EAGAIN;
++        if (rc == CELL_OK) {
++            t->spuq_bind[t->spuq_bind_n].num = num;
++            t->spuq_bind[t->spuq_bind_n].queue = spuq;
++            t->spuq_bind_n++;
++        }
++        ReleaseSRWLockExclusive(&s_spu_port_lock);
++    }
++    fprintf(stderr, "[SPU] thread_bind_queue tid=0x%X spuq=%u (type %d) num=0x%X -> 0x%X\n",
++            tid, spuq, sys_event_queue_type(spuq), num, (uint32_t)rc);
++    ctx->gpr[3] = (uint64_t)rc;
++    return rc;
++}
++
++/* sys_spu_thread_unbind_queue (194) */
++static int64_t sys_spu_thread_unbind_queue_handler(ppu_context* ctx)
++{
++    uint32_t tid = (uint32_t)ctx->gpr[3];
++    uint32_t num = (uint32_t)ctx->gpr[4];
++    spu_thread_t* t = spu_find_thread(tid);
++    int64_t rc = (int64_t)(int32_t)CELL_ESRCH;   /* no such thread, or num not bound */
++    if (t) {
++        AcquireSRWLockExclusive(&s_spu_port_lock);
++        for (int i = 0; i < t->spuq_bind_n; i++)
++            if (t->spuq_bind[i].num == num) {
++                t->spuq_bind[i] = t->spuq_bind[--t->spuq_bind_n];
++                rc = CELL_OK;
++                break;
++            }
++        ReleaseSRWLockExclusive(&s_spu_port_lock);
++    }
++    ctx->gpr[3] = (uint64_t)rc;
++    return rc;
++}
++
++/* The lv2 side of an SPU thread's stop-and-signal (spu_channels.c
++ * g_spu_stop_service_hook), for threads running their own lifted image.
++ *   0x100 SYS_SPU_THREAD_STOP_YIELD          continue
++ *   0x110 SYS_SPU_THREAD_STOP_RECEIVE_EVENT  wait on the bound queue
++ *   0x111 SYS_SPU_THREAD_STOP_TRY_RECEIVE_EVENT
++ * The SPU has written the spuq number to its outbound mailbox; the reply goes
++ * to the inbound mailbox: {CELL_OK, data1, data2, data3}, or one error word
++ * (EBUSY: mailbox not empty / nothing queued for a try; EINVAL: number not
++ * bound). Semantics follow RPCS3 sys_spu.cpp / SPUThread.cpp. */
++static int lv2_spu_stop_service(spu_context* ctx)
++{
++    const uint32_t code = ctx->stop_code;
++    if (code != 0x100u && code != 0x110u && code != 0x111u) return 0;
++    spu_thread_t* t = NULL;
++    for (int i = 0; i < MAX_SPU_THREADS; i++)
++        if (s_spu_threads[i].in_use && (s_spu_threads[i].sctx == ctx || s_spu_threads[i].live_ctx == ctx)) {
++            t = &s_spu_threads[i]; break;
++        }
++    if (!t) return 0;
++    if (code == 0x100u) return 1;
++
++    if (!ctx->ch_out_mbox.count) {
++        ps3_strict_fail("spu-receive-event", "SPU thread 0x%X stop 0x%X with an empty outbound mailbox "
++                        "(no spuq number)", t->tid, code);
++        ctx->rcv_evt[0] = (uint32_t)CELL_EINVAL; ctx->rcv_evt_n = 1; ctx->rcv_evt_i = 0;
++        return 1;
++    }
++    const uint32_t num = spu_channel_read(&ctx->ch_out_mbox);
++    if (ctx->rcv_evt_n || ctx->ch_in_mbox.count) {
++        ctx->rcv_evt[0] = (uint32_t)CELL_EBUSY; ctx->rcv_evt_n = 1; ctx->rcv_evt_i = 0;
++        return 1;
++    }
++    uint32_t q = 0;
++    AcquireSRWLockShared(&s_spu_port_lock);
++    for (int i = 0; i < t->spuq_bind_n; i++)
++        if (t->spuq_bind[i].num == num) { q = t->spuq_bind[i].queue; break; }
++    ReleaseSRWLockShared(&s_spu_port_lock);
++    if (!q) {
++        ctx->rcv_evt[0] = (uint32_t)CELL_EINVAL; ctx->rcv_evt_n = 1; ctx->rcv_evt_i = 0;
++        return 1;
++    }
++    sys_event_t ev;
++    int rc = sys_event_queue_pop_host(q, &ev, code == 0x110u, &ctx->stop_request);
++    if (rc == 1) return 2;                                   /* stop requested */
++    if (rc != (int)CELL_OK) {
++        ctx->rcv_evt[0] = (uint32_t)rc; ctx->rcv_evt_n = 1; ctx->rcv_evt_i = 0;
++        return 1;
++    }
++    ctx->rcv_evt[0] = CELL_OK;
++    ctx->rcv_evt[1] = (uint32_t)ev.data1;
++    ctx->rcv_evt[2] = (uint32_t)ev.data2;
++    ctx->rcv_evt[3] = (uint32_t)ev.data3;
++    ctx->rcv_evt_i = 0;
++    __atomic_store_n(&ctx->rcv_evt_n, 4, __ATOMIC_RELEASE);
++    return 1;
++}
++
+ static int64_t sys_spu_thread_stub(ppu_context* ctx)
+ {
+     (void)ctx;
+@@ -2592,8 +2704,10 @@ void lv2_register_all_syscalls(lv2_syscall_table* tbl)
+     lv2_syscall_register(tbl, SYS_SPU_THREAD_SET_SPU_CFG,    sys_spu_thread_set_spu_cfg_handler);
+     lv2_syscall_register(tbl, SYS_SPU_THREAD_GET_SPU_CFG,    sys_spu_thread_get_spu_cfg_handler);
+     lv2_syscall_register(tbl, SYS_SPU_THREAD_WRITE_SPU_MB,  sys_spu_thread_write_spu_mb_handler);
+-    lv2_syscall_register(tbl, SYS_SPU_THREAD_BIND_QUEUE,      sys_spu_thread_stub);
+-    lv2_syscall_register(tbl, SYS_SPU_THREAD_UNBIND_QUEUE,    sys_spu_thread_stub);
++    lv2_syscall_register(tbl, SYS_SPU_THREAD_BIND_QUEUE,      sys_spu_thread_bind_queue_handler);
++    lv2_syscall_register(tbl, SYS_SPU_THREAD_UNBIND_QUEUE,    sys_spu_thread_unbind_queue_handler);
++    { extern int (*g_spu_stop_service_hook)(spu_context*);
++      g_spu_stop_service_hook = lv2_spu_stop_service; }
+     lv2_syscall_register(tbl, SYS_SPU_THREAD_GROUP_CONNECT_EVENT_ALL_THREADS, sys_spu_thread_group_connect_event_all_threads_handler);
+ }
+ 
+diff --git a/runtime/syscalls/sys_event.c b/runtime/syscalls/sys_event.c
+index adabcc5..6cfb0d2 100644
+--- a/runtime/syscalls/sys_event.c
++++ b/runtime/syscalls/sys_event.c
+@@ -10,7 +10,7 @@
+ #include "../spu/spu_workload.h"   /* spu_elf_image_size, spu_workload_dispatch_async */
+ #include <string.h>
+ #include <stdlib.h>               /* getenv */
+-#include "ps3emu/log_first.h"
++#include "ps3emu/log_first.h"
+ 
+ /* Recorded by sys_spu_thread_initialize (lv2_register.c): the SPURS kernel
+  * context EA the title's SPU task runtime is dispatched against. */
+@@ -930,6 +930,54 @@ int64_t sys_event_port_disconnect(ppu_context* ctx)
+ 
+ /* Public helper for non-syscall callers: push an event into a queue by
+  * ID. Returns 0 on success, -1 if the queue is unknown/inactive or full. */
++int sys_event_queue_type(uint32_t queue_id)
++{
++    if (queue_id == 0 || queue_id > SYS_EVENT_QUEUE_MAX) return 0;
++    const sys_event_queue_info* q = &g_sys_event_queues[queue_id - 1];
++    return q->active ? q->type : 0;
++}
++
++int sys_event_queue_pop_host(uint32_t queue_id, sys_event_t* out, int block,
++                             volatile int* abort)
++{
++    if (queue_id == 0 || queue_id > SYS_EVENT_QUEUE_MAX) return (int)CELL_ESRCH;
++    sys_event_queue_info* q = &g_sys_event_queues[queue_id - 1];
++    if (!q->active) return (int)CELL_ESRCH;
++#ifdef _WIN32
++    EnterCriticalSection(&q->lock);
++    while (block && q->count == 0 && q->active && !q->cancelled && !(abort && *abort))
++        SleepConditionVariableCS(&q->not_empty, &q->lock, 5);
++#else
++    pthread_mutex_lock(&q->lock);
++    while (block && q->count == 0 && q->active && !q->cancelled && !(abort && *abort)) {
++        struct timespec ts;
++        clock_gettime(CLOCK_REALTIME, &ts);
++        ts.tv_nsec += 5 * 1000 * 1000;
++        if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
++        pthread_cond_timedwait(&q->not_empty, &q->lock, &ts);
++    }
++#endif
++    int rc;
++    if (q->count > 0 && q->active) {
++        *out = q->buffer[q->head];
++        q->head = (q->head + 1) % q->capacity;
++        q->count--;
++        rc = (int)CELL_OK;
++    } else if (!q->active || q->cancelled) {
++        rc = (int)CELL_ECANCELED;
++    } else if (abort && *abort) {
++        rc = 1;
++    } else {
++        rc = (int)CELL_EBUSY;
++    }
++#ifdef _WIN32
++    LeaveCriticalSection(&q->lock);
++#else
++    pthread_mutex_unlock(&q->lock);
++#endif
++    return rc;
++}
++
+ int sys_event_queue_push_by_id(uint32_t queue_id,
+                                uint64_t source, uint64_t data1,
+                                uint64_t data2,  uint64_t data3)
+diff --git a/runtime/syscalls/sys_event.h b/runtime/syscalls/sys_event.h
+index 14c6425..f957c82 100644
+--- a/runtime/syscalls/sys_event.h
++++ b/runtime/syscalls/sys_event.h
+@@ -166,6 +166,17 @@ uint32_t sys_event_find_queue_by_key(uint64_t key);
+  * game a queue id, e.g. cellAudioCreateNotifyEventQueue). 0 = table full. */
+ uint32_t sys_event_queue_create_direct(uint64_t key, int32_t size);
+ 
++/* Pop one event from queue `queue_id` for a host-side consumer (the lv2 SPU
++ * thread receive-event service). block=0 polls once. While blocking, *abort
++ * is checked every few milliseconds and a nonzero value ends the wait.
++ * Returns CELL_OK (event in *out), CELL_EBUSY (block=0 and empty),
++ * CELL_ESRCH (no such queue), CELL_ECANCELED (queue cancelled or destroyed)
++ * or 1 (aborted). */
++int sys_event_queue_pop_host(uint32_t queue_id, sys_event_t* out, int block,
++                             volatile int* abort);
++/* The queue's lv2 type (SYS_PPU_QUEUE / SYS_SPU_QUEUE), or 0 if it does not exist. */
++int sys_event_queue_type(uint32_t queue_id);
++
+ /* Mark a queue as having no producer left and release anyone blocked on it.
+  * Used by cellSpursFinalize: after it, no job completion can ever arrive, and
+  * a worker parked on the completion queue with an infinite timeout would never
+-- 
+2.56.0
+

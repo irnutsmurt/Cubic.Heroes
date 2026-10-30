@@ -1,0 +1,17 @@
+{
+  "_comment": [
+    "Guest instruction patches, lifted as run-time switches (ppu_lifter.py --insn-patches):",
+    "each becomes `if (guard) {new} else {orig}`; the guards are defined in port/game_patches.cpp.",
+    "The lift stops if `orig` is not the instruction at `addr`, so these only ever apply to",
+    "the pinned EBOOT (config/game_version.json)."
+  ],
+  "patches": [
+    {
+      "addr": "0x008D0F4C",
+      "orig": "0x39600021",
+      "new": "0x39600000",
+      "guard": "g_dotheroes_skip_flash_mp3",
+      "note": "func_008D0EBC (FMOD MultiStream MP3 codec load): its failure exit `li r11,33` becomes `li r11,0`, so a missing /dev_flash/sys/external/flashMP3.pic reports success with no codec loaded (the stat fails before anything is allocated)"
+    }
+  ]
+}

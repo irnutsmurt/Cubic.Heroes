@@ -1,0 +1,37 @@
+From 2befe83d10696017e81e565a2411c5315cb8874d Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Thu, 29 Oct 2026 18:07:00 -0700
+Subject: [PATCH 15/28] spu_helpers: an executed untranslated SPU instruction
+ is fatal in strict mode
+
+spu_unsupported warned that the result was wrong from there on and
+carried on; under PS3_STRICT it now stops with a report.
+---
+ runtime/spu/spu_helpers.h | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/runtime/spu/spu_helpers.h b/runtime/spu/spu_helpers.h
+index f04fda6..c7e6fb6 100644
+--- a/runtime/spu/spu_helpers.h
++++ b/runtime/spu/spu_helpers.h
+@@ -13,6 +13,7 @@
+ #ifndef SPU_HELPERS_H
+ #define SPU_HELPERS_H
+ 
++#include "ps3emu/ps3_strict.h"
+ #include "spu_context.h"
+ #include <string.h>
+ #include <math.h>
+@@ -184,6 +185,9 @@ static inline u128 spu_splat_u32(uint32_t v) {
+  * One line per site. */
+ static inline void spu_unsupported(uint32_t pc, const char* mnemonic)
+ {
++    if (ps3_strict())
++        ps3_strict_fail("spu-unsupported", "SPU instruction %s at LS 0x%05X executed "
++                        "with no translation", mnemonic, pc);
+     static int warned;
+     if (warned < 64) {
+         warned++;
+-- 
+2.56.0
+

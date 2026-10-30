@@ -1,0 +1,30 @@
+From 7f4bba97f470f5d8975afb5e9e6768b65296e9e8 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Fri, 30 Oct 2026 00:27:54 -0700
+Subject: [PATCH 25/28] sys_timer_usleep: resume a sleep a host signal
+ interrupted
+
+lv2 sleeps the whole interval; a debugger or profiler signal cut the
+guest's sleep short.
+---
+ runtime/syscalls/sys_timer.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/runtime/syscalls/sys_timer.c b/runtime/syscalls/sys_timer.c
+index 3a02281..7017dd6 100644
+--- a/runtime/syscalls/sys_timer.c
++++ b/runtime/syscalls/sys_timer.c
+@@ -280,7 +280,9 @@ int64_t sys_timer_usleep(ppu_context* ctx)
+         struct timespec ts;
+         ts.tv_sec  = (time_t)(usec / 1000000);
+         ts.tv_nsec = (long)((usec % 1000000) * 1000);
+-        nanosleep(&ts, NULL);
++        /* A host signal (a debugger, the dev profiler) must not cut a guest
++         * sleep short: lv2 sleeps the whole interval. */
++        while (nanosleep(&ts, &ts) != 0 && errno == EINTR) { }
+     }
+ #endif
+ 
+-- 
+2.56.0
+

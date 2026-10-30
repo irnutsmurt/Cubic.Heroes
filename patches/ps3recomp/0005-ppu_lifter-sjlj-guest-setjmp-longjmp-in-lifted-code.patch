@@ -1,0 +1,217 @@
+From 53ac47291749e60bf954573855922bac73a1657a Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Thu, 29 Oct 2026 16:28:39 -0700
+Subject: [PATCH 05/28] ppu_lifter: --sjlj, guest setjmp/longjmp in lifted code
+
+A guest longjmp's final blr only returns to its host caller, so the
+protected code continued as if nothing had been thrown. Lua 5.1's error
+handling (luaD_throw -> luaD_rawrunprotected) depends on it.
+
+--sjlj FILE names the guest setjmp and longjmp. At a setjmp call site the
+lifter takes a host setjmp in the caller's frame (runtime/ppu/ppu_sjlj.h)
+before calling the guest setjmp. At a longjmp call site it runs the guest
+longjmp, which restores the registers into ctx, and then jumps to the
+innermost frame armed for that guest jmp_buf. The guest code is unchanged;
+the host only supplies the non-local transfer.
+---
+ runtime/ppu/ppu_sjlj.h | 92 ++++++++++++++++++++++++++++++++++++++++++
+ tools/ppu_lifter.py    | 40 ++++++++++++++++--
+ 2 files changed, 129 insertions(+), 3 deletions(-)
+ create mode 100644 runtime/ppu/ppu_sjlj.h
+
+diff --git a/runtime/ppu/ppu_sjlj.h b/runtime/ppu/ppu_sjlj.h
+new file mode 100644
+index 0000000..1685e14
+--- /dev/null
++++ b/runtime/ppu/ppu_sjlj.h
+@@ -0,0 +1,92 @@
++/*
++ * ppu_sjlj.h -- guest setjmp/longjmp in lifted code (ppu_lifter.py --sjlj).
++ *
++ * A guest setjmp returns twice, and a guest longjmp resumes inside a caller
++ * whose PowerPC frame is still live. Lifted, every guest frame is a host C
++ * frame, so the guest longjmp's final `blr` only returns to its own caller
++ * and the protected code carries on as if nothing had been thrown. Lua 5.1's
++ * error handling (luaD_throw -> luaD_rawrunprotected) is the common case.
++ *
++ * The lifter rewrites the two kinds of call site:
++ *
++ *   bl setjmp   ->  _sjf.arm(ctx);
++ *                   if (PS3_SJLJ_SETJMP(_sjf) == 0) { <call guest setjmp> }
++ *   bl longjmp  ->  <call guest longjmp>; ps3_sjlj_longjmp(ctx, jmp_buf EA);
++ *
++ * `_sjf` lives in the caller's host frame (declared at function scope), so the
++ * host jmp_buf stays valid exactly as long as the guest frame that owns the
++ * guest jmp_buf. The guest setjmp and longjmp still run as lifted code: the
++ * guest jmp_buf is filled and read by the game's own code, and the guest
++ * longjmp restores r1, r2, LR, CR and the non-volatile registers into ctx
++ * before the host jump. The host side only supplies the non-local transfer.
++ *
++ * Frames form a per-thread stack. ps3_sjlj_longjmp unwinds to the innermost
++ * frame armed for that guest jmp_buf; frames above it are abandoned, which
++ * is what the guest's own longjmp does to the frames it skips.
++ */
++/* Requires ppu_context: include after the lifter-generated ppu_recomp.h (the
++ * lifter emits the include right before each function that needs it). */
++#ifndef PS3RECOMP_PPU_SJLJ_H
++#define PS3RECOMP_PPU_SJLJ_H
++
++#include <setjmp.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++
++struct ps3_sjlj_frame;
++inline thread_local ps3_sjlj_frame* g_ps3_sjlj_top = nullptr;
++
++struct ps3_sjlj_frame {
++    jmp_buf host;
++    uint32_t guest_buf = 0;
++    bool armed = false;
++    ps3_sjlj_frame* prev = nullptr;
++
++    /* At the setjmp call site: r3 is the guest jmp_buf. */
++    void arm(ppu_context* c)
++    {
++        guest_buf = (uint32_t)c->gpr[3];
++        if (!armed) {
++            prev = g_ps3_sjlj_top;
++            g_ps3_sjlj_top = this;
++            armed = true;
++        }
++    }
++    ps3_sjlj_frame() = default;
++    ps3_sjlj_frame(const ps3_sjlj_frame&) = delete;
++    ps3_sjlj_frame& operator=(const ps3_sjlj_frame&) = delete;
++    ~ps3_sjlj_frame()
++    {
++        if (armed && g_ps3_sjlj_top == this) g_ps3_sjlj_top = prev;
++    }
++};
++
++/* setjmp must be expanded in the lifted function's own frame. _setjmp skips
++ * the signal-mask save, which a guest longjmp never needs. */
++#if defined(_WIN32)
++#  define PS3_SJLJ_SETJMP(f) setjmp((f).host)
++#else
++#  define PS3_SJLJ_SETJMP(f) _setjmp((f).host)
++#endif
++
++[[noreturn]] inline void ps3_sjlj_longjmp(ppu_context* ctx, uint32_t guest_buf)
++{
++    for (ps3_sjlj_frame* f = g_ps3_sjlj_top; f; f = f->prev) {
++        if (f->guest_buf == guest_buf) {
++            g_ps3_sjlj_top = f;   /* frames above are abandoned */
++#if defined(_WIN32)
++            longjmp(f->host, 1);
++#else
++            _longjmp(f->host, 1);
++#endif
++        }
++        f->armed = false;
++    }
++    fprintf(stderr, "[sjlj] FATAL: guest longjmp to jmp_buf 0x%08X with no live setjmp frame "
++                    "on this thread (lr=0x%08X)\n", guest_buf, (uint32_t)ctx->lr);
++    fflush(stderr);
++    abort();
++}
++
++#endif /* PS3RECOMP_PPU_SJLJ_H */
+diff --git a/tools/ppu_lifter.py b/tools/ppu_lifter.py
+index a657ba6..7446ac5 100644
+--- a/tools/ppu_lifter.py
++++ b/tools/ppu_lifter.py
+@@ -2133,7 +2133,21 @@ class PPULifter:
+                 # PPC `bl` sets LR = return address (next instr). Emit it so mflr
+                 # reads the correct value AND stack-saved LRs are real return
+                 # addresses -> reliable back-chain unwinding for diagnostics.
+-                return f"ctx->lr = 0x{insn.addr + 4:08X}; {self.prefix}func_{tgt:08X}(ctx); DRAIN_TRAMPOLINE(ctx);"
++                call = f"ctx->lr = 0x{insn.addr + 4:08X}; {self.prefix}func_{tgt:08X}(ctx); DRAIN_TRAMPOLINE(ctx);"
++                # --sjlj: guest setjmp returns twice. The host setjmp has to be
++                # taken in THIS (the caller's) frame, which stays live while
++                # the protected code runs; the guest setjmp still runs and
++                # fills the guest jmp_buf. See runtime/ppu/ppu_sjlj.h.
++                if tgt in getattr(self, "sjlj_setjmp", ()):
++                    return (f"_sjf.arm(ctx); if (PS3_SJLJ_SETJMP(_sjf) == 0) {{ {call} }} "
++                            f"/* guest setjmp: a guest longjmp resumes here */")
++                # A guest longjmp restores the registers into ctx (its own
++                # code, unchanged), then the host jumps to the frame armed
++                # for that guest jmp_buf.
++                if tgt in getattr(self, "sjlj_longjmp", ()):
++                    return (f"{{ const uint32_t _jb = (uint32_t)ctx->gpr[3]; {call} "
++                            f"ps3_sjlj_longjmp(ctx, _jb); }} /* guest longjmp */")
++                return call
+             except ValueError:
+                 return f"/* bl {target} */;"
+ 
+@@ -4176,8 +4190,13 @@ class PPULifter:
+         for g in guards:
+             lines += ["#ifdef __cplusplus", f'extern "C" int {g};', "#else",
+                       f"extern int {g};", "#endif"]
++        uses_sjlj = any("ps3_sjlj_longjmp(" in bl or "_sjf.arm(" in bl for bl in func.body_lines)
++        if uses_sjlj:
++            lines.append('#include "ppu_sjlj.h"   /* --sjlj: guest setjmp/longjmp */')
+         lines.append(f"void {weak}{func.name}(ppu_context* ctx) {{")
+         lines.append("    PPU_MM_SNAP")
++        if any("_sjf.arm(" in bl for bl in func.body_lines):
++            lines.append("    ps3_sjlj_frame _sjf;")
+         for bline in _fuse_cr(func.body_lines):
+             lines.append(f"    {bline}" if not bline.endswith(":") else bline)
+ 
+@@ -4905,7 +4924,8 @@ _WORKER_STATE: dict = {}
+ 
+ def _worker_init(segs, big_endian, name_map, prefix, hle_stub_nids=None,
+                  function_entries=None, code_lo=0, code_hi=None, jump_tables=None,
+-                 toc_base=0, insn_patches=None):
++                 toc_base=0, insn_patches=None, sjlj=None):
++    _WORKER_STATE["sjlj"] = sjlj or (set(), set())
+     _WORKER_STATE["segs"] = segs
+     _WORKER_STATE["be"] = big_endian
+     _WORKER_STATE["names"] = name_map
+@@ -4937,6 +4957,7 @@ def _worker_lift(task):
+     lifter.jump_tables = _WORKER_STATE.get("jump_tables", {})
+     lifter.toc_base = _WORKER_STATE.get("toc_base", 0)
+     lifter.insn_patches = _WORKER_STATE.get("insn_patches", {})
++    lifter.sjlj_setjmp, lifter.sjlj_longjmp = _WORKER_STATE.get("sjlj", (set(), set()))
+     results = []
+     for start, end in bounds:
+         blob = b""
+@@ -4972,7 +4993,9 @@ def _parallel_lift(lifter, func_bounds, segs, big_endian, jobs):
+                              lifter.hle_stub_nids, lifter.function_entries,
+                              lifter.code_lo, lifter.code_hi, lifter.jump_tables,
+                              getattr(lifter, "toc_base", 0),
+-                             lifter.insn_patches))
++                             lifter.insn_patches,
++                             (getattr(lifter, "sjlj_setjmp", set()),
++                              getattr(lifter, "sjlj_longjmp", set()))))
+     try:
+         for idx0, results, ct, bt in pool.imap_unordered(_worker_lift, tasks):
+             results_by_idx[idx0] = results
+@@ -5058,6 +5081,11 @@ def main() -> None:
+                              "instead of its literal .lib.stub trampoline, and "
+                              "split out as its own 0x20-byte function so direct "
+                              "calls to it dispatch to the HLE handler.")
++    parser.add_argument("--sjlj", metavar="FILE", default=None,
++                        help="JSON {setjmp:[addr], longjmp:[addr]}: the guest's setjmp and "
++                             "longjmp. Call sites of the first take a host setjmp in the "
++                             "caller's frame; call sites of the second run the guest longjmp "
++                             "and then jump there (runtime/ppu/ppu_sjlj.h)")
+     parser.add_argument("--insn-patches", metavar="FILE", default=None,
+                         help="JSON list of instruction patches to lift as "
+                              "run-time switches: each {addr, orig, new, guard} "
+@@ -5520,6 +5548,12 @@ def main() -> None:
+     lifter.hle_stub_nids = hle_stubs
+     lifter.function_entries = _func_entries
+     lifter.jump_tables = jt_dispatchers
++    if args.sjlj:
++        _sj = json.load(open(args.sjlj))
++        lifter.sjlj_setjmp = {int(a, 16) for a in _sj.get("setjmp", [])}
++        lifter.sjlj_longjmp = {int(a, 16) for a in _sj.get("longjmp", [])}
++        print(f"  sjlj: setjmp {sorted(hex(a) for a in lifter.sjlj_setjmp)} "
++              f"longjmp {sorted(hex(a) for a in lifter.sjlj_longjmp)}")
+     if args.insn_patches:
+         lifter.insn_patches = load_insn_patches(args.insn_patches)
+         print(f"  insn-patches: {len(lifter.insn_patches)} from {args.insn_patches}")
+-- 
+2.56.0
+

@@ -1,0 +1,113 @@
+From 841f6dac2c8e2a9bdad97c929f3397dfa83c2d73 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Fri, 30 Oct 2026 00:27:54 -0700
+Subject: [PATCH 23/28] cellSpurs: raw stores while holding the lock-line lock
+
+vm_write32/64 take the lock-line lock themselves when an SPU holds a
+reservation on the line, so the LF queue and queue code, which already
+holds it, deadlocked exactly when an SPU was mid-operation (3D Dot Game
+Heroes' main thread hung in cellSpursQueuePopBody). Stores inside the
+locked sections are raw big-endian writes (ll_w32/ll_w64).
+---
+ libs/spurs/cellSpurs.c | 48 ++++++++++++++++++++++++------------------
+ 1 file changed, 27 insertions(+), 21 deletions(-)
+
+diff --git a/libs/spurs/cellSpurs.c b/libs/spurs/cellSpurs.c
+index 1765bbc..9193cb6 100644
+--- a/libs/spurs/cellSpurs.c
++++ b/libs/spurs/cellSpurs.c
+@@ -2950,6 +2950,12 @@ s32 cellSpursKickJobChain(u64 jc_ea, u32 numReadyCount)
+  * Log-only bring-up: capture the shapes before wiring real state.
+  * =====================================================================*/
+ 
++/* Stores made while holding the lock-line lock must be raw: vm_write32/64
++ * take that same (non-recursive) lock when an SPU holds a reservation on the
++ * line, and would deadlock exactly when it matters. */
++static inline void ll_w32(u32 a, u32 v) { u8* p = vm_base + a; p[0] = (u8)(v >> 24); p[1] = (u8)(v >> 16); p[2] = (u8)(v >> 8); p[3] = (u8)v; }
++static inline void ll_w64(u32 a, u64 v) { ll_w32(a, (u32)(v >> 32)); ll_w32(a + 4, (u32)v); }
++
+ /* ---- CellSpursQueue -----------------------------------------------------------
+  * A 128-byte, 128-aligned big-endian line shared with SPU tasks, which update it
+  * with GETLLAR/PUTLLC. Layout and protocol as the title's own SPU library uses
+@@ -2988,11 +2994,11 @@ s32 _cellSpursQueueInitialize(u64 spurs_ea, u64 taskset_ea, u64 queue_ea,
+     extern void spu_coh_notify_write(uint32_t);
+     spu_lockline_lock();
+     memset(vm_base + q, 0, 128);
+-    vm_write32(q + 0x08, size);
+-    vm_write32(q + 0x0C, depth);
+-    vm_write64(q + 0x10, (u64)buf);
+-    vm_write32(q + 0x1C, direction);
+-    vm_write64(q + 0x70, (u64)(u32)taskset_ea);
++    ll_w32(q + 0x08, size);
++    ll_w32(q + 0x0C, depth);
++    ll_w64(q + 0x10, (u64)buf);
++    ll_w32(q + 0x1C, direction);
++    ll_w64(q + 0x70, (u64)(u32)taskset_ea);
+     spu_coh_notify_write(q);
+     spu_lockline_unlock();
+     static int _n = 0;
+@@ -3033,12 +3039,12 @@ static int sq_move(u32 q, u32 data, int to_queue)
+         const s32 slot = n1 >= depth ? n1 - depth : n1;
+         memcpy(vm_base + buf + (u32)(slot * size), vm_base + data, (size_t)size);
+         __atomic_thread_fence(__ATOMIC_RELEASE);
+-        vm_write32(q + 0x04, (u32)((n1 + 1) % (2 * depth)));
++        ll_w32(q + 0x04, (u32)((n1 + 1) % (2 * depth)));
+         done = 1;
+     } else if (!to_queue && count > 0 && w0 >= 0) {
+         const s32 slot = n0 >= depth ? n0 - depth : n0;
+         memcpy(vm_base + data, vm_base + buf + (u32)(slot * size), (size_t)size);
+-        vm_write32(q + 0x00, (u32)((n0 + 1) % (2 * depth)));
++        ll_w32(q + 0x00, (u32)((n0 + 1) % (2 * depth)));
+         done = 1;
+     }
+     if (done) spu_coh_notify_write(q);
+@@ -3083,7 +3089,7 @@ s32 cellSpursQueueClear(u64 queue_ea)
+     extern void spu_lockline_lock(void); extern void spu_lockline_unlock(void);
+     extern void spu_coh_notify_write(uint32_t);
+     spu_lockline_lock();
+-    vm_write32(q + 0x00, 0); vm_write32(q + 0x04, 0);
++    ll_w32(q + 0x00, 0); ll_w32(q + 0x04, 0);
+     spu_coh_notify_write(q);
+     spu_lockline_unlock();
+     return CELL_OK;
+@@ -3510,24 +3516,24 @@ s32 _cellSpursLFQueueInitialize(u64 owner_ea, u64 queue_ea, u64 buffer_ea,
+       if (getenv("LFQ_TRACE")) g_spu_line_trace_ea = q; }
+     spu_lockline_lock();
+     const u16 h3 = lfq_r16(q, 0x4), h7 = lfq_r16(q, 0xC);
+-    vm_write32(q + 0x2C, 1);                                 /* init: being constructed */
+-    vm_write32(q + 0x10, size);
+-    vm_write32(q + 0x14, depth);
+-    vm_write64(q + 0x18, (u64)buf);
+-    vm_write32(q + 0x24, dir);
++    ll_w32(q + 0x2C, 1);                                 /* init: being constructed */
++    ll_w32(q + 0x10, size);
++    ll_w32(q + 0x14, depth);
++    ll_w64(q + 0x18, (u64)buf);
++    ll_w32(q + 0x24, dir);
+     for (u32 o = 0x32; o < 0x50; o += 2) lfq_w16(q, o, 0);   /* hs1 */
+     for (u32 o = 0x52; o < 0x70; o += 2) lfq_w16(q, o, 0);   /* hs2 */
+-    vm_write64(q + 0x70, owner_ea);                          /* eaSignal */
++    ll_w64(q + 0x70, owner_ea);                          /* eaSignal */
+     /* direction != ANY2ANY (syncLFQueueInitialize) */
+-    vm_write64(q + 0x0, 0); lfq_w16(q, 0x4, h3);             /* pop1  {0,0,h3,0} */
+-    vm_write64(q + 0x8, 0); lfq_w16(q, 0xC, h7);             /* push1 {0,0,h7,0} */
+-    vm_write32(q + 0x20, 0xFFFFFFFFu);                       /* bs[0..3] = -1 */
+-    vm_write32(q + 0x28, 0);                                 /* v1 */
++    ll_w64(q + 0x0, 0); lfq_w16(q, 0x4, h3);             /* pop1  {0,0,h3,0} */
++    ll_w64(q + 0x8, 0); lfq_w16(q, 0xC, h7);             /* push1 {0,0,h7,0} */
++    ll_w32(q + 0x20, 0xFFFFFFFFu);                       /* bs[0..3] = -1 */
++    ll_w32(q + 0x28, 0);                                 /* v1 */
+     lfq_w16(q, 0x30, 0);                                     /* push2 */
+     lfq_w16(q, 0x50, 0);                                     /* pop2 */
+-    vm_write32(q + 0x78, 0);                                 /* v2 */
+-    vm_write32(q + 0x7C, 0);                                 /* eq_id */
+-    vm_write32(q + 0x2C, 0);                                 /* init: done */
++    ll_w32(q + 0x78, 0);                                 /* v2 */
++    ll_w32(q + 0x7C, 0);                                 /* eq_id */
++    ll_w32(q + 0x2C, 0);                                 /* init: done */
+     spu_coh_notify_write(q);
+     spu_lockline_unlock();
+ 
+-- 
+2.56.0
+

@@ -1,0 +1,25 @@
+{
+  "title": "3D DOT GAME HEROES",
+  "title_id": "BLUS30490",
+  "region": "US",
+  "app_ver": "01.00",
+  "ps3_system_ver": "03.1500",
+  "disc_image": {
+    "size": 3332812800,
+    "sha256": "cb2b48d067b69df3f20965ca59c2e9f8d7f438dba655ff5b2bfcca88a11b8305",
+    "note": "Decrypted dump: one plaintext region covering all 1627350 sectors"
+  },
+  "files": {
+    "PS3_GAME/USRDIR/EBOOT.BIN": "3cda215999408c0d8d44381f133fe5baf3e79e2749eccb3cb7b035f37570a60b",
+    "PS3_GAME/PARAM.SFO": "d45615771f3097914d22d1e354a2882b9ddd5bbc73f7d53b630f75ab6e3cd349",
+    "PS3_GAME/USRDIR/data/shaders/shaders.ps3.pkg": "2a0c9936d17a4f6a66be11649cfde57bd6ef6948117bcfda60f1fdde233071ea",
+    "PS3_GAME/USRDIR/data/all.lua.eu": "b6cc9c34face41a37ff8ad007b279d2a373da75f480d0686909e223ce4e5e86a"
+  },
+  "decrypted_elf": {
+    "sha256": "ed581bd74a88e467a88d37a7d49cf765e5275204dd2a610ad5aec7a28958784a",
+    "size": 22598776,
+    "self_key_revision": "0x0001",
+    "entry_opd": "0xfef3f8",
+    "toc": "0x10764c4"
+  }
+}

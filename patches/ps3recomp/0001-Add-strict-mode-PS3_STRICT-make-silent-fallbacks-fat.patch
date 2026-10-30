@@ -1,0 +1,264 @@
+From de239a8bcdb5ee77b1852ab52474e3493d2165d7 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Thu, 29 Oct 2026 15:37:55 -0700
+Subject: [PATCH 01/28] Add strict mode (PS3_STRICT): make silent fallbacks
+ fatal
+
+Unresolved NIDs, garbage/unresolved indirect calls, calls to unlifted
+functions, unknown syscalls, SPU interpreter entry, SPU branches to
+unlifted code and SPU threads with no code each call ps3_strict_fail(),
+which names the violation and aborts. PS3_STRICT=0 (default) keeps the
+permissive bring-up behaviour; -DPS3RECOMP_STRICT_DEFAULT=1 flips it.
+---
+ include/ps3emu/ps3_strict.h     | 39 +++++++++++++++++++++++++++++++++
+ runtime/platform/ps3_strict.c   | 33 ++++++++++++++++++++++++++++
+ runtime/ppu/ppu_hle.cpp         |  4 ++++
+ runtime/ppu/ppu_loader.cpp      | 22 ++++++++++++++++++-
+ runtime/spu/spu_channels.c      |  8 ++++++-
+ runtime/spu/spu_interp.c        |  4 ++++
+ runtime/syscalls/lv2_register.c |  5 +++++
+ 7 files changed, 113 insertions(+), 2 deletions(-)
+ create mode 100644 include/ps3emu/ps3_strict.h
+ create mode 100644 runtime/platform/ps3_strict.c
+
+diff --git a/include/ps3emu/ps3_strict.h b/include/ps3emu/ps3_strict.h
+new file mode 100644
+index 0000000..129fa3e
+--- /dev/null
++++ b/include/ps3emu/ps3_strict.h
+@@ -0,0 +1,39 @@
++/*
++ * ps3_strict.h -- strict mode: every silent fallback becomes fatal.
++ *
++ * By default the runtime keeps a title running past problems it cannot
++ * answer: an unregistered import returns CELL_OK, an indirect call to an
++ * address with no lifted function logs and returns, an unknown syscall logs
++ * "(stub)", SPU code the lifter never saw runs in the SPU interpreter, and an
++ * SPU thread with no lifted image "completes" with status 0. That is useful
++ * for bring-up and fatal for a port that must prove it runs only recompiled
++ * code: the defect surfaces hours later as a wrong value.
++ *
++ * PS3_STRICT=1 turns each of those into ps3_strict_fail(): one line naming
++ * the kind and the detail, the caller's own context dump where it has one,
++ * then abort() so the platform crash handler records the host state.
++ * PS3_STRICT=0 restores the permissive behaviour. A build can choose the
++ * default with -DPS3RECOMP_STRICT_DEFAULT=1.
++ */
++#ifndef PS3EMU_PS3_STRICT_H
++#define PS3EMU_PS3_STRICT_H
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* Nonzero when strict mode is on (cached after the first call). */
++int ps3_strict(void);
++
++/* Report a strict-mode violation and abort. `kind` is a short stable tag
++ * (e.g. "unresolved-nid") that tests and log scrapers match on. */
++#if defined(__GNUC__) || defined(__clang__)
++__attribute__((noreturn, format(printf, 2, 3)))
++#endif
++void ps3_strict_fail(const char* kind, const char* fmt, ...);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* PS3EMU_PS3_STRICT_H */
+diff --git a/runtime/platform/ps3_strict.c b/runtime/platform/ps3_strict.c
+new file mode 100644
+index 0000000..7341d20
+--- /dev/null
++++ b/runtime/platform/ps3_strict.c
+@@ -0,0 +1,33 @@
++/* Strict mode -- see include/ps3emu/ps3_strict.h. */
++#include "ps3emu/ps3_strict.h"
++
++#include <stdarg.h>
++#include <stdio.h>
++#include <stdlib.h>
++
++#ifndef PS3RECOMP_STRICT_DEFAULT
++#define PS3RECOMP_STRICT_DEFAULT 0
++#endif
++
++int ps3_strict(void)
++{
++    static int s_strict = -1;
++    if (s_strict < 0) {
++        const char* e = getenv("PS3_STRICT");
++        s_strict = e && *e ? (e[0] != '0') : PS3RECOMP_STRICT_DEFAULT;
++    }
++    return s_strict;
++}
++
++void ps3_strict_fail(const char* kind, const char* fmt, ...)
++{
++    va_list ap;
++    fflush(stdout);
++    fprintf(stderr, "[strict] FATAL %s: ", kind);
++    va_start(ap, fmt);
++    vfprintf(stderr, fmt, ap);
++    va_end(ap);
++    fprintf(stderr, "\n[strict] PS3_STRICT=0 runs past this (bring-up only)\n");
++    fflush(stderr);
++    abort();
++}
+diff --git a/runtime/ppu/ppu_hle.cpp b/runtime/ppu/ppu_hle.cpp
+index 15d4ef6..0664012 100644
+--- a/runtime/ppu/ppu_hle.cpp
++++ b/runtime/ppu/ppu_hle.cpp
+@@ -22,6 +22,7 @@
+ #include "ps3emu/nid.h"   /* ps3_nid_table, ps3_nid_entry */
+ #include "ps3emu/milestone.h" /* ps3_msf -- boot milestone log */
+ #include "ps3emu/ps3_ftrace.h"   /* PS3_FTRACE: spans of HLE import calls */
++#include "ps3emu/ps3_strict.h"   /* PS3_STRICT: unresolved imports are fatal */
+ #include <stdlib.h>       /* getenv */
+ #include <stdint.h>
+ #include <stdio.h>
+@@ -185,6 +186,9 @@ extern "C" void flow_spurs_kernel_spawn_postinit(void) {}
+ static void ps3_hle_unresolved(uint32_t nid, ppu_context* ctx)
+ {
+     enum { CELL_ERROR_ERROR = (int)0x8001003Fu };  /* generic CELL failure */
++    if (ps3_strict())
++        ps3_strict_fail("unresolved-nid", "import NID 0x%08X has no HLE handler (lr=0x%08X tid=%llu)",
++                        nid, (uint32_t)ctx->lr, (unsigned long long)ctx->thread_id);
+     static int s_fake = -1;
+     if (s_fake < 0) {
+         const char* m = getenv("PS3_HLE_UNRESOLVED");
+diff --git a/runtime/ppu/ppu_loader.cpp b/runtime/ppu/ppu_loader.cpp
+index 9309f2d..7166802 100644
+--- a/runtime/ppu/ppu_loader.cpp
++++ b/runtime/ppu/ppu_loader.cpp
+@@ -35,6 +35,7 @@
+ #include "ppu_tls.h"   /* PPU_THREAD_LOCAL, without a second ppu_context */
+ #define PPU_NO_INLINE_LOADS   /* this file defines the out-of-line accessors */
+ #include "ppu_recomp.h"
++#include "ps3emu/ps3_strict.h"
+ #include "../spu/spu_coh_bitmap.h"   /* spu_coh_line_reserved, for the stores */
+ #include "ps3emu/ps3_ftrace.h"   /* PS3_FTRACE timeline */
+ #include "ps3emu/milestone.h"   /* ps3_ms / ps3_msf -- boot milestone log */     /* ppu_context, func decls, ppu_recomp_register */
+@@ -2935,6 +2936,12 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
+         { static int _nv=-1; if(_nv<0){ const char* e=getenv("PPU_NOOP_BAD_VCALL"); _nv=e?1:0; }
+           if(_nv && ((tgt & 3u)!=0u || tgt < 0x10000u || tgt >= 0x40000000u)) _invalid = true; }
+         if (_invalid) {
++            if (ps3_strict()) {
++                ppu_dump_guest_stack(ctx, "strict-garbage-vcall");
++                ps3_strict_fail("garbage-indirect-call",
++                                "target 0x%08X is not code (this=0x%08X lr=0x%08X tid=%llu)", tgt,
++                                (uint32_t)ctx->gpr[3], (uint32_t)ctx->lr, (unsigned long long)ctx->thread_id);
++            }
+             static int _gn = 0;
+             if (PS3_LOG_FIRST(_gn, 12)) fprintf(stderr, "[ppu] garbage vcall -> 0x%08X this=0x%08X (uninit/stale object) -- no-op, r3=0\n", tgt, (uint32_t)ctx->gpr[3]);
+ #ifdef _WIN32
+@@ -2980,6 +2987,12 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
+         }
+         return;   /* don't spam the log on a tight retry loop */
+     }
++    if (ps3_strict()) {
++        ppu_log_host_chain("strict-unresolved-indirect");
++        ppu_dump_guest_stack(ctx, "strict-unresolved-indirect");
++        ps3_strict_fail("unresolved-indirect-call", "no lifted function at 0x%08X (lr=0x%08X tid=%llu)",
++                        cur, (uint32_t)ctx->lr, (unsigned long long)ctx->thread_id);
++    }
+     last = cur; streak = 0;
+     fprintf(stderr, "[ppu] unresolved indirect call -> 0x%08X (tid=%llu lr=0x%08X)\n",
+             (uint32_t)ctx->ctr, (unsigned long long)ctx->thread_id, (uint32_t)ctx->lr);
+@@ -3158,7 +3171,11 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
+  * continue (the result is undefined, but it won't crash the link). */
+ extern "C" void ppu_unlifted_stub(uint64_t addr, ppu_context* ctx)
+ {
+-    (void)ctx;
++    if (ps3_strict()) {
++        ppu_dump_guest_stack(ctx, "strict-unlifted");
++        ps3_strict_fail("unlifted-function", "call to 0x%08X, which the lifter did not emit (lr=0x%08X)",
++                        (uint32_t)addr, (uint32_t)ctx->lr);
++    }
+     static int logged = 0;
+     if (logged < 20) {
+         fprintf(stderr, "[ppu] call to unlifted function 0x%08X\n", (uint32_t)addr);
+@@ -3485,6 +3502,9 @@ extern "C" void lv2_syscall(ppu_context* ctx)
+         }
+         static int logged = 0;
+         if (logged < 30) {
++            if (ps3_strict())
++                ps3_strict_fail("unknown-syscall", "lv2 syscall %llu has no implementation (lr=0x%08X)",
++                                (unsigned long long)num, (uint32_t)ctx->lr);
+             fprintf(stderr, "[ppu] lv2_syscall %llu (stub)\n", (unsigned long long)num);
+             logged++;
+         }
+diff --git a/runtime/spu/spu_channels.c b/runtime/spu/spu_channels.c
+index 5fc5020..cd1e1cc 100644
+--- a/runtime/spu/spu_channels.c
++++ b/runtime/spu/spu_channels.c
+@@ -12,6 +12,7 @@
+  * embed one), in a small lazily-populated registry.
+  */
+ 
++#include "ps3emu/ps3_strict.h"
+ #include "spu_dma.h"
+ #include "spu_coherency.h" /* lock-line lock + PPU-write coherence bitmap */
+ #include "spu_helpers.h"   /* spu_splat_u32 / spu_ls_read128 (SMC microstep) */
+@@ -2873,7 +2874,12 @@ void spu_indirect_branch(spu_context* ctx)
+                           "(runtime-loaded code)\n", ctx->image_id, p);
+               spu_interp_run(ctx, p);
+               return;
+-          } }
++          }
++          if (ps3_strict())
++              ps3_strict_fail("spu-unlifted-branch", "image %d branched to LS 0x%05X (word 0x%08X), "
++                              "which no lifted image covers%s", ctx->image_id, p, w0,
++                              w0 ? " -- runtime-loaded code (e.g. an FMOD DSP plugin)" : "");
++        }
+         spu_halt(ctx);
+         return;
+     }
+diff --git a/runtime/spu/spu_interp.c b/runtime/spu/spu_interp.c
+index e9b8f61..d428bca 100644
+--- a/runtime/spu/spu_interp.c
++++ b/runtime/spu/spu_interp.c
+@@ -5,6 +5,7 @@
+  * spu_<mnemonic> helpers the lifter emits, so interpreted and lifted code are
+  * bit-identical. Uncommon opcodes trap loudly (never silently wrong).
+  */
++#include "ps3emu/ps3_strict.h"
+ #include <time.h>
+ #include "spu_interp.h"
+ #include "spu_helpers.h"
+@@ -451,6 +452,9 @@ static void interp_stats_step(const spu_context* ctx)
+ }
+ 
+ uint32_t spu_interp_run_until(spu_context* ctx, uint32_t start_lsa, uint32_t stop_lsa) {
++    if (ps3_strict())
++        ps3_strict_fail("spu-interpreter", "SPU code at LS 0x%05X (image %d) would be interpreted: "
++                        "it was not lifted", start_lsa & 0x3FFFC, ctx->image_id);
+     if (interp_stats_on()) {
+         /* Credit an entry inside a resident code region to the image that
+          * owns it, so the list names the lift that's missing the entry. */
+diff --git a/runtime/syscalls/lv2_register.c b/runtime/syscalls/lv2_register.c
+index 9626673..1b052bf 100644
+--- a/runtime/syscalls/lv2_register.c
++++ b/runtime/syscalls/lv2_register.c
+@@ -10,6 +10,7 @@
+  * remain available as direct C calls for the runtime to use.
+  */
+ 
++#include "ps3emu/ps3_strict.h"
+ #include <stdlib.h>   /* calloc, free */
+ #include "ps3emu/nid.h"   /* ps3_compute_nid (static inline) */
+ #include "lv2_syscall_table.h"
+@@ -1137,6 +1138,10 @@ static int64_t sys_spu_thread_group_start_handler(ppu_context* ctx)
+             user = NULL;
+         }
+         if (!fb) {
++            if (ps3_strict())
++                ps3_strict_fail("spu-thread-no-code", "SPU thread tid=0x%X (image @0x%08X) has no lifted "
++                                "image or fallback; it would complete instantly with status 0",
++                                t->tid, t->img_ea);
+             t->exit_status = 0;
+             t->running = 0;
+             instant++; nofb++;
+-- 
+2.56.0
+

@@ -1,0 +1,35 @@
+From 91db2c81eb51d1251371d21250284dcfe9ab7bf5 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Thu, 29 Oct 2026 17:58:24 -0700
+Subject: [PATCH 14/28] sys_fs: follow the cellFs root when PS3_VFS_ROOT is
+ unset
+
+A port that derives ppu_vfs_root from the EBOOT path left the raw
+sys_fs layer at '.', so Bink's movie opens resolved against the working
+directory and 3D Dot Game Heroes quit when its title movie was missing.
+---
+ runtime/syscalls/sys_fs.c | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/runtime/syscalls/sys_fs.c b/runtime/syscalls/sys_fs.c
+index f076ef8..9126779 100644
+--- a/runtime/syscalls/sys_fs.c
++++ b/runtime/syscalls/sys_fs.c
+@@ -155,6 +155,14 @@ void sys_fs_translate_path(const char* ps3_path, char* host_path, int host_path_
+      * sys_fs layer points at the same place as the cellFs layer (ppu_vfs_root). */
+     if (g_sys_fs_root[0] == '.' && g_sys_fs_root[1] == '\0') {
+         const char* env = getenv("PS3_VFS_ROOT");
++        /* Otherwise follow the cellFs layer's root, which a port derives from
++         * the EBOOT path without setting the variable. Left at ".", every raw
++         * sys_fs open (Bink's movie reads) resolved against the working
++         * directory: 3D Dot Game Heroes asked for
++         * /dev_bdvd/PS3_GAME/USRDIR/data/movie/TitleMovie_Omote_eng.bik, got
++         * ./USRDIR/... = ENOENT and quit to the XMB (sys_process_exit). */
++        extern const char* ppu_vfs_root;
++        if (!(env && *env) && ppu_vfs_root && strcmp(ppu_vfs_root, ".") != 0) env = ppu_vfs_root;
+         if (env && *env) { strncpy(g_sys_fs_root, env, sizeof(g_sys_fs_root) - 1); g_sys_fs_root[sizeof(g_sys_fs_root)-1] = 0; }
+     }
+ 
+-- 
+2.56.0
+

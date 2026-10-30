@@ -1,0 +1,145 @@
+From 727089b2a316b4f058272f410d4c448e9a2dd86f Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Fri, 30 Oct 2026 00:27:54 -0700
+Subject: [PATCH 27/28] draw engine: scratch colour target for work that writes
+ no colour
+
+A draw with every colour channel masked, or a clear of depth/stencil
+only, binds a scratch target per size and format instead of the guest
+surface at the colour address. 3D Dot Game Heroes renders its shadow map
+with colour masked and the colour target left at offset 0, display
+buffer 0, which replaced the display surface and recreated it every
+frame (two rebuilds, each a clear and a GPU wait).
+
+Also: RSX_ENGINE_PASS_DUMP_TRIGGER=<file> starts a pass capture when the
+file appears; RSX_FPCONST_FP=<hash> prints a fragment program's
+constants per draw.
+---
+ libs/video/rsx_draw_engine.c | 62 +++++++++++++++++++++++++++++++++---
+ 1 file changed, 58 insertions(+), 4 deletions(-)
+
+diff --git a/libs/video/rsx_draw_engine.c b/libs/video/rsx_draw_engine.c
+index 8dff601..d56d24f 100644
+--- a/libs/video/rsx_draw_engine.c
++++ b/libs/video/rsx_draw_engine.c
+@@ -720,7 +720,12 @@ static u32 eng_surface_get(u32 location, u32 offset, u32 want_w, u32 want_h,
+  * vtable path's target_for binds by. Resolution stops at the first member
+  * that cannot be created, as that path stops at the first gap. Returns how
+  * many were resolved, or 0. */
+-static u32 eng_current_target_set(u32 slots[RSX_BE_MAX_COLOR_TARGETS])
++/* Location of the colour target bound for work that writes no colour (a
++ * shadow-map or depth pre-pass with every colour channel masked). No guest
++ * location has this value, so it never aliases a real surface. */
++#define ENG_SCRATCH_LOCATION 0xFFu
++
++static u32 eng_current_target_set_ex(u32 slots[RSX_BE_MAX_COLOR_TARGETS], int writes_color)
+ {
+     rsx_dsp_surface sf;
+     rsx_dsp_get_surface(&g.rsx, &sf);
+@@ -729,6 +734,22 @@ static u32 eng_current_target_set(u32 slots[RSX_BE_MAX_COLOR_TARGETS])
+     const u32 sel = (sf.color_target == CELL_GCM_SURFACE_TARGET_1) ? 1u : 0u;
+     const rsx_be_format fmt = eng_surface_format(sf.color_format);
+     const u32 aa_grid = sf.aa_sx | (sf.aa_sy << 8);
++    /* Work that writes no colour still needs an attachment of the right size
++     * for the framebuffer, but not the guest surface: 3D Dot Game Heroes
++     * renders its 1024x1024 shadow map with colour masked off and the colour
++     * target left at offset 0 -- display buffer 0. Binding that address
++     * replaced the 1280x720 display surface with a 1024x1024 one every frame
++     * and recreated it for the next present: two target rebuilds, each a
++     * clear and a GPU wait that also broke the draw batch. A scratch target
++     * per size and format keeps the real surface untouched. */
++    if (!writes_color && sf.color_target < CELL_GCM_SURFACE_TARGET_MRT1) {
++        const u32 w = sf.clip_w ? sf.clip_w : g.width, h = sf.clip_h ? sf.clip_h : g.height;
++        const u32 key = ((w & 0x3FFFu) << 14) | (h & 0x3FFFu) | ((u32)fmt << 28);
++        const u32 s = eng_surface_get(ENG_SCRATCH_LOCATION, key, w, h, fmt, 0, aa_grid);
++        if (s == ENG_INVALID) return 0;
++        slots[0] = s;
++        return 1;
++    }
+     const u32 first = eng_surface_get(sf.color_location[sel], sf.color_offset[sel],
+                                       sf.clip_w, sf.clip_h, fmt, sf.color_pitch[sel], aa_grid);
+     if (first == ENG_INVALID) return 0;
+@@ -934,6 +955,11 @@ void rsx_draw_engine_guest_wrote(u32 location, u32 offset, u32 pitch, u32 w, u32
+     g.be->color_target_write(g.be->user, s->handle, x, y, w, h, rows, w * 4u);
+ }
+ 
++static u32 eng_current_target_set(u32 slots[RSX_BE_MAX_COLOR_TARGETS])
++{
++    return eng_current_target_set_ex(slots, 1);
++}
++
+ static u32 eng_current_surface(void)
+ {
+     u32 slots[RSX_BE_MAX_COLOR_TARGETS];
+@@ -2691,6 +2717,19 @@ static int pd_capturing(void)
+     if (s_pd.state == 1 && s_pd.after_s &&
+         difftime(time(NULL), s_pd.start) >= (double)s_pd.after_s && pd_open_index())
+         fprintf(s_pd.index, "from a draw of frame %u, %u s in\n", g.frames, s_pd.after_s);
++    /* RSX_ENGINE_PASS_DUMP_TRIGGER=<file>: start when that file appears, so a
++     * test driver can capture the screen it has reached. Checked once a frame. */
++    if (s_pd.state == 1) {
++        static const char* trig = (const char*)-1; static u32 checked_frame = ~0u;
++        if (trig == (const char*)-1) trig = getenv("RSX_ENGINE_PASS_DUMP_TRIGGER");
++        if (trig && *trig && checked_frame != g.frames) {
++            checked_frame = g.frames;
++            FILE* t = fopen(trig, "r");
++            if (t) { fclose(t);
++                if (pd_open_index())
++                    fprintf(s_pd.index, "from a draw of frame %u (trigger %s)\n", g.frames, trig); }
++        }
++    }
+     return s_pd.state == 2;
+ }
+ 
+@@ -2941,7 +2980,7 @@ static void pd_note(const u32* targets, u32 n_targets, u32 zslot,
+ static void pd_present(u32 presented)
+ {
+     if (s_pd.state == 0) pd_capturing();
+-    if (s_pd.state == 1 && !s_pd.after_s && g.guest_draws >= s_pd.min_draws) {
++    if (s_pd.state == 1 && !s_pd.after_s && !getenv("RSX_ENGINE_PASS_DUMP_TRIGGER") && g.guest_draws >= s_pd.min_draws) {
+         if (pd_open_index())
+             fprintf(s_pd.index, "frame %u (after a frame of %u guest draws)\n",
+                     g.frames + 1, g.guest_draws);
+@@ -3069,7 +3108,7 @@ static void sink_end(void* user, const rsx_dispatch* r)
+     rsx_draw_engine_decode_render_state(&g.rsx, &rs);
+ 
+     u32 targets[RSX_BE_MAX_COLOR_TARGETS];
+-    const u32 n_targets = eng_current_target_set(targets);
++    const u32 n_targets = eng_current_target_set_ex(targets, rs.color_mask || rs.color_mask_mrt);
+     if (!n_targets) return;
+     const u32 target = targets[0];
+ 
+@@ -3152,6 +3191,19 @@ static void sink_end(void* user, const rsx_dispatch* r)
+     memset(g.fp_cb, 0, fp_bytes);
+     if (g.fp_constants.count)
+         memcpy(g.fp_cb, g.fp_constants.values, g.fp_constants.count * 16u);
++    /* RSX_FPCONST_FP=<fp hash, hex>: print the fragment constants that
++     * program draws with (first 8 draws, then every 600th), to see whether
++     * constants a title patches into the program each frame arrive. The hash
++     * is the one RSX_ENGINE_SHADER_DUMP writes to pipeN.fp.txt. */
++    { static int on = -1; static unsigned long long want; static unsigned n = 0;
++      if (on < 0) { const char* e = getenv("RSX_FPCONST_FP"); on = e && *e; if (on) want = strtoull(e, 0, 16); }
++      if (on && fp_hash == want && (n++ < 8 || n % 600 == 0)) {
++          const float* c = (const float*)g.fp_cb;
++          fprintf(stderr, "[fpconst] pipe %u draw %u:", pipeline, n);
++          for (u32 i = 0; i < g.fp_constants.count; i++)
++              fprintf(stderr, " c%u=(%g,%g,%g,%g)", i, c[i*4], c[i*4+1], c[i*4+2], c[i*4+3]);
++          fprintf(stderr, "\n");
++      } }
+     { float* alpha = (float*)(g.fp_cb + nslots * 16u);
+       alpha[0] = rsx_fp_alpha_ref(rs.alpha_ref_raw, rs.alpha_ref_format);
+       /* Window convention for WPOS (rsx_fp_decompiler.c, _rsx_wpos): SET_SHADER_WINDOW
+@@ -3244,7 +3296,9 @@ static void sink_clear(void* user, const rsx_dispatch* r, u32 mask)
+     (void)user; (void)r;
+     if (!g.ready) return;
+     u32 targets[RSX_BE_MAX_COLOR_TARGETS];
+-    const u32 n_targets = eng_current_target_set(targets);
++    /* NV4097_CLEAR_SURFACE: bits 4..7 are R, G, B, A; a clear without them
++     * touches depth/stencil only. */
++    const u32 n_targets = eng_current_target_set_ex(targets, (mask & 0xF0u) != 0);
+     if (!n_targets) return;
+     if (pd_capturing()) {
+         rsx_dsp_surface zs;
+-- 
+2.56.0
+

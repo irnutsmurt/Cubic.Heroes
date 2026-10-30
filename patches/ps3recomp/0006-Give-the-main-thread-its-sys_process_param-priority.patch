@@ -1,0 +1,75 @@
+From 9c56d3df75303e8b84ad0c5de38a04c2a38b1aff Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Thu, 29 Oct 2026 16:36:06 -0700
+Subject: [PATCH 06/28] Give the main thread its sys_process_param priority
+
+ppu_thread_register_main zeroed the main thread's slot, so
+sys_ppu_thread_get_priority(main) answered 0. The ELF declares the real
+value in its PT_PROC_PARAM segment (sys_process_param_t.primary_prio;
+1001, the SDK default, for 3D Dot Game Heroes). That title computes worker
+priorities as primary_prio - 1, asserts the result is >= 0, and exited
+cleanly at boot when it was not. The loader now reads the segment and the
+main thread starts at that priority.
+---
+ runtime/ppu/ppu_loader.cpp        | 14 ++++++++++++++
+ runtime/syscalls/sys_ppu_thread.c |  5 +++++
+ 2 files changed, 19 insertions(+)
+
+diff --git a/runtime/ppu/ppu_loader.cpp b/runtime/ppu/ppu_loader.cpp
+index bf913d3..2fd4b36 100644
+--- a/runtime/ppu/ppu_loader.cpp
++++ b/runtime/ppu/ppu_loader.cpp
+@@ -36,6 +36,7 @@
+ #define PPU_NO_INLINE_LOADS   /* this file defines the out-of-line accessors */
+ #include "ppu_recomp.h"
+ #include "ps3emu/ps3_strict.h"
++extern "C" int32_t g_ppu_primary_prio;   /* sys_ppu_thread.c */
+ #include "../spu/spu_coh_bitmap.h"   /* spu_coh_line_reserved, for the stores */
+ #include "ps3emu/ps3_ftrace.h"   /* PS3_FTRACE timeline */
+ #include "ps3emu/milestone.h"   /* ps3_ms / ps3_msf -- boot milestone log */     /* ppu_context, func decls, ppu_recomp_register */
+@@ -3601,6 +3602,19 @@ extern "C" uint32_t ppu_load_elf(const char* path)
+                     g_tls_vaddr, g_tls_filesz, g_tls_memsz);
+             continue;
+         }
++        if (p_type == 0x60000001u /*PT_PROC_PARAM: sys_process_param_t*/) {
++            /* The main thread's priority (and stack size) are declared here
++             * (SYS_PROCESS_PARAM). Titles read their own priority back with
++             * sys_ppu_thread_get_priority and derive worker priorities from it;
++             * 3D Dot Game Heroes asserts that primary_prio - 1 >= 0. */
++            uint64_t po = be64(ph + 8), pf = be64(ph + 32);
++            if (pf >= 0x14 && po + pf <= fsz && be32(file + po + 4) == 0x13BCC5F6u) {
++                g_ppu_primary_prio = (int32_t)be32(file + po + 16);
++                fprintf(stderr, "[ppu] sys_process_param: primary_prio=%d stack=0x%X sdk=0x%X\n",
++                        g_ppu_primary_prio, pf >= 0x18 ? be32(file + po + 20) : 0, be32(file + po + 12));
++            }
++            continue;
++        }
+         if (p_type != 1 /*PT_LOAD*/) continue;
+         uint64_t p_offset = be64(ph + 8);
+         uint64_t p_vaddr  = be64(ph + 16);
+diff --git a/runtime/syscalls/sys_ppu_thread.c b/runtime/syscalls/sys_ppu_thread.c
+index 41d5721..9870909 100644
+--- a/runtime/syscalls/sys_ppu_thread.c
++++ b/runtime/syscalls/sys_ppu_thread.c
+@@ -316,6 +316,10 @@ void ydkj_release_pending_threads(void) {}
+  * for main before any sys_ppu_thread_create so every thread has a unique
+  * nonzero id and the special cases die.
+  * -----------------------------------------------------------------------*/
++/* primary_prio from the ELF's sys_process_param (set by ppu_load_elf); 0 when
++ * the ELF has none, which keeps the "never set -> default" behaviour below. */
++int32_t g_ppu_primary_prio = 0;
++
+ uint64_t ppu_thread_register_main(void)
+ {
+     table_lock();
+@@ -325,6 +329,7 @@ uint64_t ppu_thread_register_main(void)
+         t->ctx.thread_id = 1;
+         t->state    = PPU_THREAD_STATE_RUNNING;
+         t->joinable = 0;                    /* nobody joins the main thread */
++        t->priority = g_ppu_primary_prio;
+         strncpy(t->name, "main", sizeof(t->name) - 1);
+         ps3_ft_name(1, "main");
+         ps3_tprof_thread('P', 1);
+-- 
+2.56.0
+

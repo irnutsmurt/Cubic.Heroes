@@ -1,0 +1,482 @@
+From 0a9db8a268c816ace1a34bc6e3f5ee1dbf298493 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Thu, 29 Oct 2026 18:07:00 -0700
+Subject: [PATCH 16/28] SPU: relocatable overlays (spu_lifter --relocatable)
+
+FMOD Ex's SPU mixer DMAs its codec and DSP plugins (position-independent
+SPU ELFs linked at LS 0x80) into its local store wherever it has room and
+branches in; 3D Dot Game Heroes' first codec lands at LS 0x156F0. Code
+lifted at one address could not run there, which left the interpreter as
+the only way in.
+
+spu_lifter.py --relocatable lifts at the link address and routes every
+PC-derived value -- brsl/bisl links, lqr/stqr addresses, drain return
+PCs, SPU_DIRECT targets -- through SPU_RELOC(x) = x + _rl, where _rl is
+ctx->ls_reloc captured at function entry and put back after each nested
+call. Absolute branches in such code stop with spu_unsupported.
+
+spu_overlay_register_relocatable(content_ea, link_lsa, span, image, code)
+registers one: a GET from content_ea into any LS address makes it
+resident with delta = lsa - link_lsa, the first dispatch verifies the
+code bytes at the displaced address, lookups translate lsa - delta, and
+spu_lifted_lookup publishes the delta in ctx->ls_reloc. A context that
+never loads one keeps ls_reloc 0, so such a lift also runs at its link
+address unchanged.
+
+build_spu_workloads.py --relocatable IMAGE=EA wires both up.
+SPU_OVL_TRACE=<lo>-<hi> logs GETs from a source EA range.
+---
+ runtime/spu/spu_channels.c          | 50 +++++++++++++++++++++++---
+ runtime/spu/spu_context.h           | 14 ++++++++
+ runtime/spu/spu_overlay_residency.h | 10 ++++++
+ tools/build_spu_workloads.py        | 51 +++++++++++++++++++++++++++
+ tools/spu_lifter.py                 | 54 ++++++++++++++++++++++-------
+ 5 files changed, 162 insertions(+), 17 deletions(-)
+
+diff --git a/runtime/spu/spu_channels.c b/runtime/spu/spu_channels.c
+index 1a91c70..b9ed7fe 100644
+--- a/runtime/spu/spu_channels.c
++++ b/runtime/spu/spu_channels.c
+@@ -1746,6 +1746,9 @@ static spu_lifted_fn spu_lifted_lookup_full(const spu_context* ctx, uint32_t lsa
+              * unverified: other images' functions there would be stale. */
+             if (ctx->resident_code[slot].verify_state &&
+                 !spu_overlay_resident_verified((spu_context*)ctx, slot)) return NULL;
++            if (ctx->resident_code[slot].reloc)
++                return (spu_lifted_fn)spu_lookup_memoized(lsa - ctx->resident_code[slot].reloc_delta,
++                                                          ctx->resident_code[slot].image_id);
+             return (spu_lifted_fn)spu_lookup_memoized(lsa, ctx->resident_code[slot].image_id);
+         }
+     spu_fn fn = NULL;
+@@ -1807,6 +1810,15 @@ static void spu_dcache_shadow_stats(void)
+ }
+ spu_lifted_fn spu_lifted_lookup(const spu_context* ctx, uint32_t lsa)
+ {
++    /* Entering relocatable code: publish its displacement (spu_context.ls_reloc). */
++    if (ctx)
++        for (unsigned slot = 0; slot < 4; ++slot)
++            if (ctx->resident_code[slot].reloc && ctx->resident_code[slot].image_id &&
++                lsa >= ctx->resident_code[slot].lsa &&
++                lsa - ctx->resident_code[slot].lsa < ctx->resident_code[slot].size) {
++                ((spu_context*)ctx)->ls_reloc = ctx->resident_code[slot].reloc_delta;
++                break;
++            }
+     const int mode = spu_dcache_mode();
+     if (!mode || !ctx) return spu_lifted_lookup_full(ctx, lsa);
+     spu_context* c = (spu_context*)ctx;
+@@ -1858,7 +1870,8 @@ spu_lifted_fn spu_lifted_lookup(const spu_context* ctx, uint32_t lsa)
+  * marks that overlay resident in the streaming context; dispatch retries a
+  * primary-image miss against the resident overlay's registry. */
+ typedef struct { uint32_t src_ea; int image_id; uint8_t sig[16]; int has_sig; uint32_t span;
+-                 uint32_t load_lsa; unsigned code_count; spu_overlay_code_segment* code; } spu_ovl_src;
++                 uint32_t load_lsa; unsigned code_count; spu_overlay_code_segment* code;
++                 int reloc; } spu_ovl_src;
+ /* 6 FMOD codec/DSP overlays + up to 89 WWS job-code modules (all stream into
+  * the same job code buffer at LS 0x4000, dispatched by content signature). */
+ #define SPU_OVL_SRC_MAX 128
+@@ -1910,6 +1923,7 @@ void spu_overlay_register_source(uint32_t content_ea, int image_id)
+         s_ovl_src[s_ovl_src_count].src_ea = content_ea;
+         s_ovl_src[s_ovl_src_count].image_id = image_id;
+         s_ovl_src[s_ovl_src_count].has_sig = 0;
++        s_ovl_src[s_ovl_src_count].reloc = 0;
+         __atomic_store_n(&s_ovl_src_count, s_ovl_src_count + 1, __ATOMIC_RELEASE);
+     }
+ }
+@@ -1958,14 +1972,25 @@ int spu_overlay_register_verified_region(uint32_t content_ea, uint32_t load_lsa,
+     return 1;
+ }
+ 
++int spu_overlay_register_relocatable(uint32_t content_ea, uint32_t link_lsa,
++    uint32_t span, int image_id, const spu_overlay_code_segment* code, unsigned count)
++{
++    if (!spu_overlay_register_verified_region(content_ea, link_lsa, span, image_id, code, count))
++        return 0;
++    s_ovl_src[s_ovl_src_count - 1].reloc = 1;
++    return 1;
++}
++
+ static int spu_overlay_resident_verified(spu_context* ctx, unsigned slot)
+ {
+     int* state = &ctx->resident_code[slot].verify_state;
+     if (*state == SPU_OVERLAY_PENDING) {
+         const spu_ovl_src* o = &s_ovl_src[ctx->resident_code[slot].source_index];
++        const uint32_t d = ctx->resident_code[slot].reloc ? ctx->resident_code[slot].reloc_delta : 0;
+         int match = 1;
+         for (unsigned i = 0; match && i < o->code_count; ++i)
+-            match = !memcmp(ctx->ls + o->code[i].lsa, o->code[i].bytes, o->code[i].size);
++            match = o->code[i].lsa + d + o->code[i].size <= SPU_LS_SIZE &&
++                    !memcmp(ctx->ls + o->code[i].lsa + d, o->code[i].bytes, o->code[i].size);
+         *state = match ? SPU_OVERLAY_VERIFIED : SPU_OVERLAY_REJECTED;
+     }
+     return *state == SPU_OVERLAY_VERIFIED;
+@@ -2149,6 +2174,16 @@ void spu_overlay_note_get(spu_context* ctx, uint32_t ea, const uint8_t* ls, uint
+ {
+     uint32_t lsa = (uint32_t)(ls - ctx->ls);
+     spu_ovl_dump(ctx, ea, lsa, ls, size);
++    /* SPU_OVL_TRACE=<lo>-<hi>: log every GET whose source EA is in [lo, hi),
++     * e.g. the range the title's embedded SPU images occupy, to learn where a
++     * runtime-loaded overlay lands in local store. */
++    { static int s_t = -1; static uint32_t s_lo, s_hi;
++      if (s_t < 0) { const char* e = getenv("SPU_OVL_TRACE"); s_t = 0;
++          if (e && *e) { char* d; s_lo = (uint32_t)strtoul(e, &d, 0);
++              if (*d == '-') { s_hi = (uint32_t)strtoul(d + 1, 0, 0); s_t = s_hi > s_lo; } } }
++      if (s_t && ea >= s_lo && ea < s_hi)
++          fprintf(stderr, "[spu-ovl-get] img=%d ea=0x%08X -> LS 0x%05X size=0x%X\n",
++                  ctx->image_id, ea, lsa, size); }
+     for (unsigned slot = 0; slot < 4; ++slot) {
+         if (!ctx->resident_code[slot].image_id) continue;
+         uint32_t base = ctx->resident_code[slot].lsa;
+@@ -2172,8 +2207,9 @@ void spu_overlay_note_get(spu_context* ctx, uint32_t ea, const uint8_t* ls, uint
+         if (hit) {
+             if (o->span) {
+                 if (lsa + o->span > SPU_LS_SIZE) return;
+-                /* Verified code was lifted for one load address. */
+-                if (o->code && lsa != o->load_lsa) continue;
++                /* Verified code was lifted for one load address, unless it is
++                 * relocatable. */
++                if (o->code && !o->reloc && lsa != o->load_lsa) continue;
+                 for (unsigned slot = 0; slot < 4; ++slot) {
+                     if (ctx->resident_code[slot].image_id && ctx->resident_code[slot].lsa != lsa)
+                         continue;
+@@ -2183,6 +2219,12 @@ void spu_overlay_note_get(spu_context* ctx, uint32_t ea, const uint8_t* ls, uint
+                     ctx->resident_code[slot].image_id = o->image_id;
+                     ctx->resident_code[slot].verify_state = o->code ? SPU_OVERLAY_PENDING : 0;
+                     ctx->resident_code[slot].source_index = i;
++                    ctx->resident_code[slot].reloc = o->reloc;
++                    ctx->resident_code[slot].reloc_delta = o->reloc ? lsa - o->load_lsa : 0;
++                    { static int _n = 0; if (o->reloc && PS3_LOG_FIRST(_n, 64))
++                        fprintf(stderr, "[spu-ovl] img=%d relocatable image %d src=0x%08X -> LS 0x%05X "
++                                "(link 0x%05X, delta 0x%05X)\n", ctx->image_id, o->image_id, ea, lsa,
++                                o->load_lsa, lsa - o->load_lsa); }
+                     spu_dcache_residency_changed(ctx);
+                     return;
+                 }
+diff --git a/runtime/spu/spu_context.h b/runtime/spu/spu_context.h
+index c5ccbec..977b426 100644
+--- a/runtime/spu/spu_context.h
++++ b/runtime/spu/spu_context.h
+@@ -302,7 +302,17 @@ typedef struct spu_context {
+         /* 0: unchecked legacy region; otherwise SPU_OVERLAY_* state of a
+          * region registered with its code bytes (spu_overlay_residency.h). */
+         int verify_state, source_index;
++        /* Relocatable code (lifted at its link address, loaded anywhere):
++         * lsa - link address, applied by dispatch; see ls_reloc. */
++        int reloc;
++        uint32_t reloc_delta;
+     } resident_code[4];
++    /* LS displacement of the relocatable code running now: spu_lifted_lookup
++     * sets it when it resolves an address in a relocatable span, and code
++     * lifted with spu_lifter.py --relocatable adds it to every PC-derived
++     * value (links, lqr/stqr addresses, return PCs). Code lifted at a fixed
++     * address never reads it. */
++    uint32_t ls_reloc;
+ 
+     /* Dispatch cache (spu_lifted_lookup, spu_channels.c). dcache_id names this
+      * context's current lifetime: 0 after spu_context_init (or a zeroed
+@@ -1025,6 +1035,10 @@ void spu_direct_init(void);
+ #    define SPU_DIRECT_TAILCALLS 1
+ #  endif
+ #endif
++/* --relocatable lifts: a PC-derived constant at the address the code runs at.
++ * `_rl` is the function's ls_reloc, captured at entry. */
++#define SPU_RELOC(x) ((uint32_t)(x) + _rl)
++
+ #ifdef SPU_DIRECT_TAILCALLS
+ #define SPU_DIRECT(ctx, PC, FN) do {                                          \
+         const uint32_t _dpc = (uint32_t)(PC);                                 \
+diff --git a/runtime/spu/spu_overlay_residency.h b/runtime/spu/spu_overlay_residency.h
+index 08af5b1..5f30dd2 100644
+--- a/runtime/spu/spu_overlay_residency.h
++++ b/runtime/spu/spu_overlay_residency.h
+@@ -29,6 +29,16 @@ int spu_overlay_register_verified_region(uint32_t content_ea, uint32_t load_lsa,
+     uint32_t span, int image_id, const spu_overlay_code_segment* code,
+     unsigned count);
+ 
++/* The same for position-independent code lifted with spu_lifter.py
++ * --relocatable at its link address `link_lsa`: a GET from content_ea into
++ * ANY local-store address makes it resident, displaced by lsa - link_lsa.
++ * The code segments are given at link addresses and are verified at the
++ * displaced ones. FMOD's SPU mixer loads its codec and DSP plugins this way,
++ * wherever it has room. Returns 1 on success. */
++int spu_overlay_register_relocatable(uint32_t content_ea, uint32_t link_lsa,
++    uint32_t span, int image_id, const spu_overlay_code_segment* code,
++    unsigned count);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/tools/build_spu_workloads.py b/tools/build_spu_workloads.py
+index 2eef378..ec780e4 100644
+--- a/tools/build_spu_workloads.py
++++ b/tools/build_spu_workloads.py
+@@ -73,6 +73,17 @@ def text_fp(b):
+     return None
+ 
+ 
++def text_seg(b):
++    """(vaddr, file bytes) of the executable PT_LOAD, or None."""
++    phoff, phes, phn = be32(b, 0x1C), be16(b, 0x2A), be16(b, 0x2C)
++    for i in range(phn):
++        o = phoff + i * phes
++        if be32(b, o) == 1 and be32(b, o + 0x18) & 1:
++            off, fsz = be32(b, o + 4), be32(b, o + 0x10)
++            return be32(b, o + 8), b[off:off + fsz]
++    return None
++
++
+ def is_spu_elf(b):
+     return (len(b) >= 0x34 and b[0:4] == b"\x7fELF"
+             and b[4] == 1 and b[5] == 2  # ELFCLASS32, ELFDATA2MSB
+@@ -120,6 +131,11 @@ def main():
+                          "branch, so --auto-functions cannot see it, and dispatch "
+                          "to it lands on address 0 at runtime. "
+                          "e.g. --extra-funcs pm_wwsjob=0xA2C")
++    ap.add_argument("--relocatable", action="append", default=[], metavar="IMAGE=EA",
++                    help="IMAGE is position-independent code its loader DMAs into local store "
++                         "wherever it has room, from guest EA (its executable segment's source). "
++                         "Lifted with spu_lifter --relocatable and registered with "
++                         "spu_overlay_register_relocatable. Repeatable.")
+     ap.add_argument("--constructor", action="store_true",
+                     help="also emit an __attribute__((constructor)) that calls the register fn at startup")
+     ap.add_argument("--relift", action="store_true", help="re-lift even if a prior lift exists")
+@@ -148,6 +164,14 @@ def main():
+     if not elfs:
+         sys.exit(f"[build_spu_workloads] no *.elf in {args.images}")
+ 
++    reloc = {}
++    for spec in args.relocatable:
++        if "=" not in spec:
++            sys.exit(f"[build_spu_workloads] --relocatable wants IMAGE=EA, got {spec!r}")
++        k, v = spec.split("=", 1)
++        reloc[k.strip()] = int(v, 0)
++    args.reloc_ea = reloc
++    args.reloc_text = {}
+     extra_funcs = {}
+     for spec in args.extra_funcs:
+         if "=" not in spec:
+@@ -173,6 +197,8 @@ def main():
+                    "--symbol-prefix", prefix, "-o", outdir]
+             if img in extra_funcs:
+                 cmd += ["--extra-funcs", extra_funcs[img]]
++            if img in reloc:
++                cmd += ["--relocatable"]
+             if args.merge_chunks:
+                 cmd += ["--merge-chunks"]
+                 print(f"[build_spu_workloads] {img}: extra entries {extra_funcs[img]}")
+@@ -188,9 +214,14 @@ def main():
+         e_entry = be32(b, 0x18)
+         imgs.append((img, prefix, fnv1a64(b[:sz]), e_entry))
+         text_fps[img] = text_fp(b)
++        if img in reloc:
++            args.reloc_text[img] = text_seg(b)
+ 
+     if not imgs:
+         sys.exit("[build_spu_workloads] no SPU images lifted")
++    missing = sorted(set(reloc) - {i[0] for i in imgs})
++    if missing:
++        sys.exit(f"[build_spu_workloads] --relocatable names unknown image(s): {missing}")
+ 
+     # Verify each registered entry symbol actually exists in the lifted header.
+     for img, prefix, fp, ent in imgs:
+@@ -214,6 +245,19 @@ def write_registry(args, imgs, text_fps, image_ids=None):
+     L.append(" * Build note: add <repo>/runtime/spu to this target's include dirs (the lifted")
+     L.append(' * sources use bare #include "spu_context.h" etc.). */')
+     L.append('#include "spu_workload.h"')
++    reloc_ea = getattr(args, "reloc_ea", {}) or {}
++    reloc_text = getattr(args, "reloc_text", {}) or {}
++    if reloc_ea:
++        L.append('#include "spu_overlay_residency.h"')
++        L.append("")
++        L.append("/* Executable segments of the relocatable images, at their link addresses:")
++        L.append(" * dispatch into a displaced copy is verified against these bytes. */")
++        for img in sorted(reloc_ea):
++            va, code = reloc_text[img]
++            L.append(f"static const unsigned char s_text_{sanitize(img)}[{len(code)}] = {{")
++            for k in range(0, len(code), 16):
++                L.append("    " + ",".join(f"0x{x:02X}" for x in code[k:k + 16]) + ",")
++            L.append("};")
+     L.append("")
+     L.append("extern void spu_begin_image(int image_id);")
+     L.append("")
+@@ -230,6 +274,13 @@ def write_registry(args, imgs, text_fps, image_ids=None):
+         L.append(f"    spu_workload_register_img(0x{fp:016X}ULL, {prefix}spu_func_{ent:08X}, {i}, \"{img}\");")
+         if text_fps.get(img):  # same entry, keyed by the text segment (raw SPU proxy-DMA load)
+             L.append(f"    spu_workload_register_img(0x{text_fps[img]:016X}ULL, {prefix}spu_func_{ent:08X}, {i}, \"{img}.text\");")
++    for index, (img, prefix, fp, ent) in enumerate(imgs, 1):
++        if img not in reloc_ea:
++            continue
++        i = image_ids[img] if image_ids else index
++        va, code = reloc_text[img]
++        L.append(f"    {{ const spu_overlay_code_segment seg = {{ 0x{va:X}u, {len(code)}u, s_text_{sanitize(img)} }};")
++        L.append(f"      spu_overlay_register_relocatable(0x{reloc_ea[img]:08X}u, 0x{va:X}u, {len(code)}u, {i}, &seg, 1); }}")
+     L.append("    spu_begin_image(0);")
+     L.append("}")
+     if args.constructor:
+diff --git a/tools/spu_lifter.py b/tools/spu_lifter.py
+index 35d8d42..b86b433 100644
+--- a/tools/spu_lifter.py
++++ b/tools/spu_lifter.py
+@@ -529,6 +529,18 @@ class SPULifter:
+         # compute_link_returns(). Emitted as `return;` so they compose with the
+         # brsl->C-call nesting instead of branching to an unregistered PC.
+         self.link_return: set = set()
++        # --relocatable: position-independent code lifted at its link address
++        # and run displaced by ctx->ls_reloc (captured as _rl at entry). Every
++        # PC-derived value goes through SPU_RELOC; absolute branches refuse.
++        self.relocatable = False
++
++    def pcv(self, v: int) -> str:
++        """A PC-derived constant: as is, or displaced in a --relocatable lift."""
++        return f"SPU_RELOC(0x{v:X})" if self.relocatable else f"0x{v:X}"
++
++    def after_call(self) -> str:
++        """After a nested call: put this function's displacement back."""
++        return " ctx->ls_reloc = _rl;" if self.relocatable else ""
+ 
+     # ------------------------------------------------------------------ #
+     def lift_function(self, insns: list[SPUInstruction],
+@@ -559,7 +571,7 @@ class SPULifter:
+             if insn.addr in merged_starts:
+                 func.body_lines.append(
+                     f"    if (ctx->int_enable && (ctx->event_status & ctx->event_mask)) "
+-                    f"{{ ctx->pc = 0x{insn.addr:X}; g_spu_trampoline_fn = "
++                    f"{{ ctx->pc = {self.pcv(insn.addr)}; g_spu_trampoline_fn = "
+                     f"{self.prefix}spu_func_{insn.addr:08X}; return; }}")
+             c = self._translate(insn, func)
+             if c:
+@@ -583,7 +595,7 @@ class SPULifter:
+                          and (last_insn.raw & 0x3FFF) in LV2_RESUMING_STOPS))
+                 and end in getattr(self, "func_starts", set())):
+             func.body_lines.append(
+-                f"    {{ SPU_DIRECT(ctx, 0x{end:X}, {self.prefix}spu_func_{end:08X}); }}")
++                f"    {{ SPU_DIRECT(ctx, {self.pcv(end)}, {self.prefix}spu_func_{end:08X}); }}")
+ 
+         # Infinite no-op self-loop (the SPU `br .` halt idiom): a function whose
+         # whole body is nops + an unconditional branch back into itself does
+@@ -866,9 +878,11 @@ class SPULifter:
+             if disp is not None:
+                 return f"spu_ls_write128(ctx, {g(base)}._u32[0] + {disp}, {g(rt())});"
+         if mn in ("lqa", "lqr"):
+-            return f"{g(rt())} = spu_ls_read128(ctx, {_imm(ops[1])});"
++            a = f"SPU_RELOC({_imm(ops[1])})" if (self.relocatable and mn == "lqr") else _imm(ops[1])
++            return f"{g(rt())} = spu_ls_read128(ctx, {a});"
+         if mn in ("stqa", "stqr"):
+-            return f"spu_ls_write128(ctx, {_imm(ops[1])}, {g(rt())});"
++            a = f"SPU_RELOC({_imm(ops[1])})" if (self.relocatable and mn == "stqr") else _imm(ops[1])
++            return f"spu_ls_write128(ctx, {a}, {g(rt())});"
+         if mn == "lqx":
+             return f"{g(rt())} = spu_ls_read128(ctx, {g(ra())}._u32[0] + {g(rb())}._u32[0]);"
+         if mn == "stqx":
+@@ -886,6 +900,11 @@ class SPULifter:
+             return f"spu_wrch(ctx, {_chan(ops[0])}, {g(_reg(ops[1]))});"
+ 
+         # ---- branches ----
++        if self.relocatable and mn in ("bra", "brasl"):
++            # Not position-independent. Usually a data word the boundary
++            # detector decoded; if it ever runs, stop rather than guess.
++            return (f'spu_unsupported(0x{addr:X}, "{mn} in relocatable code"); '
++                    f"ctx->status = SPU_STATUS_STOPPED_BY_HALT; return;")
+         if mn in ("br", "bra"):
+             tgt = self._branch_target(insn)
+             # SELF-LOOP TRAP: `br .` (target == this instruction) is an infinite
+@@ -902,7 +921,7 @@ class SPULifter:
+             tgt = self._branch_target(insn)
+             # Link register: preferred word only, other slots ZERO (real HW /
+             # RPCS3 v128::from32r) -- splatting corrupts full-quadword link use.
+-            link = f"{g(link_rt)} = spu_link(0x{(addr + 4) & 0x3FFFC:X});"   # wraps at the end of LS
++            link = f"{g(link_rt)} = spu_link({self.pcv((addr + 4) & 0x3FFFC)});"   # wraps at the end of LS
+             # SELF-LOOP TRAP: `brsl rX, .` (target == this instruction) is an
+             # infinite loop on real SPU (re-sets the link each pass, never
+             # advances) -- a trap, NOT a call. Emitting a host call recurses
+@@ -929,7 +948,7 @@ class SPULifter:
+                 # + image save/restore (adopt-on-serve cannot leak upward).
+                 return (f"{link} {{ int32_t _si = (int32_t)ctx->image_id; "
+                         f"ctx->host_depth++; {self.prefix}spu_func_{tgt:08X}(ctx); "
+-                        f"spu_drain_call(ctx, 0x{addr + 4:X}); ctx->host_depth--; spu_img_restore(ctx, _si); }}")
++                        f"spu_drain_call(ctx, {self.pcv(addr + 4)}); ctx->host_depth--; spu_img_restore(ctx, _si);{self.after_call()} }}")
+             return f"{link} /* TODO spu: brsl unresolved target */;"
+         if mn in _COND_BR:
+             tgt = self._branch_target(insn)
+@@ -943,7 +962,7 @@ class SPULifter:
+             # Cross-function conditional branch = conditional tail: a direct
+             # tail call when the drain has nothing to do on this step, else
+             # the trampoline and unwind (SPU_DIRECT, spu_context.h).
+-            return (f"if ({cond}) {{ SPU_DIRECT(ctx, 0x{tgt:X}, "
++            return (f"if ({cond}) {{ SPU_DIRECT(ctx, {self.pcv(tgt)}, "
+                     f"{self.prefix}spu_func_{tgt:08X}); }}")
+         # Interrupt enable/disable bits on the bi family (bie/bid, irete/iretd,
+         # bisle(d)...): bit 0x40000 = E (enable), 0x80000 = D (disable), taking
+@@ -991,17 +1010,17 @@ class SPULifter:
+             # SPU_DRAIN + image save/restore) so the callee's tail-chains drain
+             # here and its `bi $r0` returns via host return.
+             # read the target BEFORE writing the link: rt may be the same register as ra
+-            return (f"{{ uint32_t _tg = {g(tgt_reg)}._u32[0]; {g(link_rt)} = spu_link(0x{(addr + 4) & 0x3FFFC:X}); "
++            return (f"{{ uint32_t _tg = {g(tgt_reg)}._u32[0]; {g(link_rt)} = spu_link({self.pcv((addr + 4) & 0x3FFFC)}); "
+                     f"int32_t _si = (int32_t)ctx->image_id; "
+                     f"{_ied}ctx->pc = _tg; ctx->host_depth++; "
+-                    f"spu_indirect_branch(ctx); spu_drain_call(ctx, 0x{addr + 4:X}); "
+-                    f"ctx->host_depth--; spu_img_restore(ctx, _si); }}")
++                    f"spu_indirect_branch(ctx); spu_drain_call(ctx, {self.pcv(addr + 4)}); "
++                    f"ctx->host_depth--; spu_img_restore(ctx, _si);{self.after_call()} }}")
+         # bisled: set link, branch to RA only if an external event is pending.
+         if mn in ("bisled",):
+             link_rt = insn.raw & 0x7F            # rt = link
+             tgt_reg = (insn.raw >> 7) & 0x7F     # ra = target (the disassembler's last operand is rb, not the target)
+             # read the target before writing the link: rt may alias ra
+-            return (f"{{ uint32_t _tg = {g(tgt_reg)}._u32[0]; {g(link_rt)} = spu_link(0x{(addr + 4) & 0x3FFFC:X}); "
++            return (f"{{ uint32_t _tg = {g(tgt_reg)}._u32[0]; {g(link_rt)} = spu_link({self.pcv((addr + 4) & 0x3FFFC)}); "
+                     f"if ((ctx->event_status & ctx->event_mask) != 0) {{ "
+                     f"{_ied}ctx->pc = _tg; "
+                     f"g_spu_trampoline_fn = spu_indirect_branch; return; }} }}")
+@@ -1057,7 +1076,7 @@ class SPULifter:
+         # drain has nothing to do on this step, else hand the target to the
+         # trampoline and unwind so the enclosing SPU_DRAIN re-enters (no
+         # host-stack growth either way; SPU_DIRECT, spu_context.h).
+-        return (f"{{ SPU_DIRECT(ctx, 0x{tgt:X}, {self.prefix}spu_func_{tgt:08X}); }}")
++        return (f"{{ SPU_DIRECT(ctx, {self.pcv(tgt)}, {self.prefix}spu_func_{tgt:08X}); }}")
+ 
+     # ------------------------------------------------------------------ #
+     def emit_header(self) -> str:
+@@ -1080,8 +1099,10 @@ class SPULifter:
+     def emit_source(self,header_name: str) -> str:
+         lines = [SOURCE_PREAMBLE.format(header_name=header_name), ""]
+         weak = "__attribute__((weak)) " if getattr(self, "weak_emit", False) else ""
++        rl = ["    const uint32_t _rl = ctx->ls_reloc; (void)_rl;"] if self.relocatable else []
+         for f in self.functions:
+             lines.append(f"void {weak}{f.name}(spu_context* ctx) {{")
++            lines += rl
+             for b in f.body_lines:
+                 lines.append(b if b.endswith(":") else f"    {b}")
+             lines.append("}")
+@@ -1101,7 +1122,8 @@ class SPULifter:
+             lines.append(" * branches that escape a function's range). */")
+             for t in externs:
+                 lines.append(f"void {self.prefix}spu_func_{t:08X}(spu_context* ctx) {{")
+-                lines.append(f"    ctx->pc = 0x{t:X}u; "
++                lines += rl
++                lines.append(f"    ctx->pc = {self.pcv(t)}; "
+                              f"g_spu_trampoline_fn = spu_indirect_branch; return;")
+                 lines.append("}")
+             lines.append("")
+@@ -1146,6 +1168,11 @@ def main() -> None:
+                         "read from this ELF and the positional <input> arg "
+                         "is ignored.")
+     p.add_argument("--report", help="Write machine-readable generation diagnostics JSON")
++    p.add_argument("--relocatable", action="store_true",
++                   help="The image is position-independent and is loaded at run time "
++                        "wherever its loader chooses. Lift at the link address and add "
++                        "ctx->ls_reloc to every PC-derived value; register it with "
++                        "spu_overlay_register_relocatable. Absolute branches are an error.")
+     p.add_argument("--trace", action="store_true",
+                    help="Emit spu_trace_pc/spu_trace_rt around each instruction "
+                         "for §3 diff-vs-RPCS3 validation. Output goes to stderr "
+@@ -1311,6 +1338,7 @@ def main() -> None:
+     insns = disassemble_spu(data, base)
+ 
+     lifter = SPULifter(trace=args.trace, prefix=args.symbol_prefix)
++    lifter.relocatable = args.relocatable
+     lifter.bi_r0_jump = compute_bi_r0_jumps(insns, bounds)
+     if lifter.bi_r0_jump:
+         print(f"  {len(lifter.bi_r0_jump)} `bi $r0` computed-jump site(s) "
+-- 
+2.56.0
+

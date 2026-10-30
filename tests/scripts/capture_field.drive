@@ -1,0 +1,41 @@
+# Title screen -> NEW GAME -> first character -> default name -> opening -> first dialogue.
+# Every press waits for the screen to react before the next one.
+log TitleMovie 120          # the title's background movie is open
+sleep 5
+press START                 # "PRESS START BUTTON"
+sleep 3
+press START                 # -> main menu
+change
+sleep 3
+shot menu
+press CROSS                 # NEW GAME
+change
+sleep 4
+shot characters
+press CROSS                 # first character
+change
+sleep 2
+shot confirm
+press CROSS                 # "Is this okay?" YES
+change
+sleep 3
+shot name
+press START                 # cursor to END
+sleep 2
+press CROSS                 # END
+change
+sleep 2
+shot name-confirm
+press CROSS                 # "Is this name okay?" YES
+log OpeningMovie 90
+sleep 6
+shot opening
+press START                 # skip the opening
+log LFQueueInitialize 120   # the game is loading the first area
+sleep 12
+shot ingame
+repeat 40 CROSS 2
+press DOWN 400
+sleep 8
+shot field
+sleep 10

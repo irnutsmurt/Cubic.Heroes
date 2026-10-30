@@ -1,0 +1,355 @@
+From 64507e5606b7e75fd8aa84ac29086c6673080766 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Thu, 29 Oct 2026 22:27:22 -0700
+Subject: [PATCH 20/28] cellSpurs: CellSyncLFQueue push for SPURS LF queues
+
+_cellSpursLFQueueInitialize now lays the line out as RPCS3's
+syncLFQueueInitialize does, and _cellSpursLFQueuePushBody ports
+_cellSyncLFQueueGetPushPointer/_CompletePushPointer (no event queue),
+with the SPURS signal: the waiter id an SPU records in hs1 is
+(workload id << 8) | task id, and for a SPURS owner (eaSignal bit 0)
+the taskset is that workload's argument in wklInfo1. Every step runs
+under the lock-line lock with a coherency notify, so SPU reservations
+on the line see it as one atomic store.
+
+ANY2ANY is not implemented anywhere public (RPCS3's "2" variants are
+stubs); a queue created ANY2ANY is run as PPU2SPU, which is what a
+PPU-producer/SPU-consumer queue (Edge zlib's inflate queue in 3D Dot
+Game Heroes) does. An SPU push to it gets CELL_SYNC_ERROR_PERM from the
+title's own library.
+
+Verified on that queue with the new SPU_LINE_TRACE (LFQ_TRACE=1 traces
+the queue): the SPU reserves (pop1.h4), completes (pop1.h1), inflates,
+sets its completion flag, then registers as a waiter for the next push.
+
+cellSpursLFQueueDetachLv2EventQueue added (no event queue attached).
+---
+ libs/spurs/cellSpurs.c     | 241 +++++++++++++++++++++++++++++++++----
+ libs/spurs/cellSpurs.h     |   2 +
+ runtime/spu/spu_channels.c |  16 +++
+ 3 files changed, 235 insertions(+), 24 deletions(-)
+
+diff --git a/libs/spurs/cellSpurs.c b/libs/spurs/cellSpurs.c
+index f1e78b1..93d25c3 100644
+--- a/libs/spurs/cellSpurs.c
++++ b/libs/spurs/cellSpurs.c
+@@ -10,6 +10,7 @@
+  */
+ 
+ #include "cellSpurs.h"
++#include "ps3emu/ps3_strict.h"
+ #include "../../runtime/platform/win32_compat.h"
+ #include "../../runtime/ps3_log.h"
+ #include "spu_workload.h"   /* SPU image -> lifted-entry dispatch (runtime/spu) */
+@@ -3455,45 +3456,237 @@ s32 cellSpursQueueAttachLv2EventQueue(u64 queue_ea)
+  * buffer, direction, and the init flag, over a zeroed line (the documented
+  * empty state). The bs[]/v1 slot state machine is left zero -- see PROGRESS.md;
+  * it is not guessed at. */
++/* ---- CellSyncLFQueue, the queue behind CellSpursLFQueue ----------------------
++ * One 128-byte, 128-aligned big-endian line shared with SPU code, which updates
++ * it with GETLLAR/PUTLLC. Layout and algorithms follow RPCS3 cellSync.{h,cpp}
++ * (syncLFQueueInitialize, _cellSyncLFQueueGetPushPointer,
++ * _cellSyncLFQueueCompletePushPointer):
++ *   0x00 pop1  {u16 h1,h2,h3,h4}   0x08 push1 {u16 h5,h6,h7,h8}
++ *   0x10 size  0x14 depth  0x18 buffer (u64)  0x20 bs[4]  0x24 direction
++ *   0x28 v1    0x2C init   0x30 push2 (u16 pack of three 5-bit fields)
++ *   0x32 hs1[15] (u16)     0x50 pop2  0x52 hs2[15]  0x70 eaSignal (u64)
++ *   0x78 v2    0x7C eq_id
++ * The SPU side is the title's own lifted SPU library code (in 3D Dot Game
++ * Heroes: Edge zlib's inflate task, spu_0002, whose pop path at LS 0x9A90
++ * decodes exactly these fields).
++ *
++ * Every read-modify-write here runs under the SPU lock-line lock and ends with
++ * spu_coh_notify_write, so an SPU holding a reservation on the line loses it,
++ * as it would to a PPU store on hardware. Each step is therefore atomic as a
++ * whole, which subsumes RPCS3's per-field compare-and-swap retries.
++ *
++ * ANY2ANY (direction 3): neither RPCS3 nor anything public implements its
++ * "...2" pointer protocol. A queue created ANY2ANY whose only producer is the
++ * PPU and whose only consumers are SPUs (Edge zlib's inflate queue) behaves the
++ * same as PPU2SPU, which is implemented, so such a queue is laid out and run as
++ * PPU2SPU. An SPU push to it would get CELL_SYNC_ERROR_PERM from the title's
++ * own SPU library and a PPU pop is not implemented, so a use outside that
++ * pattern fails visibly. Recorded as exception E2 in docs/FEASIBILITY.md. */
++#define LFQ_SYNC_PERM   ((s32)0x80410109u)   /* CELL_SYNC_ERROR_PERM */
++#define LFQ_SYNC_AGAIN  ((s32)0x80410101u)   /* CELL_SYNC_ERROR_AGAIN */
++#define LFQ_PPU2SPU 2u
++#define LFQ_ANY2ANY 3u
++extern void spu_lockline_lock(void); extern void spu_lockline_unlock(void);
++extern void spu_coh_notify_write(uint32_t);
++extern void spu_taskset_signal_task(uint32_t taskset_ea, uint32_t taskId);
++
++/* LFQ_TRACE=1: dump the queue line around every push. */
++static void lfq_dump(u32 q, const char* tag)
++{
++    static int on = -1; if (on < 0) on = getenv("LFQ_TRACE") ? 1 : 0;
++    if (!on) return;
++    fprintf(stderr, "[lfq] %s q=0x%08X:", tag, q);
++    for (u32 o = 0; o < 0x80; o += 4) fprintf(stderr, "%s%08X", (o % 16) ? " " : "  |", vm_read32(q + o));
++    fprintf(stderr, "\n");
++}
++static inline u16  lfq_r16(u32 q, u32 o) { return (u16)((vm_base[q + o] << 8) | vm_base[q + o + 1]); }
++static inline void lfq_w16(u32 q, u32 o, u16 v) { vm_base[q + o] = (u8)(v >> 8); vm_base[q + o + 1] = (u8)v; }
++
++/* fpSendSignal for a SPURS LF queue: eaSignal is the taskset, or the SPURS
++ * instance with bit 0 set (what _cellSpursLFQueueInitialize receives as
++ * pTasksetOrSpurs). The waiter's id is (workload id << 8) | task id, as the SPU
++ * task library records it (spu_0002 LS 0x9778). For a SPURS owner the taskset is
++ * that workload's argument in wklInfo1 (+0xB00, 32 bytes per workload, arg at
++ * +8), which is also where the SPU library reads it (LS 0x96F8). */
++static void lfq_send_signal(u32 q, u32 waiter)
++{
++    const u64 sig = vm_read64(q + 0x70);
++    u32 taskset = (u32)sig & ~0x7Fu;
++    const u32 wid = (waiter >> 8) & 0xFF, tid = waiter & 0xFF;
++    if (sig & 1u)
++        taskset = (u32)vm_read64(taskset + 0xB00u + wid * 0x20u + 8u);
++    static int _n = 0;
++    if (PS3_LOG_FIRST(_n, 8))
++        printf("[cellSpurs] LFQueue 0x%08X: signal waiter 0x%04X -> taskset 0x%08X task %u\n",
++               q, waiter, taskset, tid);
++    if (!taskset) {
++        ps3_strict_fail("spurs-lfqueue", "LFQueue 0x%08X: no taskset for waiter 0x%04X (eaSignal 0x%llX)",
++                        q, waiter, (unsigned long long)sig);
++        return;
++    }
++    spu_taskset_signal_task(taskset, tid);
++}
++
+ s32 _cellSpursLFQueueInitialize(u64 owner_ea, u64 queue_ea, u64 buffer_ea,
+                                 u32 size, u32 depth, u32 direction)
+ {
+-    if (!queue_ea || !buffer_ea) return CELL_SPURS_TASK_ERROR_NULL_POINTER;
+-    if (!size || !depth)         return CELL_SPURS_TASK_ERROR_INVAL;
++    const u32 q = (u32)queue_ea, buf = (u32)buffer_ea;
++    if (!q) return (s32)0x80410111u;                         /* CELL_SYNC_ERROR_NULL_POINTER */
++    if (size && (!buf)) return (s32)0x80410111u;
++    if (size && (size > 0x4000 || size % 16)) return (s32)0x80410102u;   /* INVAL */
++    if (!depth || depth > 0x7FFF || direction > 3) return (s32)0x80410102u;
++    if ((q & 0x7F) || (buf & 0xF)) return (s32)0x80410110u;  /* ALIGN */
+ 
+-    uint32_t q = (uint32_t)queue_ea;
+-    for (uint32_t o = 0; o < 128; o += 4) vm_write32(q + o, 0);
+-
+-    /* W3 at +0x0C is the ring modulus the consumer reduces indices by: the
+-     * empty test is (W1-W0) mod 2*W3 and the buffer slot is index mod W3
+-     * (derived at 0x12914..0x129B8). Leaving it zero degenerated both and made
+-     * the queue look permanently empty no matter what a producer wrote. */
+-    vm_write32(q + 0x0C, depth);
++    const u32 dir = direction == LFQ_ANY2ANY ? LFQ_PPU2SPU : direction;
++    { extern uint32_t g_spu_line_trace_ea;
++      if (getenv("LFQ_TRACE")) g_spu_line_trace_ea = q; }
++    spu_lockline_lock();
++    const u16 h3 = lfq_r16(q, 0x4), h7 = lfq_r16(q, 0xC);
++    vm_write32(q + 0x2C, 1);                                 /* init: being constructed */
+     vm_write32(q + 0x10, size);
+     vm_write32(q + 0x14, depth);
+-    vm_write64(q + 0x18, (u64)(uint32_t)buffer_ea);   /* bcptr<void,u64> */
+-    /* NOT direction at +0x24 and NOT init at +0x2C. Both sit inside the
+-     * 16-byte group at +0x20..+0x2F that the consumer owns and shifts wholesale
+-     * (shlqbyi <group>,1 at 0x12A0C). The trace shows the two values we used to
+-     * write there marching through it one byte per dequeue --
+-     *   +0x24: 00000002 -> 00000200 -> 00020000 -> 02000000
+-     *   +0x2C: 00000001 -> 00000100 -> 00010000 -> 01000000
+-     * -- i.e. we were feeding garbage into the SPU's own state every cycle.
+-     * Whatever holds direction/init, it is not these offsets. */                          /* init: constructed */
+-    vm_write64(q + 0x70, (u64)(uint32_t)owner_ea);    /* eaSignal <- taskset/spurs */
+-
+-    memset(vm_base + (uint32_t)buffer_ea, 0, (size_t)size * depth);
++    vm_write64(q + 0x18, (u64)buf);
++    vm_write32(q + 0x24, dir);
++    for (u32 o = 0x32; o < 0x50; o += 2) lfq_w16(q, o, 0);   /* hs1 */
++    for (u32 o = 0x52; o < 0x70; o += 2) lfq_w16(q, o, 0);   /* hs2 */
++    vm_write64(q + 0x70, owner_ea);                          /* eaSignal */
++    /* direction != ANY2ANY (syncLFQueueInitialize) */
++    vm_write64(q + 0x0, 0); lfq_w16(q, 0x4, h3);             /* pop1  {0,0,h3,0} */
++    vm_write64(q + 0x8, 0); lfq_w16(q, 0xC, h7);             /* push1 {0,0,h7,0} */
++    vm_write32(q + 0x20, 0xFFFFFFFFu);                       /* bs[0..3] = -1 */
++    vm_write32(q + 0x28, 0);                                 /* v1 */
++    lfq_w16(q, 0x30, 0);                                     /* push2 */
++    lfq_w16(q, 0x50, 0);                                     /* pop2 */
++    vm_write32(q + 0x78, 0);                                 /* v2 */
++    vm_write32(q + 0x7C, 0);                                 /* eq_id */
++    vm_write32(q + 0x2C, 0);                                 /* init: done */
++    spu_coh_notify_write(q);
++    spu_lockline_unlock();
+ 
+     static int _n = 0;
+     if (PS3_LOG_FIRST(_n, 8))
+-        printf("[cellSpurs] _LFQueueInitialize(owner=0x%08X q=0x%08X buf=0x%08X size=%u depth=%u dir=%u) -> BE line written\n",
+-               (u32)owner_ea, (u32)queue_ea, (u32)buffer_ea, size, depth, direction);
++        printf("[cellSpurs] _LFQueueInitialize(owner=0x%08X q=0x%08X buf=0x%08X size=%u depth=%u dir=%u%s)\n",
++               (u32)owner_ea, q, buf, size, depth, direction,
++               direction == LFQ_ANY2ANY ? " -> run as PPU2SPU (E2)" : "");
+     return CELL_OK;
+ }
+ 
++/* _cellSyncLFQueueGetPushPointer, without the event queue (useEventQueue 0). */
++static s32 lfq_get_push_pointer(u32 q, s32* pointer, u32 isBlocking)
++{
++    if (vm_read32(q + 0x24) != LFQ_PPU2SPU) return LFQ_SYNC_PERM;
++    const s32 depth = (s32)vm_read32(q + 0x14);
++    for (;;) {
++        spu_lockline_lock();
++        const u16 h8 = lfq_r16(q, 0xE);
++        s32 var2 = (s32)(s16)h8 - (s32)lfq_r16(q, 0x0);      /* - pop1.h1 */
++        if (var2 < 0) var2 += depth * 2;
++        if (var2 < depth) {
++            *pointer = (s16)h8;
++            lfq_w16(q, 0xE, ((s32)(s16)h8 + 1 >= depth * 2) ? 0 : (u16)(h8 + 1));
++            spu_coh_notify_write(q);
++            spu_lockline_unlock();
++            return CELL_OK;
++        }
++        spu_lockline_unlock();
++        if (!isBlocking) return LFQ_SYNC_AGAIN;
++        Sleep(0);                                            /* full: wait for an SPU pop */
++    }
++}
++
++/* _cellSyncLFQueueCompletePushPointer with fpSendSignal = lfq_send_signal. */
++static s32 lfq_complete_push_pointer(u32 q, s32 pointer)
++{
++    if (vm_read32(q + 0x24) != LFQ_PPU2SPU) return LFQ_SYNC_PERM;
++    const s32 depth = (s32)vm_read32(q + 0x14);
++    for (;;) {
++        spu_lockline_lock();
++        u16 pack = lfq_r16(q, 0x30);                         /* push2 */
++        const u16 p3_h5 = lfq_r16(q, 0x8), p3_h6 = lfq_r16(q, 0xA);   /* push3 */
++        s32 var1 = pointer - p3_h5;
++        if (var1 < 0) var1 += depth * 2;
++        s32 var2 = (s32)(s16)lfq_r16(q, 0x6) - (s32)lfq_r16(q, 0x0);  /* pop1.h4 - pop1.h1 */
++        if (var2 < 0) var2 += depth * 2;
++        s32 var9_ = 15 - var1;
++        var9_ = (var9_ & 0x30) ? 0 : (1 << var9_);
++        const u16 inv = (u16)~(u16)(var9_ | p3_h6);
++        const s32 var9 = (inv ? __builtin_clz((u32)inv) : 32) - 16;
++        s32 var5 = p3_h6 | var9_;
++        var5 = (var9 & 0x30) ? 0 : (var5 << var9);
++        s32 var3 = p3_h5 + var9;
++        if (var3 >= depth * 2) var3 -= depth * 2;
++        s32 var4 = ((pack >> 10) & 0x1f) - ((pack >> 5) & 0x1f);
++        if (var4 < 0) var4 += 0x1e;
++        u32 var6;
++        if (var2 + var4 <= 15 && ((pack >> 10) & 0x1f) != (pack & 0x1f)) {
++            s32 var8 = (pack & 0x1f) - ((pack >> 10) & 0x1f);
++            if (var8 < 0) var8 += 0x1e;
++            if (var9 > 1 && (u32)var8 > 1 && !(16 - var2 <= 1))
++                ps3_strict_fail("spurs-lfqueue", "LFQueue 0x%08X: push2 state invariant broken", q);
++            s32 var11 = (pack >> 10) & 0x1f;
++            if (var11 >= 15) var11 -= 15;
++            u16 var12 = (pack >> 10) & 0x1f;
++            var12 = (var12 == 0x1d) ? 0 : (u16)((var12 + 1) << 10);
++            pack = (u16)((pack & 0x83ff) | var12);
++            var6 = lfq_r16(q, 0x32 + 2u * (u32)var11);       /* hs1[var11] */
++        } else {
++            var6 = 0xFFFFFFFFu;
++        }
++        if (!(var2 + var4 < 16))
++            ps3_strict_fail("spurs-lfqueue", "LFQueue 0x%08X: more than 15 waiters", q);
++        lfq_w16(q, 0x30, pack);                              /* push2 CAS succeeded */
++        if (var6 != 0xFFFFFFFFu) {
++            lfq_w16(q, 0x8, (u16)var3); lfq_w16(q, 0xA, (u16)var5);   /* push3 */
++            spu_coh_notify_write(q);
++            spu_lockline_unlock();
++            lfq_send_signal(q, var6);
++            return CELL_OK;
++        }
++        if ((pack & 0x1f) == ((pack >> 10) & 0x1f)) {
++            lfq_w16(q, 0x8, (u16)var3); lfq_w16(q, 0xA, (u16)var5);
++            spu_coh_notify_write(q);
++            spu_lockline_unlock();
++            return CELL_OK;
++        }
++        spu_coh_notify_write(q);
++        spu_lockline_unlock();
++    }
++}
++
++/* _cellSpursLFQueuePushBody(queue, buffer, isBlocking): _cellSyncLFQueuePushBody
++ * with the SPURS signal. 3D Dot Game Heroes passes isBlocking 3 (0x69C73C). */
++s32 _cellSpursLFQueuePushBody(u64 queue_ea, u64 buffer_ea, u32 isBlocking)
++{
++    const u32 q = (u32)queue_ea, src = (u32)buffer_ea;
++    if (!q || !src) return (s32)0x80410111u;
++    if ((q & 0x7F) || (src & 0xF)) return (s32)0x80410110u;
++    { static int _n = 0; if (PS3_LOG_FIRST(_n, 6))
++        printf("[cellSpurs] LFQueuePush(q=0x%08X buf=0x%08X blocking=%u) push1.h8=%u pop1.h1=%u\n",
++               q, src, isBlocking, lfq_r16(q, 0xE), lfq_r16(q, 0x0)); }
++    lfq_dump(q, "push>");
++    s32 pos = 0;
++    s32 rc = lfq_get_push_pointer(q, &pos, isBlocking);
++    if (rc) return rc;
++    const s32 depth = (s32)vm_read32(q + 0x14), size = (s32)vm_read32(q + 0x10);
++    const u32 dst = (u32)(vm_read64(q + 0x18) & ~1ull) + (u32)size * (u32)(pos >= depth ? pos - depth : pos);
++    memcpy(vm_base + dst, vm_base + src, (size_t)size);
++    __atomic_thread_fence(__ATOMIC_RELEASE);                 /* data before the publish */
++    rc = lfq_complete_push_pointer(q, pos);
++    lfq_dump(q, "push<");
++    return rc;
++}
++
+ s32 cellSpursLFQueueAttachLv2EventQueue(u64 queue_ea)
+ {
+     static int _n = 0;
+     if (PS3_LOG_FIRST(_n, 8)) printf("[cellSpurs] LFQueueAttachLv2EventQueue(q=0x%08X)\n", (u32)queue_ea);
+     return CELL_OK;
+ }
++
++/* No event queue is attached (see cellSpursLFQueueAttachLv2EventQueue): a
++ * full queue is waited out by polling. */
++s32 cellSpursLFQueueDetachLv2EventQueue(u64 queue_ea)
++{
++    (void)queue_ea;
++    return CELL_OK;
++}
+diff --git a/libs/spurs/cellSpurs.h b/libs/spurs/cellSpurs.h
+index a6769d1..3b535f3 100644
+--- a/libs/spurs/cellSpurs.h
++++ b/libs/spurs/cellSpurs.h
+@@ -255,6 +255,8 @@ s32 cellSpursSendSignal(CellSpursTaskset* taskset, CellSpursTaskId taskId);
+ 
+ s32 cellSpursTaskAttributeInitialize(CellSpursTaskAttribute* attr);
+ s32 cellSpursTaskExitCodeInitialize(CellSpursTaskExitCode* exitCode);
++s32 _cellSpursLFQueuePushBody(u64 queue_ea, u64 buffer_ea, u32 isBlocking);
++s32 cellSpursLFQueueDetachLv2EventQueue(u64 queue_ea);
+ s32 cellSpursTaskExitCodeGet(const CellSpursTaskExitCode* exitCode, s32* exitCodeOut);
+ s32 cellSpursTaskAttributeSetExitCodeContainer(CellSpursTaskAttribute* attr,
+                                                CellSpursTaskExitCode* exitCode);
+diff --git a/runtime/spu/spu_channels.c b/runtime/spu/spu_channels.c
+index b9ed7fe..b008b98 100644
+--- a/runtime/spu/spu_channels.c
++++ b/runtime/spu/spu_channels.c
+@@ -593,6 +593,8 @@ volatile unsigned g_spu_putllc_sync_hit = 0;
+ #define SPU_JOB_RETURN_LS   0x3FF00u
+ 
+ /* Returns 1 if `cmd` is an atomic line op and was handled here, else 0. */
++/* Line SPU_LINE_TRACE follows; other code may set it (cellSpurs LFQ_TRACE). */
++uint32_t g_spu_line_trace_ea;
+ static int spu_mfc_atomic(spu_context* ctx, uint32_t cmd)
+ {
+     /* Classify FIRST. Every MFC_Cmd write lands here, and only the switch at
+@@ -609,6 +611,20 @@ static int spu_mfc_atomic(spu_context* ctx, uint32_t cmd)
+     uint8_t* ls  = &ctx->ls[lsa];
+     uint8_t* mem = vm_base + ea;
+ 
++    /* SPU_LINE_TRACE=<ea>: every lock-line op on that 128-byte line, with the
++     * bytes read (GETLLAR, guest memory) or written (PUTLLC/PUTLLUC, local
++     * store), to see a shared structure's protocol from the SPU's side. */
++    { static int s_lt = -1;
++      if (s_lt < 0) { const char* e = getenv("SPU_LINE_TRACE"); s_lt = e && *e;
++                      if (s_lt) g_spu_line_trace_ea = (uint32_t)strtoul(e, 0, 0) & ~(uint32_t)(MFC_ATOMIC_LINE - 1); }
++      if (g_spu_line_trace_ea && ea == g_spu_line_trace_ea) {
++          const uint8_t* b = cmd == MFC_GETLLAR_CMD ? mem : ls;
++          fprintf(stderr, "[line %s img=%d pc=0x%05X]", cmd == MFC_GETLLAR_CMD ? "GETLLAR" :
++                  cmd == MFC_PUTLLC_CMD ? "PUTLLC " : "PUTLLUC", ctx->image_id, ctx->pc);
++          for (int o = 0; o < 128; o += 4)
++              fprintf(stderr, "%s%02X%02X%02X%02X", (o % 16) ? " " : "  |", b[o], b[o+1], b[o+2], b[o+3]);
++          fprintf(stderr, "\n");
++      } }
+     { static int s_t = -1; if (s_t < 0) s_t = getenv("SPU_POLLTRACE") ? 1 : 0;
+       if (s_t) { static uint64_t s_n = 0; static uint32_t s_lastea = 0;
+         if ((++s_n % 2000000) == 0 || ea != s_lastea) {
+-- 
+2.56.0
+

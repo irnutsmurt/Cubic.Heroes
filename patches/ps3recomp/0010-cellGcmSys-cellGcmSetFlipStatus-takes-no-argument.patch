@@ -1,0 +1,55 @@
+From 391f49e199070d498f752a39f0e7c86586098467 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Thu, 29 Oct 2026 17:41:21 -0700
+Subject: [PATCH 10/28] cellGcmSys: cellGcmSetFlipStatus takes no argument
+
+The SDK's void cellGcmSetFlipStatus(void) marks the flip DONE (RPCS3
+agrees). Reading a status from r3 stored the caller's leftover: 3D Dot
+Game Heroes leaves a nonzero bool there, so the status became WAITING
+with no flip queued and its flip-status poll never ended.
+---
+ libs/video/cellGcmSys.c | 13 ++++++++++---
+ libs/video/cellGcmSys.h |  2 +-
+ 2 files changed, 11 insertions(+), 4 deletions(-)
+
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index 298ee7d..29fba1a 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -4235,10 +4235,17 @@ s32 cellGcmSetFlipImmediate(u32 bufferId)
+     return cellGcmSetFlipCommand(bufferId);
+ }
+ 
+-/* Set flip status directly */
+-void cellGcmSetFlipStatus(u32 status)
++/* NID 0xA47C09FF. The SDK's `void cellGcmSetFlipStatus(void)` takes no
++ * argument: it marks the flip DONE, the counterpart of cellGcmResetFlipStatus
++ * (RPCS3 agrees). Reading a status out of r3 stored whatever the caller left
++ * there -- 3D Dot Game Heroes (0x2A1BC) leaves a nonzero bool from the call
++ * before, so the status became WAITING with no flip queued, and its
++ * `while (cellGcmGetFlipStatus() != DONE) usleep(200);` never ended. */
++void cellGcmSetFlipStatus(void)
+ {
+-    s_flip_status = status;
++    FLIP_LOCK();
++    s_flip_status = CELL_GCM_FLIP_STATUS_DONE;
++    FLIP_UNLOCK();
+ }
+ 
+ /* Store graphics handler callback */
+diff --git a/libs/video/cellGcmSys.h b/libs/video/cellGcmSys.h
+index eab83e1..94c14a8 100644
+--- a/libs/video/cellGcmSys.h
++++ b/libs/video/cellGcmSys.h
+@@ -431,7 +431,7 @@ u32 cellGcmGetDefaultSegmentWordSize(void);
+ s32 cellGcmSetFlipImmediate(u32 bufferId);
+ 
+ /* Flip status setter */
+-void cellGcmSetFlipStatus(u32 status);
++void cellGcmSetFlipStatus(void);
+ 
+ /* Graphics / queue handler setters */
+ void cellGcmSetGraphicsHandler(CellGcmGraphicsHandler handler);
+-- 
+2.56.0
+

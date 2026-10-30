@@ -1,0 +1,314 @@
+From f6b2df1a982a59f0a6a8d757db1c6c3e12108455 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Thu, 29 Oct 2026 17:41:21 -0700
+Subject: [PATCH 09/28] cellSpurs: decode the task save config; task exit-code
+ containers
+
+_cellSpursTaskAttributeInitialize takes six arguments: r7 points at a
+CellSpursTaskSaveConfig {eaContext, sizeContext, lsPattern} and r8 is the
+CellSpursTaskArgument. 3D Dot Game Heroes (0x4736E0) fills the three words
+right before the call, as Saints Row 2 does; the YDKJ/Jackbox call shapes
+fit too. The 8-argument and R8-form readings stay behind
+SPURS_TASKATTR_LEGACY / SPURS_TASKATTR_R8.
+
+Add cellSpursTaskAttributeSetExitCodeContainer and cellSpursTaskExitCodeGet.
+The container is registered per (taskset, task) before the task can run
+and is written when the task exits (code 0 until the SPU-side exit value
+is plumbed, as for task_exit_code[]).
+---
+ libs/spurs/cellSpurs.c     | 124 +++++++++++++++++++++----------------
+ libs/spurs/cellSpurs.h     |   6 +-
+ runtime/spu/spu_workload.c |  53 ++++++++++++++++
+ runtime/spu/spu_workload.h |   4 ++
+ 4 files changed, 133 insertions(+), 54 deletions(-)
+
+diff --git a/libs/spurs/cellSpurs.c b/libs/spurs/cellSpurs.c
+index 82ea66c..f1e78b1 100644
+--- a/libs/spurs/cellSpurs.c
++++ b/libs/spurs/cellSpurs.c
+@@ -1000,6 +1000,10 @@ s32 cellSpursTasksetAttributeSetName(CellSpursTasksetAttribute* attr,
+  * from an EA computed out of r3 = that argument (spu_0003 task main @0x17e70:
+  * `wrch $ch18, f(r3.word3)`), so a zero argument makes it GET from EA 0 and
+  * stall. lsPattern/argument arrive as guest EAs (generic adapter forwards r3..r10). */
++/* Exit-code container of the cellSpursCreateTaskWithAttribute call in progress
++ * on this thread; cellSpursCreateTask registers it before the task can run. */
++static _Thread_local u32 s_pending_exit_ct;
++
+ s32 cellSpursCreateTask(CellSpursTaskset* taskset, CellSpursTaskId* taskId,
+                         void* elf, void* context, u32 sizeContext,
+                         u32 lsPattern_ea, u32 argument_ea)
+@@ -1079,6 +1083,7 @@ s32 cellSpursCreateTask(CellSpursTaskset* taskset, CellSpursTaskId* taskId,
+               spu_taskset_mark_running(taskset_ea, i); }
+             { extern void spu_taskset2_set_exit(uint32_t, uint32_t, int, uint32_t);
+               spu_taskset2_set_exit(taskset_ea, i, 0, 0); }   /* fresh entry for a recycled id */
++            spu_taskset_set_exit_container(taskset_ea, i, s_pending_exit_ct);
+             spurs_taskset_add_task(taskset_ea, i, (uint64_t)elf_ea,
+                                    (uint64_t)context_ea, task_arg, task_lsp);
+             /* Bridge to the image-22 dispatch so build_context uses this taskset+task. */
+@@ -1197,61 +1202,36 @@ s32 _cellSpursTaskAttributeInitialize(CellSpursTaskAttribute* attr, u32 revision
+     attr->lsPattern_ea = (u32)(uintptr_t)lsPattern;
+     attr->argument_ea  = (u32)(uintptr_t)argument;
+ 
+-    /* SPURS_TASKATTR_R8: some callers use a SIX-argument form, passing only
+-     * r3..r8 -- r9/r10 then hold caller leftovers, not arguments. YDKJ is one:
+-     * func_00331DA4 sets r3..r8 and nothing else, so our 8-parameter prototype
+-     * reads lsPattern=r9 (a size, 0x0003D400) and argument=r10 (0x2E, the ASCII
+-     * terminator its hex-string parser stopped on). r8 is the real 16-byte
+-     * CellSpursTaskArgument -- proven by its contents matching the quadword the
+-     * SPU task later receives in r3. A zero/garbage argument makes the SPU task
+-     * library refuse every blocking wait (0x8041090F), which is exactly how the
+-     * CRI tasks end up parked in WAIT_SIGNAL forever.
+-     * CONFIRMED by a second, independently lifted title: Jackbox Party Pack
+-     * calls the same NID with the same shape -- r3=attr, r4=1, r5=0x00330000,
+-     * r6=eaElf, r7=sp+0x180, r8=sp+0x170 (two adjacent 16-byte blocks), and
+-     * r9/r10 never written. Two unrelated callers agreeing settles it, so this
+-     * is now the default; SPURS_TASKATTR_LEGACY=1 restores the old 8-arg read. */
+-    { static int s_r8 = -1;
+-      if (s_r8 < 0) s_r8 = getenv("SPURS_TASKATTR_LEGACY") ? 0 : 1;
+-      if (s_r8) {
++    /* The SDK's real shape is SIX arguments:
++     *   r3=attr r4=revision r5=sdkVersion r6=eaElf
++     *   r7=const CellSpursTaskSaveConfig*  { u32 eaContext; u32 sizeContext;
++     *                                        u32 lsPattern EA }  (or NULL)
++     *   r8=const CellSpursTaskArgument*
++     * r9/r10 are never written by the caller. 3D Dot Game Heroes shows it at
++     * 0x4736E0..0x473744: r7=sp+0x70 with sp+0x70/0x74/0x78 = context EA,
++     * 0x3D400, a TOC-loaded pattern pointer, stored right before the call; r8 =
++     * a 16-byte block. Saints Row 2's builder (func_009F56E0) is the same, and
++     * the YDKJ/Jackbox call sites (r7=sp+0x180, r8=sp+0x170, r9/r10 unset) fit
++     * it too. Read as eight separate arguments, sizeContext comes out as a
++     * stack address (szctx=268983040 here) and lsPattern as a leftover r9.
++     *   SPURS_TASKATTR_R8=1      the earlier reading: argument=r8, context=r7
++     *                            itself, no ls pattern
++     *   SPURS_TASKATTR_LEGACY=1  the plain eight-argument reading */
++    { static int s_mode = -1;
++      if (s_mode < 0) s_mode = getenv("SPURS_TASKATTR_LEGACY") ? 0
++                             : getenv("SPURS_TASKATTR_R8") ? 1 : 2;
++      if (s_mode == 1) {
+           attr->argument_ea  = (u32)sizeContext;   /* r8 */
+           attr->lsPattern_ea = 0;                  /* r9 was a leftover */
+-          printf("[cellSpurs] TaskAttr R8-form: argument_ea=0x%08X (was 0x%08X)\n",
+-                 attr->argument_ea, (u32)(uintptr_t)argument);
+-      } }
+-    /* SPURS_TASKATTR_DESC: a THIRD caller shape, found in Saints Row 2. Its
+-     * taskset builder (func_009F56E0) does not pass eaContext/sizeContext/
+-     * lsPattern as separate arguments at all -- r7 points at a 3-word
+-     * DESCRIPTOR it fills immediately before the call, and r8 is the argument:
+-     *
+-     *   009F58D0  addi r7, r1, 128     ; r7 = sp+0x80  -> the descriptor
+-     *   009F58D4  addi r8, r1, 176     ; r8 = sp+0xB0  -> CellSpursTaskArgument
+-     *   009F58E8  stw  r9,  0x80(r1)   ;   [0] context EA
+-     *   009F58EC  stw  r11, 0x84(r1)   ;   [1] context size, straight out of
+-     *                                  ;       cellSpursTaskGetContextSaveAreaSize
+-     *   009F58F0  stw  r25, 0x88(r1)   ;   [2] CellSpursTaskLsPattern*
+-     *
+-     * Read the 8-argument way, sizeContext comes out as r8 -- a STACK ADDRESS,
+-     * not a size (the log shows szctx=267382952 = 0x0FEFF0A8) -- and lsPattern
+-     * comes out of r9, which this caller never sets, so it is 0. Those are
+-     * exactly the conditions the SPU task library refuses to run a blocking
+-     * task under, and the tasks then park in WAIT_SIGNAL forever doing 0 ms of
+-     * work apiece, which is the symptom this title shows. Off by default: the
+-     * R8-form above is right for YDKJ and Jackbox and they are unaffected. */
+-    { static int s_desc = -1;
+-      if (s_desc < 0) s_desc = getenv("SPURS_TASKATTR_DESC") ? 1 : 0;
+-      if (s_desc) {
+-          uint32_t d = (uint32_t)eaContext;          /* r7 */
+-          attr->eaContext    = vm_read32(d + 0);
+-          attr->sizeContext  = vm_read32(d + 4);
+-          attr->lsPattern_ea = vm_read32(d + 8);
+-          attr->argument_ea  = (u32)sizeContext;     /* r8 */
+-          printf("[cellSpurs] TaskAttr DESC-form: desc=0x%08X -> ctx=0x%08X size=%u lsp=0x%08X arg=0x%08X\n",
+-                 d, (u32)attr->eaContext, attr->sizeContext,
+-                 attr->lsPattern_ea, attr->argument_ea);
++      } else if (s_mode == 2) {
++          uint32_t sc = (uint32_t)eaContext;       /* r7: CellSpursTaskSaveConfig* */
++          attr->eaContext    = sc ? vm_read32(sc + 0) : 0;
++          attr->sizeContext  = sc ? vm_read32(sc + 4) : 0;
++          attr->lsPattern_ea = sc ? vm_read32(sc + 8) : 0;
++          attr->argument_ea  = (u32)sizeContext;   /* r8 */
+       } }
+-    printf("[cellSpurs] _TaskAttributeInitialize(eaElf=0x%08X ctx=0x%08X szctx=%u lsp=0x%08X arg=0x%08X)\n",
+-           (u32)eaElf, (u32)eaContext, sizeContext,
++    printf("[cellSpurs] _TaskAttributeInitialize(eaElf=0x%08X ctx=0x%08X szctx=0x%X lsp=0x%08X arg=0x%08X)\n",
++           (u32)eaElf, (u32)attr->eaContext, attr->sizeContext,
+            attr->lsPattern_ea, attr->argument_ea);
+     return CELL_OK;
+ }
+@@ -1279,11 +1259,14 @@ s32 cellSpursCreateTaskWithAttribute(CellSpursTaskset* taskset,
+      * dropping them left the TaskInfo with a zero argument + zero lsPattern and
+      * the SPU task library then refuses every blocking wait with 0x8041090F --
+      * LBP's binkspu movie-IO task spun forever on that). */
+-    return cellSpursCreateTask(taskset, taskId,
++    s_pending_exit_ct = attr_h->exitCode_ea;   /* consumed by cellSpursCreateTask */
++    s32 rc = cellSpursCreateTask(taskset, taskId,
+                                (void*)(uintptr_t)(u32)attr_h->eaElf,
+                                (void*)(uintptr_t)(u32)attr_h->eaContext,
+                                attr_h->sizeContext,
+                                attr_h->lsPattern_ea, attr_h->argument_ea);
++    s_pending_exit_ct = 0;
++    return rc;
+ }
+ 
+ /* The SDK's versioned taskset-attribute initializer. We forward taskset creation
+@@ -1376,6 +1359,41 @@ s32 cellSpursTaskExitCodeInitialize(CellSpursTaskExitCode* exitCode)
+     return CELL_OK;
+ }
+ 
++/* NID 0xA121A224. The container is a guest CellSpursTaskExitCode, initialized
++ * by cellSpursTaskExitCodeInitialize; the task's exit is written into it
++ * (spu_taskset_set_exit_container). */
++s32 cellSpursTaskAttributeSetExitCodeContainer(CellSpursTaskAttribute* attr,
++                                               CellSpursTaskExitCode* exitCode)
++{
++    u32 ea = (u32)(uintptr_t)exitCode;
++    if (!attr) return (s32)0x80410911u;                /* TASK_ERROR_NULL_POINTER */
++    if (ea & 0x7Fu) return (s32)0x80410910u;           /* TASK_ERROR_ALIGN */
++    GUEST_PTR(attr, CellSpursTaskAttribute*)->exitCode_ea = ea;
++    printf("[cellSpurs] TaskAttributeSetExitCodeContainer(attr=0x%08X exitCode=0x%08X)\n",
++           (u32)(uintptr_t)attr, ea);
++    return CELL_OK;
++}
++
++/* NID 0x13AE18F3. Reads what the task's exit wrote (layout in spu_workload.c:
++ * +0 state, +4 code). Before the task exits the container still holds its
++ * initialized zeroes, so the code reads as 0. */
++s32 cellSpursTaskExitCodeGet(const CellSpursTaskExitCode* exitCode, s32* exitCodeOut)
++{
++    u32 ea = (u32)(uintptr_t)exitCode;
++    u32 out = (u32)(uintptr_t)exitCodeOut;
++    if (!ea || !out) return (s32)0x80410911u;
++    if (ea & 0x7Fu) return (s32)0x80410910u;
++    u32 state = vm_read32(ea + 0);
++    s32 code = (s32)vm_read32(ea + 4);
++    if (!state) {
++        static int _n = 0;
++        if (PS3_LOG_FIRST(_n, 4))
++            fprintf(stderr, "[cellSpurs] TaskExitCodeGet(0x%08X): task has not exited\n", ea);
++    }
++    vm_write32(out, (u32)code);
++    return CELL_OK;
++}
++
+ /* =========================================================================
+  * Workload
+  * =====================================================================*/
+diff --git a/libs/spurs/cellSpurs.h b/libs/spurs/cellSpurs.h
+index 07a3d2e..a6769d1 100644
+--- a/libs/spurs/cellSpurs.h
++++ b/libs/spurs/cellSpurs.h
+@@ -156,7 +156,8 @@ struct CellSpursTaskAttribute {
+      * spinning forever. */
+     u32  lsPattern_ea;
+     u32  argument_ea;
+-    u8   _padding[48];
++    u32  exitCode_ea;  /* cellSpursTaskAttributeSetExitCodeContainer */
++    u8   _padding[44];
+ };
+ 
+ /* Guest-owned exit container: unlike the legacy host records above, both its
+@@ -254,6 +255,9 @@ s32 cellSpursSendSignal(CellSpursTaskset* taskset, CellSpursTaskId taskId);
+ 
+ s32 cellSpursTaskAttributeInitialize(CellSpursTaskAttribute* attr);
+ s32 cellSpursTaskExitCodeInitialize(CellSpursTaskExitCode* exitCode);
++s32 cellSpursTaskExitCodeGet(const CellSpursTaskExitCode* exitCode, s32* exitCodeOut);
++s32 cellSpursTaskAttributeSetExitCodeContainer(CellSpursTaskAttribute* attr,
++                                               CellSpursTaskExitCode* exitCode);
+ 
+ /* ---------------------------------------------------------------------------
+  * Workload functions
+diff --git a/runtime/spu/spu_workload.c b/runtime/spu/spu_workload.c
+index 3ce8d0d..24d4180 100644
+--- a/runtime/spu/spu_workload.c
++++ b/runtime/spu/spu_workload.c
+@@ -13,6 +13,7 @@
+ #include <stdlib.h>
+ #include <string.h>
+ #include "ps3emu/log_first.h"
++#include "ps3emu/ps3_strict.h"
+ #ifdef _WIN32
+ #include <windows.h>
+ #else
+@@ -573,6 +574,57 @@ void spu_taskset2_set_exit(uint32_t taskset_ea, uint32_t task, int exited, uint3
+     spu_lockline_unlock();
+ }
+ 
++/* cellSpursTaskAttributeSetExitCodeContainer: the guest CellSpursTaskExitCode
++ * (128 bytes, opaque to the game) a task's exit is reported into. Keyed by
++ * (taskset, task id) and recorded by cellSpursCreateTask before the task can
++ * run. Layout (ours; only our cellSpursTaskExitCodeGet reads it):
++ *   +0 u32 state  0 = not exited, 1 = exited
++ *   +4 s32 exit code
++ * The SPU-side exit value is not plumbed through the lifted task library yet,
++ * so an exit is reported with code 0 -- the same gap as task_exit_code[] in
++ * spu_taskset2_set_exit. */
++#define SPU_EXIT_CT_MAX 256
++static struct { uint32_t ts, task, ea; } s_exit_ct[SPU_EXIT_CT_MAX];
++void spu_taskset_set_exit_container(uint32_t taskset_ea, uint32_t task, uint32_t ea)
++{
++    int free_i = -1;
++    ts_lock();
++    for (int i = 0; i < SPU_EXIT_CT_MAX; i++) {
++        if (s_exit_ct[i].ea && s_exit_ct[i].ts == taskset_ea && s_exit_ct[i].task == task) {
++            s_exit_ct[i].ea = ea; ts_unlock(); return;
++        }
++        if (!s_exit_ct[i].ea && free_i < 0) free_i = i;
++    }
++    if (ea && free_i >= 0) {
++        s_exit_ct[free_i].ts = taskset_ea; s_exit_ct[free_i].task = task; s_exit_ct[free_i].ea = ea;
++    }
++    ts_unlock();
++    if (ea && free_i < 0)
++        ps3_strict_fail("spurs-exit-container", "no room to track exit container 0x%08X "
++                        "(taskset 0x%08X task %u)", ea, taskset_ea, task);
++}
++static void spu_taskset_report_exit(uint32_t taskset_ea, uint32_t task, uint32_t code)
++{
++    extern uint8_t* vm_base;
++    extern void spu_coh_notify_write(uint32_t);
++    for (int i = 0; i < SPU_EXIT_CT_MAX; i++) {
++        if (s_exit_ct[i].ea && s_exit_ct[i].ts == taskset_ea && s_exit_ct[i].task == task) {
++            /* Caller holds ts_lock and not the lock-line lock (same as
++             * spu_taskset2_set_exit, which takes it inside). */
++            extern void spu_lockline_lock(void); extern void spu_lockline_unlock(void);
++            uint8_t* e = vm_base + s_exit_ct[i].ea;
++            spu_lockline_lock();
++            e[4] = (uint8_t)(code >> 24); e[5] = (uint8_t)(code >> 16);
++            e[6] = (uint8_t)(code >> 8);  e[7] = (uint8_t)code;
++            e[0] = e[1] = e[2] = 0; e[3] = 1;
++            spu_coh_notify_write(s_exit_ct[i].ea);
++            spu_lockline_unlock();
++            s_exit_ct[i].ea = 0;   /* one exit per CreateTask; the id is recycled */
++            return;
++        }
++    }
++}
++
+ static void spu_taskset_task_exited(uint32_t taskset_ea, uint32_t done_task)
+ {
+     extern uint8_t* vm_base;
+@@ -583,6 +635,7 @@ static void spu_taskset_task_exited(uint32_t taskset_ea, uint32_t done_task)
+     uint8_t* ts = vm_base + taskset_ea;
+     uint8_t* run = ts_running(taskset_ea);
+     if (done_task < 128) spu_taskset2_set_exit(taskset_ea, done_task, 1, 0);
++    if (done_task < 128) spu_taskset_report_exit(taskset_ea, done_task, 0);
+     /* The ready/pending/enabled bitsets share the taskset's first line with the
+      * SPU task library (GETLLAR/PUTLLC) and with cellSpursCreateTask, which
+      * update them under the lock-line lock. Update them under the same lock,
+diff --git a/runtime/spu/spu_workload.h b/runtime/spu/spu_workload.h
+index 09c982f..7fa0ec4 100644
+--- a/runtime/spu/spu_workload.h
++++ b/runtime/spu/spu_workload.h
+@@ -148,6 +148,10 @@ int spu_workload_dispatch(const uint8_t* image, uint32_t image_size,
+ /* Same, but runs the SPU job on its own detached host thread so the PPU caller
+  * is not blocked. Required for persistent SPURS service/worker tasks that loop
+  * waiting on PPU-side signals (running them inline deadlocks). */
++/* Exit-code container for task `task` of a taskset (0 clears). The task's
++ * exit is written into it (see spu_workload.c). */
++void spu_taskset_set_exit_container(uint32_t taskset_ea, uint32_t task, uint32_t ea);
++
+ int spu_workload_dispatch_async(const uint8_t* image, uint32_t image_size,
+                                 uint32_t args_ea);
+ 
+-- 
+2.56.0
+

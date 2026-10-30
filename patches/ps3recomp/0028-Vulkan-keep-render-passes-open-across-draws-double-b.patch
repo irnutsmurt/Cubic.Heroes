@@ -1,0 +1,435 @@
+From e47752fc1370862bc1e3b4e5a3a61df8771972aa Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Fri, 30 Oct 2026 00:27:54 -0700
+Subject: [PATCH 28/28] Vulkan: keep render passes open across draws;
+ double-buffered batches
+
+With VK_DRAW_BATCH=1:
+- Consecutive draws into the same framebuffer that sample none of its
+  images continue one render pass instead of each ending it behind a
+  full barrier; clears, copies, uploads and flushes close it first.
+- A batch flush submits without waiting and swaps in a second ring set,
+  descriptor pool, command buffer and fence, so the walker records the
+  next batch while the GPU runs this one. Anything that needs all GPU
+  work complete (destroys, readbacks, unbatched work) waits for it
+  (vk_eng_flush_sync); VK_DRAW_BATCH_SYNC=1 keeps the old behaviour.
+- The per-frame colour snapshot is recorded into the batch.
+
+3D Dot Game Heroes gameplay: ~14 -> ~17.5 flips/s on RADV Renoir.
+VK_WAIT_STATS=1 reports synchronous waits by call site.
+---
+ libs/video/rsx_vulkan_backend.c | 231 +++++++++++++++++++++++++++-----
+ 1 file changed, 199 insertions(+), 32 deletions(-)
+
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index db64302..abb9827 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -452,7 +452,15 @@ static void vk_present_wait_gpu(void);
+  * results flushes them first, so everything else keeps the invariant that
+  * all earlier work has completed. */
+ static u32 s_eb_pending;
+-static void vk_eng_flush(void);
++static void vk_eng_flush_at(int line);
++#define vk_eng_flush() vk_eng_flush_at(__LINE__)
++/* A batch flush submits without waiting (one batch in flight, see
++ * vk_eng_flush_at); this one also waits for it, for callers that need all
++ * earlier GPU work complete -- destroying an object, reading results, or
++ * recording work outside the batch. */
++static void vk_wait_inflight(void);
++static void vk_eng_flush_sync_at(int line);
++#define vk_eng_flush_sync() vk_eng_flush_sync_at(__LINE__)
+ static int vk_eb_active(void);       /* batching decided on and on */
+ static u32 vk_eb_max(void);
+ static void vk_eb_recorded(void);   /* one more command in the open batch */
+@@ -462,7 +470,11 @@ static int vk_eb_upload(VkImage img, VkBufferImageCopy* region, const void* src,
+ 
+ static void vk_destroy_image(vk_image* im)
+ {
+-    if (s_eb_pending) vk_eng_flush();
++    { static int t = -1, n = 0; if (t < 0) t = getenv("VK_DESTROY_TRACE") ? 1 : 0;
++      if (t && im->img && n++ < 400 && n > 300) {
++          extern int backtrace(void**, int); extern void backtrace_symbols_fd(void* const*, int, int);
++          void* bt[6]; int k = backtrace(bt, 6); fprintf(stderr, "[vk-destroy]\n"); backtrace_symbols_fd(bt, k, 2); } }
++    vk_eng_flush_sync();
+     /* Never under a present's copy that may still read it. */
+     if (im->img) vk_present_wait_gpu();
+     if (im->view) pvkDestroyImageView(s_vk.device, im->view, NULL);
+@@ -525,7 +537,7 @@ static int vk_create_device_buffer(vk_buffer* b, VkDeviceSize size, VkBufferUsag
+ 
+ static void vk_destroy_buffer(vk_buffer* b)
+ {
+-    if (s_eb_pending) vk_eng_flush();
++    vk_eng_flush_sync();
+     if (b->ptr) pvkUnmapMemory(s_vk.device, b->mem);
+     if (b->buf) pvkDestroyBuffer(s_vk.device, b->buf, NULL);
+     if (b->mem) pvkFreeMemory(s_vk.device, b->mem, NULL);
+@@ -575,6 +587,18 @@ static void vk_device_idle(void)
+ 
+ /* A full execution and memory dependency on everything submitted before
+  * this command buffer, the present's copy included. */
++/* VK_DRAW_BATCH: the render pass the last batched draw left open. Draws into
++ * the same framebuffer that sample none of its images continue it: within one
++ * render pass Vulkan already orders their attachment writes, blending and
++ * depth (rasterization order), so neither the per-draw full barrier nor a
++ * fresh render pass is needed. Anything else recorded into the batch -- a
++ * clear, a copy, an upload, the flush itself -- closes it first. */
++static struct { int open; VkFramebuffer fb; } s_rp;
++static void vk_rp_close(void)
++{
++    if (s_rp.open) { pvkCmdEndRenderPass(s_vk.cmd); s_rp.open = 0; s_rp.fb = VK_NULL_HANDLE; }
++}
++
+ static void vk_cmd_after_everything(VkCommandBuffer cb)
+ {
+     VkMemoryBarrier mb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+@@ -584,9 +608,23 @@ static void vk_cmd_after_everything(VkCommandBuffer cb)
+                           VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+ }
+ 
++/* Open a batch: like vk_begin, but a batch left in flight by the last flush
++ * may still be running. Every batched operation opens with a barrier against
++ * all earlier work on the queue, which orders it after that batch on the GPU;
++ * the CPU need not wait. */
++static int vk_begin_batch(void)
++{
++    VK_CHECK(pvkResetCommandBuffer(s_vk.cmd, 0), "vkResetCommandBuffer");
++    VkCommandBufferBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
++                                    .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
++    VK_CHECK(pvkBeginCommandBuffer(s_vk.cmd, &bi), "vkBeginCommandBuffer");
++    if (s_vk.present_order) { vk_cmd_after_everything(s_vk.cmd); s_vk.present_order = 0; }
++    return 0;
++}
++
+ static int vk_begin(void)
+ {
+-    if (s_eb_pending) vk_eng_flush();
++    vk_eng_flush_sync();
+     VK_CHECK(pvkResetCommandBuffer(s_vk.cmd, 0), "vkResetCommandBuffer");
+     VkCommandBufferBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                                     .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
+@@ -598,16 +636,46 @@ static int vk_begin(void)
+     return 0;
+ }
+ 
+-static int vk_submit_and_wait(void)
++/* VK_WAIT_STATS=1: every 5 s, how many synchronous submit+waits each call
++ * site made and how long they blocked (the line of vk_eng_flush's caller for
++ * a batch flush). The waits are what pace the FIFO walker. */
++static int s_flush_line;
++static struct { int line; unsigned n; double ms; } s_ws[64];
++static void vk_wait_stat(int line, double ms)
++{
++    static int on = -1; static double t0;
++    if (on < 0) on = getenv("VK_WAIT_STATS") ? 1 : 0;
++    if (!on) return;
++    int i = 0;
++    while (i < 64 && s_ws[i].line && s_ws[i].line != line) i++;
++    if (i < 64) { s_ws[i].line = line; s_ws[i].n++; s_ws[i].ms += ms; }
++    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
++    const double now = ts.tv_sec + ts.tv_nsec * 1e-9;
++    if (!t0) t0 = now;
++    if (now - t0 >= 5.0) {
++        fprintf(stderr, "[vk-wait] %.1f s:", now - t0);
++        for (int k = 0; k < 64 && s_ws[k].line; k++)
++            fprintf(stderr, " L%d n=%u %.0fms", s_ws[k].line, s_ws[k].n, s_ws[k].ms);
++        fprintf(stderr, "\n");
++        memset(s_ws, 0, sizeof s_ws); t0 = now;
++    }
++}
++static int vk_submit_and_wait_at(int line)
+ {
++    vk_wait_inflight();
+     VK_CHECK(pvkEndCommandBuffer(s_vk.cmd), "vkEndCommandBuffer");
+     VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                         .commandBufferCount = 1, .pCommandBuffers = &s_vk.cmd };
+     VK_CHECK(pvkResetFences(s_vk.device, 1, &s_vk.fence), "vkResetFences");
++    struct timespec a, b; clock_gettime(CLOCK_MONOTONIC, &a);
+     VK_CHECK(vk_queue_submit(&si, s_vk.fence), "vkQueueSubmit");
+     VK_CHECK(pvkWaitForFences(s_vk.device, 1, &s_vk.fence, VK_TRUE, UINT64_MAX), "vkWaitForFences");
++    clock_gettime(CLOCK_MONOTONIC, &b);
++    vk_wait_stat(s_flush_line ? -s_flush_line : line,
++                 (b.tv_sec - a.tv_sec) * 1e3 + (b.tv_nsec - a.tv_nsec) * 1e-6);
+     return 0;
+ }
++#define vk_submit_and_wait() vk_submit_and_wait_at(__LINE__)
+ 
+ /* Order this command buffer's use of an image after everything submitted
+  * before it; from UNDEFINED it is also the one-time move to GENERAL. */
+@@ -2308,7 +2376,7 @@ static void vk_eng_shutdown(void* user)
+ static void vk_eng_submit_and_wait(void* user, u32 reason)
+ {
+     (void)user; (void)reason;      /* every other submission has already completed */
+-    if (s_eb_pending) vk_eng_flush();
++    vk_eng_flush_sync();
+ }
+ 
+ static u32 vk_eng_color_target_create(void* user, rsx_be_format fmt, u32 w, u32 h,
+@@ -2390,7 +2458,8 @@ static void vk_eng_clear_color(void* user, u32 surface, const float rgba[4])
+     vk_eng_obj* o = vk_eng_get(surface, VK_ENG_COLOR);
+     if (!o) return;
+     const int batched = vk_eb_active();
+-    if (batched ? (!s_eb_pending && vk_begin()) : vk_begin()) return;
++    if (batched ? (!s_eb_pending && vk_begin_batch()) : vk_begin()) return;
++    vk_rp_close();
+     VkClearColorValue v;
+     memcpy(v.float32, rgba, sizeof v.float32);
+     VkImageSubresourceRange r = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+@@ -2410,7 +2479,8 @@ static void vk_eng_clear_depth_stencil(void* user, u32 depth, u32 flags,
+     if (flags & RSX_BE_CLEAR_STENCIL) aspect |= s_vk.depth_aspect & VK_IMAGE_ASPECT_STENCIL_BIT;
+     if (!o || !aspect) return;
+     const int batched = vk_eb_active();
+-    if (batched ? (!s_eb_pending && vk_begin()) : vk_begin()) return;
++    if (batched ? (!s_eb_pending && vk_begin_batch()) : vk_begin()) return;
++    vk_rp_close();
+     VkClearDepthStencilValue d = { depth_value, stencil };
+     VkImageSubresourceRange r = { aspect, 0, 1, 0, 1 };
+     vk_barrier_image(o->im.img, s_vk.depth_aspect, VK_IMAGE_LAYOUT_GENERAL);
+@@ -2647,7 +2717,11 @@ static u32 vk_eng_color_snapshot(void* user, u32 surface)
+     }
+     o->kind = VK_ENG_COLOR; o->snapshot = 1;
+     o->fmt = t->fmt; o->bpp = t->bpp; o->w = t->w; o->h = t->h;
+-    if (vk_begin()) { vk_eng_release(user, hd); return 0; }
++    /* Batched: the copy joins the open batch (only the GPU reads it, behind
++     * the barriers below), instead of a submission and a wait every frame. */
++    const int batched = vk_eb_active();
++    if (batched ? (!s_eb_pending && vk_begin_batch()) : vk_begin()) { vk_eng_release(user, hd); return 0; }
++    if (batched) { vk_rp_close(); vk_cmd_after_everything(s_vk.cmd); }
+     vk_barrier_image(o->im.img, VK_IMAGE_ASPECT_COLOR_BIT,
+                      reused ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_UNDEFINED);
+     vk_barrier_image(t->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
+@@ -2660,6 +2734,7 @@ static u32 vk_eng_color_snapshot(void* user, u32 surface)
+                     o->im.img, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
+     /* The copy, made visible to whatever samples it next. */
+     vk_barrier_image(o->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
++    if (batched) { vk_eb_recorded(); return hd; }
+     if (vk_submit_and_wait()) { vk_eng_release(user, hd); return 0; }
+     return hd;
+ }
+@@ -2726,8 +2801,8 @@ static u32 vk_eng_depth_snapshot(void* user, u32 depth, u32 w, u32 h)
+     }
+     vk_buffer st = s_snap_st;
+     const int batch = vk_eb_active();
+-    int rc = (batch && s_eb_pending) ? 0 : vk_begin();
+-    if (!rc && batch) vk_cmd_after_everything(s_vk.cmd);
++    int rc = batch ? (s_eb_pending ? 0 : vk_begin_batch()) : vk_begin();
++    if (!rc && batch) { vk_rp_close(); vk_cmd_after_everything(s_vk.cmd); }
+     if (!rc) {
+         vk_barrier_image(z->im.img, s_vk.depth_aspect, VK_IMAGE_LAYOUT_GENERAL);
+         vk_barrier_image(t->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
+@@ -2860,7 +2935,7 @@ static u32 s_esamp_count;
+ 
+ static void vk_eng_drop_framebuffers(void)
+ {
+-    if (s_eb_pending) vk_eng_flush();
++    vk_eng_flush_sync();
+     for (u32 i = 0; i < s_e2.fb_count; i++)
+         if (s_e2.fb[i].fb) pvkDestroyFramebuffer(s_vk.device, s_e2.fb[i].fb, NULL);
+     s_e2.fb_count = 0;
+@@ -3070,7 +3145,7 @@ static u32 vk_eng_pipeline_create(void* user, const char* vs_hlsl, const char* p
+ static void vk_eng_pipeline_release(void* user, u32 pipeline)
+ {
+     (void)user;
+-    if (s_eb_pending) vk_eng_flush();
++    vk_eng_flush_sync();
+     if (!pipeline || pipeline > VK_ENG_MAX_PIPE || !s_epipe[pipeline - 1].used) return;
+     vk_eng_pipe* P = &s_epipe[pipeline - 1];
+     for (u32 t = 0; t < VK_ENG_TOPOLOGIES; t++)
+@@ -3449,6 +3524,14 @@ static struct {
+     VkDeviceSize     vb_head, ib_head, ub_head, sb_head, ub_align;
+     VkDescriptorPool pool;
+     u32              sets;
++    /* Double buffering: the spare ring set, command buffer and fence. A flush
++     * submits the open batch and swaps them in; the batch it submitted stays
++     * in flight (inflight) while the next is recorded. */
++    vk_buffer        alt_vb, alt_ib, alt_ub, alt_sb;
++    VkDescriptorPool alt_pool;
++    VkCommandBuffer  alt_cmd;
++    VkFence          alt_fence;
++    int              inflight;      /* the spare set's last submission is not waited on */
+     unsigned long long draws, flushes;
+ } s_eb = { .on = -1 };
+ 
+@@ -3479,6 +3562,24 @@ static int vk_eb_on(void)
+         VK_LOG("draw batching: no host-coherent ring memory, staying off\n");
+         return 0;
+     }
++    {   /* The spare set for double buffering (VK_DRAW_BATCH_SYNC=1: none). */
++        VkCommandBufferAllocateInfo cai = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
++                                            .commandPool = s_vk.pool,
++                                            .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
++                                            .commandBufferCount = 1 };
++        VkFenceCreateInfo fci = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
++        if (!getenv("VK_DRAW_BATCH_SYNC") &&
++            (vk_create_host_buffer(&s_eb.alt_vb, VK_EB_VB_BYTES, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT) || !s_eb.alt_vb.coherent ||
++             vk_create_host_buffer(&s_eb.alt_ib, VK_EB_IB_BYTES, VK_BUFFER_USAGE_INDEX_BUFFER_BIT) || !s_eb.alt_ib.coherent ||
++             vk_create_host_buffer(&s_eb.alt_ub, VK_EB_UB_BYTES, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT) || !s_eb.alt_ub.coherent ||
++             vk_create_host_buffer(&s_eb.alt_sb, VK_EB_SB_BYTES, VK_BUFFER_USAGE_TRANSFER_SRC_BIT) || !s_eb.alt_sb.coherent ||
++             pvkCreateDescriptorPool(s_vk.device, &pci, NULL, &s_eb.alt_pool) != VK_SUCCESS ||
++             pvkAllocateCommandBuffers(s_vk.device, &cai, &s_eb.alt_cmd) != VK_SUCCESS ||
++             pvkCreateFence(s_vk.device, &fci, NULL, &s_eb.alt_fence) != VK_SUCCESS)) {
++            VK_LOG("draw batching: no memory for a second ring set, flushes stay synchronous\n");
++            s_eb.alt_cmd = VK_NULL_HANDLE;
++        }
++    }
+     VK_LOG("draw batching: on (up to %u draws per submission)\n", s_eb.max_draws);
+     s_eb.on = 1;
+     return 1;
+@@ -3488,12 +3589,18 @@ static int vk_eb_on(void)
+  * decides again. Also frees what a failed vk_eb_on had already created. */
+ static void vk_eb_release(void)
+ {
+-    if (s_eb_pending) vk_eng_flush();
++    vk_eng_flush_sync();
+     vk_destroy_buffer(&s_eb.vb);
+     vk_destroy_buffer(&s_eb.ib);
+     vk_destroy_buffer(&s_eb.ub);
+     vk_destroy_buffer(&s_eb.sb);
+     if (s_eb.pool) pvkDestroyDescriptorPool(s_vk.device, s_eb.pool, NULL);
++    vk_destroy_buffer(&s_eb.alt_vb);
++    vk_destroy_buffer(&s_eb.alt_ib);
++    vk_destroy_buffer(&s_eb.alt_ub);
++    vk_destroy_buffer(&s_eb.alt_sb);
++    if (s_eb.alt_pool) pvkDestroyDescriptorPool(s_vk.device, s_eb.alt_pool, NULL);
++    if (s_eb.alt_fence) pvkDestroyFence(s_vk.device, s_eb.alt_fence, NULL);
+     memset(&s_eb, 0, sizeof s_eb);
+     s_eb.on = -1;
+ }
+@@ -3523,7 +3630,8 @@ static int vk_eb_upload(VkImage img, VkBufferImageCopy* region, const void* src,
+     }
+     for (u32 y = 0; y < rows; y++)
+         memcpy((u8*)s_eb.sb.ptr + off + (size_t)y * tight, (const u8*)src + (size_t)y * row_bytes, tight);
+-    if (!s_eb_pending && vk_begin()) return -1;
++    if (!s_eb_pending && vk_begin_batch()) return -1;
++    vk_rp_close();
+     vk_cmd_after_everything(s_vk.cmd);
+     region->bufferOffset = off;
+     pvkCmdCopyBufferToImage(s_vk.cmd, s_eb.sb.buf, img, VK_IMAGE_LAYOUT_GENERAL, 1, region);
+@@ -3532,11 +3640,53 @@ static int vk_eb_upload(VkImage img, VkBufferImageCopy* region, const void* src,
+     return 0;
+ }
+ 
+-static void vk_eng_flush(void)
++#define VK_SWAP(T, a, b) do { T _t = (a); (a) = (b); (b) = _t; } while (0)
++/* Wait for the batch a flush left in flight (it ran on what is now the spare
++ * set), so all GPU work submitted so far is complete. */
++static void vk_wait_inflight(void)
++{
++    if (!s_eb.inflight) return;
++    struct timespec a, b; clock_gettime(CLOCK_MONOTONIC, &a);
++    pvkWaitForFences(s_vk.device, 1, &s_eb.alt_fence, VK_TRUE, UINT64_MAX);
++    clock_gettime(CLOCK_MONOTONIC, &b);
++    vk_wait_stat(s_flush_line ? -s_flush_line : 1, (b.tv_sec - a.tv_sec) * 1e3 + (b.tv_nsec - a.tv_nsec) * 1e-6);
++    s_eb.inflight = 0;
++}
++static void vk_eng_flush_sync_at(int line)
++{
++    if (s_eb_pending) vk_eng_flush_at(line);
++    vk_wait_inflight();
++}
++static void vk_eng_flush_at(int line)
+ {
+     if (!s_eb_pending) return;
++    vk_rp_close();
+     s_eb_pending = 0;               /* first: the submit below must not re-enter */
+-    vk_submit_and_wait();
++    s_flush_line = line;
++    if (!s_eb.alt_cmd) {
++        vk_submit_and_wait();
++    } else {
++        /* Submit the open batch without waiting. Its rings, descriptor pool,
++         * command buffer and fence become the spare set; the spare set (the
++         * batch before, if still running) is waited for and becomes current. */
++        vk_wait_inflight();
++        pvkEndCommandBuffer(s_vk.cmd);
++        VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
++                            .commandBufferCount = 1, .pCommandBuffers = &s_vk.cmd };
++        pvkResetFences(s_vk.device, 1, &s_vk.fence);
++        vk_queue_submit(&si, s_vk.fence);
++        VK_SWAP(VkCommandBuffer, s_vk.cmd, s_eb.alt_cmd);
++        VK_SWAP(VkFence, s_vk.fence, s_eb.alt_fence);
++        VK_SWAP(vk_buffer, s_eb.vb, s_eb.alt_vb);
++        VK_SWAP(vk_buffer, s_eb.ib, s_eb.alt_ib);
++        VK_SWAP(vk_buffer, s_eb.ub, s_eb.alt_ub);
++        VK_SWAP(vk_buffer, s_eb.sb, s_eb.alt_sb);
++        VK_SWAP(VkDescriptorPool, s_eb.pool, s_eb.alt_pool);
++        s_eb.inflight = 1;
++        if (s_eb.sets) { pvkResetDescriptorPool(s_vk.device, s_eb.pool, 0); }
++        s_eb.sets = 0;
++    }
++    s_flush_line = 0;
+     s_eb.vb_head = s_eb.ib_head = s_eb.ub_head = s_eb.sb_head = 0;
+     if (s_eb.sets) { pvkResetDescriptorPool(s_vk.device, s_eb.pool, 0); s_eb.sets = 0; }
+     if ((++s_eb.flushes & 0x3FFFu) == 0)
+@@ -3686,12 +3836,9 @@ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices,
+         memcpy((u8*)s_eb.vb.ptr + voff, vertices, (size_t)vbytes);
+         if (ibytes) memcpy((u8*)s_eb.ib.ptr + ioff, indices, (size_t)ibytes);
+         vbuf = s_eb.vb.buf; ibuf = s_eb.ib.buf;
+-        if (!s_eb_pending && vk_begin()) return;
+-        /* Earlier draws of this batch may have rendered what this one samples
+-         * or blends over: order it after all of them. */
+-        vk_cmd_after_everything(s_vk.cmd);
++        if (!s_eb_pending && vk_begin_batch()) return;
+     } else {
+-        if (s_eb_pending) vk_eng_flush();
++        vk_eng_flush_sync();
+         if (vk_ensure_vertex_buffer(vbytes)) return;
+         memcpy(s_vk.vertices.ptr, vertices, (size_t)vbytes);
+         if (ibytes) {
+@@ -3706,14 +3853,35 @@ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices,
+         if (!set) return;
+         if (vk_begin()) return;
+     }
+-    /* Everything submitted before is complete (each submission is waited
+-     * on); this orders memory for the surfaces this draw touches. */
+-    for (u32 i = 0; i < n; i++)
+-        vk_barrier_image(s_eobj[s_eng_bound.rt[i]].im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
+-    VkRenderPassBeginInfo rbi = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+-                                  .renderPass = rp, .framebuffer = fb,
+-                                  .renderArea = { { 0, 0 }, { w, h } } };
+-    pvkCmdBeginRenderPass(s_vk.cmd, &rbi, VK_SUBPASS_CONTENTS_INLINE);
++    /* Continue the open render pass when this draw targets the same
++     * framebuffer and samples none of its images (s_rp). Otherwise close it,
++     * order this draw after everything recorded before (earlier draws of the
++     * batch may have rendered what it samples), and begin a new one. */
++    int feedback = 0;
++    if (batched && s_rp.open && s_rp.fb == fb) {
++        VkImage att[RSX_BE_MAX_COLOR_TARGETS + 1]; u32 na = 0;
++        for (u32 i = 0; i < n; i++) att[na++] = s_eobj[s_eng_bound.rt[i]].im.img;
++        if (zo && dview == zo->im.view) att[na++] = zo->im.img;
++        for (u32 u = 0; u < RSX_BE_MAX_TEXTURES && !feedback; u++) {
++            if (!((s_e2.tex_mask >> u) & 1u) || !s_e2.tex[u] || s_e2.tex[u] >= VK_ENG_MAX_OBJ) continue;
++            const VkImage ti = s_eobj[s_e2.tex[u]].im.img;
++            for (u32 k = 0; k < na; k++) if (ti == att[k]) { feedback = 1; break; }
++        }
++    }
++    const int continue_rp = batched && s_rp.open && s_rp.fb == fb && !feedback;
++    if (!continue_rp) {
++        vk_rp_close();
++        if (batched) vk_cmd_after_everything(s_vk.cmd);
++        /* Everything submitted before is complete (each submission is waited
++         * on); this orders memory for the surfaces this draw touches. */
++        for (u32 i = 0; i < n; i++)
++            vk_barrier_image(s_eobj[s_eng_bound.rt[i]].im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
++        VkRenderPassBeginInfo rbi = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
++                                      .renderPass = rp, .framebuffer = fb,
++                                      .renderArea = { { 0, 0 }, { w, h } } };
++        pvkCmdBeginRenderPass(s_vk.cmd, &rbi, VK_SUBPASS_CONTENTS_INLINE);
++        s_rp.open = 1; s_rp.fb = fb;
++    }
+     pvkCmdBindPipeline(s_vk.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+     VkViewport vp = { 0.0f, 0.0f, (float)w, (float)h, 0.0f, 1.0f };
+     if (s_e2.have_vp && s_e2.vp[2] > 0.0f && s_e2.vp[3] > 0.0f) {
+@@ -3743,8 +3911,7 @@ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices,
+     } else {
+         pvkCmdDraw(s_vk.cmd, vertex_count, 1, 0, 0);
+     }
+-    pvkCmdEndRenderPass(s_vk.cmd);
+-    if (!batched) { vk_submit_and_wait(); return; }
++    if (!batched) { vk_rp_close(); vk_submit_and_wait(); return; }
+     s_eb.draws++;
+     if (++s_eb_pending >= s_eb.max_draws) vk_eng_flush();
+ }
+-- 
+2.56.0
+

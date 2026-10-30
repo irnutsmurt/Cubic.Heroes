@@ -1,0 +1,31 @@
+From bdd39568474b0aeb374d4740d18038c2a7ec4ec8 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Thu, 29 Oct 2026 16:36:06 -0700
+Subject: [PATCH 08/28] ppu_sjlj: PS3_SJLJ_LOG=<n> logs the first n guest
+ longjmps
+
+---
+ runtime/ppu/ppu_sjlj.h | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/runtime/ppu/ppu_sjlj.h b/runtime/ppu/ppu_sjlj.h
+index 1685e14..d985074 100644
+--- a/runtime/ppu/ppu_sjlj.h
++++ b/runtime/ppu/ppu_sjlj.h
+@@ -72,6 +72,13 @@ struct ps3_sjlj_frame {
+ 
+ [[noreturn]] inline void ps3_sjlj_longjmp(ppu_context* ctx, uint32_t guest_buf)
+ {
++    static int s_log = -1;
++    if (s_log < 0) { const char* e = getenv("PS3_SJLJ_LOG"); s_log = e ? atoi(e) : 0; }
++    if (s_log > 0) {
++        s_log--;
++        fprintf(stderr, "[sjlj] guest longjmp jmp_buf=0x%08X -> resume at lr=0x%08X r3=%d tid=%llu\n",
++                guest_buf, (uint32_t)ctx->lr, (int)ctx->gpr[3], (unsigned long long)ctx->thread_id);
++    }
+     for (ps3_sjlj_frame* f = g_ps3_sjlj_top; f; f = f->prev) {
+         if (f->guest_buf == guest_buf) {
+             g_ps3_sjlj_top = f;   /* frames above are abandoned */
+-- 
+2.56.0
+

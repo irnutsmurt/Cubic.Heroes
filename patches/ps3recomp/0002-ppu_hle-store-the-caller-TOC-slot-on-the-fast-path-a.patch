@@ -1,0 +1,93 @@
+From 3e09af70e1e5411e261f48f7a3dd81e5c8393c94 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Thu, 29 Oct 2026 16:23:42 -0700
+Subject: [PATCH 02/28] ppu_hle: store the caller TOC slot on the fast path;
+ add PS3_TOCCHECK
+
+The firmware import stub that ps3_hle_call replaces stores r2 at 40(r1)
+before entering the PRX, and the caller reloads it afterwards. The slow
+path's _TocGuard writes that slot, but the fast path (sys_lwmutex_lock and
+sys_lwmutex_unlock) returned before reaching it. A caller whose slot held 0
+came back with r2 = 0, and every TOC-relative load then hit page 0.
+3D Dot Game Heroes' allocator lock does exactly this during C++ static
+init, which corrupted the heap and recursed until the host stack ran out.
+
+PS3_TOCCHECK=1 reports the first indirect or firmware calls made with
+r2 = 0, which is how this was found. Strict mode now also covers the
+generic unresolved-NID path in ps3_hle_call.
+---
+ runtime/ppu/ppu_hle.cpp    | 16 +++++++++++++++-
+ runtime/ppu/ppu_loader.cpp | 18 ++++++++++++++++++
+ 2 files changed, 33 insertions(+), 1 deletion(-)
+
+diff --git a/runtime/ppu/ppu_hle.cpp b/runtime/ppu/ppu_hle.cpp
+index 0664012..be6117a 100644
+--- a/runtime/ppu/ppu_hle.cpp
++++ b/runtime/ppu/ppu_hle.cpp
+@@ -256,10 +256,21 @@ static void hle_top_note(uint32_t nid, const char* name, const ppu_context* ctx,
+     for (int j = 0; j < ht_used; j++) ht_n[j] = 0;
+ }
+ extern "C" uint32_t ppu_prof_resolve_host(void* ra);
++extern "C" void ppu_toc_check(ppu_context* ctx, const char* where, uint32_t target);
+ extern "C" void ps3_hle_call(uint32_t nid, ppu_context* ctx)
+ {
+-    if (const hle_fast_fn f = hle_fast(nid))
++    ppu_toc_check(ctx, "hle-call", nid);
++    if (const hle_fast_fn f = hle_fast(nid)) {
++        /* The firmware import stub this call replaces stores the caller's TOC
++         * in the ABI slot (std r2,40(r1)) before entering the PRX, and the
++         * caller reloads it after the call (ld r2,40(r1)). The slow path's
++         * _TocGuard writes that slot; the fast path returns before reaching
++         * it, so do the stub's store here. Without it a caller whose slot held
++         * 0 (3D Dot Game Heroes' allocator lock around sys_lwmutex_lock)
++         * comes back with r2 = 0 and every TOC-relative load hits page 0. */
++        vm_write64(ctx->gpr[1] + 0x28, ctx->gpr[2]);
+         if (f(ctx)) return;
++    }
+ 
+     /* HLE_BT_EVERY=<n>: dump the calling thread's guest stack every nth HLE
+      * call it makes. WAITBT_EVERY only samples threads that are blocking on an
+@@ -744,6 +755,9 @@ extern "C" void ps3_hle_call(uint32_t nid, ppu_context* ctx)
+                 fprintf(stderr, "[TUNERFIX] sysPrxForUser 0xE0998DBF -> 0x8001112E (profiler not loaded)\n");
+             return;
+         }
++        if (ps3_strict())
++            ps3_strict_fail("unresolved-nid", "import NID 0x%08X has no HLE handler (lr=0x%08X tid=%llu)",
++                            nid, (uint32_t)ctx->lr, (unsigned long long)ctx->thread_id);
+         static int logged = 0;
+         if (logged < 40) { fprintf(stderr, "[hle] unresolved NID 0x%08X\n", nid); logged++; }
+         /* cellSaveData call-shape capture: dump r3-r10 + resolve r7/r8 as OPD
+diff --git a/runtime/ppu/ppu_loader.cpp b/runtime/ppu/ppu_loader.cpp
+index 7166802..bf913d3 100644
+--- a/runtime/ppu/ppu_loader.cpp
++++ b/runtime/ppu/ppu_loader.cpp
+@@ -2565,8 +2565,26 @@ extern "C" void ps3_indirect_call_to(ppu_context* ctx, uint32_t target)
+     ps3_indirect_call(ctx);
+ }
+ 
++/* PS3_TOCCHECK=1: report the first few indirect or firmware calls made with
++ * r2 (the TOC) equal to 0. A zero TOC turns every TOC-relative global access
++ * into a read of the null page, so the visible symptom (null-page traffic,
++ * runaway recursion) is far from the cause; this names the first call that
++ * already carries the bad TOC. */
++extern "C" void ppu_toc_check(ppu_context* ctx, const char* where, uint32_t target)
++{
++    static int on = -1;
++    if (on < 0) on = getenv("PS3_TOCCHECK") ? 1 : 0;
++    if (!on || (uint32_t)ctx->gpr[2] != 0) return;
++    static std::atomic<int> n{0};
++    if (n.fetch_add(1) >= 4) return;
++    fprintf(stderr, "[toccheck] r2=0 at %s target=0x%08X lr=0x%08X tid=%llu\n", where, target,
++            (uint32_t)ctx->lr, (unsigned long long)ctx->thread_id);
++    ppu_dump_guest_stack(ctx, "toccheck");
++}
++
+ extern "C" void ps3_indirect_call(ppu_context* ctx)
+ {
++    ppu_toc_check(ctx, "indirect-call", (uint32_t)ctx->ctr);
+     static int on = -1;
+     if (on < 0) on = getenv("PPU_CSCHECK") ? 1 : 0;
+     { static int hg = -1; if (hg < 0) hg = getenv("PS3_ICALL_GATE") ? 1 : 0;
+-- 
+2.56.0
+

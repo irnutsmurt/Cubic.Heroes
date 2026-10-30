@@ -1,0 +1,40 @@
+From 146603499d7af057a4d72d5328f92de4e5603a32 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Thu, 29 Oct 2026 22:36:08 -0700
+Subject: [PATCH 22/28] find_spu_functions: single code pointers in data
+ segments seed functions
+
+Vtables and handler records interleave code pointers with other fields
+and never form the 3-word runs the table recogniser wants. In a
+non-executable segment one in-range instruction address is taken
+(Bullet's collision task dispatches through 0x182D0 stored at LS
+0x2D708). A spurious entry only splits a lifted function.
+---
+ tools/find_spu_functions.py | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/tools/find_spu_functions.py b/tools/find_spu_functions.py
+index af16afd..a336fa7 100644
+--- a/tools/find_spu_functions.py
++++ b/tools/find_spu_functions.py
+@@ -528,8 +528,16 @@ def collect_function_pointer_tables(buf, phs, code_start, code_end,
+         seg = buf[off:off + fsz]
+         skew = (-vaddr) & 3                 # keep words on the LS 4-byte grid
+         run = []
++        # In a NON-executable segment a single in-range instruction address is
++        # taken too: C++ vtables and handler records interleave code pointers
++        # with other fields, so they never form runs. 3D Dot Game Heroes'
++        # Bullet collision task (spu_0003) keeps {0x12D88, 0x182D0} beside
++        # data at LS 0x2D704 and dispatches through them. A spurious entry
++        # only splits a lifted function in two; a missed one is a branch the
++        # lifted code cannot take.
++        need = min_run if (ph.get("flags", 0) & 1) else 1
+         def _flush(r):
+-            if len(r) >= min_run and len(set(r)) >= 2:
++            if len(r) >= need and (need == 1 or len(set(r)) >= 2):
+                 targets.update(r)
+         i = skew
+         while i + 4 <= len(seg):
+-- 
+2.56.0
+

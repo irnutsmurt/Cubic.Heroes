@@ -1,0 +1,5 @@
+{
+  "_comment": "Guest setjmp/longjmp (libc, used by Lua 5.1 luaD_rawrunprotected/luaD_throw). Found by their f14-f31 save/restore through r3; each has exactly one call site (0x7FBDD0, 0x7FBCD4). Passed to ppu_lifter.py --sjlj.",
+  "setjmp": ["0x971d2c"],
+  "longjmp": ["0x971e50"]
+}

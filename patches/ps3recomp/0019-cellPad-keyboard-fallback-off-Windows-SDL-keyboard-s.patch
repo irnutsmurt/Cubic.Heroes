@@ -1,0 +1,80 @@
+From 1714823fbeaf362f45fcf58f3eafddf2899e153c Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Thu, 29 Oct 2026 22:27:22 -0700
+Subject: [PATCH 19/28] cellPad: keyboard fallback off Windows (SDL keyboard
+ state)
+
+The Windows keyboard map (arrows, Z/X/A/S, Q/W, 1/2, Enter, Tab), read
+from SDL's keyboard state while one of the process's SDL windows (the
+Vulkan backend's) has focus. PAD_NO_KEYBOARD=1 turns it off.
+---
+ libs/input/cellPad.c | 46 +++++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 45 insertions(+), 1 deletion(-)
+
+diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
+index afdd93d..11513fc 100644
+--- a/libs/input/cellPad.c
++++ b/libs/input/cellPad.c
+@@ -627,6 +627,50 @@ static void pad_poll_sdl2(void)
+     }
+ }
+ 
++#if !defined(_WIN32) && PAD_BACKEND_SDL2
++/* Keyboard fallback off Windows: the same key map as the Windows one above,
++ * read from SDL's keyboard state while one of this process's SDL windows (the
++ * Vulkan backend's, PS3RECOMP_VK_WINDOW=1) has keyboard focus. That window's
++ * event pump keeps the state current. PAD_NO_KEYBOARD=1 turns it off. */
++static void pad_poll_keyboard(void)
++{
++    static int off = -1;
++    if (off < 0) off = getenv("PAD_NO_KEYBOARD") ? 1 : 0;
++    if (off || !SDL_WasInit(SDL_INIT_VIDEO)) return;
++
++    PadHostState* hs = &s_host_state[0];
++    u16 btns = 0;
++    if (SDL_GetKeyboardFocus()) {
++        static const struct { SDL_Scancode sc; u16 btn; } map[] = {
++            { SDL_SCANCODE_UP,     CELL_PAD_CTRL_UP },      { SDL_SCANCODE_DOWN,  CELL_PAD_CTRL_DOWN },
++            { SDL_SCANCODE_LEFT,   CELL_PAD_CTRL_LEFT },    { SDL_SCANCODE_RIGHT, CELL_PAD_CTRL_RIGHT },
++            { SDL_SCANCODE_Z,      CELL_PAD_CTRL_CROSS },   { SDL_SCANCODE_X,     CELL_PAD_CTRL_CIRCLE },
++            { SDL_SCANCODE_A,      CELL_PAD_CTRL_SQUARE },  { SDL_SCANCODE_S,     CELL_PAD_CTRL_TRIANGLE },
++            { SDL_SCANCODE_Q,      CELL_PAD_CTRL_L1 },      { SDL_SCANCODE_W,     CELL_PAD_CTRL_R1 },
++            { SDL_SCANCODE_1,      CELL_PAD_CTRL_L2 },      { SDL_SCANCODE_2,     CELL_PAD_CTRL_R2 },
++            { SDL_SCANCODE_RETURN, CELL_PAD_CTRL_START },   { SDL_SCANCODE_TAB,   CELL_PAD_CTRL_SELECT },
++        };
++        int n = 0;
++        const Uint8* ks = SDL_GetKeyboardState(&n);
++        for (unsigned i = 0; ks && i < sizeof map / sizeof map[0]; i++)
++            if ((int)map[i].sc < n && ks[map[i].sc]) btns |= map[i].btn;
++    }
++    /* No focus: everything released, so a key held while switching away
++     * does not stay down. */
++    hs->buttons   = btns;
++    hs->connected = 1;
++    hs->analog_lx = (u8)((btns & CELL_PAD_CTRL_LEFT) ? 0 : (btns & CELL_PAD_CTRL_RIGHT) ? 255 : 128);
++    hs->analog_ly = (u8)((btns & CELL_PAD_CTRL_UP) ? 0 : (btns & CELL_PAD_CTRL_DOWN) ? 255 : 128);
++    hs->analog_rx = hs->analog_ry = 128;
++    hs->trigger_l2 = (u8)((btns & CELL_PAD_CTRL_L2) ? 255 : 0);
++    hs->trigger_r2 = (u8)((btns & CELL_PAD_CTRL_R2) ? 255 : 0);
++    { static int said = 0;
++      if (!said && btns) { said = 1;
++          printf("[cellPad] keyboard active on port 0 (no game controller)\n");
++          fflush(stdout); } }
++}
++#endif
++
+ static void pad_init_backend(void)
+ {
+     if (!s_sdl_inited) {
+@@ -710,7 +754,7 @@ static void pad_poll_backend(void)
+ #elif PAD_BACKEND_SDL2
+     pad_poll_sdl2();
+ #endif
+-#ifdef _WIN32
++#if defined(_WIN32) || PAD_BACKEND_SDL2
+     if (!s_host_state[0].connected) pad_poll_keyboard();
+ #endif
+     pad_track_assign();
+-- 
+2.56.0
+

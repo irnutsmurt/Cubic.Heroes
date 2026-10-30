@@ -1,0 +1,90 @@
+From 404b8971b67f04bbcfe013c11ead75d7c659463d Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Fri, 30 Oct 2026 00:27:54 -0700
+Subject: [PATCH 24/28] cellAudio: pace the POSIX mixing thread like the
+ Windows one
+
+The POSIX thread mixed whenever SDL's queue held under four blocks and
+slept 5 ms otherwise, running ahead of or behind the PS3's block per
+5.33 ms. It now waits for room in the device queue, or paces on the
+monotonic clock with no device, and gains AUDIO_PEAK, AUDIO_WAV and
+AUDIO_RATE as on Windows.
+---
+ libs/audio/cellAudio.c | 52 ++++++++++++++++++++++++++++++++++--------
+ 1 file changed, 43 insertions(+), 9 deletions(-)
+
+diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
+index 02b751b..c61a49f 100644
+--- a/libs/audio/cellAudio.c
++++ b/libs/audio/cellAudio.c
+@@ -649,24 +649,58 @@ static unsigned __stdcall audio_mix_thread_func(void* arg)
+     return 0;
+ }
+ #else
++/* POSIX: the same pacing as the Windows thread above. The old loop mixed
++ * whenever SDL's queue held under four blocks and slept 5 ms otherwise, so
++ * it ran ahead or behind the PS3's one block per 5.33 ms depending on how
++ * the device drained; with no device it mixed flat out. */
++static double audio_now_s(void)
++{
++    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
++    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
++}
+ static void* audio_mix_thread_func(void* arg)
+ {
+     (void)arg;
++    ps3_thread_name("audio mix");
+     printf("[cellAudio] Mixing thread started\n");
+-
++    const double t_block = (double)CELL_AUDIO_BLOCK_SAMPLES / CELL_AUDIO_SAMPLE_RATE;
++    double t0 = audio_now_s();
++    unsigned long long blocks = 0;
+     while (s_mix_thread_running) {
++        const int room = audio_backend_room();
++        if (room >= 0 && room < CELL_AUDIO_BLOCK_SAMPLES) { audio_backend_wait(); continue; }
++        if (room < 0) {                                  /* no device: the clock */
++            const double now = audio_now_s(), due = t0 + (double)blocks * t_block;
++            if (now < due) { usleep(1000); continue; }
++            if (now - due > 0.05) t0 = now - (double)blocks * t_block;   /* drop a backlog */
++        }
++        blocks++;
+         audio_mix_one_block();
++        { static int _ap = -1; if (_ap < 0) _ap = getenv("AUDIO_PEAK") ? 1 : 0;
++          if (_ap) { static unsigned _n = 0; float pk = 0.0f;
++            for (u32 i = 0; i < CELL_AUDIO_BLOCK_SAMPLES * 2; i++) {
++                float v = s_mix_buffer[i]; if (v < 0) v = -v; if (v > pk) pk = v; }
++            if ((++_n % 200) == 0 || (pk > 0.001f && _n < 40))
++                fprintf(stderr, "[audio-peak] block#%u peak=%.4f\n", _n, pk); } }
++        /* AUDIO_WAV=<file>: append the final mix as raw f32le stereo 48 kHz
++         * (ffmpeg -f f32le -ar 48000 -ac 2 -i <file>). */
++        { static FILE* _wf = (FILE*)-1;
++          if (_wf == (FILE*)-1) { const char* e = getenv("AUDIO_WAV"); _wf = e ? fopen(e, "wb") : NULL; }
++          if (_wf) fwrite(s_mix_buffer, sizeof(float), CELL_AUDIO_BLOCK_SAMPLES * 2, _wf); }
+         audio_backend_submit(s_mix_buffer, CELL_AUDIO_BLOCK_SAMPLES);
++        /* AUDIO_RATE=1: blocks mixed per second (real time 187.5) and the
++         * share of silent blocks, every 5 s. */
++        { static int on = -1; if (on < 0) on = getenv("AUDIO_RATE") ? 1 : 0;
++          if (on) { static double r0; static unsigned n, z;
++            const double now = audio_now_s(); if (!r0) r0 = now; n++;
++            { int nz = 0; for (u32 i = 0; i < CELL_AUDIO_BLOCK_SAMPLES * 2; i++) if (s_mix_buffer[i] != 0.0f) { nz = 1; break; }
++              if (!nz) z++; }
++            if (now - r0 >= 5.0) {
++                fprintf(stderr, "[audio-rate] %.1f blocks/s (real time 187.5), silent %.1f%%\n",
++                        n / (now - r0), n ? 100.0 * z / n : 0.0);
++                n = z = 0; r0 = now; } } }
+         audio_notify_event_queues();
+-
+-        u32 queued = audio_backend_queued_samples();
+-        if (queued > CELL_AUDIO_BLOCK_SAMPLES * 4) {
+-            usleep(5000);
+-        } else {
+-            usleep(2000);
+-        }
+     }
+-
+     printf("[cellAudio] Mixing thread stopped\n");
+     return NULL;
+ }
+-- 
+2.56.0
+

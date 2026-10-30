@@ -1,0 +1,19 @@
+{
+  "_comment": [
+    "SPU images that are position-independent plugins: FMOD Ex's SPU mixer DMAs them into its",
+    "local store wherever it has room and branches in. They are lifted with spu_lifter.py",
+    "--relocatable at their link address and dispatched displaced (spu_overlay_register_relocatable).",
+    "Selection: every embedded SPU ELF linked at LS 0x80 except the two mixers (entry 0xF0,",
+    "spu_0005/spu_0006, which run as SPU thread images at their link address).",
+    "Observed displaced so far: spu_0008 (codec, entry 0x218) at LS 0x156F0 (delta 0x15670).",
+    "A relocatable lift of an image that does run at its link address behaves the same (delta 0).",
+    "tools/pipeline.py computes each image's source EA (its executable segment in the EBOOT)."
+  ],
+  "images": [
+    "spu_0007_at_00FA2C80", "spu_0008_at_00FA9B80", "spu_0009_at_00FAD200", "spu_0010_at_00FB0180",
+    "spu_0011_at_00FB0E80", "spu_0012_at_00FB4D00", "spu_0013_at_00FB5900", "spu_0014_at_00FB7180",
+    "spu_0015_at_00FB7E00", "spu_0016_at_00FB9B80", "spu_0017_at_00FBAF80", "spu_0018_at_00FBC780",
+    "spu_0019_at_00FBF400", "spu_0020_at_00FC0A00", "spu_0021_at_00FC1400", "spu_0022_at_00FC2000",
+    "spu_0023_at_00FC3880", "spu_0024_at_00FC7180", "spu_0025_at_00FCA500"
+  ]
+}

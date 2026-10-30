@@ -1,0 +1,261 @@
+From d1d93db87d3b7f4b78cd4554b0209de89c398de6 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Thu, 29 Oct 2026 21:14:43 -0700
+Subject: [PATCH 18/28] cellGcmSys: report areas in guest memory; main reports
+ at IO 0x0E000000
+
+NV4097_GET_REPORT with CELL_GCM_CONTEXT_DMA_REPORT_LOCATION_MAIN
+(0xBAD68000) took its offset as a plain IO offset. On hardware (and in
+RPCS3) it is relative to IO 0x0E000000. 3D Dot Game Heroes' reports at
+offsets 0x4000.. therefore landed in its command buffer at IO 0x4xxx, and
+the FIFO walker decoded them as commands: bad JUMP/CALL, resync to put,
+dropped fences, and finally a wait on a fence that never came.
+
+The report getters also handed the guest host pointers into a host array.
+Local reports now live in guest memory (inject page + 0x800000, 2048
+slots), main reports at io2ea(0x0E000000 + index * 16), and
+cellGcmGetReportDataAddress[Location], cellGcmGetReport[DataLocation] and
+cellGcmGetTimeStamp[Location] read them there, as RPCS3 does.
+
+Also: GCM_PASS_TRACE=<n> logs walker passes and CALL/RET;
+GCM_FRAME_DUMP=<dir> writes each pass's [get, put) words for offline
+decoding.
+---
+ libs/video/cellGcmSys.c | 132 ++++++++++++++++++++++++++--------------
+ 1 file changed, 86 insertions(+), 46 deletions(-)
+
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index 7d4b56d..49e4703 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -343,14 +343,42 @@ static CellGcmTileInfo s_tiles[CELL_GCM_MAX_TILE_COUNT];
+ /* Zcull configuration (8 zcull regions) */
+ static CellGcmZcullInfo s_zcull[CELL_GCM_MAX_ZCULL_COUNT];
+ 
+-/* Report data area (256 slots, each 16 bytes) */
+-static CellGcmReportData s_report_data[CELL_GCM_MAX_REPORT_COUNT];
++/* Report areas live in guest memory, where the title reads them itself
++ * (RPCS3 cellGcmSys.cpp cellGcmGetReportDataAddressLocation):
++ *   LOCAL: 2048 CellGcmReportData {u64 timer; u32 value; u32 pad} in the
++ *          injected RSX page (on hardware, next to the labels in RSX memory)
++ *   MAIN:  IO offset 0x0E000000 + index * 16, i.e. wherever the title mapped
++ *          that IO range (cellGcmMapEaIoAddress(.., 0x0E000000, ..)).
++ * They used to be a host array, and the address getters handed the guest a
++ * host pointer. */
++#define GCM_REPORT_LOCAL_GUEST (VM_HLE_INJECT_BASE + 0x800000u)
++#define GCM_REPORT_LOCAL_COUNT 2048u
++#define GCM_REPORT_MAIN_IO     0x0E000000u
++static u32 gcm_io2ea(u32 io);
++static u32 gcm_report_ea(u32 index, u32 location)
++{
++    if (location == CELL_GCM_LOCATION_MAIN) return gcm_io2ea(GCM_REPORT_MAIN_IO + index * 16u);
++    return index < GCM_REPORT_LOCAL_COUNT ? GCM_REPORT_LOCAL_GUEST + index * 16u : 0u;
++}
++static void gcm_report_write(u32 ea, u64 ts, u32 val)
++{
++    if (!ea) return;
++    vm_write32(ea, (u32)(ts >> 32));
++    vm_write32(ea + 4u, (u32)ts);
++    vm_write32(ea + 8u, val);
++    vm_write32(ea + 12u, 0u);
++}
++static void gcm_reports_reset(void)
++{
++    if (vm_base) memset(vm_base + GCM_REPORT_LOCAL_GUEST, 0, GCM_REPORT_LOCAL_COUNT * 16u);
++}
+ 
+ /* NV4097_SET_CONTEXT_DMA_REPORT (0x1A8): where NV4097_GET_REPORT writes.
+- * Local (0xFEED0000, the default): the s_report_data slots above, read back
++ * Local (0xFEED0000, the default): the guest-resident local report slots above, read back
+  * through cellGcmGetReport* / cellGcmGetReportDataAddress. Main memory
+  * (0xFEED0001, or CELL_GCM_CONTEXT_DMA_REPORT_LOCATION_MAIN 0xBAD68000): the
+- * report's 24-bit offset is an IO offset, and the 16-byte report goes to
++ * report's 24-bit offset is an IO offset (relative to IO 0x0E000000 for
++ * 0xBAD68000), and the 16-byte report goes to
+  * guest memory at gcm_io2ea(offset), where the title reads it itself.
+  * Killzone 3 sets 0xFEED0001 and keeps its reports in its own frame data. */
+ static u32 s_report_dma = 0xFEED0000u;
+@@ -513,7 +541,7 @@ s32 cellGcmInit(u32 cmdSize, u32 ioSize, u32 ioAddress)
+     __atomic_store_n(&s_io_mapping_hw, 0, __ATOMIC_RELAXED);
+     memset(s_tiles, 0, sizeof(s_tiles));
+     memset(s_zcull, 0, sizeof(s_zcull));
+-    memset(s_report_data, 0, sizeof(s_report_data));
++    gcm_reports_reset();
+     s_report_dma = 0xFEED0000u;
+     memset(s_labels, 0, sizeof(s_labels));
+     memset(s_io_address_table, 0xFF, sizeof(s_io_address_table));
+@@ -2042,17 +2070,16 @@ static void gcm_3d_method(rsx_state* st, u32 m, u32 v, int legacy_state_live)
+         const int main_mem = s_report_dma == 0xFEED0001u || s_report_dma == 0xBAD68000u;
+         { static int rn = 0; if (PS3_LOG_FIRST(rn, 6)) printf("[GET_REPORT] type=%u off=0x%X dma=0x%08X%c", v >> 24, off, s_report_dma, 10); }
+         if (main_mem) {
+-            /* CellGcmReportData, big-endian: u64 timer, u32 value, u32 padding. */
+-            const u32 rea = gcm_io2ea(off);
+-            if (rea) {
+-                vm_write32(rea, (u32)(ts >> 32));
+-                vm_write32(rea + 4u, (u32)ts);
+-                vm_write32(rea + 8u, val);
+-                vm_write32(rea + 12u, 0u);
+-            } else { static int un = 0; if (PS3_LOG_FIRST(un, 4)) printf("[GET_REPORT] main-memory offset 0x%X is not IO-mapped%c", off, 10); }
+-        } else if (idx < CELL_GCM_MAX_REPORT_COUNT) {
+-            s_report_data[idx].timestamp = ts;
+-            s_report_data[idx].value = val;
++            /* CellGcmReportData, big-endian: u64 timer, u32 value, u32 padding.
++             * CELL_GCM_CONTEXT_DMA_REPORT_LOCATION_MAIN offsets are relative to
++             * IO 0x0E000000 (RPCS3 rsx::get_address). Taken as plain IO
++             * offsets they landed in 3D Dot Game Heroes' command buffer at IO
++             * 0x4xxx and the FIFO walker then decoded the reports as commands. */
++            const u32 rea = gcm_io2ea(s_report_dma == 0xBAD68000u ? GCM_REPORT_MAIN_IO + off : off);
++            if (rea) gcm_report_write(rea, ts, val);
++            else { static int un = 0; if (PS3_LOG_FIRST(un, 4)) printf("[GET_REPORT] main-memory offset 0x%X is not IO-mapped%c", off, 10); }
++        } else if (idx < GCM_REPORT_LOCAL_COUNT) {
++            gcm_report_write(GCM_REPORT_LOCAL_GUEST + idx * 16u, ts, val);
+         }
+     }
+ }
+@@ -2193,6 +2220,25 @@ static void gcm_rsx_process_fifo_unlocked(void)
+           fflush(stderr);
+       } }
+ 
++    /* GCM_PASS_TRACE=<n>: the first n passes that have work, with get and put
++     * at entry; CALL/RET taken are logged with them. */
++    { static int pt = -1; if (pt < 0) { const char* e = getenv("GCM_PASS_TRACE"); pt = e ? atoi(e) : 0; }
++      if (pt > 0 && s_fifo_getoff != put) { pt--;
++          fprintf(stderr, "[pass] get=%08X put=%08X call=%08X\n", s_fifo_getoff, put, s_fifo_calloff); } }
++    /* GCM_FRAME_DUMP=<dir>: write the words [get, put) of each of the first 64
++     * non-wrapping passes to <dir>/pass_<get>_<put>.bin (big-endian, as in
++     * guest memory), for decoding offline. */
++    { static int fd = -1; static char dir[400]; static int nd = 0;
++      if (fd < 0) { const char* e = getenv("GCM_FRAME_DUMP"); fd = e && *e; if (fd) snprintf(dir, sizeof dir, "%s", e); }
++      if (fd && nd < 64 && put > s_fifo_getoff && put - s_fifo_getoff < 0x100000u) {
++          char path[512]; snprintf(path, sizeof path, "%s/pass_%08X_%08X.bin", dir, s_fifo_getoff, put);
++          FILE* f = fopen(path, "wb");
++          if (f) { nd++;
++              for (u32 io = s_fifo_getoff; io < put; io += 4) {
++                  u32 ea = gcm_io2ea(io); u32 v = ea ? vm_read32(ea) : 0xDEADDEADu;
++                  unsigned char b[4] = { (unsigned char)(v >> 24), (unsigned char)(v >> 16), (unsigned char)(v >> 8), (unsigned char)v };
++                  fwrite(b, 1, 4, f); }
++              fclose(f); } } }
+     int budget = 0x100000;                    /* words per tick cap */
+     /* GCM_DRAINDBG also reports WHY each pass stopped. A drain that ends far
+      * short of `put` every tick is the signature of a FIFO that can never
+@@ -2414,11 +2460,15 @@ static void gcm_rsx_process_fifo_unlocked(void)
+         if ((w & 3) == 2) {                    /* CALL: offset | 2 */
+             { u32 tgt = w & 0x1FFFFFFCu;
+               if (!gcm_io2ea(tgt)) { gcm_fifo_bad_branch("CALL", tgt, w); gcm_fifo_resync_why("unmapped-CALL", &s_fifo_getoff, put); break; }
++              { static int pt = -1; if (pt < 0) pt = getenv("GCM_PASS_TRACE") ? 1 : 0;
++                if (pt) fprintf(stderr, "[CALL] %08X -> %08X\n", s_fifo_getoff, tgt); }
+               s_fifo_calloff = s_fifo_getoff + 4;
+               s_fifo_getoff  = tgt; }
+             continue;
+         }
+         if (w == 0x00020000u) {                /* RET */
++            { static int pt = -1; if (pt < 0) pt = getenv("GCM_PASS_TRACE") ? 1 : 0;
++              if (pt) fprintf(stderr, "[RET] %08X -> %08X\n", s_fifo_getoff, s_fifo_calloff); }
+             s_fifo_getoff = s_fifo_calloff;
+             s_fifo_calloff = 0;
+             continue;
+@@ -3755,11 +3805,11 @@ u32* cellGcmGetLabelAddress(u8 index)
+ /* NID: 0x8572ADE4 */
+ CellGcmReportData* cellGcmGetReportDataAddress(u32 index)
+ {
+-    if (index >= CELL_GCM_MAX_REPORT_COUNT) {
++    if (index >= GCM_REPORT_LOCAL_COUNT) {
+         printf("[cellGcmSys] WARNING: GetReportDataAddress index %u out of range\n", index);
+         return NULL;
+     }
+-    return &s_report_data[index];
++    return (CellGcmReportData*)(uintptr_t)gcm_report_ea(index, CELL_GCM_LOCATION_LOCAL);
+ }
+ 
+ /* NID: 0x97FC4B73 */
+@@ -3769,9 +3819,9 @@ u32 cellGcmGetReport(u32 type, u32 index)
+ {
+     { static unsigned n = 0;   /* unsigned: the periodic line keeps counting, and wrapping is defined */
+       if (n++ < 8 || (n % 2000) == 0) printf("[cellGcmSys] GetReport(type=%u, index=%u) -> %u%c", type, index,
+-                          index < CELL_GCM_MAX_REPORT_COUNT ? s_report_data[index].value : 0u, 10); }
+-    if (index >= CELL_GCM_MAX_REPORT_COUNT) return 0;
+-    return s_report_data[index].value;
++                          index < GCM_REPORT_LOCAL_COUNT ? vm_read32(gcm_report_ea(index, 0) + 8u) : 0u, 10); }
++    if (index >= GCM_REPORT_LOCAL_COUNT) return 0;
++    return vm_read32(gcm_report_ea(index, CELL_GCM_LOCATION_LOCAL) + 8u);
+ }
+ 
+ u64 cellGcmGetTimeStamp(u32 index)
+@@ -3779,12 +3829,10 @@ u64 cellGcmGetTimeStamp(u32 index)
+     if (index >= CELL_GCM_MAX_REPORT_COUNT)
+         return 0;
+ 
+-    /*
+-     * On real hardware this reads the RSX timestamp for a given report index.
+-     * We return the host timestamp in nanoseconds as a reasonable approximation.
+-     */
+-    s_report_data[index].timestamp = get_timestamp_ns();
+-    return s_report_data[index].timestamp;
++    /* The timer the RSX stored with this local report (RPCS3). */
++    if (index >= GCM_REPORT_LOCAL_COUNT) return 0;
++    const u32 ea = gcm_report_ea(index, CELL_GCM_LOCATION_LOCAL);
++    return ((u64)vm_read32(ea) << 32) | vm_read32(ea + 4u);
+ }
+ 
+ /* ---------------------------------------------------------------------------
+@@ -3955,13 +4003,9 @@ void* cellGcmGetNotifyDataAddress(u32 index)
+  * a location the report table does not distinguish. */
+ u64 cellGcmGetTimeStampLocation(u32 index, u32 location)
+ {
+-    (void)location;
+-
+-    if (index >= CELL_GCM_MAX_REPORT_COUNT)
+-        return 0;
+-
+-    s_report_data[index].timestamp = get_timestamp_ns();
+-    return s_report_data[index].timestamp;
++    const u32 ea = gcm_report_ea(index, location);
++    if (!ea) return 0;
++    return ((u64)vm_read32(ea) << 32) | vm_read32(ea + 4u);
+ }
+ 
+ /* SetTileInfo — alternative to SetTile with same parameters */
+@@ -4081,7 +4125,7 @@ void cellGcmTerminate(void)
+     __atomic_store_n(&s_io_mapping_hw, 0, __ATOMIC_RELAXED);
+     memset(s_tiles, 0, sizeof(s_tiles));
+     memset(s_zcull, 0, sizeof(s_zcull));
+-    memset(s_report_data, 0, sizeof(s_report_data));
++    gcm_reports_reset();
+     s_report_dma = 0xFEED0000u;
+     memset(s_labels, 0, sizeof(s_labels));
+     memset(s_io_address_table, 0xFF, sizeof(s_io_address_table));
+@@ -4331,24 +4375,20 @@ void cellGcmSortRemapEaIoAddress(void)
+ /* Report data with location parameter */
+ CellGcmReportData* cellGcmGetReportDataAddressLocation(u32 index, u32 location)
+ {
+-    (void)location;  /* We only have one report area */
+-
+-    if (index >= CELL_GCM_MAX_REPORT_COUNT) {
+-        printf("[cellGcmSys] WARNING: GetReportDataAddressLocation index %u out of range\n", index);
++    const u32 ea = gcm_report_ea(index, location);
++    if (!ea) {
++        printf("[cellGcmSys] WARNING: GetReportDataAddressLocation(index %u, location %u) has no address\n",
++               index, location);
+         return NULL;
+     }
+-    return &s_report_data[index];
++    return (CellGcmReportData*)(uintptr_t)ea;
+ }
+ 
+ /* Get report value at index with location */
+ u32 cellGcmGetReportDataLocation(u32 index, u32 location)
+ {
+-    (void)location;
+-
+-    if (index >= CELL_GCM_MAX_REPORT_COUNT)
+-        return 0;
+-
+-    return s_report_data[index].value;
++    const u32 ea = gcm_report_ea(index, location);
++    return ea ? vm_read32(ea + 8u) : 0u;
+ }
+ 
+ /* ---------------------------------------------------------------------------
+-- 
+2.56.0
+

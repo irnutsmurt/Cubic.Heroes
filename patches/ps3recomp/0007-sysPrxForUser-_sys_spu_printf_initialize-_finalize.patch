@@ -1,0 +1,52 @@
+From daf77936b9a2c8edae088b4151f141f0bf500ce5 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Thu, 29 Oct 2026 16:36:06 -0700
+Subject: [PATCH 07/28] sysPrxForUser: _sys_spu_printf_initialize/_finalize
+
+liblv2 only records the title's four SPU printf callbacks (attach/detach
+group, attach/detach thread) for the later attach calls, and the title's
+own _SPU_printf_server thread does the printing. Store and clear them.
+---
+ libs/system/sysPrxForUser.c | 26 ++++++++++++++++++++++++++
+ 1 file changed, 26 insertions(+)
+
+diff --git a/libs/system/sysPrxForUser.c b/libs/system/sysPrxForUser.c
+index b2cba7b..88db3b2 100644
+--- a/libs/system/sysPrxForUser.c
++++ b/libs/system/sysPrxForUser.c
+@@ -199,6 +199,32 @@ void sys_process_exit(s32 exitcode)
+     exit(exitcode);
+ }
+ 
++/* ---------------------------------------------------------------------------
++ * SPU printf
++ *
++ * sys_spu_printf_initialize() (an SDK inline) starts the title's own
++ * "_SPU_printf_server" PPU thread and hands liblv2 four guest callbacks:
++ * attach/detach an SPU thread group, attach/detach an SPU thread. liblv2 only
++ * stores them; _sys_spu_printf_attach_group() and friends later call back
++ * into the title. The callbacks are guest OPD addresses, kept as such.
++ * -----------------------------------------------------------------------*/
++static u32 s_spu_printf_cb[4];   /* agcb, dgcb, atcb, dtcb */
++
++s32 _sys_spu_printf_initialize(u32 agcb, u32 dgcb, u32 atcb, u32 dtcb)
++{
++    s_spu_printf_cb[0] = agcb; s_spu_printf_cb[1] = dgcb;
++    s_spu_printf_cb[2] = atcb; s_spu_printf_cb[3] = dtcb;
++    printf("[sysPrxForUser] _sys_spu_printf_initialize(agcb=0x%08X dgcb=0x%08X atcb=0x%08X dtcb=0x%08X)\n",
++           agcb, dgcb, atcb, dtcb);
++    return CELL_OK;
++}
++
++s32 _sys_spu_printf_finalize(void)
++{
++    memset(s_spu_printf_cb, 0, sizeof s_spu_printf_cb);
++    return CELL_OK;
++}
++
+ s32 sys_process_getpid(void)
+ {
+     return 1001;
+-- 
+2.56.0
+

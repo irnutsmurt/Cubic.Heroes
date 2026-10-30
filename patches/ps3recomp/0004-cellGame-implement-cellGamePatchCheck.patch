@@ -1,0 +1,54 @@
+From 1d5d6dbcfc6ca70bac79d7a217cf3a48f5f16a8a Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Thu, 29 Oct 2026 16:28:39 -0700
+Subject: [PATCH 04/28] cellGame: implement cellGamePatchCheck
+
+A disc or HDD boot is not a patch boot, so answer
+CELL_GAME_ERROR_NOTPATCH (CELL_GAME_ERROR_PARAM for a null size), which
+titles read as 'no update installed'. 3D Dot Game Heroes calls it during
+boot right after cellGameBootCheck.
+---
+ libs/system/cellGame.c | 14 ++++++++++++++
+ libs/system/cellGame.h |  1 +
+ 2 files changed, 15 insertions(+)
+
+diff --git a/libs/system/cellGame.c b/libs/system/cellGame.c
+index 5a1d37f..47dfbbe 100644
+--- a/libs/system/cellGame.c
++++ b/libs/system/cellGame.c
+@@ -382,6 +382,20 @@ s32 cellGameBootCheck(u32* type, u32* attributes, CellGameContentSize* size,
+     return CELL_OK;
+ }
+ 
++/* cellGamePatchCheck(size, reserved) -- "was this boot a game patch?". Only a
++ * title booted through an installed patch (PARAM.SFO CATEGORY "GD") gets a
++ * patch session; a disc or HDD boot answers CELL_GAME_ERROR_NOTPATCH, which
++ * titles treat as "no update installed" and carry on. 3D Dot Game Heroes
++ * calls it once during boot, right after cellGameBootCheck. */
++s32 cellGamePatchCheck(CellGameContentSize* size, void* reserved)
++{
++    uint32_t size_ea = (uint32_t)(uintptr_t)size;
++    (void)reserved;
++    if (!size_ea) return CELL_GAME_ERROR_PARAM;
++    printf("[cellGame] PatchCheck: not a patch boot (type=%u)\n", s_game_type);
++    return CELL_GAME_ERROR_NOTPATCH;
++}
++
+ s32 cellGameContentPermit(char* contentInfoPath, char* usrdirPath)
+ {
+     printf("[cellGame] ContentPermit() -> %s\n",
+diff --git a/libs/system/cellGame.h b/libs/system/cellGame.h
+index 734a2b7..d0b99df 100644
+--- a/libs/system/cellGame.h
++++ b/libs/system/cellGame.h
+@@ -151,6 +151,7 @@ s32 cellGameBootCheck(u32* type, u32* attributes, CellGameContentSize* size,
+ s32 cellGameContentPermit(char* contentInfoPath, char* usrdirPath);
+ 
+ s32 cellGameDataCheck(u32 type, const char* dirName, CellGameContentSize* size);
++s32 cellGamePatchCheck(CellGameContentSize* size, void* reserved);
+ 
+ s32 cellGameDataCheckCreate(u32 version, const char* dirName, u32 errDialog,
+                             void* funcStat, u32 container);
+-- 
+2.56.0
+

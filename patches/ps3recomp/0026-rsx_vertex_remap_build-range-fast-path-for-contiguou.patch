@@ -1,0 +1,56 @@
+From 23aa9700bf8dc36bd020f3b1db655090c796eb13 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Fri, 30 Oct 2026 00:27:54 -0700
+Subject: [PATCH 26/28] rsx_vertex_remap_build: range fast path for contiguous
+ index sets
+
+When every reference shares one base and the referenced range is smaller
+than the reference count, the unique set is that range and a vertex's
+slot is its offset in it: no hashing. Verified against the hash path on
+20,000 random index sets (refs[map[o]] == original[o]).
+---
+ libs/video/rsx_vertex_compact.c | 28 ++++++++++++++++++++++++++++
+ 1 file changed, 28 insertions(+)
+
+diff --git a/libs/video/rsx_vertex_compact.c b/libs/video/rsx_vertex_compact.c
+index e31b611..5f3ca3c 100644
+--- a/libs/video/rsx_vertex_compact.c
++++ b/libs/video/rsx_vertex_compact.c
+@@ -425,6 +425,34 @@ int rsx_vertex_remap_build(
+         remap->occurrence_capacity = count;
+     }
+ 
++    /* Range fast path. An indexed mesh normally references a contiguous
++     * block of vertices, each several times: when every reference shares one
++     * base and the referenced range is smaller than the reference count, the
++     * unique set is that range and a vertex's slot is its offset in it -- no
++     * hashing. (Unreferenced vertices inside the range are fetched too; they
++     * lie in the same vertex buffer.) Only when span < count, so a remap
++     * always happened as far as the caller can tell. */
++    {
++        const u32 b0 = refs[0].base_index;
++        u32 lo = refs[0].vertex_id, hi = lo, same = 1;
++        for (u32 i = 1; i < count; i++) {
++            const u32 v = refs[i].vertex_id;
++            same &= refs[i].base_index == b0;
++            lo = v < lo ? v : lo; hi = v > hi ? v : hi;
++        }
++        if (same && hi - lo < count - 1u) {
++            const u32 span = hi - lo + 1u;
++            for (u32 i = 0; i < count; i++)
++                remap->occurrence_to_unique[i] = refs[i].vertex_id - lo;
++            for (u32 k = 0; k < span; k++) {
++                refs[k].vertex_id = lo + k;
++                refs[k].base_index = b0;
++            }
++            *unique_count = span;
++            return 1;
++        }
++    }
++
+     if (count > UINT_MAX / 2u)
+         return 0;
+     u32 slot_capacity = 16u;
+-- 
+2.56.0
+
