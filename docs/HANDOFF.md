@@ -145,6 +145,15 @@ vblank pacing was fixed (patch 0034).
      to X11 automatically.
    - Linux laptop with GameMode: 20-30 fps in the overworld, dips to 6-12 at
      scene changes. Too slow to enjoy there.
+   - **Reference: RPCS3's fix for this game's random crashes (announced
+     2026-10-14).** On the PS3 the PPU can wake from an event and free a
+     SPURS task's context before the SPU has finished saving it, corrupting
+     the heap; RPCS3 works around it with "PPU Event Wake-Up Delay" = 35.
+     Our SPURS is HLE with SPU tasks on host threads, so the same race may
+     exist here (not seen yet; sessions so far were short). Fix it by
+     ordering, not a delay: signal the PPU only after the task's context save
+     (cellSpurs task save/exit path, libs/spurs) has completed. Long play
+     sessions are the test.
 7. Open issues: a flat beige quad over the castle path at ~180 s of
    `intro.drive` (pre-existing, both present modes); remaining walker cost
    (vertex data could stay in GPU buffers instead of being copied each
