@@ -50,15 +50,70 @@ game's logic is delta-time based; verified by `tests/scripts/speed.drive`
 (equal walk distances at 20 and 31 fps). A runtime bug that broke the game's
 vblank pacing was fixed (patch 0034).
 
-**Windows: in progress, untested at run time.**
-- The runtime (ps3recomp + patches) compiles for Windows with Zig's clang in
-  MinGW mode, Vulkan backend included (patch 0035): 0 errors. The port's own
-  files and the PPU scaffold compile too.
-- The full game build for Windows (`build/port-win`, CMake + Zig toolchain)
-  was compiling the 49 lifted chunks when the laptop was handed over; it had
-  no errors so far but **has never linked or run**.
-- Input and audio on Windows use the same SDL2 backends as Linux
-  (`PS3RECOMP_PAD_USE_SDL2`, `PS3RECOMP_AUDIO_USE_SDL2`), so the keyboard works.
+**Windows (RTX 3070, Ryzen 7 5800X; 2026-10-30): runs natively.**
+- The developer pipeline runs on Windows (`build/venv` is a Windows venv; the
+  laptop's is `build/venv-linux`); a lift is byte-identical to Linux (patch
+  0036). `zig_build.cmake_toolchain()` writes `.cmd` wrappers on a Windows
+  host. `.gitattributes` keeps LF everywhere; patches are `-text`.
+- `build/port-win` (CMake + Zig, Vulkan): links and runs, strict-clean, 0
+  unresolved NIDs. Title, CONTINUE with a save, overworld, walking. Imports
+  only the CRT, kernel32, SDL2, winmm, ws2_32, bcrypt (Vulkan loaded at run
+  time; no D3D12: `rsx_live_draw.c` is the no-op in Vulkan builds). Dev
+  builds write a PDB (`port/CMakeLists.txt`).
+- Fixed on the way: the Vulkan backend ignored the guest's polygon offset
+  (`set_depth_bias`), so the shadow pass shadowed the ground itself: that was
+  the "swirl" (moire rings). The diag watchdog and `DIAG_FPS` now run on
+  Windows; `DIAG_PROF` has a Windows sampler (SuspendThread + unwind tables)
+  and `tests/prof_report.py` symbolizes through DbgHelp.
+- Tests: `tests/boot_smoke.py` (both OSes; `SAVES=`, `WINDOW=1`, `DUMP=0` for
+  timing, `PASS_DUMP=1`, `WRAP=` for a profiler), `tests/nsys_capture.py`
+  (Nsight Systems; CPU sampling needs an Administrator shell),
+  `tests/scripts/load_save.drive`, `perf_walk.drive`, `save_passes.drive`.
+- **Speed (perf_walk.drive, gameplay): a solid 60 fps** (2026-10-30), from
+  ~45. Measured with PS3_FTRACE + `tests/frame_times.py`, 20 s of walking:
+  60.0 fps, median 16.7 ms, p99 ~21 ms, no frame over 25 ms, windowed or
+  headless. With the vblank at 125 Hz (DIAG_VBLANK_MS=8) the game runs ~101
+  fps: 60 has ~65% headroom; the game's own logic (~9 ms) is the next limit.
+  Gameplay speed is unchanged (tests/scripts/speed_save.drive: same position
+  at 60 and ~100 fps). Two changes:
+  - **Resident geometry** (ps3recomp `rsx_draw_engine.c` eng_geom_*, the
+    Vulkan backend's geom_* arena, `runtime/memory/vm_watch.c`): a draw's
+    converted vertices and index list stay in GPU memory under a key of the
+    registers they were built from, valid while no guest page they were read
+    from has been written. Writes are caught by page protection (a watched
+    page is read-only; the first write faults once into a vectored handler,
+    any thread, zero cost otherwise); kernel writes into guest memory release
+    their range first (fs reads). The walker's drain went 15.2 -> 4.8 ms.
+    RSX_GEOM_CACHE=0 is the old path; RSX_GEOM_CACHE_CHECK=1 rebuilds every
+    hit and compares (0 misses through boot, title, load, walking); the
+    castle frame is pixel-identical on and off. Windows only for now
+    (vm_watch is VEH-based; Linux needs the mprotect/SIGSEGV twin).
+    GetWriteWatch was tried first and dropped: ~7 us a call, polled per FIFO
+    pass it cost more than it saved.
+  - **The vblank on its own clock** (`port/main.cpp` vblank_clock): the game
+    paces every frame by the vblank count, which the walker used to tick from
+    a GetTickCount64 loop (16 ms steps, delayed by drains and presents, then
+    fired twice to catch up): ~7% of frames took two vblanks. Now a monotonic
+    clock ticks it within a fraction of a ms.
+- Before (for the record): the FIFO walker set the frame, drain 15.2 ms
+  (~9.4 ms of it re-reading, re-hashing and re-copying static vertex data:
+  the vertex cache saw ~100% hits and 0 changes, 491 blocks, 58 MB) plus
+  3.7 ms waiting at the flip for the previous present.
+- **Still emulation scaffolding** (to replace, not to keep): the RSX command
+  stream walked and translated to Vulkan (draw engine), the walker's 1 ms
+  FIFO poll, the present path (full-frame readback; present_mu held across
+  the GPU fence: the walker still waits ~3 ms a frame there), the emulated
+  vblank counter the game paces by, SPU code run inside the SPURS/lv2 HLE.
+  Native and meant to stay: resident geometry, vm_watch, the vblank clock.
+- SPU in play: FMOD's mixer (`spu FMOD:0`, image 5) ~18% of a core and
+  `water_task` (image 0, SPURS taskset on `spu job`) ~20%; neither is on the
+  frame's critical path. No Bullet task activity in the overworld sample.
+- **Colours:** the game's final pass (tone curve 1-e^-x, colour matrix
+  brightness ~0.8 / saturation ~1.1, gamma 1/2.2) is translated correctly; its
+  input, the scene buffer, holds gamma-encoded albedo where the game expects
+  linear light (no texture gamma bits are set). Decoding the albedo sRGB ->
+  linear saturates the picture close to real-hardware screenshots but slightly
+  dark; find what the PS3 does (compare RPCS3's scene buffer) before fixing.
 
 **Setup app (SFA3 style): written, not yet run end to end.**
 - `setup_app.py` (Tkinter GUI, adapted from SFA3's converter), with
@@ -121,24 +176,22 @@ your local notes, never in this public repo):
 
 ## Next steps, in order
 
-1. **Make the developer tooling work on a Windows host.** `zig_build.cmake_toolchain()`
-   writes `/bin/sh` wrapper scripts, so `tools/build_deps.py` and
-   `build_prebuilt()` only run on Linux today; write `.cmd` wrappers on
-   Windows. `tests/boot_smoke.sh` and `tests/thread_cpu.sh` are bash: port
-   boot_smoke to Python (`tests/boot_smoke.py`) for both OSes, keeping its
-   isolation (own save roots, dummy audio, `PS3RECOMP_VK_WINDOW` off, strict
-   mode, retention of 5 runs) and `tests/drive.py` (already Python).
-2. **Build and run the game natively on Windows** (CMake + Zig toolchain,
-   `-DPS3RECOMP_RSX_VULKAN=ON`, deps from `build/deps/windows` via
-   `CMAKE_PREFIX_PATH`; see `build_prebuilt()` for the exact options). Run
-   `build/port-win/dotheroes.exe build/disc/PS3_GAME/USRDIR/EBOOT.elf` with
-   `PS3RECOMP_VK_WINDOW=1`. Expect first-run issues in Windows-only paths
-   (`port/diag/diag.cpp` is POSIX-centred; the frame clock and present
-   finisher thread; file paths; WASAPI not used: SDL2 audio). Use the
-   validation layer (Vulkan SDK) and the drive scripts.
-3. **Measure on the 3070** (`DIAG_FPS=1`, `VK_GPU_TIME=1`, `VK_WAIT_STATS=1`,
-   `DIAG_PROF=<start>,<secs>` + `tests/prof_report.py`): this separates
-   laptop limits from code limits.
+The owner's goal (2026-10-30) is a performant native PC port: the recompiled
+code is the starting point, and PS3-specific machinery (SPU workloads,
+SPURS/lv2 scheduling and polling, DMA, the RSX-command-to-Vulkan layer) is
+replaceable once its purpose is understood. Every replacement is incremental,
+backed by before/after timings and correctness checks, and keeps gameplay
+speed independent of the frame rate. Steps 1-3 of the original list (Windows
+tooling, the native Windows build, measuring on the 3070) are done; see
+"Where things stand".
+
+1. **Next replacements:** the present path (frames in flight, no readback,
+   no lock held across GPU waits), then a display-driven vblank (refresh-rate
+   aware, e.g. 120 Hz panels). vm_watch on Linux (mprotect + SIGSEGV), so
+   resident geometry runs there too. Validate each with perf_walk.drive +
+   `tests/frame_times.py` and pass-dump/screenshot A/B.
+2. **Colours:** see "Where things stand"; compare RPCS3's scene buffer.
+3. **boot_smoke.sh:** retire it once `boot_smoke.py` is tested on Linux.
 4. **Run the setup app end to end** on both OSes (`python setup_app.py`, then
    `--convert`), then `tools/make_bundle.py --prebuilt` and the frozen apps.
    Watch for: modules the lifting tools need inside the frozen app

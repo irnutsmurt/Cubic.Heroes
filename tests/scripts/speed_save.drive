@@ -1,0 +1,21 @@
+# Frame-rate independence from a save (SAVES=...): load it, then walk for fixed
+# wall times. Run once at the default 60 Hz and once with DIAG_VBLANK_MS=8
+# (~100 fps here): the character must end up in the same places, so the
+# after-* shots match.
+log TitleMovie 120
+sleep 5
+press START                 # "PRESS START BUTTON"
+sleep 3
+press START                 # main menu: CONTINUE
+change
+sleep 3
+press CROSS                 # "Change characters?" NO
+change
+sleep 10
+shot start
+hold LEFT 1.5
+sleep 1
+shot after-left
+hold UP 1.2
+sleep 1
+shot after-up

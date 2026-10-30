@@ -44,6 +44,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <chrono>
 #include <condition_variable>
 #include <string>
 #include <mutex>
@@ -218,6 +219,7 @@ static unsigned                s_pf_begun;
 
 static void present_finisher(void)
 {
+    SetThreadDescription(GetCurrentThread(), L"present");
     unsigned done = 0;
     for (;;) {
         {
@@ -253,56 +255,65 @@ static void present_guest_frame(void)
     InterlockedIncrement(&g_frames_presented);
 }
 
+/* The 60 Hz vblank, on a clock of its own. The game paces every frame by the
+ * vblank count (func_00029BD8 waits for it to move), so it has to move evenly.
+ * Ticked from the walker's loop it did not: GetTickCount64 advances in ~16 ms
+ * steps on Windows, and a drain or a present that ran long held the tick back
+ * until it fired twice to catch up, so frames came out ~33 ms and ~0 ms in
+ * turn (about 7% of them in gameplay). A monotonic clock, a sleep to within a
+ * millisecond of each deadline and a yield for the rest keep every tick
+ * within a fraction of a millisecond of its slot, whatever the walker does.
+ * DIAG_VBLANK_MS=<ms> sets another period, for frame-rate tests only (25: the
+ * game's own two-vblank wait gives 20 fps; tests/scripts/speed.drive). */
+static void vblank_clock(void)
+{
+    SetThreadDescription(GetCurrentThread(), L"vblank");
+    using clock = std::chrono::steady_clock;
+    const char* e = getenv("DIAG_VBLANK_MS");
+    const auto period = std::chrono::duration_cast<clock::duration>(
+        std::chrono::duration<double, std::milli>(e && atoi(e) > 0 ? atoi(e) : 1000.0 / 60.0));
+    auto next = clock::now() + period;
+    for (;;) {
+        for (auto now = clock::now(); now < next; now = clock::now()) {
+            if (next - now > std::chrono::milliseconds(2))
+                std::this_thread::sleep_for(next - now - std::chrono::milliseconds(1));
+            else
+                std::this_thread::yield();
+        }
+        cellGcmTickVBlank();
+        cellGcmTickFlip();
+        next += period;
+        if (clock::now() - next > period * 240) next = clock::now() + period;   /* far behind: resync */
+    }
+}
+
 static DWORD WINAPI frame_clock(LPVOID)
 {
+    /* The RSX side: the FIFO walker and the present. The vblank ticks on its
+     * own thread (vblank_clock). */
+    SetThreadDescription(GetCurrentThread(), L"rsx frame clock");
     const char* title = getenv("PS3_TITLE");
     if (!title || !*title) title = "ps3recomp";
 
     int rsx_ok = (rsx_backend_init(WINDOW_WIDTH, WINDOW_HEIGHT, title) == 0);
     fprintf(stderr, "[rsx] %s backend init %s\n", RSX_BACKEND_NAME,
             rsx_ok ? "OK -- window open" : "FAILED");
+    std::thread(vblank_clock).detach();
 
     unsigned  last_flip = 0;
-    ULONGLONG next_tick = GetTickCount64();
 
     for (;;) {
         /* 1 ms: the guest's FIFO writes are not signalled, so this poll is
          * how soon the walker sees them. At 4 ms the waits added up over a
          * frame's command waves (~1 fps in gameplay). */
         Sleep(1);
-        ULONGLONG now = GetTickCount64();
 
-        int fired = 0;
-        while ((long long)(now - next_tick) >= 0 && fired < 240) {
-            cellGcmTickVBlank();
-            cellGcmTickFlip();
-            /* Present a pending flip BEFORE draining any further. The flip
-             * fires at a get==put frame boundary on the guest thread, so the
-             * batch held right now is exactly the completed frame; presenting
-             * after the drain races the guest's next-frame writes and shows a
-             * mixed one. */
-            if (rsx_ok && cellGcm_take_flip_pending()) {
-                present_guest_frame();
-                last_flip = cellGcm_flip_request_count();
-            }
-            /* Drain the FIFO every tick. This is what writes the RSX sync-fence
-             * labels the game's per-frame logic blocks on, so it has to keep
-             * advancing at 60 Hz even while present() throttles. */
-            if (rsx_ok) cellGcm_rsx_process_fifo();
-            /* 60 Hz: 16, 17, 17 ms. DIAG_VBLANK_MS=<ms> sets another period,
-             * for frame-rate tests only (25: the game's own two-vblank wait
-             * gives 20 fps; tests/scripts/speed.drive). */
-            { static int vms = -1; static unsigned vb_n;
-              if (vms < 0) { const char* e = getenv("DIAG_VBLANK_MS"); vms = e ? atoi(e) : 0; }
-              next_tick += vms > 0 ? (ULONGLONG)vms : 16u + (++vb_n % 3 != 0); }
-            fired++;
-        }
-        if (fired >= 240) next_tick = now;   /* fell too far behind -- resync */
-
-        /* Drain at the outer cadence too, not only on the 16 ms tick: titles
-         * fence every render pass on a label the drain writes, and one wave of
-         * those at 16 ms apiece paces the guest into single-figure frame rates.
-         * The real RSX writes them in microseconds. */
+        /* Drain every pass: titles fence every render pass on a label the
+         * drain writes, and the real RSX writes them in microseconds. A
+         * pending flip is presented BEFORE draining any further: the flip
+         * fires at a get==put frame boundary, so the batch held right now is
+         * exactly the completed frame; presenting after the drain races the
+         * guest's next-frame writes and shows a mixed one. */
         if (rsx_ok) {
             if (cellGcm_take_flip_pending()) {
                 present_guest_frame();

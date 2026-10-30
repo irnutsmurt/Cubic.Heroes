@@ -1,0 +1,1047 @@
+From 245abd17bdf8d7b14f24e20aaabcd095df58aa1f Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Fri, 30 Oct 2026 14:08:41 -0700
+Subject: [PATCH 40/40] Resident geometry: static draws stay in GPU memory
+ (vm_watch)
+
+The FIFO walker re-read, re-hashed and re-copied every draw's vertex
+data each frame although the vertex cache saw ~100% hits and no change
+(3D Dot Game Heroes: ~500 draws, 58 MB, ~9 ms of a ~21 ms frame).
+
+- rsx_draw_engine: a draw's converted vertices and rebuilt 32-bit index
+  list are kept by the backend (geom_create) under a key of everything
+  they were built from besides memory: primitive, layout, vertex arrays
+  and where they resolve, index array, the draw's ranges. The draw is
+  drawn from there (draw_geom) while no guest page it was read from has
+  been written; each range is watched before it is read. A written range
+  rebuilds the entry at its next draw; one rebuilt again and again, or
+  whose memory cannot be watched, stays on the copy path (dynamic).
+  RSX_GEOM_CACHE=0 is the old path, RSX_GEOM_CACHE_STATS=1 reports,
+  RSX_GEOM_CACHE_CHECK=1 rebuilds every hit too and compares.
+- rsx_vulkan_backend: geom_* -- a linear arena of 64 MB chunks in
+  device-local host-visible memory (host memory when there is none left),
+  written once; draws bind it instead of copying into the batch ring.
+- runtime/memory/vm_watch: which guest pages were written since a point
+  in time, at no cost while nothing is. A watched page is read-only; the
+  first write from any thread faults into a vectored handler that gives
+  it a new epoch and makes it writable. The epoch is read before any
+  protection, and protection changes are serialised, so no write between
+  a watch and the read it guards is lost. Pages written over and over
+  are left alone. Windows only for now (vm_watch_available() is 0
+  elsewhere, and the engine keeps the copy path there).
+- sys_fs, cellFs, cellHttp: a kernel write into guest memory (fread
+  straight into the buffer, recv) would fail on a read-only page, so they
+  release their range first (ppu_fs's fs_prefault already writes each
+  page from user mode).
+
+Measured on the walk route: the walker's drain 15.2 -> 4.8 ms a frame;
+with a steady vblank (the port's own change) gameplay holds 60 fps. The
+check mode found no missed write; the castle frame is pixel-identical
+with the cache on and off.
+---
+ libs/filesystem/cellFs.c        |   3 +
+ libs/network/cellHttp.c         |   2 +
+ libs/video/rsx_draw_engine.c    | 344 ++++++++++++++++++++++++++++++--
+ libs/video/rsx_draw_engine.h    |  13 ++
+ libs/video/rsx_vulkan_backend.c | 161 +++++++++++++--
+ runtime/memory/vm_watch.c       | 171 ++++++++++++++++
+ runtime/memory/vm_watch.h       |  52 +++++
+ runtime/syscalls/sys_fs.c       |   3 +
+ 8 files changed, 721 insertions(+), 28 deletions(-)
+ create mode 100644 runtime/memory/vm_watch.c
+ create mode 100644 runtime/memory/vm_watch.h
+
+diff --git a/libs/filesystem/cellFs.c b/libs/filesystem/cellFs.c
+index 4d916ac..f838a9d 100644
+--- a/libs/filesystem/cellFs.c
++++ b/libs/filesystem/cellFs.c
+@@ -15,6 +15,7 @@
+ #include <errno.h>
+ #include "../../runtime/ppu/ppu_memory.h"   /* GUEST_PTR, vm_write*: guest EA -> host */
+ #include "ps3emu/log_first.h"
++#include "../../runtime/memory/vm_watch.h"
+ 
+ /* glibc's <sys/stat.h> exposes st_atime/st_mtime/st_ctime as macros that expand
+  * to st_atim.tv_sec etc.  They collide with the identically named members of the
+@@ -527,6 +528,8 @@ s32 cellFsRead(CellFsFd fd, void* buf, u64 nbytes, u64* nread)
+          * which made this look handled -- but the file contents were being read
+          * to a raw guest address interpreted as a host one, so nothing the
+          * title loaded ever landed in guest memory. */
++        /* The kernel fills it: a page watched read-only must not fail the read. */
++        vm_watch_release(gptr(buf), (size_t)nbytes);
+         bytes_read = (u64)fread(gptr(buf), 1, (size_t)nbytes, s_files[fd].host_fp);
+     }
+ 
+diff --git a/libs/network/cellHttp.c b/libs/network/cellHttp.c
+index 3e30a72..c7a7d65 100644
+--- a/libs/network/cellHttp.c
++++ b/libs/network/cellHttp.c
+@@ -34,6 +34,7 @@ typedef int http_socket_t;
+ #define http_closesocket close
+ #endif
+ #include "host_socket_send.h"
++#include "../../runtime/memory/vm_watch.h"
+ 
+ /* Guest-EA marshalling: the generic HLE adapter passes PPC r3.. verbatim, so
+  * pointer arguments are guest effective addresses, not host pointers. Translate
+@@ -716,6 +717,7 @@ s32 cellHttpRecvResponse(CellHttpTransId transId, void* buf, u32 size,
+         /* buf is a guest address (the overflow copy above already translates
+          * it); recv() into the raw value wrote to the host address of the same
+          * number whenever a body outgrew the header read. */
++        vm_watch_release(GUEST_PTR(buf, char*) + filled, (size_t)want);   /* the kernel fills it */
+         int n = recv(t->sock, GUEST_PTR(buf, char*) + filled, (int)want, 0);
+         if (n < 0) {
+             /* Error - if we already have some data, return it */
+diff --git a/libs/video/rsx_draw_engine.c b/libs/video/rsx_draw_engine.c
+index e26a8e2..c475e82 100644
+--- a/libs/video/rsx_draw_engine.c
++++ b/libs/video/rsx_draw_engine.c
+@@ -17,6 +17,7 @@
+ #include "rsx_restart_cuts.h"
+ #include "rsx_vertex_formats.h"
+ #include "rsx_vp_decompiler.h"
++#include "../../runtime/memory/vm_watch.h"
+ 
+ #include <stdio.h>
+ #include <stdlib.h>
+@@ -217,6 +218,15 @@ static struct {
+ static char s_vs_hlsl[256 * 1024];
+ static char s_ps_hlsl[256 * 1024];
+ 
++/* Guest ranges one resident geometry entry was read from: its index runs and
++ * its vertex arrays (eng_geom_*). */
++#define ENG_GEOM_RANGES 8u
++typedef struct { const u8* p; u32 n; u64 since; } eng_geom_range;
++/* Why a draw could not become resident (RSX_GEOM_CACHE_STATS): more source
++ * ranges than ENG_GEOM_RANGES, a range outside the watched arena, an
++ * attribute without a stable source range, an index run not readable whole. */
++static unsigned long long s_geom_why[4];
++
+ /* The draw accumulator: one BEGIN_END group's batches, references and cuts. */
+ static struct {
+     eng_batch arr[ENG_MAX_BATCHES];
+@@ -252,6 +262,12 @@ static struct {
+     const u8* inl;
+     u32 inl_bytes;
+     u32 inline_dropped_at_begin;
++
++    /* Building resident geometry: dc_fetch watches each guest range before
++     * it reads it and records it here; cleared when one cannot be watched. */
++    int geom_watch;
++    u32 n_geom_ranges;
++    eng_geom_range geom_range[ENG_GEOM_RANGES];
+ } dc;
+ 
+ /* ---- guest memory -------------------------------------------------------- */
+@@ -2272,6 +2288,19 @@ static int dc_reserve_indices(u32 count)
+     return 1;
+ }
+ 
++/* Resident geometry being built: watch a guest range before reading it, so a
++ * write after this point is one the entry will see (vm_watch.h). */
++static void dc_geom_watch(const u8* p, u32 n)
++{
++    if (!dc.geom_watch) return;
++    for (u32 i = 0; i < dc.n_geom_ranges; i++)
++        if (p >= dc.geom_range[i].p && p + n <= dc.geom_range[i].p + dc.geom_range[i].n) return;
++    if (dc.n_geom_ranges == ENG_GEOM_RANGES) { s_geom_why[0]++; dc.geom_watch = 0; return; }
++    u64 since;
++    if (!vm_watch(p, n, &since)) { s_geom_why[1]++; dc.geom_watch = 0; return; }
++    dc.geom_range[dc.n_geom_ranges++] = (eng_geom_range){ p, n, since };
++}
++
+ /* Turn this group's batches into a reference list, recording a CUT rather
+  * than fetching a phantom vertex wherever the restart sentinel appears, then
+  * collapse repeated references and fetch each unique vertex once.
+@@ -2306,6 +2335,21 @@ static void dc_fetch(const rsx_vertex_layout_plan* layout, int allow_remap)
+         /* The index array's location field is a DMA selector, not the
+          * rsx_dsp location enum: 0 selects local memory. */
+         const u32 ia_loc = ia.location ? RSX_LOCATION_MAIN : RSX_LOCATION_LOCAL;
++        /* Resident geometry: one range over every batch's indices (they all
++         * index one buffer), watched before any of them is read. */
++        if (dc.geom_watch) {
++            u64 lo = ~0ull, hi = 0;
++            for (u32 b = 0; b < dc.n_idx; b++) {
++                const u64 s = (u64)ia.offset + (u64)dc.idx[b].first * esz;
++                const u64 e = s + (u64)dc.idx[b].count * esz;
++                if (s < lo) lo = s;
++                if (e > hi) hi = e;
++            }
++            const u8* run = (hi > lo && hi <= 0x100000000ull && hi - lo <= (64u << 20))
++                ? eng_guest_ptr(NULL, ia_loc, (u32)lo, (u32)(hi - lo)) : NULL;
++            if (run) dc_geom_watch(run, (u32)(hi - lo));
++            else { s_geom_why[3]++; dc.geom_watch = 0; }
++        }
+ 
+         for (u32 b = 0; b < dc.n_idx && dc.fetch_ok; b++) {
+             const u32 first = dc.idx[b].first, count = dc.idx[b].count;
+@@ -2320,6 +2364,7 @@ static void dc_fetch(const rsx_vertex_layout_plan* layout, int allow_remap)
+                     dc.fetch_ok = 0;
+                 continue;
+             }
++            if (dc.geom_watch) { s_geom_why[3]++; dc.geom_watch = 0; }
+             for (u32 i = 0; i < count && dc.fetch_ok; i++) {
+                 const u8* p = run ? run + (size_t)i * esz
+                     : eng_guest_ptr(NULL, ia_loc, ia.offset + (first + i) * esz, esz);
+@@ -2355,6 +2400,33 @@ static void dc_fetch(const rsx_vertex_layout_plan* layout, int allow_remap)
+     rsx_vertex_fetch_plan_init(&dc.fetch_plan, &g.rsx, layout, eng_guest_ptr, NULL);
+     rsx_vertex_fetch_plan_set_inline(&dc.fetch_plan, &g.rsx, dc.inl, dc.inl_bytes);
+     rsx_vertex_fetch_plan_prepare(&dc.fetch_plan, dc.refs, dc.n_refs);
++    /* The source range of every attribute, as the vertex cache hashes it,
++     * merged where they overlap or lie within 64 KB (interleaved arrays span
++     * one buffer), each watched before the fetch below reads it. */
++    if (dc.geom_watch) {
++        const u8* lo[RSX_DSP_NUM_VERTEX_ATTR];
++        const u8* hi[RSX_DSP_NUM_VERTEX_ATTR];
++        u32 nr = 0;
++        for (u32 slot = 0; slot < layout->count; slot++) {
++            const rsx_vertex_fetch_attr* f = &dc.fetch_plan.attr[layout->attrs[slot]];
++            if (!f->desc.type || !f->desc.size) continue;
++            if (!f->stable_base || f->stable_last < f->stable_first) {
++                s_geom_why[2]++; dc.geom_watch = 0; nr = 0; break;
++            }
++            const u8* b = f->stable_base;
++            const u8* e = b + (size_t)(f->stable_last - f->stable_first) * f->stride + f->elem_size;
++            u32 k = nr++;
++            for (; k && lo[k - 1] > b; k--) { lo[k] = lo[k - 1]; hi[k] = hi[k - 1]; }
++            lo[k] = b; hi[k] = e;
++        }
++        for (u32 r = 0; r < nr && dc.geom_watch;) {
++            const u8* b = lo[r];
++            const u8* e = hi[r];
++            for (r++; r < nr && lo[r] <= e + 0x10000; r++)
++                if (hi[r] > e) e = hi[r];
++            dc_geom_watch(b, (u32)(e - b));
++        }
++    }
+     dc.n_verts = dc.n_refs;
+     dc.vdata = rsx_vertex_fetch_cached(&dc.fetch_plan, dc.refs, dc.n_refs);
+     if (dc.vdata) return;
+@@ -2370,6 +2442,201 @@ static void dc_fetch(const rsx_vertex_layout_plan* layout, int allow_remap)
+     dc.vdata = dc.verts;
+ }
+ 
++/* ---- resident geometry --------------------------------------------------- */
++
++/* The fetch above, the reference collapse and the topology rebuild turn a
++ * draw's guest index and vertex arrays into one converted vertex block and a
++ * 32-bit index list. A title redraws the same static meshes frame after
++ * frame: 3D Dot Game Heroes' ~500 draws a frame hit the vertex cache every
++ * time with no change, and re-reading, re-hashing and re-copying them into
++ * the batch ring was ~9 ms of the FIFO walker's ~21 ms frame. Here the result
++ * lives in GPU memory (the backend's geom_*) under a key of the registers it
++ * was built from -- primitive, layout, vertex arrays and where they resolve,
++ * index array, the draw's ranges -- and is drawn from there while vm_watch
++ * reports none of the guest pages it was read from written. A write is
++ * recorded the moment it happens, by whichever thread makes it (the page
++ * faults once), and any write a draw depends on came before the walker read
++ * the draw; a written range rebuilds the entry at its next draw, and a draw
++ * rebuilt again and again (ENG_GEOM_DYNAMIC) is left on the copy path.
++ * RSX_GEOM_CACHE=0 turns it off; RSX_GEOM_CACHE_STATS=1 reports every 5 s;
++ * RSX_GEOM_CACHE_CHECK=1 rebuilds every hit as well and compares (slow: it
++ * proves the write tracking misses nothing). Windows only for now: it needs
++ * vm_watch_available(). */
++#define ENG_GEOM_SLOTS     8192u                 /* power of two */
++#define ENG_GEOM_MAX_BYTES (16u << 20)           /* larger draws keep the copy path */
++
++/* Rebuilt this often after writes, a draw's geometry is the title's dynamic
++ * kind (rewritten every frame or so): it stays on the copy path, unwatched. */
++#define ENG_GEOM_DYNAMIC 4u
++
++typedef struct {
++    u64 key;
++    u32 geom;                  /* backend handle; 0 for a dynamic draw */
++    u32 n_verts, n_draw;
++    u8  used, dynamic;
++    u16 rebuilds;
++    u8  indexed, n_ranges;
++    u64 checked;               /* the write epoch the ranges were last found clean at */
++    u64 check;                 /* RSX_GEOM_CACHE_CHECK: hash of what was uploaded */
++    eng_geom_range r[ENG_GEOM_RANGES];
++} eng_geom;
++
++static eng_geom* s_geom;
++static u32 s_geom_live;
++static struct { int on, stats, check; double t0;
++                unsigned long long look, hit, rebuilt, fresh, skip, missed, resets, dyn; } s_gs = { -1 };
++
++static int eng_geom_on(void)
++{
++    if (s_gs.on < 0) {
++        const char* e = getenv("RSX_GEOM_CACHE");
++        s_gs.stats = getenv("RSX_GEOM_CACHE_STATS") != NULL;
++        s_gs.check = getenv("RSX_GEOM_CACHE_CHECK") != NULL;
++        s_gs.on = !(e && *e == '0') && g.be->geom_create && g.be->geom_reset && g.be->draw_geom &&
++                  vm_watch_available();
++        if (s_gs.on && !(s_geom = (eng_geom*)calloc(ENG_GEOM_SLOTS, sizeof *s_geom))) s_gs.on = 0;
++        if (s_gs.stats)
++            fprintf(stderr, "[geom] resident geometry %s\n", s_gs.on ? "on"
++                    : (e && *e == '0') ? "off (RSX_GEOM_CACHE=0)" : "off (no backend support or no write watch)");
++    }
++    return s_gs.on;
++}
++
++static void eng_geom_report(void)
++{
++    struct timespec ts;
++    clock_gettime(CLOCK_MONOTONIC, &ts);
++    const double now = ts.tv_sec + ts.tv_nsec * 1e-9;
++    if (!s_gs.t0) s_gs.t0 = now;
++    if (now - s_gs.t0 < 5.0) return;
++    fprintf(stderr, "[geom] %.1f s: %llu draws, %llu resident, %llu rebuilt after a write, %llu new, "
++            "%llu dynamic, %llu too big; %u entries, %llu resets; not kept: %llu ranges, "
++            "%llu unwatched, %llu unstable, %llu index%s\n", now - s_gs.t0, s_gs.look, s_gs.hit,
++            s_gs.rebuilt, s_gs.fresh, s_gs.dyn, s_gs.skip, s_geom_live, s_gs.resets, s_geom_why[0],
++            s_geom_why[1], s_geom_why[2], s_geom_why[3],
++            s_gs.check ? (s_gs.missed ? " -- CHECK: MISSED WRITES" : " (check: no misses)") : "");
++    s_gs.look = s_gs.hit = s_gs.rebuilt = s_gs.fresh = s_gs.skip = s_gs.dyn = 0;
++    memset(s_geom_why, 0, sizeof s_geom_why);
++    s_gs.t0 = now;
++}
++
++/* Everything the fetch and the rebuild depend on besides guest memory. */
++static u64 eng_geom_key(u32 prim, const rsx_vertex_layout_plan* layout)
++{
++    u64 k = eng_fnv1a(&prim, sizeof prim, 1469598103934665603ull);
++    k = eng_fnv1a(layout, sizeof *layout, k);
++    k = eng_fnv1a(&dc.n_arr, sizeof dc.n_arr, k);
++    k = eng_fnv1a(dc.arr, dc.n_arr * (u32)sizeof dc.arr[0], k);
++    k = eng_fnv1a(&dc.n_idx, sizeof dc.n_idx, k);
++    k = eng_fnv1a(dc.idx, dc.n_idx * (u32)sizeof dc.idx[0], k);
++    const u32 regs[3] = { rsx_dsp_vertex_data_base_offset(&g.rsx), rsx_dsp_reg(&g.rsx, 0x1FC0),
++                          rsx_dsp_vertex_data_base_index(&g.rsx) };
++    k = eng_fnv1a(regs, sizeof regs, k);
++    for (u32 s = 0; s < layout->count; s++) {
++        const u32 a = layout->attrs[s];
++        rsx_dsp_vertex_attr d;
++        float def[4];
++        rsx_dsp_get_vertex_attr(&g.rsx, a, &d);
++        rsx_dsp_vertex_default(&g.rsx, a, def);
++        const u32 v[6] = { d.type, d.size, d.stride, d.frequency, d.offset, d.location };
++        /* Where the array resolves now: a remapped IO page is other memory. */
++        const void* host = (d.type && d.size) ? eng_guest_ptr(NULL, d.location, d.offset, 1) : NULL;
++        k = eng_fnv1a(v, sizeof v, k);
++        k = eng_fnv1a(def, sizeof def, k);
++        k = eng_fnv1a(&host, sizeof host, k);
++    }
++    if (dc.n_idx) {
++        rsx_dsp_index_array ia;
++        rsx_dsp_get_index_array(&g.rsx, &ia);
++        const u32 v[5] = { ia.offset, ia.location, (u32)ia.is_u32,
++                           (u32)rsx_dsp_restart_index_enabled(&g.rsx, ia.is_u32),
++                           rsx_dsp_restart_index(&g.rsx) };
++        const void* host = eng_guest_ptr(NULL, ia.location ? RSX_LOCATION_MAIN : RSX_LOCATION_LOCAL,
++                                         ia.offset, 1);
++        k = eng_fnv1a(v, sizeof v, k);
++        k = eng_fnv1a(&host, sizeof host, k);
++    }
++    return k;
++}
++
++static eng_geom* eng_geom_slot(u64 key)
++{
++    u32 i = (u32)key & (ENG_GEOM_SLOTS - 1u);
++    while (s_geom[i].used && s_geom[i].key != key) i = (i + 1u) & (ENG_GEOM_SLOTS - 1u);
++    return &s_geom[i];
++}
++
++/* Unwritten since it was read? */
++static int eng_geom_valid(eng_geom* e)
++{
++    const u64 now = vm_watch_epoch();
++    if (e->checked == now) return 1;
++    for (u32 r = 0; r < e->n_ranges; r++)
++        if (!vm_watch_clean_since(e->r[r].p, e->r[r].n, e->r[r].since)) return 0;
++    e->checked = now;
++    return 1;
++}
++
++/* Every entry dropped and the backend's memory reused. What this draw just
++ * watched is forgotten with the rest, so its caller does not store it. */
++static void eng_geom_flush(void)
++{
++    g.be->geom_reset(g.be->user);
++    memset(s_geom, 0, ENG_GEOM_SLOTS * sizeof *s_geom);
++    s_geom_live = 0;
++    vm_watch_reset();
++    s_gs.resets++;
++}
++
++static u64 eng_geom_hash(const void* verts, u64 vbytes, const u32* idx, u32 n_idx)
++{
++    u64 h = eng_fnv1a(&vbytes, sizeof vbytes, 1469598103934665603ull);
++    for (u64 at = 0; at < vbytes; at += 0x10000u)    /* eng_fnv1a takes a u32 length */
++        h = eng_fnv1a((const u8*)verts + at, (u32)(vbytes - at < 0x10000u ? vbytes - at : 0x10000u), h);
++    return idx ? eng_fnv1a(idx, n_idx * 4u, h) : h;
++}
++
++/* A draw whose memory cannot be watched (too many ranges, a page written over
++ * and over): remembered as dynamic, so its next draws skip the attempt. */
++static void eng_geom_mark_dynamic(u64 key)
++{
++    eng_geom* e = eng_geom_slot(key);
++    if (!e->used) {
++        if (s_geom_live + 1u > ENG_GEOM_SLOTS / 2u) return;
++        s_geom_live++;
++        e->rebuilds = 0;
++    }
++    e->used = 1;
++    e->dynamic = 1;
++    e->key = key;
++    e->geom = 0;
++}
++
++/* Upload what dc_fetch and the rebuild produced and remember it. Returns the
++ * backend handle, or 0 when the draw stays on the copy path this time. */
++static u32 eng_geom_store(u64 key, int indexed, u32 n_draw, u32 stride)
++{
++    const u64 vbytes = (u64)dc.n_verts * stride, ibytes = indexed ? (u64)n_draw * 4u : 0;
++    if (vbytes + ibytes > ENG_GEOM_MAX_BYTES) { s_gs.skip++; return 0; }
++    eng_geom* e = eng_geom_slot(key);
++    if (!e->used && s_geom_live + 1u > ENG_GEOM_SLOTS / 2u) { eng_geom_flush(); return 0; }
++    const u32 h = g.be->geom_create(g.be->user, dc.vdata, (u32)vbytes,
++                                    indexed ? g.indices : NULL, indexed ? n_draw : 0);
++    if (!h) { eng_geom_flush(); return 0; }
++    if (!e->used) { s_geom_live++; e->rebuilds = 0; }
++    e->used = 1;
++    e->key = key;
++    e->geom = h;
++    e->n_verts = dc.n_verts;
++    e->n_draw = n_draw;
++    e->indexed = (u8)indexed;
++    e->n_ranges = (u8)dc.n_geom_ranges;
++    memcpy(e->r, dc.geom_range, sizeof e->r);
++    e->checked = 0;
++    e->check = s_gs.check ? eng_geom_hash(dc.vdata, vbytes, indexed ? g.indices : NULL, n_draw) : 0;
++    return h;
++}
++
+ /* ---- sink ---------------------------------------------------------------- */
+ 
+ static void sink_begin(void* user, const rsx_dispatch* r, u32 prim)
+@@ -3100,17 +3367,50 @@ static void sink_end(void* user, const rsx_dispatch* r)
+ 
+     rsx_vertex_layout_plan layout;
+     eng_vertex_layout(&layout);
+-    dc_fetch(&layout, rebuild);
+-    if (!dc.n_verts || !dc.fetch_ok) return;
++
++    /* Resident geometry: built from the same registers out of guest memory
++     * nobody wrote since, the draw's geometry is already in GPU memory and
++     * nothing is fetched. Otherwise dc_fetch watches what it reads, and the
++     * result is stored below. */
++    eng_geom* gm = NULL;
++    u64 gkey = 0;
++    dc.geom_watch = 0;
++    dc.n_geom_ranges = 0;
++    if (!dc.n_immediate && !dc.inl_bytes && eng_geom_on()) {
++        if (s_gs.stats) eng_geom_report();
++        s_gs.look++;
++        gkey = eng_geom_key(prim, &layout);
++        gm = eng_geom_slot(gkey);
++        int watch = 1;
++        if (!gm->used) { s_gs.fresh++; gm = NULL; }
++        else if (gm->dynamic) { s_gs.dyn++; gm = NULL; watch = 0; }
++        else if (!eng_geom_valid(gm)) {
++            s_gs.rebuilt++;
++            if (++gm->rebuilds >= ENG_GEOM_DYNAMIC) { gm->dynamic = 1; watch = 0; }
++            gm = NULL;
++        }
++        else s_gs.hit++;
++        dc.geom_watch = gm == NULL && watch;
++    }
++    const int geom_tried = dc.geom_watch;
+ 
+     int indexed = 0;
+-    u32 n_draw = dc.n_source_refs;
+-    if (rebuild) {
+-        if (!eng_topology_rebuild(prim, dc.refs_remapped, &indexed)) return;
+-        n_draw = indexed
+-            ? rsx_draw_engine_topology_index_count(prim, dc.n_source_refs,
+-                                                   dc.cuts, dc.n_cuts)
+-            : dc.n_source_refs - dc.n_source_refs % 3u;
++    u32 n_draw;
++    if (gm && !s_gs.check) {
++        dc.n_verts = gm->n_verts;
++        indexed = gm->indexed;
++        n_draw = gm->n_draw;
++    } else {
++        dc_fetch(&layout, rebuild);
++        if (!dc.n_verts || !dc.fetch_ok) return;
++        n_draw = dc.n_source_refs;
++        if (rebuild) {
++            if (!eng_topology_rebuild(prim, dc.refs_remapped, &indexed)) return;
++            n_draw = indexed
++                ? rsx_draw_engine_topology_index_count(prim, dc.n_source_refs,
++                                                       dc.cuts, dc.n_cuts)
++                : dc.n_source_refs - dc.n_source_refs % 3u;
++        }
+     }
+     if (!n_draw) return;
+ 
+@@ -3159,13 +3459,30 @@ static void sink_end(void* user, const rsx_dispatch* r)
+     const u32 vtex_mask = sink_bind_vertex_textures(eng_vtex_mask(), vtextures,
+                                                     vsamplers);
+ 
+-    if (indexed) {
++    if (indexed && !(gm && !s_gs.check)) {
+         if (!dc_reserve_indices(n_draw)) return;
+         rsx_draw_engine_write_topology_indices(
+             prim, dc.n_source_refs, dc.cuts, dc.n_cuts,
+             dc.refs_remapped ? dc.ref_remap.occurrence_to_unique : NULL,
+             g.indices);
+     }
++    u32 geom = 0;
++    if (gm) {
++        geom = gm->geom;
++        /* RSX_GEOM_CACHE_CHECK: the hit was rebuilt above; it must match. */
++        if (s_gs.check && (gm->n_verts != dc.n_verts || gm->n_draw != n_draw || gm->indexed != indexed ||
++                           gm->check != eng_geom_hash(dc.vdata, (u64)dc.n_verts * layout.stride,
++                                                      indexed ? g.indices : NULL, n_draw))) {
++            if (s_gs.missed++ < 16)
++                fprintf(stderr, "[geom] CHECK: key %016llx changed without a write seen "
++                        "(%u verts, %u indices)\n", (unsigned long long)gkey, dc.n_verts, n_draw);
++            geom = 0;              /* draw what memory says */
++        }
++    } else if (dc.geom_watch && dc.fetch_ok) {
++        geom = eng_geom_store(gkey, indexed, n_draw, layout.stride);
++    } else if (geom_tried && dc.fetch_ok) {
++        eng_geom_mark_dynamic(gkey);   /* its memory cannot be watched: stop trying */
++    }
+ 
+     /* The transform constant block, then the viewport epilogue the vertex
+      * program's tail multiplies by: RSX window coordinates mapped into the
+@@ -3287,8 +3604,11 @@ static void sink_end(void* user, const rsx_dispatch* r)
+     }
+ 
+     const u32 uploaded = indexed ? dc.n_verts : n_draw;
+-    g.be->draw(g.be->user, topology, dc.vdata, uploaded, layout.stride,
+-               indexed ? g.indices : NULL, indexed ? n_draw : 0);
++    if (geom)
++        g.be->draw_geom(g.be->user, topology, geom, uploaded, layout.stride, indexed ? n_draw : 0);
++    else
++        g.be->draw(g.be->user, topology, dc.vdata, uploaded, layout.stride,
++                   indexed ? g.indices : NULL, indexed ? n_draw : 0);
+     /* Counted only when the draw ran the guest's OWN programs, which is what
+      * the test hook means: a draw through the built-in pair is a draw, not
+      * evidence that the decompile-translate-compile path worked. */
+diff --git a/libs/video/rsx_draw_engine.h b/libs/video/rsx_draw_engine.h
+index a25ecc2..3d9ea37 100644
+--- a/libs/video/rsx_draw_engine.h
++++ b/libs/video/rsx_draw_engine.h
+@@ -225,6 +225,18 @@ typedef struct rsx_draw_backend {
+     void (*draw)(void* user, rsx_topology topology, const void* vertices,
+                  u32 vertex_count, u32 stride, const u32* indices,
+                  u32 index_count);
++    /* Optional: geometry kept in GPU memory (the engine's resident geometry,
++     * rsx_draw_engine.c). geom_create stores `vbytes` of vertices, as `draw`
++     * takes them, and `index_count` 32-bit indices (none for a non-indexed
++     * draw) and returns a handle, 0 when it has no room; geom_reset makes
++     * every handle invalid once the GPU is done with them. draw_geom is
++     * `draw` from a handle. A backend leaves all three NULL to have every
++     * draw's geometry passed in. */
++    u32  (*geom_create)(void* user, const void* vertices, u32 vbytes,
++                        const u32* indices, u32 index_count);
++    void (*geom_reset)(void* user);
++    void (*draw_geom)(void* user, rsx_topology topology, u32 geom,
++                      u32 vertex_count, u32 stride, u32 index_count);
+ 
+     /* Clears, which are ordered against draws rather than folded into a pass:
+      * a title draws the world, clears depth, and draws the weapon over it. */
+@@ -334,6 +346,7 @@ void rsx_draw_engine_set_display_buffer(u32 buffer_id, u32 location, u32 offset,
+  * on its fence sees the GPU catch up. */
+ void rsx_draw_engine_flush(void);
+ 
++
+ /* Present whatever the frame has recorded, for a host that drives the flip
+  * itself rather than through the FIFO's 0xE944. */
+ void rsx_draw_engine_present(void);
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index 7bdfca3..52dcdba 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -506,6 +506,7 @@ static int vk_eb_active(void);       /* batching decided on and on */
+ static u32 vk_eb_max(void);
+ static void vk_eb_recorded(void);   /* one more command in the open batch */
+ static void vk_eb_release(void);    /* engine shutdown: rings and pool */
++static void vk_geom_release(void);  /* engine shutdown: the resident geometry arena */
+ static int vk_eb_upload(VkImage img, VkBufferImageCopy* region, const void* src, size_t tight,
+                         u32 rows, u32 row_bytes);   /* -2: not batched, do it the old way */
+ 
+@@ -2505,6 +2506,7 @@ static void vk_eng_shutdown(void* user)
+     for (u32 i = 1; i < VK_ENG_MAX_OBJ; i++) vk_eng_release(user, i);
+     vk_eng_snapshot_pool_drain();
+     vk_eb_release();
++    vk_geom_release();
+     vk_destroy_buffer(&s_rb_stage);
+     vk_destroy_buffer(&s_up_stage);
+ }
+@@ -3933,11 +3935,110 @@ static VkDescriptorSet vk_eng_write_descriptors_to(const vk_eng_pipe* P, VkDescr
+     return set;
+ }
+ 
+-static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices, u32 vertex_count,
+-                        u32 stride, const u32* indices, u32 index_count)
++/* ---- resident geometry (rsx_draw_backend geom_*) ----------------------------
++ * The engine's resident geometry: a draw's vertices and index list written
++ * once into memory the GPU reads directly, then bound by every later draw of
++ * it instead of copied into the batch ring. A linear arena of up to
++ * VK_GEOM_CHUNKS buffers of VK_GEOM_CHUNK bytes, each in device-local memory
++ * the host can write when the device has some left (the BAR, or all of VRAM
++ * with resizable BAR), else in host memory. The space a rebuilt entry leaves
++ * behind comes back only with geom_reset, which the engine calls once the
++ * arena is full; it waits for the GPU first. */
++#define VK_GEOM_CHUNK  ((VkDeviceSize)64 << 20)
++#define VK_GEOM_CHUNKS 6u
++#define VK_GEOM_MAX    16384u
++
++typedef struct { u32 chunk; VkDeviceSize voff, ioff; } vk_geom_ent;
++static struct {
++    vk_buffer chunk[VK_GEOM_CHUNKS];
++    u32 n_chunks, cur, n_ent;
++    VkDeviceSize head;
++    vk_geom_ent ent[VK_GEOM_MAX];
++} s_geom;
++
++static int vk_geom_chunk_create(vk_buffer* b)
++{
++    VkBufferCreateInfo bci = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = VK_GEOM_CHUNK,
++                               .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
++                               .sharingMode = VK_SHARING_MODE_EXCLUSIVE };
++    if (pvkCreateBuffer(s_vk.device, &bci, NULL, &b->buf) != VK_SUCCESS) return -1;
++    VkMemoryRequirements req;
++    pvkGetBufferMemoryRequirements(s_vk.device, b->buf, &req);
++    const VkMemoryPropertyFlags host = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
++    u32 type;
++    VkMemoryAllocateInfo mai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = req.size };
++    int local = 0;
++    if (vk_find_memory_type(req.memoryTypeBits, host | VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &type) == 0) {
++        mai.memoryTypeIndex = type;
++        local = pvkAllocateMemory(s_vk.device, &mai, NULL, &b->mem) == VK_SUCCESS;
++    }
++    if (!local) {
++        if (vk_find_memory_type(req.memoryTypeBits, host, &type) != 0) goto fail;
++        mai.memoryTypeIndex = type;
++        if (pvkAllocateMemory(s_vk.device, &mai, NULL, &b->mem) != VK_SUCCESS) goto fail;
++    }
++    if (pvkBindBufferMemory(s_vk.device, b->buf, b->mem, 0) != VK_SUCCESS ||
++        pvkMapMemory(s_vk.device, b->mem, 0, VK_WHOLE_SIZE, 0, &b->ptr) != VK_SUCCESS) goto fail;
++    b->size = VK_GEOM_CHUNK;
++    b->coherent = 1;
++    VK_LOG("resident geometry: %llu MB chunk in %s memory\n", (unsigned long long)(VK_GEOM_CHUNK >> 20),
++           local ? "device-local" : "host");
++    return 0;
++fail:
++    vk_destroy_buffer(b);
++    return -1;
++}
++
++static u32 vk_eng_geom_create(void* user, const void* vertices, u32 vbytes, const u32* indices,
++                              u32 index_count)
++{
++    (void)user;
++    if (!s_vk.device || !vertices || !vbytes || s_geom.n_ent >= VK_GEOM_MAX) return 0;
++    const VkDeviceSize vsz = ((VkDeviceSize)vbytes + 255u) & ~(VkDeviceSize)255u;
++    const VkDeviceSize isz = ((VkDeviceSize)index_count * 4u + 255u) & ~(VkDeviceSize)255u;
++    if (vsz + isz > VK_GEOM_CHUNK) return 0;
++    if (!s_geom.n_chunks || s_geom.head + vsz + isz > VK_GEOM_CHUNK) {
++        const u32 next = s_geom.n_chunks ? s_geom.cur + 1u : 0u;
++        if (next >= VK_GEOM_CHUNKS) return 0;
++        if (next >= s_geom.n_chunks) {
++            if (vk_geom_chunk_create(&s_geom.chunk[next])) return 0;
++            s_geom.n_chunks = next + 1u;
++        }
++        s_geom.cur = next;
++        s_geom.head = 0;
++    }
++    vk_geom_ent* e = &s_geom.ent[s_geom.n_ent];
++    u8* base = (u8*)s_geom.chunk[s_geom.cur].ptr;
++    e->chunk = s_geom.cur;
++    e->voff = s_geom.head;
++    e->ioff = s_geom.head + vsz;
++    memcpy(base + e->voff, vertices, vbytes);
++    if (index_count) memcpy(base + e->ioff, indices, (size_t)index_count * 4u);
++    s_geom.head += vsz + isz;
++    return ++s_geom.n_ent;
++}
++
++static void vk_eng_geom_reset(void* user)
+ {
+     (void)user;
+-    if (!s_e2.pipeline || !vertices || !vertex_count || !stride) return;
++    vk_eng_flush_sync();          /* nothing in flight reads the arena after this */
++    s_geom.cur = 0;
++    s_geom.head = 0;
++    s_geom.n_ent = 0;
++}
++
++static void vk_geom_release(void)
++{
++    for (u32 i = 0; i < s_geom.n_chunks; i++) vk_destroy_buffer(&s_geom.chunk[i]);
++    memset(&s_geom, 0, sizeof s_geom);
++}
++
++/* One draw, its geometry either passed in (vertices, indices) and copied into
++ * the batch, or resident (`res`) and bound where it lies. */
++static void vk_eng_draw_from(rsx_topology topology, const void* vertices, u32 vertex_count,
++                             u32 stride, const u32* indices, u32 index_count, const vk_geom_ent* res)
++{
++    if (!s_e2.pipeline || (!vertices && !res) || !vertex_count || !stride) return;
+     if (topology < RSX_TOPOLOGY_POINTS || topology > RSX_TOPOLOGY_TRIANGLE_STRIP) return;
+     vk_eng_pipe* P = &s_epipe[s_e2.pipeline - 1];
+     if (!P->used || stride != P->stride) return;
+@@ -3968,20 +4069,20 @@ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices,
+     if (!pipe || !rp || !fb) return;
+ 
+     const VkDeviceSize vbytes = (VkDeviceSize)vertex_count * stride;
+-    const VkDeviceSize ibytes = (indices && index_count) ? (VkDeviceSize)index_count * 4u : 0;
++    const VkDeviceSize ibytes = ((indices || res) && index_count) ? (VkDeviceSize)index_count * 4u : 0;
+     VkBuffer vbuf = s_vk.vertices.buf, ibuf = s_e2.indices.buf;
+     VkDeviceSize voff = 0, ioff = 0;
+     VkDescriptorSet set = VK_NULL_HANDLE;
+     const u32 vsb = s_e2.vs_bytes ? s_e2.vs_bytes : 16u, psb = s_e2.ps_bytes ? s_e2.ps_bytes : 16u;
+-    int batched = vk_eb_on() && vbytes <= VK_EB_VB_BYTES && ibytes <= VK_EB_IB_BYTES;
++    int batched = vk_eb_on() && (res || (vbytes <= VK_EB_VB_BYTES && ibytes <= VK_EB_IB_BYTES));
+     if (batched && P->cube_mask && !vk_eng_dummy_cube_view()) return;   /* may flush: before any slice */
+     if (batched) {
+         /* Slices of the rings and a set from the pool; a full one flushes the
+          * batch (which empties them all) and the draw takes its slices again. */
+         for (int tries = 0; tries < 2; tries++) {
+             VkDeviceSize vh = s_eb.vb_head, ih = s_eb.ib_head, uh = s_eb.ub_head;
+-            voff = vk_eb_take(&vh, VK_EB_VB_BYTES, vbytes, 16u);
+-            ioff = ibytes ? vk_eb_take(&ih, VK_EB_IB_BYTES, ibytes, 16u) : 0;
++            voff = res ? 0 : vk_eb_take(&vh, VK_EB_VB_BYTES, vbytes, 16u);
++            ioff = (ibytes && !res) ? vk_eb_take(&ih, VK_EB_IB_BYTES, ibytes, 16u) : 0;
+             const VkDeviceSize uvs = vk_eb_take(&uh, VK_EB_UB_BYTES, vsb, s_eb.ub_align);
+             const VkDeviceSize ups = uvs == (VkDeviceSize)-1 ? uvs : vk_eb_take(&uh, VK_EB_UB_BYTES, psb, s_eb.ub_align);
+             if (voff != (VkDeviceSize)-1 && ioff != (VkDeviceSize)-1 && ups != (VkDeviceSize)-1 &&
+@@ -4006,19 +4107,29 @@ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices,
+         if (batched && !set) batched = 0;
+     }
+     if (batched) {
+-        memcpy((u8*)s_eb.vb.ptr + voff, vertices, (size_t)vbytes);
+-        if (ibytes) memcpy((u8*)s_eb.ib.ptr + ioff, indices, (size_t)ibytes);
+-        vbuf = s_eb.vb.buf; ibuf = s_eb.ib.buf;
++        if (res) {
++            vbuf = ibuf = s_geom.chunk[res->chunk].buf;
++            voff = res->voff; ioff = res->ioff;
++        } else {
++            memcpy((u8*)s_eb.vb.ptr + voff, vertices, (size_t)vbytes);
++            if (ibytes) memcpy((u8*)s_eb.ib.ptr + ioff, indices, (size_t)ibytes);
++            vbuf = s_eb.vb.buf; ibuf = s_eb.ib.buf;
++        }
+         if (!s_eb_pending && vk_begin_batch()) return;
+     } else {
+         vk_eng_flush_sync();
+-        if (vk_ensure_vertex_buffer(vbytes)) return;
+-        memcpy(s_vk.vertices.ptr, vertices, (size_t)vbytes);
+-        if (ibytes) {
+-            if (vk_eng_ensure_indices(ibytes)) return;
+-            memcpy(s_e2.indices.ptr, indices, (size_t)ibytes);
++        if (res) {
++            vbuf = ibuf = s_geom.chunk[res->chunk].buf;
++            voff = res->voff; ioff = res->ioff;
++        } else {
++            if (vk_ensure_vertex_buffer(vbytes)) return;
++            memcpy(s_vk.vertices.ptr, vertices, (size_t)vbytes);
++            if (ibytes) {
++                if (vk_eng_ensure_indices(ibytes)) return;
++                memcpy(s_e2.indices.ptr, indices, (size_t)ibytes);
++            }
++            vbuf = s_vk.vertices.buf; ibuf = s_e2.indices.buf; voff = ioff = 0;
+         }
+-        vbuf = s_vk.vertices.buf; ibuf = s_e2.indices.buf; voff = ioff = 0;
+         if (!vk_eng_ucpu()) return;
+         memcpy(s_g.ubo.ptr, s_e2.ucpu, vsb);
+         memcpy((u8*)s_g.ubo.ptr + s_g.ps_off, s_e2.ucpu + s_g.ps_off, psb);
+@@ -4090,6 +4201,21 @@ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices,
+     if (++s_eb_pending >= s_eb.max_draws) vk_eng_flush();
+ }
+ 
++static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices, u32 vertex_count,
++                        u32 stride, const u32* indices, u32 index_count)
++{
++    (void)user;
++    vk_eng_draw_from(topology, vertices, vertex_count, stride, indices, index_count, NULL);
++}
++
++static void vk_eng_draw_geom(void* user, rsx_topology topology, u32 geom, u32 vertex_count,
++                             u32 stride, u32 index_count)
++{
++    (void)user;
++    if (!geom || geom > s_geom.n_ent) return;
++    vk_eng_draw_from(topology, NULL, vertex_count, stride, NULL, index_count, &s_geom.ent[geom - 1u]);
++}
++
+ static const rsx_draw_backend s_vk_engine_backend = {
+     .user                 = NULL,
+     .init                 = vk_eng_init,
+@@ -4119,6 +4245,9 @@ static const rsx_draw_backend s_vk_engine_backend = {
+     .set_depth_bias       = vk_eng_set_depth_bias,
+     .set_depth_bounds     = vk_eng_set_depth_bounds,
+     .draw                 = vk_eng_draw,
++    .geom_create          = vk_eng_geom_create,
++    .geom_reset           = vk_eng_geom_reset,
++    .draw_geom            = vk_eng_draw_geom,
+     .clear_color          = vk_eng_clear_color,
+     .clear_depth_stencil  = vk_eng_clear_depth_stencil,
+     .present              = vk_eng_present,
+diff --git a/runtime/memory/vm_watch.c b/runtime/memory/vm_watch.c
+new file mode 100644
+index 0000000..3d56a41
+--- /dev/null
++++ b/runtime/memory/vm_watch.c
+@@ -0,0 +1,171 @@
++#include "vm_watch.h"
++
++#include <stdlib.h>
++#include <string.h>
++
++#ifdef _WIN32
++#include <windows.h>
++
++extern uint8_t* vm_base;
++
++#define VW_PAGE_SHIFT  12
++#define VW_PAGE        ((size_t)1 << VW_PAGE_SHIFT)
++#define VW_SPAN        ((uint64_t)1 << 32)            /* the guest's 32-bit space */
++#define VW_PAGES       ((size_t)(VW_SPAN >> VW_PAGE_SHIFT))
++#define VW_BLOCK_SHIFT 4u                             /* 16 pages: 64 KB blocks */
++#define VW_HOT         16u                            /* writes after which a page stays unwatched */
++
++static struct {
++    int avail;                  /* -1 not set up yet */
++    volatile LONG epoch;
++    volatile LONG* page;        /* per page: the epoch of its last write seen */
++    volatile LONG* block;       /* per 64 KB block: the newest of its pages' epochs */
++    volatile char* prot;        /* per page: 1 while it is read-only for us */
++    unsigned char* writes;      /* per page: writes seen, up to VW_HOT */
++    SRWLOCK lock;               /* protection changes and their bookkeeping */
++} s_vw = { -1 };
++
++/* Lock held. Writable first, then the new epoch, and both before the faulting
++ * store runs again: a consumer that read the epoch before this sees the newer
++ * one; one that reads it after finds the page unprotected and protects it
++ * again before it reads. */
++static void vw_written_locked(size_t pg)
++{
++    DWORD old;
++    s_vw.prot[pg] = 0;
++    VirtualProtect(vm_base + (pg << VW_PAGE_SHIFT), VW_PAGE, PAGE_READWRITE, &old);
++    const LONG e = InterlockedIncrement(&s_vw.epoch);
++    s_vw.page[pg] = e;
++    if (s_vw.block[pg >> VW_BLOCK_SHIFT] < e) s_vw.block[pg >> VW_BLOCK_SHIFT] = e;
++    if (s_vw.writes[pg] < VW_HOT) s_vw.writes[pg]++;
++    MemoryBarrier();
++}
++
++static LONG CALLBACK vw_fault(EXCEPTION_POINTERS* ep)
++{
++    const EXCEPTION_RECORD* r = ep->ExceptionRecord;
++    if (r->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || r->NumberParameters < 2 ||
++        r->ExceptionInformation[0] != 1)                     /* writes only */
++        return EXCEPTION_CONTINUE_SEARCH;
++    const uintptr_t a = (uintptr_t)r->ExceptionInformation[1], b = (uintptr_t)vm_base;
++    if (a < b || (uint64_t)(a - b) >= VW_SPAN) return EXCEPTION_CONTINUE_SEARCH;
++    const size_t pg = (size_t)(a - b) >> VW_PAGE_SHIFT;
++    AcquireSRWLockExclusive(&s_vw.lock);
++    const int ours = s_vw.prot[pg];
++    if (ours) vw_written_locked(pg);
++    ReleaseSRWLockExclusive(&s_vw.lock);
++    if (ours) return EXCEPTION_CONTINUE_EXECUTION;
++    /* Another thread's fault on the same page released it meanwhile. Anything
++     * else (an uncommitted page, a real crash) is for the next handler. */
++    MEMORY_BASIC_INFORMATION mbi;
++    if (VirtualQuery((void*)a, &mbi, sizeof mbi) && mbi.State == MEM_COMMIT &&
++        mbi.Protect == PAGE_READWRITE)
++        return EXCEPTION_CONTINUE_EXECUTION;
++    return EXCEPTION_CONTINUE_SEARCH;
++}
++
++int vm_watch_available(void)
++{
++    if (s_vw.avail < 0) {
++        s_vw.avail = 0;
++        InitializeSRWLock(&s_vw.lock);
++        if (vm_base) {
++            s_vw.page   = (volatile LONG*)calloc(VW_PAGES, sizeof(LONG));
++            s_vw.block  = (volatile LONG*)calloc(VW_PAGES >> VW_BLOCK_SHIFT, sizeof(LONG));
++            s_vw.prot   = (volatile char*)calloc(VW_PAGES, 1);
++            s_vw.writes = (unsigned char*)calloc(VW_PAGES, 1);
++            /* First in line: ahead of the host's demand-commit handler, which
++             * would otherwise make a watched page writable unseen. */
++            s_vw.avail = s_vw.page && s_vw.block && s_vw.prot && s_vw.writes &&
++                         AddVectoredExceptionHandler(1, vw_fault) != NULL;
++        }
++    }
++    return s_vw.avail;
++}
++
++static int vw_pages(const void* p, size_t n, size_t* lo, size_t* hi)
++{
++    const uintptr_t a = (uintptr_t)p, b = (uintptr_t)vm_base;
++    if (!n || a < b || (uint64_t)(a - b) + n > VW_SPAN) return 0;
++    *lo = (size_t)(a - b) >> VW_PAGE_SHIFT;
++    *hi = (size_t)(((uint64_t)(a - b) + n - 1) >> VW_PAGE_SHIFT) + 1u;
++    return 1;
++}
++
++int vm_watch(const void* p, size_t n, uint64_t* since)
++{
++    size_t lo, hi;
++    if (!vm_watch_available() || !vw_pages(p, n, &lo, &hi)) return 0;
++    *since = (uint32_t)s_vw.epoch;              /* before any protection: see vw_written_locked */
++    int ok = 1;
++    AcquireSRWLockExclusive(&s_vw.lock);
++    for (size_t pg = lo; pg < hi && ok;) {
++        if (s_vw.prot[pg]) { pg++; continue; }
++        if (s_vw.writes[pg] >= VW_HOT) { ok = 0; break; }
++        size_t end = pg + 1;
++        while (end < hi && !s_vw.prot[end] && s_vw.writes[end] < VW_HOT) end++;
++        DWORD old;
++        if (!VirtualProtect(vm_base + (pg << VW_PAGE_SHIFT), (end - pg) << VW_PAGE_SHIFT, PAGE_READONLY, &old)) {
++            ok = 0;
++            break;
++        }
++        memset((void*)(s_vw.prot + pg), 1, end - pg);
++        pg = end;
++    }
++    ReleaseSRWLockExclusive(&s_vw.lock);
++    return ok;
++}
++
++uint64_t vm_watch_epoch(void) { return (uint32_t)s_vw.epoch; }
++
++int vm_watch_clean_since(const void* p, size_t n, uint64_t since)
++{
++    size_t lo, hi;
++    if (s_vw.avail != 1 || !vw_pages(p, n, &lo, &hi)) return 0;
++    /* Blocks first: only a block written since needs its pages looked at. */
++    for (size_t b = lo >> VW_BLOCK_SHIFT; b <= (hi - 1u) >> VW_BLOCK_SHIFT; b++) {
++        if ((uint64_t)(uint32_t)s_vw.block[b] <= since) continue;
++        const size_t p0 = (b << VW_BLOCK_SHIFT) > lo ? b << VW_BLOCK_SHIFT : lo;
++        const size_t p1 = ((b + 1u) << VW_BLOCK_SHIFT) < hi ? (b + 1u) << VW_BLOCK_SHIFT : hi;
++        for (size_t pg = p0; pg < p1; pg++)
++            if ((uint64_t)(uint32_t)s_vw.page[pg] > since) return 0;
++    }
++    return 1;
++}
++
++void vm_watch_release(const void* p, size_t n)
++{
++    size_t lo, hi;
++    if (s_vw.avail != 1 || !vw_pages(p, n, &lo, &hi)) return;
++    AcquireSRWLockExclusive(&s_vw.lock);
++    for (size_t pg = lo; pg < hi; pg++)
++        if (s_vw.prot[pg]) vw_written_locked(pg);
++    ReleaseSRWLockExclusive(&s_vw.lock);
++}
++
++void vm_watch_reset(void)
++{
++    if (s_vw.avail != 1) return;
++    AcquireSRWLockExclusive(&s_vw.lock);
++    for (size_t pg = 0; pg < VW_PAGES;) {
++        if (!s_vw.prot[pg]) { pg++; continue; }
++        size_t end = pg + 1;
++        while (end < VW_PAGES && s_vw.prot[end]) end++;
++        DWORD old;
++        VirtualProtect(vm_base + (pg << VW_PAGE_SHIFT), (end - pg) << VW_PAGE_SHIFT, PAGE_READWRITE, &old);
++        memset((void*)(s_vw.prot + pg), 0, end - pg);
++        pg = end;
++    }
++    ReleaseSRWLockExclusive(&s_vw.lock);
++}
++
++#else  /* no write watching here yet: callers validate their own way */
++
++int vm_watch_available(void) { return 0; }
++int vm_watch(const void* p, size_t n, uint64_t* since) { (void)p; (void)n; (void)since; return 0; }
++uint64_t vm_watch_epoch(void) { return 0; }
++int vm_watch_clean_since(const void* p, size_t n, uint64_t since) { (void)p; (void)n; (void)since; return 0; }
++void vm_watch_release(const void* p, size_t n) { (void)p; (void)n; }
++void vm_watch_reset(void) {}
++
++#endif
+diff --git a/runtime/memory/vm_watch.h b/runtime/memory/vm_watch.h
+new file mode 100644
+index 0000000..53af641
+--- /dev/null
++++ b/runtime/memory/vm_watch.h
+@@ -0,0 +1,52 @@
++/*
++ * vm_watch -- which guest pages were written since a point in time, without
++ * reading them and at no cost while nothing is written.
++ *
++ * A watched page is made read-only. The first write to it, from any thread
++ * (lifted PPU code, SPU DMA, the FIFO walker, the host's own memcpy), faults
++ * into a vectored handler that gives the page a new epoch and makes it
++ * writable again, and the write goes ahead. A consumer takes the epoch when
++ * it starts reading a range (vm_watch) and later asks whether any page of the
++ * range has a newer one (vm_watch_clean_since). Writes the host makes from
++ * the kernel -- a file read straight into guest memory -- would fail on a
++ * read-only page instead of faulting, so those paths call vm_watch_release
++ * first. A page written over and over is left unwatched (the caller then
++ * validates its own way). Windows for now; elsewhere vm_watch_available() is
++ * 0. The consumers (vm_watch, clean_since) run on one thread, the FIFO
++ * walker; the handler and vm_watch_release run on any.
++ */
++#ifndef VM_WATCH_H
++#define VM_WATCH_H
++
++#include <stddef.h>
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++int vm_watch_available(void);
++
++/* Watch [p, p+n) from now on. *since is the epoch to compare against later:
++ * read the range only after this returns. 0 when it cannot be watched. */
++int vm_watch(const void* p, size_t n, uint64_t* since);
++
++/* The current epoch: a page written after this shows a later one. */
++uint64_t vm_watch_epoch(void);
++
++/* 1 when no page of [p, p+n) was written after `since`. */
++int vm_watch_clean_since(const void* p, size_t n, uint64_t since);
++
++/* The host is about to write [p, p+n) from outside this process's own
++ * instructions (the kernel filling a read): count it as written and make the
++ * watched pages in it writable. Any thread; a no-op when nothing is watched. */
++void vm_watch_release(const void* p, size_t n);
++
++/* Stop watching everything (the consumer dropped what it read). */
++void vm_watch_reset(void);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif
+diff --git a/runtime/syscalls/sys_fs.c b/runtime/syscalls/sys_fs.c
+index 9126779..60b9c2a 100644
+--- a/runtime/syscalls/sys_fs.c
++++ b/runtime/syscalls/sys_fs.c
+@@ -11,6 +11,7 @@
+ #include <errno.h>
+ #include <sys/types.h>
+ #include <sys/stat.h>
++#include "../memory/vm_watch.h"
+ 
+ #ifdef _WIN32
+   #include <direct.h>
+@@ -520,6 +521,8 @@ int64_t sys_fs_read(ppu_context* ctx)
+      * as a read error on every movie and never decoded a frame -- solid green
+      * video. ppu_fs.cpp fs_prefault is the same fix for cellFs. */
+     if (size) vm_commit(buf_addr, (uint32_t)size);
++    /* Likewise a page made read-only to watch it for writes (vm_watch.h). */
++    if (size) vm_watch_release(buf, (size_t)size);
+     size_t nread = fread(buf, 1, (size_t)size, f->fp);
+ 
+     /* PS3_FSTRACE=<n>: every nth read, the fd and the file offset it came from.
+-- 
+2.56.0.windows.3
+
