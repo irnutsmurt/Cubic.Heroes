@@ -1,0 +1,113 @@
+From 236142b526493925565a303d4017527f1ccf1b00 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Fri, 30 Oct 2026 14:08:40 -0700
+Subject: [PATCH 39/40] Vulkan PS3_FTRACE spans; sampler registers in the pass
+ dump
+
+- rsx_vulkan_backend: the timeline spans the Metal backend records, for
+  Vulkan: synchronous flush waits and in-flight batch waits (GPU_WAIT 0
+  and 2), the walker waiting at the flip for the previous present
+  (GPU_WAIT 1), the present itself and its readback. They showed the
+  walker spending ~3.7 ms a frame there.
+- rsx_draw_engine: RSX_ENGINE_PASS_DUMP_DRAWS lines name each texture's
+  mip count, SET_TEXTURE_FILTER, CONTROL0 and ADDRESS (LOD bias and
+  range, filters, anisotropy, wrap and gamma lanes).
+---
+ libs/video/rsx_draw_engine.c    |  8 ++++++--
+ libs/video/rsx_vulkan_backend.c | 18 ++++++++++++++++++
+ 2 files changed, 24 insertions(+), 2 deletions(-)
+
+diff --git a/libs/video/rsx_draw_engine.c b/libs/video/rsx_draw_engine.c
+index 5b80d56..e26a8e2 100644
+--- a/libs/video/rsx_draw_engine.c
++++ b/libs/video/rsx_draw_engine.c
+@@ -2933,8 +2933,12 @@ static void pd_note(const u32* targets, u32 n_targets, u32 zslot,
+             if (!(tex_mask & (1u << u))) continue;
+             rsx_dsp_texture t;
+             rsx_dsp_get_texture(&g.rsx, u, &t);
+-            fprintf(s_pd.draws_log, " t%u %u:0x%08X f%02X %ux%u", u, t.location, t.offset,
+-                    t.format & 0xFFu, t.width, t.height);
++            /* m: mip levels; F: SET_TEXTURE_FILTER (LOD bias, convolution,
++             * min/mag filters); C0: SET_TEXTURE_CONTROL0 (LOD range, aniso);
++             * A: SET_TEXTURE_ADDRESS (wrap modes, gamma lanes in bits 20-23) */
++            fprintf(s_pd.draws_log, " t%u %u:0x%08X f%02X %ux%u m%u F%08X C0%08X A%08X", u,
++                    t.location, t.offset, t.format & 0xFFu, t.width, t.height, t.mipmaps, t.filter,
++                    t.control0, t.wrap);
+         }
+         fprintf(s_pd.draws_log, "\n");
+     }
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index e151d26..7bdfca3 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -48,6 +48,7 @@
+ #include "rsx_fp_decompiler.h"
+ #include "rsx_shader_spirv.h"
+ #include "rsx_draw_engine.h"
++#include "../../include/ps3emu/ps3_ftrace.h"  /* PS3_FTRACE timeline: waits, readback, present */
+ #include "vulkan/rsx_vk_fallback_vert.spv.h"
+ #include "vulkan/rsx_vk_fallback_frag.spv.h"
+ 
+@@ -792,8 +793,11 @@ static int vk_submit_and_wait_at(int line)
+                         .commandBufferCount = 1, .pCommandBuffers = &s_vk.cmd };
+     VK_CHECK(pvkResetFences(s_vk.device, 1, &s_vk.fence), "vkResetFences");
+     struct timespec a, b; vk_monotonic(&a);
++    const uint64_t ft0 = PS3_FT_ON() ? ps3_ft_now() : 0;
+     VK_CHECK(vk_queue_submit(&si, s_vk.fence), "vkQueueSubmit");
+     VK_CHECK(pvkWaitForFences(s_vk.device, 1, &s_vk.fence, VK_TRUE, UINT64_MAX), "vkWaitForFences");
++    if (ft0) { const uint64_t ft1 = ps3_ft_now();
++               if (ft1 - ft0 >= ps3_ft_min_ns()) ps3_ft_span(PS3_FT_GPU_WAIT, 0, 0, (u32)line, ft0, ft1); }
+     vk_monotonic(&b);
+     vk_gt_collect(s_vk.cmd);
+     vk_wait_stat(s_flush_line ? -s_flush_line : line,
+@@ -2185,16 +2189,22 @@ static void vk_present_wait_gpu(void)
+ static void vk_present_complete_locked(void)
+ {
+     if (!s_vk.present_inflight) return;
++    /* Timed as one present span (who 1): the GPU finishing the frame, the
++     * readback and dump (READBACK) and the window's own present. */
++    const uint64_t ft0 = PS3_FT_ON() ? ps3_ft_now() : 0;
+     pvkWaitForFences(s_vk.device, 1, &s_vk.present_fence, VK_TRUE, UINT64_MAX);
+     __atomic_store_n(&s_vk.present_inflight, 0, __ATOMIC_RELEASE);
+ 
++    const uint64_t ft_r0 = ft0 ? ps3_ft_now() : 0;
+     vk_invalidate(&s_vk.readback);
+     const unsigned char* px = (const unsigned char*)s_vk.readback.ptr;
+     size_t c = ((size_t)(s_vk.height / 2) * s_vk.width + s_vk.width / 2) * 4;
+     s_vk.last_center = ((u32)px[c] << 16) | ((u32)px[c + 1] << 8) | (u32)px[c + 2];
+     s_vk.presented++;
+     if (s_vk.dump_path && (s_vk.presented % s_vk.dump_every) == 0) vk_dump_ppm(px);
++    if (ft0) ps3_ft_span(PS3_FT_READBACK, 1, s_vk.width, s_vk.height, ft_r0, ps3_ft_now());
+     vk_present_window();
++    if (ft0) ps3_ft_span(PS3_FT_PRESENT, 1, 0, 0, ft0, ps3_ft_now());
+ }
+ 
+ /* present_mu held: a previous present finished, the present's command
+@@ -2623,8 +2633,13 @@ static void vk_eng_present(void* user, u32 surface)
+     if (!s_vk.device) return;
+     if (s_eb_pending) vk_eng_flush();   /* the present records on its own buffer */
+     vk_eng_obj* o = vk_eng_get(surface, VK_ENG_COLOR);
++    /* Timed: the walker waiting for the previous present (its lock, then
++     * whatever of it is still in flight). */
++    const uint64_t ft0 = PS3_FT_ON() ? ps3_ft_now() : 0;
+     vk_mutex_lock(&s_vk.present_mu);
+     VkCommandBuffer cb = vk_present_record_begin();
++    if (ft0) { const uint64_t ft1 = ps3_ft_now();
++               if (ft1 - ft0 >= ps3_ft_min_ns()) ps3_ft_span(PS3_FT_GPU_WAIT, 0, 1, 0, ft0, ft1); }
+     if (cb) {
+         if (o) {
+             vk_barrier_image_on(cb, o->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
+@@ -3797,7 +3812,10 @@ static void vk_wait_inflight(void)
+ {
+     if (!s_eb.inflight) return;
+     struct timespec a, b; vk_monotonic(&a);
++    const uint64_t ft0 = PS3_FT_ON() ? ps3_ft_now() : 0;
+     pvkWaitForFences(s_vk.device, 1, &s_eb.alt_fence, VK_TRUE, UINT64_MAX);
++    if (ft0) { const uint64_t ft1 = ps3_ft_now();
++               if (ft1 - ft0 >= ps3_ft_min_ns()) ps3_ft_span(PS3_FT_GPU_WAIT, 0, 2, 0, ft0, ft1); }
+     vk_monotonic(&b);
+     vk_gt_collect(s_eb.alt_cmd);
+     vk_wait_stat(s_flush_line ? -s_flush_line : 1, (b.tv_sec - a.tv_sec) * 1e3 + (b.tv_nsec - a.tv_nsec) * 1e-6);
+-- 
+2.56.0.windows.3
+

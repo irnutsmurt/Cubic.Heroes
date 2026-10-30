@@ -54,10 +54,15 @@ def cmake_toolchain(platform, zig=None, extra_include_after=()):
                       ("cxx", f"c++ -target {TARGETS[platform]}{extra}"),
                       ("ar", "ar"), ("ranlib", "ranlib"), ("rc", "rc")):
         p = os.path.join(d, "zig-" + name)
-        with open(p, "w") as f:
-            f.write(f'#!/bin/sh\nexec "{zig}" {cmd} "$@"\n')
-        os.chmod(p, 0o755)
-        tools[name] = p
+        if os.name == "nt":  # a Windows host runs .cmd files, not shell scripts
+            p += ".cmd"
+            with open(p, "w", newline="\r\n") as f:
+                f.write(f'@"{zig}" {cmd} %*\n')
+        else:
+            with open(p, "w") as f:
+                f.write(f'#!/bin/sh\nexec "{zig}" {cmd} "$@"\n')
+            os.chmod(p, 0o755)
+        tools[name] = p.replace("\\", "/")
     tc = os.path.join(d, "toolchain.cmake")
     with open(tc, "w") as f:
         if platform == "windows":

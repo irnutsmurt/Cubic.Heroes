@@ -1,0 +1,19 @@
+# Timing route (DUMP=0: no frame dumps, so no `change`/`shot` steps): load the
+# save (SAVES=...), then walk the same loop in front of the castle twice.
+# Gameplay from ~60 s; time with DIAG_FPS, PS3_FTRACE=<start>:... or DIAG_PROF.
+log TitleMovie 120
+sleep 5
+press START                 # "PRESS START BUTTON"
+sleep 3
+press START                 # main menu: CONTINUE
+sleep 5
+press CROSS                 # "Change characters?" NO
+sleep 15                    # the area loads
+hold DOWN 3
+hold LEFT 4
+hold UP 6
+hold RIGHT 4
+hold DOWN 3
+hold LEFT 4
+hold UP 6
+hold RIGHT 4

@@ -1,0 +1,109 @@
+From 815aeeeeffd10af940c31f99e762a56c8b2605c4 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Fri, 30 Oct 2026 14:08:40 -0700
+Subject: [PATCH 38/40] Vulkan: honour the guest's polygon offset
+ (set_depth_bias)
+
+The draw engine passes SET_POLY_OFFSET_* to set_depth_bias, which the
+Vulkan backend left NULL, so every draw ran without it. 3D Dot Game
+Heroes renders its shadow map with an offset (slope 1.05, units 10);
+without it the ground shadowed itself in moire rings over the whole
+field (shadow acne), the "swirl" seen on Linux and Windows.
+
+Depth bias is dynamic state, enabled in every engine pipeline (0/0 when
+the offset is off) and set before each draw like the stencil reference.
+The units carry over as the Metal backend does: guest Z24 steps are
+2^-24, which is also a float depth buffer's step over [0.5, 1); Z16 is
+256 of them, and a D16 attachment scales the other way.
+---
+ libs/video/rsx_vulkan_backend.c | 30 ++++++++++++++++++++++++++----
+ 1 file changed, 26 insertions(+), 4 deletions(-)
+
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index 1332593..e151d26 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -137,7 +137,7 @@ static const char* vk_lib_error(void) { return dlerror(); }
+     X(vkCmdBeginRenderPass) X(vkCmdEndRenderPass) X(vkCmdBindPipeline) \
+     X(vkCmdBindVertexBuffers) X(vkCmdBindDescriptorSets) X(vkCmdPushConstants) \
+     X(vkCmdSetViewport) X(vkCmdSetScissor) X(vkCmdDraw) \
+-    X(vkCmdSetStencilReference) X(vkCmdSetDepthBounds) \
++    X(vkCmdSetStencilReference) X(vkCmdSetDepthBounds) X(vkCmdSetDepthBias) \
+     X(vkCmdBindIndexBuffer) X(vkCmdDrawIndexed) \
+     X(vkCreateSemaphore) X(vkDestroySemaphore) X(vkCmdBlitImage) \
+     X(vkCreateQueryPool) X(vkDestroyQueryPool) X(vkCmdResetQueryPool) \
+@@ -3043,6 +3043,7 @@ static struct {
+     int          have_vp, have_sc;
+     u32          stencil_ref;
+     float        depth_bounds[2];     /* min, max for the next draw */
++    float        depth_bias[2];       /* constant, slope for the next draw */
+     vk_buffer    indices;
+     u32          warned;
+     /* The split set layout (vk_eng_split_layout) and its one set, made the
+@@ -3326,6 +3327,9 @@ static VkPipeline vk_eng_variant(vk_eng_pipe* P, u32 topo_idx)
+                                                                            : VK_CULL_MODE_BACK_BIT,
+         .frontFace = (rs->front_face == 0x0901u) ? VK_FRONT_FACE_COUNTER_CLOCKWISE
+                                                  : VK_FRONT_FACE_CLOCKWISE,
++        /* Always on: the guest's polygon offset is dynamic state, 0/0 when
++         * it is off (vk_eng_set_depth_bias). */
++        .depthBiasEnable = VK_TRUE,
+         .lineWidth = 1.0f };
+     VkPipelineMultisampleStateCreateInfo ms = {
+         .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+@@ -3396,11 +3400,12 @@ static VkPipeline vk_eng_variant(vk_eng_pipe* P, u32 topo_idx)
+     VkPipelineColorBlendStateCreateInfo cb = {
+         .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+         .attachmentCount = P->rt_count, .pAttachments = cba };
+-    VkDynamicState dyn[4] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR,
+-                              VK_DYNAMIC_STATE_STENCIL_REFERENCE, VK_DYNAMIC_STATE_DEPTH_BOUNDS };
++    VkDynamicState dyn[5] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR,
++                              VK_DYNAMIC_STATE_STENCIL_REFERENCE, VK_DYNAMIC_STATE_DEPTH_BIAS,
++                              VK_DYNAMIC_STATE_DEPTH_BOUNDS };
+     VkPipelineDynamicStateCreateInfo dy = {
+         .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+-        .dynamicStateCount = s_vk.depth_bounds_ok ? 4u : 3u, .pDynamicStates = dyn };
++        .dynamicStateCount = s_vk.depth_bounds_ok ? 5u : 4u, .pDynamicStates = dyn };
+     VkGraphicsPipelineCreateInfo gci = {
+         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+         .stageCount = 2, .pStages = st, .pVertexInputState = &vi, .pInputAssemblyState = &ia,
+@@ -3493,6 +3498,21 @@ static void vk_eng_set_scissor(void* user, u32 x, u32 y, u32 w, u32 h)
+ }
+ static void vk_eng_set_stencil_ref(void* user, u32 ref) { (void)user; s_e2.stencil_ref = ref; }
+ 
++/* Polygon offset. glPolygonOffset's units are steps of the guest depth
++ * buffer, 2^-16 for Z16 and 2^-24 for Z24S8. Vulkan's constant factor is in
++ * steps of the attachment: 2^-24 for D24, 2^-16 for D16, and for the float
++ * formats 2^(e-23) for a primitive whose largest depth has exponent e, which
++ * is 2^-24 over [0.5, 1) where nearly all of a perspective scene's depth sits
++ * (as in the Metal backend). Without it a shadow map pass that relies on the
++ * offset shadows its receivers themselves: moire rings across the ground. */
++static void vk_eng_set_depth_bias(void* user, float slope, float units, u32 depth_bits)
++{
++    (void)user;
++    const u32 host_bits = s_vk.depth_format == VK_FORMAT_D16_UNORM ? 16u : 24u;
++    s_e2.depth_bias[0] = units * (float)(1u << (host_bits - 16u)) / (float)(1u << (depth_bits - 16u));
++    s_e2.depth_bias[1] = slope;
++}
++
+ /* Vulkan wants the bounds inside [0, 1] without VK_EXT_depth_range_unrestricted;
+  * a NaN clamps to the open end so a garbage register cannot reject a draw. */
+ static float vk_depth_bound(float v, float open)
+@@ -4034,6 +4054,7 @@ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices,
+     pvkCmdSetViewport(s_vk.cmd, 0, 1, &vp);
+     pvkCmdSetScissor(s_vk.cmd, 0, 1, &sc);
+     pvkCmdSetStencilReference(s_vk.cmd, VK_STENCIL_FACE_FRONT_AND_BACK, s_e2.stencil_ref & 0xFFu);
++    pvkCmdSetDepthBias(s_vk.cmd, s_e2.depth_bias[0], 0.0f, s_e2.depth_bias[1]);
+     if (s_vk.depth_bounds_ok)
+         pvkCmdSetDepthBounds(s_vk.cmd, s_e2.depth_bounds[0], s_e2.depth_bounds[1]);
+     pvkCmdBindDescriptorSets(s_vk.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+@@ -4077,6 +4098,7 @@ static const rsx_draw_backend s_vk_engine_backend = {
+     .set_viewport         = vk_eng_set_viewport,
+     .set_scissor          = vk_eng_set_scissor,
+     .set_stencil_ref      = vk_eng_set_stencil_ref,
++    .set_depth_bias       = vk_eng_set_depth_bias,
+     .set_depth_bounds     = vk_eng_set_depth_bounds,
+     .draw                 = vk_eng_draw,
+     .clear_color          = vk_eng_clear_color,
+-- 
+2.56.0.windows.3
+

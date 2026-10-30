@@ -67,6 +67,18 @@ endif()
 list(LENGTH RECOMP_SOURCES RECOMP_SOURCE_COUNT)
 message(STATUS "Lifted sources:  ${RECOMP_SOURCE_COUNT} file(s)")
 
+# Windows development builds (clang/Zig): CodeView line tables and a PDB next
+# to the executable, so a debugger, Nsight and tests/prof_report.py (through
+# DbgHelp) can name every host frame, the runtime's and the lifted functions'.
+# Line tables only: names and lines at a fraction of the cost of full -g. Set
+# before the runtime subdirectory so it gets them too; release packages
+# (-DDOTHEROES_DEV_DIAGNOSTICS=OFF) stay without.
+if(WIN32 AND CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND
+   (NOT DEFINED DOTHEROES_DEV_DIAGNOSTICS OR DOTHEROES_DEV_DIAGNOSTICS))
+    add_compile_options(-gcodeview -gline-tables-only)
+    add_link_options(-g)
+endif()
+
 # ---------------------------------------------------------------------------
 # ps3recomp runtime library
 # ---------------------------------------------------------------------------

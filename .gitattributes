@@ -1,0 +1,5 @@
+# LF in every checkout, Windows included: the shell scripts must run, and the
+# generated and patched sources are compared byte for byte across hosts.
+* text=auto eol=lf
+# Patches carry the exact bytes of the files they change.
+*.patch -text

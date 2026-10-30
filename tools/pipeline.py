@@ -77,7 +77,8 @@ def toolchain():
     want = hashlib.sha256(PS3RECOMP_REV.encode() + b"".join(open(f, "rb").read() for f in patches)).hexdigest()
     stamp = os.path.join(PS3RECOMP, ".dotheroes_patchset")
     if not os.path.isdir(os.path.join(PS3RECOMP, ".git")):
-        run("toolchain", ["git", "clone", "-q", PS3RECOMP_URL, PS3RECOMP])
+        # LF checkout on every host: `git am` applies the patches byte for byte
+        run("toolchain", ["git", "clone", "-q", "-c", "core.autocrlf=false", PS3RECOMP_URL, PS3RECOMP])
     elif os.path.exists(stamp) and open(stamp).read().strip() == want:
         log("toolchain", f"ps3recomp {PS3RECOMP_REV[:7]} + {len(patches)} patch(es)")
         return

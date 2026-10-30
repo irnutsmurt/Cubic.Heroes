@@ -1,0 +1,52 @@
+From 504875d6627ef5067753983b61850ac3bd079ac6 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Fri, 30 Oct 2026 14:08:39 -0700
+Subject: [PATCH 37/40] rsx_live_draw: the no-op in Windows builds with the
+ Vulkan backend
+
+On Windows rsx_live_draw.c compiled its D3D12 capture-replay engine
+whenever _WIN32 was defined, so a Vulkan build (patch 0035) referenced
+D3D12CreateDevice, D3DCompile and friends and did not link. A Vulkan
+build renders through the draw engine and rsx_vulkan_backend.c as on
+Linux, so it takes the same no-op path; the executable imports nothing
+from D3D12.
+---
+ libs/video/rsx_live_draw.c | 10 ++++++----
+ 1 file changed, 6 insertions(+), 4 deletions(-)
+
+diff --git a/libs/video/rsx_live_draw.c b/libs/video/rsx_live_draw.c
+index 2579117..ddad94a 100644
+--- a/libs/video/rsx_live_draw.c
++++ b/libs/video/rsx_live_draw.c
+@@ -24,9 +24,11 @@
+ #include "ps3emu/yz_frontier_trace.h"
+ #include "ps3emu/log_first.h"
+ 
+-#if !defined(_WIN32)
++#if !defined(_WIN32) || defined(PS3RECOMP_RSX_VULKAN)
+ 
+-/* Non-Windows: the whole path is a no-op (D3D12 is Windows-only). */
++/* Non-Windows, and Windows builds with the Vulkan backend: the whole path
++ * is a no-op (D3D12 is Windows-only, and a Vulkan build renders through
++ * the draw engine and rsx_vulkan_backend.c as on Linux). */
+ int  rsx_live_draw_enabled(void) { return 0; }
+ int  rsx_live_draw_init(void* hwnd, u32 w, u32 h, rsx_live_guest_ptr_fn f, void* u)
+ { (void)hwnd; (void)w; (void)h; (void)f; (void)u; return 0; }
+@@ -65,7 +67,7 @@ int  rsx_live_draw_debug_dump_surface(u32 l, u32 o, const char* p)
+ void rsx_live_draw_set_a010_camera_matrix(const float* m) { (void)m; }
+ void rsx_live_draw_shutdown(void) {}
+ 
+-#else /* _WIN32 */
++#else /* _WIN32 && !PS3RECOMP_RSX_VULKAN */
+ 
+ #define _CRT_SECURE_NO_WARNINGS
+ 
+@@ -10551,4 +10553,4 @@ void rsx_live_draw_shutdown(void)
+     if (dc.cuts) { free(dc.cuts); dc.cuts = NULL; dc.cap_cuts = 0; }
+ }
+ 
+-#endif /* _WIN32 */
++#endif /* _WIN32 && !PS3RECOMP_RSX_VULKAN */
+-- 
+2.56.0.windows.3
+

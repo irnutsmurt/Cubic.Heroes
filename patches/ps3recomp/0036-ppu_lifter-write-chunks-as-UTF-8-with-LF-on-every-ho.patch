@@ -1,0 +1,40 @@
+From 0df305d62f546bc07cc09c1c7609c063b96bff6b Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Fri, 30 Oct 2026 11:09:48 -0700
+Subject: [PATCH] ppu_lifter: write chunks as UTF-8 with LF on every host
+
+On Windows, text mode turned every newline into CRLF, so a Windows lift
+differed byte for byte from a Linux one and the locale code page decided
+how the files were read.
+---
+ tools/ppu_lifter.py | 9 +++++----
+ 1 file changed, 5 insertions(+), 4 deletions(-)
+
+diff --git a/tools/ppu_lifter.py b/tools/ppu_lifter.py
+index 7446ac5..669ac06 100644
+--- a/tools/ppu_lifter.py
++++ b/tools/ppu_lifter.py
+@@ -4269,15 +4269,16 @@ class PPULifter:
+     def write_if_changed(path: str, text: str) -> bool:
+         """Write `text` to `path` only when the content differs, so an
+         unchanged file keeps its mtime and the build leaves its object alone.
+-        Returns True when the file was written."""
++        Returns True when the file was written. UTF-8 with LF line endings on
++        every host, so a Windows lift is byte-identical to a Linux one."""
+         try:
+-            with open(path, "r") as f:
++            with open(path, "r", encoding="utf-8", newline="") as f:
+                 if f.read() == text:
+                     return False
+-        except OSError:
++        except (OSError, UnicodeDecodeError):
+             pass
+         tmp = path + ".tmp"
+-        with open(tmp, "w") as f:
++        with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+             f.write(text)
+         os.replace(tmp, path)
+         return True
+-- 
+2.56.0.windows.3
+

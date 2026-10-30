@@ -18,6 +18,7 @@
 #include "ppu_tls.h"   /* PPU_THREAD_LOCAL */
 
 #include <atomic>
+#include <chrono>
 #include <cerrno>
 #include <cstdarg>
 #include <cstdint>
@@ -25,6 +26,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <thread>
 
 #ifndef _WIN32
 #  include <dirent.h>
@@ -39,6 +41,7 @@
 #else
 #  include <windows.h>
 #  include <direct.h>
+#  include <tlhelp32.h>
 #endif
 
 extern "C" PPU_THREAD_LOCAL ppu_context* g_active_ctx;
@@ -259,65 +262,6 @@ void dump_signal_handler(int, siginfo_t*, void*)
     pthread_mutex_unlock(&g_dump_lock);
     g_dump_pending.fetch_sub(1);
 }
-
-void* watchdog_main(void*)
-{
-    pthread_setname_np(pthread_self(), "diag-watchdog");
-    const char* e;
-    unsigned hang_secs = (e = getenv("DIAG_HANG_SECS")) ? (unsigned)atoi(e) : 10;
-    unsigned boot_secs = (e = getenv("DIAG_BOOT_SECS")) ? (unsigned)atoi(e) : 120;
-    bool hang_exit = (e = getenv("DIAG_HANG_EXIT")) && *e == '1';
-    /* DIAG_DUMP_AT=<s>[,<s>...]: also dump every thread at these seconds after
-     * start, for a game that keeps flipping but stops making progress. */
-    unsigned dump_at[16]; int n_dump = 0;
-    if ((e = getenv("DIAG_DUMP_AT")))
-        for (char* p = (char*)e; *p && n_dump < 16; ) {
-            dump_at[n_dump++] = (unsigned)strtoul(p, &p, 10);
-            while (*p == ',') p++;
-        }
-    unsigned elapsed = 0;
-    unsigned last = cellGcm_flip_request_count();
-    unsigned still = 0;
-    bool reported = false;
-    const bool fps_log = (e = getenv("DIAG_FPS")) && *e == '1';
-    unsigned fps_last = last;
-    struct timespec w0; clock_gettime(CLOCK_MONOTONIC, &w0);
-    for (;;) {
-        /* By the clock: signals (DIAG_PROF samples this thread too) end
-         * sleep() early, and counting wake-ups ran this clock 1000x fast. */
-        struct timespec wn;
-        do { usleep(100000); clock_gettime(CLOCK_MONOTONIC, &wn); }
-        while ((unsigned)(wn.tv_sec - w0.tv_sec) <= elapsed);
-        const unsigned target = (unsigned)(wn.tv_sec - w0.tv_sec);
-        if (target > elapsed + 1) still += target - elapsed - 1;
-        elapsed = target - 1;
-        elapsed++;
-        /* DIAG_FPS=1: guest flips per second, every 10 s. */
-        if (fps_log && elapsed % 10 == 0) {
-            const unsigned f = cellGcm_flip_request_count();
-            fprintf(stderr, "[diag] %u s: %.1f flips/s (%u total)\n", elapsed, (f - fps_last) / 10.0, f);
-            fps_last = f;
-        }
-        for (int i = 0; i < n_dump; i++)
-            if (dump_at[i] == elapsed) {
-                char why[64];
-                snprintf(why, sizeof why, "requested at %u s (DIAG_DUMP_AT)", elapsed);
-                diag_dump_all_threads(why);
-            }
-        unsigned now = cellGcm_flip_request_count();
-        if (now != last) { last = now; still = 0; reported = false; continue; }
-        still++;
-        unsigned limit = now ? hang_secs : boot_secs;
-        if (still >= limit && !reported) {
-            char why[96];
-            snprintf(why, sizeof why, "no guest flip for %u s (%u frames so far)", still, now);
-            diag_dump_all_threads(why);
-            reported = true;
-            if (hang_exit) { fprintf(stderr, "[diag] DIAG_HANG_EXIT: exit(4)\n"); _exit(4); }
-        }
-    }
-    return nullptr;
-}
 #endif /* !_WIN32 */
 
 #ifdef _WIN32
@@ -408,9 +352,77 @@ extern "C" void diag_dump_all_threads(const char* reason)
     close_report();
     pthread_mutex_unlock(&g_dump_lock);
 #else
-    (void)reason;
+    /* No per-thread dumps here (they are signal-driven); the report
+     * still records the hang. A debugger or Nsight Systems shows stacks. */
+    open_report("hang");
+    rp("=== HANG: %s (per-thread dumps are POSIX-only)\n", reason);
+    close_report();
 #endif
 }
+
+/* ---- hang watchdog and frame counter (both platforms) ------------------ */
+namespace {
+void watchdog_main()
+{
+#ifndef _WIN32
+    pthread_setname_np(pthread_self(), "diag-watchdog");
+#endif
+    const char* e;
+    unsigned hang_secs = (e = getenv("DIAG_HANG_SECS")) ? (unsigned)atoi(e) : 10;
+    unsigned boot_secs = (e = getenv("DIAG_BOOT_SECS")) ? (unsigned)atoi(e) : 120;
+    bool hang_exit = (e = getenv("DIAG_HANG_EXIT")) && *e == '1';
+    /* DIAG_DUMP_AT=<s>[,<s>...]: also dump every thread at these seconds after
+     * start, for a game that keeps flipping but stops making progress. */
+    unsigned dump_at[16]; int n_dump = 0;
+    if ((e = getenv("DIAG_DUMP_AT")))
+        for (char* p = (char*)e; *p && n_dump < 16; ) {
+            dump_at[n_dump++] = (unsigned)strtoul(p, &p, 10);
+            while (*p == ',') p++;
+        }
+    unsigned elapsed = 0;
+    unsigned last = cellGcm_flip_request_count();
+    unsigned still = 0;
+    bool reported = false;
+    const bool fps_log = (e = getenv("DIAG_FPS")) && *e == '1';
+    unsigned fps_last = last;
+    const auto w0 = std::chrono::steady_clock::now();
+    for (;;) {
+        /* By the clock: signals (DIAG_PROF samples this thread too) end
+         * sleeps early, and counting wake-ups ran this clock 1000x fast. */
+        unsigned target;
+        do {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            target = (unsigned)std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::steady_clock::now() - w0).count();
+        } while (target <= elapsed);
+        if (target > elapsed + 1) still += target - elapsed - 1;
+        elapsed = target;
+        /* DIAG_FPS=1: guest flips per second, every 10 s. */
+        if (fps_log && elapsed % 10 == 0) {
+            const unsigned f = cellGcm_flip_request_count();
+            fprintf(stderr, "[diag] %u s: %.1f flips/s (%u total)\n", elapsed, (f - fps_last) / 10.0, f);
+            fps_last = f;
+        }
+        for (int i = 0; i < n_dump; i++)
+            if (dump_at[i] == elapsed) {
+                char why[64];
+                snprintf(why, sizeof why, "requested at %u s (DIAG_DUMP_AT)", elapsed);
+                diag_dump_all_threads(why);
+            }
+        unsigned now = cellGcm_flip_request_count();
+        if (now != last) { last = now; still = 0; reported = false; continue; }
+        still++;
+        unsigned limit = now ? hang_secs : boot_secs;
+        if (still >= limit && !reported) {
+            char why[96];
+            snprintf(why, sizeof why, "no guest flip for %u s (%u frames so far)", still, now);
+            diag_dump_all_threads(why);
+            reported = true;
+            if (hang_exit) { fprintf(stderr, "[diag] DIAG_HANG_EXIT: exit(4)\n"); _exit(4); }
+        }
+    }
+}
+} // namespace
 
 #ifndef _WIN32
 /* ---- Sampling profiler (DIAG_PROF=<start s>,<seconds>) ------------------------
@@ -494,24 +506,131 @@ void* prof_main(void* arg)
     return nullptr;
 }
 } // namespace
+#else
+/* ---- Sampling profiler, Windows (DIAG_PROF=<start s>,<seconds>) ----------------
+ * The same profile.raw as the POSIX sampler, without signals: about once a
+ * millisecond every other thread of the process is suspended, its stack walked
+ * with the x64 unwind tables (.pdata) and resumed. A blocked thread is sampled
+ * too, inside its wait, so the profile splits each thread's wall time into work
+ * and waits. Nothing allocates while a thread is suspended (it may hold the
+ * heap lock); a leaf frame's return address is read with ReadProcessMemory,
+ * which fails instead of faulting. The thread names (SetThreadDescription) are
+ * written as "thread <tid> <name>" lines; tests/prof_report.py symbolizes
+ * against the PDB with DbgHelp. */
+namespace {
+constexpr unsigned k_prof_max = 400000, k_prof_depth = 20;
+
+unsigned prof_walk(HANDLE th, DWORD64* pc)
+{
+    CONTEXT ctx; memset(&ctx, 0, sizeof ctx);
+    ctx.ContextFlags = CONTEXT_FULL;
+    if (!GetThreadContext(th, &ctx)) return 0;
+    unsigned n = 0;
+    while (n < k_prof_depth && ctx.Rip) {
+        pc[n++] = ctx.Rip;
+        DWORD64 image = 0;
+        PRUNTIME_FUNCTION fn = RtlLookupFunctionEntry(ctx.Rip, &image, nullptr);
+        if (fn) {
+            void* handler_data; DWORD64 frame;
+            RtlVirtualUnwind(UNW_FLAG_NHANDLER, image, ctx.Rip, fn, &ctx, &handler_data, &frame, nullptr);
+        } else {                                  /* a leaf: the return address is on top */
+            SIZE_T got = 0;
+            if (!ReadProcessMemory(GetCurrentProcess(), (void*)ctx.Rsp, &ctx.Rip, 8, &got) || got != 8) break;
+            ctx.Rsp += 8;
+        }
+    }
+    return n;
+}
+
+void prof_main_win(unsigned start, unsigned dur)
+{
+    SetThreadDescription(GetCurrentThread(), L"diag-prof");
+    Sleep(start * 1000u);
+    DWORD64 (*pcs)[k_prof_depth] = (DWORD64 (*)[k_prof_depth])calloc(k_prof_max, sizeof *pcs);
+    DWORD* tids = (DWORD*)calloc(k_prof_max, sizeof(DWORD));
+    unsigned char* depth = (unsigned char*)calloc(k_prof_max, 1);
+    if (!pcs || !tids || !depth) return;
+    fprintf(stderr, "[diag] profiling every thread for %u s\n", dur);
+    const DWORD self = GetCurrentThreadId(), pid = GetCurrentProcessId();
+    struct Th { DWORD tid; HANDLE h; };
+    static Th ths[256]; int nt = 0;
+    unsigned count = 0, tick = 0;
+    const ULONGLONG t0 = GetTickCount64();
+    while (GetTickCount64() - t0 < dur * 1000ull) {
+        if (tick++ % 100 == 0) {                  /* refresh the thread list */
+            for (int k = 0; k < nt; k++) CloseHandle(ths[k].h);
+            nt = 0;
+            HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+            THREADENTRY32 te; te.dwSize = sizeof te;
+            if (snap != INVALID_HANDLE_VALUE && Thread32First(snap, &te)) {
+                do {
+                    if (te.th32OwnerProcessID != pid || te.th32ThreadID == self || nt >= 256) continue;
+                    HANDLE h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT |
+                                          THREAD_QUERY_LIMITED_INFORMATION, FALSE, te.th32ThreadID);
+                    if (h) ths[nt++] = { te.th32ThreadID, h };
+                } while (Thread32Next(snap, &te));
+            }
+            if (snap != INVALID_HANDLE_VALUE) CloseHandle(snap);
+        }
+        for (int k = 0; k < nt && count < k_prof_max; k++) {
+            if (SuspendThread(ths[k].h) == (DWORD)-1) continue;
+            depth[count] = (unsigned char)prof_walk(ths[k].h, pcs[count]);
+            ResumeThread(ths[k].h);
+            tids[count++] = ths[k].tid;
+        }
+        Sleep(1);
+    }
+    char path[600];
+    snprintf(path, sizeof path, "%s/profile.raw", report_dir());
+    _mkdir(report_dir());
+    FILE* f = fopen(path, "w");
+    if (f) {
+        char exe[MAX_PATH];
+        GetModuleFileNameA(nullptr, exe, sizeof exe);
+        fprintf(f, "base %p %s\n", (void*)GetModuleHandleA(nullptr), exe);
+        /* Every other module (ntdll's waits, the Vulkan driver), for their exports. */
+        HANDLE ms = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, 0);
+        MODULEENTRY32W me; me.dwSize = sizeof me;
+        if (ms != INVALID_HANDLE_VALUE && Module32FirstW(ms, &me)) {
+            do fprintf(f, "module %p %lu %ls\n", (void*)me.modBaseAddr, (unsigned long)me.modBaseSize, me.szExePath);
+            while (Module32NextW(ms, &me));
+        }
+        if (ms != INVALID_HANDLE_VALUE) CloseHandle(ms);
+        for (int k = 0; k < nt; k++) {
+            PWSTR name = nullptr;
+            if (SUCCEEDED(GetThreadDescription(ths[k].h, &name)) && name && *name)
+                fprintf(f, "thread %lu %ls\n", (unsigned long)ths[k].tid, name);
+            if (name) LocalFree(name);
+        }
+        for (unsigned i = 0; i < count; i++) {
+            fprintf(f, "%lu", (unsigned long)tids[i]);
+            for (unsigned j = 0; j < depth[i]; j++) fprintf(f, " %llx", (unsigned long long)pcs[i][j]);
+            fputc('\n', f);
+        }
+        fclose(f);
+        fprintf(stderr, "[diag] profile: %u samples -> %s\n", count, path);
+    }
+    for (int k = 0; k < nt; k++) CloseHandle(ths[k].h);
+}
+} // namespace
 #endif
 
 extern "C" void diag_start_watchdog(void)
 {
-#ifndef _WIN32
     const char* e = getenv("DIAG_WATCHDOG");
     if (e && *e == '0') return;
-    pthread_t t;
-    pthread_create(&t, nullptr, watchdog_main, nullptr);
-    pthread_detach(t);
+    std::thread(watchdog_main).detach();
     if (const char* p = getenv("DIAG_PROF")) {
         static unsigned arg[2] = { 0, 10 };
         sscanf(p, "%u,%u", &arg[0], &arg[1]);
+#ifndef _WIN32
         pthread_t pt;
         pthread_create(&pt, nullptr, prof_main, arg);
         pthread_detach(pt);
-    }
+#else
+        std::thread(prof_main_win, arg[0], arg[1]).detach();
 #endif
+    }
 }
 
 #else /* !DOTHEROES_DEV_DIAGNOSTICS: release build, no diagnostics */

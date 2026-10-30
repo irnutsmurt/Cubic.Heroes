@@ -1,0 +1,24 @@
+# Title screen -> CONTINUE -> the saved game, then a walk in the overworld.
+# Run with SAVES=<savedata dir>: with a save present, CONTINUE is the main
+# menu's default and the game asks "Change characters?" before loading.
+log TitleMovie 120          # the title's background movie is open
+sleep 5
+press START                 # "PRESS START BUTTON"
+sleep 3
+press START                 # main menu: CONTINUE
+change
+sleep 3
+shot change-characters
+press CROSS                 # "Change characters?" NO (the default)
+change
+sleep 10
+shot ingame
+hold DOWN 3
+shot walk-down
+hold LEFT 4
+shot walk-left
+hold UP 6
+shot walk-up
+hold RIGHT 4
+sleep 2
+shot walk-right

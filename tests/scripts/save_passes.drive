@@ -1,0 +1,16 @@
+# Load the save (SAVES=...), stand in front of the castle and capture one frame
+# pass by pass (PASS_DUMP=1). The scene that shows the grass "swirl".
+log TitleMovie 120
+sleep 5
+press START                 # "PRESS START BUTTON"
+sleep 3
+press START                 # main menu: CONTINUE
+change
+sleep 3
+press CROSS                 # "Change characters?" NO
+change
+sleep 12
+shot castle
+touch passes.trigger
+sleep 15
+shot after-capture

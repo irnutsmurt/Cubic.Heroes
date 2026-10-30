@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Closed-loop input driver for a running test (tests/boot_smoke.sh).
+"""Closed-loop input driver for a running test (tests/boot_smoke.py).
 
 Runs a step list against <run dir>: it waits for log markers, presses buttons
 through the game's PAD_FILE (<run>/pad.txt), waits for the screen to respond,
