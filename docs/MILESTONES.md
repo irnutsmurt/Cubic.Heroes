@@ -7,7 +7,7 @@ results. Compiling is not evidence.
 |---|---|---|
 | 1 | Analysis and feasibility | **Complete**, see FEASIBILITY.md |
 | 2 | Native executable with diagnostics | **In progress** (boot criteria met; debug console, golden log, Windows build open) |
-| 3 | Initial Vulkan rendering and native audio | **In progress**: renders and plays through Vulkan on Linux, audio mixed natively; ~17 fps in gameplay |
+| 3 | Initial Vulkan rendering and native audio | **In progress**: renders and plays through Vulkan on Linux, audio mixed natively; ~26 fps in gameplay (target 30) |
 | 4 | Menus and new-game startup | **In progress**: title → new game → opening → free movement, driven by `tests/scripts/new_game.drive` |
 | 5 | Core gameplay | Not started |
 | 6 | Full-game coverage | Not started |
@@ -139,8 +139,28 @@ Tracked in FEASIBILITY.md §6 and the `[unknown]` markers there.
   - **Speed.** Gameplay went 6 → ~17.5 fps on RADV Renoir: draw batching, an
     index-range fast path, a scratch target for colour-less passes,
     persistent render passes and double-buffered submission (0026-0028).
-    The bottleneck is the FIFO walker thread: CPU vertex conversion and the
-    remaining GPU waits.
+    Then ~26 fps (`intro.drive`, 110-210 s, A/B on the same route):
+    - The frame clock records and submits a present on the walker
+      (`_present_begin`); a finisher thread waits for it, reads it back
+      and shows it (`port/main.cpp`). Waiting on the walker put the whole
+      frame's GPU time between the guest's flips: `DIAG_PROF` showed 42%
+      of the walker blocked there. Blocking: 18.8 fps; split: 26.
+      `PS3RECOMP_VK_SYNC_PRESENT=1` restores the blocking present.
+    - One batch per frame (up to 4096 draws, was 512; patch 0030). At 512
+      a frame split in two and waited at its present for the first half:
+      20.9 → 25.9 fps with the split present.
+    - Views of feedback snapshots are destroyed after their batch's fence
+      instead of after a synchronous flush (0030); half-float and float
+      vertex decode made branchless (0029, bit-identical).
+    - The port now defaults `PS3RECOMP_VK_GUEST_PROGRAMS=1` and
+      `VK_DRAW_BATCH=1`; the environment overrides them.
+    - Validation layer, with sync validation enabled: no messages over
+      the intro route.
+    - `VK_GPU_TIME=1`: the GPU is busy ~22 ms a frame, 50-57% of the wall
+      clock. `VK_WAIT_STATS=1`: the walker's GPU waits are now ~2 ms per 5 s.
+  - **Open rendering issue.** A large flat beige quad covers the path to the
+    castle at one point of the intro route (screenshot at ~180 s). It is
+    present with the old blocking present too, so it predates these changes.
   - **Colour.** The opening's muted look is intended: `playerParam.lua.eu`
     sets `sepia_tone = 0.60` for the legendary-hero prologue.
 - Test tooling:
@@ -148,9 +168,15 @@ Tracked in FEASIBILITY.md §6 and the `[unknown]` markers there.
     input, using log markers and screen-change detection.
   - `tests/contact_sheet.py`, `tests/peek.py` and `tests/thread_cpu.sh`.
   - `tests/prof_report.py` reports on `DIAG_PROF` samples.
-  - `boot_smoke.sh` keeps the last 5 runs.
+  - `boot_smoke.sh` keeps the last 5 runs. Pruning had never worked: the
+    project path contains spaces and `xargs` split it. No path fragment
+    existed, so nothing else was removed. It now splits on newlines only.
+  - `boot_smoke.sh` refreshes `frame.ppm` every 15th present by default.
+    Dumping every frame cost several fps and skewed measurements.
 - Next:
-  - reach 30 fps (vertex conversion, GPU waits);
+  - reach 30 fps: walker CPU (vertex conversion ~1/3 of it), the frame
+    clock's 4 ms poll, the GPU's ~22 ms per frame;
+  - the beige quad;
   - windowed play with a launcher;
   - save/load;
   - Windows build.

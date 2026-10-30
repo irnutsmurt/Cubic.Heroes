@@ -13,6 +13,8 @@
 #   KEEP_RUNS=<n>      run directories kept under build/test (default 5; the
 #                      oldest are deleted when a run starts). The live frame
 #                      dump (frame.ppm) is deleted when a run ends.
+#   PS3RECOMP_VK_DUMP_EVERY=<n>  refresh frame.ppm every n-th present (default
+#                      15; dumping every frame costs several fps).
 #   DRIVE=<script>     run tests/drive.py with this script against the game
 #                      (closed-loop input; see tests/scripts/).
 #
@@ -31,7 +33,8 @@ ELF="$ROOT/build/disc/PS3_GAME/USRDIR/EBOOT.elf"
 RUN="$ROOT/build/test/boot-$(date +%Y%m%d-%H%M%S)${RUN_TAG:+-$RUN_TAG}"
 # Retention: test runs (logs, screenshots) must not pile up on disk.
 KEEP_RUNS="${KEEP_RUNS:-5}"
-ls -d "$ROOT"/build/test/boot-* 2>/dev/null | sort | head -n -"$((KEEP_RUNS > 1 ? KEEP_RUNS - 1 : 0))" | xargs -r rm -rf
+# (newline-delimited: the project path may contain spaces)
+ls -d "$ROOT"/build/test/boot-* 2>/dev/null | sort | head -n -"$((KEEP_RUNS > 1 ? KEEP_RUNS - 1 : 0))" | xargs -r -d '\n' rm -rf --
 SHOT_EVERY="${SHOT_EVERY:-10}"
 mkdir -p "$RUN/dev_flash" "$RUN/shots"
 : > "$RUN/pad.txt"
@@ -50,6 +53,7 @@ env -u DISPLAY -u WAYLAND_DISPLAY \
     PS3_DEV_FLASH="$RUN/dev_flash" \
     PS3RECOMP_VK_GUEST_PROGRAMS="${PS3RECOMP_VK_GUEST_PROGRAMS:-1}" \
     PS3RECOMP_VK_DUMP="$RUN/frame.ppm" \
+    PS3RECOMP_VK_DUMP_EVERY="${PS3RECOMP_VK_DUMP_EVERY:-15}" \
     PAD_FILE="$RUN/pad.txt" \
     SDL_AUDIODRIVER=dummy \
     DIAG_CRASH_DIR="$RUN/diag" DIAG_HANG_EXIT=1 DIAG_BOOT_SECS="${DIAG_BOOT_SECS:-60}" \

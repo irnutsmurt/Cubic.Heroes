@@ -1,0 +1,63 @@
+From d99ba9aa59bbf43c79b1a1ecc7a694128af28b27 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Fri, 30 Oct 2026 02:28:09 -0700
+Subject: [PATCH 29/30] rsx_vertex_compact: branchless half-float and bswap
+ float decode
+
+The per-component decoders of the vertex fetch loop. Results are
+bit-identical to the old ones (all 65536 half values; a sweep of the
+float space): denormals still flush to signed zero.
+---
+ libs/video/rsx_vertex_compact.c | 29 ++++++++++++++---------------
+ 1 file changed, 14 insertions(+), 15 deletions(-)
+
+diff --git a/libs/video/rsx_vertex_compact.c b/libs/video/rsx_vertex_compact.c
+index 5f3ca3c..365284a 100644
+--- a/libs/video/rsx_vertex_compact.c
++++ b/libs/video/rsx_vertex_compact.c
+@@ -6,28 +6,27 @@
+ #include <stdlib.h>
+ #include <string.h>
+ 
+-static float rsx_compact_be_f32(const u8* p)
++static inline float rsx_compact_be_f32(const u8* p)
+ {
+-    const u32 w = ((u32)p[0] << 24) | ((u32)p[1] << 16) |
+-                  ((u32)p[2] << 8) | (u32)p[3];
++    u32 w;
++    memcpy(&w, p, sizeof(w));
++    w = __builtin_bswap32(w);
+     float f;
+     memcpy(&f, &w, sizeof(f));
+     return f;
+ }
+ 
+-static float rsx_compact_be_f16(const u8* p)
++/* Branchless: this runs per component for every vertex the draw engine
++ * fetches. Same results as the RSX path it models: zero/denormal inputs
++ * flush to signed zero, exponent 31 maps to Inf/NaN with the mantissa kept. */
++static inline float rsx_compact_be_f16(const u8* p)
+ {
+-    const u16 h = (u16)((p[0] << 8) | p[1]);
+-    const u32 sign = (u32)(h >> 15) << 31;
+-    const u32 exp = (h >> 10) & 0x1F;
+-    const u32 man = h & 0x3FF;
+-    u32 out;
+-    if (exp == 0)
+-        out = sign;
+-    else if (exp == 31)
+-        out = sign | 0x7F800000u | (man << 13);
+-    else
+-        out = sign | ((exp + 112) << 23) | (man << 13);
++    const u32 h = ((u32)p[0] << 8) | p[1];
++    const u32 em = h & 0x7FFFu;
++    u32 out = (em << 13) + 0x38000000u;          /* exp + 112, mantissa << 13 */
++    out += em >= 0x7C00u ? 0x38000000u : 0u;     /* exp 31 -> 255 */
++    out = em < 0x0400u ? 0u : out;               /* exp 0 -> 0 */
++    out |= (h & 0x8000u) << 16;
+     float f;
+     memcpy(&f, &out, sizeof(f));
+     return f;
+-- 
+2.56.0
+

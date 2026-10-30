@@ -1,0 +1,232 @@
+From 48e051ee35e093e0df58b7fd13c64124787327ba Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Fri, 30 Oct 2026 02:28:09 -0700
+Subject: [PATCH 30/30] Vulkan: whole-frame batches, deferred view destruction,
+ VK_GPU_TIME
+
+- Draw batches hold up to 4096 draws by default (was 512). A frame split
+  across two batches waited at its present for the first half's GPU work.
+- Image views released while a batch may still use them (a feedback
+  snapshot's crossbar view, every frame) are destroyed after the fence that
+  covers that batch, not after a synchronous flush.
+- VK_GPU_TIME=1 reports the engine submissions' GPU time from timestamp
+  queries every 5 s.
+- Drop the VK_DESTROY_TRACE debug hook.
+---
+ libs/video/rsx_vulkan_backend.c | 111 ++++++++++++++++++++++++++++++--
+ 1 file changed, 104 insertions(+), 7 deletions(-)
+
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index abb9827..f33c061 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -101,7 +101,9 @@
+     X(vkCmdSetViewport) X(vkCmdSetScissor) X(vkCmdDraw) \
+     X(vkCmdSetStencilReference) X(vkCmdSetDepthBounds) \
+     X(vkCmdBindIndexBuffer) X(vkCmdDrawIndexed) \
+-    X(vkCreateSemaphore) X(vkDestroySemaphore) X(vkCmdBlitImage)
++    X(vkCreateSemaphore) X(vkDestroySemaphore) X(vkCmdBlitImage) \
++    X(vkCreateQueryPool) X(vkDestroyQueryPool) X(vkCmdResetQueryPool) \
++    X(vkCmdWriteTimestamp) X(vkGetQueryPoolResults)
+ /* Window-system entry points, loaded only when a window was requested, so a
+  * headless run never depends on a driver that can present. */
+ #define VK_WSI_INSTANCE_FNS(X) \
+@@ -468,12 +470,34 @@ static void vk_eb_release(void);    /* engine shutdown: rings and pool */
+ static int vk_eb_upload(VkImage img, VkBufferImageCopy* region, const void* src, size_t tight,
+                         u32 rows, u32 row_bytes);   /* -2: not batched, do it the old way */
+ 
++/* Image views released while recorded or in-flight work may still name them
++ * (a feedback snapshot's crossbar view goes every frame). They are destroyed
++ * once the GPU is past that work instead of after a synchronous flush:
++ * `open` collects views released since the last submission, `sub` holds those
++ * of the batch left in flight, freed when its fence is waited for. Every
++ * full wait (vk_submit_and_wait, vk_eng_flush_sync) frees both. */
++#define VK_DEFER_VIEWS 256
++typedef struct { VkImageView v[VK_DEFER_VIEWS]; u32 n; } vk_defer_list;
++static vk_defer_list s_defer_open, s_defer_sub;
++static void vk_defer_free(vk_defer_list* l)
++{
++    for (u32 i = 0; i < l->n; i++) pvkDestroyImageView(s_vk.device, l->v[i], NULL);
++    l->n = 0;
++}
++static void vk_defer_free_all(void) { vk_defer_free(&s_defer_sub); vk_defer_free(&s_defer_open); }
++
+ static void vk_destroy_image(vk_image* im)
+ {
+-    { static int t = -1, n = 0; if (t < 0) t = getenv("VK_DESTROY_TRACE") ? 1 : 0;
+-      if (t && im->img && n++ < 400 && n > 300) {
+-          extern int backtrace(void**, int); extern void backtrace_symbols_fd(void* const*, int, int);
+-          void* bt[6]; int k = backtrace(bt, 6); fprintf(stderr, "[vk-destroy]\n"); backtrace_symbols_fd(bt, k, 2); } }
++    if (!im->img && !im->mem) {
++        if (im->view && s_defer_open.n < VK_DEFER_VIEWS)
++            s_defer_open.v[s_defer_open.n++] = im->view;
++        else if (im->view) {
++            vk_eng_flush_sync();
++            pvkDestroyImageView(s_vk.device, im->view, NULL);
++        }
++        memset(im, 0, sizeof *im);
++        return;
++    }
+     vk_eng_flush_sync();
+     /* Never under a present's copy that may still read it. */
+     if (im->img) vk_present_wait_gpu();
+@@ -608,6 +632,65 @@ static void vk_cmd_after_everything(VkCommandBuffer cb)
+                           VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+ }
+ 
++/* VK_GPU_TIME=1: GPU execution time of the engine's submissions (timestamp
++ * queries around each command buffer), every 5 s with its share of the wall
++ * clock. Tells a GPU-bound frame from a CPU-bound one. */
++static struct {
++    int on; VkQueryPool pool; VkCommandBuffer cb0; u8 state[2];
++    double period_ns, ms, t0; unsigned n;
++} s_gt = { .on = -1 };
++static u32 vk_gt_base(VkCommandBuffer cb)
++{
++    if (!s_gt.cb0) s_gt.cb0 = cb;
++    return cb == s_gt.cb0 ? 0 : 2;
++}
++static void vk_gt_begin(VkCommandBuffer cb)
++{
++    if (s_gt.on < 0) {
++        s_gt.on = 0;
++        VkQueryPoolCreateInfo qi = { .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
++                                     .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = 4 };
++        VkPhysicalDeviceProperties p;
++        pvkGetPhysicalDeviceProperties(s_vk.phys, &p);
++        if (getenv("VK_GPU_TIME") && p.limits.timestampComputeAndGraphics &&
++            pvkCreateQueryPool(s_vk.device, &qi, NULL, &s_gt.pool) == VK_SUCCESS) {
++            s_gt.on = 1; s_gt.period_ns = p.limits.timestampPeriod;
++        }
++    }
++    if (!s_gt.on) return;
++    const u32 b = vk_gt_base(cb);
++    pvkCmdResetQueryPool(cb, s_gt.pool, b, 2);
++    pvkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, s_gt.pool, b);
++    s_gt.state[b >> 1] = 1;
++}
++static void vk_gt_end(VkCommandBuffer cb)
++{
++    if (s_gt.on <= 0) return;
++    const u32 b = vk_gt_base(cb);
++    if (s_gt.state[b >> 1] != 1) return;
++    pvkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, s_gt.pool, b + 1);
++    s_gt.state[b >> 1] = 2;
++}
++static void vk_gt_collect(VkCommandBuffer cb)   /* after its fence */
++{
++    if (s_gt.on <= 0) return;
++    const u32 b = vk_gt_base(cb);
++    if (s_gt.state[b >> 1] != 2) return;
++    s_gt.state[b >> 1] = 0;
++    uint64_t ts[2];
++    if (pvkGetQueryPoolResults(s_vk.device, s_gt.pool, b, 2, sizeof ts, ts, sizeof ts[0],
++                               VK_QUERY_RESULT_64_BIT) != VK_SUCCESS) return;
++    s_gt.ms += (double)(ts[1] - ts[0]) * s_gt.period_ns * 1e-6; s_gt.n++;
++    struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
++    const double now = t.tv_sec + t.tv_nsec * 1e-9;
++    if (!s_gt.t0) s_gt.t0 = now;
++    if (now - s_gt.t0 >= 5.0) {
++        fprintf(stderr, "[vk-gpu] %.1f s: %u submissions, GPU %.0f ms (%.0f%%)\n",
++                now - s_gt.t0, s_gt.n, s_gt.ms, s_gt.ms / ((now - s_gt.t0) * 10.0));
++        s_gt.ms = 0; s_gt.n = 0; s_gt.t0 = now;
++    }
++}
++
+ /* Open a batch: like vk_begin, but a batch left in flight by the last flush
+  * may still be running. Every batched operation opens with a barrier against
+  * all earlier work on the queue, which orders it after that batch on the GPU;
+@@ -618,6 +701,7 @@ static int vk_begin_batch(void)
+     VkCommandBufferBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                                     .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
+     VK_CHECK(pvkBeginCommandBuffer(s_vk.cmd, &bi), "vkBeginCommandBuffer");
++    vk_gt_begin(s_vk.cmd);
+     if (s_vk.present_order) { vk_cmd_after_everything(s_vk.cmd); s_vk.present_order = 0; }
+     return 0;
+ }
+@@ -629,6 +713,7 @@ static int vk_begin(void)
+     VkCommandBufferBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                                     .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
+     VK_CHECK(pvkBeginCommandBuffer(s_vk.cmd, &bi), "vkBeginCommandBuffer");
++    vk_gt_begin(s_vk.cmd);
+     /* A present's copy may still be reading the surface this frame is about
+      * to draw over: order everything here after it. Set only by a present,
+      * which never runs alongside the walker's recording. */
+@@ -663,6 +748,7 @@ static void vk_wait_stat(int line, double ms)
+ static int vk_submit_and_wait_at(int line)
+ {
+     vk_wait_inflight();
++    vk_gt_end(s_vk.cmd);
+     VK_CHECK(pvkEndCommandBuffer(s_vk.cmd), "vkEndCommandBuffer");
+     VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                         .commandBufferCount = 1, .pCommandBuffers = &s_vk.cmd };
+@@ -671,8 +757,10 @@ static int vk_submit_and_wait_at(int line)
+     VK_CHECK(vk_queue_submit(&si, s_vk.fence), "vkQueueSubmit");
+     VK_CHECK(pvkWaitForFences(s_vk.device, 1, &s_vk.fence, VK_TRUE, UINT64_MAX), "vkWaitForFences");
+     clock_gettime(CLOCK_MONOTONIC, &b);
++    vk_gt_collect(s_vk.cmd);
+     vk_wait_stat(s_flush_line ? -s_flush_line : line,
+                  (b.tv_sec - a.tv_sec) * 1e3 + (b.tv_nsec - a.tv_nsec) * 1e-6);
++    vk_defer_free_all();
+     return 0;
+ }
+ #define vk_submit_and_wait() vk_submit_and_wait_at(__LINE__)
+@@ -3515,7 +3603,7 @@ static VkImageView vk_eng_dummy_cube_view(void)
+ #define VK_EB_IB_BYTES   (16u << 20)
+ #define VK_EB_UB_BYTES   (32u << 20)
+ #define VK_EB_SB_BYTES   (64u << 20)   /* texture upload staging */
+-#define VK_EB_MAX_SETS   1024u
++#define VK_EB_MAX_SETS   4096u   /* a whole frame per batch: see vk_eb_on */
+ 
+ static struct {
+     int              on;            /* -1 undecided, 0 off, 1 on */
+@@ -3541,8 +3629,12 @@ static int vk_eb_on(void)
+     const char* e = getenv("VK_DRAW_BATCH");
+     s_eb.on = 0;
+     if (!e || *e != '1' || !s_g.on) return 0;
++    /* Up to a whole frame per batch by default. A frame split across two
++     * batches waits at its present for the first half's GPU work, which had
++     * no time to run; one batch per frame leaves only the previous frame's
++     * to wait for (3D Dot Game Heroes: ~600 draws a frame, 21 -> 26 fps). */
+     const char* m = getenv("VK_DRAW_BATCH_MAX");
+-    s_eb.max_draws = m && atoi(m) > 0 ? (u32)atoi(m) : 512u;
++    s_eb.max_draws = m && atoi(m) > 0 ? (u32)atoi(m) : VK_EB_MAX_SETS;
+     if (s_eb.max_draws > VK_EB_MAX_SETS) s_eb.max_draws = VK_EB_MAX_SETS;
+     VkPhysicalDeviceProperties p;
+     pvkGetPhysicalDeviceProperties(s_vk.phys, &p);
+@@ -3649,13 +3741,16 @@ static void vk_wait_inflight(void)
+     struct timespec a, b; clock_gettime(CLOCK_MONOTONIC, &a);
+     pvkWaitForFences(s_vk.device, 1, &s_eb.alt_fence, VK_TRUE, UINT64_MAX);
+     clock_gettime(CLOCK_MONOTONIC, &b);
++    vk_gt_collect(s_eb.alt_cmd);
+     vk_wait_stat(s_flush_line ? -s_flush_line : 1, (b.tv_sec - a.tv_sec) * 1e3 + (b.tv_nsec - a.tv_nsec) * 1e-6);
+     s_eb.inflight = 0;
++    vk_defer_free(&s_defer_sub);
+ }
+ static void vk_eng_flush_sync_at(int line)
+ {
+     if (s_eb_pending) vk_eng_flush_at(line);
+     vk_wait_inflight();
++    vk_defer_free_all();
+ }
+ static void vk_eng_flush_at(int line)
+ {
+@@ -3670,6 +3765,7 @@ static void vk_eng_flush_at(int line)
+          * command buffer and fence become the spare set; the spare set (the
+          * batch before, if still running) is waited for and becomes current. */
+         vk_wait_inflight();
++        vk_gt_end(s_vk.cmd);
+         pvkEndCommandBuffer(s_vk.cmd);
+         VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                             .commandBufferCount = 1, .pCommandBuffers = &s_vk.cmd };
+@@ -3683,6 +3779,7 @@ static void vk_eng_flush_at(int line)
+         VK_SWAP(vk_buffer, s_eb.sb, s_eb.alt_sb);
+         VK_SWAP(VkDescriptorPool, s_eb.pool, s_eb.alt_pool);
+         s_eb.inflight = 1;
++        s_defer_sub = s_defer_open; s_defer_open.n = 0;   /* sub was freed by the wait above */
+         if (s_eb.sets) { pvkResetDescriptorPool(s_vk.device, s_eb.pool, 0); }
+         s_eb.sets = 0;
+     }
+-- 
+2.56.0
+

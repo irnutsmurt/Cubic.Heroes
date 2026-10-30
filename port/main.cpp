@@ -44,6 +44,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
 
 #ifndef _WIN32
 #include <sys/mman.h>   /* mmap: the guest arena, see alloc_guest_vm */
@@ -131,6 +134,8 @@ unsigned cellGcm_flip_request_count(void);
  * PS3RECOMP_VK_DUMP=<file> writes each presented frame (rsx_vulkan_backend.h). */
 extern "C" int  rsx_vulkan_backend_init(uint32_t w, uint32_t h, const char* title);
 extern "C" void rsx_vulkan_backend_present(void);
+extern "C" void rsx_vulkan_backend_present_begin(void);
+extern "C" void rsx_vulkan_backend_present_finish(void);
 extern "C" int  rsx_vulkan_backend_pump_messages(void);
 #  define rsx_backend_init    rsx_vulkan_backend_init
 #  define rsx_backend_present rsx_vulkan_backend_present
@@ -197,9 +202,51 @@ extern "C" unsigned ppu_boot_frames_presented(void)
     return (unsigned)g_frames_presented;
 }
 
+#if defined(PS3RECOMP_RSX_VULKAN)
+/* A guest frame's present in two halves (rsx_vulkan_backend.h): this thread,
+ * the FIFO walker, only records and submits the copy out of the flipped
+ * surface; waiting for it, the readback, the frame dump and the window go to
+ * present_finisher, so the walker drains the next frame meanwhile. Waiting
+ * here put the whole frame's GPU time on the walker, the critical path
+ * between the guest's flip and its next one (DIAG_PROF: 42% of the walker's
+ * time). The backend's present mutex keeps one present in flight: the next
+ * _present_begin completes a previous one the finisher has not reached. */
+static std::mutex              s_pf_mu;
+static std::condition_variable s_pf_cv;
+static unsigned                s_pf_begun;
+
+static void present_finisher(void)
+{
+    unsigned done = 0;
+    for (;;) {
+        {
+            std::unique_lock<std::mutex> lk(s_pf_mu);
+            s_pf_cv.wait(lk, [&] { return s_pf_begun != done; });
+            done = s_pf_begun;
+        }
+        rsx_vulkan_backend_present_finish();
+    }
+}
+
+static void present_frame(void)
+{
+    /* PS3RECOMP_VK_SYNC_PRESENT=1: the whole present on this thread, as
+     * before (A/B comparisons). */
+    static const bool sync = [] { const char* e = getenv("PS3RECOMP_VK_SYNC_PRESENT"); return e && *e == '1'; }();
+    if (sync) { rsx_backend_present(); return; }
+    static std::once_flag started;
+    std::call_once(started, [] { std::thread(present_finisher).detach(); });
+    rsx_vulkan_backend_present_begin();
+    { std::lock_guard<std::mutex> lk(s_pf_mu); s_pf_begun++; }
+    s_pf_cv.notify_one();
+}
+#else
+static void present_frame(void) { rsx_backend_present(); }
+#endif
+
 static void present_guest_frame(void)
 {
-    rsx_backend_present();
+    present_frame();
     /* This thread increments and guest threads read, so interlocked rather
      * than a volatile ++, which on arm64 is neither atomic nor a fence. */
     InterlockedIncrement(&g_frames_presented);
@@ -436,6 +483,26 @@ int main(int argc, char** argv)
      * thing. POSIX timers are already fine-grained. */
     timeBeginPeriod(1);
     setvbuf(stdout, NULL, _IONBF, 0);   /* unbuffered: do not lose prints on a kill */
+#endif
+
+    /* The renderer settings this port is tested and shipped with; the
+     * environment overrides any of them (=0 turns one off). Guest programs:
+     * the game's own shaders, translated to SPIR-V, instead of the backend's
+     * generic fallback shader. Draw batching: draws recorded into one
+     * submission per frame instead of a GPU round trip each. */
+#if defined(PS3RECOMP_RSX_VULKAN)
+    static const char* const vk_defaults[][2] = {
+        { "PS3RECOMP_VK_GUEST_PROGRAMS", "1" },
+        { "VK_DRAW_BATCH", "1" },
+    };
+    for (const auto& d : vk_defaults)
+        if (!getenv(d[0])) {
+#  ifdef _WIN32
+            _putenv_s(d[0], d[1]);
+#  else
+            setenv(d[0], d[1], 0);
+#  endif
+        }
 #endif
 
     printf("=== ps3recomp game runner ===\n");
