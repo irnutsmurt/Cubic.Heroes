@@ -1,0 +1,298 @@
+From 2952e9d6b85e7378cb5b1f343bcb2b1594d5e603 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Fri, 30 Oct 2026 03:17:41 -0700
+Subject: [PATCH] Draw engine: cross-draw vertex cache
+
+Fetched vertex blocks are kept under a key of the draw's references,
+layout and attribute descriptions and resolved ranges, with a 64-bit hash
+of the guest bytes in those ranges (merged, so an interleaved buffer is
+read once). A lookup re-hashes the ranges and refetches on any change.
+Inline draws, draws under 32 vertices and draws with an unresolved source
+fetch directly as before. RSX_VERTEX_CACHE=0 disables it;
+RSX_VERTEX_CACHE_STATS=1 reports hit rates.
+
+3D Dot Game Heroes: ~460 cacheable draws a frame, ~100% hits after a
+scene loads, ~50 MB resident; gameplay 28 -> 29-30 fps (its cap).
+---
+ libs/video/rsx_draw_engine.c    |  10 +-
+ libs/video/rsx_vertex_compact.c | 177 ++++++++++++++++++++++++++++++++
+ libs/video/rsx_vertex_compact.h |  10 ++
+ 3 files changed, 195 insertions(+), 2 deletions(-)
+
+diff --git a/libs/video/rsx_draw_engine.c b/libs/video/rsx_draw_engine.c
+index d56d24f..5b80d56 100644
+--- a/libs/video/rsx_draw_engine.c
++++ b/libs/video/rsx_draw_engine.c
+@@ -235,6 +235,7 @@ static struct {
+ 
+     u8* verts;
+     u64 verts_cap;
++    const u8* vdata;    /* the draw's vertices: `verts`, or a vertex-cache block */
+     u32 n_verts;
+ 
+     /* Canonical ATTR0..15 float4 snapshots for register-based vertices.
+@@ -2165,6 +2166,7 @@ static void dc_reset(void)
+ {
+     dc.n_arr = dc.n_idx = dc.n_packets = 0;
+     dc.n_refs = dc.n_source_refs = dc.n_verts = dc.n_cuts = 0;
++    dc.vdata = NULL;
+     dc.refs_remapped = 0;
+     dc.fetch_ok = 1;
+     dc.inl = NULL;
+@@ -2287,6 +2289,7 @@ static void dc_fetch(const rsx_vertex_layout_plan* layout, int allow_remap)
+                 memcpy(dc.verts + (u64)v * layout->stride + slot * 16u,
+                        dc.immediate[v][layout->attrs[slot]], 16u);
+         dc.n_verts = dc.n_immediate;
++        dc.vdata = dc.verts;
+         return;
+     }
+     for (u32 b = 0; b < dc.n_arr && dc.fetch_ok; b++)
+@@ -2352,6 +2355,9 @@ static void dc_fetch(const rsx_vertex_layout_plan* layout, int allow_remap)
+     rsx_vertex_fetch_plan_init(&dc.fetch_plan, &g.rsx, layout, eng_guest_ptr, NULL);
+     rsx_vertex_fetch_plan_set_inline(&dc.fetch_plan, &g.rsx, dc.inl, dc.inl_bytes);
+     rsx_vertex_fetch_plan_prepare(&dc.fetch_plan, dc.refs, dc.n_refs);
++    dc.n_verts = dc.n_refs;
++    dc.vdata = rsx_vertex_fetch_cached(&dc.fetch_plan, dc.refs, dc.n_refs);
++    if (dc.vdata) return;
+     if (!dc_reserve_verts((u64)dc.n_refs * layout->stride)) {
+         dc.fetch_ok = 0;
+         return;
+@@ -2361,7 +2367,7 @@ static void dc_fetch(const rsx_vertex_layout_plan* layout, int allow_remap)
+         dc.fetch_ok = 0;
+         return;
+     }
+-    dc.n_verts = dc.n_refs;
++    dc.vdata = dc.verts;
+ }
+ 
+ /* ---- sink ---------------------------------------------------------------- */
+@@ -3277,7 +3283,7 @@ static void sink_end(void* user, const rsx_dispatch* r)
+     }
+ 
+     const u32 uploaded = indexed ? dc.n_verts : n_draw;
+-    g.be->draw(g.be->user, topology, dc.verts, uploaded, layout.stride,
++    g.be->draw(g.be->user, topology, dc.vdata, uploaded, layout.stride,
+                indexed ? g.indices : NULL, indexed ? n_draw : 0);
+     /* Counted only when the draw ran the guest's OWN programs, which is what
+      * the test hook means: a draw through the built-in pair is a draw, not
+diff --git a/libs/video/rsx_vertex_compact.c b/libs/video/rsx_vertex_compact.c
+index 3096ff1..ba1b7af 100644
+--- a/libs/video/rsx_vertex_compact.c
++++ b/libs/video/rsx_vertex_compact.c
+@@ -3,8 +3,10 @@
+ #include "rsx_vertex_formats.h"
+ 
+ #include <limits.h>
++#include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
++#include <time.h>
+ 
+ static inline float rsx_compact_be_f32(const u8* p)
+ {
+@@ -494,6 +496,181 @@ int rsx_vertex_fetch_many(
+     return 1;
+ }
+ 
++/* ---- cross-draw vertex cache ----------------------------------------------
++ * A title redraws the same meshes frame after frame: 3D Dot Game Heroes
++ * fetches ~900k vertices a frame, 97% of them from source ranges already
++ * fetched in the last second, and converting them was most of the FIFO
++ * walker's time. A fetched block is kept under a key of everything the
++ * fetch depends on besides memory (the references, the layout, each
++ * attribute's description, default and resolved range), together with a
++ * hash of the guest bytes in those ranges. A lookup re-hashes the ranges --
++ * reading them once, sequentially, instead of decoding them -- and refetches
++ * on any difference, so a title that rewrites a vertex buffer gets the new
++ * data in the same draw. RSX_VERTEX_CACHE=0 turns it off;
++ * RSX_VERTEX_CACHE_STATS=1 reports hits every 5 s. */
++#define RSX_VC_SLOTS     8192u               /* power of two */
++#define RSX_VC_MAX_BYTES ((size_t)384 << 20)
++#define RSX_VC_MIN_VERTS 32u                 /* smaller draws fetch directly */
++
++typedef struct rsx_vc_entry {
++    u64 key, content;
++    u8* data;
++    size_t bytes;
++} rsx_vc_entry;
++
++static rsx_vc_entry s_vc[RSX_VC_SLOTS];
++static u32 s_vc_live;
++static size_t s_vc_bytes;
++static struct { int on, stats; double t0; unsigned long long look, hit, stale, miss, skip; } s_vcs = { -1 };
++
++static inline u64 rsx_vc_rotl(u64 x, int r) { return (x << r) | (x >> (64 - r)); }
++static inline u64 rsx_vc_rd64(const u8* p) { u64 v; memcpy(&v, p, 8); return v; }
++
++/* A 64-bit hash in the shape of xxHash64: four independent lanes over 32-byte
++ * blocks, so it runs at memory speed. */
++static u64 rsx_vc_hash(const void* data, size_t n, u64 seed)
++{
++    const u64 P1 = 0x9E3779B185EBCA87ull, P2 = 0xC2B2AE3D27D4EB4Full;
++    const u8* p = (const u8*)data;
++    u64 a = seed + P1 + P2, b = seed + P2, c = seed, d = seed - P1;
++    const size_t total = n;
++    for (; n >= 32; n -= 32, p += 32) {
++        a = rsx_vc_rotl(a + rsx_vc_rd64(p) * P2, 31) * P1;
++        b = rsx_vc_rotl(b + rsx_vc_rd64(p + 8) * P2, 31) * P1;
++        c = rsx_vc_rotl(c + rsx_vc_rd64(p + 16) * P2, 31) * P1;
++        d = rsx_vc_rotl(d + rsx_vc_rd64(p + 24) * P2, 31) * P1;
++    }
++    u64 h = rsx_vc_rotl(a, 1) + rsx_vc_rotl(b, 7) + rsx_vc_rotl(c, 12) + rsx_vc_rotl(d, 18) + total;
++    for (; n >= 8; n -= 8, p += 8) {
++        h ^= rsx_vc_rotl(rsx_vc_rd64(p) * P2, 31) * P1;
++        h = rsx_vc_rotl(h, 27) * P1 + P2;
++    }
++    for (; n; n--, p++) {
++        h ^= (u64)*p * P1;
++        h = rsx_vc_rotl(h, 11) * P2;
++    }
++    h ^= h >> 33; h *= P2; h ^= h >> 29; h *= P1; h ^= h >> 32;
++    return h;
++}
++
++static void rsx_vc_flush(void)
++{
++    for (u32 i = 0; i < RSX_VC_SLOTS; i++) free(s_vc[i].data);
++    memset(s_vc, 0, sizeof s_vc);
++    s_vc_live = 0;
++    s_vc_bytes = 0;
++}
++
++static void rsx_vc_report(void)
++{
++    struct timespec ts;
++    clock_gettime(CLOCK_MONOTONIC, &ts);
++    const double now = ts.tv_sec + ts.tv_nsec * 1e-9;
++    if (!s_vcs.t0) s_vcs.t0 = now;
++    if (now - s_vcs.t0 < 5.0) return;
++    fprintf(stderr, "[vcache] %.1f s: %llu lookups, %llu hits, %llu changed, %llu new, "
++            "%llu not cacheable; %u blocks, %.1f MB\n", now - s_vcs.t0, s_vcs.look,
++            s_vcs.hit, s_vcs.stale, s_vcs.miss, s_vcs.skip, s_vc_live, s_vc_bytes / 1048576.0);
++    s_vcs.look = s_vcs.hit = s_vcs.stale = s_vcs.miss = s_vcs.skip = 0;
++    s_vcs.t0 = now;
++}
++
++const u8* rsx_vertex_fetch_cached(
++    const rsx_vertex_fetch_plan* plan, const rsx_vertex_ref* refs, u32 count)
++{
++    if (s_vcs.on < 0) {
++        const char* e = getenv("RSX_VERTEX_CACHE");
++        s_vcs.on = !(e && *e == '0');
++        s_vcs.stats = getenv("RSX_VERTEX_CACHE_STATS") != NULL;
++    }
++    if (!s_vcs.on || !plan || !refs || count < RSX_VC_MIN_VERTS ||
++        !plan->layout.stride || plan->inline_data)
++        return NULL;
++    if (s_vcs.stats) rsx_vc_report();
++
++    /* Key: everything but the memory contents. Content: the source ranges.
++     * An attribute that would read memory outside its resolved range (none
++     * resolved) makes the draw uncacheable. */
++    u64 key = rsx_vc_hash(refs, (size_t)count * sizeof *refs, count);
++    key = rsx_vc_hash(&plan->layout, sizeof plan->layout, key);
++    const u32 sel[2] = { plan->base_offset, plan->divider_mask };
++    key = rsx_vc_hash(sel, sizeof sel, key);
++    /* Source ranges, merged before hashing: the attributes of an interleaved
++     * buffer all span it, and hashing each one read it once per attribute. */
++    const u8* lo[RSX_DSP_NUM_VERTEX_ATTR];
++    const u8* hi[RSX_DSP_NUM_VERTEX_ATTR];
++    u32 nr = 0;
++    for (u32 slot = 0; slot < plan->layout.count; slot++) {
++        const rsx_vertex_fetch_attr* f = &plan->attr[plan->layout.attrs[slot]];
++        key = rsx_vc_hash(&f->desc, sizeof f->desc, key);
++        key = rsx_vc_hash(f->default_value, sizeof f->default_value, key);
++        if (!f->desc.type || !f->desc.size)
++            continue;
++        if (!f->stable_base || f->stable_last < f->stable_first) {
++            s_vcs.skip++;
++            return NULL;
++        }
++        const u64 range[3] = { (u64)(uintptr_t)f->stable_base,
++                               ((u64)f->stable_first << 32) | f->stable_last,
++                               ((u64)f->stride << 32) | f->elem_size };
++        key = rsx_vc_hash(range, sizeof range, key);
++        const u8* b = f->stable_base;
++        const u8* end = b + (size_t)(f->stable_last - f->stable_first) * f->stride + f->elem_size;
++        u32 k = nr++;
++        for (; k && lo[k - 1] > b; k--) { lo[k] = lo[k - 1]; hi[k] = hi[k - 1]; }
++        lo[k] = b; hi[k] = end;
++    }
++    u64 content = 0x5EED;
++    for (u32 r = 0; r < nr;) {
++        const u8* b = lo[r];
++        const u8* end = hi[r];
++        for (r++; r < nr && lo[r] <= end; r++)
++            if (hi[r] > end) end = hi[r];
++        content = rsx_vc_hash(b, (size_t)(end - b), content);
++    }
++    s_vcs.look++;
++
++    const size_t bytes = (size_t)count * plan->layout.stride;
++    u32 i = (u32)key & (RSX_VC_SLOTS - 1);
++    while (s_vc[i].data && s_vc[i].key != key) i = (i + 1) & (RSX_VC_SLOTS - 1);
++    rsx_vc_entry* e = &s_vc[i];
++    if (e->data && e->bytes == bytes) {
++        if (e->content == content) { s_vcs.hit++; return e->data; }
++        s_vcs.stale++;
++    } else {
++        if (e->data) {              /* same key, other size: cannot happen, but */
++            free(e->data); s_vc_bytes -= e->bytes; e->data = NULL; s_vc_live--;
++        }
++        /* Full: start over. The working set is a few frames' meshes; a scene
++         * change refills it within a frame. */
++        if (s_vc_live + 1 > RSX_VC_SLOTS / 2 || s_vc_bytes + bytes > RSX_VC_MAX_BYTES) {
++            rsx_vc_flush();
++            i = (u32)key & (RSX_VC_SLOTS - 1);
++            e = &s_vc[i];
++        }
++        e->data = (u8*)malloc(bytes);
++        if (!e->data) return NULL;
++        e->key = key; e->bytes = bytes;
++        s_vc_live++; s_vc_bytes += bytes;
++        s_vcs.miss++;
++    }
++    if (!rsx_vertex_fetch_many(plan, refs, count, e->data)) {
++        /* Leave no entry behind: the caller's own fetch reports the failure. */
++        free(e->data); e->data = NULL; s_vc_bytes -= e->bytes; s_vc_live--;
++        /* Linear probing cannot have holes: rehash what follows. */
++        for (u32 j = (i + 1) & (RSX_VC_SLOTS - 1); s_vc[j].data; j = (j + 1) & (RSX_VC_SLOTS - 1)) {
++            rsx_vc_entry m = s_vc[j];
++            s_vc[j].data = NULL;
++            u32 k = (u32)m.key & (RSX_VC_SLOTS - 1);
++            while (s_vc[k].data) k = (k + 1) & (RSX_VC_SLOTS - 1);
++            s_vc[k] = m;
++        }
++        return NULL;
++    }
++    e->content = content;
++    return e->data;
++}
++
+ static u64 rsx_vertex_remap_hash(u64 value)
+ {
+     value ^= value >> 33;
+diff --git a/libs/video/rsx_vertex_compact.h b/libs/video/rsx_vertex_compact.h
+index 6a12f6f..8209e53 100644
+--- a/libs/video/rsx_vertex_compact.h
++++ b/libs/video/rsx_vertex_compact.h
+@@ -124,6 +124,16 @@ int rsx_vertex_fetch_many(
+     const rsx_vertex_fetch_plan* plan, const rsx_vertex_ref* refs, u32 count,
+     u8* out);
+ 
++/* rsx_vertex_fetch_many through a cache kept across draws: the `count`
++ * vertices (count * layout.stride bytes), from the cache when neither the
++ * draw's inputs nor the guest bytes in its source ranges changed, else
++ * fetched into it. NULL when the draw is not cacheable (inline vertices, a
++ * source the plan did not resolve, a small draw), the cache is off or the
++ * fetch failed; fetch with rsx_vertex_fetch_many then. The block is valid
++ * until the next call. */
++const u8* rsx_vertex_fetch_cached(
++    const rsx_vertex_fetch_plan* plan, const rsx_vertex_ref* refs, u32 count);
++
+ /* Collapse repeated (vertex_id, base_index) references in first-use order.
+  * refs is rewritten in place with the unique prefix.  The occurrence map
+  * remains valid until the next call using the same remap object. */
+-- 
+2.56.0
+

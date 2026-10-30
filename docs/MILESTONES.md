@@ -7,7 +7,7 @@ results. Compiling is not evidence.
 |---|---|---|
 | 1 | Analysis and feasibility | **Complete**, see FEASIBILITY.md |
 | 2 | Native executable with diagnostics | **In progress** (boot criteria met; debug console, golden log, Windows build open) |
-| 3 | Initial Vulkan rendering and native audio | **In progress**: renders and plays through Vulkan on Linux, audio mixed natively; ~28 fps in gameplay (target 30) |
+| 3 | Initial Vulkan rendering and native audio | **In progress**: renders and plays through Vulkan on Linux, audio mixed natively; 29-30 fps in gameplay (the game's 30 fps cap) |
 | 4 | Menus and new-game startup | **In progress**: title → new game → opening → free movement, driven by `tests/scripts/new_game.drive` |
 | 5 | Core gameplay | Not started |
 | 6 | Full-game coverage | Not started |
@@ -157,6 +157,16 @@ Tracked in FEASIBILITY.md §6 and the `[unknown]` markers there.
     - Then ~28 fps: the frame clock polls the FIFO every 1 ms (was 4), and
       the vertex fetch runs in 128-vertex chunks with SSE2 half and float
       decode (0031; bit-identical, tested exhaustively for halves).
+    - Then 29-30 fps, the game's cap in steady play (patch 0032), from a
+      cross-draw vertex cache in the draw engine. The game fetched ~900k
+      vertices a frame, 97% of them from source ranges fetched within the
+      last second. Fetched blocks are kept under a key of the draw's
+      references, layout and attribute ranges, plus a 64-bit hash of the
+      guest bytes in those ranges. Every lookup re-hashes the bytes and
+      refetches on any change. Over the explore route: 2.46M lookups,
+      434 misses (first loads), no changed data, ~50 MB resident.
+      `RSX_VERTEX_CACHE=0` turns it off; `RSX_VERTEX_CACHE_STATS=1`
+      reports hits. Screens match the pre-cache run.
     - Validation layer, with sync validation enabled: no messages over
       the intro route.
     - `VK_GPU_TIME=1`: the GPU is busy ~22 ms a frame, 50-57% of the wall
@@ -177,8 +187,9 @@ Tracked in FEASIBILITY.md §6 and the `[unknown]` markers there.
   - `boot_smoke.sh` refreshes `frame.ppm` every 15th present by default.
     Dumping every frame cost several fps and skewed measurements.
 - Next:
-  - reach 30 fps: walker CPU (vertex conversion), the GPU's ~22 ms per
-    frame;
+  - hold 30 fps in busier scenes. The walker still copies each frame's
+    vertices into the Vulkan ring (~1/4 of its time; cached blocks could
+    live in GPU-visible buffers instead), and the GPU takes ~22 ms a frame;
   - the beige quad;
   - windowed play with a launcher;
   - save/load;
