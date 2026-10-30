@@ -288,7 +288,12 @@ static DWORD WINAPI frame_clock(LPVOID)
              * labels the game's per-frame logic blocks on, so it has to keep
              * advancing at 60 Hz even while present() throttles. */
             if (rsx_ok) cellGcm_rsx_process_fifo();
-            next_tick += 16;             /* ~60 Hz */
+            /* 60 Hz: 16, 17, 17 ms. DIAG_VBLANK_MS=<ms> sets another period,
+             * for frame-rate tests only (25: the game's own two-vblank wait
+             * gives 20 fps; tests/scripts/speed.drive). */
+            { static int vms = -1; static unsigned vb_n;
+              if (vms < 0) { const char* e = getenv("DIAG_VBLANK_MS"); vms = e ? atoi(e) : 0; }
+              next_tick += vms > 0 ? (ULONGLONG)vms : 16u + (++vb_n % 3 != 0); }
             fired++;
         }
         if (fired >= 240) next_tick = now;   /* fell too far behind -- resync */
@@ -460,6 +465,8 @@ static int run_guest(uint32_t entry, uint32_t stack_top)
 static int run_guest(uint32_t entry, uint32_t stack_top) { return ppu_run(entry, stack_top); }
 #endif
 
+extern "C" void dotheroes_configure_patches(void);
+
 int main(int argc, char** argv)
 {
     if (argc < 2) {
@@ -470,6 +477,7 @@ int main(int argc, char** argv)
     /* Before the runtime installs its own fault handlers, so they chain here. */
     diag_install_crash_handler();
     diag_start_watchdog();
+    dotheroes_configure_patches();   /* game_patches.cpp: DOTHEROES_FPS etc. */
 #ifndef _WIN32
     /* SIGTERM/SIGINT end the process at once. Guest threads block in host
      * waits with no shutdown path, so a graceful exit would hang; a save in

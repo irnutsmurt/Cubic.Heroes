@@ -1,0 +1,37 @@
+From f7f9cb6af538930ae3839d2b2827dcbd658a8389 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Fri, 30 Oct 2026 07:44:39 -0700
+Subject: [PATCH] cellGcmGetVBlankCount: return the ticked count, not one more
+ per query
+
+A title's 'wait until N vblanks have passed' loop ended after N polls
+instead of N vblanks. 3D Dot Game Heroes paces every frame with such a
+wait; its frame rate was set only by a 30 ms sleep it also has.
+---
+ libs/video/cellGcmSys.c | 8 +++++---
+ 1 file changed, 5 insertions(+), 3 deletions(-)
+
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index 49e4703..34b4f0d 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -4184,11 +4184,13 @@ s32 cellGcmUnreserveIoMapSize(u32 size)
+     return CELL_OK;
+ }
+ 
+-/* Return incrementing VBlank counter */
++/* The vblanks so far, as the host's vblank ticker counts them. Counting a
++ * vblank per query made a title's "wait for N vblanks" loop end after N
++ * polls: 3D Dot Game Heroes paces its frames with exactly that wait, and it
++ * returned in ~0.1 ms instead of 33. */
+ u32 cellGcmGetVBlankCount(void)
+ {
+-    /* Approximate: increment each time queried (games use this for timing) */
+-    return s_vblank_count++;
++    return *(volatile u32*)&s_vblank_count;
+ }
+ 
+ /* Return tile info for a given index */
+-- 
+2.56.0
+

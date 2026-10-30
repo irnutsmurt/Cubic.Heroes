@@ -16,6 +16,8 @@ Script lines (# comments allowed):
   shot <name>                 save a screenshot
   touch <file>                create <run>/<file> (e.g. a capture trigger)
   repeat <n> <BUTTON> <sec>   press n times, <sec> apart
+  hold <BUTTON> <sec>         hold for <sec> of wall time (not guest reports:
+                              those pass twice as fast at 60 fps)
 
 Buttons: START SELECT CROSS CIRCLE SQUARE TRIANGLE UP DOWN LEFT RIGHT L1 R1 L2 R2.
 Exit status 0 when every step completed, 1 on a timeout (the step is named).
@@ -67,10 +69,10 @@ def logtext():
     return t
 
 last_press_frame = [None]
-def press(mask, hold=10):
+def press(mask, hold=10, ms=0):
     last_press_frame[0] = frame()
     with open(os.path.join(run, "pad.txt"), "w") as f:
-        f.write(f"0x{mask:04X} {hold}\n")
+        f.write(f"0x{mask:04X} {hold} {ms}\n" if ms else f"0x{mask:04X} {hold}\n")
     # wait for the game to take it (the file is emptied on admission)
     t0 = time.time()
     while time.time() - t0 < 10:
@@ -98,6 +100,8 @@ for lineno, raw in enumerate(open(script), 1):
     elif op == "press":
         if not press(mask_of(a[0]), int(a[1]) if len(a) > 1 else 10):
             print(f"[drive] press not taken at line {lineno}")
+    elif op == "hold":
+        press(mask_of(a[0]), 1, int(float(a[1]) * 1000)); time.sleep(float(a[1]))
     elif op == "repeat":
         for _ in range(int(a[0])):
             press(mask_of(a[1])); time.sleep(float(a[2]))

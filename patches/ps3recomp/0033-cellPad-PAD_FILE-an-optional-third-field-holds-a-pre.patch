@@ -1,0 +1,58 @@
+From fa73702541699fa92bb043d15351ac92f651af11 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Fri, 30 Oct 2026 07:14:23 -0700
+Subject: [PATCH] cellPad PAD_FILE: an optional third field holds a press for
+ that many ms
+
+A hold counted in guest pad reports lasts half as long at 60 fps as at
+30, so frame-rate comparisons need one measured in wall time:
+'0x0010 1 1500' holds UP for 1.5 s.
+---
+ libs/input/cellPad.c | 15 ++++++++++++---
+ 1 file changed, 12 insertions(+), 3 deletions(-)
+
+diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
+index 11513fc..c0cda82 100644
+--- a/libs/input/cellPad.c
++++ b/libs/input/cellPad.c
+@@ -1010,9 +1010,11 @@ skip_inject: ;
+      *   echo 0x4000 > pad.txt    # CROSS
+      *   echo 0x0040 4 > pad.txt  # DOWN for 4 reports (menus auto-repeat a
+      *                            # long hold; the default is 40)
++     *   echo 0x0010 1 1500 > pad.txt  # UP for 1.5 s of wall time, however
++     *                            # many reports that is (frame-rate tests)
+      */
+     { static int s_pf = -1; static char pf_path[512];
+-      static unsigned held_mask = 0; static int held_n = 0;
++      static unsigned held_mask = 0; static int held_n = 0; static unsigned long long held_until = 0;
+       if (s_pf < 0) { const char* e = getenv("PAD_FILE");
+                       s_pf = (e && *e) ? 1 : 0;
+                       if (s_pf) { strncpy(pf_path, e, sizeof pf_path - 1); pf_path[sizeof pf_path - 1] = 0; } }
+@@ -1024,7 +1026,10 @@ skip_inject: ;
+                   if (fgets(buf, sizeof buf, f)) {
+                       char* rest;
+                       unsigned m = (unsigned)strtoul(buf, &rest, 0);
+-                      int n = (int)strtol(rest, 0, 0);
++                      int n = (int)strtol(rest, &rest, 0);
++                      const long ms = strtol(rest, 0, 0);
++                      held_until = 0;
++                      if (m && ms > 0) { held_until = GetTickCount64() + (unsigned long long)ms; n = 1; }
+                       if (m) { held_mask = m; held_n = n > 0 ? n : 40;
+                                printf("[cellPad] PAD_FILE press 0x%04X\n", m); fflush(stdout); }
+                   }
+@@ -1033,7 +1038,11 @@ skip_inject: ;
+               }
+           }
+           if (held_n > 0) {
+-              if (data->len > 0) held_n--;
++              if (held_until) {
++                  if (GetTickCount64() >= held_until) { held_n = 0; held_until = 0; }
++              } else if (data->len > 0) held_n--;
++          }
++          if (held_n > 0) {
+               data->button[CELL_PAD_BTN_OFFSET_DIGITAL1] |= (u16)(held_mask & 0xFF);
+               data->button[CELL_PAD_BTN_OFFSET_DIGITAL2] |= (u16)((held_mask >> 8) & 0xFF); }
+       } }
+-- 
+2.56.0
+

@@ -7,7 +7,7 @@ results. Compiling is not evidence.
 |---|---|---|
 | 1 | Analysis and feasibility | **Complete**, see FEASIBILITY.md |
 | 2 | Native executable with diagnostics | **In progress** (boot criteria met; debug console, golden log, Windows build open) |
-| 3 | Initial Vulkan rendering and native audio | **In progress**: renders and plays through Vulkan on Linux, audio mixed natively; 29-30 fps in gameplay (the game's 30 fps cap) |
+| 3 | Initial Vulkan rendering and native audio | **In progress**: renders and plays through Vulkan on Linux, audio mixed natively; frame cap lifted: menus ~60 fps, gameplay ~31 fps |
 | 4 | Menus and new-game startup | **In progress**: title → new game → opening → free movement, driven by `tests/scripts/new_game.drive` |
 | 5 | Core gameplay | Not started |
 | 6 | Full-game coverage | Not started |
@@ -171,6 +171,26 @@ Tracked in FEASIBILITY.md §6 and the `[unknown]` markers there.
       the intro route.
     - `VK_GPU_TIME=1`: the GPU is busy ~22 ms a frame, 50-57% of the wall
       clock. `VK_WAIT_STATS=1`: the walker's GPU waits are now ~2 ms per 5 s.
+  - **Frame cap (removed by default, at the user's request).** The game
+    caps itself at 30 fps twice: its main loop (0x2A5C8) sleeps until each
+    frame has taken 30 ms, and func_00029BD8 waits for two vblanks per
+    frame. Its logic runs on measured time: a fixed 1.5 s walk ends in the
+    same place at 20 and at 31 fps (`tests/scripts/speed.drive` with
+    `DIAG_VBLANK_MS=25`). Three guarded instruction patches
+    (`config/insn_patches.json`) select the cap through `DOTHEROES_FPS`:
+    `30` (original), `60` (one vblank per frame, default), `0` (none).
+    On this laptop menus run at 57-60 fps; gameplay runs at ~31, limited
+    by the hardware.
+    - Runtime bug found on the way (patch 0034): `cellGcmGetVBlankCount`
+      added a vblank on every query, so the two-vblank wait returned after
+      two polls. It now returns the ticked count. The frame clock ticks at
+      60 Hz (16/17/17 ms), not 62.5 Hz. With the real wait, the original
+      30 fps pacing gives ~25 fps in gameplay on this laptop: a frame
+      takes slightly over two vblanks, so it waits for a third. Real
+      hardware behaves the same way when a frame runs long.
+    - `PAD_FILE` takes an optional hold time in milliseconds (patch 0033)
+      and `drive.py` a `hold <BUTTON> <sec>` step. A hold counted in pad
+      reports would halve at 60 fps.
   - **Open rendering issue.** A large flat beige quad covers the path to the
     castle at one point of the intro route (screenshot at ~180 s). It is
     present with the old blocking present too, so it predates these changes.

@@ -16,7 +16,37 @@
  *   mixer would branch into that buffer; there is no lifted code for it, so a
  *   development build stops there in strict mode (spu-unlifted-branch) rather
  *   than running anything. See docs/FEASIBILITY.md, "Explicit exceptions".
+ *
+ * g_dotheroes_fps_nosleep, g_dotheroes_fps_vblank1, g_dotheroes_fps_novblank
+ *   The frame-rate cap. The main loop (0x2A5C8) holds every frame to at
+ *   least 30 ms, then func_00029BD8 waits for two vblanks since the last
+ *   frame: 30 fps. The game's logic steps by measured time (the loop turns
+ *   sys_time_get_system_time into a per-frame delta in seconds), so a
+ *   higher rate does not speed the game up: walking for a fixed 1.5 s ends
+ *   in the same place at 20 and at 31 fps (tests/scripts/speed.drive).
+ *   The cap was removed at the user's request; DOTHEROES_FPS selects:
+ *     30  the original pacing (no patch active)
+ *     60  no 30 ms floor; one vblank per frame (default)
+ *     0   no 30 ms floor and no vblank wait: as fast as the host runs
  */
 extern "C" {
 int g_dotheroes_skip_flash_mp3 = 1;
+int g_dotheroes_fps_nosleep = 0;
+int g_dotheroes_fps_vblank1 = 0;
+int g_dotheroes_fps_novblank = 0;
+}
+
+#include <stdio.h>
+#include <stdlib.h>
+
+/* Before the guest starts. */
+extern "C" void dotheroes_configure_patches(void)
+{
+    const char* e = getenv("DOTHEROES_FPS");
+    const int fps = e && *e ? atoi(e) : 60;
+    g_dotheroes_fps_nosleep  = fps != 30;
+    g_dotheroes_fps_vblank1  = fps == 60;
+    g_dotheroes_fps_novblank = fps != 30 && fps != 60;
+    fprintf(stderr, "[port] frame cap: %s\n",
+            fps == 30 ? "30 fps (original)" : fps == 60 ? "60 fps (vblank)" : "none");
 }

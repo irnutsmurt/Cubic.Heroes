@@ -12,6 +12,41 @@
       "new": "0x39600000",
       "guard": "g_dotheroes_skip_flash_mp3",
       "note": "func_008D0EBC (FMOD MultiStream MP3 codec load): its failure exit `li r11,33` becomes `li r11,0`, so a missing /dev_flash/sys/external/flashMP3.pic reports success with no codec loaded (the stat fails before anything is allocated)"
+    },
+    {
+      "addr": "0x0002A6A0",
+      "orig": "0x2FA3752F",
+      "new": "0x2FA3FFFF",
+      "guard": "g_dotheroes_fps_nosleep",
+      "note": "main loop (0x2A5C8): after a frame it sleeps 30000 us minus the frame's time (`cmpdi r3,29999` skips the sleep when the frame took longer). Comparing with -1 always skips it: no 30 ms minimum frame time"
+    },
+    {
+      "addr": "0x00029C04",
+      "orig": "0x2BA00001",
+      "new": "0x2BA00000",
+      "guard": "g_dotheroes_fps_vblank1",
+      "note": "func_00029BD8 (frame pacing): waits until cellGcmGetVBlankCount() has advanced by more than 1 since the last frame (2 vblanks: 30 fps). `> 0` waits for 1 vblank: 60 fps"
+    },
+    {
+      "addr": "0x00029C2C",
+      "orig": "0x2BA00001",
+      "new": "0x2BA00000",
+      "guard": "g_dotheroes_fps_vblank1",
+      "note": "the same test in that wait's loop"
+    },
+    {
+      "addr": "0x00029C00",
+      "orig": "0x7C001850",
+      "new": "0x38000002",
+      "guard": "g_dotheroes_fps_novblank",
+      "note": "func_00029BD8: the vblank difference (`sub r0,r3,r0`) replaced with 2, so the wait never blocks: no vblank cap"
+    },
+    {
+      "addr": "0x00029C28",
+      "orig": "0x7C001850",
+      "new": "0x38000002",
+      "guard": "g_dotheroes_fps_novblank",
+      "note": "the same in that wait's loop"
     }
   ]
 }
