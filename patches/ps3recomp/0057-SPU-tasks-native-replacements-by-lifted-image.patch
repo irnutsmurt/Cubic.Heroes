@@ -1,0 +1,160 @@
+From 2446dbe8f66cae88ccf7c3ede4a46748108d5fbf Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Sat, 31 Oct 2026 13:47:49 -0700
+Subject: [PATCH] SPU tasks: native replacements, by lifted image
+
+spu_workload_native_register(image, run, after): a title can have a SPURS
+task done by host code instead of its lifted image. On the worker that
+would run the image, before anything of it is set up, `run` gets the
+task's taskset, id and CreateTask argument (TaskInfo.args); it returns 1
+when it did the whole task -- the task then exits there, with its task
+profile and frame-trace span as before -- or 0 to have the image run as
+usual, after which `after` (if set) is called, to compare the two.
+
+The queue side a replacement needs, as the SPU task sees it:
+spurs_queue_spu_peek / _pop / _push (cellSpurs.c), the same locking,
+counters and waiter wake-ups as the lifted task's own queue operations,
+peek copying the entry without taking it.
+---
+ libs/spurs/cellSpurs.c     | 19 +++++++++++++++----
+ runtime/spu/spu_workload.c | 36 ++++++++++++++++++++++++++++++++++++
+ runtime/spu/spu_workload.h | 14 ++++++++++++++
+ 3 files changed, 65 insertions(+), 4 deletions(-)
+
+diff --git a/libs/spurs/cellSpurs.c b/libs/spurs/cellSpurs.c
+index 21f82ef..240b3b2 100644
+--- a/libs/spurs/cellSpurs.c
++++ b/libs/spurs/cellSpurs.c
+@@ -3081,8 +3081,9 @@ static void sq_wake_head(u32 q, u32 tid_off, u32 wid_off)
+     spu_taskset_signal_task(taskset, tid);
+ }
+ 
+-/* One push (to_queue = 1) or pop under the lock: 1 done, 0 full/empty. */
+-static int sq_move(u32 q, u32 data, int to_queue)
++/* One push (to_queue = 1) or pop under the lock, from or to host memory: 1
++ * done, 0 full/empty. `peek`: a pop that copies the entry but leaves it. */
++static int sq_move_host(u32 q, void* data, int to_queue, int peek)
+ {
+     extern void spu_lockline_lock(void); extern void spu_lockline_unlock(void);
+     extern void spu_coh_notify_write(uint32_t);
+@@ -3095,13 +3096,14 @@ static int sq_move(u32 q, u32 data, int to_queue)
+     int done = 0;
+     if (to_queue && count < depth && w1 >= 0) {
+         const s32 slot = n1 >= depth ? n1 - depth : n1;
+-        memcpy(vm_base + buf + (u32)(slot * size), vm_base + data, (size_t)size);
++        memcpy(vm_base + buf + (u32)(slot * size), data, (size_t)size);
+         __atomic_thread_fence(__ATOMIC_RELEASE);
+         ll_w32(q + 0x04, (u32)((n1 + 1) % (2 * depth)));
+         done = 1;
+     } else if (!to_queue && count > 0 && w0 >= 0) {
+         const s32 slot = n0 >= depth ? n0 - depth : n0;
+-        memcpy(vm_base + data, vm_base + buf + (u32)(slot * size), (size_t)size);
++        memcpy(data, vm_base + buf + (u32)(slot * size), (size_t)size);
++        if (peek) { spu_lockline_unlock(); return 1; }
+         ll_w32(q + 0x00, (u32)((n0 + 1) % (2 * depth)));
+         done = 1;
+     }
+@@ -3114,6 +3116,15 @@ static int sq_move(u32 q, u32 data, int to_queue)
+     return done;
+ }
+ 
++static int sq_move(u32 q, u32 data, int to_queue) { return sq_move_host(q, vm_base + data, to_queue, 0); }
++
++/* The SPU side of a queue, for a task run as native code in place of its
++ * lifted image (spu_workload_native_register): the lock, counters and wakes
++ * the lifted SPU code and the PPU use. 1 done, 0 empty (pop, peek) / full. */
++int spurs_queue_spu_peek(uint32_t q, void* out) { return sq_move_host(q, out, 0, 1); }
++int spurs_queue_spu_pop(uint32_t q, void* out) { return sq_move_host(q, out, 0, 0); }
++int spurs_queue_spu_push(uint32_t q, const void* in) { return sq_move_host(q, (void*)in, 1, 0); }
++
+ /* PS3_FTRACE: a PPU's wait for an entry to pop, as one span (PS3_FT_QUEUE_WAIT)
+  * from the first pop that found a queue empty to the next one that took an
+  * entry, from whichever queue. Titles poll without blocking, round the queues
+diff --git a/runtime/spu/spu_workload.c b/runtime/spu/spu_workload.c
+index 6390bb7..f28534a 100644
+--- a/runtime/spu/spu_workload.c
++++ b/runtime/spu/spu_workload.c
+@@ -744,12 +744,47 @@ static void spu_taskprof_add(int image, double disp, double enter, double r0, do
+ #endif
+ }
+ 
++/* Native task replacements, by lifted image (spu_workload.h). */
++static struct { spu_native_task_fn run; spu_native_after_fn after; } s_native[64];
++
++void spu_workload_native_register(int image_id, spu_native_task_fn run, spu_native_after_fn after)
++{
++    if (image_id <= 0 || image_id >= 64) return;
++    s_native[image_id].after = after;
++    __atomic_store_n(&s_native[image_id].run, run, __ATOMIC_RELEASE);
++}
++
+ static void spu_async_run(spu_async_job* j)
+ {
+     const double t_enter = j->t_disp ? spu_taskprof_now() : 0;
+     const uint64_t ft_enter = j->ft_disp ? ps3_ft_now() : 0;
+     double t_r0 = 0, t_r1 = 0;
+     spu_taskset_mark(j->taskset_ea, j->taskid, 1);
++    /* A native replacement for this image: it gets the CreateTask argument
++     * (TaskInfo.args, taskset + 0x80 + id * 48) and either does the task's
++     * whole work -- then the task exits here, its image never loaded -- or
++     * leaves it to the image. */
++    uint32_t nat_arg[4] = { 0, 0, 0, 0 };
++    const spu_native_task_fn nat_run = j->image_id > 0 && j->image_id < 64 && j->taskset_ea
++        ? __atomic_load_n(&s_native[j->image_id].run, __ATOMIC_ACQUIRE) : NULL;
++    if (nat_run) {
++        extern uint8_t* vm_base;
++        const uint8_t* a = vm_base + j->taskset_ea + 0x80u + j->taskid * 48u;
++        for (int k = 0; k < 4; k++)
++            nat_arg[k] = (uint32_t)a[k * 4] << 24 | (uint32_t)a[k * 4 + 1] << 16 | (uint32_t)a[k * 4 + 2] << 8 | a[k * 4 + 3];
++        if (t_enter) t_r0 = spu_taskprof_now();
++        if (nat_run(j->taskset_ea, j->taskid, nat_arg)) {
++            if (t_enter) t_r1 = spu_taskprof_now();
++            spu_taskset_task_exited(j->taskset_ea, j->taskid);
++            if (t_r1) spu_taskprof_add(j->image_id, j->t_disp, t_enter, t_r0, t_r1, spu_taskprof_now());
++            if (ft_enter)
++                ps3_ft_span(PS3_FT_SPU_TASK, (uint32_t)GetCurrentThreadId(), (uint32_t)j->image_id,
++                            (uint32_t)((ft_enter - j->ft_disp) / 1000u), ft_enter, ps3_ft_now());
++            free(j);
++            return;
++        }
++        t_r0 = 0;
++    }
+     /* Persistent per-taskset LS: acquire (+serialize) the taskset's LS, or fall
+      * back to a fresh per-dispatch LS when disabled / no taskset. */
+     spu_ts_ls_slot* ts_slot = NULL;
+@@ -1111,6 +1146,7 @@ static void spu_async_run(spu_async_job* j)
+     if (ft_enter)
+         ps3_ft_span(PS3_FT_SPU_TASK, (uint32_t)GetCurrentThreadId(), (uint32_t)j->image_id,
+                     (uint32_t)((ft_enter - j->ft_disp) / 1000u), ft_enter, ps3_ft_now());
++    if (nat_run && s_native[j->image_id].after) s_native[j->image_id].after(j->taskset_ea, j->taskid, nat_arg);
+     free(j);
+ }
+ 
+diff --git a/runtime/spu/spu_workload.h b/runtime/spu/spu_workload.h
+index 7fa0ec4..b8a8715 100644
+--- a/runtime/spu/spu_workload.h
++++ b/runtime/spu/spu_workload.h
+@@ -155,6 +155,20 @@ void spu_taskset_set_exit_container(uint32_t taskset_ea, uint32_t task, uint32_t
+ int spu_workload_dispatch_async(const uint8_t* image, uint32_t image_size,
+                                 uint32_t args_ea);
+ 
++/* A SPURS task done by native code in place of a lifted image. `run` gets
++ * the task's taskset, id and CreateTask argument on the worker that would
++ * have run the image, before anything of the image is set up; it returns 1
++ * when it did the task's whole work (its queue entries popped and pushed),
++ * 0 to have the lifted image run as usual -- and then `after`, when set, is
++ * called once the image has returned (to compare, say). The queue side it
++ * needs is spurs_queue_spu_peek/pop/push (libs/spurs/cellSpurs.c). */
++typedef int (*spu_native_task_fn)(uint32_t taskset_ea, uint32_t taskid, const uint32_t arg[4]);
++typedef void (*spu_native_after_fn)(uint32_t taskset_ea, uint32_t taskid, const uint32_t arg[4]);
++void spu_workload_native_register(int image_id, spu_native_task_fn run, spu_native_after_fn after);
++int spurs_queue_spu_peek(uint32_t q, void* out);
++int spurs_queue_spu_pop(uint32_t q, void* out);
++int spurs_queue_spu_push(uint32_t q, const void* in);
++
+ /* Number of currently registered lifted SPU binaries (diagnostics/tests). */
+ unsigned spu_workload_count(void);
+ 
+-- 
+2.56.0.windows.3
+

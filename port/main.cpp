@@ -32,6 +32,7 @@
 /* The lifter's generated header, which declares ppu_context and the function
  * table. It comes first: everything below is written against that struct. */
 #include "diag/diag.h"
+#include "native/bullet_cd_task.h"
 #include "ppu_recomp.h"
 
 /* The Win32 names -- Sleep, GetTickCount64, CreateThread, InterlockedIncrement,
@@ -580,6 +581,7 @@ int main(int argc, char** argv)
     diag_install_crash_handler();
     diag_start_watchdog();
     dotheroes_configure_patches();   /* game_patches.cpp: DOTHEROES_FPS etc. */
+    dotheroes_native_init();         /* native/bullet_cd_task.cpp: DOTHEROES_NATIVE_CD */
 #ifndef _WIN32
     /* SIGTERM/SIGINT end the process at once. Guest threads block in host
      * waits with no shutdown path, so a graceful exit would hang; a save in

@@ -232,7 +232,53 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}"
 )
 
+# ---------------------------------------------------------------------------
+# Native replacements for the game's SPU tasks (port/native/)
+# ---------------------------------------------------------------------------
+# The Bullet collision task as host code, experimental: the lifted task stays
+# the default, DOTHEROES_NATIVE_CD=1 selects this at run time. Its narrowphase
+# is Bullet 2.74's own source (zlib licence), fetched and checked by
+# tools/build_deps.py; game-independent, so a library of its own with its own
+# flags (the executable's would rebuild every lifted file). A tree without
+# Bullet builds an empty init and the lifted task runs as before.
+set(BULLET_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../build/deps/src/bullet-2.74" CACHE PATH
+    "Bullet 2.74 source tree (tools/build_deps.py fetches it)")
+add_library(dotheroes_native STATIC native/bullet_cd_task.cpp)
+target_include_directories(dotheroes_native PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/native"
+    "${PS3RECOMP_DIR}/include"
+    "${PS3RECOMP_DIR}/runtime/spu")
+if(EXISTS "${BULLET_DIR}/src/BulletMultiThreaded/SpuNarrowPhaseCollisionTask/SpuGatheringCollisionTask.h")
+    message(STATUS "Native Bullet:   ${BULLET_DIR}")
+    set(BT "${BULLET_DIR}/src")
+    target_sources(dotheroes_native PRIVATE
+        native/bullet_cd.cpp
+        native/bt_host_alloc.cpp
+        "${BT}/BulletMultiThreaded/SpuNarrowPhaseCollisionTask/SpuGjkPairDetector.cpp"
+        "${BT}/BulletMultiThreaded/SpuNarrowPhaseCollisionTask/SpuVoronoiSimplexSolver.cpp"
+        "${BT}/BulletMultiThreaded/SpuNarrowPhaseCollisionTask/SpuMinkowskiPenetrationDepthSolver.cpp"
+        "${BT}/BulletCollision/CollisionDispatch/btBoxBoxDetector.cpp"
+        "${BT}/BulletCollision/CollisionShapes/btBoxShape.cpp"
+        "${BT}/BulletCollision/CollisionShapes/btPolyhedralConvexShape.cpp"
+        "${BT}/BulletCollision/CollisionShapes/btConvexInternalShape.cpp"
+        "${BT}/BulletCollision/CollisionShapes/btConvexShape.cpp"
+        "${BT}/BulletCollision/CollisionShapes/btCollisionShape.cpp"
+        "${BT}/BulletCollision/NarrowPhaseCollision/btPersistentManifold.cpp")
+    target_include_directories(dotheroes_native PRIVATE "${BT}" "${BT}/BulletMultiThreaded")
+    # The SPU task's build: 64-bit host addresses for its effective-address
+    # type, no profiler, and PlatformDefinitions.h's own integer typedefs
+    # replaced by <stdint.h>'s.
+    target_compile_definitions(dotheroes_native PRIVATE
+        DOTHEROES_BULLET_CD USE_ADDR64 BT_NO_PROFILE __PHYSICS_COMMON_H__)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(dotheroes_native PRIVATE -O2 -w -include stdint.h)
+    endif()
+else()
+    message(STATUS "Native Bullet:   none (no ${BULLET_DIR}; tools/build_deps.py fetches it)")
+endif()
+
 target_link_libraries(${PROJECT_NAME} PRIVATE
+    dotheroes_native
     ps3recomp_runtime
 )
 

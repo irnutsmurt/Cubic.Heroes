@@ -178,7 +178,8 @@ def licenses(out, zsrc):
                        ("SDL2.txt", os.path.join(deps, "SDL2-2.32.10", "LICENSE.txt")),
                        ("glslang.txt", os.path.join(deps, "glslang-16.6.0", "LICENSE.txt")),
                        ("Vulkan-Headers.txt", os.path.join(deps, "Vulkan-Headers-vulkan-sdk-1.4.363.0",
-                                                           "LICENSE.md"))):
+                                                           "LICENSE.md")),
+                       ("Bullet.txt", os.path.join(deps, "bullet-2.74", "LICENSE"))):
         for p in [path] + glob.glob(os.path.splitext(path)[0] + "*"):
             if os.path.isfile(p):
                 shutil.copy2(p, os.path.join(lic, name))

@@ -12,6 +12,9 @@ builds, per platform, into build/deps/<platform>/:
     glslang   static (libglslang.a and friends): the game's shaders, translated
               to SPIR-V at run time.
     Vulkan    headers only: the backend loads the driver's loader at run time.
+    Bullet    2.74 source only (zlib licence): port/CMakeLists.txt compiles
+              the narrowphase files the native collision task
+              (port/native/bullet_cd.cpp) uses into its own library.
 Linux targets glibc 2.31 (Ubuntu 20.04, Debian 11 and newer); Windows the
 MinGW ABI. Nothing here comes from the game.
 """
@@ -36,6 +39,10 @@ SOURCES = {
                 "glslang-16.6.0", None),
     "Vulkan-Headers": ("https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/vulkan-sdk-1.4.363.0.tar.gz",
                        "Vulkan-Headers-vulkan-sdk-1.4.363.0", None),
+    # the game's Bullet is 2.73 (docs/BULLET_NATIVE.md); 2.74 is the reference
+    # compiled for the native collision task, checked against the game's
+    "Bullet": ("https://storage.googleapis.com/google-code-archive-downloads/v2/code.google.com/bullet/bullet-2.74.tgz",
+               "bullet-2.74", None),
 }
 PINS = os.path.join(ROOT, "config", "deps.sha256")
 
@@ -108,6 +115,7 @@ def build(platform):
     if not os.path.isdir(dst):
         shutil.copytree(os.path.join(fetch("Vulkan-Headers"), "include", "vulkan"), dst)
         shutil.copytree(os.path.join(fetch("Vulkan-Headers"), "include", "vk_video"), os.path.join(inc, "vk_video"))
+    fetch("Bullet")   # source only: built with the port (BULLET_DIR)
     print(f"[deps] {platform}: done -> {os.path.relpath(os.path.join(DEPS, platform), ROOT)}", flush=True)
 
 

@@ -11,7 +11,10 @@ Environment
   RUN_TAG=<name>     suffix for the run directory.
   KEEP_RUNS=<n>      run directories kept under build/test (default 5; the
                      oldest are deleted when a run starts). The live frame
-                     dump (frame.ppm) is deleted when a run ends.
+                     dump (frame.ppm) is deleted when a run ends. Each run
+                     records what it ran in run.json (executable hash, source
+                     revisions, switches); tests/keep_baseline.py keeps a
+                     run's summary in build/baselines/, which no run deletes.
   PS3RECOMP_VK_DUMP_EVERY=<n>  refresh frame.ppm every n-th present (default
                      15; dumping every frame costs several fps).
   DUMP=0             no frame.ppm at all, for timing runs: the dump is written
@@ -78,6 +81,39 @@ def rd(path):
         return ""
 
 
+def build_identity():
+    """What this run ran: the executable's hash and the two source trees'
+    revisions (dirty = files changed since), and the switches it was given.
+    Written to <run>/run.json; tests/keep_baseline.py keeps it with a summary."""
+    import hashlib, json, subprocess
+    h = hashlib.sha256()
+    with open(BIN, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 22), b""):
+            h.update(chunk)
+
+    def git(tree):
+        try:
+            rev = subprocess.run(["git", "-C", tree, "rev-parse", "--short=12", "HEAD"], capture_output=True,
+                                 text=True).stdout.strip()
+            dirty = subprocess.run(["git", "-C", tree, "status", "--porcelain", "-uno"], capture_output=True,
+                                   text=True).stdout.count("\n")
+            return {"rev": rev, "dirty_files": dirty}
+        except OSError:
+            return None
+    ps3 = os.environ.get("PS3RECOMP_DIR", os.path.join(ROOT, "build", "ref", "ps3recomp"))
+    prefixes = ("DOTHEROES_", "PS3_", "PS3RECOMP_", "SPU_", "VK_", "RSX_", "SPURS_", "DIAG_")
+    return {
+        "started": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "exe": {"name": os.path.basename(BIN), "sha256": h.hexdigest(), "bytes": os.path.getsize(BIN),
+                "mtime": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(os.path.getmtime(BIN)))},
+        "repo": git(ROOT), "ps3recomp": git(ps3),
+        "patches": len(glob.glob(os.path.join(ROOT, "patches", "ps3recomp", "*.patch"))),
+        "secs": SECS, "drive": os.path.relpath(os.environ["DRIVE"], ROOT) if os.environ.get("DRIVE") else None,
+        "switches": {k: v for k, v in sorted(os.environ.items())
+                     if k.startswith(prefixes) or k in ("DUMP", "WINDOW", "AUDIO", "SHOT_EVERY")},
+    }
+
+
 def main():
     if not os.path.isfile(BIN):
         print(f"no {BIN} (build port/ first)")
@@ -96,6 +132,9 @@ def main():
     for d in ("dev_flash", "shots", gamedata):
         os.makedirs(os.path.join(RUN, d), exist_ok=True)
     open(os.path.join(RUN, "pad.txt"), "w").close()
+    import json
+    with open(os.path.join(RUN, "run.json"), "w") as f:
+        json.dump(build_identity(), f, indent=1)
     if os.environ.get("SAVES"):
         dst = os.path.join(gamedata, "dev_hdd0", "home", "00000001", "savedata")
         for name in sorted(os.listdir(os.environ["SAVES"])):

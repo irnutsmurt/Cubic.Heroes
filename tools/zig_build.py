@@ -131,11 +131,15 @@ COMMON = ["-fno-strict-aliasing", "-fwrapv", "-DPS3RECOMP_RSX_VULKAN"]
 PORT_FLAGS = [CXX_STD, "-O1", "-w"] + COMMON
 PPU_FLAGS = [CXX_STD, "-O1", "-w", "-ffp-contract=off"] + COMMON
 SPU_FLAGS = [C_STD, "-O2", "-w", "-DSPU_USE_DISPATCH_MT"] + COMMON
-SHIP_FLAGS = ["-g0", f"-ffile-prefix-map={ROOT}=.", f"-ffile-prefix-map={os.path.expanduser('~')}=~"]
+# No build paths in what ships: the checkout and the home folder, as given and
+# (Windows) with forward slashes, which is how CMake hands sources over.
+SHIP_FLAGS = ["-g0"] + [f"-ffile-prefix-map={d}={to}" for d, to in ((ROOT, "."), (os.path.expanduser("~"), "~"))
+                        for d in sorted({d, d.replace(os.sep, "/")})]
 SCAFFOLD = ["runtime/ppu/ppu_loader.cpp", "runtime/ppu/ppu_hle.cpp", "runtime/ppu/ppu_fs.cpp",
             "runtime/ppu/ppu_sysprx.cpp"]
 PORT_SOURCES = ["main.cpp", "stubs.cpp", "game_patches.cpp", "diag/diag.cpp"]
 RUNTIME_LIB = "libps3recomp_runtime.a"
+NATIVE_LIB = "libdotheroes_native.a"   # port/native: the native SPU-task replacements (Bullet 2.74 in it)
 
 
 class Sources:
@@ -308,7 +312,7 @@ def link_args(lib_dir, platform=HOST):
                                                    "libMachineIndependent.a", "libGenericCodeGen.a",
                                                    "libOSDependent.a")
                if os.path.exists(os.path.join(lib_dir, n))]
-    rt = [os.path.join(lib_dir, RUNTIME_LIB)]
+    rt = [os.path.join(lib_dir, NATIVE_LIB), os.path.join(lib_dir, RUNTIME_LIB)]
     if platform == "windows":
         res = [os.path.join(lib_dir, "dotheroes.res")] if os.path.exists(os.path.join(lib_dir, "dotheroes.res")) else []
         return res + rt + glslang + [os.path.join(lib_dir, "libSDL2.dll.a"),
@@ -394,6 +398,12 @@ def link_fingerprint(platform=HOST, zig=None):
 
 # ---------------- developer side: the prebuilt parts ----------------
 
+def cmake_flags(flags):
+    """flags as one CMAKE_<LANG>_FLAGS string: CMake splits it at spaces, so a
+    flag with a space in it (a checkout path) is quoted"""
+    return " ".join(f'"{f}"' if " " in f else f for f in flags)
+
+
 def build_prebuilt(platform, ps3recomp, gen_ppu, log=print):
     """build/lib/<platform>/: the runtime library (CMake + zig, release settings:
     no dev diagnostics, not strict by default), its HLE NID table source, and the
@@ -412,13 +422,14 @@ def build_prebuilt(platform, ps3recomp, gen_ppu, log=print):
                            "-DPS3RECOMP_RSX_VULKAN=ON", "-DDOTHEROES_DEV_DIAGNOSTICS=OFF",
                            f"-DPS3RECOMP_VULKAN_INCLUDE_DIR={os.path.join(deps, 'include')}",
                            f"-DCMAKE_PREFIX_PATH={deps}", f"-DCMAKE_FIND_ROOT_PATH={deps}",
-                           "-DCMAKE_C_FLAGS=" + " ".join(SHIP_FLAGS), "-DCMAKE_CXX_FLAGS=" + " ".join(SHIP_FLAGS)],
+                           "-DCMAKE_C_FLAGS=" + cmake_flags(SHIP_FLAGS), "-DCMAKE_CXX_FLAGS=" + cmake_flags(SHIP_FLAGS)],
                           stdout=subprocess.DEVNULL)
     nids = os.path.join(work, "ppu_hle_nids.cpp")
-    subprocess.check_call(["cmake", "--build", work, "--target", "ps3recomp_runtime", nids, "--parallel", "6"],
-                          stdout=subprocess.DEVNULL)
+    subprocess.check_call(["cmake", "--build", work, "--target", "ps3recomp_runtime", "dotheroes_native", nids,
+                           "--parallel", "6"], stdout=subprocess.DEVNULL)
     os.makedirs(os.path.join(out, "src"), exist_ok=True)
     shutil.copy2(os.path.join(work, "ps3recomp_sdk", RUNTIME_LIB), out)
+    shutil.copy2(os.path.join(work, NATIVE_LIB), out)
     shutil.copy2(nids, os.path.join(out, "src"))
     for f in os.listdir(os.path.join(deps, "lib")):
         if f.endswith(".a"):

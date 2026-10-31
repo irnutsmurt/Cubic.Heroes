@@ -110,3 +110,12 @@ for path in sys.argv[1:]:
     for i in range(n):
         hist[per[i]["steps"]] = hist.get(per[i]["steps"], 0) + 1
     print("steps per frame:", dict(sorted(hist.items())))
+    # per step, over the whole run: independent of how much fighting a run had
+    ns = sum(p["steps"] for p in per)
+    if ns:
+        tot = lambda key: sum(p[key] for p in per) / ns / 1000
+        print(f"per step ({ns}): span {tot('span'):.2f} ms, exec {tot('exec'):.2f}, cd.exec {tot('cd'):.2f}, "
+              f"sv.exec {tot('sv'):.2f}, gaps {tot('span') - tot('exec'):.2f}, ppu.wait {tot('wait'):.2f}")
+        ms = sorted((flips[i + 1] - flips[i]) / 1000 for i in range(n) if per[i]["steps"])
+        print(f"frames with a step ({len(ms)}): mean {sum(ms) / len(ms):.2f} ms, median {ms[len(ms) // 2]:.2f}, "
+              f"95th {ms[int(len(ms) * 0.95)]:.2f}, over 25 ms {sum(x > 25 for x in ms)}")

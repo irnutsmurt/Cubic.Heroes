@@ -27,6 +27,14 @@ log) and [FEASIBILITY.md](FEASIBILITY.md) (design and the explicit exceptions).
 - **Clean up test artifacts.** Screenshots, frame dumps and old runs must not
   pile up (another project of the owner's reached 300 GB). `tests/boot_smoke.sh`
   keeps the last 5 runs; delete captures after use.
+- **Keep baselines past that cleanup.** Each run records what it ran in
+  `run.json` (executable hash, repo and ps3recomp revisions, switches);
+  `tests/keep_baseline.py <name> <run>...` copies a run's compact summary
+  (fps, `[native-cd]` lines, frame_times / frame_costs / phys_breakdown) and
+  its run.json into `build/baselines/<name>/`, listed in
+  `build/baselines/INDEX.md`, which no run deletes. Representative failure
+  inputs live there or in `build/snap/` (guest-memory snapshots: game data,
+  local only).
 - **Isolate tests** from the desktop and personal settings; avoid modifying
   unrelated projects or system settings; signal only processes you started.
 - Commit identity for this repo is the owner's own git config; ps3recomp
@@ -400,6 +408,14 @@ tooling, the native Windows build, measuring on the 3070) are done; see
    PPU-sequenced solver phases on top. Native CPU Bullet in place of the two
    tasks is the next step; what they read and write is mapped in
    docs/BULLET_NATIVE.md.
+   A native collision task exists, experimental and off by default
+   (`DOTHEROES_NATIVE_CD=1`, port/native/; the lifted task stays the
+   default; not bit-exact with the SPU). A/B, three runs each: collision 1.25 -> 0.07 ms a step (field), 2.74 -> 0.13 (river); a
+   step's span 3.60 -> 2.78, 6.02 -> 3.76; the main thread's wait 2.81 ->
+   1.95, 5.21 -> 2.86. Frames barely moved (river frames with a step 25.6 ->
+   24.2 ms mean, p95 35.6 -> 34.2, frames over 25 ms 123 -> 121): in the
+   slow ones the walker (~19 ms for ~935 draws) is now the limit. Details,
+   and how close its contacts are to the SPU's, in docs/BULLET_NATIVE.md.
    Frame dumps (PS3RECOMP_VK_DUMP, on in tests/boot_smoke.py unless DUMP=0)
    are written on the present path: every 60th frame took 10-20 ms longer.
    Time with DUMP=0; for play sessions grab the window instead.
@@ -444,6 +460,7 @@ tooling, the native Windows build, measuring on the 3070) are done; see
 | `SPU_MFC_LOOKUP_CACHE=0` | the per-thread MFC lookup cache off (on by default), for A/B |
 | `DOTHEROES_CPU=<zig cpu>` | build-time: the CPU level this machine compiles for (default its own: x86_64_v3 or x86_64_v2) |
 | `SPURS_SNAP=<entry>:<entry>:<n>:<prefix>` | guest memory before and after a Bullet step, for docs/BULLET_NATIVE.md (`tests/snap_read.py`) |
+| `DOTHEROES_NATIVE_CD=<0-3>` | the Bullet collision task: lifted (default), native (experimental), check (native against lifted, `[native-cd]` lines), self-check (native against itself rounding toward zero); `DOTHEROES_NATIVE_CD_DUMP=n` prints differing manifolds, `DOTHEROES_NATIVE_CD_FP=rz` runs native toward zero (docs/BULLET_NATIVE.md) |
 | `GAMEDATA=<dir>` | tests/boot_smoke.py: play on a persistent save root in place (`%LOCALAPPDATA%\dotheroes\gamedata`) |
 | `RSX_DROP_LOG=1`, `VK_DRAW_SKIP_LOG=1` | draws the engine / the Vulkan backend discard before drawing, with the reason |
 | `RSX_FP_DEBUG=<hash>:0:m` | paint that fragment program solid magenta: does the draw produce pixels at all |
@@ -463,4 +480,4 @@ Edit in `build/ref/ps3recomp` (branch `dotheroes`), commit there as
 `git format-patch --start-number <next> -o ../../../patches/ps3recomp HEAD~<n>`
 and commit the patch files here. `tools/pipeline.py` refuses to run with
 uncommitted changes in that checkout, and re-applies the whole series when
-the patch files change. 56 patches as of this handoff.
+the patch files change. 57 patches as of this handoff.
