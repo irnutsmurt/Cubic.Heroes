@@ -382,7 +382,9 @@ tooling, the native Windows build, measuring on the 3070) are done; see
    GPU compute for Bullet is out: a CPU->GPU->CPU round trip on this queue
    is 87 us median, 0.8 ms p90, and a step needs at least two, with ~24
    PPU-sequenced solver phases on top. Native CPU Bullet in place of the two
-   tasks is the next step for physics; worth 2-4 ms of a fight frame.
+   tasks is the next step for physics; worth 2-4 ms of a fight frame. What
+   the two tasks read and write is mapped in docs/BULLET_NATIVE.md (paused:
+   the debris rendering cost comes first).
    Checked: five-minute soak 59.4-59.8 fps, p99 21-22 ms, longest stall
    364 ms (was 1,288); two check-mode runs clean.
    On the way, `DIAG_PROF` itself crashed the game in 3 of 9 profiled
@@ -423,6 +425,7 @@ tooling, the native Windows build, measuring on the 3070) are done; see
 | `RSX_FALLBACK_LOG=1` | draws that got the built-in programs, and why (missing vertex or fragment program) |
 | `SPU_MFC_LOOKUP_CACHE=0` | the per-thread MFC lookup cache off (on by default), for A/B |
 | `DOTHEROES_CPU=<zig cpu>` | build-time: the CPU level this machine compiles for (default its own: x86_64_v3 or x86_64_v2) |
+| `SPURS_SNAP=<entry>:<entry>:<n>:<prefix>` | guest memory before and after a Bullet step, for docs/BULLET_NATIVE.md (`tests/snap_read.py`) |
 | `GAMEDATA=<dir>` | tests/boot_smoke.py: play on a persistent save root in place (`%LOCALAPPDATA%\dotheroes\gamedata`) |
 | `RSX_DROP_LOG=1`, `VK_DRAW_SKIP_LOG=1` | draws the engine / the Vulkan backend discard before drawing, with the reason |
 | `RSX_FP_DEBUG=<hash>:0:m` | paint that fragment program solid magenta: does the draw produce pixels at all |
@@ -442,4 +445,4 @@ Edit in `build/ref/ps3recomp` (branch `dotheroes`), commit there as
 `git format-patch --start-number <next> -o ../../../patches/ps3recomp HEAD~<n>`
 and commit the patch files here. `tools/pipeline.py` refuses to run with
 uncommitted changes in that checkout, and re-applies the whole series when
-the patch files change. 53 patches as of this handoff.
+the patch files change. 54 patches as of this handoff.
