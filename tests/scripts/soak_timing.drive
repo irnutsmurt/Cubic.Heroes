@@ -1,0 +1,58 @@
+# tests/scripts/soak.drive for timing runs (DUMP=0): no frame dumps, so
+# fixed waits instead of change and no shots. Generated from soak.drive.
+log TitleMovie 120
+sleep 5
+press START                 # "PRESS START BUTTON"
+sleep 3
+press START                 # main menu: CONTINUE
+sleep 3
+sleep 3
+press CROSS                 # "Change characters?" NO
+sleep 3
+sleep 12
+hold DOWN 3
+repeat 8 CROSS 0.4          # sword
+hold LEFT 4
+repeat 8 CROSS 0.4
+press TRIANGLE              # menu
+sleep 2
+press RIGHT
+sleep 1
+press DOWN
+sleep 1
+press TRIANGLE              # close
+sleep 2
+press L1                    # map
+sleep 2
+press L1
+sleep 2
+hold R1 2                   # guard
+hold UP 6
+repeat 6 CROSS 0.4
+hold RIGHT 6
+hold DOWN 8
+repeat 10 CROSS 0.3
+hold RIGHT 5
+repeat 10 CROSS 0.3
+hold UP 4
+press TRIANGLE
+sleep 2
+press TRIANGLE
+sleep 2
+hold LEFT 8
+repeat 10 CROSS 0.3
+hold UP 6
+hold DOWN 3
+repeat 8 CROSS 0.4
+hold LEFT 4
+press L1
+sleep 2
+press L1
+sleep 2
+hold UP 6
+hold RIGHT 6
+hold DOWN 10
+repeat 12 CROSS 0.3
+hold LEFT 10
+repeat 12 CROSS 0.3
+hold UP 10

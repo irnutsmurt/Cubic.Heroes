@@ -1,0 +1,70 @@
+# Several minutes of play from a save (SAVES=...): walking in every
+# direction, the menu and the map opened and closed, guarding, and the sword
+# swung into the scenery (cut grass and trees throw voxel debris). For cache
+# and frame-pacing soaks (RSX_GEOM_CACHE_STATS=1, PS3_FTRACE=...).
+log TitleMovie 120
+sleep 5
+press START                 # "PRESS START BUTTON"
+sleep 3
+press START                 # main menu: CONTINUE
+change
+sleep 3
+press CROSS                 # "Change characters?" NO
+change
+sleep 12
+shot start
+# -- round 1: walk, swing, menu, map
+hold DOWN 3
+repeat 8 CROSS 0.4          # sword
+hold LEFT 4
+repeat 8 CROSS 0.4
+shot swing
+press TRIANGLE              # menu
+sleep 2
+shot menu
+press RIGHT
+sleep 1
+press DOWN
+sleep 1
+press TRIANGLE              # close
+sleep 2
+press L1                    # map
+sleep 2
+shot map
+press L1
+sleep 2
+hold R1 2                   # guard
+hold UP 6
+repeat 6 CROSS 0.4
+hold RIGHT 6
+# -- round 2: further out and back
+hold DOWN 8
+repeat 10 CROSS 0.3
+shot far
+hold RIGHT 5
+repeat 10 CROSS 0.3
+hold UP 4
+press TRIANGLE
+sleep 2
+press TRIANGLE
+sleep 2
+hold LEFT 8
+repeat 10 CROSS 0.3
+shot back
+hold UP 6
+# -- round 3: the same loop again, so the first round's geometry is drawn again
+hold DOWN 3
+repeat 8 CROSS 0.4
+hold LEFT 4
+press L1
+sleep 2
+press L1
+sleep 2
+hold UP 6
+hold RIGHT 6
+hold DOWN 10
+repeat 12 CROSS 0.3
+hold LEFT 10
+repeat 12 CROSS 0.3
+hold UP 10
+shot end

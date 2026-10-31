@@ -109,7 +109,7 @@ def main():
         "PAD_FILE": os.path.join(RUN, "pad.txt"),
         "SDL_AUDIODRIVER": "dummy",
         "DIAG_CRASH_DIR": os.path.join(RUN, "diag"),
-        "DIAG_HANG_EXIT": "1",
+        "DIAG_HANG_EXIT": env.get("DIAG_HANG_EXIT", "1"),
         "DIAG_BOOT_SECS": env.get("DIAG_BOOT_SECS", "60"),
     })
     if window:

@@ -1,0 +1,186 @@
+From 226523f1f1cdcf9226e9731e12065590c284badf Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Fri, 30 Oct 2026 17:50:06 -0700
+Subject: [PATCH 43/43] cellGcmSys: a wrapped ring ends at the walker until it
+ gets there
+
+_cellGcmSetFlipCommand wraps a runtime-owned ring back to begin once less
+than 256 KB are left after the flip, which it took to be safe when the
+walker had read 128 KB past begin. But the title then writes its whole
+next frame from begin before it waits on a flip again, and the walker may
+still be at the start of the frame just flipped. 3D Dot Game Heroes writes
+~0.9 MB frames into a 2 MB ring: a frame larger than the one two before it
+wrote over the head of the frame the walker had not read yet. The walker
+decoded the new words as commands -- a CALL into the ring with no RET, a
+JUMP to an unmapped offset -- circled past the flip, resynced to put, and
+the title waited for that flip forever. With the walker slowed down
+(RSX_GEOM_CACHE_CHECK) every run froze within two minutes.
+
+Now the wrap lowers the context's `end` to the walker's position. If the
+title gets there, its own reserve calls the buffer-full callback, which
+waits until the walker has moved on and raises `end` again -- to the
+ring's own once the walker has followed the jump into the new lap. It is
+the wait the SDK's default callback does for each segment it hands out; a
+title the walker stays ahead of never waits. While a limit stands, the
+drain-side recycle leaves the ring alone and the backlog estimate uses the
+ring's own end.
+
+With the walker slowed by RSX_GEOM_CACHE_CHECK, nine runs of 160-240 s:
+no freeze, no resync (before, 5 of ~12 froze within two minutes); the
+title caught up with the walker about once a run and waited 4-17 ms. At
+full speed it never had to wait (two five-minute soaks), and frame times
+are unchanged: 59.5 fps, p99 21.7 ms against 21.2 ms without the change
+on the same drive.
+---
+ libs/video/cellGcmSys.c | 93 +++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 89 insertions(+), 4 deletions(-)
+
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index 808c20a..b0c7201 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -1090,6 +1090,17 @@ static volatile u32 s_fifo_back_jumps = 0;
+  * what the drain's own overrun recycle looks for; firing that under the
+  * callback teleports get to begin and drops the tail the callback is waiting on. */
+ static volatile int s_fifo_recycle_waiting = 0;
++/* While the title writes a new lap of its ring with the walker still reading
++ * the lap before, its context's `end` is lowered to the walker's position
++ * (s_ring_limit_end), so that the title's own buffer-full check stops it there
++ * instead of letting it write over commands the walker has not read. The
++ * callback then waits for the walker to move on and raises `end` again, up to
++ * s_ring_real_end once the walker is in the new lap -- the wait the SDK's
++ * default callback does for each segment it hands out. 0 = no limit. */
++static u32 s_ring_limit_end, s_ring_real_end, s_ring_limit_jumps;
++/* Room the title gets back each time it reaches the limit: more than any
++ * single reserve, and the flip's own GCM_RECYCLE_SLACK. */
++#define GCM_RING_LIMIT_ROOM 0x10000u
+ 
+ /* Bytes the walker is behind the writer. Linear while put >= get. Once the
+  * title's ring wraps, put sits BEHIND get and the backlog is the rest of the
+@@ -1101,7 +1112,9 @@ static u32 gcm_fifo_backlog(u32 put, u32 get)
+     if (put >= get) return put - get;
+     if (!s_gcm_context_ea) return 0;
+     u32 b = gcm_ea2io(vm_read32(s_gcm_context_ea + 0x0));
+-    u32 e = gcm_ea2io(vm_read32(s_gcm_context_ea + 0x4));
++    u32 e = vm_read32(s_gcm_context_ea + 0x4);
++    if (s_ring_limit_end && e == s_ring_limit_end) e = s_ring_real_end;   /* the ring's own end */
++    e = gcm_ea2io(e);
+     if (b == 0xFFFFFFFFu || e == 0xFFFFFFFFu || e <= b) return 0;
+     if (get < b || get > e || put < b || put > e) return 0;
+     return (e - get) + (put - b);
+@@ -2997,6 +3010,9 @@ static void gcm_rsx_process_fifo_unlocked(void)
+          * and near-end recycling is enabled from then on. */
+         static int s_title_overran = 0;
+         if (s_fifo_recycle_waiting) head_consumed = 0;   /* its callback is recycling */
++        /* `end` is the walker's position, not the ring's: being near it is the
++         * title catching up with the walker, which its callback handles. */
++        else if (s_ring_limit_end) head_consumed = 0;
+         else if (begin && end > begin && cur >= end) { head_consumed = 1; s_title_overran = 1; }
+         if (begin && end > begin && cur >= begin && cur + GCM_RECYCLE_SLACK >= end
+                 && head_consumed && s_title_overran) {
+@@ -3057,9 +3073,59 @@ static u32 gcm_ea2io(u32 ea)
+     return ((u32)io_page << 20) | (ea & 0xFFFFFu);
+ }
+ 
++/* Raise a limited ring's `end`: to the ring's own once the walker has
++ * followed the title into the new lap, else up to the walker. With `need`,
++ * wait until the title has that much room, as long as the walker keeps
++ * moving (2 s without progress, or 60 s in all, hands the title the rest of
++ * the ring: the trade the full recycle below makes). Guest thread only. */
++static void gcm_ring_limit_raise(u32 ctx_ea, u32 need)
++{
++    const u32 begin = vm_read32(ctx_ea + 0x0), cur = vm_read32(ctx_ea + 0x8);
++    const u32 io_begin = gcm_ea2io(begin), io_cur = gcm_ea2io(cur);
++    const u32 io_end = io_begin + (s_ring_real_end - begin);
++    u32 last = s_fifo_getoff;
++    int idle = 0, spins = 0;
++    if (need) s_fifo_recycle_waiting = 1;
++    for (;;) {
++        const u32 g = s_fifo_getoff;
++        /* Behind the title's write head: the walker took the jump into this
++         * lap. Level with it, it is in this lap only if it has jumped back
++         * since the wrap; else the title has written right up to it. */
++        if (g >= io_begin && (g < io_cur || (g == io_cur && s_fifo_back_jumps != s_ring_limit_jumps))) {
++            vm_write32(ctx_ea + 0x4, s_ring_real_end); s_ring_limit_end = 0; break; }
++        if (g >= io_cur && g < io_end) {
++            const u32 lim = begin + (g - io_begin);
++            if (lim > s_ring_limit_end) { vm_write32(ctx_ea + 0x4, lim); s_ring_limit_end = lim; }
++            if (g - io_cur >= need) break;
++        }
++        if (!need) break;
++        if (idle >= 2000 || spins >= 60000) {
++            static int n = 0;
++            if (PS3_LOG_FIRST(n, 4))
++                fprintf(stderr, "[cellGcmSys] ring limit: walker stalled at 0x%08X, title at 0x%08X\n", g, io_cur);
++            vm_write32(ctx_ea + 0x4, s_ring_real_end); s_ring_limit_end = 0; break;
++        }
++        Sleep(1); spins++;
++        if (s_fifo_getoff != last) { last = s_fifo_getoff; idle = 0; } else idle++;
++    }
++    s_fifo_recycle_waiting = 0;
++    if (spins) {
++        static unsigned waits, ms;
++        waits++; ms += (unsigned)spins;
++        if (waits <= 4 || waits % 500 == 0)
++            fprintf(stderr, "[cellGcmSys] ring limit: the title caught up with the walker "
++                    "(%u times, %u ms waited in all)\n", waits, ms);
++    }
++}
++
+ void cellGcm_fifo_recycle(u32 ctx_ea)
+ {
+     if (!ctx_ea) return;
++    /* The title reached the walker, not the end of its ring. */
++    if (s_ring_limit_end && vm_read32(ctx_ea + 0x4) == s_ring_limit_end) {
++        gcm_ring_limit_raise(ctx_ea, GCM_RING_LIMIT_ROOM);
++        return;
++    }
+     u32 begin   = vm_read32(ctx_ea + 0x0);
+     u32 current = vm_read32(ctx_ea + 0x8);
+     if (current <= begin) return;                       /* nothing to recycle */
+@@ -3304,7 +3370,14 @@ static int gcm_flip_into_fifo(u32 ctx, u32 bufferId)
+ {
+     if (!ctx || bufferId >= CELL_GCM_MAX_DISPLAY_BUFFER_NUM ||
+         !s_display_buffer_set[bufferId]) return 0;
+-    const u32 end = vm_read32(ctx + 4), cur = vm_read32(ctx + 8);
++    u32 end = vm_read32(ctx + 4);
++    const u32 cur = vm_read32(ctx + 8);
++    /* `end` lowered to the walker (see s_ring_limit_end): raise it as far as
++     * the walker now allows, and wait for room for the flip if there is none. */
++    if (s_ring_limit_end && end == s_ring_limit_end) {
++        gcm_ring_limit_raise(ctx, cur + 8 + GCM_RECYCLE_SLACK > end ? 8 + GCM_RECYCLE_SLACK : 0);
++        end = vm_read32(ctx + 4);
++    }
+     /* Never near the end: those bytes are the title's reserve before its
+      * ring wraps, and the recycle above keys on them. */
+     if (cur + 8 + GCM_RECYCLE_SLACK > end || gcm_ea2io(cur) == 0xFFFFFFFFu) return 0;
+@@ -3325,12 +3398,24 @@ static int gcm_flip_into_fifo(u32 ctx, u32 bufferId)
+      * moves down as it allocates from the top, so it always looks nearly full.
+      * Rewinding it to `begin` in mid-frame cut the frame short, dropping the
+      * fence release in its tail, and the title then waited for it forever. */
++    /* "Well behind" is only where the walker is now: the title writes its
++     * whole next frame from `begin` before it waits on a flip again, and with
++     * frames near half the ring (3D Dot Game Heroes: ~0.9 MB of 2 MB) that
++     * caught up with a walker still at the start of this frame, wrote over
++     * commands it had not read, and the walker, decoding them, ran past the
++     * flip the title then waited for forever. So the new lap ends at the
++     * walker (s_ring_limit_end) until it gets there. */
+     const u32 begin = vm_read32(ctx), io_begin = gcm_ea2io(begin);
+     const u32 cb_opd = vm_read32(ctx + 0xC);
+     const int runtime_ring = cb_opd && vm_read32(cb_opd) == GCM_FIFO_CALLBACK_SENTINEL_EA;
+-    if (runtime_ring && end - (cur + 4) < GCM_FLIP_WRAP_BYTES && io_begin != 0xFFFFFFFFu &&
+-        s_fifo_getoff >= io_begin + GCM_RECYCLE_MARGIN) {
++    const u32 g = s_fifo_getoff;
++    if (runtime_ring && !s_ring_limit_end && end - (cur + 4) < GCM_FLIP_WRAP_BYTES &&
++        io_begin != 0xFFFFFFFFu && g >= io_begin + GCM_RECYCLE_MARGIN && g <= gcm_ea2io(cur)) {
+         vm_write32(cur + 4, 0x20000000u | io_begin);   /* JUMP -> begin */
++        s_ring_real_end = end;
++        s_ring_limit_jumps = s_fifo_back_jumps;
++        s_ring_limit_end = begin + (g - io_begin);
++        vm_write32(ctx + 4, s_ring_limit_end);
+         vm_write32(ctx + 8, begin);
+         return 1;
+     }
+-- 
+2.56.0.windows.3
+

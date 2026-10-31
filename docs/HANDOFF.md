@@ -90,18 +90,69 @@ vblank pacing was fixed (patch 0034).
     (vm_watch is VEH-based; Linux needs the mprotect/SIGSEGV twin).
     GetWriteWatch was tried first and dropped: ~7 us a call, polled per FIFO
     pass it cost more than it saved.
+  - **Admission and eviction** (patch 0041). The keys that kept arriving
+    were not UI or particles: the post-processing quads (tone map, bloom
+    and blur chain) draw from a streaming vertex ring at 0x01A00000 whose
+    offset moves every draw (`tests/geom_newkeys.py` on an
+    RSX_GEOM_CACHE_LOG run). Their unwatchable pages left a placeholder per
+    key, which filled the table and forced full resets. Now: no
+    placeholder; an entry is admitted on its second sighting through a
+    fixed 4096-key filter; out of room, the entries drawn longest ago go
+    (never one drawn in the last 2 s), their GPU blocks reused once the
+    GPU is idle (power-of-two blocks, deferred free); still no room, new
+    entries pause 30 frames instead of retrying every draw. Five-minute
+    soaks (tests/scripts/soak_timing.drive: walking, menu, map, guard,
+    sword): ~1,300 entries / 76 MB, flat after the first minute, no
+    eviction needed, 60.0 fps, p99 21 ms, 2 frames over 25 ms in 15,000.
+    Forced small (RSX_GEOM_CACHE_MAX_ENTRIES, RSX_GEOM_ARENA_CHUNKS), it
+    evicts old entries and keeps the scene in view: 1100 entries / 128 MB
+    still gives 88% resident and p99 21 ms.
+  - Found on the way: crossing into another field area stalls the game for
+    ~1.2-2.6 s (the main thread busy loading; the same with the cache off).
+    Compare with RPCS3 or hardware before treating it as a bug.
+  - Also found: in 1 of 3 five-minute soaks, 30 s at ~33 fps during the
+    menu/map part. The title called cellSpursCreateTask ~630 times a
+    second (lr 0x955d74), SPU images 5 and 4 ran ~830 async jobs a second,
+    each on a newly spawned host thread, and the draw engine created ~2
+    colour targets a frame, each with a blocking GPU submit-and-wait
+    (vk_eng_color_target_create). The other two runs passed the same menu
+    with none of it. Not yet explained; the thread per SPU job is
+    scaffolding to replace either way.
   - **The vblank on its own clock** (`port/main.cpp` vblank_clock): the game
     paces every frame by the vblank count, which the walker used to tick from
     a GetTickCount64 loop (16 ms steps, delayed by drains and presents, then
     fired twice to catch up): ~7% of frames took two vblanks. Now a monotonic
-    clock ticks it within a fraction of a ms.
+    clock ticks it within a fraction of a ms, and completes the flips the
+    walker has reached.
+  - **A freeze that needed a slow walker** (patch 0043). After a flip the
+    runtime wraps the title's 2 MB command ring back to its start once
+    little is left, and the title writes its whole next frame (~0.9 MB)
+    from there before it waits on a flip again. With the walker still at
+    the start of the frame just flipped, a frame larger than the one two
+    before it wrote over commands the walker had not read; the walker
+    decoded them (a CALL into the ring with no RET, a JUMP to an unmapped
+    offset), circled past the flip and resynced to put, and the title
+    waited for that flip forever. With the walker slowed by
+    RSX_GEOM_CACHE_CHECK, 5 of ~12 runs froze within two minutes (all 6
+    with flips completed on the walker instead, tried first as the
+    suspected cause); at normal speed the race is only rarer. Now the new
+    lap ends at the walker until it gets there (the title's buffer-full
+    callback waits for it): 9 check-mode runs of 160-240 s, no freeze or
+    resync, the title waiting 4-17 ms about once a run; at full speed it
+    never waits, and frame times are unchanged (59.5 fps, p99 21.7 ms
+    against 21.2 without it, same drive). Traced with
+    GCM_FLIP_RING=1 (patch 0042): the flip handshake and the walker's own
+    path (passes, JUMP/CALL/RET, flip markers, resyncs), dumped when a flip
+    stays WAITING.
 - Before (for the record): the FIFO walker set the frame, drain 15.2 ms
   (~9.4 ms of it re-reading, re-hashing and re-copying static vertex data:
   the vertex cache saw ~100% hits and 0 changes, 491 blocks, 58 MB) plus
   3.7 ms waiting at the flip for the previous present.
 - **Still emulation scaffolding** (to replace, not to keep): the RSX command
   stream walked and translated to Vulkan (draw engine), the walker's 1 ms
-  FIFO poll, the present path (full-frame readback; present_mu held across
+  FIFO poll, the command ring's wrap/recycle/resync rules (the ring limit
+  of patch 0043 included: it keeps the emulated ring honest, nothing
+  more), the present path (full-frame readback; present_mu held across
   the GPU fence: the walker still waits ~3 ms a frame there), the emulated
   vblank counter the game paces by, SPU code run inside the SPURS/lv2 HLE.
   Native and meant to stay: resident geometry, vm_watch, the vblank clock.
@@ -235,9 +286,8 @@ tooling, the native Windows build, measuring on the 3070) are done; see
      (cellSpurs task save/exit path, libs/spurs) has completed. Long play
      sessions are the test.
 7. Open issues: a flat beige quad over the castle path at ~180 s of
-   `intro.drive` (pre-existing, both present modes); remaining walker cost
-   (vertex data could stay in GPU buffers instead of being copied each
-   frame); save/load untested; debug console and golden boot log (M2).
+   `intro.drive` (pre-existing, both present modes); save/load untested;
+   debug console and golden boot log (M2).
 
 ## Diagnostics and switches (environment variables)
 
@@ -250,6 +300,11 @@ tooling, the native Windows build, measuring on the 3070) are done; see
 | `VK_WAIT_STATS=1`, `VK_GPU_TIME=1` | CPU waits on the GPU by call site; GPU time per 5 s |
 | `VK_DRAW_BATCH` (default on), `VK_DRAW_BATCH_MAX` | draw batching (4096 per submission) |
 | `RSX_VERTEX_CACHE=0`, `RSX_VERTEX_CACHE_STATS=1` | the cross-frame vertex cache |
+| `RSX_GEOM_CACHE=0`, `RSX_GEOM_CACHE_STATS=1` | resident geometry off; its counters every 5 s |
+| `RSX_GEOM_CACHE_CHECK=1` | rebuild every resident hit and compare (slow; reports missed writes) |
+| `RSX_GEOM_CACHE_LOG=<n>` | the first n new keys, for `tests/geom_newkeys.py` |
+| `RSX_GEOM_CACHE_MAX_ENTRIES`, `RSX_GEOM_ARENA_CHUNKS` | cap the table / the 64 MB GPU chunks (eviction tests) |
+| `GCM_FLIP_RING=1` | flip-event and walker-path recorders, dumped when a flip stays WAITING |
 | `PS3RECOMP_VK_SYNC_PRESENT=1` | old blocking present (A/B) |
 | `PS3RECOMP_VK_WINDOW`, `PS3RECOMP_VK_FULLSCREEN` | window; fullscreen |
 | `PS3RECOMP_VK_DUMP=<ppm>`, `PS3RECOMP_VK_DUMP_EVERY=<n>` | frame dumps (tests) |

@@ -1,0 +1,580 @@
+From 1d5c3216e4f74b8e94e2c8f33fb6e1527e94d057 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Fri, 30 Oct 2026 17:49:45 -0700
+Subject: [PATCH 41/43] Resident geometry: admit on the second sighting, evict
+ the oldest
+
+The entry table filled and reset itself (every entry dropped, the whole
+scene rebuilt) every ~25 s of play. The keys that kept arriving were
+post-processing quads (tone map, bloom and blur chain) drawn from a
+streaming vertex ring whose offset moves on every draw: a new key each
+time, about 1,000 before the ring wraps, on pages written too often to
+watch, and each left a "dynamic" placeholder behind.
+
+- No placeholder for a draw whose memory cannot be watched; the attempt
+  fails fast next time (vm_watch knows the page).
+- Admission: an entry is made on a key's second sighting. First
+  sightings live in a fixed direct-mapped filter (ENG_GEOM_SEEN, 4096
+  keys), so one-off keys never take a slot or GPU memory.
+- Eviction instead of a reset: out of slots or GPU memory, the entries
+  drawn longest ago go, a quarter at a time, never one drawn in the last
+  ENG_GEOM_MIN_AGE (120) frames; still no room, new entries wait
+  ENG_GEOM_NOROOM_WAIT frames rather than retrying every draw. Erase is
+  backward-shift deletion; a rebuilt or retired entry gives its GPU
+  memory back.
+- Backend: geom_reset becomes geom_release. The Vulkan arena hands out
+  power-of-two blocks from 256 bytes; a released block waits until an
+  allocation that finds no room has waited for the GPU, then serves any
+  request its size or smaller. Handles are recycled.
+- RSX_GEOM_CACHE_STATS reports admissions, first sightings, evictions,
+  no-room, entries and MB; RSX_GEOM_CACHE_LOG=<n> logs the draws that make
+  entries with every part of their key; RSX_GEOM_CACHE_MAX_ENTRIES and
+  RSX_GEOM_ARENA_CHUNKS shrink the cache to test eviction.
+
+Five-minute soaks (walking, menu, map, guard, sword): the table levels
+off at ~1,200-1,450 entries / 73-76 MB, 86-88% of draws resident, no
+eviction or reset needed; 59.5-60 fps, p99 21-22 ms. Shrunk to 1,100
+entries / 128 MB it evicts old entries and keeps 88% of draws resident.
+The check mode found no missed write in nine runs.
+---
+ libs/video/rsx_draw_engine.c    | 221 ++++++++++++++++++++++++++------
+ libs/video/rsx_draw_engine.h    |  10 +-
+ libs/video/rsx_vulkan_backend.c | 138 ++++++++++++++------
+ 3 files changed, 285 insertions(+), 84 deletions(-)
+
+diff --git a/libs/video/rsx_draw_engine.c b/libs/video/rsx_draw_engine.c
+index c475e82..b4eddf9 100644
+--- a/libs/video/rsx_draw_engine.c
++++ b/libs/video/rsx_draw_engine.c
+@@ -2462,17 +2462,37 @@ static void dc_fetch(const rsx_vertex_layout_plan* layout, int allow_remap)
+  * RSX_GEOM_CACHE_CHECK=1 rebuilds every hit as well and compares (slow: it
+  * proves the write tracking misses nothing). Windows only for now: it needs
+  * vm_watch_available(). */
+-#define ENG_GEOM_SLOTS     8192u                 /* power of two */
++#define ENG_GEOM_SLOTS     8192u                 /* power of two; at most half are used */
+ #define ENG_GEOM_MAX_BYTES (16u << 20)           /* larger draws keep the copy path */
+ 
+ /* Rebuilt this often after writes, a draw's geometry is the title's dynamic
+  * kind (rewritten every frame or so): it stays on the copy path, unwatched. */
+ #define ENG_GEOM_DYNAMIC 4u
+ 
++/* Admission. A draw becomes an entry on its second sighting, so a key seen
++ * once never takes a slot or GPU memory: 3D Dot Game Heroes draws its
++ * post-processing quads out of a streaming vertex ring whose offset moves on
++ * every draw, a new key each time (about 1,000 of them before the ring
++ * wraps). The first sightings live in a fixed direct-mapped filter: one it
++ * forgets is merely first-seen again. */
++#define ENG_GEOM_SEEN      4096u                 /* power of two */
++
++/* Eviction. Out of slots or GPU memory, the entries drawn longest ago go, a
++ * quarter of them at a time, and never one drawn in the last
++ * ENG_GEOM_MIN_AGE frames: those are the scene in front of the player. */
++#define ENG_GEOM_MIN_AGE   120u
++
++/* Out of room even after evicting, new entries wait this many frames: the
++ * scene in view does not fit, and retrying every draw would scan the table
++ * and wait for the GPU over and over for nothing. */
++#define ENG_GEOM_NOROOM_WAIT 30u
++
+ typedef struct {
+     u64 key;
+     u32 geom;                  /* backend handle; 0 for a dynamic draw */
+     u32 n_verts, n_draw;
++    u32 last_use;              /* g.frames when last drawn or seen */
++    u32 bytes;                 /* GPU bytes it holds */
+     u8  used, dynamic;
+     u16 rebuilds;
+     u8  indexed, n_ranges;
+@@ -2483,8 +2503,12 @@ typedef struct {
+ 
+ static eng_geom* s_geom;
+ static u32 s_geom_live;
+-static struct { int on, stats, check; double t0;
+-                unsigned long long look, hit, rebuilt, fresh, skip, missed, resets, dyn; } s_gs = { -1 };
++static u64 s_geom_bytes;
++static u64 s_geom_seen[ENG_GEOM_SEEN];
++static u32 s_geom_noroom_until;               /* g.frames: no new entries before */
++static struct { int on, stats, check; double t0; u32 max_live;
++                unsigned long long look, hit, rebuilt, admitted, first, skip, missed, dyn, unwatched,
++                                   evicted, noroom; } s_gs = { -1 };
+ 
+ static int eng_geom_on(void)
+ {
+@@ -2492,8 +2516,13 @@ static int eng_geom_on(void)
+         const char* e = getenv("RSX_GEOM_CACHE");
+         s_gs.stats = getenv("RSX_GEOM_CACHE_STATS") != NULL;
+         s_gs.check = getenv("RSX_GEOM_CACHE_CHECK") != NULL;
+-        s_gs.on = !(e && *e == '0') && g.be->geom_create && g.be->geom_reset && g.be->draw_geom &&
++        s_gs.on = !(e && *e == '0') && g.be->geom_create && g.be->geom_release && g.be->draw_geom &&
+                   vm_watch_available();
++        /* RSX_GEOM_CACHE_MAX_ENTRIES=<n>: a smaller table, so a test run
++         * fills it and exercises eviction. */
++        const char* m = getenv("RSX_GEOM_CACHE_MAX_ENTRIES");
++        s_gs.max_live = ENG_GEOM_SLOTS / 2u;
++        if (m && atoi(m) > 0 && (u32)atoi(m) < s_gs.max_live) s_gs.max_live = (u32)atoi(m);
+         if (s_gs.on && !(s_geom = (eng_geom*)calloc(ENG_GEOM_SLOTS, sizeof *s_geom))) s_gs.on = 0;
+         if (s_gs.stats)
+             fprintf(stderr, "[geom] resident geometry %s\n", s_gs.on ? "on"
+@@ -2509,13 +2538,15 @@ static void eng_geom_report(void)
+     const double now = ts.tv_sec + ts.tv_nsec * 1e-9;
+     if (!s_gs.t0) s_gs.t0 = now;
+     if (now - s_gs.t0 < 5.0) return;
+-    fprintf(stderr, "[geom] %.1f s: %llu draws, %llu resident, %llu rebuilt after a write, %llu new, "
+-            "%llu dynamic, %llu too big; %u entries, %llu resets; not kept: %llu ranges, "
+-            "%llu unwatched, %llu unstable, %llu index%s\n", now - s_gs.t0, s_gs.look, s_gs.hit,
+-            s_gs.rebuilt, s_gs.fresh, s_gs.dyn, s_gs.skip, s_geom_live, s_gs.resets, s_geom_why[0],
+-            s_geom_why[1], s_geom_why[2], s_geom_why[3],
++    fprintf(stderr, "[geom] %.1f s: %llu draws: %llu resident, %llu admitted, %llu first-seen, "
++            "%llu rebuilt after a write, %llu dynamic, %llu unwatchable, %llu too big; %llu evicted, "
++            "%llu no room; %u entries, %.1f MB (not watched: %llu ranges, %llu pages, %llu unstable, "
++            "%llu index)%s\n", now - s_gs.t0, s_gs.look, s_gs.hit, s_gs.admitted, s_gs.first,
++            s_gs.rebuilt, s_gs.dyn, s_gs.unwatched, s_gs.skip, s_gs.evicted, s_gs.noroom, s_geom_live,
++            s_geom_bytes / 1048576.0, s_geom_why[0], s_geom_why[1], s_geom_why[2], s_geom_why[3],
+             s_gs.check ? (s_gs.missed ? " -- CHECK: MISSED WRITES" : " (check: no misses)") : "");
+-    s_gs.look = s_gs.hit = s_gs.rebuilt = s_gs.fresh = s_gs.skip = s_gs.dyn = 0;
++    s_gs.look = s_gs.hit = s_gs.rebuilt = s_gs.admitted = s_gs.first = s_gs.skip = s_gs.dyn = 0;
++    s_gs.unwatched = s_gs.evicted = s_gs.noroom = 0;
+     memset(s_geom_why, 0, sizeof s_geom_why);
+     s_gs.t0 = now;
+ }
+@@ -2577,15 +2608,66 @@ static int eng_geom_valid(eng_geom* e)
+     return 1;
+ }
+ 
+-/* Every entry dropped and the backend's memory reused. What this draw just
+- * watched is forgotten with the rest, so its caller does not store it. */
+-static void eng_geom_flush(void)
++/* Give an entry's GPU memory back (the backend reuses it once the GPU is done
++ * with it). */
++static void eng_geom_drop_gpu(eng_geom* e)
++{
++    if (e->geom) g.be->geom_release(g.be->user, e->geom);
++    s_geom_bytes -= e->bytes;
++    e->geom = 0;
++    e->bytes = 0;
++}
++
++/* Remove one entry. Linear probing: the entries after it in its cluster that
++ * could live earlier move back, so every lookup still finds its key. */
++static void eng_geom_erase(eng_geom* e)
++{
++    const u32 mask = ENG_GEOM_SLOTS - 1u;
++    eng_geom_drop_gpu(e);
++    u32 i = (u32)(e - s_geom), j = i;
++    for (;;) {
++        j = (j + 1u) & mask;
++        if (!s_geom[j].used) break;
++        const u32 home = (u32)s_geom[j].key & mask;
++        /* j may move to the hole at i unless its home lies cyclically in (i, j]. */
++        const int stays = i <= j ? (home > i && home <= j) : (home > i || home <= j);
++        if (!stays) { s_geom[i] = s_geom[j]; i = j; }
++    }
++    memset(&s_geom[i], 0, sizeof s_geom[i]);
++    s_geom_live--;
++}
++
++static int eng_geom_age_cmp(const void* a, const void* b)
+ {
+-    g.be->geom_reset(g.be->user);
+-    memset(s_geom, 0, ENG_GEOM_SLOTS * sizeof *s_geom);
+-    s_geom_live = 0;
+-    vm_watch_reset();
+-    s_gs.resets++;
++    const u32 x = ((const u32*)a)[0], y = ((const u32*)b)[0];
++    return x < y ? 1 : x > y ? -1 : 0;                  /* oldest first */
++}
++
++/* Room by dropping the entries drawn longest ago (see ENG_GEOM_MIN_AGE).
++ * Returns how many went; 0 when everything is in use. */
++static u32 eng_geom_evict(void)
++{
++    u32 (*c)[2] = (u32 (*)[2])malloc((size_t)s_geom_live * sizeof *c);   /* age, key's slot */
++    u64* keys = (u64*)malloc((size_t)s_geom_live * sizeof *keys);
++    if (!c || !keys) { free(c); free(keys); return 0; }
++    u32 n = 0;
++    for (u32 i = 0; i < ENG_GEOM_SLOTS; i++)
++        if (s_geom[i].used && g.frames - s_geom[i].last_use >= ENG_GEOM_MIN_AGE) {
++            c[n][0] = g.frames - s_geom[i].last_use;
++            c[n][1] = i;
++            n++;
++        }
++    qsort(c, n, sizeof *c, eng_geom_age_cmp);
++    const u32 take = n < s_geom_live / 4u + 1u ? n : s_geom_live / 4u + 1u;
++    for (u32 k = 0; k < take; k++) keys[k] = s_geom[c[k][1]].key;   /* erasing moves entries */
++    for (u32 k = 0; k < take; k++) {
++        eng_geom* e = eng_geom_slot(keys[k]);
++        if (e->used && e->key == keys[k]) eng_geom_erase(e);
++    }
++    free(c);
++    free(keys);
++    s_gs.evicted += take;
++    return take;
+ }
+ 
+ static u64 eng_geom_hash(const void* verts, u64 vbytes, const u32* idx, u32 n_idx)
+@@ -2596,20 +2678,33 @@ static u64 eng_geom_hash(const void* verts, u64 vbytes, const u32* idx, u32 n_id
+     return idx ? eng_fnv1a(idx, n_idx * 4u, h) : h;
+ }
+ 
+-/* A draw whose memory cannot be watched (too many ranges, a page written over
+- * and over): remembered as dynamic, so its next draws skip the attempt. */
+-static void eng_geom_mark_dynamic(u64 key)
+-{
+-    eng_geom* e = eng_geom_slot(key);
+-    if (!e->used) {
+-        if (s_geom_live + 1u > ENG_GEOM_SLOTS / 2u) return;
+-        s_geom_live++;
+-        e->rebuilds = 0;
++/* RSX_GEOM_CACHE_LOG=<n>: the first n draws that become entries (or dynamic
++ * ones), with everything their key is made of, to find which draws keep
++ * making new keys and which part of the key changes. */
++static void eng_geom_log(const char* what, u64 key, u32 prim, const rsx_vertex_layout_plan* layout,
++                         u32 pipeline, u32 tex0, u32 n_draw)
++{
++    static long left = -1;
++    if (left < 0) { const char* e = getenv("RSX_GEOM_CACHE_LOG"); left = e ? atol(e) : 0; }
++    if (!left) return;
++    left--;
++    fprintf(stderr, "[geom-new] f%u %s k%016llx prim %u pipe %u tex0 %u nv %u nd %u arr", g.frames, what,
++            (unsigned long long)key, prim, pipeline, tex0, dc.n_verts, n_draw);
++    for (u32 b = 0; b < dc.n_arr; b++) fprintf(stderr, " %u+%u", dc.arr[b].first, dc.arr[b].count);
++    fprintf(stderr, " idx");
++    for (u32 b = 0; b < dc.n_idx; b++) fprintf(stderr, " %u+%u", dc.idx[b].first, dc.idx[b].count);
++    if (dc.n_idx) {
++        rsx_dsp_index_array ia;
++        rsx_dsp_get_index_array(&g.rsx, &ia);
++        fprintf(stderr, " ia %u:%08X/%u", ia.location, ia.offset, (u32)ia.is_u32);
+     }
+-    e->used = 1;
+-    e->dynamic = 1;
+-    e->key = key;
+-    e->geom = 0;
++    fprintf(stderr, " bo %08X bi %u", rsx_dsp_vertex_data_base_offset(&g.rsx), rsx_dsp_vertex_data_base_index(&g.rsx));
++    for (u32 s = 0; s < layout->count; s++) {
++        rsx_dsp_vertex_attr d;
++        rsx_dsp_get_vertex_attr(&g.rsx, layout->attrs[s], &d);
++        fprintf(stderr, " a%u=%u:%08X/%u/%u.%u", layout->attrs[s], d.location, d.offset, d.stride, d.type, d.size);
++    }
++    fputc('\n', stderr);
+ }
+ 
+ /* Upload what dc_fetch and the rebuild produced and remember it. Returns the
+@@ -2619,14 +2714,36 @@ static u32 eng_geom_store(u64 key, int indexed, u32 n_draw, u32 stride)
+     const u64 vbytes = (u64)dc.n_verts * stride, ibytes = indexed ? (u64)n_draw * 4u : 0;
+     if (vbytes + ibytes > ENG_GEOM_MAX_BYTES) { s_gs.skip++; return 0; }
+     eng_geom* e = eng_geom_slot(key);
+-    if (!e->used && s_geom_live + 1u > ENG_GEOM_SLOTS / 2u) { eng_geom_flush(); return 0; }
+-    const u32 h = g.be->geom_create(g.be->user, dc.vdata, (u32)vbytes,
+-                                    indexed ? g.indices : NULL, indexed ? n_draw : 0);
+-    if (!h) { eng_geom_flush(); return 0; }
++    if (!e->used && s_geom_live + 1u > s_gs.max_live) {
++        if (!eng_geom_evict()) {
++            s_gs.noroom++;
++            s_geom_noroom_until = g.frames + ENG_GEOM_NOROOM_WAIT;
++            return 0;
++        }
++        e = eng_geom_slot(key);
++    }
++    if (e->used) eng_geom_drop_gpu(e);          /* a rebuild: its old upload goes */
++    u32 h = g.be->geom_create(g.be->user, dc.vdata, (u32)vbytes,
++                              indexed ? g.indices : NULL, indexed ? n_draw : 0);
++    if (!h && eng_geom_evict()) {
++        e = eng_geom_slot(key);
++        h = g.be->geom_create(g.be->user, dc.vdata, (u32)vbytes,
++                              indexed ? g.indices : NULL, indexed ? n_draw : 0);
++    }
++    if (!h) {
++        s_gs.noroom++;
++        s_geom_noroom_until = g.frames + ENG_GEOM_NOROOM_WAIT;
++        if (e->used) eng_geom_erase(e);
++        return 0;
++    }
+     if (!e->used) { s_geom_live++; e->rebuilds = 0; }
+     e->used = 1;
+     e->key = key;
+     e->geom = h;
++    e->bytes = (u32)(vbytes + ibytes);
++    e->last_use = g.frames;
++    s_geom_bytes += e->bytes;
++    s_gs.admitted++;
+     e->n_verts = dc.n_verts;
+     e->n_draw = n_draw;
+     e->indexed = (u8)indexed;
+@@ -3382,14 +3499,30 @@ static void sink_end(void* user, const rsx_dispatch* r)
+         gkey = eng_geom_key(prim, &layout);
+         gm = eng_geom_slot(gkey);
+         int watch = 1;
+-        if (!gm->used) { s_gs.fresh++; gm = NULL; }
+-        else if (gm->dynamic) { s_gs.dyn++; gm = NULL; watch = 0; }
+-        else if (!eng_geom_valid(gm)) {
++        if (!gm->used) {
++            /* Admitted on its second sighting (ENG_GEOM_SEEN). */
++            u64* seen = &s_geom_seen[(u32)(gkey >> 32) & (ENG_GEOM_SEEN - 1u)];
++            if (*seen != gkey) { *seen = gkey; s_gs.first++; watch = 0; }
++            else if ((int)(s_geom_noroom_until - g.frames) > 0) watch = 0;   /* full: see NOROOM_WAIT */
++            gm = NULL;
++        } else if (gm->dynamic) {
++            gm->last_use = g.frames;
++            s_gs.dyn++;
++            gm = NULL;
++            watch = 0;
++        } else if (!eng_geom_valid(gm)) {
++            gm->last_use = g.frames;
+             s_gs.rebuilt++;
+-            if (++gm->rebuilds >= ENG_GEOM_DYNAMIC) { gm->dynamic = 1; watch = 0; }
++            if (++gm->rebuilds >= ENG_GEOM_DYNAMIC) {   /* keeps its slot, not its GPU memory */
++                eng_geom_drop_gpu(gm);
++                gm->dynamic = 1;
++                watch = 0;
++            }
+             gm = NULL;
++        } else {
++            gm->last_use = g.frames;
++            s_gs.hit++;
+         }
+-        else s_gs.hit++;
+         dc.geom_watch = gm == NULL && watch;
+     }
+     const int geom_tried = dc.geom_watch;
+@@ -3479,9 +3612,15 @@ static void sink_end(void* user, const rsx_dispatch* r)
+             geom = 0;              /* draw what memory says */
+         }
+     } else if (dc.geom_watch && dc.fetch_ok) {
++        eng_geom_log("store", gkey, prim, &layout, pipeline, textures[0], n_draw);
+         geom = eng_geom_store(gkey, indexed, n_draw, layout.stride);
+     } else if (geom_tried && dc.fetch_ok) {
+-        eng_geom_mark_dynamic(gkey);   /* its memory cannot be watched: stop trying */
++        /* Its memory cannot be watched (a page written over and over, as a
++         * streaming ring's): it stays on the copy path. Nothing is kept, so
++         * a ring's ever-new keys cannot fill the table; the next attempt
++         * fails as fast (vm_watch knows the page). */
++        eng_geom_log("unwatchable", gkey, prim, &layout, pipeline, textures[0], n_draw);
++        s_gs.unwatched++;
+     }
+ 
+     /* The transform constant block, then the viewport epilogue the vertex
+diff --git a/libs/video/rsx_draw_engine.h b/libs/video/rsx_draw_engine.h
+index 3d9ea37..a4cce8b 100644
+--- a/libs/video/rsx_draw_engine.h
++++ b/libs/video/rsx_draw_engine.h
+@@ -228,13 +228,13 @@ typedef struct rsx_draw_backend {
+     /* Optional: geometry kept in GPU memory (the engine's resident geometry,
+      * rsx_draw_engine.c). geom_create stores `vbytes` of vertices, as `draw`
+      * takes them, and `index_count` 32-bit indices (none for a non-indexed
+-     * draw) and returns a handle, 0 when it has no room; geom_reset makes
+-     * every handle invalid once the GPU is done with them. draw_geom is
+-     * `draw` from a handle. A backend leaves all three NULL to have every
+-     * draw's geometry passed in. */
++     * draw) and returns a handle, 0 when it has no room; geom_release gives
++     * a handle back, its memory reused once the GPU is done with every draw
++     * recorded from it. draw_geom is `draw` from a handle. A backend leaves
++     * all three NULL to have every draw's geometry passed in. */
+     u32  (*geom_create)(void* user, const void* vertices, u32 vbytes,
+                         const u32* indices, u32 index_count);
+-    void (*geom_reset)(void* user);
++    void (*geom_release)(void* user, u32 geom);
+     void (*draw_geom)(void* user, rsx_topology topology, u32 geom,
+                       u32 vertex_count, u32 stride, u32 index_count);
+ 
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index 52dcdba..f141e2c 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -3938,22 +3938,31 @@ static VkDescriptorSet vk_eng_write_descriptors_to(const vk_eng_pipe* P, VkDescr
+ /* ---- resident geometry (rsx_draw_backend geom_*) ----------------------------
+  * The engine's resident geometry: a draw's vertices and index list written
+  * once into memory the GPU reads directly, then bound by every later draw of
+- * it instead of copied into the batch ring. A linear arena of up to
+- * VK_GEOM_CHUNKS buffers of VK_GEOM_CHUNK bytes, each in device-local memory
+- * the host can write when the device has some left (the BAR, or all of VRAM
+- * with resizable BAR), else in host memory. The space a rebuilt entry leaves
+- * behind comes back only with geom_reset, which the engine calls once the
+- * arena is full; it waits for the GPU first. */
+-#define VK_GEOM_CHUNK  ((VkDeviceSize)64 << 20)
+-#define VK_GEOM_CHUNKS 6u
+-#define VK_GEOM_MAX    16384u
+-
+-typedef struct { u32 chunk; VkDeviceSize voff, ioff; } vk_geom_ent;
++ * it instead of copied into the batch ring. Up to VK_GEOM_CHUNKS buffers of
++ * VK_GEOM_CHUNK bytes, each in device-local memory the host can write when the
++ * device has some left (the BAR, or all of VRAM with resizable BAR), else in
++ * host memory. Blocks are powers of two from 256 bytes. A released block waits
++ * on a pending list, since draws already recorded may still read it; an
++ * allocation that finds no room waits for the GPU once, and every pending
++ * block then serves any request of its size or smaller. */
++#define VK_GEOM_CHUNK     ((VkDeviceSize)64 << 20)
++#define VK_GEOM_CHUNKS    6u
++#define VK_GEOM_MAX       16384u                 /* live handles */
++#define VK_GEOM_MIN_SHIFT 8u                     /* 256 bytes */
++#define VK_GEOM_CLASSES   19u                    /* 256 bytes .. 64 MB */
++
++typedef struct { u32 chunk; VkDeviceSize off; } vk_geom_block;
++typedef struct { vk_geom_block blk; VkDeviceSize voff, ioff; u8 cls; } vk_geom_ent;
++typedef struct { vk_geom_block* b; u32 n, cap; } vk_geom_list;
+ static struct {
+     vk_buffer chunk[VK_GEOM_CHUNKS];
+-    u32 n_chunks, cur, n_ent;
+-    VkDeviceSize head;
++    u32 n_chunks;
++    VkDeviceSize head;                           /* bump point in the newest chunk */
+     vk_geom_ent ent[VK_GEOM_MAX];
++    u32 n_ent;                                   /* handles ever handed out */
++    u32 free_ent[VK_GEOM_MAX], n_free_ent;       /* handles to hand out again */
++    u32 pending[VK_GEOM_MAX], n_pending;         /* released, the GPU may still read them */
++    vk_geom_list free_blk[VK_GEOM_CLASSES];
+ } s_geom;
+ 
+ static int vk_geom_chunk_create(vk_buffer* b)
+@@ -3989,47 +3998,100 @@ fail:
+     return -1;
+ }
+ 
++static int vk_geom_push(vk_geom_list* l, vk_geom_block b)
++{
++    if (l->n == l->cap) {
++        const u32 cap = l->cap ? l->cap * 2u : 64u;
++        vk_geom_block* nb = (vk_geom_block*)realloc(l->b, cap * sizeof *nb);
++        if (!nb) return -1;
++        l->b = nb;
++        l->cap = cap;
++    }
++    l->b[l->n++] = b;
++    return 0;
++}
++
++/* A block of class `cls` or bigger: the smallest free one, else from the bump
++ * point. Returns the class the block really has, -1 when there is none. */
++static int vk_geom_take(u32 cls, vk_geom_block* out)
++{
++    for (u32 c = cls; c < VK_GEOM_CLASSES; c++)
++        if (s_geom.free_blk[c].n) { *out = s_geom.free_blk[c].b[--s_geom.free_blk[c].n]; return (int)c; }
++    /* RSX_GEOM_ARENA_CHUNKS=<n>: fewer chunks, so a test run fills the arena
++     * and exercises eviction. */
++    static u32 max_chunks;
++    if (!max_chunks) {
++        const char* e = getenv("RSX_GEOM_ARENA_CHUNKS");
++        max_chunks = (e && atoi(e) > 0 && (u32)atoi(e) < VK_GEOM_CHUNKS) ? (u32)atoi(e) : VK_GEOM_CHUNKS;
++    }
++    const VkDeviceSize size = (VkDeviceSize)1 << (cls + VK_GEOM_MIN_SHIFT);
++    if (!s_geom.n_chunks || s_geom.head + size > VK_GEOM_CHUNK) {
++        if (s_geom.n_chunks == max_chunks || vk_geom_chunk_create(&s_geom.chunk[s_geom.n_chunks])) return -1;
++        s_geom.n_chunks++;
++        s_geom.head = 0;
++    }
++    out->chunk = s_geom.n_chunks - 1u;
++    out->off = s_geom.head;
++    s_geom.head += size;
++    return (int)cls;
++}
++
++/* Wait for the GPU, then everything released is free again. */
++static void vk_geom_reclaim(void)
++{
++    if (!s_geom.n_pending) return;
++    vk_eng_flush_sync();              /* no draw recorded so far is still reading */
++    for (u32 i = 0; i < s_geom.n_pending; i++) {
++        const u32 h = s_geom.pending[i];
++        const vk_geom_ent* e = &s_geom.ent[h - 1u];
++        vk_geom_push(&s_geom.free_blk[e->cls], e->blk);
++        s_geom.free_ent[s_geom.n_free_ent++] = h;
++    }
++    s_geom.n_pending = 0;
++}
++
+ static u32 vk_eng_geom_create(void* user, const void* vertices, u32 vbytes, const u32* indices,
+                               u32 index_count)
+ {
+     (void)user;
+-    if (!s_vk.device || !vertices || !vbytes || s_geom.n_ent >= VK_GEOM_MAX) return 0;
++    if (!s_vk.device || !vertices || !vbytes) return 0;
+     const VkDeviceSize vsz = ((VkDeviceSize)vbytes + 255u) & ~(VkDeviceSize)255u;
+     const VkDeviceSize isz = ((VkDeviceSize)index_count * 4u + 255u) & ~(VkDeviceSize)255u;
+     if (vsz + isz > VK_GEOM_CHUNK) return 0;
+-    if (!s_geom.n_chunks || s_geom.head + vsz + isz > VK_GEOM_CHUNK) {
+-        const u32 next = s_geom.n_chunks ? s_geom.cur + 1u : 0u;
+-        if (next >= VK_GEOM_CHUNKS) return 0;
+-        if (next >= s_geom.n_chunks) {
+-            if (vk_geom_chunk_create(&s_geom.chunk[next])) return 0;
+-            s_geom.n_chunks = next + 1u;
+-        }
+-        s_geom.cur = next;
+-        s_geom.head = 0;
++    u32 cls = 0;
++    while (((VkDeviceSize)1 << (cls + VK_GEOM_MIN_SHIFT)) < vsz + isz) cls++;
++    if (!s_geom.n_free_ent && s_geom.n_ent == VK_GEOM_MAX) vk_geom_reclaim();
++    if (!s_geom.n_free_ent && s_geom.n_ent == VK_GEOM_MAX) return 0;
++    vk_geom_block blk;
++    int got = vk_geom_take(cls, &blk);
++    if (got < 0 && s_geom.n_pending) {
++        vk_geom_reclaim();
++        got = vk_geom_take(cls, &blk);
+     }
+-    vk_geom_ent* e = &s_geom.ent[s_geom.n_ent];
+-    u8* base = (u8*)s_geom.chunk[s_geom.cur].ptr;
+-    e->chunk = s_geom.cur;
+-    e->voff = s_geom.head;
+-    e->ioff = s_geom.head + vsz;
++    if (got < 0) return 0;
++    const u32 h = s_geom.n_free_ent ? s_geom.free_ent[--s_geom.n_free_ent] : ++s_geom.n_ent;
++    vk_geom_ent* e = &s_geom.ent[h - 1u];
++    e->blk = blk;
++    e->cls = (u8)got;
++    e->voff = blk.off;
++    e->ioff = blk.off + vsz;
++    u8* base = (u8*)s_geom.chunk[blk.chunk].ptr;
+     memcpy(base + e->voff, vertices, vbytes);
+     if (index_count) memcpy(base + e->ioff, indices, (size_t)index_count * 4u);
+-    s_geom.head += vsz + isz;
+-    return ++s_geom.n_ent;
++    return h;
+ }
+ 
+-static void vk_eng_geom_reset(void* user)
++static void vk_eng_geom_release(void* user, u32 geom)
+ {
+     (void)user;
+-    vk_eng_flush_sync();          /* nothing in flight reads the arena after this */
+-    s_geom.cur = 0;
+-    s_geom.head = 0;
+-    s_geom.n_ent = 0;
++    if (geom && geom <= s_geom.n_ent && s_geom.n_pending < VK_GEOM_MAX)
++        s_geom.pending[s_geom.n_pending++] = geom;
+ }
+ 
+ static void vk_geom_release(void)
+ {
+     for (u32 i = 0; i < s_geom.n_chunks; i++) vk_destroy_buffer(&s_geom.chunk[i]);
++    for (u32 c = 0; c < VK_GEOM_CLASSES; c++) free(s_geom.free_blk[c].b);
+     memset(&s_geom, 0, sizeof s_geom);
+ }
+ 
+@@ -4108,7 +4170,7 @@ static void vk_eng_draw_from(rsx_topology topology, const void* vertices, u32 ve
+     }
+     if (batched) {
+         if (res) {
+-            vbuf = ibuf = s_geom.chunk[res->chunk].buf;
++            vbuf = ibuf = s_geom.chunk[res->blk.chunk].buf;
+             voff = res->voff; ioff = res->ioff;
+         } else {
+             memcpy((u8*)s_eb.vb.ptr + voff, vertices, (size_t)vbytes);
+@@ -4119,7 +4181,7 @@ static void vk_eng_draw_from(rsx_topology topology, const void* vertices, u32 ve
+     } else {
+         vk_eng_flush_sync();
+         if (res) {
+-            vbuf = ibuf = s_geom.chunk[res->chunk].buf;
++            vbuf = ibuf = s_geom.chunk[res->blk.chunk].buf;
+             voff = res->voff; ioff = res->ioff;
+         } else {
+             if (vk_ensure_vertex_buffer(vbytes)) return;
+@@ -4246,7 +4308,7 @@ static const rsx_draw_backend s_vk_engine_backend = {
+     .set_depth_bounds     = vk_eng_set_depth_bounds,
+     .draw                 = vk_eng_draw,
+     .geom_create          = vk_eng_geom_create,
+-    .geom_reset           = vk_eng_geom_reset,
++    .geom_release         = vk_eng_geom_release,
+     .draw_geom            = vk_eng_draw_geom,
+     .clear_color          = vk_eng_clear_color,
+     .clear_depth_stencil  = vk_eng_clear_depth_stencil,
+-- 
+2.56.0.windows.3
+

@@ -1,0 +1,231 @@
+From 7eb36984c21a3f318104cded2e9cf8cdab9ff1ff Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Fri, 30 Oct 2026 17:49:45 -0700
+Subject: [PATCH 42/43] cellGcmSys: GCM_FLIP_RING, flip and walker event
+ recorders
+
+GCM_FLIP_RING=1 keeps the last 64 flip events -- ResetFlipStatus, a flip
+request (in the FIFO or direct), the walker reaching a flip marker, a tick
+completing a flip, a completion delivered as DONE or found stale -- each
+with the request and tick sequences, the queued/reached/completed marker
+counts, the flip status, the walker's get and the guest's put, written
+lock-free. With it the walker also records its own path: the last 256
+passes that had work (get and put at the start, where and why each
+stopped), JUMPs, CALLs, RETs, flip markers and resyncs. When a flip has
+stayed WAITING with no new request for 300 ticks both are printed, oldest
+first, and the walker's path at its first two resyncs. Off, each event is
+one load and a branch.
+
+Always on: a method whose data would run past put is reported (first 8):
+the walker would be decoding words the title has not submitted.
+
+It is how a freeze that only showed with the walker slowed down was
+traced: in a frame the same size as the two before it the walker met a
+CALL those frames did not have, into words the title was writing at the
+head of the ring, never returned, and circled past the flip the title
+then waited for.
+---
+ libs/video/cellGcmSys.c | 94 ++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 93 insertions(+), 1 deletion(-)
+
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index 34b4f0d..808c20a 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -135,6 +135,72 @@ static volatile int s_flip_direct_pending = 0;
+  * second to build its next frame here, then queues the flip, and a beat in
+  * between that reported a flip made it take the new one for done. It then
+  * rebuilt the command segment the walker was still waiting in. */
++/* GCM_FLIP_RING=1 (debug): the last 64 flip events, written lock-free and
++ * dumped once a flip has stayed WAITING with no new request for 300 ticks --
++ * to see which order of requests, markers, ticks and deliveries leaves one
++ * never completed. */
++static int s_fr_on = -1;
++static struct { u32 ev, req, tick, queued, reached, completed, status, tid, get, put; u64 t; } s_fr[64];
++static u32 s_fifo_getoff;   /* tentative: defined below (the walker's position) */
++static u32 fr_put(void);    /* the guest's put, below */
++static volatile LONG s_fr_n;
++static void fr_note(u32 ev)
++{
++    if (s_fr_on < 0) s_fr_on = getenv("GCM_FLIP_RING") ? 1 : 0;
++    if (!s_fr_on) return;
++    const u32 i = (u32)InterlockedIncrement(&s_fr_n) & 63u;
++    s_fr[i].ev = ev; s_fr[i].req = s_flip_req_seq; s_fr[i].tick = s_flip_tick_seq;
++    s_fr[i].queued = s_fifo_flips_queued; s_fr[i].reached = s_fifo_flips_reached;
++    s_fr[i].completed = s_fifo_flips_completed; s_fr[i].status = s_flip_status;
++    s_fr[i].tid = (u32)GetCurrentThreadId(); s_fr[i].t = get_timestamp_ns();
++    s_fr[i].get = s_fifo_getoff; s_fr[i].put = fr_put();
++}
++/* With it, the walker's own path: the last 256 passes with work, JUMPs,
++ * CALLs, RETs, flip markers, resyncs and methods that ran past `put`. Only
++ * the walker writes these; they are dumped with the flip events. */
++static struct { u32 ev, a, b, c; } s_wr[256];
++static u32 s_wr_n;
++static void wr_note(u32 ev, u32 a, u32 b, u32 c)
++{
++    if (s_fr_on < 0) s_fr_on = getenv("GCM_FLIP_RING") ? 1 : 0;
++    if (!s_fr_on) return;
++    const u32 i = ++s_wr_n & 255u;
++    s_wr[i].ev = ev; s_wr[i].a = a; s_wr[i].b = b; s_wr[i].c = c;
++}
++static void wr_dump(const char* why)
++{
++    static const char* name[] = { "?", "pass", "jump", "call", "ret", "flipmark", "end", "resync", "past-put" };
++    if (s_fr_on != 1) return;
++    fprintf(stderr, "[walkring] %s; last walker events (oldest first):\n", why);
++    for (u32 k = s_wr_n > 255 ? s_wr_n - 255 : 1; k <= s_wr_n; k++) {
++        const u32 i = k & 255u;
++        fprintf(stderr, "[walkring] %-8s %08X %08X %08X\n", name[s_wr[i].ev < 9 ? s_wr[i].ev : 0],
++                s_wr[i].a, s_wr[i].b, s_wr[i].c);
++    }
++}
++static void fr_check_stuck(void)
++{
++    static unsigned stuck, last_req;
++    if (s_fr_on != 1) return;
++    /* Stuck: still WAITING and no new request for 300 ticks. WAITING alone
++     * is normal: the title resets the status right after each completion. */
++    stuck = (s_flip_status == CELL_GCM_FLIP_STATUS_WAITING && s_flip_req_seq == last_req) ? stuck + 1 : 0;
++    last_req = s_flip_req_seq;
++    if (stuck != 300) return;
++    static const char* name[] = { "?", "reset", "req-fifo", "req-direct", "marker", "tick-took", "done", "stale" };
++    const u32 n = (u32)s_fr_n;
++    fprintf(stderr, "[flipring] stuck WAITING 300 ticks; last events (oldest first):\n");
++    for (u32 k = n > 63 ? n - 63 : 1; k <= n; k++) {
++        const u32 i = k & 63u;
++        fprintf(stderr, "[flipring] %llu us %-10s tid %u req %u tick %u queued %u reached %u completed %u st %u "
++                "get %08X put %08X\n",
++                (unsigned long long)(s_fr[i].t / 1000), name[s_fr[i].ev < 8 ? s_fr[i].ev : 0], s_fr[i].tid,
++                s_fr[i].req, s_fr[i].tick, s_fr[i].queued, s_fr[i].reached, s_fr[i].completed, s_fr[i].status,
++                s_fr[i].get, s_fr[i].put);
++    }
++    wr_dump("flip stuck");
++}
++
+ static int gcm_flip_executed_take(void)
+ {
+     const u32 r = s_fifo_flips_reached;
+@@ -409,6 +475,7 @@ static u32 s_labels[CELL_GCM_MAX_LABEL_COUNT];
+  * every FIFO-space / cellGcmFinish wait would hang. Placed just past the 256
+  * label slots (0x03000000..0x03001000). Fields are big-endian (vm_write32). */
+ #define GCM_CONTROL_GUEST_ADDR (VM_HLE_INJECT_BASE + 0x2000u)
++static u32 fr_put(void) { return vm_read32(GCM_CONTROL_GUEST_ADDR + 0); }
+ 
+ /* Synthetic guest code EA for the FIFO command-buffer-full callback. The title's
+  * inline gcmReserve calls context->callback(context, count) when `current` nears
+@@ -745,6 +812,7 @@ void cellGcmResetFlipStatus(void)
+     s_flip_status = CELL_GCM_FLIP_STATUS_WAITING;
+     s_flip_req_seq++;
+     FLIP_UNLOCK();
++    fr_note(1);
+ }
+ 
+ /* NID: 0xE315A0B2 */
+@@ -893,9 +961,11 @@ void ppu_gcm_pump(void)
+          * the flip handler, and hung with get == put on exactly that. Leave
+          * the newer flip WAITING for the next tick. */
+         FLIP_LOCK();
+-        if (s_flip_tick_seq == s_flip_req_seq)
++        const int fr_done = s_flip_tick_seq == s_flip_req_seq;
++        if (fr_done)
+             s_flip_status = CELL_GCM_FLIP_STATUS_DONE;
+         FLIP_UNLOCK();
++        fr_note(fr_done ? 6 : 7);
+         if (s_flip_handler_opd && g_ps3_guest_caller) {
+             ydkj_restore_handler_opd(s_flip_handler_opd, s_flip_handler_code);
+             g_ps3_guest_caller(s_flip_handler_opd, 1, 0, 0, 0, 0, 0, 0, 0);
+@@ -932,6 +1002,8 @@ void cellGcmTickFlip(void)
+     const int waiting = s_flip_status == CELL_GCM_FLIP_STATUS_WAITING && gcm_flip_executed_take();
+     if (waiting) s_flip_tick_seq = s_flip_req_seq;
+     FLIP_UNLOCK();
++    if (waiting) fr_note(5);
++    fr_check_stuck();
+     if (waiting) GCM_PENDING_SET(2);
+ }
+ 
+@@ -1641,6 +1713,8 @@ static void gcm_fifo_resync_why(const char* why, u32* getoff, u32 put)
+     if (PS3_LOG_FIRST(n, 8))
+         fprintf(stderr, "[cellGcmSys] FIFO resync (%s) 0x%08X -> put 0x%08X\n",
+                 why, *getoff, put);
++    wr_note(7, *getoff, put, 0);
++    { static int d = 0; if (PS3_LOG_FIRST(d, 2)) wr_dump(why); }
+     /* If an SPU DMA'd a pushbuffer that ends just short of `put`, that is the
+      * stream the RSX is being pointed at -- land at its START and walk it,
+      * instead of landing on `put` and skipping it. Resyncing to `put` keeps the
+@@ -2244,6 +2318,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
+      * short of `put` every tick is the signature of a FIFO that can never
+      * catch up, and the reason is the whole diagnosis. */
+     const char* why = "caught-up";
++    if (s_fifo_getoff != put) wr_note(1, s_fifo_getoff, put, s_fifo_calloff);
+     while (s_fifo_getoff != put && budget-- > 0) {
+         u32 ea = gcm_io2ea(s_fifo_getoff);
+         if (!ea) {
+@@ -2372,6 +2447,8 @@ static void gcm_rsx_process_fifo_unlocked(void)
+                 /* Not past `queued`: a resync may already have written off
+                  * this flip. */
+                 if (s_fifo_flips_reached != s_fifo_flips_queued) s_fifo_flips_reached++;
++                fr_note(4);
++                wr_note(5, s_fifo_getoff - 4, put, s_fifo_flips_reached);
+             } else {
+                 cellGcmSetFlipCommand(w & 0xFFu);
+             }
+@@ -2448,6 +2525,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
+                   break;
+               }
+               if (tgt < s_fifo_getoff) s_fifo_back_jumps++;
++              wr_note(2, s_fifo_getoff, tgt, put);
+               s_fifo_getoff = tgt;
+               /* get is the RSX's fetch pointer: a title polling it sees the
+                * GPU leave a segment as soon as the JUMP out of it is taken.
+@@ -2462,6 +2540,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
+               if (!gcm_io2ea(tgt)) { gcm_fifo_bad_branch("CALL", tgt, w); gcm_fifo_resync_why("unmapped-CALL", &s_fifo_getoff, put); break; }
+               { static int pt = -1; if (pt < 0) pt = getenv("GCM_PASS_TRACE") ? 1 : 0;
+                 if (pt) fprintf(stderr, "[CALL] %08X -> %08X\n", s_fifo_getoff, tgt); }
++              wr_note(3, s_fifo_getoff, tgt, put);
+               s_fifo_calloff = s_fifo_getoff + 4;
+               s_fifo_getoff  = tgt; }
+             continue;
+@@ -2469,6 +2548,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
+         if (w == 0x00020000u) {                /* RET */
+             { static int pt = -1; if (pt < 0) pt = getenv("GCM_PASS_TRACE") ? 1 : 0;
+               if (pt) fprintf(stderr, "[RET] %08X -> %08X\n", s_fifo_getoff, s_fifo_calloff); }
++            wr_note(4, s_fifo_getoff, s_fifo_calloff, put);
+             s_fifo_getoff = s_fifo_calloff;
+             s_fifo_calloff = 0;
+             continue;
+@@ -2752,6 +2832,15 @@ static void gcm_rsx_process_fifo_unlocked(void)
+                     gcm_2d_method(subch, m, vm_read32(dea));
+                 }
+             }
++            /* A method whose data runs past `put` is decoded from words the
++             * title has not submitted. */
++            if (s_fifo_getoff < put && s_fifo_getoff + 4 + count * 4 > put) {
++                static int n = 0;
++                if (PS3_LOG_FIRST(n, 8))
++                    fprintf(stderr, "[cellGcmSys] FIFO method at 0x%08X (word 0x%08X, %u args) "
++                            "runs past put 0x%08X\n", s_fifo_getoff, w, count, put);
++                wr_note(8, s_fifo_getoff, w, put);
++            }
+             s_fifo_getoff += 4 + count * 4;
+             continue;
+         }
+@@ -2759,6 +2848,8 @@ static void gcm_rsx_process_fifo_unlocked(void)
+             fprintf(stderr, "[FIFOUW] unknown word 0x%08X at getoff 0x%X\n", w, s_fifo_getoff); }
+         s_fifo_getoff += 4;                    /* unknown word: skip */
+     }
++    /* c: the reason's first letter, and the word budget left */
++    if (start_off != put) wr_note(6, s_fifo_getoff, put, ((u32)(unsigned char)why[0] << 24) | ((u32)budget & 0xFFFFFFu));
+ 
+     /* Walker watchdog. Everything above recovers from a *recognised* stall --
+      * a branch we cannot take, a park the title abandoned. A walker that stops
+@@ -3178,6 +3269,7 @@ static s32 gcm_flip_request(u32 bufferId, int in_fifo)
+     s_flip_status = CELL_GCM_FLIP_STATUS_WAITING;
+     s_flip_req_seq++;
+     FLIP_UNLOCK();
++    fr_note(in_fifo ? 2 : 3);
+     s_last_flip_time = get_timestamp_ns();
+     if (PS3_FT_ON()) { const uint64_t t = ps3_ft_now();
+                        ps3_ft_span(PS3_FT_FLIP_REQ, 0, bufferId, (uint32_t)in_fifo, t, t); }
+-- 
+2.56.0.windows.3
+

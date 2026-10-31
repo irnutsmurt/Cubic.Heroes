@@ -1,0 +1,19 @@
+# Long walks from the save (SAVES=..., DUMP=0 for timing): far enough to cross
+# into other field areas, so their loads and the new scenery's first frames
+# are in the run. For A/B runs (RSX_GEOM_CACHE=0 against the default).
+log TitleMovie 120
+sleep 5
+press START                 # "PRESS START BUTTON"
+sleep 3
+press START                 # main menu: CONTINUE
+sleep 5
+press CROSS                 # "Change characters?" NO
+sleep 15                    # the area loads
+hold DOWN 12
+hold LEFT 12
+hold DOWN 12
+hold RIGHT 12
+hold UP 12
+hold RIGHT 12
+hold DOWN 12
+hold LEFT 12
