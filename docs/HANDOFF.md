@@ -416,6 +416,25 @@ tooling, the native Windows build, measuring on the 3070) are done; see
    24.2 ms mean, p95 35.6 -> 34.2, frames over 25 ms 123 -> 121): in the
    slow ones the walker (~19 ms for ~935 draws) is now the limit. Details,
    and how close its contacts are to the SPU's, in docs/BULLET_NATIVE.md.
+   **The walker, split** (tests/walker_breakdown.py; kind-18 walker spans
+   and the GPU waits inside drain passes). Per guest frame: lag = flip
+   request -> walker reaching that flip; then the present. The guest's frame
+   end (func_00029BD8) waits for the vblank (usleep at lr 0x29C20) and for the
+   previous flip to complete (lr 0x29CC0): that second wait is how walker lag
+   reaches the frame rate. "19 ms" was the drain passes with their waits.
+   Native collision, windowed river, 25-34 ms frames: lag 13.8 ms = 9.8 active
+   drain + 2.6 waiting for the GPU batch in flight + 0.4 flush + 1.0 sleep; the
+   guest then waits 5.2 ms at 0x29CC0 (with lifted collision 1.3: physics holds
+   it first). The walker sleeps 13-23 ms of such a frame: its work comes after
+   the guest's. Each frame is presented twice (the FIFO's flip, then the walker
+   loop's present of the same buffer): 2-4 ms a frame of the walker waiting on
+   the present lock, outside the lag. Active drain, profiled: the FIFO decode
+   loop's own per-word work 30% (every word took the per-word diagnostic path
+   because the draw engine counted as a diagnostic), draw recording ~57%
+   (NVIDIA driver ~22%). The in-flight waits come from render-target
+   thrash -- address 0 alternates 1280x720 <-> 1024x1024 in fights
+   (RSX_SURFACE_LOG=1), each switch recreating the target with two GPU
+   syncs, 4.3 + 0.9 ms of a slow frame's lag.
    Frame dumps (PS3RECOMP_VK_DUMP, on in tests/boot_smoke.py unless DUMP=0)
    are written on the present path: every 60th frame took 10-20 ms longer.
    Time with DUMP=0; for play sessions grab the window instead.
@@ -460,6 +479,7 @@ tooling, the native Windows build, measuring on the 3070) are done; see
 | `SPU_MFC_LOOKUP_CACHE=0` | the per-thread MFC lookup cache off (on by default), for A/B |
 | `DOTHEROES_CPU=<zig cpu>` | build-time: the CPU level this machine compiles for (default its own: x86_64_v3 or x86_64_v2) |
 | `SPURS_SNAP=<entry>:<entry>:<n>:<prefix>` | guest memory before and after a Bullet step, for docs/BULLET_NATIVE.md (`tests/snap_read.py`) |
+| `RSX_SURFACE_LOG=1` | every colour render target the draw engine creates, and why (new address, resized, evicted) |
 | `DOTHEROES_NATIVE_CD=<0-3>` | the Bullet collision task: lifted (default), native (experimental), check (native against lifted, `[native-cd]` lines), self-check (native against itself rounding toward zero); `DOTHEROES_NATIVE_CD_DUMP=n` prints differing manifolds, `DOTHEROES_NATIVE_CD_FP=rz` runs native toward zero (docs/BULLET_NATIVE.md) |
 | `GAMEDATA=<dir>` | tests/boot_smoke.py: play on a persistent save root in place (`%LOCALAPPDATA%\dotheroes\gamedata`) |
 | `RSX_DROP_LOG=1`, `VK_DRAW_SKIP_LOG=1` | draws the engine / the Vulkan backend discard before drawing, with the reason |

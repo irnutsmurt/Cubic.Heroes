@@ -33,6 +33,7 @@
  * table. It comes first: everything below is written against that struct. */
 #include "diag/diag.h"
 #include "native/bullet_cd_task.h"
+#include "ps3emu/ps3_ftrace.h"
 #include "ppu_recomp.h"
 
 /* The Win32 names -- Sleep, GetTickCount64, CreateThread, InterlockedIncrement,
@@ -288,6 +289,14 @@ static void vblank_clock(void)
     }
 }
 
+/* PS3_FTRACE: the walker thread's time outside its drain passes (kind 18:
+ * who 1 a guest frame's present begun, 2 the window pump, 3 the sleep). */
+static inline uint64_t ft_now_if_on(void) { return PS3_FT_ON() ? ps3_ft_now() : 0; }
+static inline void ft_walker(uint32_t what, uint64_t t0)
+{
+    if (t0) ps3_ft_span(PS3_FT_WALKER, what, 0, 0, t0, ps3_ft_now());
+}
+
 static DWORD WINAPI frame_clock(LPVOID)
 {
     /* The RSX side: the FIFO walker and the present. The vblank ticks on its
@@ -307,7 +316,9 @@ static DWORD WINAPI frame_clock(LPVOID)
         /* 1 ms: the guest's FIFO writes are not signalled, so this poll is
          * how soon the walker sees them. At 4 ms the waits added up over a
          * frame's command waves (~1 fps in gameplay). */
+        uint64_t ft = ft_now_if_on();
         Sleep(1);
+        ft_walker(3, ft);
 
         /* Drain every pass: titles fence every render pass on a label the
          * drain writes, and the real RSX writes them in microseconds. A
@@ -317,12 +328,17 @@ static DWORD WINAPI frame_clock(LPVOID)
          * guest's next-frame writes and shows a mixed one. */
         if (rsx_ok) {
             if (cellGcm_take_flip_pending()) {
+                ft = ft_now_if_on();
                 present_guest_frame();
+                ft_walker(1, ft);
                 last_flip = cellGcm_flip_request_count();
             }
             cellGcm_rsx_process_fifo();
 
-            if (rsx_backend_pump() != 0) {
+            ft = ft_now_if_on();
+            const int pumped = rsx_backend_pump();
+            ft_walker(2, ft);
+            if (pumped != 0) {
                 rsx_ok = 0;              /* window closed */
                 /* ...so quit, as the console's Quit Game does, instead of
                  * leaving the game running with no window. */
@@ -334,7 +350,9 @@ static DWORD WINAPI frame_clock(LPVOID)
              * present freely, so the window is not blank during boot. */
             unsigned fc = cellGcm_flip_request_count();
             if (fc != last_flip) {
+                ft = ft_now_if_on();
                 present_guest_frame();
+                ft_walker(1, ft);
                 last_flip = fc;
             } else if (fc == 0) {
                 rsx_backend_present();

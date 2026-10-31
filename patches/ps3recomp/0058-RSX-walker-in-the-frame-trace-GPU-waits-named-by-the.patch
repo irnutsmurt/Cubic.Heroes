@@ -1,0 +1,105 @@
+From f71f9abcc51df06fccc115e7c069a0864d10fbba Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Sat, 31 Oct 2026 15:35:55 -0700
+Subject: [PATCH] RSX walker in the frame trace; GPU waits named by their
+ flush; surface log
+
+PS3_FT_WALKER (kind 18): the walker thread outside its drain passes, for a
+port's frame loop to mark -- who 1 a guest frame's present begun there,
+2 the window's event pump, 3 its sleep between passes. With the drain
+passes and the GPU waits inside them, the walker's time splits into active
+work and each kind of wait (a tool: the port's tests/walker_breakdown.py).
+
+Vulkan: an in-flight wait's span (GPU_WAIT a = 2) carries the source line
+of the flush or sync behind it in b, as the flush waits already did; a
+sync's own wait (vk_submit_and_wait, vk_eng_flush_sync) is named by its
+caller.
+
+RSX_SURFACE_LOG=1: every colour target the draw engine creates, with the
+reason -- a new address, the same address at another size or format, or an
+eviction. 3D Dot Game Heroes alternates address 0 between 1280x720 and
+1024x1024 in fights, each switch a new target and two GPU syncs.
+---
+ include/ps3emu/ps3_ftrace.h     | 6 +++++-
+ libs/video/rsx_draw_engine.c    | 9 +++++++++
+ libs/video/rsx_vulkan_backend.c | 6 +++---
+ 3 files changed, 17 insertions(+), 4 deletions(-)
+
+diff --git a/include/ps3emu/ps3_ftrace.h b/include/ps3emu/ps3_ftrace.h
+index 9cfcc4c..917db19 100644
+--- a/include/ps3emu/ps3_ftrace.h
++++ b/include/ps3emu/ps3_ftrace.h
+@@ -52,7 +52,8 @@ enum ps3_ft_kind {
+     PS3_FT_FLIP_REQ    = 9,  /* instant: the guest asked for a flip, a = buffer        */
+     PS3_FT_PRESENT     = 10, /* the host presented a guest frame                       */
+     PS3_FT_GPU_ENCODE  = 11, /* Metal: CPU encode of the recorded draws, a = 1 present / 0 flush, b = records */
+-    PS3_FT_GPU_WAIT    = 12, /* Metal: CPU waits for the GPU, a = 1 present / 0 flush / 2 in-flight bound, b = flush reason */
++    PS3_FT_GPU_WAIT    = 12, /* CPU waits for the GPU, a = 1 present / 0 flush / 2 in-flight bound,
++                              * b = flush reason (Vulkan: the source line of the flush or sync behind it) */
+     PS3_FT_READBACK    = 13, /* Metal: render target read back to the CPU, a = w, b = h */
+     PS3_FT_GPU_EXEC    = 14, /* Metal: a command buffer's own GPU time, ending when the CPU saw it
+                               * complete; who = render passes, a = depth resolves | colour copies << 16,
+@@ -65,6 +66,9 @@ enum ps3_ft_kind {
+     PS3_FT_QUEUE_WAIT  = 17, /* a PPU waiting on a SPURS queue entry, from the first pop that
+                               * found it empty to the one that took one: who = PPU tid,
+                               * a = the queue it popped, b = pops tried */
++    PS3_FT_WALKER      = 18, /* the RSX walker thread outside its drain passes (the port's
++                              * frame loop): who = 1 a guest frame's present begun there,
++                              * 2 the window's event pump, 3 its sleep between passes */
+ };
+ 
+ #if defined(_MSC_VER)
+diff --git a/libs/video/rsx_draw_engine.c b/libs/video/rsx_draw_engine.c
+index 3efe43a..9f29e6d 100644
+--- a/libs/video/rsx_draw_engine.c
++++ b/libs/video/rsx_draw_engine.c
+@@ -728,6 +728,15 @@ static u32 eng_surface_get(u32 location, u32 offset, u32 want_w, u32 want_h,
+         return (!evicted && slot < g.n_surfaces && g.surfaces[slot].handle) ? slot : ENG_INVALID;
+ 
+     eng_surface* s = &g.surfaces[slot];
++    /* RSX_SURFACE_LOG=1: every colour target made, and why -- a new address,
++     * the same address at another size or format, or an eviction. Each one
++     * costs the backend a GPU sync. */
++    { static int sl = -1; if (sl < 0) { const char* e = getenv("RSX_SURFACE_LOG"); sl = e && *e == '1'; }
++      if (sl) fprintf(stderr, "[surface-new] frame %u %u:0x%08X %ux%u fmt %d: %s (was %ux%u fmt %d, %u surfaces)\n",
++                      g.frames, location, offset, want_w, want_h, (int)want_fmt,
++                      evicted ? "evicted the oldest" : slot < g.n_surfaces ? "resized/reformatted" : "new address",
++                      slot < g.n_surfaces ? s->w : 0, slot < g.n_surfaces ? s->h : 0,
++                      slot < g.n_surfaces ? (int)s->fmt : -1, g.n_surfaces); }
+     if (s->feedback) { g.be->texture_release(g.be->user, s->feedback); s->feedback = 0; }
+     if (s->handle) g.be->color_target_release(g.be->user, s->handle);
+     s->location = location; s->offset = offset;
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index 3cd5527..3daa3cd 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -823,7 +823,7 @@ static void vk_wait_stat(int line, double ms)
+ }
+ static int vk_submit_and_wait_at(int line)
+ {
+-    vk_wait_inflight();
++    { const int fl = s_flush_line; if (!fl) s_flush_line = line; vk_wait_inflight(); s_flush_line = fl; }
+     vk_gt_end(s_vk.cmd);
+     VK_CHECK(pvkEndCommandBuffer(s_vk.cmd), "vkEndCommandBuffer");
+     VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+@@ -3970,7 +3970,7 @@ static void vk_wait_inflight(void)
+     const uint64_t ft0 = PS3_FT_ON() ? ps3_ft_now() : 0;
+     pvkWaitForFences(s_vk.device, 1, &s_eb.alt_fence, VK_TRUE, UINT64_MAX);
+     if (ft0) { const uint64_t ft1 = ps3_ft_now();
+-               if (ft1 - ft0 >= ps3_ft_min_ns()) ps3_ft_span(PS3_FT_GPU_WAIT, 0, 2, 0, ft0, ft1); }
++               if (ft1 - ft0 >= ps3_ft_min_ns()) ps3_ft_span(PS3_FT_GPU_WAIT, 0, 2, (u32)s_flush_line, ft0, ft1); }
+     vk_monotonic(&b);
+     vk_gt_collect(s_eb.alt_cmd);
+     vk_wait_stat(s_flush_line ? -s_flush_line : 1, (b.tv_sec - a.tv_sec) * 1e3 + (b.tv_nsec - a.tv_nsec) * 1e-6);
+@@ -3980,7 +3980,7 @@ static void vk_wait_inflight(void)
+ static void vk_eng_flush_sync_at(int line)
+ {
+     if (s_eb_pending) vk_eng_flush_at(line);
+-    vk_wait_inflight();
++    s_flush_line = line; vk_wait_inflight(); s_flush_line = 0;   /* the trace names the wait by its caller */
+     vk_defer_free_all();
+ }
+ static void vk_eng_flush_at(int line)
+-- 
+2.56.0.windows.3
+

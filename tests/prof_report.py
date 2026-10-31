@@ -2,7 +2,8 @@
 """Symbolize a DIAG_PROF profile (port/diag): per thread, the functions most
 samples were in (self) and under (inclusive).
 
-  tests/prof_report.py <profile.raw> [--top N] [--min-share 2]
+  tests/prof_report.py <profile.raw> [--top N] [--min-share 2] [--lines FUNCTION]
+--lines (Windows): the source lines that FUNCTION's own samples were on.
 
 Linux: the binary's symbol table through nm. Windows: the PDB next to the
 .exe through DbgHelp (a Windows development build writes one, see
@@ -13,6 +14,7 @@ import argparse, bisect, collections, subprocess
 ap = argparse.ArgumentParser()
 ap.add_argument("raw"); ap.add_argument("--top", type=int, default=15)
 ap.add_argument("--min-share", type=float, default=2.0, help="skip threads under this %% of samples")
+ap.add_argument("--lines", help="also list the source lines FUNCTION's own samples were on (Windows)")
 a = ap.parse_args()
 lines = open(a.raw, encoding="utf-8", errors="replace").read().splitlines()
 _, base, binary = lines[0].split(None, 2); base = int(base, 16)
@@ -95,3 +97,20 @@ for tid, samples in sorted(per.items(), key=lambda kv: -len(kv[1])):
     for n, c in self_c.most_common(a.top): print(f"    {100.0*c/len(samples):5.1f}%  {n[:110]}")
     print("  inclusive:")
     for n, c in incl_c.most_common(a.top): print(f"    {100.0*c/len(samples):5.1f}%  {n[:110]}")
+    if a.lines and windows and self_c[a.lines]:
+        class LINE(ctypes.Structure):
+            _fields_ = [("SizeOfStruct", wt.DWORD), ("Key", ctypes.c_void_p), ("LineNumber", wt.DWORD),
+                        ("FileName", ctypes.c_char_p), ("Address", ctypes.c_uint64)]
+        dbg.SymGetLineFromAddr64.argtypes = [ctypes.c_void_p, ctypes.c_uint64, ctypes.POINTER(wt.DWORD),
+                                             ctypes.POINTER(LINE)]
+        lc = collections.Counter()
+        for st in samples:
+            if len(st) > skip and name(st[skip]) == a.lines:
+                ln, d = LINE(), wt.DWORD()
+                ln.SizeOfStruct = ctypes.sizeof(LINE)
+                if dbg.SymGetLineFromAddr64(proc, st[skip] - 1, ctypes.byref(d), ctypes.byref(ln)):
+                    lc[f"{ln.FileName.decode(errors='replace').replace(chr(92), '/').rsplit('/', 1)[-1]}:{ln.LineNumber}"] += 1
+                else:
+                    lc["?"] += 1
+        print(f"  {a.lines}'s own samples by line ({self_c[a.lines]}):")
+        for n, c in lc.most_common(a.top): print(f"    {100.0*c/self_c[a.lines]:5.1f}%  {n}")

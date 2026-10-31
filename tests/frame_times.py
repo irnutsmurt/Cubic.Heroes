@@ -17,14 +17,15 @@ FLIP_FIFO, FLIP_REQ, PRESENT = 8, 9, 10
 
 for path in sys.argv[1:]:
     times = {"request": [], "rsx": [], "present": []}
-    for line in open(path, encoding="utf-8", errors="replace"):
+    for line in (__import__("gzip").open(path, "rt", encoding="utf-8", errors="replace") if path.endswith(".gz")
+                 else open(path, encoding="utf-8", errors="replace")):   # kept baselines are gzipped
         f = line.split()
         if len(f) != 6 or not f[0].isdigit():
             continue
         k = int(f[0])
         if k == FLIP_REQ: times["request"].append(float(f[4]))
         elif k == FLIP_FIFO: times["rsx"].append(float(f[4]))
-        elif k == PRESENT: times["present"].append(float(f[5]))
+        elif k == PRESENT and f[1] == "1": times["present"].append(float(f[5]))   # who 1: the window's present; who 2 marks the engine's
     print(path)
     for what, t in times.items():
         t.sort()

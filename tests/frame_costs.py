@@ -28,7 +28,8 @@ COLS = ("walker", "gpu", "presents", "draws", "passes", "barriers", "w.flush", "
 
 for path in sys.argv[1:]:
     recs, flips = [], []
-    for line in open(path, encoding="utf-8", errors="replace"):
+    for line in (__import__("gzip").open(path, "rt", encoding="utf-8", errors="replace") if path.endswith(".gz")
+                 else open(path, encoding="utf-8", errors="replace")):   # kept baselines are gzipped
         f = line.split()
         if len(f) != 6 or not f[0].isdigit():
             continue
