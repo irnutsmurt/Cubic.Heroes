@@ -1,0 +1,84 @@
+# Fights for physics timing (Bullet debris): from a save with the sword at full
+# life, out to the rabbit field east of the castle, then swing in every
+# direction for ~30 s -- sword beams, kills, debris. Needs a save past the
+# sword; seed it with SAVES=. tests/phys_frames.py reads the PS3_FTRACE file.
+log TitleMovie 120
+sleep 5
+press START
+sleep 3
+press START
+sleep 5
+press CROSS
+sleep 15
+hold RIGHT 4
+hold DOWN 1.5
+hold RIGHT 3
+hold UP 5
+shot field
+
+hold RIGHT 0.15
+repeat 2 CROSS 0.35
+hold DOWN 0.15
+repeat 2 CROSS 0.35
+hold LEFT 0.15
+repeat 2 CROSS 0.35
+hold UP 0.15
+repeat 2 CROSS 0.35
+hold RIGHT 0.15
+repeat 2 CROSS 0.35
+hold DOWN 0.15
+repeat 2 CROSS 0.35
+hold LEFT 0.15
+repeat 2 CROSS 0.35
+hold UP 0.15
+repeat 2 CROSS 0.35
+hold RIGHT 0.15
+repeat 2 CROSS 0.35
+hold DOWN 0.15
+repeat 2 CROSS 0.35
+hold LEFT 0.15
+repeat 2 CROSS 0.35
+hold UP 0.15
+repeat 2 CROSS 0.35
+hold RIGHT 0.15
+repeat 2 CROSS 0.35
+hold DOWN 0.15
+repeat 2 CROSS 0.35
+hold LEFT 0.15
+repeat 2 CROSS 0.35
+hold UP 0.15
+repeat 2 CROSS 0.35
+hold RIGHT 0.15
+repeat 2 CROSS 0.35
+hold DOWN 0.15
+repeat 2 CROSS 0.35
+hold LEFT 0.15
+repeat 2 CROSS 0.35
+hold UP 0.15
+repeat 2 CROSS 0.35
+hold RIGHT 0.15
+repeat 2 CROSS 0.35
+hold DOWN 0.15
+repeat 2 CROSS 0.35
+hold LEFT 0.15
+repeat 2 CROSS 0.35
+hold UP 0.15
+repeat 2 CROSS 0.35
+hold RIGHT 0.15
+repeat 2 CROSS 0.35
+hold DOWN 0.15
+repeat 2 CROSS 0.35
+hold LEFT 0.15
+repeat 2 CROSS 0.35
+hold UP 0.15
+repeat 2 CROSS 0.35
+hold RIGHT 0.15
+repeat 2 CROSS 0.35
+hold DOWN 0.15
+repeat 2 CROSS 0.35
+hold LEFT 0.15
+repeat 2 CROSS 0.35
+hold UP 0.15
+repeat 2 CROSS 0.35
+shot end
+sleep 10

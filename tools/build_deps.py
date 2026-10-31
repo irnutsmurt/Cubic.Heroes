@@ -83,7 +83,8 @@ def cmake_build(name, src, platform, args, host_headers=False):
     Wayland backends need theirs; nothing else should see them)."""
     work = os.path.join(DEPS, "work", platform, name)
     prefix = os.path.join(DEPS, platform)
-    tc = zig_build.cmake_toolchain(platform, extra_include_after=("/usr/include",) if host_headers and platform == "linux" else ())
+    tc = zig_build.cmake_toolchain(platform, extra_include_after=("/usr/include",) if host_headers and platform == "linux" else (),
+                                   cpu=zig_build.PORTABLE_CPU)
     subprocess.check_call(["cmake", "-S", src, "-B", work, "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release",
                            f"-DCMAKE_TOOLCHAIN_FILE={tc}", f"-DCMAKE_INSTALL_PREFIX={prefix}",
                            "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"] + args, stdout=subprocess.DEVNULL)

@@ -1,0 +1,294 @@
+From bb5d3b43ac9faa28c1d7c244e2d2c862d1c88446 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Sat, 31 Oct 2026 10:27:07 -0700
+Subject: [PATCH 53/53] Saving says so on screen: a host message over the
+ picture
+
+On a PS3 the system's save dialog shows a save going through. The
+save-data module skips that dialog -- the list takes the slot the title
+offers -- so a save happened with nothing on screen, and the owner of a
+3D Dot Game Heroes port reported that saving did not work. It did.
+
+ps3emu/osd.h: a short host message, posted by any module and shown for
+some milliseconds (header-only shared state, seqlock, like ps3_ftrace).
+cellSaveData posts GAME SAVED when a save completes, SAVE FAILED on an
+access or internal error, nothing when the title's callback cancels.
+The Vulkan backend draws it in the window: a box with 5x7 glyphs, drawn
+on the CPU once per message and window size and copied into the
+swapchain image after the window blit, so no pipeline, and the frame
+dump and readback never see it. Only 8-bit RGBA/BGRA swapchains.
+---
+ include/ps3emu/osd.h            |  87 ++++++++++++++++++++++++++
+ libs/system/cellSaveData.c      |  11 ++++
+ libs/video/rsx_vulkan_backend.c | 104 ++++++++++++++++++++++++++++++++
+ 3 files changed, 202 insertions(+)
+ create mode 100644 include/ps3emu/osd.h
+
+diff --git a/include/ps3emu/osd.h b/include/ps3emu/osd.h
+new file mode 100644
+index 0000000..73e37be
+--- /dev/null
++++ b/include/ps3emu/osd.h
+@@ -0,0 +1,87 @@
++/*
++ * ps3_osd -- a short host message over the game's picture ("GAME SAVED"), in
++ * place of what the PS3's own system dialogs would have shown. The save-data
++ * module skips the system's save list (it picks the slot the title offers),
++ * so without this a save happened with nothing on screen.
++ *
++ * A runtime module posts a message for some milliseconds; a windowed backend
++ * draws it while it lasts (rsx_vulkan_backend.c, vk_osd_draw). Header-only,
++ * one shared object the linker folds into a single copy, like ps3_ftrace.
++ * Posting is rare and the reader retries on a torn read (seqlock).
++ */
++#ifndef PS3EMU_OSD_H
++#define PS3EMU_OSD_H
++
++#include <stdint.h>
++#include <string.h>
++#ifdef _WIN32
++#  include <windows.h>
++#else
++#  include <time.h>
++#endif
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#if defined(_MSC_VER)
++#  define PS3_OSD_SHARED __declspec(selectany)
++#else
++#  define PS3_OSD_SHARED __attribute__((weak))
++#endif
++
++#define PS3_OSD_TEXT_MAX 48
++
++typedef struct {
++    uint32_t seq;                     /* odd while a post is being written */
++    char     text[PS3_OSD_TEXT_MAX];
++    uint64_t until_ms;
++} ps3_osd_state;
++
++PS3_OSD_SHARED ps3_osd_state g_ps3_osd = { 0 };
++
++static inline uint64_t ps3_osd_ms(void)
++{
++#ifdef _WIN32
++    return (uint64_t)GetTickCount64();
++#else
++    struct timespec ts;
++    clock_gettime(CLOCK_MONOTONIC, &ts);
++    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
++#endif
++}
++
++/* Show `text` (upper case: the font has capitals, digits and a few marks)
++ * for `ms` milliseconds, replacing whatever was showing. */
++static inline void ps3_osd_post(const char* text, unsigned ms)
++{
++    ps3_osd_state* s = &g_ps3_osd;
++    __atomic_add_fetch(&s->seq, 1, __ATOMIC_ACQ_REL);
++    strncpy(s->text, text, PS3_OSD_TEXT_MAX - 1);
++    s->text[PS3_OSD_TEXT_MAX - 1] = 0;
++    s->until_ms = ps3_osd_ms() + ms;
++    __atomic_add_fetch(&s->seq, 1, __ATOMIC_RELEASE);
++}
++
++/* The message showing now, copied into `out`: 1, or 0 when there is none. */
++static inline int ps3_osd_current(char out[PS3_OSD_TEXT_MAX])
++{
++    const ps3_osd_state* s = &g_ps3_osd;
++    for (int tries = 0; tries < 4; tries++) {
++        const uint32_t a = __atomic_load_n(&s->seq, __ATOMIC_ACQUIRE);
++        if (!a || (a & 1)) { if (!a) return 0; continue; }
++        memcpy(out, s->text, PS3_OSD_TEXT_MAX);
++        const uint64_t until = s->until_ms;
++        if (__atomic_load_n(&s->seq, __ATOMIC_ACQUIRE) == a) {
++            out[PS3_OSD_TEXT_MAX - 1] = 0;
++            return ps3_osd_ms() < until;
++        }
++    }
++    return 0;
++}
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* PS3EMU_OSD_H */
+diff --git a/libs/system/cellSaveData.c b/libs/system/cellSaveData.c
+index 1b61c21..4fdc7b4 100644
+--- a/libs/system/cellSaveData.c
++++ b/libs/system/cellSaveData.c
+@@ -8,6 +8,7 @@
+ #include "cellSaveData.h"
+ #include "ps3_psf.h"
+ #include "ps3emu/guest_call.h"
++#include "ps3emu/osd.h"
+ #include "../../runtime/ppu/ppu_memory.h"
+ #include "../../runtime/memory/vm.h"
+ #include <stdio.h>
+@@ -862,6 +863,16 @@ static s32 savedata_execute(const char* dirName, int is_save,
+     __atomic_add_fetch(&s_savedata_busy, 1, __ATOMIC_ACQ_REL);
+     const s32 r = savedata_execute_run(dirName, is_save, setBuf, funcStat, funcFile, userdata);
+     __atomic_sub_fetch(&s_savedata_busy, 1, __ATOMIC_ACQ_REL);
++    /* On a PS3 the system's save dialog shows the save going through; here
++     * there is none (the list picks the title's own slot), so a save the
++     * player asked for happened with nothing on screen. Say so, over the
++     * picture (ps3emu/osd.h). A save the title's callback cancels says
++     * nothing, as on hardware. */
++    if (is_save) {
++        if (r == CELL_OK) ps3_osd_post("GAME SAVED", 3000);
++        else if (r == CELL_SAVEDATA_ERROR_ACCESS_ERROR || r == CELL_SAVEDATA_ERROR_INTERNAL)
++            ps3_osd_post("SAVE FAILED", 6000);
++    }
+     return r;
+ }
+ 
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index fad44b2..5071f12 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -49,6 +49,7 @@
+ #include "rsx_shader_spirv.h"
+ #include "rsx_draw_engine.h"
+ #include "../../include/ps3emu/ps3_ftrace.h"  /* PS3_FTRACE timeline: waits, readback, present */
++#include "../../include/ps3emu/osd.h"         /* host messages over the picture: vk_osd_draw */
+ #include "vulkan/rsx_vk_fallback_vert.spv.h"
+ #include "vulkan/rsx_vk_fallback_frag.spv.h"
+ 
+@@ -265,6 +266,7 @@ typedef struct vk_state {
+     VkSwapchainKHR   swapchain;
+     VkExtent2D       sc_extent;
+     u32              sc_count;
++    int              sc_osd;          /* host messages: 0 none (format), 1 RGBA, 2 BGRA bytes */
+     VkImage          sc_images[8];
+     VkSemaphore      sc_done[8];      /* per image: the present waits on it */
+     VkSemaphore      sem_acquire;
+@@ -2067,6 +2069,8 @@ static int vk_create_swapchain(void)
+ 
+     s_vk.sc_extent = ext;
+     s_vk.sc_count = n;
++    s_vk.sc_osd = (fmt.format == VK_FORMAT_B8G8R8A8_UNORM || fmt.format == VK_FORMAT_B8G8R8A8_SRGB) ? 2 :
++                  (fmt.format == VK_FORMAT_R8G8B8A8_UNORM || fmt.format == VK_FORMAT_R8G8B8A8_SRGB) ? 1 : 0;
+     VK_LOG("window swapchain %ux%u, %u images, format %d\n", ext.width, ext.height, n, (int)fmt.format);
+     return 0;
+ }
+@@ -2078,6 +2082,105 @@ static void vk_swapchain_lost(void)
+ }
+ 
+ /* Blit the offscreen target into the next swapchain image and present it. */
++/* ---- host messages (ps3emu/osd.h) -----------------------------------------
++ * A box with one line of text, copied into the window's image after the
++ * game's picture: drawn on the CPU once per message and window size, so no
++ * pipeline, and nothing the guest renders is touched (the frame dump and the
++ * readback do not see it). 5x7 glyphs, a row a byte, bit 4 the left column. */
++static const struct { char c; uint8_t r[7]; } k_osd_font[] = {
++    {'A',{0x0E,0x11,0x11,0x1F,0x11,0x11,0x11}}, {'B',{0x1E,0x11,0x11,0x1E,0x11,0x11,0x1E}},
++    {'C',{0x0E,0x11,0x10,0x10,0x10,0x11,0x0E}}, {'D',{0x1E,0x11,0x11,0x11,0x11,0x11,0x1E}},
++    {'E',{0x1F,0x10,0x10,0x1E,0x10,0x10,0x1F}}, {'F',{0x1F,0x10,0x10,0x1E,0x10,0x10,0x10}},
++    {'G',{0x0E,0x11,0x10,0x17,0x11,0x11,0x0F}}, {'H',{0x11,0x11,0x11,0x1F,0x11,0x11,0x11}},
++    {'I',{0x0E,0x04,0x04,0x04,0x04,0x04,0x0E}}, {'J',{0x07,0x02,0x02,0x02,0x02,0x12,0x0C}},
++    {'K',{0x11,0x12,0x14,0x18,0x14,0x12,0x11}}, {'L',{0x10,0x10,0x10,0x10,0x10,0x10,0x1F}},
++    {'M',{0x11,0x1B,0x15,0x15,0x11,0x11,0x11}}, {'N',{0x11,0x11,0x19,0x15,0x13,0x11,0x11}},
++    {'O',{0x0E,0x11,0x11,0x11,0x11,0x11,0x0E}}, {'P',{0x1E,0x11,0x11,0x1E,0x10,0x10,0x10}},
++    {'Q',{0x0E,0x11,0x11,0x11,0x15,0x12,0x0D}}, {'R',{0x1E,0x11,0x11,0x1E,0x14,0x12,0x11}},
++    {'S',{0x0F,0x10,0x10,0x0E,0x01,0x01,0x1E}}, {'T',{0x1F,0x04,0x04,0x04,0x04,0x04,0x04}},
++    {'U',{0x11,0x11,0x11,0x11,0x11,0x11,0x0E}}, {'V',{0x11,0x11,0x11,0x11,0x11,0x0A,0x04}},
++    {'W',{0x11,0x11,0x11,0x15,0x15,0x15,0x0A}}, {'X',{0x11,0x11,0x0A,0x04,0x0A,0x11,0x11}},
++    {'Y',{0x11,0x11,0x0A,0x04,0x04,0x04,0x04}}, {'Z',{0x1F,0x01,0x02,0x04,0x08,0x10,0x1F}},
++    {'0',{0x0E,0x11,0x13,0x15,0x19,0x11,0x0E}}, {'1',{0x04,0x0C,0x04,0x04,0x04,0x04,0x0E}},
++    {'2',{0x0E,0x11,0x01,0x02,0x04,0x08,0x1F}}, {'3',{0x1F,0x02,0x04,0x02,0x01,0x11,0x0E}},
++    {'4',{0x02,0x06,0x0A,0x12,0x1F,0x02,0x02}}, {'5',{0x1F,0x10,0x1E,0x01,0x01,0x11,0x0E}},
++    {'6',{0x06,0x08,0x10,0x1E,0x11,0x11,0x0E}}, {'7',{0x1F,0x01,0x02,0x04,0x08,0x08,0x08}},
++    {'8',{0x0E,0x11,0x11,0x0E,0x11,0x11,0x0E}}, {'9',{0x0E,0x11,0x11,0x0F,0x01,0x02,0x0C}},
++    {'.',{0x00,0x00,0x00,0x00,0x00,0x0C,0x0C}}, {'!',{0x04,0x04,0x04,0x04,0x04,0x00,0x04}},
++    {'-',{0x00,0x00,0x00,0x1F,0x00,0x00,0x00}}, {':',{0x00,0x0C,0x0C,0x00,0x0C,0x0C,0x00}},
++};
++static struct {
++    vk_buffer buf;
++    char      text[PS3_OSD_TEXT_MAX];
++    u32       w, h, scale;
++    int       fmt, failed;
++} s_osd;
++
++static const uint8_t* vk_osd_glyph(char c)
++{
++    for (size_t i = 0; i < sizeof k_osd_font / sizeof k_osd_font[0]; i++)
++        if (k_osd_font[i].c == c) return k_osd_font[i].r;
++    return NULL;                                  /* a space, or a character the font lacks */
++}
++
++/* Called between the window blit and the switch to PRESENT_SRC, with the
++ * swapchain image in TRANSFER_DST_OPTIMAL. The window present waits for its
++ * fence before returning, so the staging buffer is free to rewrite here. */
++static void vk_osd_draw(VkCommandBuffer cb, u32 idx)
++{
++    char text[PS3_OSD_TEXT_MAX];
++    if (!s_vk.sc_osd || s_osd.failed || !ps3_osd_current(text)) return;
++    const u32 W = s_vk.sc_extent.width, H = s_vk.sc_extent.height;
++    const u32 scale = H >= 360 ? H / 180 : 2, pad = 4 * scale, n = (u32)strlen(text);
++    const u32 bw = n * 6 * scale - scale + 2 * pad, bh = 7 * scale + 2 * pad, m = H / 30;
++    if (!n || bw + 2 * m > W || bh + 2 * m > H) return;
++    if (strcmp(text, s_osd.text) || scale != s_osd.scale || s_vk.sc_osd != s_osd.fmt) {
++        const VkDeviceSize need = (VkDeviceSize)bw * bh * 4;
++        if (s_osd.buf.size < need) {
++            if (s_osd.buf.buf) vk_destroy_buffer(&s_osd.buf);
++            if (vk_create_host_buffer(&s_osd.buf, need, VK_BUFFER_USAGE_TRANSFER_SRC_BIT) != 0 ||
++                !s_osd.buf.coherent) {           /* nothing here can flush a non-coherent write */
++                if (s_osd.buf.buf) vk_destroy_buffer(&s_osd.buf);
++                s_osd.failed = 1;
++                VK_LOG("no coherent host buffer for messages; they stay off\n");
++                return;
++            }
++        }
++        const u32 edge = scale / 2 ? scale / 2 : 1;
++        uint8_t* p = (uint8_t*)s_osd.buf.ptr;
++        for (u32 y = 0; y < bh; y++)
++            for (u32 x = 0; x < bw; x++, p += 4) {
++                uint8_t v = 24;                                         /* the box */
++                if (x < edge || y < edge || x >= bw - edge || y >= bh - edge) v = 170;
++                else if (x >= pad && y >= pad && x < bw - pad && y < bh - pad) {
++                    const u32 gx = x - pad, gy = (y - pad) / scale;
++                    const u32 ci = gx / (6 * scale), cx = gx % (6 * scale) / scale;
++                    const uint8_t* g = cx < 5 ? vk_osd_glyph(text[ci]) : NULL;
++                    if (g && (g[gy] & (0x10u >> cx))) v = 255;
++                }
++                p[0] = p[1] = p[2] = v; p[3] = 255;                     /* grey: RGBA and BGRA alike */
++            }
++        memcpy(s_osd.text, text, sizeof text);
++        s_osd.scale = scale; s_osd.w = bw; s_osd.h = bh; s_osd.fmt = s_vk.sc_osd;
++    }
++    /* After the blit's write to the same image. */
++    VkImageMemoryBarrier b = {
++        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
++        .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
++        .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
++        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++        .image = s_vk.sc_images[idx], .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 },
++    };
++    pvkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
++                          0, 0, NULL, 0, NULL, 1, &b);
++    VkBufferImageCopy region = {
++        .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
++        .imageOffset = { (int32_t)m, (int32_t)(H - bh - m), 0 }, .imageExtent = { bw, bh, 1 },
++    };
++    pvkCmdCopyBufferToImage(cb, s_osd.buf.buf, s_vk.sc_images[idx],
++                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
++}
++
+ static void vk_present_window(void)
+ {
+     if (!s_vk.windowed || !s_vk.swapchain) return;
+@@ -2117,6 +2220,7 @@ static void vk_present_window(void)
+     pvkCmdBlitImage(cb, s_vk.color.img, VK_IMAGE_LAYOUT_GENERAL,
+                     s_vk.sc_images[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                     1, &blit, VK_FILTER_LINEAR);
++    vk_osd_draw(cb, idx);
+     b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+     b.dstAccessMask = 0;
+     b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+-- 
+2.56.0.windows.3
+

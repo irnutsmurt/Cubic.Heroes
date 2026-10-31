@@ -520,17 +520,46 @@ void* prof_main(void* arg)
 namespace {
 constexpr unsigned k_prof_max = 400000, k_prof_depth = 20;
 
-unsigned prof_walk(HANDLE th, DWORD64* pc)
+/* A thread's stack, [lo, hi): its TEB's DeallocationStack (x64 TEB+0x1478, the
+ * reservation's bottom) and NT_TIB.StackBase. 0, 0 when the TEB cannot be read. */
+void prof_stack_bounds(HANDLE th, DWORD64* lo, DWORD64* hi)
+{
+    struct { LONG status; PVOID teb; ULONG_PTR client[2]; ULONG_PTR affinity; LONG prio, base; } tbi = {};
+    typedef LONG (NTAPI *query_fn)(HANDLE, int, PVOID, ULONG, PULONG);
+    static query_fn query = (query_fn)(void*)GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtQueryInformationThread");
+    *lo = *hi = 0;
+    if (!query || query(th, 0 /* ThreadBasicInformation */, &tbi, sizeof tbi, nullptr) != 0 || !tbi.teb) return;
+    DWORD64 base = 0, dealloc = 0; SIZE_T got = 0;
+    if (ReadProcessMemory(GetCurrentProcess(), (char*)tbi.teb + 8, &base, 8, &got) && got == 8 &&
+        ReadProcessMemory(GetCurrentProcess(), (char*)tbi.teb + 0x1478, &dealloc, 8, &got) && got == 8 &&
+        dealloc < base) { *lo = dealloc; *hi = base; }
+}
+
+/* RtlVirtualUnwind reads the suspended thread's stack directly, through Rsp or,
+ * for a function whose unwind info names a frame register, through that
+ * register. A walk that has gone wrong leaves garbage there, and the read
+ * faulted inside ntdll on this thread: DIAG_PROF took the game down in three
+ * profiled fights out of nine (reads at 0x41A40 and 0). So each step first
+ * checks that Rsp, and the frame register if the function has one, are inside
+ * the thread's stack, and the walk stops where they are not. (Catching the
+ * fault instead and jumping out of ntdll froze the game: something stays
+ * held.) The CONTEXT's integer registers sit in the unwind codes' order,
+ * Rax..R15. */
+unsigned prof_walk(HANDLE th, DWORD64 lo, DWORD64 hi, DWORD64* pc)
 {
     CONTEXT ctx; memset(&ctx, 0, sizeof ctx);
     ctx.ContextFlags = CONTEXT_FULL;
     if (!GetThreadContext(th, &ctx)) return 0;
+    auto in_stack = [&](DWORD64 a) { return a >= lo && a < hi; };
     unsigned n = 0;
     while (n < k_prof_depth && ctx.Rip) {
         pc[n++] = ctx.Rip;
+        if (!in_stack(ctx.Rsp)) break;             /* off its own stack: the walk went wrong */
         DWORD64 image = 0;
         PRUNTIME_FUNCTION fn = RtlLookupFunctionEntry(ctx.Rip, &image, nullptr);
         if (fn) {
+            const int fp = ((const BYTE*)(image + fn->UnwindData))[3] & 0x0F;   /* UNWIND_INFO.FrameRegister */
+            if (fp && !in_stack((&ctx.Rax)[fp])) break;
             void* handler_data; DWORD64 frame;
             RtlVirtualUnwind(UNW_FLAG_NHANDLER, image, ctx.Rip, fn, &ctx, &handler_data, &frame, nullptr);
         } else {                                  /* a leaf: the return address is on top */
@@ -552,7 +581,7 @@ void prof_main_win(unsigned start, unsigned dur)
     if (!pcs || !tids || !depth) return;
     fprintf(stderr, "[diag] profiling every thread for %u s\n", dur);
     const DWORD self = GetCurrentThreadId(), pid = GetCurrentProcessId();
-    struct Th { DWORD tid; HANDLE h; };
+    struct Th { DWORD tid; HANDLE h; DWORD64 lo, hi; };
     static Th ths[256]; int nt = 0;
     unsigned count = 0, tick = 0;
     const ULONGLONG t0 = GetTickCount64();
@@ -566,15 +595,19 @@ void prof_main_win(unsigned start, unsigned dur)
                 do {
                     if (te.th32OwnerProcessID != pid || te.th32ThreadID == self || nt >= 256) continue;
                     HANDLE h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT |
-                                          THREAD_QUERY_LIMITED_INFORMATION, FALSE, te.th32ThreadID);
-                    if (h) ths[nt++] = { te.th32ThreadID, h };
+                                          THREAD_QUERY_INFORMATION, FALSE, te.th32ThreadID);
+                    if (!h) continue;
+                    ths[nt] = { te.th32ThreadID, h, 0, 0 };
+                    prof_stack_bounds(h, &ths[nt].lo, &ths[nt].hi);
+                    if (ths[nt].hi) nt++;
+                    else CloseHandle(h);          /* no stack bounds, no safe walk */
                 } while (Thread32Next(snap, &te));
             }
             if (snap != INVALID_HANDLE_VALUE) CloseHandle(snap);
         }
         for (int k = 0; k < nt && count < k_prof_max; k++) {
             if (SuspendThread(ths[k].h) == (DWORD)-1) continue;
-            depth[count] = (unsigned char)prof_walk(ths[k].h, pcs[count]);
+            depth[count] = (unsigned char)prof_walk(ths[k].h, ths[k].lo, ths[k].hi, pcs[count]);
             ResumeThread(ths[k].h);
             tids[count++] = ths[k].tid;
         }

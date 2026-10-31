@@ -22,6 +22,10 @@ Environment
   SAVES=<dir>        seed the run's save data with a copy of this game's save
                      folders (BLUS30490*) found in <dir>, e.g. an emulator's
                      dev_hdd0/home/00000001/savedata. <dir> is only read.
+  GAMEDATA=<dir>     use <dir> as the game's data root (dev_hdd0, saves,
+                     trophies) in place, read and written, instead of a fresh
+                     per-run root: for play sessions whose saves must last, e.g.
+                     %LOCALAPPDATA%/dotheroes/gamedata. Not with SAVES.
   WINDOW=1           show the game's window (PS3RECOMP_VK_WINDOW=1). By default
                      nothing appears on the desktop: rendering is offscreen.
   AUDIO=1            play through the real audio device instead of SDL's dummy
@@ -83,7 +87,12 @@ def main():
     old = sorted(glob.glob(os.path.join(ROOT, "build", "test", "boot-*")))
     for d in old[:max(0, len(old) - max(keep - 1, 0))]:
         shutil.rmtree(d, ignore_errors=True)
-    gamedata = os.path.join(RUN, "gamedata")
+    # GAMEDATA=<dir>: play on a persistent save root in place; nothing is copied
+    # into the run, and retention never touches it.
+    gamedata = os.path.abspath(os.environ["GAMEDATA"]) if os.environ.get("GAMEDATA") else os.path.join(RUN, "gamedata")
+    if os.environ.get("GAMEDATA") and os.environ.get("SAVES"):
+        print("GAMEDATA and SAVES exclude each other: GAMEDATA is played in place")
+        return 2
     for d in ("dev_flash", "shots", gamedata):
         os.makedirs(os.path.join(RUN, d), exist_ok=True)
     open(os.path.join(RUN, "pad.txt"), "w").close()

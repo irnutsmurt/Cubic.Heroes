@@ -348,7 +348,57 @@ tooling, the native Windows build, measuring on the 3070) are done; see
    driver methods on subchannel 7 (patch 0048): the hit hero blinks pink/lavender like
    RPCS3 and a kill's flare is gone within a second.
    Still open: fighting there drops to 18-33 fps -- dead rabbits throw far
-   more debris than a tuft, ~3,000 Bullet tasks a second.
+   more debris than a tuft, ~3,000 Bullet tasks a second (item 9).
+9. **Fights and the wide river at 7-13 fps** (owner's session, 2026-10-31).
+   Bullet physics: its SPU tasks are `PS3_SPURS_BulletCD` (image 4, Bullet's
+   SpuNarrowPhaseCollisionTask) and `PS3_SPURS_BulletSolver` (image 5, the
+   libsync parallel solver). Two collision runs a step, then ~24 solver
+   phases of 3 tasks, each phase sequenced by the PPU. A slow frame makes
+   Bullet's fixed step catch up with 2-6 steps the next frame (4-12
+   collision runs, ~270 solver tasks): the spiral. Each step was slow for
+   two reasons, both emulation overhead, both fixed:
+   - The build targeted baseline x86-64 (SSE2), so lifted SPU code got the
+     byte-loop `shufb` and one-lane-at-a-time float helpers. On 301
+     identical collision runs (tests/scripts/grass_cut.drive): 3.77 ms each,
+     1.12 ms at x86-64-v2, 0.80 ms at v3. `zig_build.host_cpu()` picks v3
+     when the machine has AVX2/FMA/BMI2, else v2 (`DOTHEROES_CPU`
+     overrides); the shipped prebuilt runtime and dependencies stay at v2
+     (`PORTABLE_CPU`). The helpers stay exact at v3: test_spu_float_exact
+     446,840,832 lanes bit-identical, test_spu_shufb passes.
+   - Every SPU DMA command took the MFC registry's shared lock and walked
+     every live context, while each of ~4,000 tasks a second added and
+     removed its own under the exclusive lock: half the solver's time. The
+     per-thread lookup cache was there but off; now on
+     (`SPU_MFC_LOOKUP_CACHE=0` turns it off): 118 -> 59 us a solver task.
+   Same save and script, 10-s windows 60-120 s, before -> after: the river
+   (tests/scripts/fight_river.drive) 50 50 15 25 22 53 -> 56 50 53 60 fps,
+   frames over 50 ms 257 -> 0; the rabbit field (fight_field.drive)
+   40 13 51 -> 58 58 54 60, 170 -> 0. A step now takes ~2.8 ms (both
+   collision runs in parallel 0.8 ms, the solver ~2 ms). `PS3_FTRACE` has
+   each task run (kind 16) and tests/phys_frames.py tabulates them per frame.
+   What is left in a 25 ms fight frame against a 16.5 ms one: the RSX walker
+   9.7 against 3.7 ms, waits on the GPU 8.8 against 4.9 (2.9 of it "too
+   many frames in flight"), the PPU busy ~4 ms more, physics 3-5 ms.
+   GPU compute for Bullet is out: a CPU->GPU->CPU round trip on this queue
+   is 87 us median, 0.8 ms p90, and a step needs at least two, with ~24
+   PPU-sequenced solver phases on top. Native CPU Bullet in place of the two
+   tasks is the next step for physics; worth 2-4 ms of a fight frame.
+   Checked: five-minute soak 59.4-59.8 fps, p99 21-22 ms, longest stall
+   364 ms (was 1,288); two check-mode runs clean.
+   On the way, `DIAG_PROF` itself crashed the game in 3 of 9 profiled
+   fights: its Windows sampler's RtlVirtualUnwind read a garbage frame
+   pointer of a suspended thread. The walk now stops where Rsp or the
+   function's frame register leaves the thread's stack (port/diag/diag.cpp);
+   6 of 6 since. Catching the fault and jumping out of ntdll instead froze
+   the game.
+10. **"Saving doesn't bring up the save menu"** (owner, 2026-10-31). It
+    saved: the save-data module skips the PS3's system save list and takes
+    the slot the title offers, so nothing appeared. A save now shows GAME
+    SAVED (or SAVE FAILED) in the window's corner for a few seconds
+    (`include/ps3emu/osd.h`, drawn after the window blit; not in frame
+    dumps). The owner's active save lives in `%LOCALAPPDATA%\dotheroes\gamedata`
+    (a copy, verified, of the session's): play sessions use it in place with
+    `GAMEDATA=` (tests/boot_smoke.py); tests seed copies from it with `SAVES=`.
 
 ## Diagnostics and switches (environment variables)
 
@@ -371,6 +421,9 @@ tooling, the native Windows build, measuring on the 3070) are done; see
 | `RSX_BLEND_LOG=1` | draws using the constant blend colour, with the colour |
 | `PS3_VERBOSE=0` | quiet chatty logs even when stderr is redirected (timing runs) |
 | `RSX_FALLBACK_LOG=1` | draws that got the built-in programs, and why (missing vertex or fragment program) |
+| `SPU_MFC_LOOKUP_CACHE=0` | the per-thread MFC lookup cache off (on by default), for A/B |
+| `DOTHEROES_CPU=<zig cpu>` | build-time: the CPU level this machine compiles for (default its own: x86_64_v3 or x86_64_v2) |
+| `GAMEDATA=<dir>` | tests/boot_smoke.py: play on a persistent save root in place (`%LOCALAPPDATA%\dotheroes\gamedata`) |
 | `RSX_DROP_LOG=1`, `VK_DRAW_SKIP_LOG=1` | draws the engine / the Vulkan backend discard before drawing, with the reason |
 | `RSX_FP_DEBUG=<hash>:0:m` | paint that fragment program solid magenta: does the draw produce pixels at all |
 | `RSX_ENGINE_PASS_DUMP_FP=<hash>` | with `PASS_DUMP=1`: start the pass capture at the first draw through that program |
@@ -389,4 +442,4 @@ Edit in `build/ref/ps3recomp` (branch `dotheroes`), commit there as
 `git format-patch --start-number <next> -o ../../../patches/ps3recomp HEAD~<n>`
 and commit the patch files here. `tools/pipeline.py` refuses to run with
 uncommitted changes in that checkout, and re-applies the whole series when
-the patch files change. 50 patches as of this handoff.
+the patch files change. 53 patches as of this handoff.

@@ -1,0 +1,51 @@
+From a61578e1efcda1366c64d8e1a0883e0bb2f7b1f5 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Sat, 31 Oct 2026 10:27:06 -0700
+Subject: [PATCH 52/53] spu_channels: the MFC lookup cache on by default
+
+mfc_for runs on every MFC channel access. Without the per-thread cache it
+takes the registry's shared lock and walks every live context, while each
+async task adds and removes its own slot under the exclusive lock. 3D Dot
+Game Heroes' Bullet solver runs ~4,000 tasks a second in a fight, and its
+tasks spent half their time contending for that lock (DIAG_PROF: SRW
+acquire/release and the spin under it). With the cache, on the same 21,000
+solver runs of a grass-cut burst: 118 -> 59 us a task; with the build at
+x86-64-v3 as well, the fights that reached 13-25 fps hold 50-60.
+
+The cache's generation scheme was already there and default-off; it is
+unchanged. SPU_MFC_LOOKUP_CACHE=0 turns it off. A five-minute soak with
+and without it: the same frame-time pattern, 59.4 and 59.8 fps.
+---
+ runtime/spu/spu_channels.c | 9 +++++++--
+ 1 file changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/runtime/spu/spu_channels.c b/runtime/spu/spu_channels.c
+index b008b98..5bbca72 100644
+--- a/runtime/spu/spu_channels.c
++++ b/runtime/spu/spu_channels.c
+@@ -426,7 +426,12 @@ static DWORD WINAPI spu_pcsample_thread(LPVOID p)
+     }
+ }
+ 
+-/* Default-off memoization of the last virtual owner used by this host thread.
++/* Memoization of the last virtual owner used by this host thread; on unless
++ * SPU_MFC_LOOKUP_CACHE=0. Without it every MFC channel access took the
++ * registry's shared lock and walked every live context, while each async task
++ * adds and removes its own slot under the exclusive lock: 3D Dot Game Heroes'
++ * Bullet solver tasks (~4,000 a second in a fight) spent half their time
++ * contending for it, 118 -> 59 us a task with the cache.
+  * Engines remain registry-owned, not host-thread or physical-SPU-owned. A hit
+  * borrows exactly the same pointer as the locked path; both require the owner
+  * to stop before release/range cleanup. No context layout or memory is touched.
+@@ -449,7 +454,7 @@ static int spu_mfc_cache_enabled(void)
+     int value = atomic_load_explicit(&cached, memory_order_relaxed);
+     if (!value) {
+         const char* flag = getenv("SPU_MFC_LOOKUP_CACHE");
+-        value = flag && !strcmp(flag, "1") ? 2 : 1;
++        value = flag && !strcmp(flag, "0") ? 1 : 2;
+         atomic_store_explicit(&cached, value, memory_order_relaxed);
+     }
+     return value == 2;
+-- 
+2.56.0.windows.3
+

@@ -16,6 +16,17 @@ ROOT = (os.path.dirname(sys.executable) if getattr(sys, "frozen", False)
 TARGETS = {"linux": "x86_64-linux-gnu.2.31", "windows": "x86_64-windows-gnu"}
 HOST = "windows" if os.name == "nt" else "linux"
 
+# The prebuilt parts (runtime library, dependencies) run on any player's machine,
+# so they target x86-64-v2 (SSE4.2, SSSE3, POPCNT), which Windows 11 requires
+# anyway. Code a machine compiles for itself targets that machine's own level.
+# The baseline (SSE2) costs dearly in lifted SPU code: its shufb fell back to a
+# byte loop and its float helpers to one lane at a time, and 3D Dot Game Heroes'
+# Bullet collision task ran 3.77 ms a time instead of 0.80 ms at v3.
+PORTABLE_CPU = "x86_64_v2"
+_V3 = ("__AVX2__", "__BMI2__", "__FMA__", "__F16C__", "__LZCNT__", "__MOVBE__")
+_V2 = ("__SSE4_2__", "__SSSE3__", "__POPCNT__")
+_host_cpu = None
+
 
 class BuildError(Exception):
     pass
@@ -41,14 +52,35 @@ def find_zig():
     raise BuildError("no Zig toolchain found (build/toolchain/zig-*/ or PATH)")
 
 
-def cmake_toolchain(platform, zig=None, extra_include_after=()):
+def host_cpu(zig=None):
+    """The CPU level this machine compiles its own code for, as zig names it:
+    x86_64_v3 when the host has AVX2, FMA, BMI2 and the rest of v3, else
+    x86_64_v2 or the baseline. DOTHEROES_CPU=<zig cpu name> overrides."""
+    global _host_cpu
+    if os.environ.get("DOTHEROES_CPU"):
+        return os.environ["DOTHEROES_CPU"]
+    if _host_cpu is None:
+        import subprocess
+        r = subprocess.run([zig or find_zig(), "cc", "-mcpu=native", "-dM", "-E", "-x", "c", "-"],
+                           input="", capture_output=True, text=True)
+        have = set(l.split()[1] for l in r.stdout.splitlines() if l.startswith("#define "))
+        _host_cpu = ("x86_64_v3" if all(m in have for m in _V3 + _V2) else
+                     "x86_64_v2" if all(m in have for m in _V2) else "x86_64")
+    return _host_cpu
+
+
+def cmake_toolchain(platform, zig=None, extra_include_after=(), cpu=None):
     """A CMake toolchain file that compiles for `platform` with zig, through small
     wrapper scripts (CMake wants one executable per tool). Developer side only:
-    players' machines never run CMake. Returns its path."""
+    players' machines never run CMake. `cpu`: the zig CPU level, by default this
+    machine's (host_cpu); what is shipped prebuilt passes PORTABLE_CPU. Returns
+    its path."""
     zig = zig or find_zig()
-    d = os.path.join(ROOT, "build", "toolchain", "cmake-" + platform + ("-host" if extra_include_after else ""))
+    cpu = cpu or host_cpu(zig)
+    d = os.path.join(ROOT, "build", "toolchain", "cmake-" + platform + ("-host" if extra_include_after else "")
+                     + ("" if cpu == host_cpu(zig) else "-" + cpu))
     os.makedirs(d, exist_ok=True)
-    extra = "".join(f' -idirafter "{p}"' for p in extra_include_after)
+    extra = f" -mcpu={cpu}" + "".join(f' -idirafter "{p}"' for p in extra_include_after)
     tools = {}
     for name, cmd in (("cc", f"cc -target {TARGETS[platform]}{extra}"),
                       ("cxx", f"c++ -target {TARGETS[platform]}{extra}"),
@@ -207,6 +239,7 @@ def game_jobs(src, gen_dir, obj_dir, zig, platform=HOST):
     named by a fingerprint of source + flags + compiler + headers: existing means current."""
     gen_ppu, gen_spu = os.path.join(gen_dir, "recompiled"), os.path.join(gen_dir, "spu")
     inc = src.includes(gen_ppu)
+    cpu = ["-mcpu=" + host_cpu(zig)]
     common = _zig_version(zig).encode() + TARGETS[platform].encode() + headers_fingerprint(src, gen_ppu)
     groups = []
     groups += [(os.path.join(src.port, f), "c++", PORT_FLAGS) for f in PORT_SOURCES]
@@ -222,6 +255,7 @@ def game_jobs(src, gen_dir, obj_dir, zig, platform=HOST):
     groups += [(s, "cc", SPU_FLAGS) for s in spu]
     jobs = []
     for s, tool, flags in groups:
+        flags = flags + cpu
         h = hashlib.sha1(common + tool.encode() + " ".join(flags).encode())
         _file_hash(h, s)
         rel = os.path.relpath(s, gen_dir) if s.startswith(gen_dir) else os.path.basename(s)
@@ -371,7 +405,7 @@ def build_prebuilt(platform, ps3recomp, gen_ppu, log=print):
     work = os.path.join(ROOT, "build", "rel-" + platform)
     if not os.path.isdir(os.path.join(deps, "lib")):
         raise BuildError(f"run tools/build_deps.py --platform {platform} first")
-    tc = cmake_toolchain(platform)
+    tc = cmake_toolchain(platform, cpu=PORTABLE_CPU)
     subprocess.check_call(["cmake", "-S", os.path.join(ROOT, "port"), "-B", work, "-G", "Ninja",
                            f"-DCMAKE_TOOLCHAIN_FILE={tc}", "-DCMAKE_BUILD_TYPE=Release",
                            f"-DPS3RECOMP_DIR={ps3recomp}", f"-DRECOMP_DIR={gen_ppu}",
