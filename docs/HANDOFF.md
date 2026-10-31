@@ -431,9 +431,16 @@ tooling, the native Windows build, measuring on the 3070) are done; see
    the present lock, outside the lag. Active drain, profiled: the FIFO decode
    loop's own per-word work 30% (every word took the per-word diagnostic path
    because the draw engine counted as a diagnostic), draw recording ~57%
-   (NVIDIA driver ~22%). The in-flight waits come from render-target
-   thrash -- address 0 alternates 1280x720 <-> 1024x1024 in fights
-   (RSX_SURFACE_LOG=1), each switch recreating the target with two GPU
+   (NVIDIA driver ~22%). The run fast path for the engine (patch 0059;
+   GCM_WORD_LOOP=1 restores the loop) cut the loop's share 10.8% -> 4.2% of the
+   walker and active drain ~0.7-1.0 ms a frame, but the slow frames' lag only
+   13.7 -> 13.2 ms: the walker reaches its flushes sooner and waits longer on
+   the GPU. Displayed frames unchanged within noise (A/B in
+   build/baselines/2026-10-31-walker-wordloop). Checked in play only: the FIFO
+   unit tests (libs/video/tests/test_gcm_*) are not built on Windows and have
+   not run against it. Next: the in-flight waits come
+   from render-target thrash -- address 0 alternates 1280x720 <-> 1024x1024 in
+   fights (RSX_SURFACE_LOG=1), each switch recreating the target with two GPU
    syncs, 4.3 + 0.9 ms of a slow frame's lag.
    Frame dumps (PS3RECOMP_VK_DUMP, on in tests/boot_smoke.py unless DUMP=0)
    are written on the present path: every 60th frame took 10-20 ms longer.
@@ -479,6 +486,7 @@ tooling, the native Windows build, measuring on the 3070) are done; see
 | `SPU_MFC_LOOKUP_CACHE=0` | the per-thread MFC lookup cache off (on by default), for A/B |
 | `DOTHEROES_CPU=<zig cpu>` | build-time: the CPU level this machine compiles for (default its own: x86_64_v3 or x86_64_v2) |
 | `SPURS_SNAP=<entry>:<entry>:<n>:<prefix>` | guest memory before and after a Bullet step, for docs/BULLET_NATIVE.md (`tests/snap_read.py`) |
+| `GCM_WORD_LOOP=1` | every FIFO data word through the per-word decode loop, as before the run fast path (A/B) |
 | `RSX_SURFACE_LOG=1` | every colour render target the draw engine creates, and why (new address, resized, evicted) |
 | `DOTHEROES_NATIVE_CD=<0-3>` | the Bullet collision task: lifted (default), native (experimental), check (native against lifted, `[native-cd]` lines), self-check (native against itself rounding toward zero); `DOTHEROES_NATIVE_CD_DUMP=n` prints differing manifolds, `DOTHEROES_NATIVE_CD_FP=rz` runs native toward zero (docs/BULLET_NATIVE.md) |
 | `GAMEDATA=<dir>` | tests/boot_smoke.py: play on a persistent save root in place (`%LOCALAPPDATA%\dotheroes\gamedata`) |
@@ -500,4 +508,4 @@ Edit in `build/ref/ps3recomp` (branch `dotheroes`), commit there as
 `git format-patch --start-number <next> -o ../../../patches/ps3recomp HEAD~<n>`
 and commit the patch files here. `tools/pipeline.py` refuses to run with
 uncommitted changes in that checkout, and re-applies the whole series when
-the patch files change. 57 patches as of this handoff.
+the patch files change. 59 patches as of this handoff.

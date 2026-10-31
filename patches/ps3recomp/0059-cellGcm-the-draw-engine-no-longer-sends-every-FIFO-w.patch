@@ -1,0 +1,121 @@
+From a0650313a494afea57af761d17501424587d921f Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Sat, 31 Oct 2026 15:36:29 -0700
+Subject: [PATCH] cellGcm: the draw engine no longer sends every FIFO word the
+ slow way
+
+The per-word diagnostic switches and a mirrored draw engine shared one
+flag, so with the engine on -- every Vulkan title -- each data word went
+through the per-word loop: its IO offset translated, a dozen diagnostic
+switch tests, the word read again for each consumer. That loop's own time
+was 30% of the walker's drain passes in 3D Dot Game Heroes' fights.
+
+A method's run of words inside one 1 MB IO page, on any subchannel but 7,
+with the engine on and no per-word diagnostic, now takes a fast path like
+the existing engine-off one: the offset translated once, each word read
+once, and the same calls in the same order -- the engine fed and the 3D
+method for subchannel 0 (and 1 unless GCM_SUBCH1_2D), the 2D method for the
+others. Subchannel 7 (driver and user commands) and any diagnostic switch
+keep the loop; GCM_WORD_LOOP=1 keeps every word on it, for A/B.
+
+3D Dot Game Heroes, windowed river fight, native collision, three runs each
+way: the loop's share of the walker thread 10.8% -> 4.2%, active drain
+~0.7-1.0 ms a frame less; displayed frame times unchanged within noise (the
+walker then waits longer on the GPU batch in flight). Not yet run: the FIFO
+unit tests (libs/video/tests/test_gcm_*), which are not built on Windows.
+---
+ libs/video/cellGcmSys.c | 59 ++++++++++++++++++++++++++++++++++++-----
+ 1 file changed, 53 insertions(+), 6 deletions(-)
+
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index 489820b..df7d7d4 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -2121,17 +2121,25 @@ static int gcm_get_eq_put(void)
+     return eq;
+ }
+ 
+-/* Any per-word FIFO switch set, or a mirrored draw engine on. Read once per
+- * drain: the walker hands every data word through these checks, a million a
+- * second in God of War HD gameplay, and it used to test each switch on its
+- * own for every word. */
+-static int gcm_word_diag(void)
++/* Any per-word FIFO switch set (or the live draw mirror, which is one). Read
++ * once per drain: the walker hands every data word through these checks, a
++ * million a second in God of War HD gameplay, and it used to test each
++ * switch on its own for every word. */
++static int gcm_word_debug(void)
+ {
+     static int on = -1;
+     if (on < 0)
+         on = (getenv("GCM_SUBCH7") || getenv("GCM_OBJDBG") || getenv("GCM_SUBCH_GATE") || getenv("GCM_WORD_STATS") ||
+               getenv("GCM_VAL_WATCH") || getenv("GCM_METHOD_HIST") || getenv("RSX_LIVE_FEED_DBG") ||
+-              rsx_live_draw_enabled() || rsx_draw_engine_enabled()) ? 1 : 0;
++              rsx_live_draw_enabled()) ? 1 : 0;
++    return on;
++}
++
++/* ...or the mirrored draw engine on: every word goes the per-word way. */
++static int gcm_word_diag(void)
++{
++    static int on = -1;
++    if (on < 0) on = (gcm_word_debug() || rsx_draw_engine_enabled()) ? 1 : 0;
+     return on;
+ }
+ 
+@@ -2210,6 +2218,12 @@ static void gcm_rsx_process_fifo_unlocked(void)
+     if (!s_gcm_context_ea && !s_gcm_syscall_mode) return;
+     if (!s_inited) { rsx_state_init(&s_state); s_inited = 1; }
+     const int wdiag = gcm_word_diag();
++    const int wdebug = gcm_word_debug();
++    /* The per-word path wanted only for the draw engine: the run fast path
++     * below. GCM_WORD_LOOP=1 keeps every word on the per-word path (A/B). */
++    static int word_loop = -1;
++    if (word_loop < 0) { const char* e = getenv("GCM_WORD_LOOP"); word_loop = e && *e == '1'; }
++    const int weng = wdiag && !wdebug && !word_loop;
+     /* rsx_state feeds only the legacy vtable backend. With the draw engine
+      * up and no vtable registered, the state it builds is never read, and the
+      * only methods worth handing it are the ones with effects outside it
+@@ -2699,6 +2713,39 @@ static void gcm_rsx_process_fifo_unlocked(void)
+                     continue;
+                 }
+             }
++            /* The same with the draw engine on and no per-word diagnostic:
++             * what the per-word loop below does for these words, and only
++             * that -- the engine fed, then the 3D or 2D method -- with the
++             * offset translated once and each word read once. Subchannel 7
++             * (driver and user commands) keeps the loop. Most of the walker's
++             * own time went to that loop's per-word translation and switch
++             * tests (3D Dot Game Heroes: 30% of its drain passes). */
++            if (weng && count && subch != 7 &&
++                ((s_fifo_getoff + 4) >> 20) == ((s_fifo_getoff + count * 4) >> 20)) {
++                const u32 dea = gcm_io2ea(s_fifo_getoff + 4);
++                if (dea) {
++                    const int to3d = subch == 0 || (subch == 1 && !s1_2d);
++                    for (u32 i = 0; i < count; i++) {
++                        const u32 m = type == 0 ? method + i * 4 : method;
++                        const u32 v = vm_read32(dea + i * 4);
++                        if (to3d) {
++                            rsx_draw_engine_method((subch << 13) | m, v);
++                            gcm_3d_method(&s_state, m, v, legacy_state_live);
++                        } else {
++                            gcm_2d_method(subch, m, v);
++                        }
++                    }
++                    if (s_fifo_getoff < put && s_fifo_getoff + 4 + count * 4 > put) {
++                        static int n = 0;
++                        if (PS3_LOG_FIRST(n, 8))
++                            fprintf(stderr, "[cellGcmSys] FIFO method at 0x%08X (word 0x%08X, %u args) "
++                                    "runs past put 0x%08X\n", s_fifo_getoff, w, count, put);
++                        wr_note(8, s_fifo_getoff, w, put);
++                    }
++                    s_fifo_getoff += 4 + count * 4;
++                    continue;
++                }
++            }
+             for (u32 i = 0; i < count; i++) {
+                 u32 dea = gcm_io2ea(s_fifo_getoff + 4 + i * 4);
+                 if (!dea) break;
+-- 
+2.56.0.windows.3
+
