@@ -376,15 +376,33 @@ tooling, the native Windows build, measuring on the 3070) are done; see
    40 13 51 -> 58 58 54 60, 170 -> 0. A step now takes ~2.8 ms (both
    collision runs in parallel 0.8 ms, the solver ~2 ms). `PS3_FTRACE` has
    each task run (kind 16) and tests/phys_frames.py tabulates them per frame.
-   What is left in a 25 ms fight frame against a 16.5 ms one: the RSX walker
-   9.7 against 3.7 ms, waits on the GPU 8.8 against 4.9 (2.9 of it "too
-   many frames in flight"), the PPU busy ~4 ms more, physics 3-5 ms.
+   What is left in a slow fight frame, measured per frame with the frame
+   trace (tests/frame_costs.py: the walker's drain passes, each batch's GPU
+   time with VK_GPU_TIME=1, every wait, the main thread's sleep; the river
+   fight, no frame dumps):
+   | per frame | normal | 25-34 ms | 34-50 ms |
+   |---|---|---|---|
+   | draws / render passes | 640 / 52 | 935 / 55 | 951 / 55 |
+   | walker (its waits included) | 5.4 | 15.2 | 22.6 ms |
+   | waiting for the previous batch | 0.0 | 4.8 | 6.4 ms |
+   | GPU execution | 3.6 | 7.4 | 8.6 ms |
+   | main thread asleep | 8.7 | 2.5 | 1.7 ms |
+   | Bullet tasks running (wall) | 0.1 | 10.0 | 11.9 ms |
+   The PPU is the limit: busy nearly the whole frame, most of the extra
+   being its wait for the Bullet tasks (DIAG_PROF: 19% of the main thread
+   in a fight polls for them, 4% is Bullet's own PPU code). The GPU has
+   room (8.6 of 16.7 ms); the walker comes next (10-15 us a draw in those
+   frames against 8). Debris does not multiply draws or render passes: an
+   earlier reading of 2,300 draws and 140 passes a frame counted the GPU
+   batches that finished in a slow frame, two or three frames' worth.
    GPU compute for Bullet is out: a CPU->GPU->CPU round trip on this queue
    is 87 us median, 0.8 ms p90, and a step needs at least two, with ~24
    PPU-sequenced solver phases on top. Native CPU Bullet in place of the two
-   tasks is the next step for physics; worth 2-4 ms of a fight frame. What
-   the two tasks read and write is mapped in docs/BULLET_NATIVE.md (paused:
-   the debris rendering cost comes first).
+   tasks is the next step; what they read and write is mapped in
+   docs/BULLET_NATIVE.md.
+   Frame dumps (PS3RECOMP_VK_DUMP, on in tests/boot_smoke.py unless DUMP=0)
+   are written on the present path: every 60th frame took 10-20 ms longer.
+   Time with DUMP=0; for play sessions grab the window instead.
    Checked: five-minute soak 59.4-59.8 fps, p99 21-22 ms, longest stall
    364 ms (was 1,288); two check-mode runs clean.
    On the way, `DIAG_PROF` itself crashed the game in 3 of 9 profiled
@@ -410,7 +428,7 @@ tooling, the native Windows build, measuring on the 3070) are done; see
 | `DIAG_FPS=1` | guest flips per second every 10 s |
 | `DIAG_PROF=<start>,<secs>` | all-thread wall-clock sampler -> `profile.raw`; `tests/prof_report.py` |
 | `DIAG_DUMP_AT`, `DIAG_CRASH_DIR`, `DIAG_HANG_EXIT` | crash/hang reports |
-| `VK_WAIT_STATS=1`, `VK_GPU_TIME=1` | CPU waits on the GPU by call site; GPU time per 5 s |
+| `VK_WAIT_STATS=1`, `VK_GPU_TIME=1` | CPU waits on the GPU by call site; GPU time per 5 s and why render passes restarted; with `PS3_FTRACE`, per-batch GPU spans and per-frame draws (tests/frame_costs.py) |
 | `VK_DRAW_BATCH` (default on), `VK_DRAW_BATCH_MAX` | draw batching (4096 per submission) |
 | `RSX_VERTEX_CACHE=0`, `RSX_VERTEX_CACHE_STATS=1` | the cross-frame vertex cache |
 | `RSX_GEOM_CACHE=0`, `RSX_GEOM_CACHE_STATS=1` | resident geometry off; its counters every 5 s |
@@ -445,4 +463,4 @@ Edit in `build/ref/ps3recomp` (branch `dotheroes`), commit there as
 `git format-patch --start-number <next> -o ../../../patches/ps3recomp HEAD~<n>`
 and commit the patch files here. `tools/pipeline.py` refuses to run with
 uncommitted changes in that checkout, and re-applies the whole series when
-the patch files change. 54 patches as of this handoff.
+the patch files change. 55 patches as of this handoff.

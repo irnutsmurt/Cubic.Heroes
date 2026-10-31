@@ -1,0 +1,169 @@
+From db461bca2a7c050d763cc48e2a839e72c78365a0 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Sat, 31 Oct 2026 11:16:20 -0700
+Subject: [PATCH] Vulkan: GPU time, draws and render passes in the frame trace
+
+With VK_GPU_TIME=1 and PS3_FTRACE, each draw batch's measured GPU time is
+a span (kind 14) carrying its draws and uploads, the render passes begun
+and the full barriers recorded; each engine present marks the frame's
+draws and passes (kind 10, who 2). The [vk-gpu] line adds why passes
+restarted: already closed (and by which function), another framebuffer,
+or a draw sampling its own target.
+
+That splits a slow frame into the walker's CPU, the GPU's execution and
+every wait. In 3D Dot Game Heroes' debris-heavy fight frames (25-50 ms):
+~950 draws and 55 passes against 640 and 52, GPU 7.4-8.6 ms of the
+frame, the walker 10-15 us a draw, and the PPU busy nearly the whole
+frame waiting on Bullet's SPU tasks -- physics, not drawing, is the
+limit there. Counting draws per GPU batch instead had suggested 2,300 a
+frame: a slow frame sees two or three frames' batches finish.
+---
+ include/ps3emu/ps3_ftrace.h     |  4 ++-
+ libs/video/rsx_vulkan_backend.c | 59 +++++++++++++++++++++++++++++++--
+ 2 files changed, 59 insertions(+), 4 deletions(-)
+
+diff --git a/include/ps3emu/ps3_ftrace.h b/include/ps3emu/ps3_ftrace.h
+index acec8c4..7c8c11f 100644
+--- a/include/ps3emu/ps3_ftrace.h
++++ b/include/ps3emu/ps3_ftrace.h
+@@ -56,7 +56,9 @@ enum ps3_ft_kind {
+     PS3_FT_READBACK    = 13, /* Metal: render target read back to the CPU, a = w, b = h */
+     PS3_FT_GPU_EXEC    = 14, /* Metal: a command buffer's own GPU time, ending when the CPU saw it
+                               * complete; who = render passes, a = depth resolves | colour copies << 16,
+-                              * b = 1 present / 0 flush */
++                              * b = 1 present / 0 flush. Vulkan (with VK_GPU_TIME=1): a batch's
++                              * measured GPU time, who = draws and uploads in it, a = render
++                              * passes begun, b = full barriers */
+     PS3_FT_HLE         = 15, /* who = PPU tid, a = NID, b = guest lr: an HLE import call */
+     PS3_FT_SPU_TASK    = 16, /* an async SPU task's run on a host thread: who = host tid,
+                               * a = lifted image, b = us from its dispatch to its start */
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index 5071f12..3cd5527 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -660,10 +660,25 @@ static void vk_device_idle(void)
+  * fresh render pass is needed. Anything else recorded into the batch -- a
+  * clear, a copy, an upload, the flush itself -- closes it first. */
+ static struct { int open; VkFramebuffer fb; } s_rp;
++/* Render passes begun and full barriers recorded in the open batch, for its
++ * PS3_FTRACE GPU span (vk_gt_collect). */
++static u32 s_ft_rp_begins, s_ft_full_barriers;
++/* VK_GPU_TIME: why each batched draw began a new render pass -- the pass was
++ * already closed (by a clear, copy, upload, flush: which, by function), another
++ * framebuffer, or the draw samples its own target. */
++static unsigned long long s_rp_why[3];
++static u32 s_frame_draws, s_frame_passes;        /* this frame's, for its present's PS3_FTRACE mark */
++static const char* s_rp_closer = "?";
++static unsigned long long s_rp_closers[8];
++static const char* s_rp_closer_name[8];
++
+ static void vk_rp_close(void)
+ {
+     if (s_rp.open) { pvkCmdEndRenderPass(s_vk.cmd); s_rp.open = 0; s_rp.fb = VK_NULL_HANDLE; }
+ }
++/* Every caller from here on also notes itself as the closer, for the [vk-gpu]
++ * line (a function-like macro does not expand inside its own body). */
++#define vk_rp_close() (s_rp_closer = __func__, vk_rp_close())
+ 
+ static void vk_cmd_after_everything(VkCommandBuffer cb)
+ {
+@@ -672,6 +687,7 @@ static void vk_cmd_after_everything(VkCommandBuffer cb)
+                            .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT };
+     pvkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                           VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
++    s_ft_full_barriers++;
+ }
+ 
+ /* VK_GPU_TIME=1: GPU execution time of the engine's submissions (timestamp
+@@ -679,6 +695,8 @@ static void vk_cmd_after_everything(VkCommandBuffer cb)
+  * clock. Tells a GPU-bound frame from a CPU-bound one. */
+ static struct {
+     int on; VkQueryPool pool; VkCommandBuffer cb0; u8 state[2];
++    u32 draws[2], rps[2], bars[2];   /* per command buffer, for its PS3_FTRACE span: draws and
++                                      * uploads, render passes begun, full barriers */
+     double period_ns, ms, t0; unsigned n;
+ } s_gt = { .on = -1 };
+ static u32 vk_gt_base(VkCommandBuffer cb)
+@@ -722,13 +740,29 @@ static void vk_gt_collect(VkCommandBuffer cb)   /* after its fence */
+     uint64_t ts[2];
+     if (pvkGetQueryPoolResults(s_vk.device, s_gt.pool, b, 2, sizeof ts, ts, sizeof ts[0],
+                                VK_QUERY_RESULT_64_BIT) != VK_SUCCESS) return;
+-    s_gt.ms += (double)(ts[1] - ts[0]) * s_gt.period_ns * 1e-6; s_gt.n++;
++    const double gpu_ns = (double)(ts[1] - ts[0]) * s_gt.period_ns;
++    s_gt.ms += gpu_ns * 1e-6; s_gt.n++;
++    /* PS3_FTRACE: the submission's own GPU time as a span ending when the CPU
++     * saw it complete (its start is that minus the GPU time: the placement is
++     * approximate, the length is measured), who = draws and uploads in it. */
++    if (PS3_FT_ON()) {
++        const uint64_t t1 = ps3_ft_now();
++        ps3_ft_span(PS3_FT_GPU_EXEC, s_gt.draws[b >> 1], s_gt.rps[b >> 1], s_gt.bars[b >> 1],
++                    t1 - (uint64_t)gpu_ns, t1);
++    }
+     struct timespec t; vk_monotonic(&t);
+     const double now = t.tv_sec + t.tv_nsec * 1e-9;
+     if (!s_gt.t0) s_gt.t0 = now;
+     if (now - s_gt.t0 >= 5.0) {
+-        fprintf(stderr, "[vk-gpu] %.1f s: %u submissions, GPU %.0f ms (%.0f%%)\n",
+-                now - s_gt.t0, s_gt.n, s_gt.ms, s_gt.ms / ((now - s_gt.t0) * 10.0));
++        fprintf(stderr, "[vk-gpu] %.1f s: %u submissions, GPU %.0f ms (%.0f%%); new passes: closed %llu,"
++                " other fb %llu, feedback %llu; closed by", now - s_gt.t0, s_gt.n, s_gt.ms,
++                s_gt.ms / ((now - s_gt.t0) * 10.0), s_rp_why[0], s_rp_why[1], s_rp_why[2]);
++        for (int k = 0; k < 8 && s_rp_closer_name[k]; k++) {
++            fprintf(stderr, " %s %llu", s_rp_closer_name[k], s_rp_closers[k]);
++            s_rp_closers[k] = 0;
++        }
++        fprintf(stderr, "\n");
++        memset(s_rp_why, 0, sizeof s_rp_why);
+         s_gt.ms = 0; s_gt.n = 0; s_gt.t0 = now;
+     }
+ }
+@@ -2735,6 +2769,10 @@ static void vk_eng_clear_depth_stencil(void* user, u32 depth, u32 flags,
+  * the existing present does the readback, the PPM dump and the window. */
+ static void vk_eng_present(void* user, u32 surface)
+ {
++    /* PS3_FTRACE: the frame's draws and render passes, marked at its present
++     * (who 2; tests/frame_costs.py). The game presents twice a frame. */
++    if (PS3_FT_ON()) { const uint64_t t = ps3_ft_now(); ps3_ft_span(PS3_FT_PRESENT, 2, s_frame_draws, s_frame_passes, t, t); }
++    s_frame_draws = s_frame_passes = 0;
+     (void)user;
+     if (!s_vk.device) return;
+     if (s_eb_pending) vk_eng_flush();   /* the present records on its own buffer */
+@@ -3949,6 +3987,11 @@ static void vk_eng_flush_at(int line)
+ {
+     if (!s_eb_pending) return;
+     vk_rp_close();
++    if (s_gt.on > 0) {
++        const u32 g = vk_gt_base(s_vk.cmd) >> 1;
++        s_gt.draws[g] = s_eb_pending; s_gt.rps[g] = s_ft_rp_begins; s_gt.bars[g] = s_ft_full_barriers;
++    }
++    s_ft_rp_begins = s_ft_full_barriers = 0;
+     s_eb_pending = 0;               /* first: the submit below must not re-enter */
+     s_flush_line = line;
+     if (!s_eb.alt_cmd) {
+@@ -4339,6 +4382,15 @@ static void vk_eng_draw_from(rsx_topology topology, const void* vertices, u32 ve
+         }
+     }
+     const int continue_rp = batched && s_rp.open && s_rp.fb == fb && !feedback;
++    s_frame_draws++;
++    if (!continue_rp && batched) {
++        const int why = !s_rp.open ? 0 : s_rp.fb != fb ? 1 : 2;
++        s_rp_why[why]++;
++        if (!why) for (int k = 0; k < 8; k++) {
++            if (!s_rp_closer_name[k]) s_rp_closer_name[k] = s_rp_closer;
++            if (s_rp_closer_name[k] == s_rp_closer) { s_rp_closers[k]++; break; }
++        }
++    }
+     if (!continue_rp) {
+         vk_rp_close();
+         if (batched) vk_cmd_after_everything(s_vk.cmd);
+@@ -4351,6 +4403,7 @@ static void vk_eng_draw_from(rsx_topology topology, const void* vertices, u32 ve
+                                       .renderArea = { { 0, 0 }, { w, h } } };
+         pvkCmdBeginRenderPass(s_vk.cmd, &rbi, VK_SUBPASS_CONTENTS_INLINE);
+         s_rp.open = 1; s_rp.fb = fb;
++        s_ft_rp_begins++; s_frame_passes++;
+     }
+     pvkCmdBindPipeline(s_vk.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+     VkViewport vp = { 0.0f, 0.0f, (float)w, (float)h, 0.0f, 1.0f };
+-- 
+2.56.0.windows.3
+

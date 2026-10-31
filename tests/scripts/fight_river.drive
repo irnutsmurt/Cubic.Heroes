@@ -1,7 +1,8 @@
-# Fights for physics timing at the wide river east of the castle (the scene
-# that reached 7-13 fps): from a save with the sword, east along the moat's
-# river to its bank, then swing in every direction for ~30 s. Needs a save
-# past the sword; seed it with SAVES=. tests/phys_frames.py reads the trace.
+# Fights for timing at the wide river east of the castle (the scene that
+# reached 7-13 fps): from a save with the sword, east along the moat's river
+# to its bank, then swing in every direction for ~30 s. Needs a save past the
+# sword (SAVES=). No shots, so it runs with DUMP=0; tests/phys_frames.py and
+# tests/frame_costs.py read its PS3_FTRACE file.
 log TitleMovie 120
 sleep 5
 press START
@@ -18,7 +19,6 @@ hold RIGHT 4
 hold RIGHT 2.5
 hold UP 1.5
 hold RIGHT 2
-shot river
 
 hold RIGHT 0.15
 repeat 2 CROSS 0.35
@@ -84,5 +84,4 @@ hold LEFT 0.15
 repeat 2 CROSS 0.35
 hold UP 0.15
 repeat 2 CROSS 0.35
-shot end
 sleep 10
