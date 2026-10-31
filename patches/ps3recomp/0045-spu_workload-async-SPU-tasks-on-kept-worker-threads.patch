@@ -1,0 +1,309 @@
+From 3d6582565b65abc0776f5607bd01e196283f9758 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Sat, 31 Oct 2026 07:34:12 -0700
+Subject: [PATCH 45/50] spu_workload: async SPU tasks on kept worker threads
+
+A cut grass tuft in 3D Dot Game Heroes throws debris that Bullet
+simulates on SPU: per step one BulletCD task and ~70 BulletSolver tasks,
+~2,000 a second while it settles, created on the main thread, which then
+polls for their results. Each task got a host thread of its own, created
+at dispatch: ~116 us before it started and 361 us to run cold, and the
+frame rate fell under 40 (6-40 fps in the owner's play session).
+
+Now a task goes to an idle worker, and a new worker is made only when
+none is idle, so as many tasks run at once as before (a task may block in
+WAIT_SIGNAL until another signals it) and the threads are kept. Running
+tasks on the dispatching thread instead hangs the game: they wait on one
+another. Image 22 (the cri task) still gets a thread per task: its EXIT
+handling counts calls per thread. SPU_POOL=0 is the old way.
+
+tests/scripts/grass_cut.drive: starting a task 116 -> 4 us, running one
+361 -> 122 us, the burst at 51-56 fps instead of ~40, worst frame 34 ms
+instead of 110.
+
+Also SPU_TASKPROF=<secs>, where an async task's wall time goes per image
+(start, setup, run, rest), and the per-task log lines (dispatch HIT,
+taskset context built, RETURNED) down to the first 48, SPU_TASK_LOG=1 for
+all: three lines a task, one flushed, were 65 MB in a three-minute
+session.
+---
+ runtime/spu/spu_workload.c | 191 +++++++++++++++++++++++++++++++++++--
+ 1 file changed, 183 insertions(+), 8 deletions(-)
+
+diff --git a/runtime/spu/spu_workload.c b/runtime/spu/spu_workload.c
+index 24d4180..b6d1141 100644
+--- a/runtime/spu/spu_workload.c
++++ b/runtime/spu/spu_workload.c
+@@ -26,6 +26,20 @@
+ static void spu_workload_report_miss(const char* path, uint64_t fp, uint32_t size,
+                                      uint32_t owner_ea);   /* below */
+ 
++/* The async task path's per-task lines (dispatch HIT, the taskset context
++ * built, RETURNED): the first ones, then only with SPU_TASK_LOG=1. 3D Dot
++ * Game Heroes runs ~2,000 Bullet physics tasks a second while a cut tuft's
++ * debris settles, and three lines each (one flushed) through the one stderr
++ * lock were 65 MB in a three-minute session -- the starvation the SPURS job
++ * path's per-job lines were quietened for (spu_workload_dispatch_job). */
++static int spu_task_log(void)
++{
++    static int all = -1;
++    static unsigned n;   /* racy, and only ever a few lines off */
++    if (all < 0) all = getenv("SPU_TASK_LOG") ? 1 : 0;
++    return all || n++ < 48;
++}
++
+ /* Set by the MFC DMA engine (spu_dma.h) when the cri task (image 22) issues a
+  * real video-payload GET (>256B from a non-context EA) = it actually decoded,
+  * as opposed to the 64-byte context handshake DMAs. The dispatcher's
+@@ -392,6 +406,8 @@ typedef struct {
+     int                 have_r3;
+     uint32_t            taskset_ea;   /* captured race-free at dispatch (globals get clobbered) */
+     uint32_t            taskid;
++    double              t_disp;       /* SPU_TASKPROF: when it was dispatched */
++    void*               next;         /* the worker pool's queue */
+ } spu_async_job;
+ 
+ /* ---- Persistent per-taskset local store (LBP_PERSIST_LS) ------------------
+@@ -693,8 +709,43 @@ void spu_taskset_start_pending(uint32_t taskset_ea)
+     if (taskset_ea) spu_taskset_task_exited(taskset_ea, 0xFFFFFFFFu);
+ }
+ 
++/* SPU_TASKPROF=<secs>: where an async task's wall time goes, per image,
++ * printed every <secs>: waiting for its thread to start, setting up its
++ * local store (alloc, ELF load, context), running, and the rest. */
++static double spu_taskprof_now(void)
++{ struct timespec t; timespec_get(&t, TIME_UTC); return t.tv_sec + t.tv_nsec * 1e-9; }
++static void spu_taskprof_add(int image, double disp, double enter, double r0, double r1, double done)
++{
++    static int secs = -1;
++    if (secs < 0) { const char* e = getenv("SPU_TASKPROF"); secs = e ? atoi(e) : 0; }
++    if (!secs || !disp) return;
++    static double acc[64][4], last; static unsigned cnt[64];
++#ifdef _WIN32
++    static SRWLOCK lk = SRWLOCK_INIT; AcquireSRWLockExclusive(&lk);
++#else
++    static pthread_mutex_t lk = PTHREAD_MUTEX_INITIALIZER; pthread_mutex_lock(&lk);
++#endif
++    const unsigned k = (unsigned)image & 63u;
++    acc[k][0] += enter - disp; acc[k][1] += r0 - enter; acc[k][2] += r1 - r0; acc[k][3] += done - r1; cnt[k]++;
++    if (!last) last = done;
++    if (done - last >= secs) {
++        for (unsigned i = 0; i < 64; i++) if (cnt[i])
++            fprintf(stderr, "[taskprof] image=%u n=%u avg us: start %.1f setup %.1f run %.1f rest %.1f\n",
++                    i, cnt[i], acc[i][0] / cnt[i] * 1e6, acc[i][1] / cnt[i] * 1e6,
++                    acc[i][2] / cnt[i] * 1e6, acc[i][3] / cnt[i] * 1e6);
++        memset(acc, 0, sizeof acc); memset(cnt, 0, sizeof cnt); last = done;
++    }
++#ifdef _WIN32
++    ReleaseSRWLockExclusive(&lk);
++#else
++    pthread_mutex_unlock(&lk);
++#endif
++}
++
+ static void spu_async_run(spu_async_job* j)
+ {
++    const double t_enter = j->t_disp ? spu_taskprof_now() : 0;
++    double t_r0 = 0, t_r1 = 0;
+     spu_taskset_mark(j->taskset_ea, j->taskid, 1);
+     /* Persistent per-taskset LS: acquire (+serialize) the taskset's LS, or fall
+      * back to a fresh per-dispatch LS when disabled / no taskset. */
+@@ -892,9 +943,11 @@ static void spu_async_run(spu_async_job* j)
+                  * both audio tasks run task 1's descriptor). */
+                 if (j->taskset_ea) {
+                     spurs_pm_build_context(ls, j->taskset_ea, j->taskid, 0, 0);
+-                    fprintf(stderr, "[taskset] built SpursTasksetContext image=%d "
+-                            "taskset=0x%08X task=%u\n", j->image_id,
+-                            j->taskset_ea, j->taskid); fflush(stderr);
++                    if (spu_task_log()) {
++                        fprintf(stderr, "[taskset] built SpursTasksetContext image=%d "
++                                "taskset=0x%08X task=%u\n", j->image_id,
++                                j->taskset_ea, j->taskid); fflush(stderr);
++                    }
+                 }
+             }
+             /* ---- Bink-layer probe + real-policy A/B (image 3 = binkspu) ----
+@@ -980,6 +1033,7 @@ static void spu_async_run(spu_async_job* j)
+                 #undef RDBE32
+             }
+             spu_serial_acquire();       /* one SPU task runs at a time (LBP_SPU_SERIAL) */
++            if (t_enter) t_r0 = spu_taskprof_now();
+             int32_t rc = spu_run_lifted_job_abi(j->fn, ls, j->args_ea, j->image_id,
+                                                 1, j->have_r3 ? j->r3 : 0, 0);
+             /* YDKJ_CRI_RESUME: a real SPURS task is PERSISTENT -- on yield (num=0)
+@@ -1032,8 +1086,10 @@ static void spu_async_run(spu_async_job* j)
+                   FILE* f = fopen(path, "wb");
+                   if (f) { fwrite(ls, 1, SPU_LS_SIZE, f); fclose(f);
+                       fprintf(stderr, "[spu_workload] wrote local store -> %s\n", path); } } }
+-            fprintf(stderr, "[spu_workload] async image=%d RETURNED rc=%d "
+-                    "(job ran to completion, did not loop)\n", j->image_id, rc);
++            if (t_enter) t_r1 = spu_taskprof_now();
++            if (spu_task_log())
++                fprintf(stderr, "[spu_workload] async image=%d RETURNED rc=%d "
++                        "(job ran to completion, did not loop)\n", j->image_id, rc);
+             spu_serial_release();
+             if (j->taskset_ea) spu_taskset_task_exited(j->taskset_ea, j->taskid);
+         }
+@@ -1048,6 +1104,7 @@ static void spu_async_run(spu_async_job* j)
+         pthread_mutex_unlock(&ts_slot->lock);
+ #endif
+     }
++    if (t_r1) spu_taskprof_add(j->image_id, j->t_disp, t_enter, t_r0, t_r1, spu_taskprof_now());
+     free(j);
+ }
+ 
+@@ -1070,6 +1127,116 @@ static DWORD WINAPI spu_async_thread(LPVOID p) {
+ static void* spu_async_thread(void* p) { spu_async_run((spu_async_job*)p); return NULL; }
+ #endif
+ 
++/* ---- Worker pool for async tasks --------------------------------------------
++ * A task used to get a host thread of its own, created at dispatch and gone
++ * when it returned. 3D Dot Game Heroes runs ~2,000 Bullet physics tasks a
++ * second while a cut tuft's debris settles, created on its main thread, which
++ * then polls for their results: ~116 us before each started (SPU_TASKPROF),
++ * and the creates on the main thread, took the frame rate under 40.
++ *
++ * Now a task goes to an idle worker, and a new worker is made only when none
++ * is idle -- so as many tasks run at once as before (a task may block in
++ * WAIT_SIGNAL until another one signals it), and the threads are kept.
++ * Starting a task fell to ~4 us and running one from 361 to 122 us (a fresh
++ * thread ran cold), and the burst from ~40 to 51-56 fps (tests/scripts/
++ * grass_cut.drive). Kept threads also show up in DIAG_PROF, which samples
++ * the threads alive when it starts. Running tasks on the dispatching thread
++ * instead hangs the game: these tasks wait on one another.
++ * Image 22 (the cri task) still gets a thread per task: its EXIT handling
++ * counts calls per thread (spu_channels.c). SPU_POOL=0 is the old way. */
++#define SPU_POOL_MAX 256          /* past this, a thread per task again */
++static spu_async_job *s_pool_head, *s_pool_tail;
++static unsigned s_pool_idle, s_pool_pending, s_pool_threads;
++#ifdef _WIN32
++static SRWLOCK s_pool_lock = SRWLOCK_INIT;
++static CONDITION_VARIABLE s_pool_cv = CONDITION_VARIABLE_INIT;
++#define POOL_LOCK()   AcquireSRWLockExclusive(&s_pool_lock)
++#define POOL_UNLOCK() ReleaseSRWLockExclusive(&s_pool_lock)
++#define POOL_WAIT()   SleepConditionVariableSRW(&s_pool_cv, &s_pool_lock, INFINITE, 0)
++#define POOL_WAKE()   WakeConditionVariable(&s_pool_cv)
++#else
++static pthread_mutex_t s_pool_lock = PTHREAD_MUTEX_INITIALIZER;
++static pthread_cond_t s_pool_cv = PTHREAD_COND_INITIALIZER;
++#define POOL_LOCK()   pthread_mutex_lock(&s_pool_lock)
++#define POOL_UNLOCK() pthread_mutex_unlock(&s_pool_lock)
++#define POOL_WAIT()   pthread_cond_wait(&s_pool_cv, &s_pool_lock)
++#define POOL_WAKE()   pthread_cond_signal(&s_pool_cv)
++#endif
++
++#ifdef _WIN32
++static DWORD WINAPI spu_pool_worker(LPVOID unused)
++#else
++static void* spu_pool_worker(void* unused)
++#endif
++{
++    (void)unused;
++    ps3_thread_name("spu job");
++#ifdef _WIN32
++    { ULONG g = 256 * 1024; SetThreadStackGuarantee(&g); }   /* as spu_async_thread */
++    ULONG_PTR lo, hi; GetCurrentThreadStackLimits(&lo, &hi);
++#endif
++    for (;;) {
++        POOL_LOCK();
++        while (!s_pool_head) { s_pool_idle++; POOL_WAIT(); s_pool_idle--; }
++        spu_async_job* j = s_pool_head;
++        s_pool_head = (spu_async_job*)j->next;
++        if (!s_pool_head) s_pool_tail = NULL;
++        s_pool_pending--;
++        POOL_UNLOCK();
++        spu_async_run(j);
++#ifdef _WIN32
++        /* What a task's thread did when it ended: nothing on this stack may
++         * stay in the lock-line reserver set for the next task. */
++        { extern void spu_coh_forget_range(uintptr_t, uintptr_t);
++          spu_coh_forget_range((uintptr_t)lo, (uintptr_t)hi);
++          spu_mfc_forget_range((uintptr_t)lo, (uintptr_t)hi); }
++#endif
++    }
++#ifdef _WIN32
++    return 0;
++#else
++    return NULL;
++#endif
++}
++
++/* 1: queued for a worker. 0: the caller gives the task a thread of its own. */
++static int spu_pool_submit(spu_async_job* j)
++{
++    static int on = -1;
++    if (on < 0) { const char* e = getenv("SPU_POOL"); on = !(e && e[0] == '0'); }
++    if (!on || j->image_id == 22) return 0;
++    POOL_LOCK();
++    /* An idle worker for this task too, or a new one. Workers waking from an
++     * earlier wake still count as idle, so this can spawn one more than
++     * needed now and then; it is never one too few. */
++    const int spawn = s_pool_idle <= s_pool_pending;
++    if (spawn && s_pool_threads >= SPU_POOL_MAX) { POOL_UNLOCK(); return 0; }
++    j->next = NULL;
++    if (s_pool_tail) s_pool_tail->next = j; else s_pool_head = j;
++    s_pool_tail = j;
++    s_pool_pending++;
++    if (spawn) s_pool_threads++;
++    else POOL_WAKE();
++    POOL_UNLOCK();
++    if (!spawn) return 1;
++#ifdef _WIN32
++    /* The same 256 MB stack reservation as a task's own thread (below). */
++    HANDLE th = CreateThread(NULL, 256u << 20, spu_pool_worker, NULL,
++                             STACK_SIZE_PARAM_IS_A_RESERVATION, NULL);
++    if (th) { CloseHandle(th); return 1; }
++#else
++    pthread_t th; pthread_attr_t attr; pthread_attr_init(&attr);
++    int prc = pthread_attr_setstacksize(&attr, 256u << 20) == 0
++            ? pthread_create(&th, &attr, spu_pool_worker, NULL) : EINVAL;
++    pthread_attr_destroy(&attr);
++    if (prc != 0) prc = pthread_create(&th, NULL, spu_pool_worker, NULL);
++    if (prc == 0) { pthread_detach(th); return 1; }
++#endif
++    /* No worker could be made: the task is queued and runs when one frees. */
++    POOL_LOCK(); s_pool_threads--; POOL_UNLOCK();
++    return 1;
++}
++
+ int spu_workload_dispatch_job(const uint8_t* image, uint32_t image_size,
+                               uint32_t job_ea, uint32_t job_desc_size)
+ {
+@@ -1577,6 +1744,8 @@ int spu_workload_dispatch_async(const uint8_t* image, uint32_t image_size,
+     if (!j) return 0;
+     j->image = image; j->image_size = image_size; j->args_ea = args_ea;
+     j->fn = fn; j->image_id = image_id;
++    { static int prof = -1; if (prof < 0) prof = getenv("SPU_TASKPROF") ? 1 : 0;
++      j->t_disp = prof ? spu_taskprof_now() : 0; }
+     /* Capture the taskset+taskid NOW (PPU thread, right after cellSpursCreateTask
+      * set the globals for THIS task). Reading them later in the async thread races
+      * the next CreateTask overwriting the single-slot globals -- with two audio
+@@ -1601,9 +1770,13 @@ int spu_workload_dispatch_async(const uint8_t* image, uint32_t image_size,
+         if ((j->r3[0] >> 16) == 0x40) j->have_r3 = 1;   /* valid marker */
+     }
+ 
+-    fprintf(stderr,
+-        "[spu_workload] dispatch HIT (async) fp=0x%016llX args=0x%08X image=%d -> spawning thread\n",
+-        (unsigned long long)fp, args_ea, image_id);
++    if (spu_task_log())
++        fprintf(stderr,
++            "[spu_workload] dispatch HIT (async) fp=0x%016llX args=0x%08X image=%d -> spawning thread\n",
++            (unsigned long long)fp, args_ea, image_id);
++    { static unsigned long long total;   /* the rate, without the per-task lines */
++      if (++total % 5000 == 0)
++          fprintf(stderr, "[spu_workload] %llu async SPU tasks dispatched\n", total); }
+     if (args_ea) { extern uint8_t* vm_base; const uint8_t* c = vm_base + args_ea;
+         static int _d=0; if (PS3_LOG_FIRST(_d, 1)) {
+             /* Dump a larger window of the task context buffer + scan for any word
+@@ -1630,6 +1803,8 @@ int spu_workload_dispatch_async(const uint8_t* image, uint32_t image_size,
+                 fprintf(stderr, "\n");
+             } } }
+ 
++    if (spu_pool_submit(j)) return 1;
++
+ #ifdef _WIN32
+     /* 256MB RESERVE (not commit): the Bink SPU decoder's per-macroblock brsl
+      * chains are deep host call chains with fat lifted frames -- a 1MB stack
+-- 
+2.56.0.windows.3
+

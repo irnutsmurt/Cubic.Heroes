@@ -1,0 +1,243 @@
+From 3c4a11330bfe6a8971c2e10939f0eb4ed826211f Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Sat, 31 Oct 2026 07:34:14 -0700
+Subject: [PATCH 50/50] Draw engine diagnostics: dropped draws, fallback
+ programs, capture by program
+
+- RSX_DROP_LOG=1: each draw the engine discards before the backend, and
+  why (fetch failed, mixed sources, no target, no pipeline, ...).
+- VK_DRAW_SKIP_LOG=1: the same for the Vulkan backend's silent exits.
+- RSX_FALLBACK_LOG=1: each draw that gets the built-in programs, which of
+  the two was missing, and where the fragment program was meant to be.
+- RSX_ENGINE_PASS_DUMP_FP=<hash>: start the pass capture
+  (RSX_ENGINE_PASS_DUMP_TRIGGER) at the first draw through that fragment
+  program.
+- RSX_FP_DEBUG=<hash>:<n>:m paints that program solid magenta: whether
+  the draw produces pixels at all.
+
+What found the two 3D Dot Game Heroes draw bugs before this.
+---
+ libs/video/rsx_draw_engine.c    | 65 ++++++++++++++++++++++++++++-----
+ libs/video/rsx_fp_decompiler.c  |  9 +++--
+ libs/video/rsx_vulkan_backend.c | 21 ++++++++---
+ 3 files changed, 77 insertions(+), 18 deletions(-)
+
+diff --git a/libs/video/rsx_draw_engine.c b/libs/video/rsx_draw_engine.c
+index 0e7a4e2..3efe43a 100644
+--- a/libs/video/rsx_draw_engine.c
++++ b/libs/video/rsx_draw_engine.c
+@@ -1916,6 +1916,20 @@ static int eng_debug_fp(u64 fp_hash, u32 pipeline)
+         n_skip = eng_parse_hash_list("RSX_ENGINE_SKIP_FP", skip);
+         n_dump = eng_parse_hash_list("RSX_ENGINE_REGDUMP_FP", dump);
+     }
++    /* RSX_ENGINE_PASS_DUMP_FP=<hash>: start the pass capture
++     * (RSX_ENGINE_PASS_DUMP_TRIGGER) at the first draw through that program. */
++    { static long long at = -2; static int fired; static const char* trig;
++      if (at == -2) {
++          const char* e = getenv("RSX_ENGINE_PASS_DUMP_FP");
++          at = e ? (long long)strtoull(e, NULL, 16) : -1;
++          trig = getenv("RSX_ENGINE_PASS_DUMP_TRIGGER");
++      }
++      if (at != -1 && !fired && fp_hash == (u64)at && trig) {
++          FILE* t = fopen(trig, "w"); if (t) fclose(t);
++          fired = 1;
++          fprintf(stderr, "[rsx engine] pass capture triggered by fp %016llx at frame %u\n",
++                  (unsigned long long)fp_hash, g.frames);
++      } }
+     for (u32 i = 0; i < n_dump; i++) {
+         if (dump[i] != fp_hash || (dumped & (1u << i))) continue;
+         dumped |= 1u << i;
+@@ -1980,6 +1994,24 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
+     u32 vp_instrs = 0, fp_size = 0;
+     /* No resident program pair means the built-in one; see kEngFixedVS. */
+     const int fixed = !eng_guest_programs(&vp_uc, &vp_instrs, &fp_uc, &fp_size);
++    /* RSX_FALLBACK_LOG=1: why a draw gets the built-in programs instead of
++     * the title's -- which of the two was missing, and where the fragment
++     * program was meant to be. */
++    if (fixed) {
++        static int on = -1;
++        if (on < 0) on = getenv("RSX_FALLBACK_LOG") ? 1 : 0;
++        static u32 n;
++        if (on && (n++ < 64 || n % 1000 == 0)) {
++            const u32 reg = rsx_dsp_reg(&g.rsx, 0x08E4);
++            u32 loc = 0;
++            const u32 off = reg ? rsx_dsp_fragment_program(&g.rsx, &loc) : 0;
++            const u8* p = reg ? eng_guest_ptr(NULL, loc, off, 16) : NULL;
++            fprintf(stderr, "[fallback] #%u frame %u: vp start %u instrs %u | fp reg %08X loc %u "
++                    "off %08X %s size %u\n", n, g.frames, rsx_dsp_vp_start(&g.rsx), vp_instrs,
++                    reg, loc, off, p ? "mapped" : "unmapped",
++                    p ? rsx_fp_program_size(p, ENG_FP_MAX_BYTES) : 0);
++        }
++    }
+ 
+     const u32 fp_ctrl  = rsx_dsp_shader_control(&g.rsx);
+     const u32 srgb_output = !fixed && rsx_fp_srgb_output_enabled(
+@@ -3468,14 +3500,29 @@ static void eng_log_rect_clear(const char* what, const u32 rc[4], u32 w, u32 h)
+                 what, rc[0], rc[1], rc[2], rc[3], w, h);
+ }
+ 
++/* RSX_DROP_LOG=1: each draw the engine discards before it reaches the
++ * backend, with the reason -- a missing object is otherwise silent. */
++static int eng_drop(const char* why)
++{
++    static int on = -1;
++    if (on < 0) on = getenv("RSX_DROP_LOG") ? 1 : 0;
++    static u32 n;
++    if (on && (n++ < 200 || n % 1000 == 0))
++        fprintf(stderr, "[drop] #%u frame %u: %s (prim %u, arrays %u, index runs %u, immediate %u, fetch %d, vp start %u, attr in 0x%X)\n",
++                n, g.frames, why, g.rsx.current_primitive, dc.n_arr, dc.n_idx, dc.n_immediate,
++                dc.fetch_ok, rsx_dsp_vp_start(&g.rsx), rsx_dsp_reg(&g.rsx, 0x1FF0));
++    return 0;
++}
++
+ static void sink_end(void* user, const rsx_dispatch* r)
+ {
+     (void)user; (void)r;
+-    if (!g.ready || !dc.n_packets || !dc.fetch_ok) return;
++    if (!g.ready || !dc.n_packets) return;
++    if (!dc.fetch_ok) { eng_drop("fetch failed while recording"); return; }
+     /* Mixed geometry sources have no defined concatenation here. Reject the
+      * whole group instead of drawing partial/misordered geometry. */
+     if (dc.n_immediate && (dc.n_arr || dc.n_idx || dc.inl_bytes ||
+-                          r->inline_dropped != dc.inline_dropped_at_begin)) return;
++                          r->inline_dropped != dc.inline_dropped_at_begin)) { eng_drop("mixed sources"); return; }
+ 
+     const u32 prim = g.rsx.current_primitive;
+     /* Everything that becomes triangles -- lists, strips, fans, quads, quad
+@@ -3490,9 +3537,9 @@ static void sink_end(void* user, const rsx_dispatch* r)
+     int scratch = 0;
+     const int rebuild = eng_topology_rebuild(prim, 0, &scratch) != 0;
+     if (!rebuild) {
+-        if (rsx_primitive_needs_expansion(prim)) return;
++        if (rsx_primitive_needs_expansion(prim)) { eng_drop("primitive needs expansion"); return; }
+         topology = rsx_primitive_topology(prim);
+-        if (topology == RSX_TOPOLOGY_UNSUPPORTED) return;
++        if (topology == RSX_TOPOLOGY_UNSUPPORTED) { eng_drop("unsupported topology"); return; }
+     }
+ 
+     rsx_vertex_layout_plan layout;
+@@ -3548,24 +3595,24 @@ static void sink_end(void* user, const rsx_dispatch* r)
+         n_draw = gm->n_draw;
+     } else {
+         dc_fetch(&layout, rebuild);
+-        if (!dc.n_verts || !dc.fetch_ok) return;
++        if (!dc.n_verts || !dc.fetch_ok) { eng_drop(dc.fetch_ok ? "no vertices" : "vertex fetch failed"); return; }
+         n_draw = dc.n_source_refs;
+         if (rebuild) {
+-            if (!eng_topology_rebuild(prim, dc.refs_remapped, &indexed)) return;
++            if (!eng_topology_rebuild(prim, dc.refs_remapped, &indexed)) { eng_drop("topology rebuild failed"); return; }
+             n_draw = indexed
+                 ? rsx_draw_engine_topology_index_count(prim, dc.n_source_refs,
+                                                        dc.cuts, dc.n_cuts)
+                 : dc.n_source_refs - dc.n_source_refs % 3u;
+         }
+     }
+-    if (!n_draw) return;
++    if (!n_draw) { eng_drop("nothing to draw"); return; }
+ 
+     rsx_be_render_state rs;
+     rsx_draw_engine_decode_render_state(&g.rsx, &rs);
+ 
+     u32 targets[RSX_BE_MAX_COLOR_TARGETS];
+     const u32 n_targets = eng_current_target_set_ex(targets, rs.color_mask || rs.color_mask_mrt);
+-    if (!n_targets) return;
++    if (!n_targets) { eng_drop("no colour or depth target"); return; }
+     const u32 target = targets[0];
+ 
+     rsx_dsp_surface sf;
+@@ -3586,7 +3633,7 @@ static void sink_end(void* user, const rsx_dispatch* r)
+                                           eng_surface_format(sf.color_format),
+                                           n_targets, &pipeline_is_fixed, &tex_used,
+                                           &fp_hash);
+-    if (!pipeline) return;
++    if (!pipeline) { eng_drop("no pipeline"); return; }
+     if (fp_hash && eng_debug_fp(fp_hash, pipeline)) return;
+ 
+     /* Textures before any pipeline or target binding: a cache refresh can
+diff --git a/libs/video/rsx_fp_decompiler.c b/libs/video/rsx_fp_decompiler.c
+index cfb9685..340c779 100644
+--- a/libs/video/rsx_fp_decompiler.c
++++ b/libs/video/rsx_fp_decompiler.c
+@@ -692,7 +692,7 @@ static int rsx_fp_decompile_internal(
+             dbg_hash = strtoull(e, &d, 16);
+             if (*d == ':') dbg_n = strtol(d + 1, &d, 10);
+             if (*d == ':') snprintf(dbg_reg, sizeof dbg_reg, "%s", d + 1);
+-            if (!(dbg_reg[0] == 'r' || dbg_reg[0] == 'h')) dbg_n = -1;
++            if (!(dbg_reg[0] == 'r' || dbg_reg[0] == 'h' || dbg_reg[0] == 'm')) dbg_n = -1;
+         }
+     }
+     const int dbg_here = dbg_n >= 0 &&
+@@ -885,8 +885,11 @@ static int rsx_fp_decompile_internal(
+             const char* dot = strchr(dbg_reg, '.');
+             const unsigned idx = (unsigned)strtoul(dbg_reg + 1, NULL, 10);
+             char line[96];
+-            snprintf(line, sizeof line, "    _rsx_dbg = (float4)((%c[%u])%s);\n",
+-                     dbg_reg[0], idx < 48u ? idx : 0u, dot ? dot : "");
++            if (dbg_reg[0] == 'm')   /* "m": solid magenta -- does the draw produce pixels at all */
++                snprintf(line, sizeof line, "    _rsx_dbg = float4(1, 0, 1, 1);\n");
++            else
++                snprintf(line, sizeof line, "    _rsx_dbg = (float4)((%c[%u])%s);\n",
++                         dbg_reg[0], idx < 48u ? idx : 0u, dot ? dot : "");
+             out_puts(&o, line);
+             dbg_done = 1;
+         }
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index bdb41da..fad44b2 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -4106,15 +4106,24 @@ static void vk_geom_release(void)
+     memset(&s_geom, 0, sizeof s_geom);
+ }
+ 
++/* VK_DRAW_SKIP_LOG=1: each engine draw the backend drops without a word,
++ * and why (the first 64, then one in 1000). */
++static void vk_skip(const char* why, u32 pipeline)
++{
++    static int on = -1; static u32 n;
++    if (on < 0) on = getenv("VK_DRAW_SKIP_LOG") ? 1 : 0;
++    if (on && (n++ < 64 || n % 1000 == 0)) VK_LOG("draw skipped (#%u): %s, pipeline %u\n", n, why, pipeline);
++}
++
+ /* One draw, its geometry either passed in (vertices, indices) and copied into
+  * the batch, or resident (`res`) and bound where it lies. */
+ static void vk_eng_draw_from(rsx_topology topology, const void* vertices, u32 vertex_count,
+                              u32 stride, const u32* indices, u32 index_count, const vk_geom_ent* res)
+ {
+-    if (!s_e2.pipeline || (!vertices && !res) || !vertex_count || !stride) return;
+-    if (topology < RSX_TOPOLOGY_POINTS || topology > RSX_TOPOLOGY_TRIANGLE_STRIP) return;
++    if (!s_e2.pipeline || (!vertices && !res) || !vertex_count || !stride) { vk_skip("no pipeline/vertices", s_e2.pipeline); return; }
++    if (topology < RSX_TOPOLOGY_POINTS || topology > RSX_TOPOLOGY_TRIANGLE_STRIP) { vk_skip("topology", s_e2.pipeline); return; }
+     vk_eng_pipe* P = &s_epipe[s_e2.pipeline - 1];
+-    if (!P->used || stride != P->stride) return;
++    if (!P->used || stride != P->stride) { vk_skip(P->used ? "stride differs from the pipeline's" : "pipeline unused", s_e2.pipeline); return; }
+ 
+     /* Targets: every member of a set is target A's size (engine contract). */
+     const u32 n = s_eng_bound.nrt;
+@@ -4123,7 +4132,7 @@ static void vk_eng_draw_from(rsx_topology topology, const void* vertices, u32 ve
+         return;
+     }
+     vk_eng_obj* rt0 = vk_eng_get(s_eng_bound.rt[0], VK_ENG_COLOR);
+-    if (!rt0) return;
++    if (!rt0) { vk_skip("no colour target", s_e2.pipeline); return; }
+     for (u32 i = 1; i < n; i++)
+         if (!vk_eng_get(s_eng_bound.rt[i], VK_ENG_COLOR)) return;
+     if (rt0->fmt != P->rt_fmt) {
+@@ -4133,13 +4142,13 @@ static void vk_eng_draw_from(rsx_topology topology, const void* vertices, u32 ve
+     const u32 w = rt0->w, h = rt0->h;
+     vk_eng_obj* zo = vk_eng_get(s_eng_bound.depth, VK_ENG_DEPTH);
+     VkImageView dview = (zo && zo->w >= w && zo->h >= h) ? zo->im.view : vk_eng_scratch_depth(w, h);
+-    if (!dview) return;
++    if (!dview) { vk_skip("no depth view", s_e2.pipeline); return; }
+     const u32 dkey = (zo && dview == zo->im.view) ? s_eng_bound.depth : 0xFFFFFFFFu;
+ 
+     VkPipeline pipe = vk_eng_variant(P, (u32)topology - 1u);
+     VkRenderPass rp = vk_eng_render_pass(P->rt_fmt, n);
+     VkFramebuffer fb = vk_eng_framebuffer(rp, s_eng_bound.rt, n, dview, dkey, w, h);
+-    if (!pipe || !rp || !fb) return;
++    if (!pipe || !rp || !fb) { vk_skip(!pipe ? "pipeline variant failed" : !rp ? "no render pass" : "no framebuffer", s_e2.pipeline); return; }
+ 
+     const VkDeviceSize vbytes = (VkDeviceSize)vertex_count * stride;
+     const VkDeviceSize ibytes = ((indices || res) && index_count) ? (VkDeviceSize)index_count * 4u : 0;
+-- 
+2.56.0.windows.3
+

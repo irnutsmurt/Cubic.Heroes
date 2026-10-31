@@ -1,0 +1,200 @@
+From 3e24d91d3bcb013943342c4f05fed6f8614f1284 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Sat, 31 Oct 2026 07:34:14 -0700
+Subject: [PATCH 49/50] Draw engine, Vulkan: the constant blend colour
+
+The CONSTANT_COLOR / ONE_MINUS_CONSTANT_COLOR / CONSTANT_ALPHA /
+ONE_MINUS_CONSTANT_ALPHA factors (0x8001-0x8004) had no Vulkan mapping,
+and SET_BLEND_COLOR was never read. The engine now decodes it for every
+draw -- A8R8G8B8 for an 8-bit target, halves from SET_BLEND_COLOR and
+SET_BLEND_COLOR2 for an FP16 one -- and hands it to the backend through a
+new optional set_blend_color; Vulkan sets it as dynamic state, since
+titles fade effects with it while the factors stay fixed.
+
+Found looking for a kill flash that stayed on screen; 3D Dot Game Heroes
+turned out not to use it (RSX_BLEND_LOG=1 lists the draws that do).
+---
+ libs/video/rsx_draw_engine.c    | 50 +++++++++++++++++++++++++++++++++
+ libs/video/rsx_draw_engine.h    |  6 ++++
+ libs/video/rsx_vulkan_backend.c | 21 +++++++++++---
+ 3 files changed, 73 insertions(+), 4 deletions(-)
+
+diff --git a/libs/video/rsx_draw_engine.c b/libs/video/rsx_draw_engine.c
+index b4eddf9..0e7a4e2 100644
+--- a/libs/video/rsx_draw_engine.c
++++ b/libs/video/rsx_draw_engine.c
+@@ -19,6 +19,7 @@
+ #include "rsx_vp_decompiler.h"
+ #include "../../runtime/memory/vm_watch.h"
+ 
++#include <math.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+@@ -68,6 +69,8 @@ extern u32 ppu_vm_size;
+ #define M_BLEND_SFACTOR       0x0314
+ #define M_BLEND_DFACTOR       0x0318
+ #define M_BLEND_EQUATION      0x0320
++#define M_BLEND_COLOR         0x031C
++#define M_BLEND_COLOR2        0x037C
+ #define M_COLOR_MASK          0x0324
+ #define M_STENCIL_TEST_ENABLE 0x0328
+ #define M_STENCIL_MASK        0x032C
+@@ -297,6 +300,16 @@ static const u8* eng_guest_ptr(void* user, u32 location, u32 offset,
+     return vm_base + ea;
+ }
+ 
++/* An IEEE half, as the RSX stores FP16 register values. */
++static float eng_half(u32 h)
++{
++    const u32 s = (h >> 15) & 1u, e = (h >> 10) & 0x1Fu, m = h & 0x3FFu;
++    float v = e == 0 ? (float)m * (1.0f / 16777216.0f)                       /* 2^-24 */
++            : e == 31 ? (m ? 0.0f : 65504.0f)                                 /* no inf/NaN here */
++            : ldexpf(1.0f + (float)m / 1024.0f, (int)e - 15);
++    return s ? -v : v;
++}
++
+ static u64 eng_fnv1a(const void* data, u32 n, u64 hash)
+ {
+     const u8* p = (const u8*)data;
+@@ -3742,6 +3755,43 @@ static void sink_end(void* user, const rsx_dispatch* r)
+                              sf.depth_format == 1u ? 16u : 24u);
+     }
+ 
++    /* The blend constant, dynamic too: a title fading an effect (a hit
++     * flash, a blinking sprite) animates it with the factors fixed. An
++     * 8-bit target packs it A8R8G8B8, like the clear colour; an FP16 one
++     * takes R and G as halves from SET_BLEND_COLOR and B and A from
++     * SET_BLEND_COLOR2. RSX_BLEND_LOG=1 lists the draws that use it. */
++    if (g.be->set_blend_color) {
++        const u32 c = rsx_dsp_reg(&g.rsx, M_BLEND_COLOR);
++        float rgba[4];
++        if (sf.color_format == RSX_SURFACE_FMT_F_W16Z16Y16X16) {
++            const u32 c2 = rsx_dsp_reg(&g.rsx, M_BLEND_COLOR2);
++            rgba[0] = eng_half(c & 0xFFFFu);  rgba[1] = eng_half(c >> 16);
++            rgba[2] = eng_half(c2 & 0xFFFFu); rgba[3] = eng_half(c2 >> 16);
++        } else {
++            rgba[0] = (float)((c >> 16) & 0xFF) / 255.0f;
++            rgba[1] = (float)((c >>  8) & 0xFF) / 255.0f;
++            rgba[2] = (float)( c        & 0xFF) / 255.0f;
++            rgba[3] = (float)((c >> 24) & 0xFF) / 255.0f;
++        }
++        g.be->set_blend_color(g.be->user, rgba);
++        static int log = -1;
++        if (log < 0) log = getenv("RSX_BLEND_LOG") ? 1 : 0;
++        if (log && (rsx_dsp_reg(&g.rsx, M_BLEND_ENABLE) & 1u)) {
++            const u32 sfac = rsx_dsp_reg(&g.rsx, M_BLEND_SFACTOR), dfac = rsx_dsp_reg(&g.rsx, M_BLEND_DFACTOR);
++            const u32 f[4] = { sfac & 0xFFFFu, sfac >> 16, dfac & 0xFFFFu, dfac >> 16 };
++            int uses = 0;
++            for (int k = 0; k < 4; k++) uses |= f[k] >= 0x8001u && f[k] <= 0x8004u;
++            static u32 last_c = 0xFFFFFFFFu, last_s, last_d, n = 0;
++            if (uses && (c != last_c || sfac != last_s || dfac != last_d) && n < 2000) {
++                n++; last_c = c; last_s = sfac; last_d = dfac;
++                fprintf(stderr, "[blend] frame %u: factors src %04X/%04X dst %04X/%04X eq %08X colour %08X%s (%.3f %.3f %.3f %.3f)\n",
++                        g.frames, f[0], f[1], f[2], f[3], rsx_dsp_reg(&g.rsx, M_BLEND_EQUATION), c,
++                        sf.color_format == RSX_SURFACE_FMT_F_W16Z16Y16X16 ? " fp16" : "",
++                        rgba[0], rgba[1], rgba[2], rgba[3]);
++            }
++        }
++    }
++
+     const u32 uploaded = indexed ? dc.n_verts : n_draw;
+     if (geom)
+         g.be->draw_geom(g.be->user, topology, geom, uploaded, layout.stride, indexed ? n_draw : 0);
+diff --git a/libs/video/rsx_draw_engine.h b/libs/video/rsx_draw_engine.h
+index a4cce8b..cbc450d 100644
+--- a/libs/video/rsx_draw_engine.h
++++ b/libs/video/rsx_draw_engine.h
+@@ -218,6 +218,12 @@ typedef struct rsx_draw_backend {
+      * whose depth format is another converts the units. Both are 0 when the
+      * offset is off. Left NULL, every draw is drawn without it. */
+     void (*set_depth_bias)(void* user, float slope, float units, u32 depth_bits);
++    /* Optional. The colour the CONSTANT_COLOR / CONSTANT_ALPHA blend factors
++     * (0x8001-0x8004) use for the next draw, as RGBA, called before every
++     * draw like the stencil reference: titles fade with it, so it is not
++     * pipeline state. Left NULL, those factors are whatever the backend
++     * makes of them. */
++    void (*set_blend_color)(void* user, const float rgba[4]);
+     /* One draw. `indices` is NULL for a non-indexed one. Everything the
+      * hardware has and the host does not -- quads, quad strips, fans,
+      * polygons -- has already been expanded into a triangle list by the time
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index f141e2c..bdb41da 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -138,7 +138,7 @@ static const char* vk_lib_error(void) { return dlerror(); }
+     X(vkCmdBeginRenderPass) X(vkCmdEndRenderPass) X(vkCmdBindPipeline) \
+     X(vkCmdBindVertexBuffers) X(vkCmdBindDescriptorSets) X(vkCmdPushConstants) \
+     X(vkCmdSetViewport) X(vkCmdSetScissor) X(vkCmdDraw) \
+-    X(vkCmdSetStencilReference) X(vkCmdSetDepthBounds) X(vkCmdSetDepthBias) \
++    X(vkCmdSetStencilReference) X(vkCmdSetDepthBounds) X(vkCmdSetDepthBias) X(vkCmdSetBlendConstants) \
+     X(vkCmdBindIndexBuffer) X(vkCmdDrawIndexed) \
+     X(vkCreateSemaphore) X(vkDestroySemaphore) X(vkCmdBlitImage) \
+     X(vkCreateQueryPool) X(vkDestroyQueryPool) X(vkCmdResetQueryPool) \
+@@ -3061,6 +3061,7 @@ static struct {
+     u32          stencil_ref;
+     float        depth_bounds[2];     /* min, max for the next draw */
+     float        depth_bias[2];       /* constant, slope for the next draw */
++    float        blend_color[4];      /* the blend constant for the next draw */
+     vk_buffer    indices;
+     u32          warned;
+     /* The split set layout (vk_eng_split_layout) and its one set, made the
+@@ -3136,6 +3137,11 @@ static VkBlendFactor vk_gcm_blend_factor(u32 f)
+     case 0x0306: return VK_BLEND_FACTOR_DST_COLOR;
+     case 0x0307: return VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR;
+     case 0x0308: return VK_BLEND_FACTOR_SRC_ALPHA_SATURATE;
++    /* The blend constant (SET_BLEND_COLOR), dynamic state: vk_eng_set_blend_color. */
++    case 0x8001: return VK_BLEND_FACTOR_CONSTANT_COLOR;
++    case 0x8002: return VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_COLOR;
++    case 0x8003: return VK_BLEND_FACTOR_CONSTANT_ALPHA;
++    case 0x8004: return VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_ALPHA;
+     default:     return VK_BLEND_FACTOR_ONE;
+     }
+ }
+@@ -3417,12 +3423,12 @@ static VkPipeline vk_eng_variant(vk_eng_pipe* P, u32 topo_idx)
+     VkPipelineColorBlendStateCreateInfo cb = {
+         .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+         .attachmentCount = P->rt_count, .pAttachments = cba };
+-    VkDynamicState dyn[5] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR,
++    VkDynamicState dyn[6] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR,
+                               VK_DYNAMIC_STATE_STENCIL_REFERENCE, VK_DYNAMIC_STATE_DEPTH_BIAS,
+-                              VK_DYNAMIC_STATE_DEPTH_BOUNDS };
++                              VK_DYNAMIC_STATE_BLEND_CONSTANTS, VK_DYNAMIC_STATE_DEPTH_BOUNDS };
+     VkPipelineDynamicStateCreateInfo dy = {
+         .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+-        .dynamicStateCount = s_vk.depth_bounds_ok ? 5u : 4u, .pDynamicStates = dyn };
++        .dynamicStateCount = s_vk.depth_bounds_ok ? 6u : 5u, .pDynamicStates = dyn };
+     VkGraphicsPipelineCreateInfo gci = {
+         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+         .stageCount = 2, .pStages = st, .pVertexInputState = &vi, .pInputAssemblyState = &ia,
+@@ -3514,6 +3520,11 @@ static void vk_eng_set_scissor(void* user, u32 x, u32 y, u32 w, u32 h)
+     s_e2.sc[0] = x; s_e2.sc[1] = y; s_e2.sc[2] = w; s_e2.sc[3] = h; s_e2.have_sc = 1;
+ }
+ static void vk_eng_set_stencil_ref(void* user, u32 ref) { (void)user; s_e2.stencil_ref = ref; }
++static void vk_eng_set_blend_color(void* user, const float rgba[4])
++{
++    (void)user;
++    memcpy(s_e2.blend_color, rgba, sizeof s_e2.blend_color);
++}
+ 
+ /* Polygon offset. glPolygonOffset's units are steps of the guest depth
+  * buffer, 2^-16 for Z16 and 2^-24 for Z24S8. Vulkan's constant factor is in
+@@ -4246,6 +4257,7 @@ static void vk_eng_draw_from(rsx_topology topology, const void* vertices, u32 ve
+     pvkCmdSetScissor(s_vk.cmd, 0, 1, &sc);
+     pvkCmdSetStencilReference(s_vk.cmd, VK_STENCIL_FACE_FRONT_AND_BACK, s_e2.stencil_ref & 0xFFu);
+     pvkCmdSetDepthBias(s_vk.cmd, s_e2.depth_bias[0], 0.0f, s_e2.depth_bias[1]);
++    pvkCmdSetBlendConstants(s_vk.cmd, s_e2.blend_color);
+     if (s_vk.depth_bounds_ok)
+         pvkCmdSetDepthBounds(s_vk.cmd, s_e2.depth_bounds[0], s_e2.depth_bounds[1]);
+     pvkCmdBindDescriptorSets(s_vk.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+@@ -4305,6 +4317,7 @@ static const rsx_draw_backend s_vk_engine_backend = {
+     .set_scissor          = vk_eng_set_scissor,
+     .set_stencil_ref      = vk_eng_set_stencil_ref,
+     .set_depth_bias       = vk_eng_set_depth_bias,
++    .set_blend_color      = vk_eng_set_blend_color,
+     .set_depth_bounds     = vk_eng_set_depth_bounds,
+     .draw                 = vk_eng_draw,
+     .geom_create          = vk_eng_geom_create,
+-- 
+2.56.0.windows.3
+

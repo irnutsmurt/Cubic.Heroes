@@ -24,6 +24,8 @@ Environment
                      dev_hdd0/home/00000001/savedata. <dir> is only read.
   WINDOW=1           show the game's window (PS3RECOMP_VK_WINDOW=1). By default
                      nothing appears on the desktop: rendering is offscreen.
+  AUDIO=1            play through the real audio device instead of SDL's dummy
+                     driver.
   BIN=<exe>          the game (default build/port/dotheroes, or
                      build/port-win/dotheroes.exe on Windows).
   WRAP=<json list>   launch the game through this command prefix, e.g. a
@@ -107,13 +109,14 @@ def main():
         "PS3RECOMP_VK_DUMP": os.path.join(RUN, "frame.ppm"),
         "PS3RECOMP_VK_DUMP_EVERY": env.get("PS3RECOMP_VK_DUMP_EVERY", "15"),
         "PAD_FILE": os.path.join(RUN, "pad.txt"),
-        "SDL_AUDIODRIVER": "dummy",
         "DIAG_CRASH_DIR": os.path.join(RUN, "diag"),
         "DIAG_HANG_EXIT": env.get("DIAG_HANG_EXIT", "1"),
         "DIAG_BOOT_SECS": env.get("DIAG_BOOT_SECS", "60"),
     })
     if window:
         env["PS3RECOMP_VK_WINDOW"] = "1"
+    if os.environ.get("AUDIO") != "1":
+        env["SDL_AUDIODRIVER"] = "dummy"
     if os.environ.get("DUMP") == "0":
         env.pop("PS3RECOMP_VK_DUMP", None)
     if os.environ.get("PASS_DUMP") == "1":

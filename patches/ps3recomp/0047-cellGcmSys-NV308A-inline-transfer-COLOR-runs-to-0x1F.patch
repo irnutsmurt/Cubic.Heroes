@@ -1,0 +1,47 @@
+From d072905860accbf4c4659335b57adf33fc239071 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Sat, 31 Oct 2026 07:34:13 -0700
+Subject: [PATCH 47/50] cellGcmSys: NV308A inline-transfer COLOR runs to 0x1FFC
+
+gcm_2d_method took COLOR methods only up to 0x07FC, 256 words; the array
+is 0x700 words (0x0400-0x1FFC). 3D Dot Game Heroes uploads its fragment
+programs into local memory this way as it draws: its 1,056-byte water
+program lost its last instruction, the engine found no end to it, and the
+water drew with the built-in program (flat blue) or with a stale tail of
+an earlier upload (a white flicker) -- ~19,000 such draws in 35 s by the
+castle moat. The owner saw it as the water "not rendering right" and a
+slowdown there.
+
+Since: no fallback draw, and the water draws its reflection every frame,
+as in RPCS3.
+---
+ libs/video/cellGcmSys.c | 11 +++++++++--
+ 1 file changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index 0125c44..025b658 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -1491,10 +1491,17 @@ static void gcm_2d_method(u32 subch, u32 method, u32 data)
+         case 0x0308: s_gcm2d.size_out = data; return;
+         case 0x030C: return;                /* SIZE_IN */
+         }
+-        if (method >= 0x0400 && method <= 0x07FC) {
++        if (method >= 0x0400 && method <= 0x1FFC) {
+             /* COLOR data word: write into the destination surface. Inline
+              * transfers use format Y32 (4 bytes/px, one row per point.y).
+-             * DMA 0xFEED0000 = local memory, 0xFEED0001 = main memory. */
++             * DMA 0xFEED0000 = local memory, 0xFEED0001 = main memory.
++             *
++             * COLOR runs to 0x1FFC (0x700 words), not 0x07FC: words past the
++             * 256th were dropped, and 3D Dot Game Heroes uploads its fragment
++             * programs this way as it draws -- its 1,056-byte water program
++             * lost its last instruction, the engine found no end to it, and
++             * the water drew with the built-in program (flat blue) or a stale
++             * tail from an earlier upload (the cloud-white flicker). */
+             u32 idx = (method - 0x0400) >> 2;
+             u32 px  = (s_gcm2d.point & 0xFFFF) + idx;
+             u32 py  = s_gcm2d.point >> 16;
+-- 
+2.56.0.windows.3
+

@@ -110,14 +110,40 @@ vblank pacing was fixed (patch 0034).
   - Found on the way: crossing into another field area stalls the game for
     ~1.2-2.6 s (the main thread busy loading; the same with the cache off).
     Compare with RPCS3 or hardware before treating it as a bug.
-  - Also found: in 1 of 3 five-minute soaks, 30 s at ~33 fps during the
-    menu/map part. The title called cellSpursCreateTask ~630 times a
-    second (lr 0x955d74), SPU images 5 and 4 ran ~830 async jobs a second,
-    each on a newly spawned host thread, and the draw engine created ~2
-    colour targets a frame, each with a blocking GPU submit-and-wait
-    (vk_eng_color_target_create). The other two runs passed the same menu
-    with none of it. Not yet explained; the thread per SPU job is
-    scaffolding to replace either way.
+  - **Cut grass slowed the game to 6-40 fps** (owner's play session, "around
+    the water"; tests/scripts/grass_cut.drive reproduces it). A cut tuft's
+    debris is Bullet rigid bodies, simulated on SPU: per step one
+    BulletCD task (runtime image 4, spu_0003) and ~70 BulletSolver tasks
+    (image 5, spu_0004) -- the registry's image ids are the spu_NNNN file
+    index plus one. The main thread creates them (cellSpursCreateTask, lr
+    0x955d74) and spins on cellSpursQueuePopBody for the results
+    (func_00955BD4), and each task got a new host thread: ~116 us to start,
+    and 361 us to run cold (SPU_TASKPROF=<secs>). Now async tasks run on
+    kept worker threads (spu_workload.c, SPU_POOL=0 is the old way): 4 us to
+    start, 122 us to run, the burst at 51-56 fps instead of ~40, worst frame
+    34 ms instead of 110. No soak drive ever cut a tuft, so every timing
+    before this missed it. Their per-task log lines (65 MB in a three-minute
+    session) are now the first few only (SPU_TASK_LOG=1 for all). Still to
+    find: the rest of the burst (the solver runs 3.7 ms a task).
+  - **Logging is verbose whenever stderr is redirected** (ps3_log_verbose):
+    every test run, and the installed game, whose log goes to
+    data/dotheroes.log. A play session wrote ~920 [WAIT]/[evt] lines a
+    second besides the task lines; measure timing with PS3_VERBOSE=0, and
+    consider defaulting players to quiet.
+  - **Emergency ring recycle under a working callback** (cellGcmSys): the
+    drain recycles a title's ring itself when its buffer-full callback
+    seems not to, judged by `current >= end`. But `current` sits exactly at
+    `end` whenever a title fills the ring to the byte, until its next
+    reserve calls the callback, and here the callback is the runtime's own.
+    Recycling then rewound the ring under the title: a 3.4 s stall crossing
+    areas. Now never for a ring with the runtime's callback, and only
+    `current > end` counts as an overrun.
+  - **Controller on Windows**: SDL found the Xbox pad but its input never
+    arrived. SDL reads it through raw-input messages to a hidden window
+    owned by the thread that initialised the subsystem (a guest thread), and
+    the window thread's own SDL_PumpEvents runs the joystick update too;
+    cellPad now sets SDL_JOYSTICK_THREAD=1 on Windows. Confirmed by the
+    owner. PAD_DEBUG=1 logs every button/stick change as SDL reports it.
   - **The vblank on its own clock** (`port/main.cpp` vblank_clock): the game
     paces every frame by the vblank count, which the walker used to tick from
     a GetTickCount64 loop (16 ms steps, delayed by drains and presents, then
@@ -154,7 +180,9 @@ vblank pacing was fixed (patch 0034).
   of patch 0043 included: it keeps the emulated ring honest, nothing
   more), the present path (full-frame readback; present_mu held across
   the GPU fence: the walker still waits ~3 ms a frame there), the emulated
-  vblank counter the game paces by, SPU code run inside the SPURS/lv2 HLE.
+  vblank counter the game paces by, SPU code run inside the SPURS/lv2 HLE
+  (async tasks on a pool of host threads, one per task running at once,
+  rather than a fixed set of SPUs).
   Native and meant to stay: resident geometry, vm_watch, the vblank clock.
 - SPU in play: FMOD's mixer (`spu FMOD:0`, image 5) ~18% of a core and
   `water_task` (image 0, SPURS taskset on `spu job`) ~20%; neither is on the
@@ -288,6 +316,39 @@ tooling, the native Windows build, measuring on the 3070) are done; see
 7. Open issues: a flat beige quad over the castle path at ~180 s of
    `intro.drive` (pre-existing, both present modes); save/load untested;
    debug console and golden boot log (M2).
+8. Found by the owner playing on Windows (2026-10-30), the same with
+   RSX_GEOM_CACHE=0: killing enemies left a bright flash that stayed a long
+   time; enemies flashing after a hit were invisible; the water "not
+   rendering right". **Cause:** the title uploads its fragment programs into
+   local memory with inline transfers (NV308A COLOR) as it draws, and the
+   walker took COLOR methods only up to 0x07FC -- 256 words. Its 1,056-byte
+   water program lost its last instruction, the engine found no end to it
+   and drew with the built-in program (flat blue), or with a stale tail
+   left by an earlier upload (the white flicker); ~19,000 such draws in 35
+   s by the moat (RSX_FALLBACK_LOG=1 names them). COLOR now runs to 0x1FFC
+   (0x700 words, patch 0047): no fallback draw since, the water draws its reflection
+   every frame, a kill's flash shows and is gone within 0.2 s, and hit
+   rabbits flash pink and stay visible (route: right from the castle past
+   the raised block, then up over the bridge by the sign). To confirm in
+   the owner's own play. Also added on the way, not shown to matter here:
+   the Vulkan backend's CONSTANT_COLOR/ALPHA blend factors and
+   SET_BLEND_COLOR (RSX_BLEND_LOG=1 lists such draws; this title drew none).
+   **Second cause, the invisible flashing:** one area further (Field_11,
+   the forest left of the field above the castle), the hit hero and enemies
+   still vanished while invulnerable; RPCS3 draws them blinking pink and
+   lavender. The walker fed every subchannel's methods to the draw engine,
+   which strips the subchannel, so a 2D-engine word landed on the NV4097
+   register with the same low bits: the inline transfers' point/size words
+   (0x0300-0x0308) overwrote alpha test, and a long fragment program's
+   COLOR words reached SET_SCISSOR (0x08C0/0x08C4). The flash program's
+   draw came right after its upload, scissored to rows 7324-7340. Found by
+   painting that program solid magenta (`RSX_FP_DEBUG=<hash>:0:m`: no
+   pixel), then a register dump of the draw (`RSX_ENGINE_REGDUMP_FP`). The
+   engines now get only what the walker routes to the 3D engine, plus the
+   driver methods on subchannel 7 (patch 0048): the hit hero blinks pink/lavender like
+   RPCS3 and a kill's flare is gone within a second.
+   Still open: fighting there drops to 18-33 fps -- dead rabbits throw far
+   more debris than a tuft, ~3,000 Bullet tasks a second.
 
 ## Diagnostics and switches (environment variables)
 
@@ -305,6 +366,14 @@ tooling, the native Windows build, measuring on the 3070) are done; see
 | `RSX_GEOM_CACHE_LOG=<n>` | the first n new keys, for `tests/geom_newkeys.py` |
 | `RSX_GEOM_CACHE_MAX_ENTRIES`, `RSX_GEOM_ARENA_CHUNKS` | cap the table / the 64 MB GPU chunks (eviction tests) |
 | `GCM_FLIP_RING=1` | flip-event and walker-path recorders, dumped when a flip stays WAITING |
+| `SPU_TASKPROF=<secs>`, `SPU_TASK_LOG=1`, `SPU_POOL=0` | async SPU task timing per image; every task's log lines; a thread per task again |
+| `PAD_DEBUG=1` | every controller button/stick change as SDL reports it |
+| `RSX_BLEND_LOG=1` | draws using the constant blend colour, with the colour |
+| `PS3_VERBOSE=0` | quiet chatty logs even when stderr is redirected (timing runs) |
+| `RSX_FALLBACK_LOG=1` | draws that got the built-in programs, and why (missing vertex or fragment program) |
+| `RSX_DROP_LOG=1`, `VK_DRAW_SKIP_LOG=1` | draws the engine / the Vulkan backend discard before drawing, with the reason |
+| `RSX_FP_DEBUG=<hash>:0:m` | paint that fragment program solid magenta: does the draw produce pixels at all |
+| `RSX_ENGINE_PASS_DUMP_FP=<hash>` | with `PASS_DUMP=1`: start the pass capture at the first draw through that program |
 | `PS3RECOMP_VK_SYNC_PRESENT=1` | old blocking present (A/B) |
 | `PS3RECOMP_VK_WINDOW`, `PS3RECOMP_VK_FULLSCREEN` | window; fullscreen |
 | `PS3RECOMP_VK_DUMP=<ppm>`, `PS3RECOMP_VK_DUMP_EVERY=<n>` | frame dumps (tests) |
@@ -320,4 +389,4 @@ Edit in `build/ref/ps3recomp` (branch `dotheroes`), commit there as
 `git format-patch --start-number <next> -o ../../../patches/ps3recomp HEAD~<n>`
 and commit the patch files here. `tools/pipeline.py` refuses to run with
 uncommitted changes in that checkout, and re-applies the whole series when
-the patch files change. 35 patches as of this handoff.
+the patch files change. 50 patches as of this handoff.

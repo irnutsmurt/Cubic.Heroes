@@ -1,0 +1,20 @@
+# From the save: down to the grass tufts by the first cliff, cut them, then
+# stand still while the debris settles. Each cut tuft sets off a burst of
+# SPU work: the debris is Bullet rigid bodies, ~70 solver tasks a step.
+log TitleMovie 120
+sleep 5
+press START                 # "PRESS START BUTTON"
+sleep 3
+press START                 # main menu: CONTINUE
+sleep 5
+press CROSS                 # "Change characters?" NO
+sleep 15                    # the area loads
+hold RIGHT 0.5
+hold DOWN 5                 # to the tufts above the cliff
+hold LEFT 1.1               # past them
+hold RIGHT 0.15             # face them
+repeat 6 CROSS 0.4          # cut
+sleep 4
+hold RIGHT 0.6
+repeat 6 CROSS 0.4          # the next ones
+sleep 30                    # the debris settles

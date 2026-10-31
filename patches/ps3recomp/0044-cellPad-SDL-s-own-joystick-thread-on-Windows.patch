@@ -1,0 +1,75 @@
+From 29f098d3f530fdc68011848e5cf0868f123a0569 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Sat, 31 Oct 2026 07:34:12 -0700
+Subject: [PATCH 44/50] cellPad: SDL's own joystick thread on Windows
+
+On Windows SDL found the Xbox controller, but no input from it ever
+arrived. SDL reads it through raw-input and device-notification messages
+to a hidden window owned by the thread that initialises the subsystem --
+a guest thread here -- while the window's thread runs SDL's joystick
+update and never sees them. SDL_HINT_JOYSTICK_THREAD gives SDL a thread
+of its own that pumps them, whoever polls; SDL_JOYSTICK_THREAD=0 in the
+environment still wins. Confirmed by the owner with an Xbox controller.
+
+Also: the controller's SDL path (XInput#n or a HID path) in the connect
+line, and PAD_DEBUG=1, every change of a port's buttons or left stick as
+SDL reports it -- whether the host sees the controller at all.
+---
+ libs/input/cellPad.c | 26 ++++++++++++++++++++++++--
+ 1 file changed, 24 insertions(+), 2 deletions(-)
+
+diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
+index e577bcf..f505eea 100644
+--- a/libs/input/cellPad.c
++++ b/libs/input/cellPad.c
+@@ -527,9 +527,10 @@ static void pad_sdl_scan(void)
+         memset(&s_rumble[port], 0, sizeof s_rumble[port]);   /* nothing left over from before */
+         SDL_GameControllerRumble(gc, 0, 0, 0);
+         const char* name = SDL_GameControllerName(gc);
+-        fprintf(stderr, "[cellPad] SDL controller %s on port %d: %s (instance %d)%s\n",
++        const char* path = SDL_GameControllerPath(gc);   /* which SDL driver has it: XInput#n, \\?\HID#... */
++        fprintf(stderr, "[cellPad] SDL controller %s on port %d: %s (instance %d)%s [%s]\n",
+                 back ? "reconnected" : "connected", port, name ? name : "?", (int)id,
+-                SDL_GameControllerHasRumble(gc) ? "" : " (no rumble)");
++                SDL_GameControllerHasRumble(gc) ? "" : " (no rumble)", path ? path : "no path");
+     }
+ }
+ 
+@@ -624,6 +625,18 @@ static void pad_poll_sdl2(void)
+         s_host_state[i].press_square   = (btns & CELL_PAD_CTRL_SQUARE)   ? 255 : 0;
+         s_host_state[i].press_l1       = (btns & CELL_PAD_CTRL_L1)       ? 255 : 0;
+         s_host_state[i].press_r1       = (btns & CELL_PAD_CTRL_R1)       ? 255 : 0;
++
++        /* PAD_DEBUG=1: each change of a port's buttons or (coarsely) its left
++         * stick, as SDL reports it -- whether the host sees the controller at
++         * all, before anything the title does with it. */
++        { static int dbg = -1; static u16 last_b[PAD_MAX_HOST_PORTS]; static u8 last_x[PAD_MAX_HOST_PORTS], last_y[PAD_MAX_HOST_PORTS];
++          if (dbg < 0) dbg = getenv("PAD_DEBUG") ? 1 : 0;
++          const u8 x = s_host_state[i].analog_lx >> 5, y = s_host_state[i].analog_ly >> 5;
++          if (dbg && (btns != last_b[i] || x != last_x[i] || y != last_y[i])) {
++              last_b[i] = btns; last_x[i] = x; last_y[i] = y;
++              fprintf(stderr, "[cellPad] port %d: buttons %04X stick %u,%u\n", i, btns,
++                      s_host_state[i].analog_lx, s_host_state[i].analog_ly);
++          } }
+     }
+ }
+ 
+@@ -687,6 +700,15 @@ static void pad_init_backend(void)
+              * cared. SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS=0 in the
+              * environment still wins over this. */
+             SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
++#ifdef _WIN32
++            /* On Windows SDL's device notifications and raw input (how it
++             * reads an Xbox pad) arrive as messages to a hidden window owned
++             * by the thread that initialises the subsystem -- here a guest
++             * thread -- while the window's thread runs SDL's joystick update
++             * as well and cannot see them. A thread of SDL's own pumps them
++             * whoever polls. SDL_JOYSTICK_THREAD=0 in the environment wins. */
++            SDL_SetHint(SDL_HINT_JOYSTICK_THREAD, "1");
++#endif
+             SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER);
+         }
+         s_sdl_inited = 1;
+-- 
+2.56.0.windows.3
+

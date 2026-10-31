@@ -1,0 +1,68 @@
+From 005ac407302582332b94d4eb1e9886e80c16e47f Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Sat, 31 Oct 2026 07:34:13 -0700
+Subject: [PATCH 48/50] cellGcmSys: the mirrored draw engines get 3D methods
+ only
+
+The walker fed every subchannel's methods to the draw engine (and the
+live D3D12 one), and both mask the subchannel out, so a 2D-engine word
+landed on whichever NV4097 register shares its low bits. 3D Dot Game
+Heroes uploads fragment programs through NV308A inline transfer as it
+draws: the point/size words (0x0300-0x0308) overwrote alpha test, and a
+long program's COLOR words reached SET_SCISSOR (0x08C0/0x08C4). The hit
+flash's program is drawn right after its upload, so that draw was
+scissored to rows 7324-7340 and every flashing hero and enemy vanished
+while invulnerable (the owner's report; RPCS3 draws them blinking pink
+and lavender). Found by painting that program solid magenta -- not one
+pixel -- and dumping the draw's registers.
+
+Now the engines get what the walker routes to the 3D engine (subchannel
+0, and 1 unless GCM_SUBCH1_2D) plus the driver methods on subchannel 7.
+The hit hero blinks pink and lavender as in RPCS3, and a kill's flare is
+gone within a second. Five-minute soak unchanged: 59.5 fps, p99 21.4 ms;
+two check-mode runs (RSX_GEOM_CACHE_CHECK) without a freeze or a miss.
+---
+ libs/video/cellGcmSys.c | 17 ++++++++++++++---
+ 1 file changed, 14 insertions(+), 3 deletions(-)
+
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index 025b658..489820b 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -2781,11 +2781,22 @@ static void gcm_rsx_process_fifo_unlocked(void)
+                       if ((poll++ & 255u) == 0) { FILE* g = fopen(sg, "rb"); open_g = g != NULL; if (g) fclose(g); }
+                       if (open_g) printf("[subch] %u 0x%04X = 0x%08X%c", subch, m, vm_read32(dea), 10);
+                   } }
+-                /* Mirror the whole method stream into the live NV4097->D3D12
++                /* The mirrored engines below model NV4097 only, and both mask
++                 * the subchannel out of the method, so a 2D-engine word fed to
++                 * them lands on whichever 3D register shares its low bits. In
++                 * 3D Dot Game Heroes the fragment programs are uploaded through
++                 * NV308A inline transfer: its point/size words (0x0300-0x0308)
++                 * overwrote alpha test, and a long program's COLOR words
++                 * reached 0x08C0/0x08C4, SET_SCISSOR, so the hit-flash draw
++                 * that followed was scissored to rows 7324-7340 and every
++                 * flashing hero and enemy vanished. They get what the walker
++                 * routes to the 3D engine, plus the driver methods on 7. */
++                const int eng_feed = subch == 0 || (subch == 1 && !s1_2d) || subch == 7;
++                /* Mirror the 3D method stream into the live NV4097->D3D12
+                  * engine (caner / canersaka). Inert unless RSX_LIVE_DRAW is set.
+                  * It wants the raw method with its subchannel bits -- it
+                  * canonicalises with & 0x1FFC itself. */
+-                if (wdiag) { static int live = -1;
++                if (wdiag && eng_feed) { static int live = -1;
+                   if (live < 0) live = rsx_live_draw_enabled();
+                   if (live) rsx_live_draw_method((subch << 13) | m, vm_read32(dea)); }
+                 /* GCM_METHOD_HIST=<secs>: every <secs>, the most frequent
+@@ -2817,7 +2828,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
+                  * which is the macOS path under PS3RECOMP_RSX_ENGINE=dispatch.
+                  * It wants the raw method with its subchannel bits for the
+                  * same reason the live engine does, and masks them itself. */
+-                if (wdiag) { static int eng = -1;
++                if (wdiag && eng_feed) { static int eng = -1;
+                   if (eng < 0) eng = rsx_draw_engine_enabled();
+                   if (eng) rsx_draw_engine_method((subch << 13) | m, vm_read32(dea)); }
+ 
+-- 
+2.56.0.windows.3
+

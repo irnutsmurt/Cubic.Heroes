@@ -1,0 +1,45 @@
+From f931844f77e9e70504562f00a021e87b142959da Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Sat, 31 Oct 2026 07:34:12 -0700
+Subject: [PATCH 46/50] cellGcmSys: no emergency recycle of a ring the
+ runtime's callback owns
+
+The drain recycles a title's ring itself when the title's buffer-full
+callback seems not to, judged by `current >= end`. But `current` sits
+exactly at `end` whenever a title fills the ring to the byte, until its
+next reserve calls the callback -- and when that callback is the
+runtime's own (cellGcm_fifo_recycle), it does recycle. Recycling under it
+rewound the ring beneath the title: 3D Dot Game Heroes stalled 3.4 s
+crossing into another field area.
+
+Now a ring whose callback is the runtime's is left to it, and only
+`current > end` counts as an overrun. The same crossing: 58.4 fps, with
+only the game's own 1.3 s load.
+---
+ libs/video/cellGcmSys.c | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index b0c7201..0125c44 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -3013,7 +3013,15 @@ static void gcm_rsx_process_fifo_unlocked(void)
+         /* `end` is the walker's position, not the ring's: being near it is the
+          * title catching up with the walker, which its callback handles. */
+         else if (s_ring_limit_end) head_consumed = 0;
+-        else if (begin && end > begin && cur >= end) { head_consumed = 1; s_title_overran = 1; }
++        /* A ring whose callback is the runtime's own is recycled by it
++         * (cellGcm_fifo_recycle), and `current` AT `end` is no overrun: the
++         * reserve calls the callback only when current + n > end, so a title
++         * that fills the ring exactly sits there until its next reserve. 3D
++         * Dot Game Heroes does, and recycling it then rewound the ring under
++         * it: a 3.4 s stall crossing into another field area. */
++        else if (vm_read32(ctx + 0xC) && vm_read32(vm_read32(ctx + 0xC)) == GCM_FIFO_CALLBACK_SENTINEL_EA)
++            head_consumed = 0;
++        else if (begin && end > begin && cur > end) { head_consumed = 1; s_title_overran = 1; }
+         if (begin && end > begin && cur >= begin && cur + GCM_RECYCLE_SLACK >= end
+                 && head_consumed && s_title_overran) {
+             u32 io_begin = gcm_ea2io(begin);
+-- 
+2.56.0.windows.3
+
