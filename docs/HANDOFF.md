@@ -543,7 +543,7 @@ tooling, the native Windows build, measuring on the 3070) are done; see
 | `RSX_GEOM_CACHE_LOG=<n>` | the first n new keys, for `tests/geom_newkeys.py` |
 | `RSX_GEOM_CACHE_MAX_ENTRIES`, `RSX_GEOM_ARENA_CHUNKS` | cap the table / the 64 MB GPU chunks (eviction tests) |
 | `GCM_FLIP_RING=1` | flip-event and walker-path recorders, dumped when a flip stays WAITING |
-| `SPU_TASKPROF=<secs>`, `SPU_TASK_LOG=1`, `SPU_POOL=0` | async SPU task timing per image; every task's log lines; a thread per task again |
+| `SPU_TASKPROF=<secs>`, `SPU_TASK_LOG=1`, `SPU_POOL=0` | async SPU task timing per image; every task's log lines, CreateTask's among them (by default the first 48); a thread per task again |
 | `PAD_DEBUG=1` | every controller button/stick change as SDL reports it |
 | `RSX_BLEND_LOG=1` | draws using the constant blend colour, with the colour |
 | `PS3_VERBOSE=0` | quiet chatty logs even when stderr is redirected (timing runs) |

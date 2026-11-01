@@ -1,0 +1,152 @@
+From 172c9ac4f344aae5b1046c154a5eb33f74d039f8 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Sat, 31 Oct 2026 22:47:48 -0700
+Subject: [PATCH] SPURS tasks: no per-task log line or environment lookups by
+ default
+
+cellSpursCreateTask printed a line for every task and looked up
+SPURS_TASKSET_TRACE on every call; spu_async_run looked up LBP_TASK_DELAY,
+LBP_NO_TASKSET, LBP_REAL_POLICY and SPU_LS_DUMP on every task run.
+3D Dot Game Heroes creates ~70 Bullet solver tasks a physics step, and the
+printf and getenv (the CRT's environment lock and a scan of the block) were
+about half of CreateTask's time.
+
+CreateTask's line now follows the async task path's rule: the first 48,
+then only with SPU_TASK_LOG=1. The switches are read once. Measured on a
+river fight, three runs each way: the main thread creates a round's three
+solver tasks in 10.2 us instead of 20.2, and a physics step spans
+0.4-0.56 ms less at matched collision workload.
+---
+ libs/spurs/cellSpurs.c     | 32 +++++++++++++++++++++++++++-----
+ runtime/spu/spu_workload.c | 30 ++++++++++++++++++++++--------
+ 2 files changed, 49 insertions(+), 13 deletions(-)
+
+diff --git a/libs/spurs/cellSpurs.c b/libs/spurs/cellSpurs.c
+index 240b3b2..7ce28b1 100644
+--- a/libs/spurs/cellSpurs.c
++++ b/libs/spurs/cellSpurs.c
+@@ -1062,6 +1062,27 @@ static void spurs_snap_on_create(uint32_t entry, const uint32_t arg[4])
+     }
+ }
+ 
++/* CreateTask's per-task line: the first ones, then only with SPU_TASK_LOG=1,
++ * as the async task path's lines (spu_workload.c). And the switches it reads
++ * on every call, read once. 3D Dot Game Heroes creates ~70 Bullet solver
++ * tasks a physics step; the printf and a getenv on each were about half of
++ * CreateTask's ~5.7 us (DIAG_PROF; getenv takes the CRT's environment lock
++ * and scans the block). */
++static int spurs_create_log(void)
++{
++    static int all = -1;
++    static unsigned n;   /* racy, and only ever a few lines off */
++    if (all < 0) all = getenv("SPU_TASK_LOG") ? 1 : 0;
++    return all || n++ < 48;
++}
++
++static int spurs_taskset_trace(void)
++{
++    static int on = -1;
++    if (on < 0) on = getenv("SPURS_TASKSET_TRACE") ? 1 : 0;
++    return on;
++}
++
+ s32 cellSpursCreateTask(CellSpursTaskset* taskset, CellSpursTaskId* taskId,
+                         void* elf, void* context, u32 sizeContext,
+                         u32 lsPattern_ea, u32 argument_ea)
+@@ -1149,16 +1170,17 @@ s32 cellSpursCreateTask(CellSpursTaskset* taskset, CellSpursTaskId* taskId,
+             g_ydkj_real_taskset_ea = taskset_ea;
+             g_ydkj_real_taskid     = i;
+ 
+-            printf("[cellSpurs] CreateTask(id=%u, entry=%p, arg=%08X %08X %08X %08X"
+-                   " ctx=0x%08X lsp=%08X %08X %08X %08X)\n",
+-                   s_tasks[i].id, elf, task_arg[0], task_arg[1], task_arg[2], task_arg[3],
+-                   context_ea, task_lsp[0], task_lsp[1], task_lsp[2], task_lsp[3]);
++            if (spurs_create_log())
++                printf("[cellSpurs] CreateTask(id=%u, entry=%p, arg=%08X %08X %08X %08X"
++                       " ctx=0x%08X lsp=%08X %08X %08X %08X)\n",
++                       s_tasks[i].id, elf, task_arg[0], task_arg[1], task_arg[2], task_arg[3],
++                       context_ea, task_lsp[0], task_lsp[1], task_lsp[2], task_lsp[3]);
+ 
+             /* One-shot: dump the memory the task argument points at, to find the
+              * pointer that reads back 0 (the task GETs from EA 0 -> some field of
+              * its work descriptor is null in our run). Each of the 4 arg words that
+              * looks like a valid guest EA gets 64 bytes dumped as BE u32s. */
+-            if (getenv("SPURS_TASKSET_TRACE")) {
++            if (spurs_taskset_trace()) {
+                 for (int a = 0; a < 4; a++) {
+                     uint32_t p = task_arg[a];
+                     if (p < 0x10000 || p >= 0x50000000u) continue;   /* not a plausible EA */
+diff --git a/runtime/spu/spu_workload.c b/runtime/spu/spu_workload.c
+index f28534a..8989f9c 100644
+--- a/runtime/spu/spu_workload.c
++++ b/runtime/spu/spu_workload.c
+@@ -455,6 +455,23 @@ static pthread_mutex_t s_ts_ls_dir = PTHREAD_MUTEX_INITIALIZER;
+ static int spu_persist_ls_enabled(void)
+ { static int _p = -1; if (_p < 0) _p = getenv("LBP_PERSIST_LS") ? 1 : 0; return _p; }
+ 
++/* Switches spu_async_run looked up on every task run, read once: getenv
++ * takes the CRT's environment lock and scans the block, and 3D Dot Game
++ * Heroes runs ~70 Bullet solver tasks a physics step. */
++static int spu_task_delay_s(void)   /* LBP_TASK_DELAY=<s>: -1 unset */
++{ static int _d = -2; if (_d == -2) { const char* d = getenv("LBP_TASK_DELAY"); _d = d && *d ? atoi(d) : -1; } return _d; }
++static int spu_no_taskset(void)
++{ static int _n = -1; if (_n < 0) _n = getenv("LBP_NO_TASKSET") ? 1 : 0; return _n; }
++static int spu_real_policy(void)
++{ static int _r = -1; if (_r < 0) _r = getenv("LBP_REAL_POLICY") ? 1 : 0; return _r; }
++static const char* spu_ls_dump_prefix(void)   /* SPU_LS_DUMP=<prefix>, or NULL */
++{
++    static int set = -1;
++    static char pfx[480];
++    if (set < 0) { const char* e = getenv("SPU_LS_DUMP"); if (e) snprintf(pfx, sizeof pfx, "%s", e); set = e != NULL; }
++    return set ? pfx : NULL;
++}
++
+ /* ---- Global SPU execution serialization (LBP_SPU_SERIAL) ------------------
+  * Default runs each SPU task on its own detached host thread, so N tasks race:
+  * timing jitter sends each boot down a different path to a different dead end
+@@ -956,13 +973,10 @@ static void spu_async_run(spu_async_job* j)
+              * buffer slightly LATER, delaying the run lets it see real data (=>
+              * timing bug, fix = defer/re-dispatch on signal); if it still loops on
+              * a null base, the buffer is never filled (=> an audio HLE gap). */
+-            if (j->image_id != 22) {
+-                const char* d = getenv("LBP_TASK_DELAY");
+-                if (d && *d) {
++            if (j->image_id != 22 && spu_task_delay_s() >= 0) {
+ #ifdef _WIN32
+-                    Sleep((unsigned)(atoi(d) * 1000));
++                Sleep((unsigned)(spu_task_delay_s() * 1000));
+ #endif
+-                }
+             }
+             /* A generic SPURS taskset task (image != cri 22) MUST get its
+              * SpursTasksetContext planted at LS 0x2700 -- the real kernel builds
+@@ -974,7 +988,7 @@ static void spu_async_run(spu_async_job* j)
+              * Planting it makes the mixer read the real FMOD control block
+              * (0x0094F5xx) and the EventFlag handshake completes. Default ON;
+              * LBP_NO_TASKSET restores the old direct-dispatch for comparison. */
+-            if (j->image_id != 22 && !getenv("LBP_NO_TASKSET")) {
++            if (j->image_id != 22 && !spu_no_taskset()) {
+                 extern uint64_t spurs_pm_build_context(uint8_t*, uint32_t, uint32_t, uint32_t, uint32_t);
+                 /* Use the taskset+taskid captured for THIS job at dispatch (not the
+                  * globals, which the next CreateTask clobbers -- the race that made
+@@ -1030,7 +1044,7 @@ static void spu_async_run(spu_async_job* j)
+                     }
+                     fflush(stderr);
+                 }
+-                if (getenv("LBP_REAL_POLICY") && j->taskset_ea) {
++                if (spu_real_policy() && j->taskset_ea) {
+                     extern int spurs_run_taskset_policy_probe(uint32_t,uint32_t,uint32_t,
+                                                               uint64_t,uint32_t,uint8_t*,uint32_t);
+                     /* spurs EA from the taskset header lo32 @ +0x64 (be64 @0x60). */
+@@ -1118,7 +1132,7 @@ static void spu_async_run(spu_async_job* j)
+              * ends. A reference dump from real hardware is a full local store,
+              * so the only way to ask "what ELSE is different" -- rather than
+              * checking one guessed word at a time -- is to diff all 256 KB. */
+-            { const char* pfx = getenv("SPU_LS_DUMP");
++            { const char* pfx = spu_ls_dump_prefix();
+               if (pfx) { char path[512];
+                   snprintf(path, sizeof path, "%s_img%d.bin", pfx, j->image_id);
+                   FILE* f = fopen(path, "wb");
+-- 
+2.56.0.windows.3
+
