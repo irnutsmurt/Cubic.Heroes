@@ -1,0 +1,54 @@
+From aa8dd163a64e447ce1ff9a4b6d186ea4771d3062 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Sat, 31 Oct 2026 17:44:57 -0700
+Subject: [PATCH] Draw engine: colour target NONE writes no colour; keep the
+ real surface
+
+SET_SURFACE_COLOR_TARGET NONE writes no colour on the RSX, whatever the
+colour mask. A pass drawn that way now renders into the scratch target of
+its size and format, as a colour-masked pass already did, instead of
+binding the colour offset it names.
+
+3D Dot Game Heroes draws its fight-time 1024x1024 shadow pass with target
+NONE and the colour mask on, at offset 0 -- display buffer 0, which at that
+point the game has cleared and goes on drawing into (36 draws, no clear)
+before presenting it. Binding offset 0 recreated that buffer at 1024x1024
+and back, one to three times a frame, each a new image, a clear and two GPU
+syncs, and dropped the buffer's contents. River fight: 1,098 recreations
+-> none (43 targets in the whole run, all new addresses); time in those
+GPU syncs 600-4,200 ms a run -> 5-42 ms; shadows unchanged in the
+renderer's readback. PS3RECOMP_ENG_NONE_TARGET=1 binds the address again,
+for A/B.
+---
+ libs/video/rsx_draw_engine.c | 15 +++++++++++++--
+ 1 file changed, 13 insertions(+), 2 deletions(-)
+
+diff --git a/libs/video/rsx_draw_engine.c b/libs/video/rsx_draw_engine.c
+index 3b95e3c..5f4bcd6 100644
+--- a/libs/video/rsx_draw_engine.c
++++ b/libs/video/rsx_draw_engine.c
+@@ -839,8 +839,19 @@ static u32 eng_current_target_set_ex(u32 slots[RSX_BE_MAX_COLOR_TARGETS], int wr
+      * replaced the 1280x720 display surface with a 1024x1024 one every frame
+      * and recreated it for the next present: two target rebuilds, each a
+      * clear and a GPU wait that also broke the draw batch. A scratch target
+-     * per size and format keeps the real surface untouched. */
+-    if (!writes_color && sf.color_target < CELL_GCM_SURFACE_TARGET_MRT1) {
++     * per size and format keeps the real surface untouched.
++     * SET_SURFACE_COLOR_TARGET NONE writes no colour either, whatever the
++     * colour mask: the same game's fight frames draw their 1024x1024 shadow
++     * pass that way, colour mask on, target NONE, offset 0 -- display buffer
++     * 0, cleared and half drawn at that point, which the hardware leaves
++     * alone. Binding it there recreated that buffer at 1024x1024 and back
++     * (1-3 times a frame, two GPU syncs each) and lost what it held.
++     * PS3RECOMP_ENG_NONE_TARGET=1 binds the address as before (A/B). */
++    static int none_binds = -1;
++    if (none_binds < 0) { const char* e = getenv("PS3RECOMP_ENG_NONE_TARGET"); none_binds = e && *e == '1'; }
++    const int no_colour = !writes_color ||
++                          (sf.color_target == CELL_GCM_SURFACE_TARGET_NONE && !none_binds);
++    if (no_colour && sf.color_target < CELL_GCM_SURFACE_TARGET_MRT1) {
+         const u32 w = sf.clip_w ? sf.clip_w : g.width, h = sf.clip_h ? sf.clip_h : g.height;
+         const u32 key = ((w & 0x3FFFu) << 14) | (h & 0x3FFFu) | ((u32)fmt << 28);
+         const u32 s = eng_surface_get(ENG_SCRATCH_LOCATION, key, w, h, fmt, 0, aa_grid);
+-- 
+2.56.0.windows.3
+

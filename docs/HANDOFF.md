@@ -28,7 +28,10 @@ log) and [FEASIBILITY.md](FEASIBILITY.md) (design and the explicit exceptions).
   pile up (another project of the owner's reached 300 GB). `tests/boot_smoke.sh`
   keeps the last 5 runs; delete captures after use.
 - **Keep baselines past that cleanup.** Each run records what it ran in
-  `run.json` (executable hash, repo and ps3recomp revisions, switches);
+  `run.json` (executable hash, repo and ps3recomp revisions, switches, and
+  whether the Windows desktop was locked: a locked desktop shows no window,
+  so window grabs see the lock screen and a windowed run's presents reach
+  no display -- use the renderer's readback, `frame.ppm`, to look at it);
   `tests/keep_baseline.py <name> <run>...` copies a run's compact summary
   (fps, `[native-cd]` lines, frame_times / frame_costs / phys_breakdown) and
   its run.json into `build/baselines/<name>/`, listed in
@@ -435,13 +438,43 @@ tooling, the native Windows build, measuring on the 3070) are done; see
    GCM_WORD_LOOP=1 restores the loop) cut the loop's share 10.8% -> 4.2% of the
    walker and active drain ~0.7-1.0 ms a frame, but the slow frames' lag only
    13.7 -> 13.2 ms: the walker reaches its flushes sooner and waits longer on
-   the GPU. Displayed frames unchanged within noise (A/B in
-   build/baselines/2026-10-31-walker-wordloop). Checked in play only: the FIFO
+   the GPU. Frame-to-present intervals unchanged within noise (A/B in
+   build/baselines/2026-10-31-walker-wordloop; whether the desktop was locked
+   was not recorded then, so not established as on-screen timing). Checked
+   in play only: the FIFO
    unit tests (libs/video/tests/test_gcm_*) are not built on Windows and have
-   not run against it. Next: the in-flight waits come
-   from render-target thrash -- address 0 alternates 1280x720 <-> 1024x1024 in
-   fights (RSX_SURFACE_LOG=1), each switch recreating the target with two GPU
-   syncs, 4.3 + 0.9 ms of a slow frame's lag.
+   not run against it.
+   **Render-target thrash.** The in-flight waits came from address 0
+   alternating 1280x720 <-> 1024x1024 in fights (RSX_SURFACE_LOG=1): each
+   switch recreated the target with two GPU syncs, 4.3 + 0.9 ms of a slow
+   frame's lag. RSX_SURFACE_TRACE=0:0 showed what the two are: address 0 is
+   display buffer 0 (1280x720, colour target selector 1), cleared whole, then
+   the 1024x1024 work, then 36 draws with no clear, then presented; the
+   1024x1024 work is the shadow pass with colour target selector NONE (and
+   the colour mask on), which writes no colour on the RSX. Nothing reads
+   address 0 but the present. So the shadow pass has no contents of its own
+   and must not touch address 0, while the display buffer's contents must
+   survive it -- recreating it threw them away. Fix: a pass with target NONE
+   renders into the scratch target of its size, as a colour-masked one
+   already did (PS3RECOMP_ENG_NONE_TARGET=1 restores binding the address).
+   River fight: 43 colour targets made in the whole run, all new addresses,
+   none recreated (was 1,098 recreations). Visual check from the renderer's
+   readback, both collision modes: shadows, debris and the HUD as before
+   (build/baselines/2026-10-31-rtfix-visual). A/B, same build, windowed,
+   DUMP=0, 3 runs per scene, collision mode and binding (24 runs,
+   build/baselines/2026-10-31-rtfix-ab): time in those GPU syncs 600-4,200
+   ms a run -> 5-42; the slow frames' walker lag 1.4-3.4 ms less. The
+   desktop was locked throughout: nothing was on screen, so what follows is
+   the game's internal frame and presentation timing (guest flip requests to
+   the end of each frame's present call), not displayed-frame performance.
+   Fights differed run to run (0 to 1,728 physics steps), so long frames are
+   compared within frames of the same physics load. Frames with one physics
+   step taking over 25 ms to present: river native 36% -> 12%, field lifted
+   19% -> 1.5%, field native 9% -> 0.4%, river lifted unchanged (~34%: lifted
+   physics holds those). Frames with two steps: river lifted over 33 ms
+   43% -> 19%; the others mixed on small samples (18-157 frames). Frames
+   without physics: unchanged (0.1-0.4% over 25 ms). Not yet measured with
+   the game visibly on screen.
    Frame dumps (PS3RECOMP_VK_DUMP, on in tests/boot_smoke.py unless DUMP=0)
    are written on the present path: every 60th frame took 10-20 ms longer.
    Time with DUMP=0; for play sessions grab the window instead.
@@ -488,6 +521,8 @@ tooling, the native Windows build, measuring on the 3070) are done; see
 | `SPURS_SNAP=<entry>:<entry>:<n>:<prefix>` | guest memory before and after a Bullet step, for docs/BULLET_NATIVE.md (`tests/snap_read.py`) |
 | `GCM_WORD_LOOP=1` | every FIFO data word through the per-word decode loop, as before the run fast path (A/B) |
 | `RSX_SURFACE_LOG=1` | every colour render target the draw engine creates, and why (new address, resized, evicted) |
+| `RSX_SURFACE_TRACE=<location>:<hex offset>` | what the title does with the colour target at that address, per frame: each stretch at one size (how it starts, its clears and draws, the surface registers) and every read of the address |
+| `PS3RECOMP_ENG_NONE_TARGET=1` | a pass with colour target NONE binds the guest address again, as before the render-target fix (A/B) |
 | `DOTHEROES_NATIVE_CD=<0-3>` | the Bullet collision task: lifted (default), native (experimental), check (native against lifted, `[native-cd]` lines), self-check (native against itself rounding toward zero); `DOTHEROES_NATIVE_CD_DUMP=n` prints differing manifolds, `DOTHEROES_NATIVE_CD_FP=rz` runs native toward zero (docs/BULLET_NATIVE.md) |
 | `GAMEDATA=<dir>` | tests/boot_smoke.py: play on a persistent save root in place (`%LOCALAPPDATA%\dotheroes\gamedata`) |
 | `RSX_DROP_LOG=1`, `VK_DRAW_SKIP_LOG=1` | draws the engine / the Vulkan backend discard before drawing, with the reason |
