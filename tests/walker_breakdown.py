@@ -28,8 +28,8 @@ import bisect
 import collections
 import sys
 
-SYSCALL, USLEEP, SEMA, DRAIN, FLIP_FIFO, FLIP_REQ, PRESENT, GPU_WAIT, GPU_EXEC, HLE, WALKER = \
-    1, 2, 5, 7, 8, 9, 10, 12, 14, 15, 18
+SYSCALL, USLEEP, SEMA, DRAIN, FLIP_FIFO, FLIP_REQ, PRESENT, GPU_WAIT, GPU_EXEC, HLE, SPU_TASK, WALKER = \
+    1, 2, 5, 7, 8, 9, 10, 12, 14, 15, 16, 18
 MAIN = 1
 WAITS = {0: "flush", 1: "prlock", 2: "infl"}
 WALK = {1: "present", 2: "pump", 3: "sleep"}
@@ -93,16 +93,20 @@ def split(spans, lo, hi, acc):
             acc[cat] += span / 1000
 
 
-def main(path):
-    rec = load(path)
+def guest_frames(rec):
+    """Per guest frame: displayed interval (ms), lag, latency, the walker's split, its
+    window (lo = previous flip request, hi = this one) and phys, the collision task runs
+    (SPU image 4) begun in it -- frames with physics and without, to compare runs whose
+    fights differ."""
     reqs = [t0 for t0, *_ in rec[FLIP_REQ]]
     fifos = [t0 for t0, *_ in rec[FLIP_FIFO]]
     shows = [t1 for t0, t1, who, *_ in rec[PRESENT] if who == 1]
     spans = walker_spans(rec)
     gpu = rec[GPU_EXEC]
+    cd = sorted(t0 for t0, t1, who, a, b in rec[SPU_TASK] if a == 4)
     frames, prev_shown = [], None
     for i in range(1, len(reqs) - 1):
-        req, nxt = reqs[i], reqs[i + 1]
+        req = reqs[i]
         j = bisect.bisect_left(fifos, req)
         if j >= len(fifos):
             break
@@ -117,12 +121,17 @@ def main(path):
         split(spans, reqs[i - 1], req, whole)   # the frame's commands being written: req(i-1) to req(i)
         split(spans, req, fifo, lagacc)
         g = sum(clip(t0, t1, fifo, shows[k]) for t0, t1, *_ in gpu) / 1000
-        frames.append(dict(shown=shows[k] - prev_shown, lag=(fifo - req) / 1000, lat=(shows[k] - fifo) / 1000,
-                           ppu=(req - reqs[i - 1]) / 1000, whole=whole, lagacc=lagacc, gpu_lat=g,
-                           lo=reqs[i - 1], hi=req))
+        phys = bisect.bisect_left(cd, req) - bisect.bisect_left(cd, reqs[i - 1])
+        frames.append(dict(shown=(shows[k] - prev_shown) / 1000, lag=(fifo - req) / 1000,
+                           lat=(shows[k] - fifo) / 1000, ppu=(req - reqs[i - 1]) / 1000, whole=whole,
+                           lagacc=lagacc, gpu_lat=g, lo=reqs[i - 1], hi=req, phys=phys))
         prev_shown = shows[k]
-    for f in frames:
-        f["shown"] /= 1000
+    return frames
+
+
+def main(path):
+    rec = load(path)
+    frames = guest_frames(rec)
     # main thread idle, by what it waited in
     idle = [(t0, t1, ("HLE %08X" % a) if k == HLE else ("usleep lr %08X" % b) if k == USLEEP else
              ("syscall %d" % a)) for k in (SYSCALL, USLEEP, HLE) for t0, t1, who, a, b in rec[k] if who == MAIN]
@@ -162,5 +171,6 @@ def main(path):
         print(f"  main thread idle over the guest frame: {sum(waits.values()) / n:.2f} ms" + (f" ({top})" if top else ""))
 
 
-for p in sys.argv[1:]:
-    main(p)
+if __name__ == "__main__":
+    for p in sys.argv[1:]:
+        main(p)

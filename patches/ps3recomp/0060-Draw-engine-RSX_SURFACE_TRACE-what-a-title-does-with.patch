@@ -1,0 +1,146 @@
+From 2b77576ffff24303b2ea613fd4fcdd585c1f008e Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Sat, 31 Oct 2026 17:44:39 -0700
+Subject: [PATCH] Draw engine: RSX_SURFACE_TRACE, what a title does with one
+ colour target
+
+RSX_SURFACE_TRACE=<location>:<hex offset> logs, per engine frame, each
+stretch of work on the colour target at that address at one size and
+format -- how it starts (a whole clear, a partial one, a draw), its clears
+and draws (and how many write colour), and the surface registers when it
+began (colour target selector, colour format, pitch, zeta) -- and every
+read of the address: as a texture, by the present, by a 2D transfer.
+Whether a target's contents must survive a change of size at its address
+is read off it.
+
+3D Dot Game Heroes, address 0 in fights: display buffer 0 (1280x720,
+selector 1) cleared whole, then 1024x1024 work with selector NONE (the
+shadow pass), then 36 draws without a clear, then the present; nothing
+reads the address but the present.
+---
+ libs/video/rsx_draw_engine.c | 74 ++++++++++++++++++++++++++++++++++++
+ 1 file changed, 74 insertions(+)
+
+diff --git a/libs/video/rsx_draw_engine.c b/libs/video/rsx_draw_engine.c
+index 9f29e6d..3b95e3c 100644
+--- a/libs/video/rsx_draw_engine.c
++++ b/libs/video/rsx_draw_engine.c
+@@ -764,6 +764,65 @@ static u32 eng_surface_get(u32 location, u32 offset, u32 want_w, u32 want_h,
+  * location has this value, so it never aliases a real surface. */
+ #define ENG_SCRATCH_LOCATION 0xFFu
+ 
++/* RSX_SURFACE_TRACE=<location>:<hex offset>: what the title does with the
++ * colour target at that address, per engine frame -- each stretch of work at
++ * one size and format (how it starts: a whole clear, a partial one or a draw;
++ * its clears and draws) and every read of the address (a texture, the
++ * present, a 2D transfer). Whether a target's contents must survive a switch
++ * of size at its address is read off this. */
++static struct {
++    int on;
++    u32 loc, off, w, h, fmt, frame, clears, draws, cdraws;
++    u32 sel, pitch, zloc, zoff, cfmt;   /* the surface registers when the stretch began */
++    char first[24];
++    char last_read[64];
++} s_st = { -1 };
++static int eng_st_on(void)
++{
++    if (s_st.on < 0) {
++        const char* e = getenv("RSX_SURFACE_TRACE");
++        s_st.on = e && sscanf(e, "%u:%x", &s_st.loc, &s_st.off) == 2;
++    }
++    return s_st.on;
++}
++static void eng_st_flush(void)
++{
++    if (s_st.w)
++        fprintf(stderr, "[surf-trace] frame %u %ux%u fmt %u: first %s, %u clears, %u draws (%u writing colour);"
++                " colour target selector 0x%X, colour format %u, pitch %u, zeta %u:0x%X\n",
++                s_st.frame, s_st.w, s_st.h, s_st.fmt, s_st.first, s_st.clears, s_st.draws, s_st.cdraws,
++                s_st.sel, s_st.cfmt, s_st.pitch, s_st.zloc, s_st.zoff);
++    s_st.w = 0;
++}
++static void eng_st_op(const u32* targets, u32 n, const char* op, int writes_color)
++{
++    if (!eng_st_on() || !n) return;
++    const eng_surface* t = &g.surfaces[targets[0]];
++    if (t->location != s_st.loc || t->offset != s_st.off) return;
++    if (t->w != s_st.w || t->h != s_st.h || (u32)t->fmt != s_st.fmt || g.frames != s_st.frame) {
++        eng_st_flush();
++        s_st.w = t->w; s_st.h = t->h; s_st.fmt = (u32)t->fmt; s_st.frame = g.frames;
++        s_st.clears = s_st.draws = s_st.cdraws = 0;
++        snprintf(s_st.first, sizeof s_st.first, "%s", op);
++        rsx_dsp_surface sf;
++        rsx_dsp_get_surface(&g.rsx, &sf);
++        s_st.sel = sf.color_target; s_st.cfmt = sf.color_format; s_st.pitch = sf.color_pitch[0];
++        s_st.zloc = sf.zeta_location; s_st.zoff = sf.zeta_offset;
++    }
++    if (op[0] == 'c') s_st.clears++;
++    else { s_st.draws++; s_st.cdraws += writes_color != 0; }
++}
++static void eng_st_read(const char* what, u32 location, u32 offset, u32 w, u32 h, u32 fmt)
++{
++    if (!eng_st_on() || location != s_st.loc || offset != s_st.off) return;
++    char key[64];
++    snprintf(key, sizeof key, "%u %s %ux%u %u", g.frames, what, w, h, fmt);
++    if (!strcmp(key, s_st.last_read)) return;
++    snprintf(s_st.last_read, sizeof s_st.last_read, "%s", key);
++    eng_st_flush();
++    fprintf(stderr, "[surf-trace] frame %u read by %s as %ux%u fmt 0x%X\n", g.frames, what, w, h, fmt);
++}
++
+ static u32 eng_current_target_set_ex(u32 slots[RSX_BE_MAX_COLOR_TARGETS], int writes_color)
+ {
+     rsx_dsp_surface sf;
+@@ -857,6 +916,9 @@ static u32 eng_surface_at(u32 location, u32 offset, u32 pitch, u32* xb, u32* y)
+         *xb = d % pitch;
+         *y = d / pitch;
+     }
++    if (best != ENG_INVALID)
++        eng_st_read("2D transfer", g.surfaces[best].location, g.surfaces[best].offset,
++                    g.surfaces[best].w, g.surfaces[best].h, (u32)g.surfaces[best].fmt);
+     return best;
+ }
+ 
+@@ -2950,6 +3012,7 @@ static u32 sink_bind_textures(const u32* target_slots, u32 n_targets,
+          * aliased surface a store to guest memory, for nothing. */
+         if (!t.enabled || !((tex_used >> u) & 1u)) continue;
+         mask |= 1u << u;
++        eng_st_read("texture", t.location, t.offset, t.width, t.height, t.format);
+         eng_decode_sampler(t.filter, t.wrap, t.control0, &samplers[u]);
+         samplers[u].border = eng_border_class(t.format, t.border_color);
+ 
+@@ -3622,6 +3685,7 @@ static void sink_end(void* user, const rsx_dispatch* r)
+     u32 targets[RSX_BE_MAX_COLOR_TARGETS];
+     const u32 n_targets = eng_current_target_set_ex(targets, rs.color_mask || rs.color_mask_mrt);
+     if (!n_targets) { eng_drop("no colour or depth target"); return; }
++    eng_st_op(targets, n_targets, "draw", rs.color_mask || rs.color_mask_mrt);
+     const u32 target = targets[0];
+ 
+     rsx_dsp_surface sf;
+@@ -3875,6 +3939,14 @@ static void sink_clear(void* user, const rsx_dispatch* r, u32 mask)
+      * touches depth/stencil only. */
+     const u32 n_targets = eng_current_target_set_ex(targets, (mask & 0xF0u) != 0);
+     if (!n_targets) return;
++    if (eng_st_on() && (mask & 0xF0u)) {
++        rsx_dsp_surface ssf;
++        rsx_dsp_get_surface(&g.rsx, &ssf);
++        u32 rc[4];
++        const int part = eng_clear_rect(&ssf, g.surfaces[targets[0]].w, g.surfaces[targets[0]].h, rc);
++        eng_st_op(targets, n_targets, part == 1 ? ((mask & 0xF0u) == 0xF0u ? "clear whole" : "clear whole, masked")
++                                                : part == 2 ? "clear partial" : "clear none", 1);
++    }
+     if (pd_capturing()) {
+         rsx_dsp_surface zs;
+         rsx_dsp_get_surface(&g.rsx, &zs);
+@@ -3995,6 +4067,8 @@ static void eng_present(u32 buffer_id)
+     const u32 target = eng_present_surface(buffer_id);
+     if (target == ENG_INVALID) return;
+     g.surfaces[target].last_use = g.frames;
++    eng_st_read("present", g.surfaces[target].location, g.surfaces[target].offset,
++                g.surfaces[target].w, g.surfaces[target].h, (u32)g.surfaces[target].fmt);
+     if (getenv("PS3RECOMP_METAL_FRAME_DUMP") && g.frames % 120 == 0) {
+         u32 current = eng_current_surface();
+         fprintf(stderr, "[rsx capture] frame=%u buffer=%u selected=%u current=%u draws=%u surfaces=%u\n",
+-- 
+2.56.0.windows.3
+

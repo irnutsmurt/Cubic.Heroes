@@ -100,6 +100,24 @@ def build_identity():
             return {"rev": rev, "dirty_files": dirty}
         except OSError:
             return None
+    def desktop_locked():
+        """Windows: is this session's desktop locked? A locked desktop shows no
+        window, so window grabs see the lock screen and a windowed run's
+        presents reach no display (their pacing may differ from a visible run)."""
+        if not WIN:
+            return None
+        try:
+            import ctypes, ctypes.wintypes as wt, struct
+            wts, k = ctypes.WinDLL("wtsapi32"), ctypes.WinDLL("kernel32")
+            sid, buf, n = wt.DWORD(), ctypes.c_void_p(), wt.DWORD()
+            k.ProcessIdToSessionId(k.GetCurrentProcessId(), ctypes.byref(sid))
+            if not wts.WTSQuerySessionInformationW(None, sid.value, 25, ctypes.byref(buf), ctypes.byref(n)):
+                return None
+            flags = struct.unpack_from("<i", ctypes.string_at(buf, n.value), 12)[0]   # WTSINFOEX_LEVEL1.SessionFlags
+            wts.WTSFreeMemory(buf)
+            return {0: True, 1: False}.get(flags)
+        except (OSError, struct.error):
+            return None
     ps3 = os.environ.get("PS3RECOMP_DIR", os.path.join(ROOT, "build", "ref", "ps3recomp"))
     prefixes = ("DOTHEROES_", "PS3_", "PS3RECOMP_", "SPU_", "VK_", "RSX_", "SPURS_", "DIAG_", "GCM_")
     return {
@@ -108,6 +126,7 @@ def build_identity():
                 "mtime": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(os.path.getmtime(BIN)))},
         "repo": git(ROOT), "ps3recomp": git(ps3),
         "patches": len(glob.glob(os.path.join(ROOT, "patches", "ps3recomp", "*.patch"))),
+        "desktop_locked": desktop_locked(),
         "secs": SECS, "drive": os.path.relpath(os.environ["DRIVE"], ROOT) if os.environ.get("DRIVE") else None,
         "switches": {k: v for k, v in sorted(os.environ.items())
                      if k.startswith(prefixes) or k in ("DUMP", "WINDOW", "AUDIO", "SHOT_EVERY")},
