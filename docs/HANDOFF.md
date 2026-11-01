@@ -514,9 +514,38 @@ tooling, the native Windows build, measuring on the 3070) are done; see
    the main thread waits 2.51 ms a step (iterate 1.24, write-back 0.66,
    manifold setup 0.39) and spends ~0.85 ms issuing. Removing the whole wait
    is the upper bound and still leaves debris-heavy frames over 16.67 ms: a
-   command-buffer wrap wait (4.1 ms in the heaviest frames) and extra game
-   work stay. A native solver task is a candidate there (speedup
-   unmeasured), not started.
+   command-buffer wrap wait and extra game work stay. A native solver task
+   is a candidate there (speedup unmeasured), not started.
+   **Task creation, cleaned up** (ps3recomp patch 0064): `cellSpursCreateTask`
+   printed a line for every task and looked up an environment switch on every
+   call, and the async task run four more; now the first 48 lines (all with
+   SPU_TASK_LOG=1) and the switches read once. River fight on screen, three
+   runs each way (build/baselines/2026-10-31-createtask-ab): a round's three
+   solver tasks created in 10.2 us instead of 20.2; a physics step 0.4-0.56 ms
+   shorter at matched collision workload (the arms' fights differed, ~86 vs
+   ~64 pairs a step, so only binned comparisons count). Frames: those with
+   41-120 pairs 17.19 -> 16.98 ms; the heaviest too few to compare.
+   **The command-buffer wrap wait** (ps3recomp patch 0065, frame-trace kind
+   21, tests/ring_wait.py; six on-screen river fights, both collision modes,
+   build/baselines/2026-10-31-ring-wait). Every wait seen is the buffer-full
+   wrap: the title reaches the end of its 2 MB ring mid-frame and
+   `cellGcm_fifo_recycle` waits, polling with Sleep(1), until the walker has
+   read everything up to the jump back -- 1,614 waits, median 6.4 ms, p90
+   9.7. Split by the walker noting when it made the room: the walker's part
+   88% (while it made the room: drawing 57%, blocked on the previous present
+   26%, its own 1 ms sleep between passes 16%), the waiter's own 12% (median
+   0.8 ms: the rest of a sleep and waking). The flip-time wrap, which hands
+   the title a lap ending at the walker instead of waiting, ran 1,570 times
+   in the two runs that counted it and never ended in a wait. At every one
+   of their 427 buffer-full wraps the walker was 1,469 KB or more past the
+   ring's begin (median 1,620): a lap ending there would have started with
+   more room than a frame. Frames with a ring wait: 6.5% without physics, 29%
+   with one step. The earlier "4.1 ms in the heaviest frames" picked frames
+   by main-thread busy time, which counts this wait, so it was biased; by
+   guest frame length (all six runs) the wait is ~4.3-5.2 ms in frames of
+   17.5-33 ms. Upper bounds over the 839 guest frames of 18 ms or more: with
+   no physics wait 358 would be under 16.67 ms, with no ring wait 450, with
+   neither 761; without only the waiter's own part, 6.
 10. **"Saving doesn't bring up the save menu"** (owner, 2026-10-31). It
     saved: the save-data module skips the PS3's system save list and takes
     the slot the title offers, so nothing appeared. A save now shows GAME

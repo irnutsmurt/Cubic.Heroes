@@ -373,7 +373,10 @@ time per frame: other game work 10.2 ms (7.8 in frames without physics), the
 **command-buffer wrap wait 4.1** (`cellGcm_fifo_recycle`: the title's ring is
 full and the runtime sleeps in 1 ms steps until the RSX walker has taken the
 jump back; 0.2 ms in frames without physics), the solver's issuing and
-polling 4.0, collision's 1.4 (both collision modes pooled).
+polling 4.0, collision's 1.4 (both collision modes pooled). The 4.1 is
+biased: "busy" counts the wrap wait, so picking frames by busy time picks
+frames with one. Traced directly (docs/HANDOFF.md, "The command-buffer wrap
+wait"), it is ~4.3-5.2 ms in guest frames of 17.5-33 ms that have one.
 
 **Upper bound, not a forecast:** taking the main thread's whole physics wait
 away -- 2.51 ms a step (A) -- would leave one-step frames at ~15.1 ms on
@@ -470,13 +473,16 @@ guide is the collision task, whose runs fell ~20x when made native; the
 solver's could fall much less. What is measured is what a native task cannot
 remove: the PPU's issuing, ~20 us per round to create three tasks (~0.4 ms
 a step for the 20 iterate and write-back rounds), ~0.75 ms a step for all
-~71 tasks. *If* native runs fell as far as collision's, the solver's phases
+~71 tasks -- measured before task creation lost its per-task log line and
+getenv (ps3recomp patch 0064), which halved the round's 20 us. *If* native runs fell as far as collision's, the solver's phases
 would go from ~3.1 to ~0.9-1.3 ms a step (1.8-2.2 ms of the 2.51 ms upper
 bound, at this load): one-step frames from 18.3 to ~16-16.5 ms on average,
 p90 still over 16.67, the heaviest from 23.5 to ~20.5-21. That is a
 what-if, not a forecast. The other contributors to the same frames, largest
-first: the command-buffer wrap wait (4.1 ms in the heaviest frames); the
-extra game work in debris frames (~2.4 ms over frames without physics); the
+first: the command-buffer wrap wait (with neither it nor the physics wait,
+761 of 839 frames of 18 ms or more would be under 16.67 ms; without the
+physics wait alone 358, without the wrap wait alone 450 -- upper bounds,
+docs/HANDOFF.md); the extra game work in debris frames (~2.4 ms over frames without physics); the
 per-task issuing, which only replacing the PPU's solve (`func_00952298`)
 natively would remove; lifted collision, the default, ~1.7 ms a step more
 than native.
