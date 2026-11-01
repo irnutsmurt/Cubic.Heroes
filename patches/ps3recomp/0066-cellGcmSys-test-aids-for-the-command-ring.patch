@@ -1,0 +1,137 @@
+From 409979870f4939702345efa9b6949392df5f4e7f Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Sun, 1 Nov 2026 08:24:14 -0800
+Subject: [PATCH] cellGcmSys: test aids for the command ring
+
+GCM_RING_CHECK=1: at every wrap that lets the title write again before the
+walker has read the end of the lap before (the flip-time wrap into a lap
+that ends at the walker), the unread tail is copied, and the walker compares
+each command it is about to decode there with the copy until it takes a
+jump back: a difference is a command overwritten before it was read.
+GCM_WALKER_DELAY_NS=<ns>: the walker spends that much longer on every
+command, so the title catches up with it. GCM_RING_TEST_BYTES=<n>: the
+title gets a smaller ring, so it wraps far more often. All off by default.
+---
+ libs/video/cellGcmSys.c | 78 ++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 77 insertions(+), 1 deletion(-)
+
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index d1582dc..eab045a 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -692,6 +692,13 @@ u32 cellGcmSetupContext(u32 ctx_out_addr, u32 cmdSize, u32 ioSize, u32 ioAddress
+ {
+     if (cmdSize < 0x10000)
+         cmdSize = 0x10000;
++    /* GCM_RING_TEST_BYTES=<n> (a test): the title gets a ring of n bytes (at
++     * least 64 KB) instead of the size it asked for, so it wraps far more
++     * often. The IO region keeps its size. */
++    u32 ring_bytes = cmdSize;
++    { const char* e = getenv("GCM_RING_TEST_BYTES");
++      if (e && *e) { u32 n = (u32)strtoul(e, NULL, 0); if (n >= 0x10000 && n < cmdSize) ring_bytes = n & ~0xFFFu;
++          fprintf(stderr, "[cellGcmSys] GCM_RING_TEST_BYTES: a ring of 0x%X bytes (the title asked 0x%X)\n", ring_bytes, cmdSize); } }
+ 
+     /* PSL1GHT's gcmInitBody passes ioAddress = 0, expecting gcm to allocate the
+      * IO region itself (the official SDK has the app allocate and pass it).
+@@ -707,7 +714,7 @@ u32 cellGcmSetupContext(u32 ctx_out_addr, u32 cmdSize, u32 ioSize, u32 ioAddress
+     u32 cdata  = galloc ? galloc(16, 16) : 0;
+     if (cdata && gwrite32) {
+         gwrite32(cdata + 0x0, cmdbuf);              /* begin   */
+-        gwrite32(cdata + 0x4, cmdbuf + cmdSize);    /* end     */
++        gwrite32(cdata + 0x4, cmdbuf + ring_bytes); /* end     */
+         gwrite32(cdata + 0x8, cmdbuf);              /* current */
+         /* Command-buffer-full callback: a guest OPD {func, toc} routed to
+          * hle_gcm_callback -> cellGcm_fifo_recycle. Without a real callback the
+@@ -1156,6 +1163,72 @@ static void gcm_ring_wait_end(uint64_t t0, int kind, int sleeps)
+                 tf ? (uint32_t)((tf > t0 ? tf - t0 : 0) / 1000u) : 0xFFFFFFFFu, t0, t1);
+ }
+ 
++/* GCM_RING_CHECK=1 (a test): a lap that ends at the walker lets the title
++ * write again before the walker has read the end of the lap before. At every
++ * such wrap the unread tail -- from the walker to the jump back -- is copied,
++ * and the walker compares each command it is about to decode there with the
++ * copy, until it takes a jump back: a difference is a command the title wrote
++ * over before the walker read it. Counts every 200 wraps, and the first
++ * differences, on stderr. Off: one load per command. */
++static struct {
++    volatile int armed;
++    u32 lo, hi, gen;          /* IO offsets [lo, hi) unread at the wrap; the back-jump count meanwhile */
++    u32 ea_lo;                /* the guest address of lo (the ring is contiguous) */
++    u8* copy;
++    unsigned long long wraps, cmds, bad;
++} s_rc;
++static int gcm_ring_check_on(void)
++{ static int v = -1; if (v < 0) v = getenv("GCM_RING_CHECK") ? 1 : 0; return v; }
++
++static void gcm_ring_check_arm(u32 io_lo, u32 io_hi, u32 ea_lo, u32 gen)   /* the title's thread, at a wrap */
++{
++    enum { MAX = 8u << 20 };
++    if (!gcm_ring_check_on() || io_hi <= io_lo || io_hi - io_lo > MAX) return;
++    s_rc.armed = 0;
++    atomic_thread_fence(memory_order_seq_cst);
++    if (!s_rc.copy) s_rc.copy = (u8*)malloc(MAX);
++    if (!s_rc.copy) return;
++    memcpy(s_rc.copy, vm_base + ea_lo, io_hi - io_lo);
++    s_rc.lo = io_lo; s_rc.hi = io_hi; s_rc.ea_lo = ea_lo; s_rc.gen = gen;
++    atomic_thread_fence(memory_order_release);
++    s_rc.armed = 1;
++    if (++s_rc.wraps % 200 == 0)
++        fprintf(stderr, "[ring-check] %llu wraps with the tail unread, %llu commands compared there, "
++                "%llu overwritten unread\n", s_rc.wraps, s_rc.cmds, s_rc.bad);
++}
++
++static void gcm_ring_check_cmd(u32 off)   /* the walker, before decoding the command at off */
++{
++    if (!s_rc.armed || s_fifo_back_jumps != s_rc.gen || off < s_rc.lo || off >= s_rc.hi) return;
++    const u8* was = s_rc.copy + (off - s_rc.lo);
++    const u8* now = vm_base + s_rc.ea_lo + (off - s_rc.lo);
++    const u32 w = (u32)was[0] << 24 | (u32)was[1] << 16 | (u32)was[2] << 8 | was[3];
++    u32 n = 4;   /* a method header and its data; a jump, call or return alone */
++    if (!(w & 3u) && !(w & 0x20000000u) && w != 0x00020000u) n += ((w >> 18) & 0x7FFu) * 4u;
++    if (n > s_rc.hi - off) n = s_rc.hi - off;
++    s_rc.cmds++;
++    if (memcmp(was, now, n)) {
++        s_rc.bad++;
++        static int k = 0;
++        if (PS3_LOG_FIRST(k, 16))
++            fprintf(stderr, "[ring-check] OVERWRITTEN UNREAD at io 0x%08X (unread 0x%08X-0x%08X): "
++                    "was %08X now %02X%02X%02X%02X, %u bytes compared\n",
++                    off, s_rc.lo, s_rc.hi, w, now[0], now[1], now[2], now[3], n);
++    }
++}
++
++/* GCM_WALKER_DELAY_NS=<ns> (a test): the walker spends that much longer on
++ * every command, so it falls behind the title and the title catches up with
++ * it within a lap. */
++static long long s_walker_delay_ns = -1;
++static void gcm_walker_delay(void)
++{
++    if (s_walker_delay_ns < 0) { const char* e = getenv("GCM_WALKER_DELAY_NS"); s_walker_delay_ns = e ? atoll(e) : 0; }
++    if (!s_walker_delay_ns) return;
++    const uint64_t until = ps3_ft_now() + (uint64_t)s_walker_delay_ns;
++    while (ps3_ft_now() < until) { }
++}
++
+ /* Bytes the walker is behind the writer. Linear while put >= get. Once the
+  * title's ring wraps, put sits BEHIND get and the backlog is the rest of the
+  * ring plus everything from its start to put -- nearly the whole ring, not
+@@ -2409,6 +2482,8 @@ static void gcm_rsx_process_fifo_unlocked(void)
+     if (s_fifo_getoff != put) wr_note(1, s_fifo_getoff, put, s_fifo_calloff);
+     while (s_fifo_getoff != put && budget-- > 0) {
+         gcm_ring_wait_note();
++        if (s_rc.armed) gcm_ring_check_cmd(s_fifo_getoff);
++        if (s_walker_delay_ns) gcm_walker_delay();
+         u32 ea = gcm_io2ea(s_fifo_getoff);
+         if (!ea) {
+             /* get is sitting on an IO offset with no mapping -- the title
+@@ -3554,6 +3629,7 @@ static int gcm_flip_into_fifo(u32 ctx, u32 bufferId)
+         }
+         s_ring_real_end = end;
+         s_ring_limit_jumps = s_fifo_back_jumps;
++        gcm_ring_check_arm(g, gcm_ea2io(cur) + 8u, begin + (g - io_begin), s_ring_limit_jumps);
+         s_ring_limit_end = begin + (g - io_begin);
+         vm_write32(ctx + 4, s_ring_limit_end);
+         vm_write32(ctx + 8, begin);
+-- 
+2.56.0.windows.3
+
