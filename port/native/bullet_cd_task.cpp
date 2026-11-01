@@ -10,6 +10,8 @@
 //   3            self-check: as 2, but native rounding to nearest against
 //                native rounding toward zero (how much rounding alone moves it)
 // DOTHEROES_NATIVE_CD_FP=rz runs native toward zero (the SPU's rounding);
+// DOTHEROES_PHYS_STATS=1 (any mode, 0 included) counts each collision task's
+// workload (record_census below).
 // DOTHEROES_NATIVE_CD_DUMP=n prints the first n manifolds of each kind of
 // difference in full.
 // A task whose pairs bullet_cd does not handle runs lifted in every mode,
@@ -34,6 +36,7 @@
 #include <xmmintrin.h>
 
 #include "bullet_cd.h"
+#include "ps3emu/ps3_ftrace.h"
 #include "spu_workload.h"
 
 extern "C" uint8_t* vm_base;
@@ -171,8 +174,45 @@ struct Pending {
 };
 thread_local Pending* t_pending;
 
+// DOTHEROES_PHYS_STATS=1, any mode: each collision task's workload
+// (bullet_cd::census, after the task's work) as a frame-trace instant
+// (PS3_FT_PHYS_LOAD: who = bodies, a = pairs processed, b = contact points)
+// and a [phys-stats] line every 250 tasks. Lifted tasks are counted after
+// they return, so they run exactly as without it.
+bool g_stats;
+struct StatSum { unsigned long long tasks = 0, pairs = 0, active = 0, mesh = 0, boxbox = 0, cylinder = 0, bodies = 0, points = 0; } g_stat;
+
+void record_census(uint32_t desc)
+{
+    bullet_cd::Census c;
+    bullet_cd::census(bullet_cd::Mem{ vm_base }, desc, c);
+    if (PS3_FT_ON()) { const uint64_t t = ps3_ft_now(); ps3_ft_span(PS3_FT_PHYS_LOAD, (uint32_t)c.bodies, (uint32_t)c.active, (uint32_t)c.points, t, t); }
+    std::lock_guard<std::mutex> lk(g_mu);
+    StatSum& s = g_stat;
+    s.tasks++; s.pairs += c.pairs; s.active += c.active; s.mesh += c.mesh; s.boxbox += c.boxbox;
+    s.cylinder += c.cylinder; s.bodies += c.bodies; s.points += c.points;
+    if (s.tasks % 250 == 0)
+        fprintf(stderr, "[phys-stats] %llu collision tasks: %llu SPU pairs, %llu processed (%llu mesh/box, %llu box/box, "
+                "%llu with a cylinder), %llu awake bodies, %llu contact points\n", s.tasks, s.pairs, s.active, s.mesh,
+                s.boxbox, s.cylinder, s.bodies, s.points);
+}
+
+// The descriptor of a slot's task, from its input queue's ring: every entry
+// for a slot names the same one (fixed for the run), and one is there
+// whether or not the task has popped it yet.
+uint32_t desc_from_queue(uint32_t inq, uint32_t slot)
+{
+    const uint32_t buf = be32(vm_base + inq + 0x14), depth = be32(vm_base + inq + 0x0C);
+    for (uint32_t i = 0; i < depth && i < 16; i++) {
+        const uint8_t* e = vm_base + buf + i * 16u;
+        if (be32(e) == slot && be32(e + 4) == kCmdGatherAndProcess && be32(e + 8)) return be32(e + 8);
+    }
+    return 0;
+}
+
 int cd_run(uint32_t, uint32_t, const uint32_t arg[4])
 {
+    if (g_mode == 0) return 0;   // registered for DOTHEROES_PHYS_STATS alone: the lifted task, counted after
     const uint32_t inq = arg[2], outq = arg[3];
     uint8_t entry[16];
     if (!peek_command(inq, entry)) { lifted("no command within 20 ms"); count_task(); return 0; }
@@ -203,6 +243,7 @@ int cd_run(uint32_t, uint32_t, const uint32_t arg[4])
         std::lock_guard<std::mutex> lk(g_mu);
         for (const auto& o : r.manifolds) count_down(o.bytes, o.types, 1);
     }
+    if (g_stats) record_census(desc);
     while (!spurs_queue_spu_push(outq, entry)) std::this_thread::yield();
     g_native++;
     count_task();
@@ -334,11 +375,15 @@ void compare(const Pending& p)
     }
 }
 
-void cd_after(uint32_t, uint32_t, const uint32_t[4])
+void cd_after(uint32_t, uint32_t, const uint32_t arg[4])
 {
+    if (g_stats) {   // the lifted task's work, as it left it
+        const uint32_t desc = desc_from_queue(arg[2], arg[0]);
+        if (desc) record_census(desc);
+    }
     Pending* p = t_pending;
     t_pending = nullptr;
-    if (!p) return;   // ran lifted as unsupported: counted in cd_run
+    if (!p) return;   // stats only, or ran lifted as unsupported: counted in cd_run
     compare(*p);
     delete p;
     count_task();
@@ -350,15 +395,20 @@ extern "C" void dotheroes_native_init(void)
 {
     const char* e = getenv("DOTHEROES_NATIVE_CD");
     g_mode = e ? atoi(e) : 0;
-    if (g_mode < 1 || g_mode > 3) return;
+    if (g_mode < 0 || g_mode > 3) g_mode = 0;
+    const char* st = getenv("DOTHEROES_PHYS_STATS");
+    g_stats = st && *st == '1';
+    if (g_mode == 0 && !g_stats) return;
     const char* fp = getenv("DOTHEROES_NATIVE_CD_FP");
     g_rz = fp && !strcmp(fp, "rz");
     const char* dump = getenv("DOTHEROES_NATIVE_CD_DUMP");
     g_dump_left = dump ? atoi(dump) : 0;
     spu_workload_native_register(kImageBulletCD, cd_run, cd_after);
-    fprintf(stderr, "[native-cd] Bullet collision task: %s\n",
-            g_mode == 1 ? "native" : g_mode == 2 ? "check (native against lifted)"
-                        : "self-check (native rounding to nearest against toward zero)");
+    fprintf(stderr, "[native-cd] Bullet collision task: %s%s\n",
+            g_mode == 0 ? "lifted" : g_mode == 1 ? "native (experimental)"
+                        : g_mode == 2 ? "check (native against lifted)"
+                        : "self-check (native rounding to nearest against toward zero)",
+            g_stats ? "; workload counted (DOTHEROES_PHYS_STATS)" : "");
 }
 #else
 extern "C" void dotheroes_native_init(void) {}

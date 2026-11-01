@@ -52,4 +52,16 @@ void run(const Mem& m, uint32_t desc_ea, Result& out, bool write);
 // now (to compare a run against). Reads only.
 void manifolds(const Mem& m, uint32_t desc_ea, std::vector<ManifoldOut>& out);
 
+// How much collision work a descriptor holds, whichever implementation does
+// it: its SPU pairs, those the task processes (an object awake), by kind,
+// the distinct awake bodies in them, and the contact points their manifolds
+// hold as it is read. Reads only.
+struct Census {
+    int pairs = 0, active = 0;
+    int mesh = 0, boxbox = 0, cylinder = 0;   // active pairs by kind
+    int bodies = 0;                           // distinct awake objects in active pairs
+    int points = 0;                           // manifold points in active pairs
+};
+void census(const Mem& m, uint32_t desc_ea, Census& out);
+
 }  // namespace bullet_cd

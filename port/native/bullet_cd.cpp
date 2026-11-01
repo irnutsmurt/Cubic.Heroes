@@ -603,6 +603,36 @@ void run(const Mem& m, uint32_t desc_ea, Result& out, bool write)
     t_ctx = saved;
 }
 
+void census(const Mem& m, uint32_t desc_ea, Census& out)
+{
+    uint32_t seen[512];
+    int n_seen = 0;
+    for_each_pair(m, desc_ea, [&](uint32_t pe) {
+        const uint32_t alg = r32(m, pe + 8);
+        if (r32(m, pe + 12) != 2 || !alg || !r32(m, pe) || !r32(m, pe + 4)) return;
+        out.pairs++;
+        const uint32_t o0 = r32(m, alg + L::AlgObj0), o1 = r32(m, alg + L::AlgObj1);
+        const bool a0 = is_active(m, o0), a1 = is_active(m, o1);
+        if (!a0 && !a1) return;
+        out.active++;
+        const uint32_t t0 = r32(m, alg + L::AlgType0), t1 = r32(m, alg + L::AlgType1);
+        if (t0 == kCylinder || t1 == kCylinder) out.cylinder++;
+        else if (t0 == kTriangleMesh || t1 == kTriangleMesh) out.mesh++;
+        else out.boxbox++;
+        for (const uint32_t o : { a0 ? o0 : 0u, a1 ? o1 : 0u }) {
+            if (!o) continue;
+            bool dup = false;
+            for (int i = 0; i < n_seen && !dup; i++) dup = seen[i] == o;
+            if (!dup) {
+                out.bodies++;
+                if (n_seen < 512) seen[n_seen++] = o;
+            }
+        }
+        const uint32_t pts = r32(m, r32(m, alg + L::AlgManifold) + L::MfCount);
+        out.points += pts <= 4 ? (int)pts : 0;
+    });
+}
+
 void manifolds(const Mem& m, uint32_t desc_ea, std::vector<ManifoldOut>& out)
 {
     for_each_pair(m, desc_ea, [&](uint32_t pe) {

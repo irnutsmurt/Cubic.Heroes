@@ -1,0 +1,31 @@
+From 95b2161462a5c9d60a2171deb41addaffb606f6a Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Sat, 31 Oct 2026 20:42:06 -0700
+Subject: [PATCH] Frame trace: PS3_FT_PHYS_LOAD, a physics work unit's size
+
+Kind 19, an instant: a title's physics work unit as the port counts it --
+for 3D Dot Game Heroes one Bullet collision task: who = the awake bodies in
+it, a = the pairs processed, b = the contact points. With it, runs whose
+fights differ can be compared at the same collision workload per frame
+instead of by physics step counts alone.
+---
+ include/ps3emu/ps3_ftrace.h | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/include/ps3emu/ps3_ftrace.h b/include/ps3emu/ps3_ftrace.h
+index 917db19..71f09dc 100644
+--- a/include/ps3emu/ps3_ftrace.h
++++ b/include/ps3emu/ps3_ftrace.h
+@@ -69,6 +69,9 @@ enum ps3_ft_kind {
+     PS3_FT_WALKER      = 18, /* the RSX walker thread outside its drain passes (the port's
+                               * frame loop): who = 1 a guest frame's present begun there,
+                               * 2 the window's event pump, 3 its sleep between passes */
++    PS3_FT_PHYS_LOAD   = 19, /* instant, a title's physics work unit as the port counts it
++                              * (3D Dot Game Heroes: one Bullet collision task): who = bodies,
++                              * a = pairs processed, b = contact points */
+ };
+ 
+ #if defined(_MSC_VER)
+-- 
+2.56.0.windows.3
+
