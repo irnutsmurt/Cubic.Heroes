@@ -514,6 +514,52 @@ fight variation alone. What it writes was identical to the lifted task's, which
 leaves timing as the route. With that much difference between the arms, ~1 ms
 a physics frame from the solver does not show through in five pairs.
 
+**Again with native collision in both arms** (build/baselines/2026-11-01-native-
+writeback-cd1-ab; on screen, default ring, only the write-back switched, all ten
+rounds in both; four fight runs an arm, one run of each had no fight and is
+left out). Steps at matched contact points 0.33-1.11 ms shorter in every band
+(write-back 0.70-1.37 -> 0.21 ms). Physics frames at matched contact points in
+the frame: guest frame 17.31 -> 17.22, 18.27 -> 17.60, 21.50 -> 20.18 ms (light,
+medium, heavy), present-call completion intervals over 25 ms 3.8% -> 3.2%, 7.0%
+-> 3.4%, 33.1% -> 15.1%, catch-up steps a physics frame 1.14 -> 1.07, 1.17 ->
+1.12, 1.77 -> 1.38. Pooled over every frame the arms differ in workload (two
+native-arm fights at 216 and 252 contact points a step, the other arm's at
+78-166): over 25 ms 1.15% -> 0.98%, over 33 ms 0.18% -> 0.22%, guest frame
+over 18 ms 5.58% -> 6.65%, frame start -> present median 26.99 -> 27.56 ms --
+not comparable as they stand. A first batch of these runs is not counted: from
+its second run on the game ran at ~35 fps in both arms behind another window
+(foreground share 0); tests/boot_smoke.py's guard now also stops a run whose
+window is covered, and TOPMOST=1 keeps it on top. Out of focus but uncovered,
+runs keep their speed (58 fps).
+
+**Does native collision make fights comparable?** Checked, not assumed
+(tests/workload_variation.py over every fight run on the default ring: 16
+lifted, 11 native). The workload varies as much either way -- between runs,
+the coefficient of variation of awake bodies 0.38 / 0.35, pairs 0.39 / 0.34,
+contact points 0.46 / 0.46 (lifted / native); a fight is light or heavy by what
+happens in it. What native collision steadies is the cost and the catch-up:
+collision 3.40 +- 0.92 ms a step against 0.14 +- 0.02, a step 6.67 +- 1.70
+against 3.32 +- 0.57 (CV 0.26 / 0.17), steps a physics frame CV 0.21 / 0.05,
+physics frames with two or more steps 37% / 17%. (The write-back-off runs alone
+suggested the workload steadied too -- 0.41 / 0.19 for bodies -- but that sample
+had three heavy lifted fights and no heavy native one.) So comparisons still
+have to match the workload; native collision makes what is left of a step
+mostly the solver, which lets a solver change show at matched load.
+
+**Its cost on identical inputs** (DOTHEROES_SOLVER_BENCH, 547 steps of a run
+with the lifted write-back: before the lifted tasks did each step, the native
+write-back was timed on that step's own inputs and everything it changed put
+back; with the write-back check on as well, the game's result was untouched
+over 200 steps). Lifted, the phase 504 / 656 / 784 us at 1-50 / 51-100 /
+101-200 contacts (round 1, which does the work, 53-81 us; the 30 tasks' CPU
+1.36-2.22 ms); native, one task doing the same work 0.5 / 1.2 / 1.8 us. As the
+game runs it, the native phase is ~0.21 ms a step whatever the load: the PPU
+creating 30 tasks and their dispatch, which a native write-back does not
+remove. **Gameplay benefit: unresolved.** At matched load physics frames were
+0.1-1.3 ms shorter (the phase gives back 0.5-1.2 ms a step, 1.1-1.4 steps a
+physics frame), in four fights an arm; over whole fights the difference is
+within what one fight differs from the next.
+
 **Validation.**
 - Captured inputs: `SPURS_SNAP` extended to take guest memory before a
   command's first task and after its last, in capture runs whose solver

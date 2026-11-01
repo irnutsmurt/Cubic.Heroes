@@ -596,6 +596,14 @@ tooling, the native Windows build, measuring on the 3070) are done; see
    step: the write-back cannot change collision already done in its step, but
    later steps and the schedule are not excluded).
    All ten write-back passes still run: shown redundant, not relied on.
+   With native collision in both arms (on screen, default ring, all ten
+   rounds): steps 0.33-1.11 ms shorter at matched contact points, physics
+   frames at matched load faster and less often over 25 ms; pooled frames not
+   comparable (the arms' fights differed in load). Native collision does not
+   make the workload vary less (contact points CV 0.46 either way), only the
+   cost and catch-up. On identical inputs the native write-back's work takes
+   0.5-1.8 us a step against the lifted phase's 504-784 us; its in-game phase,
+   ~0.21 ms, is the PPU's issuing of 30 tasks. Gameplay benefit unresolved.
 10. **"Saving doesn't bring up the save menu"** (owner, 2026-10-31). It
     saved: the save-data module skips the PS3's system save list and takes
     the slot the title offers, so nothing appeared. A save now shows GAME
@@ -640,7 +648,9 @@ tooling, the native Windows build, measuring on the 3070) are done; see
 | `DOTHEROES_SOLVER_SNAP=<step>[,<step>]:<prefix>` | game memory as each solver command of the chosen steps starts, the tasks' descriptors, the lock and cell masks as tasks run (tests/solver_layout.py, tests/native/bullet_solver_snapcheck.cpp); ~1.4 GB a step, game memory: local only |
 | `DOTHEROES_NATIVE_SOLVER=6` | experimental, off: the Bullet solver's warm-start write-back done natively (docs/BULLET_NATIVE.md) |
 | `DOTHEROES_NATIVE_SOLVER_CHECK=1` | each step's write-back compared, as its last task finishes, with what it must leave |
-| `VISIBLE=1`, `GRAB_EVERY=<s>` | tests/boot_smoke.py: an on-screen run -- refused on a locked desktop, stopped if it locks or the window is minimised/hidden (guard.json); window grabs to grabs/ |
+| `DOTHEROES_SOLVER_BENCH=<file>` | with the lifted write-back: each step's native write-back timed on the step's own inputs, then undone (tests/solver_bench.py) |
+| `VISIBLE=1`, `GRAB_EVERY=<s>` | tests/boot_smoke.py: an on-screen run -- refused on a locked desktop, stopped if it locks, the window is minimised/hidden, or another window covers more than a tenth of it for 3 s (a covered window ran at ~35 fps); guard.json has the foreground and covered shares; window grabs to grabs/ |
+| `TOPMOST=1` | tests/boot_smoke.py, with VISIBLE=1: the game's window kept above other windows without taking the focus |
 | `DOTHEROES_NATIVE_CD=<0-3>` | the Bullet collision task: lifted (default), native (experimental), check (native against lifted, `[native-cd]` lines), self-check (native against itself rounding toward zero); `DOTHEROES_NATIVE_CD_DUMP=n` prints differing manifolds, `DOTHEROES_NATIVE_CD_FP=rz` runs native toward zero (docs/BULLET_NATIVE.md) |
 | `GAMEDATA=<dir>` | tests/boot_smoke.py: play on a persistent save root in place (`%LOCALAPPDATA%\dotheroes\gamedata`) |
 | `RSX_DROP_LOG=1`, `VK_DRAW_SKIP_LOG=1` | draws the engine / the Vulkan backend discard before drawing, with the reason |
