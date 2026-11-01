@@ -592,7 +592,9 @@ tooling, the native Windows build, measuring on the 3070) are done; see
    lifted task's (offline 146 of 146 contacts, in the game 21,647, none
    different) and it wrote every contact in 600 steps. The phase fell from 1.04
    to 0.21 ms a step; frames showed no gain in five river pairs with lifted
-   collision, whose fight-to-fight variation (0.45-1.2 ms a step) was as large.
+   collision, whose cost differed between the arms by as much (0.45-1.2 ms a
+   step: the write-back cannot change collision already done in its step, but
+   later steps and the schedule are not excluded).
    All ten write-back passes still run: shown redundant, not relied on.
 10. **"Saving doesn't bring up the save menu"** (owner, 2026-10-31). It
     saved: the save-data module skips the PS3's system save list and takes

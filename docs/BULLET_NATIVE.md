@@ -506,9 +506,13 @@ completion intervals over 25 ms 2.90% -> 3.58%, over 33 ms 1.02% -> 0.86%, guest
 frame p99 32.0 -> 30.8 ms. The native arm's fights carried 6-11 more awake
 bodies at the same contact load; their lifted collision took 0.45-1.2 ms a step
 longer -- as much as the write-back saved, or more -- and they ran more
-catch-up steps (43% of physics frames with 2+ steps, against 38%). With lifted
-collision varying that much from fight to fight, ~1 ms a physics frame from the
-solver does not show through in five pairs.
+catch-up steps (43% of physics frames with 2+ steps, against 38%). The
+write-back cannot change the collision already done in the same step; it can
+change later steps (what it writes is warm-start state) and the schedule (when
+tasks finish and the PPU goes on), so the longer collision is not shown to be
+fight variation alone. What it writes was identical to the lifted task's, which
+leaves timing as the route. With that much difference between the arms, ~1 ms
+a physics frame from the solver does not show through in five pairs.
 
 **Validation.**
 - Captured inputs: `SPURS_SNAP` extended to take guest memory before a
