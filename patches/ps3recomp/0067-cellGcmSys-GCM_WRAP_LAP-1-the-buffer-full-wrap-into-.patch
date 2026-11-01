@@ -1,0 +1,404 @@
+From 2972bb9d9c807a30447da238f2a377bf0f9dfa6e Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Sun, 1 Nov 2026 10:11:56 -0800
+Subject: [PATCH] cellGcmSys: GCM_WRAP_LAP=1, the buffer-full wrap into a lap
+ ending at the walker
+
+Experimental and off by default (GCM_WRAP_LAP=0 waits as before). At the
+buffer-full wrap the title waited until the walker had read its whole ring
+up to the jump back -- a median 6.4 ms in 3D Dot Game Heroes' river fights.
+With the switch it gets a lap that ends at the walker instead, as the
+flip-time wrap already does: the JUMP at the write head, `current` back to
+begin, `end` lowered to the walker's position, `put` to begin; and
+gcm_ring_limit_raise moves `end` on as the walker reads the tail, waiting
+if the title catches up.
+
+Only when the ring as it is makes that safe: the runtime's own ring, no lap
+limit in force, the walker in this lap (it has jumped back since the last
+wrap -- the back-jump count at every wrap is kept for this) and behind the
+title, and room from begin to the walker for what the title's reserve
+asked and never under GCM_RECYCLE_MARGIN. Otherwise the wait as before. The
+reserve's size now reaches the callback (r4); with the switch a raise also
+leaves at least that much room. Wraps taken this way are frame-trace
+instants (kind 21, a = 4).
+
+libs/video/tests/test_gcm_wrap_lap.c: the lap, the walker reading the old
+tail and the new lap with no command overwritten unread (GCM_RING_CHECK),
+the raise back to the ring's end, the check catching an overwrite, and
+each unsafe state leaving the ring untouched.
+---
+ include/ps3emu/ps3_ftrace.h          |   3 +-
+ libs/video/cellGcmSys.c              |  89 +++++++++++-
+ libs/video/tests/test_gcm_wrap_lap.c | 201 +++++++++++++++++++++++++++
+ runtime/ppu/ppu_sysprx.cpp           |   5 +-
+ 4 files changed, 293 insertions(+), 5 deletions(-)
+ create mode 100644 libs/video/tests/test_gcm_wrap_lap.c
+
+diff --git a/include/ps3emu/ps3_ftrace.h b/include/ps3emu/ps3_ftrace.h
+index 82cbf1e..8e55536 100644
+--- a/include/ps3emu/ps3_ftrace.h
++++ b/include/ps3emu/ps3_ftrace.h
+@@ -82,7 +82,8 @@ enum ps3_ft_kind {
+                               * as the wait began << 16 (0xFFFF: not in that lap), b = us from
+                               * the wait's start until the walker had made the room (0xFFFFFFFF:
+                               * not before it ended); a = 3 (an instant): a wrap at a flip
+-                              * into a lap ending at the walker, room KB << 16 */
++                              * into a lap ending at the walker, room KB << 16; a = 4 (an
++                              * instant): the same at the ring's end (GCM_WRAP_LAP=1) */
+ };
+ 
+ #if defined(_MSC_VER)
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index eab045a..dc3b79b 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -3325,12 +3325,92 @@ static void gcm_ring_limit_raise(u32 ctx_ea, u32 need)
+     }
+ }
+ 
+-void cellGcm_fifo_recycle(u32 ctx_ea)
++/* GCM_WRAP_LAP=1 (experimental; 0, the default, waits as before): at the
++ * buffer-full wrap, hand the title a lap that ends at the walker, as the
++ * flip-time wrap does, instead of waiting for the walker to read the whole
++ * ring up to the jump back. That wait was a median 6.4 ms in 3D Dot Game
++ * Heroes' river fights, every ~2 frames with physics, and the walker was
++ * then always more than 1.4 MB into its 2 MB ring. */
++static int gcm_wrap_lap(void)
++{ static int v = -1; if (v < 0) { const char* e = getenv("GCM_WRAP_LAP"); v = e && e[0] == '1'; } return v; }
++
++/* The back-jump count as the title's current lap began, at any wrap: the
++ * walker is in that lap once it has jumped back since. */
++static u32 s_lap_jumps, s_lap_set;
++static int gcm_walker_in_lap(void) { return !s_lap_set || s_fifo_back_jumps != s_lap_jumps; }
++
++static unsigned long long s_lap_wraps, s_lap_waited[5];
++
++/* The buffer-full wrap into a lap that ends at the walker. Only when the ring
++ * as it is now makes it safe: the runtime's own ring; no lap limit in force;
++ * the walker in this lap (it has jumped back since the last wrap) and behind
++ * the title; and room from begin to the walker for what the title's reserve
++ * asked (`need`), and never under GCM_RECYCLE_MARGIN. Else 0, and the caller
++ * waits as before. The title then writes from begin up to the walker, and
++ * gcm_ring_limit_raise moves `end` on as the walker reads the tail and takes
++ * the jump, waiting -- as for a flip-time wrap -- if the title catches up. */
++static int gcm_wrap_into_lap(u32 ctx_ea, u32 begin, u32 current, u32 io_begin, u32 need)
++{
++    const u32 end = vm_read32(ctx_ea + 0x4), cb_opd = vm_read32(ctx_ea + 0xC);
++    const u32 io_cur = gcm_ea2io(current);
++    int why;
++    if (!cb_opd || vm_read32(cb_opd) != GCM_FIFO_CALLBACK_SENTINEL_EA) why = 1;
++    else if (s_ring_limit_end || io_begin == 0xFFFFFFFFu || io_cur == 0xFFFFFFFFu || current + 4 > end) why = 2;
++    else if (!gcm_walker_in_lap()) why = 3;
++    else {
++        /* The walker only moves on, and it stops at `put`, which is at most
++         * `current` until it is moved below: it cannot take the jump written
++         * here before then, so the back-jump count read here is this lap's. */
++        const u32 g = s_fifo_getoff;
++        if (!(g >= io_begin && g < io_cur)) why = 3;
++        else if (g - io_begin < need || g - io_begin < GCM_RECYCLE_MARGIN) why = 4;
++        else {
++            const u32 room = g - io_begin, jumps = s_fifo_back_jumps;
++            vm_write32(current, 0x20000000u | io_begin);              /* JUMP begin */
++            gcm_ring_check_arm(g, io_cur + 4u, begin + room, jumps);
++            s_ring_real_end = end;
++            s_ring_limit_jumps = jumps;
++            s_lap_jumps = jumps; s_lap_set = 1;
++            s_ring_limit_end = begin + room;
++            vm_write32(ctx_ea + 0x4, s_ring_limit_end);               /* end = the walker */
++            vm_write32(ctx_ea + 0x8, begin);                          /* current = begin */
++            /* The jump in guest memory before `put` moves behind `get`. */
++            atomic_thread_fence(memory_order_release);
++            vm_write32(GCM_CONTROL_GUEST_ADDR + 0, io_begin);         /* put = begin */
++            if (PS3_FT_ON()) {   /* PS3_FT_RING_WAIT 4: this wrap, an instant; KB of room the lap starts with */
++                extern PPU_THREAD_LOCAL ppu_context* g_active_ctx;
++                const uint64_t t = ps3_ft_now();
++                ps3_ft_span(PS3_FT_RING_WAIT, g_active_ctx ? (uint32_t)g_active_ctx->thread_id : 0,
++                            4u | (room >> 10) << 16, 0, t, t);
++            }
++            if (++s_lap_wraps <= 2 || s_lap_wraps % 500 == 0)
++                fprintf(stderr, "[cellGcmSys] wrap into a lap ending at the walker: %llu; waited instead: "
++                        "not the runtime's ring %llu, ring state %llu, walker not in this lap %llu, "
++                        "too little room %llu\n", s_lap_wraps, s_lap_waited[1], s_lap_waited[2],
++                        s_lap_waited[3], s_lap_waited[4]);
++            return 1;
++        }
++    }
++    s_lap_waited[why]++;
++    return 0;
++}
++
++void cellGcm_fifo_recycle_n(u32 ctx_ea, u32 count);
++void cellGcm_fifo_recycle(u32 ctx_ea) { cellGcm_fifo_recycle_n(ctx_ea, 0); }
++
++/* count: the words the title's reserve asked for (the callback's second
++ * argument), 0 unknown. */
++void cellGcm_fifo_recycle_n(u32 ctx_ea, u32 count)
+ {
+     if (!ctx_ea) return;
++    /* The room a raise or a new lap leaves the title: GCM_RING_LIMIT_ROOM, or
++     * with GCM_WRAP_LAP=1 the reserve that called, if that is more. */
++    u32 need = GCM_RING_LIMIT_ROOM;
++    if (gcm_wrap_lap() && count < (16u << 20) / 4 && count * 4u + GCM_RECYCLE_SLACK > need)
++        need = count * 4u + GCM_RECYCLE_SLACK;
+     /* The title reached the walker, not the end of its ring. */
+     if (s_ring_limit_end && vm_read32(ctx_ea + 0x4) == s_ring_limit_end) {
+-        gcm_ring_limit_raise(ctx_ea, GCM_RING_LIMIT_ROOM);
++        gcm_ring_limit_raise(ctx_ea, need);
+         return;
+     }
+     u32 begin   = vm_read32(ctx_ea + 0x0);
+@@ -3354,6 +3434,9 @@ void cellGcm_fifo_recycle(u32 ctx_ea)
+      * consumes the tail, follows the jump, and idles at begin; then it's safe
+      * for the guest to write from begin (that region was consumed long ago). */
+     u32 io_begin = gcm_ea2io(begin);
++    if (gcm_wrap_lap() && gcm_wrap_into_lap(ctx_ea, begin, current, io_begin,
++                                            count < (16u << 20) / 4 ? need : 0xFFFFFFFFu))
++        return;
+     const u32 back_jumps0 = s_fifo_back_jumps;
+     if (io_begin != 0xFFFFFFFFu) {
+         vm_write32(current, 0x20000000u | io_begin);            /* JUMP begin  */
+@@ -3400,6 +3483,7 @@ void cellGcm_fifo_recycle(u32 ctx_ea)
+     }
+ 
+     vm_write32(ctx_ea + 0x8, begin);                    /* recycle ring to base */
++    s_lap_jumps = back_jumps0; s_lap_set = 1;            /* this lap began at that jump */
+     s_fifo_recycle_waiting = 0;                          /* current no longer reads end */
+ 
+     if (s_recdbg)
+@@ -3630,6 +3714,7 @@ static int gcm_flip_into_fifo(u32 ctx, u32 bufferId)
+         s_ring_real_end = end;
+         s_ring_limit_jumps = s_fifo_back_jumps;
+         gcm_ring_check_arm(g, gcm_ea2io(cur) + 8u, begin + (g - io_begin), s_ring_limit_jumps);
++        s_lap_jumps = s_ring_limit_jumps; s_lap_set = 1;
+         s_ring_limit_end = begin + (g - io_begin);
+         vm_write32(ctx + 4, s_ring_limit_end);
+         vm_write32(ctx + 8, begin);
+diff --git a/libs/video/tests/test_gcm_wrap_lap.c b/libs/video/tests/test_gcm_wrap_lap.c
+new file mode 100644
+index 0000000..a445673
+--- /dev/null
++++ b/libs/video/tests/test_gcm_wrap_lap.c
+@@ -0,0 +1,201 @@
++/* GCM_WRAP_LAP=1: the buffer-full wrap hands the title a lap that ends at the
++ * walker instead of waiting for the walker to read the whole ring.
++ *
++ * On the runtime's own ring (cellGcmSetupContext), single-threaded: the title
++ * and the walker take turns.
++ *   1. The capped lap: the title has written to near the end, the walker is
++ *      0x30000 bytes in; the callback writes the JUMP, moves current to begin
++ *      and end to the walker, and put to begin -- without waiting.
++ *   2. Ownership: the title writes in the new lap below `end`; the walker reads
++ *      the old tail to the JUMP, jumps, and reads the new lap. GCM_RING_CHECK
++ *      compares every tail command with its copy: none overwritten.
++ *   3. The title reaches `end` with the walker in the new lap: the raise
++ *      gives it the whole ring again.
++ *   4. The check itself: a word written into the unread tail is reported.
++ *   5. Each unsafe state leaves the ring alone (gcm_wrap_into_lap returns 0
++ *      and writes nothing): too little room, the walker level with or past the
++ *      title, the walker not yet in this lap, a lap limit in force, the reserve
++ *      larger than the room, a title's own callback.
++ *
++ * gcc -std=gnu17 -I include -I libs/video libs/video/tests/test_gcm_wrap_lap.c
++ *   -ffunction-sections -fdata-sections -Wl,--gc-sections -pthread
++ *   -o /tmp/test_gcm_wrap_lap        (clang on macOS: -Wl,-dead_strip)
++ * Windows (the bundled Zig): zig cc -std=gnu17 -target x86_64-windows-gnu
++ *   -I include -I libs/video libs/video/tests/test_gcm_wrap_lap.c -o test_gcm_wrap_lap.exe
++ */
++#include "../cellGcmSys.c"
++#include <stdio.h>
++#include <stdlib.h>
++uint8_t* vm_base;
++uint32_t ppu_vm_size;
++int g_resv_store_active;
++uint32_t g_ww_lo, g_ww_hi;
++void ppu_resv_break_store(uint64_t ea) { (void)ea; }
++void ps3_ww_report_inline(uint32_t a, uint64_t v, int w) { (void)a; (void)v; (void)w; }
++int spu_coh_is_reserved(uint32_t a) { (void)a; return 0; }
++void spu_coh_notify_write(uint32_t a) { (void)a; }
++void spu_lockline_lock(void) {}
++void spu_lockline_unlock(void) {}
++ps3_guest_caller_fn g_ps3_guest_caller;
++/* The rest of the walker's world: no graphics backend, no lifted program. */
++PPU_THREAD_LOCAL ppu_context* g_active_ctx;
++u32 g_rsx_last_reference;
++void (*g_spu_put_hook)(uint32_t ea, uint32_t size);
++void rsx_raise_user_cmd(uint32_t arg) { (void)arg; }
++void ppu_dump_bctrl_ring(uint32_t n, const char* why) { (void)n; (void)why; }
++void ppu_dump_guest_stack(ppu_context* c, const char* why) { (void)c; (void)why; }
++void rsx_state_init(rsx_state* state) { (void)state; }
++int  rsx_process_method(rsx_state* state, u32 method, u32 data) { (void)state; (void)method; (void)data; return 0; }
++int  rsx_process_vp_run(rsx_state* state, u32 method, const u8* src, u32 count)
++{ (void)state; (void)method; (void)src; (void)count; return 0; }
++int  rsx_draw_engine_enabled(void) { return 0; }
++rsx_backend* rsx_get_backend(void) { return NULL; }
++void rsx_draw_engine_method(u32 method, u32 arg) { (void)method; (void)arg; }
++void rsx_draw_engine_note_flip(u32 buffer_id) { (void)buffer_id; }
++void rsx_draw_engine_guest_read(u32 l, u32 o, u32 p, u32 w, u32 h) { (void)l; (void)o; (void)p; (void)w; (void)h; }
++void rsx_draw_engine_guest_wrote(u32 l, u32 o, u32 p, u32 w, u32 h) { (void)l; (void)o; (void)p; (void)w; (void)h; }
++int  rsx_live_draw_enabled(void) { return 0; }
++void rsx_live_draw_method(u32 method, u32 arg) { (void)method; (void)arg; }
++int  rsx_live_draw_blit(u32 a, u32 b, u32 c, u32 d, u32 e, u32 f, u32 w, u32 h)
++{ (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; (void)w; (void)h; return 0; }
++void rsx_live_draw_note_resolve(u32 a, u32 b, u32 c, u32 d) { (void)a; (void)b; (void)c; (void)d; }
++int  rsx_live_draw_resolve_blit(u32 a, u32 b, u32 c, u32 d, u32 e, u32 f, u32 g, u32 h,
++                                u32 i, u32 j, u32 k, u32 l)
++{ (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; (void)g; (void)h; (void)i; (void)j; (void)k; (void)l; return 0; }
++/* Referenced from functions this test never calls; the COFF linker resolves
++ * them before dropping unused code, so Windows needs them defined. */
++void rsx_draw_engine_set_display_buffer(u32 i, u32 l, u32 o, u32 p, u32 w, u32 h)
++{ (void)i; (void)l; (void)o; (void)p; (void)w; (void)h; }
++void rsx_live_draw_set_display_buffer(u32 i, u32 l, u32 o, u32 p, u32 w, u32 h)
++{ (void)i; (void)l; (void)o; (void)p; (void)w; (void)h; }
++
++#define IO_ADDR   0x00100000u
++#define IO_SIZE   0x00400000u
++#define CMD_SIZE  0x00080000u
++#define NOP_HDR   0x00040100u     /* method 0x100 (NOP), one data word */
++#define TITLE_CB  0x012D6A78u
++
++static uint32_t g_heap = 0x00800000u;
++static u32 host_alloc(u32 size, u32 align)
++{
++    if (!align) align = 4;
++    g_heap = (g_heap + align - 1u) & ~(align - 1u);
++    u32 r = g_heap;
++    g_heap += size;
++    return r;
++}
++static void host_w32(u32 ea, u32 v) { vm_write32(ea, v); }
++
++static int fails;
++static void expect(int ok, const char* what)
++{
++    printf("[%s] %s\n", ok ? "PASS" : "FAIL", what);
++    fails += !ok;
++}
++
++/* The title: n bytes of NOP methods at current, current and put moved past them. */
++static void title_write(u32 ctx, u32 n)
++{
++    const u32 cur = vm_read32(ctx + 8);
++    for (u32 i = 0; i < n; i += 8) { vm_write32(cur + i, NOP_HDR); vm_write32(cur + i + 4, i); }
++    vm_write32(ctx + 8, cur + n);
++    vm_write32(GCM_CONTROL_GUEST_ADDR + 0, gcm_ea2io(cur + n));
++}
++
++static void walker_drain(void)
++{
++    for (int i = 0; i < 64 && s_fifo_getoff != vm_read32(GCM_CONTROL_GUEST_ADDR + 0); i++)
++        cellGcm_rsx_process_fifo();
++}
++
++int main(void)
++{
++    setvbuf(stdout, NULL, _IONBF, 0);
++    putenv("GCM_WRAP_LAP=1");
++    putenv("GCM_RING_CHECK=1");
++    const uint32_t vm_size = ppu_hle_inject_base + VM_HLE_INJECT_SIZE;
++    vm_base = (uint8_t*)calloc(1, vm_size);
++    if (!vm_base) { puts("FAIL: guest VM alloc"); return 1; }
++    ppu_vm_size = vm_size;
++
++    const u32 ctx_out = host_alloc(4, 4);
++    const u32 ctx = cellGcmSetupContext(ctx_out, CMD_SIZE, IO_SIZE, IO_ADDR, host_alloc, host_w32);
++    const u32 begin = vm_read32(ctx), end = vm_read32(ctx + 4), io_b = gcm_ea2io(begin);
++    s_fifo_getoff = io_b;
++
++    /* 1. The capped lap */
++    title_write(ctx, 0x30000);
++    walker_drain();                                   /* the walker 0x30000 in */
++    title_write(ctx, 0x40000);                        /* the title at 0x70000, unread from 0x30000 */
++    const u32 cur0 = vm_read32(ctx + 8), jumps0 = s_fifo_back_jumps;
++    cellGcm_fifo_recycle_n(ctx, 0x2000);              /* a 32 KB reserve that does not fit */
++    expect(vm_read32(cur0) == (0x20000000u | io_b), "1. JUMP to begin written at the title's position");
++    expect(vm_read32(ctx + 8) == begin, "1. current back at begin");
++    expect(vm_read32(ctx + 4) == begin + 0x30000u && s_ring_limit_end == begin + 0x30000u,
++           "1. end lowered to the walker (0x30000)");
++    expect(vm_read32(GCM_CONTROL_GUEST_ADDR + 0) == io_b, "1. put moved to begin");
++    expect(s_lap_wraps == 1 && s_rc.armed && s_rc.lo == io_b + 0x30000u && s_rc.hi == gcm_ea2io(cur0) + 4u,
++           "1. the unread tail (0x30000 to the JUMP) copied for the check");
++
++    /* 2. Ownership: the title writes below `end`, the walker reads the tail, jumps, reads the new lap */
++    title_write(ctx, 0x20000);
++    const unsigned long long cmds0 = s_rc.cmds;
++    walker_drain();
++    expect(s_fifo_back_jumps == jumps0 + 1, "2. the walker took the JUMP back");
++    expect(s_fifo_getoff == io_b + 0x20000u, "2. ... and read the new lap up to put");
++    expect(s_rc.cmds - cmds0 == 0x40000u / 8u + 1u && s_rc.bad == 0,
++           "2. every tail command (and the JUMP) compared; none overwritten unread");
++
++    /* 3. The title reaches `end` with the walker in the new lap: the whole ring again */
++    cellGcm_fifo_recycle_n(ctx, 0x4000);
++    expect(vm_read32(ctx + 4) == end && s_ring_limit_end == 0, "3. end raised back to the ring's own end");
++
++    /* 4. The check: a word written over in the unread tail is reported */
++    title_write(ctx, 0x30000);                        /* the title at 0x50000 */
++    walker_drain();                                   /* the walker there too */
++    title_write(ctx, 0x28000);                        /* the title at 0x78000, unread from 0x50000 */
++    const u32 cur1 = vm_read32(ctx + 8);
++    cellGcm_fifo_recycle_n(ctx, 0x100);
++    expect(vm_read32(ctx + 8) == begin && s_ring_limit_end == begin + 0x50000u, "4. a second capped lap (room 0x50000)");
++    vm_write32(begin + 0x60000u, 0x00040104u);        /* a "title" writing past `end` into the unread tail */
++    const unsigned long long bad0 = s_rc.bad;
++    walker_drain();
++    expect(s_rc.bad == bad0 + 1, "4. the overwritten unread command reported");
++    (void)cur1;
++    cellGcm_fifo_recycle_n(ctx, 0x100);              /* walker in the lap again: full ring */
++
++    /* 5. Unsafe states: no lap, nothing written */
++    struct { const char* what; u32 walker; u32 need; int limit; int not_in_lap; } cases[] = {
++        { "5. walker 0x10000 in: less than GCM_RECYCLE_MARGIN of room", 0x10000u, 0x10000u, 0, 0 },
++        { "5. walker level with the title",                             0x70000u, 0x10000u, 0, 0 },
++        { "5. walker past the title (another lap)",                     0x74000u, 0x10000u, 0, 0 },
++        { "5. walker not yet in this lap",                               0x40000u, 0x10000u, 0, 1 },
++        { "5. a lap limit in force",                                     0x40000u, 0x10000u, 1, 0 },
++        { "5. the reserve larger than the room",                         0x40000u, 0x48000u, 0, 0 },
++    };
++    for (unsigned k = 0; k < sizeof cases / sizeof cases[0]; k++) {
++        vm_write32(ctx + 4, end); vm_write32(ctx + 8, begin + 0x70000u);
++        vm_write32(begin + 0x70000u, NOP_HDR);
++        vm_write32(GCM_CONTROL_GUEST_ADDR + 0, io_b + 0x70000u);
++        s_fifo_getoff = io_b + cases[k].walker;
++        s_ring_limit_end = cases[k].limit ? begin + 0x20000u : 0;
++        s_lap_set = 1; s_lap_jumps = cases[k].not_in_lap ? s_fifo_back_jumps : s_fifo_back_jumps - 1;
++        const int r = gcm_wrap_into_lap(ctx, begin, begin + 0x70000u, io_b, cases[k].need);
++        expect(r == 0 && vm_read32(ctx + 8) == begin + 0x70000u && vm_read32(ctx + 4) == end &&
++               vm_read32(begin + 0x70000u) == NOP_HDR && vm_read32(GCM_CONTROL_GUEST_ADDR + 0) == io_b + 0x70000u,
++               cases[k].what);
++    }
++    s_ring_limit_end = 0;
++    {   /* a title's own callback: its buffer is not the runtime's to lap */
++        const u32 tctx = host_alloc(0x18, 16);
++        vm_write32(tctx + 0x0, begin); vm_write32(tctx + 0x4, end); vm_write32(tctx + 0x8, begin + 0x70000u);
++        vm_write32(tctx + 0xC, tctx + 0x10); vm_write32(tctx + 0x10, TITLE_CB); vm_write32(tctx + 0x14, 0);
++        s_fifo_getoff = io_b + 0x40000u; s_lap_jumps = s_fifo_back_jumps - 1;
++        const int r = gcm_wrap_into_lap(tctx, begin, begin + 0x70000u, io_b, 0x10000u);
++        expect(r == 0 && vm_read32(tctx + 8) == begin + 0x70000u, "5. a title's own callback");
++    }
++
++    printf("[gcm_wrap_lap] %s (%d failed)\n", fails ? "FAIL" : "PASS", fails);
++    free(vm_base);
++    return fails ? 1 : 0;
++}
+diff --git a/runtime/ppu/ppu_sysprx.cpp b/runtime/ppu/ppu_sysprx.cpp
+index 9cb5040..5a6fee7 100644
+--- a/runtime/ppu/ppu_sysprx.cpp
++++ b/runtime/ppu/ppu_sysprx.cpp
+@@ -562,11 +562,12 @@ static void gcm_guest_write32(unsigned int addr, unsigned int val) { vm_write32(
+  * garbage-vcall guard no-opped the callback, the FIFO never recycled and the
+  * title stopped flipping. One definition, one place. */
+ #define GCM_FIFO_CALLBACK_SENTINEL_EA (VM_HLE_INJECT_BASE + 0x2F00u)
+-extern "C" void cellGcm_fifo_recycle(unsigned int ctx_ea);
++extern "C" void cellGcm_fifo_recycle_n(unsigned int ctx_ea, unsigned int count);
+ extern "C" void ppu_register_function(uint64_t addr, void (*fn)(ppu_context*));
+ static void hle_gcm_callback(ppu_context* ctx)
+ {
+-    cellGcm_fifo_recycle((unsigned int)ctx->gpr[3]);   /* r3 = context EA */
++    /* r3 = context EA, r4 = the words the reserve asked for */
++    cellGcm_fifo_recycle_n((unsigned int)ctx->gpr[3], (unsigned int)ctx->gpr[4]);
+     ctx->gpr[3] = 0;                                   /* CELL_OK */
+ }
+ 
+-- 
+2.56.0.windows.3
+

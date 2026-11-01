@@ -6,8 +6,9 @@ and the waiter's own, and how much of each guest frame they take.
 
 Needs a PS3_FTRACE timeline with the ring waits (kind 21, cellGcmSys's
 buffer-full callback: 1 the title caught up with the walker in a new lap of
-its ring, 2 it wrapped at the ring's end; 3, instants, the wraps taken at a
-flip into a lap that ends at the walker, which can lead to waits of kind 1).
+its ring, 2 it wrapped at the ring's end; instants: 3 a wrap taken at a flip
+into a lap that ends at the walker, 4 the same at the ring's end with
+GCM_WRAP_LAP=1 -- both can lead to waits of kind 1).
 For wraps, where the walker was as the title waited: KB past the ring's
 begin, i.e. the room a lap ending at the walker would have given at once. Each wait: from its start to the
 moment the walker had made the room ("walker", noted by the walker as it
@@ -37,7 +38,7 @@ def pct(v, q):
 
 
 def main():
-    waits_all, frames_all, flip_wraps = [], [], []
+    waits_all, frames_all, flip_wraps, end_laps = [], [], [], []
     for path in sys.argv[1:]:
         rec = wb.load(path)
         spans = wb.walker_spans(rec)
@@ -45,8 +46,8 @@ def main():
         waits = []
         for t0, t1, who, a, b in rec[RING_WAIT]:
             kind, sleeps, room = a & 0xF, (a >> 4) & 0xFFF, a >> 16
-            if kind == 3:
-                flip_wraps.append(room)
+            if kind in (3, 4):
+                (flip_wraps if kind == 3 else end_laps).append(room)
                 continue
             total = t1 - t0
             walker = total if b == 0xFFFFFFFF else min(float(b), total)
@@ -71,8 +72,11 @@ def main():
                     acc["waiter"] += w["waiter"] * frac / 1000
                 i += 1
             frames_all.append(dict(steps=n, shown=f["shown"], ppu=f["ppu"], **acc))
+    if end_laps:
+        print(f"  wraps at the ring's end into a lap ending at the walker (GCM_WRAP_LAP=1): {len(end_laps)}; "
+              f"room at the start, KB: median {pct(end_laps, .5):.0f}, min {min(end_laps)}")
     if not waits_all:
-        print("no ring waits (kind 21) in the trace(s)")
+        print(f"no ring waits (kind 21 spans) in the trace(s); flip-time wraps {len(flip_wraps)}")
         return
     print(f"== {len(waits_all)} ring waits in {len(sys.argv) - 1} trace(s), {len(frames_all)} guest frames")
     for kind in sorted({w['kind'] for w in waits_all}):
