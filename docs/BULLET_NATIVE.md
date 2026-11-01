@@ -1,8 +1,10 @@
 # Native Bullet: what the game's physics tasks do (2026-10-31)
 
 Replacing 3D Dot Game Heroes' two Bullet SPU tasks with native code, one at a
-time. The collision task is done (`port/native/`, "The native collision task"
-below); the solver is next, once the collision task's gain is measured.
+time. The collision task is done and experimental (`port/native/`, "The
+native collision task" below). The solver is profiled, and a native task for it
+is a candidate ("The solver: where a step's time goes",
+"Candidate"); not started.
 The layouts below were read from guest-memory snapshots of one physics step in
 a fight (`SPURS_SNAP`, runtime patch; `tests/snap_read.py`) and live memory.
 Offsets are bytes, guest values big-endian, pointers 32-bit. Nothing here is
@@ -16,7 +18,7 @@ game data.
 | CreateTask entry | 0xF63600 | 0xF8EC80 |
 | ELF name | `PS3_SPURS_BulletCD_spu_release` | `PS3_SPURS_BulletSolver_spu_release` |
 | Source | Bullet's SpuNarrowPhaseCollisionTask (asserts name SpuVoronoiSimplexSolver.cpp, btBoxShape.h) | Sony's libsync parallel solver |
-| Per step | 2 runs, in parallel | ~24 phases of 3 tasks, each phase sequenced by the PPU |
+| Per step | 2 runs, in parallel | ~71 runs in 5 commands, each sequenced by the PPU (below) |
 
 Three slots each. A task is created per command, with a 16-byte argument
 `[slot, shared block, input queue, output queue]`; the queues are 0x80 apart
@@ -283,6 +285,206 @@ frame) -- the debris' drawing.
 Earlier estimate, for comparison: BulletCD 0.8-1.5 ms a run; the solver ~24
 phases at ~70 us each; a physics step ~2.8 ms, and a frame that catches up
 runs 2-3 steps.
+
+## The solver: where a step's time goes (2026-10-31)
+
+Three sets of river fights, kept in build/baselines/2026-10-31-solver-profile
+(traces, profiles, the analysis scripts and their output in `analysis/`):
+**A** two on-screen runs, native collision, each solver task marked with its
+command (`DOTHEROES_PHYS_STATS=1`, frame-trace kind 20), 723 steps,
+`tests/solver_breakdown.py`; **B** the on-screen campaign's river fights
+(build/baselines/2026-10-31-onscreen, 6 lifted / 5 native runs, ~16k frames
+each mode); **C** three runs with `DIAG_PROF` sampling the main thread and the
+SPU workers only (`DIAG_PROF_THREADS`), sample times on the trace's clock
+(`profile.times`). The sampler slows what it samples: C is for shares and
+call paths, A and B for times. Frame times below are guest frames (flip
+request to flip request) and present-call completion intervals, not display
+timing.
+
+**The PPU drives the solver the way Bullet 2.74's
+`btParallelSequentialImpulseSolver::allSolved` does.** Same commands, same
+order, and the PPU waits for every task of a command before the next:
+
+| per step (A) | runs | span ms | main thread waiting ms |
+|---|---|---|---|
+| (PPU builds and sorts the hash) | | 0.12 before the first run | |
+| 1 set up bodies | 1-2 | 0.09 | 0.07 |
+| 2 manifold setup | 8, three slots pipelined | 0.47 | 0.39 |
+| 4 iterate | 30: 10 rounds x 3 | 1.55 | 1.24 |
+| 5 copy bodies back | 1-2 | 0.06 | 0.04 |
+| 6 warm-start write-back | 30: 10 rounds x 3 | 0.97 | 0.66 |
+| step (collision start to last solver end) | ~73 with collision | 3.37 | 2.51 (0.11 of it on collision) |
+
+Frames with 121+ collision pairs are nearly the same per step (3.51 / 2.63
+ms). The rest of the span, ~0.85 ms, is the main thread working: mostly
+issuing ~71 tasks. An iterate round: the PPU creates the three tasks 10.7
+and 20.2 us apart (median), a run takes 149 us, the round 171 us, and the
+next round starts as the last run ends. Write-back: a run 70 us, a round
+86 us. Bullet 2.74 issues the write-back once per solver iteration
+(`numIterations` = 10), and each pass does the same thing: for every
+contact, read the 16 bytes at its manifold point, store min(3,
+appliedImpulse) in the first float, write them back. The impulses do not
+change between passes, so passes 2-10 rewrite the values pass 1 wrote
+(Bullet 2.74 source; the game's passes match it in count, the store not yet
+checked in the lifted code).
+
+**Inside the tasks (C, samples in spu_0004 by the command running):**
+
+| command | lifted Bullet code | channels, DMA, copies | lock line, atomics, coherence |
+|---|---|---|---|
+| 4 iterate (995 samples) | 66% (10 of it float helpers) | 23% | 7% |
+| 6 write-back (518) | 30% | 48% | 15% |
+| 2 manifold setup (275) | 79% | 15% | 1% |
+
+Iterate is mostly the lifted constraint math; write-back is mostly emulated
+DMA (two 16-byte transfers and waits per contact) and the cell-claim spin
+lock. The collision task's lifted runs fell ~20x when made native (2.74 to
+0.13 ms a step, above), which is the only measured guide to what native
+solver runs would take.
+
+**The main thread's wait (C):** in a step it is either creating tasks or
+polling the slots' output queues (`cellSpursQueuePopBody`, non-blocking, round
+the three slots, from `func_00955BD4`). The solver path is `func_00941668 ->
+func_00952298` (issue `func_00955328`, poll `func_009552BC`); collision's is
+`func_0095A73C` (sampled in the collision window only). Creating a task costs
+~5.7 us in `cellSpursCreateTask`, about half of it a `printf` and a
+`getenv("SPURS_TASKSET_TRACE")` on every call.
+
+**The frame (B, river fights):**
+
+| steps in the guest frame | frames lifted / native | guest frame ms | main thread busy | queue wait | present interval > 25 ms |
+|---|---|---|---|---|---|
+| 0 | 92.3% / 88.2% | 16.85 / 16.85 | 10.3 / 10.2 | 0 | 0.3% / 0.2% |
+| 1 | 4.3% / 9.9% | 19.15 / 18.28 | 12.9 / 13.9 | 4.9 / 3.2 | 4.5% / 4.3% |
+| 2 | 2.8% / 1.9% | 28.63 / 22.08 | 14.8 / 14.6 | 13.4 / 7.1 | 79.5% / 45.8% |
+| 3+ | 0.6% / 0.0% (1 frame) | 47.7 / 33.9 | 17.5 / 18.7 | 29.6 / 14.8 | 100% |
+
+"Busy" is the guest frame minus the waits the trace records (syscalls,
+usleep, HLE waits, queue waits); it includes waits the trace does not, such
+as the command-buffer wrap below. Busy p90 in one-step frames is 18.4 /
+19.5 ms. Steps per frame follow the previous frame's length: after a guest
+frame of 25 ms or more, 71% (lifted) / 50% (native) of frames with physics run
+two or more steps; after one under 18 ms, 14% / 3%. The game catches up in
+steps, so a slow physics frame tends to bring another.
+
+**The heaviest frames (C):** physics frames whose busy time is 14 ms or more
+(240 of 608): guest frame 23.5 ms, present interval 20.6. Sampled main-thread
+time per frame: other game work 10.2 ms (7.8 in frames without physics), the
+**command-buffer wrap wait 4.1** (`cellGcm_fifo_recycle`: the title's ring is
+full and the runtime sleeps in 1 ms steps until the RSX walker has taken the
+jump back; 0.2 ms in frames without physics), the solver's issuing and
+polling 4.0, collision's 1.4 (both collision modes pooled).
+
+**Upper bound, not a forecast:** taking the main thread's whole physics wait
+away -- 2.51 ms a step (A) -- would leave one-step frames at ~15.1 ms on
+average with a busy p90 still ~19.5 ms, two-step frames at ~15.0 on average;
+the heaviest frames (C), without the solver's and collision's issuing and
+polling at all, at ~18 ms. Not even that clears 16.67 ms in the
+debris-heavy frames: the wrap wait and the extra game work stay.
+
+## Candidate: a native solver task (not started, not decided)
+
+A candidate for the solver's share of slow frames, to be weighed against the
+other contributors once they are measured -- not an established requirement.
+
+**What.** Native code for the BulletSolver task (runtime image 5) through
+the hook the collision task uses (`spu_workload_native_register`): peek the
+slot's command, pop it, do the command's work on guest memory, push the
+completion to the output queue, return 1. Port the command handlers of Bullet
+2.74's `SpuParallellSolverTask.cpp` (zlib) -- body setup, manifold setup,
+iterate, copy back, write-back -- with the DMA replaced by big-endian reads
+and writes of the mapped structures, as `bullet_cd.cpp` does. The PPU side
+stays lifted and unchanged; per command a task can still fall back to the
+lifted image (return 0), so commands go native one at a time. Experimental and
+opt-in (`DOTHEROES_NATIVE_SOLVER`), independent of the collision mode; native
+collision stays experimental with its open contact differences, and its
+snapshots and failure inputs stay as they are.
+
+**Cells, ownership and completion.** Iterate and write-back share out the
+hash's cells through `getNextFreeCell`: under the guest's spin lock (libsync's
+`CellSyncMutex` at the descriptor's `m_spinLockVar`, which the PPU
+initialises before each round) a task re-reads the masks, takes the first
+cell that is neither processed (bit set in `m_currentMask[0]`, which the PPU
+presets for empty cells) nor dependent on a cell another task holds (its row,
+`m_currentMask[1 + task]`, against the dependency matrix), sets the cell's
+processed bit and its own row, and unlocks; it clears its row before asking
+for the next cell. A cell is therefore owned by the one task that set its
+processed bit, and is never processed twice. A native task would claim cells
+the same way -- the same mutex, the same bits, written to guest memory -- so a
+lifted task running in the same round (a fallback) still sees every claim.
+When the native task finishes before the other two take the lock, it has
+claimed every cell in index order; the other two each pop their own command,
+find `m_currentMask[0]` all ones, and push their own completion. Nothing
+changes for the PPU: three tasks created per round, three completions, and its
+wait for all three before it resets the masks for the next round (the
+barrier). The order is one the original allows (one SPU ahead of the other
+two) and repeatable; with a lifted task in the round it is whatever the race
+gives, as now. What has to be shown on the game's own code, not only the 2.74
+source: that the mutex is the one at `m_spinLockVar`, the mask layout, and
+that the task leaves its row cleared and the processed bits set as the
+lifted task does.
+
+**Repeated write-back.** The ten write-back passes look redundant (each sets
+the first float of every contact's 16 bytes to min(3, appliedImpulse) and
+writes the other 12 back). Dropping passes 2-10 needs, first: the inputs
+unchanged across the passes (each constraint's `m_appliedImpulse` and
+`m_originalContactPoint`), and all 16 target bytes identical after every pass
+-- checked per pass in a running game by hashing them -- so that nothing
+else writes them in between (the read-modify-write would otherwise overwrite
+it, and dropping a pass would change behaviour); and no consumer of the
+intermediate state: nothing that reads those bytes, or the masks and lock the
+passes use, between passes. If every pass leaves the same bytes, no reader
+can tell the passes apart, but the PPU's own handling of the passes (masks,
+lock init, its count of completions) stays as it is.
+
+**Steps, each measured and checked before the next:**
+1. Layouts of the game's 2.73 structures against the 2.74 source, from
+   snapshots: `SpuSolverHash` (cells, masks, dependency matrix),
+   `btSolverBody`, `btSolverConstraint`, the manifold and constraint cell
+   holders, and the `btRigidBody` fields body setup and copy back touch.
+2. Write-back, copy back and body setup natively (deterministic per task;
+   write-back is the most DMA-bound).
+3. Manifold setup (deterministic per task).
+4. Iterate.
+
+**Validation.**
+- Captured inputs: `SPURS_SNAP` extended to take guest memory before a
+  command's first task and after its last, in capture runs whose solver
+  tasks run one at a time (a switch that serializes image 5, so the lifted
+  task claims every cell in index order like the native one). An offline
+  checker like `bullet_cd_snapcheck` runs the native command on "pre" and
+  compares every field it writes with "post": structural mismatches (a body,
+  constraint or manifold point written or not written) counted apart from
+  numeric differences (max absolute and relative per field).
+- A check mode in the running game, as `DOTHEROES_NATIVE_CD=2`: native
+  computes into a copy, the lifted task does the real work, differences
+  logged.
+- Sustained heavy-debris play: on-screen river fights and grass-cutting
+  debris (`grass_cut.drive`), both collision modes, frame dumps off, the
+  intended-fight classification and workload counts as before. Behaviour
+  checks beside timing: debris settling (awake bodies over time), no velocity
+  blow-ups, window grabs reviewed.
+
+**Speedup: unmeasured.** No native solver run has been timed. The only
+guide is the collision task, whose runs fell ~20x when made native; the
+solver's could fall much less. What is measured is what a native task cannot
+remove: the PPU's issuing, ~20 us per round to create three tasks (~0.4 ms
+a step for the 20 iterate and write-back rounds), ~0.75 ms a step for all
+~71 tasks. *If* native runs fell as far as collision's, the solver's phases
+would go from ~3.1 to ~0.9-1.3 ms a step (1.8-2.2 ms of the 2.51 ms upper
+bound, at this load): one-step frames from 18.3 to ~16-16.5 ms on average,
+p90 still over 16.67, the heaviest from 23.5 to ~20.5-21. That is a
+what-if, not a forecast. The other contributors to the same frames, largest
+first: the command-buffer wrap wait (4.1 ms in the heaviest frames); the
+extra game work in debris frames (~2.4 ms over frames without physics); the
+per-task issuing, which only replacing the PPU's solve (`func_00952298`)
+natively would remove; lifted collision, the default, ~1.7 ms a step more
+than native.
+
+**Alternatives weighed.** Doing the write-back once instead of ten times:
+~0.6 ms a step if the conditions above hold. Faster runtime DMA and
+lock-line emulation: helps every SPU task, but those are a quarter to a half
+of the solver's run time.
 
 ## Method
 

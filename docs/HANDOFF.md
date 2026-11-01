@@ -508,6 +508,15 @@ tooling, the native Windows build, measuring on the 3070) are done; see
    function's frame register leaves the thread's stack (port/diag/diag.cpp);
    6 of 6 since. Catching the fault and jumping out of ntdll instead froze
    the game.
+   **The solver, profiled** (docs/BULLET_NATIVE.md, "The solver: where a
+   step's time goes"; build/baselines/2026-10-31-solver-profile): a step's
+   solver is ~71 tasks in 5 commands the PPU sequences as Bullet 2.74 does;
+   the main thread waits 2.51 ms a step (iterate 1.24, write-back 0.66,
+   manifold setup 0.39) and spends ~0.85 ms issuing. Removing the whole wait
+   is the upper bound and still leaves debris-heavy frames over 16.67 ms: a
+   command-buffer wrap wait (4.1 ms in the heaviest frames) and extra game
+   work stay. A native solver task is a candidate there (speedup
+   unmeasured), not started.
 10. **"Saving doesn't bring up the save menu"** (owner, 2026-10-31). It
     saved: the save-data module skips the PS3's system save list and takes
     the slot the title offers, so nothing appeared. A save now shows GAME
