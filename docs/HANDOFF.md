@@ -464,17 +464,39 @@ tooling, the native Windows build, measuring on the 3070) are done; see
    DUMP=0, 3 runs per scene, collision mode and binding (24 runs,
    build/baselines/2026-10-31-rtfix-ab): time in those GPU syncs 600-4,200
    ms a run -> 5-42; the slow frames' walker lag 1.4-3.4 ms less. The
-   desktop was locked throughout: nothing was on screen, so what follows is
-   the game's internal frame and presentation timing (guest flip requests to
-   the end of each frame's present call), not displayed-frame performance.
+   desktop was locked when the A/B began (window grabs showed the lock
+   screen, LogonUI was running) and, as far as is known, stayed locked; the
+   per-run lock flag in run.json was wrong then (it read the session's
+   connection state; fixed), so that is not verified run by run. What follows
+   is the game's internal frame and presentation timing (guest flip requests
+   to the end of each frame's present call), not displayed-frame performance.
    Fights differed run to run (0 to 1,728 physics steps), so long frames are
    compared within frames of the same physics load. Frames with one physics
    step taking over 25 ms to present: river native 36% -> 12%, field lifted
    19% -> 1.5%, field native 9% -> 0.4%, river lifted unchanged (~34%: lifted
    physics holds those). Frames with two steps: river lifted over 33 ms
    43% -> 19%; the others mixed on small samples (18-157 frames). Frames
-   without physics: unchanged (0.1-0.4% over 25 ms). Not yet measured with
-   the game visibly on screen.
+   without physics: unchanged (0.1-0.4% over 25 ms).
+   **On screen** (desktop unlocked, VISIBLE=1 guard, DUMP=0, 34 runs,
+   build/baselines/2026-10-31-onscreen): pacing as present-call completion
+   intervals -- each frame's first window present call returning (FIFO
+   swapchain, 144 Hz display). Not display timing: the distance to scan-out
+   is not measured (PresentMon, which would show it, needs elevation), so
+   none is claimed. The game rendered visibly
+   and correctly in every grab (debris, shadows, HUD, water), both collision
+   modes. 10 runs had no intended fight -- fight_field.drive leaves the hero
+   held at the cave screen about half the time -- and were left out
+   (classified from the grabs, CLASSIFICATION.tsv). Intended fights, collision
+   workload counted (DOTHEROES_PHYS_STATS=1): river lifted 6 runs / 2,359
+   physics steps / 168k pairs, native 5 / 2,207 / 162k: present intervals over 25 ms
+   3.45% -> 1.45%, over 33 ms 1.39% -> 0.21%, p99 35.4 -> 26.5 ms. By pairs
+   processed in the frame: 41-120 pairs, over 25 ms 29.7% (lifted) / 5.9%
+   (native); 121+ pairs 84% / 41% (median 32.0 / 23.5 ms). Field (rabbit
+   field): lifted 4 runs over 25 ms 0.46%, native 2 runs (one with a death in
+   the window) 0.27%; heavy frames (121+ pairs) 17.5% / 9.1% over 25 ms on 80 /
+   33 frames. **The 60 fps target is not met in debris-heavy river frames in
+   either mode**; the field is close in both. Every river run has one ~380 ms
+   stall at the screen load into the river (72-74 s).
    Frame dumps (PS3RECOMP_VK_DUMP, on in tests/boot_smoke.py unless DUMP=0)
    are written on the present path: every 60th frame took 10-20 ms longer.
    Time with DUMP=0; for play sessions grab the window instead.
@@ -523,6 +545,8 @@ tooling, the native Windows build, measuring on the 3070) are done; see
 | `RSX_SURFACE_LOG=1` | every colour render target the draw engine creates, and why (new address, resized, evicted) |
 | `RSX_SURFACE_TRACE=<location>:<hex offset>` | what the title does with the colour target at that address, per frame: each stretch at one size (how it starts, its clears and draws, the surface registers) and every read of the address |
 | `PS3RECOMP_ENG_NONE_TARGET=1` | a pass with colour target NONE binds the guest address again, as before the render-target fix (A/B) |
+| `DOTHEROES_PHYS_STATS=1` | each Bullet collision task's workload (pairs processed, awake bodies, contact points) as frame-trace kind 19 and [phys-stats] lines, either collision mode |
+| `VISIBLE=1`, `GRAB_EVERY=<s>` | tests/boot_smoke.py: an on-screen run -- refused on a locked desktop, stopped if it locks or the window is minimised/hidden (guard.json); window grabs to grabs/ |
 | `DOTHEROES_NATIVE_CD=<0-3>` | the Bullet collision task: lifted (default), native (experimental), check (native against lifted, `[native-cd]` lines), self-check (native against itself rounding toward zero); `DOTHEROES_NATIVE_CD_DUMP=n` prints differing manifolds, `DOTHEROES_NATIVE_CD_FP=rz` runs native toward zero (docs/BULLET_NATIVE.md) |
 | `GAMEDATA=<dir>` | tests/boot_smoke.py: play on a persistent save root in place (`%LOCALAPPDATA%\dotheroes\gamedata`) |
 | `RSX_DROP_LOG=1`, `VK_DRAW_SKIP_LOG=1` | draws the engine / the Vulkan backend discard before drawing, with the reason |
