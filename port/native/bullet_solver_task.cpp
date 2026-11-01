@@ -35,6 +35,16 @@
 // contact was written. Also counted: contacts changed again after the solver,
 // before the next collision task. A [native-solver] check line every 200 steps.
 //
+// DOTHEROES_SOLVER_BENCH=<file> (a measurement, for runs with the lifted
+// write-back): as each step's first write-back task is created -- the PPU in
+// CreateTask, no solver task running -- the native write-back is run on the
+// step's own inputs as one task claiming every cell, timed (best of 3), and
+// everything it changed put back (the cell masks and task rows, the spin
+// lock, each contact's 16 bytes), so the lifted tasks then do the step as
+// always. A line a step: the time on the frame trace's clock (us from its
+// base), contacts, cells, the native run's microseconds -- to set beside the
+// lifted write-back's phase for the same step in the trace (tests/solver_bench.py).
+//
 // The capture writes too every solver task created in the step: its slot, command, round, descriptor
 // address and bytes; and, for iterate and write-back, as each task starts and
 // as it returns, the spin lock's 8 bytes and the hash's cell masks (the lock
@@ -43,6 +53,7 @@
 #include "bullet_solver_task.h"
 
 #ifdef DOTHEROES_BULLET_CD
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -364,10 +375,66 @@ void check_on_create(uint32_t entry, const uint32_t arg[4])   // the PPU thread
     k.created++;
 }
 
+// ---- DOTHEROES_SOLVER_BENCH: on the creating PPU thread
+struct Bench {
+    FILE* f = nullptr;
+    bool done_this_step = false;
+    std::vector<bullet_solver::Write> w;
+    std::vector<std::array<uint8_t, 16>> saved;
+} g_bench;
+
+// One task alone, nothing else running: the ticket lock as a plain counter pair.
+void bench_acquire(uint8_t* b, uint32_t ea)
+{
+    const uint16_t t = rd16v(b + ea + 2);
+    wr16(b + ea + 2, (uint16_t)(t + 1));
+}
+void bench_release(uint8_t* b, uint32_t ea) { wr16(b + ea, (uint16_t)(rd16v(b + ea) + 1)); }
+
+void bench_on_create(uint32_t entry, const uint32_t arg[4])
+{
+    Bench& B = g_bench;
+    if (entry == kEntryCollision) { B.done_this_step = false; return; }
+    if (entry != kEntrySolver || B.done_this_step) return;
+    const uint32_t desc = desc_from_queue(arg[2], arg[0]);
+    if (!desc || be32(vm_base + desc) != 6) return;
+    B.done_this_step = true;
+    const uint32_t hash = be32(vm_base + desc + 0x10), lock = be32(vm_base + desc + 0x30);
+    const unsigned n = bullet_solver::writeback_expected(vm_base, desc, nullptr, 0);
+    B.w.resize(n);
+    bullet_solver::writeback_expected(vm_base, desc, B.w.data(), n);
+    B.saved.resize(n);
+    for (unsigned i = 0; i < n; i++) memcpy(B.saved[i].data(), vm_base + B.w[i].ea, 16);
+    uint8_t masks[0x70], lk[4];
+    memcpy(masks, vm_base + hash + 0x800, sizeof masks);
+    memcpy(lk, vm_base + lock, sizeof lk);
+    const auto restore = [&] {
+        for (unsigned i = 0; i < n; i++) memcpy(vm_base + B.w[i].ea, B.saved[i].data(), 16);
+        memcpy(vm_base + hash + 0x800, masks, sizeof masks);
+        memcpy(vm_base + lock, lk, sizeof lk);
+    };
+    const bullet_solver::Sync sync = { bench_acquire, bench_release };
+    double best = 1e30;
+    unsigned cells = 0;
+    const uint64_t t_at = ps3_ft_now();
+    for (int rep = 0; rep < 3; rep++) {
+        bullet_solver::Stats st;
+        const uint64_t t0 = ps3_ft_now();
+        bullet_solver::writeback_task(vm_base, desc, sync, st);
+        const uint64_t t1 = ps3_ft_now();
+        restore();
+        best = std::min(best, (double)(t1 - t0) / 1000.0);
+        cells = st.cells;
+    }
+    fprintf(B.f, "%.1f %u %u %.2f\n", (double)(int64_t)(t_at - g_ps3_ft.base) / 1000.0, n, cells, best);
+    fflush(B.f);   // the run ends with the process stopped: nothing buffered survives
+}
+
 void on_create(uint32_t entry, const uint32_t arg[4])
 {
     if (!g_cap.steps.empty()) capture_on_create(entry, arg);
     if (g_chk.on) check_on_create(entry, arg);
+    if (g_bench.f) bench_on_create(entry, arg);
 }
 
 }  // namespace
@@ -396,7 +463,15 @@ void bullet_solver_init(bool phys_stats)
     }
     const char* ck = getenv("DOTHEROES_NATIVE_SOLVER_CHECK");
     g_chk.on = ck && *ck == '1';
-    if (!g_cap.steps.empty() || g_chk.on) g_spurs_create_hook = on_create;
+    if (const char* bf = getenv("DOTHEROES_SOLVER_BENCH")) {
+        g_bench.f = fopen(bf, "w");
+        if (g_bench.f) {
+            fprintf(g_bench.f, "# t_us contacts cells native_writeback_us (best of 3, one task, the step's own inputs)\n");
+            fflush(g_bench.f);
+            if (g_native.count(6)) fprintf(stderr, "[native-solver] DOTHEROES_SOLVER_BENCH is for runs with the lifted write-back\n");
+        }
+    }
+    if (!g_cap.steps.empty() || g_chk.on || g_bench.f) g_spurs_create_hook = on_create;
     if (g_stats || g_spurs_create_hook || !g_native.empty())
         spu_workload_native_register(kImageBulletSolver, solver_run, solver_after);
 }
