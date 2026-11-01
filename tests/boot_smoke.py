@@ -19,8 +19,15 @@ Environment
                      15; dumping every frame costs several fps).
   VISIBLE=1          (Windows, with WINDOW=1) a run valid only while the game is
                      on screen: not started on a locked desktop, and stopped,
-                     with guard.json saying why, if the desktop locks or the
-                     game's window is minimised, hidden or gone.
+                     with guard.json saying why, if the desktop locks, the
+                     game's window is minimised, hidden or gone, or another
+                     window covers more than a tenth of it for 3 s. A covered
+                     window is no longer guaranteed the 1 ms timer (Windows
+                     11): the game ran at ~35 fps behind the Claude app's
+                     window, at ~59 in front of it.
+  TOPMOST=1          with VISIBLE=1: the game's window kept above other windows
+                     (without taking the focus), so another window coming to
+                     the front does not cover it.
   GRAB_EVERY=<s>     with VISIBLE=1: the window's screen area to grabs/ every
                      <s> seconds -- what was actually on screen.
   DUMP=0             no frame.ppm at all, for timing runs: the dump is written
@@ -78,6 +85,7 @@ TAG = os.environ.get("RUN_TAG")
 RUN = os.path.join(ROOT, "build", "test", "boot-" + time.strftime("%Y%m%d-%H%M%S") + (f"-{TAG}" if TAG else ""))
 SHOT_EVERY = int(os.environ.get("SHOT_EVERY", "10"))
 VISIBLE = os.environ.get("VISIBLE") == "1"
+TOPMOST = os.environ.get("TOPMOST") == "1"
 GRAB_EVERY = float(os.environ.get("GRAB_EVERY", "0"))
 
 
@@ -281,7 +289,28 @@ def main():
         except OSError:
             pass
         t0, seen, samples, front, grabs = time.monotonic(), False, 0, 0, 0
+        covered_n, covered_since, placed = 0, None, False
         next_grab = GRAB_EVERY
+        dwm = ctypes.WinDLL("dwmapi")
+
+        def covered(h):
+            # another shown window above the game's covering more than a tenth of it
+            r = wt.RECT()
+            u.GetWindowRect(h, ctypes.byref(r))
+            area = max(1, (r.right - r.left) * (r.bottom - r.top))
+            w = u.GetTopWindow(None)
+            while w and w != h:
+                cloaked = ctypes.c_int(0)
+                dwm.DwmGetWindowAttribute(w, 14, ctypes.byref(cloaked), 4)   # DWMWA_CLOAKED
+                if u.IsWindowVisible(w) and not u.IsIconic(w) and not cloaked.value:
+                    o = wt.RECT()
+                    u.GetWindowRect(w, ctypes.byref(o))
+                    ix = max(0, min(r.right, o.right) - max(r.left, o.left))
+                    iy = max(0, min(r.bottom, o.bottom) - max(r.top, o.top))
+                    if ix * iy > area // 10:
+                        return True
+                w = u.GetWindow(w, 2)   # GW_HWNDNEXT
+            return False
         os.makedirs(os.path.join(RUN, "grabs"), exist_ok=True)
         while not stop.wait(0.5):
             if ending.is_set():
@@ -293,10 +322,20 @@ def main():
                 why = "desktop locked"
             elif h:
                 seen = True
+                if TOPMOST and not placed:   # HWND_TOPMOST, no move, no resize, no activation
+                    u.SetWindowPos(h, wt.HWND(-1), 0, 0, 0, 0, 0x2 | 0x1 | 0x10)
+                    placed = True
                 if u.IsIconic(h):
                     why = "game window minimised"
                 elif not u.IsWindowVisible(h):
                     why = "game window hidden"
+                elif covered(h):
+                    covered_n += 1
+                    covered_since = covered_since if covered_since is not None else now
+                    if now - covered_since >= 3:
+                        why = "game window covered by another window"
+                else:
+                    covered_since = None
             elif seen and proc.poll() is None:
                 why = "game window gone"
             if why and ending.is_set():
@@ -320,6 +359,7 @@ def main():
                     except OSError:
                         pass
         guard_state.update(samples=samples, foreground_share=round(front / samples, 3) if samples else None,
+                           covered_share=round(covered_n / samples, 3) if samples else None, topmost=TOPMOST,
                            grabs=grabs)
     guarded = threading.Thread(target=guard, daemon=True) if VISIBLE and WIN else None
     if guarded:
