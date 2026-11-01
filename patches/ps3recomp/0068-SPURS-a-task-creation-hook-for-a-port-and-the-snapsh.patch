@@ -1,0 +1,45 @@
+From 85202c3e05a466707191c6fda84dd0cd333fe2cd Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Sun, 1 Nov 2026 11:45:03 -0800
+Subject: [PATCH] SPURS: a task-creation hook for a port, and the snapshot
+ writer for it
+
+g_spurs_create_hook, when a port sets it, sees each task as it is created:
+on the creating PPU thread, before the task can run, with its entry and
+16-byte argument. spurs_snap_write_file writes the same guest-memory
+snapshot SPURS_SNAP does, at points the port chooses -- 3D Dot Game
+Heroes captures its Bullet solver at each command's start this way.
+---
+ libs/spurs/cellSpurs.c | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/libs/spurs/cellSpurs.c b/libs/spurs/cellSpurs.c
+index 7ce28b1..9e514d2 100644
+--- a/libs/spurs/cellSpurs.c
++++ b/libs/spurs/cellSpurs.c
+@@ -1038,6 +1038,14 @@ static void spurs_snap_write(const char* path)
+ #endif
+ }
+ 
++/* The same snapshot for a port, at points of its choosing. */
++void spurs_snap_write_file(const char* path) { spurs_snap_write(path); }
++
++/* A port's look at each task as it is created: on the creating PPU thread,
++ * before the task can run, with its entry and 16-byte argument (3D Dot Game
++ * Heroes: snapshots at its Bullet solver's phase boundaries). */
++void (*g_spurs_create_hook)(uint32_t entry, const uint32_t arg[4]);
++
+ static void spurs_snap_on_create(uint32_t entry, const uint32_t arg[4])
+ {
+     static int on = -1, state;
+@@ -1164,6 +1172,7 @@ s32 cellSpursCreateTask(CellSpursTaskset* taskset, CellSpursTaskId* taskId,
+               spu_taskset2_set_exit(taskset_ea, i, 0, 0); }   /* fresh entry for a recycled id */
+             spu_taskset_set_exit_container(taskset_ea, i, s_pending_exit_ct);
+             spurs_snap_on_create((uint32_t)(uintptr_t)elf, task_arg);
++            if (g_spurs_create_hook) g_spurs_create_hook((uint32_t)(uintptr_t)elf, task_arg);
+             spurs_taskset_add_task(taskset_ea, i, (uint64_t)elf_ea,
+                                    (uint64_t)context_ea, task_arg, task_lsp);
+             /* Bridge to the image-22 dispatch so build_context uses this taskset+task. */
+-- 
+2.56.0.windows.3
+
