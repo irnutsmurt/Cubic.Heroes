@@ -1,0 +1,176 @@
+From 3d10bc96d983d9edf846bcbf1a925e95883c8b86 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Sat, 31 Oct 2026 23:09:14 -0700
+Subject: [PATCH] Frame trace: PS3_FT_RING_WAIT, the title waiting for room in
+ its ring
+
+The buffer-full callback's two waits -- the title caught up with the walker
+in a lap that ends at it, or wrapped at the ring's end and waits for the
+walker to take the jump back -- as spans. Each wait publishes what ends it
+and the walker, wherever `get` moves, notes the first moment that holds, so
+a wait splits into the walker's part (the room being made) and the waiter's
+own (the rest of its 1 ms sleep, being scheduled again). Also where the
+walker was as a wrap began, and the wraps taken at a flip, as instants.
+Inert without a frame trace; the waits' conditions and bounds are as they
+were.
+---
+ include/ps3emu/ps3_ftrace.h |  8 +++++
+ libs/video/cellGcmSys.c     | 67 +++++++++++++++++++++++++++++++++++++
+ 2 files changed, 75 insertions(+)
+
+diff --git a/include/ps3emu/ps3_ftrace.h b/include/ps3emu/ps3_ftrace.h
+index 7b3c28b..82cbf1e 100644
+--- a/include/ps3emu/ps3_ftrace.h
++++ b/include/ps3emu/ps3_ftrace.h
+@@ -75,6 +75,14 @@ enum ps3_ft_kind {
+     PS3_FT_PHYS_CMD    = 20, /* instant at a physics task's start, the command it was given
+                               * (3D Dot Game Heroes: a Bullet solver task): who = lifted image,
+                               * a = command, b = slot | the command's item count << 8 */
++    PS3_FT_RING_WAIT   = 21, /* the title waiting for room in its command ring (cellGcmSys's
++                              * buffer-full callback): who = PPU tid, a = 1 it caught up with
++                              * the walker in a new lap / 2 it wrapped at the ring's end
++                              * | 1 ms sleeps << 4 | KB the walker was past the ring's begin
++                              * as the wait began << 16 (0xFFFF: not in that lap), b = us from
++                              * the wait's start until the walker had made the room (0xFFFFFFFF:
++                              * not before it ended); a = 3 (an instant): a wrap at a flip
++                              * into a lap ending at the walker, room KB << 16 */
+ };
+ 
+ #if defined(_MSC_VER)
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index df7d7d4..d1582dc 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -1102,6 +1102,60 @@ static u32 s_ring_limit_end, s_ring_real_end, s_ring_limit_jumps;
+  * single reserve, and the flip's own GCM_RECYCLE_SLACK. */
+ #define GCM_RING_LIMIT_ROOM 0x10000u
+ 
++/* PS3_FTRACE: the title's waits for room in its ring (PS3_FT_RING_WAIT), from
++ * the ring-limit raise and the wrap below. A wait publishes what ends it; the
++ * walker, as it moves, notes the first moment that holds -- the room made --
++ * so each wait splits into the walker's part and the waiter's own (its 1 ms
++ * sleeps and waking up). Inert without a frame trace: no wait publishes. */
++static struct {
++    volatile int on;                /* 0 none, 1 limit raise, 2 wrap */
++    u32 io_begin, io_cur, io_end, need, jumps0;
++    u32 room_kb;                    /* where the walker was as the wait began: KB past begin, 0xFFFF elsewhere */
++    volatile uint64_t t_free;       /* ps3_ft_now() when the room was there, 0 not yet */
++} s_rw;
++
++/* The waiter's exit condition, as the waits below test it */
++static int gcm_ring_wait_room(void)
++{
++    const u32 g = s_fifo_getoff;
++    if (s_rw.on == 2) return s_fifo_back_jumps != s_rw.jumps0;
++    if (g >= s_rw.io_begin && (g < s_rw.io_cur || (g == s_rw.io_cur && s_fifo_back_jumps != s_ring_limit_jumps)))
++        return 1;
++    return g >= s_rw.io_cur && g < s_rw.io_end && g - s_rw.io_cur >= s_rw.need;
++}
++
++/* The walker, wherever `get` moves */
++static inline void gcm_ring_wait_note(void)
++{
++    if (s_rw.on && !s_rw.t_free && gcm_ring_wait_room()) s_rw.t_free = ps3_ft_now();
++}
++
++static uint64_t gcm_ring_wait_begin(int kind, u32 io_begin, u32 io_cur, u32 io_end, u32 need, u32 jumps0)
++{
++    if (!PS3_FT_ON()) return 0;
++    s_rw.io_begin = io_begin; s_rw.io_cur = io_cur; s_rw.io_end = io_end; s_rw.need = need;
++    s_rw.jumps0 = jumps0; s_rw.t_free = 0;
++    const u32 g = s_fifo_getoff;
++    s_rw.room_kb = g >= io_begin && (!io_cur || g <= io_cur) && g - io_begin < (0xFFFFu << 10) ? (g - io_begin) >> 10 : 0xFFFFu;
++    atomic_thread_fence(memory_order_release);
++    s_rw.on = kind;
++    const uint64_t t0 = ps3_ft_now();
++    if (gcm_ring_wait_room()) s_rw.t_free = t0;   /* the walker got there first */
++    return t0;
++}
++
++static void gcm_ring_wait_end(uint64_t t0, int kind, int sleeps)
++{
++    if (!t0) return;
++    const uint64_t t1 = ps3_ft_now(), tf = s_rw.t_free;
++    s_rw.on = 0;
++    if (!sleeps) return;
++    extern PPU_THREAD_LOCAL ppu_context* g_active_ctx;
++    ps3_ft_span(PS3_FT_RING_WAIT, g_active_ctx ? (uint32_t)g_active_ctx->thread_id : 0,
++                (uint32_t)kind | (uint32_t)(sleeps < 0xFFF ? sleeps : 0xFFF) << 4 | s_rw.room_kb << 16,
++                tf ? (uint32_t)((tf > t0 ? tf - t0 : 0) / 1000u) : 0xFFFFFFFFu, t0, t1);
++}
++
+ /* Bytes the walker is behind the writer. Linear while put >= get. Once the
+  * title's ring wraps, put sits BEHIND get and the backlog is the rest of the
+  * ring plus everything from its start to put -- nearly the whole ring, not
+@@ -2354,6 +2408,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
+     const char* why = "caught-up";
+     if (s_fifo_getoff != put) wr_note(1, s_fifo_getoff, put, s_fifo_calloff);
+     while (s_fifo_getoff != put && budget-- > 0) {
++        gcm_ring_wait_note();
+         u32 ea = gcm_io2ea(s_fifo_getoff);
+         if (!ea) {
+             /* get is sitting on an IO offset with no mapping -- the title
+@@ -2926,6 +2981,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
+             fprintf(stderr, "[FIFOUW] unknown word 0x%08X at getoff 0x%X\n", w, s_fifo_getoff); }
+         s_fifo_getoff += 4;                    /* unknown word: skip */
+     }
++    gcm_ring_wait_note();                  /* the pass's end: where get last moved */
+     /* c: the reason's first letter, and the word budget left */
+     if (start_off != put) wr_note(6, s_fifo_getoff, put, ((u32)(unsigned char)why[0] << 24) | ((u32)budget & 0xFFFFFFu));
+ 
+@@ -3105,6 +3161,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
+                  * already at begin == put. God of War HD stopped for 2-4 s at
+                  * random points in gameplay this way. */
+                 s_fifo_back_jumps++;
++                gcm_ring_wait_note();
+                 static int n = 0;
+                 if (PS3_LOG_FIRST(n, 8))
+                     fprintf(stderr, "[cellGcmSys] recycled the title's own ring "
+@@ -3159,6 +3216,7 @@ static void gcm_ring_limit_raise(u32 ctx_ea, u32 need)
+     u32 last = s_fifo_getoff;
+     int idle = 0, spins = 0;
+     if (need) s_fifo_recycle_waiting = 1;
++    const uint64_t ft0 = need ? gcm_ring_wait_begin(1, io_begin, io_cur, io_end, need, 0) : 0;
+     for (;;) {
+         const u32 g = s_fifo_getoff;
+         /* Behind the title's write head: the walker took the jump into this
+@@ -3181,6 +3239,7 @@ static void gcm_ring_limit_raise(u32 ctx_ea, u32 need)
+         Sleep(1); spins++;
+         if (s_fifo_getoff != last) { last = s_fifo_getoff; idle = 0; } else idle++;
+     }
++    gcm_ring_wait_end(ft0, 1, spins);
+     s_fifo_recycle_waiting = 0;
+     if (spins) {
+         static unsigned waits, ms;
+@@ -3246,6 +3305,7 @@ void cellGcm_fifo_recycle(u32 ctx_ea)
+     int spins = 0, idle = 0;
+     u32 last_get = s_fifo_getoff;
+     s_fifo_recycle_waiting = 1;
++    const uint64_t ft0 = io_begin != 0xFFFFFFFFu ? gcm_ring_wait_begin(2, io_begin, gcm_ea2io(current), 0, 0, back_jumps0) : 0;
+     while (io_begin != 0xFFFFFFFFu && s_fifo_back_jumps == back_jumps0 &&
+            idle < 2000 && spins < 60000) {
+         Sleep(1); spins++;
+@@ -3256,6 +3316,7 @@ void cellGcm_fifo_recycle(u32 ctx_ea)
+                     spins, s_fifo_getoff, vm_read32(GCM_CONTROL_GUEST_ADDR + 0),
+                     s_fifo_back_jumps);
+     }
++    gcm_ring_wait_end(ft0, 2, spins);
+     if (s_fifo_back_jumps == back_jumps0 && io_begin != 0xFFFFFFFFu) {
+         static int warned = 0;
+         if (PS3_LOG_FIRST(warned, 4))
+@@ -3485,6 +3546,12 @@ static int gcm_flip_into_fifo(u32 ctx, u32 bufferId)
+     if (runtime_ring && !s_ring_limit_end && end - (cur + 4) < GCM_FLIP_WRAP_BYTES &&
+         io_begin != 0xFFFFFFFFu && g >= io_begin + GCM_RECYCLE_MARGIN && g <= gcm_ea2io(cur)) {
+         vm_write32(cur + 4, 0x20000000u | io_begin);   /* JUMP -> begin */
++        if (PS3_FT_ON()) {   /* PS3_FT_RING_WAIT 3: a wrap at a flip, an instant; KB of room the lap starts with */
++            extern PPU_THREAD_LOCAL ppu_context* g_active_ctx;
++            const uint64_t t = ps3_ft_now();
++            ps3_ft_span(PS3_FT_RING_WAIT, g_active_ctx ? (uint32_t)g_active_ctx->thread_id : 0,
++                        3u | ((g - io_begin) >> 10) << 16, 0, t, t);
++        }
+         s_ring_real_end = end;
+         s_ring_limit_jumps = s_fifo_back_jumps;
+         s_ring_limit_end = begin + (g - io_begin);
+-- 
+2.56.0.windows.3
+
