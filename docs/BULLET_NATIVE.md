@@ -230,7 +230,12 @@ the box *down* into the ground are 66 of 13,540 (0.49%) of the SPU's and 79 of
 13,564 (0.58%) of native's on the same inputs (check mode, river) -- within
 counting noise -- and in native's own river run 1.0% while debris spawns,
 falling to 0.28% over the run, not growing as sinking boxes would make it
-(build/baselines/2026-10-31-native-cd-down).
+(build/baselines/2026-10-31-native-cd-down); in another native river run
+(the player build's) 1.0% over the whole run. **Unresolved:** similar
+aggregate rates do not show equivalent behaviour. They say nothing about
+which contacts flip, whether the same pieces of debris are affected, or
+what a flipped contact does to that debris over the following steps; the
+remaining contact differences (above) are not explained, only bounded.
 
 The lifted task reproduces the SPU's arithmetic exactly (truncating, no
 denormals, its estimate-and-refine reciprocal and square root); host Bullet
