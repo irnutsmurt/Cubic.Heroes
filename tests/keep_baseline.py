@@ -11,8 +11,10 @@ later into build/baselines/<name>/<run>/, which nothing prunes:
                 its log, and tests/frame_times.py, frame_costs.py and
                 phys_breakdown.py over its frame trace
   ftrace.txt.gz the frame trace itself, with --ftrace (a few MB)
+  guard.json    a VISIBLE=1 run's on-screen guard (aborted, and why)
+  grabs/        its window grabs, downscaled (the game's picture: local only)
 and appends a line per run to build/baselines/INDEX.md. Nothing of the game's
-data is in any of these.
+data is in any of these but the grabs, which stay local (build/ is not in git).
 """
 import argparse
 import gzip
@@ -26,7 +28,7 @@ import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(ROOT, "build", "baselines")
-SUMMARY_LINES = re.compile(r"^\[(diag\] .* flips|native-cd\]|fps\]|save\])")
+SUMMARY_LINES = re.compile(r"^\[(diag\] .* flips|native-cd\]|phys-stats\]|fps\]|save\])")
 
 
 def tool(name, trace):
@@ -61,6 +63,16 @@ def main():
             if os.path.exists(trace):
                 for t in ("frame_times.py", "frame_costs.py", "phys_breakdown.py"):
                     f.write(f"\n== {t}\n{tool(t, trace)}")
+        if os.path.exists(os.path.join(run, "guard.json")):   # VISIBLE=1: was it on screen throughout
+            shutil.copy2(os.path.join(run, "guard.json"), dst)
+        grabs = sorted(os.listdir(os.path.join(run, "grabs"))) if os.path.isdir(os.path.join(run, "grabs")) else []
+        if grabs:   # what was on screen, small (local only: the game's picture)
+            from PIL import Image
+            os.makedirs(os.path.join(dst, "grabs"), exist_ok=True)
+            for g in grabs:
+                im = Image.open(os.path.join(run, "grabs", g)).convert("RGB")
+                im.thumbnail((480, 480))
+                im.save(os.path.join(dst, "grabs", os.path.splitext(g)[0] + ".jpg"), quality=80)
         if a.ftrace and os.path.exists(trace):
             with open(trace, "rb") as src, gzip.open(os.path.join(dst, "ftrace.txt.gz"), "wb") as z:
                 shutil.copyfileobj(src, z)

@@ -17,6 +17,12 @@ Environment
                      run's summary in build/baselines/, which no run deletes.
   PS3RECOMP_VK_DUMP_EVERY=<n>  refresh frame.ppm every n-th present (default
                      15; dumping every frame costs several fps).
+  VISIBLE=1          (Windows, with WINDOW=1) a run valid only while the game is
+                     on screen: not started on a locked desktop, and stopped,
+                     with guard.json saying why, if the desktop locks or the
+                     game's window is minimised, hidden or gone.
+  GRAB_EVERY=<s>     with VISIBLE=1: the window's screen area to grabs/ every
+                     <s> seconds -- what was actually on screen.
   DUMP=0             no frame.ppm at all, for timing runs: the dump is written
                      on the present path and skews it. No screenshots then,
                      and a drive script may not use `change` or `shot`.
@@ -71,6 +77,24 @@ ELF = os.path.join(ROOT, "build", "disc", "PS3_GAME", "USRDIR", "EBOOT.elf")
 TAG = os.environ.get("RUN_TAG")
 RUN = os.path.join(ROOT, "build", "test", "boot-" + time.strftime("%Y%m%d-%H%M%S") + (f"-{TAG}" if TAG else ""))
 SHOT_EVERY = int(os.environ.get("SHOT_EVERY", "10"))
+VISIBLE = os.environ.get("VISIBLE") == "1"
+GRAB_EVERY = float(os.environ.get("GRAB_EVERY", "0"))
+
+
+def game_window(pid):
+    """Windows: the game's own titled top-level window, or None."""
+    import ctypes, ctypes.wintypes as wt
+    u, found = ctypes.WinDLL("user32"), []
+
+    @ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
+    def cb(h, _):
+        p = wt.DWORD()
+        u.GetWindowThreadProcessId(h, ctypes.byref(p))
+        if p.value == pid and u.GetWindowTextLengthW(h) > 0:
+            found.append(h)
+        return True
+    u.EnumWindows(cb, 0)
+    return found[0] if found else None
 
 
 def rd(path):
@@ -79,6 +103,32 @@ def rd(path):
             return f.read()
     except OSError:
         return ""
+
+
+def desktop_locked():
+    """Windows: is this session's desktop locked? A locked desktop shows no
+    window, so window grabs see the lock screen and a windowed run's
+    presents reach no display (their pacing may differ from a visible run)."""
+    if not WIN:
+        return None
+    try:
+        import ctypes, ctypes.wintypes as wt, struct
+        wts, k = ctypes.WinDLL("wtsapi32"), ctypes.WinDLL("kernel32")
+        sid, buf, n = wt.DWORD(), ctypes.c_void_p(), wt.DWORD()
+        k.ProcessIdToSessionId(k.GetCurrentProcessId(), ctypes.byref(sid))
+        if not wts.WTSQuerySessionInformationW(None, sid.value, 25, ctypes.byref(buf), ctypes.byref(n)):
+            return None
+        # WTSINFOEXW: DWORD Level, then the union at offset 8 (it holds 8-byte
+        # members): SessionId, SessionState, SessionFlags (0 locked, 1 not).
+        # Offset 12 is SessionState, "active" whether locked or not -- read
+        # as the flag, every run until 2026-10-31 18:45 said locked.
+        sess, flags = struct.unpack_from("<I4xi", ctypes.string_at(buf, n.value), 8)
+        if sess != sid.value:
+            return None
+        wts.WTSFreeMemory(buf)
+        return {0: True, 1: False}.get(flags)
+    except (OSError, struct.error):
+        return None
 
 
 def build_identity():
@@ -100,24 +150,6 @@ def build_identity():
             return {"rev": rev, "dirty_files": dirty}
         except OSError:
             return None
-    def desktop_locked():
-        """Windows: is this session's desktop locked? A locked desktop shows no
-        window, so window grabs see the lock screen and a windowed run's
-        presents reach no display (their pacing may differ from a visible run)."""
-        if not WIN:
-            return None
-        try:
-            import ctypes, ctypes.wintypes as wt, struct
-            wts, k = ctypes.WinDLL("wtsapi32"), ctypes.WinDLL("kernel32")
-            sid, buf, n = wt.DWORD(), ctypes.c_void_p(), wt.DWORD()
-            k.ProcessIdToSessionId(k.GetCurrentProcessId(), ctypes.byref(sid))
-            if not wts.WTSQuerySessionInformationW(None, sid.value, 25, ctypes.byref(buf), ctypes.byref(n)):
-                return None
-            flags = struct.unpack_from("<i", ctypes.string_at(buf, n.value), 12)[0]   # WTSINFOEX_LEVEL1.SessionFlags
-            wts.WTSFreeMemory(buf)
-            return {0: True, 1: False}.get(flags)
-        except (OSError, struct.error):
-            return None
     ps3 = os.environ.get("PS3RECOMP_DIR", os.path.join(ROOT, "build", "ref", "ps3recomp"))
     prefixes = ("DOTHEROES_", "PS3_", "PS3RECOMP_", "SPU_", "VK_", "RSX_", "SPURS_", "DIAG_", "GCM_")
     return {
@@ -137,6 +169,9 @@ def main():
     if not os.path.isfile(BIN):
         print(f"no {BIN} (build port/ first)")
         return 2
+    if VISIBLE and desktop_locked():
+        print("VISIBLE=1: the desktop is locked; not starting a run that would not be on screen")
+        return 3
     # Retention: test runs (logs, screenshots) must not pile up on disk.
     keep = int(os.environ.get("KEEP_RUNS", "5"))
     old = sorted(glob.glob(os.path.join(ROOT, "build", "test", "boot-*")))
@@ -227,6 +262,68 @@ def main():
     shots = threading.Thread(target=shooter, daemon=True) if SHOT_EVERY else None
     if shots:
         shots.start()
+
+    guard_state = {"aborted": None}
+    ending = threading.Event()   # the run's own stop at SECS: not a guard failure
+
+    def guard():
+        """VISIBLE=1 (Windows, with WINDOW=1): the run is only valid while the game is
+        on screen. Every 0.5 s: the desktop unlocked, the game's window present, shown
+        and not minimised -- else the game is stopped and the run marked aborted
+        (guard.json). GRAB_EVERY=<s>: the window's screen area saved to grabs/, what
+        was actually on screen."""
+        import ctypes
+        from PIL import ImageGrab
+        import ctypes.wintypes as wt
+        u = ctypes.WinDLL("user32")
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        except OSError:
+            pass
+        t0, seen, samples, front, grabs = time.monotonic(), False, 0, 0, 0
+        next_grab = GRAB_EVERY
+        os.makedirs(os.path.join(RUN, "grabs"), exist_ok=True)
+        while not stop.wait(0.5):
+            if ending.is_set():
+                break
+            now = time.monotonic() - t0
+            h = game_window(proc.pid)
+            why = None
+            if desktop_locked():
+                why = "desktop locked"
+            elif h:
+                seen = True
+                if u.IsIconic(h):
+                    why = "game window minimised"
+                elif not u.IsWindowVisible(h):
+                    why = "game window hidden"
+            elif seen and proc.poll() is None:
+                why = "game window gone"
+            if why and ending.is_set():
+                break   # the window went with the run's own stop, after the check began
+            if why:
+                guard_state.update(aborted=why, at_s=round(now, 1))
+                proc.terminate()
+                break
+            if h:
+                samples += 1
+                front += u.GetForegroundWindow() == h
+                if GRAB_EVERY and now >= next_grab:
+                    next_grab += GRAB_EVERY
+                    r, pt = wt.RECT(), wt.POINT(0, 0)
+                    u.GetClientRect(h, ctypes.byref(r))
+                    u.ClientToScreen(h, ctypes.byref(pt))
+                    try:
+                        ImageGrab.grab(bbox=(pt.x, pt.y, pt.x + r.right, pt.y + r.bottom), all_screens=True).save(
+                            os.path.join(RUN, "grabs", f"{int(now):04d}.png"))
+                        grabs += 1
+                    except OSError:
+                        pass
+        guard_state.update(samples=samples, foreground_share=round(front / samples, 3) if samples else None,
+                           grabs=grabs)
+    guarded = threading.Thread(target=guard, daemon=True) if VISIBLE and WIN else None
+    if guarded:
+        guarded.start()
     dr = None
     if drive:
         with open(os.path.join(RUN, "drive.log"), "wb") as log:
@@ -238,6 +335,7 @@ def main():
         rc = proc.wait(timeout=SECS)
     except subprocess.TimeoutExpired:
         timed_out = True
+        ending.set()
         proc.terminate()   # SIGTERM (the port exits at once) / TerminateProcess
         try:
             rc = proc.wait(timeout=5)
@@ -248,6 +346,12 @@ def main():
     stop.set()
     if shots:
         shots.join(15)
+    if guarded:
+        guarded.join(5)
+        with open(os.path.join(RUN, "guard.json"), "w") as f:
+            json.dump(guard_state, f)
+        if guard_state["aborted"]:
+            print(f"ABORTED : {guard_state['aborted']} at {guard_state.get('at_s')} s -- not a valid on-screen run")
     for f in ("frame.ppm", os.path.join("shots", ".tmp.ppm")):
         try:
             os.remove(os.path.join(RUN, f))
