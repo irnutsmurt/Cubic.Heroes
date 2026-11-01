@@ -441,9 +441,14 @@ tooling, the native Windows build, measuring on the 3070) are done; see
    the GPU. Frame-to-present intervals unchanged within noise (A/B in
    build/baselines/2026-10-31-walker-wordloop; whether the desktop was locked
    was not recorded then, so not established as on-screen timing). Checked
-   in play only: the FIFO
-   unit tests (libs/video/tests/test_gcm_*) are not built on Windows and have
-   not run against it.
+   in play only then; the FIFO
+   unit tests (libs/video/tests/test_gcm_*) were not built on Windows. Since
+   2026-11-01 tests/native/run_gcm_tests.sh builds nine of them with the
+   bundled Zig and they pass (it works around two things in build/: the tests
+   allocate guest memory to the inject base + 64 KB, but cellGcmInit now
+   clears the report area 8 MB past it; and the COFF linker wants two stubs).
+   flip_status and user_command (stubs they lack) and legacy_state_filter
+   (POSIX setenv) still do not build there.
    **Render-target thrash.** The in-flight waits came from address 0
    alternating 1280x720 <-> 1024x1024 in fights (RSX_SURFACE_LOG=1): each
    switch recreated the target with two GPU syncs, 4.3 + 0.9 ms of a slow
@@ -546,6 +551,36 @@ tooling, the native Windows build, measuring on the 3070) are done; see
    17.5-33 ms. Upper bounds over the 839 guest frames of 18 ms or more: with
    no physics wait 358 would be under 16.67 ms, with no ring wait 450, with
    neither 761; without only the waiter's own part, 6.
+   **The capped lap** (ps3recomp patch 0067, `GCM_WRAP_LAP=1`, experimental,
+   off by default; test aids patch 0066). At the buffer-full wrap the title
+   gets a lap ending at the walker, as at a flip-time wrap, instead of waiting
+   for the walker to reach the jump back -- only when the ring as it is makes
+   that safe (the runtime's ring, no lap limit in force, the walker in this
+   lap by the back-jump count and behind the title, room up to the walker for
+   the reserve that called and at least 128 KB); otherwise the wait as before.
+   Checked: libs/video/tests/test_gcm_wrap_lap.c; `GCM_RING_CHECK=1` (the
+   unread tail copied at every wrap that leaves it unread, each command
+   compared before the walker decodes it) with the walker slowed
+   (`GCM_WALKER_DELAY_NS=250`, ~30 fps), a 1 MB ring (`GCM_RING_TEST_BYTES`,
+   3,800 wraps a run) and both: no command overwritten unread in 30-145
+   million compared a run, no flip missed or out of order, no stall; frame
+   dumps and window grabs look right (build/baselines/2026-11-01-wrap-lap-
+   stress). On screen, frame dumps off (build/baselines/2026-11-01-wrap-lap-
+   ab: river fights 7 lifted and 3 native pairs, a 5-minute soak each way):
+   the ring wait fell 85-94% a frame (catch-up waits: none). Whether frames
+   got faster: soak (no physics) -- no: present intervals unchanged (p99 22.4
+   both), the main thread's usleep grew by what the ring wait lost: the wait
+   moved. Native collision -- physics frames' tails better at the same step
+   cost (41-120 pairs: over 25 ms 3.8% -> 2.2%; 121+: 17.8% -> 5.0%; few
+   frames). Lifted collision, the default -- mixed: over 25 ms 1.87% ->
+   2.16%, over 33 ms 0.69% -> 0.45%, guest p99 29.7 -> 27.9; at matched
+   contact points steps took ~1-1.4 ms longer at light-medium load and less at
+   heavy load, not explained by the walker overlapping the tasks (it did so
+   less); the capped-lap fights ran more catch-up steps, and two of its seven
+   runs had no fight. Queued work: flip request -> walker at the flip median
+   +0.05 ms (soak), +0.46 (lifted), -0.39 (native); frame start -> present
+   +0.13 / +0.55 / -0.57. Not shown to be a win where it matters (lifted, the
+   default): kept selectable and off.
 10. **"Saving doesn't bring up the save menu"** (owner, 2026-10-31). It
     saved: the save-data module skips the PS3's system save list and takes
     the slot the title offers, so nothing appeared. A save now shows GAME
@@ -581,6 +616,8 @@ tooling, the native Windows build, measuring on the 3070) are done; see
 | `DOTHEROES_CPU=<zig cpu>` | build-time: the CPU level this machine compiles for (default its own: x86_64_v3 or x86_64_v2) |
 | `SPURS_SNAP=<entry>:<entry>:<n>:<prefix>` | guest memory before and after a Bullet step, for docs/BULLET_NATIVE.md (`tests/snap_read.py`) |
 | `GCM_WORD_LOOP=1` | every FIFO data word through the per-word decode loop, as before the run fast path (A/B) |
+| `GCM_WRAP_LAP=1` | experimental: the buffer-full ring wrap hands the title a lap ending at the walker when that is safe, instead of waiting for the walker to read the whole ring (default 0: wait) |
+| `GCM_RING_CHECK=1`, `GCM_WALKER_DELAY_NS=<ns>`, `GCM_RING_TEST_BYTES=<n>` | ring tests: report commands overwritten before the walker read them; slow the walker per command; give the title a smaller ring |
 | `RSX_SURFACE_LOG=1` | every colour render target the draw engine creates, and why (new address, resized, evicted) |
 | `RSX_SURFACE_TRACE=<location>:<hex offset>` | what the title does with the colour target at that address, per frame: each stretch at one size (how it starts, its clears and draws, the surface registers) and every read of the address |
 | `PS3RECOMP_ENG_NONE_TARGET=1` | a pass with colour target NONE binds the guest address again, as before the render-target fix (A/B) |

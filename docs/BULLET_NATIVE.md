@@ -482,7 +482,9 @@ what-if, not a forecast. The other contributors to the same frames, largest
 first: the command-buffer wrap wait (with neither it nor the physics wait,
 761 of 839 frames of 18 ms or more would be under 16.67 ms; without the
 physics wait alone 358, without the wrap wait alone 450 -- upper bounds,
-docs/HANDOFF.md); the extra game work in debris frames (~2.4 ms over frames without physics); the
+docs/HANDOFF.md; a lap ending at the walker at the wrap, `GCM_WRAP_LAP=1`,
+removed 85-94% of that wait but did not shorten frames with lifted collision:
+off, experimental); the extra game work in debris frames (~2.4 ms over frames without physics); the
 per-task issuing, which only replacing the PPU's solve (`func_00952298`)
 natively would remove; lifted collision, the default, ~1.7 ms a step more
 than native.
