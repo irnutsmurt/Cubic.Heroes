@@ -523,7 +523,8 @@ tooling, the native Windows build, measuring on the 3070) are done; see
 |---|---|
 | `PS3_STRICT=1` | strict mode: silent fallbacks become fatal (dev default) |
 | `DIAG_FPS=1` | guest flips per second every 10 s |
-| `DIAG_PROF=<start>,<secs>` | all-thread wall-clock sampler -> `profile.raw`; `tests/prof_report.py` |
+| `DIAG_PROF=<start>,<secs>` | all-thread wall-clock sampler -> `profile.raw`; `tests/prof_report.py`. With `PS3_FTRACE` also `profile.times`, each sample's time on the trace's clock |
+| `DIAG_PROF_THREADS=<name>[,<name>]` | sample only threads whose name contains one of these (Windows), e.g. `spu job,ppu main`: all ~50 threads fill the 400,000 samples in ~10 s |
 | `DIAG_DUMP_AT`, `DIAG_CRASH_DIR`, `DIAG_HANG_EXIT` | crash/hang reports |
 | `VK_WAIT_STATS=1`, `VK_GPU_TIME=1` | CPU waits on the GPU by call site; GPU time per 5 s and why render passes restarted; with `PS3_FTRACE`, per-batch GPU spans and per-frame draws (tests/frame_costs.py) |
 | `VK_DRAW_BATCH` (default on), `VK_DRAW_BATCH_MAX` | draw batching (4096 per submission) |
@@ -545,7 +546,7 @@ tooling, the native Windows build, measuring on the 3070) are done; see
 | `RSX_SURFACE_LOG=1` | every colour render target the draw engine creates, and why (new address, resized, evicted) |
 | `RSX_SURFACE_TRACE=<location>:<hex offset>` | what the title does with the colour target at that address, per frame: each stretch at one size (how it starts, its clears and draws, the surface registers) and every read of the address |
 | `PS3RECOMP_ENG_NONE_TARGET=1` | a pass with colour target NONE binds the guest address again, as before the render-target fix (A/B) |
-| `DOTHEROES_PHYS_STATS=1` | each Bullet collision task's workload (pairs processed, awake bodies, contact points) as frame-trace kind 19 and [phys-stats] lines, either collision mode |
+| `DOTHEROES_PHYS_STATS=1` | each Bullet collision task's workload (pairs processed, awake bodies, contact points) as frame-trace kind 19 and [phys-stats] lines, either collision mode; each solver task's command as kind 20 (`tests/solver_breakdown.py`) |
 | `VISIBLE=1`, `GRAB_EVERY=<s>` | tests/boot_smoke.py: an on-screen run -- refused on a locked desktop, stopped if it locks or the window is minimised/hidden (guard.json); window grabs to grabs/ |
 | `DOTHEROES_NATIVE_CD=<0-3>` | the Bullet collision task: lifted (default), native (experimental), check (native against lifted, `[native-cd]` lines), self-check (native against itself rounding toward zero); `DOTHEROES_NATIVE_CD_DUMP=n` prints differing manifolds, `DOTHEROES_NATIVE_CD_FP=rz` runs native toward zero (docs/BULLET_NATIVE.md) |
 | `GAMEDATA=<dir>` | tests/boot_smoke.py: play on a persistent save root in place (`%LOCALAPPDATA%\dotheroes\gamedata`) |

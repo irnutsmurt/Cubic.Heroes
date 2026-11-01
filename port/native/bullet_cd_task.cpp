@@ -210,6 +210,28 @@ uint32_t desc_from_queue(uint32_t inq, uint32_t slot)
     return 0;
 }
 
+// DOTHEROES_PHYS_STATS=1 also marks each Bullet solver task (runtime image
+// 5) with the command its descriptor holds as it starts (PS3_FT_PHYS_CMD):
+// the solver runs a step as a series of commands, each one task per slot that
+// the main thread waits on. The descriptor (one per slot, fixed for the run,
+// 0x90 apart) is written before the task is created; its layout is Bullet
+// 2.74's SpuSolverTaskDesc: +0 command (1 set up bodies, 2 manifold setup,
+// 3 constraint setup, 4 iterate, 5 copy bodies back, 6 manifold warm-start
+// write-back), +4 task id, +0x34 bodies (1, 5), +0x3C manifolds (2).
+constexpr int kImageBulletSolver = 5;
+int solver_run(uint32_t, uint32_t, const uint32_t arg[4])
+{
+    const uint32_t desc = desc_from_queue(arg[2], arg[0]);
+    if (desc && PS3_FT_ON()) {
+        const uint8_t* d = vm_base + desc;
+        const uint32_t cmd = be32(d);
+        const uint32_t count = cmd == 1 || cmd == 5 ? be32(d + 0x34) : cmd == 2 ? be32(d + 0x3C) : 0;
+        const uint64_t t = ps3_ft_now();
+        ps3_ft_span(PS3_FT_PHYS_CMD, (uint32_t)kImageBulletSolver, cmd, (arg[0] & 0xFFu) | (count & 0xFFFFFFu) << 8, t, t);
+    }
+    return 0;   // the lifted solver task, as ever
+}
+
 int cd_run(uint32_t, uint32_t, const uint32_t arg[4])
 {
     if (g_mode == 0) return 0;   // registered for DOTHEROES_PHYS_STATS alone: the lifted task, counted after
@@ -404,6 +426,7 @@ extern "C" void dotheroes_native_init(void)
     const char* dump = getenv("DOTHEROES_NATIVE_CD_DUMP");
     g_dump_left = dump ? atoi(dump) : 0;
     spu_workload_native_register(kImageBulletCD, cd_run, cd_after);
+    if (g_stats) spu_workload_native_register(kImageBulletSolver, solver_run, nullptr);
     fprintf(stderr, "[native-cd] Bullet collision task: %s%s\n",
             g_mode == 0 ? "lifted" : g_mode == 1 ? "native (experimental)"
                         : g_mode == 2 ? "check (native against lifted)"

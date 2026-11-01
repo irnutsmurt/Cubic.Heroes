@@ -16,6 +16,7 @@
 
 #include "ppu_recomp.h"
 #include "ppu_tls.h"   /* PPU_THREAD_LOCAL */
+#include "ps3emu/ps3_ftrace.h"   /* ps3_ft_now, g_ps3_ft: DIAG_PROF sample times */
 
 #include <atomic>
 #include <chrono>
@@ -26,6 +27,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <string>
 #include <thread>
 
 #ifndef _WIN32
@@ -571,15 +573,40 @@ unsigned prof_walk(HANDLE th, DWORD64 lo, DWORD64 hi, DWORD64* pc)
     return n;
 }
 
+/* DIAG_PROF_THREADS=<name>[,<name>...]: sample only the threads whose name
+ * (SetThreadDescription) contains one of these, e.g. "spu job,ppu main". With
+ * every thread (~50 in a fight) the 400,000 samples last ~10 s, and each tick
+ * suspends them all. Threads made later (the SPU pool's workers) are picked up
+ * when the list is refreshed. */
+bool prof_name_matches(HANDLE h, const char* only)
+{
+    PWSTR name = nullptr;
+    char n[256] = "";
+    if (SUCCEEDED(GetThreadDescription(h, &name)) && name)
+        WideCharToMultiByte(CP_UTF8, 0, name, -1, n, sizeof n, nullptr, nullptr);
+    if (name) LocalFree(name);
+    for (const char* p = only; *n && *p;) {
+        const char* e = strchr(p, ',');
+        const size_t len = e ? (size_t)(e - p) : strlen(p);
+        if (len && strstr(n, std::string(p, len).c_str())) return true;
+        if (!e) break;
+        p = e + 1;
+    }
+    return false;
+}
+
 void prof_main_win(unsigned start, unsigned dur)
 {
     SetThreadDescription(GetCurrentThread(), L"diag-prof");
+    const char* only = getenv("DIAG_PROF_THREADS");
+    if (only && !*only) only = nullptr;
     Sleep(start * 1000u);
     DWORD64 (*pcs)[k_prof_depth] = (DWORD64 (*)[k_prof_depth])calloc(k_prof_max, sizeof *pcs);
     DWORD* tids = (DWORD*)calloc(k_prof_max, sizeof(DWORD));
     unsigned char* depth = (unsigned char*)calloc(k_prof_max, 1);
-    if (!pcs || !tids || !depth) return;
-    fprintf(stderr, "[diag] profiling every thread for %u s\n", dur);
+    uint64_t* when = (uint64_t*)calloc(k_prof_max, sizeof(uint64_t));   /* ps3_ft_now() at each sample */
+    if (!pcs || !tids || !depth || !when) return;
+    fprintf(stderr, "[diag] profiling %s for %u s\n", only ? only : "every thread", dur);
     const DWORD self = GetCurrentThreadId(), pid = GetCurrentProcessId();
     struct Th { DWORD tid; HANDLE h; DWORD64 lo, hi; };
     static Th ths[256]; int nt = 0;
@@ -597,6 +624,7 @@ void prof_main_win(unsigned start, unsigned dur)
                     HANDLE h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT |
                                           THREAD_QUERY_INFORMATION, FALSE, te.th32ThreadID);
                     if (!h) continue;
+                    if (only && !prof_name_matches(h, only)) { CloseHandle(h); continue; }
                     ths[nt] = { te.th32ThreadID, h, 0, 0 };
                     prof_stack_bounds(h, &ths[nt].lo, &ths[nt].hi);
                     if (ths[nt].hi) nt++;
@@ -607,6 +635,7 @@ void prof_main_win(unsigned start, unsigned dur)
         }
         for (int k = 0; k < nt && count < k_prof_max; k++) {
             if (SuspendThread(ths[k].h) == (DWORD)-1) continue;
+            when[count] = ps3_ft_now();
             depth[count] = (unsigned char)prof_walk(ths[k].h, ths[k].lo, ths[k].hi, pcs[count]);
             ResumeThread(ths[k].h);
             tids[count++] = ths[k].tid;
@@ -642,6 +671,17 @@ void prof_main_win(unsigned start, unsigned dur)
         }
         fclose(f);
         fprintf(stderr, "[diag] profile: %u samples -> %s\n", count, path);
+    }
+    /* With a frame trace (PS3_FTRACE) running: each sample's time in its
+     * timeline (us from its base), one line per sample in profile.raw's order,
+     * so samples can be taken from chosen frames only. */
+    if (g_ps3_ft.base) {
+        snprintf(path, sizeof path, "%s/profile.times", report_dir());
+        if (FILE* t = fopen(path, "w")) {
+            for (unsigned i = 0; i < count; i++)
+                fprintf(t, "%.1f\n", (double)(int64_t)(when[i] - g_ps3_ft.base) / 1000.0);
+            fclose(t);
+        }
     }
     for (int k = 0; k < nt; k++) CloseHandle(ths[k].h);
 }

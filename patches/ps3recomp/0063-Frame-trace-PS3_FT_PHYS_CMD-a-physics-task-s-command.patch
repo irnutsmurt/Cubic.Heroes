@@ -1,0 +1,30 @@
+From 8ee05ceb225abb7b7afeb305e03fa99aead3de92 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Sat, 31 Oct 2026 22:21:44 -0700
+Subject: [PATCH] Frame trace: PS3_FT_PHYS_CMD, a physics task's command
+
+An instant at a physics task's start naming the command it was given
+(3D Dot Game Heroes: each Bullet solver task, who = lifted image,
+a = command, b = slot | the command's item count << 8), so a step's solver
+time can be split by phase.
+---
+ include/ps3emu/ps3_ftrace.h | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/include/ps3emu/ps3_ftrace.h b/include/ps3emu/ps3_ftrace.h
+index 71f09dc..7b3c28b 100644
+--- a/include/ps3emu/ps3_ftrace.h
++++ b/include/ps3emu/ps3_ftrace.h
+@@ -72,6 +72,9 @@ enum ps3_ft_kind {
+     PS3_FT_PHYS_LOAD   = 19, /* instant, a title's physics work unit as the port counts it
+                               * (3D Dot Game Heroes: one Bullet collision task): who = bodies,
+                               * a = pairs processed, b = contact points */
++    PS3_FT_PHYS_CMD    = 20, /* instant at a physics task's start, the command it was given
++                              * (3D Dot Game Heroes: a Bullet solver task): who = lifted image,
++                              * a = command, b = slot | the command's item count << 8 */
+ };
+ 
+ #if defined(_MSC_VER)
+-- 
+2.56.0.windows.3
+
