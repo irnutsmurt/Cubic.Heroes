@@ -385,7 +385,41 @@ the heaviest frames (C), without the solver's and collision's issuing and
 polling at all, at ~18 ms. Not even that clears 16.67 ms in the
 debris-heavy frames: the wrap wait and the extra game work stay.
 
-## Candidate: a native solver task (not started, not decided)
+## Solver structures, checked (2026-11-01)
+
+What the native solver code uses, each checked against the game's own memory,
+not taken from Bullet 2.74: `DOTHEROES_SOLVER_SNAP` captures a step (guest
+memory as the first task of each command is created, the tasks' descriptors,
+and the spin lock and cell masks as each iterate and write-back task starts and
+returns; port/native/bullet_solver_task.cpp), and tests/solver_layout.py checks
+it. Captured river-fight steps (build/snap, game memory, local only): 150 and
+300 of one run (the layouts; taken before the lock was read as tasks ran), 150
+of a second (all 22 checks) and 1 and 2 of a third (1-2 cells in use, many
+tasks finding nothing: all checks; one note, below). 71-302 contacts a step.
+
+| structure | as the game has it | how it was checked |
+|---|---|---|
+| descriptor (0x90 a slot) | +0 command, +4 task id (= slot), +0x10 hash, +0x14 solver bodies, +0x18 contact constraints, +0x20 body offsets, +0x30 command data: bodies (+0x30 first, +0x34 count, +0x38 rigid bodies), manifold setup (+0x34.. counts, +0x40 manifold holders, +0x48.. solver info), iterate / write-back (+0x30 spin lock, 128-aligned; write-back also +0x40) | the words each command's tasks are created with |
+| hash: cells | +0x870, 128 x 16 bytes: local bodies, body offset, manifolds, manifold offset, contacts, contact-constraint offset (x3), constraints, constraint offset (16 bits each) | the offsets are the PPU's running sums of the counts |
+| hash: dependency matrix | +0, 128 rows of 4 words, symmetric, diagonal set | |
+| hash: cell masks | +0x800, row 0 the processed cells (preset to the cells with nothing to do as each round starts), row 1 + task id what a task holds; rows 4-6 unused | at round starts, and as tasks start and return |
+| contact constraint | 0x90 bytes, three a contact (the contact, two friction rows); applied impulse +0x54; pointer back to the manifold point **+0x78** (2.74: +0x70); friction rows' pointer 0 | the pointer and impulse fields that name and give exactly the floats write-back pass 1 changed |
+| spin lock | libsync's ticket lock: +0 now serving, +2 next ticket, 16 bits each; 0/0 as a round starts, equal when released; one ticket a claim plus one last per task | read as tasks run (the lock is freed and its memory reused by the step's end) |
+| write-back | for each contact, the first float of the 16 bytes at its pointer = min(3, applied impulse); the other 12 bytes untouched; every contact names its own 16 bytes | pass 1's changes in the snapshots; after pass 10 in the running game (`DOTHEROES_NATIVE_SOLVER_CHECK=1`, compared as the step's last write-back task finishes): 21,647 contacts in 200 steps all as pass 1 leaves them -- passes 2-10 rewrite the same values (redundant: shown, not relied on; all ten still run) |
+
+After the solver, before the next step's collision tasks, the game changes a
+few of those 16-byte targets again (2 of 71 contacts in captured step 1; 116
+contacts in 9 of 600 steps of one run): a manifold released and made again for
+a new pair starts its points at zero impulse. A check of the write-back has to
+look before that, as the step's last write-back task finishes.
+
+The cell claim (as each task asks for a cell: its row cleared, then under the
+lock the first cell neither processed nor dependent on a held one, the task's
+row set to that cell's dependencies, the cell's processed bit set; a round ends
+with every cell processed, every row clear and the lock released) matches
+Bullet 2.74's getNextFreeCell on everything the captures show.
+
+## Candidate: a native solver task (started: write-back)
 
 A candidate for the solver's share of slow frames, to be weighed against the
 other contributors once they are measured -- not an established requirement.
@@ -442,13 +476,39 @@ lock init, its count of completions) stays as it is.
 
 **Steps, each measured and checked before the next:**
 1. Layouts of the game's 2.73 structures against the 2.74 source, from
-   snapshots: `SpuSolverHash` (cells, masks, dependency matrix),
-   `btSolverBody`, `btSolverConstraint`, the manifold and constraint cell
-   holders, and the `btRigidBody` fields body setup and copy back touch.
-2. Write-back, copy back and body setup natively (deterministic per task;
-   write-back is the most DMA-bound).
+   snapshots -- done for what write-back uses ("Solver structures, checked");
+   still to do for `btSolverBody`, the rest of `btSolverConstraint`, the
+   manifold and constraint cell holders, and the `btRigidBody` fields body
+   setup and copy back touch.
+2. Write-back natively -- done (below); copy back and body setup next.
 3. Manifold setup (deterministic per task).
 4. Iterate.
+
+**Done so far: write-back** (`DOTHEROES_NATIVE_SOLVER=6`, experimental, off by
+default; port/native/bullet_solver.cpp). Each native task waits for its slot's
+command, pops it, claims cells under the round's ticket lock and masks as the
+lifted tasks do, writes min(3, impulse) for each contact of its cells, and
+pushes its own completion; the PPU still creates 3 tasks a round for 10 rounds
+and waits for each round. Checked: offline on captured inputs
+(tests/native/bullet_solver_snapcheck.cpp: the native write-back on the
+snapshot before pass 1 = the game's pass 1, 16 bytes per contact, 146 of 146;
+the hash and lock left as a round leaves them); in the running game against
+the lifted task (`DOTHEROES_NATIVE_SOLVER_CHECK=1` with the lifted write-back:
+21,647 contacts, none different) and as itself (74,001 contacts in 600 steps,
+none missed; 20,000 native tasks, none fell back to the lifted image).
+Measured on screen (build/baselines/2026-11-01-native-writeback-ab; river
+fights, lifted collision, the default ring, frame dumps off, five pairs; one
+native run had no fight and is left out): the write-back phase 1.04 -> 0.21 ms a
+step (0.60-1.39 -> 0.20-0.21 at every contact load), its tasks 89.9 -> 2.2 us
+(median); the solver's phases together 0.5-1.6 ms a step shorter at matched
+contact points, iterate unchanged. **Frames: no gain shown.** Present-call
+completion intervals over 25 ms 2.90% -> 3.58%, over 33 ms 1.02% -> 0.86%, guest
+frame p99 32.0 -> 30.8 ms. The native arm's fights carried 6-11 more awake
+bodies at the same contact load; their lifted collision took 0.45-1.2 ms a step
+longer -- as much as the write-back saved, or more -- and they ran more
+catch-up steps (43% of physics frames with 2+ steps, against 38%). With lifted
+collision varying that much from fight to fight, ~1 ms a physics frame from the
+solver does not show through in five pairs.
 
 **Validation.**
 - Captured inputs: `SPURS_SNAP` extended to take guest memory before a

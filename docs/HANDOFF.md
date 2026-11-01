@@ -580,7 +580,20 @@ tooling, the native Windows build, measuring on the 3070) are done; see
    runs had no fight. Queued work: flip request -> walker at the flip median
    +0.05 ms (soak), +0.46 (lifted), -0.39 (native); frame start -> present
    +0.13 / +0.55 / -0.57. Not shown to be a win where it matters (lifted, the
-   default): kept selectable and off.
+   default): kept selectable and off. Wrap waits reduced; no default-mode
+   frame-time gain demonstrated.
+   **Solver, one command native** (docs/BULLET_NATIVE.md, "Solver structures,
+   checked" and "Candidate"). The structures write-back uses were checked
+   against captured steps, not taken from Bullet 2.74 -- the game's contact
+   constraint keeps its manifold-point pointer at +0x78, not 2.74's +0x70. The
+   write-back runs natively with `DOTHEROES_NATIVE_SOLVER=6` (experimental,
+   off), each task keeping the lifted task's protocol (its command, the round's
+   ticket lock and cell masks, its own completion); its output matched the
+   lifted task's (offline 146 of 146 contacts, in the game 21,647, none
+   different) and it wrote every contact in 600 steps. The phase fell from 1.04
+   to 0.21 ms a step; frames showed no gain in five river pairs with lifted
+   collision, whose fight-to-fight variation (0.45-1.2 ms a step) was as large.
+   All ten write-back passes still run: shown redundant, not relied on.
 10. **"Saving doesn't bring up the save menu"** (owner, 2026-10-31). It
     saved: the save-data module skips the PS3's system save list and takes
     the slot the title offers, so nothing appeared. A save now shows GAME
@@ -622,6 +635,9 @@ tooling, the native Windows build, measuring on the 3070) are done; see
 | `RSX_SURFACE_TRACE=<location>:<hex offset>` | what the title does with the colour target at that address, per frame: each stretch at one size (how it starts, its clears and draws, the surface registers) and every read of the address |
 | `PS3RECOMP_ENG_NONE_TARGET=1` | a pass with colour target NONE binds the guest address again, as before the render-target fix (A/B) |
 | `DOTHEROES_PHYS_STATS=1` | each Bullet collision task's workload (pairs processed, awake bodies, contact points) as frame-trace kind 19 and [phys-stats] lines, either collision mode; each solver task's command as kind 20 (`tests/solver_breakdown.py`) |
+| `DOTHEROES_SOLVER_SNAP=<step>[,<step>]:<prefix>` | game memory as each solver command of the chosen steps starts, the tasks' descriptors, the lock and cell masks as tasks run (tests/solver_layout.py, tests/native/bullet_solver_snapcheck.cpp); ~1.4 GB a step, game memory: local only |
+| `DOTHEROES_NATIVE_SOLVER=6` | experimental, off: the Bullet solver's warm-start write-back done natively (docs/BULLET_NATIVE.md) |
+| `DOTHEROES_NATIVE_SOLVER_CHECK=1` | each step's write-back compared, as its last task finishes, with what it must leave |
 | `VISIBLE=1`, `GRAB_EVERY=<s>` | tests/boot_smoke.py: an on-screen run -- refused on a locked desktop, stopped if it locks or the window is minimised/hidden (guard.json); window grabs to grabs/ |
 | `DOTHEROES_NATIVE_CD=<0-3>` | the Bullet collision task: lifted (default), native (experimental), check (native against lifted, `[native-cd]` lines), self-check (native against itself rounding toward zero); `DOTHEROES_NATIVE_CD_DUMP=n` prints differing manifolds, `DOTHEROES_NATIVE_CD_FP=rz` runs native toward zero (docs/BULLET_NATIVE.md) |
 | `GAMEDATA=<dir>` | tests/boot_smoke.py: play on a persistent save root in place (`%LOCALAPPDATA%\dotheroes\gamedata`) |
