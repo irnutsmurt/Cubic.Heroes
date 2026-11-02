@@ -40,6 +40,40 @@ log) and [FEASIBILITY.md](FEASIBILITY.md) (design and the explicit exceptions).
   local only).
 - **Isolate tests** from the desktop and personal settings; avoid modifying
   unrelated projects or system settings; signal only processes you started.
+- **Debugging tools for testing the game** (the owner asked for these early
+  on; restated 2026-11-01). Add gameplay debug controls incrementally, when
+  they help a test, building on the existing tools (tests/boot_smoke.py,
+  tests/drive.py, the frame trace, `port/native/dev_state.cpp`) rather than a
+  separate debugger. Wanted:
+  - a development-only **"can't die"** switch that stops only lethal damage:
+    hits, knockback and enemy behaviour stay normal. Never keep health full
+    or grant permanent invincibility -- at full health the sword beam stays
+    available, which changes the fight and its workload;
+  - a repeatable way to **restart a test encounter from a known state**;
+  - a way for the owner to **mark a noticeable hitch** while playing, so it
+    can be found in the trace;
+  - (asked 2026-11-01) a **frame-rate readout** in the window's top-right
+    corner: fps and frame time in ms, optionally a small frame-time graph,
+    so single spikes show even when the counter reads ~60.
+  All are off by default. Every test records which debug options it ran with
+  (its `run.json` switches); a fix found with them on is validated again
+  with normal gameplay settings. The priority stays a smooth 60+ fps,
+  debris-heavy fights included.
+  **Done so far** (2026-11-01; port/native/dev_state.cpp, ps3recomp patch
+  0069; switches in "Diagnostics and switches"): the readout
+  (`PS3_OSD_FPS=1|2`, F7 cycles it); hitch marks (`DOTHEROES_DEV_KEYS=1`: F8
+  or L3+R3 -- "MARK n" on screen, a trace record, a log line; a drive script
+  marks with `touch mark.trigger`; `tests/slow_frames.py --marks` lists the
+  frames before each); can't-die (`DOTHEROES_DEV_CANT_DIE=1`: the player's own
+  life, found in memory, floored at 4 apples and raised to 4.5 -- never full;
+  hits, knockback and enemies untouched; each top-up logged); the game's state
+  for tests (`DOTHEROES_DEV_STATE=1`: life, field area, camera position,
+  physics steps, in `state.txt` and the trace; `tests/drive.py`'s `state`
+  waits on it). **Restarting an encounter from a known state** is, for now,
+  the save plus a state-checked route (tests/scripts/fight_bench.drive: in
+  play in the castle's area, then confirmed in the river's area before the
+  fight is measured); a true in-game restart (reloading an area, or putting
+  the hero at a known spot) is not done.
 - Commit identity for this repo is the owner's own git config; ps3recomp
   patches are committed as `dotheroes <dotheroes@localhost>` on the
   `dotheroes` branch of `build/ref/ps3recomp`.
@@ -275,6 +309,54 @@ speed independent of the frame rate. Steps 1-3 of the original list (Windows
 tooling, the native Windows build, measuring on the 3070) are done; see
 "Where things stand".
 
+0. **Physics and frame pacing (current, 2026-11-01):** native collision and
+   the native solver's write-back, copy-back and iterate are in, experimental
+   and off by default; steps are shorter, frames not shown better. Next: a
+   heavy-fight benchmark repeatable enough to judge frames (state-aware: the
+   intended place and encounter, measured from the first debris, a death or
+   a departure ending and classifying the segment); the native solver
+   against its baseline on it; slow frames traced through command
+   production, the ring wait, the walker, GPU waits and presentation (the
+   ring wait is a symptom: what keeps the walker from freeing room); capped
+   laps (`GCM_WRAP_LAP=1`) retested with the faster solver, apart. Native
+   collision's contact differences stay open, tracked apart.
+   **Slow frames, traced** (the owner's own play, ~7.7 min traced, 26,503
+   frames; native collision and solver, default ring; tests/slow_frames.py):
+   92% of frames under 18 ms. In the 18-25 ms frames (7.4%) the main thread
+   waits 8-10 ms a frame for room in the command ring (0.3 ms in the others);
+   its physics wait is now ~1 ms. The walker, which frees that room, drains
+   for twice as long (8.5-9.7 against 4.3 ms; ~770 draws a frame against
+   ~555) and waits 4-15 ms a frame for the previous present
+   (`present.prlock`). That lock is held 162 s of the ~460 s traced: per
+   present (two a frame) median 2.0 ms, p90 6.0 -- the GPU fence of the
+   previous frame (median 1.2, p90 5.7), then the window present (0.35).
+   `vk_eng_present` runs on the walker thread, so the ring's reader waits for
+   the GPU to finish one frame before it drains the next (no frames in
+   flight): a heavy frame's drain and its GPU time run back to back. The ring
+   wait is the symptom of that. The capped lap (below, retested) takes most
+   of the wait out of the main thread's frame -- the title no longer waits
+   for the walker to reach the ring's start when there is room behind it --
+   but not the serialization itself: frame start to present returned stays
+   ~28 ms (the walker ~8 ms behind at the flip). The present path (item 1)
+   remains the candidate for that latency and for headroom.
+   **The state-aware fight benchmark** (tests/scripts/fight_bench.drive,
+   tests/fight_bench.py; build/baselines/2026-11-01-fight-bench): the river
+   fight with the location confirmed (field area 18) before measuring, from
+   the first debris, ended and classified by a death, a departure or the
+   drive's end mark; can't-die keeps the segment going (each top-up
+   counted). Native solver (4,5,6) against the lifted one, native collision,
+   default ring, three runs each way, all alive and in the area throughout:
+   steps 3.47 -> 1.55 ms; guest frames over 18 ms 6.4% -> 3.3%, over 20 ms
+   4.2% -> 2.2%, p99 24.8 -> 22.0 ms; present intervals over 25 ms 0.46% ->
+   0.26%; at matched contact points physics frames' guest mean 17.62 / 18.51
+   / 20.42 -> 17.15 / 17.03 / 16.37 ms (1-100 / 101-250 / 251+), over 18 ms
+   34.6 / 41.8 / 70.6% -> 32.4 / 28.4 / 20.8%; latency unchanged (frame start
+   -> present median 27.5 -> 27.6 ms). One pair with normal damage: the
+   lifted run lived, the native one died 30 s into its segment -- too short
+   to compare. The drive's swing rounds take ~16 s each, not the ~3.4 s their
+   sleeps add up to (input admission; not yet looked into), so runs end
+   before its end mark ("unfinished": alive and in the area to the trace's
+   end, measured to there).
 1. **Next replacements:** the present path (frames in flight, no readback,
    no lock held across GPU waits), then a display-driven vblank (refresh-rate
    aware, e.g. 120 Hz panels). vm_watch on Linux (mprotect + SIGSEGV), so
@@ -520,7 +602,8 @@ tooling, the native Windows build, measuring on the 3070) are done; see
    manifold setup 0.39) and spends ~0.85 ms issuing. Removing the whole wait
    is the upper bound and still leaves debris-heavy frames over 16.67 ms: a
    command-buffer wrap wait and extra game work stay. A native solver task
-   is a candidate there (speedup unmeasured), not started.
+   was the candidate there; since done for three commands (below:
+   write-back, copy-back, iterate; experimental, off by default).
    **Task creation, cleaned up** (ps3recomp patch 0064): `cellSpursCreateTask`
    printed a line for every task and looked up an environment switch on every
    call, and the async task run four more; now the first 48 lines (all with
@@ -582,6 +665,19 @@ tooling, the native Windows build, measuring on the 3070) are done; see
    +0.13 / +0.55 / -0.57. Not shown to be a win where it matters (lifted, the
    default): kept selectable and off. Wrap waits reduced; no default-mode
    frame-time gain demonstrated.
+   **Retested with the faster solver** (2026-11-01, the state-aware fight
+   benchmark, tests/fight_bench.py; build/baselines/2026-11-01-fight-bench:
+   native collision and solver, can't-die, three runs each way, every segment
+   alive and in the river's area): a frame-time gain, in every run. Guest
+   frames over 18 ms 2.4% -> 0.5% (per run 2.3-2.7% -> 0.3-0.6%), over 20 ms
+   2.1% -> 0.3%, p99 23.4 -> 17.4 ms (17.4 in all three); present-call
+   completion intervals over 25 ms 0.38% -> 0.10%; the ring wait 0.16 -> 0.02
+   ms a frame. Physics frames at matched contact points over 18 ms: 32-45% ->
+   4-7%. The time did not move into queued work: frame start -> present
+   returned median 28.2 ms both ways (p90 30.7 -> 30.8), the walker's lag at
+   the flip 7.7 -> 7.8 ms median. Still experimental and off by default until
+   decided; its ring-safety checks (above) stand, and a run with normal damage
+   and one with lifted collision are still to do.
    **Solver, one command native** (docs/BULLET_NATIVE.md, "Solver structures,
    checked" and "Candidate"). The structures write-back uses were checked
    against captured steps, not taken from Bullet 2.74 -- the game's contact
@@ -622,9 +718,10 @@ tooling, the native Windows build, measuring on the 3070) are done; see
    `DOTHEROES_SOLVER_SERIAL=1` for a fixed cell order) and as itself (6,000
    rounds). Compute only, identical inputs: 64 against 252 us a round. On
    screen, only iterate switched: its phase 0.90-3.24 -> 0.24-0.67 ms a step
-   at matched contact points, steps 0.6-2.8 ms shorter; frames did not show
-   it (the native arm's fights were heavier, and it waited longer on the
-   command ring) -- gameplay effect not resolved. With all three native, the
+   at matched contact points, steps 0.6-2.8 ms shorter -- a demonstrated
+   physics-step speedup; frames did not show it (the native arm's fights were
+   heavier, and it waited longer on the command ring): the gameplay benefit
+   is unresolved. With all three native, the
    command-ring wait in a one-step physics frame (2.2 ms a frame) is about
    twice the main thread's physics wait (1.0 ms a step).
 10. **"Saving doesn't bring up the save menu"** (owner, 2026-10-31). It
@@ -674,6 +771,13 @@ tooling, the native Windows build, measuring on the 3070) are done; see
 | `DOTHEROES_NATIVE_SOLVER=<cmd>[,<cmd>]` | experimental, off: Bullet solver commands done natively -- 6 the warm-start write-back, 5 the copy-back, 4 iterate (docs/BULLET_NATIVE.md); separate from `DOTHEROES_NATIVE_CD` |
 | `DOTHEROES_NATIVE_SOLVER_CHECK=1` | each step's write-back compared, as its last task finishes, with what it must leave; the copy-back, as the write-back starts; each iterate round against the native iterate run on its inputs as it starts (then undone) |
 | `DOTHEROES_SOLVER_BENCH=<file>` | with the lifted commands: each step's native write-back, each copy-back task's and each iterate round's, timed on its own inputs (compute only), then undone (tests/solver_bench.py) |
+| `PS3_OSD_FPS=1\|2` | testing: frame-rate readout, window's top-right corner: fps, mean and longest frame of the last second; `2` adds a 120-frame frame-time graph (ps3recomp patch 0069) |
+| `DOTHEROES_DEV_KEYS=1` | testing, while the window has focus: F8 or L3+R3 marks a hitch ("MARK n", trace kind 22, `[mark]` log line); F7 cycles the readout; a drive script marks with `touch mark.trigger` |
+| `DOTHEROES_DEV_STATE=1` | testing: the game's state every 100 ms -- life (half apples), field area, camera target x/z, physics steps, can't-die top-ups -- in `<run>/state.txt` (`tests/drive.py` `state <cond> [timeout]`) and the trace (kind 23) |
+| `DOTHEROES_DEV_CANT_DIE=1\|<floor>,<refill>` | testing: no lethal damage -- the player's life floored (default: 8 half apples or less raised to 9; never full, so no sword beam); each top-up logged and counted. Report runs with it apart; recheck with normal damage |
+| `DOTHEROES_DEV_LIFE_LOG=1` | testing: every change of the player's life and the HUD's copies, logged |
+| `DOTHEROES_DEV_MEMSNAP=1` | testing: a drive script's `touch memsnap.trigger` writes all committed guest memory to `<run>/memsnap_<n>.bin` (game memory: local only; tests/native/find_state.cpp) |
+| `PPU_WWATCH=<hex ea>` | the runtime's store watch: every lifted PPU store to that 16-byte line, with the writing guest function (found the HUD's life writer) |
 | `VISIBLE=1`, `GRAB_EVERY=<s>` | tests/boot_smoke.py: an on-screen run -- refused on a locked desktop, stopped if it locks, the window is minimised/hidden, or another window covers more than a tenth of it for 3 s (a covered window ran at ~35 fps); guard.json has the foreground and covered shares; window grabs to grabs/ |
 | `TOPMOST=1` | tests/boot_smoke.py, with VISIBLE=1: the game's window kept above other windows without taking the focus |
 | `DOTHEROES_NATIVE_CD=<0-3>` | the Bullet collision task: lifted (default), native (experimental), check (native against lifted, `[native-cd]` lines), self-check (native against itself rounding toward zero); `DOTHEROES_NATIVE_CD_DUMP=n` prints differing manifolds, `DOTHEROES_NATIVE_CD_FP=rz` runs native toward zero (docs/BULLET_NATIVE.md) |
@@ -696,4 +800,4 @@ Edit in `build/ref/ps3recomp` (branch `dotheroes`), commit there as
 `git format-patch --start-number <next> -o ../../../patches/ps3recomp HEAD~<n>`
 and commit the patch files here. `tools/pipeline.py` refuses to run with
 uncommitted changes in that checkout, and re-applies the whole series when
-the patch files change. 59 patches as of this handoff.
+the patch files change. 69 patches (0001-0069) as of 2026-11-01.

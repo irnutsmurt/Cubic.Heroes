@@ -2,9 +2,14 @@
 
 Replacing 3D Dot Game Heroes' two Bullet SPU tasks with native code, one at a
 time. The collision task is done and experimental (`port/native/`, "The
-native collision task" below). The solver is profiled, and a native task for it
-is a candidate ("The solver: where a step's time goes",
-"Candidate"); not started.
+native collision task" below; its contact differences from the game's are
+open, tracked there). The solver is profiled ("The solver: where a step's
+time goes"), and three of its five commands run natively behind
+`DOTHEROES_NATIVE_SOLVER` (experimental, off by default; "Candidate"):
+write-back, copy-back and iterate, each matching the game's bit for bit.
+Iterate shortens a physics step by 0.6-2.8 ms at matched load; a gameplay
+(frame-time) benefit is not shown yet. Body setup and manifold setup stay
+lifted.
 The layouts below were read from guest-memory snapshots of one physics step in
 a fight (`SPURS_SNAP`, runtime patch; `tests/snap_read.py`) and live memory.
 Offsets are bytes, guest values big-endian, pointers 32-bit. Nothing here is
@@ -675,8 +680,21 @@ arms overlap (physics frames 16.85-17.90 against 16.52-17.34 ms). The native
 arm also waited longer for room in the command ring (20.3 s against 16.9 s in
 all; 2.23 against 2.16 ms in a one-step physics frame): its heavier scenes,
 or the time the solver no longer takes moving to that wait -- not separated.
-**Steps faster, gameplay effect not resolved.** Not extended with more noisy
+**A demonstrated physics-step speedup; the gameplay benefit is unresolved.** Not extended with more noisy
 runs: the cost on identical inputs is the bench above.
+
+**The native solver as a whole** (write-back, copy-back and iterate:
+`DOTHEROES_NATIVE_SOLVER=4,5,6`) against the lifted solver, on the
+state-aware fight benchmark (docs/HANDOFF.md, "Next steps" 0;
+build/baselines/2026-11-01-fight-bench: the location confirmed before
+measuring, can't-die, three runs each way, all alive and in the area
+throughout; native collision, default ring): steps 3.47 -> 1.55 ms; guest
+frames over 18 ms 6.4% -> 3.3%, p99 24.8 -> 22.0 ms; at matched contact
+points physics frames over 18 ms 34.6 / 41.8 / 70.6% -> 32.4 / 28.4 / 20.8%
+(1-100 / 101-250 / 251+ points); frame start to present unchanged (27.5 ->
+27.6 ms median). A frame-time gain for the three commands together, with the
+workloads matched (132 and 124 contact points a step); iterate alone was not
+switched on this benchmark.
 
 **Validation** (the plan; as done: write-back and copy-back compared field
 for field, iterate byte for byte, offline and in the game, above --
