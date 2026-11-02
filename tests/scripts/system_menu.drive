@@ -1,0 +1,59 @@
+# The system menu's other entries (START in play; SAVES=): SAVE, OPTIONS,
+# BESTIARY, LOADING ART -- each opened, looked at and left with CIRCLE (SAVE
+# saves at once and stays in the menu). RESUME, SAVE, LOAD, OPTIONS,
+# SNAPSHOT, ALBUM, BESTIARY, LOADING ART, TITLE. Screenshots step by step.
+log TitleMovie 120
+sleep 5
+press START
+sleep 3
+press START
+sleep 5
+press CROSS
+state life>0,area==17 60
+sleep 3
+press START                 # system menu, RESUME
+sleep 2
+press DOWN
+sleep 1
+press CROSS                 # SAVE: saves at once (the save list is headless), the menu stays on SAVE
+sleep 4
+shot save
+press DOWN
+sleep 1
+press DOWN
+sleep 1
+shot menu-options
+press CROSS                 # OPTIONS
+sleep 3
+shot options
+press CIRCLE
+sleep 3
+shot options-left
+press DOWN
+sleep 1
+press DOWN
+sleep 1
+press DOWN
+sleep 1
+shot menu-bestiary
+press CROSS                 # BESTIARY
+sleep 4
+shot bestiary
+press RIGHT
+sleep 2
+shot bestiary-right
+press CIRCLE
+sleep 3
+shot bestiary-left
+press DOWN
+sleep 1
+shot menu-loading-art
+press CROSS                 # LOADING ART
+sleep 4
+shot loading-art
+press RIGHT
+sleep 2
+shot loading-art-right
+press CIRCLE
+sleep 3
+shot left

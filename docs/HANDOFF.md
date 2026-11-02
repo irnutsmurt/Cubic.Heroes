@@ -616,9 +616,13 @@ tooling, the native Windows build, measuring on the 3070) are done; see
    (a display buffer, written back from the GPU first: it was black before)
    to a JPEG with the game's copyright line, exports it to
    `<data root>/dev_hdd0/photo`, and ALBUM imports the newest picture there
-   and shows it; with none it backs out to the title. Still a placeholder:
-   cellPngEnc (the game imports seven of its functions; what uses them is
-   not found yet -- BESTIARY, LOADING ART and OPTIONS are untested).
+   and shows it; with none it backs out to the title. The system menu's
+   SAVE saves at once (the headless save list; the menu stays open), OPTIONS
+   opens SOUND / SCREEN / TEXT, BESTIARY its card grid ("booked monsters 0"
+   on this save) and LOADING ART its gallery (0 of 105), each left with
+   CIRCLE (tests/scripts/system_menu.drive) -- no unresolved import on the
+   way. Still a placeholder: cellPngEnc (the game imports seven of its
+   functions; nothing tried so far uses them).
 8. Found by the owner playing on Windows (2026-10-30), the same with
    RSX_GEOM_CACHE=0: killing enemies left a bright flash that stayed a long
    time; enemies flashing after a hit were invisible; the water "not
