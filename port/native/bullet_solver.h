@@ -39,4 +39,17 @@ void writeback_task(uint8_t* base, uint32_t desc, const Sync& sync, Stats& st);
 struct Write { uint32_t ea, bits; };
 unsigned writeback_expected(const uint8_t* base, uint32_t desc, Write* out, unsigned max);
 
+// Command 5, the copy-back, for one task's range of bodies (descriptor +0x30
+// first, +0x34 count): for each body whose solver body has an inverse mass
+// above zero, the rigid body's linear and angular velocity, all four floats,
+// += the solver body's deltas, rounded toward zero with denormals as zero as
+// the SPU does (checked: the game's sums match that, not rounding to nearest);
+// every body's companion id set to -1. Returns the bodies done.
+unsigned copyback_task(uint8_t* base, uint32_t desc);
+
+// The same as the 9 words it leaves in each body (linear and angular velocity,
+// companion id), for checking: `out` gets body address, then the 9 words.
+struct BodyWords { uint32_t rb, w[9]; };
+unsigned copyback_expected(const uint8_t* base, uint32_t desc, BodyWords* out, unsigned max);
+
 }  // namespace bullet_solver

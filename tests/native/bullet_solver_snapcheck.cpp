@@ -4,6 +4,7 @@
 // as the next round or command was (port/native/bullet_solver_task.cpp).
 //
 //   bullet_solver_snapcheck writeback <c6r1.bin> <c6r2.bin> <descriptor ea>
+//   bullet_solver_snapcheck copyback <c5r1.bin> <c6r1.bin> <tasks.txt>
 //
 // Runs the write-back as one task claiming every cell (what the round does
 // when the other two tasks find nothing left: a schedule the game's allows),
@@ -64,10 +65,60 @@ static void expect(bool ok, const char* what, const char* detail)
     fails += !ok;
 }
 
+static void wr32(uint8_t* b, uint32_t ea, uint32_t v)
+{
+    b[ea] = (uint8_t)(v >> 24); b[ea + 1] = (uint8_t)(v >> 16); b[ea + 2] = (uint8_t)(v >> 8); b[ea + 3] = (uint8_t)v;
+}
+
+// copyback <c5r1.bin> <c6r1.bin> <tasks.txt>: each copy-back task's descriptor as
+// it was created (the capture's log; a later task's may not be in the first
+// snapshot yet) put back in place, the native copy-back run for every task, and
+// each body's first 0x200 bytes compared with the second snapshot.
+static int copyback(const char* pre_path, const char* post_path, const char* tasks)
+{
+    uint8_t* pre = load_space(pre_path);
+    uint8_t* post = load_space(post_path);
+    FILE* f = fopen(tasks, "r");
+    if (!f) { fprintf(stderr, "cannot read %s\n", tasks); return 2; }
+    char line[4096], buf[256];
+    std::vector<uint32_t> descs;
+    std::vector<std::vector<uint32_t>> words;
+    while (fgets(line, sizeof line, f)) {
+        unsigned slot, cmd, round, desc;
+        int at = 0;
+        if (sscanf(line, "task slot %u command %u round %u desc %x:%n", &slot, &cmd, &round, &desc, &at) != 4 || cmd != 5) continue;
+        std::vector<uint32_t> w;
+        const char* p = line + at;
+        for (int k = 0; k < 36; k++) { unsigned v; int used; if (sscanf(p, " %x%n", &v, &used) != 1) break; w.push_back(v); p += used; }
+        if (w.size() == 36) { descs.push_back(desc); words.push_back(w); }
+    }
+    fclose(f);
+    unsigned bodies = 0, same = 0, moved = 0;
+    std::vector<uint32_t> rbs;
+    for (size_t t = 0; t < descs.size(); t++) {
+        for (int k = 0; k < 36; k++) wr32(pre, descs[t] + 4 * k, words[t][k]);
+        std::vector<bullet_solver::BodyWords> want(bullet_solver::copyback_expected(pre, descs[t], nullptr, 0));
+        bullet_solver::copyback_expected(pre, descs[t], want.data(), (unsigned)want.size());
+        for (const auto& bw : want) {
+            rbs.push_back(bw.rb);
+            for (int k = 0; k < 8; k++) moved += bw.w[k] != rd32(pre, bw.rb + (k < 4 ? 0x130 : 0x140) + 4 * (k & 3));
+        }
+        bodies += bullet_solver::copyback_task(pre, descs[t]);
+    }
+    for (uint32_t rb : rbs) same += memcmp(pre + rb, post + rb, 0x200) == 0;
+    snprintf(buf, sizeof buf, "%u of %u bodies, first 0x200 bytes each (%u velocity floats changed); %zu tasks",
+             same, bodies, moved, descs.size());
+    expect(same == bodies && bodies > 0, "native copy-back = the game's, byte for byte", buf);
+    printf("[bullet_solver_snapcheck] %s (%d failed)\n", fails ? "FAIL" : "PASS", fails);
+    return fails ? 1 : 0;
+}
+
 int main(int argc, char** argv)
 {
+    if (argc == 5 && !strcmp(argv[1], "copyback")) return copyback(argv[2], argv[3], argv[4]);
     if (argc != 5 || strcmp(argv[1], "writeback")) {
-        fprintf(stderr, "usage: bullet_solver_snapcheck writeback <c6r1.bin> <c6r2.bin> <descriptor ea>\n");
+        fprintf(stderr, "usage: bullet_solver_snapcheck writeback <c6r1.bin> <c6r2.bin> <descriptor ea>\n"
+                        "       bullet_solver_snapcheck copyback <c5r1.bin> <c6r1.bin> <tasks.txt>\n");
         return 2;
     }
     uint8_t* pre = load_space(argv[2]);

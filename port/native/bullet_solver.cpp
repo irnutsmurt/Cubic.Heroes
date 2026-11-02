@@ -7,6 +7,7 @@
 
 #include <cstring>
 #include <thread>
+#include <xmmintrin.h>
 
 namespace bullet_solver {
 namespace {
@@ -112,6 +113,86 @@ unsigned writeback_expected(const uint8_t* base, uint32_t desc, Write* out, unsi
             n++;
         }
     }
+    return n;
+}
+
+namespace {
+
+// The copy-back's layouts (checked: tests/solver_copyback_layout.py)
+constexpr uint32_t kDescBodies = 0x14, kDescFirst = 0x30, kDescCount = 0x34, kDescRigidBodies = 0x38;
+constexpr uint32_t kSolverBodyBytes = 0x40, kDeltaLinear = 0x00, kDeltaAngular = 0x10, kInvMass = 0x24;
+constexpr uint32_t kRbLinearVelocity = 0x130, kRbAngularVelocity = 0x140, kRbCompanionId = 0xC4;
+
+// The SPU's single precision: rounding toward zero, denormals as zero. The
+// adds below use SSE with MXCSR set so; the compiler barriers keep them
+// between the mode's set and its restore.
+struct SpuRounding {
+    unsigned csr = _mm_getcsr();
+    SpuRounding() { _mm_setcsr(csr | 0x6000u | 0x8040u); __asm__ __volatile__("" ::: "memory"); }
+    ~SpuRounding() { __asm__ __volatile__("" ::: "memory"); _mm_setcsr(csr); }
+};
+
+inline uint32_t add_bits(uint32_t a, uint32_t b)
+{
+    float x, y;
+    memcpy(&x, &a, 4); memcpy(&y, &b, 4);
+    const float z = _mm_cvtss_f32(_mm_add_ss(_mm_set_ss(x), _mm_set_ss(y)));
+    uint32_t r;
+    memcpy(&r, &z, 4);
+    return r;
+}
+
+inline bool positive(uint32_t bits)   // > 0, denormals as zero
+{
+    float x;
+    memcpy(&x, &bits, 4);
+    return _mm_comigt_ss(_mm_set_ss(x), _mm_setzero_ps()) != 0;
+}
+
+template <class Out>
+unsigned copyback_range(const uint8_t* base, uint32_t desc, Out&& out)
+{
+    const uint32_t sbl = rd32(base, desc + kDescBodies), first = rd32(base, desc + kDescFirst);
+    const uint32_t n = rd32(base, desc + kDescCount), rbl = rd32(base, desc + kDescRigidBodies);
+    SpuRounding mode;
+    for (uint32_t i = first; i < first + n; i++) {
+        const uint32_t rb = rd32(base, rbl + 4 * i), sb = sbl + kSolverBodyBytes * i;
+        uint32_t w[9];
+        for (uint32_t k = 0; k < 4; k++) {
+            w[k] = rd32(base, rb + kRbLinearVelocity + 4 * k);
+            w[4 + k] = rd32(base, rb + kRbAngularVelocity + 4 * k);
+        }
+        if (positive(rd32(base, sb + kInvMass)))
+            for (uint32_t k = 0; k < 4; k++) {
+                w[k] = add_bits(w[k], rd32(base, sb + kDeltaLinear + 4 * k));
+                w[4 + k] = add_bits(w[4 + k], rd32(base, sb + kDeltaAngular + 4 * k));
+            }
+        w[8] = 0xFFFFFFFFu;
+        out(rb, w);
+    }
+    return n;
+}
+
+}  // namespace
+
+unsigned copyback_task(uint8_t* base, uint32_t desc)
+{
+    return copyback_range(base, desc, [base](uint32_t rb, const uint32_t* w) {
+        for (uint32_t k = 0; k < 4; k++) {
+            wr32(base, rb + kRbLinearVelocity + 4 * k, w[k]);
+            wr32(base, rb + kRbAngularVelocity + 4 * k, w[4 + k]);
+        }
+        wr32(base, rb + kRbCompanionId, w[8]);
+    });
+}
+
+unsigned copyback_expected(const uint8_t* base, uint32_t desc, BodyWords* out, unsigned max)
+{
+    unsigned n = 0;
+    copyback_range(base, desc, [&](uint32_t rb, const uint32_t* w) {
+        if (n < max) { out[n].rb = rb; memcpy(out[n].w, w, sizeof out[n].w); }
+        n++;
+    });
     return n;
 }
 

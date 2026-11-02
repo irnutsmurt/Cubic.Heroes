@@ -16,9 +16,10 @@
 // second round; then once more at the next collision task, after the step.
 // <prefix><step>_<n>_c<command>r<round>.bin, and <prefix><step>_tasks.txt with
 // DOTHEROES_NATIVE_SOLVER=<command>[,<command>...] (experimental) does those
-// commands here instead of the lifted image -- so far only 6, the warm-start
-// write-back (bullet_solver.cpp, on the game's structures as checked against
-// captured steps). A native task keeps the task's protocol: it waits for its
+// commands here instead of the lifted image -- so far 6, the warm-start
+// write-back, and 5, the copy-back of the solved velocities to the bodies
+// (bullet_solver.cpp, on the game's structures as checked against captured
+// steps). A native task keeps the task's protocol: it waits for its
 // slot's command, pops it, takes cells under the same spin lock and masks the
 // lifted tasks of the round use (so a lifted task beside it sees every claim),
 // and pushes its own completion; the PPU still creates three tasks a round and
@@ -26,7 +27,11 @@
 // another descriptor, runs lifted, counted. Every 5000 native tasks a
 // [native-solver] line counts them.
 //
-// DOTHEROES_NATIVE_SOLVER_CHECK=1: as each step's first write-back task is
+// DOTHEROES_NATIVE_SOLVER_CHECK=1 checks the copy-back too: what each copy-back
+// task must leave in its bodies (velocities, companion id) worked out as it is
+// created, compared as the step's first write-back task is (the copy-back is
+// done then, and nothing else writes the bodies in between).
+// And as each step's first write-back task is
 // created, what the write-back must leave -- min(3, applied impulse) in the
 // first float of each contact's 16 bytes, the other 12 untouched -- is worked
 // out from the inputs; as the step's last write-back task finishes, memory is
@@ -36,14 +41,16 @@
 // before the next collision task. A [native-solver] check line every 200 steps.
 //
 // DOTHEROES_SOLVER_BENCH=<file> (a measurement, for runs with the lifted
-// write-back): as each step's first write-back task is created -- the PPU in
+// commands): as each step's first write-back task is created -- the PPU in
 // CreateTask, no solver task running -- the native write-back is run on the
 // step's own inputs as one task claiming every cell, timed (best of 3), and
 // everything it changed put back (the cell masks and task rows, the spin
 // lock, each contact's 16 bytes), so the lifted tasks then do the step as
-// always. A line a step: the time on the frame trace's clock (us from its
-// base), contacts, cells, the native run's microseconds -- to set beside the
-// lifted write-back's phase for the same step in the trace (tests/solver_bench.py).
+// always; likewise each copy-back task's range of bodies as the task is
+// created (velocities and companion ids put back). A line each: the command,
+// the time on the frame trace's clock (us from its base), contacts or bodies,
+// cells, the native run's microseconds -- compute only, to set beside the
+// lifted command's dispatched phase for the same step (tests/solver_bench.py).
 //
 // The capture writes too every solver task created in the step: its slot, command, round, descriptor
 // address and bytes; and, for iterate and write-back, as each task starts and
@@ -224,7 +231,7 @@ void capture_on_create(uint32_t entry, const uint32_t arg[4])
 
 // ---- native commands (DOTHEROES_NATIVE_SOLVER)
 std::atomic<unsigned long long> g_ran_native{ 0 }, g_cells{ 0 }, g_contacts{ 0 }, g_waits{ 0 };
-std::atomic<unsigned long long> g_no_command{ 0 }, g_other_desc{ 0 };
+std::atomic<unsigned long long> g_no_command{ 0 }, g_other_desc{ 0 }, g_bodies{ 0 };
 
 // The command the PPU pushes right after CreateTask: wait for it a while
 // (the task may start before the push); past that the lifted task waits.
@@ -278,14 +285,15 @@ int native_command(uint32_t desc, uint32_t cmd, const uint32_t arg[4])
     bullet_solver::Stats st;
     const bullet_solver::Sync sync = { lock_acquire, lock_release };
     if (cmd == 6) bullet_solver::writeback_task(vm_base, desc, sync, st);
+    else if (cmd == 5) g_bodies += bullet_solver::copyback_task(vm_base, desc);
     check_task_done(cmd);   // before the PPU can see this task done
     while (!spurs_queue_spu_push(outq, entry)) std::this_thread::yield();
     g_cells += st.cells; g_contacts += st.contacts; g_waits += st.waits;
     const unsigned long long n = ++g_ran_native;
     if (n % 5000 == 0)
         fprintf(stderr, "[native-solver] %llu native tasks: %llu cells, %llu contacts written back, %llu waits for a "
-                "held cell; lifted instead: no command within 20 ms %llu, another descriptor %llu\n",
-                n, g_cells.load(), g_contacts.load(), g_waits.load(), g_no_command.load(), g_other_desc.load());
+                "held cell; %llu bodies copied back; lifted instead: no command within 20 ms %llu, another descriptor %llu\n",
+                n, g_cells.load(), g_contacts.load(), g_waits.load(), g_bodies.load(), g_no_command.load(), g_other_desc.load());
     return 1;
 }
 
@@ -343,9 +351,55 @@ void check_task_done(uint32_t cmd)   // a task's work is done (its thread), cmd 
     }
 }
 
+// The copy-back's check, on the PPU thread: expected words per body as each
+// copy-back task is created, compared as the first write-back task is.
+struct CopybackCheck {
+    std::vector<bullet_solver::BodyWords> expect;
+    unsigned long long steps = 0, bodies = 0, words_bad = 0, bodies_bad = 0;
+} g_cbk;
+
+void copyback_check(uint32_t cmd, uint32_t desc)
+{
+    CopybackCheck& c = g_cbk;
+    if (cmd == 5) {
+        const unsigned n = bullet_solver::copyback_expected(vm_base, desc, nullptr, 0);
+        const size_t at = c.expect.size();
+        c.expect.resize(at + n);
+        bullet_solver::copyback_expected(vm_base, desc, c.expect.data() + at, n);
+        return;
+    }
+    if (cmd != 6 || c.expect.empty()) return;
+    for (const auto& bw : c.expect) {
+        unsigned bad = 0;
+        for (uint32_t k = 0; k < 4; k++) {
+            bad += be32(vm_base + bw.rb + 0x130 + 4 * k) != bw.w[k];
+            bad += be32(vm_base + bw.rb + 0x140 + 4 * k) != bw.w[4 + k];
+        }
+        bad += be32(vm_base + bw.rb + 0xC4) != bw.w[8];
+        c.words_bad += bad;
+        c.bodies_bad += bad != 0;
+        static int shown = 0;
+        if (bad && shown < 8) {
+            shown++;
+            fprintf(stderr, "[native-solver] copy-back check: body %08X: %u of 9 words differ (linear x %08X, expected %08X)\n",
+                    bw.rb, bad, be32(vm_base + bw.rb + 0x130), bw.w[0]);
+        }
+    }
+    c.steps++;
+    c.bodies += c.expect.size();
+    c.expect.clear();
+    if (c.steps % 200 == 0 || (c.bodies_bad && c.steps < 20))
+        fprintf(stderr, "[native-solver] copy-back check (%s): %llu steps, %llu bodies: %llu bodies with a word not as expected (%llu words)\n",
+                g_native.count(5) ? "native" : "lifted", c.steps, c.bodies, c.bodies_bad, c.words_bad);
+}
+
 void check_on_create(uint32_t entry, const uint32_t arg[4])   // the PPU thread
 {
     Check& k = g_chk;
+    if (entry == kEntrySolver) {
+        const uint32_t d = desc_from_queue(arg[2], arg[0]);
+        if (d) copyback_check(be32(vm_base + d), d);
+    }
     if (entry == kEntryCollision && k.armed) {
         std::lock_guard<std::mutex> lk(k.mu);
         if (!k.compared) { k.late++; check_compare(); }
@@ -395,9 +449,34 @@ void bench_on_create(uint32_t entry, const uint32_t arg[4])
 {
     Bench& B = g_bench;
     if (entry == kEntryCollision) { B.done_this_step = false; return; }
-    if (entry != kEntrySolver || B.done_this_step) return;
+    if (entry != kEntrySolver) return;
     const uint32_t desc = desc_from_queue(arg[2], arg[0]);
-    if (!desc || be32(vm_base + desc) != 6) return;
+    if (desc && be32(vm_base + desc) == 5) {   // each copy-back task: its own range of bodies
+        const unsigned nb = bullet_solver::copyback_expected(vm_base, desc, nullptr, 0);
+        std::vector<bullet_solver::BodyWords> bw(nb);
+        bullet_solver::copyback_expected(vm_base, desc, bw.data(), nb);
+        std::vector<std::array<uint8_t, 36>> keep(nb);
+        for (unsigned i = 0; i < nb; i++) {
+            memcpy(keep[i].data(), vm_base + bw[i].rb + 0x130, 32);
+            memcpy(keep[i].data() + 32, vm_base + bw[i].rb + 0xC4, 4);
+        }
+        double best = 1e30;
+        const uint64_t t_at = ps3_ft_now();
+        for (int rep = 0; rep < 3; rep++) {
+            const uint64_t t0 = ps3_ft_now();
+            bullet_solver::copyback_task(vm_base, desc);
+            const uint64_t t1 = ps3_ft_now();
+            for (unsigned i = 0; i < nb; i++) {
+                memcpy(vm_base + bw[i].rb + 0x130, keep[i].data(), 32);
+                memcpy(vm_base + bw[i].rb + 0xC4, keep[i].data() + 32, 4);
+            }
+            best = std::min(best, (double)(t1 - t0) / 1000.0);
+        }
+        fprintf(B.f, "5 %.1f %u 0 %.2f\n", (double)(int64_t)(t_at - g_ps3_ft.base) / 1000.0, nb, best);
+        fflush(B.f);
+        return;
+    }
+    if (B.done_this_step || !desc || be32(vm_base + desc) != 6) return;
     B.done_this_step = true;
     const uint32_t hash = be32(vm_base + desc + 0x10), lock = be32(vm_base + desc + 0x30);
     const unsigned n = bullet_solver::writeback_expected(vm_base, desc, nullptr, 0);
@@ -426,7 +505,7 @@ void bench_on_create(uint32_t entry, const uint32_t arg[4])
         best = std::min(best, (double)(t1 - t0) / 1000.0);
         cells = st.cells;
     }
-    fprintf(B.f, "%.1f %u %u %.2f\n", (double)(int64_t)(t_at - g_ps3_ft.base) / 1000.0, n, cells, best);
+    fprintf(B.f, "6 %.1f %u %u %.2f\n", (double)(int64_t)(t_at - g_ps3_ft.base) / 1000.0, n, cells, best);
     fflush(B.f);   // the run ends with the process stopped: nothing buffered survives
 }
 
@@ -456,17 +535,19 @@ void bullet_solver_init(bool phys_stats)
     if (const char* e = getenv("DOTHEROES_NATIVE_SOLVER")) {
         for (const char* p = e; p && *p; p = strchr(p, ',') ? strchr(p, ',') + 1 : nullptr) {
             const unsigned c = (unsigned)strtoul(p, nullptr, 10);
-            if (c == 6) g_native.insert(c);
+            if (c == 5 || c == 6) g_native.insert(c);
             else fprintf(stderr, "[native-solver] command %u has no native version; it runs lifted\n", c);
         }
-        if (!g_native.empty()) fprintf(stderr, "[native-solver] native (experimental): the warm-start write-back\n");
+        if (!g_native.empty()) fprintf(stderr, "[native-solver] native (experimental):%s%s\n",
+                                       g_native.count(5) ? " the copy-back" : "", g_native.count(6) ? " the warm-start write-back" : "");
     }
     const char* ck = getenv("DOTHEROES_NATIVE_SOLVER_CHECK");
     g_chk.on = ck && *ck == '1';
     if (const char* bf = getenv("DOTHEROES_SOLVER_BENCH")) {
         g_bench.f = fopen(bf, "w");
         if (g_bench.f) {
-            fprintf(g_bench.f, "# t_us contacts cells native_writeback_us (best of 3, one task, the step's own inputs)\n");
+            fprintf(g_bench.f, "# command t_us items cells native_us (best of 3, the task's own inputs): 6 write-back, "
+                    "one task for every contact; 5 copy-back, each task's range of bodies\n");
             fflush(g_bench.f);
             if (g_native.count(6)) fprintf(stderr, "[native-solver] DOTHEROES_SOLVER_BENCH is for runs with the lifted write-back\n");
         }
