@@ -604,6 +604,14 @@ tooling, the native Windows build, measuring on the 3070) are done; see
    cost and catch-up. On identical inputs the native write-back's work takes
    0.5-1.8 us a step against the lifted phase's 504-784 us; its in-game phase,
    ~0.21 ms, is the PPU's issuing of 30 tasks. Gameplay benefit unresolved.
+   **Copy-back native** (`DOTHEROES_NATIVE_SOLVER=5`, experimental, off): its
+   layouts checked on four captured steps (the SPU rounds the velocity sums
+   toward zero, and so must native code); the same as the game's byte for byte
+   offline and in the game (32,005 + 21,768 bodies, none different). It cost
+   only 0.053 ms a step; the phase is now 0.01, a change too small to show in
+   frames (gameplay effect not resolved). Both native options stay
+   experimental; native collision's contact differences are unresolved and
+   tracked apart ("How close it is").
 10. **"Saving doesn't bring up the save menu"** (owner, 2026-10-31). It
     saved: the save-data module skips the PS3's system save list and takes
     the slot the title offers, so nothing appeared. A save now shows GAME
@@ -646,9 +654,9 @@ tooling, the native Windows build, measuring on the 3070) are done; see
 | `PS3RECOMP_ENG_NONE_TARGET=1` | a pass with colour target NONE binds the guest address again, as before the render-target fix (A/B) |
 | `DOTHEROES_PHYS_STATS=1` | each Bullet collision task's workload (pairs processed, awake bodies, contact points) as frame-trace kind 19 and [phys-stats] lines, either collision mode; each solver task's command as kind 20 (`tests/solver_breakdown.py`) |
 | `DOTHEROES_SOLVER_SNAP=<step>[,<step>]:<prefix>` | game memory as each solver command of the chosen steps starts, the tasks' descriptors, the lock and cell masks as tasks run (tests/solver_layout.py, tests/native/bullet_solver_snapcheck.cpp); ~1.4 GB a step, game memory: local only |
-| `DOTHEROES_NATIVE_SOLVER=6` | experimental, off: the Bullet solver's warm-start write-back done natively (docs/BULLET_NATIVE.md) |
-| `DOTHEROES_NATIVE_SOLVER_CHECK=1` | each step's write-back compared, as its last task finishes, with what it must leave |
-| `DOTHEROES_SOLVER_BENCH=<file>` | with the lifted write-back: each step's native write-back timed on the step's own inputs, then undone (tests/solver_bench.py) |
+| `DOTHEROES_NATIVE_SOLVER=<cmd>[,<cmd>]` | experimental, off: Bullet solver commands done natively -- 6 the warm-start write-back, 5 the copy-back (docs/BULLET_NATIVE.md); separate from `DOTHEROES_NATIVE_CD` |
+| `DOTHEROES_NATIVE_SOLVER_CHECK=1` | each step's write-back compared, as its last task finishes, with what it must leave; the copy-back, as the write-back starts |
+| `DOTHEROES_SOLVER_BENCH=<file>` | with the lifted commands: each step's native write-back, and each copy-back task's, timed on its own inputs (compute only), then undone (tests/solver_bench.py) |
 | `VISIBLE=1`, `GRAB_EVERY=<s>` | tests/boot_smoke.py: an on-screen run -- refused on a locked desktop, stopped if it locks, the window is minimised/hidden, or another window covers more than a tenth of it for 3 s (a covered window ran at ~35 fps); guard.json has the foreground and covered shares; window grabs to grabs/ |
 | `TOPMOST=1` | tests/boot_smoke.py, with VISIBLE=1: the game's window kept above other windows without taking the focus |
 | `DOTHEROES_NATIVE_CD=<0-3>` | the Bullet collision task: lifted (default), native (experimental), check (native against lifted, `[native-cd]` lines), self-check (native against itself rounding toward zero); `DOTHEROES_NATIVE_CD_DUMP=n` prints differing manifolds, `DOTHEROES_NATIVE_CD_FP=rz` runs native toward zero (docs/BULLET_NATIVE.md) |

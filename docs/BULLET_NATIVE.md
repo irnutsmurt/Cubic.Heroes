@@ -406,6 +406,9 @@ tasks finding nothing: all checks; one note, below). 71-302 contacts a step.
 | contact constraint | 0x90 bytes, three a contact (the contact, two friction rows); applied impulse +0x54; pointer back to the manifold point **+0x78** (2.74: +0x70); friction rows' pointer 0 | the pointer and impulse fields that name and give exactly the floats write-back pass 1 changed |
 | spin lock | libsync's ticket lock: +0 now serving, +2 next ticket, 16 bits each; 0/0 as a round starts, equal when released; one ticket a claim plus one last per task | read as tasks run (the lock is freed and its memory reused by the step's end) |
 | write-back | for each contact, the first float of the 16 bytes at its pointer = min(3, applied impulse); the other 12 bytes untouched; every contact names its own 16 bytes | pass 1's changes in the snapshots; after pass 10 in the running game (`DOTHEROES_NATIVE_SOLVER_CHECK=1`, compared as the step's last write-back task finishes): 21,647 contacts in 200 steps all as pass 1 leaves them -- passes 2-10 rewrite the same values (redundant: shown, not relied on; all ten still run) |
+| solver body (copy-back) | 0x40 bytes, as many as the descriptor's bodies: linear velocity delta +0x0, angular +0x10 (4 floats each), inverse mass +0x24 (2.74's layout) | the layout under which every changed velocity float is the old one plus the delta (tests/solver_copyback_layout.py) |
+| rigid body (copy-back) | the game's 2.73 btRigidBody, by the descriptor's pointer list (+0x38): linear velocity +0x130, angular velocity +0x140 (4 floats each, the 4th added too), companion id +0xC4 (set to -1); nothing else in its first 0x200 bytes changes | the bytes that changed between the copy-back's start and the write-back's |
+| copy-back arithmetic | velocity + delta in single precision **rounded toward zero** (the SPU's), only where the inverse mass is above zero; a body with deltas too small to change a sum so rounded stays as it was | 318 of 318 changed floats match toward zero, 244 to nearest (step 300); four steps |
 
 After the solver, before the next step's collision tasks, the game changes a
 few of those 16-byte targets again (2 of 71 contacts in captured step 1; 116
@@ -480,7 +483,8 @@ lock init, its count of completions) stays as it is.
    still to do for `btSolverBody`, the rest of `btSolverConstraint`, the
    manifold and constraint cell holders, and the `btRigidBody` fields body
    setup and copy back touch.
-2. Write-back natively -- done (below); copy back and body setup next.
+2. Write-back natively -- done (below); copy-back done (below); body setup
+   next.
 3. Manifold setup (deterministic per task).
 4. Iterate.
 
@@ -559,6 +563,33 @@ remove. **Gameplay benefit: unresolved.** At matched load physics frames were
 0.1-1.3 ms shorter (the phase gives back 0.5-1.2 ms a step, 1.1-1.4 steps a
 physics frame), in four fights an arm; over whole fights the difference is
 within what one fight differs from the next.
+
+**Copy-back** (`DOTHEROES_NATIVE_SOLVER=5`, with 6 as `5,6`; experimental, off
+by default). Its cost before: 0.053 ms a step (1.2 tasks of up to 64 bodies;
+the main thread waiting 0.043 of it) -- at most that to gain, below what a
+frame comparison resolves; done for what it checks (the solver body and rigid
+body layouts body setup and iterate need too) as much as for time. Each
+native task takes its range of bodies (+0x30, +0x34), adds the solver body's
+deltas to the rigid body's velocities rounded toward zero as the SPU does --
+rounding to nearest would have matched only 65-77% of the changed floats --
+and sets the companion id to -1. Checked: the layouts on four captured steps
+(tests/solver_copyback_layout.py); offline on the same captured inputs, the
+native copy-back = the game's byte for byte (56-64 bodies a step, the first
+0x200 bytes of each; all four steps had one copy-back task); in the game, the
+native model against the lifted copy-back (`DOTHEROES_NATIVE_SOLVER_CHECK=1`,
+compared as the first write-back task is created: 32,005 bodies in 400 steps,
+none different) and the native copy-back as itself (21,768 bodies, none).
+Compute only, on identical inputs (`DOTHEROES_SOLVER_BENCH`, 698 tasks): the
+native copy-back 0.2-0.9 us a task; the lifted task as dispatched 39-50 us,
+nearly the same for 1 or 64 bodies -- its cost is the task's own overhead.
+In the game, dispatched (build/baselines/2026-11-01-native-copyback; on screen,
+native collision, default ring, native write-back with all ten rounds in both
+arms, only copy-back switched, three fight runs an arm): the copy-back phase
+0.06 -> 0.01 ms a step, its tasks 49.5 -> 3.3 us. Steps at matched contact
+points differed by -0.13 to +0.35 ms (iterate differing with the fights; the
+copy-back arm ran more catch-up steps, 18% of physics frames against 10%), and
+physics frames at matched load by +0.05 to +1.06 ms the other way -- a change of
+0.05 ms a step does not show through that; **gameplay effect not resolved**.
 
 **Validation.**
 - Captured inputs: `SPURS_SNAP` extended to take guest memory before a
