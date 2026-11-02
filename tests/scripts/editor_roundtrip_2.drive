@@ -1,0 +1,20 @@
+# Editor round trip, session B on the root editor_roundtrip_1.drive saved
+# into: EDITOR -> LOAD, the character saved there, its Stand pose.
+log TitleMovie 120
+sleep 5
+press START
+sleep 3
+press DOWN
+sleep 1
+press CROSS                 # EDITOR -> LOAD / NEW DATA, on LOAD
+sleep 4
+press CROSS                 # LOAD: the save list (headless: the saved character)
+sleep 5
+shot loaded
+press CROSS                 # EDIT -> EDIT POSE
+sleep 3
+press CROSS                 # EDIT POSE -> select a pose, on Stand
+sleep 3
+press CROSS                 # Stand -> the block grid
+sleep 3
+shot grid

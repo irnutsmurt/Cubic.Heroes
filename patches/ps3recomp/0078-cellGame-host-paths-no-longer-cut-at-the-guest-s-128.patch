@@ -1,0 +1,102 @@
+From 464f3db853fa6502189dfa992f438ca8ac573803 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Mon, 2 Nov 2026 07:38:22 -0800
+Subject: [PATCH] cellGame: host paths no longer cut at the guest's 128
+ characters
+
+The content root, the content's info, USRDIR and temp directories and the
+paths built from them are host paths, but were held in buffers of the
+guest's CELL_GAME_PATH_MAX (128). A data root deeper than ~110 characters
+lost its /game: 3D Dot Game Heroes then found its game data in the wrong
+directory and exited at boot. They are 1024 bytes now; the paths handed to
+the guest (/dev_hdd0/game/...) keep CELL_GAME_PATH_MAX.
+---
+ libs/system/cellGame.c | 25 +++++++++++++++----------
+ 1 file changed, 15 insertions(+), 10 deletions(-)
+
+diff --git a/libs/system/cellGame.c b/libs/system/cellGame.c
+index 47dfbbe..e1fc3cc 100644
+--- a/libs/system/cellGame.c
++++ b/libs/system/cellGame.c
+@@ -57,7 +57,12 @@ static char s_app_ver[16]   = "01.00";
+  *
+  * The literal below is only the fallback for a host with no VFS configured;
+  * content_root() resolves the real one on first use. */
+-static char s_content_path[CELL_GAME_PATH_MAX] = "./gamedata/dev_hdd0/game";
++/* Host paths: as long as the host's own, not the guest's CELL_GAME_PATH_MAX (128).
++ * A data root deeper than ~110 characters was cut there, and with it /game:
++ * 3D Dot Game Heroes then took the wrong directory for its game data and
++ * exited at boot. Paths handed to the guest stay CELL_GAME_PATH_MAX. */
++#define GAME_HOST_PATH_MAX 1024
++static char s_content_path[GAME_HOST_PATH_MAX] = "./gamedata/dev_hdd0/game";
+ static int  s_content_path_resolved = 0;
+ 
+ /* Resolved the same way ppu_fs.cpp resolves the /dev_hdd0 mount: $PS3_HDD0_ROOT
+@@ -83,9 +88,9 @@ static const char* content_root(void)
+     }
+     return s_content_path;
+ }
+-static char s_content_info_path[CELL_GAME_PATH_MAX] = "";
+-static char s_usrdir_path[CELL_GAME_PATH_MAX] = "";
+-static char s_tmp_path[CELL_GAME_PATH_MAX] = "";
++static char s_content_info_path[GAME_HOST_PATH_MAX] = "";
++static char s_usrdir_path[GAME_HOST_PATH_MAX] = "";
++static char s_tmp_path[GAME_HOST_PATH_MAX] = "";
+ static char s_exit_param[256] = "";
+ 
+ static int  s_boot_checked = 0;
+@@ -102,7 +107,7 @@ static char s_check_dir[64] = "";
+ 
+ static void ensure_dirs(const char* path)
+ {
+-    char tmp[CELL_GAME_PATH_MAX];
++    char tmp[GAME_HOST_PATH_MAX];
+     strncpy(tmp, path, sizeof(tmp) - 1);
+     tmp[sizeof(tmp) - 1] = '\0';
+ 
+@@ -133,7 +138,7 @@ static int dir_exists(const char* path)
+  * so installation checks use the destination volume, without creating data. */
+ static s32 content_free_kb(void)
+ {
+-    char path[CELL_GAME_PATH_MAX];
++    char path[GAME_HOST_PATH_MAX];
+     snprintf(path, sizeof(path), "%s", s_content_path[0] ? s_content_path : ".");
+     for (;;) {
+ #ifdef _WIN32
+@@ -412,7 +417,7 @@ s32 cellGameContentPermit(char* contentInfoPath, char* usrdirPath)
+         ensure_dirs(s_usrdir_path);
+         {
+             extern const char* ppu_vfs_root;
+-            char vpath[CELL_GAME_PATH_MAX];
++            char vpath[GAME_HOST_PATH_MAX];
+             snprintf(vpath, sizeof vpath, "%s/game/%s/USRDIR", ppu_vfs_root, s_check_dir);
+             ensure_dirs(vpath);
+         }
+@@ -456,7 +461,7 @@ s32 cellGameDataCheck(u32 type, const char* dirName, CellGameContentSize* size)
+     strncpy(s_check_dir, check_dir, sizeof(s_check_dir) - 1);
+     s_check_dir[sizeof(s_check_dir) - 1] = '\0';
+ 
+-    char path[CELL_GAME_PATH_MAX];
++    char path[GAME_HOST_PATH_MAX];
+     snprintf(path, sizeof(path), "%s/%s", content_root(), check_dir);
+ 
+     uint32_t size_ea = (uint32_t)(uintptr_t)size;
+@@ -735,13 +740,13 @@ s32 cellGameCreateGameData(CellGameSetInitParams* init, char* tmp_contentInfoPat
+      * precedes this call, which is exactly what firmware creates. */
+     const char* create_dir = s_check_dir[0] ? s_check_dir : s_title_id;
+ 
+-    char path[CELL_GAME_PATH_MAX];
++    char path[GAME_HOST_PATH_MAX];
+     snprintf(path, sizeof(path), "%s/%s", content_root(), create_dir);
+ 
+     ensure_dirs(path);
+ 
+     /* Also create USRDIR */
+-    char usrdir[CELL_GAME_PATH_MAX];
++    char usrdir[GAME_HOST_PATH_MAX];
+     snprintf(usrdir, sizeof(usrdir), "%s/USRDIR", path);
+     ensure_dirs(usrdir);
+ 
+-- 
+2.56.0.windows.3
+

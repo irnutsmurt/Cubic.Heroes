@@ -1,0 +1,41 @@
+# Restart round trips, session 2 of 3, on the root roundtrip_1.drive installed
+# into: CONTINUE into play (FS_READ_PATH=1 names each file's source, the
+# installed copy after the game's data check), east into the river's area (an
+# area load), and a SNAPSHOT there.
+log TitleMovie 120
+sleep 5
+press START
+sleep 3
+press START                 # CONTINUE
+sleep 5
+press CROSS                 # "Change characters?" NO
+state life>0,area==17 90
+sleep 3
+hold RIGHT 4                # east along fight_bench.drive's route
+hold DOWN 1.5
+hold RIGHT 3
+hold RIGHT 4
+hold RIGHT 4
+hold RIGHT 2.5
+hold UP 1.5
+hold RIGHT 2
+state area==18,life>0 20
+sleep 2
+shot river
+press START                 # system menu, RESUME
+sleep 2
+press DOWN
+sleep 1
+press DOWN
+sleep 1
+press DOWN
+sleep 1
+press DOWN
+sleep 1
+press CROSS                 # SNAPSHOT
+sleep 3
+press CROSS                 # shutter
+sleep 4
+shot snapped
+press CIRCLE
+sleep 2

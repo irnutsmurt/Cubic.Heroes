@@ -1,0 +1,28 @@
+# Restart round trips, session 3 of 3: CONTINUE into play, then the system
+# menu's ALBUM, which should show the snapshot session 2 took at the river.
+log TitleMovie 120
+sleep 5
+press START
+sleep 3
+press START                 # CONTINUE
+sleep 5
+press CROSS                 # "Change characters?" NO
+state life>0,area==17 90
+sleep 3
+press START                 # system menu, RESUME
+sleep 2
+press DOWN
+sleep 1
+press DOWN
+sleep 1
+press DOWN
+sleep 1
+press DOWN
+sleep 1
+press DOWN
+sleep 1
+press CROSS                 # ALBUM
+sleep 5
+shot album
+press CIRCLE
+sleep 3

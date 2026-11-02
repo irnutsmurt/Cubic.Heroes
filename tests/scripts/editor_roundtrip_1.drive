@@ -1,0 +1,64 @@
+# Editor round trip, session A (GAMEDATA=<a persistent root with saves>): a
+# new character, a small red shape placed on its Stand pose, then SAVE (edit
+# data, with the character's icon). Session B (editor_roundtrip_2.drive) loads
+# it after a restart. With saves the title menu's cursor starts on CONTINUE.
+log TitleMovie 120
+sleep 5
+press START
+sleep 3
+press DOWN
+sleep 1
+press CROSS                 # EDITOR -> LOAD / NEW DATA
+sleep 4
+press DOWN
+sleep 1
+press CROSS                 # NEW DATA
+sleep 3
+press CROSS                 # MALE
+sleep 3
+press CROSS                 # HERO -> the editor, on EDIT
+sleep 4
+press CROSS                 # EDIT -> EDIT POSE
+sleep 3
+press CROSS                 # EDIT POSE -> select a pose, on Stand
+sleep 3
+press CROSS                 # Stand -> the block grid
+sleep 3
+press CROSS                 # a block at the cursor
+sleep 1
+press RIGHT
+sleep 1
+press CROSS
+sleep 1
+press RIGHT
+sleep 1
+press CROSS
+sleep 1
+press UP
+sleep 1
+press CROSS
+sleep 1
+press LEFT
+sleep 1
+press CROSS
+sleep 1
+press LEFT
+sleep 1
+press CROSS
+sleep 2
+shot grid
+press CIRCLE                # back to the poses
+sleep 2
+press CIRCLE                # back to EDIT POSE ...
+sleep 2
+shot drawn
+press CIRCLE                # back to EDIT / SETTING / SAVE / PREVIEW
+sleep 2
+press DOWN
+sleep 1
+press DOWN
+sleep 1
+shot menu-save
+press CROSS                 # SAVE
+sleep 5
+shot saved

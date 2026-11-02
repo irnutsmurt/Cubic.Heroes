@@ -1,0 +1,21 @@
+# Restart round trips, session 1 of 3 (GAMEDATA=<a persistent root with
+# saves>): INSTALL from the title menu. Session 2 (roundtrip_2.drive) plays
+# from the installed data and takes a snapshot; session 3 (roundtrip_3.drive)
+# finds the snapshot in ALBUM. With saves the title menu's cursor starts on
+# CONTINUE: NEW GAME, CONTINUE, EDITOR, ALBUM, INSTALL.
+log TitleMovie 120
+sleep 5
+press START                 # "PRESS START BUTTON" -> title menu, CONTINUE
+sleep 3
+press DOWN
+sleep 1
+press DOWN
+sleep 1
+press DOWN
+sleep 1
+shot menu-install
+press CROSS                 # INSTALL (the yes/no question is answered YES by the runtime)
+sleep 5
+shot installing
+sleep 40
+shot after-install          # back at the title (or its demo)
