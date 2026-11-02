@@ -1,0 +1,34 @@
+# The dot editor's SAVE (EDITOR -> NEW DATA -> MALE -> HERO -> the editor,
+# EDIT / SETTING / SAVE / PREVIEW): what saving an edited character calls.
+# With a save (SAVES=) the title menu's cursor starts on CONTINUE.
+log TitleMovie 120
+sleep 5
+press START
+sleep 3
+press DOWN
+sleep 1
+press CROSS                 # EDITOR -> LOAD / NEW DATA
+sleep 4
+press DOWN
+sleep 1
+press CROSS                 # NEW DATA -> gender
+sleep 3
+press CROSS                 # MALE -> class
+sleep 3
+press CROSS                 # HERO -> the editor, on EDIT
+sleep 4
+shot editor
+press DOWN
+sleep 1
+press DOWN
+sleep 1
+shot editor-save
+press CROSS                 # SAVE
+sleep 4
+shot save-1
+press CROSS
+sleep 4
+shot save-2
+press CROSS
+sleep 4
+shot save-3

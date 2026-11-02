@@ -299,7 +299,13 @@ your local notes, never in this public repo):
   or RenderDoc and compare pass by pass with ours. Its firmware and files
   must never enter this repo or a release. For stability it needs
   *Advanced -> PPU Event Wake-Up Delay = 35* (its fix for this game's
-  random crashes).
+  random crashes). Window grabs of it without touching its settings:
+  `tests/rpcs3_capture.py <rpcs3 dir> <game> <out dir> --config <copy>`,
+  where the copy is the game's RPCS3 config with fullscreen off, resolution
+  scale 100 and `Shader Mode: Async Recompiler (multi-threaded)` -- with
+  the interpreter mode RPCS3 first builds ~6,650 shader variants (over an
+  hour) and shows only its boot splash; a first boot still spends minutes
+  loading its cached pipelines.
 - **Saves past the opening**, made by the owner, so testing can skip it.
   RPCS3 and the port use the same layout,
   `dev_hdd0/home/00000001/savedata/<save folder>`: copy a save folder into
@@ -621,8 +627,16 @@ tooling, the native Windows build, measuring on the 3070) are done; see
    opens SOUND / SCREEN / TEXT, BESTIARY its card grid ("booked monsters 0"
    on this save) and LOADING ART its gallery (0 of 105), each left with
    CIRCLE (tests/scripts/system_menu.drive) -- no unresolved import on the
-   way. Still a placeholder: cellPngEnc (the game imports seven of its
-   functions; nothing tried so far uses them).
+   way. **The dot editor's SAVE fixed** (patch 0076; tests/scripts/
+   editor_save.drive): it encodes the save's icon with cellPngEnc, which
+   was a placeholder, and stopped there. Now the icon (320x176, the EDIT
+   card with the logo, from a GPU surface written back) and DATA.EDT are
+   saved as edit data (`BLJM60180T...`, the game's edit-data prefix).
+   **Colour reference:** an automated RPCS3 capture (tests/rpcs3_capture.py)
+   did not reach the game in 10 minutes -- RPCS3 was still preloading its
+   cached pipelines (48 of 126), showing only its splash. Let RPCS3 finish
+   that once interactively, then captures can compare the title and the
+   field for the washed-out colours and the swirl (item 6).
 8. Found by the owner playing on Windows (2026-10-30), the same with
    RSX_GEOM_CACHE=0: killing enemies left a bright flash that stayed a long
    time; enemies flashing after a hit were invisible; the water "not
@@ -1019,4 +1033,4 @@ Edit in `build/ref/ps3recomp` (branch `dotheroes`), commit there as
 `git format-patch --start-number <next> -o ../../../patches/ps3recomp HEAD~<n>`
 and commit the patch files here. `tools/pipeline.py` refuses to run with
 uncommitted changes in that checkout, and re-applies the whole series when
-the patch files change. 75 patches (0001-0075) as of 2026-11-02.
+the patch files change. 76 patches (0001-0076) as of 2026-11-02.
