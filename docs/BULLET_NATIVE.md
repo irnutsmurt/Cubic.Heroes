@@ -409,6 +409,9 @@ tasks finding nothing: all checks; one note, below). 71-302 contacts a step.
 | solver body (copy-back) | 0x40 bytes, as many as the descriptor's bodies: linear velocity delta +0x0, angular +0x10 (4 floats each), inverse mass +0x24 (2.74's layout) | the layout under which every changed velocity float is the old one plus the delta (tests/solver_copyback_layout.py) |
 | rigid body (copy-back) | the game's 2.73 btRigidBody, by the descriptor's pointer list (+0x38): linear velocity +0x130, angular velocity +0x140 (4 floats each, the 4th added too), companion id +0xC4 (set to -1); nothing else in its first 0x200 bytes changes | the bytes that changed between the copy-back's start and the write-back's |
 | copy-back arithmetic | velocity + delta in single precision **rounded toward zero** (the SPU's), only where the inverse mass is above zero; a body with deltas too small to change a sum so rounded stays as it was | 318 of 318 changed floats match toward zero, 244 to nearest (step 300); four steps |
+| iterate: a cell's bodies | the cell's u32 index list at descriptor +0x20 + 4 x cell +2, cell +0 entries, each a solver body at +0x14 + 0x40 x index; copied in, solved, every one written back whole | tests/solver_iterate_layout.py: bodies no list names unchanged; only the deltas' x, y, z (+0x0..+0x8, +0x10..+0x18) change, never in a body of zero inverse mass (+0x24) |
+| iterate: a row | relpos1 x normal +0x0, normal +0x10, relpos2 x normal +0x20, angular components A +0x30 and B +0x40, impulse +0x54, body ids (local to the cell's list) +0x58 / +0x5C (2.74: +0x68 / +0x6C), friction +0x60, 1 / jacobian diagonal +0x68, rhs +0x7C, cfm +0x80, limits +0x84 / +0x88; angular factor of a solver body +0x20 | the lifted row solve (SPU 0x3DB8-0x4258) read field by field; in the data: a round changes a normal row's impulse only, a friction row's impulse and limits only; the ids index the cell's list, the same in a contact's three rows |
+| iterate: a round | per cell, in packets of (0x25800 - the index list rounded to 16 - 0x40 x bodies) / 0x1B0 contacts: every normal row, then each contact's two friction rows with limits friction x -/+ the contact's impulse; each row solved in the SPU's single precision (truncation, denormals as zero) in the task's own order of operations; typed constraints loaded and stored unchanged | friction limits after a round = friction x -/+ impulse truncated, every row; the native iterate on captured rounds = the game's, byte for byte (below) |
 
 After the solver, before the next step's collision tasks, the game changes a
 few of those 16-byte targets again (2 of 71 contacts in captured step 1; 116
@@ -422,7 +425,7 @@ row set to that cell's dependencies, the cell's processed bit set; a round ends
 with every cell processed, every row clear and the lock released) matches
 Bullet 2.74's getNextFreeCell on everything the captures show.
 
-## Candidate: a native solver task (started: write-back)
+## Candidate: a native solver task (done: write-back, copy-back, iterate)
 
 A candidate for the solver's share of slow frames, to be weighed against the
 other contributors once they are measured -- not an established requirement.
@@ -483,10 +486,9 @@ lock init, its count of completions) stays as it is.
    still to do for `btSolverBody`, the rest of `btSolverConstraint`, the
    manifold and constraint cell holders, and the `btRigidBody` fields body
    setup and copy back touch.
-2. Write-back natively -- done (below); copy-back done (below); body setup
-   next.
-3. Manifold setup (deterministic per task).
-4. Iterate.
+2. Write-back natively -- done (below); copy-back done (below).
+3. Iterate -- done (below); body setup turned out not to be needed first.
+4. Manifold setup (deterministic per task), body setup.
 
 **Done so far: write-back** (`DOTHEROES_NATIVE_SOLVER=6`, experimental, off by
 default; port/native/bullet_solver.cpp). Each native task waits for its slot's
@@ -591,7 +593,96 @@ copy-back arm ran more catch-up steps, 18% of physics frames against 10%), and
 physics frames at matched load by +0.05 to +1.06 ms the other way -- a change of
 0.05 ms a step does not show through that; **gameplay effect not resolved**.
 
-**Validation.**
+**Iterate** (`DOTHEROES_NATIVE_SOLVER=4`, with the others as `4,5,6`;
+experimental, off by default). What it is in the game, mapped from the lifted
+task (the row solve at SPU 0x3DB8-0x4258, the loops at 0x8770 and 0x87D0, the
+packet size at 0x85DC / 0x31F8) and checked in captured steps ("Solver
+structures, checked"):
+- *Rounds and completion.* Ten rounds a step, the PPU creating three tasks a
+  round and waiting for all three before it resets the cell masks and the
+  ticket lock for the next (the barrier). A native task keeps that protocol as
+  the write-back's does: its slot's command popped, cells claimed under the
+  same lock and masks, its own completion pushed; the ten rounds and the
+  PPU's side are unchanged.
+- *Inputs, outputs.* Per claimed cell: its index list (descriptor +0x20) into
+  the solver bodies (+0x14), the bodies copied in and every one written back
+  whole; its contact rows (+0x18, three a contact), of which a round writes
+  the impulse (+0x54) of every row and the limits (+0x84, +0x88) of the
+  friction rows; its typed constraints loaded and stored back unchanged.
+  Nothing else.
+- *Order.* In a cell, contacts in packets the local store allows; in a packet,
+  every contact's normal row, then each contact's two friction rows with
+  limits friction x -/+ the contact's impulse as the normal rows left it. Each
+  row in the task's own order of operations in the SPU's single precision
+  (the runtime's exact helpers, spu_helpers.h: truncation, denormals as zero,
+  the SPU's compares) -- bit for bit what the lifted task computes. Between
+  cells: two cells listing the same body depend on each other (the matrix
+  keeps them apart in time), and which goes first decides the result; one task
+  alone takes the cells in index order, a schedule the protocol allows. The
+  lifted round races three tasks for the cells; `DOTHEROES_SOLVER_SERIAL=1`
+  makes them take turns, which gives that index order for reference. In the
+  game three native tasks race the same way (how the cells split between
+  them is not measured; the check below finds the result unchanged).
+- *Body setup* is not needed first: iterate reads the solver bodies and rows
+  the lifted setup and manifold setup leave, as they are. Deferred.
+
+Checked, the same as the game's, bit for bit:
+- offline, on identical captured inputs (tests/native/bullet_solver_snapcheck.cpp
+  iterate; build/baselines/2026-11-01-native-iterate/analysis): three steps of
+  2-26 cells and 71-201 contacts (4-44 between two moving bodies), one round
+  and all ten; two steps chosen for a body in two cells' lists
+  (`DOTHEROES_SOLVER_SNAP_SHARED`, the lifted tasks taking turns; 2 and 4
+  cells, 249 and 93 contacts, 226 and 68 between moving bodies, 7 and 3 shared
+  bodies), each of the ten rounds from its own snapshot and all ten from the
+  first: every solver body (0x40 bytes) and every contact row (0x90 bytes).
+  Nine rounds against the ten-round result fails, as it must.
+- in the game (`DOTHEROES_NATIVE_SOLVER_CHECK=1`: each round's result against
+  the native iterate run on that round's inputs as it starts): the lifted
+  tasks taking turns, 14,000 rounds (1,400 steps, two runs); as usual, 2,000
+  rounds; none different, with 69 bodies in two cells' lists over 34 steps
+  and one cell larger than a packet among them. The native iterate itself,
+  6,000 rounds (600 steps): none different from the model (309 times a native
+  task waited for a cell another held).
+- over repeated steps: in the native run every round of every step matched the
+  model on that step's own inputs, so step after step the native iterate does
+  what one lifted task taking the cells in index order would, and no
+  difference can build up from step to step. The run's workload stayed with
+  the lifted check runs' (109 contacts a step against 92-108); window grabs
+  of the A/B below show nothing out of place.
+
+Compute only, on identical inputs (`DOTHEROES_SOLVER_BENCH`, 3,660 rounds):
+the native iterate as one task 64 us a round (median; 70 us at 201-400
+contacts a step); the lifted round as dispatched 252 us (275), its slowest
+task about the whole round and the three tasks' CPU 716 us (the two without
+work spin on the lock until every cell is processed).
+
+In the game, dispatched (build/baselines/2026-11-01-native-iterate-ab; on
+screen, river fights, native collision, native copy-back and write-back with
+all ten rounds, default ring in both arms, only iterate switched; four fight
+runs an arm, one run without a physics step and three that ran beside a trace
+analysis set apart): at matched contact points the iterate phase went from
+0.90, 1.27, 1.53, 1.98, 3.24 to 0.24, 0.35, 0.44, 0.53, 0.67 ms a step (1-50
+to 251+ points), the whole step from 1.67-5.02 to 1.08-2.27 ms, the main
+thread's wait from 1.06-4.23 to 0.43-1.58 ms; iterate's task runs 129 -> 28 us
+(median). Catch-up about the same (22.7% of physics frames with 2+ steps
+against 23.6%). The fights were not alike: the native arm's had 159 contact
+points a step against 109 (78 awake bodies against 56; per run 103-216
+against 97-119), and frames did not follow the steps. Physics frames at
+matched points: 17.14, 17.30, 16.65 ms (native) against 16.92, 16.89, 17.56
+(guest frames; 1-100, 101-250, 251+ points), present-call completion
+intervals over 25 ms 1.5, 3.1, 3.7% against 0.5, 2.0, 10.3%; per run the two
+arms overlap (physics frames 16.85-17.90 against 16.52-17.34 ms). The native
+arm also waited longer for room in the command ring (20.3 s against 16.9 s in
+all; 2.23 against 2.16 ms in a one-step physics frame): its heavier scenes,
+or the time the solver no longer takes moving to that wait -- not separated.
+**Steps faster, gameplay effect not resolved.** Not extended with more noisy
+runs: the cost on identical inputs is the bench above.
+
+**Validation** (the plan; as done: write-back and copy-back compared field
+for field, iterate byte for byte, offline and in the game, above --
+`DOTHEROES_SOLVER_SERIAL` is the switch that serializes the iterate tasks,
+`DOTHEROES_NATIVE_SOLVER_CHECK` the check mode; the native results matched
+exactly, so there were no numeric differences to bound).
 - Captured inputs: `SPURS_SNAP` extended to take guest memory before a
   command's first task and after its last, in capture runs whose solver
   tasks run one at a time (a switch that serializes image 5, so the lifted
@@ -609,8 +700,12 @@ physics frames at matched load by +0.05 to +1.06 ms the other way -- a change of
   checks beside timing: debris settling (awake bodies over time), no velocity
   blow-ups, window grabs reviewed.
 
-**Speedup: unmeasured.** No native solver run has been timed. The only
-guide is the collision task, whose runs fell ~20x when made native; the
+**Speedup (written before any native solver command; kept for what it
+weighed).** Since measured, per command, above: write-back 1.04 -> 0.21 ms a
+step, copy-back 0.06 -> 0.01, iterate 0.90-3.24 -> 0.24-0.67 at matched
+contact points, none with a gameplay effect shown. At the time no native
+solver run had been timed. The only
+guide was the collision task, whose runs fell ~20x when made native; the
 solver's could fall much less. What is measured is what a native task cannot
 remove: the PPU's issuing, ~20 us per round to create three tasks (~0.4 ms
 a step for the 20 iterate and write-back rounds), ~0.75 ms a step for all
