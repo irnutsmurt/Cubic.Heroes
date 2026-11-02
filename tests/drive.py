@@ -36,6 +36,11 @@ BTN = {"SELECT": 0x0001, "START": 0x0008, "UP": 0x0010, "RIGHT": 0x0020, "DOWN":
        "TRIANGLE": 0x1000, "CIRCLE": 0x2000, "CROSS": 0x4000, "SQUARE": 0x8000}
 
 run, script = sys.argv[1], sys.argv[2]
+TIMING = os.environ.get("DRIVE_TIMING") == "1"   # each step's time and each press's waits in drive.log
+# A press keeps the frame it was made on only for a `change` step to compare against. Kept
+# for every press, it cost each press ~1 s when frame dumps are off (DUMP=0: no frame.ppm, and
+# frame() retries 20 x 50 ms) -- a fight's swings came every ~1.4 s instead of ~0.4 s.
+NEEDS_FRAME = any(l.split("#", 1)[0].split()[:1] == ["change"] for l in open(script))
 out = os.path.join(run, "drive"); os.makedirs(out, exist_ok=True)
 nshot = [0]
 
@@ -74,14 +79,22 @@ def logtext():
     return t
 
 last_press_frame = [None]
+T0 = time.time()
 def press(mask, hold=10, ms=0):
-    last_press_frame[0] = frame()
+    t_frame = time.time()
+    if NEEDS_FRAME:   # only `change` compares with it; with frame dumps off, frame() waits ~1 s for nothing
+        last_press_frame[0] = frame()
+    t_write = time.time()
     with open(os.path.join(run, "pad.txt"), "w") as f:
         f.write(f"0x{mask:04X} {hold} {ms}\n" if ms else f"0x{mask:04X} {hold}\n")
     # wait for the game to take it (the file is emptied on admission)
     t0 = time.time()
     while time.time() - t0 < 10:
-        if os.path.getsize(os.path.join(run, "pad.txt")) == 0: return True
+        if os.path.getsize(os.path.join(run, "pad.txt")) == 0:
+            if TIMING:
+                print(f"[drive]   +{t_write - T0:.3f} s 0x{mask:04X} {hold} {ms}: frame grab {1000 * (t_write - t_frame):.0f} ms, "
+                      f"taken after {1000 * (time.time() - t0):.0f} ms", flush=True)
+            return True
         time.sleep(0.05)
     return False
 
@@ -111,7 +124,7 @@ for lineno, raw in enumerate(open(script), 1):
     line = raw.split("#", 1)[0].strip()
     if not line: continue
     op, *a = line.split()
-    print(f"[drive] {lineno}: {line}", flush=True)
+    print(f"[drive] {lineno}: {line}" + (f"  (+{time.time() - T0:.3f} s)" if TIMING else ""), flush=True)
     if op == "log":
         rx, tmo = re.compile(a[0]), float(a[1]) if len(a) > 1 else 120
         t0 = time.time()

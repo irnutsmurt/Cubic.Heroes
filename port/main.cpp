@@ -350,6 +350,16 @@ static DWORD WINAPI frame_clock(LPVOID)
              * present freely, so the window is not blank during boot. */
             unsigned fc = cellGcm_flip_request_count();
             if (fc != last_flip) {
+                /* DOTHEROES_PRESENT_ONCE=1 (experimental, for A/B): a flip
+                 * the drain stopped at sets both the flip count and the
+                 * pending flag, so it was presented here and again at the
+                 * top of the next pass -- the same surface twice. The second
+                 * waited on the backend's present lock while the first's GPU
+                 * fence and window present finished (3.8 ms a frame in
+                 * fights), and the ring filled meanwhile. Taking the flag here
+                 * presents each flip once. */
+                static const bool once = [] { const char* e = getenv("DOTHEROES_PRESENT_ONCE"); return e && *e == '1'; }();
+                if (once) cellGcm_take_flip_pending();
                 ft = ft_now_if_on();
                 present_guest_frame();
                 ft_walker(1, ft);

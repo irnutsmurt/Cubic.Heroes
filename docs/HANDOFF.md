@@ -65,8 +65,15 @@ log) and [FEASIBILITY.md](FEASIBILITY.md) (design and the explicit exceptions).
   or L3+R3 -- "MARK n" on screen, a trace record, a log line; a drive script
   marks with `touch mark.trigger`; `tests/slow_frames.py --marks` lists the
   frames before each); can't-die (`DOTHEROES_DEV_CANT_DIE=1`: the player's own
-  life, found in memory, floored at 4 apples and raised to 4.5 -- never full;
-  hits, knockback and enemies untouched; each top-up logged); the game's state
+  life, found in memory, raised to 4.5 apples whenever it falls to 4 or
+  less -- never to full; hits, knockback and enemies untouched; each top-up
+  logged). **It heals below full, it does not only stop the lethal hit:**
+  every hit that leaves 4 apples or less is undone up to 4.5, so the hero
+  spends the fight near 4-4.5 apples, which a normal fight would not.
+  Benchmark arms must use the same setting (on in both, with the same
+  floor and refill, or off in both); runs with it are reported apart and
+  results checked again with normal damage. A version that stops only lethal
+  damage would need the game's damage path (not done); the game's state
   for tests (`DOTHEROES_DEV_STATE=1`: life, field area, camera position,
   physics steps, in `state.txt` and the trace; `tests/drive.py`'s `state`
   waits on it). **Restarting an encounter from a known state** is, for now,
@@ -309,17 +316,55 @@ speed independent of the frame rate. Steps 1-3 of the original list (Windows
 tooling, the native Windows build, measuring on the 3070) are done; see
 "Where things stand".
 
-0. **Physics and frame pacing (current, 2026-11-01):** native collision and
-   the native solver's write-back, copy-back and iterate are in, experimental
-   and off by default; steps are shorter, frames not shown better. Next: a
-   heavy-fight benchmark repeatable enough to judge frames (state-aware: the
-   intended place and encounter, measured from the first debris, a death or
-   a departure ending and classifying the segment); the native solver
-   against its baseline on it; slow frames traced through command
-   production, the ring wait, the walker, GPU waits and presentation (the
-   ring wait is a symptom: what keeps the walker from freeing room); capped
-   laps (`GCM_WRAP_LAP=1`) retested with the faster solver, apart. Native
-   collision's contact differences stay open, tracked apart.
+0. **Physics and frame pacing (current, 2026-11-01).** The goal (owner,
+   2026-11-01): sustained, smoothly paced 60 fps through exploration and
+   debris-heavy fights, the river included; 144 fps uncapped is a stretch
+   goal, after which broader game testing. Judged by frame-time percentiles,
+   spikes and worst frames (tests/frame_log.py on `DIAG_FRAMES`), loads and
+   transitions reported apart.
+   **The configuration that holds 60 in the known scenarios** (all four
+   switches experimental, off by default):
+   `DOTHEROES_NATIVE_CD=1 DOTHEROES_NATIVE_SOLVER=4,5,6 GCM_WRAP_LAP=1
+   DOTHEROES_PRESENT_ONCE=1`. To play with it (the owner's save in place,
+   sound, the frame-rate readout, F8 to mark a hitch):
+   `env WINDOW=1 AUDIO=1 DUMP=0 SHOT_EVERY=0 DOTHEROES_NATIVE_CD=1
+   DOTHEROES_NATIVE_SOLVER=4,5,6 GCM_WRAP_LAP=1 DOTHEROES_PRESENT_ONCE=1
+   PS3_OSD_FPS=2 DOTHEROES_DEV_KEYS=1 GAMEDATA=<the save root>
+   build/venv/Scripts/python.exe tests/boot_smoke.py 3600`. To measure it:
+   the benchmark (tests/scripts/fight_bench.drive with
+   `DOTHEROES_DEV_STATE=1 DOTHEROES_DEV_KEYS=1 DIAG_FRAMES=150:frames.log`,
+   `DOTHEROES_DEV_CANT_DIE=1` or not, `VISIBLE=1 TOPMOST=1`; then
+   tests/frame_log.py). Validated on screen (build/baselines/
+   2026-11-01-config-validation), guest frames (flip request to flip
+   request) in the measured segments:
+   - river fight, can't-die, 6 runs: p99 17.2-17.4 ms, p99.9 20-22, over 18
+     ms 0.2-0.6%, over 25 ms 0.03-0.05% (~1.2-1.7 a minute, mostly in the
+     first seconds of a fight), worst 33.7 ms;
+   - river fight, normal damage, 3 runs (the hero lived through every
+     segment): p99 17.3-17.4, p99.9 19.7-22.2, over 18 ms 0.3-0.4%, over 25
+     ms ~1.2 a minute, worst 33.6;
+   - exploration (tests/scripts/soak_timing.drive: walking, sword, menu,
+     map, guard), 2 runs of 154 s: p99 17.3, p99.9 ~18.7, worst 23.7, no
+     frame over 25 ms;
+   - for reference, the default configuration in the same fight: p99 29-38
+     ms, ~4.9% over 18 ms, 86-115 frames over 25 ms a minute.
+   The diagnostics' own cost does not show: the frame trace, physics stats
+   and GPU timing on against only the frame log, p99 17.2 against 17.4 ms,
+   over 18 ms 0.2 against 0.6% (within run-to-run spread).
+   Present-call completion intervals vary more than the frames (p99 21-23
+   ms, 3-6% over 20 ms): when the GPU finishes each frame varies. That is
+   not display timing; this display runs at 143 Hz, where 60 fps frames are
+   held for 2 or 3 refreshes whatever the pacing -- evenly spaced frames on
+   it need the game paced to the display (72 or 144 fps), the stretch goal's
+   ground.
+   Remaining outliers: area entry (the first seconds after arriving in the
+   river's area: a 74 ms frame of main-thread work and 50-67 ms drains,
+   transition costs) and about one frame of ~30 ms a minute in fights, at
+   debris bursts: the walker's drain of that frame takes 16-21 ms (draws
+   jump ~680 -> ~840 and the physics runs up to 6 steps over 270 new bodies
+   in it). Shader and pipeline compiles are not it (73 ms and 9 ms in a whole
+   run, 13 ms after the fight began; trace kind 24); geometry converted on
+   the CPU at first sight is being measured (trace kind 25).
    **Slow frames, traced** (the owner's own play, ~7.7 min traced, 26,503
    frames; native collision and solver, default ring; tests/slow_frames.py):
    92% of frames under 18 ms. In the 18-25 ms frames (7.4%) the main thread
@@ -330,15 +375,40 @@ tooling, the native Windows build, measuring on the 3070) are done; see
    (`present.prlock`). That lock is held 162 s of the ~460 s traced: per
    present (two a frame) median 2.0 ms, p90 6.0 -- the GPU fence of the
    previous frame (median 1.2, p90 5.7), then the window present (0.35).
-   `vk_eng_present` runs on the walker thread, so the ring's reader waits for
-   the GPU to finish one frame before it drains the next (no frames in
-   flight): a heavy frame's drain and its GPU time run back to back. The ring
-   wait is the symptom of that. The capped lap (below, retested) takes most
-   of the wait out of the main thread's frame -- the title no longer waits
-   for the walker to reach the ring's start when there is room behind it --
-   but not the serialization itself: frame start to present returned stays
-   ~28 ms (the walker ~8 ms behind at the flip). The present path (item 1)
-   remains the candidate for that latency and for headroom.
+   **What the present lock waits for, exactly** (traced event by event, then
+   counted over the session): the walker loop presented every flip twice.
+   The drain stops at a FIFO flip and sets both the flip count and the
+   pending-flip flag; the loop presents on the count right after the drain
+   (the completed frame, 0.1 ms to record and submit its copy) and again on
+   the flag at the top of its next pass -- the same surface, 0 draws. That
+   second present takes `present_mu`, which the `present` thread holds while
+   it finishes the first: the GPU fence for the frame, the readback, the
+   window present. 97.3 s of the walker's 97.5 s of present-lock waiting in
+   the session was in those repeats (3.8 ms each); the first presents waited
+   0.2 s in all. What the lock guards (rsx_vulkan_backend.c, `vk_state`): the
+   present's one command buffer (the copy, then reused for the window blit),
+   its fence, the readback buffer, the display image the frame is blitted
+   into and the window blits from, the in-flight and ordering flags, the
+   window's acquire semaphore, fence and the overlay's staging buffers. The
+   GPU wait must come before any of these is reused; it blocks command
+   processing only when the walker starts another present before the last
+   one finished, which the repeat did every frame. Presenting once per flip
+   (`DOTHEROES_PRESENT_ONCE=1`, port/main.cpp: the count path takes the flag
+   too) removes it: repeats 7,541 -> 72, the walker's present-lock wait 2-9
+   ms a frame -> 0, half the copies, readbacks and window presents. Frames
+   barely moved (the walker had slack: it still sleeps 8-10 ms of a slow
+   frame): fights with can't-die over 18 ms 3.8% -> 4.0%, p99 22.6 -> 22.1;
+   normal damage 4.2% -> 3.2%, p99 24.5 -> 20.9 (one run measured: the other
+   had no debris). Frame start -> present returned (pipeline timing, not
+   input latency) median 27.2 -> 27.8 ms, p90 30.1 -> 32.4. Kept for the
+   configuration: the same frames shown with half the present work.
+   What remains in slow frames once the repeat is gone: the main thread's own
+   work (12.6-13.8 ms against 10.2), a ring wait of 5.5-6 ms -- the wrap
+   protocol, which the capped lap (below, retested) removes safely -- and the
+   walker draining 10.7-11.7 ms (against 5.7): its own CPU work on ~770
+   draws. A further present redesign (two sets of present objects, so the
+   fence wait never meets the walker) has nothing left to win here; the
+   walker's drain cost is the next candidate if headroom is needed.
    **The state-aware fight benchmark** (tests/scripts/fight_bench.drive,
    tests/fight_bench.py; build/baselines/2026-11-01-fight-bench): the river
    fight with the location confirmed (field area 18) before measuring, from
@@ -353,10 +423,22 @@ tooling, the native Windows build, measuring on the 3070) are done; see
    34.6 / 41.8 / 70.6% -> 32.4 / 28.4 / 20.8%; latency unchanged (frame start
    -> present median 27.5 -> 27.6 ms). One pair with normal damage: the
    lifted run lived, the native one died 30 s into its segment -- too short
-   to compare. The drive's swing rounds take ~16 s each, not the ~3.4 s their
-   sleeps add up to (input admission; not yet looked into), so runs end
-   before its end mark ("unfinished": alive and in the area to the trace's
-   end, measured to there).
+   to compare. In those runs the drive's swing rounds took ~16 s each, not
+   the ~3.4 s their sleeps add up to, so runs ended before its end mark
+   ("unfinished": alive and in the area to the trace's end, measured to
+   there). **Found and fixed** (tests/drive.py; `DRIVE_TIMING=1` logs each
+   step's time and each press's waits): every press first grabbed the
+   current frame for a later `change` step, and with frame dumps off
+   (`DUMP=0`, every timing run) there is no frame.ppm, so the grab retried
+   for ~1 s before each press; the game then took each press in ~50 ms. The
+   inputs and holds were as written (a 150 ms direction tap, sword presses of
+   10 reports), only spaced ~1.4 s apart instead of ~0.4 s -- in every
+   dumps-off run of fight_bench.drive and fight_river.drive so far, both
+   arms of each comparison alike. A press now grabs only when the script has
+   a `change` step: a round takes 4.0 s (3.4 s of sleeps and twelve ~50 ms
+   admissions), the drive reaches its end mark, and the fight is now 20
+   rounds (~80 s). Fights at this cadence are busier: results from before the
+   fix are comparable among themselves, not with later ones.
 1. **Next replacements:** the present path (frames in flight, no readback,
    no lock held across GPU waits), then a display-driven vblank (refresh-rate
    aware, e.g. 120 Hz panels). vm_watch on Linux (mprotect + SIGSEGV), so
@@ -771,10 +853,13 @@ tooling, the native Windows build, measuring on the 3070) are done; see
 | `DOTHEROES_NATIVE_SOLVER=<cmd>[,<cmd>]` | experimental, off: Bullet solver commands done natively -- 6 the warm-start write-back, 5 the copy-back, 4 iterate (docs/BULLET_NATIVE.md); separate from `DOTHEROES_NATIVE_CD` |
 | `DOTHEROES_NATIVE_SOLVER_CHECK=1` | each step's write-back compared, as its last task finishes, with what it must leave; the copy-back, as the write-back starts; each iterate round against the native iterate run on its inputs as it starts (then undone) |
 | `DOTHEROES_SOLVER_BENCH=<file>` | with the lifted commands: each step's native write-back, each copy-back task's and each iterate round's, timed on its own inputs (compute only), then undone (tests/solver_bench.py) |
+| `DOTHEROES_PRESENT_ONCE=1` | experimental, off: each guest flip presented once (the walker loop presented every FIFO flip twice -- the second the same surface, waiting on the present lock while the first finished) |
+| `DIAG_FRAMES=<file>` | every guest flip request and window present, on the trace's clock, written at exit -- a frame-time record cheap enough to run with every other diagnostic off (tests/frame_log.py: percentiles, spikes, worst frames between the drive's marks) |
+| `DRIVE_TIMING=1` | tests/drive.py logs each step's time and each press's waits |
 | `PS3_OSD_FPS=1\|2` | testing: frame-rate readout, window's top-right corner: fps, mean and longest frame of the last second; `2` adds a 120-frame frame-time graph (ps3recomp patch 0069) |
 | `DOTHEROES_DEV_KEYS=1` | testing, while the window has focus: F8 or L3+R3 marks a hitch ("MARK n", trace kind 22, `[mark]` log line); F7 cycles the readout; a drive script marks with `touch mark.trigger` |
 | `DOTHEROES_DEV_STATE=1` | testing: the game's state every 100 ms -- life (half apples), field area, camera target x/z, physics steps, can't-die top-ups -- in `<run>/state.txt` (`tests/drive.py` `state <cond> [timeout]`) and the trace (kind 23) |
-| `DOTHEROES_DEV_CANT_DIE=1\|<floor>,<refill>` | testing: no lethal damage -- the player's life floored (default: 8 half apples or less raised to 9; never full, so no sword beam); each top-up logged and counted. Report runs with it apart; recheck with normal damage |
+| `DOTHEROES_DEV_CANT_DIE=1\|<floor>,<refill>` | testing: keeps the hero alive by topping life up below full -- 8 half apples or less raised to 9 (default; never full, so no sword beam). It heals, not only stops lethal hits; each top-up logged and counted. Same setting in every arm of a comparison; report runs with it apart; recheck with normal damage |
 | `DOTHEROES_DEV_LIFE_LOG=1` | testing: every change of the player's life and the HUD's copies, logged |
 | `DOTHEROES_DEV_MEMSNAP=1` | testing: a drive script's `touch memsnap.trigger` writes all committed guest memory to `<run>/memsnap_<n>.bin` (game memory: local only; tests/native/find_state.cpp) |
 | `PPU_WWATCH=<hex ea>` | the runtime's store watch: every lifted PPU store to that 16-byte line, with the writing guest function (found the HUD's life writer) |
@@ -800,4 +885,4 @@ Edit in `build/ref/ps3recomp` (branch `dotheroes`), commit there as
 `git format-patch --start-number <next> -o ../../../patches/ps3recomp HEAD~<n>`
 and commit the patch files here. `tools/pipeline.py` refuses to run with
 uncommitted changes in that checkout, and re-applies the whole series when
-the patch files change. 69 patches (0001-0069) as of 2026-11-01.
+the patch files change. 70 patches (0001-0070) as of 2026-11-01.

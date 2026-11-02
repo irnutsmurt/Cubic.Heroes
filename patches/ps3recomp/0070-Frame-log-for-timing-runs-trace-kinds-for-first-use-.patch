@@ -1,0 +1,238 @@
+From 20c68f7928d82ca15ca3ff405862f6247f036601 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Sun, 1 Nov 2026 23:30:16 -0800
+Subject: [PATCH] Frame log for timing runs; trace kinds for first-use compiles
+ and CPU-fetched geometry
+
+DIAG_FRAMES=[<seconds>:]<file>: every guest flip request and every window
+present returned, on the frame trace's clock, kept in memory (a store per
+frame) and written <seconds> after the first -- a test harness ends the
+process without running exit handlers -- and at exit. Cheap enough to run
+with every other diagnostic off, so a timing comparison can check what the
+diagnostics themselves cost.
+
+ps3_ftrace: PS3_FT_COMPILE (24), a pipeline created or a guest program
+translated to SPIR-V at first use, on the thread that needed it; and
+PS3_FT_GEOM_FETCH (25), at each frame's present, its draws whose vertices
+were fetched from guest memory and converted on the CPU (not resident) and
+their vertex count.
+---
+ include/ps3emu/osd.h            | 82 ++++++++++++++++++++++++++++++++-
+ include/ps3emu/ps3_ftrace.h     |  6 +++
+ libs/video/rsx_draw_engine.c    | 13 ++++++
+ libs/video/rsx_vulkan_backend.c |  8 +++-
+ 4 files changed, 107 insertions(+), 2 deletions(-)
+
+diff --git a/include/ps3emu/osd.h b/include/ps3emu/osd.h
+index 5737727..88259d7 100644
+--- a/include/ps3emu/osd.h
++++ b/include/ps3emu/osd.h
+@@ -15,6 +15,8 @@
+ #include <stdint.h>
+ #include <stdlib.h>
+ #include <string.h>
++#include <stdio.h>
++#include "ps3_ftrace.h"   /* the frame log's clock (DIAG_FRAMES) */
+ #ifdef _WIN32
+ #  include <windows.h>
+ #else
+@@ -113,10 +115,88 @@ static inline void ps3_osd_fps_set_mode(int m)
+     __atomic_store_n(&g_ps3_osd_frames.mode, m < 0 || m > 2 ? 0 : m, __ATOMIC_RELAXED);
+ }
+ 
++/* DIAG_FRAMES=[<seconds>:]<file>: every guest flip request ("f") and every
++ * window present returned ("p"), in microseconds on the frame trace's clock
++ * (the one the [mark] lines use), kept in memory and written <seconds> after
++ * the first one, by whichever thread notes the frame past it, and at exit --
++ * a test harness ends the process without running exit handlers, so give it
++ * the seconds. A frame-time record cheap enough (a store per frame) to
++ * compare runs with and without the other diagnostics; tests/frame_log.py. */
++#define PS3_OSD_LOG_CAP (1u << 20)
++
++typedef struct {
++    uint64_t* buf;          /* (us << 1) | 1 for a present, 0 for a flip request */
++    uint32_t  n;
++    int       on;           /* -1 not read yet, 2 being set up, 0 off, 1 on */
++    int       written;      /* written at its time already */
++    uint64_t  secs_ns, first_ns;
++    char      path[512];
++} ps3_osd_log_state;
++
++PS3_OSD_SHARED ps3_osd_log_state g_ps3_osd_log = { 0, 0, -1, 0, 0, 0, { 0 } };
++
++static void ps3_osd_log_write(void)
++{
++    ps3_osd_log_state* s = &g_ps3_osd_log;
++    FILE* f = fopen(s->path, "w");
++    if (!f) return;
++    const uint32_t n = __atomic_load_n(&s->n, __ATOMIC_ACQUIRE);
++    fprintf(f, "# DIAG_FRAMES: f = a guest flip request, p = a window present returned; us on the frame trace's clock\n");
++    for (uint32_t i = 0; i < n && i < PS3_OSD_LOG_CAP; i++)
++        fprintf(f, "%c %llu\n", (s->buf[i] & 1) ? 'p' : 'f', (unsigned long long)(s->buf[i] >> 1));
++    fclose(f);
++}
++
++static inline int ps3_osd_log_on(void)
++{
++    ps3_osd_log_state* s = &g_ps3_osd_log;
++    int on = __atomic_load_n(&s->on, __ATOMIC_ACQUIRE);
++    if (on >= 0 && on != 2) return on;
++    int unread = -1;
++    if (__atomic_compare_exchange_n(&s->on, &unread, 2, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
++        const char* e = getenv("DIAG_FRAMES");
++        (void)PS3_FT_ON();   /* the trace's clock base set (it is, lazily, on first use) */
++        on = 0;
++        if (e && *e && (s->buf = (uint64_t*)malloc(sizeof(uint64_t) * PS3_OSD_LOG_CAP)) != NULL) {
++            const char* colon = strchr(e, ':');
++            const char* p = e;
++            while (p < colon && ((*p >= '0' && *p <= '9') || *p == '.')) p++;
++            if (colon && p == colon && colon > e) {   /* <seconds>:<file> (a drive letter is not all digits) */
++                s->secs_ns = (uint64_t)(atof(e) * 1e9);
++                e = colon + 1;
++            }
++            strncpy(s->path, e, sizeof s->path - 1);
++            atexit(ps3_osd_log_write);
++            on = 1;
++        }
++        __atomic_store_n(&s->on, on, __ATOMIC_RELEASE);
++        return on;
++    }
++    while ((on = __atomic_load_n(&s->on, __ATOMIC_ACQUIRE)) == 2) { }
++    return on;
++}
++
++/* kind 0: a guest flip request; 1: a window present returned. Any thread. */
++static inline void ps3_osd_log_note(int kind)
++{
++    ps3_osd_log_state* s = &g_ps3_osd_log;
++    if (!ps3_osd_log_on()) return;
++    const uint64_t now = ps3_ft_now();
++    const uint32_t i = __atomic_fetch_add(&s->n, 1, __ATOMIC_ACQ_REL);
++    if (i < PS3_OSD_LOG_CAP)
++        s->buf[i] = ((uint64_t)((int64_t)(now - g_ps3_ft.base) / 1000) << 1) | (uint64_t)(kind & 1);
++    if (i == 0) s->first_ns = now;
++    int not_yet = 0;
++    if (s->secs_ns && s->first_ns && now - s->first_ns >= s->secs_ns &&
++        __atomic_compare_exchange_n(&s->written, &not_yet, 1, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
++        ps3_osd_log_write();
++}
++
+ /* A guest frame ended (its flip request): one writer, the guest's render
+- * thread. Cheap when the readout is off. */
++ * thread. Cheap when the readout and the log are off. */
+ static inline void ps3_osd_frame_note(void)
+ {
++    ps3_osd_log_note(0);
+     ps3_osd_frames* s = &g_ps3_osd_frames;
+     if (!ps3_osd_fps_mode()) return;
+     const uint32_t n = s->n;
+diff --git a/include/ps3emu/ps3_ftrace.h b/include/ps3emu/ps3_ftrace.h
+index a127607..2af3032 100644
+--- a/include/ps3emu/ps3_ftrace.h
++++ b/include/ps3emu/ps3_ftrace.h
+@@ -92,6 +92,12 @@ enum ps3_ft_kind {
+                               * Game Heroes, DOTHEROES_DEV_STATE=1: who = life in half apples
+                               * | the field area << 8 | can't-die top-ups so far << 16, a and
+                               * b = the camera target's x and z, float bits) */
++    PS3_FT_COMPILE     = 24, /* a backend compiling at first use, on the thread that needed it:
++                              * who = 1 a pipeline created, 2 a guest program translated to
++                              * SPIR-V and its module made (a = the stage, 0 vertex 1 fragment) */
++    PS3_FT_GEOM_FETCH  = 25, /* instant at a frame's present (the draw engine): a = its draws whose
++                              * vertices were fetched from guest memory and converted on the CPU
++                              * (not resident geometry), b = their vertices */
+ };
+ 
+ #if defined(_MSC_VER)
+diff --git a/libs/video/rsx_draw_engine.c b/libs/video/rsx_draw_engine.c
+index 5f4bcd6..44ac18e 100644
+--- a/libs/video/rsx_draw_engine.c
++++ b/libs/video/rsx_draw_engine.c
+@@ -25,6 +25,7 @@
+ #include <string.h>
+ #include <time.h>
+ #include "ps3emu/log_first.h"
++#include "ps3emu/ps3_ftrace.h"   /* PS3_FT_GEOM_FETCH */
+ 
+ /* Guest memory and the RSX offset resolvers, declared the way every backend
+  * that reads guest data declares them (rsx_vertex_fetch.h). */
+@@ -2628,6 +2629,11 @@ typedef struct {
+     eng_geom_range r[ENG_GEOM_RANGES];
+ } eng_geom;
+ 
++/* A frame's draws whose vertices were fetched from guest memory and converted
++ * on the CPU (not resident), and their vertices: a trace record at each
++ * present (PS3_FT_GEOM_FETCH). */
++static struct { u32 draws, verts; } s_frame_fetch;
++
+ static eng_geom* s_geom;
+ static u32 s_geom_live;
+ static u64 s_geom_bytes;
+@@ -3679,6 +3685,8 @@ static void sink_end(void* user, const rsx_dispatch* r)
+     } else {
+         dc_fetch(&layout, rebuild);
+         if (!dc.n_verts || !dc.fetch_ok) { eng_drop(dc.fetch_ok ? "no vertices" : "vertex fetch failed"); return; }
++        s_frame_fetch.draws++;
++        s_frame_fetch.verts += dc.n_verts;
+         n_draw = dc.n_source_refs;
+         if (rebuild) {
+             if (!eng_topology_rebuild(prim, dc.refs_remapped, &indexed)) { eng_drop("topology rebuild failed"); return; }
+@@ -4090,6 +4098,11 @@ static void eng_present(u32 buffer_id)
+                     g.surfaces[i].w, g.surfaces[i].h, g.surfaces[i].handle);
+     }
+     pd_present(target);
++    if (PS3_FT_ON()) {
++        const uint64_t t = ps3_ft_now();
++        ps3_ft_span(PS3_FT_GEOM_FETCH, 0, s_frame_fetch.draws, s_frame_fetch.verts, t, t);
++    }
++    s_frame_fetch.draws = s_frame_fetch.verts = 0;
+     g.last_present_surface = target;
+     g.be->present(g.be->user, g.surfaces[target].handle);
+     g.frames++;
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index 1dcb1e3..0def546 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -2392,6 +2392,7 @@ static void vk_present_window(void)
+         .swapchainCount = 1, .pSwapchains = &s_vk.swapchain, .pImageIndices = &idx,
+     };
+     r = vk_queue_present(&pi);
++    ps3_osd_log_note(1);   /* DIAG_FRAMES: the present returned */
+     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) vk_swapchain_lost();
+     else if (r != VK_SUCCESS) VK_LOG("vkQueuePresentKHR failed (VkResult %d)\n", (int)r);
+ }
+@@ -3436,6 +3437,7 @@ static VkStencilOpState vk_gcm_stencil_face(u32 func, u32 fail, u32 zfail, u32 z
+ 
+ static int vk_eng_translate(const char* hlsl, int stage, VkShaderModule* out)
+ {
++    const uint64_t ft0 = PS3_FT_ON() ? ps3_ft_now() : 0;
+     u32 words = 0;
+     if (rsx_hlsl_to_spirv(hlsl, stage, s_g.spv, VK_SPV_WORDS, &words, s_g.log, sizeof s_g.log) || !words) {
+         VK_LOG("engine: %s translation failed: %s\n",
+@@ -3444,7 +3446,9 @@ static int vk_eng_translate(const char* hlsl, int stage, VkShaderModule* out)
+     }
+     VkShaderModuleCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+                                     .codeSize = (size_t)words * 4u, .pCode = s_g.spv };
+-    return pvkCreateShaderModule(s_vk.device, &ci, NULL, out) == VK_SUCCESS ? 0 : -1;
++    const int r = pvkCreateShaderModule(s_vk.device, &ci, NULL, out) == VK_SUCCESS ? 0 : -1;
++    if (ft0) ps3_ft_span(PS3_FT_COMPILE, 2, stage == RSX_SHADER_STAGE_VERTEX ? 0u : 1u, words, ft0, ps3_ft_now());
++    return r;
+ }
+ 
+ /* A pixel program with a cube unit declares all sixteen units one by one
+@@ -3686,11 +3690,13 @@ static VkPipeline vk_eng_variant(vk_eng_pipe* P, u32 topo_idx)
+         .pViewportState = &vps, .pRasterizationState = &ras, .pMultisampleState = &ms,
+         .pDepthStencilState = &ds, .pColorBlendState = &cb, .pDynamicState = &dy,
+         .layout = layout, .renderPass = rp, .subpass = 0 };
++    const uint64_t ft0 = PS3_FT_ON() ? ps3_ft_now() : 0;
+     if (pvkCreateGraphicsPipelines(s_vk.device, VK_NULL_HANDLE, 1, &gci, NULL,
+                                    &P->variant[topo_idx]) != VK_SUCCESS) {
+         VK_LOG("engine: vkCreateGraphicsPipelines failed\n");
+         P->variant[topo_idx] = VK_NULL_HANDLE;
+     }
++    if (ft0) ps3_ft_span(PS3_FT_COMPILE, 1, 0, topo_idx, ft0, ps3_ft_now());
+     return P->variant[topo_idx];
+ }
+ 
+-- 
+2.56.0.windows.3
+

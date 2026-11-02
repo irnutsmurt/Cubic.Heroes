@@ -27,13 +27,16 @@
 // time; tests/drive.py's `state` waits on it) and, with PS3_FTRACE, the frame
 // trace (PS3_FT_GAME_STATE).
 //
-// DOTHEROES_DEV_CANT_DIE=1: no lethal damage. Every 2 ms, a life of 8 half
-// apples or less (4 apples) is raised to 9 (4.5 of the save's 5) -- the
-// player's own life and the HUD's copies: hits still land and knock back,
-// enemies are untouched, and life is never full -- a full life keeps the sword
-// beam, which would change the fight. Each top-up is logged and counted. Safe
-// while no hit takes 9 half apples or more, or two land within 2 ms: the
-// river's enemies hit for 2 to 7. =<floor>,<refill> sets other values. A test
+// DOTHEROES_DEV_CANT_DIE=1: keeps the hero alive by topping life up below
+// full. Every 2 ms, a life of 8 half apples or less (4 apples) is raised to 9
+// (4.5 of the save's 5) -- the player's own life and the HUD's copies: hits
+// still land and knock back, enemies are untouched, and life is never full --
+// a full life keeps the sword beam, which would change the fight. This heals:
+// it does not only stop the lethal hit (that would need the game's damage
+// path), so the hero spends a fight near 4-4.5 apples. Each top-up is logged
+// and counted. Safe while no hit takes 9 half apples or more, or two land
+// within 2 ms: the river's enemies hit for 2 to 7. =<floor>,<refill> sets
+// other values. Every arm of a comparison uses the same setting; a test
 // reports runs with it apart and checks the result again with normal damage.
 // DOTHEROES_DEV_LIFE_LOG=1 logs every change of the life values.
 //

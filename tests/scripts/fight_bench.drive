@@ -2,8 +2,9 @@
 # of fight_river.drive with checks on the game's state (DOTHEROES_DEV_STATE=1,
 # port/native/dev_state.cpp). In play in the castle's area (17), the route east
 # into the river's area (18) -- confirmed, or the drive stops there -- a mark
-# (mark.trigger, with DOTHEROES_DEV_KEYS=1) as the encounter begins, 10 rounds of
-# swings each followed by a check that the hero is still in that area and alive,
+# (mark.trigger, with DOTHEROES_DEV_KEYS=1) as the encounter begins, 20 rounds of
+# swings (4 s each: a direction tap, two sword presses 0.4 s apart, four times)
+# each followed by a check that the hero is still in that area and alive,
 # and a mark at the end. tests/fight_bench.py measures from the first physics
 # step after the first mark to the second mark, or to a death or a departure,
 # and classifies each run by how it ended. Needs a save past the sword (SAVES=).
@@ -28,6 +29,96 @@ hold UP 1.5
 hold RIGHT 2
 state area==18,life>0 20
 touch mark.trigger
+hold RIGHT 0.15
+repeat 2 CROSS 0.35
+hold DOWN 0.15
+repeat 2 CROSS 0.35
+hold LEFT 0.15
+repeat 2 CROSS 0.35
+hold UP 0.15
+repeat 2 CROSS 0.35
+state area==18,life>0 1
+hold RIGHT 0.15
+repeat 2 CROSS 0.35
+hold DOWN 0.15
+repeat 2 CROSS 0.35
+hold LEFT 0.15
+repeat 2 CROSS 0.35
+hold UP 0.15
+repeat 2 CROSS 0.35
+state area==18,life>0 1
+hold RIGHT 0.15
+repeat 2 CROSS 0.35
+hold DOWN 0.15
+repeat 2 CROSS 0.35
+hold LEFT 0.15
+repeat 2 CROSS 0.35
+hold UP 0.15
+repeat 2 CROSS 0.35
+state area==18,life>0 1
+hold RIGHT 0.15
+repeat 2 CROSS 0.35
+hold DOWN 0.15
+repeat 2 CROSS 0.35
+hold LEFT 0.15
+repeat 2 CROSS 0.35
+hold UP 0.15
+repeat 2 CROSS 0.35
+state area==18,life>0 1
+hold RIGHT 0.15
+repeat 2 CROSS 0.35
+hold DOWN 0.15
+repeat 2 CROSS 0.35
+hold LEFT 0.15
+repeat 2 CROSS 0.35
+hold UP 0.15
+repeat 2 CROSS 0.35
+state area==18,life>0 1
+hold RIGHT 0.15
+repeat 2 CROSS 0.35
+hold DOWN 0.15
+repeat 2 CROSS 0.35
+hold LEFT 0.15
+repeat 2 CROSS 0.35
+hold UP 0.15
+repeat 2 CROSS 0.35
+state area==18,life>0 1
+hold RIGHT 0.15
+repeat 2 CROSS 0.35
+hold DOWN 0.15
+repeat 2 CROSS 0.35
+hold LEFT 0.15
+repeat 2 CROSS 0.35
+hold UP 0.15
+repeat 2 CROSS 0.35
+state area==18,life>0 1
+hold RIGHT 0.15
+repeat 2 CROSS 0.35
+hold DOWN 0.15
+repeat 2 CROSS 0.35
+hold LEFT 0.15
+repeat 2 CROSS 0.35
+hold UP 0.15
+repeat 2 CROSS 0.35
+state area==18,life>0 1
+hold RIGHT 0.15
+repeat 2 CROSS 0.35
+hold DOWN 0.15
+repeat 2 CROSS 0.35
+hold LEFT 0.15
+repeat 2 CROSS 0.35
+hold UP 0.15
+repeat 2 CROSS 0.35
+state area==18,life>0 1
+hold RIGHT 0.15
+repeat 2 CROSS 0.35
+hold DOWN 0.15
+repeat 2 CROSS 0.35
+hold LEFT 0.15
+repeat 2 CROSS 0.35
+hold UP 0.15
+repeat 2 CROSS 0.35
+state area==18,life>0 1
 hold RIGHT 0.15
 repeat 2 CROSS 0.35
 hold DOWN 0.15
