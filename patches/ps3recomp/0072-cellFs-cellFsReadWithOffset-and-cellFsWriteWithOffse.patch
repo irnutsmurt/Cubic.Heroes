@@ -1,0 +1,86 @@
+From 07f0b4286b0b3024087a2eb6bcd36cc0be07d066 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Mon, 2 Nov 2026 01:26:53 -0800
+Subject: [PATCH 72/72] cellFs: cellFsReadWithOffset and cellFsWriteWithOffset
+
+A transfer at an offset that leaves the file position where it was
+(pread / pwrite), with the stream locked from the seek to the seek back.
+Unregistered, both took the unresolved-NID path: 3D Dot Game Heroes'
+INSTALL ("Install Game Data onto the PlayStation 3 HDD?" -> Yes) copies the
+disc's files with them, got nothing back, and the title exited, leaving a
+half-written BLUS30490DATA that made the next start exit too. Now the copy
+runs to the end (1,945 files, 1.28 GB, each byte-identical to the disc), the
+game returns to its title, and the next start reads the installed data.
+---
+ runtime/ppu/ppu_fs.cpp | 48 ++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 48 insertions(+)
+
+diff --git a/runtime/ppu/ppu_fs.cpp b/runtime/ppu/ppu_fs.cpp
+index 043b947..69d209c 100644
+--- a/runtime/ppu/ppu_fs.cpp
++++ b/runtime/ppu/ppu_fs.cpp
+@@ -588,6 +588,52 @@ static void cellFsWrite(ppu_context* ctx)
+     ctx->gpr[3] = CELL_OK;
+ }
+ 
++/* cellFsReadWithOffset(int fd, u64 offset, void* buf, u64 size, u64* nread)
++ * cellFsWriteWithOffset(int fd, u64 offset, const void* buf, u64 size, u64* nwrite)
++ *
++ * A transfer at an offset that leaves the file position where it was (pread /
++ * pwrite). Left unregistered, they took the unresolved-NID path: 3D Dot Game
++ * Heroes' "Install Game Data onto the HDD?" -> Yes reads the disc's archives
++ * with the first, got nothing back, and the title exited. The stream stays
++ * locked from the seek to the seek back, so another thread's read on the same
++ * fd cannot land in between; the seek back also satisfies the C rule
++ * fs_set_dir() is for. */
++static void fs_transfer_at(ppu_context* ctx, int write)
++{
++    int fd          = (int)(uint32_t)ctx->gpr[3];
++    uint64_t off    = ctx->gpr[4];
++    uint32_t buf    = (uint32_t)ctx->gpr[5];
++    uint64_t nbytes = ctx->gpr[6];
++    uint32_t n_ptr  = (uint32_t)ctx->gpr[7];
++    FILE* f = fd_file(fd);
++    if (!f) { ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_EIO; return; }
++    if (ppu_vm_size && (uint64_t)buf + nbytes > ppu_vm_size) nbytes = ppu_vm_size - buf;
++    fs_prefault(buf, nbytes);
++#ifdef _WIN32
++    _lock_file(f);
++#else
++    flockfile(f);
++#endif
++    const int64_t pos = FS_TELL64(f);
++    FS_SEEK64(f, (int64_t)off, SEEK_SET);
++    const size_t n = write ? fwrite(vm_base + buf, 1, (size_t)nbytes, f) : fread(vm_base + buf, 1, (size_t)nbytes, f);
++    FS_SEEK64(f, pos, SEEK_SET);
++    g_fd_dir[fd] = 0;
++#ifdef _WIN32
++    _unlock_file(f);
++#else
++    funlockfile(f);
++#endif
++    { static int _n = 0;
++      if (PS3_LOG_FIRST(_n, 8))
++          fprintf(stderr, "[fs] %s fd=%d offset=%llu nbytes=%llu -> %zu\n", write ? "write at" : "read at", fd,
++                  (unsigned long long)off, (unsigned long long)nbytes, n); }
++    if (n_ptr) vm_write64(n_ptr, n);
++    ctx->gpr[3] = CELL_OK;
++}
++static void cellFsReadWithOffset(ppu_context* ctx)  { fs_transfer_at(ctx, 0); }
++static void cellFsWriteWithOffset(ppu_context* ctx) { fs_transfer_at(ctx, 1); }
++
+ /* cellFsFGetBlockSize(int fd, u64* sector_size, u64* block_size)
+  * cellFsGetBlockSize(const char* path, u64* sector_size, u64* block_size)
+  *
+@@ -996,6 +1042,8 @@ extern "C" void ppu_fs_register(void)
+     ps3_hle_register_ctx(ps3_compute_nid("cellFsRead"),     "cellFsRead",     cellFsRead);
+     ps3_hle_register_ctx(ps3_compute_nid("cellFsWrite"),    "cellFsWrite",    cellFsWrite);
+     ps3_hle_register_ctx(ps3_compute_nid("cellFsLseek"),    "cellFsLseek",    cellFsLseek);
++    ps3_hle_register_ctx(ps3_compute_nid("cellFsReadWithOffset"),  "cellFsReadWithOffset",  cellFsReadWithOffset);
++    ps3_hle_register_ctx(ps3_compute_nid("cellFsWriteWithOffset"), "cellFsWriteWithOffset", cellFsWriteWithOffset);
+     ps3_hle_register_ctx(ps3_compute_nid("cellFsFGetBlockSize"), "cellFsFGetBlockSize", cellFsFGetBlockSize);
+     ps3_hle_register_ctx(ps3_compute_nid("cellFsGetBlockSize"),  "cellFsGetBlockSize",  cellFsGetBlockSize);
+     ps3_hle_register_ctx(ps3_compute_nid("cellFsStat"),     "cellFsStat",     cellFsStat);
+-- 
+2.56.0.windows.3
+

@@ -1,0 +1,129 @@
+From e089262d8cddd9ba129f114fdda974739a88d975 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Mon, 2 Nov 2026 01:26:52 -0800
+Subject: [PATCH 71/72] PPU: an indirect call's fast path, and the function
+ table in one array
+
+Every guest function-pointer and vtable call goes through
+ps3_indirect_call. With none of its switches set (decided once), a call is
+now a lookup and a jump -- the same depth cap, vcall stack and trampoline
+chain as before, the full path kept for a null or unknown target, the cap
+and every diagnostic. The address-to-function table keeps each address next
+to its function, so a lookup touches one cache line instead of two.
+
+3D Dot Game Heroes: 80% of the main thread's time is under an indirect
+call, and the dispatcher was ~7% of its own samples (a lookup's cache
+misses and two dozen per-call switch checks). Uncapped exploration (2 ms
+vblank, two runs each): mean frame 8.16 / 8.10 ms on the full path, 7.66 /
+7.77 ms on the fast path, ~5%.
+---
+ runtime/ppu/ppu_loader.cpp | 63 +++++++++++++++++++++++++++++++++-----
+ 1 file changed, 56 insertions(+), 7 deletions(-)
+
+diff --git a/runtime/ppu/ppu_loader.cpp b/runtime/ppu/ppu_loader.cpp
+index 20055e3..876ca89 100644
+--- a/runtime/ppu/ppu_loader.cpp
++++ b/runtime/ppu/ppu_loader.cpp
+@@ -2152,8 +2152,12 @@ typedef void (*ppu_fn)(ppu_context*);
+ #define PPU_HASH_SIZE (1u << PPU_HASH_BITS)
+ #define PPU_HASH_MASK (PPU_HASH_SIZE - 1)
+ 
+-static uint32_t g_addr[PPU_HASH_SIZE];
+-static ppu_fn   g_fn[PPU_HASH_SIZE];
++/* Address and function side by side: every indirect call looks one up, and a
++ * probe then touches one cache line, not one in each of two arrays (3D Dot Game
++ * Heroes' main thread spent ~2% of its time in this lookup, mostly misses). */
++static struct { uint32_t addr; ppu_fn fn; } g_slot[PPU_HASH_SIZE];
++#define g_addr(i) g_slot[i].addr
++#define g_fn(i)   g_slot[i].fn
+ static uint32_t g_fn_count = 0;
+ 
+ extern "C" void ppu_register_function(uint64_t addr, ppu_fn fn)
+@@ -2163,8 +2167,8 @@ extern "C" void ppu_register_function(uint64_t addr, ppu_fn fn)
+     /* Bounded probe: never loop past the whole table. A full table (function
+      * count >= PPU_HASH_SIZE) would otherwise spin forever here at startup. */
+     for (uint32_t probes = 0; probes < PPU_HASH_SIZE; probes++) {
+-        if (g_fn[i] == nullptr) { g_addr[i] = a; g_fn[i] = fn; g_fn_count++; return; }
+-        if (g_addr[i] == a) { g_fn[i] = fn; return; }   /* overwrite */
++        if (g_fn(i) == nullptr) { g_addr(i) = a; g_fn(i) = fn; g_fn_count++; return; }
++        if (g_addr(i) == a) { g_fn(i) = fn; return; }   /* overwrite */
+         i = (i + 1) & PPU_HASH_MASK;
+     }
+     static int warned = 0;
+@@ -2184,7 +2188,7 @@ extern "C" uint32_t ppu_prof_resolve_host(void* ra)
+ {
+     if (!g_inv_n) {
+         for (uint32_t i = 0; i < PPU_HASH_SIZE; i++)
+-            if (g_fn[i]) { g_inv[g_inv_n].host = (void*)g_fn[i]; g_inv[g_inv_n].guest = g_addr[i]; g_inv_n++; }
++            if (g_fn(i)) { g_inv[g_inv_n].host = (void*)g_fn(i); g_inv[g_inv_n].guest = g_addr(i); g_inv_n++; }
+         /* insertion-sort-free: qsort by host ptr */
+         qsort(g_inv, g_inv_n, sizeof(g_inv[0]),
+               [](const void* a, const void* b) -> int {
+@@ -2205,8 +2209,8 @@ static ppu_fn ppu_lookup(uint32_t a)
+ {
+     uint32_t i = (a * 2654435761u) & PPU_HASH_MASK;
+     for (uint32_t probes = 0; probes < PPU_HASH_SIZE; probes++) {
+-        if (g_fn[i] == nullptr) return nullptr;
+-        if (g_addr[i] == a) return g_fn[i];
++        if (g_fn(i) == nullptr) return nullptr;
++        if (g_addr(i) == a) return g_fn(i);
+         i = (i + 1) & PPU_HASH_MASK;
+     }
+     return nullptr;
+@@ -2597,8 +2601,53 @@ extern "C" void ppu_toc_check(ppu_context* ctx, const char* where, uint32_t targ
+     ppu_dump_guest_stack(ctx, "toccheck");
+ }
+ 
++/* 1 when none of the switches the indirect-call path checks is set: then a
++ * call is a lookup and a jump (ps3_indirect_call's fast path), not two dozen
++ * per-call switch checks -- an indirect call is most of how a C++ title
++ * reaches its code (80% of 3D Dot Game Heroes' main thread is under one), and
++ * the full path was ~7% of that thread's own time. Decided once. */
++static int icall_plain(void)
++{
++    static int plain = -1;
++    if (plain < 0) {
++        static const char* const vars[] = {
++            "PS3_TOCCHECK", "PPU_CSCHECK", "PS3_ICALL_GATE", "PS3_ICALL_TRACE", "BCTRL_RING", "PS3_BREADCRUMB",
++            "PPU_TOCWATCH", "PS3_CALLTRACE", "PS3_CALLTRACE_LR", "PS3_CALLTRACE_TO", "PS3_CALLTRACE_FROM",
++            "PS3_CALLTRACE_R5", "FLOW_FORCE_RTCFG", "SPURS_TRACE", "PS3_PRX_CALLTRACE", "PPU_TOCFIX",
++            "PPU_RETWATCH", 0 };
++        int p = 1;
++        for (int i = 0; vars[i]; i++) if (getenv(vars[i])) p = 0;
++        plain = p;
++    }
++    return plain;
++}
++
+ extern "C" void ps3_indirect_call(ppu_context* ctx)
+ {
++    /* The fast path: a registered target, no switch set, the depth well under
++     * the cap -- what the full path below does for such a call, in the same
++     * order (the vcall stack, the trampoline chain). Anything else (a null or
++     * unknown target, the cap, a diagnostic) goes the full way. */
++    if (__builtin_expect(icall_plain(), 1)) {
++        const uint32_t addr = g_icall_target_set ? g_icall_target : (uint32_t)ctx->ctr;
++        const ppu_fn fn = addr ? ppu_lookup(addr) : nullptr;
++        if (fn && g_dispatch_depth <= 4000) {
++            g_active_ctx = ctx;
++            g_icall_target_set = 0;
++            g_dispatch_depth++;
++            if (g_vcall_sp < 128) g_vcall_stk[g_vcall_sp] = addr;
++            g_vcall_sp++;
++            fn(ctx);
++            while (g_trampoline_fn) {
++                void (*tf)(void*) = g_trampoline_fn;
++                g_trampoline_fn = 0;
++                tf(ctx);
++            }
++            if (g_vcall_sp > 0) g_vcall_sp--;
++            g_dispatch_depth--;
++            return;
++        }
++    }
+     ppu_toc_check(ctx, "indirect-call", (uint32_t)ctx->ctr);
+     static int on = -1;
+     if (on < 0) on = getenv("PPU_CSCHECK") ? 1 : 0;
+-- 
+2.56.0.windows.3
+

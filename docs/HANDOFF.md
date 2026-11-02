@@ -369,7 +369,8 @@ tooling, the native Windows build, measuring on the 3070) are done; see
    run, 13 ms after the fight began; trace kind 24). Geometry is not cached
    between frames for every draw: ~120 draws a frame (~75-100k vertices)
    are converted on the CPU every frame, not only at first sight (trace kind
-   25) -- part of the walker's drain, and the first candidate for headroom.
+   25) -- part of the walker's drain; not what limits frames uncapped (the
+   main thread is, below), but it is in the slow frames' drains.
    **Slow frames, traced** (the owner's own play, ~7.7 min traced, 26,503
    frames; native collision and solver, default ring; tests/slow_frames.py):
    92% of frames under 18 ms. In the 18-25 ms frames (7.4%) the main thread
@@ -452,8 +453,21 @@ tooling, the native Windows build, measuring on the 3070) are done; see
    lets it: ~120 fps, guest frames mean 8.1-8.4 ms, p99 12.7-13.4, in
    exploration and in the river fight alike. Paced to this 143 Hz display
    (`DIAG_VBLANK_MS=6.944`): mean 8.9-10 ms, so 144 is not sustained; it needs
-   ~15-20% more headroom (the walker's per-frame CPU geometry first). Whether
-   gameplay stays right at these rates is checked separately (below).
+   ~15-20% more headroom. **What limits it** (tests/frame_costs.py on the
+   uncapped fight's trace; build/baselines/2026-11-02-frame-rate): the PPU
+   main thread, the game's own code -- idle 0.5 ms of an ~8.5 ms frame, while
+   the walker drains 5.6 ms and the GPU takes 2.6. Its profile (`DIAG_PROF`,
+   `DIAG_PROF_THREADS="ppu main"`, 40 s of the uncapped fight) is flat: no
+   game function over 3.4% of samples; 80% of the time is under an indirect
+   call, and the runtime's dispatcher for those was the largest single cost,
+   ~7% (its lookup's cache misses, two dozen per-call switch checks). Patch
+   0071 gives it a fast path and a one-array table: uncapped exploration
+   8.16 / 8.10 -> 7.66 / 7.77 ms a frame (~5%, ~123 -> ~130 fps; the same
+   binary with `PS3_TOCCHECK=1` forcing the old path). 144 now needs ~10%
+   more off the main thread; what is left is spread thin over the game's
+   code (the lifter's code generation as a whole), so no single fix gets
+   there. Whether gameplay stays right at these rates is checked separately
+   (below).
    **Gameplay at other frame rates** (tests/scripts/fps_check.drive,
    tests/fps_check.py: the same inputs at 30 -- the original pacing -- 60,
    ~120 with a 2 ms vblank and ~110 with a 144 Hz one; the game's state from
@@ -541,11 +555,19 @@ tooling, the native Windows build, measuring on the 3070) are done; see
      saturation somewhere: gamma/sRGB handling in render targets or the
      present blit (swapchain format 44, `B8G8R8A8_UNORM`), or a colour-matrix
      constant.
-   - **"Install Game Data onto the HDD?" -> Yes crashes.** The install thread
-     calls an unimplemented system function (unresolved NID `0x0D5B4A14`),
-     then the game exits and the shutdown aborts. The half-written
-     `dev_hdd0/game/BLUS30490DATA` it leaves makes the next start exit at
-     once. Implement the function; make the shutdown path clean.
+   - **"Install Game Data onto the HDD?" -> Yes crashed. Fixed (2026-11-02,
+     patch 0072).** NID `0x0D5B4A14` is `cellFsReadWithOffset` (NIDs are
+     SHA-1 of the name with the fixed salt); the install copies the disc
+     with it and `cellFsWriteWithOffset`, both now positional transfers in
+     ppu_fs.cpp. The main menu's INSTALL (tests/scripts/install_data.drive,
+     no `SAVES=`) runs to the end in ~25 s -- 1,945 files, 1.28 GB, each
+     byte-identical to the disc -- and returns to the title; the next start
+     on that data root runs, reading the installed copy after its data
+     check. The clean shutdown after an install failure was not revisited
+     (it no longer fails). **Still open:** cellMsgDialog answers every
+     yes/no dialog YES by itself ("Auto-responding: YES"), so a player
+     cannot decline the install question or any other; a real dialog (or
+     at least the game's default button) is needed.
    - **No window on Wayland:** the swapchain could not be created and the
      backend went headless. `SDL_VIDEODRIVER=x11` (XWayland) works; fall back
      to X11 automatically.
@@ -959,4 +981,4 @@ Edit in `build/ref/ps3recomp` (branch `dotheroes`), commit there as
 `git format-patch --start-number <next> -o ../../../patches/ps3recomp HEAD~<n>`
 and commit the patch files here. `tools/pipeline.py` refuses to run with
 uncommitted changes in that checkout, and re-applies the whole series when
-the patch files change. 70 patches (0001-0070) as of 2026-11-01.
+the patch files change. 72 patches (0001-0072) as of 2026-11-02.

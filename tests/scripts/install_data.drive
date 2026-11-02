@@ -1,0 +1,33 @@
+# The main menu's INSTALL -> "Install Game Data onto the PlayStation 3 HDD?"
+# -> Yes, on a fresh data root (no SAVES=): the copy of ~1.2 GB into the run's
+# dev_hdd0/game/BLUS30490DATA, with screenshots on the way. The game reads the
+# disc's files for it with cellFsReadWithOffset (ps3recomp's ppu_fs.cpp).
+log TitleMovie 120
+sleep 5
+press START                 # "PRESS START BUTTON" -> main menu, NEW GAME
+sleep 3
+press DOWN
+sleep 1
+press DOWN
+sleep 1
+press DOWN
+sleep 1
+press DOWN
+sleep 1
+shot menu-install
+press CROSS                 # INSTALL
+sleep 3
+shot install-question
+press CROSS                 # Yes
+sleep 5
+shot installing-5
+sleep 20
+shot installing-25
+sleep 30
+shot installing-55
+sleep 30
+shot installing-85
+sleep 30
+shot installing-115
+sleep 30
+shot installing-145
