@@ -1,0 +1,119 @@
+# Scenario: the river fight (SCENARIO=river_fight tests/boot_smoke.py).
+#
+# Starts from: the kept checkpoint castle-front (a copy of the owner's save in
+#   front of the castle: CONTINUE puts the hero in field area 17).
+# Settings: the validated 60 fps configuration (four switches), the state
+#   probes, hitch marks, the frame log, on screen with the readout; normal
+#   damage (no can't-die). Override any of these in the environment.
+# Reaching it: CONTINUE, confirmed in play in area 17; the route east (holds
+#   ending against walls), confirmed in area 18 near the arrival point.
+# Started when: in area 18, alive, within 2 units of the arrival point
+#   (76.1, -157.6), with at least three of the river's enemies (class FE4500)
+#   within 40 units.
+# Completed when: ROUNDS (default 20) rounds of swings (~4 s each) in area 18,
+#   alive throughout, debris physics ran (collision tasks rose by more than
+#   20) and the enemies near lost more than 5 half apples of life between
+#   them: a fight that cut nothing or hit nobody does not pass. Each round
+#   starts by walking back to the arrival point (knockback moves the hero).
+# Reset / retry: a failure (death, leaving the area, a check missed) is
+#   recorded (failures.jsonl) and the way back is taken -- after a death the
+#   game-over "Continue?" YES (back at the castle, nothing saved), otherwise
+#   the system menu's TITLE and CONTINUE -- then the cycle again, three tries
+#   at most; the drive stops (and the run with it) after the third.
+# Cycles: FIGHTS of them (default 1), each a fight segment for
+#   tests/batch_report.py; route and menu time recorded apart.
+#! saves build/checkpoints/castle-front
+#! env DOTHEROES_NATIVE_CD=1 DOTHEROES_NATIVE_SOLVER=4,5,6 GCM_WRAP_LAP=1 DOTHEROES_PRESENT_ONCE=1
+#! env DOTHEROES_DEV_STATE=1 DOTHEROES_DEV_KEYS=1 DIAG_FRAMES=frames.log PS3_VERBOSE=0
+#! env WINDOW=1 VISIBLE=1 TOPMOST=1 GRAB_EVERY=60 PS3_OSD_FPS=2 DUMP=0 SHOT_EVERY=0
+#! secs 900
+
+block to_castle_after_death
+  state life==0 30
+  sleep 12                  # GAME OVER, then "Continue?" on YES
+  press CROSS               # YES: back at the castle, nothing saved
+  sleep 5
+end
+
+block to_title_and_continue
+  press START               # the system menu, on RESUME
+  sleep 2
+  press UP                  # TITLE (the list wraps)
+  sleep 1
+  press CROSS               # "Exit game? Unsaved data will be lost.", on NO
+  sleep 2
+  press UP
+  sleep 1
+  press CROSS               # YES
+  log TitleMovie 30         # the title's movie opened again
+  sleep 6
+  call continue
+end
+
+block continue
+  press START               # "PRESS START BUTTON"
+  sleep 3
+  press START               # CONTINUE
+  sleep 5
+  press CROSS               # "Change characters?" NO
+end
+
+block back_to_castle
+  when life==0 to_castle_after_death
+  when life>0,area!=17 to_title_and_continue
+  state life>0,area==17 60
+end
+
+block route_to_river
+  hold RIGHT 4
+  hold DOWN 1.5
+  hold RIGHT 3
+  hold RIGHT 4
+  hold RIGHT 4
+  hold RIGHT 2.5
+  hold UP 1.5
+  hold RIGHT 2
+end
+
+block swings               # one round: back to the arrival spot, then a direction tap and two swings, four ways
+  goto 76.1 -157.6 1.5 4 soft   # knockback moves the hero; the grass is here
+  hold RIGHT 0.15
+  repeat 2 CROSS 0.35
+  hold DOWN 0.15
+  repeat 2 CROSS 0.35
+  hold LEFT 0.15
+  repeat 2 CROSS 0.35
+  hold UP 0.15
+  repeat 2 CROSS 0.35
+end
+
+log TitleMovie 120
+sleep 5
+call continue
+state life>0,area==17 90
+sleep 3
+
+loop ${FIGHTS:-1}
+  attempt 3 back_to_castle
+    expect life>0
+    segment route castle-to-river
+    call route_to_river
+    state area==18,life>0 30
+    goto 76.1 -157.6 2 6       # near the arrival point (the grass), or the route went wrong
+    endseg
+    sleep 1
+    actors cFE4500>=3 5        # the river's enemies (class FE4500) near: the encounter is here
+    expect life>0,area==18,menu==3   # alive, in the area, no menu left open
+    segment fight river
+    loop ${ROUNDS:-20}
+      call swings
+    end
+    endseg steps>+20,hpFE4500<-5   # debris physics ran and the enemies lost life
+    actors
+    expect
+    segment menu back-to-castle
+    call to_title_and_continue
+    state life>0,area==17 60
+    endseg
+  end
+end

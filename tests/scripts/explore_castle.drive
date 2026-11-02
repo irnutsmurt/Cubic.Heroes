@@ -1,0 +1,41 @@
+# Into the castle from the save's start in front of it (SAVES=): north up the
+# path and the steps to the gate ("OPEN"), the gate opened, inside (an
+# interior transition), a look around and a word with whoever is ahead.
+log TitleMovie 120
+sleep 5
+press START
+sleep 3
+press START
+sleep 5
+press CROSS                 # "Change characters?" NO
+state life>0,area==17 90
+sleep 3
+hold UP 2
+hold UP 2
+sleep 2
+hold UP 2
+sleep 2
+shot at-gate
+press CROSS                 # OPEN
+sleep 4
+shot opened
+hold UP 2
+sleep 6
+shot inside-1
+hold UP 3
+sleep 3
+shot inside-2
+press CROSS                 # talk to whoever is ahead
+sleep 3
+shot talk-1
+press CROSS
+sleep 3
+shot talk-2
+press CROSS
+sleep 3
+press CROSS
+sleep 3
+shot talk-3
+hold DOWN 6
+sleep 6
+shot out

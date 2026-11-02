@@ -69,10 +69,12 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -180,6 +182,78 @@ void life_loop()
     }
 }
 
+// The characters near the hero: objects in the heap (0x10000000-0x20000000)
+// with a class vtable at +0 in the game's .data (0x00F00000-0x01100000) and a
+// position at +0x428/+0x42C/+0x430 within `radius` of the hero's (and 20
+// units in height), up to `max`, the player's own object left out. A pass over
+// the committed heap (tens of ms, on the calling thread).
+struct Near { uint32_t ea, vt; float x, y, z; };
+
+int scan_near(uint32_t p, float radius, Near* out, int max)
+{
+    int n = 0;
+#ifdef _WIN32
+    const float px = rdf(p + 0x428), py = rdf(p + 0x42C), pz = rdf(p + 0x430);
+    for (uint64_t ea = 0x10000000u; ea < 0x20000000u && n < max; ) {
+        MEMORY_BASIC_INFORMATION mbi;
+        if (!VirtualQuery(vm_base + ea, &mbi, sizeof mbi)) break;
+        const uint64_t len = (uint64_t)((uintptr_t)mbi.BaseAddress + mbi.RegionSize - (uintptr_t)(vm_base + ea));
+        if (mbi.State == MEM_COMMIT && !(mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) && len > 0x440)
+            for (uint64_t o = 0; o + 0x440 <= len && n < max; o += 16) {
+                const uint32_t a = (uint32_t)(ea + o), vt = rd32(a);
+                if (vt < 0x00F00000u || vt >= 0x01100000u || a == p) continue;
+                const float x = rdf(a + 0x428), y = rdf(a + 0x42C), z = rdf(a + 0x430);
+                if (!(fabsf(x - px) < radius && fabsf(z - pz) < radius && fabsf(y - py) < 20.0f)) continue;
+                if (x == 0.0f && z == 0.0f) continue;
+                out[n++] = { a, vt, x, y, z };
+            }
+        ea += len;
+    }
+#else
+    (void)p; (void)radius; (void)out; (void)max;
+#endif
+    return n;
+}
+
+// actors.trigger (a drive's `actors` step): the characters within 40 units of
+// the hero counted now, into actors.txt -- "n=<all> c<vtable>=<count>
+// hp<vtable>=<summed +0x5B8> ...": the player's life field, which characters
+// share the layout of. Read by tests/drive.py at a segment's ends, outside
+// the measured frames (the scan reads the whole heap).
+void actors_now(uint32_t p)
+{
+    static Near found[256];
+    const int n = p && rd32(p) == kPlayerVtable ? scan_near(p, 40.0f, found, 256) : 0;
+    struct Cls { uint32_t vt, count; uint64_t hp; };
+    std::vector<Cls> cls;
+    for (int i = 0; i < n; i++) {
+        size_t k = 0;
+        while (k < cls.size() && cls[k].vt != found[i].vt) k++;
+        if (k == cls.size()) cls.push_back({ found[i].vt, 0, 0 });
+        cls[k].count++;
+        const uint32_t hp = rd32(found[i].ea + kPlayerLife);
+        cls[k].hp += hp < 0x10000 ? hp : 0;
+    }
+    if (FILE* f = fopen("actors.tmp", "w")) {
+        fprintf(f, "n=%d", n);
+        for (const Cls& c : cls) fprintf(f, " c%X=%u hp%X=%llu", c.vt, c.count, c.vt, (unsigned long long)c.hp);
+        fprintf(f, "\n");
+        fclose(f);
+        remove("actors.txt");
+        rename("actors.tmp", "actors.txt");
+    }
+}
+
+// The guest's frame counter (one of the words that count a frame each,
+// tests/fps_check.py): how far the game itself got, whatever the host did.
+constexpr uint32_t kFrames = 0x02CF3570;
+// Two words that change when the system menu opens (find_state differ on
+// tests/scripts/find_menu.drive's snapshots: the same in four snapshots in
+// play, the same in two with the menu open): 3 in play, 1 in the menu; 11 in
+// play, 3 in the menu. Reported raw ("menu", "scene") until the other screens'
+// values are known (docs/HANDOFF.md, "Debugging tools").
+constexpr uint32_t kMenuWord = 0x02B399C0, kSceneWord = 0x02B399A4;
+
 void state_loop()
 {
     for (;;) {
@@ -188,6 +262,10 @@ void state_loop()
         const float x = rdf(kCameraX), z = rdf(kCameraZ);
         const unsigned long long steps = dotheroes_phys_steps();
         const uint64_t t = ps3_ft_now();
+        const uint32_t p = g_player.load();
+        const bool known = p && rd32(p) == kPlayerVtable;
+        const float hx = known ? rdf(p + 0x428) : 0.0f, hy = known ? rdf(p + 0x42C) : 0.0f,
+                    hz = known ? rdf(p + 0x430) : 0.0f;
         if (PS3_FT_ON()) {
             uint32_t xb, zb;
             memcpy(&xb, &x, 4); memcpy(&zb, &z, 4);
@@ -195,11 +273,16 @@ void state_loop()
                         xb, zb, t, t);
         }
         if (FILE* f = fopen("state.tmp", "w")) {
-            fprintf(f, "%.3f %u %.2f %.2f %llu %u %u\n", (double)(int64_t)(t - g_ps3_ft.base) / 1e9, life, x, z, steps,
-                    topups, area);
+            fprintf(f, "%.3f %u %.2f %.2f %llu %u %u %.2f %.2f %.2f %u %u %u\n", (double)(int64_t)(t - g_ps3_ft.base) / 1e9,
+                    life, x, z, steps, topups, area, hx, hy, hz, rd32(kMenuWord), rd32(kSceneWord), rd32(kFrames));
             fclose(f);
             remove("state.txt");
             rename("state.tmp", "state.txt");
+        }
+        if (FILE* a = fopen("actors.trigger", "rb")) {
+            fclose(a);
+            actors_now(p);
+            remove("actors.trigger");
         }
     }
 }
@@ -246,37 +329,16 @@ void actor_log_loop()
 {
     FILE* f = fopen("actors.bin", "wb");
     if (!f) return;
-    struct Actor { uint32_t ea, vt; float x, y, z; };
-    Actor actors[kMaxActors];
+    Near actors[kMaxActors];
     int n = 0;
     for (unsigned tick = 0;; tick++) {
         std::this_thread::sleep_for(std::chrono::milliseconds(4));
         const uint32_t p = g_player.load();
         if (!p || rd32(p) != kPlayerVtable) continue;
-        if (tick % 250 == 0) {   // rescan
-            const float px = rdf(p + 0x428), py = rdf(p + 0x42C), pz = rdf(p + 0x430);
-            n = 0;
-#ifdef _WIN32
-            for (uint64_t ea = 0x10000000u; ea < 0x20000000u && n < kMaxActors; ) {
-                MEMORY_BASIC_INFORMATION mbi;
-                if (!VirtualQuery(vm_base + ea, &mbi, sizeof mbi)) break;
-                const uint64_t len = (uint64_t)((uintptr_t)mbi.BaseAddress + mbi.RegionSize - (uintptr_t)(vm_base + ea));
-                if (mbi.State == MEM_COMMIT && !(mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) && len > 0x440)
-                    for (uint64_t o = 0; o + 0x440 <= len && n < kMaxActors; o += 16) {
-                        const uint32_t a = (uint32_t)(ea + o), vt = rd32(a);
-                        if (vt < 0x00F00000u || vt >= 0x01100000u || a == p) continue;
-                        const float x = rdf(a + 0x428), y = rdf(a + 0x42C), z = rdf(a + 0x430);
-                        if (!(fabsf(x - px) < 40.0f && fabsf(z - pz) < 40.0f && fabsf(y - py) < 20.0f)) continue;
-                        if (x == 0.0f && z == 0.0f) continue;
-                        actors[n++] = { a, vt, x, y, z };
-                    }
-                ea += len;
-            }
-#endif
-        }
+        if (tick % 250 == 0) n = scan_near(p, 40.0f, actors, kMaxActors);   // rescan
         const uint64_t t = ps3_ft_now() - g_ps3_ft.base;
         for (int i = 0; i < n; i++) {
-            Actor& a = actors[i];
+            Near& a = actors[i];
             if (rd32(a.ea) != a.vt) continue;
             const float x = rdf(a.ea + 0x428), y = rdf(a.ea + 0x42C), z = rdf(a.ea + 0x430);
             if (x == a.x && y == a.y && z == a.z) continue;
@@ -368,12 +430,141 @@ void memsnap_loop()
     }
 }
 
+// DOTHEROES_DEV_STOP=1 (tests/boot_smoke.py sets it): stop.trigger in the
+// working directory ends the game the way a test wants -- the frame log
+// (DIAG_FRAMES) and the frame trace (PS3_FTRACE) written first, which a
+// harness's TerminateProcess would lose (they are otherwise written at their
+// set time or at exit) -- then the process ends with status 0 without running
+// exit handlers (other threads are mid-frame).
+void stop_loop()
+{
+    for (;;) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        FILE* t = fopen("stop.trigger", "rb");
+        if (!t) continue;
+        fclose(t);
+        remove("stop.trigger");
+        fprintf(stderr, "[dev-state] stop.trigger at %.3f s: writing the logs, then exiting\n",
+                (double)(int64_t)(ps3_ft_now() - g_ps3_ft.base) / 1e9);
+        if (__atomic_load_n(&g_ps3_osd_log.on, __ATOMIC_ACQUIRE) == 1) ps3_osd_log_write();
+        if (__atomic_load_n(&g_ps3_ft.on, __ATOMIC_ACQUIRE) == 2) ps3_ft_dump();
+        fflush(stdout);
+        fflush(stderr);
+#ifdef _WIN32
+        TerminateProcess(GetCurrentProcess(), 0);
+#else
+        _Exit(0);
+#endif
+    }
+}
+
+// DOTHEROES_DEV_RECORD=1: a play session's record for deriving a test route,
+// record.log, one event a line on the trace's clock: "<s> in <PS3 button mask>
+// <stick x> <stick y>" at every change of the controller (XInput, mapped as
+// cellPad maps SDL's: A CROSS, B CIRCLE, X SQUARE, Y TRIANGLE, the stick 0-255
+// with 128 centred, changes under 16 ignored) or of the keyboard's game keys
+// while the window has the focus; "<s> area <n> <x> <y> <z>" on entering a field
+// area, "<s> life <n>" when the life changes, "<s> pos <area> <x> <y> <z>" every
+// second while the hero is known (the player object's position), "<s> mark <n>"
+// for each hitch mark. Replaying the inputs would not reproduce a session
+// (enemies, loads and timing vary); the positions and areas are the route.
+std::mutex g_record_mu;
+FILE* g_record;
+
+void record_line(const char* fmt, ...)
+{
+    if (!g_record) return;
+    std::lock_guard<std::mutex> lock(g_record_mu);
+    fprintf(g_record, "%.3f ", (double)(int64_t)(ps3_ft_now() - g_ps3_ft.base) / 1e9);
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(g_record, fmt, ap);
+    va_end(ap);
+    fputc('\n', g_record);
+}
+
+#ifdef _WIN32
+bool our_window_focused();
+
+uint32_t keyboard_mask()
+{
+    static const struct { int vk; uint32_t btn; } map[] = {   // cellPad's keyboard map
+        { VK_UP, 0x0010 }, { VK_DOWN, 0x0040 }, { VK_LEFT, 0x0080 }, { VK_RIGHT, 0x0020 }, { 'Z', 0x4000 },
+        { 'X', 0x2000 }, { 'A', 0x8000 }, { 'S', 0x1000 }, { 'Q', 0x0400 }, { 'W', 0x0800 }, { '1', 0x0100 },
+        { '2', 0x0200 }, { VK_RETURN, 0x0008 }, { VK_TAB, 0x0001 },
+    };
+    uint32_t m = 0;
+    if (our_window_focused())
+        for (const auto& k : map)
+            if (GetAsyncKeyState(k.vk) & 0x8000) m |= k.btn;
+    return m;
+}
+#endif
+
+void record_loop()
+{
+#ifdef _WIN32
+    typedef DWORD(WINAPI * GetStateFn)(DWORD, XINPUT_STATE*);
+    HMODULE xi = LoadLibraryA("xinput1_4.dll");
+    if (!xi) xi = LoadLibraryA("xinput9_1_0.dll");
+    const GetStateFn get_state = xi ? (GetStateFn)(void*)GetProcAddress(xi, "XInputGetState") : nullptr;
+    static const struct { WORD x; uint32_t btn; } pad_map[] = {
+        { XINPUT_GAMEPAD_DPAD_UP, 0x0010 }, { XINPUT_GAMEPAD_DPAD_DOWN, 0x0040 }, { XINPUT_GAMEPAD_DPAD_LEFT, 0x0080 },
+        { XINPUT_GAMEPAD_DPAD_RIGHT, 0x0020 }, { XINPUT_GAMEPAD_START, 0x0008 }, { XINPUT_GAMEPAD_BACK, 0x0001 },
+        { XINPUT_GAMEPAD_LEFT_THUMB, 0x0002 }, { XINPUT_GAMEPAD_RIGHT_THUMB, 0x0004 },
+        { XINPUT_GAMEPAD_LEFT_SHOULDER, 0x0400 }, { XINPUT_GAMEPAD_RIGHT_SHOULDER, 0x0800 },
+        { XINPUT_GAMEPAD_A, 0x4000 }, { XINPUT_GAMEPAD_B, 0x2000 }, { XINPUT_GAMEPAD_X, 0x8000 },
+        { XINPUT_GAMEPAD_Y, 0x1000 },
+    };
+#endif
+    uint32_t last_mask = ~0u, last_area = ~0u, last_life = ~0u;
+    int last_x = -100, last_y = -100;
+    for (unsigned tick = 0;; tick++) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        uint32_t mask = 0;
+        int x = 128, y = 128;
+#ifdef _WIN32
+        for (DWORD u = 0; get_state && u < 4; u++) {
+            XINPUT_STATE s;
+            if (get_state(u, &s) != ERROR_SUCCESS) continue;
+            for (const auto& m : pad_map)
+                if (s.Gamepad.wButtons & m.x) mask |= m.btn;
+            if (s.Gamepad.bLeftTrigger > 23) mask |= 0x0100;
+            if (s.Gamepad.bRightTrigger > 23) mask |= 0x0200;
+            x = (s.Gamepad.sThumbLX + 32768) >> 8;
+            y = (32767 - s.Gamepad.sThumbLY) >> 8;
+            break;
+        }
+        mask |= keyboard_mask();
+#endif
+        if (mask != last_mask || abs(x - last_x) >= 16 || abs(y - last_y) >= 16) {
+            record_line("in %04X %d %d", mask, x, y);
+            last_mask = mask; last_x = x; last_y = y;
+        }
+        if (tick % 10) continue;
+        const uint32_t p = g_player.load();
+        const bool known = p && rd32(p) == kPlayerVtable;
+        const uint32_t area = rd32(kArea), life = player_life();
+        const float hx = known ? rdf(p + 0x428) : 0.0f, hy = known ? rdf(p + 0x42C) : 0.0f,
+                    hz = known ? rdf(p + 0x430) : 0.0f;
+        if (area != last_area) record_line("area %u %.2f %.2f %.2f", area, hx, hy, hz);
+        if (life != last_life) record_line("life %u", life);
+        last_area = area; last_life = life;
+        if (tick % 100 == 0) {
+            if (known) record_line("pos %u %.2f %.2f %.2f", area, hx, hy, hz);
+            std::lock_guard<std::mutex> lock(g_record_mu);
+            fflush(g_record);
+        }
+    }
+}
+
 #ifdef _WIN32
 void mark(unsigned& n, uint32_t who)
 {
     n++;
     const uint64_t t = ps3_ft_now();
     if (PS3_FT_ON()) ps3_ft_span(PS3_FT_MARK, who, n, 0, t, t);
+    record_line("mark %u", n);
     fprintf(stderr, "[mark] %u at %.3f s (%s)\n", n, (double)(int64_t)(t - g_ps3_ft.base) / 1e9,
             who == 1 ? "F8" : who == 2 ? "L3+R3" : "mark.trigger");
     char text[16];
@@ -439,7 +630,8 @@ void dev_state_init()
     const char* st = getenv("DOTHEROES_DEV_STATE");
     if (st && *st == '1') {
         std::thread(state_loop).detach();
-        fprintf(stderr, "[dev-state] state.txt: t_s life x z steps topups area, every 100 ms\n");
+        fprintf(stderr, "[dev-state] state.txt: t_s life x z steps topups area hx hy hz menu scene frames, every 100 ms; "
+                        "actors.trigger -> actors.txt\n");
     }
     const char* cd = getenv("DOTHEROES_DEV_CANT_DIE");
     unsigned lo = 0, up = 0;
@@ -470,7 +662,14 @@ void dev_state_init()
         std::thread(actor_log_loop).detach();
         fprintf(stderr, "[dev-state] actors.bin: characters near the hero, every 4 ms\n");
     }
-    if (g_cant_die || g_life_log || (st && *st == '1') || g_player_log_bytes || (wa && *wa) || actor_log)
+    const char* rc = getenv("DOTHEROES_DEV_RECORD");
+    if (rc && *rc == '1' && (g_record = fopen("record.log", "w")) != nullptr) {
+        std::thread(record_loop).detach();
+        fprintf(stderr, "[dev-state] record.log: inputs, areas, life, the hero's position every second, marks\n");
+    }
+    const char* sp = getenv("DOTHEROES_DEV_STOP");
+    if (sp && *sp == '1') std::thread(stop_loop).detach();
+    if (g_cant_die || g_life_log || (st && *st == '1') || g_player_log_bytes || (wa && *wa) || actor_log || g_record)
         std::thread(life_loop).detach();   // also finds the player, for state.txt, player.bin and the watch
     if (g_cant_die) {
         fprintf(stderr, "[cant-die] on (development only): life of %u half apples or less raised to %u\n", g_low_life, g_top_up);

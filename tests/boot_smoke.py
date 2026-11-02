@@ -34,7 +34,19 @@ Environment
                      on the present path and skews it. No screenshots then,
                      and a drive script may not use `change` or `shot`.
   DRIVE=<script>     run tests/drive.py with this script against the game
-                     (closed-loop input; see tests/scripts/).
+                     (closed-loop input; see tests/scripts/). When the drive
+                     ends -- done, or stopped by a failure it could not
+                     recover from -- the run ends too (stop.trigger: the game
+                     writes its frame log and trace first), so a failed route
+                     does not leave the game idling to <seconds>;
+                     HOLD_AFTER_DRIVE=1 keeps it running. <run>/result.json
+                     says how the run ended, with the drive's segments and
+                     failures (tests/batch_report.py).
+  SCENARIO=<name>    DRIVE=tests/scenarios/<name>.drive. A drive's header lines
+                     set what it needs, unless the environment already does:
+                     `#! saves <dir>` (SAVES, relative to the repo: a kept
+                     checkpoint under build/checkpoints/), `#! env NAME=value
+                     ...`, `#! secs <n>` (the run's length when none is given).
   SAVES=<dir>        seed the run's save data with a copy of this game's save
                      folders (BLUS30490*) found in <dir>, e.g. an emulator's
                      dev_hdd0/home/00000001/savedata. <dir> is only read.
@@ -77,12 +89,45 @@ import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WIN = os.name == "nt"
-SECS = float(sys.argv[1]) if len(sys.argv) > 1 else 90
+SECS_ARG = float(sys.argv[1]) if len(sys.argv) > 1 else None
+if os.environ.get("SCENARIO") and not os.environ.get("DRIVE"):
+    os.environ["DRIVE"] = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tests",
+                                       "scenarios", os.environ["SCENARIO"] + ".drive")
+
+
+def scenario_header():
+    """A drive's `#!` lines: saves, env, secs -- applied where the environment
+    does not already say. Returns the run's length from `#! secs`, or None."""
+    secs = None
+    if not os.environ.get("DRIVE"):
+        return None
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    for line in open(os.environ["DRIVE"], encoding="utf-8"):
+        if not line.startswith("#!"):
+            continue
+        what, *rest = line[2:].split("#", 1)[0].split()
+        if what == "saves" and not os.environ.get("SAVES") and not os.environ.get("GAMEDATA"):
+            os.environ["SAVES"] = os.path.join(root, rest[0])
+        elif what == "env":
+            for kv in rest:
+                k, _, v = kv.partition("=")
+                os.environ.setdefault(k, v)
+        elif what == "secs":
+            secs = float(rest[0])
+    return secs
+
+
+SECS = SECS_ARG or scenario_header() or 90
+if SECS_ARG:
+    scenario_header()
 BIN = os.environ.get("BIN") or os.path.join(ROOT, "build", *(("port-win", "dotheroes.exe") if WIN
                                                              else ("port", "dotheroes")))
 ELF = os.path.join(ROOT, "build", "disc", "PS3_GAME", "USRDIR", "EBOOT.elf")
 TAG = os.environ.get("RUN_TAG")
-RUN = os.path.join(ROOT, "build", "test", "boot-" + time.strftime("%Y%m%d-%H%M%S") + (f"-{TAG}" if TAG else ""))
+# RUNS_IN=<dir>: where the run's directory goes (default build/test, which the
+# retention below cleans); a play session's go to build/sessions, kept.
+RUNS_IN = os.path.join(ROOT, os.environ.get("RUNS_IN") or os.path.join("build", "test"))
+RUN = os.path.join(RUNS_IN, "boot-" + time.strftime("%Y%m%d-%H%M%S") + (f"-{TAG}" if TAG else ""))
 SHOT_EVERY = int(os.environ.get("SHOT_EVERY", "10"))
 VISIBLE = os.environ.get("VISIBLE") == "1"
 TOPMOST = os.environ.get("TOPMOST") == "1"
@@ -169,7 +214,7 @@ def build_identity():
         "desktop_locked": desktop_locked(),
         "secs": SECS, "drive": os.path.relpath(os.environ["DRIVE"], ROOT) if os.environ.get("DRIVE") else None,
         "switches": {k: v for k, v in sorted(os.environ.items())
-                     if k.startswith(prefixes) or k in ("DUMP", "WINDOW", "AUDIO", "SHOT_EVERY")},
+                     if k.startswith(prefixes) or k in ("DUMP", "WINDOW", "AUDIO", "SHOT_EVERY", "SCENARIO", "FIGHTS", "ROUNDS")},
     }
 
 
@@ -180,9 +225,33 @@ def main():
     if VISIBLE and desktop_locked():
         print("VISIBLE=1: the desktop is locked; not starting a run that would not be on screen")
         return 3
+    # One game at a time: a second one (a test, or someone playing) would share
+    # the CPU and GPU with this run and skew both. ALLOW_CONCURRENT=1 skips it.
+    def game_running():
+        return os.path.basename(BIN).lower() in subprocess.run(
+            ["tasklist", "/FI", f"IMAGENAME eq {os.path.basename(BIN)}", "/NH", "/FO", "CSV"],
+            capture_output=True, text=True).stdout.lower()
+    # PREEMPT_TESTS=1 (a play session): a test run still going is asked to stop
+    # (its stop.trigger: it writes its logs and exits, its drive records it) so
+    # the player need not wait for it.
+    if WIN and os.environ.get("PREEMPT_TESTS") == "1" and game_running():
+        live = [d for d in glob.glob(os.path.join(ROOT, "build", "test", "boot-*"))
+                if not os.path.exists(os.path.join(d, ".done"))]
+        for d in live:
+            open(os.path.join(d, "stop.trigger"), "w").close()
+            print(f"asked the test run {os.path.basename(d)} to stop")
+        for _ in range(60):
+            if not game_running():
+                break
+            time.sleep(0.5)
+    if WIN and os.environ.get("ALLOW_CONCURRENT") != "1":
+        if game_running():
+            print(f"another {os.path.basename(BIN)} is running (a test or a play session): not starting; "
+                  "close it or wait for it (ALLOW_CONCURRENT=1 overrides)")
+            return 4
     # Retention: test runs (logs, screenshots) must not pile up on disk.
     keep = int(os.environ.get("KEEP_RUNS", "5"))
-    old = sorted(glob.glob(os.path.join(ROOT, "build", "test", "boot-*")))
+    old = sorted(glob.glob(os.path.join(RUNS_IN, "boot-*")))
     for d in old[:max(0, len(old) - max(keep - 1, 0))]:
         shutil.rmtree(d, ignore_errors=True)
     # GAMEDATA=<dir>: play on a persistent save root in place; nothing is copied
@@ -193,6 +262,9 @@ def main():
         return 2
     for d in ("dev_flash", "shots", gamedata):
         os.makedirs(os.path.join(RUN, d), exist_ok=True)
+    roll = os.environ.get("PS3_FTRACE_ROLL")
+    if roll and not os.path.isabs(roll):   # hitch captures: the game writes there, relative to the run
+        os.makedirs(os.path.join(RUN, roll), exist_ok=True)
     open(os.path.join(RUN, "pad.txt"), "w").close()
     import json
     with open(os.path.join(RUN, "run.json"), "w") as f:
@@ -210,6 +282,7 @@ def main():
     for k in ("PS3RECOMP_VK_WINDOW",) + (() if window else ("DISPLAY", "WAYLAND_DISPLAY")):
         env.pop(k, None)
     env.update({
+        "DOTHEROES_DEV_STOP": env.get("DOTHEROES_DEV_STOP", "1"),   # stop.trigger: logs written, then exit
         "PS3_STRICT": env.get("PS3_STRICT", "1"),
         "PS3_GAMEDATA_ROOT": gamedata,
         "PS3_HDD0_ROOT": os.path.join(gamedata, "dev_hdd0"),
@@ -362,6 +435,33 @@ def main():
                            covered_share=round(covered_n / samples, 3) if samples else None, topmost=TOPMOST,
                            grabs=grabs)
     guarded = threading.Thread(target=guard, daemon=True) if VISIBLE and WIN else None
+
+    def mem_sampler():
+        """Windows: the game's working set and private bytes every MEM_EVERY seconds
+        (default 30) into memory.csv: "<s>,<working set MB>,<private MB>"."""
+        import ctypes, ctypes.wintypes as wt
+
+        class PMC(ctypes.Structure):
+            _fields_ = [("cb", wt.DWORD), ("PageFaultCount", wt.DWORD)] + [
+                (n, ctypes.c_size_t) for n in ("PeakWorkingSetSize", "WorkingSetSize", "QuotaPeakPagedPoolUsage",
+                                               "QuotaPagedPoolUsage", "QuotaPeakNonPagedPoolUsage",
+                                               "QuotaNonPagedPoolUsage", "PagefileUsage", "PeakPagefileUsage",
+                                               "PrivateUsage")]
+        k = ctypes.WinDLL("kernel32")
+        h = k.OpenProcess(0x1000 | 0x0010, False, proc.pid)   # QUERY_LIMITED_INFORMATION | VM_READ
+        every, t0 = float(os.environ.get("MEM_EVERY", "30")), time.monotonic()
+        with open(os.path.join(RUN, "memory.csv"), "w") as f:
+            while True:
+                c = PMC(); c.cb = ctypes.sizeof(PMC)
+                if h and ctypes.WinDLL("psapi").GetProcessMemoryInfo(h, ctypes.byref(c), c.cb):
+                    f.write(f"{time.monotonic() - t0:.0f},{c.WorkingSetSize / 2**20:.1f},{c.PrivateUsage / 2**20:.1f}\n")
+                    f.flush()
+                if stop.wait(every):
+                    break
+        if h:
+            k.CloseHandle(h)
+    if WIN:
+        threading.Thread(target=mem_sampler, daemon=True).start()
     if guarded:
         guarded.start()
     dr = None
@@ -370,18 +470,37 @@ def main():
             dr = subprocess.Popen([sys.executable, os.path.join(ROOT, "tests", "drive.py"), RUN, drive],
                                   stdout=log, stderr=subprocess.STDOUT, **({"creationflags": 0x08000000} if WIN else {}))
 
-    timed_out = False
-    try:
-        rc = proc.wait(timeout=SECS)
-    except subprocess.TimeoutExpired:
-        timed_out = True
+    def stop_game():
+        """stop.trigger: the game writes its frame log and trace, then exits; if it
+        does not within 20 s, it is terminated (those logs lost)."""
         ending.set()
-        proc.terminate()   # SIGTERM (the port exits at once) / TerminateProcess
+        open(os.path.join(RUN, "stop.trigger"), "w").close()
         try:
-            rc = proc.wait(timeout=5)
+            return proc.wait(timeout=20), "stop.trigger"
         except subprocess.TimeoutExpired:
-            proc.kill()
-            rc = proc.wait()
+            proc.terminate()   # SIGTERM (the port exits at once) / TerminateProcess
+            try:
+                return proc.wait(timeout=5), "terminated"
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                return proc.wait(), "killed"
+
+    timed_out, ended_by, t_start, rc = False, "game exited", time.monotonic(), None
+    hold = os.environ.get("HOLD_AFTER_DRIVE") == "1"
+    while rc is None:
+        try:
+            rc = proc.wait(timeout=0.5)
+            if guard_state["aborted"]:
+                ended_by = "guard: " + guard_state["aborted"]
+        except subprocess.TimeoutExpired:
+            if time.monotonic() - t_start >= SECS:
+                timed_out = True
+                rc, how = stop_game()
+                ended_by = f"time ({how})"
+            elif dr and not hold and dr.poll() is not None:
+                time.sleep(2)   # the drive's last records
+                rc, how = stop_game()
+                ended_by = f"drive {'done' if dr.returncode == 0 else 'failed'} ({how})"
     open(os.path.join(RUN, ".done"), "w").close()
     stop.set()
     if shots:
@@ -401,6 +520,16 @@ def main():
         time.sleep(1)
         if dr.poll() is None:
             dr.kill()
+    result = {"ended_by": ended_by, "exit": rc, "secs": round(time.monotonic() - t_start, 1),
+              "drive_status": dr.returncode if dr else None,
+              "guard": guard_state if guarded else None}
+    for name in ("segments", "failures"):
+        try:
+            result[name] = [json.loads(l) for l in open(os.path.join(RUN, f"{name}.jsonl"))]
+        except (OSError, ValueError):
+            result[name] = []
+    with open(os.path.join(RUN, "result.json"), "w") as f:
+        json.dump(result, f, indent=1)
 
     stderr = rd(os.path.join(RUN, "stderr.log"))
     diag = os.path.join(RUN, "diag")
@@ -409,8 +538,7 @@ def main():
                        stderr + "".join(rd(os.path.join(diag, r)) for r in reports))
     strict = re.search(r"^\[strict\] FATAL.*$", stderr, re.M)
     how = f" (signal {-rc})" if rc < 0 else ""
-    if timed_out:
-        how += f" (stopped after {SECS:g} s)"
+    how += f" ({ended_by})"
     print(f"run dir : {os.path.relpath(RUN, ROOT)}")
     print(f"exit    : {rc}{how}")
     print(f"strict  : {strict.group(0) if strict else 'none'}")

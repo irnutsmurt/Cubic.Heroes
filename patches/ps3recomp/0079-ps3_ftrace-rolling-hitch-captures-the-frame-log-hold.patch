@@ -1,0 +1,268 @@
+From 942bb4ab4028564663bfbfa9d8cd4b0bc2445cdd Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Mon, 2 Nov 2026 10:04:36 -0800
+Subject: [PATCH] ps3_ftrace: rolling hitch captures; the frame log holds 9
+ hours
+
+PS3_FTRACE_ROLL=<dir> keeps the frame trace in a ring for the whole run and
+writes the seconds around a slow guest frame (PS3_FTRACE_ROLL_MS, default
+25, under 100 ms) or a tester's mark to <dir>/hitch_<n>_<s>s_<why>.txt, in
+the dump's format, from a thread of its own: nothing is written on the
+frame path. Rate-limited (one per PS3_FTRACE_ROLL_GAP s, PS3_FTRACE_ROLL_MAX
+in all), load bursts (two more frames of 50 ms+ in the window) and the first
+PS3_FTRACE_ROLL_FROM seconds skipped, script marks (who 3) not triggers.
+
+DIAG_FRAMES keeps 4M records (32 MB) instead of 1M: a play session of
+several hours fits.
+---
+ include/ps3emu/osd.h        |   2 +-
+ include/ps3emu/ps3_ftrace.h | 181 +++++++++++++++++++++++++++++++++++-
+ 2 files changed, 181 insertions(+), 2 deletions(-)
+
+diff --git a/include/ps3emu/osd.h b/include/ps3emu/osd.h
+index 88259d7..fe0661b 100644
+--- a/include/ps3emu/osd.h
++++ b/include/ps3emu/osd.h
+@@ -122,7 +122,7 @@ static inline void ps3_osd_fps_set_mode(int m)
+  * a test harness ends the process without running exit handlers, so give it
+  * the seconds. A frame-time record cheap enough (a store per frame) to
+  * compare runs with and without the other diagnostics; tests/frame_log.py. */
+-#define PS3_OSD_LOG_CAP (1u << 20)
++#define PS3_OSD_LOG_CAP (1u << 22)   /* 32 MB: ~9 h at 60 fps */
+ 
+ typedef struct {
+     uint64_t* buf;          /* (us << 1) | 1 for a present, 0 for a flip request */
+diff --git a/include/ps3emu/ps3_ftrace.h b/include/ps3emu/ps3_ftrace.h
+index 2af3032..124f3d8 100644
+--- a/include/ps3emu/ps3_ftrace.h
++++ b/include/ps3emu/ps3_ftrace.h
+@@ -22,6 +22,23 @@
+  * default 20), PS3_FTRACE_MERGE_US (usleep polls of one thread at one call
+  * site closer than this become one span, default 300), PS3_FTRACE_CAP (spans
+  * kept, default 4M = 128 MB, allocated only when recording).
++ *
++ * PS3_FTRACE_ROLL=<dir> instead (not with PS3_FTRACE): hitch captures from a
++ * rolling trace. Spans go round a ring (PS3_FTRACE_CAP, default 1M = 32 MB,
++ * some tens of seconds) for the whole run. A guest frame (flip request to
++ * flip request) of PS3_FTRACE_ROLL_MS or more (default 25) but under 100 ms
++ * (longer: a load), or a tester's mark (kind 22, not a script's), triggers a
++ * capture: once
++ * PS3_FTRACE_ROLL_AFTER seconds (default 1) have passed, a thread of its own
++ * copies the spans from PS3_FTRACE_ROLL_BEFORE seconds (default 2) before the
++ * trigger to then out of the ring and writes them to
++ * <dir>/hitch_<n>_<s>s_<why>.txt in the format above (the tools read either).
++ * At most one capture per PS3_FTRACE_ROLL_GAP seconds (default 15) and
++ * PS3_FTRACE_ROLL_MAX in all (default 20); triggers in between are counted,
++ * not captured ("[ftrace] hitch ..." lines). A window with two more frames of
++ * 50 ms+ is a load or a transition, not captured; nor is anything in the first
++ * PS3_FTRACE_ROLL_FROM seconds (default 0). Nothing is written on the frame
++ * path.
+  */
+ #ifndef PS3EMU_PS3_FTRACE_H
+ #define PS3EMU_PS3_FTRACE_H
+@@ -33,6 +50,7 @@
+ #ifdef _WIN32
+ #  include <windows.h>
+ #else
++#  include <pthread.h>
+ #  include <time.h>
+ #endif
+ 
+@@ -119,6 +137,11 @@ typedef struct {
+     char path[1024];
+     struct { uint64_t t0, t1; uint32_t lr, n; } us[PS3_FT_TIDS];   /* usleep run being merged */
+     char names[PS3_FT_TIDS][28];
++    /* PS3_FTRACE_ROLL: the ring, the pending trigger, the captures */
++    int roll;
++    uint64_t last_flip, trig_t, trig_why, slow_ns;   /* trig_why: frame us, or 1 << 32 | mark n */
++    uint64_t before, after, gap, last_cap, from;
++    uint32_t caps, max_caps, skipped, bursts;
+ } ps3_ft_state;
+ 
+ PS3_FT_SHARED ps3_ft_state g_ps3_ft = { 0 };
+@@ -136,9 +159,119 @@ static inline uint64_t ps3_ft_now(void)
+ #endif
+ }
+ 
++/* PS3_FTRACE_ROLL: spans that overlap [lo, hi] copied out of the ring (oldest
++ * first) and written to path in the dump's format. Called on the capture
++ * thread only. A slot being overwritten as it is copied can come out torn; the
++ * ring holds far more than a capture's window, so that needs a wrap mid-copy. */
++static inline int ps3_ft_roll_write(const char* path, uint64_t lo, uint64_t hi, uint64_t trig, int keep_bursts)
++{
++    ps3_ft_state* s = &g_ps3_ft;
++    const uint64_t c0 = ps3_ft_now();
++    const uint32_t n = __atomic_load_n(&s->n, __ATOMIC_ACQUIRE);
++    const uint32_t count = n < s->cap ? n : s->cap;
++    ps3_ft_rec* out = (ps3_ft_rec*)malloc(sizeof(ps3_ft_rec) * (count ? count : 1));
++    if (!out) return 0;
++    uint32_t k = 0;
++    for (uint32_t j = n - count; j != n; j++) {
++        const ps3_ft_rec r = s->buf[j % s->cap];
++        if (r.kind && r.t1 >= lo && r.t0 <= hi) out[k++] = r;
++    }
++    const uint64_t c1 = ps3_ft_now();
++    /* A load or a transition is a run of long frames, not a hitch: other frames
++     * of 50 ms+ in the window make it a burst, not captured (marks always are). */
++    uint64_t prev = 0;
++    uint32_t long_frames = 0;
++    for (uint32_t i = 0; i < k; i++)
++        if (out[i].kind == PS3_FT_FLIP_REQ) {
++            if (prev && out[i].t0 != trig && out[i].t0 - prev >= 50000000ull) long_frames++;
++            prev = out[i].t0;
++        }
++    if (long_frames >= 2 && !keep_bursts) {
++        free(out);
++        return 0;
++    }
++    FILE* f = fopen(path, "w");
++    if (f) {
++        fprintf(f, "# ps3_ftrace start_us=%.3f end_us=%.3f spans=%u dropped=0\n",
++                (double)(lo - s->base) / 1e3, (double)(hi - s->base) / 1e3, k);
++        for (uint32_t t = 0; t < PS3_FT_TIDS; t++)
++            if (s->names[t][0]) fprintf(f, "T %u %s\n", t, s->names[t]);
++        for (uint32_t i = 0; i < k; i++)
++            fprintf(f, "%u %u %x %x %.3f %.3f\n", out[i].kind, out[i].who, out[i].a, out[i].b,
++                    (double)(out[i].t0 - s->base) / 1e3, (double)(out[i].t1 - s->base) / 1e3);
++        fclose(f);
++    }
++    free(out);
++    fprintf(stderr, "[ftrace] hitch capture %u: %u spans to %s (copy %.1f ms, write %.0f ms; so far %u trigger(s) "
++            "skipped, %u load burst(s) not captured)\n", s->caps + 1, k, path, (double)(c1 - c0) / 1e6,
++            (double)(ps3_ft_now() - c1) / 1e6, __atomic_load_n(&s->skipped, __ATOMIC_RELAXED), s->bursts);
++    return 1;
++}
++
++#ifdef _WIN32
++static DWORD WINAPI ps3_ft_roll_main(LPVOID unused)
++#else
++static void* ps3_ft_roll_main(void* unused)
++#endif
++{
++    ps3_ft_state* s = &g_ps3_ft;
++    (void)unused;
++    for (;;) {
++#ifdef _WIN32
++        Sleep(100);
++#else
++        struct timespec ts = { 0, 100000000 };
++        nanosleep(&ts, NULL);
++#endif
++        const uint64_t trig = __atomic_load_n(&s->trig_t, __ATOMIC_ACQUIRE);
++        if (!trig || ps3_ft_now() < trig + s->after) continue;
++        const uint64_t why = __atomic_load_n(&s->trig_why, __ATOMIC_ACQUIRE);
++        const int is_mark = (why >> 32) != 0;
++        /* a tester marks a hitch after feeling it: 2 s more before a mark */
++        const uint64_t lo = trig - s->before - (is_mark ? 2000000000ull : 0), hi = trig + s->after;
++        char path[1100];
++        if (trig - s->base < s->from) {   /* boot and the title: not measured */
++            __atomic_store_n(&s->trig_t, 0, __ATOMIC_RELEASE);
++            continue;
++        }
++        if (is_mark)
++            snprintf(path, sizeof path, "%s/hitch_%02u_%.1fs_mark%u.txt", s->path, s->caps + 1,
++                     (double)(trig - s->base) / 1e9, (uint32_t)why);
++        else
++            snprintf(path, sizeof path, "%s/hitch_%02u_%.1fs_%.0fms.txt", s->path, s->caps + 1,
++                     (double)(trig - s->base) / 1e9, (double)why / 1e3);
++        if (ps3_ft_roll_write(path, lo, hi, trig, is_mark)) {
++            s->caps++;
++            s->last_cap = trig;
++        } else {
++            s->bursts++;
++        }
++        __atomic_store_n(&s->trig_t, 0, __ATOMIC_RELEASE);
++    }
++#ifdef _WIN32
++    return 0;
++#else
++    return NULL;
++#endif
++}
++
++/* A slow frame or a mark (PS3_FTRACE_ROLL): captured unless one is pending, the
++ * last capture was under PS3_FTRACE_ROLL_GAP ago, or the budget is spent. */
++static inline void ps3_ft_roll_trigger(ps3_ft_state* s, uint64_t t, uint64_t why)
++{
++    uint64_t none = 0;
++    if (s->caps >= s->max_caps || (s->last_cap && t - s->last_cap < s->gap) ||
++        !__atomic_compare_exchange_n(&s->trig_t, &none, t, 0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
++        __atomic_fetch_add(&s->skipped, 1, __ATOMIC_RELAXED);
++        return;
++    }
++    __atomic_store_n(&s->trig_why, why, __ATOMIC_RELEASE);
++}
++
+ static inline void ps3_ft_dump(void)
+ {
+     ps3_ft_state* s = &g_ps3_ft;
++    if (s->roll) return;   /* the ring is written in captures, not dumped */
+     if (__atomic_exchange_n(&s->dumped, 1, __ATOMIC_ACQ_REL)) return;
+     __atomic_store_n(&s->on, 3, __ATOMIC_RELEASE);
+     /* Close the open usleep runs; their threads may still be in them. */
+@@ -205,6 +338,40 @@ static inline int ps3_ft_init(void)
+             }
+         }
+     }
++    const char* roll = getenv("PS3_FTRACE_ROLL");
++    if (on != 2 && roll && *roll && !(e && *e)) {
++        snprintf(s->path, sizeof s->path, "%s", roll);
++#define PS3_FT_ENV(name, dflt) (getenv(name) ? atof(getenv(name)) : (dflt))
++        s->min = (uint64_t)PS3_FT_ENV("PS3_FTRACE_MIN_US", 20) * 1000ull;
++        s->merge = (uint64_t)PS3_FT_ENV("PS3_FTRACE_MERGE_US", 300) * 1000ull;
++        s->cap = (uint32_t)PS3_FT_ENV("PS3_FTRACE_CAP", 1u << 20);
++        s->slow_ns = (uint64_t)(PS3_FT_ENV("PS3_FTRACE_ROLL_MS", 25) * 1e6);
++        s->before = (uint64_t)(PS3_FT_ENV("PS3_FTRACE_ROLL_BEFORE", 2) * 1e9);
++        s->after = (uint64_t)(PS3_FT_ENV("PS3_FTRACE_ROLL_AFTER", 1) * 1e9);
++        s->gap = (uint64_t)(PS3_FT_ENV("PS3_FTRACE_ROLL_GAP", 15) * 1e9);
++        s->max_caps = (uint32_t)PS3_FT_ENV("PS3_FTRACE_ROLL_MAX", 20);
++        s->from = (uint64_t)(PS3_FT_ENV("PS3_FTRACE_ROLL_FROM", 0) * 1e9);
++#undef PS3_FT_ENV
++        s->buf = (ps3_ft_rec*)calloc(s->cap, sizeof(ps3_ft_rec));
++        if (!s->buf) {
++            fprintf(stderr, "[ftrace] no memory for %u spans\n", s->cap);
++        } else {
++            s->roll = 1;
++            s->base = ps3_ft_now();
++            s->start = s->base;
++            s->end = ~0ull;
++#ifdef _WIN32
++            CloseHandle(CreateThread(NULL, 0, ps3_ft_roll_main, NULL, 0, NULL));
++#else
++            pthread_t th;
++            if (!pthread_create(&th, NULL, ps3_ft_roll_main, NULL)) pthread_detach(th);
++#endif
++            fprintf(stderr, "[ftrace] rolling, %u spans: frames of %.0f ms+ and marks captured to %s/hitch_*.txt "
++                    "(%.1f s before, %.1f s after, one per %.0f s, %u at most)\n", s->cap, (double)s->slow_ns / 1e6,
++                    s->path, (double)s->before / 1e9, (double)s->after / 1e9, (double)s->gap / 1e9, s->max_caps);
++            on = 2;
++        }
++    }
+     __atomic_store_n(&s->on, on, __ATOMIC_RELEASE);
+     return on == 2;
+ }
+@@ -229,8 +396,20 @@ static inline void ps3_ft_span(int kind, uint32_t who, uint32_t a, uint32_t b,
+     if (t1 < s->start) return;
+     if (t0 > s->end) { ps3_ft_dump(); return; }
+     const uint32_t i = __atomic_fetch_add(&s->n, 1, __ATOMIC_RELAXED);
+-    if (i >= s->cap) { __atomic_fetch_add(&s->dropped, 1, __ATOMIC_RELAXED); return; }
+     ps3_ft_rec r = { t0, t1, a, b, who, (uint32_t)kind };
++    if (s->roll) {
++        s->buf[i % s->cap] = r;
++        if (kind == PS3_FT_FLIP_REQ) {   /* one thread: the guest's flip requests */
++            const uint64_t last = s->last_flip;
++            s->last_flip = t0;
++            if (last && t0 - last >= s->slow_ns && t0 - last < 100000000ull)
++                ps3_ft_roll_trigger(s, t0, (t0 - last) / 1000);
++        } else if (kind == PS3_FT_MARK && who != 3) {   /* a tester's mark, not a script's (3) */
++            ps3_ft_roll_trigger(s, t0, 1ull << 32 | a);
++        }
++        return;
++    }
++    if (i >= s->cap) { __atomic_fetch_add(&s->dropped, 1, __ATOMIC_RELAXED); return; }
+     s->buf[i] = r;
+ }
+ 
+-- 
+2.56.0.windows.3
+

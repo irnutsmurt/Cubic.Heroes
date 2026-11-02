@@ -1,0 +1,64 @@
+# Snapshots for finding where the game keeps "a menu or a dialogue is open"
+# (tests/native/find_state.cpp differ; DOTHEROES_DEV_MEMSNAP=1,
+# DOTHEROES_DEV_STATE=1, SAVES= a save at the castle). In play (p0, p1), the
+# system menu open (m0, m1: the cursor moved between them), in play again (p2),
+# then inside the castle talking (d0, d1: two pages of a dialogue), and in play
+# after it (p3). memsnap_NN.bin in that order: p0 p1 m0 m1 p2 d0 d1 p3.
+log TitleMovie 120
+sleep 5
+press START
+sleep 3
+press START
+sleep 5
+press CROSS                 # "Change characters?" NO
+state life>0,area==17 90
+sleep 3
+touch memsnap.trigger
+sleep 5
+hold LEFT 0.3
+sleep 1
+touch memsnap.trigger
+sleep 5
+press START                 # the system menu, on RESUME
+sleep 2
+touch memsnap.trigger
+sleep 5
+press DOWN
+sleep 1
+touch memsnap.trigger
+sleep 5
+press UP                    # RESUME
+sleep 1
+press CROSS
+sleep 3
+touch memsnap.trigger
+sleep 5
+hold UP 2
+hold UP 2
+sleep 2
+hold UP 2
+sleep 2
+press CROSS                 # OPEN
+sleep 4
+hold UP 2
+sleep 6
+hold UP 3
+sleep 3
+press CROSS                 # talk to whoever is ahead
+sleep 3
+touch memsnap.trigger
+sleep 5
+press CROSS
+sleep 3
+touch memsnap.trigger
+sleep 5
+press CROSS
+sleep 3
+press CROSS
+sleep 3
+press CROSS
+sleep 3
+hold DOWN 1
+sleep 2
+touch memsnap.trigger
+sleep 5
