@@ -17,6 +17,9 @@ workload, kind 19; solver commands, kind 20). Per arm, over the fight runs:
   frames    present-call completion intervals (not display timing): over 25 /
             33 ms, p99; guest frames over 18 / 20 ms, p99; frame start ->
             present returned, median / p90; physics frames binned by points
+  --per-run each run's physics frames beside its frames without a physics step
+            in the same fight (a control: heavier fights also bring more of
+            the game's other work, which contact points do not measure)
 """
 import argparse
 import bisect
@@ -82,6 +85,7 @@ def main():
     ap.add_argument("--arm-env", default="DOTHEROES_NATIVE_SOLVER")
     ap.add_argument("--command", type=int, default=6)
     ap.add_argument("--min-steps", type=int, default=50)
+    ap.add_argument("--per-run", action="store_true", help="also a per-run frame table, with frames without physics as a control")
     a = ap.parse_args()
     arms = collections.defaultdict(list)
     for d in a.runs:
@@ -120,6 +124,19 @@ def main():
               f"{100 * sum(x > 18 for x in g) / n:.2f}%, over 20 ms {100 * sum(x > 20 for x in g) / n:.2f}%, p99 {pct(g, .99):.1f}; "
               f"frame start -> present median {pct([f['start_to_present'] for f in frames], .5):.2f}, "
               f"p90 {pct([f['start_to_present'] for f in frames], .9):.2f}")
+    if a.per_run:
+        print("\nper run: physics frames (a step or more) against frames without one during the fight (first to last "
+              "physics frame) -- the second a control for the scene's other work; guest frame mean, over 18 ms, "
+              "present over 25 ms")
+        for arm in names:
+            for d, ss, ff in arms[arm]:
+                idx = [i for i, f in enumerate(ff) if f["steps"]]
+                ph = [ff[i] for i in idx]
+                ctl = [f for f in ff[idx[0]:idx[-1] + 1] if not f["steps"]] if idx else []
+                row = lambda v: (f"{len(v):5d}  {m([f['ppu'] for f in v]):6.2f} ms  {100 * sum(f['ppu'] > 18 for f in v) / max(len(v), 1):5.1f}%"
+                                 f"  {100 * sum(f['shown'] > 25 for f in v) / max(len(v), 1):5.1f}%")
+                print(f"   {arm:<8} {os.path.basename(d):<42} {m([s['points'] for s in ss]):5.0f} pts   physics {row(ph)}   "
+                      f"without {row(ctl)}")
     if len(names) == 2:
         A, B = names
         sa = [s for _, ss, _ in arms[A] for s in ss]

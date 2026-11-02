@@ -5,6 +5,7 @@
 //
 //   bullet_solver_snapcheck writeback <c6r1.bin> <c6r2.bin> <descriptor ea>
 //   bullet_solver_snapcheck copyback <c5r1.bin> <c6r1.bin> <tasks.txt>
+//   bullet_solver_snapcheck iterate <c4rN.bin> <c4rN+k.bin or c5r1.bin> <tasks.txt> <k rounds>
 //
 // Runs the write-back as one task claiming every cell (what the round does
 // when the other two tasks find nothing left: a schedule the game's allows),
@@ -14,8 +15,9 @@
 // released with one ticket per claim plus the last, empty-handed one.
 // The descriptor: a write-back task's in <prefix><step>_tasks.txt.
 // Built with the bundled Zig:
-//   zig c++ -target x86_64-windows-gnu -O2 -I port/native
-//     tests/native/bullet_solver_snapcheck.cpp port/native/bullet_solver.cpp
+//   zig c++ -target x86_64-windows-gnu -O2 -I port/native -I <ps3recomp>/include
+//     -I <ps3recomp>/runtime/spu tests/native/bullet_solver_snapcheck.cpp
+//     port/native/bullet_solver.cpp
 #include <windows.h>
 
 #include <cstdio>
@@ -113,12 +115,147 @@ static int copyback(const char* pre_path, const char* post_path, const char* tas
     return fails ? 1 : 0;
 }
 
+// iterate <before.bin> <after.bin> <tasks.txt> <rounds>: an iterate task's
+// descriptor from the capture's log put in place, the native iterate run as one
+// task for <rounds> rounds -- before each round after the first, the cell masks
+// put back as the first snapshot has them (what the PPU sets for every round;
+// checked here against the second snapshot when it is one taken at a round's
+// start) -- then every solver body up to the highest one a cell lists (0x40
+// bytes each) and every contact row (0x90 bytes, three a contact) compared
+// with the second snapshot. The game's run must have taken the cells in index
+// order (DOTHEROES_SOLVER_SERIAL=1) for cells sharing a body to match.
+static uint16_t rd16(const uint8_t* b, uint32_t ea) { return (uint16_t)(b[ea] << 8 | b[ea + 1]); }
+
+static int iterate(const char* pre_path, const char* post_path, const char* tasks, int rounds)
+{
+    uint8_t* pre = load_space(pre_path);
+    uint8_t* post = load_space(post_path);
+    FILE* f = fopen(tasks, "r");
+    if (!f) { fprintf(stderr, "cannot read %s\n", tasks); return 2; }
+    char line[4096], buf[512];
+    uint32_t desc = 0, words[36];
+    while (!desc && fgets(line, sizeof line, f)) {
+        unsigned slot, cmd, round, d;
+        int at = 0;
+        if (sscanf(line, "task slot %u command %u round %u desc %x:%n", &slot, &cmd, &round, &d, &at) != 4 || cmd != 4) continue;
+        const char* p = line + at;
+        int k = 0;
+        for (; k < 36; k++) { unsigned v; int used; if (sscanf(p, " %x%n", &v, &used) != 1) break; words[k] = v; p += used; }
+        if (k == 36) desc = d;
+    }
+    fclose(f);
+    if (!desc) { fprintf(stderr, "no iterate task in %s\n", tasks); return 2; }
+    for (int k = 0; k < 36; k++) wr32(pre, desc + 4 * k, words[k]);
+    const uint32_t hash = rd32(pre, desc + 0x10), sbl = rd32(pre, desc + 0x14), rows = rd32(pre, desc + 0x18);
+    const uint32_t offs = rd32(pre, desc + 0x20);
+
+    // what the step holds: cells, their bodies and contacts
+    struct Cell { uint32_t index, nb, list, nc, first; };
+    std::vector<Cell> cells;
+    std::vector<unsigned> cells_of;          // per solver body: in how many cells' lists
+    unsigned contacts = 0, both_dynamic = 0, multi_packet = 0, out_of_cell = 0;
+    uint32_t max_body = 0;
+    for (uint32_t i = 0; i < 128; i++) {
+        const uint32_t c = hash + 0x870 + 16 * i;
+        const uint32_t nb = rd16(pre, c), nc = rd16(pre, c + 8);
+        if (!nc && !rd16(pre, c + 12)) continue;
+        cells.push_back({ i, nb, offs + 4 * rd16(pre, c + 2), nc, rd16(pre, c + 10) });
+        for (uint32_t b = 0; b < nb; b++) {
+            const uint32_t idx = rd32(pre, cells.back().list + 4 * b);
+            if (idx >= cells_of.size()) cells_of.resize(idx + 1, 0);
+            cells_of[idx]++;
+            if (idx > max_body) max_body = idx;
+        }
+        const uint32_t used = ((4 * nb + 15) & ~15u) + 0x40 * nb;
+        multi_packet += nc > (0x25800 - used) / 0x1B0;
+        for (uint32_t j = 0; j < nc; j++) {
+            const uint32_t r = rows + (cells.back().first + 3 * j) * 0x90;
+            const uint32_t a = rd32(pre, r + 0x58), b = rd32(pre, r + 0x5C);
+            if (a >= nb || b >= nb) { out_of_cell++; continue; }
+            const uint32_t ba = rd32(pre, cells.back().list + 4 * a), bb = rd32(pre, cells.back().list + 4 * b);
+            both_dynamic += (rd32(pre, sbl + 0x40 * ba + 0x24) & 0x7F800000u) && (rd32(pre, sbl + 0x40 * bb + 0x24) & 0x7F800000u);
+        }
+        contacts += nc;
+    }
+    unsigned shared = 0, listed = 0;
+    for (unsigned n : cells_of) { shared += n > 1; listed += n > 0; }
+    printf("step: %zu cells with work, %u contacts (%u between two moving bodies), %u solver bodies listed, "
+           "%u in more than one cell; cells needing more than one packet %u; rows naming a body outside their cell %u\n",
+           cells.size(), contacts, both_dynamic, listed, shared, multi_packet, out_of_cell);
+
+    uint8_t masks[0x70];
+    memcpy(masks, pre + hash + 0x800, sizeof masks);
+    const bool post_at_round = memcmp(post + hash + 0x800, masks, sizeof masks) == 0;
+    std::vector<uint8_t> body0((max_body + 1) * 0x40);
+    memcpy(body0.data(), pre + sbl, body0.size());
+    std::vector<uint8_t> rows0;
+    for (const Cell& c : cells) rows0.insert(rows0.end(), pre + rows + c.first * 0x90, pre + rows + (c.first + 3 * c.nc) * 0x90);
+    bullet_solver::Stats st;
+    const bullet_solver::Sync sync = { acquire, release };
+    LARGE_INTEGER q0, q1, qf;
+    double best = 1e30;
+    QueryPerformanceFrequency(&qf);
+    for (int r = 0; r < rounds; r++) {
+        if (r) memcpy(pre + hash + 0x800, masks, sizeof masks);
+        QueryPerformanceCounter(&q0);
+        bullet_solver::iterate_task(pre, desc, sync, st);
+        QueryPerformanceCounter(&q1);
+        const double us = (double)(q1.QuadPart - q0.QuadPart) * 1e6 / (double)qf.QuadPart;
+        if (us < best) best = us;
+    }
+    printf("native iterate, compute only: fastest round %.1f us (%d rounds, one task)\n", best, rounds);
+
+    unsigned bodies_same = 0, bodies_changed = 0, rows_same = 0, rows_changed = 0, shown = 0;
+    for (uint32_t b = 0; b <= max_body; b++) {
+        const bool same = memcmp(pre + sbl + 0x40 * b, post + sbl + 0x40 * b, 0x40) == 0;
+        bodies_same += same;
+        bodies_changed += memcmp(post + sbl + 0x40 * b, &body0[0x40 * b], 0x40) != 0;
+        if (!same && shown < 10) {
+            shown++;
+            unsigned k = 0;
+            while (rd32(pre, sbl + 0x40 * b + 4 * k) == rd32(post, sbl + 0x40 * b + 4 * k)) k++;
+            printf("  body %u (in %u cells): first differing word +0x%02X native %08X game %08X\n", b,
+                   b < cells_of.size() ? cells_of[b] : 0, 4 * k, rd32(pre, sbl + 0x40 * b + 4 * k), rd32(post, sbl + 0x40 * b + 4 * k));
+        }
+    }
+    unsigned n_rows = 0;
+    size_t at0 = 0;
+    for (const Cell& c : cells)
+        for (uint32_t j = 0; j < 3 * c.nc; j++) {
+            const uint32_t r = rows + (c.first + j) * 0x90;
+            const bool same = memcmp(pre + r, post + r, 0x90) == 0;
+            rows_same += same;
+            rows_changed += memcmp(post + r, &rows0[at0], 0x90) != 0;
+            at0 += 0x90;
+            n_rows++;
+            if (!same && shown < 20) {
+                shown++;
+                unsigned k = 0;
+                while (rd32(pre, r + 4 * k) == rd32(post, r + 4 * k)) k++;
+                printf("  cell %u contact %u row %u: first differing word +0x%02X native %08X game %08X\n", c.index, j / 3, j % 3,
+                       4 * k, rd32(pre, r + 4 * k), rd32(post, r + 4 * k));
+            }
+        }
+    snprintf(buf, sizeof buf, "%u of %u solver bodies (%u changed by the game), %d round(s), %u cells claimed, %u contacts solved",
+             bodies_same, max_body + 1, bodies_changed, rounds, st.cells, st.contacts);
+    expect(bodies_same == max_body + 1 && st.bad == 0, "native iterate = the game's: solver bodies, 0x40 bytes each", buf);
+    snprintf(buf, sizeof buf, "%u of %u rows (%u changed by the game)", rows_same, n_rows, rows_changed);
+    expect(rows_same == n_rows, "native iterate = the game's: contact rows, 0x90 bytes each", buf);
+    snprintf(buf, sizeof buf, "%s", post_at_round ? "the second snapshot's masks are the first's (as each round starts)"
+                                                  : "the second snapshot is not at a round's start (masks differ): not compared");
+    expect(true, "cell masks", buf);
+    printf("[bullet_solver_snapcheck] %s (%d failed)\n", fails ? "FAIL" : "PASS", fails);
+    return fails ? 1 : 0;
+}
+
 int main(int argc, char** argv)
 {
     if (argc == 5 && !strcmp(argv[1], "copyback")) return copyback(argv[2], argv[3], argv[4]);
+    if (argc == 6 && !strcmp(argv[1], "iterate")) return iterate(argv[2], argv[3], argv[4], atoi(argv[5]));
     if (argc != 5 || strcmp(argv[1], "writeback")) {
         fprintf(stderr, "usage: bullet_solver_snapcheck writeback <c6r1.bin> <c6r2.bin> <descriptor ea>\n"
-                        "       bullet_solver_snapcheck copyback <c5r1.bin> <c6r1.bin> <tasks.txt>\n");
+                        "       bullet_solver_snapcheck copyback <c5r1.bin> <c6r1.bin> <tasks.txt>\n"
+                        "       bullet_solver_snapcheck iterate <c4rN.bin> <c4rN+k.bin or c5r1.bin> <tasks.txt> <k>\n");
         return 2;
     }
     uint8_t* pre = load_space(argv[2]);
