@@ -31,6 +31,9 @@
 // DOTHEROES_DEV_WATCH=<hex offset>: the guest functions storing to the player's
 // object from <offset>, once a drive script touches watch.trigger (watch_loop).
 //
+// DOTHEROES_DEV_ACTOR_LOG=1: the positions of the characters near the hero
+// every 4 ms, into actors.bin (actor_log_loop below; tests/actor_steps.py).
+//
 // DOTHEROES_DEV_STATE=1: ten times a second, the game's state a test checks --
 // the hero's life (half apples), the camera target's x and z (it follows the
 // hero in the area's own coordinates, clamped at its edges), physics collision
@@ -65,6 +68,7 @@
 #ifdef DOTHEROES_BULLET_CD
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -221,6 +225,64 @@ void player_log_loop()
             const uint32_t n = g_player_log_bytes;
             memcpy(buf.data(), vm_base + p, n);
             fwrite(&t, 8, 1, f); fwrite(&p, 4, 1, f); fwrite(&n, 4, 1, f); fwrite(buf.data(), 1, n, f);
+        }
+        if (tick % 125 == 0) fflush(f);
+    }
+}
+
+// DOTHEROES_DEV_ACTOR_LOG=1: the other characters near the hero -- enemies,
+// say -- for timing their movement at different frame rates
+// (tests/actor_steps.py). Characters share the player's layout: a class
+// vtable at +0 (the game's .data, 0x00F00000-0x01100000) and the position at
+// +0x428/+0x42C/+0x430, which the movers write (func_000A7C78). About once a
+// second the heap is scanned for such objects within 40 units of the hero
+// (up to 64; the player's own object left out); every 4 ms each one's
+// position, when it changed, is appended to actors.bin: records of (u64 ns
+// on the trace's clock, u32 ea, u32 vtable, f32 x, y, z), little-endian.
+// Flushed every half second.
+constexpr int kMaxActors = 64;
+
+void actor_log_loop()
+{
+    FILE* f = fopen("actors.bin", "wb");
+    if (!f) return;
+    struct Actor { uint32_t ea, vt; float x, y, z; };
+    Actor actors[kMaxActors];
+    int n = 0;
+    for (unsigned tick = 0;; tick++) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(4));
+        const uint32_t p = g_player.load();
+        if (!p || rd32(p) != kPlayerVtable) continue;
+        if (tick % 250 == 0) {   // rescan
+            const float px = rdf(p + 0x428), py = rdf(p + 0x42C), pz = rdf(p + 0x430);
+            n = 0;
+#ifdef _WIN32
+            for (uint64_t ea = 0x10000000u; ea < 0x20000000u && n < kMaxActors; ) {
+                MEMORY_BASIC_INFORMATION mbi;
+                if (!VirtualQuery(vm_base + ea, &mbi, sizeof mbi)) break;
+                const uint64_t len = (uint64_t)((uintptr_t)mbi.BaseAddress + mbi.RegionSize - (uintptr_t)(vm_base + ea));
+                if (mbi.State == MEM_COMMIT && !(mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) && len > 0x440)
+                    for (uint64_t o = 0; o + 0x440 <= len && n < kMaxActors; o += 16) {
+                        const uint32_t a = (uint32_t)(ea + o), vt = rd32(a);
+                        if (vt < 0x00F00000u || vt >= 0x01100000u || a == p) continue;
+                        const float x = rdf(a + 0x428), y = rdf(a + 0x42C), z = rdf(a + 0x430);
+                        if (!(fabsf(x - px) < 40.0f && fabsf(z - pz) < 40.0f && fabsf(y - py) < 20.0f)) continue;
+                        if (x == 0.0f && z == 0.0f) continue;
+                        actors[n++] = { a, vt, x, y, z };
+                    }
+                ea += len;
+            }
+#endif
+        }
+        const uint64_t t = ps3_ft_now() - g_ps3_ft.base;
+        for (int i = 0; i < n; i++) {
+            Actor& a = actors[i];
+            if (rd32(a.ea) != a.vt) continue;
+            const float x = rdf(a.ea + 0x428), y = rdf(a.ea + 0x42C), z = rdf(a.ea + 0x430);
+            if (x == a.x && y == a.y && z == a.z) continue;
+            a.x = x; a.y = y; a.z = z;
+            fwrite(&t, 8, 1, f); fwrite(&a.ea, 4, 1, f); fwrite(&a.vt, 4, 1, f);
+            fwrite(&x, 4, 1, f); fwrite(&y, 4, 1, f); fwrite(&z, 4, 1, f);
         }
         if (tick % 125 == 0) fflush(f);
     }
@@ -402,7 +464,13 @@ void dev_state_init()
         fprintf(stderr, "[dev-state] watch.trigger: watch stores to the player's +0x%X..+0x%X%s\n", g_watch_offset,
                 g_watch_offset + 0x80, getenv("PPU_WWATCH") ? "" : " (no PPU_WWATCH: lifted stores are not seen)");
     }
-    if (g_cant_die || g_life_log || (st && *st == '1') || g_player_log_bytes || (wa && *wa))
+    const char* al = getenv("DOTHEROES_DEV_ACTOR_LOG");
+    const bool actor_log = al && *al == '1';
+    if (actor_log) {
+        std::thread(actor_log_loop).detach();
+        fprintf(stderr, "[dev-state] actors.bin: characters near the hero, every 4 ms\n");
+    }
+    if (g_cant_die || g_life_log || (st && *st == '1') || g_player_log_bytes || (wa && *wa) || actor_log)
         std::thread(life_loop).detach();   // also finds the player, for state.txt, player.bin and the watch
     if (g_cant_die) {
         fprintf(stderr, "[cant-die] on (development only): life of %u half apples or less raised to %u\n", g_low_life, g_top_up);

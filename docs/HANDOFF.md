@@ -517,20 +517,37 @@ tooling, the native Windows build, measuring on the 3070) are done; see
      (via the cross-module stub func_00983A78, calls at 0x00106FB8 and
      0x00106FCC): `(float)(int)(v * 100 + 0.005) * 0.01` -- truncation toward
      zero, 0.005 hundredths of slack. 22 other functions in that module
-     (0x00102BB4-0x0018BA08) call the same stub, so other moving objects --
-     enemies, likely -- are quantised the same way. Not changed: unnoticeable
-     at 60, the requirement; for the 144 stretch goal it is ~4-7% and worth a
-     fix (carry each object's truncated remainder into its next step at those
-     call sites, so positions stay on the 0.01 grid but average 9 units a
-     second; note that makes 30 fps 1.7% faster than the original too). It is
-     enough to move a timed route: at
-     ~120 fps the first drive's 0.5 s walk right ended 0.35 units short and
-     the hero slid round a ledge the 30 and 60 fps runs stop at, missing the
-     grass; the drive now ends its moves against walls.
-   - *Enemies* were not measured one by one: the river fight at ~117 fps
-     (can't-die) gave 2.2 top-ups a minute against 0.7-1.5 at 60, too few to
-     compare. Enemy timing at other rates is still to check (their objects,
-     as the player's: the same tools).
+     (0x00102BB4-0x0018BA08) call the same stub -- but each to snap a value
+     just before converting it to an integer, not a step: only the hero's
+     two calls accumulate (one chain, func_0012476C -> func_00119BEC ->
+     func_00106CB8). It is enough to move a timed route: at ~120 fps the
+     first drive's 0.5 s walk right ended 0.35 units short and the hero slid
+     round a ledge the 30 and 60 fps runs stop at, missing the grass; the
+     drive now ends its moves against walls.
+     **Fixed (2026-11-02):** an entry hook (ps3recomp patch 0077: the lifter
+     puts `if (guard) { host(ctx); return; }` at a listed function's start;
+     config/insn_patches.json) sends func_000A2C14 to
+     `dotheroes_step_round` (port/game_patches.cpp), which rounds exactly as
+     before except at the hero's two calls, where it carries the dropped part
+     into the next frame's step on that axis (restarting when the step is 0,
+     reverses or the object changes). Steps stay multiples of 0.01, as the
+     collision code has always had them. On by default;
+     `DOTHEROES_STEP_CARRY=0` truncates as the game does. Measured on the same
+     route (fpscarry-* runs): cruising 9.02 / 8.97 units a second at 30 fps,
+     9.01 / 8.96 at 60, 8.96 / 9.06 at ~130, 9.01 / 8.99 at ~125 (144 Hz
+     vblank); every run stops at the same ledge (z -173.70) and cuts the
+     grass; physics 359-361 steps, 55 bodies, 6.0 s at all four. At 30 fps
+     the hero is now 1.7% faster than the original's truncated 8.85 -- the
+     speed its step is computed from.
+   - *Enemies* move by time and never went through that rounding
+     (`DOTHEROES_DEV_ACTOR_LOG=1`, tests/actor_steps.py; the river fight at
+     30, 60, ~120 and 144-paced): the river's enemies (class 0x00FE4500)
+     take steps that are not multiples of 0.01 (1-6%, chance), and over 0.25
+     s windows move at the same discrete speeds at every rate (4.0, 6.0, 8.0,
+     10.0 units a second; which ones a run shows depends on what they did).
+     An object of class 0x00FE3DE8 that moves with the hero runs at 9.0 at
+     every rate with the carry. Bosses and other areas' enemies are not
+     measured yet.
 1. **Next replacements:** the present path (frames in flight, no readback,
    no lock held across GPU waits), then a display-driven vblank (refresh-rate
    aware, e.g. 120 Hz panels). vm_watch on Linux (mprotect + SIGSEGV), so
@@ -1009,6 +1026,8 @@ tooling, the native Windows build, measuring on the 3070) are done; see
 | `DOTHEROES_DEV_LIFE_LOG=1` | testing: every change of the player's life and the HUD's copies, logged |
 | `DOTHEROES_DEV_MEMSNAP=1` | testing: a drive script's `touch memsnap.trigger` writes all committed guest memory to `<run>/memsnap_<n>.bin` (game memory: local only; tests/native/find_state.cpp); copied in memory first, the log gives the copy's start and end |
 | `DOTHEROES_DEV_PLAYER_LOG=1\|<bytes>` | testing: the player's object (first 0x1000 bytes) every 4 ms into `<run>/player.bin`, ~1 MB/s (game memory: local only; tests/fps_check.py) |
+| `DOTHEROES_DEV_ACTOR_LOG=1` | testing: the characters within 40 units of the hero (class vtable at +0, position at +0x428), their positions every 4 ms into `<run>/actors.bin` (game memory: local only; tests/actor_steps.py) |
+| `DOTHEROES_STEP_CARRY=0` | the hero's per-frame step truncated to 0.01 as the game does; by default the truncated part is carried into the next step, so the hero walks at 9 units a second at any frame rate (port/game_patches.cpp) |
 | `DOTHEROES_DEV_WATCH=<hex offset>` | testing, with `PPU_WWATCH=10000` (any address: it routes the lifted stores through the runtime's hooks): when a drive touches `watch.trigger`, the first 48 stores to the player's object from `<offset>` (0x80 bytes) are logged as `[sync-write] +<offset - 0x40 + n>` with the storing guest function (tests/scripts/watch_walk.drive) |
 | `PPU_WWATCH=<hex ea>` | the runtime's store watch: every lifted PPU store to that 16-byte line, with the writing guest function (found the HUD's life writer) |
 | `VISIBLE=1`, `GRAB_EVERY=<s>` | tests/boot_smoke.py: an on-screen run -- refused on a locked desktop, stopped if it locks, the window is minimised/hidden, or another window covers more than a tenth of it for 3 s (a covered window ran at ~35 fps); guard.json has the foreground and covered shares; window grabs to grabs/ |
@@ -1033,4 +1052,4 @@ Edit in `build/ref/ps3recomp` (branch `dotheroes`), commit there as
 `git format-patch --start-number <next> -o ../../../patches/ps3recomp HEAD~<n>`
 and commit the patch files here. `tools/pipeline.py` refuses to run with
 uncommitted changes in that checkout, and re-applies the whole series when
-the patch files change. 76 patches (0001-0076) as of 2026-11-02.
+the patch files change. 77 patches (0001-0077) as of 2026-11-02.

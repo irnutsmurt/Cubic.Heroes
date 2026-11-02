@@ -3,7 +3,8 @@
     "Guest instruction patches, lifted as run-time switches (ppu_lifter.py --insn-patches):",
     "each becomes `if (guard) {new} else {orig}`; the guards are defined in port/game_patches.cpp.",
     "The lift stops if `orig` is not the instruction at `addr`, so these only ever apply to",
-    "the pinned EBOOT (config/game_version.json)."
+    "the pinned EBOOT (config/game_version.json).",
+    "entry_hooks: each {addr, host, guard} makes the lifted function at addr begin with `if (guard) { host(ctx); return; }` -- the port's host function in its place, for a replacement that needs state or host code (ppu_lifter.py --insn-patches)."
   ],
   "patches": [
     {
@@ -47,6 +48,14 @@
       "new": "0x38000002",
       "guard": "g_dotheroes_fps_novblank",
       "note": "the same in that wait's loop"
+    }
+  ],
+  "entry_hooks": [
+    {
+      "addr": "0x000A2C14",
+      "host": "dotheroes_step_round",
+      "guard": "g_dotheroes_step_carry",
+      "note": "func_000A2C14 rounds a float to 0.01 by truncation, (int)(v * 100 + 0.005) * 0.01. Called by func_00106CB8 on the hero's per-frame x and z step (+0x768, +0x770), it drops up to 0.01 a frame, so the hero slows as the frame rate rises; the host carries the dropped part into the next frame's step there and rounds exactly as before everywhere else (port/game_patches.cpp)"
     }
   ]
 }

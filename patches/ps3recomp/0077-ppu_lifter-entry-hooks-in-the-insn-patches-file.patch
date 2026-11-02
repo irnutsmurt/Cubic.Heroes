@@ -1,0 +1,108 @@
+From f632589a40e2e8c6b4542b61582efd9753f8b2df Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Mon, 2 Nov 2026 07:16:36 -0800
+Subject: [PATCH] ppu_lifter: entry hooks in the --insn-patches file
+
+An instruction patch swaps one instruction for another, so it cannot give a
+replacement that keeps state or calls host code. An entry hook can:
+
+    "entry_hooks": [{"addr": "0x000A2C14", "host": "port_fn",
+                     "guard": "g_port_flag", "note": "..."}]
+
+makes the lifted function at addr begin with
+`if (guard) { host(ctx); return; }`, the guard and the host function both
+the port's (declared extern "C" in the chunk, as the patches' guards are).
+A hook at no lifted function's start stops the lift. Only the chunk holding
+the function changes, so a re-lift recompiles one file.
+
+3D Dot Game Heroes uses one to carry the remainder of the hero's per-frame
+step rounding (its port's game_patches.cpp).
+---
+ tools/ppu_lifter.py | 45 ++++++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 44 insertions(+), 1 deletion(-)
+
+diff --git a/tools/ppu_lifter.py b/tools/ppu_lifter.py
+index 669ac06..f8d9a4e 100644
+--- a/tools/ppu_lifter.py
++++ b/tools/ppu_lifter.py
+@@ -823,6 +823,31 @@ def load_insn_patches(path: str) -> dict[int, tuple[int, int, str]]:
+     return out
+ 
+ 
++def load_entry_hooks(path: str) -> dict[int, tuple[str, str]]:
++    """Read the entry hooks of an --insn-patches file:
++
++        {"entry_hooks": [{"addr": "0x000A2C14", "host": "port_round_step",
++                          "guard": "g_port_round_step", "note": "..."}, ...]}
++
++    -> {addr: (host, guard)}. A hooked function begins with
++    `if (guard) { host(ctx); return; }`: with the guard set, the port's host
++    function runs in its place -- for a replacement that needs state or host
++    code, which an instruction patch cannot give."""
++    with open(path) as f:
++        spec = json.load(f)
++    out: dict[int, tuple[str, str]] = {}
++    for e in spec.get("entry_hooks", []):
++        addr = int(str(e["addr"]), 0)
++        host, guard = str(e["host"]), str(e["guard"])
++        for name in (host, guard):
++            if not re.fullmatch(r"[A-Za-z_]\w*", name):
++                sys.exit(f"[ppu_lifter] {path}: {name!r} is not a C identifier")
++        if addr & 3 or addr in out:
++            sys.exit(f"[ppu_lifter] {path}: bad or duplicate entry hook 0x{addr:08X}")
++        out[addr] = (host, guard)
++    return out
++
++
+ def _crval_to_c(val: str, mask: int, decl_a: str, a_expr: str, b_expr: str) -> str:
+     """Reconstruct a C condition from a cr_val ternary for the tested bits."""
+     m = re.match(r"^\((?P<u>.+?)\) \? 1 : \((?P<lt>.+?)\) \? 8 : \((?P<gt>.+?)\) \? 4 : 2$", val)
+@@ -4190,11 +4215,21 @@ class PPULifter:
+         for g in guards:
+             lines += ["#ifdef __cplusplus", f'extern "C" int {g};', "#else",
+                       f"extern int {g};", "#endif"]
++        # An --insn-patches entry hook: the port's host function in place of this one.
++        hook = getattr(self, "entry_hooks", {}).get(func.start_addr)
++        if hook:
++            host, guard = hook
++            lines += ["#ifdef __cplusplus", f'extern "C" int {guard};',
++                      f'extern "C" void {host}(ppu_context* ctx);', "#else",
++                      f"extern int {guard};", f"void {host}(ppu_context* ctx);", "#endif"]
+         uses_sjlj = any("ps3_sjlj_longjmp(" in bl or "_sjf.arm(" in bl for bl in func.body_lines)
+         if uses_sjlj:
+             lines.append('#include "ppu_sjlj.h"   /* --sjlj: guest setjmp/longjmp */')
+         lines.append(f"void {weak}{func.name}(ppu_context* ctx) {{")
+         lines.append("    PPU_MM_SNAP")
++        if hook:
++            lines.append(f"    if ({hook[1]}) {{ {hook[0]}(ctx); return; }}  "
++                         f"/* entry hook 0x{func.start_addr:08X} */")
+         if any("_sjf.arm(" in bl for bl in func.body_lines):
+             lines.append("    ps3_sjlj_frame _sjf;")
+         for bline in _fuse_cr(func.body_lines):
+@@ -5557,7 +5592,9 @@ def main() -> None:
+               f"longjmp {sorted(hex(a) for a in lifter.sjlj_longjmp)}")
+     if args.insn_patches:
+         lifter.insn_patches = load_insn_patches(args.insn_patches)
+-        print(f"  insn-patches: {len(lifter.insn_patches)} from {args.insn_patches}")
++        lifter.entry_hooks = load_entry_hooks(args.insn_patches)
++        print(f"  insn-patches: {len(lifter.insn_patches)}, entry hooks: {len(lifter.entry_hooks)} "
++              f"from {args.insn_patches}")
+ 
+     # Optional: load a recovered-name map (from Ghidra analysis) to annotate
+     # generated functions with meaningful names as comments.
+@@ -5614,6 +5651,12 @@ def main() -> None:
+         if missing:
+             sys.exit("[ppu_lifter] insn patches at no lifted instruction: " +
+                      ", ".join(f"0x{a:08X}" for a in missing))
++    # ...and every entry hook at the start of a lifted function.
++    if getattr(lifter, "entry_hooks", None):
++        missing = sorted(set(lifter.entry_hooks) - {f.start_addr for f in lifter.functions})
++        if missing:
++            sys.exit("[ppu_lifter] entry hooks at no lifted function's start: " +
++                     ", ".join(f"0x{a:08X}" for a in missing))
+ 
+     os.makedirs(args.output, exist_ok=True)
+ 
+-- 
+2.56.0.windows.3
+
