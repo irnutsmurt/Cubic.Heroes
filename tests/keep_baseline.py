@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Keep test runs as a baseline that later testing does not delete.
 
-  tests/keep_baseline.py <name> <run dir> [<run dir> ...] [--note TEXT] [--ftrace]
+  tests/keep_baseline.py <name> <run dir> [<run dir> ...] [--note TEXT] [--ftrace] [--hitch]
 
 Run directories under build/test are pruned to the last few (KEEP_RUNS in
 tests/boot_smoke.py). This copies what is needed to compare against a run
@@ -11,6 +11,12 @@ later into build/baselines/<name>/<run>/, which nothing prunes:
                 its log, and tests/frame_times.py, frame_costs.py and
                 phys_breakdown.py over its frame trace
   ftrace.txt.gz the frame trace itself, with --ftrace (a few MB)
+  frames.log.gz the frame log (DIAG_FRAMES), compressed
+  result.json, segments.jsonl, failures.jsonl, memory.csv, drive.log
+                how the run ended, what it measured and where it failed
+                (tests/batch_report.py reads a kept run like a live one; its
+                report is in summary.txt too)
+  hitch/        the run's hitch captures, compressed, with --hitch
   guard.json    a VISIBLE=1 run's on-screen guard (aborted, and why)
   grabs/        its window grabs, downscaled (the game's picture: local only)
 and appends a line per run to build/baselines/INDEX.md. Nothing of the game's
@@ -42,6 +48,7 @@ def main():
     ap.add_argument("runs", nargs="+")
     ap.add_argument("--note", default="")
     ap.add_argument("--ftrace", action="store_true")
+    ap.add_argument("--hitch", action="store_true")
     a = ap.parse_args()
     base = os.path.join(OUT, a.name)
     os.makedirs(base, exist_ok=True)
@@ -73,6 +80,19 @@ def main():
                 im = Image.open(os.path.join(run, "grabs", g)).convert("RGB")
                 im.thumbnail((480, 480))
                 im.save(os.path.join(dst, "grabs", os.path.splitext(g)[0] + ".jpg"), quality=80)
+        for name in ("result.json", "segments.jsonl", "failures.jsonl", "memory.csv", "drive.log"):
+            if os.path.exists(os.path.join(run, name)):
+                shutil.copy2(os.path.join(run, name), dst)
+        if os.path.exists(os.path.join(run, "frames.log")):
+            with open(os.path.join(run, "frames.log"), "rb") as src, gzip.open(os.path.join(dst, "frames.log.gz"), "wb") as z:
+                shutil.copyfileobj(src, z)
+            with open(os.path.join(dst, "summary.txt"), "a", encoding="utf-8") as f:
+                f.write("\n== batch_report.py\n" + tool("batch_report.py", run))
+        if a.hitch and os.path.isdir(os.path.join(run, "hitch")):
+            os.makedirs(os.path.join(dst, "hitch"), exist_ok=True)
+            for h in sorted(os.listdir(os.path.join(run, "hitch"))):
+                with open(os.path.join(run, "hitch", h), "rb") as src, gzip.open(os.path.join(dst, "hitch", h + ".gz"), "wb") as z:
+                    shutil.copyfileobj(src, z)
         if a.ftrace and os.path.exists(trace):
             with open(trace, "rb") as src, gzip.open(os.path.join(dst, "ftrace.txt.gz"), "wb") as z:
                 shutil.copyfileobj(src, z)

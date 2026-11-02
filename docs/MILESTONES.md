@@ -6,12 +6,15 @@ results. Compiling is not evidence.
 | # | Milestone | Status |
 |---|---|---|
 | 1 | Analysis and feasibility | **Complete**, see FEASIBILITY.md |
-| 2 | Native executable with diagnostics | **In progress** (boot criteria met; Windows build compiles, not yet run; debug console, golden log open) |
-| 3 | Initial Vulkan rendering and native audio | **In progress**: renders and plays through Vulkan on Linux, audio mixed natively; frame cap lifted: menus ~60 fps, gameplay ~31 fps |
-| 4 | Menus and new-game startup | **In progress**: title → new game → opening → free movement, driven by `tests/scripts/new_game.drive` |
-| 5 | Core gameplay | Not started |
-| 6 | Full-game coverage | Not started |
-| 7 | Stability and release preparation | Not started |
+| 2 | Native executable with diagnostics | **Met on Windows** (2026-11-02): strict-clean, 0 unresolved NIDs; crash/hang reports, the frame trace and hitch captures, the game-state probes. Debug console and golden boot log still open |
+| 3 | Initial Vulkan rendering and native audio | **Met on Windows**: 60 fps in the scenes measured, with the validated configuration (HANDOFF.md, "Current status"); colours vs RPCS3 not verified |
+| 4 | Menus and new-game startup | **Met**: title, new game, CONTINUE, the system menu and its pages, the dot editor, save and load |
+| 5 | Core gameplay | **In progress**: the castle's field and interior, the river's fights; no dungeon or boss reached yet |
+| 6 | Full-game coverage | Not started (HANDOFF.md, "Game coverage") |
+| 7 | Stability and release preparation | **In progress**: long-session soaks with reloads; the setup app not yet run end to end |
+
+The current state, open problems and next actions are in HANDOFF.md,
+"Current status"; this file keeps the evidence log.
 
 ## M1 evidence
 - Disc verified and extracted; EBOOT decrypted with HMAC verified; hashes pinned.
@@ -224,3 +227,24 @@ Tracked in FEASIBILITY.md §6 and the `[unknown]` markers there.
   yet run end to end.
 - Linux re-checked after these changes: boots and plays the intro route,
   strict-clean, guest shaders on.
+
+## Windows: 60 fps, long sessions, test tooling (2026-10-31 to 2026-11-02)
+
+Details and numbers in HANDOFF.md ("Current status", the work log).
+- The validated 60 fps configuration (native collision, three native solver
+  commands, the capped lap, one present per flip; all experimental, off by
+  default): river fights p99 17.2-17.4 ms, exploration p99 17.3 ms
+  (build/baselines/2026-11-01-config-validation). Native collision's contact
+  differences from the SPU task remain unresolved.
+- Gameplay speed independent of the frame rate at 30 / 60 / ~120 / 144-paced
+  (the hero's per-frame step rounding carried over; build/baselines/
+  2026-11-02-frame-rate).
+- Menus and features: SNAPSHOT/ALBUM, the dot editor's SAVE, INSTALL, round
+  trips across restarts (patches 0072-0078).
+- Long sessions: area reloads made the draw engine's resident geometry
+  dynamic for good after the fourth (fights 14-28% of frames at ~33 ms);
+  fixed (patch 0080), six-cycle A/B on one build.
+- Tests reach and verify an encounter: named scenarios from kept checkpoints,
+  state checks at every stage, bounded retries, measured segments with
+  required activity, batch reports, rolling hitch captures (patch 0079), play
+  session recording for routes and checkpoints.

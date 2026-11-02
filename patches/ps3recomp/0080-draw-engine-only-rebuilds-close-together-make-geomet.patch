@@ -1,0 +1,129 @@
+From 04f4b413f5f50a05ad6e40ffdf6a110d3888f7bf Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Mon, 2 Nov 2026 10:30:22 -0800
+Subject: [PATCH] draw engine: only rebuilds close together make geometry
+ dynamic
+
+A resident draw rebuilt four times went to the copy path for good -- counted
+over its whole life. A title that reloads an area into the same memory
+rewrites its static geometry once per load: in 3D Dot Game Heroes the fourth
+TITLE -> CONTINUE made the whole scene dynamic, ~145k of ~165k draws per 5 s
+converted on the CPU every frame (~20k before), the walker's drain went from
+~5 to 14-18 ms a frame and fights ran 14-28% of frames at ~33 ms from then on.
+
+Now a rebuild counts only within 60 frames of the one before, and a dynamic
+entry is watched and stored again after 600 frames, twice as long each time
+it is still dynamic (up to 64x), spread by its slot so entries that went
+dynamic together are not all rebuilt in one frame. RSX_GEOM_DYNAMIC_LIFETIME=1
+restores the old rule for A/B. Six river cycles (each a TITLE -> CONTINUE),
+same build: the old rule p99 17.2-17.4 ms in fights 1-4, 35.5 and 33.6 in
+fights 5-6; this rule 17.2-17.4 in all six (and in two runs of it without the
+backoff).
+---
+ libs/video/rsx_draw_engine.c | 52 ++++++++++++++++++++++++++++++++----
+ 1 file changed, 47 insertions(+), 5 deletions(-)
+
+diff --git a/libs/video/rsx_draw_engine.c b/libs/video/rsx_draw_engine.c
+index 44ac18e..a677b17 100644
+--- a/libs/video/rsx_draw_engine.c
++++ b/libs/video/rsx_draw_engine.c
+@@ -2593,9 +2593,26 @@ static void dc_fetch(const rsx_vertex_layout_plan* layout, int allow_remap)
+ #define ENG_GEOM_SLOTS     8192u                 /* power of two; at most half are used */
+ #define ENG_GEOM_MAX_BYTES (16u << 20)           /* larger draws keep the copy path */
+ 
+-/* Rebuilt this often after writes, a draw's geometry is the title's dynamic
+- * kind (rewritten every frame or so): it stays on the copy path, unwatched. */
+-#define ENG_GEOM_DYNAMIC 4u
++/* Rebuilt this often after writes, each within ENG_GEOM_DYNAMIC_FRAMES of
++ * the one before, a draw's geometry is the title's dynamic kind (rewritten
++ * every frame or so): it stays on the copy path, unwatched, and is tried again
++ * ENG_GEOM_DYNAMIC_RETRY frames later. Rebuilds further apart do not count: a
++ * title that reloads an area into the same memory rewrites its static geometry
++ * once per load. Counted over an entry's whole life, as they were, 3D Dot
++ * Game Heroes' fourth TITLE -> CONTINUE made the whole scene dynamic for good
++ * and the walker's drain went from ~5 to ~15 ms a frame (frames of 33 ms). */
++#define ENG_GEOM_DYNAMIC        4u
++#define ENG_GEOM_DYNAMIC_FRAMES 60u
++#define ENG_GEOM_DYNAMIC_RETRY  600u
++
++/* RSX_GEOM_DYNAMIC_LIFETIME=1: rebuilds counted over an entry's life and
++ * dynamic for good, as before (A/B). */
++static int eng_geom_dynamic_lifetime(void)
++{
++    static int on = -1;
++    if (on < 0) on = getenv("RSX_GEOM_DYNAMIC_LIFETIME") != NULL;
++    return on;
++}
+ 
+ /* Admission. A draw becomes an entry on its second sighting, so a key seen
+  * once never takes a slot or GPU memory: 3D Dot Game Heroes draws its
+@@ -2620,9 +2637,11 @@ typedef struct {
+     u32 geom;                  /* backend handle; 0 for a dynamic draw */
+     u32 n_verts, n_draw;
+     u32 last_use;              /* g.frames when last drawn or seen */
++    u32 last_rebuild;          /* g.frames at its last rebuild (or when it went dynamic) */
+     u32 bytes;                 /* GPU bytes it holds */
+     u8  used, dynamic;
+     u16 rebuilds;
++    u8  dyn_tries;             /* times it went dynamic; each retry waits twice as long */
+     u8  indexed, n_ranges;
+     u64 checked;               /* the write epoch the ranges were last found clean at */
+     u64 check;                 /* RSX_GEOM_CACHE_CHECK: hash of what was uploaded */
+@@ -2635,6 +2654,17 @@ typedef struct {
+ static struct { u32 draws, verts; } s_frame_fetch;
+ 
+ static eng_geom* s_geom;
++
++/* How long a dynamic entry waits before it is tried again: twice as long
++ * each time it turned out dynamic again (up to 64 x), spread by its slot so
++ * the entries that went dynamic together (a water surface's, a particle
++ * system's) are not all rebuilt in the same frame -- retried at once every
++ * 600 frames, 2,300-2,650 rebuilds landed together every 10 s. */
++static u32 eng_geom_retry_wait(const eng_geom* e)
++{
++    const u32 tries = e->dyn_tries ? e->dyn_tries - 1u : 0u;
++    return (ENG_GEOM_DYNAMIC_RETRY << (tries < 6u ? tries : 6u)) + ((u32)(e - s_geom) * 37u & 511u);
++}
+ static u32 s_geom_live;
+ static u64 s_geom_bytes;
+ static u64 s_geom_seen[ENG_GEOM_SEEN];
+@@ -2869,7 +2899,7 @@ static u32 eng_geom_store(u64 key, int indexed, u32 n_draw, u32 stride)
+         if (e->used) eng_geom_erase(e);
+         return 0;
+     }
+-    if (!e->used) { s_geom_live++; e->rebuilds = 0; }
++    if (!e->used) { s_geom_live++; e->rebuilds = 0; e->last_rebuild = 0; e->dyn_tries = 0; }
+     e->used = 1;
+     e->key = key;
+     e->geom = h;
+@@ -3657,14 +3687,26 @@ static void sink_end(void* user, const rsx_dispatch* r)
+         } else if (gm->dynamic) {
+             gm->last_use = g.frames;
+             s_gs.dyn++;
++            if (g.frames - gm->last_rebuild > eng_geom_retry_wait(gm) && !eng_geom_dynamic_lifetime()) {   /* settled since? watched and stored again */
++                gm->dynamic = 0;
++                gm->rebuilds = 0;
++                gm->last_rebuild = g.frames;
++            } else {
++                watch = 0;
++            }
+             gm = NULL;
+-            watch = 0;
+         } else if (!eng_geom_valid(gm)) {
+             gm->last_use = g.frames;
+             s_gs.rebuilt++;
++            if (g.frames - gm->last_rebuild > ENG_GEOM_DYNAMIC_FRAMES && !eng_geom_dynamic_lifetime()) {
++                gm->rebuilds = 0;   /* not in a run */
++                gm->dyn_tries = 0;
++            }
++            gm->last_rebuild = g.frames;
+             if (++gm->rebuilds >= ENG_GEOM_DYNAMIC) {   /* keeps its slot, not its GPU memory */
+                 eng_geom_drop_gpu(gm);
+                 gm->dynamic = 1;
++                if (gm->dyn_tries < 255u) gm->dyn_tries++;
+                 watch = 0;
+             }
+             gm = NULL;
+-- 
+2.56.0.windows.3
+

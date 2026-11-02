@@ -627,6 +627,7 @@ void keys_loop()
 
 void dev_state_init()
 {
+    (void)PS3_FT_ON();   // the trace's clock set before the first record (it is set lazily, at its first use)
     const char* st = getenv("DOTHEROES_DEV_STATE");
     if (st && *st == '1') {
         std::thread(state_loop).detach();

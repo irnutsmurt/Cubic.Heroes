@@ -436,7 +436,7 @@ def keep_saves(dest):
             continue
         now = stamps()
         for d, t in now.items():
-            if t != seen.get(d):
+            if t != seen.get(d) and pending.get(d, (None,))[0] != t:   # new, or changed again: wait from now
                 pending[d] = (t, time.time())
         for d, (t, since) in list(pending.items()):
             if time.time() - since < 3 or now.get(d) != t:   # still being written
