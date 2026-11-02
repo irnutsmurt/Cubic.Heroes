@@ -1,0 +1,50 @@
+# Saving: the river fight's route (fight_bench.drive), the hero's life set to
+# half an apple (life.trigger: DOTHEROES_DEV_KEYS=1 with DOTHEROES_DEV_STATE=1),
+# the next hit ends the game, and the game-over screen offers a save. Needs a
+# save past the sword (SAVES=). Screenshots step by step.
+log TitleMovie 120
+sleep 5
+press START
+sleep 3
+press START
+sleep 5
+press CROSS
+state life>0,area==17 60
+sleep 3
+hold RIGHT 4
+hold DOWN 1.5
+hold RIGHT 3
+hold RIGHT 4
+hold RIGHT 4
+hold RIGHT 2.5
+hold UP 1.5
+hold RIGHT 2
+state area==18,life>0 20
+touch life.trigger
+sleep 1
+shot half-apple
+state life==0 60
+shot dead
+sleep 2
+shot over-2
+sleep 2
+shot over-4
+sleep 3
+shot over-7
+sleep 3
+shot continue-question      # "Continue?" YES / NO, the cursor on YES (YES: back at the castle, no save)
+press DOWN
+sleep 1
+shot continue-no
+press CROSS                 # NO
+sleep 3
+shot save-question          # "Save your progress?" YES / NO, the cursor on YES
+press CROSS                 # YES
+sleep 2
+shot saving-2
+sleep 3
+shot saving-5
+sleep 5
+shot saving-10
+sleep 10
+shot saving-20

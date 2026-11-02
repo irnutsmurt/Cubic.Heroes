@@ -564,10 +564,12 @@ tooling, the native Windows build, measuring on the 3070) are done; see
      byte-identical to the disc -- and returns to the title; the next start
      on that data root runs, reading the installed copy after its data
      check. The clean shutdown after an install failure was not revisited
-     (it no longer fails). **Still open:** cellMsgDialog answers every
-     yes/no dialog YES by itself ("Auto-responding: YES"), so a player
-     cannot decline the install question or any other; a real dialog (or
-     at least the game's default button) is needed.
+     (it no longer fails). Open, minor: the runtime's cellMsgDialog is
+     headless and answers every yes/no dialog YES by itself
+     (`MSGDIALOG_ANSWER` switches it), so a player cannot decline one. The
+     only one this game has shown is the install confirmation, which comes
+     after the player chose INSTALL; an on-screen dialog (the OSD and the
+     pad) would be needed for any other.
    - **No window on Wayland:** the swapchain could not be created and the
      backend went headless. `SDL_VIDEODRIVER=x11` (XWayland) works; fall back
      to X11 automatically.
@@ -583,8 +585,19 @@ tooling, the native Windows build, measuring on the 3070) are done; see
      (cellSpurs task save/exit path, libs/spurs) has completed. Long play
      sessions are the test.
 7. Open issues: a flat beige quad over the castle path at ~180 s of
-   `intro.drive` (pre-existing, both present modes); save/load untested;
-   debug console and golden boot log (M2).
+   `intro.drive` (pre-existing, both present modes); debug console and
+   golden boot log (M2). **Save and load work** (2026-11-02,
+   tests/scripts/save_game.drive: the river route, the hero's life set to
+   half an apple with `life.trigger`, killed by the next hit; GAME OVER ->
+   "Continue?" NO -> "Save your progress?" YES): the system save list wrote
+   DATA.SAV, ICON0.PNG and PARAM.SFO into the loaded slot (3 bytes of
+   DATA.SAV changed: a 16-bit counter at 0x4C, play time likely, and a flag
+   at 0x835), and the next start's CONTINUE loaded it and played. "Continue?"
+   YES respawns at the castle without saving. The headless save list writes
+   into the slot that was loaded; PARAM.PFD is not rewritten (a save copied
+   back to RPCS3 or a PS3 may need that). The game's attract mode (5 min, no
+   input: field, river, desert, a lava dungeon, the red volcano area, the
+   forest) ran at 60 fps with nothing over 25 ms and nothing visibly wrong.
 8. Found by the owner playing on Windows (2026-10-30), the same with
    RSX_GEOM_CACHE=0: killing enemies left a bright flash that stayed a long
    time; enemies flashing after a hit were invisible; the water "not

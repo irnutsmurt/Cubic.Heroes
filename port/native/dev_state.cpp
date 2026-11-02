@@ -11,6 +11,10 @@
 //     it at start; include/ps3emu/osd.h).
 //   A drive script can mark too: `touch mark.trigger` in the run directory
 //     (a segment's start or end, say).
+//   A drive script can set the hero's life: life.trigger holding a number of
+//     half apples (empty: 1), so the next hit ends the game -- the way to the
+//     game-over screen and its save (tests/scripts/save_game.drive). Needs the
+//     player found (DOTHEROES_DEV_STATE=1 or another switch that looks).
 //
 // DOTHEROES_DEV_MEMSNAP=1: a thread watches the game's working directory (a
 // test run's directory) for memsnap.trigger; when a drive script touches it,
@@ -337,6 +341,19 @@ void keys_loop()
             fclose(t);
             remove("mark.trigger");
             mark(n, 3);
+        }
+        const uint32_t p = g_player.load();
+        FILE* lt = p && rd32(p) == kPlayerVtable ? fopen("life.trigger", "rb") : nullptr;
+        if (lt) {
+            unsigned life = 0;
+            if (fscanf(lt, "%u", &life) != 1 || !life) life = 1;
+            fclose(lt);
+            remove("life.trigger");
+            wr32(p + kPlayerLife, life);
+            wr32(kLife, life);
+            wr32(kLifeShown, life);
+            fprintf(stderr, "[dev-state] life set to %u half apples at %.3f s\n", life,
+                    (double)(int64_t)(ps3_ft_now() - g_ps3_ft.base) / 1e9);
         }
         if (!our_window_focused()) { f8 = f7 = pad = false; continue; }
         const bool f8_now = (GetAsyncKeyState(VK_F8) & 0x8000) != 0, f7_now = (GetAsyncKeyState(VK_F7) & 0x8000) != 0;
