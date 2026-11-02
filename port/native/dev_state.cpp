@@ -14,15 +14,24 @@
 //
 // DOTHEROES_DEV_MEMSNAP=1: a thread watches the game's working directory (a
 // test run's directory) for memsnap.trigger; when a drive script touches it,
-// guest memory is written to memsnap_<n>.bin (cellSpurs's snapshot writer:
+// guest memory is written to memsnap_<n>.bin (cellSpurs's snapshot format:
 // game memory, keep it local) and the trigger removed. The game keeps running
-// while the snapshot is written, so a value changing then may be torn. Used to
-// find where the game keeps state a test checks (tests/native/find_state.cpp).
+// while memory is copied (a few tens of ms; the log gives the copy's start and
+// end on the trace's clock), so a value changing then may be torn. Used to
+// find where the game keeps state a test checks (tests/native/find_state.cpp)
+// and how the game's clocks run at different frame rates (tests/fps_check.py).
+//
+// DOTHEROES_DEV_PLAYER_LOG=1: the player's object every 4 ms, into player.bin
+// (player_log_loop below; tests/fps_check.py).
+//
+// DOTHEROES_DEV_WATCH=<hex offset>: the guest functions storing to the player's
+// object from <offset>, once a drive script touches watch.trigger (watch_loop).
 //
 // DOTHEROES_DEV_STATE=1: ten times a second, the game's state a test checks --
 // the hero's life (half apples), the camera target's x and z (it follows the
-// hero in the area's own coordinates, clamped at its edges), physics steps so
-// far, can't-die top-ups so far, the field area's number -- into state.txt in
+// hero in the area's own coordinates, clamped at its edges), physics collision
+// tasks so far (a step has one per 64 pairs; dotheroes_phys_steps), can't-die
+// top-ups so far, the field area's number -- into state.txt in
 // the working directory ("t_s life x z steps topups area", replaced whole each
 // time; tests/drive.py's `state` waits on it) and, with PS3_FTRACE, the frame
 // trace (PS3_FT_GAME_STATE).
@@ -57,6 +66,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <thread>
+#include <vector>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -186,24 +196,85 @@ void state_loop()
     }
 }
 
+// DOTHEROES_DEV_PLAYER_LOG=1 (or =<bytes>): every 4 ms while the player's object
+// is known, its first 0x1000 bytes (or <bytes>) appended to player.bin -- records
+// of (u64 ns on the trace's clock, u32 ea, u32 size, little-endian) then the
+// object's bytes as the guest has them -- for timing what the hero does at
+// different frame rates (tests/fps_check.py). About 1 MB a second; flushed
+// every half second, since a test's end kills the game.
+uint32_t g_player_log_bytes;
+
+void player_log_loop()
+{
+    FILE* f = fopen("player.bin", "wb");
+    if (!f) return;
+    std::vector<uint8_t> buf(g_player_log_bytes);
+    for (unsigned tick = 1;; tick++) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(4));
+        const uint32_t p = g_player.load();
+        if (p && rd32(p) == kPlayerVtable) {
+            const uint64_t t = ps3_ft_now() - g_ps3_ft.base;
+            const uint32_t n = g_player_log_bytes;
+            memcpy(buf.data(), vm_base + p, n);
+            fwrite(&t, 8, 1, f); fwrite(&p, 4, 1, f); fwrite(&n, 4, 1, f); fwrite(buf.data(), 1, n, f);
+        }
+        if (tick % 125 == 0) fflush(f);
+    }
+}
+
+// DOTHEROES_DEV_WATCH=<hex offset>: who writes a field of the player's object.
+// When a drive script touches watch.trigger (the player known), the runtime's
+// second store watch -- g_barrier_sync_watch, which logs stores to its base +
+// 0x40..0xC0 as "[sync-write] +<off> <- <value> (w<width>) guest-fn=<fn>", the
+// first 48 -- is set to cover 0x80 bytes of the object from <offset>: the
+// printed +<off> is 0x40 above <offset>'s. The lifted code's stores reach the
+// runtime's hooks only with PPU_WWATCH set (to any address, e.g. 10000).
+extern "C" uint32_t g_barrier_sync_watch;
+uint32_t g_watch_offset;
+
+void watch_loop()
+{
+    for (;;) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        const uint32_t p = g_player.load();
+        FILE* t = p ? fopen("watch.trigger", "rb") : nullptr;
+        if (!t) continue;
+        fclose(t);
+        remove("watch.trigger");
+        g_barrier_sync_watch = p + g_watch_offset - 0x40;
+        fprintf(stderr, "[dev-state] watching stores to the player's +0x%X..+0x%X (%08X) at %.3f s\n", g_watch_offset,
+                g_watch_offset + 0x80, p + g_watch_offset, (double)(int64_t)(ps3_ft_now() - g_ps3_ft.base) / 1e9);
+    }
+}
+
 #ifdef _WIN32
 // The whole committed guest space (cellSpurs's writer stops at 0x20000000; the
 // game also keeps state in the system VM and HLE heap areas above it), in the
 // same format: records of (u32 ea, u32 size, little-endian) then the bytes.
-void memsnap_write(const char* path)
+// Copied in memory first, so the snapshot spans the copy (a few tens of ms;
+// its start and end on the trace's clock in t0, t1), not the file's writing.
+void memsnap_write(const char* path, uint64_t& t0, uint64_t& t1)
 {
-    FILE* f = fopen(path, "wb");
-    if (!f) return;
+    struct Rec { uint32_t ea, len; size_t at; };
+    std::vector<Rec> recs;
+    std::vector<uint8_t> bytes;
+    t0 = ps3_ft_now();
     for (uint64_t ea = 0x10000u; ea < 0xF0000000u; ) {
         MEMORY_BASIC_INFORMATION mbi;
         if (!VirtualQuery(vm_base + ea, &mbi, sizeof mbi)) break;
         uint64_t len = (uint64_t)((uintptr_t)mbi.BaseAddress + mbi.RegionSize - (uintptr_t)(vm_base + ea));
         if (ea + len > 0xF0000000u) len = 0xF0000000u - ea;
         if (mbi.State == MEM_COMMIT && !(mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) && len < 0xFFFFFFFFu) {
-            const uint32_t e32 = (uint32_t)ea, l32 = (uint32_t)len;
-            fwrite(&e32, 4, 1, f); fwrite(&l32, 4, 1, f); fwrite(vm_base + ea, 1, l32, f);
+            recs.push_back({ (uint32_t)ea, (uint32_t)len, bytes.size() });
+            bytes.insert(bytes.end(), vm_base + ea, vm_base + ea + len);
         }
         ea += len;
+    }
+    t1 = ps3_ft_now();
+    FILE* f = fopen(path, "wb");
+    if (!f) return;
+    for (const Rec& r : recs) {
+        fwrite(&r.ea, 4, 1, f); fwrite(&r.len, 4, 1, f); fwrite(bytes.data() + r.at, 1, r.len, f);
     }
     fclose(f);
 }
@@ -218,13 +289,16 @@ void memsnap_loop()
         fclose(t);
         char path[64];
         snprintf(path, sizeof path, "memsnap_%02u.bin", n++);
+        uint64_t t0 = ps3_ft_now(), t1 = t0;
 #ifdef _WIN32
-        memsnap_write(path);
+        memsnap_write(path, t0, t1);
 #else
         spurs_snap_write_file(path);
+        t1 = ps3_ft_now();
 #endif
         remove("memsnap.trigger");
-        fprintf(stderr, "[memsnap] %s\n", path);
+        fprintf(stderr, "[memsnap] %s at %.3f-%.3f s\n", path, (double)(int64_t)(t0 - g_ps3_ft.base) / 1e9,
+                (double)(int64_t)(t1 - g_ps3_ft.base) / 1e9);
     }
 }
 
@@ -297,7 +371,22 @@ void dev_state_init()
     g_cant_die = cd && (*cd == '1' || up > lo);
     const char* ll = getenv("DOTHEROES_DEV_LIFE_LOG");
     g_life_log = ll && *ll == '1';
-    if (g_cant_die || g_life_log || (st && *st == '1')) std::thread(life_loop).detach();   // also finds the player for state.txt
+    const char* pl = getenv("DOTHEROES_DEV_PLAYER_LOG");
+    if (pl && *pl && *pl != '0') {
+        const unsigned long n = strtoul(pl, nullptr, 0);
+        g_player_log_bytes = n > 1 ? (uint32_t)(n + 3) / 4 * 4 : 0x1000;
+        std::thread(player_log_loop).detach();
+        fprintf(stderr, "[dev-state] player.bin: the player's first 0x%X bytes every 4 ms\n", g_player_log_bytes);
+    }
+    const char* wa = getenv("DOTHEROES_DEV_WATCH");
+    if (wa && *wa) {
+        g_watch_offset = (uint32_t)strtoul(wa, nullptr, 16) & ~3u;
+        std::thread(watch_loop).detach();
+        fprintf(stderr, "[dev-state] watch.trigger: watch stores to the player's +0x%X..+0x%X%s\n", g_watch_offset,
+                g_watch_offset + 0x80, getenv("PPU_WWATCH") ? "" : " (no PPU_WWATCH: lifted stores are not seen)");
+    }
+    if (g_cant_die || g_life_log || (st && *st == '1') || g_player_log_bytes || (wa && *wa))
+        std::thread(life_loop).detach();   // also finds the player, for state.txt, player.bin and the watch
     if (g_cant_die) {
         fprintf(stderr, "[cant-die] on (development only): life of %u half apples or less raised to %u\n", g_low_life, g_top_up);
     }

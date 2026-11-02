@@ -18,6 +18,11 @@
 // the life each screenshot shows, h0,h1,... (in half apples, say): the fields
 // -- 8, 16 or 32-bit integers, or floats -- whose values in the snapshots are
 // all nonzero and proportional to those, with the factor.
+//
+//   find_state differ <limit> <na> <nb> <a snapshots> <b snapshots>
+//   find_state clocks <limit> <before> <after>
+//
+// (below, at each function.)
 // Built with the bundled Zig:
 //   zig c++ -target x86_64-windows-gnu -O2 tests/native/find_state.cpp
 //     -o build/native-test/find_state.exe
@@ -141,9 +146,43 @@ static int differ(uint32_t limit, int na, int nb, char** paths)
     return 0;
 }
 
+// clocks: two snapshots taken some seconds apart (tests/scripts/fps_check.drive):
+// every 32-bit word below `limit` that changed, as an integer that moved by less
+// than 2^24 ("<ea> u32 <before> <after>") or a finite float below 1e7 ("<ea> f32
+// <before> <after>") -- both, when it is both. tests/fps_check.py compares two
+// runs' lists at different frame rates: a clock counting frames moves in
+// proportion to the frame rate, one counting time does not.
+static int clocks(uint32_t limit, const char* pa, const char* pb)
+{
+    const std::vector<Range> a = load(pa), b = load(pb);
+    unsigned n = 0;
+    for (const Range& ra : a) {
+        if (ra.ea >= limit) continue;
+        const Range* rb = nullptr;
+        for (const Range& x : b)
+            if (x.ea == ra.ea && x.bytes.size() == ra.bytes.size()) { rb = &x; break; }
+        if (!rb) continue;
+        for (size_t o = 0; o + 4 <= ra.bytes.size() && ra.ea + o < limit; o += 4) {
+            const uint8_t *p = ra.bytes.data() + o, *q = rb->bytes.data() + o;
+            if (!memcmp(p, q, 4)) continue;
+            const uint32_t ua = ube(p, 4), ub = ube(q, 4), ea = ra.ea + (uint32_t)o;
+            if ((ub > ua ? ub - ua : ua - ub) < 0x1000000u) { printf("%08X u32 %u %u\n", ea, ua, ub); n++; }
+            const float fa = fbe(p), fb = fbe(q);
+            if (std::isfinite(fa) && std::isfinite(fb) && std::fabs(fa) < 1e7f && std::fabs(fb) < 1e7f &&
+                (std::fabs(fa) > 1e-6f || fa == 0) && (std::fabs(fb) > 1e-6f || fb == 0)) {
+                printf("%08X f32 %.9g %.9g\n", ea, fa, fb);
+                n++;
+            }
+        }
+    }
+    fprintf(stderr, "%u changed\n", n);
+    return 0;
+}
+
 int main(int argc, char** argv)
 {
     if (argc >= 4 && !strcmp(argv[1], "life")) return life(argv[2], argc - 3, argv + 3);
+    if (argc == 5 && !strcmp(argv[1], "clocks")) return clocks((uint32_t)strtoul(argv[2], nullptr, 16), argv[3], argv[4]);
     if (argc >= 7 && !strcmp(argv[1], "differ"))   // differ <limit> <na> <nb> <a snaps> <b snaps>
         return differ((uint32_t)strtoul(argv[2], nullptr, 16), atoi(argv[3]), atoi(argv[4]), argv + 5);
     if (argc != 9 || strcmp(argv[1], "position")) {

@@ -1,0 +1,15 @@
+# Who writes the hero's position while walking: DOTHEROES_DEV_WATCH=<offset>
+# (port/native/dev_state.cpp) with PPU_WWATCH=10000, DOTHEROES_DEV_STATE=1 and
+# a save at the castle (SAVES=). The watch is armed just before the walk.
+log TitleMovie 120
+sleep 5
+press START
+sleep 3
+press START
+sleep 5
+press CROSS
+state life>0,area==17 60
+sleep 5
+touch watch.trigger
+hold DOWN 1
+sleep 2

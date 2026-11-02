@@ -1,0 +1,52 @@
+# Frame-rate independence (tests/fps_check.py): the same inputs at different
+# frame rates (DOTHEROES_FPS, DIAG_VBLANK_MS), the game's state compared.
+# Needs DOTHEROES_DEV_STATE=1, DOTHEROES_DEV_KEYS=1 (the marks), DOTHEROES_DEV_MEMSNAP=1
+# (the two snapshots for the game's clocks), DOTHEROES_DEV_PLAYER_LOG=1 (the hero's
+# object every 4 ms), PS3_FTRACE + DOTHEROES_PHYS_STATS=1 (frames, physics), and a
+# save at the castle with the sword (SAVES=).
+#   mark 1 -> 2   standing still for 10 s, guest memory at both ends: the game's
+#                 clocks (tests/native/find_state.cpp clocks)
+#   mark 2 -> 3   walking down 1 s: distance (the camera target, no clamp there)
+#   mark 3 -> 4   walking back up 1 s
+#   mark 4 -> 5   to the grass by the first cliff and cutting it: the debris'
+#                 physics -- steps a second, bodies, how long it lasts. The
+#                 hero's speed differs a little with the frame rate (the game
+#                 truncates each frame's step to 0.01), so the route ends its
+#                 moves against walls (0.65 s right, so walking down stops at
+#                 the ledge; 1.5 s left, to the wall) rather than by time; the
+#                 sword presses are 0.5 s apart, longer than a swing at 30 fps
+#                 (~466 ms; ~400 above), so every press swings at every rate
+#   mark 5 -> 6   standing still 30 s while the debris settles
+log TitleMovie 120
+sleep 5
+press START
+sleep 3
+press START
+sleep 5
+press CROSS
+state life>0,area==17 60
+sleep 5
+touch mark.trigger
+touch memsnap.trigger
+sleep 10
+touch memsnap.trigger
+touch mark.trigger
+sleep 3
+hold DOWN 1
+sleep 2
+touch mark.trigger
+hold UP 1
+sleep 2
+touch mark.trigger
+hold RIGHT 0.65
+hold DOWN 5
+hold LEFT 1.5
+hold RIGHT 0.15
+repeat 6 CROSS 0.5
+sleep 4
+hold RIGHT 0.6
+repeat 6 CROSS 0.5
+touch mark.trigger
+sleep 30
+touch mark.trigger
+sleep 2

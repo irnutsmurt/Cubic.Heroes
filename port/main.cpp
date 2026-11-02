@@ -266,14 +266,18 @@ static void present_guest_frame(void)
  * millisecond of each deadline and a yield for the rest keep every tick
  * within a fraction of a millisecond of its slot, whatever the walker does.
  * DIAG_VBLANK_MS=<ms> sets another period, for frame-rate tests only (25: the
- * game's own two-vblank wait gives 20 fps; tests/scripts/speed.drive). */
+ * game's own two-vblank wait gives 20 fps; tests/scripts/speed.drive). It takes
+ * fractions (6.944: 144 Hz). The frame rate follows it even with
+ * DOTHEROES_FPS=0: the game still waits for each flip, which completes on a
+ * tick of this clock. */
 static void vblank_clock(void)
 {
     SetThreadDescription(GetCurrentThread(), L"vblank");
     using clock = std::chrono::steady_clock;
     const char* e = getenv("DIAG_VBLANK_MS");
+    const double ms = e ? atof(e) : 0.0;
     const auto period = std::chrono::duration_cast<clock::duration>(
-        std::chrono::duration<double, std::milli>(e && atoi(e) > 0 ? atoi(e) : 1000.0 / 60.0));
+        std::chrono::duration<double, std::milli>(ms > 0.0 ? ms : 1000.0 / 60.0));
     auto next = clock::now() + period;
     for (;;) {
         for (auto now = clock::now(); now < next; now = clock::now()) {

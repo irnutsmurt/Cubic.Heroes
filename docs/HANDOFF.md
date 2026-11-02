@@ -75,8 +75,11 @@ log) and [FEASIBILITY.md](FEASIBILITY.md) (design and the explicit exceptions).
   results checked again with normal damage. A version that stops only lethal
   damage would need the game's damage path (not done); the game's state
   for tests (`DOTHEROES_DEV_STATE=1`: life, field area, camera position,
-  physics steps, in `state.txt` and the trace; `tests/drive.py`'s `state`
-  waits on it). **Restarting an encounter from a known state** is, for now,
+  physics collision tasks -- one per 64 pairs of a step -- in `state.txt`
+  and the trace; `tests/drive.py`'s `state` waits on it); for frame-rate
+  checks (2026-11-02), the player's object logged every 4 ms
+  (`DOTHEROES_DEV_PLAYER_LOG=1`) and the guest functions storing to its
+  fields (`DOTHEROES_DEV_WATCH=<offset>`). **Restarting an encounter from a known state** is, for now,
   the save plus a state-checked route (tests/scripts/fight_bench.drive: in
   play in the castle's area, then confirmed in the river's area before the
   fight is measured); a true in-game restart (reloading an area, or putting
@@ -363,8 +366,10 @@ tooling, the native Windows build, measuring on the 3070) are done; see
    debris bursts: the walker's drain of that frame takes 16-21 ms (draws
    jump ~680 -> ~840 and the physics runs up to 6 steps over 270 new bodies
    in it). Shader and pipeline compiles are not it (73 ms and 9 ms in a whole
-   run, 13 ms after the fight began; trace kind 24); geometry converted on
-   the CPU at first sight is being measured (trace kind 25).
+   run, 13 ms after the fight began; trace kind 24). Geometry is not cached
+   between frames for every draw: ~120 draws a frame (~75-100k vertices)
+   are converted on the CPU every frame, not only at first sight (trace kind
+   25) -- part of the walker's drain, and the first candidate for headroom.
    **Slow frames, traced** (the owner's own play, ~7.7 min traced, 26,503
    frames; native collision and solver, default ring; tests/slow_frames.py):
    92% of frames under 18 ms. In the 18-25 ms frames (7.4%) the main thread
@@ -439,6 +444,73 @@ tooling, the native Windows build, measuring on the 3070) are done; see
    admissions), the drive reaches its end mark, and the fight is now 20
    rounds (~80 s). Fights at this cadence are busier: results from before the
    fix are comparable among themselves, not with later ones.
+   **Above 60** (the configuration above, on screen; build/baselines/
+   2026-11-01-config-validation, vb2-* and vb6_944-*). `DOTHEROES_FPS=0` alone
+   still gives 60: the game waits for each flip, and a flip completes on a
+   tick of the port's vblank clock (60 Hz). With the clock at 2 ms
+   (`DIAG_VBLANK_MS=2`, a test setting) the game runs as fast as the host
+   lets it: ~120 fps, guest frames mean 8.1-8.4 ms, p99 12.7-13.4, in
+   exploration and in the river fight alike. Paced to this 143 Hz display
+   (`DIAG_VBLANK_MS=6.944`): mean 8.9-10 ms, so 144 is not sustained; it needs
+   ~15-20% more headroom (the walker's per-frame CPU geometry first). Whether
+   gameplay stays right at these rates is checked separately (below).
+   **Gameplay at other frame rates** (tests/scripts/fps_check.drive,
+   tests/fps_check.py: the same inputs at 30 -- the original pacing -- 60,
+   ~120 with a 2 ms vblank and ~110 with a 144 Hz one; the game's state from
+   memory snapshots, the player's object every 4 ms (`DOTHEROES_DEV_PLAYER_LOG`)
+   and the frame trace; build/baselines/2026-11-02-frame-rate):
+   - *Timers* follow real time. Over 10 s standing still, the static-memory
+     words that count (a seconds clock at 0x029A64CC with seven countdown
+     copies, a millisecond counter at 0x02C69D50, a 60-a-second one at
+     0x02CF3544) moved the same at every rate; seven words count frames
+     (0x02CF3570, 0x02B37CEC and others moving 1, 3, 19, 85 or 374 a frame)
+     and one counts vblanks (0x0159C414, read by the frame-pacing wait
+     func_00029BD8 through cellGcmGetVBlankCount) -- none of them a gameplay
+     timer found so far. The game's frame delta is measured time
+     (sys_time_get_system_time; port/game_patches.cpp).
+   - *Physics* steps at a fixed 60 a second whatever the frame rate. The same
+     grass cut (12 swings) at 30 fps and at ~110-120: 358 and 359 steps, 60.2
+     and 60.0 a second, the same debris (55 bodies) moving for 5.9 and 6.0 s
+     (two steps a frame at 30, one every other frame or so above 60). In the
+     river fight, 60.1-60.4 steps a second while debris is active at 60 fps
+     and 60.2 at 116-118 fps (tests/solver_breakdown.py's step count; a step
+     has a collision task per 64 pairs).
+   - *Hero states and animation* follow time: the walk state lasts the 1 s
+     hold at every rate; the walk animation's phase (+0x524) advances 1 per
+     100 ms at every rate. A swing (+0x590: 2, then 3) ends each phase on the
+     first frame after its time (0.3 s, then 0.1 s) is up, so at 30 fps each
+     phase runs a frame long: 333 + 133 ms against ~300 + ~103 at 60 and
+     above -- a swing of ~466 ms in the original pacing, ~400 above. Presses
+     0.4 s apart therefore swing every other time at 30 fps (6 of 12), 9 of 12
+     at 60, all 12 at ~120 (0.5 s apart, all 12 at every rate): quantisation
+     of a time-based timer, closer to its intended length the higher the
+     rate. Not changed.
+   - *Movement* is time-based (9 units a second) but the game truncates each
+     frame's displacement to a multiple of 0.01 (steps of 0.29/0.30 at 30 fps,
+     0.14/0.15 at 60, 0.06/0.07 at ~120; the position written by the mover,
+     func_000A7C78, at +0x428/+0x42C/+0x430 of the player's object, found with
+     `DOTHEROES_DEV_WATCH`), so the hero is a little slower the higher the
+     rate: cruising 8.82-8.87 units/s at 30, 8.70-8.75 at 60 (-1.5%),
+     8.27-8.45 at ~120 and 8.40-8.42 at ~110 (-5%). Where: the step is made
+     unquantised by func_00119BEC into +0x768 (x) and +0x770 (z) of the
+     player's object, then func_00106CB8 passes each through func_000A2C14
+     (via the cross-module stub func_00983A78, calls at 0x00106FB8 and
+     0x00106FCC): `(float)(int)(v * 100 + 0.005) * 0.01` -- truncation toward
+     zero, 0.005 hundredths of slack. 22 other functions in that module
+     (0x00102BB4-0x0018BA08) call the same stub, so other moving objects --
+     enemies, likely -- are quantised the same way. Not changed: unnoticeable
+     at 60, the requirement; for the 144 stretch goal it is ~4-7% and worth a
+     fix (carry each object's truncated remainder into its next step at those
+     call sites, so positions stay on the 0.01 grid but average 9 units a
+     second; note that makes 30 fps 1.7% faster than the original too). It is
+     enough to move a timed route: at
+     ~120 fps the first drive's 0.5 s walk right ended 0.35 units short and
+     the hero slid round a ledge the 30 and 60 fps runs stop at, missing the
+     grass; the drive now ends its moves against walls.
+   - *Enemies* were not measured one by one: the river fight at ~117 fps
+     (can't-die) gave 2.2 top-ups a minute against 0.7-1.5 at 60, too few to
+     compare. Enemy timing at other rates is still to check (their objects,
+     as the player's: the same tools).
 1. **Next replacements:** the present path (frames in flight, no readback,
    no lock held across GPU waits), then a display-driven vblank (refresh-rate
    aware, e.g. 120 Hz panels). vm_watch on Linux (mprotect + SIGSEGV), so
@@ -861,7 +933,9 @@ tooling, the native Windows build, measuring on the 3070) are done; see
 | `DOTHEROES_DEV_STATE=1` | testing: the game's state every 100 ms -- life (half apples), field area, camera target x/z, physics steps, can't-die top-ups -- in `<run>/state.txt` (`tests/drive.py` `state <cond> [timeout]`) and the trace (kind 23) |
 | `DOTHEROES_DEV_CANT_DIE=1\|<floor>,<refill>` | testing: keeps the hero alive by topping life up below full -- 8 half apples or less raised to 9 (default; never full, so no sword beam). It heals, not only stops lethal hits; each top-up logged and counted. Same setting in every arm of a comparison; report runs with it apart; recheck with normal damage |
 | `DOTHEROES_DEV_LIFE_LOG=1` | testing: every change of the player's life and the HUD's copies, logged |
-| `DOTHEROES_DEV_MEMSNAP=1` | testing: a drive script's `touch memsnap.trigger` writes all committed guest memory to `<run>/memsnap_<n>.bin` (game memory: local only; tests/native/find_state.cpp) |
+| `DOTHEROES_DEV_MEMSNAP=1` | testing: a drive script's `touch memsnap.trigger` writes all committed guest memory to `<run>/memsnap_<n>.bin` (game memory: local only; tests/native/find_state.cpp); copied in memory first, the log gives the copy's start and end |
+| `DOTHEROES_DEV_PLAYER_LOG=1\|<bytes>` | testing: the player's object (first 0x1000 bytes) every 4 ms into `<run>/player.bin`, ~1 MB/s (game memory: local only; tests/fps_check.py) |
+| `DOTHEROES_DEV_WATCH=<hex offset>` | testing, with `PPU_WWATCH=10000` (any address: it routes the lifted stores through the runtime's hooks): when a drive touches `watch.trigger`, the first 48 stores to the player's object from `<offset>` (0x80 bytes) are logged as `[sync-write] +<offset - 0x40 + n>` with the storing guest function (tests/scripts/watch_walk.drive) |
 | `PPU_WWATCH=<hex ea>` | the runtime's store watch: every lifted PPU store to that 16-byte line, with the writing guest function (found the HUD's life writer) |
 | `VISIBLE=1`, `GRAB_EVERY=<s>` | tests/boot_smoke.py: an on-screen run -- refused on a locked desktop, stopped if it locks, the window is minimised/hidden, or another window covers more than a tenth of it for 3 s (a covered window ran at ~35 fps); guard.json has the foreground and covered shares; window grabs to grabs/ |
 | `TOPMOST=1` | tests/boot_smoke.py, with VISIBLE=1: the game's window kept above other windows without taking the focus |
