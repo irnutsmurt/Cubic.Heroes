@@ -584,9 +584,13 @@ tooling, the native Windows build, measuring on the 3070) are done; see
      ordering, not a delay: signal the PPU only after the task's context save
      (cellSpurs task save/exit path, libs/spurs) has completed. Long play
      sessions are the test.
-7. Open issues: a flat beige quad over the castle path at ~180 s of
-   `intro.drive` (pre-existing, both present modes); debug console and
-   golden boot log (M2). **Save and load work** (2026-11-02,
+7. Open issues: debug console and golden boot log (M2). **Not a bug: the
+   "flat beige quad over the castle path"** in `intro.drive` (2026-11-02):
+   it starts at the hero's feet and runs to the screen's edge, a flat blade
+   with a lighter centre ridge, and shows only after a sword press with the
+   hero facing down at full life -- the game's full-health giant sword,
+   drawn in the prologue's washed-out palette (white in the attract mode's
+   fights). **Save and load work** (2026-11-02,
    tests/scripts/save_game.drive: the river route, the hero's life set to
    half an apple with `life.trigger`, killed by the next hit; GAME OVER ->
    "Continue?" NO -> "Save your progress?" YES): the system save list wrote
@@ -598,6 +602,23 @@ tooling, the native Windows build, measuring on the 3070) are done; see
    back to RPCS3 or a PS3 may need that). The game's attract mode (5 min, no
    input: field, river, desert, a lava dungeon, the red volcano area, the
    forest) ran at 60 fps with nothing over 25 ms and nothing visibly wrong.
+   **Menus and features** (2026-11-02): START in play opens the system menu
+   -- RESUME, SAVE, LOAD, OPTIONS, SNAPSHOT, ALBUM, BESTIARY, LOADING ART,
+   TITLE (the title screen's menu has NEW GAME, CONTINUE, EDITOR, ALBUM,
+   INSTALL); TRIANGLE the item pages. The dot editor opens (EDITOR -> NEW
+   DATA -> gender -> class -> its frames; LOAD with no edit data saved
+   returns, the save list being empty; tests/scripts/menu_tour.drive).
+   **SNAPSHOT and ALBUM fixed** (patches 0073-0075; tests/scripts/
+   snapshot.drive, menu_album.drive): ALBUM called cellPhotoImport2, which
+   the runtime did not have -- in normal play the screen went black for
+   good, waiting for its callback; SNAPSHOT then needed cellJpgEnc's real
+   API and cellPhotoExport. Now the camera's shutter encodes the frame
+   (a display buffer, written back from the GPU first: it was black before)
+   to a JPEG with the game's copyright line, exports it to
+   `<data root>/dev_hdd0/photo`, and ALBUM imports the newest picture there
+   and shows it; with none it backs out to the title. Still a placeholder:
+   cellPngEnc (the game imports seven of its functions; what uses them is
+   not found yet -- BESTIARY, LOADING ART and OPTIONS are untested).
 8. Found by the owner playing on Windows (2026-10-30), the same with
    RSX_GEOM_CACHE=0: killing enemies left a bright flash that stayed a long
    time; enemies flashing after a hit were invisible; the water "not
@@ -994,4 +1015,4 @@ Edit in `build/ref/ps3recomp` (branch `dotheroes`), commit there as
 `git format-patch --start-number <next> -o ../../../patches/ps3recomp HEAD~<n>`
 and commit the patch files here. `tools/pipeline.py` refuses to run with
 uncommitted changes in that checkout, and re-applies the whole series when
-the patch files change. 72 patches (0001-0072) as of 2026-11-02.
+the patch files change. 75 patches (0001-0075) as of 2026-11-02.

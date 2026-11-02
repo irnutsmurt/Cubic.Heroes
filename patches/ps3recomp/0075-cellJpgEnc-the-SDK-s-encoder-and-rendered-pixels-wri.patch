@@ -1,0 +1,509 @@
+From 79660c37156b9b5799a7099cd24b2dc94352bb2f Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Mon, 2 Nov 2026 02:43:44 -0800
+Subject: [PATCH 75/75] cellJpgEnc: the SDK's encoder, and rendered pixels
+ written back for it
+
+cellJpgEnc was a placeholder with made-up functions. Now QueryAttr, Open,
+OpenEx, WaitForInput, EncodePicture/EncodePicture2, WaitForOutput,
+GetStreamInfo, Reset and Close, with the structures laid out as 3D Dot Game
+Heroes fills them: a grayscale, RGB, RGBA or ARGB picture is encoded at
+once (stb_image_write) at the title's quality into a file (a /dev_hdd0 or
+/dev_hdd1 path) or a guest buffer, and described by GetStreamInfo.
+
+The title's SNAPSHOT encodes its display buffer, which the draw engine
+renders on the host GPU: guest memory there held zeros, so the picture was
+black. cellGcm_guest_read_surface writes the engine's pixels of a guest
+rectangle back first (rsx_draw_engine_guest_read, as a 2D transfer reading
+it does, under the FIFO walker's lock); the encoder calls it for a 32-bit
+picture. The snapshot now shows the scene with the game's copyright line.
+---
+ libs/codec/cellJpgEnc.c | 272 ++++++++++++++++++++++++----------------
+ libs/codec/cellJpgEnc.h |  94 +++++++-------
+ libs/video/cellGcmSys.c |  27 ++++
+ libs/video/cellGcmSys.h |   5 +
+ 4 files changed, 246 insertions(+), 152 deletions(-)
+
+diff --git a/libs/codec/cellJpgEnc.c b/libs/codec/cellJpgEnc.c
+index 98b9108..787549e 100644
+--- a/libs/codec/cellJpgEnc.c
++++ b/libs/codec/cellJpgEnc.c
+@@ -1,147 +1,199 @@
+ /*
+- * ps3recomp - cellJpgEnc HLE implementation
++ * ps3recomp - cellJpgEnc HLE
+  *
+- * Real JPEG encoding via stb_image_write.h.
+- * stb_image_write is compiled in cellPngEnc.c (STB_IMAGE_WRITE_IMPLEMENTATION).
++ * An encode runs inside EncodePicture: the picture (grayscale, RGB, RGBA or
++ * ARGB, 8 bits a channel, rows pitchWidth bytes apart) is converted to RGB
++ * and written as a JPEG at the title's quality to its output -- a file (a
++ * /dev_hdd0 or /dev_hdd1 path, resolved as ppu_fs.cpp does) or a guest
++ * buffer of limitSize bytes. WaitForOutput then has one stream waiting and
++ * GetStreamInfo describes it. 3D Dot Game Heroes' SNAPSHOT encodes its frame
++ * this way before handing the file to cellPhotoExport.
+  */
+ 
+ #include "cellJpgEnc.h"
+-#include <stdio.h>
+-#include <string.h>
+-#include <stdlib.h>
+-#include "../../runtime/ppu/ppu_memory.h"   /* vm_write*: guest EA -> host, byte-swapped */
+-#include "../guest_struct.h"   /* GUEST_EA, guest_struct_load/store */
++#include "stb_image_write.h"   /* compiled in cellPngEnc.c */
++#include "../misc/photo_util.h"
++#include "../video/cellGcmSys.h"   /* cellGcm_guest_read_surface */
+ 
+-/* stb_image_write (declarations only — implementation in cellPngEnc.c) */
+-#include "stb_image_write.h"
+-
+-/* Internal state */
++#define JPGENC_HANDLES 4
+ 
+ typedef struct {
+-    int in_use;
+-    CellJpgEncParam param;
+-} JpgEncHandle;
+-
+-static JpgEncHandle s_handles[CELL_JPGENC_HANDLE_MAX];
++    int open;
++    int pending;           /* a stream waiting for GetStreamInfo */
++    u32 location, file_name_ea, stream_addr, limit_size, stream_size, lines;
++    s32 status;            /* the encode's result */
++} JpgEnc;
+ 
+-/* Write callback */
+-typedef struct { u8* data; u32 size; u32 capacity; } JpgWriteCtx;
++static JpgEnc s_enc[JPGENC_HANDLES + 1];   /* handles 1..JPGENC_HANDLES */
+ 
+-static void jpg_write_cb(void* context, void* data, int size)
++static JpgEnc* enc_of(u32 handle)
+ {
+-    JpgWriteCtx* ctx = (JpgWriteCtx*)context;
+-    if (ctx->size + (u32)size > ctx->capacity) {
+-        u32 new_cap = (ctx->capacity * 2 > ctx->size + (u32)size)
+-                      ? ctx->capacity * 2 : ctx->size + (u32)size + 4096;
+-        u8* p = (u8*)realloc(ctx->data, new_cap);
+-        if (!p) return;
+-        ctx->data = p;
+-        ctx->capacity = new_cap;
+-    }
+-    memcpy(ctx->data + ctx->size, data, (size_t)size);
+-    ctx->size += (u32)size;
++    return handle >= 1 && handle <= JPGENC_HANDLES && s_enc[handle].open ? &s_enc[handle] : NULL;
+ }
+ 
+-/* API */
+-
+-s32 cellJpgEncQueryAttr(const CellJpgEncParam* param, u32* workMemSize)
++s32 cellJpgEncQueryAttr(u32 config, u32 attr)
+ {
+-    (void)param;
+-    if (!workMemSize) return (s32)CELL_JPGENC_ERROR_INVALID_ARGUMENT;
+-    vm_write32((u32)(uintptr_t)workMemSize, (u32)1024 * 1024);
++    if (!config || !attr) return (s32)CELL_JPGENC_ERROR_ARG;
++    photo_write32(attr + 0x0, 0x10000);   /* memSize: the title's work area, unused here */
++    vm_base[attr + 0x4] = 4;              /* cmdQueueDepth */
++    photo_write32(attr + 0x8, 0x00010000);
++    photo_write32(attr + 0xC, 0);
+     return CELL_OK;
+ }
+ 
+-s32 cellJpgEncCreate(const CellJpgEncParam* param, CellJpgEncHandle* handle)
++s32 cellJpgEncOpen(u32 config, u32 resource, u32 handle)
+ {
+-    printf("[cellJpgEnc] Create(%ux%u, quality=%u)\n",
+-           param ? vm_read32(GUEST_EA(param) + (u32)offsetof(CellJpgEncParam, width)) : 0,
+-           param ? vm_read32(GUEST_EA(param) + (u32)offsetof(CellJpgEncParam, height)) : 0,
+-           param ? vm_read32(GUEST_EA(param) + (u32)offsetof(CellJpgEncParam, quality)) : 0);
+-    if (!param || !handle) return (s32)CELL_JPGENC_ERROR_INVALID_ARGUMENT;
+-
+-    for (int i = 0; i < CELL_JPGENC_HANDLE_MAX; i++) {
+-        if (!s_handles[i].in_use) {
+-            memset(&s_handles[i], 0, sizeof(JpgEncHandle));
+-            s_handles[i].in_use = 1;
+-            guest_struct_load(&s_handles[i].param, GUEST_EA(param),
+-                              (u32)sizeof(s_handles[i].param));
+-            if (s_handles[i].param.quality == 0) s_handles[i].param.quality = 85;
+-            vm_write32((u32)(uintptr_t)handle, (u32)i);
++    if (!config || !resource || !handle) return (s32)CELL_JPGENC_ERROR_ARG;
++    for (u32 h = 1; h <= JPGENC_HANDLES; h++)
++        if (!s_enc[h].open) {
++            memset(&s_enc[h], 0, sizeof s_enc[h]);
++            s_enc[h].open = 1;
++            photo_write32(handle, h);
++            printf("[cellJpgEnc] Open(max %ux%u) -> %u\n", photo_read32(config), photo_read32(config + 4), h);
+             return CELL_OK;
+         }
+-    }
+-    return (s32)CELL_JPGENC_ERROR_OUT_OF_MEMORY;
++    return (s32)CELL_JPGENC_ERROR_FATAL;
+ }
+ 
+-s32 cellJpgEncDestroy(CellJpgEncHandle handle)
++s32 cellJpgEncOpenEx(u32 config, u32 resource, u32 handle)
+ {
+-    if (handle >= CELL_JPGENC_HANDLE_MAX || !s_handles[handle].in_use)
+-        return (s32)CELL_JPGENC_ERROR_INVALID_ARGUMENT;
+-    s_handles[handle].in_use = 0;
+-    return CELL_OK;
++    return cellJpgEncOpen(config, resource, handle);
++}
++
++s32 cellJpgEncWaitForInput(u32 handle, u32 block)
++{
++    (void)block;
++    return enc_of(handle) ? CELL_OK : (s32)CELL_JPGENC_ERROR_ARG;
++}
++
++typedef struct { u32 addr, limit, used; int overflow; } BufOut;
++static void buf_write(void* context, void* data, int size)
++{
++    BufOut* o = (BufOut*)context;
++    if (o->used + (u32)size > o->limit) { o->overflow = 1; return; }
++    memcpy(vm_base + o->addr + o->used, data, (size_t)size);
++    o->used += (u32)size;
++}
++typedef struct { FILE* f; u32 used; } FileOut;
++static void file_write(void* context, void* data, int size)
++{
++    FileOut* o = (FileOut*)context;
++    o->used += (u32)fwrite(data, 1, (size_t)size, o->f);
+ }
+ 
+-s32 cellJpgEncEncode(CellJpgEncHandle handle, const void* inputData,
+-                       CellJpgEncOutputInfo* outputInfo)
++s32 cellJpgEncEncodePicture(u32 handle, u32 picture, u32 encodeParam, u32 outputParam)
+ {
+-    if (handle >= CELL_JPGENC_HANDLE_MAX || !s_handles[handle].in_use)
+-        return (s32)CELL_JPGENC_ERROR_INVALID_ARGUMENT;
+-    if (!inputData || !outputInfo) return (s32)CELL_JPGENC_ERROR_INVALID_ARGUMENT;
+-
+-    JpgEncHandle* h = &s_handles[handle];
+-    u32 w = h->param.width, hp = h->param.height;
+-    int ch = 3;
+-    const u8* src = (const u8*)inputData;
+-    u8* rgb = NULL;
+-
+-    if (h->param.colorSpace == CELL_JPGENC_COLOR_SPACE_ARGB) {
+-        rgb = (u8*)malloc(w * hp * 3);
+-        if (!rgb) return (s32)CELL_JPGENC_ERROR_OUT_OF_MEMORY;
+-        for (u32 i = 0; i < w * hp; i++) {
+-            rgb[i*3] = src[i*4+1]; rgb[i*3+1] = src[i*4+2]; rgb[i*3+2] = src[i*4+3];
++    JpgEnc* e = enc_of(handle);
++    if (!e || !picture || !outputParam) return (s32)CELL_JPGENC_ERROR_ARG;
++    if (e->pending) return (s32)CELL_JPGENC_ERROR_BUSY;
++    const u32 w = photo_read32(picture), h = photo_read32(picture + 4), pitch = photo_read32(picture + 8);
++    const u32 cs = photo_read32(picture + 12), src = photo_read32(picture + 16);
++    u32 quality = encodeParam ? photo_read32(encodeParam + 0x10) : 0;
++    if (quality < 1 || quality > 100) quality = 90;
++    const u32 bpp = cs == CELL_JPGENC_COLOR_SPACE_GRAYSCALE ? 1 : cs == CELL_JPGENC_COLOR_SPACE_RGB ? 3
++                  : (cs == CELL_JPGENC_COLOR_SPACE_RGBA || cs == CELL_JPGENC_COLOR_SPACE_ARGB) ? 4 : 0;
++    if (!w || !h || !src || !bpp || pitch < w * bpp) return (s32)CELL_JPGENC_ERROR_ARG;
++
++    unsigned char* rgb = (unsigned char*)malloc((size_t)w * h * 3);
++    if (!rgb) return (s32)CELL_JPGENC_ERROR_FATAL;
++    /* A picture the title rendered (SNAPSHOT encodes its display buffer) is on
++     * the host GPU until written back. */
++    if (bpp == 4) cellGcm_guest_read_surface(src, pitch, w, h);
++    for (u32 y = 0; y < h; y++) {
++        const uint8_t* row = vm_base + src + (size_t)y * pitch;
++        unsigned char* out = rgb + (size_t)y * w * 3;
++        for (u32 x = 0; x < w; x++, out += 3) {
++            const uint8_t* p = row + (size_t)x * bpp;
++            if (bpp == 1) out[0] = out[1] = out[2] = p[0];
++            else if (cs == CELL_JPGENC_COLOR_SPACE_ARGB) { out[0] = p[1]; out[1] = p[2]; out[2] = p[3]; }
++            else { out[0] = p[0]; out[1] = p[1]; out[2] = p[2]; }
+         }
+-        src = rgb;
+-    } else if (h->param.colorSpace == CELL_JPGENC_COLOR_SPACE_RGBA) {
+-        rgb = (u8*)malloc(w * hp * 3);
+-        if (!rgb) return (s32)CELL_JPGENC_ERROR_OUT_OF_MEMORY;
+-        for (u32 i = 0; i < w * hp; i++) {
+-            rgb[i*3] = src[i*4]; rgb[i*3+1] = src[i*4+1]; rgb[i*3+2] = src[i*4+2];
++    }
++
++    e->location = photo_read32(outputParam);
++    e->file_name_ea = photo_read32(outputParam + 4);
++    e->stream_addr = photo_read32(outputParam + 8);
++    e->limit_size = photo_read32(outputParam + 12);
++    e->stream_size = 0;
++    e->lines = h;
++    e->status = CELL_OK;
++    char guest[1024], path[1400];
++    if (e->location == CELL_JPGENC_LOCATION_FILE) {
++        photo_guest_str(guest, sizeof guest, e->file_name_ea);
++        FileOut o = { NULL, 0 };
++        if (photo_host_path(path, sizeof path, guest)) {
++            char dir[1400];
++            snprintf(dir, sizeof dir, "%s", path);
++            char* slash = strrchr(dir, '/');
++            if (slash) { *slash = '\0'; photo_mkdirs(dir); }
++            o.f = fopen(path, "wb");
+         }
+-        src = rgb;
+-    } else if (h->param.colorSpace == CELL_JPGENC_COLOR_SPACE_GRAYSCALE) {
+-        ch = 1;
++        if (!o.f) e->status = (s32)CELL_JPGENC_ERROR_STREAM_FILE_OPEN;
++        else {
++            stbi_write_jpg_to_func(file_write, &o, (int)w, (int)h, 3, rgb, (int)quality);
++            fclose(o.f);
++            e->stream_size = o.used;
++        }
++        printf("[cellJpgEnc] EncodePicture(%ux%u at 0x%08X, color space %u, quality %u) -> %s, %u bytes\n", w, h, src,
++               cs, quality, guest, e->stream_size);
++    } else {
++        BufOut o = { e->stream_addr, e->limit_size, 0, 0 };
++        stbi_write_jpg_to_func(buf_write, &o, (int)w, (int)h, 3, rgb, (int)quality);
++        e->stream_size = o.used;
++        if (o.overflow) e->status = (s32)CELL_JPGENC_ERROR_STREAM_OVERFLOW;
++        printf("[cellJpgEnc] EncodePicture(%ux%u, color space %u, quality %u) -> buffer, %u bytes%s\n", w, h, cs,
++               quality, o.used, o.overflow ? " (overflow)" : "");
+     }
++    free(rgb);
++    e->pending = 1;
++    return CELL_OK;
++}
+ 
+-    JpgWriteCtx ctx = {0};
+-    ctx.capacity = w * hp * ch;
+-    ctx.data = (u8*)malloc(ctx.capacity);
+-    if (!ctx.data) { free(rgb); return (s32)CELL_JPGENC_ERROR_OUT_OF_MEMORY; }
++s32 cellJpgEncEncodePicture2(u32 handle, u32 picture, u32 encodeParam, u32 outputParam)
++{
++    return cellJpgEncEncodePicture(handle, picture, encodeParam, outputParam);
++}
+ 
+-    int ok = stbi_write_jpg_to_func(jpg_write_cb, &ctx, (int)w, (int)hp,
+-                                     ch, src, (int)h->param.quality);
+-    free(rgb);
+-    if (!ok) { free(ctx.data); return (s32)CELL_JPGENC_ERROR_FATAL; }
+-
+-    /* The encoded bytes have nowhere to go. CellJpgEncOutputInfo.outputData is a
+-     * pointer the TITLE reads, and what we have is a host malloc -- writing it
+-     * would hand the guest an address it cannot touch (and the old code leaked
+-     * the buffer besides). Report the size and a null pointer, which the caller
+-     * can at least test.
+-     *
+-     * ponytail: the real API hands the encoder a destination buffer at open
+-     * time; wire that through cellJpgEncOpen and the data has somewhere to land.
+-     */
+-    u32 out_ea = GUEST_EA(outputInfo);
+-    vm_write32(out_ea + (u32)offsetof(CellJpgEncOutputInfo, outputData), 0);
+-    vm_write32(out_ea + (u32)offsetof(CellJpgEncOutputInfo, outputSize), ctx.size);
+-    free(ctx.data);
++s32 cellJpgEncWaitForOutput(u32 handle, u32 streamInfoNum, u32 block)
++{
++    (void)block;
++    JpgEnc* e = enc_of(handle);
++    if (!e || !streamInfoNum) return (s32)CELL_JPGENC_ERROR_ARG;
++    photo_write32(streamInfoNum, e->pending ? 1 : 0);
++    return e->pending ? CELL_OK : (s32)CELL_JPGENC_ERROR_EMPTY;
++}
++
++s32 cellJpgEncGetStreamInfo(u32 handle, u32 streamInfo)
++{
++    JpgEnc* e = enc_of(handle);
++    if (!e || !streamInfo) return (s32)CELL_JPGENC_ERROR_ARG;
++    if (!e->pending) return (s32)CELL_JPGENC_ERROR_EMPTY;
++    photo_write32(streamInfo + 0x00, (u32)e->status);
++    photo_write32(streamInfo + 0x04, e->location);
++    photo_write32(streamInfo + 0x08, e->file_name_ea);
++    photo_write32(streamInfo + 0x0C, e->stream_addr);
++    photo_write32(streamInfo + 0x10, e->limit_size);
++    photo_write32(streamInfo + 0x14, e->stream_size);
++    photo_write32(streamInfo + 0x18, e->lines);
++    photo_write32(streamInfo + 0x20, 0);
++    photo_write32(streamInfo + 0x24, 0);
++    e->pending = 0;
++    return CELL_OK;
++}
++
++s32 cellJpgEncReset(u32 handle)
++{
++    JpgEnc* e = enc_of(handle);
++    if (!e) return (s32)CELL_JPGENC_ERROR_ARG;
++    e->pending = 0;
+     return CELL_OK;
+ }
+ 
+-s32 cellJpgEncReset(CellJpgEncHandle handle)
++s32 cellJpgEncClose(u32 handle)
+ {
+-    if (handle >= CELL_JPGENC_HANDLE_MAX || !s_handles[handle].in_use)
+-        return (s32)CELL_JPGENC_ERROR_INVALID_ARGUMENT;
++    JpgEnc* e = enc_of(handle);
++    if (!e) return (s32)CELL_JPGENC_ERROR_ARG;
++    e->open = 0;
++    printf("[cellJpgEnc] Close(%u)\n", handle);
+     return CELL_OK;
+ }
+diff --git a/libs/codec/cellJpgEnc.h b/libs/codec/cellJpgEnc.h
+index a1fca36..a136ca6 100644
+--- a/libs/codec/cellJpgEnc.h
++++ b/libs/codec/cellJpgEnc.h
+@@ -1,8 +1,10 @@
+ /*
+  * ps3recomp - cellJpgEnc HLE
+  *
+- * JPEG encoding: converts raw pixel data to JPEG format.
+- * Stub — encoder handles are tracked but no actual encoding occurs.
++ * The JPEG encoder: a title opens an encoder, hands it a picture with an
++ * output (a file or a buffer), waits for the output and reads its stream
++ * info. Encoding is done at once here (stb_image_write, compiled in
++ * cellPngEnc.c), so input is always ready and output always waiting.
+  */
+ 
+ #ifndef PS3RECOMP_CELL_JPGENC_H
+@@ -15,46 +17,54 @@
+ extern "C" {
+ #endif
+ 
+-/* Error codes */
+-#define CELL_JPGENC_ERROR_NOT_INITIALIZED     0x80611101
+-#define CELL_JPGENC_ERROR_INVALID_ARGUMENT    0x80611102
+-#define CELL_JPGENC_ERROR_OUT_OF_MEMORY       0x80611103
+-#define CELL_JPGENC_ERROR_NOT_SUPPORTED       0x80611104
+-#define CELL_JPGENC_ERROR_FATAL               0x80611105
+-
+-/* Constants */
+-#define CELL_JPGENC_HANDLE_MAX   4
+-
+-/* Color space */
+-#define CELL_JPGENC_COLOR_SPACE_ARGB      0
+-#define CELL_JPGENC_COLOR_SPACE_RGBA      1
+-#define CELL_JPGENC_COLOR_SPACE_YCbCr     2
+-#define CELL_JPGENC_COLOR_SPACE_GRAYSCALE 3
+-
+-/* Types */
+-typedef u32 CellJpgEncHandle;
+-
+-typedef struct CellJpgEncParam {
+-    u32 width;
+-    u32 height;
+-    u32 colorSpace;
+-    u32 quality;         /* 1-100 */
+-    u32 reserved[4];
+-} CellJpgEncParam;
+-
+-typedef struct CellJpgEncOutputInfo {
+-    void* outputData;
+-    u32 outputSize;
+-    u32 reserved;
+-} CellJpgEncOutputInfo;
+-
+-/* Functions */
+-s32 cellJpgEncCreate(const CellJpgEncParam* param, CellJpgEncHandle* handle);
+-s32 cellJpgEncDestroy(CellJpgEncHandle handle);
+-s32 cellJpgEncEncode(CellJpgEncHandle handle, const void* inputData,
+-                       CellJpgEncOutputInfo* outputInfo);
+-s32 cellJpgEncQueryAttr(const CellJpgEncParam* param, u32* workMemSize);
+-s32 cellJpgEncReset(CellJpgEncHandle handle);
++#define CELL_JPGENC_ERROR_ARG             0x80611191
++#define CELL_JPGENC_ERROR_SEQ             0x80611192
++#define CELL_JPGENC_ERROR_BUSY            0x80611193
++#define CELL_JPGENC_ERROR_EMPTY           0x80611194
++#define CELL_JPGENC_ERROR_RESET           0x80611195
++#define CELL_JPGENC_ERROR_FATAL           0x80611196
++#define CELL_JPGENC_ERROR_STREAM_ABORT    0x806111A1
++#define CELL_JPGENC_ERROR_STREAM_SKIP     0x806111A2
++#define CELL_JPGENC_ERROR_STREAM_OVERFLOW 0x806111A3
++#define CELL_JPGENC_ERROR_STREAM_FILE_OPEN 0x806111A4
++
++#define CELL_JPGENC_COLOR_SPACE_GRAYSCALE 1
++#define CELL_JPGENC_COLOR_SPACE_RGB       2
++#define CELL_JPGENC_COLOR_SPACE_YCbCr     3
++#define CELL_JPGENC_COLOR_SPACE_RGBA      10
++#define CELL_JPGENC_COLOR_SPACE_ARGB      20
++
++#define CELL_JPGENC_LOCATION_FILE   0
++#define CELL_JPGENC_LOCATION_BUFFER 1
++
++/* The structures, big-endian in guest memory (offsets as 3D Dot Game Heroes
++ * fills them):
++ *   CellJpgEncConfig     { u32 maxWidth, maxHeight, encodeColorSpace,
++ *                          encodeSamplingFormat; b8 enableSpu (+3 pad);
++ *                          s32 numOfSpus; ... }
++ *   CellJpgEncAttr       { u32 memSize; u8 cmdQueueDepth (+3); u32 versionUpper,
++ *                          versionLower }
++ *   CellJpgEncResource   { void* memAddr; u32 memSize; s32 ppuThreadPriority,
++ *                          spuThreadPriority }
++ *   CellJpgEncPicture    { u32 width, height, pitchWidth, colorSpace;
++ *                          void* pictureAddr }
++ *   CellJpgEncEncodeParam{ b8 enableSpu (+3); u32 +4, +8, +0xC; u32 quality
++ *                          (+0x10, 1-100); u32 compressionMode, streamSizeLimit }
++ *   CellJpgEncOutputParam{ u32 location; const char* streamFileName;
++ *                          void* streamAddr; u32 limitSize }
++ *   CellJpgEncStreamInfo { u32 state, location; const char* streamFileName;
++ *                          void* streamAddr; u32 limitSize, streamSize,
++ *                          processedLine (+pad); u64 userData } */
++s32 cellJpgEncQueryAttr(u32 config, u32 attr);
++s32 cellJpgEncOpen(u32 config, u32 resource, u32 handle);
++s32 cellJpgEncOpenEx(u32 config, u32 resource, u32 handle);
++s32 cellJpgEncWaitForInput(u32 handle, u32 block);
++s32 cellJpgEncEncodePicture(u32 handle, u32 picture, u32 encodeParam, u32 outputParam);
++s32 cellJpgEncEncodePicture2(u32 handle, u32 picture, u32 encodeParam, u32 outputParam);
++s32 cellJpgEncWaitForOutput(u32 handle, u32 streamInfoNum, u32 block);
++s32 cellJpgEncGetStreamInfo(u32 handle, u32 streamInfo);
++s32 cellJpgEncReset(u32 handle);
++s32 cellJpgEncClose(u32 handle);
+ 
+ #ifdef __cplusplus
+ }
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index 0dbdf62..31755a1 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -2226,6 +2226,33 @@ void cellGcm_rsx_process_fifo(void)
+     }
+ }
+ 
++/* For a library that reads pixels the title rendered -- cellJpgEnc encoding
++ * the display buffer 3D Dot Game Heroes' SNAPSHOT draws into. The engine
++ * renders on the host GPU, so those pixels are not in guest memory until
++ * written back: store the engine's pixels of the rectangle at guest address
++ * ea (RSX local memory, or main memory the RSX has mapped) into guest memory,
++ * as a 2D transfer reading it would (nv3089_engine_read). It drives the
++ * engine, so it takes the FIFO walker's lock, as the poll path does. pitch in
++ * bytes; w and h in 32-bit pixels. Nothing happens without the engine or for
++ * an address the RSX does not see. */
++void cellGcm_guest_read_surface(u32 ea, u32 pitch, u32 w, u32 h)
++{
++    if (!rsx_draw_engine_enabled() || !pitch || !w || !h) return;
++    u32 location, offset;
++    if (ea >= s_config.localAddress && ea - s_config.localAddress < s_config.localSize) {
++        location = RSX_LOCATION_LOCAL;
++        offset = ea - s_config.localAddress;
++    } else {
++        const u32 page = ea >> 20;
++        if (page >= 65536 || s_io_address_table[page] == 0xFFFF) return;
++        location = RSX_LOCATION_MAIN;
++        offset = ((u32)s_io_address_table[page] << 20) | (ea & 0xFFFFF);
++    }
++    AcquireSRWLockExclusive(&s_gcm_fifo_lock);
++    rsx_draw_engine_guest_read(location, offset, pitch, w, h);
++    ReleaseSRWLockExclusive(&s_gcm_fifo_lock);
++}
++
+ /* The methods rsx_process_method acts on beyond its own rsx_state: the notify
+  * and semaphore DMA contexts, the notify write, the back-end label offset and
+  * label writes, and SET_REFERENCE (g_rsx_last_reference). Everything else only
+diff --git a/libs/video/cellGcmSys.h b/libs/video/cellGcmSys.h
+index 94c14a8..ec15bf3 100644
+--- a/libs/video/cellGcmSys.h
++++ b/libs/video/cellGcmSys.h
+@@ -260,6 +260,11 @@ void cellGcm_syscall_set_fifo(u32 put, u32 get);
+ /* Hand the display buffers the title has registered so far to the draw
+  * engine, for an engine that comes up after cellGcmSetDisplayBuffer ran. */
+ void cellGcm_replay_display_buffers_to_engine(void);
++/* For a library reading pixels the title rendered (an encoder given a display
++ * buffer): the draw engine's pixels of that rectangle, written back into guest
++ * memory first. ea a guest address the RSX sees; pitch in bytes; w and h in
++ * 32-bit pixels. */
++void cellGcm_guest_read_surface(u32 ea, u32 pitch, u32 w, u32 h);
+ 
+ s32 cellGcmSetDisplayBuffer(u32 bufferId, u32 offset, u32 pitch,
+                             u32 width, u32 height);
+-- 
+2.56.0.windows.3
+

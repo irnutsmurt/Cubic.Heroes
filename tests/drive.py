@@ -24,14 +24,15 @@ Script lines (# comments allowed):
   hold <BUTTON> <sec>         hold for <sec> of wall time (not guest reports:
                               those pass twice as fast at 60 fps)
 
-Buttons: START SELECT CROSS CIRCLE SQUARE TRIANGLE UP DOWN LEFT RIGHT L1 R1 L2 R2.
+Buttons: START SELECT CROSS CIRCLE SQUARE TRIANGLE UP DOWN LEFT RIGHT L1 R1 L2 R2 L3 R3,
+or a mask (0x0009: SELECT and START together).
 Exit status 0 when every step completed, 1 on a timeout (the step is named).
 """
 import os, re, sys, time
 from PIL import Image, ImageChops, ImageFile, ImageStat
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
-BTN = {"SELECT": 0x0001, "START": 0x0008, "UP": 0x0010, "RIGHT": 0x0020, "DOWN": 0x0040,
+BTN = {"SELECT": 0x0001, "L3": 0x0002, "R3": 0x0004, "START": 0x0008, "UP": 0x0010, "RIGHT": 0x0020, "DOWN": 0x0040,
        "LEFT": 0x0080, "L2": 0x0100, "R2": 0x0200, "L1": 0x0400, "R1": 0x0800,
        "TRIANGLE": 0x1000, "CIRCLE": 0x2000, "CROSS": 0x4000, "SQUARE": 0x8000}
 

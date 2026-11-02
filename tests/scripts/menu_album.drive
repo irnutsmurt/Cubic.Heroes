@@ -1,0 +1,26 @@
+# The main menu's ALBUM, which no other drive opens. With a save (SAVES=)
+# the cursor starts on CONTINUE: NEW GAME, CONTINUE, EDITOR, ALBUM, INSTALL.
+log TitleMovie 120
+sleep 5
+press START                 # "PRESS START BUTTON" -> main menu, CONTINUE
+sleep 3
+press DOWN
+sleep 1
+press DOWN
+sleep 1
+shot menu-album
+press CROSS                 # ALBUM
+sleep 4
+shot album-1
+press CROSS
+sleep 3
+shot album-2
+press RIGHT
+sleep 2
+shot album-3
+press CROSS
+sleep 3
+shot album-4
+press CIRCLE
+sleep 3
+shot album-back

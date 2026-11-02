@@ -1,0 +1,47 @@
+# The game's snapshot: in play at the castle (SAVES=), START opens the system
+# menu (RESUME, SAVE, LOAD, OPTIONS, SNAPSHOT, ALBUM, BESTIARY, LOADING ART,
+# TITLE); SNAPSHOT is the camera, CROSS the shutter. The picture is encoded
+# and handed to the photo export utility (<PS3_HDD0_ROOT>/photo). Then the
+# menu's ALBUM shows it. Screenshots step by step.
+log TitleMovie 120
+sleep 5
+press START
+sleep 3
+press START
+sleep 5
+press CROSS
+state life>0,area==17 60
+sleep 3
+press START                 # system menu, RESUME
+sleep 2
+press DOWN
+sleep 1
+press DOWN
+sleep 1
+press DOWN
+sleep 1
+press DOWN
+sleep 1
+shot menu-snapshot
+press CROSS                 # SNAPSHOT
+sleep 3
+shot camera
+press CROSS                 # shutter
+sleep 2
+shot shutter-2
+sleep 3
+shot shutter-5
+sleep 5
+shot shutter-10
+press CIRCLE                # leave the camera: back in the system menu, on SNAPSHOT
+sleep 3
+shot camera-left
+press DOWN
+sleep 1
+shot menu-album
+press CROSS                 # ALBUM: the snapshot just taken, imported and shown
+sleep 5
+shot album
+press CIRCLE
+sleep 3
+shot album-left

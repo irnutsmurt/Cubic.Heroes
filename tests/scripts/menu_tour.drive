@@ -1,0 +1,32 @@
+# The main menu's EDITOR (the dot editor), which no other drive opens: NEW
+# DATA, then a look around. With a save (SAVES=) the cursor starts on
+# CONTINUE: NEW GAME, CONTINUE, EDITOR, ALBUM, INSTALL. EDITOR -> LOAD with
+# no edit data saved returns to LOAD / NEW DATA (the save list is empty).
+log TitleMovie 120
+sleep 5
+press START                 # "PRESS START BUTTON" -> main menu, CONTINUE
+sleep 3
+press DOWN
+sleep 1
+shot menu-editor
+press CROSS                 # EDITOR -> LOAD / NEW DATA
+sleep 4
+press DOWN
+sleep 1
+shot editor-new-data
+press CROSS                 # NEW DATA
+sleep 4
+shot editor-1
+press CROSS
+sleep 3
+shot editor-2
+press RIGHT
+sleep 1
+press CROSS
+sleep 3
+shot editor-3
+press DOWN
+sleep 1
+press CROSS
+sleep 3
+shot editor-4

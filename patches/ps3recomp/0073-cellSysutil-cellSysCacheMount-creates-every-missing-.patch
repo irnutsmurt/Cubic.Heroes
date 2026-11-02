@@ -1,0 +1,41 @@
+From 551cd8b4f76786365e101691395f3de11588940e Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Mon, 2 Nov 2026 02:43:44 -0800
+Subject: [PATCH 73/75] cellSysutil: cellSysCacheMount creates every missing
+ directory
+
+The host cache directory is <PS3_HDD1_ROOT>/cache/<id>. A fresh data root
+has no dev_hdd1 yet, so creating cache and then cache/<id> failed (errno 2)
+and the cache stayed unwritable. 3D Dot Game Heroes mounts it for its ALBUM
+and SNAPSHOT, which copy pictures through it. Every level is created now.
+---
+ libs/system/cellSysutil.c | 12 ++++++++++--
+ 1 file changed, 10 insertions(+), 2 deletions(-)
+
+diff --git a/libs/system/cellSysutil.c b/libs/system/cellSysutil.c
+index c4eb87d..add6456 100644
+--- a/libs/system/cellSysutil.c
++++ b/libs/system/cellSysutil.c
+@@ -586,9 +586,17 @@ s32 cellSysCacheMount(char* param)
+     { const char* root = getenv("PS3_HDD1_ROOT");
+       if (root && *root) {
+           char hpath[512];
+-          snprintf(hpath, sizeof hpath, "%s/cache", root);
+-          mkdir(hpath, 0777);
+           snprintf(hpath, sizeof hpath, "%s/cache/%s", root, cache_id);
++          /* Every level, the root included: a fresh data root has no dev_hdd1
++           * yet, and creating only cache/<id> then failed (errno 2), leaving
++           * the cache unwritable (3D Dot Game Heroes' ALBUM mounts it). */
++          for (char* p = hpath + 1; *p; p++)
++              if ((*p == '/' || *p == '\\') && p[-1] != ':') {
++                  const char c = *p;
++                  *p = '\0';
++                  mkdir(hpath, 0777);
++                  *p = c;
++              }
+           if (mkdir(hpath, 0777) == 0 || errno == EEXIST)
+               printf("[cellSysutil] SysCacheMount: host cache dir %s ready\n", hpath);
+           else
+-- 
+2.56.0.windows.3
+
