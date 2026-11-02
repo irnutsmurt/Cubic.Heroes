@@ -78,9 +78,17 @@ def walker_spans(rec):
     return out
 
 
+_index = {}
+
+
 def split(spans, lo, hi, acc):
-    """add each walker category's time inside [lo, hi) to acc (ms)"""
-    for t0, t1, cat, nested in spans:
+    """add each walker category's time inside [lo, hi) to acc (ms); spans sorted by start (walker_spans)"""
+    got = _index.get(id(spans))
+    if got is None or got[0] is not spans:   # the starts, and the longest span, to look up only what overlaps
+        got = _index[id(spans)] = (spans, [s[0] for s in spans], max((s[1] - s[0] for s in spans), default=0.0))
+    _, starts, longest = got
+    i, j = bisect.bisect_left(starts, lo - longest), bisect.bisect_left(starts, hi)
+    for t0, t1, cat, nested in spans[i:j]:
         if t1 <= lo or t0 >= hi:
             continue
         span = clip(t0, t1, lo, hi)
@@ -105,6 +113,13 @@ def guest_frames(rec):
     shows = [t1 for t0, t1, who, *_ in rec[PRESENT] if who == 1]
     spans = walker_spans(rec)
     gpu = rec[GPU_EXEC]
+    gpu_starts = [x[0] for x in gpu]
+    gpu_longest = max((x[1] - x[0] for x in gpu), default=0.0)
+
+    def gpu_in(lo, hi):   # the GPU spans overlapping [lo, hi]: those starting from lo - the longest span on
+        i = bisect.bisect_left(gpu_starts, lo - gpu_longest)
+        j = bisect.bisect_right(gpu_starts, hi)
+        return gpu[i:j]
     cd = sorted(t0 for t0, t1, who, a, b in rec[SPU_TASK] if a == 4)
     load = rec[PHYS_LOAD]   # (DOTHEROES_PHYS_STATS) per collision task: who bodies, a pairs, b points
     lt = [x[0] for x in load]
@@ -124,7 +139,7 @@ def guest_frames(rec):
         whole, lagacc = collections.Counter(), collections.Counter()
         split(spans, reqs[i - 1], req, whole)   # the frame's commands being written: req(i-1) to req(i)
         split(spans, req, fifo, lagacc)
-        g = sum(clip(t0, t1, fifo, shows[k]) for t0, t1, *_ in gpu) / 1000
+        g = sum(clip(t0, t1, fifo, shows[k]) for t0, t1, *_ in gpu_in(fifo, shows[k])) / 1000
         phys = bisect.bisect_left(cd, req) - bisect.bisect_left(cd, reqs[i - 1])
         l0, l1 = bisect.bisect_left(lt, reqs[i - 1]), bisect.bisect_left(lt, req)
         pairs = sum(load[x][3] for x in range(l0, l1))

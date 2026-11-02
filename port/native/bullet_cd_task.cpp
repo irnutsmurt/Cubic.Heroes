@@ -37,6 +37,7 @@
 
 #include "bullet_cd.h"
 #include "bullet_solver_task.h"
+#include "dev_state.h"
 #include "ps3emu/ps3_ftrace.h"
 #include "spu_workload.h"
 
@@ -211,8 +212,11 @@ uint32_t desc_from_queue(uint32_t inq, uint32_t slot)
     return 0;
 }
 
+std::atomic<unsigned long long> g_steps{ 0 };   // collision tasks begun: physics steps (DOTHEROES_DEV_STATE)
+
 int cd_run(uint32_t, uint32_t, const uint32_t arg[4])
 {
+    g_steps.fetch_add(1, std::memory_order_relaxed);
     if (g_mode == 0) return 0;   // registered for DOTHEROES_PHYS_STATS alone: the lifted task, counted after
     const uint32_t inq = arg[2], outq = arg[3];
     uint8_t entry[16];
@@ -392,6 +396,8 @@ void cd_after(uint32_t, uint32_t, const uint32_t arg[4])
 
 }  // namespace
 
+unsigned long long dotheroes_phys_steps() { return g_steps.load(std::memory_order_relaxed); }
+
 extern "C" void dotheroes_native_init(void)
 {
     const char* e = getenv("DOTHEROES_NATIVE_CD");
@@ -400,7 +406,9 @@ extern "C" void dotheroes_native_init(void)
     const char* st = getenv("DOTHEROES_PHYS_STATS");
     g_stats = st && *st == '1';
     bullet_solver_init(g_stats);   // the solver task's own switches (bullet_solver_task.cpp)
-    if (g_mode == 0 && !g_stats) return;
+    dev_state_init();              // benchmark aids (dev_state.cpp)
+    const char* ds = getenv("DOTHEROES_DEV_STATE");
+    if (g_mode == 0 && !g_stats && !(ds && *ds == '1')) return;   // the state file counts physics steps here
     const char* fp = getenv("DOTHEROES_NATIVE_CD_FP");
     g_rz = fp && !strcmp(fp, "rz");
     const char* dump = getenv("DOTHEROES_NATIVE_CD_DUMP");

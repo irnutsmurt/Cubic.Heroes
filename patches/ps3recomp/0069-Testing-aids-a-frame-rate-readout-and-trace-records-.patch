@@ -1,0 +1,272 @@
+From fc15e49eaa3ec13d4937ca3d36ed52d189a870b8 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Sun, 1 Nov 2026 20:23:30 -0800
+Subject: [PATCH] Testing aids: a frame-rate readout, and trace records for
+ marks and game state
+
+PS3_OSD_FPS=1 shows, in the window's top-right corner, frames a second and
+the mean and longest frame of the last second; =2 adds a graph of the last
+120 frames' times (green, yellow past 17.5 ms, red past 25 ms; a dotted line
+at 16.7 ms), so a single hitch shows even when the average reads 60. A frame
+is guest flip request to flip request: cellGcmSys notes each into a ring
+(include/ps3emu/osd.h) only while the readout is on; the Vulkan present
+draws it after the message box, in one row above a title's HUD. A port may
+change the mode while running.
+
+ps3_ftrace: PS3_FT_MARK (22), a mark a tester or a test script made, and
+PS3_FT_GAME_STATE (23), a port's sample of the title's state for tests.
+---
+ include/ps3emu/osd.h            |  61 ++++++++++++++++++
+ include/ps3emu/ps3_ftrace.h     |   8 +++
+ libs/video/cellGcmSys.c         |   2 +
+ libs/video/rsx_vulkan_backend.c | 109 ++++++++++++++++++++++++++++++++
+ 4 files changed, 180 insertions(+)
+
+diff --git a/include/ps3emu/osd.h b/include/ps3emu/osd.h
+index 73e37be..5737727 100644
+--- a/include/ps3emu/osd.h
++++ b/include/ps3emu/osd.h
+@@ -13,6 +13,7 @@
+ #define PS3EMU_OSD_H
+ 
+ #include <stdint.h>
++#include <stdlib.h>
+ #include <string.h>
+ #ifdef _WIN32
+ #  include <windows.h>
+@@ -63,6 +64,66 @@ static inline void ps3_osd_post(const char* text, unsigned ms)
+     __atomic_add_fetch(&s->seq, 1, __ATOMIC_RELEASE);
+ }
+ 
++/* A frame-rate readout in the window's top-right corner, for testing (off by
++ * default): PS3_OSD_FPS=1 shows frames a second and the mean and longest
++ * frame of the last half second, =2 adds a graph of the last frames' times
++ * (bars past 16.7 ms stand out). A frame is guest flip request to flip
++ * request (cellGcmSys notes each); a port may change the mode while running
++ * (3D Dot Game Heroes: F7 with DOTHEROES_DEV_KEYS=1). */
++#define PS3_OSD_FRAMES 128
++
++typedef struct {
++    uint64_t t_us[PS3_OSD_FRAMES];    /* flip requests, a ring */
++    uint32_t n;                       /* written so far */
++    int      mode;                    /* 0 off, 1 text, 2 text and graph */
++} ps3_osd_frames;
++
++PS3_OSD_SHARED ps3_osd_frames g_ps3_osd_frames = { { 0 }, 0, -1 };
++
++static inline uint64_t ps3_osd_us(void)
++{
++#ifdef _WIN32
++    LARGE_INTEGER c, f;
++    QueryPerformanceCounter(&c);
++    QueryPerformanceFrequency(&f);
++    return (uint64_t)(c.QuadPart / f.QuadPart) * 1000000u + (uint64_t)(c.QuadPart % f.QuadPart) * 1000000u / (uint64_t)f.QuadPart;
++#else
++    struct timespec ts;
++    clock_gettime(CLOCK_MONOTONIC, &ts);
++    return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)ts.tv_nsec / 1000u;
++#endif
++}
++
++/* The mode, read from PS3_OSD_FPS the first time. */
++static inline int ps3_osd_fps_mode(void)
++{
++    ps3_osd_frames* s = &g_ps3_osd_frames;
++    int m = __atomic_load_n(&s->mode, __ATOMIC_RELAXED);
++    if (m < 0) {
++        const char* e = getenv("PS3_OSD_FPS");
++        m = e ? atoi(e) : 0;
++        if (m < 0 || m > 2) m = 0;
++        __atomic_store_n(&s->mode, m, __ATOMIC_RELAXED);
++    }
++    return m;
++}
++
++static inline void ps3_osd_fps_set_mode(int m)
++{
++    __atomic_store_n(&g_ps3_osd_frames.mode, m < 0 || m > 2 ? 0 : m, __ATOMIC_RELAXED);
++}
++
++/* A guest frame ended (its flip request): one writer, the guest's render
++ * thread. Cheap when the readout is off. */
++static inline void ps3_osd_frame_note(void)
++{
++    ps3_osd_frames* s = &g_ps3_osd_frames;
++    if (!ps3_osd_fps_mode()) return;
++    const uint32_t n = s->n;
++    s->t_us[n % PS3_OSD_FRAMES] = ps3_osd_us();
++    __atomic_store_n(&s->n, n + 1, __ATOMIC_RELEASE);
++}
++
+ /* The message showing now, copied into `out`: 1, or 0 when there is none. */
+ static inline int ps3_osd_current(char out[PS3_OSD_TEXT_MAX])
+ {
+diff --git a/include/ps3emu/ps3_ftrace.h b/include/ps3emu/ps3_ftrace.h
+index 8e55536..a127607 100644
+--- a/include/ps3emu/ps3_ftrace.h
++++ b/include/ps3emu/ps3_ftrace.h
+@@ -84,6 +84,14 @@ enum ps3_ft_kind {
+                               * not before it ended); a = 3 (an instant): a wrap at a flip
+                               * into a lap ending at the walker, room KB << 16; a = 4 (an
+                               * instant): the same at the ring's end (GCM_WRAP_LAP=1) */
++    PS3_FT_MARK        = 22, /* instant: a mark a tester made while playing (a port's hotkey,
++                              * 3D Dot Game Heroes: F8 or L3+R3 with DOTHEROES_DEV_KEYS=1):
++                              * who = 1 keyboard / 2 controller / 3 a test script, a = the
++                              * mark's number */
++    PS3_FT_GAME_STATE  = 23, /* instant: a port's sample of the title's state for tests (3D Dot
++                              * Game Heroes, DOTHEROES_DEV_STATE=1: who = life in half apples
++                              * | the field area << 8 | can't-die top-ups so far << 16, a and
++                              * b = the camera target's x and z, float bits) */
+ };
+ 
+ #if defined(_MSC_VER)
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index dc3b79b..0dbdf62 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -18,6 +18,7 @@
+ #include "rsx_commands.h"                    /* rsx_state, rsx_process_command_buffer */
+ #include "../../include/ps3emu/guest_call.h" /* g_ps3_guest_caller for direct handler dispatch */
+ #include "../../include/ps3emu/ps3_ftrace.h"  /* PS3_FTRACE timeline */
++#include "../../include/ps3emu/osd.h"         /* the frame-rate readout's frame times (PS3_OSD_FPS) */
+ 
+ /* Guest EA of the GCM context (begin/end/current/callback) the title writes its
+  * command stream into; recorded by cellGcmSetupContext, drained by the RSX. */
+@@ -3632,6 +3633,7 @@ static s32 gcm_flip_request(u32 bufferId, int in_fifo)
+     s_last_flip_time = get_timestamp_ns();
+     if (PS3_FT_ON()) { const uint64_t t = ps3_ft_now();
+                        ps3_ft_span(PS3_FT_FLIP_REQ, 0, bufferId, (uint32_t)in_fifo, t, t); }
++    ps3_osd_frame_note();
+ 
+     /* Invoke via OPD resolution, not a raw call into guest code.
+      *
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index 3daa3cd..1dcb1e3 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -2215,6 +2215,114 @@ static void vk_osd_draw(VkCommandBuffer cb, u32 idx)
+                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+ }
+ 
++/* The frame-rate readout (PS3_OSD_FPS, include/ps3emu/osd.h), one row in the
++ * top right corner above the game's HUD, at half the message's scale: frames
++ * a second, the mean and longest frame of the last second (the text refreshed
++ * twice a second), and in mode 2 beside it the last 120 frames' times as bars
++ * over 0-33 ms (green, yellow past 17.5 ms, red past 25 ms; the dotted line is
++ * 16.7 ms). Drawn like the message, after it. */
++static struct {
++    vk_buffer buf;
++    char      text[PS3_OSD_TEXT_MAX];
++    uint64_t  text_at;
++    int       failed;
++} s_fps;
++
++static void vk_osd_px(uint8_t* p, uint8_t r, uint8_t g, uint8_t b)
++{
++    if (s_vk.sc_osd == 2) { p[0] = b; p[1] = g; p[2] = r; }
++    else                  { p[0] = r; p[1] = g; p[2] = b; }
++    p[3] = 255;
++}
++
++static void vk_osd_fps_draw(VkCommandBuffer cb, u32 idx)
++{
++    const int mode = ps3_osd_fps_mode();
++    if (!mode || !s_vk.sc_osd || s_fps.failed) return;
++    enum { GRAPH = 120 };
++    const ps3_osd_frames* f = &g_ps3_osd_frames;
++    const uint32_t n = __atomic_load_n(&f->n, __ATOMIC_ACQUIRE);
++    const uint32_t avail = n < PS3_OSD_FRAMES ? n : PS3_OSD_FRAMES;   /* notes still in the ring */
++    const uint64_t now = ps3_osd_us();
++    if (!s_fps.text_at || now - s_fps.text_at >= 500000) {   /* the last second's frames */
++        uint32_t frames = 0;
++        uint64_t span = 0, longest = 0;
++        for (uint32_t i = 0; i + 1 < avail; i++) {
++            const uint32_t j = n - 1 - i;
++            const uint64_t t1 = f->t_us[j % PS3_OSD_FRAMES], t0 = f->t_us[(j - 1) % PS3_OSD_FRAMES];
++            if (now > t1 && now - t1 > 1000000) break;
++            const uint64_t d = t1 > t0 ? t1 - t0 : 0;
++            frames++; span += d;
++            if (d > longest) longest = d;
++        }
++        if (frames && span)
++            snprintf(s_fps.text, sizeof s_fps.text, "%.0f FPS %.1f MS MAX %.1f", frames * 1e6 / (double)span,
++                     span / 1000.0 / frames, longest / 1000.0);
++        else
++            snprintf(s_fps.text, sizeof s_fps.text, "0 FPS");
++        s_fps.text_at = now;
++    }
++    const u32 W = s_vk.sc_extent.width, H = s_vk.sc_extent.height;
++    const u32 big = H >= 360 ? H / 180 : 2, sc = big / 2 ? big / 2 : 1;
++    const u32 pad = 3 * sc, tn = (u32)strlen(s_fps.text), tw = tn * 6 * sc - sc, th = 7 * sc;
++    const u32 gw = mode == 2 ? GRAPH * sc : 0, gh = mode == 2 ? 16 * sc : 0;
++    const u32 ih = th > gh ? th : gh, ty = pad + (ih - th) / 2;
++    const u32 bw = tw + (gw ? pad + gw : 0) + 2 * pad, bh = ih + 2 * pad, m = H / 90;
++    if (!tn || bw + 2 * m > W || bh + 2 * m > H) return;
++    const VkDeviceSize need = (VkDeviceSize)bw * bh * 4;
++    if (s_fps.buf.size < need) {
++        if (s_fps.buf.buf) vk_destroy_buffer(&s_fps.buf);
++        if (vk_create_host_buffer(&s_fps.buf, need, VK_BUFFER_USAGE_TRANSFER_SRC_BIT) != 0 || !s_fps.buf.coherent) {
++            if (s_fps.buf.buf) vk_destroy_buffer(&s_fps.buf);
++            s_fps.failed = 1;
++            VK_LOG("no coherent host buffer for the frame-rate readout; it stays off\n");
++            return;
++        }
++    }
++    uint8_t* px = (uint8_t*)s_fps.buf.ptr;
++    for (u32 y = 0; y < bh; y++)                                            /* the box and the text */
++        for (u32 x = 0; x < bw; x++) {
++            uint8_t v = (x == 0 || y == 0 || x == bw - 1 || y == bh - 1) ? 170 : 24;
++            if (x >= pad && y >= ty && x < pad + tw && y < ty + th) {
++                const u32 gx = x - pad, gy = (y - ty) / sc, ci = gx / (6 * sc), cx = gx % (6 * sc) / sc;
++                const uint8_t* g = cx < 5 ? vk_osd_glyph(s_fps.text[ci]) : NULL;
++                if (g && (g[gy] & (0x10u >> cx))) v = 255;
++            }
++            vk_osd_px(px + ((size_t)y * bw + x) * 4, v, v, v);
++        }
++    if (gh) {                                                               /* the graph, newest at the right */
++        const u32 gx0 = 2 * pad + tw, gy0 = pad, k = avail > 1 ? (avail - 1 < GRAPH ? avail - 1 : GRAPH) : 0;
++        for (u32 i = 0; i < k; i++) {
++            const uint32_t j = n - k + i;
++            const uint64_t t1 = f->t_us[j % PS3_OSD_FRAMES], t0 = f->t_us[(j - 1) % PS3_OSD_FRAMES];
++            const float ms = t1 > t0 ? (float)(t1 - t0) / 1000.0f : 0.0f;
++            u32 h = (u32)(ms * (float)gh / 33.3f);
++            if (h > gh) h = gh;
++            const uint8_t r = ms > 17.5f ? 230 : 90, g = ms > 25.0f ? 70 : ms > 17.5f ? 200 : 200, b = ms > 17.5f ? 60 : 90;
++            for (u32 y = gh - h; y < gh; y++)
++                for (u32 x = (GRAPH - k + i) * sc; x < (GRAPH - k + i + 1) * sc; x++)
++                    vk_osd_px(px + ((size_t)(gy0 + y) * bw + gx0 + x) * 4, r, g, b);
++        }
++        const u32 line = gh - (u32)(16.7f * (float)gh / 33.3f);
++        for (u32 x = 0; x < gw; x += 2) vk_osd_px(px + ((size_t)(gy0 + line) * bw + gx0 + x) * 4, 220, 220, 220);
++    }
++    VkImageMemoryBarrier b = {
++        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
++        .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
++        .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
++        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++        .image = s_vk.sc_images[idx], .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 },
++    };
++    pvkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
++                          0, 0, NULL, 0, NULL, 1, &b);
++    VkBufferImageCopy region = {
++        .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
++        .imageOffset = { (int32_t)(W - bw - m), (int32_t)m, 0 }, .imageExtent = { bw, bh, 1 },
++    };
++    pvkCmdCopyBufferToImage(cb, s_fps.buf.buf, s_vk.sc_images[idx],
++                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
++}
++
+ static void vk_present_window(void)
+ {
+     if (!s_vk.windowed || !s_vk.swapchain) return;
+@@ -2255,6 +2363,7 @@ static void vk_present_window(void)
+                     s_vk.sc_images[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                     1, &blit, VK_FILTER_LINEAR);
+     vk_osd_draw(cb, idx);
++    vk_osd_fps_draw(cb, idx);
+     b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+     b.dstAccessMask = 0;
+     b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+-- 
+2.56.0.windows.3
+

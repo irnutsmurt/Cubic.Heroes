@@ -15,6 +15,11 @@ Script lines (# comments allowed):
                               the last press (the game reacted)
   shot <name>                 save a screenshot
   touch <file>                create <run>/<file> (e.g. a capture trigger)
+  state <cond>[,<cond>] [timeout]  wait until the game's state (DOTHEROES_DEV_STATE=1,
+                              <run>/state.txt: t life x z steps topups area) meets every
+                              condition, e.g. `state area==18,life>0 60` or `state steps>+20`
+                              (a signed value is relative to the step's start); a timeout
+                              ends the drive with status 1
   repeat <n> <BUTTON> <sec>   press n times, <sec> apart
   hold <BUTTON> <sec>         hold for <sec> of wall time (not guest reports:
                               those pass twice as fast at 60 fps)
@@ -83,6 +88,25 @@ def press(mask, hold=10, ms=0):
 def mask_of(tok):
     return int(tok, 0) if tok.startswith("0x") else BTN[tok.upper()]
 
+# DOTHEROES_DEV_STATE=1 (port/native/dev_state.cpp): <run>/state.txt, rewritten every 100 ms
+STATE_KEYS = ("t", "life", "x", "z", "steps", "topups", "area")
+CMP = {"<=": lambda a, b: a <= b, ">=": lambda a, b: a >= b, "==": lambda a, b: a == b,
+       "!=": lambda a, b: a != b, "<": lambda a, b: a < b, ">": lambda a, b: a > b}
+
+def state():
+    try:
+        f = open(os.path.join(run, "state.txt")).read().split()
+        return dict(zip(STATE_KEYS, map(float, f))) if len(f) == len(STATE_KEYS) else None
+    except (OSError, ValueError):
+        return None
+
+def cond(text):   # key op value; a value with a sign (+5, -3) is relative to the state as the step began
+    m = re.fullmatch(r"(\w+)(<=|>=|==|!=|<|>)([+-]?)([\d.]+)", text)
+    if not m or m.group(1) not in STATE_KEYS:
+        sys.exit(f"[drive] bad state condition {text!r}")
+    k, o, sign, v = m.groups()
+    return k, o, float(v) * (-1 if sign == "-" else 1), bool(sign)
+
 for lineno, raw in enumerate(open(script), 1):
     line = raw.split("#", 1)[0].strip()
     if not line: continue
@@ -113,6 +137,19 @@ for lineno, raw in enumerate(open(script), 1):
             if time.time() - t0 > tmo:
                 print(f"[drive] no screen change after line {lineno} (continuing)"); break
             time.sleep(0.25)
+    elif op == "state":
+        conds, tmo = [cond(c) for c in a[0].split(",")], float(a[1]) if len(a) > 1 else 60
+        t0, s0 = time.time(), None
+        while True:
+            s = state()
+            if s is not None:
+                s0 = s0 or s
+                if all(CMP[o](s[k], (s0[k] + v) if rel else v) for k, o, v, rel in conds):
+                    print(f"[drive] state {' '.join(f'{k}={s[k]:g}' for k in STATE_KEYS)}", flush=True)
+                    break
+            if time.time() - t0 > tmo:
+                print(f"[drive] TIMEOUT line {lineno}: {line} (state {s})"); sys.exit(1)
+            time.sleep(0.1)
     elif op == "touch":
         open(os.path.join(run, a[0]), "w").close()
     elif op == "shot":

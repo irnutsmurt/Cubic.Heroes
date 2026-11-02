@@ -1,0 +1,40 @@
+# Snapshots for finding the hero's position in guest memory (tests/find_state.py):
+# from a save at the castle, guest memory standing still twice, after walking
+# right 1 s and 1 s more, back left 2 s, down 1 s and back up 1 s. Needs
+# DOTHEROES_DEV_MEMSNAP=1 (port/native/dev_state.cpp) and a save (SAVES=);
+# with DOTHEROES_DEV_KEYS=1 it also marks its start and end in the trace.
+log TitleMovie 120
+sleep 5
+press START
+sleep 3
+press START
+sleep 5
+press CROSS
+sleep 15
+touch mark.trigger
+touch memsnap.trigger
+sleep 4
+touch memsnap.trigger
+sleep 4
+hold RIGHT 1
+sleep 1
+touch memsnap.trigger
+sleep 4
+hold RIGHT 1
+sleep 1
+touch memsnap.trigger
+sleep 4
+hold LEFT 2
+sleep 1
+touch memsnap.trigger
+sleep 4
+hold DOWN 1
+sleep 1
+touch memsnap.trigger
+sleep 4
+hold UP 1
+sleep 1
+touch memsnap.trigger
+sleep 4
+touch mark.trigger
+sleep 5

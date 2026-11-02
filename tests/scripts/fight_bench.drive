@@ -1,0 +1,122 @@
+# The heavy-fight benchmark, state-aware (tests/fight_bench.py): the river fight
+# of fight_river.drive with checks on the game's state (DOTHEROES_DEV_STATE=1,
+# port/native/dev_state.cpp). In play in the castle's area (17), the route east
+# into the river's area (18) -- confirmed, or the drive stops there -- a mark
+# (mark.trigger, with DOTHEROES_DEV_KEYS=1) as the encounter begins, 10 rounds of
+# swings each followed by a check that the hero is still in that area and alive,
+# and a mark at the end. tests/fight_bench.py measures from the first physics
+# step after the first mark to the second mark, or to a death or a departure,
+# and classifies each run by how it ended. Needs a save past the sword (SAVES=).
+# DOTHEROES_DEV_CANT_DIE=1 keeps a hit from ending the segment (report such runs
+# apart; check results again with normal damage).
+log TitleMovie 120
+sleep 5
+press START
+sleep 3
+press START
+sleep 5
+press CROSS
+state life>0,area==17 60
+sleep 3
+hold RIGHT 4
+hold DOWN 1.5
+hold RIGHT 3
+hold RIGHT 4
+hold RIGHT 4
+hold RIGHT 2.5
+hold UP 1.5
+hold RIGHT 2
+state area==18,life>0 20
+touch mark.trigger
+hold RIGHT 0.15
+repeat 2 CROSS 0.35
+hold DOWN 0.15
+repeat 2 CROSS 0.35
+hold LEFT 0.15
+repeat 2 CROSS 0.35
+hold UP 0.15
+repeat 2 CROSS 0.35
+state area==18,life>0 1
+hold RIGHT 0.15
+repeat 2 CROSS 0.35
+hold DOWN 0.15
+repeat 2 CROSS 0.35
+hold LEFT 0.15
+repeat 2 CROSS 0.35
+hold UP 0.15
+repeat 2 CROSS 0.35
+state area==18,life>0 1
+hold RIGHT 0.15
+repeat 2 CROSS 0.35
+hold DOWN 0.15
+repeat 2 CROSS 0.35
+hold LEFT 0.15
+repeat 2 CROSS 0.35
+hold UP 0.15
+repeat 2 CROSS 0.35
+state area==18,life>0 1
+hold RIGHT 0.15
+repeat 2 CROSS 0.35
+hold DOWN 0.15
+repeat 2 CROSS 0.35
+hold LEFT 0.15
+repeat 2 CROSS 0.35
+hold UP 0.15
+repeat 2 CROSS 0.35
+state area==18,life>0 1
+hold RIGHT 0.15
+repeat 2 CROSS 0.35
+hold DOWN 0.15
+repeat 2 CROSS 0.35
+hold LEFT 0.15
+repeat 2 CROSS 0.35
+hold UP 0.15
+repeat 2 CROSS 0.35
+state area==18,life>0 1
+hold RIGHT 0.15
+repeat 2 CROSS 0.35
+hold DOWN 0.15
+repeat 2 CROSS 0.35
+hold LEFT 0.15
+repeat 2 CROSS 0.35
+hold UP 0.15
+repeat 2 CROSS 0.35
+state area==18,life>0 1
+hold RIGHT 0.15
+repeat 2 CROSS 0.35
+hold DOWN 0.15
+repeat 2 CROSS 0.35
+hold LEFT 0.15
+repeat 2 CROSS 0.35
+hold UP 0.15
+repeat 2 CROSS 0.35
+state area==18,life>0 1
+hold RIGHT 0.15
+repeat 2 CROSS 0.35
+hold DOWN 0.15
+repeat 2 CROSS 0.35
+hold LEFT 0.15
+repeat 2 CROSS 0.35
+hold UP 0.15
+repeat 2 CROSS 0.35
+state area==18,life>0 1
+hold RIGHT 0.15
+repeat 2 CROSS 0.35
+hold DOWN 0.15
+repeat 2 CROSS 0.35
+hold LEFT 0.15
+repeat 2 CROSS 0.35
+hold UP 0.15
+repeat 2 CROSS 0.35
+state area==18,life>0 1
+hold RIGHT 0.15
+repeat 2 CROSS 0.35
+hold DOWN 0.15
+repeat 2 CROSS 0.35
+hold LEFT 0.15
+repeat 2 CROSS 0.35
+hold UP 0.15
+repeat 2 CROSS 0.35
+state area==18,life>0 1
+touch mark.trigger
+sleep 3

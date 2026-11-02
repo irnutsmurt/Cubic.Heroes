@@ -1,0 +1,133 @@
+# Snapshots through the river fight for finding the hero's life (tests/native/find_state.cpp):
+# tests/scripts/fight_river.drive's route, then rounds of swings, guest memory and a screenshot
+# after each (DOTHEROES_DEV_MEMSNAP=1, frame dumps on, SAVES=).
+log TitleMovie 120
+sleep 5
+press START
+sleep 3
+press START
+sleep 5
+press CROSS
+sleep 15
+hold RIGHT 4
+hold DOWN 1.5
+hold RIGHT 3
+hold RIGHT 4
+hold RIGHT 4
+hold RIGHT 2.5
+hold UP 1.5
+hold RIGHT 2
+
+touch memsnap.trigger
+shot life00
+hold RIGHT 0.15
+repeat 2 CROSS 0.35
+hold DOWN 0.15
+repeat 2 CROSS 0.35
+hold LEFT 0.15
+repeat 2 CROSS 0.35
+hold UP 0.15
+repeat 2 CROSS 0.35
+touch memsnap.trigger
+shot life01
+hold RIGHT 0.15
+repeat 2 CROSS 0.35
+hold DOWN 0.15
+repeat 2 CROSS 0.35
+hold LEFT 0.15
+repeat 2 CROSS 0.35
+hold UP 0.15
+repeat 2 CROSS 0.35
+touch memsnap.trigger
+shot life02
+hold RIGHT 0.15
+repeat 2 CROSS 0.35
+hold DOWN 0.15
+repeat 2 CROSS 0.35
+hold LEFT 0.15
+repeat 2 CROSS 0.35
+hold UP 0.15
+repeat 2 CROSS 0.35
+touch memsnap.trigger
+shot life03
+hold RIGHT 0.15
+repeat 2 CROSS 0.35
+hold DOWN 0.15
+repeat 2 CROSS 0.35
+hold LEFT 0.15
+repeat 2 CROSS 0.35
+hold UP 0.15
+repeat 2 CROSS 0.35
+touch memsnap.trigger
+shot life04
+hold RIGHT 0.15
+repeat 2 CROSS 0.35
+hold DOWN 0.15
+repeat 2 CROSS 0.35
+hold LEFT 0.15
+repeat 2 CROSS 0.35
+hold UP 0.15
+repeat 2 CROSS 0.35
+touch memsnap.trigger
+shot life05
+hold RIGHT 0.15
+repeat 2 CROSS 0.35
+hold DOWN 0.15
+repeat 2 CROSS 0.35
+hold LEFT 0.15
+repeat 2 CROSS 0.35
+hold UP 0.15
+repeat 2 CROSS 0.35
+touch memsnap.trigger
+shot life06
+hold RIGHT 0.15
+repeat 2 CROSS 0.35
+hold DOWN 0.15
+repeat 2 CROSS 0.35
+hold LEFT 0.15
+repeat 2 CROSS 0.35
+hold UP 0.15
+repeat 2 CROSS 0.35
+touch memsnap.trigger
+shot life07
+hold RIGHT 0.15
+repeat 2 CROSS 0.35
+hold DOWN 0.15
+repeat 2 CROSS 0.35
+hold LEFT 0.15
+repeat 2 CROSS 0.35
+hold UP 0.15
+repeat 2 CROSS 0.35
+touch memsnap.trigger
+shot life08
+hold RIGHT 0.15
+repeat 2 CROSS 0.35
+hold DOWN 0.15
+repeat 2 CROSS 0.35
+hold LEFT 0.15
+repeat 2 CROSS 0.35
+hold UP 0.15
+repeat 2 CROSS 0.35
+touch memsnap.trigger
+shot life09
+hold RIGHT 0.15
+repeat 2 CROSS 0.35
+hold DOWN 0.15
+repeat 2 CROSS 0.35
+hold LEFT 0.15
+repeat 2 CROSS 0.35
+hold UP 0.15
+repeat 2 CROSS 0.35
+touch memsnap.trigger
+shot life10
+hold RIGHT 0.15
+repeat 2 CROSS 0.35
+hold DOWN 0.15
+repeat 2 CROSS 0.35
+hold LEFT 0.15
+repeat 2 CROSS 0.35
+hold UP 0.15
+repeat 2 CROSS 0.35
+touch memsnap.trigger
+shot life11
+sleep 5
