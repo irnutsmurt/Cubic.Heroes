@@ -905,6 +905,7 @@ block boss_approach
   goto 141.3 -57.0 0.3 10 soft   # the door north (x 140.8)
   goto 142.1 -53.1 0.25 20 soft
   fight any 60 soft              # into room 5,-3 (25.6 x 19.2 cells): a room with enemies bars its doors
+  unstick DOWN 8                 # the corner stone's message, if the fight swung at it (east29)
   hold RIGHT 0.12            # face right
   sleep 0.07
   press CROSS   # 1467.9 s
@@ -973,17 +974,15 @@ block boss_approach
   hold RIGHT 0.1
   press CROSS
   sleep 0.6
-  fight any 45 soft
-  goto 140.0 -49.4 0.2 8 soft     # the chest: the boss's key ("You need a special key." at the
-  open FE3C70 6 soft              # portal without it, east24); its objects appear this near
-  unstick DOWN 8
-  goto 139.2 -48.6 0.25 8 soft    # and from the owner's spot (1,479.5 s) if that did not take
-  hold UP 0.35
-  sleep 0.4
-  press CROSS
-  sleep 2.5
-  press CROSS
-  sleep 1.2
+  fight any 45 soft               # (it swings at the corner stone too, which opens its message:
+  unstick DOWN 8                  # paged, or the hero stays frozen -- east27)
+  goto 148.8 -48.6 0.4 8 soft     # round the pillars from wherever the fight left the hero (by
+  goto 140.0 -51.2 0.25 8 soft    # the corner stone in east25); the chest (FE6660 at (140.0,
+  goto 140.0 -48.8 0.15 8 soft    # -47.2)): the boss's key ("You need a special key." at the
+  press CROSS                     # portal without it, east24). Walked up into from below, so the
+  sleep 2.5                       # hero faces it: it opens facing it from ~1.4 below (the
+  press CROSS                     # boomerang's from (64.2, -47.0)); 0.7 or more off its x a hold
+  sleep 1.2                       # slides past it (east24 at 141.4, east29 at 138.6)
   press CROSS
   sleep 0.8
   unstick DOWN 8

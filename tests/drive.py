@@ -50,8 +50,9 @@ scenario header):
                               edge or a door), sidestepping when blocked; a timeout
                               (default 20 s) fails
   rooms <w> <h> | off         a dungeon of w x h rooms, a door at the middle of each
-                              wall: a goto into the next room that stalls goes through
-                              that wall's door (a point before it, one past) and on
+                              wall: a goto into the next room that stalls fights what is
+                              left near (an enemy left bars a room's doors), then goes
+                              through that wall's door (a point before it, one past) and on
   goto <x> <z> [tol] [timeout] [soft]  walk the hero to (x, z) in the area's
                               coordinates (hx/hz: RIGHT is +x, UP is +z), steering
                               by its position every ~0.3 s, within tol (default
@@ -833,6 +834,7 @@ def step(lineno, line, op, a):
                 if not pts:
                     raise
                 say(f"  {e}")
+                fight("ANY", 30, 2.5, soft=True)   # an enemy left bars the room's doors (east13, east26)
                 for dx, dz in pts:
                     goto(dx, dz, 0.6, 10)
                 goto(x, z, tol, tmo)
