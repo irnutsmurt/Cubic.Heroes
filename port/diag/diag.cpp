@@ -613,7 +613,10 @@ void prof_main_win(unsigned start, unsigned dur)
     unsigned count = 0, tick = 0;
     const ULONGLONG t0 = GetTickCount64();
     while (GetTickCount64() - t0 < dur * 1000ull) {
-        if (tick++ % 100 == 0) {                  /* refresh the thread list */
+        /* Refresh the thread list every ~20 ms: a task the SPU pool starts on a
+         * new worker (an Edge zlib inflate at an area load, ~90 ms) ran and
+         * parked unseen between refreshes ~220 ms apart. */
+        if (tick++ % 10 == 0) {
             for (int k = 0; k < nt; k++) CloseHandle(ths[k].h);
             nt = 0;
             HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);

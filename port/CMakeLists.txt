@@ -244,7 +244,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 set(BULLET_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../build/deps/src/bullet-2.74" CACHE PATH
     "Bullet 2.74 source tree (tools/build_deps.py fetches it)")
 add_library(dotheroes_native STATIC native/bullet_cd_task.cpp native/bullet_solver_task.cpp native/bullet_solver.cpp
-    native/dev_state.cpp)
+    native/dev_state.cpp native/inflate.c native/edge_inflate.c)
 target_include_directories(dotheroes_native PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/native"
     "${PS3RECOMP_DIR}/include"

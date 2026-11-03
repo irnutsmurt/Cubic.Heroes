@@ -192,7 +192,8 @@ def main():
     wl = os.path.join(spu, "spu_workloads.c")
     spu_stamp = os.path.join(GEN, ".spu_stamp")
     reloc_cfg = os.path.join(ROOT, "config", "spu_relocatable.json")
-    if not (os.path.exists(wl) and fresh([spu_stamp], [elf, reloc_cfg, os.path.join(TOOLS, "spu_lifter.py"), os.path.join(TOOLS, "find_spu_functions.py"),
+    hooks_cfg = os.path.join(ROOT, "config", "spu_entry_hooks.json")
+    if not (os.path.exists(wl) and fresh([spu_stamp], [elf, reloc_cfg, hooks_cfg, os.path.join(TOOLS, "spu_lifter.py"), os.path.join(TOOLS, "find_spu_functions.py"),
                                                        os.path.join(TOOLS, "build_spu_workloads.py")])):
         images = os.path.join(spu, "images")
         run("spu", [PY, os.path.join(TOOLS, "extract_spu_images.py"), elf, "--output", images])
@@ -200,7 +201,7 @@ def main():
         for img in json.load(open(reloc_cfg))["images"]:
             reloc += ["--relocatable", f"{img}=0x{spu_text_ea(elf, os.path.join(images, img + '.elf')):08X}"]
         run("spu", [PY, os.path.join(TOOLS, "build_spu_workloads.py"), "--images", images,
-                    "--lifted", spu, "--out", wl, "--constructor", "--relift", *reloc])
+                    "--lifted", spu, "--out", wl, "--constructor", "--relift", "--entry-hooks", hooks_cfg, *reloc])
         open(spu_stamp, "w").close()
 
     log("done", f"generated sources in {os.path.relpath(GEN, ROOT)}/")

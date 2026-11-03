@@ -459,7 +459,8 @@ def main():
 
     def mem_sampler():
         """Windows: the game's working set and private bytes every MEM_EVERY seconds
-        (default 30) into memory.csv: "<s>,<working set MB>,<private MB>"."""
+        (default 30) into memory.csv: "<s>,<working set MB>,<private MB>,<threads>,<handles>"
+        (threads and handles: what an area reload leaves behind besides memory)."""
         import ctypes, ctypes.wintypes as wt
 
         class PMC(ctypes.Structure):
@@ -468,14 +469,32 @@ def main():
                                                "QuotaPagedPoolUsage", "QuotaPeakNonPagedPoolUsage",
                                                "QuotaNonPagedPoolUsage", "PagefileUsage", "PeakPagefileUsage",
                                                "PrivateUsage")]
+        class TE32(ctypes.Structure):
+            _fields_ = [("dwSize", wt.DWORD), ("cntUsage", wt.DWORD), ("th32ThreadID", wt.DWORD),
+                        ("th32OwnerProcessID", wt.DWORD), ("tpBasePri", wt.LONG), ("tpDeltaPri", wt.LONG),
+                        ("dwFlags", wt.DWORD)]
         k = ctypes.WinDLL("kernel32")
+        k.CreateToolhelp32Snapshot.restype = wt.HANDLE
         h = k.OpenProcess(0x1000 | 0x0010, False, proc.pid)   # QUERY_LIMITED_INFORMATION | VM_READ
+
+        def threads():
+            snap, n = k.CreateToolhelp32Snapshot(0x4, 0), 0   # TH32CS_SNAPTHREAD
+            te = TE32(); te.dwSize = ctypes.sizeof(TE32)
+            ok = k.Thread32First(snap, ctypes.byref(te))
+            while ok:
+                n += te.th32OwnerProcessID == proc.pid
+                ok = k.Thread32Next(snap, ctypes.byref(te))
+            k.CloseHandle(snap)
+            return n
         every, t0 = float(os.environ.get("MEM_EVERY", "30")), time.monotonic()
         with open(os.path.join(RUN, "memory.csv"), "w") as f:
             while True:
                 c = PMC(); c.cb = ctypes.sizeof(PMC)
                 if h and ctypes.WinDLL("psapi").GetProcessMemoryInfo(h, ctypes.byref(c), c.cb):
-                    f.write(f"{time.monotonic() - t0:.0f},{c.WorkingSetSize / 2**20:.1f},{c.PrivateUsage / 2**20:.1f}\n")
+                    hc = wt.DWORD(0)
+                    k.GetProcessHandleCount(h, ctypes.byref(hc))
+                    f.write(f"{time.monotonic() - t0:.0f},{c.WorkingSetSize / 2**20:.1f},{c.PrivateUsage / 2**20:.1f},"
+                            f"{threads()},{hc.value}\n")
                     f.flush()
                 if stop.wait(every):
                     break

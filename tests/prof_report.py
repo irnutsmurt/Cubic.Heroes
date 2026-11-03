@@ -2,8 +2,11 @@
 """Symbolize a DIAG_PROF profile (port/diag): per thread, the functions most
 samples were in (self) and under (inclusive).
 
-  tests/prof_report.py <profile.raw> [--top N] [--min-share 2] [--lines FUNCTION]
+  tests/prof_report.py <profile.raw> [--top N] [--min-share 2] [--lines FUNCTION] [--at T0-T1[,T0-T1...]]
 --lines (Windows): the source lines that FUNCTION's own samples were on.
+--at: only the samples taken in these spans, in us on the frame trace's clock
+(a PS3_FTRACE run writes profile.times next to profile.raw), e.g. one slow
+frame's flip request to the next (tests/slow_frames.py lists them).
 
 Linux: the binary's symbol table through nm. Windows: the PDB next to the
 .exe through DbgHelp (a Windows development build writes one, see
@@ -15,8 +18,21 @@ ap = argparse.ArgumentParser()
 ap.add_argument("raw"); ap.add_argument("--top", type=int, default=15)
 ap.add_argument("--min-share", type=float, default=2.0, help="skip threads under this %% of samples")
 ap.add_argument("--lines", help="also list the source lines FUNCTION's own samples were on (Windows)")
+ap.add_argument("--at", help="T0-T1[,T0-T1...]: only samples in these spans (us, the frame trace's clock)")
 a = ap.parse_args()
 lines = open(a.raw, encoding="utf-8", errors="replace").read().splitlines()
+if a.at:   # profile.times: one time per sample line, in profile.raw's order
+    import os
+    spans = [tuple(float(x) for x in s.split("-")) for s in a.at.split(",")]
+    when = [float(x) for x in open(os.path.join(os.path.dirname(os.path.abspath(a.raw)), "profile.times"))]
+    kept, i = [lines[0]], 0
+    for l in lines[1:]:
+        if l.startswith(("thread ", "module ")):
+            kept.append(l); continue
+        if any(t0 <= when[i] <= t1 for t0, t1 in spans):
+            kept.append(l)
+        i += 1
+    lines = kept
 _, base, binary = lines[0].split(None, 2); base = int(base, 16)
 windows = binary.lower().endswith(".exe")
 cache = {}

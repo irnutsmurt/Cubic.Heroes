@@ -1,0 +1,13 @@
+# Where CONTINUE puts the hero for a save (SAVES=<checkpoint dir>): the title,
+# CONTINUE, "Change characters?" NO, then the state (area, hx, hz) once in
+# play, and a shot. The game restarts the hero at a place of its own -- the
+# castle-front save in front of the castle, the before-dungeon1 one (made in
+# the same area) in front of the town's inn -- not where the save was made.
+include ../scenarios/common.drive
+log TitleMovie 120
+sleep 5
+call continue
+state life>0 90
+sleep 4
+state life>0 5
+shot continued

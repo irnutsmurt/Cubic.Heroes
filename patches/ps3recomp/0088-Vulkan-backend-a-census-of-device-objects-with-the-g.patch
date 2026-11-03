@@ -1,0 +1,52 @@
+From 3c6e48028e52e0830eefda85581d5d980d325895 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Mon, 2 Nov 2026 18:38:13 -0800
+Subject: [PATCH 88/88] Vulkan backend: a census of device objects with the
+ geometry stats
+
+RSX_GEOM_CACHE_STATS=1 also logs, every 5 s, the images by kind with their
+texel bytes, programs, pipelines, framebuffers and samplers: what fills once
+and what grows with every area reload.
+---
+ libs/video/rsx_vulkan_backend.c | 25 +++++++++++++++++++++++++
+ 1 file changed, 25 insertions(+)
+
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index b7f54cc..763e325 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -4448,6 +4448,31 @@ static void vk_geom_stats(void)
+     VK_LOG("geometry arena: %u chunks (%u device-local), %.1f MB in blocks, %u pending, %llu waits for room, "
+            "%llu requests with none%s\n", s_geom.n_chunks, local, (double)s_geom.used / 1048576.0, s_geom.n_pending,
+            s_geom.syncs, s_geom.fails, s_geom.held[0] ? (s_geom.overlaps ? " -- CHECK: OVERLAPS" : " (check: no overlaps)") : "");
++    /* What else the device holds, for telling caches that fill once from
++     * what grows with every area reload: images by kind (their texel bytes,
++     * mips and cube faces included), pipelines, framebuffers, samplers. */
++    u32 n[5] = { 0 }, pipes = 0, variants = 0;
++    double mb[5] = { 0 };
++    for (u32 i = 0; i < VK_ENG_MAX_OBJ; i++) {
++        const vk_eng_obj* o = &s_eobj[i];
++        if (o->kind == VK_ENG_FREE || o->kind > VK_ENG_VIEW) continue;
++        n[o->kind]++;
++        if (o->kind == VK_ENG_VIEW) continue;
++        double b = o->block ? (double)((o->w + 3) / 4) * ((o->h + 3) / 4) * o->block
++                            : (double)o->w * o->h * (o->bpp ? o->bpp : 4);
++        if (o->kind == VK_ENG_TEXTURE && o->mips > 1) b *= 4.0 / 3.0;
++        if (o->kind == VK_ENG_TEXTURE && o->cube) b *= 6;
++        mb[o->kind] += b / 1048576.0;
++    }
++    for (u32 i = 0; i < VK_ENG_MAX_PIPE; i++) {
++        if (!s_epipe[i].used) continue;
++        pipes++;
++        for (u32 t = 0; t < VK_ENG_TOPOLOGIES; t++) variants += s_epipe[i].variant[t] != VK_NULL_HANDLE;
++    }
++    VK_LOG("device objects: %u textures %.1f MB, %u colour targets %.1f MB, %u depth %.1f MB, %u views; "
++           "%u programs, %u pipelines, %u framebuffers, %u samplers\n",
++           n[VK_ENG_TEXTURE], mb[VK_ENG_TEXTURE], n[VK_ENG_COLOR], mb[VK_ENG_COLOR], n[VK_ENG_DEPTH], mb[VK_ENG_DEPTH],
++           n[VK_ENG_VIEW], pipes, variants, s_e2.fb_count, s_esamp_count);
+ }
+ 
+ static u32 vk_eng_geom_create(void* user, const void* vertices, u32 vbytes, const u32* indices,
+-- 
+2.56.0.windows.3
+

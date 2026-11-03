@@ -1,0 +1,60 @@
+# Scenario: where CONTINUE puts the hero after a save made inside the first
+# dungeon (SCENARIO=dungeon1_save_continue tests/boot_smoke.py).
+#
+# Starts from: build/checkpoints/before-dungeon1 (CONTINUE: the town's inn).
+# Settings: as dungeon1_approach.
+# Route: dungeon1_approach's (dungeon1_route.drive) into area 37 and past its
+#   first room's dialogues and floor switch.
+# Then: the system menu's SAVE (it saves at once and stays open; the save goes
+#   to the run's own copy of the saves, never the owner's), CIRCLE, then TITLE
+#   and CONTINUE. Completed when: back in play after CONTINUE -- the `state`
+#   line after the menu segment is where the save restored the hero (area,
+#   hx/hz). If that is inside the dungeon, the run's save
+#   (<run>/gamedata/.../savedata) can become a checkpoint nearer the fights.
+#! saves build/checkpoints/before-dungeon1
+#! env DOTHEROES_NATIVE_CD=1 DOTHEROES_NATIVE_SOLVER=4,5,6 GCM_WRAP_LAP=1 DOTHEROES_PRESENT_ONCE=1
+#! env DOTHEROES_DEV_STATE=1 DOTHEROES_DEV_KEYS=1 DIAG_FRAMES=frames.log PS3_VERBOSE=0
+#! env WINDOW=1 VISIBLE=1 TOPMOST=1 GRAB_EVERY=20 PS3_OSD_FPS=2 DUMP=0 SHOT_EVERY=0
+#! secs 600
+include common.drive
+include dungeon1_route.drive
+
+log TitleMovie 120
+sleep 5
+call continue
+state life>0 90
+sleep 3
+
+attempt 2 back_to_start
+  expect life>0
+  segment route castle-to-dungeon
+  call route_to_dungeon
+  endseg
+  expect life>0,area==37
+  segment explore dungeon-entry
+  call dungeon_entry
+  endseg hz>+8
+end
+expect
+state area==37,life>0 10      # where the save is made
+shot saved-here
+press START                   # the system menu, on RESUME
+sleep 2
+state menu==1 5
+press DOWN                    # SAVE
+sleep 1
+press CROSS                   # saves at once; the menu stays on SAVE
+sleep 6
+shot saved
+press UP                      # RESUME: the menu opens where it was left, and
+sleep 1                       # to_title_and_continue counts from RESUME
+press CROSS
+sleep 2
+state menu==3 10
+segment menu save-title-continue
+call to_title_and_continue
+state life>0 60
+endseg
+sleep 3
+state life>0 5                # where CONTINUE restored the hero
+shot continued

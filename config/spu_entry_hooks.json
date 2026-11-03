@@ -1,0 +1,25 @@
+{
+  "_comment": [
+    "Native code in place of lifted SPU routines (spu_lifter.py --entry-hook, through",
+    "build_spu_workloads.py --entry-hooks): the function at addr in that image begins with",
+    "`if (guard && host(ctx)) SPU_RET(ctx);` -- host returns 1 when it did the work (return registers",
+    "set; the function then returns to its link, as its own `bi $r0` would), 0 to let the lifted body run.",
+    "The hosts and guards are in port/native/edge_inflate.c."
+  ],
+  "entry_hooks": [
+    {
+      "image": "spu_0002_at_00F49F00",
+      "addr": "0x3710",
+      "host": "dotheroes_edge_inflate_large",
+      "guard": "g_dotheroes_native_inflate",
+      "note": "Edge zlib's edgeZlibFetchAndInflateLargeRawData(r3 out EA, r4 out size, r5 in EA, r6 in size, r7 DMA tag, r8-r11 LS buffers) -> r3 0 or an error: a map pack inflated at an area load (13 MB for the first dungeon's room, ~100 ms in lifted code, the game's main thread waiting on it)"
+    },
+    {
+      "image": "spu_0002_at_00F49F00",
+      "addr": "0x3258",
+      "host": "dotheroes_edge_inflate_check",
+      "guard": "g_dotheroes_native_inflate_check",
+      "note": "where the task goes once a queue element is inflated: DOTHEROES_NATIVE_INFLATE=check compares the lifted output with the native one here"
+    }
+  ]
+}

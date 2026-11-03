@@ -248,3 +248,11 @@ Details and numbers in HANDOFF.md ("Current status", the work log).
   state checks at every stage, bounded retries, measured segments with
   required activity, batch reports, rolling hitch captures (patch 0079), play
   session recording for routes and checkpoints.
+- 20 area-reload cycles hold 60 fps (patches 0080-0084), a crash at the 10th
+  hitch mark fixed (0082); stable baseline tagged `stable-2026-11-02`.
+- The first dungeon's entry: its 93-95 ms frame was Edge zlib inflating the
+  room's map pack on a lifted SPU task; now native (SPU entry hooks, patch
+  0086; port/native/inflate.c), 13 ms, exact against the lifted output and
+  zlib; render targets and textures created without GPU waits (0089).
+- Memory bounded over repeated area loads: a finalized SPURS instance's
+  parked task ended (0087), the SPU pool no longer grows a worker per load.

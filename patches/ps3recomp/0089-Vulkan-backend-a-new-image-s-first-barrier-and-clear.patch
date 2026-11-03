@@ -1,0 +1,134 @@
+From 4a822e251da5ddb44cfc8e3effaec46c8a407a67 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Mon, 2 Nov 2026 19:33:37 -0800
+Subject: [PATCH] Vulkan backend: a new image's first barrier and clear go into
+ the batch
+
+Creating a texture or a colour or depth target flushed the walker's batch,
+waited for the GPU, then submitted its layout change (and a target's clear)
+and waited again. Entering 3D Dot Game Heroes' first dungeon makes ~35
+colour targets and ~10 textures in one frame: ~30 ms of those waits in a
+100 ms frame on the walker. Now they are recorded into the open batch,
+ahead of everything that can use the image, like a batched upload; the
+first visit's worst frame went from 83.4-83.5 to 66.8-66.9 ms (two runs
+each way, three cycles; later visits unchanged). No validation-layer error
+in a cycle with it. VK_SYNC_CREATE=1 keeps the old way.
+---
+ libs/video/rsx_vulkan_backend.c | 73 ++++++++++++++++++++++++++-------
+ 1 file changed, 58 insertions(+), 15 deletions(-)
+
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index 763e325..e09dd34 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -512,6 +512,8 @@ static void vk_geom_release(void);  /* engine shutdown: the resident geometry ar
+ static void vk_geom_retire(unsigned long long done);   /* free what batches before `done` released */
+ static int vk_eb_upload(VkImage img, VkBufferImageCopy* region, const void* src, size_t tight,
+                         u32 rows, u32 row_bytes);   /* -2: not batched, do it the old way */
++enum { VK_INIT_NONE, VK_INIT_CLEAR_COLOR, VK_INIT_CLEAR_DEPTH };
++static int vk_eb_init_image(VkImage img, VkImageAspectFlags aspect, int init);   /* -2 as vk_eb_upload */
+ 
+ /* Image views released while recorded or in-flight work may still name them
+  * (a feedback snapshot's crossbar view goes every frame). They are destroyed
+@@ -2806,12 +2808,16 @@ static u32 vk_eng_color_target_create(void* user, rsx_be_format fmt, u32 w, u32
+     o->kind = VK_ENG_COLOR; o->fmt = vf; o->bpp = bpp; o->w = w; o->h = h;
+     /* UNDEFINED -> GENERAL, then the guest's own bytes when the engine could
+      * resolve them, else transparent black so the contents are defined. */
+-    if (vk_begin()) { vk_eng_release(user, hd); return 0; }
+-    vk_barrier_image(o->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED);
+-    VkClearColorValue zero = { .float32 = { 0.0f, 0.0f, 0.0f, 0.0f } };
+-    VkImageSubresourceRange r = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+-    pvkCmdClearColorImage(s_vk.cmd, o->im.img, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &r);
+-    if (vk_submit_and_wait()) { vk_eng_release(user, hd); return 0; }
++    const int b = vk_eb_init_image(o->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_INIT_CLEAR_COLOR);
++    if (b == -1) { vk_eng_release(user, hd); return 0; }
++    if (b == -2) {
++        if (vk_begin()) { vk_eng_release(user, hd); return 0; }
++        vk_barrier_image(o->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED);
++        VkClearColorValue zero = { .float32 = { 0.0f, 0.0f, 0.0f, 0.0f } };
++        VkImageSubresourceRange r = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
++        pvkCmdClearColorImage(s_vk.cmd, o->im.img, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &r);
++        if (vk_submit_and_wait()) { vk_eng_release(user, hd); return 0; }
++    }
+     if (seed && seed_row_bytes)
+         vk_eng_upload(o->im.img, 0, 0, w, h, bpp, seed, seed_row_bytes);
+     return hd;
+@@ -2832,12 +2838,16 @@ static u32 vk_eng_depth_target_create(void* user, u32 w, u32 h)
+     }
+     o->kind = VK_ENG_DEPTH; o->fmt = s_vk.depth_format; o->w = w; o->h = h;
+     /* Far plane, for the reason the display depth starts there. */
+-    if (vk_begin()) { vk_eng_release(user, hd); return 0; }
+-    vk_barrier_image(o->im.img, s_vk.depth_aspect, VK_IMAGE_LAYOUT_UNDEFINED);
+-    VkClearDepthStencilValue far_plane = { 1.0f, 0 };
+-    VkImageSubresourceRange r = { s_vk.depth_aspect, 0, 1, 0, 1 };
+-    pvkCmdClearDepthStencilImage(s_vk.cmd, o->im.img, VK_IMAGE_LAYOUT_GENERAL, &far_plane, 1, &r);
+-    if (vk_submit_and_wait()) { vk_eng_release(user, hd); return 0; }
++    const int b = vk_eb_init_image(o->im.img, s_vk.depth_aspect, VK_INIT_CLEAR_DEPTH);
++    if (b == -1) { vk_eng_release(user, hd); return 0; }
++    if (b == -2) {
++        if (vk_begin()) { vk_eng_release(user, hd); return 0; }
++        vk_barrier_image(o->im.img, s_vk.depth_aspect, VK_IMAGE_LAYOUT_UNDEFINED);
++        VkClearDepthStencilValue far_plane = { 1.0f, 0 };
++        VkImageSubresourceRange r = { s_vk.depth_aspect, 0, 1, 0, 1 };
++        pvkCmdClearDepthStencilImage(s_vk.cmd, o->im.img, VK_IMAGE_LAYOUT_GENERAL, &far_plane, 1, &r);
++        if (vk_submit_and_wait()) { vk_eng_release(user, hd); return 0; }
++    }
+     return hd;
+ }
+ 
+@@ -3023,9 +3033,13 @@ static u32 vk_eng_texture_create(void* user, rsx_be_format fmt, u32 w, u32 h,
+     o->kind = VK_ENG_TEXTURE; o->fmt = vf; o->w = w; o->h = h; o->cube = (u8)cube; o->mips = mips;
+     o->bpp = bc ? 0 : bpp; o->block = bc ? bpp : 0;
+     /* UNDEFINED -> GENERAL for every level and face before the uploads arrive. */
+-    if (vk_begin()) goto fail;
+-    vk_barrier_image(o->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED);
+-    if (vk_submit_and_wait()) goto fail;
++    const int b = vk_eb_init_image(o->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_INIT_NONE);
++    if (b == -1) goto fail;
++    if (b == -2) {
++        if (vk_begin()) goto fail;
++        vk_barrier_image(o->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED);
++        if (vk_submit_and_wait()) goto fail;
++    }
+     return hd;
+ fail:
+     vk_destroy_image(&o->im);
+@@ -4093,6 +4107,35 @@ static int vk_eb_upload(VkImage img, VkBufferImageCopy* region, const void* src,
+     return 0;
+ }
+ 
++/* A new image's move from UNDEFINED to GENERAL, and a target's first clear,
++ * as one more batched operation: recorded ahead of everything that can use
++ * the image, which is all recorded or submitted after it. Each used to flush
++ * the batch, wait for the GPU and then submit and wait again: entering the
++ * first dungeon of 3D Dot Game Heroes makes ~35 colour targets and ~10
++ * textures in one frame, ~30 ms of those waits in a 100 ms frame.
++ * VK_SYNC_CREATE=1 keeps the old way. */
++static int vk_eb_init_image(VkImage img, VkImageAspectFlags aspect, int init)
++{
++    static int sync = -1;
++    if (sync < 0) sync = getenv("VK_SYNC_CREATE") ? 1 : 0;
++    if (sync || !vk_eb_active()) return -2;
++    if (!s_eb_pending && vk_begin_batch()) return -1;
++    vk_rp_close();
++    vk_barrier_image(img, aspect, VK_IMAGE_LAYOUT_UNDEFINED);
++    if (init == VK_INIT_CLEAR_COLOR) {
++        VkClearColorValue zero = { .float32 = { 0.0f, 0.0f, 0.0f, 0.0f } };
++        VkImageSubresourceRange r = { aspect, 0, 1, 0, 1 };
++        pvkCmdClearColorImage(s_vk.cmd, img, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &r);
++    } else if (init == VK_INIT_CLEAR_DEPTH) {
++        VkClearDepthStencilValue far_plane = { 1.0f, 0 };
++        VkImageSubresourceRange r = { aspect, 0, 1, 0, 1 };
++        pvkCmdClearDepthStencilImage(s_vk.cmd, img, VK_IMAGE_LAYOUT_GENERAL, &far_plane, 1, &r);
++    }
++    if (init != VK_INIT_NONE) vk_barrier_image(img, aspect, VK_IMAGE_LAYOUT_GENERAL);   /* the clear before any use */
++    if (++s_eb_pending >= s_eb.max_draws) vk_eng_flush();
++    return 0;
++}
++
+ #define VK_SWAP(T, a, b) do { T _t = (a); (a) = (b); (b) = _t; } while (0)
+ /* Wait for the batch a flush left in flight (it ran on what is now the spare
+  * set), so all GPU work submitted so far is complete. */
+-- 
+2.56.0.windows.3
+

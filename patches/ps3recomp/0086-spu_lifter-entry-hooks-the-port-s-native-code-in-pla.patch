@@ -1,0 +1,126 @@
+From 721a29ae2c15997a52f4ed9f0e2aac26613117ee Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Mon, 2 Nov 2026 18:38:12 -0800
+Subject: [PATCH 86/88] spu_lifter: entry hooks -- the port's native code in
+ place of a lifted SPU routine
+
+--entry-hook ADDR=HOST:GUARD (build_spu_workloads.py --entry-hooks <json>,
+by image): the function at ADDR begins with
+`if (GUARD && HOST(ctx)) SPU_RET(ctx);` -- the host does the routine's
+work and the function returns to its link as its own `bi $r0` would
+(spu_drain_call checks the pc against the call's return address; a host
+that only returned left the pc stale and the drain re-ran the caller), or
+the host returns 0 and the lifted body runs. A hook at no function start
+fails the lift.
+---
+ tools/build_spu_workloads.py | 14 ++++++++++++++
+ tools/spu_lifter.py          | 30 ++++++++++++++++++++++++++++++
+ 2 files changed, 44 insertions(+)
+
+diff --git a/tools/build_spu_workloads.py b/tools/build_spu_workloads.py
+index ec780e4..06faf98 100644
+--- a/tools/build_spu_workloads.py
++++ b/tools/build_spu_workloads.py
+@@ -143,6 +143,10 @@ def main():
+                     help="do not run the lifter; assume --lifted already populated (still fixes includes + emits registry)")
+     ap.add_argument("--allow-partial", action="store_true",
+                     help="With --input, emit supported registrations despite incomplete coverage")
++    ap.add_argument("--entry-hooks", metavar="JSON",
++                    help='{"entry_hooks": [{"image": "<image name>", "addr": "0x3710", "host": "<fn>", '
++                         '"guard": "<int>"}, ...]}: spu_lifter.py --entry-hook for those images -- '
++                         "the port's native code in place of a lifted routine, behind a guard")
+     ap.add_argument("--merge-chunks", action="store_true",
+                     help="Pass --merge-chunks to spu_lifter.py: each run of chunks from one "
+                          "call target to the next becomes one C function, so branches "
+@@ -178,6 +182,14 @@ def main():
+             sys.exit(f"[build_spu_workloads] --extra-funcs wants IMAGE=ADDR, got {spec!r}")
+         k, v = spec.split("=", 1)
+         extra_funcs[k.strip()] = v.strip()
++    entry_hooks = {}
++    if args.entry_hooks:
++        import json
++        for h in json.load(open(args.entry_hooks)).get("entry_hooks", []):
++            entry_hooks.setdefault(h["image"], []).append(h)
++        known = {os.path.splitext(os.path.basename(e))[0] for e in elfs}
++        for img in sorted(set(entry_hooks) - known):
++            sys.exit(f"[build_spu_workloads] {args.entry_hooks}: no image {img!r}")
+ 
+     imgs = []  # (img, prefix, fingerprint, e_entry)
+     text_fps = {}  # img -> executable-segment fingerprint
+@@ -199,6 +211,8 @@ def main():
+                 cmd += ["--extra-funcs", extra_funcs[img]]
+             if img in reloc:
+                 cmd += ["--relocatable"]
++            for h in entry_hooks.get(img, []):
++                cmd += ["--entry-hook", f"{h['addr']}={h['host']}:{h['guard']}"]
+             if args.merge_chunks:
+                 cmd += ["--merge-chunks"]
+                 print(f"[build_spu_workloads] {img}: extra entries {extra_funcs[img]}")
+diff --git a/tools/spu_lifter.py b/tools/spu_lifter.py
+index b86b433..ec7f018 100644
+--- a/tools/spu_lifter.py
++++ b/tools/spu_lifter.py
+@@ -1100,9 +1100,19 @@ class SPULifter:
+         lines = [SOURCE_PREAMBLE.format(header_name=header_name), ""]
+         weak = "__attribute__((weak)) " if getattr(self, "weak_emit", False) else ""
+         rl = ["    const uint32_t _rl = ctx->ls_reloc; (void)_rl;"] if self.relocatable else []
++        hooks = getattr(self, "entry_hooks", {})
+         for f in self.functions:
++            hook = hooks.get(f.start_addr)
++            if hook:   # --entry-hook: the port's host function first
++                lines += ["#ifdef __cplusplus", f'extern "C" int {hook[1]};',
++                          f'extern "C" int {hook[0]}(spu_context* ctx);', "#else",
++                          f"extern int {hook[1]};", f"int {hook[0]}(spu_context* ctx);", "#endif"]
+             lines.append(f"void {weak}{f.name}(spu_context* ctx) {{")
+             lines += rl
++            if hook:
++                # Done by the host: return as the function's own `bi $r0` would
++                # (spu_drain_call checks the pc against the call's link).
++                lines.append(f"    if ({hook[1]} && {hook[0]}(ctx)) SPU_RET(ctx);  /* entry hook 0x{f.start_addr:05X} */")
+             for b in f.body_lines:
+                 lines.append(b if b.endswith(":") else f"    {b}")
+             lines.append("}")
+@@ -1215,6 +1225,14 @@ def main() -> None:
+                         "changes speed, not which code can be reached.")
+     p.add_argument("--max-group-insns", type=int, default=4000,
+                    help="Cap on instructions per merged group (keeps clang fast).")
++    p.add_argument("--entry-hook", action="append", default=[], metavar="ADDR=HOST:GUARD",
++                   help="The function at ADDR begins with `if (GUARD && HOST(ctx)) SPU_RET(ctx);`: "
++                        "with the int GUARD set, the port's `int HOST(spu_context*)` runs "
++                        "first and either does the function's work (it sets the return "
++                        "registers and returns 1; the function then returns to its link "
++                        "register, so ADDR must be one called with a link in r0) or returns "
++                        "0 and the lifted body runs. "
++                        "For a native replacement of a hot SPU routine (repeatable).")
+     p.add_argument("--force-indirect", default="",
+                    help="Comma-separated `bi $rN` addresses to emit as GENERIC "
+                         "indirect dispatch, overriding the link-register-return "
+@@ -1339,6 +1357,15 @@ def main() -> None:
+ 
+     lifter = SPULifter(trace=args.trace, prefix=args.symbol_prefix)
+     lifter.relocatable = args.relocatable
++    lifter.entry_hooks = {}
++    for spec in args.entry_hook:
++        m = re.fullmatch(r"\s*(0x[0-9A-Fa-f]+|\d+)\s*=\s*([A-Za-z_]\w*)\s*:\s*([A-Za-z_]\w*)\s*", spec)
++        if not m:
++            p.error(f"--entry-hook {spec!r}: expected ADDR=HOST:GUARD")
++        addr = int(m.group(1), 0)
++        if addr & 3 or addr in lifter.entry_hooks:
++            p.error(f"--entry-hook {spec!r}: unaligned or duplicate address")
++        lifter.entry_hooks[addr] = (m.group(2), m.group(3))
+     lifter.bi_r0_jump = compute_bi_r0_jumps(insns, bounds)
+     if lifter.bi_r0_jump:
+         print(f"  {len(lifter.bi_r0_jump)} `bi $r0` computed-jump site(s) "
+@@ -1371,6 +1398,9 @@ def main() -> None:
+               f"(--merge-chunks, max {args.max_group_insns} insns)")
+     for s, e in bounds:
+         lifter.lift_function(insns, s, groups.get(s, e))
++    missing = sorted(set(lifter.entry_hooks) - {f.start_addr for f in lifter.functions})
++    if missing:
++        sys.exit("[spu_lifter] --entry-hook at no function start: " + ", ".join(f"0x{a:X}" for a in missing))
+ 
+     os.makedirs(args.output, exist_ok=True)
+     hp = os.path.join(args.output, args.header_name)
+-- 
+2.56.0.windows.3
+

@@ -227,6 +227,21 @@ def report(runs, title):
             (t0, m0), (t1, m1) = mem[min(2, len(mem) - 1)], mem[-1]
             lines.append(f"- memory: {mem[0][1]:.0f} MB at start, {m0:.0f} MB at {t0:.0f} s -> {m1:.0f} MB at "
                          f"{t1:.0f} s ({(m1 - m0) / max((t1 - t0) / 60, 1e-9):+.1f} MB/min after the first minute)")
+            # The same point of each cycle (its first segment's start): the first
+            # cycle loads what the route needs for the first time (caches); growth
+            # from cycle to cycle after it is what repeated visits accumulate.
+            starts = {}
+            for s in segs:
+                if s.get("cycle") and s.get("wall0") is not None:
+                    starts.setdefault(s["cycle"], s["wall0"])
+            at = [(c, max((m for tm, m in mem if tm <= w), default=None)) for c, w in sorted(starts.items())]
+            at = [(c, m) for c, m in at if m is not None]
+            if len(at) >= 3:
+                steps = [b[1] - a[1] for a, b in zip(at[1:], at[2:])]
+                lines.append("  by cycle (working set at its start): " +
+                             ", ".join(f"c{c} {m:.0f}" for c, m in at) +
+                             f"; after cycle 1: {sum(steps) / len(steps):+.1f} MB a cycle"
+                             + (f" (last {len(steps[-3:])}: {', '.join(f'{x:+.0f}' for x in steps[-3:])})"))
         for e in errors(r["dir"]):
             lines.append(f"- error: {e}")
         hd = os.path.join(r["dir"], "hitch")

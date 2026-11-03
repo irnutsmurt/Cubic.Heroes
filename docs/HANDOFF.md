@@ -118,7 +118,16 @@ task and its contact differences are unresolved** (docs/BULLET_NATIVE.md,
 contacts, 0.6-0.85% materially different normals; similar aggregate rates do
 not show equivalent behaviour. The three native solver commands are
 bit-exact. The default (all four off) still drops to p99 29-38 ms in
-debris-heavy fights.
+debris-heavy fights. Native inflate (the Edge zlib map packs) is on by
+default and exact (below), not one of the four.
+
+**Stable baseline.** Tag `stable-2026-11-02` (commit db11101; ps3recomp
+0001-0085, its local tag `dotheroes-stable-2026-11-02`): the build the
+20-reload soak, the dungeon route and the fullscreen tests ran, with the
+four switches. Its executable (sha256 9a42d867...) is kept locally in
+build/stable/2026-11-02/ with a README; `BIN=build/stable/2026-11-02/
+dotheroes.exe` runs the tests on it. What came after (native inflate, the
+Finalize fix, wait-free creation) is measured against it.
 
 **Open problems, most important first.**
 1. **Long sessions with area reloads lost 60 fps -- four causes found and
@@ -187,6 +196,27 @@ debris-heavy fights.
    (0084; found by reading, not shown to have caused anything).
    Any long session -- area changes in normal play reload geometry too --
    needs all of these.
+   **Memory over repeated visits -- bounded (2026-11-02).** The dungeon
+   route's "+68 MB a minute" was the first trip filling caches (785 -> 1400
+   MB working set over the first cycle: town, field 15, the dungeon). A
+   10-cycle soak (dungeon-mem10, memory.csv now with threads and handles,
+   `RSX_GEOM_CACHE_STATS=1` with a census of device objects, ps3recomp 0088)
+   then grew +17, +6, +7, +9, +3, +2 MB a cycle. The caches fill and stop:
+   textures 89 -> 102 (the engine's cache holds 1,024), pipelines 171-182,
+   colour targets 65 throughout, the geometry arena at its six chunks by
+   design (0081). One thing grew with every visit: threads, 54 -> 73. The
+   game builds a SPURS instance for each area load, runs one Edge zlib task
+   in it and finalizes it; on hardware Finalize ends the task, here it stayed
+   parked in WAIT_SIGNAL -- one SPU pool worker per load (26 after ten
+   trips), and the parked-task table's 64 slots would have run out in a long
+   session (a task parked past them is woken only by its 1 s timeout). Fixed
+   (ps3recomp 0087: a task whose instance is finalized ends at its next
+   WAIT_SIGNAL; `SPURS_FINALIZE_KEEP_TASKS=1` for the old way). The same
+   soak after the fix (dungeon-mem10b): 10 of 10 cycles; working set 1399,
+   1420, 1426, then 1427-1428 MB from cycle 5 to 10 (+0 the last three);
+   threads 52-54; two pool workers (build/baselines/2026-11-02-dungeon-memory).
+   The river soak's ~2 MB a minute (above) is probably the same leak at one
+   load a cycle -- not re-measured since.
 2. **Fight spikes** (about one frame of 25-37 ms a minute; the spike run,
    build/test spikes: three 80-second river fights with hitch captures, GPU
    timing and physics stats): at debris bursts. Either the main thread
@@ -201,10 +231,36 @@ debris-heavy fights.
    The isolated 66.6 ms frame of a 45-minute attract run: an attract run
    with hitch captures of 40 ms+ is the trace (`SCENARIO=attract`; not run
    yet -- twice preempted on 2026-11-02).
-   **The dungeon's first room**: one frame of 93-95 ms every time around the
-   floor switch and the door it opens, and 2-3 more over 33 ms
-   (dungeon1_approach, three cycles: p99 17.3 ms otherwise) -- reproducible,
-   not yet traced.
+   **The dungeon's entry -- traced and its largest part fixed (2026-11-02).**
+   The 93-95 ms frame came ~0.5 s after walking in (area 37), not at the
+   floor switch as first written (the segment's clock started at the area
+   change). Its work: the room's map pack (map/pac_data/D_1_1_1.ps3.pac.gz,
+   2.6 MB of deflate to 13.2 MB) inflated by Sony's Edge zlib SPU task, in
+   lifted code, ~100 ms (90% zlib's inflate loop, 10% DMA copies), while the
+   game's main thread waited in cellSpursEventFlagWait (trace runs
+   entry-trace 1-4: PS3_FTRACE, DIAG_PROF on the main thread, the SPU jobs
+   and the walker; `tests/prof_report.py --at` takes one frame's samples).
+   **Now native** (ps3recomp 0086: SPU entry hooks in the lifter;
+   port/native/inflate.c, edge_inflate.c, config/spu_entry_hooks.json): the
+   pack inflates in 13 ms; the overworld's 42-43 MB packs in 40-53 ms instead
+   of ~300 ms inside their loads. Identical to the lifted routine's output on
+   7 of 7 loads (`DOTHEROES_NATIVE_INFLATE=check`) and to zlib on all 167
+   gzip files of the disc (tests/native/inflate_check.py); on by default,
+   `DOTHEROES_NATIVE_INFLATE=0` for the lifted task
+   (build/baselines/2026-11-02-dungeon-inflate). The entry's worst frames
+   went from 95/84/53, 93/54/33, 93/47/33 ms (three cycles) to 83/53/33,
+   50/33, 49/33. What is left: a ~50 ms frame of the game's own area set-up
+   on the main thread (PPU code, func_009731A8 and many others; every
+   visit), a 33 ms frame, and on the first visit an 83-100 ms frame on the
+   walker -- 35 new colour targets and 10 textures, each flushing the batch
+   and waiting for the GPU twice (~30 ms of waits), and 48 shader
+   translations (~20 ms). The creations no longer wait (ps3recomp 0089: a
+   new image's first barrier and clear go into the open batch;
+   `VK_SYNC_CREATE=1` the old way): that frame 83.4-83.5 -> 66.8-66.9 ms
+   (ABAB, three cycles each; later visits unchanged), no validation-layer
+   error in a cycle with it (build/baselines/2026-11-02-dungeon-create).
+   Left: the shader translations (a disk cache would take them off every
+   session after the first) and the game's own ~50 ms set-up frame.
 3. 144 fps uncapped is not sustained (~125-130 fps; the main thread, the
    game's own code, is the limit). Stretch goal.
 4. Not verified: save portability (PARAM.PFD is not rewritten) and the colour
@@ -222,7 +278,8 @@ debris-heavy fights.
 | Gameplay speed independent of frame rate (30/60/120/144) | done for the hero, river enemies, physics, timers | build/baselines/2026-11-02-frame-rate |
 | Save / load, GAME OVER save | done | tests/scripts/save_game.drive |
 | INSTALL, SNAPSHOT/ALBUM, dot editor SAVE, across restarts | done | tests/scripts/roundtrip_*.drive, editor_roundtrip_*.drive |
-| First dungeon, first boss | played by the owner (no crash, p99 17.6 ms); as a repeatable test: the way there and its first room (two dialogues, a floor switch), 3 of 3 cycles; the deeper rooms and the boss not yet | owner session 2026-11-02; tests/scenarios/dungeon1_approach.drive |
+| First dungeon, first boss | **manual:** played by the owner through the dungeon and its boss (no crash, p99 17.6 ms). **Automated:** the way there and the first room (two dialogues, a floor switch), 3 of 3 and 10 of 10 cycles; a save in the first room continues at the dungeon's door (checkpoint dungeon1-entrance); the deeper rooms and the boss not yet | owner session 2026-11-02; tests/scenarios/dungeon1_approach.drive, dungeon1_save_continue.drive |
+| Memory bounded over repeated area loads | done for the dungeon route (flat from the 5th of 10 cycles) | build/baselines/2026-11-02-dungeon-memory |
 | 144 fps uncapped | not met (~125-130) | build/baselines/2026-11-02-frame-rate |
 | Save portability, colour vs RPCS3 | not verified | -- |
 | Setup app end to end, first release | not started | -- |
@@ -232,16 +289,23 @@ debris-heavy fights.
    standing long-session test after any renderer or memory change: reloads,
    deaths and area changes, not idle time. Then longer sessions with real
    area changes (the owner's play session gives them).
-2. Take dungeon1_approach deeper: the first room's fight (the replayed
-   presses do not get through it), then the boss in area 38 -- the owner's
-   record covers both (1,000-1,600 s) -- and measure them like the river
-   fight, with normal damage and real audio in representative runs. A save
-   inside the dungeon, before the boss, would make the boss a short test
-   (the next play session: OWNER_PLAY.md, now fullscreen).
-3. The hitches: the dungeon switch/door's 93-95 ms frame (reproducible), the
-   fight spikes (profile the main thread in the debris-burst frames, the
-   walker's drain when draws jump), the first area entry's walker frame, and
-   the attract run for the 66.6 ms frame.
+2. Take the dungeon deeper from checkpoint dungeon1-entrance (CONTINUE puts
+   the hero just inside the dungeon's door; the town route is no longer
+   needed): the first room's fight (the owner's record, 1,006-1,045 s:
+   north through the opened door, west along the room with the sword), then
+   the boss in area 38 (record ~1,580 s), measured like the river fight, with
+   normal damage and real audio in representative runs. Where CONTINUE
+   restores is the game's own choice (the before/after-dungeon1 saves, made
+   at the castle, continue at the town's inn; field-area14 near where it was
+   made; the dungeon save at the dungeon's door), so a save next to the boss
+   may still continue at the door: the owner's save there, checked with
+   tests/scripts/continue_where.drive, settles it.
+3. The hitches: what is left of the dungeon entry (the walker's first-visit
+   frame: resource creation without GPU waits, then the shader translations
+   -- a disk cache of them; the main thread's ~50 ms area set-up), the fight
+   spikes (profile the main thread in the debris-burst frames, the walker's
+   drain when draws jump), the first area entry's walker frame, and the
+   attract run for the 66.6 ms frame (tracked; reproducible problems first).
 4. Then the stretch goal (144 fps), colours vs RPCS3, save portability, the
    setup app and a first release.
 
@@ -294,7 +358,13 @@ sword) or, since the owner's first play session, from its saves.
   debris, damage, deaths with can't-die and with normal damage); GAME OVER,
   Continue and Save; a new game (character select, name, the prologue, the
   first steps).
-- *Played by the owner* (2026-11-02, 38.5 minutes, the validated
+- *Automated scenarios, gameplay:* the first dungeon's approach -- town,
+  field 15, the dungeon's door -- and its first room's two dialogues and floor
+  switch (dungeon1_approach: 3 of 3 cycles, then 10 of 10 in the memory soak,
+  normal damage); a save in that room and CONTINUE (dungeon1_save_continue).
+  Not automated yet: the dungeon past its first room, its fights, the boss.
+- *Played by the owner* (manual coverage, not counted as automated)
+  (2026-11-02, 38.5 minutes, the validated
   configuration with every fix of the day -- the session's binary is the one
   the hot-page soak ran; windowed, sound on, normal damage, diagnostics on:
   build/sessions/boot-20261102-134835-owner-play): field areas 11 and 14-18,
@@ -1277,13 +1347,13 @@ as the current state.*
 |---|---|
 | `PS3_STRICT=1` | strict mode: silent fallbacks become fatal (dev default) |
 | `DIAG_FPS=1` | guest flips per second every 10 s |
-| `DIAG_PROF=<start>,<secs>` | all-thread wall-clock sampler -> `profile.raw`; `tests/prof_report.py`. With `PS3_FTRACE` also `profile.times`, each sample's time on the trace's clock |
+| `DIAG_PROF=<start>,<secs>` | all-thread wall-clock sampler -> `profile.raw`; `tests/prof_report.py`. With `PS3_FTRACE` also `profile.times`, each sample's time on the trace's clock (`tests/prof_report.py --at T0-T1` keeps one frame's samples); the thread list is refreshed every ~20 ms, so a task on a new SPU pool worker is seen |
 | `DIAG_PROF_THREADS=<name>[,<name>]` | sample only threads whose name contains one of these (Windows), e.g. `spu job,ppu main`: all ~50 threads fill the 400,000 samples in ~10 s |
 | `DIAG_DUMP_AT`, `DIAG_CRASH_DIR`, `DIAG_HANG_EXIT` | crash/hang reports |
 | `VK_WAIT_STATS=1`, `VK_GPU_TIME=1` | CPU waits on the GPU by call site; GPU time per 5 s and why render passes restarted; with `PS3_FTRACE`, per-batch GPU spans and per-frame draws (tests/frame_costs.py) |
 | `VK_DRAW_BATCH` (default on), `VK_DRAW_BATCH_MAX` | draw batching (4096 per submission) |
 | `RSX_VERTEX_CACHE=0`, `RSX_VERTEX_CACHE_STATS=1` | the cross-frame vertex cache |
-| `RSX_GEOM_CACHE=0`, `RSX_GEOM_CACHE_STATS=1` | resident geometry off; its counters every 5 s |
+| `RSX_GEOM_CACHE=0`, `RSX_GEOM_CACHE_STATS=1` | resident geometry off; its counters every 5 s, with the arena and a census of device objects (textures and targets with their bytes, programs, pipelines, framebuffers, samplers; patch 0088) |
 | `RSX_GEOM_CACHE_CHECK=1` | rebuild every resident hit and compare (slow; reports missed writes) |
 | `RSX_GEOM_CACHE_LOG=<n>` | the first n new keys, for `tests/geom_newkeys.py` |
 | `RSX_GEOM_CACHE_MAX_ENTRIES`, `RSX_GEOM_ARENA_CHUNKS` | cap the table / the 64 MB GPU chunks (eviction tests) |
@@ -1319,6 +1389,9 @@ as the current state.*
 | `DOTHEROES_DEV_RECORD=1` | testing: `record.log` -- controller/keyboard input (PS3 mask and stick on change), field area changes, life, the hero's position every second, hitch marks, on the trace's clock: for deriving routes from a play session |
 | `PS3_FTRACE_ROLL=<dir>` | hitch captures: a rolling frame trace (`PS3_FTRACE_CAP` spans, default 1M); a frame of `PS3_FTRACE_ROLL_MS` (25) to 100 ms writes `<dir>/hitch_<n>_<s>s_<why>.txt` from `PS3_FTRACE_ROLL_BEFORE` (2) s before to `_AFTER` (1) s after, on its own thread; one per `_GAP` (15) s, `_MAX` (20) in all, none in the first `_FROM` (0) s, load bursts skipped; a tester's mark (F8, L3+R3) from its own budget, `_MARKS` (100), 2 s more before it, `hitch_m<n>_..._mark<n>.txt` (patch 0085); tests/slow_frames.py reads them |
 | `RSX_GEOM_ARENA_CHECK=1` | the geometry arena's blocks checked against a map of held granules: overlaps counted, reported with `RSX_GEOM_CACHE_STATS=1` (whose "geometry arena" line gives chunks, device-local chunks, MB in blocks, pending, waits for room, failed requests) |
+| `DOTHEROES_NATIVE_INFLATE=0\|check` | Edge zlib's large inflate (every area's map pack) natively: on by default (port/native/edge_inflate.c, an SPU entry hook); `0` the lifted routine; `check` both, each output compared (`[edge-inflate] check`) |
+| `SPURS_FINALIZE_KEEP_TASKS=1` | A/B: cellSpursFinalize leaves its tasks parked in WAIT_SIGNAL, as before patch 0087 (one SPU pool worker leaked per area load) |
+| `VK_SYNC_CREATE=1` | A/B: a new texture or render target flushes the batch and waits for the GPU (twice) instead of its first barrier and clear going into the batch (patch 0089) |
 | `RSX_GEOM_DYNAMIC_LIFETIME=1` | A/B: resident geometry's old rule -- an entry rebuilt four times in its life goes to the copy path for good (made every static draw dynamic after four area reloads) |
 | `SCENARIO=<name>` | tests/boot_smoke.py: `DRIVE=tests/scenarios/<name>.drive`; its `#! saves`, `#! env`, `#! secs` lines apply unless set; `FIGHTS`, `ROUNDS` and other `${NAME:-default}` values in the drive come from the environment |
 | `HOLD_AFTER_DRIVE=1`, `ALLOW_CONCURRENT=1`, `MEM_EVERY=<s>`, `RUNS_IN=<dir>`, `PREEMPT_TESTS=1` | tests/boot_smoke.py: keep the game running after the drive ends; start even though another game is running; memory.csv's period (30 s); where run directories go (default build/test; play sessions build/sessions); stop running tests and hold further ones (build/test/HOLD) before starting (play sessions) |
@@ -1352,4 +1425,4 @@ Edit in `build/ref/ps3recomp` (branch `dotheroes`), commit there as
 `git format-patch --start-number <next> -o ../../../patches/ps3recomp HEAD~<n>`
 and commit the patch files here. `tools/pipeline.py` refuses to run with
 uncommitted changes in that checkout, and re-applies the whole series when
-the patch files change. 85 patches (0001-0085) as of 2026-11-02.
+the patch files change. 89 patches (0001-0089) as of 2026-11-02.

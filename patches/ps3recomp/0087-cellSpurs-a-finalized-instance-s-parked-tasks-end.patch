@@ -1,0 +1,225 @@
+From efd70db4a111380db0a83f09cb9184bb58b0bcc5 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Mon, 2 Nov 2026 18:38:12 -0800
+Subject: [PATCH 87/88] cellSpurs: a finalized instance's parked tasks end
+
+On hardware cellSpursFinalize takes the instance's SPU group down with its
+tasks. Here a task parked in WAIT_SIGNAL is a host thread blocked on the
+signal condition, and nothing woke it: a title that builds an instance per
+load (3D Dot Game Heroes, an Edge zlib task per area load) left one parked
+task per load -- a pool worker and a parked-table slot each (26 workers
+after ten trips; the table has 64 slots).
+
+A task notes its instance's address and how many times that address has
+been finalized when it starts; Finalize bumps the count and wakes the
+parked; a task whose instance is gone halts out of WAIT_SIGNAL and leaves
+the taskset's memory alone (the next instance may be using it).
+SPURS_FINALIZE_KEEP_TASKS=1 keeps the old behaviour. The SPU pool logs each
+worker it starts.
+---
+ libs/spurs/cellSpurs.c     |  6 +++
+ runtime/spu/spu_channels.c |  4 ++
+ runtime/spu/spu_workload.c | 98 +++++++++++++++++++++++++++++++++++++-
+ 3 files changed, 106 insertions(+), 2 deletions(-)
+
+diff --git a/libs/spurs/cellSpurs.c b/libs/spurs/cellSpurs.c
+index 9e514d2..a45606d 100644
+--- a/libs/spurs/cellSpurs.c
++++ b/libs/spurs/cellSpurs.c
+@@ -613,6 +613,12 @@ s32 cellSpursFinalize(CellSpurs* spurs)
+     __atomic_store_n(&si->ea, 0, __ATOMIC_RELEASE);
+     si->stopping = 0;
+     ReleaseSRWLockExclusive(&si->lock);
++    /* Its tasks still parked in WAIT_SIGNAL end (spu_workload.c).
++     * SPURS_FINALIZE_KEEP_TASKS=1 leaves them parked, as before, for A/B. */
++    { static int keep = -1;
++      if (keep < 0) keep = getenv("SPURS_FINALIZE_KEEP_TASKS") ? 1 : 0;
++      extern void spu_spurs_finalized(uint32_t spurs_ea);
++      if (!keep) spu_spurs_finalized(ea); }
+     return CELL_OK;
+ }
+ 
+diff --git a/runtime/spu/spu_channels.c b/runtime/spu/spu_channels.c
+index 5bbca72..0457bf1 100644
+--- a/runtime/spu/spu_channels.c
++++ b/runtime/spu/spu_channels.c
+@@ -2446,6 +2446,10 @@ void spu_spurs_taskset_syscall(spu_context* ctx)   /* non-static: also called by
+             spu_taskset_wait_signal(ts, tid);
+             spu_taskset_parked_del(ts, tid);
+             yz_lockstep_block_end(ctx);
++            /* Its SPURS instance was finalized while it waited: the task ends
++             * here, as the SPU group taken down under it would. */
++            { extern int spu_task_retired(void);
++              if (spu_task_retired()) { ctx->status = SPU_STATUS_STOPPED; spu_halt(ctx); return; } }
+             spu_ef_deliver_owed(ctx, wobj);
+         }
+         ctx->gpr[3]._u32[0] = 0;
+diff --git a/runtime/spu/spu_workload.c b/runtime/spu/spu_workload.c
+index 8989f9c..e5988f0 100644
+--- a/runtime/spu/spu_workload.c
++++ b/runtime/spu/spu_workload.c
+@@ -771,12 +771,16 @@ void spu_workload_native_register(int image_id, spu_native_task_fn run, spu_nati
+     __atomic_store_n(&s_native[image_id].run, run, __ATOMIC_RELEASE);
+ }
+ 
++static void spu_task_bind_instance(uint32_t taskset_ea);   /* with WAIT_SIGNAL, below */
++int spu_task_retired(void);
++
+ static void spu_async_run(spu_async_job* j)
+ {
+     const double t_enter = j->t_disp ? spu_taskprof_now() : 0;
+     const uint64_t ft_enter = j->ft_disp ? ps3_ft_now() : 0;
+     double t_r0 = 0, t_r1 = 0;
+     spu_taskset_mark(j->taskset_ea, j->taskid, 1);
++    spu_task_bind_instance(j->taskset_ea);
+     /* A native replacement for this image: it gets the CreateTask argument
+      * (TaskInfo.args, taskset + 0x80 + id * 48) and either does the task's
+      * whole work -- then the task exits here, its image never loaded -- or
+@@ -1143,7 +1147,9 @@ static void spu_async_run(spu_async_job* j)
+                 fprintf(stderr, "[spu_workload] async image=%d RETURNED rc=%d "
+                         "(job ran to completion, did not loop)\n", j->image_id, rc);
+             spu_serial_release();
+-            if (j->taskset_ea) spu_taskset_task_exited(j->taskset_ea, j->taskid);
++            /* A task its instance's Finalize ended leaves the taskset alone:
++             * the next instance may already be using that memory. */
++            if (j->taskset_ea && !spu_task_retired()) spu_taskset_task_exited(j->taskset_ea, j->taskid);
+         }
+         /* Persistent LS is retained in its taskset slot for the next task; a
+          * per-dispatch LS is freed. */
+@@ -1273,8 +1279,12 @@ static int spu_pool_submit(spu_async_job* j)
+     s_pool_pending++;
+     if (spawn) s_pool_threads++;
+     else POOL_WAKE();
++    const unsigned workers = s_pool_threads;
+     POOL_UNLOCK();
+     if (!spawn) return 1;
++    /* Rare (a task finding every worker busy or parked), and a parked task
++     * keeps its worker: the count says what repeated loads leave behind. */
++    fprintf(stderr, "[spu pool] worker %u started for image %d\n", workers, j->image_id);
+ #ifdef _WIN32
+     /* The same 256 MB stack reservation as a task's own thread (below). */
+     HANDLE th = CreateThread(NULL, 256u << 20, spu_pool_worker, NULL,
+@@ -1400,6 +1410,82 @@ static pthread_mutex_t s_sig_lock = PTHREAD_MUTEX_INITIALIZER;
+ static pthread_cond_t  s_sig_cv   = PTHREAD_COND_INITIALIZER;
+ #endif
+ 
++/* A task whose SPURS instance is finalized ends.
++ *
++ * On hardware cellSpursFinalize takes the instance's SPU thread group down
++ * and every task with it. Here a task parked in WAIT_SIGNAL is a host thread
++ * blocked on s_sig_cv, and nothing woke it: 3D Dot Game Heroes builds an
++ * instance for each area load, runs one Edge zlib task in it, waits for the
++ * inflate and finalizes it, and each load left its task parked for good -- a
++ * pool worker, a parked-table slot and their memory per load (26 workers after
++ * ten trips to the first dungeon), with the table's 64 slots running out over
++ * a long session.
++ *
++ * The instance is identified by its address and how many times that address
++ * has been finalized (the game builds the next one at the same address): a
++ * task notes both when it starts, and a later Finalize of that address ends it
++ * at its next WAIT_SIGNAL, without touching the taskset's memory, which by
++ * then belongs to the next instance. */
++#define SPU_EPOCH_MAX 32
++static volatile uint32_t s_epoch_ea[SPU_EPOCH_MAX], s_epoch_n[SPU_EPOCH_MAX];
++static _Thread_local uint32_t t_task_spurs, t_task_epoch;
++static _Thread_local int t_task_retired;
++
++static uint32_t spurs_finalize_epoch(uint32_t spurs_ea)
++{
++    for (int i = 0; i < SPU_EPOCH_MAX; i++)
++        if (s_epoch_ea[i] == spurs_ea) return s_epoch_n[i];
++    return 0;
++}
++
++static void spu_task_bind_instance(uint32_t taskset_ea)
++{
++    extern uint8_t* vm_base;
++    t_task_retired = 0;
++    t_task_spurs = 0;
++    if (!taskset_ea || !vm_base) return;
++    const uint8_t* p = vm_base + taskset_ea + CSTS_SPURS + 4;   /* the low word of the BE u64 */
++    t_task_spurs = (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
++    t_task_epoch = spurs_finalize_epoch(t_task_spurs);
++}
++
++/* Under s_sig_lock: has the task's instance been finalized since it started? */
++static int spu_task_instance_gone(void)
++{
++    return t_task_spurs && spurs_finalize_epoch(t_task_spurs) != t_task_epoch;
++}
++
++/* cellSpursFinalize: its tasks end at their next WAIT_SIGNAL. */
++void spu_spurs_finalized(uint32_t spurs_ea)
++{
++#ifdef _WIN32
++    AcquireSRWLockExclusive(&s_sig_lock);
++#else
++    pthread_mutex_lock(&s_sig_lock);
++#endif
++    int i = 0;
++    while (i < SPU_EPOCH_MAX && s_epoch_ea[i] && s_epoch_ea[i] != spurs_ea) i++;
++    if (i < SPU_EPOCH_MAX) {
++        s_epoch_ea[i] = spurs_ea;
++        s_epoch_n[i]++;
++    } else {
++        static int _n = 0;
++        if (PS3_LOG_FIRST(_n, 1))
++            fprintf(stderr, "[spu_workload] more than %d SPURS instances finalized: tasks of 0x%08X stay parked\n",
++                    SPU_EPOCH_MAX, spurs_ea);
++    }
++#ifdef _WIN32
++    WakeAllConditionVariable(&s_sig_cv);
++    ReleaseSRWLockExclusive(&s_sig_lock);
++#else
++    pthread_cond_broadcast(&s_sig_cv);
++    pthread_mutex_unlock(&s_sig_lock);
++#endif
++}
++
++/* After WAIT_SIGNAL: did it end because the task's instance was finalized? */
++int spu_task_retired(void) { return t_task_retired; }
++
+ /* Which (taskset, task) pairs are currently parked in WAIT_SIGNAL.
+  *
+  * A PPU->SPU event-flag Set must be able to reach a task that parked WITHOUT
+@@ -1711,6 +1797,7 @@ int spu_taskset_wait_signal(uint32_t taskset_ea, uint32_t taskId)
+      * keeps the block-forever behaviour. Reversible, opt-in. */
+     unsigned drain = 0; { const char* e = getenv("LBP_WS_DRAIN"); if (e) { drain = (unsigned)atoi(e); if (!drain) drain = 1; } }
+     int drained = 0;
++    int retired = 0;   /* its SPURS instance was finalized meanwhile */
+     /* Release the global SPU-serial lock while parked so another SPU task can
+      * run (and possibly signal us); re-acquired before returning to resume. */
+     spu_serial_release();
+@@ -1721,6 +1808,7 @@ int spu_taskset_wait_signal(uint32_t taskset_ea, uint32_t taskId)
+ #ifdef _WIN32
+     AcquireSRWLockExclusive(&s_sig_lock);
+     while (!spurs_bitset_test(taskset_ea + CSTS_SIGNALLED, taskId)) {
++        if (spu_task_instance_gone()) { retired = 1; break; }
+         if (!SleepConditionVariableSRW(&s_sig_cv, &s_sig_lock, 1000, 0)) {
+             static int _n = 0;
+             if (++secs && _n < 16) { _n++;
+@@ -1733,6 +1821,7 @@ int spu_taskset_wait_signal(uint32_t taskset_ea, uint32_t taskId)
+ #else
+     pthread_mutex_lock(&s_sig_lock);
+     while (!spurs_bitset_test(taskset_ea + CSTS_SIGNALLED, taskId)) {
++        if (spu_task_instance_gone()) { retired = 1; break; }
+         struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); ts.tv_sec += 1;
+         if (pthread_cond_timedwait(&s_sig_cv, &s_sig_lock, &ts) != 0) {
+             static int _n = 0;
+@@ -1748,7 +1837,12 @@ int spu_taskset_wait_signal(uint32_t taskset_ea, uint32_t taskId)
+     spu_coh_watch_remove(&watch);
+     spu_lockline_unlock();
+     /* Signals coalesce in the bit, so consuming it outside s_sig_lock loses none. */
+-    if (!drained) spu_signalled_update(taskset_ea, taskId, 0);
++    if (!drained && !retired) spu_signalled_update(taskset_ea, taskId, 0);
++    t_task_retired = retired;
++    if (retired) { static unsigned _r = 0; _r++;
++        if (_r <= 8 || _r % 100 == 0)
++            fprintf(stderr, "[spu_workload] task %u (taskset 0x%08X) ends: SPURS 0x%08X was finalized (%u so far)\n",
++                    taskId, taskset_ea, t_task_spurs, _r); }
+     if (drained) { static int _d = 0; if (PS3_LOG_FIRST(_d, 24))
+         fprintf(stderr, "[spu_workload] task %u (taskset 0x%08X) WS_DRAIN resume "
+                 "after %us (no signal)\n", taskId, taskset_ea, secs); fflush(stderr); }
+-- 
+2.56.0.windows.3
+
