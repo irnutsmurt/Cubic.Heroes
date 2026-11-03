@@ -684,6 +684,9 @@ dotheroes.cfg and defaults, the harness's switches dropped):
   `DOTHEROES_PRESENT_ONCE=1`) into a new install's dotheroes.cfg and adds
   missing ones to an older one (a player's own values kept); with them the
   same fights ran p99 17.3/17.5 ms, under 1% over 18 ms, as in development.
+  Checked end to end (2026-11-03): a fresh `--convert` (build/player-install-
+  1103) wrote them, and its first launch -- shader cache empty, real audio --
+  fought the river at p99 17.2 ms, 0.26% over 18 ms, native collision on.
   Native collision is experimental: not bit-exact with the game's SPU task.
 - *Cache:* on by default at `data/cache/shaders`; a relaunch read 83
   translations (0.9 MB, 7 ms) and reused the 1.5 MB pipeline cache.
