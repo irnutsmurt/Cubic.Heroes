@@ -476,7 +476,12 @@ sword) or, since the owner's first play session, from its saves.
   (3, -3); a guide's Red Door that needs a bought Red Key). Asked the owner.
   New drive steps: `switches` (the boomerang at each wall switch in the
   room, in line with it). Not automated yet: the special key, the boss
-  (area 38). Drive changes for the dungeon: facing
+  (area 38). Smoothness on the way (east36, can't-die, 13.5 minutes of the
+  east, north-east and approach rooms with their fights): p99 17.2 ms, 0.09%
+  of frames over 18 ms, 4 over 25 ms, worst 34 ms; memory 1,002 -> 1,042 MB.
+  The route is not yet reliable end to end: about one run in three stalls
+  in the room before the north-east rooms (x 95, a way east the goto does
+  not find) and starts over. Drive changes for the dungeon: facing
   taps became short holds (a tap does not turn the hero), `rooms 25.6 19.2`
   (a goto into the next room that stalls goes through the door at that
   wall's middle), `open` nearest first and soft.
@@ -484,6 +489,12 @@ sword) or, since the owner's first play session, from its saves.
   room fights at p99 17.2 ms, under 0.2% of frames over 18 ms, worst 33 ms
   (the 50 ms frame is the first room's set-up frame); the hero died in the
   east room and near its chest (GAME OVER, Continue, the way back driven).
+- *New field areas* (fields_beyond from field-area14, 2026-11-03): field 14
+  is walled in round the owner's ground -- a cliff west of x 56.8, a row of
+  rocks south of z -183.3 with a golden chest (FE6660 at (58.4, -188.0), on
+  a ledge) beyond it, likely an item's job (bombs: the hero has none);
+  `cross DIR any` there found no other way out. The ways on from here are
+  for the owner's next session or the map.
 - *After the first dungeon* (field_after_dungeon from after-dungeon1,
   2026-11-03): the town to field 15, area 8 north of it, the cave 117 (an old
   man: "Come back when you have a bow."), field 14, the house 146 (villagers,

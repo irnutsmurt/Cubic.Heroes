@@ -46,7 +46,7 @@ scenario header):
                               only those within 25 units of where it began, and
                               not one 25 swings did not hurt or 6 s brought no
                               nearer; `soft`: a timeout is logged, not a failure
-  cross <DIR> <area> [timeout]  walk on in DIR until the field area is <area> (an
+  cross <DIR> <area|any> [timeout] [soft]  walk on in DIR until the field area is <area> (`any`: another; an
                               edge or a door), sidestepping when blocked; a timeout
                               (default 20 s) fails
   switches                    the boomerang at each wall switch (FE6CC0) in the hero's
@@ -446,18 +446,24 @@ def unstick(direction, tries):
 
 def cross(direction, area, tmo):
     """Walk on in `direction` until the field area is `area` (an area's edge or
-    a door): short holds, and when the hero stops moving -- an enemy, a corner
-    -- a step to each side in turn before going on."""
+    a door; None: any other than the one it started in): short holds, and when
+    the hero stops moving -- an enemy, a corner -- a step to each side in turn
+    before going on."""
     t0, last, still = time.time(), None, time.time()
+    if area is None:
+        s0 = state()
+        if not s0:
+            raise Fail("cross: no state")
+        start = s0["area"]
     side = ("UP", "DOWN") if direction in ("LEFT", "RIGHT") else ("LEFT", "RIGHT")
     turn = 0
     while True:
         s = state()
-        if s and s["area"] == area:
-            say(f"  in area {area:g}")
+        if s and (s["area"] == area if area is not None else s["area"] != start):
+            say(f"  in area {s['area']:g}")
             return
         if time.time() - t0 > tmo:
-            raise Fail(f"cross {direction} into area {area:g}: still in area {s['area']:g} at "
+            raise Fail(f"cross {direction} into area {'another' if area is None else format(area, 'g')}: still in area {s['area']:g} at "
                        f"({s.get('hx', 0):.2f}, {s.get('hz', 0):.2f}) after {tmo:g} s" if s else "cross: no state")
         here = (s["hx"], s["hz"]) if s and "hx" in s else None
         if here and last and abs(here[0] - last[0]) + abs(here[1] - last[1]) > 0.2:
@@ -852,7 +858,14 @@ def step(lineno, line, op, a):
     elif op == "unstick":
         unstick(a[0].upper(), int(a[1]) if len(a) > 1 else 8)
     elif op == "cross":
-        cross(a[0].upper(), float(a[1]), float(a[2]) if len(a) > 2 else 20)
+        soft = a[-1] == "soft"
+        a = a[:-1] if soft else a
+        try:
+            cross(a[0].upper(), None if a[1] == "any" else float(a[1]), float(a[2]) if len(a) > 2 else 20)
+        except Fail as e:
+            if not soft or not alive():
+                raise
+            say(f"  (soft) {e}")
     elif op == "goto":
         soft = a[-1] == "soft"
         a = a[:-1] if soft else a

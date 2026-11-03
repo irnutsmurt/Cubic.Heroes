@@ -1,0 +1,63 @@
+# Scenario: new field areas round field 14 (SCENARIO=fields_beyond).
+# Exploratory: run with DOTHEROES_DEV_CANT_DIE=1 to find the way.
+#
+# Starts from: build/checkpoints/field-area14 (the owner's save in field 14
+#   after the first dungeon; CONTINUE: area 14 at (87.2, -119.2)).
+# Route: from there out across each of field 14's edges in turn (`cross DIR
+#   any`: on until the area changes) from its south-west corner (the owner's
+#   way through the village there), an `actors list` in each new area, and
+#   back the other way: areas the owner's session never entered, so their
+#   loads, shaders and first frames are new to the tests. Every inflate's
+#   time logged (DOTHEROES_INFLATE_LOG) for tests/inflate_frames.py.
+# Completed when: each edge crossed out and back (or logged as a wall).
+#! saves build/checkpoints/field-area14
+#! env DOTHEROES_NATIVE_CD=1 DOTHEROES_NATIVE_SOLVER=4,5,6 GCM_WRAP_LAP=1 DOTHEROES_PRESENT_ONCE=1
+#! env DOTHEROES_DEV_STATE=1 DOTHEROES_DEV_KEYS=1 DIAG_FRAMES=frames.log PS3_VERBOSE=0 DOTHEROES_INFLATE_LOG=1
+#! env WINDOW=1 VISIBLE=1 TOPMOST=1 GRAB_EVERY=4 PS3_OSD_FPS=2 DUMP=0 SHOT_EVERY=0
+#! secs 900
+include common.drive
+
+block to_southwest              # the owner's way through the village (record 2,237-2,225 s, back)
+  goto 87.0 -129.0 0.5 10 soft
+  goto 85.0 -137.0 0.5 10 soft
+  goto 66.0 -138.0 0.5 10 soft
+  goto 62.0 -143.0 0.5 10 soft
+  goto 67.0 -149.0 0.5 10 soft
+  goto 67.0 -158.0 0.5 10 soft
+  goto 63.0 -163.0 0.5 10 soft
+  goto 59.0 -170.0 0.5 10 soft
+end
+
+block out_and_back_west
+  cross LEFT any 40 soft
+  sleep 2
+  actors list
+  cross RIGHT 14 40 soft
+end
+
+block out_and_back_south
+  cross DOWN any 40 soft
+  sleep 2
+  actors list
+  cross UP 14 40 soft
+end
+
+log TitleMovie 120
+sleep 5
+call continue
+state area==14,life>0 90
+sleep 3
+actors list
+segment explore field14-southwest
+call to_southwest
+endseg
+segment explore field14-west
+call out_and_back_west
+state area==14 5
+endseg
+call to_southwest
+segment explore field14-south
+call out_and_back_south
+state area==14 5
+endseg
+state life>0 5
