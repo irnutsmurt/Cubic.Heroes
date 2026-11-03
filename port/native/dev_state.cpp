@@ -85,6 +85,7 @@
 
 #include "ps3emu/osd.h"
 #include "ps3emu/ps3_ftrace.h"
+extern "C" void rsx_vulkan_cache_save(void);   // libs/video/rsx_vulkan_backend.h
 
 extern "C" void spurs_snap_write_file(const char* path);
 extern "C" uint8_t* vm_base;
@@ -458,6 +459,7 @@ void stop_loop()
                 (double)(int64_t)(ps3_ft_now() - g_ps3_ft.base) / 1e9);
         if (__atomic_load_n(&g_ps3_osd_log.on, __ATOMIC_ACQUIRE) == 1) ps3_osd_log_write();
         if (__atomic_load_n(&g_ps3_ft.on, __ATOMIC_ACQUIRE) == 2) ps3_ft_dump();
+        rsx_vulkan_cache_save();   // the shader cache's pipelines (a no-op without one)
         fflush(stdout);
         fflush(stderr);
 #ifdef _WIN32

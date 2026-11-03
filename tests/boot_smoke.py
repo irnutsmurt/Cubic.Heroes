@@ -9,6 +9,8 @@ Environment
                      seconds to <run>/shots/NNNN.png (the backend's
                      PS3RECOMP_VK_DUMP frame). Default 10; 0 = off.
   RUN_TAG=<name>     suffix for the run directory.
+  PS3RECOMP_SPIRV_CACHE=<dir>  keep translated shaders and built pipelines there (the
+                     default here is off: each run builds them as a first session would)
   KEEP_RUNS=<n>      run directories kept under build/test (default 5; the
                      oldest are deleted when a run starts). The live frame
                      dump (frame.ppm) is deleted when a run ends. Each run
@@ -308,6 +310,10 @@ def main():
         "DIAG_CRASH_DIR": os.path.join(RUN, "diag"),
         "DIAG_HANG_EXIT": env.get("DIAG_HANG_EXIT", "1"),
         "DIAG_BOOT_SECS": env.get("DIAG_BOOT_SECS", "60"),
+        # The shader and pipeline cache (the port keeps one between sessions): off
+        # unless asked for, so every run starts from the same place; a directory
+        # here is kept by the runs that name it (cold, then warm).
+        "PS3RECOMP_SPIRV_CACHE": env.get("PS3RECOMP_SPIRV_CACHE", "off"),
     })
     if window:
         env["PS3RECOMP_VK_WINDOW"] = "1"

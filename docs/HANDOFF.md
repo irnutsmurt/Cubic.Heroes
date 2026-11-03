@@ -259,8 +259,33 @@ Finalize fix, wait-free creation) is measured against it.
    `VK_SYNC_CREATE=1` the old way): that frame 83.4-83.5 -> 66.8-66.9 ms
    (ABAB, three cycles each; later visits unchanged), no validation-layer
    error in a cycle with it (build/baselines/2026-11-02-dungeon-create).
-   Left: the shader translations (a disk cache would take them off every
-   session after the first) and the game's own ~50 ms set-up frame.
+   **Shaders and pipelines are now kept between sessions** (ps3recomp
+   0090; the port keeps them in `<data>/cache/shaders`,
+   `PS3RECOMP_SPIRV_CACHE`; test runs have it off unless they name a
+   directory). The dungeon entry measured three ways (one cache directory,
+   NVIDIA's own disk cache moved to an empty test folder with
+   `__GL_SHADER_DISK_CACHE_PATH`, `VK_COMPILE_LOG=1`;
+   build/baselines/2026-11-02-shader-cache): **cold**, ~1 s after walking
+   in, one 267-278 ms freeze while 40 pipelines are built and 10 shaders
+   translated (59 pipelines and 11 translations in the segment, 261 ms);
+   **warm** after a restart, twice: no translation, the same 59 pipelines in
+   3 ms in all, no frame over 61 ms. (The earlier runs' 67-83 ms frame was
+   the in-between case: NVIDIA's cache warm from earlier runs, ours absent.)
+   The startup check: a translation file of another glslang or translator
+   build is removed, the pipeline file is used only for the same vendor,
+   device, driver version and driver cache UUID -- a copy with the driver
+   version changed started empty and said so (cache-tamper). What still
+   compiles during play, warm: nothing on this route; the compile log
+   (`[vk-compile]` lines, counted per segment by tests/batch_report.py)
+   shows any that does.
+   **The room set-up frames, tracked apart:** walking into the dungeon's
+   first room costs two frames of ~50-53 ms, ~0.6 s apart, every visit,
+   warm or cold -- the game's main thread busy in its own code (the profile
+   at the entry: func_009731A8 and many others, with demand-commit and
+   write-watch faults among them: vm_commit_veh, vw_fault), not shaders.
+   Next for it: a main-thread profile of just those frames
+   (`tests/prof_report.py --at`) to see whether the host's page faults are a
+   real share.
 3. 144 fps uncapped is not sustained (~125-130 fps; the main thread, the
    game's own code, is the limit). Stretch goal.
 4. Not verified: save portability (PARAM.PFD is not rewritten) and the colour
@@ -363,15 +388,20 @@ sword) or, since the owner's first play session, from its saves.
   field 15, the dungeon's door -- and its first room's two dialogues and floor
   switch (dungeon1_approach: 3 of 3 cycles, then 10 of 10 in the memory soak,
   normal damage); a save in that room and CONTINUE (dungeon1_save_continue).
-  Past the switch (dungeon1_room2, from checkpoint dungeon1-entrance,
-  exploratory, can't-die on): the next room's fight is driven and verified --
-  `fight FE4500` walks to the nearest enemy of the class with life left and
-  swings until none within 25 units has life (cleared in 9 swings, 12 s) --
-  and the owner's way on to the locked door west of it (63.3, -97) is walked;
-  the door stayed locked ("You need a key." when the fight was skipped; with
-  the fight, still locked and two red enemies alive in the door's room), so
-  the key's source is the next thing to find (the owner's record, 1,036 s).
-  Not automated yet: past that door, the dungeon's other rooms, the boss.
+  Past the switch (from checkpoint dungeon1-entrance; can't-die on; the
+  owner's record 1,006-1,091 s): the north room's fight, the east room's
+  fight, its chest (the key) and the locked door west of the north room are
+  driven and pass (dungeon1_route.drive's room2, east_key, chest,
+  locked_door; dungeon1_room2, dungeon1_persist). `fight` walks to the
+  nearest enemy with life and swings; the chest is tried across its width
+  and the door retried with it, because whether the key was had shows only
+  at the door. **What a dungeon save keeps** (dungeon1_persist, 2026-11-02):
+  saved past the key's door, TITLE, CONTINUE -- the hero is back at the
+  dungeon's entrance door (area 37, (88.8, -130.4)); the floor switch's door
+  and the key's door stay open (walked straight through); the rooms'
+  enemies come back. That save is checkpoint dungeon1-past-key-door.
+  Not automated yet: north of the key's door (the owner's 1,091-1,534 s),
+  the boss (area 38).
 - *Played by the owner* (manual coverage, not counted as automated)
   (2026-11-02, 38.5 minutes, the validated
   configuration with every fix of the day -- the session's binary is the one
@@ -1400,6 +1430,8 @@ as the current state.*
 | `RSX_GEOM_ARENA_CHECK=1` | the geometry arena's blocks checked against a map of held granules: overlaps counted, reported with `RSX_GEOM_CACHE_STATS=1` (whose "geometry arena" line gives chunks, device-local chunks, MB in blocks, pending, waits for room, failed requests) |
 | `DOTHEROES_NATIVE_INFLATE=0\|check` | Edge zlib's large inflate (every area's map pack) natively: on by default (port/native/edge_inflate.c, an SPU entry hook); `0` the lifted routine; `check` both, each output compared (`[edge-inflate] check`) |
 | `SPURS_FINALIZE_KEEP_TASKS=1` | A/B: cellSpursFinalize leaves its tasks parked in WAIT_SIGNAL, as before patch 0087 (one SPU pool worker leaked per area load) |
+| `PS3RECOMP_SPIRV_CACHE=<dir>\|off` | translated shaders and the Vulkan pipeline cache kept there between sessions (the port: `<data>/cache/shaders`; tests/boot_smoke.py: off unless set); checked at startup against this build, glslang, GPU and driver (patch 0090) |
+| `VK_COMPILE_LOG=1` | a `[vk-compile]` line per shader translation (glslang, memory or disk) and per pipeline built, with its time on the trace's clock; tests/batch_report.py counts them per segment |
 | `VK_SYNC_CREATE=1` | A/B: a new texture or render target flushes the batch and waits for the GPU (twice) instead of its first barrier and clear going into the batch (patch 0089) |
 | `RSX_GEOM_DYNAMIC_LIFETIME=1` | A/B: resident geometry's old rule -- an entry rebuilt four times in its life goes to the copy path for good (made every static draw dynamic after four area reloads) |
 | `SCENARIO=<name>` | tests/boot_smoke.py: `DRIVE=tests/scenarios/<name>.drive`; its `#! saves`, `#! env`, `#! secs` lines apply unless set; `FIGHTS`, `ROUNDS` and other `${NAME:-default}` values in the drive come from the environment |
@@ -1434,4 +1466,4 @@ Edit in `build/ref/ps3recomp` (branch `dotheroes`), commit there as
 `git format-patch --start-number <next> -o ../../../patches/ps3recomp HEAD~<n>`
 and commit the patch files here. `tools/pipeline.py` refuses to run with
 uncommitted changes in that checkout, and re-applies the whole series when
-the patch files change. 89 patches (0001-0089) as of 2026-11-02.
+the patch files change. 90 patches (0001-0090) as of 2026-11-02.

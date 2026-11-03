@@ -1,0 +1,419 @@
+From 3b525eac52f84684cbebc0794ff2ae2cdac4b208 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Mon, 2 Nov 2026 22:15:57 -0800
+Subject: [PATCH] Vulkan backend: translated shaders and built pipelines kept
+ between sessions
+
+The first time a scene shows a program its HLSL goes through glslang and
+its pipelines are built. Cold -- no cache, the driver's own emptied --
+entering 3D Dot Game Heroes' first dungeon stalled 267-278 ms for 40
+pipelines and 10 translations; warm, those pipelines took 3 ms and no
+translation ran.
+
+- PS3RECOMP_SPIRV_CACHE's directory ("0"/"off": none; made if missing)
+  also holds a VkPipelineCache (pipelines.vkpc), used for every pipeline,
+  saved by a thread of its own when it has grown, at shutdown and through
+  rsx_vulkan_cache_save() for a port that exits without one.
+- The startup check: the pipeline cache is used only if it was written
+  for this vendor, device, driver version and driver cache UUID (else it
+  starts empty and says why); every translation file this build would
+  have written (format, glslang version, translator build) is read into
+  memory, so play reads no file, and the others are removed.
+- VK_COMPILE_LOG=1: a line per translation (glslang, memory or disk) and
+  per pipeline built, with its time on the trace's clock.
+---
+ libs/video/rsx_shader_spirv.cpp |  70 ++++++++++++-
+ libs/video/rsx_shader_spirv.h   |  15 +++
+ libs/video/rsx_vulkan_backend.c | 176 +++++++++++++++++++++++++++++++-
+ libs/video/rsx_vulkan_backend.h |   4 +
+ 4 files changed, 260 insertions(+), 5 deletions(-)
+
+diff --git a/libs/video/rsx_shader_spirv.cpp b/libs/video/rsx_shader_spirv.cpp
+index df893a6..b465176 100644
+--- a/libs/video/rsx_shader_spirv.cpp
++++ b/libs/video/rsx_shader_spirv.cpp
+@@ -37,6 +37,7 @@
+ #include <glslang/Public/ResourceLimits.h>
+ #include <glslang/SPIRV/GlslangToSpv.h>
+ 
++#include <filesystem>
+ #include <mutex>
+ #include <string>
+ #include <thread>
+@@ -149,7 +150,11 @@ const std::string& cache_dir(Cache& c)
+ {
+     if (!c.dir_read) {
+         const char* e = getenv("PS3RECOMP_SPIRV_CACHE");
+-        c.dir = (e && *e) ? e : "";
++        c.dir = (e && *e && strcmp(e, "0") && strcmp(e, "off")) ? e : "";
++        if (!c.dir.empty()) {   /* made if missing: a default location may not exist yet */
++            std::error_code ec;
++            std::filesystem::create_directories(c.dir, ec);
++        }
+         c.dir_read = true;
+     }
+     return c.dir;
+@@ -296,6 +301,61 @@ extern "C" void rsx_hlsl_to_spirv_cache_reset(void)
+     c.stats = {};
+ }
+ 
++extern "C" const char* rsx_hlsl_to_spirv_cache_dir(void)
++{
++    Cache& c = cache();
++    std::lock_guard<std::mutex> guard(c.lock);
++    return cache_dir(c).c_str();
++}
++
++extern "C" int rsx_hlsl_to_spirv_cache_preload(RsxSpirvCachePreload* out)
++{
++    RsxSpirvCachePreload r = {};
++    Cache& c = cache();
++    std::lock_guard<std::mutex> guard(c.lock);
++    const std::string dir = cache_dir(c);
++    if (dir.empty()) {
++        if (out) *out = r;
++        return 0;
++    }
++    u32 want[kHeaderWords];
++    cache_header(want, std::string(), 0);
++    std::error_code ec;
++    for (const auto& ent : std::filesystem::directory_iterator(dir, ec)) {
++        if (ent.path().extension() != ".spv") continue;
++        const std::string path = ent.path().string();
++        FILE* f = fopen(path.c_str(), "rb");
++        if (!f) continue;
++        u32 hdr[kHeaderWords];
++        bool ok = fread(hdr, sizeof hdr, 1, f) == 1;
++        /* magic, format, glslang version, translator build: words 0-10 */
++        const bool same = ok && memcmp(hdr, want, 11 * sizeof(u32)) == 0;
++        std::string key;
++        std::vector<unsigned int> spirv;
++        if (same) {
++            ok = hdr[11] != 0 && hdr[11] <= (1u << 20) && hdr[12] != 0 && hdr[12] <= (1u << 24);
++            if (ok) {
++                key.resize(hdr[11]);
++                spirv.resize(hdr[12]);
++                ok = fread(&key[0], 1, key.size(), f) == key.size() &&
++                     fread(spirv.data(), sizeof(u32), spirv.size(), f) == spirv.size() &&
++                     cache_path(dir, key) == dir + "/" + ent.path().filename().string();
++            }
++        }
++        fclose(f);
++        if (same && ok) {
++            r.bytes += spirv.size() * sizeof(u32);
++            c.map.emplace(std::move(key), std::move(spirv));
++            r.loaded++;
++        } else {
++            if (same || !ok) r.bad++; else r.stale++;
++            std::filesystem::remove(ent.path(), ec);
++        }
++    }
++    if (out) *out = r;
++    return 1;
++}
++
+ #else /* !PS3RECOMP_HAVE_SPIRV_TRANSLATION */
+ 
+ extern "C" int rsx_hlsl_to_spirv_available(void) { return 0; }
+@@ -318,4 +378,12 @@ extern "C" void rsx_hlsl_to_spirv_cache_stats(RsxSpirvCacheStats* out)
+ 
+ extern "C" void rsx_hlsl_to_spirv_cache_reset(void) {}
+ 
++extern "C" const char* rsx_hlsl_to_spirv_cache_dir(void) { return ""; }
++
++extern "C" int rsx_hlsl_to_spirv_cache_preload(RsxSpirvCachePreload* out)
++{
++    if (out) memset(out, 0, sizeof *out);
++    return 0;
++}
++
+ #endif
+diff --git a/libs/video/rsx_shader_spirv.h b/libs/video/rsx_shader_spirv.h
+index b9f67f5..914ca26 100644
+--- a/libs/video/rsx_shader_spirv.h
++++ b/libs/video/rsx_shader_spirv.h
+@@ -72,6 +72,21 @@ void rsx_hlsl_to_spirv_cache_stats(RsxSpirvCacheStats* out);
+  * PS3RECOMP_SPIRV_CACHE again on the next request. Disk files stay. */
+ void rsx_hlsl_to_spirv_cache_reset(void);
+ 
++/* At startup: every translation in the disk cache that this build would
++ * have written -- same format, glslang version and translator build -- read
++ * into the memory cache, so play reads no file for them; the others removed
++ * (no request can hit them). Returns 0 with no cache directory. */
++typedef struct RsxSpirvCachePreload {
++    u32 loaded;         /* translations now in memory */
++    u32 stale;          /* files of another build or glslang, removed */
++    u32 bad;            /* unreadable files, removed */
++    u64 bytes;          /* SPIR-V loaded */
++} RsxSpirvCachePreload;
++
++int rsx_hlsl_to_spirv_cache_preload(RsxSpirvCachePreload* out);
++/* The cache directory (PS3RECOMP_SPIRV_CACHE; empty, "0" or "off": none), "" if none. */
++const char* rsx_hlsl_to_spirv_cache_dir(void);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index e09dd34..e09f63f 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -133,6 +133,7 @@ static const char* vk_lib_error(void) { return dlerror(); }
+     X(vkAllocateDescriptorSets) X(vkUpdateDescriptorSets) X(vkResetDescriptorPool) \
+     X(vkCreatePipelineLayout) X(vkDestroyPipelineLayout) \
+     X(vkCreateGraphicsPipelines) X(vkDestroyPipeline) \
++    X(vkCreatePipelineCache) X(vkDestroyPipelineCache) X(vkGetPipelineCacheData) \
+     X(vkCreateSampler) X(vkDestroySampler) \
+     X(vkCmdPipelineBarrier) X(vkCmdClearColorImage) X(vkCmdClearDepthStencilImage) \
+     X(vkCmdCopyImageToBuffer) X(vkCmdCopyBufferToImage) X(vkCmdCopyImage) \
+@@ -278,6 +279,7 @@ typedef struct vk_state {
+     u32              presented;
+     const char*      dump_path;
+     u32              dump_every;       /* write every nth presented frame */
++    VkPipelineCache  pcache;           /* kept on disk: vk_pcache_open */
+ } vk_state;
+ 
+ static vk_state s_vk;
+@@ -1288,7 +1290,7 @@ static VkPipeline vk_get_pipeline(int ztest, int zwrite, u32 cmp)
+         .pDynamicState = &dy, .layout = s_vk.pipe_layout, .renderPass = s_vk.render_pass,
+         .subpass = 0 };
+     VkPipeline p = VK_NULL_HANDLE;
+-    VkResult r = pvkCreateGraphicsPipelines(s_vk.device, VK_NULL_HANDLE, 1, &gci, NULL, &p);
++    VkResult r = pvkCreateGraphicsPipelines(s_vk.device, s_vk.pcache, 1, &gci, NULL, &p);
+     if (r != VK_SUCCESS) { VK_LOG("vkCreateGraphicsPipelines failed (%d)\n", (int)r); return VK_NULL_HANDLE; }
+     s_vk.pipelines[slot] = p;
+     return p;
+@@ -1629,7 +1631,7 @@ static VkPipeline vk_guest_pipeline(int vs, int fs, int ztest, int zwrite, u32 c
+         .pDynamicState = &dy, .layout = s_g.pipe_layout, .renderPass = s_vk.render_pass,
+         .subpass = 0 };
+     VkPipeline p = VK_NULL_HANDLE;
+-    VkResult r = pvkCreateGraphicsPipelines(s_vk.device, VK_NULL_HANDLE, 1, &gci, NULL, &p);
++    VkResult r = pvkCreateGraphicsPipelines(s_vk.device, s_vk.pcache, 1, &gci, NULL, &p);
+     if (r != VK_SUCCESS) {
+         VK_LOG("guest pipeline: vkCreateGraphicsPipelines failed (%d)\n", (int)r);
+         return VK_NULL_HANDLE;
+@@ -3467,11 +3469,168 @@ static VkStencilOpState vk_gcm_stencil_face(u32 func, u32 fail, u32 zfail, u32 z
+     return s;
+ }
+ 
++/* ---------------------------------------------------------------------------
++ * The shader and pipeline caches, kept between sessions.
++ *
++ * Two kinds of work happen the first time a scene shows a program: its HLSL
++ * becomes SPIR-V (glslang, 0.4-4 ms each) and its pipelines are built (the
++ * driver). Entering 3D Dot Game Heroes' first dungeon does 48 translations
++ * and 24 pipelines in one frame. Both are kept in PS3RECOMP_SPIRV_CACHE's
++ * directory (the port sets it; "off" for none):
++ *   - translations: rsx_shader_spirv.cpp, one file each, keyed by the HLSL;
++ *     at startup every file this build would have written is read into
++ *     memory and the others removed (rsx_hlsl_to_spirv_cache_preload);
++ *   - pipelines: a VkPipelineCache, read at startup if the file was written
++ *     for this device and driver (vendor, device, driver version, the
++ *     driver's cache UUID; else discarded and said why), saved by a thread of
++ *     its own when it has grown, and at shutdown.
++ * VK_COMPILE_LOG=1: a line per translation and pipeline built, with how long
++ * it took and the trace's clock (tests/batch_report.py counts them per
++ * segment), and whether the translation came from glslang or the cache.
++ * -------------------------------------------------------------------------*/
++#define VK_PCACHE_MAGIC  0x43504B56u   /* "VKPC" */
++#define VK_PCACHE_FORMAT 1u
++typedef struct {
++    u32 magic, format, vendor, device, driver;
++    u8  uuid[VK_UUID_SIZE];
++    u32 bytes;
++} vk_pcache_header;
++
++static struct {
++    char       path[600];
++    size_t     saved;       /* the cache's size at its last save */
++    int        log;         /* VK_COMPILE_LOG: -1 not read yet */
++    vk_mutex_t lock;        /* one save at a time */
++} s_pc = { .log = -1 };
++
++static double vk_ft_seconds(void) { return (double)(int64_t)(ps3_ft_now() - g_ps3_ft.base) / 1e9; }
++
++static int vk_compile_log(void)
++{
++    if (s_pc.log < 0) s_pc.log = getenv("VK_COMPILE_LOG") ? 1 : 0;
++    return s_pc.log;
++}
++
++/* Written under a temporary name and renamed: never half a file. */
++static void vk_pcache_save(void)
++{
++    if (!s_pc.path[0] || !s_vk.device || !s_vk.pcache) return;
++    vk_mutex_lock(&s_pc.lock);
++    size_t n = 0;
++    if (pvkGetPipelineCacheData(s_vk.device, s_vk.pcache, &n, NULL) == VK_SUCCESS && n && n != s_pc.saved) {
++        u8* data = (u8*)malloc(sizeof(vk_pcache_header) + n);
++        if (data && pvkGetPipelineCacheData(s_vk.device, s_vk.pcache, &n, data + sizeof(vk_pcache_header)) == VK_SUCCESS) {
++            VkPhysicalDeviceProperties p;
++            pvkGetPhysicalDeviceProperties(s_vk.phys, &p);
++            vk_pcache_header h = { VK_PCACHE_MAGIC, VK_PCACHE_FORMAT, p.vendorID, p.deviceID, p.driverVersion, { 0 }, (u32)n };
++            memcpy(h.uuid, p.pipelineCacheUUID, VK_UUID_SIZE);
++            memcpy(data, &h, sizeof h);
++            char tmp[620];
++            snprintf(tmp, sizeof tmp, "%s.tmp", s_pc.path);
++            FILE* f = fopen(tmp, "wb");
++            int ok = f && fwrite(data, 1, sizeof h + n, f) == sizeof h + n;
++            if (f) ok = (fclose(f) == 0) && ok;
++#ifdef _WIN32
++            if (ok) remove(s_pc.path);
++#endif
++            if (ok && rename(tmp, s_pc.path) == 0) s_pc.saved = n;
++            else remove(tmp);
++        }
++        free(data);
++    }
++    vk_mutex_unlock(&s_pc.lock);
++}
++
++/* rsx_vulkan_backend.h: a port's own way out (TerminateProcess) saves first. */
++void rsx_vulkan_cache_save(void) { vk_pcache_save(); }
++
++static int SDLCALL vk_pcache_saver(void* unused)
++{
++    (void)unused;
++    for (;;) {
++        SDL_Delay(10000);
++        vk_pcache_save();
++    }
++    return 0;
++}
++
++static void vk_pcache_open(void)
++{
++    vk_mutex_init(&s_pc.lock);
++    VkPipelineCacheCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO };
++    const char* dir = rsx_hlsl_to_spirv_cache_dir();
++    u8* data = NULL;
++    if (dir && *dir) {
++        RsxSpirvCachePreload r;
++        struct timespec a, b;
++        vk_monotonic(&a);
++        rsx_hlsl_to_spirv_cache_preload(&r);
++        vk_monotonic(&b);
++        VK_LOG("shader cache %s: %u translations read (%.1f MB, %.0f ms), %u of another build or glslang removed%s\n",
++               dir, r.loaded, (double)r.bytes / 1048576.0,
++               (b.tv_sec - a.tv_sec) * 1e3 + (b.tv_nsec - a.tv_nsec) * 1e-6, r.stale,
++               r.bad ? ", some unreadable removed" : "");
++        snprintf(s_pc.path, sizeof s_pc.path, "%s/pipelines.vkpc", dir);
++        VkPhysicalDeviceProperties p;
++        pvkGetPhysicalDeviceProperties(s_vk.phys, &p);
++        FILE* f = fopen(s_pc.path, "rb");
++        vk_pcache_header h;
++        const char* why = NULL;
++        if (!f) why = "none yet";
++        else if (fread(&h, sizeof h, 1, f) != 1 || h.magic != VK_PCACHE_MAGIC || h.format != VK_PCACHE_FORMAT)
++            why = "not a pipeline cache of this format";
++        else if (h.vendor != p.vendorID || h.device != p.deviceID) why = "made on another GPU";
++        else if (h.driver != p.driverVersion) why = "made with another driver version";
++        else if (memcmp(h.uuid, p.pipelineCacheUUID, VK_UUID_SIZE)) why = "the driver's cache UUID differs";
++        else if (!h.bytes || h.bytes > (256u << 20) || !(data = (u8*)malloc(h.bytes)) ||
++                 fread(data, 1, h.bytes, f) != h.bytes)
++            why = "short or unreadable";
++        if (f) fclose(f);
++        if (why) {
++            free(data);
++            data = NULL;
++            VK_LOG("pipeline cache %s: starting empty (%s)\n", s_pc.path, why);
++        } else {
++            ci.initialDataSize = h.bytes;
++            ci.pInitialData = data;
++            s_pc.saved = h.bytes;
++            VK_LOG("pipeline cache %s: %.1f MB for this device and driver, reused\n", s_pc.path, h.bytes / 1048576.0);
++        }
++    }
++    if (pvkCreatePipelineCache(s_vk.device, &ci, NULL, &s_vk.pcache) != VK_SUCCESS) {
++        s_vk.pcache = VK_NULL_HANDLE;
++        if (ci.pInitialData) {
++            VK_LOG("pipeline cache: the driver refused the saved data, starting empty\n");
++            ci.initialDataSize = 0;
++            ci.pInitialData = NULL;
++            s_pc.saved = 0;
++            if (pvkCreatePipelineCache(s_vk.device, &ci, NULL, &s_vk.pcache) != VK_SUCCESS) s_vk.pcache = VK_NULL_HANDLE;
++        }
++    }
++    free(data);
++    if (s_pc.path[0] && s_vk.pcache) {
++        SDL_Thread* t = SDL_CreateThread(vk_pcache_saver, "vk cache", NULL);
++        if (t) SDL_DetachThread(t);
++    }
++}
++
+ static int vk_eng_translate(const char* hlsl, int stage, VkShaderModule* out)
+ {
+     const uint64_t ft0 = PS3_FT_ON() ? ps3_ft_now() : 0;
+     u32 words = 0;
+-    if (rsx_hlsl_to_spirv(hlsl, stage, s_g.spv, VK_SPV_WORDS, &words, s_g.log, sizeof s_g.log) || !words) {
++    RsxSpirvCacheStats st0 = { 0 }, st1 = { 0 };
++    struct timespec c0, c1;
++    if (vk_compile_log()) { rsx_hlsl_to_spirv_cache_stats(&st0); vk_monotonic(&c0); }
++    const int bad = rsx_hlsl_to_spirv(hlsl, stage, s_g.spv, VK_SPV_WORDS, &words, s_g.log, sizeof s_g.log) || !words;
++    if (vk_compile_log()) {
++        rsx_hlsl_to_spirv_cache_stats(&st1);
++        vk_monotonic(&c1);
++        fprintf(stderr, "[vk-compile] t=%.3f translate %s %u words %.2f ms %s\n", vk_ft_seconds(),
++                stage == RSX_SHADER_STAGE_VERTEX ? "vertex" : "fragment", words,
++                (c1.tv_sec - c0.tv_sec) * 1e3 + (c1.tv_nsec - c0.tv_nsec) * 1e-6,
++                st1.translations != st0.translations ? "glslang" : st1.disk_hits != st0.disk_hits ? "disk" : "memory");
++    }
++    if (bad) {
+         VK_LOG("engine: %s translation failed: %s\n",
+                stage == RSX_SHADER_STAGE_VERTEX ? "vertex" : "fragment", s_g.log);
+         return -1;
+@@ -3723,12 +3882,19 @@ static VkPipeline vk_eng_variant(vk_eng_pipe* P, u32 topo_idx)
+         .pDepthStencilState = &ds, .pColorBlendState = &cb, .pDynamicState = &dy,
+         .layout = layout, .renderPass = rp, .subpass = 0 };
+     const uint64_t ft0 = PS3_FT_ON() ? ps3_ft_now() : 0;
+-    if (pvkCreateGraphicsPipelines(s_vk.device, VK_NULL_HANDLE, 1, &gci, NULL,
++    struct timespec c0, c1;
++    if (vk_compile_log()) vk_monotonic(&c0);
++    if (pvkCreateGraphicsPipelines(s_vk.device, s_vk.pcache, 1, &gci, NULL,
+                                    &P->variant[topo_idx]) != VK_SUCCESS) {
+         VK_LOG("engine: vkCreateGraphicsPipelines failed\n");
+         P->variant[topo_idx] = VK_NULL_HANDLE;
+     }
+     if (ft0) ps3_ft_span(PS3_FT_COMPILE, 1, 0, topo_idx, ft0, ps3_ft_now());
++    if (vk_compile_log()) {
++        vk_monotonic(&c1);
++        fprintf(stderr, "[vk-compile] t=%.3f pipeline topology %u %.2f ms\n", vk_ft_seconds(), topo_idx,
++                (c1.tv_sec - c0.tv_sec) * 1e3 + (c1.tv_nsec - c0.tv_nsec) * 1e-6);
++    }
+     return P->variant[topo_idx];
+ }
+ 
+@@ -4914,6 +5080,7 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+                                .pEnabledFeatures = &want };
+     VK_CHECK(pvkCreateDevice(s_vk.phys, &dci, NULL, &s_vk.device), "vkCreateDevice");
+     if (vk_load_device_functions()) return -1;
++    vk_pcache_open();
+     if (s_vk.windowed && vk_load_wsi_device_functions())
+         vk_window_drop("the driver has no swapchain functions");
+     pvkGetDeviceQueue(s_vk.device, s_vk.queue_family, 0, &s_vk.queue);
+@@ -5007,6 +5174,7 @@ int rsx_vulkan_backend_init(u32 width, u32 height, const char* title)
+ 
+ void rsx_vulkan_backend_shutdown(void)
+ {
++    vk_pcache_save();   /* the shader cache's pipelines, before the device goes */
+     rsx_vulkan_backend_present_finish();   /* a host that began one and quit */
+     if (rsx_get_backend() == &s_vulkan_backend) rsx_set_backend(NULL);
+     if (s_vk.eng_active) { rsx_draw_engine_shutdown(); s_vk.eng_active = 0; }
+diff --git a/libs/video/rsx_vulkan_backend.h b/libs/video/rsx_vulkan_backend.h
+index 788b986..fc33758 100644
+--- a/libs/video/rsx_vulkan_backend.h
++++ b/libs/video/rsx_vulkan_backend.h
+@@ -68,6 +68,10 @@ int  rsx_vulkan_backend_init(u32 width, u32 height, const char* title);
+ /* Unregister and destroy every Vulkan object, then unload the library. */
+ void rsx_vulkan_backend_shutdown(void);
+ 
++/* Save the pipeline cache now (PS3RECOMP_SPIRV_CACHE's directory): for a port
++ * that leaves without a shutdown. A no-op with no cache directory. */
++void rsx_vulkan_cache_save(void);
++
+ /* Headless: always 0. Windowed: drains SDL's event queue; -1 once the
+  * window has been closed or Esc pressed. */
+ int  rsx_vulkan_backend_pump_messages(void);
+-- 
+2.56.0.windows.3
+

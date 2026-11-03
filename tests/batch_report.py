@@ -47,8 +47,10 @@ def load_json(p, default=None):
 
 def frames(d):
     flips = []
-    try:
-        for ln in open(os.path.join(d, "frames.log")):
+    try:   # a kept run (tests/keep_baseline.py) has it gzipped
+        p = os.path.join(d, "frames.log")
+        f = open(p) if os.path.exists(p) else __import__("gzip").open(p + ".gz", "rt")
+        for ln in f:
             if ln[:1] == "f":
                 flips.append(int(ln.split()[1]))
     except OSError:
@@ -96,6 +98,32 @@ def memory(d):
     return rows
 
 
+def compiles(d):
+    """VK_COMPILE_LOG=1's lines: (t, what, ms), what = glslang / memory / disk
+    (a translation and where it came from) or pipeline."""
+    out = []
+    try:
+        for ln in open(os.path.join(d, "stderr.log"), encoding="utf-8", errors="replace"):
+            if not ln.startswith("[vk-compile] t="):
+                continue
+            f = ln.split()
+            t = float(f[1][2:])
+            if f[2] == "translate":
+                out.append((t, f[-1], float(f[-3])))
+            elif f[2] == "pipeline":
+                out.append((t, "pipeline", float(f[-2])))
+    except (OSError, ValueError, IndexError):
+        pass
+    return out
+
+
+def fmt_compiles(cs):
+    n = {k: sum(1 for _, w, _ in cs if w == k) for k in ("glslang", "memory", "disk", "pipeline")}
+    ms = sum(m for _, _, m in cs)
+    return (f"compiles: {n['glslang']} translated, {n['disk'] + n['memory']} from the cache, "
+            f"{n['pipeline']} pipelines, {ms:.0f} ms")
+
+
 def errors(d):
     err = ""
     try:
@@ -120,7 +148,11 @@ def fmt_stats(s):
     return (f"{s['secs']:.0f} s, {s['frames']} frames: mean {s['mean']:.2f} ms, p50 {s['p50']:.1f}, p99 {s['p99']:.1f}, "
             f"p99.9 {s['p999']:.1f}, max {s['max']:.1f}; >18 ms {100 * s['o18'] / max(s['frames'], 1):.2f}%, "
             f">25 ms {s['o25']} ({s['o25'] / mins:.1f}/min), >33.4 ms {s['o33']}"
-            + (f"; {s['loads']} load frame(s) of 100 ms+ apart" if s["loads"] else ""))
+            # 100 ms+ frames are kept out as loads, but say how long: in a stretch of
+            # play with no area change one is a stall (a cold dungeon entry's
+            # 278 ms of shader and pipeline builds showed only as "1 load frame")
+            + (f"; {s['loads']} frame(s) of 100 ms+ apart, loads or stalls: "
+               f"{', '.join(f'{x:.0f}' for x in s['load_ms'])} ms" if s["loads"] else ""))
 
 
 def report(runs, title):
@@ -204,8 +236,10 @@ def report(runs, title):
             by_kind[s["kind"]][1] += w
         if by_kind:
             lines.append("- time by kind: " + ", ".join(f"{k} {n}x {w:.0f} s" for k, (n, w) in sorted(by_kind.items())))
+        comp = compiles(r["dir"])
         for s in segs:
             w = s.get("work", {})
+            cs = [c for c in comp if s.get("t0") is not None and s.get("t1") is not None and s["t0"] <= c[0] <= s["t1"]]
             ft = cut(r["flips"], s["t0"], s["t1"]) if r["flips"] and s.get("t0") is not None and s.get("t1") is not None else []
             st = stats(ft) if ft else None
             act = s.get("actors") or []
@@ -215,7 +249,8 @@ def report(runs, title):
                          + (f"; collision tasks +{w.get('steps', 0):g}, top-ups +{w.get('topups', 0):g}" if w else "")
                          + (f"; actors {act[0].get('n', '?'):g}" if act else "")
                          + (f"; {fmt_stats(st)}" if st and s["kind"] in GAMEPLAY else
-                            f"; {st['secs']:.0f} s, max {st['max']:.0f} ms, loads {st['loads']}" if st else ""))
+                            f"; {st['secs']:.0f} s, max {st['max']:.0f} ms, loads {st['loads']}" if st else "")
+                         + (f"; {fmt_compiles(cs)}" if cs else ""))
             if st and st["worst"] and s["kind"] in GAMEPLAY:
                 lines.append("    worst: " + ", ".join(f"{x:.1f} ms at {t:.1f} s" for x, t in st["worst"]))
         for f in res.get("failures", []):
