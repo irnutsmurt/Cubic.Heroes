@@ -49,6 +49,8 @@ scenario header):
   cross <DIR> <area> [timeout]  walk on in DIR until the field area is <area> (an
                               edge or a door), sidestepping when blocked; a timeout
                               (default 20 s) fails
+  switches                    the boomerang at each wall switch (FE6CC0) in the hero's
+                              room, from in line with it (`rooms` grid needed)
   rooms <w> <h> | off         a dungeon of w x h rooms, a door at the middle of each
                               wall: a goto into the next room that stalls fights what is
                               left near (an enemy left bars a room's doors), then goes
@@ -552,6 +554,37 @@ def door_path(hx, hz, x, z):
     return pts
 
 
+def hit_switches(cls="FE6CC0", reach=5.0):
+    """`switches`: every wall switch (class FE6CC0, the red cylinders the
+    boomerang hits) in the hero's room (`rooms` cells), each from `reach` units
+    out from its wall in line with it, facing it, one CIRCLE: from 1.6 off its
+    line a throw misses (the east room's, east22-east23). A lava strip or a
+    pillar short of the spot leaves the hero in line all the same."""
+    import math
+    if actors() is None:
+        raise Fail("switches: no actors.txt (DOTHEROES_DEV_STATE=1?)")
+    if not ctx.get("rooms"):
+        raise Fail("switches: no `rooms` grid set")
+    w, h = ctx["rooms"]
+    s = state() or {}
+    cx, cz = math.floor(s.get("hx", 0) / w), math.floor(s.get("hz", 0) / h)
+    sws = [o for o in last_object_list if o[0] == cls and (math.floor(o[1] / w), math.floor(o[3] / h)) == (cx, cz)]
+    if not sws:
+        say(f"  switches: none in room {cx},{cz}")
+        return
+    for _, x, _, z in sws:
+        walls = {"LEFT": x - cx * w, "RIGHT": (cx + 1) * w - x, "DOWN": z - cz * h, "UP": (cz + 1) * h - z}
+        face = min(walls, key=walls.get)
+        sx, sz = {"LEFT": (x + reach, z), "RIGHT": (x - reach, z), "DOWN": (x, z + reach), "UP": (x, z - reach)}[face]
+        say(f"  switch at ({x:.1f}, {z:.1f}) on the {face.lower()} wall: from ({sx:.1f}, {sz:.1f})")
+        try:
+            goto(sx, sz, 0.3, 10)
+        except Fail as e:
+            say(f"  (soft) {e}")
+        press(BTN[face], 1, 100); wait(0.15)
+        press(BTN["CIRCLE"]); wait(1.8)
+
+
 def fight(cls, tmo, reach, radius=25.0, soft=False):
     """Clear the characters of one class near the hero: walk to the nearest
     with life left until within `reach`, turn to it (one pad report of its
@@ -842,6 +875,8 @@ def step(lineno, line, op, a):
             if not soft or not alive():
                 raise
             say(f"  (soft) {e}")
+    elif op == "switches":
+        hit_switches()
     elif op == "rooms":
         ctx["rooms"] = None if a[0] == "off" else (float(a[0]), float(a[1]))
     elif op == "repeat":

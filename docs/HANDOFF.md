@@ -461,10 +461,22 @@ sword) or, since the owner's first play session, from its saves.
   west wall's switch was hit too (east24; thrown from in line with each
   switch -- the east room's misses from 1.6 off its z), then the rooms west
   and north to the boss's door (the owner's 1,486-1,534 s), saved there
-  (checkpoint dungeon1-boss-door). **The boss's door wants the boss's key**
-  ("You need a special key."): the six-pillar room's chest, not opened in
-  east24 -- being worked on. Not automated yet: that chest, the boss (area
-  38). Drive changes for the dungeon: facing
+  (checkpoint dungeon1-boss-door). **The boss's door wants a special key**
+  ("You need a special key."), not found yet. Ruled out: the six-pillar
+  room's chest (it appears once the room's last enemy dies and gives a Small
+  Key -- opened from its front at (140.4, -48.6) with a short step up, east34;
+  holds and stalled gotos slide off its corners), the room west of it (no
+  wall switches there; the owner's four throws in it hit nothing listed),
+  the portal room's four pots (FE65F0, broken: the owner's swings). The
+  portal room has two floor plates by the door: FE6ED8 (84.0, -24.8) lights
+  green when walked over; FE6A20 (95.2, -24.8) stays dark, and the owner
+  stood beside it at (93.9, -24.8) for 3 s with 3 presses (1,528-1,531 s),
+  then walked straight through the door. The map (L1) shows every room
+  explored but one, behind a red door north of the middle room (cell
+  (3, -3); a guide's Red Door that needs a bought Red Key). Asked the owner.
+  New drive steps: `switches` (the boomerang at each wall switch in the
+  room, in line with it). Not automated yet: the special key, the boss
+  (area 38). Drive changes for the dungeon: facing
   taps became short holds (a tap does not turn the hero), `rooms 25.6 19.2`
   (a goto into the next room that stalls goes through the door at that
   wall's middle), `open` nearest first and soft.

@@ -977,12 +977,13 @@ block boss_approach
   fight any 45 soft               # (it swings at the corner stone too, which opens its message:
   unstick DOWN 8                  # paged, or the hero stays frozen -- east27)
   goto 148.8 -48.6 0.4 8 soft     # round the pillars from wherever the fight left the hero (by
-  goto 140.0 -51.2 0.25 8 soft    # the corner stone in east25); the chest (FE6660 at (140.0,
-  goto 140.0 -48.8 0.15 8 soft    # -47.2)): the boss's key ("You need a special key." at the
-  press CROSS                     # portal without it, east24). Walked up into from below, so the
-  sleep 2.5                       # hero faces it: it opens facing it from ~1.4 below (the
-  press CROSS                     # boomerang's from (64.2, -47.0)); 0.7 or more off its x a hold
-  sleep 1.2                       # slides past it (east24 at 141.4, east29 at 138.6)
+  goto 140.4 -51.2 0.25 8 soft    # the corner stone in east25); the chest (FE6660 at (140.0,
+  goto 140.4 -49.3 0.15 8 soft    # -47.2): the boss's key ("You need a special key." at the
+  press UP 8                      # portal without it, east24); it appears once the room's last
+  press CROSS                     # enemy dies (a bat in east30). Against its front at (140.4,
+  sleep 2.5                       # -48.6) "OPEN" shows (east33), but anything longer than a short
+  press CROSS                     # step up into it slides the hero off a corner first (a hold:
+  sleep 1.2                       # east31 west, east32 east; a stalled goto: east33)
   press CROSS
   sleep 0.8
   unstick DOWN 8
@@ -992,6 +993,9 @@ block boss_approach
   goto 130.4 -44.1 0.25 20 soft
   goto 127.9 -47.9 0.25 20 soft
   fight any 60 soft              # into room 4,-3 (25.6 x 19.2 cells): a room with enemies bars its doors
+  actors list                    # the four-switch room (the owner threw at four, 1,494-1,500 s:
+  switches                       # "Press all four switches there to get the key to the boss
+  actors list                    # room", a walkthrough); its switches hit from in line with each
   goto 123.8 -47.9 0.3 6 soft   # where it was pressed
   hold LEFT 0.12             # face left
   press CROSS   # 1488.2 s
@@ -1064,9 +1068,12 @@ block boss_approach
   goto 113.3 -21.9 0.25 20 soft
   goto 100.6 -28.5 0.25 20 soft
   fight any 60 soft              # into room 3,-2 (25.6 x 19.2 cells): a room with enemies bars its doors
-  hold UP 0.12               # face up
-  sleep 0.12
-  press CROSS   # 1516.8 s
+  unstick DOWN 8
+  actors list                    # the portal room: four FE65F0 (x 79.2/80.8, 98.4/100.0, z -26.4),
+  goto 100.6 -29.6 0.25 8 soft   # FE6A20 (95.2, -24.8), FE6ED8 (84.0, -24.8). The owner faced up
+  goto 100.6 -28.5 0.15 6 soft   # at (100.6, -28.5) and paged 5 times (1,516.7-1,520.9 s): a
+  press UP 8                     # message, or a chest -- the boss's key ("You need a special
+  press CROSS   # 1516.8 s       # key." at the portal without it, east24)
   sleep 0.78
   press CROSS   # 1517.6 s
   sleep 0.40
@@ -1088,14 +1095,23 @@ block boss_approach
   hold LEFT 0.12             # face left
   press CROSS   # 1525.3 s
   goto 79.4 -26.6 0.25 20 soft
-  goto 93.9 -24.8 0.25 20 soft
-  hold LEFT 0.12             # face left
-  sleep 1.36
+  goto 80.8 -26.4 0.3 6 soft     # each of the four FE65F0 stood on (the owner crossed them)
+  goto 79.2 -26.4 0.3 6 soft
+  goto 98.4 -26.4 0.3 8 soft
+  goto 100.0 -26.4 0.3 6 soft
+  fight any 45 soft
+  unstick DOWN 8
+  actors list
+  goto 93.9 -24.8 0.25 20 soft   # the owner came east to here and paged 3 times (1,528-1,531 s):
+  press RIGHT 8                  # FE6A20 at (95.2, -24.8) beside
   press CROSS   # 1529.7 s
   sleep 1.12
   press CROSS   # 1530.8 s
   sleep 0.60
   press CROSS   # 1531.4 s
+  sleep 1.0
+  unstick DOWN 8
+  actors list
 end
 
 block into_boss_room           # the portal north of the last room (area 38, the owner's 1,534.9 s)
