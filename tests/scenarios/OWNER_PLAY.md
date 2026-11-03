@@ -88,6 +88,10 @@ north-east rooms, the six-pillar room's west door. The boss's door says "You
 need a special key." without it. Your regular playthrough
 (`build/play-route/gamedata`) is not touched. Each save is copied into
 `build/checkpoints/owner-boss/`; its shader cache is `build/play-boss/cache`.
+It runs at the display's pace (`DOTHEROES_FPS=display`: 72 fps on this 144 Hz
+screen, every frame held for 2 refreshes, against 60 fps's mix of 2 and 3).
+Tell me if motion looks better, worse or the same as before -- or if anything
+plays oddly at that rate (timers, animations, sound, cutscenes).
 
 ## What is recorded (automatically)
 

@@ -28,6 +28,8 @@
  *   The cap was removed at the user's request; DOTHEROES_FPS selects:
  *     30  the original pacing (no patch active)
  *     60  no 30 ms floor; one vblank per frame (default)
+ *     display  as 60, the vblank at a whole number of the display's
+ *         refreshes (72 fps on a 144 Hz display; main.cpp, display_frame_ms)
  *     0   no 30 ms floor and no vblank wait: as fast as the host runs
  *
  * g_dotheroes_step_carry (an entry hook: dotheroes_step_round)
@@ -60,6 +62,7 @@ int g_dotheroes_step_carry = 1;
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 /* func_000A2C14 for an entry hook: see g_dotheroes_step_carry. The rounding
  * is the lifted function's, operation for operation: a fused multiply-add
@@ -104,12 +107,15 @@ extern "C" void dotheroes_step_round(ppu_context* ctx)
 extern "C" void dotheroes_configure_patches(void)
 {
     const char* e = getenv("DOTHEROES_FPS");
-    const int fps = e && *e ? atoi(e) : 60;
+    /* display: a frame a vblank as at 60, the vblank paced to the display
+     * (main.cpp, display_frame_ms) */
+    const int fps = e && !strcmp(e, "display") ? 60 : e && *e ? atoi(e) : 60;
     g_dotheroes_fps_nosleep  = fps != 30;
     g_dotheroes_fps_vblank1  = fps == 60;
     g_dotheroes_fps_novblank = fps != 30 && fps != 60;
     fprintf(stderr, "[port] frame cap: %s\n",
-            fps == 30 ? "30 fps (original)" : fps == 60 ? "60 fps (vblank)" : "none");
+            fps == 30 ? "30 fps (original)" : e && !strcmp(e, "display") ? "a frame a vblank, the display's pace"
+            : fps == 60 ? "60 fps (vblank)" : "none");
     const char* sc = getenv("DOTHEROES_STEP_CARRY");
     g_dotheroes_step_carry = !(sc && *sc == '0');
     fprintf(stderr, "[port] hero step rounding: %s\n",

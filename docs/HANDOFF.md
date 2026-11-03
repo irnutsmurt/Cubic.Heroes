@@ -489,6 +489,20 @@ sword) or, since the owner's first play session, from its saves.
   room fights at p99 17.2 ms, under 0.2% of frames over 18 ms, worst 33 ms
   (the 50 ms frame is the first room's set-up frame); the hero died in the
   east room and near its chest (GAME OVER, Continue, the way back driven).
+- *How 60 fps looks on a 144 Hz display* (2026-11-03, build/baselines/
+  2026-11-03-display-pace, fullscreen on the owner's 143.98 Hz desktop): the
+  game's 60 fps frames do not divide the display's refresh, so in FIFO order
+  each is held for 2 refreshes or 3 -- 2 for 64-73% of frames, 3 for 27-35%,
+  the hold changing from one frame to the next on 49-59% of them: uneven
+  motion with every frame on time (the presents the owner's first session
+  marked). `DOTHEROES_FPS=display` paces the vblank to a whole number of
+  refreshes (71.99 fps here; the game's logic follows time): 93-95% held
+  exactly 2, the hold changing on 8-12%. It holds in fights: the river fight
+  p99 17.0 ms (19.8 at 60), worst 27.9 (33.5), 1.5% of frames over 16 ms
+  (a refresh missed: that frame held 3); the field route p99 17.3, 1.9%
+  over 16 ms. Not yet the default: the owner's boss session runs with it,
+  to be judged by eye. One drive artefact: an item menu opened and closed
+  in the owner's recorded rhythm took a later press to close at 72 fps.
 - *New field areas* (fields_beyond from field-area14, 2026-11-03): field 14
   is walled in round the owner's ground -- a cliff west of x 56.8, a row of
   rocks south of z -183.3 with a golden chest (FE6660 at (58.4, -188.0), on
@@ -1070,8 +1084,9 @@ tooling, the native Windows build, measuring on the 3070) are done; see
      every rate with the carry. Bosses and other areas' enemies are not
      measured yet.
 1. **Next replacements:** the present path (frames in flight, no readback,
-   no lock held across GPU waits), then a display-driven vblank (refresh-rate
-   aware, e.g. 120 Hz panels). vm_watch on Linux (mprotect + SIGSEGV), so
+   no lock held across GPU waits). The display-driven vblank exists now as
+   `DOTHEROES_FPS=display` (2026-11-03, below "Game coverage"'s pacing
+   note); phase-locking it to the display's own vblank is the next step. vm_watch on Linux (mprotect + SIGSEGV), so
    resident geometry runs there too. Validate each with perf_walk.drive +
    `tests/frame_times.py` and pass-dump/screenshot A/B.
 2. **Colours:** see "Where things stand"; compare RPCS3's scene buffer.
@@ -1608,7 +1623,7 @@ as the current state.*
 | `PS3RECOMP_VK_WINDOW`, `PS3RECOMP_VK_FULLSCREEN` | window; fullscreen |
 | `PS3RECOMP_VK_DUMP=<ppm>`, `PS3RECOMP_VK_DUMP_EVERY=<n>` | frame dumps (tests) |
 | `PS3RECOMP_VK_GUEST_PROGRAMS` (default on) | the game's own shaders via glslang |
-| `DOTHEROES_FPS` | frame cap: 60 (default), 30, 0 |
+| `DOTHEROES_FPS` | frame cap: 60 (default), 30, 0, `display` (a frame every whole number of the display's refreshes, at most 90 fps: 72 on a 144 Hz display, 60 on 60 or 120 Hz; the exact period from the compositor, main.cpp display_frame_ms) |
 | `DIAG_VBLANK_MS=<ms>` | vblank period, frame-rate tests only |
 | `PAD_FILE=<file>` | closed-loop input (`tests/drive.py`): `0xMASK [reports] [ms]` |
 

@@ -70,6 +70,9 @@
  * there is nothing to shim: the 15.6 ms default timer granularity this works
  * around is a Windows problem. */
 #include <timeapi.h>
+/* DOTHEROES_FPS=display: the display's exact refresh period, from the desktop
+ * compositor (dwmapi, loaded when asked for: see display_frame_ms). */
+#include <dwmapi.h>
 #endif
 
 /* ---------------------------------------------------------------------------
@@ -269,13 +272,60 @@ static void present_guest_frame(void)
  * game's own two-vblank wait gives 20 fps; tests/scripts/speed.drive). It takes
  * fractions (6.944: 144 Hz). The frame rate follows it even with
  * DOTHEROES_FPS=0: the game still waits for each flip, which completes on a
- * tick of this clock. */
+ * tick of this clock.
+ *
+ * DOTHEROES_FPS=display: the clock at a whole number of the display's
+ * refreshes, so every frame is shown for the same number of them. At 60 Hz
+ * the game's 60 fps frames do not divide a 144 Hz display's refresh: with
+ * the window presented in FIFO order each is held for 2 or 3 refreshes in
+ * turn (13.9 / 20.8 ms), uneven motion whatever the frame times. Here the
+ * period is the fewest refreshes that make it at most 90 fps (144 Hz: 2, 72
+ * fps; 120: 2, 60; 60: 1; 165: 2, 82.5; 240: 3, 80), one fewer if that would
+ * fall under 58 fps (100 Hz: 100). The game's logic steps by measured time,
+ * so a rate other than 60 does not change its speed (game_patches.cpp). */
+static double display_frame_ms(void)
+{
+    double refresh_ms = 0.0;
+#ifdef _WIN32
+    /* The compositor's refresh period in QPC ticks: exact (143.98 Hz, not the
+     * display mode's whole 143 or 144, which would slip a refresh every few
+     * seconds against it). */
+    typedef HRESULT(WINAPI * timing_fn)(HWND, DWM_TIMING_INFO*);
+    if (HMODULE dwm = LoadLibraryA("dwmapi.dll")) {
+        if (timing_fn get = (timing_fn)(void*)GetProcAddress(dwm, "DwmGetCompositionTimingInfo")) {
+            DWM_TIMING_INFO ti = {};
+            ti.cbSize = sizeof ti;
+            LARGE_INTEGER f;
+            if (get(NULL, &ti) == S_OK && ti.qpcRefreshPeriod && QueryPerformanceFrequency(&f))
+                refresh_ms = (double)ti.qpcRefreshPeriod * 1000.0 / (double)f.QuadPart;
+        }
+    }
+    if (refresh_ms <= 0.0) {   /* the display mode's whole hertz, failing that */
+        DEVMODEW dm = {};
+        dm.dmSize = sizeof dm;
+        if (EnumDisplaySettingsW(NULL, ENUM_CURRENT_SETTINGS, &dm) && dm.dmDisplayFrequency > 1)
+            refresh_ms = 1000.0 / (double)dm.dmDisplayFrequency;
+    }
+#endif
+    if (refresh_ms < 2.0 || refresh_ms > 50.0) {
+        fprintf(stderr, "[port] vblank: the display's refresh not known; 60 Hz\n");
+        return 1000.0 / 60.0;
+    }
+    int k = 1;
+    while (refresh_ms * k < 1000.0 / 90.0) k++;
+    if (k > 1 && refresh_ms * k > 1000.0 / 58.0) k--;
+    fprintf(stderr, "[port] vblank: the display at %.3f Hz, a frame every %d refresh%s: %.2f fps\n",
+            1000.0 / refresh_ms, k, k == 1 ? "" : "es", 1000.0 / (refresh_ms * k));
+    return refresh_ms * k;
+}
+
 static void vblank_clock(void)
 {
     SetThreadDescription(GetCurrentThread(), L"vblank");
     using clock = std::chrono::steady_clock;
     const char* e = getenv("DIAG_VBLANK_MS");
-    const double ms = e ? atof(e) : 0.0;
+    const char* fps = getenv("DOTHEROES_FPS");
+    const double ms = e ? atof(e) : fps && !strcmp(fps, "display") ? display_frame_ms() : 0.0;
     const auto period = std::chrono::duration_cast<clock::duration>(
         std::chrono::duration<double, std::milli>(ms > 0.0 ? ms : 1000.0 / 60.0));
     auto next = clock::now() + period;
