@@ -260,17 +260,9 @@ block west_rooms               # the owner's 1,088-1,146 s: the west room's encl
   hold UP 3.0                    # push its block in (the owner moved 3 units north in 2 s here)
   state hz>@-89.5 2              # in: the block went
   goto 39.1 -87.0 0.5 10 soft
-  press UP 1                # face up
-  sleep 0.68
-  press CROSS   # 1132.3 s
-  goto 37.6 -87.0 0.3 6 soft   # where it was pressed
-  press CROSS   # 1133.5 s
-  goto 37.2 -87.0 0.5 10 soft
-  press UP 1                # face up
-  sleep 0.43
-  press CROSS   # 1134.2 s
-  sleep 0.41
-  press CROSS   # 1134.6 s
+  call west_chest
+  goto 39.1 -87.0 0.5 10 soft
+  goto 39.2 -91.0 0.5 10 soft    # out through the notch
   goto 41.2 -92.8 0.5 10 soft
   goto 48.0 -89.8 0.5 10 soft
   goto 51.3 -86.8 0.5 10 soft
@@ -281,4 +273,728 @@ block west_rooms               # the owner's 1,088-1,146 s: the west room's encl
   sleep 0.30
   goto 64.5 -78.4 0.3 6 soft   # where it was pressed
   goto 64.5 -76.6 0.5 10 soft
+end
+
+block north_rooms           # the owner's 1,146-1,300 s as recorded (presses where they were made):
+  # the rooms north of the west rooms and their fights, a heart (life 10 at 1,216 s), CIRCLE
+  # (the west chest's item?) at (63.2, -32.6), back south. Exploratory.
+  # area 37: 1146-1299 s, 145 positions, 49 waypoints
+  goto 64.5 -75.7 0.25 20 soft
+  goto 64.8 -71.0 0.4 10 soft    # into the room north: bats and skeletons; its west door stays
+  fight any 120 soft             # barred until they are gone (the owner's 1,147-1,160 s)
+  goto 57.0 -63.0 0.5 15 soft
+  goto 55.4 -64.0 0.5 15 soft
+  goto 51.1 -66.3 0.25 20 soft
+  goto 47.9 -66.4 0.3 6 soft   # where it was pressed
+  press UP 1                # face up
+  press CROSS   # 1164.0 s
+  goto 46.3 -63.7 0.3 6 soft   # where it was pressed
+  press LEFT 1                # face left
+  press CROSS   # 1165.3 s
+  goto 45.7 -62.7 0.3 6 soft   # where it was pressed
+  press CROSS   # 1165.9 s
+  goto 44.9 -62.7 0.3 6 soft   # where it was pressed
+  press CROSS   # 1166.4 s
+  sleep 0.26
+  press CROSS   # 1166.7 s
+  goto 44.0 -62.7 0.3 6 soft   # where it was pressed
+  press CROSS   # 1166.9 s
+  sleep 0.18
+  press CROSS   # 1167.0 s
+  goto 43.1 -62.7 0.3 6 soft   # where it was pressed
+  press CROSS   # 1167.3 s
+  goto 42.2 -62.7 0.3 6 soft   # where it was pressed
+  press CROSS   # 1167.6 s
+  goto 41.2 -62.7 0.3 6 soft   # where it was pressed
+  press CROSS   # 1168.1 s
+  goto 39.8 -62.7 0.25 20 soft
+  goto 35.6 -64.9 0.25 20 soft
+  goto 37.4 -67.8 0.25 20 soft
+  goto 38.3 -56.1 0.3 6 soft   # where it was pressed
+  press LEFT 1                # face left
+  press CROSS   # 1175.7 s
+  press RIGHT 1                # face right
+  sleep 1.45
+  press CROSS   # 1177.2 s
+  sleep 1.50
+  press CROSS   # 1180.5 s
+  sleep 0.65
+  press CROSS   # 1181.2 s
+  sleep 1.44
+  press CROSS   # 1182.6 s
+  goto 38.8 -54.9 0.3 6 soft   # where it was pressed
+  press LEFT 1                # face left
+  press CROSS   # 1183.5 s
+  goto 38.9 -54.7 0.25 20 soft
+  goto 37.8 -54.7 0.3 6 soft   # where it was pressed
+  press LEFT 1                # face left
+  press CROSS   # 1184.1 s
+  goto 33.3 -54.7 0.3 6 soft   # where it was pressed
+  press CROSS   # 1185.2 s
+  goto 30.5 -54.7 0.25 20 soft
+  goto 32.1 -54.7 0.3 6 soft   # where it was pressed
+  press UP 1                # face up
+  press CROSS   # 1186.3 s
+  goto 33.8 -54.6 0.25 20 soft
+  goto 32.1 -53.2 0.3 6 soft   # where it was pressed
+  press RIGHT 1                # face right
+  press CROSS   # 1187.7 s
+  goto 29.7 -49.8 0.25 20 soft
+  goto 30.1 -42.4 0.25 20 soft
+  goto 39.7 -42.4 0.25 20 soft
+  goto 44.0 -48.0 0.4 10 soft    # the fire-pit room: its big one (life 32) must die too -- the
+  fight any 60 soft              # enclosure room's north door opened in the runs that killed it
+  goto 53.1 -48.5 0.25 20 soft
+  fight any 150 soft             # the enclosure room: a crowned crab and wall turrets; its north
+                                 # door (x 63.2) stays barred until they are gone (the owner's 1,194-1,250 s)
+  press DOWN 1                # face down
+  sleep 0.85
+  press CROSS   # 1196.2 s
+  sleep 0.43
+  press CROSS   # 1196.6 s
+  sleep 0.84
+  press CROSS   # 1197.5 s
+  sleep 0.39
+  press CROSS   # 1197.9 s
+  sleep 1.50
+  press CROSS   # 1201.6 s
+  goto 53.4 -49.8 0.3 6 soft   # where it was pressed
+  press CROSS   # 1202.5 s
+  goto 53.5 -50.4 0.3 6 soft   # where it was pressed
+  press CROSS   # 1203.0 s
+  goto 53.6 -51.1 0.3 6 soft   # where it was pressed
+  press CROSS   # 1203.8 s
+  goto 53.7 -51.9 0.3 6 soft   # where it was pressed
+  press CROSS   # 1204.0 s
+  goto 54.1 -54.4 0.3 6 soft   # where it was pressed
+  press RIGHT 1                # face right
+  press CROSS   # 1204.7 s
+  goto 54.2 -55.0 0.25 20 soft
+  press UP 1                # face up
+  sleep 0.27
+  press CROSS   # 1205.1 s
+  goto 68.3 -54.4 0.3 6 soft   # where it was pressed
+  press RIGHT 1                # face right
+  press CROSS   # 1207.6 s
+  goto 70.9 -54.4 0.25 20 soft
+  goto 74.5 -51.0 0.25 20 soft
+  goto 59.0 -53.5 0.25 20 soft
+  goto 54.3 -48.3 0.25 20 soft
+  goto 54.3 -42.0 0.25 20 soft
+  goto 65.2 -42.0 0.3 6 soft   # where it was pressed
+  press RIGHT 1                # face right
+  press CROSS   # 1214.7 s
+  goto 70.8 -41.2 0.25 20 soft   # life 10
+  goto 73.4 -48.8 0.25 20 soft
+  goto 71.7 -53.8 0.25 20 soft
+  goto 55.3 -51.5 0.25 20 soft
+  goto 55.3 -45.2 0.25 20 soft
+  goto 58.4 -42.5 0.2 20 soft    # the enclosure's way in, from the north: the owner went
+  goto 58.4 -44.4 0.3 8 soft     # straight south here (record 1,237.7-1,238.8 s); a diagonal
+  goto 60.8 -46.5 0.3 8 soft     # slid east along its wall (deeper10)
+  hold UP 0.2                    # face up
+  press CROSS   # 1240.3 s
+  goto 63.9 -47.0 0.25 20 soft
+  sleep 1.50
+  press CROSS   # 1242.9 s
+  sleep 1.01
+  press CROSS   # 1243.9 s
+  sleep 0.48
+  press CROSS   # 1244.4 s
+  sleep 0.53
+  press CROSS   # 1244.9 s
+  sleep 0.98
+  press CROSS   # 1245.9 s
+  press LEFT 1                # face left
+  sleep 0.59
+  press CROSS   # 1246.5 s
+  sleep 0.86
+  press CROSS   # 1247.3 s
+  goto 59.6 -45.6 0.25 20 soft
+  attempt 3 clear_enclosure_room # its north door opens once the crowned crab (life 32) is dead:
+    goto 63.2 -41.0 0.3 10       # deeper10's fight never met it and the door stayed shut;
+    goto 64.4 -38.3 0.3 8        # deeper11's killed it and the door opened ("Got 100!" beyond)
+    state hz>@-39.0 3
+  end
+  goto 63.2 -32.6 0.3 6 soft   # where it was pressed
+  press UP 1                # face up
+  press CIRCLE   # 1252.6 s
+  sleep 0.09
+  press CIRCLE   # 1252.7 s
+  goto 63.2 -32.1 0.3 6 soft   # where it was pressed
+  press CROSS   # 1253.1 s
+  sleep 0.19
+  press CROSS   # 1253.3 s
+  goto 63.2 -31.1 0.3 6 soft   # where it was pressed
+  press CROSS   # 1253.8 s
+  goto 63.2 -30.1 0.3 6 soft   # where it was pressed
+  press CROSS   # 1254.2 s
+  sleep 0.19
+  press CROSS   # 1254.4 s
+  goto 63.2 -29.1 0.3 6 soft   # where it was pressed
+  press LEFT 1                # face left
+  press CROSS   # 1254.6 s
+  goto 63.2 -27.3 0.3 6 soft   # where it was pressed
+  press UP 1                # face up
+  press CROSS   # 1255.1 s
+  goto 63.3 -24.8 0.25 20 soft
+  goto 68.4 -26.3 0.3 6 soft   # where it was pressed
+  press UP 1                # face up
+  press CROSS   # 1257.1 s
+  press RIGHT 1                # face right
+  sleep 0.53
+  press CROSS   # 1257.6 s
+  goto 68.9 -26.2 0.3 6 soft   # where it was pressed
+  press CROSS   # 1257.9 s
+  goto 68.9 -26.2 0.25 20 soft
+  goto 67.3 -27.4 0.3 6 soft   # where it was pressed
+  press LEFT 1                # face left
+  press CROSS   # 1258.5 s
+  goto 66.9 -27.8 0.3 6 soft   # where it was pressed
+  press CROSS   # 1258.7 s
+  goto 66.3 -28.2 0.3 6 soft   # where it was pressed
+  press DOWN 1                # face down
+  press CROSS   # 1259.0 s
+  goto 65.3 -28.0 0.25 20 soft
+  goto 71.5 -26.7 0.3 6 soft   # where it was pressed
+  press RIGHT 1                # face right
+  press CROSS   # 1261.0 s
+  goto 72.2 -26.5 0.25 20 soft
+  goto 63.7 -25.9 0.3 6 soft   # where it was pressed
+  press UP 1                # face up
+  press CIRCLE   # 1263.1 s
+  goto 57.9 -26.2 0.3 6 soft   # where it was pressed
+  press CROSS   # 1264.5 s
+  sleep 0.60
+  press CROSS   # 1265.1 s
+  sleep 0.28
+  press CROSS   # 1265.4 s
+  goto 55.8 -25.9 0.3 6 soft   # where it was pressed
+  press LEFT 1                # face left
+  press CROSS   # 1266.0 s
+  goto 54.7 -25.8 0.3 6 soft   # where it was pressed
+  press CROSS   # 1266.6 s
+  press UP 1                # face up
+  sleep 0.58
+  press CROSS   # 1267.2 s
+  goto 54.2 -26.0 0.25 20 soft
+  goto 54.4 -26.5 0.3 6 soft   # where it was pressed
+  press RIGHT 1                # face right
+  press CROSS   # 1268.5 s
+  goto 58.9 -26.6 0.25 20 soft
+  goto 63.2 -32.5 0.25 20 soft
+  goto 63.2 -39.0 0.25 20 soft
+  goto 50.4 -47.1 0.3 6 soft   # where it was pressed
+  press LEFT 1                # face left
+  press L1   # 1277.2 s
+  sleep 0.34
+  press L1   # 1277.5 s
+  sleep 0.35
+  press L1   # 1277.9 s
+  goto 50.1 -47.1 0.25 20 soft
+  goto 49.9 -47.6 0.3 6 soft   # where it was pressed
+  press CIRCLE   # 1282.4 s
+  goto 48.3 -51.6 0.25 20 soft
+  goto 39.5 -53.0 0.25 20 soft
+  goto 39.2 -58.4 0.25 20 soft
+  goto 48.9 -67.1 0.25 20 soft
+  goto 59.1 -69.1 0.25 20 soft
+  goto 63.1 -76.3 0.25 20 soft
+  goto 63.5 -84.7 0.3 6 soft   # where it was pressed
+  press DOWN 1                # face down
+  press CROSS   # 1295.9 s
+  goto 62.1 -91.5 0.3 6 soft   # where it was pressed
+  press CROSS   # 1297.1 s
+  goto 63.6 -96.1 0.25 20 soft
+end
+
+block west_chest               # the chest inside the west room's enclosure, west of the pushed block
+  # The owner pressed CROSS below it at x 37.6 and 37.2 (z -87.0), facing up (record
+  # 1,132-1,135 s). It holds the key to the door north-west of the bat room
+  # (deeper9: "OPEN", "Got a ...", and the door opened). Up into it from x 37.6
+  # the hero slides west round it, from the west holding east slides it south;
+  # from x 38.0 it slid to 37.7 and stopped under it, and that try opened it.
+  # Up against it from across its width, CROSS at each (at an opened chest it
+  # only swings the sword).
+  goto 38.0 -87.4 0.2 8 soft
+  hold UP 0.25
+  sleep 0.4
+  press CROSS
+  sleep 2.5
+  press CROSS
+  sleep 1.2
+  press CROSS
+  sleep 0.8
+  goto 37.6 -87.4 0.2 8 soft
+  hold UP 0.25
+  sleep 0.4
+  press CROSS
+  sleep 2.5
+  press CROSS
+  sleep 1.2
+  press CROSS
+  sleep 0.8
+  goto 37.2 -87.4 0.2 8 soft
+  hold UP 0.25
+  sleep 0.4
+  press CROSS
+  sleep 2.5
+  press CROSS
+  sleep 1.2
+  press CROSS
+  sleep 0.8
+end
+
+block clear_enclosure_room     # the enclosure room's enemies again, and the fire-pit room's west of
+  goto 54.3 -48.3 0.4 15 soft  # it: the door opened when a life-32 one there died (deeper11,
+  fight any 60 soft            # deeper12's second try), not when it lived (deeper10, deeper13)
+  goto 49.0 -48.5 0.4 10 soft
+  goto 44.0 -48.0 0.4 10 soft
+  fight any 60 soft
+  goto 49.0 -48.5 0.4 10 soft
+  goto 54.3 -48.3 0.4 15 soft
+end
+
+block east_rooms
+  # the owner's 1,300-1,372 s as recorded (presses where they were made), from north of the
+  # key's door: back south through it, the rooms south and east of the entrance's, the east
+  # room (the key's chest) and north of it, west again and north from the entrance's north
+  # room (x 87). SQUARE and CIRCLE presses kept (the owner's; the HUD's CIRCLE item is empty
+  # in these saves). Exploratory.
+  goto 63.6 -98.1 0.25 20 soft
+  goto 63.0 -98.3 0.3 6 soft   # where it was pressed
+  press DOWN 1                # face down
+  press CROSS   # 1301.6 s
+  goto 60.6 -99.4 0.3 6 soft   # where it was pressed
+  press RIGHT 1                # face right
+  press CROSS   # 1302.7 s
+  goto 60.3 -99.8 0.3 6 soft   # where it was pressed
+  press CROSS   # 1303.1 s
+  sleep 0.21
+  press CROSS   # 1303.3 s
+  goto 60.0 -100.1 0.25 20 soft
+  goto 61.9 -100.4 0.3 6 soft   # where it was pressed
+  press RIGHT 1                # face right
+  press CROSS   # 1303.9 s
+  goto 65.1 -101.2 0.3 6 soft   # where it was pressed
+  press DOWN 1                # face down
+  press CROSS   # 1304.7 s
+  goto 67.4 -104.0 0.25 20 soft
+  goto 63.9 -110.3 0.3 6 soft   # where it was pressed
+  press LEFT 1                # face left
+  press CROSS   # 1307.3 s
+  goto 63.4 -112.2 0.25 20 soft
+  goto 57.1 -112.9 0.25 20 soft   # life 10
+  goto 80.6 -103.7 0.3 6 soft   # where it was pressed
+  press RIGHT 1                # face right
+  press CROSS   # 1314.6 s
+  goto 82.2 -102.5 0.25 20 soft
+  goto 85.2 -104.0 0.3 6 soft   # where it was pressed
+  press DOWN 1                # face down
+  press CROSS   # 1315.9 s
+  goto 87.1 -106.7 0.3 6 soft   # where it was pressed
+  press LEFT 1                # face left
+  press CROSS   # 1316.8 s
+  goto 89.0 -110.0 0.3 6 soft   # where it was pressed
+  press RIGHT 1                # face right
+  press CROSS   # 1317.8 s
+  goto 90.4 -111.5 0.25 20 soft
+  goto 106.2 -105.0 0.3 6 soft   # where it was pressed
+  press RIGHT 1                # face right
+  press CROSS   # 1322.6 s
+  goto 109.1 -104.2 0.3 6 soft   # where it was pressed
+  press CROSS   # 1323.2 s
+  goto 111.7 -103.6 0.25 20 soft
+  press RIGHT 1                # face right
+  press CROSS   # 1323.7 s
+  goto 112.6 -103.5 0.3 6 soft   # where it was pressed
+  press CROSS   # 1324.1 s
+  goto 113.7 -103.3 0.3 6 soft   # where it was pressed
+  press CROSS   # 1324.6 s
+  goto 116.4 -106.4 0.3 6 soft   # where it was pressed
+  press SQUARE   # 1325.9 s
+  goto 117.2 -106.4 0.3 6 soft   # where it was pressed
+  press SQUARE   # 1326.5 s
+  goto 117.6 -106.4 0.25 20 soft
+  press RIGHT 1                # face right
+  sleep 0.29
+  press CIRCLE   # 1327.1 s
+  goto 117.7 -105.5 0.3 6 soft   # where it was pressed
+  press CIRCLE   # 1328.0 s
+  goto 115.4 -92.5 0.3 6 soft   # where it was pressed
+  press UP 1                # face up
+  press CIRCLE   # 1332.3 s
+  goto 115.4 -91.8 0.3 6 soft   # where it was pressed
+  press CROSS   # 1332.8 s
+  goto 115.2 -91.1 0.3 6 soft   # where it was pressed
+  press CROSS   # 1333.4 s
+  goto 114.4 -91.2 0.25 20 soft
+  goto 115.7 -91.4 0.3 6 soft   # where it was pressed
+  press RIGHT 1                # face right
+  press CIRCLE   # 1334.5 s
+  goto 119.0 -92.1 0.3 6 soft   # where it was pressed
+  press CROSS   # 1335.1 s
+  goto 123.0 -93.3 0.25 20 soft
+  goto 102.4 -85.6 0.25 20 soft
+  goto 95.3 -92.0 0.25 20 soft
+  goto 93.3 -92.3 0.3 6 soft   # where it was pressed
+  press LEFT 1                # face left
+  press CROSS   # 1343.1 s
+  goto 88.7 -92.9 0.3 6 soft   # where it was pressed
+  press CROSS   # 1343.9 s
+  goto 85.4 -93.7 0.25 20 soft
+  goto 80.7 -89.8 0.25 20 soft   # life 9
+  goto 82.7 -92.5 0.25 20 soft
+  goto 87.0 -88.9 0.25 20 soft
+  goto 84.0 -86.4 0.25 20 soft
+  goto 88.6 -81.2 0.25 20 soft
+  goto 87.3 -73.7 0.3 6 soft   # where it was pressed
+  press UP 1                # face up
+  press CIRCLE   # 1353.5 s
+  sleep 0.33
+  press CROSS   # 1353.8 s
+  goto 87.3 -73.2 0.3 6 soft   # where it was pressed
+  press CROSS   # 1354.0 s
+  goto 87.3 -72.3 0.3 6 soft   # where it was pressed
+  press CROSS   # 1354.7 s
+  goto 87.3 -70.5 0.3 6 soft   # where it was pressed
+  press CIRCLE   # 1355.6 s
+  goto 87.3 -68.3 0.3 6 soft   # where it was pressed
+  press RIGHT 1                # face right
+  press CROSS   # 1356.4 s
+  goto 87.3 -68.0 0.25 20 soft
+  press RIGHT 1                # face right
+  sleep 0.15
+  press CROSS   # 1356.7 s
+  sleep 0.20
+  press CROSS   # 1356.9 s
+  goto 87.6 -67.3 0.3 6 soft   # where it was pressed
+  press UP 1                # face up
+  press CROSS   # 1357.2 s
+  goto 89.8 -68.3 0.3 6 soft   # where it was pressed
+  press RIGHT 1                # face right
+  press CROSS   # 1358.4 s
+  goto 90.3 -68.7 0.25 20 soft
+  goto 87.8 -67.8 0.3 6 soft   # where it was pressed
+  press UP 1                # face up
+  press CIRCLE   # 1359.5 s
+  goto 87.2 -67.6 0.25 20 soft
+  goto 87.2 -61.2 0.3 6 soft   # where it was pressed
+  press RIGHT 1                # face right
+  press CROSS   # 1361.3 s
+  goto 87.2 -60.1 0.25 20 soft
+  goto 84.0 -65.1 0.25 20 soft
+  goto 87.6 -71.0 0.25 20 soft
+  goto 95.2 -68.7 0.25 20 soft
+  goto 93.0 -63.1 0.25 20 soft
+  goto 91.2 -64.0 0.3 6 soft   # where it was pressed
+  press UP 1                # face up
+  press CROSS   # 1366.7 s
+  goto 89.3 -64.6 0.3 6 soft   # where it was pressed
+  press CROSS   # 1367.5 s
+  goto 88.2 -64.6 0.3 6 soft   # where it was pressed
+  press RIGHT 1                # face right
+  press CROSS   # 1368.0 s
+  sleep 0.32
+  press CROSS   # 1368.3 s
+  sleep 0.83
+  press CROSS   # 1369.2 s
+  sleep 0.42
+  press CROSS   # 1369.6 s
+  sleep 0.41
+  press CROSS   # 1370.0 s
+  sleep 0.38
+  press CROSS   # 1370.4 s
+  sleep 0.66
+  press CROSS   # 1371.0 s
+  goto 87.9 -64.6 0.25 20 soft
+end
+
+block northeast_rooms
+  # the owner's 1,372-1,460 s: east and north-east, fights (life 8-10). Exploratory.
+  # area 37: 1372-1459 s, 83 positions, 30 waypoints
+  goto 87.9 -64.6 0.25 20 soft
+  goto 87.8 -64.1 0.3 6 soft   # where it was pressed
+  press UP 1                # face up
+  press CROSS   # 1372.6 s
+  goto 89.9 -58.6 0.25 20 soft
+  goto 89.4 -58.8 0.3 6 soft   # where it was pressed
+  press RIGHT 1                # face right
+  press CROSS   # 1374.7 s
+  goto 88.7 -59.2 0.3 6 soft   # where it was pressed
+  press CROSS   # 1375.0 s
+  goto 86.8 -60.1 0.25 20 soft
+  goto 90.6 -84.1 0.3 6 soft   # where it was pressed
+  press RIGHT 1                # face right
+  press CROSS   # 1381.2 s
+  press LEFT 1                # face left
+  sleep 0.53
+  press CROSS   # 1381.7 s
+  goto 90.6 -84.0 0.25 20 soft
+  goto 95.2 -86.0 0.25 20 soft
+  goto 89.4 -88.9 0.25 20 soft
+  goto 96.4 -92.3 0.25 20 soft
+  goto 102.5 -87.3 0.25 20 soft
+  goto 105.0 -87.3 0.3 6 soft   # where it was pressed
+  press RIGHT 1                # face right
+  press L1   # 1390.1 s
+  goto 107.4 -87.3 0.3 6 soft   # where it was pressed
+  press L1   # 1391.8 s
+  goto 117.9 -87.3 0.3 6 soft   # where it was pressed
+  press CROSS   # 1393.5 s
+  goto 129.0 -87.3 0.25 20 soft
+  goto 130.2 -84.7 0.3 6 soft   # where it was pressed
+  press UP 1                # face up
+  press CIRCLE   # 1397.6 s
+  goto 131.2 -81.4 0.25 20 soft   # life 10
+  goto 134.2 -81.5 0.3 6 soft   # where it was pressed
+  press DOWN 1                # face down
+  press CROSS   # 1399.4 s
+  goto 138.1 -81.7 0.25 20 soft
+  goto 138.0 -82.7 0.3 6 soft   # where it was pressed
+  press RIGHT 1                # face right
+  press CROSS   # 1400.2 s
+  goto 137.8 -86.7 0.25 20 soft
+  press RIGHT 1                # face right
+  sleep 0.12
+  press CROSS   # 1401.2 s
+  goto 138.5 -86.3 0.3 6 soft   # where it was pressed
+  press CROSS   # 1402.0 s
+  goto 143.9 -87.1 0.25 20 soft
+  press RIGHT 1                # face right
+  sleep 0.05
+  press CROSS   # 1403.2 s
+  goto 139.3 -87.8 0.3 6 soft   # where it was pressed
+  press CIRCLE   # 1404.6 s
+  goto 143.1 -88.3 0.3 6 soft   # where it was pressed
+  press CIRCLE   # 1406.1 s
+  goto 143.5 -88.7 0.3 6 soft   # where it was pressed
+  press CIRCLE   # 1407.1 s
+  goto 142.5 -88.9 0.3 6 soft   # where it was pressed
+  press CIRCLE   # 1407.7 s
+  sleep 0.18
+  press CIRCLE   # 1407.8 s
+  goto 141.5 -88.8 0.3 6 soft   # where it was pressed
+  press CIRCLE   # 1408.0 s
+  sleep 0.17
+  press CROSS   # 1408.2 s
+  goto 140.3 -88.7 0.25 20 soft   # life 8
+  goto 144.1 -88.7 0.3 6 soft   # where it was pressed
+  press RIGHT 1                # face right
+  press CROSS   # 1409.3 s
+  goto 146.1 -88.9 0.3 6 soft   # where it was pressed
+  press CROSS   # 1409.8 s
+  goto 147.8 -89.3 0.3 6 soft   # where it was pressed
+  press CROSS   # 1410.5 s
+  goto 148.2 -89.4 0.25 20 soft
+  goto 139.9 -87.2 0.3 6 soft   # where it was pressed
+  press UP 1                # face up
+  press CROSS   # 1412.6 s
+  goto 139.1 -87.0 0.25 20 soft
+  press UP 1                # face up
+  sleep 0.49
+  press CROSS   # 1413.2 s
+  sleep 0.25
+  press CROSS   # 1413.5 s
+  goto 148.1 -81.6 0.3 6 soft   # where it was pressed
+  press RIGHT 1                # face right
+  press CROSS   # 1415.1 s
+  goto 151.2 -80.0 0.25 20 soft
+  goto 149.2 -80.7 0.3 6 soft   # where it was pressed
+  press LEFT 1                # face left
+  press CROSS   # 1416.3 s
+  goto 145.3 -81.7 0.3 6 soft   # where it was pressed
+  press CROSS   # 1417.1 s
+  goto 130.1 -87.3 0.25 20 soft
+  goto 124.8 -87.3 0.3 6 soft   # where it was pressed
+  press LEFT 1                # face left
+  press L1   # 1422.9 s
+  goto 123.2 -87.3 0.3 6 soft   # where it was pressed
+  press CROSS   # 1428.6 s
+  sleep 0.48
+  press CIRCLE   # 1429.1 s
+  goto 122.3 -87.3 0.25 20 soft
+  goto 116.2 -80.8 0.25 20 soft
+  goto 115.3 -76.1 0.25 20 soft
+  goto 118.5 -72.1 0.25 20 soft
+  goto 124.4 -72.3 0.25 20 soft
+  goto 128.1 -67.0 0.25 20 soft
+  goto 131.5 -68.7 0.3 6 soft   # where it was pressed
+  press DOWN 1                # face down
+  press CROSS   # 1439.0 s
+  goto 132.2 -69.2 0.25 20 soft
+  goto 133.1 -74.1 0.25 20 soft   # life 10
+  goto 138.3 -73.2 0.3 6 soft   # where it was pressed
+  press RIGHT 1                # face right
+  press CROSS   # 1441.1 s
+  goto 147.4 -72.2 0.25 20 soft
+  goto 147.7 -71.7 0.3 6 soft   # where it was pressed
+  press UP 1                # face up
+  press CROSS   # 1442.7 s
+  goto 148.4 -70.7 0.3 6 soft   # where it was pressed
+  press CROSS   # 1443.2 s
+  goto 148.8 -69.9 0.3 6 soft   # where it was pressed
+  press CROSS   # 1443.5 s
+  goto 148.8 -68.8 0.3 6 soft   # where it was pressed
+  press CROSS   # 1443.9 s
+  goto 148.0 -62.0 0.25 20 soft
+  goto 127.2 -68.1 0.25 20 soft
+  goto 133.9 -68.1 0.25 20 soft
+end
+
+block boss_approach
+  # the owner's 1,460-1,536 s: north-east, then west along the north to the boss's door;
+  # area 38 at (89.9, -19.65) at 1,534.9 s. Exploratory.
+  # area 37: 1460-1535 s, 71 positions, 28 waypoints
+  goto 136.8 -64.7 0.25 20 soft
+  goto 141.8 -60.0 0.25 20 soft
+  goto 142.1 -53.1 0.25 20 soft
+  press RIGHT 1                # face right
+  sleep 0.07
+  press CROSS   # 1467.9 s
+  goto 146.2 -53.6 0.25 20 soft
+  goto 143.2 -53.5 0.25 20 soft
+  goto 145.5 -51.6 0.3 6 soft   # where it was pressed
+  press UP 1                # face up
+  press CIRCLE   # 1470.5 s
+  goto 147.4 -50.1 0.3 6 soft   # where it was pressed
+  press CROSS   # 1471.0 s
+  goto 147.8 -49.1 0.3 6 soft   # where it was pressed
+  press CROSS   # 1471.2 s
+  goto 148.9 -45.1 0.3 6 soft   # where it was pressed
+  press RIGHT 1                # face right
+  press CIRCLE   # 1472.2 s
+  goto 150.8 -45.2 0.25 20 soft
+  goto 141.6 -44.2 0.25 20 soft
+  goto 140.7 -43.4 0.3 6 soft   # where it was pressed
+  press UP 1                # face up
+  press CROSS   # 1474.5 s
+  goto 138.4 -41.5 0.25 20 soft
+  goto 140.4 -41.2 0.3 6 soft   # where it was pressed
+  press RIGHT 1                # face right
+  press CIRCLE   # 1475.8 s
+  goto 142.1 -40.8 0.3 6 soft   # where it was pressed
+  press CROSS   # 1476.3 s
+  goto 142.2 -40.8 0.25 20 soft
+  goto 142.0 -41.3 0.3 6 soft   # where it was pressed
+  press RIGHT 1                # face right
+  press CROSS   # 1476.5 s
+  goto 141.4 -48.4 0.25 20 soft
+  goto 140.7 -48.5 0.3 6 soft   # where it was pressed
+  press UP 1                # face up
+  press CROSS   # 1478.8 s
+  goto 139.9 -48.5 0.3 6 soft   # where it was pressed
+  press R2   # 1479.2 s
+  goto 139.2 -48.6 0.25 20 soft
+  press UP 1                # face up
+  press CROSS   # 1479.5 s
+  sleep 0.47
+  press CROSS   # 1480.0 s
+  goto 143.0 -41.2 0.25 20 soft
+  goto 144.1 -44.1 0.25 20 soft
+  goto 130.4 -44.1 0.25 20 soft
+  goto 127.9 -47.9 0.25 20 soft
+  goto 123.8 -47.9 0.3 6 soft   # where it was pressed
+  press LEFT 1                # face left
+  press CROSS   # 1488.2 s
+  goto 122.2 -47.9 0.3 6 soft   # where it was pressed
+  press CROSS   # 1488.8 s
+  goto 119.4 -47.1 0.3 6 soft   # where it was pressed
+  press CROSS   # 1489.6 s
+  goto 117.6 -46.5 0.25 20 soft
+  goto 117.6 -47.1 0.3 6 soft   # where it was pressed
+  press UP 1                # face up
+  press CROSS   # 1490.3 s
+  goto 117.7 -48.3 0.3 6 soft   # where it was pressed
+  press LEFT 1                # face left
+  press CROSS   # 1490.7 s
+  goto 117.5 -49.8 0.3 6 soft   # where it was pressed
+  press CROSS   # 1491.3 s
+  goto 114.3 -50.2 0.3 6 soft   # where it was pressed
+  press RIGHT 1                # face right
+  press CROSS   # 1492.6 s
+  goto 115.5 -50.6 0.25 20 soft
+  goto 123.4 -47.2 0.25 20 soft
+  goto 123.8 -46.3 0.3 6 soft   # where it was pressed
+  press UP 1                # face up
+  press CIRCLE   # 1494.6 s
+  goto 125.1 -43.5 0.3 6 soft   # where it was pressed
+  press CROSS   # 1495.2 s
+  goto 125.6 -42.5 0.25 20 soft
+  goto 114.4 -40.8 0.3 6 soft   # where it was pressed
+  press LEFT 1                # face left
+  press CIRCLE   # 1497.5 s
+  goto 104.8 -41.2 0.25 20 soft
+  goto 104.8 -44.0 0.3 6 soft   # where it was pressed
+  press DOWN 1                # face down
+  press CIRCLE   # 1499.2 s
+  goto 104.8 -46.7 0.3 6 soft   # where it was pressed
+  press CIRCLE   # 1499.8 s
+  goto 104.8 -48.8 0.3 6 soft   # where it was pressed
+  press CROSS   # 1500.6 s
+  goto 105.0 -54.9 0.25 20 soft
+  goto 113.9 -43.1 0.25 20 soft
+  goto 116.4 -34.4 0.3 6 soft   # where it was pressed
+  press UP 1                # face up
+  press CROSS   # 1507.1 s
+  goto 116.4 -34.3 0.25 20 soft
+  goto 116.0 -31.8 0.3 6 soft   # where it was pressed
+  press UP 1                # face up
+  press CIRCLE   # 1507.7 s
+  goto 115.7 -29.8 0.3 6 soft   # where it was pressed
+  press CROSS   # 1508.2 s
+  goto 115.5 -27.8 0.3 6 soft   # where it was pressed
+  press CROSS   # 1508.9 s
+  goto 114.4 -26.0 0.3 6 soft   # where it was pressed
+  press RIGHT 1                # face right
+  press CROSS   # 1509.7 s
+  goto 113.0 -24.9 0.3 6 soft   # where it was pressed
+  press LEFT 1                # face left
+  press CROSS   # 1510.2 s
+  press RIGHT 1                # face right
+  sleep 0.17
+  press CROSS   # 1510.4 s
+  goto 112.6 -25.3 0.3 6 soft   # where it was pressed
+  press CROSS   # 1510.7 s
+  goto 112.3 -25.9 0.3 6 soft   # where it was pressed
+  press UP 1                # face up
+  press CROSS   # 1511.4 s
+  goto 112.5 -25.0 0.3 6 soft   # where it was pressed
+  press RIGHT 1                # face right
+  press CROSS   # 1511.6 s
+  goto 113.3 -21.9 0.25 20 soft
+  goto 100.6 -28.5 0.25 20 soft
+  press UP 1                # face up
+  sleep 0.12
+  press CROSS   # 1516.8 s
+  sleep 0.78
+  press CROSS   # 1517.6 s
+  sleep 0.40
+  press CROSS   # 1518.0 s
+  sleep 0.47
+  press CROSS   # 1518.4 s
+  sleep 0.38
+  press CROSS   # 1518.8 s
+  sleep 1.44
+  press CROSS   # 1520.3 s
+  goto 100.1 -28.0 0.3 6 soft   # where it was pressed
+  press CROSS   # 1521.1 s
+  goto 98.2 -26.4 0.3 6 soft   # where it was pressed
+  press CROSS   # 1522.1 s
+  press RIGHT 1                # face right
+  sleep 0.51
+  press CROSS   # 1522.6 s
+  goto 81.9 -26.6 0.3 6 soft   # where it was pressed
+  press LEFT 1                # face left
+  press CROSS   # 1525.3 s
+  goto 79.4 -26.6 0.25 20 soft
+  goto 93.9 -24.8 0.25 20 soft
+  press LEFT 1                # face left
+  sleep 1.36
+  press CROSS   # 1529.7 s
+  sleep 1.12
+  press CROSS   # 1530.8 s
+  sleep 0.60
+  press CROSS   # 1531.4 s
+  goto 89.9 -19.6 0.25 20 soft
 end

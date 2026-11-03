@@ -11,7 +11,7 @@
 #! env DOTHEROES_NATIVE_CD=1 DOTHEROES_NATIVE_SOLVER=4,5,6 GCM_WRAP_LAP=1 DOTHEROES_PRESENT_ONCE=1
 #! env DOTHEROES_DEV_STATE=1 DOTHEROES_DEV_KEYS=1 DIAG_FRAMES=frames.log PS3_VERBOSE=0
 #! env WINDOW=1 VISIBLE=1 TOPMOST=1 GRAB_EVERY=5 PS3_OSD_FPS=2 DUMP=0 SHOT_EVERY=0
-#! secs 900
+#! secs 1200
 include common.drive
 include dungeon1_route.drive
 
@@ -27,3 +27,26 @@ segment explore west-rooms
 call west_rooms
 endseg
 actors list
+segment explore north-rooms
+call north_rooms
+endseg
+actors list
+# A save here (the run's own copy): CONTINUE then starts at the dungeon's door
+# with the doors opened so far kept -- the next checkpoint
+# (build/checkpoints/dungeon1-north-rooms).
+state area==37,life>0 10
+sleep 2
+attempt 3 page_dialogues
+  press START                 # the system menu, on RESUME
+  sleep 2
+  state menu==1 4
+end
+press DOWN                    # SAVE
+sleep 1
+press CROSS                   # saves at once; the menu stays on SAVE
+sleep 6
+press UP                      # RESUME
+sleep 1
+press CROSS
+sleep 2
+state life>0 5

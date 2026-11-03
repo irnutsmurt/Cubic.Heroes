@@ -1,0 +1,40 @@
+# Scenario: the first dungeon from its north rooms on, toward the boss
+# (SCENARIO=dungeon1_east). Exploratory: run with DOTHEROES_DEV_CANT_DIE=1.
+#
+# Starts from: build/checkpoints/dungeon1-north-rooms (a test's save after the
+#   west chest's key, its door, the enclosure room and the room beyond it;
+#   CONTINUE: the dungeon's door, the doors opened so far kept).
+# Route: through the kept doors (past_key_door), then the owner's record on
+#   from 1,300 s a stretch at a time (dungeon1_route.drive: east_rooms,
+#   northeast_rooms, boss_approach), `actors list` at each stretch's end.
+# Completed when: each stretch's segment ends where the owner's did; the last
+#   at the boss's door (area 38 at 1,534.9 s in the owner's record).
+#! saves build/checkpoints/dungeon1-north-rooms
+#! env DOTHEROES_NATIVE_CD=1 DOTHEROES_NATIVE_SOLVER=4,5,6 GCM_WRAP_LAP=1 DOTHEROES_PRESENT_ONCE=1
+#! env DOTHEROES_DEV_STATE=1 DOTHEROES_DEV_KEYS=1 DIAG_FRAMES=frames.log PS3_VERBOSE=0
+#! env WINDOW=1 VISIBLE=1 TOPMOST=1 GRAB_EVERY=3 PS3_OSD_FPS=2 DUMP=0 SHOT_EVERY=0
+#! secs 1500
+include common.drive
+include dungeon1_route.drive
+
+log TitleMovie 120
+sleep 5
+call continue
+state area==37,life>0 90
+sleep 3
+segment explore past-key-door
+call past_key_door
+endseg
+segment explore east-rooms
+call east_rooms
+endseg
+actors list
+segment explore northeast-rooms
+call northeast_rooms
+endseg
+actors list
+segment explore boss-approach
+call boss_approach
+endseg
+state life>0 5
+actors list

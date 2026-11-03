@@ -399,7 +399,10 @@ def seg_end(text, lineno):
         raise Fail(seg["why"])
 
 
-def fail_record(lineno, line, why):
+def fail_record(lineno, line, why, keep_segment=False):
+    """A failure, in failures.jsonl; the open segment ends with it as failed,
+    unless keep_segment (an attempt inside a segment it did not open: a retry
+    there is part of the segment)."""
     s = state()
     rec = {"wall": round(time.time() - T0, 3), "line": lineno, "step": line, "why": why, "state": s,
            "cycle": ctx["cycle"], "attempt": ctx["attempt"],
@@ -408,7 +411,7 @@ def fail_record(lineno, line, why):
     grabs = sorted(os.listdir(os.path.join(run, "grabs"))) if os.path.isdir(os.path.join(run, "grabs")) else []
     rec["last_grab"] = grabs[-1] if grabs else None
     record("failures.jsonl", rec)
-    if ctx["segment"]:   # the open segment, recorded as failed
+    if ctx["segment"] and not keep_segment:   # the open segment, recorded as failed
         seg = dict(ctx["segment"], wall1=rec["wall"], s1=s, ok=False, why=why)
         record("segments.jsonl", seg)
         ctx["segment"] = None
@@ -701,13 +704,15 @@ def run_steps(steps):
         elif op == "attempt":
             tries, recover = int(a[0]), a[1] if len(a) > 1 else None
             saved = expecting
+            outer_seg = ctx["segment"]   # open before the attempt: a retry stays inside it
             for k in range(1, tries + 1):
                 ctx["attempt"] = k
                 try:
                     run_steps(inner)
                     break
                 except Fail as e:
-                    fail_record(*getattr(e, "where", (n, line)), str(e))
+                    fail_record(*getattr(e, "where", (n, line)), str(e),
+                                keep_segment=outer_seg is not None and ctx["segment"] is outer_seg)
                     expecting = []
                     if k == tries or not alive():
                         ctx["attempt"] = None
