@@ -49,6 +49,9 @@ scenario header):
   cross <DIR> <area> [timeout]  walk on in DIR until the field area is <area> (an
                               edge or a door), sidestepping when blocked; a timeout
                               (default 20 s) fails
+  rooms <w> <h> | off         a dungeon of w x h rooms, a door at the middle of each
+                              wall: a goto into the next room that stalls goes through
+                              that wall's door (a point before it, one past) and on
   goto <x> <z> [tol] [timeout] [soft]  walk the hero to (x, z) in the area's
                               coordinates (hx/hz: RIGHT is +x, UP is +z), steering
                               by its position every ~0.3 s, within tol (default
@@ -516,6 +519,38 @@ def goto(x, z, tol, tmo):
         wait(secs)
 
 
+def door_path(hx, hz, x, z):
+    """`rooms <w> <h>`: a dungeon of w x h rooms, a door at the middle of a
+    wall between two. When (x, z) is in the room next to the hero's: a point
+    before that wall's door and one past it (a straight goto stops on the wall
+    beside a door, east17); otherwise none -- not every wall has a door, and
+    which way round is the route's to say (east18 went east into a wall)."""
+    import math
+    if hx is None or hz is None:
+        return []
+    w, h = ctx["rooms"]
+    cx, cz = math.floor(hx / w), math.floor(hz / h)
+    tx, tz = math.floor(x / w), math.floor(z / h)
+    pts = []
+    if abs(tx - cx) + abs(tz - cz) != 1:
+        return pts
+    while (cx, cz) != (tx, tz):
+        if cx != tx:
+            d = 1 if tx > cx else -1
+            wall, mid = max(cx, cx + d) * w, cz * h + h / 2
+            pts += [(wall - 2.0 * d, mid), (wall + 2.0 * d, mid)]
+            cx += d
+        else:
+            d = 1 if tz > cz else -1
+            wall, mid = max(cz, cz + d) * h, cx * w + w / 2
+            pts += [(mid, wall - 2.0 * d), (mid, wall + 2.0 * d)]
+            cz += d
+    if pts:
+        say("  through the door" + ("s" if len(pts) > 2 else "") + " at " +
+            ", ".join(f"({px:.1f}, {pz:.1f})" for px, pz in pts[1::2]))
+    return pts
+
+
 def fight(cls, tmo, reach, radius=25.0, soft=False):
     """Clear the characters of one class near the hero: walk to the nearest
     with life left until within `reach`, turn to it (one pad report of its
@@ -788,11 +823,25 @@ def step(lineno, line, op, a):
         soft = a[-1] == "soft"
         a = a[:-1] if soft else a
         try:
-            goto(float(a[0]), float(a[1]), float(a[2]) if len(a) > 2 else 1.0, float(a[3]) if len(a) > 3 else 30)
+            x, z = float(a[0]), float(a[1])
+            tol, tmo = float(a[2]) if len(a) > 2 else 1.0, float(a[3]) if len(a) > 3 else 30
+            try:
+                goto(x, z, tol, tmo)
+            except Fail as e:   # into the next room: through the door at its wall's middle, then again
+                s = state() or {}
+                pts = door_path(s.get("hx"), s.get("hz"), x, z) if ctx.get("rooms") and alive() else []
+                if not pts:
+                    raise
+                say(f"  {e}")
+                for dx, dz in pts:
+                    goto(dx, dz, 0.6, 10)
+                goto(x, z, tol, tmo)
         except Fail as e:
             if not soft or not alive():
                 raise
             say(f"  (soft) {e}")
+    elif op == "rooms":
+        ctx["rooms"] = None if a[0] == "off" else (float(a[0]), float(a[1]))
     elif op == "repeat":
         for _ in range(int(a[0])):
             press(mask_of(a[1])); wait(float(a[2]))

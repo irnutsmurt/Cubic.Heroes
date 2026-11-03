@@ -345,14 +345,16 @@ Finalize fix, wait-free creation) is measured against it.
    standing long-session test after any renderer or memory change: reloads,
    deaths and area changes, not idle time. Then longer sessions with real
    area changes (the owner's play session gives them).
-2. The first dungeon past the east room's north door (the owner's record
-   1,325-1,330 s; see "Game coverage": the door is the blocker, not yet
-   understood), then the boss in area 38 (record ~1,535-1,592 s), measured
-   like the river fight with normal damage and real audio in representative
-   runs. The quickest way: the owner's save at the boss door (a separate
-   slot, with the key), checked with tests/scripts/continue_where.drive --
-   dungeon saves have continued at the dungeon's door, the doors kept, so
-   the route from the door to the boss may still be needed.
+2. The first dungeon to the boss: the east room's north door is solved (the
+   boomerang, "Game coverage"); dungeon1_east from checkpoint
+   dungeon1-boomerang drives to the six-pillar room north-east whose west
+   door stays barred (its wall switches and chest: the owner's record
+   1,466-1,486 s), then the record's 1,486-1,534 s to the portal, then the
+   boss in area 38 (record ~1,535-1,592 s), measured like the river fight
+   with normal damage and real audio in representative runs. The area
+   changes' 60-94 ms frames stay tracked (open problem 2's room set-up
+   frames and the field's pack inflates); a pack-cache experiment is
+   measured on the same revisits before it counts.
 3. The hitches: what is left of the dungeon entry (the walker's first-visit
    frame: resource creation without GPU waits, then the shader translations
    -- a disk cache of them; the main thread's ~50 ms area set-up), the fight
@@ -437,16 +439,35 @@ sword) or, since the owner's first play session, from its saves.
   killed a life-32 enemy in the fire-pit room, so it is retried with both
   rooms cleared), the room beyond it (a 10 G chest) and back south; saved
   there as checkpoint dungeon1-north-rooms (CONTINUE: the dungeon's door,
-  the doors kept). From it (dungeon1_east): the rooms south of the key's door
-  and the entrance's east room cleared; **the east room's north door does
-  not open** -- no "You need a key", the menu's KEYS empty; the owner pressed
-  SQUARE and CIRCLE by two red cylinders beyond the lava strip on the east
-  wall, at full life, and was through two seconds later; SQUARE, CROSS and
-  CIRCLE there at life 9 and at full life (`life 10`, route discovery only)
-  did not open it. A guide says the Grass Temple has a Red Door that normal
-  keys do not open. Not automated: from that door to the boss (the owner's
-  1,330-1,534 s), the boss (area 38). The menu (TRIANGLE) in these saves has
-  nothing equipped: ITEMS a bottle, a red-topped item and a small chest item.
+  the doors kept). **The boomerang, and the east room's north door**
+  (2026-11-03): the owner's record shows that door passed at 1,331 s, two
+  seconds after CIRCLE throws across the lava at the east wall's red switch
+  -- the boomerang, which no checkpoint had. It is in the enclosure room's
+  chest (the record's 1,240 s; a walkthrough agrees): the enclosure's block
+  (FE6878 at x 58.4) pushed south with a 2 s hold (a goto gives up before
+  it moves), then up into the chest's front (it opens from (64.2, -47.0),
+  the right half) and CROSS; the HUD's circle slot then shows it ("It can
+  briefly stun, ..."). north_rooms now takes it, the room beyond's wall
+  switch and chests too; a save after it is checkpoint dungeon1-boomerang.
+  From it (dungeon1_east, can't-die on): the rooms south and east of the
+  entrance, the east room's switch hit (a hit switch turns from a red
+  cylinder out of the wall to a disc facing out) and its north door passed;
+  the north-east rooms (a fight on entering each room -- one with enemies
+  bars its doors --, the key's chest in the four-block room, out along its
+  west wall); three pushable blocks across the way north (the two side ones
+  up, the middle one west, as the owner did at 1,459-1,464 s); into the
+  room beyond (six pillars, three wall switches, a chest, a stone: "Glory
+  shines upon one who banishes darkness."): its west door opened once the
+  west wall's switch was hit too (east24; thrown from in line with each
+  switch -- the east room's misses from 1.6 off its z), then the rooms west
+  and north to the boss's door (the owner's 1,486-1,534 s), saved there
+  (checkpoint dungeon1-boss-door). **The boss's door wants the boss's key**
+  ("You need a special key."): the six-pillar room's chest, not opened in
+  east24 -- being worked on. Not automated yet: that chest, the boss (area
+  38). Drive changes for the dungeon: facing
+  taps became short holds (a tap does not turn the hero), `rooms 25.6 19.2`
+  (a goto into the next room that stalls goes through the door at that
+  wall's middle), `open` nearest first and soft.
   Normal damage with sound (rep-dmg1, dungeon1_persist): the north and east
   room fights at p99 17.2 ms, under 0.2% of frames over 18 ms, worst 33 ms
   (the 50 ms frame is the first room's set-up frame); the hero died in the

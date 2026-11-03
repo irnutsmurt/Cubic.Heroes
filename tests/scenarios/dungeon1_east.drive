@@ -29,6 +29,7 @@ sleep 5
 call continue
 state area==37,life>0 90
 sleep 3
+rooms 25.6 19.2                 # the dungeon's grid: gotos into the next room through its door
 segment explore past-key-door
 call past_key_door
 endseg

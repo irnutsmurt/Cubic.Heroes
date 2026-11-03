@@ -631,15 +631,11 @@ block east_rooms
   press CROSS   # 1324.1 s
   goto 113.7 -103.3 0.3 6 soft   # where it was pressed
   press CROSS   # 1324.6 s
-  goto 117.6 -106.4 0.25 20 soft
-  hold RIGHT 0.15                # face right: the boomerang across the lava at the east wall's
-  press CIRCLE   # 1327.1 s      # switch opens the room's north door (the owner was through 2 s later)
-  sleep 1.5
-  goto 117.7 -105.5 0.3 6 soft   # where it was pressed
-  hold RIGHT 0.15
-  press CIRCLE   # 1328.0 s
-  sleep 1.5
-  attempt 3 clear_east_room      # its north door (x 115.4), barred until the room is clear
+  attempt 4 clear_east_room      # its north door (x 115.4): the boomerang across the lava at
+    goto 117.6 -104.9 0.25 12 soft # the east wall's switch (FE6CC0 at (126.6, -104.8); the red
+    hold RIGHT 0.15              # cylinder below it is its reflection) opens it (the owner was
+    press CIRCLE                 # through 2 s later, 1,327-1,330 s, the second throw from z
+    sleep 1.8                    # -105.6). From z -106.4 to -106.6 it misses (east22, east23).
     goto 115.4 -97.5 0.3 10
     goto 115.4 -92.5 0.3 8
     state hz>@-94.0 3
@@ -890,8 +886,23 @@ block boss_approach
   # the owner's 1,460-1,536 s: north-east, then west along the north to the boss's door;
   # area 38 at (89.9, -19.65) at 1,534.9 s. Exploratory.
   # area 37: 1460-1535 s, 71 positions, 28 waypoints
-  goto 136.8 -64.7 0.25 20 soft
+  # three blocks (FE6878 at x 136.8, 138.4, 140.0, z -63.2) across the way north: the two side
+  # ones pushed up, the middle one sideways (a walkthrough; the owner's 1,459-1,464 s)
+  goto 134.0 -68.1 0.3 10 soft
+  goto 136.8 -65.0 0.2 10 soft   # below the left one
+  hold UP 1.2
+  actors list
+  hold DOWN 0.3
+  goto 138.4 -65.6 0.3 8 soft
+  goto 140.0 -65.0 0.2 8 soft    # below the right one
+  hold UP 1.2
+  actors list
+  goto 140.0 -63.2 0.2 6 soft    # where the right one was (the owner's 1,462.6 s)
+  hold LEFT 1.2                  # the middle one west (the owner at (138.3, -63.1) after)
+  actors list
+  goto 138.4 -61.0 0.3 6 soft
   goto 141.8 -60.0 0.25 20 soft
+  goto 141.3 -57.0 0.3 10 soft   # the door north (x 140.8)
   goto 142.1 -53.1 0.25 20 soft
   fight any 60 soft              # into room 5,-3 (25.6 x 19.2 cells): a room with enemies bars its doors
   hold RIGHT 0.12            # face right
@@ -935,6 +946,48 @@ block boss_approach
   press CROSS   # 1479.5 s
   sleep 0.47
   press CROSS   # 1480.0 s
+  # The room's wall switches (FE6CC0: north (143.2, -39.8), east (152.2, -44.0), west
+  # (129.4, -42.4)) hit with the boomerang from in line with each, then its chest (FE6660 at
+  # (140.0, -47.2)) as the boomerang's: in east20 the chest stayed shut and so did the west
+  # door (its bars, FE6280, 1.6 apart; open ones are 5.2 apart). "Press all four switches
+  # there to get the key to the boss room" (a walkthrough).
+  goto 143.2 -53.5 0.3 8 soft     # north, from where the owner threw (1,470.5 s)
+  hold UP 0.1
+  press CIRCLE
+  sleep 1.8
+  goto 148.8 -44.2 0.3 8 soft     # east (1,472.2 s); a hit one turns from a red cylinder out of
+  hold RIGHT 0.1                  # the wall to a red disc facing out (the east room's, east21)
+  press CIRCLE
+  sleep 1.8
+  goto 134.0 -44.1 0.3 8 soft     # west, round the pillar east of it (the owner never threw at
+  goto 131.6 -44.1 0.3 8 soft     # it; east21 left it a cylinder)
+  goto 131.6 -42.6 0.3 6 soft
+  hold LEFT 0.1
+  press CIRCLE
+  sleep 1.8
+  goto 138.4 -41.5 0.3 8 soft     # the owner's third throw, east along z -41.5 (1,475.8 s), and
+  hold RIGHT 0.1                  # the sword by the north switch (142.2, -40.8; 1,476.3 s)
+  press CIRCLE
+  sleep 1.8
+  goto 142.2 -40.8 0.3 6 soft
+  hold RIGHT 0.1
+  press CROSS
+  sleep 0.6
+  fight any 45 soft
+  goto 140.0 -49.4 0.2 8 soft     # the chest: the boss's key ("You need a special key." at the
+  open FE3C70 6 soft              # portal without it, east24); its objects appear this near
+  unstick DOWN 8
+  goto 139.2 -48.6 0.25 8 soft    # and from the owner's spot (1,479.5 s) if that did not take
+  hold UP 0.35
+  sleep 0.4
+  press CROSS
+  sleep 2.5
+  press CROSS
+  sleep 1.2
+  press CROSS
+  sleep 0.8
+  unstick DOWN 8
+  actors list
   goto 143.0 -41.2 0.25 20 soft
   goto 144.1 -44.1 0.25 20 soft
   goto 130.4 -44.1 0.25 20 soft
