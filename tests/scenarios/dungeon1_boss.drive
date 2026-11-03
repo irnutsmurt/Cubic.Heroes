@@ -1,0 +1,534 @@
+# Scenario: the first dungeon's boss (SCENARIO=dungeon1_boss), along the
+# owner's boss session. Exploratory: run with DOTHEROES_DEV_CANT_DIE=1 to find
+# the way, then without.
+#
+# Starts from: build/checkpoints/dungeon1-boss-door (CONTINUE: the Grass
+#   Temple's entrance, the doors a test opened kept; the switches done).
+# Route: the owner's boss session (build/sessions/boot-20261103-135259-
+#   owner-boss, record 97-339 s; tests/route_from_record.py --buttons, menu
+#   presses dropped), a fight on entering each room (25.6 x 19.2 cells): the
+#   east room, its north door, the north-east rooms, back west to the room
+#   north of the north room for the special key's chest (mark 1), the three
+#   blocks, the six-pillar room, west and north to the portal room (its floor
+#   plates) and the boss's door; then the boss (area 38).
+# Completed when: area 38 reached and its fight segment ends.
+# State (2026-11-03): boss1 followed the route to the key's room, but the chest
+#   did not open from the owner's spot (no message): whatever makes it appear
+#   (the room's enemies, an order of rooms) is not reproduced yet. The boss
+#   itself is measured from the owner's session instead.
+#! saves build/checkpoints/dungeon1-boss-door
+#! env DOTHEROES_NATIVE_CD=1 DOTHEROES_NATIVE_SOLVER=4,5,6 GCM_WRAP_LAP=1 DOTHEROES_PRESENT_ONCE=1
+#! env DOTHEROES_DEV_STATE=1 DOTHEROES_DEV_KEYS=1 DIAG_FRAMES=frames.log PS3_VERBOSE=0 DOTHEROES_INFLATE_LOG=1
+#! env WINDOW=1 VISIBLE=1 TOPMOST=1 GRAB_EVERY=3 PS3_OSD_FPS=2 DUMP=0 SHOT_EVERY=0
+#! secs 1800
+include common.drive
+include dungeon1_route.drive
+
+block to_boss_door             # the owner's 97-339 s, as above
+  goto 88.8 -130.4 0.25 20 soft
+  goto 89.7 -114.4 0.25 20 soft
+  fight any 45 soft              # into room 3,-6: a room with enemies bars its doors
+  unstick DOWN 6 soft
+  goto 90.6 -110.4 0.3 6 soft   # where it was pressed
+  goto 90.8 -109.7 0.25 20 soft
+  hold UP 0.12               # face up
+  sleep 0.06
+  goto 91.0 -110.5 0.3 6 soft   # where it was pressed
+  press CROSS   # 102.9 s
+  goto 91.3 -111.1 0.3 6 soft   # where it was pressed
+  hold DOWN 0.12             # face down
+  press CROSS   # 103.1 s
+  goto 91.5 -111.8 0.3 6 soft   # where it was pressed
+  hold LEFT 0.12             # face left
+  press CROSS   # 103.3 s
+  goto 91.7 -112.4 0.3 6 soft   # where it was pressed
+  hold RIGHT 0.12            # face right
+  press CROSS   # 103.6 s
+  goto 91.8 -112.8 0.25 20 soft   # life 9
+  goto 92.1 -112.2 0.3 6 soft   # where it was pressed
+  hold LEFT 0.12             # face left
+  press CROSS   # 104.3 s
+  sleep 0.19
+  press CROSS   # 104.5 s
+  goto 92.3 -111.8 0.25 20 soft
+  goto 91.6 -111.5 0.3 6 soft   # where it was pressed
+  hold LEFT 0.12             # face left
+  press CROSS   # 104.9 s
+  goto 90.9 -111.2 0.3 6 soft   # where it was pressed
+  hold RIGHT 0.12            # face right
+  press CROSS   # 105.1 s
+  goto 89.8 -110.8 0.3 6 soft   # where it was pressed
+  press CROSS   # 105.4 s
+  goto 88.9 -110.4 0.3 6 soft   # where it was pressed
+  press CROSS   # 105.7 s
+  goto 88.2 -110.2 0.25 20 soft   # life 8
+  goto 86.6 -103.7 0.25 20 soft
+  goto 85.3 -103.2 0.3 6 soft   # where it was pressed
+  hold LEFT 0.12             # face left
+  press CROSS   # 107.2 s
+  goto 82.1 -102.0 0.25 20 soft
+  goto 95.4 -99.0 0.3 6 soft   # where it was pressed
+  hold RIGHT 0.12            # face right
+  press CROSS   # 110.3 s
+  goto 100.0 -98.4 0.25 20 soft
+  goto 94.6 -103.7 0.25 20 soft
+  hold DOWN 0.12             # face down
+  press CROSS   # 112.2 s
+  goto 94.7 -109.2 0.25 20 soft
+  goto 100.5 -105.3 0.25 20 soft
+  goto 107.4 -105.2 0.3 6 soft   # where it was pressed
+  fight any 45 soft              # into room 4,-6: a room with enemies bars its doors
+  unstick DOWN 6 soft
+  hold RIGHT 0.12            # face right
+  press CROSS   # 117.2 s
+  goto 110.7 -105.2 0.3 6 soft   # where it was pressed
+  press CROSS   # 118.1 s
+  goto 112.1 -105.2 0.25 20 soft
+  goto 112.7 -104.6 0.3 6 soft   # where it was pressed
+  hold RIGHT 0.12            # face right
+  press CROSS   # 119.0 s
+  goto 113.6 -103.7 0.25 20 soft
+  goto 116.4 -105.4 0.25 20 soft
+  goto 114.5 -94.0 0.3 6 soft   # where it was pressed
+  fight any 45 soft              # into room 4,-5: a room with enemies bars its doors
+  unstick DOWN 6 soft
+  hold LEFT 0.12             # face left
+  press CROSS   # 124.3 s
+  goto 114.6 -92.6 0.3 6 soft   # where it was pressed
+  press CROSS   # 125.0 s
+  hold RIGHT 0.12            # face right
+  sleep 0.54
+  press CROSS   # 125.5 s
+  goto 114.2 -92.9 0.25 20 soft
+  goto 115.5 -92.6 0.3 6 soft   # where it was pressed
+  hold RIGHT 0.12            # face right
+  press CROSS   # 126.3 s
+  goto 119.2 -91.7 0.25 20 soft
+  goto 120.7 -88.6 0.3 6 soft   # where it was pressed
+  hold RIGHT 0.12            # face right
+  press CROSS   # 127.7 s
+  goto 121.7 -86.7 0.25 20 soft
+  goto 124.2 -88.6 0.25 20 soft
+  goto 112.0 -88.6 0.25 20 soft
+  goto 112.0 -87.3 0.25 20 soft
+  sleep 1.11
+  goto 112.8 -87.3 0.3 6 soft   # where it was pressed
+  goto 116.0 -87.3 0.3 6 soft   # where it was pressed
+  hold RIGHT 0.12            # face right
+  press CROSS   # 142.1 s
+  goto 129.6 -87.3 0.25 20 soft
+  fight any 45 soft              # into room 5,-5: a room with enemies bars its doors
+  unstick DOWN 6 soft
+  goto 135.3 -89.5 0.25 20 soft
+  hold RIGHT 0.12            # face right
+  sleep 0.25
+  press CROSS   # 147.4 s
+  goto 136.9 -89.0 0.3 6 soft   # where it was pressed
+  press CROSS   # 148.0 s
+  goto 138.1 -88.9 0.3 6 soft   # where it was pressed
+  press CROSS   # 148.8 s
+  goto 138.9 -88.9 0.25 20 soft
+  hold RIGHT 0.12            # face right
+  sleep 0.30
+  press CROSS   # 149.6 s
+  goto 139.3 -87.4 0.25 20 soft
+  goto 148.0 -88.7 0.25 20 soft
+  goto 149.3 -87.7 0.3 6 soft   # where it was pressed
+  hold UP 0.12               # face up
+  press CROSS   # 151.9 s
+  goto 151.2 -86.4 0.25 20 soft
+  hold UP 0.12               # face up
+  sleep 0.18
+  press CROSS   # 152.7 s
+  goto 151.2 -84.6 0.3 6 soft   # where it was pressed
+  press CROSS   # 153.2 s
+  goto 151.2 -83.8 0.25 20 soft   # life 10
+  goto 146.7 -79.4 0.25 20 soft
+  goto 136.4 -79.2 0.3 6 soft   # where it was pressed
+  hold LEFT 0.12             # face left
+  press CROSS   # 155.9 s
+  goto 131.8 -79.2 0.25 20 soft
+  goto 130.4 -85.9 0.25 20 soft
+  hold DOWN 0.12             # face down
+  sleep 0.44
+  sleep 0.40
+  sleep 1.50
+  sleep 0.74
+  sleep 1.12
+  goto 99.2 -85.9 0.25 20 soft
+  fight any 45 soft              # into room 3,-5: a room with enemies bars its doors
+  unstick DOWN 6 soft
+  goto 98.9 -84.7 0.3 6 soft   # where it was pressed
+  hold LEFT 0.12             # face left
+  press CROSS   # 174.1 s
+  goto 98.4 -82.8 0.25 20 soft
+  goto 94.7 -79.8 0.3 6 soft   # where it was pressed
+  hold LEFT 0.12             # face left
+  press CROSS   # 175.7 s
+  goto 93.9 -79.2 0.25 20 soft
+  goto 87.4 -83.2 0.3 6 soft   # where it was pressed
+  hold RIGHT 0.12            # face right
+  press CROSS   # 177.2 s
+  goto 85.1 -84.0 0.25 20 soft   # life 9
+  goto 88.5 -84.0 0.25 20 soft
+  goto 88.8 -79.8 0.25 20 soft
+  goto 81.3 -80.4 0.25 20 soft
+  goto 86.2 -80.7 0.25 20 soft
+  goto 89.2 -76.8 0.25 20 soft
+  fight any 45 soft              # into room 3,-4: a room with enemies bars its doors
+  unstick DOWN 6 soft
+  goto 87.8 -74.4 0.25 20 soft
+  goto 89.3 -70.2 0.25 20 soft   # life 8
+  hold LEFT 0.12             # face left
+  press CROSS   # 186.5 s
+  goto 90.3 -69.9 0.3 6 soft   # where it was pressed
+  hold RIGHT 0.12            # face right
+  press CROSS   # 186.9 s
+  goto 91.3 -69.7 0.3 6 soft   # where it was pressed
+  press CROSS   # 187.2 s
+  goto 91.9 -69.5 0.3 6 soft   # where it was pressed
+  hold UP 0.12               # face up
+  press CROSS   # 187.5 s
+  goto 91.9 -69.5 0.25 20 soft
+  hold LEFT 0.12             # face left
+  sleep 0.23
+  press CROSS   # 187.7 s
+  sleep 0.46
+  press CROSS   # 188.2 s
+  goto 91.8 -70.1 0.3 6 soft   # where it was pressed
+  hold DOWN 0.12             # face down
+  press CROSS   # 188.4 s
+  hold LEFT 0.12             # face left
+  sleep 0.19
+  press CROSS   # 188.6 s
+  goto 90.9 -70.4 0.3 6 soft   # where it was pressed
+  press CROSS   # 189.0 s
+  goto 90.4 -70.6 0.3 6 soft   # where it was pressed
+  press CROSS   # 189.3 s
+  hold DOWN 0.12             # face down
+  sleep 0.20
+  press CROSS   # 189.5 s
+  goto 89.9 -70.7 0.25 20 soft
+  goto 86.8 -70.0 0.3 6 soft   # where it was pressed
+  hold UP 0.12               # face up
+  press CROSS   # 190.5 s
+  goto 86.3 -69.9 0.25 20 soft
+  hold UP 0.12               # face up
+  sleep 0.06
+  press CROSS   # 190.7 s
+  goto 88.1 -69.8 0.3 6 soft   # where it was pressed
+  press CROSS   # 191.3 s
+  goto 89.3 -69.7 0.25 20 soft
+  goto 89.2 -69.1 0.3 6 soft   # where it was pressed
+  hold UP 0.12               # face up
+  press CROSS   # 191.9 s
+  goto 88.6 -65.5 0.25 20 soft
+  goto 82.3 -63.2 0.25 20 soft
+  goto 95.5 -70.1 0.25 20 soft
+  goto 88.2 -69.0 0.25 20 soft
+  goto 89.3 -66.2 0.25 8 soft    # the special key's chest (FE6660 at (88.8, -63.2)): the owner faced
+  goto 89.3 -64.6 0.15 6 soft    # up into it from (89.32, -64.61) at 197.7 s (mark 1)
+  press UP 8
+  press CROSS
+  sleep 2.5
+  press CROSS
+  sleep 1.2
+  press CROSS
+  sleep 0.8
+  unstick DOWN 8 soft
+  goto 89.3 -64.6 0.25 20 soft
+  sleep 1.50
+  press CROSS   # 200.9 s
+  sleep 0.74
+  press CROSS   # 201.7 s
+  sleep 0.60
+  sleep 1.50
+  press CROSS   # 204.0 s
+  sleep 0.56
+  press CROSS   # 204.6 s
+  sleep 0.67
+  press CROSS   # 205.2 s
+  goto 91.3 -68.6 0.25 20 soft
+  goto 93.9 -69.1 0.3 6 soft   # where it was pressed
+  hold RIGHT 0.12            # face right
+  press CROSS   # 207.1 s
+  goto 96.3 -69.5 0.25 20 soft
+  goto 100.0 -63.3 0.25 20 soft
+  hold UP 0.12               # face up
+  press CROSS   # 208.7 s
+  goto 97.8 -60.0 0.25 20 soft
+  goto 82.8 -60.0 0.3 6 soft   # where it was pressed
+  hold LEFT 0.12             # face left
+  press CROSS   # 211.7 s
+  goto 81.4 -60.0 0.25 20 soft
+  goto 89.8 -59.0 0.3 6 soft   # where it was pressed
+  hold DOWN 0.12             # face down
+  press CROSS   # 213.6 s
+  sleep 0.27
+  press CROSS   # 213.9 s
+  goto 89.8 -58.6 0.25 20 soft
+  goto 86.9 -60.1 0.25 20 soft
+  goto 88.7 -78.0 0.25 20 soft
+  fight any 45 soft              # into room 3,-5: a room with enemies bars its doors
+  unstick DOWN 6 soft
+  goto 85.3 -83.9 0.25 20 soft
+  goto 86.0 -88.9 0.25 20 soft
+  goto 92.5 -88.8 0.25 20 soft
+  goto 95.3 -87.0 0.25 20 soft
+  goto 91.5 -84.1 0.25 20 soft
+  goto 94.7 -88.7 0.25 20 soft
+  goto 93.9 -93.7 0.25 20 soft
+  goto 102.5 -86.8 0.25 20 soft   # life 5
+  fight any 45 soft              # into room 4,-5: a room with enemies bars its doors
+  unstick DOWN 6 soft
+  goto 112.9 -85.7 0.25 20 soft
+  goto 117.6 -69.2 0.25 20 soft
+  fight any 45 soft              # into room 4,-4: a room with enemies bars its doors
+  unstick DOWN 6 soft
+  goto 116.2 -66.6 0.3 6 soft   # where it was pressed
+  hold UP 0.12               # face up
+  press CROSS   # 236.9 s
+  goto 115.2 -64.9 0.25 20 soft
+  goto 115.3 -61.6 0.3 6 soft   # where it was pressed
+  hold LEFT 0.12             # face left
+  press CROSS   # 238.3 s
+  goto 115.3 -61.3 0.25 20 soft
+  goto 111.0 -62.5 0.25 20 soft   # life 7
+  goto 114.0 -68.9 0.25 20 soft
+  goto 106.1 -69.6 0.3 6 soft   # where it was pressed
+  hold LEFT 0.12             # face left
+  press CROSS   # 241.5 s
+  goto 105.6 -69.6 0.25 20 soft
+  hold DOWN 0.12             # face down
+  sleep 0.44
+  press CROSS   # 242.0 s
+  sleep 0.21
+  press CROSS   # 242.2 s
+  goto 105.7 -70.2 0.3 6 soft   # where it was pressed
+  press CROSS   # 242.5 s
+  goto 105.9 -70.8 0.3 6 soft   # where it was pressed
+  press CROSS   # 243.1 s
+  goto 106.2 -71.4 0.25 20 soft
+  goto 111.5 -74.4 0.25 20 soft
+  goto 120.0 -67.5 0.3 6 soft   # where it was pressed
+  hold RIGHT 0.12            # face right
+  press CROSS   # 246.5 s
+  goto 120.9 -66.9 0.25 20 soft   # life 6
+  hold RIGHT 0.12            # face right
+  sleep 0.19
+  press CROSS   # 247.1 s
+  goto 121.1 -67.7 0.3 6 soft   # where it was pressed
+  press CROSS   # 247.7 s
+  goto 121.1 -68.0 0.25 20 soft
+  goto 135.5 -69.0 0.25 20 soft   # life 6
+  fight any 45 soft              # into room 5,-4: a room with enemies bars its doors
+  unstick DOWN 6 soft
+  goto 134.2 -68.2 0.3 6 soft   # where it was pressed
+  hold LEFT 0.12             # face left
+  press CROSS   # 252.5 s
+  goto 131.5 -66.5 0.25 20 soft
+  hold UP 0.12               # face up
+  sleep 0.05
+  press CROSS   # 253.3 s
+  goto 131.3 -65.5 0.3 6 soft   # where it was pressed
+  press CROSS   # 253.9 s
+  goto 131.1 -64.9 0.3 6 soft   # where it was pressed
+  press CROSS   # 254.3 s
+  goto 131.0 -63.9 0.3 6 soft   # where it was pressed
+  press CROSS   # 254.5 s
+  goto 130.4 -60.3 0.25 20 soft
+  goto 130.4 -67.2 0.25 20 soft
+  goto 133.3 -67.5 0.3 6 soft   # where it was pressed
+  goto 139.1 -68.1 0.3 6 soft   # where it was pressed
+  press CIRCLE   # 257.5 s
+  goto 145.3 -68.1 0.3 6 soft   # where it was pressed
+  press CROSS   # 258.4 s
+  goto 146.4 -68.1 0.25 20 soft
+  goto 151.3 -70.4 0.25 20 soft
+  hold DOWN 0.12             # face down
+  sleep 0.13
+  press CROSS   # 259.7 s
+  goto 151.3 -74.1 0.25 20 soft
+  goto 144.8 -71.2 0.25 20 soft
+  goto 138.4 -63.1 0.25 20 soft
+  goto 132.6 -66.5 0.25 20 soft
+  goto 127.3 -67.6 0.25 20 soft
+  fight any 45 soft              # into room 4,-4: a room with enemies bars its doors
+  unstick DOWN 6 soft
+  goto 133.5 -67.6 0.25 20 soft
+  fight any 45 soft              # into room 5,-4: a room with enemies bars its doors
+  unstick DOWN 6 soft
+  goto 140.0 -64.7 0.25 20 soft
+  goto 136.8 -63.4 0.25 20 soft
+  goto 138.5 -63.2 0.25 20 soft
+  goto 140.9 -57.6 0.25 20 soft
+  fight any 45 soft              # into room 5,-3: a room with enemies bars its doors
+  unstick DOWN 6 soft
+  goto 140.8 -53.6 0.3 6 soft   # where it was pressed
+  hold UP 0.12               # face up
+  press CROSS   # 279.0 s
+  goto 140.7 -50.8 0.25 20 soft
+  goto 139.5 -50.7 0.3 6 soft   # where it was pressed
+  hold LEFT 0.12             # face left
+  press CIRCLE   # 280.1 s
+  goto 135.5 -50.2 0.3 6 soft   # where it was pressed
+  press CROSS   # 281.3 s
+  goto 134.3 -50.0 0.3 6 soft   # where it was pressed
+  press CROSS   # 281.9 s
+  goto 133.7 -49.5 0.3 6 soft   # where it was pressed
+  press CROSS   # 282.3 s
+  goto 133.3 -49.2 0.3 6 soft   # where it was pressed
+  press CROSS   # 282.6 s
+  goto 132.8 -48.7 0.3 6 soft   # where it was pressed
+  press CROSS   # 283.0 s
+  sleep 0.19
+  press CROSS   # 283.1 s
+  goto 132.3 -48.7 0.3 6 soft   # where it was pressed
+  press CROSS   # 283.3 s
+  goto 131.3 -48.7 0.25 20 soft
+  goto 138.0 -48.8 0.25 20 soft
+  goto 140.0 -40.8 0.25 20 soft
+  goto 141.1 -40.8 0.3 6 soft   # where it was pressed
+  hold RIGHT 0.12            # face right
+  press CIRCLE   # 286.4 s
+  goto 144.3 -40.8 0.3 6 soft   # where it was pressed
+  press CROSS   # 287.0 s
+  goto 145.1 -40.8 0.25 20 soft
+  goto 145.3 -41.4 0.3 6 soft   # where it was pressed
+  hold RIGHT 0.12            # face right
+  press CROSS   # 287.4 s
+  goto 145.9 -42.5 0.3 6 soft   # where it was pressed
+  hold DOWN 0.12             # face down
+  press CROSS   # 287.9 s
+  goto 146.1 -43.1 0.3 6 soft   # where it was pressed
+  press CROSS   # 288.1 s
+  goto 146.3 -43.4 0.25 20 soft
+  goto 124.2 -46.9 0.3 6 soft   # where it was pressed
+  fight any 45 soft              # into room 4,-3: a room with enemies bars its doors
+  unstick DOWN 6 soft
+  hold UP 0.12               # face up
+  press CROSS   # 293.5 s
+  goto 124.0 -46.9 0.25 20 soft
+  goto 123.5 -48.0 0.3 6 soft   # where it was pressed
+  hold UP 0.12               # face up
+  press CIRCLE   # 293.9 s
+  goto 122.8 -49.6 0.3 6 soft   # where it was pressed
+  press CROSS   # 294.4 s
+  goto 122.5 -50.5 0.25 20 soft   # life 5
+  hold UP 0.12               # face up
+  sleep 0.07
+  press CROSS   # 294.7 s
+  goto 123.2 -49.5 0.3 6 soft   # where it was pressed
+  hold RIGHT 0.12            # face right
+  press CROSS   # 294.9 s
+  goto 125.2 -46.8 0.3 6 soft   # where it was pressed
+  hold UP 0.12               # face up
+  press CIRCLE   # 295.6 s
+  goto 125.4 -46.6 0.25 20 soft
+  goto 125.2 -43.6 0.3 6 soft   # where it was pressed
+  hold DOWN 0.12             # face down
+  press CIRCLE   # 296.5 s
+  goto 125.2 -42.8 0.25 20 soft
+  goto 125.2 -45.1 0.3 6 soft   # where it was pressed
+  hold DOWN 0.12             # face down
+  press CROSS   # 297.2 s
+  goto 125.2 -50.2 0.3 6 soft   # where it was pressed
+  press CROSS   # 298.2 s
+  goto 125.2 -54.0 0.25 20 soft
+  goto 118.8 -55.3 0.25 20 soft
+  goto 114.5 -53.6 0.3 6 soft   # where it was pressed
+  hold UP 0.12               # face up
+  press CIRCLE   # 300.7 s
+  goto 112.7 -53.0 0.25 20 soft
+  goto 112.7 -49.9 0.3 6 soft   # where it was pressed
+  hold UP 0.12               # face up
+  press CROSS   # 301.6 s
+  goto 112.7 -47.4 0.25 20 soft
+  goto 108.3 -40.8 0.25 20 soft
+  hold LEFT 0.12             # face left
+  sleep 0.16
+  press CROSS   # 303.3 s
+  goto 106.3 -40.8 0.25 20 soft
+  goto 114.9 -39.6 0.25 20 soft
+  goto 115.4 -34.6 0.3 6 soft   # where it was pressed
+  fight any 45 soft              # into room 4,-2: a room with enemies bars its doors
+  unstick DOWN 6 soft
+  hold UP 0.12               # face up
+  press CIRCLE   # 307.9 s
+  goto 115.7 -32.9 0.3 6 soft   # where it was pressed
+  press CROSS   # 308.2 s
+  goto 115.9 -29.8 0.3 6 soft   # where it was pressed
+  press CROSS   # 309.1 s
+  goto 115.9 -28.4 0.25 20 soft
+  hold DOWN 0.12             # face down
+  sleep 0.12
+  press CIRCLE   # 309.6 s
+  goto 116.0 -29.5 0.3 6 soft   # where it was pressed
+  press CROSS   # 310.1 s
+  goto 116.2 -30.7 0.3 6 soft   # where it was pressed
+  press CROSS   # 310.6 s
+  goto 117.5 -35.5 0.25 20 soft
+  goto 119.5 -33.7 0.25 20 soft
+  goto 117.0 -31.6 0.3 6 soft   # where it was pressed
+  hold UP 0.12               # face up
+  press CIRCLE   # 313.2 s
+  goto 114.5 -29.7 0.3 6 soft   # where it was pressed
+  press CROSS   # 313.9 s
+  goto 113.0 -29.0 0.25 20 soft
+  hold UP 0.12               # face up
+  sleep 0.10
+  press CIRCLE   # 314.9 s
+  goto 113.0 -26.6 0.3 6 soft   # where it was pressed
+  press CROSS   # 315.6 s
+  goto 112.8 -25.4 0.3 6 soft   # where it was pressed
+  press CROSS   # 316.0 s
+  goto 112.5 -24.9 0.3 6 soft   # where it was pressed
+  press CROSS   # 316.2 s
+  goto 112.1 -23.9 0.3 6 soft   # where it was pressed
+  press CROSS   # 316.6 s
+  goto 111.8 -23.3 0.3 6 soft   # where it was pressed
+  press CROSS   # 316.8 s
+  hold RIGHT 0.12            # face right
+  sleep 0.22
+  press CROSS   # 317.1 s
+  goto 111.3 -21.6 0.25 20 soft
+  goto 99.0 -29.0 0.3 6 soft   # where it was pressed
+  fight any 45 soft              # into room 3,-2: a room with enemies bars its doors
+  unstick DOWN 6 soft
+  hold UP 0.12               # face up
+  press CROSS   # 322.2 s
+  goto 99.0 -29.0 0.25 20 soft
+  goto 96.9 -26.4 0.25 20 soft
+  goto 94.5 -26.1 0.3 6 soft   # where it was pressed
+  sleep 1.50
+  press CROSS   # 327.6 s
+  sleep 0.49
+  press CROSS   # 328.1 s
+  goto 84.3 -26.2 0.3 6 soft   # where it was pressed
+  hold LEFT 0.12             # face left
+  press CROSS   # 329.9 s
+  goto 82.8 -26.2 0.3 6 soft   # where it was pressed
+  press CROSS   # 330.4 s
+  goto 81.2 -26.3 0.3 6 soft   # where it was pressed
+  press CROSS   # 331.0 s
+  goto 79.5 -26.5 0.25 20 soft
+  goto 88.5 -25.9 0.25 20 soft
+  goto 89.8 -19.7 0.25 20 soft
+end
+
+log TitleMovie 120
+sleep 5
+call continue
+state area==37,life>0 90
+sleep 3
+rooms 25.6 19.2
+segment explore to-boss-door
+call to_boss_door
+endseg
+actors list
+segment fight boss
+call into_boss_room
+fight any 240 soft
+endseg
+actors list
+sleep 5

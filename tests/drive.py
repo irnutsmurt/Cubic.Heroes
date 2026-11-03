@@ -31,7 +31,7 @@ scenario header):
   hold <BUTTON> <sec>         hold for <sec> of wall time (not guest reports:
                               those pass twice as fast at 60 fps); logs where
                               the hero went (hx/hz)
-  unstick <DIR> [tries]       a short step in DIR; while the hero does not move (a
+  unstick <DIR> [tries] [soft]  a short step in DIR; while the hero does not move (a
                               dialogue open), CROSS and again, up to tries (8)
   actors list                 every character and object within 40 units, nearest
                               first: class, position, life
@@ -856,7 +856,14 @@ def step(lineno, line, op, a):
                 raise
             say(f"  (soft) {e}")
     elif op == "unstick":
-        unstick(a[0].upper(), int(a[1]) if len(a) > 1 else 8)
+        soft = a[-1] == "soft"
+        a = a[:-1] if soft else a
+        try:
+            unstick(a[0].upper(), int(a[1]) if len(a) > 1 else 8)
+        except Fail as e:
+            if not soft or not alive():
+                raise
+            say(f"  (soft) {e}")
     elif op == "cross":
         soft = a[-1] == "soft"
         a = a[:-1] if soft else a
