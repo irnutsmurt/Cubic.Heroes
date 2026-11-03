@@ -281,7 +281,14 @@ Finalize fix, wait-free creation) is measured against it.
    version changed started empty and said so (cache-tamper). What still
    compiles during play, warm: nothing on this route; the compile log
    (`[vk-compile]` lines, counted per segment by tests/batch_report.py)
-   shows any that does.
+   shows any that does. A damaged file: one translation with its tail
+   garbled was handed to the driver as it was, and its pipeline failed on
+   every draw (11,912 failures in one run). Translation files now end with a
+   checksum of key and words (ps3recomp 0091, cache format 2), so a damaged
+   or truncated one is a miss and is translated again, and a pipeline the
+   driver refuses is remembered and not asked for again. NVIDIA's own cache
+   follows `__GL_SHADER_DISK_CACHE_PATH` for Vulkan on Windows (its files
+   appeared in the test folder), which is how the cold runs were made cold.
    **The room set-up frames, tracked apart:** walking into the dungeon's
    first room costs two frames of ~50-53 ms, ~0.6 s apart, every visit,
    warm or cold -- the game's main thread busy in its own code (the profile
@@ -617,7 +624,28 @@ vblank pacing was fixed (patch 0034).
   linear saturates the picture close to real-hardware screenshots but slightly
   dark; find what the PS3 does (compare RPCS3's scene buffer) before fixing.
 
-**Setup app (SFA3 style): written, not yet run end to end.**
+**Setup app (SFA3 style): the headless conversion run end to end on Windows;
+the GUI and the frozen bundle not yet.** `setup_app.py --convert <disc> <keys>
+<folder>` (2026-11-02, the owner's disc and keys, a fresh folder) produced a
+working install: the game starts with no arguments, keeps its own saves and
+shader cache under `data/`, plays with sound. Tested as a player starts it
+(`INSTALLED=<install>` in tests/boot_smoke.py: its exe, data folder,
+dotheroes.cfg and defaults, the harness's switches dropped):
+- *Smoothness:* with the settings the app then wrote (FPS and window only) an
+  install fought the river at p99 26.8/27.3 ms, 10-16% of frames over 18 ms
+  -- the original collision task, not what development measures. The app now
+  writes the validated settings (`DOTHEROES_NATIVE_CD=1`,
+  `DOTHEROES_NATIVE_SOLVER=4,5,6`, `GCM_WRAP_LAP=1`,
+  `DOTHEROES_PRESENT_ONCE=1`) into a new install's dotheroes.cfg and adds
+  missing ones to an older one (a player's own values kept); with them the
+  same fights ran p99 17.3/17.5 ms, under 1% over 18 ms, as in development.
+  Native collision is experimental: not bit-exact with the game's SPU task.
+- *Cache:* on by default at `data/cache/shaders`; a relaunch read 83
+  translations (0.9 MB, 7 ms) and reused the 1.5 MB pipeline cache.
+- *Saves:* installed_save / installed_continue: an arrow bought in field
+  area 14's shop (HUD wallet 0224 -> 0222, arrows 14 -> 15), the system
+  menu's SAVE, the game exited; relaunched, CONTINUE in area 14 at (87.2,
+  -119.2) with wallet 0222 and 15 arrows.
 - `setup_app.py` (Tkinter GUI, adapted from SFA3's converter), with
   `--convert DISC KEYS FOLDER`, `--update FOLDER`, and `app <tool>.py args`
   (runs the lifting tools inside the frozen app).
@@ -927,8 +955,8 @@ tooling, the native Windows build, measuring on the 3070) are done; see
    `tests/frame_times.py` and pass-dump/screenshot A/B.
 2. **Colours:** see "Where things stand"; compare RPCS3's scene buffer.
 3. **boot_smoke.sh:** retire it once `boot_smoke.py` is tested on Linux.
-4. **Run the setup app end to end** on both OSes (`python setup_app.py`, then
-   `--convert`), then `tools/make_bundle.py --prebuilt` and the frozen apps.
+4. **Run the setup app end to end** on both OSes (the GUI, `python
+   setup_app.py`; `--convert` passed on Windows 2026-11-02), then `tools/make_bundle.py --prebuilt` and the frozen apps.
    Watch for: modules the lifting tools need inside the frozen app
    (`make_bundle.tool_imports()`), multiprocessing in the frozen lifter, the
    exact flag groups in `zig_build` vs the CMake build, link libraries.
@@ -1470,4 +1498,4 @@ Edit in `build/ref/ps3recomp` (branch `dotheroes`), commit there as
 `git format-patch --start-number <next> -o ../../../patches/ps3recomp HEAD~<n>`
 and commit the patch files here. `tools/pipeline.py` refuses to run with
 uncommitted changes in that checkout, and re-applies the whole series when
-the patch files change. 90 patches (0001-0090) as of 2026-11-02.
+the patch files change. 91 patches (0001-0091) as of 2026-11-02.
