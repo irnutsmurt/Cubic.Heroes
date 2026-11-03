@@ -325,17 +325,14 @@ Finalize fix, wait-free creation) is measured against it.
    standing long-session test after any renderer or memory change: reloads,
    deaths and area changes, not idle time. Then longer sessions with real
    area changes (the owner's play session gives them).
-2. Take the dungeon deeper from checkpoint dungeon1-entrance (CONTINUE puts
-   the hero just inside the dungeon's door; the town route is no longer
-   needed): the first room's fight (the owner's record, 1,006-1,045 s:
-   north through the opened door, west along the room with the sword), then
-   the boss in area 38 (record ~1,580 s), measured like the river fight, with
-   normal damage and real audio in representative runs. Where CONTINUE
-   restores is the game's own choice (the before/after-dungeon1 saves, made
-   at the castle, continue at the town's inn; field-area14 near where it was
-   made; the dungeon save at the dungeon's door), so a save next to the boss
-   may still continue at the door: the owner's save there, checked with
-   tests/scripts/continue_where.drive, settles it.
+2. The first dungeon past the east room's north door (the owner's record
+   1,325-1,330 s; see "Game coverage": the door is the blocker, not yet
+   understood), then the boss in area 38 (record ~1,535-1,592 s), measured
+   like the river fight with normal damage and real audio in representative
+   runs. The quickest way: the owner's save at the boss door (a separate
+   slot, with the key), checked with tests/scripts/continue_where.drive --
+   dungeon saves have continued at the dungeon's door, the doors kept, so
+   the route from the door to the boss may still be needed.
 3. The hitches: what is left of the dungeon entry (the walker's first-visit
    frame: resource creation without GPU waits, then the shader translations
    -- a disk cache of them; the main thread's ~50 ms area set-up), the fight
@@ -386,7 +383,7 @@ open (`unstick`); `fight <class>` clears one class of enemies near the hero
 tests/route_from_record.py turns the record into a route of `goto`
 waypoints and area checks.
 
-**Game coverage (2026-11-02).** What has been run -- scenes, not the whole
+**Game coverage (2026-11-03).** What has been run -- scenes, not the whole
 game. Driven tests start from the owner's early saves (the castle, the first
 sword) or, since the owner's first play session, from its saves.
 - *Gameplay, driven:* the castle's field; the castle's interior (the gate's
@@ -411,8 +408,43 @@ sword) or, since the owner's first play session, from its saves.
   dungeon's entrance door (area 37, (88.8, -130.4)); the floor switch's door
   and the key's door stay open (walked straight through); the rooms'
   enemies come back. That save is checkpoint dungeon1-past-key-door.
-  Not automated yet: north of the key's door (the owner's 1,091-1,534 s),
-  the boss (area 38).
+  **North of the key's door** (2026-11-03, dungeon1_deeper from
+  dungeon1-past-key-door, can't-die on): the west rooms (a block pushed into
+  an enclosure; its chest, approached from below at x 37.6-38.0, gave the
+  key to the door north-west of the bat room), the bat room cleared (its west
+  door is barred until then), that door, the fire-pit and enclosure rooms
+  cleared, the enclosure room's north door (it opened in the runs that also
+  killed a life-32 enemy in the fire-pit room, so it is retried with both
+  rooms cleared), the room beyond it (a 10 G chest) and back south; saved
+  there as checkpoint dungeon1-north-rooms (CONTINUE: the dungeon's door,
+  the doors kept). From it (dungeon1_east): the rooms south of the key's door
+  and the entrance's east room cleared; **the east room's north door does
+  not open** -- no "You need a key", the menu's KEYS empty; the owner pressed
+  SQUARE and CIRCLE by two red cylinders beyond the lava strip on the east
+  wall, at full life, and was through two seconds later; SQUARE, CROSS and
+  CIRCLE there at life 9 and at full life (`life 10`, route discovery only)
+  did not open it. A guide says the Grass Temple has a Red Door that normal
+  keys do not open. Not automated: from that door to the boss (the owner's
+  1,330-1,534 s), the boss (area 38). The menu (TRIANGLE) in these saves has
+  nothing equipped: ITEMS a bottle, a red-topped item and a small chest item.
+  Normal damage with sound (rep-dmg1, dungeon1_persist): the north and east
+  room fights at p99 17.2 ms, under 0.2% of frames over 18 ms, worst 33 ms
+  (the 50 ms frame is the first room's set-up frame); the hero died in the
+  east room and near its chest (GAME OVER, Continue, the way back driven).
+- *After the first dungeon* (field_after_dungeon from after-dungeon1,
+  2026-11-03): the town to field 15, area 8 north of it, the cave 117 (an old
+  man: "Come back when you have a bow."), field 14, the house 146 (villagers,
+  a well, a YES/NO question) and out, every area change confirmed: passes
+  with can't-die (p99 17.2 ms); with normal damage the hero died in the
+  fields (the route's swings are the owner's, not fight-aware) and the game
+  put it back at the inn. Memory rose on the first visits of those areas and
+  then held (1,533-1,534 MB over the last 90 s); a repeat cycle would confirm
+  the bound. The shader cache on this route (build/baselines/2026-11-03-
+  field-shader-cache): cold, 20 translations and 123 pipelines (482 ms) in
+  the route and three stalls of 100, 108 and 133 ms; warm, nothing translated,
+  116 pipelines in 5 ms, no frame of 100 ms+, p99.9 43.2 -> 19.9 ms. Frames of
+  60-94 ms remain in both, not shader work: tracked with the room set-up
+  frames.
 - *Played by the owner* (manual coverage, not counted as automated)
   (2026-11-02, 38.5 minutes, the validated
   configuration with every fix of the day -- the session's binary is the one
