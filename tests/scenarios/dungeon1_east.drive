@@ -9,6 +9,9 @@
 #   northeast_rooms, boss_approach), `actors list` at each stretch's end.
 # Completed when: each stretch's segment ends where the owner's did; the last
 #   at the boss's door (area 38 at 1,534.9 s in the owner's record).
+# State (2026-11-03): east_rooms reaches the east room (the key's chest) and
+#   clears it, but its north door stays shut (east_wall_tries: not solved), so
+#   the later stretches stall.
 #! saves build/checkpoints/dungeon1-north-rooms
 #! env DOTHEROES_NATIVE_CD=1 DOTHEROES_NATIVE_SOLVER=4,5,6 GCM_WRAP_LAP=1 DOTHEROES_PRESENT_ONCE=1
 #! env DOTHEROES_DEV_STATE=1 DOTHEROES_DEV_KEYS=1 DIAG_FRAMES=frames.log PS3_VERBOSE=0

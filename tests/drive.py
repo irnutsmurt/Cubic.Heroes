@@ -19,6 +19,9 @@ scenario header):
                               the last press (the game reacted)
   shot <name>                 save a screenshot
   touch <file>                create <run>/<file> (e.g. a capture trigger)
+  life <n>                    set the hero's life to n half apples, once (DOTHEROES_DEV_STATE;
+                              route discovery: full life's long sword reaches targets the game
+                              puts out of reach -- never in a measured run)
   state <cond>[,<cond>] [timeout]  wait until the game's state (DOTHEROES_DEV_STATE=1,
                               <run>/state.txt) meets every condition, e.g.
                               `state area==18,life>0 60` or `state steps>+20` (a
@@ -842,6 +845,12 @@ def step(lineno, line, op, a):
     elif op == "touch":
         acted()
         open(os.path.join(run, a[0]), "w").close()
+    elif op == "life":   # set the hero's life once (DOTHEROES_DEV_STATE): route discovery, not measurement
+        acted()
+        with open(os.path.join(run, "life.trigger"), "w") as f:
+            f.write(f"{int(a[0])}\n")
+        wait(0.5)
+        say(f"life set to {int(a[0])} half apples")
     elif op == "shot":
         shot(a[0] if a else f"line{lineno}")
     elif op == "stop":

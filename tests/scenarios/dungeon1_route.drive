@@ -585,6 +585,14 @@ block east_rooms
   press CROSS   # 1307.3 s
   goto 63.4 -112.2 0.25 20 soft
   goto 57.1 -112.9 0.25 20 soft   # life 10
+  goto 63.0 -106.0 0.4 10 soft   # the room south of the key's door, cleared as the owner did
+  fight any 60 soft              # (1,296-1,310 s) -- a key for the east room's red door may drop
+  goto 58.0 -110.0 0.5 10 soft   # here; swept for what fell (a pickup needs walking over)
+  goto 63.0 -112.5 0.5 10 soft
+  goto 67.0 -108.0 0.5 10 soft
+  goto 63.0 -102.0 0.5 10 soft
+  goto 58.0 -104.0 0.5 10 soft
+  goto 63.0 -106.0 0.5 10 soft
   goto 80.6 -103.7 0.3 6 soft   # where it was pressed
   press RIGHT 1                # face right
   press CROSS   # 1314.6 s
@@ -599,6 +607,9 @@ block east_rooms
   press RIGHT 1                # face right
   press CROSS   # 1317.8 s
   goto 90.4 -111.5 0.25 20 soft
+  goto 98.0 -109.6 0.4 10 soft   # into the east room (the key's chest) through the doorway near
+  goto 104.0 -106.5 0.4 10 soft  # z -110 (a straight line to (100, -105) stops on the wall north of it)
+  fight any 120 soft             # its skeletons and blobs keep its north door barred (east1)
   goto 106.2 -105.0 0.3 6 soft   # where it was pressed
   press RIGHT 1                # face right
   press CROSS   # 1322.6 s
@@ -611,17 +622,18 @@ block east_rooms
   press CROSS   # 1324.1 s
   goto 113.7 -103.3 0.3 6 soft   # where it was pressed
   press CROSS   # 1324.6 s
-  goto 116.4 -106.4 0.3 6 soft   # where it was pressed
-  press SQUARE   # 1325.9 s
-  goto 117.2 -106.4 0.3 6 soft   # where it was pressed
-  press SQUARE   # 1326.5 s
+  call east_wall_tries          # what opens the room's north door: being tried (east5: SQUARE there did not)
   goto 117.6 -106.4 0.25 20 soft
   press RIGHT 1                # face right
   sleep 0.29
   press CIRCLE   # 1327.1 s
   goto 117.7 -105.5 0.3 6 soft   # where it was pressed
   press CIRCLE   # 1328.0 s
-  goto 115.4 -92.5 0.3 6 soft   # where it was pressed
+  attempt 3 clear_east_room      # its north door (x 115.4), barred until the room is clear
+    goto 115.4 -97.5 0.3 10
+    goto 115.4 -92.5 0.3 8
+    state hz>@-94.0 3
+  end
   press UP 1                # face up
   press CIRCLE   # 1332.3 s
   goto 115.4 -91.8 0.3 6 soft   # where it was pressed
@@ -997,4 +1009,42 @@ block boss_approach
   sleep 0.60
   press CROSS   # 1531.4 s
   goto 89.9 -19.6 0.25 20 soft
+end
+
+block clear_east_room          # the east room's enemies again, from its middle
+  goto 98.0 -109.6 0.4 10 soft
+  goto 110.0 -104.0 0.4 15 soft
+  fight any 90 soft
+end
+
+block east_wall_tries          # the east room's east wall: two red cylinders (z about -104.5 and -106.5)
+  # beyond the lava strip (the hero stops at x 119.3). The owner, at full life (10: the long
+  # sword), pressed SQUARE twice and CIRCLE twice by them (116.3-117.6, -106.4) and was through
+  # the north door 2 s later (record 1,325.9-1,330.0 s). Not solved: SQUARE, CROSS and CIRCLE
+  # here at life 9 (east5, east6) and at full life (east8: `life 10`, the longer sword stops
+  # short of them) left the door shut; no "You need a key", and the menu's KEYS is empty. A
+  # guide says the Grass Temple has a Red Door normal keys do not open (its Red Key sold
+  # elsewhere): this may be it, though the owner was through. Tries kept for the next attempt.
+  goto 118.6 -104.5 0.3 8 soft
+  hold RIGHT 0.12
+  press CROSS
+  sleep 1.0
+  press SQUARE
+  sleep 1.5
+  goto 118.6 -106.4 0.3 8 soft
+  hold RIGHT 0.12
+  press CROSS
+  sleep 1.0
+  press SQUARE
+  sleep 1.5
+  goto 116.3 -106.4 0.3 8 soft
+  hold RIGHT 0.1
+  press SQUARE
+  sleep 0.6
+  press SQUARE
+  sleep 0.6
+  press CIRCLE
+  sleep 0.8
+  press CIRCLE
+  sleep 1.5
 end
