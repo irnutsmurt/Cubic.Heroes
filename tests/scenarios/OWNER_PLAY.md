@@ -73,6 +73,22 @@ Each save is copied automatically, the moment the game writes it, into
 `build/checkpoints/owner-play/<n>-area<area>/` -- the game writes every save
 over the slot it loaded, so without the copy only the last one would survive.
 
+## The boss session (2026-11-03)
+
+```bash
+env SCENARIO=owner_boss RUN_TAG=owner-boss build/venv/Scripts/python.exe tests/boot_smoke.py
+```
+
+The same game and recording as above, on a save root of its own,
+`build/play-boss/gamedata`, seeded with a copy of checkpoint dungeon1-boss-door
+(a test's save before the boss's portal). CONTINUE starts at the Grass
+Temple's entrance (area 37 at (88.8, -130.4), life 10) with the doors the test
+opened still open: the boomerang in the circle slot, the east room's door, the
+north-east rooms, the six-pillar room's west door. The boss's door says "You
+need a special key." without it. Your regular playthrough
+(`build/play-route/gamedata`) is not touched. Each save is copied into
+`build/checkpoints/owner-boss/`; its shader cache is `build/play-boss/cache`.
+
 ## What is recorded (automatically)
 
 In `build/sessions/boot-<time>-owner-play/`: every frame's time
