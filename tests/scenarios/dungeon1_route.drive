@@ -3,7 +3,7 @@
 # (`include dungeon1_route.drive`): the owner's way
 # from the inn into the dungeon, and its first room up to past the floor switch.
 
-block route_to_dungeon      # from the inn: the owner's way out of town (west), across 15, into the dungeon
+block town_to_field15       # from the inn: the owner's way out of town (west) into field 15
   # tests/route_from_record.py <the session> --from 924 --to 986 --eps 1
   state area==16,life>0 60
   goto 108.3 -189.6 2 25
@@ -20,6 +20,10 @@ block route_to_dungeon      # from the inn: the owner's way out of town (west), 
   # the cliff's corner for 20 s (3 of 10 cycles, 2026-11-02 dungeon-mem10).
   goto 56.0 -142.6 0.4 10 soft
   cross LEFT 15 20           # on across the town's west edge
+end
+
+block route_to_dungeon      # from the inn: the owner's way out of town (west), across 15, into the dungeon
+  call town_to_field15
   goto 147.7 -141.9 2 25
   goto 141.1 -140.4 2 25
   goto 139.6 -137.8 2 25

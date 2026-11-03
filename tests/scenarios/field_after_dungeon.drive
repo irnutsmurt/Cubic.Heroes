@@ -1,0 +1,368 @@
+# Scenario: the owner's way after the first dungeon, town to field 15, area 8,
+# area 117, field 14 and area 146 (SCENARIO=field_after_dungeon). Exploratory:
+# run with DOTHEROES_DEV_CANT_DIE=1 to find the way, then without.
+#
+# Starts from: build/checkpoints/after-dungeon1 (the owner's save at the
+#   castle after the dungeon; CONTINUE: the town's inn, area 16, life 12).
+# Route: dungeon1_route.drive's town_to_field15, then the owner's record
+#   2,012-2,203 s as recorded (presses where they were made; their fights in
+#   field 15 replayed as swings), each area change confirmed (`cross`). Area
+#   117 is a cave with an old man: "Come back when you have a bow."
+# Completed when: back in field 14 from area 146 (the owner at 2,200.5 s).
+#! saves build/checkpoints/after-dungeon1
+#! env DOTHEROES_NATIVE_CD=1 DOTHEROES_NATIVE_SOLVER=4,5,6 GCM_WRAP_LAP=1 DOTHEROES_PRESENT_ONCE=1
+#! env DOTHEROES_DEV_STATE=1 DOTHEROES_DEV_KEYS=1 DIAG_FRAMES=frames.log PS3_VERBOSE=0
+#! env WINDOW=1 VISIBLE=1 TOPMOST=1 GRAB_EVERY=4 PS3_OSD_FPS=2 DUMP=0 SHOT_EVERY=0
+#! secs 900
+include common.drive
+include dungeon1_route.drive
+
+block after_dungeon_way       # the owner's 2,012-2,203 s
+  state area==15,life>0 60
+  # area 15: 2014-2081 s, 64 positions, 23 waypoints
+  goto 145.3 -142.2 1.5 20 soft
+  goto 143.4 -141.2 0.3 6 soft   # where it was pressed
+  press UP 1                # face up
+  press CROSS   # 2015.0 s
+  goto 141.4 -140.2 1.5 20 soft
+  goto 145.2 -138.4 0.3 6 soft   # where it was pressed
+  press UP 1                # face up
+  press CROSS   # 2016.3 s
+  goto 146.5 -137.8 1.5 20 soft
+  goto 146.5 -144.4 1.5 20 soft
+  goto 146.9 -138.9 0.3 6 soft   # where it was pressed
+  press UP 1                # face up
+  press CROSS   # 2018.5 s
+  goto 147.0 -137.3 1.5 20 soft
+  goto 141.5 -154.5 1.5 20 soft
+  goto 143.7 -156.7 0.3 6 soft   # where it was pressed
+  press DOWN 1                # face down
+  press CROSS   # 2022.8 s
+  goto 144.7 -158.4 1.5 20 soft
+  press RIGHT 1                # face right
+  press CROSS   # 2024.1 s
+  goto 147.1 -156.7 1.5 20 soft
+  goto 143.5 -168.3 0.3 6 soft   # where it was pressed
+  press LEFT 1                # face left
+  press CROSS   # 2026.8 s
+  goto 142.8 -170.1 1.5 20 soft
+  goto 137.8 -170.9 0.3 6 soft   # where it was pressed
+  press RIGHT 1                # face right
+  press CROSS   # 2028.3 s
+  goto 137.8 -170.9 1.5 20 soft
+  goto 138.9 -174.2 1.5 20 soft
+  press RIGHT 1                # face right
+  sleep 0.12
+  press CROSS   # 2029.5 s
+  goto 118.5 -169.2 0.3 6 soft   # where it was pressed
+  press LEFT 1                # face left
+  press CROSS   # 2032.5 s
+  goto 115.1 -168.3 0.3 6 soft   # where it was pressed
+  press CROSS   # 2033.4 s
+  goto 114.4 -168.1 1.5 20 soft
+  goto 114.3 -170.4 0.3 6 soft   # where it was pressed
+  press DOWN 1                # face down
+  press CROSS   # 2034.2 s
+  goto 113.4 -173.1 0.3 6 soft   # where it was pressed
+  press CROSS   # 2035.2 s
+  goto 112.6 -174.4 1.5 20 soft
+  goto 110.3 -165.0 0.3 6 soft   # where it was pressed
+  press UP 1                # face up
+  press CROSS   # 2037.2 s
+  goto 109.8 -162.9 0.3 6 soft   # where it was pressed
+  press CROSS   # 2037.7 s
+  goto 110.4 -159.3 1.5 20 soft
+  goto 114.3 -176.6 1.5 20 soft
+  goto 111.5 -185.1 1.5 20 soft
+  goto 118.8 -186.4 0.3 6 soft   # where it was pressed
+  press RIGHT 1                # face right
+  press CROSS   # 2044.4 s
+  goto 119.5 -186.8 0.3 6 soft   # where it was pressed
+  press DOWN 1                # face down
+  press CROSS   # 2045.0 s
+  goto 121.7 -185.7 0.3 6 soft   # where it was pressed
+  press RIGHT 1                # face right
+  press CROSS   # 2046.0 s
+  goto 122.4 -185.1 1.5 20 soft
+  goto 120.4 -192.1 1.5 20 soft
+  goto 93.5 -190.3 0.3 6 soft   # where it was pressed
+  press UP 1                # face up
+  press CROSS   # 2051.7 s
+  goto 89.7 -191.7 1.5 20 soft
+  press LEFT 1                # face left
+  sleep 0.12
+  press CROSS   # 2052.8 s
+  goto 92.8 -190.6 1.5 20 soft
+  press RIGHT 1                # face right
+  press CROSS   # 2053.7 s
+  goto 91.3 -177.7 0.3 6 soft   # where it was pressed
+  press UP 1                # face up
+  press CROSS   # 2055.9 s
+  goto 90.3 -176.4 0.3 6 soft   # where it was pressed
+  press CROSS   # 2056.6 s
+  goto 89.9 -175.8 1.5 20 soft
+  goto 90.7 -175.1 0.3 6 soft   # where it was pressed
+  press UP 1                # face up
+  press CROSS   # 2057.3 s
+  goto 91.9 -173.0 0.3 6 soft   # where it was pressed
+  press CROSS   # 2058.2 s
+  goto 91.3 -169.7 0.3 6 soft   # where it was pressed
+  press CROSS   # 2059.2 s
+  goto 90.6 -157.5 0.3 6 soft   # where it was pressed
+  press L1   # 2061.2 s
+  sleep 1.50
+  press CIRCLE   # 2065.0 s
+  goto 91.7 -149.3 0.3 6 soft   # where it was pressed
+  press CROSS   # 2067.6 s
+  goto 92.6 -148.5 0.3 6 soft   # where it was pressed
+  press CROSS   # 2068.2 s
+  goto 93.1 -147.9 1.5 20 soft
+  goto 92.2 -138.8 0.3 6 soft   # where it was pressed
+  press UP 1                # face up
+  press TRIANGLE   # 2069.9 s
+  goto 91.9 -136.4 0.3 6 soft   # where it was pressed
+  press CIRCLE   # 2070.7 s
+  goto 91.3 -133.7 0.3 6 soft   # where it was pressed
+  press SQUARE   # 2071.4 s
+  goto 91.8 -132.4 0.3 6 soft   # where it was pressed
+  press SQUARE   # 2072.3 s
+  goto 91.9 -131.6 0.3 6 soft   # where it was pressed
+  press SQUARE   # 2073.5 s
+  goto 91.6 -131.0 0.3 6 soft   # where it was pressed
+  press CIRCLE   # 2073.9 s
+  goto 91.6 -129.8 0.3 6 soft   # where it was pressed
+  press SQUARE   # 2075.0 s
+  goto 91.6 -128.3 0.3 6 soft   # where it was pressed
+  press CROSS   # 2075.3 s
+  goto 88.2 -120.1 0.3 6 soft   # where it was pressed
+  press L1   # 2077.0 s
+  sleep 1.50
+  press CIRCLE   # 2079.0 s
+  goto 88.0 -104.5 1.5 20 soft
+  cross UP 8 20   # on across the edge (or a door)
+  # area 8: 2084-2095 s, 11 positions, 7 waypoints
+  goto 88.0 -197.2 1.5 20 soft
+  goto 87.1 -191.1 0.3 6 soft   # where it was pressed
+  press UP 1                # face up
+  press CROSS   # 2085.4 s
+  goto 87.1 -189.5 0.3 6 soft   # where it was pressed
+  press CROSS   # 2086.1 s
+  goto 87.1 -188.7 1.5 20 soft
+  press UP 1                # face up
+  press CROSS   # 2086.6 s
+  goto 86.6 -191.0 0.3 6 soft   # where it was pressed
+  press SQUARE   # 2087.5 s
+  goto 86.5 -191.2 1.5 20 soft
+  goto 85.2 -190.4 0.3 6 soft   # where it was pressed
+  press UP 1                # face up
+  press CROSS   # 2088.2 s
+  goto 84.0 -189.7 1.5 20 soft
+  goto 84.4 -181.9 0.3 6 soft   # where it was pressed
+  press RIGHT 1                # face right
+  press CROSS   # 2089.9 s
+  goto 85.3 -182.7 0.3 6 soft   # where it was pressed
+  press CROSS   # 2090.6 s
+  press DOWN 1                # face down
+  sleep 0.22
+  press CROSS   # 2090.8 s
+  goto 85.5 -182.9 1.5 20 soft
+  goto 83.2 -188.2 1.5 20 soft
+  goto 88.7 -202.7 1.5 20 soft
+  cross DOWN 15 20   # on across the edge (or a door)
+  # area 15: 2097-2104 s, 7 positions, 4 waypoints
+  goto 87.1 -105.0 1.5 20 soft
+  goto 86.5 -113.8 1.5 20 soft
+  goto 81.9 -119.1 1.5 20 soft
+  goto 63.5 -119.7 0.3 6 soft   # where it was pressed
+  press LEFT 1                # face left
+  press L1   # 2101.4 s
+  goto 63.1 -119.1 0.3 6 soft   # where it was pressed
+  press L1   # 2102.8 s
+  goto 63.35 -118.6 0.3 8 soft  # below the cave's mouth in the cliff north of the path: up goes in
+  cross UP 117 20               # (the record said DOWN; after1 went in from its mouth, after2-3 walked away)
+  # area 117: 2107-2114 s, 8 positions, 2 waypoints
+  goto 18.4 -30.4 1.5 20 soft
+  goto 18.4 -10.5 0.3 6 soft   # where it was pressed
+  press UP 1                # face up
+  press CROSS   # 2109.2 s
+  goto 18.4 -9.0 0.3 6 soft   # where it was pressed
+  press CROSS   # 2109.7 s
+  sleep 0.51
+  press CROSS   # 2110.2 s
+  unstick DOWN 8                # the old man's "Come back when you have a bow." paged shut
+  goto 18.4 -36.3 1.5 20 soft
+  cross DOWN 15 20              # out the way in (the record's facing said UP)
+  # area 15: 2117-2142 s, 24 positions, 12 waypoints
+  goto 61.6 -126.8 1.5 20 soft
+  goto 68.4 -129.8 1.5 20 soft
+  goto 85.8 -126.1 1.5 20 soft
+  goto 88.8 -128.2 0.3 6 soft   # where it was pressed
+  press LEFT 1                # face left
+  press SQUARE   # 2121.6 s
+  goto 92.7 -129.2 1.5 20 soft
+  press LEFT 1                # face left
+  sleep 0.07
+  press SQUARE   # 2122.6 s
+  goto 90.6 -129.7 0.3 6 soft   # where it was pressed
+  press CIRCLE   # 2123.2 s
+  goto 88.0 -129.8 0.3 6 soft   # where it was pressed
+  press CROSS   # 2123.9 s
+  goto 85.1 -128.9 1.5 20 soft
+  goto 88.6 -159.3 0.3 6 soft   # where it was pressed
+  press DOWN 1                # face down
+  press CIRCLE   # 2130.4 s
+  goto 90.0 -161.7 0.3 6 soft   # where it was pressed
+  press CROSS   # 2130.9 s
+  goto 90.3 -162.3 1.5 20 soft
+  goto 86.7 -167.0 1.5 20 soft
+  goto 84.9 -167.0 0.3 6 soft   # where it was pressed
+  press LEFT 1                # face left
+  press CIRCLE   # 2132.4 s
+  goto 81.4 -167.0 0.3 6 soft   # where it was pressed
+  press CROSS   # 2133.0 s
+  goto 71.2 -167.0 0.3 6 soft   # where it was pressed
+  press CROSS   # 2134.5 s
+  goto 67.1 -167.1 1.5 20 soft
+  goto 59.6 -171.2 1.5 20 soft
+  goto 64.8 -167.6 1.5 20 soft
+  goto 64.8 -158.0 1.5 20 soft
+  goto 53.3 -147.6 1.5 20 soft
+  cross LEFT 14 20   # on across the edge (or a door)
+  # area 14: 2145-2161 s, 16 positions, 8 waypoints
+  goto 147.7 -144.9 1.5 20 soft
+  goto 139.4 -148.1 1.5 20 soft
+  goto 136.7 -155.0 1.5 20 soft
+  goto 125.7 -157.7 0.3 6 soft   # where it was pressed
+  press DOWN 1                # face down
+  press CROSS   # 2149.6 s
+  goto 123.1 -158.4 1.5 20 soft
+  goto 122.1 -160.9 0.3 6 soft   # where it was pressed
+  press LEFT 1                # face left
+  press CROSS   # 2150.7 s
+  goto 121.1 -163.7 0.3 6 soft   # where it was pressed
+  press CROSS   # 2151.4 s
+  goto 117.8 -168.3 1.5 20 soft
+  goto 115.1 -167.8 0.3 6 soft   # where it was pressed
+  press LEFT 1                # face left
+  press CROSS   # 2153.9 s
+  goto 111.9 -168.1 0.3 6 soft   # where it was pressed
+  press DOWN 1                # face down
+  press CROSS   # 2154.7 s
+  goto 110.6 -169.5 0.3 6 soft   # where it was pressed
+  press CROSS   # 2155.3 s
+  goto 108.6 -169.4 0.3 6 soft   # where it was pressed
+  press UP 1                # face up
+  press CROSS   # 2156.2 s
+  goto 108.0 -169.2 1.5 20 soft
+  goto 108.7 -169.5 0.3 6 soft   # where it was pressed
+  press DOWN 1                # face down
+  press CROSS   # 2156.6 s
+  goto 114.4 -171.3 1.5 20 soft
+  goto 118.6 -154.6 1.5 20 soft
+  cross UP 146 20               # in at its door, walking north (the record's crossing said DOWN)
+  # area 146: 2163-2200 s, 36 positions, 10 waypoints
+  goto 20.0 -35.2 1.5 20 soft
+  goto 18.6 -28.6 1.5 20 soft
+  press UP 1                # face up
+  sleep 0.34
+  press CROSS   # 2164.3 s
+  sleep 1.20
+  press CROSS   # 2165.5 s
+  sleep 0.58
+  press CROSS   # 2166.0 s
+  press LEFT 1                # face left
+  sleep 1.50
+  press CROSS   # 2167.9 s
+  sleep 0.80
+  press CROSS   # 2168.7 s
+  goto 24.4 -27.8 0.3 6 soft   # where it was pressed
+  press UP 1                # face up
+  press CROSS   # 2170.8 s
+  goto 26.3 -27.7 1.5 20 soft
+  press UP 1                # face up
+  press CROSS   # 2171.3 s
+  sleep 1.50
+  press CROSS   # 2173.3 s
+  goto 13.8 -25.8 1.5 20 soft
+  press UP 1                # face up
+  sleep 0.22
+  press CROSS   # 2175.8 s
+  goto 13.4 -24.9 0.3 6 soft   # where it was pressed
+  press CROSS   # 2176.3 s
+  sleep 0.97
+  press CROSS   # 2177.3 s
+  goto 15.3 -20.4 0.3 6 soft   # where it was pressed
+  press CROSS   # 2178.6 s
+  goto 15.5 -19.8 1.5 20 soft
+  press RIGHT 1                # face right
+  sleep 0.41
+  press CROSS   # 2179.1 s
+  sleep 0.54
+  press CROSS   # 2179.7 s
+  goto 13.4 -25.3 0.3 6 soft   # where it was pressed
+  press LEFT 1                # face left
+  press CROSS   # 2181.4 s
+  goto 12.1 -25.8 1.5 20 soft
+  press LEFT 1                # face left
+  sleep 0.09
+  press CROSS   # 2182.0 s
+  sleep 0.43
+  press CROSS   # 2182.4 s
+  press RIGHT 1                # face right
+  sleep 1.50
+  press CROSS   # 2184.9 s
+  sleep 0.74
+  press CROSS   # 2185.6 s
+  goto 14.3 -26.0 0.3 6 soft   # where it was pressed
+  press UP 1                # face up
+  press CROSS   # 2187.6 s
+  goto 13.7 -24.7 0.3 6 soft   # where it was pressed
+  press CROSS   # 2188.1 s
+  goto 14.0 -25.5 0.3 6 soft   # where it was pressed
+  press CROSS   # 2188.8 s
+  goto 15.4 -26.6 0.3 6 soft   # where it was pressed
+  press RIGHT 1                # face right
+  press CROSS   # 2189.7 s
+  goto 16.6 -26.6 0.3 6 soft   # where it was pressed
+  press CROSS   # 2190.1 s
+  goto 17.2 -26.6 1.5 20 soft
+  goto 17.3 -27.6 0.3 6 soft   # where it was pressed
+  press RIGHT 1                # face right
+  press CROSS   # 2190.7 s
+  goto 17.3 -29.4 1.5 20 soft
+  goto 23.0 -29.7 0.3 6 soft   # where it was pressed
+  press LEFT 1                # face left
+  press CROSS   # 2193.8 s
+  sleep 0.55
+  press CROSS   # 2194.4 s
+  sleep 0.40
+  press CROSS   # 2194.8 s
+  goto 25.2 -28.4 0.3 6 soft   # where it was pressed
+  press UP 1                # face up
+  press CROSS   # 2196.3 s
+  goto 26.4 -27.7 1.5 20 soft
+  press UP 1                # face up
+  sleep 0.06
+  press CROSS   # 2196.8 s
+  sleep 0.66
+  press CROSS   # 2197.4 s
+  goto 19.6 -37.9 1.5 20 soft
+  unstick DOWN 8                # whatever was said in 146, paged shut
+  goto 19.7 -37.0 0.5 10 soft   # its door (the owner out at (19.65, -37.89), 2,200.5 s)
+  cross DOWN 14 20
+  state area==14,life>0 10
+end
+
+log TitleMovie 120
+sleep 5
+call continue
+state area==16,life>0 90
+sleep 3
+segment route town-to-field15
+call town_to_field15
+endseg
+segment explore after-dungeon-way
+call after_dungeon_way
+endseg
+state life>0 5
+actors list

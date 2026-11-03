@@ -172,14 +172,18 @@ def main():
             nxt = runs[i + 1][0]
             jx, jz = nxt[2] - last[1][1], nxt[3] - last[1][2]
             # Across a field edge the hero comes in on the far side of the next
-            # area: a big jump in x or z says which edge (in at high x: out to
-            # the west). Through a door there is no such jump: the way it walked.
-            if abs(jx) > 40 and abs(jx) >= abs(jz):
+            # area: a big jump in x or z, the other kept, says which edge (in at
+            # high x: out to the west). Through a door (a cave, a house) both
+            # change -- the inside has coordinates of its own -- or neither: the
+            # way it walked (a door read as an edge sent the hero away from it).
+            if abs(jx) > 40 and abs(jz) < 10:
                 d = "LEFT" if jx > 0 else "RIGHT"
-            elif abs(jz) > 40:
+            elif abs(jz) > 40 and abs(jx) < 10:
                 d = "DOWN" if jz > 0 else "UP"
-            else:
-                d = direction(last[0], last[1])
+            else:   # the last step it took toward the door (raw positions, not the thinned path)
+                end = run[-1]
+                back = next((p for p in reversed(run[:-1]) if abs(p[2] - end[2]) + abs(p[3] - end[3]) > 0.3), run[0])
+                d = direction((back[0], back[2], back[3]), (end[0], end[2], end[3]))
             out.append(f"cross {d} {runs[i + 1][0][1]} 20   # on across the edge (or a door)")
     print("\n".join(out))
 
