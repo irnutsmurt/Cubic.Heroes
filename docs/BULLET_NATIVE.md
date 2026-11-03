@@ -141,11 +141,14 @@ remove, refresh). The solver's command protocol is still to map.
 
 ## The native collision task (experimental)
 
-**Experimental: off by default.** The lifted SPU task stays the default
-(`DOTHEROES_NATIVE_CD` unset or 0). Native collision is selectable for
-testing and comparison; it is not bit-exact with the game's SPU task (see
-"How close it is"), has been checked only in the scenes below, and has not
-been played by a person at length.
+**Experimental: off in the executable, on in player installs.** The lifted
+SPU task stays the executable's default (`DOTHEROES_NATIVE_CD` unset or 0).
+Since 2026-11-03 the setup app writes `DOTHEROES_NATIVE_CD=1` (with the
+other three performance settings) into every new install's dotheroes.cfg,
+so players run native collision by default. It is not bit-exact with the
+game's SPU task (see "How close it is"), has been checked only in the scenes
+below, and has not been played by a person at length; its differences are
+tracked in docs/HANDOFF.md, open problem 3.
 
 `port/native/bullet_cd.cpp` does one task's work over the game's data in
 guest memory: box/box (`btBoxBoxDetector`), box or cylinder against box or

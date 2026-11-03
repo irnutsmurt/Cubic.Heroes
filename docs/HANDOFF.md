@@ -106,8 +106,15 @@ INSTALL, SNAPSHOT / ALBUM, and round trips of installed data, snapshots and
 edited characters across restarts. That is a small, early part of the game
 (see "Game coverage" below); nothing past the castle area has been played.
 
-**Performance configuration.** Four switches, all experimental and off by
-default, hold 60 fps in the scenes measured so far:
+**Performance configuration.** Four switches, all experimental, hold 60 fps
+in the scenes measured so far. **Every fresh player install turns all four
+on by default** (2026-11-03, commit 45033a0): the setup app writes them into
+a new install's dotheroes.cfg and adds missing ones to an older install's,
+keeping a player's own values; the executable's built-in defaults and the
+development runs leave them off unless set. So players now run native
+collision, whose known behavioural differences are tracked as open problem 3
+below; a player turns it off with `DOTHEROES_NATIVE_CD=0` in dotheroes.cfg.
+The switches:
 `DOTHEROES_NATIVE_CD=1 DOTHEROES_NATIVE_SOLVER=4,5,6 GCM_WRAP_LAP=1
 DOTHEROES_PRESENT_ONCE=1` -- the baseline every timing uses
 (build/baselines/2026-11-01-config-validation; river fight p99 17.2-17.4 ms,
@@ -297,9 +304,22 @@ Finalize fix, wait-free creation) is measured against it.
    Next for it: a main-thread profile of just those frames
    (`tests/prof_report.py --at`) to see whether the host's page faults are a
    real share.
-3. 144 fps uncapped is not sustained (~125-130 fps; the main thread, the
+3. **Native collision is on in every player install; its behavioural
+   differences are tracked, not resolved.** Known (docs/BULLET_NATIVE.md,
+   "How close it is"; check mode on one field and one river run): mesh/box
+   manifolds 85-91% identical, 5-6% with other contact points, 0.4-0.7%
+   with a normal more than 5 deg off; the lifted task checked against itself
+   differs by similar rates, but similar rates do not show the same
+   behaviour. No gameplay difference has been seen or ruled out: two scenes
+   checked, and no person has played at length with it. Track: check mode
+   (`DOTHEROES_NATIVE_CD=2`) on each newly driven scene (the dungeon, the
+   fields after it), and any report of debris, blocks or bodies behaving
+   differently from the PS3 (compare with RPCS3 on the same save). If a
+   gameplay difference shows, the install's default goes back to 0 until
+   it is fixed.
+4. 144 fps uncapped is not sustained (~125-130 fps; the main thread, the
    game's own code, is the limit). Stretch goal.
-4. Not verified: save portability (PARAM.PFD is not rewritten) and the colour
+5. Not verified: save portability (PARAM.PFD is not rewritten) and the colour
    comparison with RPCS3 (its capture never got past preloading pipelines).
 
 **Milestones.**
