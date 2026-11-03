@@ -51,7 +51,8 @@ block dungeon_entry          # the owner's first ~25 s inside (986-1010 s): tigh
   # tests/route_from_record.py <the session> --from 986 --to 1010 --eps 0.5 --tol 0.25 --timeout 10 --soft --buttons
   # (two dialogues paged with CROSS; a floor switch opens the next door). Further on the room has a
   # fight the replayed presses do not get through (the hero stuck near (89, -116)): not yet a test.
-  goto 89.9 -133.6 0.25 10 soft
+  # (from the door: callers that walked in step to 89.9 -133.6 first; from the
+  # dungeon1-entrance checkpoint the hero starts inside it, and that step walks out)
   goto 89.9 -128.8 0.25 10 soft
   unstick LEFT 8            # the first dialogue ("The door leading further in is closed.") closed
   sleep 0.16

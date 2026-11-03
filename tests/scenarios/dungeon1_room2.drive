@@ -1,0 +1,74 @@
+# Scenario: the first dungeon past its first room's floor switch -- the room
+# north of the opened door and its fight (SCENARIO=dungeon1_room2).
+#
+# Starts from: build/checkpoints/dungeon1-entrance (a test's own save in the
+#   first room: CONTINUE puts the hero just inside the dungeon's door, area 37
+#   at (88.8, -130.4)).
+# Route: the first room as dungeon1_approach (dungeon1_route.drive: its
+#   dialogues; the switch was pressed before the save), then the owner's own
+#   1,006-1,045 s (tests/route_from_record.py --from 1006.5 --to 1045 --eps 0.5
+#   --tol 0.5 --soft --buttons, the map and item-menu presses left out): north
+#   through the opened door, west along the room with the sword.
+# Started when: in area 37, alive, after the first room.
+# Completed when: the route walked, alive, in area 37; `actors` before and
+#   after say which enemies are near and how much life they lost.
+# Reset / retry: as dungeon1_approach (TITLE and CONTINUE; two tries).
+# Cycles: RUNS (default 1). Exploratory: the replayed presses may not finish
+#   the fight -- the run says where the hero stopped.
+#! saves build/checkpoints/dungeon1-entrance
+#! env DOTHEROES_NATIVE_CD=1 DOTHEROES_NATIVE_SOLVER=4,5,6 GCM_WRAP_LAP=1 DOTHEROES_PRESENT_ONCE=1
+#! env DOTHEROES_DEV_STATE=1 DOTHEROES_DEV_KEYS=1 DIAG_FRAMES=frames.log PS3_VERBOSE=0
+#! env WINDOW=1 VISIBLE=1 TOPMOST=1 GRAB_EVERY=10 PS3_OSD_FPS=2 DUMP=0 SHOT_EVERY=0
+#! secs 600
+include common.drive
+include dungeon1_route.drive
+
+block room2                    # north through the opened door, the room's fight, its locked door
+  # The owner's way (record 1,006-1,045 s; tests/route_from_record.py --from 1006.5 --to 1045):
+  # north through the door the switch opened, the room's enemies (class FE4500,
+  # the river's) fought, then west to the locked north door at (63.3, -97). The
+  # replayed presses alone left the enemies alive and the hero at that door
+  # with "You need a key." open (room2-cantdie, 2026-11-02): now `fight`.
+  goto 89.4 -114.3 0.5 10 soft
+  goto 90.3 -108.7 0.5 10 soft
+  goto 90.0 -101.0 0.5 10 soft
+  fight FE4500 90
+  sleep 2
+  actors
+  goto 87.0 -98.4 0.5 10 soft    # the owner's way after the fight: east and back
+  goto 82.6 -98.4 0.5 10 soft    # (what the fight drops -- the key? -- picked up)
+  goto 99.4 -98.4 0.5 15 soft
+  goto 83.4 -98.4 0.5 15 soft
+  goto 76.7 -104.7 0.5 15 soft
+  goto 66.9 -104.7 0.5 15 soft
+  goto 63.3 -99.0 0.5 15 soft
+  goto 63.3 -97.0 0.5 10 soft
+  press CROSS                  # the door: with the key it opens, without it says so
+  sleep 1
+  unstick DOWN 8               # a dialogue left open closed
+end
+
+log TitleMovie 120
+sleep 5
+call continue
+state area==37,life>0 90
+sleep 3
+
+loop ${RUNS:-1}
+  attempt 2 back_to_start
+    expect life>0,area==37
+    segment explore dungeon-room1
+    call dungeon_entry
+    endseg
+    actors
+    segment explore dungeon-room2
+    call room2
+    endseg
+    actors
+    expect
+    segment menu back-to-start
+    call to_title_and_continue
+    state area==37,life>0 60
+    endseg
+  end
+end

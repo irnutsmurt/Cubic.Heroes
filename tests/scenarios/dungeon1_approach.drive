@@ -45,6 +45,7 @@ loop ${RUNS:-1}
     endseg
     expect life>0,area==37
     segment explore dungeon-entry
+    goto 89.9 -133.6 0.25 10 soft   # just inside the door
     call dungeon_entry
     endseg hz>+8              # past the dialogues and the switch, ~10 units north of the door: a hero stuck there does not pass
     expect

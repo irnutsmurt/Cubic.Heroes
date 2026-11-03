@@ -345,7 +345,8 @@ play session's record (`tests/route_from_record.py --buttons`) walk by
 position (`goto`, fine pad steps for narrow ways), cross area edges and doors
 until the area changes (`cross`), replay the tester's action buttons where
 they pressed them (dialogues, switches), and step free of a dialogue left
-open (`unstick`);
+open (`unstick`); `fight <class>` clears one class of enemies near the hero
+(actors.txt now lists each character with life left: class, x, z, life);
 tests/route_from_record.py turns the record into a route of `goto`
 waypoints and area checks.
 
@@ -362,7 +363,15 @@ sword) or, since the owner's first play session, from its saves.
   field 15, the dungeon's door -- and its first room's two dialogues and floor
   switch (dungeon1_approach: 3 of 3 cycles, then 10 of 10 in the memory soak,
   normal damage); a save in that room and CONTINUE (dungeon1_save_continue).
-  Not automated yet: the dungeon past its first room, its fights, the boss.
+  Past the switch (dungeon1_room2, from checkpoint dungeon1-entrance,
+  exploratory, can't-die on): the next room's fight is driven and verified --
+  `fight FE4500` walks to the nearest enemy of the class with life left and
+  swings until none within 25 units has life (cleared in 9 swings, 12 s) --
+  and the owner's way on to the locked door west of it (63.3, -97) is walked;
+  the door stayed locked ("You need a key." when the fight was skipped; with
+  the fight, still locked and two red enemies alive in the door's room), so
+  the key's source is the next thing to find (the owner's record, 1,036 s).
+  Not automated yet: past that door, the dungeon's other rooms, the boss.
 - *Played by the owner* (manual coverage, not counted as automated)
   (2026-11-02, 38.5 minutes, the validated
   configuration with every fix of the day -- the session's binary is the one

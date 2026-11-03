@@ -30,6 +30,12 @@ scenario header):
                               the hero went (hx/hz)
   unstick <DIR> [tries]       a short step in DIR; while the hero does not move (a
                               dialogue open), CROSS and again, up to tries (8)
+  fight <class> [timeout] [reach]  clear one class of characters near the hero
+                              (e.g. FE4500): walk to the nearest with life left, turn
+                              to it and swing, until none within 40 units has life;
+                              fails after timeout (60 s) with how many are left;
+                              only those within 25 units of where it began, and
+                              not one 8 swings did not hurt
   cross <DIR> <area> [timeout]  walk on in DIR until the field area is <area> (an
                               edge or a door), sidestepping when blocked; a timeout
                               (default 20 s) fails
@@ -302,6 +308,9 @@ def wait(sec):
 
 
 # Characters near the hero, on demand (actors.trigger -> actors.txt).
+last_actor_list = []   # (class, x, z, life) of each with life left, from the last actors()
+
+
 def actors():
     p, t = os.path.join(run, "actors.txt"), os.path.join(run, "actors.trigger")
     try: before = os.path.getmtime(p)
@@ -311,10 +320,14 @@ def actors():
     while time.time() - t0 < 5:
         try:
             if os.path.getmtime(p) != before and not os.path.exists(t):
+                lines = open(p).read().splitlines()
                 vals = {}
-                for tok in open(p).read().split():
+                for tok in lines[0].split() if lines else []:
                     k, _, v = tok.partition("=")
                     vals[k] = float(v)
+                # then one line per character with life left: a <class> <x> <z> <life>
+                last_actor_list[:] = [(f[1].upper(), float(f[2]), float(f[3]), int(f[4]))
+                                      for f in (ln.split() for ln in lines[1:]) if len(f) == 5 and f[0] == "a"]
                 return vals
         except (OSError, ValueError):
             pass
@@ -485,6 +498,60 @@ def goto(x, z, tol, tmo):
         wait(secs)
 
 
+def fight(cls, tmo, reach, radius=25.0):
+    """Clear the characters of one class near the hero: walk to the nearest
+    with life left until within `reach`, turn to it (one pad report of its
+    direction) and swing (CROSS); again until none of the class within
+    `radius` of where the fight began has life, or fail after `tmo` s with how
+    many are left. Positions are re-read before every move: enemies walk, and
+    knock the hero back. One that keeps its life through 8 swings is left
+    alone (the first dungeon has one of the class at its door, life 1, that
+    no swing reaches)."""
+    t0, swings, last, home = time.time(), 0, None, None
+    tried = {}   # (x, z) rounded -> [swings at it, its life then]
+    while True:
+        if actors() is None:
+            raise Fail("fight: no actors.txt (DOTHEROES_DEV_STATE=1?)")
+        s = state()
+        if home is None and s and "hx" in s:
+            home = (s["hx"], s["hz"])
+        def key(a): return (round(a[1]), round(a[2]))
+        left = [a for a in last_actor_list if a[0] == cls and
+                (home is None or ((a[1] - home[0]) ** 2 + (a[2] - home[1]) ** 2) ** 0.5 <= radius) and
+                not (key(a) in tried and tried[key(a)][0] >= 8 and tried[key(a)][1] <= a[3])]
+        if not left:
+            say(f"  fight {cls}: none left with life ({swings} swings, {time.time() - t0:.0f} s)")
+            return
+        if time.time() - t0 > tmo:
+            raise Fail(f"fight {cls}: {len(left)} left with life {sum(a[3] for a in left)} after {tmo:g} s "
+                       f"({swings} swings)")
+        if not s or "hx" not in s:
+            wait(0.2); continue
+        tgt = min(left, key=lambda a: (a[1] - s["hx"]) ** 2 + (a[2] - s["hz"]) ** 2)
+        if last != len(left):
+            say(f"  fight {cls}: {len(left)} with life, the nearest at ({tgt[1]:.1f}, {tgt[2]:.1f}) life {tgt[3]}")
+            last = len(left)
+        dx, dz = tgt[1] - s["hx"], tgt[2] - s["hz"]
+        dist = (dx * dx + dz * dz) ** 0.5
+        face = (BTN["RIGHT"] if dx > 0 else BTN["LEFT"]) if abs(dx) >= abs(dz) else (BTN["UP"] if dz > 0 else BTN["DOWN"])
+        if dist > reach:
+            mask = 0
+            if abs(dx) > reach / 3: mask |= BTN["RIGHT"] if dx > 0 else BTN["LEFT"]
+            if abs(dz) > reach / 3: mask |= BTN["UP"] if dz > 0 else BTN["DOWN"]
+            secs = max(0.05, min(0.25, (dist - reach) / 9.0))
+            press(mask or face, 1, int(secs * 1000))
+            wait(secs)
+            continue
+        press(face, 1)          # turn to it
+        wait(0.05)
+        press(BTN["CROSS"])
+        swings += 1
+        t = tried.setdefault(key(tgt), [0, tgt[3]])
+        t[0] = t[0] + 1 if tgt[3] >= t[1] else 0   # its life fell: count again from here
+        t[1] = tgt[3]
+        wait(0.35)
+
+
 def keep_saves(dest):
     """until_exit: wait for the game to exit; with dest, copy each save the game
     makes (its folder under GAMEDATA's savedata, once its files stop changing)."""
@@ -624,6 +691,8 @@ def step(lineno, line, op, a):
         if s0 and s1 and "hx" in s0:
             say(f"  moved {s1['hx'] - s0['hx']:+.2f} {s1['hz'] - s0['hz']:+.2f} to ({s1['hx']:.2f}, {s1['hz']:.2f})"
                 f" area {s1['area']:g}")
+    elif op == "fight":
+        fight(a[0].upper().lstrip("C") if a[0].upper().startswith("C") else a[0].upper(), float(a[1]) if len(a) > 1 else 60, float(a[2]) if len(a) > 2 else 2.5)
     elif op == "unstick":
         unstick(a[0].upper(), int(a[1]) if len(a) > 1 else 8)
     elif op == "cross":

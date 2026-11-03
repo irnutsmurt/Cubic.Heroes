@@ -32,6 +32,7 @@ attempt 2 back_to_start
   endseg
   expect life>0,area==37
   segment explore dungeon-entry
+  goto 89.9 -133.6 0.25 10 soft   # just inside the door
   call dungeon_entry
   endseg hz>+8
 end

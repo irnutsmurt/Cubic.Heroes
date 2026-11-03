@@ -238,6 +238,12 @@ void actors_now(uint32_t p)
         fprintf(f, "n=%d", n);
         for (const Cls& c : cls) fprintf(f, " c%X=%u hp%X=%llu", c.vt, c.count, c.vt, (unsigned long long)c.hp);
         fprintf(f, "\n");
+        // Then each one with life left: "a <vtable> <x> <z> <life>" (a drive's
+        // `fight` walks to the nearest of a class and swings).
+        for (int i = 0; i < n; i++) {
+            const uint32_t hp = rd32(found[i].ea + kPlayerLife);
+            if (hp && hp < 0x10000) fprintf(f, "a %X %.2f %.2f %u\n", found[i].vt, found[i].x, found[i].z, hp);
+        }
         fclose(f);
         remove("actors.txt");
         rename("actors.tmp", "actors.txt");
