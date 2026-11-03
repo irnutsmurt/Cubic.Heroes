@@ -1,5 +1,6 @@
 # The first dungeon's route blocks, shared by dungeon1_approach.drive and
-# dungeon1_save_continue.drive (`include dungeon1_route.drive`): the owner's way
+# dungeon1_save_continue.drive, dungeon1_room2.drive and dungeon1_persist.drive
+# (`include dungeon1_route.drive`): the owner's way
 # from the inn into the dungeon, and its first room up to past the floor switch.
 
 block route_to_dungeon      # from the inn: the owner's way out of town (west), across 15, into the dungeon
@@ -79,5 +80,111 @@ block dungeon_entry          # the owner's first ~25 s inside (986-1010 s): tigh
   unstick UP 8              # the switch's dialogue closed, whenever it opened
   goto 84.5 -120.8 0.25 10 soft
   goto 89.4 -118.4 0.25 10 soft
+end
+
+
+block room2                    # north through the opened door, the room's fight, its locked door
+  # The owner's way (record 1,006-1,045 s; tests/route_from_record.py --from 1006.5 --to 1045):
+  # north through the door the switch opened, the room's enemies (class FE4500,
+  # the river's) fought, then west to the locked north door at (63.3, -97). The
+  # replayed presses alone left the enemies alive and the hero at that door
+  # with "You need a key." open (room2-cantdie, 2026-11-02): now `fight`.
+  goto 89.4 -114.3 0.5 10 soft
+  goto 90.3 -108.7 0.5 10 soft
+  goto 90.0 -101.0 0.5 10 soft
+  fight FE4500 90
+  sleep 2
+  actors
+  goto 87.0 -98.4 0.5 10 soft    # the owner's way after the fight: east and back
+  goto 82.6 -98.4 0.5 10 soft    # (what the fight drops -- the key? -- picked up)
+  goto 99.4 -98.4 0.5 15 soft
+  goto 83.4 -98.4 0.5 15 soft
+  # (the owner went west to the locked door next and was turned away: the key
+  # is in the east room -- see east_key)
+end
+
+block east_key                 # the owner's 1,044-1,091 s: the east room's fight, the key, the locked door, through it
+  # tests/route_from_record.py <the session> --from 1043 --to 1092 --eps 0.4 --tol 0.5 --soft --buttons
+  # (its item-menu presses left out). The owner swung through the east room
+  # (x 104-119), opened its chest at the north-west corner, walked back west
+  # to the locked door and through it at 1,087 s.
+  goto 94.3 -108.8 0.5 10 soft
+  goto 100.5 -106.5 0.5 10 soft
+  goto 104.3 -106.5 0.5 10 soft
+  goto 108.5 -106.5 0.5 10 soft  # straight in through its doorway (aimed diagonally, the hero stuck in it)
+  goto 111.3 -110.0 0.5 10 soft
+  fight any 90
+  sleep 2
+  actors list
+  # The chest, then the door: whether the key was had shows only at the door,
+  # so a door that stays shut sends the hero back to the chest.
+  attempt 3 back_to_chest
+    call chest
+    call locked_door
+  end
+  goto 63.4 -90.4 0.5 10 soft
+  goto 66.7 -87.2 0.5 10 soft
+end
+
+block chest                    # the east room's chest, against its north wall, centred near x 105.8
+  # (pushing up from x 106.6-106.9 the hero slid east round it, from 107.8 nothing
+  # stopped it: persist8's moves)
+  # The owner pushed up into it from (106.7, -101.6) and pressed CROSS once to
+  # open it and twice for the key's message (record 1,067.8-1,069.2 s, the
+  # analog stick up). Up against it from across its width, CROSS at each (a
+  # press at an opened chest only swings the sword).
+  goto 105.8 -103.6 0.2 8 soft
+  hold UP 0.4
+  sleep 0.4
+  press CROSS
+  sleep 2.5
+  press CROSS
+  sleep 1.2
+  press CROSS
+  sleep 0.8
+  goto 105.3 -103.6 0.2 8 soft
+  hold UP 0.4
+  sleep 0.4
+  press CROSS
+  sleep 2.5
+  press CROSS
+  sleep 1.2
+  press CROSS
+  sleep 0.8
+  goto 106.3 -103.6 0.2 8 soft
+  hold UP 0.4
+  sleep 0.4
+  press CROSS
+  sleep 2.5
+  press CROSS
+  sleep 1.2
+  press CROSS
+  sleep 0.8
+  unstick DOWN 8
+end
+
+block locked_door              # west to the locked door, centred, and through it
+  goto 99.3 -106.4 0.5 15 soft
+  goto 91.6 -107.4 0.5 10 soft
+  goto 84.0 -102.9 0.5 10 soft
+  goto 76.8 -104.7 0.5 10 soft
+  goto 65.8 -103.2 0.5 10 soft
+  goto 64.0 -98.2 0.2 10 soft    # the door is narrow: from x 64.4-64.8 it stayed shut
+  hold UP 0.3
+  press CROSS                    # open it with the key
+  sleep 1.5
+  hold UP 1.2
+  state hz>@-96.3 2              # through it: the door line is at -97 (fails: no key -- back to the chest)
+end
+
+block back_to_chest
+  unstick DOWN 4
+  goto 65.8 -103.2 0.5 10 soft
+  goto 76.8 -104.7 0.5 10 soft
+  goto 84.0 -102.9 0.5 10 soft
+  goto 91.6 -107.4 0.5 10 soft
+  goto 99.3 -106.4 0.5 15 soft
+  goto 104.3 -106.5 0.5 10 soft
+  goto 108.5 -106.5 0.5 10 soft
 end
 

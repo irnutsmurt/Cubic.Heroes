@@ -30,12 +30,17 @@ scenario header):
                               the hero went (hx/hz)
   unstick <DIR> [tries]       a short step in DIR; while the hero does not move (a
                               dialogue open), CROSS and again, up to tries (8)
-  fight <class> [timeout] [reach]  clear one class of characters near the hero
+  actors list                 every character and object within 40 units, nearest
+                              first: class, position, life
+  open <class> [tries]        open what objects of the class are (a chest): up to
+                              each from the south, facing it, CROSS, until the
+                              class's count falls (its item taken); tries (10)
+  fight <class>|any [timeout] [reach]  clear one class (or every one) of characters near the hero
                               (e.g. FE4500): walk to the nearest with life left, turn
                               to it and swing, until none within 40 units has life;
                               fails after timeout (60 s) with how many are left;
                               only those within 25 units of where it began, and
-                              not one 8 swings did not hurt
+                              not one 25 swings did not hurt
   cross <DIR> <area> [timeout]  walk on in DIR until the field area is <area> (an
                               edge or a door), sidestepping when blocked; a timeout
                               (default 20 s) fails
@@ -256,12 +261,13 @@ def fmt_state(s):
     return " ".join(f"{k}={s[k]:g}" for k in STATE_KEYS if s and k in s) if s else "none"
 
 
-def cond(text):   # key op value; a value with a sign (+5, -3) is relative to a reference state
-    m = re.fullmatch(r"(\w+)(<=|>=|==|!=|<|>)([+-]?)([\dx.A-Fa-f]+)", text)
+def cond(text):   # key op value; a value with a sign (+5, -3) is relative to a reference state,
+    # unless it starts with @ (hz>@-95.5: north of z -95.5, wherever it began)
+    m = re.fullmatch(r"(\w+)(<=|>=|==|!=|<|>)(@?)([+-]?)([\dx.A-Fa-f]+)", text)
     if not m:
         sys.exit(f"[drive] bad condition {text!r}")
-    k, o, sign, v = m.groups()
-    return k, o, float(int(v, 16) if v.startswith("0x") else float(v)) * (-1 if sign == "-" else 1), bool(sign)
+    k, o, at, sign, v = m.groups()
+    return k, o, float(int(v, 16) if v.startswith("0x") else float(v)) * (-1 if sign == "-" else 1), bool(sign) and not at
 
 
 def conds(text):
@@ -309,6 +315,7 @@ def wait(sec):
 
 # Characters near the hero, on demand (actors.trigger -> actors.txt).
 last_actor_list = []   # (class, x, z, life) of each with life left, from the last actors()
+last_object_list = []  # (class, x, y, z) of every one near, from the last actors()
 
 
 def actors():
@@ -328,6 +335,9 @@ def actors():
                 # then one line per character with life left: a <class> <x> <z> <life>
                 last_actor_list[:] = [(f[1].upper(), float(f[2]), float(f[3]), int(f[4]))
                                       for f in (ln.split() for ln in lines[1:]) if len(f) == 5 and f[0] == "a"]
+                # and every one, life or not: o <class> <x> <y> <z>
+                last_object_list[:] = [(f[1].upper(), float(f[2]), float(f[3]), float(f[4]))
+                                       for f in (ln.split() for ln in lines[1:]) if len(f) == 5 and f[0] == "o"]
                 return vals
         except (OSError, ValueError):
             pass
@@ -504,9 +514,10 @@ def fight(cls, tmo, reach, radius=25.0):
     direction) and swing (CROSS); again until none of the class within
     `radius` of where the fight began has life, or fail after `tmo` s with how
     many are left. Positions are re-read before every move: enemies walk, and
-    knock the hero back. One that keeps its life through 8 swings is left
+    knock the hero back. One that keeps its life through 25 swings is left
     alone (the first dungeon has one of the class at its door, life 1, that
-    no swing reaches)."""
+    no swing reaches; a hovering one, also life 1, in its east room takes a
+    while to catch low -- and its chest waits for it)."""
     t0, swings, last, home = time.time(), 0, None, None
     tried = {}   # (x, z) rounded -> [swings at it, its life then]
     while True:
@@ -516,11 +527,15 @@ def fight(cls, tmo, reach, radius=25.0):
         if home is None and s and "hx" in s:
             home = (s["hx"], s["hz"])
         def key(a): return (round(a[1]), round(a[2]))
-        left = [a for a in last_actor_list if a[0] == cls and
+        left = [a for a in last_actor_list if (cls == "ANY" or a[0] == cls) and
                 (home is None or ((a[1] - home[0]) ** 2 + (a[2] - home[1]) ** 2) ** 0.5 <= radius) and
-                not (key(a) in tried and tried[key(a)][0] >= 8 and tried[key(a)][1] <= a[3])]
+                not (key(a) in tried and tried[key(a)][0] >= 25 and tried[key(a)][1] <= a[3])]
+        if not left and last is None and time.time() - t0 < 5:
+            wait(0.5)   # none yet: a room's enemies appear as the hero comes in
+            continue
         if not left:
-            say(f"  fight {cls}: none left with life ({swings} swings, {time.time() - t0:.0f} s)")
+            say(f"  fight {cls}: none left with life ({swings} swings, {time.time() - t0:.0f} s)"
+                if last is not None else f"  fight {cls}: none appeared in 5 s")
             return
         if time.time() - t0 > tmo:
             raise Fail(f"fight {cls}: {len(left)} left with life {sum(a[3] for a in left)} after {tmo:g} s "
@@ -550,6 +565,42 @@ def fight(cls, tmo, reach, radius=25.0):
         t[0] = t[0] + 1 if tgt[3] >= t[1] else 0   # its life fell: count again from here
         t[1] = tgt[3]
         wait(0.35)
+
+
+def open_obj(cls, tries):
+    """Open what the objects of one class are (a chest): walk up to each from
+    the south, at small offsets across it, facing it, and press CROSS (then
+    twice more for an item's message), until the class's count near the hero
+    falls -- the first dungeon's chest is two objects of class FE3C70 until
+    its key is taken, then one. Fails after `tries` approaches."""
+    t0 = time.time()
+    while True:   # a chest can take a few seconds to appear once a room is cleared
+        if actors() is None:
+            raise Fail("open: no actors.txt (DOTHEROES_DEV_STATE=1?)")
+        objs = [o for o in last_object_list if o[0] == cls]
+        if objs or time.time() - t0 > 8:
+            break
+        wait(0.5)
+    n0 = len(objs)
+    if not objs:
+        raise Fail(f"open {cls}: none within 40 units after 8 s")
+    spots = [(o[1] + dx, o[3]) for o in sorted(objs, key=lambda o: o[3]) for dx in (0.0, -0.6, 0.6, -1.2, 1.2)]
+    for i, (x, z) in enumerate(spots[:tries]):
+        try:
+            goto(x, z - 1.6, 0.25, 8)
+        except Fail as e:
+            say(f"  open {cls}: {e}")
+        press(BTN["UP"], 1, 350); wait(0.35)
+        wait(0.4)
+        for pause in (2.5, 1.2, 0.8):
+            press(BTN["CROSS"]); wait(pause)
+        if actors() is None:
+            raise Fail("open: no actors.txt")
+        n = sum(1 for o in last_object_list if o[0] == cls)
+        if n < n0:
+            say(f"  open {cls}: opened from ({x:.1f}, {z - 1.6:.1f}), try {i + 1} ({n0} -> {n})")
+            return
+    raise Fail(f"open {cls}: still {n0} after {min(tries, len(spots))} tries")
 
 
 def keep_saves(dest):
@@ -693,6 +744,8 @@ def step(lineno, line, op, a):
                 f" area {s1['area']:g}")
     elif op == "fight":
         fight(a[0].upper().lstrip("C") if a[0].upper().startswith("C") else a[0].upper(), float(a[1]) if len(a) > 1 else 60, float(a[2]) if len(a) > 2 else 2.5)
+    elif op == "open":
+        open_obj(a[0].upper(), int(a[1]) if len(a) > 1 else 10)
     elif op == "unstick":
         unstick(a[0].upper(), int(a[1]) if len(a) > 1 else 8)
     elif op == "cross":
@@ -733,6 +786,17 @@ def step(lineno, line, op, a):
     elif op == "expect":
         expecting = conds(a[0]) if a else []
         check()
+    elif op == "actors" and a and a[0] == "list":
+        # every character and object within 40 units, nearest first
+        if actors() is None:
+            raise Fail("actors list: no actors.txt (DOTHEROES_DEV_STATE=1?)")
+        s = state() or {}
+        hx, hz = s.get("hx", 0.0), s.get("hz", 0.0)
+        life = {(c, round(x, 1), round(z, 1)): h for c, x, z, h in last_actor_list}
+        for c, x, y, z in sorted(last_object_list, key=lambda o: (o[1] - hx) ** 2 + (o[3] - hz) ** 2):
+            d = ((x - hx) ** 2 + (z - hz) ** 2) ** 0.5
+            h = life.get((c, round(x, 1), round(z, 1)))
+            say(f"  {c} at ({x:.1f}, {y:.1f}, {z:.1f}), {d:.1f} away" + (f", life {h}" if h else ""))
     elif op == "actors":
         cs = conds(a[0]) if a and not a[0][0].isdigit() else []
         tmo = float(a[-1]) if a and a[-1][0].isdigit() else 5

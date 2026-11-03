@@ -244,6 +244,10 @@ void actors_now(uint32_t p)
             const uint32_t hp = rd32(found[i].ea + kPlayerLife);
             if (hp && hp < 0x10000) fprintf(f, "a %X %.2f %.2f %u\n", found[i].vt, found[i].x, found[i].z, hp);
         }
+        // And every one, life or not: "o <vtable> <x> <y> <z>" (chests,
+        // switches, doors: what a route has to walk up to; `actors list`).
+        for (int i = 0; i < n; i++)
+            fprintf(f, "o %X %.2f %.2f %.2f\n", found[i].vt, found[i].x, found[i].y, found[i].z);
         fclose(f);
         remove("actors.txt");
         rename("actors.tmp", "actors.txt");
