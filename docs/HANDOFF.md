@@ -476,7 +476,9 @@ sword) or, since the owner's first play session, from its saves.
   (3, -3); a guide's Red Door that needs a bought Red Key). Asked the owner.
   New drive steps: `switches` (the boomerang at each wall switch in the
   room, in line with it). Not automated yet: the special key, the boss
-  (area 38). Smoothness on the way (east36, can't-die, 13.5 minutes of the
+  (area 38) -- the special key since found in the owner's boss session: the
+  chest in the room north of the north room, now in northeast_rooms.
+  Smoothness on the way (east36, can't-die, 13.5 minutes of the
   east, north-east and approach rooms with their fights): p99 17.2 ms, 0.09%
   of frames over 18 ms, 4 over 25 ms, worst 34 ms; memory 1,002 -> 1,042 MB.
   The route is not yet reliable end to end: about one run in three stalls
@@ -489,6 +491,26 @@ sword) or, since the owner's first play session, from its saves.
   room fights at p99 17.2 ms, under 0.2% of frames over 18 ms, worst 33 ms
   (the 50 ms frame is the first room's set-up frame); the hero died in the
   east room and near its chest (GAME OVER, Continue, the way back driven).
+- *Played by the owner: the boss* (2026-11-03, 6.2 minutes, owner_boss:
+  fullscreen, sound, normal damage, DOTHEROES_FPS=display -- 71.99 fps on the
+  143.99 Hz display --, a cold shader cache, from a copy of dungeon1-boss-door;
+  build/sessions/boot-20261103-135259-owner-boss). The special key is the
+  chest in the room north of the north room (FE6660 at (88.8, -63.2), opened
+  facing up from (89.32, -64.61); the owner's mark 1); then the portal room
+  (its right floor plate, mark 2), the boss's door (mark 3), the boss (area
+  38: life 10 -> 1 at worst, beaten in ~37 s, then a heart container, 12),
+  area 39 and back, a save in area 38 (checkpoint dungeon1-boss-beaten).
+  Smooth throughout: the temple p99 16.4 ms with 97.0% of frames held exactly
+  2 refreshes, **the boss fight p99 14.4 ms, 98.6% held 2, 0.20% over 16
+  ms**, after it 99.6%. What a first-time player still sees are single
+  frames at first sights: 167 ms at the dungeon entry after CONTINUE, 83 ms
+  entering the boss's room, 70 ms into area 39, 26-42 ms in a few rooms and
+  one of 24 ms mid-fight -- each a vertex shader's translation (up to 19 ms)
+  and its pipeline, the cache being empty (645 compile events in the
+  session); a second play has them from the disk cache. One 39 ms frame
+  (183.2 s) was the present waiting 30 ms for the previous frame (GPU 3.7
+  ms): once in the session. At 72 fps the main thread is busy ~9.7 ms of a
+  13.9 ms frame. Memory 1,034 -> 1,101 MB. No crash.
 - *How 60 fps looks on a 144 Hz display* (2026-11-03, build/baselines/
   2026-11-03-display-pace, fullscreen on the owner's 143.98 Hz desktop): the
   game's 60 fps frames do not divide the display's refresh, so in FIFO order

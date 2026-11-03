@@ -732,6 +732,18 @@ block northeast_rooms
   # the owner's 1,372-1,460 s: east and north-east, fights (life 8-10). Exploratory.
   # area 37: 1372-1459 s, 83 positions, 30 waypoints
   goto 87.9 -64.6 0.25 20 soft
+  fight any 60 soft              # the room north of the north room (red door in its north wall):
+  unstick DOWN 8                 # its chest (FE6660 at (88.8, -63.2)) holds the boss door's special
+  goto 89.3 -66.2 0.25 8 soft    # key -- the owner opened it facing up from (89.32, -64.61) in the
+  goto 89.3 -64.6 0.15 6 soft    # boss session (2026-11-03, 197.7 s, mark 1)
+  press UP 8
+  press CROSS
+  sleep 2.5
+  press CROSS
+  sleep 1.2
+  press CROSS
+  sleep 0.8
+  unstick DOWN 8
   goto 87.8 -64.1 0.3 6 soft   # where it was pressed
   hold UP 0.12               # face up
   press CROSS   # 1372.6 s
