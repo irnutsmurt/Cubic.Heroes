@@ -393,38 +393,35 @@ block north_rooms           # the owner's 1,146-1,300 s as recorded (presses whe
   goto 71.7 -53.8 0.25 20 soft
   goto 55.3 -51.5 0.25 20 soft
   goto 55.3 -45.2 0.25 20 soft
-  goto 58.4 -42.5 0.2 20 soft    # the enclosure's way in, from the north: the owner went
-  goto 58.4 -44.4 0.3 8 soft     # straight south here (record 1,237.7-1,238.8 s); a diagonal
-  goto 60.8 -46.5 0.3 8 soft     # slid east along its wall (deeper10)
-  hold UP 0.2                    # face up
-  press CROSS   # 1240.3 s
-  goto 63.9 -47.0 0.25 20 soft
-  sleep 1.50
-  press CROSS   # 1242.9 s
-  sleep 1.01
-  press CROSS   # 1243.9 s
-  sleep 0.48
-  press CROSS   # 1244.4 s
-  sleep 0.53
-  press CROSS   # 1244.9 s
-  sleep 0.98
-  press CROSS   # 1245.9 s
-  press LEFT 1                # face left
-  sleep 0.59
-  press CROSS   # 1246.5 s
-  sleep 0.86
-  press CROSS   # 1247.3 s
-  goto 59.6 -45.6 0.25 20 soft
+  goto 55.5 -42.5 0.3 8 soft
+  goto 58.4 -42.5 0.2 10 soft    # the enclosure's way in, from the north: its block (FE6878 at
+  hold DOWN 2.0                  # x 58.4) pushed south, -44.0 -> -47.2 (boomer1; a goto gives up
+                                 # before it moves -- deeper14 never got in)
+  goto 60.8 -46.5 0.3 8 soft
+  goto 63.4 -48.6 0.25 8 soft    # below the boomerang's chest (FE6660 at (63.2, -45.6)); up
+  hold UP 0.35                   # into it slides to its front's right half, (64.2, -47.0) --
+  sleep 0.4                      # where the owner opened it (1,240.3 s) and east11 did: the HUD's
+  press CROSS                    # circle slot then shows the boomerang ("It can briefly stun,
+  sleep 2.5                      # ..."). Its two FE3C70 objects stay, so not `open` (which
+  press CROSS                    # counts them); east12's single CROSS from (64.5, -47.0) did not
+  sleep 1.2                      # open it.
+  press CROSS
+  sleep 0.8
+  unstick DOWN 8                 # its messages paged
+  goto 59.6 -45.6 0.25 20 soft   # out of the ring the way in: the gap the block left at x 58.4
+  goto 58.4 -44.0 0.25 8 soft
+  goto 58.4 -42.3 0.25 8 soft
   attempt 3 clear_enclosure_room # its north door opens once the crowned crab (life 32) is dead:
     goto 63.2 -41.0 0.3 10       # deeper10's fight never met it and the door stayed shut;
     goto 64.4 -38.3 0.3 8        # deeper11's killed it and the door opened ("Got 100!" beyond)
     state hz>@-39.0 3
   end
   goto 63.2 -32.6 0.3 6 soft   # where it was pressed
-  press UP 1                # face up
-  press CIRCLE   # 1252.6 s
-  sleep 0.09
+  hold UP 0.15                   # face up: the boomerang at the north wall's switch (63.2, -20.6),
+  press CIRCLE   # 1252.6 s      # which opens the way to a chest with a key (a walkthrough)
+  sleep 1.5
   press CIRCLE   # 1252.7 s
+  sleep 1.5
   goto 63.2 -32.1 0.3 6 soft   # where it was pressed
   press CROSS   # 1253.1 s
   sleep 0.19
@@ -436,36 +433,36 @@ block north_rooms           # the owner's 1,146-1,300 s as recorded (presses whe
   sleep 0.19
   press CROSS   # 1254.4 s
   goto 63.2 -29.1 0.3 6 soft   # where it was pressed
-  press LEFT 1                # face left
+  hold LEFT 0.12             # face left
   press CROSS   # 1254.6 s
   goto 63.2 -27.3 0.3 6 soft   # where it was pressed
-  press UP 1                # face up
+  hold UP 0.12               # face up
   press CROSS   # 1255.1 s
   goto 63.3 -24.8 0.25 20 soft
   goto 68.4 -26.3 0.3 6 soft   # where it was pressed
-  press UP 1                # face up
+  hold UP 0.12               # face up
   press CROSS   # 1257.1 s
-  press RIGHT 1                # face right
+  hold RIGHT 0.12            # face right
   sleep 0.53
   press CROSS   # 1257.6 s
   goto 68.9 -26.2 0.3 6 soft   # where it was pressed
   press CROSS   # 1257.9 s
   goto 68.9 -26.2 0.25 20 soft
   goto 67.3 -27.4 0.3 6 soft   # where it was pressed
-  press LEFT 1                # face left
+  hold LEFT 0.12             # face left
   press CROSS   # 1258.5 s
   goto 66.9 -27.8 0.3 6 soft   # where it was pressed
   press CROSS   # 1258.7 s
   goto 66.3 -28.2 0.3 6 soft   # where it was pressed
-  press DOWN 1                # face down
+  hold DOWN 0.12             # face down
   press CROSS   # 1259.0 s
   goto 65.3 -28.0 0.25 20 soft
   goto 71.5 -26.7 0.3 6 soft   # where it was pressed
-  press RIGHT 1                # face right
+  hold RIGHT 0.12            # face right
   press CROSS   # 1261.0 s
   goto 72.2 -26.5 0.25 20 soft
   goto 63.7 -25.9 0.3 6 soft   # where it was pressed
-  press UP 1                # face up
+  hold UP 0.12               # face up
   press CIRCLE   # 1263.1 s
   goto 57.9 -26.2 0.3 6 soft   # where it was pressed
   press CROSS   # 1264.5 s
@@ -474,22 +471,28 @@ block north_rooms           # the owner's 1,146-1,300 s as recorded (presses whe
   sleep 0.28
   press CROSS   # 1265.4 s
   goto 55.8 -25.9 0.3 6 soft   # where it was pressed
-  press LEFT 1                # face left
+  hold LEFT 0.12             # face left
   press CROSS   # 1266.0 s
   goto 54.7 -25.8 0.3 6 soft   # where it was pressed
   press CROSS   # 1266.6 s
-  press UP 1                # face up
+  hold UP 0.12               # face up
   sleep 0.58
   press CROSS   # 1267.2 s
   goto 54.2 -26.0 0.25 20 soft
   goto 54.4 -26.5 0.3 6 soft   # where it was pressed
-  press RIGHT 1                # face right
+  hold RIGHT 0.12            # face right
   press CROSS   # 1268.5 s
+  goto 58.4 -26.4 0.25 8 soft    # the room's chests (FE6660 at (58.4, -24.8) and (69.6, -24.8),
+  open FE3C70 6 soft             # one with a key; the owner's 1,264 and 1,257 s), whatever the
+  unstick DOWN 8                 # owner's presses left; their objects appear only this near
+  goto 69.6 -26.4 0.25 8 soft
+  open FE3C70 6 soft
+  unstick DOWN 8
   goto 58.9 -26.6 0.25 20 soft
   goto 63.2 -32.5 0.25 20 soft
   goto 63.2 -39.0 0.25 20 soft
   goto 50.4 -47.1 0.3 6 soft   # where it was pressed
-  press LEFT 1                # face left
+  hold LEFT 0.12             # face left
   press L1   # 1277.2 s
   sleep 0.34
   press L1   # 1277.5 s
@@ -503,9 +506,10 @@ block north_rooms           # the owner's 1,146-1,300 s as recorded (presses whe
   goto 39.2 -58.4 0.25 20 soft
   goto 48.9 -67.1 0.25 20 soft
   goto 59.1 -69.1 0.25 20 soft
-  goto 63.1 -76.3 0.25 20 soft
+  fight any 60 soft              # the bat room again: a bat its first fight left keeps its south
+  goto 63.1 -76.3 0.25 20 soft   # door barred (east13, east14 stopped at z -75.9)
   goto 63.5 -84.7 0.3 6 soft   # where it was pressed
-  press DOWN 1                # face down
+  hold DOWN 0.12             # face down
   press CROSS   # 1295.9 s
   goto 62.1 -91.5 0.3 6 soft   # where it was pressed
   press CROSS   # 1297.1 s
@@ -567,10 +571,10 @@ block east_rooms
   # in these saves). Exploratory.
   goto 63.6 -98.1 0.25 20 soft
   goto 63.0 -98.3 0.3 6 soft   # where it was pressed
-  press DOWN 1                # face down
+  hold DOWN 0.12             # face down
   press CROSS   # 1301.6 s
   goto 60.6 -99.4 0.3 6 soft   # where it was pressed
-  press RIGHT 1                # face right
+  hold RIGHT 0.12            # face right
   press CROSS   # 1302.7 s
   goto 60.3 -99.8 0.3 6 soft   # where it was pressed
   press CROSS   # 1303.1 s
@@ -578,14 +582,14 @@ block east_rooms
   press CROSS   # 1303.3 s
   goto 60.0 -100.1 0.25 20 soft
   goto 61.9 -100.4 0.3 6 soft   # where it was pressed
-  press RIGHT 1                # face right
+  hold RIGHT 0.12            # face right
   press CROSS   # 1303.9 s
   goto 65.1 -101.2 0.3 6 soft   # where it was pressed
-  press DOWN 1                # face down
+  hold DOWN 0.12             # face down
   press CROSS   # 1304.7 s
   goto 67.4 -104.0 0.25 20 soft
   goto 63.9 -110.3 0.3 6 soft   # where it was pressed
-  press LEFT 1                # face left
+  hold LEFT 0.12             # face left
   press CROSS   # 1307.3 s
   goto 63.4 -112.2 0.25 20 soft
   goto 57.1 -112.9 0.25 20 soft   # life 10
@@ -598,47 +602,49 @@ block east_rooms
   goto 58.0 -104.0 0.5 10 soft
   goto 63.0 -106.0 0.5 10 soft
   goto 80.6 -103.7 0.3 6 soft   # where it was pressed
-  press RIGHT 1                # face right
+  hold RIGHT 0.12            # face right
   press CROSS   # 1314.6 s
   goto 82.2 -102.5 0.25 20 soft
   goto 85.2 -104.0 0.3 6 soft   # where it was pressed
-  press DOWN 1                # face down
+  hold DOWN 0.12             # face down
   press CROSS   # 1315.9 s
   goto 87.1 -106.7 0.3 6 soft   # where it was pressed
-  press LEFT 1                # face left
+  hold LEFT 0.12             # face left
   press CROSS   # 1316.8 s
   goto 89.0 -110.0 0.3 6 soft   # where it was pressed
-  press RIGHT 1                # face right
+  hold RIGHT 0.12            # face right
   press CROSS   # 1317.8 s
-  goto 90.4 -111.5 0.25 20 soft
+  fight any 90 soft              # this room's (life 16-32) bar its east doorway: east13 walked
+  goto 90.4 -111.5 0.25 20 soft  # into it uncleared and stopped at x 81, then x 95
   goto 98.0 -109.6 0.4 10 soft   # into the east room (the key's chest) through the doorway near
   goto 104.0 -106.5 0.4 10 soft  # z -110 (a straight line to (100, -105) stops on the wall north of it)
   fight any 120 soft             # its skeletons and blobs keep its north door barred (east1)
   goto 106.2 -105.0 0.3 6 soft   # where it was pressed
-  press RIGHT 1                # face right
+  hold RIGHT 0.12            # face right
   press CROSS   # 1322.6 s
   goto 109.1 -104.2 0.3 6 soft   # where it was pressed
   press CROSS   # 1323.2 s
   goto 111.7 -103.6 0.25 20 soft
-  press RIGHT 1                # face right
+  hold RIGHT 0.12            # face right
   press CROSS   # 1323.7 s
   goto 112.6 -103.5 0.3 6 soft   # where it was pressed
   press CROSS   # 1324.1 s
   goto 113.7 -103.3 0.3 6 soft   # where it was pressed
   press CROSS   # 1324.6 s
-  call east_wall_tries          # what opens the room's north door: being tried (east5: SQUARE there did not)
   goto 117.6 -106.4 0.25 20 soft
-  press RIGHT 1                # face right
-  sleep 0.29
-  press CIRCLE   # 1327.1 s
+  hold RIGHT 0.15                # face right: the boomerang across the lava at the east wall's
+  press CIRCLE   # 1327.1 s      # switch opens the room's north door (the owner was through 2 s later)
+  sleep 1.5
   goto 117.7 -105.5 0.3 6 soft   # where it was pressed
+  hold RIGHT 0.15
   press CIRCLE   # 1328.0 s
+  sleep 1.5
   attempt 3 clear_east_room      # its north door (x 115.4), barred until the room is clear
     goto 115.4 -97.5 0.3 10
     goto 115.4 -92.5 0.3 8
     state hz>@-94.0 3
   end
-  press UP 1                # face up
+  hold UP 0.12               # face up
   press CIRCLE   # 1332.3 s
   goto 115.4 -91.8 0.3 6 soft   # where it was pressed
   press CROSS   # 1332.8 s
@@ -646,7 +652,7 @@ block east_rooms
   press CROSS   # 1333.4 s
   goto 114.4 -91.2 0.25 20 soft
   goto 115.7 -91.4 0.3 6 soft   # where it was pressed
-  press RIGHT 1                # face right
+  hold RIGHT 0.12            # face right
   press CIRCLE   # 1334.5 s
   goto 119.0 -92.1 0.3 6 soft   # where it was pressed
   press CROSS   # 1335.1 s
@@ -654,7 +660,7 @@ block east_rooms
   goto 102.4 -85.6 0.25 20 soft
   goto 95.3 -92.0 0.25 20 soft
   goto 93.3 -92.3 0.3 6 soft   # where it was pressed
-  press LEFT 1                # face left
+  hold LEFT 0.12             # face left
   press CROSS   # 1343.1 s
   goto 88.7 -92.9 0.3 6 soft   # where it was pressed
   press CROSS   # 1343.9 s
@@ -665,7 +671,7 @@ block east_rooms
   goto 84.0 -86.4 0.25 20 soft
   goto 88.6 -81.2 0.25 20 soft
   goto 87.3 -73.7 0.3 6 soft   # where it was pressed
-  press UP 1                # face up
+  hold UP 0.12               # face up
   press CIRCLE   # 1353.5 s
   sleep 0.33
   press CROSS   # 1353.8 s
@@ -676,27 +682,27 @@ block east_rooms
   goto 87.3 -70.5 0.3 6 soft   # where it was pressed
   press CIRCLE   # 1355.6 s
   goto 87.3 -68.3 0.3 6 soft   # where it was pressed
-  press RIGHT 1                # face right
+  hold RIGHT 0.12            # face right
   press CROSS   # 1356.4 s
   goto 87.3 -68.0 0.25 20 soft
-  press RIGHT 1                # face right
+  hold RIGHT 0.12            # face right
   sleep 0.15
   press CROSS   # 1356.7 s
   sleep 0.20
   press CROSS   # 1356.9 s
   goto 87.6 -67.3 0.3 6 soft   # where it was pressed
-  press UP 1                # face up
+  hold UP 0.12               # face up
   press CROSS   # 1357.2 s
   goto 89.8 -68.3 0.3 6 soft   # where it was pressed
-  press RIGHT 1                # face right
+  hold RIGHT 0.12            # face right
   press CROSS   # 1358.4 s
   goto 90.3 -68.7 0.25 20 soft
   goto 87.8 -67.8 0.3 6 soft   # where it was pressed
-  press UP 1                # face up
+  hold UP 0.12               # face up
   press CIRCLE   # 1359.5 s
   goto 87.2 -67.6 0.25 20 soft
   goto 87.2 -61.2 0.3 6 soft   # where it was pressed
-  press RIGHT 1                # face right
+  hold RIGHT 0.12            # face right
   press CROSS   # 1361.3 s
   goto 87.2 -60.1 0.25 20 soft
   goto 84.0 -65.1 0.25 20 soft
@@ -704,12 +710,12 @@ block east_rooms
   goto 95.2 -68.7 0.25 20 soft
   goto 93.0 -63.1 0.25 20 soft
   goto 91.2 -64.0 0.3 6 soft   # where it was pressed
-  press UP 1                # face up
+  hold UP 0.12               # face up
   press CROSS   # 1366.7 s
   goto 89.3 -64.6 0.3 6 soft   # where it was pressed
   press CROSS   # 1367.5 s
   goto 88.2 -64.6 0.3 6 soft   # where it was pressed
-  press RIGHT 1                # face right
+  hold RIGHT 0.12            # face right
   press CROSS   # 1368.0 s
   sleep 0.32
   press CROSS   # 1368.3 s
@@ -731,19 +737,20 @@ block northeast_rooms
   # area 37: 1372-1459 s, 83 positions, 30 waypoints
   goto 87.9 -64.6 0.25 20 soft
   goto 87.8 -64.1 0.3 6 soft   # where it was pressed
-  press UP 1                # face up
+  hold UP 0.12               # face up
   press CROSS   # 1372.6 s
   goto 89.9 -58.6 0.25 20 soft
   goto 89.4 -58.8 0.3 6 soft   # where it was pressed
-  press RIGHT 1                # face right
+  hold RIGHT 0.12            # face right
   press CROSS   # 1374.7 s
   goto 88.7 -59.2 0.3 6 soft   # where it was pressed
   press CROSS   # 1375.0 s
   goto 86.8 -60.1 0.25 20 soft
   goto 90.6 -84.1 0.3 6 soft   # where it was pressed
-  press RIGHT 1                # face right
+  fight any 60 soft              # into room 3,-5 (25.6 x 19.2 cells): a room with enemies bars its doors
+  hold RIGHT 0.12            # face right
   press CROSS   # 1381.2 s
-  press LEFT 1                # face left
+  hold LEFT 0.12             # face left
   sleep 0.53
   press CROSS   # 1381.7 s
   goto 90.6 -84.0 0.25 20 soft
@@ -751,33 +758,45 @@ block northeast_rooms
   goto 89.4 -88.9 0.25 20 soft
   goto 96.4 -92.3 0.25 20 soft
   goto 102.5 -87.3 0.25 20 soft
+  fight any 60 soft              # into room 4,-5 (25.6 x 19.2 cells): a room with enemies bars its doors
   goto 105.0 -87.3 0.3 6 soft   # where it was pressed
-  press RIGHT 1                # face right
+  hold RIGHT 0.12            # face right
   press L1   # 1390.1 s
   goto 107.4 -87.3 0.3 6 soft   # where it was pressed
   press L1   # 1391.8 s
   goto 117.9 -87.3 0.3 6 soft   # where it was pressed
   press CROSS   # 1393.5 s
   goto 129.0 -87.3 0.25 20 soft
+  fight any 60 soft              # into room 5,-5 (25.6 x 19.2 cells): a room with enemies bars its doors
+  goto 140.0 -88.6 0.3 10 soft   # its chest (FE6660 at (140.0, -85.6)) appears once the room is
+  hold UP 0.35                   # clear (east15): the key, as a walkthrough has it ("defeat the
+  sleep 0.4                      # enemies, and take the key"). Up into its front and CROSS, as
+  press CROSS                    # the boomerang's chest: 2.9 below it its FE3C70 objects are not
+  sleep 2.5                      # there yet for `open` (east16)
+  press CROSS
+  sleep 1.2
+  press CROSS
+  sleep 0.8
+  unstick DOWN 8
   goto 130.2 -84.7 0.3 6 soft   # where it was pressed
-  press UP 1                # face up
+  hold UP 0.12               # face up
   press CIRCLE   # 1397.6 s
   goto 131.2 -81.4 0.25 20 soft   # life 10
   goto 134.2 -81.5 0.3 6 soft   # where it was pressed
-  press DOWN 1                # face down
+  hold DOWN 0.12             # face down
   press CROSS   # 1399.4 s
   goto 138.1 -81.7 0.25 20 soft
   goto 138.0 -82.7 0.3 6 soft   # where it was pressed
-  press RIGHT 1                # face right
+  hold RIGHT 0.12            # face right
   press CROSS   # 1400.2 s
   goto 137.8 -86.7 0.25 20 soft
-  press RIGHT 1                # face right
+  hold RIGHT 0.12            # face right
   sleep 0.12
   press CROSS   # 1401.2 s
   goto 138.5 -86.3 0.3 6 soft   # where it was pressed
   press CROSS   # 1402.0 s
   goto 143.9 -87.1 0.25 20 soft
-  press RIGHT 1                # face right
+  hold RIGHT 0.12            # face right
   sleep 0.05
   press CROSS   # 1403.2 s
   goto 139.3 -87.8 0.3 6 soft   # where it was pressed
@@ -796,7 +815,7 @@ block northeast_rooms
   press CROSS   # 1408.2 s
   goto 140.3 -88.7 0.25 20 soft   # life 8
   goto 144.1 -88.7 0.3 6 soft   # where it was pressed
-  press RIGHT 1                # face right
+  hold RIGHT 0.12            # face right
   press CROSS   # 1409.3 s
   goto 146.1 -88.9 0.3 6 soft   # where it was pressed
   press CROSS   # 1409.8 s
@@ -804,26 +823,31 @@ block northeast_rooms
   press CROSS   # 1410.5 s
   goto 148.2 -89.4 0.25 20 soft
   goto 139.9 -87.2 0.3 6 soft   # where it was pressed
-  press UP 1                # face up
+  hold UP 0.12               # face up
   press CROSS   # 1412.6 s
   goto 139.1 -87.0 0.25 20 soft
-  press UP 1                # face up
+  hold UP 0.12               # face up
   sleep 0.49
   press CROSS   # 1413.2 s
   sleep 0.25
   press CROSS   # 1413.5 s
   goto 148.1 -81.6 0.3 6 soft   # where it was pressed
-  press RIGHT 1                # face right
+  hold RIGHT 0.12            # face right
   press CROSS   # 1415.1 s
   goto 151.2 -80.0 0.25 20 soft
   goto 149.2 -80.7 0.3 6 soft   # where it was pressed
-  press LEFT 1                # face left
+  hold LEFT 0.12             # face left
   press CROSS   # 1416.3 s
   goto 145.3 -81.7 0.3 6 soft   # where it was pressed
   press CROSS   # 1417.1 s
-  goto 130.1 -87.3 0.25 20 soft
+  goto 140.8 -81.7 0.4 10 soft   # out west the way the owner came in (1,396.8-1,398.9 s), along
+  goto 131.2 -81.4 0.4 10 soft   # the west wall: straight from the middle (the owner's 1,419 s)
+  goto 130.5 -84.0 0.4 8 soft    # the hero stops at x 135.2 every time (east15, east16)
+  goto 129.0 -87.3 0.3 8 soft
+  goto 126.9 -87.3 0.4 8 soft
   goto 124.8 -87.3 0.3 6 soft   # where it was pressed
-  press LEFT 1                # face left
+  fight any 60 soft              # into room 4,-5 (25.6 x 19.2 cells): a room with enemies bars its doors
+  hold LEFT 0.12             # face left
   press L1   # 1422.9 s
   goto 123.2 -87.3 0.3 6 soft   # where it was pressed
   press CROSS   # 1428.6 s
@@ -832,20 +856,22 @@ block northeast_rooms
   goto 122.3 -87.3 0.25 20 soft
   goto 116.2 -80.8 0.25 20 soft
   goto 115.3 -76.1 0.25 20 soft
+  fight any 60 soft              # into room 4,-4 (25.6 x 19.2 cells): a room with enemies bars its doors
   goto 118.5 -72.1 0.25 20 soft
   goto 124.4 -72.3 0.25 20 soft
   goto 128.1 -67.0 0.25 20 soft
+  fight any 60 soft              # into room 5,-4 (25.6 x 19.2 cells): a room with enemies bars its doors
   goto 131.5 -68.7 0.3 6 soft   # where it was pressed
-  press DOWN 1                # face down
+  hold DOWN 0.12             # face down
   press CROSS   # 1439.0 s
   goto 132.2 -69.2 0.25 20 soft
   goto 133.1 -74.1 0.25 20 soft   # life 10
   goto 138.3 -73.2 0.3 6 soft   # where it was pressed
-  press RIGHT 1                # face right
+  hold RIGHT 0.12            # face right
   press CROSS   # 1441.1 s
   goto 147.4 -72.2 0.25 20 soft
   goto 147.7 -71.7 0.3 6 soft   # where it was pressed
-  press UP 1                # face up
+  hold UP 0.12               # face up
   press CROSS   # 1442.7 s
   goto 148.4 -70.7 0.3 6 soft   # where it was pressed
   press CROSS   # 1443.2 s
@@ -855,7 +881,9 @@ block northeast_rooms
   press CROSS   # 1443.9 s
   goto 148.0 -62.0 0.25 20 soft
   goto 127.2 -68.1 0.25 20 soft
+  fight any 60 soft              # into room 4,-4 (25.6 x 19.2 cells): a room with enemies bars its doors
   goto 133.9 -68.1 0.25 20 soft
+  fight any 60 soft              # into room 5,-4 (25.6 x 19.2 cells): a room with enemies bars its doors
 end
 
 block boss_approach
@@ -865,44 +893,45 @@ block boss_approach
   goto 136.8 -64.7 0.25 20 soft
   goto 141.8 -60.0 0.25 20 soft
   goto 142.1 -53.1 0.25 20 soft
-  press RIGHT 1                # face right
+  fight any 60 soft              # into room 5,-3 (25.6 x 19.2 cells): a room with enemies bars its doors
+  hold RIGHT 0.12            # face right
   sleep 0.07
   press CROSS   # 1467.9 s
   goto 146.2 -53.6 0.25 20 soft
   goto 143.2 -53.5 0.25 20 soft
   goto 145.5 -51.6 0.3 6 soft   # where it was pressed
-  press UP 1                # face up
+  hold UP 0.12               # face up
   press CIRCLE   # 1470.5 s
   goto 147.4 -50.1 0.3 6 soft   # where it was pressed
   press CROSS   # 1471.0 s
   goto 147.8 -49.1 0.3 6 soft   # where it was pressed
   press CROSS   # 1471.2 s
   goto 148.9 -45.1 0.3 6 soft   # where it was pressed
-  press RIGHT 1                # face right
+  hold RIGHT 0.12            # face right
   press CIRCLE   # 1472.2 s
   goto 150.8 -45.2 0.25 20 soft
   goto 141.6 -44.2 0.25 20 soft
   goto 140.7 -43.4 0.3 6 soft   # where it was pressed
-  press UP 1                # face up
+  hold UP 0.12               # face up
   press CROSS   # 1474.5 s
   goto 138.4 -41.5 0.25 20 soft
   goto 140.4 -41.2 0.3 6 soft   # where it was pressed
-  press RIGHT 1                # face right
+  hold RIGHT 0.12            # face right
   press CIRCLE   # 1475.8 s
   goto 142.1 -40.8 0.3 6 soft   # where it was pressed
   press CROSS   # 1476.3 s
   goto 142.2 -40.8 0.25 20 soft
   goto 142.0 -41.3 0.3 6 soft   # where it was pressed
-  press RIGHT 1                # face right
+  hold RIGHT 0.12            # face right
   press CROSS   # 1476.5 s
   goto 141.4 -48.4 0.25 20 soft
   goto 140.7 -48.5 0.3 6 soft   # where it was pressed
-  press UP 1                # face up
+  hold UP 0.12               # face up
   press CROSS   # 1478.8 s
   goto 139.9 -48.5 0.3 6 soft   # where it was pressed
   press R2   # 1479.2 s
   goto 139.2 -48.6 0.25 20 soft
-  press UP 1                # face up
+  hold UP 0.12               # face up
   press CROSS   # 1479.5 s
   sleep 0.47
   press CROSS   # 1480.0 s
@@ -910,8 +939,9 @@ block boss_approach
   goto 144.1 -44.1 0.25 20 soft
   goto 130.4 -44.1 0.25 20 soft
   goto 127.9 -47.9 0.25 20 soft
+  fight any 60 soft              # into room 4,-3 (25.6 x 19.2 cells): a room with enemies bars its doors
   goto 123.8 -47.9 0.3 6 soft   # where it was pressed
-  press LEFT 1                # face left
+  hold LEFT 0.12             # face left
   press CROSS   # 1488.2 s
   goto 122.2 -47.9 0.3 6 soft   # where it was pressed
   press CROSS   # 1488.8 s
@@ -919,30 +949,30 @@ block boss_approach
   press CROSS   # 1489.6 s
   goto 117.6 -46.5 0.25 20 soft
   goto 117.6 -47.1 0.3 6 soft   # where it was pressed
-  press UP 1                # face up
+  hold UP 0.12               # face up
   press CROSS   # 1490.3 s
   goto 117.7 -48.3 0.3 6 soft   # where it was pressed
-  press LEFT 1                # face left
+  hold LEFT 0.12             # face left
   press CROSS   # 1490.7 s
   goto 117.5 -49.8 0.3 6 soft   # where it was pressed
   press CROSS   # 1491.3 s
   goto 114.3 -50.2 0.3 6 soft   # where it was pressed
-  press RIGHT 1                # face right
+  hold RIGHT 0.12            # face right
   press CROSS   # 1492.6 s
   goto 115.5 -50.6 0.25 20 soft
   goto 123.4 -47.2 0.25 20 soft
   goto 123.8 -46.3 0.3 6 soft   # where it was pressed
-  press UP 1                # face up
+  hold UP 0.12               # face up
   press CIRCLE   # 1494.6 s
   goto 125.1 -43.5 0.3 6 soft   # where it was pressed
   press CROSS   # 1495.2 s
   goto 125.6 -42.5 0.25 20 soft
   goto 114.4 -40.8 0.3 6 soft   # where it was pressed
-  press LEFT 1                # face left
+  hold LEFT 0.12             # face left
   press CIRCLE   # 1497.5 s
   goto 104.8 -41.2 0.25 20 soft
   goto 104.8 -44.0 0.3 6 soft   # where it was pressed
-  press DOWN 1                # face down
+  hold DOWN 0.12             # face down
   press CIRCLE   # 1499.2 s
   goto 104.8 -46.7 0.3 6 soft   # where it was pressed
   press CIRCLE   # 1499.8 s
@@ -951,36 +981,38 @@ block boss_approach
   goto 105.0 -54.9 0.25 20 soft
   goto 113.9 -43.1 0.25 20 soft
   goto 116.4 -34.4 0.3 6 soft   # where it was pressed
-  press UP 1                # face up
+  fight any 60 soft              # into room 4,-2 (25.6 x 19.2 cells): a room with enemies bars its doors
+  hold UP 0.12               # face up
   press CROSS   # 1507.1 s
   goto 116.4 -34.3 0.25 20 soft
   goto 116.0 -31.8 0.3 6 soft   # where it was pressed
-  press UP 1                # face up
+  hold UP 0.12               # face up
   press CIRCLE   # 1507.7 s
   goto 115.7 -29.8 0.3 6 soft   # where it was pressed
   press CROSS   # 1508.2 s
   goto 115.5 -27.8 0.3 6 soft   # where it was pressed
   press CROSS   # 1508.9 s
   goto 114.4 -26.0 0.3 6 soft   # where it was pressed
-  press RIGHT 1                # face right
+  hold RIGHT 0.12            # face right
   press CROSS   # 1509.7 s
   goto 113.0 -24.9 0.3 6 soft   # where it was pressed
-  press LEFT 1                # face left
+  hold LEFT 0.12             # face left
   press CROSS   # 1510.2 s
-  press RIGHT 1                # face right
+  hold RIGHT 0.12            # face right
   sleep 0.17
   press CROSS   # 1510.4 s
   goto 112.6 -25.3 0.3 6 soft   # where it was pressed
   press CROSS   # 1510.7 s
   goto 112.3 -25.9 0.3 6 soft   # where it was pressed
-  press UP 1                # face up
+  hold UP 0.12               # face up
   press CROSS   # 1511.4 s
   goto 112.5 -25.0 0.3 6 soft   # where it was pressed
-  press RIGHT 1                # face right
+  hold RIGHT 0.12            # face right
   press CROSS   # 1511.6 s
   goto 113.3 -21.9 0.25 20 soft
   goto 100.6 -28.5 0.25 20 soft
-  press UP 1                # face up
+  fight any 60 soft              # into room 3,-2 (25.6 x 19.2 cells): a room with enemies bars its doors
+  hold UP 0.12               # face up
   sleep 0.12
   press CROSS   # 1516.8 s
   sleep 0.78
@@ -997,22 +1029,26 @@ block boss_approach
   press CROSS   # 1521.1 s
   goto 98.2 -26.4 0.3 6 soft   # where it was pressed
   press CROSS   # 1522.1 s
-  press RIGHT 1                # face right
+  hold RIGHT 0.12            # face right
   sleep 0.51
   press CROSS   # 1522.6 s
   goto 81.9 -26.6 0.3 6 soft   # where it was pressed
-  press LEFT 1                # face left
+  hold LEFT 0.12             # face left
   press CROSS   # 1525.3 s
   goto 79.4 -26.6 0.25 20 soft
   goto 93.9 -24.8 0.25 20 soft
-  press LEFT 1                # face left
+  hold LEFT 0.12             # face left
   sleep 1.36
   press CROSS   # 1529.7 s
   sleep 1.12
   press CROSS   # 1530.8 s
   sleep 0.60
   press CROSS   # 1531.4 s
+end
+
+block into_boss_room           # the portal north of the last room (area 38, the owner's 1,534.9 s)
   goto 89.9 -19.6 0.25 20 soft
+  state area==38 15
 end
 
 block clear_east_room          # the east room's enemies again, from its middle
@@ -1021,34 +1057,3 @@ block clear_east_room          # the east room's enemies again, from its middle
   fight any 90 soft
 end
 
-block east_wall_tries          # the east room's east wall: two red cylinders (z about -104.5 and -106.5)
-  # beyond the lava strip (the hero stops at x 119.3). The owner, at full life (10: the long
-  # sword), pressed SQUARE twice and CIRCLE twice by them (116.3-117.6, -106.4) and was through
-  # the north door 2 s later (record 1,325.9-1,330.0 s). Not solved: SQUARE, CROSS and CIRCLE
-  # here at life 9 (east5, east6) and at full life (east8: `life 10`, the longer sword stops
-  # short of them) left the door shut; no "You need a key", and the menu's KEYS is empty. A
-  # guide says the Grass Temple has a Red Door normal keys do not open (its Red Key sold
-  # elsewhere): this may be it, though the owner was through. Tries kept for the next attempt.
-  goto 118.6 -104.5 0.3 8 soft
-  hold RIGHT 0.12
-  press CROSS
-  sleep 1.0
-  press SQUARE
-  sleep 1.5
-  goto 118.6 -106.4 0.3 8 soft
-  hold RIGHT 0.12
-  press CROSS
-  sleep 1.0
-  press SQUARE
-  sleep 1.5
-  goto 116.3 -106.4 0.3 8 soft
-  hold RIGHT 0.1
-  press SQUARE
-  sleep 0.6
-  press SQUARE
-  sleep 0.6
-  press CIRCLE
-  sleep 0.8
-  press CIRCLE
-  sleep 1.5
-end

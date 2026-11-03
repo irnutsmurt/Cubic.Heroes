@@ -156,7 +156,7 @@ def main():
                         out.append(f"goto {px:.1f} {pz:.1f} 0.3 6 soft   # where it was pressed")
                         at, last = (px, pz), tp
                     if d and d != face:
-                        out.append(f"press {d} 1                # face {d.lower()}")
+                        out.append(f"hold {d} 0.12" + " " * (17 - len(d)) + f"# face {d.lower()}")   # a tap does not turn the hero
                         face = d
                     if tp - last > 0.05:
                         out.append(f"sleep {min(tp - last, 1.5):.2f}")

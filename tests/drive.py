@@ -35,9 +35,10 @@ scenario header):
                               dialogue open), CROSS and again, up to tries (8)
   actors list                 every character and object within 40 units, nearest
                               first: class, position, life
-  open <class> [tries]        open what objects of the class are (a chest): up to
+  open <class> [tries] [soft] open what objects of the class are (a chest): up to
                               each from the south, facing it, CROSS, until the
-                              class's count falls (its item taken); tries (10)
+                              class's count falls (its item taken); tries (10);
+                              `soft`: none there or none opened is logged, not a failure
   fight <class>|any [timeout] [reach]  clear one class (or every one) of characters near the hero
                               (e.g. FE4500): walk to the nearest with life left, turn
                               to it and swing, until none within 40 units has life;
@@ -586,7 +587,7 @@ def fight(cls, tmo, reach, radius=25.0, soft=False):
 
 
 def open_obj(cls, tries):
-    """Open what the objects of one class are (a chest): walk up to each from
+    """Open what the objects of one class are (a chest): walk up to each, nearest first, from
     the south, at small offsets across it, facing it, and press CROSS (then
     twice more for an item's message), until the class's count near the hero
     falls -- the first dungeon's chest is two objects of class FE3C70 until
@@ -602,7 +603,10 @@ def open_obj(cls, tries):
     n0 = len(objs)
     if not objs:
         raise Fail(f"open {cls}: none within 40 units after 8 s")
-    spots = [(o[1] + dx, o[3]) for o in sorted(objs, key=lambda o: o[3]) for dx in (0.0, -0.6, 0.6, -1.2, 1.2)]
+    s = state() or {}
+    hx, hz = s.get("hx", 0.0), s.get("hz", 0.0)   # the nearest first: the chest the route walked up to
+    near = sorted(objs, key=lambda o: (o[1] - hx) ** 2 + (o[3] - hz) ** 2)
+    spots = [(o[1] + dx, o[3]) for o in near for dx in (0.0, -0.6, 0.6, -1.2, 1.2)]
     for i, (x, z) in enumerate(spots[:tries]):
         try:
             goto(x, z - 1.6, 0.25, 8)
@@ -768,7 +772,14 @@ def step(lineno, line, op, a):
         fight(a[0].upper().lstrip("C") if a[0].upper().startswith("C") else a[0].upper(), float(a[1]) if len(a) > 1 else 60,
               float(a[2]) if len(a) > 2 else 2.5, soft=soft)
     elif op == "open":
-        open_obj(a[0].upper(), int(a[1]) if len(a) > 1 else 10)
+        soft = a[-1] == "soft"
+        a = a[:-1] if soft else a
+        try:
+            open_obj(a[0].upper(), int(a[1]) if len(a) > 1 else 10)
+        except Fail as e:
+            if not soft or not alive():
+                raise
+            say(f"  (soft) {e}")
     elif op == "unstick":
         unstick(a[0].upper(), int(a[1]) if len(a) > 1 else 8)
     elif op == "cross":

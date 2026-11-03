@@ -1,22 +1,26 @@
-# Scenario: the first dungeon from its north rooms on, toward the boss
+# Scenario: the first dungeon from its north rooms to the boss
 # (SCENARIO=dungeon1_east). Exploratory: run with DOTHEROES_DEV_CANT_DIE=1.
 #
-# Starts from: build/checkpoints/dungeon1-north-rooms (a test's save after the
-#   west chest's key, its door, the enclosure room and the room beyond it;
-#   CONTINUE: the dungeon's door, the doors opened so far kept).
+# Starts from: build/checkpoints/dungeon1-boomerang (a test's save after the
+#   north rooms with the boomerang: the enclosure's block pushed south, its
+#   chest, the room beyond's wall switch and chests -- dungeon1_deeper.drive's
+#   north_rooms; CONTINUE: the dungeon's door, the doors opened so far kept).
 # Route: through the kept doors (past_key_door), then the owner's record on
-#   from 1,300 s a stretch at a time (dungeon1_route.drive: east_rooms,
-#   northeast_rooms, boss_approach), `actors list` at each stretch's end.
-# Completed when: each stretch's segment ends where the owner's did; the last
-#   at the boss's door (area 38 at 1,534.9 s in the owner's record).
-# State (2026-11-03): east_rooms reaches the east room (the key's chest) and
-#   clears it, but its north door stays shut (east_wall_tries: not solved), so
-#   the later stretches stall.
-#! saves build/checkpoints/dungeon1-north-rooms
+#   from 1,300 s a stretch at a time (dungeon1_route.drive: east_rooms -- the
+#   east room's wall switch across the lava hit with the boomerang opens its
+#   north door -- northeast_rooms, boss_approach, a fight on entering each
+#   room: one with enemies bars its doors), `actors list` at each stretch's
+#   end; a save before the boss's portal, then into the boss's room (area 38).
+# Completed when: each stretch's segment ends where the owner's did; the save
+#   made; area 38 reached.
+# State (2026-11-03): the east room's north door opens with the boomerang
+#   (east14); east14 then stopped in a barred room north-east (no fights in
+#   the generated stretches then).
+#! saves build/checkpoints/dungeon1-boomerang
 #! env DOTHEROES_NATIVE_CD=1 DOTHEROES_NATIVE_SOLVER=4,5,6 GCM_WRAP_LAP=1 DOTHEROES_PRESENT_ONCE=1
 #! env DOTHEROES_DEV_STATE=1 DOTHEROES_DEV_KEYS=1 DIAG_FRAMES=frames.log PS3_VERBOSE=0
 #! env WINDOW=1 VISIBLE=1 TOPMOST=1 GRAB_EVERY=3 PS3_OSD_FPS=2 DUMP=0 SHOT_EVERY=0
-#! secs 1500
+#! secs 2400
 include common.drive
 include dungeon1_route.drive
 
@@ -41,3 +45,14 @@ call boss_approach
 endseg
 state life>0 5
 actors list
+# A save before the portal (the run's own copy; CONTINUE starts at the
+# dungeon's door with its doors kept): build/checkpoints/dungeon1-boss-door.
+state area==37,life>0 10
+sleep 2
+call system_save
+segment fight boss
+call into_boss_room
+fight any 240 soft
+endseg
+actors list
+sleep 5

@@ -32,21 +32,9 @@ call north_rooms
 endseg
 actors list
 # A save here (the run's own copy): CONTINUE then starts at the dungeon's door
-# with the doors opened so far kept -- the next checkpoint
-# (build/checkpoints/dungeon1-north-rooms).
+# with the doors opened so far kept -- the next checkpoint (north_rooms now
+# takes the boomerang: build/checkpoints/dungeon1-boomerang; before it,
+# dungeon1-north-rooms).
 state area==37,life>0 10
 sleep 2
-attempt 3 page_dialogues
-  press START                 # the system menu, on RESUME
-  sleep 2
-  state menu==1 4
-end
-press DOWN                    # SAVE
-sleep 1
-press CROSS                   # saves at once; the menu stays on SAVE
-sleep 6
-press UP                      # RESUME
-sleep 1
-press CROSS
-sleep 2
-state life>0 5
+call system_save
