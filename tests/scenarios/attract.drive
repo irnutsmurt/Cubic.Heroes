@@ -1,0 +1,19 @@
+# Scenario: the attract mode (SCENARIO=attract tests/boot_smoke.py) -- the
+# game's own demos cycling with no input: the field, the river, the desert, a
+# lava dungeon room, the red volcano area, the forest. Rendering and stability
+# coverage, not gameplay. A fresh save root (no saves needed).
+# Measured: one "attract" segment from the title onward for ATTRACT_SECS
+# (default 2640, 44 minutes); hitch captures of frames of 40 ms or more (the
+# 45-minute run of 2026-11-02 had one isolated 66.6 ms frame at +1081 s), one
+# per 10 s at most, so loads -- runs of long frames -- are not captured.
+#! env DOTHEROES_NATIVE_CD=1 DOTHEROES_NATIVE_SOLVER=4,5,6 GCM_WRAP_LAP=1 DOTHEROES_PRESENT_ONCE=1
+#! env DOTHEROES_DEV_KEYS=1 DIAG_FRAMES=frames.log PS3_VERBOSE=0
+#! env PS3_FTRACE_ROLL=hitch PS3_FTRACE_ROLL_MS=40 PS3_FTRACE_ROLL_GAP=10 PS3_FTRACE_ROLL_MAX=40 PS3_FTRACE_ROLL_FROM=60
+#! env WINDOW=1 VISIBLE=1 TOPMOST=1 GRAB_EVERY=300 PS3_OSD_FPS=2 DUMP=0 SHOT_EVERY=0
+#! secs 2800
+log TitleMovie 120
+sleep 10
+segment attract demos
+sleep ${ATTRACT_SECS:-2640}
+endseg
+stop

@@ -20,7 +20,8 @@ $env:SCENARIO='owner_play'; $env:RUN_TAG='owner-play'; build\venv\Scripts\python
 ```
 
 If one of my test runs is on screen, it is asked to stop first (a few
-seconds). The game opens in a window with sound. Close the window when you are
+seconds), and no further test starts until testing is resumed
+(`tests/stop_tests.py --resume`). The game opens in a window with sound. Close the window when you are
 done: that ends the recording.
 
 ## What it uses
@@ -34,11 +35,21 @@ done: that ends the recording.
   beam stay as the game has them. If you die, choose Continue (YES) and carry
   on.
 - The **frame-rate readout** with its graph, top right.
+- **Fullscreen at your desktop's resolution** (1920x1080 here). The game
+  itself draws 1280x720 -- the PS3 game's own resolution -- and that picture
+  is scaled up to fill the screen; rendering at 1080p would be a renderer
+  feature of its own (not done). For the 1280x720 window instead, put
+  `PS3RECOMP_VK_FULLSCREEN=0` in front of the command (Git Bash:
+  `env PS3RECOMP_VK_FULLSCREEN=0 SCENARIO=owner_play ...`). Checked
+  2026-11-02: the picture and the readout at 1920x1080, the game in play,
+  F8 marks, Alt-Tab away (the game keeps running) and back (input again);
+  the controller's buttons in fullscreen are for you to confirm.
 
 ## Controls
 
-- Your controller as usual (or the keyboard: arrows, Z = cross, X = circle,
-  A = square, S = triangle, Q / W = L1 / R1, Enter = START, Tab = SELECT).
+- Your controller as usual. The keyboard (arrows, Z = cross, X = circle,
+  A = square, S = triangle, Q / W = L1 / R1, Enter = START, Tab = SELECT) is
+  read only while no controller is connected.
 - **Mark a hitch: F8, or click both sticks (L3+R3).** "MARK n" shows on
   screen. Mark any stutter you notice, even a small one, right when you feel
   it -- the frame trace from a few seconds before is kept.

@@ -23,7 +23,7 @@ import re
 import sys
 
 LOAD_MS = 100.0
-GAMEPLAY = ("fight", "explore", "idle")
+GAMEPLAY = ("fight", "explore", "idle", "attract")   # measured kinds ("attract": rendering only, reported apart)
 # Switches that change what a frame costs: runs are grouped by them.
 PERF_KEYS = ("DOTHEROES_NATIVE_CD", "DOTHEROES_NATIVE_SOLVER", "GCM_WRAP_LAP", "DOTHEROES_PRESENT_ONCE",
              "DOTHEROES_FPS", "DIAG_VBLANK_MS", "DOTHEROES_DEV_CANT_DIE", "PS3_FTRACE", "PS3_FTRACE_ROLL",
@@ -133,6 +133,9 @@ def report(runs, title):
         flips = frames(d)
         segs = res.get("segments", [])
         why = []
+        diag = os.path.join(d, "diag")
+        if res.get("crash") or (os.path.isdir(diag) and any(f.startswith("crash-") for f in os.listdir(diag))):
+            why.append("CRASH: " + (res.get("crash") or "see diag/"))
         guard = res.get("guard") or load_json(os.path.join(d, "guard.json"), {}) or {}
         if guard.get("aborted"):
             why.append(f"guard: {guard['aborted']}")
@@ -185,9 +188,14 @@ def report(runs, title):
         lines.append(f"- segments: {len(done)} of {len(segs)} completed; failures: {len(res.get('failures', []))}")
         cycles = sorted({s.get("cycle") for s in segs if s.get("cycle")})
         if cycles:
-            ok_c = [c for c in cycles if all(s.get("ok") for s in segs if s.get("cycle") == c)
-                    and any(s["kind"] == "fight" and s.get("ok") for s in segs if s.get("cycle") == c)]
-            lines.append(f"- cycles: {len(ok_c)} of {len(cycles)} with every segment completed and a real fight")
+            fights = any(s["kind"] == "fight" for s in segs)
+            ok_c = [c for c in cycles if any(s.get("cycle") == c and s.get("ok") for s in segs)
+                    and all(s.get("ok") or s.get("attempt", 1) and any(t.get("cycle") == c and t.get("kind") == s["kind"]
+                                                                   and t.get("name") == s["name"] and t.get("ok")
+                                                                   for t in segs) for s in segs if s.get("cycle") == c)
+                    and (not fights or any(s["kind"] == "fight" and s.get("ok") for s in segs if s.get("cycle") == c))]
+            lines.append(f"- cycles: {len(ok_c)} of {len(cycles)} with every segment completed (a failed try retried "
+                         f"successfully counts){' and a real fight' if fights else ''}")
         by_kind = {}
         for s in segs:
             w = (s.get("wall1") or 0) - (s.get("wall0") or 0)

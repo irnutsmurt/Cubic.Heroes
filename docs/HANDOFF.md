@@ -83,7 +83,9 @@ log) and [FEASIBILITY.md](FEASIBILITY.md) (design and the explicit exceptions).
   the save plus a state-checked route (tests/scripts/fight_bench.drive: in
   play in the castle's area, then confirmed in the river's area before the
   fight is measured); a true in-game restart (reloading an area, or putting
-  the hero at a known spot) is not done.
+  the hero at a known spot) is not done. Since 2026-11-02: named scenarios start from kept checkpoints,
+  check every stage and retry from the checkpoint a bounded number of times
+  ("Current status", "How tests run now").
 - Commit identity for this repo is the owner's own git config; ps3recomp
   patches are committed as `dotheroes <dotheroes@localhost>` on the
   `dotheroes` branch of `build/ref/ps3recomp`.
@@ -91,7 +93,259 @@ log) and [FEASIBILITY.md](FEASIBILITY.md) (design and the explicit exceptions).
   project for Street Fighter Alpha 3 on the Dreamcast (SFA3) is the model for the
   setup app and release downloads.
 
-## Where things stand
+## Current status (2026-11-02)
+
+Read this section first; the sections after it are the record it is drawn
+from, oldest diagnoses in "History" at the end.
+
+**What runs.** The Windows build (RTX 3070, Ryzen 7 5800X) boots, plays and
+saves strict-clean with no unresolved imports: title, new game and prologue,
+CONTINUE, the castle's field and interior, the river's area and its fights,
+GAME OVER / Continue / Save, the system menu and its pages, the dot editor,
+INSTALL, SNAPSHOT / ALBUM, and round trips of installed data, snapshots and
+edited characters across restarts. That is a small, early part of the game
+(see "Game coverage" below); nothing past the castle area has been played.
+
+**Performance configuration.** Four switches, all experimental and off by
+default, hold 60 fps in the scenes measured so far:
+`DOTHEROES_NATIVE_CD=1 DOTHEROES_NATIVE_SOLVER=4,5,6 GCM_WRAP_LAP=1
+DOTHEROES_PRESENT_ONCE=1` -- the baseline every timing uses
+(build/baselines/2026-11-01-config-validation; river fight p99 17.2-17.4 ms,
+exploration p99 17.3 ms, no frame over 25 ms in exploration). **Native
+collision (`DOTHEROES_NATIVE_CD=1`) is not bit-exact with the game's SPU
+task and its contact differences are unresolved** (docs/BULLET_NATIVE.md,
+"How close it is"): 6.1-7.8% of mesh/box manifolds have genuinely different
+contacts, 0.6-0.85% materially different normals; similar aggregate rates do
+not show equivalent behaviour. The three native solver commands are
+bit-exact. The default (all four off) still drops to p99 29-38 ms in
+debris-heavy fights.
+
+**Open problems, most important first.**
+1. **Long sessions with area reloads lost 60 fps -- four causes found and
+   fixed (2026-11-02, ps3recomp patches 0080, 0081, 0083, 0084); a crash
+   found and fixed on the way (0082). The 30-minute soak on the final build
+   held: 20 of 20 cycles, every fight p99 17.2-17.9 ms, the last five as clean
+   as the first, 3 frames over 25 ms in 11 minutes of fighting, no crash
+   (soak-reload-30m, build/baselines/2026-11-02-long-sessions).** Memory
+   after the first six minutes grows ~2 MB a minute (~2.6 MB a cycle;
+   1,262 -> 1,300 MB over 21 minutes): small, tracked.
+   A 35-minute play soak cycling the river fight through TITLE -> CONTINUE
+   held 60 for four cycles; from the fifth on, 18-22% of fight frames took
+   ~33 ms (p99 34-36 ms), and 8% while idle. All three causes sent the
+   scene's draws to the draw engine's copy path (converted on the CPU every
+   frame), where the walker's drain goes from ~5 to 11-18 ms a frame and the
+   main thread waits for the flip:
+   - *Dynamic for good* (0080): a cached draw whose memory had been
+     rewritten four times in its life stayed on the copy path, and each
+     reload rewrites the area's static geometry once. After the fourth,
+     ~145k of ~165k draws per 5 s took the copy path (~20k before). Six
+     river cycles a run, one build (FIGHTS=6 ROUNDS=8; build/test
+     geomfix-*): the old rule (`RSX_GEOM_DYNAMIC_LIFETIME=1`) p99 17.2-17.4
+     ms in fights 1-4, then 35.5 and 33.6 ms; the new one 17.2-17.4 in all
+     six, in three runs.
+   - *The geometry arena ran out* (0081), which the first had hidden: a
+     20-cycle soak with that fix (soak-fix-30m) held fights 1-7, then ~10% of
+     frames at 33 ms from fight 8 and ~70% from fight 16 (30 fps). The Vulkan
+     backend gave a request the smallest free block of its size or larger,
+     whole, and freed released blocks only when out of room; each reload
+     re-uploads ~130 MB, and after about six the six 64 MB chunks were spent
+     and cut up. Now a buddy allocator: blocks split for smaller requests and
+     merged with free buddies, released blocks freed once the batches that
+     could read them have finished. Eight cycles with every block checked
+     (`RSX_GEOM_ARENA_CHECK=1`, buddy-check): no overlap, no wait for room,
+     ~187 MB in blocks throughout, fights p99 17.2-17.4 ms, none over 25.
+   - *Loads still tripped the rule* (0083): with rebuilds up to 60 frames
+     apart counting, a load rewriting an area several times within a second
+     made parts of the scene dynamic now and then, and their retry waits
+     doubled at every load -- 22k, then 76k, then 158k draws per 5 s on the
+     copy path over 17 cycles (soak-buddy-30m). Now only rebuilds within 8
+     frames of each other count, and an entry that stays valid 600 frames
+     after a retry starts its backoff over.
+   - *Hot pages for good* (0084): with all of that (soak-final-30m), fights
+     1-8 held (p99 17.3-17.4 ms), 9-15 had 2-3% of frames over 18 ms and
+     16-20 had 24-38%, dynamic draws jumping in steps to ~65k and ~140k per
+     5 s. vm_watch stopped watching a page after 16 writes in its life
+     (`VW_HOT`), and each reload writes the area's pages again: once its
+     pages were "hot", an entry's every retry failed to store, it was
+     rebuilt each frame and went dynamic again with a doubled wait. Now only
+     writes within 1 s of each other count, and a hot page not seen written
+     for 10 s is watched again.
+   *The crash* (0082): three of these soaks crashed inside the NVIDIA driver
+   (nvoglv64.dll: a null read, or two threads writing one address), each
+   just after a hitch mark -- the 10th or the 100th, when "MARK n" on screen
+   grows a digit and the overlay's staging buffer is made again. The overlay
+   freed the old buffer with vk_destroy_buffer, which first flushes the
+   walker's batch: from the present thread, while the walker was recording.
+   tests/scripts/mark_stress.drive (120 marks 0.3 s apart) crashed at the
+   10th every time; with the overlay's buffers freed without that flush,
+   120 marks and no crash. The overlay came with patch 0069 (2026-11-01):
+   any session that marks ten hitches could have crashed this way. A run
+   under the Vulkan validation layer (`VK_INSTANCE_LAYERS=
+   VK_LAYER_KHRONOS_validation`, four fights) reported no error. On the way,
+   vm_watch's fault handler looked at a page another thread had released
+   outside its lock, where a consumer could watch the page again in between
+   (0084; found by reading, not shown to have caused anything).
+   Any long session -- area changes in normal play reload geometry too --
+   needs all of these.
+2. **Fight spikes** (about one frame of 25-37 ms a minute; the spike run,
+   build/test spikes: three 80-second river fights with hitch captures, GPU
+   timing and physics stats): at debris bursts. Either the main thread
+   itself is busy 25-30 ms a frame for a few frames (two to four physics
+   steps a frame on 180-370 contact points, its physics wait only 1-2 ms:
+   the game's own code with the new debris; a 54 ms frame in one fight), or
+   the walker's drain takes 16-19 ms as the draw count jumps, once with a
+   10 ms command-ring wait. The first frames in the river's area after boot
+   (only the first entry) have a 30-39 ms frame from the walker alone (16 ms
+   drain, the main thread idle). Next: a main-thread profile of the burst
+   frames (`DIAG_PROF` with the trace's clock) to see which game code grows.
+   The isolated 66.6 ms frame of a 45-minute attract run: an attract run
+   with hitch captures of 40 ms+ is the trace (`SCENARIO=attract`; not run
+   yet -- twice preempted on 2026-11-02).
+   **The dungeon's first room**: one frame of 93-95 ms every time around the
+   floor switch and the door it opens, and 2-3 more over 33 ms
+   (dungeon1_approach, three cycles: p99 17.3 ms otherwise) -- reproducible,
+   not yet traced.
+3. 144 fps uncapped is not sustained (~125-130 fps; the main thread, the
+   game's own code, is the limit). Stretch goal.
+4. Not verified: save portability (PARAM.PFD is not rewritten) and the colour
+   comparison with RPCS3 (its capture never got past preloading pipelines).
+
+**Milestones.**
+
+| Milestone | State | Evidence |
+|---|---|---|
+| Windows native build, strict-clean, 0 unresolved NIDs | done | every run's `strict: none`, `hle: 0` |
+| Boot -> title -> new game / CONTINUE -> play | done | tests/scripts/new_game.drive, load_save.drive |
+| 60 fps in exploration (validated configuration) | done in the scenes measured | build/baselines/2026-11-01-config-validation |
+| 60 fps in debris-heavy river fights (validated configuration) | done in short runs | same; fight_bench / river_fight scenario |
+| 60 fps held across a long session with reloads | done for 20 river reload cycles (every fight p99 17.2-17.9 ms, no crash) | build/baselines/2026-11-02-long-sessions |
+| Gameplay speed independent of frame rate (30/60/120/144) | done for the hero, river enemies, physics, timers | build/baselines/2026-11-02-frame-rate |
+| Save / load, GAME OVER save | done | tests/scripts/save_game.drive |
+| INSTALL, SNAPSHOT/ALBUM, dot editor SAVE, across restarts | done | tests/scripts/roundtrip_*.drive, editor_roundtrip_*.drive |
+| First dungeon, first boss | played by the owner (no crash, p99 17.6 ms); as a repeatable test: the way there and its first room (two dialogues, a floor switch), 3 of 3 cycles; the deeper rooms and the boss not yet | owner session 2026-11-02; tests/scenarios/dungeon1_approach.drive |
+| 144 fps uncapped | not met (~125-130) | build/baselines/2026-11-02-frame-rate |
+| Save portability, colour vs RPCS3 | not verified | -- |
+| Setup app end to end, first release | not started | -- |
+
+**Next actions, in order.**
+1. Keep the 30-minute cycling soak (river_fight, FIGHTS=20 ROUNDS=8) as the
+   standing long-session test after any renderer or memory change: reloads,
+   deaths and area changes, not idle time. Then longer sessions with real
+   area changes (the owner's play session gives them).
+2. Take dungeon1_approach deeper: the first room's fight (the replayed
+   presses do not get through it), then the boss in area 38 -- the owner's
+   record covers both (1,000-1,600 s) -- and measure them like the river
+   fight, with normal damage and real audio in representative runs. A save
+   inside the dungeon, before the boss, would make the boss a short test
+   (the next play session: OWNER_PLAY.md, now fullscreen).
+3. The hitches: the dungeon switch/door's 93-95 ms frame (reproducible), the
+   fight spikes (profile the main thread in the debris-burst frames, the
+   walker's drain when draws jump), the first area entry's walker frame, and
+   the attract run for the 66.6 ms frame.
+4. Then the stretch goal (144 fps), colours vs RPCS3, save portability, the
+   setup app and a first release.
+
+**How tests run now (2026-11-02).** A test is a named scenario
+(tests/scenarios/*.drive) run by tests/boot_smoke.py with `SCENARIO=<name>`:
+its header names the kept checkpoint it starts from (build/checkpoints/,
+copies of the owner's saves, never cleaned up by runs) and the settings it
+needs; the drive checks the game's state at every stage (state.txt: life,
+area, the hero's position, the system menu's word), fails a stage on a
+timeout, a death, leaving the area or a menu left open, records each
+failure with the state and the log's tail (failures.jsonl), takes the way
+back to the checkpoint and retries a bounded number of times, and records
+each stretch it measures as a segment (segments.jsonl): fights must show
+debris physics and enemies losing life, or they do not count. The run ends
+when the drive ends; a run stopped by the on-screen guard is stopped the
+game's own way too (its frame log is kept), and a run that left a crash
+report says CRASH whatever ended it after (a crash first showed up as "game
+window covered"). tests/batch_report.py turns a batch of runs into a
+report: completed and failed scenarios, combat time, workload, frame-time
+percentiles and spikes per minute per kind of segment, worst frames, memory
+growth, errors, the exact build and settings; invalid runs first and kept out
+of the totals; settings never pooled across configurations. Hitch captures
+(`PS3_FTRACE_ROLL=hitch`) keep a rolling frame trace and write the seconds
+around each slow frame or tester's mark (tests/slow_frames.py reads them);
+the copy takes 0.3-4 ms and the write 3-9 ms, on a thread of their own. Their
+cost in frames does not show: two river runs of two 80-second fights each way
+(ABBA, build/test ovh-*), without p99 17.3 ms, 0.37% of frames over 18 ms,
+0.7 a minute over 25; with p99 17.3, 0.31%, 0.5 a minute. Play sessions
+(`SCENARIO=owner_play`, tests/scenarios/OWNER_PLAY.md) record inputs, areas
+and positions, hitch captures and a copy of every save, fullscreen at the
+desktop's resolution (the 720p picture scaled); one starting stops any test
+run and holds further ones (build/test/HOLD; `tests/stop_tests.py` does the
+same by hand, `--resume` lifts it). `tests/run_batch.py <name> <tag:secs:ENV=..>
+...` runs a batch, ends at a hold, and writes its report to build/reports/;
+scenarios share their blocks through `include common.drive`; routes from a
+play session's record (`tests/route_from_record.py --buttons`) walk by
+position (`goto`, fine pad steps for narrow ways), cross area edges and doors
+until the area changes (`cross`), replay the tester's action buttons where
+they pressed them (dialogues, switches), and step free of a dialogue left
+open (`unstick`);
+tests/route_from_record.py turns the record into a route of `goto`
+waypoints and area checks.
+
+**Game coverage (2026-11-02).** What has been run -- scenes, not the whole
+game. Driven tests start from the owner's early saves (the castle, the first
+sword) or, since the owner's first play session, from its saves.
+- *Gameplay, driven:* the castle's field; the castle's interior (the gate's
+  OPEN, the throne room, out again; tests/scripts/explore_castle.drive); the
+  river's area east of it and its fights (sword, the full-life giant sword,
+  debris, damage, deaths with can't-die and with normal damage); GAME OVER,
+  Continue and Save; a new game (character select, name, the prologue, the
+  first steps).
+- *Played by the owner* (2026-11-02, 38.5 minutes, the validated
+  configuration with every fix of the day -- the session's binary is the one
+  the hot-page soak ran; windowed, sound on, normal damage, diagnostics on:
+  build/sessions/boot-20261102-134835-owner-play): field areas 11 and 14-18,
+  ten or so building interiors, and **the first dungeon** (areas 37-39,
+  reached from field area 15) **with its boss** (area 38: a hard fight, life
+  10 -> 6, then a heart container, 12). No crash; 136,000 frames, p99 17.6 ms,
+  0.71% over 18 ms; per area p99 17.1-19.8 ms -- the roughest field areas 14
+  and 15 (2.5-3% over 18 ms), the dungeon's main area 37 (9 minutes) 17.5 ms.
+  The owner's three marks fell where the game's frames were on time (18-21
+  ms) but window presents were uneven (53 of 300 over 20 ms in the 5 s before
+  the first two; 27-28 ms around the third). Three saves kept as checkpoints
+  (before-dungeon1, after-dungeon1, field-area14) and the route as positions
+  (tests/scenarios/dungeon1_approach.drive).
+- *Menus and features:* the title menu (NEW GAME, CONTINUE, EDITOR, ALBUM,
+  INSTALL), the system menu (RESUME, SAVE, LOAD's neighbours, OPTIONS,
+  SNAPSHOT, ALBUM, BESTIARY, LOADING ART, TITLE), the item pages, the map; the
+  dot editor (draw, save, reload); install, snapshots, album and edited
+  characters across restarts.
+- *Frame rates:* 30, 60, ~120 and 144-paced (movement, timers, physics).
+- *Rendering only* (the attract mode's demos, no input): desert, a lava
+  dungeon room, the red volcano area, the forest. They render at 60 fps; none
+  has been played.
+- *Long sessions* (stability evidence; only the cycling soak is gameplay):
+  - the attract mode, 45 minutes: rendering and stability only -- no crash,
+    memory 805 -> 807.5 MB, p99 17.3 ms, five frames over 25 ms, one of them
+    an isolated 66.6 ms at +1081 s (tracked, not yet traced);
+  - in play but idle, 30 minutes standing in the river's area after its
+    drive stalled: stability only, not gameplay coverage -- p99 17.1 ms,
+    nothing over 19.5, memory 1107 -> 1115 MB;
+  - the cycling play soak (soak-play-30m-b, 35 minutes,
+    tests/scripts/soak_play.drive): **14 of 14 intended cycles completed**,
+    each checked in play at the castle and then in the river's area; debris
+    physics in every fight, the hero hit in 7. Of the 35 minutes: combat 3.7
+    (fourteen 16-second fights of swings at the river's entrance), scripted
+    walking 5.4 (the 23-second route each cycle), menus, title, loads and
+    transitions ~6.4, and ~18.6 idle at the castle after the drive ended
+    (stability only). Frames: fights 1-4 p99 17.3-18.1 ms; from cycle 5 on
+    p99 34-36 ms with 18-22% of frames at ~33 ms, and 8% in the idle tail --
+    open problem 1. Memory 1321 -> 1393 MB over the cycles (~5 MB a cycle),
+    flat while idle.
+- *Not played at all:* dungeons and bosses past the first, shops, NPC dialogue
+  beyond the castle, items other than the sword (bombs, boomerang, lamp, ...),
+  magic, fairies, side quests, later areas, the ending; OPTIONS' settings
+  changed; the editor's SETTING, PREVIEW, other poses and classes; trophies;
+  a measured run with real audio; Linux.
+
+## The platform and the early speed work (to 2026-10-31)
+
+*The record of how the port came to run on Windows. Its numbers are from
+before the physics work and are superseded by "Current status" above; the
+setup app's state is still current.*
 
 **Linux (tested):** boots, plays Bink movies and FMOD audio, title -> new game
 -> opening -> overworld with dialogue and movement, strict-clean. Gameplay is
@@ -124,7 +378,8 @@ vblank pacing was fixed (patch 0034).
   timing, `PASS_DUMP=1`, `WRAP=` for a profiler), `tests/nsys_capture.py`
   (Nsight Systems; CPU sampling needs an Administrator shell),
   `tests/scripts/load_save.drive`, `perf_walk.drive`, `save_passes.drive`.
-- **Speed (perf_walk.drive, gameplay): a solid 60 fps** (2026-10-30), from
+- *(Superseded: 2026-10-30 numbers, before the physics work and the validated
+  configuration.)* **Speed (perf_walk.drive, gameplay): a solid 60 fps** (2026-10-30), from
   ~45. Measured with PS3_FTRACE + `tests/frame_times.py`, 20 s of walking:
   60.0 fps, median 16.7 ms, p99 ~21 ms, no frame over 25 ms, windowed or
   headless. With the vblank at 125 Hz (DIAG_VBLANK_MS=8) the game runs ~101
@@ -314,7 +569,11 @@ your local notes, never in this public repo):
   never from the owner's originals). Saves are personal data: keep them out
   of git.
 
-## Next steps, in order
+## Work log: diagnoses and measurements, 2026-10-30 to 2026-11-02
+
+*As written at the time, by topic. "Current status" above is the summary and
+the list of next actions; diagnoses a later entry replaced are in "History:
+superseded diagnoses" at the end.*
 
 The owner's goal (2026-10-30) is a performant native PC port: the recompiled
 code is the starting point, and PS3-specific machinery (SPU workloads,
@@ -671,6 +930,7 @@ tooling, the native Windows build, measuring on the 3070) are done; see
    then captures can compare the title and the field for the washed-out
    colours and the swirl (item 6). Shader preloading is RPCS3's and stays
    out of any performance measurement here.
+   Game coverage: see "Current status", "Game coverage".
 8. Found by the owner playing on Windows (2026-10-30), the same with
    RSX_GEOM_CACHE=0: killing enemies left a bright flash that stayed a long
    time; enemies flashing after a hit were invisible; the water "not
@@ -704,7 +964,31 @@ tooling, the native Windows build, measuring on the 3070) are done; see
    RPCS3 and a kill's flare is gone within a second.
    Still open: fighting there drops to 18-33 fps -- dead rabbits throw far
    more debris than a tuft, ~3,000 Bullet tasks a second (item 9).
-9. **Fights and the wide river at 7-13 fps** (owner's session, 2026-10-31).
+9. **Fights and physics, 2026-10-31 to 11-01** (the owner's session: fights
+   and the wide river at 7-13 fps). Fixed step by step -- the SIMD level of
+   the lifted SPU code, the MFC lookup cache, native collision, render-target
+   thrash, the ring wait and the capped lap, task creation, the native solver
+   commands -- to the validated configuration in item 0. The measurements and
+   diagnoses on the way, several superseded by later ones, are in "History:
+   superseded diagnoses" at the end; native collision's open contact
+   differences are tracked in docs/BULLET_NATIVE.md.
+10. **"Saving doesn't bring up the save menu"** (owner, 2026-10-31). It
+    saved: the save-data module skips the PS3's system save list and takes
+    the slot the title offers, so nothing appeared. A save now shows GAME
+    SAVED (or SAVE FAILED) in the window's corner for a few seconds
+    (`include/ps3emu/osd.h`, drawn after the window blit; not in frame
+    dumps). The owner's active save lives in `%LOCALAPPDATA%\dotheroes\gamedata`
+    (a copy, verified, of the session's): play sessions use it in place with
+    `GAMEDATA=` (tests/boot_smoke.py); tests seed copies from it with `SAVES=`.
+
+## History: superseded diagnoses (kept for the record)
+
+*Moved here from the work log on 2026-11-02. These were right about what they
+measured at the time; later entries changed the picture (the validated
+configuration, the native solver, the present fix). Do not quote their numbers
+as the current state.*
+
+**Fights and the wide river at 7-13 fps** (owner's session, 2026-10-31).
    Bullet physics: its SPU tasks are `PS3_SPURS_BulletCD` (image 4, Bullet's
    SpuNarrowPhaseCollisionTask) and `PS3_SPURS_BulletSolver` (image 5, the
    libsync parallel solver). Two collision runs a step, then ~24 solver
@@ -986,14 +1270,6 @@ tooling, the native Windows build, measuring on the 3070) are done; see
    is unresolved. With all three native, the
    command-ring wait in a one-step physics frame (2.2 ms a frame) is about
    twice the main thread's physics wait (1.0 ms a step).
-10. **"Saving doesn't bring up the save menu"** (owner, 2026-10-31). It
-    saved: the save-data module skips the PS3's system save list and takes
-    the slot the title offers, so nothing appeared. A save now shows GAME
-    SAVED (or SAVE FAILED) in the window's corner for a few seconds
-    (`include/ps3emu/osd.h`, drawn after the window blit; not in frame
-    dumps). The owner's active save lives in `%LOCALAPPDATA%\dotheroes\gamedata`
-    (a copy, verified, of the session's): play sessions use it in place with
-    `GAMEDATA=` (tests/boot_smoke.py); tests seed copies from it with `SAVES=`.
 
 ## Diagnostics and switches (environment variables)
 
@@ -1038,7 +1314,14 @@ tooling, the native Windows build, measuring on the 3070) are done; see
 | `DRIVE_TIMING=1` | tests/drive.py logs each step's time and each press's waits |
 | `PS3_OSD_FPS=1\|2` | testing: frame-rate readout, window's top-right corner: fps, mean and longest frame of the last second; `2` adds a 120-frame frame-time graph (ps3recomp patch 0069) |
 | `DOTHEROES_DEV_KEYS=1` | testing, while the window has focus: F8 or L3+R3 marks a hitch ("MARK n", trace kind 22, `[mark]` log line); F7 cycles the readout; a drive script marks with `touch mark.trigger` |
-| `DOTHEROES_DEV_STATE=1` | testing: the game's state every 100 ms -- life (half apples), field area, camera target x/z, physics steps, can't-die top-ups -- in `<run>/state.txt` (`tests/drive.py` `state <cond> [timeout]`) and the trace (kind 23) |
+| `DOTHEROES_DEV_STATE=1` | testing: the game's state every 100 ms -- life (half apples), field area, camera target x/z, physics collision tasks, can't-die top-ups, the hero's position (hx hy hz), the system menu's two words (menu: 3 in play, 1 in the menu; scene: 11 / 3), the guest frame counter -- in `<run>/state.txt` (`tests/drive.py` `state`, `expect`, `goto`) and the trace (kind 23); `actors.trigger` counts the characters within 40 units into `actors.txt` (`n`, `c<class>`, `hp<class>`) |
+| `DOTHEROES_DEV_STOP=1` | tests/boot_smoke.py sets it: `stop.trigger` in the run makes the game write its frame log and trace, then exit -- how a run ends when its drive ends |
+| `DOTHEROES_DEV_RECORD=1` | testing: `record.log` -- controller/keyboard input (PS3 mask and stick on change), field area changes, life, the hero's position every second, hitch marks, on the trace's clock: for deriving routes from a play session |
+| `PS3_FTRACE_ROLL=<dir>` | hitch captures: a rolling frame trace (`PS3_FTRACE_CAP` spans, default 1M); a frame of `PS3_FTRACE_ROLL_MS` (25) to 100 ms writes `<dir>/hitch_<n>_<s>s_<why>.txt` from `PS3_FTRACE_ROLL_BEFORE` (2) s before to `_AFTER` (1) s after, on its own thread; one per `_GAP` (15) s, `_MAX` (20) in all, none in the first `_FROM` (0) s, load bursts skipped; a tester's mark (F8, L3+R3) from its own budget, `_MARKS` (100), 2 s more before it, `hitch_m<n>_..._mark<n>.txt` (patch 0085); tests/slow_frames.py reads them |
+| `RSX_GEOM_ARENA_CHECK=1` | the geometry arena's blocks checked against a map of held granules: overlaps counted, reported with `RSX_GEOM_CACHE_STATS=1` (whose "geometry arena" line gives chunks, device-local chunks, MB in blocks, pending, waits for room, failed requests) |
+| `RSX_GEOM_DYNAMIC_LIFETIME=1` | A/B: resident geometry's old rule -- an entry rebuilt four times in its life goes to the copy path for good (made every static draw dynamic after four area reloads) |
+| `SCENARIO=<name>` | tests/boot_smoke.py: `DRIVE=tests/scenarios/<name>.drive`; its `#! saves`, `#! env`, `#! secs` lines apply unless set; `FIGHTS`, `ROUNDS` and other `${NAME:-default}` values in the drive come from the environment |
+| `HOLD_AFTER_DRIVE=1`, `ALLOW_CONCURRENT=1`, `MEM_EVERY=<s>`, `RUNS_IN=<dir>`, `PREEMPT_TESTS=1` | tests/boot_smoke.py: keep the game running after the drive ends; start even though another game is running; memory.csv's period (30 s); where run directories go (default build/test; play sessions build/sessions); stop running tests and hold further ones (build/test/HOLD) before starting (play sessions) |
 | `DOTHEROES_DEV_CANT_DIE=1\|<floor>,<refill>` | testing: keeps the hero alive by topping life up below full -- 8 half apples or less raised to 9 (default; never full, so no sword beam). It heals, not only stops lethal hits; each top-up logged and counted. Same setting in every arm of a comparison; report runs with it apart; recheck with normal damage |
 | `DOTHEROES_DEV_LIFE_LOG=1` | testing: every change of the player's life and the HUD's copies, logged |
 | `DOTHEROES_DEV_MEMSNAP=1` | testing: a drive script's `touch memsnap.trigger` writes all committed guest memory to `<run>/memsnap_<n>.bin` (game memory: local only; tests/native/find_state.cpp); copied in memory first, the log gives the copy's start and end |
@@ -1069,4 +1352,4 @@ Edit in `build/ref/ps3recomp` (branch `dotheroes`), commit there as
 `git format-patch --start-number <next> -o ../../../patches/ps3recomp HEAD~<n>`
 and commit the patch files here. `tools/pipeline.py` refuses to run with
 uncommitted changes in that checkout, and re-applies the whole series when
-the patch files change. 78 patches (0001-0078) as of 2026-11-02.
+the patch files change. 85 patches (0001-0085) as of 2026-11-02.

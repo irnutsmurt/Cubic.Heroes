@@ -1,0 +1,140 @@
+From cb0f40b5a544a99705222b1573286f375e2c2243 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Mon, 2 Nov 2026 14:48:31 -0800
+Subject: [PATCH 84/85] vm_watch: hot pages by rate, not for life; the fault
+ check under the lock
+
+A page went unwatched for good after 16 writes in its life (VW_HOT). A title
+reloading an area into the same memory writes its pages once per load, so
+after enough reloads (3D Dot Game Heroes' TITLE -> CONTINUE) its static
+geometry could not stay resident: the draw engine's retries failed to store,
+the entries were rebuilt every frame and went dynamic again with a doubled
+wait -- fights 9-15 of a 20-cycle soak had 2-3% of frames over 18 ms, 16-20
+24-38%. Now only writes within 1 s of the page's last count, and a hot page
+not seen written for 10 s is watched again.
+
+Also: a thread faulting on a page another thread's fault had just released
+looked at the page's protection outside the lock, where a consumer could
+watch the page again in between, and the write went on to the next handler
+as if it were not ours. The look is under the lock now (found by reading;
+not shown to have caused anything).
+---
+ runtime/memory/vm_watch.c | 57 ++++++++++++++++++++++++++++-----------
+ 1 file changed, 42 insertions(+), 15 deletions(-)
+
+diff --git a/runtime/memory/vm_watch.c b/runtime/memory/vm_watch.c
+index 3d56a41..02889cd 100644
+--- a/runtime/memory/vm_watch.c
++++ b/runtime/memory/vm_watch.c
+@@ -13,7 +13,16 @@ extern uint8_t* vm_base;
+ #define VW_SPAN        ((uint64_t)1 << 32)            /* the guest's 32-bit space */
+ #define VW_PAGES       ((size_t)(VW_SPAN >> VW_PAGE_SHIFT))
+ #define VW_BLOCK_SHIFT 4u                             /* 16 pages: 64 KB blocks */
+-#define VW_HOT         16u                            /* writes after which a page stays unwatched */
++#define VW_HOT         16u                            /* writes in close succession: the page goes unwatched */
++#define VW_HOT_MS      1000u                          /* a write later than this after the last starts the count over */
++#define VW_COOL_MS     10000u                         /* an unwatched page not seen written this long is tried again */
++
++/* A page counted hot over its whole life, as it was, went unwatched for good:
++ * a title reloading an area into the same memory writes its pages once per
++ * load, and after enough reloads (3D Dot Game Heroes' TITLE -> CONTINUE) its
++ * static geometry could not stay resident any more -- the draw engine's
++ * entries over those pages failed every retry and the scene went to the copy
++ * path (frames of 33 ms from the ~16th reload). */
+ 
+ static struct {
+     int avail;                  /* -1 not set up yet */
+@@ -21,7 +30,8 @@ static struct {
+     volatile LONG* page;        /* per page: the epoch of its last write seen */
+     volatile LONG* block;       /* per 64 KB block: the newest of its pages' epochs */
+     volatile char* prot;        /* per page: 1 while it is read-only for us */
+-    unsigned char* writes;      /* per page: writes seen, up to VW_HOT */
++    unsigned char* writes;      /* per page: writes seen in close succession, up to VW_HOT */
++    DWORD* wtime;               /* per page: GetTickCount() at the last write seen */
+     SRWLOCK lock;               /* protection changes and their bookkeeping */
+ } s_vw = { -1 };
+ 
+@@ -37,6 +47,9 @@ static void vw_written_locked(size_t pg)
+     const LONG e = InterlockedIncrement(&s_vw.epoch);
+     s_vw.page[pg] = e;
+     if (s_vw.block[pg >> VW_BLOCK_SHIFT] < e) s_vw.block[pg >> VW_BLOCK_SHIFT] = e;
++    const DWORD now = GetTickCount();
++    if (now - s_vw.wtime[pg] > VW_HOT_MS) s_vw.writes[pg] = 0;
++    s_vw.wtime[pg] = now;
+     if (s_vw.writes[pg] < VW_HOT) s_vw.writes[pg]++;
+     MemoryBarrier();
+ }
+@@ -51,17 +64,21 @@ static LONG CALLBACK vw_fault(EXCEPTION_POINTERS* ep)
+     if (a < b || (uint64_t)(a - b) >= VW_SPAN) return EXCEPTION_CONTINUE_SEARCH;
+     const size_t pg = (size_t)(a - b) >> VW_PAGE_SHIFT;
+     AcquireSRWLockExclusive(&s_vw.lock);
+-    const int ours = s_vw.prot[pg];
+-    if (ours) vw_written_locked(pg);
++    int retry = s_vw.prot[pg];
++    if (retry) {
++        vw_written_locked(pg);
++    } else {
++        /* Another thread's fault on the same page released it meanwhile. Looked
++         * at under the lock: outside it, a consumer could watch the page again
++         * between the release and the look, and the write would go on to the
++         * next handler as if it were not ours. Anything else (an uncommitted
++         * page, a real crash) is for the next handler. */
++        MEMORY_BASIC_INFORMATION mbi;
++        retry = VirtualQuery((void*)a, &mbi, sizeof mbi) && mbi.State == MEM_COMMIT &&
++                mbi.Protect == PAGE_READWRITE;
++    }
+     ReleaseSRWLockExclusive(&s_vw.lock);
+-    if (ours) return EXCEPTION_CONTINUE_EXECUTION;
+-    /* Another thread's fault on the same page released it meanwhile. Anything
+-     * else (an uncommitted page, a real crash) is for the next handler. */
+-    MEMORY_BASIC_INFORMATION mbi;
+-    if (VirtualQuery((void*)a, &mbi, sizeof mbi) && mbi.State == MEM_COMMIT &&
+-        mbi.Protect == PAGE_READWRITE)
+-        return EXCEPTION_CONTINUE_EXECUTION;
+-    return EXCEPTION_CONTINUE_SEARCH;
++    return retry ? EXCEPTION_CONTINUE_EXECUTION : EXCEPTION_CONTINUE_SEARCH;
+ }
+ 
+ int vm_watch_available(void)
+@@ -74,15 +91,25 @@ int vm_watch_available(void)
+             s_vw.block  = (volatile LONG*)calloc(VW_PAGES >> VW_BLOCK_SHIFT, sizeof(LONG));
+             s_vw.prot   = (volatile char*)calloc(VW_PAGES, 1);
+             s_vw.writes = (unsigned char*)calloc(VW_PAGES, 1);
++            s_vw.wtime  = (DWORD*)calloc(VW_PAGES, sizeof(DWORD));
+             /* First in line: ahead of the host's demand-commit handler, which
+              * would otherwise make a watched page writable unseen. */
+-            s_vw.avail = s_vw.page && s_vw.block && s_vw.prot && s_vw.writes &&
++            s_vw.avail = s_vw.page && s_vw.block && s_vw.prot && s_vw.writes && s_vw.wtime &&
+                          AddVectoredExceptionHandler(1, vw_fault) != NULL;
+         }
+     }
+     return s_vw.avail;
+ }
+ 
++/* Lock held. Hot: written in close succession and seen written lately. */
++static int vw_hot(size_t pg)
++{
++    if (s_vw.writes[pg] < VW_HOT) return 0;
++    if (GetTickCount() - s_vw.wtime[pg] <= VW_COOL_MS) return 1;
++    s_vw.writes[pg] = 0;   /* not seen written for a while: watched again */
++    return 0;
++}
++
+ static int vw_pages(const void* p, size_t n, size_t* lo, size_t* hi)
+ {
+     const uintptr_t a = (uintptr_t)p, b = (uintptr_t)vm_base;
+@@ -101,9 +128,9 @@ int vm_watch(const void* p, size_t n, uint64_t* since)
+     AcquireSRWLockExclusive(&s_vw.lock);
+     for (size_t pg = lo; pg < hi && ok;) {
+         if (s_vw.prot[pg]) { pg++; continue; }
+-        if (s_vw.writes[pg] >= VW_HOT) { ok = 0; break; }
++        if (vw_hot(pg)) { ok = 0; break; }
+         size_t end = pg + 1;
+-        while (end < hi && !s_vw.prot[end] && s_vw.writes[end] < VW_HOT) end++;
++        while (end < hi && !s_vw.prot[end] && !vw_hot(end)) end++;
+         DWORD old;
+         if (!VirtualProtect(vm_base + (pg << VW_PAGE_SHIFT), (end - pg) << VW_PAGE_SHIFT, PAGE_READONLY, &old)) {
+             ok = 0;
+-- 
+2.56.0.windows.3
+

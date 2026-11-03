@@ -1,0 +1,53 @@
+# Blocks the scenarios share (`include common.drive`): the title's CONTINUE,
+# the way back to the checkpoint from wherever a failure left the hero.
+
+block continue
+  press START               # "PRESS START BUTTON"
+  sleep 3
+  press START               # CONTINUE
+  sleep 5
+  press CROSS               # "Change characters?" NO
+end
+
+block to_title_and_continue
+  press START               # the system menu, on RESUME
+  sleep 2
+  press UP                  # TITLE (the list wraps)
+  sleep 1
+  press CROSS               # "Exit game? Unsaved data will be lost.", on NO
+  sleep 2
+  press UP
+  sleep 1
+  press CROSS               # YES
+  log TitleMovie 30         # the title's movie opened again
+  sleep 6
+  call continue
+end
+
+block continue_after_death
+  state life==0 30
+  sleep 12                  # GAME OVER, then "Continue?" on YES
+  press CROSS               # YES: back in play somewhere, nothing saved
+  sleep 8
+end
+
+block close_menu
+  press CIRCLE
+  sleep 2
+end
+
+block page_dialogues        # a dialogue left open keeps the system menu shut
+  repeat 4 CROSS 0.7
+end
+
+# Back to the checkpoint whatever happened: after a death the game-over
+# "Continue?" first, a menu left open closed, a dialogue paged shut (spare
+# presses swing the sword), then the system menu's TITLE and CONTINUE -- the
+# save loaded again. The caller checks where that puts the hero.
+block back_to_start
+  when life==0 continue_after_death
+  when menu==1 close_menu
+  when life>0,menu==3 page_dialogues
+  call to_title_and_continue
+  state life>0 60
+end

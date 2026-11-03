@@ -1,0 +1,304 @@
+From cee51dfde40c5f5d76a19f452103b6ea36657748 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Mon, 2 Nov 2026 14:48:16 -0800
+Subject: [PATCH 81/85] Vulkan backend: resident geometry in a buddy allocator
+
+The arena gave a request the smallest free block of its size class or
+larger, whole, bump-allocated otherwise, and freed released blocks only when
+an allocation found no room (a full GPU wait). A title that reloads an area
+into the same memory re-uploads its static geometry each time -- ~130 MB in
+3D Dot Game Heroes -- and after about six TITLE -> CONTINUE cycles the six
+64 MB chunks were spent and cut up: new entries found no room, the scene
+went to the per-frame copy path, and fights ran at 30 fps.
+
+Now a buddy allocator over each chunk: a larger free block is split for a
+smaller request, a freed block merges with its free buddy (a per-granule map
+says where free blocks start; free lists may hold stale entries). Each flush
+frees what the batch before it released, once that batch's fence was waited
+for; an allocation that finds no room still waits for the GPU once and frees
+everything. RSX_GEOM_CACHE_STATS=1 adds a line on the arena (chunks,
+device-local ones, MB in blocks, pending, waits for room, failed requests);
+RSX_GEOM_ARENA_CHECK=1 checks every block handed out or freed against a map
+of held granules and counts overlaps. Eight river cycles checked: no overlap,
+no wait for room, ~187 MB in blocks throughout.
+---
+ libs/video/rsx_vulkan_backend.c | 180 ++++++++++++++++++++++++++------
+ 1 file changed, 150 insertions(+), 30 deletions(-)
+
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index 0def546..8ee9c95 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -509,6 +509,7 @@ static u32 vk_eb_max(void);
+ static void vk_eb_recorded(void);   /* one more command in the open batch */
+ static void vk_eb_release(void);    /* engine shutdown: rings and pool */
+ static void vk_geom_release(void);  /* engine shutdown: the resident geometry arena */
++static void vk_geom_retire(unsigned long long done);   /* free what batches before `done` released */
+ static int vk_eb_upload(VkImage img, VkBufferImageCopy* region, const void* src, size_t tight,
+                         u32 rows, u32 row_bytes);   /* -2: not batched, do it the old way */
+ 
+@@ -4111,11 +4112,13 @@ static void vk_eng_flush_at(int line)
+     s_flush_line = line;
+     if (!s_eb.alt_cmd) {
+         vk_submit_and_wait();
++        vk_geom_retire(s_eb.flushes + 1u);   /* this batch and all before it are done */
+     } else {
+         /* Submit the open batch without waiting. Its rings, descriptor pool,
+          * command buffer and fence become the spare set; the spare set (the
+          * batch before, if still running) is waited for and becomes current. */
+         vk_wait_inflight();
++        vk_geom_retire(s_eb.flushes);   /* the batch before this one is done, and all before it */
+         vk_gt_end(s_vk.cmd);
+         pvkEndCommandBuffer(s_vk.cmd);
+         VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+@@ -4214,10 +4217,20 @@ static VkDescriptorSet vk_eng_write_descriptors_to(const vk_eng_pipe* P, VkDescr
+  * it instead of copied into the batch ring. Up to VK_GEOM_CHUNKS buffers of
+  * VK_GEOM_CHUNK bytes, each in device-local memory the host can write when the
+  * device has some left (the BAR, or all of VRAM with resizable BAR), else in
+- * host memory. Blocks are powers of two from 256 bytes. A released block waits
+- * on a pending list, since draws already recorded may still read it; an
+- * allocation that finds no room waits for the GPU once, and every pending
+- * block then serves any request of its size or smaller. */
++ * host memory. Blocks are powers of two from 256 bytes, a buddy allocator over
++ * each chunk: a larger free block is split for a smaller request, and a freed
++ * block merges with its free buddy. A released block waits on a pending list
++ * until the batches that could still read it have finished on the GPU (each
++ * flush frees what the batch before it released, once that batch's fence was
++ * waited for); an allocation that finds no room waits for the GPU once and
++ * frees everything pending.
++ *
++ * It used to hand a request the smallest free block of its class or larger,
++ * whole, and to bump-allocate otherwise, retiring only when out of room: a
++ * title reloading an area (3D Dot Game Heroes' TITLE -> CONTINUE) re-uploads
++ * its ~130 MB of static geometry each time, and after about six reloads the
++ * six chunks were spent and cut up -- new entries found no room and the
++ * scene went to the per-frame copy path (frames of 33 ms, then 30 fps). */
+ #define VK_GEOM_CHUNK     ((VkDeviceSize)64 << 20)
+ #define VK_GEOM_CHUNKS    6u
+ #define VK_GEOM_MAX       16384u                 /* live handles */
+@@ -4229,16 +4242,39 @@ typedef struct { vk_geom_block blk; VkDeviceSize voff, ioff; u8 cls; } vk_geom_e
+ typedef struct { vk_geom_block* b; u32 n, cap; } vk_geom_list;
+ static struct {
+     vk_buffer chunk[VK_GEOM_CHUNKS];
++    u8* fs[VK_GEOM_CHUNKS];                      /* per 256 bytes: class + 1 where a free block starts, else 0 */
++    u8 local[VK_GEOM_CHUNKS];                    /* the chunk is in device-local memory */
+     u32 n_chunks;
+-    VkDeviceSize head;                           /* bump point in the newest chunk */
+     vk_geom_ent ent[VK_GEOM_MAX];
+     u32 n_ent;                                   /* handles ever handed out */
+     u32 free_ent[VK_GEOM_MAX], n_free_ent;       /* handles to hand out again */
+     u32 pending[VK_GEOM_MAX], n_pending;         /* released, the GPU may still read them */
+-    vk_geom_list free_blk[VK_GEOM_CLASSES];
++    unsigned long long pend_gen[VK_GEOM_MAX];    /* the batch (s_eb.flushes) each was released in */
++    vk_geom_list free_blk[VK_GEOM_CLASSES];      /* may hold stale entries: fs is the truth */
++    VkDeviceSize used;                           /* bytes in blocks handed out, pending included */
++    unsigned long long syncs, fails;             /* full GPU waits for room; requests with none */
++    u8* held[VK_GEOM_CHUNKS];                    /* RSX_GEOM_ARENA_CHECK: granules handed out */
++    unsigned long long overlaps;                 /* blocks handed out over a held granule, freed twice */
+ } s_geom;
+ 
+-static int vk_geom_chunk_create(vk_buffer* b)
++/* RSX_GEOM_ARENA_CHECK=1: every block handed out or freed checked against a
++ * map of the granules held (slow for big blocks): an allocator bug would give
++ * two live draws the same memory, which shows as corrupt geometry, not a crash. */
++static void vk_geom_check(vk_geom_block b, u32 cls, int take)
++{
++    static int on = -1;
++    if (on < 0) on = getenv("RSX_GEOM_ARENA_CHECK") != NULL;
++    if (!on) return;
++    if (!s_geom.held[b.chunk] &&
++        !(s_geom.held[b.chunk] = (u8*)calloc((size_t)(VK_GEOM_CHUNK >> VK_GEOM_MIN_SHIFT), 1))) return;
++    u8* h = s_geom.held[b.chunk] + (b.off >> VK_GEOM_MIN_SHIFT);
++    const u32 n = 1u << cls;
++    for (u32 i = 0; i < n; i++)
++        if (h[i] != (take ? 0 : 1)) { s_geom.overlaps++; break; }
++    memset(h, take ? 1 : 0, n);
++}
++
++static int vk_geom_chunk_create(vk_buffer* b, u8* is_local)
+ {
+     VkBufferCreateInfo bci = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = VK_GEOM_CHUNK,
+                                .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+@@ -4265,6 +4301,7 @@ static int vk_geom_chunk_create(vk_buffer* b)
+     b->coherent = 1;
+     VK_LOG("resident geometry: %llu MB chunk in %s memory\n", (unsigned long long)(VK_GEOM_CHUNK >> 20),
+            local ? "device-local" : "host");
++    *is_local = (u8)local;
+     return 0;
+ fail:
+     vk_destroy_buffer(b);
+@@ -4284,12 +4321,50 @@ static int vk_geom_push(vk_geom_list* l, vk_geom_block b)
+     return 0;
+ }
+ 
+-/* A block of class `cls` or bigger: the smallest free one, else from the bump
+- * point. Returns the class the block really has, -1 when there is none. */
++/* Free a block of class `cls`: merged with its buddy while that is free whole. */
++static void vk_geom_free_block(vk_geom_block b, u32 cls)
++{
++    u8* fs = s_geom.fs[b.chunk];
++    for (; cls + 1u < VK_GEOM_CLASSES; cls++) {
++        const VkDeviceSize size = (VkDeviceSize)1 << (cls + VK_GEOM_MIN_SHIFT);
++        const VkDeviceSize buddy = b.off ^ size;
++        if (fs[buddy >> VK_GEOM_MIN_SHIFT] != cls + 1u) break;
++        fs[buddy >> VK_GEOM_MIN_SHIFT] = 0;   /* its list entry goes stale */
++        b.off &= ~size;
++    }
++    fs[b.off >> VK_GEOM_MIN_SHIFT] = (u8)(cls + 1u);
++    vk_geom_list* l = &s_geom.free_blk[cls];
++    if (l->n >= 4096u && (l->n & 4095u) == 0) {   /* drop stale entries now and then */
++        u32 k = 0;
++        for (u32 i = 0; i < l->n; i++)
++            if (s_geom.fs[l->b[i].chunk][l->b[i].off >> VK_GEOM_MIN_SHIFT] == cls + 1u) l->b[k++] = l->b[i];
++        l->n = k;
++    }
++    vk_geom_push(l, b);
++}
++
++/* A block of class `cls`: the smallest free one that fits, split down to
++ * size, else a new chunk. Returns `cls`, or -1 when there is no room. */
+ static int vk_geom_take(u32 cls, vk_geom_block* out)
+ {
+-    for (u32 c = cls; c < VK_GEOM_CLASSES; c++)
+-        if (s_geom.free_blk[c].n) { *out = s_geom.free_blk[c].b[--s_geom.free_blk[c].n]; return (int)c; }
++    for (u32 c = cls; c < VK_GEOM_CLASSES; c++) {
++        vk_geom_list* l = &s_geom.free_blk[c];
++        while (l->n) {
++            const vk_geom_block b = l->b[--l->n];
++            u8* fs = s_geom.fs[b.chunk];
++            if (fs[b.off >> VK_GEOM_MIN_SHIFT] != c + 1u) continue;   /* merged or taken since */
++            fs[b.off >> VK_GEOM_MIN_SHIFT] = 0;
++            for (u32 k = c; k > cls; k--) {   /* the upper halves stay free */
++                const vk_geom_block hi = { b.chunk, b.off + ((VkDeviceSize)1 << (k - 1u + VK_GEOM_MIN_SHIFT)) };
++                fs[hi.off >> VK_GEOM_MIN_SHIFT] = (u8)k;
++                vk_geom_push(&s_geom.free_blk[k - 1u], hi);
++            }
++            *out = b;
++            s_geom.used += (VkDeviceSize)1 << (cls + VK_GEOM_MIN_SHIFT);
++            vk_geom_check(b, cls, 1);
++            return (int)cls;
++        }
++    }
+     /* RSX_GEOM_ARENA_CHUNKS=<n>: fewer chunks, so a test run fills the arena
+      * and exercises eviction. */
+     static u32 max_chunks;
+@@ -4297,16 +4372,38 @@ static int vk_geom_take(u32 cls, vk_geom_block* out)
+         const char* e = getenv("RSX_GEOM_ARENA_CHUNKS");
+         max_chunks = (e && atoi(e) > 0 && (u32)atoi(e) < VK_GEOM_CHUNKS) ? (u32)atoi(e) : VK_GEOM_CHUNKS;
+     }
+-    const VkDeviceSize size = (VkDeviceSize)1 << (cls + VK_GEOM_MIN_SHIFT);
+-    if (!s_geom.n_chunks || s_geom.head + size > VK_GEOM_CHUNK) {
+-        if (s_geom.n_chunks == max_chunks || vk_geom_chunk_create(&s_geom.chunk[s_geom.n_chunks])) return -1;
+-        s_geom.n_chunks++;
+-        s_geom.head = 0;
++    const u32 n = s_geom.n_chunks;
++    if (n == max_chunks) return -1;
++    if (!(s_geom.fs[n] = (u8*)calloc((size_t)(VK_GEOM_CHUNK >> VK_GEOM_MIN_SHIFT), 1))) return -1;
++    if (vk_geom_chunk_create(&s_geom.chunk[n], &s_geom.local[n])) {
++        free(s_geom.fs[n]);
++        s_geom.fs[n] = NULL;
++        return -1;
++    }
++    s_geom.n_chunks++;
++    vk_geom_free_block((vk_geom_block){ n, 0 }, VK_GEOM_CLASSES - 1u);
++    return vk_geom_take(cls, out);
++}
++
++/* Blocks released in batches before `done` (s_eb.flushes counts) are free:
++ * those batches have finished on the GPU. */
++static void vk_geom_retire(unsigned long long done)
++{
++    u32 k = 0;
++    for (u32 i = 0; i < s_geom.n_pending; i++) {
++        const u32 h = s_geom.pending[i];
++        if (s_geom.pend_gen[i] < done) {
++            const vk_geom_ent* e = &s_geom.ent[h - 1u];
++            vk_geom_check(e->blk, e->cls, 0);
++            vk_geom_free_block(e->blk, e->cls);
++            s_geom.used -= (VkDeviceSize)1 << (e->cls + VK_GEOM_MIN_SHIFT);
++            s_geom.free_ent[s_geom.n_free_ent++] = h;
++        } else {
++            s_geom.pending[k] = h;
++            s_geom.pend_gen[k++] = s_geom.pend_gen[i];
++        }
+     }
+-    out->chunk = s_geom.n_chunks - 1u;
+-    out->off = s_geom.head;
+-    s_geom.head += size;
+-    return (int)cls;
++    s_geom.n_pending = k;
+ }
+ 
+ /* Wait for the GPU, then everything released is free again. */
+@@ -4314,13 +4411,26 @@ static void vk_geom_reclaim(void)
+ {
+     if (!s_geom.n_pending) return;
+     vk_eng_flush_sync();              /* no draw recorded so far is still reading */
+-    for (u32 i = 0; i < s_geom.n_pending; i++) {
+-        const u32 h = s_geom.pending[i];
+-        const vk_geom_ent* e = &s_geom.ent[h - 1u];
+-        vk_geom_push(&s_geom.free_blk[e->cls], e->blk);
+-        s_geom.free_ent[s_geom.n_free_ent++] = h;
+-    }
+-    s_geom.n_pending = 0;
++    vk_geom_retire(~0ull);
++    s_geom.syncs++;
++}
++
++/* RSX_GEOM_CACHE_STATS=1: the arena every 5 s. */
++static void vk_geom_stats(void)
++{
++    static int on = -1;
++    static struct timespec last;
++    if (on < 0) on = getenv("RSX_GEOM_CACHE_STATS") != NULL;
++    if (!on) return;
++    struct timespec now;
++    vk_monotonic(&now);
++    if (now.tv_sec - last.tv_sec < 5) return;
++    last = now;
++    u32 local = 0;
++    for (u32 i = 0; i < s_geom.n_chunks; i++) local += s_geom.local[i];
++    VK_LOG("geometry arena: %u chunks (%u device-local), %.1f MB in blocks, %u pending, %llu waits for room, "
++           "%llu requests with none%s\n", s_geom.n_chunks, local, (double)s_geom.used / 1048576.0, s_geom.n_pending,
++           s_geom.syncs, s_geom.fails, s_geom.held[0] ? (s_geom.overlaps ? " -- CHECK: OVERLAPS" : " (check: no overlaps)") : "");
+ }
+ 
+ static u32 vk_eng_geom_create(void* user, const void* vertices, u32 vbytes, const u32* indices,
+@@ -4341,7 +4451,11 @@ static u32 vk_eng_geom_create(void* user, const void* vertices, u32 vbytes, cons
+         vk_geom_reclaim();
+         got = vk_geom_take(cls, &blk);
+     }
+-    if (got < 0) return 0;
++    vk_geom_stats();
++    if (got < 0) {
++        s_geom.fails++;
++        return 0;
++    }
+     const u32 h = s_geom.n_free_ent ? s_geom.free_ent[--s_geom.n_free_ent] : ++s_geom.n_ent;
+     vk_geom_ent* e = &s_geom.ent[h - 1u];
+     e->blk = blk;
+@@ -4357,13 +4471,19 @@ static u32 vk_eng_geom_create(void* user, const void* vertices, u32 vbytes, cons
+ static void vk_eng_geom_release(void* user, u32 geom)
+ {
+     (void)user;
+-    if (geom && geom <= s_geom.n_ent && s_geom.n_pending < VK_GEOM_MAX)
++    if (geom && geom <= s_geom.n_ent && s_geom.n_pending < VK_GEOM_MAX) {
++        s_geom.pend_gen[s_geom.n_pending] = s_eb.flushes;   /* the batch being recorded */
+         s_geom.pending[s_geom.n_pending++] = geom;
++    }
+ }
+ 
+ static void vk_geom_release(void)
+ {
+-    for (u32 i = 0; i < s_geom.n_chunks; i++) vk_destroy_buffer(&s_geom.chunk[i]);
++    for (u32 i = 0; i < s_geom.n_chunks; i++) {
++        vk_destroy_buffer(&s_geom.chunk[i]);
++        free(s_geom.fs[i]);
++        free(s_geom.held[i]);
++    }
+     for (u32 c = 0; c < VK_GEOM_CLASSES; c++) free(s_geom.free_blk[c].b);
+     memset(&s_geom, 0, sizeof s_geom);
+ }
+-- 
+2.56.0.windows.3
+

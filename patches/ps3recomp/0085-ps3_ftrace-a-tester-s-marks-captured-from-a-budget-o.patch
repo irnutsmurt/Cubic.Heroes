@@ -1,0 +1,157 @@
+From 43956ec6d4b3602a5aff3b6fdc0d848ec70d07e1 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Mon, 2 Nov 2026 14:48:31 -0800
+Subject: [PATCH 85/85] ps3_ftrace: a tester's marks captured from a budget of
+ their own
+
+Hitch captures of slow frames and of a tester's marks shared one pending slot
+and one budget (PS3_FTRACE_ROLL_MAX, default 20): in the owner's first play
+session automatic captures had spent all twenty by 13 minutes, mostly on the
+frames entering buildings, and a mark at 29 minutes was not kept. Marks now
+have their own slot and budget (PS3_FTRACE_ROLL_MARKS, default 100), files
+hitch_m<n>_<s>s_mark<n>.txt, and are captured whatever the slow frames did
+(checked: with PS3_FTRACE_ROLL_MAX=1 spent at once, four F8 marks captured).
+---
+ include/ps3emu/ps3_ftrace.h | 73 ++++++++++++++++++++++++-------------
+ 1 file changed, 48 insertions(+), 25 deletions(-)
+
+diff --git a/include/ps3emu/ps3_ftrace.h b/include/ps3emu/ps3_ftrace.h
+index 124f3d8..dec7fed 100644
+--- a/include/ps3emu/ps3_ftrace.h
++++ b/include/ps3emu/ps3_ftrace.h
+@@ -27,18 +27,20 @@
+  * rolling trace. Spans go round a ring (PS3_FTRACE_CAP, default 1M = 32 MB,
+  * some tens of seconds) for the whole run. A guest frame (flip request to
+  * flip request) of PS3_FTRACE_ROLL_MS or more (default 25) but under 100 ms
+- * (longer: a load), or a tester's mark (kind 22, not a script's), triggers a
+- * capture: once
++ * (longer: a load) triggers a capture, and so does a tester's mark (kind 22,
++ * not a script's) -- marks from a slot and budget of their own
++ * (PS3_FTRACE_ROLL_MARKS, default 100, files hitch_m<n>_..._mark<n>.txt), so
++ * automatic captures never use them up: once
+  * PS3_FTRACE_ROLL_AFTER seconds (default 1) have passed, a thread of its own
+  * copies the spans from PS3_FTRACE_ROLL_BEFORE seconds (default 2) before the
+  * trigger to then out of the ring and writes them to
+  * <dir>/hitch_<n>_<s>s_<why>.txt in the format above (the tools read either).
+- * At most one capture per PS3_FTRACE_ROLL_GAP seconds (default 15) and
+- * PS3_FTRACE_ROLL_MAX in all (default 20); triggers in between are counted,
+- * not captured ("[ftrace] hitch ..." lines). A window with two more frames of
+- * 50 ms+ is a load or a transition, not captured; nor is anything in the first
+- * PS3_FTRACE_ROLL_FROM seconds (default 0). Nothing is written on the frame
+- * path.
++ * Slow frames: at most one capture per PS3_FTRACE_ROLL_GAP seconds (default
++ * 15) and PS3_FTRACE_ROLL_MAX in all (default 20); triggers in between are
++ * counted, not captured ("[ftrace] hitch ..." lines); a window with two more
++ * frames of 50 ms+ is a load or a transition, not captured; nor is anything in
++ * the first PS3_FTRACE_ROLL_FROM seconds (default 0). Nothing is written on
++ * the frame path.
+  */
+ #ifndef PS3EMU_PS3_FTRACE_H
+ #define PS3EMU_PS3_FTRACE_H
+@@ -139,7 +141,9 @@ typedef struct {
+     char names[PS3_FT_TIDS][28];
+     /* PS3_FTRACE_ROLL: the ring, the pending trigger, the captures */
+     int roll;
+-    uint64_t last_flip, trig_t, trig_why, slow_ns;   /* trig_why: frame us, or 1 << 32 | mark n */
++    uint64_t last_flip, trig_t, trig_why, slow_ns;   /* a slow frame's trigger: when, its us */
++    uint64_t mark_t;                                 /* a tester's mark's trigger: when */
++    uint32_t mark_n, marks, max_marks, marks_skipped;
+     uint64_t before, after, gap, last_cap, from;
+     uint32_t caps, max_caps, skipped, bursts;
+ } ps3_ft_state;
+@@ -202,8 +206,8 @@ static inline int ps3_ft_roll_write(const char* path, uint64_t lo, uint64_t hi,
+         fclose(f);
+     }
+     free(out);
+-    fprintf(stderr, "[ftrace] hitch capture %u: %u spans to %s (copy %.1f ms, write %.0f ms; so far %u trigger(s) "
+-            "skipped, %u load burst(s) not captured)\n", s->caps + 1, k, path, (double)(c1 - c0) / 1e6,
++    fprintf(stderr, "[ftrace] hitch capture: %u spans to %s (copy %.1f ms, write %.0f ms; so far %u slow-frame "
++            "trigger(s) skipped, %u load burst(s) not captured)\n", k, path, (double)(c1 - c0) / 1e6,
+             (double)(ps3_ft_now() - c1) / 1e6, __atomic_load_n(&s->skipped, __ATOMIC_RELAXED), s->bursts);
+     return 1;
+ }
+@@ -223,24 +227,29 @@ static void* ps3_ft_roll_main(void* unused)
+         struct timespec ts = { 0, 100000000 };
+         nanosleep(&ts, NULL);
+ #endif
++        char path[1100];
++        /* A tester's mark first, from its own slot and budget: automatic
++         * captures cannot use it up (in the owner's first session they had
++         * spent all twenty by 13 minutes, and a mark at 29 was not kept). A
++         * tester marks a hitch after feeling it: 2 s more before a mark. */
++        const uint64_t mt = __atomic_load_n(&s->mark_t, __ATOMIC_ACQUIRE);
++        if (mt && ps3_ft_now() >= mt + s->after) {
++            snprintf(path, sizeof path, "%s/hitch_m%02u_%.1fs_mark%u.txt", s->path, s->marks + 1,
++                     (double)(mt - s->base) / 1e9, s->mark_n);
++            if (ps3_ft_roll_write(path, mt - s->before - 2000000000ull, mt + s->after, mt, 1)) s->marks++;
++            __atomic_store_n(&s->mark_t, 0, __ATOMIC_RELEASE);
++        }
+         const uint64_t trig = __atomic_load_n(&s->trig_t, __ATOMIC_ACQUIRE);
+         if (!trig || ps3_ft_now() < trig + s->after) continue;
+         const uint64_t why = __atomic_load_n(&s->trig_why, __ATOMIC_ACQUIRE);
+-        const int is_mark = (why >> 32) != 0;
+-        /* a tester marks a hitch after feeling it: 2 s more before a mark */
+-        const uint64_t lo = trig - s->before - (is_mark ? 2000000000ull : 0), hi = trig + s->after;
+-        char path[1100];
++        const uint64_t lo = trig - s->before, hi = trig + s->after;
+         if (trig - s->base < s->from) {   /* boot and the title: not measured */
+             __atomic_store_n(&s->trig_t, 0, __ATOMIC_RELEASE);
+             continue;
+         }
+-        if (is_mark)
+-            snprintf(path, sizeof path, "%s/hitch_%02u_%.1fs_mark%u.txt", s->path, s->caps + 1,
+-                     (double)(trig - s->base) / 1e9, (uint32_t)why);
+-        else
+-            snprintf(path, sizeof path, "%s/hitch_%02u_%.1fs_%.0fms.txt", s->path, s->caps + 1,
+-                     (double)(trig - s->base) / 1e9, (double)why / 1e3);
+-        if (ps3_ft_roll_write(path, lo, hi, trig, is_mark)) {
++        snprintf(path, sizeof path, "%s/hitch_%02u_%.1fs_%.0fms.txt", s->path, s->caps + 1,
++                 (double)(trig - s->base) / 1e9, (double)why / 1e3);
++        if (ps3_ft_roll_write(path, lo, hi, trig, 0)) {
+             s->caps++;
+             s->last_cap = trig;
+         } else {
+@@ -255,8 +264,21 @@ static void* ps3_ft_roll_main(void* unused)
+ #endif
+ }
+ 
+-/* A slow frame or a mark (PS3_FTRACE_ROLL): captured unless one is pending, the
+- * last capture was under PS3_FTRACE_ROLL_GAP ago, or the budget is spent. */
++/* A tester's mark (PS3_FTRACE_ROLL): captured unless one is pending (whose
++ * window holds this one) or PS3_FTRACE_ROLL_MARKS (default 100) are spent. */
++static inline void ps3_ft_roll_mark(ps3_ft_state* s, uint64_t t, uint32_t n)
++{
++    uint64_t none = 0;
++    if (s->marks >= s->max_marks ||
++        !__atomic_compare_exchange_n(&s->mark_t, &none, t, 0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
++        __atomic_fetch_add(&s->marks_skipped, 1, __ATOMIC_RELAXED);
++        return;
++    }
++    s->mark_n = n;
++}
++
++/* A slow frame (PS3_FTRACE_ROLL): captured unless one is pending, the last
++ * capture was under PS3_FTRACE_ROLL_GAP ago, or the budget is spent. */
+ static inline void ps3_ft_roll_trigger(ps3_ft_state* s, uint64_t t, uint64_t why)
+ {
+     uint64_t none = 0;
+@@ -350,6 +372,7 @@ static inline int ps3_ft_init(void)
+         s->after = (uint64_t)(PS3_FT_ENV("PS3_FTRACE_ROLL_AFTER", 1) * 1e9);
+         s->gap = (uint64_t)(PS3_FT_ENV("PS3_FTRACE_ROLL_GAP", 15) * 1e9);
+         s->max_caps = (uint32_t)PS3_FT_ENV("PS3_FTRACE_ROLL_MAX", 20);
++        s->max_marks = (uint32_t)PS3_FT_ENV("PS3_FTRACE_ROLL_MARKS", 100);
+         s->from = (uint64_t)(PS3_FT_ENV("PS3_FTRACE_ROLL_FROM", 0) * 1e9);
+ #undef PS3_FT_ENV
+         s->buf = (ps3_ft_rec*)calloc(s->cap, sizeof(ps3_ft_rec));
+@@ -405,7 +428,7 @@ static inline void ps3_ft_span(int kind, uint32_t who, uint32_t a, uint32_t b,
+             if (last && t0 - last >= s->slow_ns && t0 - last < 100000000ull)
+                 ps3_ft_roll_trigger(s, t0, (t0 - last) / 1000);
+         } else if (kind == PS3_FT_MARK && who != 3) {   /* a tester's mark, not a script's (3) */
+-            ps3_ft_roll_trigger(s, t0, 1ull << 32 | a);
++            ps3_ft_roll_mark(s, t0, a);
+         }
+         return;
+     }
+-- 
+2.56.0.windows.3
+

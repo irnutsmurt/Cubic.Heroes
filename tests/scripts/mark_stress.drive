@@ -1,0 +1,18 @@
+# Hitch marks in quick succession, in play (DOTHEROES_DEV_KEYS=1, SAVES= a save
+# at the castle): "MARK n" on screen grows a digit at 10 and at 100, and each
+# time the overlay's staging buffer is made again -- where three soaks crashed
+# inside the NVIDIA driver (2026-11-02). 120 marks, 0.3 s apart.
+log TitleMovie 120
+sleep 5
+press START
+sleep 3
+press START
+sleep 5
+press CROSS                 # "Change characters?" NO
+state life>0,area==17 90
+sleep 3
+loop 120
+  touch mark.trigger
+  sleep 0.3
+end
+sleep 5

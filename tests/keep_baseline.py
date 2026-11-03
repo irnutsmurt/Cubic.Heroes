@@ -17,6 +17,7 @@ later into build/baselines/<name>/<run>/, which nothing prunes:
                 (tests/batch_report.py reads a kept run like a live one; its
                 report is in summary.txt too)
   hitch/        the run's hitch captures, compressed, with --hitch
+  diag/         its crash or hang reports, if any
   guard.json    a VISIBLE=1 run's on-screen guard (aborted, and why)
   grabs/        its window grabs, downscaled (the game's picture: local only)
 and appends a line per run to build/baselines/INDEX.md. Nothing of the game's
@@ -80,6 +81,8 @@ def main():
                 im = Image.open(os.path.join(run, "grabs", g)).convert("RGB")
                 im.thumbnail((480, 480))
                 im.save(os.path.join(dst, "grabs", os.path.splitext(g)[0] + ".jpg"), quality=80)
+        if os.path.isdir(os.path.join(run, "diag")) and os.listdir(os.path.join(run, "diag")):   # crash reports
+            shutil.copytree(os.path.join(run, "diag"), os.path.join(dst, "diag"), dirs_exist_ok=True)
         for name in ("result.json", "segments.jsonl", "failures.jsonl", "memory.csv", "drive.log"):
             if os.path.exists(os.path.join(run, name)):
                 shutil.copy2(os.path.join(run, name), dst)

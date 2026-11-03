@@ -28,6 +28,11 @@ scenario header):
   hold <BUTTON> <sec>         hold for <sec> of wall time (not guest reports:
                               those pass twice as fast at 60 fps); logs where
                               the hero went (hx/hz)
+  unstick <DIR> [tries]       a short step in DIR; while the hero does not move (a
+                              dialogue open), CROSS and again, up to tries (8)
+  cross <DIR> <area> [timeout]  walk on in DIR until the field area is <area> (an
+                              edge or a door), sidestepping when blocked; a timeout
+                              (default 20 s) fails
   goto <x> <z> [tol] [timeout] [soft]  walk the hero to (x, z) in the area's
                               coordinates (hx/hz: RIGHT is +x, UP is +z), steering
                               by its position every ~0.3 s, within tol (default
@@ -77,7 +82,9 @@ scenario header):
                               save into the slot it loaded, so each copy keeps
                               one point of progress as a test checkpoint
 
-${NAME} or ${NAME:-default} in a line is replaced from the environment.
+${NAME} or ${NAME:-default} in a line is replaced from the environment;
+`include <file>` (relative to the script) puts another script's lines there
+(tests/scenarios/common.drive: the blocks scenarios share).
 
 Buttons: START SELECT CROSS CIRCLE SQUARE TRIANGLE UP DOWN LEFT RIGHT L1 R1 L2 R2 L3 R3,
 or a mask (0x0009: SELECT and START together).
@@ -95,8 +102,21 @@ BTN = {"SELECT": 0x0001, "L3": 0x0002, "R3": 0x0004, "START": 0x0008, "UP": 0x00
 run, script = sys.argv[1], sys.argv[2]
 TIMING = os.environ.get("DRIVE_TIMING") == "1"   # each step's time and each press's waits in drive.log
 # ${NAME} or ${NAME:-default}: from the environment (a scenario's cycle count, say)
-LINES = [(n, re.sub(r"\$\{(\w+)(?::-([^}]*))?\}", lambda m: os.environ.get(m.group(1), m.group(2) or ""),
-                    raw.split("#", 1)[0].strip())) for n, raw in enumerate(open(script), 1)]
+def load(path, depth=0):
+    """The script's lines; `include <file>` (relative to the including script)
+    brings another's in its place -- the blocks scenarios share."""
+    lines = []
+    for n, raw in enumerate(open(path), 1):
+        line = re.sub(r"\$\{(\w+)(?::-([^}]*))?\}", lambda m: os.environ.get(m.group(1), m.group(2) or ""),
+                      raw.split("#", 1)[0].strip())
+        if line.startswith("include ") and depth < 4:
+            lines += load(os.path.join(os.path.dirname(path), line.split(None, 1)[1]), depth + 1)
+        else:
+            lines.append((n, line))
+    return lines
+
+
+LINES = load(script)
 # A press keeps the frame it was made on only for a `change` step to compare against. Kept
 # for every press, it cost each press ~1 s when frame dumps are off (DUMP=0: no frame.ppm, and
 # frame() retries 20 x 50 ms) -- a fight's swings came every ~1.4 s instead of ~0.4 s.
@@ -371,6 +391,49 @@ def fail_record(lineno, line, why):
     say(f"FAILED line {lineno}: {line}: {why} ({fmt_state(s)})")
 
 
+def unstick(direction, tries):
+    """A dialogue open freezes the hero (the system menu does not open then
+    either): try a short step in `direction`; while the hero does not move,
+    page with CROSS and try again. Fails when still frozen after `tries`."""
+    for k in range(tries):
+        s0 = state()
+        press(BTN[direction], 1, 200); wait(0.4)
+        s1 = state()
+        if s0 and s1 and "hx" in s0 and abs(s1["hx"] - s0["hx"]) + abs(s1["hz"] - s0["hz"]) > 0.3:
+            if k:
+                say(f"  free after {k} page(s)")
+            return
+        press(BTN["CROSS"]); wait(0.7)
+    raise Fail(f"unstick {direction}: the hero did not move after {tries} tries (a dialogue that does not close?)")
+
+
+def cross(direction, area, tmo):
+    """Walk on in `direction` until the field area is `area` (an area's edge or
+    a door): short holds, and when the hero stops moving -- an enemy, a corner
+    -- a step to each side in turn before going on."""
+    t0, last, still = time.time(), None, time.time()
+    side = ("UP", "DOWN") if direction in ("LEFT", "RIGHT") else ("LEFT", "RIGHT")
+    turn = 0
+    while True:
+        s = state()
+        if s and s["area"] == area:
+            say(f"  in area {area:g}")
+            return
+        if time.time() - t0 > tmo:
+            raise Fail(f"cross {direction} into area {area:g}: still in area {s['area']:g} at "
+                       f"({s.get('hx', 0):.2f}, {s.get('hz', 0):.2f}) after {tmo:g} s" if s else "cross: no state")
+        here = (s["hx"], s["hz"]) if s and "hx" in s else None
+        if here and last and abs(here[0] - last[0]) + abs(here[1] - last[1]) > 0.2:
+            still = time.time()
+        last = here
+        if time.time() - still > 1.5:   # blocked: a sidestep, the other way next time
+            press(BTN[side[turn % 2]], 1, 400); wait(0.4)
+            turn += 1
+            still = time.time()
+        press(BTN[direction], 1, 300)
+        wait(0.3)
+
+
 def goto(x, z, tol, tmo):
     """Steer the hero to (x, z): short holds toward it (diagonals as two
     directions), re-aimed from its position each time. Blocked for 2 s, it
@@ -399,15 +462,25 @@ def goto(x, z, tol, tmo):
             say(f"  blocked at ({s['hx']:.2f}, {s['hz']:.2f}): along {axis} alone")
             best, best_t = dist, time.time()
         mask = 0
-        if axis != "z" and abs(dx) > tol / 2:
+        # A small offset on the other axis waits until the long one is nearly
+        # done, as a player walks: cutting the corner diagonally left the
+        # owner's line through town and ran into a fence.
+        lead = None if axis else ("x" if abs(dz) < 0.25 * abs(dx) and abs(dx) > 3 * tol else
+                                  "z" if abs(dx) < 0.25 * abs(dz) and abs(dz) > 3 * tol else None)
+        if axis != "z" and lead != "z" and abs(dx) > tol / 2:
             mask |= BTN["RIGHT"] if dx > 0 else BTN["LEFT"]
-        if axis != "x" and abs(dz) > tol / 2:
+        if axis != "x" and lead != "x" and abs(dz) > tol / 2:
             mask |= BTN["UP"] if dz > 0 else BTN["DOWN"]
         if not mask:   # the chosen axis is done: back to both
             axis = None
             continue
-        secs = max(0.1, min(0.3, (abs(dx) if mask & (BTN["RIGHT"] | BTN["LEFT"]) and not mask & (BTN["UP"] | BTN["DOWN"])
-                                  else abs(dz) if not mask & (BTN["RIGHT"] | BTN["LEFT"]) else dist) / 9.0))
+        left = (abs(dx) if mask & (BTN["RIGHT"] | BTN["LEFT"]) and not mask & (BTN["UP"] | BTN["DOWN"])
+                else abs(dz) if not mask & (BTN["RIGHT"] | BTN["LEFT"]) else dist)
+        if left < 1.0:   # the last stretch in pad reports (~0.15 units each at 9 a second): narrow ways want the lane
+            press(mask, max(1, int(left / 0.15)))
+            wait(0.15)
+            continue
+        secs = max(0.05, min(0.3, left / 9.0))
         press(mask, 1, int(secs * 1000))
         wait(secs)
 
@@ -551,6 +624,10 @@ def step(lineno, line, op, a):
         if s0 and s1 and "hx" in s0:
             say(f"  moved {s1['hx'] - s0['hx']:+.2f} {s1['hz'] - s0['hz']:+.2f} to ({s1['hx']:.2f}, {s1['hz']:.2f})"
                 f" area {s1['area']:g}")
+    elif op == "unstick":
+        unstick(a[0].upper(), int(a[1]) if len(a) > 1 else 8)
+    elif op == "cross":
+        cross(a[0].upper(), float(a[1]), float(a[2]) if len(a) > 2 else 20)
     elif op == "goto":
         soft = a[-1] == "soft"
         a = a[:-1] if soft else a

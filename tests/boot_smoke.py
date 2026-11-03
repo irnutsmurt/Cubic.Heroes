@@ -231,6 +231,19 @@ def main():
         return os.path.basename(BIN).lower() in subprocess.run(
             ["tasklist", "/FI", f"IMAGENAME eq {os.path.basename(BIN)}", "/NH", "/FO", "CSV"],
             capture_output=True, text=True).stdout.lower()
+    # build/test/HOLD (tests/stop_tests.py): no test run starts while it exists --
+    # someone is using the PC. A play session (PREEMPT_TESTS=1) sets it itself,
+    # so a batch of tests waiting for the game to close does not start its next
+    # run when the session ends; tests/stop_tests.py --resume removes it.
+    hold = os.path.join(ROOT, "build", "test", "HOLD")
+    if os.environ.get("PREEMPT_TESTS") == "1":
+        os.makedirs(os.path.dirname(hold), exist_ok=True)
+        with open(hold, "w") as f:
+            f.write(f"set by a play session at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+    elif os.path.exists(hold):
+        print(f"held: {os.path.relpath(hold, ROOT)} exists (someone is using the PC); not starting. "
+              "tests/stop_tests.py --resume removes it")
+        return 5
     # PREEMPT_TESTS=1 (a play session): a test run still going is asked to stop
     # (its stop.trigger: it writes its logs and exits, its drive records it) so
     # the player need not wait for it.
@@ -415,7 +428,15 @@ def main():
                 break   # the window went with the run's own stop, after the check began
             if why:
                 guard_state.update(aborted=why, at_s=round(now, 1))
-                proc.terminate()
+                # the game's own stop first, so the frame log and trace up to here are
+                # written (the run is invalid as a whole, its segments before this are not)
+                open(os.path.join(RUN, "stop.trigger"), "w").close()
+                for _ in range(40):
+                    if proc.poll() is not None:
+                        break
+                    time.sleep(0.25)
+                if proc.poll() is None:
+                    proc.terminate()
                 break
             if h:
                 samples += 1
@@ -523,6 +544,13 @@ def main():
     result = {"ended_by": ended_by, "exit": rc, "secs": round(time.monotonic() - t_start, 1),
               "drive_status": dr.returncode if dr else None,
               "guard": guard_state if guarded else None}
+    # A crash report wins over whatever ended the run after it (a crash leaves the
+    # window frozen or gone, which the guard then reports as covered or gone).
+    crashes = sorted(glob.glob(os.path.join(RUN, "diag", "crash-*.txt")))
+    if crashes:
+        first = re.search(r"=== CRASH: .*", rd(crashes[0]))
+        result["crash"] = first.group(0) if first else os.path.basename(crashes[0])
+        result["ended_by"] = f"CRASH ({result['crash']}); then {ended_by}"
     for name in ("segments", "failures"):
         try:
             result[name] = [json.loads(l) for l in open(os.path.join(RUN, f"{name}.jsonl"))]
@@ -539,6 +567,8 @@ def main():
     strict = re.search(r"^\[strict\] FATAL.*$", stderr, re.M)
     how = f" (signal {-rc})" if rc < 0 else ""
     how += f" ({ended_by})"
+    if glob.glob(os.path.join(RUN, "diag", "crash-*.txt")):
+        how += " -- CRASHED (diag/)"
     print(f"run dir : {os.path.relpath(RUN, ROOT)}")
     print(f"exit    : {rc}{how}")
     print(f"strict  : {strict.group(0) if strict else 'none'}")

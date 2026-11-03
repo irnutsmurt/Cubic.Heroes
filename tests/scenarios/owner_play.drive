@@ -1,6 +1,8 @@
 # A play session for the owner (SCENARIO=owner_play tests/boot_smoke.py): the
 # game as a player has it with the validated 60 fps configuration, sound, the
-# frame-rate readout with its graph, normal damage -- and everything a test
+# frame-rate readout with its graph, normal damage, fullscreen at the desktop's
+# resolution (the game's 1280x720 picture scaled up; PS3RECOMP_VK_FULLSCREEN=0
+# for the 1280x720 window) -- and everything a test
 # needs recorded on the side:
 #   frames.log   every frame's time (DIAG_FRAMES)
 #   record.log   controller and keyboard input, the field area and the hero's
@@ -21,7 +23,7 @@
 # run still going when it starts is asked to stop first.
 #! env GAMEDATA=build/play-route/gamedata RUNS_IN=build/sessions KEEP_RUNS=1000 PREEMPT_TESTS=1
 #! env DOTHEROES_NATIVE_CD=1 DOTHEROES_NATIVE_SOLVER=4,5,6 GCM_WRAP_LAP=1 DOTHEROES_PRESENT_ONCE=1
-#! env WINDOW=1 AUDIO=1 PS3_OSD_FPS=2 DUMP=0 SHOT_EVERY=0 PS3_VERBOSE=0
+#! env WINDOW=1 PS3RECOMP_VK_FULLSCREEN=1 AUDIO=1 PS3_OSD_FPS=2 DUMP=0 SHOT_EVERY=0 PS3_VERBOSE=0
 #! env DOTHEROES_DEV_KEYS=1 DOTHEROES_DEV_STATE=1 DOTHEROES_DEV_RECORD=1 DIAG_FRAMES=frames.log
 #! env PS3_FTRACE_ROLL=hitch PS3_FTRACE_ROLL_FROM=60 DOTHEROES_PHYS_STATS=1 VK_GPU_TIME=1
 #! secs 14400

@@ -1,0 +1,78 @@
+From 308a8123611f5a3857b7199e92c8c221089e3f44 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Mon, 2 Nov 2026 14:48:16 -0800
+Subject: [PATCH 82/85] Vulkan backend: overlay buffers replaced without
+ flushing the walker
+
+The message and the frame-rate readout replaced their staging buffers with
+vk_destroy_buffer, which first flushes the engine's batch -- the walker's.
+Called from the present thread while the walker was recording, it ended and
+submitted the walker's command buffer under it, and the NVIDIA driver
+crashed (a null read, or two threads writing one address in nvoglv64.dll):
+every time "MARK 9" became "MARK 10" (or 99, 100) and the message's buffer
+grew. tests/scripts/mark_stress.drive (120 marks 0.3 s apart) crashed at the
+10th every time; three long soaks crashed the same way.
+
+Only the window present's own command buffer reads these, and the present
+waits for its fence before returning, so they are freed without the flush.
+120 marks, no crash.
+---
+ libs/video/rsx_vulkan_backend.c | 25 +++++++++++++++++++++----
+ 1 file changed, 21 insertions(+), 4 deletions(-)
+
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index 8ee9c95..b7f54cc 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -611,6 +611,23 @@ static void vk_destroy_buffer(vk_buffer* b)
+     memset(b, 0, sizeof *b);
+ }
+ 
++/* A buffer only the window present's own command buffer reads (the message
++ * and the frame-rate readout): freed without vk_destroy_buffer's flush of the
++ * engine's batch. The window present waits for its fence before it returns,
++ * so nothing reads these when they are replaced -- and the flush is the
++ * walker's: called from the present thread while the walker recorded, it
++ * ended and submitted the walker's command buffer under it, and the NVIDIA
++ * driver crashed (two threads writing one address in it, or a null read):
++ * every time "MARK 9" became "MARK 10" and the message's buffer grew, in
++ * tests/scripts/mark_stress.drive. */
++static void vk_destroy_present_buffer(vk_buffer* b)
++{
++    if (b->ptr) pvkUnmapMemory(s_vk.device, b->mem);
++    if (b->buf) pvkDestroyBuffer(s_vk.device, b->buf, NULL);
++    if (b->mem) pvkFreeMemory(s_vk.device, b->mem, NULL);
++    memset(b, 0, sizeof *b);
++}
++
+ /* Host writes to non-coherent memory need a flush; there is no
+  * vkFlushMappedMemoryRanges loaded, so writes only ever go to coherent
+  * buffers (every desktop/L4T driver exposes one). Reads invalidate. */
+@@ -2172,10 +2189,10 @@ static void vk_osd_draw(VkCommandBuffer cb, u32 idx)
+     if (strcmp(text, s_osd.text) || scale != s_osd.scale || s_vk.sc_osd != s_osd.fmt) {
+         const VkDeviceSize need = (VkDeviceSize)bw * bh * 4;
+         if (s_osd.buf.size < need) {
+-            if (s_osd.buf.buf) vk_destroy_buffer(&s_osd.buf);
++            if (s_osd.buf.buf) vk_destroy_present_buffer(&s_osd.buf);
+             if (vk_create_host_buffer(&s_osd.buf, need, VK_BUFFER_USAGE_TRANSFER_SRC_BIT) != 0 ||
+                 !s_osd.buf.coherent) {           /* nothing here can flush a non-coherent write */
+-                if (s_osd.buf.buf) vk_destroy_buffer(&s_osd.buf);
++                if (s_osd.buf.buf) vk_destroy_present_buffer(&s_osd.buf);
+                 s_osd.failed = 1;
+                 VK_LOG("no coherent host buffer for messages; they stay off\n");
+                 return;
+@@ -2272,9 +2289,9 @@ static void vk_osd_fps_draw(VkCommandBuffer cb, u32 idx)
+     if (!tn || bw + 2 * m > W || bh + 2 * m > H) return;
+     const VkDeviceSize need = (VkDeviceSize)bw * bh * 4;
+     if (s_fps.buf.size < need) {
+-        if (s_fps.buf.buf) vk_destroy_buffer(&s_fps.buf);
++        if (s_fps.buf.buf) vk_destroy_present_buffer(&s_fps.buf);
+         if (vk_create_host_buffer(&s_fps.buf, need, VK_BUFFER_USAGE_TRANSFER_SRC_BIT) != 0 || !s_fps.buf.coherent) {
+-            if (s_fps.buf.buf) vk_destroy_buffer(&s_fps.buf);
++            if (s_fps.buf.buf) vk_destroy_present_buffer(&s_fps.buf);
+             s_fps.failed = 1;
+             VK_LOG("no coherent host buffer for the frame-rate readout; it stays off\n");
+             return;
+-- 
+2.56.0.windows.3
+
