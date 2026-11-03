@@ -506,11 +506,20 @@ sword) or, since the owner's first play session, from its saves.
   func_0091BC28/func_0091C080/func_0091C620 (the area's set-up); no page-fault
   handlers among them. The SPU work waited for is the overworld's map packs:
   39-47 MB inflated natively in 42-66 ms at each field-area change, and the
-  same pack again on every return (three times each on this route). Leads,
-  not started: keep the last few inflated packs (input compared byte for
-  byte, ~53 MB each) so a return costs a copy (~4 ms) -- the main thread's
-  wait in those frames is ~23 ms, so 60-70 ms frames would become ~40-47 ms
-  on returns; the game code's share needs its own look.
+  same pack again on every return (three times each on this route). **A
+  pack cache does not shorten them** (2026-11-03, build/baselines/2026-11-03-
+  pack-cache-ab: field_after_dungeon, cache off/on/off/on, warm shader cache,
+  tests/inflate_frames.py on the same revisits): a hit (the input compared
+  byte for byte, the kept output copied) took 20-27 ms against 47-55 ms
+  inflated, yet the revisit frames stayed 60-72 ms (43 MB pack, second and
+  third visits: off 60.7/69.0 and 60.7/64.9 ms, on 71.6/65.5 and 66.4/65.0)
+  and 47-52 ms (39 MB pack); first visits got slower (the extra copies:
+  inflates 54-83 ms, frames up to 66 against 51). The main thread's work in
+  those frames, not the inflate, sets their length. Dropped; every inflate's
+  time stays logged (DOTHEROES_INFLATE_LOG=1, on in field_after_dungeon) so
+  tests/inflate_frames.py tracks these frames per area change. Next for
+  them: the game's area set-up code (func_0091BC28 and around) profiled on
+  its own.
 - *Played by the owner* (manual coverage, not counted as automated)
   (2026-11-02, 38.5 minutes, the validated
   configuration with every fix of the day -- the session's binary is the one

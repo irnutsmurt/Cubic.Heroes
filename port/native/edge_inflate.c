@@ -11,7 +11,12 @@
  *
  * DOTHEROES_NATIVE_INFLATE: on unless 0. =check inflates natively into a
  * buffer of its own, lets the lifted routine run as before, and compares the
- * two where the task goes next (the hook at 0x3258), logging each result. */
+ * two where the task goes next (the hook at 0x3258), logging each result.
+ * DOTHEROES_INFLATE_LOG=1 logs every inflate with its start on the frame
+ * trace's clock, for tests/inflate_frames.py (an area change's frames). A
+ * cache of inflated packs was tried and dropped: on the same revisits its
+ * copies (20-27 ms into guest memory) left the frames as long, and first
+ * visits got slower (build/baselines/2026-11-03-pack-cache-ab). */
 #include "inflate.h"
 
 #include <stdio.h>
@@ -31,6 +36,7 @@ void spu_lockline_unlock(void);
 
 int g_dotheroes_native_inflate = 1;
 int g_dotheroes_native_inflate_check = 0;
+static int s_log_each;
 
 static long s_native, s_fallback, s_checked, s_differ;
 #define COUNT(x) __atomic_add_fetch(&(x), 1, __ATOMIC_RELAXED)
@@ -43,6 +49,8 @@ __attribute__((constructor)) static void edge_inflate_init(void)
     } else if (e && *e && !atoi(e)) {
         g_dotheroes_native_inflate = 0;
     }
+    const char* l = getenv("DOTHEROES_INFLATE_LOG");
+    s_log_each = l && atoi(l);
 }
 
 static double now_ms(void)
@@ -121,9 +129,9 @@ int dotheroes_edge_inflate_large(spu_context* ctx)
     if (g_spu_put_hook) g_spu_put_hook(out_ea, out_size);
     memset(&ctx->gpr[3], 0, sizeof ctx->gpr[3]);
     const long n = COUNT(s_native);
-    if (n <= 16 || n % 100 == 0)
-        fprintf(stderr, "[edge-inflate] #%ld native: %u bytes from %u in %.1f ms%s\n", n, out_size, in_size,
-                now_ms() - t0, overlap ? " (in place, through a buffer)" : "");
+    if (n <= 16 || n % 100 == 0 || s_log_each)
+        fprintf(stderr, "[edge-inflate] #%ld native: %u bytes from %u in %.1f ms%s at %.3f s\n", n, out_size,
+                in_size, now_ms() - t0, overlap ? " (in place, through a buffer)" : "", t0 / 1e3);   /* the trace's clock */
     return 1;
 }
 
