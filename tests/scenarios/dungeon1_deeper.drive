@@ -1,0 +1,29 @@
+# Scenario: the first dungeon past its key's door, toward the boss
+# (SCENARIO=dungeon1_deeper). Exploratory: run with DOTHEROES_DEV_CANT_DIE=1.
+#
+# Starts from: build/checkpoints/dungeon1-past-key-door (CONTINUE: the
+#   dungeon's door; the floor switch's and the key's doors kept open).
+# Route: through the kept doors (past_key_door), then the owner's record on
+#   from 1,088 s a stretch at a time (dungeon1_route.drive), `actors list` at
+#   each stretch's end for what is there.
+# Completed when: each stretch's segment ends where the owner's did.
+#! saves build/checkpoints/dungeon1-past-key-door
+#! env DOTHEROES_NATIVE_CD=1 DOTHEROES_NATIVE_SOLVER=4,5,6 GCM_WRAP_LAP=1 DOTHEROES_PRESENT_ONCE=1
+#! env DOTHEROES_DEV_STATE=1 DOTHEROES_DEV_KEYS=1 DIAG_FRAMES=frames.log PS3_VERBOSE=0
+#! env WINDOW=1 VISIBLE=1 TOPMOST=1 GRAB_EVERY=5 PS3_OSD_FPS=2 DUMP=0 SHOT_EVERY=0
+#! secs 900
+include common.drive
+include dungeon1_route.drive
+
+log TitleMovie 120
+sleep 5
+call continue
+state area==37,life>0 90
+sleep 3
+segment explore past-key-door
+call past_key_door
+endseg
+segment explore west-rooms
+call west_rooms
+endseg
+actors list

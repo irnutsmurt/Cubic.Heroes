@@ -40,7 +40,8 @@ scenario header):
                               to it and swing, until none within 40 units has life;
                               fails after timeout (60 s) with how many are left;
                               only those within 25 units of where it began, and
-                              not one 25 swings did not hurt
+                              not one 25 swings did not hurt or 6 s brought no
+                              nearer; `soft`: a timeout is logged, not a failure
   cross <DIR> <area> [timeout]  walk on in DIR until the field area is <area> (an
                               edge or a door), sidestepping when blocked; a timeout
                               (default 20 s) fails
@@ -508,7 +509,7 @@ def goto(x, z, tol, tmo):
         wait(secs)
 
 
-def fight(cls, tmo, reach, radius=25.0):
+def fight(cls, tmo, reach, radius=25.0, soft=False):
     """Clear the characters of one class near the hero: walk to the nearest
     with life left until within `reach`, turn to it (one pad report of its
     direction) and swing (CROSS); again until none of the class within
@@ -520,6 +521,7 @@ def fight(cls, tmo, reach, radius=25.0):
     while to catch low -- and its chest waits for it)."""
     t0, swings, last, home = time.time(), 0, None, None
     tried = {}   # (x, z) rounded -> [swings at it, its life then]
+    near = {}    # class and life -> [the closest the hero got, when]: no nearer in 6 s, out of reach
     while True:
         if actors() is None:
             raise Fail("fight: no actors.txt (DOTHEROES_DEV_STATE=1?)")
@@ -538,8 +540,11 @@ def fight(cls, tmo, reach, radius=25.0):
                 if last is not None else f"  fight {cls}: none appeared in 5 s")
             return
         if time.time() - t0 > tmo:
-            raise Fail(f"fight {cls}: {len(left)} left with life {sum(a[3] for a in left)} after {tmo:g} s "
-                       f"({swings} swings)")
+            why = f"fight {cls}: {len(left)} left with life {sum(a[3] for a in left)} after {tmo:g} s ({swings} swings)"
+            if soft:
+                say(f"  (soft) {why}")
+                return
+            raise Fail(why)
         if not s or "hx" not in s:
             wait(0.2); continue
         tgt = min(left, key=lambda a: (a[1] - s["hx"]) ** 2 + (a[2] - s["hz"]) ** 2)
@@ -548,6 +553,13 @@ def fight(cls, tmo, reach, radius=25.0):
             last = len(left)
         dx, dz = tgt[1] - s["hx"], tgt[2] - s["hz"]
         dist = (dx * dx + dz * dz) ** 0.5
+        g = near.setdefault((tgt[0], tgt[3], key(tgt)), [dist, time.time()])
+        if dist < g[0] - 0.5:
+            g[0], g[1] = dist, time.time()
+        elif dist > reach and time.time() - g[1] > 6:   # a wall between: set it aside like an unhurt one
+            tried[key(tgt)] = [25, tgt[3]]
+            say(f"  fight {cls}: the one at ({tgt[1]:.1f}, {tgt[2]:.1f}) is out of reach")
+            continue
         face = (BTN["RIGHT"] if dx > 0 else BTN["LEFT"]) if abs(dx) >= abs(dz) else (BTN["UP"] if dz > 0 else BTN["DOWN"])
         if dist > reach:
             mask = 0
@@ -743,7 +755,10 @@ def step(lineno, line, op, a):
             say(f"  moved {s1['hx'] - s0['hx']:+.2f} {s1['hz'] - s0['hz']:+.2f} to ({s1['hx']:.2f}, {s1['hz']:.2f})"
                 f" area {s1['area']:g}")
     elif op == "fight":
-        fight(a[0].upper().lstrip("C") if a[0].upper().startswith("C") else a[0].upper(), float(a[1]) if len(a) > 1 else 60, float(a[2]) if len(a) > 2 else 2.5)
+        soft = "soft" in a
+        a = [x for x in a if x != "soft"]
+        fight(a[0].upper().lstrip("C") if a[0].upper().startswith("C") else a[0].upper(), float(a[1]) if len(a) > 1 else 60,
+              float(a[2]) if len(a) > 2 else 2.5, soft=soft)
     elif op == "open":
         open_obj(a[0].upper(), int(a[1]) if len(a) > 1 else 10)
     elif op == "unstick":

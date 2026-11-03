@@ -13,7 +13,8 @@ toward that edge until the area changes) -- so a replay fails at the stage where
 goes wrong, with where the hero stopped, instead of drifting on. Marks
 (the tester's F8 / L3+R3) and life changes are comments at their place;
 with --buttons the tester's action buttons (CROSS, CIRCLE, ...: dialogue
-pages, switches, the sword) are pressed after the waypoint before them.
+pages, switches, the sword) are pressed where the tester was then (between the record's one-a-second
+positions), turned first to the way they were facing.
 --tol, --timeout and --soft set the gotos' (dungeons want --tol 0.25). Replaying
 the inputs themselves is not attempted: enemies, knockback and loading
 differ from run to run; positions and areas are the route.
@@ -33,18 +34,41 @@ ACTIONS = {0x4000: "CROSS", 0x2000: "CIRCLE", 0x8000: "SQUARE", 0x1000: "TRIANGL
            0x0100: "L2", 0x0200: "R2"}
 
 
+# The digital pad's directions in the record's mask (with the analog stick
+# after it: x, y 0-255, y 0 up).
+DPAD = {0x0010: "UP", 0x0020: "RIGHT", 0x0040: "DOWN", 0x0080: "LEFT"}
+
+
 def presses(path):
-    """(t, button) for each action button going down."""
-    out, prev = [], 0
+    """(t, button, facing) for each action button going down; facing is the
+    direction the tester held then, or last held within 1.5 s (the stick past
+    a third of its travel, or the pad), else None."""
+    out, prev, held, held_t = [], 0, None, -1e9
     for ln in open(path, encoding="utf-8", errors="replace"):
         f = ln.split()
         if len(f) >= 3 and f[1] == "in":
-            m = int(f[2], 16)
+            t, m = float(f[0]), int(f[2], 16)
+            d = next((n for bit, n in DPAD.items() if m & bit), None)
+            if d is None and len(f) >= 5:
+                dx, dy = int(f[3]) - 128, int(f[4]) - 127
+                if max(abs(dx), abs(dy)) > 42:
+                    d = ("RIGHT" if dx > 0 else "LEFT") if abs(dx) >= abs(dy) else ("DOWN" if dy > 0 else "UP")
+            if d:
+                held, held_t = d, t
             for bit, name in ACTIONS.items():
                 if m & bit and not prev & bit:
-                    out.append((float(f[0]), name))
+                    out.append((t, name, held if t - held_t <= 1.5 else None))
             prev = m
     return out
+
+
+def where(run, t):
+    """The hero's (x, z) at t, between the record's one-a-second positions."""
+    for (t0, _, x0, z0), (t1, _, x1, z1) in zip(run, run[1:]):
+        if t0 <= t <= t1:
+            k = (t - t0) / max(t1 - t0, 1e-9)
+            return x0 + k * (x1 - x0), z0 + k * (z1 - z0)
+    return (run[0][2], run[0][3]) if t < run[0][0] else (run[-1][2], run[-1][3])
 
 
 def parse(path):
@@ -122,15 +146,24 @@ def main():
         pts = thin([(t, x, z) for t, _, x, z in run], a.eps)
         out.append(f"# area {run[0][1]}: {run[0][0]:.0f}-{run[-1][0]:.0f} s, {len(run)} positions, {len(pts)} waypoints")
         prev_t = run[0][0]
+        at = (pts[0][1], pts[0][2])
         for t, x, z in pts:
-            if a.buttons:   # pressed on the way here: after the last waypoint, in order, as far apart
-                last = prev_t   # the first after as long as the tester waited (a dialogue opening)
-                for tp, b in [(tp, b) for tp, b in btns if prev_t < tp <= t]:
+            if a.buttons:   # pressed on the way here: where and facing as the tester was, as far apart
+                last, face = prev_t, None   # the first after as long as the tester waited (a dialogue opening)
+                for tp, b, d in [e for e in btns if prev_t < e[0] <= t]:
+                    px, pz = where(run, tp)
+                    if ((px - at[0]) ** 2 + (pz - at[1]) ** 2) ** 0.5 > 0.5:
+                        out.append(f"goto {px:.1f} {pz:.1f} 0.3 6 soft   # where it was pressed")
+                        at, last = (px, pz), tp
+                    if d and d != face:
+                        out.append(f"press {d} 1                # face {d.lower()}")
+                        face = d
                     if tp - last > 0.05:
                         out.append(f"sleep {min(tp - last, 1.5):.2f}")
                     out.append(f"press {b}   # {tp:.1f} s")
                     last = tp
             prev_t = t
+            at = (x, z)
             notes = [f"{k} {' '.join(v)}" for te, k, v in events if k in ("mark", "life") and t - 1 < te <= t]
             out.append(f"goto {x:.1f} {z:.1f} {a.tol:g} {a.timeout:g}{' soft' if a.soft else ''}" +
                        (f"   # {', '.join(notes)}" if notes else ""))

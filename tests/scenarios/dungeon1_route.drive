@@ -188,3 +188,97 @@ block back_to_chest
   goto 108.5 -106.5 0.5 10 soft
 end
 
+
+block past_key_door            # from CONTINUE at the dungeon's door (switch and key doors kept open) through the key's door
+  goto 89.9 -128.8 0.25 10 soft
+  unstick LEFT 8               # the first room's dialogue, if it comes again
+  goto 89.9 -120.0 0.4 10 soft
+  goto 89.4 -114.3 0.5 10 soft
+  goto 90.3 -108.7 0.5 10 soft
+  goto 90.0 -101.0 0.5 10 soft
+  fight FE4500 60              # its enemies come back after CONTINUE and block the way west
+  goto 83.4 -98.4 0.5 10 soft
+  goto 76.8 -104.7 0.5 10 soft
+  goto 65.8 -103.2 0.5 10 soft
+  goto 64.0 -98.2 0.2 10 soft
+  hold UP 1.2
+  state hz>@-96.3 3            # through the key's door
+  goto 63.4 -90.4 0.5 10 soft
+end
+
+block west_rooms               # the owner's 1,088-1,146 s: the west room's enclosure -- its switch, its chest -- and back to (64.5, -76.6)
+  # tests/route_from_record.py <the session> --from 1088 --to 1146 --eps 0.6 --tol 0.5 --soft --buttons
+  # (map and L2 presses left out). The owner circled the walled enclosure, swung at a bat on its
+  # north side, pushed a block of its south wall in at x ~39 and opened its chest facing up from
+  # (39.1, -87.0).
+  goto 66.7 -87.2 0.5 10 soft
+  goto 64.7 -82.4 0.3 6 soft   # where it was pressed
+  press LEFT 1                # face left
+  press CROSS   # 1089.2 s
+  goto 64.7 -82.4 0.5 10 soft
+  goto 59.2 -80.0 0.5 10 soft
+  goto 56.8 -82.7 0.5 10 soft
+  goto 49.6 -86.0 0.5 10 soft
+  fight any 40 soft            # the doorway's bats (the owner swung four times from here)
+  press DOWN 1                # face down
+  sleep 0.40
+  press CROSS   # 1096.0 s
+  sleep 0.95
+  press CROSS   # 1097.0 s
+  sleep 0.46
+  press CROSS   # 1097.4 s
+  sleep 1.50
+  press CROSS   # 1099.5 s
+  goto 47.2 -86.0 0.5 10 soft
+  goto 46.5 -80.8 0.3 6 soft   # where it was pressed
+  press LEFT 1                # face left
+  press CROSS   # 1102.6 s
+  goto 46.0 -79.2 0.5 10 soft
+  goto 35.7 -79.2 0.3 6 soft   # where it was pressed
+  press LEFT 1                # face left
+  press CROSS   # 1104.3 s
+  goto 32.0 -79.2 0.5 10 soft
+  goto 29.7 -79.8 0.3 6 soft   # where it was pressed
+  press DOWN 1                # face down
+  press CROSS   # 1105.8 s
+  goto 28.0 -80.2 0.5 10 soft
+  goto 28.5 -85.2 0.5 10 soft
+  goto 29.7 -87.3 0.5 10 soft
+  goto 29.7 -83.4 0.5 10 soft
+  goto 31.9 -80.9 0.5 10 soft
+  goto 43.6 -81.0 0.3 6 soft   # where it was pressed
+  press DOWN 1                # face down
+  press CROSS   # 1119.4 s
+  goto 47.2 -81.2 0.5 10 soft
+  goto 47.2 -89.9 0.5 10 soft
+  goto 44.1 -92.9 0.5 10 soft
+  goto 44.1 -92.3 0.3 6 soft   # where it was pressed
+  press UP 1                # face up
+  goto 44.0 -92.0 0.5 10 soft
+  goto 39.7 -92.0 0.5 10 soft
+  goto 39.2 -92.2 0.25 8 soft    # under the notch in the enclosure's south wall
+  hold UP 3.0                    # push its block in (the owner moved 3 units north in 2 s here)
+  state hz>@-89.5 2              # in: the block went
+  goto 39.1 -87.0 0.5 10 soft
+  press UP 1                # face up
+  sleep 0.68
+  press CROSS   # 1132.3 s
+  goto 37.6 -87.0 0.3 6 soft   # where it was pressed
+  press CROSS   # 1133.5 s
+  goto 37.2 -87.0 0.5 10 soft
+  press UP 1                # face up
+  sleep 0.43
+  press CROSS   # 1134.2 s
+  sleep 0.41
+  press CROSS   # 1134.6 s
+  goto 41.2 -92.8 0.5 10 soft
+  goto 48.0 -89.8 0.5 10 soft
+  goto 51.3 -86.8 0.5 10 soft
+  goto 54.4 -86.4 0.5 10 soft
+  goto 60.9 -82.7 0.5 10 soft
+  goto 64.5 -79.4 0.5 10 soft
+  press UP 1                # face up
+  sleep 0.30
+  goto 64.5 -78.4 0.3 6 soft   # where it was pressed
+  goto 64.5 -76.6 0.5 10 soft
+end
