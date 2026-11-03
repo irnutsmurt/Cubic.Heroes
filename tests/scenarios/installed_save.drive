@@ -1,0 +1,52 @@
+# Scenario: a player's install keeps what was bought across a save, an exit and
+# a relaunch -- part one (INSTALLED=<install> SCENARIO=installed_save; part two
+# is installed_continue, run next on the same install).
+#
+# Starts from: build/checkpoints/field-area14, copied into the install's own
+#   save root (<install>/data/gamedata); the game runs as a player starts it
+#   (no arguments: its dotheroes.cfg, shader cache and real audio).
+# Route: field14_building's way into the arrow shop (building 100), one arrow
+#   bought at the counter (the HUD: wallet 0224 -> 0222, arrows 14 -> 15, the
+#   quiver full), out again; then the system menu's SAVE in area 14 and
+#   RESUME. The run's stop exits the game.
+# Completed when: saved in area 14 (the `saved` shot); installed_continue then
+#   relaunches and CONTINUEs, and its HUD shows whether the purchase was kept.
+#! saves build/checkpoints/field-area14
+#! env DOTHEROES_DEV_STATE=1 DOTHEROES_DEV_KEYS=1 DIAG_FRAMES=frames.log PS3_VERBOSE=0
+#! env WINDOW=1 VISIBLE=1 TOPMOST=1 GRAB_EVERY=2 PS3_OSD_FPS=2 DUMP=0 SHOT_EVERY=0
+#! secs 400
+include common.drive
+include field14_route.drive
+
+log TitleMovie 120
+sleep 5
+call continue
+state area==14,life>0 90
+sleep 3
+segment explore door-of-100
+call door_of_100
+state area==100 8
+endseg
+segment explore inside-100
+call buy_arrow
+call leave_100
+state area==14 10
+endseg
+state area==14,life>0 10      # where the save is made
+sleep 3
+shot saved-here               # the HUD: wallet and arrows as saved
+attempt 3 page_dialogues      # just through a door, START can go unheard
+  press START                 # the system menu, on RESUME
+  sleep 2
+  state menu==1 4
+end
+press DOWN                    # SAVE
+sleep 1
+press CROSS                   # saves at once; the menu stays on SAVE
+sleep 6
+shot saved
+press UP                      # RESUME
+sleep 1
+press CROSS
+sleep 2
+state life>0 5

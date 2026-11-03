@@ -1,0 +1,21 @@
+# Scenario: part two of the installed-build save test (INSTALLED=<install>
+# SCENARIO=installed_continue, after installed_save on the same install):
+# relaunched as a player starts it, and CONTINUE.
+#
+# Starts from: the install's own save root as installed_save left it (no
+#   `saves` line: nothing is copied over it).
+# Completed when: in play after CONTINUE: the `continued` state and shot show
+#   where the save restored the hero, and the HUD whether the purchase was
+#   kept (wallet 0222 and 15 arrows; 0224 and 14 if not).
+#! env DOTHEROES_DEV_STATE=1 DOTHEROES_DEV_KEYS=1 DIAG_FRAMES=frames.log PS3_VERBOSE=0
+#! env WINDOW=1 VISIBLE=1 TOPMOST=1 GRAB_EVERY=4 PS3_OSD_FPS=2 DUMP=0 SHOT_EVERY=0
+#! secs 400
+include common.drive
+
+log TitleMovie 120
+sleep 5
+call continue
+state life>0 90
+sleep 3
+state life>0 5                # where CONTINUE restored the hero
+shot continued

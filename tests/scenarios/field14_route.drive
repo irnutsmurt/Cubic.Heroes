@@ -1,0 +1,147 @@
+# Field area 14's shop (building 100): shared by field14_building and the
+# installed-build save test (installed_save, installed_continue).
+
+block door_of_100             # from where CONTINUE puts the hero (87.2, -119.2), in at its door
+  goto 88.5 -114.2 0.4 10 soft
+  press UP 1
+  sleep 0.3
+  repeat 6 CROSS 0.8             # whoever is there, as the owner paged it
+  unstick DOWN 6
+  goto 85.2 -114.0 0.25 8 soft   # under the door (the owner went in from (85.5, -112.7))
+  hold UP 0.8                   # up to the door: "OPEN" shows only there
+  sleep 0.4
+  press CROSS                   # open it (the owner's 2,245.6 s)
+  sleep 1.5
+  hold UP 2.0
+end
+
+block building100              # building 100 is the arrow shop: the owner's 2,250-2,295 s inside, then out
+  # Their presses where they made them open the shop at its counter: Arrow(1) 2 G, Arrow(10)
+  # 18 G, Arrow(30) 40 G; one arrow bought (b100d, 2026-11-02: wallet 224 -> 222), a full
+  # quiver gets "You can't hold that!".
+  goto 16.8 -34.4 1.0 10 soft
+  goto 13.7 -26.3 0.3 6 soft   # where it was pressed
+  press UP 1                # face up
+  press CROSS   # 2251.3 s
+  sleep 0.46
+  press CROSS   # 2251.7 s
+  goto 13.7 -26.2 1.0 10 soft
+  press UP 1                # face up
+  sleep 0.43
+  press CROSS   # 2252.2 s
+  sleep 1.50
+  press CROSS   # 2255.1 s
+  sleep 0.66
+  press CROSS   # 2255.7 s
+  sleep 1.06
+  press CROSS   # 2256.8 s
+  press DOWN 1                # face down
+  sleep 1.50
+  press CROSS   # 2258.5 s
+  sleep 1.31
+  press CROSS   # 2259.8 s
+  sleep 1.50
+  press CROSS   # 2262.7 s
+  sleep 0.62
+  press CROSS   # 2263.3 s
+  sleep 1.00
+  press CROSS   # 2264.3 s
+  sleep 0.70
+  press CROSS   # 2265.0 s
+  sleep 0.94
+  press CROSS   # 2265.9 s
+  sleep 0.38
+  press CROSS   # 2266.3 s
+  press UP 1                # face up
+  sleep 1.50
+  press CROSS   # 2269.0 s
+  sleep 0.49
+  press CROSS   # 2269.5 s
+  sleep 0.36
+  press CROSS   # 2269.8 s
+  sleep 0.35
+  press CROSS   # 2270.2 s
+  sleep 0.33
+  press CROSS   # 2270.5 s
+  sleep 0.68
+  press CROSS   # 2271.2 s
+  sleep 0.48
+  press CROSS   # 2271.7 s
+  sleep 0.46
+  press CROSS   # 2272.1 s
+  press DOWN 1                # face down
+  sleep 0.96
+  press CROSS   # 2273.1 s
+  sleep 1.50
+  press CROSS   # 2274.7 s
+  sleep 0.37
+  press CROSS   # 2275.0 s
+  goto 14.2 -29.4 1.0 10 soft
+  goto 21.6 -24.9 1.0 10 soft
+  goto 19.3 -16.2 1.0 10 soft
+  goto 16.9 -15.5 0.3 6 soft   # where it was pressed
+  press UP 1                # face up
+  press CROSS   # 2279.9 s
+  goto 15.4 -15.1 0.3 6 soft   # where it was pressed
+  press CROSS   # 2280.3 s
+  goto 15.2 -15.1 1.0 10 soft
+  press UP 1                # face up
+  sleep 0.43
+  press CROSS   # 2280.8 s
+  sleep 0.88
+  press CROSS   # 2281.7 s
+  goto 16.8 -15.8 0.3 6 soft   # where it was pressed
+  press CROSS   # 2282.9 s
+  goto 17.9 -15.2 0.3 6 soft   # where it was pressed
+  press CROSS   # 2283.4 s
+  goto 18.3 -14.9 1.0 10 soft
+  press UP 1                # face up
+  press CROSS   # 2283.6 s
+  sleep 0.75
+  press CROSS   # 2284.4 s
+  sleep 0.45
+  press CROSS   # 2284.8 s
+  sleep 0.68
+  press CROSS   # 2285.5 s
+  sleep 0.36
+  press CROSS   # 2285.8 s
+  sleep 0.67
+  press CROSS   # 2286.5 s
+  sleep 1.17
+  press CROSS   # 2287.7 s
+  sleep 0.61
+  press CROSS   # 2288.3 s
+  sleep 0.74
+  press CROSS   # 2289.0 s
+  sleep 1.50
+  press CROSS   # 2290.7 s
+  goto 18.5 -15.6 0.3 6 soft   # where it was pressed
+  press CROSS   # 2291.3 s
+  goto 21.5 -25.7 1.0 10 soft
+  goto 18.5 -41.1 1.0 10 soft
+  repeat 3 CIRCLE 0.8          # out of the list and the shop's talk
+  unstick DOWN 6
+  goto 16.8 -36.5 0.4 10 soft  # the doorway (in at (16.8, -40.8))
+  hold DOWN 2.5
+end
+
+# One arrow from the shopkeeper by the forge, the short way (the owner's 45 s
+# of presses talk to whoever is nearest). Facing him, CROSS pages whatever he
+# says, then talks again: the shop's "TAKE A LOOK!", the list on Arrow(1) 2 G,
+# "You BUYIN'?", yes. Spare presses are safe: the quiver holds 15 (14 in the
+# area-14 save), so only one arrow is ever bought ("You can't hold that!").
+# The HUD's wallet and arrow count show whether it was.
+block buy_arrow
+  goto 13.7 -26.4 0.25 8 soft  # just below him (he stands by the forge)
+  hold UP 0.4               # face him (a tap leaves the hero facing the way it walked)
+  sleep 0.5
+  repeat 12 CROSS 1.2
+  repeat 3 CIRCLE 0.8       # out of the list and the talk
+  sleep 1.0
+end
+
+block leave_100             # out of the shop's door, back in area 14
+  unstick DOWN 6
+  goto 16.8 -36.5 0.4 10 soft  # the doorway (in at (16.8, -40.8))
+  hold DOWN 2.5
+end

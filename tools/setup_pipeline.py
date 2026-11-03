@@ -286,7 +286,8 @@ def spu(paths, log):
             reloc += ["--relocatable", f"{img}=0x{spu_text_ea(paths.elf, os.path.join(images, img + '.elf')):08X}"]
     run_tool(os.path.join(t, "build_spu_workloads.py"),
              ["--images", images, "--lifted", spu_dir, "--out", os.path.join(spu_dir, "spu_workloads.c"),
-              "--constructor", "--relift", *reloc], log)
+              "--constructor", "--relift", "--entry-hooks", os.path.join(config_dir(), "spu_entry_hooks.json"),
+              *reloc], log)   # entry hooks: native code for hot SPU routines (the map packs' inflate)
 
 
 def finish(paths, log):

@@ -9,6 +9,11 @@ Environment
                      seconds to <run>/shots/NNNN.png (the backend's
                      PS3RECOMP_VK_DUMP frame). Default 10; 0 = off.
   RUN_TAG=<name>     suffix for the run directory.
+  INSTALLED=<dir>    test a player's install as a player starts it: <dir>/dotheroes.exe with no
+                     arguments, so its own data folder, dotheroes.cfg and defaults (the shader
+                     cache, audio, no strict mode) apply; only the test's input (PAD_FILE), the
+                     state probe and the stop trigger are added, and its log comes here
+                     (DOTHEROES_LOG_TO_CONSOLE=1). SAVES= are copied into <dir>/data/gamedata.
   PS3RECOMP_SPIRV_CACHE=<dir>  keep translated shaders and built pipelines there (the
                      default here is off: each run builds them as a first session would)
   KEEP_RUNS=<n>      run directories kept under build/test (default 5; the
@@ -125,6 +130,9 @@ if SECS_ARG:
 BIN = os.environ.get("BIN") or os.path.join(ROOT, "build", *(("port-win", "dotheroes.exe") if WIN
                                                              else ("port", "dotheroes")))
 ELF = os.path.join(ROOT, "build", "disc", "PS3_GAME", "USRDIR", "EBOOT.elf")
+INSTALLED = os.path.abspath(os.environ["INSTALLED"]) if os.environ.get("INSTALLED") else ""
+# Settings a test of an install asked for itself (the scenario's or the caller's), kept.
+INSTALLED_KEEP = set(os.environ.get("INSTALLED_KEEP", "").split(","))
 TAG = os.environ.get("RUN_TAG")
 # RUNS_IN=<dir>: where the run's directory goes (default build/test, which the
 # retention below cleans); a play session's go to build/sessions, kept.
@@ -186,13 +194,30 @@ def desktop_locked():
         return None
 
 
-def build_identity():
+def installed_settings():
+    """An install's dotheroes.cfg (NAME=value): the defaults its game starts with."""
+    cfg = {}
+    try:
+        for ln in open(os.path.join(INSTALLED, "dotheroes.cfg"), encoding="utf-8", errors="replace"):
+            ln = ln.strip()
+            if ln and not ln.startswith("#") and "=" in ln:
+                k, v = ln.split("=", 1)
+                cfg[k.strip()] = v.strip()
+    except OSError:
+        pass
+    return cfg
+
+
+def build_identity(env):
     """What this run ran: the executable's hash and the two source trees'
-    revisions (dirty = files changed since), and the switches it was given.
+    revisions (dirty = files changed since), and the switches it was given
+    (env: what the game was started with; an install's dotheroes.cfg fills in
+    what that leaves unset, as the game does).
     Written to <run>/run.json; tests/keep_baseline.py keeps it with a summary."""
     import hashlib, json, subprocess
+    exe = os.path.join(INSTALLED, "dotheroes.exe") if INSTALLED else BIN
     h = hashlib.sha256()
-    with open(BIN, "rb") as f:
+    with open(exe, "rb") as f:
         for chunk in iter(lambda: f.read(1 << 22), b""):
             h.update(chunk)
 
@@ -207,16 +232,24 @@ def build_identity():
             return None
     ps3 = os.environ.get("PS3RECOMP_DIR", os.path.join(ROOT, "build", "ref", "ps3recomp"))
     prefixes = ("DOTHEROES_", "PS3_", "PS3RECOMP_", "SPU_", "VK_", "RSX_", "SPURS_", "DIAG_", "GCM_")
+    harness = ("DUMP", "WINDOW", "AUDIO", "SHOT_EVERY", "SCENARIO", "FIGHTS", "ROUNDS")
+    sw = {k: v for k, v in env.items() if k.startswith(prefixes) or k in harness}
+    for k in harness:   # the harness's own (not passed on to the game, which never sees them)
+        if k in os.environ:
+            sw[k] = os.environ[k]
+    if INSTALLED:
+        cfg = installed_settings()
+        sw = {**cfg, **sw}
     return {
         "started": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "exe": {"name": os.path.basename(BIN), "sha256": h.hexdigest(), "bytes": os.path.getsize(BIN),
-                "mtime": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(os.path.getmtime(BIN)))},
+        "exe": {"name": os.path.basename(exe), "sha256": h.hexdigest(), "bytes": os.path.getsize(exe),
+                "mtime": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(os.path.getmtime(exe)))},
+        "installed": {"dir": os.path.relpath(INSTALLED, ROOT), "cfg": installed_settings()} if INSTALLED else None,
         "repo": git(ROOT), "ps3recomp": git(ps3),
         "patches": len(glob.glob(os.path.join(ROOT, "patches", "ps3recomp", "*.patch"))),
         "desktop_locked": desktop_locked(),
         "secs": SECS, "drive": os.path.relpath(os.environ["DRIVE"], ROOT) if os.environ.get("DRIVE") else None,
-        "switches": {k: v for k, v in sorted(os.environ.items())
-                     if k.startswith(prefixes) or k in ("DUMP", "WINDOW", "AUDIO", "SHOT_EVERY", "SCENARIO", "FIGHTS", "ROUNDS")},
+        "switches": dict(sorted(sw.items())),
     }
 
 
@@ -272,6 +305,8 @@ def main():
     # GAMEDATA=<dir>: play on a persistent save root in place; nothing is copied
     # into the run, and retention never touches it.
     gamedata = os.path.abspath(os.environ["GAMEDATA"]) if os.environ.get("GAMEDATA") else os.path.join(RUN, "gamedata")
+    if INSTALLED:   # the install's own save root (a fresh install's is empty)
+        gamedata = os.path.join(INSTALLED, "data", "gamedata")
     if os.environ.get("GAMEDATA") and os.environ.get("SAVES"):
         print("GAMEDATA and SAVES exclude each other: GAMEDATA is played in place")
         return 2
@@ -282,13 +317,13 @@ def main():
         os.makedirs(os.path.join(RUN, roll), exist_ok=True)
     open(os.path.join(RUN, "pad.txt"), "w").close()
     import json
-    with open(os.path.join(RUN, "run.json"), "w") as f:
-        json.dump(build_identity(), f, indent=1)
     if os.environ.get("SAVES"):
         dst = os.path.join(gamedata, "dev_hdd0", "home", "00000001", "savedata")
         for name in sorted(os.listdir(os.environ["SAVES"])):
             src = os.path.join(os.environ["SAVES"], name)
             if name.startswith("BLUS30490") and os.path.isdir(src):
+                if INSTALLED:   # the test install's own save root: the checkpoint replaces what a run left
+                    shutil.rmtree(os.path.join(dst, name), ignore_errors=True)
                 shutil.copytree(src, os.path.join(dst, name))
     drive = os.path.abspath(os.environ["DRIVE"]) if os.environ.get("DRIVE") else None
 
@@ -319,7 +354,15 @@ def main():
         env["PS3RECOMP_SPIRV_CACHE"] = os.path.join(ROOT, env["PS3RECOMP_SPIRV_CACHE"])   # the game runs in the run dir
     if window:
         env["PS3RECOMP_VK_WINDOW"] = "1"
-    if os.environ.get("AUDIO") != "1":
+    if INSTALLED:   # as a player starts it: none of the dev harness's own settings
+        for k in ("PS3_STRICT", "PS3_GAMEDATA_ROOT", "PS3_HDD0_ROOT", "PS3_HDD1_ROOT", "PS3_DEV_FLASH",
+                  "PS3RECOMP_VK_GUEST_PROGRAMS", "PS3RECOMP_VK_DUMP", "PS3RECOMP_VK_DUMP_EVERY",
+                  "PS3RECOMP_SPIRV_CACHE", "DOTHEROES_NATIVE_CD", "DOTHEROES_NATIVE_SOLVER", "GCM_WRAP_LAP",
+                  "DOTHEROES_PRESENT_ONCE"):   # the performance switches: dotheroes.cfg decides
+            if k not in INSTALLED_KEEP:
+                env.pop(k, None)
+        env["DOTHEROES_LOG_TO_CONSOLE"] = "1"
+    if os.environ.get("AUDIO") != "1" and not INSTALLED:
         env["SDL_AUDIODRIVER"] = "dummy"
     if os.environ.get("DUMP") == "0":
         env.pop("PS3RECOMP_VK_DUMP", None)
@@ -329,6 +372,8 @@ def main():
         env["RSX_ENGINE_PASS_DUMP_TRIGGER"] = os.path.join(RUN, "passes.trigger")
         env.setdefault("RSX_ENGINE_PASS_DUMP_DRAWS", "1")
         env.setdefault("RSX_ENGINE_SHADER_DUMP", os.path.join(RUN, "passes"))  # pipe<N>.ps.hlsl
+    with open(os.path.join(RUN, "run.json"), "w") as f:
+        json.dump(build_identity(env), f, indent=1)
 
     kw = {}
     if WIN:
@@ -344,7 +389,8 @@ def main():
         kw["preexec_fn"] = lambda: resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     with open(os.path.join(RUN, "stdout.log"), "wb") as out, open(os.path.join(RUN, "stderr.log"), "wb") as err:
         wrap = json.loads(os.environ["WRAP"]) if os.environ.get("WRAP") else []
-        proc = subprocess.Popen(wrap + [BIN, ELF], cwd=RUN, env=env, stdout=out, stderr=err, **kw)
+        args = [os.path.join(INSTALLED, "dotheroes.exe")] if INSTALLED else [BIN, ELF]
+        proc = subprocess.Popen(wrap + args, cwd=RUN, env=env, stdout=out, stderr=err, **kw)
 
     stop = threading.Event()
 

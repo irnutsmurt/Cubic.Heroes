@@ -190,6 +190,24 @@ def read_game_settings(install):
     return out
 
 
+# The settings that hold 60 fps in debris-heavy fights (docs/HANDOFF.md,
+# "Performance configuration"): native collision and three native solver
+# commands, the capped command-ring lap, one present per flip. Without them an
+# install fights at p99 ~27 ms (10-16% of frames over 18 ms); with them 17.3-17.5,
+# as in development. Experimental: native collision is not bit-exact with the
+# game's SPU task. Written for a new install and added to an older one's
+# settings if missing; a player's own value is never replaced.
+PERFORMANCE = {"DOTHEROES_NATIVE_CD": "1", "DOTHEROES_NATIVE_SOLVER": "4,5,6", "GCM_WRAP_LAP": "1",
+               "DOTHEROES_PRESENT_ONCE": "1"}
+
+
+def ensure_performance_settings(install):
+    cur = read_game_settings(install)
+    missing = {k: v for k, v in PERFORMANCE.items() if k not in cur}
+    if missing or not os.path.exists(game_settings_path(install)):
+        write_game_settings(install, **missing)
+
+
 def write_game_settings(install, **values):
     cur = read_game_settings(install)
     cur.update(values)
@@ -198,6 +216,8 @@ def write_game_settings(install, **values):
             f.write("# 3D Dot Game Heroes settings (the setup app writes this; editing by hand is fine)\n")
             f.write("# DOTHEROES_FPS: 60, 30 (the original) or 0 (no limit)\n")
             f.write("# PS3RECOMP_VK_FULLSCREEN: 1 = fullscreen\n")
+            f.write("# DOTHEROES_NATIVE_CD, DOTHEROES_NATIVE_SOLVER, GCM_WRAP_LAP, DOTHEROES_PRESENT_ONCE: the\n")
+            f.write("#   settings that hold 60 fps in fights (0 / empty: the original's way, slower)\n")
             for k, v in sorted(cur.items()):
                 f.write(f"{k}={v}\n")
     except OSError:
@@ -485,6 +505,7 @@ class App:
                                skip=lambda st: self.events.put(("skip", st)), full=full)
             if not os.path.exists(game_settings_path(install)):
                 write_game_settings(install, DOTHEROES_FPS="60", PS3RECOMP_VK_FULLSCREEN="0")
+            ensure_performance_settings(install)
             if image is not None:  # an update keeps the shortcuts as the player left them
                 try:
                     made = shortcuts.create_shortcuts(out, self.icon_for(out), desktop=desktop)
@@ -677,6 +698,7 @@ def convert_headless(image, install, keys=None, full=False):
         sys.exit(f"\nfailed: {e}")
     if not os.path.exists(game_settings_path(install)):
         write_game_settings(install, DOTHEROES_FPS="60", PS3RECOMP_VK_FULLSCREEN="0")
+    ensure_performance_settings(install)
     print(f"\ndone: {out}")
 
 

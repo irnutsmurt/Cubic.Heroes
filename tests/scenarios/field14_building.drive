@@ -1,0 +1,33 @@
+# Scenario: building 100 off field area 14, as the owner went in and out of it
+# before the area-14 save (SCENARIO=field14_building). Exploratory.
+#
+# Starts from: build/checkpoints/field-area14 (CONTINUE: area 14 at (87.2,
+#   -119.2), in front of the door the owner came out of before saving).
+# Route: the owner's record 2,238-2,297 s: six CROSS presses at (88.5, -114.2)
+#   (someone spoken to), in at (85.5, -112.7) walking up, their 45 s inside
+#   with their presses where they made them, and out again.
+# Completed when: back in area 14 after being in area 100.
+#! saves build/checkpoints/field-area14
+#! env DOTHEROES_NATIVE_CD=1 DOTHEROES_NATIVE_SOLVER=4,5,6 GCM_WRAP_LAP=1 DOTHEROES_PRESENT_ONCE=1
+#! env DOTHEROES_DEV_STATE=1 DOTHEROES_DEV_KEYS=1 DIAG_FRAMES=frames.log PS3_VERBOSE=0
+#! env WINDOW=1 VISIBLE=1 TOPMOST=1 GRAB_EVERY=4 PS3_OSD_FPS=2 DUMP=0 SHOT_EVERY=0
+#! secs 400
+include common.drive
+include field14_route.drive
+
+log TitleMovie 120
+sleep 5
+call continue
+state area==14,life>0 90
+sleep 3
+actors list
+segment explore door-of-100
+call door_of_100
+state area==100 8
+endseg
+segment explore inside-100
+call building100
+state area==14 10
+endseg
+state area==14,life>0 10
+actors list
