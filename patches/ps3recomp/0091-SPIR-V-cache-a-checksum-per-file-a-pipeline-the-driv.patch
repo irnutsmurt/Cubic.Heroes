@@ -1,0 +1,117 @@
+From 6754ddeb6ad4d1d573ac5b87042d5f499671f55a Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Mon, 2 Nov 2026 22:47:05 -0800
+Subject: [PATCH] SPIR-V cache: a checksum per file; a pipeline the driver
+ refuses is not asked again
+
+A cache file with its last words garbled loaded as SPIR-V, and the
+pipeline built from it failed -- on every draw that used it, 11,912 times
+in one dungeon run (1.9 s of failed builds). Format 2 adds a checksum
+after the words (older files are of another format and removed at
+startup); a file that does not match is a miss and is translated again.
+A pipeline variant the driver refuses is remembered and its draws skipped,
+with one log line. Checked: three damaged or missing files of 78 were
+translated again, a scrambled pipeline blob was taken by the driver with
+no failure, an older-format cache was removed and rebuilt.
+---
+ libs/video/rsx_shader_spirv.cpp | 22 ++++++++++++++++++++--
+ libs/video/rsx_vulkan_backend.c |  5 ++++-
+ 2 files changed, 24 insertions(+), 3 deletions(-)
+
+diff --git a/libs/video/rsx_shader_spirv.cpp b/libs/video/rsx_shader_spirv.cpp
+index b465176..ef6026b 100644
+--- a/libs/video/rsx_shader_spirv.cpp
++++ b/libs/video/rsx_shader_spirv.cpp
+@@ -120,7 +120,10 @@ int translate(const char* hlsl, int stage, std::vector<unsigned int>& spirv,
+ 
+ /* ---- translation cache ------------------------------------------------- */
+ 
+-const u32 kCacheFormat = 1;
++/* 2: a checksum word after the SPIR-V (a damaged file is a miss, not words
++ * handed to the driver: one with its tail garbled failed its pipeline on
++ * every draw). */
++const u32 kCacheFormat = 2;
+ const u32 kCacheMagic = 0x56505352u;   /* "RSPV" */
+ /* Stands for translate()'s options and the binding contract in
+  * rsx_shader_spirv.h: the build passes a hash of this file and that header
+@@ -181,6 +184,15 @@ std::string cache_path(const std::string& dir, const std::string& key)
+  * words), key bytes, word count; then the key and the words. */
+ const int kHeaderWords = 13;
+ 
++/* FNV-1a over the key and the words: what the trailing checksum holds. */
++u32 cache_sum(const std::string& key, const std::vector<unsigned int>& spirv)
++{
++    u32 h = 2166136261u;
++    for (unsigned char ch : key) { h ^= ch; h *= 16777619u; }
++    for (unsigned int w : spirv) { h ^= w; h *= 16777619u; }
++    return h;
++}
++
+ void cache_header(u32 hdr[kHeaderWords], const std::string& key, size_t nwords)
+ {
+     const glslang::Version v = glslang::GetVersion();
+@@ -206,7 +218,9 @@ bool cache_load(const std::string& path, const std::string& key,
+     }
+     if (ok) {
+         spirv.resize(hdr[kHeaderWords - 1]);
+-        ok = fread(spirv.data(), sizeof(u32), spirv.size(), f) == spirv.size();
++        u32 sum = 0;
++        ok = fread(spirv.data(), sizeof(u32), spirv.size(), f) == spirv.size() &&
++             fread(&sum, sizeof sum, 1, f) == 1 && sum == cache_sum(key, spirv);
+     }
+     fclose(f);
+     if (!ok) spirv.clear();
+@@ -227,6 +241,8 @@ void cache_store(const std::string& path, const std::string& key,
+     bool ok = fwrite(hdr, sizeof hdr, 1, f) == 1 &&
+               fwrite(key.data(), 1, key.size(), f) == key.size() &&
+               fwrite(spirv.data(), sizeof(u32), spirv.size(), f) == spirv.size();
++    const u32 sum = cache_sum(key, spirv);
++    ok = ok && fwrite(&sum, sizeof sum, 1, f) == 1;
+     ok = (fclose(f) == 0) && ok;
+ #ifdef _WIN32
+     if (ok) remove(path.c_str());      /* rename does not replace on Windows */
+@@ -337,8 +353,10 @@ extern "C" int rsx_hlsl_to_spirv_cache_preload(RsxSpirvCachePreload* out)
+             if (ok) {
+                 key.resize(hdr[11]);
+                 spirv.resize(hdr[12]);
++                u32 sum = 0;
+                 ok = fread(&key[0], 1, key.size(), f) == key.size() &&
+                      fread(spirv.data(), sizeof(u32), spirv.size(), f) == spirv.size() &&
++                     fread(&sum, sizeof sum, 1, f) == 1 && sum == cache_sum(key, spirv) &&
+                      cache_path(dir, key) == dir + "/" + ent.path().filename().string();
+             }
+         }
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index e09f63f..808bbc5 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -3325,6 +3325,7 @@ typedef struct vk_eng_pipe {
+     VkFormat            rt_fmt;          /* picks the render pass it is built against */
+     u32                 cube_mask;       /* TextureCube units: the split set layout */
+     VkPipeline          variant[VK_ENG_TOPOLOGIES];
++    u8                  failed;          /* topologies the driver would not build: not asked again */
+ } vk_eng_pipe;
+ 
+ static vk_eng_pipe s_epipe[VK_ENG_MAX_PIPE];
+@@ -3759,6 +3760,7 @@ static VkPipeline vk_eng_variant(vk_eng_pipe* P, u32 topo_idx)
+         VK_PRIMITIVE_TOPOLOGY_LINE_STRIP, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+         VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP };
+     if (P->variant[topo_idx]) return P->variant[topo_idx];
++    if (P->failed & (1u << topo_idx)) return VK_NULL_HANDLE;   /* asked every draw, it failed 11,912 times */
+     VkRenderPass rp = vk_eng_render_pass(P->rt_fmt, P->rt_count);
+     if (!rp || P->nslots > VK_GUEST_ATTRS) return VK_NULL_HANDLE;
+     const VkPipelineLayout layout = P->cube_mask ? vk_eng_split_layout() : s_g.pipe_layout;
+@@ -3886,8 +3888,9 @@ static VkPipeline vk_eng_variant(vk_eng_pipe* P, u32 topo_idx)
+     if (vk_compile_log()) vk_monotonic(&c0);
+     if (pvkCreateGraphicsPipelines(s_vk.device, s_vk.pcache, 1, &gci, NULL,
+                                    &P->variant[topo_idx]) != VK_SUCCESS) {
+-        VK_LOG("engine: vkCreateGraphicsPipelines failed\n");
++        VK_LOG("engine: vkCreateGraphicsPipelines failed (topology %u): its draws are skipped\n", topo_idx);
+         P->variant[topo_idx] = VK_NULL_HANDLE;
++        P->failed |= (u8)(1u << topo_idx);
+     }
+     if (ft0) ps3_ft_span(PS3_FT_COMPILE, 1, 0, topo_idx, ft0, ps3_ft_now());
+     if (vk_compile_log()) {
+-- 
+2.56.0.windows.3
+

@@ -260,9 +260,13 @@ Finalize fix, wait-free creation) is measured against it.
    (ABAB, three cycles each; later visits unchanged), no validation-layer
    error in a cycle with it (build/baselines/2026-11-02-dungeon-create).
    **Shaders and pipelines are now kept between sessions** (ps3recomp
-   0090; the port keeps them in `<data>/cache/shaders`,
-   `PS3RECOMP_SPIRV_CACHE`; test runs have it off unless they name a
-   directory). The dungeon entry measured three ways (one cache directory,
+   0090). The translator already had a disk cache of SPIR-V
+   (`PS3RECOMP_SPIRV_CACHE`, one file per shader) but it was opt-in and
+   nothing set it, so every session translated again; and pipelines were
+   built with no `VkPipelineCache` at all. Now the installed game sets the
+   directory (`<install>/data/cache/shaders`, port/main.cpp), it also holds
+   a pipeline cache, and startup checks and preloads both; test runs keep it
+   off unless they name a directory (play sessions: build/play-route/cache). The dungeon entry measured three ways (one cache directory,
    NVIDIA's own disk cache moved to an empty test folder with
    `__GL_SHADER_DISK_CACHE_PATH`, `VK_COMPILE_LOG=1`;
    build/baselines/2026-11-02-shader-cache): **cold**, ~1 s after walking

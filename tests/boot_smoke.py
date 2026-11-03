@@ -315,6 +315,8 @@ def main():
         # here is kept by the runs that name it (cold, then warm).
         "PS3RECOMP_SPIRV_CACHE": env.get("PS3RECOMP_SPIRV_CACHE", "off"),
     })
+    if env["PS3RECOMP_SPIRV_CACHE"] not in ("off", "0", "") and not os.path.isabs(env["PS3RECOMP_SPIRV_CACHE"]):
+        env["PS3RECOMP_SPIRV_CACHE"] = os.path.join(ROOT, env["PS3RECOMP_SPIRV_CACHE"])   # the game runs in the run dir
     if window:
         env["PS3RECOMP_VK_WINDOW"] = "1"
     if os.environ.get("AUDIO") != "1":
