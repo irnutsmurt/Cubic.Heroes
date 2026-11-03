@@ -437,9 +437,11 @@ sword) or, since the owner's first play session, from its saves.
   a well, a YES/NO question) and out, every area change confirmed: passes
   with can't-die (p99 17.2 ms); with normal damage the hero died in the
   fields (the route's swings are the owner's, not fight-aware) and the game
-  put it back at the inn. Memory rose on the first visits of those areas and
-  then held (1,533-1,534 MB over the last 90 s); a repeat cycle would confirm
-  the bound. The shader cache on this route (build/baselines/2026-11-03-
+  put it back at the inn. Memory is bounded on this route (field-mem2c, two
+  cycles with the title and CONTINUE between, build/baselines/2026-11-03-
+  field-memory): it rises on the first visits (1,067 MB at 60 s, 1,535 at
+  the end of cycle 1), the reload adds ~20 MB, and cycle 2 holds 1,557-1,560
+  MB through the same areas. The shader cache on this route (build/baselines/2026-11-03-
   field-shader-cache): cold, 20 translations and 123 pipelines (482 ms) in
   the route and three stalls of 100, 108 and 133 ms; warm, nothing translated,
   116 pipelines in 5 ms, no frame of 100 ms+, p99.9 43.2 -> 19.9 ms. Frames of

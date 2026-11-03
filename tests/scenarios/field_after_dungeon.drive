@@ -9,6 +9,8 @@
 #   field 15 replayed as swings), each area change confirmed (`cross`). Area
 #   117 is a cave with an old man: "Come back when you have a bow."
 # Completed when: back in field 14 from area 146 (the owner at 2,200.5 s).
+# Cycles: RUNS of them (default 1), each back to the title and CONTINUE (the
+#   inn) -- repeated visits for the memory check.
 #! saves build/checkpoints/after-dungeon1
 #! env DOTHEROES_NATIVE_CD=1 DOTHEROES_NATIVE_SOLVER=4,5,6 GCM_WRAP_LAP=1 DOTHEROES_PRESENT_ONCE=1
 #! env DOTHEROES_DEV_STATE=1 DOTHEROES_DEV_KEYS=1 DIAG_FRAMES=frames.log PS3_VERBOSE=0
@@ -16,6 +18,12 @@
 #! secs 900
 include common.drive
 include dungeon1_route.drive
+
+block step_aside_146          # round whoever stands between the hero and the house's door
+  unstick DOWN 6
+  goto 22.5 -31.0 0.5 8 soft
+  goto 20.0 -34.0 0.5 8 soft
+end
 
 block after_dungeon_way       # the owner's 2,012-2,203 s
   state area==15,life>0 60
@@ -348,8 +356,10 @@ block after_dungeon_way       # the owner's 2,012-2,203 s
   press CROSS   # 2197.4 s
   goto 19.6 -37.9 1.5 20 soft
   unstick DOWN 8                # whatever was said in 146, paged shut
-  goto 19.7 -37.0 0.5 10 soft   # its door (the owner out at (19.65, -37.89), 2,200.5 s)
-  cross DOWN 14 20
+  attempt 3 step_aside_146      # its door (the owner out at (19.65, -37.89), 2,200.5 s); a villager
+    goto 19.7 -37.0 0.5 8       # walking about can stand in the way (field-mem3b's second cycle)
+    cross DOWN 14 20
+  end
   state area==14,life>0 10
 end
 
@@ -358,11 +368,17 @@ sleep 5
 call continue
 state area==16,life>0 90
 sleep 3
-segment route town-to-field15
-call town_to_field15
-endseg
-segment explore after-dungeon-way
-call after_dungeon_way
-endseg
-state life>0 5
-actors list
+loop ${RUNS:-1}
+  segment route town-to-field15
+  call town_to_field15
+  endseg
+  segment explore after-dungeon-way
+  call after_dungeon_way
+  endseg
+  state life>0 5
+  actors list
+  segment menu back-to-start   # the title and CONTINUE: the next cycle from the inn again
+  call to_title_and_continue
+  state area==16,life>0 60
+  endseg
+end

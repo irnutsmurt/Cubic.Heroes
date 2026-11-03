@@ -10,8 +10,11 @@ block continue
 end
 
 block to_title_and_continue
-  press START               # the system menu, on RESUME
-  sleep 2
+  attempt 3 page_dialogues  # just through a door START can go unheard (then the presses below
+    press START             # walked the hero back through it: field-mem3); a dialogue keeps it shut
+    sleep 2                 # the system menu, on RESUME
+    state menu==1 4
+  end
   press UP                  # TITLE (the list wraps)
   sleep 1
   press CROSS               # "Exit game? Unsaved data will be lost.", on NO
