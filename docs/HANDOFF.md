@@ -446,7 +446,18 @@ sword) or, since the owner's first play session, from its saves.
   the route and three stalls of 100, 108 and 133 ms; warm, nothing translated,
   116 pipelines in 5 ms, no frame of 100 ms+, p99.9 43.2 -> 19.9 ms. Frames of
   60-94 ms remain in both, not shader work: tracked with the room set-up
-  frames.
+  frames. **What they are** (field-prof, build/baselines/2026-11-03-field-
+  area-frames: DIAG_PROF on the main thread with the frame trace, the seven
+  55-110 ms frames of the route): about a third of the main thread's samples
+  wait in cellSpursEventFlagWait and a third run game code around
+  func_0091BC28/func_0091C080/func_0091C620 (the area's set-up); no page-fault
+  handlers among them. The SPU work waited for is the overworld's map packs:
+  39-47 MB inflated natively in 42-66 ms at each field-area change, and the
+  same pack again on every return (three times each on this route). Leads,
+  not started: keep the last few inflated packs (input compared byte for
+  byte, ~53 MB each) so a return costs a copy (~4 ms) -- the main thread's
+  wait in those frames is ~23 ms, so 60-70 ms frames would become ~40-47 ms
+  on returns; the game code's share needs its own look.
 - *Played by the owner* (manual coverage, not counted as automated)
   (2026-11-02, 38.5 minutes, the validated
   configuration with every fix of the day -- the session's binary is the one
