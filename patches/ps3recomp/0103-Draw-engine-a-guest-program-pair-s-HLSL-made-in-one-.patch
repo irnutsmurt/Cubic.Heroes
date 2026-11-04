@@ -1,0 +1,129 @@
+From 69849b20071fd85ddd4b4152ca1246f813667f71 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Wed, 4 Nov 2026 15:49:34 -0800
+Subject: [PATCH 103/104] Draw engine: a guest program pair's HLSL made in one
+ function
+
+eng_pipeline_get made the vertex and fragment programs' HLSL inline, from
+locals. The parameters go into an eng_prog_params and the making into
+eng_programs_text, called the same way, so the same text can be made again
+from the same microcode and parameters -- by R1's capture, and by a tool.
+
+No change in the text: a river fight with the shader cache of 2026-11-03
+found every one of its 284 programs there (its key is the whole HLSL text)
+and translated none.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libs/video/rsx_draw_engine.c | 80 +++++++++++++++++++++++-------------
+ 1 file changed, 52 insertions(+), 28 deletions(-)
+
+diff --git a/libs/video/rsx_draw_engine.c b/libs/video/rsx_draw_engine.c
+index 9b805ed..751008a 100644
+--- a/libs/video/rsx_draw_engine.c
++++ b/libs/video/rsx_draw_engine.c
+@@ -2064,6 +2064,47 @@ static u64 eng_fp_debug_hash(const u8* fp_uc, u32 fp_size)
+         ? rsx_fp_structural_hash(fp_uc, fp_size, 1469598103934665603ull) : 0;
+ }
+ 
++/* What a guest program pair's HLSL is made from: the microcode and the
++ * draw's conversion parameters (eng_pipeline_get). */
++typedef struct eng_prog_params {
++    const u8* vp_uc; u32 vp_bytes; const u8* fp_uc; u32 fp_size;
++    u32 fp_ctrl, cube_mask, vol_mask, vtex_mask, layout_mask, vp_branch_bits, ucp;
++    u32 srgb_output, alpha_test, alpha_func, unnorm_mask, shadow_mask, gamma_units, expand_units;
++    u32 wpos[2]; int wpos_scaled;
++    const rsx_fp_shadow_desc* shadow; const u8* gamma_masks; const u8* expand_masks;
++    const u32 (*unnorm_dim)[3];
++} eng_prog_params;
++
++/* The guest pair as HLSL; vi and fi as the decompilers return them (> 0
++ * made, < 0 not). Every guest pipeline the engine makes goes through here. */
++static void eng_programs_text(const eng_prog_params* p, char* vs, u32 vs_size, char* ps, u32 ps_size,
++                              int* vi_out, int* fi_out, u32* nconst_out)
++{
++    int vi, fi;
++    rsx_vp_set_branch_bits(p->vp_branch_bits);
++    vi = rsx_vp_decompile_compact_ex(p->vp_uc, p->vp_bytes, p->vtex_mask, p->layout_mask, vs, vs_size);
++    if (vi > 0 && p->ucp && rsx_vp_apply_user_clip(vs, vs_size, p->ucp) < 0) {
++        vi = -1;
++        static u32 said;
++        if (PS3_LOG_FIRST(said, 8))
++            fprintf(stderr, "[rsx engine] user clip planes 0x%06X: vertex program text not in the"
++                            " decompiler's form, draw skipped\n", rsx_dsp_reg(&g.rsx, 0x1478u));
++    }
++    fi = rsx_fp_decompile_buffered_shadow_color_expand_vol_ex(p->fp_uc, p->fp_size, p->fp_ctrl,
++            p->cube_mask, p->vol_mask, p->shadow_mask ? p->shadow : NULL, p->gamma_masks,
++            p->expand_units ? p->expand_masks : NULL, ps, ps_size, nconst_out);
++    if (fi > 0 && p->wpos_scaled && rsx_fp_apply_wpos_grid(ps, ps_size, p->wpos[0], p->wpos[1]) < 0)
++        fi = -1;
++    if (fi > 0 && rsx_fp_apply_unnorm_scale(ps, ps_size, p->unnorm_mask, p->unnorm_dim, p->cube_mask,
++                                            p->vol_mask) < 0)
++        fi = -1;
++    if (fi > 0 && p->srgb_output && rsx_fp_apply_srgb_output(ps, ps_size) < 0)
++        fi = -1;
++    if (fi > 0 && p->alpha_test && rsx_fp_apply_alpha_test_buffered(ps, ps_size, p->alpha_func) < 0)
++        fi = -1;
++    *vi_out = vi; *fi_out = fi;
++}
++
+ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
+                             const rsx_be_render_state* rs,
+                             rsx_be_format rt_fmt, u32 rt_count, int* out_fixed,
+@@ -2204,6 +2245,16 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
+     key = eng_fnv1a(&rt_count, sizeof rt_count, key);
+     key = rsx_draw_engine_hash_render_state(rs, key);
+ 
++    const eng_prog_params pp = {
++        .vp_uc = vp_uc, .vp_bytes = vp_instrs * 16u, .fp_uc = fp_uc, .fp_size = fp_size,
++        .fp_ctrl = fp_ctrl, .cube_mask = cube_mask, .vol_mask = vol_mask, .vtex_mask = vtex_mask,
++        .layout_mask = layout->mask, .vp_branch_bits = vp_branch_bits, .ucp = ucp,
++        .srgb_output = srgb_output, .alpha_test = rs->alpha_test_enable, .alpha_func = rs->alpha_func,
++        .unnorm_mask = unnorm_mask, .shadow_mask = shadow_mask, .gamma_units = gamma_units,
++        .expand_units = expand_units, .wpos = { wpos_grid[0], wpos_grid[1] }, .wpos_scaled = wpos_scaled,
++        .shadow = shadow, .gamma_masks = gamma_masks, .expand_masks = expand_masks,
++        .unnorm_dim = (const u32 (*)[3])unnorm_dim };
++
+     u32 slot = eng_pipeline_slot(key);
+     for (; g.pipeline_index[slot]; slot = (slot + 1u) & (ENG_PIPELINE_INDEX - 1u)) {
+         const eng_pipeline* p = &g.pipelines[g.pipeline_index[slot] - 1u];
+@@ -2223,35 +2274,8 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
+         snprintf(s_vs_hlsl, sizeof s_vs_hlsl, "%s", kEngFixedVS);
+         snprintf(s_ps_hlsl, sizeof s_ps_hlsl, "%s", kEngFixedPS);
+     } else {
+-        rsx_vp_set_branch_bits(vp_branch_bits);
+-        vi = rsx_vp_decompile_compact_ex(vp_uc, vp_instrs * 16u, vtex_mask,
+-                                         layout->mask, s_vs_hlsl,
+-                                         sizeof s_vs_hlsl);
+-        if (vi > 0 && ucp && rsx_vp_apply_user_clip(s_vs_hlsl, sizeof s_vs_hlsl, ucp) < 0) {
+-            vi = -1;
+-            static u32 said;
+-            if (PS3_LOG_FIRST(said, 8))
+-                fprintf(stderr, "[rsx engine] user clip planes 0x%06X: vertex program text not in the"
+-                                " decompiler's form, draw skipped\n", rsx_dsp_reg(&g.rsx, 0x1478u));
+-        }
+-        fi = rsx_fp_decompile_buffered_shadow_color_expand_vol_ex(fp_uc, fp_size, fp_ctrl, cube_mask, vol_mask,
+-                shadow_mask ? shadow : NULL, gamma_masks, expand_units ? expand_masks : NULL,
+-                s_ps_hlsl, sizeof s_ps_hlsl, &nconst);
++        eng_programs_text(&pp, s_vs_hlsl, sizeof s_vs_hlsl, s_ps_hlsl, sizeof s_ps_hlsl, &vi, &fi, &nconst);
+         if (fi > 0 && nconst != g.fp_constants.count) fi = -1;
+-        if (fi > 0 && wpos_scaled &&
+-            rsx_fp_apply_wpos_grid(s_ps_hlsl, sizeof s_ps_hlsl, wpos_grid[0], wpos_grid[1]) < 0)
+-            fi = -1;
+-        if (fi > 0 && rsx_fp_apply_unnorm_scale(s_ps_hlsl, sizeof s_ps_hlsl, unnorm_mask,
+-                                                (const u32 (*)[3])unnorm_dim, cube_mask,
+-                                                vol_mask) < 0)
+-            fi = -1;
+-        if (fi > 0 && srgb_output &&
+-            rsx_fp_apply_srgb_output(s_ps_hlsl, sizeof s_ps_hlsl) < 0)
+-            fi = -1;
+-        if (fi > 0 && rs->alpha_test_enable &&
+-            rsx_fp_apply_alpha_test_buffered(s_ps_hlsl, sizeof s_ps_hlsl,
+-                                             rs->alpha_func) < 0)
+-            fi = -1;
+     }
+     if (vi > 0 && fi > 0)
+         handle = g.be->pipeline_create(g.be->user, s_vs_hlsl, s_ps_hlsl, rs,
+-- 
+2.56.0.windows.3
+

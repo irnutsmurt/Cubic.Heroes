@@ -1,0 +1,648 @@
+From 4ac8a9e7142e63a2fe6c63e110132c4a06c88d75 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Wed, 4 Nov 2026 15:49:54 -0800
+Subject: [PATCH 104/104] R1's consumption capture: a named draw's inputs,
+ state and output, as the GPU used them
+
+Development only, off unless DOTHEROES_R1_DIR, DOTHEROES_R1_AT and
+DOTHEROES_R1_DRAWS are set (docs/NATIVE_PORT.md section 5 of the port).
+
+- The engine (rsx_draw_engine.c) names draws by colour target offset,
+  fragment program offset and occurrence in the frame, in the first frame
+  after DOTHEROES_R1_AT seconds. For one, it makes the programs' HLSL again
+  (eng_programs_text) with the microcode it read after every queued write
+  had landed, and hands the backend a description (rsx_be_capture, the
+  backend's new optional capture_next_draw).
+- The Vulkan backend (rsx_vulkan_backend.c): before the draw everything is
+  submitted and waited for, and each bound texture and the colour target
+  copied to host memory; the draw is recorded as always and what it binds
+  written down as Vulkan values (vk_eng_variant_info's create info,
+  constants, vertices, viewport, scissor, dynamic state); after it, it is
+  submitted and the target copied again: the reference output. Into
+  <dir>/<name>/desc.json (native terms only) and the files it names.
+- Each pipeline keeps a hash of the HLSL it was made from; the capture says
+  whether the text it made again is that text (programs_match_pipeline).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libs/video/rsx_draw_engine.c    | 171 ++++++++++++++++++-
+ libs/video/rsx_draw_engine.h    |  31 ++++
+ libs/video/rsx_vulkan_backend.c | 290 +++++++++++++++++++++++++++++++-
+ 3 files changed, 489 insertions(+), 3 deletions(-)
+
+diff --git a/libs/video/rsx_draw_engine.c b/libs/video/rsx_draw_engine.c
+index 751008a..9a5cc28 100644
+--- a/libs/video/rsx_draw_engine.c
++++ b/libs/video/rsx_draw_engine.c
+@@ -2076,7 +2076,9 @@ typedef struct eng_prog_params {
+ } eng_prog_params;
+ 
+ /* The guest pair as HLSL; vi and fi as the decompilers return them (> 0
+- * made, < 0 not). Every guest pipeline the engine makes goes through here. */
++ * made, < 0 not). Every guest pipeline the engine makes goes through here,
++ * and so does R1's capture, so the text it records is the text a pipeline is
++ * made from. */
+ static void eng_programs_text(const eng_prog_params* p, char* vs, u32 vs_size, char* ps, u32 ps_size,
+                               int* vi_out, int* fi_out, u32* nconst_out)
+ {
+@@ -2105,6 +2107,168 @@ static void eng_programs_text(const eng_prog_params* p, char* vs, u32 vs_size, c
+     *vi_out = vi; *fi_out = fi;
+ }
+ 
++/* ---- R1's consumption capture (docs/NATIVE_PORT.md section 5) -----------
++ * Development only, off unless DOTHEROES_R1_DIR, DOTHEROES_R1_AT and
++ * DOTHEROES_R1_DRAWS are set. DOTHEROES_R1_DRAWS=<name>=<target>/<fp>/<n>,...
++ * names draws by colour target A's offset in guest memory (* for any), the
++ * fragment program's offset, and which such draw of the frame it is, e.g.
++ * pass3=02DD0000/018F0380/1. In the first frame that begins DOTHEROES_R1_AT
++ * seconds after the process started, each named draw goes to the backend's
++ * capture_next_draw (rsx_vulkan_backend.c writes <dir>/<name>/) with the
++ * microcode the engine read for it -- after every queued write to it had
++ * landed -- and its programs' HLSL and conversion parameters. */
++enum { ENG_R1_MAX = 4 };
++static struct {
++    int on;                                /* -1 unread, 0 off, 1 armed */
++    double at;
++    char dir[512];
++    int n;
++    struct { char name[24]; u32 rt, fp, occ, seen; int any_rt, done; } k[ENG_R1_MAX];
++    int waiting;                           /* the time came: the next frame is the one */
++    u32 frame;                             /* the frame captured */
++    int active;
++    int pending;                           /* the key of the draw being captured, or -1 */
++    eng_prog_params pp;                    /* its programs' parameters */
++    char vs[16384], ps[65536];
++    u32 nconst; int vi, fi;
++    rsx_fp_shadow_desc shadow[RSX_DSP_NUM_TEXTURES];
++    u8 gamma[RSX_DSP_NUM_TEXTURES], expand[RSX_DSP_NUM_TEXTURES];
++    u32 unnorm[RSX_DSP_NUM_TEXTURES][3];
++    int have_programs;
++} s_r1 = { .on = -1, .pending = -1 };
++
++/* Seconds since the process was created: the clock DOTHEROES_R1_AT names
++ * (port/native/render/r1_observe.cpp reads the same one). */
++static double eng_r1_seconds(void)
++{
++#ifdef _WIN32
++    FILETIME c, e, k, u, now;
++    GetProcessTimes(GetCurrentProcess(), &c, &e, &k, &u);
++    GetSystemTimeAsFileTime(&now);
++    const unsigned long long a = ((unsigned long long)c.dwHighDateTime << 32) | c.dwLowDateTime;
++    const unsigned long long b = ((unsigned long long)now.dwHighDateTime << 32) | now.dwLowDateTime;
++    return (double)(b - a) * 1e-7;
++#else
++    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
++    return ts.tv_sec + ts.tv_nsec * 1e-9;
++#endif
++}
++
++static void eng_r1_read(void)
++{
++    s_r1.on = 0;
++    const char* dir = getenv("DOTHEROES_R1_DIR");
++    const char* at = getenv("DOTHEROES_R1_AT");
++    const char* dr = getenv("DOTHEROES_R1_DRAWS");
++    if (!dir || !*dir || !at || !*at || !dr || !*dr) return;
++    snprintf(s_r1.dir, sizeof s_r1.dir, "%s", dir);
++    s_r1.at = atof(at);
++    for (const char* p = dr; *p && s_r1.n < ENG_R1_MAX; ) {
++        char name[24] = "", rt[16] = "", fp[16] = "";
++        unsigned occ = 1;
++        if (sscanf(p, "%23[^=]=%15[^/]/%15[^/]/%u", name, rt, fp, &occ) != 4) break;
++        snprintf(s_r1.k[s_r1.n].name, sizeof s_r1.k[s_r1.n].name, "%s", name);
++        s_r1.k[s_r1.n].any_rt = rt[0] == '*';
++        s_r1.k[s_r1.n].rt = (u32)strtoul(rt, NULL, 16);
++        s_r1.k[s_r1.n].fp = (u32)strtoul(fp, NULL, 16);
++        s_r1.k[s_r1.n].occ = occ ? occ : 1u;
++        s_r1.n++;
++        const char* c = strchr(p, ',');
++        if (!c) break;
++        p = c + 1;
++    }
++    if (s_r1.n) s_r1.on = 1;
++    fprintf(stderr, "[r1] consumption capture: %d draw(s), from %.1f s, into %s\n", s_r1.n, s_r1.at, s_r1.dir);
++}
++
++/* At a draw: is it one the capture names? Sets s_r1.pending. */
++static void eng_r1_match(const rsx_dsp_surface* sf)
++{
++    s_r1.pending = -1;
++    if (s_r1.on < 0) eng_r1_read();
++    if (s_r1.on <= 0) return;
++    if (!s_r1.active) {
++        if (!s_r1.waiting) {
++            if (eng_r1_seconds() < s_r1.at) return;
++            s_r1.waiting = 1; s_r1.frame = g.frames + 1u;   /* the next whole frame */
++        }
++        if (g.frames != s_r1.frame) return;
++        s_r1.active = 1;
++        fprintf(stderr, "[r1] capturing frame %u at %.3f s\n", s_r1.frame, eng_r1_seconds());
++    }
++    if (g.frames != s_r1.frame) {       /* that frame is over */
++        for (int i = 0; i < s_r1.n; i++)
++            if (!s_r1.k[i].done)
++                fprintf(stderr, "[r1] %s: not found in frame %u (%u draws matched the program)\n",
++                        s_r1.k[i].name, s_r1.frame, s_r1.k[i].seen);
++        s_r1.on = 0;
++        return;
++    }
++    u32 fp_loc = 0;
++    const u32 fp_off = rsx_dsp_fragment_program(&g.rsx, &fp_loc);
++    for (int i = 0; i < s_r1.n; i++) {
++        if (s_r1.k[i].done) continue;
++        if (fp_off != s_r1.k[i].fp) continue;
++        if (!s_r1.k[i].any_rt && sf->color_offset[0] != s_r1.k[i].rt) continue;
++        if (++s_r1.k[i].seen != s_r1.k[i].occ) continue;
++        s_r1.pending = i;
++        s_r1.have_programs = 0;
++        return;
++    }
++}
++
++static void eng_r1_note_programs(const eng_prog_params* p)
++{
++    s_r1.pp = *p;
++    memcpy(s_r1.shadow, p->shadow, sizeof s_r1.shadow);
++    memcpy(s_r1.gamma, p->gamma_masks, sizeof s_r1.gamma);
++    memcpy(s_r1.expand, p->expand_masks, sizeof s_r1.expand);
++    memcpy(s_r1.unnorm, p->unnorm_dim, sizeof s_r1.unnorm);
++    s_r1.nconst = 0;
++    eng_programs_text(p, s_r1.vs, sizeof s_r1.vs, s_r1.ps, sizeof s_r1.ps, &s_r1.vi, &s_r1.fi, &s_r1.nconst);
++    s_r1.have_programs = s_r1.vi > 0 && s_r1.fi > 0;
++}
++
++/* Just before the named draw goes to the backend. */
++static void eng_r1_hand_over(const rsx_dsp_surface* sf)
++{
++    const int i = s_r1.pending;
++    s_r1.pending = -1;
++    if (i < 0) return;
++    s_r1.k[i].done = 1;
++    if (!g.be->capture_next_draw || !s_r1.have_programs) {
++        fprintf(stderr, "[r1] %s: %s\n", s_r1.k[i].name,
++                !g.be->capture_next_draw ? "the backend cannot capture" : "programs not remade");
++        return;
++    }
++    extern u32 s_fifo_getoff_pub(void);   /* cellGcmSys.c: the walker's offset */
++    u32 fp_loc = 0;
++    const u32 fp_off = rsx_dsp_fragment_program(&g.rsx, &fp_loc);
++    rsx_be_capture c = {
++        .dir = s_r1.dir, .name = s_r1.k[i].name, .frame = s_r1.frame, .fifo_get = s_fifo_getoff_pub(),
++        .rt_offset = sf->color_offset[0], .rt_location = sf->color_location[0],
++        .fp_offset = fp_off, .fp_location = fp_loc,
++        .fp_ucode = s_r1.pp.fp_uc, .fp_bytes = s_r1.pp.fp_size,
++        .vp_ucode = s_r1.pp.vp_uc, .vp_bytes = s_r1.pp.vp_bytes,
++        .vs_hlsl = s_r1.vs, .ps_hlsl = s_r1.ps,
++        .fp_ctrl = s_r1.pp.fp_ctrl, .cube_mask = s_r1.pp.cube_mask, .vol_mask = s_r1.pp.vol_mask,
++        .vtex_mask = s_r1.pp.vtex_mask, .layout_mask = s_r1.pp.layout_mask,
++        .vp_branch_bits = s_r1.pp.vp_branch_bits, .ucp = s_r1.pp.ucp,
++        .srgb_output = s_r1.pp.srgb_output, .alpha_test = s_r1.pp.alpha_test,
++        .alpha_func = s_r1.pp.alpha_func, .unnorm_mask = s_r1.pp.unnorm_mask,
++        .wpos_x = s_r1.pp.wpos_scaled ? s_r1.pp.wpos[0] : 1u,
++        .wpos_y = s_r1.pp.wpos_scaled ? s_r1.pp.wpos[1] : 1u,
++        .shadow_mask = s_r1.pp.shadow_mask, .gamma_units = s_r1.pp.gamma_units,
++        .expand_units = s_r1.pp.expand_units, .nconst = s_r1.nconst,
++        .shadow = s_r1.shadow, .shadow_bytes = sizeof s_r1.shadow };
++    memcpy(c.unnorm_dim, s_r1.unnorm, sizeof c.unnorm_dim);
++    memcpy(c.gamma_masks, s_r1.gamma, sizeof c.gamma_masks);
++    memcpy(c.expand_masks, s_r1.expand, sizeof c.expand_masks);
++    fprintf(stderr, "[r1] %s: frame %u, draw at FIFO 0x%08X, target 0x%08X, fp 0x%08X\n",
++            c.name, c.frame, c.fifo_get, c.rt_offset, c.fp_offset);
++    g.be->capture_next_draw(g.be->user, &c);
++}
++
+ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
+                             const rsx_be_render_state* rs,
+                             rsx_be_format rt_fmt, u32 rt_count, int* out_fixed,
+@@ -2254,6 +2418,9 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
+         .expand_units = expand_units, .wpos = { wpos_grid[0], wpos_grid[1] }, .wpos_scaled = wpos_scaled,
+         .shadow = shadow, .gamma_masks = gamma_masks, .expand_masks = expand_masks,
+         .unnorm_dim = (const u32 (*)[3])unnorm_dim };
++    /* R1's capture: the programs of the draw it names, made again here even
++     * when the pipeline is cached, with the parameters that made them. */
++    if (s_r1.pending >= 0 && !fixed) eng_r1_note_programs(&pp);
+ 
+     u32 slot = eng_pipeline_slot(key);
+     for (; g.pipeline_index[slot]; slot = (slot + 1u) & (ENG_PIPELINE_INDEX - 1u)) {
+@@ -3790,6 +3957,7 @@ static void sink_end(void* user, const rsx_dispatch* r)
+     rsx_dsp_viewport vp;
+     rsx_dsp_get_surface(&g.rsx, &sf);
+     rsx_dsp_get_viewport(&g.rsx, &vp);
++    if (s_r1.on) eng_r1_match(&sf);   /* R1's capture: off unless asked for */
+     const u32 zslot = eng_zdepth_get(sf.zeta_location, sf.zeta_offset,
+                                      sf.clip_w, sf.clip_h);
+ 
+@@ -4011,6 +4179,7 @@ static void sink_end(void* user, const rsx_dispatch* r)
+     }
+ 
+     const u32 uploaded = indexed ? dc.n_verts : n_draw;
++    if (s_r1.pending >= 0) eng_r1_hand_over(&sf);
+     if (geom)
+         g.be->draw_geom(g.be->user, topology, geom, uploaded, layout.stride, indexed ? n_draw : 0);
+     else
+diff --git a/libs/video/rsx_draw_engine.h b/libs/video/rsx_draw_engine.h
+index cbc450d..11cbda4 100644
+--- a/libs/video/rsx_draw_engine.h
++++ b/libs/video/rsx_draw_engine.h
+@@ -120,6 +120,7 @@ typedef struct rsx_be_render_state {
+ /* ---- the backend interface ---------------------------------------------- */
+ 
+ #define RSX_BE_HAS_COLOR_SNAPSHOT 1
++struct rsx_be_capture;
+ typedef struct rsx_draw_backend {
+     void* user;
+ 
+@@ -314,8 +315,38 @@ typedef struct rsx_draw_backend {
+                                      float depth_value, u8 stencil,
+                                      u32 x, u32 y, u32 w, u32 h);
+ 
++    /* Optional, development: R1's consumption capture (rsx_draw_engine.c,
++     * DOTHEROES_R1_*). Called just before a draw the capture names, with what
++     * the engine knows of it; the backend records that draw's inputs, state
++     * and output around it, in GPU order, and writes them out. */
++    void (*capture_next_draw)(void* user, const struct rsx_be_capture* c);
++
+ } rsx_draw_backend;
+ 
++/* What the engine hands capture_next_draw: the draw's guest provenance, the
++ * programs as the GPU will run them (the microcode the engine read after
++ * every queued write had landed, and the HLSL it made of it), and the
++ * conversion parameters it made it with, so a tool can make the same HLSL
++ * from the same microcode again. Pointers are valid during the call. */
++typedef struct rsx_be_capture {
++    const char* dir;                 /* where the backend writes */
++    const char* name;                /* the capture's name: <dir>/<name>/ */
++    u32 frame;                       /* the engine's frame (flips presented) */
++    u32 fifo_get;                    /* the walker's command offset at the draw */
++    u32 rt_offset, rt_location;      /* colour target A in guest memory */
++    u32 fp_offset, fp_location;      /* the fragment program in guest memory */
++    const u8* fp_ucode; u32 fp_bytes;
++    const u8* vp_ucode; u32 vp_bytes;
++    const char* vs_hlsl; const char* ps_hlsl;
++    /* the conversion parameters (rsx_draw_engine.c eng_programs_text) */
++    u32 fp_ctrl, cube_mask, vol_mask, vtex_mask, layout_mask, vp_branch_bits, ucp;
++    u32 srgb_output, alpha_test, alpha_func, unnorm_mask, wpos_x, wpos_y, shadow_mask;
++    u32 gamma_units, expand_units, nconst;
++    u32 unnorm_dim[16][3];
++    u8  gamma_masks[16], expand_masks[16];
++    const void* shadow; u32 shadow_bytes;   /* rsx_fp_shadow_desc[16] */
++} rsx_be_capture;
++
+ /* ---- the engine --------------------------------------------------------- */
+ 
+ /* Register the backend the engine drives. Passing NULL unregisters it. */
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index cf7a944..e8bf3be 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -3410,8 +3410,17 @@ typedef struct vk_eng_pipe {
+     u32                 cube_mask;       /* TextureCube units: the split set layout */
+     VkPipeline          variant[VK_ENG_TOPOLOGIES];
+     u8                  failed;          /* topologies the driver would not build: not asked again */
++    u64                 vs_hash, ps_hash; /* of the HLSL it was made from (R1's capture checks it) */
+ } vk_eng_pipe;
+ 
++/* FNV-1a: the pipelines' HLSL hashes (vk_eng_pipe) and R1's check of them. */
++static u64 vk_r1_fnv(const void* p, size_t n)
++{
++    u64 h = 1469598103934665603ull;
++    for (size_t i = 0; i < n; i++) { h ^= ((const u8*)p)[i]; h *= 1099511628211ull; }
++    return h;
++}
++
+ static vk_eng_pipe s_epipe[VK_ENG_MAX_PIPE];
+ 
+ static struct {
+@@ -3814,6 +3823,8 @@ static u32 vk_eng_pipeline_create(void* user, const char* vs_hlsl, const char* p
+         pvkDestroyShaderModule(s_vk.device, P->vs, NULL); memset(P, 0, sizeof *P); return 0;
+     }
+     P->rs = *rs;
++    P->vs_hash = vk_r1_fnv(vs_hlsl, strlen(vs_hlsl));
++    P->ps_hash = vk_r1_fnv(ps_hlsl, strlen(ps_hlsl));
+     P->nslots = layout->count;
+     P->stride = vertex_stride;
+     P->rt_count = rt_count;
+@@ -3837,8 +3848,8 @@ static void vk_eng_pipeline_release(void* user, u32 pipeline)
+     if (s_e2.pipeline == pipeline) s_e2.pipeline = 0;
+ }
+ 
+-/* A pipeline variant's create info, filled in one place: what vk_eng_variant
+- * builds, readable without building it. */
++/* A pipeline variant's create info: what vk_eng_variant builds, and what R1's
++ * consumption capture writes down (vk_r1_*), from one place. */
+ typedef struct vk_eng_pinfo {
+     VkPipelineShaderStageCreateInfo        st[2];
+     VkVertexInputBindingDescription        vb;
+@@ -4869,6 +4880,276 @@ static void vk_skip(const char* why, u32 pipeline)
+ 
+ /* One draw, its geometry either passed in (vertices, indices) and copied into
+  * the batch, or resident (`res`) and bound where it lies. */
++#ifndef _WIN32
++#include <sys/stat.h>
++#endif
++/* ---- R1's consumption capture (docs/NATIVE_PORT.md section 5) ------------
++ * Development only: rsx_draw_engine.c's DOTHEROES_R1_DRAWS names a draw and
++ * calls capture_next_draw just before handing it over. Around that draw:
++ *  - before: everything recorded so far is submitted and waited for, then
++ *    each texture the draw binds and its colour target are copied to host
++ *    memory, their content as the draw sees it;
++ *  - the draw is recorded as always (vk_eng_draw_from), and what it binds is
++ *    written down as Vulkan values: the pipeline's create info
++ *    (vk_eng_variant_info), constants, vertices, viewport, scissor and the
++ *    dynamic state;
++ *  - after: it is submitted and waited for, and the target copied again: the
++ *    existing renderer's output for that draw.
++ * Into <dir>/<name>/: desc.json, in native terms only, and the files it
++ * names. Game data: keep it local. */
++static struct {
++    int armed, noted;
++    char path[700];
++    rsx_be_capture m;                 /* the engine's description; its pointers are not kept */
++    u32 rt, tex[RSX_BE_MAX_TEXTURES], tex_mask;
++    rsx_be_sampler_desc samp[RSX_BE_MAX_TEXTURES];
++    u64 vs_hash, ps_hash;             /* of the HLSL the engine made again */
++    FILE* desc;                       /* desc.json, open from capture_next_draw on */
++} s_r1c;
++
++static int vk_r1_write(const char* file, const void* p, size_t n)
++{
++    char path[800];
++    snprintf(path, sizeof path, "%s/%s", s_r1c.path, file);
++    FILE* f = fopen(path, "wb");
++    if (!f) return -1;
++    const size_t w = n ? fwrite(p, 1, n, f) : 0;
++    fclose(f);
++    return w == n ? 0 : -1;
++}
++
++/* An engine object's pixels, every level and layer, to <file>: copied on the
++ * queue after everything submitted before (the caller has waited for it). */
++static int vk_r1_image(const vk_eng_obj* o, const char* file, u64* out_bytes)
++{
++    const vk_eng_obj* src = o;
++    if (o->kind == VK_ENG_VIEW) src = &s_eobj[o->surface];     /* a view samples its surface */
++    const u32 mips = src->kind == VK_ENG_TEXTURE ? (src->mips ? src->mips : 1u) : 1u;
++    const u32 layers = src->cube ? 6u : 1u;
++    VkBufferImageCopy rg[16 * 6];
++    VkDeviceSize total = 0;
++    u32 n = 0;
++    for (u32 l = 0; l < layers; l++)
++        for (u32 m = 0; m < mips && n < 16u * 6u; m++) {
++            const u32 w = src->w >> m ? src->w >> m : 1u, h = src->h >> m ? src->h >> m : 1u;
++            const VkDeviceSize bytes = src->block ? (VkDeviceSize)((w + 3) / 4) * ((h + 3) / 4) * src->block
++                                                  : (VkDeviceSize)w * h * src->bpp;
++            rg[n++] = (VkBufferImageCopy){ .bufferOffset = total,
++                .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, m, l, 1 },
++                .imageExtent = { w, h, 1 } };
++            total += (bytes + 15u) & ~(VkDeviceSize)15u;
++        }
++    vk_buffer b = { 0 };
++    if (!total || vk_create_host_buffer(&b, total, VK_BUFFER_USAGE_TRANSFER_DST_BIT)) return -1;
++    if (vk_begin()) { vk_destroy_buffer(&b); return -1; }
++    vk_cmd_after_everything(s_vk.cmd);   /* the writes of earlier submissions, made visible */
++    pvkCmdCopyImageToBuffer(s_vk.cmd, src->im.img, VK_IMAGE_LAYOUT_GENERAL, b.buf, n, rg);
++    vk_submit_and_wait();
++    if (!b.coherent) vk_invalidate(&b);
++    const int r = vk_r1_write(file, b.ptr, (size_t)total);
++    vk_destroy_buffer(&b);
++    if (out_bytes) *out_bytes = total;
++    return r;
++}
++
++static void vk_r1_image_json(FILE* f, const char* key, const vk_eng_obj* o, const char* file, u64 bytes)
++{
++    const vk_eng_obj* src = o->kind == VK_ENG_VIEW ? &s_eobj[o->surface] : o;
++    const VkComponentMapping map = o->kind == VK_ENG_COLOR ? (VkComponentMapping){ 0 }
++                                                           : vk_remap(o->remap, o->rsx_fmt);
++    fprintf(f, "  \"%s\": {\"width\": %u, \"height\": %u, \"format\": %d, \"view_format\": %d, "
++               "\"levels\": %u, \"layers\": %u, \"bytes_per_texel\": %u, \"bytes_per_block\": %u, "
++               "\"swizzle\": [%d, %d, %d, %d], \"file\": \"%s\", \"bytes\": %llu}",
++            key, src->w, src->h, (int)src->fmt, (int)o->fmt,
++            src->kind == VK_ENG_TEXTURE ? (src->mips ? src->mips : 1u) : 1u, src->cube ? 6u : 1u,
++            src->bpp, src->block, (int)map.r, (int)map.g, (int)map.b, (int)map.a, file,
++            (unsigned long long)bytes);
++}
++
++/* The engine's hand-over: before the draw. */
++static void vk_eng_capture_next_draw(void* user, const rsx_be_capture* c)
++{
++    (void)user;
++    if (s_r1c.armed) return;
++    snprintf(s_r1c.path, sizeof s_r1c.path, "%s/%s", c->dir, c->name);
++#ifdef _WIN32
++    CreateDirectoryA(c->dir, NULL);
++    CreateDirectoryA(s_r1c.path, NULL);
++#else
++    mkdir(c->dir, 0755); mkdir(s_r1c.path, 0755);
++#endif
++    s_r1c.m = *c;
++    s_r1c.rt = s_eng_bound.nrt ? s_eng_bound.rt[0] : 0;
++    memcpy(s_r1c.tex, s_e2.tex, sizeof s_r1c.tex);
++    memcpy(s_r1c.samp, s_e2.samp, sizeof s_r1c.samp);
++    s_r1c.tex_mask = s_e2.tex_mask;
++    vk_r1_write("fp.ucode", c->fp_ucode, c->fp_bytes);
++    vk_r1_write("vp.ucode", c->vp_ucode, c->vp_bytes);
++    vk_r1_write("vs.hlsl", c->vs_hlsl, strlen(c->vs_hlsl));
++    vk_r1_write("ps.hlsl", c->ps_hlsl, strlen(c->ps_hlsl));
++    vk_r1_write("shadow.bin", c->shadow, c->shadow_bytes);
++    s_r1c.vs_hash = vk_r1_fnv(c->vs_hlsl, strlen(c->vs_hlsl));
++    s_r1c.ps_hash = vk_r1_fnv(c->ps_hlsl, strlen(c->ps_hlsl));
++    /* The SPIR-V the pipeline's modules are made of: the same translation
++     * (vk_eng_translate), of the same text. */
++    for (int st = 0; st < 2; st++) {
++        u32 words = 0;
++        if (!rsx_hlsl_to_spirv(st ? c->ps_hlsl : c->vs_hlsl, st ? RSX_SHADER_STAGE_FRAGMENT : RSX_SHADER_STAGE_VERTEX,
++                               s_g.spv, VK_SPV_WORDS, &words, s_g.log, sizeof s_g.log) && words)
++            vk_r1_write(st ? "fs.spv" : "vs.spv", s_g.spv, (size_t)words * 4u);
++    }
++    /* Before: all earlier work done, then the inputs and the target as the
++     * draw will see them. */
++    vk_eng_flush_sync();
++    char path[800];
++    snprintf(path, sizeof path, "%s/desc.json", s_r1c.path);
++    s_r1c.desc = fopen(path, "w");
++    if (!s_r1c.desc) return;
++    FILE* f = s_r1c.desc;
++    fprintf(f, "{\n  \"r1_pass_description\": 0,\n  \"name\": \"%s\",\n", c->name);
++    fprintf(f, "  \"provenance\": {\"frame\": %u, \"fifo_get\": %u, \"rt_offset\": %u, \"rt_location\": %u, "
++               "\"fp_offset\": %u, \"fp_location\": %u, \"fp_ucode\": \"fp.ucode\", \"vp_ucode\": \"vp.ucode\", "
++               "\"note\": \"guest addresses and microcode, for provenance and the asset conversion only\"},\n",
++            c->frame, c->fifo_get, c->rt_offset, c->rt_location, c->fp_offset, c->fp_location);
++    fprintf(f, "  \"conversion\": {\"fp_ctrl\": %u, \"cube_mask\": %u, \"vol_mask\": %u, \"vtex_mask\": %u, "
++               "\"layout_mask\": %u, \"vp_branch_bits\": %u, \"ucp\": %u, \"srgb_output\": %u, \"alpha_test\": %u, "
++               "\"alpha_func\": %u, \"unnorm_mask\": %u, \"wpos\": [%u, %u], \"shadow_mask\": %u, "
++               "\"gamma_units\": %u, \"expand_units\": %u, \"nconst\": %u, \"shadow\": \"shadow.bin\", "
++               "\"gamma_masks\": [",
++            c->fp_ctrl, c->cube_mask, c->vol_mask, c->vtex_mask, c->layout_mask, c->vp_branch_bits, c->ucp,
++            c->srgb_output, c->alpha_test, c->alpha_func, c->unnorm_mask, c->wpos_x, c->wpos_y,
++            c->shadow_mask, c->gamma_units, c->expand_units, c->nconst);
++    for (int u = 0; u < 16; u++) fprintf(f, "%s%u", u ? ", " : "", c->gamma_masks[u]);
++    fprintf(f, "], \"expand_masks\": [");
++    for (int u = 0; u < 16; u++) fprintf(f, "%s%u", u ? ", " : "", c->expand_masks[u]);
++    fprintf(f, "], \"unnorm_dim\": [");
++    for (int u = 0; u < 16; u++)
++        fprintf(f, "%s[%u, %u, %u]", u ? ", " : "", c->unnorm_dim[u][0], c->unnorm_dim[u][1], c->unnorm_dim[u][2]);
++    fprintf(f, "], \"vs_hlsl\": \"vs.hlsl\", \"ps_hlsl\": \"ps.hlsl\"},\n");
++    fprintf(f, "  \"shaders\": {\"vertex\": \"vs.spv\", \"fragment\": \"fs.spv\", \"entry\": \"main\"},\n");
++    /* The textures the draw binds, every unit (the descriptor array has 16). */
++    fprintf(f, "  \"textures\": [");
++    int first = 1;
++    for (u32 u = 0; u < RSX_BE_MAX_TEXTURES; u++) {
++        if (!((s_r1c.tex_mask >> u) & 1u) || !s_r1c.tex[u] || s_r1c.tex[u] >= VK_ENG_MAX_OBJ) continue;
++        const vk_eng_obj* o = &s_eobj[s_r1c.tex[u]];
++        if (o->kind != VK_ENG_TEXTURE && o->kind != VK_ENG_COLOR && o->kind != VK_ENG_VIEW) continue;
++        char file[32]; snprintf(file, sizeof file, "tex%u.bin", u);
++        u64 bytes = 0;
++        vk_r1_image(o, file, &bytes);
++        const rsx_be_sampler_desc* d = &s_r1c.samp[u];
++        float min_lod = d->min_lod, max_lod = d->mip_present ? d->max_lod : d->min_lod;
++        if (max_lod < min_lod) max_lod = min_lod;
++        fprintf(f, "%s\n   {\"unit\": %u, \"binding\": %u, \"sampler_binding\": %u, \"cube\": %d,\n",
++                first ? "" : ",", u, RSX_SPIRV_TEXTURE_BINDING, RSX_SPIRV_SAMPLER_BINDING, (int)o->cube);
++        vk_r1_image_json(f, "image", o, file, bytes);
++        fprintf(f, ",\n    \"sampler\": {\"mag_filter\": %d, \"min_filter\": %d, \"mipmap_mode\": %d, "
++                   "\"address\": [%d, %d, %d], \"min_lod\": %.9g, \"max_lod\": %.9g, \"border_color\": %d}}",
++                d->mag_linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST,
++                d->min_linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST,
++                d->mip_linear ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST,
++                (int)vk_gcm_wrap(d->wrap_s), (int)vk_gcm_wrap(d->wrap_t), (int)vk_gcm_wrap(d->wrap_r),
++                min_lod, max_lod, (int)VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK);
++        first = 0;
++    }
++    fprintf(f, "\n  ],\n");
++    const vk_eng_obj* rt = vk_eng_get(s_r1c.rt, VK_ENG_COLOR);
++    if (rt) {
++        u64 bytes = 0;
++        vk_r1_image(rt, "target_before.bin", &bytes);
++        vk_r1_image_json(f, "target", rt, "target_before.bin", bytes);
++        fprintf(f, ",\n");
++    }
++    s_r1c.armed = 1; s_r1c.noted = 0;
++}
++
++/* In vk_eng_draw_from, when everything the draw binds is known. */
++static void vk_r1_note_draw(const vk_eng_pipe* P, rsx_topology topology, const void* vertices,
++                            const vk_geom_ent* res, u32 vertex_count, u32 stride, const u32* indices,
++                            u32 index_count, const VkViewport* vp, const VkRect2D* sc, u32 vsb, u32 psb)
++{
++    FILE* f = s_r1c.desc;
++    if (!f) return;
++    vk_eng_pinfo pi;
++    if (vk_eng_variant_info(P, (u32)topology - 1u, &pi)) return;
++    /* Vertices and indices as the GPU reads them. */
++    const VkDeviceSize vbytes = (VkDeviceSize)vertex_count * stride;
++    const u8* vsrc = res ? (const u8*)s_geom.chunk[res->blk.chunk].ptr + res->voff : (const u8*)vertices;
++    const u8* isrc = res ? (const u8*)s_geom.chunk[res->blk.chunk].ptr + res->ioff : (const u8*)indices;
++    if (vsrc) vk_r1_write("vertices.bin", vsrc, (size_t)vbytes);
++    if (index_count && isrc) vk_r1_write("indices.bin", isrc, (size_t)index_count * 4u);
++    vk_r1_write("vs_constants.bin", vk_eng_ucpu(), vsb);
++    vk_r1_write("ps_constants.bin", vk_eng_ucpu() + s_g.ps_off, psb);
++    fprintf(f, "  \"programs_match_pipeline\": %s,\n",
++            (P->vs_hash == s_r1c.vs_hash && P->ps_hash == s_r1c.ps_hash) ? "true" : "false");
++    fprintf(f, "  \"constants\": {\"vertex\": {\"binding\": %u, \"file\": \"vs_constants.bin\", \"bytes\": %u}, "
++               "\"fragment\": {\"binding\": %u, \"file\": \"ps_constants.bin\", \"bytes\": %u}},\n",
++            RSX_SPIRV_VPCONST_BINDING, vsb, RSX_SPIRV_PSCONST_BINDING, psb);
++    fprintf(f, "  \"vertex_input\": {\"stride\": %u, \"rate\": %d, \"attributes\": [",
++            pi.vb.stride, (int)pi.vb.inputRate);
++    for (u32 a = 0; a < pi.vi.vertexAttributeDescriptionCount; a++)
++        fprintf(f, "%s{\"location\": %u, \"format\": %d, \"offset\": %u}", a ? ", " : "",
++                pi.va[a].location, (int)pi.va[a].format, pi.va[a].offset);
++    fprintf(f, "]},\n");
++    fprintf(f, "  \"draw\": {\"topology\": %d, \"vertex_count\": %u, \"vertices\": \"vertices.bin\", "
++               "\"index_count\": %u, \"index_type\": %d%s},\n",
++            (int)pi.ia.topology, vertex_count, index_count, (int)VK_INDEX_TYPE_UINT32,
++            index_count ? ", \"indices\": \"indices.bin\"" : "");
++    fprintf(f, "  \"rasterization\": {\"polygon_mode\": %d, \"cull_mode\": %d, \"front_face\": %d, "
++               "\"depth_bias_enable\": %d, \"depth_bias_constant\": %.9g, \"depth_bias_slope\": %.9g, "
++               "\"line_width\": %.9g, \"samples\": %d},\n",
++            (int)pi.ras.polygonMode, (int)pi.ras.cullMode, (int)pi.ras.frontFace, (int)pi.ras.depthBiasEnable,
++            s_e2.depth_bias[0], s_e2.depth_bias[1], pi.ras.lineWidth, (int)pi.ms.rasterizationSamples);
++    fprintf(f, "  \"depth_stencil\": {\"depth_test\": %d, \"depth_write\": %d, \"depth_compare\": %d, "
++               "\"stencil_test\": %d, \"depth_bounds_test\": %d, \"stencil_reference\": %u, "
++               "\"front\": [%d, %d, %d, %d, %u, %u], \"back\": [%d, %d, %d, %d, %u, %u]},\n",
++            (int)pi.ds.depthTestEnable, (int)pi.ds.depthWriteEnable, (int)pi.ds.depthCompareOp,
++            (int)pi.ds.stencilTestEnable, (int)pi.ds.depthBoundsTestEnable, s_e2.stencil_ref & 0xFFu,
++            (int)pi.ds.front.failOp, (int)pi.ds.front.passOp, (int)pi.ds.front.depthFailOp,
++            (int)pi.ds.front.compareOp, pi.ds.front.compareMask, pi.ds.front.writeMask,
++            (int)pi.ds.back.failOp, (int)pi.ds.back.passOp, (int)pi.ds.back.depthFailOp,
++            (int)pi.ds.back.compareOp, pi.ds.back.compareMask, pi.ds.back.writeMask);
++    fprintf(f, "  \"blend\": {\"constants\": [%.9g, %.9g, %.9g, %.9g], \"attachments\": [",
++            s_e2.blend_color[0], s_e2.blend_color[1], s_e2.blend_color[2], s_e2.blend_color[3]);
++    for (u32 a = 0; a < pi.cb.attachmentCount; a++) {
++        const VkPipelineColorBlendAttachmentState* b = &pi.cba[a];
++        fprintf(f, "%s{\"enable\": %d, \"src_color\": %d, \"dst_color\": %d, \"color_op\": %d, "
++                   "\"src_alpha\": %d, \"dst_alpha\": %d, \"alpha_op\": %d, \"write_mask\": %u}",
++                a ? ", " : "", (int)b->blendEnable, (int)b->srcColorBlendFactor, (int)b->dstColorBlendFactor,
++                (int)b->colorBlendOp, (int)b->srcAlphaBlendFactor, (int)b->dstAlphaBlendFactor,
++                (int)b->alphaBlendOp, (unsigned)b->colorWriteMask);
++    }
++    fprintf(f, "]},\n");
++    fprintf(f, "  \"viewport\": [%.9g, %.9g, %.9g, %.9g, %.9g, %.9g],\n  \"scissor\": [%d, %d, %u, %u],\n",
++            vp->x, vp->y, vp->width, vp->height, vp->minDepth, vp->maxDepth,
++            sc->offset.x, sc->offset.y, sc->extent.width, sc->extent.height);
++    s_r1c.noted = 1;
++}
++
++/* After the draw: the existing renderer's output. */
++static void vk_r1_after_draw(void)
++{
++    if (!s_r1c.armed) return;
++    s_r1c.armed = 0;
++    FILE* f = s_r1c.desc;
++    s_r1c.desc = NULL;
++    if (!f) return;
++    if (!s_r1c.noted) {
++        fprintf(f, "  \"error\": \"the draw was not recorded\"\n}\n");
++        fclose(f);
++        VK_LOG("r1: %s: the draw was not recorded\n", s_r1c.m.name);
++        return;
++    }
++    vk_eng_flush_sync();
++    const vk_eng_obj* rt = vk_eng_get(s_r1c.rt, VK_ENG_COLOR);
++    u64 bytes = 0;
++    if (rt) vk_r1_image(rt, "target_after.bin", &bytes);
++    fprintf(f, "  \"reference_output\": {\"file\": \"target_after.bin\", \"bytes\": %llu}\n}\n",
++            (unsigned long long)bytes);
++    fclose(f);
++    fprintf(stderr, "[r1] %s: written to %s\n", s_r1c.m.name, s_r1c.path);
++}
++
+ static void vk_eng_draw_from(rsx_topology topology, const void* vertices, u32 vertex_count,
+                              u32 stride, const u32* indices, u32 index_count, const vk_geom_ent* res)
+ {
+@@ -5033,6 +5314,8 @@ static void vk_eng_draw_from(rsx_topology topology, const void* vertices, u32 ve
+     pvkCmdSetBlendConstants(s_vk.cmd, s_e2.blend_color);
+     if (s_vk.depth_bounds_ok)
+         pvkCmdSetDepthBounds(s_vk.cmd, s_e2.depth_bounds[0], s_e2.depth_bounds[1]);
++    if (s_r1c.armed && !s_r1c.noted)   /* R1's capture: what this draw binds */
++        vk_r1_note_draw(P, topology, vertices, res, vertex_count, stride, indices, index_count, &vp, &sc, vsb, psb);
+     pvkCmdBindDescriptorSets(s_vk.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                              P->cube_mask ? s_e2.split_pipe_layout : s_g.pipe_layout,
+                              0, 1, &set, 0, NULL);
+@@ -5053,6 +5336,7 @@ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices,
+ {
+     (void)user;
+     vk_eng_draw_from(topology, vertices, vertex_count, stride, indices, index_count, NULL);
++    if (s_r1c.armed) vk_r1_after_draw();
+ }
+ 
+ static void vk_eng_draw_geom(void* user, rsx_topology topology, u32 geom, u32 vertex_count,
+@@ -5061,6 +5345,7 @@ static void vk_eng_draw_geom(void* user, rsx_topology topology, u32 geom, u32 ve
+     (void)user;
+     if (!geom || geom > s_geom.n_ent) return;
+     vk_eng_draw_from(topology, NULL, vertex_count, stride, NULL, index_count, &s_geom.ent[geom - 1u]);
++    if (s_r1c.armed) vk_r1_after_draw();
+ }
+ 
+ static const rsx_draw_backend s_vk_engine_backend = {
+@@ -5105,6 +5390,7 @@ static const rsx_draw_backend s_vk_engine_backend = {
+     /* Every draw and every upload submits and waits, so an upload runs after
+      * each earlier draw that sampled the old bytes has completed. */
+     .texture_upload_ordered = 1,
++    .capture_next_draw    = vk_eng_capture_next_draw,   /* R1's capture, development */
+ };
+ 
+ static rsx_backend s_vulkan_backend = {
+-- 
+2.56.0.windows.3
+

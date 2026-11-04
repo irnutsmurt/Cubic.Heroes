@@ -1,0 +1,175 @@
+From 417370644b1a096502d166e43147d182309372ae Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Wed, 4 Nov 2026 15:49:12 -0800
+Subject: [PATCH 102/104] Vulkan backend: a pipeline variant's create info
+ filled in one place
+
+vk_eng_variant built its VkGraphicsPipelineCreateInfo from locals. The
+filling moves to vk_eng_variant_info, which writes it into a vk_eng_pinfo
+(the structs and the arrays they point to); vk_eng_variant calls it and
+creates the pipeline as before. So what a variant is made of can be read
+without creating one -- R1's capture writes it down.
+
+No change in what is built: with the warm shader and pipeline caches of
+2026-11-03, a river fight made all 142 pipelines as driver cache hits
+(<= 0.29 ms each) and the pipeline cache gained no entry.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libs/video/rsx_vulkan_backend.c | 80 +++++++++++++++++++++++----------
+ 1 file changed, 56 insertions(+), 24 deletions(-)
+
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index 3ff368b..cf7a944 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -3837,44 +3837,65 @@ static void vk_eng_pipeline_release(void* user, u32 pipeline)
+     if (s_e2.pipeline == pipeline) s_e2.pipeline = 0;
+ }
+ 
+-static VkPipeline vk_eng_variant(vk_eng_pipe* P, u32 topo_idx)
++/* A pipeline variant's create info, filled in one place: what vk_eng_variant
++ * builds, readable without building it. */
++typedef struct vk_eng_pinfo {
++    VkPipelineShaderStageCreateInfo        st[2];
++    VkVertexInputBindingDescription        vb;
++    VkVertexInputAttributeDescription      va[VK_GUEST_ATTRS];
++    VkPipelineVertexInputStateCreateInfo   vi;
++    VkPipelineInputAssemblyStateCreateInfo ia;
++    VkPipelineViewportStateCreateInfo      vps;
++    VkPipelineRasterizationStateCreateInfo ras;
++    VkPipelineMultisampleStateCreateInfo   ms;
++    VkPipelineDepthStencilStateCreateInfo  ds;
++    VkPipelineColorBlendAttachmentState    cba[RSX_BE_MAX_COLOR_TARGETS];
++    VkPipelineColorBlendStateCreateInfo    cb;
++    VkDynamicState                         dyn[6];
++    VkPipelineDynamicStateCreateInfo       dy;
++    VkGraphicsPipelineCreateInfo           gci;
++} vk_eng_pinfo;
++
++/* Fill *o for P's variant topo_idx; 0, or -1 when it cannot be built. */
++static int vk_eng_variant_info(const vk_eng_pipe* P, u32 topo_idx, vk_eng_pinfo* o)
+ {
+     static const VkPrimitiveTopology topo[VK_ENG_TOPOLOGIES] = {
+         VK_PRIMITIVE_TOPOLOGY_POINT_LIST, VK_PRIMITIVE_TOPOLOGY_LINE_LIST,
+         VK_PRIMITIVE_TOPOLOGY_LINE_STRIP, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+         VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP };
+-    if (P->variant[topo_idx]) return P->variant[topo_idx];
+-    if (P->failed & (1u << topo_idx)) return VK_NULL_HANDLE;   /* asked every draw, it failed 11,912 times */
+     VkRenderPass rp = vk_eng_render_pass(P->rt_fmt, P->rt_count);
+-    if (!rp || P->nslots > VK_GUEST_ATTRS) return VK_NULL_HANDLE;
++    if (!rp || P->nslots > VK_GUEST_ATTRS) return -1;
+     const VkPipelineLayout layout = P->cube_mask ? vk_eng_split_layout() : s_g.pipe_layout;
+-    if (!layout) return VK_NULL_HANDLE;
++    if (!layout) return -1;
++    memset(o, 0, sizeof *o);
+     const rsx_be_render_state* rs = &P->rs;
+ 
+-    VkPipelineShaderStageCreateInfo st[2] = {
++    VkPipelineShaderStageCreateInfo* st = o->st;
++    const VkPipelineShaderStageCreateInfo st0[2] = {
+         { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+           .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = P->vs, .pName = "main" },
+         { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+           .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = P->fs, .pName = "main" } };
+-    VkVertexInputBindingDescription vb = { 0, P->stride, VK_VERTEX_INPUT_RATE_VERTEX };
+-    VkVertexInputAttributeDescription va[VK_GUEST_ATTRS];
++    memcpy(st, st0, sizeof st0);
++    o->vb = (VkVertexInputBindingDescription){ 0, P->stride, VK_VERTEX_INPUT_RATE_VERTEX };
++    VkVertexInputAttributeDescription* va = o->va;
+     for (u32 s = 0; s < P->nslots; s++)
+         va[s] = (VkVertexInputAttributeDescription){ s, 0, VK_FORMAT_R32G32B32A32_SFLOAT, s * 16u };
+-    VkPipelineVertexInputStateCreateInfo vi = {
++    o->vi = (VkPipelineVertexInputStateCreateInfo){
+         .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+-        .vertexBindingDescriptionCount = 1, .pVertexBindingDescriptions = &vb,
++        .vertexBindingDescriptionCount = 1, .pVertexBindingDescriptions = &o->vb,
+         .vertexAttributeDescriptionCount = P->nslots, .pVertexAttributeDescriptions = va };
+-    VkPipelineInputAssemblyStateCreateInfo ia = {
++    o->ia = (VkPipelineInputAssemblyStateCreateInfo){
+         .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+         .topology = topo[topo_idx] };
+-    VkPipelineViewportStateCreateInfo vps = {
++    o->vps = (VkPipelineViewportStateCreateInfo){
+         .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+         .viewportCount = 1, .scissorCount = 1 };
+     /* CULL_FACE FRONT 0x0404 / BACK 0x0405 / FRONT_AND_BACK 0x0408 (front, as
+      * in D3D12 and Metal); FRONT_FACE CCW 0x0901 maps directly: both APIs
+      * judge winding on screen, and the Y flip in the vertex stage makes this
+      * screen the same one D3D's viewport produces. */
+-    VkPipelineRasterizationStateCreateInfo ras = {
++    o->ras = (VkPipelineRasterizationStateCreateInfo){
+         .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+         .polygonMode = VK_POLYGON_MODE_FILL,
+         .cullMode = !rs->cull_enable ? VK_CULL_MODE_NONE
+@@ -3886,7 +3907,7 @@ static VkPipeline vk_eng_variant(vk_eng_pipe* P, u32 topo_idx)
+          * it is off (vk_eng_set_depth_bias). */
+         .depthBiasEnable = VK_TRUE,
+         .lineWidth = 1.0f };
+-    VkPipelineMultisampleStateCreateInfo ms = {
++    o->ms = (VkPipelineMultisampleStateCreateInfo){
+         .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+         .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT };
+     VkStencilOpState front = vk_gcm_stencil_face(rs->s_func, rs->s_fail, rs->s_zfail, rs->s_zpass,
+@@ -3895,7 +3916,7 @@ static VkPipeline vk_eng_variant(vk_eng_pipe* P, u32 topo_idx)
+         ? vk_gcm_stencil_face(rs->bs_func, rs->bs_fail, rs->bs_zfail, rs->bs_zpass,
+                               rs->s_func_mask, rs->s_write_mask)
+         : front;
+-    VkPipelineDepthStencilStateCreateInfo ds = {
++    o->ds = (VkPipelineDepthStencilStateCreateInfo){
+         .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+         .depthTestEnable = rs->depth_test ? VK_TRUE : VK_FALSE,
+         .depthWriteEnable = (rs->depth_test && rs->depth_write) ? VK_TRUE : VK_FALSE,
+@@ -3927,7 +3948,7 @@ static VkPipeline vk_eng_variant(vk_eng_pipe* P, u32 topo_idx)
+     if ((rs->color_mask >> 24) & 0xFFu) wm |= VK_COLOR_COMPONENT_A_BIT;
+     static int mrt_mode = -1;
+     if (mrt_mode < 0) { const char* e = getenv("PS3RECOMP_VK_MRT_MASK"); mrt_mode = e ? atoi(e) : 1; }
+-    VkPipelineColorBlendAttachmentState cba[RSX_BE_MAX_COLOR_TARGETS];
++    VkPipelineColorBlendAttachmentState* cba = o->cba;
+     for (u32 r = 0; r < P->rt_count; r++) {
+         VkColorComponentFlags twm = wm;
+         int tblend = rs->blend_enable != 0;
+@@ -3952,21 +3973,32 @@ static VkPipeline vk_eng_variant(vk_eng_pipe* P, u32 topo_idx)
+             .alphaBlendOp = vk_gcm_blend_op(rs->eq_a),
+             .colorWriteMask = twm };
+     }
+-    VkPipelineColorBlendStateCreateInfo cb = {
++    o->cb = (VkPipelineColorBlendStateCreateInfo){
+         .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+         .attachmentCount = P->rt_count, .pAttachments = cba };
+-    VkDynamicState dyn[6] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR,
++    static const VkDynamicState dyn[6] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR,
+                               VK_DYNAMIC_STATE_STENCIL_REFERENCE, VK_DYNAMIC_STATE_DEPTH_BIAS,
+                               VK_DYNAMIC_STATE_BLEND_CONSTANTS, VK_DYNAMIC_STATE_DEPTH_BOUNDS };
+-    VkPipelineDynamicStateCreateInfo dy = {
++    memcpy(o->dyn, dyn, sizeof dyn);
++    o->dy = (VkPipelineDynamicStateCreateInfo){
+         .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+-        .dynamicStateCount = s_vk.depth_bounds_ok ? 6u : 5u, .pDynamicStates = dyn };
+-    VkGraphicsPipelineCreateInfo gci = {
++        .dynamicStateCount = s_vk.depth_bounds_ok ? 6u : 5u, .pDynamicStates = o->dyn };
++    o->gci = (VkGraphicsPipelineCreateInfo){
+         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+-        .stageCount = 2, .pStages = st, .pVertexInputState = &vi, .pInputAssemblyState = &ia,
+-        .pViewportState = &vps, .pRasterizationState = &ras, .pMultisampleState = &ms,
+-        .pDepthStencilState = &ds, .pColorBlendState = &cb, .pDynamicState = &dy,
++        .stageCount = 2, .pStages = o->st, .pVertexInputState = &o->vi, .pInputAssemblyState = &o->ia,
++        .pViewportState = &o->vps, .pRasterizationState = &o->ras, .pMultisampleState = &o->ms,
++        .pDepthStencilState = &o->ds, .pColorBlendState = &o->cb, .pDynamicState = &o->dy,
+         .layout = layout, .renderPass = rp, .subpass = 0 };
++    return 0;
++}
++
++static VkPipeline vk_eng_variant(vk_eng_pipe* P, u32 topo_idx)
++{
++    if (P->variant[topo_idx]) return P->variant[topo_idx];
++    if (P->failed & (1u << topo_idx)) return VK_NULL_HANDLE;   /* asked every draw, it failed 11,912 times */
++    vk_eng_pinfo pi;
++    if (vk_eng_variant_info(P, topo_idx, &pi)) return VK_NULL_HANDLE;
++    const VkGraphicsPipelineCreateInfo gci = pi.gci;
+     const uint64_t ft0 = PS3_FT_ON() ? ps3_ft_now() : 0;
+     struct timespec c0, c1;
+     if (vk_compile_log()) vk_monotonic(&c0);
+-- 
+2.56.0.windows.3
+

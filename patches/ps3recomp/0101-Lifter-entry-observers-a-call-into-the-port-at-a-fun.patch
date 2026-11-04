@@ -1,0 +1,113 @@
+From 55c4181df621a7ae78eb361a2924ee53696bed2c Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Wed, 4 Nov 2026 15:48:45 -0800
+Subject: [PATCH 101/104] Lifter: --entry-observers, a call into the port at a
+ function's entry, the body unchanged
+
+A development lift's way to see what a function was asked to do without
+replacing it: for each address in the file ({"observers": [{"addr"}]}),
+the generated function begins with
+  if (g_ppu_entry_observe) ppu_entry_observe(addr, ctx);
+and then runs its lifted body as before. The port defines both. Unlike an
+entry hook it never returns early, so the game behaves the same; the
+production lift takes no such file. An address that names no lifted function
+stops the lift.
+
+First use: R1's boundary capture of the libgcm calls PPFX makes (the
+port's config/dev_capture_observers.json, 29 functions).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ tools/ppu_lifter.py | 43 +++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 43 insertions(+)
+
+diff --git a/tools/ppu_lifter.py b/tools/ppu_lifter.py
+index 4f4630d..57e5344 100644
+--- a/tools/ppu_lifter.py
++++ b/tools/ppu_lifter.py
+@@ -881,6 +881,27 @@ def load_entry_hooks(path: str) -> dict[int, tuple[str, str]]:
+     return out
+ 
+ 
++def load_entry_observers(path: str) -> set[int]:
++    """Read an --entry-observers file:
++
++        {"observers": [{"addr": "0x0069F944", "note": "..."}, ...]}
++
++    -> {addr}. An observed function begins with
++    `if (g_ppu_entry_observe) ppu_entry_observe(addr, ctx);` and then runs its
++    lifted body unchanged: the port's observer sees each call's arguments
++    (a capture, a dual-run oracle) without replacing the function. A
++    development lift only; the production lift takes no such file."""
++    with open(path) as f:
++        spec = json.load(f)
++    out: set[int] = set()
++    for e in spec.get("observers", []):
++        addr = int(str(e["addr"]), 0)
++        if addr & 3 or addr in out:
++            sys.exit(f"[ppu_lifter] {path}: bad or duplicate observer 0x{addr:08X}")
++        out.add(addr)
++    return out
++
++
+ def _crval_to_c(val: str, mask: int, decl_a: str, a_expr: str, b_expr: str) -> str:
+     """Reconstruct a C condition from a cr_val ternary for the tested bits."""
+     m = re.match(r"^\((?P<u>.+?)\) \? 1 : \((?P<lt>.+?)\) \? 8 : \((?P<gt>.+?)\) \? 4 : 2$", val)
+@@ -4255,11 +4276,20 @@ class PPULifter:
+             lines += ["#ifdef __cplusplus", f'extern "C" int {guard};',
+                       f'extern "C" void {host}(ppu_context* ctx);', "#else",
+                       f"extern int {guard};", f"void {host}(ppu_context* ctx);", "#endif"]
++        observed = func.start_addr in getattr(self, "entry_observers", ())
++        if observed:
++            lines += ["#ifdef __cplusplus", 'extern "C" int g_ppu_entry_observe;',
++                      'extern "C" void ppu_entry_observe(uint32_t addr, ppu_context* ctx);', "#else",
++                      "extern int g_ppu_entry_observe;",
++                      "void ppu_entry_observe(uint32_t addr, ppu_context* ctx);", "#endif"]
+         uses_sjlj = any("ps3_sjlj_longjmp(" in bl or "_sjf.arm(" in bl for bl in func.body_lines)
+         if uses_sjlj:
+             lines.append('#include "ppu_sjlj.h"   /* --sjlj: guest setjmp/longjmp */')
+         lines.append(f"void {weak}{func.name}(ppu_context* ctx) {{")
+         lines.append("    PPU_MM_SNAP")
++        if observed:
++            lines.append(f"    if (g_ppu_entry_observe) ppu_entry_observe(0x{func.start_addr:08X}u, ctx);  "
++                         f"/* entry observer */")
+         if hook:
+             lines.append(f"    if ({hook[1]}) {{ {hook[0]}(ctx); return; }}  "
+                          f"/* entry hook 0x{func.start_addr:08X} */")
+@@ -5155,6 +5185,10 @@ def main() -> None:
+                              "longjmp. Call sites of the first take a host setjmp in the "
+                              "caller's frame; call sites of the second run the guest longjmp "
+                              "and then jump there (runtime/ppu/ppu_sjlj.h)")
++    parser.add_argument("--entry-observers", metavar="FILE", default=None,
++                        help="JSON {observers:[{addr}]}: functions whose entry calls the "
++                             "port's ppu_entry_observe(addr, ctx) while g_ppu_entry_observe "
++                             "is set, then runs the lifted body unchanged (development lifts)")
+     parser.add_argument("--insn-patches", metavar="FILE", default=None,
+                         help="JSON list of instruction patches to lift as "
+                              "run-time switches: each {addr, orig, new, guard} "
+@@ -5629,6 +5663,10 @@ def main() -> None:
+         print(f"  insn-patches: {len(lifter.insn_patches)}, entry hooks: {len(lifter.entry_hooks)} "
+               f"from {args.insn_patches}")
+ 
++    if args.entry_observers:
++        lifter.entry_observers = load_entry_observers(args.entry_observers)
++        print(f"  entry observers: {len(lifter.entry_observers)} from {args.entry_observers}")
++
+     # Optional: load a recovered-name map (from Ghidra analysis) to annotate
+     # generated functions with meaningful names as comments.
+     if args.names:
+@@ -5685,6 +5723,11 @@ def main() -> None:
+             sys.exit("[ppu_lifter] insn patches at no lifted instruction: " +
+                      ", ".join(f"0x{a:08X}" for a in missing))
+     # ...and every entry hook at the start of a lifted function.
++    if getattr(lifter, "entry_observers", None):
++        missing = sorted(set(lifter.entry_observers) - {f.start_addr for f in lifter.functions})
++        if missing:
++            sys.exit("[ppu_lifter] entry observers name no lifted function: "
++                     + ", ".join(f"0x{a:08X}" for a in missing))
+     if getattr(lifter, "entry_hooks", None):
+         missing = sorted(set(lifter.entry_hooks) - {f.start_addr for f in lifter.functions})
+         if missing:
+-- 
+2.56.0.windows.3
+

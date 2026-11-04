@@ -1,0 +1,35 @@
+From 62d4afa4c894123eff913a5db6ddf89770754065 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Wed, 4 Nov 2026 15:48:37 -0800
+Subject: [PATCH 100/104] Built-in shader programs line: the counter read once,
+ not modified and read unsequenced
+
+`(++s_fx & (s_fx - 1))` modifies and reads s_fx without a sequence point
+(clang -Wunsequenced): undefined behaviour in the release-path line of
+dd795bf. The incremented value is taken once and tested.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libs/video/rsx_draw_engine.c | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/libs/video/rsx_draw_engine.c b/libs/video/rsx_draw_engine.c
+index 6e1d517..9b805ed 100644
+--- a/libs/video/rsx_draw_engine.c
++++ b/libs/video/rsx_draw_engine.c
+@@ -2085,9 +2085,10 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
+         if (on < 0) on = getenv("RSX_FALLBACK_LOG") ? 1 : 0;
+         static u32 n;
+         { static unsigned long long s_fx;
+-          if ((++s_fx & (s_fx - 1)) == 0)   /* 1, 2, 4, ...: the release-path audit */
++          const unsigned long long fx = ++s_fx;
++          if ((fx & (fx - 1)) == 0)   /* 1, 2, 4, ...: the release-path audit */
+               fprintf(stderr, "[release-path] built-in shader programs for a draw, frame %u (%llu so far)\n",
+-                      g.frames, s_fx); }
++                      g.frames, fx); }
+         if (on && (n++ < 64 || n % 1000 == 0)) {
+             const u32 reg = rsx_dsp_reg(&g.rsx, 0x08E4);
+             u32 loc = 0;
+-- 
+2.56.0.windows.3
+
