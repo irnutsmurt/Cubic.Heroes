@@ -404,3 +404,27 @@ if(APPLE)
         "-framework AppKit" "-framework Metal" "-framework QuartzCore" "-framework IOSurface")
     install(TARGETS ${PROJECT_NAME}_window RUNTIME DESTINATION bin)
 endif()
+
+# ---------------------------------------------------------------------------
+# R1's executor (docs/NATIVE_PORT.md section 5)
+# ---------------------------------------------------------------------------
+# Renders a captured pass description with its own Vulkan device
+# (native/render/r1_replay.c). It links the program translators -- the
+# decompilers and the HLSL -> SPIR-V step, asset conversion -- and glslang,
+# and nothing of the runtime: no FIFO walker, RSX state or GCM HLE
+# (tools/r1_check_deps.py checks the executable). Development only; not
+# installed.
+find_package(glslang CONFIG QUIET)
+if(glslang_FOUND AND TARGET glslang::glslang AND TARGET glslang::SPIRV AND PS3RECOMP_VULKAN_INCLUDE_DIR)
+    add_executable(r1_replay native/render/r1_replay.c native/render/r1_json.c
+        "${PS3RECOMP_DIR}/libs/video/rsx_fp_decompiler.c"
+        "${PS3RECOMP_DIR}/libs/video/rsx_vp_decompiler.c"
+        "${PS3RECOMP_DIR}/libs/video/rsx_shader_spirv.cpp")
+    target_include_directories(r1_replay PRIVATE "${PS3RECOMP_DIR}/include" "${PS3RECOMP_DIR}/libs/video"
+        "${PS3RECOMP_VULKAN_INCLUDE_DIR}")
+    target_compile_definitions(r1_replay PRIVATE PS3RECOMP_HAVE_SPIRV_TRANSLATION=1)
+    target_link_libraries(r1_replay PRIVATE glslang::glslang glslang::SPIRV)
+    if(TARGET glslang::glslang-default-resource-limits)
+        target_link_libraries(r1_replay PRIVATE glslang::glslang-default-resource-limits)
+    endif()
+endif()
