@@ -317,8 +317,27 @@ Finalize fix, wait-free creation) is measured against it.
    differently from the PS3 (compare with RPCS3 on the same save). If a
    gameplay difference shows, the install's default goes back to 0 until
    it is fixed.
-4. 144 fps uncapped is not sustained (~125-130 fps; the main thread, the
-   game's own code, is the limit). Stretch goal.
+4. 144 fps uncapped is not sustained; the main thread, the game's own
+   recompiled code, is the limit. **Measured again 2026-11-03** (build/
+   baselines/2026-11-03-uncapped-profile, with the exe, PDB, generated
+   sources, traces and profile): the river_fight scenario uncapped with
+   debris runs 94 fps (10.6 ms; ordinary frames 10.3, frames with physics
+   13.4-13.7), the main thread busy 10.2-10.4 ms of an ordinary frame and
+   waiting ~0.13 (flip/vblank waits 0.02-0.05). The earlier ~117 fps
+   "uncapped fight" (fight_bench.drive) had no physics in its window; the
+   same script on today's build gives 124 fps: no regression, a lighter
+   scene. A 0.5 ms vblank tick against 2 ms changed nothing measurable; the
+   sampler costs ~8%. Main-thread self time: generated code 87.8%, the
+   indirect-call dispatcher 4.1%. By source line: guest stores 31.9%, guest
+   loads 26.8%, compare -> condition register 7.3%, float 5.8%, the
+   function-entry memory snapshot 3.6%, indirect call sites 2.4%. Each
+   guest store at -O1 is ~25 instructions around a 2-instruction store: the
+   range check, two diagnostic watch globals and the SPU reservation bitmap,
+   each global through a .refptr indirection (780,829 store sites in the
+   generated code). Candidates for discussion before any change, in that
+   order: the store path's per-store checks, then the loads' (poll word,
+   alignment), then lazy condition-register updates in the lifter. Stretch
+   goal.
 5. Not verified: save portability (PARAM.PFD is not rewritten) and the colour
    comparison with RPCS3 (its capture never got past preloading pipelines).
 
