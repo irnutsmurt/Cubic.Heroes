@@ -420,15 +420,22 @@ Finalize fix, wait-free creation) is measured against it.
    2 (main thread: the remaining reservation test 6-7.5% of generated
    samples, condition-register updates, indirect calls, the matrix code;
    render side: barrier tracking, submission waits, the present readback).
-   **Architecture:** the owner's requirement is zero emulation, the PS3
-   command processor retired on a plan whatever the frame rate. The game
-   does not use PSGL: it renders through its "asp" engine's ps3gcm backend
-   and the PPFX post-effects library, both writing libgcm commands. A
-   proposal for native render records consumed by a render thread, with a
-   whole-runtime audit, is in build/ab/2026-11-04-opt-review
-   (architecture-proposal.md, native-render-design.md,
-   zero-emulation-audit.md). It awaits the owner's review: no replacement
-   code before that.
+   **Checkpoint:** tag `checkpoint-2026-11-04` (repo 9ea01df, ps3recomp
+   578c9aa, pushed), smoke-tested; executable, symbols and measurements in
+   build/checkpoint/2026-11-04.
+   **Architecture (direction approved by the owner, 2026-11-04):** zero
+   emulation, the PS3 command processor retired on a plan whatever the frame
+   rate; the game renders through asp's ps3gcm backend and PPFX on libgcm
+   (no PSGL). The plan is docs/NATIVE_PORT.md (decisions, priorities, one
+   implementation order R0-R7, the synchronisation model, behaviour changes,
+   release paths); the evidence stage is docs/NATIVE_EVIDENCE.md (the main
+   thread writes every command; PPFX is 47 one-draw passes a frame, 16% of
+   the commands; WaitFlip never blocks today; Finish runs once a session;
+   per-pass GPU time: a barrier transition costs 7-8 us, 0.31-0.37 ms a
+   frame, so the "~53 full drains" above is a count, not the main GPU
+   cost). **Milestone R1 (one captured PPFX pass rendered natively) awaits
+   the owner's approval: no replacement code before that.** The local review
+   documents in build/ab/2026-11-04-opt-review are the background.
 5. Not verified: save portability (PARAM.PFD is not rewritten) and the colour
    comparison with RPCS3 (its capture never got past preloading pipelines).
 

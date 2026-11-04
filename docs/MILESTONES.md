@@ -13,13 +13,20 @@ results. Compiling is not evidence.
 | 6 | Full-game coverage | Not started (HANDOFF.md, "Game coverage") |
 | 7 | Stability and release preparation | **In progress**: long-session soaks with reloads; the setup app not yet run end to end |
 
+The native-port milestones (R0-R7: the PS3 graphics path replaced, then
+retired) are defined in NATIVE_PORT.md; their records follow its section 10
+and are logged at the end of this file.
+
 The current state, open problems and next actions are in HANDOFF.md,
 "Current status"; this file keeps the evidence log.
 
 ## M1 evidence
 - Disc verified and extracted; EBOOT decrypted with HMAC verified; hashes pinned.
 - Middleware identified from the binary: FMOD Ex 4, Bink 1, Lua 5.1.3,
-  Bullet (SPURS), PSGL, Edge zlib.
+  Bullet (SPURS), Edge zlib; graphics through the "asp" engine's ps3gcm
+  backend and the PPFX post-effects library on a statically linked libgcm
+  (first listed as PSGL; corrected 2026-11-04: the "PSGL" strings are PPFX's
+  shader file names, FEASIBILITY.md §3).
 - 237 imports and 26 SPU images inventoried.
 - Full PPU lift with 0 undecoded instructions and 638/638 jump tables; all
   26 SPU images lifted.
@@ -89,13 +96,14 @@ The current state, open problems and next actions are in HANDOFF.md,
   (patch 0015), and there are new probes `PS3_FS_FAIL_ABORT`, `SPU_OVL_TRACE` and
   `GCM_BADBRANCH_REREAD`. The pipeline no longer writes an unused
   `build/gen/ppu_hle_nids.cpp`; the port build generates the NID table itself.
-- Current stop: the RSX command-FIFO walker mis-decodes PSGL's command stream
+- Current stop: the RSX command-FIFO walker mis-decodes the game's command stream
   every few thousand frames: a "JUMP"/"CALL" to unmapped IO, then a resync to
   `put`. Re-reading shows the bad word is stable (not a late write), and the
   walker has also run past the end of the 2 MB command buffer. A resync drops
   label writes, and the game later waits forever on one of those fences
   (`func_0045AC78`). It is timing-dependent: one 150 s run never hit it. The
-  game does not use libgcm's buffer-full callback here, so PSGL manages its
+  game does not use libgcm's buffer-full callback here, so its own libgcm code
+  (asp and PPFX; first written up as PSGL) manages its
   own segments. This is RSX/FIFO work (start of M3). Next step: log every
   JUMP/CALL/RET the walker takes, and every `put` the game publishes, and find
   the first command whose size the walker gets wrong.
@@ -256,3 +264,21 @@ Details and numbers in HANDOFF.md ("Current status", the work log).
   zlib; render targets and textures created without GPU waits (0089).
 - Memory bounded over repeated area loads: a finalized SPURS instance's
   parked task ended (0087), the SPU pool no longer grows a worker per load.
+
+## Native port: R0, the rendering evidence stage (2026-11-04)
+
+- **Dependencies:** the 2026-11-04 checkpoint (tag checkpoint-2026-11-04,
+  smoke-tested: 2 river fights ok, exploration 240 s, strict none).
+- **Removed:** nothing (evidence only).
+- **Remains:** the whole PS3 graphics path.
+- **Evidence:** NATIVE_EVIDENCE.md. Six instrumented runs (river fight,
+  exploration) and the counters in ps3recomp 0097-0099: one producer thread
+  for every command; PPFX's pass anatomy and entry points; the game's waits
+  by event (consumption, GPU completion, presentation); GPU time per render
+  pass; no release-path fallback observed in the two scenes.
+- **Performance:** the counters are off by default and leave the main
+  thread's paths unchanged when off. The evidence build with every switch
+  off: combat main-thread busy 6.26 ms against the checkpoint's 6.15 (two
+  fights a side, both ok): +1.7%, inside the 1-2% batch drift, and too small
+  for two runs a side to resolve (build/ab/2026-11-04-evidence/offcheck.sh).
+- **Next:** R1 (one captured PPFX pass rendered natively) awaits approval.
