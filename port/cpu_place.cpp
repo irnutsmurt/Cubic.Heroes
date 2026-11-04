@@ -7,6 +7,9 @@
  *   isolate  the PPU main thread -- this one: main() runs the guest's entry on
  *            it -- alone on one logical processor, and every other thread of
  *            the process kept off both logical processors of that core
+ *   reserve  as isolate, but the main thread may run on either logical
+ *            processor of its core: when an interrupt or another process takes
+ *            one, it moves to the other instead of waiting
  *
  * The guest's main thread is the game's critical path, and with SMT a busy
  * thread on the other logical processor of its core takes a share of the
@@ -17,7 +20,7 @@
  *
  * The topology is the system's (GetSystemCpuSetInformation): which logical
  * processors share a core, never assumed from their numbering. The core for
- * isolate: DOTHEROES_CPU_CORE=<one of its logical processors>, else among the
+ * isolate and reserve: DOTHEROES_CPU_CORE=<one of its logical processors>, else among the
  * cores of the highest efficiency class (a hybrid CPU's performance cores) and
  * then the highest scheduling class (the system's preferred cores, where it
  * ranks them), the last one -- not the core of logical processor 0 where
@@ -28,7 +31,8 @@
  * isolate is CPU sets: the process's default set without the chosen core
  * (threads made later, the driver's and the audio's included, take it too),
  * and the main thread's own set, with a hard affinity as well, that one
- * logical processor.
+ * logical processor. reserve gives the main thread its core's CPU sets and
+ * no affinity.
  */
 #ifdef _WIN32
 #include <windows.h>
@@ -114,8 +118,9 @@ extern "C" void dotheroes_cpu_place(void)
                 (unsigned long long)mask, ok ? "" : " -- FAILED");
         return;
     }
-    if (strcmp(how, "isolate")) {
-        fprintf(stderr, "[port] cpu: DOTHEROES_CPU_PLACE=%s not known (normal, percore, isolate); placement normal\n", how);
+    const bool reserve = !strcmp(how, "reserve");
+    if (strcmp(how, "isolate") && !reserve) {
+        fprintf(stderr, "[port] cpu: DOTHEROES_CPU_PLACE=%s not known (normal, percore, isolate, reserve); placement normal\n", how);
         return;
     }
     // The core for the main thread.
@@ -142,23 +147,23 @@ extern "C" void dotheroes_cpu_place(void)
                 if (rank(c) == best) pick = (int)c;
     }
     if (pick < 0 || cores.size() < 2) {
-        fprintf(stderr, "[port] cpu: isolate needs two cores or more; placement normal\n");
+        fprintf(stderr, "[port] cpu: %s needs two cores or more; placement normal\n", how);
         return;
     }
     const uint64_t mine = core_mask[pick];
     const int main_lp = __builtin_ctzll(mine);
-    ULONG main_id = 0;
-    std::vector<ULONG> others;
+    std::vector<ULONG> main_ids, others;
     uint64_t others_mask = 0;
     for (const Lp& p : lps) {
-        if (p.lp == main_lp) main_id = p.id;
+        if (reserve ? (mine >> p.lp & 1) : p.lp == main_lp) main_ids.push_back(p.id);
         if (!(mine >> p.lp & 1)) { others.push_back(p.id); others_mask |= 1ull << p.lp; }
     }
     const BOOL a = SetProcessDefaultCpuSets(GetCurrentProcess(), others.data(), (ULONG)others.size());
-    const BOOL b = SetThreadSelectedCpuSets(GetCurrentThread(), &main_id, 1);
-    const BOOL c = SetThreadAffinityMask(GetCurrentThread(), (DWORD_PTR)1 << main_lp) != 0;
-    fprintf(stderr, "[port] cpu: placement isolate, the PPU main thread on %d (its core: %s), the other threads on %s%s\n",
-            main_lp, list(mine).c_str(), list(others_mask).c_str(), a && b && c ? "" : " -- FAILED");
+    const BOOL b = SetThreadSelectedCpuSets(GetCurrentThread(), main_ids.data(), (ULONG)main_ids.size());
+    const BOOL c = reserve || SetThreadAffinityMask(GetCurrentThread(), (DWORD_PTR)1 << main_lp) != 0;
+    fprintf(stderr, "[port] cpu: placement %s, the PPU main thread on %s (its core: %s), the other threads on %s%s\n",
+            how, reserve ? list(mine).c_str() : std::to_string(main_lp).c_str(), list(mine).c_str(),
+            list(others_mask).c_str(), a && b && c ? "" : " -- FAILED");
 }
 #else
 extern "C" void dotheroes_cpu_place(void) {}

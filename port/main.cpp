@@ -319,6 +319,16 @@ static double display_frame_ms(void)
     return refresh_ms * k;
 }
 
+/* PS3_FTRACE kind 18's a: the logical processor this thread is on | 0x100. */
+static inline uint32_t ft_cpu(void)
+{
+#ifdef _WIN32
+    return GetCurrentProcessorNumber() | 0x100;
+#else
+    return 0;
+#endif
+}
+
 static void vblank_clock(void)
 {
     SetThreadDescription(GetCurrentThread(), L"vblank");
@@ -329,6 +339,7 @@ static void vblank_clock(void)
     const auto period = std::chrono::duration_cast<clock::duration>(
         std::chrono::duration<double, std::milli>(ms > 0.0 ? ms : 1000.0 / 60.0));
     auto next = clock::now() + period;
+    unsigned ticks = 0;
     for (;;) {
         for (auto now = clock::now(); now < next; now = clock::now()) {
             if (next - now > std::chrono::milliseconds(2))
@@ -338,17 +349,25 @@ static void vblank_clock(void)
         }
         cellGcmTickVBlank();
         cellGcmTickFlip();
+        /* PS3_FTRACE: every 16th tick, where this thread ran (kind 18, who 4) */
+        if (!(++ticks & 15) && PS3_FT_ON()) {
+            const uint64_t t = ps3_ft_now();
+            ps3_ft_span(PS3_FT_WALKER, 4, ft_cpu(), 0, t, t);
+        }
         next += period;
         if (clock::now() - next > period * 240) next = clock::now() + period;   /* far behind: resync */
     }
 }
 
 /* PS3_FTRACE: the walker thread's time outside its drain passes (kind 18:
- * who 1 a guest frame's present begun, 2 the window pump, 3 the sleep). */
+ * who 1 a guest frame's present begun, 2 the window pump, 3 the sleep; a =
+ * the logical processor it ran on at the span's end | 0x100). who 4 is the
+ * vblank clock's thread (vblank_clock). Where the two ran tells whether one
+ * of them shares the PPU main thread's core (kind 26). */
 static inline uint64_t ft_now_if_on(void) { return PS3_FT_ON() ? ps3_ft_now() : 0; }
 static inline void ft_walker(uint32_t what, uint64_t t0)
 {
-    if (t0) ps3_ft_span(PS3_FT_WALKER, what, 0, 0, t0, ps3_ft_now());
+    if (t0) ps3_ft_span(PS3_FT_WALKER, what, ft_cpu(), 0, t0, ps3_ft_now());
 }
 
 static DWORD WINAPI frame_clock(LPVOID)
