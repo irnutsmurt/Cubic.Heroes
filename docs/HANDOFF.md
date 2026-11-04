@@ -346,16 +346,44 @@ Finalize fix, wait-free creation) is measured against it.
    7.93 -> 7.41 ms (-6.6%), main busy -7.4% (permutation p = 0.0014);
    physics frames -3.7% (not significant: debris varies); frames over
    16.7 ms 0.10% -> 0.03%.
-   **Measuring: hold the process to one logical CPU per core.** Unpinned,
-   each process settles at its own level for a whole fight (the same build
-   7.8 or ~10 ms an ordinary frame): another busy thread on the main
-   thread's SMT sibling. Pinned (affinity 0x5555, set right after start;
-   build/ab/2026-11-03-store-check/ab_pinned.sh) the levels agree within
-   ~0.3 ms -- and sit at the fast one. That is also the next candidate:
-   keeping the PPU main thread's core to itself is worth ~2 ms an ordinary
-   frame in a typical unpinned run, more than this change. Then the loads'
-   checks (poll word, alignment), then lazy condition-register updates.
-   Stretch goal.
+   **CPU placement, measured 2026-11-04** (build/ab/2026-11-04-cpu-place:
+   both builds with PDBs, 78 runs, README; `DOTHEROES_CPU_PLACE`,
+   experimental, default normal). A busy thread on the main thread's SMT
+   sibling is the mechanism: ordinary frames 6.6-6.9 ms with the sibling
+   idle, 9.4-10.6 with it 50-90% busy, in every arm. The store-check A/B's
+   slow unpinned runs (9.2-10.4 ms) were a test condition, not where the
+   scheduler happened to start: they need SDL's dummy audio and an
+   unfocused window (15 of 15 slow; focused 4 of 4 fast; real audio always
+   fast), and turning Windows' power throttling off for the process removes
+   them (4 of 4 fast against 4 of 4 slow). A throttled process -- neither
+   in the foreground nor playing audio -- gets its busy threads put on the
+   main thread's core: there, the uncapped tests' vblank clock (which spins
+   at DIAG_VBLANK_MS=0.5) and the walker. With real audio and normal
+   scheduling every run sits at one level (uncapped ordinary 7.07-7.61 ms,
+   13 runs). Over that, keeping the main thread's core to it (isolate or
+   reserve) is a repeatable gain, the same in both batches: uncapped
+   ordinary 7.20 -> 6.97 ms (p .002), ordinary p99 10.8-11.0 -> 9.4-9.7; at
+   72 fps the main thread's busy time 7.17 -> 6.89 (p .029) and its p99
+   10.9 -> 9.3, physics frames' busy 8.87 -> 8.27 at matched solver work.
+   Heavy-debris frames uncapped: not resolved (workload varies by run; too
+   few runs with many such frames). Nothing else waits longer: walker drain
+   unchanged and its tail shorter, SPU task start 4 us in every arm. Pacing
+   at 72 fps is unchanged (99.2-99.8% of frames within 1 ms of the period
+   in every arm); isolate's hard pin costs 0.3-1.0 ms of ordinary-frame
+   p99.9, reserve does not. Not yet a default; proposed behaviour, tested
+   only on this 8-core Ryzen: reserve the main thread's core only with SMT
+   and at least 6 physical cores (5 left for the walker, present, SPU tasks
+   and audio); no SMT or fewer cores: normal. The core from the system's
+   ranking (highest efficiency class -- a hybrid CPU's performance cores --
+   then scheduling class), not core 0; a process that starts with an
+   affinity already set (the user's, or a tool's) is left alone; group 0
+   only; any API failure: normal. Separately, the process could opt out of
+   power throttling (execution speed, timer resolution): a player's
+   unfocused, silent game would otherwise run at the slow level.
+   **Measuring:** in A/Bs use real audio (`AUDIO=1`) or hold the process
+   (percore / isolate); with dummy audio and the window unfocused, power
+   throttling decides the level. Then the loads' checks (poll word,
+   alignment), then lazy condition-register updates. Stretch goal.
 5. Not verified: save portability (PARAM.PFD is not rewritten) and the colour
    comparison with RPCS3 (its capture never got past preloading pipelines).
 
@@ -1631,6 +1659,7 @@ as the current state.*
 | `RSX_FALLBACK_LOG=1` | draws that got the built-in programs, and why (missing vertex or fragment program) |
 | `SPU_MFC_LOOKUP_CACHE=0` | the per-thread MFC lookup cache off (on by default), for A/B |
 | `DOTHEROES_CPU=<zig cpu>` | build-time: the CPU level this machine compiles for (default its own: x86_64_v3 or x86_64_v2) |
+| `DOTHEROES_CPU_PLACE=normal\|percore\|isolate\|reserve`, `DOTHEROES_CPU_CORE=<n>` | experimental thread placement (port/cpu_place.cpp; default normal): the whole process one logical processor a core; the PPU main thread alone on one logical processor with the game's other threads off its core; the same with the main thread free on either of its core's two. The core: the one holding logical processor n, else the system's preferred core. The topology is logged in every mode. With `PS3_FTRACE`, kind 26 says per frame where the main thread ran and how busy its core's other logical processor was |
 | `SPURS_SNAP=<entry>:<entry>:<n>:<prefix>` | guest memory before and after a Bullet step, for docs/BULLET_NATIVE.md (`tests/snap_read.py`) |
 | `GCM_WORD_LOOP=1` | every FIFO data word through the per-word decode loop, as before the run fast path (A/B) |
 | `GCM_WRAP_LAP=1` | experimental: the buffer-full ring wrap hands the title a lap ending at the walker when that is safe, instead of waiting for the walker to read the whole ring (default 0: wait) |
