@@ -143,6 +143,17 @@ def compare(d, want_png, poisoned=False):
             else:
                 lit[i * 4 + 3] = 255
         png(os.path.join(d, "diff.png"), w, h, lit)
+        # sheet.png: reference | native | difference, side by side, 8 px apart
+        ref8, nat8 = to8(rv, kind), to8(nv, kind)
+        gap = 8
+        sw = 3 * w + 2 * gap
+        sheet = bytearray(sw * h * 4)
+        for y in range(h):
+            row = y * sw * 4
+            for k, src in enumerate((ref8, nat8, lit)):
+                o = row + k * (w + gap) * 4
+                sheet[o:o + w * 4] = src[y * w * 4:(y + 1) * w * 4]
+        png(os.path.join(d, "sheet.png"), sw, h, sheet)
         _, bv = channels(before, kind, n)
         png(os.path.join(d, "target_before.png"), w, h, to8(bv, kind))
         for tex in desc.get("textures", []):
