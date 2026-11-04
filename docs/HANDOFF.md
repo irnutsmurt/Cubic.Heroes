@@ -433,9 +433,13 @@ Finalize fix, wait-free creation) is measured against it.
    the commands; WaitFlip never blocks today; Finish runs once a session;
    per-pass GPU time: a barrier transition costs 7-8 us, 0.31-0.37 ms a
    frame, so the "~53 full drains" above is a count, not the main GPU
-   cost). **Milestone R1 (one captured PPFX pass rendered natively) awaits
-   the owner's approval: no replacement code before that.** The local review
-   documents in build/ab/2026-11-04-opt-review are the background.
+   cost). **R1 is done** (docs/NATIVE_R1.md): PPFX passes 3 and 48,
+   captured in river combat and exploration, render bit-exact through the
+   standalone native executor (build/r1: tools/r1_dev_lift.sh,
+   tools/r1_capture.sh, r1_replay); it removes nothing from the game yet.
+   **R2's scope (the whole PPFX chain offline) awaits the owner's review.**
+   The local review documents in build/ab/2026-11-04-opt-review are the
+   background.
 5. Not verified: save portability (PARAM.PFD is not rewritten) and the colour
    comparison with RPCS3 (its capture never got past preloading pipelines).
 

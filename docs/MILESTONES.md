@@ -282,3 +282,27 @@ Details and numbers in HANDOFF.md ("Current status", the work log).
   fights a side, both ok): +1.7%, inside the 1-2% batch drift, and too small
   for two runs a side to resolve (build/ab/2026-11-04-evidence/offcheck.sh).
 - **Next:** R1 (one captured PPFX pass rendered natively) awaits approval.
+
+## Native port: R1, one captured PPFX pass rendered natively (2026-11-04)
+
+- **Dependencies:** R0; the owner's approval with corrections (2026-11-04).
+- **Removed:** nothing from the game's active graphics path.
+- **Remains:** the whole PS3 graphics path; the game renders as before.
+- **Evidence:** NATIVE_R1.md. PPFX passes 3 (640x360 RGBA16F) and 48
+  (1280x720 RGBA8, the final composite) from one frame of river combat and
+  one of exploration, rendered by the standalone executor from a native pass
+  description: bit-exact in all four (no pixel or channel differs), also
+  from a poisoned target; programs remade byte-identical; synchronisation
+  validation 0 errors and 0 warnings (negative control caught); the
+  boundary log's queued program patches and constants equal what the GPU
+  consumed; the executor links no runtime code (tools/r1_check_deps.py).
+- **Performance:** the executor's GPU time per pass, 2,000 repetitions after
+  warm-up: 24.6 us (pass 3) and 29.7 us (pass 48), against 20.5-23.6 and
+  22.5-24.6 us in the game; the difference is unexplained, the obvious
+  causes ruled out. No in-game performance claim. The two production
+  refactors (ps3recomp 0102, 0103) change nothing built: no shader or
+  pipeline cache miss in a river fight.
+- **Commits:** ps3recomp 0100-0104; repo 795314b, cdb48e3, fdb5118, 37d91e2,
+  246dc39.
+- **Next:** R2's scope (the whole PPFX chain offline) awaits review.
+

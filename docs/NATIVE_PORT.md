@@ -1,9 +1,10 @@
 # Native port plan
 
 Status, 2026-11-04: **direction approved by the owner**; the evidence stage is
-done (NATIVE_EVIDENCE.md); **milestone R1 awaits approval** (section 5). The
-effort figures are provisional and are revised from actual progress at each
-milestone.
+done (NATIVE_EVIDENCE.md); **R1 is done** (NATIVE_R1.md: both passes, both
+scenes, bit-exact; it removes nothing from the game yet); **R2's scope awaits
+review** (NATIVE_R1.md, last section). The effort figures are provisional and
+are revised from actual progress at each milestone.
 
 This file replaces, for decisions, the four local review documents of
 2026-11-04 (architecture-proposal.md, native-render-design.md,
@@ -126,11 +127,17 @@ This settles the earlier documents' disagreement (one put the PPFX prototype
 first, the other a native rendering core): the core grows with its first
 producer, PPFX, in R1-R3.
 
-Provisional effort, revised at every milestone: R1 2-3 weeks, R2 2-3, R3 3-5,
-R4 1-2; R5-R7 estimated after R4. The earlier 5-9 months for the whole
-graphics replacement stays provisional until then.
+Provisional effort, revised at every milestone. R1 was estimated at 2-3
+weeks and took one working session; from that, R2 is 2-4 days, R3 and R4
+are re-estimated after R2; R5-R7 after R4. The earlier 5-9 months for the
+whole graphics replacement stays provisional until then.
 
-## 5. Milestone R1, for approval: one captured PPFX pass, rendered natively
+## 5. Milestone R1: one captured PPFX pass, rendered natively (done)
+
+Approved and done on 2026-11-04; the results, the corrections the owner asked
+for on approval (capturing what the GPU consumes, format-specific
+acceptance, synchronisation validation, honest timing) and R2's proposed
+scope are in NATIVE_R1.md. The plan as approved:
 
 **Goal.** Show that a real PPFX pass, described at PPFX's own boundary,
 renders correctly through native Vulkan code with its own resources, and
