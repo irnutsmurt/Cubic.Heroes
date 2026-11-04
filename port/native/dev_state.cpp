@@ -639,6 +639,19 @@ void keys_loop()
 }
 #endif
 
+// A loop that reads guest memory, started once there is some: main() reserves
+// it (alloc_guest_vm) after dev_state_init, and a read of vm_base + ea before
+// that is a read of ea itself -- life_loop's first, 2 ms in, faulted on
+// 0x02B38E0C when the reservation came later than that.
+void start_reader(void (*loop)())
+{
+    std::thread([loop] {
+        while (!__atomic_load_n(&vm_base, __ATOMIC_ACQUIRE))
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        loop();
+    }).detach();
+}
+
 }  // namespace
 
 void dev_state_init()
@@ -646,7 +659,7 @@ void dev_state_init()
     (void)PS3_FT_ON();   // the trace's clock set before the first record (it is set lazily, at its first use)
     const char* st = getenv("DOTHEROES_DEV_STATE");
     if (st && *st == '1') {
-        std::thread(state_loop).detach();
+        start_reader(state_loop);
         fprintf(stderr, "[dev-state] state.txt: t_s life x z steps topups area hx hy hz menu scene frames, every 100 ms; "
                         "actors.trigger -> actors.txt\n");
     }
@@ -663,38 +676,38 @@ void dev_state_init()
     if (pl && *pl && *pl != '0') {
         const unsigned long n = strtoul(pl, nullptr, 0);
         g_player_log_bytes = n > 1 ? (uint32_t)(n + 3) / 4 * 4 : 0x1000;
-        std::thread(player_log_loop).detach();
+        start_reader(player_log_loop);
         fprintf(stderr, "[dev-state] player.bin: the player's first 0x%X bytes every 4 ms\n", g_player_log_bytes);
     }
     const char* wa = getenv("DOTHEROES_DEV_WATCH");
     if (wa && *wa) {
         g_watch_offset = (uint32_t)strtoul(wa, nullptr, 16) & ~3u;
         vm_inline_st_ok = 0;   // every store out of line, where the watch is read (watch_loop)
-        std::thread(watch_loop).detach();
+        start_reader(watch_loop);
         fprintf(stderr, "[dev-state] watch.trigger: watch stores to the player's +0x%X..+0x%X\n", g_watch_offset,
                 g_watch_offset + 0x80);
     }
     const char* al = getenv("DOTHEROES_DEV_ACTOR_LOG");
     const bool actor_log = al && *al == '1';
     if (actor_log) {
-        std::thread(actor_log_loop).detach();
+        start_reader(actor_log_loop);
         fprintf(stderr, "[dev-state] actors.bin: characters near the hero, every 4 ms\n");
     }
     const char* rc = getenv("DOTHEROES_DEV_RECORD");
     if (rc && *rc == '1' && (g_record = fopen("record.log", "w")) != nullptr) {
-        std::thread(record_loop).detach();
+        start_reader(record_loop);
         fprintf(stderr, "[dev-state] record.log: inputs, areas, life, the hero's position every second, marks\n");
     }
     const char* sp = getenv("DOTHEROES_DEV_STOP");
     if (sp && *sp == '1') std::thread(stop_loop).detach();
     if (g_cant_die || g_life_log || (st && *st == '1') || g_player_log_bytes || (wa && *wa) || actor_log || g_record)
-        std::thread(life_loop).detach();   // also finds the player, for state.txt, player.bin and the watch
+        start_reader(life_loop);   // also finds the player, for state.txt, player.bin and the watch
     if (g_cant_die) {
         fprintf(stderr, "[cant-die] on (development only): life of %u half apples or less raised to %u\n", g_low_life, g_top_up);
     }
     const char* e = getenv("DOTHEROES_DEV_MEMSNAP");
     if (e && *e == '1') {
-        std::thread(memsnap_loop).detach();
+        start_reader(memsnap_loop);
         fprintf(stderr, "[memsnap] watching for memsnap.trigger\n");
     }
 #ifdef _WIN32
