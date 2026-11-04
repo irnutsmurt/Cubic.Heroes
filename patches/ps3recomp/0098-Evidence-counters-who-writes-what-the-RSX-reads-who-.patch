@@ -1,0 +1,371 @@
+From 84b3cf40fdf8c5469580e47a6c45dbfe3b7f63b8 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Wed, 4 Nov 2026 14:11:56 -0800
+Subject: [PATCH 98/99] Evidence counters: who writes what the RSX reads, who
+ calls a range, a frame's commands
+
+For the native renderer's boundary: which code, on which thread, produces the
+commands, measured rather than read off the disassembly. Development only;
+everything is off unless its switch is set.
+
+- PS3_ATTRIB_ST=<lo>-<hi>[,...] (ppu_loader.cpp): guest stores into a range
+  counted by writer and thread; PS3_ATTRIB_CALL=<lo>-<hi>[,...] indirect calls
+  into a range counted by target, caller and thread. A window
+  (PS3_ATTRIB_FROM/_SECS), then PS3_ATTRIB_OUT. Every store goes out of line
+  and every indirect call the full way while armed: slow, not for timing.
+- PS3_ATTRIB_SHADOW=1: the last writer (function, thread, lr) of every word
+  of the first store range, for the frame trace.
+- RSX_FRAME_TRACE=<s>:<frames>:<path> (cellGcmSys.c): every command header the
+  drain reads in N frames with its data words, and with the shadow the guest
+  function, thread and caller that stored it.
+- GCM_SEMA_STATS=1: the drain's NV406E acquires by label offset, and how many
+  found their value already there.
+
+On 3D Dot Game Heroes (2026-11-04): every store into RSX-visible memory and
+every indirect call into asp or PPFX was on the main thread; a frame's 42,000
+command headers were 82% asp, 16% PPFX, 2% game code through libgcm; the one
+acquire a frame (label 0x10, WaitFlip) was always already satisfied.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libs/video/cellGcmSys.c    |  80 ++++++++++++++++
+ runtime/ppu/ppu_loader.cpp | 190 ++++++++++++++++++++++++++++++++++++-
+ 2 files changed, 267 insertions(+), 3 deletions(-)
+
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index 5af273d..771edf9 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -2088,6 +2088,84 @@ void cellGcm_ref_on_poll(void)
+         SetEvent(s_gcm_kick_ev);       /* dry: ask the present thread to walk */
+ }
+ 
++/* RSX_FRAME_TRACE=<s>:<frames>:<path>: every command word the drain reads
++ * in <frames> frames, from the first flip <s> seconds after its first word:
++ * the word's IO offset and value, and for a method header its subchannel,
++ * method, count and first data words. With PS3_ATTRIB_SHADOW (ppu_loader.cpp)
++ * each word also names the guest function and thread that stored it
++ * (g_gcm_word_writer): which code produced which commands, in order -- the
++ * anatomy of a frame. Walker thread only; evidence, not for timing. */
++u64 (*g_gcm_word_writer)(u32 ea);
++u32 (*g_gcm_word_caller)(u32 ea);
++static void gcm_frame_trace(u32 off, u32 ea, u32 w)
++{
++    static int on = -1, active, left;
++    static FILE* f;
++    static unsigned long long t0, after_ms;
++    if (on == 0) return;
++    if (on < 0) {
++        on = 0;
++        const char* e = getenv("RSX_FRAME_TRACE");
++        unsigned s = 0, n = 0; char path[260] = "";
++        if (!e || sscanf(e, "%u:%u:%259s", &s, &n, path) != 3 || !n) return;
++        if (!(f = fopen(path, "w"))) return;
++        after_ms = 1000ull * s; left = (int)n; t0 = ps3_ms_now(); on = 1;
++        fprintf(f, "# rsx frame trace: %u frames from the first flip %u s after the drain's first word\n", n, s);
++        fprintf(f, "# off word [fn tid lr=] | method header: sc method count data...\n");
++    }
++    if ((w & 0xFFFF0000u) == 0xFEAD0000u) {   /* a flip word: a frame boundary */
++        if (active) {
++            fprintf(f, "%08X %08X FLIP\n", off, w);
++            if (--left <= 0) { fclose(f); f = NULL; on = 0; return; }
++        } else if (ps3_ms_now() - t0 >= after_ms) {
++            active = 1;
++            fprintf(f, "# begins after the flip at %08X, %.1f s\n", off, (ps3_ms_now() - t0) * 1e-3);
++        }
++        return;
++    }
++    if (!active) return;
++    const u64 wr = g_gcm_word_writer ? g_gcm_word_writer(ea) : 0;
++    fprintf(f, "%08X %08X %08X %u", off, w, (u32)wr, (u32)(wr >> 32));
++    if (g_gcm_word_caller) fprintf(f, " lr=%08X", g_gcm_word_caller(ea));
++    const u32 type = w >> 29;
++    if (!w) fprintf(f, " NOP");
++    else if ((w & 0xE0000003u) == 0x20000000u) fprintf(f, " JUMP %08X", w & 0x1FFFFFFCu);
++    else if ((w & 3u) == 1u) fprintf(f, " JUMP-OLD %08X", w & 0xFFFFFFFCu);
++    else if ((w & 3u) == 2u) fprintf(f, " CALL %08X", w & 0xFFFFFFFCu);
++    else if (w == 0x00020000u) fprintf(f, " RET");
++    else if (type == 0 || type == 2) {
++        const u32 count = (w >> 18) & 0x7FFu, method = w & 0x1FFCu, subch = (w >> 13) & 7u;
++        fprintf(f, " M %u %04X %u%s", subch, method, count, type == 2 ? " ni" : "");
++        for (u32 i = 0; i < count && i < 8; i++) fprintf(f, " %08X", vm_read32(ea + 4 + i * 4));
++        if (count > 8) fprintf(f, " ...");
++    }
++    fputc('\n', f);
++}
++
++/* GCM_SEMA_STATS=1: every 5 s, the NV406E ACQUIREs the drain met, by label
++ * offset, and how many found their value already there -- which waits the
++ * game puts in the command stream, and which of them the RSX would have sat
++ * on. With GCM_SEMA_ACQUIRE on, a blocked acquire is met again on every pass.
++ * Walker thread only. */
++static void gcm_sema_stat(u32 off, int satisfied)
++{
++    static int on = -1;
++    static struct { u32 off; unsigned long long n, sat; } st[16];
++    static unsigned long long t0;
++    if (on < 0) on = getenv("GCM_SEMA_STATS") ? 1 : 0;
++    if (!on) return;
++    int i = 0;
++    while (i < 16 && st[i].n && st[i].off != off) i++;
++    if (i < 16) { st[i].off = off; st[i].n++; st[i].sat += satisfied ? 1 : 0; }
++    const unsigned long long now = ps3_ms_now();
++    if (!t0) t0 = now;
++    if (now - t0 < 5000) return;
++    fprintf(stderr, "[gcm-sema] %.1f s: acquires by label offset:", (now - t0) * 1e-3);
++    for (int k = 0; k < 16 && st[k].n; k++)
++        fprintf(stderr, " 0x%X n=%llu satisfied=%llu", st[k].off, st[k].n, st[k].sat);
++    fprintf(stderr, "\n");
++    memset(st, 0, sizeof st); t0 = now;
++}
+ static uint64_t s_ft_sema_t0;          /* PS3_FTRACE: when the walker began waiting on the current acquire */
+ 
+ /* RSX_WALKER_PROF=<file>: an in-process sampling profile of the FIFO walker
+@@ -2539,6 +2617,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
+             break;
+         }
+         u32 w = vm_read32(ea);
++        gcm_frame_trace(s_fifo_getoff, ea, w);
+         /* Only remember offsets BELOW put -- those are positions in the
+          * ring the title is writing. A park in another region is where the
+          * walker gave up, not how far it got through the ring. */
+@@ -2796,6 +2875,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
+                         ps3_ft_span(PS3_FT_SEMA, 0, s_sema_offset, v, s_ft_sema_t0, ps3_ft_now());
+                         s_ft_sema_t0 = 0;
+                     }
++                    if (m == 0x68u) gcm_sema_stat(s_sema_offset, vm_read32(la) == v);
+                     if (m == 0x64u)      s_sema_offset = v;
+                     else if (m == 0x6Cu) {
+                         /* The RSX has fetched past a RELEASE before its
+diff --git a/runtime/ppu/ppu_loader.cpp b/runtime/ppu/ppu_loader.cpp
+index 2695f46..50e4170 100644
+--- a/runtime/ppu/ppu_loader.cpp
++++ b/runtime/ppu/ppu_loader.cpp
+@@ -1705,7 +1705,8 @@ static struct VmInlineInit {
+          * either set, every store goes out of line, where both are read on
+          * each store. Without them both stay 0 for the whole run, so the
+          * inline stores need not test them. */
+-        static const char* const svars[] = { "PPU_WVAL", "PPU_WWATCH", "PT", "SPU_ATOM_EA", "PS3_NULL_SWEEP", 0 };
++        static const char* const svars[] = { "PPU_WVAL", "PPU_WWATCH", "PT", "SPU_ATOM_EA", "PS3_NULL_SWEEP",
++                                              "PS3_ATTRIB_ST", 0 };
+         int sd = 0;
+         for (int i = 0; svars[i]; i++) if (getenv(svars[i])) sd = 1;
+         vm_inline_st_ok = !sd;
+@@ -1945,6 +1946,187 @@ static void ww_arm_inline_window(uint32_t ww)
+     g_ww_lo = ww & ~15u;
+     g_ww_hi = (ww & ~15u) + len;
+ }
++/* PS3_ATTRIB_ST=<lo>-<hi>[,<lo>-<hi>...] and PS3_ATTRIB_CALL=<lo>-<hi>[,...]
++ * (hex guest addresses): who writes a range, and who calls into one --
++ * counted, not logged, so a busy range (a command ring, a vertex pool) can be
++ * watched for a whole scene. A store is keyed by its range, the guest thread
++ * and the writing host function's return address (named as its guest function
++ * when written out; a store made by runtime code has none, and its host offset
++ * is given); an indirect call by its target, its caller's lr and the thread.
++ * Counting runs from PS3_ATTRIB_FROM seconds after start (default 60) for
++ * PS3_ATTRIB_SECS (default 30); the first access after that writes
++ * PS3_ATTRIB_OUT (default attrib.txt) with the window on the PS3_FTRACE clock,
++ * and counting stops. PS3_ATTRIB_ST sends every guest store out of line
++ * (s_vm_inline_init) and PS3_ATTRIB_CALL every indirect call the full way
++ * (icall_plain): a slow run, for evidence only. Vector stores (vm_raw_st16)
++ * are not seen. */
++namespace {
++struct AttribSlot { uint64_t a; uint32_t b, tid; uint64_t n, bytes; };
++enum { ATTRIB_SLOTS = 1 << 14, ATTRIB_RANGES = 8 };
++struct AttribTable {
++    uint32_t lo[ATTRIB_RANGES], hi[ATTRIB_RANGES], nr;
++    uint64_t dropped;
++    AttribSlot s[ATTRIB_SLOTS];
++};
++AttribTable* s_at_st;
++AttribTable* s_at_call;
++std::atomic_flag s_at_lock = ATOMIC_FLAG_INIT;
++std::atomic<int> s_at_state{-1};   /* -1 unread, 0 off, 1 armed, 2 written */
++unsigned long long s_at_t0, s_at_from, s_at_to;   /* ps3_ms_now */
++uint64_t s_at_ft0, s_at_ft1;                      /* PS3_FTRACE clock */
++/* PS3_ATTRIB_SHADOW=1: the last writer of every word of the first store
++ * range (host return address | thread << 48), kept from the start whatever
++ * the window, for cellGcmSys.c's RSX_FRAME_TRACE (g_gcm_word_writer). */
++uint64_t* s_at_shadow;
++uint32_t* s_at_shadow_lr;   /* and the writing thread's guest lr then: its caller, for a leaf writer */
++uint32_t s_at_sh_lo, s_at_sh_len;
++}
++extern "C" unsigned long long ps3_ms_now(void);
++static AttribTable* attrib_parse(const char* e)
++{
++    if (!e || !*e) return nullptr;
++    AttribTable* t = (AttribTable*)calloc(1, sizeof(AttribTable));
++    for (const char* p = e; *p && t->nr < ATTRIB_RANGES; ) {
++        char* q; const uint32_t lo = (uint32_t)strtoul(p, &q, 16);
++        if (*q != '-') break;
++        const uint32_t hi = (uint32_t)strtoul(q + 1, &q, 16);
++        t->lo[t->nr] = lo; t->hi[t->nr] = hi; t->nr++;
++        p = *q == ',' ? q + 1 : q;
++    }
++    return t;
++}
++static struct AttribInit {
++    AttribInit() { s_at_t0 = ps3_ms_now(); }
++} s_attrib_init;
++static void attrib_write(void)
++{
++    const char* path = getenv("PS3_ATTRIB_OUT");
++    FILE* f = fopen(path && *path ? path : "attrib.txt", "w");
++    if (!f) return;
++    char* mb = (char*)GetModuleHandleA(0);
++    fprintf(f, "# ps3_attrib from_s=%llu to_s=%llu ft_from_us=%llu ft_to_us=%llu\n",
++            (s_at_from - s_at_t0) / 1000ull, (s_at_to - s_at_t0) / 1000ull,
++            /* as ftrace.txt and frames.log give them: from the trace's base */
++            (unsigned long long)((s_at_ft0 - g_ps3_ft.base) / 1000u),
++            (unsigned long long)((s_at_ft1 - g_ps3_ft.base) / 1000u));
++    if (AttribTable* t = s_at_st) {
++        for (uint32_t r = 0; r < t->nr; r++) fprintf(f, "# store range %u 0x%08X-0x%08X\n", r, t->lo[r], t->hi[r]);
++        fprintf(f, "# S range tid guest_fn host_off stores bytes (dropped %llu)\n", (unsigned long long)t->dropped);
++        for (uint32_t i = 0; i < ATTRIB_SLOTS; i++) if (t->s[i].n)
++            fprintf(f, "S %u %u 0x%08X 0x%llX %llu %llu\n", t->s[i].b, t->s[i].tid,
++                    ppu_prof_resolve_host((void*)(uintptr_t)t->s[i].a),
++                    (unsigned long long)((char*)(uintptr_t)t->s[i].a - mb),
++                    (unsigned long long)t->s[i].n, (unsigned long long)t->s[i].bytes);
++    }
++    if (AttribTable* t = s_at_call) {
++        for (uint32_t r = 0; r < t->nr; r++) fprintf(f, "# call range %u 0x%08X-0x%08X\n", r, t->lo[r], t->hi[r]);
++        fprintf(f, "# C tid target lr calls (dropped %llu)\n", (unsigned long long)t->dropped);
++        for (uint32_t i = 0; i < ATTRIB_SLOTS; i++) if (t->s[i].n)
++            fprintf(f, "C %u 0x%08X 0x%08X %llu\n", t->s[i].tid, (uint32_t)t->s[i].a, t->s[i].b,
++                    (unsigned long long)t->s[i].n);
++    }
++    fclose(f);
++    fprintf(stderr, "[attrib] written: %s\n", path && *path ? path : "attrib.txt");
++}
++/* The guest function and thread that last stored the word at ea, and the
++ * guest lr the store was made with. */
++extern "C" uint64_t (*g_gcm_word_writer)(uint32_t ea);   /* cellGcmSys.c */
++extern "C" uint32_t (*g_gcm_word_caller)(uint32_t ea);
++static uint32_t attrib_word_caller(uint32_t ea)
++{
++    const uint32_t i = ea - s_at_sh_lo;
++    return s_at_shadow_lr && i < s_at_sh_len ? __atomic_load_n(&s_at_shadow_lr[i >> 2], __ATOMIC_RELAXED) : 0;
++}
++static uint64_t attrib_word_writer(uint32_t ea)
++{
++    const uint32_t i = ea - s_at_sh_lo;
++    if (!s_at_shadow || i >= s_at_sh_len) return 0;
++    const uint64_t v = __atomic_load_n(&s_at_shadow[i >> 2], __ATOMIC_RELAXED);
++    if (!v) return 0;
++    const uint32_t fn = ppu_prof_resolve_host((void*)(uintptr_t)(v & 0xFFFFFFFFFFFFull));
++    return (uint64_t)fn | ((v >> 48) << 32);
++}
++/* 1 while counting; the first call after the window writes the file. */
++static int attrib_live(void)
++{
++    int st = s_at_state.load(std::memory_order_relaxed);
++    if (__builtin_expect(st == 0 || st == 2, 1)) return 0;
++    if (st < 0) {
++        while (s_at_lock.test_and_set(std::memory_order_acquire)) {}
++        if (s_at_state.load() < 0) {
++            s_at_st = attrib_parse(getenv("PS3_ATTRIB_ST"));
++            s_at_call = attrib_parse(getenv("PS3_ATTRIB_CALL"));
++            const char* fr = getenv("PS3_ATTRIB_FROM"); const char* se = getenv("PS3_ATTRIB_SECS");
++            s_at_from = s_at_t0 + 1000ull * (unsigned long long)(fr ? atoi(fr) : 60);
++            s_at_to = s_at_from + 1000ull * (unsigned long long)(se ? atoi(se) : 30);
++            if (s_at_st && s_at_st->nr && getenv("PS3_ATTRIB_SHADOW")) {
++                s_at_sh_lo = s_at_st->lo[0]; s_at_sh_len = s_at_st->hi[0] - s_at_st->lo[0];
++                s_at_shadow = (uint64_t*)calloc(s_at_sh_len / 4 + 1, sizeof(uint64_t));
++                s_at_shadow_lr = (uint32_t*)calloc(s_at_sh_len / 4 + 1, sizeof(uint32_t));
++                if (s_at_shadow && s_at_shadow_lr) {
++                    g_gcm_word_writer = attrib_word_writer; g_gcm_word_caller = attrib_word_caller; }
++            }
++            s_at_state.store(s_at_st || s_at_call ? 1 : 0);
++        }
++        s_at_lock.clear(std::memory_order_release);
++        st = s_at_state.load();
++        if (st != 1) return 0;
++    }
++    const unsigned long long now = ps3_ms_now();
++    if (now < s_at_from) return 0;
++    if (!s_at_ft0) s_at_ft0 = ps3_ft_now();
++    if (now < s_at_to) return 1;
++    while (s_at_lock.test_and_set(std::memory_order_acquire)) {}
++    if (s_at_state.load() == 1) { s_at_ft1 = ps3_ft_now(); s_at_state.store(2); attrib_write(); }
++    s_at_lock.clear(std::memory_order_release);
++    return 0;
++}
++static void attrib_count(AttribTable* t, uint64_t a, uint32_t b, uint32_t tid, uint32_t bytes)
++{
++    uint64_t h = (a ^ ((uint64_t)b << 32) ^ ((uint64_t)tid << 56)) * 0x9E3779B97F4A7C15ull;
++    uint32_t i = (uint32_t)(h >> 50) & (ATTRIB_SLOTS - 1);
++    while (s_at_lock.test_and_set(std::memory_order_acquire)) {}
++    for (uint32_t probe = 0; probe < 64; probe++, i = (i + 1) & (ATTRIB_SLOTS - 1)) {
++        AttribSlot& s = t->s[i];
++        if (!s.n) { s.a = a; s.b = b; s.tid = tid; }
++        else if (s.a != a || s.b != b || s.tid != tid) continue;
++        s.n++; s.bytes += bytes;
++        s_at_lock.clear(std::memory_order_release);
++        return;
++    }
++    t->dropped++;
++    s_at_lock.clear(std::memory_order_release);
++}
++static void attrib_store(uint32_t a, int width, void* ra)
++{
++    const int live = attrib_live();
++    if (s_at_shadow && a - s_at_sh_lo < s_at_sh_len) {
++        __atomic_store_n(&s_at_shadow_lr[(a - s_at_sh_lo) >> 2],
++                         g_active_ctx ? (uint32_t)g_active_ctx->lr : 0u, __ATOMIC_RELAXED);
++        __atomic_store_n(&s_at_shadow[(a - s_at_sh_lo) >> 2],
++                         ((uint64_t)(uintptr_t)ra & 0xFFFFFFFFFFFFull) |
++                         ((uint64_t)(g_active_ctx ? (uint32_t)g_active_ctx->thread_id & 0xFFFFu : 0u) << 48),
++                         __ATOMIC_RELAXED); }
++    if (!live || !s_at_st) return;
++    AttribTable* t = s_at_st;
++    for (uint32_t r = 0; r < t->nr; r++)
++        if (a >= t->lo[r] && a < t->hi[r]) {
++            attrib_count(t, (uint64_t)(uintptr_t)ra, r,
++                         g_active_ctx ? (uint32_t)g_active_ctx->thread_id : 0u, (uint32_t)width);
++            return;
++        }
++}
++static void attrib_call(ppu_context* ctx, uint32_t target)
++{
++    if (!attrib_live() || !s_at_call) return;
++    AttribTable* t = s_at_call;
++    for (uint32_t r = 0; r < t->nr; r++)
++        if (target >= t->lo[r] && target < t->hi[r]) {
++            attrib_count(t, target, (uint32_t)ctx->lr, (uint32_t)ctx->thread_id, 0);
++            return;
++        }
++}
++
+ /* -1 until read; 0 when neither PPU_WVAL nor PPU_WWATCH is set, which with no
+  * sync-line probe armed leaves every guest store one load and one compare. */
+ static int s_store_watch = -1;
+@@ -1956,7 +2138,8 @@ static inline void barrier_watch_hit(uint32_t a, uint32_t v, int width, void* ra
+ }
+ static __attribute__((noinline)) void barrier_watch_hit_slow(uint32_t a, uint32_t v, int width, void* ra)
+ {
+-    if (s_store_watch < 0) s_store_watch = getenv("PPU_WVAL") || getenv("PPU_WWATCH") ? 1 : 0;
++    if (s_store_watch < 0) s_store_watch = getenv("PPU_WVAL") || getenv("PPU_WWATCH") || getenv("PS3_ATTRIB_ST") ? 1 : 0;
++    attrib_store(a, width, ra);
+     /* PPU_WVAL=<hexvalue>: log every PPU store that WRITES this value, wherever
+      * it lands. PPU_WWATCH answers "who writes this address"; when a bad value is
+      * copied from node to node down a list, that only ever catches the copy.
+@@ -2638,7 +2821,7 @@ static int icall_plain(void)
+             "PS3_TOCCHECK", "PPU_CSCHECK", "PS3_ICALL_GATE", "PS3_ICALL_TRACE", "BCTRL_RING", "PS3_BREADCRUMB",
+             "PPU_TOCWATCH", "PS3_CALLTRACE", "PS3_CALLTRACE_LR", "PS3_CALLTRACE_TO", "PS3_CALLTRACE_FROM",
+             "PS3_CALLTRACE_R5", "FLOW_FORCE_RTCFG", "SPURS_TRACE", "PS3_PRX_CALLTRACE", "PPU_TOCFIX",
+-            "PPU_RETWATCH", 0 };
++            "PPU_RETWATCH", "PS3_ATTRIB_CALL", 0 };
+         int p = 1;
+         for (int i = 0; vars[i]; i++) if (getenv(vars[i])) p = 0;
+         plain = p;
+@@ -2726,6 +2909,7 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
+ #endif
+     uint32_t addr = (uint32_t)ctx->ctr;
+     if (g_icall_target_set) { addr = g_icall_target; g_icall_target_set = 0; }
++    attrib_call(ctx, addr);   /* PS3_ATTRIB_CALL */
+     /* PS3_CALLTRACE=N: log the first N indirect calls (target + r3/r4) --
+      * generic visibility into vtable/callback dispatch (e.g. which job body a
+      * JobManager worker runs). */
+-- 
+2.56.0.windows.3
+

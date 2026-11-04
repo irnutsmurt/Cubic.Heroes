@@ -1,0 +1,104 @@
+From dd795bf2119b72dd862faa41dc1ff4e46f67caef Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Wed, 4 Nov 2026 14:11:57 -0800
+Subject: [PATCH 99/99] Release paths reported when they run: the SPU
+ microstepper, built-in shaders, skipped waits
+
+Strict mode does not cover these, so a run that used one looked like a run
+that did not. Each now writes a line (the first few, then at powers of two):
+- [release-path] SPU microstepper ran (spu_channels.c): interpreted SPU code
+  where no lifted function exists;
+- [release-path] built-in shader programs for a draw (rsx_draw_engine.c): the
+  game's own programs were missing;
+- [release-path] ACQUIRE consumed unsatisfied (cellGcmSys.c): with
+  GCM_SEMA_ACQUIRE off, an RSX wait the hardware would have made;
+- [gcm] SPU DMA into RSX-visible memory (cellGcmSys.c): an SPU producing what
+  the RSX reads.
+None appeared in seven runs of the river fight and exploration (2026-11-04).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libs/video/cellGcmSys.c      | 19 +++++++++++++++++++
+ libs/video/rsx_draw_engine.c |  4 ++++
+ runtime/spu/spu_channels.c   | 12 +++++++++++-
+ 3 files changed, 34 insertions(+), 1 deletion(-)
+
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index 771edf9..0f7ffbe 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -1814,6 +1814,14 @@ void gcm_note_spu_put(u32 ea, u32 size)
+     u32 room = 0;
+     u32 io = gcm_ea2io_range(ea, &room);
+     if (io == 0xFFFFFFFFu || size > room) return;   /* not in RSX-visible memory */
++    /* Reported: an SPU writing what the RSX reads (a command block, vertices)
++     * is a producer the native renderer must know of. The first four, then at
++     * powers of two. */
++    { static unsigned long long s_pn;
++      const unsigned long long pn = __atomic_add_fetch(&s_pn, 1, __ATOMIC_RELAXED);
++      if (pn <= 4 || (pn & (pn - 1)) == 0)
++          fprintf(stderr, "[gcm] SPU DMA into RSX-visible memory: ea 0x%08X io 0x%08X size 0x%X (%llu so far)\n",
++                  ea, io, size, pn); }
+ 
+     /* Coalesce with the previous block when an SPU emits one buffer in several
+      * transfers -- otherwise only the last fragment is remembered and the
+@@ -2902,6 +2910,17 @@ static void gcm_rsx_process_fifo_unlocked(void)
+             static int blk = -1; static unsigned blk_ms;
+             if (blk < 0) { const char* e = getenv("GCM_SEMA_ACQUIRE"); blk = e ? atoi(e) : 0;
+                            const char* t = getenv("GCM_SEMA_ACQUIRE_MS"); blk_ms = t ? (unsigned)atoi(t) : 0; }
++            if (!blk) {
++                /* Consumed although the label does not hold the value: the
++                 * hardware would wait here. Reported for the release-path
++                 * audit: the first eight, then at powers of two. */
++                static unsigned long long s_an;
++                const unsigned long long an = ++s_an;
++                if (an <= 8 || (an & (an - 1)) == 0)
++                    fprintf(stderr, "[release-path] ACQUIRE consumed unsatisfied (GCM_SEMA_ACQUIRE off):"
++                            " off 0x%X want 0x%08X label 0x%08X (%llu so far)\n",
++                            s_sema_offset, v, vm_read32(la), an);
++            }
+             if (blk) {
+                 /* GCM_SEMA_ACQUIRE_MS=<ms>: a bounded wait. The hardware waits
+                  * for ever; an emulated producer that never comes (a boot-time
+diff --git a/libs/video/rsx_draw_engine.c b/libs/video/rsx_draw_engine.c
+index 1ed3327..6e1d517 100644
+--- a/libs/video/rsx_draw_engine.c
++++ b/libs/video/rsx_draw_engine.c
+@@ -2084,6 +2084,10 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
+         static int on = -1;
+         if (on < 0) on = getenv("RSX_FALLBACK_LOG") ? 1 : 0;
+         static u32 n;
++        { static unsigned long long s_fx;
++          if ((++s_fx & (s_fx - 1)) == 0)   /* 1, 2, 4, ...: the release-path audit */
++              fprintf(stderr, "[release-path] built-in shader programs for a draw, frame %u (%llu so far)\n",
++                      g.frames, s_fx); }
+         if (on && (n++ < 64 || n % 1000 == 0)) {
+             const u32 reg = rsx_dsp_reg(&g.rsx, 0x08E4);
+             u32 loc = 0;
+diff --git a/runtime/spu/spu_channels.c b/runtime/spu/spu_channels.c
+index 0457bf1..8a164fd 100644
+--- a/runtime/spu/spu_channels.c
++++ b/runtime/spu/spu_channels.c
+@@ -3232,8 +3232,18 @@ void spu_indirect_branch(spu_context* ctx)
+      * WWS jobmanager writes a save/restore stub above its static
+      * image and calls it). Interpret the live LS bytes; on success the next
+      * branch re-enters lifted code via the trampoline. */
+-    if (spu_smc_microstep(ctx))
++    const uint32_t ms_pc = ctx->pc & SPU_LS_MASK;
++    if (spu_smc_microstep(ctx)) {
++        /* Interpreted, not lifted: say so (release-path audit). Strict mode
++         * does not cover this path, so without the line a run that used it
++         * looks like one that did not. */
++        static unsigned long long s_ms_n;
++        const unsigned long long n = __atomic_add_fetch(&s_ms_n, 1, __ATOMIC_RELAXED);
++        if (n <= 8 || (n & (n - 1)) == 0)
++            fprintf(stderr, "[release-path] SPU microstepper ran image %d from LS 0x%05X (%llu so far)\n",
++                    ctx->image_id, ms_pc, n);
+         return;
++    }
+     /* Cap the unresolved-branch log PER IMAGE: a global cap let one noisy
+      * image (the FMOD mixer's overlay calls) exhaust it and silently hide
+      * every other image's misses -- LBP's loading jobs skipped their command
+-- 
+2.56.0.windows.3
+

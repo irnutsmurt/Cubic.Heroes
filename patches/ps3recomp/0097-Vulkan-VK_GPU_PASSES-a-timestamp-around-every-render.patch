@@ -1,0 +1,175 @@
+From b3a572ad63b871099f840eb8b523f2eec67e68a1 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Wed, 4 Nov 2026 14:11:35 -0800
+Subject: [PATCH 97/99] Vulkan: VK_GPU_PASSES, a timestamp around every render
+ pass
+
+With VK_GPU_TIME, VK_GPU_PASSES=<path> writes a TOP_OF_PIPE timestamp after a
+draw-engine pass's barrier, just before it begins, and a BOTTOM_OF_PIPE one
+when it ends. The [vk-gpu] line adds the period's GPU time in passes and
+between them (the full barriers, clears, copies and uploads recorded there),
+and every 5 s one submission's passes go to <path>: size, draws, start,
+duration, the gap before it, and what closed it.
+
+What it showed on 3D Dot Game Heroes (2026-11-04): 53 passes a frame, a
+pass-to-pass transition 7-8 us of GPU time (0.31-0.37 ms a frame), the depth
+snapshot 0.33-0.40 ms.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libs/video/rsx_vulkan_backend.c | 90 ++++++++++++++++++++++++++++++++-
+ 1 file changed, 88 insertions(+), 2 deletions(-)
+
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index 808bbc5..3ff368b 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -694,9 +694,10 @@ static const char* s_rp_closer = "?";
+ static unsigned long long s_rp_closers[8];
+ static const char* s_rp_closer_name[8];
+ 
++static void vk_gp_pass_end(void);
+ static void vk_rp_close(void)
+ {
+-    if (s_rp.open) { pvkCmdEndRenderPass(s_vk.cmd); s_rp.open = 0; s_rp.fb = VK_NULL_HANDLE; }
++    if (s_rp.open) { pvkCmdEndRenderPass(s_vk.cmd); vk_gp_pass_end(); s_rp.open = 0; s_rp.fb = VK_NULL_HANDLE; }
+ }
+ /* Every caller from here on also notes itself as the closer, for the [vk-gpu]
+  * line (a function-like macro does not expand inside its own body). */
+@@ -726,22 +727,99 @@ static u32 vk_gt_base(VkCommandBuffer cb)
+     if (!s_gt.cb0) s_gt.cb0 = cb;
+     return cb == s_gt.cb0 ? 0 : 2;
+ }
++/* VK_GPU_PASSES=<path>, with VK_GPU_TIME: the GPU time of each render pass the
++ * draw engine begins, to tell a pass's own work from the time between passes
++ * (the full barriers, and the clears, copies and uploads recorded there). A
++ * pass gets a TOP_OF_PIPE timestamp after its barrier, just before it begins,
++ * and a BOTTOM_OF_PIPE one when it ends; "between" is the submission's GPU
++ * time less its passes'. The [vk-gpu] line adds the period's totals, and every
++ * 5 s one submission's passes go to <path>. Passes past VK_GP_MAX in one
++ * submission, and the older single-draw paths' passes, count as between. */
++enum { VK_GP_MAX = 480 };
++static struct {
++    int on, dump, open; FILE* f; u32 n[2]; unsigned long long cbs;
++    struct { u16 w, h; u32 draws; const char* closer; } rec[2][VK_GP_MAX];
++    double in_ms, between_ms; unsigned long long passes, untimed;
++} s_gp;
++static u32 vk_gp_query(u32 half, u32 k) { return 4 + half * 2 * VK_GP_MAX + 2 * k; }
++static void vk_gp_pass_begin(u32 w, u32 h)
++{
++    s_gp.open = 0;
++    if (s_gt.on <= 0 || !s_gp.on) return;
++    const u32 half = vk_gt_base(s_vk.cmd) >> 1;
++    if (s_gt.state[half] != 1) return;
++    const u32 k = s_gp.n[half];
++    if (k >= VK_GP_MAX) { s_gp.untimed++; return; }
++    pvkCmdWriteTimestamp(s_vk.cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, s_gt.pool, vk_gp_query(half, k));
++    s_gp.rec[half][k].w = (u16)w; s_gp.rec[half][k].h = (u16)h;
++    s_gp.rec[half][k].draws = 0; s_gp.rec[half][k].closer = "?";
++    s_gp.open = 1;
++}
++static void vk_gp_pass_draw(void)
++{
++    if (s_gp.open) s_gp.rec[vk_gt_base(s_vk.cmd) >> 1][s_gp.n[vk_gt_base(s_vk.cmd) >> 1]].draws++;
++}
++static void vk_gp_pass_end(void)
++{
++    if (!s_gp.open) return;
++    s_gp.open = 0;
++    const u32 half = vk_gt_base(s_vk.cmd) >> 1;
++    const u32 k = s_gp.n[half];
++    pvkCmdWriteTimestamp(s_vk.cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, s_gt.pool, vk_gp_query(half, k) + 1);
++    s_gp.rec[half][k].closer = s_rp_closer;
++    s_gp.n[half] = k + 1;
++}
++/* After the submission's fence: its passes' times, from ts0 (its start). */
++static void vk_gp_collect(u32 half, uint64_t ts0, double gpu_ns)
++{
++    const u32 n = s_gp.n[half];
++    s_gp.n[half] = 0;
++    s_gp.cbs++;
++    static uint64_t ts[2 * VK_GP_MAX];
++    if (n && pvkGetQueryPoolResults(s_vk.device, s_gt.pool, vk_gp_query(half, 0), 2 * n,
++                                    sizeof(uint64_t) * 2 * n, ts, sizeof ts[0],
++                                    VK_QUERY_RESULT_64_BIT) != VK_SUCCESS) return;
++    double in_ns = 0;
++    for (u32 k = 0; k < n; k++) in_ns += (double)(ts[2 * k + 1] - ts[2 * k]) * s_gt.period_ns;
++    s_gp.in_ms += in_ns * 1e-6;
++    s_gp.between_ms += (gpu_ns - in_ns) * 1e-6;
++    s_gp.passes += n;
++    if (!s_gp.dump || !s_gp.f || n < 4) return;   /* the next submission with passes */
++    s_gp.dump = 0;
++    fprintf(s_gp.f, "cb %llu span_us %.1f passes %u in_us %.1f between_us %.1f\n", s_gp.cbs,
++            gpu_ns * 1e-3, n, in_ns * 1e-3, (gpu_ns - in_ns) * 1e-3);
++    uint64_t prev = ts0;
++    for (u32 k = 0; k < n; k++) {
++        fprintf(s_gp.f, "  %u %ux%u draws %u start_us %.1f dur_us %.1f before_us %.1f closer %s\n", k,
++                s_gp.rec[half][k].w, s_gp.rec[half][k].h, s_gp.rec[half][k].draws,
++                (double)(ts[2 * k] - ts0) * s_gt.period_ns * 1e-3,
++                (double)(ts[2 * k + 1] - ts[2 * k]) * s_gt.period_ns * 1e-3,
++                (double)(int64_t)(ts[2 * k] - prev) * s_gt.period_ns * 1e-3, s_gp.rec[half][k].closer);
++        prev = ts[2 * k + 1];
++    }
++    fflush(s_gp.f);
++}
+ static void vk_gt_begin(VkCommandBuffer cb)
+ {
+     if (s_gt.on < 0) {
+         s_gt.on = 0;
++        const char* gp = getenv("VK_GPU_PASSES");
+         VkQueryPoolCreateInfo qi = { .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+-                                     .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = 4 };
++                                     .queryType = VK_QUERY_TYPE_TIMESTAMP,
++                                     .queryCount = gp ? vk_gp_query(2, 0) : 4 };
+         VkPhysicalDeviceProperties p;
+         pvkGetPhysicalDeviceProperties(s_vk.phys, &p);
+         if (getenv("VK_GPU_TIME") && p.limits.timestampComputeAndGraphics &&
+             pvkCreateQueryPool(s_vk.device, &qi, NULL, &s_gt.pool) == VK_SUCCESS) {
+             s_gt.on = 1; s_gt.period_ns = p.limits.timestampPeriod;
++            if (gp) { s_gp.on = 1; s_gp.f = fopen(gp, "w"); }
+         }
+     }
+     if (!s_gt.on) return;
+     const u32 b = vk_gt_base(cb);
+     pvkCmdResetQueryPool(cb, s_gt.pool, b, 2);
++    if (s_gp.on) { pvkCmdResetQueryPool(cb, s_gt.pool, vk_gp_query(b >> 1, 0), 2 * VK_GP_MAX);
++                   s_gp.n[b >> 1] = 0; }
+     pvkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, s_gt.pool, b);
+     s_gt.state[b >> 1] = 1;
+ }
+@@ -764,6 +842,7 @@ static void vk_gt_collect(VkCommandBuffer cb)   /* after its fence */
+                                VK_QUERY_RESULT_64_BIT) != VK_SUCCESS) return;
+     const double gpu_ns = (double)(ts[1] - ts[0]) * s_gt.period_ns;
+     s_gt.ms += gpu_ns * 1e-6; s_gt.n++;
++    if (s_gp.on) vk_gp_collect(b >> 1, ts[0], gpu_ns);
+     /* PS3_FTRACE: the submission's own GPU time as a span ending when the CPU
+      * saw it complete (its start is that minus the GPU time: the placement is
+      * approximate, the length is measured), who = draws and uploads in it. */
+@@ -783,6 +862,11 @@ static void vk_gt_collect(VkCommandBuffer cb)   /* after its fence */
+             fprintf(stderr, " %s %llu", s_rp_closer_name[k], s_rp_closers[k]);
+             s_rp_closers[k] = 0;
+         }
++        if (s_gp.on) {
++            fprintf(stderr, "; timed passes %llu (untimed %llu): in passes %.0f ms, between %.0f ms",
++                    s_gp.passes, s_gp.untimed, s_gp.in_ms, s_gp.between_ms);
++            s_gp.passes = s_gp.untimed = 0; s_gp.in_ms = s_gp.between_ms = 0; s_gp.dump = 1;
++        }
+         fprintf(stderr, "\n");
+         memset(s_rp_why, 0, sizeof s_rp_why);
+         s_gt.ms = 0; s_gt.n = 0; s_gt.t0 = now;
+@@ -4890,10 +4974,12 @@ static void vk_eng_draw_from(rsx_topology topology, const void* vertices, u32 ve
+         VkRenderPassBeginInfo rbi = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+                                       .renderPass = rp, .framebuffer = fb,
+                                       .renderArea = { { 0, 0 }, { w, h } } };
++        vk_gp_pass_begin(w, h);
+         pvkCmdBeginRenderPass(s_vk.cmd, &rbi, VK_SUBPASS_CONTENTS_INLINE);
+         s_rp.open = 1; s_rp.fb = fb;
+         s_ft_rp_begins++; s_frame_passes++;
+     }
++    vk_gp_pass_draw();
+     pvkCmdBindPipeline(s_vk.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+     VkViewport vp = { 0.0f, 0.0f, (float)w, (float)h, 0.0f, 1.0f };
+     if (s_e2.have_vp && s_e2.vp[2] > 0.0f && s_e2.vp[3] > 0.0f) {
+-- 
+2.56.0.windows.3
+
