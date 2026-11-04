@@ -334,10 +334,28 @@ Finalize fix, wait-free creation) is measured against it.
    guest store at -O1 is ~25 instructions around a 2-instruction store: the
    range check, two diagnostic watch globals and the SPU reservation bitmap,
    each global through a .refptr indirection (780,829 store sites in the
-   generated code). Candidates for discussion before any change, in that
-   order: the store path's per-store checks, then the loads' (poll word,
-   alignment), then lazy condition-register updates in the lifter. Stretch
-   goal.
+   generated code). ("-O1" is clang -O2: zig maps -O1/-O2/-O3 to -O2, and
+   the objects are byte-identical, so a higher level is no test.)
+   **The store check, done 2026-11-03** (ps3recomp 0092; build/ab/
+   2026-11-03-store-check, both exes with PDBs, every run, README): the
+   inline store no longer tests the two diagnostic watch globals -- they can
+   rise only under a start-up variable (SPU_ATOM_EA, PS3_NULL_SWEEP, and
+   the port's DOTHEROES_DEV_WATCH), which now send every store out of line
+   instead; the SPU reservation bitmap check is unchanged. Watch logs equal
+   in both builds. River fight, uncapped, 8 runs against 7: ordinary frames
+   7.93 -> 7.41 ms (-6.6%), main busy -7.4% (permutation p = 0.0014);
+   physics frames -3.7% (not significant: debris varies); frames over
+   16.7 ms 0.10% -> 0.03%.
+   **Measuring: hold the process to one logical CPU per core.** Unpinned,
+   each process settles at its own level for a whole fight (the same build
+   7.8 or ~10 ms an ordinary frame): another busy thread on the main
+   thread's SMT sibling. Pinned (affinity 0x5555, set right after start;
+   build/ab/2026-11-03-store-check/ab_pinned.sh) the levels agree within
+   ~0.3 ms -- and sit at the fast one. That is also the next candidate:
+   keeping the PPU main thread's core to itself is worth ~2 ms an ordinary
+   frame in a typical unpinned run, more than this change. Then the loads'
+   checks (poll word, alignment), then lazy condition-register updates.
+   Stretch goal.
 5. Not verified: save portability (PARAM.PFD is not rewritten) and the colour
    comparison with RPCS3 (its capture never got past preloading pipelines).
 
@@ -1651,7 +1669,7 @@ as the current state.*
 | `DOTHEROES_DEV_PLAYER_LOG=1\|<bytes>` | testing: the player's object (first 0x1000 bytes) every 4 ms into `<run>/player.bin`, ~1 MB/s (game memory: local only; tests/fps_check.py) |
 | `DOTHEROES_DEV_ACTOR_LOG=1` | testing: the characters within 40 units of the hero (class vtable at +0, position at +0x428), their positions every 4 ms into `<run>/actors.bin` (game memory: local only; tests/actor_steps.py) |
 | `DOTHEROES_STEP_CARRY=0` | the hero's per-frame step truncated to 0.01 as the game does; by default the truncated part is carried into the next step, so the hero walks at 9 units a second at any frame rate (port/game_patches.cpp) |
-| `DOTHEROES_DEV_WATCH=<hex offset>` | testing, with `PPU_WWATCH=10000` (any address: it routes the lifted stores through the runtime's hooks): when a drive touches `watch.trigger`, the first 48 stores to the player's object from `<offset>` (0x80 bytes) are logged as `[sync-write] +<offset - 0x40 + n>` with the storing guest function (tests/scripts/watch_walk.drive) |
+| `DOTHEROES_DEV_WATCH=<hex offset>` | testing (it turns the lifted code's inline stores off, so every store goes through the runtime's hooks; `PPU_WWATCH` is no longer needed): when a drive touches `watch.trigger`, the first 48 stores to the player's object from `<offset>` (0x80 bytes) are logged as `[sync-write] +<offset - 0x40 + n>` with the storing guest function (tests/scripts/watch_walk.drive) |
 | `PPU_WWATCH=<hex ea>` | the runtime's store watch: every lifted PPU store to that 16-byte line, with the writing guest function (found the HUD's life writer) |
 | `VISIBLE=1`, `GRAB_EVERY=<s>` | tests/boot_smoke.py: an on-screen run -- refused on a locked desktop, stopped if it locks, the window is minimised/hidden, or another window covers more than a tenth of it for 3 s (a covered window ran at ~35 fps); guard.json has the foreground and covered shares; window grabs to grabs/ |
 | `TOPMOST=1` | tests/boot_smoke.py, with VISIBLE=1: the game's window kept above other windows without taking the focus |

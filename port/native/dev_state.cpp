@@ -366,9 +366,13 @@ void actor_log_loop()
 // second store watch -- g_barrier_sync_watch, which logs stores to its base +
 // 0x40..0xC0 as "[sync-write] +<off> <- <value> (w<width>) guest-fn=<fn>", the
 // first 48 -- is set to cover 0x80 bytes of the object from <offset>: the
-// printed +<off> is 0x40 above <offset>'s. The lifted code's stores reach the
-// runtime's hooks only with PPU_WWATCH set (to any address, e.g. 10000).
+// printed +<off> is 0x40 above <offset>'s. The lifted code's inline stores do
+// not look at that watch, so with DOTHEROES_DEV_WATCH set they are turned off
+// before the guest starts (vm_inline_st_ok, as the runtime's own store
+// diagnostics do): every store then reaches the runtime's hooks, which read the
+// watch on each one, and it can be armed from this thread at any time.
 extern "C" uint32_t g_barrier_sync_watch;
+extern "C" int vm_inline_st_ok;
 uint32_t g_watch_offset;
 
 void watch_loop()
@@ -665,9 +669,10 @@ void dev_state_init()
     const char* wa = getenv("DOTHEROES_DEV_WATCH");
     if (wa && *wa) {
         g_watch_offset = (uint32_t)strtoul(wa, nullptr, 16) & ~3u;
+        vm_inline_st_ok = 0;   // every store out of line, where the watch is read (watch_loop)
         std::thread(watch_loop).detach();
-        fprintf(stderr, "[dev-state] watch.trigger: watch stores to the player's +0x%X..+0x%X%s\n", g_watch_offset,
-                g_watch_offset + 0x80, getenv("PPU_WWATCH") ? "" : " (no PPU_WWATCH: lifted stores are not seen)");
+        fprintf(stderr, "[dev-state] watch.trigger: watch stores to the player's +0x%X..+0x%X\n", g_watch_offset,
+                g_watch_offset + 0x80);
     }
     const char* al = getenv("DOTHEROES_DEV_ACTOR_LOG");
     const bool actor_log = al && *al == '1';
