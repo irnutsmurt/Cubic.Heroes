@@ -190,6 +190,7 @@ add_executable(${PROJECT_NAME}
     stubs.cpp
     diag/diag.cpp
     game_patches.cpp
+    cpu_place.cpp
     ${PS3RECOMP_SCAFFOLD}
     ${HLE_NID_TABLE}
     ${RECOMP_SOURCES}

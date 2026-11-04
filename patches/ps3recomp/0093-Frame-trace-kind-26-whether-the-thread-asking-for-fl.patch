@@ -1,0 +1,135 @@
+From 6f5aa9d8b0d2e861865c4d8beb135072edf2f384 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Tue, 3 Nov 2026 19:03:50 -0800
+Subject: [PATCH] Frame trace: kind 26, whether the thread asking for flips has
+ its core to itself
+
+At each flip request, on the thread making it (the guest's main thread, the
+critical path), PS3_FT_CPU records its logical processor now and at the last
+request, how busy its core's other logical processor was in between, its own
+logical processor's busy share, its own run time, and the mean busy share
+outside its core. Busy is 1 - idle cycles / TSC cycles over the interval, any
+process (QueryIdleProcessorCycleTimeEx); the core map is the system's
+(GetLogicalProcessorInformationEx), not assumed from the numbering. Windows on
+x86-64 only, recorded only while PS3_FTRACE is.
+
+It is for telling a frame slowed by a busy SMT sibling from one slowed by the
+game's own work: unpinned, the same build ran a fight 7.8 or ~10 ms an
+ordinary frame by where the scheduler put its threads.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ include/ps3emu/ps3_ftrace.h | 75 +++++++++++++++++++++++++++++++++++++
+ libs/video/cellGcmSys.c     |  3 +-
+ 2 files changed, 77 insertions(+), 1 deletion(-)
+
+diff --git a/include/ps3emu/ps3_ftrace.h b/include/ps3emu/ps3_ftrace.h
+index dec7fed..525c184 100644
+--- a/include/ps3emu/ps3_ftrace.h
++++ b/include/ps3emu/ps3_ftrace.h
+@@ -118,6 +118,14 @@ enum ps3_ft_kind {
+     PS3_FT_GEOM_FETCH  = 25, /* instant at a frame's present (the draw engine): a = its draws whose
+                               * vertices were fetched from guest memory and converted on the CPU
+                               * (not resident geometry), b = their vertices */
++    PS3_FT_CPU         = 26, /* at each flip request, on the thread making it, since its last one
++                              * (Windows, x86-64; ps3_ft_cpu_frame): who = its logical processor
++                              * now | the one at the last | 1 << 16 if its core has no other;
++                              * a = busy per mille of its core's other logical processor (the
++                              * busiest, if more) | its own's << 16; b = the thread's own run time
++                              * per mille | the mean busy per mille of the logical processors
++                              * outside its core << 16. Busy: 1 - idle cycles / TSC cycles, any
++                              * process (QueryIdleProcessorCycleTimeEx); group 0 only */
+ };
+ 
+ #if defined(_MSC_VER)
+@@ -452,6 +460,73 @@ static inline void ps3_ft_usleep(uint32_t tid, uint32_t lr, uint64_t t0, uint64_
+     s->us[tid].t0 = t0; s->us[tid].t1 = t1; s->us[tid].lr = lr; s->us[tid].n = 1;
+ }
+ 
++/* PS3_FT_CPU, called at each flip request: whether the thread asking (the
++ * guest's main thread, the critical path) has its core to itself. A busy
++ * thread on the same core's other logical processor (SMT) takes a share of the
++ * core's execution units for as long as they share; a thread on the same
++ * logical processor takes turns with it (its run time drops). The core map
++ * comes from the system, not from the numbering. Only the first thread to
++ * call it is sampled; nothing here allocates. */
++#if defined(_WIN32) && (defined(__x86_64__) || defined(_M_X64))
++#include <intrin.h>
++static inline void ps3_ft_cpu_frame(uint64_t t)
++{
++    static DWORD tid;
++    static int ncpu;                         /* logical processors in group 0 (at most 64) */
++    static uint64_t core_of[64];             /* each one's core, as a mask of its processors */
++    static ULONG64 idle0[64], idle1[64];
++    static uint64_t t0, tsc0, run0;
++    static unsigned cpu0;
++    if (!tid) {
++        DWORD len = 0;
++        GetLogicalProcessorInformationEx(RelationProcessorCore, NULL, &len);
++        char* buf = len ? (char*)malloc(len) : NULL;
++        if (!buf || !GetLogicalProcessorInformationEx(RelationProcessorCore,
++                (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)buf, &len)) { free(buf); tid = (DWORD)-1; return; }
++        for (DWORD o = 0; o < len;) {
++            PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX e = (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)(buf + o);
++            for (WORD g = 0; g < e->Processor.GroupCount; g++)
++                if (e->Processor.GroupMask[g].Group == 0)
++                    for (int i = 0; i < 64; i++)
++                        if (e->Processor.GroupMask[g].Mask >> i & 1) core_of[i] = e->Processor.GroupMask[g].Mask;
++            o += e->Size;
++        }
++        free(buf);
++        ULONG n = sizeof idle0;
++        if (!QueryIdleProcessorCycleTimeEx(0, &n, idle0)) { tid = (DWORD)-1; return; }
++        ncpu = (int)(n / sizeof idle0[0]);
++        tid = GetCurrentThreadId();
++        QueryThreadCycleTime(GetCurrentThread(), &run0);
++        tsc0 = __rdtsc(); t0 = t; cpu0 = GetCurrentProcessorNumber();
++        return;
++    }
++    if (tid != GetCurrentThreadId()) return;
++    ULONG n = sizeof idle1;
++    ULONG64 run1;
++    if (!QueryIdleProcessorCycleTimeEx(0, &n, idle1) || !QueryThreadCycleTime(GetCurrentThread(), &run1)) return;
++    const uint64_t tsc1 = __rdtsc();
++    const unsigned cpu = GetCurrentProcessorNumber() & 63;
++    const double dt = (double)(tsc1 - tsc0);
++    uint32_t sib = 0, own = 0, rest = 0, nrest = 0;
++    int alone = 1;
++    for (int i = 0; i < ncpu && dt > 0; i++) {
++        double busy = 1.0 - (double)(idle1[i] - idle0[i]) / dt;
++        const uint32_t pm = busy <= 0 ? 0 : busy >= 1 ? 1000 : (uint32_t)(busy * 1000 + 0.5);
++        if ((unsigned)i == cpu) own = pm;
++        else if (core_of[cpu] >> i & 1) { alone = 0; if (pm > sib) sib = pm; }
++        else { rest += pm; nrest++; }
++        idle0[i] = idle1[i];
++    }
++    const double run = dt > 0 ? (double)(run1 - run0) / dt : 0;
++    const uint32_t run_pm = run <= 0 ? 0 : run >= 1 ? 1000 : (uint32_t)(run * 1000 + 0.5);
++    ps3_ft_span(PS3_FT_CPU, cpu | (cpu0 & 63) << 8 | (uint32_t)alone << 16, sib | own << 16,
++                run_pm | (nrest ? rest / nrest : 0) << 16, t0, t);
++    t0 = t; tsc0 = tsc1; run0 = run1; cpu0 = cpu;
++}
++#else
++static inline void ps3_ft_cpu_frame(uint64_t t) { (void)t; }
++#endif
++
+ /* A PPU thread's name, for the report's labels. */
+ static inline void ps3_ft_name(uint32_t tid, const char* name)
+ {
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index 31755a1..5af273d 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -3659,7 +3659,8 @@ static s32 gcm_flip_request(u32 bufferId, int in_fifo)
+     fr_note(in_fifo ? 2 : 3);
+     s_last_flip_time = get_timestamp_ns();
+     if (PS3_FT_ON()) { const uint64_t t = ps3_ft_now();
+-                       ps3_ft_span(PS3_FT_FLIP_REQ, 0, bufferId, (uint32_t)in_fifo, t, t); }
++                       ps3_ft_span(PS3_FT_FLIP_REQ, 0, bufferId, (uint32_t)in_fifo, t, t);
++                       ps3_ft_cpu_frame(t); }
+     ps3_osd_frame_note();
+ 
+     /* Invoke via OPD resolution, not a raw call into guest code.
+-- 
+2.56.0.windows.3
+

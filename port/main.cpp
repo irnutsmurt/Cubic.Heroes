@@ -561,6 +561,7 @@ static int run_guest(uint32_t entry, uint32_t stack_top) { return ppu_run(entry,
 #endif
 
 extern "C" void dotheroes_configure_patches(void);
+extern "C" void dotheroes_cpu_place(void);   /* cpu_place.cpp: DOTHEROES_CPU_PLACE */
 
 /* ---------------------------------------------------------------------------
  * Installed layout
@@ -663,6 +664,9 @@ int main(int argc, char** argv)
 
     /* Before the runtime installs its own fault handlers, so they chain here. */
     diag_install_crash_handler();
+    /* On this thread, which runs the guest's entry (the PPU main thread),
+     * and before the others start, so they take the process's placement. */
+    dotheroes_cpu_place();
     diag_start_watchdog();
     dotheroes_configure_patches();   /* game_patches.cpp: DOTHEROES_FPS etc. */
     dotheroes_native_init();         /* native/bullet_cd_task.cpp: DOTHEROES_NATIVE_CD */
