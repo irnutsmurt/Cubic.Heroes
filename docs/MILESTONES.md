@@ -9,9 +9,9 @@ results. Compiling is not evidence.
 | 2 | Native executable with diagnostics | **Met on Windows** (2026-11-02): strict-clean, 0 unresolved NIDs; crash/hang reports, the frame trace and hitch captures, the game-state probes. Debug console and golden boot log still open |
 | 3 | Initial Vulkan rendering and native audio | **Met on Windows**: 60 fps in the scenes measured, with the validated configuration (HANDOFF.md, "Current status"); colours vs RPCS3 not verified |
 | 4 | Menus and new-game startup | **Met**: title, new game, CONTINUE, the system menu and its pages, the dot editor, save and load |
-| 5 | Core gameplay | **In progress**: the castle's field and interior, the river's fights; no dungeon or boss reached yet |
+| 5 | Core gameplay | **In progress**. Manual play (the owner): the castle, the field, the river's fights, the first dungeon and its boss (2026-11-02/03). Automated: the field, the river's fights, the first dungeon to the boss's door (checkpoint dungeon1-boss-door); the boss route is exploratory (its key chest does not open yet) |
 | 6 | Full-game coverage | Not started (HANDOFF.md, "Game coverage") |
-| 7 | Stability and release preparation | **In progress**: long-session soaks with reloads; the setup app not yet run end to end |
+| 7 | Stability and release preparation | **In progress**: long-session soaks with reloads; the setup app's headless conversion run end to end on Windows (2026-11-02: a working install from the owner's disc and keys); its GUI, the frozen bundle and a first release not yet |
 
 The native-port milestones (R0-R7: the PS3 graphics path replaced, then
 retired) are defined in NATIVE_PORT.md; their records follow its section 10

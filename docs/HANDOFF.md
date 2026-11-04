@@ -451,11 +451,11 @@ Finalize fix, wait-free creation) is measured against it.
 | Gameplay speed independent of frame rate (30/60/120/144) | done for the hero, river enemies, physics, timers | build/baselines/2026-11-02-frame-rate |
 | Save / load, GAME OVER save | done | tests/scripts/save_game.drive |
 | INSTALL, SNAPSHOT/ALBUM, dot editor SAVE, across restarts | done | tests/scripts/roundtrip_*.drive, editor_roundtrip_*.drive |
-| First dungeon, first boss | **manual:** played by the owner through the dungeon and its boss (no crash, p99 17.6 ms). **Automated:** the way there and the first room (two dialogues, a floor switch), 3 of 3 and 10 of 10 cycles; a save in the first room continues at the dungeon's door (checkpoint dungeon1-entrance); the deeper rooms and the boss not yet | owner session 2026-11-02; tests/scenarios/dungeon1_approach.drive, dungeon1_save_continue.drive |
+| First dungeon, first boss | **manual:** played by the owner through the dungeon (2026-11-02, no crash, p99 17.6 ms) and its boss (2026-11-03, beaten, boss fight p99 14.4 ms; checkpoint dungeon1-boss-beaten). **Automated:** the way there and the first room, 3 of 3 and 10 of 10 cycles; the deeper rooms to the boss's door (checkpoint dungeon1-boss-door); the boss route (dungeon1_boss) exploratory: its special-key chest does not open yet | owner sessions 2026-11-02, 2026-11-03 (owner_boss); tests/scenarios/dungeon1_approach.drive, dungeon1_save_continue.drive, dungeon1_route.drive, dungeon1_boss.drive |
 | Memory bounded over repeated area loads | done for the dungeon route (flat from the 5th of 10 cycles) | build/baselines/2026-11-02-dungeon-memory |
 | 144 fps uncapped | not met (~125-130) | build/baselines/2026-11-02-frame-rate |
 | Save portability, colour vs RPCS3 | not verified | -- |
-| Setup app end to end, first release | not started | -- |
+| Setup app end to end, first release | the headless conversion done end to end on Windows (a working install, 2026-11-02); the GUI, the frozen bundle and a release not yet | "Setup app" below |
 
 **Next actions, in order.**
 1. Keep the 30-minute cycling soak (river_fight, FIGHTS=20 ROUNDS=8) as the

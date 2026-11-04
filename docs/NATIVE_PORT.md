@@ -58,7 +58,7 @@ no broad code-generation campaign while the rendering boundary is settled.
 | 5 | Physics correctness and further optimisation; Bullet upgrades only if worthwhile | Native collision is not bit-exact (BULLET_NATIVE.md); no upgrade planned |
 | 6 | Native audio, including an open-source replacement for the FMOD mixing path | Not started |
 | 7 | Native video decoding and playback | Bink runs recompiled; FFmpeg's decoders verified on all 5 movies (M1) |
-| 8 | Asset preparation, loading, decompression, persistent shader and pipeline caches | SPIR-V cache exists; no pipeline cache; no install-time conversion |
+| 8 | Asset preparation, loading, decompression, persistent shader and pipeline caches | translated shaders and a VkPipelineCache kept on disk between sessions and preloaded at start-up (ps3recomp 0090; the install's data/cache/shaders); shaders are still translated at first sight, not at install |
 | 9 | Further x64 code generation and CPU optimisation | Paused at the 2026-11-04 checkpoint (ps3recomp 0094-0096) |
 | 10 | Full-game correctness, stability and performance validation throughout | Continuous; the checkpoint below is the current baseline |
 

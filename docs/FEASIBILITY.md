@@ -173,7 +173,7 @@ cellGcm FIFO → shared register-file **draw engine** (`rsx_draw_engine.c`, shar
 | Depth-only passes unhandled | Shadow-map passes | Medium |
 | No anisotropic filtering, border colour always transparent black | Visual fidelity | Small |
 | No MSAA (AA surfaces drawn at sample resolution) | Fidelity if the game enables RSX AA **[unknown]** | Medium |
-| Fully synchronous submit-and-wait, readback every present, FIFO-only present, no `VkPipelineCache`, all images in GENERAL layout | Performance and frame pacing; faithful-first is fine, but this is a **likely M7 rewrite area** | Large |
+| Fully synchronous submit-and-wait, readback every present, FIFO-only present, no `VkPipelineCache` (since added: a pipeline cache kept on disk, ps3recomp 0090), all images in GENERAL layout | Performance and frame pacing; faithful-first is fine, but this is a **likely M7 rewrite area** | Large |
 | Validation never enabled in code; no debug-utils messenger | Debug tooling | Small |
 | No RenderDoc in-app capture or texture identification on Vulkan (D3D12-only) | Debug tooling | Medium |
 
