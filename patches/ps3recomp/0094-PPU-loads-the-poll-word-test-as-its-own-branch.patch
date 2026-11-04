@@ -1,0 +1,46 @@
+From f772157bdc1755647fd339695989098be798a300 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Wed, 4 Nov 2026 12:01:12 -0800
+Subject: [PATCH 94/96] PPU loads: the poll-word test as its own branch
+
+vm_read32_mm tested the GCM ref-poll word inside the range test's condition
+(a && b). The compiler built the poll comparison into a flag ahead of the
+range branch and tested it after: cmp, sete, test and jne on every 32-bit
+load, integer and float. Tested first and on its own it is one compare and
+branch. The range test, the poll word's out-of-line read (which publishes
+fences) and every loaded value are unchanged; a differential test of the
+emitted helpers (every width, around the null page, the poll word, the
+span's end, unaligned, reserved lines) prints the same output as before.
+
+Static: a lifted chunk of 3D Dot Game Heroes at -O1 has 5.5% fewer
+instructions (650,828 -> 615,042). Measured (uncapped, real audio, normal
+scheduling, 5 river fights and 3 exploration runs a side, interleaved):
+main-thread busy time 0.8% lower in combat frames, 2% in exploration, 1.8-2.4%
+in debris frames; each within run-to-run spread (p 0.06-0.2).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ tools/ppu_lifter.py | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/tools/ppu_lifter.py b/tools/ppu_lifter.py
+index 40c2e63..8fbfc87 100644
+--- a/tools/ppu_lifter.py
++++ b/tools/ppu_lifter.py
+@@ -241,7 +241,12 @@ static inline uint16_t vm_read16_mm(const ppu_mm* m, uint64_t a)
+ static inline uint32_t vm_read32_mm(const ppu_mm* m, uint64_t a)
+ {
+     const uint32_t ea = (uint32_t)a;
+-    if (__builtin_expect(vm_mm_ok(m, ea, 4), 1) && __builtin_expect(ea != m->poll, 1)) {   /* aligned: single-copy atomic, as on Cell */
++    /* The poll word first and on its own: one compare and branch. Tested in
++     * the range test's condition (a && b), the compiler materialised it as a
++     * flag ahead of the range branch and tested it after: two more
++     * instructions on every 32-bit load, integer and float. */
++    if (__builtin_expect(ea == m->poll, 0)) return vm_read32(a);
++    if (__builtin_expect(vm_mm_ok(m, ea, 4), 1)) {   /* aligned: single-copy atomic, as on Cell */
+         uint32_t v;
+         if (!(ea & 3u)) v = __atomic_load_n((const uint32_t*)(m->vb + ea), __ATOMIC_RELAXED);
+         else memcpy(&v, m->vb + ea, 4);
+-- 
+2.56.0.windows.3
+

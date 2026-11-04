@@ -382,8 +382,53 @@ Finalize fix, wait-free creation) is measured against it.
    unfocused, silent game would otherwise run at the slow level.
    **Measuring:** in A/Bs use real audio (`AUDIO=1`) or hold the process
    (percore / isolate); with dummy audio and the window unfocused, power
-   throttling decides the level. Then the loads' checks (poll word,
-   alignment), then lazy condition-register updates. Stretch goal.
+   throttling decides the level.
+   **The emitted helpers, done 2026-11-04** (ps3recomp 0094-0096; build/ab/
+   2026-11-04-opt-review: every build with its PDB and lifted tree, 51 runs,
+   README). The loads' checks are each needed: the range keeps memory bounds,
+   the GCM ref-poll word's reads publish fences (cellGcm_ref_on_poll), the
+   aligned path keeps single-copy atomicity. Their form was not:
+   - 0094 the poll test as its own branch (the `&&` cost two instructions on
+     every 32-bit load);
+   - 0095 one NaN test per float op on the common path (bit-exact);
+   - 0096 the memory model published once before the guest's entry
+     (g_ppu_mm; zero until then, so everything goes out of line) with the
+     reservation bitmap's address in it (g_spu_coh_map), so a store no
+     longer reloads a global pointer through an indirection.
+   A differential test of the emitted helpers (helper_test.cpp there)
+   prints the same output for all four trees. Stacked A/Bs, real audio,
+   normal scheduling, uncapped, 5 river fights and 3 exploration runs a side,
+   main-thread busy time:
+   - 0094: -0.8 to -2.4%, within run-to-run drift;
+   - 0095: combat -2.4% (p .03), exploration n.s.;
+   - 0096: combat 6.92 -> 6.22 ms (-10%, p .008), busy p99 11.36 -> 9.74,
+     debris frames -11 to -16%, exploration 6.60 -> 5.56 ms (-16%).
+   Combat frames now run at 6.94-6.96 ms, the display's 144 Hz under FIFO
+   presentation (vkCreateSwapchainKHR: FIFO, 3 images), so shown frames
+   cannot pass the refresh. Exploration is held by the render side at
+   ~7.5 ms: the main thread waits 1.65 ms a frame for the previous flip;
+   the walker drains 3.7 ms and waits 1.5 ms on the GPU (each submission is
+   waited on); every render-pass change records a full ALL_COMMANDS barrier
+   (~53 a frame); the GPU is busy 31% median, 66% p90 at 720p; every
+   present also copies the frame to a readback buffer (test scaffolding).
+   **The 5 ms budget now** (200 fps; README section 4):
+   - main thread 6.2 ms in combat, 7.3-8.2 in debris frames, 5.6 in
+     exploration;
+   - walker drain ~5.0 ms in combat;
+   - GPU ~2.4 ms in combat, ~4.4 ms in exploration.
+   Ranked next steps with evidence, benefit, risk and effort: README section
+   2 (main thread: the remaining reservation test 6-7.5% of generated
+   samples, condition-register updates, indirect calls, the matrix code;
+   render side: barrier tracking, submission waits, the present readback).
+   **Architecture:** the owner's requirement is zero emulation, the PS3
+   command processor retired on a plan whatever the frame rate. The game
+   does not use PSGL: it renders through its "asp" engine's ps3gcm backend
+   and the PPFX post-effects library, both writing libgcm commands. A
+   proposal for native render records consumed by a render thread, with a
+   whole-runtime audit, is in build/ab/2026-11-04-opt-review
+   (architecture-proposal.md, native-render-design.md,
+   zero-emulation-audit.md). It awaits the owner's review: no replacement
+   code before that.
 5. Not verified: save portability (PARAM.PFD is not rewritten) and the colour
    comparison with RPCS3 (its capture never got past preloading pipelines).
 

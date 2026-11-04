@@ -1,0 +1,70 @@
+From 1605f07aca9dedab1c3694fbb93b8796528e5bbb Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Wed, 4 Nov 2026 12:01:12 -0800
+Subject: [PATCH 95/96] PPU float ops: the result's NaN test first
+
+ppu_fp_bin and ppu_fmadd_core tested each operand for a NaN, then the
+result: three compares and branches on every add, subtract, multiply,
+divide and fused multiply-add. A NaN operand always gives a NaN result for
+these operations, so a result that is not a NaN means neither operand was
+one: the common path now tests the result alone. A NaN result takes the
+operand tests in their original order, so every NaN comes out as before.
+Checked bit for bit against the old helpers over every pair and triple of 40
+special and random doubles (signed zeros, denormals, infinities, quiet and
+signalling NaNs with payloads), the fused forms with each negation.
+
+Measured (3D Dot Game Heroes, uncapped, real audio, normal scheduling, 5
+river fights and 3 exploration runs a side): main-thread busy time in combat
+frames 7.12 -> 6.95 ms (-2.4%, p = 0.03), in moderate-debris frames -7%
+(p = 0.016); exploration +1.3% (not significant, p = 0.7).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ tools/ppu_lifter.py | 19 +++++++++++++------
+ 1 file changed, 13 insertions(+), 6 deletions(-)
+
+diff --git a/tools/ppu_lifter.py b/tools/ppu_lifter.py
+index 8fbfc87..aeb3152 100644
+--- a/tools/ppu_lifter.py
++++ b/tools/ppu_lifter.py
+@@ -410,12 +410,17 @@ static inline double ppu_fp_default_qnan(void)
+  * new NaN (inf - inf, 0 * inf) has its sign bit set. Only for a title whose
+  * output does not depend on NaN bits. */
+ #ifndef PPU_FAST_FP
++/* The result is tested first: a NaN operand always gives a NaN result for
++ * + - * / and fma, so a result that is not a NaN means neither operand was
++ * one -- one test on the common path instead of three. A NaN result takes
++ * the operand tests in their original order, so every NaN comes out as
++ * before. */
+ static inline double ppu_fp_bin(double a, double b, double r)
+ {
++    if (__builtin_expect(r == r, 1)) return r;
+     if (a != a) return ppu_fp_quiet(a);
+     if (b != b) return ppu_fp_quiet(b);
+-    if (r != r) return ppu_fp_default_qnan();
+-    return r;
++    return ppu_fp_default_qnan();
+ }
+ #else
+ static inline double ppu_fp_bin(double a, double b, double r) { (void)a; (void)b; return r; }
+@@ -429,11 +434,13 @@ static inline double ppu_fdiv(double a, double b) { return ppu_fp_bin(a, b, a /
+ static inline double ppu_fmadd_core(double a, double c, double b, int neg_b, int neg_res)
+ {
+ #ifndef PPU_FAST_FP
+-    if (a != a) return ppu_fp_quiet(a);
+-    if (b != b) return ppu_fp_quiet(b);
+-    if (c != c) return ppu_fp_quiet(c);
+     double r = fma(a, c, neg_b ? -b : b);
+-    if (r != r) return ppu_fp_default_qnan();
++    if (__builtin_expect(r != r, 0)) {   /* as ppu_fp_bin: the result first */
++        if (a != a) return ppu_fp_quiet(a);
++        if (b != b) return ppu_fp_quiet(b);
++        if (c != c) return ppu_fp_quiet(c);
++        return ppu_fp_default_qnan();
++    }
+ #else
+     double r = fma(a, c, neg_b ? -b : b);
+ #endif
+-- 
+2.56.0.windows.3
+

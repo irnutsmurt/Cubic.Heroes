@@ -67,7 +67,7 @@ Verified from strings and code in the decrypted ELF **[measured]**:
 | **Bink** | Bink 1 library (`binkliba`), with "Bink IO Thread" and "Bink Audio Thread" PPU threads. Frames become GCM textures ("Create_Bink_textures in gcmtextures"). No Bink SPU ELF is embedded **[unknown]**: whether part of the decode runs on SPU as a raw blob | Textures through cellGcm; audio presumably through FMOD or cellAudio **[unknown]** |
 | **Lua** | Lua 5.1.3 + tolua, statically linked. Scripts are loaded from disc as source and compiled by the game's own VM | Pure game code |
 | **Bullet** | Bullet physics (`btRigidBody`, `btCollisionObject`, …). Collision detection and constraint solving offloaded as SPURS tasks `PS3_SPURS_BulletCD_spu_release.elf` (174 KB) and `PS3_SPURS_BulletSolver_spu_release.elf` (30 KB) | cellSpurs **taskset** |
-| (not credited) | **PSGL** (Sony's OpenGL ES over libgcm; 1,879 strings), **Edge zlib** SPU inflate task, two game SPU tasks (`water_task`, `waver_task`) | cellGcmSys, cellSpurs |
+| (not credited) | The **asp** engine's PS3 device backend (`aspTOT/ps3gcm`) and the **PPFX** post-effects library, both on a statically linked libgcm; **Edge zlib** SPU inflate task, two game SPU tasks (`water_task`, `waver_task`) | cellGcmSys, cellResc, cellSpurs |
 
 Conclusion: no credited component has to be reimplemented. All four are
 ordinary game code in the EBOOT and recompile with it. The only open choice
@@ -179,7 +179,7 @@ cellGcm FIFO → shared register-file **draw engine** (`rsx_draw_engine.c`, shar
 
 Windows: Vulkan needs the loader (`vulkan-1.dll`, present with every current GPU driver) and SDL2. Linux: Mesa RADV, ANV or NVIDIA. Both need glslang at build time.
 
-The PSGL layer is game code that emits ordinary GCM command buffers, so it needs nothing special. Its 1,879 strings suggest the game may render mostly through PSGL **[unknown]**.
+Corrected 2026-11-04: the game does not use PSGL. The 1,879 strings once counted as PSGL are all file names under `TexUtil_PSGL/` (1,857 `.fpo`, 22 `.vpo`): compiled shader objects of the post-effects library. The EBOOT has no OpenGL entry-point or Cg runtime strings. It renders through asp's ps3gcm backend and PPFX, both writing ordinary GCM command buffers through the statically linked libgcm.
 
 ---
 
