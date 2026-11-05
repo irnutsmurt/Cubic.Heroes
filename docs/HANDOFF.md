@@ -453,8 +453,15 @@ Finalize fix, wait-free creation) is measured against it.
    exploration, field 14 and the dungeon with 3-10 title cycles: 5.9 million
    records matched, none missed, 699,627 of 700,315 outputs identical, the
    rest all in first-load frames whose state other code set. Development
-   builds only, off by default. **R3's results await the owner's review;
-   R4 does not start before.** The boss on the dual-run build:
+   builds only, off by default. The owner reviewed R3 and asked for a
+   follow-up, **done** (docs/NATIVE_R3B.md, 2026-11-05): explicit records
+   (no register block), asp's state API observed, the first-load frames
+   matching (the "inherited" colour mask was the walker feeding subchannel
+   1 to the 3D engine: fixed, GCM_SUBCH1_2D=1), per-image barriers and
+   device-memory uploads (native GPU 0.52 ms a PPFX frame), the SPU read
+   explained (the runtime's probe), reverse dependencies measured, R4's
+   plan revised. **It awaits the owner's review; R4 does not start
+   before.** The boss on the dual-run build:
    tests/scenarios/owner_boss_r3.drive (for the owner to play).
    The local review documents in build/ab/2026-11-04-opt-review are the
    background.

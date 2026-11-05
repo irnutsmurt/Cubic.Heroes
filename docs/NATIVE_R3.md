@@ -14,6 +14,12 @@ Labels as elsewhere: **[M]** measured, **[C]** from code, **[I]** inferred,
 
 ## Results
 
+> **Follow-up (docs/NATIVE_R3B.md).** The first-load differences below
+> are explained and gone: one item was the existing renderer misreading a
+> memory-copy command, the other is asp's state, which the recorder now
+> follows. Records are explicit descriptions, not a register block; the
+> native renderer's barriers are per image.
+
 **Every PPFX output compared is bit-exact, except in an area's first
 frames, where PPFX draws with state that other code left and that no
 libgcm call carries (section 4).** No tolerance is used or set; outputs are
@@ -257,6 +263,14 @@ asp drew. The cross-check finds the constants, both programs and the
 vertex bytes of every record equal to what the engine reads at the same
 draw (0 differences over 5.9 million draws).
 
+> **Corrected (docs/NATIVE_R3B.md section 1).** Of the two items below,
+> the colour mask was not PPFX's state at all: it was the existing
+> renderer feeding PPFX's report copy, a memory-to-memory transfer on FIFO
+> subchannel 1, into the 3D engine, whose colour mask took the transfer's
+> FORMAT word (fixed: GCM_SUBCH1_2D=1). Unit 0's address mode is asp's
+> and the recorder now follows it through asp's state API. The first-load
+> frames match.
+
 **Inherited state (a finding) [M].** In the first ~20 frames after an area
 loads (the castle and dungeon entries, after each CONTINUE), 49 PPFX draws
 use state that PPFX did not set and that came from other code: texture
@@ -329,6 +343,14 @@ covers that case with it on.)
 | CPU reads of PPFX's targets | ppfx_watch over every PPFX target and the program pages (43 ranges), the river (tw3) and the dungeon with a title cycle (tw2) | below |
 | One producer | every run | 0 calls on other threads |
 
+> **Corrected (docs/NATIVE_R3B.md section 4).** The "SPU job" read below
+> was the runtime's own diagnostic probe for SPU image 3, which follows
+> every address-like word of the task's argument block: here a float,
+> -116.0 (0xC2E80000), read as an address in RSX local memory. No SPU
+> program and no game code read a PPFX target; the probe is off now
+> (ps3recomp 0111), and the conclusion below ("a difference from the PS3")
+> was wrong.
+
 **Who touches PPFX's targets in guest memory** [M, tw3 and tw2; every page
 closed, each access counted by instruction, thread and time, the symbols
 from the build's PDB]: the game's clearing routine (func_009731A8, the main
@@ -355,6 +377,12 @@ gameplay coverage of the existing renderer, not of R3's native path.
 
 Correctness and cost are measured in different runs. A dual run renders
 PPFX twice and reads outputs back: **its frame rate is not R4's**.
+
+> **Corrected (docs/NATIVE_R3B.md section 3).** The per-frame figures in
+> this section divide by every flip since start-up, about 2,200 of them
+> before PPFX's first frame. Per frame with PPFX records (6,655 in ov2): the
+> recorder 0.33 ms, the bridge 0.10 ms, the native thread 0.61 ms, the
+> native GPU 1.69 ms.
 
 **The native side's own cost** (ov2: river, 150 s, 8,863 frames, the
 native renderer on, comparisons and cross-check off) [M]:
@@ -497,6 +525,10 @@ does. The bridge stays temporary: with asp and the HUD native it goes.
   records in the stream;
 - the walker's writes into PPFX's program pages (ppfx_watch: the inline
   transfers it applies today): 0.
+
+> **Answered (docs/NATIVE_R3B.md sections 1, 5 and 9).** Other work does
+> take state from PPFX (the colour target, vertex constants), and the
+> first-load question no longer needs the owner: the plan is revised there.
 
 **Before R4 can start, two questions:**
 1. *Does other code inherit PPFX's state?* The reverse of the finding in

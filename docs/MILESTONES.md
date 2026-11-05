@@ -379,6 +379,41 @@ Details and numbers in HANDOFF.md ("Current status", the work log).
   other areas (no saves), menus over the game, other frame pacings.
 - **Commits:** ps3recomp 0108-0109; repo 7e76892, f941695, 96d3900,
   07d848d, baec719, f3efb24, 8c0240d.
-- **Next:** the owner's review of R3. R4 (PPFX's command-writing bodies
-  bypassed; NATIVE_R3.md section 9) needs two answers first: whether other
-  code inherits PPFX's state, and how the first-load frames should look.
+- **Next:** the owner's review of R3 (done: a follow-up asked for, below).
+
+## Native port: R3 follow-up (2026-11-05)
+
+- **Dependencies:** R3; the owner's review of it (2026-11-05).
+- **Removed:** the register-shaped record (the 754-word block and the
+  scratch register file in the native path); the runtime's image-3 SPU
+  probe from default runs.
+- **Changed (behaviour, separate commit 81539ff):** FIFO subchannel 1 no
+  longer feeds the 3D engine (GCM_SUBCH1_2D=1): PPFX's report copy had been
+  setting the 3D colour mask, a one-frame tint after every load.
+- **Evidence:** NATIVE_R3B.md. The first-load "inherited" colour mask was
+  that misdecode; unit 0's address mode is asp's, now followed through
+  asp's state API (its colour mask setter, sampler bind and state-store
+  re-emissions, observed). Records are explicit descriptions in libgcm's
+  vocabulary. Dual runs (river, the dungeon with three title cycles, menus
+  over the game, the map, the editor's preview, SNAPSHOT and the album,
+  30/72/60/144 Hz pacing): 0 missed, 0 cross-check differences, every
+  compared output identical, every comparison accounted for (identical,
+  differing, skipped, unfinished) and the first-load frames' all compared.
+  The SPU read was the runtime's own probe reading a float as an address.
+  Other work draws into the surface PPFX sets and reads a matrix PPFX's
+  pass leaves in the vertex constants; it samples no PPFX output.
+  Validation 0 errors, hazards caught, slow consumer and image lifetime
+  checked again.
+- **Performance:** per frame with PPFX records (R3's figures had divided by
+  every flip since start-up): the native GPU time 1.73 ms with full
+  barriers, 0.97 with per-image barriers, 0.52 with uploads in device
+  memory (R2's executor 0.48); the recorder 0.33 ms, the bridge 0.10 ms,
+  the native thread 0.44 ms. The off switch: production matches the
+  preserved checkpoint (p99 17.1-17.5 ms both).
+- **Not covered:** the boss and magic (owner_boss_r3.drive, to be played),
+  areas past the first dungeon (no saves); how a snapshot takes its
+  picture; who reads PPFX's report.
+- **Commits:** ps3recomp 0110-0111; repo 097e035, 2387f2b, 81539ff,
+  f86e84f and the document's.
+- **Next:** the owner's review of NATIVE_R3B.md; R4 (its section 9) not
+  before.
