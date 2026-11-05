@@ -1,0 +1,70 @@
+# Scenario: the system menu's SNAPSHOT and ALBUM, for native PPFX's dual run
+# (SCENARIO=snapshot_r3; docs/NATIVE_R3B.md section 6). Coverage, not a
+# measurement; with DOTHEROES_PPFX_TARGET_WATCH it also shows whether taking
+# a snapshot reads a PPFX output (the display buffer) back.
+#
+# Starts from: the kept checkpoint castle-front.
+# The system menu: RESUME, SAVE, LOAD, OPTIONS, SNAPSHOT, ALBUM, BESTIARY,
+#   LOADING ART, TITLE; it opens on RESUME the first time, then where it was
+#   left. SNAPSHOT (4 down) opens a camera: CROSS takes a picture.
+#! saves build/checkpoints/castle-front
+#! env DOTHEROES_NATIVE_CD=1 DOTHEROES_NATIVE_SOLVER=4,5,6 GCM_WRAP_LAP=1 DOTHEROES_PRESENT_ONCE=1
+#! env DOTHEROES_DEV_STATE=1 DOTHEROES_DEV_KEYS=1 DIAG_FRAMES=frames.log PS3_VERBOSE=0
+#! env WINDOW=1 VISIBLE=1 TOPMOST=1 GRAB_EVERY=2 PS3_OSD_FPS=2 SHOT_EVERY=0
+#! secs 400
+include common.drive
+
+block system_menu
+  attempt 3 page_dialogues
+    press START               # the system menu, on RESUME
+    sleep 2
+    state menu==1 4
+  end
+end
+
+log TitleMovie 120
+sleep 5
+call continue
+state life>0 60
+sleep 15                      # the load
+state life>0,menu==3 10
+sleep 4
+segment menus snapshot
+call system_menu
+press DOWN
+sleep 1
+press DOWN
+sleep 1
+press DOWN
+sleep 1
+press DOWN                    # SNAPSHOT
+sleep 1
+press CROSS
+sleep 4
+press CROSS                   # (a camera or a confirmation, whichever comes)
+sleep 4
+press CROSS
+sleep 4
+press CIRCLE
+sleep 3
+press CIRCLE
+sleep 3
+segment menus album
+call system_menu              # it opens where it was left: on SNAPSHOT
+press DOWN                    # ALBUM
+sleep 1
+press CROSS
+sleep 5
+press CROSS
+sleep 4
+press RIGHT
+sleep 3
+press CROSS
+sleep 4
+press CIRCLE
+sleep 3
+press CIRCLE
+sleep 3
+press CIRCLE
+sleep 3
+sleep 5

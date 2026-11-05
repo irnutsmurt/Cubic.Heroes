@@ -6,9 +6,8 @@
 # What it shows the dual run: PPFX's chain under each screen that opens over
 #   the game -- the item menu (TRIANGLE), the system menu (START), the map
 #   (L1) -- each held open several seconds and moved about in; then the
-#   system menu's TITLE and CONTINUE (an area's first frames again), the same
-#   three screens once more, and the title's ALBUM (NEW GAME, CONTINUE,
-#   EDITOR, ALBUM, INSTALL with a save) paged through.
+#   system menu's TITLE and CONTINUE (an area's first frames again), and the
+#   same three screens once more. The album and SNAPSHOT: snapshot_r3.drive.
 # Checks: in play (life > 0, the system menu shut) before each screen, the
 #   system menu open when it should be; shots of each screen (frame dumps on:
 #   not a timing run); the run's report says what PPFX drew.
@@ -72,40 +71,4 @@ call to_title_and_continue
 state life>0 60
 sleep 15
 call screens
-segment menus album
-attempt 3 page_dialogues
-  press START                 # the system menu, on RESUME
-  sleep 2
-  state menu==1 4
-end
-press UP                      # TITLE (the list wraps)
-sleep 1
-press CROSS                   # "Exit game?", on NO
-sleep 2
-press UP
-sleep 1
-press CROSS                   # YES
-log TitleMovie 30
-sleep 6
-press START                   # "PRESS START BUTTON" -> main menu, on CONTINUE
-sleep 3
-press DOWN
-sleep 1
-press DOWN
-sleep 1
-press CROSS                   # ALBUM
-sleep 4
-shot album-1
-press CROSS
-sleep 3
-press RIGHT
-sleep 2
-shot album-2
-press CROSS
-sleep 3
-press CIRCLE
-sleep 3
-press CIRCLE
-sleep 3
-shot album-back
 sleep 5
