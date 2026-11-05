@@ -102,17 +102,17 @@ from one session to the next:
 env SCENARIO=owner_onward_r4 build/venv/Scripts/python.exe tests/boot_smoke.py
 ```
 
-CONTINUE starts in the first boss's room, the boss beaten (a copy of
-checkpoint dungeon1-boss-beaten, kept in `build/play-onward/gamedata`).
-Play on as you like: leaving the dungeon, the next regions and their
-dungeons, and magic once the hero has it are what no automated route
-reaches yet. Save as you normally would: each save is also kept as a test
+CONTINUE starts on the field outside the first dungeon, where you saved
+after beating its boss on R4's build (a copy, kept in
+`build/play-onward/gamedata`). Play on as you like: the next regions and
+their dungeons, and magic once the hero has it, are what no automated
+route reaches yet. Save as you normally would: each save is also kept as a test
 checkpoint in `build/checkpoints/owner-onward-r4/`. Press F8 (or both
 sticks) at anything that looks or feels wrong. Close the window when done.
 
-## The R4 boss session (played 2026-11-05)
+## The R4 boss session (played twice, 2026-11-05)
 
-Played once (docs/NATIVE_R4.md section 6). The hero has no magic yet, so a
+Played twice (docs/NATIVE_R4.md section 6), the second time smooth. The hero has no magic yet, so a
 magic attack waits for the onward session above.
 
 The same boss, on R4's development build (docs/NATIVE_R4.md): PPFX's

@@ -393,10 +393,44 @@ blocks checking every 30th handback:
   cb01e50) and it was copied by hand to
   build/checkpoints/owner-boss-r4/01-area37.
 
+**The owner's second boss session** (2026-11-05, 5.6 minutes,
+build/sessions/boot-20261105-125501), with DOTHEROES_PPFX_COMPARE_NOWAIT=1
+on a build at a266368: the boss beaten again (area 38, 46 s), area 39,
+back out to field 15, saved there (kept: build/checkpoints/owner-boss-r4/
+02-area15, the onward session's start). One mark, 2.5 s after field 15
+loaded, in an R4 block (7 intervals over 25 ms in the R3 block before it).
+
+| Area | R4 blocks: fps, over 25 ms | R3 blocks (comparing, no waits): fps, over 25 ms |
+|---|---|---|
+| 37, the dungeon | 71.6, 0.2% | 71.0, 0.5% |
+| 38, the boss | 71.9, 0% | 71.2, 0.5% |
+| 39, after the boss | 72.0, 0% | 71.4, 0.4% |
+| 15, the field | 72.0, 0% | 70.0, 1.0% |
+| all | 71.8, 0.1% | 70.8, 0.5% (the first session: 67.6, 4.8%) |
+
+- 11,400 R4 frames, 458,853 records bypassed (0 exit mismatches), every
+  marker met; 20,143 handbacks, 0 failed, 672 checked and equal.
+- The R3 blocks: 49,274 compared outputs equal, 0 differ, 1,252 skipped
+  for want of a readback buffer, 9,620 finals equal; the cross-check 0
+  mismatches in 466,142 draws.
+- **The unrendered record again** (frame 20,823, an R4 block, the way out
+  to field 15): this time the texture at 0:058F0000 -- 0x3C0000 above the
+  first session's 0:05530000, a 1280x720 A8R8G8B8 linear surface each: the
+  two display buffers. Leaving the dungeon after the boss, PPFX samples the
+  last displayed frame, which the native renderer has no copy of. Reached
+  twice in two sessions at nearly the same frame: reproducible (gap,
+  section 11).
+- **A wait at exit**: the window closed, the native thread's last batch
+  waited for an engine submission that never came (the engine had
+  stopped) and gave up after 10 s ("waiting for the engine's signal
+  failed"): exit took 10 s longer. Not a fault in play (the last frame was
+  at 529,080.3 s, the close); render_drain should not wait for an engine
+  that has stopped (gap, section 11).
+
 **Not covered, needing the owner:** a magic attack (the hero has none
 yet: tests/scenarios/owner_onward_r4.drive plays onward from the first
-boss beaten, keeping the progress), and the areas past the first dungeon beyond the
-field right after it (the desert, the lava dungeon, the volcano, the
+boss beaten, keeping the progress), and the areas past the first
+dungeon beyond the field right after it (the desert, the lava dungeon, the volcano, the
 forest: no saves there).
 
 ## 7. Same-frame image comparisons
@@ -677,8 +711,15 @@ go native.
   brought over, so it is skipped and that frame lacks its output. The fix:
   a texture read of an engine-only surface hands the engine's image over
   first, as asp's targets are (and a test route through the transition in
-  an R4 block). Which surface it is -- a display buffer kept for the
-  transition, or one the game draws -- is not known yet.
+  an R4 block). The surface is a display buffer (the second session read
+  the other one, 0:058F0000): leaving the dungeon after its boss, PPFX
+  samples the last displayed frame -- reached in both boss sessions at
+  nearly the same frame.
+- **The native thread waits 10 s at exit** when its last batch needs an
+  engine submission that never comes (the window closed; the second boss
+  session): render_drain should give up at once on an engine that has
+  stopped. Exit only; the report then says "waiting for the engine's
+  signal failed".
 - **One unexplained divergence** in a forced no-wait comparison run
   (section 6): one step at two pixels, once in three no-wait runs, never
   in a waiting run. Open: repeated runs of both to tell an ordering race

@@ -10,8 +10,9 @@
 # handback checked.
 #   SCENARIO=owner_onward_r4 build/venv/Scripts/python.exe tests/boot_smoke.py
 # needs R4's development build in build/r4/play. The saves are a persistent
-# root, build/play-onward/gamedata, seeded once from a copy of checkpoint
-# dungeon1-boss-beaten (CONTINUE starts in the boss's room, area 38): the
+# root, build/play-onward/gamedata, seeded once from a copy of the owner's
+# save on field 15 after beating the first boss on R4's build
+# (build/checkpoints/owner-boss-r4/02-area15; CONTINUE starts there): the
 # progress made in a session stays there for the next one, and each save the
 # game writes is also copied to build/checkpoints/owner-onward-r4/ as a test
 # checkpoint. The owner's own saves are not touched. Normal damage, sound,
