@@ -39,6 +39,7 @@ press DOWN
 sleep 1
 press DOWN                    # SNAPSHOT
 sleep 1
+touch trace.trigger           # with RSX_FRAME_TRACE=arm:<frames>:<path>: the frames from here (how a picture is taken)
 press CROSS
 sleep 4
 press CROSS                   # (a camera or a confirmation, whichever comes)

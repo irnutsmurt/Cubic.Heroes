@@ -79,6 +79,7 @@ extern "C" uint32_t rsx_fp_program_size(const uint8_t* ucode, uint32_t max_bytes
 extern "C" uint32_t rsx_vp_program_size_instrs(const uint8_t* ucode, uint32_t max_bytes);
 extern "C" void (*g_dotheroes_stop_hook)(void);   // dev_state.cpp: run before a test's stop
 extern "C" void rsx_frame_trace_arm(void);   // cellGcmSys.c: RSX_FRAME_TRACE=arm:<frames>:<path>
+extern "C" void ppfx_watch_add_ea(uint32_t ea, uint32_t n);   // ppfx_watch.cpp
 
 namespace ppfx {
 
@@ -1132,7 +1133,30 @@ extern "C" void ppfx_rec_observe(uint32_t addr, ppu_context* ctx)
         S.st.raster.poly_offset_factor = (float)ctx->fpr[1]; S.st.raster.poly_offset_units = (float)ctx->fpr[2];
         break;
     case 0x006A1D1C:   // the report copy (a memory-to-memory transfer): a side effect, no rendering state
-        if (who) st.transfers++;
+        if (who) {
+            st.transfers++;
+            // PPFX's occlusion query's end (func_007C2EF4, docs/NATIVE_R4.md):
+            // cellGcmSetTransferReportData(ctx, io offset, index) copies report
+            // `index` into the query's result buffer (its EA at +0x4C of the
+            // query object, which the caller holds in r31), whose last word
+            // the caller has just set to 1 (pending) -- the copy clears it.
+            // Who reads the buffer and the report: the watch says (it has to
+            // run: DOTHEROES_PPFX_TARGET_WATCH or DOTHEROES_PPFX_EA_WATCH).
+            const uint32_t obj = (uint32_t)ctx->gpr[31];
+            const uint32_t buf = (uint32_t)ctx->lr == 0x007C2F94u && ea_ok(obj + 0x4C) ? g32(obj + 0x4C) : 0;
+            const uint32_t idx = (uint32_t)ctx->gpr[5];
+            if (ea_ok(buf, 16)) ppfx_watch_add_ea(buf, 16);
+            static int said = 0;
+            if (said++ < 8) {
+                char line[220];
+                snprintf(line, sizeof line, "report copy: lr %08X query %08X result buffer %08X (%08X %08X %08X %08X) "
+                         "io %08X report index %u frame %u", (uint32_t)ctx->lr, obj, buf,
+                         ea_ok(buf, 16) ? g32(buf) : 0, ea_ok(buf, 16) ? g32(buf + 4) : 0,
+                         ea_ok(buf, 16) ? g32(buf + 8) : 0, ea_ok(buf, 16) ? g32(buf + 12) : 0,
+                         (uint32_t)ctx->gpr[4], idx, S.frame);
+                report_add(line);
+            }
+        }
         break;
     case 0x006A1E28: if (mode() && who) build_draw(ctx); break;
     case 0x006A5CF4:   // a clear: a record when it clears colour (depth and stencil are not PPFX's output)

@@ -10,7 +10,8 @@
 //   F7: the frame-rate readout off / text / text and graph (PS3_OSD_FPS sets
 //     it at start; include/ps3emu/osd.h).
 //   A drive script can mark too: `touch mark.trigger` in the run directory
-//     (a segment's start or end, say).
+//     (a segment's start or end, say); `touch trace.trigger` marks and starts
+//     the RSX frame trace at the next flip (RSX_FRAME_TRACE=arm:<frames>:<path>).
 //   A drive script can set the hero's life: life.trigger holding a number of
 //     half apples (empty: 1), so the next hit ends the game -- the way to the
 //     game-over screen and its save (tests/scripts/save_game.drive). Needs the
@@ -88,6 +89,7 @@
 extern "C" void rsx_vulkan_cache_save(void);   // libs/video/rsx_vulkan_backend.h
 
 extern "C" void spurs_snap_write_file(const char* path);
+extern "C" void rsx_frame_trace_arm(void);   // cellGcmSys.c (ps3recomp 0110): RSX_FRAME_TRACE=arm:..
 extern "C" uint8_t* vm_base;
 // Work a development tool needs done before a test's stop ends the process
 // (no exit handlers run then): the native PPFX recorder's last report, after
@@ -587,7 +589,7 @@ void mark(unsigned& n, uint32_t who)
     if (PS3_FT_ON()) ps3_ft_span(PS3_FT_MARK, who, n, 0, t, t);
     record_line("mark %u", n);
     fprintf(stderr, "[mark] %u at %.3f s (%s)\n", n, (double)(int64_t)(t - g_ps3_ft.base) / 1e9,
-            who == 1 ? "F8" : who == 2 ? "L3+R3" : "mark.trigger");
+            who == 1 ? "F8" : who == 2 ? "L3+R3" : who == 4 ? "trace.trigger" : "mark.trigger");
     char text[16];
     snprintf(text, sizeof text, "MARK %u", n);
     ps3_osd_post(text, 1500);
@@ -615,6 +617,15 @@ void keys_loop()
             fclose(t);
             remove("mark.trigger");
             mark(n, 3);
+        }
+        // trace.trigger: the RSX frame trace starts at the next flip (with
+        // RSX_FRAME_TRACE=arm:<frames>:<path>; ps3recomp 0110) -- a drive
+        // script's way to trace the frames of a moment it reaches
+        if (FILE* t = fopen("trace.trigger", "rb")) {
+            fclose(t);
+            remove("trace.trigger");
+            rsx_frame_trace_arm();
+            mark(n, 4);
         }
         const uint32_t p = g_player.load();
         FILE* lt = p && rd32(p) == kPlayerVtable ? fopen("life.trigger", "rb") : nullptr;
