@@ -24,6 +24,14 @@
 // The temporary bridge between the records and the FIFO path (the walker's
 // matching, the handoffs) is ppfx_bridge.cpp alone; with every graphics
 // producer native it goes, and the queue's `walked` with it.
+//
+// R4 (docs/NATIVE_R4.md, DOTHEROES_PPFX_BYPASS): the libgcm calls whose work
+// the records carry do not run for PPFX -- no command of theirs reaches the
+// stream, the engine draws none of PPFX's draws -- and the native renderer's
+// output is what the rest of the frame sees. A bypassed record reaches the
+// walker by a stream marker the recorder writes where its commands would
+// have been; the bridge hands the native output back to the engine's
+// surface before the engine next reads or writes it (a handback).
 #pragma once
 
 #include <atomic>
@@ -165,6 +173,10 @@ struct Walk {
     int64_t ordinal;               // that signal's place in the engine's signal order
     uint8_t want_cmp;              // the comparison asked for this record's output ...
     uint8_t cmp_why;               // ... why (kCmp*), and whether the engine's copy was made
+    // R4: native semaphores the engine waited on for handbacks, free again
+    // once this record's batch (which waits for an engine signal after those
+    // waits) has completed; -1 none
+    int16_t release_sem[4];
     // dev cross-check: state items that differ from the engine's at the matched draw
     uint32_t diff_regs, diff_consts, diff_vp, diff_fp, diff_vtx;
 };
@@ -198,6 +210,7 @@ struct Rec {
     VtxRange tex[16];
     uint32_t ntex;
     std::vector<uint8_t> tdata;
+    uint8_t bypassed;              // R4: its call's body did not run; the walker meets it at its marker
     Walk walk;
 };
 
@@ -253,6 +266,30 @@ void slot_release_image(int slot);
 void slot_release_buffer(int slot);
 // Which records' outputs the walker copies for comparison (kCmp*, or 0).
 int compare_wanted(const Rec* r);
+
+// R4's handback (walker thread): the native renderer finishes everything
+// walked, puts the native image of the surface at (location, offset) in a
+// layout the engine copies from, and submits that with a semaphore to
+// signal. Blocks until submitted (or timeout_ms). check: the image is also
+// read back in the same batch (*check_rows: its rows once that batch is
+// done, *check_slot: give it back with handback_check_done). 0 when done.
+struct HandOut {
+    uint64_t image;        // VkImage
+    uint32_t layout;       // VkImageLayout it is in
+    uint32_t w, h, vkformat, bpp;
+    int sem_slot;          // the semaphore the native submission signals (a slot)
+    uint64_t sem;          // VkSemaphore
+    const uint8_t* check_rows;
+    int check_slot;
+};
+int handback_take(uint32_t location, uint32_t offset, bool check, uint32_t timeout_ms, HandOut* out);
+void handback_check_done(int check_slot);
+// rsx_be_format the engine keeps a cellGcmSetSurface colour format in
+uint32_t surface_beformat(uint32_t color_format);
+// R4's stream marker (ppfx_bridge.cpp, the producer's thread): written into
+// the command buffer of the context at ctx_ea where a bypassed record's
+// commands would have gone. false when it could not be written (counted).
+bool bridge_marker(uint32_t ctx_ea, uint64_t seq);
 // The VkFormat the engine keeps a colour surface of this cellGcmSetSurface
 // colour format in (the engine's eng_surface_format, the backend's table).
 uint32_t surface_vkformat(uint32_t color_format, uint32_t* bpp);
@@ -294,6 +331,14 @@ struct Stats {
     std::atomic<uint64_t> wait_walker_us{0}, wait_signal_us{0}, gpu_ns{0}, cpu_record_ns{0}, compare_ns{0};
     std::atomic<uint64_t> gpu_draw_ns{0}, gpu_copy_ns{0}, gpu_readback_ns{0}, gpu_other_ns{0};   // the batches' timestamps, by section
     std::atomic<uint64_t> bridge_ns{0}, xcheck_ns{0};   // the walker's thread: the bridge's callbacks, the cross-check in them
+    // R4: the bypass (the recorder), the markers and handbacks (the bridge)
+    std::atomic<uint64_t> r4_frames{0}, r4_records{0}, r4_skipped{0}, r4_kept{0}, r4_exit_mismatch{0};
+    std::atomic<uint64_t> markers_written{0}, marker_wraps{0}, marker_fail{0};
+    std::atomic<uint64_t> markers_met{0}, marker_unknown{0}, marker_r3_matched{0}, matched_r3_in_r4{0};
+    std::atomic<uint64_t> handbacks{0}, handback_fail{0}, handback_ns{0}, handback_wait_ns{0};
+    std::atomic<uint64_t> handbacks_by_kind[6];   // 0 a draw's target, 1 texture, 2 transfer/guest, 3 present, 4 clear, 5 other
+    std::atomic<uint64_t> hb_checked{0}, hb_equal{0}, hb_differ{0};
+    std::atomic<uint64_t> present_hashes{0};
 };
 Stats& stats();
 void report_add(const char* line);   // a line in the next report (diagnostics)

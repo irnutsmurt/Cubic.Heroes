@@ -50,6 +50,22 @@
 // =1: and the native renderer. DOTHEROES_PPFX_PROGWATCH=<file> (a
 // diagnostic): every fragment-program bind's bytes three ways -- main memory,
 // local memory now, the shadow.
+//
+// R4 (docs/NATIVE_R4.md), DOTHEROES_PPFX_BYPASS (with DOTHEROES_PPFX_NATIVE=1):
+// each entry point PPFX reaches has a class (r4_class): its commands are
+// what a record carries and only PPFX's own draws read them (bypassed), or
+// other work reads what it leaves (kept: the surface, the scissor and clear
+// values a kept clear uses, depth and stencil clears, the vertex program and
+// its constants, the occlusion query's calls), or it writes no command
+// (runs). =1: a PPFX call to a bypassed entry point does not run -- the
+// observer tells the lifted function to return at once (ps3recomp 0112) --
+// once the native renderer is ready, from the next frame; a bypassed draw or
+// colour clear becomes a record with a stream marker in its place
+// (bridge_marker). Calls made inside a kept call run. =verify: nothing is
+// bypassed; each PPFX call to a bypassed entry point runs with its results
+// checked against what bypassing it would leave (r4_verify_exit: the return
+// value, the registers the ABI keeps, every store its body makes).
+// =alt:<n>: bypassed in alternate blocks of n frames (R3, R4, R3, ...).
 
 #include "ppu_context.h"
 #include "ppfx_native.h"
@@ -80,6 +96,7 @@ extern "C" uint32_t rsx_vp_program_size_instrs(const uint8_t* ucode, uint32_t ma
 extern "C" void (*g_dotheroes_stop_hook)(void);   // dev_state.cpp: run before a test's stop
 extern "C" void rsx_frame_trace_arm(void);   // cellGcmSys.c: RSX_FRAME_TRACE=arm:<frames>:<path>
 extern "C" void ppfx_watch_add_ea(uint32_t ea, uint32_t n);   // ppfx_watch.cpp
+extern "C" int g_ppu_obs_store;                                // r1_observe.cpp (ps3recomp 0112)
 
 namespace ppfx {
 
@@ -279,6 +296,10 @@ struct Rstate {
     uint8_t by;                      // who makes the call being encoded (By)
     // the producer
     uint32_t tid;
+    // R4
+    bool r4_frame;                   // this frame's PPFX calls are bypassed
+    bool skipping;                   // the call being encoded is (its record is bypassed)
+    uint32_t kept_depth;             // inside a kept PPFX call: everything runs
 } S;
 
 // asp's state API (docs/NATIVE_R3B.md section 1). asp keeps its render state
@@ -651,6 +672,172 @@ void asp_call(uint32_t addr, ppu_context* c)
     }
 }
 
+// ---- R4: the bypass ---------------------------------------------------------------
+
+// DOTHEROES_PPFX_BYPASS: 0 off, 1 bypass, 2 verify, 3 alternate blocks of s_alt_n frames
+int s_bypass = -1;
+uint32_t s_alt_n = 60;
+int bypass_mode()
+{
+    if (s_bypass < 0) {
+        const char* e = getenv("DOTHEROES_PPFX_BYPASS");
+        s_bypass = !e || !*e || *e == '0' ? 0 : !strcmp(e, "verify") ? 2 : !strncmp(e, "alt:", 4) ? 3 : *e == '1' ? 1 : 0;
+        if (s_bypass == 3) { s_alt_n = (uint32_t)atoi(e + 4); if (!s_alt_n) s_alt_n = 60; }
+        if (s_bypass && mode() != 2 && s_bypass != 2) s_bypass = 0;   // bypassing needs the native renderer
+    }
+    return s_bypass;
+}
+
+enum Cls : uint8_t { kClsRun = 0, kClsBypass = 1, kClsKeep = 2 };
+
+// What R4 does with a PPFX call to this entry point (docs/NATIVE_R4.md
+// section 2) and, for a kept one, why.
+Cls r4_class(uint32_t addr, const ppu_context* c, const char** why)
+{
+    *why = "";
+    switch (addr) {
+    // PPFX's own state and draws: the records carry them, only PPFX's draws read them
+    case 0x0069E6E0: case 0x0069E7EC: case 0x0069E99C: case 0x0069F19C: case 0x0069F2B8: case 0x0069FC38:
+    case 0x006A1E28: case 0x006A56BC: case 0x006A5EC0: case 0x006A5FE0: case 0x006A6070: case 0x006A6100:
+    case 0x006A62B4: case 0x006A6344: case 0x006A650C: case 0x006A659C: case 0x006A662C: case 0x006A66BC:
+    case 0x006A6810: case 0x006A68A0: case 0x006A6DA0: case 0x006A6E30: case 0x006A6F74: case 0x006A7004:
+    case 0x006A7124: case 0x006A71B4: case 0x006A7244: case 0x006A7364: case 0x006A75D8: case 0x006A7674:
+    case 0x006A7744: case 0x006A7834: case 0x006A7BA4: case 0x006A7CF8: case 0x006A7EB0: case 0x006A90EC:
+    case 0x006A96E8: case 0x006A5C30:
+        return kClsBypass;
+    // a clear: colour only is a record; one that clears depth or stencil is
+    // kept (asp's scene is drawn into the depth buffer PPFX clears)
+    case 0x006A5CF4:
+        if ((uint32_t)c->gpr[4] & 0x03u) { *why = "depth/stencil clear: other work's draws use it"; return kClsKeep; }
+        return kClsBypass;
+    case 0x0069F944: *why = "surface: asp's scene and the game's draws render into the target PPFX sets"; return kClsKeep;
+    case 0x006A674C: *why = "scissor: a kept clear's extent"; return kClsKeep;
+    case 0x006A5DA0: *why = "clear colour: a kept clear's value"; return kClsKeep;
+    case 0x006A5E30: *why = "clear depth/stencil value: a kept clear's value"; return kClsKeep;
+    case 0x006A39EC: *why = "vertex program constants: asp's and the game's programs read them"; return kClsKeep;
+    case 0x006A4E50: *why = "vertex program: its default constants, read by others"; return kClsKeep;
+    case 0x006A8020: case 0x006A817C: case 0x006A820C: case 0x006A829C: case 0x006A1D1C:
+        *why = "occlusion query: kept as the port runs it today"; return kClsKeep;
+    default:
+        return kClsRun;   // no command (helpers, wrappers, the flush): the body runs
+    }
+}
+
+struct BpCount {
+    uint64_t ppfx = 0, skipped = 0, kept = 0, inside_kept = 0, before_ready = 0, verified = 0;
+    // verify: what running the body left that bypassing it would not
+    uint64_t r3_same = 0, r3_diff = 0, f1_diff = 0, nonvol_diff = 0, ctx_moved = 0, callbacks = 0;
+    uint64_t st_cmd = 0, st_ctx = 0, st_stack = 0, st_caller_abi = 0, st_other = 0, words = 0;
+    uint64_t vol_diff = 0;
+    uint32_t last_r3_diff_lr = 0, last_other_ea = 0, last_other_lr = 0;
+    const char* why = "";
+};
+std::map<uint32_t, BpCount> s_bp;
+std::mutex s_bp_lock;   // the report reads it
+
+// A call whose body runs with its return seen (ps3recomp 0112's 2): a kept
+// call (inside it everything runs) or a verified one.
+struct VEntry {
+    uint32_t addr, lr, sp, ctx_ea, begin, end, cur;
+    uint8_t kind;   // 0 kept, 1 verified
+    uint64_t gpr[32];
+    double fpr[32];
+    uint8_t vr[12][16];   // v20..v31
+    uint32_t cr;
+    size_t store_from;
+};
+std::vector<VEntry> s_vstack;
+std::vector<std::pair<uint64_t, uint32_t>> s_stores;   // (ea, bytes) of verified bodies' stores
+uint32_t s_verifying;
+
+void r4_ctx_fields(VEntry& v, uint32_t ctx_ea)
+{
+    v.ctx_ea = ctx_ea;
+    v.begin = v.end = v.cur = 0;
+    if (ea_ok(ctx_ea, 16)) { v.begin = g32(ctx_ea); v.end = g32(ctx_ea + 4); v.cur = g32(ctx_ea + 8); }
+}
+
+void r4_verify_enter(uint32_t addr, ppu_context* c)
+{
+    VEntry v;
+    v.addr = addr; v.lr = (uint32_t)c->lr; v.sp = (uint32_t)c->gpr[1]; v.kind = 1;
+    r4_ctx_fields(v, (uint32_t)c->gpr[3]);
+    memcpy(v.gpr, c->gpr, sizeof v.gpr);
+    memcpy(v.fpr, c->fpr, sizeof v.fpr);
+    memcpy(v.vr, &c->vr[20], sizeof v.vr);
+    v.cr = c->cr;
+    v.store_from = s_stores.size();
+    s_vstack.push_back(v);
+    s_verifying++;
+    g_ppu_obs_store = 1;
+}
+
+void r4_verify_exit(const VEntry& v, ppu_context* c)
+{
+    std::lock_guard<std::mutex> g(s_bp_lock);
+    BpCount& k = s_bp[v.addr];
+    k.verified++;
+    // the return value: bypassing leaves r3 as it was
+    if (c->gpr[3] == v.gpr[3]) k.r3_same++;
+    else { k.r3_diff++; k.last_r3_diff_lr = v.lr; }
+    if (memcmp(&c->fpr[1], &v.fpr[1], 8)) k.f1_diff++;
+    // what the ABI keeps across a call: r1, r2, r13-r31, f14-f31, v20-v31, CR2-CR4
+    bool nv = c->gpr[1] != v.gpr[1] || c->gpr[2] != v.gpr[2] || ((c->cr ^ v.cr) & 0x00FFF000u) != 0;
+    for (int r = 13; r < 32 && !nv; r++) nv = c->gpr[r] != v.gpr[r];
+    for (int f = 14; f < 32 && !nv; f++) nv = memcmp(&c->fpr[f], &v.fpr[f], 8) != 0;
+    if (!nv) nv = memcmp(&c->vr[20], v.vr, sizeof v.vr) != 0;
+    if (nv) k.nonvol_diff++;
+    // the registers the ABI does not keep (r0, r4-r12, CTR, the other CR fields): changed (only counted)
+    bool vol = false;
+    for (int r = 4; r <= 12 && !vol; r++) vol = c->gpr[r] != v.gpr[r];
+    if (vol) k.vol_diff++;
+    // the command buffer: where the body left its context
+    VEntry now;
+    r4_ctx_fields(now, v.ctx_ea);
+    const bool callback = now.begin != v.begin || now.end != v.end || now.cur < v.cur;
+    if (callback) k.callbacks++;
+    if (now.cur != v.cur) k.ctx_moved++;
+    if (!callback && now.cur > v.cur) k.words += (now.cur - v.cur) / 4;
+    // every store the body made
+    for (size_t i = v.store_from; i < s_stores.size(); i++) {
+        const uint64_t ea = s_stores[i].first;
+        const uint32_t n = s_stores[i].second;
+        const bool cmd = (ea >= v.cur && ea + n <= (callback ? (uint64_t)v.end + 16 : (uint64_t)now.cur)) ||
+                         (callback && ea >= now.begin && ea + n <= now.cur);
+        if (cmd) k.st_cmd++;
+        else if (ea == (uint64_t)v.ctx_ea + 8 && n == 4) k.st_ctx++;
+        else if (ea < v.sp && ea + 0x10000 >= v.sp) k.st_stack++;            // the body's own frame
+        else if (ea >= v.sp && ea + n <= (uint64_t)v.sp + 112) k.st_caller_abi++;   // LR/CR save, parameter save area
+        else { k.st_other++; k.last_other_ea = (uint32_t)ea; k.last_other_lr = v.lr; }
+    }
+}
+
+// What this PPFX call's body does: 0 runs, 1 bypassed, 2 runs, its return seen.
+int r4_decide(uint32_t addr, ppu_context* c)
+{
+    const char* why;
+    const Cls cls = r4_class(addr, c, &why);
+    if (cls == kClsRun) return 0;
+    std::lock_guard<std::mutex> g(s_bp_lock);
+    BpCount& k = s_bp[addr];
+    k.ppfx++;
+    if (S.kept_depth) { k.inside_kept++; return 0; }
+    if (cls == kClsKeep) {
+        k.kept++; k.why = why;
+        stats().r4_kept++;
+        VEntry v; memset(&v, 0, sizeof v); v.addr = addr; v.kind = 0;
+        s_vstack.push_back(v);
+        S.kept_depth++;
+        return 2;
+    }
+    if (bypass_mode() == 2) return 3;   // verify: the caller snapshots (outside this lock)
+    if (!S.r4_frame) { k.before_ready++; return 0; }
+    k.skipped++;
+    stats().r4_skipped++;
+    S.skipping = true;
+    return 1;
+}
+
 // ---- attribution ---------------------------------------------------------------
 
 bool in_ppfx(uint32_t a) { return a >= kPpfxLo && a < kPpfxHi; }
@@ -724,6 +911,8 @@ void fill_common(Rec* r, uint32_t kind, ppu_context* c)
     r->st = S.st;
     r->nvr = 0; r->vdata.clear(); r->nneed = 0; r->ntex = 0; r->tdata.clear();
     memset(&r->walk, 0, sizeof r->walk);
+    for (int16_t& k : r->walk.release_sem) k = -1;
+    r->bypassed = S.skipping ? 1 : 0;
     // where its commands go: the title's lap and the context's current (or,
     // if this call's reserve wraps the ring, the next lap from its start)
     const uint32_t ctx = (uint32_t)c->gpr[3];
@@ -834,6 +1023,7 @@ void build_draw(ppu_context* c)
     }
     publish(r);
     stats().draws++;
+    if (r->bypassed) { stats().r4_records++; bridge_marker((uint32_t)c->gpr[3], r->seq); }
 }
 
 void build_clear(ppu_context* c)
@@ -844,6 +1034,7 @@ void build_clear(ppu_context* c)
     add_target_need(r);
     publish(r);
     stats().clears++;
+    if (r->bypassed) { stats().r4_records++; bridge_marker((uint32_t)c->gpr[3], r->seq); }
 }
 
 void read_env()
@@ -895,6 +1086,45 @@ void write_report()
             (unsigned long long)s.xc_vp, (unsigned long long)s.xc_fp, (unsigned long long)s.xc_vtx,
             (unsigned long long)s.xc_tex);
     fprintf(f, "handoffs %llu failed %llu\n", (unsigned long long)s.handoffs, (unsigned long long)s.handoff_fail);
+    if (bypass_mode()) {
+        fprintf(f, "r4 mode %d frames %llu records %llu calls_bypassed %llu calls_kept %llu exit_mismatch %llu | "
+                   "markers written %llu wraps %llu failed %llu met %llu unknown %llu | r3_matched_in_r4_frames %llu\n",
+                bypass_mode(), (unsigned long long)s.r4_frames, (unsigned long long)s.r4_records,
+                (unsigned long long)s.r4_skipped, (unsigned long long)s.r4_kept, (unsigned long long)s.r4_exit_mismatch,
+                (unsigned long long)s.markers_written, (unsigned long long)s.marker_wraps,
+                (unsigned long long)s.marker_fail, (unsigned long long)s.markers_met,
+                (unsigned long long)s.marker_unknown, (unsigned long long)s.matched_r3_in_r4);
+        fprintf(f, "r4 handbacks %llu failed %llu ms %.1f (waiting for the native side %.1f) | by kind: target %llu "
+                   "texture %llu transfer %llu present %llu clear %llu | checked %llu equal %llu differ %llu | "
+                   "present_hashes %llu\n",
+                (unsigned long long)s.handbacks, (unsigned long long)s.handback_fail, s.handback_ns / 1e6,
+                s.handback_wait_ns / 1e6, (unsigned long long)s.handbacks_by_kind[0].load(),
+                (unsigned long long)s.handbacks_by_kind[1].load(), (unsigned long long)s.handbacks_by_kind[2].load(),
+                (unsigned long long)s.handbacks_by_kind[3].load(), (unsigned long long)s.handbacks_by_kind[4].load(),
+                (unsigned long long)s.hb_checked, (unsigned long long)s.hb_equal, (unsigned long long)s.hb_differ,
+                (unsigned long long)s.present_hashes);
+        std::lock_guard<std::mutex> g(s_bp_lock);
+        for (auto& kv : s_bp) {
+            const BpCount& k = kv.second;
+            fprintf(f, "r4 entry %08X class %s ppfx_calls %llu bypassed %llu kept %llu inside_kept %llu "
+                       "ran_before_ready %llu%s%s\n", kv.first,
+                    k.why[0] ? "kept" : "bypassed", (unsigned long long)k.ppfx, (unsigned long long)k.skipped,
+                    (unsigned long long)k.kept, (unsigned long long)k.inside_kept, (unsigned long long)k.before_ready,
+                    k.why[0] ? " | " : "", k.why);
+            if (k.verified)
+                fprintf(f, "r4 verify %08X runs %llu r3_unchanged %llu r3_changed %llu (last caller %08X) f1_changed %llu "
+                           "abi_kept_regs_changed %llu volatile_changed %llu | context moved %llu reserve_callbacks %llu "
+                           "command_words %llu | stores: commands %llu context %llu own_frame %llu caller_abi_slots %llu "
+                           "other %llu (last %08X from %08X)\n", kv.first,
+                        (unsigned long long)k.verified, (unsigned long long)k.r3_same, (unsigned long long)k.r3_diff,
+                        k.last_r3_diff_lr, (unsigned long long)k.f1_diff, (unsigned long long)k.nonvol_diff,
+                        (unsigned long long)k.vol_diff, (unsigned long long)k.ctx_moved,
+                        (unsigned long long)k.callbacks, (unsigned long long)k.words, (unsigned long long)k.st_cmd,
+                        (unsigned long long)k.st_ctx, (unsigned long long)k.st_stack,
+                        (unsigned long long)k.st_caller_abi, (unsigned long long)k.st_other, k.last_other_ea,
+                        k.last_other_lr);
+        }
+    }
     fprintf(f, "native frames_with_records %llu\n", (unsigned long long)s.n_frames);
     fprintf(f, "native draws %llu clears %llu unsupported %llu batches %llu pipelines %llu images %llu (%.1f MB) "
                "static_textures %llu own_target_snapshots %llu images_replaced %llu\n",
@@ -989,8 +1219,9 @@ extern "C" int ppfx_rec_wanted(void)
     return ppfx::mode() != 0;
 }
 
-// Every observed call, from r1_observe.cpp's ppu_entry_observe.
-extern "C" void ppfx_rec_observe(uint32_t addr, ppu_context* ctx)
+// Every observed call, from r1_observe.cpp's ppu_entry_observe: 0 the body
+// runs, 1 it does not (R4's bypass), 2 it runs and ppfx_rec_exit sees its return.
+extern "C" int ppfx_rec_observe(uint32_t addr, ppu_context* ctx)
 {
     static int started = 0;
     if (!started) { started = 1; ppfx::start(); }
@@ -1003,7 +1234,9 @@ extern "C" void ppfx_rec_observe(uint32_t addr, ppu_context* ctx)
         }
         // a diagnostic: the game's copies into RSX local memory below the
         // first PPFX intermediate (the display buffers among them) and from
-        // there, by caller -- what a snapshot does with the frame
+        // there, by caller -- what a snapshot does with the frame (R4: a
+        // snapshot reads the engine's display surface instead,
+        // cellJpgEncEncodePicture; docs/NATIVE_R4.md)
         const bool to_low = dst >= kLocalEa && dst - kLocalEa < 0x01AE0000u;
         const bool from_low = src >= kLocalEa && src - kLocalEa < 0x01AE0000u;
         if ((to_low || from_low) && n) {
@@ -1019,7 +1252,7 @@ extern "C" void ppfx_rec_observe(uint32_t addr, ppu_context* ctx)
                 report_add(line);
             }
         }
-        return;
+        return 0;
     }
     const uint64_t t0 = now_ns();
     Stats& st = stats();
@@ -1034,7 +1267,14 @@ extern "C" void ppfx_rec_observe(uint32_t addr, ppu_context* ctx)
     std::unique_lock<std::mutex> g(s_lock);
     struct Held { Held(std::unique_lock<std::mutex>* h) { s_held = h; } ~Held() { s_held = nullptr; } } held(&g);
     if (addr == 0x0069DD60u) {   // cellGcmSetFlip: a frame
-        if (tid == S.tid || !S.tid) { S.frame++; st.frames++; }
+        if (tid == S.tid || !S.tid) {
+            S.frame++; st.frames++;
+            // R4: whether the next frame's PPFX calls are bypassed -- once the
+            // native renderer can take them; alternate blocks with =alt:<n>
+            const int bm = bypass_mode();
+            S.r4_frame = (bm == 1 || (bm == 3 && (S.frame / s_alt_n) % 2 == 1)) && render_ready();
+            if (S.r4_frame) st.r4_frames++;
+        }
         if (s_pw && (S.frame & 255) == 0) fflush(s_pw);
     }
     // Inline transfers into the shadow, whoever makes them (the program
@@ -1063,7 +1303,7 @@ extern "C" void ppfx_rec_observe(uint32_t addr, ppu_context* ctx)
         }
         st.other_thread_calls++;
         st.rec_ns += now_ns() - t0;
-        return;
+        return 0;
     }
     // Other code's calls on the producer's thread set state too, at the same
     // entry points: PPFX's first frames after a load draw with some of it
@@ -1075,12 +1315,16 @@ extern "C" void ppfx_rec_observe(uint32_t addr, ppu_context* ctx)
     if (asp_fn(addr)) {
         if (mode() || s_pw) asp_call(addr, ctx);
         st.rec_ns += now_ns() - t0;
-        return;
+        return 0;
     }
     if (who) { st.ppfx_calls++; if (who == 2) st.nested_ppfx++; }
     else st.foreign_state_calls++;
     S.by = who ? kByPpfx : kByGame;
     if (who && !S.ring_ctx) S.ring_ctx = (uint32_t)ctx->gpr[3];
+    // R4: what this call's body does (r4_decide); a bypassed call's record is too
+    S.skipping = false;
+    int act = who && bypass_mode() ? r4_decide(addr, ctx) : 0;
+    if (act == 3) { r4_verify_enter(addr, ctx); act = 2; }
     // DOTHEROES_PPFX_TRACE_LOAD=1 (a diagnostic, with RSX_FRAME_TRACE=arm:..):
     // the frame trace starts at the walker's next flip after PPFX's first call
     // following 30 frames without one -- an area's first frames, state-triggered
@@ -1099,7 +1343,7 @@ extern "C" void ppfx_rec_observe(uint32_t addr, ppu_context* ctx)
         }
         last_ppfx_frame = S.frame;
     }
-    if (!mode() && !s_pw) return;
+    if (!mode() && !s_pw) return act;
     switch (addr) {
     case 0x0069F944: enc_surface((uint32_t)ctx->gpr[4]); break;
     case 0x0069E7EC: enc_viewport(ctx); break;
@@ -1171,5 +1415,30 @@ extern "C" void ppfx_rec_observe(uint32_t addr, ppu_context* ctx)
         break;
     }
     }
+    S.skipping = false;
     st.rec_ns += now_ns() - t0;
+    return act;
+}
+
+// The return of a call ppfx_rec_observe answered 2 (the producer's thread):
+// a kept call's end, or a verified call's results checked.
+extern "C" void ppfx_rec_exit(uint32_t addr, ppu_context* ctx)
+{
+    if (s_vstack.empty()) { stats().r4_exit_mismatch++; return; }
+    const VEntry v = s_vstack.back();
+    s_vstack.pop_back();
+    if (v.addr != addr) stats().r4_exit_mismatch++;
+    if (v.kind == 0) { if (S.kept_depth) S.kept_depth--; return; }
+    r4_verify_exit(v, ctx);
+    if (--s_verifying == 0) { g_ppu_obs_store = 0; s_stores.clear(); }
+}
+
+// A store a verified body makes (ps3recomp 0112's PPU_OBS_ST).
+extern "C" void ppfx_rec_store(uint64_t ea, uint32_t bytes)
+{
+    if (!s_verifying) return;
+#ifdef _WIN32
+    if (GetCurrentThreadId() != S.tid) return;
+#endif
+    if (s_stores.size() < 4096) s_stores.emplace_back(ea, bytes);
 }

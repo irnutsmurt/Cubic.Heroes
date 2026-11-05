@@ -26,6 +26,29 @@
 // memory now (after every queued patch landed), and the vertex and static
 // texture bytes the engine is about to read. It only counts and reports; the
 // records never take anything from the engine.
+//
+// R4 (docs/NATIVE_R4.md, DOTHEROES_PPFX_BYPASS): a bypassed record has no
+// commands. In their place the recorder writes a stream marker
+// (bridge_marker, below): NV4097 method 0x0100 (no operation), not
+// incrementing, three words -- kMarkMagic and the record's sequence number --
+// which the engine ignores and hands to on_marker. At a marker the walker
+// does for the record what it did at its draw: the engine's surfaces it
+// needs copied for it (handoffs). Its target is then the native side's: the
+// engine's copy is stale. Before the engine next reads or writes such a
+// surface -- another draw renders into it, samples it, a clear, a 2D
+// transfer or a guest read of its memory (a snapshot's JPEG encoder), the
+// present -- the walker hands the native image back (handback): the native
+// renderer submits everything walked with the image ready to copy from and a
+// semaphore to signal; the engine's next submission waits on it and copies
+// the image into its surface first. A later native batch waits on a signal
+// of that engine submission before it touches the image again.
+//
+// Ordering: a marker sits where the record's commands were, so the walker
+// meets it after every earlier command and before every later one -- other
+// work's included -- and the record's sequence number is in it. All of R4's
+// bridging -- the marker's format and its writing, the walker's hooks, the
+// handbacks and their semaphores -- is here; when the engine draws nothing
+// PPFX hands over to (asp and the HUD native), it goes with this file.
 
 #include "ppfx_native.h"
 
@@ -47,6 +70,8 @@
 
 extern "C" uint8_t* vm_base;
 extern "C" uint32_t cellGcmResolveLocated(int local, uint32_t offset);
+extern "C" void cellGcm_fifo_recycle_n(uint32_t ctx_ea, uint32_t count);   // cellGcmSys.c: the runtime's reserve callback
+extern "C" uint32_t ppu_hle_inject_base;                                   // runtime/memory/vm.h
 
 namespace ppfx {
 
@@ -76,6 +101,13 @@ struct BState {
     std::map<std::string, XR> xr;
     std::mutex xr_lock;          // the report reads it
     uint64_t logged_miss;
+    // R4: surfaces whose newest content is the native side's (key -> the record that wrote it)
+    struct Held { uint64_t seq; uint32_t w, h, format, pitch; };
+    std::unordered_map<uint64_t, Held> native;
+    bool war_pending;                       // a handback's copy: the next record waits for the engine past it
+    std::vector<int> pending_release;       // the handbacks' native semaphores, freed with that record's batch
+    int mphase; uint32_t mlo;               // the marker being read
+    uint8_t last_bypassed;
 } B;
 
 uint64_t K(int64_t lap, uint32_t io) { return (uint64_t)lap << 32 | io; }
@@ -395,6 +427,7 @@ int match(uint32_t kind, uint32_t laps, uint32_t io)
         const uint64_t put = q.put.load(std::memory_order_acquire);
         if (B.w >= put) return 0;
         Rec* r = q.at(B.w);
+        if (r->bypassed) return 0;   // R4: met at its marker, never by its commands
         const uint32_t d = delta_of(r->kind);
         if (!B.have_delta && B.logged_miss < 8) {   // until the first match: what was compared
             char line[200];
@@ -424,6 +457,7 @@ int match(uint32_t kind, uint32_t laps, uint32_t io)
             if (wk == k2) stats().wraps_in_call++;
             if (d && wk == k3 && wk != k2) stats().ends_at_ring_end++;
             stats().matched++;
+            if (kind == kDraw) stats().marker_r3_matched++;   // a PPFX draw the engine draws itself
             r->walk.matched = 1;
             return 1;
         }
@@ -527,10 +561,179 @@ bool structure_changed(const Rec* r)
 // A draw about to be recorded by the engine.
 struct BTime { uint64_t t0 = bnow(); ~BTime() { stats().bridge_ns += bnow() - t0; } };
 
+// ---- R4: handbacks --------------------------------------------------------------------
+
+void finish(Rec* r);   // below
+
+void walk_init(Rec* r)
+{
+    for (uint32_t k = 0; k < kMaxNeeds; k++) r->walk.hand[k] = -1;
+    r->walk.ref = -1; r->walk.sem = -1; r->walk.ordinal = -1;
+}
+
+// DOTHEROES_PPFX_HANDBACK_CHECK (default on with comparisons): every
+// handback of a final composite, and every 60th otherwise, is read back on
+// both sides after the copy and compared byte for byte -- a copy that ran
+// before the native side's work was done would differ.
+
+FILE* s_present_hash;   // DOTHEROES_PPFX_PRESENT_HASH=<file>: every present's displayed image, hashed
+
+// The native image of `key` handed back into the engine's surface, here in
+// the engine's stream (kind: why, for the counts).
+void handback(uint64_t key, int kind)
+{
+    auto it = B.native.find(key);
+    if (it == B.native.end()) return;
+    const BState::Held held = it->second;
+    B.native.erase(it);
+    Stats& st = stats();
+    const uint64_t t0 = bnow();
+    const uint32_t loc = (uint32_t)(key >> 32), off = (uint32_t)key;
+    // the engine's surface there, made if it has none (the native side's size and format)
+    u32 w = 0, h = 0, fmt = 0;
+    u32 handle = rsx_draw_engine_find_surface(loc, off, &w, &h, &fmt);
+    if (!handle) handle = rsx_draw_engine_surface_ensure(loc, off, held.w, held.h, surface_beformat(held.format), held.pitch);
+    if (!handle) {
+        st.handback_fail++;
+        char line[160];
+        snprintf(line, sizeof line, "bridge: handback of %u:%08X (record %llu): the engine has no surface for it", loc, off,
+                 (unsigned long long)held.seq);
+        report_add(line);
+        return;
+    }
+    // the engine's work so far is submitted, with the signals the native side may be waiting for
+    rsx_vk_bridge_flush();
+    static int chk = -1;
+    if (chk < 0) {
+        const char* e = getenv("DOTHEROES_PPFX_HANDBACK_CHECK");
+        const char* c = getenv("DOTHEROES_PPFX_COMPARE");
+        chk = e && *e ? atoi(e) : !(c && *c == '0');
+    }
+    static uint64_t n = 0;
+    const bool check = chk && (held.format == 0x08 || n++ % 60 == 0);
+    HandOut o;
+    const uint64_t tw = bnow();
+    const int rc = handback_take(loc, off, check, 10000, &o);
+    st.handback_wait_ns += bnow() - tw;
+    if (rc) {
+        st.handback_fail++;
+        char line[160];
+        snprintf(line, sizeof line, "bridge: handback of %u:%08X (record %llu) failed (%d)", loc, off,
+                 (unsigned long long)held.seq, rc);
+        report_add(line);
+        return;
+    }
+    if (rsx_vk_bridge_copy_into(handle, (VkImage)o.image, (VkImageLayout)o.layout, o.w, o.h, (VkSemaphore)o.sem)) {
+        st.handback_fail++;   // its semaphore is signalled and never waited: the slot stays taken
+        if (o.check_slot >= 0) handback_check_done(o.check_slot);
+        return;
+    }
+    B.war_pending = true;
+    B.pending_release.push_back(o.sem_slot);
+    B.dirty.erase(key);
+    st.handbacks++;
+    st.handbacks_by_kind[kind < 6 ? kind : 5]++;
+    if (o.check_slot >= 0) {
+        // both sides read back: the engine's surface after the copy (this waits
+        // for the engine, which waited for the native side)
+        static std::vector<uint8_t> eng;
+        const uint32_t bytes = o.w * o.h * o.bpp;
+        if (eng.size() < (size_t)bytes * 2) eng.resize((size_t)bytes * 2);
+        u32 ew = 0, eh = 0, eb = 0;
+        if (!rsx_draw_engine_readback_surface(loc, off, eng.data(), (u32)eng.size(), &ew, &eh, &eb) && eb == o.bpp) {
+            const uint32_t cw = ew < o.w ? ew : o.w, chh = eh < o.h ? eh : o.h;
+            bool same = true;
+            for (uint32_t y = 0; y < chh && same; y++)
+                same = !memcmp(&eng[(size_t)y * ew * eb], o.check_rows + (size_t)y * o.w * o.bpp, (size_t)cw * eb);
+            st.hb_checked++;
+            if (same) st.hb_equal++;
+            else {
+                st.hb_differ++;
+                char line[160];
+                snprintf(line, sizeof line, "bridge: handback of %u:%08X (record %llu): the engine's copy differs from the "
+                         "native image", loc, off, (unsigned long long)held.seq);
+                report_add(line);
+            }
+        }
+        handback_check_done(o.check_slot);
+    }
+    st.handback_ns += bnow() - t0;
+}
+
+// The engine is about to read or write the surface at (loc, off) (rsx_engine_bridge.touch).
+void on_touch(void*, u32 loc, u32 off, int kind)
+{
+    if (!B.native.empty()) {
+        BTime bt;
+        handback((uint64_t)loc << 32 | off, kind);
+    }
+    if (kind == 3 && s_present_hash) {
+        // what is displayed: the engine's surface now, hashed (development; a GPU wait)
+        static std::vector<uint8_t> buf(1280u * 720u * 16u);
+        static uint64_t presents = 0;
+        u32 w = 0, h = 0, bpp = 0;
+        if (!rsx_draw_engine_readback_surface(loc, off, buf.data(), (u32)buf.size(), &w, &h, &bpp)) {
+            const uint32_t frame = B.w ? queue().at(B.w - 1)->frame : 0;
+            fprintf(s_present_hash, "%llu %u %u %016llx %ux%u\n", (unsigned long long)presents, frame, B.last_bypassed,
+                    (unsigned long long)fnv(buf.data(), (size_t)w * h * bpp), w, h);
+            stats().present_hashes++;
+            if ((presents & 63) == 0) fflush(s_present_hash);
+        }
+        presents++;
+    }
+}
+
+// The record a marker names, reached (the walker's thread).
+void marker_reached(uint64_t seq)
+{
+    BTime bt;
+    Queue& q = queue();
+    const uint64_t put = q.put.load(std::memory_order_acquire);
+    if (seq >= put || seq < B.w) { stats().marker_unknown++; return; }
+    while (B.w < seq) {   // records before it the walker never met: counted, passed on
+        Rec* m = q.at(B.w);
+        walk_init(m);
+        m->walk.matched = 0;
+        stats().missed++;
+        mark_walked(m);
+    }
+    Rec* r = q.at(B.w);
+    if (!r->bypassed) { stats().marker_unknown++; return; }
+    stats().markers_met++;
+    walk_init(r);
+    r->walk.matched = 1;
+    B.copies = 0;
+    const Need& t = r->need[0];
+    const uint64_t key = (uint64_t)t.location << 32 | t.offset;
+    if (B.xcheck) { std::lock_guard<std::mutex> g(s_fr_lock); s_ppfx_targets[key] = 1; }
+    static int nohand = -1;
+    if (nohand < 0) { const char* e = getenv("DOTHEROES_PPFX_NO_HANDOFF"); nohand = e && *e == '1'; }
+    if (mode() == 2 && render_ready() && !nohand) handoffs(r);
+    // its target: the native side's now
+    B.dirty.erase(key);
+    B.native[key] = { r->seq, t.w, t.h, t.format, t.pitch };
+    B.last_bypassed = 1;
+    finish(r);
+}
+
+// Each NV4097 no-operation word the engine meets (rsx_engine_bridge.marker).
+const uint32_t kMarkMagic = 0x52344D4Bu;   // "R4MK"
+void on_marker(void*, u32, u32, u32 word)
+{
+    if (B.mphase == 0) { if (word == kMarkMagic) B.mphase = 1; return; }
+    if (B.mphase == 1) { B.mlo = word; B.mphase = 2; return; }
+    B.mphase = 0;
+    marker_reached((uint64_t)word << 32 | B.mlo);
+}
+
 void on_draw_pre(void*, u32 io, u32 laps, const u32* handles, const u32* locations, const u32* offsets, u32 n)
 {
     (void)handles;
     BTime bt;
+    // R4: a target whose newest content is the native side's comes back
+    // first -- the draw blends onto it (the HUD over the final composite)
+    if (!B.native.empty())
+        for (uint32_t i = 0; i < n; i++) handback((uint64_t)locations[i] << 32 | offsets[i], 0);
     if (!match(kDraw, laps, io)) {
         foreign(locations, offsets, n, 1);
         if (B.xcheck) { const uint64_t x0 = bnow(); foreign_reads(locations, offsets, n); stats().xcheck_ns += bnow() - x0; }
@@ -540,6 +743,7 @@ void on_draw_pre(void*, u32 io, u32 laps, const u32* handles, const u32* locatio
     if (B.xcheck) { std::lock_guard<std::mutex> g(s_fr_lock); s_ppfx_targets[(uint64_t)r->need[0].location << 32 | r->need[0].offset] = 1; }
     for (uint32_t k = 0; k < kMaxNeeds; k++) r->walk.hand[k] = -1;
     r->walk.ref = -1; r->walk.sem = -1; r->walk.ordinal = -1;
+    B.last_bypassed = 0;
     B.copies = 0;
     if (B.xcheck) { const uint64_t x0 = bnow(); crosscheck(r); stats().xcheck_ns += bnow() - x0; }
     // DOTHEROES_PPFX_NO_HANDOFF=1 (a negative control): no handoffs, so the
@@ -547,8 +751,12 @@ void on_draw_pre(void*, u32 io, u32 laps, const u32* handles, const u32* locatio
     static int nohand = -1;
     if (nohand < 0) { const char* e = getenv("DOTHEROES_PPFX_NO_HANDOFF"); nohand = e && *e == '1'; }
     if (mode() == 2 && render_ready() && !nohand) handoffs(r);
-    // PPFX's own write: the native side will have these targets' content
-    for (uint32_t i = 0; i < n; i++) B.dirty.erase((uint64_t)locations[i] << 32 | offsets[i]);
+    // PPFX's own write: the native side will have these targets' content --
+    // and the engine draws it too (R3): neither side's is newer
+    for (uint32_t i = 0; i < n; i++) {
+        B.dirty.erase((uint64_t)locations[i] << 32 | offsets[i]);
+        B.native.erase((uint64_t)locations[i] << 32 | offsets[i]);
+    }
     B.pending = r;   // finished after the engine's draw (on_wrote)
 }
 
@@ -559,7 +767,12 @@ void on_draw_pre(void*, u32 io, u32 laps, const u32* handles, const u32* locatio
 // engine submits at its own points (its batches, the flip), not forced here.
 void finish(Rec* r)
 {
-    if (B.copies) {
+    // R4: after a handback, the next record walked waits for an engine signal
+    // past the handback's copy (the native side must not touch the image the
+    // engine copies from before that), and frees the handbacks' semaphores
+    // once its batch is done
+    const bool war = B.war_pending;
+    if (B.copies || war) {
         int used = 0;
         long long ord = rsx_vk_bridge_signal(VK_NULL_HANDLE, &used);   // already one for this command buffer?
         int16_t slot = ord >= 0 && ord == B.last_ord ? B.last_slot : -1;
@@ -574,13 +787,23 @@ void finish(Rec* r)
                     std::this_thread::sleep_for(std::chrono::microseconds(100));
                 stats().hand_slot_wait_ns += bnow() - t0;
             }
-            ord = s >= 0 ? rsx_vk_bridge_signal((VkSemaphore)sem, &used) : -2;
+            // with copies the engine's batch is open; a handback's signal alone opens one
+            // (the engine's work after the handback's copy)
+            ord = s >= 0 ? (B.copies ? rsx_vk_bridge_signal((VkSemaphore)sem, &used)
+                                     : rsx_vk_bridge_signal_open((VkSemaphore)sem, &used)) : -2;
             if (ord >= 0 && used) { slot = (int16_t)s; B.last_ord = ord; B.last_slot = slot; }
             else if (s >= 0) slot_release_semaphore(s);
         }
         if (ord >= 0 && slot >= 0) {
             r->walk.sem = slot;
             r->walk.ordinal = ord;
+            if (war) {
+                for (size_t i = 0; i < B.pending_release.size() && i < 4; i++) r->walk.release_sem[i] = (int16_t)B.pending_release[i];
+                B.pending_release.clear();
+                B.war_pending = false;
+            }
+        } else if (!B.copies) {
+            // only the handback's signal, and none could be had: the next record tries again
         } else {
             // nothing would order the native side after the copies: they are
             // not used, and their slots are free again once the engine's
@@ -651,7 +874,10 @@ void on_wrote(void*, u32 io, u32 laps, int draw, const u32* handles, const u32* 
     for (uint32_t k = 0; k < kMaxNeeds; k++) r->walk.hand[k] = -1;
     r->walk.ref = -1; r->walk.sem = -1; r->walk.ordinal = -1;
     B.copies = 0;
-    for (uint32_t i = 0; i < n; i++) B.dirty.erase((uint64_t)locations[i] << 32 | offsets[i]);
+    for (uint32_t i = 0; i < n; i++) {
+        B.dirty.erase((uint64_t)locations[i] << 32 | offsets[i]);
+        B.native.erase((uint64_t)locations[i] << 32 | offsets[i]);
+    }
     finish(r);
 }
 
@@ -661,8 +887,48 @@ void bridge_install()
 {
     const char* x = getenv("DOTHEROES_PPFX_XCHECK");
     B.xcheck = !(x && *x == '0');
-    static rsx_engine_bridge b = { nullptr, on_draw_pre, on_wrote };
+    static rsx_engine_bridge b = { nullptr, on_draw_pre, on_wrote, on_marker, on_touch };
+    const char* ph = getenv("DOTHEROES_PPFX_PRESENT_HASH");
+    if (ph && *ph) {
+        s_present_hash = fopen(ph, "w");
+        if (s_present_hash) fprintf(s_present_hash, "# present frame_of_last_record last_record_bypassed hash size\n");
+    }
     rsx_draw_engine_set_bridge(&b);
+}
+
+// R4's stream marker (the producer's thread, from the recorder): four words
+// at the context's current position -- a non-incrementing NV4097 method
+// 0x0100 header for three words, kMarkMagic, the sequence number's low and
+// high halves -- reserved as libgcm's own reserve does: when they do not fit
+// before the context's end, its callback first (here the runtime's own,
+// cellGcm_fifo_recycle_n, the only one this title installs; another is not
+// called: counted, and the record is missed).
+bool bridge_marker(uint32_t ctx_ea, uint64_t seq)
+{
+    auto rd = [](uint32_t ea) { return (uint32_t)vm_base[ea] << 24 | (uint32_t)vm_base[ea + 1] << 16 |
+                                       (uint32_t)vm_base[ea + 2] << 8 | vm_base[ea + 3]; };
+    auto wr = [](uint32_t ea, uint32_t v) { vm_base[ea] = (uint8_t)(v >> 24); vm_base[ea + 1] = (uint8_t)(v >> 16);
+                                            vm_base[ea + 2] = (uint8_t)(v >> 8); vm_base[ea + 3] = (uint8_t)v; };
+    if (ctx_ea < 0x10000u || ctx_ea >= 0xE0000000u) { stats().marker_fail++; return false; }
+    uint32_t cur = rd(ctx_ea + 8), end = rd(ctx_ea + 4);
+    if (cur + 16 > end) {
+        const uint32_t opd = rd(ctx_ea + 12);
+        if (opd < 0x10000u || opd >= 0xE0000000u || rd(opd) != ppu_hle_inject_base + 0x2F00u) {
+            stats().marker_fail++;
+            return false;
+        }
+        cellGcm_fifo_recycle_n(ctx_ea, 4);
+        cur = rd(ctx_ea + 8); end = rd(ctx_ea + 4);
+        if (cur + 16 > end) { stats().marker_fail++; return false; }
+        stats().marker_wraps++;
+    }
+    wr(cur, 0x400C0100u);           // NV4097 0x0100, 3 words, not incrementing (subchannel 0)
+    wr(cur + 4, kMarkMagic);
+    wr(cur + 8, (uint32_t)seq);
+    wr(cur + 12, (uint32_t)(seq >> 32));
+    wr(ctx_ea + 8, cur + 16);
+    stats().markers_written++;
+    return true;
 }
 
 // The cross-check's per-register aggregate, for the report.

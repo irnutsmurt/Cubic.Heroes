@@ -39,11 +39,16 @@ extern "C" volatile int g_r1_capture_done;   // rsx_draw_engine.c: captures ende
 
 extern "C" {
 int g_ppu_entry_observe = 0;
+int g_ppu_obs_store = 0;   // ps3recomp 0112: an observed body's stores reach ppu_obs_store while set
 }
 // R3 (ppfx_recorder.cpp, ppfx_watch.cpp): the recorder sees every observed
-// call; the target watch starts with the observers.
+// call; the target watch starts with the observers. R4: the recorder decides
+// whether the call's body runs (0), is replaced (1: it does not run) or runs
+// and is seen again at its return (2) -- ps3recomp 0112's protocol.
 extern "C" int ppfx_rec_wanted(void);
-extern "C" void ppfx_rec_observe(uint32_t addr, ppu_context* ctx);
+extern "C" int ppfx_rec_observe(uint32_t addr, ppu_context* ctx);
+extern "C" void ppfx_rec_exit(uint32_t addr, ppu_context* ctx);
+extern "C" void ppfx_rec_store(uint64_t ea, uint32_t bytes);
 extern "C" void ppfx_watch_start(void);
 static int s_rec = 0;
 
@@ -153,9 +158,27 @@ void step(double t)
 
 }  // namespace
 
-extern "C" void ppu_entry_observe(uint32_t addr, ppu_context* ctx)
+extern "C" void ppu_exit_observe(uint32_t addr, ppu_context* ctx)
 {
-    if (s_rec) ppfx_rec_observe(addr, ctx);
+    if (s_rec) ppfx_rec_exit(addr, ctx);
+}
+
+extern "C" void ppu_obs_store(uint64_t ea, uint32_t bytes)
+{
+    if (s_rec) ppfx_rec_store(ea, bytes);
+}
+
+static void r1_log(uint32_t addr, ppu_context* ctx);
+
+extern "C" int ppu_entry_observe(uint32_t addr, ppu_context* ctx)
+{
+    const int act = s_rec ? ppfx_rec_observe(addr, ctx) : 0;
+    r1_log(addr, ctx);
+    return act;
+}
+
+static void r1_log(uint32_t addr, ppu_context* ctx)
+{
     if (addr == 0x00963EBCu) return;   // the game's memcpy: R3's recorder only, not a libgcm call to log
     if (addr == 0x0069DD60u) {
         s_frame.fetch_add(1, std::memory_order_relaxed);

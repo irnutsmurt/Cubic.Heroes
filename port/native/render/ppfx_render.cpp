@@ -38,6 +38,14 @@
 // comparisons run. Records are released to the recorder (`done`) once
 // recorded: nothing here reads a record after that.
 //
+// R4's handbacks (docs/NATIVE_R4.md): the walker asks for the native image of
+// a surface the engine is about to use (handback_take); this thread
+// finishes every record walked, puts the image in TRANSFER_SRC (or GENERAL),
+// and submits with a semaphore the engine's next submission waits on. The
+// record the walker reaches next waits for an engine signal past that copy
+// (so nothing here touches the image while the engine reads it) and frees
+// the semaphore once its own batch is done.
+//
 // Comparison. For the records the walker copied the engine's output of
 // (compare_wanted), the native output is read back after the record and
 // compared byte for byte once both copies are complete. Every comparison
@@ -361,6 +369,8 @@ struct Batch {
     std::vector<uint8_t> sect;                   // per timestamp after the first: its section
     std::vector<int> sems;                       // semaphore slots to wait on ...
     std::vector<long long> ords;                 // ... and their signals' ordinals
+    std::vector<VkSemaphore> signals;            // R4: handbacks' semaphores this batch signals
+    std::vector<int> release;                    // R4: handbacks' semaphore slots, free once this batch is done
     std::vector<std::function<void()>> done;     // after completion
 };
 const int kBatches = 4;
@@ -409,9 +419,11 @@ void retire(Batch& b)
     {
         std::lock_guard<std::mutex> g(s_slot_lock);
         for (int s : b.sems) s_ssem[s].busy = false;
+        for (int s : b.release) if (s >= 0 && (size_t)s < s_ssem.size()) s_ssem[s].busy = false;
     }
     b.sems.clear();
     b.ords.clear();
+    b.release.clear();
     b.pending = false;
 }
 
@@ -467,10 +479,13 @@ void submit()
     si.waitSemaphoreCount = (uint32_t)waits.size(); si.pWaitSemaphores = waits.data();
     si.pWaitDstStageMask = stages.data();
     si.commandBufferCount = 1; si.pCommandBuffers = &b.cb;
+    si.signalSemaphoreCount = (uint32_t)b.signals.size();
+    si.pSignalSemaphores = b.signals.empty() ? nullptr : b.signals.data();
     rsx_vk_bridge_queue_lock();
     const VkResult r = F.vkQueueSubmit(D.queue, 1, &si, b.fence);
     rsx_vk_bridge_queue_unlock();
     if (r != VK_SUCCESS) fail("vkQueueSubmit", r);
+    b.signals.clear();
     b.open = false; b.pending = true;
     stats().n_batches++;
     s_cur = (s_cur + 1) % kBatches;
@@ -1258,6 +1273,7 @@ long long s_waited = -1;   // the last engine signal a batch waits on
 // the batch of the first record that needs it.
 void wait_for(Batch& b, const Rec* r)
 {
+    for (int16_t k : r->walk.release_sem) if (k >= 0) b.release.push_back(k);
     if (r->walk.sem < 0 || r->walk.ordinal <= s_waited) return;
     b.sems.push_back(r->walk.sem);
     b.ords.push_back(r->walk.ordinal);
@@ -1588,6 +1604,78 @@ bool init()
 std::atomic<int> s_draining{0};
 std::atomic<int> s_idle{0};   // the thread has submitted everything walked and waits
 
+// ---- R4: handbacks ----------------------------------------------------------------------------
+
+struct HbReq {
+    uint64_t key;
+    bool check;
+    int state;        // 0 asked, 1 submitted, < 0 failed
+    HandOut out;
+};
+std::mutex s_hb_lock;
+std::condition_variable s_hb_cv;
+HbReq* s_hb;             // the walker's request, while it waits
+bool s_hb_serving;       // this thread is working on it (the walker does not leave before)
+std::vector<Buf> s_hb_bufs;   // the checks' readbacks, by slot
+std::vector<bool> s_hb_busy;
+
+// This thread, with every record walked recorded: the image ready for the
+// engine's copy, the batch submitted with the request's semaphore.
+void hb_service(uint32_t frame)
+{
+    HbReq* q;
+    {
+        std::lock_guard<std::mutex> g(s_hb_lock);
+        q = s_hb;
+        if (!q || q->state) return;
+        s_hb_serving = true;
+    }
+    int rc = 0;
+    auto it = s_targets.find(q->key);
+    Img* t = it == s_targets.end() ? nullptr : it->second;
+    uint64_t sem = 0;
+    const int slot = t && t->written ? slot_semaphore(&sem) : -1;
+    if (!t || !t->written) rc = -1;
+    else if (slot < 0) rc = -2;
+    else {
+        Batch& b = batch(frame);
+        access(b.cb, t, kCopySrc);
+        int cs = -1;
+        if (q->check) {
+            const VkDeviceSize bytes = (VkDeviceSize)t->w * t->h * t->bpp;
+            std::lock_guard<std::mutex> g(s_hb_lock);
+            for (size_t i = 0; i < s_hb_busy.size(); i++)
+                if (!s_hb_busy[i] && s_hb_bufs[i].n >= bytes) { cs = (int)i; break; }
+            if (cs < 0 && s_hb_bufs.size() < 8) {
+                Buf nb;
+                if (make_buffer(nb, bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true)) {
+                    s_hb_bufs.push_back(nb); s_hb_busy.push_back(false); cs = (int)s_hb_bufs.size() - 1;
+                }
+            }
+            if (cs >= 0) {
+                s_hb_busy[cs] = true;
+                VkBufferImageCopy c = {};
+                c.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+                c.imageExtent = { t->w, t->h, 1 };
+                F.vkCmdCopyImageToBuffer(b.cb, t->img, layout_of(t), s_hb_bufs[cs].b, 1, &c);
+                mark(b, kSectReadback);
+            }
+        }
+        b.signals.push_back((VkSemaphore)sem);
+        submit();
+        HandOut& o = q->out;
+        o.image = (uint64_t)t->img; o.layout = (uint32_t)layout_of(t); o.w = t->w; o.h = t->h;
+        o.vkformat = (uint32_t)t->fmt; o.bpp = t->bpp; o.sem_slot = slot; o.sem = sem;
+        o.check_slot = cs; o.check_rows = cs >= 0 ? s_hb_bufs[cs].p : nullptr;
+    }
+    {
+        std::lock_guard<std::mutex> g(s_hb_lock);
+        q->state = rc ? rc : 1;
+        s_hb_serving = false;
+    }
+    s_hb_cv.notify_all();
+}
+
 void run()
 {
 #ifdef _WIN32
@@ -1606,6 +1694,8 @@ void run()
             if (idle) { for (Img* o : s_retired) destroy_image(o); s_retired.clear(); }
         }
         if (next >= q.walked.load(std::memory_order_acquire)) {
+            // R4: a handback asked for (everything walked is recorded now)
+            hb_service(frame);
             // nothing walked yet: submit what is open, so its work and
             // comparisons go ahead, and wait for the walker
             const uint64_t t0 = now_ns();
@@ -1613,7 +1703,7 @@ void run()
             if (s_draining) { for (Batch& b : s_b) retire(b); s_idle = 1; }
             std::unique_lock<std::mutex> lk(q.m);
             q.cv.wait_for(lk, std::chrono::milliseconds(2),
-                          [&] { return next < q.walked.load(std::memory_order_acquire); });
+                          [&] { return next < q.walked.load(std::memory_order_acquire) || s_hb != nullptr; });
             stats().wait_walker_us += (now_ns() - t0) / 1000;
             continue;
         }
@@ -1670,6 +1760,45 @@ uint32_t surface_vkformat(uint32_t color_format, uint32_t* bpp)
 uint32_t be_vkformat_pub(uint32_t be_format, uint32_t* bpp) { return (uint32_t)be_vkformat((rsx_be_format)be_format, bpp); }
 
 bool render_ready() { return s_ready.load() != 0; }
+
+uint32_t surface_beformat(uint32_t color_format)
+{
+    switch (color_format & 0x1Fu) {   // the engine's eng_surface_format
+    case RSX_SURFACE_FMT_F_W16Z16Y16X16: return RSX_BE_FMT_R16G16B16A16F;
+    case 0x0C: return RSX_BE_FMT_R32G32B32A32F;
+    case 0x0D: return RSX_BE_FMT_R32F;
+    default: return RSX_BE_FMT_R8G8B8A8;
+    }
+}
+
+int handback_take(uint32_t location, uint32_t offset, bool check, uint32_t timeout_ms, HandOut* out)
+{
+    if (!render_ready()) return -10;
+    HbReq q;
+    q.key = akey(location, offset); q.check = check; q.state = 0;
+    memset(&q.out, 0, sizeof q.out);
+    q.out.check_slot = -1;
+    std::unique_lock<std::mutex> lk(s_hb_lock);
+    s_hb = &q;
+    lk.unlock();
+    { std::lock_guard<std::mutex> g(queue().m); }
+    queue().cv.notify_all();
+    lk.lock();
+    const bool ok = s_hb_cv.wait_for(lk, std::chrono::milliseconds(timeout_ms), [&] { return q.state != 0; });
+    // not before the native thread has left the request alone (it lives on this stack)
+    s_hb_cv.wait(lk, [&] { return !s_hb_serving; });
+    s_hb = nullptr;
+    if (!ok && q.state == 0) return -11;
+    if (q.state < 0) return q.state;
+    *out = q.out;
+    return 0;
+}
+
+void handback_check_done(int slot)
+{
+    std::lock_guard<std::mutex> g(s_hb_lock);
+    if (slot >= 0 && (size_t)slot < s_hb_busy.size()) s_hb_busy[slot] = false;
+}
 
 void frame_flag_inherited(uint32_t frame)
 {
