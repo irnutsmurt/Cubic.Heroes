@@ -40,6 +40,12 @@ extern "C" volatile int g_r1_capture_done;   // rsx_draw_engine.c: captures ende
 extern "C" {
 int g_ppu_entry_observe = 0;
 }
+// R3 (ppfx_recorder.cpp, ppfx_watch.cpp): the recorder sees every observed
+// call; the target watch starts with the observers.
+extern "C" int ppfx_rec_wanted(void);
+extern "C" void ppfx_rec_observe(uint32_t addr, ppu_context* ctx);
+extern "C" void ppfx_watch_start(void);
+static int s_rec = 0;
 
 namespace {
 
@@ -52,6 +58,7 @@ int s_state = -1;   // -1 unread, 0 off, 1 waiting for a window, 2 logging, 3 do
 char s_dir[512];
 double s_ats[8];
 int s_nat, s_win;
+int s_capture;   // a consumption capture was asked for: a window waits for it to end
 
 // Seconds since this process was created: the clock DOTHEROES_R1_AT names,
 // shared with the consumption capture.
@@ -101,6 +108,8 @@ void read_config()
     }
     s_win = 0;
     s_from = s_ats[0] - 1.0; s_to = s_ats[0] + 1.0;
+    { const char* d = getenv("DOTHEROES_R1_DRAWS"); const char* c = getenv("DOTHEROES_R2_CHAIN");
+      s_capture = (d && *d) || (c && *c); }
     s_state = s_nat ? 1 : 0;
 }
 
@@ -128,7 +137,7 @@ void open_window()
 void step(double t)
 {
     if (s_state == 1 && t >= s_from) open_window();
-    else if (s_state == 2 && t >= s_to && (g_r1_capture_done > s_win || t >= s_from + 61.0)) {
+    else if (s_state == 2 && t >= s_to && (!s_capture || g_r1_capture_done > s_win || t >= s_from + 61.0)) {
         s_logging.store(0, std::memory_order_relaxed);
         fprintf(s_out, "# end at %.3f s\n", t);
         fclose(s_out); s_out = NULL;
@@ -146,6 +155,7 @@ void step(double t)
 
 extern "C" void ppu_entry_observe(uint32_t addr, ppu_context* ctx)
 {
+    if (s_rec) ppfx_rec_observe(addr, ctx);
     if (addr == 0x0069DD60u) {
         s_frame.fetch_add(1, std::memory_order_relaxed);
         std::lock_guard<std::mutex> g(s_lock);
@@ -183,7 +193,9 @@ struct R1ObserveInit {
     {
         const char* dir = getenv("DOTHEROES_R1_DIR");
         const char* at = getenv("DOTHEROES_R1_AT");
-        g_ppu_entry_observe = dir && *dir && at && *at;
+        s_rec = ppfx_rec_wanted();
+        g_ppu_entry_observe = (dir && *dir && at && *at) || s_rec;
+        ppfx_watch_start();
     }
 } s_r1_observe_init;
 }  // namespace

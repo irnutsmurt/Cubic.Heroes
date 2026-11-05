@@ -246,14 +246,20 @@ set(BULLET_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../build/deps/src/bullet-2.74" CACHE
     "Bullet 2.74 source tree (tools/build_deps.py fetches it)")
 add_library(dotheroes_native STATIC native/bullet_cd_task.cpp native/bullet_solver_task.cpp native/bullet_solver.cpp
     native/dev_state.cpp native/inflate.c native/edge_inflate.c
-    # R1's boundary capture: linked only when a development lift's entry
-    # observers reference it (tools/r1_dev_lift.sh)
-    native/render/r1_observe.cpp)
+    # R1's boundary capture and R3's recorder and target watch: linked only
+    # when a development lift's entry observers reference them
+    # (tools/r1_dev_lift.sh)
+    native/render/r1_observe.cpp native/render/ppfx_recorder.cpp native/render/ppfx_watch.cpp
+    native/render/ppfx_bridge.cpp native/render/ppfx_render.cpp)
 target_include_directories(dotheroes_native PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/native"
     "${PS3RECOMP_DIR}/include"
+    "${PS3RECOMP_DIR}/libs/video"
     "${PS3RECOMP_DIR}/runtime/spu"
     "${PS3RECOMP_DIR}/runtime/ppu")
+if(PS3RECOMP_VULKAN_INCLUDE_DIR)
+    target_include_directories(dotheroes_native PRIVATE "${PS3RECOMP_VULKAN_INCLUDE_DIR}")
+endif()
 if(EXISTS "${BULLET_DIR}/src/BulletMultiThreaded/SpuNarrowPhaseCollisionTask/SpuGatheringCollisionTask.h")
     message(STATUS "Native Bullet:   ${BULLET_DIR}")
     set(BT "${BULLET_DIR}/src")
