@@ -1,0 +1,88 @@
+From f33fc7cfa1d6cb476d766cfe2c9353685747819c Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Thu, 5 Nov 2026 07:11:21 -0800
+Subject: [PATCH 110/111] Frame trace: a state trigger (arm:<frames>:<path>,
+ rsx_frame_trace_arm) and every data word on request
+
+RSX_FRAME_TRACE=arm:<frames>:<path> starts the trace at the first flip
+after rsx_frame_trace_arm(), so the caller can start it at an area's first
+frames instead of a guessed time. RSX_FRAME_TRACE_WORDS=all prints every
+data word of a method (vertex-program microcode and constants whole), not
+the first 8. Diagnostics only, as before.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libs/video/cellGcmSys.c | 26 ++++++++++++++++++--------
+ 1 file changed, 18 insertions(+), 8 deletions(-)
+
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index d5b85c6..365256c 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -2106,7 +2106,9 @@ void cellGcm_ref_on_poll(void)
+ }
+ 
+ /* RSX_FRAME_TRACE=<s>:<frames>:<path>: every command word the drain reads
+- * in <frames> frames, from the first flip <s> seconds after its first word:
++ * in <frames> frames, from the first flip <s> seconds after its first word
++ * -- or, with <s> "arm", from the first flip after rsx_frame_trace_arm()
++ * (a state trigger: the caller decides when, e.g. at an area's first frame):
+  * the word's IO offset and value, and for a method header its subchannel,
+  * method, count and first data words. With PS3_ATTRIB_SHADOW (ppu_loader.cpp)
+  * each word also names the guest function and thread that stored it
+@@ -2114,9 +2116,11 @@ void cellGcm_ref_on_poll(void)
+  * anatomy of a frame. Walker thread only; evidence, not for timing. */
+ u64 (*g_gcm_word_writer)(u32 ea);
+ u32 (*g_gcm_word_caller)(u32 ea);
++static volatile int s_ft_armed;
++void rsx_frame_trace_arm(void) { s_ft_armed = 1; }
+ static void gcm_frame_trace(u32 off, u32 ea, u32 w)
+ {
+-    static int on = -1, active, left;
++    static int on = -1, active, left, by_arm;
+     static FILE* f;
+     static unsigned long long t0, after_ms;
+     if (on == 0) return;
+@@ -2124,17 +2128,19 @@ static void gcm_frame_trace(u32 off, u32 ea, u32 w)
+         on = 0;
+         const char* e = getenv("RSX_FRAME_TRACE");
+         unsigned s = 0, n = 0; char path[260] = "";
+-        if (!e || sscanf(e, "%u:%u:%259s", &s, &n, path) != 3 || !n) return;
+-        if (!(f = fopen(path, "w"))) return;
++        if (e && sscanf(e, "arm:%u:%259s", &n, path) == 2) by_arm = 1;
++        else if (!e || sscanf(e, "%u:%u:%259s", &s, &n, path) != 3) return;
++        if (!n || !(f = fopen(path, "w"))) return;
+         after_ms = 1000ull * s; left = (int)n; t0 = ps3_ms_now(); on = 1;
+-        fprintf(f, "# rsx frame trace: %u frames from the first flip %u s after the drain's first word\n", n, s);
++        if (by_arm) fprintf(f, "# rsx frame trace: %u frames from the first flip after rsx_frame_trace_arm()\n", n);
++        else fprintf(f, "# rsx frame trace: %u frames from the first flip %u s after the drain's first word\n", n, s);
+         fprintf(f, "# off word [fn tid lr=] | method header: sc method count data...\n");
+     }
+     if ((w & 0xFFFF0000u) == 0xFEAD0000u) {   /* a flip word: a frame boundary */
+         if (active) {
+             fprintf(f, "%08X %08X FLIP\n", off, w);
+             if (--left <= 0) { fclose(f); f = NULL; on = 0; return; }
+-        } else if (ps3_ms_now() - t0 >= after_ms) {
++        } else if (by_arm ? s_ft_armed : ps3_ms_now() - t0 >= after_ms) {
+             active = 1;
+             fprintf(f, "# begins after the flip at %08X, %.1f s\n", off, (ps3_ms_now() - t0) * 1e-3);
+         }
+@@ -2152,9 +2158,13 @@ static void gcm_frame_trace(u32 off, u32 ea, u32 w)
+     else if (w == 0x00020000u) fprintf(f, " RET");
+     else if (type == 0 || type == 2) {
+         const u32 count = (w >> 18) & 0x7FFu, method = w & 0x1FFCu, subch = (w >> 13) & 7u;
++        /* RSX_FRAME_TRACE_WORDS=all: every data word (the vertex programs'
++         * microcode and constants whole), else the first 8 */
++        static u32 maxw = 0;
++        if (!maxw) { const char* e = getenv("RSX_FRAME_TRACE_WORDS"); maxw = e && !strcmp(e, "all") ? 2048u : 8u; }
+         fprintf(f, " M %u %04X %u%s", subch, method, count, type == 2 ? " ni" : "");
+-        for (u32 i = 0; i < count && i < 8; i++) fprintf(f, " %08X", vm_read32(ea + 4 + i * 4));
+-        if (count > 8) fprintf(f, " ...");
++        for (u32 i = 0; i < count && i < maxw; i++) fprintf(f, " %08X", vm_read32(ea + 4 + i * 4));
++        if (count > maxw) fprintf(f, " ...");
+     }
+     fputc('\n', f);
+ }
+-- 
+2.56.0.windows.3
+

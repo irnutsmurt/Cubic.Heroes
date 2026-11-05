@@ -1,0 +1,51 @@
+From 80ebf468fc912a593e0347bae46775a35d2b8ad1 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Thu, 5 Nov 2026 07:11:22 -0800
+Subject: [PATCH 111/111] SPU image-3 probe: off unless SPU_IMAGE3_PROBE (or
+ LBP_REAL_POLICY) is set
+
+The probe was written for a title whose SPU image 3 is binkspu and ran on
+every dispatch of image 3 in every title. It follows each word of the
+argument block that looks like an address -- floats included -- and prints
+what is there. In 3D Dot Game Heroes image 3 is the Edge zlib inflate
+task; a target-watch run caught the probe reading RSX local memory behind
+a render target (0xC2E80000 is -116.0f). It only printed; nothing the game
+does depends on it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ runtime/spu/spu_workload.c | 11 ++++++++++-
+ 1 file changed, 10 insertions(+), 1 deletion(-)
+
+diff --git a/runtime/spu/spu_workload.c b/runtime/spu/spu_workload.c
+index e5988f0..ef8664a 100644
+--- a/runtime/spu/spu_workload.c
++++ b/runtime/spu/spu_workload.c
+@@ -464,6 +464,15 @@ static int spu_no_taskset(void)
+ { static int _n = -1; if (_n < 0) _n = getenv("LBP_NO_TASKSET") ? 1 : 0; return _n; }
+ static int spu_real_policy(void)
+ { static int _r = -1; if (_r < 0) _r = getenv("LBP_REAL_POLICY") ? 1 : 0; return _r; }
++/* SPU_IMAGE3_PROBE=1: the image-3 work-descriptor probe below (written for a
++ * title whose image 3 is binkspu). Off by default: elsewhere image 3 is any
++ * program -- 3D Dot Game Heroes' is the Edge zlib inflate task -- and the probe
++ * follows every word of the argument block that looks like an address,
++ * floats included: it read RSX local memory behind a render target
++ * (0xC2E80000 is -116.0f) in a target-watch run (the port's
++ * docs/NATIVE_R3B.md section 4). */
++static int spu_image3_probe(void)
++{ static int _p = -1; if (_p < 0) _p = getenv("SPU_IMAGE3_PROBE") ? 1 : 0; return _p; }
+ static const char* spu_ls_dump_prefix(void)   /* SPU_LS_DUMP=<prefix>, or NULL */
+ {
+     static int set = -1;
+@@ -1016,7 +1025,7 @@ static void spu_async_run(spu_async_job* j)
+              * (2) LBP_REAL_POLICY: run the REAL lifted taskset policy to build its
+              *     SpursTasksetContext and diff it against the C reimpl build_context
+              *     planted in `ls` -- shows exactly which fields differ. */
+-            if (j->image_id == 3) {
++            if (j->image_id == 3 && (spu_image3_probe() || spu_real_policy())) {
+                 extern uint8_t* vm_base;
+                 uint32_t arg = j->args_ea;
+                 /* SPU DMA maps EAs as vm_base + (uint32_t)ea with NO masking
+-- 
+2.56.0.windows.3
+
