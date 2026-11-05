@@ -460,9 +460,28 @@ Finalize fix, wait-free creation) is measured against it.
    1 to the 3D engine: fixed, GCM_SUBCH1_2D=1), per-image barriers and
    device-memory uploads (native GPU 0.52 ms a PPFX frame), the SPU read
    explained (the runtime's probe), reverse dependencies measured, R4's
-   plan revised. **It awaits the owner's review; R4 does not start
-   before.** The boss on the dual-run build:
-   tests/scenarios/owner_boss_r3.drive (for the owner to play).
+   plan revised. The owner reviewed it and authorised R4, then R5 as one
+   phase. **R4 is done as a checkpoint** (docs/NATIVE_R4.md, 2026-11-05):
+   behind DOTHEROES_PPFX_BYPASS (development builds, off by default) PPFX's
+   command writers do not run (ps3recomp 0112's observers that can replace
+   a call), stream markers stand where their commands were, and the native
+   output is handed back to the engine's surfaces before the engine next
+   uses them (0113). **R5 (asp) has started** (its first step: asp's draws
+   described from asp's own methods and cross-checked, not rendered).
+   The boss on R4's build: tests/scenarios/owner_boss_r4.drive (for the
+   owner to play; owner_boss_r3.drive is the dual-run one).
+   **Known gap, tracked:** PPFX's occlusion query result never arrives in
+   the port. The report's copy into PPFX's result buffer
+   (cellGcmSetTransferReportData: a memory-to-memory transfer on FIFO
+   subchannel 1) is not carried out by the engine, so PPFX's poll
+   (func_007C2CDC, every frame) finds it pending forever and the query is
+   issued once per area load; on a PS3 the pixel count arrives a frame later
+   and PPFX scales an effect with it (func_00779E80's object, intensities at
+   +0x40..+0x50). The routing fix (GCM_SUBCH1_2D=1) stopped the copy's words
+   corrupting the 3D state; it did not carry the copy out. Carrying it out
+   alone would deliver the walker's fixed "visible" count (0xFFFF), not the
+   game's; a faithful fix needs real occlusion counts -- a behaviour change
+   for the owner to decide (docs/NATIVE_R4.md section 1).
    The local review documents in build/ab/2026-11-04-opt-review are the
    background.
 5. Not verified: save portability (PARAM.PFD is not rewritten) and the colour

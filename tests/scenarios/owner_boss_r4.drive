@@ -1,0 +1,30 @@
+# A play session for the owner at the first dungeon's boss, on R4's build
+# (docs/NATIVE_R4.md): PPFX's commands bypassed and its output rendered
+# natively, in blocks of 5 s alternating with R3's dual run
+# (DOTHEROES_PPFX_BYPASS=alt:300): in the R3 blocks the existing renderer
+# draws PPFX and the native renderer's output is compared with it (every
+# frame's final composite, every draw of every 30th frame and after a
+# change); in the R4 blocks what is shown is the native renderer's, handed
+# back to the engine, every 30th handback read back on both sides and
+# compared. What it adds to R4's coverage: the boss fight's own
+# post-processing and any magic attack's, which no automated route reaches.
+#   SCENARIO=owner_boss_r4 build/venv/Scripts/python.exe tests/boot_smoke.py
+# needs R4's development build in build/r4/play (copied from build/r1/bld
+# by the R4 checkpoint). A fresh copy of checkpoint dungeon1-boss-door each
+# run (CONTINUE starts at the dungeon's door; the special key is in the room
+# north of the north room), normal damage, sound, fullscreen. The results
+# go to the run's ppfx_report.txt (build/sessions/boot-<time>-<tag>/; the
+# first differing outputs in ppfx_dump/), the saves the game writes to
+# build/checkpoints/owner-boss-r4/. If anything looks wrong -- a flicker
+# every 5 s, a missing effect -- press F8 (or L3+R3) at that moment: the
+# mark goes into the run's log with its time.
+#! saves build/checkpoints/dungeon1-boss-door
+#! env BIN=build/r4/play/dotheroes.exe RUNS_IN=build/sessions KEEP_RUNS=1000 PREEMPT_TESTS=1
+#! env DOTHEROES_PPFX_NATIVE=1 DOTHEROES_PPFX_BYPASS=alt:300 DOTHEROES_PPFX_HANDBACK_CHECK=30
+#! env DOTHEROES_PPFX_REPORT=ppfx_report.txt DOTHEROES_PPFX_DUMP=ppfx_dump
+#! env DOTHEROES_NATIVE_CD=1 DOTHEROES_NATIVE_SOLVER=4,5,6 GCM_WRAP_LAP=1 DOTHEROES_PRESENT_ONCE=1
+#! env WINDOW=1 PS3RECOMP_VK_FULLSCREEN=1 AUDIO=1 PS3_OSD_FPS=2 DUMP=0 SHOT_EVERY=0 PS3_VERBOSE=0
+#! env DOTHEROES_DEV_KEYS=1 DOTHEROES_DEV_STATE=1 DOTHEROES_DEV_RECORD=1 DIAG_FRAMES=frames.log
+#! env PS3RECOMP_SPIRV_CACHE=build/play-boss/cache DOTHEROES_FPS=display
+#! secs 14400
+until_exit build/checkpoints/owner-boss-r4

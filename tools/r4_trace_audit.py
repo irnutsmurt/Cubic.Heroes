@@ -53,8 +53,13 @@ def main():
         n = 1
         if len(f) >= 9 and f[5] == "M":
             n = 1 + int(f[8])
-            if f[7] == "0100" and len(f) > 9 and f[9] == MAGIC:
+            data = f[10:] if len(f) > 9 and f[9] == "ni" else f[9:]
+            if f[7] == "0100" and data and data[0] == MAGIC:
                 markers += 1
+                continue   # written by the recorder (host code): no guest writer to name
+            # a clear that touches depth or stencil is kept (r4_class), whatever its entry point
+            if fn == 0x006A5CF4 and f[7] == "1D94" and data and int(data[0], 16) & 0x03:
+                fn = 0x1D94_0000
             if f[7] in ("1808", "1814", "1818", "181C"):   # BEGIN_END, DRAW_ARRAYS, DRAW_INDEX, INDEX ARRAY
                 draws[(fn, who)] += 1
         words[(fn, who)] += n
@@ -64,7 +69,7 @@ def main():
     print("# writer   class      words_ppfx_calls  words_libgcm_calls  words_other  draw_words(ppfx/other)")
     tot = collections.Counter()
     for fn in fns:
-        cls = "bypassed" if fn in BYPASSED else "kept" if fn in KEPT else ("libgcm" if GCM[0] <= fn < GCM[1] else
+        cls = "kept" if fn == 0x1D94_0000 else "bypassed" if fn in BYPASSED else "kept" if fn in KEPT else ("libgcm" if GCM[0] <= fn < GCM[1] else
                                                                            "ppfx" if PPFX[0] <= fn < PPFX[1] else "-")
         a, b, c = words[(fn, "ppfx")], words[(fn, "libgcm")], words[(fn, "other")]
         tot[(cls, "ppfx")] += a

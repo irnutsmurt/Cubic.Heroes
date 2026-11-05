@@ -93,6 +93,28 @@ screen, every frame held for 2 refreshes, against 60 fps's mix of 2 and 3).
 Tell me if motion looks better, worse or the same as before -- or if anything
 plays oddly at that rate (timers, animations, sound, cutscenes).
 
+## The R4 boss session (pending)
+
+The same boss, on R4's development build (docs/NATIVE_R4.md): PPFX's
+post-processing rendered by the native renderer, in 5-second blocks
+alternating with the old path, which compares the two. Start it like the
+others:
+
+```bash
+env SCENARIO=owner_boss_r4 build/venv/Scripts/python.exe tests/boot_smoke.py
+```
+
+It starts at the boss's door (a fresh copy of `dungeon1-boss-door`), with
+normal damage, sound and fullscreen. Play the boss, and use a magic attack
+or two if you have one. If something looks wrong -- a flicker every 5
+seconds, an effect missing or different -- press F8 (or both sticks) right
+then: the mark goes into the log with the time. Close the window when done.
+The comparison's results go to `ppfx_report.txt` in
+`build/sessions/boot-<time>-.../`, your saves to
+`build/checkpoints/owner-boss-r4/`. A save in an area past the first
+dungeon (the desert, the lava dungeon, the volcano, the forest) would let
+the same checks run there.
+
 ## What is recorded (automatically)
 
 In `build/sessions/boot-<time>-owner-play/`: every frame's time
