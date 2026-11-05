@@ -38,6 +38,7 @@
 #include "ppfx_native.h"
 
 #include <chrono>
+#include <condition_variable>
 #include <functional>
 #include <map>
 #include <stdio.h>
@@ -153,6 +154,7 @@ struct Img {
     VkFramebuffer fb = VK_NULL_HANDLE;
     std::unordered_map<uint64_t, VkImageView> views;   // (remap, format byte) -> a view with that crossbar
     uint32_t written = 0;                              // records have written it (or a handoff filled it)
+    VkDeviceSize bytes = 0;                            // its memory
 };
 
 VkImageView make_view(VkImage img, VkFormat fmt, uint32_t levels, VkComponentMapping map)
@@ -188,6 +190,7 @@ Img* make_image(VkFormat fmt, uint32_t w, uint32_t h, uint32_t levels, uint32_t 
     o->fmt = fmt; o->w = w; o->h = h; o->levels = levels; o->bpp = bpp;
     o->view = make_view(o->img, fmt, levels, { VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
                                                VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY });
+    o->bytes = rq.size;
     stats().n_images++;
     stats().n_image_bytes += rq.size;
     return o;
@@ -202,6 +205,7 @@ void destroy_image(Img* o)
     if (o->img) F.vkDestroyImage(D.device, o->img, nullptr);
     if (o->mem) F.vkFreeMemory(D.device, o->mem, nullptr);
     stats().n_images--;
+    stats().n_image_bytes -= o->bytes;
     delete o;
 }
 
@@ -239,7 +243,8 @@ std::mutex s_slot_lock;
 std::vector<SlotImg> s_simg;
 std::vector<SlotBuf> s_sbuf;
 std::vector<SlotSem> s_ssem;
-const size_t kMaxSlots = 64;
+const size_t kMaxSlotImages = 128, kMaxSlotBuffers = 512, kMaxSlotSems = 64;
+const size_t kFinalReserve = 32;   // buffers kept for final composites: those are compared every frame
 
 // ---- batches --------------------------------------------------------------------------
 
@@ -252,8 +257,8 @@ struct Batch {
     VkDeviceSize used = 0;
     bool open = false, pending = false;
     uint32_t frame = 0, records = 0, sets = 0;
-    std::vector<int> sems;                       // semaphore slots to wait on
-    int64_t max_ordinal = -1;
+    std::vector<int> sems;                       // semaphore slots to wait on ...
+    std::vector<long long> ords;                 // ... and their signals' ordinals
     std::vector<std::function<void()>> done;     // after completion
     uint64_t t_record = 0;
 };
@@ -283,7 +288,7 @@ void retire(Batch& b)
         for (int s : b.sems) s_ssem[s].busy = false;
     }
     b.sems.clear();
-    b.max_ordinal = -1;
+    b.ords.clear();
     b.pending = false;
 }
 
@@ -310,17 +315,15 @@ void submit()
 {
     Batch& b = s_b[s_cur];
     if (!b.open) return;
-    // the engine's work the waits are on must be submitted before ours waits
-    if (b.max_ordinal >= 0) {
+    // the engine's submissions that signal what we wait on must be made
+    // before ours waits (the engine submits at its own points: a frame at most)
+    if (!b.ords.empty()) {
         const uint64_t t0 = now_ns();
-        unsigned long long lost = 0;
-        while ((long long)rsx_vk_bridge_signals(&lost) <= b.max_ordinal) {
-            std::this_thread::sleep_for(std::chrono::microseconds(100));
-            if (now_ns() - t0 > 5000000000ull) {
-                fail("waiting for the engine's signal", VK_TIMEOUT);
-                break;
+        for (long long o : b.ords)
+            while (!rsx_vk_bridge_submitted(o)) {
+                std::this_thread::sleep_for(std::chrono::microseconds(200));
+                if (now_ns() - t0 > 10000000000ull) { fail("waiting for the engine's signal", VK_TIMEOUT); break; }
             }
-        }
         stats().wait_signal_us += (now_ns() - t0) / 1000;
     }
     // the engine's copies (other queue, ordered by the semaphores) and ours,
@@ -500,7 +503,7 @@ Img* target_image(Batch& b, uint32_t loc, uint32_t off, VkFormat fmt, uint32_t b
     if (t && t->fmt == fmt && t->w >= w && t->h >= h) return t;
     // new, or other than this record needs: a new image (resource reuse); the
     // old one goes once nothing in flight can use it
-    if (t) s_retired.push_back(t);
+    if (t) { s_retired.push_back(t); stats().n_retired++; }
     t = make_image(fmt, w, h, 1, bpp, true);
     if (t) to_general(b.cb, t->img, 1);
     return t;
@@ -781,7 +784,7 @@ void apply_handoffs(Batch& b, const Rec* r)
         const Need& n = r->need[k];
         Img*& dst = s_targets[akey(n.location, n.offset)];
         if (!dst || dst->fmt != src->fmt || dst->w < src->w || dst->h < src->h) {
-            if (dst) s_retired.push_back(dst);
+            if (dst) { s_retired.push_back(dst); stats().n_retired++; }
             dst = make_image(src->fmt, src->w, src->h, 1, src->bpp, true);
             if (!dst) continue;
             to_general(b.cb, dst->img, 1);
@@ -796,6 +799,71 @@ void apply_handoffs(Batch& b, const Rec* r)
         b.done.push_back([s] { std::lock_guard<std::mutex> g(s_slot_lock); s_simg[s].busy = false; });
     }
     if (any) barrier_all(b.cb);
+}
+
+// ---- chain variants -----------------------------------------------------------------------
+// A frame's chain structure: the sequence of its records' targets (address
+// and size) and, as a second level, of their fragment programs' content. Each
+// frame's comparisons are counted under its structure and program variant.
+
+struct FrameAcc { uint64_t shape = 1469598103934665603ull, progs = 1469598103934665603ull; uint32_t draws = 0;
+                  uint32_t eq = 0, diff = 0, fin = 0, fin_eq = 0; int pending = 0; std::string desc; };
+struct VarAcc { std::string desc; uint64_t frames = 0, cmp_frames = 0, eq = 0, diff = 0, fin = 0, fin_eq = 0;
+                std::map<uint64_t, uint64_t> progs; };
+std::mutex s_var_lock;
+std::map<uint32_t, FrameAcc> s_frames;   // open and recent frames
+std::map<uint64_t, VarAcc> s_vars;
+
+void frame_note(const Rec* r, uint32_t w, uint32_t h)
+{
+    std::lock_guard<std::mutex> g(s_var_lock);
+    FrameAcc& f = s_frames[r->frame];
+    // the final composite alternates between the display buffers: one place
+    const uint32_t t[3] = { r->need[0].format == 0x08 ? 0xD15Bu : r->need[0].offset, w, h };
+    f.shape = fnv(t, sizeof t, f.shape);
+    // programs by structure: the constants PPFX patches each frame are not a variant
+    const uint64_t ph = r->fp ? rsx_fp_structural_hash(r->fp->bytes.data(), (uint32_t)r->fp->bytes.size(), 0) : 0;
+    f.progs = fnv(&ph, 8, f.progs);
+    if (f.draws < 3 || f.desc.size() < 200) {
+        char b[48];
+        snprintf(b, sizeof b, "%s%ux%u", f.draws ? " " : "", w, h);
+        if (f.draws < 64) f.desc += b;
+    }
+    f.draws++;
+}
+
+void frame_result(uint32_t frame, bool equal, bool final_)
+{
+    std::lock_guard<std::mutex> g(s_var_lock);
+    FrameAcc& f = s_frames[frame];
+    (equal ? f.eq : f.diff)++;
+    if (final_) { f.fin++; if (equal) f.fin_eq++; }
+}
+
+void frame_pending(uint32_t frame, int d)
+{
+    std::lock_guard<std::mutex> g(s_var_lock);
+    s_frames[frame].pending += d;
+}
+
+// Frames well behind the renderer whose comparisons have all run are
+// complete: into their variant's totals.
+void frames_close(uint32_t before)
+{
+    std::lock_guard<std::mutex> g(s_var_lock);
+    for (auto it = s_frames.begin(); it != s_frames.end() && it->first + 8 < before;) {
+        FrameAcc& f = it->second;
+        if (f.pending > 0) { ++it; continue; }
+        char key[64];
+        snprintf(key, sizeof key, "%u draws", f.draws);
+        VarAcc& v = s_vars[f.shape];
+        if (v.desc.empty()) v.desc = std::string(key) + ": " + f.desc;
+        v.frames++;
+        v.progs[f.progs]++;
+        if (f.eq + f.diff > f.fin) v.cmp_frames++;
+        v.eq += f.eq; v.diff += f.diff; v.fin += f.fin; v.fin_eq += f.fin_eq;
+        it = s_frames.erase(it);
+    }
 }
 
 // ---- comparison ----------------------------------------------------------------------------
@@ -813,59 +881,111 @@ void dump(const char* side, uint32_t frame, uint64_t seq, uint32_t off, const ui
     if (o) { fwrite(p, 1, n, o); fclose(o); }
 }
 
-void compare_after(Batch& b, const Rec* r, Img* t, uint32_t w, uint32_t h)
+// The comparisons run on a thread of their own, so the native renderer is
+// not held up by them: a job per compared record, queued at its batch's
+// completion (both copies are then complete), bounded (the renderer waits
+// for room: counted). Readback buffers come from a pool.
+struct CmpJob { Buf mine; int ref; VkDeviceSize bytes; uint32_t w, h, bpp, ref_w, ref_h, frame, off; uint64_t seq;
+                int final_; VkFormat f; };
+std::mutex s_cmp_lock;
+std::condition_variable s_cmp_cv;
+std::vector<CmpJob> s_cmp_q;
+const size_t kCmpQ = 512;
+std::multimap<VkDeviceSize, Buf> s_rb_pool;   // free readback buffers by size
+
+Buf rb_take(VkDeviceSize bytes)
 {
-    const int ref = r->walk.ref;
-    if (ref < 0) return;
-    const VkDeviceSize bytes = (VkDeviceSize)w * h * t->bpp;
-    Buf mine;
-    if (!make_buffer(mine, bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true)) return;
-    barrier_all(b.cb);
-    VkBufferImageCopy c = {};
-    c.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-    c.imageExtent = { w, h, 1 };
-    F.vkCmdCopyImageToBuffer(b.cb, t->img, VK_IMAGE_LAYOUT_GENERAL, mine.b, 1, &c);
-    // what the comparison needs after the record is gone
-    struct Info { uint64_t seq; uint32_t frame, off; int final_; } info =
-        { r->seq, r->frame, r->need[0].offset, r->need[0].format == 0x08 };
-    const VkFormat f = t->fmt;
-    const uint32_t bpp = t->bpp;
-    const uint32_t ref_w = r->walk.ref_w, ref_h = r->walk.ref_h;
-    b.done.push_back([=]() mutable {
-        const uint64_t t0 = now_ns();
-        Stats& st = stats();
-        st.cmp_records++;
-        if (info.final_) st.cmp_finals++;
-        Buf eng;
-        { std::lock_guard<std::mutex> g(s_slot_lock); eng = s_sbuf[ref].b; }
-        bool equal = false;
-        uint64_t differ = 0;
-        if (ref_w == w && ref_h == h && eng.n >= bytes) {
-            equal = !memcmp(mine.p, eng.p, (size_t)bytes);
-            if (!equal)
-                for (VkDeviceSize i = 0; i < bytes; i += bpp) differ += memcmp(mine.p + i, eng.p + i, bpp) != 0;
-        } else {
-            st.cmp_skipped++;
-        }
-        if (equal) { st.cmp_equal++; if (info.final_) st.cmp_finals_equal++; }
-        else if (ref_w == w && ref_h == h) {
+    {
+        std::lock_guard<std::mutex> g(s_cmp_lock);
+        auto it = s_rb_pool.lower_bound(bytes);
+        if (it != s_rb_pool.end() && it->first < bytes * 2) { Buf b = it->second; s_rb_pool.erase(it); return b; }
+    }
+    Buf b;
+    if (!make_buffer(b, bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true)) return Buf();
+    return b;
+}
+
+void cmp_run(CmpJob& j)
+{
+    const uint64_t t0 = now_ns();
+    Stats& st = stats();
+    st.cmp_records++;
+    if (j.final_) st.cmp_finals++;
+    Buf eng;
+    { std::lock_guard<std::mutex> g(s_slot_lock); eng = s_sbuf[j.ref].b; }
+    const bool same = j.ref_w == j.w && j.ref_h == j.h && eng.n >= j.bytes;
+    const bool equal = same && !memcmp(j.mine.p, eng.p, (size_t)j.bytes);
+    if (!same) st.cmp_skipped++;
+    else {
+        frame_result(j.frame, equal, j.final_);
+        if (equal) { st.cmp_equal++; if (j.final_) st.cmp_finals_equal++; }
+        else {
             st.cmp_differ++;
+            uint64_t differ = 0;
+            for (VkDeviceSize i = 0; i < j.bytes; i += j.bpp) differ += memcmp(j.mine.p + i, eng.p + i, j.bpp) != 0;
             static int said = 0;
             if (said++ < 40) {
                 char line[240];
                 snprintf(line, sizeof line, "compare: record %llu frame %u target %08X %ux%u: %llu of %u pixels differ",
-                         (unsigned long long)info.seq, info.frame, info.off, w, h, (unsigned long long)differ, w * h);
+                         (unsigned long long)j.seq, j.frame, j.off, j.w, j.h, (unsigned long long)differ, j.w * j.h);
                 report_add(line);
             }
             if (s_dump[0] && s_dumped++ < 12) {
-                dump("native", info.frame, info.seq, info.off, mine.p, (size_t)bytes, w, h, f);
-                dump("engine", info.frame, info.seq, info.off, eng.p, (size_t)bytes, w, h, f);
+                dump("native", j.frame, j.seq, j.off, j.mine.p, (size_t)j.bytes, j.w, j.h, j.f);
+                dump("engine", j.frame, j.seq, j.off, eng.p, (size_t)j.bytes, j.w, j.h, j.f);
             }
         }
-        { std::lock_guard<std::mutex> g(s_slot_lock); s_sbuf[ref].busy = false; }
-        F.vkDestroyBuffer(D.device, mine.b, nullptr);
-        F.vkFreeMemory(D.device, mine.m, nullptr);
-        st.compare_ns += now_ns() - t0;
+    }
+    frame_pending(j.frame, -1);
+    { std::lock_guard<std::mutex> g(s_slot_lock); s_sbuf[j.ref].busy = false; }
+    { std::lock_guard<std::mutex> g(s_cmp_lock); s_rb_pool.emplace(j.mine.n, j.mine); }
+    st.compare_ns += now_ns() - t0;
+}
+
+void cmp_thread()
+{
+#ifdef _WIN32
+    SetThreadDescription(GetCurrentThread(), L"ppfx compare");
+#endif
+    for (;;) {
+        CmpJob j;
+        {
+            std::unique_lock<std::mutex> lk(s_cmp_lock);
+            s_cmp_cv.wait(lk, [] { return !s_cmp_q.empty(); });
+            j = s_cmp_q.front();
+            s_cmp_q.erase(s_cmp_q.begin());
+        }
+        s_cmp_cv.notify_all();
+        cmp_run(j);
+    }
+}
+
+void compare_after(Batch& b, const Rec* r, Img* t, uint32_t w, uint32_t h)
+{
+    const int ref = r->walk.ref;
+    if (ref < 0) return;
+    CmpJob j;
+    j.bytes = (VkDeviceSize)w * h * t->bpp;
+    j.mine = rb_take(j.bytes);
+    if (!j.mine.b) { std::lock_guard<std::mutex> g(s_slot_lock); s_sbuf[ref].busy = false; return; }
+    barrier_all(b.cb);
+    VkBufferImageCopy c = {};
+    c.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+    c.imageExtent = { w, h, 1 };
+    F.vkCmdCopyImageToBuffer(b.cb, t->img, VK_IMAGE_LAYOUT_GENERAL, j.mine.b, 1, &c);
+    // what the comparison needs after the record is gone
+    j.ref = ref; j.w = w; j.h = h; j.bpp = t->bpp; j.ref_w = r->walk.ref_w; j.ref_h = r->walk.ref_h;
+    j.frame = r->frame; j.off = r->need[0].offset; j.seq = r->seq; j.final_ = r->need[0].format == 0x08; j.f = t->fmt;
+    frame_pending(j.frame, +1);
+    b.done.push_back([j] {
+        const uint64_t t0 = now_ns();
+        std::unique_lock<std::mutex> lk(s_cmp_lock);
+        if (s_cmp_q.size() >= kCmpQ) stats().cmp_queue_waits++;
+        s_cmp_cv.wait(lk, [] { return s_cmp_q.size() < kCmpQ; });
+        s_cmp_q.push_back(j);
+        lk.unlock();
+        s_cmp_cv.notify_all();
+        stats().cmp_queue_wait_ns += now_ns() - t0;
     });
 }
 
@@ -902,10 +1022,22 @@ void scissor_rect(const rsx_dsp_surface* sf, uint32_t w, uint32_t h, uint32_t ou
     out[0] = sx; out[1] = sy; out[2] = sw; out[3] = sh;
 }
 
+long long s_waited = -1;   // the last engine signal a batch waits on
+
+// The engine's signal a record's copies are ordered by: waited on once, in
+// the batch of the first record that needs it.
+void wait_for(Batch& b, const Rec* r)
+{
+    if (r->walk.sem < 0 || r->walk.ordinal <= s_waited) return;
+    b.sems.push_back(r->walk.sem);
+    b.ords.push_back(r->walk.ordinal);
+    s_waited = r->walk.ordinal;
+}
+
 void draw(const Rec* r)
 {
     Batch& b = batch(r->frame);
-    if (r->walk.sem >= 0) { b.sems.push_back(r->walk.sem); if (r->walk.ordinal > b.max_ordinal) b.max_ordinal = r->walk.ordinal; }
+    wait_for(b, r);
     if (r->why) { unsupported(r, "no programs or vertex data"); return; }
     load_state(r);
     rsx_dsp_surface sf; rsx_dsp_get_surface(s_R, &sf);
@@ -1035,8 +1167,13 @@ void draw(const Rec* r)
     wr[2].dstBinding = 16; wr[2].descriptorCount = 16; wr[2].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE; wr[2].pImageInfo = ii;
     wr[3].dstBinding = 48; wr[3].descriptorCount = 16; wr[3].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER; wr[3].pImageInfo = si;
     F.vkUpdateDescriptorSets(D.device, 4, wr, 0, nullptr);
-    // the draw
-    barrier_all(b.cb);
+    // the draw. DOTHEROES_PPFX_HAZARD_TEST=1 (the synchronisation check's
+    // negative control): one draw in 5000 goes without its barrier, so the
+    // validation layer must report a hazard
+    static int hazard = -1;
+    if (hazard < 0) { const char* e = getenv("DOTHEROES_PPFX_HAZARD_TEST"); hazard = e && *e == '1'; }
+    if (!(hazard && stats().n_draws % 5000 == 4999)) barrier_all(b.cb);
+    else report_add("render: hazard test: a draw recorded without its barrier");
     VkRenderPassBeginInfo rbi = { VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
     rbi.renderPass = render_pass(rt); rbi.framebuffer = framebuffer(t);
     rbi.renderArea = { { 0, 0 }, { t->w, t->h } };
@@ -1060,13 +1197,14 @@ void draw(const Rec* r)
     t->written = 1;
     b.records++;
     stats().n_draws++;
+    frame_note(r, W, H);
     compare_after(b, r, t, W, H);
 }
 
 void clear(const Rec* r)
 {
     Batch& b = batch(r->frame);
-    if (r->walk.sem >= 0) { b.sems.push_back(r->walk.sem); if (r->walk.ordinal > b.max_ordinal) b.max_ordinal = r->walk.ordinal; }
+    wait_for(b, r);
     load_state(r);
     rsx_dsp_surface sf; rsx_dsp_get_surface(s_R, &sf);
     uint32_t bpp = 0;
@@ -1176,6 +1314,9 @@ bool init()
     rsx_dispatch_init(s_R, nullptr);
     const char* d = getenv("DOTHEROES_PPFX_DUMP");
     snprintf(s_dump, sizeof s_dump, "%s", d && *d ? d : "");
+#ifdef _WIN32
+    if (s_dump[0]) CreateDirectoryA(s_dump, NULL);
+#endif
     s_ready = 1;
     return true;
 }
@@ -1210,7 +1351,12 @@ void run()
         }
         Rec* r = q.at(next);
         if (r->frame != frame && s_b[s_cur].open) submit();   // a frame's work in a batch of its own
+        if (r->frame != frame) frames_close(r->frame);
         frame = r->frame;
+        // DOTHEROES_PPFX_DELAY_MS=<n> (a test): a slow consumer, n ms a record
+        static int delay = -1;
+        if (delay < 0) { const char* e = getenv("DOTHEROES_PPFX_DELAY_MS"); delay = e && *e ? atoi(e) : 0; }
+        if (delay) std::this_thread::sleep_for(std::chrono::milliseconds(delay));
         const uint64_t t0 = now_ns();
         if (r->kind == kDraw) draw(r);
         else if (r->kind == kClear) clear(r);
@@ -1240,6 +1386,21 @@ uint32_t be_vkformat_pub(uint32_t be_format, uint32_t* bpp) { return (uint32_t)b
 
 bool render_ready() { return s_ready.load() != 0; }
 
+void render_report(std::vector<std::string>& out)
+{
+    std::lock_guard<std::mutex> g(s_var_lock);
+    char line[512];
+    for (auto& kv : s_vars) {
+        const VarAcc& v = kv.second;
+        snprintf(line, sizeof line, "variant %016llx: %llu frames (%zu program variants), %llu with every draw compared; "
+                 "draws equal %llu differ %llu; finals equal %llu of %llu | %s", (unsigned long long)kv.first,
+                 (unsigned long long)v.frames, v.progs.size(), (unsigned long long)v.cmp_frames,
+                 (unsigned long long)v.eq, (unsigned long long)v.diff, (unsigned long long)v.fin_eq,
+                 (unsigned long long)v.fin, v.desc.c_str());
+        out.push_back(line);
+    }
+}
+
 int slot_image(uint32_t vkformat, uint32_t w, uint32_t h, uint64_t* image)
 {
     if (!render_ready()) return -1;
@@ -1250,7 +1411,7 @@ int slot_image(uint32_t vkformat, uint32_t w, uint32_t h, uint64_t* image)
             s.busy = true; *image = (uint64_t)s.im->img; return (int)i;
         }
     }
-    if (s_simg.size() >= kMaxSlots) return -1;
+    if (s_simg.size() >= kMaxSlotImages) return -1;
     uint32_t bpp = 0;
     switch ((VkFormat)vkformat) {
     case VK_FORMAT_R16G16B16A16_SFLOAT: bpp = 8; break;
@@ -1266,13 +1427,16 @@ int slot_image(uint32_t vkformat, uint32_t w, uint32_t h, uint64_t* image)
     return (int)s_simg.size() - 1;
 }
 
-int slot_buffer(uint64_t bytes, uint64_t* buffer)
+int slot_buffer(uint64_t bytes, uint64_t* buffer, bool final_)
 {
     if (!render_ready()) return -1;
     std::lock_guard<std::mutex> g(s_slot_lock);
+    size_t busy = 0;
+    for (const SlotBuf& b : s_sbuf) busy += b.busy;
+    if (!final_ && busy + kFinalReserve >= kMaxSlotBuffers) return -1;
     for (size_t i = 0; i < s_sbuf.size(); i++)
         if (!s_sbuf[i].busy && s_sbuf[i].b.n >= bytes) { s_sbuf[i].busy = true; *buffer = (uint64_t)s_sbuf[i].b.b; return (int)i; }
-    if (s_sbuf.size() >= kMaxSlots) return -1;
+    if (s_sbuf.size() >= kMaxSlotBuffers) return -1;
     SlotBuf s;
     if (!make_buffer(s.b, bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true)) return -1;
     s.busy = true;
@@ -1287,7 +1451,7 @@ int slot_semaphore(uint64_t* semaphore)
     std::lock_guard<std::mutex> g(s_slot_lock);
     for (size_t i = 0; i < s_ssem.size(); i++)
         if (!s_ssem[i].busy) { s_ssem[i].busy = true; *semaphore = (uint64_t)s_ssem[i].s; return (int)i; }
-    if (s_ssem.size() >= kMaxSlots) return -1;
+    if (s_ssem.size() >= kMaxSlotSems) return -1;
     VkSemaphoreCreateInfo ci = { VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
     VkSemaphore s = VK_NULL_HANDLE;
     if (F.vkCreateSemaphore(D.device, &ci, nullptr, &s) != VK_SUCCESS) return -1;
@@ -1296,11 +1460,31 @@ int slot_semaphore(uint64_t* semaphore)
     return (int)s_ssem.size() - 1;
 }
 
+void slot_release_image(int slot)
+{
+    std::lock_guard<std::mutex> g(s_slot_lock);
+    if (slot >= 0 && (size_t)slot < s_simg.size()) s_simg[slot].busy = false;
+}
+
+void slot_release_buffer(int slot)
+{
+    std::lock_guard<std::mutex> g(s_slot_lock);
+    if (slot >= 0 && (size_t)slot < s_sbuf.size()) s_sbuf[slot].busy = false;
+}
+
+void slot_release_semaphore(int slot)
+{
+    std::lock_guard<std::mutex> g(s_slot_lock);
+    if (slot >= 0 && (size_t)slot < s_ssem.size()) s_ssem[slot].busy = false;
+}
+
 bool compare_wanted(const Rec* r)
 {
-    static int every = -1;
+    static int every = -1, off = -1;
     if (every < 0) { const char* e = getenv("DOTHEROES_PPFX_COMPARE_EVERY"); every = e && *e ? atoi(e) : 30; }
-    if (r->kind != kDraw) return false;
+    // DOTHEROES_PPFX_COMPARE=0: no comparison at all (the native renderer's own cost)
+    if (off < 0) { const char* e = getenv("DOTHEROES_PPFX_COMPARE"); off = e && *e == '0'; }
+    if (off || r->kind != kDraw) return false;
     const bool final_ = r->need[0].format == 0x08;   // the final composite: the A8R8G8B8 display buffer
     return final_ || (every > 0 && r->frame % (uint32_t)every == 0);
 }
@@ -1308,6 +1492,7 @@ bool compare_wanted(const Rec* r)
 void render_start()
 {
     std::thread(run).detach();
+    std::thread(cmp_thread).detach();
 }
 
 }  // namespace ppfx

@@ -156,6 +156,7 @@ void step(double t)
 extern "C" void ppu_entry_observe(uint32_t addr, ppu_context* ctx)
 {
     if (s_rec) ppfx_rec_observe(addr, ctx);
+    if (addr == 0x00963EBCu) return;   // the game's memcpy: R3's recorder only, not a libgcm call to log
     if (addr == 0x0069DD60u) {
         s_frame.fetch_add(1, std::memory_order_relaxed);
         std::lock_guard<std::mutex> g(s_lock);

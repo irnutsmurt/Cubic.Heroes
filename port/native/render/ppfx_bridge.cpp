@@ -27,6 +27,8 @@
 
 #include "ppfx_native.h"
 
+#include <chrono>
+#include <thread>
 #include <map>
 #include <mutex>
 #include <stdio.h>
@@ -50,6 +52,12 @@ namespace {
 
 const uint32_t kDrawDelta = 0x20, kClearDelta = 0;
 
+uint64_t bnow()
+{
+    return (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
 struct BState {
     uint64_t w;                 // the head record (== queue().walked)
     int have_delta;
@@ -61,7 +69,8 @@ struct BState {
     const Rec* cur;              // the record being checked
     Rec* pending;                // a matched draw, finished after the engine's draw
     uint32_t copies;             // copies recorded for it so far
-    int64_t ordinal;             // signals attached so far (their order in the engine's submissions)
+    long long last_ord = -1;     // the last signal this bridge attached ...
+    int16_t last_slot = -1;      // ... and its semaphore slot
     std::map<std::string, XR> xr;
     std::mutex xr_lock;          // the report reads it
     uint64_t logged_miss;
@@ -251,9 +260,14 @@ void crosscheck(Rec* r)
 
 // The head record against the walker's event (kind, laps, io): 1 matched
 // (the head is walked), 0 the event is other work's.
+struct WEv { uint32_t kind, laps, io; };
+WEv s_recent[8];
+uint32_t s_nrecent;
+
 int match(uint32_t kind, uint32_t laps, uint32_t io)
 {
     Queue& q = queue();
+    s_recent[s_nrecent++ % 8] = { kind, laps, io };
     for (;;) {
         const uint64_t put = q.put.load(std::memory_order_acquire);
         if (B.w >= put) return 0;
@@ -278,9 +292,14 @@ int match(uint32_t kind, uint32_t laps, uint32_t io)
             report_add(line);
         }
         const uint64_t wk = K(laps, io);
+        // k3: commands that end exactly at the ring's end, where the walker
+        // has taken the jump back before it reports them (the next lap's
+        // first byte: no command of that lap can end there)
         const uint64_t k1 = K(r->lap + B.delta, r->io + d), k2 = K(r->lap + 1 + B.delta, r->io_alt + d);
-        if (r->kind == kind && (wk == k1 || wk == k2)) {
+        const uint64_t k3 = K(r->lap + 1 + B.delta, r->io_alt);
+        if (r->kind == kind && (wk == k1 || wk == k2 || (d && wk == k3))) {
             if (wk == k2) stats().wraps_in_call++;
+            if (d && wk == k3 && wk != k2) stats().ends_at_ring_end++;
             stats().matched++;
             r->walk.matched = 1;
             return 1;
@@ -299,9 +318,13 @@ int match(uint32_t kind, uint32_t laps, uint32_t io)
         if (!missed) return 0;
         stats().missed++;
         if (B.logged_miss++ < 20) {
-            char line[200];
-            snprintf(line, sizeof line, "bridge: record %llu (kind %u, lap %u io %08X alt %08X) not reached; walker at "
-                     "laps %u io %08X kind %u", (unsigned long long)r->seq, r->kind, r->lap, r->io, r->io_alt, laps, io, kind);
+            char line[400];
+            int at = snprintf(line, sizeof line, "bridge: record %llu (kind %u, lap %u io %08X alt %08X) not reached; "
+                              "the walker's last events:", (unsigned long long)r->seq, r->kind, r->lap, r->io, r->io_alt);
+            for (uint32_t k = s_nrecent > 8 ? s_nrecent - 8 : 0; k < s_nrecent && at < (int)sizeof line - 32; k++) {
+                const WEv& e = s_recent[k % 8];
+                at += snprintf(line + at, sizeof line - at, " %u:%u/%08X", e.kind, e.laps, e.io);
+            }
             report_add(line);
         }
         r->walk.matched = 0;
@@ -326,9 +349,23 @@ void handoffs(Rec* r)
         uint32_t bpp = 0;
         const uint32_t vf = be_vkformat_pub(fmt, &bpp);
         uint64_t img = 0;
-        const int slot = vf ? slot_image(vf, w, h, &img) : -1;
-        if (slot < 0 || rsx_vk_bridge_copy_image(handle, (VkImage)img, w, h)) {
-            st.handoff_fail++;
+        int slot = vf ? slot_image(vf, w, h, &img) : -1;
+        if (slot < 0 && vf) {
+            // Every slot is with records the native renderer has not done yet
+            // (a slow consumer): wait for one -- a handoff is never dropped.
+            // The engine's work is submitted first, so the renderer is not
+            // left waiting for a signal only this thread would submit.
+            const uint64_t t0 = bnow();
+            rsx_vk_bridge_flush();
+            st.hand_slot_waits++;
+            while ((slot = slot_image(vf, w, h, &img)) < 0 && bnow() - t0 < 10000000000ull)
+                std::this_thread::sleep_for(std::chrono::microseconds(100));
+            st.hand_slot_wait_ns += bnow() - t0;
+        }
+        if (slot < 0) { st.handoff_fail++; st.hand_no_slot++; continue; }
+        if (rsx_vk_bridge_copy_image(handle, (VkImage)img, w, h)) {
+            st.handoff_fail++; st.hand_copy_fail++;
+            slot_release_image(slot);
             continue;
         }
         r->walk.hand[k] = (int16_t)slot;
@@ -338,38 +375,92 @@ void handoffs(Rec* r)
     }
 }
 
+// State-triggered comparison: a frame whose chain departs from the frame
+// before -- another target or size, another program structure at the same
+// place in the chain (an area's first frames, a dungeon's, programs reloaded
+// elsewhere after the title) -- has every draw compared from there on, and so
+// do the DOTHEROES_PPFX_COMPARE_AFTER_CHANGE (default 60) frames after it.
+struct VState { uint32_t frame = ~0u, full_until = 0; std::vector<uint64_t> cur, prev; } V;
+
+bool structure_changed(const Rec* r)
+{
+    static int after = -1;
+    if (after < 0) { const char* e = getenv("DOTHEROES_PPFX_COMPARE_AFTER_CHANGE"); after = e && *e ? atoi(e) : 60; }
+    if (r->frame != V.frame) { V.prev.swap(V.cur); V.cur.clear(); V.frame = r->frame; }
+    const uint64_t prog = r->fp ? rsx_fp_structural_hash(r->fp->bytes.data(), (uint32_t)r->fp->bytes.size(), 0) : 0;
+    const uint32_t place = r->need[0].format == 0x08 ? 0xD15Bu : r->need[0].offset;   // display buffers alternate
+    const uint64_t key = fnv(&place, 4, fnv(&r->need[0].w, 8, prog));
+    const size_t i = V.cur.size();
+    V.cur.push_back(key);
+    if (i >= V.prev.size() || V.prev[i] != key) {
+        if (V.full_until < r->frame + (uint32_t)after) {
+            if (V.full_until < r->frame) stats().cmp_triggers++;
+            V.full_until = r->frame + (uint32_t)after;
+        }
+    }
+    return r->frame <= V.full_until && V.frame != ~0u && after > 0;
+}
+
 // A draw about to be recorded by the engine.
+struct BTime { uint64_t t0 = bnow(); ~BTime() { stats().bridge_ns += bnow() - t0; } };
+
 void on_draw_pre(void*, u32 io, u32 laps, const u32* handles, const u32* locations, const u32* offsets, u32 n)
 {
     (void)handles;
+    BTime bt;
     if (!match(kDraw, laps, io)) { foreign(locations, offsets, n, 1); return; }
     Rec* r = queue().at(B.w);
     for (uint32_t k = 0; k < kMaxNeeds; k++) r->walk.hand[k] = -1;
     r->walk.ref = -1; r->walk.sem = -1; r->walk.ordinal = -1;
     B.copies = 0;
-    if (B.xcheck) crosscheck(r);
-    if (mode() == 2 && render_ready()) handoffs(r);
+    if (B.xcheck) { const uint64_t x0 = bnow(); crosscheck(r); stats().xcheck_ns += bnow() - x0; }
+    // DOTHEROES_PPFX_NO_HANDOFF=1 (a negative control): no handoffs, so the
+    // native side lacks what other work drew and the comparison must see it
+    static int nohand = -1;
+    if (nohand < 0) { const char* e = getenv("DOTHEROES_PPFX_NO_HANDOFF"); nohand = e && *e == '1'; }
+    if (mode() == 2 && render_ready() && !nohand) handoffs(r);
     // PPFX's own write: the native side will have these targets' content
     for (uint32_t i = 0; i < n; i++) B.dirty.erase((uint64_t)locations[i] << 32 | offsets[i]);
     B.pending = r;   // finished after the engine's draw (on_wrote)
 }
 
-// The copies recorded for a record go with the engine's next submission,
-// which signals a semaphore the native renderer waits on; the batch is
-// submitted now so the native side need not wait for the frame's end.
+// The copies recorded for a record go with the engine's next submission of
+// the command buffer they are in; that submission signals one semaphore,
+// shared by every record whose copies went into the same command buffer. The
+// native side waits on it once, before the first record that needs it; the
+// engine submits at its own points (its batches, the flip), not forced here.
 void finish(Rec* r)
 {
     if (B.copies) {
-        uint64_t sem = 0;
-        const int s = slot_semaphore(&sem);
-        if (s >= 0 && !rsx_vk_bridge_signal((VkSemaphore)sem)) {
-            r->walk.sem = (int16_t)s;
-            r->walk.ordinal = B.ordinal++;
-            rsx_vk_bridge_flush();
+        int used = 0;
+        long long ord = rsx_vk_bridge_signal(VK_NULL_HANDLE, &used);   // already one for this command buffer?
+        int16_t slot = ord >= 0 && ord == B.last_ord ? B.last_slot : -1;
+        if (ord == -1) {
+            uint64_t sem = 0;
+            int s = slot_semaphore(&sem);
+            if (s < 0 && render_ready()) {   // as for an image slot: wait, the engine's work submitted first
+                const uint64_t t0 = bnow();
+                rsx_vk_bridge_flush();
+                stats().hand_slot_waits++;
+                while ((s = slot_semaphore(&sem)) < 0 && bnow() - t0 < 10000000000ull)
+                    std::this_thread::sleep_for(std::chrono::microseconds(100));
+                stats().hand_slot_wait_ns += bnow() - t0;
+            }
+            ord = s >= 0 ? rsx_vk_bridge_signal((VkSemaphore)sem, &used) : -2;
+            if (ord >= 0 && used) { slot = (int16_t)s; B.last_ord = ord; B.last_slot = slot; }
+            else if (s >= 0) slot_release_semaphore(s);
+        }
+        if (ord >= 0 && slot >= 0) {
+            r->walk.sem = slot;
+            r->walk.ordinal = ord;
         } else {
-            // nothing would order the native side after the copies: they are not used
+            // nothing would order the native side after the copies: they are
+            // not used, and their slots are free again once the engine's
+            // submission has run them (the next frame's, at the latest: the
+            // slots are only released here, the copies are harmless)
             stats().handoff_fail += B.copies;
-            for (uint32_t k = 0; k < kMaxNeeds; k++) r->walk.hand[k] = -1;
+            for (uint32_t k = 0; k < kMaxNeeds; k++) { if (r->walk.hand[k] >= 0) slot_release_image(r->walk.hand[k]); r->walk.hand[k] = -1; }
+            if (r->walk.ref >= 0) slot_release_buffer(r->walk.ref);
             r->walk.ref = -1;
             char line[160];
             snprintf(line, sizeof line, "bridge: record %llu: no semaphore for its copies", (unsigned long long)r->seq);
@@ -382,22 +473,28 @@ void finish(Rec* r)
 // After a draw (draw = 1; its draw_pre came first) or a clear.
 void on_wrote(void*, u32 io, u32 laps, int draw, const u32* handles, const u32* locations, const u32* offsets, u32 n)
 {
+    BTime bt;
     if (draw) {
         Rec* r = B.pending;
         if (!r) return;   // other work's draw: decided at its draw_pre
         B.pending = nullptr;
         // the reference output, for the comparison
-        if (mode() == 2 && render_ready() && compare_wanted(r) && n) {
+        static int cmp_off = -1;
+        if (cmp_off < 0) { const char* e = getenv("DOTHEROES_PPFX_COMPARE"); cmp_off = e && *e == '0'; }
+        const bool changed = mode() == 2 && !cmp_off && structure_changed(r);
+        if (mode() == 2 && render_ready() && (compare_wanted(r) || changed) && n) {
             const Need& t = r->need[0];
             uint32_t bpp = 0;
             surface_vkformat(t.format, &bpp);
             uint64_t buf = 0;
-            const int slot = bpp ? slot_buffer((uint64_t)t.w * t.h * bpp, &buf) : -1;
+            const int slot = bpp ? slot_buffer((uint64_t)t.w * t.h * bpp, &buf, t.format == 0x08) : -1;
             if (slot >= 0 && !rsx_vk_bridge_copy_buffer(handles[0], (VkBuffer)buf, 0, t.w, t.h)) {
                 r->walk.ref = (int16_t)slot; r->walk.ref_w = t.w; r->walk.ref_h = t.h;
                 B.copies++;
             } else {
+                if (slot >= 0) slot_release_buffer(slot);
                 stats().cmp_skipped++;
+                stats().cmp_no_slot++;
             }
         }
         finish(r);

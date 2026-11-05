@@ -189,6 +189,29 @@ void shadow_write(uint32_t off, const uint8_t* src, uint32_t n, uint64_t ep)
     }
 }
 
+// A copy the game makes into local memory (its memcpy, observed): on pages
+// the shadow keeps (program memory), the bytes it writes, in call order --
+// a program uploaded again, after the title, at an offset that held other
+// programs' patched words before.
+void shadow_cpu_write(uint32_t off, const uint8_t* src, uint32_t n)
+{
+    const uint64_t ep = ++s_epoch;
+    for (uint32_t pg = off & ~0xFFFu; pg < off + n; pg += 0x1000) {
+        auto it = s_shadow.find(pg >> 12);
+        if (it == s_shadow.end()) continue;
+        ShadowPage* p = it->second;
+        const uint32_t lo = pg < off ? off : pg, hi = pg + 0x1000 < off + n ? pg + 0x1000 : off + n;
+        for (uint32_t w = lo & ~3u; w < hi; w += 4) {
+            uint8_t* d = p->b + (w & 0xFFF);
+            uint64_t& wep = p->ep[(w & 0xFFF) >> 2];
+            if (!wep) memcpy(d, vm_base + kLocalEa + w, 4);   // a word copied in part: the rest as memory has it
+            for (uint32_t b = 0; b < 4; b++)
+                if (w + b >= lo && w + b < hi) d[b] = src[w + b - off];
+            wep = ep;
+        }
+    }
+}
+
 // Program memory at a bind. `since`: words a transfer wrote after it are the
 // new program's own (patched just before this bind); with `fresh` the other
 // words take the program's base bytes, else the shadow keeps what it has.
@@ -753,15 +776,17 @@ void write_report()
     Queue& q = queue();
     fprintf(f, "# ppfx report at %.1f s (mode %d)\n", now_s(), mode());
     fprintf(f, "calls %llu ppfx %llu nested_ppfx %llu others_on_producer %llu other_threads %llu unmodelled %llu "
-               "producer_threads %llu\n",
+               "producer_threads %llu local_copies %llu\n",
             (unsigned long long)s.calls, (unsigned long long)s.ppfx_calls, (unsigned long long)s.nested_ppfx,
             (unsigned long long)s.foreign_state_calls, (unsigned long long)s.other_thread_calls,
-            (unsigned long long)s.unmodelled, (unsigned long long)s.producer_threads);
+            (unsigned long long)s.unmodelled, (unsigned long long)s.producer_threads,
+            (unsigned long long)s.local_copies);
     fprintf(f, "records draws %llu clears %llu (depth-only clears %llu) frames %llu put %llu walked %llu done %llu\n",
             (unsigned long long)s.draws, (unsigned long long)s.clears, (unsigned long long)s.depth_clears,
             (unsigned long long)s.frames,
             (unsigned long long)q.put, (unsigned long long)q.walked, (unsigned long long)q.done);
-    fprintf(f, "wraps_in_call %llu\n", (unsigned long long)s.wraps_in_call);
+    fprintf(f, "wraps_in_call %llu ends_at_ring_end %llu\n", (unsigned long long)s.wraps_in_call,
+            (unsigned long long)s.ends_at_ring_end);
     fprintf(f, "recorder_ms %.3f queue_full_waits %llu queue_full_wait_ms %.3f\n", s.rec_ns / 1e6,
             (unsigned long long)q.full_waits, q.full_wait_us / 1e3);
     fprintf(f, "walker matched %llu missed %llu foreign_draws %llu foreign_clears %llu lap_delta_changes %llu\n",
@@ -773,15 +798,24 @@ void write_report()
             (unsigned long long)s.xc_tex);
     fprintf(f, "handoffs %llu failed %llu\n", (unsigned long long)s.handoffs, (unsigned long long)s.handoff_fail);
     fprintf(f, "native draws %llu clears %llu unsupported %llu batches %llu pipelines %llu images %llu (%.1f MB) "
-               "static_textures %llu own_target_snapshots %llu\n",
+               "static_textures %llu own_target_snapshots %llu images_replaced %llu\n",
             (unsigned long long)s.n_draws, (unsigned long long)s.n_clears, (unsigned long long)s.n_unsupported,
             (unsigned long long)s.n_batches, (unsigned long long)s.n_pipelines, (unsigned long long)s.n_images,
-            s.n_image_bytes / 1048576.0, (unsigned long long)s.n_static_textures, (unsigned long long)s.n_feedback);
+            s.n_image_bytes / 1048576.0, (unsigned long long)s.n_static_textures, (unsigned long long)s.n_feedback,
+            (unsigned long long)s.n_retired);
     fprintf(f, "native_ms record_cpu %.1f gpu %.1f wait_walker %.1f wait_signal %.1f compare %.1f\n",
             s.cpu_record_ns / 1e6, s.gpu_ns / 1e6, s.wait_walker_us / 1e3, s.wait_signal_us / 1e3, s.compare_ns / 1e6);
-    fprintf(f, "compare records %llu equal %llu differ %llu skipped %llu finals %llu finals_equal %llu\n",
+    fprintf(f, "walker_ms bridge %.1f of which crosscheck %.1f\n", s.bridge_ns / 1e6, s.xcheck_ns / 1e6);
+    fprintf(f, "compare records %llu equal %llu differ %llu skipped %llu finals %llu finals_equal %llu "
+               "structure_triggers %llu\n",
             (unsigned long long)s.cmp_records, (unsigned long long)s.cmp_equal, (unsigned long long)s.cmp_differ,
-            (unsigned long long)s.cmp_skipped, (unsigned long long)s.cmp_finals, (unsigned long long)s.cmp_finals_equal);
+            (unsigned long long)s.cmp_skipped, (unsigned long long)s.cmp_finals, (unsigned long long)s.cmp_finals_equal,
+            (unsigned long long)s.cmp_triggers);
+    fprintf(f, "compare_slots no_buffer %llu queue_waits %llu queue_wait_ms %.1f | handoff no_slot %llu copy_failed %llu "
+               "slot_waits %llu slot_wait_ms %.1f\n",
+            (unsigned long long)s.cmp_no_slot, (unsigned long long)s.cmp_queue_waits, s.cmp_queue_wait_ns / 1e6,
+            (unsigned long long)s.hand_no_slot, (unsigned long long)s.hand_copy_fail,
+            (unsigned long long)s.hand_slot_waits, s.hand_slot_wait_ns / 1e6);
     {
         std::lock_guard<std::mutex> g(s_unm_lock);
         for (auto& kv : s_unmodelled_by) fprintf(f, "unmodelled %08X %llu\n", kv.first, (unsigned long long)kv.second);
@@ -789,6 +823,7 @@ void write_report()
     {
         std::vector<std::string> xs;
         bridge_report(xs);
+        if (mode() == 2) render_report(xs);
         for (auto& l : xs) fprintf(f, "%s\n", l.c_str());
     }
     std::lock_guard<std::mutex> g(s_rep_lock);
@@ -848,6 +883,15 @@ extern "C" void ppfx_rec_observe(uint32_t addr, ppu_context* ctx)
 {
     static int started = 0;
     if (!started) { started = 1; ppfx::start(); }
+    if (addr == 0x00963EBCu) {   // the game's memcpy(dst, src, n): only copies into local memory matter
+        const uint32_t dst = (uint32_t)ctx->gpr[3], src = (uint32_t)ctx->gpr[4], n = (uint32_t)ctx->gpr[5];
+        if (dst >= kLocalEa && dst - kLocalEa < 0x10000000u && n && n <= (64u << 20) && ea_ok(src, n)) {
+            std::lock_guard<std::mutex> g(s_lock);
+            shadow_cpu_write(dst - kLocalEa, vm_base + src, n);
+            stats().local_copies++;
+        }
+        return;
+    }
     const uint64_t t0 = now_ns();
     Stats& st = stats();
     st.calls++;

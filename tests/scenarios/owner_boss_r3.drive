@@ -1,0 +1,23 @@
+# A play session for the owner at the first dungeon's boss, on R3's dual-run
+# build (docs/NATIVE_R3.md): the existing renderer draws what is shown, and
+# beside it the native PPFX renderer renders the same frames from PPFX's own
+# calls and compares them -- every frame's final composite, and every PPFX
+# draw of every 30th frame and of the 60 frames after the chain changes. What
+# it adds to R3's coverage: the boss fight's own post-processing (and any
+# magic attack's), which no automated route reaches.
+#   SCENARIO=owner_boss_r3 build/venv/Scripts/python.exe tests/boot_smoke.py
+# needs the development build (tools/r1_dev_lift.sh), copied to build/r3/play.
+# A fresh copy of checkpoint dungeon1-boss-door each run (CONTINUE starts at
+# the dungeon's door; the special key is in the room north of the north
+# room), normal damage, sound, fullscreen. The comparison's results go to the
+# run's ppfx_report.txt (build/sessions/boot-<time>-<tag>/), the saves the
+# game writes to build/checkpoints/owner-boss-r3/.
+#! saves build/checkpoints/dungeon1-boss-door
+#! env BIN=build/r3/play/dotheroes.exe RUNS_IN=build/sessions KEEP_RUNS=1000 PREEMPT_TESTS=1
+#! env DOTHEROES_PPFX_NATIVE=1 DOTHEROES_PPFX_REPORT=ppfx_report.txt DOTHEROES_PPFX_DUMP=ppfx_dump
+#! env DOTHEROES_NATIVE_CD=1 DOTHEROES_NATIVE_SOLVER=4,5,6 GCM_WRAP_LAP=1 DOTHEROES_PRESENT_ONCE=1
+#! env WINDOW=1 PS3RECOMP_VK_FULLSCREEN=1 AUDIO=1 PS3_OSD_FPS=2 DUMP=0 SHOT_EVERY=0 PS3_VERBOSE=0
+#! env DOTHEROES_DEV_KEYS=1 DOTHEROES_DEV_STATE=1 DOTHEROES_DEV_RECORD=1 DIAG_FRAMES=frames.log
+#! env PS3RECOMP_SPIRV_CACHE=build/play-boss/cache DOTHEROES_FPS=display
+#! secs 14400
+until_exit build/checkpoints/owner-boss-r3

@@ -328,6 +328,10 @@
   {
    "addr": "0x006A9ED8",
    "note": "no command seen in the river trace (PPFX calls it)"
+  },
+  {
+   "addr": "0x00963EBC",
+   "note": "the game's memcpy: R3's recorder takes copies into RSX local memory (the fragment programs' uploads) into its program shadow"
   }
  ]
 }

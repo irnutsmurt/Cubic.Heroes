@@ -145,6 +145,7 @@ int mode();
 // recorder's start-up when the mode asks for it.
 void bridge_install();
 void bridge_report(std::vector<std::string>& out);   // the cross-check's aggregate
+void render_report(std::vector<std::string>& out);   // comparisons per chain variant
 // The native renderer's start (ppfx_render.cpp), mode 2.
 void render_start();
 
@@ -153,8 +154,11 @@ void render_start();
 // slot is the native renderer's again once its work with it has completed.
 bool render_ready();
 int slot_image(uint32_t vkformat, uint32_t w, uint32_t h, uint64_t* image);
-int slot_buffer(uint64_t bytes, uint64_t* buffer);
+int slot_buffer(uint64_t bytes, uint64_t* buffer, bool final_);   // a final composite may use the reserve
 int slot_semaphore(uint64_t* semaphore);
+void slot_release_semaphore(int slot);   // taken but not used
+void slot_release_image(int slot);
+void slot_release_buffer(int slot);
 // Which records' outputs the walker copies for comparison.
 bool compare_wanted(const Rec* r);
 // The VkFormat the engine keeps a colour surface of this SET_SURFACE_FORMAT
@@ -168,9 +172,11 @@ uint32_t be_vkformat_pub(uint32_t be_format, uint32_t* bpp);
 struct Stats {
     std::atomic<uint64_t> calls{0}, ppfx_calls{0}, nested_ppfx{0}, foreign_state_calls{0}, other_thread_calls{0};
     std::atomic<uint64_t> unmodelled{0};          // PPFX calls with commands the recorder has no encoder for
+    std::atomic<uint64_t> local_copies{0};        // the game's copies into local memory seen
     std::atomic<uint64_t> draws{0}, clears{0}, depth_clears{0}, frames{0};
     std::atomic<uint64_t> producer_threads{0};    // > 1: the single-producer assumption broke
     std::atomic<uint64_t> wraps_in_call{0};       // records the walker found at their wrapped position
+    std::atomic<uint64_t> ends_at_ring_end{0};    // records whose commands ended at the ring's end
     std::atomic<uint64_t> rec_ns{0};              // the recorder's own time on the game's thread
     std::atomic<uint64_t> matched{0}, missed{0}, foreign_draws{0}, foreign_clears{0};
     std::atomic<uint64_t> lap_delta_changes{0};
@@ -179,9 +185,12 @@ struct Stats {
     // the native renderer
     std::atomic<uint64_t> n_draws{0}, n_clears{0}, n_skipped{0}, n_unsupported{0}, n_batches{0};
     std::atomic<uint64_t> n_pipelines{0}, n_images{0}, n_image_bytes{0}, n_static_textures{0}, n_feedback{0};
+    std::atomic<uint64_t> n_retired{0};   // images replaced at an address (another size or format) and destroyed later
     std::atomic<uint64_t> cmp_records{0}, cmp_equal{0}, cmp_differ{0}, cmp_skipped{0};
-    std::atomic<uint64_t> cmp_finals{0}, cmp_finals_equal{0};
+    std::atomic<uint64_t> cmp_finals{0}, cmp_finals_equal{0}, cmp_triggers{0}, cmp_queue_waits{0}, cmp_queue_wait_ns{0};
+    std::atomic<uint64_t> cmp_no_slot{0}, hand_no_slot{0}, hand_copy_fail{0}, hand_slot_waits{0}, hand_slot_wait_ns{0};
     std::atomic<uint64_t> wait_walker_us{0}, wait_signal_us{0}, gpu_ns{0}, cpu_record_ns{0}, compare_ns{0};
+    std::atomic<uint64_t> bridge_ns{0}, xcheck_ns{0};   // the walker's thread: the bridge's callbacks, the cross-check in them
 };
 Stats& stats();
 void report_add(const char* line);   // a line in the next report (diagnostics)
