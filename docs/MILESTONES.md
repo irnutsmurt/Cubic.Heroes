@@ -378,7 +378,7 @@ Details and numbers in HANDOFF.md ("Current status", the work log).
 - **Not covered:** the boss fight (owner_boss_r3.drive, to be played),
   other areas (no saves), menus over the game, other frame pacings.
 - **Commits:** ps3recomp 0108-0109; repo 7e76892, f941695, 96d3900,
-  07d848d, baec719, and the documents.
+  07d848d, baec719, f3efb24, 8c0240d.
 - **Next:** the owner's review of R3. R4 (PPFX's command-writing bodies
   bypassed; NATIVE_R3.md section 9) needs two answers first: whether other
   code inherits PPFX's state, and how the first-load frames should look.
