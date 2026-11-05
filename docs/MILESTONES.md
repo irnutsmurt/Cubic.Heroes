@@ -417,3 +417,43 @@ Details and numbers in HANDOFF.md ("Current status", the work log).
   f86e84f and the document's.
 - **Next:** the owner's review of NATIVE_R3B.md; R4 (its section 9) not
   before.
+
+## Native port: R4, PPFX's command generation bypassed (2026-11-05)
+
+docs/NATIVE_R4.md. The owner authorised R4 behind an opt-in switch, then R5
+(asp) as one continuous phase with R4 as its checkpoint.
+
+- **Prerequisites:** a snapshot's picture is the JPEG encoder's read of the
+  engine's display surface (cellJpgEncEncodePicture -> the engine's guest
+  read); PPFX's occlusion query result is read only by PPFX's own poll and
+  never arrives in the port (its copy is not carried out): kept as it is,
+  tracked as a gap in HANDOFF.md.
+- **Done:** behind DOTHEROES_PPFX_BYPASS (development builds; off by
+  default) PPFX's 2,625 command-writing calls a frame do not run (ps3recomp
+  0112: observers that can replace a call), 367 that other work depends on
+  run and are counted; a stream marker stands where each record's commands
+  were; the native output is handed back to the engine's surfaces before
+  the engine uses them (0113); a verify mode and a static call-site check
+  show a skipped call leaves the CPU as a run one would (no store elsewhere,
+  ABI registers kept, the r3 some bodies leave read by no caller); an
+  attributed trace shows no bypassed word and no PPFX draw in the stream.
+- **Validated:** river, dungeon with three title cycles, menus, editor,
+  snapshot and album, field 14, the field after the dungeon, 30/60/72/144
+  Hz pacing, image lifetime, a slow consumer: 4.4 million records, none
+  missed; 184,378 handbacks, none failed, all 91,622 checked identical;
+  synchronisation validation 0 errors; R3 and R4 frames of a still scene
+  identical at all 53 switches.
+- **Performance:** 60 and 72 fps held; the 60 fps tail a little longer
+  (p99 17.4-19.2 ms against 17.2); throughput 95-99 fps against the
+  reference's 137-141 (uncapped, not held at 60): the handbacks put the
+  native renderer on the critical path (the walker waits ~1 ms a frame for
+  the native thread, the queues run one after another). The native GPU
+  time 0.53 ms (the engine's for the same draws 0.86).
+- **R5 begun:** asp's draws recorded from asp's own methods and
+  cross-checked (2.0 million matched in the river); programs, render state
+  and samplers still to describe; nothing of asp rendered natively yet.
+- **Not covered:** the boss and magic (owner_boss_r4.drive, ready), areas
+  past the first dungeon's surroundings; the GitHub rename needs a signed-in
+  session.
+- **Commits:** ps3recomp 0112-0113; repo dabced3, 45299af, b3f03d6,
+  d2698f0, 6b54767 and the documents'.
