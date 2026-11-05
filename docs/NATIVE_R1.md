@@ -73,12 +73,15 @@ c[0x1D3] twice, (1, -1, 0, 0) and then (1, 1, 0, 0), and the GPU used the
 second [M].
 
 **Inherited state.** The capture records the effective pipeline state, not
-only what PPFX set. Neither pass sets the colour mask: its write mask 15 (all
-channels) comes from asp [M, boundary check: no colour-mask call in the
-pass]. Pass 3 also never sets its texture unit's address or filter modes:
-mirrored-repeat, mirrored-repeat, clamp-to-edge and linear filtering are
-inherited from earlier calls [M]. A native PPFX device (R3) must set these
-explicitly.
+only what PPFX set. Neither pass sets the colour mask in its own calls: its
+write mask 15 (all channels) is inherited [M, boundary check: no colour-mask
+call in the pass]. *Corrected by R2 (NATIVE_R2.md):* R1 read this as asp's;
+the whole frame's log shows the last colour-mask call before every PPFX draw
+is PPFX's own, at its first pass (drawn before asp's scene), and its value
+is what the GPU consumed. Pass 3 also never sets its texture unit's address
+or filter modes: mirrored-repeat, mirrored-repeat, clamp-to-edge and linear
+filtering are inherited from earlier calls [M]. A native PPFX device (R3)
+must set these explicitly.
 
 **The same frame, the right point.** Before the named draw the backend
 submits and waits for everything recorded so far, then copies each bound

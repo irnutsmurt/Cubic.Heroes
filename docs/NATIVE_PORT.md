@@ -100,7 +100,11 @@ single-consumer, provided the remaining scenes confirm it (R0b below).
   local 0x01AE0000), and then reads it.
 - PPFX's last pass writes the display buffer; asp's HUD then draws onto it;
   the flip shows it.
-- PPFX inherits the colour mask from asp's state.
+- PPFX's first pass draws into that same scene target before asp renders
+  the scene over it (NATIVE_R2.md).
+- Every render state a PPFX draw uses was last set by PPFX itself, with the
+  value the GPU consumed (NATIVE_R2.md; R1 had read the colour mask as
+  inherited from asp).
 
 ## 4. One implementation order
 
@@ -113,7 +117,7 @@ away.
 | R0 | Evidence stage | the evidence counters (dev) | nothing |
 | R0b | The same counters on the remaining scenes | - | nothing |
 | **R1** | **One captured PPFX pass rendered natively** (section 5) | capture at PPFX's libgcm calls; the pass description; a headless Vulkan executor; offline shader translation; the comparison tool | nothing |
-| R2 | The whole PPFX chain of a frame, captured and rendered natively offline | the chain's resource graph; every PPFX program translated; cross-frame resources | nothing |
+| **R2** | **The whole PPFX chain, captured and rendered natively offline (done: NATIVE_R2.md)** | the chain capture and description; the executor's chain mode with dependency-driven barriers and the feedback copy; the inventory of chain structures | nothing |
 | R3 | PPFX in the game, dual-run | the render thread and record queue; interception at the PPFX device (decided at R3's start with R1-R2 data); a resource registry shared with the existing backend; ordering against the FIFO stream; PPFX's waits | nothing: the FIFO path still renders PPFX as the reference |
 | R4 | PPFX native in production | - | PPFX's command generation, ring traffic, decoding and register state: ~6,900 command headers a frame (16%) |
 | R5 | asp's backend native | records from asp's backend methods; asp's programs, textures and vertex buffers native | ~82% of the commands |
@@ -128,11 +132,22 @@ first, the other a native rendering core): the core grows with its first
 producer, PPFX, in R1-R3.
 
 Provisional effort, revised at every milestone. R1 was estimated at 2-3
-weeks and took one working session; from that, R2 is 2-4 days, R3 and R4
-are re-estimated after R2; R5-R7 after R4. The earlier 5-9 months for the
+weeks and took one working session; R2, estimated at 2-4 days, took one
+long session (most of it in capture runs, comparisons and coverage, not in
+the executor). R3, from that: 1-2 weeks -- the recorder and its state block,
+the shared resource registry, the render thread and its ordering against
+the walker are new code in the game, unlike R1-R2's offline tools; R4 is
+re-estimated after R3, R5-R7 after R4. The earlier 5-9 months for the
 whole graphics replacement stays provisional until then.
 
-## 5. Milestone R1: one captured PPFX pass, rendered natively (done)
+## 5. Milestones R1 and R2 (done); R3 proposed
+
+R2 (the whole chain, offline) is done: results, coverage and R3's proposed
+scope -- where PPFX produces native render records from its own libgcm
+calls, without the old renderer's reconstructed state -- are in
+NATIVE_R2.md. R1's plan as approved follows.
+
+### Milestone R1: one captured PPFX pass, rendered natively (done)
 
 Approved and done on 2026-11-04; the results, the corrections the owner asked
 for on approval (capturing what the GPU consumes, format-specific

@@ -304,5 +304,42 @@ Details and numbers in HANDOFF.md ("Current status", the work log).
   pipeline cache miss in a river fight.
 - **Commits:** ps3recomp 0100-0104; repo 795314b, cdb48e3, fdb5118, 37d91e2,
   246dc39.
-- **Next:** R2's scope (the whole PPFX chain offline) awaits review.
+- **Next:** R2's scope (the whole PPFX chain offline) awaits review (approved
+  2026-11-04; done, below).
 
+
+## Native port: R2, the whole PPFX chain rendered natively (2026-11-04)
+
+- **Dependencies:** R1; the owner's approval of R2's scope (2026-11-04).
+- **Removed:** nothing from the game's active graphics path.
+- **Remains:** the whole PS3 graphics path; the game renders as before.
+- **Evidence:** NATIVE_R2.md. PPFX's complete chain -- 47 draws a frame
+  (pass 1 before asp's scene, 46 after) in river combat and exploration, 49
+  in the first dungeon -- captured from the running game and run by the
+  standalone executor on its own images, only the external inputs seeded
+  (the scene target where asp hands it back, static textures): 555 frames
+  (sequences of 120 and 180 consecutive frames, 2-3 s), 26,685 passes and
+  555 feedback copies, **every output bit-exact** with carried state and
+  with every image poisoned each frame; 26,685 program conversions
+  byte-identical (27 program offsets, 26 programs, including the variants
+  other moments of the route use); synchronisation validation 0 errors
+  (negative control caught); 24,578 passes' boundaries equal what the GPU
+  consumed, and every render state PPFX uses is its own; no history (no
+  chain resource read in a later frame), what changes over time comes from
+  the CPU in each frame's patched constants and program bytes. The executor
+  links no runtime code. The main build at 0105-0107 passed a fight smoke.
+- **Performance:** the executor's chain, 2,000 repetitions after warm-up:
+  pass 1 17.7-17.8 us; the rest 461.5-462.1 us (river, exploration) and
+  501.6 us (dungeon), barriers and the copy included -- against 843.8,
+  680.9 and 709.6 us from pass 3's start to the last pass's end in the game
+  (its passes alone 450.3, 370.7 and 395.3 us). A standalone comparison of
+  comparable work, no in-game claim; R1's per-pass difference stays
+  unexplained.
+- **Not covered:** the first 3 s inside the dungeon; the one-off chains of
+  an area's first frames; the chain after a return to the title (programs
+  reloaded at other offsets); the boss fight and other areas (saves needed;
+  the attract mode's demos are movies).
+- **Commits:** ps3recomp 0105-0107; repo 02122f4, 36d4eb6, 9053968, 20e8356,
+  43c705b, 6ac23f5, 380617e, 17c87ca, c16eb0a, and the documents.
+- **Next:** R3's scope (PPFX in the game, dual run; NATIVE_R2.md) awaits
+  review.

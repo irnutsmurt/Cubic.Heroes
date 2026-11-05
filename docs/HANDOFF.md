@@ -437,7 +437,15 @@ Finalize fix, wait-free creation) is measured against it.
    captured in river combat and exploration, render bit-exact through the
    standalone native executor (build/r1: tools/r1_dev_lift.sh,
    tools/r1_capture.sh, r1_replay); it removes nothing from the game yet.
-   **R2's scope (the whole PPFX chain offline) awaits the owner's review.**
+   **R2 is done** (docs/NATIVE_R2.md): PPFX's whole chain (47 draws a frame,
+   49 in the dungeon) runs through the executor's chain mode
+   (`r1_replay --chain`) on its own images, bit-exact in all 27,240 outputs
+   of 555 captured frames (river combat, exploration with its program
+   variants, the dungeon; sequences of 120-180 frames, carried and poisoned),
+   validation clean, every pass's boundary matching; no history; tools
+   tools/r2_capture.sh, r2_chain.py, r2_compare.py, r2_boundary_check.py,
+   r2_inventory.sh/.py, r2_prune.py; captures in build/r1/captures (local).
+   **R3's scope (PPFX in the game, dual run) awaits the owner's review.**
    The local review documents in build/ab/2026-11-04-opt-review are the
    background.
 5. Not verified: save portability (PARAM.PFD is not rewritten) and the colour

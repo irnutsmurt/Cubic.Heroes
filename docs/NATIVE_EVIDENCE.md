@@ -111,8 +111,11 @@ seam between a native PPFX and a FIFO asp.
 Shared state the pass depends on [M]: the GCM context and command ring (shared
 with asp, one thread); asp's scene target (input); the implicit GCM render
 state left by asp; the fragment program's local-memory copy, which PPFX
-rewrites every pass. Cross-frame PPFX resources (feedback, exposure) are not
-yet identified [U]. No PPFX pass samples the depth buffer in these scenes [M].
+rewrites every pass. Cross-frame PPFX resources (feedback, exposure): none --
+R2 found nothing the chain reads that it wrote in an earlier frame, over 120
+consecutive frames in each scene; what changes over time arrives in each
+frame's patched constants (NATIVE_R2.md) [M]. No PPFX pass samples the depth
+buffer in these scenes [M].
 
 ## 3. Synchronisation: what the game waits on
 
