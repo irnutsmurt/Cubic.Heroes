@@ -559,6 +559,36 @@ width, height, depth, location, pitch, offset).
    switches, with the same verify mode, static call-site check, markers and
    handbacks (for what the engine still draws after: the HUD).
 
+## 10b. R6, the concrete scope (not started; dependencies only)
+
+R6 is the game's own libgcm users and the frame's end, the rest of what the
+engine still draws once asp is native [M: build/r3/lt3, build/r4/rt1]:
+
+- **The game's libgcm draws**: about 22 a river frame (0x006A2164, called
+  from 0x00024720: the HUD, the menus, dialogue boxes, the map, the
+  editor's screens, the title and loading screens). They go through the
+  same libgcm entry points PPFX uses, already observed and encoded on the
+  producer's thread (their calls are counted as the game's, kByGame): R6
+  makes them records too, renders them natively over the final composite,
+  and bypasses their writers with R4's verify mode and call-site check.
+- **The present**: the native renderer presents its display image itself
+  (its own swapchain, or the finished frame handed to the backend's present
+  without the engine drawing anything), with the same pacing (DOTHEROES_FPS,
+  the vblank clock, the flip's semaphores and labels the game waits on).
+- **The snapshot**: cellJpgEncEncodePicture reads the native display image
+  instead of the engine's surface.
+- **Movies and other surfaces the game writes from the CPU** (any guest
+  write into a surface the engine syncs, rsx_draw_engine_guest_wrote): read
+  from guest memory into native images.
+
+**Dependencies:** R5 complete (asp's scene native, so no engine surface is
+left between PPFX and the HUD); the occlusion query decided (section 1);
+then R4's bridge -- markers, handbacks, the touch hooks -- has nothing left
+to order against and goes (section 9). **R7** (retirement) depends on R6:
+the FIFO walker, the ring and its reserve callback, the engine, the
+reports and labels as RSX memory, and the SPU environment as its workloads
+go native.
+
 ## 11. Gaps
 
 - **Needs the owner:** the boss and a magic attack
