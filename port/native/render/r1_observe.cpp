@@ -4,17 +4,19 @@
 // (tools/r1_dev_lift.sh, ppu_lifter.py --entry-observers); the production lift
 // has no observers and never references this file.
 //
-// DOTHEROES_R1_DIR=<dir> and DOTHEROES_R1_AT=<s>: from <s> - 1 to <s> + 1
-// seconds after the process started, each observed call goes to
-// <dir>/boundary.txt:
+// DOTHEROES_R1_DIR=<dir> and DOTHEROES_R1_AT=<s>: from <s> - 1 seconds after
+// the process started until the consumption capture has ended
+// (g_r1_capture_done, rsx_draw_engine.c) and <s> + 1 has passed -- at most a
+// minute -- each observed call goes to <dir>/boundary.txt:
 //   C <frame> <addr> <lr> <tid> <ring ea> r3..r10 f1..f4
 // then, for an argument register holding a guest address, the bytes there:
 //   B <reg> <ea> <hex>
 // <frame> counts the flips the game has asked for (calls of the flip,
-// 0x0069DD60), so a call belongs to the frame the walker numbers the same way
-// (the consumption capture, rsx_draw_engine.c's DOTHEROES_R1_DRAWS). <ring ea>
-// is the GCM context's current pointer: where this call's commands go, to
-// join a call with the draw that consumed it. Game memory: keep it local.
+// 0x0069DD60). The walker's frame numbers differ from these by a constant
+// that differs from run to run (they start counting at different points), so
+// a call is joined with the draw that consumed it by <ring ea>, the GCM
+// context's current pointer: where the call's commands go
+// (tools/r1_boundary_check.py). Game memory: keep it local.
 
 #include "ppu_context.h"   // runtime/ppu: the layout the generated code shares
 
@@ -29,6 +31,7 @@
 #endif
 
 extern "C" uint8_t* vm_base;
+extern "C" volatile int g_r1_capture_done;   // rsx_draw_engine.c
 
 extern "C" {
 int g_ppu_entry_observe = 0;
@@ -100,7 +103,7 @@ extern "C" void ppu_entry_observe(uint32_t addr, ppu_context* ctx)
     if (s_state < 0) { open_log(); if (s_state == 0) return; }
     const double t = r1_seconds();
     if (t < s_from) return;
-    if (t >= s_to) {
+    if (t >= s_to && (g_r1_capture_done || t >= s_from + 61.0)) {
         fprintf(s_out, "# end at %.3f s\n", t);
         fclose(s_out); s_out = NULL; s_state = 3;
         g_ppu_entry_observe = 0;

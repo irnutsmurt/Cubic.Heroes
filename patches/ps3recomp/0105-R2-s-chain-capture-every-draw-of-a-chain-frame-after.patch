@@ -1,0 +1,512 @@
+From faa04dc8ab572b7517a734eeafad583894d80f23 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Wed, 4 Nov 2026 16:36:10 -0800
+Subject: [PATCH] R2's chain capture: every draw of a chain, frame after frame,
+ with what work outside it supplied
+
+The consumption capture's chain mode (development only, off unless
+DOTHEROES_R2_CHAIN is set): DOTHEROES_R2_CHAIN=<first>,<last> names a
+window of draws, DOTHEROES_R2_FRAMES how many consecutive frames, and
+DOTHEROES_R2_PROGRAMS=<lo>-<hi> which fragment programs are the chain's
+(another renderer's draws in the window are not captured). Each draw goes
+to the backend as f<frame>/d<draw>.
+
+The backend names every texture and target by its resource (the engine
+object whose image it is: a view names its surface, a feedback snapshot
+records its source), takes a resource's content only where the chain reads
+it before writing it in that frame, and lists each frame's operations in
+f<frame>/ops.jsonl: snapshot copies, draws, and what work outside the chain
+wrote -- between frames, and between two of the chain's draws, after which
+the resource's next content is a new input generation. A target's earlier
+content is taken only with DOTHEROES_R2_TARGET_INPUTS=1 (only a blending
+draw reads it). Each texture records its guest offset, location and format.
+
+Two record fixes the capture needed: an uploaded texture now keeps the
+crossbar its view was made with (the capture described remap 0 before,
+so a remapped texture's swizzle was wrong in the description), and a
+colour snapshot records its source surface. Neither changes rendering.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libs/video/rsx_draw_engine.c    | 115 +++++++++++++++++++++--
+ libs/video/rsx_draw_engine.h    |   3 +
+ libs/video/rsx_vulkan_backend.c | 160 ++++++++++++++++++++++++++++++--
+ 3 files changed, 260 insertions(+), 18 deletions(-)
+
+diff --git a/libs/video/rsx_draw_engine.c b/libs/video/rsx_draw_engine.c
+index 9a5cc28..e13894c 100644
+--- a/libs/video/rsx_draw_engine.c
++++ b/libs/video/rsx_draw_engine.c
+@@ -2116,8 +2116,20 @@ static void eng_programs_text(const eng_prog_params* p, char* vs, u32 vs_size, c
+  * seconds after the process started, each named draw goes to the backend's
+  * capture_next_draw (rsx_vulkan_backend.c writes <dir>/<name>/) with the
+  * microcode the engine read for it -- after every queued write to it had
+- * landed -- and its programs' HLSL and conversion parameters. */
++ * landed -- and its programs' HLSL and conversion parameters.
++ *
++ * R2's chain capture: DOTHEROES_R2_CHAIN=<first>,<last> (two draws named as
++ * above, without the name) and DOTHEROES_R2_FRAMES=<n> (default 1). From
++ * that first frame on, for n consecutive frames, every draw from <first> to
++ * <last> inclusive goes to capture_next_draw as f<frame>/d<draw> -- with
++ * DOTHEROES_R2_PROGRAMS=<lo>-<hi> (fragment program offsets, hex), only those
++ * whose fragment program lies in [lo, hi): the chain's own, when other work
++ * (another renderer's scene) draws in between; that work's writes the
++ * backend records as written from outside the chain. */
+ enum { ENG_R1_MAX = 4 };
++/* 1 once a capture asked for has ended (its frame is over, or its last
++ * chain frame): port/native/render/r1_observe.cpp logs until then. */
++volatile int g_r1_capture_done = 0;
+ static struct {
+     int on;                                /* -1 unread, 0 off, 1 armed */
+     double at;
+@@ -2135,6 +2147,13 @@ static struct {
+     u8 gamma[RSX_DSP_NUM_TEXTURES], expand[RSX_DSP_NUM_TEXTURES];
+     u32 unnorm[RSX_DSP_NUM_TEXTURES][3];
+     int have_programs;
++    /* R2: the chain window */
++    int chain;                             /* DOTHEROES_R2_CHAIN set */
++    u32 frames, fidx, cur_frame, draw;     /* frames asked for, this one's index, the engine's, the draw */
++    int in_window;                         /* 0 out, 1 in, 2 the last draw */
++    u32 prog_lo, prog_hi;                  /* DOTHEROES_R2_PROGRAMS, or 0 and ~0 */
++    u32 others;                            /* draws in the window outside it, this frame */
++    char name[48];
+ } s_r1 = { .on = -1, .pending = -1 };
+ 
+ /* Seconds since the process was created: the clock DOTHEROES_R1_AT names
+@@ -2160,6 +2179,25 @@ static void eng_r1_read(void)
+     const char* dir = getenv("DOTHEROES_R1_DIR");
+     const char* at = getenv("DOTHEROES_R1_AT");
+     const char* dr = getenv("DOTHEROES_R1_DRAWS");
++    const char* ch = getenv("DOTHEROES_R2_CHAIN");
++    if (ch && *ch) {   /* the chain's two ends, as keys 0 and 1 */
++        static char keys[256];
++        snprintf(keys, sizeof keys, "first=%s", ch);
++        char* comma = strchr(keys, ',');
++        if (comma) {
++            char rest[200];
++            snprintf(rest, sizeof rest, "%s", comma + 1);
++            snprintf(comma, sizeof keys - (size_t)(comma - keys), ",last=%s", rest);
++        }
++        dr = keys;
++        s_r1.chain = 1;
++        const char* fr = getenv("DOTHEROES_R2_FRAMES");
++        s_r1.frames = fr && atoi(fr) > 0 ? (u32)atoi(fr) : 1u;
++        const char* pr = getenv("DOTHEROES_R2_PROGRAMS");
++        unsigned lo = 0, hi = 0;
++        if (pr && sscanf(pr, "%x-%x", &lo, &hi) == 2 && lo < hi) { s_r1.prog_lo = lo; s_r1.prog_hi = hi; }
++        else { s_r1.prog_lo = 0; s_r1.prog_hi = ~0u; }
++    }
+     if (!dir || !*dir || !at || !*at || !dr || !*dr) return;
+     snprintf(s_r1.dir, sizeof s_r1.dir, "%s", dir);
+     s_r1.at = atof(at);
+@@ -2177,8 +2215,55 @@ static void eng_r1_read(void)
+         if (!c) break;
+         p = c + 1;
+     }
+-    if (s_r1.n) s_r1.on = 1;
+-    fprintf(stderr, "[r1] consumption capture: %d draw(s), from %.1f s, into %s\n", s_r1.n, s_r1.at, s_r1.dir);
++    if (s_r1.n && (!s_r1.chain || s_r1.n == 2)) s_r1.on = 1;
++    if (s_r1.chain)
++        fprintf(stderr, "[r2] chain capture: %u frame(s) from %.1f s, into %s\n", s_r1.frames, s_r1.at, s_r1.dir);
++    else
++        fprintf(stderr, "[r1] consumption capture: %d draw(s), from %.1f s, into %s\n", s_r1.n, s_r1.at, s_r1.dir);
++}
++
++static int eng_r1_key(int i, const rsx_dsp_surface* sf, u32 fp_off)
++{
++    return fp_off == s_r1.k[i].fp && (s_r1.k[i].any_rt || sf->color_offset[0] == s_r1.k[i].rt);
++}
++
++/* R2: in the frames asked for, every draw of the window first..last. */
++static void eng_r2_match(const rsx_dsp_surface* sf)
++{
++    if (!s_r1.active) {
++        if (!s_r1.waiting) {
++            if (eng_r1_seconds() < s_r1.at) return;
++            s_r1.waiting = 1; s_r1.frame = g.frames + 1u;
++        }
++        if (g.frames != s_r1.frame) return;
++        s_r1.active = 1; s_r1.cur_frame = g.frames; s_r1.fidx = 0;
++        fprintf(stderr, "[r2] capturing frames %u-%u from %.3f s\n", s_r1.frame, s_r1.frame + s_r1.frames - 1u,
++                eng_r1_seconds());
++    }
++    if (g.frames != s_r1.cur_frame) {   /* the next frame */
++        if (s_r1.in_window == 1) fprintf(stderr, "[r2] frame %u: the window did not close\n", s_r1.fidx);
++        if (s_r1.in_window) fprintf(stderr, "[r2] frame %u: %u chain draws, %u other draws in the window\n",
++                                    s_r1.fidx, s_r1.draw, s_r1.others);
++        s_r1.others = 0;
++        s_r1.cur_frame = g.frames; s_r1.fidx = g.frames - s_r1.frame;
++        s_r1.in_window = 0; s_r1.draw = 0; s_r1.k[0].seen = s_r1.k[1].seen = 0;
++        if (s_r1.fidx >= s_r1.frames) {
++            fprintf(stderr, "[r2] done: %u frames\n", s_r1.frames);
++            s_r1.on = 0; g_r1_capture_done = 1; return;
++        }
++    }
++    u32 fp_loc = 0;
++    const u32 fp_off = rsx_dsp_fragment_program(&g.rsx, &fp_loc);
++    if (s_r1.in_window != 1) {
++        if (s_r1.in_window == 2) return;   /* closed for this frame */
++        if (!eng_r1_key(0, sf, fp_off) || ++s_r1.k[0].seen != s_r1.k[0].occ) return;
++        s_r1.in_window = 1;
++    }
++    if (fp_off < s_r1.prog_lo || fp_off >= s_r1.prog_hi) { s_r1.others++; return; }
++    if (eng_r1_key(1, sf, fp_off) && ++s_r1.k[1].seen == s_r1.k[1].occ) s_r1.in_window = 2;
++    snprintf(s_r1.name, sizeof s_r1.name, "f%03u/d%02u", s_r1.fidx, s_r1.draw);
++    s_r1.pending = 0;
++    s_r1.have_programs = 0;
+ }
+ 
+ /* At a draw: is it one the capture names? Sets s_r1.pending. */
+@@ -2187,6 +2272,7 @@ static void eng_r1_match(const rsx_dsp_surface* sf)
+     s_r1.pending = -1;
+     if (s_r1.on < 0) eng_r1_read();
+     if (s_r1.on <= 0) return;
++    if (s_r1.chain) { eng_r2_match(sf); return; }
+     if (!s_r1.active) {
+         if (!s_r1.waiting) {
+             if (eng_r1_seconds() < s_r1.at) return;
+@@ -2201,7 +2287,7 @@ static void eng_r1_match(const rsx_dsp_surface* sf)
+             if (!s_r1.k[i].done)
+                 fprintf(stderr, "[r1] %s: not found in frame %u (%u draws matched the program)\n",
+                         s_r1.k[i].name, s_r1.frame, s_r1.k[i].seen);
+-        s_r1.on = 0;
++        s_r1.on = 0; g_r1_capture_done = 1;
+         return;
+     }
+     u32 fp_loc = 0;
+@@ -2235,17 +2321,20 @@ static void eng_r1_hand_over(const rsx_dsp_surface* sf)
+     const int i = s_r1.pending;
+     s_r1.pending = -1;
+     if (i < 0) return;
+-    s_r1.k[i].done = 1;
++    const char* name = s_r1.chain ? s_r1.name : s_r1.k[i].name;
++    if (!s_r1.chain) s_r1.k[i].done = 1;
+     if (!g.be->capture_next_draw || !s_r1.have_programs) {
+-        fprintf(stderr, "[r1] %s: %s\n", s_r1.k[i].name,
+-                !g.be->capture_next_draw ? "the backend cannot capture" : "programs not remade");
++        fprintf(stderr, "[r1] %s: %s\n", name,
++                !g.be->capture_next_draw ? "the backend cannot capture" : "programs not remade (a fixed-function draw)");
++        if (s_r1.chain) s_r1.draw++;
+         return;
+     }
+     extern u32 s_fifo_getoff_pub(void);   /* cellGcmSys.c: the walker's offset */
+     u32 fp_loc = 0;
+     const u32 fp_off = rsx_dsp_fragment_program(&g.rsx, &fp_loc);
+     rsx_be_capture c = {
+-        .dir = s_r1.dir, .name = s_r1.k[i].name, .frame = s_r1.frame, .fifo_get = s_fifo_getoff_pub(),
++        .dir = s_r1.dir, .name = name, .frame = s_r1.chain ? s_r1.cur_frame : s_r1.frame,
++        .fifo_get = s_fifo_getoff_pub(),
+         .rt_offset = sf->color_offset[0], .rt_location = sf->color_location[0],
+         .fp_offset = fp_off, .fp_location = fp_loc,
+         .fp_ucode = s_r1.pp.fp_uc, .fp_bytes = s_r1.pp.fp_size,
+@@ -2264,8 +2353,14 @@ static void eng_r1_hand_over(const rsx_dsp_surface* sf)
+     memcpy(c.unnorm_dim, s_r1.unnorm, sizeof c.unnorm_dim);
+     memcpy(c.gamma_masks, s_r1.gamma, sizeof c.gamma_masks);
+     memcpy(c.expand_masks, s_r1.expand, sizeof c.expand_masks);
+-    fprintf(stderr, "[r1] %s: frame %u, draw at FIFO 0x%08X, target 0x%08X, fp 0x%08X\n",
+-            c.name, c.frame, c.fifo_get, c.rt_offset, c.fp_offset);
++    for (u32 u = 0; u < 16 && u < RSX_DSP_NUM_TEXTURES; u++) {
++        rsx_dsp_texture t;
++        rsx_dsp_get_texture(&g.rsx, u, &t);
++        c.tex_offset[u] = t.offset; c.tex_location[u] = t.location; c.tex_format[u] = t.format;
++    }
++    if (s_r1.chain) { c.chain = 1; c.chain_frame = s_r1.fidx; c.chain_draw = s_r1.draw++; }
++    else fprintf(stderr, "[r1] %s: frame %u, draw at FIFO 0x%08X, target 0x%08X, fp 0x%08X\n",
++                 c.name, c.frame, c.fifo_get, c.rt_offset, c.fp_offset);
+     g.be->capture_next_draw(g.be->user, &c);
+ }
+ 
+diff --git a/libs/video/rsx_draw_engine.h b/libs/video/rsx_draw_engine.h
+index 11cbda4..ecc3199 100644
+--- a/libs/video/rsx_draw_engine.h
++++ b/libs/video/rsx_draw_engine.h
+@@ -345,6 +345,9 @@ typedef struct rsx_be_capture {
+     u32 unnorm_dim[16][3];
+     u8  gamma_masks[16], expand_masks[16];
+     const void* shadow; u32 shadow_bytes;   /* rsx_fp_shadow_desc[16] */
++    /* R2's chain capture: every draw of a named window, frame after frame */
++    u32 chain, chain_frame, chain_draw;     /* chain != 0: draw chain_draw of frame chain_frame */
++    u32 tex_offset[16], tex_location[16], tex_format[16];   /* each unit's guest texture */
+ } rsx_be_capture;
+ 
+ /* ---- the engine --------------------------------------------------------- */
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index e8bf3be..3d6cffb 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -2647,7 +2647,8 @@ typedef struct vk_eng_obj {
+     u32      w, h;
+     vk_image im;                     /* a VIEW owns only im.view            */
+     u32      block;                  /* bytes per 4x4 block, 0 = not BC     */
+-    u32      surface, remap, rsx_fmt;/* VIEW: what it is a view of          */
++    u32      surface, remap, rsx_fmt;/* VIEW: what it is a view of; VIEW and
++                                      * TEXTURE: the crossbar its view has */
+     u8       cube;                   /* TEXTURE: six layers, a CUBE view    */
+     u8       snapshot;               /* COLOR: a feedback copy, never a target */
+     u32      mips;                   /* TEXTURE: levels the image was created with */
+@@ -2947,9 +2948,12 @@ static void vk_eng_bind_targets(void* user, const u32* surfaces, u32 count, u32
+     s_eng_bound.depth = depth;
+ }
+ 
++static void vk_r1_outside(u32 handle);   /* R2's chain capture: work outside the chain */
++
+ static void vk_eng_clear_color(void* user, u32 surface, const float rgba[4])
+ {
+     (void)user;
++    vk_r1_outside(surface);
+     /* The debug hook reports the last colour asked for, as Metal's does. */
+     s_vk.clear_argb = ((u32)(rgba[3] * 255.0f + 0.5f) << 24) |
+                       ((u32)(rgba[0] * 255.0f + 0.5f) << 16) |
+@@ -3035,6 +3039,7 @@ static void vk_eng_present(void* user, u32 surface)
+ static void vk_eng_color_target_write(void* user, u32 surface, u32 x, u32 y,
+                                       u32 w, u32 h, const void* rows, u32 row_bytes)
+ {
++    vk_r1_outside(surface);
+     (void)user;
+     vk_eng_obj* o = vk_eng_get(surface, VK_ENG_COLOR);
+     if (!o || o->fmt != VK_FORMAT_R8G8B8A8_UNORM) return;   /* rows are R,G,B,A */
+@@ -3118,6 +3123,7 @@ static u32 vk_eng_texture_create(void* user, rsx_be_format fmt, u32 w, u32 h,
+         goto fail;
+     o->kind = VK_ENG_TEXTURE; o->fmt = vf; o->w = w; o->h = h; o->cube = (u8)cube; o->mips = mips;
+     o->bpp = bc ? 0 : bpp; o->block = bc ? bpp : 0;
++    o->remap = remap; o->rsx_fmt = rsx_fmt;   /* the view's crossbar, for the R1/R2 capture */
+     /* UNDEFINED -> GENERAL for every level and face before the uploads arrive. */
+     const int b = vk_eb_init_image(o->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_INIT_NONE);
+     if (b == -1) goto fail;
+@@ -3137,6 +3143,7 @@ static void vk_eng_texture_upload(void* user, u32 texture, u32 face, u32 mip, u3
+                                   const void* src, u32 row_bytes, u32 rows)
+ {
+     (void)user;
++    vk_r1_outside(texture);
+     vk_eng_obj* o = vk_eng_get(texture, VK_ENG_TEXTURE);
+     if (!o || !src || !row_bytes || !rows || face >= (o->cube ? 6u : 1u) || mip >= o->mips) return;
+     /* A BC row is a row of 4x4 blocks; the engine's `rows` already counts them. */
+@@ -3229,6 +3236,7 @@ static u32 vk_eng_color_snapshot(void* user, u32 surface)
+         return 0;
+     }
+     o->kind = VK_ENG_COLOR; o->snapshot = 1;
++    o->surface = surface;   /* the copy's source (R2's chain capture names it) */
+     o->fmt = t->fmt; o->bpp = t->bpp; o->w = t->w; o->h = t->h;
+     /* Batched: the copy joins the open batch (only the GPU reads it, behind
+      * the barriers below), instead of a submission and a wait every frame. */
+@@ -4896,16 +4904,42 @@ static void vk_skip(const char* why, u32 pipeline)
+  *  - after: it is submitted and waited for, and the target copied again: the
+  *    existing renderer's output for that draw.
+  * Into <dir>/<name>/: desc.json, in native terms only, and the files it
+- * names. Game data: keep it local. */
++ * names. Game data: keep it local.
++ *
++ * R2's chain capture (c->chain): the draws of a chain, frame after frame,
++ * named f<frame>/d<draw>. Each texture and target is named by its resource:
++ * the engine object whose image it is (a view names its surface; a feedback
++ * snapshot is its own image, and records its source). A resource's content
++ * is taken only where the chain reads it before any of its draws has
++ * written it in that frame -- an input, or history -- into
++ * f<frame>/input_r<id>.bin; every draw's output still goes to its
++ * target_after.bin, for comparison only. f<frame>/ops.jsonl lists the
++ * frame's operations in order: each snapshot copy just before the draw that
++ * samples it, then the draw. Its second line names the resources work
++ * outside the chain wrote since the chain's previous frame (a draw, a clear,
++ * an upload, a snapshot): what was re-supplied rather than carried. Work
++ * outside the chain between two of its draws (asp's scene, between PPFX's
++ * first pass and the rest) gets a line of its own there, "within_frame";
++ * what it wrote counts as unwritten again, and its content, where the chain
++ * then reads it, goes to input_r<id>_g<n>.bin (the n-th time this frame). */
+ static struct {
+     int armed, noted;
++    int chain_frame;                  /* R2: the frame open, -1 none */
++    u8 written[VK_ENG_MAX_OBJ], taken[VK_ENG_MAX_OBJ];
++    int session;                      /* R2: a chain capture has begun */
++    u8 outside[VK_ENG_MAX_OBJ];       /* written by work outside the chain since its last frame,
++                                       * or since its last draw within one */
++    u16 gen[VK_ENG_MAX_OBJ];          /* times work outside the chain rewrote it this frame */
++    FILE* ops;
++    char frame_dir[700];
++    u32 rt_rid, tex_rid[RSX_BE_MAX_TEXTURES], draw;
+     char path[700];
+     rsx_be_capture m;                 /* the engine's description; its pointers are not kept */
+     u32 rt, tex[RSX_BE_MAX_TEXTURES], tex_mask;
+     rsx_be_sampler_desc samp[RSX_BE_MAX_TEXTURES];
+     u64 vs_hash, ps_hash;             /* of the HLSL the engine made again */
+     FILE* desc;                       /* desc.json, open from capture_next_draw on */
+-} s_r1c;
++} s_r1c = { .chain_frame = -1 };
+ 
+ static int vk_r1_write(const char* file, const void* p, size_t n)
+ {
+@@ -4966,6 +5000,16 @@ static void vk_r1_image_json(FILE* f, const char* key, const vk_eng_obj* o, cons
+             (unsigned long long)bytes);
+ }
+ 
++/* R2: a resource's content as an input, named by its generation this frame
++ * (input_r<id>.bin, then input_r<id>_g<n>.bin after work outside the chain
++ * rewrote it n times). */
++static void vk_r1_input_name(char* file, size_t n, u32 rid)
++{
++    const u32 g = rid < VK_ENG_MAX_OBJ ? s_r1c.gen[rid] : 0u;
++    if (g) snprintf(file, n, "../input_r%u_g%u.bin", rid, g);
++    else snprintf(file, n, "../input_r%u.bin", rid);
++}
++
+ /* The engine's hand-over: before the draw. */
+ static void vk_eng_capture_next_draw(void* user, const rsx_be_capture* c)
+ {
+@@ -4974,10 +5018,55 @@ static void vk_eng_capture_next_draw(void* user, const rsx_be_capture* c)
+     snprintf(s_r1c.path, sizeof s_r1c.path, "%s/%s", c->dir, c->name);
+ #ifdef _WIN32
+     CreateDirectoryA(c->dir, NULL);
++#else
++    mkdir(c->dir, 0755);
++#endif
++    if (c->chain && (int)c->chain_frame != s_r1c.chain_frame) {   /* R2: a new frame */
++        if (s_r1c.ops) fclose(s_r1c.ops);
++        memset(s_r1c.written, 0, sizeof s_r1c.written);
++        memset(s_r1c.taken, 0, sizeof s_r1c.taken);
++        memset(s_r1c.gen, 0, sizeof s_r1c.gen);
++        s_r1c.chain_frame = (int)c->chain_frame;
++        snprintf(s_r1c.frame_dir, sizeof s_r1c.frame_dir, "%s/f%03u", c->dir, c->chain_frame);
++#ifdef _WIN32
++        CreateDirectoryA(s_r1c.frame_dir, NULL);
++#else
++        mkdir(s_r1c.frame_dir, 0755);
++#endif
++        char op[800];
++        snprintf(op, sizeof op, "%s/ops.jsonl", s_r1c.frame_dir);
++        s_r1c.ops = fopen(op, "w");
++        if (s_r1c.ops) {
++            fprintf(s_r1c.ops, "{\"op\": \"frame\", \"frame\": %u, \"engine_frame\": %u}\n",
++                    c->chain_frame, c->frame);
++            fprintf(s_r1c.ops, "{\"op\": \"outside_written\", \"since_previous_frame\": %s, \"resources\": [",
++                    s_r1c.session ? "true" : "false");
++            int first = 1;
++            for (u32 i = 0; i < VK_ENG_MAX_OBJ; i++)
++                if (s_r1c.outside[i]) { fprintf(s_r1c.ops, "%s%u", first ? "" : ", ", i); first = 0; }
++            fprintf(s_r1c.ops, "]}\n");
++        }
++        memset(s_r1c.outside, 0, sizeof s_r1c.outside);
++        s_r1c.session = 1;
++    } else if (c->chain) {   /* R2: what work outside the chain wrote since its last draw, mid-frame */
++        int first = 1;
++        for (u32 i = 0; i < VK_ENG_MAX_OBJ; i++) {
++            if (!s_r1c.outside[i]) continue;
++            if (first && s_r1c.ops) fprintf(s_r1c.ops, "{\"op\": \"outside_written\", \"within_frame\": true, \"resources\": [");
++            if (s_r1c.ops) fprintf(s_r1c.ops, "%s%u", first ? "" : ", ", i);
++            first = 0;
++            /* re-supplied: its next read takes its content again, as a new generation */
++            s_r1c.written[i] = 0; s_r1c.taken[i] = 0; s_r1c.gen[i]++;
++        }
++        if (!first && s_r1c.ops) fprintf(s_r1c.ops, "]}\n");
++        memset(s_r1c.outside, 0, sizeof s_r1c.outside);
++    }
++#ifdef _WIN32
+     CreateDirectoryA(s_r1c.path, NULL);
+ #else
+-    mkdir(c->dir, 0755); mkdir(s_r1c.path, 0755);
++    mkdir(s_r1c.path, 0755);
+ #endif
++    s_r1c.draw = c->chain_draw;
+     s_r1c.m = *c;
+     s_r1c.rt = s_eng_bound.nrt ? s_eng_bound.rt[0] : 0;
+     memcpy(s_r1c.tex, s_e2.tex, sizeof s_r1c.tex);
+@@ -5034,14 +5123,32 @@ static void vk_eng_capture_next_draw(void* user, const rsx_be_capture* c)
+         if (!((s_r1c.tex_mask >> u) & 1u) || !s_r1c.tex[u] || s_r1c.tex[u] >= VK_ENG_MAX_OBJ) continue;
+         const vk_eng_obj* o = &s_eobj[s_r1c.tex[u]];
+         if (o->kind != VK_ENG_TEXTURE && o->kind != VK_ENG_COLOR && o->kind != VK_ENG_VIEW) continue;
+-        char file[32]; snprintf(file, sizeof file, "tex%u.bin", u);
++        const u32 rid = o->kind == VK_ENG_VIEW ? o->surface : s_r1c.tex[u];
++        const int snap = rid < VK_ENG_MAX_OBJ && s_eobj[rid].kind == VK_ENG_COLOR && s_eobj[rid].snapshot;
++        s_r1c.tex_rid[u] = rid;
++        char file[48]; snprintf(file, sizeof file, "tex%u.bin", u);
+         u64 bytes = 0;
+-        vk_r1_image(o, file, &bytes);
++        if (!c->chain) vk_r1_image(o, file, &bytes);
++        else {
++            if (snap && s_r1c.ops)   /* the copy the engine made for this draw, just before it */
++                fprintf(s_r1c.ops, "{\"op\": \"snapshot\", \"src\": %u, \"dst\": %u, \"for_draw\": %u}\n",
++                        s_eobj[rid].surface, rid, c->chain_draw);
++            vk_r1_input_name(file, sizeof file, rid);
++            if (!s_r1c.written[rid] && !s_r1c.taken[rid]) { vk_r1_image(o, file, &bytes); s_r1c.taken[rid] = 1; }
++            else bytes = 0;
++        }
+         const rsx_be_sampler_desc* d = &s_r1c.samp[u];
+         float min_lod = d->min_lod, max_lod = d->mip_present ? d->max_lod : d->min_lod;
+         if (max_lod < min_lod) max_lod = min_lod;
+         fprintf(f, "%s\n   {\"unit\": %u, \"binding\": %u, \"sampler_binding\": %u, \"cube\": %d,\n",
+                 first ? "" : ",", u, RSX_SPIRV_TEXTURE_BINDING, RSX_SPIRV_SAMPLER_BINDING, (int)o->cube);
++        if (c->chain)
++            fprintf(f, "    \"resource\": %u, \"object\": %u, \"snapshot_of\": %d, \"guest_offset\": %u, "
++                       "\"guest_location\": %u, \"guest_format\": %u,\n",
++                    s_r1c.tex_rid[u], s_r1c.tex[u],
++                    (s_r1c.tex_rid[u] < VK_ENG_MAX_OBJ && s_eobj[s_r1c.tex_rid[u]].snapshot)
++                        ? (int)s_eobj[s_r1c.tex_rid[u]].surface : -1,
++                    c->tex_offset[u], c->tex_location[u], c->tex_format[u]);
+         vk_r1_image_json(f, "image", o, file, bytes);
+         fprintf(f, ",\n    \"sampler\": {\"mag_filter\": %d, \"min_filter\": %d, \"mipmap_mode\": %d, "
+                    "\"address\": [%d, %d, %d], \"min_lod\": %.9g, \"max_lod\": %.9g, \"border_color\": %d}}",
+@@ -5054,11 +5161,23 @@ static void vk_eng_capture_next_draw(void* user, const rsx_be_capture* c)
+     }
+     fprintf(f, "\n  ],\n");
+     const vk_eng_obj* rt = vk_eng_get(s_r1c.rt, VK_ENG_COLOR);
+-    if (rt) {
++    s_r1c.rt_rid = s_r1c.rt;
++    if (rt && !c->chain) {
+         u64 bytes = 0;
+         vk_r1_image(rt, "target_before.bin", &bytes);
+         vk_r1_image_json(f, "target", rt, "target_before.bin", bytes);
+         fprintf(f, ",\n");
++    } else if (rt) {   /* R2: the target's content only where the chain has not written it this frame */
++        char file[48]; vk_r1_input_name(file, sizeof file, s_r1c.rt);
++        u64 bytes = 0;
++        /* A target's earlier content is an input only to a draw that blends;
++         * PPFX's never do, so it is taken only with DOTHEROES_R2_TARGET_INPUTS=1
++         * (tools/r2_chain.py reports a blending draw whose target was not). */
++        static int want = -1;
++        if (want < 0) { const char* e = getenv("DOTHEROES_R2_TARGET_INPUTS"); want = e && *e == '1'; }
++        if (want && !s_r1c.written[s_r1c.rt] && !s_r1c.taken[s_r1c.rt]) { vk_r1_image(rt, file, &bytes); s_r1c.taken[s_r1c.rt] = 1; }
++        vk_r1_image_json(f, "target", rt, file, bytes);
++        fprintf(f, ",\n  \"target_resource\": %u,\n", s_r1c.rt);
+     }
+     s_r1c.armed = 1; s_r1c.noted = 0;
+ }
+@@ -5147,12 +5266,37 @@ static void vk_r1_after_draw(void)
+     fprintf(f, "  \"reference_output\": {\"file\": \"target_after.bin\", \"bytes\": %llu}\n}\n",
+             (unsigned long long)bytes);
+     fclose(f);
+-    fprintf(stderr, "[r1] %s: written to %s\n", s_r1c.m.name, s_r1c.path);
++    if (s_r1c.m.chain) {
++        if (s_r1c.rt_rid < VK_ENG_MAX_OBJ) s_r1c.written[s_r1c.rt_rid] = 1;
++        if (s_r1c.ops) {
++            fprintf(s_r1c.ops, "{\"op\": \"draw\", \"draw\": %u, \"dir\": \"d%02u\", \"target\": %u, \"textures\": {",
++                    s_r1c.draw, s_r1c.draw, s_r1c.rt_rid);
++            int first = 1;
++            for (u32 u = 0; u < RSX_BE_MAX_TEXTURES; u++)
++                if ((s_r1c.tex_mask >> u) & 1u && s_r1c.tex[u] && s_r1c.tex[u] < VK_ENG_MAX_OBJ) {
++                    fprintf(s_r1c.ops, "%s\"%u\": %u", first ? "" : ", ", u, s_r1c.tex_rid[u]);
++                    first = 0;
++                }
++            fprintf(s_r1c.ops, "}}\n");
++            fflush(s_r1c.ops);
++        }
++    } else
++        fprintf(stderr, "[r1] %s: written to %s\n", s_r1c.m.name, s_r1c.path);
++}
++
++/* R2: a resource written by work outside the chain window, between frames. */
++static void vk_r1_outside(u32 handle)
++{
++    if (!s_r1c.session || s_r1c.armed || !handle || handle >= VK_ENG_MAX_OBJ) return;
++    const u32 rid = s_eobj[handle].kind == VK_ENG_VIEW ? s_eobj[handle].surface : handle;
++    if (rid < VK_ENG_MAX_OBJ) s_r1c.outside[rid] = 1;
+ }
+ 
+ static void vk_eng_draw_from(rsx_topology topology, const void* vertices, u32 vertex_count,
+                              u32 stride, const u32* indices, u32 index_count, const vk_geom_ent* res)
+ {
++    if (s_r1c.session && !s_r1c.armed)
++        for (u32 i = 0; i < s_eng_bound.nrt; i++) vk_r1_outside(s_eng_bound.rt[i]);
+     if (!s_e2.pipeline || (!vertices && !res) || !vertex_count || !stride) { vk_skip("no pipeline/vertices", s_e2.pipeline); return; }
+     if (topology < RSX_TOPOLOGY_POINTS || topology > RSX_TOPOLOGY_TRIANGLE_STRIP) { vk_skip("topology", s_e2.pipeline); return; }
+     vk_eng_pipe* P = &s_epipe[s_e2.pipeline - 1];
+-- 
+2.56.0.windows.3
+
