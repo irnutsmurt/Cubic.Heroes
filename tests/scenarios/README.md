@@ -37,7 +37,7 @@ point, not where the save was made.
 | `dungeon1_boss` | dungeon1-boss-door (a test's save before the boss's portal) | exploratory: the owner's boss session as a route (record 97-339 s), to the special key's chest and the boss; the chest does not open yet in replays |
 | `fields_beyond` | field-area14 (the owner's save in field 14) | exploratory: from field 14's south-west corner across its west and south edges (`cross DIR any`): a cliff and a row of rocks (a golden chest beyond) so far |
 | `installed_save`, `installed_continue` | field-area14, in a player's install (`INSTALLED=<install>`: its own exe, data folder, dotheroes.cfg, shader cache, real audio) | the install's save, exit, relaunch: one arrow bought (HUD: wallet 0224 -> 0222, arrows 14 -> 15), the system menu's SAVE, the run's end; then a second run CONTINUEs on the same install and its HUD shows whether the purchase was kept |
-| `attract` | a fresh root (no saves) | the attract mode's demos, no input, for `ATTRACT_SECS` (default 44 min): rendering and stability coverage, not gameplay; hitch captures of frames of 40 ms+ |
+| `attract` | a fresh root (no saves) | the attract mode's demos, no input, for `ATTRACT_SECS` (default 44 min): the demos are movies, so video playback and stability coverage -- not the game rendering those areas, and not gameplay; hitch captures of frames of 40 ms+ |
 | `owner_play` | build/play-route/gamedata (a copy of the owner's save, played in place) | a play session: the validated configuration, sound, the readout; frames, input/area/position record, hitch captures around marks and slow frames, memory; a copy of every save into build/checkpoints/owner-play/ |
 
 To add one (the first dungeon, its boss): a checkpoint from a play session's

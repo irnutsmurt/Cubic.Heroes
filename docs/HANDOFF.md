@@ -717,11 +717,14 @@ sword) or, since the owner's first play session, from its saves.
   dot editor (draw, save, reload); install, snapshots, album and edited
   characters across restarts.
 - *Frame rates:* 30, 60, ~120 and 144-paced (movement, timers, physics).
-- *Rendering only* (the attract mode's demos, no input): desert, a lava
-  dungeon room, the red volcano area, the forest. They render at 60 fps; none
-  has been played.
+- *Video playback only* (the attract mode's demos, no input): desert, a
+  lava dungeon room, the red volcano area, the forest. The demos are movies
+  (one to 19 draws a frame, the video's quad; no PPFX: NATIVE_R2.md), so
+  they show the video path at 60 fps -- not those areas' in-game rendering,
+  which has not been seen, and none has been played.
 - *Long sessions* (stability evidence; only the cycling soak is gameplay):
-  - the attract mode, 45 minutes: rendering and stability only -- no crash,
+  - the attract mode, 45 minutes: video playback and stability only (the
+    demos are movies) -- no crash,
     memory 805 -> 807.5 MB, p99 17.3 ms, five frames over 25 ms, one of them
     an isolated 66.6 ms at +1081 s (tracked, not yet traced);
   - in play but idle, 30 minutes standing in the river's area after its
@@ -1311,7 +1314,9 @@ tooling, the native Windows build, measuring on the 3070) are done; see
    into the slot that was loaded; PARAM.PFD is not rewritten (a save copied
    back to RPCS3 or a PS3 may need that). The game's attract mode (5 min, no
    input: field, river, desert, a lava dungeon, the red volcano area, the
-   forest) ran at 60 fps with nothing over 25 ms and nothing visibly wrong.
+   forest) ran at 60 fps with nothing over 25 ms and nothing visibly wrong --
+   as video: its demos are movies (corrected 2026-11-04, NATIVE_R2.md), not
+   the game rendering those areas.
    **Menus and features** (2026-11-02): START in play opens the system menu
    -- RESUME, SAVE, LOAD, OPTIONS, SNAPSHOT, ALBUM, BESTIARY, LOADING ART,
    TITLE (the title screen's menu has NEW GAME, CONTINUE, EDITOR, ALBUM,

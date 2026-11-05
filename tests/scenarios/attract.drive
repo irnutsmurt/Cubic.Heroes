@@ -1,7 +1,10 @@
 # Scenario: the attract mode (SCENARIO=attract tests/boot_smoke.py) -- the
 # game's own demos cycling with no input: the field, the river, the desert, a
-# lava dungeon room, the red volcano area, the forest. Rendering and stability
-# coverage, not gameplay. A fresh save root (no saves needed).
+# lava dungeon room, the red volcano area, the forest. The demos are movies
+# (an inventory of every draw found one to 19 a frame, the video's quad, and
+# no PPFX: docs/NATIVE_R2.md), so this is video playback and stability
+# coverage -- not evidence of the game rendering those areas, and not
+# gameplay. A fresh save root (no saves needed).
 # Measured: one "attract" segment from the title onward for ATTRACT_SECS
 # (default 2640, 44 minutes); hitch captures of frames of 40 ms or more (the
 # 45-minute run of 2026-11-02 had one isolated 66.6 ms frame at +1081 s), one
