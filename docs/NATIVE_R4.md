@@ -356,7 +356,37 @@ blocks checking every 30th handback:
   three in R3 blocks, 3-4 s into them, among their slow frames (41-54
   intervals over 25 ms in the 4 s around each); 4 on field 15, in an R4
   block 1.6 s after a switch, 4 s after the area loaded (a 139 ms
-  interval in the 4 s around it). What the owner saw at each: asked.
+  interval in the 4 s around it). The owner: **stutter at all four**.
+  The fourth's stutter was the R3 block that ended 1.6 s before it (26
+  intervals over 25 ms there, 1 in the R4 block after).
+- **The stutter's cause** (finding): in the R3 blocks a final composite's
+  or a change frame's comparison waits on the walker for a readback buffer
+  when all are busy -- 9.4 s of such waits in the session (reported then
+  as a handoff slot wait: now counted on its own). The boss's effects
+  changed often (13 structure triggers, each comparing every draw for 60
+  frames; 1 in a river run). Reproduced in the river by making every frame
+  a change frame (DOTHEROES_PPFX_COMPARE_AFTER_CHANGE=100000, build/r4/nw-*):
+  the R3 blocks at 64.7 fps with 10.1% of intervals over 25 ms -- the
+  session's area 39 exactly -- and 926 waits, 2.7 s. Comparing finals only
+  every 10th frame made no difference in the river (build/r4/fab-*: 0.5%
+  and 0.6%, no waits either way). **DOTHEROES_PPFX_COMPARE_NOWAIT=1**
+  skips such a comparison instead (counted as without an engine copy):
+  forced, 68.2 then 70.3 fps, 4.3% then 1.3% over 25 ms (102 and 574
+  skipped); with the play session's settings 70.8 fps, 0.7%, none
+  skipped. owner_boss_r4.drive now uses it. The R4 blocks were unaffected
+  throughout (0.4-1.0%).
+- **An unexplained divergence** (open): the first forced no-wait run
+  (nw-nowait) compared 477 outputs different, the first in any R3 or R4
+  run: one divergence at frame 8,077 -- the R3 block's first PPFX draw into
+  0:00398000 with 2 of 921,600 pixels one step apart -- carried by PPFX's
+  feedback (it blends its own previous output) through the block's
+  remaining 22 frames. Not again in the next two no-wait runs (130,042 and
+  10,603 compared, 0 differ), nor in any waiting run. Whether skipping the
+  wait (which no longer submits the engine's work at that point) exposes
+  an ordering race or the divergence is a rare content case is not known;
+  a batch of repeated no-wait and waiting runs is the next test. For the
+  player it is invisible (one step at two pixels), and the session's
+  report would show it.
 - The game saved in area 37 before the boss's room; the session did not
   keep it (tests/drive.py kept saves only for GAMEDATA sessions, fixed in
   cb01e50) and it was copied by hand to
@@ -647,6 +677,10 @@ go native.
   first, as asp's targets are (and a test route through the transition in
   an R4 block). Which surface it is -- a display buffer kept for the
   transition, or one the game draws -- is not known yet.
+- **One unexplained divergence** in a forced no-wait comparison run
+  (section 6): one step at two pixels, once in three no-wait runs, never
+  in a waiting run. Open: repeated runs of both to tell an ordering race
+  from a rare content case.
 - **R4's cost**: throughput 95-99 fps against the reference's 137-141 and
   a longer 60 fps tail (section 8) -- the bridge's handbacks; not reduced in
   this checkpoint.

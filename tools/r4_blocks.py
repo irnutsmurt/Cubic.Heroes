@@ -54,8 +54,6 @@ def main():
         tot = collections.defaultdict(lambda: [0, 0, 0.0])
         for k in sorted(st):
             n, o, ms = st[k]
-            for x, y in zip(tot[k[1]], (n, o, ms)):
-                pass
             t = tot[k[1]]
             t[0] += n; t[1] += o; t[2] += ms
             if areas:
