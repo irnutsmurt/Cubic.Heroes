@@ -806,6 +806,9 @@ void write_report()
     fprintf(f, "native_ms record_cpu %.1f gpu %.1f wait_walker %.1f wait_signal %.1f compare %.1f\n",
             s.cpu_record_ns / 1e6, s.gpu_ns / 1e6, s.wait_walker_us / 1e3, s.wait_signal_us / 1e3, s.compare_ns / 1e6);
     fprintf(f, "walker_ms bridge %.1f of which crosscheck %.1f\n", s.bridge_ns / 1e6, s.xcheck_ns / 1e6);
+    fprintf(f, "compare differ_in_frames_with_inherited_state %llu differ_elsewhere %llu\n",
+            (unsigned long long)s.cmp_differ_inherited,
+            (unsigned long long)(s.cmp_differ - s.cmp_differ_inherited));
     fprintf(f, "compare records %llu equal %llu differ %llu skipped %llu finals %llu finals_equal %llu "
                "structure_triggers %llu\n",
             (unsigned long long)s.cmp_records, (unsigned long long)s.cmp_equal, (unsigned long long)s.cmp_differ,

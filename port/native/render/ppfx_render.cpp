@@ -41,6 +41,7 @@
 #include <condition_variable>
 #include <functional>
 #include <map>
+#include <set>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -245,6 +246,8 @@ std::vector<SlotBuf> s_sbuf;
 std::vector<SlotSem> s_ssem;
 const size_t kMaxSlotImages = 128, kMaxSlotBuffers = 512, kMaxSlotSems = 64;
 const size_t kFinalReserve = 32;   // buffers kept for final composites: those are compared every frame
+const VkDeviceSize kSlotBufferBytes = 768ull << 20;   // the engine-side reference buffers, at most
+const VkDeviceSize kReadbackPoolBytes = 256ull << 20; // free native readback buffers kept for reuse
 
 // ---- batches --------------------------------------------------------------------------
 
@@ -832,6 +835,15 @@ void frame_note(const Rec* r, uint32_t w, uint32_t h)
     f.draws++;
 }
 
+std::mutex s_inh_lock;
+std::set<uint32_t> s_inherited;   // frames the cross-check flagged (bounded: the latest 4096)
+
+bool frame_is_inherited(uint32_t frame)
+{
+    std::lock_guard<std::mutex> g(s_inh_lock);
+    return s_inherited.count(frame) != 0;
+}
+
 void frame_result(uint32_t frame, bool equal, bool final_)
 {
     std::lock_guard<std::mutex> g(s_var_lock);
@@ -921,6 +933,7 @@ void cmp_run(CmpJob& j)
         if (equal) { st.cmp_equal++; if (j.final_) st.cmp_finals_equal++; }
         else {
             st.cmp_differ++;
+            if (frame_is_inherited(j.frame)) st.cmp_differ_inherited++;
             uint64_t differ = 0;
             for (VkDeviceSize i = 0; i < j.bytes; i += j.bpp) differ += memcmp(j.mine.p + i, eng.p + i, j.bpp) != 0;
             static int said = 0;
@@ -938,7 +951,13 @@ void cmp_run(CmpJob& j)
     }
     frame_pending(j.frame, -1);
     { std::lock_guard<std::mutex> g(s_slot_lock); s_sbuf[j.ref].busy = false; }
-    { std::lock_guard<std::mutex> g(s_cmp_lock); s_rb_pool.emplace(j.mine.n, j.mine); }
+    {
+        std::lock_guard<std::mutex> g(s_cmp_lock);
+        VkDeviceSize pooled = 0;
+        for (auto& kv : s_rb_pool) pooled += kv.first;
+        if (pooled + j.mine.n <= kReadbackPoolBytes) s_rb_pool.emplace(j.mine.n, j.mine);
+        else { F.vkDestroyBuffer(D.device, j.mine.b, nullptr); F.vkFreeMemory(D.device, j.mine.m, nullptr); }
+    }
     st.compare_ns += now_ns() - t0;
 }
 
@@ -1168,12 +1187,28 @@ void draw(const Rec* r)
     wr[3].dstBinding = 48; wr[3].descriptorCount = 16; wr[3].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER; wr[3].pImageInfo = si;
     F.vkUpdateDescriptorSets(D.device, 4, wr, 0, nullptr);
     // the draw. DOTHEROES_PPFX_HAZARD_TEST=1 (the synchronisation check's
-    // negative control): one draw in 5000 goes without its barrier, so the
-    // validation layer must report a hazard
+    // negative control): before one draw in 5000, the target is copied twice
+    // into a scratch image with no barrier between the copies -- a write
+    // after write the validation layer must report
     static int hazard = -1;
     if (hazard < 0) { const char* e = getenv("DOTHEROES_PPFX_HAZARD_TEST"); hazard = e && *e == '1'; }
-    if (!(hazard && stats().n_draws % 5000 == 4999)) barrier_all(b.cb);
-    else report_add("render: hazard test: a draw recorded without its barrier");
+    if (hazard && stats().n_draws % 5000 == 4999) {
+        static Img* scratch = nullptr;
+        if (!scratch || scratch->fmt != t->fmt || scratch->w < t->w || scratch->h < t->h) {
+            scratch = make_image(t->fmt, t->w, t->h, 1, t->bpp, false);
+            if (scratch) to_general(b.cb, scratch->img, 1);
+        }
+        if (scratch) {
+            barrier_all(b.cb);
+            VkImageCopy c = {};
+            c.srcSubresource = c.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+            c.extent = { t->w, t->h, 1 };
+            F.vkCmdCopyImage(b.cb, t->img, VK_IMAGE_LAYOUT_GENERAL, scratch->img, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
+            F.vkCmdCopyImage(b.cb, t->img, VK_IMAGE_LAYOUT_GENERAL, scratch->img, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
+            report_add("render: hazard test: two copies into one image without a barrier");
+        }
+    }
+    barrier_all(b.cb);
     VkRenderPassBeginInfo rbi = { VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
     rbi.renderPass = render_pass(rt); rbi.framebuffer = framebuffer(t);
     rbi.renderArea = { { 0, 0 }, { t->w, t->h } };
@@ -1351,7 +1386,21 @@ void run()
         }
         Rec* r = q.at(next);
         if (r->frame != frame && s_b[s_cur].open) submit();   // a frame's work in a batch of its own
-        if (r->frame != frame) frames_close(r->frame);
+        if (r->frame != frame) {
+            frames_close(r->frame);
+            // DOTHEROES_PPFX_REALLOC_EVERY=<n> (a test of image lifetime):
+            // every n frames every native image is retired -- destroyed once
+            // the batches in flight are done -- and made again at its next use
+            static int every = -1;
+            if (every < 0) { const char* e = getenv("DOTHEROES_PPFX_REALLOC_EVERY"); every = e && *e ? atoi(e) : 0; }
+            if (every > 0 && r->frame % (uint32_t)every == 0 && !s_targets.empty()) {
+                if (s_b[s_cur].open) submit();
+                for (auto& kv : s_targets) { s_retired.push_back(kv.second); stats().n_retired++; }
+                s_targets.clear();
+                for (auto& kv : s_snap) if (kv.second) { s_retired.push_back(kv.second); stats().n_retired++; }
+                s_snap.clear();
+            }
+        }
         frame = r->frame;
         // DOTHEROES_PPFX_DELAY_MS=<n> (a test): a slow consumer, n ms a record
         static int delay = -1;
@@ -1385,6 +1434,13 @@ uint32_t surface_vkformat(uint32_t color_format, uint32_t* bpp)
 uint32_t be_vkformat_pub(uint32_t be_format, uint32_t* bpp) { return (uint32_t)be_vkformat((rsx_be_format)be_format, bpp); }
 
 bool render_ready() { return s_ready.load() != 0; }
+
+void frame_flag_inherited(uint32_t frame)
+{
+    std::lock_guard<std::mutex> g(s_inh_lock);
+    s_inherited.insert(frame);
+    while (s_inherited.size() > 4096) s_inherited.erase(s_inherited.begin());
+}
 
 void render_report(std::vector<std::string>& out)
 {
@@ -1434,9 +1490,15 @@ int slot_buffer(uint64_t bytes, uint64_t* buffer, bool final_)
     size_t busy = 0;
     for (const SlotBuf& b : s_sbuf) busy += b.busy;
     if (!final_ && busy + kFinalReserve >= kMaxSlotBuffers) return -1;
+    int best = -1;
     for (size_t i = 0; i < s_sbuf.size(); i++)
-        if (!s_sbuf[i].busy && s_sbuf[i].b.n >= bytes) { s_sbuf[i].busy = true; *buffer = (uint64_t)s_sbuf[i].b.b; return (int)i; }
+        if (!s_sbuf[i].busy && s_sbuf[i].b.n >= bytes && (best < 0 || s_sbuf[i].b.n < s_sbuf[best].b.n)) best = (int)i;
+    if (best >= 0) { s_sbuf[best].busy = true; *buffer = (uint64_t)s_sbuf[best].b.b; return best; }
     if (s_sbuf.size() >= kMaxSlotBuffers) return -1;
+    // bounded in bytes too: a buffer of every size seen would otherwise pile up
+    VkDeviceSize total = 0;
+    for (const SlotBuf& b : s_sbuf) total += b.b.n;
+    if (total + bytes > kSlotBufferBytes) return -1;
     SlotBuf s;
     if (!make_buffer(s.b, bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true)) return -1;
     s.busy = true;

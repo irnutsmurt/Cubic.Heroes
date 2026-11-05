@@ -35,7 +35,8 @@ const uint32_t kLocalEa = 0xC0000000u;
 struct Range { uint32_t lo, hi; };
 Range s_ranges[64];
 int s_nr;
-struct Hit { uint64_t rip; uint32_t page, tid; uint8_t kind; std::atomic<uint64_t> n; uint64_t first_ms, last_ms; };
+// one entry per accessing instruction, thread and kind: the pages it touched (lowest, highest), when
+struct Hit { uint64_t rip; uint32_t page, page_hi, tid; uint8_t kind; std::atomic<uint64_t> n; uint64_t first_ms, last_ms; };
 uint64_t s_t0;
 enum { kHits = 4096 };
 Hit s_hits[kHits];
@@ -60,14 +61,16 @@ void count(uint64_t rip, uint32_t page, uint32_t tid, uint8_t kind)
     const int n = s_nhits.load(std::memory_order_relaxed);
     int i = 0;
     for (; i < n; i++)
-        if (s_hits[i].rip == rip && s_hits[i].page == page && s_hits[i].tid == tid && s_hits[i].kind == kind) break;
+        if (s_hits[i].rip == rip && s_hits[i].tid == tid && s_hits[i].kind == kind) break;
     if (i == n) {
         if (n == kHits) { s_lost++; s_lock.clear(std::memory_order_release); return; }
-        s_hits[n].rip = rip; s_hits[n].page = page; s_hits[n].tid = tid; s_hits[n].kind = kind;
+        s_hits[n].rip = rip; s_hits[n].page = s_hits[n].page_hi = page; s_hits[n].tid = tid; s_hits[n].kind = kind;
         s_hits[n].first_ms = GetTickCount64() - s_t0;
         s_nhits.store(n + 1, std::memory_order_relaxed);
     }
     s_hits[i].last_ms = GetTickCount64() - s_t0;
+    if (page < s_hits[i].page) s_hits[i].page = page;
+    if (page > s_hits[i].page_hi) s_hits[i].page_hi = page;
     s_hits[i].n++;
     s_lock.clear(std::memory_order_release);
 }
@@ -134,7 +137,8 @@ void report()
     fprintf(f, "# ppfx target watch: %d ranges, %d distinct accesses, %llu not counted (table full); "
                "%llu committed pages closed at the last pass, %llu protection failures\n", s_nr, n,
             (unsigned long long)s_lost.load(), (unsigned long long)s_closed.load(), (unsigned long long)s_fail.load());
-    fprintf(f, "# count kind page(offset) thread [name] address module+offset symbol\n");
+    fprintf(f, "# count kind lowest-highest page(offset) thread [name] address module+offset symbol first_s last_s "
+               "(seconds since the watch was set up); one line per instruction, thread and kind\n");
     for (int i = 0; i < n; i++) {
         char name[256] = "?";
         if (sym) {
@@ -168,9 +172,10 @@ void report()
             }
             CloseHandle(th);
         }
-        fprintf(f, "%llu %s %08X %u [%s] %llX %s+0x%llX %s\n", (unsigned long long)s_hits[i].n.load(),
-                s_hits[i].kind == 1 ? "write" : s_hits[i].kind == 8 ? "exec" : "read", s_hits[i].page, s_hits[i].tid,
-                tname, (unsigned long long)s_hits[i].rip, mod, modoff, name);
+        fprintf(f, "%llu %s %08X-%08X %u [%s] %llX %s+0x%llX %s %.2f %.2f\n", (unsigned long long)s_hits[i].n.load(),
+                s_hits[i].kind == 1 ? "write" : s_hits[i].kind == 8 ? "exec" : "read", s_hits[i].page,
+                s_hits[i].page_hi, s_hits[i].tid, tname, (unsigned long long)s_hits[i].rip, mod, modoff, name,
+                s_hits[i].first_ms / 1000.0, s_hits[i].last_ms / 1000.0);
     }
     fclose(f);
 }

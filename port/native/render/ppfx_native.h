@@ -146,6 +146,10 @@ int mode();
 void bridge_install();
 void bridge_report(std::vector<std::string>& out);   // the cross-check's aggregate
 void render_report(std::vector<std::string>& out);   // comparisons per chain variant
+// A frame in which the cross-check found a PPFX draw using state PPFX did
+// not set (the walker's thread): its comparisons' differences are counted
+// apart from the others.
+void frame_flag_inherited(uint32_t frame);
 // The native renderer's start (ppfx_render.cpp), mode 2.
 void render_start();
 
@@ -187,6 +191,7 @@ struct Stats {
     std::atomic<uint64_t> n_pipelines{0}, n_images{0}, n_image_bytes{0}, n_static_textures{0}, n_feedback{0};
     std::atomic<uint64_t> n_retired{0};   // images replaced at an address (another size or format) and destroyed later
     std::atomic<uint64_t> cmp_records{0}, cmp_equal{0}, cmp_differ{0}, cmp_skipped{0};
+    std::atomic<uint64_t> cmp_differ_inherited{0};   // differences in frames with inherited state
     std::atomic<uint64_t> cmp_finals{0}, cmp_finals_equal{0}, cmp_triggers{0}, cmp_queue_waits{0}, cmp_queue_wait_ns{0};
     std::atomic<uint64_t> cmp_no_slot{0}, hand_no_slot{0}, hand_copy_fail{0}, hand_slot_waits{0}, hand_slot_wait_ns{0};
     std::atomic<uint64_t> wait_walker_us{0}, wait_signal_us{0}, gpu_ns{0}, cpu_record_ns{0}, compare_ns{0};

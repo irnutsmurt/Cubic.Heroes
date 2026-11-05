@@ -215,6 +215,7 @@ void crosscheck(Rec* r)
             xdiff(name, r->vconst[k][0], E->constants[k][0], dc);
         }
     r->walk.diff_regs = dr; r->walk.diff_consts = dc;
+    if (dr || dc) frame_flag_inherited(r->frame);
     if (dr) st.xc_regs++;
     if (dc) st.xc_consts++;
     // the vertex program the engine will run
