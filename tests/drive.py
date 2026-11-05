@@ -702,9 +702,15 @@ def open_obj(cls, tries):
 
 def keep_saves(dest):
     """until_exit: wait for the game to exit; with dest, copy each save the game
-    makes (its folder under GAMEDATA's savedata, once its files stop changing)."""
+    makes (its folder under the game's savedata, once its files stop changing).
+    The game's data root is GAMEDATA when the session plays one in place, else
+    the run's own gamedata/ (a '#! saves' session plays a fresh copy there).
+    A relative dest is the project's."""
     import shutil
-    root = os.path.join(os.environ.get("GAMEDATA", ""), "dev_hdd0", "home", "00000001", "savedata")
+    gamedata = os.environ.get("GAMEDATA") or os.path.join(run, "gamedata")
+    root = os.path.join(gamedata, "dev_hdd0", "home", "00000001", "savedata")
+    if dest:
+        dest = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), dest)
 
     def stamps():
         out = {}
@@ -720,7 +726,7 @@ def keep_saves(dest):
     n = len(os.listdir(dest)) if dest and os.path.isdir(dest) else 0   # numbering goes on across sessions
     while alive():
         time.sleep(1)
-        if not dest or not os.environ.get("GAMEDATA"):
+        if not dest:
             continue
         now = stamps()
         for d, t in now.items():
