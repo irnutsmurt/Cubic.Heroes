@@ -189,14 +189,29 @@ def main():
         draws = [o for o in fr["ops"] if o["op"] == "draw"]
         per_lf = per[k]
         whole = sorted(lf for lf, rs in per_lf.items() if len(rs) == len(draws) and all(r["ok"] for r in rs))
-        found.append((fr, draws, per_lf, whole))
-    # consecutive chain frames are consecutive log frames: the offset every frame agrees on
-    offs = None
-    for k, (fr, _, _, whole) in enumerate(found):
-        o = {lf - k for lf in whole}
-        offs = o if offs is None else offs & o
-    base = min(offs) if offs and len(offs) == 1 else None
-    for k, (fr, draws, per_lf, whole) in enumerate(found):
+        # in the log at all: some log frame has a candidate for every draw
+        # (a stray ring match of a single draw a lap away does not count)
+        logged = any(len(rs) == len(draws) for rs in per_lf.values())
+        found.append((fr, draws, per_lf, whole, logged))
+    # consecutive chain frames are consecutive log frames: the offset most
+    # frames agree on (a frame's draws can also match the same calls a ring
+    # lap earlier when the scene is still, so one frame alone may not tell)
+    votes = {}
+    for k, (fr, _, _, whole, logged) in enumerate(found):
+        for o in {lf - k for lf in whole}:
+            votes[o] = votes.get(o, 0) + 1
+    top = sorted(votes.items(), key=lambda kv: -kv[1])
+    base = top[0][0] if top and (len(top) == 1 or top[0][1] > top[1][1]) else None
+    last_logged = max((c["frame"] for c in calls), default=-1)
+    outside = 0
+    for k, (fr, draws, per_lf, whole, logged) in enumerate(found):
+        if base is not None and base + k > last_logged:
+            logged = False
+        if not logged:   # the observers had stopped (a window lasts a minute at most)
+            outside += 1
+            out["frames"].append({"frame": fr["index"], "draws": len(draws), "in_log": False})
+            print(f"{cap} frame {fr['index']}: not in the boundary log")
+            continue
         best = base + k if base is not None else max(per_lf, key=lambda lf: (len(per_lf[lf]),
                                                                             sum(r["ok"] for r in per_lf[lf])),
                                                      default=None)
@@ -214,10 +229,13 @@ def main():
         bad = [r for r in rs if not r["ok"]]
         for r in bad[:6]:
             print(f"    {r['draw']}: " + ", ".join(k for k, v in r["checks"].items() if not v) + f" {r['detail']}")
-    out["ok"] = all_ok
+    out["frames_outside_the_log"] = outside
+    out["ok"] = all_ok and outside < len(found)
     with open(os.path.join(cap, "boundary_chain.json"), "w") as f:
         json.dump(out, f, indent=1)
-    sys.exit(0 if all_ok else 1)
+    if outside:
+        print(f"{cap}: {len(found) - outside} frames checked, {outside} outside the log")
+    sys.exit(0 if out["ok"] else 1)
 
 
 if __name__ == "__main__":
