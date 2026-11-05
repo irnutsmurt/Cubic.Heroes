@@ -42,9 +42,15 @@ Labels as elsewhere: **[M]** measured, **[C]** from code, **[I]** inferred,
   cross-checked against the engine (2.0 million matched in the river); its
   textures, constants and streams are described, its programs, render state
   and samplers not yet (section 10).
-- **Needs the owner**: the boss and a magic attack (owner_boss_r4.drive,
-  ready), the areas past the first dungeon's surroundings, and the GitHub
-  repository rename (the browser here is not signed in to GitHub).
+- **The owner's boss session** (2026-11-05, section 6): the first boss
+  beaten on R4's build in alternating blocks; every check equal, 0
+  failures; the R4 blocks held 72 fps (0.1% of frames over 25 ms in the
+  boss room, against 8.4% in the validation blocks beside them). It found
+  one record the native renderer could not render (a dungeon-to-field
+  transition reads an engine surface it has no copy of: section 11).
+- **Needs the owner**: a magic attack (not known whether the session used
+  one) and the areas past the first dungeon's surroundings. The GitHub
+  repository is renamed (irnutsmurt/Cubic.Heroes, 2026-11-05).
 
 ## 1. The prerequisites
 
@@ -318,10 +324,48 @@ What each adds:
 | the display's pace, 72 (DOTHEROES_FPS=display) | 54.2 fps (rp72) | 14.0 / 28.1 / 29.5 ms |
 | 144 (DOTHEROES_FPS=0, DIAG_VBLANK_MS=6.944) | 57.1 fps (rp144) | 20.4 / 25.7 / 30.8 ms |
 
-**Not covered, needing the owner:** the boss and a magic attack
-(tests/scenarios/owner_boss_r4.drive, ready to play), and the areas past
-the first dungeon beyond the field right after it (the desert, the lava
-dungeon, the volcano, the forest: no saves there).
+**The owner's boss session** (2026-11-05, owner_boss_r4.drive, 5.4
+minutes, build/sessions/boot-20261105-121357): from a copy of
+dungeon1-boss-door, area 37, the boss's room (area 38, 54 s, the boss
+beaten), area 39, and back out through 38 and 37 to field 15 -- a
+dungeon-to-field transition too. DOTHEROES_PPFX_BYPASS=alt:300 at the
+display's pace (72 fps), the R3 blocks comparing as in validation, the R4
+blocks checking every 30th handback:
+
+- 10,887 R4 frames, 496,243 records bypassed (27.6 million calls, 0 exit
+  mismatches), every marker met; 21,858 handbacks, 0 failed, 729 checked
+  and all equal.
+- The R3 blocks: 67,071 compared outputs equal, 0 differ (46 without an
+  engine copy, as in validation), 10,295 final composites equal; the
+  cross-check 0 mismatches in 495,503 draws.
+- **One record not rendered** (frame 20,835, an R4 block, the walk from
+  area 37 to field 15): its texture, a 1280x720 A8R8G8B8 linear surface at
+  local 0x05530000, has no native source -- the first in any run (gap,
+  section 11).
+- Smoothness, the flips' intervals by block (the R3 blocks carry the
+  validation comparisons, the R4 blocks only the sampled handback check):
+
+| Area | R4 blocks: fps, over 25 ms | R3 blocks (comparing): fps, over 25 ms |
+|---|---|---|
+| 37, the dungeon | 71.3, 0.4% | 69.4, 1.8% |
+| 38, the boss | 71.9, 0.1% | 65.9, 8.4% |
+| 39, after the boss | 72.0, 0% | 64.7, 10.1% |
+| 15, the field | 71.8, 0.3% | 64.9, 6.4% |
+
+- The owner's four marks: 1 and 2 in the boss fight, 3 in area 39 -- all
+  three in R3 blocks, 3-4 s into them, among their slow frames (41-54
+  intervals over 25 ms in the 4 s around each); 4 on field 15, in an R4
+  block 1.6 s after a switch, 4 s after the area loaded (a 139 ms
+  interval in the 4 s around it). What the owner saw at each: asked.
+- The game saved in area 37 before the boss's room; the session did not
+  keep it (tests/drive.py kept saves only for GAMEDATA sessions, fixed in
+  cb01e50) and it was copied by hand to
+  build/checkpoints/owner-boss-r4/01-area37.
+
+**Not covered, needing the owner:** a magic attack (whether the session
+used one is not known), and the areas past the first dungeon beyond the
+field right after it (the desert, the lava dungeon, the volcano, the
+forest: no saves there).
 
 ## 7. Same-frame image comparisons
 
@@ -591,10 +635,18 @@ go native.
 
 ## 11. Gaps
 
-- **Needs the owner:** the boss and a magic attack
-  (tests/scenarios/owner_boss_r4.drive); areas past the first dungeon's
-  surroundings (no saves); the GitHub repository rename (no signed-in
-  session here).
+- **Needs the owner:** a magic attack (tests/scenarios/owner_boss_r4.drive
+  again); areas past the first dungeon's surroundings (no saves). The boss
+  is covered (section 6) and the repository renamed.
+- **An engine surface the native renderer has no copy of** (the owner's
+  boss session, section 6): one PPFX draw in an R4 frame of the
+  dungeon-to-field transition samples a 1280x720 A8R8G8B8 linear surface
+  at local 0x05530000 that neither the native renderer drew nor a handoff
+  brought over, so it is skipped and that frame lacks its output. The fix:
+  a texture read of an engine-only surface hands the engine's image over
+  first, as asp's targets are (and a test route through the transition in
+  an R4 block). Which surface it is -- a display buffer kept for the
+  transition, or one the game draws -- is not known yet.
 - **R4's cost**: throughput 95-99 fps against the reference's 137-141 and
   a longer 60 fps tail (section 8) -- the bridge's handbacks; not reduced in
   this checkpoint.

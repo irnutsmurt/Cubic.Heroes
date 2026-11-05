@@ -479,8 +479,11 @@ Finalize fix, wait-free creation) is measured against it.
    output is handed back to the engine's surfaces before the engine next
    uses them (0113). **R5 (asp) has started** (its first step: asp's draws
    described from asp's own methods and cross-checked, not rendered).
-   The boss on R4's build: tests/scenarios/owner_boss_r4.drive (for the
-   owner to play; owner_boss_r3.drive is the dual-run one).
+   The boss on R4's build: played by the owner 2026-11-05
+   (tests/scenarios/owner_boss_r4.drive; NATIVE_R4.md section 6): every
+   check equal, the R4 blocks at 72 fps; it found one engine surface the
+   native renderer has no copy of (a dungeon-to-field transition,
+   NATIVE_R4.md section 11). A magic attack is still to be covered.
    **Known gap, tracked:** PPFX's occlusion query result never arrives in
    the port. The report's copy into PPFX's result buffer
    (cellGcmSetTransferReportData: a memory-to-memory transfer on FIFO

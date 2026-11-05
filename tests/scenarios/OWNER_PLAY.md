@@ -93,7 +93,10 @@ screen, every frame held for 2 refreshes, against 60 fps's mix of 2 and 3).
 Tell me if motion looks better, worse or the same as before -- or if anything
 plays oddly at that rate (timers, animations, sound, cutscenes).
 
-## The R4 boss session (pending)
+## The R4 boss session (played 2026-11-05; again for a magic attack)
+
+Played once (docs/NATIVE_R4.md section 6). Playing it again helps if you
+use a magic attack in it; leaving the dungeon to the field in it helps too.
 
 The same boss, on R4's development build (docs/NATIVE_R4.md): PPFX's
 post-processing rendered by the native renderer, in 5-second blocks
