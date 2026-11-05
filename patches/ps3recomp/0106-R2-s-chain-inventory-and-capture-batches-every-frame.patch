@@ -1,0 +1,223 @@
+From f42826ed265559e6625099a3c6fe37548987202f Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Wed, 4 Nov 2026 17:15:31 -0800
+Subject: [PATCH] R2's chain inventory and capture batches: every frame's chain
+ structure; several moments in one run
+
+DOTHEROES_R2_INVENTORY=<file> (development only, no capture): every frame's
+draws whose fragment program lies in DOTHEROES_R2_PROGRAMS's range, as the
+sequence of (fragment program, colour target A, its size); a new sequence
+goes to the file in full, a frame whose sequence differs from the one
+before gets a line. Which chain structures a run shows, and when, at the
+cost of a hash per draw.
+
+The chain capture can take several moments of one run:
+DOTHEROES_R1_AT=<s1>,<s2>,... captures N frames at each in turn, batch k
+into <dir>/b<k>/; g_r1_capture_done counts the captures ended, so the
+boundary observers keep one window per batch. DOTHEROES_R2_CHAIN's last key
+"end" keeps the window open to the frame's end, for chains whose last
+program varies by area. A batch's first frame records no "previous frame".
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libs/video/rsx_draw_engine.c    | 106 ++++++++++++++++++++++++++++----
+ libs/video/rsx_vulkan_backend.c |   1 +
+ 2 files changed, 96 insertions(+), 11 deletions(-)
+
+diff --git a/libs/video/rsx_draw_engine.c b/libs/video/rsx_draw_engine.c
+index e13894c..329214e 100644
+--- a/libs/video/rsx_draw_engine.c
++++ b/libs/video/rsx_draw_engine.c
+@@ -2125,10 +2125,14 @@ static void eng_programs_text(const eng_prog_params* p, char* vs, u32 vs_size, c
+  * DOTHEROES_R2_PROGRAMS=<lo>-<hi> (fragment program offsets, hex), only those
+  * whose fragment program lies in [lo, hi): the chain's own, when other work
+  * (another renderer's scene) draws in between; that work's writes the
+- * backend records as written from outside the chain. */
+-enum { ENG_R1_MAX = 4 };
+-/* 1 once a capture asked for has ended (its frame is over, or its last
+- * chain frame): port/native/render/r1_observe.cpp logs until then. */
++ * backend records as written from outside the chain. <last> "end" keeps the
++ * window open to the frame's end (a chain whose last program varies).
++ * DOTHEROES_R1_AT=<s1>,<s2>,... (up to 8) captures the chain at each of
++ * those times in turn, each batch into <dir>/b<k>/. */
++enum { ENG_R1_MAX = 4, ENG_R1_ATS = 8 };
++/* How many captures asked for have ended (a frame is over, or a batch's
++ * last chain frame): port/native/render/r1_observe.cpp logs each window
++ * until then. */
+ volatile int g_r1_capture_done = 0;
+ static struct {
+     int on;                                /* -1 unread, 0 off, 1 armed */
+@@ -2153,6 +2157,10 @@ static struct {
+     int in_window;                         /* 0 out, 1 in, 2 the last draw */
+     u32 prog_lo, prog_hi;                  /* DOTHEROES_R2_PROGRAMS, or 0 and ~0 */
+     u32 others;                            /* draws in the window outside it, this frame */
++    int to_frame_end;                      /* <last> was "end" */
++    double ats[ENG_R1_ATS];                /* DOTHEROES_R1_AT's times; the batch now */
++    int nat, batch;
++    char base[512];                        /* DOTHEROES_R1_DIR, when batches go below it */
+     char name[48];
+ } s_r1 = { .on = -1, .pending = -1 };
+ 
+@@ -2173,9 +2181,63 @@ static double eng_r1_seconds(void)
+ #endif
+ }
+ 
++/* R2's chain inventory, DOTHEROES_R2_INVENTORY=<file> (development only; no
++ * capture): in every frame, the draws whose fragment program lies in
++ * DOTHEROES_R2_PROGRAMS's range (PPFX's program area), as the sequence of
++ * (fragment program, colour target A, its size). A sequence seen for the
++ * first time goes to <file> in full ("S <signature> <frame> <seconds>
++ * <draws>", then a line per draw); a frame whose sequence differs from the
++ * frame before adds "F <frame> <seconds> <signature> <draws>". Which chain
++ * structures a run shows, and when, at the cost of a hash per draw. */
++enum { ENG_INV_SEEN = 512, ENG_INV_DRAWS = 256 };
++static struct {
++    FILE* f;
++    u32 lo, hi, frame, n;
++    unsigned long long sig, prev, seen[ENG_INV_SEEN];
++    u32 nseen, list[ENG_INV_DRAWS][4];
++} s_inv;
++
++static double eng_r1_seconds(void);
++
++static void eng_r2_inventory(const rsx_dsp_surface* sf)
++{
++    if (g.frames != s_inv.frame) {   /* the frame before is complete */
++        int known = 0;
++        for (u32 i = 0; i < s_inv.nseen; i++) known |= s_inv.seen[i] == s_inv.sig;
++        if (!known && s_inv.nseen < ENG_INV_SEEN) {
++            s_inv.seen[s_inv.nseen++] = s_inv.sig;
++            fprintf(s_inv.f, "S %016llX %u %.3f %u\n", s_inv.sig, s_inv.frame, eng_r1_seconds(), s_inv.n);
++            for (u32 i = 0; i < s_inv.n && i < ENG_INV_DRAWS; i++)
++                fprintf(s_inv.f, "  %08X %08X %ux%u\n", s_inv.list[i][0], s_inv.list[i][1], s_inv.list[i][2],
++                        s_inv.list[i][3]);
++        }
++        if (s_inv.sig != s_inv.prev)
++            fprintf(s_inv.f, "F %u %.3f %016llX %u\n", s_inv.frame, eng_r1_seconds(), s_inv.sig, s_inv.n);
++        fflush(s_inv.f);
++        s_inv.prev = s_inv.sig;
++        s_inv.frame = g.frames; s_inv.sig = 1469598103934665603ull; s_inv.n = 0;
++    }
++    u32 loc = 0;
++    const u32 fp = rsx_dsp_fragment_program(&g.rsx, &loc);
++    if (fp < s_inv.lo || fp >= s_inv.hi) return;
++    const u32 v[4] = { fp, sf->color_offset[0], sf->clip_w, sf->clip_h };
++    for (int k = 0; k < 4; k++) { s_inv.sig ^= v[k]; s_inv.sig *= 1099511628211ull; }
++    if (s_inv.n < ENG_INV_DRAWS) memcpy(s_inv.list[s_inv.n], v, sizeof v);
++    s_inv.n++;
++}
++
+ static void eng_r1_read(void)
+ {
+     s_r1.on = 0;
++    const char* inv = getenv("DOTHEROES_R2_INVENTORY");
++    if (inv && *inv && !s_inv.f && (s_inv.f = fopen(inv, "w"))) {
++        const char* pr = getenv("DOTHEROES_R2_PROGRAMS");
++        unsigned lo = 0, hi = 0;
++        if (pr && sscanf(pr, "%x-%x", &lo, &hi) == 2 && lo < hi) { s_inv.lo = lo; s_inv.hi = hi; }
++        else { s_inv.lo = 0; s_inv.hi = ~0u; }
++        s_inv.frame = g.frames; s_inv.sig = 1469598103934665603ull;
++        fprintf(stderr, "[r2] chain inventory into %s, programs %08X-%08X\n", inv, s_inv.lo, s_inv.hi);
++    }
+     const char* dir = getenv("DOTHEROES_R1_DIR");
+     const char* at = getenv("DOTHEROES_R1_AT");
+     const char* dr = getenv("DOTHEROES_R1_DRAWS");
+@@ -2187,7 +2249,9 @@ static void eng_r1_read(void)
+         if (comma) {
+             char rest[200];
+             snprintf(rest, sizeof rest, "%s", comma + 1);
+-            snprintf(comma, sizeof keys - (size_t)(comma - keys), ",last=%s", rest);
++            s_r1.to_frame_end = !strcmp(rest, "end");   /* a key no draw matches */
++            snprintf(comma, sizeof keys - (size_t)(comma - keys), ",last=%s",
++                     s_r1.to_frame_end ? "*/FFFFFFFF/1" : rest);
+         }
+         dr = keys;
+         s_r1.chain = 1;
+@@ -2200,7 +2264,17 @@ static void eng_r1_read(void)
+     }
+     if (!dir || !*dir || !at || !*at || !dr || !*dr) return;
+     snprintf(s_r1.dir, sizeof s_r1.dir, "%s", dir);
+-    s_r1.at = atof(at);
++    for (const char* p = at; *p && s_r1.nat < ENG_R1_ATS; ) {
++        s_r1.ats[s_r1.nat++] = atof(p);
++        const char* c = strchr(p, ',');
++        if (!c) break;
++        p = c + 1;
++    }
++    s_r1.at = s_r1.ats[0];
++    if (s_r1.chain && s_r1.nat > 1) {   /* batches: <dir>/b0, b1, ... */
++        snprintf(s_r1.base, sizeof s_r1.base, "%s", dir);
++        snprintf(s_r1.dir, sizeof s_r1.dir, "%s/b0", s_r1.base);
++    }
+     for (const char* p = dr; *p && s_r1.n < ENG_R1_MAX; ) {
+         char name[24] = "", rt[16] = "", fp[16] = "";
+         unsigned occ = 1;
+@@ -2241,15 +2315,24 @@ static void eng_r2_match(const rsx_dsp_surface* sf)
+                 eng_r1_seconds());
+     }
+     if (g.frames != s_r1.cur_frame) {   /* the next frame */
+-        if (s_r1.in_window == 1) fprintf(stderr, "[r2] frame %u: the window did not close\n", s_r1.fidx);
++        if (s_r1.in_window == 1 && !s_r1.to_frame_end)
++            fprintf(stderr, "[r2] frame %u: the window did not close\n", s_r1.fidx);
+         if (s_r1.in_window) fprintf(stderr, "[r2] frame %u: %u chain draws, %u other draws in the window\n",
+                                     s_r1.fidx, s_r1.draw, s_r1.others);
+         s_r1.others = 0;
+         s_r1.cur_frame = g.frames; s_r1.fidx = g.frames - s_r1.frame;
+         s_r1.in_window = 0; s_r1.draw = 0; s_r1.k[0].seen = s_r1.k[1].seen = 0;
+         if (s_r1.fidx >= s_r1.frames) {
+-            fprintf(stderr, "[r2] done: %u frames\n", s_r1.frames);
+-            s_r1.on = 0; g_r1_capture_done = 1; return;
++            fprintf(stderr, "[r2] done: %u frames into %s\n", s_r1.frames, s_r1.dir);
++            g_r1_capture_done++;
++            if (++s_r1.batch < s_r1.nat) {   /* the next time asked for, into the next batch */
++                s_r1.at = s_r1.ats[s_r1.batch];
++                snprintf(s_r1.dir, sizeof s_r1.dir, "%s/b%d", s_r1.base, s_r1.batch);
++                s_r1.active = 0; s_r1.waiting = 0;
++                fprintf(stderr, "[r2] next: %u frame(s) from %.1f s, into %s\n", s_r1.frames, s_r1.at, s_r1.dir);
++                return;
++            }
++            s_r1.on = 0; return;
+         }
+     }
+     u32 fp_loc = 0;
+@@ -2271,6 +2354,7 @@ static void eng_r1_match(const rsx_dsp_surface* sf)
+ {
+     s_r1.pending = -1;
+     if (s_r1.on < 0) eng_r1_read();
++    if (s_inv.f) eng_r2_inventory(sf);
+     if (s_r1.on <= 0) return;
+     if (s_r1.chain) { eng_r2_match(sf); return; }
+     if (!s_r1.active) {
+@@ -2287,7 +2371,7 @@ static void eng_r1_match(const rsx_dsp_surface* sf)
+             if (!s_r1.k[i].done)
+                 fprintf(stderr, "[r1] %s: not found in frame %u (%u draws matched the program)\n",
+                         s_r1.k[i].name, s_r1.frame, s_r1.k[i].seen);
+-        s_r1.on = 0; g_r1_capture_done = 1;
++        s_r1.on = 0; g_r1_capture_done++;
+         return;
+     }
+     u32 fp_loc = 0;
+@@ -4052,7 +4136,7 @@ static void sink_end(void* user, const rsx_dispatch* r)
+     rsx_dsp_viewport vp;
+     rsx_dsp_get_surface(&g.rsx, &sf);
+     rsx_dsp_get_viewport(&g.rsx, &vp);
+-    if (s_r1.on) eng_r1_match(&sf);   /* R1's capture: off unless asked for */
++    if (s_r1.on || s_inv.f) eng_r1_match(&sf);   /* R1's capture, R2's inventory: off unless asked for */
+     const u32 zslot = eng_zdepth_get(sf.zeta_location, sf.zeta_offset,
+                                      sf.clip_w, sf.clip_h);
+ 
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index 3d6cffb..dd94f03 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -5023,6 +5023,7 @@ static void vk_eng_capture_next_draw(void* user, const rsx_be_capture* c)
+ #endif
+     if (c->chain && (int)c->chain_frame != s_r1c.chain_frame) {   /* R2: a new frame */
+         if (s_r1c.ops) fclose(s_r1c.ops);
++        if (c->chain_frame == 0) s_r1c.session = 0;   /* a new batch: no frame before it */
+         memset(s_r1c.written, 0, sizeof s_r1c.written);
+         memset(s_r1c.taken, 0, sizeof s_r1c.taken);
+         memset(s_r1c.gen, 0, sizeof s_r1c.gen);
+-- 
+2.56.0.windows.3
+

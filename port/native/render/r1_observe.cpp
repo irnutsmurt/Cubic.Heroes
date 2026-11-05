@@ -11,6 +11,10 @@
 //   C <frame> <addr> <lr> <tid> <ring ea> r3..r10 f1..f4
 // then, for an argument register holding a guest address, the bytes there:
 //   B <reg> <ea> <hex>
+// With several times (DOTHEROES_R1_AT=<s1>,<s2>,..., the chain capture's
+// batches), one such window each, into <dir>/b<k>/boundary.txt. Windows open
+// and close at a flip, the only call that reads the clock: the other calls
+// cost a flag test outside a window.
 // <frame> counts the flips the game has asked for (calls of the flip,
 // 0x0069DD60). The walker's frame numbers differ from these by a constant
 // that differs from run to run (they start counting at different points), so
@@ -31,7 +35,7 @@
 #endif
 
 extern "C" uint8_t* vm_base;
-extern "C" volatile int g_r1_capture_done;   // rsx_draw_engine.c
+extern "C" volatile int g_r1_capture_done;   // rsx_draw_engine.c: captures ended so far
 
 extern "C" {
 int g_ppu_entry_observe = 0;
@@ -43,7 +47,11 @@ std::mutex s_lock;
 FILE* s_out;
 double s_from = -1, s_to = -1;
 std::atomic<uint32_t> s_frame{0};
-int s_state = -1;   // -1 unread, 0 off, 1 waiting, 2 logging, 3 done
+std::atomic<int> s_logging{0};
+int s_state = -1;   // -1 unread, 0 off, 1 waiting for a window, 2 logging, 3 done
+char s_dir[512];
+double s_ats[8];
+int s_nat, s_win;
 
 // Seconds since this process was created: the clock DOTHEROES_R1_AT names,
 // shared with the consumption capture.
@@ -75,41 +83,78 @@ uint32_t blob_bytes(uint32_t addr)
     }
 }
 
-void open_log()
+void read_config()
 {
     const char* dir = getenv("DOTHEROES_R1_DIR");
     const char* at = getenv("DOTHEROES_R1_AT");
-    if (!dir || !*dir || !at || !*at) { s_state = 0; return; }
-    char path[1024];
-    snprintf(path, sizeof path, "%s/boundary.txt", dir);
+    s_state = 0;
+    if (!dir || !*dir || !at || !*at) return;
+    snprintf(s_dir, sizeof s_dir, "%s", dir);
 #ifdef _WIN32
-    CreateDirectoryA(dir, NULL);
+    CreateDirectoryA(s_dir, NULL);
 #endif
+    for (const char* p = at; *p && s_nat < 8;) {
+        s_ats[s_nat++] = atof(p);
+        const char* c = strchr(p, ',');
+        if (!c) break;
+        p = c + 1;
+    }
+    s_win = 0;
+    s_from = s_ats[0] - 1.0; s_to = s_ats[0] + 1.0;
+    s_state = s_nat ? 1 : 0;
+}
+
+void open_window()
+{
+    char path[1024];
+    if (s_nat > 1) {
+        snprintf(path, sizeof path, "%s/b%d", s_dir, s_win);
+#ifdef _WIN32
+        CreateDirectoryA(path, NULL);
+#endif
+        snprintf(path, sizeof path, "%s/b%d/boundary.txt", s_dir, s_win);
+    } else {
+        snprintf(path, sizeof path, "%s/boundary.txt", s_dir);
+    }
     s_out = fopen(path, "w");
-    if (!s_out) { s_state = 0; return; }
-    s_from = atof(at) - 1.0;
-    s_to = atof(at) + 1.0;
+    if (!s_out) { s_state = 0; g_ppu_entry_observe = 0; return; }
     fprintf(s_out, "# r1 boundary log: %.1f-%.1f s\n", s_from, s_to);
-    s_state = 1;
+    s_state = 2;
+    s_logging.store(1, std::memory_order_relaxed);
+}
+
+// At each flip: open the next window when its time has come, close the open
+// one once its capture has ended and its time has passed.
+void step(double t)
+{
+    if (s_state == 1 && t >= s_from) open_window();
+    else if (s_state == 2 && t >= s_to && (g_r1_capture_done > s_win || t >= s_from + 61.0)) {
+        s_logging.store(0, std::memory_order_relaxed);
+        fprintf(s_out, "# end at %.3f s\n", t);
+        fclose(s_out); s_out = NULL;
+        if (++s_win < s_nat) {
+            s_from = s_ats[s_win] - 1.0; s_to = s_ats[s_win] + 1.0;
+            s_state = 1;
+        } else {
+            s_state = 3;
+            g_ppu_entry_observe = 0;
+        }
+    }
 }
 
 }  // namespace
 
 extern "C" void ppu_entry_observe(uint32_t addr, ppu_context* ctx)
 {
-    if (addr == 0x0069DD60u) s_frame.fetch_add(1, std::memory_order_relaxed);
-    std::lock_guard<std::mutex> g(s_lock);
-    if (s_state == 0 || s_state == 3) return;
-    if (s_state < 0) { open_log(); if (s_state == 0) return; }
-    const double t = r1_seconds();
-    if (t < s_from) return;
-    if (t >= s_to && (g_r1_capture_done || t >= s_from + 61.0)) {
-        fprintf(s_out, "# end at %.3f s\n", t);
-        fclose(s_out); s_out = NULL; s_state = 3;
-        g_ppu_entry_observe = 0;
-        return;
+    if (addr == 0x0069DD60u) {
+        s_frame.fetch_add(1, std::memory_order_relaxed);
+        std::lock_guard<std::mutex> g(s_lock);
+        if (s_state < 0) read_config();
+        if (s_state == 1 || s_state == 2) step(r1_seconds());
     }
-    s_state = 2;
+    if (!s_logging.load(std::memory_order_relaxed)) return;
+    std::lock_guard<std::mutex> g(s_lock);
+    if (!s_out) return;
     const uint32_t r3 = (uint32_t)ctx->gpr[3];
     const uint32_t ring = guest_ptr(r3) ? __builtin_bswap32(*(const uint32_t*)(vm_base + r3 + 8)) : 0;
     fprintf(s_out, "C %u %08X %08X %u %08X", s_frame.load(std::memory_order_relaxed), addr,
