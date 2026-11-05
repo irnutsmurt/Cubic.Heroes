@@ -459,7 +459,7 @@ static int cmp_double(const void* a, const void* b)
 
 /* ---- R2: a chain of passes, frame after frame ----------------------------
  *
- *   r1_replay --chain <capture dir> [--frames A-B] [--validate] [--poison-each-frame]
+ *   r1_replay --chain <capture dir> [--frames A-B] [--validate] [--poison-each-frame] [--hazard-selftest]
  *                     [--reps N --warmup N --time-frame F]
  *
  * Runs <capture dir>/chain.json (tools/r2_chain.py): every frame's copies
@@ -484,7 +484,9 @@ static int cmp_double(const void* a, const void* b)
  * 1; passes 3-48) between a timestamp after a full barrier and one at its
  * end, copies and barriers included, the seeding outside them; after them,
  * one more correctness pass checks the repeated execution left the results
- * exact (native_after_repeated.bin). */
+ * exact (native_after_repeated.bin). --hazard-selftest drops one dependency on
+ * purpose (outputs *_hazard.bin): the check that "no errors" means the
+ * validation layer looked. */
 
 enum { R2_MAX_RID = 1024 };
 
@@ -559,6 +561,12 @@ static void r2_access(VkCommandBuffer cb, r2_res* r, VkImageLayout want, VkPipel
         if (r->wstage || r->rstages) { src |= r->wstage | r->rstages; srca |= r->waccess; need = 1; }
     } else if (r->wstage && !(r->rstages & stage)) {   /* RAW, once per reading stage */
         src |= r->wstage; srca |= r->waccess; need = 1;
+    }
+    /* --hazard-selftest: the first read of a pass's output after the colour
+     * writes keeps its layout transition but loses its dependency on them --
+     * a hazard synchronisation validation must report */
+    if (s_hazard == 1 && need && !write && r->wstage == VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT) {
+        src = 0; srca = 0; s_hazard = 2;
     }
     if (need) image_barrier(cb, r->im.img, r->im.levels, r->im.layers, r->layout, want,
                             src ? src : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, srca, stage, access);
@@ -901,6 +909,7 @@ static int chain_main(int argc, char** argv)
     for (int i = 3; i < argc; i++) {
         if (!strcmp(argv[i], "--validate")) validate = 1;
         else if (!strcmp(argv[i], "--poison-each-frame")) { poison_each = 1; s_r2_sfx = "_pe"; }
+        else if (!strcmp(argv[i], "--hazard-selftest")) { s_hazard = 1; s_r2_sfx = "_hazard"; }
         else if (!strcmp(argv[i], "--reps") && i + 1 < argc) reps = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--warmup") && i + 1 < argc) warmup = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--time-frame") && i + 1 < argc) tframe = atoi(argv[++i]);
@@ -915,7 +924,7 @@ static int chain_main(int argc, char** argv)
     if (!ch) die("chain.json: %s", err);
     if (validate) {
         char path[1024];
-        snprintf(path, sizeof path, "%s/validation_chain%s%s.txt", cap, poison_each ? "_pe" : "", reps ? "_timing" : "");
+        snprintf(path, sizeof path, "%s/validation_chain%s%s.txt", cap, s_r2_sfx, reps ? "_timing" : "");
         s_vlog = fopen(path, "w");
     }
     vk_start(validate);
