@@ -1,9 +1,27 @@
 # Play session checklist (for the owner)
 
-What helps most now: **saves at the first dungeon and its boss**, and the
-route there. Every test so far starts at the castle; scripted inputs alone
-are slow to find the way across the overworld, but one session of yours gives
-checkpoints and a route the tests can then repeat on their own.
+## What is wanted when you have time (optional coverage)
+
+None of these blocks the work: R5 goes on with the saves and recordings
+already here. Gathered in one place for whenever you want to play:
+
+1. **The onward session** (below, "Playing onward on R4's build"): past the
+   first dungeon on R4's build. What it adds: **a magic attack** once the
+   hero has one, and **the next regions and their dungeons** (the desert,
+   the lava dungeon, the volcano, the forest), which no save reaches yet.
+   Your saves there become test checkpoints.
+2. **The post-boss warp** (only if it comes up on its own): the floor
+   warp in the first dungeon's portal room after its boss, which takes the
+   hero back to the entrance. In both R4 boss sessions one post-processing
+   draw there read the last displayed frame, which the native renderer had
+   no copy of (docs/NATIVE_R4.md section 11). A save in area 37 right after
+   the boss, before stepping on it, would let a test repeat it.
+3. **Anything that looks or feels wrong**: F8 (or both sticks) at that
+   moment.
+
+The sections below are the sessions so far, kept as they were asked for:
+the first one (saves at the first dungeon and its boss, now done), the boss
+sessions, and the onward session.
 
 ## Start
 

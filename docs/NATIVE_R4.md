@@ -714,17 +714,58 @@ go native.
 - **Needs the owner:** a magic attack (the hero has none yet;
   tests/scenarios/owner_onward_r4.drive plays onward to it); areas past the first dungeon's surroundings (no saves). The boss
   is covered (section 6) and the repository renamed.
-- **An engine surface the native renderer has no copy of** (the owner's
-  boss session, section 6): one PPFX draw in an R4 frame of the
-  dungeon-to-field transition samples a 1280x720 A8R8G8B8 linear surface
-  at local 0x05530000 that neither the native renderer drew nor a handoff
-  brought over, so it is skipped and that frame lacks its output. The fix:
-  a texture read of an engine-only surface hands the engine's image over
-  first, as asp's targets are (and a test route through the transition in
-  an R4 block). The surface is a display buffer (the second session read
-  the other one, 0:058F0000): leaving the dungeon after its boss, PPFX
-  samples the last displayed frame -- reached in both boss sessions at
-  nearly the same frame.
+- **The post-boss warp's capture, skipped once in each boss session --
+  fixed (development build), not yet seen again in play.** One PPFX draw in
+  an R4 frame sampled a 1280x720 A8R8G8B8 linear surface at local
+  0x05530000 (the second session: 0x058F0000) that the native renderer had
+  no image of, so it was skipped and that frame lacked its output.
+  *Where:* not the exit itself. Both sessions' frame (20,835 and 20,823)
+  falls 4 s after the hero came back into area 37 from the boss's room,
+  the moment record.log shows him jump from (84.2, -25.8) to (84.0,
+  -120.8): the portal room's warp back to the entrance, after the boss.
+  The same exit walked from the entrance with the boss beaten
+  (tests/scenarios/dungeon1_exit_after_boss.drive, build/r4/bx-r4, R4
+  throughout) has no such draw. *What:* PPFX's final composites go to the
+  display buffers at 0:00000000 and 0:00398000 (the recorder's new
+  `target` report lines, build/r4/pr1); 0:05530000 is neither, nor any
+  surface the engine keeps (rsx_draw_engine_find_surface: no handle, so
+  no handoff). The warp captures the last frame with a 2D transfer, which
+  the engine carries out by reading the display surface back into guest
+  memory (rsx_draw_engine_guest_read); PPFX then samples those guest bytes
+  as an ordinary texture -- 3.5 MB, past the recorder's 256 KB snapshot of
+  small textures, and taken at the call, before the walker has run the
+  transfer anyway. *The fix* (ppfx_bridge.cpp guest_texture): a texture
+  unit no record wrote and no engine surface holds is taken from guest
+  memory by the walker, at the record's place in the stream -- after
+  every command before it has run, so the bytes are what the engine
+  itself would sample there (up to 16 MB; counted in the report's
+  `handoffs` line). *Checked* by sending every static texture through
+  that path (DOTHEROES_PPFX_GUEST_AT_WALK=1, build/r4/gw-*): the river in
+  R3, 6,721 compared outputs equal, 1,254 textures taken at the walker; in
+  R4, 1,260 checked handbacks equal; the menus with R3 and R4 alternating
+  every 30 frames, 13,818 compared equal and 4,166 handbacks equal, 8,086
+  textures at the walker. The warp itself is past the dungeon's route
+  (it needs the boss beaten and the portal room): a save there is on the
+  owner's list (tests/scenarios/OWNER_PLAY.md), not a prerequisite.
+- **The field-15 arrival hitch** (the 139 ms interval near the owner's
+  fourth mark, section 6; 97 ms at the same place in the second session):
+  **not R4's** -- the production build has it at the same spot (the
+  dungeon exit run on build/r4/prod twice with a frame trace, build/r4/ht-ref1,
+  ht-ref2: 58, 73 and 83 ms; 59, 93 and 83 ms), and in both sessions it fell
+  in an R3 block. Three frames about 5 s after the field's load
+  (tests/slow_frames.py --loads; the sampler on the development build's
+  production path, build/r4/ht-dev1, DIAG_PROF): **52-58 ms** the game's
+  main thread waits in cellSpursEventFlagWait for the SPU job inflating the
+  overworld's map pack (dh_inflate_raw, the native inflate); **73-93 ms**
+  the main thread runs the game's own area set-up (func_0091BC28,
+  func_0091C620 under func_009126FC) -- both the "area set-up frames"
+  docs/HANDOFF.md already tracks; **~83 ms** the existing renderer replaces
+  its surfaces for the field: eng_current_target_set_ex -> eng_surface_get ->
+  vk_eng_drop_framebuffers waits for the whole GPU to go idle
+  (vk_wait_inflight) and destroys images, 41-49 ms of the walker's time.
+  The third is the engine's and goes with it (R5/R6: the native renderer
+  retires images without a wait); the first two are the game's loading,
+  tracked with the area set-up frames.
 - **The native thread waits 10 s at exit** when its last batch needs an
   engine submission that never comes (the window closed; the second boss
   session): render_drain should give up at once on an engine that has

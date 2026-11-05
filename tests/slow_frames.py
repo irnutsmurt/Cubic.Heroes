@@ -24,7 +24,7 @@ Per frame:
            timing), lag and latency (walker at the flip to present returned)
 Bands: per guest-frame length, the mean of each. Then the slowest frames
 (--top) and a spread sample of frames of 18-50 ms (--sample), each in full;
-with --marks, every hitch mark (kind 22: DOTHEROES_DEV_KEYS's F8 or L3+R3, or
+with --loads, the frames of 50 ms or more in full too; with --marks, every hitch mark (kind 22: DOTHEROES_DEV_KEYS's F8 or L3+R3, or
 a script's mark.trigger) and the frames over 18 ms in the 3 s before it.
 Frames over 50 ms are listed apart: loads (the main thread blocked).
 """
@@ -63,6 +63,8 @@ def main():
     ap.add_argument("--top", type=int, default=8)
     ap.add_argument("--sample", type=int, default=8)
     ap.add_argument("--marks", action="store_true")
+    ap.add_argument("--loads", type=float, metavar="T0-T1", nargs="?", const=-1.0, default=None,
+                    help="also show every frame of 50 ms or more in full")
     a = ap.parse_args()
     rec = wb.load(a.trace)
     frames = wb.guest_frames(rec)
@@ -124,6 +126,9 @@ def main():
     if loads:
         print(f"\nframes of 50 ms or more (loads, listed apart): {len(loads)}; at " +
               ", ".join(f"{(f['lo'] - base) / 1e6:.1f} s ({f['ppu']:.0f} ms)" for f in loads[:20]))
+        if a.loads is not None:
+            for f in loads:
+                print(line(f))
     if a.marks:
         marks = rec[MARK]
         print(f"\nhitch marks: {len(marks)}")
