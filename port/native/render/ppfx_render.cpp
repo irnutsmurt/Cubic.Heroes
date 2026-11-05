@@ -1709,6 +1709,12 @@ void run()
         }
         s_idle = 0;
         Rec* r = q.at(next);
+        if (r->kind == kAspDraw) {   // R5: not rendered yet
+            next++;
+            q.done.store(next, std::memory_order_release);
+            q.cv.notify_all();
+            continue;
+        }
         if (r->frame != frame && s_b[s_cur].open) submit();   // a frame's work in a batch of its own
         if (r->frame != frame) {
             stats().n_frames++;
@@ -1732,7 +1738,8 @@ void run()
         if (delay < 0) { const char* e = getenv("DOTHEROES_PPFX_DELAY_MS"); delay = e && *e ? atoi(e) : 0; }
         if (delay) std::this_thread::sleep_for(std::chrono::milliseconds(delay));
         const uint64_t t0 = now_ns();
-        if (r->kind == kDraw) draw(r);
+        if (r->kind == kAspDraw) {}   // R5: asp's records are checked, not rendered yet
+        else if (r->kind == kDraw) draw(r);
         else if (r->kind == kClear) clear(r);
         stats().cpu_record_ns += now_ns() - t0;
         if (s_b[s_cur].open && (s_b[s_cur].used > kUpload / 2 || s_b[s_cur].sets > kSets / 2 ||

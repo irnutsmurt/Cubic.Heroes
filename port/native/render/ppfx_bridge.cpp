@@ -72,6 +72,7 @@ extern "C" uint8_t* vm_base;
 extern "C" uint32_t cellGcmResolveLocated(int local, uint32_t offset);
 extern "C" void cellGcm_fifo_recycle_n(uint32_t ctx_ea, uint32_t count);   // cellGcmSys.c: the runtime's reserve callback
 extern "C" uint32_t ppu_hle_inject_base;                                   // runtime/memory/vm.h
+extern "C" uint32_t rsx_fp_program_size(const uint8_t* ucode, uint32_t max_bytes);
 
 namespace ppfx {
 
@@ -185,11 +186,13 @@ void vp_const_mask(const Blob* vp, uint32_t mask[16])
     }
 }
 
-/// One state item the record and the engine disagree on.
+/// One state item the record and the engine disagree on (R5: an asp
+/// record's items under "asp ").
+bool s_xc_asp;
 void xdiff(const char* what, uint32_t rec, uint32_t eng, uint32_t& n)
 {
     n++;
-    auto& x = B.xr[std::string(what)];
+    auto& x = B.xr[s_xc_asp ? std::string("asp ") + what : std::string(what)];
     if (!x.n) { x.seq0 = B.cur->seq; x.frame0 = B.cur->frame; }
     x.n++; x.rec = rec; x.eng = eng; x.seq1 = B.cur->seq; x.frame1 = B.cur->frame;
 }
@@ -312,8 +315,23 @@ void crosscheck(Rec* r)
     X(fp.pixel_kill, "fp.pixel_kill"); X(fp.gamma, "fp.gamma");
     if ((a.fp.input_mask & ~0x20u) != e.fp.input_mask) xdiff("fp.input_mask", a.fp.input_mask, e.fp.input_mask, dr);
     X(vp.start, "vp.start"); X(vp.input_mask, "vp.input_mask"); X(vp.regs_le32, "vp.regs_le32");
-    // the units the fragment program samples
-    const uint32_t units = r->fp ? rsx_fp_texture_units(r->fp->bytes.data(), (uint32_t)r->fp->bytes.size()) : 0;
+    // the units the fragment program samples (R5: an asp record does not
+    // describe its programs yet -- the engine's choose what is compared)
+    const bool asp = r->kind == kAspDraw;
+    Blob evp, efp;
+    if (asp) {
+        const uint32_t st0 = rsx_dsp_vp_start(E);
+        const uint32_t n = st0 < 544 ? rsx_vp_program_size_instrs((const uint8_t*)(E->vp + st0 * 4), (544 - st0) * 16) : 0;
+        if (n) evp.bytes.assign((const uint8_t*)(E->vp + st0 * 4), (const uint8_t*)(E->vp + st0 * 4) + n * 16);
+        uint32_t floc = 0;
+        const uint32_t foff = rsx_dsp_fragment_program(E, &floc);
+        const uint32_t fea = cellGcmResolveLocated(floc == RSX_LOCATION_LOCAL, foff);
+        const uint32_t fsz = fea ? rsx_fp_program_size(vm_base + fea, 0x8000) : 0;
+        if (fsz) efp.bytes.assign(vm_base + fea, vm_base + fea + fsz);
+    }
+    const Blob* vpb = asp ? (evp.bytes.empty() ? nullptr : &evp) : r->vp.get();
+    const Blob* fpb = asp ? (efp.bytes.empty() ? nullptr : &efp) : r->fp.get();
+    const uint32_t units = fpb ? rsx_fp_texture_units(fpb->bytes.data(), (uint32_t)fpb->bytes.size()) : 0;
     for (uint32_t u = 0; u < 16; u++) {
         if (!(units >> u & 1)) continue;
 #define XU(field) snprintf(name, sizeof name, "tex%u." #field "%s", u, by_name(a.samp[u].address_by)); \
@@ -329,7 +347,7 @@ void crosscheck(Rec* r)
     }
     // the inputs the vertex program reads
     rsx_vp_input_analysis an = { 0xFFFFu, 0 };
-    if (r->vp) rsx_vp_analyze_inputs(r->vp->bytes.data(), (uint32_t)r->vp->bytes.size(), &an);
+    if (vpb) rsx_vp_analyze_inputs(vpb->bytes.data(), (uint32_t)vpb->bytes.size(), &an);
     for (uint32_t i = 0; i < 16; i++) {
         if (!(an.input_mask >> i & 1)) continue;
         snprintf(name, sizeof name, "vin%u.size", i); X(vin[i].size, name);
@@ -361,7 +379,7 @@ void crosscheck(Rec* r)
 #undef XF
     // the constants the vertex program reads
     uint32_t cm[16];
-    vp_const_mask(r->vp.get(), cm);
+    vp_const_mask(vpb, cm);
     for (uint32_t k = 0; k < 512; k++)
         if ((cm[k >> 5] >> (k & 31) & 1) && memcmp(E->constants[k], r->vconst[k], 16)) {
             snprintf(name, sizeof name, "const c%u%s", k,
@@ -369,6 +387,30 @@ void crosscheck(Rec* r)
             xdiff(name, r->vconst[k][0], E->constants[k][0], dc);
         }
     r->walk.diff_regs = dr; r->walk.diff_consts = dc;
+    if (asp) {   // R5: asp's items only; its programs and vertex bytes are not described yet
+        static int probe = -1, n = 0;
+        if (probe < 0) { const char* e = getenv("DOTHEROES_ASP_PROBE"); probe = e && *e == '1'; }
+        if (probe && n < 64) {   // what the engine runs at this asp draw, beside the probe's containers
+            n++;
+            const uint32_t vs = rsx_dsp_vp_start(E);
+            uint32_t floc = 0;
+            const uint32_t foff = rsx_dsp_fragment_program(E, &floc);
+            const uint32_t fea = cellGcmResolveLocated(floc == RSX_LOCATION_LOCAL, foff);
+            char line[400];
+            snprintf(line, sizeof line, "asp probe draw seq %llu: engine vp start %u instrs %zu first %08X %08X %08X %08X | fp %u:%08X "
+                     "first %08X %08X %08X %08X control %08X", (unsigned long long)r->seq, vs, evp.bytes.size() / 16,
+                     vs < 544 ? E->vp[vs * 4] : 0, vs < 544 ? E->vp[vs * 4 + 1] : 0, vs < 544 ? E->vp[vs * 4 + 2] : 0,
+                     vs < 544 ? E->vp[vs * 4 + 3] : 0, floc, foff,
+                     fea ? __builtin_bswap32(*(const uint32_t*)(vm_base + fea)) : 0,
+                     fea ? __builtin_bswap32(*(const uint32_t*)(vm_base + fea + 4)) : 0,
+                     fea ? __builtin_bswap32(*(const uint32_t*)(vm_base + fea + 8)) : 0,
+                     fea ? __builtin_bswap32(*(const uint32_t*)(vm_base + fea + 12)) : 0, rsx_dsp_shader_control(E));
+            report_add(line);
+        }
+        st.asp_xc_draws++;
+        if (dr || dc) st.asp_xc_differ++;
+        return;
+    }
     if (dr || dc) frame_flag_inherited(r->frame);
     if (dr) st.xc_regs++;
     if (dc) st.xc_consts++;
@@ -428,6 +470,26 @@ int match(uint32_t kind, uint32_t laps, uint32_t io)
         if (B.w >= put) return 0;
         Rec* r = q.at(B.w);
         if (r->bypassed) return 0;   // R4: met at its marker, never by its commands
+        if (r->kind == kAspDraw) {
+            // R5: an asp draw is the engine's first draw inside its commands
+            // (the context's position at its call to the one at its return)
+            if (!B.have_delta) {
+                if (kind == kDraw && io >= r->io && io <= r->io_end && r->lap_end == r->lap) {
+                    B.delta = (int64_t)laps - r->lap; B.have_delta = 1;
+                    report_add("bridge: first match at an asp record");
+                } else if (io > r->io_end && r->lap_end == r->lap && io - r->io_end < 0x100000u) {
+                    stats().asp_missed++; r->walk.matched = 0; mark_walked(r); continue;
+                } else return 0;
+            }
+            const uint64_t wk = K(laps, io);
+            const uint64_t lo = K(r->lap + B.delta, r->io), hi = K(r->lap_end + B.delta, r->io_end);
+            if (kind == kDraw && wk >= lo && wk <= hi) { r->walk.matched = 1; stats().asp_matched++; return 1; }
+            if (wk <= hi) return 0;   // ahead of it: other work's
+            stats().asp_missed++;     // behind it: the asp draw made no engine draw
+            r->walk.matched = 0;
+            mark_walked(r);
+            continue;
+        }
         const uint32_t d = delta_of(r->kind);
         if (!B.have_delta && B.logged_miss < 8) {   // until the first match: what was compared
             char line[200];
@@ -571,10 +633,11 @@ void walk_init(Rec* r)
     r->walk.ref = -1; r->walk.sem = -1; r->walk.ordinal = -1;
 }
 
-// DOTHEROES_PPFX_HANDBACK_CHECK (default on with comparisons): every
-// handback of a final composite, and every 60th otherwise, is read back on
-// both sides after the copy and compared byte for byte -- a copy that ran
-// before the native side's work was done would differ.
+// DOTHEROES_PPFX_HANDBACK_CHECK (default 1 with comparisons, 0 without):
+// every handback of a final composite, and every 60th otherwise, is read
+// back on both sides after the copy and compared byte for byte -- a copy
+// that ran before the native side's work was done would differ. =<n> (n > 1):
+// every n-th handback (a lighter sample: each check waits for the GPU).
 
 FILE* s_present_hash;   // DOTHEROES_PPFX_PRESENT_HASH=<file>: every present's displayed image, hashed
 
@@ -609,8 +672,9 @@ void handback(uint64_t key, int kind)
         const char* c = getenv("DOTHEROES_PPFX_COMPARE");
         chk = e && *e ? atoi(e) : !(c && *c == '0');
     }
+    // 1: every final composite's and every 60th other; n > 1: every n-th of any
     static uint64_t n = 0;
-    const bool check = chk && (held.format == 0x08 || n++ % 60 == 0);
+    const bool check = chk == 1 ? (held.format == 0x08 || n++ % 60 == 0) : chk > 1 && n++ % (uint64_t)chk == 0;
     HandOut o;
     const uint64_t tw = bnow();
     const int rc = handback_take(loc, off, check, 10000, &o);
@@ -740,6 +804,18 @@ void on_draw_pre(void*, u32 io, u32 laps, const u32* handles, const u32* locatio
         return;
     }
     Rec* r = queue().at(B.w);
+    if (r->kind == kAspDraw) {   // R5: asp's draw, the engine's to draw; checked against it
+        foreign(locations, offsets, n, 1);
+        if (B.xcheck) {
+            const uint64_t x0 = bnow();
+            foreign_reads(locations, offsets, n);
+            s_xc_asp = true; crosscheck(r); s_xc_asp = false;
+            stats().xcheck_ns += bnow() - x0;
+        }
+        walk_init(r);
+        mark_walked(r);
+        return;
+    }
     if (B.xcheck) { std::lock_guard<std::mutex> g(s_fr_lock); s_ppfx_targets[(uint64_t)r->need[0].location << 32 | r->need[0].offset] = 1; }
     for (uint32_t k = 0; k < kMaxNeeds; k++) r->walk.hand[k] = -1;
     r->walk.ref = -1; r->walk.sem = -1; r->walk.ordinal = -1;
@@ -870,6 +946,7 @@ void on_wrote(void*, u32 io, u32 laps, int draw, const u32* handles, const u32* 
         return;
     }
     if (!match(kClear, laps, io)) { foreign(locations, offsets, n, 0); return; }
+    if (queue().at(B.w)->kind == kAspDraw) { foreign(locations, offsets, n, 0); return; }
     Rec* r = queue().at(B.w);
     for (uint32_t k = 0; k < kMaxNeeds; k++) r->walk.hand[k] = -1;
     r->walk.ref = -1; r->walk.sem = -1; r->walk.ordinal = -1;

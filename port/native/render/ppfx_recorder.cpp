@@ -568,6 +568,8 @@ bool asp_fn(uint32_t a)
     case 0x006C02E8: case 0x006C37A0: case 0x006D0BE0: case 0x006D1764: case 0x006CD014: case 0x006D0B98:
     case 0x006C01C4: case 0x006C4628: case 0x006C49BC: case 0x006C4D1C: case 0x006C5298: case 0x006C0A70:
     case 0x006C0E38: case 0x006C19A4:
+    case 0x006C6F88: case 0x006CB070: case 0x006D3190: case 0x006D32D0: case 0x006C9C74:   // R5
+    case 0x006CA3D0: case 0x006C99B0:
         return true;
     default:
         return false;
@@ -633,9 +635,12 @@ void asp_resolve()
     A.pending_units = 0;
 }
 
-void asp_call(uint32_t addr, ppu_context* c)
+int asp_record_call(uint32_t addr, ppu_context* c);   // R5, below
+
+int asp_call(uint32_t addr, ppu_context* c)
 {
     stats().asp_calls++;
+    if (const int r5 = asp_record_call(addr, c)) return r5 - 1;
     if (addr == kAspColorMask || addr == kAspSampler) { A.device = (uint32_t)c->gpr[3]; A.toc = (uint32_t)c->gpr[2]; }
     switch (addr) {
     case kAspColorMask: {   // (device, const u8 rgba[4]): asp writes R, G and A as on/off, B's byte as it is
@@ -670,6 +675,7 @@ void asp_call(uint32_t addr, ppu_context* c)
     default:                // asp's other setters: state PPFX sets itself (docs/NATIVE_R3B.md)
         break;
     }
+    return 0;
 }
 
 // ---- R4: the bypass ---------------------------------------------------------------
@@ -739,7 +745,8 @@ std::mutex s_bp_lock;   // the report reads it
 // call (inside it everything runs) or a verified one.
 struct VEntry {
     uint32_t addr, lr, sp, ctx_ea, begin, end, cur;
-    uint8_t kind;   // 0 kept, 1 verified
+    uint8_t kind;   // 0 kept, 1 verified, 2 asp's draw (R5)
+    uint32_t lap;
     uint64_t gpr[32];
     double fpr[32];
     uint8_t vr[12][16];   // v20..v31
@@ -1037,6 +1044,128 @@ void build_clear(ppu_context* c)
     if (r->bypassed) { stats().r4_records++; bridge_marker((uint32_t)c->gpr[3], r->seq); }
 }
 
+// ---- R5: asp's records (docs/NATIVE_R4.md section 10) ---------------------------
+// DOTHEROES_ASP_RECORD=1: asp's draws become records too, described from
+// asp's own methods (its texture apply, stream binds, constant uploads,
+// besides its state API above and the game's libgcm calls), built when
+// asp's draw returns, matched with the engine's draw inside its commands and
+// cross-checked there. Not rendered: R5's first step.
+
+int asp_records_on()
+{
+    static int on = -1;
+    if (on < 0) { const char* e = getenv("DOTHEROES_ASP_RECORD"); on = e && *e == '1'; }
+    return on;
+}
+
+// asp's command context: the one PPFX writes to (the title's one)
+uint32_t asp_ctx() { return S.ring_ctx; }
+
+void asp_draw_enter(ppu_context* c)
+{
+    VEntry v;
+    memset(&v, 0, sizeof v);
+    v.addr = 0x006C6F88u; v.kind = 2;
+    r4_ctx_fields(v, asp_ctx());
+    v.lap = cellGcm_title_laps_pub(nullptr);
+    (void)c;
+    s_vstack.push_back(v);
+}
+
+void asp_draw_exit(const VEntry& v)
+{
+    if (!ea_ok(v.ctx_ea, 16)) return;
+    std::unique_lock<std::mutex> g(s_lock);
+    struct Held { Held(std::unique_lock<std::mutex>* h) { s_held = h; } ~Held() { s_held = nullptr; } } held(&g);
+    Rec* r = acquire();
+    Queue& q = queue();
+    r->seq = q.put.load(std::memory_order_relaxed);
+    r->kind = kAspDraw;
+    r->frame = S.frame;
+    r->why = kWhyNone;
+    r->st = S.st;
+    r->nvr = 0; r->vdata.clear(); r->nneed = 0; r->ntex = 0; r->tdata.clear();
+    memset(&r->walk, 0, sizeof r->walk);
+    for (int16_t& k : r->walk.release_sem) k = -1;
+    r->bypassed = 0;
+    memcpy(r->vconst, S.vconst, sizeof r->vconst);
+    memcpy(r->vconst_written, S.vconst_written, sizeof r->vconst_written);
+    r->vp = nullptr; r->fp = nullptr;
+    // its commands: from the context's position at the call to where it is now
+    const uint32_t cur = g32(v.ctx_ea + 8), begin = g32(v.ctx_ea);
+    r->lap = v.lap;
+    r->io = cellGcm_ea2io_pub(v.cur);
+    r->io_alt = cellGcm_ea2io_pub(begin);
+    r->lap_end = cellGcm_title_laps_pub(nullptr);
+    r->io_end = cellGcm_ea2io_pub(cur);
+    publish(r);
+    stats().asp_records++;
+}
+
+// asp's methods R5 describes: 1 + what ppfx_rec_observe answers, or 0 (not one of them)
+int asp_record_call(uint32_t addr, ppu_context* c)
+{
+    if (!asp_records_on()) return 0;
+    switch (addr) {
+    case 0x006C6F88:   // the draw: a record at its return
+        if (!S.ring_ctx) return 1;
+        asp_draw_enter(c);
+        return 3;
+    case 0x006CB070: { // texture apply (this, {unit, ..}, CellGcmTexture*)
+        const uint32_t t = (uint32_t)c->gpr[5];
+        if (!ea_ok(t, 24)) return 1;
+        Texture& o = S.st.tex[(uint32_t)(c->gpr[4] >> 32) & 15];
+        o.format = (uint8_t)g8(t + 0); o.mipmap = (uint8_t)g8(t + 1); o.dimension = (uint8_t)g8(t + 2);
+        o.cubemap = (uint8_t)g8(t + 3); o.remap = g32(t + 4);
+        o.width = (uint16_t)g16(t + 8); o.height = (uint16_t)g16(t + 10); o.depth = (uint16_t)g16(t + 12);
+        o.location = (uint8_t)g8(t + 14); o.pitch = g32(t + 16); o.offset = g32(t + 20);
+        return 1;
+    }
+    case 0x006D3190: case 0x006D32D0: {   // a vertex stream: (stream object, {index, ..}) / (stream object)
+        const uint32_t s = (uint32_t)c->gpr[3];
+        const uint32_t ix = addr == 0x006D3190u ? (uint32_t)c->gpr[4] : s;
+        if (!ea_ok(s, 0x14) || !ea_ok(ix, 4)) return 1;
+        VertexInput& v = S.st.vin[g32(ix) & 15];
+        v.stride = (uint8_t)g8(s + 8); v.size = (uint8_t)(g8(s + 9) & 0xF); v.type = (uint8_t)(g8(s + 10) & 0xF);
+        v.location = (uint8_t)(g8(s + 11) & 1); v.frequency = (uint16_t)g16(s + 12); v.offset = g32(s + 16);
+        return 1;
+    }
+    case 0x006C9C74: { // vertex constants (this, {start, ..}, const float*, count): whole vec4s
+        const uint32_t start = (uint32_t)(c->gpr[4] >> 32) & 0x7FFFu, data = (uint32_t)c->gpr[5];
+        const uint32_t n = ((uint32_t)c->gpr[6] + 3u) & ~3u;
+        if (!n || !ea_ok(data, n * 4)) return 1;
+        for (uint32_t i = 0; i < n && start + i / 4 < 512; i++) {
+            S.vconst[start + i / 4][i % 4] = g32(data + 4 * i);
+            S.vconst_written[(start + i / 4) >> 5] |= 1u << ((start + i / 4) & 31);
+        }
+        return 1;
+    }
+    case 0x006CA3D0: case 0x006C99B0: {   // R5's probe (DOTHEROES_ASP_PROBE=1): asp's shader containers
+        static int probe = -1, n = 0;
+        if (probe < 0) { const char* e = getenv("DOTHEROES_ASP_PROBE"); probe = e && *e == '1'; }
+        if (!probe || n >= 48) return 1;
+        n++;
+        const uint32_t self = (uint32_t)c->gpr[3];
+        char line[600];
+        int at = snprintf(line, sizeof line, "asp probe %s this %08X r4 %08X r5 %08X", addr == 0x006CA3D0u ? "vp-upload" : "fp-bind",
+                          self, (uint32_t)c->gpr[4], (uint32_t)c->gpr[5]);
+        for (uint32_t off = 0x10; off <= 0x20 && ea_ok(self + off, 8); off += 8) {
+            const uint32_t obj = g32(self + off);
+            if (!ea_ok(obj, 8)) continue;
+            const uint32_t hdr = g32(obj), uc = g32(obj + 4);
+            at += snprintf(line + at, sizeof line - at, " | this+%X obj %08X hdr %08X:", off, obj, hdr);
+            for (uint32_t i = 0; i < 0x20 && ea_ok(hdr, 0x20); i += 4) at += snprintf(line + at, sizeof line - at, " %08X", g32(hdr + i));
+            if (ea_ok(uc, 16)) at += snprintf(line + at, sizeof line - at, " ucode %08X: %08X %08X %08X %08X", uc, g32(uc), g32(uc + 4), g32(uc + 8), g32(uc + 12));
+        }
+        if (addr == 0x006C99B0u && ea_ok(self + 0xF0, 4)) at += snprintf(line + at, sizeof line - at, " | this+F0 %08X", g32(self + 0xF0));
+        report_add(line);
+        return 1;
+    }
+    default:
+        return 0;
+    }
+}
+
 void read_env()
 {
     const char* pw = getenv("DOTHEROES_PPFX_PROGWATCH");
@@ -1126,6 +1255,11 @@ void write_report()
         }
     }
     fprintf(f, "native frames_with_records %llu\n", (unsigned long long)s.n_frames);
+    if (asp_records_on())
+        fprintf(f, "asp records %llu matched %llu missed %llu engine_draws_in_them %llu | crosscheck draws %llu "
+                   "with_differences %llu\n", (unsigned long long)s.asp_records, (unsigned long long)s.asp_matched,
+                (unsigned long long)s.asp_missed, (unsigned long long)s.asp_draw_events,
+                (unsigned long long)s.asp_xc_draws, (unsigned long long)s.asp_xc_differ);
     fprintf(f, "native draws %llu clears %llu unsupported %llu batches %llu pipelines %llu images %llu (%.1f MB) "
                "static_textures %llu own_target_snapshots %llu images_replaced %llu\n",
             (unsigned long long)s.n_draws, (unsigned long long)s.n_clears, (unsigned long long)s.n_unsupported,
@@ -1313,9 +1447,9 @@ extern "C" int ppfx_rec_observe(uint32_t addr, ppu_context* ctx)
     // modes are in asp's state store now
     asp_resolve();
     if (asp_fn(addr)) {
-        if (mode() || s_pw) asp_call(addr, ctx);
+        const int a = mode() || s_pw ? asp_call(addr, ctx) : 0;
         st.rec_ns += now_ns() - t0;
-        return 0;
+        return a;
     }
     if (who) { st.ppfx_calls++; if (who == 2) st.nested_ppfx++; }
     else st.foreign_state_calls++;
@@ -1429,6 +1563,7 @@ extern "C" void ppfx_rec_exit(uint32_t addr, ppu_context* ctx)
     s_vstack.pop_back();
     if (v.addr != addr) stats().r4_exit_mismatch++;
     if (v.kind == 0) { if (S.kept_depth) S.kept_depth--; return; }
+    if (v.kind == 2) { asp_draw_exit(v); return; }
     r4_verify_exit(v, ctx);
     if (--s_verifying == 0) { g_ppu_obs_store = 0; s_stores.clear(); }
 }

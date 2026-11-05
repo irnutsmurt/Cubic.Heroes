@@ -143,7 +143,9 @@ uint64_t fnv(const void* p, size_t n, uint64_t h = 1469598103934665603ull);
 
 // ---- records ---------------------------------------------------------------
 
-enum Kind : uint32_t { kDraw = 1, kClear = 2 };
+// kAspDraw (R5, docs/NATIVE_R4.md section 10): one of asp's draws, described from
+// asp's own methods; checked against the engine's state at that draw, not rendered yet
+enum Kind : uint32_t { kDraw = 1, kClear = 2, kAspDraw = 3 };
 
 // A guest surface a record reads (a texture unit) or writes (its colour
 // target), as the recorder saw it.
@@ -190,6 +192,7 @@ struct Rec {
     // command, as the call began -- or, when the call's own reserve wraps the
     // ring, lap + 1 at io_alt (the ring's start). The walker tells which.
     uint32_t lap, io, io_alt;
+    uint32_t lap_end, io_end;      // kAspDraw: where its commands ended (its draw's return)
     uint32_t why;                  // 0, or a reason the record is not drawable (kWhy*)
     State st;                      // what it draws with
     uint32_t vconst[512][4];       // the vertex program's constants
@@ -339,6 +342,9 @@ struct Stats {
     std::atomic<uint64_t> handbacks_by_kind[6];   // 0 a draw's target, 1 texture, 2 transfer/guest, 3 present, 4 clear, 5 other
     std::atomic<uint64_t> hb_checked{0}, hb_equal{0}, hb_differ{0};
     std::atomic<uint64_t> present_hashes{0};
+    // R5: asp's records
+    std::atomic<uint64_t> asp_records{0}, asp_matched{0}, asp_missed{0}, asp_xc_draws{0}, asp_xc_differ{0};
+    std::atomic<uint64_t> asp_draw_events{0};   // engine draw events inside a matched asp draw's commands
 };
 Stats& stats();
 void report_add(const char* line);   // a line in the next report (diagnostics)

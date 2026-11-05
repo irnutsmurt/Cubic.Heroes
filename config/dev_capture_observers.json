@@ -388,6 +388,34 @@
   {
    "addr": "0x006C19A4",
    "note": "asp's line width setter"
+  },
+  {
+   "addr": "0x006C6F88",
+   "note": "asp's draw (the draw context's method): R5's asp records, built at its return (docs/NATIVE_R4.md section 10)"
+  },
+  {
+   "addr": "0x006CB070",
+   "note": "asp's texture apply (this, {unit, ..}, CellGcmTexture*): a unit's texture"
+  },
+  {
+   "addr": "0x006D3190",
+   "note": "asp's vertex stream bind (stream object, {index, ..}): a vertex input's size, type, stride, location, frequency, offset"
+  },
+  {
+   "addr": "0x006D32D0",
+   "note": "asp's vertex stream rebind (stream object holding its index)"
+  },
+  {
+   "addr": "0x006C9C74",
+   "note": "asp's vertex constant upload (this, {start, ..}, const float*, count)"
+  },
+  {
+   "addr": "0x006CA3D0",
+   "note": "asp's vertex program upload and bind (shader object): R5's probe of asp's shader container"
+  },
+  {
+   "addr": "0x006C99B0",
+   "note": "asp's fragment program bind (shader object): R5's probe"
   }
  ]
 }
