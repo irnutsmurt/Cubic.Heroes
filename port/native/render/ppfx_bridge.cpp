@@ -19,7 +19,9 @@
 // checks it.
 //
 // Cross-check (development, DOTHEROES_PPFX_XCHECK, on unless 0): at each
-// matched draw, the record's state against the engine's -- registers,
+// matched draw, the record's explicit state against the engine's register
+// file decoded into the same explicit form (engine_state: the only place
+// registers are read, development only) -- the items the draw uses, the
 // vertex-program constants and words, the fragment program's bytes in local
 // memory now (after every queued patch landed), and the vertex and static
 // texture bytes the engine is about to read. It only counts and reports; the
@@ -117,7 +119,7 @@ void vp_const_mask(const Blob* vp, uint32_t mask[16])
     }
 }
 
-// One state item the record and the engine disagree on.
+/// One state item the record and the engine disagree on.
 void xdiff(const char* what, uint32_t rec, uint32_t eng, uint32_t& n)
 {
     n++;
@@ -126,92 +128,178 @@ void xdiff(const char* what, uint32_t rec, uint32_t eng, uint32_t& n)
     x.n++; x.rec = rec; x.eng = eng; x.seq1 = B.cur->seq; x.frame1 = B.cur->frame;
 }
 
-void xreg(const rsx_dispatch* E, const rsx_dispatch* R, uint32_t m, uint32_t& n)
+uint32_t fu(float f) { uint32_t u; memcpy(&u, &f, 4); return u; }
+
+// The engine's state at the matched draw, in the explicit form
+// (development only: the register file read through the toolkit's getters,
+// decoded as the recorder's encoders would have set the same items). Only
+// the cross-check uses it; records never take anything from it.
+void engine_state(const rsx_dispatch* E, State* o)
 {
-    const uint32_t e = E->regs[m >> 2], v = R->regs[m >> 2];
-    if (e == v) return;
-    char name[48];
-    snprintf(name, sizeof name, "reg %04X%s", m, reg_written(m) ? "" : " (never PPFX's)");
-    xdiff(name, v, e, n);
+    reset_state(o);
+    rsx_dsp_surface sf; rsx_dsp_get_surface(E, &sf);
+    Surface& s = o->surface;
+    s.color_format = (uint8_t)sf.color_format; s.depth_format = (uint8_t)sf.depth_format; s.type = (uint8_t)sf.raster_type;
+    s.antialias = (uint8_t)sf.antialias; s.color_target = (uint8_t)sf.color_target;
+    for (int i = 0; i < 4; i++) {
+        s.color_location[i] = (uint8_t)sf.color_location[i]; s.color_offset[i] = sf.color_offset[i];
+        s.color_pitch[i] = sf.color_pitch[i];
+    }
+    s.depth_location = (uint8_t)sf.zeta_location; s.depth_offset = sf.zeta_offset; s.depth_pitch = sf.zeta_pitch;
+    s.width = (uint16_t)(sf.clip_w / (sf.aa_sx ? sf.aa_sx : 1)); s.height = (uint16_t)(sf.clip_h / (sf.aa_sy ? sf.aa_sy : 1));
+    s.x = (uint16_t)sf.clip_x; s.y = (uint16_t)sf.clip_y;
+    rsx_dsp_viewport vp; rsx_dsp_get_viewport(E, &vp);
+    Viewport& v = o->viewport;
+    v.x = (uint16_t)vp.x; v.y = (uint16_t)vp.y; v.w = (uint16_t)vp.w; v.h = (uint16_t)vp.h;
+    memcpy(v.scale, vp.scale, 16); memcpy(v.offset, vp.translate, 16);
+    { uint32_t a = rsx_dsp_reg(E, 0x0394), b = rsx_dsp_reg(E, 0x0398); memcpy(&v.zmin, &a, 4); memcpy(&v.zmax, &b, 4); }
+    const uint32_t sh = rsx_dsp_reg(E, 0x08C0), sv = rsx_dsp_reg(E, 0x08C4);
+    o->scissor = { (uint16_t)sh, (uint16_t)sv, (uint16_t)(sh >> 16), (uint16_t)(sv >> 16) };
+    const uint32_t fpo = rsx_dsp_reg(E, 0x08E4), ctl = rsx_dsp_shader_control(E);
+    FragmentProgram& f = o->fp;
+    f.offset = fpo & ~3u; f.location = (uint8_t)((fpo & 3u) - 1u);
+    f.reg_count = (uint8_t)(ctl >> 24); f.txp = (uint8_t)(ctl >> 15 & 1); f.output_from_h0 = !(ctl & 0x40u);
+    f.depth_replace = (ctl & 0xEu) != 0; f.pixel_kill = (uint8_t)(ctl >> 7 & 1);
+    f.input_mask = rsx_dsp_reg(E, 0x1FF4) & ~0x20u;
+    f.gamma = (uint8_t)rsx_dsp_reg(E, 0x1FEC);
+    o->vp.start = (uint16_t)rsx_dsp_vp_start(E);
+    o->vp.input_mask = rsx_dsp_reg(E, 0x1FF0);
+    o->vp.regs_le32 = (rsx_dsp_reg(E, 0x1EF8) >> 16) == 0x20u;
+    for (uint32_t u = 0; u < 16; u++) {
+        rsx_dsp_texture t; rsx_dsp_get_texture(E, u, &t);
+        Texture& x = o->tex[u];
+        x.format = (uint8_t)t.format; x.mipmap = (uint8_t)t.mipmaps; x.dimension = (uint8_t)t.dimension;
+        x.cubemap = (uint8_t)t.cubemap; x.location = (uint8_t)t.location; x.remap = t.remap;
+        x.width = (uint16_t)t.width; x.height = (uint16_t)t.height; x.depth = (uint16_t)t.depth;
+        x.pitch = t.pitch; x.offset = t.offset;
+        Sampler& m = o->samp[u];
+        m.enable = (uint8_t)(t.control0 >> 31); m.max_aniso = (uint8_t)(t.control0 >> 4 & 7);
+        m.min_lod = (uint16_t)(t.control0 >> 19 & 0xFFF); m.max_lod = (uint16_t)(t.control0 >> 7 & 0xFFF);
+        m.min_filter = (uint8_t)(t.filter >> 16 & 7); m.mag_filter = (uint8_t)(t.filter >> 24 & 7);
+        m.conv = (uint8_t)(t.filter >> 13 & 7); m.bias = (uint16_t)(t.filter & 0x1FFF);
+        m.filter_signed = (uint8_t)(t.filter >> 28);
+        m.wrap_s = t.wrap & 0xF; m.wrap_t = t.wrap >> 8 & 0xF; m.unsigned_remap = t.wrap >> 12 & 0xF;
+        m.wrap_r = t.wrap >> 16 & 0xF; m.gamma = t.wrap >> 20 & 0xF; m.zfunc = t.wrap >> 28 & 0xF;
+        m.border = t.border_color;
+    }
+    for (uint32_t i = 0; i < 16; i++) {
+        rsx_dsp_vertex_attr a; rsx_dsp_get_vertex_attr(E, i, &a);
+        VertexInput& in = o->vin[i];
+        in.size = (uint8_t)a.size; in.type = (uint8_t)a.type; in.stride = (uint8_t)a.stride;
+        in.frequency = (uint16_t)a.frequency; in.offset = a.offset; in.location = (uint8_t)a.location;
+        rsx_dsp_vertex_default(E, i, o->vdata.current[i]);
+    }
+    o->vdata.base_offset = rsx_dsp_vertex_data_base_offset(E);
+    o->vdata.base_index = rsx_dsp_reg(E, 0x173C);
+    o->vdata.divider_op = (uint16_t)rsx_dsp_reg(E, 0x1FC0);
+    rsx_be_render_state rs; rsx_draw_engine_decode_render_state(E, &rs);
+    Raster& r = o->raster;
+    r.color_mask = rs.color_mask; r.blend = (uint8_t)rs.blend_enable; r.alpha_test = (uint8_t)rs.alpha_test_enable;
+    r.depth_test = (uint8_t)rs.depth_test; r.depth_write = (uint8_t)rs.depth_write; r.depth_func = (uint16_t)rs.depth_func;
+    r.cull = (uint8_t)rs.cull_enable; r.cull_face = (uint16_t)rs.cull_face; r.front_face = (uint16_t)rs.front_face;
+    r.stencil_test = (uint8_t)rs.stencil_enable;
+    const uint32_t aa = rsx_dsp_reg(E, 0x1D7C);
+    r.aa_enable = aa & 1; r.alpha_to_coverage = aa >> 4 & 1; r.alpha_to_one = aa >> 8 & 1; r.sample_mask = (uint16_t)(aa >> 16);
+    r.poly_offset_fill = (uint8_t)(rsx_dsp_reg(E, 0x0A68) & 1);
+    { uint32_t a = rsx_dsp_reg(E, 0x0A78), b = rsx_dsp_reg(E, 0x0A7C);
+      memcpy(&r.poly_offset_factor, &a, 4); memcpy(&r.poly_offset_units, &b, 4); }
 }
 
-rsx_dispatch* scratch()
-{
-    static rsx_dispatch* d = nullptr;
-    if (!d) { d = (rsx_dispatch*)malloc(sizeof(rsx_dispatch)); rsx_dispatch_init(d, nullptr); }
-    return d;
-}
+const char* by_name(uint8_t b) { return b == kByPpfx ? "" : b == kByAsp ? " (asp's)" : b == kByGame ? " (the game's)" : " (reset)"; }
 
 // The effective state of the matched draw, record against engine: what the
 // engine's derivation reads for this draw -- the surface, viewport and
-// scissor, the programs' registers, the units the fragment program samples,
-// the arrays the vertex program reads, the render state (the fields that
-// matter with the enables as they are), the constants the vertex program
-// reads, the programs' bytes, and the vertex bytes.
+// scissor, the programs' parameters, the units the fragment program samples,
+// the inputs the vertex program reads, the render state that matters with
+// the enables as they are, the constants the vertex program reads, the
+// programs' bytes, and the vertex bytes.
 void crosscheck(Rec* r)
 {
     const rsx_dispatch* E = rsx_draw_engine_state();
     if (!E) return;
     Stats& st = stats();
     st.xc_draws++;
-    rsx_dispatch* R = scratch();
-    const uint32_t nr = reg_count();
-    for (uint32_t i = 0; i < nr; i++) R->regs[reg_method(i) >> 2] = r->regs[i];
+    static State e;
+    engine_state(E, &e);
+    const State& a = r->st;
     std::lock_guard<std::mutex> g(B.xr_lock);
     B.cur = r;
     uint32_t dr = 0, dc = 0;
-    static const uint16_t kAlways[] = {
-        0x0194, 0x0208, 0x020C, 0x0210, 0x0200, 0x0204, 0x0220, 0x02B8, 0x1D88,          // surface
-        0x0A00, 0x0A04, 0x0394, 0x0398, 0x0A20, 0x0A24, 0x0A28, 0x0A2C, 0x0A30, 0x0A34,   // viewport
-        0x0A38, 0x0A3C, 0x08C0, 0x08C4,                                                    // and scissor
-        0x08E4, 0x1D60, 0x1FF4, 0x1FF0, 0x1EA0, 0x1FEC, 0x1478, 0x1D7C,                    // programs
-        0x1738, 0x173C, 0x1FC0, 0x0A68 };
-    // (texture coordinate control, 0x0B40-0x0B64, is not read by the translators or the engine)
-    for (uint16_t m : kAlways) xreg(E, R, m, dr);
-    for (uint32_t u = 0; u < 4; u++) xreg(E, R, 0x090C + 0x20 * u, dr);   // vertex texture control0 (enable)
+    char name[64];
+#define X(field, label) if ((uint32_t)(a.field) != (uint32_t)(e.field)) xdiff(label, (uint32_t)(a.field), (uint32_t)(e.field), dr)
+#define XF(field, label) if (fu(a.field) != fu(e.field)) xdiff(label, fu(a.field), fu(e.field), dr)
+    X(surface.color_format, "surface.color_format"); X(surface.color_target, "surface.color_target");
+    X(surface.antialias, "surface.antialias"); X(surface.color_location[0], "surface.color_location");
+    X(surface.color_offset[0], "surface.color_offset"); X(surface.color_pitch[0], "surface.color_pitch");
+    X(surface.width, "surface.width"); X(surface.height, "surface.height");
+    X(surface.x, "surface.x"); X(surface.y, "surface.y");
+    X(viewport.x, "viewport.x"); X(viewport.y, "viewport.y"); X(viewport.w, "viewport.w"); X(viewport.h, "viewport.h");
+    XF(viewport.zmin, "viewport.zmin"); XF(viewport.zmax, "viewport.zmax");
+    for (int i = 0; i < 4; i++) {
+        snprintf(name, sizeof name, "viewport.scale[%d]", i); XF(viewport.scale[i], name);
+        snprintf(name, sizeof name, "viewport.offset[%d]", i); XF(viewport.offset[i], name);
+    }
+    X(scissor.x, "scissor.x"); X(scissor.y, "scissor.y"); X(scissor.w, "scissor.w"); X(scissor.h, "scissor.h");
+    X(fp.offset, "fp.offset"); X(fp.location, "fp.location");
+    if ((a.fp.reg_count < 2 ? 2u : a.fp.reg_count) != e.fp.reg_count) xdiff("fp.reg_count", a.fp.reg_count, e.fp.reg_count, dr);
+    X(fp.txp, "fp.txp"); X(fp.output_from_h0, "fp.output_from_h0"); X(fp.depth_replace, "fp.depth_replace");
+    X(fp.pixel_kill, "fp.pixel_kill"); X(fp.gamma, "fp.gamma");
+    if ((a.fp.input_mask & ~0x20u) != e.fp.input_mask) xdiff("fp.input_mask", a.fp.input_mask, e.fp.input_mask, dr);
+    X(vp.start, "vp.start"); X(vp.input_mask, "vp.input_mask"); X(vp.regs_le32, "vp.regs_le32");
     // the units the fragment program samples
     const uint32_t units = r->fp ? rsx_fp_texture_units(r->fp->bytes.data(), (uint32_t)r->fp->bytes.size()) : 0;
     for (uint32_t u = 0; u < 16; u++) {
         if (!(units >> u & 1)) continue;
-        for (uint32_t k = 0; k < 8; k++) xreg(E, R, 0x1A00 + 0x20 * u + 4 * k, dr);
-        xreg(E, R, 0x1840 + 4 * u, dr);
+#define XU(field) snprintf(name, sizeof name, "tex%u." #field "%s", u, by_name(a.samp[u].address_by)); \
+                  if ((uint32_t)a.field != (uint32_t)e.field) xdiff(name, (uint32_t)a.field, (uint32_t)e.field, dr)
+        XU(samp[u].enable);
+        if (!a.samp[u].enable) continue;
+        XU(tex[u].format); XU(tex[u].mipmap); XU(tex[u].dimension); XU(tex[u].cubemap); XU(tex[u].location);
+        XU(tex[u].remap); XU(tex[u].width); XU(tex[u].height); XU(tex[u].depth); XU(tex[u].pitch); XU(tex[u].offset);
+        XU(samp[u].max_aniso); XU(samp[u].min_lod); XU(samp[u].max_lod); XU(samp[u].min_filter); XU(samp[u].mag_filter);
+        XU(samp[u].conv); XU(samp[u].bias); XU(samp[u].filter_signed); XU(samp[u].wrap_s); XU(samp[u].wrap_t);
+        XU(samp[u].wrap_r); XU(samp[u].unsigned_remap); XU(samp[u].zfunc); XU(samp[u].gamma); XU(samp[u].border);
+#undef XU
     }
-    // the arrays the vertex program reads
+    // the inputs the vertex program reads
     rsx_vp_input_analysis an = { 0xFFFFu, 0 };
     if (r->vp) rsx_vp_analyze_inputs(r->vp->bytes.data(), (uint32_t)r->vp->bytes.size(), &an);
     for (uint32_t i = 0; i < 16; i++) {
         if (!(an.input_mask >> i & 1)) continue;
-        xreg(E, R, 0x1740 + 4 * i, dr);
-        if (R->regs[(0x1740 >> 2) + i] >> 4 & 0xF) xreg(E, R, 0x1680 + 4 * i, dr);
-        else for (uint32_t k = 0; k < 4; k++) xreg(E, R, 0x1C00 + 16 * i + 4 * k, dr);
+        snprintf(name, sizeof name, "vin%u.size", i); X(vin[i].size, name);
+        if (!a.vin[i].size) {
+            for (int k = 0; k < 4; k++) { snprintf(name, sizeof name, "vin%u.current[%d]", i, k); XF(vdata.current[i][k], name); }
+            continue;
+        }
+        if ((a.vin[i].type & 7u) != e.vin[i].type) { snprintf(name, sizeof name, "vin%u.type", i); xdiff(name, a.vin[i].type, e.vin[i].type, dr); }
+        snprintf(name, sizeof name, "vin%u.stride", i); X(vin[i].stride, name);
+        snprintf(name, sizeof name, "vin%u.frequency", i); X(vin[i].frequency, name);
+        snprintf(name, sizeof name, "vin%u.location", i); X(vin[i].location, name);
+        if ((a.vin[i].offset & 0x7FFFFFFFu) != e.vin[i].offset) {
+            snprintf(name, sizeof name, "vin%u.offset", i); xdiff(name, a.vin[i].offset, e.vin[i].offset, dr);
+        }
     }
-    if (R->regs[0x0A68 >> 2] & 1) { xreg(E, R, 0x0A78, dr); xreg(E, R, 0x0A7C, dr); }
+    X(vdata.base_offset, "vdata.base_offset"); X(vdata.base_index, "vdata.base_index"); X(vdata.divider_op, "vdata.divider_op");
     // the render state, with what the enables make irrelevant left out
-    rsx_be_render_state a, b;
-    rsx_draw_engine_decode_render_state(R, &a);
-    rsx_draw_engine_decode_render_state(E, &b);
-#define RS(f) if (a.f != b.f) xdiff("rs " #f, a.f, b.f, dr)
-    RS(alpha_test_enable); if (a.alpha_test_enable) { RS(alpha_func); RS(alpha_ref_raw); }
-    RS(blend_enable); RS(blend_mrt);
-    if (a.blend_enable || a.blend_mrt) { RS(sf_rgb); RS(df_rgb); RS(sf_a); RS(df_a); RS(eq_rgb); RS(eq_a); }
-    RS(depth_test); if (a.depth_test) { RS(depth_write); RS(depth_func); }
-    RS(cull_enable); if (a.cull_enable) { RS(cull_face); RS(front_face); }
-    RS(color_mask); RS(color_mask_mrt); RS(rt_fp16);
-    RS(stencil_enable);
-    if (a.stencil_enable) {
-        RS(stencil_two_sided); RS(s_func); RS(s_func_mask); RS(s_write_mask); RS(s_fail); RS(s_zfail); RS(s_zpass);
-        RS(bs_func); RS(bs_fail); RS(bs_zfail); RS(bs_zpass);
-    }
-    RS(depth_bounds_test);
-#undef RS
+    snprintf(name, sizeof name, "raster.color_mask%s", by_name(a.raster.color_mask_by)); X(raster.color_mask, name);
+    X(raster.blend, "raster.blend"); X(raster.alpha_test, "raster.alpha_test"); X(raster.stencil_test, "raster.stencil_test");
+    X(raster.depth_test, "raster.depth_test");
+    if (a.raster.depth_test) { X(raster.depth_write, "raster.depth_write"); X(raster.depth_func, "raster.depth_func"); }
+    X(raster.cull, "raster.cull");
+    if (a.raster.cull) { X(raster.cull_face, "raster.cull_face"); X(raster.front_face, "raster.front_face"); }
+    X(raster.aa_enable, "raster.aa_enable"); X(raster.alpha_to_coverage, "raster.alpha_to_coverage");
+    X(raster.alpha_to_one, "raster.alpha_to_one"); X(raster.sample_mask, "raster.sample_mask");
+    X(raster.poly_offset_fill, "raster.poly_offset_fill");
+    if (a.raster.poly_offset_fill) { XF(raster.poly_offset_factor, "raster.poly_offset_factor"); XF(raster.poly_offset_units, "raster.poly_offset_units"); }
+#undef X
+#undef XF
     // the constants the vertex program reads
     uint32_t cm[16];
     vp_const_mask(r->vp.get(), cm);
     for (uint32_t k = 0; k < 512; k++)
         if ((cm[k >> 5] >> (k & 31) & 1) && memcmp(E->constants[k], r->vconst[k], 16)) {
-            char name[48];
             snprintf(name, sizeof name, "const c%u%s", k,
-                     r->vconst_written[k >> 5] >> (k & 31) & 1 ? "" : " (never PPFX's)");
+                     r->vconst_written[k >> 5] >> (k & 31) & 1 ? "" : " (never set)");
             xdiff(name, r->vconst[k][0], E->constants[k][0], dc);
         }
     r->walk.diff_regs = dr; r->walk.diff_consts = dc;
@@ -220,14 +308,14 @@ void crosscheck(Rec* r)
     if (dc) st.xc_consts++;
     // the vertex program the engine will run
     const uint32_t start = rsx_dsp_vp_start(E);
-    if (!r->vp || start != r->vp_start || start >= 544 || r->vp->bytes.size() > (544 - start) * 16 ||
+    if (!r->vp || start != r->st.vp.start || start >= 544 || r->vp->bytes.size() > (544 - start) * 16 ||
         memcmp(E->vp + start * 4, r->vp->bytes.data(), r->vp->bytes.size())) {
         r->walk.diff_vp = 1; st.xc_vp++;
     }
     // the fragment program as local memory has it now
     uint32_t loc = 0;
     const uint32_t off = rsx_dsp_fragment_program(E, &loc);
-    if (!r->fp || off != r->fp_off) { r->walk.diff_fp = 1; st.xc_fp++; }
+    if (!r->fp || off != r->st.fp.offset) { r->walk.diff_fp = 1; st.xc_fp++; }
     else {
         const uint32_t ea = cellGcmResolveLocated(loc == RSX_LOCATION_LOCAL, off);
         if (!ea || memcmp(vm_base + ea, r->fp->bytes.data(), r->fp->bytes.size())) {
@@ -461,7 +549,7 @@ void finish(Rec* r)
             // slots are only released here, the copies are harmless)
             stats().handoff_fail += B.copies;
             for (uint32_t k = 0; k < kMaxNeeds; k++) { if (r->walk.hand[k] >= 0) slot_release_image(r->walk.hand[k]); r->walk.hand[k] = -1; }
-            if (r->walk.ref >= 0) slot_release_buffer(r->walk.ref);
+            if (r->walk.ref >= 0) { slot_release_buffer(r->walk.ref); stats().cmp_skip_no_ref++; }
             r->walk.ref = -1;
             char line[160];
             snprintf(line, sizeof line, "bridge: record %llu: no semaphore for its copies", (unsigned long long)r->seq);
@@ -483,19 +571,37 @@ void on_wrote(void*, u32 io, u32 laps, int draw, const u32* handles, const u32* 
         static int cmp_off = -1;
         if (cmp_off < 0) { const char* e = getenv("DOTHEROES_PPFX_COMPARE"); cmp_off = e && *e == '0'; }
         const bool changed = mode() == 2 && !cmp_off && structure_changed(r);
-        if (mode() == 2 && render_ready() && (compare_wanted(r) || changed) && n) {
+        int why = mode() == 2 && render_ready() ? compare_wanted(r) : kCmpNone;
+        if (mode() == 2 && render_ready() && why == kCmpNone && changed) why = kCmpChange;
+        if (why != kCmpNone && n) {
+            // asked for: from here it ends counted as compared (equal or
+            // differ), skipped (and why) or unfinished at exit
+            Stats& st = stats();
+            st.cmp_wanted++;
+            if (why == kCmpChange || (changed && why == kCmpEvery)) { why = kCmpChange; st.cmp_change_wanted++; }
+            r->walk.want_cmp = 1; r->walk.cmp_why = (uint8_t)why;
             const Need& t = r->need[0];
             uint32_t bpp = 0;
             surface_vkformat(t.format, &bpp);
             uint64_t buf = 0;
-            const int slot = bpp ? slot_buffer((uint64_t)t.w * t.h * bpp, &buf, t.format == 0x08) : -1;
+            // the finals and the frames after a structure change may use the
+            // reserves; with every buffer busy, a final or a change frame's
+            // comparison waits for one (the engine's work submitted first)
+            const int prio = why == kCmpFinal ? 2 : why == kCmpChange ? 1 : 0;
+            int slot = bpp ? slot_buffer((uint64_t)t.w * t.h * bpp, &buf, prio) : -1;
+            if (slot < 0 && bpp && prio > 0) {
+                const uint64_t t0 = bnow();
+                rsx_vk_bridge_flush();
+                while ((slot = slot_buffer((uint64_t)t.w * t.h * bpp, &buf, prio)) < 0 && bnow() - t0 < 2000000000ull)
+                    std::this_thread::sleep_for(std::chrono::microseconds(100));
+                st.hand_slot_wait_ns += bnow() - t0;
+            }
             if (slot >= 0 && !rsx_vk_bridge_copy_buffer(handles[0], (VkBuffer)buf, 0, t.w, t.h)) {
                 r->walk.ref = (int16_t)slot; r->walk.ref_w = t.w; r->walk.ref_h = t.h;
                 B.copies++;
             } else {
                 if (slot >= 0) slot_release_buffer(slot);
-                stats().cmp_skipped++;
-                stats().cmp_no_slot++;
+                st.cmp_skip_no_ref++;
             }
         }
         finish(r);

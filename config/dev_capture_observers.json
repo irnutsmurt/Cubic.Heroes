@@ -331,7 +331,63 @@
   },
   {
    "addr": "0x00963EBC",
-   "note": "the game's memcpy: R3's recorder takes copies into RSX local memory (the fragment programs' uploads) into its program shadow"
+   "note": "the game's memcpy: R3's recorder takes copies into RSX local memory (the fragment programs' uploads) into its program shadow, and asp's re-emissions of its state store into the command buffer"
+  },
+  {
+   "addr": "0x006C02E8",
+   "note": "asp's colour write mask setter (device, const u8 rgba[4]): the colour mask PPFX's draws inherit"
+  },
+  {
+   "addr": "0x006C37A0",
+   "note": "asp's sampler bind (device, unit, enable): a unit's sampler state from asp's per-unit sampler table; PPFX inherits unit 0's address mode from it"
+  },
+  {
+   "addr": "0x006D0BE0",
+   "note": "asp's append of a prebuilt block (context, source, words): the copy of its state store, by the game's memcpy"
+  },
+  {
+   "addr": "0x006D1764",
+   "note": "asp's pass apply: colour mask, depth test and depth mask for a pass"
+  },
+  {
+   "addr": "0x006CD014",
+   "note": "asp's state block compiler (context, ...): asp's whole render state into a block"
+  },
+  {
+   "addr": "0x006D0B98",
+   "note": "asp's rebuild of its global state block (through 0x006CD014)"
+  },
+  {
+   "addr": "0x006C01C4",
+   "note": "asp's depth write mask setter (device, enable)"
+  },
+  {
+   "addr": "0x006C4628",
+   "note": "asp's polygon offset setter (device, factor, units)"
+  },
+  {
+   "addr": "0x006C49BC",
+   "note": "asp's depth test and function setter (device, func)"
+  },
+  {
+   "addr": "0x006C4D1C",
+   "note": "asp's cull setter (device, mode)"
+  },
+  {
+   "addr": "0x006C5298",
+   "note": "asp's blend setter (device, ...)"
+  },
+  {
+   "addr": "0x006C0A70",
+   "note": "asp's stencil function and operations setter"
+  },
+  {
+   "addr": "0x006C0E38",
+   "note": "asp's stencil write mask setter"
+  },
+  {
+   "addr": "0x006C19A4",
+   "note": "asp's line width setter"
   }
  ]
 }

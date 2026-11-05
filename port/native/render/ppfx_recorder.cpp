@@ -1,19 +1,25 @@
-// R3's recorder (docs/NATIVE_R3.md): PPFX's libgcm calls, seen at their
-// entry by the development lift's observers (r1_observe.cpp dispatches here),
-// made into native records from the calls' own arguments -- no FIFO
-// decoding, no reconstructed RSX state.
+// The native PPFX recorder (docs/NATIVE_R3.md, docs/NATIVE_R3B.md): PPFX's
+// libgcm calls, seen at their entry by the development lift's observers
+// (r1_observe.cpp dispatches here), made into native records from the calls'
+// own arguments -- no FIFO decoding, no reconstructed RSX state.
 //
-// The state block. Each libgcm entry point PPFX reaches has an encoder here:
-// from the call's arguments (and the structures they point to: a
-// CellGcmSurface, a CellGcmTexture, a CgBinaryProgram) it writes the values
-// that call means into the recorder's own block, laid out like the RSX
-// register file because that is the layout the shader translators, the
-// texture and vertex decoders and the render-state decode read. Nothing else
-// writes the block; the existing renderer's registers are never read here
-// (the bridge compares against them in development runs, as a check only).
-// The encodings were taken from a frame trace of what each call writes
-// (tools/r3_gt_encodings.py) and are checked at every PPFX draw by the
-// bridge's cross-check.
+// The state. Each libgcm entry point PPFX reaches has an encoder here: from
+// the call's arguments (and the structures they point to: a CellGcmSurface, a
+// CellGcmTexture, a CgBinaryProgram) it sets the explicit state items that
+// call means (ppfx_native.h State), in libgcm's own vocabulary. Nothing else
+// sets them but the calls and asp's state API below; the existing renderer's
+// registers are never read here (the bridge compares against them in
+// development runs, as a check only).
+//
+// What PPFX inherits. Some of what PPFX's draws use, PPFX does not set: the
+// game sets a few items at a frame's start through libgcm (observed here the
+// same way), and asp, the engine, sets the colour mask and its texture
+// units' sampler state through its own state API. That API is observed too:
+// asp's colour mask setter (its four booleans), its sampler bind (the unit's
+// address mode as asp's state store holds it once the bind has run), and
+// asp's re-emission of its state store into the command buffer (the items
+// the re-emitted range holds). docs/NATIVE_R3B.md section 1 has the evidence
+// and the list.
 //
 // Which calls are PPFX's. A call whose return address lies in PPFX's code is;
 // a call from inside libgcm (a libgcm function calling another, as
@@ -71,46 +77,26 @@ extern "C" uint32_t cellGcmResolveLocated(int local, uint32_t offset);
 extern "C" uint32_t rsx_fp_texture_units(const uint8_t* ucode, uint32_t max_bytes);
 extern "C" uint32_t rsx_fp_program_size(const uint8_t* ucode, uint32_t max_bytes);
 extern "C" uint32_t rsx_vp_program_size_instrs(const uint8_t* ucode, uint32_t max_bytes);
+extern "C" void (*g_dotheroes_stop_hook)(void);   // dev_state.cpp: run before a test's stop
+extern "C" void rsx_frame_trace_arm(void);   // cellGcmSys.c: RSX_FRAME_TRACE=arm:<frames>:<path>
 
 namespace ppfx {
 
 // ---- shared definitions -----------------------------------------------------
 
-const RegRange kRanges[] = {
-    { 0x0180, 0x0400 },   // DMA objects, surface, the 0x03xx state (blend, alpha, stencil, masks)
-    { 0x08C0, 0x0900 },   // scissor, shader program
-    { 0x0900, 0x0980 },   // vertex texture units (never PPFX's; their enables shape the vertex program)
-    { 0x0A00, 0x0B00 },   // viewport, depth, polygon offset
-    { 0x0B40, 0x0B80 },   // texture coordinate control
-    { 0x1400, 0x1500 },   // 0x142C, user clip planes 0x1478, 0x147C
-    { 0x1680, 0x1880 },   // vertex arrays, base offset/index, polygon modes, cull, texture pitch/depth
-    { 0x1A00, 0x1C00 },   // texture units
-    { 0x1C00, 0x1D00 },   // vertex attribute values (what a disabled array reads)
-    { 0x1D60, 0x1E00 },   // shader control, shader window, clear values, clear
-    { 0x1E98, 0x1F00 },   // transform program load/start, timeout, constant load
-    { 0x1FC0, 0x2000 },   // frequency divider, gamma, attribute masks, branch bits
-};
-const uint32_t kNRanges = sizeof kRanges / sizeof kRanges[0];
-
-namespace {
-uint16_t s_idx[0x2000 / 4];
-uint16_t s_meth[kMaxRegs];
-uint32_t s_nregs;
-void init_index()
+// The GPU's reset state: everything off or zero, but all four colour
+// channels written, counter-clockwise front faces, a depth/stencil clear
+// value of depth 1.0 and stencil 0, and (0, 0, 0, 1) for a vertex input no
+// array feeds (the RSX's documented reset values, as the toolkit's
+// rsx_dispatch_init seeds them).
+void reset_state(State* s)
 {
-    if (s_nregs) return;
-    for (auto& v : s_idx) v = 0xFFFF;
-    for (uint32_t r = 0; r < kNRanges; r++)
-        for (uint32_t m = kRanges[r].lo; m < kRanges[r].hi; m += 4) {
-            s_idx[m >> 2] = (uint16_t)s_nregs;
-            s_meth[s_nregs++] = (uint16_t)m;
-        }
+    memset(s, 0, sizeof *s);
+    s->raster.color_mask = 0x01010101u;   // CELL_GCM_COLOR_MASK_{R,G,B,A}
+    s->raster.front_face = 0x0901u;       // CELL_GCM_CCW
+    s->clear_depth = 0xFFFFFF00u;
+    for (auto& v : s->vdata.current) { v[0] = v[1] = v[2] = 0.0f; v[3] = 1.0f; }
 }
-}  // namespace
-
-uint32_t reg_count() { init_index(); return s_nregs; }
-uint32_t reg_index(uint32_t m) { init_index(); return m < 0x2000 && s_idx[m >> 2] != 0xFFFF ? s_idx[m >> 2] : ~0u; }
-uint32_t reg_method(uint32_t i) { init_index(); return i < s_nregs ? s_meth[i] : 0; }
 
 uint64_t fnv(const void* p, size_t n, uint64_t h)
 {
@@ -143,8 +129,6 @@ uint32_t g32(uint32_t ea) { return be32(vm_base + ea); }
 uint32_t g16(uint32_t ea) { return (uint32_t)vm_base[ea] << 8 | vm_base[ea + 1]; }
 uint32_t g8(uint32_t ea) { return vm_base[ea]; }
 bool ea_ok(uint32_t ea, uint32_t n = 4) { return ea >= 0x10000u && (uint64_t)ea + n <= 0xE0000000ull; }
-uint32_t fbits(double d) { float f = (float)d; uint32_t u; memcpy(&u, &f, 4); return u; }
-uint32_t flog2(uint32_t v) { uint32_t r = 0; while (v > 1) { v >>= 1; r++; } return r; }
 
 double now_s()
 {
@@ -280,21 +264,34 @@ void progwatch_bind(uint32_t prog, uint32_t off, const std::vector<uint8_t>& sh,
 
 // ---- the recorder's state ------------------------------------------------------
 
-struct State {
-    uint32_t regs[0x2000 / 4];
-    uint8_t written[0x2000 / 4];     // the recorder has written this register
+struct Rstate {
+    State st;                        // the explicit state, as the calls set it
     uint32_t vconst[512][4];
     uint32_t vconst_written[16];
-    uint32_t vp[kVpWords];
-    uint32_t vp_load;                // 1E9C: the next upload's slot
-    BlobP fp; uint32_t fp_off, fp_loc;
+    uint32_t vp[kVpWords];           // vertex program memory as the uploads made it
+    BlobP fp;                        // the bound fragment program's bytes
     BlobP vp_blob; uint64_t vp_gen, vp_blob_gen; uint32_t vp_blob_start;
     uint32_t fp_units;               // texture units the bound fragment program samples
     std::unordered_set<uint64_t> ppfx_targets;   // (location << 32 | offset) a record has written
     uint32_t frame;
+    uint32_t ring_ctx;               // the command buffer's CellGcmContextData (PPFX's calls' first argument)
+    uint8_t by;                      // who makes the call being encoded (By)
     // the producer
     uint32_t tid;
 } S;
+
+// asp's state API (docs/NATIVE_R3B.md section 1). asp keeps its render state
+// in a state store: a command block, one slot per state item, at the
+// CellGcmContextData its device holds at +0x124; its setters write an item
+// both into the command buffer and into the item's slot, and it re-emits
+// ranges of the store into the command buffer (its block append,
+// 0x006D0BE0). The slots' offsets are asp's own tables, through its TOC.
+struct Asp {
+    uint32_t device, toc;            // asp's device and TOC, from its calls
+    uint32_t pending_units;          // sampler binds that ran: the unit's address mode is in the store now
+    uint8_t cmask_unknown;           // a pass apply set the colour mask in a way the model does not follow
+    uint64_t unknown_draws;          // PPFX draws while it was
+} A;
 
 // Calls on other threads than the producer's touch the shadow (an inline
 // transfer by other code) and the frame count; the lock keeps them apart. It
@@ -318,71 +315,56 @@ BlobP blob_of(const uint8_t* p, size_t n)
     return b;
 }
 
-void W(uint32_t m, uint32_t v)
-{
-    S.regs[m >> 2] = v;
-    S.written[m >> 2] = 1;
-}
+float gfloat(uint32_t ea) { const uint32_t u = g32(ea); float f; memcpy(&f, &u, 4); return f; }
 
-// ---- encoders ----------------------------------------------------------------
+// ---- encoders: what each call means ----------------------------------------------
 
 // cellGcmSetSurface(ctx, const CellGcmSurface*)
 void enc_surface(uint32_t s)
 {
     if (!ea_ok(s, 60)) return;
-    const uint32_t type = g8(s + 0), aa = g8(s + 1), cfmt = g8(s + 2), ctarget = g8(s + 3);
-    uint32_t cloc[4], coff[4], cpitch[4];
-    for (int i = 0; i < 4; i++) { cloc[i] = g8(s + 4 + i); coff[i] = g32(s + 8 + 4 * i); cpitch[i] = g32(s + 24 + 4 * i); }
-    const uint32_t dfmt = g8(s + 40), dloc = g8(s + 41), doff = g32(s + 44), dpitch = g32(s + 48);
-    const uint32_t w = g16(s + 52), h = g16(s + 54), x = g16(s + 56), y = g16(s + 58);
-    W(0x0194, 0xFEED0000u + cloc[0]);
-    W(0x018C, 0xFEED0000u + cloc[1]);
-    W(0x01B4, 0xFEED0000u + cloc[2]);
-    W(0x01B8, 0xFEED0000u + cloc[3]);
-    W(0x0198, 0xFEED0000u + dloc);
-    W(0x0208, cfmt | dfmt << 5 | type << 8 | aa << 12 | flog2(w) << 16 | flog2(h) << 24);
-    W(0x020C, cpitch[0]); W(0x0210, coff[0]); W(0x0214, doff); W(0x0218, coff[1]); W(0x021C, cpitch[1]);
-    W(0x022C, dpitch);
-    W(0x0280, cpitch[2]); W(0x0284, cpitch[3]); W(0x0288, coff[2]); W(0x028C, coff[3]);
-    W(0x0220, ctarget);
-    W(0x02B8, y << 16 | x);
-    W(0x0200, w << 16 | x);
-    W(0x0204, h << 16 | y);
-    W(0x1D88, h | 0x1000u);   // shader window: the height, origin bottom, centres at half
+    Surface& o = S.st.surface;
+    o.type = (uint8_t)g8(s + 0); o.antialias = (uint8_t)g8(s + 1);
+    o.color_format = (uint8_t)g8(s + 2); o.color_target = (uint8_t)g8(s + 3);
+    for (int i = 0; i < 4; i++) {
+        o.color_location[i] = (uint8_t)g8(s + 4 + i);
+        o.color_offset[i] = g32(s + 8 + 4 * i);
+        o.color_pitch[i] = g32(s + 24 + 4 * i);
+    }
+    o.depth_format = (uint8_t)g8(s + 40); o.depth_location = (uint8_t)g8(s + 41);
+    o.depth_offset = g32(s + 44); o.depth_pitch = g32(s + 48);
+    o.width = (uint16_t)g16(s + 52); o.height = (uint16_t)g16(s + 54);
+    o.x = (uint16_t)g16(s + 56); o.y = (uint16_t)g16(s + 58);
 }
 
 // cellGcmSetViewport(ctx, x, y, w, h, min, max, scale[4], offset[4]): the
 // last pointer is the ninth argument, in the caller's parameter save area.
 void enc_viewport(ppu_context* c)
 {
-    const uint32_t x = (uint32_t)c->gpr[4] & 0xFFFF, y = (uint32_t)c->gpr[5] & 0xFFFF;
-    const uint32_t w = (uint32_t)c->gpr[6] & 0xFFFF, h = (uint32_t)c->gpr[7] & 0xFFFF;
+    Viewport& v = S.st.viewport;
+    v.x = (uint16_t)c->gpr[4]; v.y = (uint16_t)c->gpr[5]; v.w = (uint16_t)c->gpr[6]; v.h = (uint16_t)c->gpr[7];
+    v.zmin = (float)c->fpr[1]; v.zmax = (float)c->fpr[2];
     const uint32_t scale = (uint32_t)c->gpr[10];
     const uint32_t sp = (uint32_t)c->gpr[1];
     const uint32_t offset = ea_ok(sp + 112, 8) ? g32(sp + 112 + 4) : 0;
-    W(0x0A00, w << 16 | x);
-    W(0x0A04, h << 16 | y);
-    W(0x0394, fbits(c->fpr[1]));
-    W(0x0398, fbits(c->fpr[2]));
     for (int i = 0; i < 4; i++) {
-        if (ea_ok(offset, 16)) W(0x0A20 + 4 * i, g32(offset + 4 * i));
-        if (ea_ok(scale, 16)) W(0x0A30 + 4 * i, g32(scale + 4 * i));
+        if (ea_ok(offset, 16)) v.offset[i] = gfloat(offset + 4 * i);
+        if (ea_ok(scale, 16)) v.scale[i] = gfloat(scale + 4 * i);
     }
 }
 
-// cellGcmSetFragmentProgramOffset-like bind (the libgcm function
-// cellGcmSetFragmentProgram calls): (ctx, CgBinaryProgram*, offset, location)
+// The fragment program bind cellGcmSetFragmentProgram makes:
+// (ctx, CgBinaryProgram*, offset, location)
 void enc_fp_bind(ppu_context* c, uint32_t flips)
 {
     const uint32_t prog = (uint32_t)c->gpr[4], off = (uint32_t)c->gpr[5], loc = (uint32_t)c->gpr[6] & 1;
     if (!ea_ok(prog, 32)) return;
-    W(0x08E4, off | (loc + 1));
+    FragmentProgram& f = S.st.fp;
+    f.offset = off; f.location = (uint8_t)loc;
     const uint32_t fpd = prog + g32(prog + 20);   // CgBinaryFragmentProgram
     if (ea_ok(fpd, 24)) {
-        W(0x1FF4, g32(fpd + 4) | 0x20u);          // attributeInputMask, and bit 5 libgcm always sets
-        const uint32_t tmask = g16(fpd + 12), t2d = g16(fpd + 14), tcen = g16(fpd + 16);
-        for (uint32_t i = 0; i < 10; i++)
-            if (tmask >> i & 1) W(0x0B40 + 4 * i, (t2d >> i & 1) | (tcen >> i & 1) << 4);
+        f.input_mask = g32(fpd + 4);
+        f.tex_mask = (uint16_t)g16(fpd + 12); f.tex_2d = (uint16_t)g16(fpd + 14); f.tex_centroid = (uint16_t)g16(fpd + 16);
     }
     std::vector<uint8_t> bytes;
     uint32_t known = 0;
@@ -393,21 +375,22 @@ void enc_fp_bind(ppu_context* c, uint32_t flips)
         if (ea_ok(ea, usize)) bytes.assign(vm_base + ea, vm_base + ea + usize);
     }
     S.fp = bytes.empty() ? nullptr : blob_of(bytes.data(), bytes.size());
-    S.fp_off = off; S.fp_loc = loc;
     S.fp_units = S.fp ? rsx_fp_texture_units(S.fp->bytes.data(), (uint32_t)S.fp->bytes.size()) : 0;
     if (s_pw && loc == 0) progwatch_bind(prog, off, bytes, known, flips);
 }
 
-// The shader control the fragment-program functions set: (ctx, prog, controlTxp, ...)
+// The shader control the fragment-program functions set: (ctx, prog, controlTxp, ...):
+// the CgBinaryFragmentProgram's registerCount, outputFromH0, depthReplace, pixelKill
 void enc_shader_control(ppu_context* c)
 {
     const uint32_t prog = (uint32_t)c->gpr[4];
     if (!ea_ok(prog, 32)) return;
     const uint32_t fpd = prog + g32(prog + 20);
     if (!ea_ok(fpd, 24)) return;
-    const uint32_t rc = g8(fpd + 18), h0 = g8(fpd + 19), depth = g8(fpd + 20), kill = g8(fpd + 21);
-    const uint32_t txp = (uint32_t)c->gpr[5] & 1;
-    W(0x1D60, (rc < 2 ? 2 : rc) << 24 | txp << 15 | 0x400u | (h0 ? 0 : 0x40u) | (depth ? 0xEu : 0) | (kill ? 0x80u : 0));
+    FragmentProgram& f = S.st.fp;
+    f.reg_count = (uint8_t)g8(fpd + 18); f.output_from_h0 = (uint8_t)g8(fpd + 19);
+    f.depth_replace = (uint8_t)g8(fpd + 20); f.pixel_kill = (uint8_t)g8(fpd + 21);
+    f.txp = (uint8_t)((uint32_t)c->gpr[5] & 1);
 }
 
 // cellGcmSetVertexProgram(ctx, CgBinaryProgram*, ucode)
@@ -418,14 +401,10 @@ void enc_vp(ppu_context* c)
     const uint32_t vpd = prog + g32(prog + 20);   // CgBinaryVertexProgram
     if (!ea_ok(vpd, 24)) return;
     const uint32_t n = g32(vpd + 0), slot = g32(vpd + 4), rc = g32(vpd + 8), in = g32(vpd + 12);
-    W(0x1E9C, slot);
-    W(0x1EA0, slot);
-    S.vp_load = slot;
     if (ea_ok(uc, n * 16))
         for (uint32_t i = 0; i < n * 4 && slot * 4 + i < kVpWords; i++) S.vp[slot * 4 + i] = g32(uc + 4 * i);
-    S.vp_load = slot + n;
-    W(0x1FF0, in);
-    W(0x1EF8, (rc <= 32 ? 0x20u : 0x30u) << 16 | 0xFFFFu);
+    VertexProgram& v = S.st.vp;
+    v.start = (uint16_t)slot; v.input_mask = in; v.regs_le32 = rc <= 32;
     S.vp_gen++;
 }
 
@@ -444,7 +423,6 @@ void enc_vp_const(ppu_context* c)
     case 0x428: regs = 4; break;         // CG_FLOAT4x4
     default: stats().unmodelled++; break;
     }
-    W(0x1EFC, res);
     for (uint32_t r = 0; r < regs && res + r < 512; r++)
         for (uint32_t k = 0; k < 4; k++) {
             const uint32_t at = val + 4 * (r * 4 + k);
@@ -456,88 +434,95 @@ void enc_vp_const(ppu_context* c)
 // cellGcmSetVertexDataArray(ctx, index, frequency, stride, size, type, location, offset)
 void enc_vertex_array(ppu_context* c)
 {
-    const uint32_t i = (uint32_t)c->gpr[4] & 15;
-    const uint32_t freq = (uint32_t)c->gpr[5] & 0xFFFF, stride = (uint32_t)c->gpr[6] & 0xFF;
-    const uint32_t size = (uint32_t)c->gpr[7] & 0xF, type = (uint32_t)c->gpr[8] & 0xF;
-    const uint32_t loc = (uint32_t)c->gpr[9] & 1, off = (uint32_t)c->gpr[10];
-    W(0x1740 + 4 * i, freq << 16 | stride << 8 | size << 4 | type);
-    W(0x1680 + 4 * i, loc << 31 | (off & 0x7FFFFFFFu));
+    VertexInput& v = S.st.vin[(uint32_t)c->gpr[4] & 15];
+    v.frequency = (uint16_t)c->gpr[5]; v.stride = (uint8_t)c->gpr[6];
+    v.size = (uint8_t)((uint32_t)c->gpr[7] & 0xF); v.type = (uint8_t)((uint32_t)c->gpr[8] & 0xF);
+    v.location = (uint8_t)((uint32_t)c->gpr[9] & 1); v.offset = (uint32_t)c->gpr[10];
 }
 
 // cellGcmSetTexture(ctx, index, const CellGcmTexture*)
 void enc_texture(ppu_context* c)
 {
-    const uint32_t u = (uint32_t)c->gpr[4] & 15, t = (uint32_t)c->gpr[5];
+    const uint32_t t = (uint32_t)c->gpr[5];
     if (!ea_ok(t, 24)) return;
-    const uint32_t fmt = g8(t + 0), mip = g8(t + 1), dim = g8(t + 2), cube = g8(t + 3), remap = g32(t + 4);
-    const uint32_t w = g16(t + 8), h = g16(t + 10), d = g16(t + 12), loc = g8(t + 14);
-    const uint32_t pitch = g32(t + 16), off = g32(t + 20);
-    const uint32_t b = 0x1A00 + 0x20 * u;
-    W(b + 0x00, off);
-    W(b + 0x04, (loc + 1) | cube << 2 | 0x8u | dim << 4 | fmt << 8 | mip << 16);
-    W(b + 0x18, w << 16 | h);
-    W(0x1840 + 4 * u, d << 20 | pitch);
-    W(b + 0x10, remap);
+    Texture& o = S.st.tex[(uint32_t)c->gpr[4] & 15];
+    o.format = (uint8_t)g8(t + 0); o.mipmap = (uint8_t)g8(t + 1); o.dimension = (uint8_t)g8(t + 2);
+    o.cubemap = (uint8_t)g8(t + 3); o.remap = g32(t + 4);
+    o.width = (uint16_t)g16(t + 8); o.height = (uint16_t)g16(t + 10); o.depth = (uint16_t)g16(t + 12);
+    o.location = (uint8_t)g8(t + 14); o.pitch = g32(t + 16); o.offset = g32(t + 20);
 }
 
 void enc_tex_filter(ppu_context* c)    // (ctx, index, bias, min, mag, conv)
 {
-    const uint32_t u = (uint32_t)c->gpr[4] & 15;
-    W(0x1A14 + 0x20 * u, ((uint32_t)c->gpr[7] & 7) << 24 | ((uint32_t)c->gpr[6] & 7) << 16 |
-                         ((uint32_t)c->gpr[8] & 7) << 13 | ((uint32_t)c->gpr[5] & 0x1FFF));
+    Sampler& s = S.st.samp[(uint32_t)c->gpr[4] & 15];
+    s.bias = (uint16_t)((uint32_t)c->gpr[5] & 0x1FFF);
+    s.min_filter = (uint8_t)((uint32_t)c->gpr[6] & 7); s.mag_filter = (uint8_t)((uint32_t)c->gpr[7] & 7);
+    s.conv = (uint8_t)((uint32_t)c->gpr[8] & 7);
+    s.filter_signed = 0;
 }
 
 void enc_tex_address(ppu_context* c)   // (ctx, index, wraps, wrapt, wrapr, unsignedRemap, zfunc, gamma)
 {
-    const uint32_t u = (uint32_t)c->gpr[4] & 15;
-    W(0x1A08 + 0x20 * u, ((uint32_t)c->gpr[5] & 0xF) | ((uint32_t)c->gpr[6] & 0xF) << 8 |
-                         ((uint32_t)c->gpr[8] & 0xF) << 12 | ((uint32_t)c->gpr[7] & 0xF) << 16 |
-                         ((uint32_t)c->gpr[10] & 0xF) << 20 | ((uint32_t)c->gpr[9] & 0xF) << 28);
+    Sampler& s = S.st.samp[(uint32_t)c->gpr[4] & 15];
+    s.wrap_s = (uint8_t)((uint32_t)c->gpr[5] & 0xF); s.wrap_t = (uint8_t)((uint32_t)c->gpr[6] & 0xF);
+    s.wrap_r = (uint8_t)((uint32_t)c->gpr[7] & 0xF); s.unsigned_remap = (uint8_t)((uint32_t)c->gpr[8] & 0xF);
+    s.zfunc = (uint8_t)((uint32_t)c->gpr[9] & 0xF); s.gamma = (uint8_t)((uint32_t)c->gpr[10] & 0xF);
+    s.address_by = S.by;
 }
 
 void enc_tex_control0(ppu_context* c)  // (ctx, index, enable, minlod, maxlod, maxaniso)
 {
-    const uint32_t u = (uint32_t)c->gpr[4] & 15;
-    W(0x1A0C + 0x20 * u, ((uint32_t)c->gpr[5] & 1) << 31 | ((uint32_t)c->gpr[6] & 0xFFF) << 19 |
-                         ((uint32_t)c->gpr[7] & 0xFFF) << 7 | ((uint32_t)c->gpr[8] & 7) << 4);
+    Sampler& s = S.st.samp[(uint32_t)c->gpr[4] & 15];
+    s.enable = (uint8_t)((uint32_t)c->gpr[5] & 1);
+    s.min_lod = (uint16_t)((uint32_t)c->gpr[6] & 0xFFF); s.max_lod = (uint16_t)((uint32_t)c->gpr[7] & 0xFFF);
+    s.max_aniso = (uint8_t)((uint32_t)c->gpr[8] & 7);
 }
 
-// The single-register calls: the method and the argument it takes.
-struct Simple { uint32_t addr, method; int shift; };
-const Simple kSimple[] = {
-    { 0x006A5DA0, 0x1D90, 0 },   // clear colour
-    { 0x006A5E30, 0x1D8C, 0 },   // clear depth/stencil value
-    { 0x006A5EC0, 0x0324, 0 },   // colour mask
-    { 0x006A5FE0, 0x1830, 0 },   // cull face
-    { 0x006A6070, 0x0A6C, 0 },   // depth func
-    { 0x006A6100, 0x0A70, 0 },   // depth mask
-    { 0x006A62B4, 0x03BC, 0 },
-    { 0x006A6344, 0x1DB4, 0 },
-    { 0x006A650C, 0x1838, 0 },   // polygon smooth
-    { 0x006A659C, 0x147C, 0 },
-    { 0x006A662C, 0x1828, 0 },   // front polygon mode
-    { 0x006A66BC, 0x182C, 0 },   // back polygon mode
-    { 0x006A6810, 0x0368, 0 },   // shade mode
-    { 0x006A68A0, 0x142C, 0 },
-    { 0x006A6DA0, 0x0304, 0 },   // alpha test enable
-    { 0x006A6E30, 0x0310, 0 },   // blend enable
-    { 0x006A6F74, 0x0374, 0 },   // logic op enable
-    { 0x006A7004, 0x183C, 0 },   // cull face enable
-    { 0x006A7124, 0x0A74, 0 },   // depth test enable
-    { 0x006A71B4, 0x0300, 0 },   // dither enable
-    { 0x006A7244, 0x0328, 0 },   // stencil test enable
-    { 0x006A7364, 0x0A68, 0 },   // polygon offset fill enable
-    { 0x006A7CF8, 0x1FC0, 0 },   // frequency divider operation
-    { 0x006A7EB0, 0x1FEC, 0 },   // fragment program gamma
-    { 0x006A8020, 0x1E98, 24 },
-    { 0x006A817C, 0x17CC, 0 },
-    { 0x006A820C, 0x17C8, 0 },
-    { 0x006A829C, 0x1800, 0 },
-};
+// The calls that take one value: what it sets. 0 when the call is not one of them.
+bool enc_simple(uint32_t addr, uint32_t a)
+{
+    State& t = S.st;
+    Raster& r = t.raster;
+    switch (addr) {
+    case 0x006A5DA0: t.clear_color = a; break;                         // cellGcmSetClearColor
+    case 0x006A5E30: t.clear_depth = a; break;                         // cellGcmSetClearDepthStencil
+    case 0x006A5EC0: r.color_mask = a; r.color_mask_by = S.by; A.cmask_unknown = 0; break;   // cellGcmSetColorMask
+    case 0x006A5FE0: r.cull_face = (uint16_t)a; break;                 // cellGcmSetCullFace
+    case 0x006A6070: r.depth_func = (uint16_t)a; break;                // cellGcmSetDepthFunc
+    case 0x006A6100: r.depth_write = (uint8_t)a; break;                // cellGcmSetDepthMask
+    case 0x006A62B4: r.line_smooth = (uint8_t)a; break;                // cellGcmSetLineSmoothEnable
+    case 0x006A6344: r.line_stipple = (uint8_t)a; break;               // cellGcmSetLineStippleEnable
+    case 0x006A650C: r.poly_smooth = (uint8_t)a; break;                // cellGcmSetPolySmoothEnable
+    case 0x006A659C: r.poly_stipple = (uint8_t)a; break;               // cellGcmSetPolygonStippleEnable
+    case 0x006A662C: r.front_poly_mode = (uint16_t)a; break;           // cellGcmSetFrontPolygonMode
+    case 0x006A66BC: r.back_poly_mode = (uint16_t)a; break;            // cellGcmSetBackPolygonMode
+    case 0x006A6810: r.shade_model = (uint16_t)a; break;               // cellGcmSetShadeMode
+    case 0x006A68A0: r.two_side_light = (uint8_t)a; break;             // cellGcmSetTwoSideLightEnable
+    case 0x006A6DA0: r.alpha_test = (uint8_t)a; break;                 // cellGcmSetAlphaTestEnable
+    case 0x006A6E30: r.blend = (uint8_t)a; break;                      // cellGcmSetBlendEnable
+    case 0x006A6F74: r.logic_op = (uint8_t)a; break;                   // cellGcmSetLogicOpEnable
+    case 0x006A7004: r.cull = (uint8_t)a; break;                       // cellGcmSetCullFaceEnable
+    case 0x006A7124: r.depth_test = (uint8_t)a; break;                 // cellGcmSetDepthTestEnable
+    case 0x006A71B4: r.dither = (uint8_t)a; break;                     // cellGcmSetDitherEnable
+    case 0x006A7244: r.stencil_test = (uint8_t)a; break;               // cellGcmSetStencilTestEnable
+    case 0x006A7364: r.poly_offset_fill = (uint8_t)a; break;           // cellGcmSetPolygonOffsetFillEnable
+    case 0x006A7CF8: t.vdata.divider_op = (uint16_t)a; break;          // cellGcmSetFrequencyDividerOperation
+    case 0x006A7EB0: t.fp.gamma = (uint8_t)a; break;                   // cellGcmSetFragmentProgramGammaEnable
+    // occlusion queries: no rendering state; R4 has to keep their effects (docs/NATIVE_R3B.md)
+    case 0x006A8020: r.render_enable_mode = (uint8_t)a; break;         // cellGcmSetRenderEnable
+    case 0x006A817C: r.zpass_count = (uint8_t)a; break;                // cellGcmSetZpassPixelCountEnable
+    case 0x006A820C: break;                                            // cellGcmSetClearReport
+    case 0x006A829C: if (S.by == kByPpfx) stats().reports++; break;    // cellGcmSetReport
+    default: return false;
+    }
+    return true;
+}
 
-// Calls PPFX makes that write no state the records use: wrappers whose work
+// Calls PPFX makes that set no state the records use: wrappers whose work
 // the calls they make are observed for, the vertex cache invalidate, and the
-// functions that write no command at all.
+// functions that write no command at all -- and the report copy
+// (0x006A1D1C, a transfer on the memory-to-memory object: a side effect for
+// R4, no rendering state).
 bool no_state(uint32_t a)
 {
     switch (a) {
@@ -547,6 +532,121 @@ bool no_state(uint32_t a)
         return true;
     default:
         return a < 0x0069DD60u;   // 0x0069CAC4..0x0069D240: no command (address and memory helpers)
+    }
+}
+
+// ---- asp's state API ---------------------------------------------------------------
+
+const uint32_t kAspColorMask = 0x006C02E8u, kAspSampler = 0x006C37A0u, kAspAppend = 0x006D0BE0u;
+const uint32_t kAspPassApply = 0x006D1764u;
+
+bool asp_fn(uint32_t a)
+{
+    switch (a) {
+    case 0x006C02E8: case 0x006C37A0: case 0x006D0BE0: case 0x006D1764: case 0x006CD014: case 0x006D0B98:
+    case 0x006C01C4: case 0x006C4628: case 0x006C49BC: case 0x006C4D1C: case 0x006C5298: case 0x006C0A70:
+    case 0x006C0E38: case 0x006C19A4:
+        return true;
+    default:
+        return false;
+    }
+}
+
+// The store's bounds (its CellGcmContextData's begin and end).
+bool asp_store(uint32_t* begin, uint32_t* end)
+{
+    if (!A.device) return false;
+    const uint32_t ctx = g32(A.device + 0x124);
+    if (!ea_ok(ctx, 16)) return false;
+    *begin = g32(ctx + 0); *end = g32(ctx + 4);
+    return ea_ok(*begin, 8) && *end > *begin;
+}
+
+// An item's slot in the store: asp's slot table (a TOC entry) gives its
+// offset; the slot is the command that sets the item, its value the word
+// after the method header.
+uint32_t asp_slot(uint32_t begin, int32_t toc_entry, uint32_t at)
+{
+    const uint32_t tbl = g32(A.toc + (uint32_t)toc_entry);
+    if (!ea_ok(tbl + at, 2)) return 0;
+    return begin + (g16(tbl + at) & ~3u);
+}
+uint32_t asp_color_mask_slot(uint32_t begin) { return asp_slot(begin, -0x2D98, 0x20); }
+uint32_t asp_address_slot(uint32_t begin, uint32_t unit) { return asp_slot(begin, -0x2D54, 4 * unit); }
+
+// The value a slot holds, when it holds the item it should (the method
+// header checks the table and the layout; a mismatch is counted).
+bool asp_read(uint32_t slot, uint32_t method, uint32_t* v)
+{
+    if (!slot || !ea_ok(slot, 8) || g32(slot) != (0x00040000u | method)) { stats().asp_store_mismatch++; return false; }
+    *v = g32(slot + 4);
+    return true;
+}
+
+// asp's stored address mode (the value cellGcmSetTextureAddress would take, packed as asp stores it)
+void asp_set_address(uint32_t unit, uint32_t w)
+{
+    Sampler& s = S.st.samp[unit];
+    s.wrap_s = w & 0xF; s.wrap_t = w >> 8 & 0xF; s.unsigned_remap = w >> 12 & 0xF;
+    s.wrap_r = w >> 16 & 0xF; s.gamma = w >> 20 & 0xF; s.zfunc = w >> 28 & 0xF;
+    s.address_by = kByAsp;
+}
+
+void asp_set_color_mask(uint32_t m)
+{
+    S.st.raster.color_mask = m; S.st.raster.color_mask_by = kByAsp; A.cmask_unknown = 0;
+}
+
+// Sampler binds that have run since the last call: the store has the units' address modes now.
+void asp_resolve()
+{
+    if (!A.pending_units) return;
+    uint32_t begin, end;
+    if (asp_store(&begin, &end))
+        for (uint32_t u = 0; u < 16; u++) {
+            uint32_t v;
+            if ((A.pending_units >> u & 1) && asp_read(asp_address_slot(begin, u), 0x1A08 + 0x20 * u, &v))
+                asp_set_address(u, v);
+        }
+    A.pending_units = 0;
+}
+
+void asp_call(uint32_t addr, ppu_context* c)
+{
+    stats().asp_calls++;
+    if (addr == kAspColorMask || addr == kAspSampler) { A.device = (uint32_t)c->gpr[3]; A.toc = (uint32_t)c->gpr[2]; }
+    switch (addr) {
+    case kAspColorMask: {   // (device, const u8 rgba[4]): asp writes R, G and A as on/off, B's byte as it is
+        const uint32_t p = (uint32_t)c->gpr[4];
+        if (!ea_ok(p, 4)) break;
+        asp_set_color_mask((g8(p) ? 0x00010000u : 0) | (g8(p + 1) ? 0x00000100u : 0) | g8(p + 2) |
+                           (g8(p + 3) ? 0x01000000u : 0));
+        break;
+    }
+    case kAspSampler: {     // (device, unit, enable): an enabled bind sets the unit's address mode from asp's sampler table
+        const uint32_t u = (uint32_t)c->gpr[4] & 0xFF;
+        if (u < 16 && ((uint32_t)c->gpr[5] & 0xFF)) A.pending_units |= 1u << u;
+        break;
+    }
+    case kAspAppend: {      // (context, source, words): a re-emission of the store's range into the command buffer
+        const uint32_t dst = (uint32_t)c->gpr[3], src = (uint32_t)c->gpr[4], words = (uint32_t)c->gpr[5];
+        uint32_t begin, end, v;
+        if (dst != S.ring_ctx || !asp_store(&begin, &end) || src < begin || src >= end) break;
+        stats().asp_restores++;
+        const uint64_t hi = (uint64_t)src + 4ull * words;
+        const uint32_t cm = asp_color_mask_slot(begin);
+        if (cm >= src && cm < hi && asp_read(cm, 0x0324, &v)) asp_set_color_mask(v);
+        for (uint32_t u = 0; u < 16; u++) {
+            const uint32_t s = asp_address_slot(begin, u);
+            if (s >= src && s < hi && asp_read(s, 0x1A08 + 0x20 * u, &v)) asp_set_address(u, v);
+        }
+        break;
+    }
+    case kAspPassApply:     // a pass's own colour mask, depth test and mask: not followed here
+        A.cmask_unknown = 1;
+        break;
+    default:                // asp's other setters: state PPFX sets itself (docs/NATIVE_R3B.md)
+        break;
     }
 }
 
@@ -620,8 +720,7 @@ void fill_common(Rec* r, uint32_t kind, ppu_context* c)
     r->kind = kind;
     r->frame = S.frame;
     r->why = kWhyNone;
-    const uint32_t n = reg_count();
-    for (uint32_t i = 0; i < n; i++) r->regs[i] = S.regs[reg_method(i) >> 2];
+    r->st = S.st;
     r->nvr = 0; r->vdata.clear(); r->nneed = 0; r->ntex = 0; r->tdata.clear();
     memset(&r->walk, 0, sizeof r->walk);
     // where its commands go: the title's lap and the context's current (or,
@@ -647,16 +746,15 @@ void publish(Rec* r)
 
 void add_target_need(Rec* r)
 {
-    const uint32_t* R = S.regs;
-    const uint32_t dma = R[0x0194 >> 2];
+    const Surface& sf = S.st.surface;
     Need& n = r->need[r->nneed++];
     memset(&n, 0, sizeof n);
-    n.location = dma == 0xFEED0001u ? 1u : 0u;
-    n.offset = R[0x0210 >> 2];
-    n.pitch = R[0x020C >> 2];
-    n.w = R[0x0200 >> 2] >> 16;
-    n.h = R[0x0204 >> 2] >> 16;
-    n.format = R[0x0208 >> 2] & 0x1F;
+    n.location = sf.color_location[0] ? 1u : 0u;   // CELL_GCM_LOCATION_MAIN : _LOCAL
+    n.offset = sf.color_offset[0];
+    n.pitch = sf.color_pitch[0];
+    n.w = sf.width;
+    n.h = sf.height;
+    n.format = sf.color_format;
     n.unit = 0xFF;
     const uint64_t key = (uint64_t)n.location << 32 | n.offset;
     n.ppfx_wrote = S.ppfx_targets.count(key) ? 1 : 0;
@@ -673,8 +771,7 @@ void build_draw(ppu_context* c)
     memcpy(r->vconst, S.vconst, sizeof r->vconst);
     memcpy(r->vconst_written, S.vconst_written, sizeof r->vconst_written);
     // the vertex program from its start slot through its last instruction
-    const uint32_t start = S.regs[0x1EA0 >> 2];
-    r->vp_start = start;
+    const uint32_t start = S.st.vp.start;
     if (S.vp_blob_gen != S.vp_gen || !S.vp_blob || start != S.vp_blob_start) {
         if (start < 544) {
             const uint32_t instrs = rsx_vp_program_size_instrs((const uint8_t*)(S.vp + start * 4), (544 - start) * 16);
@@ -684,20 +781,20 @@ void build_draw(ppu_context* c)
         S.vp_blob_start = start;
     }
     r->vp = S.vp_blob;
-    r->fp = S.fp; r->fp_off = S.fp_off; r->fp_loc = S.fp_loc;
+    r->fp = S.fp;
     if (!r->vp) r->why = kWhyNoVp;
     else if (!r->fp) r->why = kWhyNoFp;
-    // the vertex arrays' bytes this draw reads
-    const uint32_t base = S.regs[0x1738 >> 2];
+    if (A.cmask_unknown) A.unknown_draws++;
+    // the vertex inputs' bytes this draw reads
+    const uint32_t base = S.st.vdata.base_offset;
     for (uint32_t i = 0; i < 16; i++) {
-        const uint32_t f = S.regs[(0x1740 >> 2) + i], o = S.regs[(0x1680 >> 2) + i];
-        const uint32_t size = f >> 4 & 0xF, type = f & 0xF, stride = f >> 8 & 0xFF;
-        if (!size || !r->count) continue;
-        const uint32_t loc = o >> 31 ? 1u : 0u;   // RSX_LOCATION_MAIN : _LOCAL
-        const uint32_t off = (base + (o & 0x7FFFFFFFu)) & 0x0FFFFFFFu;
-        const uint32_t eb = elem_bytes(type, size);
-        const uint32_t lo = off + r->first * stride;
-        const uint32_t bytes = (r->count - 1) * stride + eb;
+        const VertexInput& in = S.st.vin[i];
+        if (!in.size || !r->count) continue;
+        const uint32_t loc = in.location;   // CELL_GCM_LOCATION_LOCAL 0, _MAIN 1
+        const uint32_t off = (base + (in.offset & 0x7FFFFFFFu)) & 0x0FFFFFFFu;
+        const uint32_t eb = elem_bytes(in.type, in.size);
+        const uint32_t lo = off + r->first * in.stride;
+        const uint32_t bytes = (r->count - 1) * in.stride + eb;
         const uint32_t ea = cellGcmResolveLocated(loc == 0, lo);
         if (!ea_ok(ea, bytes) || bytes > (1u << 20)) { r->why = kWhyVertex; continue; }
         VtxRange& v = r->vr[r->nvr++];
@@ -707,17 +804,15 @@ void build_draw(ppu_context* c)
     // what it reads and writes: its colour target, the units its program samples
     add_target_need(r);
     for (uint32_t u = 0; u < 16; u++) {
-        if (!(S.fp_units >> u & 1)) continue;
-        const uint32_t b = (0x1A00 + 0x20 * u) >> 2;
-        if (!(S.regs[b + 3] >> 31)) continue;     // control0's enable
+        if (!(S.fp_units >> u & 1) || !S.st.samp[u].enable) continue;
+        const Texture& t = S.st.tex[u];
         Need& n = r->need[r->nneed++];
         memset(&n, 0, sizeof n);
-        const uint32_t fw = S.regs[b + 1];
-        n.location = (fw & 3) == 2 ? 1u : 0u;
-        n.offset = S.regs[b];
-        n.format = fw >> 8 & 0xFF;
-        n.w = S.regs[b + 6] >> 16; n.h = S.regs[b + 6] & 0xFFFF;
-        n.pitch = S.regs[(0x1840 >> 2) + u] & 0xFFFFF;
+        n.location = t.location ? 1u : 0u;
+        n.offset = t.offset;
+        n.format = t.format;
+        n.w = t.width; n.h = t.height;
+        n.pitch = t.pitch;
         n.unit = (uint8_t)u;
         n.ppfx_wrote = S.ppfx_targets.count((uint64_t)n.location << 32 | n.offset) ? 1 : 0;
         if (!n.ppfx_wrote) {
@@ -725,14 +820,13 @@ void build_draw(ppu_context* c)
             // texture; a surface other work renders is handed over instead) --
             // its whole mip chain, as the engine reads it
             rsx_tex_level lv[RSX_MAX_TEXTURE_LEVELS];
-            const uint32_t levels = fw >> 16 & 0xFF;
-            const uint32_t nlv = (fw >> 2 & 1) ? 0 : rsx_texture_mip_chain(n.format, n.w, n.h, levels, n.pitch, lv);
+            const uint32_t nlv = t.cubemap ? 0 : rsx_texture_mip_chain(n.format, n.w, n.h, t.mipmap, n.pitch, lv);
             const uint32_t bytes = nlv ? lv[nlv - 1].offset + lv[nlv - 1].tl.face_bytes : 0;
             const uint32_t ea = cellGcmResolveLocated(n.location == 0, n.offset);
             if (bytes && bytes <= (256u << 10) && ea_ok(ea, bytes)) {
-                VtxRange& t = r->tex[r->ntex++];
-                t.location = u;   // here: the unit
-                t.offset = n.offset; t.bytes = bytes; t.at = (uint32_t)r->tdata.size();
+                VtxRange& tr = r->tex[r->ntex++];
+                tr.location = u;   // here: the unit
+                tr.offset = n.offset; tr.bytes = bytes; tr.at = (uint32_t)r->tdata.size();
                 r->tdata.insert(r->tdata.end(), vm_base + ea, vm_base + ea + bytes);
             }
         }
@@ -746,8 +840,6 @@ void build_clear(ppu_context* c)
     Rec* r = acquire();
     fill_common(r, kClear, c);
     r->clear_mask = (uint32_t)c->gpr[4];
-    W(0x1D94, r->clear_mask);
-    r->regs[reg_index(0x1D94)] = r->clear_mask;
     add_target_need(r);
     publish(r);
     stats().clears++;
@@ -792,11 +884,17 @@ void write_report()
     fprintf(f, "walker matched %llu missed %llu foreign_draws %llu foreign_clears %llu lap_delta_changes %llu\n",
             (unsigned long long)s.matched, (unsigned long long)s.missed, (unsigned long long)s.foreign_draws,
             (unsigned long long)s.foreign_clears, (unsigned long long)s.lap_delta_changes);
-    fprintf(f, "crosscheck draws %llu regs %llu consts %llu vp %llu fp %llu vtx %llu\n",
+    fprintf(f, "asp calls %llu store_restores %llu store_mismatches %llu ppfx_draws_after_untracked_pass_apply %llu\n",
+            (unsigned long long)s.asp_calls, (unsigned long long)s.asp_restores,
+            (unsigned long long)s.asp_store_mismatch, (unsigned long long)A.unknown_draws);
+    fprintf(f, "side_effects reports %llu report_copies %llu\n", (unsigned long long)s.reports,
+            (unsigned long long)s.transfers);
+    fprintf(f, "crosscheck draws %llu state %llu consts %llu vp %llu fp %llu vtx %llu\n",
             (unsigned long long)s.xc_draws, (unsigned long long)s.xc_regs, (unsigned long long)s.xc_consts,
             (unsigned long long)s.xc_vp, (unsigned long long)s.xc_fp, (unsigned long long)s.xc_vtx,
             (unsigned long long)s.xc_tex);
     fprintf(f, "handoffs %llu failed %llu\n", (unsigned long long)s.handoffs, (unsigned long long)s.handoff_fail);
+    fprintf(f, "native frames_with_records %llu\n", (unsigned long long)s.n_frames);
     fprintf(f, "native draws %llu clears %llu unsupported %llu batches %llu pipelines %llu images %llu (%.1f MB) "
                "static_textures %llu own_target_snapshots %llu images_replaced %llu\n",
             (unsigned long long)s.n_draws, (unsigned long long)s.n_clears, (unsigned long long)s.n_unsupported,
@@ -805,18 +903,28 @@ void write_report()
             (unsigned long long)s.n_retired);
     fprintf(f, "native_ms record_cpu %.1f gpu %.1f wait_walker %.1f wait_signal %.1f compare %.1f\n",
             s.cpu_record_ns / 1e6, s.gpu_ns / 1e6, s.wait_walker_us / 1e3, s.wait_signal_us / 1e3, s.compare_ns / 1e6);
+    fprintf(f, "native_gpu_ms draws %.1f copies %.1f readbacks %.1f other %.1f | barriers %llu (full %llu) "
+               "handoff_copies %llu snapshot_copies %llu\n",
+            s.gpu_draw_ns / 1e6, s.gpu_copy_ns / 1e6, s.gpu_readback_ns / 1e6, s.gpu_other_ns / 1e6,
+            (unsigned long long)s.n_barriers, (unsigned long long)s.n_barriers_full,
+            (unsigned long long)s.n_handoff_copies, (unsigned long long)s.n_snapshot_copies);
     fprintf(f, "walker_ms bridge %.1f of which crosscheck %.1f\n", s.bridge_ns / 1e6, s.xcheck_ns / 1e6);
-    fprintf(f, "compare differ_in_frames_with_inherited_state %llu differ_elsewhere %llu\n",
+    fprintf(f, "compare differ_in_frames_the_crosscheck_flagged %llu differ_elsewhere %llu\n",
             (unsigned long long)s.cmp_differ_inherited,
             (unsigned long long)(s.cmp_differ - s.cmp_differ_inherited));
-    fprintf(f, "compare records %llu equal %llu differ %llu skipped %llu finals %llu finals_equal %llu "
-               "structure_triggers %llu\n",
-            (unsigned long long)s.cmp_records, (unsigned long long)s.cmp_equal, (unsigned long long)s.cmp_differ,
-            (unsigned long long)s.cmp_skipped, (unsigned long long)s.cmp_finals, (unsigned long long)s.cmp_finals_equal,
-            (unsigned long long)s.cmp_triggers);
-    fprintf(f, "compare_slots no_buffer %llu queue_waits %llu queue_wait_ms %.1f | handoff no_slot %llu copy_failed %llu "
+    // every comparison asked for ends as exactly one of these
+    fprintf(f, "compare wanted %llu equal %llu differ %llu skipped_no_engine_copy %llu skipped_no_readback %llu "
+               "skipped_extent %llu skipped_not_drawn %llu unfinished %llu | of them after a structure change: "
+               "wanted %llu compared %llu | finals %llu finals_equal %llu structure_triggers %llu\n",
+            (unsigned long long)s.cmp_wanted, (unsigned long long)s.cmp_equal, (unsigned long long)s.cmp_differ,
+            (unsigned long long)s.cmp_skip_no_ref, (unsigned long long)s.cmp_skip_no_readback,
+            (unsigned long long)s.cmp_skip_extent, (unsigned long long)s.cmp_skip_not_drawn,
+            (unsigned long long)s.cmp_unfinished, (unsigned long long)s.cmp_change_wanted,
+            (unsigned long long)s.cmp_change_done, (unsigned long long)s.cmp_finals,
+            (unsigned long long)s.cmp_finals_equal, (unsigned long long)s.cmp_triggers);
+    fprintf(f, "compare_queue waits %llu wait_ms %.1f | handoff no_slot %llu copy_failed %llu "
                "slot_waits %llu slot_wait_ms %.1f\n",
-            (unsigned long long)s.cmp_no_slot, (unsigned long long)s.cmp_queue_waits, s.cmp_queue_wait_ns / 1e6,
+            (unsigned long long)s.cmp_queue_waits, s.cmp_queue_wait_ns / 1e6,
             (unsigned long long)s.hand_no_slot, (unsigned long long)s.hand_copy_fail,
             (unsigned long long)s.hand_slot_waits, s.hand_slot_wait_ns / 1e6);
     {
@@ -836,8 +944,6 @@ void write_report()
 
 }  // namespace
 
-bool reg_written(uint32_t m) { return m < 0x2000 && S.written[m >> 2]; }
-
 void report_add(const char* line)
 {
     std::lock_guard<std::mutex> g(s_rep_lock);
@@ -846,20 +952,21 @@ void report_add(const char* line)
 
 void start()
 {
-    init_index();
-    {   // the hardware's reset values, as the register file starts
-        rsx_dispatch* t = (rsx_dispatch*)malloc(sizeof(rsx_dispatch));
-        if (t) {
-            rsx_dispatch_init(t, nullptr);
-            memcpy(S.regs, t->regs, sizeof S.regs);
-            free(t);
-        }
-    }
+    reset_state(&S.st);
     read_env();
     const char* rp = getenv("DOTHEROES_PPFX_REPORT");
     snprintf(s_rep_path, sizeof s_rep_path, "%s", rp && *rp ? rp : "ppfx_report.txt");
     if (!mode()) return;
     atexit(write_report);
+    // runs first (atexit is last in, first out): the native renderer finishes
+    // what was walked and the comparisons in flight, so the report counts
+    // what is left as unfinished
+    if (mode() == 2) atexit([] { render_drain(5000); report_add("report: final, after the native renderer's drain"); });
+    // a test's stop ends the process without exit handlers: the same there
+    g_dotheroes_stop_hook = [] {
+        if (mode() == 2) { render_drain(5000); report_add("report: final, after the native renderer's drain (test stop)"); }
+        write_report();
+    };
     std::thread([] {
 #ifdef _WIN32
         SetThreadDescription(GetCurrentThread(), L"ppfx report");
@@ -943,8 +1050,36 @@ extern "C" void ppfx_rec_observe(uint32_t addr, ppu_context* ctx)
     // entry points: PPFX's first frames after a load draw with some of it
     // (a texture address, the colour mask) -- the GPU's state as the calls
     // left it, in their order. Only PPFX's draws and clears become records.
+    // asp's sampler binds that ran since the last call: their units' address
+    // modes are in asp's state store now
+    asp_resolve();
+    if (asp_fn(addr)) {
+        if (mode() || s_pw) asp_call(addr, ctx);
+        st.rec_ns += now_ns() - t0;
+        return;
+    }
     if (who) { st.ppfx_calls++; if (who == 2) st.nested_ppfx++; }
     else st.foreign_state_calls++;
+    S.by = who ? kByPpfx : kByGame;
+    if (who && !S.ring_ctx) S.ring_ctx = (uint32_t)ctx->gpr[3];
+    // DOTHEROES_PPFX_TRACE_LOAD=1 (a diagnostic, with RSX_FRAME_TRACE=arm:..):
+    // the frame trace starts at the walker's next flip after PPFX's first call
+    // following 30 frames without one -- an area's first frames, state-triggered
+    if (who) {
+        static int tl = -1;
+        static uint32_t last_ppfx_frame = 0;
+        if (tl < 0) { const char* e = getenv("DOTHEROES_PPFX_TRACE_LOAD"); tl = e && *e == '1'; }
+        if (tl == 1 && S.frame >= last_ppfx_frame + 30) {
+            rsx_frame_trace_arm();
+            tl = 2;
+            char line[160];
+            snprintf(line, sizeof line, "recorder: frame trace armed at frame %u (the first PPFX call after %u frames "
+                     "without one), record %llu next", S.frame, S.frame - last_ppfx_frame,
+                     (unsigned long long)queue().put.load());
+            report_add(line);
+        }
+        last_ppfx_frame = S.frame;
+    }
     if (!mode() && !s_pw) return;
     switch (addr) {
     case 0x0069F944: enc_surface((uint32_t)ctx->gpr[4]); break;
@@ -958,17 +1093,29 @@ extern "C" void ppfx_rec_observe(uint32_t addr, ppu_context* ctx)
     case 0x006A7674: enc_tex_filter(ctx); break;
     case 0x006A7744: enc_tex_address(ctx); break;
     case 0x006A7834: enc_tex_control0(ctx); break;
-    case 0x006A75D8: W(0x1A1C + 0x20 * ((uint32_t)ctx->gpr[4] & 15), (uint32_t)ctx->gpr[5]); break;
-    case 0x006A674C:   // scissor (ctx, x, y, w, h)
-        W(0x08C0, ((uint32_t)ctx->gpr[6] & 0xFFFF) << 16 | ((uint32_t)ctx->gpr[4] & 0xFFFF));
-        W(0x08C4, ((uint32_t)ctx->gpr[7] & 0xFFFF) << 16 | ((uint32_t)ctx->gpr[5] & 0xFFFF));
+    case 0x006A75D8:   // cellGcmSetTextureBorderColor (ctx, index, color)
+        S.st.samp[(uint32_t)ctx->gpr[4] & 15].border = (uint32_t)ctx->gpr[5];
         break;
-    case 0x006A56BC:   // anti-aliasing control (ctx, enable, alphaToCoverage, alphaToOne, sampleMask)
-        W(0x1D7C, ((uint32_t)ctx->gpr[7] & 0xFFFF) << 16 | ((uint32_t)ctx->gpr[6] & 1) << 8 |
-                  ((uint32_t)ctx->gpr[5] & 1) << 4 | ((uint32_t)ctx->gpr[4] & 1));
+    case 0x006A674C: {  // cellGcmSetScissor (ctx, x, y, w, h)
+        Scissor& sc = S.st.scissor;
+        sc.x = (uint16_t)ctx->gpr[4]; sc.y = (uint16_t)ctx->gpr[5]; sc.w = (uint16_t)ctx->gpr[6]; sc.h = (uint16_t)ctx->gpr[7];
         break;
-    case 0x006A90EC: W(0x1738, (uint32_t)ctx->gpr[4]); W(0x173C, (uint32_t)ctx->gpr[5]); break;
-    case 0x006A96E8: W(0x0A78, fbits(ctx->fpr[1])); W(0x0A7C, fbits(ctx->fpr[2])); break;
+    }
+    case 0x006A56BC: {  // cellGcmSetAntiAliasingControl (ctx, enable, alphaToCoverage, alphaToOne, sampleMask)
+        Raster& r = S.st.raster;
+        r.aa_enable = (uint8_t)((uint32_t)ctx->gpr[4] & 1); r.alpha_to_coverage = (uint8_t)((uint32_t)ctx->gpr[5] & 1);
+        r.alpha_to_one = (uint8_t)((uint32_t)ctx->gpr[6] & 1); r.sample_mask = (uint16_t)ctx->gpr[7];
+        break;
+    }
+    case 0x006A90EC:   // cellGcmSetVertexDataBase (ctx, baseOffset, baseIndex)
+        S.st.vdata.base_offset = (uint32_t)ctx->gpr[4]; S.st.vdata.base_index = (uint32_t)ctx->gpr[5];
+        break;
+    case 0x006A96E8:   // cellGcmSetPolygonOffset (ctx, factor, units)
+        S.st.raster.poly_offset_factor = (float)ctx->fpr[1]; S.st.raster.poly_offset_units = (float)ctx->fpr[2];
+        break;
+    case 0x006A1D1C:   // the report copy (a memory-to-memory transfer): a side effect, no rendering state
+        if (who) st.transfers++;
+        break;
     case 0x006A1E28: if (mode() && who) build_draw(ctx); break;
     case 0x006A5CF4:   // a clear: a record when it clears colour (depth and stencil are not PPFX's output)
         if (!who) break;
@@ -977,9 +1124,7 @@ extern "C" void ppfx_rec_observe(uint32_t addr, ppu_context* ctx)
         break;
     case 0x0069FC38: case 0x0069DD60: break;
     default: {
-        bool done = false;
-        for (const Simple& s : kSimple)
-            if (s.addr == addr) { W(s.method, (uint32_t)ctx->gpr[4] << s.shift); done = true; break; }
+        const bool done = enc_simple(addr, (uint32_t)ctx->gpr[4]);
         if (!done && !no_state(addr) && who) { st.unmodelled++; std::lock_guard<std::mutex> u(s_unm_lock); s_unmodelled_by[addr]++; }
         break;
     }

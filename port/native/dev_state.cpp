@@ -89,6 +89,10 @@ extern "C" void rsx_vulkan_cache_save(void);   // libs/video/rsx_vulkan_backend.
 
 extern "C" void spurs_snap_write_file(const char* path);
 extern "C" uint8_t* vm_base;
+// Work a development tool needs done before a test's stop ends the process
+// (no exit handlers run then): the native PPFX recorder's last report, after
+// its renderer has finished what it was given (ppfx_recorder.cpp).
+extern "C" { void (*g_dotheroes_stop_hook)(void) = nullptr; }
 
 namespace {
 
@@ -464,6 +468,7 @@ void stop_loop()
         if (__atomic_load_n(&g_ps3_osd_log.on, __ATOMIC_ACQUIRE) == 1) ps3_osd_log_write();
         if (__atomic_load_n(&g_ps3_ft.on, __ATOMIC_ACQUIRE) == 2) ps3_ft_dump();
         rsx_vulkan_cache_save();   // the shader cache's pipelines (a no-op without one)
+        if (g_dotheroes_stop_hook) g_dotheroes_stop_hook();
         fflush(stdout);
         fflush(stderr);
 #ifdef _WIN32
