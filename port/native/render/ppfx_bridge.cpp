@@ -631,7 +631,7 @@ void on_wrote(void*, u32 io, u32 laps, int draw, const u32* handles, const u32* 
             if (slot < 0 && bpp && prio > 0) {
                 const uint64_t t0 = bnow();
                 rsx_vk_bridge_flush();
-                while ((slot = slot_buffer((uint64_t)t.w * t.h * bpp, &buf, prio)) < 0 && bnow() - t0 < 2000000000ull)
+                while ((slot = slot_buffer((uint64_t)t.w * t.h * bpp, &buf, prio)) < 0 && bnow() - t0 < 10000000000ull)
                     std::this_thread::sleep_for(std::chrono::microseconds(100));
                 st.hand_slot_wait_ns += bnow() - t0;
             }

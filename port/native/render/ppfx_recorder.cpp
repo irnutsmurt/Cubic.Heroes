@@ -961,10 +961,10 @@ void start()
     // runs first (atexit is last in, first out): the native renderer finishes
     // what was walked and the comparisons in flight, so the report counts
     // what is left as unfinished
-    if (mode() == 2) atexit([] { render_drain(5000); report_add("report: final, after the native renderer's drain"); });
+    if (mode() == 2) atexit([] { render_drain(15000); report_add("report: final, after the native renderer's drain"); });
     // a test's stop ends the process without exit handlers: the same there
     g_dotheroes_stop_hook = [] {
-        if (mode() == 2) { render_drain(5000); report_add("report: final, after the native renderer's drain (test stop)"); }
+        if (mode() == 2) { render_drain(15000); report_add("report: final, after the native renderer's drain (test stop)"); }
         write_report();
     };
     std::thread([] {
@@ -999,6 +999,24 @@ extern "C" void ppfx_rec_observe(uint32_t addr, ppu_context* ctx)
             std::lock_guard<std::mutex> g(s_lock);
             shadow_cpu_write(dst - kLocalEa, vm_base + src, n);
             stats().local_copies++;
+        }
+        // a diagnostic: the game's copies into RSX local memory below the
+        // first PPFX intermediate (the display buffers among them) and from
+        // there, by caller -- what a snapshot does with the frame
+        const bool to_low = dst >= kLocalEa && dst - kLocalEa < 0x01AE0000u;
+        const bool from_low = src >= kLocalEa && src - kLocalEa < 0x01AE0000u;
+        if ((to_low || from_low) && n) {
+            static std::map<uint64_t, uint64_t>* seen = new std::map<uint64_t, uint64_t>;
+            static std::mutex m;
+            std::lock_guard<std::mutex> g(m);
+            const uint64_t key = (uint64_t)(uint32_t)ctx->lr << 32 | (to_low ? 1u : 0u) | (from_low ? 2u : 0u);
+            if ((*seen)[key]++ == 0 && seen->size() < 64) {
+                char line[200];
+                snprintf(line, sizeof line, "memcpy %s local memory below the targets: lr %08X dst %08X src %08X bytes %u "
+                         "frame %u at %.3f s", to_low && from_low ? "within" : to_low ? "into" : "out of",
+                         (uint32_t)ctx->lr, dst, src, n, S.frame, now_s());
+                report_add(line);
+            }
         }
         return;
     }

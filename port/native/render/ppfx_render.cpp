@@ -141,7 +141,7 @@ struct Buf { VkBuffer b = VK_NULL_HANDLE; VkDeviceMemory m = VK_NULL_HANDLE; uin
 // Host-visible memory; a buffer the CPU reads back (readback) is cached
 // memory, which the CPU reads at its own speed -- write-combined memory read
 // by the CPU costs hundreds of milliseconds a frame.
-bool make_buffer(Buf& o, VkDeviceSize n, VkBufferUsageFlags usage, bool readback = false)
+bool make_buffer(Buf& o, VkDeviceSize n, VkBufferUsageFlags usage, bool readback = false, bool device = false)
 {
     VkBufferCreateInfo ci = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
     ci.size = n; ci.usage = usage; ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
@@ -149,6 +149,12 @@ bool make_buffer(Buf& o, VkDeviceSize n, VkBufferUsageFlags usage, bool readback
     VkMemoryRequirements rq;
     F.vkGetBufferMemoryRequirements(D.device, o.b, &rq);
     uint32_t t = ~0u;
+    // the batches' uploads (vertices, constants) in video memory the CPU can
+    // write (the default; DOTHEROES_PPFX_UPLOAD=host: system memory, R3's way, 0.45 ms
+    // a frame more of GPU time), when the device has such memory
+    if (device)
+        t = mem_type(rq.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                        VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
     if (readback)
         t = mem_type(rq.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
                                         VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
@@ -157,6 +163,12 @@ bool make_buffer(Buf& o, VkDeviceSize n, VkBufferUsageFlags usage, bool readback
     VkMemoryAllocateInfo ai = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
     ai.allocationSize = rq.size; ai.memoryTypeIndex = t;
     if (t == ~0u || F.vkAllocateMemory(D.device, &ai, nullptr, &o.m) != VK_SUCCESS) return false;
+    if (device) {   // which memory the uploads got, for the report
+        static int said = 0;
+        if (!said++) report_add((s_mem.memoryTypes[t].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+                                    ? "render: uploads in device-local memory the CPU writes"
+                                    : "render: uploads in system memory (no device-local host-visible memory)");
+    }
     F.vkBindBufferMemory(D.device, o.b, o.m, 0);
     void* p = nullptr;
     F.vkMapMemory(D.device, o.m, 0, VK_WHOLE_SIZE, 0, &p);
@@ -1541,8 +1553,11 @@ bool init()
         VkQueryPoolCreateInfo qi = { VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO };
         qi.queryType = VK_QUERY_TYPE_TIMESTAMP; qi.queryCount = kQueries;
         F.vkCreateQueryPool(D.device, &qi, nullptr, &b.qp);
+        static int dev_up = -1;
+        if (dev_up < 0) { const char* e = getenv("DOTHEROES_PPFX_UPLOAD"); dev_up = !(e && !strcmp(e, "host")); }
         if (!make_buffer(b.up, kUpload, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
-                                            VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT))
+                                            VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                         false, dev_up != 0))
             return false;
     }
     // the dummy every unbound unit samples (as the engine's: 1x1 magenta)
