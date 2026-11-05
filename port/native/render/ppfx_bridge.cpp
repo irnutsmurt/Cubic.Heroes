@@ -406,6 +406,13 @@ void crosscheck(Rec* r)
                      fea ? __builtin_bswap32(*(const uint32_t*)(vm_base + fea + 8)) : 0,
                      fea ? __builtin_bswap32(*(const uint32_t*)(vm_base + fea + 12)) : 0, rsx_dsp_shader_control(E));
             report_add(line);
+            char l2[400];
+            int at = snprintf(l2, sizeof l2, "asp probe draw seq %llu streams record/engine:", (unsigned long long)r->seq);
+            for (uint32_t i = 0; i < 16 && at < (int)sizeof l2 - 40; i++)
+                if (r->st.vin[i].size || e.vin[i].size)
+                    at += snprintf(l2 + at, sizeof l2 - at, " v%u %X/%X off %08X/%08X", i, r->st.vin[i].size, e.vin[i].size,
+                                   r->st.vin[i].offset, e.vin[i].offset);
+            report_add(l2);
         }
         st.asp_xc_draws++;
         if (dr || dc) st.asp_xc_differ++;

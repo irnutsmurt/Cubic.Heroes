@@ -483,6 +483,34 @@ programs, viewport, scissor, its own surfaces (the 1024x1024 shadow pass),
 its render state and its sampler table are not described yet. Nothing of
 asp is rendered natively, and nothing of asp is bypassed.
 
+A second round (build/r4/as2, as3, with DOTHEROES_ASP_PROBE=1) found:
+
+- asp's stream objects hold `0xFFFF8000 | index` while bound and
+  0xFFFFFFFF while not; asp rebinds unbound ones too, which the first
+  encoder took for input 15. Fixed (as3): no input-15 difference left.
+- For some inputs (2, 3, and 0 or 1 in a few draws) the engine's stream
+  has a smaller size (2 or 3) at an offset 4 bytes lower than the stream
+  object's fields: asp writes those inputs from something other than the
+  object's fields as read here -- the next encoder to settle.
+- asp's draw object (vtable 0xFEA9D0): the primitive at +0x08, two counts
+  at +0x0C and +0x10, the index buffer at +0x14 (its EA and IO offset at
+  +0x18 and +0x1C), the index type at +0x24 (2 in every draw seen).
+- A vertex shader object holds at +0x18 its container and at +0x1C its
+  microcode; the container starts "CGB " (then 0, 0x00500003,
+  0x00030100, 0x00004000, ...) with the microcode right after its 0x20-byte
+  header. The fields giving the start slot, the instruction count and the
+  input mask are to be matched against what the engine runs (the probe logs
+  both).
+- The fragment-program bind's object (vtable 0xFEAB48) holds the vertex
+  shader object at +0x18 and, at +0xF0, what looks like the fragment
+  shader's: the program pair asp applies together.
+
+After as3 every asp draw still differs from the engine in some item
+(programs, render state, samplers, viewport, surfaces are not described):
+R5's encoders are the next work, one group at a time, until the asp
+cross-check is clean; then native rendering of asp's records, then the
+bypass of asp's writers.
+
 **What asp is [M, C]** (build/r3/lt3: 60 river frames, every word
 attributed; the lifted code). asp, the engine's renderer, draws about 230
 draws a river frame (13,653 in 60 frames) through one draw method

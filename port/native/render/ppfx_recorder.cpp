@@ -1109,6 +1109,20 @@ int asp_record_call(uint32_t addr, ppu_context* c)
     switch (addr) {
     case 0x006C6F88:   // the draw: a record at its return
         if (!S.ring_ctx) return 1;
+        {
+            static int probe = -1, n = 0;
+            if (probe < 0) { const char* e = getenv("DOTHEROES_ASP_PROBE"); probe = e && *e == '1'; }
+            const uint32_t self = (uint32_t)c->gpr[3];
+            if (probe && n < 48 && ea_ok(self, 0x28)) {
+                n++;
+                char line[400];
+                int at = snprintf(line, sizeof line, "asp probe draw-call seq %llu r4 %08X r5 %08X r6 %08X r7 %08X | this:",
+                                  (unsigned long long)queue().put.load(), (uint32_t)c->gpr[4], (uint32_t)c->gpr[5],
+                                  (uint32_t)c->gpr[6], (uint32_t)c->gpr[7]);
+                for (uint32_t i = 0; i < 0x28; i += 4) at += snprintf(line + at, sizeof line - at, " %08X", g32(self + i));
+                report_add(line);
+            }
+        }
         asp_draw_enter(c);
         return 3;
     case 0x006CB070: { // texture apply (this, {unit, ..}, CellGcmTexture*)
@@ -1125,6 +1139,22 @@ int asp_record_call(uint32_t addr, ppu_context* c)
         const uint32_t s = (uint32_t)c->gpr[3];
         const uint32_t ix = addr == 0x006D3190u ? (uint32_t)c->gpr[4] : s;
         if (!ea_ok(s, 0x14) || !ea_ok(ix, 4)) return 1;
+        {
+            static int probe = -1, n = 0;
+            if (probe < 0) { const char* e = getenv("DOTHEROES_ASP_PROBE"); probe = e && *e == '1'; }
+            if (probe && n < 64) {
+                n++;
+                char line[300];
+                snprintf(line, sizeof line, "asp probe stream %s seq %llu obj %08X: %08X %08X %08X %08X %08X | r4 %08X -> %08X %08X",
+                         addr == 0x006D3190u ? "bind" : "rebind", (unsigned long long)queue().put.load(), s, g32(s), g32(s + 4),
+                         g32(s + 8), g32(s + 12), g32(s + 16), (uint32_t)c->gpr[4],
+                         ea_ok((uint32_t)c->gpr[4], 8) ? g32((uint32_t)c->gpr[4]) : 0,
+                         ea_ok((uint32_t)c->gpr[4], 8) ? g32((uint32_t)c->gpr[4] + 4) : 0);
+                report_add(line);
+            }
+        }
+        // a stream object not bound to an input holds 0xFFFFFFFF (bound: 0xFFFF8000 | index)
+        if ((g32(ix) & 0x7FFFu) >= 16) return 1;
         VertexInput& v = S.st.vin[g32(ix) & 15];
         v.stride = (uint8_t)g8(s + 8); v.size = (uint8_t)(g8(s + 9) & 0xF); v.type = (uint8_t)(g8(s + 10) & 0xF);
         v.location = (uint8_t)(g8(s + 11) & 1); v.frequency = (uint16_t)g16(s + 12); v.offset = g32(s + 16);
@@ -1146,15 +1176,15 @@ int asp_record_call(uint32_t addr, ppu_context* c)
         if (!probe || n >= 48) return 1;
         n++;
         const uint32_t self = (uint32_t)c->gpr[3];
-        char line[600];
+        char line[800];
         int at = snprintf(line, sizeof line, "asp probe %s this %08X r4 %08X r5 %08X", addr == 0x006CA3D0u ? "vp-upload" : "fp-bind",
                           self, (uint32_t)c->gpr[4], (uint32_t)c->gpr[5]);
-        for (uint32_t off = 0x10; off <= 0x20 && ea_ok(self + off, 8); off += 8) {
-            const uint32_t obj = g32(self + off);
-            if (!ea_ok(obj, 8)) continue;
+        // a shader object holds at +0x18 its container (a "CGB" header) and at +0x1C its microcode
+        for (uint32_t off = 0x18; off <= 0x18 && ea_ok(self + off, 8); off += 8) {
+            const uint32_t obj = self + off;
             const uint32_t hdr = g32(obj), uc = g32(obj + 4);
             at += snprintf(line + at, sizeof line - at, " | this+%X obj %08X hdr %08X:", off, obj, hdr);
-            for (uint32_t i = 0; i < 0x20 && ea_ok(hdr, 0x20); i += 4) at += snprintf(line + at, sizeof line - at, " %08X", g32(hdr + i));
+            for (uint32_t i = 0; i < 0x30 && ea_ok(hdr, 0x30); i += 4) at += snprintf(line + at, sizeof line - at, " %08X", g32(hdr + i));
             if (ea_ok(uc, 16)) at += snprintf(line + at, sizeof line - at, " ucode %08X: %08X %08X %08X %08X", uc, g32(uc), g32(uc + 4), g32(uc + 8), g32(uc + 12));
         }
         if (addr == 0x006C99B0u && ea_ok(self + 0xF0, 4)) at += snprintf(line + at, sizeof line - at, " | this+F0 %08X", g32(self + 0xF0));
