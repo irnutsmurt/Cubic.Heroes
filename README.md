@@ -1,11 +1,15 @@
-# 3D Dot Game Heroes — native PC recompilation (PS3)
+# Cubic.Heroes — 3D Dot Game Heroes Recomp
 
-A native PC port (Windows and Linux) of the **US PlayStation 3 release of 3D
-Dot Game Heroes**, built by **statically recompiling** the game's own PPU and
-SPU machine code to C/C++ and pairing it with a native runtime: a Vulkan
-renderer for its RSX graphics work, SDL2 input and audio, and the PS3 system
-libraries it calls reimplemented on the PC. It is not an emulator: no PS3 code
-is interpreted or JIT-compiled while you play.
+**Cubic.Heroes** is a native PC port (Windows and Linux) of the **US
+PlayStation 3 release of 3D Dot Game Heroes**, built by **statically
+recompiling** the game's own PPU and SPU machine code to C/C++ and pairing it
+with a native runtime: a Vulkan renderer for its RSX graphics work, SDL2 input
+and audio, and the PS3 system libraries it calls reimplemented on the PC. It
+is not an emulator: no PS3 code is interpreted or JIT-compiled while you play.
+
+This repository was called `3D-Dot-Game-Heroes-PS3-Recomp` until November
+2026; links to the old name lead here, and setup apps downloaded before the
+rename still find new versions.
 
 > **Built 100% with AI.** All of this project's code, from the pipeline,
 > runtime changes and patches to the setup app and build tooling, was written
@@ -81,9 +85,12 @@ and `--update FOLDER` brings an install up to date.
 new version changed is redone. The app tells you when a new version of itself
 is out.
 
-The app adds the game to your Start Menu (Windows) or app menu (Linux), and to
-your desktop if you leave that ticked. **Add to Steam** puts it in your Steam
-library as a non-Steam game.
+The app adds the game to your Start Menu (Windows) or app menu (Linux) as
+**Cubic.Heroes**, and to your desktop if you leave that ticked. **Add to
+Steam** puts it in your Steam library as a non-Steam game. Installs keep
+their folder and their saves from before the rename (the default folder is
+still `3D Dot Game Heroes`), and a shortcut made under the old name is
+replaced when the app makes the new one.
 
 ### From source (developers)
 

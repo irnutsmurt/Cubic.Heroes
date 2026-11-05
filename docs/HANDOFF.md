@@ -89,7 +89,18 @@ log) and [FEASIBILITY.md](FEASIBILITY.md) (design and the explicit exceptions).
 - Commit identity for this repo is the owner's own git config; ps3recomp
   patches are committed as `dotheroes <dotheroes@localhost>` on the
   `dotheroes` branch of `build/ref/ps3recomp`.
-- Repo: public, GPL-3.0, `main` branch. A similar recompilation
+- Repo: `irnutsmurt/Cubic.Heroes` (until 2026-11-05
+  `irnutsmurt/3D-Dot-Game-Heroes-PS3-Recomp`, renamed in place: GitHub
+  redirects the old name, and `tools/self_update.py` falls back to it on a
+  404), public, GPL-3.0, `main` branch. The project is **Cubic.Heroes**,
+  subtitle "3D Dot Game Heroes Recomp" (setup app, shortcuts, the installed
+  game's window title; `tests/boot_smoke.py` finds the game's window by its
+  process, so builds with either title work). Internal names stayed, so
+  nothing existing breaks:
+  `dotheroes.exe`, `dotheroes.cfg`, `DOTHEROES_*`, `%LOCALAPPDATA%\dotheroes`,
+  the `DotHeroes-Setup` app and its release assets, the default install
+  folder `3D Dot Game Heroes`. Records written before the rename (the
+  milestone reports, MILESTONES.md) keep the old name. A similar recompilation
   project for Street Fighter Alpha 3 on the Dreamcast (SFA3) is the model for the
   setup app and release downloads.
 
