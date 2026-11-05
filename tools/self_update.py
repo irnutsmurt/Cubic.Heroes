@@ -147,7 +147,7 @@ def stage(url, version, app_dir, progress=None):
 
 
 _HELPER = r"""@echo off
-rem 3D Dot Game Heroes setup: put the downloaded version in place once the old one has exited
+rem Cubic.Heroes setup: put the downloaded version in place once the old one has exited
 :wait
 tasklist /FI "PID eq %DDGH_PID%" /NH | find "%DDGH_PID%" >nul
 if not errorlevel 1 (
