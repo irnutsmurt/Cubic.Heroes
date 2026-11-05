@@ -1,0 +1,65 @@
+# Scenario: the dot editor, for native PPFX's dual run (SCENARIO=editor_r3;
+# docs/NATIVE_R3B.md section 6). Coverage, not a measurement.
+#
+# Starts from: the kept checkpoint castle-front (a save: the title menu's
+#   cursor starts on CONTINUE -- NEW GAME, CONTINUE, EDITOR, ALBUM, INSTALL).
+# What it shows the dual run: the editor's screens -- NEW DATA, MALE, HERO,
+#   EDIT, a pose's block grid with blocks placed, then PREVIEW (the hero
+#   shown in 3D) -- each held a few seconds; nothing is saved.
+#! saves build/checkpoints/castle-front
+#! env DOTHEROES_DEV_STATE=1 DOTHEROES_DEV_KEYS=1 DIAG_FRAMES=frames.log PS3_VERBOSE=0 GCM_WRAP_LAP=1
+#! env WINDOW=1 VISIBLE=1 TOPMOST=1 GRAB_EVERY=5 PS3_OSD_FPS=2 SHOT_EVERY=0
+#! secs 300
+log TitleMovie 120
+sleep 5
+press START                   # "PRESS START BUTTON" -> main menu, on CONTINUE
+sleep 3
+press DOWN
+sleep 1
+press CROSS                   # EDITOR -> LOAD / NEW DATA
+sleep 4
+press DOWN
+sleep 1
+press CROSS                   # NEW DATA
+sleep 3
+press CROSS                   # MALE
+sleep 3
+press CROSS                   # HERO -> the editor, on EDIT
+sleep 5
+shot editor
+press CROSS                   # EDIT -> EDIT POSE
+sleep 3
+press CROSS                   # EDIT POSE -> select a pose, on Stand
+sleep 3
+press CROSS                   # Stand -> the block grid
+sleep 3
+press CROSS                   # a block at the cursor
+sleep 1
+press RIGHT
+sleep 1
+press CROSS
+sleep 1
+press UP
+sleep 1
+press CROSS
+sleep 3
+shot grid
+press CIRCLE                  # back to the poses
+sleep 2
+press CIRCLE                  # back to EDIT POSE ...
+sleep 2
+press CIRCLE                  # back to EDIT / SETTING / SAVE / PREVIEW
+sleep 2
+press DOWN
+sleep 1
+press DOWN
+sleep 1
+press DOWN
+sleep 1
+press CROSS                   # PREVIEW
+sleep 8
+hold RIGHT 2
+sleep 4
+shot preview
+press CIRCLE
+sleep 4

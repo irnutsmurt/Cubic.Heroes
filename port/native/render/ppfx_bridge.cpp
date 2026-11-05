@@ -98,6 +98,40 @@ void foreign(const uint32_t* locations, const uint32_t* offsets, uint32_t n, int
     if (draw) stats().foreign_draws++; else stats().foreign_clears++;
 }
 
+// Development (with the cross-check): what other work's draws take from
+// PPFX's outputs -- a PPFX target their fragment program samples, a PPFX
+// target they render into -- counted by address and unit
+// (docs/NATIVE_R3B.md section 5). PPFX's targets: every record's colour
+// target so far.
+std::unordered_map<uint64_t, uint8_t> s_ppfx_targets;   // (location << 32 | offset) -> 1
+std::map<std::string, uint64_t> s_foreign_reads;
+std::mutex s_fr_lock;
+
+void foreign_reads(const uint32_t* locations, const uint32_t* offsets, uint32_t n)
+{
+    const rsx_dispatch* E = rsx_draw_engine_state();
+    if (!E) return;
+    char key[96];
+    std::lock_guard<std::mutex> g(s_fr_lock);
+    for (uint32_t i = 0; i < n; i++)
+        if (s_ppfx_targets.count((uint64_t)locations[i] << 32 | offsets[i])) {
+            snprintf(key, sizeof key, "renders into PPFX target %u:%08X", locations[i], offsets[i]);
+            s_foreign_reads[key]++;
+        }
+    uint32_t loc = 0;
+    const uint32_t off = rsx_dsp_fragment_program(E, &loc);
+    const uint32_t ea = cellGcmResolveLocated(loc == RSX_LOCATION_LOCAL, off);
+    if (!ea) return;
+    const uint32_t units = rsx_fp_texture_units(vm_base + ea, 0x8000);
+    for (uint32_t u = 0; u < 16; u++) {
+        if (!(units >> u & 1)) continue;
+        rsx_dsp_texture t; rsx_dsp_get_texture(E, u, &t);
+        if (!t.enabled || !s_ppfx_targets.count((uint64_t)t.location << 32 | t.offset)) continue;
+        snprintf(key, sizeof key, "samples PPFX target %u:%08X on unit %u", t.location, t.offset, u);
+        s_foreign_reads[key]++;
+    }
+}
+
 // The constants a vertex program reads (D1 const_src, for each source whose
 // register type is a constant; a relative read may reach any of them).
 void vp_const_mask(const Blob* vp, uint32_t mask[16])
@@ -497,8 +531,13 @@ void on_draw_pre(void*, u32 io, u32 laps, const u32* handles, const u32* locatio
 {
     (void)handles;
     BTime bt;
-    if (!match(kDraw, laps, io)) { foreign(locations, offsets, n, 1); return; }
+    if (!match(kDraw, laps, io)) {
+        foreign(locations, offsets, n, 1);
+        if (B.xcheck) { const uint64_t x0 = bnow(); foreign_reads(locations, offsets, n); stats().xcheck_ns += bnow() - x0; }
+        return;
+    }
     Rec* r = queue().at(B.w);
+    if (B.xcheck) { std::lock_guard<std::mutex> g(s_fr_lock); s_ppfx_targets[(uint64_t)r->need[0].location << 32 | r->need[0].offset] = 1; }
     for (uint32_t k = 0; k < kMaxNeeds; k++) r->walk.hand[k] = -1;
     r->walk.ref = -1; r->walk.sem = -1; r->walk.ordinal = -1;
     B.copies = 0;
@@ -630,6 +669,13 @@ void bridge_install()
 void bridge_report(std::vector<std::string>& out)
 {
     char line[200];
+    {
+        std::lock_guard<std::mutex> g(s_fr_lock);
+        for (auto& kv : s_foreign_reads) {
+            snprintf(line, sizeof line, "other work's draws: %s: %llu draws", kv.first.c_str(), (unsigned long long)kv.second);
+            out.push_back(line);
+        }
+    }
     std::lock_guard<std::mutex> g(B.xr_lock);
     for (auto& kv : B.xr) {
         snprintf(line, sizeof line, "xcheck %s: %llu draws, record %08X engine %08X (the last); records %llu-%llu, "

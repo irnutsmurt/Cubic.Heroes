@@ -1,0 +1,111 @@
+# Scenario: menus over the game, for native PPFX's dual run (SCENARIO=menus_r3;
+# docs/NATIVE_R3B.md section 6). Coverage, not a measurement.
+#
+# Starts from: the kept checkpoint castle-front (CONTINUE: field area 17, in
+#   front of the castle).
+# What it shows the dual run: PPFX's chain under each screen that opens over
+#   the game -- the item menu (TRIANGLE), the system menu (START), the map
+#   (L1) -- each held open several seconds and moved about in; then the
+#   system menu's TITLE and CONTINUE (an area's first frames again), the same
+#   three screens once more, and the title's ALBUM (NEW GAME, CONTINUE,
+#   EDITOR, ALBUM, INSTALL with a save) paged through.
+# Checks: in play (life > 0, the system menu shut) before each screen, the
+#   system menu open when it should be; shots of each screen (frame dumps on:
+#   not a timing run); the run's report says what PPFX drew.
+#! saves build/checkpoints/castle-front
+#! env DOTHEROES_NATIVE_CD=1 DOTHEROES_NATIVE_SOLVER=4,5,6 GCM_WRAP_LAP=1 DOTHEROES_PRESENT_ONCE=1
+#! env DOTHEROES_DEV_STATE=1 DOTHEROES_DEV_KEYS=1 DIAG_FRAMES=frames.log PS3_VERBOSE=0
+#! env WINDOW=1 VISIBLE=1 TOPMOST=1 GRAB_EVERY=5 PS3_OSD_FPS=2 SHOT_EVERY=0
+#! secs 600
+include common.drive
+
+block screens
+  state life>0,menu==3 30
+  sleep 6                     # PPFX's steady chain first
+  press TRIANGLE              # the item menu
+  sleep 5
+  press RIGHT
+  sleep 2
+  press DOWN
+  sleep 2
+  shot item-menu
+  press TRIANGLE              # closed
+  sleep 4
+  state life>0,menu==3 10
+  attempt 3 page_dialogues
+    press START               # the system menu, on RESUME
+    sleep 2
+    state menu==1 4
+  end
+  sleep 4
+  press DOWN
+  sleep 2
+  press DOWN
+  sleep 2
+  shot system-menu
+  press UP
+  sleep 1
+  press UP
+  sleep 1
+  press CROSS                 # RESUME
+  sleep 4
+  state life>0,menu==3 10
+  press L1                    # the map
+  sleep 5
+  hold RIGHT 2
+  hold UP 2
+  shot map
+  press L1                    # closed
+  sleep 4
+  state life>0,menu==3 10
+end
+
+log TitleMovie 120
+sleep 5
+call continue
+state life>0 60
+sleep 15                      # the load (life is the save's already while it loads)
+segment menus first-visit
+call screens
+segment menus title-continue
+call to_title_and_continue
+state life>0 60
+sleep 15
+call screens
+segment menus album
+attempt 3 page_dialogues
+  press START                 # the system menu, on RESUME
+  sleep 2
+  state menu==1 4
+end
+press UP                      # TITLE (the list wraps)
+sleep 1
+press CROSS                   # "Exit game?", on NO
+sleep 2
+press UP
+sleep 1
+press CROSS                   # YES
+log TitleMovie 30
+sleep 6
+press START                   # "PRESS START BUTTON" -> main menu, on CONTINUE
+sleep 3
+press DOWN
+sleep 1
+press DOWN
+sleep 1
+press CROSS                   # ALBUM
+sleep 4
+shot album-1
+press CROSS
+sleep 3
+press RIGHT
+sleep 2
+shot album-2
+press CROSS
+sleep 3
+press CIRCLE
+sleep 3
+press CIRCLE
+sleep 3
+shot album-back
+sleep 5
