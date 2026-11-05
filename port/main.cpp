@@ -716,6 +716,14 @@ int main(int argc, char** argv)
     static const char* const vk_defaults[][2] = {
         { "PS3RECOMP_VK_GUEST_PROGRAMS", "1" },
         { "VK_DRAW_BATCH", "1" },
+        /* FIFO subchannel 1 is libgcm's memory-to-memory object (NV0039)
+         * here, not the 3D engine: PPFX's one report copy after each area
+         * load (cellGcmSetTransferReportData-like, 0x006A1D1C) issues its
+         * FORMAT method there, 0x0324, which the 3D engine took as the
+         * colour mask -- PPFX's next 46 draws then wrote green and blue
+         * only, for one frame (docs/NATIVE_R3B.md section 1). The copy
+         * itself was never carried out, before or now. */
+        { "GCM_SUBCH1_2D", "1" },
     };
     for (const auto& d : vk_defaults)
         if (!getenv(d[0])) {
