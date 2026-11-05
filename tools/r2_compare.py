@@ -24,6 +24,8 @@ tolerated. --png also writes, for each frame's final composite,
 final_sheet.png (reference | native | difference) into the frame dir.
 Every output's SHA-256 and its reference's go into the json; --prune then
 deletes each native output that was bit-exact (its hash is the record).
+Where tools/r2_prune.py has replaced a reference image by its hash
+(references.json), the output is checked against that hash.
 Game data: keep the images local.
 """
 import hashlib
@@ -125,6 +127,23 @@ def main():
     out = {"capture": os.path.basename(os.path.normpath(cap)), "variant": variant or "carry",
            "repeated": repeated, "frames": []}
     total = exact = 0
+    refs_path = os.path.join(cap, "references.json")   # tools/r2_prune.py: reference images as hashes
+    refs = json.load(open(refs_path)) if os.path.exists(refs_path) else {}
+
+    def against(ref_path, nat_path, fmt, w, h):
+        """measure(), or with the reference pruned, its recorded hash."""
+        nb = read(nat_path)
+        if os.path.exists(ref_path):
+            rb = read(ref_path)
+            r, extra = measure(rb, nb, fmt, w, h)
+            r["reference_sha256"] = sha(rb)
+        else:
+            want = refs.get(os.path.relpath(ref_path, cap).replace("\\", "/"))
+            r, extra = {"format": FMT[fmt][0], "width": w, "height": h, "bit_exact": want == sha(nb),
+                        "by_hash": True, "reference_sha256": want}, None
+        r["native_sha256"] = sha(nb)
+        return r, extra
+
     for fr in chain["frames"][fa:fb + 1]:
         fdir = os.path.join(cap, fr["dir"])
         latest = {int(r): os.path.join(cap, p) for r, p in fr["seed"].items()}
@@ -148,10 +167,8 @@ def main():
                 if ref_path is None:
                     ops.append({"op": k, "copy": [src, dst], "error": "no reference for the source"})
                     continue
-                rb, nb = read(ref_path), read(nat_path)
-                r, _ = measure(rb, nb, spec["format"], spec["width"], spec["height"])
-                r.update({"op": k, "copy": [src, dst], "reference": os.path.relpath(ref_path, cap).replace("\\", "/"),
-                          "reference_sha256": sha(rb), "native_sha256": sha(nb)})
+                r, _ = against(ref_path, nat_path, spec["format"], spec["width"], spec["height"])
+                r.update({"op": k, "copy": [src, dst], "reference": os.path.relpath(ref_path, cap).replace("\\", "/")})
                 if r["bit_exact"]:
                     prune.append(nat_path)
                 ops.append(r)
@@ -166,16 +183,14 @@ def main():
             latest[o["target"]] = ref_path
             if repeated and not os.path.exists(nat_path):
                 continue
-            rb, nb = read(ref_path), read(nat_path)
-            r, extra = measure(rb, nb, t["format"], t["width"], t["height"])
-            r.update({"op": k, "draw": o["dir"], "target": o["target"], "reference_sha256": sha(rb),
-                      "native_sha256": sha(nb)})
+            r, extra = against(ref_path, nat_path, t["format"], t["width"], t["height"])
+            r.update({"op": k, "draw": o["dir"], "target": o["target"]})
             if r["bit_exact"]:
                 prune.append(nat_path)
             ops.append(r)
             total += 1; exact += r["bit_exact"]
             last_draw = (o, ddir, t, ref_path, nat_path, extra)
-        if "--png" in args and last_draw:
+        if "--png" in args and last_draw and os.path.exists(last_draw[3]):
             o, ddir, t, ref_path, nat_path, extra = last_draw
             sheet(os.path.join(fdir, f"final_sheet{sfx}.png"), t["width"], t["height"], read(ref_path), read(nat_path),
                   t["format"], extra[3] if extra else None)

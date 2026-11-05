@@ -23,6 +23,7 @@ log's N (the two count from different starts), so a match is found by ring
 position; candidates a ring lap apart are each checked, and every one has to
 agree with the consumption capture for the check to pass.
 """
+import gzip
 import json
 import os
 import struct
@@ -33,9 +34,11 @@ PPFX = (0x007497E0, 0x007D3E38)
 
 
 def load(path):
+    """The log's calls; boundary.txt.gz (tools/r2_prune.py) when that is what is kept."""
     calls = []
     cur = None
-    for ln in open(path, errors="replace"):
+    f = open(path, errors="replace") if os.path.exists(path) else gzip.open(path + ".gz", "rt", errors="replace")
+    for ln in f:
         t = ln.split()
         if not t or t[0] == "#":
             continue

@@ -47,29 +47,32 @@ SET_BY = {0x006A5EC0: "colour mask", 0x006A6E30: "blend enable", 0x006A7124: "de
           0x006A7674: "texture filter", 0x006A7744: "texture address"}
 
 
-def state_at(calls, upto):
-    """The observed GCM state just before calls[upto]: textures per unit,
-    the fragment program bound, the patches by local offset, vp constants."""
-    tex, patch, vpc = {}, {}, {}
-    fp = None
-    view = sc = None
-    for c in calls[:upto]:
+class State:
+    """The observed GCM state, call by call: textures per unit, the fragment
+    program bound, the patches by local offset, vp constants, viewport and
+    scissor -- the last call that set each."""
+
+    def __init__(self):
+        self.tex, self.patch, self.vpc = {}, {}, {}
+        self.fp = self.view = self.sc = None
+
+    def apply(self, c):
         a = c["addr"]
         if a == VIEWPORT:
-            view = c
+            self.view = c
         elif a == SCISSOR:
-            sc = c
+            self.sc = c
         elif a == TEX:
             t = texture(c)
             if t:
-                tex[t["unit"]] = t
+                self.tex[t["unit"]] = t
         elif a == FPBIND:
-            fp = c["r"][2]
+            self.fp = c["r"][2]
         elif a == XFER:
             dst, words = c["r"][1], c["r"][3]
             src = c["blob"].get(5, (0, b""))[1][:words * 4]
             for i in range(0, len(src), 4):
-                patch[dst + i] = src[i:i + 4]
+                self.patch[dst + i] = src[i:i + 4]
         elif a == VPC:
             # cellGcmSetVertexProgramParameter(ctx, CgBinaryParameter*, values):
             # the parameter's type (+0) and register (+12); a CG_FLOAT..CG_FLOAT4
@@ -78,18 +81,17 @@ def state_at(calls, upto):
             db = c["blob"].get(5, (0, b""))[1]
             if len(pb) >= 16 and len(db) >= 16:
                 ty = be32(pb, 0)
-                vpc[be32(pb, 12)] = (db[:16], CG_COMPONENTS.get(ty), ty)
-    return tex, fp, patch, vpc, view, sc
+                self.vpc[be32(pb, 12)] = (db[:16], CG_COMPONENTS.get(ty), ty)
 
 
-def check_draw(calls, di, ddir, desc):
+def check_draw(calls, di, ddir, desc, st):
     frame = calls[di]["frame"]
     si = di
     while si >= 0 and not (calls[si]["addr"] == SURF and PPFX[0] <= calls[si]["lr"] < PPFX[1]
                            and calls[si]["frame"] == frame):
         si -= 1
     win = calls[si:di + 1]
-    tex, fp_bound, patch, vpc, view, sc = state_at(calls, di)
+    tex, fp_bound, patch, vpc, view, sc = st.tex, st.fp, st.patch, st.vpc, st.view, st.sc
     ck = {}
     s = surface(calls[si]) if si >= 0 else None
     t = desc["target"]
@@ -161,19 +163,31 @@ def main():
     chain = json.load(open(os.path.join(cap, "chain.json")))
     out = {"capture": os.path.basename(os.path.normpath(cap)), "frames": []}
     all_ok = True
-    found = []
-    for fr in chain["frames"]:
-        per_lf = {}
-        draws = [o for o in fr["ops"] if o["op"] == "draw"]
-        for o in draws:
+    # every chain draw, by the ring position its draw-arrays call has
+    jobs, by_ring = [], {}
+    for k, fr in enumerate(chain["frames"]):
+        for o in fr["ops"]:
+            if o["op"] != "draw":
+                continue
             ddir = os.path.join(cap, o["dir"])
             desc = json.load(open(os.path.join(ddir, "desc.json")))
-            get = desc["provenance"]["fifo_get"]
-            for di, c in enumerate(calls):
-                if c["addr"] == DRAW and PPFX[0] <= c["lr"] < PPFX[1] and get - (c["ring"] - IO_BASE) == 0x20:
-                    r = check_draw(calls, di, ddir, desc)
-                    r["draw"] = o["dir"]
-                    per_lf.setdefault(r["log_frame"], []).append(r)
+            by_ring.setdefault(desc["provenance"]["fifo_get"] - 0x20, []).append(len(jobs))
+            jobs.append((k, o, ddir, desc))
+    # one pass over the log: each candidate checked against the state just before it
+    per = [{} for _ in chain["frames"]]
+    st = State()
+    for di, c in enumerate(calls):
+        if c["addr"] == DRAW and PPFX[0] <= c["lr"] < PPFX[1]:
+            for j in by_ring.get(c["ring"] - IO_BASE, ()):
+                k, o, ddir, desc = jobs[j]
+                r = check_draw(calls, di, ddir, desc, st)
+                r["draw"] = o["dir"]
+                per[k].setdefault(r["log_frame"], []).append(r)
+        st.apply(c)
+    found = []
+    for k, fr in enumerate(chain["frames"]):
+        draws = [o for o in fr["ops"] if o["op"] == "draw"]
+        per_lf = per[k]
         whole = sorted(lf for lf, rs in per_lf.items() if len(rs) == len(draws) and all(r["ok"] for r in rs))
         found.append((fr, draws, per_lf, whole))
     # consecutive chain frames are consecutive log frames: the offset every frame agrees on
