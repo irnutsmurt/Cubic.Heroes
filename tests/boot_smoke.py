@@ -501,7 +501,7 @@ def main():
             if h:
                 samples += 1
                 front += u.GetForegroundWindow() == h
-                if GRAB_EVERY and now >= next_grab:
+                if GRAB_EVERY >= 0.5 and now >= next_grab:   # shorter: fast_grabs, below
                     next_grab += GRAB_EVERY
                     r, pt = wt.RECT(), wt.POINT(0, 0)
                     u.GetClientRect(h, ctypes.byref(r))
@@ -516,6 +516,32 @@ def main():
                            covered_share=round(covered_n / samples, 3) if samples else None, topmost=TOPMOST,
                            grabs=grabs)
     guarded = threading.Thread(target=guard, daemon=True) if VISIBLE and WIN else None
+
+    def fast_grabs():
+        """GRAB_EVERY under 0.5 s (VISIBLE=1): the window's client area grabbed on
+        a thread of its own at that pace, named by the run's time in
+        milliseconds (grabs/<ms>.png) -- a short effect's frames, e.g. the
+        brightness over an area transition (tools/grab_luma.py)."""
+        import ctypes, ctypes.wintypes as wt
+        from PIL import ImageGrab
+        u = ctypes.windll.user32
+        os.makedirs(os.path.join(RUN, "grabs"), exist_ok=True)
+        t0 = time.monotonic()
+        while not stop.wait(GRAB_EVERY):
+            if ending.is_set():
+                break
+            h = game_window(proc.pid)
+            if not h:
+                continue
+            r, pt = wt.RECT(), wt.POINT(0, 0)
+            u.GetClientRect(h, ctypes.byref(r))
+            u.ClientToScreen(h, ctypes.byref(pt))
+            try:
+                ImageGrab.grab(bbox=(pt.x, pt.y, pt.x + r.right, pt.y + r.bottom), all_screens=True).save(
+                    os.path.join(RUN, "grabs", "%08d.png" % int((time.monotonic() - t0) * 1000)), compress_level=1)
+            except OSError:
+                pass
+    fast = threading.Thread(target=fast_grabs, daemon=True) if VISIBLE and WIN and 0 < GRAB_EVERY < 0.5 else None
 
     def mem_sampler():
         """Windows: the game's working set and private bytes every MEM_EVERY seconds
@@ -564,6 +590,8 @@ def main():
         threading.Thread(target=mem_sampler, daemon=True).start()
     if guarded:
         guarded.start()
+    if fast:
+        fast.start()
     dr = None
     if drive:
         with open(os.path.join(RUN, "drive.log"), "wb") as log:

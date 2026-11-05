@@ -1,0 +1,25 @@
+# Scenario: out of the first dungeon onto field 15 (SCENARIO=dungeon1_exit
+# tests/boot_smoke.py) -- the dungeon-to-field transition, where the owner's
+# R4 boss sessions saw the screen bright for a moment (docs/NATIVE_R4.md
+# section 6) and the native renderer missed a display buffer once.
+#
+# Starts from: build/checkpoints/dungeon1-boss-door (CONTINUE: area 37 at
+#   the dungeon's entrance, 88.8 -130.4).
+# Route: south through the entrance into field 15, then standing there.
+# Completed when: in field 15, 8 s after arriving.
+# With VISIBLE=1 GRAB_EVERY=0.1 the screen is grabbed ten times a second
+# (grabs/): the brightness over the transition, compared between builds.
+#! saves build/checkpoints/dungeon1-boss-door
+#! env DOTHEROES_NATIVE_CD=1 DOTHEROES_NATIVE_SOLVER=4,5,6 GCM_WRAP_LAP=1 DOTHEROES_PRESENT_ONCE=1
+#! env DOTHEROES_DEV_STATE=1 DOTHEROES_DEV_KEYS=1 DIAG_FRAMES=frames.log PS3_VERBOSE=0
+#! env WINDOW=1 VISIBLE=1 TOPMOST=1 PS3_OSD_FPS=0 DUMP=0 SHOT_EVERY=0
+#! secs 150
+include common.drive
+
+log TitleMovie 120
+sleep 5
+call continue
+state area==37,life>0 90
+sleep 3
+cross DOWN 15 20
+sleep 8

@@ -399,6 +399,16 @@ on a build at a266368: the boss beaten again (area 38, 46 s), area 39,
 back out to field 15, saved there (kept: build/checkpoints/owner-boss-r4/
 02-area15, the onward session's start). One mark, 2.5 s after field 15
 loaded, in an R4 block (7 intervals over 25 ms in the R3 block before it).
+The owner: "the screen was kind of bright and then adjusted quickly". In
+both sessions field 15 came in during an R3 block (the engine's output
+shown) and the switch to R4 came 2.1-2.3 s later. The same transition run
+on both builds (tests/scenarios/dungeon1_exit.drive, the window grabbed
+every 0.1 s, tools/grab_luma.py; build/r4/exit-ref, exit-r4): the
+production build's field comes in at luma 170 (peak 182) and settles to
+108 over 2.2 s; R4's (the native renderer shown throughout) at 177 (peak
+183), settling to 108 over 2.2 s. **The game's own adaptation, the same on
+both** -- not a fault. (That exit, before the boss, had no unrendered
+record.)
 
 | Area | R4 blocks: fps, over 25 ms | R3 blocks (comparing, no waits): fps, over 25 ms |
 |---|---|---|
