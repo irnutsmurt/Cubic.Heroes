@@ -663,6 +663,7 @@ frames.log, memory.csv, stderr), as R3:
 
 | Tag | What |
 |---|---|
+| lt1 | the first state-triggered frame trace, 40 frames from the river's load: the full list of what PPFX's draws take from others (section 1) |
 | lt2 | state-triggered frame trace, 75 frames from the river's load: the report copy on subchannel 1 (section 1) |
 | lt3 | the same, 60 frames, every data word: the reverse audit (`lt3/reverse_deps.txt`, section 5) |
 | rx1, rx2 | river dual runs before and after the subchannel routing fix |
