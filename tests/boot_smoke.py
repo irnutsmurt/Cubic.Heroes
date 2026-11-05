@@ -127,8 +127,10 @@ def scenario_header():
 SECS = SECS_ARG or scenario_header() or 90
 if SECS_ARG:
     scenario_header()
-BIN = os.environ.get("BIN") or os.path.join(ROOT, "build", *(("port-win", "dotheroes.exe") if WIN
-                                                             else ("port", "dotheroes")))
+# A relative BIN (a drive script's '#! env BIN=build/...') is the project's:
+# the game runs with its run directory as the working directory.
+BIN = os.path.join(ROOT, os.environ.get("BIN") or os.path.join("build", *(("port-win", "dotheroes.exe") if WIN
+                                                                          else ("port", "dotheroes"))))
 ELF = os.path.join(ROOT, "build", "disc", "PS3_GAME", "USRDIR", "EBOOT.elf")
 INSTALLED = os.path.abspath(os.environ["INSTALLED"]) if os.environ.get("INSTALLED") else ""
 # Settings a test of an install asked for itself (the scenario's or the caller's), kept.
