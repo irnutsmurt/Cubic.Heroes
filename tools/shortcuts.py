@@ -19,8 +19,12 @@ import sys
 import time
 import zlib
 
-NAME = "3D Dot Game Heroes"
-COMMENT = "Native PC port of the PS3 version (static recompilation)"
+NAME = "Cubic.Heroes"
+COMMENT = "3D Dot Game Heroes Recomp: native PC port of the PS3 version (static recompilation)"
+# The name earlier versions gave the shortcuts and the Steam entry. Where this one
+# makes its own, it takes away an old one that starts the game (dotheroes[.exe])
+# rather than leave both; one that starts anything else (RPCS3's, say) stays.
+OLD_NAMES = ["3D Dot Game Heroes"]
 NO_WINDOW = 0x08000000 if os.name == "nt" else 0  # CREATE_NO_WINDOW
 
 
@@ -36,11 +40,16 @@ def _windows_shortcuts(exe, desktop):
     made = []
     for folder in ["Programs"] + (["Desktop"] if desktop else []):
         _powershell(
-            "$d = [Environment]::GetFolderPath($env:DDGH_FOLDER);"
-            "$s = (New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path $d ($env:DDGH_NAME + '.lnk')));"
+            "$d = [Environment]::GetFolderPath($env:DDGH_FOLDER); $w = New-Object -ComObject WScript.Shell;"
+            "$s = $w.CreateShortcut((Join-Path $d ($env:DDGH_NAME + '.lnk')));"
             "$s.TargetPath = $env:DDGH_EXE; $s.WorkingDirectory = $env:DDGH_DIR;"
-            "$s.IconLocation = $env:DDGH_EXE + ',0'; $s.Description = $env:DDGH_COMMENT; $s.Save()",
-            DDGH_FOLDER=folder, DDGH_NAME=NAME, DDGH_EXE=exe, DDGH_DIR=os.path.dirname(exe), DDGH_COMMENT=COMMENT)
+            "$s.IconLocation = $env:DDGH_EXE + ',0'; $s.Description = $env:DDGH_COMMENT; $s.Save();"
+            # an old-named shortcut in the same folder that starts the game (any install of it) goes
+            "foreach ($n in $env:DDGH_OLD.Split('|')) { $p = Join-Path $d ($n + '.lnk');"
+            " if ($n -and (Test-Path -LiteralPath $p) -and ([IO.Path]::GetFileName($w.CreateShortcut($p).TargetPath)"
+            " -eq [IO.Path]::GetFileName($env:DDGH_EXE))) { Remove-Item -LiteralPath $p } }",
+            DDGH_FOLDER=folder, DDGH_NAME=NAME, DDGH_EXE=exe, DDGH_DIR=os.path.dirname(exe), DDGH_COMMENT=COMMENT,
+            DDGH_OLD="|".join(OLD_NAMES))
         made.append(folder)
     return made
 
@@ -59,7 +68,7 @@ def _desktop_entry(exe, icon):
     def q(p):  # Exec quoting: '\' before " ` $ \, then the backslash itself doubled (desktop entry spec)
         return '"' + re.sub(r'(["`$\\])', r"\\\\\1", p) + '"'
     return ("[Desktop Entry]\nType=Application\n"
-            f"Name={NAME}\nComment={COMMENT}\n"
+            f"Name={NAME}\nComment={COMMENT}\nKeywords={';'.join(OLD_NAMES)};\n"
             f"Exec={q(exe)}\nPath={os.path.dirname(exe)}\nIcon={icon}\n"
             "Terminal=false\nCategories=Game;ArcadeGame;\n")
 
@@ -250,6 +259,12 @@ def write_shortcuts(path, shortcuts):
     os.replace(tmp, path)
 
 
+def _starts_game(exe_field, exe):
+    """A Steam entry's Exe ("quoted path") names the game's executable (any install of it)."""
+    path = str(exe_field or "").strip().strip('"')
+    return os.path.basename(path.replace("\\", "/")).lower() == os.path.basename(exe).lower()
+
+
 def steam_app_id(exe_field, name):
     """The id Steam gives a non-Steam game (also the name of its artwork files)."""
     return (zlib.crc32((exe_field + name).encode()) & 0xFFFFFFFF) | 0x80000000
@@ -290,8 +305,10 @@ def add_to_steam(exe, icon, roots=None, artwork=True):
                 continue  # a file we can't read safely: leave it alone
             if os.path.exists(path) and not os.path.exists(path + ".dotheroes-backup"):
                 shutil.copy2(path, path + ".dotheroes-backup")
-            # replace an earlier entry for this game (same name or same executable)
-            items = [s for s in items if s.get("AppName") != NAME and s.get("Exe") != exe_field]
+            # replace an earlier entry for this game (same name or same executable, or the
+            # old name on an entry that starts the game)
+            items = [s for s in items if s.get("AppName") != NAME and s.get("Exe") != exe_field
+                     and not (s.get("AppName") in OLD_NAMES and _starts_game(s.get("Exe"), exe))]
             items.append(entry)
             os.makedirs(config, exist_ok=True)
             write_shortcuts(path, {str(i): s for i, s in enumerate(items)})

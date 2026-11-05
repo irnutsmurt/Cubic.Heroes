@@ -662,7 +662,7 @@ static const char* installed_defaults(void)
     set_default_env("PS3_HDD1_ROOT", data + "/gamedata/dev_hdd1");
     set_default_env("PS3_DEV_FLASH", data + "/dev_flash");
     set_default_env("PS3RECOMP_VK_WINDOW", "1");
-    set_default_env("PS3_TITLE", "3D Dot Game Heroes");
+    set_default_env("PS3_TITLE", "Cubic.Heroes - 3D Dot Game Heroes Recomp");
     // Translated shaders and built pipelines, kept between sessions ("off": none).
     set_default_env("PS3RECOMP_SPIRV_CACHE", data + "/cache/shaders");
     return s_installed_elf.c_str();

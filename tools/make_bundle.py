@@ -213,7 +213,7 @@ def bundle(platform):
              "a Vulkan-capable graphics driver and glibc 2.31 or newer\n"
              "(Ubuntu 20.04, Debian 11, Fedora 32 or anything more recent).")
     with open(os.path.join(out, "README.txt"), "w", newline="\r\n" if platform == "windows" else "\n") as f:
-        f.write(f"3D Dot Game Heroes - native PC port setup, version {VERSION}\n\n"
+        f.write(f"Cubic.Heroes (3D Dot Game Heroes Recomp) - native PC port setup, version {VERSION}\n\n"
                 f"Run {APP}{zig_build.exe_suffix(platform)}, choose your own disc (a decrypted ISO of the US\n"
                 "release BLUS-30490, or its folder), your keys file (or an EBOOT.elf you decrypted) and an\n"
                 "install folder, press Convert, then Play.\n\n"

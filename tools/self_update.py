@@ -25,10 +25,15 @@ import subprocess
 import sys
 import tarfile
 import time
+import urllib.error
 import urllib.request
 import zipfile
 
-REPO = "irnutsmurt/3D-Dot-Game-Heroes-PS3-Recomp"
+# The repository's name, and the one it had until 2026-11-05. GitHub redirects the
+# old name (earlier versions of this app ask for it); the old one is asked for here
+# only when the new name isn't found (a 404: before the rename, or after one undone).
+REPO = "irnutsmurt/Cubic.Heroes"
+OLD_REPO = "irnutsmurt/3D-Dot-Game-Heroes-PS3-Recomp"
 ASSET = "DotHeroes-Setup-windows-x86_64.zip" if os.name == "nt" else "DotHeroes-Setup-linux-x86_64.tar.xz"
 APP = "DotHeroes-Setup.exe" if os.name == "nt" else "DotHeroes-Setup"
 
@@ -44,10 +49,25 @@ def _get(url, timeout):
     return urllib.request.urlopen(req, timeout=timeout)
 
 
+def releases_url(repo):
+    return f"https://api.github.com/repos/{repo}/releases?per_page=20"
+
+
+def _releases(timeout):
+    """The release list: from REPO, or from OLD_REPO if GitHub doesn't know REPO."""
+    try:
+        with _get(releases_url(REPO), timeout) as r:
+            return json.load(r)
+    except urllib.error.HTTPError as e:
+        if e.code != 404:
+            raise
+    with _get(releases_url(OLD_REPO), timeout) as r:
+        return json.load(r)
+
+
 def latest(timeout=6):
     """The newest release (pre-releases included) that has this platform's download."""
-    with _get(f"https://api.github.com/repos/{REPO}/releases?per_page=20", timeout) as r:
-        releases = json.load(r)
+    releases = _releases(timeout)
     best = None
     for rel in releases:
         if rel.get("draft"):
@@ -127,7 +147,7 @@ def stage(url, version, app_dir, progress=None):
 
 
 _HELPER = r"""@echo off
-rem 3D Dot Game Heroes setup: put the downloaded version in place once the old one has exited
+rem Cubic.Heroes setup: put the downloaded version in place once the old one has exited
 :wait
 tasklist /FI "PID eq %DDGH_PID%" /NH | find "%DDGH_PID%" >nul
 if not errorlevel 1 (

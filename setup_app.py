@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""3D Dot Game Heroes native PC port: the setup app.
+"""Cubic.Heroes (3D Dot Game Heroes Recomp), the native PC port: the setup app.
 
 Turns your own disc (a decrypted ISO of BLUS-30490, or its folder) into the
 native game, on your machine: pick the disc, your keys file (or an EBOOT.elf
@@ -25,7 +25,10 @@ import self_update  # noqa: E402
 import shortcuts  # noqa: E402
 from version import VERSION  # noqa: E402
 
-TITLE = "3D Dot Game Heroes — PC port setup"
+TITLE = "Cubic.Heroes — 3D Dot Game Heroes Recomp setup"
+# The install folder's default name. Kept from before the project was named
+# Cubic.Heroes: an install there is still found when nothing else remembers it.
+INSTALL_DIR = "3D Dot Game Heroes"
 NEEDED_GB = 6  # extracted disc (3.3 GB) + recompiled code + compiled objects
 UPDATE_GB = 1.5  # an update: recompiled code + objects
 FPS_CHOICES = [("60 fps (smoother; the game runs at the same speed)", "60"),
@@ -168,8 +171,8 @@ class Spinner:
 def default_install():
     if os.name == "nt":
         base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
-        return os.path.join(base, "3D Dot Game Heroes")
-    return os.path.join(os.path.expanduser("~"), "Games", "3D Dot Game Heroes")
+        return os.path.join(base, INSTALL_DIR)
+    return os.path.join(os.path.expanduser("~"), "Games", INSTALL_DIR)
 
 
 def game_settings_path(install):
@@ -213,7 +216,7 @@ def write_game_settings(install, **values):
     cur.update(values)
     try:
         with open(game_settings_path(install), "w") as f:
-            f.write("# 3D Dot Game Heroes settings (the setup app writes this; editing by hand is fine)\n")
+            f.write("# Cubic.Heroes settings (the setup app writes this; editing by hand is fine)\n")
             f.write("# DOTHEROES_FPS: 60, 30 (the original) or 0 (no limit)\n")
             f.write("# PS3RECOMP_VK_FULLSCREEN: 1 = fullscreen\n")
             f.write("# DOTHEROES_NATIVE_CD, DOTHEROES_NATIVE_SOLVER, GCM_WRAP_LAP, DOTHEROES_PRESENT_ONCE: the\n")
@@ -238,10 +241,11 @@ class App:
         apply_theme(root, self.dark.get())
         pad = {"padx": 12, "pady": 6}
 
-        ttk.Label(root, text="3D Dot Game Heroes", font=("TkDefaultFont", 16, "bold")).pack(anchor="w", padx=12,
-                                                                                           pady=(14, 0))
-        self.subtitle = ttk.Label(root, text="Builds the native PC version from your own PS3 disc. Nothing from "
-                                             "the game is included with this app.", wraplength=590, style="Muted.TLabel")
+        ttk.Label(root, text="Cubic.Heroes", font=("TkDefaultFont", 16, "bold")).pack(anchor="w", padx=12,
+                                                                                     pady=(14, 0))
+        self.subtitle = ttk.Label(root, text="3D Dot Game Heroes Recomp. Builds the native PC version from your own "
+                                             "PS3 disc. Nothing from the game is included with this app.",
+                                  wraplength=590, style="Muted.TLabel")
         self.subtitle.pack(anchor="w", **pad)
 
         self.update_bar = ttk.Frame(root)  # shown when a newer version of this app is out
@@ -394,7 +398,7 @@ class App:
     def pick_install(self):
         p = filedialog.askdirectory(title="Install the game to", initialdir=os.path.dirname(self.install.get()))
         if p:
-            name = "3D Dot Game Heroes"
+            name = INSTALL_DIR
             self.install.set(os.path.join(p, name) if os.listdir(p) and os.path.basename(p) != name else p)
             save_settings(install=os.path.abspath(self.install.get()))
 

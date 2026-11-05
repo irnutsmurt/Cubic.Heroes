@@ -147,7 +147,11 @@ GRAB_EVERY = float(os.environ.get("GRAB_EVERY", "0"))
 
 
 def game_window(pid):
-    """Windows: the game's own titled top-level window, or None."""
+    """Windows: the game's own titled top-level window, or None. Found by its
+    process, never by its title: the title differs between builds (a
+    development build's "ps3recomp", an install's "Cubic.Heroes - 3D Dot Game
+    Heroes Recomp", and "3D Dot Game Heroes" in installs and preserved builds
+    from before the rename), and every one of them must be found."""
     import ctypes, ctypes.wintypes as wt
     u, found = ctypes.WinDLL("user32"), []
 
