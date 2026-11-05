@@ -483,7 +483,10 @@ Finalize fix, wait-free creation) is measured against it.
    (tests/scenarios/owner_boss_r4.drive; NATIVE_R4.md section 6): every
    check equal, the R4 blocks at 72 fps; it found one engine surface the
    native renderer has no copy of (a dungeon-to-field transition,
-   NATIVE_R4.md section 11). A magic attack is still to be covered.
+   NATIVE_R4.md section 11). A magic attack is still to be covered: the
+   hero has none yet; tests/scenarios/owner_onward_r4.drive plays onward
+   from the first boss beaten on R4's build, its progress kept in
+   build/play-onward/gamedata across sessions.
    **Known gap, tracked:** PPFX's occlusion query result never arrives in
    the port. The report's copy into PPFX's result buffer
    (cellGcmSetTransferReportData: a memory-to-memory transfer on FIFO

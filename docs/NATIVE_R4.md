@@ -48,8 +48,9 @@ Labels as elsewhere: **[M]** measured, **[C]** from code, **[I]** inferred,
   boss room, against 8.4% in the validation blocks beside them). It found
   one record the native renderer could not render (a dungeon-to-field
   transition reads an engine surface it has no copy of: section 11).
-- **Needs the owner**: a magic attack (not known whether the session used
-  one) and the areas past the first dungeon's surroundings. The GitHub
+- **Needs the owner**: a magic attack (the hero has none yet: it waits for
+  progress, tests/scenarios/owner_onward_r4.drive) and the areas past the
+  first dungeon's surroundings (the same onward session). The GitHub
   repository is renamed (irnutsmurt/Cubic.Heroes, 2026-11-05).
 
 ## 1. The prerequisites
@@ -392,8 +393,9 @@ blocks checking every 30th handback:
   cb01e50) and it was copied by hand to
   build/checkpoints/owner-boss-r4/01-area37.
 
-**Not covered, needing the owner:** a magic attack (whether the session
-used one is not known), and the areas past the first dungeon beyond the
+**Not covered, needing the owner:** a magic attack (the hero has none
+yet: tests/scenarios/owner_onward_r4.drive plays onward from the first
+boss beaten, keeping the progress), and the areas past the first dungeon beyond the
 field right after it (the desert, the lava dungeon, the volcano, the
 forest: no saves there).
 
@@ -665,8 +667,8 @@ go native.
 
 ## 11. Gaps
 
-- **Needs the owner:** a magic attack (tests/scenarios/owner_boss_r4.drive
-  again); areas past the first dungeon's surroundings (no saves). The boss
+- **Needs the owner:** a magic attack (the hero has none yet;
+  tests/scenarios/owner_onward_r4.drive plays onward to it); areas past the first dungeon's surroundings (no saves). The boss
   is covered (section 6) and the repository renamed.
 - **An engine surface the native renderer has no copy of** (the owner's
   boss session, section 6): one PPFX draw in an R4 frame of the

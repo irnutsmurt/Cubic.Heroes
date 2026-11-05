@@ -707,10 +707,11 @@ def keep_saves(dest):
     the run's own gamedata/ (a '#! saves' session plays a fresh copy there).
     A relative dest is the project's."""
     import shutil
-    gamedata = os.environ.get("GAMEDATA") or os.path.join(run, "gamedata")
+    project = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    gamedata = os.path.join(project, os.environ["GAMEDATA"]) if os.environ.get("GAMEDATA") else os.path.join(run, "gamedata")
     root = os.path.join(gamedata, "dev_hdd0", "home", "00000001", "savedata")
     if dest:
-        dest = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), dest)
+        dest = os.path.join(project, dest)
 
     def stamps():
         out = {}
