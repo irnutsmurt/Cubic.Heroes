@@ -931,15 +931,24 @@ void on_wrote(void*, u32 io, u32 laps, int draw, const u32* handles, const u32* 
             uint64_t buf = 0;
             // the finals and the frames after a structure change may use the
             // reserves; with every buffer busy, a final or a change frame's
-            // comparison waits for one (the engine's work submitted first)
+            // comparison waits for one (the engine's work submitted first).
+            // That wait is the walker's: where effects change often (the
+            // owner's boss fight) the frames miss their pace.
+            // DOTHEROES_PPFX_COMPARE_NOWAIT=1 (play sessions): no wait, the
+            // comparison skipped (counted as without an engine copy).
+            static int nowait = -1;
+            if (nowait < 0) { const char* e = getenv("DOTHEROES_PPFX_COMPARE_NOWAIT"); nowait = e && *e == '1'; }
             const int prio = why == kCmpFinal ? 2 : why == kCmpChange ? 1 : 0;
             int slot = bpp ? slot_buffer((uint64_t)t.w * t.h * bpp, &buf, prio) : -1;
-            if (slot < 0 && bpp && prio > 0) {
+            if (slot < 0 && bpp && prio > 0 && !nowait) {
                 const uint64_t t0 = bnow();
                 rsx_vk_bridge_flush();
                 while ((slot = slot_buffer((uint64_t)t.w * t.h * bpp, &buf, prio)) < 0 && bnow() - t0 < 10000000000ull)
                     std::this_thread::sleep_for(std::chrono::microseconds(100));
-                st.hand_slot_wait_ns += bnow() - t0;
+                st.cmp_slot_waits++;
+                st.cmp_slot_wait_ns += bnow() - t0;
+            } else if (slot < 0 && bpp && prio > 0) {
+                st.cmp_slot_skips++;
             }
             if (slot >= 0 && !rsx_vk_bridge_copy_buffer(handles[0], (VkBuffer)buf, 0, t.w, t.h)) {
                 r->walk.ref = (int16_t)slot; r->walk.ref_w = t.w; r->walk.ref_h = t.h;

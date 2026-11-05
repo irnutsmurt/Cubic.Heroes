@@ -1949,18 +1949,25 @@ void slot_release_semaphore(int slot)
     if (slot >= 0 && (size_t)slot < s_ssem.size()) s_ssem[slot].busy = false;
 }
 
-// Which records' outputs are compared: every frame's final composite, every
+// Which records' outputs are compared: the final composite of every
+// DOTHEROES_PPFX_COMPARE_FINALS-th frame (default 1: every frame's), every
 // draw of every DOTHEROES_PPFX_COMPARE_EVERY-th frame (default 30), and (the
-// bridge decides) every draw after a structure change.
+// bridge decides) every draw after a structure change. A final's comparison
+// waits for a readback buffer when all are busy, which at the display's pace
+// costs frames (the owner's boss session, docs/NATIVE_R4.md section 6): play
+// sessions sample the finals instead.
 int compare_wanted(const Rec* r)
 {
-    static int every = -1, off = -1;
+    static int every = -1, finals = -1, off = -1;
     if (every < 0) { const char* e = getenv("DOTHEROES_PPFX_COMPARE_EVERY"); every = e && *e ? atoi(e) : 30; }
+    if (finals < 0) { const char* e = getenv("DOTHEROES_PPFX_COMPARE_FINALS"); finals = e && *e ? atoi(e) : 1; }
     // DOTHEROES_PPFX_COMPARE=0: no comparison at all (the native renderer's own cost)
     if (off < 0) { const char* e = getenv("DOTHEROES_PPFX_COMPARE"); off = e && *e == '0'; }
     if (off || r->kind != kDraw) return kCmpNone;
-    if (r->need[0].format == 0x08) return kCmpFinal;   // the final composite: the A8R8G8B8 display buffer
-    return every > 0 && r->frame % (uint32_t)every == 0 ? kCmpEvery : kCmpNone;
+    const bool every_frame = every > 0 && r->frame % (uint32_t)every == 0;
+    if (r->need[0].format == 0x08 && finals > 0 && r->frame % (uint32_t)finals == 0)
+        return kCmpFinal;   // the final composite: the A8R8G8B8 display buffer
+    return every_frame ? kCmpEvery : kCmpNone;
 }
 
 void render_start()

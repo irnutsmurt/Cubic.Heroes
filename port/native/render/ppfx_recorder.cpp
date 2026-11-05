@@ -1317,9 +1317,10 @@ void write_report()
             (unsigned long long)s.cmp_unfinished, (unsigned long long)s.cmp_change_wanted,
             (unsigned long long)s.cmp_change_done, (unsigned long long)s.cmp_finals,
             (unsigned long long)s.cmp_finals_equal, (unsigned long long)s.cmp_triggers);
-    fprintf(f, "compare_queue waits %llu wait_ms %.1f | handoff no_slot %llu copy_failed %llu "
-               "slot_waits %llu slot_wait_ms %.1f\n",
+    fprintf(f, "compare_queue waits %llu wait_ms %.1f | readback buffer waits %llu wait_ms %.1f skipped_for_none %llu "
+               "| handoff no_slot %llu copy_failed %llu slot_waits %llu slot_wait_ms %.1f\n",
             (unsigned long long)s.cmp_queue_waits, s.cmp_queue_wait_ns / 1e6,
+            (unsigned long long)s.cmp_slot_waits, s.cmp_slot_wait_ns / 1e6, (unsigned long long)s.cmp_slot_skips,
             (unsigned long long)s.hand_no_slot, (unsigned long long)s.hand_copy_fail,
             (unsigned long long)s.hand_slot_waits, s.hand_slot_wait_ns / 1e6);
     {

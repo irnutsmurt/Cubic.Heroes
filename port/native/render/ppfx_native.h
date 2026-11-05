@@ -330,6 +330,9 @@ struct Stats {
     std::atomic<uint64_t> cmp_change_wanted{0}, cmp_change_done{0};   // of them, structure-change frames'
     std::atomic<uint64_t> cmp_differ_inherited{0};   // differences in frames the cross-check flagged
     std::atomic<uint64_t> cmp_finals{0}, cmp_finals_equal{0}, cmp_triggers{0}, cmp_queue_waits{0}, cmp_queue_wait_ns{0};
+    // the walker waiting for a comparison's readback buffer (a final's or a
+    // change frame's), and with DOTHEROES_PPFX_COMPARE_NOWAIT=1 the ones skipped instead
+    std::atomic<uint64_t> cmp_slot_waits{0}, cmp_slot_wait_ns{0}, cmp_slot_skips{0};
     std::atomic<uint64_t> hand_no_slot{0}, hand_copy_fail{0}, hand_slot_waits{0}, hand_slot_wait_ns{0};
     std::atomic<uint64_t> wait_walker_us{0}, wait_signal_us{0}, gpu_ns{0}, cpu_record_ns{0}, compare_ns{0};
     std::atomic<uint64_t> gpu_draw_ns{0}, gpu_copy_ns{0}, gpu_readback_ns{0}, gpu_other_ns{0};   // the batches' timestamps, by section
