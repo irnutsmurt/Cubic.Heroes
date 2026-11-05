@@ -343,3 +343,42 @@ Details and numbers in HANDOFF.md ("Current status", the work log).
   43c705b, 6ac23f5, 380617e, 17c87ca, c16eb0a, and the documents.
 - **Next:** R3's scope (PPFX in the game, dual run; NATIVE_R2.md) awaits
   review.
+
+
+## Native port: R3, native PPFX in the game, dual run (2026-11-05)
+
+- **Dependencies:** R2; the owner's approval of R3's scope (2026-11-04).
+- **Removed:** nothing. The existing renderer still renders PPFX and is
+  what the player sees; R3's code is in development builds only (the entry
+  observers), off unless DOTHEROES_PPFX_NATIVE asks for it.
+- **Remains:** the whole PS3 graphics path.
+- **Evidence:** NATIVE_R3.md. PPFX's libgcm calls (46 entry points with an
+  encoder, others' calls on the same thread tracked too) made into records
+  from the calls' arguments -- no FIFO decoding, no reconstructed
+  registers; programs from the game's own uploads and PPFX's patches in
+  call order, by content; a native renderer on its own queue and thread;
+  the walker matching every record by ring lap and position. Six dual runs
+  (river, exploration, field 14 from the owner's save, the first dungeon
+  with 3, 10 and 3 returns to the title): 155,479 frames, **5,881,331
+  records matched, 0 missed**; 700,315 outputs compared byte for byte,
+  699,627 identical; the 686 that differ are all in the first-load frames,
+  where PPFX draws with state other code copied into the ring as command
+  blocks (0 differences elsewhere, attributed per frame). Every steady
+  chain variant exact. Synchronisation validation 0 errors (negative
+  control caught); a no-handoff control and a slow consumer behave as
+  designed; ten title cycles bounded in memory, threads and handles; a
+  start-up race found and fixed. No game code reads a render target (one
+  SPU job read once, a pre-existing PS3 difference).
+- **Performance:** the native side's own cost per river frame: the recorder
+  0.25 ms on the game's thread, the bridge 0.08 ms on the walker's, 0.46 ms
+  on its own thread, 1.27 ms of GPU (full barriers); with it on and
+  comparisons off the river fight holds 60 (p99 17.4 ms). Dual-run frame
+  rates are not R4's. The off switch: the production build with 0108-0109
+  matches the preserved checkpoint build (p99 17.3-17.5 ms both).
+- **Not covered:** the boss fight (owner_boss_r3.drive, to be played),
+  other areas (no saves), menus over the game, other frame pacings.
+- **Commits:** ps3recomp 0108-0109; repo 7e76892, f941695, 96d3900,
+  07d848d, baec719, and the documents.
+- **Next:** the owner's review of R3. R4 (PPFX's command-writing bodies
+  bypassed; NATIVE_R3.md section 9) needs two answers first: whether other
+  code inherits PPFX's state, and how the first-load frames should look.

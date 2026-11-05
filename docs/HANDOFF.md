@@ -445,7 +445,17 @@ Finalize fix, wait-free creation) is measured against it.
    validation clean, every pass's boundary matching; no history; tools
    tools/r2_capture.sh, r2_chain.py, r2_compare.py, r2_boundary_check.py,
    r2_inventory.sh/.py, r2_prune.py; captures in build/r1/captures (local).
-   **R3's scope (PPFX in the game, dual run) awaits the owner's review.**
+   **R3 is done** (docs/NATIVE_R3.md, 2026-11-05): PPFX's own libgcm calls
+   become native records (port/native/render/ppfx_recorder.cpp), a native
+   renderer on its own queue renders them beside the existing renderer
+   (ppfx_render.cpp), the walker matches every record (ppfx_bridge.cpp;
+   ps3recomp 0108-0109); dual runs (tools/r3_scene.sh) over river,
+   exploration, field 14 and the dungeon with 3-10 title cycles: 5.9 million
+   records matched, none missed, 699,627 of 700,315 outputs identical, the
+   rest all in first-load frames whose state other code set. Development
+   builds only, off by default. **R3's results await the owner's review;
+   R4 does not start before.** The boss on the dual-run build:
+   tests/scenarios/owner_boss_r3.drive (for the owner to play).
    The local review documents in build/ab/2026-11-04-opt-review are the
    background.
 5. Not verified: save portability (PARAM.PFD is not rewritten) and the colour

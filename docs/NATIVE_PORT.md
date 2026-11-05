@@ -140,12 +140,14 @@ the walker are new code in the game, unlike R1-R2's offline tools; R4 is
 re-estimated after R3, R5-R7 after R4. The earlier 5-9 months for the
 whole graphics replacement stays provisional until then.
 
-## 5. Milestones R1 and R2 (done); R3 proposed
+## 5. Milestones R1, R2 and R3 (done); R4 proposed
 
-R2 (the whole chain, offline) is done: results, coverage and R3's proposed
-scope -- where PPFX produces native render records from its own libgcm
-calls, without the old renderer's reconstructed state -- are in
-NATIVE_R2.md. R1's plan as approved follows.
+R2 (the whole chain, offline) is done: results, coverage and R3's scope
+are in NATIVE_R2.md. R3 (PPFX in the game, dual run) is done: PPFX
+produces native render records from its own libgcm calls, without the old
+renderer's reconstructed state, rendered beside the existing renderer and
+compared live; results, coverage, measurements and R4's proposed plan are
+in NATIVE_R3.md (awaiting review). R1's plan as approved follows.
 
 ### Milestone R1: one captured PPFX pass, rendered natively (done)
 
