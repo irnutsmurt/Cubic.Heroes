@@ -64,7 +64,7 @@ against the known SHA-256.
 ### The easy way: the setup app
 
 Download `DotHeroes-Setup` for your system from the
-[Releases](https://github.com/irnutsmurt/3D-Dot-Game-Heroes-PS3-Recomp/releases)
+[Releases](https://github.com/irnutsmurt/Cubic.Heroes/releases)
 page, unpack it and run it. Choose your disc (ISO or folder), your keys file
 (or `EBOOT.elf`) and an install folder, press **Convert**, then **Play**. It
 needs nothing else installed: the app carries its own C/C++ compiler (Zig),
