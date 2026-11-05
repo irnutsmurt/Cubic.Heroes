@@ -1,0 +1,136 @@
+From 9612d19416229faf5e6f6a5a89b593ac92c5f498 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Wed, 4 Nov 2026 23:51:55 -0800
+Subject: [PATCH] R3's bridge: one signal per command buffer, by ordinal; the
+ device only once its queues exist
+
+- rsx_vk_bridge_signal attaches a semaphore to the command buffer being
+  recorded only when none is attached yet, and returns the signal's ordinal;
+  every copy recorded into that buffer is covered by the same signal.
+  rsx_vk_bridge_submitted says whether an ordinal's submission has been
+  made (a queue may wait on its semaphore only then). Asking for one signal
+  per copy and flushing the engine's batch for it ran out of semaphores and
+  cost the walker 12% of its time.
+- rsx_vk_bridge_device reports the device only after its queues have been
+  fetched: asked as soon as the device existed, one native start in several
+  found no queue yet and submitted to a null one.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libs/video/rsx_vulkan_backend.c | 37 ++++++++++++++++++++++++++-------
+ libs/video/rsx_vulkan_bridge.h  | 15 ++++++++++---
+ 2 files changed, 42 insertions(+), 10 deletions(-)
+
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index 24c5644..1c786ea 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -660,8 +660,11 @@ static struct {
+     VkQueue queue2;                         /* the native renderer's own */
+     VkSemaphore sem[VK_BR_SIGNALS];         /* to signal with ... */
+     VkCommandBuffer cmd[VK_BR_SIGNALS];     /* ... the submission of this command buffer */
++    long long ord[VK_BR_SIGNALS];           /* its place in the order signals were asked for */
+     u32 n;
++    long long attached;                     /* signals asked for so far */
+     unsigned long long signalled, lost;
++    int ready;                              /* the device and its queues are there (atomic) */
+ } s_br;
+ 
+ static VkResult vk_queue_submit(const VkSubmitInfo* si, VkFence fence)
+@@ -679,7 +682,7 @@ static VkResult vk_queue_submit(const VkSubmitInfo* si, VkFence fence)
+             int carried = 0;
+             for (u32 c = 0; c < si->commandBufferCount; c++) carried |= si->pCommandBuffers[c] == s_br.cmd[k];
+             if (carried) sig[ns++] = s_br.sem[k];
+-            else { s_br.sem[keep] = s_br.sem[k]; s_br.cmd[keep] = s_br.cmd[k]; keep++; }
++            else { s_br.sem[keep] = s_br.sem[k]; s_br.cmd[keep] = s_br.cmd[k]; s_br.ord[keep] = s_br.ord[k]; keep++; }
+         }
+         s_br.signalled += s_br.n - keep;
+         s_br.n = keep;
+@@ -5684,6 +5687,10 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+         vk_window_drop("the driver has no swapchain functions");
+     pvkGetDeviceQueue(s_vk.device, s_vk.queue_family, 0, &s_vk.queue);
+     if (nq == 2) pvkGetDeviceQueue(s_vk.device, s_vk.queue_family, 1, &s_br.queue2);
++    /* Only now may a native renderer have the device: its queues are known.
++     * (Asking as soon as the device existed, one run in several found no
++     * queue yet and submitted to a null one.) */
++    __atomic_store_n(&s_br.ready, 1, __ATOMIC_RELEASE);
+ 
+     VkCommandPoolCreateInfo pci = { .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+                                     .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+@@ -5888,7 +5895,7 @@ int rsx_vulkan_backend_depth_bounds(void)
+ 
+ int rsx_vk_bridge_device(rsx_vk_bridge_dev* out)
+ {
+-    if (!out || !s_vk.device || !s_br.want) return -1;
++    if (!out || !__atomic_load_n(&s_br.ready, __ATOMIC_ACQUIRE) || !s_br.want) return -1;
+     memset(out, 0, sizeof *out);
+     out->instance = s_vk.instance;
+     out->phys = s_vk.phys;
+@@ -5959,16 +5966,32 @@ int rsx_vk_bridge_copy_buffer(u32 handle, VkBuffer dst, VkDeviceSize off, u32 w,
+     return 0;
+ }
+ 
+-int rsx_vk_bridge_signal(VkSemaphore sem)
++long long rsx_vk_bridge_signal(VkSemaphore sem, int* used)
+ {
+-    if (!sem) return -1;
++    if (used) *used = 0;
+     vk_mutex_lock(&s_vk.queue_mu);   /* vk_queue_submit takes signals off the list under it */
+-    if (s_br.n == VK_BR_SIGNALS) { s_br.lost++; vk_mutex_unlock(&s_vk.queue_mu); return -1; }
++    /* A signal already waits for the command buffer being recorded: its
++     * submission carries what was recorded since, so it covers this too. */
++    for (u32 k = 0; k < s_br.n; k++)
++        if (s_br.cmd[k] == s_vk.cmd) { const long long o = s_br.ord[k]; vk_mutex_unlock(&s_vk.queue_mu); return o; }
++    if (!sem) { vk_mutex_unlock(&s_vk.queue_mu); return -1; }
++    if (s_br.n == VK_BR_SIGNALS) { s_br.lost++; vk_mutex_unlock(&s_vk.queue_mu); return -2; }
+     /* the open batch's command buffer; a synchronous copy was submitted
+      * already, so its signal goes with the next one */
+-    s_br.sem[s_br.n] = sem; s_br.cmd[s_br.n] = s_vk.cmd; s_br.n++;
++    const long long o = s_br.attached++;
++    s_br.sem[s_br.n] = sem; s_br.cmd[s_br.n] = s_vk.cmd; s_br.ord[s_br.n] = o; s_br.n++;
++    if (used) *used = 1;
+     vk_mutex_unlock(&s_vk.queue_mu);
+-    return 0;
++    return o;
++}
++
++int rsx_vk_bridge_submitted(long long ordinal)
++{
++    vk_mutex_lock(&s_vk.queue_mu);
++    int pending = ordinal >= s_br.attached;
++    for (u32 k = 0; k < s_br.n && !pending; k++) pending = s_br.ord[k] == ordinal;
++    vk_mutex_unlock(&s_vk.queue_mu);
++    return !pending;
+ }
+ 
+ void rsx_vk_bridge_flush(void)
+diff --git a/libs/video/rsx_vulkan_bridge.h b/libs/video/rsx_vulkan_bridge.h
+index 41b5e0e..9c1a91c 100644
+--- a/libs/video/rsx_vulkan_bridge.h
++++ b/libs/video/rsx_vulkan_bridge.h
+@@ -50,10 +50,19 @@ void rsx_vk_bridge_queue_unlock(void);
+ int rsx_vk_bridge_copy_image(u32 handle, VkImage dst, u32 w, u32 h);
+ int rsx_vk_bridge_copy_buffer(u32 handle, VkBuffer dst, VkDeviceSize off, u32 w, u32 h);
+ 
+-/* Signal `sem` (binary) with the submission of what is recorded so far. */
+-int rsx_vk_bridge_signal(VkSemaphore sem);
++/* Have the submission that carries what is recorded so far signal a binary
++ * semaphore: the one already attached to the command buffer being recorded,
++ * if there is one, else `sem` (NULL: only ask). Returns the signal's ordinal
++ * -- its place in the order signals were asked for -- or -1 (none attached
++ * and no `sem`), -2 (no room: a bug); *used says whether `sem` was taken. */
++long long rsx_vk_bridge_signal(VkSemaphore sem, int* used);
+ 
+-/* Submit the open batch now, its signals with it. */
++/* Whether the signal with this ordinal has been submitted: a queue may wait
++ * on its semaphore only then. */
++int rsx_vk_bridge_submitted(long long ordinal);
++
++/* Submit the open batch now, its signals with it (not needed: the backend
++ * submits at its own points). */
+ void rsx_vk_bridge_flush(void);
+ 
+ /* Semaphores signalled so far, and how many did not fit (dropped: a bug). */
+-- 
+2.56.0.windows.3
+
