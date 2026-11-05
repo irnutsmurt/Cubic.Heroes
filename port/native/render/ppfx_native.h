@@ -334,6 +334,8 @@ struct Stats {
     // change frame's), and with DOTHEROES_PPFX_COMPARE_NOWAIT=1 the ones skipped instead
     std::atomic<uint64_t> cmp_slot_waits{0}, cmp_slot_wait_ns{0}, cmp_slot_skips{0};
     std::atomic<uint64_t> hand_no_slot{0}, hand_copy_fail{0}, hand_slot_waits{0}, hand_slot_wait_ns{0};
+    // textures taken from guest memory by the walker, at the record's place in the stream
+    std::atomic<uint64_t> guest_tex{0}, guest_tex_bytes{0}, guest_tex_fail{0};
     std::atomic<uint64_t> wait_walker_us{0}, wait_signal_us{0}, gpu_ns{0}, cpu_record_ns{0}, compare_ns{0};
     std::atomic<uint64_t> gpu_draw_ns{0}, gpu_copy_ns{0}, gpu_readback_ns{0}, gpu_other_ns{0};   // the batches' timestamps, by section
     std::atomic<uint64_t> bridge_ns{0}, xcheck_ns{0};   // the walker's thread: the bridge's callbacks, the cross-check in them

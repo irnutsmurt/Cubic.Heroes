@@ -321,6 +321,10 @@ struct Asp {
 std::mutex s_lock;
 std::unique_lock<std::mutex>* s_held;   // the producer's hold on it, during a call
 std::mutex s_unm_lock;                   // s_unmodelled_by, which the report reads
+// every address a record drew or cleared into (the report: what the native
+// renderer holds an image of, against what PPFX's draws sample)
+struct TargetSeen { uint64_t records; uint32_t w, h, format, last_frame; };
+std::map<uint64_t, TargetSeen> s_targets_seen;
 std::unordered_map<uint64_t, BlobP> s_blobs;   // programs by content
 
 BlobP blob_of(const uint8_t* p, size_t n)
@@ -956,6 +960,9 @@ void add_target_need(Rec* r)
     const uint64_t key = (uint64_t)n.location << 32 | n.offset;
     n.ppfx_wrote = S.ppfx_targets.count(key) ? 1 : 0;
     S.ppfx_targets.insert(key);
+    std::lock_guard<std::mutex> u(s_unm_lock);
+    TargetSeen& t = s_targets_seen[key];
+    t.records++; t.w = n.w; t.h = n.h; t.format = n.format; t.last_frame = S.frame;
 }
 
 void build_draw(ppu_context* c)
@@ -1020,7 +1027,11 @@ void build_draw(ppu_context* c)
             const uint32_t nlv = t.cubemap ? 0 : rsx_texture_mip_chain(n.format, n.w, n.h, t.mipmap, n.pitch, lv);
             const uint32_t bytes = nlv ? lv[nlv - 1].offset + lv[nlv - 1].tl.face_bytes : 0;
             const uint32_t ea = cellGcmResolveLocated(n.location == 0, n.offset);
-            if (bytes && bytes <= (256u << 10) && ea_ok(ea, bytes)) {
+            // DOTHEROES_PPFX_GUEST_AT_WALK=1 (a check of the walker's own
+            // snapshot, ppfx_bridge.cpp guest_texture): none taken here
+            static int at_walk = -1;
+            if (at_walk < 0) { const char* e = getenv("DOTHEROES_PPFX_GUEST_AT_WALK"); at_walk = e && *e == '1'; }
+            if (!at_walk && bytes && bytes <= (256u << 10) && ea_ok(ea, bytes)) {
                 VtxRange& tr = r->tex[r->ntex++];
                 tr.location = u;   // here: the unit
                 tr.offset = n.offset; tr.bytes = bytes; tr.at = (uint32_t)r->tdata.size();
@@ -1244,7 +1255,9 @@ void write_report()
             (unsigned long long)s.xc_draws, (unsigned long long)s.xc_regs, (unsigned long long)s.xc_consts,
             (unsigned long long)s.xc_vp, (unsigned long long)s.xc_fp, (unsigned long long)s.xc_vtx,
             (unsigned long long)s.xc_tex);
-    fprintf(f, "handoffs %llu failed %llu\n", (unsigned long long)s.handoffs, (unsigned long long)s.handoff_fail);
+    fprintf(f, "handoffs %llu failed %llu | textures from guest memory at the walker %llu (%.1f MB) failed %llu\n",
+            (unsigned long long)s.handoffs, (unsigned long long)s.handoff_fail, (unsigned long long)s.guest_tex,
+            s.guest_tex_bytes / 1048576.0, (unsigned long long)s.guest_tex_fail);
     if (bypass_mode()) {
         fprintf(f, "r4 mode %d frames %llu records %llu calls_bypassed %llu calls_kept %llu exit_mismatch %llu | "
                    "markers written %llu wraps %llu failed %llu met %llu unknown %llu | r3_matched_in_r4_frames %llu\n",
@@ -1326,6 +1339,12 @@ void write_report()
     {
         std::lock_guard<std::mutex> g(s_unm_lock);
         for (auto& kv : s_unmodelled_by) fprintf(f, "unmodelled %08X %llu\n", kv.first, (unsigned long long)kv.second);
+        int n = 0;
+        for (auto& kv : s_targets_seen)
+            if (n++ < 64)
+                fprintf(f, "target %u:%08X %ux%u format %02X records %llu last_frame %u\n", (uint32_t)(kv.first >> 32),
+                        (uint32_t)kv.first, kv.second.w, kv.second.h, kv.second.format,
+                        (unsigned long long)kv.second.records, kv.second.last_frame);
     }
     {
         std::vector<std::string> xs;

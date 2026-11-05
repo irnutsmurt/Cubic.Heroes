@@ -67,6 +67,7 @@
 #include "rsx_draw_engine.h"
 #include "rsx_fp_decompiler.h"
 #include "rsx_vp_decompiler.h"
+#include "rsx_texture_layout.h"
 
 extern "C" uint8_t* vm_base;
 extern "C" uint32_t cellGcmResolveLocated(int local, uint32_t offset);
@@ -562,6 +563,31 @@ int match(uint32_t kind, uint32_t laps, uint32_t io)
 // native side does not already hold that content: other work wrote the
 // address since PPFX last did (dirty), or no record has written it (the
 // first use: the engine's surface as it was created, or other work's).
+// A texture unit's bytes as guest memory holds them now, at the record's
+// place in the stream, for a texture neither the native renderer nor the
+// engine holds an image of: what the engine itself would read there -- bytes
+// the game wrote, or a 2D transfer the walker has just run (the engine's
+// transfers read a surface back into guest memory: the post-boss warp's
+// capture of the last displayed frame, 0:05530000, docs/NATIVE_R4.md section
+// 11). The recorder's own snapshot at the call (small textures) is kept when
+// there is one.
+void guest_texture(Rec* r, const Need& n)
+{
+    for (uint32_t k = 0; k < r->ntex; k++) if (r->tex[k].location == n.unit) return;   // the recorder's
+    const Texture& t = r->st.tex[n.unit];
+    if (t.cubemap || r->ntex >= 16) return;
+    rsx_tex_level lv[RSX_MAX_TEXTURE_LEVELS];
+    const uint32_t nlv = rsx_texture_mip_chain(t.format, t.width, t.height, t.mipmap, t.pitch, lv);
+    const uint32_t bytes = nlv ? lv[nlv - 1].offset + lv[nlv - 1].tl.face_bytes : 0;
+    const uint32_t ea = cellGcmResolveLocated(n.location == 0, n.offset);
+    if (!bytes || bytes > (16u << 20) || ea < 0x10000u || (uint64_t)ea + bytes > 0xE0000000ull) { stats().guest_tex_fail++; return; }
+    VtxRange& tr = r->tex[r->ntex++];
+    tr.location = n.unit; tr.offset = n.offset; tr.bytes = bytes; tr.at = (uint32_t)r->tdata.size();
+    r->tdata.insert(r->tdata.end(), vm_base + ea, vm_base + ea + bytes);
+    stats().guest_tex++;
+    stats().guest_tex_bytes += bytes;
+}
+
 void handoffs(Rec* r)
 {
     Stats& st = stats();
@@ -570,7 +596,10 @@ void handoffs(Rec* r)
         const uint64_t key = (uint64_t)n.location << 32 | n.offset;
         u32 w = 0, h = 0, fmt = 0;
         const u32 handle = rsx_draw_engine_find_surface(n.location, n.offset, &w, &h, &fmt);
-        if (!handle) continue;   // not a surface the engine has: a static texture, or nothing yet
+        if (!handle) {   // not a surface the engine has: a texture in guest memory, or nothing yet
+            if (n.unit != 0xFF && !n.ppfx_wrote) guest_texture(r, n);
+            continue;
+        }
         if (n.ppfx_wrote && !B.dirty.count(key)) continue;
         uint32_t bpp = 0;
         const uint32_t vf = be_vkformat_pub(fmt, &bpp);
