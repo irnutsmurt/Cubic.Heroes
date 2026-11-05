@@ -73,11 +73,12 @@ def main():
                         p1.append(sub[i - 2]["dur"])
                     break
         if not spans:
-            print(f"{path}: the chain's passes 3-48 not found")
+            print(f"{path}: the chain's passes 3-{len(tail) + 2} not found")
             continue
         med = statistics.median
-        print(f"{path}: {len(spans)} submissions with passes 3-48")
-        print(f"  span (pass 3 start to pass 48 end): median {med(spans):.1f} us, range {min(spans):.1f}-{max(spans):.1f}")
+        last = len(tail) + 2
+        print(f"{path}: {len(spans)} submissions with passes 3-{last}")
+        print(f"  span (pass 3 start to pass {last} end): median {med(spans):.1f} us, range {min(spans):.1f}-{max(spans):.1f}")
         print(f"  in passes: median {med(ins):.1f} us; between: median {med([s - i for s, i in zip(spans, ins)]):.1f} us")
         if p1:
             print(f"  pass 1: {len(p1)} submissions, median {med(p1):.1f} us, range {min(p1):.1f}-{max(p1):.1f}")

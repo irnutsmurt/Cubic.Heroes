@@ -1,0 +1,31 @@
+From 7b72c36851eeaf6b2410637ee80e67739692b8ad Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Wed, 4 Nov 2026 17:56:08 -0800
+Subject: [PATCH] R2's chain inventory lists up to 1024 draws a frame: every
+ draw of a frame, with the full program range
+
+A frame of asp's scene and PPFX's chain together exceeds the 256 the list
+kept, so an inventory over every draw (finding where a scene keeps PPFX's
+programs) lost the frame's last draws -- PPFX's.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libs/video/rsx_draw_engine.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/libs/video/rsx_draw_engine.c b/libs/video/rsx_draw_engine.c
+index 329214e..16649d6 100644
+--- a/libs/video/rsx_draw_engine.c
++++ b/libs/video/rsx_draw_engine.c
+@@ -2189,7 +2189,7 @@ static double eng_r1_seconds(void)
+  * <draws>", then a line per draw); a frame whose sequence differs from the
+  * frame before adds "F <frame> <seconds> <signature> <draws>". Which chain
+  * structures a run shows, and when, at the cost of a hash per draw. */
+-enum { ENG_INV_SEEN = 512, ENG_INV_DRAWS = 256 };
++enum { ENG_INV_SEEN = 512, ENG_INV_DRAWS = 1024 };   /* a frame's draws listed: every draw with the full range */
+ static struct {
+     FILE* f;
+     u32 lo, hi, frame, n;
+-- 
+2.56.0.windows.3
+

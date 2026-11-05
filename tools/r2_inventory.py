@@ -1,6 +1,6 @@
 """R2: the PPFX chain structures a run showed, from its inventory.
 
-r2_inventory.py <inventory.txt> [--programs-of <capture dir>]
+r2_inventory.py <inventory.txt> [--programs-of <capture dir>] [--range <lo>-<hi>] [--pass1 <fp>/<rt>]
 
 inventory.txt is what DOTHEROES_R2_INVENTORY writes (rsx_draw_engine.c):
 for each distinct sequence of PPFX draws in an engine frame -- (fragment
@@ -14,7 +14,13 @@ target), each chain keyed by its (program, target size) sequence. Prints,
 per structure: how many chains and when (seconds since the process
 started), its draws and distinct programs, and how it differs from the most
 common structure (or, with --programs-of, from the captured chain) --
-programs at the same position, extra or missing passes. Writes nothing.
+programs at the same position, extra or missing passes. --range keeps only
+draws whose fragment program lies in [lo, hi) (an inventory taken over
+every draw); --pass1 names the draw that begins a chain (fragment program
+and colour target, hex; 018F0000/01AE0000 by default). With --programs
+alone, prints the fragment programs of draws into small targets (at most
+640x360) by how often each was used: where a scene keeps PPFX's programs.
+Writes nothing.
 """
 import json
 import os
@@ -42,7 +48,7 @@ def parse(path):
     return seqs, runs
 
 
-def chains(seqs, runs):
+def chains(seqs, runs, lo=0, hi=1 << 32, pass1=PASS1):
     """(start seconds, [(fp, rt, w, h), ...]) for each chain of the run."""
     out, cur, t_cur = [], None, 0.0
     for k, (fr, t, sig) in enumerate(runs):
@@ -51,7 +57,9 @@ def chains(seqs, runs):
         for i in range(n):
             ts = t + (nxt[1] - t) * i / n
             for d in seqs.get(sig, []):
-                if (d[0], d[1]) == PASS1:
+                if not lo <= d[0] < hi:
+                    continue
+                if (d[0], d[1]) == pass1:
                     if cur is not None:
                         out.append((t_cur, cur))
                     cur, t_cur = [], ts
@@ -97,9 +105,31 @@ def main():
                 d = json.load(open(os.path.join(cap, o["dir"], "desc.json")))
                 ref.append((d["provenance"]["fp_offset"], d["target"]["width"], d["target"]["height"]))
         ref = tuple(ref)
+    lo, hi, pass1, survey = 0, 1 << 32, PASS1, False
+    if "--range" in args:
+        i = args.index("--range")
+        lo, hi = (int(x, 16) for x in args[i + 1].split("-"))
+        del args[i:i + 2]
+    if "--pass1" in args:
+        i = args.index("--pass1")
+        pass1 = tuple(int(x, 16) for x in args[i + 1].split("/"))
+        del args[i:i + 2]
+    if "--programs" in args:
+        survey = True
+        args.remove("--programs")
     for path in args:
         seqs, runs = parse(path)
-        cs = chains(seqs, runs)
+        if survey:
+            use = {}
+            for q in seqs.values():
+                for d in q:
+                    if d[2] * d[3] <= 640 * 360:
+                        use.setdefault(d[0], set()).add(f"{d[2]}x{d[3]}")
+            print(f"{path}: fragment programs drawing into targets of 640x360 or less")
+            for fp, sz in sorted(use.items()):
+                print(f"  {fp:08X}: {' '.join(sorted(sz))}")
+            continue
+        cs = chains(seqs, runs, lo, hi, pass1)
         by = {}
         for t, c in cs:
             by.setdefault(key(c), []).append(t)
