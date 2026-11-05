@@ -1,0 +1,299 @@
+From a0b30ba89266533ee337c07d7fd446de6b53c750 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Thu, 5 Nov 2026 09:23:44 -0800
+Subject: [PATCH 113/113] R4's bridge: stream-marker and surface-touch hooks,
+ the engine's copy from a native image after a native signal
+
+For a native renderer that replaces some of a title's commands (the port's
+docs/NATIVE_R4.md), development only, inert without a bridge:
+- rsx_engine_bridge.marker: every word of NV4097 method 0x0100 (no
+  operation) the engine meets, in stream order (the native side's markers
+  ride on it);
+- rsx_engine_bridge.touch: before the engine reads or writes a colour
+  surface other than as a draw's target -- as a texture, by a 2D transfer
+  or a guest read or write of its memory (eng_surface_at: the snapshot's
+  JPEG read among them), to present it, to clear it;
+- rsx_draw_engine_surface_ensure: the engine's surface at an address, made
+  if absent; rsx_draw_engine_readback_surface: one read back now (checks);
+- rsx_vk_bridge_copy_into: a native image copied into the engine's surface
+  in the engine's stream, its submission first waiting on a semaphore the
+  native queue signals (waits attached per command buffer, as the signals
+  are); rsx_vk_bridge_signal_open: a signal with the engine's next
+  submission, opening a batch if none is open.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libs/video/rsx_draw_engine.c    | 42 +++++++++++++++++++++++++
+ libs/video/rsx_draw_engine.h    | 19 ++++++++++++
+ libs/video/rsx_vulkan_backend.c | 55 ++++++++++++++++++++++++++++++++-
+ libs/video/rsx_vulkan_bridge.h  | 17 ++++++++++
+ 4 files changed, 132 insertions(+), 1 deletion(-)
+
+diff --git a/libs/video/rsx_draw_engine.c b/libs/video/rsx_draw_engine.c
+index 3635610..773cc59 100644
+--- a/libs/video/rsx_draw_engine.c
++++ b/libs/video/rsx_draw_engine.c
+@@ -913,8 +913,10 @@ static u32 eng_transfer_bpp(rsx_be_format fmt)
+  * resolve into the RGBA8 one's rows (rsx_live_draw.c's resolve takes the same
+  * rule, and its comment records copying out of a stale surface at 0x0 before
+  * it did). */
++static void eng_bridge_touch(u32 location, u32 offset, int kind);
+ static u32 eng_surface_at(u32 location, u32 offset, u32 pitch, u32* xb, u32* y)
+ {
++    eng_bridge_touch(location, offset, 2);
+     u32 best = ENG_INVALID;
+     for (u32 i = 0; i < g.n_surfaces; i++) {
+         const eng_surface* s = &g.surfaces[i];
+@@ -1732,6 +1734,13 @@ static void eng_bridge_wrote(const u32* targets, u32 n, int draw)
+     s_bridge.wrote(s_bridge.user, s_fifo_getoff_pub(), s_fifo_laps_pub(), draw, h, l, o, n);
+ }
+ 
++/* R4's touch (rsx_engine_bridge.touch): before the engine reads or writes a
++ * colour surface other than as a draw's target. */
++static void eng_bridge_touch(u32 location, u32 offset, int kind)
++{
++    if (s_bridge.touch) s_bridge.touch(s_bridge.user, location, offset, kind);
++}
++
+ static void eng_surfaces_wrote(const u32* targets, u32 n_targets)
+ {
+     const u64 serial = ++g.write_serial;
+@@ -3463,6 +3472,7 @@ static u32 sink_bind_textures(const u32* target_slots, u32 n_targets,
+         if (!t.enabled || !((tex_used >> u) & 1u)) continue;
+         mask |= 1u << u;
+         eng_st_read("texture", t.location, t.offset, t.width, t.height, t.format);
++        eng_bridge_touch(t.location, t.offset, 1);
+         eng_decode_sampler(t.filter, t.wrap, t.control0, &samplers[u]);
+         samplers[u].border = eng_border_class(t.format, t.border_color);
+ 
+@@ -4444,6 +4454,8 @@ static void sink_clear(void* user, const rsx_dispatch* r, u32 mask)
+          * whole G-buffer in one CLEAR_SURFACE, and B, C and D would otherwise
+          * keep whatever the last frame left in them. Each only where the
+          * clip and the scissor let the clear through (eng_clear_rect). */
++        for (u32 i = 0; i < n_targets; i++)
++            eng_bridge_touch(g.surfaces[targets[i]].location, g.surfaces[targets[i]].offset, 4);
+         int wrote = 0;
+         for (u32 i = 0; i < n_targets; i++) {
+             const eng_surface* s = &g.surfaces[targets[i]];
+@@ -4538,6 +4550,8 @@ static u32 eng_present_surface(u32 buffer_id)
+ static void eng_present(u32 buffer_id)
+ {
+     if (!g.ready) return;
++    if (buffer_id < 8 && g.display_buffers[buffer_id].valid)
++        eng_bridge_touch(g.display_buffers[buffer_id].location, g.display_buffers[buffer_id].offset, 3);
+     const u32 target = eng_present_surface(buffer_id);
+     if (target == ENG_INVALID) return;
+     g.surfaces[target].last_use = g.frames;
+@@ -4587,6 +4601,32 @@ void rsx_draw_engine_set_bridge(const rsx_engine_bridge* bridge)
+ 
+ const struct rsx_dispatch* rsx_draw_engine_state(void) { return &g.rsx; }
+ 
++u32 rsx_draw_engine_surface_ensure(u32 location, u32 offset, u32 w, u32 h, u32 be_format, u32 pitch)
++{
++    if (!g.ready) return 0;
++    const u32 slot = eng_surface_get(location, offset, w, h, (rsx_be_format)be_format, pitch, 0x101u);
++    if (slot == ENG_INVALID) return 0;
++    if (pitch) g.surfaces[slot].pitch = pitch;
++    return g.surfaces[slot].handle;
++}
++
++int rsx_draw_engine_readback_surface(u32 location, u32 offset, void* dst, u32 max_bytes,
++                                     u32* w, u32* h, u32* bpp)
++{
++    if (!g.ready || !g.be->readback) return -1;
++    for (u32 i = 0; i < g.n_surfaces; i++) {
++        const eng_surface* s = &g.surfaces[i];
++        if (!s->handle || s->location != location || s->offset != offset) continue;
++        const u32 b = eng_transfer_bpp(s->fmt);
++        if (!b || (u64)s->w * s->h * b > max_bytes) return -1;
++        g.be->submit_and_wait(g.be->user, RSX_BE_FLUSH_GUEST_REFERENCE);
++        g.be->readback(g.be->user, s->handle, 0, 0, s->w, s->h, dst, s->w * b);
++        *w = s->w; *h = s->h; *bpp = b;
++        return 0;
++    }
++    return -1;
++}
++
+ u32 rsx_draw_engine_find_surface(u32 location, u32 offset, u32* w, u32* h, u32* format)
+ {
+     for (u32 i = 0; i < g.n_surfaces; i++) {
+@@ -4698,6 +4738,8 @@ void rsx_draw_engine_method(u32 method, u32 arg)
+      * (0xE9xx, 0xEBxx) encode the subchannel bits as part of the address;
+      * preserve them with the wider mask. */
+     u32 m = (method >= 0xE000u) ? (method & 0xFFFCu) : (method & 0x1FFCu);
++    if (m == 0x0100u && s_bridge.marker)
++        s_bridge.marker(s_bridge.user, s_fifo_getoff_pub(), s_fifo_laps_pub(), arg);
+     rsx_dispatch_method(&g.rsx, m, arg);
+ }
+ 
+diff --git a/libs/video/rsx_draw_engine.h b/libs/video/rsx_draw_engine.h
+index b5d9c03..ba3325b 100644
+--- a/libs/video/rsx_draw_engine.h
++++ b/libs/video/rsx_draw_engine.h
+@@ -370,12 +370,31 @@ typedef struct rsx_engine_bridge {
+     /* Colour surfaces a draw (draw = 1) or a clear (draw = 0) has written. */
+     void (*wrote)(void* user, u32 io, u32 laps, int draw, const u32* handles, const u32* locations,
+                   const u32* offsets, u32 n);
++    /* R4 (the port's docs/NATIVE_R4.md): every word of NV4097 method 0x0100
++     * (NO_OPERATION) the engine meets, in stream order -- the native
++     * renderer's stream markers ride on it. */
++    void (*marker)(void* user, u32 io, u32 laps, u32 word);
++    /* R4: the engine is about to read or write the colour surface at
++     * (location, offset) other than as a draw's target -- as a texture
++     * (kind 1), by a 2D transfer or a guest read or write of its memory (2),
++     * to present it (3), to clear it (4) -- so a native renderer holding newer
++     * content for it hands that over first. */
++    void (*touch)(void* user, u32 location, u32 offset, int kind);
+ } rsx_engine_bridge;
+ void rsx_draw_engine_set_bridge(const rsx_engine_bridge* bridge);   /* NULL: off */
+ /* The engine's colour surface at guest (location, offset): its backend handle,
+  * size and format (rsx_be_format), or 0 when the engine has none. Walker
+  * thread only. */
+ u32 rsx_draw_engine_find_surface(u32 location, u32 offset, u32* w, u32* h, u32* format);
++/* R4: the engine's colour surface at (location, offset), made if it has none
++ * (w x h, an rsx_be_format, the guest pitch; no antialiasing): its backend
++ * handle, or 0. Walker thread (or under the walker's lock) only. */
++u32 rsx_draw_engine_surface_ensure(u32 location, u32 offset, u32 w, u32 h, u32 be_format, u32 pitch);
++/* R4 (development checks): the engine's colour surface at (location, offset)
++ * read back now, after everything recorded so far (a GPU wait): rows of
++ * *bpp-byte pixels into dst, at most max_bytes. 0 when read. Walker thread. */
++int rsx_draw_engine_readback_surface(u32 location, u32 offset, void* dst, u32 max_bytes,
++                                     u32* w, u32* h, u32* bpp);
+ /* The engine's register state as the walker has it now: development checks
+  * only (the port's R3 compares a native recorder's own state with it).
+  * Walker thread only. */
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index 1c786ea..2805aa2 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -664,6 +664,10 @@ static struct {
+     u32 n;
+     long long attached;                     /* signals asked for so far */
+     unsigned long long signalled, lost;
++    VkSemaphore wsem[VK_BR_SIGNALS];        /* R4: to wait for before ... */
++    VkCommandBuffer wcmd[VK_BR_SIGNALS];    /* ... the submission of this command buffer */
++    u32 nw;
++    unsigned long long waited, wlost;
+     int ready;                              /* the device and its queues are there (atomic) */
+ } s_br;
+ 
+@@ -671,7 +675,7 @@ static VkResult vk_queue_submit(const VkSubmitInfo* si, VkFence fence)
+ {
+     vk_mutex_lock(&s_vk.queue_mu);
+     VkResult r;
+-    if (s_br.n && si->commandBufferCount) {
++    if ((s_br.n || s_br.nw) && si->commandBufferCount) {
+         /* Signals waiting for a command buffer this submission carries go
+          * with it (a signal orders after all earlier work on the queue). */
+         VkSemaphore sig[VK_BR_SIGNALS + 8];
+@@ -686,9 +690,29 @@ static VkResult vk_queue_submit(const VkSubmitInfo* si, VkFence fence)
+         }
+         s_br.signalled += s_br.n - keep;
+         s_br.n = keep;
++        /* R4: waits on the native queue's signals, for a command buffer this
++         * submission carries, before it runs */
++        VkSemaphore wt[VK_BR_SIGNALS + 8];
++        VkPipelineStageFlags ws[VK_BR_SIGNALS + 8];
++        u32 nwt = 0;
++        for (u32 i = 0; i < si->waitSemaphoreCount && nwt < 8; i++) {
++            wt[nwt] = si->pWaitSemaphores[i]; ws[nwt++] = si->pWaitDstStageMask[i];
++        }
++        u32 wkeep = 0;
++        for (u32 k = 0; k < s_br.nw; k++) {
++            int carried = 0;
++            for (u32 c = 0; c < si->commandBufferCount; c++) carried |= si->pCommandBuffers[c] == s_br.wcmd[k];
++            if (carried) { wt[nwt] = s_br.wsem[k]; ws[nwt++] = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT; }
++            else { s_br.wsem[wkeep] = s_br.wsem[k]; s_br.wcmd[wkeep] = s_br.wcmd[k]; wkeep++; }
++        }
++        s_br.waited += s_br.nw - wkeep;
++        s_br.nw = wkeep;
+         VkSubmitInfo with = *si;
+         with.signalSemaphoreCount = ns;
+         with.pSignalSemaphores = sig;
++        with.waitSemaphoreCount = nwt;
++        with.pWaitSemaphores = nwt ? wt : NULL;
++        with.pWaitDstStageMask = nwt ? ws : NULL;
+         r = pvkQueueSubmit(s_vk.queue, 1, &with, fence);
+     } else {
+         r = pvkQueueSubmit(s_vk.queue, 1, si, fence);
+@@ -5966,6 +5990,28 @@ int rsx_vk_bridge_copy_buffer(u32 handle, VkBuffer dst, VkDeviceSize off, u32 w,
+     return 0;
+ }
+ 
++int rsx_vk_bridge_copy_into(u32 handle, VkImage src, VkImageLayout src_layout, u32 w, u32 h, VkSemaphore wait)
++{
++    vk_eng_obj* o = vk_eng_get(handle, VK_ENG_COLOR);
++    if (!o || !src) return -1;
++    int batched;
++    if (vk_br_open(&batched)) return -1;
++    const VkImageCopy c = { .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
++                            .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
++                            .extent = { w < o->w ? w : o->w, h < o->h ? h : o->h, 1 } };
++    pvkCmdCopyImage(s_vk.cmd, src, src_layout, o->im.img, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
++    if (wait) {
++        vk_mutex_lock(&s_vk.queue_mu);
++        if (s_br.nw < VK_BR_SIGNALS) { s_br.wsem[s_br.nw] = wait; s_br.wcmd[s_br.nw] = s_vk.cmd; s_br.nw++; }
++        else s_br.wlost++;
++        vk_mutex_unlock(&s_vk.queue_mu);
++    }
++    /* A synchronous copy (no batching) was submitted and waited on already in
++     * vk_br_close: its wait has to be attached first -- R4 needs batching. */
++    vk_br_close(batched);
++    return 0;
++}
++
+ long long rsx_vk_bridge_signal(VkSemaphore sem, int* used)
+ {
+     if (used) *used = 0;
+@@ -5985,6 +6031,13 @@ long long rsx_vk_bridge_signal(VkSemaphore sem, int* used)
+     return o;
+ }
+ 
++long long rsx_vk_bridge_signal_open(VkSemaphore sem, int* used)
++{
++    int batched;
++    if (!vk_br_open(&batched)) vk_br_close(batched);
++    return rsx_vk_bridge_signal(sem, used);
++}
++
+ int rsx_vk_bridge_submitted(long long ordinal)
+ {
+     vk_mutex_lock(&s_vk.queue_mu);
+diff --git a/libs/video/rsx_vulkan_bridge.h b/libs/video/rsx_vulkan_bridge.h
+index 9c1a91c..1a162cf 100644
+--- a/libs/video/rsx_vulkan_bridge.h
++++ b/libs/video/rsx_vulkan_bridge.h
+@@ -50,6 +50,18 @@ void rsx_vk_bridge_queue_unlock(void);
+ int rsx_vk_bridge_copy_image(u32 handle, VkImage dst, u32 w, u32 h);
+ int rsx_vk_bridge_copy_buffer(u32 handle, VkBuffer dst, VkDeviceSize off, u32 w, u32 h);
+ 
++/* R4 (the port's docs/NATIVE_R4.md): the native renderer's image `src`
++ * (in `src_layout`, w x h) copied here in the stream into the engine's colour
++ * surface `handle`, after every earlier write and before every later access;
++ * the submission that carries the copy first waits for `wait`, a binary
++ * semaphore the native queue has signalled (or will: its submission must
++ * have been made before this command buffer is submitted). Walker thread
++ * only, from a bridge callback; the open batch must carry no signal the
++ * native side's `wait` depends on (submit it first: rsx_vk_bridge_flush).
++ * 0 when recorded. */
++int rsx_vk_bridge_copy_into(u32 handle, VkImage src, VkImageLayout src_layout, u32 w, u32 h,
++                            VkSemaphore wait);
++
+ /* Have the submission that carries what is recorded so far signal a binary
+  * semaphore: the one already attached to the command buffer being recorded,
+  * if there is one, else `sem` (NULL: only ask). Returns the signal's ordinal
+@@ -57,6 +69,11 @@ int rsx_vk_bridge_copy_buffer(u32 handle, VkBuffer dst, VkDeviceSize off, u32 w,
+  * and no `sem`), -2 (no room: a bug); *used says whether `sem` was taken. */
+ long long rsx_vk_bridge_signal(VkSemaphore sem, int* used);
+ 
++/* The same, opening the engine's batch first when none is open, so the
++ * signal goes with the engine's next submission (R4: a signal after the
++ * engine's work so far, with nothing of its own to record). */
++long long rsx_vk_bridge_signal_open(VkSemaphore sem, int* used);
++
+ /* Whether the signal with this ordinal has been submitted: a queue may wait
+  * on its semaphore only then. */
+ int rsx_vk_bridge_submitted(long long ordinal);
+-- 
+2.56.0.windows.3
+

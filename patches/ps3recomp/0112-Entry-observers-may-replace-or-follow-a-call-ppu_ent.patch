@@ -1,0 +1,144 @@
+From e1f814b36a5bc0d3e542766869cd76310897274a Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Thu, 5 Nov 2026 09:23:44 -0800
+Subject: [PATCH 112/113] Entry observers may replace or follow a call:
+ ppu_entry_observe returns 0/1/2, an observed body's stores are probed
+
+An observed function is now a wrapper around its unchanged lifted body
+(static <name>__body): the observer's answer decides whether the body runs
+(0), is replaced (1: the observer has done the call's work and set its
+results) or runs and the observer sees its return too (2,
+ppu_exit_observe). While g_ppu_obs_store is set, every store an observed
+body makes reaches ppu_obs_store(ea, bytes) first (PPU_OBS_ST around the
+address of each vm_write and vm_raw_st16): a check of what a body writes.
+Development lifts only (--entry-observers); the production lift is
+unchanged. The port's R4 skips PPFX's command writers with it and verifies
+that skipping them leaves the CPU as running them would.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ tools/ppu_lifter.py | 85 +++++++++++++++++++++++++++++++++++++++------
+ 1 file changed, 74 insertions(+), 11 deletions(-)
+
+diff --git a/tools/ppu_lifter.py b/tools/ppu_lifter.py
+index 57e5344..625a511 100644
+--- a/tools/ppu_lifter.py
++++ b/tools/ppu_lifter.py
+@@ -881,15 +881,59 @@ def load_entry_hooks(path: str) -> dict[int, tuple[str, str]]:
+     return out
+ 
+ 
++_OBS_STORE_RE = re.compile(r"\b(vm_write(8|16|32|64)|vm_raw_st16)\(")
++
++
++def _obs_stores(line: str) -> str:
++    """An observed body's stores, each preceded by PPU_OBS_ST(size, address):
++    `vm_write32(A, V)` -> `vm_write32((PPU_OBS_ST(4, A), A), V)`. The address
++    expression is register arithmetic (no side effects), so taking it twice
++    is safe."""
++    out, i = [], 0
++    for m in _OBS_STORE_RE.finditer(line):
++        if m.start() < i:
++            continue
++        j, depth = m.end(), 0
++        while j < len(line):   # the first argument: to the top-level comma
++            c = line[j]
++            if c in "([":
++                depth += 1
++            elif c in ")]":
++                depth -= 1
++            elif c == "," and depth == 0:
++                break
++            j += 1
++        if j >= len(line):
++            continue
++        addr = line[m.end():j]
++        n = {"8": 1, "16": 2, "32": 4, "64": 8}.get(m.group(2), 16)
++        out.append(line[i:m.end()])
++        out.append(f"(PPU_OBS_ST({n}, {addr}), {addr})")
++        i = j
++    out.append(line[i:])
++    return "".join(out)
++
++
+ def load_entry_observers(path: str) -> set[int]:
+     """Read an --entry-observers file:
+ 
+         {"observers": [{"addr": "0x0069F944", "note": "..."}, ...]}
+ 
+-    -> {addr}. An observed function begins with
+-    `if (g_ppu_entry_observe) ppu_entry_observe(addr, ctx);` and then runs its
+-    lifted body unchanged: the port's observer sees each call's arguments
+-    (a capture, a dual-run oracle) without replacing the function. A
++    -> {addr}. An observed function is a wrapper around its lifted body
++    (emitted unchanged as `static void <name>__body`):
++
++        if (g_ppu_entry_observe) {
++            int a = ppu_entry_observe(addr, ctx);
++            if (a == 1) return;                       // the observer did the call's work
++            if (a == 2) { body; ppu_exit_observe(addr, ctx); return; }
++        }
++        body;
++
++    so the port's observer sees each call's arguments (a capture, a dual-run
++    oracle) and may instead replace a call (1: the body does not run; the
++    observer has set the results) or see its results (2). The body's stores
++    go through PPU_OBS_ST: while g_ppu_obs_store is set, each store's address
++    and size reach ppu_obs_store first (a check of what a body writes). A
+     development lift only; the production lift takes no such file."""
+     with open(path) as f:
+         spec = json.load(f)
+@@ -4278,24 +4322,43 @@ class PPULifter:
+                       f"extern int {guard};", f"void {host}(ppu_context* ctx);", "#endif"]
+         observed = func.start_addr in getattr(self, "entry_observers", ())
+         if observed:
+-            lines += ["#ifdef __cplusplus", 'extern "C" int g_ppu_entry_observe;',
+-                      'extern "C" void ppu_entry_observe(uint32_t addr, ppu_context* ctx);', "#else",
++            lines += ["#ifndef PPU_OBS_DECLARED", "#define PPU_OBS_DECLARED",
++                      "#ifdef __cplusplus", 'extern "C" {', "#endif",
+                       "extern int g_ppu_entry_observe;",
+-                      "void ppu_entry_observe(uint32_t addr, ppu_context* ctx);", "#endif"]
++                      "int ppu_entry_observe(uint32_t addr, ppu_context* ctx);",
++                      "void ppu_exit_observe(uint32_t addr, ppu_context* ctx);",
++                      "extern int g_ppu_obs_store;",
++                      "void ppu_obs_store(uint64_t ea, uint32_t bytes);",
++                      "#ifdef __cplusplus", "}", "#endif",
++                      "#define PPU_OBS_ST(n, a) (g_ppu_obs_store ? ppu_obs_store((uint64_t)(a), (n)) : (void)0)",
++                      "#endif",
++                      f"static void {func.name}__body(ppu_context* ctx);"]
+         uses_sjlj = any("ps3_sjlj_longjmp(" in bl or "_sjf.arm(" in bl for bl in func.body_lines)
+         if uses_sjlj:
+             lines.append('#include "ppu_sjlj.h"   /* --sjlj: guest setjmp/longjmp */')
+-        lines.append(f"void {weak}{func.name}(ppu_context* ctx) {{")
+-        lines.append("    PPU_MM_SNAP")
+         if observed:
+-            lines.append(f"    if (g_ppu_entry_observe) ppu_entry_observe(0x{func.start_addr:08X}u, ctx);  "
+-                         f"/* entry observer */")
++            a = f"0x{func.start_addr:08X}u"
++            lines += [f"void {weak}{func.name}(ppu_context* ctx) {{",
++                      "    if (g_ppu_entry_observe) {  /* entry observer */",
++                      f"        const int _ob = ppu_entry_observe({a}, ctx);",
++                      "        if (_ob == 1) return;",
++                      f"        if (_ob == 2) {{ {func.name}__body(ctx); DRAIN_TRAMPOLINE(ctx); "
++                      f"ppu_exit_observe({a}, ctx); return; }}",
++                      "    }",
++                      f"    {func.name}__body(ctx);",
++                      "}",
++                      f"static void {func.name}__body(ppu_context* ctx) {{"]
++        else:
++            lines.append(f"void {weak}{func.name}(ppu_context* ctx) {{")
++        lines.append("    PPU_MM_SNAP")
+         if hook:
+             lines.append(f"    if ({hook[1]}) {{ {hook[0]}(ctx); return; }}  "
+                          f"/* entry hook 0x{func.start_addr:08X} */")
+         if any("_sjf.arm(" in bl for bl in func.body_lines):
+             lines.append("    ps3_sjlj_frame _sjf;")
+         for bline in _fuse_cr(func.body_lines):
++            if observed:
++                bline = _obs_stores(bline)
+             lines.append(f"    {bline}" if not bline.endswith(":") else bline)
+ 
+         # If a function doesn't end with blr/b/bctr (a return or unconditional
+-- 
+2.56.0.windows.3
+
