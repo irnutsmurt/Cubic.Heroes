@@ -1,0 +1,570 @@
+From 5c6559f310e0166ba732b4bfc8215b1bf31ee101 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Wed, 4 Nov 2026 23:05:01 -0800
+Subject: [PATCH] R3's bridge: engine hooks, a second queue, copies and
+ signals, translator locks, the title's laps
+
+For a native renderer running beside the engine (the port's R3, dual run):
+- rsx_engine_bridge: the engine calls draw_pre before each draw it records
+  and wrote after each draw and colour clear, with the walker's position and
+  back-jump count and the colour targets; rsx_draw_engine_find_surface and
+  rsx_draw_engine_state (the latter for development cross-checks only).
+- cellGcm_title_laps_pub: the jumps back to the ring's start the runtime
+  writes for the title, counted on the title's thread where each is written,
+  with where; s_fifo_laps_pub the walker's side.
+- rsx_vulkan_bridge.h: with DOTHEROES_PPFX_NATIVE=1 the device gets a second
+  queue of the graphics family; a copy of an engine surface into another
+  image or a buffer, recorded at the exact point of the stream, and a binary
+  semaphore signalled by the submission that carries it (the signal list
+  under the queue lock); the queue lock for the other queue's submissions.
+- The decompilers' state (the branch bits, the vertex decompiler's work
+  buffers) and the SPIR-V translator's cache are shared: one lock each, so
+  two threads can translate.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libs/video/cellGcmSys.c         |  16 ++++
+ libs/video/rsx_draw_engine.c    |  52 ++++++++++-
+ libs/video/rsx_draw_engine.h    |  26 ++++++
+ libs/video/rsx_shader_spirv.cpp |  16 ++++
+ libs/video/rsx_vp_decompiler.c  |   7 ++
+ libs/video/rsx_vp_decompiler.h  |   8 ++
+ libs/video/rsx_vulkan_backend.c | 154 +++++++++++++++++++++++++++++++-
+ libs/video/rsx_vulkan_bridge.h  |  65 ++++++++++++++
+ 8 files changed, 340 insertions(+), 4 deletions(-)
+ create mode 100644 libs/video/rsx_vulkan_bridge.h
+
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index 0f7ffbe..d5b85c6 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -1093,6 +1093,15 @@ u32 s_fifo_getoff_pub(void) { return s_fifo_getoff; }   /* diagnostics */
+  * consumed the whole tail. g_gcm_fifo_drained_ea == begin cannot say that on its
+  * own, because it is also begin before the walker has moved at all. */
+ static volatile u32 s_fifo_back_jumps = 0;
++u32 s_fifo_laps_pub(void) { return s_fifo_back_jumps; }   /* R3's bridge: with the offset, a position that does not repeat */
++/* The title's side of the same count: the jumps back to the ring's start the
++ * runtime writes for the title (the three wraps below), counted on the
++ * title's thread as each is written, with where it went. A command the title
++ * writes in lap n is read by the walker after its n-th back jump, if every
++ * back jump the walker takes is one of these -- the port's R3 bridge checks
++ * that the difference stays constant. */
++static volatile u32 s_title_laps, s_title_jump_io;
++u32 cellGcm_title_laps_pub(u32* jump_io) { if (jump_io) *jump_io = s_title_jump_io; return s_title_laps; }
+ /* Set while the title's buffer-full callback (cellGcm_fifo_recycle) is waiting
+  * for the walker. Its context still reads current == end then, which is exactly
+  * what the drain's own overrun recycle looks for; firing that under the
+@@ -3351,6 +3360,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
+             if (io_begin != 0xFFFFFFFFu) {
+                 u32 jmp_at = (cur + 4 <= end) ? cur : end - 4;
+                 vm_write32(jmp_at, 0x20000000u | io_begin);   /* JUMP -> begin */
++                s_title_jump_io = gcm_ea2io(jmp_at); s_title_laps++;   /* a lap for the title too (its writes go there) */
+                 vm_write32(ctx + 0x8, begin);                 /* current = begin */
+                 vm_write32(GCM_CONTROL_GUEST_ADDR + 0, io_begin);  /* put */
+                 s_fifo_getoff = io_begin;                          /* get */
+@@ -3405,6 +3415,9 @@ static u32 gcm_ea2io(u32 ea)
+     return ((u32)io_page << 20) | (ea & 0xFFFFFu);
+ }
+ 
++/* R3's recorder: a command's ring EA as the walker's IO offset. */
++u32 cellGcm_ea2io_pub(u32 ea) { return gcm_ea2io(ea); }
++
+ /* Raise a limited ring's `end`: to the ring's own once the walker has
+  * followed the title into the new lap, else up to the walker. With `need`,
+  * wait until the title has that much room, as long as the walker keeps
+@@ -3494,6 +3507,7 @@ static int gcm_wrap_into_lap(u32 ctx_ea, u32 begin, u32 current, u32 io_begin, u
+         else {
+             const u32 room = g - io_begin, jumps = s_fifo_back_jumps;
+             vm_write32(current, 0x20000000u | io_begin);              /* JUMP begin */
++            s_title_jump_io = io_cur; s_title_laps++;
+             gcm_ring_check_arm(g, io_cur + 4u, begin + room, jumps);
+             s_ring_real_end = end;
+             s_ring_limit_jumps = jumps;
+@@ -3567,6 +3581,7 @@ void cellGcm_fifo_recycle_n(u32 ctx_ea, u32 count)
+     const u32 back_jumps0 = s_fifo_back_jumps;
+     if (io_begin != 0xFFFFFFFFu) {
+         vm_write32(current, 0x20000000u | io_begin);            /* JUMP begin  */
++        s_title_jump_io = gcm_ea2io(current); s_title_laps++;
+         /* The jump has to be in guest memory before `put` moves behind the
+          * walker's `get`. Program order is not enough on arm64: the walker
+          * may observe the new `put`, find `get` != `put`, and read the old
+@@ -3834,6 +3849,7 @@ static int gcm_flip_into_fifo(u32 ctx, u32 bufferId)
+     if (runtime_ring && !s_ring_limit_end && end - (cur + 4) < GCM_FLIP_WRAP_BYTES &&
+         io_begin != 0xFFFFFFFFu && g >= io_begin + GCM_RECYCLE_MARGIN && g <= gcm_ea2io(cur)) {
+         vm_write32(cur + 4, 0x20000000u | io_begin);   /* JUMP -> begin */
++        s_title_jump_io = gcm_ea2io(cur + 4); s_title_laps++;
+         if (PS3_FT_ON()) {   /* PS3_FT_RING_WAIT 3: a wrap at a flip, an instant; KB of room the lap starts with */
+             extern PPU_THREAD_LOCAL ppu_context* g_active_ctx;
+             const uint64_t t = ps3_ft_now();
+diff --git a/libs/video/rsx_draw_engine.c b/libs/video/rsx_draw_engine.c
+index 16649d6..3635610 100644
+--- a/libs/video/rsx_draw_engine.c
++++ b/libs/video/rsx_draw_engine.c
+@@ -1712,6 +1712,26 @@ static void eng_zdepth_wrote(u32 slot, const rsx_dsp_surface* sf)
+     z->used_h = sf->clip_h ? sf->clip_h : g.height;
+ }
+ 
++/* R3's bridge (rsx_draw_engine_set_bridge): off unless a native renderer set it. */
++static rsx_engine_bridge s_bridge;
++u32 s_fifo_getoff_pub(void);   /* cellGcmSys.c: the walker's position */
++u32 s_fifo_laps_pub(void);     /* and its backward jumps */
++static void eng_bridge_targets(const u32* targets, u32 n, u32* handles, u32* locations, u32* offsets)
++{
++    for (u32 i = 0; i < n; i++) {
++        handles[i] = g.surfaces[targets[i]].handle;
++        locations[i] = g.surfaces[targets[i]].location;
++        offsets[i] = g.surfaces[targets[i]].offset;
++    }
++}
++static void eng_bridge_wrote(const u32* targets, u32 n, int draw)
++{
++    if (!s_bridge.wrote || !n) return;
++    u32 h[RSX_BE_MAX_COLOR_TARGETS], l[RSX_BE_MAX_COLOR_TARGETS], o[RSX_BE_MAX_COLOR_TARGETS];
++    eng_bridge_targets(targets, n, h, l, o);
++    s_bridge.wrote(s_bridge.user, s_fifo_getoff_pub(), s_fifo_laps_pub(), draw, h, l, o, n);
++}
++
+ static void eng_surfaces_wrote(const u32* targets, u32 n_targets)
+ {
+     const u64 serial = ++g.write_serial;
+@@ -2083,6 +2103,7 @@ static void eng_programs_text(const eng_prog_params* p, char* vs, u32 vs_size, c
+                               int* vi_out, int* fi_out, u32* nconst_out)
+ {
+     int vi, fi;
++    rsx_shader_text_lock();
+     rsx_vp_set_branch_bits(p->vp_branch_bits);
+     vi = rsx_vp_decompile_compact_ex(p->vp_uc, p->vp_bytes, p->vtex_mask, p->layout_mask, vs, vs_size);
+     if (vi > 0 && p->ucp && rsx_vp_apply_user_clip(vs, vs_size, p->ucp) < 0) {
+@@ -2104,6 +2125,7 @@ static void eng_programs_text(const eng_prog_params* p, char* vs, u32 vs_size, c
+         fi = -1;
+     if (fi > 0 && p->alpha_test && rsx_fp_apply_alpha_test_buffered(ps, ps_size, p->alpha_func) < 0)
+         fi = -1;
++    rsx_shader_text_unlock();
+     *vi_out = vi; *fi_out = fi;
+ }
+ 
+@@ -4359,6 +4381,11 @@ static void sink_end(void* user, const rsx_dispatch* r)
+ 
+     const u32 uploaded = indexed ? dc.n_verts : n_draw;
+     if (s_r1.pending >= 0) eng_r1_hand_over(&sf);
++    if (s_bridge.draw_pre) {
++        u32 h[RSX_BE_MAX_COLOR_TARGETS], l[RSX_BE_MAX_COLOR_TARGETS], o[RSX_BE_MAX_COLOR_TARGETS];
++        eng_bridge_targets(targets, n_targets, h, l, o);
++        s_bridge.draw_pre(s_bridge.user, s_fifo_getoff_pub(), s_fifo_laps_pub(), h, l, o, n_targets);
++    }
+     if (geom)
+         g.be->draw_geom(g.be->user, topology, geom, uploaded, layout.stride, indexed ? n_draw : 0);
+     else
+@@ -4370,6 +4397,7 @@ static void sink_end(void* user, const rsx_dispatch* r)
+     if (!pipeline_is_fixed) g.guest_draws++;
+ 
+     if (rs.color_mask) eng_surfaces_wrote(targets, n_targets);
++    eng_bridge_wrote(targets, n_targets, 1);
+     if (zslot != ENG_INVALID && rs.depth_test && rs.depth_write) {
+         g.zdepths[zslot].had_write = 1;
+         eng_zdepth_wrote(zslot, &sf);
+@@ -4430,7 +4458,7 @@ static void sink_clear(void* user, const rsx_dispatch* r, u32 mask)
+                 g.be->clear_color(g.be->user, s->handle, rgba);
+             wrote = 1;
+         }
+-        if (wrote) eng_surfaces_wrote(targets, n_targets);
++        if (wrote) { eng_surfaces_wrote(targets, n_targets); eng_bridge_wrote(targets, n_targets, 0); }
+     }
+     if (mask & (RSX_CLEAR_DEPTH | RSX_CLEAR_STENCIL)) {
+         const u32 zslot = eng_zdepth_get(sf.zeta_location, sf.zeta_offset,
+@@ -4551,6 +4579,28 @@ void rsx_draw_engine_set_backend(const rsx_draw_backend* backend)
+     g.be = backend;
+ }
+ 
++void rsx_draw_engine_set_bridge(const rsx_engine_bridge* bridge)
++{
++    if (bridge) s_bridge = *bridge;
++    else memset(&s_bridge, 0, sizeof s_bridge);
++}
++
++const struct rsx_dispatch* rsx_draw_engine_state(void) { return &g.rsx; }
++
++u32 rsx_draw_engine_find_surface(u32 location, u32 offset, u32* w, u32* h, u32* format)
++{
++    for (u32 i = 0; i < g.n_surfaces; i++) {
++        const eng_surface* s = &g.surfaces[i];
++        if (s->handle && s->location == location && s->offset == offset) {
++            if (w) *w = s->w;
++            if (h) *h = s->h;
++            if (format) *format = (u32)s->fmt;
++            return s->handle;
++        }
++    }
++    return 0;
++}
++
+ void rsx_draw_engine_set_default(int on)
+ {
+     g.default_on = on;
+diff --git a/libs/video/rsx_draw_engine.h b/libs/video/rsx_draw_engine.h
+index ecc3199..b5d9c03 100644
+--- a/libs/video/rsx_draw_engine.h
++++ b/libs/video/rsx_draw_engine.h
+@@ -355,6 +355,32 @@ typedef struct rsx_be_capture {
+ /* Register the backend the engine drives. Passing NULL unregisters it. */
+ void rsx_draw_engine_set_backend(const rsx_draw_backend* backend);
+ 
++/* R3's bridge (development only, docs/NATIVE_R3.md in the port): a native
++ * renderer running beside the engine learns where the walker is at each draw
++ * and which surfaces each draw or clear wrote, so it can take the engine's
++ * copy of a surface at an exact point of the command stream. The callbacks
++ * run on the walker's thread, inside the operation; `io` is the command
++ * ring's IO offset the walker is at (a draw's END word) and `laps` how many
++ * backward jumps it has taken, a pair that does not repeat. */
++typedef struct rsx_engine_bridge {
++    void* user;
++    /* A draw about to be recorded, and its colour targets. */
++    void (*draw_pre)(void* user, u32 io, u32 laps, const u32* handles, const u32* locations,
++                     const u32* offsets, u32 n);
++    /* Colour surfaces a draw (draw = 1) or a clear (draw = 0) has written. */
++    void (*wrote)(void* user, u32 io, u32 laps, int draw, const u32* handles, const u32* locations,
++                  const u32* offsets, u32 n);
++} rsx_engine_bridge;
++void rsx_draw_engine_set_bridge(const rsx_engine_bridge* bridge);   /* NULL: off */
++/* The engine's colour surface at guest (location, offset): its backend handle,
++ * size and format (rsx_be_format), or 0 when the engine has none. Walker
++ * thread only. */
++u32 rsx_draw_engine_find_surface(u32 location, u32 offset, u32* w, u32* h, u32* format);
++/* The engine's register state as the walker has it now: development checks
++ * only (the port's R3 compares a native recorder's own state with it).
++ * Walker thread only. */
++const struct rsx_dispatch* rsx_draw_engine_state(void);
++
+ /* Is the engine the path this run takes? True when PS3RECOMP_RSX_ENGINE names
+  * "dispatch" (or the backend asked for it by default) and a backend has been
+  * registered. Read once and cached, so it is cheap in the FIFO walker. */
+diff --git a/libs/video/rsx_shader_spirv.cpp b/libs/video/rsx_shader_spirv.cpp
+index ef6026b..64453eb 100644
+--- a/libs/video/rsx_shader_spirv.cpp
++++ b/libs/video/rsx_shader_spirv.cpp
+@@ -254,9 +254,25 @@ void cache_store(const std::string& path, const std::string& key,
+ 
+ extern "C" int rsx_hlsl_to_spirv_available(void) { return 1; }
+ 
++static int rsx_hlsl_to_spirv_locked(const char* hlsl, int stage,
++                                    u32* words, u32 max_words, u32* out_words,
++                                    char* log, u32 log_size);
++
++/* One translation at a time: glslang's set-up and the cache above are shared
++ * by every caller, and a native renderer on its own thread (the port's R3,
++ * DOTHEROES_PPFX_NATIVE) translates beside the backend. */
+ extern "C" int rsx_hlsl_to_spirv(const char* hlsl, int stage,
+                                  u32* words, u32 max_words, u32* out_words,
+                                  char* log, u32 log_size)
++{
++    static std::mutex m;
++    std::lock_guard<std::mutex> g(m);
++    return rsx_hlsl_to_spirv_locked(hlsl, stage, words, max_words, out_words, log, log_size);
++}
++
++static int rsx_hlsl_to_spirv_locked(const char* hlsl, int stage,
++                                    u32* words, u32 max_words, u32* out_words,
++                                    char* log, u32 log_size)
+ {
+     if (out_words) *out_words = 0;
+     if (!hlsl || !words || !out_words || max_words == 0) {
+diff --git a/libs/video/rsx_vp_decompiler.c b/libs/video/rsx_vp_decompiler.c
+index ba6c18e..76ecefe 100644
+--- a/libs/video/rsx_vp_decompiler.c
++++ b/libs/video/rsx_vp_decompiler.c
+@@ -139,6 +139,13 @@ static void emit_store(Out* b, const char* dst_fmt, u32 idx, const char* m)
+ static u32 s_vp_branch_base = 0;   /* VP slot the program being decompiled starts at */
+ void rsx_vp_set_branch_base(u32 start_slot) { s_vp_branch_base = start_slot; }
+ 
++/* A spin lock: held only while one program's text is made (rare: a new
++ * pipeline), so contention is short and rare. */
++#include <stdatomic.h>
++static atomic_flag s_text_lock = ATOMIC_FLAG_INIT;
++void rsx_shader_text_lock(void) { while (atomic_flag_test_and_set_explicit(&s_text_lock, memory_order_acquire)) {} }
++void rsx_shader_text_unlock(void) { atomic_flag_clear_explicit(&s_text_lock, memory_order_release); }
++
+ static u32 s_vp_branch_bits = 0;   /* SET_TRANSFORM_BRANCH_BITS, tested by BRB/CLB */
+ void rsx_vp_set_branch_bits(u32 bits) { s_vp_branch_bits = bits; }
+ 
+diff --git a/libs/video/rsx_vp_decompiler.h b/libs/video/rsx_vp_decompiler.h
+index 130b1ca..f1f2c1b 100644
+--- a/libs/video/rsx_vp_decompiler.h
++++ b/libs/video/rsx_vp_decompiler.h
+@@ -61,6 +61,14 @@ void rsx_vp_set_branch_base(u32 start_slot);
+  * branch on one of these bits; the decompiler bakes the outcome in, so a
+  * program that rsx_vp_uses_branch_bits() must be keyed on them too. */
+ void rsx_vp_set_branch_bits(u32 bits);
++
++/* The decompilers keep state between calls (the branch bits above, the
++ * vertex decompiler's work buffers): a caller that may run beside another --
++ * the draw engine on the FIFO walker's thread and a native renderer on its
++ * own (the port's R3) -- holds this lock from setting the branch bits until
++ * its program text is complete. */
++void rsx_shader_text_lock(void);
++void rsx_shader_text_unlock(void);
+ int rsx_vp_uses_branch_bits(const u8* ucode, u32 max_bytes);
+ 
+ /* Bit N in vtex_mask declares NV40 2D vertex-texture unit N at t(16+N),
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index dd94f03..24c5644 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -649,10 +649,47 @@ static void vk_invalidate(vk_buffer* b)
+  * The queue is shared with the present (see present_mu in vk_state), so every
+  * operation on it goes through these.
+  * -------------------------------------------------------------------------*/
++/* R3's bridge (rsx_vulkan_bridge.h; development only, docs/NATIVE_R3.md in
++ * the port): with DOTHEROES_PPFX_NATIVE=1 the device gets a second queue of
++ * the graphics family for a native renderer running beside this one, and
++ * semaphores it waits on are signalled by the submission that carries the
++ * copies it asked for. */
++enum { VK_BR_SIGNALS = 64 };
++static struct {
++    int want;                               /* DOTHEROES_PPFX_NATIVE=1 */
++    VkQueue queue2;                         /* the native renderer's own */
++    VkSemaphore sem[VK_BR_SIGNALS];         /* to signal with ... */
++    VkCommandBuffer cmd[VK_BR_SIGNALS];     /* ... the submission of this command buffer */
++    u32 n;
++    unsigned long long signalled, lost;
++} s_br;
++
+ static VkResult vk_queue_submit(const VkSubmitInfo* si, VkFence fence)
+ {
+     vk_mutex_lock(&s_vk.queue_mu);
+-    const VkResult r = pvkQueueSubmit(s_vk.queue, 1, si, fence);
++    VkResult r;
++    if (s_br.n && si->commandBufferCount) {
++        /* Signals waiting for a command buffer this submission carries go
++         * with it (a signal orders after all earlier work on the queue). */
++        VkSemaphore sig[VK_BR_SIGNALS + 8];
++        u32 ns = 0;
++        for (u32 i = 0; i < si->signalSemaphoreCount && ns < 8; i++) sig[ns++] = si->pSignalSemaphores[i];
++        u32 keep = 0;
++        for (u32 k = 0; k < s_br.n; k++) {
++            int carried = 0;
++            for (u32 c = 0; c < si->commandBufferCount; c++) carried |= si->pCommandBuffers[c] == s_br.cmd[k];
++            if (carried) sig[ns++] = s_br.sem[k];
++            else { s_br.sem[keep] = s_br.sem[k]; s_br.cmd[keep] = s_br.cmd[k]; keep++; }
++        }
++        s_br.signalled += s_br.n - keep;
++        s_br.n = keep;
++        VkSubmitInfo with = *si;
++        with.signalSemaphoreCount = ns;
++        with.pSignalSemaphores = sig;
++        r = pvkQueueSubmit(s_vk.queue, 1, &with, fence);
++    } else {
++        r = pvkQueueSubmit(s_vk.queue, 1, si, fence);
++    }
+     vk_mutex_unlock(&s_vk.queue_mu);
+     return r;
+ }
+@@ -5602,10 +5639,20 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+         if (vk_pick_device()) return -1;
+     }
+ 
+-    float prio = 1.0f;
++    const float prio[2] = { 1.0f, 1.0f };
++    {   const char* e = getenv("DOTHEROES_PPFX_NATIVE");
++        s_br.want = e && *e == '1'; }
++    u32 nq = 1;
++    if (s_br.want) {   /* R3's bridge: a second queue of the family, when it has one */
++        VkQueueFamilyProperties qf[16];
++        u32 nf = 16;
++        pvkGetPhysicalDeviceQueueFamilyProperties(s_vk.phys, &nf, qf);
++        if (s_vk.queue_family < nf && qf[s_vk.queue_family].queueCount >= 2) nq = 2;
++        else VK_LOG("R3 bridge: the graphics family has one queue; the native renderer shares it\n");
++    }
+     VkDeviceQueueCreateInfo qci = { .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+                                     .queueFamilyIndex = s_vk.queue_family,
+-                                    .queueCount = 1, .pQueuePriorities = &prio };
++                                    .queueCount = nq, .pQueuePriorities = prio };
+     static const char* dev_exts[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+     /* DXT (BC1-3) is how PS3 titles ship most textures; Vulkan gates it
+      * behind a feature, enabled only when the device reports it. */
+@@ -5636,6 +5683,7 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+     if (s_vk.windowed && vk_load_wsi_device_functions())
+         vk_window_drop("the driver has no swapchain functions");
+     pvkGetDeviceQueue(s_vk.device, s_vk.queue_family, 0, &s_vk.queue);
++    if (nq == 2) pvkGetDeviceQueue(s_vk.device, s_vk.queue_family, 1, &s_br.queue2);
+ 
+     VkCommandPoolCreateInfo pci = { .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+                                     .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+@@ -5835,4 +5883,104 @@ int rsx_vulkan_backend_depth_bounds(void)
+     return s_vk.eng_active && s_vk.depth_bounds_ok;
+ }
+ 
++/* ---- R3's bridge (rsx_vulkan_bridge.h) ----------------------------------- */
++#include "rsx_vulkan_bridge.h"
++
++int rsx_vk_bridge_device(rsx_vk_bridge_dev* out)
++{
++    if (!out || !s_vk.device || !s_br.want) return -1;
++    memset(out, 0, sizeof *out);
++    out->instance = s_vk.instance;
++    out->phys = s_vk.phys;
++    out->device = s_vk.device;
++    out->queue_family = s_vk.queue_family;
++    out->queue = s_br.queue2 ? s_br.queue2 : s_vk.queue;
++    out->shared_queue = s_br.queue2 ? 0 : 1;
++    out->get_instance_proc = pvkGetInstanceProcAddr;
++    out->get_device_proc = pvkGetDeviceProcAddr;
++    return 0;
++}
++
++/* The queue lock: vkDeviceWaitIdle needs every queue of the device, so a
++ * native submission and this backend's idle never overlap. */
++void rsx_vk_bridge_queue_lock(void) { vk_mutex_lock(&s_vk.queue_mu); }
++void rsx_vk_bridge_queue_unlock(void) { vk_mutex_unlock(&s_vk.queue_mu); }
+ 
++/* Open the batch (or a synchronous buffer) for a copy, ordered after every
++ * earlier write; 0 when recording. */
++static int vk_br_open(int* batched)
++{
++    *batched = vk_eb_active();
++    if (*batched ? (!s_eb_pending && vk_begin_batch()) : vk_begin()) return -1;
++    vk_rp_close();
++    vk_cmd_after_everything(s_vk.cmd);
++    return 0;
++}
++static void vk_br_close(int batched)
++{
++    vk_cmd_after_everything(s_vk.cmd);   /* later writes to the source wait for the copy */
++    if (batched) vk_eb_recorded();
++    else vk_submit_and_wait();
++}
++
++int rsx_vk_bridge_copy_image(u32 handle, VkImage dst, u32 w, u32 h)
++{
++    vk_eng_obj* o = vk_eng_get(handle, VK_ENG_COLOR);
++    if (!o || !dst) return -1;
++    int batched;
++    if (vk_br_open(&batched)) return -1;
++    const VkImageCopy c = { .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
++                            .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
++                            .extent = { w < o->w ? w : o->w, h < o->h ? h : o->h, 1 } };
++    /* The destination is a staging image the copy fills whole: whatever it
++     * held is discarded on the way to GENERAL. */
++    const VkImageMemoryBarrier ib = { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
++        .srcAccessMask = 0, .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
++        .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED, .newLayout = VK_IMAGE_LAYOUT_GENERAL,
++        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++        .image = dst, .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
++    pvkCmdPipelineBarrier(s_vk.cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
++                          0, NULL, 0, NULL, 1, &ib);
++    pvkCmdCopyImage(s_vk.cmd, o->im.img, VK_IMAGE_LAYOUT_GENERAL, dst, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
++    vk_br_close(batched);
++    return 0;
++}
++
++int rsx_vk_bridge_copy_buffer(u32 handle, VkBuffer dst, VkDeviceSize off, u32 w, u32 h)
++{
++    vk_eng_obj* o = vk_eng_get(handle, VK_ENG_COLOR);
++    if (!o || !dst) return -1;
++    int batched;
++    if (vk_br_open(&batched)) return -1;
++    const VkBufferImageCopy c = { .bufferOffset = off, .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
++                                  .imageExtent = { w < o->w ? w : o->w, h < o->h ? h : o->h, 1 } };
++    pvkCmdCopyImageToBuffer(s_vk.cmd, o->im.img, VK_IMAGE_LAYOUT_GENERAL, dst, 1, &c);
++    vk_br_close(batched);
++    return 0;
++}
++
++int rsx_vk_bridge_signal(VkSemaphore sem)
++{
++    if (!sem) return -1;
++    vk_mutex_lock(&s_vk.queue_mu);   /* vk_queue_submit takes signals off the list under it */
++    if (s_br.n == VK_BR_SIGNALS) { s_br.lost++; vk_mutex_unlock(&s_vk.queue_mu); return -1; }
++    /* the open batch's command buffer; a synchronous copy was submitted
++     * already, so its signal goes with the next one */
++    s_br.sem[s_br.n] = sem; s_br.cmd[s_br.n] = s_vk.cmd; s_br.n++;
++    vk_mutex_unlock(&s_vk.queue_mu);
++    return 0;
++}
++
++void rsx_vk_bridge_flush(void)
++{
++    if (s_eb_pending) vk_eng_flush();
++}
++
++unsigned long long rsx_vk_bridge_signals(unsigned long long* lost)
++{
++    vk_mutex_lock(&s_vk.queue_mu);
++    const unsigned long long n = s_br.signalled;
++    if (lost) *lost = s_br.lost;
++    vk_mutex_unlock(&s_vk.queue_mu);
++    return n;
++}
+diff --git a/libs/video/rsx_vulkan_bridge.h b/libs/video/rsx_vulkan_bridge.h
+new file mode 100644
+index 0000000..41b5e0e
+--- /dev/null
++++ b/libs/video/rsx_vulkan_bridge.h
+@@ -0,0 +1,65 @@
++/*
++ * ps3recomp - the Vulkan backend's bridge to a native renderer beside it
++ *
++ * Development only (the port's docs/NATIVE_R3.md): with DOTHEROES_PPFX_NATIVE=1
++ * the device is made with a second queue of the graphics family, and a
++ * native renderer running on its own thread renders into images of its own on
++ * it. These functions let that renderer use the same device, and take the
++ * engine's copy of a colour surface at an exact point of the command stream:
++ * called on the walker's thread from an rsx_engine_bridge callback, a copy is
++ * recorded right there, and a semaphore given to rsx_vk_bridge_signal is
++ * signalled by the submission that carries it.
++ */
++#ifndef PS3RECOMP_RSX_VULKAN_BRIDGE_H
++#define PS3RECOMP_RSX_VULKAN_BRIDGE_H
++
++#ifndef VK_NO_PROTOTYPES
++#define VK_NO_PROTOTYPES
++#endif
++#include <vulkan/vulkan.h>
++#include "ps3emu/ps3types.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++typedef struct rsx_vk_bridge_dev {
++    VkInstance instance;
++    VkPhysicalDevice phys;
++    VkDevice device;
++    u32 queue_family;
++    VkQueue queue;          /* the native renderer's: a second queue of the family ... */
++    int shared_queue;       /* ... or, when the family has one, the backend's own */
++    PFN_vkGetInstanceProcAddr get_instance_proc;
++    PFN_vkGetDeviceProcAddr get_device_proc;
++} rsx_vk_bridge_dev;
++
++/* 0 and the device, once the backend has made it with the bridge asked for. */
++int rsx_vk_bridge_device(rsx_vk_bridge_dev* out);
++
++/* Held around every submission to the native queue: vkDeviceWaitIdle needs all
++ * queues of the device, and the backend takes the same lock for it. */
++void rsx_vk_bridge_queue_lock(void);
++void rsx_vk_bridge_queue_unlock(void);
++
++/* Walker thread only, from an rsx_engine_bridge callback: the engine's colour
++ * surface `handle`, w x h of it, copied here in the stream into `dst` (an
++ * image in VK_IMAGE_LAYOUT_GENERAL of the surface's format), or into a
++ * buffer at `off`. Ordered after every earlier write, and every later write
++ * after it. 0 when recorded. */
++int rsx_vk_bridge_copy_image(u32 handle, VkImage dst, u32 w, u32 h);
++int rsx_vk_bridge_copy_buffer(u32 handle, VkBuffer dst, VkDeviceSize off, u32 w, u32 h);
++
++/* Signal `sem` (binary) with the submission of what is recorded so far. */
++int rsx_vk_bridge_signal(VkSemaphore sem);
++
++/* Submit the open batch now, its signals with it. */
++void rsx_vk_bridge_flush(void);
++
++/* Semaphores signalled so far, and how many did not fit (dropped: a bug). */
++unsigned long long rsx_vk_bridge_signals(unsigned long long* lost);
++
++#ifdef __cplusplus
++}
++#endif
++#endif /* PS3RECOMP_RSX_VULKAN_BRIDGE_H */
+-- 
+2.56.0.windows.3
+
