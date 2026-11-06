@@ -413,6 +413,7 @@ struct Stats {
     // clears narrower than their surface (the native clear takes it whole)
     std::atomic<uint64_t> r6_game_clears{0}, r6_game_arrays{0}, r6_game_skipped{0}, r6_clears_scissored{0};
     std::atomic<uint64_t> r6_game_arrays_walked{0}, r6_flip_clears{0}, clears_masked{0};   // R6: Bink's records' textures taken at the walker; clears done at a flip; PPFX colour clears of some channels only
+    std::atomic<uint64_t> fclr_depth{0}, fclr_shown{0}, fclr_other{0};   // R6: the clears done at a flip, by kind
     // R6's native present: frames presented, flips with no native image of their display buffer
     std::atomic<uint64_t> r6_presents{0}, r6_present_missing{0}, r6_present_ns{0};
     std::atomic<uint64_t> r6_takeback{0}, r6_takeback_words{0};   // asp's clears and pass starts taken back

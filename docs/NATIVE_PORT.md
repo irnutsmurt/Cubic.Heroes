@@ -1,11 +1,17 @@
 # Native port plan
 
-Status, 2026-11-05: **R1-R5 are done**, every native path opt-in -- R1-R3
+Status, 2026-11-06: **R1-R6 are done**, every native path opt-in -- R1-R3
 (NATIVE_R1.md, NATIVE_R2.md, NATIVE_R3.md, NATIVE_R3B.md), R4 (NATIVE_R4.md:
 PPFX native, its writers bypassed; tag r4-checkpoint-2026-11-05), R5
 (NATIVE_R5.md: asp described, rendered natively, its images shared with PPFX,
-its draws' commands bypassed). **R6 is the next review checkpoint** (not
-started; its scope in NATIVE_R5.md section 9). The effort figures are
+its draws' commands bypassed), R6 (NATIVE_R6.md: every remaining producer
+native, a native present and snapshot, the command writers replaced at their
+entry instead of taken back, real occlusion results, synchronisation and
+shutdown validated, the uncapped measurement). The PS3 graphics path is not
+gone: the FIFO walker, the ring, the GCM command HLE and the bridge still
+run, and 13 libgcm functions still write command words (NATIVE_R6.md
+section 3). **R7 -- their retirement -- is the next review checkpoint** (not
+started; its checklist in NATIVE_R6.md section 9). The effort figures are
 provisional and are revised from actual progress at each milestone.
 
 (2026-11-04: direction approved by the owner; the evidence stage done,
@@ -126,7 +132,7 @@ away.
 | R3 | PPFX in the game, dual-run | the render thread and record queue; interception at the PPFX device (decided at R3's start with R1-R2 data); a resource registry shared with the existing backend; ordering against the FIFO stream; PPFX's waits | nothing: the FIFO path still renders PPFX as the reference |
 | R4 | PPFX native in production | - | PPFX's command generation, ring traffic, decoding and register state: ~6,900 command headers a frame (16%) |
 | R5 | asp's backend native | records from asp's backend methods; asp's programs, textures and vertex buffers native | ~82% of the commands |
-| R6 | the game's own libgcm users; flips and the vblank as native services | - | the last producers of commands |
+| R6 | the game's own libgcm users, the present and snapshot native; command writers replaced at their entry (done: NATIVE_R6.md) | the native present, the producers' records, the entry replacements and their verify mode, occlusion queries, the benchmark mode, the lean native-play lift | every draw, state and program command but 92 words a frame (13 unobserved libgcm functions) |
 | R7 | retire the FIFO walker, the ring, method decoding, the RSX state and the GCM command HLE; release builds exclude them | - | the PS3 command processor |
 
 Each step keeps the previous step's reference path selectable in development

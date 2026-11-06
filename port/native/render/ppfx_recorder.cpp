@@ -1670,7 +1670,26 @@ void build_flip(ppu_context* c)
     // as the engine did them before its flip
     if (r6_producers()) {
         r->naclear = A.nclears;
-        for (uint32_t i = 0; i < A.nclears; i++) r->aclear[i] = A.clears[i];
+        for (uint32_t i = 0; i < A.nclears; i++) {
+            const Rec::AspClear& k = A.clears[i];
+            r->aclear[i] = k;
+            // which clears wait for a flip: depth or stencil only, a colour
+            // clear of the buffer this flip shows, a colour clear of another
+            Stats& st = stats();
+            const bool col = (k.mask & 0xF0u) != 0;
+            if (!col) st.fclr_depth++;
+            else if (!k.surface.color_location[0] && k.surface.color_offset[0] == off) st.fclr_shown++;
+            else st.fclr_other++;
+            static int said = 0;
+            if (said < 12) {
+                said++;
+                char line[200];
+                snprintf(line, sizeof line, "recorder: clear %02X of colour %u:%08X depth %08X done at the flip of frame %u "
+                         "(display buffer 0:%08X)", k.mask, k.surface.color_location[0], k.surface.color_offset[0],
+                         k.surface.depth_offset, S.frame ? S.frame - 1 : 0, off);
+                report_add(line);
+            }
+        }
         A.nclears = 0;
     }
     r->vc_full = 0; r->cdelta.clear();
@@ -3412,9 +3431,10 @@ void write_report()
                 (unsigned long long)s.vp_new_cases.load());
     if (r6_producers())
         fprintf(f, "r6 producers (late fixes): clears done at a flip %llu | game draw-arrays records with every "
-                   "texture taken at the walker %llu | PPFX colour clears of some channels only %llu\n",
+                   "texture taken at the walker %llu | PPFX colour clears of some channels only %llu | clears at a flip: depth/stencil only %llu, colour of the buffer shown %llu, colour of another %llu\n",
                 (unsigned long long)s.r6_flip_clears.load(), (unsigned long long)s.r6_game_arrays_walked.load(),
-                (unsigned long long)s.clears_masked.load());
+                (unsigned long long)s.clears_masked.load(), (unsigned long long)s.fclr_depth.load(),
+                (unsigned long long)s.fclr_shown.load(), (unsigned long long)s.fclr_other.load());
     if (r6_present())
         fprintf(f, "r6 present: flips recorded %llu presented %llu (no native image %llu) | present_ms %.1f\n",
                 (unsigned long long)queue().flips_recorded.load(), (unsigned long long)s.r6_presents.load(),
