@@ -252,3 +252,14 @@ cost**: every draw converts and uploads its vertices (76 GB in an4, about
 checked by content hashes -- the native renderer needs the same before
 any timing. The blend colour (asp's constant-colour blends) is not
 described yet.
+
+**The first comparisons of asp's output** (build/r4/an5, an6; the dumps
+converted with a half-float reader): without asp's clears every pixel
+differed (the native depth buffer was never cleared: every fragment
+failed); with them (an6, 7,274 clears, 4,269 dropped by a two-clear
+buffer between draws -- to widen) 93% differ: the geometry is in place
+(the castle, walls and bridge exactly where the engine draws them), the
+shading about twenty times too dark, the ground missing. Next: compare
+asp's draws one by one -- the bridge's copy of the engine's target after
+a matched draw (R3's mechanism for PPFX) for every asp draw of a chosen
+frame, so the first draw that differs names the state at fault.
