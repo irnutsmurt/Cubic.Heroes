@@ -348,6 +348,9 @@ struct Asp {
     uint32_t samp_written_valid;
     uint8_t stored_samp_valid;
     uint64_t rebuilds, samp_restores;
+    Rec::AspClear clears[2];         // asp's clears waiting for its next draw
+    uint32_t nclears;
+    uint64_t clears_dropped;
 } A;
 
 // Calls on other threads than the producer's touch the shadow (an inline
@@ -1353,6 +1356,9 @@ void asp_draw_exit(const VEntry& v)
     r->vp = vp_blob_now();
     r->fp = A.fp_bound ? asp_fp_now() : S.fp;
     asp_draw_operation(r, (uint32_t)v.gpr[3]);
+    r->naclear = A.nclears;
+    for (uint32_t i = 0; i < A.nclears; i++) r->aclear[i] = A.clears[i];
+    A.nclears = 0;
     if (A.fp_bound) {
         auto lo = A.fp_last_obj.find(S.st.fp.offset);
         if (lo == A.fp_last_obj.end() || lo->second != A.fp_bound_obj) {
@@ -1621,6 +1627,25 @@ int asp_record_call(uint32_t addr, ppu_context* c)
         if (w > 2 && h > 2) S.st.scissor = { 1, 1, (uint16_t)(w - 2), (uint16_t)(h - 2) };
         return 1;
     }
+    case 0x006C2D3C: { // clear (device, flags 1 colour 2 depth 4 stencil, const float rgba[4]*, stencil; depth f1)
+        const uint32_t fl = (uint32_t)c->gpr[4], cp = (uint32_t)c->gpr[5];
+        Rec::AspClear k;
+        memset(&k, 0, sizeof k);
+        k.mask = (fl & 1 ? 0xF0u : 0) | (fl & 2 ? 0x01u : 0) | (fl & 4 ? 0x02u : 0);
+        if (fl & 1 && ea_ok(cp, 16)) {
+            for (int i = 0; i < 4; i++) k.rgba[i] = gfloat(cp + 4 * i);
+            auto ch = [](float f) -> uint32_t { return f <= 0 ? 0u : f >= 1 ? 255u : (uint32_t)(f * 255.0f + 0.5f); };
+            k.argb = ch(k.rgba[3]) << 24 | ch(k.rgba[0]) << 16 | ch(k.rgba[1]) << 8 | ch(k.rgba[2]);
+        }
+        const double d = c->fpr[1];
+        k.depth = d <= 0 ? 0u : d >= 1 ? 0xFFFFFFu : (uint32_t)(d * 16777215.0 + 0.5);
+        k.stencil = (uint32_t)c->gpr[6] & 0xFF;
+        k.surface = S.st.surface;
+        if (!k.mask) return 1;
+        if (A.nclears < 2) A.clears[A.nclears++] = k;
+        else { A.clears[0] = A.clears[1]; A.clears[1] = k; A.clears_dropped++; }
+        return 1;
+    }
     case 0x006C9C74: { // vertex constants (this, {start, ..}, const float*, count): whole vec4s
         const uint32_t start = (uint32_t)(c->gpr[4] >> 32) & 0x7FFFu, data = (uint32_t)c->gpr[5];
         const uint32_t n = ((uint32_t)c->gpr[6] + 3u) & ~3u;
@@ -1882,7 +1907,8 @@ void write_report()
                 (unsigned long long)s.asp_group_restores, (unsigned long long)A.fp_odd_patches, A.fp_bytes.size(),
                 (unsigned long long)A.fp_stale_draws, (unsigned long long)A.rebuilds, (unsigned long long)A.samp_restores);
     if (s.n_asp_draws)
-        fprintf(f, "native asp draws %llu vertex_mb %.1f\n", (unsigned long long)s.n_asp_draws, s.n_asp_vertex_bytes / 1048576.0);
+        fprintf(f, "native asp draws %llu clears %llu vertex_mb %.1f | clears dropped %llu\n", (unsigned long long)s.n_asp_draws,
+                (unsigned long long)s.n_asp_clears, s.n_asp_vertex_bytes / 1048576.0, (unsigned long long)A.clears_dropped);
     fprintf(f, "native draws %llu clears %llu unsupported %llu batches %llu pipelines %llu images %llu (%.1f MB) "
                "static_textures %llu own_target_snapshots %llu images_replaced %llu\n",
             (unsigned long long)s.n_draws, (unsigned long long)s.n_clears, (unsigned long long)s.n_unsupported,

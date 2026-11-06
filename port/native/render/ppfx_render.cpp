@@ -103,7 +103,7 @@ namespace {
     X(vkCmdEndRenderPass) X(vkCmdBindPipeline) X(vkCmdSetViewport) X(vkCmdSetScissor) \
     X(vkCmdSetStencilReference) X(vkCmdSetDepthBias) X(vkCmdSetBlendConstants) X(vkCmdBindDescriptorSets) \
     X(vkCmdBindVertexBuffers) X(vkCmdBindIndexBuffer) X(vkCmdDrawIndexed) X(vkCmdPipelineBarrier) \
-    X(vkCmdCopyImage) X(vkCmdCopyImageToBuffer) X(vkCmdCopyBufferToImage) X(vkCmdClearColorImage) \
+    X(vkCmdCopyImage) X(vkCmdCopyImageToBuffer) X(vkCmdCopyBufferToImage) X(vkCmdClearColorImage) X(vkCmdClearDepthStencilImage)\
     X(vkCmdClearAttachments) X(vkCmdWriteTimestamp) X(vkCmdResetQueryPool) X(vkCreateQueryPool) \
     X(vkGetQueryPoolResults) X(vkCreateFence) X(vkGetFenceStatus) X(vkResetFences) X(vkWaitForFences) \
     X(vkQueueSubmit) X(vkCreateSemaphore)
@@ -200,6 +200,7 @@ struct Img {
     VkAccessFlags waccess = 0;
     bool external = false;                             // a slot: the engine's queue writes it, a semaphore orders it
     VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT;   // R5: a depth image's depth (and stencil) aspects
+    uint32_t asp_frame = 0;                            // R5: 1 + the frame asp's records last drew into it
 };
 
 VkImageView make_view(VkImage img, VkFormat fmt, uint32_t levels, VkComponentMapping map)
@@ -1306,6 +1307,9 @@ VkImageView view_of(Img* o, uint32_t crossbar, uint32_t fmt)
     return o->views[k] = make_view(o->img, o->fmt, o->levels, remap(crossbar, fmt));
 }
 
+int asp_native();
+void asp_compare(Batch& b, const Rec* r, Img* mine, Img* eng, uint32_t off);
+
 // The handoffs of a record: the engine's copies, from their slots into the
 // native images of their addresses.
 void apply_handoffs(Batch& b, const Rec* r)
@@ -1322,6 +1326,10 @@ void apply_handoffs(Batch& b, const Rec* r)
             dst = make_image(src->fmt, src->w, src->h, 1, src->bpp, true);
             if (!dst) continue;
         }
+        // R5: asp drew this target natively this frame -- the engine's copy
+        // of it is the reference: both read back and compared, once the batch is done
+        if (asp_native() && dst->asp_frame == r->frame + 1 && dst->fmt == src->fmt && dst->w == src->w && dst->h == src->h)
+            asp_compare(b, r, dst, src, n.offset);
         access(b.cb, src, kCopySrc);
         access(b.cb, dst, kCopyDst);
         VkImageCopy c = {};
@@ -1805,6 +1813,69 @@ void draw(const Rec* r)
     compare_after(b, r, t, W, H);
 }
 
+// R5's check of asp's native output: the native image asp's records drew
+// and the engine's copy of the same surface at the same place in the stream
+// (the handoff that brings it to PPFX), read back in the batch and compared
+// when it is done -- the pixels that differ and the largest difference of a
+// channel (in units of the format: 8-bit steps, or half-float bit patterns).
+std::atomic<uint64_t> s_aspc_n{0}, s_aspc_equal{0}, s_aspc_px{0}, s_aspc_px_total{0}, s_aspc_maxd{0};
+void asp_compare(Batch& b, const Rec* r, Img* mine, Img* eng, uint32_t off)
+{
+    static int every = -1;
+    if (every < 0) { const char* e = getenv("DOTHEROES_ASP_COMPARE"); every = e && *e ? atoi(e) : 1; }
+    if (every <= 0 || r->frame % (uint32_t)every) return;
+    const VkDeviceSize bytes = (VkDeviceSize)mine->w * mine->h * mine->bpp;
+    if (!bytes || !mine->bpp) return;
+    Buf a = rb_take(bytes), e = rb_take(bytes);
+    if (!a.b || !e.b) return;
+    VkBufferImageCopy c = {};
+    c.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+    c.imageExtent = { mine->w, mine->h, 1 };
+    access(b.cb, mine, kCopySrc);
+    F.vkCmdCopyImageToBuffer(b.cb, mine->img, layout_of(mine), a.b, 1, &c);
+    access(b.cb, eng, kCopySrc);
+    F.vkCmdCopyImageToBuffer(b.cb, eng->img, layout_of(eng), e.b, 1, &c);
+    mark(b, kSectReadback);
+    const uint32_t w = mine->w, h = mine->h, bpp = mine->bpp, frame = r->frame;
+    const VkFormat f = mine->fmt;
+    const uint64_t seq = r->seq;
+    b.done.push_back([a, e, bytes, w, h, bpp, frame, f, seq, off] {
+        const bool half = f == VK_FORMAT_R16G16B16A16_SFLOAT || f == VK_FORMAT_R16G16_SFLOAT;
+        uint64_t px = 0, maxd = 0;
+        for (VkDeviceSize i = 0; i < bytes; i += bpp) {
+            if (!memcmp(a.p + i, e.p + i, bpp)) continue;
+            px++;
+            if (half) for (uint32_t k = 0; k + 2 <= bpp; k += 2) {
+                const int x = *(const uint16_t*)(a.p + i + k), y = *(const uint16_t*)(e.p + i + k);
+                const uint64_t d = (uint64_t)(x > y ? x - y : y - x);
+                if (d > maxd) maxd = d;
+            } else for (uint32_t k = 0; k < bpp; k++) {
+                const int x = a.p[i + k], y = e.p[i + k];
+                const uint64_t d = (uint64_t)(x > y ? x - y : y - x);
+                if (d > maxd) maxd = d;
+            }
+        }
+        s_aspc_n++;
+        if (!px) s_aspc_equal++;
+        s_aspc_px += px; s_aspc_px_total += (uint64_t)w * h;
+        uint64_t m = s_aspc_maxd.load();
+        while (maxd > m && !s_aspc_maxd.compare_exchange_weak(m, maxd)) {}
+        static int said = 0;
+        if (px && said++ < 16) {
+            char line[200];
+            snprintf(line, sizeof line, "asp compare: frame %u target %08X %ux%u: %llu of %u pixels differ, largest %llu",
+                     frame, off, w, h, (unsigned long long)px, w * h, (unsigned long long)maxd);
+            report_add(line);
+        }
+        if (px && s_dump[0] && s_dumped++ < 6) {
+            dump("asp-native", frame, seq, off, a.p, (size_t)bytes, w, h, f);
+            dump("asp-engine", frame, seq, off, e.p, (size_t)bytes, w, h, f);
+        }
+        std::lock_guard<std::mutex> g(s_cmp_lock);
+        s_rb_pool.emplace(a.n, a); s_rb_pool.emplace(e.n, e);
+    });
+}
+
 // ---- R5: asp's draws (DOTHEROES_ASP_NATIVE=1, development) -----------------------------------
 // asp's records drawn natively: its colour and depth targets in the native
 // registries, its vertices, indices and textures read from guest memory on
@@ -1916,10 +1987,51 @@ Img* guest_texture_live(Batch& b, const Rec* r, const Texture& t)
     return g.img;
 }
 
+// asp's clears before a draw, each on the surface it was made with
+void asp_clears(Batch& b, const Rec* r)
+{
+    for (uint32_t i = 0; i < r->naclear; i++) {
+        const Rec::AspClear& k = r->aclear[i];
+        const Surface& sf = k.surface;
+        if (!sf.width || !sf.height) continue;
+        if ((k.mask & 0xF0u) && sf.color_target) {
+            uint32_t bpp = 0;
+            const VkFormat rt = (VkFormat)surface_vkformat(sf.color_format, &bpp);
+            Img* t = target_image(sf.color_location[0] ? 1u : 0u, sf.color_offset[0], rt, bpp, sf.width, sf.height);
+            if (t) {
+                VkClearColorValue cv;
+                const bool flt = rt == VK_FORMAT_R16G16B16A16_SFLOAT || rt == VK_FORMAT_R32G32B32A32_SFLOAT;
+                if (flt) for (int j = 0; j < 4; j++) cv.float32[j] = k.rgba[j];
+                else { cv.float32[0] = (k.argb >> 16 & 0xFF) / 255.0f; cv.float32[1] = (k.argb >> 8 & 0xFF) / 255.0f;
+                       cv.float32[2] = (k.argb & 0xFF) / 255.0f; cv.float32[3] = (k.argb >> 24) / 255.0f; }
+                access(b.cb, t, kCopyDst);
+                VkImageSubresourceRange rg = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+                F.vkCmdClearColorImage(b.cb, t->img, layout_of(t), &cv, 1, &rg);
+                t->written = 1; t->asp_frame = r->frame + 1;
+            }
+        }
+        if ((k.mask & 0x03u) && sf.depth_format) {
+            const VkFormat df = depth_vkformat(sf.depth_format);
+            Img* d = depth_image(sf.depth_location ? 1u : 0u, sf.depth_offset, df, sf.width, sf.height);
+            if (d) {
+                VkClearDepthStencilValue dv = { k.depth / 16777215.0f, k.stencil };
+                access(b.cb, d, kCopyDst);
+                VkImageSubresourceRange rg = { (VkImageAspectFlags)((k.mask & 1u ? VK_IMAGE_ASPECT_DEPTH_BIT : 0) |
+                                               (k.mask & 2u && has_stencil(df) ? VK_IMAGE_ASPECT_STENCIL_BIT : 0)), 0, 1, 0, 1 };
+                if (rg.aspectMask) F.vkCmdClearDepthStencilImage(b.cb, d->img, layout_of(d), &dv, 1, &rg);
+                d->written = 1;
+            }
+        }
+        mark(b, kSectOther);
+        stats().n_asp_clears++;
+    }
+}
+
 void asp_draw(const Rec* r)
 {
     Batch& b = batch(r->frame);
     wait_for(b, r);
+    asp_clears(b, r);
     if (r->why || !r->vp || !r->fp) { unsupported(r, "asp: no programs, or no draw object"); return; }
     const State& st = r->st;
     const Surface& sf = st.surface;
@@ -2094,7 +2206,7 @@ void asp_draw(const Rec* r)
     F.vkCmdDrawIndexed(b.cb, n_draw, 1, 0, 0, 0);
     F.vkCmdEndRenderPass(b.cb);
     mark(b, kSectDraw);
-    if (t) t->written = 1;
+    if (t) { t->written = 1; t->asp_frame = r->frame + 1; }
     if (d) d->written = 1;
     b.records++;
     stats().n_asp_draws++;
@@ -2467,6 +2579,13 @@ void render_drain(uint32_t timeout_ms)
 
 void render_report(std::vector<std::string>& out)
 {
+    if (s_aspc_n) {
+        char line[300];
+        snprintf(line, sizeof line, "asp compare: %llu targets compared, %llu equal; %.4f%% of pixels differ, the largest difference %llu",
+                 (unsigned long long)s_aspc_n.load(), (unsigned long long)s_aspc_equal.load(),
+                 s_aspc_px_total ? 100.0 * s_aspc_px / s_aspc_px_total : 0.0, (unsigned long long)s_aspc_maxd.load());
+        out.push_back(line);
+    }
     {
         std::lock_guard<std::mutex> g(s_why_lock);
         for (auto& kv : s_why) {
