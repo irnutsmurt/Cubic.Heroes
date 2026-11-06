@@ -472,6 +472,10 @@
   {
    "addr": "0x006D0E84",
    "note": "asp's texture apply for unit 4 (0x1A80-0x1A98, control 3 0x1850): the shadow map"
+  },
+  {
+   "addr": "0x006A2164",
+   "note": "cellGcmSetDrawIndexArray (the game's own draws, not PPFX's): R5 records those inside asp's scene -- the reflection's stencil mask, the water, scene parts (docs/NATIVE_R5.md)"
   }
  ]
 }

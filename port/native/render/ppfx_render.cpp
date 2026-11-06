@@ -60,6 +60,7 @@
 
 #include <chrono>
 #include <condition_variable>
+#include <deque>
 #include <functional>
 #include <map>
 #include <set>
@@ -103,7 +104,7 @@ namespace {
     X(vkCmdEndRenderPass) X(vkCmdBindPipeline) X(vkCmdSetViewport) X(vkCmdSetScissor) \
     X(vkCmdSetStencilReference) X(vkCmdSetDepthBias) X(vkCmdSetBlendConstants) X(vkCmdBindDescriptorSets) \
     X(vkCmdBindVertexBuffers) X(vkCmdBindIndexBuffer) X(vkCmdDrawIndexed) X(vkCmdPipelineBarrier) \
-    X(vkCmdCopyImage) X(vkCmdCopyImageToBuffer) X(vkCmdCopyBufferToImage) X(vkCmdClearColorImage) X(vkCmdClearDepthStencilImage)\
+    X(vkCmdCopyImage) X(vkCmdCopyImageToBuffer) X(vkCmdCopyBufferToImage) X(vkCmdClearColorImage) X(vkCmdClearDepthStencilImage) X(vkCmdCopyBuffer) \
     X(vkCmdClearAttachments) X(vkCmdWriteTimestamp) X(vkCmdResetQueryPool) X(vkCreateQueryPool) \
     X(vkGetQueryPoolResults) X(vkCreateFence) X(vkGetFenceStatus) X(vkResetFences) X(vkWaitForFences) \
     X(vkQueueSubmit) X(vkCreateSemaphore)
@@ -1482,7 +1483,7 @@ void dump(const char* side, uint32_t frame, uint64_t seq, uint32_t off, const ui
 // completion (both copies are then complete), bounded (the renderer waits
 // for room: counted). Readback buffers come from a pool.
 struct CmpJob { Buf mine; int ref; VkDeviceSize bytes; uint32_t w, h, bpp, ref_w, ref_h, frame, off; uint64_t seq;
-                int final_; int change; VkFormat f; };
+                int final_; int change; VkFormat f; char desc[200]; };
 std::mutex s_cmp_lock;
 std::condition_variable s_cmp_cv;
 std::vector<CmpJob> s_cmp_q;
@@ -1547,9 +1548,9 @@ void cmp_run(CmpJob& j)
             const bool first = firsts.size() < 4096 && firsts.insert((uint64_t)j.frame << 32 | j.off).second;
             static int said = 0;
             if (first && said++ < 64) {
-                char line[240];
-                snprintf(line, sizeof line, "compare: record %llu frame %u target %08X %ux%u: %llu of %u pixels differ (the first there)",
-                         (unsigned long long)j.seq, j.frame, j.off, j.w, j.h, (unsigned long long)differ, j.w * j.h);
+                char line[480];
+                snprintf(line, sizeof line, "compare: record %llu frame %u target %08X %ux%u: %llu of %u pixels differ (the first there) %s",
+                         (unsigned long long)j.seq, j.frame, j.off, j.w, j.h, (unsigned long long)differ, j.w * j.h, j.desc);
                 report_add(line);
             }
             if (first && s_dump[0] && s_dumped++ < 16) {
@@ -1600,6 +1601,15 @@ void compare_after(Batch& b, const Rec* r, Img* t, uint32_t w, uint32_t h)
     const int ref = r->walk.ref;
     if (ref < 0) return;
     CmpJob j;
+    j.desc[0] = 0;
+    if (r->kind == kAspDraw) {   // what the draw draws with, for the first differing one's line
+        const Raster& ra = r->st.raster;
+        int at = snprintf(j.desc, sizeof j.desc, "| asp prim %u n %u fp %016llx blend %u %X/%X alpha %u depth %u/%u stencil %u cmask %08X tex",
+                          r->prim, r->count, r->fp ? (unsigned long long)r->fp->hash : 0ull, ra.blend, ra.blend_sf_rgb, ra.blend_df_rgb,
+                          ra.alpha_test, ra.depth_test, ra.depth_write, ra.stencil_test, ra.color_mask);
+        for (uint32_t u = 0; u < 16 && at < (int)sizeof j.desc - 24; u++)
+            if (r->st.samp[u].enable) at += snprintf(j.desc + at, sizeof j.desc - at, " %u:%02X@%08X", u, r->st.tex[u].format, r->st.tex[u].offset);
+    }
     j.bytes = (VkDeviceSize)w * h * t->bpp;
     j.mine = rb_take(j.bytes);
     if (!j.mine.b) { stats().cmp_skip_no_readback++; release_ref(ref); return; }
@@ -1923,13 +1933,16 @@ void asp_compare(Batch& b, const Rec* r, Img* mine, Img* eng, uint32_t off)
         uint64_t m = s_aspc_maxd.load();
         while (maxd > m && !s_aspc_maxd.compare_exchange_weak(m, maxd)) {}
         static int said = 0;
-        if (px && said++ < 16) {
+        if (px && (said < 16 || (px > 1000 && said < 80))) {
+            said++;
             char line[200];
             snprintf(line, sizeof line, "asp compare: frame %u target %08X %ux%u: %llu of %u pixels differ, largest %llu",
                      frame, off, w, h, (unsigned long long)px, w * h, (unsigned long long)maxd);
             report_add(line);
         }
-        if (px && s_dump[0] && s_dumped++ < 6) {
+        static long long from = -2;
+        if (from == -2) { const char* e = getenv("DOTHEROES_ASP_DUMP_FROM"); from = e && *e ? atoll(e) : 0; }
+        if (px > 1000 && (long long)frame >= from && s_dump[0] && s_dumped++ < 6) {
             dump("asp-native", frame, seq, off, a.p, (size_t)bytes, w, h, f);
             dump("asp-engine", frame, seq, off, e.p, (size_t)bytes, w, h, f);
         }
@@ -2127,6 +2140,104 @@ void asp_describe_line(const Rec* r)
                 r->aclear[i].stencil, r->aclear[i].argb, r->aclear[i].surface.color_offset[0], r->aclear[i].surface.depth_offset);
 }
 
+// R5: asp's converted vertices and rebuilt index lists, kept on the GPU
+// across draws and frames (DOTHEROES_ASP_VCACHE=0 turns it off). An entry is
+// found by what it is made from -- the streams' descriptions, the vertex
+// count, the primitive -- and a hash of the guest bytes it is made from,
+// computed at every use: a rewrite of the game's data is a different entry.
+// Entries live in arenas of video memory the CPU writes; past the budget the
+// oldest arena goes whole (its entries are gone with it), destroyed when the
+// batch then being recorded has completed.
+struct Arena { Buf b; VkDeviceSize used = 0; uint32_t gen = 0; };
+std::deque<Arena> s_arenas;
+uint32_t s_arena_gen = 0;
+const VkDeviceSize kArena = 64u << 20;
+const size_t kArenas = 8;   // 512 MB
+struct CacheEnt { uint32_t gen; VkDeviceSize off; VkDeviceSize bytes; uint32_t count; };
+std::unordered_map<uint64_t, CacheEnt> s_vcache;
+// admission: by where the data comes from (without its content), the hash
+// it had the last time -- an entry is made only when the same place holds
+// the same bytes a second time, so data the game rewrites every frame
+// (debris, effects) goes through the batch's upload instead of filling the
+// arenas and pushing the static meshes out
+std::unordered_map<uint64_t, uint64_t> s_vseen;
+std::atomic<uint64_t> s_vc_uncached{0}, s_vc_direct{0}, s_vc_direct_bytes{0}, s_vc_direct_max{0};
+std::atomic<uint64_t> s_vc_hits{0}, s_vc_misses{0}, s_ic_hits{0}, s_ic_misses{0}, s_vc_hashed{0}, s_arenas_retired{0};
+
+int asp_vcache()
+{
+    static int on = -1;
+    if (on < 0) { const char* e = getenv("DOTHEROES_ASP_VCACHE"); on = !(e && *e == '0'); }
+    return on;
+}
+
+// a cached entry's buffer, or null when its arena is gone
+const Arena* arena_of(const CacheEnt& e)
+{
+    for (const Arena& a : s_arenas) if (a.gen == e.gen) return &a;
+    return nullptr;
+}
+
+// An arena: video memory only (the CPU's window into video memory is small
+// without resizable BAR, and shared with the batches' uploads)
+bool make_device_buffer(Buf& o, VkDeviceSize n, VkBufferUsageFlags usage)
+{
+    VkBufferCreateInfo ci = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+    ci.size = n; ci.usage = usage; ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (F.vkCreateBuffer(D.device, &ci, nullptr, &o.b) != VK_SUCCESS) return false;
+    VkMemoryRequirements rq;
+    F.vkGetBufferMemoryRequirements(D.device, o.b, &rq);
+    const uint32_t t = mem_type(rq.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    VkMemoryAllocateInfo ai = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+    ai.allocationSize = rq.size; ai.memoryTypeIndex = t;
+    if (t == ~0u || F.vkAllocateMemory(D.device, &ai, nullptr, &o.m) != VK_SUCCESS) {
+        F.vkDestroyBuffer(D.device, o.b, nullptr); o.b = VK_NULL_HANDLE; return false;
+    }
+    F.vkBindBufferMemory(D.device, o.b, o.m, 0);
+    o.p = nullptr; o.n = n;
+    return true;
+}
+
+// room for n bytes; the arena and its offset
+Arena* arena_alloc(Batch& b, VkDeviceSize n, VkDeviceSize* off)
+{
+    if (n > kArena) return nullptr;
+    if (s_arenas.empty() || ((s_arenas.back().used + 255) & ~(VkDeviceSize)255) + n > kArena) {
+        Arena a;
+        if (!make_device_buffer(a.b, kArena, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
+                                             VK_BUFFER_USAGE_TRANSFER_DST_BIT)) {
+            static int said = 0;
+            if (!said++) report_add("render: asp's vertex cache: an arena could not be made");
+            return nullptr;
+        }
+        a.gen = ++s_arena_gen;
+        s_arenas.push_back(a);
+        if (s_arenas.size() > kArenas) {
+            Buf old = s_arenas.front().b;
+            s_arenas.pop_front();
+            s_arenas_retired++;
+            b.done.push_back([old] { F.vkDestroyBuffer(D.device, old.b, nullptr); F.vkFreeMemory(D.device, old.m, nullptr); });
+        }
+    }
+    Arena& a = s_arenas.back();
+    *off = (a.used + 255) & ~(VkDeviceSize)255;
+    a.used = *off + n;
+    return &a;
+}
+
+// The arena's bytes at off come from the batch's upload buffer at src: a
+// copy, and a barrier before any later vertex or index read of them
+void arena_fill(Batch& b, const Arena& a, VkDeviceSize off, VkDeviceSize src, VkDeviceSize n)
+{
+    VkBufferCopy c = { src, off, n };
+    F.vkCmdCopyBuffer(b.cb, b.up.b, a.b.b, 1, &c);
+    VkMemoryBarrier mb = { VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+    mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    mb.dstAccessMask = VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT;
+    F.vkCmdPipelineBarrier(b.cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+    mark(b, kSectCopy);
+}
+
 void asp_draw(const Rec* r)
 {
     Batch& b = batch(r->frame);
@@ -2184,17 +2295,143 @@ void asp_draw(const Rec* r)
         if (n > nv) { unsupported(r, "asp: more vertices drawn than the object has"); return; }
         for (uint32_t i = 0; i < n; i++) occ[i] = i;
     }
-    std::vector<rsx_vertex_ref> refs(nv);
-    for (uint32_t i = 0; i < nv; i++) refs[i] = { i, 0 };
+    // the vertices the draw references: [vmin, vmin + nref), the indices rebased to it
+    uint32_t vmin = ~0u, vmax = 0;
+    for (uint32_t i = 0; i < n; i++) { if (occ[i] < vmin) vmin = occ[i]; if (occ[i] > vmax) vmax = occ[i]; }
+    const uint32_t nref = vmax - vmin + 1;
+    if (vmin) for (uint32_t i = 0; i < n; i++) occ[i] -= vmin;
+    if (r->src_hash) {   // DOTHEROES_ASP_RACE_CHECK: the same bytes as when the game drew it?
+        uint64_t h = 1469598103934665603ull;
+        for (uint32_t i = 0; i < r->nvr; i++) {
+            const uint8_t* p = guest_ptr_live(nullptr, r->vr[i].location, r->vr[i].offset, r->vr[i].bytes);
+            if (p) h = fnv(p, r->vr[i].bytes, h);
+        }
+        if (r->idx_ea) h = fnv(vm_base + r->idx_ea, (size_t)n * (r->idx_type == 2 ? 2 : 4), h);
+        stats().asp_race_checked++;
+        if ((h | 1) != r->src_hash) {
+            stats().asp_race_changed++;
+            static int said = 0;
+            if (said++ < 12) {
+                char line[200];
+                snprintf(line, sizeof line, "asp race: record %llu frame %u: its bytes changed before the native draw (%u streams, %u vertices)",
+                         (unsigned long long)r->seq, r->frame, r->nvr, nv);
+                report_add(line);
+            }
+        }
+    }
+    const uint32_t n_draw = rsx_draw_engine_topology_index_count(r->prim, n, nullptr, 0);
     rsx_vertex_fetch_plan plan;
     fetch_plan(&plan, r, layout);
     plan.guest_ptr = guest_ptr_live; plan.guest_user = nullptr;
-    rsx_vertex_fetch_plan_prepare(&plan, refs.data(), nv);
-    std::vector<uint8_t> verts((size_t)nv * layout.stride);
-    if (!rsx_vertex_fetch_many(&plan, refs.data(), nv, verts.data())) { unsupported(r, "asp: vertex fetch"); return; }
-    const uint32_t n_draw = rsx_draw_engine_topology_index_count(r->prim, n, nullptr, 0);
-    std::vector<uint32_t> idx(n_draw ? n_draw : 1);
-    rsx_draw_engine_write_topology_indices(r->prim, n, nullptr, 0, occ.data(), idx.data());
+    // the vertices: from the cache when the same streams hold the same bytes
+    VkBuffer vbuf = VK_NULL_HANDLE, ibuf = VK_NULL_HANDLE;
+    VkDeviceSize vofs = 0, iofs = 0;
+    std::vector<uint8_t> verts;
+    std::vector<uint32_t> idx;
+    const VkDeviceSize vbytes = (VkDeviceSize)nref * layout.stride;
+    if (asp_vcache()) {
+        uint64_t k = fnv(&layout, sizeof layout, 0x5EEDull);
+        k = fnv(&nv, 4, k);
+        for (uint32_t a = 0; a < 16; a++) {
+            if (!(layout.mask >> a & 1)) continue;
+            const rsx_vertex_fetch_attr& f = plan.attr[a];
+            k = fnv(&f.desc, sizeof f.desc, k);
+            k = fnv(f.default_value, sizeof f.default_value, k);
+        }
+        k = fnv(&plan.base_offset, 4, k);
+        k = fnv(&vmin, 4, fnv(&nref, 4, k));
+        uint64_t place = k;   // the place: k before the bytes are hashed in
+        // the guest bytes: each stream's referenced range, hashed (ranges of one interleaved buffer once)
+        uint32_t lo[16], hi[16], loc[16], nr = 0;
+        for (uint32_t a = 0; a < 16; a++) {
+            const VertexInput& in = r->st.vin[a];
+            if (!in.size) continue;
+            const uint32_t base = (r->st.vdata.base_offset + (in.offset & 0x7FFFFFFFu)) & 0x0FFFFFFFu;
+            const uint32_t es = rsx_vertex_attrib_size(in.type & 7u, in.size), stride = in.stride ? in.stride : es;
+            const uint32_t vlo = base + vmin * stride, vhi = base + vmax * stride + es;
+            bool merged = false;
+            for (uint32_t j = 0; j < nr && !merged; j++)
+                if (loc[j] == in.location && vlo <= hi[j] && vhi >= lo[j]) {
+                    lo[j] = lo[j] < vlo ? lo[j] : vlo; hi[j] = hi[j] > vhi ? hi[j] : vhi;
+                    merged = true;
+                }
+            if (!merged && nr < 16) { lo[nr] = vlo; hi[nr] = vhi; loc[nr] = in.location; nr++; }
+        }
+        for (uint32_t j = 0; j < nr; j++) {
+            const uint8_t* p = guest_ptr_live(nullptr, loc[j], lo[j], hi[j] - lo[j]);
+            if (!p) { unsupported(r, "asp: vertex range"); return; }
+            k = fast_hash(p, hi[j] - lo[j], k ^ ((uint64_t)loc[j] << 32 | lo[j]));
+            place = fnv(&lo[j], 4, fnv(&hi[j], 4, fnv(&loc[j], 4, place)));
+            s_vc_hashed += hi[j] - lo[j];
+        }
+        auto it = s_vcache.find(k);
+        const Arena* ar = it != s_vcache.end() ? arena_of(it->second) : nullptr;
+        uint64_t& seen = s_vseen[place];
+        const bool admit = seen == k;
+        seen = k;
+        if (ar) { vbuf = ar->b.b; vofs = it->second.off; s_vc_hits++; }
+        else if (!admit) s_vc_uncached++;
+        else {
+            VkDeviceSize off = 0, src = ~(VkDeviceSize)0;
+            if (b.used + vbytes + 512 < kUpload / 2) src = (b.used + 15) & ~(VkDeviceSize)15;   // the staging place, aligned
+            Arena* na = src != ~(VkDeviceSize)0 ? arena_alloc(b, vbytes, &off) : nullptr;
+            if (na) {
+                std::vector<rsx_vertex_ref> refs(nref);
+                for (uint32_t i = 0; i < nref; i++) refs[i] = { vmin + i, 0 };
+                rsx_vertex_fetch_plan_prepare(&plan, refs.data(), nref);
+                if (!rsx_vertex_fetch_many(&plan, refs.data(), nref, b.up.p + src)) { unsupported(r, "asp: vertex fetch"); return; }
+                b.used = src + vbytes;
+                arena_fill(b, *na, off, src, vbytes);
+                s_vcache[k] = { na->gen, off, vbytes, nref };
+                vbuf = na->b.b; vofs = off;
+                s_vc_misses++;
+                stats().n_asp_vertex_bytes += vbytes;
+            }
+        }
+        // the index list, rebuilt as triangles: by the index bytes, the primitive and counts
+        uint64_t ik = fnv(&r->prim, 4, 0x1D7ull);
+        ik = fnv(&n, 4, ik); ik = fnv(&vmin, 4, fnv(&nref, 4, ik));
+        ik = r->idx_ea ? fast_hash(vm_base + r->idx_ea, (size_t)n * (r->idx_type == 2 ? 2 : 4), ik ^ r->idx_ea ^ ((uint64_t)r->idx_type << 40))
+                       : fnv("arrays", 6, ik);
+        auto jt = s_vcache.find(ik);
+        const Arena* ia = jt != s_vcache.end() ? arena_of(jt->second) : nullptr;
+        uint64_t iplace = fnv(&r->idx_ea, 4, fnv(&n, 4, fnv(&r->prim, 4, 0x1D8ull)));
+        uint64_t& iseen = s_vseen[iplace];
+        const bool iadmit = iseen == ik;
+        iseen = ik;
+        if (ia) { ibuf = ia->b.b; iofs = jt->second.off; s_ic_hits++; }
+        else if (!iadmit) s_vc_uncached++;
+        else {
+            const VkDeviceSize ibytes = (VkDeviceSize)(n_draw ? n_draw : 1) * 4;
+            VkDeviceSize off = 0, src = ~(VkDeviceSize)0;
+            if (b.used + ibytes + 512 < kUpload / 2) src = (b.used + 15) & ~(VkDeviceSize)15;
+            Arena* na = src != ~(VkDeviceSize)0 ? arena_alloc(b, ibytes, &off) : nullptr;
+            if (na) {
+                rsx_draw_engine_write_topology_indices(r->prim, n, nullptr, 0, occ.data(), (uint32_t*)(b.up.p + src));
+                b.used = src + ibytes;
+                arena_fill(b, *na, off, src, ibytes);
+                s_vcache[ik] = { na->gen, off, ibytes, n_draw };
+                ibuf = na->b.b; iofs = off;
+                s_ic_misses++;
+            }
+        }
+        if (s_vcache.size() > 400000) s_vcache.clear();   // bounded: everything again from the guest
+        if (s_vseen.size() > 400000) s_vseen.clear();
+    }
+    if (!vbuf) {
+        s_vc_direct++; s_vc_direct_bytes += vbytes;
+        if (vbytes > s_vc_direct_max) s_vc_direct_max = vbytes;
+        std::vector<rsx_vertex_ref> refs(nref);
+        for (uint32_t i = 0; i < nref; i++) refs[i] = { vmin + i, 0 };
+        rsx_vertex_fetch_plan_prepare(&plan, refs.data(), nref);
+        verts.resize((size_t)vbytes);
+        if (!rsx_vertex_fetch_many(&plan, refs.data(), nref, verts.data())) { unsupported(r, "asp: vertex fetch"); return; }
+        stats().n_asp_vertex_bytes += vbytes;
+    }
+    if (!ibuf) {
+        idx.resize(n_draw ? n_draw : 1);
+        rsx_draw_engine_write_topology_indices(r->prim, n, nullptr, 0, occ.data(), idx.data());
+    }
     // the pipeline
     rsx_fp_constant_block fc;
     const Pipe* P = pipeline_asp(r, layout, rt, df, &fc);
@@ -2242,7 +2479,8 @@ void asp_draw(const Rec* r)
             src = ct->second;
             if (src == t) { unsupported(r, "asp: a draw sampling its own target"); return; }
             views[u] = view_of(src, tx.remap & 0xFFFFu, tx.format);
-        } else if ((src = guest_texture_live(b, r, tx))) views[u] = view_of(src, tx.remap & 0xFFFFu, tx.format);
+        } else if ((src = static_texture(b, r, u, tx)) || (src = guest_texture_live(b, r, tx)))
+            views[u] = view_of(src, tx.remap & 0xFFFFu, tx.format);
         if (!src) {
             char why[200];
             snprintf(why, sizeof why, "asp: unit %u (format %02X %ux%u mips %u dim %u cube %u) has no source at %u:%08X", u,
@@ -2261,12 +2499,15 @@ void asp_draw(const Rec* r)
         si[u].sampler = sampler(st.samp[u]);
     }
     const VkDeviceSize o_vc = upload(b, vcb, sizeof vcb), o_pc = upload(b, pcb.data(), pcb.size());
-    const VkDeviceSize o_v = upload(b, verts.data(), verts.size(), 16), o_i = upload(b, idx.data(), idx.size() * 4, 16);
+    const VkDeviceSize o_v = vbuf ? vofs : upload(b, verts.data(), verts.size(), 16);
+    const VkDeviceSize o_i = ibuf ? iofs : upload(b, idx.data(), idx.size() * 4, 16);
     if (o_vc == ~(VkDeviceSize)0 || o_pc == ~(VkDeviceSize)0 || o_v == ~(VkDeviceSize)0 || o_i == ~(VkDeviceSize)0 ||
         b.sets >= kSets) {
         unsupported(r, "asp: the batch is full");
         return;
     }
+    if (!vbuf) vbuf = b.up.b;
+    if (!ibuf) ibuf = b.up.b;
     VkDescriptorSetAllocateInfo dai = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
     dai.descriptorPool = b.dp; dai.descriptorSetCount = 1; dai.pSetLayouts = &s_dsl;
     VkDescriptorSet set;
@@ -2304,8 +2545,8 @@ void asp_draw(const Rec* r)
     const float bc[4] = { 0, 0, 0, 0 };   // the blend colour: not described yet (asp's constant-colour blends)
     F.vkCmdSetBlendConstants(b.cb, bc);
     F.vkCmdBindDescriptorSets(b.cb, VK_PIPELINE_BIND_POINT_GRAPHICS, s_pl, 0, 1, &set, 0, nullptr);
-    F.vkCmdBindVertexBuffers(b.cb, 0, 1, &b.up.b, &o_v);
-    F.vkCmdBindIndexBuffer(b.cb, b.up.b, o_i, VK_INDEX_TYPE_UINT32);
+    F.vkCmdBindVertexBuffers(b.cb, 0, 1, &vbuf, &o_v);
+    F.vkCmdBindIndexBuffer(b.cb, ibuf, o_i, VK_INDEX_TYPE_UINT32);
     F.vkCmdDrawIndexed(b.cb, n_draw, 1, 0, 0, 0);
     F.vkCmdEndRenderPass(b.cb);
     mark(b, kSectDraw);
@@ -2314,7 +2555,6 @@ void asp_draw(const Rec* r)
     b.records++;
     stats().n_asp_draws++;
     if (t) compare_after(b, r, t, W, H);   // DOTHEROES_ASP_COMPARE_DRAWS
-    stats().n_asp_vertex_bytes += verts.size();
 }
 
 void clear(const Rec* r)
@@ -2683,11 +2923,22 @@ void render_drain(uint32_t timeout_ms)
 
 void render_report(std::vector<std::string>& out)
 {
+    if (s_vc_hits || s_vc_misses) {
+        char line[300];
+        snprintf(line, sizeof line, "asp vertex cache: vertices %llu hits %llu misses, indices %llu hits %llu misses, %llu not cached "
+                 "(changed since their last use), %.1f MB hashed, %zu arenas, %llu retired", (unsigned long long)s_vc_hits.load(),
+                 (unsigned long long)s_vc_misses.load(), (unsigned long long)s_ic_hits.load(), (unsigned long long)s_ic_misses.load(),
+                 (unsigned long long)s_vc_uncached.load(), s_vc_hashed / 1048576.0, s_arenas.size(), (unsigned long long)s_arenas_retired.load());
+        out.push_back(line);
+    }
     if (s_aspc_n) {
         char line[300];
         snprintf(line, sizeof line, "asp compare: %llu targets compared, %llu equal; %.4f%% of pixels differ, the largest difference %llu",
                  (unsigned long long)s_aspc_n.load(), (unsigned long long)s_aspc_equal.load(),
                  s_aspc_px_total ? 100.0 * s_aspc_px / s_aspc_px_total : 0.0, (unsigned long long)s_aspc_maxd.load());
+        out.push_back(line);
+        snprintf(line, sizeof line, "asp vertex cache: converted without the cache %llu draws, %.1f MB, the largest %.1f MB",
+                 (unsigned long long)s_vc_direct.load(), s_vc_direct_bytes / 1048576.0, s_vc_direct_max / 1048576.0);
         out.push_back(line);
     }
     {
@@ -2827,7 +3078,8 @@ int compare_wanted(const Rec* r)
     if (r->kind == kAspDraw) {   // R5: DOTHEROES_ASP_COMPARE_DRAWS=<n>: every asp draw of every n-th frame
         static int ad = -1;
         if (ad < 0) { const char* e = getenv("DOTHEROES_ASP_COMPARE_DRAWS"); ad = e && *e ? atoi(e) : 0; }
-        return ad > 0 && asp_native() && r->frame % (uint32_t)ad == 0 && r->nneed && r->need[0].unit == 0xFF ? kCmpEvery : kCmpNone;
+        return ad > 0 && asp_native() && r->frame % (uint32_t)ad == 0 && r->nneed && r->need[0].unit == 0xFF &&
+               r->st.raster.color_mask ? kCmpEvery : kCmpNone;
     }
     if (r->kind != kDraw) return kCmpNone;
     const bool every_frame = every > 0 && r->frame % (uint32_t)every == 0;

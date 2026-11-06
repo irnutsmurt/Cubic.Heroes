@@ -213,6 +213,7 @@ struct Rec {
     // vertices [0, vcount) of each enabled stream, read from guest memory
     // by the native renderer (vr[] give the streams' ranges, no bytes)
     uint32_t idx_ea, idx_type, vcount;
+    uint64_t src_hash;             // R5 (DOTHEROES_ASP_RACE_CHECK=1): its vertex and index bytes' hash when the game drew it
     // kAspDraw (R5): asp's clears since its previous draw, done before this
     // draw (each on the surface it was made with): CELL_GCM_CLEAR_* bits,
     // the colour (ARGB8, or four floats for a float target), depth (24-bit) and stencil
@@ -333,11 +334,13 @@ struct Stats {
     std::atomic<uint64_t> lap_delta_changes{0};
     std::atomic<uint64_t> xc_draws{0}, xc_regs{0}, xc_consts{0}, xc_vp{0}, xc_fp{0}, xc_vtx{0}, xc_tex{0};
     std::atomic<uint64_t> handoffs{0}, handoff_fail{0};
+    std::atomic<uint64_t> handoffs_shared{0};   // R5: handoffs not needed: asp drew the surface natively
     // the native renderer
     std::atomic<uint64_t> n_draws{0}, n_clears{0}, n_skipped{0}, n_unsupported{0}, n_batches{0};
     std::atomic<uint64_t> n_pipelines{0}, n_images{0}, n_image_bytes{0}, n_static_textures{0}, n_feedback{0};
     std::atomic<uint64_t> n_frames{0};    // frames with PPFX records (the per-frame figures' denominator)
     std::atomic<uint64_t> n_asp_draws{0}, n_asp_vertex_bytes{0}, n_asp_clears{0};   // R5: asp's records drawn natively
+    std::atomic<uint64_t> asp_race_checked{0}, asp_race_changed{0};   // R5: guest bytes changed between the record and its native draw
     std::atomic<uint64_t> n_retired{0};   // images replaced at an address (another size or format) and destroyed later
     std::atomic<uint64_t> n_barriers{0}, n_barriers_full{0}, n_handoff_copies{0}, n_snapshot_copies{0};
     // comparisons: wanted = asked for; then exactly one of equal, differ,
@@ -369,6 +372,9 @@ struct Stats {
     std::atomic<uint64_t> asp_records{0}, asp_matched{0}, asp_missed{0}, asp_xc_draws{0}, asp_xc_differ{0};
     std::atomic<uint64_t> asp_draw_events{0};   // engine draw events inside a matched asp draw's commands
     std::atomic<uint64_t> asp_group_restores{0};   // asp's state items restored from its store by a re-emission
+    std::atomic<uint64_t> game_draw_records{0};    // the game's own indexed draws recorded with asp's (R5)
+    std::atomic<uint64_t> asp_tex_snapshots{0};    // small textures taken as the game drew (R5)
+    std::atomic<uint64_t> asp_bypassed{0}, asp_bypassed_words{0}, asp_not_bypassed{0}, asp_marker_fail{0};   // R5's bypass
 };
 Stats& stats();
 void report_add(const char* line);   // a line in the next report (diagnostics)

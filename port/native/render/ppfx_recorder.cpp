@@ -156,6 +156,10 @@ const uint32_t kGcmLo = 0x0069C000u, kGcmHi = 0x006B0000u;     // libgcm's
 
 uint32_t be32(const uint8_t* p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
 uint32_t g32(uint32_t ea) { return be32(vm_base + ea); }
+void p32(uint32_t ea, uint32_t v)
+{
+    vm_base[ea] = (uint8_t)(v >> 24); vm_base[ea + 1] = (uint8_t)(v >> 16); vm_base[ea + 2] = (uint8_t)(v >> 8); vm_base[ea + 3] = (uint8_t)v;
+}
 uint32_t g16(uint32_t ea) { return (uint32_t)vm_base[ea] << 8 | vm_base[ea + 1]; }
 uint32_t g8(uint32_t ea) { return vm_base[ea]; }
 bool ea_ok(uint32_t ea, uint32_t n = 4) { return ea >= 0x10000u && (uint64_t)ea + n <= 0xE0000000ull; }
@@ -331,7 +335,9 @@ struct Asp {
     uint8_t fp_bound;                // an asp program pair is bound: its draws take the program from the shadow
     uint32_t fp_bound_obj;           // the bound fragment shader object
     std::unordered_map<uint32_t, uint32_t> fp_last_obj;   // per offset: the object uploaded there last
+    std::unordered_map<uint32_t, uint64_t> fp_slot_epoch; // per offset: the shadow's epoch when it last got a program
     uint64_t fp_stale_draws;         // draws whose bound program is not the one last uploaded at its offset
+    uint64_t fp_resident_binds;      // binds of a program asp did not upload first (taken from the object)
     // R5: asp's state store as its setters left it, in the explicit form
     // (every setter writes its item into the command buffer and into the
     // item's slot; asp re-emits ranges of the store), and the inputs a draw
@@ -348,9 +354,10 @@ struct Asp {
     uint32_t samp_written_valid;
     uint8_t stored_samp_valid;
     uint64_t rebuilds, samp_restores;
+    std::unordered_set<uint64_t> asp_targets;   // surfaces asp draws into (location << 32 | offset)
     Rec::AspClear clears[32];        // asp's clears waiting for its next draw
     uint32_t nclears;
-    uint64_t clears_dropped;
+    uint64_t clears_dropped, clears_merged;
 } A;
 
 // Calls on other threads than the producer's touch the shadow (an inline
@@ -423,6 +430,7 @@ void enc_fp_bind(ppu_context* c, uint32_t flips)
 {
     const uint32_t prog = (uint32_t)c->gpr[4], off = (uint32_t)c->gpr[5], loc = (uint32_t)c->gpr[6] & 1;
     if (!ea_ok(prog, 32)) return;
+    A.fp_bound = 0;   // R5: a libgcm bind: the program is this one, not asp's
     FragmentProgram& f = S.st.fp;
     f.offset = off; f.location = (uint8_t)loc;
     const uint32_t fpd = prog + g32(prog + 20);   // CgBinaryFragmentProgram
@@ -760,6 +768,8 @@ void asp_mirror(uint32_t addr)
             t.border = 0; t.address_by = kByAsp;
         }
         A.stored_samp_valid = 1;
+        A.stored.scissor = { 0, 0, 0x0FFF, 0x0FFF };   // and its scissor off (the store's re-emission writes 0x0FFF0000)
+        A.stored_valid |= 1u << kGScissor;
         A.rebuilds++;
         return;
     }
@@ -1238,6 +1248,27 @@ void build_clear(ppu_context* c)
 // asp's draw returns, matched with the engine's draw inside its commands and
 // cross-checked there. Not rendered: R5's first step.
 
+int bypass_mode();
+// R5's bypass of asp's command writers (DOTHEROES_ASP_BYPASS=1: its draws):
+// only with asp drawn natively, PPFX's images shared and R4's bypass of PPFX
+// (=1): then nothing the engine would draw needs asp's scene
+int asp_bypass()
+{
+    static int on = -1;
+    if (on < 0) {
+        const char* e = getenv("DOTHEROES_ASP_BYPASS");
+        const char* n = getenv("DOTHEROES_ASP_NATIVE");
+        const char* sh = getenv("DOTHEROES_ASP_SHARE");
+        on = e && *e ? atoi(e) : 0;
+        if (on && (!(n && *n == '1') || !(sh && *sh == '1') || mode() != 2 || bypass_mode() != 1)) {
+            fprintf(stderr, "[ppfx] DOTHEROES_ASP_BYPASS needs DOTHEROES_ASP_NATIVE=1, DOTHEROES_ASP_SHARE=1 and "
+                            "DOTHEROES_PPFX_BYPASS=1 (with DOTHEROES_PPFX_NATIVE=1): off\n");
+            on = 0;
+        }
+    }
+    return on;
+}
+
 int asp_records_on()
 {
     static int on = -1;
@@ -1256,6 +1287,21 @@ void asp_draw_enter(ppu_context* c)
     r4_ctx_fields(v, asp_ctx());
     v.lap = cellGcm_title_laps_pub(nullptr);
     v.gpr[3] = c->gpr[3];   // the draw object
+    s_vstack.push_back(v);
+}
+
+// R5: the game's own cellGcmSetDrawIndexArray(ctx, mode, count, type,
+// location, offset): drawn inside asp's scene with asp's programs (the
+// reflection's stencil mask, the water, scene parts); a record like asp's,
+// built at its return
+void game_draw_enter(ppu_context* c)
+{
+    VEntry v;
+    memset(&v, 0, sizeof v);
+    v.addr = 0x006A2164u; v.kind = 2;
+    r4_ctx_fields(v, (uint32_t)c->gpr[3]);
+    v.lap = cellGcm_title_laps_pub(nullptr);
+    for (int i = 3; i <= 8; i++) v.gpr[i] = c->gpr[i];
     s_vstack.push_back(v);
 }
 
@@ -1285,17 +1331,10 @@ void asp_draw_probe(const VEntry& v)
 // reads and writes: its colour and depth targets, the units its fragment
 // program samples, its streams' ranges. No bytes: the native renderer reads
 // guest memory itself (docs/NATIVE_R5.md section 4).
-void asp_draw_operation(Rec* r, uint32_t self)
+// its streams: [0, vcount) of each enabled input
+void asp_draw_streams(Rec* r)
 {
-    r->prim = r->first = r->count = r->idx_ea = r->idx_type = r->vcount = 0;
-    if (!ea_ok(self, 0x28)) { r->why = kWhyVertex; return; }
-    r->prim = g32(self + 0x08);
-    const uint32_t ic = g32(self + 0x0C);
-    r->vcount = g32(self + 0x10);
-    r->idx_ea = ic ? g32(self + 0x18) : 0;
-    r->idx_type = g32(self + 0x24);
-    r->count = ic ? ic : r->vcount;
-    // its streams: [0, vcount) of each enabled input
+    r->nvr = 0;
     for (uint32_t i = 0; i < 16; i++) {
         const VertexInput& in = r->st.vin[i];
         if (!in.size || !r->vcount) continue;
@@ -1303,6 +1342,21 @@ void asp_draw_operation(Rec* r, uint32_t self)
         vr.location = in.location; vr.offset = (r->st.vdata.base_offset + (in.offset & 0x7FFFFFFFu)) & 0x0FFFFFFFu;
         vr.bytes = (r->vcount - 1) * in.stride + elem_bytes(in.type, in.size);
         vr.at = 0;
+    }
+}
+
+void asp_draw_operation(Rec* r, uint32_t self)
+{
+    r->prim = r->first = r->count = r->idx_ea = r->idx_type = r->vcount = 0;
+    if (self) {
+        if (!ea_ok(self, 0x28)) { r->why = kWhyVertex; return; }
+        r->prim = g32(self + 0x08);
+        const uint32_t ic = g32(self + 0x0C);
+        r->vcount = g32(self + 0x10);
+        r->idx_ea = ic ? g32(self + 0x18) : 0;
+        r->idx_type = g32(self + 0x24);
+        r->count = ic ? ic : r->vcount;
+        asp_draw_streams(r);
     }
     // its targets
     const Surface& sf = r->st.surface;
@@ -1320,6 +1374,7 @@ void asp_draw_operation(Rec* r, uint32_t self)
     }
     // the units its fragment program samples
     const uint32_t units = r->fp ? rsx_fp_texture_units(r->fp->bytes.data(), (uint32_t)r->fp->bytes.size()) : 0;
+    r->ntex = 0; r->tdata.clear();
     for (uint32_t u = 0; u < 16 && r->nneed < kMaxNeeds; u++) {
         if (!(units >> u & 1) || !r->st.samp[u].enable) continue;
         const Texture& t = r->st.tex[u];
@@ -1327,7 +1382,51 @@ void asp_draw_operation(Rec* r, uint32_t self)
         memset(&n, 0, sizeof n);
         n.location = t.location ? 1u : 0u; n.offset = t.offset; n.format = t.format;
         n.w = t.width; n.h = t.height; n.pitch = t.pitch; n.unit = (uint8_t)u;
+        // a small uncompressed texture in guest memory that is no surface's:
+        // taken by the walker at the draw's place in the stream (the bridge's
+        // guest_texture) -- the game rewrites some after issuing the draw (the
+        // water's), and the GPU reads them when it executes it
+        const uint32_t base = t.format & 0x9Fu;
+        const uint64_t key = (uint64_t)n.location << 32 | n.offset;
+        n.ppfx_wrote = (base >= 0x86 && base <= 0x88) || S.ppfx_targets.count(key) || A.asp_targets.count(key) ? 1 : 0;
     }
+    if (sf.color_target) A.asp_targets.insert((uint64_t)(sf.color_location[0] ? 1u : 0u) << 32 | sf.color_offset[0]);
+}
+
+// DOTHEROES_ASP_RACE_CHECK=1 (a diagnostic): the record's vertex and index
+// bytes hashed as the game drew it; the native renderer hashes them again
+// when it draws (stats: asp_race_changed)
+uint64_t asp_race_hash(const Rec* r)
+{
+    static int on = -1;
+    if (on < 0) { const char* e = getenv("DOTHEROES_ASP_RACE_CHECK"); on = e && *e == '1'; }
+    if (!on) return 0;
+    uint64_t h = 1469598103934665603ull;
+    for (uint32_t i = 0; i < r->nvr; i++) {
+        const uint32_t ea = cellGcmResolveLocated(r->vr[i].location == 0, r->vr[i].offset);
+        if (ea_ok(ea, r->vr[i].bytes)) h = fnv(vm_base + ea, r->vr[i].bytes, h);
+    }
+    if (r->idx_ea && ea_ok(r->idx_ea, r->count * (r->idx_type == 2 ? 2u : 4u))) h = fnv(vm_base + r->idx_ea, r->count * (r->idx_type == 2 ? 2u : 4u), h);
+    return h | 1;
+}
+
+void game_draw_operation(Rec* r, const VEntry& v)
+{
+    r->prim = (uint32_t)v.gpr[4] & 0xFF; r->count = (uint32_t)v.gpr[5]; r->first = 0;
+    const uint32_t type = (uint32_t)v.gpr[6] & 0xF, loc = (uint32_t)v.gpr[7] & 1, off = (uint32_t)v.gpr[8];
+    r->idx_type = type == 1 ? 2u : 4u;   // CELL_GCM_DRAW_INDEX_ARRAY_TYPE_16 -> asp's 2 (16-bit), else 32-bit
+    r->idx_ea = cellGcmResolveLocated(loc == 0, off);
+    r->vcount = 0;
+    const uint32_t isz = r->idx_type == 2 ? 2u : 4u;
+    if (!r->count || r->count > (1u << 22) || !ea_ok(r->idx_ea, r->count * isz)) { r->why = kWhyVertex; return; }
+    // the vertices it reads: [0, the largest index]
+    uint32_t mx = 0;
+    for (uint32_t i = 0; i < r->count; i++) {
+        const uint32_t x = isz == 2 ? g16(r->idx_ea + 2 * i) : g32(r->idx_ea + 4 * i);
+        if (x > mx) mx = x;
+    }
+    r->vcount = mx + 1;
+    stats().game_draw_records++;
 }
 
 void asp_draw_exit(const VEntry& v)
@@ -1355,7 +1454,14 @@ void asp_draw_exit(const VEntry& v)
     // the fragment program asp uploaded at the bound offset
     r->vp = vp_blob_now();
     r->fp = A.fp_bound ? asp_fp_now() : S.fp;
-    asp_draw_operation(r, (uint32_t)v.gpr[3]);
+    if (v.addr == 0x006A2164u) {   // the game's draw: its operation from the call; its streams, targets, units as asp's
+        asp_draw_operation(r, 0);
+        r->why = kWhyNone;
+        if (!r->vp) r->why = kWhyNoVp; else if (!r->fp) r->why = kWhyNoFp;
+        game_draw_operation(r, v);
+        asp_draw_streams(r);
+    } else asp_draw_operation(r, (uint32_t)v.gpr[3]);
+    r->src_hash = asp_race_hash(r);
     r->naclear = A.nclears;
     for (uint32_t i = 0; i < A.nclears; i++) r->aclear[i] = A.clears[i];
     A.nclears = 0;
@@ -1380,11 +1486,42 @@ void asp_draw_exit(const VEntry& v)
     r->io_alt = cellGcm_ea2io_pub(begin);
     r->lap_end = cellGcm_title_laps_pub(nullptr);
     r->io_end = cellGcm_ea2io_pub(cur);
+    // R5's bypass, stage 1 (DOTHEROES_ASP_BYPASS=1): the draw's commands --
+    // its own and those of the calls inside it -- taken back and a marker in
+    // their place; the native renderer alone draws it. Not when its commands
+    // wrapped the ring (counted): the engine draws that one.
+    const bool bypass = asp_bypass() >= 1;
+    if (bypass) {
+        const uint32_t now = g32(v.ctx_ea + 8);
+        if (cellGcm_title_laps_pub(nullptr) == v.lap && now >= v.cur && now - v.cur < (4u << 20)) {
+            p32(v.ctx_ea + 8, v.cur);
+            r->bypassed = 1;
+            stats().asp_bypassed++;
+            stats().asp_bypassed_words += (now - v.cur) / 4;
+        } else stats().asp_not_bypassed++;
+    }
     publish(r);
     stats().asp_records++;
+    if (r->bypassed && !bridge_marker(v.ctx_ea, r->seq)) stats().asp_marker_fail++;
 }
 
 // asp's methods R5 describes: 1 + what ppfx_rec_observe answers, or 0 (not one of them)
+// asp's clears wait for its next draw (Rec::aclear). A clear that covers an
+// earlier pending one -- the same surface, every aspect the earlier one
+// cleared -- replaces it; past 32 the oldest goes (counted)
+void asp_pend_clear(const Rec::AspClear& k)
+{
+    for (uint32_t i = 0; i < A.nclears;) {
+        const Rec::AspClear& o = A.clears[i];
+        const bool same = o.surface.color_offset[0] == k.surface.color_offset[0] && o.surface.depth_offset == k.surface.depth_offset &&
+                          o.surface.color_target == k.surface.color_target && (o.mask & ~k.mask) == 0;
+        if (same) { memmove(&A.clears[i], &A.clears[i + 1], (A.nclears - i - 1) * sizeof k); A.nclears--; A.clears_merged++; }
+        else i++;
+    }
+    if (A.nclears < 32) A.clears[A.nclears++] = k;
+    else { memmove(&A.clears[0], &A.clears[1], 31 * sizeof k); A.clears[31] = k; A.clears_dropped++; }
+}
+
 // A unit's texture from a CellGcmTexture (asp's objects hold libgcm's own)
 void enc_texture_at(uint32_t unit, uint32_t t)
 {
@@ -1569,9 +1706,10 @@ int asp_record_call(uint32_t addr, ppu_context* c)
         if (!n) n = 16;
         const uint32_t at = g32((uint32_t)c->gpr[2] - 0x2D94u);   // anisotropy codes by ratio
         m.max_aniso = ea_ok(at + 0x40 + n - 1, 1) ? (uint8_t)(g8(at + 0x40 + n - 1) & 7) : 0;
-        // the address mode, the filter and the border colour: written (into
-        // the command buffer and the store) only when they differ from what
-        // the bind last wrote for the unit
+        // the address mode with the border colour, and the filter: written
+        // (into the command buffer and the store) only when the entry marks
+        // them changed -- its dirty byte at +0x2E for the first, +0x2D or
+        // +0x2C for the filter, which the bind clears (read here before it runs)
         Sampler nw = m;
         nw.min_filter = (uint8_t)(g32(e + 0x0C) + 1); nw.mag_filter = (uint8_t)(g32(e + 0x08) + 1);
         nw.conv = 1; nw.bias = 0; nw.filter_signed = 0;
@@ -1579,24 +1717,18 @@ int asp_record_call(uint32_t addr, ppu_context* c)
         nw.unsigned_remap = 0; nw.gamma = 0; nw.zfunc = 6;   // the depth comparison GEQUAL
         auto ch = [](float f) -> uint32_t { return f <= 0 ? 0u : f >= 1 ? 255u : (uint32_t)(f * 255.0f + 0.5f); };
         nw.border = ch(gfloat(e + 0x28)) << 24 | ch(gfloat(e + 0x1C)) << 16 | ch(gfloat(e + 0x20)) << 8 | ch(gfloat(e + 0x24));
-        Sampler& w = A.samp_written[u];
-        const bool known = A.samp_written_valid >> u & 1;
         Sampler& st = A.stored.samp[u];
         // control 0 (enable, levels, anisotropy): always written
         st.enable = m.enable; st.min_lod = m.min_lod; st.max_lod = m.max_lod; st.max_aniso = m.max_aniso;
-        if (!known || nw.wrap_s != w.wrap_s || nw.wrap_t != w.wrap_t || nw.wrap_r != w.wrap_r || nw.zfunc != w.zfunc ||
-            nw.gamma != w.gamma || nw.unsigned_remap != w.unsigned_remap) {
-            m.wrap_s = st.wrap_s = w.wrap_s = nw.wrap_s; m.wrap_t = st.wrap_t = w.wrap_t = nw.wrap_t;
-            m.wrap_r = st.wrap_r = w.wrap_r = nw.wrap_r; m.zfunc = st.zfunc = w.zfunc = nw.zfunc;
-            m.gamma = st.gamma = w.gamma = nw.gamma; m.unsigned_remap = st.unsigned_remap = w.unsigned_remap = nw.unsigned_remap;
+        if (g8(e + 0x2E)) {   // the address mode and the border colour
+            m.wrap_s = st.wrap_s = nw.wrap_s; m.wrap_t = st.wrap_t = nw.wrap_t; m.wrap_r = st.wrap_r = nw.wrap_r;
+            m.zfunc = st.zfunc = nw.zfunc; m.gamma = st.gamma = nw.gamma; m.unsigned_remap = st.unsigned_remap = nw.unsigned_remap;
+            m.border = st.border = nw.border;
         }
-        if (!known || nw.min_filter != w.min_filter || nw.mag_filter != w.mag_filter || nw.conv != w.conv || nw.bias != w.bias) {
-            m.min_filter = st.min_filter = w.min_filter = nw.min_filter; m.mag_filter = st.mag_filter = w.mag_filter = nw.mag_filter;
-            m.conv = st.conv = w.conv = nw.conv; m.bias = st.bias = w.bias = nw.bias;
-            m.filter_signed = st.filter_signed = w.filter_signed = nw.filter_signed;
+        if (g8(e + 0x2D) || g8(e + 0x2C)) {   // the filter
+            m.min_filter = st.min_filter = nw.min_filter; m.mag_filter = st.mag_filter = nw.mag_filter;
+            m.conv = st.conv = nw.conv; m.bias = st.bias = nw.bias; m.filter_signed = st.filter_signed = nw.filter_signed;
         }
-        if (!known || nw.border != w.border) m.border = st.border = w.border = nw.border;
-        A.samp_written_valid |= 1u << u;
         m.address_by = st.address_by = kByAsp;
         return 1;
     }
@@ -1627,8 +1759,7 @@ int asp_record_call(uint32_t addr, ppu_context* c)
             Rec::AspClear k;
             memset(&k, 0, sizeof k);
             k.mask = 0x03u; k.depth = 0xFFFFFFu; k.stencil = 0xFFu; k.surface = S.st.surface;
-            if (A.nclears < 32) A.clears[A.nclears++] = k;
-            else { memmove(&A.clears[0], &A.clears[1], 31 * sizeof k); A.clears[31] = k; A.clears_dropped++; }
+            asp_pend_clear(k);
         }
         // and a scissor one pixel inside the target's edges (+0x04, +0x08 its size)
         const uint32_t w = g32(rt + 4), h = g32(rt + 8);
@@ -1650,8 +1781,7 @@ int asp_record_call(uint32_t addr, ppu_context* c)
         k.stencil = (uint32_t)c->gpr[6] & 0xFF;
         k.surface = S.st.surface;
         if (!k.mask) return 1;
-        if (A.nclears < 32) A.clears[A.nclears++] = k;
-        else { memmove(&A.clears[0], &A.clears[1], 31 * sizeof k); A.clears[31] = k; A.clears_dropped++; }
+        asp_pend_clear(k);
         return 1;
     }
     case 0x006C9C74: { // vertex constants (this, {start, ..}, const float*, count): whole vec4s
@@ -1699,6 +1829,7 @@ int asp_record_call(uint32_t addr, ppu_context* c)
         shadow_write(off, vm_base + uc, bytes & ~3u, ++s_epoch);
         A.fp_bytes[off] = bytes;
         A.fp_last_obj[off] = self;
+        A.fp_slot_epoch[off] = s_epoch;
         return 1;
     }
     case 0x006C9624: { // fragment constant patch (shader object, parameter, count, const float*)
@@ -1733,6 +1864,27 @@ int asp_record_call(uint32_t addr, ppu_context* c)
         f.reg_count = (uint8_t)(ctl >> 24); f.txp = (uint8_t)(ctl >> 15 & 1); f.output_from_h0 = !(ctl & 0x40u);
         f.depth_replace = (ctl & 0xEu) != 0; f.pixel_kill = (uint8_t)(ctl >> 7 & 1);
         A.fp_bound = 1; A.fp_bound_obj = fo;
+        // a program asp binds without uploading it is one it holds resident at
+        // its slot: the slot's bytes are its microcode (asp's patches since apply on top)
+        auto lo = A.fp_last_obj.find(f.offset);
+        if (lo == A.fp_last_obj.end() || lo->second != fo) {
+            const uint32_t cont = g32(fo + 0x18), uc = g32(fo + 0x1C);
+            const uint32_t bytes = ea_ok(cont, 0x20) ? g16(cont + 8) : 0;
+            if (bytes && ea_ok(uc, bytes) && f.offset < 0x10000000u) {
+                // its words, but those asp patched since the slot last got a
+                // program: the patches were this program's (made before the bind)
+                const uint64_t since = A.fp_slot_epoch[f.offset], ep = ++s_epoch;
+                for (uint32_t i = 0; i + 4 <= (bytes & ~3u); i += 4) {
+                    ShadowPage* pg = shadow_page(f.offset + i);
+                    if (pg->ep[((f.offset + i) & 0xFFF) >> 2] > since) continue;
+                    shadow_write(f.offset + i, vm_base + uc + i, 4, ep);
+                }
+                A.fp_bytes[f.offset] = bytes;
+                A.fp_last_obj[f.offset] = fo;
+                A.fp_slot_epoch[f.offset] = ep;
+                A.fp_resident_binds++;
+            }
+        }
         return 1;
     }
     default:
@@ -1861,9 +2013,9 @@ void write_report()
             (unsigned long long)s.xc_draws, (unsigned long long)s.xc_regs, (unsigned long long)s.xc_consts,
             (unsigned long long)s.xc_vp, (unsigned long long)s.xc_fp, (unsigned long long)s.xc_vtx,
             (unsigned long long)s.xc_tex);
-    fprintf(f, "handoffs %llu failed %llu | textures from guest memory at the walker %llu (%.1f MB) failed %llu\n",
-            (unsigned long long)s.handoffs, (unsigned long long)s.handoff_fail, (unsigned long long)s.guest_tex,
-            s.guest_tex_bytes / 1048576.0, (unsigned long long)s.guest_tex_fail);
+    fprintf(f, "handoffs %llu failed %llu shared %llu | textures from guest memory at the walker %llu (%.1f MB) failed %llu\n",
+            (unsigned long long)s.handoffs, (unsigned long long)s.handoff_fail, (unsigned long long)s.handoffs_shared,
+            (unsigned long long)s.guest_tex, s.guest_tex_bytes / 1048576.0, (unsigned long long)s.guest_tex_fail);
     if (bypass_mode()) {
         fprintf(f, "r4 mode %d frames %llu records %llu calls_bypassed %llu calls_kept %llu exit_mismatch %llu | "
                    "markers written %llu wraps %llu failed %llu met %llu unknown %llu | r3_matched_in_r4_frames %llu\n",
@@ -1914,9 +2066,21 @@ void write_report()
                    "draws_with_a_program_not_uploaded_last %llu store_rebuilds %llu sampler_restores %llu\n",
                 (unsigned long long)s.asp_group_restores, (unsigned long long)A.fp_odd_patches, A.fp_bytes.size(),
                 (unsigned long long)A.fp_stale_draws, (unsigned long long)A.rebuilds, (unsigned long long)A.samp_restores);
+    if (s.asp_bypassed || s.asp_not_bypassed)
+        fprintf(f, "asp bypassed draws %llu (%.1f M words taken back) not bypassed %llu (their commands wrapped the ring) "
+                   "marker_fail %llu\n", (unsigned long long)s.asp_bypassed, s.asp_bypassed_words / 1e6,
+                (unsigned long long)s.asp_not_bypassed, (unsigned long long)s.asp_marker_fail);
+    if (s.asp_tex_snapshots)
+        fprintf(f, "asp textures taken as the game drew them %llu\n", (unsigned long long)s.asp_tex_snapshots);
+    if (s.game_draw_records)
+        fprintf(f, "game draw records (cellGcmSetDrawIndexArray inside asp's scene) %llu\n", (unsigned long long)s.game_draw_records);
+    if (s.asp_race_checked)
+        fprintf(f, "asp race check: %llu draws checked, %llu whose vertex or index bytes changed between the record and the native draw\n",
+                (unsigned long long)s.asp_race_checked, (unsigned long long)s.asp_race_changed);
     if (s.n_asp_draws)
-        fprintf(f, "native asp draws %llu clears %llu vertex_mb %.1f | clears dropped %llu\n", (unsigned long long)s.n_asp_draws,
-                (unsigned long long)s.n_asp_clears, s.n_asp_vertex_bytes / 1048576.0, (unsigned long long)A.clears_dropped);
+        fprintf(f, "native asp draws %llu clears %llu vertex_mb %.1f | clears merged %llu dropped %llu | resident fp binds %llu\n",
+                (unsigned long long)s.n_asp_draws, (unsigned long long)s.n_asp_clears, s.n_asp_vertex_bytes / 1048576.0,
+                (unsigned long long)A.clears_merged, (unsigned long long)A.clears_dropped, (unsigned long long)A.fp_resident_binds);
     fprintf(f, "native draws %llu clears %llu unsupported %llu batches %llu pipelines %llu images %llu (%.1f MB) "
                "static_textures %llu own_target_snapshots %llu images_replaced %llu\n",
             (unsigned long long)s.n_draws, (unsigned long long)s.n_clears, (unsigned long long)s.n_unsupported,
@@ -2201,6 +2365,12 @@ extern "C" int ppfx_rec_observe(uint32_t addr, ppu_context* ctx)
         }
         break;
     case 0x006A1E28: if (mode() && who) build_draw(ctx); break;
+    case 0x006A2164:   // cellGcmSetDrawIndexArray by the game (inside asp's scene): R5's records, at its return
+        if (!who && asp_records_on() && S.ring_ctx && (uint32_t)ctx->gpr[3] == S.ring_ctx) {
+            game_draw_enter(ctx);
+            act = 2;
+        }
+        break;
     case 0x006A5CF4:   // a clear: a record when it clears colour (depth and stencil are not PPFX's output)
         if (!who) break;
         if (mode() && ((uint32_t)ctx->gpr[4] & 0xF0u)) build_clear(ctx);

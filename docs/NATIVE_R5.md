@@ -306,3 +306,80 @@ of the stencil is not described, or the engine's stencil differs from its
 state (an aliased surface, a clear it does not apply): to be settled with
 the engine's stencil read back at that draw before calling either side
 right. Everything else asp draws in that frame matches the engine exactly.
+
+## 6. The gaps closed (2026-11-05, second round) [M, C]
+
+**The reflection's stencil: the reference was right; the game's own draws
+were missing.** A log of every draw in the frame that is no record's
+(DOTHEROES_ASP_DESCRIBE_FRAME also writes foreign_f<frame>.txt, the
+engine's state at each) found 29 in frame 2500: 13 into the reflection
+target with the colour mask off, depth off, the stencil test ALWAYS with
+REPLACE 1 -- the water's stencil mask the reflection then tests EQUAL 1
+against -- 2 more into it, and 14 into the scene target. They are the
+game's own cellGcmSetDrawIndexArray (0x006A2164), drawn inside asp's scene
+with asp's programs and state. R5 now records them with asp's records
+(observed in the development lift, 119 observers; a record built at the
+call's return from its arguments: mode, count, index type, location,
+offset, the vertex count from the largest index), drawn natively the same
+way. The HUD and menus, drawn with the same call after PPFX, are R6's.
+
+**Unit 1's sampler in the dungeon: asp's dirty flags.** asp's sampler bind
+does not compare values: each unit's entry in its sampler table carries
+dirty bytes (+0x2E: the address mode and border colour; +0x2D or +0x2C:
+the filter), set by asp's setters and cleared by the bind once written
+(the lifted 0x006C37A0). The recorder reads them at the bind's call;
+with a store rebuild's reset values for the units no bind rewrites, the
+dungeon route's unit-1 difference is gone (as10: 12,095 draws; c31d: 0).
+
+**The start-up gaps.** The store's rebuild (0x006D0B98) resets its scissor
+to the whole range; a program asp binds without uploading it is one it
+keeps resident in its slot (its microcode is taken from the object, the
+constants asp patched into it since the slot last changed program kept);
+asp's clears are kept per surface (a later clear of the same surface and
+aspects replaces an earlier one: 3,796 merged, 0 dropped in c31n).
+
+**The vertex cache** (DOTHEROES_ASP_VCACHE, on by default with
+DOTHEROES_ASP_NATIVE): converted vertices and rebuilt index lists in
+arenas of video memory, found by the streams' descriptions, the counts
+and a hash of the guest bytes taken at every use (a rewrite of the game's
+data is a different entry); the oldest arena retired whole past 512 MB.
+River (c31n): 397,077 vertex hits and 606 misses, 397,473 index hits and
+238 misses; converted vertices 81 MB over the run (before: 26-76 GB);
+22.6 GB hashed (about 6 MB a frame).
+
+**Where asp's native output stands** (c31n, the river, 50 s): at the
+handoff that brings the engine's scene to PPFX, 567 of 721 compared
+frames equal, 0.17% of all pixels differing; draw by draw, frame 2500 ends
+equal on both targets. The frames that differ do so in the moat's band.
+The dungeon route's cross-check (c31d): 2,355,742 asp records, 318
+differing (fragment programs at start-up, addressed next); PPFX's own
+records 0 differences in 2,639,501.
+
+**The moat, and data the game rewrites after drawing** (build/r4/fh*,
+the river, 60 s): what remained differed only in the moat's band, at
+times. Measured, step by step:
+- vertex and index bytes do not change between the game's draw and the
+  native draw (DOTHEROES_ASP_RACE_CHECK=1: 100,665 draws checked, 0
+  changed);
+- the engine's own texture check (a sparse hash a frame, full every 8)
+  explains a little (PS3RECOMP_ENG_TEXHASH_FULL=1: 0.17% -> 0.11%);
+- the water samples a small linear A8R8G8B8 texture in local memory the
+  game rewrites after issuing the draw: taken when the game drew (at the
+  record) it was worse (0.11% -> 4.3%), taken by the walker at the draw's
+  place in the stream -- when the GPU reads it, as the engine does -- it is
+  right: **0.016% of the scene's pixels differ, 1,118 of 1,271 frames
+  equal**. asp's small uncompressed textures (up to 256 KB) are now taken
+  that way (the bridge's guest_texture, R4's warp fix); DXT textures and
+  surfaces are not (static, or native images).
+- The vertex cache needed two fixes on the way: its arenas in plain video
+  memory filled by copies (the CPU-writable window into video memory is
+  256 MB without resizable BAR, and a second arena failed: 30 GB of
+  vertices were converted per run outside the cache), an entry admitted
+  only when the same source holds the same bytes a second time, and only
+  the vertices a draw references hashed and converted (the game's draws
+  index small parts of large shared buffers). River (fh8): 685,856 vertex
+  hits, 1,104 misses, 226 MB converted per run.
+
+Still differing: the first two recorded frames (37,513 and 87,802
+pixels), a few frames of 1,000-8,500 pixels (the moat's band), and the
+steady frames by tens of pixels.

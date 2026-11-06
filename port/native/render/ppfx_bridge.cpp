@@ -110,7 +110,17 @@ struct BState {
     std::vector<int> pending_release;       // the handbacks' native semaphores, freed with that record's batch
     int mphase; uint32_t mlo;               // the marker being read
     uint8_t last_bypassed;
+    // R5 (DOTHEROES_ASP_SHARE=1): surfaces asp's records drew natively, by the
+    // frame they did -- PPFX reads the native image of them, not a handoff
+    std::unordered_map<uint64_t, uint32_t> asp_drawn;
 } B;
+
+int asp_share()
+{
+    static int on = -1;
+    if (on < 0) { const char* e = getenv("DOTHEROES_ASP_SHARE"); on = e && *e == '1' && getenv("DOTHEROES_ASP_NATIVE") && *getenv("DOTHEROES_ASP_NATIVE") == '1'; }
+    return on;
+}
 
 uint64_t K(int64_t lap, uint32_t io) { return (uint64_t)lap << 32 | io; }
 
@@ -611,6 +621,17 @@ int match(uint32_t kind, uint32_t laps, uint32_t io)
     }
 }
 
+void guest_texture(Rec* r, const Need& n, uint32_t limit);
+// R5: an asp record's small uncompressed guest textures, taken at its place
+// in the stream (ppfx_wrote marks the DXT ones and the surfaces: not taken)
+void asp_guest_textures(Rec* r)
+{
+    for (uint32_t k = 0; k < r->nneed; k++) {
+        const Need& n = r->need[k];
+        if (n.unit < 16 && !n.ppfx_wrote) guest_texture(r, n, 256u << 10);
+    }
+}
+
 // The engine's surface behind a record's need, copied into a slot when the
 // native side does not already hold that content: other work wrote the
 // address since PPFX last did (dirty), or no record has written it (the
@@ -623,7 +644,7 @@ int match(uint32_t kind, uint32_t laps, uint32_t io)
 // capture of the last displayed frame, 0:05530000, docs/NATIVE_R4.md section
 // 11). The recorder's own snapshot at the call (small textures) is kept when
 // there is one.
-void guest_texture(Rec* r, const Need& n)
+void guest_texture(Rec* r, const Need& n, uint32_t limit = 16u << 20)
 {
     for (uint32_t k = 0; k < r->ntex; k++) if (r->tex[k].location == n.unit) return;   // the recorder's
     const Texture& t = r->st.tex[n.unit];
@@ -631,6 +652,7 @@ void guest_texture(Rec* r, const Need& n)
     rsx_tex_level lv[RSX_MAX_TEXTURE_LEVELS];
     const uint32_t nlv = rsx_texture_mip_chain(t.format, t.width, t.height, t.mipmap, t.pitch, lv);
     const uint32_t bytes = nlv ? lv[nlv - 1].offset + lv[nlv - 1].tl.face_bytes : 0;
+    if (bytes > limit) return;
     const uint32_t ea = cellGcmResolveLocated(n.location == 0, n.offset);
     if (!bytes || bytes > (16u << 20) || ea < 0x10000u || (uint64_t)ea + bytes > 0xE0000000ull) { stats().guest_tex_fail++; return; }
     VtxRange& tr = r->tex[r->ntex++];
@@ -646,6 +668,10 @@ void handoffs(Rec* r)
     for (uint32_t k = 0; k < r->nneed; k++) {
         const Need& n = r->need[k];
         const uint64_t key = (uint64_t)n.location << 32 | n.offset;
+        if (asp_share()) {   // R5: asp's scene, drawn natively this frame and not written since by other work
+            auto ad = B.asp_drawn.find(key);
+            if (ad != B.asp_drawn.end() && ad->second == r->frame && !B.dirty.count(key)) { st.handoffs_shared++; continue; }
+        }
         u32 w = 0, h = 0, fmt = 0;
         const u32 handle = rsx_draw_engine_find_surface(n.location, n.offset, &w, &h, &fmt);
         if (!handle) {   // not a surface the engine has: a texture in guest memory, or nothing yet
@@ -855,6 +881,20 @@ void marker_reached(uint64_t seq)
     walk_init(r);
     r->walk.matched = 1;
     B.copies = 0;
+    if (r->kind == kAspDraw) {   // R5: asp's draw, the native side's alone; its colour target the native side's now
+        asp_guest_textures(r);
+        for (uint32_t k = 0; k < r->nneed; k++) {
+            const Need& t = r->need[k];
+            if (t.unit != 0xFF && t.unit != 0xFE) continue;
+            const uint64_t key = (uint64_t)t.location << 32 | t.offset;
+            B.dirty.erase(key);
+            B.asp_drawn[key] = r->frame;
+            if (t.unit == 0xFF) B.native[key] = { r->seq, t.w, t.h, t.format, t.pitch };
+        }
+        B.last_bypassed = 1;
+        finish(r);
+        return;
+    }
     const Need& t = r->need[0];
     const uint64_t key = (uint64_t)t.location << 32 | t.offset;
     if (B.xcheck) { std::lock_guard<std::mutex> g(s_fr_lock); s_ppfx_targets[key] = 1; }
@@ -878,6 +918,37 @@ void on_marker(void*, u32, u32, u32 word)
     marker_reached((uint64_t)word << 32 | B.mlo);
 }
 
+// DOTHEROES_ASP_DESCRIBE_FRAME=<frame> (a diagnostic, with DOTHEROES_PPFX_DUMP):
+// every draw of that frame that is no record's -- the game's own libgcm
+// draws -- with the engine's state at it, a line each (foreign_f<frame>.txt)
+void foreign_describe(uint32_t io)
+{
+    static long long want = -2;
+    static FILE* f = nullptr;
+    if (want == -2) {
+        const char* e = getenv("DOTHEROES_ASP_DESCRIBE_FRAME");
+        want = e && *e ? atoll(e) : -1;
+    }
+    if (want < 0) return;
+    const uint32_t frame = B.w ? queue().at(B.w - 1)->frame : 0;
+    if ((long long)frame != want) { if (f && (long long)frame > want) { fclose(f); f = nullptr; want = -1; } return; }
+    const char* dir = getenv("DOTHEROES_PPFX_DUMP");
+    if (!dir || !*dir) return;
+    if (!f) { char path[600]; snprintf(path, sizeof path, "%s/foreign_f%u.txt", dir, (uint32_t)want); if (!(f = fopen(path, "w"))) { want = -1; return; } }
+    const rsx_dispatch* E = rsx_draw_engine_state();
+    if (!E) return;
+    State e;
+    engine_state(E, &e);
+    const Raster& r = e.raster;
+    fprintf(f, "io %08X after record %llu | tgt %08X fmt %u dz %08X | cmask %08X | depth %u/%u %X | stencil %u %X ref %u mask %X/%X "
+               "ops %X/%X/%X | blend %u | cull %u | fp %08X vp %u\n",
+            io, (unsigned long long)(B.w ? queue().at(B.w - 1)->seq : 0), e.surface.color_offset[0], e.surface.color_format,
+            e.surface.depth_offset, r.color_mask, r.depth_test, r.depth_write, r.depth_func, r.stencil_test, r.stencil_func,
+            r.stencil_ref, r.stencil_func_mask, r.stencil_write_mask, r.stencil_fail, r.stencil_zfail, r.stencil_zpass, r.blend,
+            r.cull, e.fp.offset, e.vp.start);
+    fflush(f);
+}
+
 void on_draw_pre(void*, u32 io, u32 laps, const u32* handles, const u32* locations, const u32* offsets, u32 n)
 {
     (void)handles;
@@ -889,10 +960,19 @@ void on_draw_pre(void*, u32 io, u32 laps, const u32* handles, const u32* locatio
     if (!match(kDraw, laps, io)) {
         foreign(locations, offsets, n, 1);
         if (B.xcheck) { const uint64_t x0 = bnow(); foreign_reads(locations, offsets, n); stats().xcheck_ns += bnow() - x0; }
+        foreign_describe(io);
         return;
     }
     Rec* r = queue().at(B.w);
     if (r->kind == kAspDraw) {   // R5: asp's draw, the engine's to draw; checked against it
+        if (asp_share() && mode() == 2) {   // drawn natively as well: its targets' newest content is the native side's
+            for (uint32_t i = 0; i < n; i++) {
+                const uint64_t key = (uint64_t)locations[i] << 32 | offsets[i];
+                B.asp_drawn[key] = r->frame;
+                B.dirty.erase(key);
+            }
+            stats().foreign_draws++;
+        } else
         foreign(locations, offsets, n, 1);
         if (B.xcheck) {
             const uint64_t x0 = bnow();
@@ -901,6 +981,7 @@ void on_draw_pre(void*, u32 io, u32 laps, const u32* handles, const u32* locatio
             stats().xcheck_ns += bnow() - x0;
         }
         walk_init(r);
+        if (mode() == 2) asp_guest_textures(r);
         // R5: a draw compared one by one (DOTHEROES_ASP_COMPARE_DRAWS): the
         // engine's target copied after this draw, as for PPFX's
         if (mode() == 2 && render_ready() && compare_wanted(r) != kCmpNone) { B.copies = 0; B.pending = r; return; }
