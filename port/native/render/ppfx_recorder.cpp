@@ -501,28 +501,156 @@ void enc_vp(ppu_context* c)
     S.vp_gen++;
 }
 
-// cellGcmSetVertexProgramParameter(ctx, CgBinaryParameter*, const float*)
+// cellGcmSetVertexProgramParameter(ctx, CgBinaryParameter*, const float*):
+// the parameter's registers from its values, word(i) the i-th value word, as
+// the body (0x006A39EC; 030, its jump table at 0x006A3A90) decodes them. A
+// parameter whose resource (+0x04) is CG_UNDEFINED (0xCB8), or whose type
+// is not one of these, sets nothing. Vectors go to the parameter's resIndex
+// (+0x0C; -1 none), the components it lacks 0 (CG_FLOAT1 0x443 as CG_FLOAT).
+// Matrices go row by row: each row is a parameter of its own after it (+0x30
+// apart: its resource, its resIndex), the values a row apart whether the row
+// is loaded or not (3 words a row for 3x3 and 4x3, 4 for 3x4 and 4x4), a row
+// CG_UNDEFINED or at -1 skipped, w 0 for three columns. A 4x4 whose rows
+// are all defined is one load at the first row's register, nothing if any
+// row's is -1. (R3-R6 modelled the four vectors and the 4x4 at the
+// parameter's own resIndex, every other type as one float4: vp_new_cases
+// counts every parameter where the two decodes differ: the run's report.)
+template <class W> void vp_param(uint32_t par, W word)
+{
+    if (!ea_ok(par, 16)) return;
+    const uint32_t type = g32(par + 0), resource = g32(par + 4), res = g32(par + 12);
+    auto set = [](uint32_t reg, const uint32_t v[4]) {
+        if (reg >= 512) return;
+        for (int k = 0; k < 4; k++) S.vconst[reg][k] = v[k];
+        S.vconst_written[reg >> 5] |= 1u << (reg & 31);
+        S.vc_dirty[reg >> 5] |= 1u << (reg & 31);
+    };
+    uint32_t comps = 0, rows = 0, cols = 0;
+    switch (type) {
+    case 0x415: case 0x443: comps = 1; break;   // CG_FLOAT, CG_FLOAT1
+    case 0x416: comps = 2; break;               // CG_FLOAT2
+    case 0x417: comps = 3; break;               // CG_FLOAT3
+    case 0x418: comps = 4; break;               // CG_FLOAT4
+    case 0x423: rows = 3; cols = 3; break;      // CG_FLOAT3x3
+    case 0x424: rows = 3; cols = 4; break;      // CG_FLOAT3x4
+    case 0x427: rows = 4; cols = 3; break;      // CG_FLOAT4x3
+    case 0x428: rows = 4; cols = 4; break;      // CG_FLOAT4x4
+    default: break;
+    }
+    if (!comps && !rows) { stats().unmodelled++; stats().vp_new_cases++; return; }
+    if (resource == 0xCB8u) { stats().vp_new_cases++; return; }
+    uint32_t v[4];
+    if (comps) {
+        if (type == 0x443) stats().vp_new_cases++;
+        for (uint32_t k = 0; k < 4; k++) v[k] = k < comps ? word(k) : 0;
+        if (res != 0xFFFFFFFFu) set(res, v);
+        return;
+    }
+    if (!ea_ok(par, 0x30 * (rows + 1))) return;
+    bool all_defined = true;
+    for (uint32_t r = 0; r < rows; r++) if (g32(par + 0x30 * (r + 1) + 4) == 0xCB8u) all_defined = false;
+    if (rows == 4 && cols == 4 && all_defined) {
+        for (uint32_t r = 0; r < 4; r++) if (g32(par + 0x30 * (r + 1) + 0x0C) == 0xFFFFFFFFu) { stats().vp_new_cases++; return; }
+        const uint32_t base = g32(par + 0x3C);
+        if (base != res) stats().vp_new_cases++;
+        for (uint32_t r = 0; r < 4; r++) {
+            for (uint32_t k = 0; k < 4; k++) v[k] = word(4 * r + k);
+            if (base + r < 512) set(base + r, v);
+        }
+        return;
+    }
+    stats().vp_new_cases++;
+    for (uint32_t r = 0; r < rows; r++) {
+        const uint32_t row = par + 0x30 * (r + 1), at = g32(row + 0x0C);
+        if (g32(row + 4) == 0xCB8u || at == 0xFFFFFFFFu) continue;
+        for (uint32_t k = 0; k < 4; k++) v[k] = k < cols ? word(cols * r + k) : 0;
+        set(at, v);
+    }
+}
 void enc_vp_const(ppu_context* c)
 {
     const uint32_t par = (uint32_t)c->gpr[4], val = (uint32_t)c->gpr[5];
-    if (!ea_ok(par, 16)) return;
-    const uint32_t type = g32(par + 0), res = g32(par + 12);
-    uint32_t regs = 1, comps = 4;
-    switch (type) {
-    case 0x415: comps = 1; break;        // CG_FLOAT
-    case 0x416: comps = 2; break;        // CG_FLOAT2
-    case 0x417: comps = 3; break;        // CG_FLOAT3
-    case 0x418: comps = 4; break;        // CG_FLOAT4
-    case 0x428: regs = 4; break;         // CG_FLOAT4x4
-    default: stats().unmodelled++; break;
-    }
-    for (uint32_t r = 0; r < regs && res + r < 512; r++)
-        for (uint32_t k = 0; k < 4; k++) {
-            const uint32_t at = val + 4 * (r * 4 + k);
-            S.vconst[res + r][k] = k < comps && ea_ok(at) ? g32(at) : 0;
-            S.vconst_written[(res + r) >> 5] |= 1u << ((res + r) & 31);
-            S.vc_dirty[(res + r) >> 5] |= 1u << ((res + r) & 31);
+    vp_param(par, [val](uint32_t i) { const uint32_t at = val + 4 * i; return ea_ok(at) ? g32(at) : 0u; });
+}
+
+// R6 (=all): cellGcmSetVertexProgram's body (0x006A4E50; 030, loc_006A514C)
+// ends by setting each parameter's default. For every CgBinaryParameter
+// (0x30 bytes; the program's +0x0C their count, +0x10 the array's offset)
+// with a default value (+0x14, an offset in the program) whose variability
+// (+0x08) is CG_UNIFORM or CG_CONSTANT (0x1006, 0x1007), it copies the
+// default's first 16 bytes into its frame (+0x70) and calls
+// cellGcmSetVertexProgramParameter(ctx, parameter, that copy) -- an observed
+// call, which is how the recorder saw these constants while the body ran
+// (R4 kept the body: "its default constants, read by others"). A matrix
+// parameter reads 64 bytes from the copy: the frame's next 48 bytes are the
+// caller's r24-r29 as the body saved them. With the body skipped (=all) the
+// same constants are set here, in the same order, after the program.
+struct VpDefault { uint32_t par; uint32_t w[16]; };
+template <class F> void vp_defaults_each(ppu_context* c, F each)
+{
+    const uint32_t prog = (uint32_t)c->gpr[4];
+    if (!ea_ok(prog, 0x14)) return;
+    const int32_t n = (int32_t)g32(prog + 0x0C);
+    const uint32_t arr = prog + g32(prog + 0x10);
+    for (int32_t i = 0; i < n && i < 4096; i++) {
+        const uint32_t p = arr + 0x30u * (uint32_t)i;
+        if (!ea_ok(p, 0x30)) break;
+        const uint32_t dv = g32(p + 0x14);
+        if (!dv || g32(p + 0x08) - 0x1006u > 1u) continue;
+        const uint32_t src = prog + dv;
+        VpDefault d;
+        d.par = p;
+        for (int k = 0; k < 4; k++) d.w[k] = ea_ok(src + 4 * k, 4) ? g32(src + 4 * k) : 0;
+        for (int k = 0; k < 6; k++) {
+            const uint64_t v = c->gpr[24 + k];
+            d.w[4 + 2 * k] = (uint32_t)(v >> 32); d.w[5 + 2 * k] = (uint32_t)v;
         }
+        each(d);
+    }
+}
+void vp_defaults(ppu_context* c)
+{
+    stats().vpd_programs++;
+    vp_defaults_each(c, [](const VpDefault& d) {
+        vp_param(d.par, [&d](uint32_t i) { return i < 16 ? d.w[i] : 0u; });
+        stats().vpd_sets++;
+        if (g32(d.par) == 0x428) stats().vpd_matrices++;
+    });
+}
+// its verify (DOTHEROES_R6_VP_VERIFY=1, with DOTHEROES_R6_KEEP=6A4E50 so the
+// body runs): the defaults predicted at the entry, each nested parameter
+// call's parameter and value words compared with the next prediction
+bool vp_verify()
+{
+    static int on = -1;
+    if (on < 0) { const char* e = getenv("DOTHEROES_R6_VP_VERIFY"); on = e && *e == '1'; }
+    return on;
+}
+std::vector<VpDefault> s_vpv;
+size_t s_vpv_next = 0;
+bool s_vpv_open = false;
+void vp_verify_enter(ppu_context* c)
+{
+    s_vpv.clear(); s_vpv_next = 0; s_vpv_open = true;
+    vp_defaults_each(c, [](const VpDefault& d) { s_vpv.push_back(d); });
+    stats().vpdv_programs++;
+}
+void vp_verify_nested(ppu_context* c)   // 0x006A39EC called from 0x006A529C
+{
+    if (!s_vpv_open) return;
+    const uint32_t par = (uint32_t)c->gpr[4], val = (uint32_t)c->gpr[5];
+    if (s_vpv_next >= s_vpv.size()) { stats().vpdv_differ++; return; }
+    const VpDefault& d = s_vpv[s_vpv_next++];
+    bool same = d.par == par;
+    const uint32_t regs = ea_ok(par, 4) && g32(par) == 0x428 ? 4 : 1;
+    for (uint32_t i = 0; same && i < 4 * regs; i++) same = ea_ok(val + 4 * i, 4) && g32(val + 4 * i) == d.w[i];
+    if (same) stats().vpdv_equal++; else stats().vpdv_differ++;
+}
+void vp_verify_exit()
+{
+    if (!s_vpv_open) return;
+    if (s_vpv_next != s_vpv.size()) stats().vpdv_count_differ++;
+    s_vpv_open = false;
 }
 
 // cellGcmSetVertexDataArray(ctx, index, frequency, stride, size, type, location, offset)
@@ -1130,6 +1258,7 @@ Rec* acquire()
     }
     Rec*& r = q.slot[p % Queue::kCap];
     if (!r) r = new Rec();
+    r->game_arrays = 0;
     return r;
 }
 
@@ -1536,6 +1665,14 @@ void build_flip(ppu_context* c)
     memset(&r->walk, 0, sizeof r->walk);
     for (int16_t& k : r->walk.release_sem) k = -1;
     r->flip_id = id; r->flip_offset = off; r->flip_pitch = pitch; r->flip_w = w; r->flip_h = h;
+    // the clears still waiting (the game's frame-start clear in a frame that
+    // drew nothing after it -- loads, transitions): done before the present,
+    // as the engine did them before its flip
+    if (r6_producers()) {
+        r->naclear = A.nclears;
+        for (uint32_t i = 0; i < A.nclears; i++) r->aclear[i] = A.clears[i];
+        A.nclears = 0;
+    }
     r->vc_full = 0; r->cdelta.clear();
     r->lap = r->lap_end = cellGcm_title_laps_pub(nullptr);
     r->io = r->io_end = cellGcm_ea2io_pub(g32(ctx + 8));
@@ -1731,6 +1868,28 @@ int r6_skip()
         }
     }
     return on;
+}
+// DOTHEROES_R6_KEEP=<hex>,<hex>,... (a development switch): libgcm entry
+// points whose bodies run under =all all the same -- to find which skipped
+// body a difference depends on
+bool r6_keep(uint32_t addr)
+{
+    static uint32_t keep[64];
+    static int n = -1;
+    if (n < 0) {
+        n = 0;
+        const char* e = getenv("DOTHEROES_R6_KEEP");
+        while (e && *e && n < 64) {
+            char* end = nullptr;
+            const unsigned long v = strtoul(e, &end, 16);
+            if (end == e) break;
+            keep[n++] = (uint32_t)v;
+            e = *end == ',' ? end + 1 : end;
+        }
+        if (n) fprintf(stderr, "[ppfx] DOTHEROES_R6_KEEP: %d libgcm entry points run under =all\n", n);
+    }
+    for (int i = 0; i < n; i++) if (keep[i] == addr) return true;
+    return false;
 }
 const uint32_t kCurCtx = 0x02C11BACu, kStreamCache = 0x02C12E10u, kCurPair = 0x02C12CE0u, kSent = 0x02C12AF0u;
 const uint32_t kCounterP = 0x02C12B1Cu, kStreamSetVt = 0x00FEABF0u;
@@ -2001,6 +2160,7 @@ void game_arrays_record(ppu_context* c, bool skip)
     r->io = r->io_end = cellGcm_ea2io_pub(g32(ctx + 8));
     r->io_alt = cellGcm_ea2io_pub(g32(ctx));
     r->bypassed = skip ? 1 : 0;
+    r->game_arrays = 1;
     publish(r);
     stats().asp_records++;
     stats().r6_game_arrays++;
@@ -3241,6 +3401,20 @@ void write_report()
                 (unsigned long long)s.occ_missing.load(), (unsigned long long)s.occ_sum_last.load(),
                 (unsigned long long)s.occ_transfers.load(), (unsigned long long)s.occ_writebacks.load(),
                 (unsigned long long)s.occ_cond_render.load());
+    if (r6_skip() == 3 || s.vpdv_programs)
+        fprintf(f, "r6 vertex program defaults (cellGcmSetVertexProgram's body skipped): programs %llu, constants set %llu "
+                   "(matrices %llu) | verify (body run): programs %llu (the game's %llu), parameter calls equal %llu differ %llu, "
+                   "count differs %llu | parameters decoded otherwise than R3-R6's model %llu\n",
+                (unsigned long long)s.vpd_programs.load(), (unsigned long long)s.vpd_sets.load(),
+                (unsigned long long)s.vpd_matrices.load(), (unsigned long long)s.vpdv_programs.load(),
+                (unsigned long long)s.vpdv_game.load(), (unsigned long long)s.vpdv_equal.load(),
+                (unsigned long long)s.vpdv_differ.load(), (unsigned long long)s.vpdv_count_differ.load(),
+                (unsigned long long)s.vp_new_cases.load());
+    if (r6_producers())
+        fprintf(f, "r6 producers (late fixes): clears done at a flip %llu | game draw-arrays records with every "
+                   "texture taken at the walker %llu | PPFX colour clears of some channels only %llu\n",
+                (unsigned long long)s.r6_flip_clears.load(), (unsigned long long)s.r6_game_arrays_walked.load(),
+                (unsigned long long)s.clears_masked.load());
     if (r6_present())
         fprintf(f, "r6 present: flips recorded %llu presented %llu (no native image %llu) | present_ms %.1f\n",
                 (unsigned long long)queue().flips_recorded.load(), (unsigned long long)s.r6_presents.load(),
@@ -3513,13 +3687,21 @@ extern "C" int ppfx_rec_observe(uint32_t addr, ppu_context* ctx)
     // helpers and calls with no command keep running (class run); the draws
     // and clears are records (below).
     if (!occ && r6_skip() == 3 && (uint32_t)ctx->gpr[3] == S.ring_ctx && addr != 0x006A1E28u && addr != 0x006A2164u &&
-        addr != 0x006A5CF4u && !occ_fn(addr)) {
+        addr != 0x006A5CF4u && !occ_fn(addr) && !r6_keep(addr)) {
         const char* why;
         const Cls k = r4_class(addr, ctx, &why);
         if (k == kClsBypass && who && S.r4_frame && !S.kept_depth) { act = r4_decide(addr, ctx); decided = true; }
         else if (k != kClsRun && !(who && S.kept_depth)) { act = 1; decided = true; r6_libgcm_skipped(addr, who); }
     }
     if (!decided) act = who && bypass_mode() ? r4_decide(addr, ctx) : 0;
+    // R6: the vertex program verify for the game's own cellGcmSetVertexProgram
+    // calls too (Bink's, the mesh path's): their exit observed
+    if (!decided && !who && act == 0 && addr == 0x006A4E50u && vp_verify() && (uint32_t)ctx->gpr[3] == S.ring_ctx) {
+        VEntry v; memset(&v, 0, sizeof v); v.addr = addr; v.kind = 0;
+        s_vstack.push_back(v);
+        act = 2;
+        stats().vpdv_game++;
+    }
     if (act == 3) { r4_verify_enter(addr, ctx); act = 2; }
     // DOTHEROES_PPFX_TRACE_LOAD=1 (a diagnostic, with RSX_FRAME_TRACE=arm:..):
     // the frame trace starts at the walker's next flip after PPFX's first call
@@ -3545,8 +3727,15 @@ extern "C" int ppfx_rec_observe(uint32_t addr, ppu_context* ctx)
     case 0x0069E7EC: enc_viewport(ctx); break;
     case 0x0069E99C: enc_fp_bind(ctx, S.frame); break;
     case 0x0069E6E0: enc_shader_control(ctx); break;
-    case 0x006A4E50: enc_vp(ctx); break;
-    case 0x006A39EC: enc_vp_const(ctx); break;
+    case 0x006A4E50:
+        enc_vp(ctx);
+        if (act == 1) vp_defaults(ctx);   // R6 (=all): the body's default constants, the body skipped
+        else if (act == 2 && vp_verify()) vp_verify_enter(ctx);
+        break;
+    case 0x006A39EC:
+        if (vp_verify() && (uint32_t)ctx->lr == 0x006A529Cu) vp_verify_nested(ctx);
+        enc_vp_const(ctx);
+        break;
     case 0x0069F19C: enc_vertex_array(ctx); break;
     case 0x0069F2B8: enc_texture(ctx); break;
     case 0x006A7674: enc_tex_filter(ctx); break;
@@ -3630,14 +3819,28 @@ extern "C" int ppfx_rec_observe(uint32_t addr, ppu_context* ctx)
             }
             break;
         }
-        if (mode() && ((uint32_t)ctx->gpr[4] & 0xF0u)) build_clear(ctx);
+        if (mode() && ((uint32_t)ctx->gpr[4] & 0xF0u)) {
+            // the native clear clears every channel of the first target (as the
+            // engine's reference did): a mask of some channels only is counted
+            // and named, so the assumption is checked, not silent
+            const uint32_t cm = (uint32_t)ctx->gpr[4] & 0xF0u;
+            if (cm != 0xF0u) {
+                if (!st.clears_masked++) {
+                    char line[140];
+                    snprintf(line, sizeof line, "recorder: PPFX colour clear of some channels only (mask %02X) at frame %u "
+                             "-- cleared whole natively", (uint32_t)ctx->gpr[4] & 0xFFu, S.frame);
+                    report_add(line);
+                }
+            }
+            build_clear(ctx);
+        }
         else st.depth_clears++;
         // R6: its depth and stencil part done natively too (R4 kept it for the
         // engine's depth buffer; the native depth images asp's scene uses
         // never saw it), before the next record
         if (r6_producers() && ((uint32_t)ctx->gpr[4] & 0x03u) && (uint32_t)ctx->gpr[3] == S.ring_ctx) {
             game_clear((uint32_t)ctx->gpr[4] & 0x03u);
-            if (r6_skip() == 3 && act != 1) {   // kept by R4: with =all its body does not run
+            if (r6_skip() == 3 && act != 1 && !r6_keep(addr)) {   // kept by R4: with =all its body does not run
                 if (act == 2 && !s_vstack.empty() && s_vstack.back().kind == 0) { s_vstack.pop_back(); if (S.kept_depth) S.kept_depth--; }
                 act = 1; r6_libgcm_skipped(addr, who);
             }
@@ -3666,7 +3869,7 @@ extern "C" void ppfx_rec_exit(uint32_t addr, ppu_context* ctx)
     const VEntry v = s_vstack.back();
     s_vstack.pop_back();
     if (v.addr != addr) stats().r4_exit_mismatch++;
-    if (v.kind == 0) { if (S.kept_depth) S.kept_depth--; return; }
+    if (v.kind == 0) { if (v.addr == 0x006A4E50u) vp_verify_exit(); if (S.kept_depth) S.kept_depth--; return; }
     if (v.kind == 2 && v.addr == 0x006C6F88u) skv_exit(ctx);   // R6's verify: before the take-back
     if (v.kind == 2) {   // R6: the record built at a draw's return, timed (sampled) apart from the entries
         static uint32_t tick = 0;

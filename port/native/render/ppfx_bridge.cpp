@@ -628,12 +628,23 @@ int match(uint32_t kind, uint32_t laps, uint32_t io)
 void guest_texture(Rec* r, const Need& n, uint32_t limit);
 // R5: an asp record's small uncompressed guest textures, taken at its place
 // in the stream (ppfx_wrote marks the DXT ones and the surfaces: not taken)
+//
+// R6: the game's cellGcmSetDrawArrays records (Bink's frames) take every
+// guest texture here, whatever its size. Bink's draw is followed by a
+// back-end label the walker writes as it meets it (cellGcmSetWriteBackEndLabel
+// 0xC0, its fence), and Bink decodes into a texture set again once that
+// label has passed the set's fence (func_0045AC78): the label promises the
+// set has been read. The engine read the planes at the walker; the native
+// thread draws later, so its luma plane (1280x720, 900 KB, above the 256 KB
+// taken here before) could be read after Bink began rewriting it. Taken
+// here, before the walker reaches the label, the promise holds again.
 void asp_guest_textures(Rec* r)
 {
     for (uint32_t k = 0; k < r->nneed; k++) {
         const Need& n = r->need[k];
-        if (n.unit < 16 && !n.ppfx_wrote) guest_texture(r, n, 256u << 10);
+        if (n.unit < 16 && !n.ppfx_wrote) guest_texture(r, n, r->game_arrays ? 16u << 20 : 256u << 10);
     }
+    if (r->game_arrays) stats().r6_game_arrays_walked++;
 }
 
 // The engine's surface behind a record's need, copied into a slot when the
@@ -1039,6 +1050,13 @@ void marker_reached(uint64_t seq)
             B.asp_drawn[key] = r->frame;
             if (t.unit == 0xFF) B.native[key] = { r->seq, t.w, t.h, t.format, t.pitch };
         }
+        B.last_bypassed = 1;
+        finish(r);
+        return;
+    }
+    if (r->kind == kFlip || r->kind == kReport || !r->nneed) {
+        // R6: a flip or report names no target (nneed 0; need[0] is a reused
+        // slot's): the table of what the native side holds is left as it is
         B.last_bypassed = 1;
         finish(r);
         return;

@@ -246,6 +246,7 @@ struct Rec {
     uint32_t ntex;
     std::vector<uint8_t> tdata;
     uint8_t bypassed;              // R4: its call's body did not run; the walker meets it at its marker
+    uint8_t game_arrays;           // R6: the game's cellGcmSetDrawArrays (Bink's frames): every guest texture taken at the walker (reset in acquire)
     // kFlip (R6): the flip id and the display buffer it names (local memory)
     uint32_t flip_id, flip_offset, flip_pitch, flip_w, flip_h;
     // kReport (R6): the operation, the report type, index (and count of a
@@ -411,6 +412,7 @@ struct Stats {
     // draw-arrays draws recorded, the calls whose bodies did not run, and the
     // clears narrower than their surface (the native clear takes it whole)
     std::atomic<uint64_t> r6_game_clears{0}, r6_game_arrays{0}, r6_game_skipped{0}, r6_clears_scissored{0};
+    std::atomic<uint64_t> r6_game_arrays_walked{0}, r6_flip_clears{0}, clears_masked{0};   // R6: Bink's records' textures taken at the walker; clears done at a flip; PPFX colour clears of some channels only
     // R6's native present: frames presented, flips with no native image of their display buffer
     std::atomic<uint64_t> r6_presents{0}, r6_present_missing{0}, r6_present_ns{0};
     std::atomic<uint64_t> r6_takeback{0}, r6_takeback_words{0};   // asp's clears and pass starts taken back
@@ -440,6 +442,11 @@ struct Stats {
     // render enables in the conditional mode (never seen), other report types
     std::atomic<uint64_t> occ_ops{0}, occ_draws{0}, occ_reports{0}, occ_transfers{0}, occ_cond_render{0};
     std::atomic<uint64_t> occ_other_types{0}, occ_writebacks{0}, occ_sum_last{0}, occ_missing{0};
+    // R6 (=all): cellGcmSetVertexProgram's default constants applied with its
+    // body skipped (matrices among them), and its verify (DOTHEROES_R6_VP_VERIFY=1
+    // with the body run: the prediction against the nested parameter calls)
+    std::atomic<uint64_t> vpd_sets{0}, vpd_matrices{0}, vpd_programs{0};
+    std::atomic<uint64_t> vpdv_programs{0}, vpdv_equal{0}, vpdv_differ{0}, vpdv_count_differ{0}, vpdv_game{0}, vp_new_cases{0};
 };
 Stats& stats();
 void report_add(const char* line);   // a line in the next report (diagnostics)

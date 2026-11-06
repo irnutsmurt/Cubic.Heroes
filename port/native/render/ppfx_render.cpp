@@ -3318,6 +3318,14 @@ namespace {
 void present_native(const Rec* r)
 {
     const uint64_t t0 = now_ns();
+    // the clears made after the frame's last draw first (a frame that draws
+    // nothing after the game's frame-start clear shows the cleared buffer)
+    if (r->naclear) {
+        Batch& b = batch(r->frame);
+        wait_for(b, r);
+        asp_clears(b, r);
+        stats().r6_flip_clears += r->naclear;
+    }
     auto it = s_targets.find((uint64_t)r->flip_offset);   // a display buffer: local memory (location 0)
     Img* t = it == s_targets.end() ? nullptr : it->second;
     VkImage target = VK_NULL_HANDLE;
