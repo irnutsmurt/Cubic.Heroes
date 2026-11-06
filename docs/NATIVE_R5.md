@@ -1,4 +1,4 @@
-# R5: asp's draws described, rendered and bypassed (begun 2026-11-05)
+# R5: asp's draws described, rendered and bypassed (2026-11-05, complete)
 
 R5 is the second half of the graphics replacement the owner authorised with
 R4 (docs/NATIVE_PORT.md, docs/NATIVE_R4.md section 10): asp, the engine's
@@ -23,6 +23,33 @@ Steps, as for PPFX in R1-R4:
 Everything is opt-in: DOTHEROES_ASP_RECORD=1 (records and their
 cross-check, with DOTHEROES_PPFX_NATIVE=check or =1), and the later steps'
 switches; without them the build behaves as R4's.
+
+## Summary (R5 complete, 2026-11-05)
+
+- **Described**: asp's state at each draw is built from asp's own methods
+  (sections 1-3; DOTHEROES_ASP_RECORD=1) and checked against the engine's
+  item by item: the dungeon route's cross-check, 318 of 2.36 million draws
+  differing (start-up fragment programs).
+- **Rendered natively** (DOTHEROES_ASP_NATIVE=1; sections 4-6, 8): the
+  river's scene against the engine's, 3,177 of 3,348 targets equal, 0.011%
+  of pixels differing (the area's first frames, an occasional reflection
+  band); vertex and index caches checked by the OS's write watch.
+- **Shared** (DOTHEROES_ASP_SHARE=1): the scene's handoff from the engine
+  goes -- once a frame in R4, once a run in R5.
+- **Bypassed** (DOTHEROES_ASP_BYPASS=1, stage 1, validated): asp's draws'
+  commands are taken back; six scenarios (19 million draws) with every
+  marker met and every checked handback equal. Stage 2 (=2, its program
+  uploads too) is valid in the river, not in the menus: experimental.
+- **Performance** (section 8): uncapped 100 fps against R4's 91-95 and the
+  production build's 136-137; capped as smooth as R4. The game's thread is
+  now the bottleneck (the recording of asp's ~4,200 calls a frame).
+- **Fixed on the way**: a device loss (images destroyed while the batch
+  being recorded used them) and 50 ms frames every 3.4 s (static
+  textures retired 256 at once).
+- **Left** (section 9): the display buffer's handoff and handbacks, the
+  HUD and menus' draws (which inherit asp's state and programs), the
+  present, the snapshot, CPU-written surfaces, the occlusion query with
+  real results -- R6, the next review checkpoint.
 
 ## 1. asp's writers and the state they set [M]
 
@@ -469,3 +496,199 @@ bypass.
 **R4's exit wait** (section 11 of NATIVE_R4.md): at exit the native thread
 no longer waits 10 s for an engine submission that will not come; after
 100 ms the batch goes without it (counted: exit_signal_skips).
+
+**Stage 1 again, on the faster native path** (build/r4/s6*, b62, section
+8's changes; every 30th handback checked): river 100 s (2.29 M asp draws
+bypassed, 245 handbacks checked), dungeon route 200 s (2.35 M, 394), menus
+300 s (5.06 M, 595), fields 200 s (1.75 M, 243), snapshot and album 200 s
+(2.55 M, 310), the field after the dungeon 250 s (5.14 M, 784): every
+checked handback equal, every marker met (none unknown), no failure, no
+device loss. The river's comparison with the engine (R3's arrangement,
+build/r4/fc1, 100 s): 3,177 of 3,348 scene targets equal, 0.0111% of
+pixels differ (fh13 before: 1,118 of 1,271, 0.0158%).
+
+## 8. Performance [M]
+
+**The first measurement** (build/r4/perf5, b51; build/r4/r5_perf.sh; the
+river fight, real audio, comparisons, cross-check and handback checks off,
+arms alternated): the production reference, R4, and R5 (asp native, its
+images shared, its draws bypassed) with bypass stage 1 and stage 2.
+Capped, every arm held 60 fps on average, but R5's fight had 7-25 frame
+intervals over 25 ms a run (p99.9 30-50 ms) against R4's 0-1, and
+uncapped R5 ran at 77-80 fps against R4's 94-99 and the reference's
+139-142. The native thread recorded asp's draws for 10.9 ms a frame (R4:
+0.4 ms) and the walker waited for it 9.5-10 ms a frame before the display
+handbacks.
+
+Three of those R5 runs also **lost the Vulkan device** about 40 s in
+(vkQueueSubmit -4; the engine's presents failed with it): their numbers
+are not valid, and the cause was R5's -- see below.
+
+**Where the native thread's time went** (DOTHEROES_ASP_PROFILE=1: asp_draw
+timed by part; river 90 s, ~1.9 million draws a run, build/r4/pf*):
+
+| Step | µs a draw | What changed |
+|---|---|---|
+| pf1 (b52) | 17.2 | -- (hashing 4.3: the vertex cache checked each draw's vertex and index ranges, 31 MB a frame; indices 4.2: every index decoded each draw; textures 3.2; a render pass a draw 2.2) |
+| pf2 (b53) | 12.3 | indices: an index list's range [vmin, vmax] kept by its bytes' hash, decoded only to build it (4.2 -> 0.45); walk-time texture snapshots hashed with the fast hash (textures 3.2 -> 1.7); a range hashed once a frame (saved only 10%: the river's draws read 30 MB of distinct ranges a frame) |
+| pf5 (b56) | 8.2 | **the OS's write watch** on the guest space (port/main.cpp reserves it with MEM_WRITE_WATCH under DOTHEROES_ASP_NATIVE=1): a range nobody wrote since it was hashed is not read again -- 117 GB of 117.3 GB not re-hashed; a poll a frame over the 82 page runs the caches rely on, 0.1 ms. GetWriteWatch's cost follows its output array, not the span (0.7 ms for a million entries, 1 µs for 17; build/r4 microbenchmark), so each run's array is sized to the run |
+| pf7 (b58) | 5.8 | **one render pass for consecutive draws into the same targets** (98.7% of draws join the open pass; anything that must be outside a pass -- a barrier, a copy, a clear, a query reset, another pass, the command buffer's end -- ends it first, through wrapped entry points); commands 3.1 -> 0.7 |
+| pf10 (b61) | 5.3 | a fragment program's analysis (units, structural hash, constants) and a vertex program's input mask kept by the program's content hash (pipeline 1.4 -> 0.8) |
+
+**Two bugs found on the way:**
+
+- **The device loss**: a retired image was destroyed once no batch was in
+  flight, but the batch still being recorded could already use it (the
+  static-texture table retired all its images at 256). Images retired
+  while a batch is open are now destroyed after that batch completes.
+  R4's PPFX path shared the hazard (its static textures too); not seen in
+  R4's runs.
+- **The 50 ms frames every 3.4 s**: the water's texture changes every
+  frame, so its walk-time snapshot made a new image a frame; at 256 the
+  table retired them all at once -- first every texture (re-uploaded
+  within a frame), then, with a "not used for 8 frames" rule, the 200
+  stale ones (their memory freed together). Swept once a frame now.
+
+**The final measurement** (build/r4/perf6, b62; the same arms and
+settings as perf5; no device loss in any run). Capped, the fight's guest
+frame intervals (tools/r4_fight.py; three runs each, ~5,000 frames a run;
+stage 2's first run is left out -- the bot route did not reach the fight,
+so it measured the whole run, area loads included):
+
+| Arm | p50 | p99 | p99.9 | max | over 25 ms |
+|---|---|---|---|---|---|
+| reference | 16.7 | 17.3, 17.3, 17.3 | 18.1, 17.7, 19.4 | 22.0, 23.3, 22.5 | 0, 0, 0 |
+| R4 | 16.7 | 17.4, 17.5, 21.1 | 21.5, 21.8, 24.7 | 24.2, 24.0, 28.3 | 0, 0, 4 |
+| R5, stage 1 | 16.7 | 17.4, 17.5, 17.4 | 22.0, 21.0, 21.6 | 50.2, 23.8, 27.6 | 1, 0, 1 |
+| R5, stage 2 | 16.7 | -, 17.6, 17.5 | -, 21.9, 22.0 | -, 24.0, 25.7 | -, 0, 2 |
+
+Every arm holds 60.0 fps; R5's tail is R4's (one 50 ms interval in nine
+runs' 45,000 frames).
+
+The native side's costs per frame with records (capped):
+
+| Where | R4 | R5, stage 1 | R5, stage 2 |
+|---|---|---|---|
+| the game's thread: the recorder | 0.81-0.83 ms | 1.01 ms | 1.06-1.12 ms |
+| the walker: the bridge (of it waiting for the native side) | 0.91-1.30 (0.64-0.88) ms | 2.91-2.96 (2.41-2.44) ms | 3.25-3.29 (2.76-2.84) ms |
+| the native thread (recording) | 0.40 ms | 3.55-3.60 ms | 3.56-3.59 ms |
+| the native GPU | 0.55-0.58 ms | 1.99-2.01 ms | 2.01 ms |
+
+Uncapped, throughput (two runs each; the frame trace, tests/walker_breakdown.py):
+
+| Arm | fps | interval p50 / p99 | walker over a frame: decoding / at the present (of it waiting for the previous batch) / asleep | the game's thread busy (idle) |
+|---|---|---|---|---|
+| reference | 137.0, 136.2 | 7.0 / 11.0-11.5 | 5.44 / 0.10 / 1.63 ms | 6.2 (1.02) ms |
+| the development build, native paths off | 134.4, 128.4 | 7.0-7.4 / 12.1-12.2 | 5.51-5.88 / 0.10 / 1.72 ms | 6.6-6.7 (0.78-1.01) ms |
+| R4 | 90.6, 94.8 | 10.5-10.8 / 14.5-20.2 | 6.36 / 2.46 (2.40) / 1.61 ms | 8.1 (2.32) ms |
+| R5, stage 1 | 100.3, 100.2 | 9.4 / 15.5-16.0 | 2.29 / 1.52 (0.02) / 5.90 ms | 9.7 (0.09) ms |
+| R5, stage 2 | 100.8, 101.1 | 9.3-9.4 / 15.7-15.9 | 1.80 / 1.90 (0) / 6.00 ms | 9.7 (0.08) ms |
+
+**What the numbers say [M, I].** R5 is faster than R4 (100 fps against
+91-95 uncapped) and as smooth capped, and still slower than the production
+build (136-137). The walker, R4's bottleneck, now decodes 2.3 ms a frame
+instead of 6.4 (asp's commands are gone from the ring) and sleeps 5.9 ms;
+its wait for the previous batch at the present is gone. The critical path
+has moved to the game's thread, which never waits now and is busy 9.7 ms
+a frame against the production build's 6.2: the development lift's
+observer hooks cost ~0.5 ms (native paths off), R4's recording of PPFX
+~1.5 ms more, R5's recording of asp ~1.6 ms more (the recorder's own timer
+counts 1.0 ms of it; the rest is asp's ~4,200 observed calls a frame, each
+entering and leaving an observer, the state store's mirror, and the
+programs interned by a byte-wise hash). That is R5's next cost to cut --
+the observers and the record's copies (8 KB of vertex constants a draw) --
+and, in R6, asp's draw bodies themselves need not run once their commands
+are never kept. The native thread (3.6 ms a frame) and the walker's wait
+for it at the display buffer's handbacks (2.4 ms) are off the critical
+path while the game thread is slower, and go with R6's native present.
+
+## 9. What R5 leaves, and R6's work [M, C]
+
+**The handoffs** (engine -> native copies) and **handbacks** (native ->
+engine), per river frame (build/r4/perf5, perf6 reports):
+
+| | R4 | R5 |
+|---|---|---|
+| handoffs: asp's scene target (0:01AE0000) | 1 a frame (6,655 a run) | 0-2 a run (its first use) |
+| handoffs: the display buffers (0:00000000, 0:00398000) | 1 a frame | 1 a frame |
+| handbacks | 2 a frame (kind "target": the engine about to draw into a surface the native side wrote) | 2 a frame (the display buffer: at the engine's clear and at the present) |
+| command words the walker decodes for asp | all | stage 1: asp's draws' words taken back (37.6 M a river minute); stage 2 (river only): its program uploads too (65.6 M more) |
+
+What remains each frame is the display buffer: the engine still draws
+the HUD and the menus over the final composite and presents it. R6
+removes it.
+
+**R5's own open items** (none blocks R6):
+
+- **Start-up frames**: the area's first frames differ by a few draws; 10
+  draws a river run (records 1166-1175, the area's first frame) are not
+  drawn ("asp: pipeline": their fragment program's buffered constants
+  cannot be collected -- 48 bytes, the first word 1E7E7E00). Later frames
+  match (frame 2500 draw by draw, section 6).
+- **Occasional moat-band frames** in the river (1k-8k pixels of a frame,
+  the water's reflection band) and steady small differences (tens of
+  pixels): 171 of 3,348 targets differ, 0.011% of pixels.
+- **Large textures** (over 256 KB) are read when the native thread draws,
+  not at the walk: a texture the game rewrote after drawing with it in the
+  same frame would be read late (seen only for the water's small one,
+  which is taken at the walk).
+- **The water's texture** makes a new image a frame (its snapshot, keyed by
+  content); a pool of same-sized images would avoid the allocations.
+- **Stage 2** (asp's program uploads) is valid in the river, not in the
+  menus (section 7): it waits for the menus' draws to be native.
+- **The walker still waits for the native side** at the display buffer's
+  handbacks (section 8): the native thread's per-frame recording is on the
+  critical path until R6 presents natively.
+
+**R6** (docs/NATIVE_R4.md section 10b, with what R5 found):
+
+1. **The game's libgcm draws**: the HUD, menus, dialogue boxes, map and
+   editor screens (0x006A2164 from 0x00024720, and draw-arrays draws) --
+   records, rendered natively, then bypassed. They inherit asp's render
+   state and run asp's last-loaded programs (vertex slot 0, fragment slot
+   01533D80): their records must carry that state explicitly. With them
+   native, bypass stages 2 (programs) and 3 (all of asp's state) become
+   valid everywhere.
+2. **The present**: the native display image presented directly, with the
+   same pacing (DOTHEROES_FPS, the vblank clock, the flip's labels and
+   semaphores). This removes the last per-frame handoff and both handbacks.
+3. **The snapshot** (cellJpgEncEncodePicture) reads the native display
+   image.
+4. **CPU-written surfaces** (movies, any guest write into a surface) read
+   from guest memory into native images -- the write watch (section 8)
+   can tell when.
+5. **The occlusion query** (PPFX's effect object, 0x006A1D1C and report
+   769; docs/NATIVE_R4.md section 1). The owner's decision (2026-11-05):
+   correct native behaviour with real results. Today the engine writes a
+   fixed "visible" count and never carries out the copy into the game's
+   result buffer, so the poll finds the result pending forever and the
+   query is issued once an area. R6 issues a Vulkan occlusion query around
+   the counted draws in the native pass, writes the report with the real
+   sample count (and its timer) into the result buffer when the GPU has
+   it, and honours cellGcmSetRenderEnable natively (conditional rendering,
+   or the previous frame's result). This changes what the effect shows --
+   intended.
+6. **R4's bridge** (markers, handbacks, the touch hooks) goes once nothing
+   is left to order against; R7 (retirement) follows.
+
+## Reproducing
+
+```
+tools/r1_dev_lift.sh                                   (the development lift: 119 observers)
+tools/r4_scene.sh <tag> river_fight 100 DOTHEROES_ASP_RECORD=1 DOTHEROES_ASP_NATIVE=1 DOTHEROES_ASP_COMPARE=1
+        (asp native beside the engine, each frame's scene compared; DOTHEROES_ASP_COMPARE_DRAWS=<n> draw by draw)
+tools/r4_scene.sh <tag> dungeon1_approach 200 DOTHEROES_PPFX_NATIVE=check DOTHEROES_ASP_RECORD=1   (the cross-check)
+tools/r4_scene.sh <tag> river_fight 90 DOTHEROES_PPFX_BYPASS=1 DOTHEROES_PPFX_COMPARE=0 DOTHEROES_PPFX_XCHECK=0         DOTHEROES_PPFX_HANDBACK_CHECK=0 DOTHEROES_ASP_RECORD=1 DOTHEROES_ASP_NATIVE=1 DOTHEROES_ASP_SHARE=1         DOTHEROES_ASP_BYPASS=1 DOTHEROES_ASP_PROFILE=1      (R5 with asp_draw's time by part)
+TAG=s6 sh build/r4/r5_stab.sh <build> 1                (stage 1 through six scenarios; local script)
+TAG=sc STAGES="1 2" sh build/r4/stage2_check.sh <build>  (stage 2 against stage 1, the engine's remaining draws' states)
+PERF_DIR=perf6 sh build/r4/r5_perf.sh <build> 3        (the measurement; local script, its arms in section 8)
+sh build/r4/r5_plain.sh <build> 2                      (the development build, native paths off)
+```
+
+Switches: DOTHEROES_ASP_RECORD=1, DOTHEROES_ASP_NATIVE=1, DOTHEROES_ASP_SHARE=1,
+DOTHEROES_ASP_BYPASS=1|2|3, DOTHEROES_ASP_VCACHE=0, DOTHEROES_ASP_WWATCH=0,
+DOTHEROES_ASP_WWATCH_US=<n>, DOTHEROES_ASP_PASS_MERGE=0, DOTHEROES_ASP_PROFILE=1,
+DOTHEROES_ASP_COMPARE=1, DOTHEROES_ASP_COMPARE_DRAWS=<n>,
+DOTHEROES_ASP_DESCRIBE_FRAME=<frame>, DOTHEROES_ASP_DESCRIBE=<seq>,
+DOTHEROES_ASP_RACE_CHECK=1, DOTHEROES_ASP_FOREIGN_STATES=<file>,
+DOTHEROES_ASP_DUMP_FROM=<frame>, DOTHEROES_ASP_CULL_FLIP=1.

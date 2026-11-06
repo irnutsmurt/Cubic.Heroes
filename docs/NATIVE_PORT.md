@@ -1,10 +1,15 @@
 # Native port plan
 
-Status, 2026-11-04: **direction approved by the owner**; the evidence stage is
-done (NATIVE_EVIDENCE.md); **R1 is done** (NATIVE_R1.md: both passes, both
-scenes, bit-exact; it removes nothing from the game yet); **R2's scope awaits
-review** (NATIVE_R1.md, last section). The effort figures are provisional and
-are revised from actual progress at each milestone.
+Status, 2026-11-05: **R1-R5 are done**, every native path opt-in -- R1-R3
+(NATIVE_R1.md, NATIVE_R2.md, NATIVE_R3.md, NATIVE_R3B.md), R4 (NATIVE_R4.md:
+PPFX native, its writers bypassed; tag r4-checkpoint-2026-11-05), R5
+(NATIVE_R5.md: asp described, rendered natively, its images shared with PPFX,
+its draws' commands bypassed). **R6 is the next review checkpoint** (not
+started; its scope in NATIVE_R5.md section 9). The effort figures are
+provisional and are revised from actual progress at each milestone.
+
+(2026-11-04: direction approved by the owner; the evidence stage done,
+NATIVE_EVIDENCE.md.)
 
 This file replaces, for decisions, the four local review documents of
 2026-11-04 (architecture-proposal.md, native-render-design.md,
