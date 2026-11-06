@@ -263,3 +263,23 @@ shading about twenty times too dark, the ground missing. Next: compare
 asp's draws one by one -- the bridge's copy of the engine's target after
 a matched draw (R3's mechanism for PPFX) for every asp draw of a chosen
 frame, so the first draw that differs names the state at fault.
+
+**Comparing draw by draw** (DOTHEROES_ASP_COMPARE_DRAWS=<n>: the bridge
+copies the engine's target after every asp draw of every n-th frame, as R3
+did for PPFX; the report names each frame's first differing draw per
+target, with dumps; DOTHEROES_ASP_DESCRIBE=<seq> writes a record's
+translated programs, constants and inputs) found the cause of the dark
+scene: asp's fragment programs sample the shadow map (unit 4, a depth
+texture, compared in the shader), and the shadow pass's own depth clear --
+written inline by the pass's start, not through asp's clear -- was not
+recorded, so the native shadow map was never cleared and every pixel came
+out in shadow. With that clear (build/r4/an11): **6.9% of the scene
+target's pixels differ** (from 89.8%), the mean brightness 0.233 against
+the engine's 0.263. Still different: the engine's float target holds
+values up to 4.7 (and negative alpha) where the native output stays within
+0..1 -- an additive or constant-colour blend, or an effect not yet drawn
+natively, is the next thing the draw-by-draw comparison has to name. The
+winding is as the engine maps it (flipping it: 99.99% differ). asp also
+clears surfaces it then does not draw into (1,650 clears dropped past the
+32 a draw keeps; harmless if they are older than a later clear of the same
+surface, to be made exact).

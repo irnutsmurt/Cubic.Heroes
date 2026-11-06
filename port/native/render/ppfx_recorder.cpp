@@ -348,7 +348,7 @@ struct Asp {
     uint32_t samp_written_valid;
     uint8_t stored_samp_valid;
     uint64_t rebuilds, samp_restores;
-    Rec::AspClear clears[2];         // asp's clears waiting for its next draw
+    Rec::AspClear clears[32];        // asp's clears waiting for its next draw
     uint32_t nclears;
     uint64_t clears_dropped;
 } A;
@@ -1622,6 +1622,14 @@ int asp_record_call(uint32_t addr, ppu_context* c)
         r.color_mask = g8(rt + 0x0C) ? 0x01010101u : 0; r.color_mask_by = kByAsp;
         r.depth_test = 1; r.depth_write = 1; r.stencil_test = 0;
         A.cmask_unknown = 0;
+        // its own clear of depth and stencil (written inline: 1.0 and 0xFF), on its surface
+        {
+            Rec::AspClear k;
+            memset(&k, 0, sizeof k);
+            k.mask = 0x03u; k.depth = 0xFFFFFFu; k.stencil = 0xFFu; k.surface = S.st.surface;
+            if (A.nclears < 32) A.clears[A.nclears++] = k;
+            else { memmove(&A.clears[0], &A.clears[1], 31 * sizeof k); A.clears[31] = k; A.clears_dropped++; }
+        }
         // and a scissor one pixel inside the target's edges (+0x04, +0x08 its size)
         const uint32_t w = g32(rt + 4), h = g32(rt + 8);
         if (w > 2 && h > 2) S.st.scissor = { 1, 1, (uint16_t)(w - 2), (uint16_t)(h - 2) };
@@ -1642,8 +1650,8 @@ int asp_record_call(uint32_t addr, ppu_context* c)
         k.stencil = (uint32_t)c->gpr[6] & 0xFF;
         k.surface = S.st.surface;
         if (!k.mask) return 1;
-        if (A.nclears < 2) A.clears[A.nclears++] = k;
-        else { A.clears[0] = A.clears[1]; A.clears[1] = k; A.clears_dropped++; }
+        if (A.nclears < 32) A.clears[A.nclears++] = k;
+        else { memmove(&A.clears[0], &A.clears[1], 31 * sizeof k); A.clears[31] = k; A.clears_dropped++; }
         return 1;
     }
     case 0x006C9C74: { // vertex constants (this, {start, ..}, const float*, count): whole vec4s

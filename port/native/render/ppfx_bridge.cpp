@@ -901,6 +901,9 @@ void on_draw_pre(void*, u32 io, u32 laps, const u32* handles, const u32* locatio
             stats().xcheck_ns += bnow() - x0;
         }
         walk_init(r);
+        // R5: a draw compared one by one (DOTHEROES_ASP_COMPARE_DRAWS): the
+        // engine's target copied after this draw, as for PPFX's
+        if (mode() == 2 && render_ready() && compare_wanted(r) != kCmpNone) { B.copies = 0; B.pending = r; return; }
         mark_walked(r);
         return;
     }
@@ -996,7 +999,7 @@ void on_wrote(void*, u32 io, u32 laps, int draw, const u32* handles, const u32* 
         // the reference output, for the comparison
         static int cmp_off = -1;
         if (cmp_off < 0) { const char* e = getenv("DOTHEROES_PPFX_COMPARE"); cmp_off = e && *e == '0'; }
-        const bool changed = mode() == 2 && !cmp_off && structure_changed(r);
+        const bool changed = mode() == 2 && !cmp_off && r->kind != kAspDraw && structure_changed(r);
         int why = mode() == 2 && render_ready() ? compare_wanted(r) : kCmpNone;
         if (mode() == 2 && render_ready() && why == kCmpNone && changed) why = kCmpChange;
         if (why != kCmpNone && n) {

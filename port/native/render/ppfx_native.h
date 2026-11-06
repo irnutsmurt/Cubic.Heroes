@@ -216,7 +216,7 @@ struct Rec {
     // kAspDraw (R5): asp's clears since its previous draw, done before this
     // draw (each on the surface it was made with): CELL_GCM_CLEAR_* bits,
     // the colour (ARGB8, or four floats for a float target), depth (24-bit) and stencil
-    struct AspClear { uint32_t mask, argb, depth, stencil; float rgba[4]; Surface surface; } aclear[2];
+    struct AspClear { uint32_t mask, argb, depth, stencil; float rgba[4]; Surface surface; } aclear[32];
     uint32_t naclear;
     uint32_t clear_mask;           // clear
     VtxRange vr[16];

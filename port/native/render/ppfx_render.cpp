@@ -122,6 +122,7 @@ VkPhysicalDeviceMemoryProperties s_mem;
 float s_ts_period = 1.0f;
 std::atomic<int> s_ready{0};
 int s_full = 0;   // DOTHEROES_PPFX_BARRIERS=full: R3's full barriers, every image in GENERAL
+char s_dump[512];   // DOTHEROES_PPFX_DUMP: where the first differing outputs go
 
 uint64_t now_ns()
 {
@@ -1076,6 +1077,45 @@ VkStencilOp gcm_stencil_op(uint32_t o)
     }
 }
 
+// DOTHEROES_ASP_DESCRIBE=<seq> (a diagnostic): the record's translated
+// programs, its fragment constants, vertex inputs and sampled textures,
+// into the dump directory (only when its pipeline is made: a fresh one)
+void asp_describe(const Rec* r, const std::string& vs, const std::string& ps, const rsx_vertex_layout_plan& layout,
+                  const rsx_fp_constant_block* fc)
+{
+    static long long want = -2;
+    if (want == -2) { const char* e = getenv("DOTHEROES_ASP_DESCRIBE"); want = e && *e ? atoll(e) : -1; }
+    if (want < 0 || (long long)r->seq < want || !s_dump[0]) return;
+    want = -1;   // the first fresh pipeline at or after it
+    char path[600];
+    snprintf(path, sizeof path, "%s/describe_r%llu.txt", s_dump, (unsigned long long)r->seq);
+    FILE* f = fopen(path, "w");
+    if (!f) return;
+    const State& st = r->st;
+    fprintf(f, "record %llu frame %u prim %u count %u vcount %u idx %08X type %u\n", (unsigned long long)r->seq, r->frame,
+            r->prim, r->count, r->vcount, r->idx_ea, r->idx_type);
+    fprintf(f, "fp offset %08X ctl reg %u h0 %u txp %u kill %u input %08X tex %04X 2d %04X\n", st.fp.offset, st.fp.reg_count,
+            st.fp.output_from_h0, st.fp.txp, st.fp.pixel_kill, st.fp.input_mask, st.fp.tex_mask, st.fp.tex_2d);
+    for (uint32_t i = 0; i < 16; i++)
+        if (st.vin[i].size)
+            fprintf(f, "vin%u size %u type %u stride %u loc %u off %08X freq %u\n", i, st.vin[i].size, st.vin[i].type,
+                    st.vin[i].stride, st.vin[i].location, st.vin[i].offset, st.vin[i].frequency);
+    fprintf(f, "layout mask %04X stride %u count %u\n", layout.mask, layout.stride, layout.count);
+    for (uint32_t u = 0; u < 16; u++)
+        if (st.samp[u].enable)
+            fprintf(f, "tex%u fmt %02X %ux%u mips %u remap %08X loc %u off %08X | min %u mag %u wrap %u/%u\n", u, st.tex[u].format,
+                    st.tex[u].width, st.tex[u].height, st.tex[u].mipmap, st.tex[u].remap, st.tex[u].location, st.tex[u].offset,
+                    st.samp[u].min_filter, st.samp[u].mag_filter, st.samp[u].wrap_s, st.samp[u].wrap_t);
+    for (uint32_t k = 0; k < fc->count; k++)
+        fprintf(f, "fpconst %u: %g %g %g %g\n", k, fc->values[k][0], fc->values[k][1], fc->values[k][2], fc->values[k][3]);
+    fprintf(f, "raster blend %u %04X/%04X alpha %u %04X ref %u depth %u/%u %04X cull %u %04X/%04X cmask %08X\n",
+            st.raster.blend, st.raster.blend_sf_rgb, st.raster.blend_df_rgb, st.raster.alpha_test, st.raster.alpha_func,
+            st.raster.alpha_ref, st.raster.depth_test, st.raster.depth_write, st.raster.depth_func, st.raster.cull,
+            st.raster.cull_face, st.raster.front_face, st.raster.color_mask);
+    fprintf(f, "\n---- vertex program (HLSL)\n%s\n---- fragment program (HLSL)\n%s\n", vs.c_str(), ps.c_str());
+    fclose(f);
+}
+
 // The pipeline for an asp record: its programs as for PPFX's (pipeline()),
 // with the alpha test in the fragment program, and its whole render state:
 // blend, depth, stencil, cull, polygon offset (dynamic), the colour mask;
@@ -1157,6 +1197,7 @@ const Pipe* pipeline_asp(const Rec* r, const rsx_vertex_layout_plan& layout, VkF
         report_add("render: an asp record's programs did not translate");
         return nullptr;
     }
+    asp_describe(r, vs, ps, layout, consts);
     VkShaderModule vsm = spirv_module(vs, RSX_SHADER_STAGE_VERTEX), fsm = spirv_module(ps, RSX_SHADER_STAGE_FRAGMENT);
     if (!vsm || !fsm) return nullptr;
     VkPipelineShaderStageCreateInfo stg[2] = {
@@ -1179,6 +1220,11 @@ const Pipe* pipeline_asp(const Rec* r, const rsx_vertex_layout_plan& layout, VkF
     ras.cullMode = !ra.cull ? VK_CULL_MODE_NONE
                  : (ra.cull_face == 0x0404u || ra.cull_face == 0x0408u) ? VK_CULL_MODE_FRONT_BIT : VK_CULL_MODE_BACK_BIT;
     ras.frontFace = ra.front_face == 0x0901u ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE;
+    {   // DOTHEROES_ASP_CULL_FLIP=1 (a test of the winding's orientation): the other face front
+        static int flip = -1;
+        if (flip < 0) { const char* e = getenv("DOTHEROES_ASP_CULL_FLIP"); flip = e && *e == '1'; }
+        if (flip) ras.frontFace = ras.frontFace == VK_FRONT_FACE_CLOCKWISE ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE;
+    }
     ras.depthBiasEnable = VK_TRUE; ras.lineWidth = 1.0f;
     VkPipelineMultisampleStateCreateInfo ms = { VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
     ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
@@ -1419,7 +1465,6 @@ void frames_close(uint32_t before)
 
 // ---- comparison ----------------------------------------------------------------------------
 
-char s_dump[512];
 std::atomic<int> s_dumped{0};
 
 void dump(const char* side, uint32_t frame, uint64_t seq, uint32_t off, const uint8_t* p, size_t n, uint32_t w,
@@ -1483,14 +1528,17 @@ void cmp_run(CmpJob& j)
             if (frame_is_inherited(j.frame)) st.cmp_differ_inherited++;
             uint64_t differ = 0;
             for (VkDeviceSize i = 0; i < j.bytes; i += j.bpp) differ += memcmp(j.mine.p + i, eng.p + i, j.bpp) != 0;
+            // the first differing record of each (frame, target): the one that names the cause
+            static std::set<uint64_t> firsts;
+            const bool first = firsts.size() < 4096 && firsts.insert((uint64_t)j.frame << 32 | j.off).second;
             static int said = 0;
-            if (said++ < 40) {
+            if (first && said++ < 64) {
                 char line[240];
-                snprintf(line, sizeof line, "compare: record %llu frame %u target %08X %ux%u: %llu of %u pixels differ",
+                snprintf(line, sizeof line, "compare: record %llu frame %u target %08X %ux%u: %llu of %u pixels differ (the first there)",
                          (unsigned long long)j.seq, j.frame, j.off, j.w, j.h, (unsigned long long)differ, j.w * j.h);
                 report_add(line);
             }
-            if (s_dump[0] && s_dumped++ < 12) {
+            if (first && s_dump[0] && s_dumped++ < 16) {
                 dump("native", j.frame, j.seq, j.off, j.mine.p, (size_t)j.bytes, j.w, j.h, j.f);
                 dump("engine", j.frame, j.seq, j.off, eng.p, (size_t)j.bytes, j.w, j.h, j.f);
             }
@@ -2210,6 +2258,7 @@ void asp_draw(const Rec* r)
     if (d) d->written = 1;
     b.records++;
     stats().n_asp_draws++;
+    if (t) compare_after(b, r, t, W, H);   // DOTHEROES_ASP_COMPARE_DRAWS
     stats().n_asp_vertex_bytes += verts.size();
 }
 
@@ -2719,7 +2768,13 @@ int compare_wanted(const Rec* r)
     if (finals < 0) { const char* e = getenv("DOTHEROES_PPFX_COMPARE_FINALS"); finals = e && *e ? atoi(e) : 1; }
     // DOTHEROES_PPFX_COMPARE=0: no comparison at all (the native renderer's own cost)
     if (off < 0) { const char* e = getenv("DOTHEROES_PPFX_COMPARE"); off = e && *e == '0'; }
-    if (off || r->kind != kDraw) return kCmpNone;
+    if (off) return kCmpNone;
+    if (r->kind == kAspDraw) {   // R5: DOTHEROES_ASP_COMPARE_DRAWS=<n>: every asp draw of every n-th frame
+        static int ad = -1;
+        if (ad < 0) { const char* e = getenv("DOTHEROES_ASP_COMPARE_DRAWS"); ad = e && *e ? atoi(e) : 0; }
+        return ad > 0 && asp_native() && r->frame % (uint32_t)ad == 0 && r->nneed && r->need[0].unit == 0xFF ? kCmpEvery : kCmpNone;
+    }
+    if (r->kind != kDraw) return kCmpNone;
     const bool every_frame = every > 0 && r->frame % (uint32_t)every == 0;
     if (r->need[0].format == 0x08 && finals > 0 && r->frame % (uint32_t)finals == 0)
         return kCmpFinal;   // the final composite: the A8R8G8B8 display buffer
