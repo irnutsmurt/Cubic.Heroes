@@ -108,6 +108,7 @@ extern int32_t g_sys_process_exit_code;
 
 /* Host-provided symbols the runtime and the HLE libraries link against. */
 uint8_t* vm_base = nullptr;
+int vm_write_watch = 0;                       /* the guest space has the OS's write watch (R5) */
 extern uint32_t ppu_vm_size;                  /* ppu_loader.cpp: the OOB guard */
 
 /* Guest-callback dispatch. g_ps3_guest_caller is the hook the HLE runtime
@@ -492,7 +493,20 @@ static bool alloc_guest_vm(void)
 {
 #ifdef _WIN32
     AddVectoredExceptionHandler(1, vm_commit_veh);
-    vm_base = (uint8_t*)VirtualAlloc(NULL, VM_SIZE, MEM_RESERVE, PAGE_READWRITE);
+    /* R5 (docs/NATIVE_R5.md): with asp drawn natively (DOTHEROES_ASP_NATIVE=1)
+     * the guest space is reserved with the OS's write watch, which tells the
+     * native renderer which guest pages were written since it last looked, so
+     * vertices and textures nobody wrote are not hashed again each frame.
+     * DOTHEROES_ASP_WWATCH=0 turns it off. */
+    {
+        const char* an = getenv("DOTHEROES_ASP_NATIVE");
+        const char* ww = getenv("DOTHEROES_ASP_WWATCH");
+        if (an && *an == '1' && !(ww && *ww == '0')) {
+            vm_base = (uint8_t*)VirtualAlloc(NULL, VM_SIZE, MEM_RESERVE | MEM_WRITE_WATCH, PAGE_READWRITE);
+            vm_write_watch = vm_base != nullptr;
+        }
+    }
+    if (!vm_base) vm_base = (uint8_t*)VirtualAlloc(NULL, VM_SIZE, MEM_RESERVE, PAGE_READWRITE);
     ppu_vm_size = 0;              /* the whole space is backed; no OOB guard needed */
 #else
     /* No vectored exception handlers off Windows, so the arena is mapped up

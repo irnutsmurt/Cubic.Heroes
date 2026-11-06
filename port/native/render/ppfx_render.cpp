@@ -118,6 +118,76 @@ struct Fn {
     PFN_vkGetPhysicalDeviceFormatProperties GetPhysicalDeviceFormatProperties;
 } F;
 
+// R5: asp's consecutive draws into the same targets share one render pass
+// (DOTHEROES_ASP_PASS_MERGE=0: a pass a draw, as before). The pass is left
+// open after a draw; anything that must be recorded outside a render pass
+// -- a barrier, a copy, a clear of an image, a query reset, another pass,
+// the command buffer's end -- ends it first: those entry points of F are
+// wrapped at init. A command buffer reset forgets it; a framebuffer
+// destroyed while its pass is open ends it.
+int asp_native();
+int pass_merge()
+{
+    static int on = -1;
+    if (on < 0) { const char* e = getenv("DOTHEROES_ASP_PASS_MERGE"); on = asp_native() && !(e && *e == '0'); }
+    return on;
+}
+struct OpenPass { VkCommandBuffer cb; VkRenderPass rp; VkFramebuffer fb; uint32_t w, h; } s_open = {};
+uint64_t s_pass_merged = 0;
+PFN_vkCmdEndRenderPass s_real_end_pass;
+void end_open_pass(VkCommandBuffer cb)
+{
+    if (s_open.cb && s_open.cb == cb) { s_open.cb = VK_NULL_HANDLE; s_real_end_pass(cb); }
+}
+#define PASS_WRAP(name, params, args) \
+    PFN_##name s_real_##name; \
+    VKAPI_ATTR void VKAPI_CALL w_##name params { end_open_pass(cb); s_real_##name args; }
+PASS_WRAP(vkCmdPipelineBarrier, (VkCommandBuffer cb, VkPipelineStageFlags a, VkPipelineStageFlags b, VkDependencyFlags c, uint32_t d,
+                                 const VkMemoryBarrier* e, uint32_t f, const VkBufferMemoryBarrier* g, uint32_t h,
+                                 const VkImageMemoryBarrier* i), (cb, a, b, c, d, e, f, g, h, i))
+PASS_WRAP(vkCmdCopyImage, (VkCommandBuffer cb, VkImage a, VkImageLayout b, VkImage c, VkImageLayout d, uint32_t e, const VkImageCopy* f),
+          (cb, a, b, c, d, e, f))
+PASS_WRAP(vkCmdCopyImageToBuffer, (VkCommandBuffer cb, VkImage a, VkImageLayout b, VkBuffer c, uint32_t d, const VkBufferImageCopy* e),
+          (cb, a, b, c, d, e))
+PASS_WRAP(vkCmdCopyBufferToImage, (VkCommandBuffer cb, VkBuffer a, VkImage b, VkImageLayout c, uint32_t d, const VkBufferImageCopy* e),
+          (cb, a, b, c, d, e))
+PASS_WRAP(vkCmdClearColorImage, (VkCommandBuffer cb, VkImage a, VkImageLayout b, const VkClearColorValue* c, uint32_t d,
+                                 const VkImageSubresourceRange* e), (cb, a, b, c, d, e))
+PASS_WRAP(vkCmdClearDepthStencilImage, (VkCommandBuffer cb, VkImage a, VkImageLayout b, const VkClearDepthStencilValue* c, uint32_t d,
+                                        const VkImageSubresourceRange* e), (cb, a, b, c, d, e))
+PASS_WRAP(vkCmdCopyBuffer, (VkCommandBuffer cb, VkBuffer a, VkBuffer b, uint32_t c, const VkBufferCopy* d), (cb, a, b, c, d))
+PASS_WRAP(vkCmdResetQueryPool, (VkCommandBuffer cb, VkQueryPool a, uint32_t b, uint32_t c), (cb, a, b, c))
+PASS_WRAP(vkCmdBeginRenderPass, (VkCommandBuffer cb, const VkRenderPassBeginInfo* a, VkSubpassContents b), (cb, a, b))
+#undef PASS_WRAP
+PFN_vkEndCommandBuffer s_real_vkEndCommandBuffer;
+VKAPI_ATTR VkResult VKAPI_CALL w_vkEndCommandBuffer(VkCommandBuffer cb)
+{
+    end_open_pass(cb);
+    return s_real_vkEndCommandBuffer(cb);
+}
+PFN_vkResetCommandBuffer s_real_vkResetCommandBuffer;
+VKAPI_ATTR VkResult VKAPI_CALL w_vkResetCommandBuffer(VkCommandBuffer cb, VkCommandBufferResetFlags f)
+{
+    if (s_open.cb == cb) s_open.cb = VK_NULL_HANDLE;
+    return s_real_vkResetCommandBuffer(cb, f);
+}
+PFN_vkDestroyFramebuffer s_real_vkDestroyFramebuffer;
+VKAPI_ATTR void VKAPI_CALL w_vkDestroyFramebuffer(VkDevice dev, VkFramebuffer fb, const VkAllocationCallbacks* a)
+{
+    if (s_open.cb && s_open.fb == fb) end_open_pass(s_open.cb);
+    s_real_vkDestroyFramebuffer(dev, fb, a);
+}
+void pass_wrap_install()
+{
+    if (!pass_merge()) return;
+    s_real_end_pass = F.vkCmdEndRenderPass;
+#define W(f) s_real_##f = F.f; F.f = w_##f;
+    W(vkCmdPipelineBarrier) W(vkCmdCopyImage) W(vkCmdCopyImageToBuffer) W(vkCmdCopyBufferToImage) W(vkCmdClearColorImage)
+    W(vkCmdClearDepthStencilImage) W(vkCmdCopyBuffer) W(vkCmdResetQueryPool) W(vkCmdBeginRenderPass) W(vkEndCommandBuffer)
+    W(vkResetCommandBuffer) W(vkDestroyFramebuffer)
+#undef W
+}
+
 rsx_vk_bridge_dev D;
 VkPhysicalDeviceMemoryProperties s_mem;
 float s_ts_period = 1.0f;
@@ -834,7 +904,8 @@ void forget_framebuffers(Img* o)
 // ---- the registries -------------------------------------------------------------------------
 
 std::unordered_map<uint64_t, Img*> s_targets;     // a surface address PPFX renders to, or other work's surface handed over
-std::unordered_map<uint64_t, Img*> s_static;      // static textures by content
+struct StaticTex { Img* img; uint32_t frame; };
+std::unordered_map<uint64_t, StaticTex> s_static;  // static textures by content, with the frame of their last use
 std::map<std::tuple<VkFormat, uint32_t, uint32_t>, Img*> s_snap;   // own-target snapshots
 std::vector<Img*> s_retired;                      // destroyed once the batches in flight are done
 
@@ -1126,6 +1197,40 @@ void asp_describe(const Rec* r, const std::string& vs, const std::string& ps, co
 // blend, depth, stencil, cull, polygon offset (dynamic), the colour mask;
 // a colour format of VK_FORMAT_UNDEFINED for a depth-only pass. Null when it
 // cannot be made.
+// R5: what asp's draws read from a fragment program's bytes, once a
+// program -- records' programs are interned by content, so a blob's hash
+// names its bytes: the units it samples, its structural hash, its buffered
+// constants, and (by the textures' gamma and expansion masks) the units
+// those apply to
+struct FpInfo {
+    uint32_t sampled = 0;
+    bool ok = false;
+    uint64_t shash = 0;
+    uint32_t nconst = 0;
+    std::vector<uint32_t> consts;
+    std::unordered_map<uint64_t, std::pair<uint32_t, uint32_t>> units;
+};
+std::unordered_map<uint64_t, FpInfo> s_fpinfo;
+FpInfo& fp_info(const Blob* b)
+{
+    const uint64_t key = b->hash ^ ((uint64_t)b->bytes.size() << 40);
+    auto it = s_fpinfo.find(key);
+    if (it != s_fpinfo.end()) return it->second;
+    if (s_fpinfo.size() > 8192) s_fpinfo.clear();
+    FpInfo& f = s_fpinfo[key];
+    const uint8_t* fp = b->bytes.data();
+    const uint32_t n = (uint32_t)b->bytes.size();
+    f.sampled = rsx_fp_texture_units(fp, n);
+    f.shash = rsx_fp_structural_hash(fp, n, 0xF5ull);
+    rsx_fp_constant_block cb;
+    cb.count = 0;
+    f.ok = rsx_fp_collect_constants(fp, n, &cb) >= 0;
+    if (f.ok) { f.nconst = cb.count; f.consts.assign(&cb.values[0][0], &cb.values[0][0] + (size_t)cb.count * 4); }
+    return f;
+}
+// a vertex program's inputs (the layout's mask), once a program
+std::unordered_map<uint64_t, uint32_t> s_vpmask;
+
 const Pipe* pipeline_asp(const Rec* r, const rsx_vertex_layout_plan& layout, VkFormat rt, VkFormat df,
                          rsx_fp_constant_block* consts)
 {
@@ -1136,7 +1241,8 @@ const Pipe* pipeline_asp(const Rec* r, const rsx_vertex_layout_plan& layout, VkF
     const uint32_t fp_size = (uint32_t)r->fp->bytes.size();
     const uint32_t fp_ctrl = fp_control(st.fp);
     const uint32_t srgb = rt != VK_FORMAT_UNDEFINED ? rsx_fp_srgb_output_enabled(st.fp.gamma, fp_ctrl, st.surface.color_format & 0x1Fu) : 0;
-    const uint32_t sampled = rsx_fp_texture_units(fp, fp_size);
+    FpInfo& fi = fp_info(r->fp.get());
+    const uint32_t sampled = fi.sampled;
     uint32_t cube = 0, vol = 0, shadow_mask = 0, unnorm_mask = 0;
     rsx_fp_shadow_desc shadow[16] = {};
     uint8_t gamma[16] = {}, expand[16] = {};
@@ -1158,14 +1264,24 @@ const Pipe* pipeline_asp(const Rec* r, const rsx_vertex_layout_plan& layout, VkF
             unnorm[u][0] = t.width; unnorm[u][1] = t.height; unnorm[u][2] = t.depth;
         }
     }
-    const uint32_t gamma_units = rsx_fp_texture_gamma_units(fp, fp_size, gamma);
+    uint32_t gamma_units, expand_units;
+    {
+        const uint64_t gk = fnv(gamma, sizeof gamma, fnv(expand, sizeof expand));
+        auto gt = fi.units.find(gk);
+        if (gt != fi.units.end()) { gamma_units = gt->second.first; expand_units = gt->second.second; }
+        else {
+            gamma_units = rsx_fp_texture_gamma_units(fp, fp_size, gamma);
+            expand_units = rsx_fp_texture_expand_units(fp, fp_size, expand);
+            if (fi.units.size() < 64) fi.units[gk] = { gamma_units, expand_units };
+        }
+    }
     for (uint32_t u = 0; u < 16; u++) if (!(gamma_units >> u & 1)) gamma[u] = 0;
-    const uint32_t expand_units = rsx_fp_texture_expand_units(fp, fp_size, expand);
     for (uint32_t u = 0; u < 16; u++) if (!(expand_units >> u & 1)) expand[u] = 0;
     unnorm_mask &= sampled & ~shadow_mask;
     for (uint32_t u = 0; u < 16; u++) if (!(unnorm_mask >> u & 1)) unnorm[u][0] = unnorm[u][1] = unnorm[u][2] = 0;
     consts->count = 0;
-    if (rsx_fp_collect_constants(fp, fp_size, consts) < 0) {
+    if (fi.ok) { consts->count = fi.nconst; if (fi.nconst) memcpy(consts->values, fi.consts.data(), (size_t)fi.nconst * 16); }
+    if (!fi.ok) {
         static int said = 0;
         if (said++ < 4) {
             char line[200];
@@ -1177,8 +1293,8 @@ const Pipe* pipeline_asp(const Rec* r, const rsx_vertex_layout_plan& layout, VkF
     }
     const Raster& ra = st.raster;
     const uint32_t alpha_test = ra.alpha_test ? 1u : 0u, alpha_func = ra.alpha_func;
-    uint64_t k = fnv(vp, vp_bytes, 0xA5Bull);
-    k = rsx_fp_structural_hash(fp, fp_size, k);
+    const uint64_t vk[2] = { r->vp->hash, (uint64_t)vp_bytes };
+    uint64_t k = fnv(&fi.shash, 8, fnv(vk, sizeof vk, 0xA5Bull));
     const uint32_t ints[] = { fp_ctrl & 0x4Eu, srgb, cube, vol, shadow_mask, unnorm_mask, gamma_units, expand_units,
                               layout.mask, layout.stride, (uint32_t)rt, (uint32_t)df, ra.color_mask, ra.front_face,
                               ra.cull, ra.cull_face, ra.blend, ra.blend_sf_rgb, ra.blend_df_rgb, ra.blend_sf_a, ra.blend_df_a,
@@ -1310,6 +1426,7 @@ void fetch_plan(rsx_vertex_fetch_plan* plan, const Rec* r, const rsx_vertex_layo
 
 // A static texture from the bytes the recorder took (the engine's
 // eng_texture_upload, one face), by content.
+uint64_t fast_hash(const uint8_t* p, size_t n, uint64_t seed);
 Img* static_texture(Batch& b, const Rec* r, uint32_t unit, const Texture& t)
 {
     const VtxRange* snap = nullptr;
@@ -1322,11 +1439,11 @@ Img* static_texture(Batch& b, const Rec* r, uint32_t unit, const Texture& t)
     const VkFormat vf = be_vkformat(texfmt_be(lv[0].tl.fmt), &bpp);
     if (vf == VK_FORMAT_UNDEFINED) return nullptr;
     const uint8_t* src = &r->tdata[snap->at];
-    uint64_t h = fnv(src, snap->bytes);
+    uint64_t h = fast_hash(src, snap->bytes, 0x57A7ull);
     const uint32_t key[] = { t.format, t.width, t.height, nlv, t.pitch };
     h = fnv(key, sizeof key, h);
     auto it = s_static.find(h);
-    if (it != s_static.end()) return it->second;
+    if (it != s_static.end()) { it->second.frame = r->frame; return it->second.img; }
     Img* o = make_image(vf, t.width, t.height, nlv, bpp, false);
     if (!o) return nullptr;
     access(b.cb, o, kCopyDst);
@@ -1346,8 +1463,19 @@ Img* static_texture(Batch& b, const Rec* r, uint32_t unit, const Texture& t)
     mark(b, kSectCopy);
     o->written = 1;
     stats().n_static_textures++;
-    if (s_static.size() > 256) { for (auto& kv : s_static) s_retired.push_back(kv.second); s_static.clear(); }
-    return s_static[h] = o;
+    // those not used for 8 frames go, swept once a frame (R5: a texture the
+    // game rewrites each frame, the water's, adds one a frame; retiring 256
+    // at once -- all of them, or the unused ones -- held the native thread
+    // ~33 ms every 3.4 s: every texture uploaded again, or 200 images freed)
+    static uint32_t swept = ~0u;
+    if (swept != r->frame) {
+        swept = r->frame;
+        for (auto jt = s_static.begin(); jt != s_static.end();)
+            if (r->frame - jt->second.frame > 8) { s_retired.push_back(jt->second.img); jt = s_static.erase(jt); }
+            else ++jt;
+    }
+    s_static[h] = { o, r->frame };
+    return o;
 }
 
 VkImageView view_of(Img* o, uint32_t crossbar, uint32_t fmt)
@@ -2028,6 +2156,7 @@ Img* depth_image(uint32_t loc, uint32_t off, VkFormat fmt, uint32_t w, uint32_t 
 // swizzled ones), cached by its description and checked against the guest
 // bytes by a hash once a frame
 struct GuestTex { Img* img; uint64_t hash; uint32_t frame; };
+uint64_t range_hash(const uint8_t* p, uint32_t len, const Rec* r);
 std::unordered_map<uint64_t, GuestTex> s_gtex;
 
 Img* guest_texture_live(Batch& b, const Rec* r, const Texture& t)
@@ -2043,7 +2172,7 @@ Img* guest_texture_live(Batch& b, const Rec* r, const Texture& t)
     const uint64_t k = fnv(key, sizeof key);
     GuestTex& g = s_gtex[k];
     if (g.img && g.frame == r->frame) return g.img;
-    const uint64_t h = fast_hash(vm_base + ea, bytes, k);
+    const uint64_t h = range_hash(vm_base + ea, bytes, r) ^ k;
     if (g.img && g.hash == h) { g.frame = r->frame; return g.img; }
     uint32_t bpp;
     const VkFormat vf = be_vkformat(texfmt_be(lv[0].tl.fmt), &bpp);
@@ -2242,12 +2371,176 @@ void arena_fill(Batch& b, const Arena& a, VkDeviceSize off, VkDeviceSize src, Vk
     mark(b, kSectCopy);
 }
 
+// DOTHEROES_ASP_PROFILE=1: asp_draw's time by part, on the native thread
+int asp_profile()
+{
+    static int on = -1;
+    if (on < 0) { const char* e = getenv("DOTHEROES_ASP_PROFILE"); on = e && *e == '1'; }
+    return on;
+}
+enum { kApClears, kApLayout, kApIndices, kApPlan, kApVcache, kApPipeline, kApTextures, kApDescriptors, kApCommands,
+       kApHash, kApN };
+const char* const kApName[kApN] = { "clears", "layout", "indices", "fetch plan", "vertex cache", "pipeline", "textures",
+                                    "uploads and descriptors", "commands", "(of the cache: hashing)" };
+uint64_t s_ap_ns[kApN], s_ap_draws;
+struct AspProf {
+    uint64_t t = 0;
+    bool on;
+    AspProf() : on(asp_profile() != 0) { if (on) { t = now_ns(); s_ap_draws++; } }
+    void mark(int i) { if (on) { const uint64_t n = now_ns(); s_ap_ns[i] += n - t; t = n; } }
+};
+
+// Guest writes, from the OS's write watch on the guest space (port/main.cpp
+// reserves it with MEM_WRITE_WATCH when asp is drawn natively): a poll
+// collects the 4 KB pages written since the previous one and stamps each
+// with the poll's number. A range hashed after poll E is unchanged while
+// none of its pages carries a later stamp. A poll sees every write made
+// before it, so it covers the records published before it began (their
+// vertices were written before the game drew); a record published later
+// waits for the next poll -- at most one a millisecond -- or is hashed.
+extern "C" int vm_write_watch;
+std::vector<uint32_t> s_pg_epoch;   // per 4 KB guest page: the poll that last found it written
+std::vector<void*> s_ww_buf;
+uint32_t s_ww_epoch = 0;            // the polls so far
+uint64_t s_ww_cover = 0;            // records below this seq were published before the last poll
+uint64_t s_ww_last_ns = 0, s_ww_polls = 0, s_ww_ns = 0, s_ww_pages = 0, s_ww_failed = 0, s_ww_scanned = 0;
+// the guest pages relied on, as runs [first, end) -- runs closer than
+// kWwGap pages merged (a poll's cost is per page scanned and per call)
+std::map<uint32_t, uint32_t> s_ww_runs;
+const uint32_t kWwGap = 32;
+
+int ww_poll_us()
+{
+    static int us = -1;
+    if (us < 0) { const char* e = getenv("DOTHEROES_ASP_WWATCH_US"); us = e && *e ? atoi(e) : 1000; }
+    return us;
+}
+
+void ww_note(uint32_t ea, uint32_t len)
+{
+    uint32_t a = ea >> 12, b = (uint32_t)(((uint64_t)ea + len + 0xFFFu) >> 12);
+    // merge every run within kWwGap of [a, b)
+    auto it = s_ww_runs.upper_bound(a);
+    if (it != s_ww_runs.begin()) {
+        auto pv = std::prev(it);
+        if (pv->second + kWwGap >= a) it = pv;
+    }
+    while (it != s_ww_runs.end() && it->first <= b + kWwGap) {
+        if (it->second + kWwGap < a) { ++it; continue; }
+        if (it->first < a) a = it->first;
+        if (it->second > b) b = it->second;
+        it = s_ww_runs.erase(it);
+    }
+    s_ww_runs[a] = b;
+}
+
+bool ww_poll()
+{
+    if (!vm_write_watch) return false;
+    if (s_pg_epoch.empty()) { s_pg_epoch.assign(1u << 20, 0); s_ww_buf.resize(1u << 20); }
+    const uint64_t t0 = now_ns();
+    const uint64_t cover = queue().put.load(std::memory_order_acquire);   // before the poll
+    s_ww_epoch++;
+    for (const auto& run : s_ww_runs) {
+        // the output array sized to the run: the call's cost follows the
+        // array's size, not the span's (0.7 ms for a million entries)
+        ULONG_PTR n = run.second - run.first;
+        DWORD gran = 0;
+        s_ww_scanned += run.second - run.first;
+        if (n > s_ww_buf.size() ||
+            GetWriteWatch(WRITE_WATCH_FLAG_RESET, vm_base + ((uint64_t)run.first << 12), (SIZE_T)(run.second - run.first) << 12,
+                          s_ww_buf.data(), &n, &gran) != 0) {
+            vm_write_watch = 0;   // the write watch failed: everything hashed from now on
+            s_ww_failed++;
+            return false;
+        }
+        for (ULONG_PTR i = 0; i < n; i++) {
+            const uint64_t pg = (uint64_t)((uint8_t*)s_ww_buf[i] - vm_base) >> 12;
+            if (pg < s_pg_epoch.size()) s_pg_epoch[pg] = s_ww_epoch;
+        }
+        s_ww_pages += n;
+    }
+    s_ww_cover = cover;
+    s_ww_polls++;
+    s_ww_last_ns = now_ns();
+    s_ww_ns += s_ww_last_ns - t0;
+    return true;
+}
+
+// the record's writes seen by a poll: it is covered, or a poll is due
+bool ww_covers(uint64_t seq)
+{
+    if (!vm_write_watch) return false;
+    if (seq < s_ww_cover) return true;
+    if (now_ns() - s_ww_last_ns < (uint64_t)ww_poll_us() * 1000u) return false;
+    return ww_poll() && seq < s_ww_cover;
+}
+
+bool ww_clean(uint32_t ea, uint32_t len, uint32_t epoch)
+{
+    for (uint32_t pg = ea >> 12, e = (uint32_t)(((uint64_t)ea + len - 1) >> 12); pg <= e; pg++)
+        if (s_pg_epoch[pg] > epoch) return false;
+    return true;
+}
+
+// The hash of a guest range's bytes. Unchanged since it was last hashed
+// (the write watch above): the same hash, nothing read. Otherwise once a
+// frame: asp draws a mesh in several passes a frame (the shadow, the
+// reflection, the scene), and a later use in the same frame is checked by
+// a sample of the bytes (eight words across the range); a range the game
+// rewrote between two draws of a frame -- its sample changed -- is hashed
+// again.
+struct RangeHash { uint64_t h, sample; uint32_t frame, epoch; bool ww; };
+std::unordered_map<uint64_t, RangeHash> s_rhash;
+uint64_t s_rh_memo_bytes = 0, s_rh_ww_bytes = 0, s_rh_rehashed = 0;
+
+uint64_t sample_hash(const uint8_t* p, uint32_t len)
+{
+    if (len < 64) return fast_hash(p, len, 0x5A3Dull);
+    uint64_t h = len;
+    for (uint32_t i = 0; i < 8; i++) {
+        uint64_t w;
+        memcpy(&w, p + (uint64_t)(len - 8) * i / 7, 8);
+        h = (h ^ w) * 0x100000001B3ull;
+        h ^= h >> 29;
+    }
+    return h;
+}
+
+uint64_t range_hash(const uint8_t* p, uint32_t len, const Rec* r)
+{
+    const uint32_t ea = (uint32_t)(p - vm_base);
+    const uint32_t kk[2] = { ea, len };
+    const uint64_t key = fnv(kk, sizeof kk);
+    if (s_rhash.size() > 300000) { s_rhash.clear(); s_ww_runs.clear(); }
+    RangeHash& e = s_rhash[key];
+    if (e.ww && ww_covers(r->seq) && ww_clean(ea, len, e.epoch)) { s_rh_ww_bytes += len; e.frame = r->frame + 1; return e.h; }
+    const uint64_t sm = sample_hash(p, len);
+    if (e.frame == r->frame + 1 && e.sample == sm) { s_rh_memo_bytes += len; return e.h; }
+    if (e.frame == r->frame + 1) s_rh_rehashed++;
+    e.h = fast_hash(p, len, key);
+    e.sample = sm;
+    e.frame = r->frame + 1;
+    e.ww = vm_write_watch != 0;
+    e.epoch = s_ww_epoch;
+    if (e.ww) ww_note(ea, len);
+    s_vc_hashed += len;
+    return e.h;
+}
+
+// An index list's referenced vertices [vmin, vmax], by its bytes' hash: an
+// unchanged list is not decoded again
+struct IdxSum { uint32_t vmin, vmax; };
+std::unordered_map<uint64_t, IdxSum> s_isum;
+
 void asp_draw(const Rec* r)
 {
+    AspProf prof;
     Batch& b = batch(r->frame);
     wait_for(b, r);
     asp_describe_line(r);
     asp_clears(b, r);
+    prof.mark(kApClears);
     if (r->why || !r->vp || !r->fp) { unsupported(r, "asp: no programs, or no draw object"); return; }
     const State& st = r->st;
     const Surface& sf = st.surface;
@@ -2272,38 +2565,74 @@ void asp_draw(const Rec* r)
     // the vertex layout, the vertices [0, vcount), the indices
     rsx_vertex_layout_plan layout;
     {
+        const uint64_t vkey = r->vp->hash ^ ((uint64_t)r->vp->bytes.size() << 40);
+        auto mt = s_vpmask.find(vkey);
         uint32_t mask = 0xFFFFu;
-        rsx_vp_input_analysis an = { 0xFFFFu, 0 };
-        const uint32_t instrs = (uint32_t)r->vp->bytes.size() / 16;
-        if (rsx_vp_analyze_inputs(r->vp->bytes.data(), instrs * 16u, &an) == (int)instrs && an.exact && an.input_mask)
-            mask = an.input_mask;
+        if (mt != s_vpmask.end()) mask = mt->second;
+        else {
+            rsx_vp_input_analysis an = { 0xFFFFu, 0 };
+            const uint32_t instrs = (uint32_t)r->vp->bytes.size() / 16;
+            if (rsx_vp_analyze_inputs(r->vp->bytes.data(), instrs * 16u, &an) == (int)instrs && an.exact && an.input_mask)
+                mask = an.input_mask;
+            if (s_vpmask.size() > 8192) s_vpmask.clear();
+            s_vpmask[vkey] = mask;
+        }
         rsx_vertex_layout_plan_init(&layout, mask);
     }
+    prof.mark(kApLayout);
     int indexed = 0;
     if (!rsx_vertex_topology_plan(r->prim, 1, &indexed)) { unsupported(r, "asp: a primitive the engine does not rebuild"); return; }
     const uint32_t nv = r->vcount, n = r->count;
     if (!nv || !n || nv > (1u << 20) || n > (1u << 22)) { unsupported(r, "asp: counts"); return; }
-    std::vector<uint32_t> occ(n);
+    const bool u16 = r->idx_type == 2;
+    const uint32_t ibytes_guest = n * (u16 ? 2u : 4u);
     if (r->idx_ea) {
-        const bool u16 = r->idx_type == 2;
-        const uint64_t ib = (uint64_t)r->idx_ea + (uint64_t)n * (u16 ? 2 : 4);
+        const uint64_t ib = (uint64_t)r->idx_ea + ibytes_guest;
         if (r->idx_ea < 0x10000u || ib > 0xE0000000ull) { unsupported(r, "asp: index buffer"); return; }
-        const uint8_t* ip = vm_base + r->idx_ea;
-        for (uint32_t i = 0; i < n; i++) {
-            const uint32_t v = u16 ? (uint32_t)(ip[2 * i] << 8 | ip[2 * i + 1])
-                                   : (uint32_t)ip[4 * i] << 24 | (uint32_t)ip[4 * i + 1] << 16 | (uint32_t)ip[4 * i + 2] << 8 | ip[4 * i + 3];
-            if (v >= nv) { unsupported(r, "asp: an index past the vertex count"); return; }
-            occ[i] = v;
+    } else if (n > nv) { unsupported(r, "asp: more vertices drawn than the object has"); return; }
+    // the vertices the draw references, [vmin, vmax]; the indices, rebased to
+    // vmin, decoded only when they are needed (not when the list is cached)
+    static std::vector<uint32_t> occ;   // the native thread's own
+    uint32_t vmin = 0, vmax = n - 1;
+    bool decoded = false, have_sum = false;
+    auto decode = [&]() -> bool {
+        occ.resize(n);
+        if (r->idx_ea) {
+            const uint8_t* ip = vm_base + r->idx_ea;
+            uint32_t lo = ~0u, hi = 0;
+            for (uint32_t i = 0; i < n; i++) {
+                const uint32_t v = u16 ? (uint32_t)(ip[2 * i] << 8 | ip[2 * i + 1])
+                                       : (uint32_t)ip[4 * i] << 24 | (uint32_t)ip[4 * i + 1] << 16 | (uint32_t)ip[4 * i + 2] << 8 | ip[4 * i + 3];
+                if (v >= nv) return false;
+                occ[i] = v;
+                lo = v < lo ? v : lo; hi = v > hi ? v : hi;
+            }
+            if (have_sum && (lo != vmin || hi != vmax)) return false;   // rewritten since it was hashed
+            vmin = lo; vmax = hi;
+            if (vmin) for (uint32_t i = 0; i < n; i++) occ[i] -= vmin;
+        } else {
+            for (uint32_t i = 0; i < n; i++) occ[i] = i;
         }
+        decoded = true;
+        return true;
+    };
+    uint64_t ih = 0;   // the index bytes' hash (with the vertex cache)
+    if (!asp_vcache() || !r->idx_ea) {
+        if (!decode()) { unsupported(r, "asp: an index past the vertex count"); return; }
     } else {
-        if (n > nv) { unsupported(r, "asp: more vertices drawn than the object has"); return; }
-        for (uint32_t i = 0; i < n; i++) occ[i] = i;
+        ih = range_hash(vm_base + r->idx_ea, ibytes_guest, r);
+        const uint32_t sv[3] = { n, nv, (uint32_t)u16 };
+        const uint64_t sk = fnv(sv, sizeof sv, ih);
+        auto it = s_isum.find(sk);
+        if (it != s_isum.end()) { vmin = it->second.vmin; vmax = it->second.vmax; have_sum = true; }
+        else {
+            if (!decode()) { unsupported(r, "asp: an index past the vertex count"); return; }
+            if (s_isum.size() > 200000) s_isum.clear();
+            s_isum[sk] = { vmin, vmax };
+        }
     }
-    // the vertices the draw references: [vmin, vmin + nref), the indices rebased to it
-    uint32_t vmin = ~0u, vmax = 0;
-    for (uint32_t i = 0; i < n; i++) { if (occ[i] < vmin) vmin = occ[i]; if (occ[i] > vmax) vmax = occ[i]; }
     const uint32_t nref = vmax - vmin + 1;
-    if (vmin) for (uint32_t i = 0; i < n; i++) occ[i] -= vmin;
+    prof.mark(kApIndices);
     if (r->src_hash) {   // DOTHEROES_ASP_RACE_CHECK: the same bytes as when the game drew it?
         uint64_t h = 1469598103934665603ull;
         for (uint32_t i = 0; i < r->nvr; i++) {
@@ -2327,6 +2656,7 @@ void asp_draw(const Rec* r)
     rsx_vertex_fetch_plan plan;
     fetch_plan(&plan, r, layout);
     plan.guest_ptr = guest_ptr_live; plan.guest_user = nullptr;
+    prof.mark(kApPlan);
     // the vertices: from the cache when the same streams hold the same bytes
     VkBuffer vbuf = VK_NULL_HANDLE, ibuf = VK_NULL_HANDLE;
     VkDeviceSize vofs = 0, iofs = 0;
@@ -2361,13 +2691,15 @@ void asp_draw(const Rec* r)
                 }
             if (!merged && nr < 16) { lo[nr] = vlo; hi[nr] = vhi; loc[nr] = in.location; nr++; }
         }
+        const uint64_t th0 = prof.on ? now_ns() : 0;
         for (uint32_t j = 0; j < nr; j++) {
             const uint8_t* p = guest_ptr_live(nullptr, loc[j], lo[j], hi[j] - lo[j]);
             if (!p) { unsupported(r, "asp: vertex range"); return; }
-            k = fast_hash(p, hi[j] - lo[j], k ^ ((uint64_t)loc[j] << 32 | lo[j]));
+            const uint64_t rh = range_hash(p, hi[j] - lo[j], r);
+            k = fnv(&rh, 8, k);
             place = fnv(&lo[j], 4, fnv(&hi[j], 4, fnv(&loc[j], 4, place)));
-            s_vc_hashed += hi[j] - lo[j];
         }
+        if (prof.on) s_ap_ns[kApHash] += now_ns() - th0;
         auto it = s_vcache.find(k);
         const Arena* ar = it != s_vcache.end() ? arena_of(it->second) : nullptr;
         uint64_t& seen = s_vseen[place];
@@ -2395,8 +2727,7 @@ void asp_draw(const Rec* r)
         // the index list, rebuilt as triangles: by the index bytes, the primitive and counts
         uint64_t ik = fnv(&r->prim, 4, 0x1D7ull);
         ik = fnv(&n, 4, ik); ik = fnv(&vmin, 4, fnv(&nref, 4, ik));
-        ik = r->idx_ea ? fast_hash(vm_base + r->idx_ea, (size_t)n * (r->idx_type == 2 ? 2 : 4), ik ^ r->idx_ea ^ ((uint64_t)r->idx_type << 40))
-                       : fnv("arrays", 6, ik);
+        ik = r->idx_ea ? fnv(&ih, 8, ik ^ r->idx_ea ^ ((uint64_t)r->idx_type << 40)) : fnv("arrays", 6, ik);
         auto jt = s_vcache.find(ik);
         const Arena* ia = jt != s_vcache.end() ? arena_of(jt->second) : nullptr;
         uint64_t iplace = fnv(&r->idx_ea, 4, fnv(&n, 4, fnv(&r->prim, 4, 0x1D8ull)));
@@ -2410,6 +2741,7 @@ void asp_draw(const Rec* r)
             VkDeviceSize off = 0, src = ~(VkDeviceSize)0;
             if (b.used + ibytes + 512 < kUpload / 2) src = (b.used + 15) & ~(VkDeviceSize)15;
             Arena* na = src != ~(VkDeviceSize)0 ? arena_alloc(b, ibytes, &off) : nullptr;
+            if (na && !decoded && !decode()) { unsupported(r, "asp: an index past the vertex count"); return; }
             if (na) {
                 rsx_draw_engine_write_topology_indices(r->prim, n, nullptr, 0, occ.data(), (uint32_t*)(b.up.p + src));
                 b.used = src + ibytes;
@@ -2433,13 +2765,16 @@ void asp_draw(const Rec* r)
         stats().n_asp_vertex_bytes += vbytes;
     }
     if (!ibuf) {
+        if (!decoded && !decode()) { unsupported(r, "asp: an index past the vertex count"); return; }
         idx.resize(n_draw ? n_draw : 1);
         rsx_draw_engine_write_topology_indices(r->prim, n, nullptr, 0, occ.data(), idx.data());
     }
+    prof.mark(kApVcache);
     // the pipeline
     rsx_fp_constant_block fc;
     const Pipe* P = pipeline_asp(r, layout, rt, df, &fc);
     if (!P) { unsupported(r, "asp: pipeline"); return; }
+    prof.mark(kApPipeline);
     // constants: the vertex program's and the viewport epilogue; the fragment
     // program's buffered constants and the alpha reference and window slot
     const Viewport& vp = st.viewport;
@@ -2468,7 +2803,7 @@ void asp_draw(const Rec* r)
     // textures: a native image of the address (a target asp or PPFX drew, a
     // depth surface), else guest memory
     VkDescriptorImageInfo ii[16], si[16];
-    const uint32_t sampled = rsx_fp_texture_units(r->fp->bytes.data(), (uint32_t)r->fp->bytes.size());
+    const uint32_t sampled = fp_info(r->fp.get()).sampled;
     Img* srcs[16] = {};
     VkImageView views[16] = {};
     for (uint32_t u = 0; u < 16; u++) {
@@ -2494,6 +2829,7 @@ void asp_draw(const Rec* r)
         }
         srcs[u] = src;
     }
+    prof.mark(kApTextures);
     for (uint32_t u = 0; u < 16; u++) if (srcs[u]) access(b.cb, srcs[u], kSampled);
     for (uint32_t u = 0; u < 16; u++) {
         ii[u] = { VK_NULL_HANDLE, s_dummy->view, sampled_layout() };
@@ -2525,14 +2861,24 @@ void asp_draw(const Rec* r)
     wr[2].dstBinding = 16; wr[2].descriptorCount = 16; wr[2].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE; wr[2].pImageInfo = ii;
     wr[3].dstBinding = 48; wr[3].descriptorCount = 16; wr[3].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER; wr[3].pImageInfo = si;
     F.vkUpdateDescriptorSets(D.device, 4, wr, 0, nullptr);
-    if (t) access(b.cb, t, kAttach);
-    if (d) access(b.cb, d, kDepthAttach);
+    prof.mark(kApDescriptors);
     VkRenderPassBeginInfo rbi = { VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
     rbi.renderPass = render_pass2(rt, df); rbi.framebuffer = framebuffer2(t, d);
     const uint32_t fw = t && d ? (t->w < d->w ? t->w : d->w) : t ? t->w : d->w;
     const uint32_t fh = t && d ? (t->h < d->h ? t->h : d->h) : t ? t->h : d->h;
     rbi.renderArea = { { 0, 0 }, { fw, fh } };
-    F.vkCmdBeginRenderPass(b.cb, &rbi, VK_SUBPASS_CONTENTS_INLINE);
+    // the previous draw's pass, still open on the same targets (nothing
+    // recorded since that had to end it): this draw joins it -- draws into
+    // the same attachments within one pass are ordered without barriers
+    if (pass_merge() && s_open.cb == b.cb && s_open.rp == rbi.renderPass && s_open.fb == rbi.framebuffer && s_open.w == fw &&
+        s_open.h == fh)
+        s_pass_merged++;
+    else {
+        if (t) access(b.cb, t, kAttach);
+        if (d) access(b.cb, d, kDepthAttach);
+        F.vkCmdBeginRenderPass(b.cb, &rbi, VK_SUBPASS_CONTENTS_INLINE);   // ends an open one first
+        if (pass_merge()) s_open = { b.cb, rbi.renderPass, rbi.framebuffer, fw, fh };
+    }
     F.vkCmdBindPipeline(b.cb, VK_PIPELINE_BIND_POINT_GRAPHICS, P->p);
     VkViewport v = { 0.0f, 0.0f, Wf, Hf, 0.0f, 1.0f };
     F.vkCmdSetViewport(b.cb, 0, 1, &v);
@@ -2552,8 +2898,9 @@ void asp_draw(const Rec* r)
     F.vkCmdBindVertexBuffers(b.cb, 0, 1, &vbuf, &o_v);
     F.vkCmdBindIndexBuffer(b.cb, ibuf, o_i, VK_INDEX_TYPE_UINT32);
     F.vkCmdDrawIndexed(b.cb, n_draw, 1, 0, 0, 0);
-    F.vkCmdEndRenderPass(b.cb);
+    if (!pass_merge()) F.vkCmdEndRenderPass(b.cb);   // else left open for the next draw
     mark(b, kSectDraw);
+    prof.mark(kApCommands);
     if (t) { t->written = 1; t->asp_frame = r->frame + 1; }
     if (d) d->written = 1;
     b.records++;
@@ -2610,6 +2957,7 @@ bool init()
 #define X(f) F.f = (PFN_##f)D.get_device_proc(D.device, #f); if (!F.f) { fail(#f, VK_ERROR_INITIALIZATION_FAILED); return false; }
     PPFX_VK_DEVICE(X)
 #undef X
+    pass_wrap_install();
     F.GetPhysicalDeviceMemoryProperties =
         (PFN_vkGetPhysicalDeviceMemoryProperties)D.get_instance_proc(D.instance, "vkGetPhysicalDeviceMemoryProperties");
     F.GetPhysicalDeviceProperties =
@@ -2776,10 +3124,20 @@ void run()
     for (;;) {
         for (Batch& b : s_b) if (retire_ready(b)) retire(b);
         if (!s_retired.empty()) {
-            // retired images: destroyed once every batch in flight has completed
-            bool idle = true;
-            for (Batch& b : s_b) idle &= !b.pending;
-            if (idle) { for (Img* o : s_retired) destroy_image(o); s_retired.clear(); }
+            // retired images: destroyed once every batch that may use them has
+            // completed -- the batch being recorded too (R5: an image retired
+            // while it was open, used by its earlier records, was destroyed
+            // before it was submitted, and the device was lost)
+            Batch& cur = s_b[s_cur];
+            if (cur.open) {
+                std::vector<Img*> v;
+                v.swap(s_retired);
+                cur.done.push_back([v] { for (Img* o : v) destroy_image(o); });
+            } else {
+                bool idle = true;
+                for (Batch& b : s_b) idle &= !b.pending;
+                if (idle) { for (Img* o : s_retired) destroy_image(o); s_retired.clear(); }
+            }
         }
         if (next >= q.walked.load(std::memory_order_acquire)) {
             // R4: a handback asked for (everything walked is recorded now)
@@ -2926,6 +3284,30 @@ void render_drain(uint32_t timeout_ms)
 
 void render_report(std::vector<std::string>& out)
 {
+    if (s_ap_draws) {
+        std::string line = "asp draw profile (us a draw, " + std::to_string(s_ap_draws) + " draws):";
+        uint64_t tot = 0;
+        for (int i = 0; i < kApHash; i++) tot += s_ap_ns[i];
+        char x[96];
+        for (int i = 0; i < kApN; i++) {
+            snprintf(x, sizeof x, " %s %.2f", kApName[i], s_ap_ns[i] / 1e3 / (double)s_ap_draws);
+            line += x;
+        }
+        snprintf(x, sizeof x, " | total %.2f us, %.1f s | %llu draws joined the previous one's pass", tot / 1e3 / (double)s_ap_draws,
+                 tot / 1e9, (unsigned long long)s_pass_merged);
+        line += x;
+        out.push_back(line);
+    }
+    if (s_rh_memo_bytes || s_rh_rehashed || s_rh_ww_bytes) {
+        char line[400];
+        snprintf(line, sizeof line, "asp range hashes: %.1f MB unwritten since hashed (the write watch), %.1f MB taken from earlier in "
+                 "the frame, %llu ranges rewritten within a frame | write watch %s: %llu polls, %.1f ms, %llu pages scanned, %llu found "
+                 "written, %zu runs now%s",
+                 s_rh_ww_bytes / 1048576.0, s_rh_memo_bytes / 1048576.0, (unsigned long long)s_rh_rehashed,
+                 vm_write_watch ? "on" : "off", (unsigned long long)s_ww_polls, s_ww_ns / 1e6, (unsigned long long)s_ww_scanned,
+                 (unsigned long long)s_ww_pages, s_ww_runs.size(), s_ww_failed ? " (failed: turned off)" : "");
+        out.push_back(line);
+    }
     if (s_vc_hits || s_vc_misses) {
         char line[300];
         snprintf(line, sizeof line, "asp vertex cache: vertices %llu hits %llu misses, indices %llu hits %llu misses, %llu not cached "
