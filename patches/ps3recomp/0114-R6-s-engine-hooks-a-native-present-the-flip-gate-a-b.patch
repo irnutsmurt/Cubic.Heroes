@@ -1,0 +1,432 @@
+From 27ad23005d559ec7c0a778ec298de99d03a1d78b Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Fri, 6 Nov 2026 00:22:08 -0800
+Subject: [PATCH 114/115] R6's engine hooks: a native present, the flip gate, a
+ benchmark mode, native reports and guest reads
+
+For a native renderer that draws every frame itself (the port's
+docs/NATIVE_R6.md), development only, inert unless a host asks:
+- rsx_vk_bridge_present_prepare / _submit / _cancel: the host blits its
+  frame into the present's offscreen target on its own queue, and the
+  present's submission waits on its semaphore; the window present stays
+  on the host's present thread;
+- cellGcm_set_flip_gate: a flip completes only once the host has
+  executed it too; cellGcm_set_flip_immediate (benchmarks): a flip
+  completes when executed, not at the next vblank tick;
+- PS3RECOMP_VK_PRESENT_MODE=mailbox|immediate (benchmarks; FIFO when the
+  surface has none) and PS3RECOMP_VK_READBACK=0 (no per-frame copy to host
+  memory);
+- a bridge signal asked for with nothing recorded in the open command
+  buffer is submitted alone at once (it orders after everything submitted
+  before it): attached, it waited for an engine submission that never came
+  once the engine drew nothing -- the native side waiting on it and the
+  walker on the native side;
+- cellGcm_title_context_pub, cellGcm_display_buffer_pub,
+  cellGcm_report_write_pub / _copy_pub / _timestamp_pub, cellGcm_io2ea_pub;
+  cellGcm_set_guest_read_hook (a host holding a surface's newest content
+  reads it into guest memory for the JPEG and PNG encoders);
+- occlusionQueryPrecise enabled on the device when it has it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libs/video/cellGcmSys.c         |  85 ++++++++++++++++++-
+ libs/video/rsx_vulkan_backend.c | 139 +++++++++++++++++++++++++++++---
+ libs/video/rsx_vulkan_bridge.h  |  13 +++
+ 3 files changed, 224 insertions(+), 13 deletions(-)
+
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index 365256c..7191ae7 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -202,10 +202,27 @@ static void fr_check_stuck(void)
+     wr_dump("flip stuck");
+ }
+ 
++/* A host renderer that draws the frames itself (the port's native renderer)
++ * may hold a flip's completion until it has executed the flip too: the gate
++ * answers whether it has consumed every flip requested so far. Called with
++ * FLIP_LOCK held or from the ticker; must not block. */
++static int (*s_flip_gate)(void);
++void cellGcm_set_flip_gate(int (*gate)(void)) { s_flip_gate = gate; }
++/* cellGcm_set_flip_immediate(1) (benchmarks): a flip completes as soon as it
++ * has been executed -- at the drain's flip marker, or when the gate opens --
++ * not at the next vblank tick. */
++static volatile int s_flip_immediate;
++void cellGcm_set_flip_immediate(int on) { s_flip_immediate = on; }
++int cellGcm_flip_immediate(void) { return s_flip_immediate; }
++
+ static int gcm_flip_executed_take(void)
+ {
+     const u32 r = s_fifo_flips_reached;
+-    if (r != s_fifo_flips_completed) { s_fifo_flips_completed = r; return 1; }
++    if (r != s_fifo_flips_completed) {
++        if (s_flip_gate && !s_flip_gate()) return 0;   /* the host has not executed it yet */
++        s_fifo_flips_completed = r;
++        return 1;
++    }
+     if (s_flip_direct_pending) { s_flip_direct_pending = 0; return 1; }
+     return 0;
+ }
+@@ -435,6 +452,41 @@ static void gcm_report_write(u32 ea, u64 ts, u32 val)
+     vm_write32(ea + 8u, val);
+     vm_write32(ea + 12u, 0u);
+ }
++/* A host renderer's report (the port's R6: real occlusion counts): written
++ * when its GPU has the result, as the RSX writes one -- {timer, value, 0} at
++ * the report area of `location` (the pad last); and a report's 16 bytes
++ * copied to IO offset `io` (cellGcmSetTransferReportData's copy), the pad
++ * word last. The timer is the reports' own clock. */
++u64 cellGcm_report_timestamp_pub(void);
++void cellGcm_report_write_pub(u32 index, u32 location, u32 value)
++{
++    const u32 ea = gcm_report_ea(index, location);
++    if (!ea) return;
++    const u64 ts = cellGcm_report_timestamp_pub();
++    vm_write32(ea, (u32)(ts >> 32));
++    vm_write32(ea + 4u, (u32)ts);
++    vm_write32(ea + 8u, value);
++    __atomic_thread_fence(__ATOMIC_RELEASE);
++    vm_write32(ea + 12u, 0u);
++}
++int cellGcm_report_copy_pub(u32 index, u32 location, u32 io_out, u32 count)
++{
++    const u32 ea = gcm_io2ea(io_out);
++    if (!ea) return 0;
++    for (u32 k = 0; k < count; k++) {
++        const u32 src = gcm_report_ea(index + k, location);
++        if (!src) return 0;
++        const u32 d = ea + 16u * k;
++        vm_write32(d, vm_read32(src));
++        vm_write32(d + 4u, vm_read32(src + 4u));
++        vm_write32(d + 8u, vm_read32(src + 8u));
++        __atomic_thread_fence(__ATOMIC_RELEASE);
++        vm_write32(d + 12u, vm_read32(src + 12u));
++    }
++    return 1;
++}
++u32 cellGcm_io2ea_pub(u32 io) { return gcm_io2ea(io); }
++
+ static void gcm_reports_reset(void)
+ {
+     if (vm_base) memset(vm_base + GCM_REPORT_LOCAL_GUEST, 0, GCM_REPORT_LOCAL_COUNT * 16u);
+@@ -460,6 +512,7 @@ static u64 gcm_report_timestamp(void)
+     s_report_last_ts = t;
+     return t;
+ }
++u64 cellGcm_report_timestamp_pub(void) { return gcm_report_timestamp(); }
+ 
+ /* Label area (256 labels, each u32). Labels live in GUEST memory so the
+  * recompiled game can poll them via vm_read32; cellGcmGetLabelAddress returns a
+@@ -1102,6 +1155,19 @@ u32 s_fifo_laps_pub(void) { return s_fifo_back_jumps; }   /* R3's bridge: with t
+  * that the difference stays constant. */
+ static volatile u32 s_title_laps, s_title_jump_io;
+ u32 cellGcm_title_laps_pub(u32* jump_io) { if (jump_io) *jump_io = s_title_jump_io; return s_title_laps; }
++/* The title's own command context (its CellGcmContextData, set up by
++ * cellGcmInit): a host renderer that records the title's calls from its first
++ * frame needs it before any of them names it. 0 before cellGcmInit. */
++u32 cellGcm_title_context_pub(void) { return s_gcm_context_ea; }
++/* The display buffer a flip id names (cellGcmSetDisplayBuffer): local-memory
++ * offset, pitch and size. 0 when it was never set. */
++int cellGcm_display_buffer_pub(u32 id, u32* offset, u32* pitch, u32* w, u32* h)
++{
++    if (id >= CELL_GCM_MAX_DISPLAY_BUFFER_NUM || !s_display_buffers[id].width) return 0;
++    *offset = s_display_buffers[id].offset; *pitch = s_display_buffers[id].pitch;
++    *w = s_display_buffers[id].width; *h = s_display_buffers[id].height;
++    return 1;
++}
+ /* Set while the title's buffer-full callback (cellGcm_fifo_recycle) is waiting
+  * for the walker. Its context still reads current == end then, which is exactly
+  * what the drain's own overrun recycle looks for; firing that under the
+@@ -2340,9 +2406,23 @@ void cellGcm_rsx_process_fifo(void)
+  * engine, so it takes the FIFO walker's lock, as the poll path does. pitch in
+  * bytes; w and h in 32-bit pixels. Nothing happens without the engine or for
+  * an address the RSX does not see. */
++/* A host renderer holding the newest content of a surface (the port's native
++ * renderer, R6) reads it into guest memory itself: answers 1 when it did. */
++static int (*s_guest_read_hook)(u32 location, u32 offset, u32 pitch, u32 w, u32 h);
++void cellGcm_set_guest_read_hook(int (*hook)(u32, u32, u32, u32, u32)) { s_guest_read_hook = hook; }
++
+ void cellGcm_guest_read_surface(u32 ea, u32 pitch, u32 w, u32 h)
+ {
+-    if (!rsx_draw_engine_enabled() || !pitch || !w || !h) return;
++    if (!pitch || !w || !h) return;
++    if (s_guest_read_hook) {
++        u32 loc = ~0u, off = 0;
++        if (ea >= s_config.localAddress && ea - s_config.localAddress < s_config.localSize) {
++            loc = RSX_LOCATION_LOCAL; off = ea - s_config.localAddress;
++        }
++        /* outside the walker's lock: the host renderer's work may wait for the walker's */
++        if (loc != ~0u && s_guest_read_hook(loc, off, pitch, w, h)) return;
++    }
++    if (!rsx_draw_engine_enabled()) return;
+     u32 location, offset;
+     if (ea >= s_config.localAddress && ea - s_config.localAddress < s_config.localSize) {
+         location = RSX_LOCATION_LOCAL;
+@@ -2747,6 +2827,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
+                 if (s_fifo_flips_reached != s_fifo_flips_queued) s_fifo_flips_reached++;
+                 fr_note(4);
+                 wr_note(5, s_fifo_getoff - 4, put, s_fifo_flips_reached);
++                if (s_flip_immediate) cellGcmTickFlip();   /* benchmarks: complete it now */
+             } else {
+                 cellGcmSetFlipCommand(w & 0xFFu);
+             }
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index 2805aa2..ac8b2a0 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -149,7 +149,8 @@ static const char* vk_lib_error(void) { return dlerror(); }
+  * headless run never depends on a driver that can present. */
+ #define VK_WSI_INSTANCE_FNS(X) \
+     X(vkDestroySurfaceKHR) X(vkGetPhysicalDeviceSurfaceSupportKHR) \
+-    X(vkGetPhysicalDeviceSurfaceCapabilitiesKHR) X(vkGetPhysicalDeviceSurfaceFormatsKHR)
++    X(vkGetPhysicalDeviceSurfaceCapabilitiesKHR) X(vkGetPhysicalDeviceSurfaceFormatsKHR) \
++    X(vkGetPhysicalDeviceSurfacePresentModesKHR)
+ #define VK_WSI_DEVICE_FNS(X) \
+     X(vkCreateSwapchainKHR) X(vkDestroySwapchainKHR) X(vkGetSwapchainImagesKHR) \
+     X(vkAcquireNextImageKHR) X(vkQueuePresentKHR)
+@@ -247,6 +248,8 @@ typedef struct vk_state {
+     VkFence          window_fence;    /* the blit into the swapchain image     */
+     int              present_inflight;/* copy submitted, not yet finished      */
+     int              present_split;   /* inside rsx_vulkan_backend_present_begin */
++    int              present_readback;   /* the in-flight present copies the frame to `readback` */
++    VkSemaphore      present_wait;       /* the next present's submission waits on it (native frames) */
+     int              present_order;   /* the walker's next command buffer waits */
+     vk_mutex_t  queue_mu;
+     vk_mutex_t  present_mu;
+@@ -668,6 +671,7 @@ static struct {
+     VkCommandBuffer wcmd[VK_BR_SIGNALS];    /* ... the submission of this command buffer */
+     u32 nw;
+     unsigned long long waited, wlost;
++    unsigned long long alone;               /* signals submitted alone: nothing recorded to carry them */
+     int ready;                              /* the device and its queues are there (atomic) */
+ } s_br;
+ 
+@@ -2238,6 +2242,28 @@ static int vk_create_swapchain(void)
+     for (size_t k = 0; k < 4; k++)
+         if (caps.supportedCompositeAlpha & alphas[k]) { alpha = alphas[k]; break; }
+ 
++    /* PS3RECOMP_VK_PRESENT_MODE=mailbox|immediate (benchmarks only): a
++     * present mode that does not hold presents to the display's refresh, so a
++     * throughput test is not capped by it. FIFO otherwise, and whenever the
++     * surface does not offer the mode asked for. MAILBOX keeps one image
++     * spare. */
++    VkPresentModeKHR mode = VK_PRESENT_MODE_FIFO_KHR;
++    {
++        const char* e = getenv("PS3RECOMP_VK_PRESENT_MODE");
++        VkPresentModeKHR want = e && !strcmp(e, "mailbox") ? VK_PRESENT_MODE_MAILBOX_KHR
++                              : e && !strcmp(e, "immediate") ? VK_PRESENT_MODE_IMMEDIATE_KHR
++                              : VK_PRESENT_MODE_FIFO_KHR;
++        if (want != VK_PRESENT_MODE_FIFO_KHR && pvkGetPhysicalDeviceSurfacePresentModesKHR) {
++            u32 nm = 0; VkPresentModeKHR modes[16];
++            pvkGetPhysicalDeviceSurfacePresentModesKHR(s_vk.phys, s_vk.surface, &nm, NULL);
++            if (nm > 16) nm = 16;
++            pvkGetPhysicalDeviceSurfacePresentModesKHR(s_vk.phys, s_vk.surface, &nm, modes);
++            for (u32 i = 0; i < nm; i++) if (modes[i] == want) mode = want;
++            if (mode != want) VK_LOG("present mode %s not offered; FIFO\n", e);
++            if (mode == VK_PRESENT_MODE_MAILBOX_KHR && count < 3) count = 3;
++            if (caps.maxImageCount && count > caps.maxImageCount) count = caps.maxImageCount;
++        }
++    }
+     VkSwapchainKHR old = s_vk.swapchain;
+     VkSwapchainCreateInfoKHR sci = {
+         .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
+@@ -2247,7 +2273,7 @@ static int vk_create_swapchain(void)
+         .imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+         .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
+         .preTransform = caps.currentTransform, .compositeAlpha = alpha,
+-        .presentMode = VK_PRESENT_MODE_FIFO_KHR,   /* the one mode every driver has */
++        .presentMode = mode,   /* FIFO, the one mode every driver has, unless asked */
+         .clipped = VK_TRUE, .oldSwapchain = old,
+     };
+     VkSwapchainKHR sc = VK_NULL_HANDLE;
+@@ -2275,7 +2301,9 @@ static int vk_create_swapchain(void)
+     s_vk.sc_count = n;
+     s_vk.sc_osd = (fmt.format == VK_FORMAT_B8G8R8A8_UNORM || fmt.format == VK_FORMAT_B8G8R8A8_SRGB) ? 2 :
+                   (fmt.format == VK_FORMAT_R8G8B8A8_UNORM || fmt.format == VK_FORMAT_R8G8B8A8_SRGB) ? 1 : 0;
+-    VK_LOG("window swapchain %ux%u, %u images, format %d\n", ext.width, ext.height, n, (int)fmt.format);
++    VK_LOG("window swapchain %ux%u, %u images, format %d, present mode %s\n", ext.width, ext.height, n,
++           (int)fmt.format, mode == VK_PRESENT_MODE_MAILBOX_KHR ? "mailbox" :
++           mode == VK_PRESENT_MODE_IMMEDIATE_KHR ? "immediate" : "fifo");
+     return 0;
+ }
+ 
+@@ -2615,12 +2643,14 @@ static void vk_present_complete_locked(void)
+     __atomic_store_n(&s_vk.present_inflight, 0, __ATOMIC_RELEASE);
+ 
+     const uint64_t ft_r0 = ft0 ? ps3_ft_now() : 0;
+-    vk_invalidate(&s_vk.readback);
+-    const unsigned char* px = (const unsigned char*)s_vk.readback.ptr;
+-    size_t c = ((size_t)(s_vk.height / 2) * s_vk.width + s_vk.width / 2) * 4;
+-    s_vk.last_center = ((u32)px[c] << 16) | ((u32)px[c + 1] << 8) | (u32)px[c + 2];
+     s_vk.presented++;
+-    if (s_vk.dump_path && (s_vk.presented % s_vk.dump_every) == 0) vk_dump_ppm(px);
++    if (s_vk.present_readback) {
++        vk_invalidate(&s_vk.readback);
++        const unsigned char* px = (const unsigned char*)s_vk.readback.ptr;
++        size_t c = ((size_t)(s_vk.height / 2) * s_vk.width + s_vk.width / 2) * 4;
++        s_vk.last_center = ((u32)px[c] << 16) | ((u32)px[c + 1] << 8) | (u32)px[c + 2];
++        if (s_vk.dump_path && (s_vk.presented % s_vk.dump_every) == 0) vk_dump_ppm(px);
++    }
+     if (ft0) ps3_ft_span(PS3_FT_READBACK, 1, s_vk.width, s_vk.height, ft_r0, ps3_ft_now());
+     vk_present_window();
+     if (ft0) ps3_ft_span(PS3_FT_PRESENT, 1, 0, 0, ft0, ps3_ft_now());
+@@ -2645,6 +2675,11 @@ static VkCommandBuffer vk_present_record_begin(void)
+ static void vk_present_record_end(VkCommandBuffer cb)
+ {
+     vk_barrier_image_on(cb, s_vk.color.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
++    /* PS3RECOMP_VK_READBACK=0 (benchmarks): no copy of every presented
++     * frame into host memory -- no centre pixel, no frame dump. */
++    static int rb = -1;
++    if (rb < 0) { const char* e = getenv("PS3RECOMP_VK_READBACK"); rb = !(e && *e == '0'); }
++    if (rb) {
+     VkBufferImageCopy region = {
+         .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+         .imageExtent = { s_vk.width, s_vk.height, 1 },
+@@ -2659,11 +2694,21 @@ static void vk_present_record_end(VkCommandBuffer cb)
+     };
+     pvkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
+                           0, 0, NULL, 1, &host, 0, NULL);
++    }
++    s_vk.present_readback = rb;
+     if (pvkEndCommandBuffer(cb) != VK_SUCCESS) { VK_LOG("vkEndCommandBuffer (present) failed\n"); return; }
+     VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                         .commandBufferCount = 1, .pCommandBuffers = &cb };
++    /* A native renderer's frame (rsx_vk_bridge_present_submit): the copy out
++     * of the target waits for the submission that blitted the frame into it. */
++    VkPipelineStageFlags wst = VK_PIPELINE_STAGE_TRANSFER_BIT;
++    if (s_vk.present_wait) {
++        si.waitSemaphoreCount = 1; si.pWaitSemaphores = &s_vk.present_wait; si.pWaitDstStageMask = &wst;
++    }
+     pvkResetFences(s_vk.device, 1, &s_vk.present_fence);
+-    if (vk_queue_submit(&si, s_vk.present_fence) != VK_SUCCESS) {
++    const VkResult sr = vk_queue_submit(&si, s_vk.present_fence);
++    s_vk.present_wait = VK_NULL_HANDLE;
++    if (sr != VK_SUCCESS) {
+         VK_LOG("vkQueueSubmit (present) failed\n"); return;
+     }
+     __atomic_store_n(&s_vk.present_inflight, 1, __ATOMIC_RELEASE);
+@@ -5698,6 +5743,10 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+     /* Per-target colour mask and blend enable (an MRT set's targets B..D
+      * have their own); without it every target takes target A's. */
+     want.independentBlend = have.independentBlend;
++    /* exact sample counts for occlusion queries (a native renderer's, the
++     * port's R6): without it an implementation may report any non-zero
++     * count for a visible draw */
++    want.occlusionQueryPrecise = have.occlusionQueryPrecise;
+     s_vk.indep_blend_ok = have.independentBlend ? 1 : 0;
+     VkDeviceCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+                                .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci,
+@@ -5891,6 +5940,53 @@ void rsx_vulkan_backend_present_finish(void)
+     vk_mutex_unlock(&s_vk.present_mu);
+ }
+ 
++/* A native renderer presenting its own frames (the port's R6,
++ * docs/NATIVE_R6.md): in three steps on its thread, with the present mutex
++ * held from the first to the last.
++ *   _prepare   completes the previous present (its copy, readback and
++ *              window present: the GPU is done reading the target) and
++ *              returns the offscreen target the window is presented from
++ *              (an image in GENERAL, the frame's size), for the native
++ *              renderer to blit its frame into on its own queue;
++ *   _submit    the present's own submission -- the readback copy (unless
++ *              PS3RECOMP_VK_READBACK=0) -- waiting on `wait`, which the
++ *              native submission with the blit signals;
++ *   finishing  the window present: rsx_vulkan_backend_present_finish, on the
++ *              host's present thread (or at once, when `finish_now`).
++ * The engine's own present is not used for those frames. */
++int rsx_vk_bridge_present_prepare(VkImage* target, u32* w, u32* h)
++{
++    if (!s_vk.device || !s_vk.color.img) return -1;
++    vk_mutex_lock(&s_vk.present_mu);
++    vk_present_complete_locked();
++    *target = s_vk.color.img; *w = s_vk.width; *h = s_vk.height;
++    return 0;
++}
++
++void rsx_vk_bridge_present_submit(VkSemaphore wait, int finish_now)
++{
++    VkCommandBuffer cb = s_vk.present_cmd;
++    if (pvkResetCommandBuffer(cb, 0) == VK_SUCCESS) {
++        VkCommandBufferBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
++                                        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
++        if (pvkBeginCommandBuffer(cb, &bi) == VK_SUCCESS) {
++            s_vk.present_wait = wait;
++            const int split = s_vk.present_split;
++            s_vk.present_split = !finish_now;
++            const int eng = s_vk.eng_active;
++            s_vk.eng_active = 1;   /* vk_present_record_end: leave the finish to the caller */
++            vk_present_record_end(cb);
++            s_vk.eng_active = eng;
++            s_vk.present_split = split;
++            if (finish_now) vk_present_complete_locked();
++        }
++    }
++    vk_mutex_unlock(&s_vk.present_mu);
++}
++
++/* The prepare taken, nothing to present after all: the mutex back. */
++void rsx_vk_bridge_present_cancel(void) { vk_mutex_unlock(&s_vk.present_mu); }
++
+ u32 rsx_vulkan_backend_presented_center(void)
+ {
+     return s_vk.presented ? (0xFF000000u | s_vk.last_center) : 0u;
+@@ -6021,9 +6117,30 @@ long long rsx_vk_bridge_signal(VkSemaphore sem, int* used)
+     for (u32 k = 0; k < s_br.n; k++)
+         if (s_br.cmd[k] == s_vk.cmd) { const long long o = s_br.ord[k]; vk_mutex_unlock(&s_vk.queue_mu); return o; }
+     if (!sem) { vk_mutex_unlock(&s_vk.queue_mu); return -1; }
++    if (!s_eb_pending) {
++        /* Nothing recorded in the open command buffer (the engine has drawn
++         * nothing since its last submission, or copies are submitted at once):
++         * no later submission need ever come to carry the signal -- once the
++         * engine draws nothing, none does -- and a native batch waiting on it
++         * would wait for the walker, which may be waiting on the native side
++         * (a handback). Submitted alone: a signal operation orders after
++         * everything submitted to the queue before it. */
++        VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
++                            .signalSemaphoreCount = 1, .pSignalSemaphores = &sem };
++        if (pvkQueueSubmit(s_vk.queue, 1, &si, VK_NULL_HANDLE) == VK_SUCCESS) {
++            const long long o = s_br.attached++;
++            s_br.signalled++;
++            s_br.alone++;
++            if (used) *used = 1;
++            vk_mutex_unlock(&s_vk.queue_mu);
++            return o;
++        }
++        s_br.lost++;
++        vk_mutex_unlock(&s_vk.queue_mu);
++        return -2;
++    }
+     if (s_br.n == VK_BR_SIGNALS) { s_br.lost++; vk_mutex_unlock(&s_vk.queue_mu); return -2; }
+-    /* the open batch's command buffer; a synchronous copy was submitted
+-     * already, so its signal goes with the next one */
++    /* the open batch's command buffer: its submission carries the signal */
+     const long long o = s_br.attached++;
+     s_br.sem[s_br.n] = sem; s_br.cmd[s_br.n] = s_vk.cmd; s_br.ord[s_br.n] = o; s_br.n++;
+     if (used) *used = 1;
+diff --git a/libs/video/rsx_vulkan_bridge.h b/libs/video/rsx_vulkan_bridge.h
+index 1a162cf..973c6f2 100644
+--- a/libs/video/rsx_vulkan_bridge.h
++++ b/libs/video/rsx_vulkan_bridge.h
+@@ -82,6 +82,19 @@ int rsx_vk_bridge_submitted(long long ordinal);
+  * submits at its own points). */
+ void rsx_vk_bridge_flush(void);
+ 
++/* R6 (the port's docs/NATIVE_R6.md): a native renderer presents its own
++ * frames, in three steps on its thread, the present mutex held from the first
++ * to the second: _prepare completes the previous present and gives the
++ * offscreen target the window is presented from (GENERAL, the frame's size)
++ * for the native renderer to blit its frame into on its own queue; _submit
++ * makes the present's submission wait on `wait` (signalled by the native
++ * submission with that blit) and leaves the window present to
++ * rsx_vulkan_backend_present_finish (on the host's present thread) unless
++ * `finish_now`; _cancel gives the mutex back with nothing presented. */
++int rsx_vk_bridge_present_prepare(VkImage* target, u32* w, u32* h);
++void rsx_vk_bridge_present_submit(VkSemaphore wait, int finish_now);
++void rsx_vk_bridge_present_cancel(void);
++
+ /* Semaphores signalled so far, and how many did not fit (dropped: a bug). */
+ unsigned long long rsx_vk_bridge_signals(unsigned long long* lost);
+ 
+-- 
+2.56.0.windows.3
+

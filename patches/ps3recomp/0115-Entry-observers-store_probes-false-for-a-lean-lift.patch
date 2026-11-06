@@ -1,0 +1,49 @@
+From 47ea665199e1419b8d789ee0d8e32f83340a44c1 Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Fri, 6 Nov 2026 00:22:10 -0800
+Subject: [PATCH 115/115] Entry observers: "store_probes": false for a lean
+ lift
+
+An observers file may turn off the store probes (PPU_OBS_ST on every store
+of an observed body): the port's native-play lift keeps the same API
+boundaries as its development lift without them (R4's verify mode needs
+the development lift).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ tools/ppu_lifter.py | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/tools/ppu_lifter.py b/tools/ppu_lifter.py
+index 625a511..8b0820e 100644
+--- a/tools/ppu_lifter.py
++++ b/tools/ppu_lifter.py
+@@ -943,9 +943,16 @@ def load_entry_observers(path: str) -> set[int]:
+         if addr & 3 or addr in out:
+             sys.exit(f"[ppu_lifter] {path}: bad or duplicate observer 0x{addr:08X}")
+         out.add(addr)
++    # "store_probes": false -- a lean lift (the port's native play): the
++    # observed bodies' stores are not routed through PPU_OBS_ST
++    global ENTRY_OBSERVER_STORE_PROBES
++    ENTRY_OBSERVER_STORE_PROBES = bool(spec.get("store_probes", True))
+     return out
+ 
+ 
++ENTRY_OBSERVER_STORE_PROBES = True
++
++
+ def _crval_to_c(val: str, mask: int, decl_a: str, a_expr: str, b_expr: str) -> str:
+     """Reconstruct a C condition from a cr_val ternary for the tested bits."""
+     m = re.match(r"^\((?P<u>.+?)\) \? 1 : \((?P<lt>.+?)\) \? 8 : \((?P<gt>.+?)\) \? 4 : 2$", val)
+@@ -4357,7 +4364,7 @@ class PPULifter:
+         if any("_sjf.arm(" in bl for bl in func.body_lines):
+             lines.append("    ps3_sjlj_frame _sjf;")
+         for bline in _fuse_cr(func.body_lines):
+-            if observed:
++            if observed and ENTRY_OBSERVER_STORE_PROBES:
+                 bline = _obs_stores(bline)
+             lines.append(f"    {bline}" if not bline.endswith(":") else bline)
+ 
+-- 
+2.56.0.windows.3
+

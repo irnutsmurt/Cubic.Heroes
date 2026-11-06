@@ -126,6 +126,7 @@ void     cellGcmTickFlip(void);
 int      cellGcm_take_flip_pending(void);
 void     cellGcm_rsx_process_fifo(void);      /* drain get -> put */
 unsigned cellGcm_flip_request_count(void);
+void     cellGcm_set_flip_immediate(int on);   /* benchmarks: a flip completes once executed */
 }
 
 /* ---------------------------------------------------------------------------
@@ -222,6 +223,7 @@ extern "C" unsigned ppu_boot_frames_presented(void)
 static std::mutex              s_pf_mu;
 static std::condition_variable s_pf_cv;
 static unsigned                s_pf_begun;
+static std::once_flag          s_pf_started;   /* one present thread, whoever begins first */
 
 static void present_finisher(void)
 {
@@ -243,8 +245,7 @@ static void present_frame(void)
      * before (A/B comparisons). */
     static const bool sync = [] { const char* e = getenv("PS3RECOMP_VK_SYNC_PRESENT"); return e && *e == '1'; }();
     if (sync) { rsx_backend_present(); return; }
-    static std::once_flag started;
-    std::call_once(started, [] { std::thread(present_finisher).detach(); });
+    std::call_once(s_pf_started, [] { std::thread(present_finisher).detach(); });
     rsx_vulkan_backend_present_begin();
     { std::lock_guard<std::mutex> lk(s_pf_mu); s_pf_begun++; }
     s_pf_cv.notify_one();
@@ -253,9 +254,34 @@ static void present_frame(void)
 static void present_frame(void) { rsx_backend_present(); }
 #endif
 
+/* R6's native present (port/native/render, DOTHEROES_R6_PRESENT=1): the
+ * native renderer presents the frames from the flip the recorder took them
+ * over at; the walker's present of those does not run. */
+extern "C" { int g_dotheroes_native_present = 0; }
+#if defined(PS3RECOMP_RSX_VULKAN)
+extern "C" void rsx_vk_bridge_flush(void);
+#endif
+
+#if defined(PS3RECOMP_RSX_VULKAN)
+/* The native renderer's present begun (rsx_vk_bridge_present_submit): its
+ * window present on the present thread, as the walker's are. */
+extern "C" void dotheroes_present_finish_async(void)
+{
+    std::call_once(s_pf_started, [] { std::thread(present_finisher).detach(); });
+    { std::lock_guard<std::mutex> lk(s_pf_mu); s_pf_begun++; }
+    s_pf_cv.notify_one();
+}
+#endif
+
 static void present_guest_frame(void)
 {
-    present_frame();
+    if (!g_dotheroes_native_present) present_frame();
+#if defined(PS3RECOMP_RSX_VULKAN)
+    /* The engine's own present submitted whatever the engine had recorded
+     * each frame, and the signals the native side waits on with it; with the
+     * native present that is the flip's job (R6). */
+    else rsx_vk_bridge_flush();
+#endif
     /* This thread increments and guest threads read, so interlocked rather
      * than a volatile ++, which on arm64 is neither atomic nor a fence. */
     InterlockedIncrement(&g_frames_presented);
@@ -693,6 +719,27 @@ int main(int argc, char** argv)
             return 2;
         }
         fclose(f);
+    }
+
+    /* DOTHEROES_BENCH=1: the throughput benchmark (docs/NATIVE_R6.md section
+     * on measurement), never a play default. No frame-rate ceiling from the
+     * game or the vblank clock (DOTHEROES_FPS=0, and a flip completes as soon
+     * as it has been executed instead of at the next tick, so no fast-ticking
+     * clock is needed), a present mode that does not wait for the display's
+     * refresh (mailbox; FIFO when the surface has none), each flip presented
+     * once, and no copy of every frame back into host memory. Any of them can
+     * still be set otherwise in the environment. */
+    {
+        const char* b = getenv("DOTHEROES_BENCH");
+        if (b && *b == '1') {
+            set_default_env("DOTHEROES_FPS", "0");
+            set_default_env("PS3RECOMP_VK_PRESENT_MODE", "mailbox");
+            set_default_env("PS3RECOMP_VK_READBACK", "0");
+            set_default_env("DOTHEROES_PRESENT_ONCE", "1");
+            cellGcm_set_flip_immediate(1);
+            fprintf(stderr, "[port] benchmark mode: no frame cap, flips complete when executed, present mode %s\n",
+                    getenv("PS3RECOMP_VK_PRESENT_MODE"));
+        }
     }
 
     /* Before the runtime installs its own fault handlers, so they chain here. */

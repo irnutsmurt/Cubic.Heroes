@@ -1,0 +1,482 @@
+{
+ "_comment": "R6's native-play lift (tools/r6_native_lift.sh, docs/NATIVE_R6.md section 4): the same API boundaries as the development lift (config/dev_capture_observers.json) -- the libgcm entry points, asp's methods, the game's draws, the flip and memcpy -- without the development lift's store probes (no PPU_OBS_ST on every store of an observed body; R4's verify mode needs the development lift). Addresses only: the lifted bodies run unchanged unless the recorder replaces them.",
+ "store_probes": false,
+ "observers": [
+  {
+   "addr": "0x0069CAC4",
+   "note": "no command seen in the river trace (PPFX calls it)"
+  },
+  {
+   "addr": "0x0069CAF0",
+   "note": "no command seen in the river trace (PPFX calls it)"
+  },
+  {
+   "addr": "0x0069CBAC",
+   "note": "no command seen in the river trace (PPFX calls it)"
+  },
+  {
+   "addr": "0x0069CBDC",
+   "note": "no command seen in the river trace (PPFX calls it)"
+  },
+  {
+   "addr": "0x0069CC28",
+   "note": "no command seen in the river trace (PPFX calls it)"
+  },
+  {
+   "addr": "0x0069CC6C",
+   "note": "no command seen in the river trace (PPFX calls it)"
+  },
+  {
+   "addr": "0x0069CC74",
+   "note": "no command seen in the river trace (PPFX calls it)"
+  },
+  {
+   "addr": "0x0069CC7C",
+   "note": "no command seen in the river trace (PPFX calls it)"
+  },
+  {
+   "addr": "0x0069CCA0",
+   "note": "no command seen in the river trace (PPFX calls it)"
+  },
+  {
+   "addr": "0x0069CCE0",
+   "note": "no command seen in the river trace (PPFX calls it)"
+  },
+  {
+   "addr": "0x0069CCE8",
+   "note": "no command seen in the river trace (PPFX calls it)"
+  },
+  {
+   "addr": "0x0069CD00",
+   "note": "no command seen in the river trace (PPFX calls it)"
+  },
+  {
+   "addr": "0x0069CD0C",
+   "note": "no command seen in the river trace (PPFX calls it)"
+  },
+  {
+   "addr": "0x0069CD58",
+   "note": "no command seen in the river trace (PPFX calls it)"
+  },
+  {
+   "addr": "0x0069CD60",
+   "note": "no command seen in the river trace (PPFX calls it)"
+  },
+  {
+   "addr": "0x0069CDC4",
+   "note": "no command seen in the river trace (PPFX calls it)"
+  },
+  {
+   "addr": "0x0069CE50",
+   "note": "no command seen in the river trace (PPFX calls it)"
+  },
+  {
+   "addr": "0x0069CEB4",
+   "note": "no command seen in the river trace (PPFX calls it)"
+  },
+  {
+   "addr": "0x0069CF04",
+   "note": "no command seen in the river trace (PPFX calls it)"
+  },
+  {
+   "addr": "0x0069CF34",
+   "note": "no command seen in the river trace (PPFX calls it)"
+  },
+  {
+   "addr": "0x0069D240",
+   "note": "no command seen in the river trace (PPFX calls it)"
+  },
+  {
+   "addr": "0x0069DD60",
+   "note": "cellGcmSetFlip (the frame loop's flip) (flip)"
+  },
+  {
+   "addr": "0x0069E474",
+   "note": "no command seen in the river trace (libgcm calls it for PPFX)"
+  },
+  {
+   "addr": "0x0069E6E0",
+   "note": "method 0x1D60 (libgcm calls it for PPFX)"
+  },
+  {
+   "addr": "0x0069E7EC",
+   "note": "viewport (PPFX calls it)"
+  },
+  {
+   "addr": "0x0069E99C",
+   "note": "fragment program (libgcm calls it for PPFX)"
+  },
+  {
+   "addr": "0x0069F19C",
+   "note": "vertex data array (PPFX calls it)"
+  },
+  {
+   "addr": "0x0069F2B8",
+   "note": "texture (libgcm calls it for PPFX)"
+  },
+  {
+   "addr": "0x0069F454",
+   "note": "no command seen in the river trace (PPFX calls it)"
+  },
+  {
+   "addr": "0x0069F814",
+   "note": "no command seen in the river trace (PPFX calls it)"
+  },
+  {
+   "addr": "0x0069F944",
+   "note": "surface (libgcm calls it for PPFX)"
+  },
+  {
+   "addr": "0x0069FC2C",
+   "note": "no command seen in the river trace (PPFX calls it)"
+  },
+  {
+   "addr": "0x0069FC38",
+   "note": "inline transfer (the fragment program's constant patch) (libgcm calls it for PPFX)"
+  },
+  {
+   "addr": "0x006A1D1C",
+   "note": "no command seen in the river trace (PPFX calls it)"
+  },
+  {
+   "addr": "0x006A1E28",
+   "note": "draw arrays (PPFX calls it)"
+  },
+  {
+   "addr": "0x006A336C",
+   "note": "no command seen in the river trace (PPFX calls it)"
+  },
+  {
+   "addr": "0x006A39EC",
+   "note": "vertex program constants (PPFX calls it)"
+  },
+  {
+   "addr": "0x006A4564",
+   "note": "no command seen in the river trace (PPFX calls it)"
+  },
+  {
+   "addr": "0x006A4E50",
+   "note": "vertex program (PPFX calls it)"
+  },
+  {
+   "addr": "0x006A56BC",
+   "note": "method 0x1D7C (PPFX calls it)"
+  },
+  {
+   "addr": "0x006A5A40",
+   "note": "no command seen in the river trace (PPFX calls it)"
+  },
+  {
+   "addr": "0x006A5ADC",
+   "note": "no command seen in the river trace (PPFX calls it)"
+  },
+  {
+   "addr": "0x006A5C30",
+   "note": "writes 0314 (PPFX calls it)"
+  },
+  {
+   "addr": "0x006A5CF4",
+   "note": "writes 0100 1D94 (PPFX calls it)"
+  },
+  {
+   "addr": "0x006A5DA0",
+   "note": "writes 1D90 (PPFX calls it)"
+  },
+  {
+   "addr": "0x006A5E30",
+   "note": "writes 1D8C (PPFX calls it)"
+  },
+  {
+   "addr": "0x006A5EC0",
+   "note": "colour mask (PPFX calls it)"
+  },
+  {
+   "addr": "0x006A5FE0",
+   "note": "writes 1830 (PPFX calls it)"
+  },
+  {
+   "addr": "0x006A6070",
+   "note": "writes 0A6C (PPFX calls it)"
+  },
+  {
+   "addr": "0x006A6100",
+   "note": "writes 0A70 (PPFX calls it)"
+  },
+  {
+   "addr": "0x006A62B4",
+   "note": "writes 03BC (PPFX calls it)"
+  },
+  {
+   "addr": "0x006A6344",
+   "note": "writes 1DB4 (PPFX calls it)"
+  },
+  {
+   "addr": "0x006A650C",
+   "note": "polygon smooth (PPFX calls it)"
+  },
+  {
+   "addr": "0x006A659C",
+   "note": "writes 147C (PPFX calls it)"
+  },
+  {
+   "addr": "0x006A662C",
+   "note": "writes 1828 (PPFX calls it)"
+  },
+  {
+   "addr": "0x006A66BC",
+   "note": "back polygon mode (PPFX calls it)"
+  },
+  {
+   "addr": "0x006A674C",
+   "note": "scissor (PPFX calls it)"
+  },
+  {
+   "addr": "0x006A6810",
+   "note": "writes 0368 (PPFX calls it)"
+  },
+  {
+   "addr": "0x006A68A0",
+   "note": "writes 142C (PPFX calls it)"
+  },
+  {
+   "addr": "0x006A6DA0",
+   "note": "alpha test enable (PPFX calls it)"
+  },
+  {
+   "addr": "0x006A6E30",
+   "note": "blend enable (PPFX calls it)"
+  },
+  {
+   "addr": "0x006A6F74",
+   "note": "writes 0374 (PPFX calls it)"
+  },
+  {
+   "addr": "0x006A7004",
+   "note": "cull face enable (PPFX calls it)"
+  },
+  {
+   "addr": "0x006A7124",
+   "note": "depth test enable (PPFX calls it)"
+  },
+  {
+   "addr": "0x006A71B4",
+   "note": "method 0x0300 (PPFX calls it)"
+  },
+  {
+   "addr": "0x006A7244",
+   "note": "stencil test enable (PPFX calls it)"
+  },
+  {
+   "addr": "0x006A7364",
+   "note": "writes 0A68 (PPFX calls it)"
+  },
+  {
+   "addr": "0x006A75D8",
+   "note": "writes 1A1C 1A3C 1A5C 1A7C 1A9C 1ABC ... (PPFX calls it)"
+  },
+  {
+   "addr": "0x006A7674",
+   "note": "texture filter (PPFX calls it)"
+  },
+  {
+   "addr": "0x006A7744",
+   "note": "texture address (PPFX calls it)"
+  },
+  {
+   "addr": "0x006A7834",
+   "note": "texture control 0 (PPFX calls it)"
+  },
+  {
+   "addr": "0x006A7BA4",
+   "note": "vertex cache invalidate (PPFX calls it)"
+  },
+  {
+   "addr": "0x006A7CF8",
+   "note": "frequency divider (PPFX calls it)"
+  },
+  {
+   "addr": "0x006A7EB0",
+   "note": "method 0x1FEC (PPFX calls it)"
+  },
+  {
+   "addr": "0x006A8020",
+   "note": "writes 1E98 (PPFX calls it)"
+  },
+  {
+   "addr": "0x006A817C",
+   "note": "writes 17CC (PPFX calls it)"
+  },
+  {
+   "addr": "0x006A820C",
+   "note": "writes 17C8 (PPFX calls it)"
+  },
+  {
+   "addr": "0x006A829C",
+   "note": "writes 1800 (PPFX calls it)"
+  },
+  {
+   "addr": "0x006A90EC",
+   "note": "writes 1738 (PPFX calls it)"
+  },
+  {
+   "addr": "0x006A96E8",
+   "note": "polygon offset fill enable (PPFX calls it)"
+  },
+  {
+   "addr": "0x006A97F8",
+   "note": "no command seen in the river trace (PPFX calls it)"
+  },
+  {
+   "addr": "0x006A9ED8",
+   "note": "no command seen in the river trace (PPFX calls it)"
+  },
+  {
+   "addr": "0x00963EBC",
+   "note": "the game's memcpy: R3's recorder takes copies into RSX local memory (the fragment programs' uploads) into its program shadow, and asp's re-emissions of its state store into the command buffer"
+  },
+  {
+   "addr": "0x006C02E8",
+   "note": "asp's colour write mask setter (device, const u8 rgba[4]): the colour mask PPFX's draws inherit"
+  },
+  {
+   "addr": "0x006C37A0",
+   "note": "asp's sampler bind (device, unit, enable): a unit's sampler state from asp's per-unit sampler table; PPFX inherits unit 0's address mode from it"
+  },
+  {
+   "addr": "0x006D0BE0",
+   "note": "asp's append of a prebuilt block (context, source, words): the copy of its state store, by the game's memcpy"
+  },
+  {
+   "addr": "0x006D1764",
+   "note": "asp's pass apply: colour mask, depth test and depth mask for a pass"
+  },
+  {
+   "addr": "0x006CD014",
+   "note": "asp's state block compiler (context, ...): asp's whole render state into a block"
+  },
+  {
+   "addr": "0x006D0B98",
+   "note": "asp's rebuild of its global state block (through 0x006CD014)"
+  },
+  {
+   "addr": "0x006C01C4",
+   "note": "asp's depth write mask setter (device, enable)"
+  },
+  {
+   "addr": "0x006C4628",
+   "note": "asp's polygon offset setter (device, factor, units)"
+  },
+  {
+   "addr": "0x006C49BC",
+   "note": "asp's depth test and function setter (device, func)"
+  },
+  {
+   "addr": "0x006C4D1C",
+   "note": "asp's cull setter (device, mode)"
+  },
+  {
+   "addr": "0x006C5298",
+   "note": "asp's blend setter (device, ...)"
+  },
+  {
+   "addr": "0x006C0A70",
+   "note": "asp's stencil function and operations setter"
+  },
+  {
+   "addr": "0x006C0E38",
+   "note": "asp's stencil write mask setter"
+  },
+  {
+   "addr": "0x006C19A4",
+   "note": "asp's line width setter"
+  },
+  {
+   "addr": "0x006C6F88",
+   "note": "asp's draw (the draw context's method): R5's asp records, built at its return (docs/NATIVE_R4.md section 10)"
+  },
+  {
+   "addr": "0x006CB070",
+   "note": "asp's texture apply (this, {unit, ..}, CellGcmTexture*): a unit's texture"
+  },
+  {
+   "addr": "0x006D3190",
+   "note": "asp's vertex stream bind (stream object, {index, ..}): a vertex input's size, type, stride, location, frequency, offset"
+  },
+  {
+   "addr": "0x006D32D0",
+   "note": "asp's vertex stream rebind (stream object holding its index)"
+  },
+  {
+   "addr": "0x006C9C74",
+   "note": "asp's vertex constant upload (this, {start, ..}, const float*, count)"
+  },
+  {
+   "addr": "0x006CA3D0",
+   "note": "asp's vertex program upload and bind (shader object): R5's probe of asp's shader container"
+  },
+  {
+   "addr": "0x006C99B0",
+   "note": "asp's fragment program bind (shader object): R5's probe"
+  },
+  {
+   "addr": "0x006C048C",
+   "note": "asp's blend enable setter (method 0x0310): R5's encoders and setter probe (docs/NATIVE_R5.md)"
+  },
+  {
+   "addr": "0x006C05AC",
+   "note": "asp's alpha test enable setter (0x0304)"
+  },
+  {
+   "addr": "0x006C06CC",
+   "note": "asp's polygon mode setter (front and back, 0x1828/0x182C)"
+  },
+  {
+   "addr": "0x006C08F0",
+   "note": "asp's scissor setter (0x08C0/0x08C4)"
+  },
+  {
+   "addr": "0x006C5170",
+   "note": "asp's scissor setter, a second form (0x08C0/0x08C4)"
+  },
+  {
+   "addr": "0x006D11BC",
+   "note": "asp's scissor setter, a third form (0x08C0/0x08C4)"
+  },
+  {
+   "addr": "0x006C0F60",
+   "note": "asp's viewport setter (clip range 0x0394/0x0398, viewport 0x0A00/0x0A04, scale and offset 0x0A20-0x0A3C)"
+  },
+  {
+   "addr": "0x006C2D3C",
+   "note": "asp's clear (clear values 0x1D8C/0x1D90, the clear 0x1D94)"
+  },
+  {
+   "addr": "0x006C4284",
+   "note": "asp's alpha function setter (enable, function, reference: 0x0304-0x030C)"
+  },
+  {
+   "addr": "0x006C4508",
+   "note": "asp's stencil test enable setter (0x0328)"
+  },
+  {
+   "addr": "0x006C8A34",
+   "note": "asp's render target set (the surface: 0x018C-0x02B8, 0x1D88)"
+  },
+  {
+   "addr": "0x006CADE4",
+   "note": "asp's fragment program upload (an inline transfer into local memory)"
+  },
+  {
+   "addr": "0x006C9624",
+   "note": "asp's fragment program constant patch (an inline transfer into a program in local memory)"
+  },
+  {
+   "addr": "0x006D0E84",
+   "note": "asp's texture apply for unit 4 (0x1A80-0x1A98, control 3 0x1850): the shadow map"
+  },
+  {
+   "addr": "0x006A2164",
+   "note": "cellGcmSetDrawIndexArray (the game's own draws, not PPFX's): R5 records those inside asp's scene -- the reflection's stencil mask, the water, scene parts (docs/NATIVE_R5.md)"
+  }
+ ]
+}

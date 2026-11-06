@@ -275,6 +275,34 @@ LONG WINAPI win_crash_filter(EXCEPTION_POINTERS* ep)
     uint32_t g; uintptr_t off;
     if (host_to_guest((uintptr_t)ep->ExceptionRecord->ExceptionAddress, &g, &off))
         rp("  in lifted func_%08X (+host 0x%lX)\n", g, (unsigned long)off);
+    {   // the module and the offset in it, for a symbolizer (llvm-symbolizer --obj=dotheroes.exe 0x<rva + image base>)
+        HMODULE m = NULL;
+        char name[MAX_PATH] = "?";
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               (LPCSTR)ep->ExceptionRecord->ExceptionAddress, &m) && m)
+            GetModuleFileNameA(m, name, sizeof name);
+        rp("  module %s base %p rva 0x%llX\n", name, (void*)m,
+           (unsigned long long)((uintptr_t)ep->ExceptionRecord->ExceptionAddress - (uintptr_t)m));
+#if defined(_M_X64) || defined(__x86_64__)
+        // the faulting thread's host stack, as module offsets (tools/symbolize.py)
+        CONTEXT c = *ep->ContextRecord;
+        rp("  host stack (rva in that module):");
+        for (int i = 0; i < 24 && c.Rip; i++) {
+            const uintptr_t pc = (uintptr_t)c.Rip;
+            HMODULE pm = NULL;
+            if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                   (LPCSTR)pc, &pm) && pm == m)
+                rp(" 0x%llX", (unsigned long long)(pc - (uintptr_t)m));
+            else rp(" %p", (void*)pc);
+            DWORD64 img = 0;
+            PRUNTIME_FUNCTION fe = RtlLookupFunctionEntry(c.Rip, &img, NULL);
+            if (!fe) { c.Rip = *(DWORD64*)c.Rsp; c.Rsp += 8; continue; }   // a leaf
+            void* hd = NULL; DWORD64 ef = 0;
+            RtlVirtualUnwind(UNW_FLAG_NHANDLER, img, c.Rip, fe, &c, &hd, &ef, NULL);
+        }
+        rp("\n");
+#endif
+    }
     if (ep->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
         uint32_t ea;
         uintptr_t a = (uintptr_t)ep->ExceptionRecord->ExceptionInformation[1];

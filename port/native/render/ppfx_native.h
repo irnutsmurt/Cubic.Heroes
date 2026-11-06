@@ -152,7 +152,14 @@ uint64_t fnv(const void* p, size_t n, uint64_t h = 1469598103934665603ull);
 
 // kAspDraw (R5, docs/NATIVE_R4.md section 10): one of asp's draws, described from
 // asp's own methods; checked against the engine's state at that draw, not rendered yet
-enum Kind : uint32_t { kDraw = 1, kClear = 2, kAspDraw = 3 };
+// kFlip (R6, docs/NATIVE_R6.md): the game's cellGcmSetFlip -- the frame's end;
+// with the native present (DOTHEROES_R6_PRESENT=1) the native renderer
+// presents the display buffer it names
+// kReport (R6, DOTHEROES_R6_OCCLUSION=1): an occlusion report's operation --
+// cellGcmSetClearReport, cellGcmSetReport, cellGcmSetTransferReportData --
+// carried out by the native renderer with the counts its own queries took
+enum Kind : uint32_t { kDraw = 1, kClear = 2, kAspDraw = 3, kFlip = 4, kReport = 5 };
+enum ReportOp : uint32_t { kRepClear = 1, kRepReport = 2, kRepTransfer = 3 };
 
 // A guest surface a record reads (a texture unit) or writes (its colour
 // target), as the recorder saw it.
@@ -202,8 +209,15 @@ struct Rec {
     uint32_t lap_end, io_end;      // kAspDraw: where its commands ended (its draw's return)
     uint32_t why;                  // 0, or a reason the record is not drawable (kWhy*)
     State st;                      // what it draws with
-    uint32_t vconst[512][4];       // the vertex program's constants
+    uint32_t vconst[512][4];       // the vertex program's constants (whole: vc_full; else see cdelta)
     uint32_t vconst_written[16];   // bit per constant ever set (512 bits)
+    // R6 (the game thread's cost): the constants as a delta -- the ranges set
+    // since the previous record, as words (start << 16 | count, then count x 4
+    // values) -- which the native renderer, the records' one in-order
+    // consumer, applies to its own copy. vc_full: vconst holds them all
+    // (DOTHEROES_R6_VCONST_FULL=1, and whenever the cross-check reads them).
+    uint8_t vc_full;
+    std::vector<uint32_t> cdelta;
     BlobP vp;                      // vertex program words from its start slot, through its last instruction
     BlobP fp;                      // fragment program bytes as the GPU will read them at this draw
     // the operation
@@ -232,6 +246,11 @@ struct Rec {
     uint32_t ntex;
     std::vector<uint8_t> tdata;
     uint8_t bypassed;              // R4: its call's body did not run; the walker meets it at its marker
+    // kFlip (R6): the flip id and the display buffer it names (local memory)
+    uint32_t flip_id, flip_offset, flip_pitch, flip_w, flip_h;
+    // kReport (R6): the operation, the report type, index (and count of a
+    // transfer), the transfer's destination IO offset
+    uint32_t rep_op, rep_type, rep_index, rep_count, rep_io;
     Walk walk;
 };
 
@@ -246,6 +265,9 @@ struct Queue {
     enum { kCap = 4096 };   // R5: asp's records too (about 250 a river frame)
     Rec* slot[kCap];
     std::atomic<uint64_t> put{0}, walked{0}, done{0};
+    // R6's native present: flips recorded (kFlip published) and presented by
+    // the native renderer; a flip completes for the game only once both agree
+    std::atomic<uint64_t> flips_recorded{0}, flips_presented{0};
     std::mutex m;
     std::condition_variable cv;    // any of the three moved
     // backpressure: how often and how long the producer waited for room
@@ -305,6 +327,12 @@ struct HandOut {
 };
 int handback_take(uint32_t location, uint32_t offset, bool check, uint32_t timeout_ms, HandOut* out);
 void handback_check_done(int check_slot);
+// R6: the native image of the colour surface at (location, offset) read back
+// into `rows` (its own format: *vkformat, *bpp, *w x *h, rows packed) once
+// the native renderer has recorded every record before `upto`. Blocks (any
+// thread but the native renderer's) until done or timeout_ms. 0 when done.
+int readback_take(uint32_t location, uint32_t offset, uint64_t upto, uint32_t timeout_ms, std::vector<uint8_t>& rows,
+                  uint32_t* w, uint32_t* h, uint32_t* vkformat, uint32_t* bpp);
 // rsx_be_format the engine keeps a cellGcmSetSurface colour format in
 uint32_t surface_beformat(uint32_t color_format);
 // R4's stream marker (ppfx_bridge.cpp, the producer's thread): written into
@@ -332,6 +360,7 @@ struct Stats {
     std::atomic<uint64_t> wraps_in_call{0};       // records the walker found at their wrapped position
     std::atomic<uint64_t> ends_at_ring_end{0};    // records whose commands ended at the ring's end
     std::atomic<uint64_t> rec_ns{0};              // the recorder's own time on the game's thread
+    std::atomic<uint64_t> rec_exit_ns{0};         // R6: of the draws' records built at their return (sampled)
     std::atomic<uint64_t> matched{0}, missed{0}, foreign_draws{0}, foreign_clears{0};
     std::atomic<uint64_t> lap_delta_changes{0};
     std::atomic<uint64_t> xc_draws{0}, xc_regs{0}, xc_consts{0}, xc_vp{0}, xc_fp{0}, xc_vtx{0}, xc_tex{0};
@@ -378,6 +407,39 @@ struct Stats {
     std::atomic<uint64_t> asp_tex_snapshots{0};    // small textures taken as the game drew (R5)
     std::atomic<uint64_t> asp_bypassed{0}, asp_bypassed_words{0}, asp_not_bypassed{0}, asp_marker_fail{0};   // R5's bypass
     std::atomic<uint64_t> asp_state_bypassed{0}, asp_state_words{0}, asp_state_kept{0};   // R5's bypass, stage 2
+    // R6: the game's own producers (DOTHEROES_R6_PRODUCERS=1): its clears and
+    // draw-arrays draws recorded, the calls whose bodies did not run, and the
+    // clears narrower than their surface (the native clear takes it whole)
+    std::atomic<uint64_t> r6_game_clears{0}, r6_game_arrays{0}, r6_game_skipped{0}, r6_clears_scissored{0};
+    // R6's native present: frames presented, flips with no native image of their display buffer
+    std::atomic<uint64_t> r6_presents{0}, r6_present_missing{0}, r6_present_ns{0};
+    std::atomic<uint64_t> r6_takeback{0}, r6_takeback_words{0};   // asp's clears and pass starts taken back
+    // R6's skipped bodies (DOTHEROES_R6_SKIP=1): asp's draws and the game's
+    // indexed draws replaced at their entry (the body never runs), the calls
+    // left to their bodies and why; =verify: the body runs and the
+    // replacement's predicted effects are compared with what it did
+    std::atomic<uint64_t> skip_asp_draws{0}, skip_game_draws{0}, skip_fallback_args{0}, skip_fallback_ctx{0};
+    std::atomic<uint64_t> skip_fallback_set{0}, skip_cache_hits{0}, skip_no_draw{0};
+    std::atomic<uint64_t> skip_extra_sets{0}, skip_count_override{0};   // draws with more stream sets, a vertex-count override
+    std::atomic<uint64_t> skv_draws{0}, skv_binds_equal{0}, skv_binds_differ{0}, skv_counter_bad{0}, skv_cache_bad{0};
+    std::atomic<uint64_t> skv_r3_bad{0}, skv_stream_words_bad{0};
+    // ... asp's program functions (vertex upload, constants, fragment upload,
+    // patch, pair bind) replaced at entry; the heap's first set-up left to its
+    // body; verify: the fields the replacement would write against the body's
+    std::atomic<uint64_t> skip_prog{0}, skip_prog_heap{0}, skpv_calls{0}, skpv_fields_bad{0}, skpv_r3_bad{0};
+    // ... and (=all) asp's state functions: setters, clears, passes, targets,
+    // samplers, textures, the shadow map; the calls left to their bodies (not
+    // on the title's context)
+    std::atomic<uint64_t> skip_state{0}, skip_state_left{0}, skip_restores{0};
+    // verify: the state the replacement records against the R5 path's after
+    // the body (State compared whole, then by part), its guest stores and r3
+    std::atomic<uint64_t> sksv_calls{0}, sksv_state_equal{0}, sksv_state_differ{0}, sksv_stores_bad{0}, sksv_r3_bad{0};
+    std::atomic<uint64_t> sksv_differ_by[8];
+    // R6's occlusion reports: the operations recorded, the counted draws and
+    // queries the native renderer made, the reports and transfers it wrote,
+    // render enables in the conditional mode (never seen), other report types
+    std::atomic<uint64_t> occ_ops{0}, occ_draws{0}, occ_reports{0}, occ_transfers{0}, occ_cond_render{0};
+    std::atomic<uint64_t> occ_other_types{0}, occ_writebacks{0}, occ_sum_last{0}, occ_missing{0};
 };
 Stats& stats();
 void report_add(const char* line);   // a line in the next report (diagnostics)

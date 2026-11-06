@@ -107,7 +107,7 @@ namespace {
     X(vkCmdCopyImage) X(vkCmdCopyImageToBuffer) X(vkCmdCopyBufferToImage) X(vkCmdClearColorImage) X(vkCmdClearDepthStencilImage) X(vkCmdCopyBuffer) \
     X(vkCmdClearAttachments) X(vkCmdWriteTimestamp) X(vkCmdResetQueryPool) X(vkCreateQueryPool) \
     X(vkGetQueryPoolResults) X(vkCreateFence) X(vkGetFenceStatus) X(vkResetFences) X(vkWaitForFences) \
-    X(vkQueueSubmit) X(vkCreateSemaphore)
+    X(vkQueueSubmit) X(vkCreateSemaphore) X(vkCmdBlitImage) X(vkCmdBeginQuery) X(vkCmdEndQuery)
 
 struct Fn {
 #define X(f) PFN_##f f;
@@ -157,6 +157,8 @@ PASS_WRAP(vkCmdClearDepthStencilImage, (VkCommandBuffer cb, VkImage a, VkImageLa
                                         const VkImageSubresourceRange* e), (cb, a, b, c, d, e))
 PASS_WRAP(vkCmdCopyBuffer, (VkCommandBuffer cb, VkBuffer a, VkBuffer b, uint32_t c, const VkBufferCopy* d), (cb, a, b, c, d))
 PASS_WRAP(vkCmdResetQueryPool, (VkCommandBuffer cb, VkQueryPool a, uint32_t b, uint32_t c), (cb, a, b, c))
+PASS_WRAP(vkCmdBlitImage, (VkCommandBuffer cb, VkImage a, VkImageLayout b, VkImage c, VkImageLayout d, uint32_t e, const VkImageBlit* f,
+                           VkFilter g), (cb, a, b, c, d, e, f, g))
 PASS_WRAP(vkCmdBeginRenderPass, (VkCommandBuffer cb, const VkRenderPassBeginInfo* a, VkSubpassContents b), (cb, a, b))
 #undef PASS_WRAP
 PFN_vkEndCommandBuffer s_real_vkEndCommandBuffer;
@@ -183,7 +185,7 @@ void pass_wrap_install()
     s_real_end_pass = F.vkCmdEndRenderPass;
 #define W(f) s_real_##f = F.f; F.f = w_##f;
     W(vkCmdPipelineBarrier) W(vkCmdCopyImage) W(vkCmdCopyImageToBuffer) W(vkCmdCopyBufferToImage) W(vkCmdClearColorImage)
-    W(vkCmdClearDepthStencilImage) W(vkCmdCopyBuffer) W(vkCmdResetQueryPool) W(vkCmdBeginRenderPass) W(vkEndCommandBuffer)
+    W(vkCmdClearDepthStencilImage) W(vkCmdCopyBuffer) W(vkCmdResetQueryPool) W(vkCmdBlitImage) W(vkCmdBeginRenderPass) W(vkEndCommandBuffer)
     W(vkResetCommandBuffer) W(vkDestroyFramebuffer)
 #undef W
 }
@@ -192,9 +194,34 @@ rsx_vk_bridge_dev D;
 VkPhysicalDeviceMemoryProperties s_mem;
 float s_ts_period = 1.0f;
 std::atomic<int> s_ready{0};
+// R6: the vertex constants as the records so far set them (Rec::cdelta, or
+// a whole copy), applied in record order by this thread
+uint32_t s_vc[512][4];
+void apply_vconst(const Rec* r)
+{
+    if (r->vc_full) { memcpy(s_vc, r->vconst, sizeof s_vc); return; }
+    const uint32_t* p = r->cdelta.data();
+    const uint32_t* e = p + r->cdelta.size();
+    while (p < e) {
+        const uint32_t start = *p >> 16, count = *p & 0xFFFFu;
+        p++;
+        if (start + count <= 512 && p + 4 * count <= e) memcpy(&s_vc[start][0], p, 16u * count);
+        p += 4 * count;
+    }
+}
+VkSemaphore s_present_sem[2];   // R6: the present's submission waits on one; the next-but-one present reuses it
+int s_occ_on = -1;              // R6: DOTHEROES_R6_OCCLUSION
+uint32_t s_present_n = 0;
 int s_full = 0;   // DOTHEROES_PPFX_BARRIERS=full: R3's full barriers, every image in GENERAL
 char s_dump[512];   // DOTHEROES_PPFX_DUMP: where the first differing outputs go
 std::atomic<int> s_draining{0};   // render_drain: the engine has stopped (exit)
+std::atomic<int> s_stop{0}, s_stopped{0};   // R6: render_drain asks the native thread to end; it has
+// R6 (a diagnostic for a request that times out): where the native thread is
+// -- 1 recording, 2 idle (waiting for the walker), 3 waiting for an engine
+// signal before a submission, 4 serving a readback, 5 presenting -- and the
+// next record it takes
+std::atomic<int> s_where{0};
+std::atomic<uint64_t> s_next{0};
 
 uint64_t now_ns()
 {
@@ -274,6 +301,8 @@ struct Img {
     bool external = false;                             // a slot: the engine's queue writes it, a semaphore orders it
     VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT;   // R5: a depth image's depth (and stencil) aspects
     uint32_t asp_frame = 0;                            // R5: 1 + the frame asp's records last drew into it
+    uint8_t main_dirty = 0;                            // R6: a main-memory target drawn since its last write-back
+    uint32_t guest_pitch = 0;                          // R6: its pitch in guest memory
 };
 
 VkImageView make_view(VkImage img, VkFormat fmt, uint32_t levels, VkComponentMapping map)
@@ -503,8 +532,16 @@ struct Batch {
     std::vector<VkSemaphore> signals;            // R4: handbacks' semaphores this batch signals
     std::vector<int> release;                    // R4: handbacks' semaphore slots, free once this batch is done
     std::vector<std::function<void()>> done;     // after completion
+    // R6: occlusion queries (DOTHEROES_R6_OCCLUSION=1): one a counted draw,
+    // each with its global number; and the batch's place in submission order
+    VkQueryPool occ = VK_NULL_HANDLE;
+    uint32_t nocc = 0;
+    std::vector<uint64_t> occ_gid;
+    uint64_t seq = 0;
 };
 const int kBatches = 4;
+const uint32_t kOcc = 1024;
+uint64_t s_batch_seq = 0;   // R6: submissions so far (the batches retire in this order)
 const VkDeviceSize kUpload = 16u << 20;
 const uint32_t kSets = 1024;
 Batch s_b[kBatches];
@@ -524,10 +561,23 @@ void mark(Batch& b, Sect s)
     b.sect.push_back(s);
 }
 
+uint64_t s_occ_val[1u << 16];   // R6: occlusion results by global number (mod 2^16), read at completion
+bool s_occ_open = false;        // R6: a query begun for the draw being recorded
 void retire(Batch& b)
 {
     if (!b.pending) return;
+    // R6: in submission order -- a later batch's completion work may use what
+    // an earlier batch's completion reads (occlusion counts)
+    for (Batch& o : s_b) if (&o != &b && o.pending && o.seq < b.seq) retire(o);
     F.vkWaitForFences(D.device, 1, &b.fence, VK_TRUE, UINT64_MAX);
+    if (b.nocc) {
+        std::vector<uint64_t> v(b.nocc);
+        if (F.vkGetQueryPoolResults(D.device, b.occ, 0, b.nocc, v.size() * 8, v.data(), 8,
+                                    VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT) == VK_SUCCESS)
+            for (uint32_t i = 0; i < b.nocc; i++) s_occ_val[b.occ_gid[i] & 0xFFFFu] = v[i];
+        b.nocc = 0;
+        b.occ_gid.clear();
+    }
     if (b.qp && b.nq >= 2) {
         std::vector<uint64_t> ts(b.nq);
         if (F.vkGetQueryPoolResults(D.device, b.qp, 0, b.nq, ts.size() * 8, ts.data(), 8, VK_QUERY_RESULT_64_BIT) ==
@@ -549,7 +599,7 @@ void retire(Batch& b)
     b.done.clear();
     {
         std::lock_guard<std::mutex> g(s_slot_lock);
-        for (int s : b.sems) s_ssem[s].busy = false;
+        for (int s : b.sems) if (s >= 0 && (size_t)s < s_ssem.size()) s_ssem[s].busy = false;
         for (int s : b.release) if (s >= 0 && (size_t)s < s_ssem.size()) s_ssem[s].busy = false;
     }
     b.sems.clear();
@@ -564,7 +614,9 @@ Batch& batch(uint32_t frame)
 {
     Batch& b = s_b[s_cur];
     if (b.open) return b;
+    const int was = s_where.exchange(6);   // 6: waiting for a batch slot's previous use to complete
     retire(b);
+    s_where = was;
     F.vkResetFences(D.device, 1, &b.fence);
     F.vkResetDescriptorPool(D.device, b.dp, 0);
     F.vkResetCommandBuffer(b.cb, 0);
@@ -572,10 +624,39 @@ Batch& batch(uint32_t frame)
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     F.vkBeginCommandBuffer(b.cb, &bi);
     F.vkCmdResetQueryPool(b.cb, b.qp, 0, kQueries);
+    if (b.occ) F.vkCmdResetQueryPool(b.cb, b.occ, 0, kOcc);
+    b.nocc = 0; b.occ_gid.clear(); b.seq = ++s_batch_seq;
     b.nq = 0; b.sect.clear();
     F.vkCmdWriteTimestamp(b.cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, b.qp, b.nq++);
     b.used = 0; b.open = true; b.frame = frame; b.records = 0; b.sets = 0;
     return b;
+}
+
+// R6 (docs/NATIVE_R6.md, synchronisation): a batch whose engine signal
+// never came is not submitted -- its commands read what the engine's copies
+// would have written, and waiting on a semaphore whose signal was never
+// submitted is invalid (VUID-vkQueueSubmit-pWaitSemaphores-03238; R4/R5 did
+// that at exit after 100 ms). It is cancelled instead: recorded but never
+// run, its completion work done once every batch before it has completed,
+// its slots given back. The semaphores it would have signalled stay
+// unsignalled: only an engine submission made after its last one could wait
+// on them, and at exit there is none.
+uint64_t s_cancelled = 0;
+void cancel(Batch& b)
+{
+    F.vkEndCommandBuffer(b.cb);
+    for (Batch& o : s_b) if (&o != &b) retire(o);   // the GPU done with what the cancelled batch's completion frees
+    for (auto& f : b.done) f();
+    b.done.clear();
+    {
+        std::lock_guard<std::mutex> g(s_slot_lock);
+        for (int k : b.sems) if (k >= 0 && (size_t)k < s_ssem.size()) s_ssem[k].busy = false;
+        for (int k : b.release) if (k >= 0 && (size_t)k < s_ssem.size()) s_ssem[k].busy = false;
+    }
+    b.sems.clear(); b.ords.clear(); b.release.clear(); b.signals.clear();
+    b.open = false; b.pending = false;
+    s_cancelled++;
+    s_cur = (s_cur + 1) % kBatches;
 }
 
 void submit()
@@ -586,15 +667,23 @@ void submit()
     // before ours waits (the engine submits at its own points: a frame at most)
     if (!b.ords.empty()) {
         const uint64_t t0 = now_ns();
+        bool missing = false;
+        uint64_t say = 10000000000ull;
+        const int was = s_where.exchange(3);
         for (long long o : b.ords)
             while (!rsx_vk_bridge_submitted(o)) {
                 std::this_thread::sleep_for(std::chrono::microseconds(200));
-                // at exit the engine may have stopped before its next submission:
-                // a short wait, then the batch goes without it (counted)
-                if (s_draining && now_ns() - t0 > 100000000ull) { stats().exit_signal_skips++; break; }
-                if (now_ns() - t0 > 10000000000ull) { fail("waiting for the engine's signal", VK_TIMEOUT); break; }
+                // at exit the engine may have stopped before its next
+                // submission: after a short wait the batch is cancelled (counted)
+                if (s_draining && now_ns() - t0 > 100000000ull) { stats().exit_signal_skips++; missing = true; break; }
+                // in play: a bug (nothing the engine does any more waits a
+                // frame to submit); said, and the wait goes on -- never a
+                // submission that waits on an unsubmitted signal
+                if (now_ns() - t0 > say) { fail("waiting for the engine's signal (still waiting)", VK_TIMEOUT); say += 10000000000ull; }
             }
         stats().wait_signal_us += (now_ns() - t0) / 1000;
+        s_where = was;
+        if (missing) { cancel(b); return; }
     }
     // the readback copies visible to the host for the comparisons
     VkMemoryBarrier mb = { VK_STRUCTURE_TYPE_MEMORY_BARRIER };
@@ -618,9 +707,18 @@ void submit()
     rsx_vk_bridge_queue_lock();
     const VkResult r = F.vkQueueSubmit(D.queue, 1, &si, b.fence);
     rsx_vk_bridge_queue_unlock();
-    if (r != VK_SUCCESS) fail("vkQueueSubmit", r);
     b.signals.clear();
-    b.open = false; b.pending = true;
+    b.open = false;
+    if (r != VK_SUCCESS) {
+        // nothing was submitted: its fence will never signal (R6: it was left
+        // pending, and retiring it waited forever)
+        fail("vkQueueSubmit", r);
+        for (auto& f : b.done) f();   // a lost device: nothing runs any more
+        b.done.clear(); b.sems.clear(); b.ords.clear(); b.release.clear();
+        s_cur = (s_cur + 1) % kBatches;
+        return;
+    }
+    b.pending = true;
     stats().n_batches++;
     s_cur = (s_cur + 1) % kBatches;
 }
@@ -1427,6 +1525,34 @@ void fetch_plan(rsx_vertex_fetch_plan* plan, const Rec* r, const rsx_vertex_layo
 // A static texture from the bytes the recorder took (the engine's
 // eng_texture_upload, one face), by content.
 uint64_t fast_hash(const uint8_t* p, size_t n, uint64_t seed);
+// R6 (R5's open item: the water's texture made a new image every frame):
+// static textures the sweep drops go into a pool once every batch that may
+// have used them has completed (as retired images are destroyed: in the open
+// batch's completion, or at once with none in flight), and a texture of the
+// same shape takes one from there instead of a new image.
+std::multimap<uint64_t, Img*> s_static_pool;   // shape -> images no batch uses
+std::vector<Img*> s_static_swept;              // dropped, not yet known unused by the GPU
+uint64_t s_static_reused = 0, s_static_pool_destroyed = 0;
+uint64_t shape_key(VkFormat f, uint32_t w, uint32_t h, uint32_t lv)
+{
+    return (uint64_t)f << 48 ^ (uint64_t)w << 32 ^ (uint64_t)h << 16 ^ lv;
+}
+void static_pool_put(Img* o)
+{
+    if (s_static_pool.size() >= 128) { destroy_image(o); s_static_pool_destroyed++; return; }
+    s_static_pool.emplace(shape_key(o->fmt, o->w, o->h, o->levels), o);
+}
+Img* static_pool_take(VkFormat f, uint32_t w, uint32_t h, uint32_t lv)
+{
+    auto it = s_static_pool.find(shape_key(f, w, h, lv));
+    if (it == s_static_pool.end()) return nullptr;
+    Img* o = it->second;
+    s_static_pool.erase(it);
+    if (o->fmt != f || o->w != w || o->h != h || o->levels != lv) { destroy_image(o); return nullptr; }
+    s_static_reused++;
+    return o;
+}
+
 Img* static_texture(Batch& b, const Rec* r, uint32_t unit, const Texture& t)
 {
     const VtxRange* snap = nullptr;
@@ -1444,7 +1570,8 @@ Img* static_texture(Batch& b, const Rec* r, uint32_t unit, const Texture& t)
     h = fnv(key, sizeof key, h);
     auto it = s_static.find(h);
     if (it != s_static.end()) { it->second.frame = r->frame; return it->second.img; }
-    Img* o = make_image(vf, t.width, t.height, nlv, bpp, false);
+    Img* o = static_pool_take(vf, t.width, t.height, nlv);
+    if (!o) o = make_image(vf, t.width, t.height, nlv, bpp, false);
     if (!o) return nullptr;
     access(b.cb, o, kCopyDst);
     std::vector<uint8_t> dec;
@@ -1471,7 +1598,7 @@ Img* static_texture(Batch& b, const Rec* r, uint32_t unit, const Texture& t)
     if (swept != r->frame) {
         swept = r->frame;
         for (auto jt = s_static.begin(); jt != s_static.end();)
-            if (r->frame - jt->second.frame > 8) { s_retired.push_back(jt->second.img); jt = s_static.erase(jt); }
+            if (r->frame - jt->second.frame > 8) { s_static_swept.push_back(jt->second.img); jt = s_static.erase(jt); }
             else ++jt;
     }
     s_static[h] = { o, r->frame };
@@ -1823,10 +1950,14 @@ void wait_for(Batch& b, const Rec* r)
     s_waited = r->walk.ordinal;
 }
 
+void asp_clears(Batch& b, const Rec* r);
+void occ_begin(Batch& b, const Rec* r);   // R6: a counted draw's occlusion query
+void occ_end(Batch& b);
 void draw(const Rec* r)
 {
     Batch& b = batch(r->frame);
     wait_for(b, r);
+    if (r->naclear) asp_clears(b, r);   // R6: the clears made before it (the game's, asp's)
     if (r->why) { unsupported(r, "no programs or vertex data"); return; }
     const State& st = r->st;
     const Surface& sf = st.surface;
@@ -1843,6 +1974,7 @@ void draw(const Rec* r)
     apply_handoffs(b, r);
     Img* t = target_image(sf.color_location[0] ? 1u : 0u, sf.color_offset[0], rt, bpp, W, H);
     if (!t) { unsupported(r, "target image"); return; }
+    if (sf.color_location[0]) { t->main_dirty = 1; t->guest_pitch = sf.color_pitch[0]; }   // R6: main memory: written back
     // the vertex layout and the vertices
     rsx_vertex_layout_plan layout;
     {
@@ -1885,7 +2017,7 @@ void draw(const Rec* r)
         xf[6] = vp.offset[2];
     }
     uint8_t vcb[512 * 16 + 32];
-    memcpy(vcb, r->vconst, 512 * 16);
+    memcpy(vcb, s_vc, 512 * 16);
     memcpy(vcb + 512 * 16, xf, sizeof xf);
     const uint32_t nslots = fc.count ? fc.count : 1u;
     std::vector<uint8_t> pcb((nslots + 1) * 16, 0);
@@ -2007,7 +2139,9 @@ void draw(const Rec* r)
     F.vkCmdBindDescriptorSets(b.cb, VK_PIPELINE_BIND_POINT_GRAPHICS, s_pl, 0, 1, &set, 0, nullptr);
     F.vkCmdBindVertexBuffers(b.cb, 0, 1, &b.up.b, &o_v);
     F.vkCmdBindIndexBuffer(b.cb, b.up.b, o_i, VK_INDEX_TYPE_UINT32);
+    occ_begin(b, r);
     F.vkCmdDrawIndexed(b.cb, n_draw, 1, 0, 0, 0);
+    occ_end(b);
     F.vkCmdEndRenderPass(b.cb);
     mark(b, kSectDraw);
     t->written = 1;
@@ -2345,7 +2479,9 @@ Arena* arena_alloc(Batch& b, VkDeviceSize n, VkDeviceSize* off)
         }
         a.gen = ++s_arena_gen;
         s_arenas.push_back(a);
-        if (s_arenas.size() > kArenas) {
+        static size_t keep = 0;
+        if (!keep) { const char* e = getenv("DOTHEROES_R6_ARENAS"); keep = e && atoi(e) > 0 ? (size_t)atoi(e) : kArenas; }
+        if (s_arenas.size() > keep) {   // R6: DOTHEROES_R6_ARENAS=<n> (a lifetime test) keeps fewer
             Buf old = s_arenas.front().b;
             s_arenas.pop_front();
             s_arenas_retired++;
@@ -2553,6 +2689,7 @@ void asp_draw(const Rec* r)
         rt = (VkFormat)surface_vkformat(sf.color_format, &bpp);
         t = target_image(sf.color_location[0] ? 1u : 0u, sf.color_offset[0], rt, bpp, W, H);
         if (!t) { unsupported(r, "asp: target image"); return; }
+        if (sf.color_location[0]) { t->main_dirty = 1; t->guest_pitch = sf.color_pitch[0]; }   // R6: written back
     }
     const Raster& ra = st.raster;
     Img* d = nullptr; VkFormat df = VK_FORMAT_UNDEFINED;
@@ -2789,7 +2926,7 @@ void asp_draw(const Rec* r)
         xf[6] = vp.offset[2];
     }
     uint8_t vcb[512 * 16 + 32];
-    memcpy(vcb, r->vconst, 512 * 16);
+    memcpy(vcb, s_vc, 512 * 16);
     memcpy(vcb + 512 * 16, xf, sizeof xf);
     const uint32_t nslots = fc.count ? fc.count : 1u;
     std::vector<uint8_t> pcb((nslots + 1) * 16, 0);
@@ -2897,7 +3034,9 @@ void asp_draw(const Rec* r)
     F.vkCmdBindDescriptorSets(b.cb, VK_PIPELINE_BIND_POINT_GRAPHICS, s_pl, 0, 1, &set, 0, nullptr);
     F.vkCmdBindVertexBuffers(b.cb, 0, 1, &vbuf, &o_v);
     F.vkCmdBindIndexBuffer(b.cb, ibuf, o_i, VK_INDEX_TYPE_UINT32);
+    occ_begin(b, r);
     F.vkCmdDrawIndexed(b.cb, n_draw, 1, 0, 0, 0);
+    occ_end(b);
     if (!pass_merge()) F.vkCmdEndRenderPass(b.cb);   // else left open for the next draw
     mark(b, kSectDraw);
     prof.mark(kApCommands);
@@ -2912,6 +3051,7 @@ void clear(const Rec* r)
 {
     Batch& b = batch(r->frame);
     wait_for(b, r);
+    if (r->naclear) asp_clears(b, r);   // R6: the clears made before it (the game's, asp's)
     const Surface& sf = r->st.surface;
     uint32_t bpp = 0;
     const VkFormat rt = (VkFormat)surface_vkformat(sf.color_format, &bpp);
@@ -3006,6 +3146,11 @@ bool init()
         VkQueryPoolCreateInfo qi = { VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO };
         qi.queryType = VK_QUERY_TYPE_TIMESTAMP; qi.queryCount = kQueries;
         F.vkCreateQueryPool(D.device, &qi, nullptr, &b.qp);
+        {   // R6: occlusion
+            VkQueryPoolCreateInfo oi = { VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO };
+            oi.queryType = VK_QUERY_TYPE_OCCLUSION; oi.queryCount = kOcc;
+            F.vkCreateQueryPool(D.device, &oi, nullptr, &b.occ);
+        }
         static int dev_up = -1;
         if (dev_up < 0) { const char* e = getenv("DOTHEROES_PPFX_UPLOAD"); dev_up = !(e && !strcmp(e, "host")); }
         if (!make_buffer(b.up, kUpload, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
@@ -3029,6 +3174,10 @@ bool init()
         ds.min_filter = 2; ds.mag_filter = 2; ds.wrap_s = ds.wrap_t = ds.wrap_r = 3;
         s_dummy_smp = sampler(ds);
     }
+    for (VkSemaphore& sem : s_present_sem) {   // R6's native present
+        VkSemaphoreCreateInfo sci = { VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
+        F.vkCreateSemaphore(D.device, &sci, nullptr, &sem);
+    }
     const char* d = getenv("DOTHEROES_PPFX_DUMP");
     snprintf(s_dump, sizeof s_dump, "%s", d && *d ? d : "");
 #ifdef _WIN32
@@ -3039,6 +3188,188 @@ bool init()
 }
 
 std::atomic<int> s_idle{0};   // the thread has submitted everything walked and waits
+
+// ---- R6: occlusion reports (docs/NATIVE_R6.md section 5) -------------------------------------
+// The RSX's zpass counter, as the records drive it: cellGcmSetClearReport
+// starts a new count, every draw made with zpass counting on adds the samples
+// that pass its depth and stencil tests (one precise occlusion query each),
+// cellGcmSetReport writes the count so far into the report and
+// cellGcmSetTransferReportData copies reports to the game's buffer. Written
+// into guest memory when the batch with them completes (the GPU has the
+// counts), in record order: a transfer after the reports before it, the pad
+// word last; main-memory colour targets the records drew into written back
+// first (PPFX's probe reads its 1x1 target when its query is done).
+
+}  // namespace
+}  // namespace ppfx
+extern "C" void cellGcm_report_write_pub(uint32_t index, uint32_t location, uint32_t value);
+extern "C" int cellGcm_report_copy_pub(uint32_t index, uint32_t location, uint32_t io_out, uint32_t count);
+extern "C" uint32_t cellGcm_io2ea_pub(uint32_t io);
+extern "C" int rsx_texture_argb_is_rgba(void);
+namespace ppfx {
+namespace {
+
+std::vector<uint64_t> s_occ_set;   // the queries counted since the last clear
+uint64_t s_occ_gid = 0;
+int occ_on()
+{
+    if (s_occ_on < 0) { const char* e = getenv("DOTHEROES_R6_OCCLUSION"); s_occ_on = e && *e == '1'; }
+    return s_occ_on;
+}
+void occ_begin(Batch& b, const Rec* r)
+{
+    if (!r->st.raster.zpass_count || !occ_on() || !b.occ || b.nocc >= kOcc) { b.occ_gid.reserve(0); return; }
+    F.vkCmdBeginQuery(b.cb, b.occ, b.nocc, VK_QUERY_CONTROL_PRECISE_BIT);
+    const uint64_t gid = s_occ_gid++;
+    b.occ_gid.push_back(gid);
+    s_occ_set.push_back(gid);
+    b.nocc++;
+    s_occ_open = true;
+    stats().occ_draws++;
+}
+void occ_end(Batch& b)
+{
+    if (!s_occ_open) return;
+    F.vkCmdEndQuery(b.cb, b.occ, b.nocc - 1);
+    s_occ_open = false;
+}
+
+// main-memory colour targets the records drew into since their last write-back
+struct WriteBack { uint32_t ea, pitch, w, h, bpp; VkFormat fmt; Buf buf; };
+void report_op(const Rec* r)
+{
+    Batch& b = batch(r->frame);
+    wait_for(b, r);
+    if (r->rep_op == kRepClear) { s_occ_set.clear(); return; }
+    if (r->rep_op == kRepReport) {
+        if (r->rep_type != 1) stats().occ_other_types++;   // ZCULL statistics: never seen; written as 0
+        std::vector<uint64_t> gids = r->rep_type == 1 ? s_occ_set : std::vector<uint64_t>();
+        const uint32_t index = r->rep_index;
+        b.done.push_back([gids, index] {
+            uint64_t sum = 0;
+            for (uint64_t g : gids) sum += s_occ_val[g & 0xFFFFu];
+            const uint32_t v = sum > 0xFFFFFFFFull ? 0xFFFFFFFFu : (uint32_t)sum;
+            cellGcm_report_write_pub(index, 0 /* LOCAL */, v);
+            stats().occ_reports++;
+            stats().occ_sum_last = v;
+        });
+        return;
+    }
+    // a transfer: the main-memory targets first
+    std::vector<WriteBack> wb;
+    for (auto& kv : s_targets) {
+        Img* t = kv.second;
+        if ((kv.first >> 32) != 1 || !t || !t->main_dirty) continue;
+        t->main_dirty = 0;
+        WriteBack w;
+        w.ea = cellGcm_io2ea_pub((uint32_t)kv.first); w.pitch = t->guest_pitch ? t->guest_pitch : t->w * t->bpp;
+        w.w = t->w; w.h = t->h; w.bpp = t->bpp; w.fmt = t->fmt;
+        if (!w.ea || !make_buffer(w.buf, (VkDeviceSize)t->w * t->h * t->bpp, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true)) continue;
+        access(b.cb, t, kCopySrc);
+        VkBufferImageCopy c = {};
+        c.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+        c.imageExtent = { t->w, t->h, 1 };
+        F.vkCmdCopyImageToBuffer(b.cb, t->img, layout_of(t), w.buf.b, 1, &c);
+        mark(b, kSectReadback);
+        wb.push_back(w);
+    }
+    const uint32_t index = r->rep_index, io = r->rep_io, count = r->rep_count ? r->rep_count : 1;
+    b.done.push_back([wb, index, io, count] {
+        const bool as_is = rsx_texture_argb_is_rgba() != 0;
+        for (const WriteBack& w : wb) {
+            if (w.bpp == 4 && (w.fmt == VK_FORMAT_R8G8B8A8_UNORM || w.fmt == VK_FORMAT_B8G8R8A8_UNORM)) {
+                const bool bgra = w.fmt == VK_FORMAT_B8G8R8A8_UNORM;
+                for (uint32_t y = 0; y < w.h; y++) {
+                    if ((uint64_t)w.ea + (uint64_t)y * w.pitch + w.w * 4 > 0xE0000000ull) break;
+                    uint8_t* d = vm_base + w.ea + y * w.pitch;
+                    const uint8_t* sp = w.buf.p + (size_t)y * w.w * 4;
+                    for (uint32_t x = 0; x < w.w; x++, d += 4, sp += 4) {
+                        if (as_is) { memcpy(d, sp, 4); continue; }
+                        d[0] = sp[3]; d[1] = bgra ? sp[2] : sp[0]; d[2] = sp[1]; d[3] = bgra ? sp[0] : sp[2];
+                    }
+                }
+                stats().occ_writebacks++;
+            }
+            F.vkDestroyBuffer(D.device, w.buf.b, nullptr);
+            F.vkFreeMemory(D.device, w.buf.m, nullptr);
+        }
+        std::atomic_thread_fence(std::memory_order_release);
+        if (cellGcm_report_copy_pub(index, 0 /* LOCAL */, io, count)) stats().occ_transfers++;
+    });
+}
+
+// ---- R6: the native present (docs/NATIVE_R6.md section 2) -----------------------------------
+
+}  // namespace
+}  // namespace ppfx
+extern "C" void dotheroes_present_finish_async(void);   // main.cpp: the window present on the present thread
+extern "C" int cellGcm_flip_immediate(void);
+extern "C" void cellGcmTickFlip(void);
+namespace ppfx {
+namespace {
+
+
+// A kFlip: the display buffer the flip names, as the native renderer drew
+// it, blitted into the backend's present target on this queue, and the
+// present's own submission (on the backend's queue) made to wait for that.
+// The previous present is complete first (rsx_vk_bridge_present_prepare: the
+// backend's queue is done reading the target). Then the flip counts as
+// presented: the game's flip status follows (the flip gate).
+void present_native(const Rec* r)
+{
+    const uint64_t t0 = now_ns();
+    auto it = s_targets.find((uint64_t)r->flip_offset);   // a display buffer: local memory (location 0)
+    Img* t = it == s_targets.end() ? nullptr : it->second;
+    VkImage target = VK_NULL_HANDLE;
+    uint32_t tw = 0, th = 0;
+    // the frame's work first, without the present's lock (its submission may
+    // wait for the engine's: nothing the engine does then may need the lock)
+    if (s_b[s_cur].open) submit();
+    if (t && t->written && !rsx_vk_bridge_present_prepare(&target, &tw, &th)) {
+        Batch& b = batch(r->frame);
+        wait_for(b, r);
+        access(b.cb, t, kCopySrc);
+        VkImageMemoryBarrier ib = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+        ib.srcAccessMask = 0; ib.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        ib.oldLayout = VK_IMAGE_LAYOUT_GENERAL; ib.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        ib.srcQueueFamilyIndex = ib.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        ib.image = target; ib.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        F.vkCmdPipelineBarrier(b.cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &ib);
+        VkImageBlit bl = {};
+        bl.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+        bl.srcOffsets[1] = { (int32_t)(r->flip_w < t->w ? r->flip_w : t->w), (int32_t)(r->flip_h < t->h ? r->flip_h : t->h), 1 };
+        bl.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+        bl.dstOffsets[1] = { (int32_t)tw, (int32_t)th, 1 };
+        const bool same = bl.srcOffsets[1].x == (int32_t)tw && bl.srcOffsets[1].y == (int32_t)th;
+        F.vkCmdBlitImage(b.cb, t->img, layout_of(t), target, VK_IMAGE_LAYOUT_GENERAL, 1, &bl,
+                         same ? VK_FILTER_NEAREST : VK_FILTER_LINEAR);
+        ib.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; ib.dstAccessMask = 0;
+        F.vkCmdPipelineBarrier(b.cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1, &ib);
+        mark(b, kSectOther);
+        // DOTHEROES_R6_HAZARD=present (a negative control for the validation
+        // layer): the present's submission does not wait for the blit
+        static int hz = -1;
+        if (hz < 0) { const char* e = getenv("DOTHEROES_R6_HAZARD"); hz = e && !strcmp(e, "present"); }
+        VkSemaphore sem = s_present_sem[s_present_n++ & 1];
+        if (!hz) b.signals.push_back(sem);
+        submit();
+        rsx_vk_bridge_present_submit(hz ? VK_NULL_HANDLE : sem, 0);
+        dotheroes_present_finish_async();
+        stats().r6_presents++;
+    } else {
+        stats().r6_present_missing++;
+        static int said = 0;
+        if (said++ < 8) {
+            char line[160];
+            snprintf(line, sizeof line, "render: flip %u of frame %u: no native image of display buffer 0:%08X -- not presented",
+                     r->flip_id, r->frame, r->flip_offset);
+            report_add(line);
+        }
+    }
+    queue().flips_presented.fetch_add(1, std::memory_order_release);
+    if (cellGcm_flip_immediate()) cellGcmTickFlip();   // benchmarks: the flip completes now
+    stats().r6_present_ns += now_ns() - t0;
+}
 
 // ---- R4: handbacks ----------------------------------------------------------------------------
 
@@ -3112,6 +3443,65 @@ void hb_service(uint32_t frame)
     s_hb_cv.notify_all();
 }
 
+// ---- R6: a native image read back (the snapshot, guest reads, the present comparison) ---------
+
+struct RbReq {
+    uint64_t key, upto;      // the image; served once every record before `upto` is recorded
+    std::vector<uint8_t>* rows;
+    uint32_t w, h, vkformat, bpp;
+    int state;               // 0 asked, 1 done, < 0 failed
+};
+RbReq* s_rb;                 // under s_hb_lock
+std::atomic<uint64_t> s_rb_upto{~0ull};   // the request's upto, for this thread's check without the lock
+bool s_rb_serving;
+Buf s_rb_buf;                // host-visible, grown as needed
+
+// This thread, with every record before the request's `upto` recorded: the
+// image copied into host memory in a batch of its own, waited for here.
+void rb_service(uint32_t frame)
+{
+    RbReq* q;
+    {
+        std::lock_guard<std::mutex> g(s_hb_lock);
+        q = s_rb;
+        if (!q || q->state) return;
+        s_rb_serving = true;
+    }
+    int rc = 0;
+    auto it = s_targets.find(q->key);
+    Img* t = it == s_targets.end() ? nullptr : it->second;
+    if (!t || !t->written) rc = -1;
+    else {
+        const VkDeviceSize bytes = (VkDeviceSize)t->w * t->h * t->bpp;
+        if (s_rb_buf.n < bytes) {
+            // the old one: its readbacks' batches were waited for (below), nothing uses it
+            if (s_rb_buf.b) { F.vkDestroyBuffer(D.device, s_rb_buf.b, nullptr); F.vkFreeMemory(D.device, s_rb_buf.m, nullptr); s_rb_buf = Buf(); }
+            if (!make_buffer(s_rb_buf, bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true)) rc = -2;
+        }
+        if (!rc) {
+            if (s_b[s_cur].open) submit();
+            const int bi = s_cur;
+            Batch& b = batch(frame);
+            access(b.cb, t, kCopySrc);
+            VkBufferImageCopy c = {};
+            c.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+            c.imageExtent = { t->w, t->h, 1 };
+            F.vkCmdCopyImageToBuffer(b.cb, t->img, layout_of(t), s_rb_buf.b, 1, &c);
+            mark(b, kSectReadback);
+            submit();
+            retire(s_b[bi]);   // its fence: the copy is in host memory
+            q->rows->assign(s_rb_buf.p, s_rb_buf.p + bytes);
+            q->w = t->w; q->h = t->h; q->vkformat = (uint32_t)t->fmt; q->bpp = t->bpp;
+        }
+    }
+    {
+        std::lock_guard<std::mutex> g(s_hb_lock);
+        q->state = rc ? rc : 1;
+        s_rb_serving = false;
+    }
+    s_hb_cv.notify_all();
+}
+
 void run()
 {
 #ifdef _WIN32
@@ -3122,7 +3512,25 @@ void run()
     uint64_t next = 0;
     uint32_t frame = 0;
     for (;;) {
+        if (s_stop.load()) {   // R6: the exit drain is done: everything waited for, nothing more
+            submit();
+            for (Batch& b : s_b) retire(b);
+            s_stopped = 1;
+            return;
+        }
         for (Batch& b : s_b) if (retire_ready(b)) retire(b);
+        if (!s_static_swept.empty()) {   // R6: into the pool once unused, as retired images are destroyed
+            Batch& cur = s_b[s_cur];
+            std::vector<Img*> v;
+            v.swap(s_static_swept);
+            if (cur.open) cur.done.push_back([v] { for (Img* o : v) static_pool_put(o); });
+            else {
+                bool idle = true;
+                for (Batch& b : s_b) idle &= !b.pending;
+                if (idle) for (Img* o : v) static_pool_put(o);
+                else s_static_swept.swap(v);   // later
+            }
+        }
         if (!s_retired.empty()) {
             // retired images: destroyed once every batch that may use them has
             // completed -- the batch being recorded too (R5: an image retired
@@ -3139,6 +3547,7 @@ void run()
                 if (idle) { for (Img* o : s_retired) destroy_image(o); s_retired.clear(); }
             }
         }
+        if (next >= s_rb_upto.load(std::memory_order_acquire)) rb_service(frame);   // R6: a readback asked for
         if (next >= q.walked.load(std::memory_order_acquire)) {
             // R4: a handback asked for (everything walked is recorded now)
             hb_service(frame);
@@ -3146,15 +3555,18 @@ void run()
             // comparisons go ahead, and wait for the walker
             const uint64_t t0 = now_ns();
             submit();
+            s_where = 2;
             if (s_draining) { for (Batch& b : s_b) retire(b); s_idle = 1; }
             std::unique_lock<std::mutex> lk(q.m);
             q.cv.wait_for(lk, std::chrono::milliseconds(2),
-                          [&] { return next < q.walked.load(std::memory_order_acquire) || s_hb != nullptr; });
+                          [&] { return next < q.walked.load(std::memory_order_acquire) || s_hb != nullptr || s_stop.load() ||
+                                       next >= s_rb_upto.load(std::memory_order_acquire); });
             stats().wait_walker_us += (now_ns() - t0) / 1000;
             continue;
         }
         s_idle = 0;
         Rec* r = q.at(next);
+        apply_vconst(r);   // R6: every record's constants, in order, whatever is drawn of it
         if (r->kind == kAspDraw && !asp_native()) {   // R5: checked, not rendered
             next++;
             q.done.store(next, std::memory_order_release);
@@ -3176,6 +3588,13 @@ void run()
                 s_targets.clear();
                 for (auto& kv : s_snap) if (kv.second) { s_retired.push_back(kv.second); stats().n_retired++; }
                 s_snap.clear();
+                // R6: the depth images, the guest textures and the static ones too
+                for (auto& kv : s_depths) if (kv.second) { s_retired.push_back(kv.second); stats().n_retired++; }
+                s_depths.clear();
+                for (auto& kv : s_gtex) if (kv.second.img) { s_retired.push_back(kv.second.img); stats().n_retired++; }
+                s_gtex.clear();
+                for (auto& kv : s_static) if (kv.second.img) { s_static_swept.push_back(kv.second.img); stats().n_retired++; }
+                s_static.clear();
             }
         }
         frame = r->frame;
@@ -3183,14 +3602,22 @@ void run()
         static int delay = -1;
         if (delay < 0) { const char* e = getenv("DOTHEROES_PPFX_DELAY_MS"); delay = e && *e ? atoi(e) : 0; }
         if (delay) std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+        // R6: DOTHEROES_PPFX_DELAY_US=<n> (the backpressure test): n us a record, spun
+        static int delay_us = -1;
+        if (delay_us < 0) { const char* e = getenv("DOTHEROES_PPFX_DELAY_US"); delay_us = e && *e ? atoi(e) : 0; }
+        if (delay_us) { const uint64_t until = now_ns() + 1000ull * delay_us; while (now_ns() < until) {} }
         const uint64_t t0 = now_ns();
         if (r->kind == kAspDraw) asp_draw(r);   // R5 (DOTHEROES_ASP_NATIVE=1)
         else if (r->kind == kDraw) draw(r);
         else if (r->kind == kClear) clear(r);
+        else if (r->kind == kFlip) present_native(r);   // R6 (DOTHEROES_R6_PRESENT=1)
+        else if (r->kind == kReport) report_op(r);      // R6 (DOTHEROES_R6_OCCLUSION=1)
         stats().cpu_record_ns += now_ns() - t0;
         if (s_b[s_cur].open && (s_b[s_cur].used > kUpload / 2 || s_b[s_cur].sets > kSets / 2 ||
-                                s_b[s_cur].nq > kQueries - 64)) submit();
+                                s_b[s_cur].nq > kQueries - 64 || s_b[s_cur].nocc > kOcc - 64)) submit();
         next++;
+        s_next = next;
+        s_where = 1;
         q.done.store(next, std::memory_order_release);
         q.cv.notify_all();
     }
@@ -3247,6 +3674,38 @@ int handback_take(uint32_t location, uint32_t offset, bool check, uint32_t timeo
     return 0;
 }
 
+int readback_take(uint32_t location, uint32_t offset, uint64_t upto, uint32_t timeout_ms, std::vector<uint8_t>& rows,
+                  uint32_t* w, uint32_t* h, uint32_t* vkformat, uint32_t* bpp)
+{
+    if (!render_ready()) return -10;
+    static std::mutex one;   // one request at a time (the walker's comparison, the game's snapshot)
+    std::lock_guard<std::mutex> only(one);
+    RbReq q;
+    q.key = akey(location, offset); q.upto = upto; q.rows = &rows; q.w = q.h = q.vkformat = q.bpp = 0; q.state = 0;
+    std::unique_lock<std::mutex> lk(s_hb_lock);
+    s_rb = &q;
+    s_rb_upto.store(upto, std::memory_order_release);
+    lk.unlock();
+    { std::lock_guard<std::mutex> g(queue().m); }
+    queue().cv.notify_all();
+    lk.lock();
+    const bool ok = s_hb_cv.wait_for(lk, std::chrono::milliseconds(timeout_ms), [&] { return q.state != 0; });
+    s_hb_cv.wait(lk, [&] { return !s_rb_serving; });
+    s_rb = nullptr;
+    s_rb_upto.store(~0ull, std::memory_order_release);
+    if (!ok && q.state == 0) {
+        char line[200];
+        snprintf(line, sizeof line, "render: readback of %u:%08X timed out: the native thread at record %llu (wanted %llu, "
+                 "walked %llu), where %d", location, offset, (unsigned long long)s_next.load(), (unsigned long long)upto,
+                 (unsigned long long)queue().walked.load(), s_where.load());
+        report_add(line);
+        return -11;
+    }
+    if (q.state < 0) return q.state;
+    *w = q.w; *h = q.h; *vkformat = q.vkformat; *bpp = q.bpp;
+    return 0;
+}
+
 void handback_check_done(int slot)
 {
     std::lock_guard<std::mutex> g(s_hb_lock);
@@ -3276,6 +3735,20 @@ void render_drain(uint32_t timeout_ms)
         if (walked_done && cmp_done) break;
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
+    // R6: the native thread stops here -- every batch it submitted completed
+    // (waited for), nothing more submitted -- so no native work is in flight
+    // when the process ends, whatever the walker still passes it
+    s_stop = 1;
+    { std::lock_guard<std::mutex> g(queue().m); }
+    queue().cv.notify_all();
+    for (int i = 0; i < 400 && !s_stopped.load(); i++) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    {
+        char line[200];
+        snprintf(line, sizeof line, "render: exit drain %.1f ms, the native thread %s; batches cancelled (an engine signal "
+                 "that never came) %llu", (now_ns() - t0) / 1e6, s_stopped.load() ? "stopped, its batches complete" : "NOT stopped",
+                 (unsigned long long)s_cancelled);
+        report_add(line);
+    }
     Stats& s = stats();
     const uint64_t ended = s.cmp_equal + s.cmp_differ + s.cmp_skip_no_ref + s.cmp_skip_no_readback +
                            s.cmp_skip_extent + s.cmp_skip_not_drawn;
@@ -3284,6 +3757,17 @@ void render_drain(uint32_t timeout_ms)
 
 void render_report(std::vector<std::string>& out)
 {
+    {   // R6: where the native thread is (a diagnostic for a stall: the record it takes next)
+        Queue& q = queue();
+        const uint64_t n = s_next.load();
+        char line[220];
+        const Rec* r = n < q.put.load() && q.at(n) ? q.at(n) : nullptr;
+        snprintf(line, sizeof line, "render: the native thread at record %llu (kind %u frame %u bypassed %u sem %d ord %lld), "
+                 "where %d; put %llu walked %llu done %llu", (unsigned long long)n, r ? r->kind : 0u, r ? r->frame : 0u,
+                 r ? r->bypassed : 0u, r ? r->walk.sem : -1, r ? (long long)r->walk.ordinal : -1LL, s_where.load(),
+                 (unsigned long long)q.put.load(), (unsigned long long)q.walked.load(), (unsigned long long)q.done.load());
+        out.push_back(line);
+    }
     if (s_ap_draws) {
         std::string line = "asp draw profile (us a draw, " + std::to_string(s_ap_draws) + " draws):";
         uint64_t tot = 0;
@@ -3314,6 +3798,13 @@ void render_report(std::vector<std::string>& out)
                  "(changed since their last use), %.1f MB hashed, %zu arenas, %llu retired", (unsigned long long)s_vc_hits.load(),
                  (unsigned long long)s_vc_misses.load(), (unsigned long long)s_ic_hits.load(), (unsigned long long)s_ic_misses.load(),
                  (unsigned long long)s_vc_uncached.load(), s_vc_hashed / 1048576.0, s_arenas.size(), (unsigned long long)s_arenas_retired.load());
+        out.push_back(line);
+    }
+    {
+        char line[200];
+        snprintf(line, sizeof line, "static textures: %zu live, %llu images reused from the pool (%zu pooled, %llu destroyed past it)",
+                 s_static.size(), (unsigned long long)s_static_reused, s_static_pool.size(),
+                 (unsigned long long)s_static_pool_destroyed);
         out.push_back(line);
     }
     if (s_aspc_n) {

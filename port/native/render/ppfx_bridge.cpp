@@ -74,6 +74,9 @@ extern "C" uint32_t cellGcmResolveLocated(int local, uint32_t offset);
 extern "C" void cellGcm_fifo_recycle_n(uint32_t ctx_ea, uint32_t count);   // cellGcmSys.c: the runtime's reserve callback
 extern "C" uint32_t ppu_hle_inject_base;                                   // runtime/memory/vm.h
 extern "C" uint32_t rsx_fp_program_size(const uint8_t* ucode, uint32_t max_bytes);
+extern "C" int g_dotheroes_native_present;   // main.cpp (R6): the native renderer presents the frames
+extern "C" int rsx_texture_argb_is_rgba(void);
+extern "C" void cellGcm_set_guest_read_hook(int (*hook)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t));
 
 namespace ppfx {
 
@@ -841,12 +844,155 @@ void handback(uint64_t key, int kind)
 }
 
 // The engine is about to read or write the surface at (loc, off) (rsx_engine_bridge.touch).
+// R6 (DOTHEROES_R6_PRESENT_COMPARE=<n>, in R3's arrangement: the engine
+// draws everything too): every n-th present, the displayed buffer as the
+// engine drew it against the native image of it -- the whole frame, the
+// game's own draws and clears, the HUD and the menus included. Pixels that
+// differ by more than 2 in a channel are counted; the first differing frames'
+// both sides go to the dump directory (PPM).
+struct PresentCmp { uint64_t presents = 0, compared = 0, equal = 0, close = 0, differ = 0, failed = 0, dumped = 0;
+                    uint64_t px_differ = 0, px_total = 0, worst = 0; uint32_t worst_frame = 0; };
+PresentCmp s_pcmp;
+int present_compare_every()
+{
+    static int n = -1;
+    if (n < 0) { const char* e = getenv("DOTHEROES_R6_PRESENT_COMPARE"); n = e && *e ? atoi(e) : 0; }
+    return n;
+}
+
+void dump_ppm(const char* name, const uint8_t* p, uint32_t w, uint32_t h, uint32_t bpp, bool bgra)
+{
+    const char* d = getenv("DOTHEROES_PPFX_DUMP");
+    if (!d || !*d) return;
+    char path[600];
+    snprintf(path, sizeof path, "%s/%s.ppm", d, name);
+    FILE* f = fopen(path, "wb");
+    if (!f) return;
+    fprintf(f, "P6\n%u %u\n255\n", w, h);
+    std::vector<uint8_t> row(w * 3);
+    for (uint32_t y = 0; y < h; y++) {
+        for (uint32_t x = 0; x < w; x++) {
+            const uint8_t* s = p + ((size_t)y * w + x) * bpp;
+            row[x * 3 + 0] = bgra ? s[2] : s[0]; row[x * 3 + 1] = s[1]; row[x * 3 + 2] = bgra ? s[0] : s[2];
+        }
+        fwrite(row.data(), 1, row.size(), f);
+    }
+    fclose(f);
+}
+
+void present_compare(u32 loc, u32 off)
+{
+    const int every = present_compare_every();
+    if (every <= 0 || (s_pcmp.presents++ % (uint64_t)every) != 0) return;
+    static std::vector<uint8_t> eng, mine;
+    if (eng.size() < 1280u * 720u * 16u) eng.resize(1280u * 720u * 16u);
+    u32 ew = 0, eh = 0, eb = 0;
+    if (rsx_draw_engine_readback_surface(loc, off, eng.data(), (u32)eng.size(), &ew, &eh, &eb)) { s_pcmp.failed++; return; }
+    // the native side: everything the walker has passed recorded first
+    rsx_vk_bridge_flush();
+    uint32_t nw = 0, nh = 0, nf = 0, nb = 0;
+    if (readback_take(loc, off, queue().walked.load(std::memory_order_acquire), 10000, mine, &nw, &nh, &nf, &nb) ||
+        nb != eb) { s_pcmp.failed++; return; }
+    const uint32_t w = ew < nw ? ew : nw, h = eh < nh ? eh : nh;
+    uint64_t differ = 0, maxd = 0;
+    for (uint32_t y = 0; y < h; y++)
+        for (uint32_t x = 0; x < w; x++) {
+            const uint8_t* a = &eng[((size_t)y * ew + x) * eb];
+            const uint8_t* b = &mine[((size_t)y * nw + x) * nb];
+            uint32_t d = 0;
+            for (uint32_t c = 0; c < eb; c++) { const uint32_t k = a[c] > b[c] ? a[c] - b[c] : b[c] - a[c]; d = k > d ? k : d; }
+            if (d > 2) differ++;
+            if (d > maxd) maxd = d;
+        }
+    s_pcmp.compared++;
+    s_pcmp.px_total += (uint64_t)w * h;
+    s_pcmp.px_differ += differ;
+    const uint32_t frame = B.w ? queue().at(B.w - 1)->frame : 0;
+    if (!maxd) s_pcmp.equal++;
+    else if (!differ) s_pcmp.close++;
+    else {
+        s_pcmp.differ++;
+        if (differ > s_pcmp.worst) { s_pcmp.worst = differ; s_pcmp.worst_frame = frame; }
+        if (s_pcmp.dumped < 6 || differ > 20000) {
+            if (s_pcmp.dumped < 24) {
+                s_pcmp.dumped++;
+                char name[64];
+                const bool bgra = nf == (uint32_t)VK_FORMAT_B8G8R8A8_UNORM;
+                snprintf(name, sizeof name, "present_f%u_engine", frame); dump_ppm(name, eng.data(), ew, eh, eb, bgra);
+                snprintf(name, sizeof name, "present_f%u_native", frame); dump_ppm(name, mine.data(), nw, nh, nb, bgra);
+            }
+            char line[200];
+            snprintf(line, sizeof line, "r6 present compare: frame %u surface %u:%08X: %llu pixels differ (largest %llu)",
+                     frame, loc, off, (unsigned long long)differ, (unsigned long long)maxd);
+            report_add(line);
+        }
+    }
+}
+
+// R6: the game's reads of a display buffer's memory (the snapshot's JPEG and
+// PNG encoders, cellGcm_guest_read_surface on the game's thread) served from
+// the native image once the native renderer presents the frames: everything
+// published so far drawn, the image read back and written into guest memory
+// as the engine's guest read writes it (rsx_draw_engine_guest_read: A, R, G,
+// B bytes; TEX_RGBA=1 the image's own order). Other surfaces: the engine's.
+std::atomic<uint64_t> s_guest_reads{0}, s_guest_read_fail{0};
+int guest_read_native(u32 loc, u32 off, u32 pitch, u32 w, u32 h)
+{
+    if (!g_dotheroes_native_present) return 0;
+    std::vector<uint8_t> rows;
+    uint32_t nw = 0, nh = 0, nf = 0, nb = 0;
+    if (readback_take(loc, off, queue().put.load(std::memory_order_acquire), 10000, rows, &nw, &nh, &nf, &nb) || nb != 4) {
+        s_guest_read_fail++;
+        return 0;
+    }
+    const bool bgra = nf == (uint32_t)VK_FORMAT_B8G8R8A8_UNORM, as_is = rsx_texture_argb_is_rgba() != 0;
+    const uint32_t ww = w < nw ? w : nw, hh = h < nh ? h : nh;
+    for (uint32_t y = 0; y < hh; y++) {
+        const uint32_t ea = cellGcmResolveLocated(loc == 0, off + y * pitch);
+        if (!ea || ea + ww * 4 > 0xE0000000u) break;
+        uint8_t* d = vm_base + ea;
+        const uint8_t* sp = rows.data() + (size_t)y * nw * 4;
+        for (uint32_t x = 0; x < ww; x++, d += 4, sp += 4) {
+            if (as_is) { memcpy(d, sp, 4); continue; }
+            d[0] = sp[3];                                         // A
+            d[1] = bgra ? sp[2] : sp[0];                          // R
+            d[2] = sp[1];                                         // G
+            d[3] = bgra ? sp[0] : sp[2];                          // B
+        }
+    }
+    s_guest_reads++;
+    char line[160];
+    snprintf(line, sizeof line, "r6: guest read of %u:%08X (%ux%u, pitch %u) from the native image", loc, off, w, h, pitch);
+    report_add(line);
+    return 1;
+}
+
+void present_compare_report(std::vector<std::string>& out)
+{
+    if (s_guest_reads || s_guest_read_fail) {
+        char l[120];
+        snprintf(l, sizeof l, "r6 guest reads from native images %llu failed %llu", (unsigned long long)s_guest_reads.load(),
+                 (unsigned long long)s_guest_read_fail.load());
+        out.push_back(l);
+    }
+    if (present_compare_every() <= 0) return;
+    char line[300];
+    snprintf(line, sizeof line, "r6 present compare: presents %llu compared %llu equal %llu within_2 %llu differ %llu failed %llu | "
+             "pixels differing %.4f%% | worst %llu pixels at frame %u", (unsigned long long)s_pcmp.presents,
+             (unsigned long long)s_pcmp.compared, (unsigned long long)s_pcmp.equal, (unsigned long long)s_pcmp.close,
+             (unsigned long long)s_pcmp.differ, (unsigned long long)s_pcmp.failed,
+             s_pcmp.px_total ? 100.0 * s_pcmp.px_differ / s_pcmp.px_total : 0.0, (unsigned long long)s_pcmp.worst,
+             s_pcmp.worst_frame);
+    out.push_back(line);
+}
+
 void on_touch(void*, u32 loc, u32 off, int kind)
 {
     if (!B.native.empty()) {
         BTime bt;
         handback((uint64_t)loc << 32 | off, kind);
     }
+    if (kind == 3) { BTime bt; present_compare(loc, off); }
     if (kind == 3 && s_present_hash) {
         // what is displayed: the engine's surface now, hashed (development; a GPU wait)
         static std::vector<uint8_t> buf(1280u * 720u * 16u);
@@ -1093,10 +1239,13 @@ void finish(Rec* r)
                     std::this_thread::sleep_for(std::chrono::microseconds(100));
                 stats().hand_slot_wait_ns += bnow() - t0;
             }
-            // with copies the engine's batch is open; a handback's signal alone opens one
-            // (the engine's work after the handback's copy)
-            ord = s >= 0 ? (B.copies ? rsx_vk_bridge_signal((VkSemaphore)sem, &used)
-                                     : rsx_vk_bridge_signal_open((VkSemaphore)sem, &used)) : -2;
+            // with copies the engine's batch is open and carries the signal; a
+            // handback's signal alone goes after the handback's copy: with the
+            // copy submitted, at once (R6: the backend submits a signal alone
+            // when nothing is recorded -- R4's opening of an engine batch for it
+            // made the native side wait for the engine's next submission, a
+            // frame later once the engine draws nothing)
+            ord = s >= 0 ? rsx_vk_bridge_signal((VkSemaphore)sem, &used) : -2;
             if (ord >= 0 && used) { slot = (int16_t)s; B.last_ord = ord; B.last_slot = slot; }
             else if (s >= 0) slot_release_semaphore(s);
         }
@@ -1210,6 +1359,7 @@ void bridge_install()
         if (s_present_hash) fprintf(s_present_hash, "# present frame_of_last_record last_record_bypassed hash size\n");
     }
     rsx_draw_engine_set_bridge(&b);
+    cellGcm_set_guest_read_hook(guest_read_native);   // R6: answers only once the native renderer presents
 }
 
 // R4's stream marker (the producer's thread, from the recorder): four words
@@ -1250,6 +1400,7 @@ bool bridge_marker(uint32_t ctx_ea, uint64_t seq)
 // The cross-check's per-register aggregate, for the report.
 void bridge_report(std::vector<std::string>& out)
 {
+    present_compare_report(out);
     {
         std::lock_guard<std::mutex> g(B.xr_lock);
         for (auto& kv : B.hand_by) {

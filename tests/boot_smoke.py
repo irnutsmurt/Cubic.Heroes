@@ -160,10 +160,19 @@ def game_window(pid):
         p = wt.DWORD()
         u.GetWindowThreadProcessId(h, ctypes.byref(p))
         if p.value == pid and u.GetWindowTextLengthW(h) > 0:
-            found.append(h)
+            # not the hidden helper windows other code makes in the process,
+            # titled top-level windows too that can come first in the
+            # enumeration: the input method's ("Default IME", classes IME and
+            # MSCTFIME UI) and the NVIDIA driver's (__wglDummyWindowFodder,
+            # class NVOpenGLPbuffer: made with a mailbox swapchain). SDL's own
+            # window first when there is one.
+            cls = ctypes.create_unicode_buffer(64)
+            u.GetClassNameW(h, cls, 64)
+            if cls.value not in ("IME", "MSCTFIME UI", "NVOpenGLPbuffer"):
+                found.append((cls.value != "SDL_app", h))
         return True
     u.EnumWindows(cb, 0)
-    return found[0] if found else None
+    return min(found)[1] if found else None
 
 
 def rd(path):
