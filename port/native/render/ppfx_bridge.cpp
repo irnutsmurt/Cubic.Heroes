@@ -113,6 +113,7 @@ struct BState {
     // R5 (DOTHEROES_ASP_SHARE=1): surfaces asp's records drew natively, by the
     // frame they did -- PPFX reads the native image of them, not a handoff
     std::unordered_map<uint64_t, uint32_t> asp_drawn;
+    std::map<uint64_t, uint64_t> hand_by;   // handoffs by surface (the report)
 } B;
 
 int asp_share()
@@ -704,6 +705,7 @@ void handoffs(Rec* r)
         r->walk.hand[k] = (int16_t)slot;
         B.copies++;
         st.handoffs++;
+        { std::lock_guard<std::mutex> g(B.xr_lock); B.hand_by[key]++; }
         B.dirty.erase(key);
     }
 }
@@ -949,6 +951,39 @@ void foreign_describe(uint32_t io)
     fflush(f);
 }
 
+// DOTHEROES_ASP_FOREIGN_STATES=<file> (a check of R5's stage 2): the
+// distinct engine states the draws that are no record's run with (the HUD,
+// the menus) -- the same set with and without asp's state commands means
+// they do not depend on them
+std::map<uint64_t, std::pair<uint64_t, std::string>> s_fstates;
+void foreign_states()
+{
+    static int on = -1;
+    if (on < 0) { const char* e = getenv("DOTHEROES_ASP_FOREIGN_STATES"); on = e && *e; }
+    if (!on) return;
+    const rsx_dispatch* E = rsx_draw_engine_state();
+    if (!E) return;
+    State e;
+    engine_state(E, &e);
+    const Raster& r = e.raster;
+    char d[400];
+    snprintf(d, sizeof d, "tgt %08X fmt %u cmask %08X depth %u/%u %X stencil %u %X/%u cull %u %X/%X blend %u %X/%X %X/%X eq %X alpha %u %X/%u "
+             "poff %u scissor %u,%u %ux%u viewport %u,%u %ux%u",
+             e.surface.color_offset[0], e.surface.color_format, r.color_mask, r.depth_test, r.depth_write, r.depth_func, r.stencil_test,
+             r.stencil_func, r.stencil_ref, r.cull, r.cull_face, r.front_face, r.blend, r.blend_sf_rgb, r.blend_df_rgb, r.blend_sf_a,
+             r.blend_df_a, r.blend_eq_rgb, r.alpha_test, r.alpha_func, r.alpha_ref, r.poly_offset_fill, e.scissor.x, e.scissor.y,
+             e.scissor.w, e.scissor.h, e.viewport.x, e.viewport.y, e.viewport.w, e.viewport.h);
+    const uint64_t h = fnv(d, strlen(d));
+    auto& slot = s_fstates[h];
+    if (!slot.first) slot.second = d;
+    slot.first++;
+    static uint64_t n = 0;
+    if ((++n & 1023) == 0 || n < 4) {
+        FILE* f = fopen(getenv("DOTHEROES_ASP_FOREIGN_STATES"), "w");
+        if (f) { for (auto& kv : s_fstates) fprintf(f, "%llu %s\n", (unsigned long long)kv.second.first, kv.second.second.c_str()); fclose(f); }
+    }
+}
+
 void on_draw_pre(void*, u32 io, u32 laps, const u32* handles, const u32* locations, const u32* offsets, u32 n)
 {
     (void)handles;
@@ -961,6 +996,7 @@ void on_draw_pre(void*, u32 io, u32 laps, const u32* handles, const u32* locatio
         foreign(locations, offsets, n, 1);
         if (B.xcheck) { const uint64_t x0 = bnow(); foreign_reads(locations, offsets, n); stats().xcheck_ns += bnow() - x0; }
         foreign_describe(io);
+        foreign_states();
         return;
     }
     Rec* r = queue().at(B.w);
@@ -1192,6 +1228,15 @@ bool bridge_marker(uint32_t ctx_ea, uint64_t seq)
 // The cross-check's per-register aggregate, for the report.
 void bridge_report(std::vector<std::string>& out)
 {
+    {
+        std::lock_guard<std::mutex> g(B.xr_lock);
+        for (auto& kv : B.hand_by) {
+            char line[160];
+            snprintf(line, sizeof line, "handoffs of %u:%08X: %llu", (uint32_t)(kv.first >> 32), (uint32_t)kv.first,
+                     (unsigned long long)kv.second);
+            out.push_back(line);
+        }
+    }
     char line[200];
     {
         std::lock_guard<std::mutex> g(s_fr_lock);

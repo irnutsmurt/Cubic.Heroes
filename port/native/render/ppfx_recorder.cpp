@@ -695,10 +695,12 @@ int asp_call_state(uint32_t addr, ppu_context* c);
 int asp_records_on();
 void asp_mirror(uint32_t addr);
 
+bool asp_state_bypass_enter(uint32_t addr, ppu_context* c);
+
 int asp_call(uint32_t addr, ppu_context* c)
 {
     stats().asp_calls++;
-    const bool probed = asp_probe_enter(addr, c);
+    const bool probed = asp_probe_enter(addr, c) || asp_state_bypass_enter(addr, c);
     int ret;
     if (const int r5 = asp_record_call(addr, c)) ret = r5 - 1;
     else ret = asp_call_state(addr, c);
@@ -904,7 +906,7 @@ std::mutex s_bp_lock;   // the report reads it
 // call (inside it everything runs) or a verified one.
 struct VEntry {
     uint32_t addr, lr, sp, ctx_ea, begin, end, cur;
-    uint8_t kind;   // 0 kept, 1 verified, 2 asp's draw (R5), 3 R5's setter probe
+    uint8_t kind;   // 0 kept, 1 verified, 2 asp's draw (R5), 3 R5's setter probe, 4 R5's state bypass
     uint32_t lap;
     uint64_t gpr[32];
     double fpr[32];
@@ -1041,6 +1043,26 @@ uint32_t elem_bytes(uint32_t type, uint32_t size)
     }
 }
 
+// The queue full: the walker must reach the records' commands (their
+// markers) to make room, and it reads the ring only up to the put register,
+// which the game moves at its flushes. With asp's records (R5) the queue
+// can fill between two of the game's flushes (an area's first frames): the
+// commands already written are made visible, as cellGcmFlush would -- the
+// put register (the runtime's control area, VM_HLE_INJECT_BASE + 0x2000)
+// moved forward to the context's current position, within the lap only.
+extern "C" uint32_t ppu_hle_inject_base;
+void flush_for_room()
+{
+    if (!S.ring_ctx || !ea_ok(S.ring_ctx, 16)) return;
+    const uint32_t ctl = ppu_hle_inject_base + 0x2000u;
+    const uint32_t cur = cellGcm_ea2io_pub(g32(S.ring_ctx + 8)), put = g32(ctl);
+    if (cur > put && cur - put < (16u << 20)) {
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        p32(ctl, cur);
+        stats().flushes_for_room++;
+    }
+}
+
 Rec* acquire()
 {
     Queue& q = queue();
@@ -1048,6 +1070,7 @@ Rec* acquire()
     if (p - q.done.load(std::memory_order_acquire) >= Queue::kCap) {
         const uint64_t t0 = now_ns();
         q.full_waits++;
+        flush_for_room();
         if (s_held) s_held->unlock();
         std::unique_lock<std::mutex> lk(q.m);
         uint64_t waited = 0;
@@ -1433,6 +1456,22 @@ void asp_draw_exit(const VEntry& v)
 {
     if (asp_probe2()) asp_draw_probe(v);
     if (!ea_ok(v.ctx_ea, 16)) return;
+    // R5's bypass, stage 1 (DOTHEROES_ASP_BYPASS=1): the draw's commands --
+    // its own and those of the calls inside it -- taken back, before anything
+    // can make them visible to the walker (a flush for room in the queue),
+    // and a marker in their place once the record is published; the native
+    // renderer alone draws it. Not when its commands wrapped the ring
+    // (counted): the engine draws that one.
+    bool taken = false;
+    if (asp_bypass() >= 1) {
+        const uint32_t now = g32(v.ctx_ea + 8);
+        if (cellGcm_title_laps_pub(nullptr) == v.lap && now >= v.cur && now - v.cur < (4u << 20)) {
+            p32(v.ctx_ea + 8, v.cur);
+            taken = true;
+            stats().asp_bypassed++;
+            stats().asp_bypassed_words += (now - v.cur) / 4;
+        } else stats().asp_not_bypassed++;
+    }
     std::unique_lock<std::mutex> g(s_lock);
     struct Held { Held(std::unique_lock<std::mutex>* h) { s_held = h; } ~Held() { s_held = nullptr; } } held(&g);
     Rec* r = acquire();
@@ -1486,20 +1525,7 @@ void asp_draw_exit(const VEntry& v)
     r->io_alt = cellGcm_ea2io_pub(begin);
     r->lap_end = cellGcm_title_laps_pub(nullptr);
     r->io_end = cellGcm_ea2io_pub(cur);
-    // R5's bypass, stage 1 (DOTHEROES_ASP_BYPASS=1): the draw's commands --
-    // its own and those of the calls inside it -- taken back and a marker in
-    // their place; the native renderer alone draws it. Not when its commands
-    // wrapped the ring (counted): the engine draws that one.
-    const bool bypass = asp_bypass() >= 1;
-    if (bypass) {
-        const uint32_t now = g32(v.ctx_ea + 8);
-        if (cellGcm_title_laps_pub(nullptr) == v.lap && now >= v.cur && now - v.cur < (4u << 20)) {
-            p32(v.ctx_ea + 8, v.cur);
-            r->bypassed = 1;
-            stats().asp_bypassed++;
-            stats().asp_bypassed_words += (now - v.cur) / 4;
-        } else stats().asp_not_bypassed++;
-    }
+    r->bypassed = taken ? 1 : 0;
     publish(r);
     stats().asp_records++;
     if (r->bypassed && !bridge_marker(v.ctx_ea, r->seq)) stats().asp_marker_fail++;
@@ -1965,6 +1991,38 @@ void asp_probe_exit(const VEntry& v)
     s_probe_distinct[v.addr] = (uint32_t)m.size();
 }
 
+// R5's bypass, stage 2 (DOTHEROES_ASP_BYPASS=2): asp's state functions and
+// program uploads run, and the commands they wrote are taken back at their
+// return (not when they wrapped the ring, nor when a marker was written
+// inside them: counted). The native renderer has their state from the
+// records; the engine, which draws none of asp's, does not need it.
+int asp_bypass();
+bool asp_state_bypass_enter(uint32_t addr, ppu_context* c)
+{
+    if (asp_bypass() < 2 || addr == 0x006C6F88u) return false;
+    for (const VEntry& e : s_vstack) if (e.kind == 2 || e.kind == 4) return false;   // inside a draw or another: theirs
+    VEntry v;
+    memset(&v, 0, sizeof v);
+    v.addr = addr; v.kind = 4;
+    r4_ctx_fields(v, addr == kAspAppend ? (uint32_t)c->gpr[3] : asp_cmd_ctx(c));
+    if (v.ctx_ea != S.ring_ctx) return false;   // another context's (asp's state store being built): left alone
+    v.lap = cellGcm_title_laps_pub(nullptr);
+    v.store_from = (size_t)stats().markers_written.load();
+    s_vstack.push_back(v);
+    return true;
+}
+
+void asp_state_bypass_exit(const VEntry& v)
+{
+    if (!ea_ok(v.ctx_ea, 16)) return;
+    const uint32_t now = g32(v.ctx_ea + 8);
+    if ((size_t)stats().markers_written.load() != v.store_from) { stats().asp_state_kept++; return; }
+    if (cellGcm_title_laps_pub(nullptr) != v.lap || now < v.cur || now - v.cur > (4u << 20)) { stats().asp_state_kept++; return; }
+    p32(v.ctx_ea + 8, v.cur);
+    stats().asp_state_bypassed++;
+    stats().asp_state_words += (now - v.cur) / 4;
+}
+
 void read_env()
 {
     const char* pw = getenv("DOTHEROES_PPFX_PROGWATCH");
@@ -1999,8 +2057,8 @@ void write_report()
             (unsigned long long)q.put, (unsigned long long)q.walked, (unsigned long long)q.done);
     fprintf(f, "wraps_in_call %llu ends_at_ring_end %llu\n", (unsigned long long)s.wraps_in_call,
             (unsigned long long)s.ends_at_ring_end);
-    fprintf(f, "recorder_ms %.3f queue_full_waits %llu queue_full_wait_ms %.3f\n", s.rec_ns / 1e6,
-            (unsigned long long)q.full_waits, q.full_wait_us / 1e3);
+    fprintf(f, "recorder_ms %.3f queue_full_waits %llu queue_full_wait_ms %.3f flushes_for_room %llu\n", s.rec_ns / 1e6,
+            (unsigned long long)q.full_waits, q.full_wait_us / 1e3, (unsigned long long)s.flushes_for_room);
     fprintf(f, "walker matched %llu missed %llu foreign_draws %llu foreign_clears %llu lap_delta_changes %llu\n",
             (unsigned long long)s.matched, (unsigned long long)s.missed, (unsigned long long)s.foreign_draws,
             (unsigned long long)s.foreign_clears, (unsigned long long)s.lap_delta_changes);
@@ -2066,6 +2124,9 @@ void write_report()
                    "draws_with_a_program_not_uploaded_last %llu store_rebuilds %llu sampler_restores %llu\n",
                 (unsigned long long)s.asp_group_restores, (unsigned long long)A.fp_odd_patches, A.fp_bytes.size(),
                 (unsigned long long)A.fp_stale_draws, (unsigned long long)A.rebuilds, (unsigned long long)A.samp_restores);
+    if (s.asp_state_bypassed || s.asp_state_kept)
+        fprintf(f, "asp state calls bypassed %llu (%.1f M words taken back) kept %llu\n", (unsigned long long)s.asp_state_bypassed,
+                s.asp_state_words / 1e6, (unsigned long long)s.asp_state_kept);
     if (s.asp_bypassed || s.asp_not_bypassed)
         fprintf(f, "asp bypassed draws %llu (%.1f M words taken back) not bypassed %llu (their commands wrapped the ring) "
                    "marker_fail %llu\n", (unsigned long long)s.asp_bypassed, s.asp_bypassed_words / 1e6,
@@ -2399,6 +2460,7 @@ extern "C" void ppfx_rec_exit(uint32_t addr, ppu_context* ctx)
     if (v.kind == 0) { if (S.kept_depth) S.kept_depth--; return; }
     if (v.kind == 2) { asp_draw_exit(v); return; }
     if (v.kind == 3) { asp_probe_exit(v); return; }
+    if (v.kind == 4) { asp_state_bypass_exit(v); return; }
     r4_verify_exit(v, ctx);
     if (--s_verifying == 0) { g_ppu_obs_store = 0; s_stores.clear(); }
 }

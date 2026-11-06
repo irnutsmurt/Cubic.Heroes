@@ -243,7 +243,7 @@ enum Why : uint32_t {
 // ---- the queue -------------------------------------------------------------
 
 struct Queue {
-    enum { kCap = 1024 };
+    enum { kCap = 4096 };   // R5: asp's records too (about 250 a river frame)
     Rec* slot[kCap];
     std::atomic<uint64_t> put{0}, walked{0}, done{0};
     std::mutex m;
@@ -327,6 +327,7 @@ struct Stats {
     std::atomic<uint64_t> transfers{0}, reports{0};   // PPFX's report copies and report requests (side effects)
     std::atomic<uint64_t> draws{0}, clears{0}, depth_clears{0}, frames{0};
     std::atomic<uint64_t> producer_threads{0};    // > 1: the single-producer assumption broke
+    std::atomic<uint64_t> flushes_for_room{0};    // the ring's put moved forward for a full queue (R5)
     std::atomic<uint64_t> wraps_in_call{0};       // records the walker found at their wrapped position
     std::atomic<uint64_t> ends_at_ring_end{0};    // records whose commands ended at the ring's end
     std::atomic<uint64_t> rec_ns{0};              // the recorder's own time on the game's thread
@@ -375,6 +376,7 @@ struct Stats {
     std::atomic<uint64_t> game_draw_records{0};    // the game's own indexed draws recorded with asp's (R5)
     std::atomic<uint64_t> asp_tex_snapshots{0};    // small textures taken as the game drew (R5)
     std::atomic<uint64_t> asp_bypassed{0}, asp_bypassed_words{0}, asp_not_bypassed{0}, asp_marker_fail{0};   // R5's bypass
+    std::atomic<uint64_t> asp_state_bypassed{0}, asp_state_words{0}, asp_state_kept{0};   // R5's bypass, stage 2
 };
 Stats& stats();
 void report_add(const char* line);   // a line in the next report (diagnostics)

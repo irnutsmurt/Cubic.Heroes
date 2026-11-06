@@ -383,3 +383,52 @@ times. Measured, step by step:
 Still differing: the first two recorded frames (37,513 and 87,802
 pixels), a few frames of 1,000-8,500 pixels (the moat's band), and the
 steady frames by tens of pixels.
+
+## 7. Shared images and the bypass [M]
+
+**Sharing** (DOTHEROES_ASP_SHARE=1): a surface asp's records drew this
+frame, and no other work wrote since, is not handed off -- PPFX reads the
+native image asp drew. River, 50 s (build/r4/sh2), handoffs by surface:
+asp's scene target (0:01AE0000) **once in the run** (its first use, before
+asp had drawn it), against once a frame without sharing; the only handoffs
+left each frame are the two display buffers (0:00000000 and 0:00398000,
+373 and 374), which the engine's own HUD and menu draws write -- R6's; the
+rest once each at start. 2,986 handoffs shared. In R3's arrangement
+(sh1, the engine still drawing everything, PPFX's outputs compared):
+5,514 of 6,566 outputs equal, 1,057 of 1,193 final composites -- the
+differing ones downstream of the frames where asp's native scene still
+differs (section 6: 0.016% of its pixels), spread by PPFX's blurs.
+
+**The bypass, stage 1** (DOTHEROES_ASP_BYPASS=1, with R4's
+DOTHEROES_PPFX_BYPASS=1 and sharing): asp's draws and the game's draws in
+its scene run as before, and at their return the commands they wrote --
+theirs and those of the calls inside them -- are taken back and an R4
+marker written in their place; the engine draws nothing of asp's, the
+native renderer all of it. River, 60 s (build/r4/by1): 709,958 draws
+bypassed, 37.6 million command words taken back, 5 kept (their commands
+wrapped the ring); markers 769,831 written, 769,141 met, 0 unknown;
+2,547 handbacks, every 30th checked: 85 equal; no failure.
+
+**Stage 2** (DOTHEROES_ASP_BYPASS=2): asp's state functions and program
+uploads too -- the commands they write into the frame's command buffer
+taken back at their return (not inside a draw, not when they wrapped the
+ring or a marker was written inside them; the state store asp builds in
+its own buffer left alone). Its check: the engine's remaining draws (the
+HUD and menus) must run with the same states as with stage 1
+(DOTHEROES_ASP_FOREIGN_STATES=<file>: the distinct engine states of every
+draw that is no record's).
+
+**Stage 1 through R4's scenarios** (build/r4/s5*, every 30th handback
+checked; r5_stab.sh): river 100 s (2.30 M asp draws bypassed, 245
+handbacks checked, all equal), dungeon route 200 s (2.40 M, 416), menus
+300 s (5.00 M, 591), fields 200 s (1.77 M, 244), snapshot and album 200 s
+(2.53 M, 309), the field after the dungeon 250 s (5.34 M, 781): every
+marker met, no failure. The field route first hung (s5after): the record
+queue (1,024) filled at an area's first frames, the producer waited for
+room, and the walker could not reach the markers that would make it --
+they were in commands the game had not flushed yet. Fixed: the queue holds
+4,096 records (asp's add about 250 a river frame), a full queue first makes
+the commands written so far visible (the put register moved forward, as
+cellGcmFlush would), and a bypassed draw's commands are taken back before
+anything can expose them (s5after2 showed the order mattered: 99,742
+markers met unknown). s5after3: 14,773 frames, the queue never full.
