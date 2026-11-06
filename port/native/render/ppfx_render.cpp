@@ -2112,14 +2112,19 @@ void asp_describe_line(const Rec* r)
     const State& st = r->st;
     const Raster& ra = st.raster;
     fprintf(f, "%llu prim %u n %u v %u | tgt %08X fmt %u dz %08X | fp %016llx | blend %u %X/%X %X/%X eq %X/%X | alpha %u %X %u | "
-               "depth %u/%u %X | stencil %u | cull %u %X | cmask %08X | clears %u | tex",
+               "depth %u/%u %X | stencil %u %X ref %u mask %X/%X ops %X/%X/%X | cull %u %X | cmask %08X | clears %u | tex",
             (unsigned long long)r->seq, r->prim, r->count, r->vcount, st.surface.color_offset[0], st.surface.color_format,
             st.surface.depth_offset, r->fp ? (unsigned long long)r->fp->hash : 0ull, ra.blend, ra.blend_sf_rgb, ra.blend_df_rgb,
             ra.blend_sf_a, ra.blend_df_a, ra.blend_eq_rgb, ra.blend_eq_a, ra.alpha_test, ra.alpha_func, ra.alpha_ref,
-            ra.depth_test, ra.depth_write, ra.depth_func, ra.stencil_test, ra.cull, ra.cull_face, ra.color_mask, r->naclear);
+            ra.depth_test, ra.depth_write, ra.depth_func, ra.stencil_test, ra.stencil_func, ra.stencil_ref, ra.stencil_func_mask,
+            ra.stencil_write_mask, ra.stencil_fail, ra.stencil_zfail, ra.stencil_zpass, ra.cull, ra.cull_face, ra.color_mask,
+            r->naclear);
     for (uint32_t u = 0; u < 16; u++)
         if (st.samp[u].enable) fprintf(f, " %u:%02X@%08X", u, st.tex[u].format, st.tex[u].offset);
     fprintf(f, "\n");
+    for (uint32_t i = 0; i < r->naclear; i++)
+        fprintf(f, "  clear %u: mask %X depth %06X stencil %X argb %08X on %08X/%08X\n", i, r->aclear[i].mask, r->aclear[i].depth,
+                r->aclear[i].stencil, r->aclear[i].argb, r->aclear[i].surface.color_offset[0], r->aclear[i].surface.depth_offset);
 }
 
 void asp_draw(const Rec* r)

@@ -295,3 +295,14 @@ every frame) is the moat: the water samples the 512x512 reflection target
 (0x010B3D80, R5G6B5 with Z24S8, drawn with the stencil test), which
 differs from its first draw after its clear -- the stencil's state or its
 clear is the next suspect.
+
+**The reflection pass, open** (build/r4/an15): the 512x512 target's first
+draw of frame 2500 comes right after asp's clear of colour, depth and
+stencil (mask 0xF3, stencil 0) and draws with the stencil test EQUAL 1
+(ref 1, masks 0xFF, every operation KEEP) -- the engine's own state at that
+draw says the same (the cross-check). By that state no pixel passes; the
+native renderer draws none, the engine draws 290. Either an earlier write
+of the stencil is not described, or the engine's stencil differs from its
+state (an aliased surface, a clear it does not apply): to be settled with
+the engine's stencil read back at that draw before calling either side
+right. Everything else asp draws in that frame matches the engine exactly.
