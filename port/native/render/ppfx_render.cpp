@@ -1518,6 +1518,20 @@ void cmp_run(CmpJob& j)
     { std::lock_guard<std::mutex> g(s_slot_lock); eng = s_sbuf[j.ref].b; }
     const bool same = j.ref_w == j.w && j.ref_h == j.h && eng.n >= j.bytes;
     const bool equal = same && !memcmp(j.mine.p, eng.p, (size_t)j.bytes);
+    {   // DOTHEROES_ASP_DESCRIBE_FRAME: every comparison of that frame, a line each
+        static long long want = -2;
+        static FILE* cf = nullptr;
+        if (want == -2) { const char* e = getenv("DOTHEROES_ASP_DESCRIBE_FRAME"); want = e && *e ? atoll(e) : -1; }
+        if (want >= 0 && (long long)j.frame == want && s_dump[0] && same) {
+            if (!cf) { char path[600]; snprintf(path, sizeof path, "%s/compare_f%u.txt", s_dump, j.frame); cf = fopen(path, "w"); }
+            if (cf) {
+                uint64_t px = 0;
+                if (!equal) for (VkDeviceSize i = 0; i < j.bytes; i += j.bpp) px += memcmp(j.mine.p + i, eng.p + i, j.bpp) != 0;
+                fprintf(cf, "%llu %08X %llu\n", (unsigned long long)j.seq, j.off, (unsigned long long)px);
+                fflush(cf);
+            }
+        }
+    }
     if (!same) st.cmp_skip_extent++;
     else {
         if (j.change) st.cmp_change_done++;
@@ -1966,16 +1980,23 @@ const uint8_t* guest_ptr_live(void*, uint32_t location, uint32_t offset, uint32_
 std::unordered_map<uint64_t, Img*> s_depths;   // asp's depth surfaces by address
 VkFormat s_d24s8 = VK_FORMAT_UNDEFINED;
 
+// The engine's own choice (rsx_vulkan_backend.c): one host depth format for
+// every guest depth surface, D32_SFLOAT_S8_UINT first -- so that asp's depth
+// tests resolve as the engine's do (the comparisons are exact)
 VkFormat depth_vkformat(uint32_t depth_format)
 {
-    if (depth_format == 1) return VK_FORMAT_D16_UNORM;   // CELL_GCM_SURFACE_Z16
+    (void)depth_format;
     if (s_d24s8 == VK_FORMAT_UNDEFINED) {
-        VkFormatProperties fp;
-        F.GetPhysicalDeviceFormatProperties(D.phys, VK_FORMAT_D24_UNORM_S8_UINT, &fp);
-        s_d24s8 = (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) ? VK_FORMAT_D24_UNORM_S8_UINT
-                                                                                            : VK_FORMAT_D32_SFLOAT_S8_UINT;
+        const VkFormat cand[] = { VK_FORMAT_D32_SFLOAT_S8_UINT, VK_FORMAT_D24_UNORM_S8_UINT };
+        for (VkFormat c : cand) {
+            VkFormatProperties fp;
+            F.GetPhysicalDeviceFormatProperties(D.phys, c, &fp);
+            if ((fp.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) &&
+                (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_TRANSFER_DST_BIT)) { s_d24s8 = c; break; }
+        }
+        if (s_d24s8 == VK_FORMAT_UNDEFINED) s_d24s8 = VK_FORMAT_D24_UNORM_S8_UINT;
     }
-    return s_d24s8;   // CELL_GCM_SURFACE_Z24S8
+    return s_d24s8;
 }
 
 Img* depth_image(uint32_t loc, uint32_t off, VkFormat fmt, uint32_t w, uint32_t h)
@@ -2075,10 +2096,37 @@ void asp_clears(Batch& b, const Rec* r)
     }
 }
 
+// DOTHEROES_ASP_DESCRIBE_FRAME=<frame> (a diagnostic): a line per asp draw
+// of that frame -- what it draws with -- into the dump directory
+void asp_describe_line(const Rec* r)
+{
+    static long long want = -2;
+    static FILE* f = nullptr;
+    if (want == -2) { const char* e = getenv("DOTHEROES_ASP_DESCRIBE_FRAME"); want = e && *e ? atoll(e) : -1; }
+    if (want < 0 || (long long)r->frame != want || !s_dump[0]) { if (f && (long long)r->frame > want) { fclose(f); f = nullptr; want = -1; } return; }
+    if (!f) {
+        char path[600];
+        snprintf(path, sizeof path, "%s/describe_f%u.txt", s_dump, r->frame);
+        if (!(f = fopen(path, "w"))) { want = -1; return; }
+    }
+    const State& st = r->st;
+    const Raster& ra = st.raster;
+    fprintf(f, "%llu prim %u n %u v %u | tgt %08X fmt %u dz %08X | fp %016llx | blend %u %X/%X %X/%X eq %X/%X | alpha %u %X %u | "
+               "depth %u/%u %X | stencil %u | cull %u %X | cmask %08X | clears %u | tex",
+            (unsigned long long)r->seq, r->prim, r->count, r->vcount, st.surface.color_offset[0], st.surface.color_format,
+            st.surface.depth_offset, r->fp ? (unsigned long long)r->fp->hash : 0ull, ra.blend, ra.blend_sf_rgb, ra.blend_df_rgb,
+            ra.blend_sf_a, ra.blend_df_a, ra.blend_eq_rgb, ra.blend_eq_a, ra.alpha_test, ra.alpha_func, ra.alpha_ref,
+            ra.depth_test, ra.depth_write, ra.depth_func, ra.stencil_test, ra.cull, ra.cull_face, ra.color_mask, r->naclear);
+    for (uint32_t u = 0; u < 16; u++)
+        if (st.samp[u].enable) fprintf(f, " %u:%02X@%08X", u, st.tex[u].format, st.tex[u].offset);
+    fprintf(f, "\n");
+}
+
 void asp_draw(const Rec* r)
 {
     Batch& b = batch(r->frame);
     wait_for(b, r);
+    asp_describe_line(r);
     asp_clears(b, r);
     if (r->why || !r->vp || !r->fp) { unsupported(r, "asp: no programs, or no draw object"); return; }
     const State& st = r->st;
@@ -2244,7 +2292,9 @@ void asp_draw(const Rec* r)
     F.vkCmdSetScissor(b.cb, 0, 1, &s2);
     F.vkCmdSetStencilReference(b.cb, VK_STENCIL_FACE_FRONT_AND_BACK, ra.stencil_ref);
     // polygon offset: the guest's units are the depth format's resolution steps, as Vulkan's
-    if (ra.poly_offset_fill) F.vkCmdSetDepthBias(b.cb, ra.poly_offset_units, 0.0f, ra.poly_offset_factor);
+    // the engine's scaling (vk_eng_set_depth_bias): units in 2^-24 steps, a Z16 surface's in 2^-16
+    if (ra.poly_offset_fill) F.vkCmdSetDepthBias(b.cb, ra.poly_offset_units * (sf.depth_format == 1 ? 256.0f : 1.0f), 0.0f,
+                                                 ra.poly_offset_factor);
     else F.vkCmdSetDepthBias(b.cb, 0.0f, 0.0f, 0.0f);
     const float bc[4] = { 0, 0, 0, 0 };   // the blend colour: not described yet (asp's constant-colour blends)
     F.vkCmdSetBlendConstants(b.cb, bc);

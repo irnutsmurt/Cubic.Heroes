@@ -283,3 +283,15 @@ winding is as the engine maps it (flipping it: 99.99% differ). asp also
 clears surfaces it then does not draw into (1,650 clears dropped past the
 32 a draw keeps; harmless if they are older than a later clear of the same
 surface, to be made exact).
+
+**The engine's depth format, and where the rest differs** (build/r4/an13,
+an14; DOTHEROES_ASP_DESCRIBE_FRAME=<frame> writes a line per asp draw of
+that frame and every comparison of it): the engine keeps every guest depth
+surface as D32_SFLOAT_S8_UINT (its first choice); with the same format the
+native renderer's depth tests resolve as the engine's, and **asp's scene
+target ends frame 2500 equal to the engine's, pixel for pixel**. What
+still differs at the handoff (about 88,000 of 921,600 pixels, the same in
+every frame) is the moat: the water samples the 512x512 reflection target
+(0x010B3D80, R5G6B5 with Z24S8, drawn with the stencil test), which
+differs from its first draw after its clear -- the stencil's state or its
+clear is the next suspect.
