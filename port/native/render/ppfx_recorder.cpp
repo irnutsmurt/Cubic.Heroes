@@ -340,6 +340,14 @@ struct Asp {
     uint8_t stored_init;
     uint32_t stored_valid;           // the groups a setter has set (the rest: what asp's set-up put there, unknown)
     uint32_t unbind_after;
+    // R5: what asp's sampler bind last wrote per unit (it writes an item only
+    // when it differs from that), and whether the store's samplers are known
+    // (its global state block, rebuilt by 0x006D0B98, sets them to the reset
+    // values; binds then write what changes)
+    Sampler samp_written[16];
+    uint32_t samp_written_valid;
+    uint8_t stored_samp_valid;
+    uint64_t rebuilds, samp_restores;
 } A;
 
 // Calls on other threads than the producer's touch the shadow (an inline
@@ -740,8 +748,16 @@ void asp_mirror(uint32_t addr)
     case 0x006C0A70: case 0x006C4508: g = kGStencil; break;
     case 0x006C0E38: g = kGSwmask; break;
     case 0x006C0F60: g = kGViewport; break;
-    case 0x006C37A0: {   // the sampler bind: the unit's address mode is in its slot too
-        for (uint32_t k = 0; k < 16; k++) A.stored.samp[k] = S.st.samp[k];
+    case 0x006D0B98: {   // the global state block rebuilt: the store's samplers at their reset values
+        for (uint32_t k = 0; k < 16; k++) {
+            Sampler& t = A.stored.samp[k];
+            t.enable = 0; t.min_lod = t.max_lod = 0; t.max_aniso = 0;
+            t.min_filter = t.mag_filter = 1; t.conv = 1; t.bias = 0; t.filter_signed = 0;   // nearest
+            t.wrap_s = t.wrap_t = 1; t.wrap_r = 3; t.unsigned_remap = 0; t.gamma = 0; t.zfunc = 6;
+            t.border = 0; t.address_by = kByAsp;
+        }
+        A.stored_samp_valid = 1;
+        A.rebuilds++;
         return;
     }
     default: return;
@@ -760,6 +776,12 @@ void asp_restore(uint32_t begin, uint32_t src, uint64_t hi)
         const uint32_t slot = begin + (g16(tbl + kGroupSlot[g]) & ~3u);
         if (slot >= src && slot < hi) { asp_copy_group(g, A.stored, S.st); stats().asp_group_restores++; }
     }
+    // the units' samplers (their address mode's slot: TOC -0x2D54)
+    if (A.stored_samp_valid)
+        for (uint32_t u = 0; u < 16; u++) {
+            const uint32_t slot = asp_address_slot(begin, u);
+            if (slot && slot >= src && slot < hi) { S.st.samp[u] = A.stored.samp[u]; A.samp_restores++; }
+        }
 }
 
 int asp_call_state(uint32_t addr, ppu_context* c)
@@ -1254,6 +1276,57 @@ void asp_draw_probe(const VEntry& v)
     report_add(line);
 }
 
+// R5: what an asp draw draws (its object, vtable 0xFEA9D0: +0x08 the
+// primitive in libgcm's numbering, +0x0C the index count, +0x10 the vertex
+// count, +0x18 the index buffer's address, +0x24 its type) and what it
+// reads and writes: its colour and depth targets, the units its fragment
+// program samples, its streams' ranges. No bytes: the native renderer reads
+// guest memory itself (docs/NATIVE_R5.md section 4).
+void asp_draw_operation(Rec* r, uint32_t self)
+{
+    r->prim = r->first = r->count = r->idx_ea = r->idx_type = r->vcount = 0;
+    if (!ea_ok(self, 0x28)) { r->why = kWhyVertex; return; }
+    r->prim = g32(self + 0x08);
+    const uint32_t ic = g32(self + 0x0C);
+    r->vcount = g32(self + 0x10);
+    r->idx_ea = ic ? g32(self + 0x18) : 0;
+    r->idx_type = g32(self + 0x24);
+    r->count = ic ? ic : r->vcount;
+    // its streams: [0, vcount) of each enabled input
+    for (uint32_t i = 0; i < 16; i++) {
+        const VertexInput& in = r->st.vin[i];
+        if (!in.size || !r->vcount) continue;
+        VtxRange& vr = r->vr[r->nvr++];
+        vr.location = in.location; vr.offset = (r->st.vdata.base_offset + (in.offset & 0x7FFFFFFFu)) & 0x0FFFFFFFu;
+        vr.bytes = (r->vcount - 1) * in.stride + elem_bytes(in.type, in.size);
+        vr.at = 0;
+    }
+    // its targets
+    const Surface& sf = r->st.surface;
+    if (sf.color_target) {
+        Need& n = r->need[r->nneed++];
+        memset(&n, 0, sizeof n);
+        n.location = sf.color_location[0] ? 1u : 0u; n.offset = sf.color_offset[0]; n.pitch = sf.color_pitch[0];
+        n.w = sf.width; n.h = sf.height; n.format = sf.color_format; n.unit = 0xFF;
+    }
+    if (sf.depth_format && (r->st.raster.depth_test || r->st.raster.stencil_test)) {
+        Need& n = r->need[r->nneed++];
+        memset(&n, 0, sizeof n);
+        n.location = sf.depth_location ? 1u : 0u; n.offset = sf.depth_offset; n.pitch = sf.depth_pitch;
+        n.w = sf.width; n.h = sf.height; n.format = sf.depth_format; n.unit = 0xFE;
+    }
+    // the units its fragment program samples
+    const uint32_t units = r->fp ? rsx_fp_texture_units(r->fp->bytes.data(), (uint32_t)r->fp->bytes.size()) : 0;
+    for (uint32_t u = 0; u < 16 && r->nneed < kMaxNeeds; u++) {
+        if (!(units >> u & 1) || !r->st.samp[u].enable) continue;
+        const Texture& t = r->st.tex[u];
+        Need& n = r->need[r->nneed++];
+        memset(&n, 0, sizeof n);
+        n.location = t.location ? 1u : 0u; n.offset = t.offset; n.format = t.format;
+        n.w = t.width; n.h = t.height; n.pitch = t.pitch; n.unit = (uint8_t)u;
+    }
+}
+
 void asp_draw_exit(const VEntry& v)
 {
     if (asp_probe2()) asp_draw_probe(v);
@@ -1279,6 +1352,7 @@ void asp_draw_exit(const VEntry& v)
     // the fragment program asp uploaded at the bound offset
     r->vp = vp_blob_now();
     r->fp = A.fp_bound ? asp_fp_now() : S.fp;
+    asp_draw_operation(r, (uint32_t)v.gpr[3]);
     if (A.fp_bound) {
         auto lo = A.fp_last_obj.find(S.st.fp.offset);
         if (lo == A.fp_last_obj.end() || lo->second != A.fp_bound_obj) {
@@ -1479,7 +1553,7 @@ int asp_record_call(uint32_t addr, ppu_context* c)
         if (u >= 16) return 1;
         Sampler& m = S.st.samp[u];
         m.enable = en ? 1 : 0;
-        if (!en) return 1;
+        if (!en) { A.stored.samp[u].enable = 0; return 1; }   // control 0 alone
         // the table (TOC -0x2D88): an entry of 48 bytes a unit from +0x0C
         const uint32_t e = g32((uint32_t)c->gpr[2] - 0x2D88u) + 0x0Cu + 48u * u;
         if (!ea_ok(e, 48)) return 1;
@@ -1489,13 +1563,35 @@ int asp_record_call(uint32_t addr, ppu_context* c)
         if (!n) n = 16;
         const uint32_t at = g32((uint32_t)c->gpr[2] - 0x2D94u);   // anisotropy codes by ratio
         m.max_aniso = ea_ok(at + 0x40 + n - 1, 1) ? (uint8_t)(g8(at + 0x40 + n - 1) & 7) : 0;
-        m.min_filter = (uint8_t)(g32(e + 0x0C) + 1); m.mag_filter = (uint8_t)(g32(e + 0x08) + 1);
-        m.conv = 1; m.bias = 0; m.filter_signed = 0;
-        m.wrap_s = (uint8_t)(g32(e + 0x14) + 1); m.wrap_t = (uint8_t)(g32(e + 0x18) + 1); m.wrap_r = 3;   // R clamped
-        m.unsigned_remap = 0; m.gamma = 0; m.zfunc = 6;   // the depth comparison GEQUAL
+        // the address mode, the filter and the border colour: written (into
+        // the command buffer and the store) only when they differ from what
+        // the bind last wrote for the unit
+        Sampler nw = m;
+        nw.min_filter = (uint8_t)(g32(e + 0x0C) + 1); nw.mag_filter = (uint8_t)(g32(e + 0x08) + 1);
+        nw.conv = 1; nw.bias = 0; nw.filter_signed = 0;
+        nw.wrap_s = (uint8_t)(g32(e + 0x14) + 1); nw.wrap_t = (uint8_t)(g32(e + 0x18) + 1); nw.wrap_r = 3;   // R clamped
+        nw.unsigned_remap = 0; nw.gamma = 0; nw.zfunc = 6;   // the depth comparison GEQUAL
         auto ch = [](float f) -> uint32_t { return f <= 0 ? 0u : f >= 1 ? 255u : (uint32_t)(f * 255.0f + 0.5f); };
-        m.border = ch(gfloat(e + 0x28)) << 24 | ch(gfloat(e + 0x1C)) << 16 | ch(gfloat(e + 0x20)) << 8 | ch(gfloat(e + 0x24));
-        m.address_by = kByAsp;
+        nw.border = ch(gfloat(e + 0x28)) << 24 | ch(gfloat(e + 0x1C)) << 16 | ch(gfloat(e + 0x20)) << 8 | ch(gfloat(e + 0x24));
+        Sampler& w = A.samp_written[u];
+        const bool known = A.samp_written_valid >> u & 1;
+        Sampler& st = A.stored.samp[u];
+        // control 0 (enable, levels, anisotropy): always written
+        st.enable = m.enable; st.min_lod = m.min_lod; st.max_lod = m.max_lod; st.max_aniso = m.max_aniso;
+        if (!known || nw.wrap_s != w.wrap_s || nw.wrap_t != w.wrap_t || nw.wrap_r != w.wrap_r || nw.zfunc != w.zfunc ||
+            nw.gamma != w.gamma || nw.unsigned_remap != w.unsigned_remap) {
+            m.wrap_s = st.wrap_s = w.wrap_s = nw.wrap_s; m.wrap_t = st.wrap_t = w.wrap_t = nw.wrap_t;
+            m.wrap_r = st.wrap_r = w.wrap_r = nw.wrap_r; m.zfunc = st.zfunc = w.zfunc = nw.zfunc;
+            m.gamma = st.gamma = w.gamma = nw.gamma; m.unsigned_remap = st.unsigned_remap = w.unsigned_remap = nw.unsigned_remap;
+        }
+        if (!known || nw.min_filter != w.min_filter || nw.mag_filter != w.mag_filter || nw.conv != w.conv || nw.bias != w.bias) {
+            m.min_filter = st.min_filter = w.min_filter = nw.min_filter; m.mag_filter = st.mag_filter = w.mag_filter = nw.mag_filter;
+            m.conv = st.conv = w.conv = nw.conv; m.bias = st.bias = w.bias = nw.bias;
+            m.filter_signed = st.filter_signed = w.filter_signed = nw.filter_signed;
+        }
+        if (!known || nw.border != w.border) m.border = st.border = w.border = nw.border;
+        A.samp_written_valid |= 1u << u;
+        m.address_by = st.address_by = kByAsp;
         return 1;
     }
     case 0x006D0E84: { // the shadow map on unit 4 (render target, ...): its texture, a fixed sampler
@@ -1782,9 +1878,11 @@ void write_report()
                 (unsigned long long)s.asp_xc_draws, (unsigned long long)s.asp_xc_differ);
     if (asp_records_on())
         fprintf(f, "asp store_group_restores %llu fp_patches_of_odd_count %llu fp_programs_uploaded_at %zu "
-                   "draws_with_a_program_not_uploaded_last %llu\n",
+                   "draws_with_a_program_not_uploaded_last %llu store_rebuilds %llu sampler_restores %llu\n",
                 (unsigned long long)s.asp_group_restores, (unsigned long long)A.fp_odd_patches, A.fp_bytes.size(),
-                (unsigned long long)A.fp_stale_draws);
+                (unsigned long long)A.fp_stale_draws, (unsigned long long)A.rebuilds, (unsigned long long)A.samp_restores);
+    if (s.n_asp_draws)
+        fprintf(f, "native asp draws %llu vertex_mb %.1f\n", (unsigned long long)s.n_asp_draws, s.n_asp_vertex_bytes / 1048576.0);
     fprintf(f, "native draws %llu clears %llu unsupported %llu batches %llu pipelines %llu images %llu (%.1f MB) "
                "static_textures %llu own_target_snapshots %llu images_replaced %llu\n",
             (unsigned long long)s.n_draws, (unsigned long long)s.n_clears, (unsigned long long)s.n_unsupported,

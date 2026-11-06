@@ -137,6 +137,20 @@ river fight, check mode (DOTHEROES_PPFX_NATIVE=check DOTHEROES_ASP_RECORD=1),
 | as3 (R5's first step) | 2,063,903 | all | programs, render state, samplers, viewport, scissor, surfaces, vertex inputs |
 | as4 (the setters' encoders) | 647,669 | all | every vertex input off; scissor; viewport depth; 178 fragment programs |
 | as5 (the store; unbinds after the draw) | 378,218 | 133,638 | the shadow pass's scissor; 185 fragment programs |
+| as6 (the pass's inset scissor) | 382,651 | 354 | the first recorded frame's scissor (180); 191 fragment programs, all in the first three frames |
+| as7 (the dungeon route, 200 s) | 2,218,291 | 13,063 | as as6, and unit 1's sampler in one area (12,464) |
+| as10 (the dungeon route; the bind's write-if-changed model) | 2,210,831 | 12,698 | as as7: unit 1's sampler still open (12,095) |
+
+The first frame's differences are a start-up gap of the description, not
+of a state item: the store's initial contents come from asp's set-up, not
+from a setter the recorder saw (the restore now leaves alone a group no
+setter has set), and the fragment program bound in those frames was
+uploaded before the recorder saw an upload to that offset (184 draws whose
+bound program is not the one last uploaded there). Unit 1's sampler in the
+dungeon area is open: its nearest filter and zero border come from the
+store's re-emission (section 3's third finding), but modelling the bind's
+write-if-changed and the rebuild's reset did not reach those draws; the
+next check counts the rebuilds and the samplers restored.
 
 Two findings along the way:
 
@@ -194,3 +208,47 @@ blending, depth, stencil, alpha test and culling refused):
 - *Ordering with PPFX*: asp's scene goes into the target PPFX then reads
   (its kept cellGcmSetSurface): once asp is native, that target's handoff
   (engine -> native) is no longer needed -- the first handoffs R5 removes.
+
+**A third finding: asp's sampler bind writes only what changed** (the
+dungeon route, as7: unit 1's filter and border differed in 12,464 draws of
+one area). An attributed frame trace there (build/r4/ft1,
+RSX_FRAME_TRACE at 110 s) shows unit 1's nearest filter and zero border
+written by the store's re-emission (through a second memcpy, 0x00963C80),
+never by the bind: the bind writes a unit's address mode, filter and border
+only when they differ from what it last wrote, while the global state
+block's rebuild (0x006D0B98) resets the store's samplers to nearest, wrap,
+disabled. A unit whose values asp believes current thus samples the store's
+reset values after the next re-emission -- on the PS3 as here. The recorder
+now models exactly that: what the bind last wrote per unit, the rebuild's
+reset values in the stored copy, and the samplers' slots in a re-emitted
+range.
+
+## 5. asp's draws rendered natively: the first runs [M]
+
+DOTHEROES_ASP_NATIVE=1 (with DOTHEROES_PPFX_NATIVE=1 and
+DOTHEROES_ASP_RECORD=1; development): the native renderer draws asp's
+records too (ppfx_render.cpp asp_draw), into its own images, while the
+engine still draws everything (R3's arrangement: PPFX's inputs from asp
+still arrive by handoff). New in the renderer: depth images (Z24S8, Z16;
+the shadow map sampled through its depth view, the comparison in the
+translated shader), passes with a colour and a depth attachment or either
+alone, pipelines with the whole render state (blend, depth, stencil, cull,
+polygon offset, the alpha test in the fragment program), indexed draws
+(16- and 32-bit indices, strips and quads rebuilt as lists), vertices and
+indices read from guest memory on the native thread, and textures from
+guest memory cached by their description and checked by a content hash
+once a frame -- DXT1/3/5 as BC1/2/3.
+
+| Run (river, 60 s) | asp draws drawn | not drawn | PPFX's compared outputs |
+|---|---|---|---|
+| an1 | 211,571 | 399,609 (no texture source) | 6,504: 6,498 equal, 6 differ |
+| an4 (DXT textures) | 897,011 | 161 (the first frames' fragment program) | 16,083: 16,082 equal, 0 differ, 1 unfinished |
+
+Not done yet: **no comparison of asp's native output with the engine's**
+(the next step: at the handoff that brings the engine's scene target to
+PPFX, compare it with the native image asp's records drew), and **the
+cost**: every draw converts and uploads its vertices (76 GB in an4, about
+21 MB a frame), where the engine keeps converted vertices in a cache
+checked by content hashes -- the native renderer needs the same before
+any timing. The blend colour (asp's constant-colour blends) is not
+described yet.

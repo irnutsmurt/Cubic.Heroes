@@ -84,6 +84,7 @@
 #include "rsx_vulkan_bridge.h"
 
 extern "C" uint8_t* vm_base;
+extern "C" uint32_t cellGcmResolveLocated(int local, uint32_t offset);
 
 namespace ppfx {
 namespace {
@@ -113,6 +114,7 @@ struct Fn {
 #undef X
     PFN_vkGetPhysicalDeviceMemoryProperties GetPhysicalDeviceMemoryProperties;
     PFN_vkGetPhysicalDeviceProperties GetPhysicalDeviceProperties;
+    PFN_vkGetPhysicalDeviceFormatProperties GetPhysicalDeviceFormatProperties;
 } F;
 
 rsx_vk_bridge_dev D;
@@ -197,6 +199,7 @@ struct Img {
     VkPipelineStageFlags wstage = 0, rstages = 0;
     VkAccessFlags waccess = 0;
     bool external = false;                             // a slot: the engine's queue writes it, a semaphore orders it
+    VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT;   // R5: a depth image's depth (and stencil) aspects
 };
 
 VkImageView make_view(VkImage img, VkFormat fmt, uint32_t levels, VkComponentMapping map)
@@ -238,9 +241,60 @@ Img* make_image(VkFormat fmt, uint32_t w, uint32_t h, uint32_t levels, uint32_t 
     return o;
 }
 
+// R5: a depth (and stencil) image: an attachment asp's draws test and
+// write, and a texture the shadow pass's readers sample (its depth aspect)
+bool has_stencil(VkFormat f) { return f == VK_FORMAT_D24_UNORM_S8_UINT || f == VK_FORMAT_D32_SFLOAT_S8_UINT; }
+Img* make_depth_image(VkFormat fmt, uint32_t w, uint32_t h)
+{
+    Img* o = new Img;
+    VkImageCreateInfo ci = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+    ci.imageType = VK_IMAGE_TYPE_2D; ci.format = fmt; ci.extent = { w, h, 1 }; ci.mipLevels = 1;
+    ci.arrayLayers = 1; ci.samples = VK_SAMPLE_COUNT_1_BIT; ci.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ci.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+               VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE; ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (F.vkCreateImage(D.device, &ci, nullptr, &o->img) != VK_SUCCESS) { delete o; return nullptr; }
+    VkMemoryRequirements rq;
+    F.vkGetImageMemoryRequirements(D.device, o->img, &rq);
+    VkMemoryAllocateInfo ai = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+    ai.allocationSize = rq.size;
+    ai.memoryTypeIndex = mem_type(rq.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (ai.memoryTypeIndex == ~0u) ai.memoryTypeIndex = mem_type(rq.memoryTypeBits, 0);
+    if (F.vkAllocateMemory(D.device, &ai, nullptr, &o->mem) != VK_SUCCESS) {
+        F.vkDestroyImage(D.device, o->img, nullptr); delete o; return nullptr;
+    }
+    F.vkBindImageMemory(D.device, o->img, o->mem, 0);
+    o->fmt = fmt; o->w = w; o->h = h; o->levels = 1; o->bpp = 4;
+    o->aspect = VK_IMAGE_ASPECT_DEPTH_BIT | (has_stencil(fmt) ? VK_IMAGE_ASPECT_STENCIL_BIT : 0);
+    // the attachment's view: both aspects; a sampled view: depth alone (made on use)
+    VkImageViewCreateInfo vi = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+    vi.image = o->img; vi.viewType = VK_IMAGE_VIEW_TYPE_2D; vi.format = fmt;
+    vi.subresourceRange = { o->aspect, 0, 1, 0, 1 };
+    F.vkCreateImageView(D.device, &vi, nullptr, &o->view);
+    o->bytes = rq.size;
+    stats().n_images++;
+    stats().n_image_bytes += rq.size;
+    return o;
+}
+
+// The depth image's view for sampling (its depth aspect)
+VkImageView depth_sample_view(Img* o)
+{
+    auto it = o->views.find(~0ull);
+    if (it != o->views.end()) return it->second;
+    VkImageViewCreateInfo vi = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+    vi.image = o->img; vi.viewType = VK_IMAGE_VIEW_TYPE_2D; vi.format = o->fmt;
+    vi.subresourceRange = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1 };
+    VkImageView v = VK_NULL_HANDLE;
+    F.vkCreateImageView(D.device, &vi, nullptr, &v);
+    return o->views[~0ull] = v;
+}
+
+void forget_framebuffers(Img* o);
 void destroy_image(Img* o)
 {
     if (!o) return;
+    forget_framebuffers(o);
     for (auto& kv : o->views) F.vkDestroyImageView(D.device, kv.second, nullptr);
     if (o->fb) F.vkDestroyFramebuffer(D.device, o->fb, nullptr);
     if (o->view) F.vkDestroyImageView(D.device, o->view, nullptr);
@@ -269,7 +323,7 @@ void barrier_all(VkCommandBuffer cb)
 // One access to an image, with the barrier its hazard needs: read after
 // write, write after read or write, a layout change (R2's r2_access). In
 // full mode: the full barrier, and every image stays in GENERAL.
-enum Use { kAttach, kSampled, kCopySrc, kCopyDst };
+enum Use { kAttach, kSampled, kCopySrc, kCopyDst, kDepthAttach };
 void access(VkCommandBuffer cb, Img* o, Use use)
 {
     if (s_full) {
@@ -278,7 +332,7 @@ void access(VkCommandBuffer cb, Img* o, Use use)
             b.srcAccessMask = 0; b.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
             b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED; b.newLayout = VK_IMAGE_LAYOUT_GENERAL;
             b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            b.image = o->img; b.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, o->levels, 0, 1 };
+            b.image = o->img; b.subresourceRange = { o->aspect, 0, o->levels, 0, 1 };
             F.vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0,
                                    nullptr, 0, nullptr, 1, &b);
             o->layout = VK_IMAGE_LAYOUT_GENERAL;
@@ -293,6 +347,9 @@ void access(VkCommandBuffer cb, Img* o, Use use)
                   acc = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT; write = true; break;
     case kSampled: want = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL; stage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
                    acc = VK_ACCESS_SHADER_READ_BIT; write = false; break;
+    case kDepthAttach: want = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+                   stage = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+                   acc = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT; write = true; break;
     case kCopySrc: want = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL; stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
                    acc = VK_ACCESS_TRANSFER_READ_BIT; write = false; break;
     default: want = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL; stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
@@ -316,7 +373,7 @@ void access(VkCommandBuffer cb, Img* o, Use use)
         b.srcAccessMask = srca; b.dstAccessMask = acc;
         b.oldLayout = o->layout; b.newLayout = want;
         b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        b.image = o->img; b.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, o->levels, 0, 1 };
+        b.image = o->img; b.subresourceRange = { o->aspect, 0, o->levels, 0, 1 };
         F.vkCmdPipelineBarrier(cb, src ? src : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, stage, 0, 0, nullptr, 0, nullptr, 1, &b);
         stats().n_barriers++;
     }
@@ -515,6 +572,9 @@ VkFormat be_vkformat(rsx_be_format f, uint32_t* bpp)
     case RSX_BE_FMT_R16G16B16A16F: *bpp = 8; return VK_FORMAT_R16G16B16A16_SFLOAT;
     case RSX_BE_FMT_R32F: *bpp = 4; return VK_FORMAT_R32_SFLOAT;
     case RSX_BE_FMT_R32G32B32A32F: *bpp = 16; return VK_FORMAT_R32G32B32A32_SFLOAT;
+    case RSX_BE_FMT_BC1: *bpp = 8; return VK_FORMAT_BC1_RGBA_UNORM_BLOCK;   // per block (R5: asp's DXT textures)
+    case RSX_BE_FMT_BC2: *bpp = 16; return VK_FORMAT_BC2_UNORM_BLOCK;
+    case RSX_BE_FMT_BC3: *bpp = 16; return VK_FORMAT_BC3_UNORM_BLOCK;
     default: *bpp = 0; return VK_FORMAT_UNDEFINED;
     }
 }
@@ -531,6 +591,9 @@ rsx_be_format texfmt_be(rsx_texfmt f)
     case RSX_TEXFMT_R16G16B16A16F: return RSX_BE_FMT_R16G16B16A16F;
     case RSX_TEXFMT_R32F: return RSX_BE_FMT_R32F;
     case RSX_TEXFMT_R32G32B32A32F: return RSX_BE_FMT_R32G32B32A32F;
+    case RSX_TEXFMT_BC1: return RSX_BE_FMT_BC1;
+    case RSX_TEXFMT_BC2: return RSX_BE_FMT_BC2;
+    case RSX_TEXFMT_BC3: return RSX_BE_FMT_BC3;
     default: return RSX_BE_FMT_NONE;
     }
 }
@@ -691,6 +754,74 @@ VkFramebuffer framebuffer(Img* o)
     ci.width = o->w; ci.height = o->h; ci.layers = 1;
     F.vkCreateFramebuffer(D.device, &ci, nullptr, &o->fb);
     return o->fb;
+}
+
+// R5: a pass with a colour attachment, a depth (and stencil) attachment, or
+// both -- asp's draws; both loaded and stored, as the guest's surfaces are
+std::map<std::pair<VkFormat, VkFormat>, VkRenderPass> s_rps2;
+VkRenderPass render_pass2(VkFormat c, VkFormat d)
+{
+    auto it = s_rps2.find({ c, d });
+    if (it != s_rps2.end()) return it->second;
+    VkAttachmentDescription a[2] = {};
+    VkAttachmentReference cr = {}, dr = {};
+    uint32_t n = 0;
+    VkSubpassDescription sp = {};
+    sp.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    if (c != VK_FORMAT_UNDEFINED) {
+        const VkImageLayout l = s_full ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        a[n].format = c; a[n].samples = VK_SAMPLE_COUNT_1_BIT;
+        a[n].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD; a[n].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        a[n].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; a[n].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        a[n].initialLayout = l; a[n].finalLayout = l;
+        cr = { n, l };
+        sp.colorAttachmentCount = 1; sp.pColorAttachments = &cr;
+        n++;
+    }
+    if (d != VK_FORMAT_UNDEFINED) {
+        const VkImageLayout l = s_full ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        a[n].format = d; a[n].samples = VK_SAMPLE_COUNT_1_BIT;
+        a[n].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD; a[n].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        a[n].stencilLoadOp = has_stencil(d) ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        a[n].stencilStoreOp = has_stencil(d) ? VK_ATTACHMENT_STORE_OP_STORE : VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        a[n].initialLayout = l; a[n].finalLayout = l;
+        dr = { n, l };
+        sp.pDepthStencilAttachment = &dr;
+        n++;
+    }
+    VkRenderPassCreateInfo ci = { VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO };
+    ci.attachmentCount = n; ci.pAttachments = a; ci.subpassCount = 1; ci.pSubpasses = &sp;
+    VkRenderPass rp = VK_NULL_HANDLE;
+    F.vkCreateRenderPass(D.device, &ci, nullptr, &rp);
+    return s_rps2[{ c, d }] = rp;
+}
+
+// The framebuffer of a colour image and a depth image (either may be null),
+// kept until either is destroyed (with the colour image's, or the depth's
+// when there is no colour)
+std::map<std::pair<Img*, Img*>, VkFramebuffer> s_fbs2;
+VkFramebuffer framebuffer2(Img* c, Img* d)
+{
+    auto it = s_fbs2.find({ c, d });
+    if (it != s_fbs2.end()) return it->second;
+    VkImageView v[2]; uint32_t n = 0;
+    if (c) v[n++] = c->view;
+    if (d) v[n++] = d->view;
+    VkFramebufferCreateInfo ci = { VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
+    ci.renderPass = render_pass2(c ? c->fmt : VK_FORMAT_UNDEFINED, d ? d->fmt : VK_FORMAT_UNDEFINED);
+    ci.attachmentCount = n; ci.pAttachments = v;
+    ci.width = c ? c->w : d->w; ci.height = c ? c->h : d->h; ci.layers = 1;
+    if (c && d) { ci.width = c->w < d->w ? c->w : d->w; ci.height = c->h < d->h ? c->h : d->h; }
+    VkFramebuffer fb = VK_NULL_HANDLE;
+    F.vkCreateFramebuffer(D.device, &ci, nullptr, &fb);
+    return s_fbs2[{ c, d }] = fb;
+}
+// An image going away: its framebuffers with it
+void forget_framebuffers(Img* o)
+{
+    for (auto it = s_fbs2.begin(); it != s_fbs2.end();)
+        if (it->first.first == o || it->first.second == o) { F.vkDestroyFramebuffer(D.device, it->second, nullptr); it = s_fbs2.erase(it); }
+        else ++it;
 }
 
 // ---- the registries -------------------------------------------------------------------------
@@ -891,6 +1022,197 @@ const Pipe* pipeline(const Rec* r, const rsx_vertex_layout_plan& layout, VkForma
     F.vkDestroyShaderModule(D.device, vsm, nullptr);
     F.vkDestroyShaderModule(D.device, fsm, nullptr);
     if (res != VK_SUCCESS) { fail("vkCreateGraphicsPipelines", res); P.p = VK_NULL_HANDLE; return nullptr; }
+    P.nconst = nconst;
+    stats().n_pipelines++;
+    return &P;
+}
+
+// ---- R5: asp's pipelines ---------------------------------------------------------------------
+// libgcm's constants (CELL_GCM_*, as the record keeps them) to Vulkan's
+VkCompareOp gcm_compare(uint32_t f) { return (VkCompareOp)((f - 0x0200u) & 7u); }   // NEVER..ALWAYS in the same order
+VkBlendFactor gcm_blend_factor(uint32_t f)
+{
+    switch (f) {
+    case 0: return VK_BLEND_FACTOR_ZERO;
+    case 1: return VK_BLEND_FACTOR_ONE;
+    case 0x0300: return VK_BLEND_FACTOR_SRC_COLOR;
+    case 0x0301: return VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR;
+    case 0x0302: return VK_BLEND_FACTOR_SRC_ALPHA;
+    case 0x0303: return VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    case 0x0304: return VK_BLEND_FACTOR_DST_ALPHA;
+    case 0x0305: return VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA;
+    case 0x0306: return VK_BLEND_FACTOR_DST_COLOR;
+    case 0x0307: return VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR;
+    case 0x0308: return VK_BLEND_FACTOR_SRC_ALPHA_SATURATE;
+    case 0x8001: return VK_BLEND_FACTOR_CONSTANT_COLOR;
+    case 0x8002: return VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_COLOR;
+    case 0x8003: return VK_BLEND_FACTOR_CONSTANT_ALPHA;
+    case 0x8004: return VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_ALPHA;
+    default: return VK_BLEND_FACTOR_ONE;
+    }
+}
+VkBlendOp gcm_blend_op(uint32_t e)
+{
+    switch (e) {
+    case 0x800A: return VK_BLEND_OP_SUBTRACT;
+    case 0x800B: return VK_BLEND_OP_REVERSE_SUBTRACT;
+    case 0x8007: return VK_BLEND_OP_MIN;
+    case 0x8008: return VK_BLEND_OP_MAX;
+    default: return VK_BLEND_OP_ADD;
+    }
+}
+VkStencilOp gcm_stencil_op(uint32_t o)
+{
+    switch (o) {
+    case 0x0000: return VK_STENCIL_OP_ZERO;
+    case 0x1E01: return VK_STENCIL_OP_REPLACE;
+    case 0x1E02: return VK_STENCIL_OP_INCREMENT_AND_CLAMP;
+    case 0x1E03: return VK_STENCIL_OP_DECREMENT_AND_CLAMP;
+    case 0x150A: return VK_STENCIL_OP_INVERT;
+    case 0x8507: return VK_STENCIL_OP_INCREMENT_AND_WRAP;
+    case 0x8508: return VK_STENCIL_OP_DECREMENT_AND_WRAP;
+    default: return VK_STENCIL_OP_KEEP;
+    }
+}
+
+// The pipeline for an asp record: its programs as for PPFX's (pipeline()),
+// with the alpha test in the fragment program, and its whole render state:
+// blend, depth, stencil, cull, polygon offset (dynamic), the colour mask;
+// a colour format of VK_FORMAT_UNDEFINED for a depth-only pass. Null when it
+// cannot be made.
+const Pipe* pipeline_asp(const Rec* r, const rsx_vertex_layout_plan& layout, VkFormat rt, VkFormat df,
+                         rsx_fp_constant_block* consts)
+{
+    const State& st = r->st;
+    const uint8_t* vp = r->vp->bytes.data();
+    const uint32_t vp_bytes = (uint32_t)r->vp->bytes.size();
+    const uint8_t* fp = r->fp->bytes.data();
+    const uint32_t fp_size = (uint32_t)r->fp->bytes.size();
+    const uint32_t fp_ctrl = fp_control(st.fp);
+    const uint32_t srgb = rt != VK_FORMAT_UNDEFINED ? rsx_fp_srgb_output_enabled(st.fp.gamma, fp_ctrl, st.surface.color_format & 0x1Fu) : 0;
+    const uint32_t sampled = rsx_fp_texture_units(fp, fp_size);
+    uint32_t cube = 0, vol = 0, shadow_mask = 0, unnorm_mask = 0;
+    rsx_fp_shadow_desc shadow[16] = {};
+    uint8_t gamma[16] = {}, expand[16] = {};
+    uint32_t unnorm[16][3] = {};
+    for (uint32_t u = 0; u < 16; u++) {
+        const Texture& t = st.tex[u];
+        const Sampler& sm = st.samp[u];
+        if (!sm.enable) continue;
+        if (t.cubemap && t.width && t.width == t.height) cube |= 1u << u;
+        if (!t.cubemap && t.dimension == 3 && t.depth > 1 && t.width && t.height) vol |= 1u << u;
+        gamma[u] = gamma_mask(t, sm);
+        expand[u] = expand_mask(t, sm);
+        if (sampled >> u & 1) {
+            shadow_desc(&shadow[u], t, sm);
+            if (shadow[u].enabled) shadow_mask |= 1u << u;
+        }
+        if ((t.format & RSX_TEX_FMT_UNNORM) && t.width && t.height) {
+            unnorm_mask |= 1u << u;
+            unnorm[u][0] = t.width; unnorm[u][1] = t.height; unnorm[u][2] = t.depth;
+        }
+    }
+    const uint32_t gamma_units = rsx_fp_texture_gamma_units(fp, fp_size, gamma);
+    for (uint32_t u = 0; u < 16; u++) if (!(gamma_units >> u & 1)) gamma[u] = 0;
+    const uint32_t expand_units = rsx_fp_texture_expand_units(fp, fp_size, expand);
+    for (uint32_t u = 0; u < 16; u++) if (!(expand_units >> u & 1)) expand[u] = 0;
+    unnorm_mask &= sampled & ~shadow_mask;
+    for (uint32_t u = 0; u < 16; u++) if (!(unnorm_mask >> u & 1)) unnorm[u][0] = unnorm[u][1] = unnorm[u][2] = 0;
+    consts->count = 0;
+    if (rsx_fp_collect_constants(fp, fp_size, consts) < 0) {
+        static int said = 0;
+        if (said++ < 4) {
+            char line[200];
+            snprintf(line, sizeof line, "render: asp: the fragment program's constants could not be collected (%u bytes, first %02X%02X%02X%02X)",
+                     fp_size, fp[0], fp[1], fp[2], fp[3]);
+            report_add(line);
+        }
+        return nullptr;
+    }
+    const Raster& ra = st.raster;
+    const uint32_t alpha_test = ra.alpha_test ? 1u : 0u, alpha_func = ra.alpha_func;
+    uint64_t k = fnv(vp, vp_bytes, 0xA5Bull);
+    k = rsx_fp_structural_hash(fp, fp_size, k);
+    const uint32_t ints[] = { fp_ctrl & 0x4Eu, srgb, cube, vol, shadow_mask, unnorm_mask, gamma_units, expand_units,
+                              layout.mask, layout.stride, (uint32_t)rt, (uint32_t)df, ra.color_mask, ra.front_face,
+                              ra.cull, ra.cull_face, ra.blend, ra.blend_sf_rgb, ra.blend_df_rgb, ra.blend_sf_a, ra.blend_df_a,
+                              ra.blend_eq_rgb, ra.blend_eq_a, ra.depth_test, ra.depth_write, ra.depth_func,
+                              ra.stencil_test, ra.stencil_func, ra.stencil_func_mask, ra.stencil_write_mask,
+                              ra.stencil_fail, ra.stencil_zfail, ra.stencil_zpass, alpha_test, alpha_test ? alpha_func : 0 };
+    k = fnv(ints, sizeof ints, k);
+    k = fnv(gamma, sizeof gamma, k); k = fnv(expand, sizeof expand, k);
+    k = fnv(unnorm, sizeof unnorm, k); k = fnv(shadow, sizeof shadow, k);
+    auto it = s_pipes.find(k);
+    if (it != s_pipes.end()) return it->second.p ? &it->second : nullptr;
+    Pipe& P = s_pipes[k];
+    P.p = VK_NULL_HANDLE;
+    const uint32_t wpos[2] = { 1u, 1u };
+    ProgParams pp = { vp, vp_bytes, fp, fp_size, fp_ctrl, cube, vol, 0u, layout.mask, 0u, 0u, srgb,
+                      alpha_test, alpha_func, unnorm_mask, shadow_mask, gamma_units, expand_units,
+                      { wpos[0], wpos[1] }, 0, shadow, gamma, expand, (const uint32_t (*)[3])unnorm };
+    std::string vs, ps;
+    uint32_t nconst = 0;
+    if (!programs_text(pp, vs, ps, &nconst) || nconst != consts->count) {
+        report_add("render: an asp record's programs did not translate");
+        return nullptr;
+    }
+    VkShaderModule vsm = spirv_module(vs, RSX_SHADER_STAGE_VERTEX), fsm = spirv_module(ps, RSX_SHADER_STAGE_FRAGMENT);
+    if (!vsm || !fsm) return nullptr;
+    VkPipelineShaderStageCreateInfo stg[2] = {
+        { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, vsm, "main", nullptr },
+        { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, fsm, "main", nullptr } };
+    VkVertexInputBindingDescription vb = { 0, layout.stride, VK_VERTEX_INPUT_RATE_VERTEX };
+    VkVertexInputAttributeDescription va[16];
+    for (uint32_t i = 0; i < layout.count; i++) va[i] = { i, 0, VK_FORMAT_R32G32B32A32_SFLOAT, i * 16u };
+    VkPipelineVertexInputStateCreateInfo vi = { VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+    vi.vertexBindingDescriptionCount = 1; vi.pVertexBindingDescriptions = &vb;
+    vi.vertexAttributeDescriptionCount = layout.count; vi.pVertexAttributeDescriptions = va;
+    VkPipelineInputAssemblyStateCreateInfo ia = { VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
+    ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;   // every primitive rebuilt as a triangle list
+    VkPipelineViewportStateCreateInfo vps = { VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
+    vps.viewportCount = 1; vps.scissorCount = 1;
+    // as the engine (rsx_vulkan_backend.c): CULL_FACE FRONT and FRONT_AND_BACK
+    // cull front faces; the winding judged on screen after the vertex stage's Y flip
+    VkPipelineRasterizationStateCreateInfo ras = { VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
+    ras.polygonMode = VK_POLYGON_MODE_FILL;
+    ras.cullMode = !ra.cull ? VK_CULL_MODE_NONE
+                 : (ra.cull_face == 0x0404u || ra.cull_face == 0x0408u) ? VK_CULL_MODE_FRONT_BIT : VK_CULL_MODE_BACK_BIT;
+    ras.frontFace = ra.front_face == 0x0901u ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE;
+    ras.depthBiasEnable = VK_TRUE; ras.lineWidth = 1.0f;
+    VkPipelineMultisampleStateCreateInfo ms = { VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
+    ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    VkStencilOpState face = {};
+    face.failOp = gcm_stencil_op(ra.stencil_fail); face.depthFailOp = gcm_stencil_op(ra.stencil_zfail);
+    face.passOp = gcm_stencil_op(ra.stencil_zpass); face.compareOp = gcm_compare(ra.stencil_func);
+    face.compareMask = ra.stencil_func_mask; face.writeMask = ra.stencil_write_mask; face.reference = 0;   // dynamic
+    VkPipelineDepthStencilStateCreateInfo ds = { VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
+    ds.depthTestEnable = df != VK_FORMAT_UNDEFINED && ra.depth_test ? VK_TRUE : VK_FALSE;
+    ds.depthWriteEnable = ds.depthTestEnable && ra.depth_write ? VK_TRUE : VK_FALSE;
+    ds.depthCompareOp = gcm_compare(ra.depth_func);
+    ds.stencilTestEnable = df != VK_FORMAT_UNDEFINED && has_stencil(df) && ra.stencil_test ? VK_TRUE : VK_FALSE;
+    ds.front = face; ds.back = face;
+    ds.minDepthBounds = 0.0f; ds.maxDepthBounds = 1.0f;
+    VkPipelineColorBlendAttachmentState cba = {};
+    cba.blendEnable = ra.blend ? VK_TRUE : VK_FALSE;
+    cba.srcColorBlendFactor = gcm_blend_factor(ra.blend_sf_rgb); cba.dstColorBlendFactor = gcm_blend_factor(ra.blend_df_rgb);
+    cba.colorBlendOp = gcm_blend_op(ra.blend_eq_rgb);
+    cba.srcAlphaBlendFactor = gcm_blend_factor(ra.blend_sf_a); cba.dstAlphaBlendFactor = gcm_blend_factor(ra.blend_df_a);
+    cba.alphaBlendOp = gcm_blend_op(ra.blend_eq_a);
+    cba.colorWriteMask = write_mask(ra.color_mask);
+    VkPipelineColorBlendStateCreateInfo cb = { VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
+    cb.attachmentCount = rt != VK_FORMAT_UNDEFINED ? 1u : 0u; cb.pAttachments = &cba;
+    const VkDynamicState dyn[5] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_STENCIL_REFERENCE,
+                                    VK_DYNAMIC_STATE_DEPTH_BIAS, VK_DYNAMIC_STATE_BLEND_CONSTANTS };
+    VkPipelineDynamicStateCreateInfo dy = { VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
+    dy.dynamicStateCount = 5; dy.pDynamicStates = dyn;
+    VkGraphicsPipelineCreateInfo gci = { VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+    gci.stageCount = 2; gci.pStages = stg; gci.pVertexInputState = &vi; gci.pInputAssemblyState = &ia;
+    gci.pViewportState = &vps; gci.pRasterizationState = &ras; gci.pMultisampleState = &ms; gci.pColorBlendState = &cb;
+    gci.pDepthStencilState = &ds; gci.pDynamicState = &dy; gci.layout = s_pl; gci.renderPass = render_pass2(rt, df);
+    const VkResult res = F.vkCreateGraphicsPipelines(D.device, VK_NULL_HANDLE, 1, &gci, nullptr, &P.p);
+    F.vkDestroyShaderModule(D.device, vsm, nullptr);
+    F.vkDestroyShaderModule(D.device, fsm, nullptr);
+    if (res != VK_SUCCESS) { fail("vkCreateGraphicsPipelines (asp)", res); P.p = VK_NULL_HANDLE; return nullptr; }
     P.nconst = nconst;
     stats().n_pipelines++;
     return &P;
@@ -1236,9 +1558,18 @@ void compare_after(Batch& b, const Rec* r, Img* t, uint32_t w, uint32_t h)
 
 // ---- one record ------------------------------------------------------------------------------
 
+std::mutex s_why_lock;
+std::map<std::string, uint64_t> s_why;   // records not rendered, by reason (the report)
 void unsupported(const Rec* r, const char* why)
 {
     stats().n_unsupported++;
+    {
+        std::lock_guard<std::mutex> g(s_why_lock);
+        std::string k(why);
+        const size_t cut = k.find(" at ");   // a texture's address: one reason per kind
+        if (cut != std::string::npos && k.compare(0, 9, "asp: unit") == 0) k = k.substr(0, cut);
+        s_why[k]++;
+    }
     // a comparison it was copied for cannot run
     if (r->walk.ref >= 0) { stats().cmp_skip_not_drawn++; release_ref(r->walk.ref); }
     static int said = 0;
@@ -1474,6 +1805,302 @@ void draw(const Rec* r)
     compare_after(b, r, t, W, H);
 }
 
+// ---- R5: asp's draws (DOTHEROES_ASP_NATIVE=1, development) -----------------------------------
+// asp's records drawn natively: its colour and depth targets in the native
+// registries, its vertices, indices and textures read from guest memory on
+// this thread (docs/NATIVE_R5.md section 4). The engine draws them too until
+// asp's writers are bypassed.
+
+int asp_native()
+{
+    static int on = -1;
+    if (on < 0) { const char* e = getenv("DOTHEROES_ASP_NATIVE"); on = e && *e == '1'; }
+    return on;
+}
+
+// A fast 64-bit hash of guest bytes (the shape of xxHash64's lanes)
+uint64_t fast_hash(const uint8_t* p, size_t n, uint64_t seed)
+{
+    const uint64_t P1 = 11400714785074694791ull, P2 = 14029467366897019727ull;
+    auto rotl = [](uint64_t x, int r) { return (x << r) | (x >> (64 - r)); };
+    uint64_t a = seed + P1 + P2, b = seed + P2, c = seed, d = seed - P1;
+    size_t i = 0;
+    for (; i + 32 <= n; i += 32) {
+        uint64_t w[4]; memcpy(w, p + i, 32);
+        a = rotl(a + w[0] * P2, 31) * P1; b = rotl(b + w[1] * P2, 31) * P1;
+        c = rotl(c + w[2] * P2, 31) * P1; d = rotl(d + w[3] * P2, 31) * P1;
+    }
+    uint64_t h = rotl(a, 1) + rotl(b, 7) + rotl(c, 12) + rotl(d, 18) + n;
+    for (; i + 8 <= n; i += 8) { uint64_t w; memcpy(&w, p + i, 8); h ^= rotl(w * P2, 31) * P1; h = rotl(h, 27) * P1 + P2; }
+    for (; i < n; i++) { h ^= p[i] * P1; h = rotl(h, 11) * P2; }
+    return h;
+}
+
+// Guest memory as the vertex fetch reads it: local (location 0) or main
+const uint8_t* guest_ptr_live(void*, uint32_t location, uint32_t offset, uint32_t n)
+{
+    const uint32_t ea = cellGcmResolveLocated(location == 0, offset);
+    if (!ea || (uint64_t)ea + n > 0xE0000000ull) return nullptr;
+    return vm_base + ea;
+}
+
+std::unordered_map<uint64_t, Img*> s_depths;   // asp's depth surfaces by address
+VkFormat s_d24s8 = VK_FORMAT_UNDEFINED;
+
+VkFormat depth_vkformat(uint32_t depth_format)
+{
+    if (depth_format == 1) return VK_FORMAT_D16_UNORM;   // CELL_GCM_SURFACE_Z16
+    if (s_d24s8 == VK_FORMAT_UNDEFINED) {
+        VkFormatProperties fp;
+        F.GetPhysicalDeviceFormatProperties(D.phys, VK_FORMAT_D24_UNORM_S8_UINT, &fp);
+        s_d24s8 = (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) ? VK_FORMAT_D24_UNORM_S8_UINT
+                                                                                            : VK_FORMAT_D32_SFLOAT_S8_UINT;
+    }
+    return s_d24s8;   // CELL_GCM_SURFACE_Z24S8
+}
+
+Img* depth_image(uint32_t loc, uint32_t off, VkFormat fmt, uint32_t w, uint32_t h)
+{
+    Img*& o = s_depths[akey(loc, off)];
+    if (o && (o->fmt != fmt || o->w < w || o->h < h)) { s_retired.push_back(o); stats().n_retired++; o = nullptr; }
+    if (!o) o = make_depth_image(fmt, w, h);
+    return o;
+}
+
+// A texture asp samples from guest memory (static, mostly: DXT and
+// swizzled ones), cached by its description and checked against the guest
+// bytes by a hash once a frame
+struct GuestTex { Img* img; uint64_t hash; uint32_t frame; };
+std::unordered_map<uint64_t, GuestTex> s_gtex;
+
+Img* guest_texture_live(Batch& b, const Rec* r, const Texture& t)
+{
+    if (t.cubemap || t.dimension == 3) return nullptr;
+    rsx_tex_level lv[RSX_MAX_TEXTURE_LEVELS];
+    const uint32_t nlv = rsx_texture_mip_chain(t.format, t.width, t.height, t.mipmap, t.pitch, lv);
+    if (!nlv) return nullptr;
+    const uint32_t bytes = lv[nlv - 1].offset + lv[nlv - 1].tl.face_bytes;
+    const uint32_t ea = cellGcmResolveLocated(t.location == 0, t.offset);
+    if (!ea || (uint64_t)ea + bytes > 0xE0000000ull || bytes > (64u << 20)) return nullptr;
+    const uint32_t key[] = { t.location, t.offset, t.format, t.width, t.height, nlv, t.pitch };
+    const uint64_t k = fnv(key, sizeof key);
+    GuestTex& g = s_gtex[k];
+    if (g.img && g.frame == r->frame) return g.img;
+    const uint64_t h = fast_hash(vm_base + ea, bytes, k);
+    if (g.img && g.hash == h) { g.frame = r->frame; return g.img; }
+    uint32_t bpp;
+    const VkFormat vf = be_vkformat(texfmt_be(lv[0].tl.fmt), &bpp);
+    if (vf == VK_FORMAT_UNDEFINED) return nullptr;
+    if (g.img && (g.img->fmt != vf || g.img->w != t.width || g.img->h != t.height || g.img->levels != nlv)) {
+        s_retired.push_back(g.img); g.img = nullptr;
+    }
+    if (!g.img && !(g.img = make_image(vf, t.width, t.height, nlv, bpp, false))) return nullptr;
+    access(b.cb, g.img, kCopyDst);
+    std::vector<uint8_t> dec;
+    for (uint32_t m = 0; m < nlv; m++) {
+        const rsx_tex_layout* tl = &lv[m].tl;
+        dec.assign((size_t)tl->dst_row_bytes * tl->rows, 0);
+        rsx_texture_decode(dec.data(), tl->dst_row_bytes, vm_base + ea + lv[m].offset, lv[m].w, lv[m].h, tl,
+                           rsx_texture_argb_is_rgba());
+        const VkDeviceSize at = upload(b, dec.data(), dec.size(), 16);
+        if (at == ~(VkDeviceSize)0) { g.frame = ~0u; return nullptr; }   // the batch is full: again next time
+        VkBufferImageCopy c = {};
+        c.bufferOffset = at; c.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, m, 0, 1 };
+        c.imageExtent = { lv[m].w, lv[m].h, 1 };
+        F.vkCmdCopyBufferToImage(b.cb, b.up.b, g.img->img, layout_of(g.img), 1, &c);
+    }
+    mark(b, kSectCopy);
+    g.img->written = 1;
+    g.hash = h; g.frame = r->frame;
+    stats().n_static_textures++;
+    return g.img;
+}
+
+void asp_draw(const Rec* r)
+{
+    Batch& b = batch(r->frame);
+    wait_for(b, r);
+    if (r->why || !r->vp || !r->fp) { unsupported(r, "asp: no programs, or no draw object"); return; }
+    const State& st = r->st;
+    const Surface& sf = st.surface;
+    if (sf.color_target > 1 || sf.antialias) { unsupported(r, "asp: MRT or antialiased target"); return; }
+    const uint32_t W = sf.width, H = sf.height;
+    if (!W || !H) { unsupported(r, "asp: no clip"); return; }
+    // its targets
+    Img* t = nullptr; VkFormat rt = VK_FORMAT_UNDEFINED; uint32_t bpp = 0;
+    if (sf.color_target) {
+        rt = (VkFormat)surface_vkformat(sf.color_format, &bpp);
+        t = target_image(sf.color_location[0] ? 1u : 0u, sf.color_offset[0], rt, bpp, W, H);
+        if (!t) { unsupported(r, "asp: target image"); return; }
+    }
+    const Raster& ra = st.raster;
+    Img* d = nullptr; VkFormat df = VK_FORMAT_UNDEFINED;
+    if (sf.depth_format && (ra.depth_test || ra.stencil_test)) {
+        df = depth_vkformat(sf.depth_format);
+        d = depth_image(sf.depth_location ? 1u : 0u, sf.depth_offset, df, W, H);
+        if (!d) { unsupported(r, "asp: depth image"); return; }
+    }
+    if (!t && !d) { unsupported(r, "asp: neither a colour nor a depth target"); return; }
+    // the vertex layout, the vertices [0, vcount), the indices
+    rsx_vertex_layout_plan layout;
+    {
+        uint32_t mask = 0xFFFFu;
+        rsx_vp_input_analysis an = { 0xFFFFu, 0 };
+        const uint32_t instrs = (uint32_t)r->vp->bytes.size() / 16;
+        if (rsx_vp_analyze_inputs(r->vp->bytes.data(), instrs * 16u, &an) == (int)instrs && an.exact && an.input_mask)
+            mask = an.input_mask;
+        rsx_vertex_layout_plan_init(&layout, mask);
+    }
+    int indexed = 0;
+    if (!rsx_vertex_topology_plan(r->prim, 1, &indexed)) { unsupported(r, "asp: a primitive the engine does not rebuild"); return; }
+    const uint32_t nv = r->vcount, n = r->count;
+    if (!nv || !n || nv > (1u << 20) || n > (1u << 22)) { unsupported(r, "asp: counts"); return; }
+    std::vector<uint32_t> occ(n);
+    if (r->idx_ea) {
+        const bool u16 = r->idx_type == 2;
+        const uint64_t ib = (uint64_t)r->idx_ea + (uint64_t)n * (u16 ? 2 : 4);
+        if (r->idx_ea < 0x10000u || ib > 0xE0000000ull) { unsupported(r, "asp: index buffer"); return; }
+        const uint8_t* ip = vm_base + r->idx_ea;
+        for (uint32_t i = 0; i < n; i++) {
+            const uint32_t v = u16 ? (uint32_t)(ip[2 * i] << 8 | ip[2 * i + 1])
+                                   : (uint32_t)ip[4 * i] << 24 | (uint32_t)ip[4 * i + 1] << 16 | (uint32_t)ip[4 * i + 2] << 8 | ip[4 * i + 3];
+            if (v >= nv) { unsupported(r, "asp: an index past the vertex count"); return; }
+            occ[i] = v;
+        }
+    } else {
+        if (n > nv) { unsupported(r, "asp: more vertices drawn than the object has"); return; }
+        for (uint32_t i = 0; i < n; i++) occ[i] = i;
+    }
+    std::vector<rsx_vertex_ref> refs(nv);
+    for (uint32_t i = 0; i < nv; i++) refs[i] = { i, 0 };
+    rsx_vertex_fetch_plan plan;
+    fetch_plan(&plan, r, layout);
+    plan.guest_ptr = guest_ptr_live; plan.guest_user = nullptr;
+    rsx_vertex_fetch_plan_prepare(&plan, refs.data(), nv);
+    std::vector<uint8_t> verts((size_t)nv * layout.stride);
+    if (!rsx_vertex_fetch_many(&plan, refs.data(), nv, verts.data())) { unsupported(r, "asp: vertex fetch"); return; }
+    const uint32_t n_draw = rsx_draw_engine_topology_index_count(r->prim, n, nullptr, 0);
+    std::vector<uint32_t> idx(n_draw ? n_draw : 1);
+    rsx_draw_engine_write_topology_indices(r->prim, n, nullptr, 0, occ.data(), idx.data());
+    // the pipeline
+    rsx_fp_constant_block fc;
+    const Pipe* P = pipeline_asp(r, layout, rt, df, &fc);
+    if (!P) { unsupported(r, "asp: pipeline"); return; }
+    // constants: the vertex program's and the viewport epilogue; the fragment
+    // program's buffered constants and the alpha reference and window slot
+    const Viewport& vp = st.viewport;
+    const float Wf = (float)W, Hf = (float)H;
+    float xf[8] = { 1, 1, 1, 0, 0, 0, 0, 0 };
+    if (vp.scale[0] != 0.0f || vp.offset[0] != 0.0f) {
+        xf[0] = vp.scale[0] / (Wf * 0.5f);
+        xf[1] = -(vp.scale[1] / (Hf * 0.5f));
+        xf[2] = vp.scale[2];
+        xf[4] = (vp.offset[0] - Wf * 0.5f) / (Wf * 0.5f);
+        xf[5] = -((vp.offset[1] - Hf * 0.5f) / (Hf * 0.5f));
+        xf[6] = vp.offset[2];
+    }
+    uint8_t vcb[512 * 16 + 32];
+    memcpy(vcb, r->vconst, 512 * 16);
+    memcpy(vcb + 512 * 16, xf, sizeof xf);
+    const uint32_t nslots = fc.count ? fc.count : 1u;
+    std::vector<uint8_t> pcb((nslots + 1) * 16, 0);
+    if (fc.count) memcpy(pcb.data(), fc.values, fc.count * 16u);
+    {
+        float* alpha = (float*)(pcb.data() + nslots * 16);
+        alpha[0] = ra.alpha_test ? ra.alpha_ref / 255.0f : 0.0f;
+        alpha[1] = (float)(sf.height & 0xFFFu);
+        alpha[2] = 0.0f; alpha[3] = 0.0f;
+    }
+    // textures: a native image of the address (a target asp or PPFX drew, a
+    // depth surface), else guest memory
+    VkDescriptorImageInfo ii[16], si[16];
+    const uint32_t sampled = rsx_fp_texture_units(r->fp->bytes.data(), (uint32_t)r->fp->bytes.size());
+    Img* srcs[16] = {};
+    VkImageView views[16] = {};
+    for (uint32_t u = 0; u < 16; u++) {
+        if (!(sampled >> u & 1) || !st.samp[u].enable) continue;
+        const Texture& tx = st.tex[u];
+        const uint64_t key = akey(tx.location ? 1u : 0u, tx.offset);
+        Img* src = nullptr;
+        auto dt = s_depths.find(key);
+        auto ct = s_targets.find(key);
+        if (dt != s_depths.end() && dt->second && dt->second->written) { src = dt->second; views[u] = depth_sample_view(src); }
+        else if (ct != s_targets.end() && ct->second->written) {
+            src = ct->second;
+            if (src == t) { unsupported(r, "asp: a draw sampling its own target"); return; }
+            views[u] = view_of(src, tx.remap & 0xFFFFu, tx.format);
+        } else if ((src = guest_texture_live(b, r, tx))) views[u] = view_of(src, tx.remap & 0xFFFFu, tx.format);
+        if (!src) {
+            char why[200];
+            snprintf(why, sizeof why, "asp: unit %u (format %02X %ux%u mips %u dim %u cube %u) has no source at %u:%08X", u,
+                     tx.format, tx.width, tx.height, tx.mipmap, tx.dimension, tx.cubemap, tx.location, tx.offset);
+            unsupported(r, why);
+            return;
+        }
+        srcs[u] = src;
+    }
+    for (uint32_t u = 0; u < 16; u++) if (srcs[u]) access(b.cb, srcs[u], kSampled);
+    for (uint32_t u = 0; u < 16; u++) {
+        ii[u] = { VK_NULL_HANDLE, s_dummy->view, sampled_layout() };
+        si[u] = { s_dummy_smp, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED };
+        if (!srcs[u]) continue;
+        ii[u].imageView = views[u];
+        si[u].sampler = sampler(st.samp[u]);
+    }
+    const VkDeviceSize o_vc = upload(b, vcb, sizeof vcb), o_pc = upload(b, pcb.data(), pcb.size());
+    const VkDeviceSize o_v = upload(b, verts.data(), verts.size(), 16), o_i = upload(b, idx.data(), idx.size() * 4, 16);
+    if (o_vc == ~(VkDeviceSize)0 || o_pc == ~(VkDeviceSize)0 || o_v == ~(VkDeviceSize)0 || o_i == ~(VkDeviceSize)0 ||
+        b.sets >= kSets) {
+        unsupported(r, "asp: the batch is full");
+        return;
+    }
+    VkDescriptorSetAllocateInfo dai = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+    dai.descriptorPool = b.dp; dai.descriptorSetCount = 1; dai.pSetLayouts = &s_dsl;
+    VkDescriptorSet set;
+    if (F.vkAllocateDescriptorSets(D.device, &dai, &set) != VK_SUCCESS) { unsupported(r, "asp: descriptor set"); return; }
+    b.sets++;
+    VkDescriptorBufferInfo bi[2] = { { b.up.b, o_vc, sizeof vcb }, { b.up.b, o_pc, pcb.size() } };
+    VkWriteDescriptorSet wr[4] = {};
+    for (int k = 0; k < 4; k++) { wr[k].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; wr[k].dstSet = set; }
+    wr[0].dstBinding = 0; wr[0].descriptorCount = 1; wr[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; wr[0].pBufferInfo = &bi[0];
+    wr[1].dstBinding = 1; wr[1].descriptorCount = 1; wr[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; wr[1].pBufferInfo = &bi[1];
+    wr[2].dstBinding = 16; wr[2].descriptorCount = 16; wr[2].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE; wr[2].pImageInfo = ii;
+    wr[3].dstBinding = 48; wr[3].descriptorCount = 16; wr[3].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER; wr[3].pImageInfo = si;
+    F.vkUpdateDescriptorSets(D.device, 4, wr, 0, nullptr);
+    if (t) access(b.cb, t, kAttach);
+    if (d) access(b.cb, d, kDepthAttach);
+    VkRenderPassBeginInfo rbi = { VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+    rbi.renderPass = render_pass2(rt, df); rbi.framebuffer = framebuffer2(t, d);
+    const uint32_t fw = t && d ? (t->w < d->w ? t->w : d->w) : t ? t->w : d->w;
+    const uint32_t fh = t && d ? (t->h < d->h ? t->h : d->h) : t ? t->h : d->h;
+    rbi.renderArea = { { 0, 0 }, { fw, fh } };
+    F.vkCmdBeginRenderPass(b.cb, &rbi, VK_SUBPASS_CONTENTS_INLINE);
+    F.vkCmdBindPipeline(b.cb, VK_PIPELINE_BIND_POINT_GRAPHICS, P->p);
+    VkViewport v = { 0.0f, 0.0f, Wf, Hf, 0.0f, 1.0f };
+    F.vkCmdSetViewport(b.cb, 0, 1, &v);
+    uint32_t sc[4];
+    scissor_rect(st.scissor, fw, fh, sc);
+    VkRect2D s2 = { { (int32_t)sc[0], (int32_t)sc[1] }, { sc[2], sc[3] } };
+    F.vkCmdSetScissor(b.cb, 0, 1, &s2);
+    F.vkCmdSetStencilReference(b.cb, VK_STENCIL_FACE_FRONT_AND_BACK, ra.stencil_ref);
+    // polygon offset: the guest's units are the depth format's resolution steps, as Vulkan's
+    if (ra.poly_offset_fill) F.vkCmdSetDepthBias(b.cb, ra.poly_offset_units, 0.0f, ra.poly_offset_factor);
+    else F.vkCmdSetDepthBias(b.cb, 0.0f, 0.0f, 0.0f);
+    const float bc[4] = { 0, 0, 0, 0 };   // the blend colour: not described yet (asp's constant-colour blends)
+    F.vkCmdSetBlendConstants(b.cb, bc);
+    F.vkCmdBindDescriptorSets(b.cb, VK_PIPELINE_BIND_POINT_GRAPHICS, s_pl, 0, 1, &set, 0, nullptr);
+    F.vkCmdBindVertexBuffers(b.cb, 0, 1, &b.up.b, &o_v);
+    F.vkCmdBindIndexBuffer(b.cb, b.up.b, o_i, VK_INDEX_TYPE_UINT32);
+    F.vkCmdDrawIndexed(b.cb, n_draw, 1, 0, 0, 0);
+    F.vkCmdEndRenderPass(b.cb);
+    mark(b, kSectDraw);
+    if (t) t->written = 1;
+    if (d) d->written = 1;
+    b.records++;
+    stats().n_asp_draws++;
+    stats().n_asp_vertex_bytes += verts.size();
+}
+
 void clear(const Rec* r)
 {
     Batch& b = batch(r->frame);
@@ -1527,6 +2154,8 @@ bool init()
         (PFN_vkGetPhysicalDeviceMemoryProperties)D.get_instance_proc(D.instance, "vkGetPhysicalDeviceMemoryProperties");
     F.GetPhysicalDeviceProperties =
         (PFN_vkGetPhysicalDeviceProperties)D.get_instance_proc(D.instance, "vkGetPhysicalDeviceProperties");
+    F.GetPhysicalDeviceFormatProperties =
+        (PFN_vkGetPhysicalDeviceFormatProperties)D.get_instance_proc(D.instance, "vkGetPhysicalDeviceFormatProperties");
     F.GetPhysicalDeviceMemoryProperties(D.phys, &s_mem);
     VkPhysicalDeviceProperties props;
     F.GetPhysicalDeviceProperties(D.phys, &props);
@@ -1709,7 +2338,7 @@ void run()
         }
         s_idle = 0;
         Rec* r = q.at(next);
-        if (r->kind == kAspDraw) {   // R5: not rendered yet
+        if (r->kind == kAspDraw && !asp_native()) {   // R5: checked, not rendered
             next++;
             q.done.store(next, std::memory_order_release);
             q.cv.notify_all();
@@ -1738,7 +2367,7 @@ void run()
         if (delay < 0) { const char* e = getenv("DOTHEROES_PPFX_DELAY_MS"); delay = e && *e ? atoi(e) : 0; }
         if (delay) std::this_thread::sleep_for(std::chrono::milliseconds(delay));
         const uint64_t t0 = now_ns();
-        if (r->kind == kAspDraw) {}   // R5: asp's records are checked, not rendered yet
+        if (r->kind == kAspDraw) asp_draw(r);   // R5 (DOTHEROES_ASP_NATIVE=1)
         else if (r->kind == kDraw) draw(r);
         else if (r->kind == kClear) clear(r);
         stats().cpu_record_ns += now_ns() - t0;
@@ -1838,6 +2467,14 @@ void render_drain(uint32_t timeout_ms)
 
 void render_report(std::vector<std::string>& out)
 {
+    {
+        std::lock_guard<std::mutex> g(s_why_lock);
+        for (auto& kv : s_why) {
+            char line[300];
+            snprintf(line, sizeof line, "not rendered: %llu %s", (unsigned long long)kv.second, kv.first.c_str());
+            out.push_back(line);
+        }
+    }
     std::lock_guard<std::mutex> g(s_var_lock);
     char line[512];
     for (auto& kv : s_vars) {

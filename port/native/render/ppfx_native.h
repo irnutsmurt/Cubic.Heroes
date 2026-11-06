@@ -160,7 +160,7 @@ struct Need {
     uint32_t location, offset;     // RSX_LOCATION_*, offset
     uint32_t w, h, pitch;          // the extent the record uses
     uint32_t format;               // texture: the format byte; target: the surface colour format
-    uint8_t unit;                  // 0..15 a texture unit, 0xFF the colour target
+    uint8_t unit;                  // 0..15 a texture unit, 0xFF the colour target, 0xFE the depth target (R5)
     uint8_t ppfx_wrote;            // an earlier record wrote this address (the native side has it)
 };
 enum { kMaxNeeds = 17 };
@@ -207,7 +207,12 @@ struct Rec {
     BlobP vp;                      // vertex program words from its start slot, through its last instruction
     BlobP fp;                      // fragment program bytes as the GPU will read them at this draw
     // the operation
-    uint32_t prim, first, count;   // draw arrays
+    uint32_t prim, first, count;   // draw arrays (kAspDraw: count is the index count, or the vertex count)
+    // kAspDraw (R5): the draw object's index buffer (its address; 0 none,
+    // DRAW_ARRAYS) and index type (2: 16-bit), and its vertex count: the
+    // vertices [0, vcount) of each enabled stream, read from guest memory
+    // by the native renderer (vr[] give the streams' ranges, no bytes)
+    uint32_t idx_ea, idx_type, vcount;
     uint32_t clear_mask;           // clear
     VtxRange vr[16];
     uint32_t nvr;
@@ -327,6 +332,7 @@ struct Stats {
     std::atomic<uint64_t> n_draws{0}, n_clears{0}, n_skipped{0}, n_unsupported{0}, n_batches{0};
     std::atomic<uint64_t> n_pipelines{0}, n_images{0}, n_image_bytes{0}, n_static_textures{0}, n_feedback{0};
     std::atomic<uint64_t> n_frames{0};    // frames with PPFX records (the per-frame figures' denominator)
+    std::atomic<uint64_t> n_asp_draws{0}, n_asp_vertex_bytes{0};   // R5: asp's records drawn natively
     std::atomic<uint64_t> n_retired{0};   // images replaced at an address (another size or format) and destroyed later
     std::atomic<uint64_t> n_barriers{0}, n_barriers_full{0}, n_handoff_copies{0}, n_snapshot_copies{0};
     // comparisons: wanted = asked for; then exactly one of equal, differ,
