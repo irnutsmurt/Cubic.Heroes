@@ -107,6 +107,13 @@ struct Raster {             // the render state, as the calls gave it
     // cellGcmSetReport, cellGcmSetRenderEnable): not rendering state, kept for
     // R4's accounting of PPFX's side effects
     uint8_t zpass_count, render_enable_mode;
+    // R5: what asp's draws set besides (PPFX turns these off: blend, the
+    // alpha and stencil tests). The libgcm constants (CELL_GCM_*), as the
+    // calls' arguments give them.
+    uint16_t blend_sf_rgb, blend_df_rgb, blend_sf_a, blend_df_a, blend_eq_rgb, blend_eq_a;   // cellGcmSetBlendFunc / Equation
+    uint16_t alpha_func; uint8_t alpha_ref;                    // cellGcmSetAlphaFunc
+    uint16_t stencil_func, stencil_fail, stencil_zfail, stencil_zpass;   // cellGcmSetStencilFunc / Op
+    uint8_t stencil_ref, stencil_func_mask, stencil_write_mask;
 };
 struct VertexData {
     uint32_t base_offset, base_index;   // cellGcmSetVertexDataBase
@@ -350,6 +357,7 @@ struct Stats {
     // R5: asp's records
     std::atomic<uint64_t> asp_records{0}, asp_matched{0}, asp_missed{0}, asp_xc_draws{0}, asp_xc_differ{0};
     std::atomic<uint64_t> asp_draw_events{0};   // engine draw events inside a matched asp draw's commands
+    std::atomic<uint64_t> asp_group_restores{0};   // asp's state items restored from its store by a re-emission
 };
 Stats& stats();
 void report_add(const char* line);   // a line in the next report (diagnostics)

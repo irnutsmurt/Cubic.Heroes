@@ -416,6 +416,62 @@
   {
    "addr": "0x006C99B0",
    "note": "asp's fragment program bind (shader object): R5's probe"
+  },
+  {
+   "addr": "0x006C048C",
+   "note": "asp's blend enable setter (method 0x0310): R5's encoders and setter probe (docs/NATIVE_R5.md)"
+  },
+  {
+   "addr": "0x006C05AC",
+   "note": "asp's alpha test enable setter (0x0304)"
+  },
+  {
+   "addr": "0x006C06CC",
+   "note": "asp's polygon mode setter (front and back, 0x1828/0x182C)"
+  },
+  {
+   "addr": "0x006C08F0",
+   "note": "asp's scissor setter (0x08C0/0x08C4)"
+  },
+  {
+   "addr": "0x006C5170",
+   "note": "asp's scissor setter, a second form (0x08C0/0x08C4)"
+  },
+  {
+   "addr": "0x006D11BC",
+   "note": "asp's scissor setter, a third form (0x08C0/0x08C4)"
+  },
+  {
+   "addr": "0x006C0F60",
+   "note": "asp's viewport setter (clip range 0x0394/0x0398, viewport 0x0A00/0x0A04, scale and offset 0x0A20-0x0A3C)"
+  },
+  {
+   "addr": "0x006C2D3C",
+   "note": "asp's clear (clear values 0x1D8C/0x1D90, the clear 0x1D94)"
+  },
+  {
+   "addr": "0x006C4284",
+   "note": "asp's alpha function setter (enable, function, reference: 0x0304-0x030C)"
+  },
+  {
+   "addr": "0x006C4508",
+   "note": "asp's stencil test enable setter (0x0328)"
+  },
+  {
+   "addr": "0x006C8A34",
+   "note": "asp's render target set (the surface: 0x018C-0x02B8, 0x1D88)"
+  },
+  {
+   "addr": "0x006CADE4",
+   "note": "asp's fragment program upload (an inline transfer into local memory)"
+  },
+  {
+   "addr": "0x006C9624",
+   "note": "asp's fragment program constant patch (an inline transfer into a program in local memory)"
+  },
+  {
+   "addr": "0x006D0E84",
+   "note": "asp's texture apply for unit 4 (0x1A80-0x1A98, control 3 0x1850): the shadow map"
   }
  ]
 }

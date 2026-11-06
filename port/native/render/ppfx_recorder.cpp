@@ -74,6 +74,7 @@
 
 #include <chrono>
 #include <map>
+#include <set>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -112,6 +113,17 @@ void reset_state(State* s)
     memset(s, 0, sizeof *s);
     s->raster.color_mask = 0x01010101u;   // CELL_GCM_COLOR_MASK_{R,G,B,A}
     s->raster.front_face = 0x0901u;       // CELL_GCM_CCW
+    // the rest of the reset render state (the GPU's, as libgcm documents it)
+    Raster& r = s->raster;
+    r.cull_face = 0x0405u;                // CELL_GCM_BACK
+    r.depth_func = 0x0201u;               // CELL_GCM_LESS
+    r.front_poly_mode = r.back_poly_mode = 0x1B02u;   // CELL_GCM_POLYGON_MODE_FILL
+    r.blend_sf_rgb = r.blend_sf_a = 1;    // CELL_GCM_ONE
+    r.blend_df_rgb = r.blend_df_a = 0;    // CELL_GCM_ZERO
+    r.blend_eq_rgb = r.blend_eq_a = 0x8006u;   // CELL_GCM_FUNC_ADD
+    r.alpha_func = r.stencil_func = 0x0207u;   // CELL_GCM_ALWAYS
+    r.stencil_fail = r.stencil_zfail = r.stencil_zpass = 0x1E00u;   // CELL_GCM_KEEP
+    r.stencil_func_mask = r.stencil_write_mask = 0xFF;
     s->clear_depth = 0xFFFFFF00u;
     for (auto& v : s->vdata.current) { v[0] = v[1] = v[2] = 0.0f; v[3] = 1.0f; }
 }
@@ -313,6 +325,21 @@ struct Asp {
     uint32_t pending_units;          // sampler binds that ran: the unit's address mode is in the store now
     uint8_t cmask_unknown;           // a pass apply set the colour mask in a way the model does not follow
     uint64_t unknown_draws;          // PPFX draws while it was
+    // R5: asp's fragment programs, uploaded into local memory (offset -> bytes)
+    std::unordered_map<uint32_t, uint32_t> fp_bytes;
+    uint64_t fp_odd_patches;         // constant patches of an odd word count (asp transfers one word more)
+    uint8_t fp_bound;                // an asp program pair is bound: its draws take the program from the shadow
+    uint32_t fp_bound_obj;           // the bound fragment shader object
+    std::unordered_map<uint32_t, uint32_t> fp_last_obj;   // per offset: the object uploaded there last
+    uint64_t fp_stale_draws;         // draws whose bound program is not the one last uploaded at its offset
+    // R5: asp's state store as its setters left it, in the explicit form
+    // (every setter writes its item into the command buffer and into the
+    // item's slot; asp re-emits ranges of the store), and the inputs a draw
+    // unbinds after its draw command
+    State stored;
+    uint8_t stored_init;
+    uint32_t stored_valid;           // the groups a setter has set (the rest: what asp's set-up put there, unknown)
+    uint32_t unbind_after;
 } A;
 
 // Calls on other threads than the producer's touch the shadow (an inline
@@ -574,6 +601,9 @@ bool asp_fn(uint32_t a)
     case 0x006C0E38: case 0x006C19A4:
     case 0x006C6F88: case 0x006CB070: case 0x006D3190: case 0x006D32D0: case 0x006C9C74:   // R5
     case 0x006CA3D0: case 0x006C99B0:
+    case 0x006C048C: case 0x006C05AC: case 0x006C06CC: case 0x006C08F0: case 0x006C5170: case 0x006D11BC:   // R5, more
+    case 0x006C0F60: case 0x006C2D3C: case 0x006C4284: case 0x006C4508: case 0x006C8A34: case 0x006CADE4:
+    case 0x006C9624: case 0x006D0E84:
         return true;
     default:
         return false;
@@ -640,11 +670,100 @@ void asp_resolve()
 }
 
 int asp_record_call(uint32_t addr, ppu_context* c);   // R5, below
+bool asp_probe_enter(uint32_t addr, ppu_context* c);    // R5's setter probe, below
+int asp_call_state(uint32_t addr, ppu_context* c);
+
+int asp_records_on();
+void asp_mirror(uint32_t addr);
 
 int asp_call(uint32_t addr, ppu_context* c)
 {
     stats().asp_calls++;
-    if (const int r5 = asp_record_call(addr, c)) return r5 - 1;
+    const bool probed = asp_probe_enter(addr, c);
+    int ret;
+    if (const int r5 = asp_record_call(addr, c)) ret = r5 - 1;
+    else ret = asp_call_state(addr, c);
+    if (asp_records_on()) asp_mirror(addr);
+    return probed ? 2 : ret;
+}
+
+// ---- R5: asp's state store, as items. A group of items per slot of asp's
+// render-state table (TOC -0x2D98: u16 offsets into the store), as the
+// setters read it from their own code.
+enum AspGroup { kGAlpha, kGBlend, kGCmask, kGCull, kGDepth, kGDmask, kGPmode, kGPoffset, kGScissor, kGStencil,
+                kGSwmask, kGViewport, kGroups };
+const uint16_t kGroupSlot[kGroups] = { 0x04, 0x10, 0x20, 0x28, 0x30, 0x34, 0x40, 0x48, 0x50, 0x54, 0x5C, 0x64 };
+
+void asp_copy_group(int g, const State& from, State& to)
+{
+    const Raster& f = from.raster;
+    Raster& t = to.raster;
+    switch (g) {
+    case kGAlpha: t.alpha_test = f.alpha_test; t.alpha_func = f.alpha_func; t.alpha_ref = f.alpha_ref; break;
+    case kGBlend:
+        t.blend = f.blend; t.blend_sf_rgb = f.blend_sf_rgb; t.blend_df_rgb = f.blend_df_rgb; t.blend_sf_a = f.blend_sf_a;
+        t.blend_df_a = f.blend_df_a; t.blend_eq_rgb = f.blend_eq_rgb; t.blend_eq_a = f.blend_eq_a;
+        break;
+    case kGCmask: t.color_mask = f.color_mask; t.color_mask_by = kByAsp; break;
+    case kGCull: t.cull = f.cull; t.cull_face = f.cull_face; t.front_face = f.front_face; break;
+    case kGDepth: t.depth_test = f.depth_test; t.depth_func = f.depth_func; break;
+    case kGDmask: t.depth_write = f.depth_write; break;
+    case kGPmode: t.front_poly_mode = f.front_poly_mode; t.back_poly_mode = f.back_poly_mode; break;
+    case kGPoffset: t.poly_offset_fill = f.poly_offset_fill; t.poly_offset_factor = f.poly_offset_factor; t.poly_offset_units = f.poly_offset_units; break;
+    case kGScissor: to.scissor = from.scissor; break;
+    case kGStencil:
+        t.stencil_test = f.stencil_test; t.stencil_func = f.stencil_func; t.stencil_ref = f.stencil_ref;
+        t.stencil_func_mask = f.stencil_func_mask; t.stencil_fail = f.stencil_fail; t.stencil_zfail = f.stencil_zfail;
+        t.stencil_zpass = f.stencil_zpass;
+        break;
+    case kGSwmask: t.stencil_write_mask = f.stencil_write_mask; break;
+    case kGViewport: to.viewport = from.viewport; break;
+    default: break;
+    }
+}
+
+// A setter has run: its item is in the store now, as it is in the state
+void asp_mirror(uint32_t addr)
+{
+    if (!A.stored_init) { reset_state(&A.stored); A.stored_init = 1; }
+    int g = -1;
+    switch (addr) {
+    case 0x006C05AC: case 0x006C4284: g = kGAlpha; break;
+    case 0x006C048C: case 0x006C5298: g = kGBlend; break;
+    case 0x006C02E8: g = kGCmask; break;
+    case 0x006C4D1C: g = kGCull; break;
+    case 0x006C49BC: g = kGDepth; break;
+    case 0x006C01C4: g = kGDmask; break;
+    case 0x006C06CC: g = kGPmode; break;
+    case 0x006C4628: g = kGPoffset; break;
+    case 0x006C08F0: case 0x006C5170: g = kGScissor; break;
+    case 0x006C0A70: case 0x006C4508: g = kGStencil; break;
+    case 0x006C0E38: g = kGSwmask; break;
+    case 0x006C0F60: g = kGViewport; break;
+    case 0x006C37A0: {   // the sampler bind: the unit's address mode is in its slot too
+        for (uint32_t k = 0; k < 16; k++) A.stored.samp[k] = S.st.samp[k];
+        return;
+    }
+    default: return;
+    }
+    asp_copy_group(g, S.st, A.stored);
+    A.stored_valid |= 1u << g;
+}
+
+// asp re-emits [src, src + 4 * words) of its store: the items whose slots lie there are the store's again
+void asp_restore(uint32_t begin, uint32_t src, uint64_t hi)
+{
+    if (!A.stored_init) return;
+    const uint32_t tbl = g32(A.toc - 0x2D98u);
+    for (int g = 0; g < kGroups; g++) {
+        if (!(A.stored_valid >> g & 1) || !ea_ok(tbl + kGroupSlot[g], 2)) continue;
+        const uint32_t slot = begin + (g16(tbl + kGroupSlot[g]) & ~3u);
+        if (slot >= src && slot < hi) { asp_copy_group(g, A.stored, S.st); stats().asp_group_restores++; }
+    }
+}
+
+int asp_call_state(uint32_t addr, ppu_context* c)
+{
     if (addr == kAspColorMask || addr == kAspSampler) { A.device = (uint32_t)c->gpr[3]; A.toc = (uint32_t)c->gpr[2]; }
     switch (addr) {
     case kAspColorMask: {   // (device, const u8 rgba[4]): asp writes R, G and A as on/off, B's byte as it is
@@ -665,6 +784,7 @@ int asp_call(uint32_t addr, ppu_context* c)
         if (dst != S.ring_ctx || !asp_store(&begin, &end) || src < begin || src >= end) break;
         stats().asp_restores++;
         const uint64_t hi = (uint64_t)src + 4ull * words;
+        if (asp_records_on()) asp_restore(begin, src, hi);   // R5: every item, from the setters' own values
         const uint32_t cm = asp_color_mask_slot(begin);
         if (cm >= src && cm < hi && asp_read(cm, 0x0324, &v)) asp_set_color_mask(v);
         for (uint32_t u = 0; u < 16; u++) {
@@ -749,7 +869,7 @@ std::mutex s_bp_lock;   // the report reads it
 // call (inside it everything runs) or a verified one.
 struct VEntry {
     uint32_t addr, lr, sp, ctx_ea, begin, end, cur;
-    uint8_t kind;   // 0 kept, 1 verified, 2 asp's draw (R5)
+    uint8_t kind;   // 0 kept, 1 verified, 2 asp's draw (R5), 3 R5's setter probe
     uint32_t lap;
     uint64_t gpr[32];
     double fpr[32];
@@ -945,6 +1065,47 @@ void publish(Rec* r)
     q.cv.notify_all();
 }
 
+// The vertex program from its start slot through its last instruction, as
+// the uploads left vertex program memory
+BlobP vp_blob_now()
+{
+    const uint32_t start = S.st.vp.start;
+    if (S.vp_blob_gen != S.vp_gen || !S.vp_blob || start != S.vp_blob_start) {
+        if (start < 544) {
+            const uint32_t instrs = rsx_vp_program_size_instrs((const uint8_t*)(S.vp + start * 4), (544 - start) * 16);
+            S.vp_blob = instrs ? blob_of((const uint8_t*)(S.vp + start * 4), instrs * 16) : nullptr;
+        } else S.vp_blob = nullptr;
+        S.vp_blob_gen = S.vp_gen;
+        S.vp_blob_start = start;
+    }
+    return S.vp_blob;
+}
+
+// Local memory's bytes as the shadow has them (else as memory has them)
+void shadow_read(uint32_t off, std::vector<uint8_t>& out)
+{
+    for (uint32_t i = 0; i + 4 <= out.size(); i += 4) {
+        auto it = s_shadow.find((off + i) >> 12);
+        const uint32_t w = (off + i) & 0xFFF;
+        if (it != s_shadow.end() && it->second->ep[w >> 2]) memcpy(&out[i], it->second->b + w, 4);
+        else memcpy(&out[i], vm_base + kLocalEa + off + i, 4);
+    }
+}
+
+// R5: the fragment program an asp draw runs -- the one asp uploaded at the
+// bound offset, with the patches made since, through its last instruction
+BlobP asp_fp_now()
+{
+    const uint32_t off = S.st.fp.offset;
+    auto it = A.fp_bytes.find(off);
+    if (it == A.fp_bytes.end() || !it->second) return nullptr;
+    std::vector<uint8_t> buf(it->second & ~3u);
+    shadow_read(off, buf);
+    const uint32_t size = rsx_fp_program_size(buf.data(), (uint32_t)buf.size());
+    if (size && size < buf.size()) buf.resize(size);
+    return blob_of(buf.data(), buf.size());
+}
+
 void add_target_need(Rec* r)
 {
     const Surface& sf = S.st.surface;
@@ -974,17 +1135,7 @@ void build_draw(ppu_context* c)
     r->count = (uint32_t)c->gpr[6];
     memcpy(r->vconst, S.vconst, sizeof r->vconst);
     memcpy(r->vconst_written, S.vconst_written, sizeof r->vconst_written);
-    // the vertex program from its start slot through its last instruction
-    const uint32_t start = S.st.vp.start;
-    if (S.vp_blob_gen != S.vp_gen || !S.vp_blob || start != S.vp_blob_start) {
-        if (start < 544) {
-            const uint32_t instrs = rsx_vp_program_size_instrs((const uint8_t*)(S.vp + start * 4), (544 - start) * 16);
-            S.vp_blob = instrs ? blob_of((const uint8_t*)(S.vp + start * 4), instrs * 16) : nullptr;
-        } else S.vp_blob = nullptr;
-        S.vp_blob_gen = S.vp_gen;
-        S.vp_blob_start = start;
-    }
-    r->vp = S.vp_blob;
+    r->vp = vp_blob_now();
     r->fp = S.fp;
     if (!r->vp) r->why = kWhyNoVp;
     else if (!r->fp) r->why = kWhyNoFp;
@@ -1079,12 +1230,33 @@ void asp_draw_enter(ppu_context* c)
     v.addr = 0x006C6F88u; v.kind = 2;
     r4_ctx_fields(v, asp_ctx());
     v.lap = cellGcm_title_laps_pub(nullptr);
-    (void)c;
+    v.gpr[3] = c->gpr[3];   // the draw object
     s_vstack.push_back(v);
+}
+
+int asp_probe2();
+// R5's probe of asp's draw (DOTHEROES_ASP_PROBE=2): the draw object and the
+// words the draw wrote, for up to 24 distinct (primitive, index type, counts' shape)
+void asp_draw_probe(const VEntry& v)
+{
+    const uint32_t self = (uint32_t)v.gpr[3];
+    if (!ea_ok(self, 0x28) || !ea_ok(v.ctx_ea, 16)) return;
+    const uint32_t cur = g32(v.ctx_ea + 8);
+    if (cur < v.cur || cur - v.cur > 4096) return;
+    const uint32_t key[] = { g32(self + 8), g32(self + 0x24), g32(self + 0x0C) == g32(self + 0x10) };
+    static std::set<uint64_t> seen;
+    if (seen.size() >= 24 || !seen.insert(fnv(key, sizeof key)).second) return;
+    char line[2000];
+    int at = snprintf(line, sizeof line, "asp probe2 draw this %08X:", self);
+    for (uint32_t i = 0; i < 0x28; i += 4) at += snprintf(line + at, sizeof line - at, " %08X", g32(self + i));
+    at += snprintf(line + at, sizeof line - at, " | words %u:", (cur - v.cur) / 4);
+    for (uint32_t w = v.cur; w < cur && at < (int)sizeof line - 16; w += 4) at += snprintf(line + at, sizeof line - at, " %08X", g32(w));
+    report_add(line);
 }
 
 void asp_draw_exit(const VEntry& v)
 {
+    if (asp_probe2()) asp_draw_probe(v);
     if (!ea_ok(v.ctx_ea, 16)) return;
     std::unique_lock<std::mutex> g(s_lock);
     struct Held { Held(std::unique_lock<std::mutex>* h) { s_held = h; } ~Held() { s_held = nullptr; } } held(&g);
@@ -1099,9 +1271,28 @@ void asp_draw_exit(const VEntry& v)
     memset(&r->walk, 0, sizeof r->walk);
     for (int16_t& k : r->walk.release_sem) k = -1;
     r->bypassed = 0;
+    for (uint32_t i = 0; i < 16; i++) if (A.unbind_after >> i & 1) S.st.vin[i].size = 0;   // after its state was taken
+    A.unbind_after = 0;
     memcpy(r->vconst, S.vconst, sizeof r->vconst);
     memcpy(r->vconst_written, S.vconst_written, sizeof r->vconst_written);
-    r->vp = nullptr; r->fp = nullptr;
+    // its programs: the vertex program as vertex program memory holds it,
+    // the fragment program asp uploaded at the bound offset
+    r->vp = vp_blob_now();
+    r->fp = A.fp_bound ? asp_fp_now() : S.fp;
+    if (A.fp_bound) {
+        auto lo = A.fp_last_obj.find(S.st.fp.offset);
+        if (lo == A.fp_last_obj.end() || lo->second != A.fp_bound_obj) {
+            if (A.fp_stale_draws++ < 12) {
+                char line[200];
+                snprintf(line, sizeof line, "asp fp stale seq %llu frame %u: bound %08X, last uploaded at %08X: %08X",
+                         (unsigned long long)r->seq, S.frame, A.fp_bound_obj, S.st.fp.offset,
+                         lo == A.fp_last_obj.end() ? 0u : lo->second);
+                report_add(line);
+            }
+        }
+    }
+    if (!r->vp) r->why = kWhyNoVp;
+    else if (!r->fp) r->why = kWhyNoFp;
     // its commands: from the context's position at the call to where it is now
     const uint32_t cur = g32(v.ctx_ea + 8), begin = g32(v.ctx_ea);
     r->lap = v.lap;
@@ -1114,6 +1305,17 @@ void asp_draw_exit(const VEntry& v)
 }
 
 // asp's methods R5 describes: 1 + what ppfx_rec_observe answers, or 0 (not one of them)
+// A unit's texture from a CellGcmTexture (asp's objects hold libgcm's own)
+void enc_texture_at(uint32_t unit, uint32_t t)
+{
+    if (!ea_ok(t, 24)) return;
+    Texture& o = S.st.tex[unit & 15];
+    o.format = (uint8_t)g8(t + 0); o.mipmap = (uint8_t)g8(t + 1); o.dimension = (uint8_t)g8(t + 2);
+    o.cubemap = (uint8_t)g8(t + 3); o.remap = g32(t + 4);
+    o.width = (uint16_t)g16(t + 8); o.height = (uint16_t)g16(t + 10); o.depth = (uint16_t)g16(t + 12);
+    o.location = (uint8_t)g8(t + 14); o.pitch = g32(t + 16); o.offset = g32(t + 20);
+}
+
 int asp_record_call(uint32_t addr, ppu_context* c)
 {
     if (!asp_records_on()) return 0;
@@ -1137,16 +1339,10 @@ int asp_record_call(uint32_t addr, ppu_context* c)
         asp_draw_enter(c);
         return 3;
     case 0x006CB070: { // texture apply (this, {unit, ..}, CellGcmTexture*)
-        const uint32_t t = (uint32_t)c->gpr[5];
-        if (!ea_ok(t, 24)) return 1;
-        Texture& o = S.st.tex[(uint32_t)(c->gpr[4] >> 32) & 15];
-        o.format = (uint8_t)g8(t + 0); o.mipmap = (uint8_t)g8(t + 1); o.dimension = (uint8_t)g8(t + 2);
-        o.cubemap = (uint8_t)g8(t + 3); o.remap = g32(t + 4);
-        o.width = (uint16_t)g16(t + 8); o.height = (uint16_t)g16(t + 10); o.depth = (uint16_t)g16(t + 12);
-        o.location = (uint8_t)g8(t + 14); o.pitch = g32(t + 16); o.offset = g32(t + 20);
+        enc_texture_at((uint32_t)(c->gpr[4] >> 32) & 15, (uint32_t)c->gpr[5]);
         return 1;
     }
-    case 0x006D3190: case 0x006D32D0: {   // a vertex stream: (stream object, {index, ..}) / (stream object)
+    case 0x006D3190: case 0x006D32D0: {   // a vertex stream's bind (stream object, {index, ..}) / unbind (stream object)
         const uint32_t s = (uint32_t)c->gpr[3];
         const uint32_t ix = addr == 0x006D3190u ? (uint32_t)c->gpr[4] : s;
         if (!ea_ok(s, 0x14) || !ea_ok(ix, 4)) return 1;
@@ -1167,8 +1363,166 @@ int asp_record_call(uint32_t addr, ppu_context* c)
         // a stream object not bound to an input holds 0xFFFFFFFF (bound: 0xFFFF8000 | index)
         if ((g32(ix) & 0x7FFFu) >= 16) return 1;
         VertexInput& v = S.st.vin[g32(ix) & 15];
+        if (addr == 0x006D32D0u) {   // the unbind: the input off (its stride and type kept) ...
+            bool in_draw = false;      // ... after the draw it is called from (its draw command already written)
+            for (const VEntry& e : s_vstack) if (e.kind == 2) in_draw = true;
+            if (in_draw) A.unbind_after |= 1u << (g32(ix) & 15);
+            else v.size = 0;
+            return 1;
+        }
         v.stride = (uint8_t)g8(s + 8); v.size = (uint8_t)(g8(s + 9) & 0xF); v.type = (uint8_t)(g8(s + 10) & 0xF);
         v.location = (uint8_t)(g8(s + 11) & 1); v.frequency = (uint16_t)g16(s + 12); v.offset = g32(s + 16);
+        return 1;
+    }
+    // ---- asp's render state setters (device, ...): their arguments, in asp's
+    // own enumerations, mapped to the libgcm constants they write (the setter
+    // probe, docs/NATIVE_R5.md section 2)
+    case 0x006C01C4:   // depth write mask (device, enable)
+        S.st.raster.depth_write = (uint32_t)c->gpr[4] ? 1 : 0;
+        return 1;
+    case 0x006C49BC: { // depth test (device, func 0..7): 7 (always) turns the test off
+        const uint32_t f = (uint32_t)c->gpr[4];
+        if (f >= 7) S.st.raster.depth_test = 0;
+        else { S.st.raster.depth_test = 1; S.st.raster.depth_func = (uint16_t)(0x0200u + f); }
+        return 1;
+    }
+    case 0x006C4D1C: { // cull (device, mode): 0 none, 1 front, 2 back; clockwise front faces
+        const uint32_t m = (uint32_t)c->gpr[4];
+        if (!m) S.st.raster.cull = 0;
+        else {
+            S.st.raster.cull = 1; S.st.raster.front_face = 0x0900u;
+            S.st.raster.cull_face = (uint16_t)(m == 1 ? 0x0404u : m == 2 ? 0x0405u : 0x0408u);
+        }
+        return 1;
+    }
+    case 0x006C048C:   // blend off (device)
+        S.st.raster.blend = 0;
+        return 1;
+    case 0x006C5298: { // blend on (device, src, dst, op, src alpha, dst alpha, op alpha)
+        // asp's factors in GL's order: zero, one, the nine 0x0300-0x0308, then the constant colour's four
+        auto factor = [](uint32_t i) -> uint16_t {
+            return (uint16_t)(i < 2 ? i : i <= 10 ? 0x0300u + (i - 2) : i <= 14 ? 0x8001u + (i - 11) : 1u);
+        };
+        auto op = [](uint32_t i) -> uint16_t {
+            static const uint16_t k[] = { 0x8006, 0x800A, 0x800B, 0x8007, 0x8008 };   // add, subtract, reverse subtract, min, max
+            return i < 5 ? k[i] : 0x8006;
+        };
+        Raster& r = S.st.raster;
+        r.blend = 1;
+        r.blend_sf_rgb = factor((uint32_t)c->gpr[4]); r.blend_df_rgb = factor((uint32_t)c->gpr[5]);
+        r.blend_eq_rgb = op((uint32_t)c->gpr[6]);
+        r.blend_sf_a = factor((uint32_t)c->gpr[7]); r.blend_df_a = factor((uint32_t)c->gpr[8]);
+        r.blend_eq_a = op((uint32_t)c->gpr[9]);
+        return 1;
+    }
+    case 0x006C05AC:   // alpha test off (device)
+        S.st.raster.alpha_test = 0;
+        return 1;
+    case 0x006C4284: { // alpha test on (device, func 0..7, reference 0..1)
+        const double ref = c->fpr[1];
+        S.st.raster.alpha_test = 1;
+        S.st.raster.alpha_func = (uint16_t)(0x0200u + ((uint32_t)c->gpr[4] & 7));
+        S.st.raster.alpha_ref = (uint8_t)(ref <= 0 ? 0 : ref >= 1 ? 255 : (uint32_t)(ref * 255.0));   // truncated, as asp does
+        return 1;
+    }
+    case 0x006C4508:   // stencil test off (device)
+        S.st.raster.stencil_test = 0;
+        return 1;
+    case 0x006C0A70: { // stencil test on (device, func 0..7, ref, mask, fail, zfail, zpass)
+        auto sop = [](uint32_t i) -> uint16_t {
+            static const uint16_t k[] = { 0x1E00, 0x0000, 0x1E01, 0x1E02, 0x1E03, 0x150A, 0x8507, 0x8508 };   // keep, zero, replace, incr, decr, invert, incr wrap, decr wrap
+            return i < 8 ? k[i] : 0x1E00;
+        };
+        Raster& r = S.st.raster;
+        r.stencil_test = 1;
+        r.stencil_func = (uint16_t)(0x0200u + ((uint32_t)c->gpr[4] & 7));
+        r.stencil_ref = (uint8_t)c->gpr[5]; r.stencil_func_mask = (uint8_t)c->gpr[6];
+        r.stencil_fail = sop((uint32_t)c->gpr[7]); r.stencil_zfail = sop((uint32_t)c->gpr[8]); r.stencil_zpass = sop((uint32_t)c->gpr[9]);
+        return 1;
+    }
+    case 0x006C0E38:   // stencil write mask (device, mask)
+        S.st.raster.stencil_write_mask = (uint8_t)c->gpr[4];
+        return 1;
+    case 0x006C4628: { // polygon offset (device, factor, units): both 0 turns it off
+        const float f = (float)c->fpr[1], u = (float)c->fpr[2];
+        S.st.raster.poly_offset_fill = f != 0.0f || u != 0.0f;
+        S.st.raster.poly_offset_factor = f; S.st.raster.poly_offset_units = u;
+        return 1;
+    }
+    case 0x006C06CC: { // polygon mode (device, mode 0 point, 1 line, 2 fill): both faces
+        const uint32_t m = (uint32_t)c->gpr[4];
+        S.st.raster.front_poly_mode = S.st.raster.back_poly_mode = (uint16_t)(0x1B00u + (m < 3 ? m : 2));
+        return 1;
+    }
+    case 0x006C0F60: { // viewport (device, x, y, w, h, zmin, zmax): asp's depth maps [zmin, zmax] from 0..1
+        Viewport& v = S.st.viewport;
+        const int32_t x = (int32_t)c->gpr[4], y = (int32_t)c->gpr[5], w = (int32_t)c->gpr[6], h = (int32_t)c->gpr[7];
+        const float zmin = (float)c->fpr[1], zmax = (float)c->fpr[2];
+        v.x = (uint16_t)x; v.y = (uint16_t)y; v.w = (uint16_t)w; v.h = (uint16_t)h;
+        v.zmin = zmin; v.zmax = zmax;
+        v.scale[0] = w * 0.5f; v.scale[1] = h * -0.5f; v.scale[2] = zmax - zmin; v.scale[3] = 0.0f;
+        v.offset[0] = x + w * 0.5f; v.offset[1] = y + h * 0.5f; v.offset[2] = zmin; v.offset[3] = 0.0f;
+        return 1;
+    }
+    case 0x006C08F0:   // scissor (device, x, y, w, h)
+        S.st.scissor = { (uint16_t)c->gpr[4], (uint16_t)c->gpr[5], (uint16_t)c->gpr[6], (uint16_t)c->gpr[7] };
+        return 1;
+    case 0x006C5170:   // scissor off (device, ...): the whole 4096 x 4096
+        S.st.scissor = { 0, 0, 0x0FFF, 0x0FFF };
+        return 1;
+    case 0x006D11BC:   // a pass's end (render target): every colour channel written, no scissor
+        S.st.scissor = { 0, 0, 0x0FFF, 0x0FFF };
+        S.st.raster.color_mask = 0x01010101u; S.st.raster.color_mask_by = kByAsp;
+        return 1;
+    case 0x006C37A0: { // sampler bind (device, unit, enable): the unit's entry in asp's sampler table
+        const uint32_t u = (uint32_t)c->gpr[4] & 0xFF, en = (uint32_t)c->gpr[5] & 0xFF;
+        if (u >= 16) return 1;
+        Sampler& m = S.st.samp[u];
+        m.enable = en ? 1 : 0;
+        if (!en) return 1;
+        // the table (TOC -0x2D88): an entry of 48 bytes a unit from +0x0C
+        const uint32_t e = g32((uint32_t)c->gpr[2] - 0x2D88u) + 0x0Cu + 48u * u;
+        if (!ea_ok(e, 48)) return 1;
+        m.min_lod = (uint16_t)(g8(e + 3) << 8); m.max_lod = 0x0C00;   // 4.8 fixed point: the first level, 12
+        float an = gfloat(e + 0x10);
+        uint32_t n = an >= 1.0f && an < 256.0f ? (uint32_t)an & 0xFF : 0;
+        if (!n) n = 16;
+        const uint32_t at = g32((uint32_t)c->gpr[2] - 0x2D94u);   // anisotropy codes by ratio
+        m.max_aniso = ea_ok(at + 0x40 + n - 1, 1) ? (uint8_t)(g8(at + 0x40 + n - 1) & 7) : 0;
+        m.min_filter = (uint8_t)(g32(e + 0x0C) + 1); m.mag_filter = (uint8_t)(g32(e + 0x08) + 1);
+        m.conv = 1; m.bias = 0; m.filter_signed = 0;
+        m.wrap_s = (uint8_t)(g32(e + 0x14) + 1); m.wrap_t = (uint8_t)(g32(e + 0x18) + 1); m.wrap_r = 3;   // R clamped
+        m.unsigned_remap = 0; m.gamma = 0; m.zfunc = 6;   // the depth comparison GEQUAL
+        auto ch = [](float f) -> uint32_t { return f <= 0 ? 0u : f >= 1 ? 255u : (uint32_t)(f * 255.0f + 0.5f); };
+        m.border = ch(gfloat(e + 0x28)) << 24 | ch(gfloat(e + 0x1C)) << 16 | ch(gfloat(e + 0x20)) << 8 | ch(gfloat(e + 0x24));
+        m.address_by = kByAsp;
+        return 1;
+    }
+    case 0x006D0E84: { // the shadow map on unit 4 (render target, ...): its texture, a fixed sampler
+        const uint32_t rt = (uint32_t)c->gpr[3];
+        if (!ea_ok(rt + 0x14, 24)) return 1;
+        enc_texture_at(4, rt + 0x14);
+        Sampler& m = S.st.samp[4];
+        m.enable = 1; m.min_lod = 0; m.max_lod = 0; m.max_aniso = 0;
+        m.min_filter = 2; m.mag_filter = 2; m.conv = 1; m.bias = 0; m.filter_signed = 0;   // linear
+        m.wrap_s = m.wrap_t = m.wrap_r = 3; m.unsigned_remap = 0; m.gamma = 0; m.zfunc = 6;   // clamped; GEQUAL
+        m.address_by = kByAsp;
+        return 1;
+    }
+    case 0x006C8A34:   // render target set (render target): its CellGcmSurface at +0x40
+        enc_surface((uint32_t)c->gpr[3] + 0x40);
+        return 1;
+    case 0x006D1764: { // a pass's start (render target, ...): its CellGcmSurface at +0x2C, the pass's own state
+        const uint32_t rt = (uint32_t)c->gpr[3];
+        if (!ea_ok(rt, 0x80) || !g32(rt + 0x28) || !g32(rt + 0x58)) return 1;   // as asp: nothing without them
+        enc_surface(rt + 0x2C);
+        Raster& r = S.st.raster;
+        r.color_mask = g8(rt + 0x0C) ? 0x01010101u : 0; r.color_mask_by = kByAsp;
+        r.depth_test = 1; r.depth_write = 1; r.stencil_test = 0;
+        A.cmask_unknown = 0;
+        // and a scissor one pixel inside the target's edges (+0x04, +0x08 its size)
+        const uint32_t w = g32(rt + 4), h = g32(rt + 8);
+        if (w > 2 && h > 2) S.st.scissor = { 1, 1, (uint16_t)(w - 2), (uint16_t)(h - 2) };
         return 1;
     }
     case 0x006C9C74: { // vertex constants (this, {start, ..}, const float*, count): whole vec4s
@@ -1181,30 +1535,153 @@ int asp_record_call(uint32_t addr, ppu_context* c)
         }
         return 1;
     }
-    case 0x006CA3D0: case 0x006C99B0: {   // R5's probe (DOTHEROES_ASP_PROBE=1): asp's shader containers
-        static int probe = -1, n = 0;
-        if (probe < 0) { const char* e = getenv("DOTHEROES_ASP_PROBE"); probe = e && *e == '1'; }
-        if (!probe || n >= 48) return 1;
-        n++;
+    // ---- asp's programs. A shader object (vtables 0xFEAB48 vertex, 0xFEAB30
+    // fragment) holds at +0x18 its container ("CGB": at +0x08 the microcode's
+    // bytes in the high half, at +0x0C the input mask in the high half), at
+    // +0x1C the microcode (the container's +0x20).
+    case 0x006CA3D0: { // vertex program upload and bind (shader object): at slot 0, with its own constants
         const uint32_t self = (uint32_t)c->gpr[3];
-        char line[800];
-        int at = snprintf(line, sizeof line, "asp probe %s this %08X r4 %08X r5 %08X", addr == 0x006CA3D0u ? "vp-upload" : "fp-bind",
-                          self, (uint32_t)c->gpr[4], (uint32_t)c->gpr[5]);
-        // a shader object holds at +0x18 its container (a "CGB" header) and at +0x1C its microcode
-        for (uint32_t off = 0x18; off <= 0x18 && ea_ok(self + off, 8); off += 8) {
-            const uint32_t obj = self + off;
-            const uint32_t hdr = g32(obj), uc = g32(obj + 4);
-            at += snprintf(line + at, sizeof line - at, " | this+%X obj %08X hdr %08X:", off, obj, hdr);
-            for (uint32_t i = 0; i < 0x30 && ea_ok(hdr, 0x30); i += 4) at += snprintf(line + at, sizeof line - at, " %08X", g32(hdr + i));
-            if (ea_ok(uc, 16)) at += snprintf(line + at, sizeof line - at, " ucode %08X: %08X %08X %08X %08X", uc, g32(uc), g32(uc + 4), g32(uc + 8), g32(uc + 12));
+        if (!ea_ok(self, 0x30)) return 1;
+        const uint32_t cont = g32(self + 0x18), uc = g32(self + 0x1C);
+        if (!ea_ok(cont, 0x20)) return 1;
+        const uint32_t bytes = g16(cont + 8), slot = 0;   // asp loads and starts every program at slot 0
+        if (!bytes || !ea_ok(uc, bytes)) return 1;
+        for (uint32_t i = 0; i < bytes / 4 && slot * 4 + i < kVpWords; i++) S.vp[slot * 4 + i] = g32(uc + 4 * i);
+        VertexProgram& v = S.st.vp;
+        v.start = (uint16_t)slot; v.input_mask = g16(cont + 0x0C); v.regs_le32 = 1;
+        S.vp_gen++;
+        // its constants: +0x20 their count, +0x24 a table of 12-byte entries (the register first), +0x28 the values
+        const uint32_t n = g32(self + 0x20), tbl = g32(self + 0x24), vals = g32(self + 0x28);
+        for (uint32_t k = 0; k < n && k < 64 && ea_ok(tbl + 12 * k, 2) && ea_ok(vals + 16 * k, 16); k++) {
+            const uint32_t reg = g16(tbl + 12 * k);
+            if (reg >= 512) continue;
+            for (uint32_t j = 0; j < 4; j++) S.vconst[reg][j] = g32(vals + 16 * k + 4 * j);
+            S.vconst_written[reg >> 5] |= 1u << (reg & 31);
         }
-        if (addr == 0x006C99B0u && ea_ok(self + 0xF0, 4)) at += snprintf(line + at, sizeof line - at, " | this+F0 %08X", g32(self + 0xF0));
-        report_add(line);
+        return 1;
+    }
+    case 0x006CADE4: { // fragment program upload (shader object): its microcode into local memory at +0x54
+        const uint32_t self = (uint32_t)c->gpr[3];
+        if (!ea_ok(self, 0x70)) return 1;
+        const uint32_t cont = g32(self + 0x18), uc = g32(self + 0x1C), off = g32(self + 0x54);
+        if (!ea_ok(cont, 0x20)) return 1;
+        const uint32_t bytes = g16(cont + 8);
+        if (!bytes || !ea_ok(uc, bytes) || off >= 0x10000000u) return 1;
+        shadow_write(off, vm_base + uc, bytes & ~3u, ++s_epoch);
+        A.fp_bytes[off] = bytes;
+        A.fp_last_obj[off] = self;
+        return 1;
+    }
+    case 0x006C9624: { // fragment constant patch (shader object, parameter, count, const float*)
+        // the parameter's entry (+0x70: 20 bytes each) lists up to 8 offsets
+        // into the program (u16) and their count (+0x10); each gets the values
+        // with their 16-bit halves swapped, as the GPU reads constants
+        const uint32_t self = (uint32_t)c->gpr[3], par = (uint32_t)c->gpr[4], cnt = (uint32_t)c->gpr[5], val = (uint32_t)c->gpr[6];
+        if (!ea_ok(self, 0x74) || !cnt || cnt > 64 || !ea_ok(val, 4 * cnt)) return 1;
+        const uint32_t e = g32(self + 0x70) + 20u * par, base = g32(self + 0x54);
+        if (!ea_ok(e, 20)) return 1;
+        uint8_t buf[256];
+        for (uint32_t i = 0; i < cnt; i++) {
+            const uint32_t w = g32(val + 4 * i), sw = w << 16 | w >> 16;
+            buf[4 * i] = (uint8_t)(sw >> 24); buf[4 * i + 1] = (uint8_t)(sw >> 16); buf[4 * i + 2] = (uint8_t)(sw >> 8); buf[4 * i + 3] = (uint8_t)sw;
+        }
+        const uint32_t n = g32(e + 0x10);
+        const uint64_t ep = ++s_epoch;
+        for (uint32_t k = 0; k < n && k < 8; k++) shadow_write(base + g16(e + 2 * k), buf, 4 * cnt, ep);
+        if (cnt & 1) A.fp_odd_patches++;   // asp transfers an even count: the last word is what its buffer held
+        return 1;
+    }
+    case 0x006C99B0: { // fragment program bind (program pair): the fragment shader object at +0x1C
+        const uint32_t pair = (uint32_t)c->gpr[3];
+        if (!ea_ok(pair, 0x20)) return 1;
+        const uint32_t fo = g32(pair + 0x1C);
+        if (!ea_ok(fo, 0x70)) return 1;
+        FragmentProgram& f = S.st.fp;
+        f.offset = g32(fo + 0x54); f.location = 0;   // local memory
+        f.input_mask = g32(fo + 0x58);
+        f.tex_mask = (uint16_t)g16(fo + 0x5C); f.tex_2d = (uint16_t)g16(fo + 0x5E); f.tex_centroid = (uint16_t)g16(fo + 0x60);
+        const uint32_t ctl = (uint32_t)g8(fo + 0x68) << 24 | g16(fo + 0x66);   // the shader control as asp writes it
+        f.reg_count = (uint8_t)(ctl >> 24); f.txp = (uint8_t)(ctl >> 15 & 1); f.output_from_h0 = !(ctl & 0x40u);
+        f.depth_replace = (ctl & 0xEu) != 0; f.pixel_kill = (uint8_t)(ctl >> 7 & 1);
+        A.fp_bound = 1; A.fp_bound_obj = fo;
         return 1;
     }
     default:
         return 0;
     }
+}
+
+// R5's setter probe (DOTHEROES_ASP_PROBE=2, development): for each of asp's
+// observed methods but its draw, up to 16 distinct calls -- by the command
+// words they wrote -- with their arguments (r3-r8, f1-f4), the first words of
+// what r3-r5 point at, and the words written into the command context
+// between the call and its return. What maps asp's arguments to the state
+// they set (docs/NATIVE_R5.md).
+int asp_probe2()
+{
+    static int on = -1;
+    if (on < 0) { const char* e = getenv("DOTHEROES_ASP_PROBE"); on = e && *e == '2'; }
+    return on;
+}
+
+std::map<uint32_t, uint32_t> s_probe_distinct;   // per function: distinct calls logged
+
+// asp's command context: through its TOC (the setters' own load, TOC -0x2D9C)
+uint32_t asp_cmd_ctx(const ppu_context* c)
+{
+    const uint32_t p = g32((uint32_t)c->gpr[2] - 0x2D9Cu);
+    return ea_ok(p, 4) ? g32(p) : 0;
+}
+
+bool asp_probe_enter(uint32_t addr, ppu_context* c)
+{
+    if (!asp_probe2() || addr == 0x006C6F88u || addr == kAspAppend) return false;
+    if (s_probe_distinct[addr] >= 24) return false;   // enough of each to see its distinct uses
+    VEntry v;
+    memset(&v, 0, sizeof v);
+    v.addr = addr; v.kind = 3; v.lr = (uint32_t)c->lr;
+    r4_ctx_fields(v, asp_cmd_ctx(c));
+    memcpy(v.gpr, c->gpr, sizeof v.gpr);
+    memcpy(v.fpr, c->fpr, sizeof v.fpr);
+    s_vstack.push_back(v);
+    return true;
+}
+
+void asp_probe_exit(const VEntry& v)
+{
+    if (!ea_ok(v.ctx_ea, 16)) return;
+    const uint32_t cur = g32(v.ctx_ea + 8);
+    if (cur < v.cur || cur - v.cur > 4096) return;   // wrapped, or not this context
+    const uint64_t h = fnv(vm_base + v.cur, cur - v.cur, v.addr);
+    static std::map<uint32_t, std::set<uint64_t>> seen;
+    std::set<uint64_t>& m = seen[v.addr];
+    if (m.size() >= 24 || !m.insert(h).second) return;
+    char line[4000];
+    int at = snprintf(line, sizeof line, "asp probe2 %08X lr %08X r3 %08X r4 %08X r5 %08X r6 %08X r7 %08X r8 %08X r9 %08X r10 %08X "
+                      "f1 %g f2 %g f3 %g f4 %g |", v.addr, v.lr, (uint32_t)v.gpr[3], (uint32_t)v.gpr[4], (uint32_t)v.gpr[5],
+                      (uint32_t)v.gpr[6], (uint32_t)v.gpr[7], (uint32_t)v.gpr[8], (uint32_t)v.gpr[9], (uint32_t)v.gpr[10],
+                      v.fpr[1], v.fpr[2], v.fpr[3], v.fpr[4]);
+    auto dump = [&](const char* name, uint32_t p, uint32_t n) {
+        if (!ea_ok(p, n)) return;
+        at += snprintf(line + at, sizeof line - at, " %s@%08X:", name, p);
+        for (uint32_t i = 0; i < n && at < (int)sizeof line - 16; i += 4) at += snprintf(line + at, sizeof line - at, " %08X", g32(p + i));
+    };
+    dump("*r3", (uint32_t)v.gpr[3], 0x80);
+    dump("*r4", (uint32_t)v.gpr[4], 0x40);
+    dump("*r5", (uint32_t)v.gpr[5], 0x40);
+    if (v.addr == 0x006CA3D0u || v.addr == 0x006CADE4u || v.addr == 0x006C9624u) {   // a shader object: its container
+        const uint32_t self = (uint32_t)v.gpr[3];
+        if (ea_ok(self + 0x18, 8)) dump("container", g32(self + 0x18), 0x60);
+        if (ea_ok(self + 0x24, 12)) { dump("[24]", g32(self + 0x24), 0x30); dump("[28]", g32(self + 0x28), 0x30); dump("[30]", g32(self + 0x30), 0x30); }
+    }
+    if (v.addr == 0x006C37A0u) {   // the sampler bind: the unit's entry in asp's sampler table (TOC -0x2D88, 48 bytes a unit)
+        const uint32_t tbl = g32((uint32_t)v.gpr[2] - 0x2D88u);
+        dump("samplers", tbl + 48u * ((uint32_t)v.gpr[4] & 15), 48);
+    }
+    at += snprintf(line + at, sizeof line - at, " | words %u:", (cur - v.cur) / 4);
+    for (uint32_t w = v.cur; w < cur && at < (int)sizeof line - 16; w += 4) at += snprintf(line + at, sizeof line - at, " %08X", g32(w));
+    report_add(line);
+    s_probe_distinct[v.addr] = (uint32_t)m.size();
 }
 
 void read_env()
@@ -1303,6 +1780,11 @@ void write_report()
                    "with_differences %llu\n", (unsigned long long)s.asp_records, (unsigned long long)s.asp_matched,
                 (unsigned long long)s.asp_missed, (unsigned long long)s.asp_draw_events,
                 (unsigned long long)s.asp_xc_draws, (unsigned long long)s.asp_xc_differ);
+    if (asp_records_on())
+        fprintf(f, "asp store_group_restores %llu fp_patches_of_odd_count %llu fp_programs_uploaded_at %zu "
+                   "draws_with_a_program_not_uploaded_last %llu\n",
+                (unsigned long long)s.asp_group_restores, (unsigned long long)A.fp_odd_patches, A.fp_bytes.size(),
+                (unsigned long long)A.fp_stale_draws);
     fprintf(f, "native draws %llu clears %llu unsupported %llu batches %llu pipelines %llu images %llu (%.1f MB) "
                "static_textures %llu own_target_snapshots %llu images_replaced %llu\n",
             (unsigned long long)s.n_draws, (unsigned long long)s.n_clears, (unsigned long long)s.n_unsupported,
@@ -1614,6 +2096,7 @@ extern "C" void ppfx_rec_exit(uint32_t addr, ppu_context* ctx)
     if (v.addr != addr) stats().r4_exit_mismatch++;
     if (v.kind == 0) { if (S.kept_depth) S.kept_depth--; return; }
     if (v.kind == 2) { asp_draw_exit(v); return; }
+    if (v.kind == 3) { asp_probe_exit(v); return; }
     r4_verify_exit(v, ctx);
     if (--s_verifying == 0) { g_ppu_obs_store = 0; s_stores.clear(); }
 }

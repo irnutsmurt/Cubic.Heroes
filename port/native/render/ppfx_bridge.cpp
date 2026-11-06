@@ -271,6 +271,13 @@ void engine_state(const rsx_dispatch* E, State* o)
     const uint32_t aa = rsx_dsp_reg(E, 0x1D7C);
     r.aa_enable = aa & 1; r.alpha_to_coverage = aa >> 4 & 1; r.alpha_to_one = aa >> 8 & 1; r.sample_mask = (uint16_t)(aa >> 16);
     r.poly_offset_fill = (uint8_t)(rsx_dsp_reg(E, 0x0A68) & 1);
+    r.blend_sf_rgb = (uint16_t)rs.sf_rgb; r.blend_df_rgb = (uint16_t)rs.df_rgb; r.blend_sf_a = (uint16_t)rs.sf_a;
+    r.blend_df_a = (uint16_t)rs.df_a; r.blend_eq_rgb = (uint16_t)rs.eq_rgb; r.blend_eq_a = (uint16_t)rs.eq_a;
+    r.alpha_func = (uint16_t)rs.alpha_func; r.alpha_ref = (uint8_t)rsx_dsp_reg(E, 0x030C);
+    r.stencil_func = (uint16_t)rs.s_func; r.stencil_fail = (uint16_t)rs.s_fail; r.stencil_zfail = (uint16_t)rs.s_zfail;
+    r.stencil_zpass = (uint16_t)rs.s_zpass; r.stencil_ref = (uint8_t)rsx_dsp_reg(E, 0x0334);
+    r.stencil_func_mask = (uint8_t)rs.s_func_mask; r.stencil_write_mask = (uint8_t)rs.s_write_mask;
+    r.front_poly_mode = (uint16_t)rsx_dsp_reg(E, 0x1828); r.back_poly_mode = (uint16_t)rsx_dsp_reg(E, 0x182C);
     { uint32_t a = rsx_dsp_reg(E, 0x0A78), b = rsx_dsp_reg(E, 0x0A7C);
       memcpy(&r.poly_offset_factor, &a, 4); memcpy(&r.poly_offset_units, &b, 4); }
 }
@@ -320,7 +327,7 @@ void crosscheck(Rec* r)
     // describe its programs yet -- the engine's choose what is compared)
     const bool asp = r->kind == kAspDraw;
     Blob evp, efp;
-    if (asp) {
+    if (asp && (!r->vp || !r->fp)) {   // a record without its programs: the engine's choose what is compared
         const uint32_t st0 = rsx_dsp_vp_start(E);
         const uint32_t n = st0 < 544 ? rsx_vp_program_size_instrs((const uint8_t*)(E->vp + st0 * 4), (544 - st0) * 16) : 0;
         if (n) evp.bytes.assign((const uint8_t*)(E->vp + st0 * 4), (const uint8_t*)(E->vp + st0 * 4) + n * 16);
@@ -330,8 +337,8 @@ void crosscheck(Rec* r)
         const uint32_t fsz = fea ? rsx_fp_program_size(vm_base + fea, 0x8000) : 0;
         if (fsz) efp.bytes.assign(vm_base + fea, vm_base + fea + fsz);
     }
-    const Blob* vpb = asp ? (evp.bytes.empty() ? nullptr : &evp) : r->vp.get();
-    const Blob* fpb = asp ? (efp.bytes.empty() ? nullptr : &efp) : r->fp.get();
+    const Blob* vpb = asp && !r->vp ? (evp.bytes.empty() ? nullptr : &evp) : r->vp.get();
+    const Blob* fpb = asp && !r->fp ? (efp.bytes.empty() ? nullptr : &efp) : r->fp.get();
     const uint32_t units = fpb ? rsx_fp_texture_units(fpb->bytes.data(), (uint32_t)fpb->bytes.size()) : 0;
     for (uint32_t u = 0; u < 16; u++) {
         if (!(units >> u & 1)) continue;
@@ -368,6 +375,19 @@ void crosscheck(Rec* r)
     // the render state, with what the enables make irrelevant left out
     snprintf(name, sizeof name, "raster.color_mask%s", by_name(a.raster.color_mask_by)); X(raster.color_mask, name);
     X(raster.blend, "raster.blend"); X(raster.alpha_test, "raster.alpha_test"); X(raster.stencil_test, "raster.stencil_test");
+    if (a.raster.blend) {
+        X(raster.blend_sf_rgb, "raster.blend_sf_rgb"); X(raster.blend_df_rgb, "raster.blend_df_rgb");
+        X(raster.blend_sf_a, "raster.blend_sf_a"); X(raster.blend_df_a, "raster.blend_df_a");
+        X(raster.blend_eq_rgb, "raster.blend_eq_rgb"); X(raster.blend_eq_a, "raster.blend_eq_a");
+    }
+    if (a.raster.alpha_test) { X(raster.alpha_func, "raster.alpha_func"); X(raster.alpha_ref, "raster.alpha_ref"); }
+    if (a.raster.stencil_test) {
+        X(raster.stencil_func, "raster.stencil_func"); X(raster.stencil_ref, "raster.stencil_ref");
+        X(raster.stencil_func_mask, "raster.stencil_func_mask"); X(raster.stencil_write_mask, "raster.stencil_write_mask");
+        X(raster.stencil_fail, "raster.stencil_fail"); X(raster.stencil_zfail, "raster.stencil_zfail");
+        X(raster.stencil_zpass, "raster.stencil_zpass");
+    }
+    if (asp) { X(raster.front_poly_mode, "raster.front_poly_mode"); X(raster.back_poly_mode, "raster.back_poly_mode"); }
     X(raster.depth_test, "raster.depth_test");
     if (a.raster.depth_test) { X(raster.depth_write, "raster.depth_write"); X(raster.depth_func, "raster.depth_func"); }
     X(raster.cull, "raster.cull");
@@ -414,6 +434,38 @@ void crosscheck(Rec* r)
                     at += snprintf(l2 + at, sizeof l2 - at, " v%u %X/%X off %08X/%08X", i, r->st.vin[i].size, e.vin[i].size,
                                    r->st.vin[i].offset, e.vin[i].offset);
             report_add(l2);
+        }
+        // its programs against what the engine runs
+        {
+            const uint32_t s0 = rsx_dsp_vp_start(E);
+            if (!r->vp || s0 >= 544 || r->vp->bytes.size() > (544 - s0) * 16 ||
+                memcmp(E->vp + s0 * 4, r->vp->bytes.data(), r->vp->bytes.size()))
+                xdiff(r->vp ? "vp.bytes" : "vp.bytes (none recorded)", r->vp ? (uint32_t)r->vp->bytes.size() : 0, s0, dr);
+            uint32_t floc = 0;
+            const uint32_t foff = rsx_dsp_fragment_program(E, &floc);
+            const uint32_t fea = cellGcmResolveLocated(floc == RSX_LOCATION_LOCAL, foff);
+            if (!r->fp || !fea || memcmp(vm_base + fea, r->fp->bytes.data(), r->fp->bytes.size())) {
+                uint32_t first = ~0u;
+                if (r->fp && fea)
+                    for (size_t i = 0; i + 4 <= r->fp->bytes.size() && first == ~0u; i += 4)
+                        if (memcmp(vm_base + fea + i, &r->fp->bytes[i], 4)) first = (uint32_t)i;
+                xdiff(r->fp ? "fp.bytes (first differing byte)" : "fp.bytes (none recorded)", first,
+                      r->fp ? (uint32_t)r->fp->bytes.size() : 0, dr);
+                static int said = 0;
+                if (r->fp && fea && said++ < 12) {
+                    char line[400];
+                    int at = snprintf(line, sizeof line, "xfp asp seq %llu frame %u off %08X (record %08X) bytes %zu | record:",
+                                      (unsigned long long)r->seq, r->frame, foff, r->st.fp.offset, r->fp->bytes.size());
+                    for (size_t i = 0; i < 16 && i + 4 <= r->fp->bytes.size(); i += 4)
+                        at += snprintf(line + at, sizeof line - at, " %02X%02X%02X%02X", r->fp->bytes[i], r->fp->bytes[i + 1],
+                                       r->fp->bytes[i + 2], r->fp->bytes[i + 3]);
+                    at += snprintf(line + at, sizeof line - at, " | engine:");
+                    for (uint32_t i = 0; i < 16; i += 4)
+                        at += snprintf(line + at, sizeof line - at, " %02X%02X%02X%02X", vm_base[fea + i], vm_base[fea + i + 1],
+                                       vm_base[fea + i + 2], vm_base[fea + i + 3]);
+                    report_add(line);
+                }
+            }
         }
         st.asp_xc_draws++;
         if (dr || dc) st.asp_xc_differ++;
