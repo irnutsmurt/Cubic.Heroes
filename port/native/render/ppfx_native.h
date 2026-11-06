@@ -328,6 +328,7 @@ struct Stats {
     std::atomic<uint64_t> draws{0}, clears{0}, depth_clears{0}, frames{0};
     std::atomic<uint64_t> producer_threads{0};    // > 1: the single-producer assumption broke
     std::atomic<uint64_t> flushes_for_room{0};    // the ring's put moved forward for a full queue (R5)
+    std::atomic<uint64_t> exit_signal_skips{0};   // at exit, batches not waiting for an engine that stopped
     std::atomic<uint64_t> wraps_in_call{0};       // records the walker found at their wrapped position
     std::atomic<uint64_t> ends_at_ring_end{0};    // records whose commands ended at the ring's end
     std::atomic<uint64_t> rec_ns{0};              // the recorder's own time on the game's thread

@@ -432,3 +432,40 @@ the commands written so far visible (the put register moved forward, as
 cellGcmFlush would), and a bypassed draw's commands are taken back before
 anything can expose them (s5after2 showed the order mattered: 99,742
 markers met unknown). s5after3: 14,773 frames, the queue never full.
+
+**Stage 2, first try: asp's state is inherited by the engine's remaining
+draws** (build/r4/st1-*, st2-*, DOTHEROES_ASP_FOREIGN_STATES). With every
+asp state function's commands taken back (44 million calls, 859 million
+words in the menus run), the river's remaining draws ran with exactly the
+same engine states (13 of 13), the menus' did not: with stage 1, menu draws
+into the display buffers ran with blending (SRC_ALPHA, 1-SRC_ALPHA) and the
+alpha test (GREATER 0) on, the depth function LEQUAL and clockwise front
+faces -- asp's last settings -- and one drew into asp's scene target, on
+asp's surface; without asp's state commands those states were gone. The
+engine's own HUD and menu draws inherit asp's render state and surface:
+taking that state away would change what the menus show. So stage 2 is
+the program traffic alone -- asp's vertex program uploads, fragment
+program uploads and their constant patches, most of its words -- checked
+by the same comparison, now with each remaining draw's vertex program,
+fragment program and the constants it reads. Taking asp's render state
+back too (=3) waits for R6, which makes those draws native.
+
+**Stage 2, programs only: valid in the river, not in the menus**
+(build/r4/sb*, sc*; stage2_check.sh). The river's remaining draws ran with
+the same states, programs and constants with stage 2 as with stage 1 (519
+of 519); stage 2 took back 1.67 million calls, 65.6 million words, on top
+of stage 1's 37.6 million. The menus' did not (469 states with stage 1,
+523 with stage 2, 4 and 58 found in one only): menu draws straight into
+the display buffer, depth on, use vertex program slot 0 and asp's
+fragment program slot (01533D80) without loading programs of their own --
+they run whatever asp loaded last, so with asp's uploads taken back they
+ran stale programs. Keeping the uploads after the frame's final composite
+(sc*) did not close it: in the menus those draws come without one. A
+correct stage 2 needs to know, when asp uploads, whether an engine draw
+will run that program next -- which only making those draws native (R6)
+settles. Stage 2 stays experimental (=2); stage 1 is R5's validated
+bypass.
+
+**R4's exit wait** (section 11 of NATIVE_R4.md): at exit the native thread
+no longer waits 10 s for an engine submission that will not come; after
+100 ms the batch goes without it (counted: exit_signal_skips).

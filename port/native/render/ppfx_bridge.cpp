@@ -966,13 +966,35 @@ void foreign_states()
     State e;
     engine_state(E, &e);
     const Raster& r = e.raster;
-    char d[400];
+    char d[600];
     snprintf(d, sizeof d, "tgt %08X fmt %u cmask %08X depth %u/%u %X stencil %u %X/%u cull %u %X/%X blend %u %X/%X %X/%X eq %X alpha %u %X/%u "
              "poff %u scissor %u,%u %ux%u viewport %u,%u %ux%u",
              e.surface.color_offset[0], e.surface.color_format, r.color_mask, r.depth_test, r.depth_write, r.depth_func, r.stencil_test,
              r.stencil_func, r.stencil_ref, r.cull, r.cull_face, r.front_face, r.blend, r.blend_sf_rgb, r.blend_df_rgb, r.blend_sf_a,
              r.blend_df_a, r.blend_eq_rgb, r.alpha_test, r.alpha_func, r.alpha_ref, r.poly_offset_fill, e.scissor.x, e.scissor.y,
              e.scissor.w, e.scissor.h, e.viewport.x, e.viewport.y, e.viewport.w, e.viewport.h);
+    // and what it runs: the vertex program from its start, the fragment
+    // program's bytes, the constants the vertex program reads
+    {
+        const uint32_t st0 = rsx_dsp_vp_start(E);
+        const uint32_t nvi = st0 < 544 ? rsx_vp_program_size_instrs((const uint8_t*)(E->vp + st0 * 4), (544 - st0) * 16) : 0;
+        uint64_t hv = nvi ? fnv(E->vp + st0 * 4, nvi * 16) : 0;
+        uint32_t floc = 0;
+        const uint32_t foff = rsx_dsp_fragment_program(E, &floc);
+        const uint32_t fea = cellGcmResolveLocated(floc == RSX_LOCATION_LOCAL, foff);
+        const uint32_t fsz = fea ? rsx_fp_program_size(vm_base + fea, 0x8000) : 0;
+        const uint64_t hf = fsz ? fnv(vm_base + fea, fsz) : 0;
+        uint64_t hc = 1469598103934665603ull;
+        if (nvi) {
+            Blob vb; vb.bytes.assign((const uint8_t*)(E->vp + st0 * 4), (const uint8_t*)(E->vp + st0 * 4) + nvi * 16);
+            uint32_t cm[16];
+            vp_const_mask(&vb, cm);
+            for (uint32_t k = 0; k < 512; k++) if (cm[k >> 5] >> (k & 31) & 1) hc = fnv(E->constants[k], 16, hc);
+        }
+        const size_t at = strlen(d);
+        snprintf(d + at, sizeof d - at, " vp %u:%016llx fp %08X:%016llx consts %016llx", st0, (unsigned long long)hv, foff,
+                 (unsigned long long)hf, (unsigned long long)hc);
+    }
     const uint64_t h = fnv(d, strlen(d));
     auto& slot = s_fstates[h];
     if (!slot.first) slot.second = d;

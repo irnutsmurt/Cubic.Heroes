@@ -124,6 +124,7 @@ float s_ts_period = 1.0f;
 std::atomic<int> s_ready{0};
 int s_full = 0;   // DOTHEROES_PPFX_BARRIERS=full: R3's full barriers, every image in GENERAL
 char s_dump[512];   // DOTHEROES_PPFX_DUMP: where the first differing outputs go
+std::atomic<int> s_draining{0};   // render_drain: the engine has stopped (exit)
 
 uint64_t now_ns()
 {
@@ -518,6 +519,9 @@ void submit()
         for (long long o : b.ords)
             while (!rsx_vk_bridge_submitted(o)) {
                 std::this_thread::sleep_for(std::chrono::microseconds(200));
+                // at exit the engine may have stopped before its next submission:
+                // a short wait, then the batch goes without it (counted)
+                if (s_draining && now_ns() - t0 > 100000000ull) { stats().exit_signal_skips++; break; }
                 if (now_ns() - t0 > 10000000000ull) { fail("waiting for the engine's signal", VK_TIMEOUT); break; }
             }
         stats().wait_signal_us += (now_ns() - t0) / 1000;
@@ -2686,7 +2690,6 @@ bool init()
     return true;
 }
 
-std::atomic<int> s_draining{0};
 std::atomic<int> s_idle{0};   // the thread has submitted everything walked and waits
 
 // ---- R4: handbacks ----------------------------------------------------------------------------

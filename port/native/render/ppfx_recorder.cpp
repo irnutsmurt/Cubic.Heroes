@@ -308,6 +308,7 @@ struct Rstate {
     uint32_t fp_units;               // texture units the bound fragment program samples
     std::unordered_set<uint64_t> ppfx_targets;   // (location << 32 | offset) a record has written
     uint32_t frame;
+    uint32_t final_frame;            // R5: the frame whose final composite has been recorded (~0u none)
     uint32_t ring_ctx;               // the command buffer's CellGcmContextData (PPFX's calls' first argument)
     uint8_t by;                      // who makes the call being encoded (By)
     // the producer
@@ -1167,6 +1168,7 @@ BlobP asp_fp_now()
 void add_target_need(Rec* r)
 {
     const Surface& sf = S.st.surface;
+    if (r->kind == kDraw && (sf.color_format & 0x1Fu) == 0x08 && sf.width >= 1280) S.final_frame = S.frame;   // the final composite
     Need& n = r->need[r->nneed++];
     memset(&n, 0, sizeof n);
     n.location = sf.color_location[0] ? 1u : 0u;   // CELL_GCM_LOCATION_MAIN : _LOCAL
@@ -1997,9 +1999,23 @@ void asp_probe_exit(const VEntry& v)
 // inside them: counted). The native renderer has their state from the
 // records; the engine, which draws none of asp's, does not need it.
 int asp_bypass();
+// =2: the program traffic alone -- vertex program uploads, fragment program
+// uploads and their constant patches (most of asp's words); =3 every state
+// function too, which the engine's own remaining draws (the HUD, the menus)
+// inherit state from (blend, alpha test, depth, surface): not for use
+// before R6 makes those draws native (docs/NATIVE_R5.md section 7)
+bool asp_state_bypassed_fn(uint32_t addr)
+{
+    if (asp_bypass() >= 3) return true;
+    return addr == 0x006CA3D0u || addr == 0x006CADE4u || addr == 0x006C9624u;
+}
+
 bool asp_state_bypass_enter(uint32_t addr, ppu_context* c)
 {
-    if (asp_bypass() < 2 || addr == 0x006C6F88u) return false;
+    if (asp_bypass() < 2 || addr == 0x006C6F88u || !asp_state_bypassed_fn(addr)) return false;
+    // after the frame's final composite the engine draws the HUD and the menus
+    // with asp's programs: from there on, asp's uploads are the engine's (kept)
+    if (S.final_frame == S.frame) return false;
     for (const VEntry& e : s_vstack) if (e.kind == 2 || e.kind == 4) return false;   // inside a draw or another: theirs
     VEntry v;
     memset(&v, 0, sizeof v);
@@ -2057,8 +2073,9 @@ void write_report()
             (unsigned long long)q.put, (unsigned long long)q.walked, (unsigned long long)q.done);
     fprintf(f, "wraps_in_call %llu ends_at_ring_end %llu\n", (unsigned long long)s.wraps_in_call,
             (unsigned long long)s.ends_at_ring_end);
-    fprintf(f, "recorder_ms %.3f queue_full_waits %llu queue_full_wait_ms %.3f flushes_for_room %llu\n", s.rec_ns / 1e6,
-            (unsigned long long)q.full_waits, q.full_wait_us / 1e3, (unsigned long long)s.flushes_for_room);
+    fprintf(f, "recorder_ms %.3f queue_full_waits %llu queue_full_wait_ms %.3f flushes_for_room %llu exit_signal_skips %llu\n",
+            s.rec_ns / 1e6, (unsigned long long)q.full_waits, q.full_wait_us / 1e3, (unsigned long long)s.flushes_for_room,
+            (unsigned long long)s.exit_signal_skips);
     fprintf(f, "walker matched %llu missed %llu foreign_draws %llu foreign_clears %llu lap_delta_changes %llu\n",
             (unsigned long long)s.matched, (unsigned long long)s.missed, (unsigned long long)s.foreign_draws,
             (unsigned long long)s.foreign_clears, (unsigned long long)s.lap_delta_changes);
