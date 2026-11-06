@@ -1,5 +1,26 @@
 # Play session checklist (for the owner)
 
+## R7's one request (2026-11-06, optional, about 10-15 minutes)
+
+**The post-boss warp on the R7 build.** R7's release build has no PS3
+graphics command path at all; the one thing no automated route reaches is
+the floor warp in the first dungeon's portal room after its boss, which
+captures the last displayed frame with a 2D transfer that R7 now does as a
+native copy (docs/NATIVE_R7.md). From the repository folder, in Git Bash:
+
+```bash
+env SCENARIO=owner_warp_r7 RUN_TAG=owner-warp-r7 build/venv/Scripts/python.exe tests/boot_smoke.py
+```
+
+It starts from a copy of the boss-door save (CONTINUE: the dungeon's door;
+the special key is in the room north of the north room). Beat the boss, step
+on the floor warp in the portal room, watch the warp, then close the window.
+Normal damage, sound, fullscreen. The report, the frame the warp captured
+(xfer_dump/) and a grab a second are saved in the run's folder under
+build/sessions/; your own saves are not touched. Any test of mine on screen
+is stopped first and resumes afterwards. If the warp looks wrong, press F8
+at that moment.
+
 ## What is wanted when you have time (optional coverage)
 
 None of these blocks the work: R5 goes on with the saves and recordings

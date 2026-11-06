@@ -1,0 +1,24 @@
+# A short play session for the owner on R7's native release build
+# (docs/NATIVE_R7.md): the first dungeon's boss and then the floor warp in
+# the portal room after it -- the warp captures the last displayed frame
+# with a 2D transfer (cellGcmSetTransferImage), which R7 carries out as a
+# native copy and which no automated route reaches (docs/NATIVE_R4.md
+# section 11). The build has no FIFO walker and no RSX command path at all.
+#   SCENARIO=owner_warp_r7 build/venv/Scripts/python.exe tests/boot_smoke.py
+# needs R7's release build in build/r7/rel3. A fresh copy of checkpoint
+# dungeon1-boss-door each run (CONTINUE starts at the dungeon's door; the
+# special key is in the room north of the north room), normal damage,
+# sound, fullscreen. What it records: the run's ppfx_report.txt (the
+# "r7: transfer image" lines name the copy, its source and destination),
+# frames.log, window grabs every second (grabs/), and the warp's captured
+# frame itself as the copy left it in guest memory (xfer_dump/: a PPM per copy). Close the window when
+# done. If anything looks wrong, press F8 (or L3+R3) at that moment.
+#! saves build/checkpoints/dungeon1-boss-door
+#! env BIN=build/r7/rel3/dotheroes.exe RUNS_IN=build/sessions KEEP_RUNS=1000 PREEMPT_TESTS=1
+#! env DOTHEROES_PPFX_REPORT=ppfx_report.txt DOTHEROES_R7_XFER_DUMP=xfer_dump
+#! env DOTHEROES_NATIVE_CD=1 DOTHEROES_NATIVE_SOLVER=4,5,6 GCM_WRAP_LAP=1 DOTHEROES_PRESENT_ONCE=1
+#! env WINDOW=1 VISIBLE=1 PS3RECOMP_VK_FULLSCREEN=1 AUDIO=1 PS3_OSD_FPS=2 DUMP=0 SHOT_EVERY=0 PS3_VERBOSE=0 GRAB_EVERY=1
+#! env DOTHEROES_DEV_KEYS=1 DOTHEROES_DEV_STATE=1 DOTHEROES_DEV_RECORD=1 DIAG_FRAMES=frames.log
+#! env PS3RECOMP_SPIRV_CACHE=build/play-boss/cache DOTHEROES_FPS=display
+#! secs 3600
+until_exit build/checkpoints/owner-warp-r7

@@ -87,6 +87,20 @@ endif()
 # imported one arrives without SDL2, pthreads, the Metal frameworks or the
 # Winsock/XInput imports -- the link then fails on every platform for a
 # different reason. add_subdirectory hands all of that over with the target.
+# The native release build (docs/NATIVE_R7.md): the title's graphics are the
+# native renderer's alone, from its libgcm calls at their entry (R7: no FIFO
+# walker, no command words), so the runtime is built without the RSX command
+# path (PS3RECOMP_NATIVE_GRAPHICS: no walker, method decoder, draw engine or
+# backend drawing) and the port without R4's bridge to it. The development
+# configuration (OFF) keeps all of them: the existing renderer stays the
+# reference the native one is compared against.
+option(DOTHEROES_NATIVE_RELEASE "Native graphics only: no RSX command path, no bridge" OFF)
+set(HLE_NID_DEFINES "")
+if(DOTHEROES_NATIVE_RELEASE)
+    set(PS3RECOMP_NATIVE_GRAPHICS ON CACHE BOOL "" FORCE)
+    # the NID table registers what this build compiles (no walker functions)
+    set(HLE_NID_DEFINES --define PS3RECOMP_RSX_COMMAND_PATH=0)
+endif()
 add_subdirectory("${PS3RECOMP_DIR}" "${CMAKE_BINARY_DIR}/ps3recomp_sdk"
                  EXCLUDE_FROM_ALL)
 
@@ -115,7 +129,7 @@ else()
         OUTPUT "${HLE_NID_TABLE}"
         COMMAND "${Python3_EXECUTABLE}"
                 "${PS3RECOMP_DIR}/tools/gen_hle_nids.py"
-                --out "${HLE_NID_TABLE}" --all
+                --out "${HLE_NID_TABLE}" --all ${HLE_NID_DEFINES}
         DEPENDS "${PS3RECOMP_DIR}/tools/gen_hle_nids.py"
                 "${PS3RECOMP_DIR}/tools/nid_database.py"
                 ${HLE_NID_SOURCES} "${HLE_NID_SOURCE_LIST}"
@@ -250,7 +264,11 @@ add_library(dotheroes_native STATIC native/bullet_cd_task.cpp native/bullet_solv
     # when a development lift's entry observers reference them
     # (tools/r1_dev_lift.sh)
     native/render/r1_observe.cpp native/render/ppfx_recorder.cpp native/render/ppfx_watch.cpp
-    native/render/ppfx_bridge.cpp native/render/ppfx_render.cpp)
+    native/render/ppfx_render.cpp)
+if(NOT DOTHEROES_NATIVE_RELEASE)
+    # R4's bridge to the FIFO walker and the existing renderer (development)
+    target_sources(dotheroes_native PRIVATE native/render/ppfx_bridge.cpp)
+endif()
 target_include_directories(dotheroes_native PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/native"
     "${PS3RECOMP_DIR}/include"
@@ -293,6 +311,10 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     dotheroes_native
     ps3recomp_runtime
 )
+if(DOTHEROES_NATIVE_RELEASE)
+    target_compile_definitions(dotheroes_native PRIVATE DOTHEROES_NATIVE_RELEASE=1)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE DOTHEROES_NATIVE_RELEASE=1)
+endif()
 
 # The runtime is C++, and on Apple also Objective-C. Letting CMake infer the
 # link language from the generated C would leave the C++ standard library out.

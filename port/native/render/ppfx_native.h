@@ -114,6 +114,19 @@ struct Raster {             // the render state, as the calls gave it
     uint16_t alpha_func; uint8_t alpha_ref;                    // cellGcmSetAlphaFunc
     uint16_t stencil_func, stencil_fail, stencil_zfail, stencil_zpass;   // cellGcmSetStencilFunc / Op
     uint8_t stencil_ref, stencil_func_mask, stencil_write_mask;
+    // R7: the game's frame-start reset (func_00029618), whose calls write no
+    // words any more: what they set, in their own encoding. The native
+    // renderer draws with one colour target, no depth bounds test, one-sided
+    // stencil and no point sprites; a draw made with any of these other than
+    // that is counted (render report: r7 state the native renderer does not model)
+    uint32_t color_mask_mrt;        // 0x0370: cellGcmSetColorMaskMrt
+    uint32_t zminmax;               // 0x1D78: cellGcmSetZMinMaxControl (cullNearFar | zclamp << 4 | cullIgnoreW << 8)
+    uint8_t blend_mrt;              // 0x036C: cellGcmSetBlendEnableMrt (mrt1 | mrt2 << 1 | mrt3 << 2)
+    uint8_t depth_bounds;           // 0x0380: cellGcmSetDepthBoundsTestEnable
+    uint8_t two_sided_stencil;      // 0x0348: cellGcmSetTwoSidedStencilTestEnable
+    uint8_t point_sprite;           // 0x1EE4/0x1EE8: cellGcmSetPointSpriteControl's enable
+    uint32_t point_sprite_ctl;      // ... and its 0x1EE8 word
+    uint16_t line_width;            // R7: cellGcmSetLineWidth (0x03B8, 6.3 fixed point; 8 = 1.0) -- the editor's grid
 };
 struct VertexData {
     uint32_t base_offset, base_index;   // cellGcmSetVertexDataBase
@@ -158,7 +171,17 @@ uint64_t fnv(const void* p, size_t n, uint64_t h = 1469598103934665603ull);
 // kReport (R6, DOTHEROES_R6_OCCLUSION=1): an occlusion report's operation --
 // cellGcmSetClearReport, cellGcmSetReport, cellGcmSetTransferReportData --
 // carried out by the native renderer with the counts its own queries took
-enum Kind : uint32_t { kDraw = 1, kClear = 2, kAspDraw = 3, kFlip = 4, kReport = 5 };
+// R7 (docs/NATIVE_R7.md, DOTHEROES_R7=1): what the walker did for the
+// title's synchronisation, now records the native renderer carries out in
+// their order --
+// kLabel: a label written (cellGcmSetWriteCommandLabel: when consumed; the
+//   back-end and texture-read labels: when the work before it has completed)
+// kRef: cellGcmSetReferenceCommand -- the ref register written when the work
+//   before it has completed (cellGcmFinish waits on it)
+// kWait: cellGcmSetWaitLabel -- the consumer waits until the label holds the value
+// kTransfer: a 2D copy between surfaces (cellGcmSetTransferImage and its family)
+enum Kind : uint32_t { kDraw = 1, kClear = 2, kAspDraw = 3, kFlip = 4, kReport = 5, kLabel = 6, kRef = 7, kWait = 8,
+                       kTransfer = 9 };
 enum ReportOp : uint32_t { kRepClear = 1, kRepReport = 2, kRepTransfer = 3 };
 
 // A guest surface a record reads (a texture unit) or writes (its colour
@@ -169,6 +192,9 @@ struct Need {
     uint32_t format;               // texture: the format byte; target: the surface colour format
     uint8_t unit;                  // 0..15 a texture unit, 0xFF the colour target, 0xFE the depth target (R5)
     uint8_t ppfx_wrote;            // an earlier record wrote this address (the native side has it)
+                                   // (asp's records: also set for DXT textures, which the walker did not take)
+    uint8_t drawn;                 // R7: an earlier record drew or copied into this address -- a native
+                                   // image, not guest bytes (the capture check's test; DXT stays guest bytes)
 };
 enum { kMaxNeeds = 17 };
 
@@ -252,6 +278,26 @@ struct Rec {
     // kReport (R6): the operation, the report type, index (and count of a
     // transfer), the transfer's destination IO offset
     uint32_t rep_op, rep_type, rep_index, rep_count, rep_io;
+    uint32_t rep_loc;              // R7: the report area (0 local, 1 main: cellGcmSetReportLocation's)
+    // R7: kLabel (index, value, stage 0 consumed / 1 completed), kRef (value),
+    // kWait (index, value)
+    uint32_t lab_index, lab_value; uint8_t lab_stage;
+    // R7: kTransfer -- source and destination (location, offset, pitch, x, y),
+    // the extent, bytes per pixel
+    uint32_t xs_loc, xs_off, xs_pitch, xs_x, xs_y, xd_loc, xd_off, xd_pitch, xd_x, xd_y, x_w, x_h, x_bpp;
+    // R7: the record's guest inputs are taken by the native renderer when it
+    // consumes the record (after the flush that would have submitted it), not
+    // at the call: vr[] and tex[] give the ranges, their bytes are filled then
+    uint8_t deferred;
+    // R7's capture check (DOTHEROES_R7_CAPTURE_CHECK=1): the hash of each guest
+    // input range (r7_input_hashes) at the game's flush, compared with the
+    // bytes when the native renderer takes them
+    std::vector<uint64_t> fhash;
+    uint8_t fh;
+    // R7: its small uncompressed textures were taken at the flush, on the
+    // game's thread (tex[], tdata): the game rewrites one of them -- the
+    // water's -- inside the window, so later would be too late (section 2)
+    uint8_t tex_at_flush;
     Walk walk;
 };
 
@@ -266,6 +312,9 @@ struct Queue {
     enum { kCap = 4096 };   // R5: asp's records too (about 250 a river frame)
     Rec* slot[kCap];
     std::atomic<uint64_t> put{0}, walked{0}, done{0};
+    // R7: the records whose commands the game has flushed -- the native
+    // renderer consumes [0, flushed) (no walker, no `walked`)
+    std::atomic<uint64_t> flushed{0};
     // R6's native present: flips recorded (kFlip published) and presented by
     // the native renderer; a flip completes for the game only once both agree
     std::atomic<uint64_t> flips_recorded{0}, flips_presented{0};
@@ -336,6 +385,11 @@ int readback_take(uint32_t location, uint32_t offset, uint64_t upto, uint32_t ti
                   uint32_t* w, uint32_t* h, uint32_t* vkformat, uint32_t* bpp);
 // rsx_be_format the engine keeps a cellGcmSetSurface colour format in
 uint32_t surface_beformat(uint32_t color_format);
+// R6/R7: a guest read of a display buffer's memory (the snapshot's JPEG and
+// PNG encoders) served from the native image; installed with
+// cellGcm_set_guest_read_hook. 1 when done.
+int guest_read_native(uint32_t loc, uint32_t off, uint32_t pitch, uint32_t w, uint32_t h);
+extern std::atomic<uint64_t> s_guest_reads, s_guest_read_fail;
 // R4's stream marker (ppfx_bridge.cpp, the producer's thread): written into
 // the command buffer of the context at ctx_ea where a bypassed record's
 // commands would have gone. false when it could not be written (counted).
@@ -448,8 +502,30 @@ struct Stats {
     // with the body run: the prediction against the nested parameter calls)
     std::atomic<uint64_t> vpd_sets{0}, vpd_matrices{0}, vpd_programs{0};
     std::atomic<uint64_t> vpdv_programs{0}, vpdv_equal{0}, vpdv_differ{0}, vpdv_count_differ{0}, vpdv_game{0}, vp_new_cases{0};
+    // R7 (no walker): the game's flushes (records published to the native
+    // renderer), flushes forced by a full queue; command words found in the
+    // title's ring at a flush (written by a function no hook replaces) and the
+    // flushes with any; the remaining writers' calls replaced; the label,
+    // reference and wait records; the transfers; the reset's state
+    std::atomic<uint64_t> r7_flushes{0}, r7_forced{0}, r7_words{0}, r7_word_flushes{0};
+    std::atomic<uint64_t> r7_markers{0}, r7_jumps{0}, r7_reset_calls{0}, r7_reset_nondefault{0}, r7_reportloc{0};
+    std::atomic<uint64_t> r7_labels{0}, r7_labels_done{0}, r7_refs{0}, r7_refs_done{0}, r7_waits{0}, r7_wait_spins{0}, r7_wait_timeouts{0};
+    std::atomic<uint64_t> r7_wait_us{0}, r7_reports{0}, r7_legacy_reports{0}, r7_legacy_transfers_dropped{0};
+    std::atomic<uint64_t> r7_xfer_calls{0}, r7_xfers{0}, r7_xfer_unsupported{0}, r7_unknown_calls{0};
+    std::atomic<uint64_t> r7_deferred{0}, r7_deferred_bytes{0}, r7_unmodelled_draws{0}, r7_flip_executed{0};
+    std::atomic<uint64_t> cc_records{0}, cc_ranges{0}, cc_bytes{0}, cc_changed_records{0}, cc_changed_ranges{0};
+    std::atomic<uint64_t> r7_heap_setups{0}, r7_invalidates{0}, r7_line_width_calls{0}, r7_wide_line_draws{0};
+    std::atomic<uint64_t> r7_flush_tex{0}, r7_flush_tex_bytes{0}, cc_flush_taken_changed{0};
 };
 Stats& stats();
 void report_add(const char* line);   // a line in the next report (diagnostics)
+// R7's capture check: a record's guest inputs (vertex ranges, the index
+// buffer, the textures no record drew), one hash a range; `what` names each
+int r7_capture_check();
+void r7_input_hashes(const Rec* r, std::vector<uint64_t>& out, std::vector<std::string>* what,
+                     std::vector<uint8_t>* taken_at_flush = nullptr);
+// R7: a record's small uncompressed guest textures taken into it at the
+// flush (the game's thread); false when the switch turned it off
+bool r7_take_at_flush(Rec* r);
 
 }  // namespace ppfx

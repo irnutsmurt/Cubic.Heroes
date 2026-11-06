@@ -273,6 +273,7 @@ extern "C" void dotheroes_present_finish_async(void)
 }
 #endif
 
+#ifndef DOTHEROES_NATIVE_RELEASE
 static void present_guest_frame(void)
 {
     if (!g_dotheroes_native_present) present_frame();
@@ -286,6 +287,7 @@ static void present_guest_frame(void)
      * than a volatile ++, which on arm64 is neither atomic nor a fence. */
     InterlockedIncrement(&g_frames_presented);
 }
+#endif
 
 /* The 60 Hz vblank, on a clock of its own. The game paces every frame by the
  * vblank count (func_00029BD8 waits for it to move), so it has to move evenly.
@@ -412,6 +414,31 @@ static DWORD WINAPI frame_clock(LPVOID)
 
     unsigned  last_flip = 0;
 
+    /* R7 (docs/NATIVE_R7.md, DOTHEROES_R7=1): no FIFO walker. Every
+     * command-writing call is the native renderer's at its entry, the ring
+     * stays empty, and the native renderer presents and completes the flips
+     * (cellGcm_native_flip_executed). This thread only keeps the window: its
+     * message pump (the pads' SDL keyboard state comes from it), and a blank
+     * present until the first flip. */
+    {
+#ifdef DOTHEROES_NATIVE_RELEASE
+        const bool r7_on = true;   /* the release has no walker to run */
+#else
+        const char* r7 = getenv("DOTHEROES_R7");
+        const bool r7_on = r7 && *r7 == '1';
+#endif
+        if (r7_on) {
+            fprintf(stderr, "[rsx] R7: no FIFO walker; this thread pumps the window\n");
+            for (;;) {
+                Sleep(1);
+                if (!rsx_ok) continue;
+                if (rsx_backend_pump() != 0) { rsx_ok = 0; ps3_host_quit("window closed"); continue; }
+                if (cellGcm_flip_request_count() == 0) rsx_backend_present();
+            }
+        }
+    }
+
+#ifndef DOTHEROES_NATIVE_RELEASE
     for (;;) {
         /* 1 ms: the guest's FIFO writes are not signalled, so this poll is
          * how soon the walker sees them. At 4 ms the waits added up over a
@@ -469,6 +496,7 @@ static DWORD WINAPI frame_clock(LPVOID)
             }
         }
     }
+#endif
     return 0;
 }
 

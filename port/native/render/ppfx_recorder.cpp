@@ -102,8 +102,24 @@ extern "C" void (*g_dotheroes_stop_hook)(void);   // dev_state.cpp: run before a
 extern "C" void rsx_frame_trace_arm(void);   // cellGcmSys.c: RSX_FRAME_TRACE=arm:<frames>:<path>
 extern "C" void ppfx_watch_add_ea(uint32_t ea, uint32_t n);   // ppfx_watch.cpp
 extern "C" int g_ppu_obs_store;                                // r1_observe.cpp (ps3recomp 0112)
+extern "C" void cellGcm_set_native_frontend(int on);           // cellGcmSys.c (R7): no walker, the host's front end
+void func_006CAD4C(ppu_context* ctx);                          // the lift (C++ linkage): asp's fragment heap set-up (R7 calls it)
+extern "C" PPU_THREAD_LOCAL void (*g_trampoline_fn)(void*);    // the lift's tail calls
+extern "C" void cellGcm_set_guest_read_hook(int (*hook)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t));
+extern "C" uint32_t cellGcm_native_fe_recycles(void);
+extern "C" uint32_t cellGcm_native_fe_get_polls(void);
 
 namespace ppfx {
+namespace {
+// R7 (the game thread's cost): switches read on every observed call, cached
+// in plain variables behind always-inlined getters (R6's getters were real
+// calls on that path: 0.7% of the game thread)
+int r6_skip_read();
+int asp_bypass_read();
+int s_r6_skip_c = -1, s_asp_bypass_c = -1;
+__attribute__((always_inline)) inline int r6_skip() { return s_r6_skip_c >= 0 ? s_r6_skip_c : (s_r6_skip_c = r6_skip_read()); }
+__attribute__((always_inline)) inline int asp_bypass() { return s_asp_bypass_c >= 0 ? s_asp_bypass_c : (s_asp_bypass_c = asp_bypass_read()); }
+}  // namespace
 
 // ---- shared definitions -----------------------------------------------------
 
@@ -128,6 +144,7 @@ void reset_state(State* s)
     r.alpha_func = r.stencil_func = 0x0207u;   // CELL_GCM_ALWAYS
     r.stencil_fail = r.stencil_zfail = r.stencil_zpass = 0x1E00u;   // CELL_GCM_KEEP
     r.stencil_func_mask = r.stencil_write_mask = 0xFF;
+    r.line_width = 8;                     // 1.0 (6.3 fixed point)
     s->clear_depth = 0xFFFFFF00u;
     for (auto& v : s->vdata.current) { v[0] = v[1] = v[2] = 0.0f; v[3] = 1.0f; }
 }
@@ -197,25 +214,44 @@ uint64_t now_ns()
 // Local memory's bytes as the calls made them: per word, the bytes and the
 // sequence number of the transfer that wrote it last (0: none).
 
-struct ShadowPage { uint8_t b[4096]; uint64_t ep[1024]; };
+// R7 (the game thread's cost): each word also carries the shader object
+// whose upload or patch wrote it last (R6 kept that in an unordered_map per
+// word: 1.5% of the game thread), and the page last looked up is kept.
+struct ShadowPage { uint8_t b[4096]; uint64_t ep[1024]; uint32_t own[1024]; };
 std::unordered_map<uint32_t, ShadowPage*> s_shadow;
 uint64_t s_epoch;   // transfers so far
+uint32_t s_shadow_last = ~0u;
+ShadowPage* s_shadow_last_p;
 
 ShadowPage* shadow_page(uint32_t off)
 {
+    if ((off >> 12) == s_shadow_last) return s_shadow_last_p;
     ShadowPage*& p = s_shadow[off >> 12];
     if (!p) { p = new ShadowPage; memset(p, 0, sizeof *p); }
+    s_shadow_last = off >> 12; s_shadow_last_p = p;
     return p;
 }
 
+// the words [off, off + n) written: one page lookup a page (off word-aligned)
 void shadow_write(uint32_t off, const uint8_t* src, uint32_t n, uint64_t ep)
 {
-    for (uint32_t i = 0; i + 4 <= n; i += 4) {
-        ShadowPage* p = shadow_page(off + i);
-        memcpy(p->b + ((off + i) & 0xFFF), src + i, 4);
-        p->ep[((off + i) & 0xFFF) >> 2] = ep;
+    for (uint32_t i = 0; i + 4 <= n;) {
+        const uint32_t a = off + i;
+        ShadowPage* p = shadow_page(a);
+        uint32_t take = 0x1000 - (a & 0xFFF);
+        if (take > ((n - i) & ~3u)) take = (n - i) & ~3u;
+        if (!take) break;
+        memcpy(p->b + (a & 0xFFF), src + i, take);
+        for (uint32_t w = (a & 0xFFF) >> 2, e = w + take / 4; w < e; w++) p->ep[w] = ep;
+        i += take;
     }
 }
+// the shader object a word of program memory belongs to (0: none known)
+void owner_set(uint32_t off, uint32_t n, uint32_t obj)
+{
+    for (uint32_t i = 0; i + 4 <= n; i += 4) shadow_page(off + i)->own[((off + i) & 0xFFF) >> 2] = obj;
+}
+uint32_t owner_get(uint32_t off) { return shadow_page(off)->own[(off & 0xFFF) >> 2]; }
 
 // A copy the game makes into local memory (its memcpy, observed): on pages
 // the shadow keeps (program memory), the bytes it writes, in call order --
@@ -351,7 +387,7 @@ struct Asp {
     // R6: per word of program memory, the shader object whose upload or
     // constant patch wrote it last -- a resident bind keeps only its own
     // object's patches (R5's start-up gap: another program's patches kept)
-    std::unordered_map<uint32_t, uint32_t> fp_word_owner;
+    // (the words' owners: in the shadow's pages, ShadowPage::own)
     uint64_t fp_foreign_patch_words;  // words a resident bind took back from another object's patch
     uint64_t fp_const_calls;          // R6: 0x006C9C74's fragment-parameter calls (not vertex constants)
     uint64_t fp_quiet_binds;          // R6: pair binds that emitted nothing (the program unchanged)
@@ -393,9 +429,27 @@ struct TargetSeen { uint64_t records; uint32_t w, h, format, last_frame; };
 std::map<uint64_t, TargetSeen> s_targets_seen;
 std::unordered_map<uint64_t, BlobP> s_blobs;   // programs by content
 
+// a fast 64-bit hash (the shape of xxHash64's lanes; the renderer's fast_hash)
+uint64_t blob_hash(const uint8_t* p, size_t n)
+{
+    const uint64_t P1 = 11400714785074694791ull, P2 = 14029467366897019727ull, seed = 0xB10Bull;
+    auto rotl = [](uint64_t x, int r) { return (x << r) | (x >> (64 - r)); };
+    uint64_t a = seed + P1 + P2, b = seed + P2, c = seed, d = seed - P1;
+    size_t i = 0;
+    for (; i + 32 <= n; i += 32) {
+        uint64_t w[4]; memcpy(w, p + i, 32);
+        a = rotl(a + w[0] * P2, 31) * P1; b = rotl(b + w[1] * P2, 31) * P1;
+        c = rotl(c + w[2] * P2, 31) * P1; d = rotl(d + w[3] * P2, 31) * P1;
+    }
+    uint64_t h = rotl(a, 1) + rotl(b, 7) + rotl(c, 12) + rotl(d, 18) + n;
+    for (; i + 8 <= n; i += 8) { uint64_t w; memcpy(&w, p + i, 8); h ^= rotl(w * P2, 31) * P1; h = rotl(h, 27) * P1 + P2; }
+    for (; i < n; i++) { h ^= p[i] * P1; h = rotl(h, 11) * P2; }
+    return h;
+}
+
 BlobP blob_of(const uint8_t* p, size_t n)
 {
-    const uint64_t h = fnv(p, n) ^ (uint64_t)n;
+    const uint64_t h = blob_hash(p, n) ^ (uint64_t)n;
     auto it = s_blobs.find(h);
     if (it != s_blobs.end() && it->second->bytes.size() == n && !memcmp(it->second->bytes.data(), p, n))
         return it->second;
@@ -1198,6 +1252,29 @@ int attribute(ppu_context* c)
     return 0;
 }
 
+// ---- R7: no walker (docs/NATIVE_R7.md) ----------------------------------------------
+// DOTHEROES_R7=1: the native renderer is the title's whole GPU. Every call
+// that wrote command words is replaced at its entry, nothing reaches the
+// ring, no FIFO walker runs (port/main.cpp), and the records are consumed
+// once the game's flush (cellGcmFlush, 0x006A336C) would have submitted their
+// commands -- the queue's `flushed`. No stream markers.
+#ifdef DOTHEROES_NATIVE_RELEASE
+int r7() { return 1; }   // the release: no walker, so R7 always
+bool rmark(uint32_t, uint64_t) { return true; }
+#else
+int r7()
+{
+    static int on = -1;
+    if (on < 0) { const char* e = getenv("DOTHEROES_R7"); on = e && *e == '1'; }
+    return on;
+}
+bool rmark(uint32_t ctx, uint64_t seq)
+{
+    if (r7()) return true;   // nothing walks the ring: no marker
+    return bridge_marker(ctx, seq);
+}
+#endif
+
 // ---- records ---------------------------------------------------------------------
 
 uint32_t elem_bytes(uint32_t type, uint32_t size)
@@ -1219,8 +1296,10 @@ uint32_t elem_bytes(uint32_t type, uint32_t size)
 // put register (the runtime's control area, VM_HLE_INJECT_BASE + 0x2000)
 // moved forward to the context's current position, within the lap only.
 extern "C" uint32_t ppu_hle_inject_base;
+void r7_publish(bool forced);
 void flush_for_room()
 {
+    if (r7()) { r7_publish(true); return; }
     if (!S.ring_ctx || !ea_ok(S.ring_ctx, 16)) return;
     const uint32_t ctl = ppu_hle_inject_base + 0x2000u;
     const uint32_t cur = cellGcm_ea2io_pub(g32(S.ring_ctx + 8)), put = g32(ctl);
@@ -1229,6 +1308,12 @@ void flush_for_room()
         p32(ctl, cur);
         stats().flushes_for_room++;
     }
+}
+
+// a reused record's buffer: emptied, and let go past 64 KB (acquire, below)
+template <class V> inline void trim_buf(V& v)
+{
+    if (v.capacity() * sizeof(typename V::value_type) > (64u << 10)) V().swap(v);
 }
 
 Rec* acquire()
@@ -1258,7 +1343,21 @@ Rec* acquire()
     }
     Rec*& r = q.slot[p % Queue::kCap];
     if (!r) r = new Rec();
+    // R7 (memory over area cycles): a slot's buffers keep their capacity
+    // when cleared, so one large input -- a Bink frame's planes, a long
+    // vertex stream -- stayed held by its slot for good, and as the title's
+    // movie replayed into other slots the process grew by 100-220 MB a
+    // cycle (4,096 slots). Past 64 KB a buffer is let go here, where the slot
+    // is being reused and no one else holds it.
+    trim_buf(r->vdata);
+    trim_buf(r->tdata);
+    trim_buf(r->cdelta);
+    trim_buf(r->fhash);
     r->game_arrays = 0;
+    r->deferred = 0;
+    r->rep_loc = 0;
+    r->fh = 0;
+    r->tex_at_flush = 0;
     return r;
 }
 
@@ -1452,8 +1551,10 @@ void build_draw(ppu_context* c)
         if (!ea_ok(ea, bytes) || bytes > (1u << 20)) { r->why = kWhyVertex; continue; }
         VtxRange& v = r->vr[r->nvr++];
         v.location = loc; v.offset = lo; v.bytes = bytes; v.at = (uint32_t)r->vdata.size();
+        if (r7()) continue;   // R7: taken when consumed (r->deferred)
         r->vdata.insert(r->vdata.end(), vm_base + ea, vm_base + ea + bytes);
     }
+    r->deferred = r7() ? 1 : 0;
     // what it reads and writes: its colour target, the units its program samples
     add_target_need(r);
     for (uint32_t u = 0; u < 16; u++) {
@@ -1468,6 +1569,7 @@ void build_draw(ppu_context* c)
         n.pitch = t.pitch;
         n.unit = (uint8_t)u;
         n.ppfx_wrote = S.ppfx_targets.count((uint64_t)n.location << 32 | n.offset) ? 1 : 0;
+        n.drawn = n.ppfx_wrote;
         if (!n.ppfx_wrote) {
             // a texture no record wrote: its bytes now, if small (a static
             // texture; a surface other work renders is handed over instead) --
@@ -1484,13 +1586,13 @@ void build_draw(ppu_context* c)
                 VtxRange& tr = r->tex[r->ntex++];
                 tr.location = u;   // here: the unit
                 tr.offset = n.offset; tr.bytes = bytes; tr.at = (uint32_t)r->tdata.size();
-                r->tdata.insert(r->tdata.end(), vm_base + ea, vm_base + ea + bytes);
+                if (!r7()) r->tdata.insert(r->tdata.end(), vm_base + ea, vm_base + ea + bytes);
             }
         }
     }
     publish(r);
     stats().draws++;
-    if (r->bypassed) { stats().r4_records++; bridge_marker((uint32_t)c->gpr[3], r->seq); }
+    if (r->bypassed) { stats().r4_records++; rmark((uint32_t)c->gpr[3], r->seq); }
 }
 
 void build_clear(ppu_context* c)
@@ -1501,7 +1603,7 @@ void build_clear(ppu_context* c)
     add_target_need(r);
     publish(r);
     stats().clears++;
-    if (r->bypassed) { stats().r4_records++; bridge_marker((uint32_t)c->gpr[3], r->seq); }
+    if (r->bypassed) { stats().r4_records++; rmark((uint32_t)c->gpr[3], r->seq); }
 }
 
 // ---- R5: asp's records (docs/NATIVE_R4.md section 10) ---------------------------
@@ -1515,10 +1617,10 @@ int bypass_mode();
 // R5's bypass of asp's command writers (DOTHEROES_ASP_BYPASS=1: its draws):
 // only with asp drawn natively, PPFX's images shared and R4's bypass of PPFX
 // (=1): then nothing the engine would draw needs asp's scene
-int asp_bypass()
+int asp_bypass_read()
 {
-    static int on = -1;
-    if (on < 0) {
+    int on = -1;
+    {
         const char* e = getenv("DOTHEROES_ASP_BYPASS");
         const char* n = getenv("DOTHEROES_ASP_NATIVE");
         const char* sh = getenv("DOTHEROES_ASP_SHARE");
@@ -1610,6 +1712,7 @@ int r6_occlusion()
     }
     return on;
 }
+uint32_t r7_report_main();
 bool occ_fn(uint32_t a)
 {
     return a == 0x006A817Cu || a == 0x006A820Cu || a == 0x006A829Cu || a == 0x006A1D1Cu || a == 0x006A8020u;
@@ -1632,13 +1735,14 @@ void build_report(ppu_context* c, uint32_t op)
     r->rep_index = op == kRepReport ? (uint32_t)c->gpr[5] : op == kRepTransfer ? (uint32_t)c->gpr[5] : 0u;
     r->rep_count = op == kRepTransfer ? (uint32_t)c->gpr[6] : 1u;
     r->rep_io = op == kRepTransfer ? (uint32_t)c->gpr[4] : 0u;
+    r->rep_loc = r7_report_main();   // R7: cellGcmSetReportLocation's choice (the game selects local before these)
     r->lap = r->lap_end = cellGcm_title_laps_pub(nullptr);
     r->io = r->io_end = cellGcm_ea2io_pub(g32(ctx + 8));
     r->io_alt = cellGcm_ea2io_pub(g32(ctx));
     r->bypassed = 1;
     publish(r);
     stats().occ_ops++;
-    if (!bridge_marker(ctx, r->seq)) stats().asp_marker_fail++;
+    if (!rmark(ctx, r->seq)) stats().asp_marker_fail++;
 }
 
 int native_flip_gate()
@@ -1699,17 +1803,335 @@ void build_flip(ppu_context* c)
     r->bypassed = 1;
     q.flips_recorded.fetch_add(1, std::memory_order_release);
     publish(r);
-    if (!bridge_marker(ctx, r->seq)) stats().asp_marker_fail++;
+    if (!rmark(ctx, r->seq)) stats().asp_marker_fail++;
     static bool on = false;
     if (!on) {
         on = true;
-        cellGcm_set_flip_gate(native_flip_gate);
+        if (!r7()) cellGcm_set_flip_gate(native_flip_gate);   // R7: the native renderer completes the flips itself
         g_dotheroes_native_present = 1;
         char line[160];
         snprintf(line, sizeof line, "recorder: the native present takes the frames over at flip %llu (frame %u)",
                  (unsigned long long)q.flips_recorded.load(), S.frame);
         report_add(line);
     }
+}
+
+
+// ---- R7: the calls that wrote what the walker read (docs/NATIVE_R7.md) -------------------
+// With every draw, state and program call already replaced at its entry
+// (R6's =all), what still wrote words into the title's ring were thirteen
+// libgcm functions and the flip (docs/NATIVE_R6.md section 3): the game's
+// frame-start reset of eight render-state items, the performance markers,
+// the wait-flip acquire, the profiling meter's report requests and their
+// location -- and, outside the river, the labels Bink fences on, the
+// reference command cellGcmFinish waits on, the 2D transfers. Each is
+// replaced here by what it means: state, a record for the native renderer,
+// or nothing (the markers, a jump). The flush publishes what is recorded.
+// A word that still reaches the ring is found at the next flush (the
+// detector) and counted by method -- the proof that nothing generates
+// commands is that count staying 0.
+struct R7State {
+    uint32_t cur = 0;                 // the title's ring position the detector last saw
+    uint32_t report_main = 0;         // cellGcmSetReportLocation: 1 main memory, 0 local (the reset)
+    std::map<uint32_t, uint64_t> words;      // (subchannel << 16 | method) -> words found
+    std::map<uint64_t, uint64_t> calls;      // (addr << 32 | lr) -> calls of the functions watched for the inventory
+    std::mutex lock;                          // the report reads the maps
+} R7S;
+
+Rec* r7_rec(uint32_t kind)
+{
+    Rec* r = acquire();
+    Queue& q = queue();
+    r->seq = q.put.load(std::memory_order_relaxed);
+    r->kind = kind;
+    r->frame = S.frame;
+    r->why = kWhyNone;
+    r->nvr = 0; r->vdata.clear(); r->nneed = 0; r->ntex = 0; r->tdata.clear(); r->naclear = 0;
+    r->vc_full = 0; r->cdelta.clear();
+    memset(&r->walk, 0, sizeof r->walk);
+    for (int16_t& k : r->walk.release_sem) k = -1;
+    r->lap = r->lap_end = r->io = r->io_end = r->io_alt = 0;
+    r->bypassed = 1;
+    r->lab_index = r->lab_value = 0; r->lab_stage = 0;
+    return r;
+}
+
+// R7 (section 2 of the R7 document): a record's small uncompressed guest
+// textures -- at most 256 KB, not DXT, not an address a record drew -- taken
+// into the record at the game's flush, on the game's thread: the walker's
+// rule (R5: the water's texture is right taken where the RSX's front end
+// reads it, wrong at the call), at the moment the walker could first have
+// read them. The capture check found the game rewriting the water's texture
+// between its flush and the native thread's capture; everything else it
+// found stable. DOTHEROES_R7_TEX_AT_FLUSH=0 (development): at consumption.
+}  // namespace
+bool r7_take_at_flush(Rec* r)
+{
+    static int on = -1;
+    if (on < 0) { const char* e = getenv("DOTHEROES_R7_TEX_AT_FLUSH"); on = !(e && *e == '0'); }
+    if (!on || r->tex_at_flush || (r->kind != kAspDraw && r->kind != kDraw)) return false;
+    for (uint32_t k = 0; k < r->nneed; k++) {
+        const Need& n = r->need[k];
+        if (n.unit >= 16 || n.drawn) continue;
+        const Texture& t = r->st.tex[n.unit];
+        const uint32_t base = t.format & 0x9Fu;
+        if (t.cubemap || (base >= 0x86 && base <= 0x88)) continue;
+        rsx_tex_level lv[RSX_MAX_TEXTURE_LEVELS];
+        const uint32_t nlv = rsx_texture_mip_chain(t.format, t.width, t.height, t.mipmap, t.pitch, lv);
+        const uint32_t bytes = nlv ? lv[nlv - 1].offset + lv[nlv - 1].tl.face_bytes : 0;
+        const uint32_t ea = cellGcmResolveLocated(t.location == 0, t.offset);
+        if (!bytes || bytes > (256u << 10) || !ea_ok(ea, bytes)) continue;
+        VtxRange* tr = nullptr;
+        for (uint32_t j = 0; j < r->ntex; j++) if (r->tex[j].location == n.unit) tr = &r->tex[j];
+        if (!tr) { if (r->ntex >= 16) continue; tr = &r->tex[r->ntex++]; }
+        tr->location = n.unit; tr->offset = t.offset; tr->bytes = bytes; tr->at = (uint32_t)r->tdata.size();
+        r->tdata.insert(r->tdata.end(), vm_base + ea, vm_base + ea + bytes);
+        stats().r7_flush_tex++;
+        stats().r7_flush_tex_bytes += bytes;
+    }
+    r->tex_at_flush = 1;
+    return true;
+}
+namespace {
+
+// The records so far go to the native renderer: the game's flush (or, with
+// the queue full, what libgcm's ring-full callback would do -- counted apart)
+void r7_publish(bool forced)
+{
+    Queue& q = queue();
+    const uint64_t p = q.put.load(std::memory_order_acquire);
+    // the small uncompressed textures, now (section 2); then, in development,
+    // every input as it is at the flush
+    for (uint64_t i = q.flushed.load(std::memory_order_relaxed); i < p; i++) {
+        Rec* r = q.at(i);
+        r7_take_at_flush(r);
+        if (r7_capture_check()) { r7_input_hashes(r, r->fhash, nullptr); r->fh = 1; }
+    }
+    if (q.flushed.load(std::memory_order_relaxed) != p) {
+        { std::lock_guard<std::mutex> g(q.m); q.flushed.store(p, std::memory_order_release); }
+        q.cv.notify_all();
+    }
+    if (forced) stats().r7_forced++; else stats().r7_flushes++;
+}
+
+// Words in the title's ring since the detector last looked: decoded by
+// method (a header's subchannel and method, its count of data words), each
+// counted, the first few named in the report with the frame
+void r7_detect(uint32_t ctx)
+{
+    if (!ea_ok(ctx, 16)) return;
+    const uint32_t beg = g32(ctx), cur = g32(ctx + 8);
+    if (!R7S.cur) R7S.cur = beg;   // from the ring's start: anything since the title's set-up counts
+    if (cur == R7S.cur) return;
+    uint32_t a = cur > R7S.cur ? R7S.cur : beg;   // the ring went back to its start meanwhile
+    uint64_t n = 0;
+    std::lock_guard<std::mutex> g(R7S.lock);
+    while (a < cur && n < (1u << 20)) {
+        const uint32_t h = g32(a);
+        uint32_t cnt = (h >> 18) & 0x7FFu, key;
+        if ((h & 0xE0000003u) == 0x20000000u || (h & 3u) == 1u || (h & 3u) == 2u) { key = 0xFFFF0000u | (h & 3u); cnt = 0; }
+        else key = ((h >> 13) & 7u) << 16 | (h & 0x1FFCu);
+        R7S.words[key] += 1 + cnt;
+        n += 1 + cnt;
+        a += 4u * (1 + cnt);
+    }
+    stats().r7_words += n;
+    stats().r7_word_flushes++;
+    static int said = 0;
+    if (said < 24) {
+        said++;
+        char line[200];
+        snprintf(line, sizeof line, "r7: %llu command words in the title's ring at the flush of frame %u (first header %08X at %08X)",
+                 (unsigned long long)n, S.frame, cur > R7S.cur ? g32(R7S.cur) : g32(beg), cur > R7S.cur ? R7S.cur : beg);
+        report_add(line);
+    }
+    R7S.cur = cur;
+}
+
+// The frame-start reset's state (func_00029618): set as each call's words
+// said, counted where it differs from the reset value the native renderer assumes
+uint64_t s_r7_reset_by[8];   // per setter (below, in order): calls not setting the reset value
+uint32_t s_r7_reset_last[8];  // and the last such value
+void r7_reset_note(bool differs, int which = 0, uint32_t value = 0)
+{
+    stats().r7_reset_calls++;
+    if (differs) { stats().r7_reset_nondefault++; s_r7_reset_by[which & 7]++; s_r7_reset_last[which & 7] = value; }
+}
+
+// a function watched for the inventory (its body still runs): its calls by return address
+void r7_watch(uint32_t addr, ppu_context* c)
+{
+    stats().r7_unknown_calls++;
+    std::lock_guard<std::mutex> g(R7S.lock);
+    const uint64_t k = (uint64_t)addr << 32 | (uint32_t)c->lr;
+    if (R7S.calls[k]++ == 0) {
+        char line[220];
+        snprintf(line, sizeof line, "r7: watched %08X called from %08X at frame %u (r4 %08X r5 %08X r6 %08X r7 %08X r8 %08X r9 %08X r10 %08X)",
+                 addr, (uint32_t)c->lr, S.frame, (uint32_t)c->gpr[4], (uint32_t)c->gpr[5], (uint32_t)c->gpr[6],
+                 (uint32_t)c->gpr[7], (uint32_t)c->gpr[8], (uint32_t)c->gpr[9], (uint32_t)c->gpr[10]);
+        report_add(line);
+    }
+}
+
+// R7's entry points on the title's context: what ppfx_rec_observe answers
+// (0 the body runs, 1 it does not), or -1 when the address is not one of them
+int r7_call(uint32_t addr, ppu_context* c)
+{
+    Stats& st = stats();
+    Raster& ra = S.st.raster;
+    const uint32_t a4 = (uint32_t)c->gpr[4], a5 = (uint32_t)c->gpr[5], a6 = (uint32_t)c->gpr[6];
+    switch (addr) {
+    case 0x006A336Cu:   // cellGcmFlush: the body runs (put = current: nothing moved it)
+        r7_detect((uint32_t)c->gpr[3]);
+        r7_publish(false);
+        return 0;
+    case 0x0069DF80u: case 0x0069E0E0u:   // the performance markers' push and pop: inert strings
+        st.r7_markers++;
+        return 1;
+    case 0x0069E504u:   // cellGcmSetJumpCommand: no ring to steer
+        st.r7_jumps++;
+        return 1;
+    case 0x006A6220u: case 0x006AA3A0u:   // cellGcmSetLineWidth(ctx, width) and its Unsafe form: state
+        ra.line_width = (uint16_t)(a4 & 0x1FFu);
+        st.r7_line_width_calls++;
+        return 1;
+    case 0x006A7548u:   // cellGcmSetInvalidateTextureCache(ctx, value): the native renderer has no
+                        // texture cache to invalidate -- guest textures are checked by their bytes
+        st.r7_invalidates++;
+        return 1;
+    case 0x0069E474u: {   // cellGcmSetReferenceCommand(ctx, value)
+        Rec* r = r7_rec(kRef);
+        r->lab_value = a4;
+        publish(r);
+        st.r7_refs++;
+        return 1;
+    }
+    case 0x0069E58Cu: {   // cellGcmSetWaitLabel(ctx, index, value): the wait-flip acquire among them
+        Rec* r = r7_rec(kWait);
+        r->lab_index = a4 & 0xFFu; r->lab_value = a5;
+        publish(r);
+        st.r7_waits++;
+        return 1;
+    }
+    case 0x006A577Cu: case 0x006A5830u: case 0x006A5900u: {   // command, back-end and texture-read labels (ctx, index, value)
+        Rec* r = r7_rec(kLabel);
+        r->lab_index = a4 & 0xFFu; r->lab_value = a5;
+        r->lab_stage = addr == 0x006A577Cu ? 0 : 1;
+        publish(r);
+        st.r7_labels++;
+        return 1;
+    }
+    case 0x006A5624u: {   // a report request, NV4097_GET_REPORT (ctx, index): type 1, where the location says
+        Rec* r = r7_rec(kReport);
+        r->rep_op = kRepReport; r->rep_type = 1; r->rep_index = a4; r->rep_count = 1; r->rep_io = 0;
+        r->rep_loc = R7S.report_main;
+        publish(r);
+        st.occ_ops++; st.r7_reports++;
+        return 1;
+    }
+    case 0x006A9358u: {   // cellGcmSetReportLocation(ctx, location): the DMA word from libgcm's table
+        const uint32_t tab = g32((uint32_t)c->gpr[2] - 0x35E0u);
+        const uint32_t v = ea_ok(tab + (a4 << 2), 4) ? g32(tab + (a4 << 2)) : 0x66626660u;
+        R7S.report_main = (v == 0xBAD68000u || v == 0xFEED0001u) ? 1u : 0u;
+        st.r7_reportloc++;
+        return 1;
+    }
+    // the frame start's reset
+    case 0x006A5B8Cu:   // blend equation (ctx, colour, alpha)
+        r7_reset_note(a4 != 0x8006u || a5 != 0x8006u, 0, a4 | a5 << 16);
+        ra.blend_eq_rgb = (uint16_t)a4; ra.blend_eq_a = (uint16_t)a5;
+        return 1;
+    case 0x006A5F50u:   // colour mask of the extra targets (0x0370)
+        r7_reset_note(a4 != 0, 1, a4);
+        ra.color_mask_mrt = a4;
+        return 1;
+    case 0x006A6190u:   // front face (also Bink's draw set-up)
+        r7_reset_note(a4 != 0x0901u, 2, a4);
+        ra.front_face = (uint16_t)a4;
+        return 1;
+    case 0x006A6CF0u: {  // z min/max control (cullNearFar, zclamp, cullIgnoreW)
+        const uint32_t v = (a4 & 0xFu) | (a5 & 0xFu) << 4 | (a6 & 0xFu) << 8;
+        r7_reset_note(v != 1u, 3, v);
+        ra.zminmax = v;
+        return 1;
+    }
+    case 0x006A6EC0u:   // blend enable of the extra targets
+        r7_reset_note((a4 | a5 | a6) & 1u, 4, a4 | a5 << 1 | a6 << 2);
+        ra.blend_mrt = (uint8_t)((a4 & 1u) | (a5 & 1u) << 1 | (a6 & 1u) << 2);
+        return 1;
+    case 0x006A7094u:   // depth bounds test enable
+        r7_reset_note(a4 & 1u, 5, a4);
+        ra.depth_bounds = (uint8_t)(a4 & 1u);
+        return 1;
+    case 0x006A72D4u:   // two-sided stencil enable
+        r7_reset_note(a4 & 1u, 6, a4);
+        ra.two_sided_stencil = (uint8_t)(a4 & 1u);
+        return 1;
+    case 0x006A7484u:   // point sprite control (ctx, enable, rmode, texcoord mask)
+        r7_reset_note(a4 & 1u, 7, a4);
+        ra.point_sprite = (uint8_t)(a4 & 1u);
+        ra.point_sprite_ctl = a4 | a5 << 1 | a6;
+        return 1;
+    case 0x0069FDD0u: {   // cellGcmSetTransferImage(ctx, mode, dstOffset, dstPitch, dstX, dstY, srcOffset, srcPitch,
+                          //   srcX, srcY, width, height, bytesPerPixel): the last five on the caller's stack
+        const uint32_t sp = (uint32_t)c->gpr[1];
+        if (!ea_ok(sp + 0x70, 0x28)) return -1;
+        Rec* r = r7_rec(kTransfer);
+        // CELL_GCM_TRANSFER_MAIN_TO_LOCAL 0, LOCAL_TO_MAIN 1, LOCAL_TO_LOCAL 2, MAIN_TO_MAIN 3 (location 1 main, 0 local)
+        const uint32_t mode = a4 & 3u;
+        r->xs_loc = (mode == 0 || mode == 3) ? 1u : 0u;
+        r->xd_loc = (mode == 1 || mode == 3) ? 1u : 0u;
+        r->xd_off = a5; r->xd_pitch = a6; r->xd_x = (uint32_t)c->gpr[7]; r->xd_y = (uint32_t)c->gpr[8];
+        r->xs_off = (uint32_t)c->gpr[9]; r->xs_pitch = (uint32_t)c->gpr[10];
+        r->xs_x = g32(sp + 0x74); r->xs_y = g32(sp + 0x7C); r->x_w = g32(sp + 0x84); r->x_h = g32(sp + 0x8C);
+        r->x_bpp = g32(sp + 0x94);
+        publish(r);
+        S.ppfx_targets.insert((uint64_t)r->xd_loc << 32 | r->xd_off);   // a native image there from now on
+        st.r7_xfer_calls++;
+        static int said = 0;
+        if (said++ < 16) {
+            char line[220];
+            snprintf(line, sizeof line, "r7: transfer image %u:%08X (pitch %u) +%u,%u -> %u:%08X (pitch %u) +%u,%u, %ux%u, %u bytes "
+                     "a pixel, frame %u, from %08X", r->xs_loc, r->xs_off, r->xs_pitch, r->xs_x, r->xs_y, r->xd_loc, r->xd_off,
+                     r->xd_pitch, r->xd_x, r->xd_y, r->x_w, r->x_h, r->x_bpp, S.frame, (uint32_t)c->lr);
+            report_add(line);
+        }
+        return 1;
+    }
+    // watched for the inventory: the other 2D transfers, the label helpers and the
+    // Unsafe forms (no static callers), the FIFO reset -- their bodies run
+    // (any word they write is the detector's), every caller named
+    case 0x006A0D60u: case 0x006A1444u: case 0x006A17C4u: case 0x006A1974u: case 0x006A1B48u:
+    case 0x006ABE64u: case 0x006ABFBCu: case 0x006ACCA8u: case 0x006AD264u: case 0x006AD3E8u: case 0x006AD4F0u:
+    case 0x006AD65Cu:
+        st.r7_xfer_calls++;
+        r7_watch(addr, c);
+        return 0;
+    case 0x0069EDB0u: case 0x0069EEA4u: case 0x006AA034u: case 0x006AA074u: case 0x006AA0B4u: case 0x006AA110u:
+    case 0x006AB60Cu: case 0x006AB68Cu: case 0x006A32D8u: case 0x006AA8A8u:
+        r7_watch(addr, c);
+        return 0;
+    default:
+        return -1;
+    }
+}
+
+uint32_t r7_report_main() { return R7S.report_main; }
+
+// R7: asp's fragment heap set up by its own code (func_006CAD4C: an
+// allocation and an address-to-offset, no command), called from the
+// upload's entry with the volatile registers given back as they were
+void r7_heap_setup(ppu_context* c)
+{
+    uint64_t g[13];
+    memcpy(g, c->gpr, sizeof g);
+    const uint64_t lr = c->lr, ctr = c->ctr;
+    const uint32_t cr = c->cr;
+    func_006CAD4C(c);
+    while (g_trampoline_fn) { void (*f)(void*) = g_trampoline_fn; g_trampoline_fn = nullptr; f(c); }
+    memcpy(c->gpr, g, sizeof g);
+    c->lr = lr; c->ctr = ctr; c->cr = cr;
+    stats().r7_heap_setups++;
 }
 
 // asp's command context: the one PPFX writes to (the title's one)
@@ -1824,7 +2246,8 @@ void asp_draw_operation(Rec* r, uint32_t self)
         // water's), and the GPU reads them when it executes it
         const uint32_t base = t.format & 0x9Fu;
         const uint64_t key = (uint64_t)n.location << 32 | n.offset;
-        n.ppfx_wrote = (base >= 0x86 && base <= 0x88) || S.ppfx_targets.count(key) || A.asp_targets.count(key) ? 1 : 0;
+        n.drawn = S.ppfx_targets.count(key) || A.asp_targets.count(key) ? 1 : 0;
+        n.ppfx_wrote = (base >= 0x86 && base <= 0x88) || n.drawn ? 1 : 0;
     }
     if (sf.color_target) A.asp_targets.insert((uint64_t)(sf.color_location[0] ? 1u : 0u) << 32 | sf.color_offset[0]);
 }
@@ -1874,10 +2297,10 @@ void game_draw_operation(Rec* r, const VEntry& v)
 // 0; the binds and the unbinds after the draw command as the record's state.
 // =verify: the body runs, and what the replacement would have done is
 // compared with what it did (stats skv_*).
-int r6_skip()
+int r6_skip_read()
 {
-    static int on = -1;
-    if (on < 0) {
+    int on = -1;
+    {
         const char* e = getenv("DOTHEROES_R6_SKIP");
         // 1: draws and programs; all (3): asp's state functions too; verify (2)
         on = !e || !*e ? 0 : !strcmp(e, "verify") ? 2 : !strcmp(e, "all") ? 3 : *e == '1' ? 1 : 0;
@@ -2105,7 +2528,7 @@ void asp_record_publish(Rec* r, uint32_t ctx, bool marker)
     r->bypassed = marker ? 1 : 0;
     publish(r);
     stats().asp_records++;
-    if (marker && !bridge_marker(ctx, r->seq)) stats().asp_marker_fail++;
+    if (marker && !rmark(ctx, r->seq)) stats().asp_marker_fail++;
 }
 
 // R6: the game's own clear, cellGcmSetClearSurface(ctx, mask): a pending
@@ -2185,7 +2608,7 @@ void game_arrays_record(ppu_context* c, bool skip)
     stats().r6_game_arrays++;
     if (skip) {
         stats().r6_game_skipped++;
-        if (!bridge_marker(ctx, r->seq)) stats().asp_marker_fail++;
+        if (!rmark(ctx, r->seq)) stats().asp_marker_fail++;
     }
 }
 
@@ -2523,7 +2946,7 @@ void asp_draw_exit(const VEntry& v)
     r->bypassed = taken ? 1 : 0;
     publish(r);
     stats().asp_records++;
-    if (r->bypassed && !bridge_marker(v.ctx_ea, r->seq)) stats().asp_marker_fail++;
+    if (r->bypassed && !rmark(v.ctx_ea, r->seq)) stats().asp_marker_fail++;
 }
 
 // asp's methods R5 describes: 1 + what ppfx_rec_observe answers, or 0 (not one of them)
@@ -2577,7 +3000,7 @@ uint32_t fp_patch_record(uint32_t self, uint32_t par, uint32_t cnt, uint32_t val
     const uint64_t ep = ++s_epoch;
     for (uint32_t k = 0; k < n && k < 8; k++) {
         shadow_write(base + g16(e + 2 * k), buf, 4 * cnt, ep);
-        for (uint32_t i = 0; i < cnt; i++) A.fp_word_owner[base + g16(e + 2 * k) + 4 * i] = self;
+        owner_set(base + g16(e + 2 * k), 4 * cnt, self);
     }
     if (cnt & 1) A.fp_odd_patches++;
     return n;
@@ -2643,7 +3066,16 @@ int asp_prog_r6(uint32_t addr, ppu_context* c)
             p8(self + 0x50, 1); stats().skip_prog++;
             return 2;
         }
-        if (!g8(kFpHeap + 0x10)) { stats().skip_prog_heap++; return asp_record_call_inner(addr, c); }   // the heap's first set-up (a byte flag, 031:1872): the body
+        if (!g8(kFpHeap + 0x10)) {   // the heap's first set-up (a byte flag, 031:1872)
+            if (!r7()) { stats().skip_prog_heap++; return asp_record_call_inner(addr, c); }   // R6: the body
+            // R7: the body's first part as guest code -- func_006CAD4C, asp's
+            // allocation of the heap (16 KB of local memory, its offset; no
+            // command) -- and the rest replaced as below: the body's upload
+            // is an inline transfer asp writes itself (24 words: nothing
+            // would execute them)
+            r7_heap_setup(c);
+            if (!g8(kFpHeap + 0x10)) { stats().skip_prog_heap++; return asp_record_call_inner(addr, c); }
+        }
         const uint32_t bin = g32(self + 0x18), off = g32(kFpHeap + 0x1C);
         if (!ea_ok(bin, 0x20)) return asp_record_call_inner(addr, c);
         if (verify) {   // predicted: +0x54 = the slot, +0x50 = 1, the configuration from the binary
@@ -3052,7 +3484,7 @@ int asp_record_call_inner(uint32_t addr, ppu_context* c)
         const uint32_t bytes = g16(cont + 8);
         if (!bytes || !ea_ok(uc, bytes) || off >= 0x10000000u) return 1;
         shadow_write(off, vm_base + uc, bytes & ~3u, ++s_epoch);
-        for (uint32_t i = 0; i + 4 <= (bytes & ~3u); i += 4) A.fp_word_owner[off + i] = self;
+        owner_set(off, bytes & ~3u, self);
         A.fp_bytes[off] = bytes;
         A.fp_last_obj[off] = self;
         A.fp_slot_epoch[off] = s_epoch;
@@ -3094,12 +3526,11 @@ int asp_record_call_inner(uint32_t addr, ppu_context* c)
                     ShadowPage* pg = shadow_page(f.offset + i);
                     if (pg->ep[((f.offset + i) & 0xFFF) >> 2] > since) {
                         // patched since: kept if it was this program's own patch
-                        auto ow = A.fp_word_owner.find(f.offset + i);
-                        if (ow != A.fp_word_owner.end() && ow->second == fo) continue;
+                        if (owner_get(f.offset + i) == fo) continue;
                         A.fp_foreign_patch_words++;
                     }
                     shadow_write(f.offset + i, vm_base + uc + i, 4, ep);
-                    A.fp_word_owner[f.offset + i] = fo;
+                    owner_set(f.offset + i, 4, fo);
                 }
                 A.fp_bytes[f.offset] = bytes;
                 A.fp_last_obj[f.offset] = fo;
@@ -3435,6 +3866,57 @@ void write_report()
                 (unsigned long long)s.r6_flip_clears.load(), (unsigned long long)s.r6_game_arrays_walked.load(),
                 (unsigned long long)s.clears_masked.load(), (unsigned long long)s.fclr_depth.load(),
                 (unsigned long long)s.fclr_shown.load(), (unsigned long long)s.fclr_other.load());
+    if (r7()) {
+        fprintf(f, "r7 (no walker): flushes %llu (forced by a full queue %llu) | command words found in the title's ring %llu "
+                   "(at %llu flushes) | ring recycles %u, get answered %u times | markers skipped %llu, jumps %llu, texture cache invalidates %llu | frame-start "
+                   "reset calls %llu (not the reset value %llu) | report location calls %llu, report requests %llu\n",
+                (unsigned long long)s.r7_flushes.load(), (unsigned long long)s.r7_forced.load(),
+                (unsigned long long)s.r7_words.load(), (unsigned long long)s.r7_word_flushes.load(),
+                cellGcm_native_fe_recycles(), cellGcm_native_fe_get_polls(), (unsigned long long)s.r7_markers.load(),
+                (unsigned long long)s.r7_jumps.load(), (unsigned long long)s.r7_invalidates.load(), (unsigned long long)s.r7_reset_calls.load(),
+                (unsigned long long)s.r7_reset_nondefault.load(), (unsigned long long)s.r7_reportloc.load(),
+                (unsigned long long)s.r7_reports.load());
+        fprintf(f, "r7 frame-start reset, calls not setting the reset value (the last value): blend equation %llu (%08X), "
+                   "MRT colour mask %llu (%X), front face %llu (%X), z min/max control %llu (%X), MRT blend %llu (%X), depth "
+                   "bounds %llu, two-sided stencil %llu, point sprite %llu\n",
+                (unsigned long long)s_r7_reset_by[0], s_r7_reset_last[0], (unsigned long long)s_r7_reset_by[1], s_r7_reset_last[1],
+                (unsigned long long)s_r7_reset_by[2], s_r7_reset_last[2], (unsigned long long)s_r7_reset_by[3], s_r7_reset_last[3],
+                (unsigned long long)s_r7_reset_by[4], s_r7_reset_last[4], (unsigned long long)s_r7_reset_by[5],
+                (unsigned long long)s_r7_reset_by[6], (unsigned long long)s_r7_reset_by[7]);
+        fprintf(f, "r7 textures taken at the flush %llu (%.1f MB)\n", (unsigned long long)s.r7_flush_tex.load(),
+                s.r7_flush_tex_bytes.load() / 1048576.0);
+        fprintf(f, "r7 asp fragment heap set-ups by asp's own allocation (the upload replaced) %llu | line width calls %llu, "
+                   "line draws wider than 1 (drawn 1 wide: not modelled) %llu\n",
+                (unsigned long long)s.r7_heap_setups.load(), (unsigned long long)s.r7_line_width_calls.load(),
+                (unsigned long long)s.r7_wide_line_draws.load());
+        fprintf(f, "r7 synchronisation: labels %llu (written %llu) | references %llu (written %llu) | label waits %llu (spun %llu, "
+                   "%.1f ms, timed out %llu) | flips executed natively %llu | legacy occlusion: reports %llu, copies dropped %llu | "
+                   "PPFX draws whose inputs were taken at consumption %llu (%.1f MB) | draws with state the native renderer does "
+                   "not model %llu | inventory: transfer calls %llu, watched calls %llu\n",
+                (unsigned long long)s.r7_labels.load(), (unsigned long long)s.r7_labels_done.load(),
+                (unsigned long long)s.r7_refs.load(), (unsigned long long)s.r7_refs_done.load(),
+                (unsigned long long)s.r7_waits.load(), (unsigned long long)s.r7_wait_spins.load(), s.r7_wait_us.load() / 1e3,
+                (unsigned long long)s.r7_wait_timeouts.load(), (unsigned long long)s.r7_flip_executed.load(),
+                (unsigned long long)s.r7_legacy_reports.load(), (unsigned long long)s.r7_legacy_transfers_dropped.load(),
+                (unsigned long long)s.r7_deferred.load(), s.r7_deferred_bytes.load() / 1048576.0,
+                (unsigned long long)s.r7_unmodelled_draws.load(), (unsigned long long)s.r7_xfer_calls.load(),
+                (unsigned long long)s.r7_unknown_calls.load());
+        if (s.cc_records)
+            fprintf(f, "r7 capture check: records %llu, input ranges %llu (%.1f MB hashed twice) | written between the flush and "
+                       "the capture: records %llu, ranges %llu | rewritten after the flush but taken at it (not used) %llu\n",
+                    (unsigned long long)s.cc_records.load(),
+                    (unsigned long long)s.cc_ranges.load(), s.cc_bytes.load() / 2.0 / 1048576.0,
+                    (unsigned long long)s.cc_changed_records.load(), (unsigned long long)s.cc_changed_ranges.load(),
+                    (unsigned long long)s.cc_flush_taken_changed.load());
+        std::lock_guard<std::mutex> g(R7S.lock);
+        if (!R7S.words.empty()) {
+            fprintf(f, "r7 command words by (subchannel:method):");
+            for (auto& kv : R7S.words) fprintf(f, " %X:%04X %llu", kv.first >> 16, kv.first & 0xFFFFu, (unsigned long long)kv.second);
+            fprintf(f, "\n");
+        }
+        for (auto& kv : R7S.calls)
+            fprintf(f, "r7 watched call %08X from %08X: %llu\n", (uint32_t)(kv.first >> 32), (uint32_t)kv.first, (unsigned long long)kv.second);
+    }
     if (r6_present())
         fprintf(f, "r6 present: flips recorded %llu presented %llu (no native image %llu) | present_ms %.1f\n",
                 (unsigned long long)queue().flips_recorded.load(), (unsigned long long)s.r6_presents.load(),
@@ -3491,7 +3973,9 @@ void write_report()
     }
     {
         std::vector<std::string> xs;
+#ifndef DOTHEROES_NATIVE_RELEASE
         bridge_report(xs);
+#endif
         if (mode() == 2) render_report(xs);
         for (auto& l : xs) fprintf(f, "%s\n", l.c_str());
     }
@@ -3531,7 +4015,11 @@ void start()
 #endif
         for (;;) { std::this_thread::sleep_for(std::chrono::seconds(10)); write_report(); }
     }).detach();
-    bridge_install();
+#ifndef DOTHEROES_NATIVE_RELEASE
+    if (!r7()) bridge_install();   // R7: no walker, no bridge
+    else
+#endif
+    cellGcm_set_guest_read_hook(guest_read_native);   // the snapshot's read of a display buffer
     if (mode() == 2) render_start();
 }
 
@@ -3539,8 +4027,32 @@ void start()
 
 using namespace ppfx;
 
+// R7's switches: DOTHEROES_R7=1 is the whole native configuration (R4-R6's
+// switches; each can still be set by hand), with the host's front end in
+// cellGcmSys set before the title's first call. Called from
+// r1_observe.cpp's static initialiser, before anything reads them.
+static void r7_defaults()
+{
+#ifndef DOTHEROES_NATIVE_RELEASE
+    const char* e = getenv("DOTHEROES_R7");
+    if (!(e && *e == '1')) return;
+#endif
+    static const char* const kv[][2] = {
+        { "DOTHEROES_PPFX_NATIVE", "1" }, { "DOTHEROES_PPFX_BYPASS", "1" }, { "DOTHEROES_PPFX_COMPARE", "0" },
+        { "DOTHEROES_PPFX_XCHECK", "0" }, { "DOTHEROES_PPFX_HANDBACK_CHECK", "0" }, { "DOTHEROES_ASP_RECORD", "1" },
+        { "DOTHEROES_ASP_NATIVE", "1" }, { "DOTHEROES_ASP_SHARE", "1" }, { "DOTHEROES_ASP_BYPASS", "1" },
+        { "DOTHEROES_R6_PRODUCERS", "1" }, { "DOTHEROES_R6_PRESENT", "1" }, { "DOTHEROES_R6_SKIP", "all" } };
+    for (auto& p : kv) if (!getenv(p[0])) _putenv_s(p[0], p[1]);
+    // the occlusion queries' calls are always records here (nothing else
+    // would write their reports); DOTHEROES_R7_OCCLUSION=legacy writes them
+    // as the previous port did (the render report says which)
+    _putenv_s("DOTHEROES_R6_OCCLUSION", "1");
+    cellGcm_set_native_frontend(1);
+}
+
 extern "C" int ppfx_rec_wanted(void)
 {
+    r7_defaults();
     const char* pw = getenv("DOTHEROES_PPFX_PROGWATCH");
     if (pw && *pw) return 1;
     return ppfx::mode() != 0;
@@ -3614,7 +4126,6 @@ extern "C" int ppfx_rec_observe(uint32_t addr, ppu_context* ctx)
 #else
         0;
 #endif
-    const int who = attribute(ctx);
     std::unique_lock<std::mutex> g(s_lock);
     struct Held { Held(std::unique_lock<std::mutex>* h) { s_held = h; } ~Held() { s_held = nullptr; } } held(&g);
     if (addr == 0x0069DD60u) {   // cellGcmSetFlip: a frame
@@ -3623,10 +4134,20 @@ extern "C" int ppfx_rec_observe(uint32_t addr, ppu_context* ctx)
             // R4: whether the next frame's PPFX calls are bypassed -- once the
             // native renderer can take them; alternate blocks with =alt:<n>
             const int bm = bypass_mode();
-            S.r4_frame = (bm == 1 || (bm == 3 && (S.frame / s_alt_n) % 2 == 1)) && render_ready();
+            S.r4_frame = (bm == 1 || (bm == 3 && (S.frame / s_alt_n) % 2 == 1)) && (render_ready() || r7());
             if (S.r4_frame) st.r4_frames++;
         }
         if (s_pw && (S.frame & 255) == 0) fflush(s_pw);
+        // R7 (memory over area cycles): what the recorder holds, every 1800
+        // frames (DOTHEROES_R7_CENSUS=1, development)
+        static int census = -1;
+        if (census < 0) { const char* e = getenv("DOTHEROES_R7_CENSUS"); census = e && *e == '1'; }
+        if (census && S.frame % 1800 == 0)
+            fprintf(stderr, "[census] recorder frame %u shadow_pages %zu (%.1f MB) bound %zu blobs %zu fp_bytes %zu "
+                            "fp_last_obj %zu fp_slot_epoch %zu targets_seen %zu pw_seen %zu ppfx_targets %zu asp_targets %zu\n",
+                    S.frame, s_shadow.size(), s_shadow.size() * (double)sizeof(ShadowPage) / 1048576.0, s_bound.size(),
+                    s_blobs.size(), A.fp_bytes.size(), A.fp_last_obj.size(), A.fp_slot_epoch.size(), s_targets_seen.size(),
+                    s_pw_seen.size(), S.ppfx_targets.size(), A.asp_targets.size());
     }
     // Inline transfers into the shadow, whoever makes them (the program
     // memory is the GPU's; PPFX's are the ones that matter, but a transfer
@@ -3645,7 +4166,7 @@ extern "C" int ppfx_rec_observe(uint32_t addr, ppu_context* ctx)
     // code on other threads are counted and left out of the state.
     if (!S.tid) S.tid = tid;
     if (tid != S.tid) {
-        if (who) {
+        if (attribute(ctx)) {
             st.producer_threads++;
             fprintf(stderr, "[ppfx] FATAL: a PPFX call (0x%08X) on thread %u, the command stream's producer is "
                             "thread %u: the single-producer assumption does not hold\n", addr, tid, S.tid);
@@ -3666,6 +4187,11 @@ extern "C" int ppfx_rec_observe(uint32_t addr, ppu_context* ctx)
             report_add(line);
         }
     }
+    // R7: the remaining command writers, the flush, labels, reference, waits
+    if (r7() && S.ring_ctx && (uint32_t)ctx->gpr[3] == S.ring_ctx) {
+        const int a7 = r7_call(addr, ctx);
+        if (a7 >= 0) { if (timed) bump(st.rec_ns, 16 * (now_ns() - t0)); return a7; }
+    }
     // Other code's calls on the producer's thread set state too, at the same
     // entry points: PPFX's first frames after a load draw with some of it
     // (a texture address, the colour mask) -- the GPU's state as the calls
@@ -3678,6 +4204,7 @@ extern "C" int ppfx_rec_observe(uint32_t addr, ppu_context* ctx)
         if (timed) bump(st.rec_ns, 16 * (now_ns() - t0));
         return a;
     }
+    const int who = attribute(ctx);   // R7: computed here, past the calls that do not need it
     if (who) { st.ppfx_calls++; if (who == 2) st.nested_ppfx++; }
     else st.foreign_state_calls++;
     S.by = who ? kByPpfx : kByGame;
@@ -3731,7 +4258,9 @@ extern "C" int ppfx_rec_observe(uint32_t addr, ppu_context* ctx)
         static uint32_t last_ppfx_frame = 0;
         if (tl < 0) { const char* e = getenv("DOTHEROES_PPFX_TRACE_LOAD"); tl = e && *e == '1'; }
         if (tl == 1 && S.frame >= last_ppfx_frame + 30) {
+#ifndef DOTHEROES_NATIVE_RELEASE
             rsx_frame_trace_arm();
+#endif
             tl = 2;
             char line[160];
             snprintf(line, sizeof line, "recorder: frame trace armed at frame %u (the first PPFX call after %u frames "
@@ -3866,8 +4395,11 @@ extern "C" int ppfx_rec_observe(uint32_t addr, ppu_context* ctx)
             }
         }
         break;
-    case 0x0069DD60:   // cellGcmSetFlip: R6's native present
-        if (r6_present() && render_ready() && (uint32_t)ctx->gpr[3] == S.ring_ctx) build_flip(ctx);
+    case 0x0069DD60:   // cellGcmSetFlip: R6's native present (R7: from the first, the renderer ready or not)
+        if (r6_present() && (render_ready() || r7()) && (uint32_t)ctx->gpr[3] == S.ring_ctx) build_flip(ctx);
+        // R7: the RSX puts the depth/stencil clear value back to its reset at a
+        // flip (the engine's gcm_fifo_flip_resets_state did it in the walker)
+        if (r7() && (uint32_t)ctx->gpr[3] == S.ring_ctx) S.st.clear_depth = 0xFFFFFF00u;
         break;
     case 0x0069FC38: break;
     default: {

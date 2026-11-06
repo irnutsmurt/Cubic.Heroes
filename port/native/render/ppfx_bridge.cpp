@@ -940,43 +940,7 @@ void present_compare(u32 loc, u32 off)
     }
 }
 
-// R6: the game's reads of a display buffer's memory (the snapshot's JPEG and
-// PNG encoders, cellGcm_guest_read_surface on the game's thread) served from
-// the native image once the native renderer presents the frames: everything
-// published so far drawn, the image read back and written into guest memory
-// as the engine's guest read writes it (rsx_draw_engine_guest_read: A, R, G,
-// B bytes; TEX_RGBA=1 the image's own order). Other surfaces: the engine's.
-std::atomic<uint64_t> s_guest_reads{0}, s_guest_read_fail{0};
-int guest_read_native(u32 loc, u32 off, u32 pitch, u32 w, u32 h)
-{
-    if (!g_dotheroes_native_present) return 0;
-    std::vector<uint8_t> rows;
-    uint32_t nw = 0, nh = 0, nf = 0, nb = 0;
-    if (readback_take(loc, off, queue().put.load(std::memory_order_acquire), 10000, rows, &nw, &nh, &nf, &nb) || nb != 4) {
-        s_guest_read_fail++;
-        return 0;
-    }
-    const bool bgra = nf == (uint32_t)VK_FORMAT_B8G8R8A8_UNORM, as_is = rsx_texture_argb_is_rgba() != 0;
-    const uint32_t ww = w < nw ? w : nw, hh = h < nh ? h : nh;
-    for (uint32_t y = 0; y < hh; y++) {
-        const uint32_t ea = cellGcmResolveLocated(loc == 0, off + y * pitch);
-        if (!ea || ea + ww * 4 > 0xE0000000u) break;
-        uint8_t* d = vm_base + ea;
-        const uint8_t* sp = rows.data() + (size_t)y * nw * 4;
-        for (uint32_t x = 0; x < ww; x++, d += 4, sp += 4) {
-            if (as_is) { memcpy(d, sp, 4); continue; }
-            d[0] = sp[3];                                         // A
-            d[1] = bgra ? sp[2] : sp[0];                          // R
-            d[2] = sp[1];                                         // G
-            d[3] = bgra ? sp[0] : sp[2];                          // B
-        }
-    }
-    s_guest_reads++;
-    char line[160];
-    snprintf(line, sizeof line, "r6: guest read of %u:%08X (%ux%u, pitch %u) from the native image", loc, off, w, h, pitch);
-    report_add(line);
-    return 1;
-}
+// R6's guest reads of a display buffer: guest_read_native, in ppfx_render.cpp
 
 void present_compare_report(std::vector<std::string>& out)
 {

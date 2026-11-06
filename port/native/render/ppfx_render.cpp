@@ -86,9 +86,14 @@
 
 extern "C" uint8_t* vm_base;
 extern "C" uint32_t cellGcmResolveLocated(int local, uint32_t offset);
+extern "C" int g_dotheroes_native_present;   // main.cpp (R6)
 
 namespace ppfx {
 namespace {
+// R7 (docs/NATIVE_R7.md): defined with the R7 operations below
+int r7_on();
+int occ_legacy();
+void r7_unmodelled(const Raster& ra, uint32_t prim);
 
 // ---- Vulkan entry points ------------------------------------------------------
 
@@ -292,6 +297,11 @@ struct Img {
     VkFramebuffer fb = VK_NULL_HANDLE;
     std::unordered_map<uint64_t, VkImageView> views;   // (remap, format byte) -> a view with that crossbar
     uint32_t written = 0;                              // records have written it (or a handoff filled it)
+    // R7's target watch (DOTHEROES_R7_TARGET_WATCH=1, development): the
+    // guest range of a local-memory target and the write-watch poll after
+    // its last native write -- a CPU write there since means the guest's
+    // bytes are newer than the image
+    uint32_t ww_epoch = 0, guest_ea = 0, guest_len = 0;
     VkDeviceSize bytes = 0;                            // its memory
     // the hazard tracking (the native queue's view of it): its layout, the
     // stage and access of its last write, the stages that read it since
@@ -1618,6 +1628,7 @@ void asp_compare(Batch& b, const Rec* r, Img* mine, Img* eng, uint32_t off);
 
 // The handoffs of a record: the engine's copies, from their slots into the
 // native images of their addresses.
+#ifndef DOTHEROES_NATIVE_RELEASE
 void apply_handoffs(Batch& b, const Rec* r)
 {
     for (uint32_t k = 0; k < r->nneed; k++) {
@@ -1648,6 +1659,9 @@ void apply_handoffs(Batch& b, const Rec* r)
         b.done.push_back([s] { std::lock_guard<std::mutex> g(s_slot_lock); s_simg[s].busy = false; });
     }
 }
+#else
+void apply_handoffs(Batch&, const Rec*) {}   // the release: no engine, nothing handed over
+#endif  // DOTHEROES_NATIVE_RELEASE
 
 // ---- chain variants -----------------------------------------------------------------------
 // A frame's chain structure: the sequence of its records' targets (address
@@ -1768,6 +1782,7 @@ void release_ref(int ref)
     if (ref >= 0 && (size_t)ref < s_sbuf.size()) s_sbuf[ref].busy = false;
 }
 
+#ifndef DOTHEROES_NATIVE_RELEASE
 void cmp_run(CmpJob& j)
 {
     const uint64_t t0 = now_ns();
@@ -1829,7 +1844,9 @@ void cmp_run(CmpJob& j)
     }
     st.compare_ns += now_ns() - t0;
 }
+#endif  // DOTHEROES_NATIVE_RELEASE
 
+#ifndef DOTHEROES_NATIVE_RELEASE
 void cmp_thread()
 {
 #ifdef _WIN32
@@ -1850,11 +1867,13 @@ void cmp_thread()
         s_cmp_cv.notify_all();
     }
 }
+#endif  // DOTHEROES_NATIVE_RELEASE
 
 // A record whose output the walker copied: its native output read back
 // after it, compared once both copies are complete. Every record the
 // comparison asked for ends counted (wanted = equal + differ + skipped +
 // unfinished).
+#ifndef DOTHEROES_NATIVE_RELEASE
 void compare_after(Batch& b, const Rec* r, Img* t, uint32_t w, uint32_t h)
 {
     const int ref = r->walk.ref;
@@ -1894,6 +1913,9 @@ void compare_after(Batch& b, const Rec* r, Img* t, uint32_t w, uint32_t h)
         stats().cmp_queue_wait_ns += now_ns() - t0;
     });
 }
+#else
+void compare_after(Batch&, const Rec*, Img*, uint32_t, uint32_t) {}   // the release: no engine output to compare with
+#endif  // DOTHEROES_NATIVE_RELEASE
 
 // ---- one record ------------------------------------------------------------------------------
 
@@ -1963,6 +1985,7 @@ void draw(const Rec* r)
     const Surface& sf = st.surface;
     if (sf.color_target != 1 || sf.antialias) { unsupported(r, "MRT or antialiased target"); return; }
     const Raster& ra = st.raster;
+    r7_unmodelled(ra, r->prim);
     if (ra.blend || ra.depth_test || ra.stencil_test || ra.alpha_test || ra.cull) {
         unsupported(r, "render state beyond PPFX's (blend, depth, stencil, alpha test, cull)");
         return;
@@ -2157,6 +2180,7 @@ void draw(const Rec* r)
 // when it is done -- the pixels that differ and the largest difference of a
 // channel (in units of the format: 8-bit steps, or half-float bit patterns).
 std::atomic<uint64_t> s_aspc_n{0}, s_aspc_equal{0}, s_aspc_px{0}, s_aspc_px_total{0}, s_aspc_maxd{0};
+#ifndef DOTHEROES_NATIVE_RELEASE
 void asp_compare(Batch& b, const Rec* r, Img* mine, Img* eng, uint32_t off)
 {
     static int every = -1;
@@ -2216,6 +2240,7 @@ void asp_compare(Batch& b, const Rec* r, Img* mine, Img* eng, uint32_t off)
         s_rb_pool.emplace(a.n, a); s_rb_pool.emplace(e.n, e);
     });
 }
+#endif  // DOTHEROES_NATIVE_RELEASE
 
 // ---- R5: asp's draws (DOTHEROES_ASP_NATIVE=1, development) -----------------------------------
 // asp's records drawn natively: its colour and depth targets in the native
@@ -2305,7 +2330,7 @@ Img* guest_texture_live(Batch& b, const Rec* r, const Texture& t)
     const uint32_t key[] = { t.location, t.offset, t.format, t.width, t.height, nlv, t.pitch };
     const uint64_t k = fnv(key, sizeof key);
     GuestTex& g = s_gtex[k];
-    if (g.img && g.frame == r->frame) return g.img;
+    if (g.img && g.frame == r->frame && !r7_on()) return g.img;   // R7: every use asks the range's hash (below)
     const uint64_t h = range_hash(vm_base + ea, bytes, r) ^ k;
     if (g.img && g.hash == h) { g.frame = r->frame; return g.img; }
     uint32_t bpp;
@@ -2418,7 +2443,16 @@ void asp_describe_line(const Rec* r)
 struct Arena { Buf b; VkDeviceSize used = 0; uint32_t gen = 0; };
 std::deque<Arena> s_arenas;
 uint32_t s_arena_gen = 0;
-const VkDeviceSize kArena = 64u << 20;
+// R7: DOTHEROES_R7_ARENA_MB=<n> (a lifetime test): smaller arenas, so the
+// oldest is retired -- destroyed once the batch then recorded completes --
+// within seconds instead of never (R6's two 64 MB arenas never filled)
+VkDeviceSize arena_bytes()
+{
+    static VkDeviceSize b = 0;
+    if (!b) { const char* e = getenv("DOTHEROES_R7_ARENA_MB"); b = (VkDeviceSize)(e && atoi(e) > 0 ? atoi(e) : 64) << 20; }
+    return b;
+}
+#define kArena arena_bytes()
 const size_t kArenas = 8;   // 512 MB
 struct CacheEnt { uint32_t gen; VkDeviceSize off; VkDeviceSize bytes; uint32_t count; };
 std::unordered_map<uint64_t, CacheEnt> s_vcache;
@@ -2575,7 +2609,9 @@ bool ww_poll()
     if (!vm_write_watch) return false;
     if (s_pg_epoch.empty()) { s_pg_epoch.assign(1u << 20, 0); s_ww_buf.resize(1u << 20); }
     const uint64_t t0 = now_ns();
-    const uint64_t cover = queue().put.load(std::memory_order_acquire);   // before the poll
+    // before the poll: the records whose bytes the game had finished before it
+    // (R7: flushed ones -- a record's bytes are the game's until its flush)
+    const uint64_t cover = (r7_on() ? queue().flushed : queue().put).load(std::memory_order_acquire);
     s_ww_epoch++;
     for (const auto& run : s_ww_runs) {
         // the output array sized to the run: the call's cost follows the
@@ -2643,6 +2679,48 @@ uint64_t sample_hash(const uint8_t* p, uint32_t len)
     return h;
 }
 
+
+// R7's target watch (development): which native images' guest memory the CPU
+// rewrote after the native renderer last drew them, found when a draw then
+// samples the image (the image would be older than its memory). Counted and
+// named; the image is still used (the measurement says whether that ever
+// happens before anything changes).
+int target_watch()
+{
+    static int on = -1;
+    if (on < 0) { const char* e = getenv("DOTHEROES_R7_TARGET_WATCH"); on = e && *e == '1'; }
+    return on;
+}
+void ww_note(uint32_t ea, uint32_t len);
+bool ww_covers(uint64_t seq);
+bool ww_clean(uint32_t ea, uint32_t len, uint32_t epoch);
+extern "C" int vm_write_watch;
+uint64_t s_tw_checked = 0, s_tw_newer = 0;
+void target_watch_note(Img* t, uint32_t loc, uint32_t off, uint32_t pitch)
+{
+    if (!target_watch() || !vm_write_watch || loc != 0) return;   // local memory only (main-memory targets are written back)
+    const uint32_t ea = cellGcmResolveLocated(1, off);
+    const uint32_t len = (pitch ? pitch : t->w * t->bpp) * t->h;
+    if (ea < 0x10000u || (uint64_t)ea + len > 0xE0000000ull) return;
+    t->guest_ea = ea; t->guest_len = len;
+    t->ww_epoch = s_ww_epoch + 1;   // a write stamped by the next poll may precede the draw: not counted
+    ww_note(ea, len);
+}
+void target_watch_check(Img* src, const Rec* r, uint32_t off)
+{
+    if (!target_watch() || !src->guest_len || !vm_write_watch) return;
+    s_tw_checked++;
+    if (!ww_covers(r->seq) || ww_clean(src->guest_ea, src->guest_len, src->ww_epoch)) return;
+    s_tw_newer++;
+    static int said = 0;
+    if (said++ < 12) {
+        char line[200];
+        snprintf(line, sizeof line, "r7 target watch: record %llu (frame %u) samples the native image of 0:%08X, whose guest "
+                 "memory the CPU wrote after it was drawn", (unsigned long long)r->seq, r->frame, off);
+        report_add(line);
+    }
+}
+
 uint64_t range_hash(const uint8_t* p, uint32_t len, const Rec* r)
 {
     const uint32_t ea = (uint32_t)(p - vm_base);
@@ -2652,7 +2730,9 @@ uint64_t range_hash(const uint8_t* p, uint32_t len, const Rec* r)
     RangeHash& e = s_rhash[key];
     if (e.ww && ww_covers(r->seq) && ww_clean(ea, len, e.epoch)) { s_rh_ww_bytes += len; e.frame = r->frame + 1; return e.h; }
     const uint64_t sm = sample_hash(p, len);
-    if (e.frame == r->frame + 1 && e.sample == sm) { s_rh_memo_bytes += len; return e.h; }
+    // R7: no reuse from a sample of eight words -- a range rewritten within a
+    // frame that kept those words would keep its old content
+    if (e.frame == r->frame + 1 && e.sample == sm && !r7_on()) { s_rh_memo_bytes += len; return e.h; }
     if (e.frame == r->frame + 1) s_rh_rehashed++;
     e.h = fast_hash(p, len, key);
     e.sample = sm;
@@ -2692,6 +2772,7 @@ void asp_draw(const Rec* r)
         if (sf.color_location[0]) { t->main_dirty = 1; t->guest_pitch = sf.color_pitch[0]; }   // R6: written back
     }
     const Raster& ra = st.raster;
+    r7_unmodelled(ra, r->prim);
     Img* d = nullptr; VkFormat df = VK_FORMAT_UNDEFINED;
     if (sf.depth_format && (ra.depth_test || ra.stencil_test)) {
         df = depth_vkformat(sf.depth_format);
@@ -2953,6 +3034,7 @@ void asp_draw(const Rec* r)
         if (dt != s_depths.end() && dt->second && dt->second->written) { src = dt->second; views[u] = depth_sample_view(src); }
         else if (ct != s_targets.end() && ct->second->written) {
             src = ct->second;
+            target_watch_check(src, r, tx.offset);
             if (src == t) { unsupported(r, "asp: a draw sampling its own target"); return; }
             views[u] = view_of(src, tx.remap & 0xFFFFu, tx.format);
         } else if ((src = static_texture(b, r, u, tx)) || (src = guest_texture_live(b, r, tx)))
@@ -3040,7 +3122,7 @@ void asp_draw(const Rec* r)
     if (!pass_merge()) F.vkCmdEndRenderPass(b.cb);   // else left open for the next draw
     mark(b, kSectDraw);
     prof.mark(kApCommands);
-    if (t) { t->written = 1; t->asp_frame = r->frame + 1; }
+    if (t) { t->written = 1; t->asp_frame = r->frame + 1; target_watch_note(t, sf.color_location[0] ? 1u : 0u, sf.color_offset[0], sf.color_pitch[0]); }
     if (d) d->written = 1;
     b.records++;
     stats().n_asp_draws++;
@@ -3211,9 +3293,10 @@ namespace {
 
 std::vector<uint64_t> s_occ_set;   // the queries counted since the last clear
 uint64_t s_occ_gid = 0;
+int occ_legacy();
 int occ_on()
 {
-    if (s_occ_on < 0) { const char* e = getenv("DOTHEROES_R6_OCCLUSION"); s_occ_on = e && *e == '1'; }
+    if (s_occ_on < 0) { const char* e = getenv("DOTHEROES_R6_OCCLUSION"); s_occ_on = e && *e == '1' && !occ_legacy(); }
     return s_occ_on;
 }
 void occ_begin(Batch& b, const Rec* r)
@@ -3238,18 +3321,23 @@ void occ_end(Batch& b)
 struct WriteBack { uint32_t ea, pitch, w, h, bpp; VkFormat fmt; Buf buf; };
 void report_op(const Rec* r)
 {
+    if (occ_legacy()) {   // R7, DOTHEROES_R7_OCCLUSION=legacy: as the previous port's walker wrote them
+        if (r->rep_op == kRepReport) { cellGcm_report_write_pub(r->rep_index, r->rep_loc, r->rep_type == 1 ? 0xFFFFu : 0u); stats().r7_legacy_reports++; }
+        else if (r->rep_op == kRepTransfer) stats().r7_legacy_transfers_dropped++;
+        return;
+    }
     Batch& b = batch(r->frame);
     wait_for(b, r);
     if (r->rep_op == kRepClear) { s_occ_set.clear(); return; }
     if (r->rep_op == kRepReport) {
         if (r->rep_type != 1) stats().occ_other_types++;   // ZCULL statistics: never seen; written as 0
         std::vector<uint64_t> gids = r->rep_type == 1 ? s_occ_set : std::vector<uint64_t>();
-        const uint32_t index = r->rep_index;
-        b.done.push_back([gids, index] {
+        const uint32_t index = r->rep_index, loc = r->rep_loc;
+        b.done.push_back([gids, index, loc] {
             uint64_t sum = 0;
             for (uint64_t g : gids) sum += s_occ_val[g & 0xFFFFu];
             const uint32_t v = sum > 0xFFFFFFFFull ? 0xFFFFFFFFu : (uint32_t)sum;
-            cellGcm_report_write_pub(index, 0 /* LOCAL */, v);
+            cellGcm_report_write_pub(index, loc, v);
             stats().occ_reports++;
             stats().occ_sum_last = v;
         });
@@ -3296,6 +3384,381 @@ void report_op(const Rec* r)
         std::atomic_thread_fence(std::memory_order_release);
         if (cellGcm_report_copy_pub(index, 0 /* LOCAL */, io, count)) stats().occ_transfers++;
     });
+}
+
+
+// ---- R7: the walker's synchronisation, done by the consumer (docs/NATIVE_R7.md) -------------
+// The records arrive once the game's flush would have submitted them
+// (queue().flushed), and this thread is the title's whole GPU: what the RSX
+// would write back for the title is written here, at the stage the RSX
+// would have written it --
+//   consumed (the front end has passed the command): a command label, the
+//     wait for a label;
+//   completed (the work before it has finished): a back-end or texture-read
+//     label, the reference cellGcmFinish waits on, reports;
+//   presented: a flip (cellGcm_native_flip_executed, once its present is
+//     submitted after the frame's work).
+// Every guest input of a record is read while this thread consumes it --
+// after the flush, before any of those writes that follow it -- so the
+// title's own synchronisation keeps the bytes as they were until they are
+// taken (the rule; section 2 of the R7 document has the evidence).
+
+}  // namespace
+}  // namespace ppfx
+extern "C" void cellGcm_label_write_pub(uint32_t index, uint32_t value);
+extern "C" uint32_t cellGcm_label_read_pub(uint32_t index);
+extern "C" void cellGcm_native_ref(uint32_t value);
+extern "C" void cellGcm_native_flip_executed(uint32_t buffer_id);
+namespace ppfx {
+namespace {
+
+int r7_on()
+{
+#ifdef DOTHEROES_NATIVE_RELEASE
+    return 1;
+#else
+    static int on = -1;
+    if (on < 0) { const char* e = getenv("DOTHEROES_R7"); on = e && *e == '1'; }
+    return on;
+#endif
+}
+// DOTHEROES_R7_OCCLUSION=legacy: reports as the previous port wrote them (a
+// fixed count of 0xFFFF, no zpass counting, the report copies never made) --
+// kept apart from the real counts until they are compared with RPCS3
+int occ_legacy()
+{
+    static int on = -1;
+    if (on < 0) { const char* e = getenv("DOTHEROES_R7_OCCLUSION"); on = e && !strcmp(e, "legacy"); }
+    return on;
+}
+
+// Work done when everything recorded so far has completed on the GPU: in the
+// open batch (submitted now, so the write is not held for a frame), or with
+// the last batch submitted, or at once when none is in flight
+void when_complete(std::function<void()> f)
+{
+    Batch& cur = s_b[s_cur];
+    if (cur.open) { cur.done.push_back(std::move(f)); submit(); return; }
+    Batch* last = nullptr;
+    for (Batch& b : s_b) if (b.pending && (!last || b.seq > last->seq)) last = &b;
+    if (last) last->done.push_back(std::move(f));
+    else f();
+}
+
+void label_op(const Rec* r)
+{
+    const uint32_t i = r->lab_index, v = r->lab_value;
+    if (r->lab_stage == 0) { cellGcm_label_write_pub(i, v); stats().r7_labels_done++; return; }
+    when_complete([i, v] { cellGcm_label_write_pub(i, v); stats().r7_labels_done++; });
+}
+
+void ref_op(const Rec* r)
+{
+    const uint32_t v = r->lab_value;
+    when_complete([v] { cellGcm_native_ref(v); stats().r7_refs_done++; });
+}
+
+// The front end waits until the label holds the value: the PPU writes it,
+// or one of this thread's own completions does -- so the open batch goes and
+// completed batches retire while waiting (1 s at most: counted)
+void wait_op(const Rec* r)
+{
+    if (cellGcm_label_read_pub(r->lab_index) == r->lab_value) return;
+    const uint64_t t0 = now_ns();
+    stats().r7_wait_spins++;
+    if (s_b[s_cur].open) submit();
+    while (cellGcm_label_read_pub(r->lab_index) != r->lab_value) {
+        for (Batch& b : s_b) if (retire_ready(b)) retire(b);
+        if (s_stop.load() || now_ns() - t0 > 1000000000ull) { stats().r7_wait_timeouts++; break; }
+        std::this_thread::sleep_for(std::chrono::microseconds(50));
+    }
+    stats().r7_wait_us += (now_ns() - t0) / 1000;
+}
+
+// A PPFX draw's vertex bytes and small textures, taken now (R7: at
+// consumption, after the flush), into the record -- the ranges the recorder
+// named at the call
+void capture(Rec* r)
+{
+    uint64_t bytes = 0;
+    r->vdata.clear();
+    for (uint32_t k = 0; k < r->nvr; k++) {
+        VtxRange& v = r->vr[k];
+        const uint32_t ea = cellGcmResolveLocated(v.location == 0, v.offset);
+        v.at = (uint32_t)r->vdata.size();
+        if (ea >= 0x10000u && (uint64_t)ea + v.bytes <= 0xE0000000ull) r->vdata.insert(r->vdata.end(), vm_base + ea, vm_base + ea + v.bytes);
+        else r->vdata.resize(r->vdata.size() + v.bytes);
+        bytes += v.bytes;
+    }
+    if (!r->tex_at_flush) r->tdata.clear();
+    for (uint32_t k = 0; k < r->ntex && !r->tex_at_flush; k++) {
+        VtxRange& t = r->tex[k];
+        const Texture& tx = r->st.tex[t.location & 15u];
+        const uint32_t ea = cellGcmResolveLocated(tx.location == 0, t.offset);
+        t.at = (uint32_t)r->tdata.size();
+        if (ea >= 0x10000u && (uint64_t)ea + t.bytes <= 0xE0000000ull) r->tdata.insert(r->tdata.end(), vm_base + ea, vm_base + ea + t.bytes);
+        else r->tdata.resize(r->tdata.size() + t.bytes);
+        bytes += t.bytes;
+    }
+    r->deferred = 0;
+    stats().r7_deferred++;
+    stats().r7_deferred_bytes += bytes;
+}
+
+
+// ---- R7: the capture check (DOTHEROES_R7_CAPTURE_CHECK=1, development) --------------------
+// The rule R7 relies on: a record's guest bytes are the game's until its
+// flush, and from the flush until the native renderer's write that follows
+// the record (a label, a report, the flip's completion) the game does not
+// write them -- so taking them anywhere in that window gives the bytes the
+// RSX would have read. Checked, not assumed: each input range hashed at the
+// flush (the game's thread, ppfx_recorder.cpp r7_publish) and again as this
+// thread takes it; a difference is a write inside the window, counted and
+// named (which record, which range).
+}  // namespace
+
+int r7_capture_check()
+{
+    static int on = -1;
+    if (on < 0) { const char* e = getenv("DOTHEROES_R7_CAPTURE_CHECK"); on = e && *e == '1'; }
+    return on;
+}
+
+void r7_input_hashes(const Rec* r, std::vector<uint64_t>& out, std::vector<std::string>* what,
+                     std::vector<uint8_t>* taken_at_flush)
+{
+    out.clear();
+    if (what) what->clear();
+    if (taken_at_flush) taken_at_flush->clear();
+    char w[160];
+    auto add = [&](uint32_t ea, uint64_t bytes, const char* name) {
+        if (!bytes || bytes > (64u << 20) || ea < 0x10000u || (uint64_t)ea + bytes > 0xE0000000ull) { out.push_back(0); }
+        else { out.push_back(fast_hash(vm_base + ea, (size_t)bytes, 0xC0FFEEull)); stats().cc_bytes += bytes; }
+        if (what) what->push_back(name);
+    };
+    if (r->kind != kAspDraw && r->kind != kDraw) return;
+    for (uint32_t i = 0; i < r->nvr; i++) {
+        const VtxRange& v = r->vr[i];
+        snprintf(w, sizeof w, "vertex range %u (%u:%08X, %u bytes)", i, v.location, v.offset, v.bytes);
+        add(cellGcmResolveLocated(v.location == 0, v.offset), v.bytes, w);
+    }
+    if (r->kind == kAspDraw && r->idx_ea) {
+        snprintf(w, sizeof w, "index buffer %08X (%u indices)", r->idx_ea, r->count);
+        add(r->idx_ea, (uint64_t)r->count * (r->idx_type == 2 ? 2u : 4u), w);
+    }
+    for (uint32_t k = 0; k < r->nneed; k++) {
+        const Need& n = r->need[k];
+        if (n.unit >= 16 || n.drawn) continue;   // a native image: no guest bytes to take (DXT ones are guest bytes)
+        const Texture& t = r->st.tex[n.unit];
+        if (t.cubemap) continue;
+        rsx_tex_level lv[RSX_MAX_TEXTURE_LEVELS];
+        const uint32_t nlv = rsx_texture_mip_chain(t.format, t.width, t.height, t.mipmap, t.pitch, lv);
+        const uint32_t bytes = nlv ? lv[nlv - 1].offset + lv[nlv - 1].tl.face_bytes : 0;
+        snprintf(w, sizeof w, "texture unit %u (format %02X %ux%u mips %u at %u:%08X, %u bytes)", n.unit, t.format, t.width,
+                 t.height, t.mipmap, t.location, t.offset, bytes);
+        add(cellGcmResolveLocated(t.location == 0, t.offset), bytes, w);
+        if (taken_at_flush) {
+            bool snap = false;
+            for (uint32_t j = 0; j < r->ntex && r->tex_at_flush; j++) snap |= r->tex[j].location == n.unit;
+            taken_at_flush->resize(out.size(), 0);
+            taken_at_flush->back() = snap ? 1 : 0;
+        }
+    }
+}
+
+namespace {
+std::mutex s_cc_lock;
+std::map<std::string, uint64_t> s_cc_changed;   // which input, of what kind of record -> times written inside the window
+void capture_compare(const Rec* r)
+{
+    std::vector<uint64_t> now;
+    std::vector<std::string> what;
+    std::vector<uint8_t> snap;
+    r7_input_hashes(r, now, &what, &snap);
+    Stats& st = stats();
+    st.cc_records++;
+    st.cc_ranges += now.size();
+    bool changed = false;
+    for (size_t i = 0; i < now.size() && i < r->fhash.size(); i++) {
+        if (now[i] == r->fhash[i]) continue;
+        // a texture taken at the flush: the renderer draws with those bytes,
+        // the rewrite came after them (counted apart)
+        if (i < snap.size() && snap[i]) { st.cc_flush_taken_changed++; continue; }
+        changed = true;
+        st.cc_changed_ranges++;
+        std::lock_guard<std::mutex> g(s_cc_lock);
+        std::string key = std::string(r->kind == kAspDraw ? (r->game_arrays ? "game draw-arrays" : "asp draw") : "PPFX draw") + ": " + what[i];
+        if (s_cc_changed[key]++ == 0 && s_cc_changed.size() <= 40) {
+            char line[300];
+            snprintf(line, sizeof line, "r7 capture check: record %llu (frame %u) %s written between the flush and its capture",
+                     (unsigned long long)r->seq, r->frame, key.c_str());
+            report_add(line);
+        }
+    }
+    if (changed) st.cc_changed_records++;
+}
+
+
+// R7: a 2D transfer (cellGcmSetTransferImage) -- the post-boss warp's
+// capture of the frame shown is one (docs/NATIVE_R4.md section 11). A
+// source the native renderer drew is copied on the GPU into a native image
+// at the destination (what later draws sample there), and that image is
+// written back into the destination's guest memory once the copy has
+// completed (the bytes the RSX would have left there). A source in guest
+// memory is copied as bytes, now; a native image at the destination is then
+// older than its memory and goes.
+// DOTHEROES_R7_XFER_DUMP=<dir> (the warp session): each transfer's result as
+// the copy left it in guest memory, a PPM per copy (xfer_<seq>.ppm)
+void xfer_dump(uint64_t seq, const uint8_t* px, uint32_t w, uint32_t h, uint32_t stride, bool guest_argb, bool bgra)
+{
+    static const char* dir = getenv("DOTHEROES_R7_XFER_DUMP");
+    if (!dir || !*dir) return;
+#ifdef _WIN32
+    CreateDirectoryA(dir, NULL);
+#endif
+    char path[600];
+    snprintf(path, sizeof path, "%s/xfer_%llu.ppm", dir, (unsigned long long)seq);
+    FILE* f = fopen(path, "wb");
+    if (!f) return;
+    fprintf(f, "P6\n%u %u\n255\n", w, h);
+    for (uint32_t y = 0; y < h; y++)
+        for (uint32_t x = 0; x < w; x++) {
+            const uint8_t* p = px + (size_t)y * stride + x * 4u;
+            uint8_t rgb[3];
+            if (guest_argb) { rgb[0] = p[1]; rgb[1] = p[2]; rgb[2] = p[3]; }       // A R G B in guest memory
+            else if (bgra) { rgb[0] = p[2]; rgb[1] = p[1]; rgb[2] = p[0]; }
+            else { rgb[0] = p[0]; rgb[1] = p[1]; rgb[2] = p[2]; }
+            fwrite(rgb, 1, 3, f);
+        }
+    fclose(f);
+}
+
+void transfer_op(const Rec* r)
+{
+    Stats& st = stats();
+    st.r7_xfers++;
+    const uint32_t w = r->x_w, h = r->x_h, bpp = r->x_bpp;
+    if (!w || !h || (bpp != 2 && bpp != 4) || w > 8192 || h > 8192) { st.r7_xfer_unsupported++; return; }
+    auto it = s_targets.find(akey(r->xs_loc, r->xs_off));
+    Img* s = it != s_targets.end() && it->second && it->second->written ? it->second : nullptr;
+    if (s) {
+        if (s->bpp != bpp || r->xs_x + w > s->w || r->xs_y + h > s->h) {
+            st.r7_xfer_unsupported++;
+            char line[200];
+            snprintf(line, sizeof line, "render: transfer from %u:%08X (a native %ux%u image, %u bytes a pixel) not done: %ux%u at %u,%u, "
+                     "%u bytes a pixel", r->xs_loc, r->xs_off, s->w, s->h, s->bpp, w, h, r->xs_x, r->xs_y, bpp);
+            report_add(line);
+            return;
+        }
+        Batch& b = batch(r->frame);
+        wait_for(b, r);
+        Img* d = target_image(r->xd_loc, r->xd_off, s->fmt, s->bpp, r->xd_x + w, r->xd_y + h);
+        if (!d || d == s) { st.r7_xfer_unsupported++; return; }
+        access(b.cb, s, kCopySrc);
+        access(b.cb, d, kCopyDst);
+        VkImageCopy c = {};
+        c.srcSubresource = c.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+        c.srcOffset = { (int32_t)r->xs_x, (int32_t)r->xs_y, 0 };
+        c.dstOffset = { (int32_t)r->xd_x, (int32_t)r->xd_y, 0 };
+        c.extent = { w, h, 1 };
+        F.vkCmdCopyImage(b.cb, s->img, layout_of(s), d->img, layout_of(d), 1, &c);
+        mark(b, kSectCopy);
+        d->written = 1;
+        d->guest_pitch = r->xd_pitch;
+        // the destination's guest memory, once the copy has completed
+        const uint32_t dea = cellGcmResolveLocated(r->xd_loc == 0, r->xd_off);
+        Buf wb;
+        if (bpp == 4 && dea >= 0x10000u && (uint64_t)dea + (uint64_t)r->xd_pitch * (r->xd_y + h) <= 0xE0000000ull &&
+            (d->fmt == VK_FORMAT_R8G8B8A8_UNORM || d->fmt == VK_FORMAT_B8G8R8A8_UNORM) &&
+            make_buffer(wb, (VkDeviceSize)w * h * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true)) {
+            access(b.cb, d, kCopySrc);
+            VkBufferImageCopy bc = {};
+            bc.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+            bc.imageOffset = { (int32_t)r->xd_x, (int32_t)r->xd_y, 0 };
+            bc.imageExtent = { w, h, 1 };
+            F.vkCmdCopyImageToBuffer(b.cb, d->img, layout_of(d), wb.b, 1, &bc);
+            mark(b, kSectReadback);
+            const bool bgra = d->fmt == VK_FORMAT_B8G8R8A8_UNORM;
+            const uint32_t pitch = r->xd_pitch, x0 = r->xd_x, y0 = r->xd_y;
+            const uint64_t seq = r->seq;
+            b.done.push_back([wb, dea, pitch, x0, y0, w, h, bgra, seq] {
+                const bool as_is = rsx_texture_argb_is_rgba() != 0;
+                xfer_dump(seq, wb.p, w, h, w * 4u, false, bgra);
+                for (uint32_t y = 0; y < h; y++) {
+                    uint8_t* dp = vm_base + dea + (uint64_t)(y0 + y) * pitch + x0 * 4u;
+                    const uint8_t* sp = wb.p + (size_t)y * w * 4;
+                    for (uint32_t x = 0; x < w; x++, dp += 4, sp += 4) {
+                        if (as_is) { memcpy(dp, sp, 4); continue; }
+                        dp[0] = sp[3]; dp[1] = bgra ? sp[2] : sp[0]; dp[2] = sp[1]; dp[3] = bgra ? sp[0] : sp[2];
+                    }
+                }
+                F.vkDestroyBuffer(D.device, wb.b, nullptr);
+                F.vkFreeMemory(D.device, wb.m, nullptr);
+            });
+        }
+        return;
+    }
+    // guest memory to guest memory, as the bytes are now
+    const uint32_t sea = cellGcmResolveLocated(r->xs_loc == 0, r->xs_off), dea = cellGcmResolveLocated(r->xd_loc == 0, r->xd_off);
+    if (sea < 0x10000u || dea < 0x10000u ||
+        (uint64_t)sea + (uint64_t)r->xs_pitch * (r->xs_y + h) > 0xE0000000ull ||
+        (uint64_t)dea + (uint64_t)r->xd_pitch * (r->xd_y + h) > 0xE0000000ull) { st.r7_xfer_unsupported++; return; }
+    for (uint32_t y = 0; y < h; y++)
+        memmove(vm_base + dea + (uint64_t)(r->xd_y + y) * r->xd_pitch + r->xd_x * bpp,
+                vm_base + sea + (uint64_t)(r->xs_y + y) * r->xs_pitch + r->xs_x * bpp, (size_t)w * bpp);
+    if (bpp == 4) xfer_dump(r->seq, vm_base + dea + (uint64_t)r->xd_y * r->xd_pitch + r->xd_x * 4u, w, h, r->xd_pitch, true, false);
+    auto dt = s_targets.find(akey(r->xd_loc, r->xd_off));
+    if (dt != s_targets.end() && dt->second) { s_retired.push_back(dt->second); stats().n_retired++; s_targets.erase(dt); }
+}
+
+// R6: the game's reads of a display buffer's memory (the snapshot's JPEG and
+// PNG encoders, cellGcm_guest_read_surface on the game's thread) served from
+// the native image once the native renderer presents the frames: everything
+// published so far drawn, the image read back and written into guest memory
+// as the engine's guest read writes it (rsx_draw_engine_guest_read: A, R, G,
+// B bytes; TEX_RGBA=1 the image's own order). Other surfaces: the engine's.
+}  // namespace
+std::atomic<uint64_t> s_guest_reads{0}, s_guest_read_fail{0};
+int guest_read_native(uint32_t loc, uint32_t off, uint32_t pitch, uint32_t w, uint32_t h)
+{
+    if (!g_dotheroes_native_present) return 0;
+    // R7: what the game has flushed (the RSX executes nothing else); R6: everything published
+    const uint64_t upto = (r7_on() ? queue().flushed : queue().put).load(std::memory_order_acquire);
+    std::vector<uint8_t> rows;
+    uint32_t nw = 0, nh = 0, nf = 0, nb = 0;
+    if (readback_take(loc, off, upto, 10000, rows, &nw, &nh, &nf, &nb) || nb != 4) {
+        s_guest_read_fail++;
+        return 0;
+    }
+    const bool bgra = nf == (uint32_t)VK_FORMAT_B8G8R8A8_UNORM, as_is = rsx_texture_argb_is_rgba() != 0;
+    const uint32_t ww = w < nw ? w : nw, hh = h < nh ? h : nh;
+    for (uint32_t y = 0; y < hh; y++) {
+        const uint32_t ea = cellGcmResolveLocated(loc == 0, off + y * pitch);
+        if (!ea || ea + ww * 4 > 0xE0000000u) break;
+        uint8_t* d = vm_base + ea;
+        const uint8_t* sp = rows.data() + (size_t)y * nw * 4;
+        for (uint32_t x = 0; x < ww; x++, d += 4, sp += 4) {
+            if (as_is) { memcpy(d, sp, 4); continue; }
+            d[0] = sp[3];                                         // A
+            d[1] = bgra ? sp[2] : sp[0];                          // R
+            d[2] = sp[1];                                         // G
+            d[3] = bgra ? sp[0] : sp[2];                          // B
+        }
+    }
+    s_guest_reads++;
+    char line[160];
+    snprintf(line, sizeof line, "r6: guest read of %u:%08X (%ux%u, pitch %u) from the native image", loc, off, w, h, pitch);
+    report_add(line);
+    return 1;
+}
+namespace {
+
+
+// render state a draw uses that the native renderer does not carry out
+void r7_unmodelled(const Raster& ra, uint32_t prim)
+{
+    if (ra.depth_bounds || ra.two_sided_stencil || ra.point_sprite) stats().r7_unmodelled_draws++;
+    if (prim >= 2 && prim <= 4 && ra.line_width > 8) stats().r7_wide_line_draws++;
 }
 
 // ---- R6: the native present (docs/NATIVE_R6.md section 2) -----------------------------------
@@ -3375,7 +3838,8 @@ void present_native(const Rec* r)
         }
     }
     queue().flips_presented.fetch_add(1, std::memory_order_release);
-    if (cellGcm_flip_immediate()) cellGcmTickFlip();   // benchmarks: the flip completes now
+    if (r7_on()) { cellGcm_native_flip_executed(r->flip_id); stats().r7_flip_executed++; }   // R7: the flip's own completion
+    else if (cellGcm_flip_immediate()) cellGcmTickFlip();   // benchmarks: the flip completes now
     stats().r6_present_ns += now_ns() - t0;
 }
 
@@ -3396,6 +3860,7 @@ std::vector<bool> s_hb_busy;
 
 // This thread, with every record walked recorded: the image ready for the
 // engine's copy, the batch submitted with the request's semaphore.
+#ifndef DOTHEROES_NATIVE_RELEASE
 void hb_service(uint32_t frame)
 {
     HbReq* q;
@@ -3450,6 +3915,7 @@ void hb_service(uint32_t frame)
     }
     s_hb_cv.notify_all();
 }
+#endif  // DOTHEROES_NATIVE_RELEASE
 
 // ---- R6: a native image read back (the snapshot, guest reads, the present comparison) ---------
 
@@ -3556,9 +4022,12 @@ void run()
             }
         }
         if (next >= s_rb_upto.load(std::memory_order_acquire)) rb_service(frame);   // R6: a readback asked for
-        if (next >= q.walked.load(std::memory_order_acquire)) {
+        const uint64_t avail = r7_on() ? q.flushed.load(std::memory_order_acquire) : q.walked.load(std::memory_order_acquire);
+        if (next >= avail) {
             // R4: a handback asked for (everything walked is recorded now)
+#ifndef DOTHEROES_NATIVE_RELEASE
             hb_service(frame);
+#endif
             // nothing walked yet: submit what is open, so its work and
             // comparisons go ahead, and wait for the walker
             const uint64_t t0 = now_ns();
@@ -3567,8 +4036,8 @@ void run()
             if (s_draining) { for (Batch& b : s_b) retire(b); s_idle = 1; }
             std::unique_lock<std::mutex> lk(q.m);
             q.cv.wait_for(lk, std::chrono::milliseconds(2),
-                          [&] { return next < q.walked.load(std::memory_order_acquire) || s_hb != nullptr || s_stop.load() ||
-                                       next >= s_rb_upto.load(std::memory_order_acquire); });
+                          [&] { return next < (r7_on() ? q.flushed : q.walked).load(std::memory_order_acquire) || s_hb != nullptr ||
+                                       s_stop.load() || next >= s_rb_upto.load(std::memory_order_acquire); });
             stats().wait_walker_us += (now_ns() - t0) / 1000;
             continue;
         }
@@ -3585,6 +4054,17 @@ void run()
         if (r->frame != frame) {
             stats().n_frames++;
             frames_close(r->frame);
+            // R7 (memory over area cycles): what the renderer holds, every
+            // 1800 frames (DOTHEROES_R7_CENSUS=1, development)
+            static int census = -1;
+            if (census < 0) { const char* e = getenv("DOTHEROES_R7_CENSUS"); census = e && *e == '1'; }
+            if (census && r->frame % 1800 == 0)
+                fprintf(stderr, "[census] renderer frame %u gtex %zu static %zu pipes %zu vcache %zu vseen %zu rhash %zu "
+                                "isum %zu arenas %zu targets %zu snap %zu depths %zu fpinfo %zu vpmask %zu frames %zu vars %zu "
+                                "retired %zu samplers %zu\n",
+                        r->frame, s_gtex.size(), s_static.size(), s_pipes.size(), s_vcache.size(), s_vseen.size(),
+                        s_rhash.size(), s_isum.size(), s_arenas.size(), s_targets.size(), s_snap.size(), s_depths.size(),
+                        s_fpinfo.size(), s_vpmask.size(), s_frames.size(), s_vars.size(), s_retired.size(), s_samplers.size());
             // DOTHEROES_PPFX_REALLOC_EVERY=<n> (a test of image lifetime):
             // every n frames every native image is retired -- destroyed once
             // the batches in flight are done -- and made again at its next use
@@ -3615,11 +4095,23 @@ void run()
         if (delay_us < 0) { const char* e = getenv("DOTHEROES_PPFX_DELAY_US"); delay_us = e && *e ? atoi(e) : 0; }
         if (delay_us) { const uint64_t until = now_ns() + 1000ull * delay_us; while (now_ns() < until) {} }
         const uint64_t t0 = now_ns();
+        if (r7_on()) {   // R7: no walker -- nothing handed over, nothing to wait for on the engine's side
+            Walk& w = r->walk;
+            w.matched = 0; w.ref = -1; w.sem = -1; w.ordinal = -1; w.want_cmp = 0; w.cmp_why = 0;
+            for (int16_t& h : w.hand) h = -1;
+            for (int16_t& k : w.release_sem) k = -1;
+        }
+        if (r->fh) { capture_compare(r); r->fh = 0; }   // R7: written since the flush? (development)
+        if (r->deferred) capture(r);            // R7: a PPFX draw's inputs, taken now
         if (r->kind == kAspDraw) asp_draw(r);   // R5 (DOTHEROES_ASP_NATIVE=1)
         else if (r->kind == kDraw) draw(r);
         else if (r->kind == kClear) clear(r);
         else if (r->kind == kFlip) present_native(r);   // R6 (DOTHEROES_R6_PRESENT=1)
         else if (r->kind == kReport) report_op(r);      // R6 (DOTHEROES_R6_OCCLUSION=1)
+        else if (r->kind == kLabel) label_op(r);        // R7
+        else if (r->kind == kRef) ref_op(r);
+        else if (r->kind == kWait) wait_op(r);
+        else if (r->kind == kTransfer) transfer_op(r);
         stats().cpu_record_ns += now_ns() - t0;
         if (s_b[s_cur].open && (s_b[s_cur].used > kUpload / 2 || s_b[s_cur].sets > kSets / 2 ||
                                 s_b[s_cur].nq > kQueries - 64 || s_b[s_cur].nocc > kOcc - 64)) submit();
@@ -3659,6 +4151,7 @@ uint32_t surface_beformat(uint32_t color_format)
     }
 }
 
+#ifndef DOTHEROES_NATIVE_RELEASE
 int handback_take(uint32_t location, uint32_t offset, bool check, uint32_t timeout_ms, HandOut* out)
 {
     if (!render_ready()) return -10;
@@ -3681,6 +4174,7 @@ int handback_take(uint32_t location, uint32_t offset, bool check, uint32_t timeo
     *out = q.out;
     return 0;
 }
+#endif  // DOTHEROES_NATIVE_RELEASE
 
 int readback_take(uint32_t location, uint32_t offset, uint64_t upto, uint32_t timeout_ms, std::vector<uint8_t>& rows,
                   uint32_t* w, uint32_t* h, uint32_t* vkformat, uint32_t* bpp)
@@ -3714,11 +4208,13 @@ int readback_take(uint32_t location, uint32_t offset, uint64_t upto, uint32_t ti
     return 0;
 }
 
+#ifndef DOTHEROES_NATIVE_RELEASE
 void handback_check_done(int slot)
 {
     std::lock_guard<std::mutex> g(s_hb_lock);
     if (slot >= 0 && (size_t)slot < s_hb_busy.size()) s_hb_busy[slot] = false;
 }
+#endif  // DOTHEROES_NATIVE_RELEASE
 
 void frame_flag_inherited(uint32_t frame)
 {
@@ -3736,8 +4232,12 @@ void render_drain(uint32_t timeout_ms)
     const uint64_t t0 = now_ns(), limit = (uint64_t)timeout_ms * 1000000ull;
     s_draining = 1;
     Queue& q = queue();
+    if (r7_on()) {   // R7: what the game recorded after its last flush goes too
+        { std::lock_guard<std::mutex> g(q.m); q.flushed.store(q.put.load()); }
+        q.cv.notify_all();
+    }
     while (now_ns() - t0 < limit) {
-        const bool walked_done = q.done.load() >= q.walked.load() && s_idle.load();
+        const bool walked_done = q.done.load() >= (r7_on() ? q.flushed.load() : q.walked.load()) && s_idle.load();
         bool cmp_done;
         { std::lock_guard<std::mutex> g(s_cmp_lock); cmp_done = s_cmp_q.empty() && !s_cmp_running; }
         if (walked_done && cmp_done) break;
@@ -3788,6 +4288,12 @@ void render_report(std::vector<std::string>& out)
         snprintf(x, sizeof x, " | total %.2f us, %.1f s | %llu draws joined the previous one's pass", tot / 1e3 / (double)s_ap_draws,
                  tot / 1e9, (unsigned long long)s_pass_merged);
         line += x;
+        out.push_back(line);
+    }
+    if (s_tw_checked) {
+        char line[200];
+        snprintf(line, sizeof line, "r7 target watch: native images sampled %llu, of them with their guest memory written by the "
+                 "CPU since drawn %llu", (unsigned long long)s_tw_checked, (unsigned long long)s_tw_newer);
         out.push_back(line);
     }
     if (s_rh_memo_bytes || s_rh_rehashed || s_rh_ww_bytes) {
@@ -3854,6 +4360,7 @@ void render_report(std::vector<std::string>& out)
     }
 }
 
+#ifndef DOTHEROES_NATIVE_RELEASE
 int slot_image(uint32_t vkformat, uint32_t w, uint32_t h, uint64_t* image)
 {
     if (!render_ready()) return -1;
@@ -3882,7 +4389,9 @@ int slot_image(uint32_t vkformat, uint32_t w, uint32_t h, uint64_t* image)
     *image = (uint64_t)o->img;
     return (int)s_simg.size() - 1;
 }
+#endif  // DOTHEROES_NATIVE_RELEASE
 
+#ifndef DOTHEROES_NATIVE_RELEASE
 int slot_buffer(uint64_t bytes, uint64_t* buffer, int prio)
 {
     if (!render_ready()) return -1;
@@ -3910,7 +4419,9 @@ int slot_buffer(uint64_t bytes, uint64_t* buffer, int prio)
     *buffer = (uint64_t)s.b.b;
     return (int)s_sbuf.size() - 1;
 }
+#endif  // DOTHEROES_NATIVE_RELEASE
 
+#ifndef DOTHEROES_NATIVE_RELEASE
 int slot_semaphore(uint64_t* semaphore)
 {
     if (!render_ready()) return -1;
@@ -3925,24 +4436,31 @@ int slot_semaphore(uint64_t* semaphore)
     *semaphore = (uint64_t)s;
     return (int)s_ssem.size() - 1;
 }
+#endif  // DOTHEROES_NATIVE_RELEASE
 
+#ifndef DOTHEROES_NATIVE_RELEASE
 void slot_release_image(int slot)
 {
     std::lock_guard<std::mutex> g(s_slot_lock);
     if (slot >= 0 && (size_t)slot < s_simg.size()) s_simg[slot].busy = false;
 }
+#endif  // DOTHEROES_NATIVE_RELEASE
 
+#ifndef DOTHEROES_NATIVE_RELEASE
 void slot_release_buffer(int slot)
 {
     std::lock_guard<std::mutex> g(s_slot_lock);
     if (slot >= 0 && (size_t)slot < s_sbuf.size()) s_sbuf[slot].busy = false;
 }
+#endif  // DOTHEROES_NATIVE_RELEASE
 
+#ifndef DOTHEROES_NATIVE_RELEASE
 void slot_release_semaphore(int slot)
 {
     std::lock_guard<std::mutex> g(s_slot_lock);
     if (slot >= 0 && (size_t)slot < s_ssem.size()) s_ssem[slot].busy = false;
 }
+#endif  // DOTHEROES_NATIVE_RELEASE
 
 // Which records' outputs are compared: the final composite of every
 // DOTHEROES_PPFX_COMPARE_FINALS-th frame (default 1: every frame's), every
@@ -3951,6 +4469,7 @@ void slot_release_semaphore(int slot)
 // waits for a readback buffer when all are busy, which at the display's pace
 // costs frames (the owner's boss session, docs/NATIVE_R4.md section 6): play
 // sessions sample the finals instead.
+#ifndef DOTHEROES_NATIVE_RELEASE
 int compare_wanted(const Rec* r)
 {
     static int every = -1, finals = -1, off = -1;
@@ -3971,11 +4490,14 @@ int compare_wanted(const Rec* r)
         return kCmpFinal;   // the final composite: the A8R8G8B8 display buffer
     return every_frame ? kCmpEvery : kCmpNone;
 }
+#endif  // DOTHEROES_NATIVE_RELEASE
 
 void render_start()
 {
     std::thread(run).detach();
-    std::thread(cmp_thread).detach();
+#ifndef DOTHEROES_NATIVE_RELEASE
+    std::thread(cmp_thread).detach();   // R3's comparisons with the engine's outputs (development)
+#endif
 }
 
 }  // namespace ppfx

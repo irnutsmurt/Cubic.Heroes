@@ -624,7 +624,9 @@ void keys_loop()
         if (FILE* t = fopen("trace.trigger", "rb")) {
             fclose(t);
             remove("trace.trigger");
-            rsx_frame_trace_arm();
+#ifndef DOTHEROES_NATIVE_RELEASE
+            rsx_frame_trace_arm();   // the release has no frame trace (no walker)
+#endif
             mark(n, 4);
         }
         const uint32_t p = g_player.load();

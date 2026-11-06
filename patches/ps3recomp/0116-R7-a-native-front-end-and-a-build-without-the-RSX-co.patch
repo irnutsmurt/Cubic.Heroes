@@ -1,0 +1,1223 @@
+From 4c22c24685f6016e2902c3bd830a13aac9a6aadf Mon Sep 17 00:00:00 2001
+From: dotheroes <dotheroes@localhost>
+Date: Fri, 6 Nov 2026 09:02:57 -0800
+Subject: [PATCH] R7: a native front end, and a build without the RSX command
+ path
+
+For a host renderer that takes every command-writing libgcm call at its
+entry, so that nothing is ever written into the title's ring (the port's
+docs/NATIVE_R7.md):
+
+- cellGcm_set_native_frontend: no FIFO walker. A flip is requested
+  without a marker and completes once the host has executed it
+  (cellGcm_native_flip_executed, the walker's half; the next tick, or at
+  once in the benchmark mode); `get` answers `put` on a guest read of it
+  (vm_read32, control+4); `ref`, labels and reports are the host's to write
+  (cellGcm_native_ref, cellGcm_label_write_pub / _read_pub,
+  cellGcm_report_write_pub); the ring-full callback recycles without
+  waiting, counted. Inert unless a host sets it.
+- PS3RECOMP_NATIVE_GRAPHICS (CMake, off by default): the runtime built
+  without the command path -- rsx_commands.c, rsx_dispatch.c,
+  rsx_draw_engine.c, rsx_live_draw*.c and the null and D3D12 backends left
+  out; cellGcmSys.c (the walker, the 2D engines, the resync, the ref queue,
+  the frame trace, the flip marker, the ring limit and lap wrap, the SPU
+  put hook), rsx_vulkan_backend.c (the fixed-function and register-file
+  draw paths, the pipeline cache, the bridge's copies into the engine's
+  stream), rsx_vertex_compact.c (the fetch plan read from the register file,
+  inline arrays) and ppu_loader.cpp's walker diagnostics compiled with
+  PS3RECOMP_RSX_COMMAND_PATH=0. Kept: the system API, the Vulkan device,
+  window, swapchain and present, shader, texture and vertex-format
+  translation. The present-only backend clears its target on the present's
+  own command buffer and still reads the SPIR-V cache.
+- rsx_topology.c: the draw engine's topology expansion moved out unchanged,
+  so a native renderer has it without the engine.
+- gen_hle_nids.py --define NAME=VALUE: #if NAME blocks decided, so a build
+  that compiles functions out does not register them.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ CMakeLists.txt                  |  19 ++++
+ libs/video/cellGcmSys.c         | 148 ++++++++++++++++++++++++++++++++
+ libs/video/rsx_draw_engine.c    | 136 +----------------------------
+ libs/video/rsx_draw_engine.h    |   7 +-
+ libs/video/rsx_topology.c       | 141 ++++++++++++++++++++++++++++++
+ libs/video/rsx_topology.h       |  20 +++++
+ libs/video/rsx_vertex_compact.c |   4 +
+ libs/video/rsx_vulkan_backend.c |  83 +++++++++++++++++-
+ runtime/ppu/ppu_loader.cpp      |  11 +++
+ tools/gen_hle_nids.py           |  54 +++++++++++-
+ 10 files changed, 479 insertions(+), 144 deletions(-)
+ create mode 100644 libs/video/rsx_topology.c
+ create mode 100644 libs/video/rsx_topology.h
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 79fa174..31518b8 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -75,6 +75,20 @@ if(PS3RECOMP_RSX_VULKAN)
+                  "${CMAKE_CURRENT_SOURCE_DIR}/libs/video/rsx_shader_spirv.h")
+ endif()
+ 
++# A native graphics build (the port's R7, docs/NATIVE_R7.md there): the
++# title's graphics are a host renderer's, made from its libgcm calls at their
++# entry, so nothing here reads a command stream. The FIFO walker and the 2D
++# engines in cellGcmSys.c, the method decoder and RSX state (rsx_commands.c),
++# the register file (rsx_dispatch.c), the draw engine, the live-draw path and
++# the backends' drawing are left out; what stays is the system API (cellGcm's
++# memory, display buffers, flips, labels and reports as the host writes them),
++# the Vulkan device and present, and asset translation (shaders, textures,
++# vertex formats, topology).
++option(PS3RECOMP_NATIVE_GRAPHICS "Build without the RSX command path (a native renderer draws)" OFF)
++if(PS3RECOMP_NATIVE_GRAPHICS)
++    list(FILTER HLE_SOURCES EXCLUDE REGEX "/libs/video/(rsx_commands|rsx_dispatch|rsx_draw_engine|rsx_live_draw|rsx_live_draw_config|rsx_null_backend|rsx_d3d12_backend)\\.c$")
++endif()
++
+ # The Metal backend is Objective-C and Apple-only, so it is added explicitly
+ # rather than globbed. It needs no platform #ifdef of its own as a result.
+ if(APPLE)
+@@ -203,6 +217,11 @@ if(PS3RECOMP_RSX_VULKAN)
+     target_link_libraries(ps3recomp_runtime PUBLIC ${CMAKE_DL_LIBS})
+     message(STATUS "  Vulkan:       RSX backend enabled (rsx_vulkan_backend.c, headers in ${PS3RECOMP_VULKAN_INCLUDE_DIR})")
+ endif()
++if(PS3RECOMP_NATIVE_GRAPHICS)
++    # PUBLIC: the port's sources select their native-only paths on it too
++    target_compile_definitions(ps3recomp_runtime PUBLIC PS3RECOMP_RSX_COMMAND_PATH=0)
++    message(STATUS "  Graphics:     native only -- no RSX command path (walker, decoder, draw engine, backend drawing)")
++endif()
+ 
+ # cellVdec decodes H.264 / MPEG-2 through FFmpeg when this is on. libavcodec
+ # is loaded at run time (dlopen / LoadLibrary), never linked, so building needs
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index 7191ae7..f9f9d98 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -8,14 +8,29 @@
+  * Actual rendering is handled elsewhere -- this module just tracks state.
+  */
+ 
++/* PS3RECOMP_RSX_COMMAND_PATH (default 1): the FIFO walker, the 2D engines and
++ * the hand-over to the method decoder and draw engine. 0 (a native graphics
++ * build, PS3RECOMP_NATIVE_GRAPHICS): none of it -- the host renderer does the
++ * title's graphics from its libgcm calls (the native front end above). */
++#ifndef PS3RECOMP_RSX_COMMAND_PATH
++#define PS3RECOMP_RSX_COMMAND_PATH 1
++#endif
++#if PS3RECOMP_RSX_COMMAND_PATH
+ #include "rsx_live_draw.h"
+ #include "rsx_draw_engine.h"
++#endif
++#ifndef RSX_LOCATION_LOCAL
++#define RSX_LOCATION_LOCAL 0   /* rsx_dispatch.h's */
++#define RSX_LOCATION_MAIN  1
++#endif
+ #include "cellGcmSys.h"
+ #include "../../runtime/platform/win32_compat.h"
+ #include "../../runtime/ppu/ppu_memory.h"   /* vm_write32 (translate + byte-swap, OOB-safe) */
+ #include "../../runtime/memory/vm.h"    /* VM_HLE_INJECT_BASE */
+ #include "../../runtime/spu/spu_coherency.h" /* the blit row copy's reservation bookkeeping */
++#if PS3RECOMP_RSX_COMMAND_PATH
+ #include "rsx_commands.h"                    /* rsx_state, rsx_process_command_buffer */
++#endif
+ #include "../../include/ps3emu/guest_call.h" /* g_ps3_guest_caller for direct handler dispatch */
+ #include "../../include/ps3emu/ps3_ftrace.h"  /* PS3_FTRACE timeline */
+ #include "../../include/ps3emu/osd.h"         /* the frame-rate readout's frame times (PS3_OSD_FPS) */
+@@ -215,6 +230,29 @@ static volatile int s_flip_immediate;
+ void cellGcm_set_flip_immediate(int on) { s_flip_immediate = on; }
+ int cellGcm_flip_immediate(void) { return s_flip_immediate; }
+ 
++/* A native front end (the port's R7, docs/NATIVE_R7.md): a host renderer that
++ * takes every command-writing libgcm call at its entry, so nothing is ever
++ * written into the title's ring and no FIFO walker runs. What the walker did
++ * for the title's synchronisation the host does itself, in its own order:
++ *   - a flip is requested without a marker (no word in the ring) and
++ *     completes once the host has executed it: cellGcm_native_flip_executed,
++ *     the walker's half of the flip (the next tick then completes it);
++ *   - `get` answers `put` on every guest read of it: the ring has nothing
++ *     to consume (the host counts any word written into it);
++ *   - `ref`, labels and reports are written by the host (cellGcm_native_ref,
++ *     cellGcm_label_write_pub, cellGcm_report_write_pub) at the stage the
++ *     RSX would write them: when the command is consumed (ref, the front
++ *     end's labels) or when the work before it has completed (back-end
++ *     labels, reports);
++ *   - a ring-full callback (never expected) recycles without waiting.
++ * Set once by the host before the title's first flip; never cleared. */
++static volatile int s_gcm_native_fe;
++static volatile u32 s_native_fe_recycles, s_native_fe_get_polls;
++void cellGcm_set_native_frontend(int on) { s_gcm_native_fe = on; }
++int cellGcm_native_frontend(void) { return s_gcm_native_fe; }
++u32 cellGcm_native_fe_recycles(void) { return s_native_fe_recycles; }
++u32 cellGcm_native_fe_get_polls(void) { return s_native_fe_get_polls; }
++
+ static int gcm_flip_executed_take(void)
+ {
+     const u32 r = s_fifo_flips_reached;
+@@ -243,11 +281,26 @@ int cellGcm_take_flip_pending(void)
+ static void gcm_set_current_display_buffer(u32 bufferId)
+ {
+     s_current_display_buffer_id = bufferId;
++#if PS3RECOMP_RSX_COMMAND_PATH
+     if (rsx_draw_engine_enabled())
+         rsx_draw_engine_note_flip(bufferId);
++#endif
+ }
+ 
+ 
++/* The native front end's half of a flip (what the walker does at the
++ * marker): the buffer becomes the displayed one and the flip counts as
++ * executed; the next tick completes it (at once in the benchmark mode). */
++void cellGcmTickFlip(void);
++void cellGcm_native_flip_executed(u32 bufferId)
++{
++    if (bufferId < CELL_GCM_MAX_DISPLAY_BUFFER_NUM) gcm_set_current_display_buffer(bufferId);
++    s_flip_pending = 1;
++    s_flip_request_count++;
++    if (s_fifo_flips_reached != s_fifo_flips_queued) s_fifo_flips_reached++;
++    if (s_flip_immediate) cellGcmTickFlip();
++}
++
+ /* The RSX puts its 3D state back to the reset values at a flip, and a title
+  * may count on that: one sets ZSTENCIL_CLEAR_VALUE to 0 for a single clear
+  * and never writes it again, so its later depth clears are to the far plane
+@@ -256,6 +309,7 @@ static void gcm_set_current_display_buffer(u32 bufferId)
+  * of the method stream, at the flip's place in it.
+  * TODO: the rest of the reset image; this is the one register a title has
+  * been seen to depend on. */
++#if PS3RECOMP_RSX_COMMAND_PATH
+ static void gcm_fifo_flip_resets_state(rsx_state* state)
+ {
+     const u32 m = NV4097_SET_ZSTENCIL_CLEAR_VALUE, v = RSX_DSP_ZSTENCIL_CLEAR_RESET;
+@@ -263,6 +317,7 @@ static void gcm_fifo_flip_resets_state(rsx_state* state)
+     if (rsx_live_draw_enabled())   rsx_live_draw_method(m, v);
+     if (rsx_draw_engine_enabled()) rsx_draw_engine_method(m, v);
+ }
++#endif  /* PS3RECOMP_RSX_COMMAND_PATH */
+ 
+ /* Configuration */
+ static CellGcmConfig s_config;
+@@ -531,6 +586,32 @@ static u32 s_labels[CELL_GCM_MAX_LABEL_COUNT];
+ #define GCM_CONTROL_GUEST_ADDR (VM_HLE_INJECT_BASE + 0x2000u)
+ static u32 fr_put(void) { return vm_read32(GCM_CONTROL_GUEST_ADDR + 0); }
+ 
++/* The native front end (above): `ref` as the host's consumer passes a
++ * reference command; `get` = `put` on a guest read (vm_read32 calls this for
++ * control+4 while the front end is native); a label's value. */
++void cellGcm_native_ref(u32 value)
++{
++    __atomic_thread_fence(__ATOMIC_RELEASE);
++    vm_write32(GCM_CONTROL_GUEST_ADDR + 8, value);
++}
++void cellGcm_get_on_poll(void)
++{
++    if (!s_gcm_native_fe) return;
++    s_native_fe_get_polls++;
++    vm_write32(GCM_CONTROL_GUEST_ADDR + 4, vm_read32(GCM_CONTROL_GUEST_ADDR + 0));
++}
++void cellGcm_label_write_pub(u32 index, u32 value)
++{
++    if (index >= CELL_GCM_MAX_LABEL_COUNT) return;
++    __atomic_thread_fence(__ATOMIC_RELEASE);
++    vm_write32(VM_HLE_INJECT_BASE + index * 0x10u, value);
++}
++u32 cellGcm_label_read_pub(u32 index)
++{
++    return index < CELL_GCM_MAX_LABEL_COUNT ? vm_read32(VM_HLE_INJECT_BASE + index * 0x10u) : 0u;
++}
++u32 cellGcm_control_ea_pub(void) { return GCM_CONTROL_GUEST_ADDR; }
++
+ /* Synthetic guest code EA for the FIFO command-buffer-full callback. The title's
+  * inline gcmReserve calls context->callback(context, count) when `current` nears
+  * `end`; we point the context's callback OPD at this EA and register it in the
+@@ -726,11 +807,13 @@ s32 cellGcmInit(u32 cmdSize, u32 ioSize, u32 ioAddress)
+      * an SPU never tells libgcm where that stream is, so the write is the only
+      * evidence of it -- see gcm_note_spu_put. Costs one NULL check per SPU DMA
+      * for titles that do not. */
++#if PS3RECOMP_RSX_COMMAND_PATH
+     { extern void (*g_spu_put_hook)(u32 ea, u32 size);
+       void gcm_note_spu_put(u32 ea, u32 size);       /* defined with the walker */
+       void gcm_forget_spu_blocks(void);
+       gcm_forget_spu_blocks();
+       g_spu_put_hook = gcm_note_spu_put; }
++#endif
+ 
+     s_gcm_initialized = 1;
+     return CELL_OK;
+@@ -1377,6 +1460,7 @@ static struct {
+ /* Morton/Z-order offset for an NV309E swizzled surface: interleave the low
+  * min(l2w,l2h) bits of x and y, then append the remaining bits of the larger
+  * dimension above them. */
++#if PS3RECOMP_RSX_COMMAND_PATH
+ static u32 nv309e_swz(u32 x, u32 y, u32 l2w, u32 l2h)
+ {
+     u32 n = l2w < l2h ? l2w : l2h, off = 0;
+@@ -1761,6 +1845,7 @@ static void gcm_2d_method(u32 subch, u32 method, u32 data)
+         printf("[cellGcmSys] FIFO subch %u method 0x%04X (unhandled 2D engine)\n",
+                subch, method);
+ }
++#endif  /* PS3RECOMP_RSX_COMMAND_PATH */
+ 
+ /* Present gate for the ticker: a flip is ready once the drain has consumed
+  * everything up to put. The guest blocks in its own WaitFlip right after
+@@ -1799,6 +1884,7 @@ static volatile u32 s_ref_qhead = 0, s_ref_qtail = 0;   /* single producer+consu
+  * a title spinning on ctrl->ref waits forever with no indication why. Tokyo
+  * Jungle did exactly this -- get left the 1 MB ring for IO 0x00F00000, which it
+  * never mapped, while put sat at 0x604. Stop at the bad word and say so. */
++#if PS3RECOMP_RSX_COMMAND_PATH
+ static void gcm_fifo_bad_branch(const char* kind, u32 target, u32 word)
+ {
+     static int n = 0;
+@@ -2150,6 +2236,7 @@ static SRWLOCK s_ref_pub_lock = SRWLOCK_INIT;
+ 
+ void cellGcm_ref_on_poll(void)
+ {
++    if (s_gcm_native_fe) return;   /* the host writes ref itself */
+     /* Pace: leave each published value observable for >= ~200us of spins
+      * (equality-waiters at any poll rate see every value; still ~5000/s so
+      * loading's fence storms clear in seconds, not minutes). */
+@@ -2396,6 +2483,18 @@ void cellGcm_rsx_process_fifo(void)
+             ps3_ft_span(PS3_FT_DRAIN, 0, s_ft_sema_t0 ? 1u : 0u, 0, ft_t0, t1);
+     }
+ }
++#else
++/* No walker: the ref register is the host's (cellGcm_native_ref); a poll of
++ * it has nothing queued to publish. */
++volatile long long g_gcm_ref_pub_count = 0;
++unsigned long long ps3_qpc_us(void)
++{
++    static LARGE_INTEGER f; if (!f.QuadPart) QueryPerformanceFrequency(&f);
++    LARGE_INTEGER n; QueryPerformanceCounter(&n);
++    return (unsigned long long)(n.QuadPart / (f.QuadPart / 1000000));
++}
++void cellGcm_ref_on_poll(void) {}
++#endif  /* PS3RECOMP_RSX_COMMAND_PATH */
+ 
+ /* For a library that reads pixels the title rendered -- cellJpgEnc encoding
+  * the display buffer 3D Dot Game Heroes' SNAPSHOT draws into. The engine
+@@ -2422,6 +2521,9 @@ void cellGcm_guest_read_surface(u32 ea, u32 pitch, u32 w, u32 h)
+         /* outside the walker's lock: the host renderer's work may wait for the walker's */
+         if (loc != ~0u && s_guest_read_hook(loc, off, pitch, w, h)) return;
+     }
++#if !PS3RECOMP_RSX_COMMAND_PATH
++    }   /* no engine: the host renderer's hook above, or nothing */
++#else
+     if (!rsx_draw_engine_enabled()) return;
+     u32 location, offset;
+     if (ea >= s_config.localAddress && ea - s_config.localAddress < s_config.localSize) {
+@@ -2437,11 +2539,13 @@ void cellGcm_guest_read_surface(u32 ea, u32 pitch, u32 w, u32 h)
+     rsx_draw_engine_guest_read(location, offset, pitch, w, h);
+     ReleaseSRWLockExclusive(&s_gcm_fifo_lock);
+ }
++#endif  /* PS3RECOMP_RSX_COMMAND_PATH */
+ 
+ /* The methods rsx_process_method acts on beyond its own rsx_state: the notify
+  * and semaphore DMA contexts, the notify write, the back-end label offset and
+  * label writes, and SET_REFERENCE (g_rsx_last_reference). Everything else only
+  * updates state for a vtable backend. */
++#if PS3RECOMP_RSX_COMMAND_PATH
+ static int gcm_legacy_method_has_effect(u32 m)
+ {
+     switch (m) {
+@@ -3487,6 +3591,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
+     gcm_ref_publish_one();
+     ReleaseSRWLockExclusive(&s_ref_pub_lock);
+ }
++#endif  /* PS3RECOMP_RSX_COMMAND_PATH */
+ 
+ /* FIFO command-buffer-full callback body. The title's inline gcmReserve calls
+  * context->callback(context, count) (routed here via the synthetic OPD) when the
+@@ -3514,6 +3619,7 @@ u32 cellGcm_ea2io_pub(u32 ea) { return gcm_ea2io(ea); }
+  * wait until the title has that much room, as long as the walker keeps
+  * moving (2 s without progress, or 60 s in all, hands the title the rest of
+  * the ring: the trade the full recycle below makes). Guest thread only. */
++#if PS3RECOMP_RSX_COMMAND_PATH
+ static void gcm_ring_limit_raise(u32 ctx_ea, u32 need)
+ {
+     const u32 begin = vm_read32(ctx_ea + 0x0), cur = vm_read32(ctx_ea + 0x8);
+@@ -3626,6 +3732,7 @@ static int gcm_wrap_into_lap(u32 ctx_ea, u32 begin, u32 current, u32 io_begin, u
+     s_lap_waited[why]++;
+     return 0;
+ }
++#endif  /* PS3RECOMP_RSX_COMMAND_PATH */
+ 
+ void cellGcm_fifo_recycle_n(u32 ctx_ea, u32 count);
+ void cellGcm_fifo_recycle(u32 ctx_ea) { cellGcm_fifo_recycle_n(ctx_ea, 0); }
+@@ -3635,6 +3742,15 @@ void cellGcm_fifo_recycle(u32 ctx_ea) { cellGcm_fifo_recycle_n(ctx_ea, 0); }
+ void cellGcm_fifo_recycle_n(u32 ctx_ea, u32 count)
+ {
+     if (!ctx_ea) return;
++#if PS3RECOMP_RSX_COMMAND_PATH
++    if (s_gcm_native_fe)
++#endif
++    {   /* nothing consumes the ring: back to its start, no jump, no wait (counted) */
++        s_native_fe_recycles++;
++        vm_write32(ctx_ea + 0x8, vm_read32(ctx_ea + 0x0));
++        return;
++    }
++#if PS3RECOMP_RSX_COMMAND_PATH
+     /* The room a raise or a new lap leaves the title: GCM_RING_LIMIT_ROOM, or
+      * with GCM_WRAP_LAP=1 the reserve that called, if that is more. */
+     u32 need = GCM_RING_LIMIT_ROOM;
+@@ -3725,6 +3841,7 @@ void cellGcm_fifo_recycle_n(u32 ctx_ea, u32 count)
+                 vm_read32(GCM_CONTROL_GUEST_ADDR + 0),
+                 vm_read32(GCM_CONTROL_GUEST_ADDR + 4),
+                 g_gcm_fifo_drained_ea, spins);
++#endif  /* PS3RECOMP_RSX_COMMAND_PATH */
+ }
+ 
+ /* A host that brings its backend up on another thread -- a frame clock that
+@@ -3733,6 +3850,7 @@ void cellGcm_fifo_recycle_n(u32 ctx_ea, u32 count)
+  * no scanout, and every flip presents whatever surface happens to be bound:
+  * Twisted Metal on Linux showed an offscreen target instead of its composited
+  * display buffer. rsx_draw_engine_init calls this to catch up. */
++#if PS3RECOMP_RSX_COMMAND_PATH
+ void cellGcm_replay_display_buffers_to_engine(void)
+ {
+     for (u32 i = 0; i < CELL_GCM_MAX_DISPLAY_BUFFER_NUM; i++)
+@@ -3742,6 +3860,7 @@ void cellGcm_replay_display_buffers_to_engine(void)
+                                                s_display_buffers[i].width,
+                                                s_display_buffers[i].height);
+ }
++#endif  /* PS3RECOMP_RSX_COMMAND_PATH */
+ 
+ /* NID: 0xDC09357E */
+ s32 cellGcmSetDisplayBuffer(u32 bufferId, u32 offset, u32 pitch,
+@@ -3762,10 +3881,12 @@ s32 cellGcmSetDisplayBuffer(u32 bufferId, u32 offset, u32 pitch,
+     /* Tell the live engine too, or it has no registered scanout to present and
+      * falls back to whatever surface happens to be current. Display buffers are
+      * always in RSX local memory (location 0). */
++#if PS3RECOMP_RSX_COMMAND_PATH
+     if (rsx_live_draw_enabled())
+         rsx_live_draw_set_display_buffer(bufferId, 0, offset, pitch, width, height);
+     if (rsx_draw_engine_enabled())
+         rsx_draw_engine_set_display_buffer(bufferId, 0, offset, pitch, width, height);
++#endif
+ 
+     return CELL_OK;
+ }
+@@ -3894,6 +4015,7 @@ s32 cellGcmSetFlipCommand(u32 bufferId) { return gcm_flip_request(bufferId, 0);
+  * at ctx->current instead; the drain stops at it and fires the flip there,
+  * exactly as it does for the 0xFEAD words a statically-linked libgcm emits.
+  * Returns 0 when there is no room or ctx is not a mapped command buffer. */
++#if PS3RECOMP_RSX_COMMAND_PATH
+ static int gcm_flip_into_fifo(u32 ctx, u32 bufferId)
+ {
+     if (!ctx || bufferId >= CELL_GCM_MAX_DISPLAY_BUFFER_NUM ||
+@@ -3959,6 +4081,7 @@ static int gcm_flip_into_fifo(u32 ctx, u32 bufferId)
+     vm_write32(ctx + 8, cur + 4);
+     return 1;
+ }
++#endif  /* PS3RECOMP_RSX_COMMAND_PATH */
+ 
+ /* cellGcmSetFlip(context, buffer_id) — immediate flip request. PSL1GHT's
+  * gcmSetFlip import (NID 0xDC09357E) lands here; without it vkcube's flip was
+@@ -4753,9 +4876,20 @@ s32 cellGcmSetDefaultFifoSize(u32 size)
+ /* NID: 0x21397818 */
+ s32 _cellGcmSetFlipCommand(void* ctx, u32 bufferId)
+ {
++#if PS3RECOMP_RSX_COMMAND_PATH
++    if (s_gcm_native_fe)
++#endif
++    {   /* no marker: the host executes the flip (cellGcm_native_flip_executed) */
++        if (bufferId >= CELL_GCM_MAX_DISPLAY_BUFFER_NUM || !s_display_buffer_set[bufferId])
++            return CELL_GCM_ERROR_INVALID_VALUE;
++        s_fifo_flips_queued++;
++        return gcm_flip_request(bufferId, 1);
++    }
++#if PS3RECOMP_RSX_COMMAND_PATH
+     if (gcm_flip_into_fifo((u32)(uintptr_t)ctx, bufferId))
+         return gcm_flip_request(bufferId, 1);
+     return cellGcmSetFlipCommand(bufferId);
++#endif
+ }
+ 
+ /* NID: 0xD8F88E1A */
+@@ -4771,6 +4905,17 @@ s32 _cellGcmSetFlipCommandWithWaitLabel(void* ctx, u32 bufferId,
+                                         u32 labelIndex, u32 labelValue)
+ {
+     const u32 c = (u32)(uintptr_t)ctx;
++#if PS3RECOMP_RSX_COMMAND_PATH
++    if (s_gcm_native_fe)
++#endif
++    {   /* the wait is the host's (it executes flips in order); no words */
++        if (bufferId >= CELL_GCM_MAX_DISPLAY_BUFFER_NUM || !s_display_buffer_set[bufferId])
++            return CELL_GCM_ERROR_INVALID_VALUE;
++        (void)labelIndex; (void)labelValue;
++        s_fifo_flips_queued++;
++        return gcm_flip_request(bufferId, 1);
++    }
++#if PS3RECOMP_RSX_COMMAND_PATH
+     if (c && labelIndex < CELL_GCM_MAX_LABEL_COUNT &&
+         bufferId < CELL_GCM_MAX_DISPLAY_BUFFER_NUM && s_display_buffer_set[bufferId]) {
+         const u32 end = vm_read32(c + 4), cur = vm_read32(c + 8);
+@@ -4786,6 +4931,7 @@ s32 _cellGcmSetFlipCommandWithWaitLabel(void* ctx, u32 bufferId,
+         }
+     }
+     return cellGcmSetFlipCommandWithWaitLabel(bufferId, labelIndex, labelValue);
++#endif
+ }
+ 
+ /* ---------------------------------------------------------------------------
+@@ -5120,6 +5266,7 @@ u32 cellGcmGetReportDataLocation(u32 index, u32 location)
+ static struct { u32 dst, size; int claimed; } s_uploads[RSX_UPLOAD_LOG];
+ static u32 s_upload_n;
+ 
++#if PS3RECOMP_RSX_COMMAND_PATH
+ void rsx_note_vram_upload(u32 dst_ea, u32 size)
+ {
+     if (!size) return;
+@@ -5152,6 +5299,7 @@ void rsx_reset_upload_claims(void)
+ {
+     for (u32 i = 0; i < RSX_UPLOAD_LOG; i++) s_uploads[i].claimed = 0;
+ }
++#endif  /* PS3RECOMP_RSX_COMMAND_PATH */
+ 
+ /* ---------------------------------------------------------------------------
+  * sys_rsx_* bridge (libs/video/sys_rsx.c)
+diff --git a/libs/video/rsx_draw_engine.c b/libs/video/rsx_draw_engine.c
+index 773cc59..dd84390 100644
+--- a/libs/video/rsx_draw_engine.c
++++ b/libs/video/rsx_draw_engine.c
+@@ -434,141 +434,7 @@ u64 rsx_draw_engine_hash_render_state(const rsx_be_render_state* rs, u64 hash)
+     return hash;
+ }
+ 
+-/* ---- topology expansion -------------------------------------------------- */
+-
+-/* Every expansion is bounded by the restart cuts, so a strip that the guest
+- * broke with the sentinel index gets no connecting triangle across the break.
+- * Missing that decode is what upstream's aa7fb63 records as "the exploded
+- * spiky mesh that occluded the scene". */
+-u32 rsx_draw_engine_topology_index_count(u32 primitive, u32 source_refs,
+-                                         const u32* cuts, u32 cut_count)
+-{
+-    const u32 segments = cut_count + 1;
+-    switch (primitive) {
+-    case RSX_PRIMITIVE_TRIANGLES:
+-        return source_refs - source_refs % 3u;
+-    case RSX_PRIMITIVE_TRIANGLE_STRIP:
+-    case RSX_PRIMITIVE_TRIANGLE_FAN:
+-    case RSX_PRIMITIVE_POLYGON: {
+-        u32 total = 0;
+-        for (u32 s = 0; s < segments; s++) {
+-            u32 begin, count;
+-            rsx_restart_segment_bounds(cuts, cut_count, source_refs, s,
+-                                       &begin, &count);
+-            (void)begin;
+-            if (count >= 3) total += (count - 2) * 3;
+-        }
+-        return total;
+-    }
+-    case RSX_PRIMITIVE_QUAD_STRIP: {
+-        /* Two vertices per quad after the first pair, so a segment of n
+-         * carries (n - 2) / 2 quads and an odd trailing vertex is dropped. */
+-        u32 total = 0;
+-        for (u32 s = 0; s < segments; s++) {
+-            u32 begin, count;
+-            rsx_restart_segment_bounds(cuts, cut_count, source_refs, s,
+-                                       &begin, &count);
+-            (void)begin;
+-            if (count >= 4) total += ((count - 2u) / 2u) * 6u;
+-        }
+-        return total;
+-    }
+-    case RSX_PRIMITIVE_QUADS:
+-        return (source_refs / 4u) * 6u;
+-    default:
+-        return 0;
+-    }
+-}
+-
+-static u32 eng_topology_vertex(const u32* occurrence_to_unique, u32 occurrence)
+-{
+-    return occurrence_to_unique ? occurrence_to_unique[occurrence] : occurrence;
+-}
+-
+-void rsx_draw_engine_write_topology_indices(u32 primitive, u32 source_refs,
+-                                            const u32* cuts, u32 cut_count,
+-                                            const u32* occurrence_to_unique,
+-                                            u32* indices)
+-{
+-    u32 write = 0;
+-    const u32 segments = cut_count + 1;
+-    switch (primitive) {
+-    case RSX_PRIMITIVE_TRIANGLES: {
+-        const u32 count = source_refs - source_refs % 3u;
+-        for (u32 o = 0; o < count; o++)
+-            indices[write++] = eng_topology_vertex(occurrence_to_unique, o);
+-        break;
+-    }
+-    case RSX_PRIMITIVE_TRIANGLE_STRIP:
+-        for (u32 s = 0; s < segments; s++) {
+-            u32 begin, count;
+-            rsx_restart_segment_bounds(cuts, cut_count, source_refs, s,
+-                                       &begin, &count);
+-            if (count < 3) continue;
+-            /* Odd triangles swap their first two vertices, so the whole strip
+-             * keeps one winding. */
+-            for (u32 i = 0; i + 2 < count; i++) {
+-                indices[write++] = eng_topology_vertex(
+-                    occurrence_to_unique, begin + i + (i & 1u));
+-                indices[write++] = eng_topology_vertex(
+-                    occurrence_to_unique, begin + i + 1u - (i & 1u));
+-                indices[write++] = eng_topology_vertex(
+-                    occurrence_to_unique, begin + i + 2u);
+-            }
+-        }
+-        break;
+-    /* A polygon is a convex fan around its own first vertex, which is what
+-     * both of this tree's other renderers make of one. */
+-    case RSX_PRIMITIVE_TRIANGLE_FAN:
+-    case RSX_PRIMITIVE_POLYGON:
+-        for (u32 s = 0; s < segments; s++) {
+-            u32 begin, count;
+-            rsx_restart_segment_bounds(cuts, cut_count, source_refs, s,
+-                                       &begin, &count);
+-            if (count < 3) continue;
+-            for (u32 i = 1; i + 1 < count; i++) {
+-                indices[write++] = eng_topology_vertex(occurrence_to_unique, begin);
+-                indices[write++] = eng_topology_vertex(occurrence_to_unique, begin + i);
+-                indices[write++] = eng_topology_vertex(occurrence_to_unique, begin + i + 1u);
+-            }
+-        }
+-        break;
+-    case RSX_PRIMITIVE_QUAD_STRIP:
+-        for (u32 s = 0; s < segments; s++) {
+-            u32 begin, count;
+-            rsx_restart_segment_bounds(cuts, cut_count, source_refs, s,
+-                                       &begin, &count);
+-            if (count < 4) continue;
+-            /* Every quad is split along the diagonal between the two pairs,
+-             * so each one keeps the strip's winding without alternating the
+-             * way a triangle strip has to; a cut simply starts the pairing
+-             * again from the segment's own first vertex. This is the
+-             * expansion the vtable path's emit_vertices performs. */
+-            for (u32 q = 0; q + 3 < count; q += 2) {
+-                indices[write++] = eng_topology_vertex(occurrence_to_unique, begin + q);
+-                indices[write++] = eng_topology_vertex(occurrence_to_unique, begin + q + 1u);
+-                indices[write++] = eng_topology_vertex(occurrence_to_unique, begin + q + 2u);
+-                indices[write++] = eng_topology_vertex(occurrence_to_unique, begin + q + 1u);
+-                indices[write++] = eng_topology_vertex(occurrence_to_unique, begin + q + 3u);
+-                indices[write++] = eng_topology_vertex(occurrence_to_unique, begin + q + 2u);
+-            }
+-        }
+-        break;
+-    case RSX_PRIMITIVE_QUADS:
+-        for (u32 q = 0; q < source_refs / 4u; q++) {
+-            const u32 base = q * 4u;
+-            indices[write++] = eng_topology_vertex(occurrence_to_unique, base);
+-            indices[write++] = eng_topology_vertex(occurrence_to_unique, base + 1u);
+-            indices[write++] = eng_topology_vertex(occurrence_to_unique, base + 2u);
+-            indices[write++] = eng_topology_vertex(occurrence_to_unique, base + 2u);
+-            indices[write++] = eng_topology_vertex(occurrence_to_unique, base + 3u);
+-            indices[write++] = eng_topology_vertex(occurrence_to_unique, base);
+-        }
+-        break;
+-    default:
+-        break;
+-    }
+-}
++/* ---- topology expansion: rsx_topology.c (the native renderer uses it without the engine) ---- */
+ 
+ /* Does this primitive become an indexed triangle list, and is the index buffer
+  * needed at all? rsx_vertex_topology_plan answers that for the reference
+diff --git a/libs/video/rsx_draw_engine.h b/libs/video/rsx_draw_engine.h
+index ba3325b..93dd7fb 100644
+--- a/libs/video/rsx_draw_engine.h
++++ b/libs/video/rsx_draw_engine.h
+@@ -491,12 +491,7 @@ u64  rsx_draw_engine_hash_render_state(const rsx_be_render_state* rs, u64 hash);
+  * room for the count. Triangle strips alternate winding per segment; a quad
+  * strip pairs its vertices from each segment's own start, and a polygon is a
+  * fan around each segment's own first vertex. */
+-u32  rsx_draw_engine_topology_index_count(u32 primitive, u32 source_refs,
+-                                          const u32* cuts, u32 cut_count);
+-void rsx_draw_engine_write_topology_indices(u32 primitive, u32 source_refs,
+-                                            const u32* cuts, u32 cut_count,
+-                                            const u32* occurrence_to_unique,
+-                                            u32* indices);
++#include "rsx_topology.h"   /* rsx_draw_engine_topology_index_count, _write_topology_indices */
+ 
+ #ifdef __cplusplus
+ }
+diff --git a/libs/video/rsx_topology.c b/libs/video/rsx_topology.c
+new file mode 100644
+index 0000000..ac939c7
+--- /dev/null
++++ b/libs/video/rsx_topology.c
+@@ -0,0 +1,141 @@
++/* Primitive topology expansion (see rsx_topology.h): moved out of
++ * rsx_draw_engine.c unchanged. */
++#include "rsx_topology.h"
++#include "rsx_primitives.h"
++#include "rsx_restart_cuts.h"
++
++/* ---- topology expansion -------------------------------------------------- */
++
++/* Every expansion is bounded by the restart cuts, so a strip that the guest
++ * broke with the sentinel index gets no connecting triangle across the break.
++ * Missing that decode is what upstream's aa7fb63 records as "the exploded
++ * spiky mesh that occluded the scene". */
++u32 rsx_draw_engine_topology_index_count(u32 primitive, u32 source_refs,
++                                         const u32* cuts, u32 cut_count)
++{
++    const u32 segments = cut_count + 1;
++    switch (primitive) {
++    case RSX_PRIMITIVE_TRIANGLES:
++        return source_refs - source_refs % 3u;
++    case RSX_PRIMITIVE_TRIANGLE_STRIP:
++    case RSX_PRIMITIVE_TRIANGLE_FAN:
++    case RSX_PRIMITIVE_POLYGON: {
++        u32 total = 0;
++        for (u32 s = 0; s < segments; s++) {
++            u32 begin, count;
++            rsx_restart_segment_bounds(cuts, cut_count, source_refs, s,
++                                       &begin, &count);
++            (void)begin;
++            if (count >= 3) total += (count - 2) * 3;
++        }
++        return total;
++    }
++    case RSX_PRIMITIVE_QUAD_STRIP: {
++        /* Two vertices per quad after the first pair, so a segment of n
++         * carries (n - 2) / 2 quads and an odd trailing vertex is dropped. */
++        u32 total = 0;
++        for (u32 s = 0; s < segments; s++) {
++            u32 begin, count;
++            rsx_restart_segment_bounds(cuts, cut_count, source_refs, s,
++                                       &begin, &count);
++            (void)begin;
++            if (count >= 4) total += ((count - 2u) / 2u) * 6u;
++        }
++        return total;
++    }
++    case RSX_PRIMITIVE_QUADS:
++        return (source_refs / 4u) * 6u;
++    default:
++        return 0;
++    }
++}
++
++static u32 eng_topology_vertex(const u32* occurrence_to_unique, u32 occurrence)
++{
++    return occurrence_to_unique ? occurrence_to_unique[occurrence] : occurrence;
++}
++
++void rsx_draw_engine_write_topology_indices(u32 primitive, u32 source_refs,
++                                            const u32* cuts, u32 cut_count,
++                                            const u32* occurrence_to_unique,
++                                            u32* indices)
++{
++    u32 write = 0;
++    const u32 segments = cut_count + 1;
++    switch (primitive) {
++    case RSX_PRIMITIVE_TRIANGLES: {
++        const u32 count = source_refs - source_refs % 3u;
++        for (u32 o = 0; o < count; o++)
++            indices[write++] = eng_topology_vertex(occurrence_to_unique, o);
++        break;
++    }
++    case RSX_PRIMITIVE_TRIANGLE_STRIP:
++        for (u32 s = 0; s < segments; s++) {
++            u32 begin, count;
++            rsx_restart_segment_bounds(cuts, cut_count, source_refs, s,
++                                       &begin, &count);
++            if (count < 3) continue;
++            /* Odd triangles swap their first two vertices, so the whole strip
++             * keeps one winding. */
++            for (u32 i = 0; i + 2 < count; i++) {
++                indices[write++] = eng_topology_vertex(
++                    occurrence_to_unique, begin + i + (i & 1u));
++                indices[write++] = eng_topology_vertex(
++                    occurrence_to_unique, begin + i + 1u - (i & 1u));
++                indices[write++] = eng_topology_vertex(
++                    occurrence_to_unique, begin + i + 2u);
++            }
++        }
++        break;
++    /* A polygon is a convex fan around its own first vertex, which is what
++     * both of this tree's other renderers make of one. */
++    case RSX_PRIMITIVE_TRIANGLE_FAN:
++    case RSX_PRIMITIVE_POLYGON:
++        for (u32 s = 0; s < segments; s++) {
++            u32 begin, count;
++            rsx_restart_segment_bounds(cuts, cut_count, source_refs, s,
++                                       &begin, &count);
++            if (count < 3) continue;
++            for (u32 i = 1; i + 1 < count; i++) {
++                indices[write++] = eng_topology_vertex(occurrence_to_unique, begin);
++                indices[write++] = eng_topology_vertex(occurrence_to_unique, begin + i);
++                indices[write++] = eng_topology_vertex(occurrence_to_unique, begin + i + 1u);
++            }
++        }
++        break;
++    case RSX_PRIMITIVE_QUAD_STRIP:
++        for (u32 s = 0; s < segments; s++) {
++            u32 begin, count;
++            rsx_restart_segment_bounds(cuts, cut_count, source_refs, s,
++                                       &begin, &count);
++            if (count < 4) continue;
++            /* Every quad is split along the diagonal between the two pairs,
++             * so each one keeps the strip's winding without alternating the
++             * way a triangle strip has to; a cut simply starts the pairing
++             * again from the segment's own first vertex. This is the
++             * expansion the vtable path's emit_vertices performs. */
++            for (u32 q = 0; q + 3 < count; q += 2) {
++                indices[write++] = eng_topology_vertex(occurrence_to_unique, begin + q);
++                indices[write++] = eng_topology_vertex(occurrence_to_unique, begin + q + 1u);
++                indices[write++] = eng_topology_vertex(occurrence_to_unique, begin + q + 2u);
++                indices[write++] = eng_topology_vertex(occurrence_to_unique, begin + q + 1u);
++                indices[write++] = eng_topology_vertex(occurrence_to_unique, begin + q + 3u);
++                indices[write++] = eng_topology_vertex(occurrence_to_unique, begin + q + 2u);
++            }
++        }
++        break;
++    case RSX_PRIMITIVE_QUADS:
++        for (u32 q = 0; q < source_refs / 4u; q++) {
++            const u32 base = q * 4u;
++            indices[write++] = eng_topology_vertex(occurrence_to_unique, base);
++            indices[write++] = eng_topology_vertex(occurrence_to_unique, base + 1u);
++            indices[write++] = eng_topology_vertex(occurrence_to_unique, base + 2u);
++            indices[write++] = eng_topology_vertex(occurrence_to_unique, base + 2u);
++            indices[write++] = eng_topology_vertex(occurrence_to_unique, base + 3u);
++            indices[write++] = eng_topology_vertex(occurrence_to_unique, base);
++        }
++        break;
++    default:
++        break;
++    }
++}
+diff --git a/libs/video/rsx_topology.h b/libs/video/rsx_topology.h
+new file mode 100644
+index 0000000..de31f46
+--- /dev/null
++++ b/libs/video/rsx_topology.h
+@@ -0,0 +1,20 @@
++/* Primitive topology expansion (the draw engine's, moved here so that a
++ * native renderer built without the engine has it): a primitive's vertex
++ * references expanded into an indexed triangle list, cut at the restart
++ * index's positions. Pure functions; no RSX state. */
++#ifndef RSX_TOPOLOGY_H
++#define RSX_TOPOLOGY_H
++#include "ps3emu/ps3types.h"
++#ifdef __cplusplus
++extern "C" {
++#endif
++u32  rsx_draw_engine_topology_index_count(u32 primitive, u32 source_refs,
++                                          const u32* cuts, u32 cut_count);
++void rsx_draw_engine_write_topology_indices(u32 primitive, u32 source_refs,
++                                            const u32* cuts, u32 cut_count,
++                                            const u32* occurrence_to_unique,
++                                            u32* indices);
++#ifdef __cplusplus
++}
++#endif
++#endif
+diff --git a/libs/video/rsx_vertex_compact.c b/libs/video/rsx_vertex_compact.c
+index ba1b7af..51b3f0d 100644
+--- a/libs/video/rsx_vertex_compact.c
++++ b/libs/video/rsx_vertex_compact.c
+@@ -145,6 +145,7 @@ void rsx_vertex_layout_plan_init(
+     plan->stride = (u32)plan->count * 16u;
+ }
+ 
++#if !defined(PS3RECOMP_RSX_COMMAND_PATH) || PS3RECOMP_RSX_COMMAND_PATH   /* reads the register file (rsx_dispatch.c) */
+ void rsx_vertex_fetch_plan_init(
+     rsx_vertex_fetch_plan* plan, const rsx_dispatch* rsx,
+     const rsx_vertex_layout_plan* layout,
+@@ -177,7 +178,9 @@ void rsx_vertex_fetch_plan_init(
+         }
+     }
+ }
++#endif
+ 
++#if !defined(PS3RECOMP_RSX_COMMAND_PATH) || PS3RECOMP_RSX_COMMAND_PATH   /* vertices inlined in the command stream (INLINE_ARRAY) */
+ u32 rsx_vertex_inline_layout(
+     const rsx_dispatch* rsx, u32 offsets[RSX_DSP_NUM_VERTEX_ATTR])
+ {
+@@ -210,6 +213,7 @@ void rsx_vertex_fetch_plan_set_inline(
+     plan->inline_data = data;
+     plan->inline_bytes = bytes;
+ }
++#endif
+ 
+ void rsx_vertex_fetch_plan_prepare(
+     rsx_vertex_fetch_plan* plan, const rsx_vertex_ref* refs, u32 count)
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index ac8b2a0..3e071b4 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -39,6 +39,14 @@
+  */
+ 
+ #define VK_NO_PROTOTYPES
++/* PS3RECOMP_RSX_COMMAND_PATH (default 1): this backend draws (the fixed-function
++ * vtable path and the register-file draw engine's backend). 0 (a native
++ * graphics build, PS3RECOMP_NATIVE_GRAPHICS): only the device, the window,
++ * its swapchain and present, the OSD and the frame dump -- a host renderer
++ * draws every frame and presents through rsx_vk_bridge_present_*. */
++#ifndef PS3RECOMP_RSX_COMMAND_PATH
++#define PS3RECOMP_RSX_COMMAND_PATH 1
++#endif
+ #include <vulkan/vulkan.h>
+ 
+ #include "rsx_vulkan_backend.h"
+@@ -762,6 +770,7 @@ static const char* s_rp_closer = "?";
+ static unsigned long long s_rp_closers[8];
+ static const char* s_rp_closer_name[8];
+ 
++#if PS3RECOMP_RSX_COMMAND_PATH
+ static void vk_gp_pass_end(void);
+ static void vk_rp_close(void)
+ {
+@@ -771,6 +780,7 @@ static void vk_rp_close(void)
+  * line (a function-like macro does not expand inside its own body). */
+ #define vk_rp_close() (s_rp_closer = __func__, vk_rp_close())
+ 
++#endif  /* PS3RECOMP_RSX_COMMAND_PATH */
+ static void vk_cmd_after_everything(VkCommandBuffer cb)
+ {
+     VkMemoryBarrier mb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+@@ -781,6 +791,7 @@ static void vk_cmd_after_everything(VkCommandBuffer cb)
+     s_ft_full_barriers++;
+ }
+ 
++#if PS3RECOMP_RSX_COMMAND_PATH
+ /* VK_GPU_TIME=1: GPU execution time of the engine's submissions (timestamp
+  * queries around each command buffer), every 5 s with its share of the wall
+  * clock. Tells a GPU-bound frame from a CPU-bound one. */
+@@ -1018,6 +1029,7 @@ static int vk_submit_and_wait_at(int line)
+ }
+ #define vk_submit_and_wait() vk_submit_and_wait_at(__LINE__)
+ 
++#endif  /* PS3RECOMP_RSX_COMMAND_PATH */
+ /* Order this command buffer's use of an image after everything submitted
+  * before it; from UNDEFINED it is also the one-time move to GENERAL. */
+ static void vk_barrier_image_on(VkCommandBuffer cb, VkImage img, VkImageAspectFlags aspect,
+@@ -1042,6 +1054,7 @@ static void vk_barrier_image(VkImage img, VkImageAspectFlags aspect, VkImageLayo
+     vk_barrier_image_on(s_vk.cmd, img, aspect, old_layout);
+ }
+ 
++#if PS3RECOMP_RSX_COMMAND_PATH
+ /* ---------------------------------------------------------------------------
+  * Texture unit 0
+  * -------------------------------------------------------------------------*/
+@@ -2108,6 +2121,7 @@ static void vk_cb_clear(void* ud, u32 flags, u32 color, float depth, u8 stencil)
+     }
+     vk_submit_and_wait();
+ }
++#endif  /* PS3RECOMP_RSX_COMMAND_PATH */
+ 
+ /* ---------------------------------------------------------------------------
+  * Optional window: PS3RECOMP_VK_WINDOW=1
+@@ -2724,10 +2738,13 @@ static void vk_cb_present(void* ud, u32 buffer_id)
+     VkCommandBuffer cb = vk_present_record_begin();
+     if (cb) vk_present_record_end(cb);
+     vk_mutex_unlock(&s_vk.present_mu);
++#if PS3RECOMP_RSX_COMMAND_PATH
+     s_g.last_draws = s_g.draws;
+     s_g.draws = 0;
++#endif
+ }
+ 
++#if PS3RECOMP_RSX_COMMAND_PATH
+ /* ---------------------------------------------------------------------------
+  * Register-file draw engine backend (rsx_draw_engine.h)
+  *
+@@ -3139,8 +3156,10 @@ static void vk_eng_present(void* user, u32 surface)
+         vk_present_record_end(cb);
+     }
+     vk_mutex_unlock(&s_vk.present_mu);
++#if PS3RECOMP_RSX_COMMAND_PATH
+     s_g.last_draws = s_g.draws;
+     s_g.draws = 0;
++#endif
+ }
+ 
+ /* Pixels a 2D transfer put into guest memory, pushed into the colour target
+@@ -5658,6 +5677,24 @@ static rsx_backend s_vulkan_backend = {
+     .bind_texture       = vk_cb_bind_texture,
+     .present            = vk_cb_present,
+ };
++#else
++/* No engine: the helpers the device and present code share with it. Nothing
++ * is batched, so there is nothing to flush; the SPIR-V translations' disk
++ * cache (the native renderer's shaders) is still read at start. */
++static void vk_eng_flush_sync_at(int line) { (void)line; }
++static void vk_wait_inflight(void) {}
++static void vk_pcache_save(void) {}
++void rsx_vulkan_cache_save(void) {}
++static void vk_pcache_open(void)
++{
++    const char* dir = rsx_hlsl_to_spirv_cache_dir();
++    if (!dir || !*dir) return;
++    RsxSpirvCachePreload r;
++    rsx_hlsl_to_spirv_cache_preload(&r);
++    VK_LOG("shader cache %s: %u translations read (%.1f MB), %u of another build or glslang removed\n",
++           dir, r.loaded, (double)r.bytes / 1048576.0, r.stale);
++}
++#endif  /* PS3RECOMP_RSX_COMMAND_PATH */
+ 
+ /* ---------------------------------------------------------------------------
+  * Public entry points
+@@ -5783,15 +5820,20 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+     VK_CHECK(pvkCreateFence(s_vk.device, &fci, NULL, &s_vk.present_fence), "vkCreateFence");
+     VK_CHECK(pvkCreateFence(s_vk.device, &fci, NULL, &s_vk.window_fence), "vkCreateFence");
+ 
++#if PS3RECOMP_RSX_COMMAND_PATH
+     if (vk_pick_depth_format()) return -1;
++#endif
+     if (vk_create_image(&s_vk.color, VK_FORMAT_R8G8B8A8_UNORM, s_vk.width, s_vk.height,
+                         VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_IMAGE_ASPECT_COLOR_BIT)) return -1;
++#if PS3RECOMP_RSX_COMMAND_PATH
+     if (vk_create_image(&s_vk.depth, s_vk.depth_format, s_vk.width, s_vk.height,
+                         VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                         VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, s_vk.depth_aspect)) return -1;
++#endif
+     if (vk_create_host_buffer(&s_vk.readback, (VkDeviceSize)s_vk.width * s_vk.height * 4u,
+                               VK_BUFFER_USAGE_TRANSFER_DST_BIT)) return -1;
++#if PS3RECOMP_RSX_COMMAND_PATH
+     if (vk_create_render_pass()) return -1;
+     if (vk_create_pipeline_objects()) return -1;
+     if (vk_guest_init()) {
+@@ -5814,7 +5856,23 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+     pvkCmdClearColorImage(s_vk.cmd, s_vk.color.img, VK_IMAGE_LAYOUT_GENERAL, &black, 1, &cr);
+     pvkCmdClearDepthStencilImage(s_vk.cmd, s_vk.depth.img, VK_IMAGE_LAYOUT_GENERAL, &far_plane, 1, &dr);
+     if (vk_submit_and_wait()) return -1;
+-
++#else
++    {   /* the target opaque black, in GENERAL, on the present's own command buffer */
++        VkCommandBuffer cb = s_vk.present_cmd;
++        VkCommandBufferBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
++                                        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
++        if (pvkBeginCommandBuffer(cb, &bi) != VK_SUCCESS) return -1;
++        vk_barrier_image_on(cb, s_vk.color.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED);
++        VkClearColorValue black = { .float32 = { 0.0f, 0.0f, 0.0f, 1.0f } };
++        VkImageSubresourceRange cr = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
++        pvkCmdClearColorImage(cb, s_vk.color.img, VK_IMAGE_LAYOUT_GENERAL, &black, 1, &cr);
++        if (pvkEndCommandBuffer(cb) != VK_SUCCESS) return -1;
++        VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &cb };
++        pvkResetFences(s_vk.device, 1, &s_vk.present_fence);
++        if (vk_queue_submit(&si, s_vk.present_fence) != VK_SUCCESS) return -1;
++        pvkWaitForFences(s_vk.device, 1, &s_vk.present_fence, VK_TRUE, UINT64_MAX);
++    }
++#endif
+     if (s_vk.windowed) {
+         VkSemaphoreCreateInfo semi = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
+         if (pvkCreateSemaphore(s_vk.device, &semi, NULL, &s_vk.sem_acquire) != VK_SUCCESS ||
+@@ -5840,6 +5898,7 @@ int rsx_vulkan_backend_init(u32 width, u32 height, const char* title)
+      * pipeline from the guest's programs, so without them it has nothing to
+      * draw with, and the vtable's fixed-function path stays the default.
+      * Either way PS3RECOMP_RSX_ENGINE=dispatch|vtable overrides. */
++#if PS3RECOMP_RSX_COMMAND_PATH
+     rsx_draw_engine_set_backend(&s_vk_engine_backend);
+     rsx_draw_engine_set_default(s_g.on ? 1 : 0);
+     if (rsx_draw_engine_enabled() && rsx_draw_engine_init(s_vk.width, s_vk.height) == 0)
+@@ -5847,6 +5906,9 @@ int rsx_vulkan_backend_init(u32 width, u32 height, const char* title)
+     else
+         rsx_set_backend(&s_vulkan_backend);
+     VK_LOG("%s path\n", s_vk.eng_active ? "register-file draw engine" : "vtable");
++#else
++    VK_LOG("present only: a native renderer draws (no RSX command path in this build)\n");
++#endif
+     VK_LOG("offscreen target %ux%u ready, depth format %d (%s)\n",
+            s_vk.width, s_vk.height, (int)s_vk.depth_format, title ? title : "");
+     return 0;
+@@ -5856,9 +5918,11 @@ void rsx_vulkan_backend_shutdown(void)
+ {
+     vk_pcache_save();   /* the shader cache's pipelines, before the device goes */
+     rsx_vulkan_backend_present_finish();   /* a host that began one and quit */
++#if PS3RECOMP_RSX_COMMAND_PATH
+     if (rsx_get_backend() == &s_vulkan_backend) rsx_set_backend(NULL);
+     if (s_vk.eng_active) { rsx_draw_engine_shutdown(); s_vk.eng_active = 0; }
+     rsx_draw_engine_set_backend(NULL);
++#endif
+     if (s_vk.windowed && s_vk.swapchain && s_vk.presented && s_vk.hold_seconds > 0.0) {
+         VK_LOG("holding the last frame on screen for %.1f s "
+                "(Esc or closing the window ends it early)\n", s_vk.hold_seconds);
+@@ -5871,7 +5935,9 @@ void rsx_vulkan_backend_shutdown(void)
+     if (s_vk.windowed || s_vk.window) vk_window_drop(NULL);
+     if (s_vk.device) {
+         vk_device_idle();
++#if PS3RECOMP_RSX_COMMAND_PATH
+         vk_guest_shutdown();
++#endif
+         for (int i = 0; i < VK_PIPELINE_SLOTS; i++)
+             if (s_vk.pipelines[i]) pvkDestroyPipeline(s_vk.device, s_vk.pipelines[i], NULL);
+         if (s_vk.pipe_layout) pvkDestroyPipelineLayout(s_vk.device, s_vk.pipe_layout, NULL);
+@@ -5927,8 +5993,11 @@ void rsx_vulkan_backend_present_begin(void)
+ {
+     if (!s_vk.device) return;
+     s_vk.present_split = 1;
++#if PS3RECOMP_RSX_COMMAND_PATH
+     if (s_vk.eng_active) rsx_draw_engine_present();
+-    else                 vk_cb_present(&s_vk, 0);
++    else
++#endif
++                         vk_cb_present(&s_vk, 0);
+     s_vk.present_split = 0;
+ }
+ 
+@@ -5996,13 +6065,19 @@ u32 rsx_vulkan_backend_debug_color(void) { return s_vk.clear_argb; }
+ 
+ u32 rsx_vulkan_backend_readback_center(void)
+ {
++#if PS3RECOMP_RSX_COMMAND_PATH
+     if (s_vk.eng_active) return rsx_draw_engine_readback_center();
++#endif
+     return s_vk.presented ? (0xFF000000u | s_vk.last_center) : 0u;
+ }
+ 
+ u32 rsx_vulkan_backend_guest_draws(void)
+ {
++#if PS3RECOMP_RSX_COMMAND_PATH
+     return s_vk.eng_active ? rsx_draw_engine_guest_draws() : s_g.last_draws;
++#else
++    return 0;
++#endif
+ }
+ 
+ int rsx_vulkan_backend_depth_bounds(void)
+@@ -6033,6 +6108,7 @@ int rsx_vk_bridge_device(rsx_vk_bridge_dev* out)
+ void rsx_vk_bridge_queue_lock(void) { vk_mutex_lock(&s_vk.queue_mu); }
+ void rsx_vk_bridge_queue_unlock(void) { vk_mutex_unlock(&s_vk.queue_mu); }
+ 
++#if PS3RECOMP_RSX_COMMAND_PATH
+ /* Open the batch (or a synchronous buffer) for a copy, ordered after every
+  * earlier write; 0 when recording. */
+ static int vk_br_open(int* batched)
+@@ -6155,6 +6231,7 @@ long long rsx_vk_bridge_signal_open(VkSemaphore sem, int* used)
+     return rsx_vk_bridge_signal(sem, used);
+ }
+ 
++#endif  /* PS3RECOMP_RSX_COMMAND_PATH */
+ int rsx_vk_bridge_submitted(long long ordinal)
+ {
+     vk_mutex_lock(&s_vk.queue_mu);
+@@ -6164,10 +6241,12 @@ int rsx_vk_bridge_submitted(long long ordinal)
+     return !pending;
+ }
+ 
++#if PS3RECOMP_RSX_COMMAND_PATH
+ void rsx_vk_bridge_flush(void)
+ {
+     if (s_eb_pending) vk_eng_flush();
+ }
++#endif
+ 
+ unsigned long long rsx_vk_bridge_signals(unsigned long long* lost)
+ {
+diff --git a/runtime/ppu/ppu_loader.cpp b/runtime/ppu/ppu_loader.cpp
+index 50e4170..d4587ff 100644
+--- a/runtime/ppu/ppu_loader.cpp
++++ b/runtime/ppu/ppu_loader.cpp
+@@ -626,7 +626,11 @@ static void samp_report(void)
+ static DWORD s_samp_boot_tid;
+ static int   s_samp_main = -1;
+ static int   s_samp_drain = -1;
++#if !defined(PS3RECOMP_RSX_COMMAND_PATH) || PS3RECOMP_RSX_COMMAND_PATH
+ extern "C" volatile unsigned long g_gcm_drain_tid;
++#else
++static volatile unsigned long g_gcm_drain_tid = 0;   /* a native graphics build: no walker thread */
++#endif
+ 
+ static uint32_t samp_stack_guest(HANDLE h, const CONTEXT* c)
+ {
+@@ -1795,6 +1799,8 @@ uint32_t vm_read32(uint64_t a) { if (vm_oob((uint32_t)a,4)) return 0; ppu_rwatch
+      * publishing, LBP's asset loading -- thousands of fence-waits -- crawled
+      * at ~28 fences/s (minutes-to-hours of [finspin]); read-driven pacing
+      * publishes at up to 1/ms and the loading progresses ~35x faster. */
++    if ((uint32_t)a == (VM_HLE_INJECT_BASE + 0x2004u)) {   /* R7's native front end: get = put */
++        extern void cellGcm_get_on_poll(void); cellGcm_get_on_poll(); }
+     if ((uint32_t)a == (VM_HLE_INJECT_BASE + 0x2008u)) { static int _rp=-1;
+         if(_rp<0){ const char* e=getenv("GCM_REFPOLL"); _rp=(e&&*e=='0')?0:1; }
+         if(_rp){ extern void cellGcm_ref_on_poll(void); cellGcm_ref_on_poll(); } }
+@@ -2030,8 +2036,13 @@ static void attrib_write(void)
+ }
+ /* The guest function and thread that last stored the word at ea, and the
+  * guest lr the store was made with. */
++#if !defined(PS3RECOMP_RSX_COMMAND_PATH) || PS3RECOMP_RSX_COMMAND_PATH
+ extern "C" uint64_t (*g_gcm_word_writer)(uint32_t ea);   /* cellGcmSys.c */
+ extern "C" uint32_t (*g_gcm_word_caller)(uint32_t ea);
++#else
++static uint64_t (*g_gcm_word_writer)(uint32_t ea);       /* a native graphics build: no frame trace to feed */
++static uint32_t (*g_gcm_word_caller)(uint32_t ea);
++#endif
+ static uint32_t attrib_word_caller(uint32_t ea)
+ {
+     const uint32_t i = ea - s_at_sh_lo;
+diff --git a/tools/gen_hle_nids.py b/tools/gen_hle_nids.py
+index ac13929..794718c 100644
+--- a/tools/gen_hle_nids.py
++++ b/tools/gen_hle_nids.py
+@@ -32,8 +32,55 @@ DEF_RE = re.compile(
+     re.M)
+ 
+ 
++# --define NAME=VALUE: the preprocessor conditions on NAME evaluated, so a
++# function a configuration compiles out is not registered (a native graphics
++# build's PS3RECOMP_RSX_COMMAND_PATH=0 leaves cellGcmSys.c's walker out).
++# Only `#if NAME`, `#if !NAME`, `#ifdef NAME`, `#ifndef NAME`, `#else` and
++# `#endif` on a defined NAME are decided; any other condition keeps both
++# branches, as before.
++DEFINES = {}
++
++
++def preprocess(txt):
++    if not DEFINES:
++        return txt
++    out, stack = [], []   # stack: (kept_before, decided, this_branch_kept)
++    kept = True
++    for line in txt.split("\n"):
++        t = line.strip()
++        m = re.match(r"#\s*(if|ifdef|ifndef|elif|else|endif)\b\s*(!?)\s*(\w*)", t)
++        if m:
++            d, neg, name = m.group(1), m.group(2), m.group(3)
++            if d in ("if", "ifdef", "ifndef"):
++                decided = name in DEFINES and (d != "if" or True)
++                if decided:
++                    v = DEFINES[name]
++                    take = (v != "0") if d == "if" else True if d == "ifdef" else False
++                    if d == "if" and neg:
++                        take = not take
++                else:
++                    take = True
++                stack.append((kept, decided, take))
++                kept = kept and take
++                out.append("")
++                continue
++            if d in ("else", "elif") and stack:
++                before, decided, take = stack[-1]
++                if decided and d == "else":
++                    stack[-1] = (before, decided, not take)
++                    kept = before and not take
++                out.append("")
++                continue
++            if d == "endif" and stack:
++                kept = stack.pop()[0]
++                out.append("")
++                continue
++        out.append(line if kept else "")
++    return "\n".join(out)
++
++
+ def scan(c_path):
+-    txt = open(c_path, encoding="latin1").read()
++    txt = preprocess(open(c_path, encoding="latin1").read())
+     out = []
+     for m in DEF_RE.finditer(txt):
+         name = m.group(1)
+@@ -72,7 +119,12 @@ def main():
+                          "(the canonical invocation -- can't silently drop a "
+                          "library the way a hand-typed list can).")
+     ap.add_argument("--out", default="ppu_hle_nids.cpp")
++    ap.add_argument("--define", action="append", default=[],
++                    help="NAME=VALUE: decide #if NAME blocks (e.g. PS3RECOMP_RSX_COMMAND_PATH=0)")
+     args = ap.parse_args()
++    for d in args.define:
++        k, _, v = d.partition("=")
++        DEFINES[k] = v or "1"
+ 
+     if args.all:
+         args.libs = discover_all() + list(args.libs)
+-- 
+2.56.0.windows.3
+

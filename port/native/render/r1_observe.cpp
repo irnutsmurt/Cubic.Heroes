@@ -35,7 +35,11 @@
 #endif
 
 extern "C" uint8_t* vm_base;
+#ifndef DOTHEROES_NATIVE_RELEASE
 extern "C" volatile int g_r1_capture_done;   // rsx_draw_engine.c: captures ended so far
+#else
+static volatile int g_r1_capture_done = 0;   // the release has no draw engine to capture
+#endif
 
 extern "C" {
 int g_ppu_entry_observe = 0;
