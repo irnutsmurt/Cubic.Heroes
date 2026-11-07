@@ -30,6 +30,7 @@ per-thread work reported apart. An average of 144 is not 144 sustained.
 | The indirect calls | a call-site cache (ps3recomp 0118): +1.5-3% (section 5.1) |
 | **The native physics tasks** | **issued and completed directly, without SPURS** (no task, no image hash, no queue, no polling of SPURS), checked and measured: heavy frames 0.2-0.5 ms shorter (section 6.1) |
 | The releases | R8's first (rel1/rel2) and part 2's (rel6, then rel7 with leaf promotion; rel8 its final tree) validated: 8 scenarios' pictures, sync validation, capture check, the stops, gameplay timing at 60 and 200 fps, normal damage; the production and player build paths built and run (sections 5.2, 7, 7.1) |
+| **The player's build path** | **audited: it built the development configuration** (the old renderer, checked loads and stores, physics through SPURS). Changed to build the native release at all three layers (the lift, the prebuilt runtime, the install-time compile); 11 static checks pass. **Not yet built or run** (sections 7.2, 9.1) |
 | Measurement | done (sections 8, 8.2): combat 194 fps at the median (production 148), exploring 235 (production 186) for rel6; 144 sustained exploring (99.8% of frames), not yet in combat (97.8%) |
 | What is left | section 9 -- one decision for the owner there (the reservation test) |
 
@@ -805,6 +806,91 @@ half (ps3recomp 0124) the release draws started without the switch
 (smoke-rel8-noenv3: 2,274 frames in 40 s, the scene in its grabs). rel8 is
 rebuilt with both (sha256 f02ff92a...).
 
+### 7.2 The player's build path, audited (2026-11-07) [C]
+
+Done while the owner's PC was in use: reviewed and changed in source,
+checked by static tests; **not yet built and not yet run** (section 9.1
+queues both). The question: does a player's install (setup_app.py ->
+tools/setup_pipeline.py -> tools/zig_build.py) produce the native release
+that R8 builds, validates and measures (tools/r8_lift.sh, then
+tools/r8_release_build.sh)?
+
+**It did not** [C]. Three layers each built the development configuration:
+
+| Layer | The measured release (rel7/rel8) | The player's path, until now |
+|---|---|---|
+| The lift (setup_pipeline.recomp) | config/sjlj.json, insn_patches.json, **r8_hooks.json** (the physics issued directly), **r7_native_hooks.json** (the entry hooks into the native renderer), **--promote-leaf**, 48 chunks | sjlj.json and insn_patches.json only |
+| The prebuilt runtime and native library (zig_build.build_prebuilt) | **DOTHEROES_NATIVE_RELEASE=ON**: no RSX command path, no R4 bridge, the NID table without the walker's functions | the development configuration: the RSX command path and the bridge |
+| What the install compiles (zig_build.game_jobs: the port, the PPU scaffold, the NID table, the lift, the SPU images) | DOTHEROES_NATIVE_RELEASE=1, PPU_BARE_LOADS=1, PPU_STORE_MOV=1 and the runtime's public PS3RECOMP_RSX_COMMAND_PATH=0, PS3RECOMP_RSX_VULKAN, PS3RECOMP_SPU_INTERPRETER=0 | PS3RECOMP_RSX_VULKAN only |
+
+So part 2's player build (build/r8/player, smoke-player) was a working game,
+but the old renderer, the checked loads and stores, and physics through
+SPURS -- not the release. The layers must change together. A release
+runtime under development-compiled sources does not link (main.cpp's
+present path calls the walker's functions). Sources compiled without
+PS3RECOMP_SPU_INTERPRETER=0 take spu_interp.h's default of 1 against a
+runtime built without the interpreter. A release runtime without the R7
+hooks in the lift has nothing that draws.
+
+**Changed** (implemented; static tests only):
+- setup_pipeline.py: the lift's options are LIFT_CONFIG and LIFT_FLAGS,
+  tools/r8_lift.sh's.
+- zig_build.build_prebuilt: configures the native release by default
+  (RELEASE_CMAKE; `release=False` keeps the development configuration). It
+  records the configuration and the definitions CMake gives the game
+  executable's sources (read from its build.ninja, less main.cpp's
+  development diagnostics) in build/lib/<platform>/game_build.json, which
+  the bundle ships with the libraries.
+- zig_build.game_jobs: adds those definitions to every source the install
+  compiles. They are in each object's fingerprint, so an install built in
+  another configuration recompiles everything; nothing is reused across
+  configurations. A prebuilt without the record is an older, development
+  one, and gets no extra definitions, as before.
+
+**Tests.**
+- tests/test_player_pipeline.py: 11 checks, no compiling, run and passing:
+  - the lift's options against tools/r8_lift.sh;
+  - the configuration files committed;
+  - PORT_SOURCES against port/CMakeLists.txt's executable;
+  - the build.ninja parser, on a sample and on rel7's own build tree (the
+    six definitions above, exactly);
+  - every kind of install-time source getting them;
+  - an older prebuilt getting none;
+  - no object reused across configurations;
+  - build_prebuilt's CMake arguments.
+
+  Both old defects fail it: the lift without the R7/R8 configuration, and
+  the source list without cpu_place.cpp.
+- tests/player_install_test.py, **prepared, not run**: a fresh install from
+  the disc image and build/EBOOT.elf into F:, then:
+  - **check**: the stamps, the settings file, and the lift (leaf promotion,
+    the R7 and R8 hooks, file for file against the developers' lift
+    build/r8/gen6);
+  - **update**: nothing changed, so every step but the build is skipped,
+    every object is reused, and the game is relinked;
+  - **relift**: the lift's stamp cleared, so the same code is lifted again
+    and every object is reused;
+  - **settings**: a player's own dotheroes.cfg values kept, and a missing
+    performance switch added back;
+  - **game**, only with --run-game: `--memtest`, then a river fight
+    started as a player starts the install.
+
+**Differences that remain between a player's build and the measured
+release** (reviewed; each to be measured or decided, not assumed harmless):
+
+| Difference | Kind | What to do |
+|---|---|---|
+| Development diagnostics off | deliberate | no crash reports or PDB; not strict by default |
+| The prebuilt runtime and native library at x86-64-v2 | performance | the developers' builds run at this PC's v3, and the native library holds Bullet's narrowphase, the solver commands, the recorder and the renderer. To be measured (section 9.1) |
+| Symbols stripped (-g0, -s) | deliberate | -- |
+| GCM_WRAP_LAP=1 and DOTHEROES_PRESENT_ONCE=1 in dotheroes.cfg | inert | they act on the FIFO walker, which the release does not have [C]; the other two performance switches are the native physics, which the release needs to match R8's measurements |
+| DOTHEROES_FPS=60 by default | for the settings | docs/PC_EXPERIENCE.md replaces it |
+| Linux | untested | the release configuration has never been built there (loads and stores stay checked there by CMake) |
+
+An existing install's update relifts, because setup_pipeline.py is in the
+tools' fingerprint. It then recompiles everything, because the definitions
+changed: about the time of a fresh build. Its dotheroes.cfg is kept.
+
 ## 8. Measurement [M]
 
 build/r8/bench1_run.sh: four arms under R7's batch-4 conditions -- the
@@ -985,6 +1071,20 @@ Left, in the order the measurements point:
 | **Known gaps, found and left** | a misaligned scalar store across a 128-byte line tests only its first line's reservation; a raw (vector) store into the first page lands where a scalar one is dropped; the bare loads on Linux not established (checked there) | each a change of its own if a title needs it |
 | **Audio** | FMOD's mixer, codecs and DSPs lifted SPU code: the SPU context, channels, DMA, reservations, sys_event | the audio milestone |
 | **R7's open items** | the post-boss warp run (the owner's optional session), occlusion against RPCS3, the depth clamp, the dual run's stall | unchanged |
+
+### 9.1 Queued until testing resumes
+
+Work done on 2026-11-07 while the owner's PC was in use for a meeting: no
+game started, no window, no benchmark, no large build. Each item below is
+what it still needs, in order, and nothing in it counts as validated before
+then.
+
+| # | Needs | For |
+|---|---|---|
+| 1 | build the prebuilt parts in the release configuration (tools/zig_build.py build_prebuilt("windows", ...): a CMake build of the runtime and the native library) | section 7.2 |
+| 2 | `tests/player_install_test.py` (fresh, check, update, relift, settings): a conversion from the disc image into F: -- the lift and the full compile, ~15-20 min | section 7.2 |
+| 3 | `tests/player_install_test.py game --run-game`: `--memtest`, a river fight from the install | section 7.2 |
+| 4 | the player-built game against rel8: the river fight and the fields, uncapped, real audio (the x86-64-v2 prebuilt against v3) | section 7.2 |
 
 ## 10. Reproducing
 

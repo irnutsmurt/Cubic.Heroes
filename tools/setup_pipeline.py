@@ -8,7 +8,8 @@ Shared by the setup app (setup_app.py) and its command line. Steps:
     3. decrypt  EBOOT.BIN -> EBOOT.elf, with the player's keys file (or an
                 EBOOT.elf they decrypted themselves); checked by SHA-256
     4. recomp   the PPU code lifted to C++ (ps3recomp's loader and lifter, with
-                this port's function fixes, setjmp map and patch switches)
+                this port's function fixes, setjmp map and patch switches, and
+                the native release's hooks: LIFT_CONFIG)
     5. spu      the SPU programs lifted to C
     6. build    compiled with the bundled Zig and linked with the prebuilt
                 runtime (tools/zig_build.py)
@@ -266,11 +267,24 @@ def recomp(paths, log):
     fixed = os.path.join(out, "EBOOT.functions.fixed.json")
     run_tool(os.path.join(ROOT, "tools", "fix_functions.py"),
              [paths.elf, os.path.join(out, "EBOOT.functions.json"), fixed], log)
-    c = config_dir()
     run_tool(os.path.join(t, "ppu_lifter.py"),
              [paths.elf, "--functions", fixed, "--hle-stubs", os.path.join(out, "EBOOT.imports.json"),
-              "--sjlj", os.path.join(c, "sjlj.json"), "--insn-patches", os.path.join(c, "insn_patches.json"),
-              "--chunks", PPU_CHUNKS, "-o", rec], log)
+              *lift_options(), "-o", rec], log)
+
+
+# The release lift, as tools/r8_lift.sh makes it (docs/NATIVE_R8.md): the
+# function fixes' setjmp map and patch switches, R8's physics hooks beside them,
+# R7's entry hooks into the native renderer (without them the native release,
+# which has no RSX command path, draws nothing) and R8's leaf promotion.
+# tests/test_player_pipeline.py checks these against tools/r8_lift.sh.
+LIFT_CONFIG = [("--sjlj", "sjlj.json"), ("--insn-patches", "insn_patches.json"), ("--insn-patches", "r8_hooks.json"),
+               ("--entry-observers", "r7_native_hooks.json")]
+LIFT_FLAGS = ["--chunks", PPU_CHUNKS, "--promote-leaf"]
+
+
+def lift_options():
+    c = config_dir()
+    return [a for opt, f in LIFT_CONFIG for a in (opt, os.path.join(c, f))] + LIFT_FLAGS
 
 
 def spu(paths, log):

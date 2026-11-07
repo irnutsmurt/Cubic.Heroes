@@ -143,6 +143,49 @@ PORT_SOURCES = ["main.cpp", "stubs.cpp", "game_patches.cpp", "cpu_place.cpp", "p
                 "native/memtest.cpp", "native/memtest_checked.cpp", "native/memtest_bare.cpp"]
 RUNTIME_LIB = "libps3recomp_runtime.a"
 NATIVE_LIB = "libdotheroes_native.a"   # port/native: the native SPU-task replacements (Bullet 2.74 in it)
+# What the prebuilt parts were configured as, written beside them by build_prebuilt:
+# {"config": ..., "defines": [...]}. The defines are the ones CMake gives the game
+# executable's sources in that configuration (DOTHEROES_NATIVE_RELEASE, the lifted
+# loads' and stores' forms, the runtime's public PS3RECOMP_* switches); every source
+# the player compiles gets them, so what is compiled at install time agrees with
+# the prebuilt runtime it links (docs/NATIVE_R8.md section 7.2). An older prebuilt
+# without the file was the development configuration: no extra defines.
+GAME_BUILD = "game_build.json"
+# The prebuilt configuration players get: R7's native release (no RSX command
+# path, no bridge) with R8's loads and stores -- as tools/r8_release_build.sh,
+# less the development diagnostics.
+RELEASE_CMAKE = ["-DDOTHEROES_NATIVE_RELEASE=ON"]
+# CMake's per-file definitions of the game's sources that are not the build's:
+# main.cpp's development diagnostics (set only when they are on)
+_NOT_GAME_WIDE = ("DOTHEROES_DEV_DIAGNOSTICS",)
+
+
+def ninja_game_defines(build_ninja, source="main.cpp"):
+    """The -D flags CMake's Ninja build gives the game executable's `source` (port/main.cpp):
+    the definitions every one of the executable's sources gets."""
+    defs, inside = None, False
+    with open(build_ninja, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            if line.startswith("build "):
+                out = line.split(":", 1)[0].replace("\\", "/")
+                inside = out.endswith(("/dotheroes.dir/" + source + ".obj", "/dotheroes.dir/" + source + ".o"))
+            elif inside and line.strip().startswith("DEFINES ="):
+                defs = line.split("=", 1)[1].split()
+                break
+    if defs is None:
+        raise BuildError(f"no DEFINES for the game's {source} in {build_ninja}")
+    return [d for d in defs if d.startswith("-D") and d[2:].split("=", 1)[0] not in _NOT_GAME_WIDE]
+
+
+def game_defines(lib_dir):
+    """The defines the prebuilt in lib_dir was configured with (GAME_BUILD), or none."""
+    try:
+        with open(os.path.join(lib_dir, GAME_BUILD)) as f:
+            return list(json.load(f).get("defines", []))
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError) as e:
+        raise BuildError(f"{os.path.join(lib_dir, GAME_BUILD)} is unreadable ({e}); rebuild the prebuilt parts")
 
 
 class Sources:
@@ -246,7 +289,9 @@ def game_jobs(src, gen_dir, obj_dir, zig, platform=HOST):
     named by a fingerprint of source + flags + compiler + headers: existing means current."""
     gen_ppu, gen_spu = os.path.join(gen_dir, "recompiled"), os.path.join(gen_dir, "spu")
     inc = src.includes(gen_ppu)
-    cpu = ["-mcpu=" + host_cpu(zig)]
+    # the prebuilt's configuration (game_defines), after the fixed flags; in the
+    # fingerprint, so a change of configuration recompiles everything
+    cpu = ["-mcpu=" + host_cpu(zig)] + [d for d in game_defines(src.lib_dir) if d not in COMMON]
     common = _zig_version(zig).encode() + TARGETS[platform].encode() + headers_fingerprint(src, gen_ppu)
     groups = []
     groups += [(os.path.join(src.port, f), "c++", PORT_FLAGS) for f in PORT_SOURCES]
@@ -407,12 +452,14 @@ def cmake_flags(flags):
     return " ".join(f'"{f}"' if " " in f else f for f in flags)
 
 
-def build_prebuilt(platform, ps3recomp, gen_ppu, log=print):
+def build_prebuilt(platform, ps3recomp, gen_ppu, log=print, release=True):
     """build/lib/<platform>/: the runtime library (CMake + zig, release settings:
     no dev diagnostics, not strict by default), its HLE NID table source, and the
     third-party libraries from tools/build_deps.py. Game-independent: the CMake
     configure needs a lifted ppu_recomp.h to exist, but only the runtime target
-    and the NID table are built."""
+    and the NID table are built. release (the default): the native release
+    (RELEASE_CMAKE); False: the development configuration (the RSX command path).
+    GAME_BUILD records which, and the defines the game's own sources need."""
     deps = os.path.join(ROOT, "build", "deps", platform)
     out = os.path.join(ROOT, "build", "lib", platform)
     work = os.path.join(ROOT, "build", "rel-" + platform)
@@ -425,8 +472,11 @@ def build_prebuilt(platform, ps3recomp, gen_ppu, log=print):
                            "-DPS3RECOMP_RSX_VULKAN=ON", "-DDOTHEROES_DEV_DIAGNOSTICS=OFF",
                            f"-DPS3RECOMP_VULKAN_INCLUDE_DIR={os.path.join(deps, 'include')}",
                            f"-DCMAKE_PREFIX_PATH={deps}", f"-DCMAKE_FIND_ROOT_PATH={deps}",
-                           "-DCMAKE_C_FLAGS=" + cmake_flags(SHIP_FLAGS), "-DCMAKE_CXX_FLAGS=" + cmake_flags(SHIP_FLAGS)],
+                           "-DCMAKE_C_FLAGS=" + cmake_flags(SHIP_FLAGS), "-DCMAKE_CXX_FLAGS=" + cmake_flags(SHIP_FLAGS)]
+                          # a configuration chosen once stays in CMake's cache: say it either way
+                          + (RELEASE_CMAKE if release else ["-DDOTHEROES_NATIVE_RELEASE=OFF"]),
                           stdout=subprocess.DEVNULL)
+    defines = ninja_game_defines(os.path.join(work, "build.ninja"))
     nids = os.path.join(work, "ppu_hle_nids.cpp")
     subprocess.check_call(["cmake", "--build", work, "--target", "ps3recomp_runtime", "dotheroes_native", nids,
                            "--parallel", "6"], stdout=subprocess.DEVNULL)
@@ -434,6 +484,8 @@ def build_prebuilt(platform, ps3recomp, gen_ppu, log=print):
     shutil.copy2(os.path.join(work, "ps3recomp_sdk", RUNTIME_LIB), out)
     shutil.copy2(os.path.join(work, NATIVE_LIB), out)
     shutil.copy2(nids, os.path.join(out, "src"))
+    with open(os.path.join(out, GAME_BUILD), "w") as f:
+        json.dump({"config": "native-release" if release else "development", "defines": defines}, f, indent=1)
     for f in os.listdir(os.path.join(deps, "lib")):
         if f.endswith(".a"):
             shutil.copy2(os.path.join(deps, "lib", f), out)
