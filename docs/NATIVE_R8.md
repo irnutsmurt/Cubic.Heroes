@@ -33,6 +33,7 @@ per-thread work reported apart. An average of 144 is not 144 sustained.
 | The releases | R8's first (rel1/rel2) and part 2's (rel6, then rel7 with leaf promotion; rel8 its final tree) validated: 8 scenarios' pictures, sync validation, capture check, the stops, gameplay timing at 60 and 200 fps, normal damage; the production and player build paths built and run (sections 5.2, 7, 7.1) |
 | **The player's build path** | **audited: it built the development configuration** (the old renderer, checked loads and stores, physics through SPURS). Changed to build the native release at all three layers (the lift, the prebuilt runtime, the install-time compile); 11 static checks pass. **Not yet built or run** (sections 7.2, 9.1) |
 | Measurement | done (sections 8, 8.2): combat 194 fps at the median (production 148), exploring 235 (production 186) for rel6; 144 sustained exploring (99.8% of frames), not yet in combat (97.8%) |
+| **Stopping a batch** | **fixed**: tools/owned_run.py runs a batch in a job object of its own; a cancel, the launching shell's end or the launcher's end stops every process it started and nothing else. 7 dummy-process tests and one stop of a real background task pass; not yet used for a game batch (section 9.2) |
 | What is left | section 9 -- one decision for the owner there (the reservation test) |
 
 ## 1. Inventory: what runs, and what is on the critical path [M, C]
@@ -1186,6 +1187,54 @@ then.
 | 6 | `--memtest` on both: the two new store groups, and the earlier 614 checks | section 5.4.1 |
 | 7 | validate as rel7 was (build/r8/val3_run.sh: the eight scenarios, sync validation, capture check, the stops, timing, normal damage) | section 5.4.1 |
 | 8 | A/B against rel8, uncapped, real audio (the fields and the fight): the cost of the line-crossing test and the raw stores' range test | section 5.4.1 |
+| 9 | every batch above launched through tools/owned_run.py, and the first one stopped and restarted on purpose once (its game included) | section 9.2 |
+
+### 9.2 Stopping a batch stops what it started (2026-11-07) [C, M]
+
+**The defect.** Stopping a background batch, as part 2 had to once, ended
+only the outermost Git Bash. Its inner shells, `timeout`,
+tests/boot_smoke.py, tests/drive.py and the game ran on. One batch carried
+on into its next stages beside two builds, and its runs landed in
+directories the next batch reused. Cleaning up meant finding the processes
+by command line and stopping them by hand.
+
+**The fix: tools/owned_run.py** (implemented and tested with dummy
+processes; no game run uses it yet). It runs a batch inside a Windows job
+object of its own. Every process the batch starts belongs to the job from
+its first instruction: the launcher joins the job before it starts the
+command. So which processes the batch owns is the operating system's
+record, not a search by name. The batch ends, with every process in the job,
+when:
+- `owned_run.py --cancel NAME` is run from any shell (the job is named);
+- any shell or Python process the launcher was started under goes away, up
+  to the first other process (all of them are watched);
+- the launcher itself is killed (the job kills its processes when the
+  launcher's handle closes).
+
+When the command ends by itself, whatever it left running in the job is
+stopped and named, and the launcher exits with the command's code. A process
+outside the job is never touched: the owner's game, another batch, anything
+started another way. `--list` shows each batch's processes and clears the
+records of launchers that were killed.
+
+**Tests** (tests/test_owned_run.py with tests/owned_dummy.py: dummy shells,
+`sleep`, Python processes and their children; 7 tests, 11.5 s, all pass):
+- the exit code passed on;
+- leftovers stopped when the command ends;
+- `--cancel` ends a tree of 5 or more processes, and a process started
+  beside it survives;
+- the launching bash killed, both with the launcher as one of its commands
+  and as its only command;
+- the launcher killed;
+- a second batch of the same name refused, the first undisturbed.
+
+**One end-to-end check with this harness's own stop**: a dummy batch of 8
+processes (shells, `sleep`, Python and its child) run as a background task,
+and the task stopped. All 8 ended at once.
+
+**Not yet used for a game batch**: the first batch after testing resumes
+runs through it (section 9.1). To launch one:
+`build/venv/Scripts/python.exe tools/owned_run.py --name <batch> -- sh build/r8/<batch>_run.sh`.
 
 ## 10. Reproducing
 
