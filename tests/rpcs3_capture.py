@@ -3,16 +3,22 @@
 with the port (colour, the post-processing): an offline reference only.
 
   tests/rpcs3_capture.py <rpcs3 dir> <game: disc image or EBOOT> <out dir>
-      [--config <rpcs3 config.yml>] [--secs 90] [--every 5]
+      [--config <rpcs3 config.yml>] [--secs 90] [--every 5] [--gui]
 
-Boots the game with `rpcs3 --no-gui` (--gui: with RPCS3's main window, as its
-GUI boots it -- a build whose boot overlay stays up under --no-gui) (with --config, that file for this boot
-only: e.g. a copy of the game's own config with fullscreen off), keeps its
-window above the others without taking the focus, saves the window's client
-area to <out dir>/NNNN.png every --every seconds, then stops the RPCS3 it
-started. Nothing is sent to the game: what it shows on its own (logos, the
-title, the attract mode). Windows only. The grabs show the game's picture:
-keep them local.
+Boots the game with `rpcs3 --no-gui` (--gui: with RPCS3's main window too)
+(with --config, that file for this boot only: e.g. a copy of the game's own
+config with fullscreen off), keeps its window above the others without taking
+the focus, saves the window's client area to <out dir>/NNNN.png every --every
+seconds, then stops the RPCS3 it started. Nothing is sent to the game: what it
+shows on its own (logos, the title, the attract mode). Windows only. The grabs
+show the game's picture: keep them local.
+
+A game window as large as the screen is presented as a full-screen one, and a
+grab of it shows a frame from before that (2026-11-07: the boot overlay,
+seemingly stuck, while the game played behind it). RPCS3 keeps the window's
+size in GuiConfigs/CurrentSettings.ini ([GSFrame] geometry): use a copy of
+RPCS3 whose window is smaller than the screen, and set "Exclusive Fullscreen
+Mode: Disable" in the --config file.
 """
 import argparse
 import ctypes
@@ -31,7 +37,7 @@ ap.add_argument("out")
 ap.add_argument("--config")
 ap.add_argument("--secs", type=float, default=90)
 ap.add_argument("--every", type=float, default=5)
-ap.add_argument("--gui", action="store_true", help="boot with RPCS3's main window (as from its GUI) instead of --no-gui")
+ap.add_argument("--gui", action="store_true", help="boot with RPCS3's main window too (as from its GUI), not --no-gui")
 a = ap.parse_args()
 
 u = ctypes.windll.user32
