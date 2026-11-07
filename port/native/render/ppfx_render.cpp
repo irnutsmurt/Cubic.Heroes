@@ -1472,6 +1472,48 @@ static void asp_hot_mark(std::string& ps)
     }
 }
 
+// DOTHEROES_PPFX_NONNEG=1 (a behaviour change, off by default; the owner's
+// play session turns it on): an unblended asp draw into a floating-point
+// colour target writes negative colour components as 0.
+//
+// The first dungeon's lamp-lit rooms (2026-11-07, docs/NATIVE_R8.md section
+// 9.3): the voxel hero's lighting program adds each lamp's N.L unclamped, so
+// faces turned from a lamp come out slightly negative in some channels (all
+// above -0.25 at the room's door). Written to the fp16 scene, those reach
+// YEBIS's bright pass, which divides colour by luminance: where the channels
+// nearly cancel, the quotient runs up to the pass's 64000 cap and the glare
+// draws red, blue and white stars from it -- the "disco ball". RPCS3, at the
+// same spot in the same save, shows none. With this switch the hero matches
+// RPCS3 there (its hood 21,16,18 against RPCS3's 16,12,12; ours unclamped
+// 42,23,43 and starred) and the room is unchanged at the grabs' scale.
+// Why RPCS3 has no such values is not established: the program, its
+// constants, the textures and the vertices were checked equal to what the
+// game gives (exact axis-aligned frames, RPCS3's precision rules), and RPCS3
+// clamps neither fragment outputs nor sampled texels. Blended draws are left
+// alone: one may subtract with a negative colour on purpose.
+static int asp_nonneg_on()
+{
+    static int on = -1;
+    if (on < 0) {
+        const char* e = getenv("DOTHEROES_PPFX_NONNEG");
+        on = e && *e == '1';
+        if (on) fprintf(stderr, "[ppfx] unblended asp colour into float targets: negative components written as 0 "
+                                "(DOTHEROES_PPFX_NONNEG)\n");
+    }
+    return on;
+}
+static void asp_nonneg(std::string& ps)
+{
+    for (int n = -1; n < 4; n++) {
+        char v[8], from[64], to[80];
+        if (n < 0) snprintf(v, sizeof v, "_o"); else snprintf(v, sizeof v, "_o%d", n);
+        snprintf(from, sizeof from, "(%s == %s) ? %s : (float4)0", v, v, v);
+        snprintf(to, sizeof to, "(%s == %s) ? max(%s, (float4)0) : (float4)0", v, v, v);
+        for (size_t k = ps.find(from); k != std::string::npos; k = ps.find(from, k + strlen(to)))
+            ps.replace(k, strlen(from), to);
+    }
+}
+
 const Pipe* pipeline_asp(const Rec* r, const rsx_vertex_layout_plan& layout, VkFormat rt, VkFormat df,
                          rsx_fp_constant_block* consts)
 {
@@ -1560,6 +1602,8 @@ const Pipe* pipeline_asp(const Rec* r, const rsx_vertex_layout_plan& layout, VkF
         return nullptr;
     }
     asp_describe(r, vs, ps, layout, consts);
+    if (asp_nonneg_on() && !ra.blend && (rt == VK_FORMAT_R16G16B16A16_SFLOAT || rt == VK_FORMAT_R32G32B32A32_SFLOAT))
+        asp_nonneg(ps);
     asp_hot_mark(ps);
     VkShaderModule vsm = spirv_module(vs, RSX_SHADER_STAGE_VERTEX), fsm = spirv_module(ps, RSX_SHADER_STAGE_FRAGMENT);
     if (!vsm || !fsm) return nullptr;
