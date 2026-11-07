@@ -457,3 +457,20 @@ docs/NATIVE_R4.md. The owner authorised R4 behind an opt-in switch, then R5
   session.
 - **Commits:** ps3recomp 0112-0113; repo dabced3, 45299af, b3f03d6,
   d2698f0, 6b54767 and the documents'.
+
+## Planned: the PC experience (requirements agreed 2026-11-07)
+
+The settings agreed with the owner, as requirements with tests:
+- display: windowed, borderless, fullscreen, at the display's own mode;
+- resolution;
+- VSync, chosen apart from the frame limit;
+- the frame limit: presets, a custom number, uncapped. The monitor's
+  refresh rate is never changed;
+- master, music and sound-effects volumes;
+- button prompts: automatic, Xbox, PlayStation (the game's own),
+  Switch, keyboard, separate from remapping. The owner's `button
+  assets/` folder holds Kenney's sets;
+- the PS3 Install Game option removed.
+
+Then the launcher and update management, before RTX. Details:
+docs/PC_EXPERIENCE.md. Nothing implemented yet.

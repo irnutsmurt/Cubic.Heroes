@@ -79,6 +79,15 @@ no broad code-generation campaign while the rendering boundary is settled.
 | 9 | Further x64 code generation and CPU optimisation | R8 (NATIVE_R8.md, ps3recomp 0118-0123): the native release's lifted loads without their inline tests (the game thread 1.1-1.2 ms faster; their assumptions tested by `--memtest` and gated to Windows x86-64), indirect calls cached at their call sites, the stores priced (one mov after the tests), registers in locals in functions that call nothing (+3.5% exploring); -O2 and promotion at every call measured without gain; next promotion across calls with liveness, the recorder's bookkeeping |
 | 10 | Full-game correctness, stability and performance validation throughout | Continuous; the checkpoint below is the current baseline |
 
+After the native base, in this order:
+1. the PC-experience milestone: display mode, resolution, VSync apart
+   from the frame limit, volumes, button prompts, the PS3 install option
+   removed. Requirements in PC_EXPERIENCE.md, agreed 2026-11-07, not
+   implemented;
+2. the launcher and update management, once the base and the settings
+   are stable;
+3. RTX.
+
 Baseline: tag `checkpoint-2026-11-04` (repo 9ea01df, ps3recomp 578c9aa),
 executable, symbols and measurements kept locally in build/checkpoint/2026-11-04.
 
