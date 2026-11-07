@@ -1,0 +1,48 @@
+From 19bd7dad9a8d5b21265398839ee64608c0610c84 Mon Sep 17 00:00:00 2001
+From: giteaguy <73799093+irnutsmurt@users.noreply.github.com>
+Date: Sat, 7 Nov 2026 09:50:11 -0800
+Subject: [PATCH] Save data: PS3_SAVEDATA_SECURE_ID_LOG names the secure file
+ ID a title passes
+
+A development switch: the first time a run reads or writes each protected
+(SECUREFILE) file, stderr gets the file name and the 16-byte secure file ID
+the title passed. Saves made on a real PS3 keep such files encrypted under a
+key derived from that ID; this port keeps its own saves unencrypted, so
+importing one means decrypting it once, which needs the ID. Off by default.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libs/system/cellSaveData.c | 17 +++++++++++++++++
+ 1 file changed, 17 insertions(+)
+
+diff --git a/libs/system/cellSaveData.c b/libs/system/cellSaveData.c
+index 4fdc7b4..7373980 100644
+--- a/libs/system/cellSaveData.c
++++ b/libs/system/cellSaveData.c
+@@ -267,6 +267,23 @@ static s32 dispatch_func_file(uint32_t func_opd, uint32_t* userdata_ea,
+     memcpy(out->secureFileId, vm_base + set_ea + 12, 16);
+     u32 name = vm_read32(set_ea + 28), buffer = vm_read32(set_ea + 44);
+     out->fileName = name ? (char*)vm_base + name : NULL;
++    /* PS3_SAVEDATA_SECURE_ID_LOG=1 (development): the secure file ID the title
++     * passes for a protected file, once per run and file name -- what decrypting
++     * a save made on a real PS3 needs (the port keeps its own saves unencrypted;
++     * 3D Dot Game Heroes' tools/edit_import.py). */
++    { static int on = -1;
++      if (on < 0) { const char* e = getenv("PS3_SAVEDATA_SECURE_ID_LOG"); on = e && *e == '1'; }
++      if (on && out->fileType == CELL_SAVEDATA_FILETYPE_SECUREFILE && out->fileName) {
++          static char seen[8][64]; static int nseen;
++          int known = 0;
++          for (int i = 0; i < nseen; i++) known |= !strncmp(seen[i], out->fileName, 63);
++          if (!known && nseen < 8) {
++              char hex[33];
++              for (int i = 0; i < 16; i++) snprintf(hex + 2 * i, 3, "%02X", out->secureFileId[i]);
++              strncpy(seen[nseen++], out->fileName, 63);
++              fprintf(stderr, "[savedata] secure file '%.63s': id %s\n", out->fileName, hex);
++          }
++      } }
+     out->fileOffset = vm_read32(set_ea + 32);
+     out->fileSize = vm_read32(set_ea + 36);
+     out->fileBufSize = vm_read32(set_ea + 40);
+-- 
+2.56.0.windows.3
+
