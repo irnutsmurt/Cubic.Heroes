@@ -55,7 +55,8 @@ Environment
                      checkpoint under build/checkpoints/), `#! env NAME=value
                      ...`, `#! secs <n>` (the run's length when none is given).
   SAVES=<dir>        seed the run's save data with a copy of this game's save
-                     folders (BLUS30490*) found in <dir>, e.g. an emulator's
+                     folders (BLUS30490*, and its edit data BLJM60180*)
+                     found in <dir>, e.g. an emulator's
                      dev_hdd0/home/00000001/savedata. <dir> is only read.
   GAMEDATA=<dir>     use <dir> as the game's data root (dev_hdd0, saves,
                      trophies) in place, read and written, instead of a fresh
@@ -332,11 +333,15 @@ def main():
         os.makedirs(os.path.join(RUN, roll), exist_ok=True)
     open(os.path.join(RUN, "pad.txt"), "w").close()
     import json
+    # the game's saves, and its edit data (characters made in the editor): the
+    # game names those with the Japanese release's ID, BLJM60180, in every
+    # region, so edits are shared between them
+    SAVE_PREFIXES = ("BLUS30490", "BLJM60180")
     if os.environ.get("SAVES"):
         dst = os.path.join(gamedata, "dev_hdd0", "home", "00000001", "savedata")
         for name in sorted(os.listdir(os.environ["SAVES"])):
             src = os.path.join(os.environ["SAVES"], name)
-            if name.startswith("BLUS30490") and os.path.isdir(src):
+            if name.startswith(SAVE_PREFIXES) and os.path.isdir(src):
                 if INSTALLED:   # the test install's own save root: the checkpoint replaces what a run left
                     shutil.rmtree(os.path.join(dst, name), ignore_errors=True)
                 shutil.copytree(src, os.path.join(dst, name))

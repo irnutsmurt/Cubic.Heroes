@@ -102,7 +102,8 @@ scenario header):
                               <dir>/<n>-area<area>/ with checkpoint.json (the
                               time, the state then) -- the game writes every
                               save into the slot it loaded, so each copy keeps
-                              one point of progress as a test checkpoint
+                              one point of progress as a test checkpoint; the
+                              edit data (BLJM60180*: edited heroes) goes with it
 
 ${NAME} or ${NAME:-default} in a line is replaced from the environment;
 `include <file>` (relative to the script) puts another script's lines there
@@ -743,9 +744,16 @@ def keep_saves(dest):
             out = os.path.join(dest, f"{n:02d}-area{int(s.get('area', 0))}")
             os.makedirs(out, exist_ok=True)
             shutil.copytree(os.path.join(root, d), os.path.join(out, d), dirs_exist_ok=True)
+            # and the edit data (characters made in the game's editor, named with
+            # the Japanese release's ID in every region): a save whose hero is an
+            # edited one loads it at the start, and without it the hero has no body
+            # (only the shield: owner-play-r8, 2026-11-07)
+            edits = [e for e in sorted(os.listdir(root)) if e.startswith("BLJM60180") and os.path.isdir(os.path.join(root, e))]
+            for e in edits:
+                shutil.copytree(os.path.join(root, e), os.path.join(out, e), dirs_exist_ok=True)
             with open(os.path.join(out, "checkpoint.json"), "w") as f:
                 json.dump({"saved": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t)), "folder": d,
-                           "state": s, "run": os.path.basename(run),
+                           "edit_data": edits, "state": s, "run": os.path.basename(run),
                            "start": "title -> CONTINUE loads the newest save: copy this folder (and the "
                                     "BLUS30490SYSTEM folder of the session's root) into a run's savedata"}, f, indent=1)
             say(f"save {n}: {d} -> {out} ({fmt_state(s)})")
