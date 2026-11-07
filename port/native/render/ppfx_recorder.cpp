@@ -167,7 +167,15 @@ int mode()
     static int m = -1;
     if (m < 0) {
         const char* e = getenv("DOTHEROES_PPFX_NATIVE");
+#ifdef DOTHEROES_NATIVE_RELEASE
+        // The release has no other renderer (no walker, no command path):
+        // unset, it draws natively. Before R8 it needed DOTHEROES_PPFX_NATIVE=1,
+        // which only the test harness set -- started any other way, a black
+        // window (docs/NATIVE_R8.md section 7.1).
+        m = !e || !*e ? 2 : !strcmp(e, "check") ? 1 : e[0] == '1' ? 2 : 0;
+#else
         m = !e || !*e ? 0 : !strcmp(e, "check") ? 1 : e[0] == '1' ? 2 : 0;
+#endif
     }
     return m;
 }

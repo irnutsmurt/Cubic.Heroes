@@ -1,0 +1,40 @@
+From 44aca0665db337723fd472ba6efff1c8187c06a6 Mon Sep 17 00:00:00 2001
+From: giteaguy <73799093+irnutsmurt@users.noreply.github.com>
+Date: Sat, 7 Nov 2026 08:01:16 -0800
+Subject: [PATCH] Vulkan: without the command path, the native renderer's queue
+ by default
+
+A build without the RSX command path draws only through a native
+renderer, but the backend opened that renderer's second queue only when
+DOTHEROES_PPFX_NATIVE=1 was set: started without it, such a build showed a
+black window. Unset now means on there; builds with the command path keep
+their opt-in.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libs/video/rsx_vulkan_backend.c | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index 3e071b4..c039d0a 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -5750,7 +5750,14 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+ 
+     const float prio[2] = { 1.0f, 1.0f };
+     {   const char* e = getenv("DOTHEROES_PPFX_NATIVE");
+-        s_br.want = e && *e == '1'; }
++#if defined(PS3RECOMP_RSX_COMMAND_PATH) && !PS3RECOMP_RSX_COMMAND_PATH
++        /* A build without the command path draws only natively: unset is on
++         * (the port's recorder makes the same default). */
++        s_br.want = !(e && *e) || *e == '1';
++#else
++        s_br.want = e && *e == '1';
++#endif
++    }
+     u32 nq = 1;
+     if (s_br.want) {   /* R3's bridge: a second queue of the family, when it has one */
+         VkQueueFamilyProperties qf[16];
+-- 
+2.56.0.windows.3
+

@@ -769,8 +769,7 @@ units a second, 359 steps in 6.0 s with 54 bodies) and uncapped at 203 fps
 (5.13, within the 4.99-5.17 the holds give; 360 steps, 55 bodies); normal
 damage 4, 3, 2 hits, lowest life 6-8. **rel7 is R8 part 2's release.**
 
-**rel8** (sha256 873496ec...) is rel7's tree with the last two source
-changes, both outside the release's measured paths: the physics pool's
+**rel8** is rel7's tree with the last source changes, both outside the release's measured paths: the physics pool's
 threads start with the first native task instead of at start (a lift
 without the hooks -- the production lift, a player's -- never starts them),
 and memtest_bare.cpp's fallback where the bare loads are not established.
@@ -792,6 +791,19 @@ which main.cpp calls: a player's install would have failed to link (the
 player libraries were last built on 2026-11-02, so nothing showed it). The
 list now has it, and R8's new port sources (phys_hooks.cpp, the memtest's
 three).
+
+**A second defect, older than R8 (from R7):** the native release drew only
+with DOTHEROES_PPFX_NATIVE=1, which every test run sets
+(tools/r8_scene.sh) and nothing else does. Started any other way it showed
+a black window (build/r8/smoke-rel8-noenv: 8 of 8 grabs black, one flip in
+40 s): with no walker and no command path, the recorder (ppfx::mode) and the
+Vulkan backend's second queue for the native renderer both waited for the
+switch. A native release now defaults both to on when the switch is unset
+(ppfx_recorder.cpp; ps3recomp's rsx_vulkan_backend.c). The recorder's half
+alone was not enough (smoke-rel8-noenv2: still black); with the backend's
+half (ps3recomp 0124) the release draws started without the switch
+(smoke-rel8-noenv3: 2,274 frames in 40 s, the scene in its grabs). rel8 is
+rebuilt with both (sha256 f02ff92a...).
 
 ## 8. Measurement [M]
 
@@ -1004,9 +1016,12 @@ the call-site cache), val1 and dmg2 (the release's validation), bench1
 issue's validation), pb1 (its measurement), vc1/vc2 (the raw stores'
 reservation test), val2 (rel6's validation), bench3/bench3b (the
 measurement), prof2 (the profiles), lp1 (leaf promotion), val3 (rel7's
-validation). Each binary measured is kept beside its
-build with SHA256SUMS (build/r8/rel2..rel7, chk3/chk5/chk6, stA, stX, stB,
-rel5x).
+validation). On 2026-11-07, with the system drive full, the runs, the
+variant builds and the earlier lifts went to an archive on another drive
+(and the window grabs were deleted); build/r8 keeps base, rel1, rel2, rel6,
+rel7 (with its build tree), rel8, chk6 (binaries) and gen5, gen6 (the lifts). Each binary measured is kept beside its
+build with SHA256SUMS (build/r8/rel2..rel8, chk3/chk5/chk6, stA, stX, stB,
+rel5x; the variants archived).
 
 Switches (development): DOTHEROES_DEV_HWWATCH=<ea>[:w][,...]@<start s>,<secs>
 (up to four words watched with the debug registers; hwwatch.txt),
@@ -1019,4 +1034,4 @@ DOTHEROES_SPU_INTERPRETER (development only). Engine changes:
 patches/ps3recomp/0117 (PAD_FILE holds), 0118 (the call-site cache,
 PPU_BARE_LOADS), 0119 (no SPU interpreter; ps3_fatal), 0120 (the bare loads
 defined and gated, the stores' variants, entry hooks that may decline), 0121
-and 0122 (the raw stores' reservation test), 0123 (--promote-leaf).
+and 0122 (the raw stores' reservation test), 0123 (--promote-leaf), 0124 (the release draws without DOTHEROES_PPFX_NATIVE).
