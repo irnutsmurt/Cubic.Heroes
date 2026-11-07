@@ -5,7 +5,8 @@ with the port (colour, the post-processing): an offline reference only.
   tests/rpcs3_capture.py <rpcs3 dir> <game: disc image or EBOOT> <out dir>
       [--config <rpcs3 config.yml>] [--secs 90] [--every 5]
 
-Boots the game with `rpcs3 --no-gui` (with --config, that file for this boot
+Boots the game with `rpcs3 --no-gui` (--gui: with RPCS3's main window, as its
+GUI boots it -- a build whose boot overlay stays up under --no-gui) (with --config, that file for this boot
 only: e.g. a copy of the game's own config with fullscreen off), keeps its
 window above the others without taking the focus, saves the window's client
 area to <out dir>/NNNN.png every --every seconds, then stops the RPCS3 it
@@ -30,12 +31,13 @@ ap.add_argument("out")
 ap.add_argument("--config")
 ap.add_argument("--secs", type=float, default=90)
 ap.add_argument("--every", type=float, default=5)
+ap.add_argument("--gui", action="store_true", help="boot with RPCS3's main window (as from its GUI) instead of --no-gui")
 a = ap.parse_args()
 
 u = ctypes.windll.user32
 u.SetProcessDPIAware()
 os.makedirs(a.out, exist_ok=True)
-cmd = [os.path.join(a.rpcs3_dir, "rpcs3.exe"), "--no-gui"]
+cmd = [os.path.join(a.rpcs3_dir, "rpcs3.exe")] + ([] if a.gui else ["--no-gui"])
 if a.config:
     cmd += ["--config", os.path.abspath(a.config)]
 cmd.append(a.game)

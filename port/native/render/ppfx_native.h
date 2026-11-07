@@ -432,6 +432,9 @@ struct Stats {
     std::atomic<uint64_t> asp_race_checked{0}, asp_race_changed{0};   // R5: guest bytes changed between the record and its native draw
     std::atomic<uint64_t> n_retired{0};   // images replaced at an address (another size or format) and destroyed later
     std::atomic<uint64_t> n_barriers{0}, n_barriers_full{0}, n_handoff_copies{0}, n_snapshot_copies{0};
+    // draws whose fragment program reads a texture unit the game has disabled (the placeholder's
+    // value, ppfx_render.cpp), and those units
+    std::atomic<uint64_t> n_disabled_unit_draws{0}, disabled_units{0};
     // comparisons: wanted = asked for; then exactly one of equal, differ,
     // skipped_* (never compared, and why) or unfinished (in flight at the end)
     std::atomic<uint64_t> cmp_wanted{0}, cmp_records{0}, cmp_equal{0}, cmp_differ{0};

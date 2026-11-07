@@ -70,6 +70,7 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
+#include <unordered_set>
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -816,11 +817,37 @@ VkSamplerAddressMode gcm_wrap(uint32_t w)
 
 std::map<uint64_t, VkSampler> s_samplers;
 
+// DOTHEROES_PPFX_ANISO=1: anisotropic filtering at the ratio the game sets
+// for each unit (SET_TEXTURE_CONTROL0's max_aniso: 1, 2, 4, 6, 8, 10, 12 or
+// 16 to 1, as RPCS3 expands it). Neither this renderer nor the old engine
+// modelled it, so a texture the game asks to filter anisotropically is seen
+// at a slant through blurrier mip levels than on the PS3. Not the first
+// dungeon's sparkling hero (the game sets 1 to 1 on its units, 2026-11-07).
+// A switch until a scene that uses it is compared with RPCS3; needs the
+// device's samplerAnisotropy (rsx_vk_aniso_ok), otherwise off with a line.
+extern "C" int rsx_vk_aniso_ok(void);
+static int aniso_on()
+{
+    static int on = -1;
+    if (on < 0) {
+        const char* e = getenv("DOTHEROES_PPFX_ANISO");
+        on = e && *e == '1';
+        if (on && !rsx_vk_aniso_ok()) {
+            fprintf(stderr, "[ppfx] DOTHEROES_PPFX_ANISO: the device has no samplerAnisotropy; off\n");
+            on = 0;
+        }
+        if (on) fprintf(stderr, "[ppfx] anisotropic filtering at the game's ratios (DOTHEROES_PPFX_ANISO)\n");
+    }
+    return on;
+}
+
 // A sampler from cellGcmSetTextureFilter's filters and cellGcmSetTextureControl's
 // levels of detail and cellGcmSetTextureAddress's wrap modes (the engine's
 // eng_decode_sampler and the backend's vk_eng_sampler).
 VkSampler sampler(const Sampler& s)
 {
+    static const uint8_t kAniso[8] = { 1, 2, 4, 6, 8, 10, 12, 16 };
+    const uint32_t aniso = aniso_on() && (s.min_filter == 2 || s.min_filter == 4 || s.min_filter == 6) ? kAniso[s.max_aniso & 7] : 1;
     const uint32_t minf = s.min_filter, magf = s.mag_filter;
     const int min_linear = minf == 2 || minf == 4 || minf == 6, mag_linear = magf == 2;
     const int mip_present = minf >= 3, mip_linear = minf == 5 || minf == 6;
@@ -832,7 +859,8 @@ VkSampler sampler(const Sampler& s)
     memcpy(&lo, &min_lod, 4); memcpy(&hi, &max_lod, 4);
     const uint64_t key = (uint64_t)min_linear | (uint64_t)mag_linear << 1 | (uint64_t)mip_linear << 2 |
                          (uint64_t)mip_present << 3 | (uint64_t)(s.wrap_s & 0xF) << 4 | (uint64_t)(s.wrap_t & 0xF) << 8 |
-                         (uint64_t)(s.wrap_r & 0xF) << 12 | (uint64_t)(lo >> 16) << 16 | (uint64_t)(hi >> 16) << 32;
+                         (uint64_t)(s.wrap_r & 0xF) << 12 | (uint64_t)(lo >> 16) << 16 | (uint64_t)(hi >> 16) << 32 |
+                         (uint64_t)(aniso & 0x1F) << 48;
     auto it = s_samplers.find(key);
     if (it != s_samplers.end()) return it->second;
     VkSamplerCreateInfo ci = { VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
@@ -841,6 +869,7 @@ VkSampler sampler(const Sampler& s)
     ci.mipmapMode = mip_linear ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST;
     ci.addressModeU = gcm_wrap(s.wrap_s); ci.addressModeV = gcm_wrap(s.wrap_t); ci.addressModeW = gcm_wrap(s.wrap_r);
     ci.minLod = min_lod; ci.maxLod = max_lod;
+    if (aniso > 1) { ci.anisotropyEnable = VK_TRUE; ci.maxAnisotropy = (float)aniso; }
     ci.borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
     VkSampler v = VK_NULL_HANDLE;
     F.vkCreateSampler(D.device, &ci, nullptr, &v);
@@ -1102,6 +1131,32 @@ VkColorComponentFlags write_mask(uint32_t m)
     return wm;
 }
 
+// DOTHEROES_PPFX_DEPTH_CLAMP=1: depth clamped to the viewport's range instead
+// of clipped at the near and far planes, as the RSX does with ZMIN_MAX_CONTROL's
+// clamp bit -- which 3D Dot Game Heroes' frame-start reset sets every frame
+// (0x11: docs/NATIVE_R7.md section 9). Neither this renderer nor the old engine
+// modelled it, so geometry past the far plane is clipped where the PS3 draws
+// it at the far depth -- suspected (not shown) for the castle hall's floor
+// reflection, whose mirrored ceiling RPCS3 shows and this renderer does not
+// (2026-11-07). A switch until compared with RPCS3; needs the device's
+// depthClamp (rsx_vk_depth_clamp_ok), otherwise off with a line saying so.
+extern "C" int rsx_vk_depth_clamp_ok(void);
+static VkBool32 depth_clamp()
+{
+    static int on = -1;
+    if (on < 0) {
+        const char* e = getenv("DOTHEROES_PPFX_DEPTH_CLAMP");
+        on = e && *e == '1';
+        if (on && !rsx_vk_depth_clamp_ok()) {
+            fprintf(stderr, "[ppfx] DOTHEROES_PPFX_DEPTH_CLAMP: the device has no depthClamp; clipping as before\n");
+            on = 0;
+        }
+        if (on) fprintf(stderr, "[ppfx] depth clamped to the viewport's range (DOTHEROES_PPFX_DEPTH_CLAMP)\n");
+    }
+    return on ? VK_TRUE : VK_FALSE;
+}
+
+
 // The pipeline for this record: its programs as the engine makes them, with
 // the record's texture, sampler and surface parameters, and its render state.
 // 0 when it cannot be made.
@@ -1187,6 +1242,7 @@ const Pipe* pipeline(const Rec* r, const rsx_vertex_layout_plan& layout, VkForma
     vps.viewportCount = 1; vps.scissorCount = 1;
     VkPipelineRasterizationStateCreateInfo ras = { VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
     ras.polygonMode = VK_POLYGON_MODE_FILL;
+    ras.depthClampEnable = depth_clamp();
     ras.cullMode = VK_CULL_MODE_NONE;   // culling off (checked by the caller)
     ras.frontFace = ra.front_face == 0x0901u ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE;
     ras.depthBiasEnable = VK_TRUE; ras.lineWidth = 1.0f;
@@ -1339,6 +1395,83 @@ FpInfo& fp_info(const Blob* b)
 // a vertex program's inputs (the layout's mask), once a program
 std::unordered_map<uint64_t, uint32_t> s_vpmask;
 
+// DOTHEROES_PPFX_HOT=<t> (a diagnostic): an asp draw's colour output with a
+// component that is not finite or whose magnitude exceeds t is written as
+// (0, 0, 64, 1), bright blue -- to find which draws put the extreme values in
+// the scene that PPFX's glare draws stars from (the first dungeon's sparkling
+// hero, 2026-11-07). The translator otherwise writes a NaN output as 0.
+static void asp_hot_mark(std::string& ps)
+{
+    static float hot = -2.0f;
+    if (hot == -2.0f) {
+        const char* e = getenv("DOTHEROES_PPFX_HOT");
+        hot = e && *e ? (float)atof(e) : -1.0f;
+        if (hot > 0) fprintf(stderr, "[ppfx] DOTHEROES_PPFX_HOT: asp outputs beyond %g or not finite show blue\n", hot);
+    }
+    // DOTHEROES_PPFX_PS_SUB=<from>@@<to>[##<from>@@<to>...] (a diagnostic, the
+    // same place): text substitutions in the translated pixel shader -- a term
+    // switched off to see what it puts on screen (the dungeon hero, 2026-11-07)
+    static std::vector<std::pair<std::string, std::string>> subs;
+    static int subs_read = 0;
+    if (!subs_read) {
+        subs_read = 1;
+        const char* e = getenv("DOTHEROES_PPFX_PS_SUB");
+        std::string all = e ? e : "";
+        for (size_t at = 0; at < all.size();) {
+            size_t end = all.find("##", at);
+            if (end == std::string::npos) end = all.size();
+            const std::string one = all.substr(at, end - at);
+            const size_t mid = one.find("@@");
+            if (mid != std::string::npos) subs.emplace_back(one.substr(0, mid), one.substr(mid + 2));
+            at = end + 2;
+        }
+        if (!subs.empty()) fprintf(stderr, "[ppfx] DOTHEROES_PPFX_PS_SUB: %zu substitutions\n", subs.size());
+    }
+    for (const auto& s : subs)
+        for (size_t k = ps.find(s.first); k != std::string::npos && !s.first.empty(); k = ps.find(s.first, k + s.second.size()))
+            ps.replace(k, s.first.size(), s.second);
+    // DOTHEROES_PPFX_SHOW_UNIT=<u> (a diagnostic, the same place): a program
+    // that samples unit u at tc0 outputs that sample, unlit -- which image the
+    // unit really has (the dungeon hero's colour texture, 2026-11-07)
+    static int show = -2;
+    if (show == -2) {
+        const char* e = getenv("DOTHEROES_PPFX_SHOW_UNIT");
+        show = e && *e ? atoi(e) : -1;
+        if (show >= 0) fprintf(stderr, "[ppfx] DOTHEROES_PPFX_SHOW_UNIT: unit %d's sample at tc0 is the output\n", show);
+    }
+    if (show >= 0 && show < 16) {
+        char smp[96];
+        snprintf(smp, sizeof smp, "rsx_tex[%d].Sample(rsx_samp[%d], ((input.tc0).xyzw).xy)", show, show);
+        if (ps.find(smp) != std::string::npos) {
+            for (int n = -1; n < 4; n++) {
+                char v[8], from[64];
+                if (n < 0) snprintf(v, sizeof v, "_o"); else snprintf(v, sizeof v, "_o%d", n);
+                snprintf(from, sizeof from, "(%s == %s) ? %s : (float4)0", v, v, v);
+                const std::string to = std::string("float4((") + smp + ").rgb, 1.0)";
+                for (size_t k = ps.find(from); k != std::string::npos; k = ps.find(from, k + to.size()))
+                    ps.replace(k, strlen(from), to);
+            }
+        }
+    }
+    if (hot <= 0) return;
+    size_t at = ps.find("PSOutput main(");
+    if (at == std::string::npos) at = ps.find("float4 main(");
+    if (at == std::string::npos) return;
+    char def[320];
+    snprintf(def, sizeof def, "float4 _rsx_hot(float4 o) { float4 a = abs(o); return (a.x <= %.9g && a.y <= %.9g && "
+             "a.z <= %.9g && a.w <= %.9g) ? o : float4(0, 0, 64, 1); }\n", hot, hot, hot, hot);
+    ps.insert(at, def);
+    // the outputs: "(_oN == _oN) ? _oN : (float4)0" and "(_o == _o) ? _o : (float4)0"
+    for (int n = -1; n < 4; n++) {
+        char v[8], from[64], to[32];
+        if (n < 0) snprintf(v, sizeof v, "_o"); else snprintf(v, sizeof v, "_o%d", n);
+        snprintf(from, sizeof from, "(%s == %s) ? %s : (float4)0", v, v, v);
+        snprintf(to, sizeof to, "_rsx_hot(%s)", v);
+        for (size_t k = ps.find(from); k != std::string::npos; k = ps.find(from, k + strlen(to)))
+            ps.replace(k, strlen(from), to);
+    }
+}
+
 const Pipe* pipeline_asp(const Rec* r, const rsx_vertex_layout_plan& layout, VkFormat rt, VkFormat df,
                          rsx_fp_constant_block* consts)
 {
@@ -1427,6 +1560,7 @@ const Pipe* pipeline_asp(const Rec* r, const rsx_vertex_layout_plan& layout, VkF
         return nullptr;
     }
     asp_describe(r, vs, ps, layout, consts);
+    asp_hot_mark(ps);
     VkShaderModule vsm = spirv_module(vs, RSX_SHADER_STAGE_VERTEX), fsm = spirv_module(ps, RSX_SHADER_STAGE_FRAGMENT);
     if (!vsm || !fsm) return nullptr;
     VkPipelineShaderStageCreateInfo stg[2] = {
@@ -1446,6 +1580,7 @@ const Pipe* pipeline_asp(const Rec* r, const rsx_vertex_layout_plan& layout, VkF
     // cull front faces; the winding judged on screen after the vertex stage's Y flip
     VkPipelineRasterizationStateCreateInfo ras = { VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
     ras.polygonMode = VK_POLYGON_MODE_FILL;
+    ras.depthClampEnable = depth_clamp();
     ras.cullMode = !ra.cull ? VK_CULL_MODE_NONE
                  : (ra.cull_face == 0x0404u || ra.cull_face == 0x0408u) ? VK_CULL_MODE_FRONT_BIT : VK_CULL_MODE_BACK_BIT;
     ras.frontFace = ra.front_face == 0x0901u ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE;
@@ -1975,12 +2110,16 @@ void wait_for(Batch& b, const Rec* r)
 void asp_clears(Batch& b, const Rec* r);
 void occ_begin(Batch& b, const Rec* r);   // R6: a counted draw's occlusion query
 void occ_end(Batch& b);
+void asp_describe_line(const Rec* r);
+static bool skip_fp(uint64_t hash);
 void draw(const Rec* r)
 {
     Batch& b = batch(r->frame);
     wait_for(b, r);
+    asp_describe_line(r);   // the post-effects path's draws, in the same description (a "ppfx" line)
     if (r->naclear) asp_clears(b, r);   // R6: the clears made before it (the game's, asp's)
     if (r->why) { unsupported(r, "no programs or vertex data"); return; }
+    if (r->fp && skip_fp(r->fp->hash)) return;
     const State& st = r->st;
     const Surface& sf = st.surface;
     if (sf.color_target != 1 || sf.antialias) { unsupported(r, "MRT or antialiased target"); return; }
@@ -2059,6 +2198,9 @@ void draw(const Rec* r)
     VkDescriptorImageInfo ii[16], si[16];
     const uint32_t sampled = rsx_fp_texture_units(r->fp->bytes.data(), (uint32_t)r->fp->bytes.size());
     Img* srcs[16] = {};
+    uint32_t disabled_read = 0;   // units the program reads that the game has disabled: the placeholder
+    for (uint32_t u = 0; u < 16; u++) if ((sampled >> u & 1) && !st.samp[u].enable) disabled_read |= 1u << u;
+    if (disabled_read) { stats().n_disabled_unit_draws++; stats().disabled_units.fetch_or(disabled_read); }
     for (uint32_t u = 0; u < 16; u++) {
         if (!(sampled >> u & 1) || !st.samp[u].enable) continue;
         const Texture& tx = st.tex[u];
@@ -2402,24 +2544,58 @@ void asp_clears(Batch& b, const Rec* r)
 }
 
 // DOTHEROES_ASP_DESCRIBE_FRAME=<frame> (a diagnostic): a line per asp draw
-// of that frame -- what it draws with -- into the dump directory
+// of that frame -- what it draws with -- into the dump directory, and each
+// program it draws with, once (fp_<hash>.bin, vp_<hash>.bin: the bytes as
+// recorded). =trigger: the frame after the one in which a drive script's
+// `touch describe.trigger` (the run directory) is seen, and again for each
+// later touch -- a frame number differs from run to run.
 void asp_describe_line(const Rec* r)
 {
     static long long want = -2;
+    static int trigger = 0;
+    static uint32_t polled = ~0u;
     static FILE* f = nullptr;
-    if (want == -2) { const char* e = getenv("DOTHEROES_ASP_DESCRIBE_FRAME"); want = e && *e ? atoll(e) : -1; }
-    if (want < 0 || (long long)r->frame != want || !s_dump[0]) { if (f && (long long)r->frame > want) { fclose(f); f = nullptr; want = -1; } return; }
+    if (want == -2) {
+        const char* e = getenv("DOTHEROES_ASP_DESCRIBE_FRAME");
+        trigger = e && !strcmp(e, "trigger");
+        want = e && *e && !trigger ? atoll(e) : -1;
+    }
+    if (trigger && r->frame != polled) {   // once a frame: is there a new trigger?
+        polled = r->frame;
+        if (FILE* t = fopen("describe.trigger", "rb")) {
+            fclose(t);
+            remove("describe.trigger");
+            if (want < (long long)r->frame) want = (long long)r->frame + 1;
+        }
+    }
+    if (want < 0 || (long long)r->frame != want || !s_dump[0]) {
+        if (f && (long long)r->frame > want) { fclose(f); f = nullptr; if (!trigger) want = -1; }
+        return;
+    }
     if (!f) {
         char path[600];
         snprintf(path, sizeof path, "%s/describe_f%u.txt", s_dump, r->frame);
         if (!(f = fopen(path, "w"))) { want = -1; return; }
     }
+    {   // the programs, once each
+        static std::unordered_set<uint64_t> dumped;
+        const Blob* progs[2] = { r->fp.get(), r->vp.get() };
+        for (int k = 0; k < 2; k++) {
+            const Blob* bl = progs[k];
+            if (!bl || !dumped.insert(bl->hash ^ (uint64_t)k).second) continue;
+            char path[600];
+            snprintf(path, sizeof path, "%s/%s_%016llx.bin", s_dump, k ? "vp" : "fp", (unsigned long long)bl->hash);
+            if (FILE* pf = fopen(path, "wb")) { fwrite(bl->bytes.data(), 1, bl->bytes.size(), pf); fclose(pf); }
+        }
+    }
     const State& st = r->st;
     const Raster& ra = st.raster;
-    fprintf(f, "%llu prim %u n %u v %u | tgt %08X fmt %u dz %08X | fp %016llx | blend %u %X/%X %X/%X eq %X/%X | alpha %u %X %u | "
+    fprintf(f, "%llu%s prim %u n %u v %u | tgt %08X fmt %u dz %08X | vp %016llx | fp %016llx ctl %08X | blend %u %X/%X %X/%X eq %X/%X | alpha %u %X %u | "
                "depth %u/%u %X | stencil %u %X ref %u mask %X/%X ops %X/%X/%X | cull %u %X | cmask %08X | clears %u | tex",
-            (unsigned long long)r->seq, r->prim, r->count, r->vcount, st.surface.color_offset[0], st.surface.color_format,
-            st.surface.depth_offset, r->fp ? (unsigned long long)r->fp->hash : 0ull, ra.blend, ra.blend_sf_rgb, ra.blend_df_rgb,
+            (unsigned long long)r->seq, r->kind == kAspDraw ? "" : " ppfx", r->prim, r->count, r->vcount,
+            st.surface.color_offset[0], st.surface.color_format,
+            st.surface.depth_offset, r->vp ? (unsigned long long)r->vp->hash : 0ull,
+            r->fp ? (unsigned long long)r->fp->hash : 0ull, fp_control(st.fp), ra.blend, ra.blend_sf_rgb, ra.blend_df_rgb,
             ra.blend_sf_a, ra.blend_df_a, ra.blend_eq_rgb, ra.blend_eq_a, ra.alpha_test, ra.alpha_func, ra.alpha_ref,
             ra.depth_test, ra.depth_write, ra.depth_func, ra.stencil_test, ra.stencil_func, ra.stencil_ref, ra.stencil_func_mask,
             ra.stencil_write_mask, ra.stencil_fail, ra.stencil_zfail, ra.stencil_zpass, ra.cull, ra.cull_face, ra.color_mask,
@@ -2427,6 +2603,56 @@ void asp_describe_line(const Rec* r)
     for (uint32_t u = 0; u < 16; u++)
         if (st.samp[u].enable) fprintf(f, " %u:%02X@%08X", u, st.tex[u].format, st.tex[u].offset);
     fprintf(f, "\n");
+    {   // the vertex constants this draw uses, as this thread holds them
+        char path[600];
+        snprintf(path, sizeof path, "%s/vc_%llu.bin", s_dump, (unsigned long long)r->seq);
+        if (FILE* vf = fopen(path, "wb")) { fwrite(s_vc, 1, sizeof s_vc, vf); fclose(vf); }
+    }
+    {   // the vertex bytes: from the lowest enabled input's offset, stride x the vertex count (vtx_<seq>.bin)
+        uint32_t lo = ~0u, loc = 0, stride = 0;
+        for (uint32_t i = 0; i < 16; i++) {
+            const VertexInput& v = st.vin[i];
+            if (v.size && (v.offset & 0x7FFFFFFFu) < lo) { lo = v.offset & 0x7FFFFFFFu; loc = v.location; stride = v.stride; }
+        }
+        const uint64_t bytes = (uint64_t)stride * r->vcount;
+        const uint32_t ea = lo != ~0u ? cellGcmResolveLocated(loc == 0, lo) : 0;
+        if (ea && bytes && bytes <= (8u << 20) && (uint64_t)ea + bytes <= 0xE0000000ull) {
+            char path[600];
+            snprintf(path, sizeof path, "%s/vtx_%llu.bin", s_dump, (unsigned long long)r->seq);
+            if (FILE* vf = fopen(path, "wb")) { fwrite(vm_base + ea, 1, (size_t)bytes, vf); fclose(vf); }
+        }
+    }
+    // the details: vertex inputs (size, type, stride, location, offset) and textures
+    fprintf(f, "  vin");
+    for (uint32_t i = 0; i < 16; i++) {
+        const VertexInput& v = st.vin[i];
+        if (v.size) fprintf(f, " %u:%ux%u/%u@%u:%08X", i, v.size, v.type, v.stride, v.location, v.offset);
+    }
+    fprintf(f, "\n");
+    for (uint32_t u = 0; u < 16; u++) {
+        if (!st.samp[u].enable) continue;
+        const Texture& x = st.tex[u];
+        const Sampler& s = st.samp[u];
+        {   // the texture's guest bytes, once: tex_<offset>_<format>_<w>x<h>_<levels>.bin
+            static std::unordered_set<uint64_t> seen;
+            const uint64_t k = (uint64_t)x.offset << 24 ^ (uint64_t)x.format << 16 ^ (uint64_t)x.width << 32 ^ x.height ^
+                               (uint64_t)x.location << 63;
+            rsx_tex_level lv[RSX_MAX_TEXTURE_LEVELS];
+            const uint32_t nlv = !x.cubemap && x.dimension != 3 ?
+                rsx_texture_mip_chain(x.format, x.width, x.height, x.mipmap, x.pitch, lv) : 0;
+            const uint32_t bytes = nlv ? lv[nlv - 1].offset + lv[nlv - 1].tl.face_bytes : 0;
+            const uint32_t ea = cellGcmResolveLocated(x.location == 0, x.offset);
+            if (nlv && ea && bytes <= (16u << 20) && (uint64_t)ea + bytes <= 0xE0000000ull && seen.insert(k).second) {
+                char path[600];
+                snprintf(path, sizeof path, "%s/tex_%08X_%02X_%ux%u_%u.bin", s_dump, x.offset, x.format, x.width, x.height, nlv);
+                if (FILE* tf = fopen(path, "wb")) { fwrite(vm_base + ea, 1, bytes, tf); fclose(tf); }
+            }
+        }
+        fprintf(f, "  tex%u fmt %02X %ux%u mips %u remap %08X loc %u pitch %u | min %u mag %u signed %X urm %u gamma %X wrap %u/%u"
+                   " | lod %u-%u bias %X aniso %u\n",
+                u, x.format, x.width, x.height, x.mipmap, x.remap, x.location, x.pitch, s.min_filter, s.mag_filter,
+                s.filter_signed, s.unsigned_remap, s.gamma, s.wrap_s, s.wrap_t, s.min_lod, s.max_lod, s.bias, s.max_aniso);
+    }
     for (uint32_t i = 0; i < r->naclear; i++)
         fprintf(f, "  clear %u: mask %X depth %06X stencil %X argb %08X on %08X/%08X\n", i, r->aclear[i].mask, r->aclear[i].depth,
                 r->aclear[i].stencil, r->aclear[i].argb, r->aclear[i].surface.color_offset[0], r->aclear[i].surface.depth_offset);
@@ -2749,6 +2975,30 @@ uint64_t range_hash(const uint8_t* p, uint32_t len, const Rec* r)
 struct IdxSum { uint32_t vmin, vmax; };
 std::unordered_map<uint64_t, IdxSum> s_isum;
 
+// DOTHEROES_PPFX_SKIP_FP=<hex>[,<hex>...] (a diagnostic): asp draws whose
+// fragment program has one of these hashes (DOTHEROES_ASP_DESCRIBE_FRAME's
+// "fp" column) are not drawn -- to find which draw a difference from RPCS3
+// comes from (the first dungeon's sparkling hero, 2026-11-07)
+static bool skip_fp(uint64_t hash)
+{
+    static std::vector<uint64_t> list;
+    static int init = 0;
+    if (!init) {
+        init = 1;
+        const char* e = getenv("DOTHEROES_PPFX_SKIP_FP");
+        for (const char* s = e; s && *s;) {
+            char* end = nullptr;
+            const unsigned long long v = strtoull(s, &end, 16);
+            if (end == s) break;
+            list.push_back(v);
+            s = *end == ',' ? end + 1 : end;
+        }
+        if (!list.empty()) fprintf(stderr, "[ppfx] DOTHEROES_PPFX_SKIP_FP: %zu fragment programs not drawn\n", list.size());
+    }
+    for (uint64_t v : list) if (v == hash) return true;
+    return false;
+}
+
 void asp_draw(const Rec* r)
 {
     AspProf prof;
@@ -2757,6 +3007,7 @@ void asp_draw(const Rec* r)
     asp_describe_line(r);
     asp_clears(b, r);
     prof.mark(kApClears);
+    if (r->fp && skip_fp(r->fp->hash)) return;
     if (r->why || !r->vp || !r->fp) { unsupported(r, "asp: no programs, or no draw object"); return; }
     const State& st = r->st;
     const Surface& sf = st.surface;
@@ -3024,6 +3275,9 @@ void asp_draw(const Rec* r)
     const uint32_t sampled = fp_info(r->fp.get()).sampled;
     Img* srcs[16] = {};
     VkImageView views[16] = {};
+    uint32_t disabled_read = 0;   // units the program reads that the game has disabled: the placeholder
+    for (uint32_t u = 0; u < 16; u++) if ((sampled >> u & 1) && !st.samp[u].enable) disabled_read |= 1u << u;
+    if (disabled_read) { stats().n_disabled_unit_draws++; stats().disabled_units.fetch_or(disabled_read); }
     for (uint32_t u = 0; u < 16; u++) {
         if (!(sampled >> u & 1) || !st.samp[u].enable) continue;
         const Texture& tx = st.tex[u];
@@ -3240,13 +3494,23 @@ bool init()
                          false, dev_up != 0))
             return false;
     }
-    // the dummy every unbound unit samples (as the engine's: 1x1 magenta)
+    // The placeholder every unit without a texture samples: one the program
+    // does not read, and one it reads while the game has it disabled (the
+    // report's disabled_unit_draws counts those draws: none in the first
+    // dungeon, the castle or the field, 2026-11-07). The engine's 1x1
+    // magenta by default; DOTHEROES_PPFX_DUMMY=zero (0,0,0,0) or black
+    // (0,0,0,1) for a comparison where such draws occur.
     {
         Batch& b = batch(0);
         s_dummy = make_image(VK_FORMAT_R8G8B8A8_UNORM, 1, 1, 1, 4, false);
         access(b.cb, s_dummy, kCopyDst);
-        const uint8_t magenta[4] = { 0xFF, 0x00, 0xFF, 0xFF };
-        const VkDeviceSize at = upload(b, magenta, 4, 16);
+        const char* dv = getenv("DOTHEROES_PPFX_DUMMY");
+        const bool zero = dv && !strcmp(dv, "zero"), black = dv && !strcmp(dv, "black"), magenta = !zero && !black;
+        const uint8_t texel[4] = { (uint8_t)(magenta ? 0xFF : 0), 0, (uint8_t)(magenta ? 0xFF : 0),
+                                   (uint8_t)(zero ? 0 : 0xFF) };
+        if (!magenta)
+            fprintf(stderr, "[ppfx] the placeholder texture: %s (DOTHEROES_PPFX_DUMMY)\n", zero ? "zero" : "opaque black");
+        const VkDeviceSize at = upload(b, texel, 4, 16);
         VkBufferImageCopy c = {};
         c.bufferOffset = at; c.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }; c.imageExtent = { 1, 1, 1 };
         F.vkCmdCopyBufferToImage(b.cb, b.up.b, s_dummy->img, layout_of(s_dummy), 1, &c);

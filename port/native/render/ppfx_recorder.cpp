@@ -4008,11 +4008,13 @@ void write_report()
                 (unsigned long long)s.n_asp_draws, (unsigned long long)s.n_asp_clears, s.n_asp_vertex_bytes / 1048576.0,
                 (unsigned long long)A.clears_merged, (unsigned long long)A.clears_dropped, (unsigned long long)A.fp_resident_binds);
     fprintf(f, "native draws %llu clears %llu unsupported %llu batches %llu pipelines %llu images %llu (%.1f MB) "
-               "static_textures %llu own_target_snapshots %llu images_replaced %llu\n",
+               "static_textures %llu own_target_snapshots %llu images_replaced %llu "
+               "disabled_unit_draws %llu (units %04llX)\n",
             (unsigned long long)s.n_draws, (unsigned long long)s.n_clears, (unsigned long long)s.n_unsupported,
             (unsigned long long)s.n_batches, (unsigned long long)s.n_pipelines, (unsigned long long)s.n_images,
             s.n_image_bytes / 1048576.0, (unsigned long long)s.n_static_textures, (unsigned long long)s.n_feedback,
-            (unsigned long long)s.n_retired);
+            (unsigned long long)s.n_retired, (unsigned long long)s.n_disabled_unit_draws,
+            (unsigned long long)s.disabled_units.load());
     fprintf(f, "native_ms record_cpu %.1f gpu %.1f wait_walker %.1f wait_signal %.1f compare %.1f\n",
             s.cpu_record_ns / 1e6, s.gpu_ns / 1e6, s.wait_walker_us / 1e3, s.wait_signal_us / 1e3, s.compare_ns / 1e6);
     fprintf(f, "native_gpu_ms draws %.1f copies %.1f readbacks %.1f other %.1f | barriers %llu (full %llu) "
