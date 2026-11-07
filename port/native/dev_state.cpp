@@ -99,6 +99,7 @@ extern "C" uint8_t* vm_base;
 // (no exit handlers run then): the native PPFX recorder's last report, after
 // its renderer has finished what it was given (ppfx_recorder.cpp).
 extern "C" { void (*g_dotheroes_stop_hook)(void) = nullptr; }
+extern "C" void phys_direct_report(void);
 
 namespace {
 
@@ -475,6 +476,7 @@ void stop_loop()
         if (__atomic_load_n(&g_ps3_ft.on, __ATOMIC_ACQUIRE) == 2) ps3_ft_dump();
         rsx_vulkan_cache_save();   // the shader cache's pipelines (a no-op without one)
         if (g_dotheroes_stop_hook) g_dotheroes_stop_hook();
+        phys_direct_report();   // phys_direct.cpp: its counts (atexit does not run past TerminateProcess)
         fflush(stdout);
         fflush(stderr);
 #ifdef _WIN32

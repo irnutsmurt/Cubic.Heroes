@@ -317,6 +317,8 @@ void lock_release(uint8_t* base, uint32_t ea)
     spu_lockline_unlock();
 }
 
+void native_work(uint32_t desc, uint32_t cmd);
+
 int native_command(uint32_t desc, uint32_t cmd, const uint32_t arg[4])
 {
     const uint32_t inq = arg[2], outq = arg[3];
@@ -324,13 +326,21 @@ int native_command(uint32_t desc, uint32_t cmd, const uint32_t arg[4])
     if (!peek_command(inq, entry)) { g_no_command++; return 0; }
     if (be32(entry + 4) != 1 || be32(entry + 8) != desc) { g_other_desc++; return 0; }
     if (!spurs_queue_spu_pop(inq, entry)) { g_no_command++; return 0; }
+    native_work(desc, cmd);
+    while (!spurs_queue_spu_push(outq, entry)) std::this_thread::yield();
+    return 1;
+}
+
+// A native command's work for one task, and its counts: from a SPURS task
+// (native_command) or issued directly (bullet_solver_direct_run, R8).
+void native_work(uint32_t desc, uint32_t cmd)
+{
     bullet_solver::Stats st;
     const bullet_solver::Sync sync = { lock_acquire, lock_release };
     if (cmd == 6) bullet_solver::writeback_task(vm_base, desc, sync, st);
     else if (cmd == 5) g_bodies += bullet_solver::copyback_task(vm_base, desc);
     else if (cmd == 4) bullet_solver::iterate_task(vm_base, desc, sync, st);
     check_task_done(cmd);   // before the PPU can see this task done
-    while (!spurs_queue_spu_push(outq, entry)) std::this_thread::yield();
     g_cells += st.cells; g_waits += st.waits; g_bad_rows += st.bad;
     (cmd == 4 ? g_solved : g_contacts) += st.contacts;
     const unsigned long long n = ++g_ran_native;
@@ -340,7 +350,6 @@ int native_command(uint32_t desc, uint32_t cmd, const uint32_t arg[4])
                 "instead: no command within 20 ms %llu, another descriptor %llu\n",
                 n, g_cells.load(), g_solved.load(), g_contacts.load(), g_waits.load(), g_bad_rows.load(), g_bodies.load(),
                 g_no_command.load(), g_other_desc.load());
-    return 1;
 }
 
 // ---- DOTHEROES_NATIVE_SOLVER_CHECK
@@ -691,6 +700,28 @@ void on_create(uint32_t entry, const uint32_t arg[4])
 }
 
 }  // namespace
+
+bool bullet_solver_direct_accept(const uint32_t entry[4], uint32_t* cmd)
+{
+    if (g_native.empty() || entry[1] != 1 || !entry[2]) return false;
+    const uint32_t c = be32(vm_base + entry[2]);
+    if (!g_native.count(c)) return false;
+    *cmd = c;
+    return true;
+}
+
+void bullet_solver_direct_run(uint32_t slot, uint32_t desc, uint32_t cmd)
+{
+    t_task_cmd = cmd;
+    capture_task_state("start", slot, desc);
+    if (g_stats && PS3_FT_ON()) {
+        const uint8_t* d = vm_base + desc;
+        const uint64_t t = ps3_ft_now();
+        ps3_ft_span(PS3_FT_PHYS_CMD, (uint32_t)kImageBulletSolver, be32(d),
+                    (slot & 0xFFu) | (command_count(d) & 0xFFFFFFu) << 8, t, t);
+    }
+    native_work(desc, cmd);
+}
 
 void bullet_solver_init(bool phys_stats)
 {

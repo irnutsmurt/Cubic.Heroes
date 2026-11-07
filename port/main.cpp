@@ -33,6 +33,8 @@
  * table. It comes first: everything below is written against that struct. */
 #include "diag/diag.h"
 #include "native/bullet_cd_task.h"
+#include "native/memtest.h"
+#include "ps3emu/ps3_strict.h"
 #include "ps3emu/ps3_ftrace.h"
 #include "ppu_recomp.h"
 
@@ -105,6 +107,10 @@ extern uint32_t g_ppu_main_stack_size;
  * entry function unwound instead. */
 extern int     g_sys_process_exit_called;
 extern int32_t g_sys_process_exit_code;
+
+/* runtime/spu: the SPU interpreter's entry, or in a build without it
+ * (PS3RECOMP_SPU_INTERPRETER=0) its stand-in that stops the program. */
+extern "C" uint32_t spu_interp_run(void* ctx, uint32_t start_lsa);
 
 /* Host-provided symbols the runtime and the HLE libraries link against. */
 uint8_t* vm_base = nullptr;
@@ -588,6 +594,29 @@ static bool alloc_guest_vm(void)
     return vm_base != nullptr;
 }
 
+/* R8 (docs/NATIVE_R8.md section 5.3): what a build with bare guest loads
+ * (PPU_BARE_LOADS) needs from this platform, checked at every start. A lifted
+ * load then reads vm_base + its 32-bit address, up to 7 bytes past it: that
+ * must be inside one reservation whose untouched pages read zero (the commit
+ * handler above), the guard past 4 GB included. The runtime checks its own
+ * side when the guest starts (ppu_loader.cpp, ppu_mm_publish); `dotheroes
+ * --memtest` tests the whole of it. */
+static void bare_loads_gate(void)
+{
+#ifdef PPU_BARE_LOADS
+#  ifndef _WIN32
+#    error "PPU_BARE_LOADS: the guest space's reservation and commit handler are established on Windows only (docs/NATIVE_R8.md section 5.3)"
+#  else
+    MEMORY_BASIC_INFORMATION a{}, b{};
+    if (!VirtualQuery(vm_base, &a, sizeof a) || !VirtualQuery(vm_base + VM_SIZE - 1, &b, sizeof b) ||
+        a.AllocationBase != vm_base || b.AllocationBase != vm_base)
+        ps3_fatal("bare-loads", "the guest space and its guard are not one reservation");
+    if (*(volatile const uint64_t*)(vm_base + VM_SIZE - 8) != 0)
+        ps3_fatal("bare-loads", "the guard past 4 GB does not read as zero");
+#  endif
+#endif
+}
+
 /* ---------------------------------------------------------------------------
  * Main
  * -----------------------------------------------------------------------*/
@@ -738,6 +767,15 @@ static const char* installed_defaults(void)
 
 int main(int argc, char** argv)
 {
+    /* `dotheroes --memtest`: the guest loads' assumptions, tested on a guest
+     * space of its own, then exit (native/memtest.cpp). */
+    if (argc >= 2 && strcmp(argv[1], "--memtest") == 0) {
+        if (!alloc_guest_vm()) {
+            fprintf(stderr, "ERROR: could not allocate the guest address space\n");
+            return 1;
+        }
+        return dotheroes_memtest(VM_SIZE);
+    }
     const char* elf = argc >= 2 ? argv[1] : installed_defaults();
     if (argc < 2) {
         FILE* f = fopen(elf, "rb");
@@ -778,6 +816,15 @@ int main(int argc, char** argv)
     diag_start_watchdog();
     dotheroes_configure_patches();   /* game_patches.cpp: DOTHEROES_FPS etc. */
     dotheroes_native_init();         /* native/bullet_cd_task.cpp: DOTHEROES_NATIVE_CD */
+#if defined(PS3RECOMP_SPU_INTERPRETER) && !PS3RECOMP_SPU_INTERPRETER
+    /* DOTHEROES_R8_INTERP_TEST=1 (R8, docs/NATIVE_R8.md): ask for the SPU
+     * interpreter this build does not have, as SPU code with no lift would --
+     * the stop's own test; it must stop whatever PS3_STRICT says. */
+    {
+        const char* t = getenv("DOTHEROES_R8_INTERP_TEST");
+        if (t && *t == '1') spu_interp_run(nullptr, 0x01234);
+    }
+#endif
 #ifndef _WIN32
     /* SIGTERM/SIGINT end the process at once. Guest threads block in host
      * waits with no shutdown path, so a graceful exit would hang; a save in
@@ -830,6 +877,7 @@ int main(int argc, char** argv)
         fprintf(stderr, "ERROR: could not allocate the guest address space\n");
         return 1;
     }
+    bare_loads_gate();
 
     uint32_t entry = ppu_load_elf(elf);
     if (!entry) {

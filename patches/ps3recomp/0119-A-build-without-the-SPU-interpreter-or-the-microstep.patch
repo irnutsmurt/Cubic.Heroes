@@ -1,0 +1,235 @@
+From f690aa88c66a493ff0e60906acf07d94e8463290 Mon Sep 17 00:00:00 2001
+From: giteaguy <73799093+irnutsmurt@users.noreply.github.com>
+Date: Fri, 6 Nov 2026 19:28:16 -0800
+Subject: [PATCH 119/120] A build without the SPU interpreter or the
+ microstepper; ps3_fatal
+
+PS3RECOMP_SPU_INTERPRETER=OFF (CMake, default ON) leaves out spu_interp.c
+and the self-modifying-code microstepper (spu_channels.c's
+spu_smc_microstep). runtime/spu/spu_interp_absent.c stands in for the
+interpreter's entry points: every way into interpretation -- a branch to
+local store no lifted function covers, SPU_INTERP_UNLIFTED, an image with
+no lift (spu_run_interp_job), the dispatcher's miss -- stops the program
+with the image and the address, whatever PS3_STRICT says. A port that has
+lifted everything it runs then interprets nothing at run time.
+
+ps3_fatal(kind, fmt, ...): a stop the build makes, not strict mode's: one
+line, then abort() for the crash handler.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ CMakeLists.txt                  | 15 ++++++++++
+ include/ps3emu/ps3_strict.h     |  8 +++++
+ runtime/platform/ps3_strict.c   | 13 +++++++++
+ runtime/spu/spu_channels.c      |  7 +++++
+ runtime/spu/spu_interp.h        | 15 +++++++++-
+ runtime/spu/spu_interp_absent.c | 52 +++++++++++++++++++++++++++++++++
+ 6 files changed, 109 insertions(+), 1 deletion(-)
+ create mode 100644 runtime/spu/spu_interp_absent.c
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 31518b8..703aae0 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -123,6 +123,15 @@ file(GLOB_RECURSE RUNTIME_SOURCES
+ #    call leaks one resolver frame per guest loop iteration. A port adds it to
+ #    its own target; see templates/project/CMakeLists.txt.
+ list(FILTER RUNTIME_SOURCES EXCLUDE REGEX "/tests/|/runtime/ppu/|/runtime/host/|/spu_dispatch_mt\.c$")
++# The SPU interpreter and the self-modifying-code microstepper run SPU code the
++# lifter never saw (runtime-loaded overlays, generated stubs). A port that has
++# lifted everything it runs builds without them: such code then stops the
++# program with its image and address (runtime/spu/spu_interp_absent.c),
++# whatever PS3_STRICT says, instead of being interpreted.
++option(PS3RECOMP_SPU_INTERPRETER "Build the SPU interpreter and the SMC microstepper (fallbacks for SPU code with no lift)" ON)
++if(NOT PS3RECOMP_SPU_INTERPRETER)
++    list(FILTER RUNTIME_SOURCES EXCLUDE REGEX "/runtime/spu/spu_interp\.c$")
++endif()
+ 
+ # ---------------------------------------------------------------------------
+ # Static library
+@@ -217,6 +226,12 @@ if(PS3RECOMP_RSX_VULKAN)
+     target_link_libraries(ps3recomp_runtime PUBLIC ${CMAKE_DL_LIBS})
+     message(STATUS "  Vulkan:       RSX backend enabled (rsx_vulkan_backend.c, headers in ${PS3RECOMP_VULKAN_INCLUDE_DIR})")
+ endif()
++if(PS3RECOMP_SPU_INTERPRETER)
++    target_compile_definitions(ps3recomp_runtime PUBLIC PS3RECOMP_SPU_INTERPRETER=1)
++else()
++    target_compile_definitions(ps3recomp_runtime PUBLIC PS3RECOMP_SPU_INTERPRETER=0)
++    message(STATUS "  SPU interpreter: none -- SPU code with no lift stops the program")
++endif()
+ if(PS3RECOMP_NATIVE_GRAPHICS)
+     # PUBLIC: the port's sources select their native-only paths on it too
+     target_compile_definitions(ps3recomp_runtime PUBLIC PS3RECOMP_RSX_COMMAND_PATH=0)
+diff --git a/include/ps3emu/ps3_strict.h b/include/ps3emu/ps3_strict.h
+index 129fa3e..a61c516 100644
+--- a/include/ps3emu/ps3_strict.h
++++ b/include/ps3emu/ps3_strict.h
+@@ -32,6 +32,14 @@ __attribute__((noreturn, format(printf, 2, 3)))
+ #endif
+ void ps3_strict_fail(const char* kind, const char* fmt, ...);
+ 
++/* A stop the build makes, whatever PS3_STRICT says: something this build left
++ * out on purpose (the SPU interpreter, say) was asked for. One line naming
++ * the kind and the detail, then abort() for the crash handler. */
++#if defined(__GNUC__) || defined(__clang__)
++__attribute__((noreturn, format(printf, 2, 3)))
++#endif
++void ps3_fatal(const char* kind, const char* fmt, ...);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/runtime/platform/ps3_strict.c b/runtime/platform/ps3_strict.c
+index 7341d20..884d74f 100644
+--- a/runtime/platform/ps3_strict.c
++++ b/runtime/platform/ps3_strict.c
+@@ -31,3 +31,16 @@ void ps3_strict_fail(const char* kind, const char* fmt, ...)
+     fflush(stderr);
+     abort();
+ }
++
++void ps3_fatal(const char* kind, const char* fmt, ...)
++{
++    va_list ap;
++    fflush(stdout);
++    fprintf(stderr, "[fatal] %s: ", kind);
++    va_start(ap, fmt);
++    vfprintf(stderr, fmt, ap);
++    va_end(ap);
++    fprintf(stderr, "\n");
++    fflush(stderr);
++    abort();
++}
+diff --git a/runtime/spu/spu_channels.c b/runtime/spu/spu_channels.c
+index 8a164fd..363557d 100644
+--- a/runtime/spu/spu_channels.c
++++ b/runtime/spu/spu_channels.c
+@@ -2471,6 +2471,7 @@ void spu_spurs_taskset_syscall(spu_context* ctx)   /* non-static: also called by
+  * the small instruction set such stubs use, and exit back into lifted code at
+  * the first branch (trampoline re-dispatch). Returns 1 if it executed to a
+  * branch, 0 on an unknown opcode (caller falls through to BRANCH-TO-0). */
++#if PS3RECOMP_SPU_INTERPRETER
+ static int spu_smc_microstep(spu_context* ctx)
+ {
+     uint32_t pc = ctx->pc & SPU_LS_MASK & ~3u;
+@@ -2682,6 +2683,7 @@ static int spu_smc_microstep(spu_context* ctx)
+                 ctx->image_id, ctx->pc & SPU_LS_MASK); }
+     return 0;
+ }
++#endif /* PS3RECOMP_SPU_INTERPRETER */
+ 
+ void spu_indirect_branch(spu_context* ctx)
+ {
+@@ -3233,6 +3235,10 @@ void spu_indirect_branch(spu_context* ctx)
+      * image and calls it). Interpret the live LS bytes; on success the next
+      * branch re-enters lifted code via the trampoline. */
+     const uint32_t ms_pc = ctx->pc & SPU_LS_MASK;
++#if !PS3RECOMP_SPU_INTERPRETER
++    /* No interpreter in this build: the microstepper would run this. */
++    spu_interp_absent(ctx, ms_pc, "a branch to code with no lift: the microstepper's case");
++#else
+     if (spu_smc_microstep(ctx)) {
+         /* Interpreted, not lifted: say so (release-path audit). Strict mode
+          * does not cover this path, so without the line a run that used it
+@@ -3244,6 +3250,7 @@ void spu_indirect_branch(spu_context* ctx)
+                     ctx->image_id, ms_pc, n);
+         return;
+     }
++#endif /* PS3RECOMP_SPU_INTERPRETER */
+     /* Cap the unresolved-branch log PER IMAGE: a global cap let one noisy
+      * image (the FMOD mixer's overlay calls) exhaust it and silently hide
+      * every other image's misses -- LBP's loading jobs skipped their command
+diff --git a/runtime/spu/spu_interp.h b/runtime/spu/spu_interp.h
+index 801245d..c00242e 100644
+--- a/runtime/spu/spu_interp.h
++++ b/runtime/spu/spu_interp.h
+@@ -15,6 +15,12 @@
+ 
+ #include "spu_context.h"
+ 
++/* 0: a build without the interpreter (CMake PS3RECOMP_SPU_INTERPRETER=OFF);
++ * its entry points stop the program (spu_interp_absent.c). */
++#ifndef PS3RECOMP_SPU_INTERPRETER
++#define PS3RECOMP_SPU_INTERPRETER 1
++#endif
++
+ #ifdef __cplusplus
+ extern "C" {
+ #endif
+@@ -33,7 +39,14 @@ spu_lifted_fn spu_lifted_lookup(const spu_context* ctx, uint32_t lsa);
+ uint32_t spu_interp_run(spu_context* ctx, uint32_t start_lsa);
+ /* As spu_interp_run, but also hands back at stop_lsa (0 = no such point): the
+  * return point of the drain the caller goes back to (spu_smc_microstep). */
+-uint32_t spu_interp_run_until(spu_context* ctx, uint32_t start_lsa, uint32_t stop_lsa);
++uint32_t spu_interp_run_until(spu_context* ctx, uint32_t start_lsa, uint32_t stop_lsa);
++#if !PS3RECOMP_SPU_INTERPRETER
++/* The one stop for every way into interpretation in a build without it. */
++#if defined(__GNUC__) || defined(__clang__)
++__attribute__((noreturn))
++#endif
++void spu_interp_absent(const spu_context* ctx, uint32_t lsa, const char* via);
++#endif
+ 
+ /* The single dispatch point every computed branch routes through. If `target`
+  * is a registered lifted entry, runs it; otherwise interprets from `target`.
+diff --git a/runtime/spu/spu_interp_absent.c b/runtime/spu/spu_interp_absent.c
+new file mode 100644
+index 0000000..b9491b6
+--- /dev/null
++++ b/runtime/spu/spu_interp_absent.c
+@@ -0,0 +1,52 @@
++/* spu_interp_absent.c -- a build without the SPU interpreter.
++ *
++ * CMake PS3RECOMP_SPU_INTERPRETER=OFF leaves spu_interp.c (the interpreter)
++ * out and compiles the microstepper in spu_channels.c out; this file stands in
++ * for the interpreter's entry points. Every way into interpretation -- a
++ * branch to a local-store address no lifted function covers (the
++ * microstepper's way in), SPU_INTERP_UNLIFTED, an SPU image with no lift
++ * (spu_run_interp_job), the dispatcher's miss -- ends here: one line naming
++ * the image and the address, then abort(), whether PS3_STRICT is on or off.
++ * Nothing is interpreted, so a port built this way runs only lifted SPU code
++ * and native replacements.
++ *
++ * The variables are the interpreter's state other files refer to (the
++ * staged event sys_event.c hands an interpreted SPU, the step counters the
++ * watchdog prints); they stay zero.
++ */
++#include "spu_interp.h"
++
++#if !PS3RECOMP_SPU_INTERPRETER
++#include "ps3emu/ps3_strict.h"
++
++uint32_t g_spu_pending_evt[3];
++int      g_spu_pending_evt_valid;
++uint32_t g_spu_interp_last_pc = 0;
++uint64_t g_spu_interp_steps   = 0;
++
++void spu_interp_absent(const spu_context* ctx, uint32_t lsa, const char* via)
++{
++    ps3_fatal("spu-interpreter-absent",
++              "SPU image %d reached local store 0x%05X (%s), which no lifted function covers, "
++              "and this build has no SPU interpreter (PS3RECOMP_SPU_INTERPRETER=OFF)",
++              ctx ? ctx->image_id : -1, lsa & SPU_LS_MASK, via);
++}
++
++uint32_t spu_interp_run(spu_context* ctx, uint32_t start_lsa)
++{
++    spu_interp_absent(ctx, start_lsa, "spu_interp_run");
++}
++
++uint32_t spu_interp_run_until(spu_context* ctx, uint32_t start_lsa, uint32_t stop_lsa)
++{
++    (void)stop_lsa;
++    spu_interp_absent(ctx, start_lsa, "spu_interp_run_until");
++}
++
++void spu_dispatch(spu_context* ctx, uint32_t target)
++{
++    spu_lifted_fn fn = spu_lifted_lookup(ctx, target & 0x3FFFC);
++    if (fn) { ctx->pc = target & 0x3FFFC; fn(ctx); return; }
++    spu_interp_absent(ctx, target, "spu_dispatch");
++}
++#endif
+-- 
+2.56.0.windows.3
+

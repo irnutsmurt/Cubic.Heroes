@@ -1,0 +1,138 @@
+From 50f5460f7b4187f872a014b135437bfeda98ac39 Mon Sep 17 00:00:00 2001
+From: giteaguy <73799093+irnutsmurt@users.noreply.github.com>
+Date: Sat, 7 Nov 2026 01:48:54 -0800
+Subject: [PATCH] Lifter: --promote-leaf, guest registers in locals in
+ functions that call nothing
+
+A lifted function in which the context never escapes -- no guest call,
+trampoline drain, indirect call, syscall, HLE call, hook, observer or sjlj
+frame, only ctx->field accesses -- keeps the guest registers it uses (gpr,
+fpr, cr, ctr, xer) in C locals: loaded at entry, the ones it writes (or
+takes the address of) stored back before every return and at its end.
+Nothing else can see the context while such a function runs, so the stores
+back at its exits are all the context needs; what still reads it
+mid-function is diagnostic only (a crash report, a store diagnostic's
+stack dump). Functions with a register indexed by a variable, entry hooks
+or observers are left as they were.
+
+The compiler then keeps those registers in host registers across the guest
+accesses, which as stores through vm_base could alias the context and made
+it reload every register after each guest store. 3D Dot Game Heroes: 8,395
+functions, a fifth of the game thread's time exploring; its strided fill
+loop from 26 to 21 instructions an iteration with no memory dependency
+through the context.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ tools/ppu_lifter.py | 74 +++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 74 insertions(+)
+
+diff --git a/tools/ppu_lifter.py b/tools/ppu_lifter.py
+index 0c02ef1..864e80d 100644
+--- a/tools/ppu_lifter.py
++++ b/tools/ppu_lifter.py
+@@ -1070,6 +1070,65 @@ def load_insn_patches(path: str) -> dict[int, tuple[int, int, str]]:
+     return out
+ 
+ 
++# --promote-leaf (R8, docs/NATIVE_R8.md section 5.6): a lifted function in
++# which ctx never escapes -- no guest call, trampoline drain, indirect call,
++# syscall, HLE call, hook, observer or sjlj frame; only ctx->field accesses --
++# keeps the guest registers it uses (gpr, fpr, cr, ctr, xer) in C locals:
++# loaded at entry, the ones it writes stored back before every return and at
++# its end. Nothing else can see the context while such a function runs (it
++# calls nothing; no longjmp lands in or passes through it; the other threads
++# never read a running thread's registers), so the stores back at its exits
++# are all the context needs. What still sees the context mid-function is
++# diagnostic only: a crash report, a store diagnostic's guest stack dump. The
++# compiler then keeps the registers in host registers between the guest
++# accesses, which as stores through vm_base could alias the context and made
++# it reload every register after each guest store.
++_PROMO_FIELDS = ((re.compile(r"ctx->gpr\[(\d+)\]"), "_pr", "uint64_t", "gpr"),
++                 (re.compile(r"ctx->fpr\[(\d+)\]"), "_pf", "double", "fpr"))
++_PROMO_SCALARS = (("cr", "uint32_t"), ("ctr", "uint64_t"), ("xer", "uint32_t"))
++_PROMO_ESCAPE = re.compile(r"\bctx\b(?!\s*->)")
++_PROMO_WRITE = r"(?:\s*(?:=(?!=)|[-+|&^*/%]=|<<=|>>=|\+\+|--))"
++
++
++def _promote_leaf_body(body: list[str]):
++    """The body of a leaf function with its registers in locals, or None if
++    the function is not one (see _PROMO_FIELDS above)."""
++    text = "\n".join(body)
++    if _PROMO_ESCAPE.search(text) or "_sjf" in text:
++        return None
++    if re.search(r"ctx->(?:gpr|fpr)(?!\[\d+\])", text):
++        return None   # a register indexed by a variable, or the array itself
++    decl, flush = [], []
++    for rx, pfx, ty, field in _PROMO_FIELDS:
++        for n in sorted({int(x) for x in rx.findall(text)}):
++            f = rf"ctx->{field}\[{n}\]"
++            decl.append(f"{ty} {pfx}{n} = ctx->{field}[{n}];")
++            if re.search(f + _PROMO_WRITE, text) or re.search(r"(?:\+\+|--|&)\s*" + f, text):
++                flush.append(f"ctx->{field}[{n}] = {pfx}{n};")
++    for name, ty in _PROMO_SCALARS:
++        f = rf"ctx->{name}\b"
++        if re.search(f, text):
++            decl.append(f"{ty} _p{name} = ctx->{name};")
++            if re.search(f + _PROMO_WRITE, text) or re.search(r"(?:\+\+|--|&)\s*" + f, text):
++                flush.append(f"ctx->{name} = _p{name};")
++    if not decl:
++        return None
++    fl = " ".join(flush)
++    out = ["    " + " ".join(decl) + "  /* --promote-leaf */"]
++    for ln in body:
++        t = ln
++        for rx, pfx, ty, field in _PROMO_FIELDS:
++            t = rx.sub(lambda m, pfx=pfx: f"{pfx}{m.group(1)}", t)
++        for name, ty in _PROMO_SCALARS:
++            t = re.sub(rf"ctx->{name}\b", f"_p{name}", t)
++        if fl:
++            t = t.replace("return;", "{ " + fl + " return; }")
++        out.append(t)
++    if fl:
++        out.append("    " + fl)
++    return out
++
++
+ def load_entry_hooks(path: str) -> dict[int, tuple[str, str, bool]]:
+     """Read the entry hooks of an --insn-patches file:
+ 
+@@ -4626,6 +4685,17 @@ class PPULifter:
+ 
+         lines.append("}")
+         lines.append("")
++        if getattr(self, "promote_leaf", False) and not observed and not hook and not uses_sjlj:
++            try:
++                head = lines.index("    PPU_MM_SNAP") + 1
++            except ValueError:
++                head = -1
++            if head > 0:
++                end = len(lines) - 2   # the closing brace
++                new = _promote_leaf_body(lines[head:end])
++                if new is not None:
++                    lines[head:end] = new
++                    self.promoted_leaf = getattr(self, "promoted_leaf", 0) + 1
+         return lines
+ 
+     def _table_lines(self) -> list[str]:
+@@ -5483,6 +5553,9 @@ def main() -> None:
+                         help="JSON {observers:[{addr}]}: functions whose entry calls the "
+                              "port's ppu_entry_observe(addr, ctx) while g_ppu_entry_observe "
+                              "is set, then runs the lifted body unchanged (development lifts)")
++    parser.add_argument("--promote-leaf", action="store_true",
++                        help="keep the guest registers in C locals in functions where the context never "
++                             "escapes (no calls of any kind): see _PROMO_FIELDS")
+     parser.add_argument("--insn-patches", metavar="FILE", default=None, action="append",
+                         help="JSON list of instruction patches to lift as "
+                              "run-time switches: each {addr, orig, new, guard} "
+@@ -5951,6 +6024,7 @@ def main() -> None:
+         lifter.sjlj_longjmp = {int(a, 16) for a in _sj.get("longjmp", [])}
+         print(f"  sjlj: setjmp {sorted(hex(a) for a in lifter.sjlj_setjmp)} "
+               f"longjmp {sorted(hex(a) for a in lifter.sjlj_longjmp)}")
++    lifter.promote_leaf = bool(args.promote_leaf)
+     if args.insn_patches:
+         # Repeatable: each file's patches and entry hooks, merged; an address
+         # in two files is an error, as within one.
+-- 
+2.56.0.windows.3
+

@@ -1,0 +1,71 @@
+From 6e13792882c27ad5c226beea043c447fb9bc4de4 Mon Sep 17 00:00:00 2001
+From: giteaguy <73799093+irnutsmurt@users.noreply.github.com>
+Date: Fri, 6 Nov 2026 22:07:27 -0800
+Subject: [PATCH] stvx: one reservation test, through the function's snapshot
+
+The raw stores' reservation test (0121) made stvx test the bitmap three
+times, through a global the compiler reloads after every store: 0.13 ms of
+the game thread exploring in 3D Dot Game Heroes, whose memory copies are
+stvx loops. Inside a lifted function stvx is now vm_raw_st16_mm: one test of
+the quadword's line through the snapshot's bitmap address (as the scalar
+stores test it), then the two 8-byte stores; outside, vm_raw_st16 tests once
+and stores directly.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ tools/ppu_lifter.py | 25 ++++++++++++++++++++++++-
+ 1 file changed, 24 insertions(+), 1 deletion(-)
+
+diff --git a/tools/ppu_lifter.py b/tools/ppu_lifter.py
+index 7fce799..0c02ef1 100644
+--- a/tools/ppu_lifter.py
++++ b/tools/ppu_lifter.py
+@@ -189,7 +189,9 @@ static inline void vm_raw_ld16(void* dst, uint64_t ea) {   /* quadword-aligned *
+ static inline void vm_raw_st16(uint64_t ea, const void* src) {   /* quadword-aligned: one line */
+     if (__builtin_expect(vm_coh_reserved((uint32_t)ea, 16), 0)) { vm_write_block_coh(ea, src, 16); return; }
+     uint64_t lo, hi; memcpy(&lo, src, 8); memcpy(&hi, (const uint8_t*)src + 8, 8);
+-    VM_RAW_ST(uint64_t, ea, lo); VM_RAW_ST(uint64_t, ea + 8, hi); }
++    uint8_t* p = vm_base + (uint32_t)ea;
++    __atomic_store_n((uint64_t*)p, lo, __ATOMIC_RELAXED);
++    __atomic_store_n((uint64_t*)(p + 8), hi, __ATOMIC_RELAXED); }
+ /* stvlx/stvrx: n bytes from src at ea, inside one quadword */
+ static inline void vm_raw_st_bytes(uint64_t ea, const uint8_t* src, uint32_t n) {
+     if (__builtin_expect(vm_coh_reserved((uint32_t)ea, n ? n : 1), 0)) { vm_write_block_coh(ea, src, n); return; }
+@@ -456,6 +458,24 @@ static inline void vm_write64_mm(const ppu_mm* m, uint64_t a, uint64_t v)
+     vm_write64(a, v);
+ }
+ #endif
++/* stvx (quadword-aligned: one 128-byte line), inside a lifted function: one
++ * test of the reservation bitmap through the function's snapshot, then the
++ * two 8-byte halves; a reserved line out of line, under the lock-line lock
++ * (vm_write_block_coh). The out-of-function form, vm_raw_st16, tests through
++ * the global. */
++static inline void vm_raw_st16_mm(const ppu_mm* m, uint64_t a, const void* src)
++{
++    const uint32_t ea = (uint32_t)a, line = ea >> 7;
++#ifndef PPU_RAW_ST_NO_COH
++    if (__builtin_expect((m->coh[line >> 3] >> (line & 7)) & 1u, 0)) { vm_write_block_coh(ea, src, 16); return; }
++#else
++    (void)line;
++#endif
++    uint64_t lo, hi; memcpy(&lo, src, 8); memcpy(&hi, (const uint8_t*)src + 8, 8);
++    uint8_t* p = m->vb + ea;
++    __atomic_store_n((uint64_t*)p, lo, __ATOMIC_RELAXED);
++    __atomic_store_n((uint64_t*)(p + 8), hi, __ATOMIC_RELAXED);
++}
+ /* Outside a lifted function: a fresh copy per access. */
+ static inline uint8_t  vm_read8_inl (uint64_t a) { const ppu_mm m = ppu_mm_take(); return vm_read8_mm(&m, a); }
+ static inline uint16_t vm_read16_inl(uint64_t a) { const ppu_mm m = ppu_mm_take(); return vm_read16_mm(&m, a); }
+@@ -849,6 +869,9 @@ static inline void ppu_icall_site(ppu_context* ctx, uint64_t* ic)
+ #define vm_write32(a, v) vm_write32_mm(&_mm, a, v)
+ #define vm_write64(a, v) vm_write64_mm(&_mm, a, v)
+ #endif
++/* stvx inside a lifted function: the function's snapshot of the reservation
++ * bitmap's address, one test for the quadword's one line (vm_raw_st16_mm). */
++#define vm_raw_st16(ea, src) vm_raw_st16_mm(&_mm, ea, src)
+ 
+ """
+ 
+-- 
+2.56.0.windows.3
+

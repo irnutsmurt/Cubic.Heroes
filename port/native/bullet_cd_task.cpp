@@ -38,6 +38,7 @@
 #include "bullet_cd.h"
 #include "bullet_solver_task.h"
 #include "dev_state.h"
+#include "phys_direct.h"
 #include "ps3emu/ps3_ftrace.h"
 #include "spu_workload.h"
 
@@ -396,6 +397,28 @@ void cd_after(uint32_t, uint32_t, const uint32_t arg[4])
 
 }  // namespace
 
+bool bullet_cd_direct_accept(const uint32_t entry[4])
+{
+    if (g_mode != 1 || entry[1] != kCmdGatherAndProcess || !entry[2]) return false;
+    char why[160];
+    return bullet_cd::supported(bullet_cd::Mem{ vm_base }, entry[2], why, sizeof why);
+}
+
+void bullet_cd_direct_run(const uint32_t entry[4])
+{
+    g_steps.fetch_add(1, std::memory_order_relaxed);
+    const uint32_t desc = entry[2];
+    bullet_cd::Result r;
+    native_run(bullet_cd::Mem{ vm_base }, desc, r, true, g_rz);
+    {
+        std::lock_guard<std::mutex> lk(g_mu);
+        for (const auto& o : r.manifolds) count_down(o.bytes, o.types, 1);
+    }
+    if (g_stats) record_census(desc);
+    g_native++;
+    count_task();
+}
+
 unsigned long long dotheroes_phys_steps() { return g_steps.load(std::memory_order_relaxed); }
 
 extern "C" void dotheroes_native_init(void)
@@ -407,10 +430,11 @@ extern "C" void dotheroes_native_init(void)
     g_stats = st && *st == '1';
     bullet_solver_init(g_stats);   // the solver task's own switches (bullet_solver_task.cpp)
     dev_state_init();              // benchmark aids (dev_state.cpp)
-    const char* ds = getenv("DOTHEROES_DEV_STATE");
-    if (g_mode == 0 && !g_stats && !(ds && *ds == '1')) return;   // the state file counts physics steps here
     const char* fp = getenv("DOTHEROES_NATIVE_CD_FP");
     g_rz = fp && !strcmp(fp, "rz");
+    phys_direct_init();            // R8: native tasks issued directly (phys_direct.cpp)
+    const char* ds = getenv("DOTHEROES_DEV_STATE");
+    if (g_mode == 0 && !g_stats && !(ds && *ds == '1')) return;   // the state file counts physics steps here
     const char* dump = getenv("DOTHEROES_NATIVE_CD_DUMP");
     g_dump_left = dump ? atoi(dump) : 0;
     spu_workload_native_register(kImageBulletCD, cd_run, cd_after);

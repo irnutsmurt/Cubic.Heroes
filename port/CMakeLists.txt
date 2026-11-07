@@ -101,6 +101,18 @@ if(DOTHEROES_NATIVE_RELEASE)
     # the NID table registers what this build compiles (no walker functions)
     set(HLE_NID_DEFINES --define PS3RECOMP_RSX_COMMAND_PATH=0)
 endif()
+# R8 (docs/NATIVE_R8.md): no SPU interpreter and no microstepper. Every SPU
+# image this game runs is lifted or replaced natively, so SPU code with no lift
+# stops the program with its image and address, whether strict mode is on or
+# off -- nothing is interpreted at run time. DOTHEROES_SPU_INTERPRETER=ON
+# brings both back for bring-up in a development build; a player package
+# (DOTHEROES_DEV_DIAGNOSTICS=OFF) and a native release refuse it.
+option(DOTHEROES_SPU_INTERPRETER "Development only: build the SPU interpreter and the microstepper" OFF)
+if(DOTHEROES_SPU_INTERPRETER AND
+   (DOTHEROES_NATIVE_RELEASE OR (DEFINED DOTHEROES_DEV_DIAGNOSTICS AND NOT DOTHEROES_DEV_DIAGNOSTICS)))
+    message(FATAL_ERROR "DOTHEROES_SPU_INTERPRETER is for development builds only")
+endif()
+set(PS3RECOMP_SPU_INTERPRETER ${DOTHEROES_SPU_INTERPRETER} CACHE BOOL "" FORCE)
 add_subdirectory("${PS3RECOMP_DIR}" "${CMAKE_BINARY_DIR}/ps3recomp_sdk"
                  EXCLUDE_FROM_ALL)
 
@@ -210,6 +222,13 @@ add_executable(${PROJECT_NAME}
     ${RECOMP_SOURCES}
     ${SPU_SOURCES}
 )
+# `dotheroes --memtest` (docs/NATIVE_R8.md section 5.3): the lifted loads'
+# checked and bare forms, compiled from this lift's ppu_recomp.h, tested
+# against the guest space.
+target_sources(${PROJECT_NAME} PRIVATE native/memtest.cpp native/memtest_checked.cpp native/memtest_bare.cpp)
+# R8's physics hooks (config/r8_hooks.json): the guest registers in and out of
+# native/phys_direct.cpp
+target_sources(${PROJECT_NAME} PRIVATE phys_hooks.cpp)
 
 # The lifted SPU sources use bare #include "spu_context.h". Scope that include
 # directory (and their flags) to those TUs alone: adding it to the whole target
@@ -259,6 +278,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 set(BULLET_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../build/deps/src/bullet-2.74" CACHE PATH
     "Bullet 2.74 source tree (tools/build_deps.py fetches it)")
 add_library(dotheroes_native STATIC native/bullet_cd_task.cpp native/bullet_solver_task.cpp native/bullet_solver.cpp
+    native/phys_direct.cpp
     native/dev_state.cpp native/inflate.c native/edge_inflate.c
     # R1's boundary capture and R3's recorder and target watch: linked only
     # when a development lift's entry observers reference them
@@ -319,10 +339,47 @@ if(DOTHEROES_NATIVE_RELEASE)
     # PPU_BARE_LOADS; a lift from before R8 ignores it). DOTHEROES_PPU_CHECKED_LOADS=ON
     # keeps the tests in a release build.
     option(DOTHEROES_PPU_CHECKED_LOADS "Keep the lifted loads' inline tests in a native release build" OFF)
-    if(NOT DOTHEROES_PPU_CHECKED_LOADS)
+    # Bare only where their assumptions are established (section 5.3): the
+    # whole guest space and a guard reserved, pages committed zero-filled on
+    # first touch (port/main.cpp's commit handler), x86-64's scalar loads.
+    # Elsewhere -- Linux's mapping is another mechanism, not yet tested --
+    # the loads stay checked.
+    if(DOTHEROES_PPU_CHECKED_LOADS)
+        message(STATUS "Lifted loads:    checked (DOTHEROES_PPU_CHECKED_LOADS)")
+    elseif(WIN32 AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|x86_64|X86_64|amd64)$")
         target_compile_definitions(${PROJECT_NAME} PRIVATE PPU_BARE_LOADS=1)
-        message(STATUS "Lifted loads:    bare (PPU_BARE_LOADS)")
+        message(STATUS "Lifted loads:    bare (PPU_BARE_LOADS; dotheroes --memtest tests what they rely on)")
+    else()
+        message(STATUS "Lifted loads:    checked (the bare loads are established on Windows x86-64 only)")
     endif()
+    # The guest stores (docs/NATIVE_R8.md section 5.4). checked: as R7 (the
+    # range and SPU reservation tests, then an aligned atomic store or a
+    # memcpy). mov: the same tests, then one store -- measured, the default on
+    # Windows x86-64. nocoh-measure and bare-measure leave out the reservation
+    # test, or every test: builds for measurement only, which refuse to start
+    # without DOTHEROES_MEASURE_ONLY=1.
+    if(WIN32 AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|x86_64|X86_64|amd64)$")
+        set(_stores_default mov)
+    else()
+        set(_stores_default checked)
+    endif()
+    set(DOTHEROES_PPU_STORES "${_stores_default}" CACHE STRING
+        "The lifted code's guest stores: checked, mov, nocoh-measure, bare-measure")
+    set_property(CACHE DOTHEROES_PPU_STORES PROPERTY STRINGS checked mov nocoh-measure bare-measure)
+    if(NOT DOTHEROES_PPU_STORES STREQUAL "checked" AND
+       NOT (WIN32 AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|x86_64|X86_64|amd64)$"))
+        message(FATAL_ERROR "DOTHEROES_PPU_STORES=${DOTHEROES_PPU_STORES} is established on Windows x86-64 only")
+    endif()
+    if(DOTHEROES_PPU_STORES STREQUAL "mov")
+        target_compile_definitions(${PROJECT_NAME} PRIVATE PPU_STORE_MOV=1)
+    elseif(DOTHEROES_PPU_STORES STREQUAL "nocoh-measure")
+        target_compile_definitions(${PROJECT_NAME} PRIVATE PPU_STORES_NO_COH_MEASURE=1)
+    elseif(DOTHEROES_PPU_STORES STREQUAL "bare-measure")
+        target_compile_definitions(${PROJECT_NAME} PRIVATE PPU_STORES_BARE_MEASURE=1)
+    elseif(NOT DOTHEROES_PPU_STORES STREQUAL "checked")
+        message(FATAL_ERROR "DOTHEROES_PPU_STORES: checked, mov, nocoh-measure or bare-measure")
+    endif()
+    message(STATUS "Lifted stores:   ${DOTHEROES_PPU_STORES}")
 endif()
 
 # The runtime is C++, and on Apple also Objective-C. Letting CMake infer the

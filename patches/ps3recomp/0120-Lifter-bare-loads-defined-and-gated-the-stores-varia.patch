@@ -1,0 +1,361 @@
+From 9613db9d658999eafc1b6eb02ffebafc85cafffd Mon Sep 17 00:00:00 2001
+From: giteaguy <73799093+irnutsmurt@users.noreply.github.com>
+Date: Fri, 6 Nov 2026 19:28:16 -0800
+Subject: [PATCH 120/120] Lifter: bare loads defined and gated, the stores'
+ variants, hooks that may decline
+
+PPU_BARE_LOADS: a guest load is a volatile load through an alignment-1
+type and its byte swap -- defined for a misaligned address (the atomic
+builtin was not), one instruction, never hoisted out of a spin; #error
+unless x86-64 with clang or GCC. The runtime checks what it can see when the
+guest starts (ppu_mm_publish): the guest space mapped and unbounded, no read
+diagnostic set (the lifted loads no longer pass through one); a guest call
+before the model's publication is fatal; creating a raw SPU (whose
+problem-state loads have side effects) is fatal.
+
+The stores: PPU_STORE_MOV keeps the range and SPU reservation tests and
+makes the store one volatile alignment-1 store. PPU_STORES_NO_COH_MEASURE
+(no reservation test) and PPU_STORES_BARE_MEASURE (no test) are for
+measurement only: the runtime refuses to start them without
+DOTHEROES_MEASURE_ONLY=1.
+
+Entry hooks may decline ("decline": true): `if (guard && host(ctx))
+return;`, the host returning int -- a direct per-function hook that can
+leave the call to the lifted body. --insn-patches may be given more than
+once; the files' patches and hooks are merged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ runtime/ppu/ppu_loader.cpp |  48 +++++++++++++
+ runtime/spu/spu_raw.c      |  10 +++
+ tools/ppu_lifter.py        | 138 ++++++++++++++++++++++++++++++-------
+ 3 files changed, 173 insertions(+), 23 deletions(-)
+
+diff --git a/runtime/ppu/ppu_loader.cpp b/runtime/ppu/ppu_loader.cpp
+index 59e541b..b15e776 100644
+--- a/runtime/ppu/ppu_loader.cpp
++++ b/runtime/ppu/ppu_loader.cpp
+@@ -1731,9 +1731,49 @@ static struct VmInlineInit {
+  * Threads that run guest code start after it (or are given guest code to run
+  * after it), and the fence orders it ahead of anything they are handed. */
+ extern "C" ppu_mm g_ppu_mm = {};
++#ifdef PPU_BARE_LOADS
++extern "C" int g_ppu_bare_loads;   /* spu_raw.c: a raw SPU is fatal with bare loads */
++#endif
+ static void ppu_mm_publish(void)
+ {
+     g_ppu_mm = ppu_mm_compute();
++#if defined(PPU_STORES_BARE_MEASURE) || defined(PPU_STORES_NO_COH_MEASURE)
++    {   /* ppu_recomp.h: a store variant that is wrong to play on */
++        const char* mo = getenv("DOTHEROES_MEASURE_ONLY");
++        if (!(mo && mo[0] == '1'))
++            ps3_fatal("measurement-build", "this build's guest stores skip %s: it is for measurement "
++                      "(DOTHEROES_MEASURE_ONLY=1), never for play",
++#  ifdef PPU_STORES_BARE_MEASURE
++                      "every test (the null page, the SPU reservations)"
++#  else
++                      "the SPU reservation test"
++#  endif
++                      );
++        fprintf(stderr, "[ppu] MEASUREMENT BUILD: guest stores without %s\n",
++#  ifdef PPU_STORES_BARE_MEASURE
++                "any test"
++#  else
++                "the SPU reservation test"
++#  endif
++                );
++    }
++#endif
++#ifdef PPU_BARE_LOADS
++    /* The bare loads' assumptions the runtime can see (ppu_recomp.h, docs
++     * NATIVE_R8.md section 5.3); the platform's are the port's to check. */
++    {
++        if (!g_ppu_mm.vb)
++            ps3_fatal("bare-loads", "the guest space is not mapped when the guest starts");
++        if (ppu_vm_size != 0)
++            ps3_fatal("bare-loads", "the guest space is bounded (ppu_vm_size 0x%08X): the bare loads "
++                      "need all of it reserved", ppu_vm_size);
++        if (!vm_inline_ok)
++            ps3_fatal("bare-loads", "a read diagnostic (PPU_RWATCH, PPU_FORCE_READ_ADDR, YDKJ_RWATCH, PPU_RVAL, "
++                      "PPU_RVAL64, PPU_HOTMAP, PPU_HOTREAD, PPU_SPINBT) is set, and the lifted code's loads do not "
++                      "pass through it in this build: use a build with checked loads");
++        g_ppu_bare_loads = 1;
++    }
++#endif
+     std::atomic_thread_fence(std::memory_order_seq_cst);
+     fprintf(stderr, "[ppu] memory model: base %p, loads to 0x%08llX, stores to 0x%08llX, poll word 0x%08X\n",
+             (void*)g_ppu_mm.vb, (unsigned long long)(0x10000 + g_ppu_mm.ld_span),
+@@ -4238,6 +4278,10 @@ extern "C" uint64_t ppu_guest_call(uint32_t opd_addr,
+                                    uint64_t a4, uint64_t a5, uint64_t a6, uint64_t a7)
+ {
+     if (!opd_addr) return 0;
++#if defined(PPU_BARE_LOADS) && defined(PPU_MM_GLOBAL)
++    if (__builtin_expect(!g_ppu_mm.vb, 0))   /* the bare loads would read through a NULL base */
++        ps3_fatal("bare-loads", "a guest call (0x%08X) before the memory model is published", opd_addr);
++#endif
+     uint32_t code = 0, toc = 0;
+     ppu_opd_resolve(opd_addr, &code, &toc);
+     ppu_fn fn = ppu_lookup(code);
+@@ -4296,6 +4340,10 @@ extern "C" uint64_t ppu_guest_call_ct(uint32_t code, uint32_t toc,
+                                       uint64_t a4, uint64_t a5, uint64_t a6, uint64_t a7)
+ {
+     if (!code) return 0;
++#if defined(PPU_BARE_LOADS) && defined(PPU_MM_GLOBAL)
++    if (__builtin_expect(!g_ppu_mm.vb, 0))
++        ps3_fatal("bare-loads", "a guest call (0x%08X) before the memory model is published", code);
++#endif
+     ppu_fn fn = ppu_lookup(code);
+     if (!fn) { fprintf(stderr, "[ppu] guest_call_ct: code 0x%08X not registered\n", code); return 0; }
+ 
+diff --git a/runtime/spu/spu_raw.c b/runtime/spu/spu_raw.c
+index be77bfd..a77a140 100644
+--- a/runtime/spu/spu_raw.c
++++ b/runtime/spu/spu_raw.c
+@@ -30,6 +30,7 @@
+ #include "spu_context.h"
+ #include "spu_workload.h"
+ #include "spu_lifted_job.h"
++#include "ps3emu/ps3_strict.h"
+ #include "../syscalls/lv2_syscall_table.h"
+ #include "../../include/ps3emu/error_codes.h"
+ #include "ps3emu/nid.h"      /* ps3_compute_nid */
+@@ -642,9 +643,18 @@ int spu_raw_reg_load(uint32_t ea, uint32_t* out)
+ /* ---------------------------------------------------------------------------
+  * Syscalls
+  * -----------------------------------------------------------------------*/
++/* Set by the scaffold (ppu_loader.cpp's ppu_mm_publish) when the lifted code
++ * was compiled with PPU_BARE_LOADS: its guest loads read memory directly, so
++ * a load of a raw SPU's outbound mailbox would not pop it (spu_raw_reg_load).
++ * A title that creates a raw SPU needs the checked loads. */
++int g_ppu_bare_loads = 0;
++
+ /* 160: sys_raw_spu_create(u32* id, void* attr) */
+ static int64_t sc_raw_spu_create(ppu_context* ctx)
+ {
++    if (g_ppu_bare_loads)
++        ps3_fatal("raw-spu-bare-loads", "the title creates a raw SPU, whose problem-state loads have "
++                  "side effects the bare loads (PPU_BARE_LOADS) skip: build with checked loads");
+     uint32_t id_ea = (uint32_t)ctx->gpr[3];
+     for (uint32_t n = 0; n < SPU_RAW_COUNT; n++) {
+         if (s_spu[n].used) continue;
+diff --git a/tools/ppu_lifter.py b/tools/ppu_lifter.py
+index d056797..21f9ce1 100644
+--- a/tools/ppu_lifter.py
++++ b/tools/ppu_lifter.py
+@@ -247,21 +247,63 @@ static inline int vm_mm_st_ok(const ppu_mm* m, uint32_t ea, uint32_t n)
+  * its byte swap, nothing else. The tests above are for what this build does
+  * not have or does not need: the GCM poll word (the native front end writes
+  * the reference itself: cellGcm_ref_on_poll returns at once), the raw SPU
+- * windows (no raw SPU), the null page and the space past the mapping (on
+- * Windows the whole 4 GB is reserved and a page is committed, zero-filled,
+- * on first touch: a stray load reads 0 as the slow path's did, without its
+- * report), and a span of 0 while a read diagnostic is armed (development
+- * builds keep the tests and their diagnostics). The tests and their slow
+- * paths were a fifth of the main thread's time (docs/NATIVE_R8.md). Loads
+- * stay relaxed atomics: a spin on a guest word is not hoisted. */
++ * windows (no raw SPU: creating one is fatal in this build), the null page
++ * and the space past the mapping (on Windows the whole 4 GB and a 64 KB guard
++ * are one reservation, a page committed zero-filled on first touch: a stray
++ * load reads what the slow path read, without its report), and a span of 0
++ * while a read diagnostic is armed (fatal in this build: development builds
++ * keep the tests and their diagnostics). The tests and their slow paths were
++ * a fifth of the main thread's time (docs/NATIVE_R8.md section 5).
++ *
++ * What the bare load relies on (docs/NATIVE_R8.md section 5.3; tested by
++ * `dotheroes --memtest`):
++ *  - x86-64: any alignment is a legal scalar load, and an access of 1, 2, 4
++ *    or 8 bytes that is naturally aligned is single-copy atomic, as on Cell.
++ *    A misaligned one is not (it is not on Cell either). Hence the #error.
++ *  - volatile, alignment 1: defined for a misaligned address (an atomic
++ *    builtin is not), one instruction (LLVM does not split or merge a
++ *    volatile access of a legal width), and never hoisted out of a spin on a
++ *    guest word nor dropped.
++ *  - the model is published before any lifted code runs (ppu_run; a guest
++ *    call before it is fatal in this build): the base is never NULL.
++ *  - a 32-bit address plus at most 7 bytes stays inside the reservation: the
++ *    64 KB guard past 4 GB is reserved and committed on touch too. */
++/* The store side (R8). PPU_STORE_MOV: a store that passes the tests is one
++ * volatile alignment-1 store of the byte-swapped value -- the aligned
++ * atomic-or-memcpy choice was a branch on every store, and on x86-64 both
++ * arms are the same single mov. The tests stay: the range (a store below
++ * 0x10000 or past 0xE0000000 goes out of line, where the first 4 KB is
++ * dropped as hardware drops it), a store diagnostic's span of 0, and the SPU
++ * reservation bitmap (a store to a line an SPU holds a reservation on takes
++ * the lock-line lock and breaks the reservation).
++ *
++ * PPU_STORES_NO_COH_MEASURE and PPU_STORES_BARE_MEASURE are measurement
++ * builds only (docs/NATIVE_R8.md section 5.4): the first leaves out the
++ * reservation test -- a change of synchronisation, wrong while any SPU code
++ * can hold a reservation on a line the PPU writes -- the second every test.
++ * The runtime refuses to start either unless DOTHEROES_MEASURE_ONLY=1. */
++#if defined(PPU_STORES_BARE_MEASURE) || defined(PPU_STORES_NO_COH_MEASURE)
++#  ifndef PPU_STORE_MOV
++#    define PPU_STORE_MOV 1
++#  endif
++#endif
++#if defined(PPU_BARE_LOADS) || defined(PPU_STORE_MOV)
++#if !(defined(__x86_64__) || defined(_M_X64)) || !(defined(__clang__) || defined(__GNUC__))
++#error "PPU_BARE_LOADS and PPU_STORE_MOV are established for x86-64 with clang or GCC only (docs/NATIVE_R8.md section 5.3)"
++#endif
++typedef uint16_t ppu_bare_u16 __attribute__((aligned(1), may_alias));
++typedef uint32_t ppu_bare_u32 __attribute__((aligned(1), may_alias));
++typedef uint64_t ppu_bare_u64 __attribute__((aligned(1), may_alias));
++#endif
+ #ifdef PPU_BARE_LOADS
+-static inline uint8_t vm_read8_mm(const ppu_mm* m, uint64_t a) { return __atomic_load_n(m->vb + (uint32_t)a, __ATOMIC_RELAXED); }
++static inline uint8_t vm_read8_mm(const ppu_mm* m, uint64_t a)
++{ return *(const volatile uint8_t*)(m->vb + (uint32_t)a); }
+ static inline uint16_t vm_read16_mm(const ppu_mm* m, uint64_t a)
+-{ return __builtin_bswap16(__atomic_load_n((const uint16_t*)(m->vb + (uint32_t)a), __ATOMIC_RELAXED)); }
++{ return __builtin_bswap16(*(const volatile ppu_bare_u16*)(m->vb + (uint32_t)a)); }
+ static inline uint32_t vm_read32_mm(const ppu_mm* m, uint64_t a)
+-{ return __builtin_bswap32(__atomic_load_n((const uint32_t*)(m->vb + (uint32_t)a), __ATOMIC_RELAXED)); }
++{ return __builtin_bswap32(*(const volatile ppu_bare_u32*)(m->vb + (uint32_t)a)); }
+ static inline uint64_t vm_read64_mm(const ppu_mm* m, uint64_t a)
+-{ return __builtin_bswap64(__atomic_load_n((const uint64_t*)(m->vb + (uint32_t)a), __ATOMIC_RELAXED)); }
++{ return __builtin_bswap64(*(const volatile ppu_bare_u64*)(m->vb + (uint32_t)a)); }
+ #else
+ static inline uint8_t vm_read8_mm(const ppu_mm* m, uint64_t a)
+ {
+@@ -305,6 +347,39 @@ static inline uint64_t vm_read64_mm(const ppu_mm* m, uint64_t a)
+     return vm_read64(a);
+ }
+ #endif
++#if defined(PPU_STORE_MOV)
++#if defined(PPU_STORES_BARE_MEASURE)
++#  define PPU_ST_OK(m, ea, n) 1
++#elif defined(PPU_STORES_NO_COH_MEASURE)
++#  define PPU_ST_OK(m, ea, n) vm_mm_in((m)->st_span, (ea), (n))
++#else
++#  define PPU_ST_OK(m, ea, n) vm_mm_st_ok((m), (ea), (n))
++#endif
++static inline void vm_write8_mm(const ppu_mm* m, uint64_t a, uint8_t v)
++{
++    const uint32_t ea = (uint32_t)a;
++    if (__builtin_expect(PPU_ST_OK(m, ea, 1), 1)) { *(volatile uint8_t*)(m->vb + ea) = v; return; }
++    vm_write8(a, v);
++}
++static inline void vm_write16_mm(const ppu_mm* m, uint64_t a, uint16_t v)
++{
++    const uint32_t ea = (uint32_t)a;
++    if (__builtin_expect(PPU_ST_OK(m, ea, 2), 1)) { *(volatile ppu_bare_u16*)(m->vb + ea) = __builtin_bswap16(v); return; }
++    vm_write16(a, v);
++}
++static inline void vm_write32_mm(const ppu_mm* m, uint64_t a, uint32_t v)
++{
++    const uint32_t ea = (uint32_t)a;
++    if (__builtin_expect(PPU_ST_OK(m, ea, 4), 1)) { *(volatile ppu_bare_u32*)(m->vb + ea) = __builtin_bswap32(v); return; }
++    vm_write32(a, v);
++}
++static inline void vm_write64_mm(const ppu_mm* m, uint64_t a, uint64_t v)
++{
++    const uint32_t ea = (uint32_t)a;
++    if (__builtin_expect(PPU_ST_OK(m, ea, 8), 1)) { *(volatile ppu_bare_u64*)(m->vb + ea) = __builtin_bswap64(v); return; }
++    vm_write64(a, v);
++}
++#else
+ static inline void vm_write8_mm(const ppu_mm* m, uint64_t a, uint8_t v)
+ {
+     const uint32_t ea = (uint32_t)a;
+@@ -341,6 +416,7 @@ static inline void vm_write64_mm(const ppu_mm* m, uint64_t a, uint64_t v)
+         return; }
+     vm_write64(a, v);
+ }
++#endif
+ /* Outside a lifted function: a fresh copy per access. */
+ static inline uint8_t  vm_read8_inl (uint64_t a) { const ppu_mm m = ppu_mm_take(); return vm_read8_mm(&m, a); }
+ static inline uint16_t vm_read16_inl(uint64_t a) { const ppu_mm m = ppu_mm_take(); return vm_read16_mm(&m, a); }
+@@ -932,16 +1008,19 @@ def load_insn_patches(path: str) -> dict[int, tuple[int, int, str]]:
+     return out
+ 
+ 
+-def load_entry_hooks(path: str) -> dict[int, tuple[str, str]]:
++def load_entry_hooks(path: str) -> dict[int, tuple[str, str, bool]]:
+     """Read the entry hooks of an --insn-patches file:
+ 
+         {"entry_hooks": [{"addr": "0x000A2C14", "host": "port_round_step",
+                           "guard": "g_port_round_step", "note": "..."}, ...]}
+ 
+-    -> {addr: (host, guard)}. A hooked function begins with
++    -> {addr: (host, guard, decline)}. A hooked function begins with
+     `if (guard) { host(ctx); return; }`: with the guard set, the port's host
+     function runs in its place -- for a replacement that needs state or host
+-    code, which an instruction patch cannot give."""
++    code, which an instruction patch cannot give. With "decline": true the
++    host returns int and may leave the call to the lifted body:
++    `if (guard && host(ctx)) return;` -- one direct call, not the generic
++    entry-observer dispatch."""
+     with open(path) as f:
+         spec = json.load(f)
+     out: dict[int, tuple[str, str]] = {}
+@@ -953,7 +1032,7 @@ def load_entry_hooks(path: str) -> dict[int, tuple[str, str]]:
+                 sys.exit(f"[ppu_lifter] {path}: {name!r} is not a C identifier")
+         if addr & 3 or addr in out:
+             sys.exit(f"[ppu_lifter] {path}: bad or duplicate entry hook 0x{addr:08X}")
+-        out[addr] = (host, guard)
++        out[addr] = (host, guard, bool(e.get("decline", False)))
+     return out
+ 
+ 
+@@ -4399,10 +4478,11 @@ class PPULifter:
+         # An --insn-patches entry hook: the port's host function in place of this one.
+         hook = getattr(self, "entry_hooks", {}).get(func.start_addr)
+         if hook:
+-            host, guard = hook
++            host, guard, decline = hook
++            rt = "int" if decline else "void"
+             lines += ["#ifdef __cplusplus", f'extern "C" int {guard};',
+-                      f'extern "C" void {host}(ppu_context* ctx);', "#else",
+-                      f"extern int {guard};", f"void {host}(ppu_context* ctx);", "#endif"]
++                      f'extern "C" {rt} {host}(ppu_context* ctx);', "#else",
++                      f"extern int {guard};", f"{rt} {host}(ppu_context* ctx);", "#endif"]
+         observed = func.start_addr in getattr(self, "entry_observers", ())
+         if observed:
+             lines += ["#ifndef PPU_OBS_DECLARED", "#define PPU_OBS_DECLARED",
+@@ -4435,7 +4515,11 @@ class PPULifter:
+             lines.append(f"void {weak}{func.name}(ppu_context* ctx) {{")
+         lines.append("    PPU_MM_SNAP")
+         if hook:
+-            lines.append(f"    if ({hook[1]}) {{ {hook[0]}(ctx); return; }}  "
++            if hook[2]:
++                lines.append(f"    if ({hook[1]} && {hook[0]}(ctx)) return;  "
++                             f"/* entry hook 0x{func.start_addr:08X}: may decline */")
++            else:
++              lines.append(f"    if ({hook[1]}) {{ {hook[0]}(ctx); return; }}  "
+                          f"/* entry hook 0x{func.start_addr:08X} */")
+         if any("_sjf.arm(" in bl for bl in func.body_lines):
+             lines.append("    ps3_sjlj_frame _sjf;")
+@@ -5335,7 +5419,7 @@ def main() -> None:
+                         help="JSON {observers:[{addr}]}: functions whose entry calls the "
+                              "port's ppu_entry_observe(addr, ctx) while g_ppu_entry_observe "
+                              "is set, then runs the lifted body unchanged (development lifts)")
+-    parser.add_argument("--insn-patches", metavar="FILE", default=None,
++    parser.add_argument("--insn-patches", metavar="FILE", default=None, action="append",
+                         help="JSON list of instruction patches to lift as "
+                              "run-time switches: each {addr, orig, new, guard} "
+                              "is emitted as `if (guard) {new} else {orig}`, guard "
+@@ -5804,10 +5888,18 @@ def main() -> None:
+         print(f"  sjlj: setjmp {sorted(hex(a) for a in lifter.sjlj_setjmp)} "
+               f"longjmp {sorted(hex(a) for a in lifter.sjlj_longjmp)}")
+     if args.insn_patches:
+-        lifter.insn_patches = load_insn_patches(args.insn_patches)
+-        lifter.entry_hooks = load_entry_hooks(args.insn_patches)
++        # Repeatable: each file's patches and entry hooks, merged; an address
++        # in two files is an error, as within one.
++        lifter.insn_patches, lifter.entry_hooks = {}, {}
++        for path in args.insn_patches:
++            p, h = load_insn_patches(path), load_entry_hooks(path)
++            both = (set(p) & set(lifter.insn_patches)) | (set(h) & set(lifter.entry_hooks))
++            if both:
++                sys.exit(f"[ppu_lifter] {path}: 0x{min(both):08X} is patched or hooked in an earlier file too")
++            lifter.insn_patches.update(p)
++            lifter.entry_hooks.update(h)
+         print(f"  insn-patches: {len(lifter.insn_patches)}, entry hooks: {len(lifter.entry_hooks)} "
+-              f"from {args.insn_patches}")
++              f"from {', '.join(args.insn_patches)}")
+ 
+     if args.entry_observers:
+         lifter.entry_observers = load_entry_observers(args.entry_observers)
+-- 
+2.56.0.windows.3
+

@@ -137,7 +137,10 @@ SHIP_FLAGS = ["-g0"] + [f"-ffile-prefix-map={d}={to}" for d, to in ((ROOT, "."),
                         for d in sorted({d, d.replace(os.sep, "/")})]
 SCAFFOLD = ["runtime/ppu/ppu_loader.cpp", "runtime/ppu/ppu_hle.cpp", "runtime/ppu/ppu_fs.cpp",
             "runtime/ppu/ppu_sysprx.cpp"]
-PORT_SOURCES = ["main.cpp", "stubs.cpp", "game_patches.cpp", "diag/diag.cpp"]
+# The executable's own sources (port/CMakeLists.txt's add_executable and
+# target_sources, less the lift and the runtime): main.cpp calls into each.
+PORT_SOURCES = ["main.cpp", "stubs.cpp", "game_patches.cpp", "cpu_place.cpp", "phys_hooks.cpp", "diag/diag.cpp",
+                "native/memtest.cpp", "native/memtest_checked.cpp", "native/memtest_bare.cpp"]
 RUNTIME_LIB = "libps3recomp_runtime.a"
 NATIVE_LIB = "libdotheroes_native.a"   # port/native: the native SPU-task replacements (Bullet 2.74 in it)
 

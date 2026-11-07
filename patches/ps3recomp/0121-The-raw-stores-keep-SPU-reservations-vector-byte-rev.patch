@@ -1,0 +1,147 @@
+From 5075cc18b7b1dcdb7bfd69a1d5de5914e0f592fd Mon Sep 17 00:00:00 2001
+From: giteaguy <73799093+irnutsmurt@users.noreply.github.com>
+Date: Fri, 6 Nov 2026 21:22:36 -0800
+Subject: [PATCH] The raw stores keep SPU reservations: vector, byte-reversed,
+ dcbz
+
+The lifted code's raw stores -- stvx and the element and unaligned vector
+stores, stwbrx/sthbrx/stdbrx, dcbz -- wrote guest memory directly, without
+the SPU reservation test the scalar stores make: an SPU holding a
+reservation on such a line had its PUTLLC succeed over the PPU's write.
+Each now tests the bitmap for its line or lines and, reserved, writes under
+the lock-line lock and breaks the reservation (vm_write_block_coh,
+vm_zero_block_coh), as VM_WRITE_COH does a scalar store's.
+PPU_RAW_ST_NO_COH keeps the old form, for measuring the change.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ runtime/ppu/ppu_loader.cpp | 22 +++++++++++++++
+ tools/ppu_lifter.py        | 55 +++++++++++++++++++++++++++++++++-----
+ 2 files changed, 70 insertions(+), 7 deletions(-)
+
+diff --git a/runtime/ppu/ppu_loader.cpp b/runtime/ppu/ppu_loader.cpp
+index b15e776..d268092 100644
+--- a/runtime/ppu/ppu_loader.cpp
++++ b/runtime/ppu/ppu_loader.cpp
+@@ -2315,6 +2315,28 @@ static __attribute__((noinline)) void barrier_watch_hit_slow(uint32_t a, uint32_
+     }
+ }
+ 
++/* The lifted code's raw stores to a line an SPU holds a reservation on
++ * (ppu_recomp.h's VM_RAW_ST, vm_raw_st16, vm_raw_st_bytes, vm_raw_zero_line:
++ * vector, byte-reversed, dcbz): the write under the lock-line lock, each line
++ * it touches told (spu_coh_notify_write), as VM_WRITE_COH does a scalar
++ * store's. */
++extern "C" void vm_write_block_coh(uint64_t a, const void* src, uint32_t n)
++{
++    const uint32_t ea = (uint32_t)a;
++    spu_lockline_lock();
++    memcpy(vm_base + ea, src, n);
++    for (uint32_t l = ea & ~127u; l < ea + n; l += 128u) spu_coh_notify_write(l);
++    spu_lockline_unlock();
++}
++extern "C" void vm_zero_block_coh(uint64_t a, uint32_t n)
++{
++    const uint32_t ea = (uint32_t)a;
++    spu_lockline_lock();
++    memset(vm_base + ea, 0, n);
++    for (uint32_t l = ea & ~127u; l < ea + n; l += 128u) spu_coh_notify_write(l);
++    spu_lockline_unlock();
++}
++
+ /* See the note on the forward declaration above ppu_stwcx32. */
+ extern "C" void ppu_ww_note_atomic(uint32_t ea, uint32_t val, int width, void* ra)
+ {
+diff --git a/tools/ppu_lifter.py b/tools/ppu_lifter.py
+index 21f9ce1..7fce799 100644
+--- a/tools/ppu_lifter.py
++++ b/tools/ppu_lifter.py
+@@ -151,15 +151,54 @@ extern uint8_t* vm_base;
+ #define VM_RAW_LD(T, ea) ({ const uint8_t* _p = vm_base + (uint32_t)(ea); T _v; \
+     if (!((uintptr_t)_p & (sizeof(T) - 1))) _v = __atomic_load_n((const T*)_p, __ATOMIC_RELAXED); \
+     else memcpy(&_v, _p, sizeof(T)); _v; })
+-#define VM_RAW_ST(T, ea, val) do { uint8_t* _p = vm_base + (uint32_t)(ea); T _v = (val); \
++/* The raw stores -- vector (stvx and the element and unaligned forms),
++ * byte-reversed, dcbz -- keep the SPU reservations as the scalar stores do
++ * (R8, docs/NATIVE_R8.md section 5.4): a store to a line an SPU holds a
++ * reservation on goes out of line, where it takes the lock-line lock, writes
++ * and breaks the reservation. They did not before: such a store left an
++ * SPU's PUTLLC to succeed over it. PPU_RAW_ST_NO_COH keeps the old form (for
++ * measuring the change). */
++#ifdef __cplusplus
++extern "C" {
++#endif
++extern const unsigned char* const g_spu_coh_map;
++void vm_write_block_coh(uint64_t ea, const void* src, uint32_t n);
++void vm_zero_block_coh(uint64_t ea, uint32_t n);
++#ifdef __cplusplus
++}
++#endif
++static inline int vm_coh_reserved(uint32_t ea, uint32_t n)
++{
++#ifdef PPU_RAW_ST_NO_COH
++    (void)ea; (void)n; return 0;
++#else
++    const uint32_t l0 = ea >> 7, l1 = (uint32_t)(ea + n - 1) >> 7;
++    int r = (g_spu_coh_map[l0 >> 3] >> (l0 & 7)) & 1;
++    if (l1 != l0) r |= (g_spu_coh_map[l1 >> 3] >> (l1 & 7)) & 1;
++    return r;
++#endif
++}
++#define VM_RAW_ST(T, ea, val) do { const uint32_t _rea = (uint32_t)(ea); T _v = (val); \
++    if (__builtin_expect(vm_coh_reserved(_rea, sizeof(T)), 0)) { vm_write_block_coh(_rea, &_v, sizeof(T)); break; } \
++    uint8_t* _p = vm_base + _rea; \
+     if (!((uintptr_t)_p & (sizeof(T) - 1))) __atomic_store_n((T*)_p, _v, __ATOMIC_RELAXED); \
+     else memcpy(_p, &_v, sizeof(T)); } while (0)
+ static inline void vm_raw_ld16(void* dst, uint64_t ea) {   /* quadword-aligned */
+     uint64_t lo = VM_RAW_LD(uint64_t, ea), hi = VM_RAW_LD(uint64_t, ea + 8);
+     memcpy(dst, &lo, 8); memcpy((uint8_t*)dst + 8, &hi, 8); }
+-static inline void vm_raw_st16(uint64_t ea, const void* src) {
++static inline void vm_raw_st16(uint64_t ea, const void* src) {   /* quadword-aligned: one line */
++    if (__builtin_expect(vm_coh_reserved((uint32_t)ea, 16), 0)) { vm_write_block_coh(ea, src, 16); return; }
+     uint64_t lo, hi; memcpy(&lo, src, 8); memcpy(&hi, (const uint8_t*)src + 8, 8);
+     VM_RAW_ST(uint64_t, ea, lo); VM_RAW_ST(uint64_t, ea + 8, hi); }
++/* stvlx/stvrx: n bytes from src at ea, inside one quadword */
++static inline void vm_raw_st_bytes(uint64_t ea, const uint8_t* src, uint32_t n) {
++    if (__builtin_expect(vm_coh_reserved((uint32_t)ea, n ? n : 1), 0)) { vm_write_block_coh(ea, src, n); return; }
++    uint8_t* m = vm_base + (uint32_t)ea;
++    for (uint32_t i = 0; i < n; i++) m[i] = src[i]; }
++/* dcbz: the 128-byte line at ea */
++static inline void vm_raw_zero_line(uint64_t ea) {
++    if (__builtin_expect(vm_coh_reserved((uint32_t)ea, 128), 0)) { vm_zero_block_coh(ea, 128); return; }
++    memset(vm_base + (uint32_t)ea, 0, 128); }
+ extern int      vm_inline_ok;
+ extern int      vm_inline_st_ok;
+ extern uint32_t ppu_vm_size;
+@@ -3061,13 +3100,15 @@ class PPULifter:
+         if mn in ("stvlx", "stvlxl", "stvrx", "stvrxl"):
+             vs = int(ops[0][1:]) if ops[0].startswith("v") else _reg_idx(ops[0])
+             ra, rb = _reg_idx(ops[1]), _reg_idx(ops[2])
++            # stvlx: vS's first 16-sh bytes to EA..the quadword's end; stvrx:
++            # its last sh bytes to the quadword's start. One contiguous range
++            # each (vm_raw_st_bytes: the reservation test, R8).
+             if mn.startswith("stvl"):
+-                loop = "for (uint32_t i = 0; i < 16u - sh; i++) m[sh + i] = s[i];"
++                st = "vm_raw_st_bytes(ea, s, 16u - sh);"
+             else:
+-                loop = "for (uint32_t i = 16u - sh; i < 16u; i++) m[i - (16u - sh)] = s[i];"
++                st = "vm_raw_st_bytes(ea & ~0xFULL, s + (16u - sh), sh);"
+             return (f"{{ uint64_t ea = {_xea(ra, rb)}; uint32_t sh = (uint32_t)(ea & 0xF); "
+-                    f"uint8_t* m = vm_base + (uint32_t)(ea & ~0xFULL); "
+-                    f"const uint8_t* s = (const uint8_t*)&ctx->vr[{vs}]; {loop} }}")
++                    f"const uint8_t* s = (const uint8_t*)&ctx->vr[{vs}]; {st} }}")
+ 
+         if mn == "lwaux":
+             rd, ra, rb = _reg_idx(ops[0]), _reg_idx(ops[1]), _reg_idx(ops[2])
+@@ -3172,7 +3213,7 @@ class PPULifter:
+             ra = _reg_idx(ops[0])
+             rb = _reg_idx(ops[1])
+             return (f"{{ uint64_t ea = ({_xea(ra,rb)}) & ~0x7FULL; "
+-                    f"memset(vm_base + (uint32_t)ea, 0, 128); }}")
++                    f"vm_raw_zero_line(ea); }}")
+ 
+         if mn in ("dcbt", "dcbtst", "dcbf", "dcbst", "dcba", "icbi"):
+             return f"/* {mn}: cache hint, no-op */;"
+-- 
+2.56.0.windows.3
+

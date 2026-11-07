@@ -1,0 +1,19 @@
+{
+ "_comment": "R8's entry hooks (docs/NATIVE_R8.md section 6.1), lifted beside config/insn_patches.json (tools/r8_lift.sh passes both). Each may decline: the lifted body then runs as before.",
+ "entry_hooks": [
+  {
+   "addr": "0x00955CF0",
+   "host": "dotheroes_phys_issue",
+   "guard": "g_phys_direct",
+   "decline": true,
+   "note": "the issue of one Bullet task (collision or solver): cellSpursCreateTask, then cellSpursQueuePushBody of its entry. A task whose work is native becomes a native job (port/native/phys_direct.cpp); any other is declined"
+  },
+  {
+   "addr": "0x00955BD4",
+   "host": "dotheroes_phys_poll",
+   "guard": "g_phys_direct",
+   "decline": true,
+   "note": "the wait for one task of a manager: non-blocking cellSpursQueuePopBody round the slots. Done natively while the hooks are on (native completions, and the SPURS queues of lifted tasks)"
+  }
+ ]
+}
