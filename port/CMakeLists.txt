@@ -314,6 +314,15 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
 if(DOTHEROES_NATIVE_RELEASE)
     target_compile_definitions(dotheroes_native PRIVATE DOTHEROES_NATIVE_RELEASE=1)
     target_compile_definitions(${PROJECT_NAME} PRIVATE DOTHEROES_NATIVE_RELEASE=1)
+    # R8 (docs/NATIVE_R8.md section 5): the lifted code's guest loads without the
+    # poll-word, range and alignment tests (the generated ppu_recomp.h's
+    # PPU_BARE_LOADS; a lift from before R8 ignores it). DOTHEROES_PPU_CHECKED_LOADS=ON
+    # keeps the tests in a release build.
+    option(DOTHEROES_PPU_CHECKED_LOADS "Keep the lifted loads' inline tests in a native release build" OFF)
+    if(NOT DOTHEROES_PPU_CHECKED_LOADS)
+        target_compile_definitions(${PROJECT_NAME} PRIVATE PPU_BARE_LOADS=1)
+        message(STATUS "Lifted loads:    bare (PPU_BARE_LOADS)")
+    endif()
 endif()
 
 # The runtime is C++, and on Apple also Objective-C. Letting CMake infer the
@@ -382,8 +391,20 @@ if(MSVC)
     set_source_files_properties(${RECOMP_SOURCES} PROPERTIES
         COMPILE_OPTIONS "/w;/bigobj")
 else()
+    # DOTHEROES_PPU_OPT (R8, docs/NATIVE_R8.md): the optimisation level of the
+    # lifted PPU sources and the PPU boot scaffold (ppu_loader.cpp, with
+    # ps3_indirect_call) -- empty keeps the target-wide -O1 above, e.g. -O2.
+    # The last -O on the line wins. The floating-point options are unchanged:
+    # no contraction, no fast-math at any level.
+    set(DOTHEROES_PPU_OPT "" CACHE STRING "Optimisation level for the lifted PPU code and its scaffold (empty: -O1)")
+    set(_ppu_opt "-w;-ffp-contract=off")
+    if(DOTHEROES_PPU_OPT)
+        list(APPEND _ppu_opt ${DOTHEROES_PPU_OPT})
+        set_source_files_properties(${PS3RECOMP_SCAFFOLD} PROPERTIES COMPILE_OPTIONS "${DOTHEROES_PPU_OPT}")
+        message(STATUS "Lifted PPU code: ${DOTHEROES_PPU_OPT}")
+    endif()
     set_source_files_properties(${RECOMP_SOURCES} PROPERTIES
-        COMPILE_OPTIONS "-w;-ffp-contract=off")
+        COMPILE_OPTIONS "${_ppu_opt}")
 endif()
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,212 @@
+From 50a7ea8177ade962c0814be14f462c94ab6e5541 Mon Sep 17 00:00:00 2001
+From: giteaguy <73799093+irnutsmurt@users.noreply.github.com>
+Date: Fri, 6 Nov 2026 15:57:07 -0800
+Subject: [PATCH 118/118] Lifter: indirect calls cached at their call sites;
+ bare loads for a native release
+
+PPU_ICALL (every bctrl and bcctrl): a call site keeps its last guest target
+and that target's host function in one 64-bit word (the address and the
+function's offset in the image) and calls it directly when the target
+repeats -- no hash lookup, and the host call is the site's own, predicted
+per site. A hit does what ps3_indirect_call's fast path does around the
+call (the active context, the depth and its cap, the vcall stack, the
+trampolines); anything else (a new target, a dispatch diagnostic set, the
+cap) goes through ps3_indirect_call. The runtime exports the lookup
+(ps3_icall_lookup), the plain-dispatch flag and the dispatch's thread-local
+state. -DPPU_NO_ICALL_CACHE: the plain call. 3D Dot Game Heroes: +1.5-3%.
+
+PPU_BARE_LOADS (a build that defines it): the lifted code's guest loads
+without the poll-word, range and alignment tests -- a relaxed atomic load
+and its byte swap. For a build where the whole 32-bit space is reserved
+and committed on first touch (a stray load reads 0, as the slow path
+answered), no raw SPU, and a native GCM front end that writes the
+reference itself. The tests and their slow paths were a fifth of 3D Dot
+Game Heroes' main thread. Development builds keep them and the read
+diagnostics.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ runtime/ppu/ppu_loader.cpp | 19 +++++++--
+ tools/ppu_lifter.py        | 80 +++++++++++++++++++++++++++++++++++++-
+ 2 files changed, 94 insertions(+), 5 deletions(-)
+
+diff --git a/runtime/ppu/ppu_loader.cpp b/runtime/ppu/ppu_loader.cpp
+index d4587ff..59e541b 100644
+--- a/runtime/ppu/ppu_loader.cpp
++++ b/runtime/ppu/ppu_loader.cpp
+@@ -1572,8 +1572,12 @@ static void pt_restore(uint32_t addr) { for (int i=0;i<g_pt_n;i++) if (g_pt_addr
+ #endif
+ /* Stack of currently-executing indirect-call (vtable) targets on this thread, so a
+  * write hook can name the virtual method that is running when it writes a value. */
+-static PPU_THREAD_LOCAL uint32_t g_vcall_stk[128];
+-static PPU_THREAD_LOCAL int      g_vcall_sp = 0;
++/* Not static (R8): the lifted code's call-site cache (PPU_ICALL, ppu_lifter.py)
++ * keeps the stack, the depth and the active context itself on a hit. */
++extern "C" PPU_THREAD_LOCAL uint32_t g_vcall_stk[128];
++extern "C" PPU_THREAD_LOCAL int      g_vcall_sp;
++PPU_THREAD_LOCAL uint32_t g_vcall_stk[128];
++PPU_THREAD_LOCAL int      g_vcall_sp = 0;
+ /* Nesting depth of ps3_indirect_call on this host thread (the recursion guard
+  * in ps3_indirect_call_impl). A host coroutine that runs guest code and ends by
+  * switching away from inside an indirect call never unwinds its frames, so one
+@@ -1583,7 +1587,8 @@ static PPU_THREAD_LOCAL int      g_vcall_sp = 0;
+  * switches away and restoring it when it switches back; threads that never
+  * switch keep using their thread-local count. The vcall stack pointer leaks
+  * the same way. */
+-static PPU_THREAD_LOCAL int      g_dispatch_depth = 0;
++extern "C" PPU_THREAD_LOCAL int g_dispatch_depth;
++PPU_THREAD_LOCAL int      g_dispatch_depth = 0;
+ extern "C" int* ps3_ppu_dispatch_depth_slot(void) { return &g_dispatch_depth; }
+ extern "C" int* ps3_ppu_vcall_sp_slot(void) { return &g_vcall_sp; }
+ 
+@@ -2433,6 +2438,8 @@ static ppu_fn ppu_lookup(uint32_t a)
+     }
+     return nullptr;
+ }
++/* R8: the lifted code's call-site cache fills itself from this (PPU_ICALL) */
++extern "C" ppu_fn ps3_icall_lookup(uint32_t a) { return a ? ppu_lookup(a) : nullptr; }
+ 
+ extern "C" uint32_t ppu_function_count(void) { return g_fn_count; }
+ 
+@@ -2824,6 +2831,11 @@ extern "C" void ppu_toc_check(ppu_context* ctx, const char* where, uint32_t targ
+  * per-call switch checks -- an indirect call is most of how a C++ title
+  * reaches its code (80% of 3D Dot Game Heroes' main thread is under one), and
+  * the full path was ~7% of that thread's own time. Decided once. */
++/* 1 once icall_plain() has found no switch set: the call-site cache's hits
++ * (PPU_ICALL) are taken only then; until the first indirect call decides it,
++ * every site goes through ps3_indirect_call. */
++extern "C" int g_icall_plain_on;
++int g_icall_plain_on = 0;
+ static int icall_plain(void)
+ {
+     static int plain = -1;
+@@ -2836,6 +2848,7 @@ static int icall_plain(void)
+         int p = 1;
+         for (int i = 0; vars[i]; i++) if (getenv(vars[i])) p = 0;
+         plain = p;
++        g_icall_plain_on = p;
+     }
+     return plain;
+ }
+diff --git a/tools/ppu_lifter.py b/tools/ppu_lifter.py
+index 8b0820e..d056797 100644
+--- a/tools/ppu_lifter.py
++++ b/tools/ppu_lifter.py
+@@ -243,6 +243,26 @@ static inline int vm_mm_st_ok(const ppu_mm* m, uint32_t ea, uint32_t n)
+     if ((m->coh[line >> 3] >> (line & 7)) & 1u) return 0;
+     return 1;
+ }
++/* PPU_BARE_LOADS (R8, a native release build): a guest load is the load and
++ * its byte swap, nothing else. The tests above are for what this build does
++ * not have or does not need: the GCM poll word (the native front end writes
++ * the reference itself: cellGcm_ref_on_poll returns at once), the raw SPU
++ * windows (no raw SPU), the null page and the space past the mapping (on
++ * Windows the whole 4 GB is reserved and a page is committed, zero-filled,
++ * on first touch: a stray load reads 0 as the slow path's did, without its
++ * report), and a span of 0 while a read diagnostic is armed (development
++ * builds keep the tests and their diagnostics). The tests and their slow
++ * paths were a fifth of the main thread's time (docs/NATIVE_R8.md). Loads
++ * stay relaxed atomics: a spin on a guest word is not hoisted. */
++#ifdef PPU_BARE_LOADS
++static inline uint8_t vm_read8_mm(const ppu_mm* m, uint64_t a) { return __atomic_load_n(m->vb + (uint32_t)a, __ATOMIC_RELAXED); }
++static inline uint16_t vm_read16_mm(const ppu_mm* m, uint64_t a)
++{ return __builtin_bswap16(__atomic_load_n((const uint16_t*)(m->vb + (uint32_t)a), __ATOMIC_RELAXED)); }
++static inline uint32_t vm_read32_mm(const ppu_mm* m, uint64_t a)
++{ return __builtin_bswap32(__atomic_load_n((const uint32_t*)(m->vb + (uint32_t)a), __ATOMIC_RELAXED)); }
++static inline uint64_t vm_read64_mm(const ppu_mm* m, uint64_t a)
++{ return __builtin_bswap64(__atomic_load_n((const uint64_t*)(m->vb + (uint32_t)a), __ATOMIC_RELAXED)); }
++#else
+ static inline uint8_t vm_read8_mm(const ppu_mm* m, uint64_t a)
+ {
+     const uint32_t ea = (uint32_t)a;
+@@ -284,6 +304,7 @@ static inline uint64_t vm_read64_mm(const ppu_mm* m, uint64_t a)
+         return __builtin_bswap64(v); }
+     return vm_read64(a);
+ }
++#endif
+ static inline void vm_write8_mm(const ppu_mm* m, uint64_t a, uint8_t v)
+ {
+     const uint32_t ea = (uint32_t)a;
+@@ -634,6 +655,61 @@ extern "C" PPU_THREAD_LOCAL void (*g_trampoline_fn)(void*);
+     } \\
+ } while(0)
+ 
++/* R8: an indirect call's target cached at its call site (PPU_ICALL, emitted
++ * for bctrl and bcctrl). A C++ title reaches most of its code through
++ * indirect calls, and every one went through ps3_indirect_call: a hash lookup
++ * and one shared host call instruction for all of them -- 5-7% of 3D Dot
++ * Game Heroes' main thread was that dispatch alone. A site keeps the last
++ * guest target it called with that target's host function (one 64-bit word:
++ * the guest address and the function's offset in the image, written whole),
++ * and calls it directly when the target repeats: no lookup, and the host
++ * call is the site's own, predicted per site as a native virtual call is.
++ * A hit does what ps3_indirect_call's fast path does around the call (the
++ * active context, the depth, the vcall stack, the trampolines). Anything
++ * else -- a new target, no target, a run with a dispatch diagnostic set
++ * (until the first call has decided there is none), the depth cap -- goes
++ * through ps3_indirect_call as before. -DPPU_NO_ICALL_CACHE: the plain call. */
++#ifndef PPU_NO_ICALL_CACHE
++typedef void (*ppu_icall_fn_t)(ppu_context*);
++extern "C" ppu_icall_fn_t ps3_icall_lookup(uint32_t addr);
++extern "C" int g_icall_plain_on;
++extern "C" PPU_THREAD_LOCAL ppu_context* g_active_ctx;
++extern "C" PPU_THREAD_LOCAL int g_dispatch_depth;
++extern "C" PPU_THREAD_LOCAL uint32_t g_vcall_stk[128];
++extern "C" PPU_THREAD_LOCAL int g_vcall_sp;
++extern "C" char __ImageBase;
++static inline void ppu_icall_site(ppu_context* ctx, uint64_t* ic)
++{
++    const uint32_t a = (uint32_t)ctx->ctr;
++    const uint64_t e = __atomic_load_n(ic, __ATOMIC_RELAXED);
++    if (__builtin_expect(e == 0 || (uint32_t)(e >> 32) != a || !g_icall_plain_on || g_dispatch_depth > 4000, 0)) {
++        if (g_icall_plain_on && a) {
++            const ppu_icall_fn_t f = ps3_icall_lookup(a);
++            if (f) __atomic_store_n(ic, (uint64_t)a << 32 | (uint32_t)((const char*)f - &__ImageBase), __ATOMIC_RELAXED);
++        }
++        ps3_indirect_call(ctx);
++        return;
++    }
++    const ppu_icall_fn_t fn = (ppu_icall_fn_t)(&__ImageBase + (uint32_t)e);
++    g_active_ctx = ctx;
++    g_dispatch_depth++;
++    const int sp = g_vcall_sp;
++    if (sp < 128) g_vcall_stk[sp] = a;
++    g_vcall_sp = sp + 1;
++    fn(ctx);
++    while (g_trampoline_fn) {
++        void (*tf)(void*) = g_trampoline_fn;
++        g_trampoline_fn = 0;
++        tf((void*)ctx);
++    }
++    if (g_vcall_sp > 0) g_vcall_sp--;
++    g_dispatch_depth--;
++}
++#define PPU_ICALL(ctx) do { static uint64_t _ic; ppu_icall_site((ctx), &_ic); } while (0)
++#else
++#define PPU_ICALL(ctx) ps3_indirect_call(ctx)
++#endif
++
+ /* Each lifted function opens with PPU_MM_SNAP; its loads and stores use that
+  * copy of the memory model (ppu_mm in ppu_recomp.h: the one the runtime
+  * published before the guest's entry, g_ppu_mm). */
+@@ -2316,7 +2392,7 @@ class PPULifter:
+             cond = self._branch_condition(mn, ops, insn.raw)
+             if mn.endswith("ctrl"):   # link = call: keep executing after it
+                 return (f"ctx->lr = 0x{insn.addr + 4:08X}; "
+-                        f"if ({cond}) {{ ps3_indirect_call(ctx); DRAIN_TRAMPOLINE(ctx); }}")
++                        f"if ({cond}) {{ PPU_ICALL(ctx); DRAIN_TRAMPOLINE(ctx); }}")
+             return f"if ({cond}) {{ ps3_indirect_call(ctx); DRAIN_TRAMPOLINE(ctx); return; }}"
+ 
+         # Conditional branches
+@@ -2386,7 +2462,7 @@ class PPULifter:
+             # Indirect call through CTR register. The CTR value is a GUEST
+             # address (or OPD pointer). We dispatch through a hash table
+             # that maps guest addresses to host function pointers.
+-            return f"ctx->lr = 0x{insn.addr + 4:08X}; ps3_indirect_call(ctx); DRAIN_TRAMPOLINE(ctx);"
++            return f"ctx->lr = 0x{insn.addr + 4:08X}; PPU_ICALL(ctx); DRAIN_TRAMPOLINE(ctx);"
+ 
+         # ------- SPR -------
+         if mn == "mflr":
+-- 
+2.56.0.windows.3
+

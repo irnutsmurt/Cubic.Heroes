@@ -82,6 +82,10 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <xinput.h>
+#include <tlhelp32.h>
+#include <dbghelp.h>
+#include <algorithm>
+#include <string>
 #endif
 
 #include "ps3emu/osd.h"
@@ -655,6 +659,186 @@ void keys_loop()
         f8 = f8_now; f7 = f7_now; pad = pad_now;
     }
 }
+
+// DOTHEROES_DEV_HWWATCH=<ea>[:w][,<ea>[:w]...]@<start s>,<seconds> (R8): who reads and
+// writes up to four guest words. The CPU's debug registers watch each word (4
+// bytes, aligned; :w writes only, else reads and writes) on every thread of the
+// process from <start s> after start-up for <seconds>; threads started meanwhile
+// are armed within 200 ms. A watched access traps after its instruction; the
+// handler counts it by that instruction and its caller (one frame unwound) and
+// by whether the word's value changed since the last access seen (a write that
+// changed it) or not (a read, or a write of the same value). At the end the
+// watch is cleared and hwwatch.txt written, symbolized through the PDB: a lifted
+// function's name, func_XXXXXXXX, is the guest function. Development only: a
+// trap costs microseconds, so a word read thousands of times a frame slows the game.
+namespace hww {
+struct Hit { std::atomic<uint64_t> rip, caller; std::atomic<uint32_t> changed, same; };
+constexpr unsigned kSlots = 2048;
+Hit g_hits[4][kSlots];
+uint32_t g_ea[4];
+bool g_write_only[4];
+unsigned g_n;
+std::atomic<uint32_t> g_last[4];
+std::atomic<int> g_on{ 0 };
+std::atomic<uint32_t> g_full{ 0 };
+
+void count(unsigned i, uint64_t rip, uint64_t caller, bool changed)
+{
+    uint64_t h = (rip ^ (caller * 0x9E3779B97F4A7C15ull)) * 0xFF51AFD7ED558CCDull;
+    for (unsigned k = 0; k < kSlots; k++) {
+        Hit& s = g_hits[i][(h + k) & (kSlots - 1)];
+        uint64_t r = s.rip.load(std::memory_order_acquire);
+        if (r == 0) {
+            uint64_t z = 0;
+            if (s.rip.compare_exchange_strong(z, rip)) { s.caller.store(caller, std::memory_order_release); r = rip; }
+            else r = z;
+        }
+        if (r == rip) {
+            uint64_t c;
+            while ((c = s.caller.load(std::memory_order_acquire)) == 0) {}
+            if (c != caller) continue;
+            (changed ? s.changed : s.same).fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+    }
+    g_full.fetch_add(1, std::memory_order_relaxed);
+}
+
+// The handler reads the watched words itself, with the thread's debug registers
+// still live: that read traps again, inside the handler. The nested trap is
+// dropped (and the first one counted) by this flag.
+thread_local int t_in_handler;
+
+LONG CALLBACK veh(EXCEPTION_POINTERS* x)
+{
+    if (x->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP || !g_on.load(std::memory_order_relaxed))
+        return EXCEPTION_CONTINUE_SEARCH;
+    CONTEXT* c = x->ContextRecord;
+    const DWORD64 st = c->Dr6 & 0xF;
+    if (!st) return EXCEPTION_CONTINUE_SEARCH;
+    if (t_in_handler) { c->Dr6 = 0; return EXCEPTION_CONTINUE_EXECUTION; }
+    struct Guard { Guard() { t_in_handler = 1; } ~Guard() { t_in_handler = 0; } } guard;
+    uint64_t caller = 1;   // 1: not unwound
+    {
+        CONTEXT u = *c;
+        DWORD64 base = 0;
+        if (PRUNTIME_FUNCTION f = RtlLookupFunctionEntry(u.Rip, &base, nullptr)) {
+            PVOID hd = nullptr; DWORD64 est = 0;
+            RtlVirtualUnwind(UNW_FLAG_NHANDLER, base, u.Rip, f, &u, &hd, &est, nullptr);
+            caller = u.Rip ? u.Rip : 1;
+        }
+    }
+    for (unsigned i = 0; i < g_n; i++) {
+        if (!(st & (1u << i))) continue;
+        uint32_t v;
+        memcpy(&v, vm_base + g_ea[i], 4);
+        const bool changed = g_last[i].exchange(v, std::memory_order_relaxed) != v;
+        count(i, c->Rip, caller, changed);
+    }
+    c->Dr6 = 0;
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
+
+// Arms (dr7 != 0) or clears one thread's debug registers.
+bool set_thread(DWORD tid, DWORD64 dr7)
+{
+    HANDLE h = OpenThread(THREAD_GET_CONTEXT | THREAD_SET_CONTEXT | THREAD_SUSPEND_RESUME, FALSE, tid);
+    if (!h) return false;
+    bool ok = false;
+    if (SuspendThread(h) != (DWORD)-1) {
+        CONTEXT c{};
+        c.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+        if (GetThreadContext(h, &c)) {
+            DWORD64* dr[4] = { &c.Dr0, &c.Dr1, &c.Dr2, &c.Dr3 };
+            for (unsigned i = 0; i < 4; i++) *dr[i] = dr7 && i < g_n ? (DWORD64)(uintptr_t)(vm_base + g_ea[i]) : 0;
+            c.Dr6 = 0;
+            c.Dr7 = dr7;
+            ok = SetThreadContext(h, &c) != 0;
+        }
+        ResumeThread(h);
+    }
+    CloseHandle(h);
+    return ok;
+}
+
+void loop(double start_s, double secs)
+{
+    std::this_thread::sleep_for(std::chrono::milliseconds((long long)(start_s * 1000)));
+    DWORD64 dr7 = 0;
+    for (unsigned i = 0; i < g_n; i++)
+        dr7 |= (1ull << (2 * i)) | ((g_write_only[i] ? 1ull : 3ull) << (16 + 4 * i)) | (3ull << (18 + 4 * i));
+    for (unsigned i = 0; i < g_n; i++) { uint32_t v; memcpy(&v, vm_base + g_ea[i], 4); g_last[i] = v; }
+    AddVectoredExceptionHandler(1, veh);
+    g_on = 1;
+    const DWORD self = GetCurrentThreadId(), pid = GetCurrentProcessId();
+    std::vector<DWORD> armed;
+    const uint64_t t0 = ps3_ft_now(), t_end = t0 + (uint64_t)(secs * 1e9);
+    fprintf(stderr, "[hwwatch] armed at %.3f s for %.0f s\n", (double)(int64_t)(t0 - g_ps3_ft.base) / 1e9, secs);
+    while (ps3_ft_now() < t_end) {
+        HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        THREADENTRY32 te{ sizeof te };
+        for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te)) {
+            if (te.th32OwnerProcessID != pid || te.th32ThreadID == self) continue;
+            if (std::find(armed.begin(), armed.end(), te.th32ThreadID) != armed.end()) continue;
+            if (set_thread(te.th32ThreadID, dr7)) armed.push_back(te.th32ThreadID);
+        }
+        CloseHandle(snap);
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+    for (DWORD t : armed) set_thread(t, 0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    g_on = 0;
+    HANDLE proc = GetCurrentProcess();
+    SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
+    SymInitialize(proc, nullptr, TRUE);
+    auto name = [&](uint64_t a) {
+        static char buf[sizeof(SYMBOL_INFO) + 256];
+        std::string s;
+        if (a <= 1) return std::string("?");
+        SYMBOL_INFO* si = (SYMBOL_INFO*)buf;
+        memset(buf, 0, sizeof buf);
+        si->SizeOfStruct = sizeof(SYMBOL_INFO);
+        si->MaxNameLen = 255;
+        DWORD64 d = 0;
+        char out[320];
+        if (SymFromAddr(proc, a, &d, si)) snprintf(out, sizeof out, "%s+0x%llX", si->Name, (unsigned long long)d);
+        else snprintf(out, sizeof out, "0x%llX", (unsigned long long)a);
+        return std::string(out);
+    };
+    FILE* f = fopen("hwwatch.txt", "w");
+    for (unsigned i = 0; i < g_n && f; i++) {
+        struct Row { uint32_t changed, same; uint64_t rip, caller; };
+        std::vector<Row> rows;
+        for (Hit& s : g_hits[i])
+            if (s.rip.load()) rows.push_back({ s.changed.load(), s.same.load(), s.rip.load(), s.caller.load() });
+        std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) { return a.changed + a.same > b.changed + b.same; });
+        fprintf(f, "word %08X (%s), %.0f s from %.3f s: %zu sites\n", g_ea[i], g_write_only[i] ? "writes" : "reads and writes",
+                secs, (double)(int64_t)(t0 - g_ps3_ft.base) / 1e9, rows.size());
+        for (const Row& r : rows)
+            fprintf(f, "  %9u changed %9u same  %s  <-  %s\n", r.changed, r.same, name(r.rip).c_str(), name(r.caller).c_str());
+    }
+    if (f) { fprintf(f, "table full: %u\n", g_full.load()); fclose(f); }
+    fprintf(stderr, "[hwwatch] done: %zu threads armed, hwwatch.txt written\n", armed.size());
+}
+
+void start(const char* spec)
+{
+    const char* at = strchr(spec, '@');
+    double start_s = 0, secs = 10;
+    if (at) sscanf(at + 1, "%lf,%lf", &start_s, &secs);
+    for (const char* p = spec; *p && *p != '@' && g_n < 4; ) {
+        char* e;
+        const uint32_t ea = (uint32_t)strtoul(p, &e, 16) & ~3u;
+        g_write_only[g_n] = *e == ':' && (e[1] == 'w' || e[1] == 'W');
+        g_ea[g_n++] = ea;
+        while (*e && *e != ',' && *e != '@') e++;
+        p = *e == ',' ? e + 1 : e;
+    }
+    if (!g_n) return;
+    std::thread(loop, start_s, secs).detach();
+    fprintf(stderr, "[hwwatch] %u words, from %.0f s for %.0f s, into hwwatch.txt\n", g_n, start_s, secs);
+}
+} // namespace hww
 #endif
 
 // A loop that reads guest memory, started once there is some: main() reserves
@@ -729,6 +913,7 @@ void dev_state_init()
         fprintf(stderr, "[memsnap] watching for memsnap.trigger\n");
     }
 #ifdef _WIN32
+    if (const char* hw = getenv("DOTHEROES_DEV_HWWATCH"); hw && *hw) hww::start(hw);
     const char* k = getenv("DOTHEROES_DEV_KEYS");
     if (k && *k == '1') {
         std::thread(keys_loop).detach();

@@ -71,6 +71,9 @@
 #include "ppfx_native.h"
 #include "rsx_dispatch.h"
 #include "rsx_texture_layout.h"
+#include "ps3emu/osd.h"          // ps3_osd_post: an unimplemented graphics call, on screen (R8)
+#include "ps3emu/ps3_strict.h"   // ps3_strict_fail: the same, fatal under PS3_STRICT=1
+#include <atomic>
 
 #include <chrono>
 #include <map>
@@ -1914,6 +1917,39 @@ void r7_publish(bool forced)
     if (forced) stats().r7_forced++; else stats().r7_flushes++;
 }
 
+// R8: graphics work nothing executes. Without a walker, a command word in the
+// title's ring (the detector) and a call of a libgcm writer R7 did not replace
+// (r7_watch) are work lost, not deferred. Neither has happened in any scenario
+// (NATIVE_R7.md), and neither may pass unnoticed if one ever does: each new
+// kind is named on stderr at once and on screen (once a run), all are counted
+// in a line at exit, and under PS3_STRICT=1 (development builds, every test
+// run) the first is fatal, with its name.
+std::atomic<uint64_t> s_lost_events{ 0 };
+void r7_lost_summary()   // once: at exit, or at a test's stop (which skips the exit handlers)
+{
+    static std::atomic<int> said{ 0 };
+    const uint64_t n = s_lost_events.load();
+    if (n && said.exchange(1) == 0) fprintf(stderr, "[graphics] %llu unimplemented graphics calls or command-word batches were not executed this "
+                           "run (the first of each kind above; the report lists them)\n", (unsigned long long)n);
+}
+void r7_unimplemented(const char* what, uint32_t addr, uint32_t lr, bool first_of_kind)
+{
+    s_lost_events.fetch_add(1);
+    if (!first_of_kind) return;
+    fprintf(stderr, "[graphics] not executed: %s %08X (from %08X, frame %u) -- the native renderer has no "
+                    "implementation, so its work is lost\n", what, addr, lr, S.frame);
+    fflush(stderr);
+    static std::atomic<int> shown{ 0 };
+    if (shown.exchange(1) == 0) {
+        char t[PS3_OSD_TEXT_MAX];
+        snprintf(t, sizeof t, "GRAPHICS CALL NOT IMPLEMENTED: %08X", addr);
+        ps3_osd_post(t, 10000);
+    }
+    if (ps3_strict())
+        ps3_strict_fail("unimplemented-graphics", "%s %08X from %08X at frame %u: no native implementation, "
+                        "its work would be lost", what, addr, lr, S.frame);
+}
+
 // Words in the title's ring since the detector last looked: decoded by
 // method (a header's subchannel and method, its count of data words), each
 // counted, the first few named in the report with the frame
@@ -1925,16 +1961,26 @@ void r7_detect(uint32_t ctx)
     if (cur == R7S.cur) return;
     uint32_t a = cur > R7S.cur ? R7S.cur : beg;   // the ring went back to its start meanwhile
     uint64_t n = 0;
-    std::lock_guard<std::mutex> g(R7S.lock);
+    std::unique_lock<std::mutex> g(R7S.lock);
+    uint32_t new_key = 0, new_at = 0;
+    bool fresh = false;
     while (a < cur && n < (1u << 20)) {
         const uint32_t h = g32(a);
         uint32_t cnt = (h >> 18) & 0x7FFu, key;
         if ((h & 0xE0000003u) == 0x20000000u || (h & 3u) == 1u || (h & 3u) == 2u) { key = 0xFFFF0000u | (h & 3u); cnt = 0; }
         else key = ((h >> 13) & 7u) << 16 | (h & 0x1FFCu);
+        if (R7S.words[key] == 0 && !fresh) { fresh = true; new_key = key; new_at = a; }
         R7S.words[key] += 1 + cnt;
         n += 1 + cnt;
         a += 4u * (1 + cnt);
     }
+    g.unlock();
+    if (n) {   // the method's subchannel << 16 | method (0xFFFF000x: a jump or call); the word's address as "from"
+        char what[96];
+        snprintf(what, sizeof what, "%llu command words in the ring, a new method", (unsigned long long)n);
+        r7_unimplemented(what, new_key, new_at, fresh);
+    }
+    g.lock();
     stats().r7_words += n;
     stats().r7_word_flushes++;
     static int said = 0;
@@ -1962,9 +2008,16 @@ void r7_reset_note(bool differs, int which = 0, uint32_t value = 0)
 void r7_watch(uint32_t addr, ppu_context* c)
 {
     stats().r7_unknown_calls++;
-    std::lock_guard<std::mutex> g(R7S.lock);
+    std::unique_lock<std::mutex> g(R7S.lock);
     const uint64_t k = (uint64_t)addr << 32 | (uint32_t)c->lr;
-    if (R7S.calls[k]++ == 0) {
+    bool fn_new = true;
+    for (auto it = R7S.calls.lower_bound((uint64_t)addr << 32); it != R7S.calls.end() && (it->first >> 32) == addr; ++it)
+        if (it->second) { fn_new = false; break; }
+    const bool site_new = R7S.calls[k]++ == 0;
+    g.unlock();
+    r7_unimplemented("libgcm writer", addr, (uint32_t)c->lr, fn_new);
+    g.lock();
+    if (site_new) {
         char line[220];
         snprintf(line, sizeof line, "r7: watched %08X called from %08X at frame %u (r4 %08X r5 %08X r6 %08X r7 %08X r8 %08X r9 %08X r10 %08X)",
                  addr, (uint32_t)c->lr, S.frame, (uint32_t)c->gpr[4], (uint32_t)c->gpr[5], (uint32_t)c->gpr[6],
@@ -1982,6 +2035,23 @@ int r7_call(uint32_t addr, ppu_context* c)
     const uint32_t a4 = (uint32_t)c->gpr[4], a5 = (uint32_t)c->gpr[5], a6 = (uint32_t)c->gpr[6];
     switch (addr) {
     case 0x006A336Cu:   // cellGcmFlush: the body runs (put = current: nothing moved it)
+        {   // DOTHEROES_R8_LOST_TEST=<frame> (development): at that frame's flush, one NOP method (header and
+            // its data word) put in the ring as an unreplaced writer would -- the diagnostic's own test
+            static const unsigned plant = [] { const char* e = getenv("DOTHEROES_R8_LOST_TEST"); return e ? (unsigned)atoi(e) : 0u; }();
+            static bool planted = false;
+            const uint32_t ctx = (uint32_t)c->gpr[3];
+            if (plant && !planted && S.frame >= plant && ea_ok(ctx, 16)) {
+                const uint32_t cur = g32(ctx + 8), end = g32(ctx + 4);
+                if (ea_ok(cur, 8) && cur + 8 <= end) {
+                    const uint32_t w[2] = { __builtin_bswap32(0x00040100u), 0 };   // NV4097 NO_OPERATION, count 1
+                    memcpy(vm_base + cur, w, 8);
+                    const uint32_t nc = __builtin_bswap32(cur + 8);
+                    memcpy(vm_base + ctx + 8, &nc, 4);
+                    planted = true;
+                    fprintf(stderr, "[graphics] test: a NOP method planted in the ring at %08X, frame %u\n", cur, S.frame);
+                }
+            }
+        }
         r7_detect((uint32_t)c->gpr[3]);
         r7_publish(false);
         return 0;
@@ -4000,6 +4070,7 @@ void start()
     snprintf(s_rep_path, sizeof s_rep_path, "%s", rp && *rp ? rp : "ppfx_report.txt");
     if (!mode()) return;
     atexit(write_report);
+    atexit(r7_lost_summary);
     // runs first (atexit is last in, first out): the native renderer finishes
     // what was walked and the comparisons in flight, so the report counts
     // what is left as unfinished
@@ -4007,6 +4078,7 @@ void start()
     // a test's stop ends the process without exit handlers: the same there
     g_dotheroes_stop_hook = [] {
         if (mode() == 2) { render_drain(15000); report_add("report: final, after the native renderer's drain (test stop)"); }
+        r7_lost_summary();
         write_report();
     };
     std::thread([] {

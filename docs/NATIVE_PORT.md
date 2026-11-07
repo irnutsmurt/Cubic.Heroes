@@ -70,13 +70,13 @@ no broad code-generation campaign while the rendering boundary is settled.
 |---|---|---|
 | 1 | Native Vulkan graphics replacing the PS3 graphics path | Evidence stage done; R1 proposed (section 5) |
 | 2 | Native implementations of the remaining SPU workloads | Collision and solver native (DOTHEROES_NATIVE_CD, _SOLVER), commands 1-2 still lifted; Edge zlib native with a lifted fallback; FMOD mixer, codecs and DSPs lifted |
-| 3 | Native task scheduling and synchronisation, retiring SPURS, DMA, mailboxes and polling | Not started; follows 2 workload by workload |
+| 3 | Native task scheduling and synchronisation, retiring SPURS, DMA, mailboxes and polling | R8 (NATIVE_R8.md): inventoried and measured -- the native physics tasks' SPURS handshake ~0.4 ms of a heavy-debris frame on the game thread; follows 2 workload by workload |
 | 4 | Remaining PS3 platform mechanisms as native services | Partly (file system, save data, input are native-backed HLE); inventory in zero-emulation-audit.md §2.8-2.10 |
 | 5 | Physics correctness and further optimisation; Bullet upgrades only if worthwhile | Native collision is not bit-exact (BULLET_NATIVE.md); no upgrade planned |
 | 6 | Native audio, including an open-source replacement for the FMOD mixing path | Not started |
 | 7 | Native video decoding and playback | Bink runs recompiled; FFmpeg's decoders verified on all 5 movies (M1) |
 | 8 | Asset preparation, loading, decompression, persistent shader and pipeline caches | translated shaders and a VkPipelineCache kept on disk between sessions and preloaded at start-up (ps3recomp 0090; the install's data/cache/shaders); shaders are still translated at first sight, not at install |
-| 9 | Further x64 code generation and CPU optimisation | Paused at the 2026-11-04 checkpoint (ps3recomp 0094-0096) |
+| 9 | Further x64 code generation and CPU optimisation | R8 (NATIVE_R8.md, ps3recomp 0118): the native release's lifted loads without their inline tests (the game thread 1.1-1.2 ms faster), indirect calls cached at their call sites; -O2 measured without gain; next the stores' tests and registers kept in locals |
 | 10 | Full-game correctness, stability and performance validation throughout | Continuous; the checkpoint below is the current baseline |
 
 Baseline: tag `checkpoint-2026-11-04` (repo 9ea01df, ps3recomp 578c9aa),
