@@ -1276,23 +1276,27 @@ Left, in the order the measurements point:
 ### 9.1 Queued until testing resumes
 
 Work done on 2026-11-07 while the owner's PC was in use for a meeting: no
-game started, no window, no benchmark, no large build. Each item below is
-what it still needs, in order, and nothing in it counts as validated before
-then.
+game started, no window, no benchmark, no large build. What it still needs
+is below, in the order to run it. **Nothing in sections 5.4.1, 7.2, 8.4 or
+9.2 counts as validated before its row here has run.** The batch scripts
+are in build/r8 (local). Each runs through tools/owned_run.py, so that
+stopping it stops all of it (section 9.2).
 
-| # | Needs | For |
-|---|---|---|
-| 1 | build the prebuilt parts in the release configuration (tools/zig_build.py build_prebuilt("windows", ...): a CMake build of the runtime and the native library) | section 7.2 |
-| 2 | `tests/player_install_test.py` (fresh, check, update, relift, settings): a conversion from the disc image into F: -- the lift and the full compile, ~15-20 min | section 7.2 |
-| 3 | `tests/player_install_test.py game --run-game`: `--memtest`, a river fight from the install | section 7.2 |
-| 4 | the player-built game against rel8: the river fight and the fields, uncapped, real audio (the x86-64-v2 prebuilt against v3) | section 7.2 |
-| 5 | relift (tools/r8_lift.sh: ps3recomp 0125 changes the generated header) and rebuild the release and its checked comparison build | section 5.4.1 |
-| 6 | `--memtest` on both: the two new store groups, and the earlier 614 checks | section 5.4.1 |
-| 7 | validate as rel7 was (build/r8/val3_run.sh: the eight scenarios, sync validation, capture check, the stops, timing, normal damage) | section 5.4.1 |
-| 8 | A/B against rel8, uncapped, real audio (the fields and the fight): the cost of the line-crossing test and the raw stores' range test | section 5.4.1 |
-| 9 | every batch above launched through tools/owned_run.py, and the first one stopped and restarted on purpose once (its game included) | section 9.2 |
-| 10 | the recorder's step 0 on the release from item 5: the river fight and the fields with DOTHEROES_R6_CALL_COUNTS=1 (calls by address a flip; local_copies_other_threads, transfers_other_threads) | section 8.4 |
-| 11 | the SPU captures docs/SPU_NON_AUDIO.md queues: the solver's set-up snapshots (a river fight), the water task's DMA and atomics, the declined collision tasks and the waver's dispatches counted | docs/SPU_NON_AUDIO.md |
+| # | Run | What it does | For | Needs |
+|---|---|---|---|---|
+| 0 | a 30 s river smoke through `tools/owned_run.py`, stopped on purpose mid-run with the task's stop, then started again | the first game batch under the job object: the game ends with the stop, nothing is left running, the restart is clean | 9.2 | testing resumed |
+| 1 | `owned_run.py --name resume1 -- sh build/r8/resume1_build.sh` | the lift build/r8/gen7 (ps3recomp 0125); the release build/r8/rel9 and its comparison build chk9 (checked loads, **checked stores**); `--memtest` on both (the two new store groups and the 614 load checks); the player's prebuilt parts in the release configuration; the static pipeline tests again | 5.4.1, 7.2 | heavy: the lift and three builds |
+| 2 | `owned_run.py --name resume2 -- sh build/r8/resume2_install.sh` | tests/player_install_test.py: a fresh install from the disc image into F:, its checks (the lift file for file against gen7), an update with nothing changed, a relift, the settings pass; then `--memtest` and a river fight from the install as a player starts it | 7.2 | heavy (a full lift and compile); 1 |
+| 3 | `owned_run.py --name val4 -- sh build/r8/val4_run.sh` | rel9 validated as rel7 was (the eight scenarios, synchronisation validation, the capture check, both stops, timing at 60 fps and uncapped, normal damage three times); then the recorder's step 0 (calls by address a flip; the other-thread counters) in the fight and the fields | 5.4.1, 8.4 | window, real audio; 1 |
+| 4 | `owned_run.py --name ab4 -- sh build/r8/ab4_run.sh` | uncapped, real audio, two rounds rotated: rel8 against rel9 (the cost of 0125's two tests) against the player's own build (the x86-64-v2 prebuilt, diagnostics off) | 5.4.1, 7.2 | window, real audio; 1, 2 |
+| 5 | not yet scripted: code first | the SPU captures docs/SPU_NON_AUDIO.md lists: the solver's set-up snapshots (DOTHEROES_SOLVER_SNAP extended), the water task's DMA and atomics, counters for the collision tasks phys_direct declines and for the waver's dispatches | SPU_NON_AUDIO.md | the counters and snapshot code written and built |
+
+After 1-4 the record gets each result in its section. rel9 replaces rel8 as
+R8's release only if 3 passes and 4 shows no cost beyond the runs' spread.
+Otherwise 0125's inline test gets the lifter's alignment exemption (section
+5.4.1) and is measured again. Pushing the commits made during the meeting
+waits on the owner. The archived builds on F: stay until the current build
+is confirmed to work well (the owner's rule).
 
 ### 9.2 Stopping a batch stops what it started (2026-11-07) [C, M]
 
@@ -1361,6 +1365,13 @@ tools/r8_phys.py <run dir> ...                               (the physics tasks 
 tools/r8_threads.py <profile.raw> [--fps F] [--thread NAME] [--under FUNCTION]   (per-thread work and waits, by category)
 tools/r8_split.py <profile.raw> <spans> <ftrace.txt>          (the main thread in two sets of frames, e.g. heavy debris against the rest)
 tools/r7_measure.py, tools/r7_grabs.py, tests/fps_check.py, tests/actor_steps.py   (as in R7)
+tools/owned_run.py --name <batch> -- sh build/r8/<batch>.sh   (a batch in a job object of its own: --cancel <batch>,
+                                                              --list; section 9.2)
+build/venv/Scripts/python.exe tests/test_player_pipeline.py    (the player's build path against the release's: section 7.2)
+build/venv/Scripts/python.exe tests/player_install_test.py     (a fresh install and its updates into F:; `game --run-game`
+                                                              starts the game: section 7.2)
+build/venv/Scripts/python.exe tests/native/store_paths.py      (the generated stores, outside the game: section 5.4.1)
+build/venv/Scripts/python.exe tests/test_owned_run.py          (batch cancellation with dummy processes: section 9.2)
 ```
 
 The batches, kept in build/r8 with their runs: prof1 (the inventory's
