@@ -1,0 +1,73 @@
+From cae5f95abb15b0d10406bac05a9eb7323cc6dca0 Mon Sep 17 00:00:00 2001
+From: giteaguy <73799093+irnutsmurt@users.noreply.github.com>
+Date: Sat, 7 Nov 2026 14:16:16 -0800
+Subject: [PATCH 128/129] Fragment programs: a result's precision clamps it, as
+ on NV40
+
+An instruction's precision bits (OPDEST 22-23) were ignored: every result
+stayed full float. NV40 keeps a fixed-point result in its range -- 12-bit
+fixed point in [-2, 2], 9-bit in [-1, 1] -- and a half one in the half
+range. Applied as RPCS3's FragmentProgramDecompiler applies them (SetDst,
+ClampValue): after the result scale, when the result is not saturated; not
+for NRM, MAX, MIN, COS, SIN, RFL, FRC, LIT, LIF, LG2, nor a MOV of a half
+temporary into a half register; the half clamp only for a half destination.
+
+Found while comparing 3D Dot Game Heroes with RPCS3 (its condition-register
+writes carry 12-bit precision). It did not change the difference being
+chased (that was elsewhere). Run in about twenty comparison runs (the
+castle, the first dungeon, the field) with no visible change; not a
+validation of its own.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libs/video/rsx_fp_decompiler.c | 27 +++++++++++++++++++++++++++
+ 1 file changed, 27 insertions(+)
+
+diff --git a/libs/video/rsx_fp_decompiler.c b/libs/video/rsx_fp_decompiler.c
+index 340c779..5d97064 100644
+--- a/libs/video/rsx_fp_decompiler.c
++++ b/libs/video/rsx_fp_decompiler.c
+@@ -26,6 +26,8 @@
+ #define FP_INPUT_SRC_MASK   (15u << 13)
+ #define FP_TEX_UNIT_SHIFT   17
+ #define FP_TEX_UNIT_MASK    (15u << 17)
++#define FP_OUT_PREC_SHIFT   22         /* the result's precision: 0 full, 1 half, 2 fixed 12, 3 fixed 9 */
++#define FP_OUT_PREC_MASK    (3u << 22)
+ #define FP_OPCODE_SHIFT     24
+ #define FP_OPCODE_MASK      (0x3Fu << 24)
+ #define FP_OUT_NONE         (1u << 30)
+@@ -1095,6 +1097,31 @@ static int rsx_fp_decompile_internal(
+             dest_mask(w0, m);
+ 
+             const char* sat = (w0 & FP_OUT_SAT) ? " _v = saturate(_v);" : "";
++            /* The result's precision (OPDEST bits 22-23), when it is not
++             * saturated: NV40 keeps a fixed-point result in its range --
++             * 12-bit fixed point in [-2, 2], 9-bit in [-1, 1] -- and a half
++             * one in the half range. The translation kept every result at
++             * full float, so a highlight a program computes at fixed 12-bit
++             * precision went far past 2.0: in the first dungeon's lamp-lit
++             * rooms the hero's armour showed red and blue points the glare
++             * pass drew stars from, which RPCS3 (and so the PS3) does not
++             * (2026-11-07). As RPCS3's FragmentProgramDecompiler (SetDst,
++             * ClampValue): after the result scale; not for NRM, MAX, MIN, COS,
++             * SIN, RFL, FRC, LIT, LIF, LG2, nor a MOV of a half temporary into
++             * a half register; the half clamp only for a half destination. */
++            const u32 prec = (w0 & FP_OUT_PREC_MASK) >> FP_OUT_PREC_SHIFT;
++            if (!sat[0] && prec) {
++                int exempt = opcode == OP_NRM || opcode == OP_MAX || opcode == OP_MIN || opcode == OP_COS ||
++                             opcode == OP_SIN || opcode == OP_RFL || opcode == OP_FRC || opcode == OP_LIT ||
++                             opcode == OP_LIF || opcode == OP_LG2;
++                if (opcode == OP_MOV && dst_half && (w1 & FP_SRC_HALF) &&
++                    ((w1 & FP_REG_TYPE_MASK) >> FP_REG_TYPE_SHIFT) == FP_REG_TYPE_TEMP)
++                    exempt = 1;
++                if (prec == 1 && !dst_half) exempt = 1;
++                if (!exempt)
++                    sat = prec == 1 ? " _v = clamp(_v, -65504.0, 65504.0);"
++                        : prec == 2 ? " _v = clamp(_v, -2.0, 2.0);" : " _v = clamp(_v, -1.0, 1.0);";
++            }
+             /* NV40 per-instruction result-scale modifier (SRC1 word bits
+              * 28-30): 1/2/3 = *2/*4/*8, 5/6/7 = /2//4//8; applied to the
+              * result BEFORE saturate (RPCS3 FragmentProgramDecompiler.cpp
+-- 
+2.56.0.windows.3
+

@@ -1,4 +1,6 @@
-# A play session for the owner on R8's release (docs/NATIVE_R8.md: build/r8/rel8b -- rel8 with the event fix, ps3recomp 0126;
+# A play session for the owner on R8's release (docs/NATIVE_R8.md: build/r8/rel8g -- rel8b's tree with the RPCS3
+# comparison's changes, section 9.3: the precision clamp, ps3recomp 0128, and DOTHEROES_PPFX_NONNEG on, so the
+# first dungeon's hero no longer sparkles;
 # the native release -- no RSX command path, no SPU interpreter, the physics
 # tasks issued directly, leaf promotion):
 #   SCENARIO=owner_play_r8 build/venv/Scripts/python.exe tests/boot_smoke.py
@@ -17,10 +19,13 @@
 # root seeded from a copy of the owner's save (the owner's own saves are not
 # touched; progress from earlier sessions continues). Records frames.log,
 # record.log, hitches (F8, or L3+R3) and a copy of the save each time the game
-# saves. Close the window when done.
-#! env BIN=build/r8/rel8b/dotheroes.exe GAMEDATA=build/play-route/gamedata RUNS_IN=build/sessions KEEP_RUNS=1000 PREEMPT_TESTS=1
+# saves. Close the window when done. DOTHEROES_PPFX_NONNEG=1 is on here only
+# (not yet run outside the first dungeon): if a scene looks wrong, the session
+# can be started with DOTHEROES_PPFX_NONNEG=0 in the environment to compare.
+#! env BIN=build/r8/rel8g/dotheroes.exe GAMEDATA=build/play-route/gamedata RUNS_IN=build/sessions KEEP_RUNS=1000 PREEMPT_TESTS=1
 #! env DOTHEROES_PPFX_NATIVE=1 DOTHEROES_NATIVE_CD=1 DOTHEROES_NATIVE_SOLVER=4,5,6 GCM_WRAP_LAP=1 DOTHEROES_PRESENT_ONCE=1
 #! env DOTHEROES_BENCH=1 PS3RECOMP_VK_PRESENT_MODE=fifo DOTHEROES_FPS=0 DOTHEROES_DEV_CANT_DIE=0
+#! env DOTHEROES_PPFX_NONNEG=1
 #! env WINDOW=1 PS3RECOMP_VK_FULLSCREEN=1 AUDIO=1 PS3_OSD_FPS=2 DUMP=0 SHOT_EVERY=0 PS3_VERBOSE=0
 #! env DOTHEROES_DEV_KEYS=1 DOTHEROES_DEV_STATE=1 DOTHEROES_DEV_RECORD=1 DIAG_FRAMES=frames.log
 #! env PS3_FTRACE_ROLL=hitch PS3_FTRACE_ROLL_FROM=60 DOTHEROES_PHYS_STATS=1

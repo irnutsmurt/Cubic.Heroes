@@ -1,0 +1,61 @@
+From e3bcc2a9db3f8e8fa3f32c2bc0bba4ed1a45744a Mon Sep 17 00:00:00 2001
+From: giteaguy <73799093+irnutsmurt@users.noreply.github.com>
+Date: Sat, 7 Nov 2026 14:16:16 -0800
+Subject: [PATCH 129/129] Vulkan: depthClamp and samplerAnisotropy enabled when
+ the device has them
+
+For a native renderer that models the RSX's depth clamp (ZMIN_MAX_CONTROL)
+and its per-unit anisotropy ratio: the device features are turned on when
+present, and rsx_vk_depth_clamp_ok() / rsx_vk_aniso_ok() say so. Nothing
+here uses them: a pipeline or sampler asks only when its renderer's switch
+is on (the default is off), so the pictures are unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libs/video/rsx_vulkan_backend.c | 19 +++++++++++++++++++
+ 1 file changed, 19 insertions(+)
+
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index c039d0a..7f974aa 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -268,6 +268,8 @@ typedef struct vk_state {
+     int              eng_active;      /* the register-file engine drives us */
+     int              bc_ok;           /* textureCompressionBC enabled       */
+     int              depth_bounds_ok; /* depthBounds enabled                */
++    int              depth_clamp_ok;  /* depthClamp enabled                 */
++    int              aniso_ok;        /* samplerAnisotropy enabled          */
+     int              indep_blend_ok;  /* independentBlend: per-target MRT state */
+     u32              max_dim;         /* maxImageDimension2D of the device  */
+     int              windowed;
+@@ -5791,6 +5793,17 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+      * port's R6): without it an implementation may report any non-zero
+      * count for a visible draw */
+     want.occlusionQueryPrecise = have.occlusionQueryPrecise;
++    /* Depth clamping instead of near/far clipping, for a native renderer
++     * that models the RSX's ZMIN_MAX_CONTROL clamp (3D Dot Game Heroes'
++     * frame-start reset turns it on every frame): enabled when the device has
++     * it; a pipeline uses it only when it asks (rsx_vk_depth_clamp_ok). */
++    want.depthClamp = have.depthClamp;
++    /* Anisotropic filtering, for a native renderer that models the RSX's
++     * per-unit ratio (SET_TEXTURE_CONTROL0's max_aniso): enabled when the
++     * device has it; a sampler uses it only when it asks (rsx_vk_aniso_ok). */
++    want.samplerAnisotropy = have.samplerAnisotropy;
++    s_vk.aniso_ok = have.samplerAnisotropy ? 1 : 0;
++    s_vk.depth_clamp_ok = have.depthClamp ? 1 : 0;
+     s_vk.indep_blend_ok = have.independentBlend ? 1 : 0;
+     VkDeviceCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+                                .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci,
+@@ -6263,3 +6276,9 @@ unsigned long long rsx_vk_bridge_signals(unsigned long long* lost)
+     vk_mutex_unlock(&s_vk.queue_mu);
+     return n;
+ }
++
++/* Whether the device was created with depthClamp (a native renderer's pipelines may ask for it). */
++int rsx_vk_depth_clamp_ok(void) { return s_vk.depth_clamp_ok; }
++
++/* Whether the device was created with samplerAnisotropy (a native renderer's samplers may ask for it). */
++int rsx_vk_aniso_ok(void) { return s_vk.aniso_ok; }
+-- 
+2.56.0.windows.3
+
