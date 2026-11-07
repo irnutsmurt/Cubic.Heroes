@@ -19,10 +19,15 @@
  *  - a load in a spin loop seeing another thread's store (not hoisted);
  *  - aligned loads never torn by a concurrent store, and what misaligned
  *    ones do (reported: not single-copy atomic on Cell either);
- *  - the reservation itself: one allocation from the base to the guard's end.
+ *  - the reservation itself: one allocation from the base to the guard's end;
+ *  - the stores (memtest_stores.cpp): every kind the lifted code makes, into
+ *    the null page (dropped), the rest of the first 64 KB and the inline span
+ *    (kept), and at a 128-byte line's end, where a store that runs into the
+ *    next line must tell that line too (section 5.4.1).
  * A watchdog ends the test if a stage stops making progress (a fault the
  * commit handler did not resolve would retry forever). */
 #include "memtest.h"
+#include "spu_coherency.h"   /* the line watches the store groups count with */
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -353,6 +358,125 @@ void t_reservation()
     group_end("one reservation from the base through the guard", n);
 }
 
+/* ---- the stores (docs/NATIVE_R8.md section 5.4.1): every kind of store the
+ * lifted code makes, as this build compiles it, with the memory model a game
+ * run publishes. Where it lands: the null page drops it, the rest of the
+ * first 64 KB and the inline span keep it. Which lines it tells: a host
+ * watch (spu_coh_watch, the mechanism behind the SPU reservations' and the
+ * PPU waits' wake-ups) on a line counts the stores that reached it, so a
+ * store that runs into the next line has to tell that line as well. */
+const int kStoreKinds[] = { MT_ST8, MT_ST16, MT_ST32, MT_ST64, MT_BRX16, MT_BRX32, MT_BRX64, MT_STVX, MT_STVX_G,
+                            MT_STVLX8, MT_DCBZ };
+const char* kind_name(int k)
+{
+    switch (k) {
+    case MT_ST8: return "stb"; case MT_ST16: return "sth"; case MT_ST32: return "stw"; case MT_ST64: return "std";
+    case MT_BRX16: return "sthbrx"; case MT_BRX32: return "stwbrx"; case MT_BRX64: return "stdbrx";
+    case MT_STVX: return "stvx"; case MT_STVX_G: return "stvx (outside a function)"; case MT_STVLX8: return "stvlx";
+    default: return "dcbz";
+    }
+}
+/* the store, and what the test expects of memory after it; the bytes are
+ * filled first (never 0), so a dropped dcbz shows as much as a landed one */
+void store(int kind, uint32_t ea, unsigned seed, bool lands)
+{
+    const int n = mt_store_size(kind);
+    put_pattern(ea, (size_t)n, seed + 77);
+    std::vector<uint8_t> b(n);
+    for (int i = 0; i < n; i++) b[i] = kind == MT_DCBZ ? 0 : (uint8_t)((i + seed) * 53 + 7) | 1;
+    mt_store(kind, ea, b.data());
+    if (lands) g_written.push_back({ ea, b });
+}
+int check_bytes(uint32_t ea, int n, const char* what, int kind)
+{
+    g_checks++;
+    for (int i = 0; i < n; i++)
+        if (vm_base[ea + (uint32_t)i] != exp_byte(ea + (uint64_t)i)) {
+            fail("%s: %s at 0x%X: byte +%d is 0x%02X, expected 0x%02X", what, kind_name(kind), ea, i,
+                 vm_base[ea + (uint32_t)i], exp_byte(ea + (uint64_t)i));
+            return 1;
+        }
+    return 1;
+}
+
+void t_store_pages()
+{
+    group("stores: the first pages");
+    int n = 0;
+    mt_store_model(1);
+    unsigned seed = 1;
+    for (int k : kStoreKinds) {
+        /* every kind's size and alignment fit 0x800 and 0x4000 (dcbz: a line) */
+        const uint32_t in_null = 0x800, in_first = 0x4000 + (uint32_t)seed * 0x100, inline_ea = 0x20000000 + seed * 0x100;
+        store(k, in_null, seed, false);   /* the first 4 KB: dropped, as a scalar store is */
+        n += check_bytes(in_null, mt_store_size(k), "a store into the null page lands nowhere", k);
+        store(k, in_first, seed + 1, true);   /* below 0x10000 but past the first page: out of line, kept */
+        n += check_bytes(in_first, mt_store_size(k), "a store below 0x10000 past the null page", k);
+        store(k, inline_ea, seed + 2, true);   /* the inline span */
+        n += check_bytes(inline_ea, mt_store_size(k), "a store in the inline span", k);
+        seed += 3;
+    }
+    mt_store_model(0);
+    group_end("every store kind: the null page dropped, the rest of the first 64 KB and the inline span kept", n);
+}
+
+void count_wake(void* p) { ++*(std::atomic<int>*)p; }
+
+void t_store_lines()
+{
+    group("stores: line boundaries");
+    int n = 0;
+    mt_store_model(1);
+    const uint32_t W = 0x30000000;   /* a line; W + 128 the next */
+    std::atomic<int> first{0}, second{0};
+    spu_coh_watch w1{}, w2{};
+    spu_lockline_lock();
+    spu_coh_watch_add(&w2, W + 128, count_wake, &second);
+    spu_lockline_unlock();
+    struct Case { int kind; uint32_t off; bool reaches; };
+    /* the second line watched: a store reaches it if it runs past W + 127 */
+    const Case cases[] = {
+        { MT_ST16, 126, false }, { MT_ST16, 127, true },
+        { MT_ST32, 124, false }, { MT_ST32, 125, true }, { MT_ST32, 127, true },
+        { MT_ST64, 120, false }, { MT_ST64, 121, true }, { MT_ST64, 124, true },
+        { MT_BRX16, 127, true }, { MT_BRX32, 124, false }, { MT_BRX32, 126, true }, { MT_BRX64, 121, true },
+        { MT_STVX, 112, false }, { MT_STVX, 128, true }, { MT_STVX_G, 128, true },
+        { MT_STVLX8, 120, false }, { MT_STVLX8, 128, true },
+        { MT_DCBZ, 0, false }, { MT_DCBZ, 128, true },
+        { MT_ST8, 127, false }, { MT_ST8, 128, true },
+    };
+    unsigned seed = 100;
+    for (const Case& c : cases) {
+        const int before = second.load();
+        store(c.kind, W + c.off, seed++, true);
+        n += check_bytes(W + c.off, mt_store_size(c.kind), "a store at a line boundary", c.kind);
+        g_checks++; n++;
+        if ((second.load() != before) != c.reaches)
+            fail("%s of %d bytes at line+%u: the next line was %s", kind_name(c.kind), mt_store_size(c.kind), c.off,
+                 c.reaches ? "not told (its reservations would survive the store)" : "told, though the store ends before it");
+    }
+    /* both lines watched: a store across the boundary tells both */
+    spu_lockline_lock();
+    spu_coh_watch_add(&w1, W, count_wake, &first);
+    spu_lockline_unlock();
+    for (int k : { MT_ST32, MT_ST64, MT_BRX32 }) {
+        const int f = first.load(), s = second.load();
+        const uint32_t off = k == MT_ST64 ? 124 : 126;
+        store(k, W + off, seed++, true);
+        n += check_bytes(W + off, mt_store_size(k), "a store across two watched lines", k);
+        g_checks++; n++;
+        if (first.load() == f || second.load() == s)
+            fail("%s at line+%u across two watched lines: told the first %d time(s), the second %d", kind_name(k), off,
+                 first.load() - f, second.load() - s);
+    }
+    spu_lockline_lock();
+    spu_coh_watch_remove(&w1);
+    spu_coh_watch_remove(&w2);
+    spu_lockline_unlock();
+    mt_store_model(0);
+    group_end("stores at a line's end: the next line told exactly when the store reaches it", n);
+}
+
 } // namespace
 
 extern "C" int dotheroes_memtest(uint64_t vm_size)
@@ -378,6 +502,8 @@ extern "C" int dotheroes_memtest(uint64_t vm_size)
     t_spin();
     t_torn();
     t_reservation();
+    t_store_pages();
+    t_store_lines();   /* last: it marks two lines in the reservation bitmap for good */
     g_done.store(1);
     watchdog.join();
     printf("[memtest] %d checks, %d failed: %s\n", g_checks, g_fail, g_fail ? "FAIL" : "PASS");

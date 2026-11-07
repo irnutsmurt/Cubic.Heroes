@@ -1,0 +1,291 @@
+From 26fbf3ef55240a80ddfbfbe6e0eee8038315ba93 Mon Sep 17 00:00:00 2001
+From: giteaguy <73799093+irnutsmurt@users.noreply.github.com>
+Date: Sat, 7 Nov 2026 08:30:57 -0800
+Subject: [PATCH] Stores: a misaligned store tells both lines; raw stores keep
+ the range
+
+Two gaps in the guest stores' coherence and range handling:
+
+- A misaligned scalar store that runs into the next 128-byte line tested
+  and told only its first line, in the inline test (vm_mm_st_ok) and in
+  the out-of-line commit (VM_WRITE_COH). An SPU's reservation on the
+  second line survived the store. The inline test now sends a store that
+  crosses a line out of line, and VM_WRITE_COH tests and tells both lines.
+  A naturally aligned store never crosses; a byte store's test folds away.
+
+- The raw stores (byte-reversed, the vector forms, dcbz) wrote wherever
+  they pointed, so one into the null page landed where a scalar store is
+  dropped, and a store diagnostic's span of 0 did not stop them. They now
+  test the scalar stores' inline span (the snapshot's, or g_ppu_mm's) and
+  go out of line otherwise. vm_raw_store_slow and vm_raw_zero_slow do what
+  vm_write8..64 do: the store diagnostics, the mapping's end, the first
+  4 KB dropped and reported, then the write under the reservation
+  protocol on every line it touches.
+
+The raw-store block moves after the memory model in the generated header,
+which it now needs. PPU_STORES_BARE_MEASURE leaves the raw range test out,
+as it does the scalar ones.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ runtime/ppu/ppu_loader.cpp |  57 +++++++++++++--
+ tools/ppu_lifter.py        | 138 +++++++++++++++++++++++--------------
+ 2 files changed, 137 insertions(+), 58 deletions(-)
+
+diff --git a/runtime/ppu/ppu_loader.cpp b/runtime/ppu/ppu_loader.cpp
+index d268092..683fd56 100644
+--- a/runtime/ppu/ppu_loader.cpp
++++ b/runtime/ppu/ppu_loader.cpp
+@@ -1593,16 +1593,23 @@ extern "C" int* ps3_ppu_dispatch_depth_slot(void) { return &g_dispatch_depth; }
+ extern "C" int* ps3_ppu_vcall_sp_slot(void) { return &g_vcall_sp; }
+ 
+ /* Every guest store commits through this: on a line no SPU has reserved (all of
+- * them, until SPU code runs) it is the plain memcpy it replaced. */
++ * them, until SPU code runs) it is the plain memcpy it replaced. A misaligned
++ * store can run into the next 128-byte line (R8, docs/NATIVE_R8.md section
++ * 5.4.1): both lines are tested, and both told. It tested and told the first
++ * alone, so an SPU's reservation on the second survived the store. */
+ #define VM_WRITE_COH(a, src, n)                                               \
+     do {                                                                      \
+-        if (spu_coh_line_reserved((uint32_t)(a))) {                           \
++        const uint32_t _wa = (uint32_t)(a);                                   \
++        const uint32_t _wl = (_wa + (uint32_t)(n) - 1u) & ~127u;              \
++        const int _wx = _wl != (_wa & ~127u);                                 \
++        if (spu_coh_line_reserved(_wa) || (_wx && spu_coh_line_reserved(_wl))) { \
+             spu_lockline_lock();                                              \
+-            memcpy(vm_base + (uint32_t)(a), (src), (n));                      \
+-            spu_coh_notify_write((uint32_t)(a));                              \
++            memcpy(vm_base + _wa, (src), (n));                                \
++            spu_coh_notify_write(_wa);                                        \
++            if (_wx) spu_coh_notify_write(_wl);                               \
+             spu_lockline_unlock();                                            \
+         } else {                                                              \
+-            memcpy(vm_base + (uint32_t)(a), (src), (n));                      \
++            memcpy(vm_base + _wa, (src), (n));                                \
+         }                                                                     \
+     } while (0)
+ 
+@@ -2337,6 +2344,46 @@ extern "C" void vm_zero_block_coh(uint64_t a, uint32_t n)
+     spu_lockline_unlock();
+ }
+ 
++/* The raw stores' out-of-line path (R8, docs/NATIVE_R8.md section 5.4.1):
++ * ppu_recomp.h sends a raw store -- vector, byte-reversed, dcbz -- here when
++ * it is not wholly inside the inline store span, and this does what a scalar
++ * store's out-of-line path (vm_write8..64 below) does: the store diagnostics
++ * (the write and barrier watches, a word at a time, the rest a byte at a
++ * time), the mapping's end, a store that starts in the first 4 KB dropped and
++ * reported (vm_null_store, and the null-page sweep's containment), then the
++ * write under the reservation protocol on every line it touches; a word
++ * store to a raw SPU register reaches the register, as vm_write32's does. */
++static void vm_raw_store_out(uint32_t ea, const uint8_t* s, uint32_t n, void* ra)
++{
++    uint32_t i = 0;
++    for (; i + 4 <= n; i += 4) {
++        uint32_t w;
++        memcpy(&w, s + i, 4);
++        barrier_watch_hit(ea + i, __builtin_bswap32(w), 4, ra);
++    }
++    for (; i < n; i++) barrier_watch_hit(ea + i, s[i], 1, ra);
++    if (!n || vm_oob(ea, n)) return;
++    uint32_t first = 0;
++    for (uint32_t k = 0; k < n && k < 4; k++) first = (first << 8) | s[k];
++    if (vm_null_store(ea, first, (int)n, ra)) return;
++    int reserved = 0;
++    for (uint64_t l = ea & ~127u; l < (uint64_t)ea + n; l += 128u) reserved |= spu_coh_line_reserved((uint32_t)l);
++    if (reserved) vm_write_block_coh(ea, s, n);
++    else memcpy(vm_base + ea, s, n);
++    if (n == 4 && spu_raw_is_reg(ea)) spu_raw_reg_store(ea, first, 4);
++}
++extern "C" void vm_raw_store_slow(uint64_t a, const void* src, uint32_t n)
++{
++    vm_raw_store_out((uint32_t)a, (const uint8_t*)src, n, __builtin_return_address(0));
++}
++extern "C" void vm_raw_zero_slow(uint64_t a, uint32_t n)
++{
++    static const uint8_t zeros[128] = {0};
++    void* ra = __builtin_return_address(0);
++    for (uint32_t done = 0; done < n; done += 128u)
++        vm_raw_store_out((uint32_t)a + done, zeros, n - done < 128u ? n - done : 128u, ra);
++}
++
+ /* See the note on the forward declaration above ppu_stwcx32. */
+ extern "C" void ppu_ww_note_atomic(uint32_t ea, uint32_t val, int width, void* ra)
+ {
+diff --git a/tools/ppu_lifter.py b/tools/ppu_lifter.py
+index 864e80d..8792b24 100644
+--- a/tools/ppu_lifter.py
++++ b/tools/ppu_lifter.py
+@@ -151,56 +151,6 @@ extern uint8_t* vm_base;
+ #define VM_RAW_LD(T, ea) ({ const uint8_t* _p = vm_base + (uint32_t)(ea); T _v; \
+     if (!((uintptr_t)_p & (sizeof(T) - 1))) _v = __atomic_load_n((const T*)_p, __ATOMIC_RELAXED); \
+     else memcpy(&_v, _p, sizeof(T)); _v; })
+-/* The raw stores -- vector (stvx and the element and unaligned forms),
+- * byte-reversed, dcbz -- keep the SPU reservations as the scalar stores do
+- * (R8, docs/NATIVE_R8.md section 5.4): a store to a line an SPU holds a
+- * reservation on goes out of line, where it takes the lock-line lock, writes
+- * and breaks the reservation. They did not before: such a store left an
+- * SPU's PUTLLC to succeed over it. PPU_RAW_ST_NO_COH keeps the old form (for
+- * measuring the change). */
+-#ifdef __cplusplus
+-extern "C" {
+-#endif
+-extern const unsigned char* const g_spu_coh_map;
+-void vm_write_block_coh(uint64_t ea, const void* src, uint32_t n);
+-void vm_zero_block_coh(uint64_t ea, uint32_t n);
+-#ifdef __cplusplus
+-}
+-#endif
+-static inline int vm_coh_reserved(uint32_t ea, uint32_t n)
+-{
+-#ifdef PPU_RAW_ST_NO_COH
+-    (void)ea; (void)n; return 0;
+-#else
+-    const uint32_t l0 = ea >> 7, l1 = (uint32_t)(ea + n - 1) >> 7;
+-    int r = (g_spu_coh_map[l0 >> 3] >> (l0 & 7)) & 1;
+-    if (l1 != l0) r |= (g_spu_coh_map[l1 >> 3] >> (l1 & 7)) & 1;
+-    return r;
+-#endif
+-}
+-#define VM_RAW_ST(T, ea, val) do { const uint32_t _rea = (uint32_t)(ea); T _v = (val); \
+-    if (__builtin_expect(vm_coh_reserved(_rea, sizeof(T)), 0)) { vm_write_block_coh(_rea, &_v, sizeof(T)); break; } \
+-    uint8_t* _p = vm_base + _rea; \
+-    if (!((uintptr_t)_p & (sizeof(T) - 1))) __atomic_store_n((T*)_p, _v, __ATOMIC_RELAXED); \
+-    else memcpy(_p, &_v, sizeof(T)); } while (0)
+-static inline void vm_raw_ld16(void* dst, uint64_t ea) {   /* quadword-aligned */
+-    uint64_t lo = VM_RAW_LD(uint64_t, ea), hi = VM_RAW_LD(uint64_t, ea + 8);
+-    memcpy(dst, &lo, 8); memcpy((uint8_t*)dst + 8, &hi, 8); }
+-static inline void vm_raw_st16(uint64_t ea, const void* src) {   /* quadword-aligned: one line */
+-    if (__builtin_expect(vm_coh_reserved((uint32_t)ea, 16), 0)) { vm_write_block_coh(ea, src, 16); return; }
+-    uint64_t lo, hi; memcpy(&lo, src, 8); memcpy(&hi, (const uint8_t*)src + 8, 8);
+-    uint8_t* p = vm_base + (uint32_t)ea;
+-    __atomic_store_n((uint64_t*)p, lo, __ATOMIC_RELAXED);
+-    __atomic_store_n((uint64_t*)(p + 8), hi, __ATOMIC_RELAXED); }
+-/* stvlx/stvrx: n bytes from src at ea, inside one quadword */
+-static inline void vm_raw_st_bytes(uint64_t ea, const uint8_t* src, uint32_t n) {
+-    if (__builtin_expect(vm_coh_reserved((uint32_t)ea, n ? n : 1), 0)) { vm_write_block_coh(ea, src, n); return; }
+-    uint8_t* m = vm_base + (uint32_t)ea;
+-    for (uint32_t i = 0; i < n; i++) m[i] = src[i]; }
+-/* dcbz: the 128-byte line at ea */
+-static inline void vm_raw_zero_line(uint64_t ea) {
+-    if (__builtin_expect(vm_coh_reserved((uint32_t)ea, 128), 0)) { vm_zero_block_coh(ea, 128); return; }
+-    memset(vm_base + (uint32_t)ea, 0, 128); }
+ extern int      vm_inline_ok;
+ extern int      vm_inline_st_ok;
+ extern uint32_t ppu_vm_size;
+@@ -280,10 +230,90 @@ static inline int vm_mm_st_ok(const ppu_mm* m, uint32_t ea, uint32_t n)
+ {
+     if (!__builtin_expect(vm_mm_in(m->st_span, ea, n), 1))
+         return 0;
++    /* A misaligned store that runs into the next 128-byte line goes out of
++     * line (R8, docs/NATIVE_R8.md section 5.4.1), where both lines'
++     * reservations are tested and broken (the loader's VM_WRITE_COH): the
++     * bit below is the first line's alone. No naturally aligned store
++     * crosses, nor a byte store (the compiler drops the test for it). */
++    if (__builtin_expect((ea & 127u) > 128u - n, 0))
++        return 0;
+     const uint32_t line = ea >> 7;
+     if ((m->coh[line >> 3] >> (line & 7)) & 1u) return 0;
+     return 1;
+ }
++/* The raw stores -- vector (stvx and the element and unaligned forms),
++ * byte-reversed, dcbz -- keep the SPU reservations as the scalar stores do
++ * (R8, docs/NATIVE_R8.md section 5.4): a store to a line an SPU holds a
++ * reservation on goes out of line, where it takes the lock-line lock, writes
++ * and breaks the reservation. They did not before: such a store left an
++ * SPU's PUTLLC to succeed over it. PPU_RAW_ST_NO_COH keeps the old form (for
++ * measuring the change).
++ *
++ * And the scalar stores' range (R8, docs/NATIVE_R8.md section 5.4.1): a raw
++ * store not wholly inside the inline store span -- below 0x10000, the raw
++ * SPU windows, past the mapping, or anywhere while a store diagnostic is
++ * armed (a span of 0) -- goes out of line as well (vm_raw_store_slow), which
++ * does what a scalar store's out-of-line path does: the store diagnostics,
++ * the mapping's end, a store into the first 4 KB dropped and reported. Before,
++ * a raw store wrote wherever it pointed: one into the null page landed where
++ * a scalar store is dropped. The span is g_ppu_mm's (0 until the model is
++ * published: everything out of line), or a lifted function's snapshot
++ * (vm_raw_st16_mm). PPU_STORES_BARE_MEASURE leaves the range test out, as it
++ * does the scalar stores'. */
++#ifdef __cplusplus
++extern "C" {
++#endif
++extern const unsigned char* const g_spu_coh_map;
++void vm_write_block_coh(uint64_t ea, const void* src, uint32_t n);
++void vm_zero_block_coh(uint64_t ea, uint32_t n);
++void vm_raw_store_slow(uint64_t ea, const void* src, uint32_t n);
++void vm_raw_zero_slow(uint64_t ea, uint32_t n);
++#ifdef __cplusplus
++}
++#endif
++static inline int vm_coh_reserved(uint32_t ea, uint32_t n)
++{
++#ifdef PPU_RAW_ST_NO_COH
++    (void)ea; (void)n; return 0;
++#else
++    const uint32_t l0 = ea >> 7, l1 = (uint32_t)(ea + n - 1) >> 7;
++    int r = (g_spu_coh_map[l0 >> 3] >> (l0 & 7)) & 1;
++    if (l1 != l0) r |= (g_spu_coh_map[l1 >> 3] >> (l1 & 7)) & 1;
++    return r;
++#endif
++}
++#ifdef PPU_STORES_BARE_MEASURE
++#  define VM_RAW_ST_IN(span, ea, n) 1
++#else
++#  define VM_RAW_ST_IN(span, ea, n) vm_mm_in((span), (ea), (n))
++#endif
++#define VM_RAW_ST(T, ea, val) do { const uint32_t _rea = (uint32_t)(ea); T _v = (val); \
++    if (__builtin_expect(!VM_RAW_ST_IN(g_ppu_mm.st_span, _rea, sizeof(T)), 0)) { vm_raw_store_slow(_rea, &_v, sizeof(T)); break; } \
++    if (__builtin_expect(vm_coh_reserved(_rea, sizeof(T)), 0)) { vm_write_block_coh(_rea, &_v, sizeof(T)); break; } \
++    uint8_t* _p = vm_base + _rea; \
++    if (!((uintptr_t)_p & (sizeof(T) - 1))) __atomic_store_n((T*)_p, _v, __ATOMIC_RELAXED); \
++    else memcpy(_p, &_v, sizeof(T)); } while (0)
++static inline void vm_raw_ld16(void* dst, uint64_t ea) {   /* quadword-aligned */
++    uint64_t lo = VM_RAW_LD(uint64_t, ea), hi = VM_RAW_LD(uint64_t, ea + 8);
++    memcpy(dst, &lo, 8); memcpy((uint8_t*)dst + 8, &hi, 8); }
++static inline void vm_raw_st16(uint64_t ea, const void* src) {   /* quadword-aligned: one line */
++    if (__builtin_expect(!VM_RAW_ST_IN(g_ppu_mm.st_span, (uint32_t)ea, 16), 0)) { vm_raw_store_slow(ea, src, 16); return; }
++    if (__builtin_expect(vm_coh_reserved((uint32_t)ea, 16), 0)) { vm_write_block_coh(ea, src, 16); return; }
++    uint64_t lo, hi; memcpy(&lo, src, 8); memcpy(&hi, (const uint8_t*)src + 8, 8);
++    uint8_t* p = vm_base + (uint32_t)ea;
++    __atomic_store_n((uint64_t*)p, lo, __ATOMIC_RELAXED);
++    __atomic_store_n((uint64_t*)(p + 8), hi, __ATOMIC_RELAXED); }
++/* stvlx/stvrx: n bytes from src at ea, inside one quadword */
++static inline void vm_raw_st_bytes(uint64_t ea, const uint8_t* src, uint32_t n) {
++    if (__builtin_expect(!VM_RAW_ST_IN(g_ppu_mm.st_span, (uint32_t)ea, n), 0)) { if (n) vm_raw_store_slow(ea, src, n); return; }
++    if (__builtin_expect(vm_coh_reserved((uint32_t)ea, n ? n : 1), 0)) { vm_write_block_coh(ea, src, n); return; }
++    uint8_t* m = vm_base + (uint32_t)ea;
++    for (uint32_t i = 0; i < n; i++) m[i] = src[i]; }
++/* dcbz: the 128-byte line at ea */
++static inline void vm_raw_zero_line(uint64_t ea) {
++    if (__builtin_expect(!VM_RAW_ST_IN(g_ppu_mm.st_span, (uint32_t)ea, 128), 0)) { vm_raw_zero_slow(ea, 128); return; }
++    if (__builtin_expect(vm_coh_reserved((uint32_t)ea, 128), 0)) { vm_zero_block_coh(ea, 128); return; }
++    memset(vm_base + (uint32_t)ea, 0, 128); }
+ /* PPU_BARE_LOADS (R8, a native release build): a guest load is the load and
+  * its byte swap, nothing else. The tests above are for what this build does
+  * not have or does not need: the GCM poll word (the native front end writes
+@@ -314,9 +344,10 @@ static inline int vm_mm_st_ok(const ppu_mm* m, uint32_t ea, uint32_t n)
+  * atomic-or-memcpy choice was a branch on every store, and on x86-64 both
+  * arms are the same single mov. The tests stay: the range (a store below
+  * 0x10000 or past 0xE0000000 goes out of line, where the first 4 KB is
+- * dropped as hardware drops it), a store diagnostic's span of 0, and the SPU
+- * reservation bitmap (a store to a line an SPU holds a reservation on takes
+- * the lock-line lock and breaks the reservation).
++ * dropped as hardware drops it), a store diagnostic's span of 0, a
++ * misaligned store into the next 128-byte line, and the SPU reservation
++ * bitmap (a store to a line an SPU holds a reservation on takes the
++ * lock-line lock and breaks the reservation).
+  *
+  * PPU_STORES_NO_COH_MEASURE and PPU_STORES_BARE_MEASURE are measurement
+  * builds only (docs/NATIVE_R8.md section 5.4): the first leaves out the
+@@ -466,6 +497,7 @@ static inline void vm_write64_mm(const ppu_mm* m, uint64_t a, uint64_t v)
+ static inline void vm_raw_st16_mm(const ppu_mm* m, uint64_t a, const void* src)
+ {
+     const uint32_t ea = (uint32_t)a, line = ea >> 7;
++    if (__builtin_expect(!VM_RAW_ST_IN(m->st_span, ea, 16), 0)) { vm_raw_store_slow(ea, src, 16); return; }
+ #ifndef PPU_RAW_ST_NO_COH
+     if (__builtin_expect((m->coh[line >> 3] >> (line & 7)) & 1u, 0)) { vm_write_block_coh(ea, src, 16); return; }
+ #else
+-- 
+2.56.0.windows.3
+

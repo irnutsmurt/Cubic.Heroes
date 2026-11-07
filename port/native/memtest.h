@@ -30,6 +30,21 @@ uint64_t mt_bare_torn(int size, uint64_t ea, uint64_t a, uint64_t b, uint64_t n)
 /* Whether this build's lifted code uses the bare form. */
 int mt_build_bare(void);
 
+/* One guest store as this build's lifted code makes it (memtest_stores.cpp):
+ * `kind` below, `bytes` the bytes it puts in guest memory, in order
+ * (mt_store_size of them; dcbz takes none). docs/NATIVE_R8.md section 5.4.1. */
+enum { MT_ST8 = 1, MT_ST16 = 2, MT_ST32 = 4, MT_ST64 = 8,   /* stb .. std */
+       MT_BRX16 = 102, MT_BRX32 = 104, MT_BRX64 = 108,      /* sthbrx, stwbrx, stdbrx */
+       MT_STVX = 116,      /* stvx inside a lifted function (its snapshot) */
+       MT_STVX_G = 117,    /* stvx outside one (the global model) */
+       MT_STVLX8 = 118,    /* stvlx/stvrx: 8 bytes */
+       MT_DCBZ = 128 };
+void mt_store(int kind, uint64_t ea, const uint8_t* bytes);
+int mt_store_size(int kind);
+/* The memory model a game run publishes (the inline spans), or none (0):
+ * the test runs before the loader publishes one. */
+void mt_store_model(int on);
+
 /* The test, on the guest space main.cpp reserved (`vm_size` bytes from
  * vm_base: the 4 GB and the guard). Returns the process exit code: 0 when
  * every check passed. */

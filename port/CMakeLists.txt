@@ -222,10 +222,11 @@ add_executable(${PROJECT_NAME}
     ${RECOMP_SOURCES}
     ${SPU_SOURCES}
 )
-# `dotheroes --memtest` (docs/NATIVE_R8.md section 5.3): the lifted loads'
+# `dotheroes --memtest` (docs/NATIVE_R8.md sections 5.3, 5.4.1): the lifted loads'
 # checked and bare forms, compiled from this lift's ppu_recomp.h, tested
 # against the guest space.
-target_sources(${PROJECT_NAME} PRIVATE native/memtest.cpp native/memtest_checked.cpp native/memtest_bare.cpp)
+target_sources(${PROJECT_NAME} PRIVATE native/memtest.cpp native/memtest_checked.cpp native/memtest_bare.cpp
+    native/memtest_stores.cpp)
 # R8's physics hooks (config/r8_hooks.json): the guest registers in and out of
 # native/phys_direct.cpp
 target_sources(${PROJECT_NAME} PRIVATE phys_hooks.cpp)

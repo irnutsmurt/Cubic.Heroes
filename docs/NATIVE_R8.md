@@ -25,6 +25,7 @@ per-thread work reported apart. An average of 144 is not 144 sustained.
 | The lifted code: the loads' tests | removed in the native release: the game thread 1.1-1.2 ms faster (section 5) |
 | **The bare loads' assumptions** | **reviewed, enforced and tested** (`dotheroes --memtest`, 614 checks), defined for any alignment, gated to Windows x86-64; a checked comparison build kept (section 5.3) |
 | **The stores** | **priced** (the reservation test 0.4 ms, the range test 0.2 ms: measurement builds); one mov after the tests; **the raw stores' missing reservation test added** (section 5.4) |
+| **The two known store gaps** | **fixed in source** (ps3recomp 0125): a misaligned store across a line now tells both lines; the raw stores test the scalar stores' range, so a raw store into the null page is dropped. Standalone test 52/52 in both variants (the old code fails 24); the `--memtest` store groups and the cost are **not yet built, run or measured** (sections 5.4.1, 9.1) |
 | **The SPU interpreter and microstepper** | **gone from every build**; any way into them stops the program whatever PS3_STRICT says (section 5.5) |
 | **Register promotion** | at every call: measured worse, not adopted; **in functions that call nothing: adopted**, 3.5% of the game thread exploring (section 5.6) |
 | The indirect calls | a call-site cache (ps3recomp 0118): +1.5-3% (section 5.1) |
@@ -468,6 +469,102 @@ so the fields are the cleaner comparison of code.)
   the reservation test is required while any SPU code takes reservations on
   lines the PPU writes. It can go only with a different synchronisation
   design (section 9: a tradeoff for the owner).
+
+### 5.4.1 The two known store gaps, closed (2026-11-07) [C]
+
+Reviewed and fixed in source, with focused tests (ps3recomp 0125). The
+standalone test ran; the in-game test is built into `--memtest` but **has
+not run**, and nothing is measured (section 9.1). Both gaps were found in
+part 2's review and left (section 9).
+
+**A misaligned store across a 128-byte line.** Two places tested and told
+only the store's first line:
+- the inline test (vm_mm_st_ok);
+- the out-of-line commit (ppu_loader.cpp's VM_WRITE_COH: one
+  spu_coh_line_reserved, one spu_coh_notify_write).
+
+So a 2-, 4- or 8-byte store that ran past a line's end into a line an SPU
+held a reservation on left that reservation standing, and that SPU's
+PUTLLC could succeed over the PPU's write. The same went for the line
+watches: spu_coh_watch, the host waits the bitmap also drives.
+
+Fixed:
+- The inline test sends a store whose bytes run past its line
+  (`(ea & 127) > 128 - n`) out of line. No naturally aligned store
+  crosses, and for a byte store the compiler drops the test.
+- VM_WRITE_COH tests both lines and tells both.
+- The raw stores already tested both lines (vm_coh_reserved) and told
+  every line (vm_write_block_coh).
+
+The new inline test is an and, a compare and a branch on each 2-, 4- and
+8-byte store. Its cost is **not yet measured**. If it shows, the lifter can
+leave it out where it proves the address aligned, such as stack slots off
+r1 with aligned offsets.
+
+**A raw store into the first page.** The raw stores wrote wherever they
+pointed and never tested the scalar stores' range: the byte-reversed
+stores, stvx, the element stores, stvlx/stvrx and dcbz. So:
+- a raw store into the first 4 KB landed where a scalar store is dropped
+  and reported (vm_null_store);
+- a store diagnostic's span of 0 did not stop them, and a write watch never
+  saw a vector store;
+- a raw store past the mapping's end was not turned away.
+
+Fixed: every raw store tests the inline store span, through the lifted
+function's snapshot for stvx and g_ppu_mm for the rest, and goes out of
+line otherwise. vm_raw_store_slow and vm_raw_zero_slow then do what the
+scalar stores' out-of-line path does:
+- the write and barrier watches (a word at a time);
+- the mapping's end;
+- a store starting in the first 4 KB dropped and reported, with the
+  null-page sweep's containment;
+- the write, under the reservation protocol on every line it touches;
+- a word store to a raw SPU register reaching the register.
+
+PPU_STORES_BARE_MEASURE leaves the new range test out, as it does the
+scalar stores' tests.
+
+**Tests.**
+- **tests/native/store_paths.py**: the generated header's store helpers,
+  compiled with a small test (tests/native/store_paths_test.cpp) once per
+  store variant and run against a 512 KB test guest space. The out-of-line
+  functions are stubs that record their calls. It has 52 checks:
+  - every 2-, 4- and 8-byte store at the last offsets of a line;
+  - a byte store at offset 127;
+  - a reserved first line, a reserved second line, and a store ending
+    exactly at a reserved line;
+  - the range at 0, in the first page, across 0x10000, at 0x10000, at the
+    space's end and past it, and with a diagnostic armed;
+  - each raw store kind in and out of the range, reserved and not.
+
+  Result: **checked 52/52, mov 52/52**. The same test on the lifter before
+  the fix fails 24 checks in each variant: every crossing store, and every
+  raw store in the first page, across 0x10000, past the end or under a
+  diagnostic.
+- **`dotheroes --memtest`**, two new groups (memtest_stores.cpp, the
+  build's own store variant, the real runtime). **Built into the next
+  build, not yet run.**
+  - **stores: the first pages**: each of eleven store kinds into the null
+    page (must not land, even a dcbz over nonzero bytes), at 0x4000 (lands,
+    out of line) and in the inline span (lands).
+  - **stores: line boundaries**: a line watch (spu_coh_watch) counts the
+    stores that reach the next line. It is told exactly when a store runs
+    into it: 21 cases over the kinds and offsets, with the bytes checked.
+    With both lines watched, a crossing store tells both.
+
+  Compile-checked against the new header in both variants, as was the
+  changed ppu_loader.cpp.
+- ps3recomp's lifter tests: test_lifter_header_name,
+  test_ppu_lifter_insn_patches and test_ppu_lifter_chunks pass.
+  test_ppu_lift fails the same way with and without this change: it
+  compiles its conformance file with MSVC, which has no
+  `__builtin_expect`.
+
+**What changes for this game** [I, from the lift's counts]: its lift has
+737 stvx sites and two byte-reversed stores, and no dcbz or stvlx/stvrx
+(section 5.4). Whether any store of it crosses a line or touches the first
+page in play is not known. The fixes make what such a store does correct,
+not observed.
 
 ### 5.5 No SPU interpreter, no microstepper [C, M]
 
@@ -1068,7 +1165,7 @@ Left, in the order the measurements point:
 | **The stores' range test and the diagnostics' span** | 0.2 ms more (measurement build) | required (the first page's stores dropped, the store diagnostics); left |
 | **Lifted SPU code left (non-audio)** | the water task (9.5% of a pool thread, off the critical path), solver commands 1-2, the inflate's SPU shell | native versions as measured benefit allows; with FMOD they are what holds the reservation test |
 | **Development code in the release** | the test harness's threads (dev keys, state, stop) and R4-R7's verify modes compiled in, inert in play | trim |
-| **Known gaps, found and left** | a misaligned scalar store across a 128-byte line tests only its first line's reservation; a raw (vector) store into the first page lands where a scalar one is dropped; the bare loads on Linux not established (checked there) | each a change of its own if a title needs it |
+| **Known gaps, found and left** | the bare loads on Linux not established (checked there). The two store gaps (a misaligned store across a line; a raw store into the first page) are fixed in source, not yet built or run (section 5.4.1) | a change of its own if a title needs it |
 | **Audio** | FMOD's mixer, codecs and DSPs lifted SPU code: the SPU context, channels, DMA, reservations, sys_event | the audio milestone |
 | **R7's open items** | the post-boss warp run (the owner's optional session), occlusion against RPCS3, the depth clamp, the dual run's stall | unchanged |
 
@@ -1085,6 +1182,10 @@ then.
 | 2 | `tests/player_install_test.py` (fresh, check, update, relift, settings): a conversion from the disc image into F: -- the lift and the full compile, ~15-20 min | section 7.2 |
 | 3 | `tests/player_install_test.py game --run-game`: `--memtest`, a river fight from the install | section 7.2 |
 | 4 | the player-built game against rel8: the river fight and the fields, uncapped, real audio (the x86-64-v2 prebuilt against v3) | section 7.2 |
+| 5 | relift (tools/r8_lift.sh: ps3recomp 0125 changes the generated header) and rebuild the release and its checked comparison build | section 5.4.1 |
+| 6 | `--memtest` on both: the two new store groups, and the earlier 614 checks | section 5.4.1 |
+| 7 | validate as rel7 was (build/r8/val3_run.sh: the eight scenarios, sync validation, capture check, the stops, timing, normal damage) | section 5.4.1 |
+| 8 | A/B against rel8, uncapped, real audio (the fields and the fight): the cost of the line-crossing test and the raw stores' range test | section 5.4.1 |
 
 ## 10. Reproducing
 
@@ -1134,4 +1235,4 @@ DOTHEROES_SPU_INTERPRETER (development only). Engine changes:
 patches/ps3recomp/0117 (PAD_FILE holds), 0118 (the call-site cache,
 PPU_BARE_LOADS), 0119 (no SPU interpreter; ps3_fatal), 0120 (the bare loads
 defined and gated, the stores' variants, entry hooks that may decline), 0121
-and 0122 (the raw stores' reservation test), 0123 (--promote-leaf), 0124 (the release draws without DOTHEROES_PPFX_NATIVE).
+and 0122 (the raw stores' reservation test), 0123 (--promote-leaf), 0124 (the release draws without DOTHEROES_PPFX_NATIVE), 0125 (a misaligned store tells both lines; the raw stores keep the scalar stores' range).
