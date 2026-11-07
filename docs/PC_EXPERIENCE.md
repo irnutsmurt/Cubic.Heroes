@@ -149,8 +149,17 @@ where expected. The game's frame time is unchanged by the output size at
 four values, and any other number means no limit:
 - 30: the game's original pacing (its own sleep and two vblanks);
 - 60: one vblank a frame (the default);
-- 0: none;
-- display: a frame per display refresh.
+- 0: none of the game's own pacing. **But outside benchmark mode a flip
+  still completes on the next tick of the port's vblank clock, which runs at
+  60 Hz** (port/main.cpp). So 0 ran at exactly 60 fps on the 143 Hz monitor
+  [M, the owner's rel8b session, 2026-11-07: 95,474 presents, median 16.67
+  ms]. Only DOTHEROES_BENCH=1 makes a flip complete when executed;
+- display: a frame per display refresh (the vblank clock at the display's
+  own period).
+
+So "uncapped" in this milestone must also complete flips when executed, as
+benchmark mode does, and must be tested by the measured rate, not by the
+setting's name.
 
 **Required.**
 - **Presets**: 30 (the original pacing, kept for fidelity), 60, 120, 144,
