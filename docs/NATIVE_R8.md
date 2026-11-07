@@ -34,6 +34,7 @@ per-thread work reported apart. An average of 144 is not 144 sustained.
 | **The player's build path** | **audited: it built the development configuration** (the old renderer, checked loads and stores, physics through SPURS). Changed to build the native release at all three layers (the lift, the prebuilt runtime, the install-time compile); 11 static checks pass. **Not yet built or run** (sections 7.2, 9.1) |
 | Measurement | done (sections 8, 8.2): combat 194 fps at the median (production 148), exploring 235 (production 186) for rel6; 144 sustained exploring (99.8% of frames), not yet in combat (97.8%) |
 | **Stopping a batch** | **fixed**: tools/owned_run.py runs a batch in a job object of its own; a cancel, the launching shell's end or the launcher's end stops every process it started and nothing else. 7 dummy-process tests and one stop of a real background task pass; not yet used for a game batch (section 9.2) |
+| **The recorder's bookkeeping** | **investigated**: one producer thread (measured: no observed call on another thread in the kept fight reports); the lock is needed only against copies into RSX local memory and inline transfers made on other threads, which the native renderer never takes part in. A lock-free producer path, an indexed dispatch and direct handlers are prepared as three measured steps; two counters added to tell whether other threads write at all (compiled, not run) (section 8.4) |
 | What is left | section 9 -- one decision for the owner there (the reservation test) |
 
 ## 1. Inventory: what runs, and what is on the critical path [M, C]
@@ -1148,6 +1149,108 @@ over each window from its frame log), against the R7 release's
   threads idle outside physics steps. The main PPU thread is still the
   critical path alone.
 
+### 8.4 The recorder's bookkeeping: what it must keep, and a direct path (2026-11-07) [C, M]
+
+Investigated from the source and the kept runs' reports. Prepared, not
+implemented: the only code change is two report counters, compile-checked,
+not yet run.
+
+**What it costs** [M, section 8.3]: the recorder is 1.03 ms of a fight
+frame's game thread and 0.52 ms exploring. About 0.35 ms of the fight's is
+bookkeeping around the records:
+- the lock, under ppfx::acquire: 2.7%;
+- the generic dispatch, ppfx_rec_observe: 2.6%;
+- mutex calls: about 1.2%.
+
+**How many calls it sees** [M, v3river's report: rel7's validation fight,
+5,909 frames]:
+- 35.8 million observed calls, about 6,070 a frame, not counting the game's
+  memcpy, which returns before the count;
+- asp's, 22.4 million: 62%;
+- `other_threads 0`, `producer_threads 0`;
+- `local_copies 8,157`.
+
+The calls by address were last counted in R6, before the bodies were
+skipped (u1river, a flip). The constants (0x006C9C74) 1,271, the stream
+unbind (0x006D32D0) 1,235 and bind (0x006D3190) 673, the game's vertex
+arrays (0x0069F19C) 612 and the fragment patch (0x006C9624) 476 made about
+70% of 6,400. The current release's counts are not measured (section 9.1).
+
+**One call's path** [C]:
+1. The lifted wrapper tests g_ppu_entry_observe and calls
+   ppu_entry_observe (r1_observe.cpp).
+2. That calls ppfx_rec_observe, then r1_log: one address test and one
+   atomic load.
+3. ppfx_rec_observe makes, in order:
+   - the start-up test, the call-count test, the memcpy test;
+   - a 1-in-16 time sample and the call counter;
+   - GetCurrentThreadId, then **the lock (s_lock), taken on every call**;
+   - the flip and inline-transfer tests;
+   - the producer-thread test and the title's context;
+   - R7's calls (r7_call), asp's state (asp_resolve) and asp's calls
+     (asp_fn, asp_call);
+   - the caller's attribution, then the occlusion, R6 and R4 decisions.
+
+   Each call walks this chain of tests before its own work.
+
+**The producer-thread requirement, established.**
+- [C] The command stream has one producer: the thread of the first
+  observed call (S.tid). A PPFX call on any other thread is fatal. Other
+  code's calls on other threads are counted and left out of the state.
+- [M] In both kept fight reports (v3river; R6's u1river, 29,921 frames)
+  every observed call but the memcpy came from that one thread.
+
+**The lock's job, established** [C]. s_lock keeps the producer apart from
+two writers that may run on other threads:
+- the game's memcpy into RSX local memory, which updates the recorder's
+  copy of program memory (shadow_cpu_write: the shadow's pages and its
+  epoch counter);
+- the inline transfer entry, 0x0069FC38 (shadow_write), handled before the
+  thread test.
+
+Nothing else needs it:
+- the native renderer's thread never takes it. It reads the record queue
+  (put/flushed/done atomics; q.m and q.cv only for the full-queue wait),
+  the records, the program blobs (immutable once made) and guest memory;
+- the report uses its own locks and the counters' atomics;
+- other threads' other calls touch no state, but take the lock today
+  because it comes before the thread test.
+
+acquire() lets the lock go while it waits for room in the queue
+(queue_full_waits: 0 in u1river), so those writers never wait behind a full
+queue. **Whether either writer actually runs on another thread in play is
+not known**: the report counted local copies but not their thread. Two
+counters now say: `local_copies_other_threads` and
+`transfers_other_threads` on the report's `calls` line (ppfx_native.h,
+ppfx_recorder.cpp; compiled in both configurations, not yet run).
+
+**Order requirements a faster path must keep** [C]:
+- records are published in call order (seq = the queue's put), with the
+  producer's state (S, A) as the calls left it;
+- a record sees program memory as the copies and transfers before its call
+  left it: a copy on another thread that the game ordered before the call
+  must be in the shadow when the call reads it;
+- each entry returns what it returns today: 0 the body runs, 1 it does not,
+  2 it runs and its exit is observed, with the exit observation in order.
+
+**The direct path, prepared** (each step a change of its own, validated
+and measured before the next):
+
+| Step | What | Correctness test | Measure |
+|---|---|---|---|
+| 0 | the current release's calls by address (DOTHEROES_R6_CALL_COUNTS=1) and the two new counters, fight and fields | -- | which entries to take first; whether other threads write at all |
+| 1 | **no lock on the producer's path**. Other threads' copies and transfers go onto a short hand-off list (its own small lock and an atomic flag); the producer applies the list at the top of its next call (one relaxed load when empty) -- the same order as the lock gives today: whichever enters first. S.tid set once by compare-exchange; other threads' other calls return without the lock; acquire() no longer lets go of anything | the eight scenarios against rel8, sync validation, the capture check; the development configuration's cross-check (DOTHEROES_PPFX_XCHECK against the engine's own commands: 0 mismatches); a forced test of the hand-off (a development switch that makes the memcpy observer queue every copy) | A/B against rel8, uncapped, real audio: busy, the recorder's sampled time |
+| 2 | **an indexed dispatch**: the lifter passes each observed entry's index (`ppu_entry_observe_ix(i, addr, ctx)`; the entry list is fixed at lift time) and the recorder keeps a table of handler classes -- memcpy, flip, transfer, R7's calls, asp's calls, the rest -- so a call goes to its class without the chain of tests; the start-up, call-count and timing tests leave the per-call path (counting becomes a build option) | as step 1, plus the calls-by-address report equal in shape to step 0's | as step 1 |
+| 3 | **direct handlers for the hottest entries** (from step 0; in R6 asp's constants, stream bind/unbind, fragment patch, pair bind and draw, and the game's vertex arrays): each does what the generic path does for its address, in the same order (asp_resolve first, then the call), with its preconditions checked once instead of per call (the producer thread, the title's context known, not one of R7's calls) | as step 2, per handler: its records' counts and contents against the generic path's on the same drive | per handler: the recorder's time at that entry |
+
+The ceiling of steps 1-2 is the measured bookkeeping, about 0.35 ms of a
+fight frame [I]; step 3 trims the handlers' own work and is estimated per
+entry once step 0 gives the counts. Register-level hooks (the physics'
+declining entry hooks) do not fit the observed entries as they are: those
+can replace a body or decline, but not run it and observe its return
+(code 2), which several entries need. So the index goes through the
+observer instead.
+
 ## 9. What R8 leaves, and the next steps
 
 R8 so far: the inventory; the timer question settled; the harness's hold
@@ -1160,7 +1263,7 @@ Left, in the order the measurements point:
 | Left | Measured | Next |
 |---|---|---|
 | **The lifted code** | 68-82% of the game thread; registers in memory across every call | promotion across calls with liveness (section 5.6): store back only what a callee can read, reload only what it can change and is still needed -- a dataflow pass in the lifter, validated scenario by scenario. The hottest non-leaf function (func_000A7C78, 8% exploring) first |
-| **The recorder's bookkeeping** | 1.03 ms a fight frame, 0.35 ms of it the lock, the generic dispatch and mutex calls round the records | direct per-entry hooks (the lifter's declining entry hooks, as the physics uses) for the hottest observed entries, and one producer thread without the lock |
+| **The recorder's bookkeeping** | 1.03 ms a fight frame, 0.35 ms of it the lock, the generic dispatch and mutex calls round the records | requirements established and the direct path prepared in three steps (section 8.4): no lock on the producer's path (other threads' copies handed off), an indexed dispatch through the observer, direct handlers for the hottest entries. Step 0 (the current counts) first |
 | **The SPU reservation test on every store** | 0.4 ms of the game thread (10%) -- priced by a measurement build, not removable as things stand | **a decision for the owner**: (a) keep it until no lifted SPU code takes reservations (the audio milestone and the non-audio SPU code below); or (b) change the synchronisation model: an SPU's PUTLLC checks the 128-byte line against what its GETLLAR read (as ppu_stwcx32 already does for the PPU) instead of every PPU store breaking reservations -- which loses PUTLLC's detection of a store that rewrote the same bytes (ABA) and needs another wake-up for SPU code waiting on a lost reservation (the SPURS queues and event flags, FMOD) |
 | **Heavy-debris frames** | p50 6.9-7.5 ms in the fight (over 144's 6.94): the game's lifted physics on the PPU (~0.8 ms), the lifted solver commands 1-2 (~130 us a run, nine a step, waited for in turn) | native commands 1-2: a port of Sony's set-up code bit-exact with the SPU (its truncating single precision, its estimates), as iterate was -- days of work, worth ~0.3 ms of a heavy frame |
 | **The stores' range test and the diagnostics' span** | 0.2 ms more (measurement build) | required (the first page's stores dropped, the store diagnostics); left |
@@ -1188,6 +1291,7 @@ then.
 | 7 | validate as rel7 was (build/r8/val3_run.sh: the eight scenarios, sync validation, capture check, the stops, timing, normal damage) | section 5.4.1 |
 | 8 | A/B against rel8, uncapped, real audio (the fields and the fight): the cost of the line-crossing test and the raw stores' range test | section 5.4.1 |
 | 9 | every batch above launched through tools/owned_run.py, and the first one stopped and restarted on purpose once (its game included) | section 9.2 |
+| 10 | the recorder's step 0 on the release from item 5: the river fight and the fields with DOTHEROES_R6_CALL_COUNTS=1 (calls by address a flip; local_copies_other_threads, transfers_other_threads) | section 8.4 |
 
 ### 9.2 Stopping a batch stops what it started (2026-11-07) [C, M]
 

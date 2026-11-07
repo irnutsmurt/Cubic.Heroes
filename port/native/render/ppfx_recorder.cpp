@@ -3781,11 +3781,12 @@ void write_report()
     fprintf(f, "# ppfx report at %.1f s (mode %d)\n", now_s(), mode());
     write_call_counts(f);
     fprintf(f, "calls %llu ppfx %llu nested_ppfx %llu others_on_producer %llu other_threads %llu unmodelled %llu "
-               "producer_threads %llu local_copies %llu\n",
+               "producer_threads %llu local_copies %llu local_copies_other_threads %llu transfers_other_threads %llu\n",
             (unsigned long long)s.calls, (unsigned long long)s.ppfx_calls, (unsigned long long)s.nested_ppfx,
             (unsigned long long)s.foreign_state_calls, (unsigned long long)s.other_thread_calls,
             (unsigned long long)s.unmodelled, (unsigned long long)s.producer_threads,
-            (unsigned long long)s.local_copies);
+            (unsigned long long)s.local_copies, (unsigned long long)s.local_copies_other,
+            (unsigned long long)s.transfers_other);
     fprintf(f, "records draws %llu clears %llu (depth-only clears %llu) frames %llu put %llu walked %llu done %llu\n",
             (unsigned long long)s.draws, (unsigned long long)s.clears, (unsigned long long)s.depth_clears,
             (unsigned long long)s.frames,
@@ -4170,6 +4171,9 @@ extern "C" int ppfx_rec_observe(uint32_t addr, ppu_context* ctx)
             std::lock_guard<std::mutex> g(s_lock);
             shadow_cpu_write(dst - kLocalEa, vm_base + src, n);
             stats().local_copies++;
+#ifdef _WIN32
+            if (S.tid && GetCurrentThreadId() != S.tid) stats().local_copies_other++;   // S.tid: set under this lock
+#endif
         }
         // a diagnostic: the game's copies into RSX local memory below the
         // first PPFX intermediate (the display buffers among them) and from
@@ -4233,6 +4237,7 @@ extern "C" int ppfx_rec_observe(uint32_t addr, ppu_context* ctx)
     // memory is the GPU's; PPFX's are the ones that matter, but a transfer
     // by other code lands in the same memory).
     if (addr == 0x0069FC38u) {
+        if (S.tid && tid != S.tid) bump(st.transfers_other);
         const uint32_t dst = (uint32_t)ctx->gpr[4], src = (uint32_t)ctx->gpr[5], words = (uint32_t)ctx->gpr[6];
         if (words && words <= 0x10000u && ea_ok(src, words * 4)) {
             shadow_write(dst, vm_base + src, words * 4u, ++s_epoch);

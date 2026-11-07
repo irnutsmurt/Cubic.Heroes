@@ -406,6 +406,9 @@ struct Stats {
     std::atomic<uint64_t> calls{0}, ppfx_calls{0}, nested_ppfx{0}, foreign_state_calls{0}, other_thread_calls{0};
     std::atomic<uint64_t> unmodelled{0};          // PPFX calls with commands the recorder has no encoder for
     std::atomic<uint64_t> local_copies{0};        // the game's copies into local memory seen
+    // R8 (docs/NATIVE_R8.md section 8.4): of those and of the inline transfers, the ones made on
+    // another thread than the producer's -- what the recorder's lock is there for
+    std::atomic<uint64_t> local_copies_other{0}, transfers_other{0};
     std::atomic<uint64_t> asp_calls{0}, asp_restores{0}, asp_store_mismatch{0};   // asp's state API seen
     std::atomic<uint64_t> transfers{0}, reports{0};   // PPFX's report copies and report requests (side effects)
     std::atomic<uint64_t> draws{0}, clears{0}, depth_clears{0}, frames{0};
