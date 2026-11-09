@@ -1,0 +1,402 @@
+{
+ "about": "RPCS3 reference captures (2026-11-09, RPCS3 0.0.43-20511, scale 100, Write Color/Depth Buffers): the targets RPCS3 wrote back, read over its GDB server at the camera given. The data is game output and stays local in build/reference/rpcs3/<scene>/ (tests/rpcs3_reference.py pack). 'accepted' holds the figures the validated build reached; tests/rpcs3_reference.py check flags anything worse.",
+ "scenes": {
+  "dungeon_door": {
+   "about": "first dungeon, the lamp-lit second room's south door: the hero's sparkle (glare stars from negative scene colour)",
+   "drive": "tests/scenarios/rpcs3ref_dungeon_door.drive",
+   "save": "a castle-entrance save with the Assassin preset (packed with the scene)",
+   "camera": [
+    89.6,
+    -104.0
+   ],
+   "area": 37,
+   "secs": 150,
+   "notes": "enemies move: the frame and combined buffer differ where they stand; the sparkle's measure is no negative component in ours and the bright pass's spread",
+   "targets": [
+    {
+     "name": "combined",
+     "offset": "02260000",
+     "w": 1280,
+     "h": 720,
+     "kind": "f16",
+     "pitch": 10240,
+     "rpcs3_file": "combined.bin"
+    },
+    {
+     "name": "bright",
+     "offset": "02DD0000",
+     "w": 640,
+     "h": 360,
+     "kind": "f16",
+     "pitch": 5120,
+     "rpcs3_file": "bright.bin"
+    },
+    {
+     "name": "glare",
+     "offset": "02A10000",
+     "w": 640,
+     "h": 360,
+     "kind": "f16",
+     "pitch": 5120,
+     "rpcs3_file": "glare.bin"
+    },
+    {
+     "name": "refl",
+     "offset": "01233D80",
+     "w": 1024,
+     "h": 512,
+     "kind": "r565",
+     "pitch": 2048,
+     "rpcs3_file": "refl.bin"
+    },
+    {
+     "name": "final",
+     "offset": "00398000",
+     "w": 1280,
+     "h": 720,
+     "kind": "argb8",
+     "pitch": 5120,
+     "rpcs3_file": "final.bin"
+    }
+   ],
+   "accepted": {
+    "combined": {
+     "mean": [
+      0.02636,
+      0.01307,
+      0.00234
+     ],
+     "far_pct": 40.644,
+     "neg_ours": 0
+    },
+    "bright": {
+     "mean": [
+      0.0,
+      0.0,
+      0.0
+     ],
+     "far_pct": 0.0,
+     "neg_ours": 0
+    },
+    "glare": {
+     "mean": [
+      0.0,
+      0.0,
+      0.0
+     ],
+     "far_pct": 0.0,
+     "neg_ours": 0
+    },
+    "refl": {
+     "mean": [
+      0.817,
+      0.556,
+      0.034
+     ],
+     "far_pct": 1.064
+    },
+    "final": {
+     "mean": [
+      2.506,
+      2.69,
+      1.299
+     ],
+     "far_pct": 3.812
+    }
+   },
+   "accepted_from": "rel8r"
+  },
+  "entry_hall": {
+   "about": "castle area 82, the entry hall below the throne-room corridor: the floor reflection's stair walls (the depth clamp)",
+   "drive": "tests/scenarios/rpcs3ref_entry_hall.drive",
+   "save": "build/checkpoints/castle-front (packed with the scene)",
+   "camera": [
+    14.4,
+    -47.2
+   ],
+   "area": 82,
+   "secs": 150,
+   "targets": [
+    {
+     "name": "refl",
+     "offset": "01233D80",
+     "w": 1024,
+     "h": 512,
+     "kind": "r565",
+     "pitch": 2048,
+     "rpcs3_file": "refl.bin"
+    },
+    {
+     "name": "combined",
+     "offset": "02260000",
+     "w": 1280,
+     "h": 720,
+     "kind": "f16",
+     "pitch": 10240,
+     "rpcs3_file": "combined.bin"
+    },
+    {
+     "name": "final",
+     "offset": "00398000",
+     "w": 1280,
+     "h": 720,
+     "kind": "argb8",
+     "pitch": 5120,
+     "rpcs3_file": "final.bin"
+    }
+   ],
+   "accepted": {
+    "refl": {
+     "mean": [
+      0.182,
+      0.164,
+      0.33
+     ],
+     "far_pct": 0.485
+    },
+    "combined": {
+     "mean": [
+      0.00139,
+      0.00097,
+      0.00192
+     ],
+     "far_pct": 1.368,
+     "neg_ours": 0
+    },
+    "final": {
+     "mean": [
+      0.452,
+      0.43,
+      0.629
+     ],
+     "far_pct": 0.784
+    }
+   },
+   "accepted_from": "rel8r"
+  },
+  "corridor": {
+   "about": "castle area 82, the throne-room corridor, the hero placed at RPCS3's camera: reflection, the pillars' shading",
+   "drive": "tests/scenarios/rpcs3ref_corridor.drive",
+   "save": "build/checkpoints/castle-front (packed with the scene)",
+   "camera": [
+    14.4,
+    -29.52
+   ],
+   "area": 82,
+   "secs": 150,
+   "targets": [
+    {
+     "name": "refl",
+     "offset": "01233D80",
+     "w": 1024,
+     "h": 512,
+     "kind": "r565",
+     "pitch": 2048,
+     "rpcs3_file": "refl.bin"
+    },
+    {
+     "name": "scene",
+     "offset": "01AE0000",
+     "w": 1280,
+     "h": 720,
+     "kind": "f16",
+     "pitch": 10240,
+     "rpcs3_file": "scene.bin"
+    },
+    {
+     "name": "combined",
+     "offset": "02260000",
+     "w": 1280,
+     "h": 720,
+     "kind": "f16",
+     "pitch": 10240,
+     "rpcs3_file": "combined.bin"
+    },
+    {
+     "name": "final",
+     "offset": "00398000",
+     "w": 1280,
+     "h": 720,
+     "kind": "argb8",
+     "pitch": 5120,
+     "rpcs3_file": "final.bin"
+    }
+   ],
+   "accepted": {
+    "refl": {
+     "mean": [
+      0.142,
+      0.138,
+      0.138
+     ],
+     "far_pct": 0.27
+    },
+    "scene": {
+     "mean": [
+      0.00142,
+      0.00124,
+      0.00124
+     ],
+     "far_pct": 2.47,
+     "neg_ours": 0
+    },
+    "combined": {
+     "mean": [
+      0.00131,
+      0.00113,
+      0.00114
+     ],
+     "far_pct": 3.807,
+     "neg_ours": 0
+    },
+    "final": {
+     "mean": [
+      0.33,
+      0.347,
+      0.346
+     ],
+     "far_pct": 0.965
+    }
+   },
+   "accepted_from": "rel8r"
+  },
+  "king": {
+   "about": "the king's dialogue close-up, 10 s after talking: bloom chain, the window-light floor, the shadow map",
+   "drive": "tests/scenarios/rpcs3ref_king.drive",
+   "save": "build/checkpoints/castle-front (packed with the scene)",
+   "camera": [
+    12.0,
+    -18.4
+   ],
+   "area": 82,
+   "secs": 150,
+   "notes": "RPCS3's copy was read about 14 s into the dialogue, ours is dumped at 10 s: the king's gesture can differ. RPCS3's final display buffer was the other one (not read). The shadow map's first 512 rows in RPCS3's copy are stale memory.",
+   "targets": [
+    {
+     "name": "combined",
+     "offset": "02260000",
+     "w": 1280,
+     "h": 720,
+     "kind": "f16",
+     "pitch": 10240,
+     "rpcs3_file": "combined.bin"
+    },
+    {
+     "name": "bright",
+     "offset": "02DD0000",
+     "w": 640,
+     "h": 360,
+     "kind": "f16",
+     "pitch": 5120,
+     "rpcs3_file": "bright.bin"
+    },
+    {
+     "name": "bloom",
+     "offset": "04BD0000",
+     "w": 640,
+     "h": 360,
+     "kind": "f16",
+     "pitch": 5120,
+     "rpcs3_file": "bloom.bin"
+    },
+    {
+     "name": "glare",
+     "offset": "02A10000",
+     "w": 640,
+     "h": 360,
+     "kind": "f16",
+     "pitch": 5120,
+     "rpcs3_file": "glare.bin"
+    },
+    {
+     "name": "star",
+     "offset": "04270000",
+     "w": 640,
+     "h": 360,
+     "kind": "f16",
+     "pitch": 5120,
+     "rpcs3_file": "star.bin"
+    },
+    {
+     "name": "refl",
+     "offset": "01233D80",
+     "w": 1024,
+     "h": 512,
+     "kind": "r565",
+     "pitch": 2048,
+     "rpcs3_file": "refl.bin"
+    },
+    {
+     "name": "shadow",
+     "offset": "00AF3D80",
+     "w": 1024,
+     "h": 1024,
+     "kind": "d24",
+     "pitch": 4096,
+     "rows_from": 512,
+     "rpcs3_file": "shadow.bin"
+    }
+   ],
+   "accepted": {
+    "combined": {
+     "mean": [
+      2e-05,
+      1e-05,
+      0.0
+     ],
+     "far_pct": 0.042,
+     "neg_ours": 0
+    },
+    "bright": {
+     "mean": [
+      0.0,
+      0.0,
+      0.0
+     ],
+     "far_pct": 0.0,
+     "neg_ours": 0
+    },
+    "bloom": {
+     "mean": [
+      0.0,
+      0.0,
+      0.0
+     ],
+     "far_pct": 0.0,
+     "neg_ours": 0
+    },
+    "glare": {
+     "mean": [
+      0.0,
+      0.0,
+      0.0
+     ],
+     "far_pct": 0.0,
+     "neg_ours": 0
+    },
+    "star": {
+     "mean": [
+      0.0,
+      0.0,
+      0.0
+     ],
+     "far_pct": 0.0,
+     "neg_ours": 0
+    },
+    "refl": {
+     "mean": [
+      0.005,
+      0.023,
+      0.011
+     ],
+     "far_pct": 0.0
+    },
+    "shadow": {
+     "mean": 0.0,
+     "within_2steps_pct": 100.0
+    }
+   },
+   "accepted_from": "rel8r"
+  }
+ }
+}

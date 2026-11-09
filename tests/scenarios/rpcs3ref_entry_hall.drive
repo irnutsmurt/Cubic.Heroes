@@ -1,0 +1,29 @@
+# RPCS3 reference scene entry_hall (tests/rpcs3_reference.py): area 82, the entry hall below the corridor, at RPCS3 camera (14.4, -47.2) (2026-11-09)
+log TitleMovie 120
+sleep 5
+press START
+sleep 3
+press START
+sleep 5
+press CROSS                 # "Change characters?" NO
+state life>0,area==17 90
+sleep 3
+hold UP 2
+hold UP 2
+sleep 2
+hold UP 2
+sleep 2
+press CROSS                 # OPEN
+sleep 4
+hold UP 2
+sleep 6
+state area==88 20
+goto 40.2 -72 0.5 10 soft
+cross UP 82 15
+sleep 3
+goto 16.4 -47.3 0.25 10 soft
+sleep 4
+state area==82 5
+touch describe.trigger
+sleep 2
+shot here

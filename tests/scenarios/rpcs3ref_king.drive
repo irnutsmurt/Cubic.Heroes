@@ -1,0 +1,32 @@
+# RPCS3 reference scene king (tests/rpcs3_reference.py): the king dialogue close-up, 10 s in, described (2026-11-09)
+log TitleMovie 120
+sleep 5
+press START
+sleep 3
+press START
+sleep 5
+press CROSS                 # "Change characters?" NO
+state life>0,area==17 90
+sleep 3
+hold UP 2
+hold UP 2
+sleep 2
+hold UP 2
+sleep 2
+press CROSS                 # OPEN
+sleep 4
+hold UP 2
+sleep 6
+state area==88 20
+goto 40.2 -72 0.5 10 soft
+cross UP 82 15
+sleep 3
+goto 13.6 -42.4 0.5 10 soft
+goto 12 -30 0.5 10 soft
+goto 11.9 -19.9 0.3 10 soft
+hold UP 0.2
+press CROSS
+sleep 10
+touch describe.trigger
+sleep 2
+shot k
