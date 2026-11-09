@@ -4162,60 +4162,6 @@ namespace ppfx {
 namespace {
 
 
-// PS3RECOMP_VK_DUMP=<file> (the test harness's frame dump, tests/boot_smoke.py
-// SHOT_EVERY: its shots/NNNN.png): every PS3RECOMP_VK_DUMP_EVERY-th present
-// (default 15) the display buffer presented is read back and written there as
-// a binary PPM (through a temporary file, renamed) -- the picture the game
-// made, which no window over the game's can hide (the screen grabs can). The
-// old engine's backend wrote it; the native present did not until 2026-11-09.
-// Off when unset (timing runs: DUMP=0).
-void present_dump(Batch& b, Img* t, uint32_t w, uint32_t h)
-{
-    static const char* path = nullptr;
-    static uint32_t every = 15, n = 0;
-    static bool init = false;
-    if (!init) {
-        init = true;
-        const char* e = getenv("PS3RECOMP_VK_DUMP");
-        path = e && *e ? e : nullptr;
-        const char* k = getenv("PS3RECOMP_VK_DUMP_EVERY");
-        if (k && atoi(k) > 0) every = (uint32_t)atoi(k);
-    }
-    if (!path || (n++ % every) || !w || !h || t->bpp != 4) return;
-    Buf buf;
-    if (!make_buffer(buf, (VkDeviceSize)w * h * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true)) return;
-    access(b.cb, t, kCopySrc);
-    VkBufferImageCopy c = {};
-    c.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-    c.imageExtent = { w, h, 1 };
-    F.vkCmdCopyImageToBuffer(b.cb, t->img, layout_of(t), buf.b, 1, &c);
-    mark(b, kSectReadback);
-    const bool bgra = t->fmt == VK_FORMAT_B8G8R8A8_UNORM;
-    const std::string dst = path;
-    b.done.push_back([buf, w, h, bgra, dst] {
-        const std::string tmp = dst + ".tmp";
-        if (FILE* f = fopen(tmp.c_str(), "wb")) {
-            fprintf(f, "P6\n%u %u\n255\n", w, h);
-            std::vector<uint8_t> row((size_t)w * 3);
-            for (uint32_t y = 0; y < h; y++) {
-                const uint8_t* s = buf.p + (size_t)y * w * 4;
-                for (uint32_t x = 0; x < w; x++, s += 4) {
-                    row[x * 3 + 0] = bgra ? s[2] : s[0]; row[x * 3 + 1] = s[1]; row[x * 3 + 2] = bgra ? s[0] : s[2];
-                }
-                fwrite(row.data(), 1, row.size(), f);
-            }
-            fclose(f);
-#ifdef _WIN32
-            MoveFileExA(tmp.c_str(), dst.c_str(), MOVEFILE_REPLACE_EXISTING);
-#else
-            rename(tmp.c_str(), dst.c_str());
-#endif
-        }
-        F.vkDestroyBuffer(D.device, buf.b, nullptr);
-        F.vkFreeMemory(D.device, buf.m, nullptr);
-    });
-}
-
 // A kFlip: the display buffer the flip names, as the native renderer drew
 // it, blitted into the backend's present target on this queue, and the
 // present's own submission (on the backend's queue) made to wait for that.
@@ -4261,7 +4207,6 @@ void present_native(const Rec* r)
         ib.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; ib.dstAccessMask = 0;
         F.vkCmdPipelineBarrier(b.cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1, &ib);
         mark(b, kSectOther);
-        present_dump(b, t, (uint32_t)bl.srcOffsets[1].x, (uint32_t)bl.srcOffsets[1].y);
         // DOTHEROES_R6_HAZARD=present (a negative control for the validation
         // layer): the present's submission does not wait for the blit
         static int hz = -1;

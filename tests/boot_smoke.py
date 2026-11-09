@@ -414,19 +414,34 @@ def main():
 
     stop = threading.Event()
 
+    def whole_ppm(path):
+        """A binary PPM holding all its pixels: the backend writes the dump in place
+        (rsx_vulkan_backend.c vk_dump_ppm), so a copy taken while it writes is short --
+        loaded as truncated, its missing rows came out black (2026-11-09)."""
+        with open(path, "rb") as f:
+            head = f.read(64)
+        parts = head.split(b"\n", 3)
+        if len(parts) < 4 or parts[0] != b"P6":
+            return False
+        w, h = (int(v) for v in parts[1].split())
+        return os.path.getsize(path) == len(b"\n".join(parts[:3])) + 1 + w * h * 3
+
     def shooter():
-        from PIL import Image, ImageFile
-        ImageFile.LOAD_TRUNCATED_IMAGES = True
+        from PIL import Image
         n, frame, tmp = 0, os.path.join(RUN, "frame.ppm"), os.path.join(RUN, "shots", ".tmp.ppm")
         while not stop.wait(SHOT_EVERY):
             n += SHOT_EVERY
-            try:
-                # Copy first: the backend overwrites the dump on every present.
-                if os.path.getsize(frame):
-                    shutil.copyfile(frame, tmp)
-                    Image.open(tmp).save(os.path.join(RUN, "shots", f"{n:04d}.png"))
-            except (OSError, ValueError, SyntaxError):
-                pass
+            for _ in range(5):   # a copy caught mid-write: again shortly
+                try:
+                    # Copy first: the backend overwrites the dump on every present.
+                    if os.path.getsize(frame):
+                        shutil.copyfile(frame, tmp)
+                        if whole_ppm(tmp):
+                            Image.open(tmp).save(os.path.join(RUN, "shots", f"{n:04d}.png"))
+                            break
+                except (OSError, ValueError, SyntaxError):
+                    pass
+                time.sleep(0.05)
     shots = threading.Thread(target=shooter, daemon=True) if SHOT_EVERY else None
     if shots:
         shots.start()
