@@ -1131,29 +1131,36 @@ VkColorComponentFlags write_mask(uint32_t m)
     return wm;
 }
 
-// DOTHEROES_PPFX_DEPTH_CLAMP=1: depth clamped to the viewport's range instead
-// of clipped at the near and far planes, as the RSX does with ZMIN_MAX_CONTROL's
-// clamp bit -- which 3D Dot Game Heroes' frame-start reset sets every frame
-// (0x11: docs/NATIVE_R7.md section 9). Neither this renderer nor the old engine
-// modelled it, so geometry past the far plane is clipped where the PS3 draws
-// it at the far depth -- suspected (not shown) for the castle hall's floor
-// reflection, whose mirrored ceiling RPCS3 shows and this renderer does not
-// (2026-11-07). A switch until compared with RPCS3; needs the device's
-// depthClamp (rsx_vk_depth_clamp_ok), otherwise off with a line saying so.
+// The depth clamp, per draw, from its z min/max control (cellGcmSetZMinMaxControl:
+// near/far culling | zclamp << 4 | ignore-w << 8) as RPCS3 decides it
+// (VKGSRender, decode_rsx_state): clamped to the viewport's range, not clipped
+// at the near and far planes, where the control's zclamp is set or its
+// near/far culling is off. 3D Dot Game Heroes' frame-start reset sets 0x11
+// every frame (docs/NATIVE_R7.md section 9), so every draw clamps: neither
+// the old engine nor this renderer modelled it until 2026-11-09, and the
+// castle hall's floor reflection lost the stair walls RPCS3 shows (at
+// RPCS3's own camera, the reflection's mean difference 4.4 -> 1.7 of 255).
+// It needs the 24-bit depth surfaces (depth_vkformat): a float surface's
+// bias scales with the unclipped primitive's depth.
+//   DOTHEROES_PPFX_DEPTH_CLAMP=0: clipped as before; =2: every draw clamped.
+// Needs the device's depthClamp (rsx_vk_depth_clamp_ok), else clipped, said.
 extern "C" int rsx_vk_depth_clamp_ok(void);
-static VkBool32 depth_clamp()
+static VkBool32 depth_clamp(uint32_t zminmax)
 {
     static int on = -1;
     if (on < 0) {
         const char* e = getenv("DOTHEROES_PPFX_DEPTH_CLAMP");
-        on = e && *e == '1';
+        on = !e || !*e ? 1 : *e == '0' ? 0 : *e == '2' ? 2 : 1;
         if (on && !rsx_vk_depth_clamp_ok()) {
-            fprintf(stderr, "[ppfx] DOTHEROES_PPFX_DEPTH_CLAMP: the device has no depthClamp; clipping as before\n");
+            report_add("render: the device has no depthClamp: depth clipped at the near and far planes, not clamped");
             on = 0;
         }
-        if (on) fprintf(stderr, "[ppfx] depth clamped to the viewport's range (DOTHEROES_PPFX_DEPTH_CLAMP)\n");
+        if (on == 2) fprintf(stderr, "[ppfx] every draw's depth clamped (DOTHEROES_PPFX_DEPTH_CLAMP=2)\n");
+        if (!on) fprintf(stderr, "[ppfx] depth clipped, not clamped\n");
     }
-    return on ? VK_TRUE : VK_FALSE;
+    if (on == 2) return VK_TRUE;
+    if (on == 1) return (zminmax >> 4 & 0xFu) || !(zminmax & 0xFu) ? VK_TRUE : VK_FALSE;
+    return VK_FALSE;
 }
 
 
@@ -1208,7 +1215,7 @@ const Pipe* pipeline(const Rec* r, const rsx_vertex_layout_plan& layout, VkForma
     uint64_t k = fnv(vp, vp_bytes);
     k = rsx_fp_structural_hash(fp, fp_size, k);
     const uint32_t ints[] = { fp_ctrl & 0x4Eu, srgb, cube, vol, shadow_mask, unnorm_mask, gamma_units, expand_units,
-                              layout.mask, layout.stride, (uint32_t)rt, ra.color_mask, ra.front_face };
+                              layout.mask, layout.stride, (uint32_t)rt, ra.color_mask, ra.front_face, ra.zminmax };
     k = fnv(ints, sizeof ints, k);
     k = fnv(gamma, sizeof gamma, k); k = fnv(expand, sizeof expand, k);
     k = fnv(unnorm, sizeof unnorm, k); k = fnv(shadow, sizeof shadow, k);
@@ -1242,7 +1249,7 @@ const Pipe* pipeline(const Rec* r, const rsx_vertex_layout_plan& layout, VkForma
     vps.viewportCount = 1; vps.scissorCount = 1;
     VkPipelineRasterizationStateCreateInfo ras = { VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
     ras.polygonMode = VK_POLYGON_MODE_FILL;
-    ras.depthClampEnable = depth_clamp();
+    ras.depthClampEnable = depth_clamp(ra.zminmax);
     ras.cullMode = VK_CULL_MODE_NONE;   // culling off (checked by the caller)
     ras.frontFace = ra.front_face == 0x0901u ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE;
     ras.depthBiasEnable = VK_TRUE; ras.lineWidth = 1.0f;
@@ -1472,48 +1479,6 @@ static void asp_hot_mark(std::string& ps)
     }
 }
 
-// DOTHEROES_PPFX_NONNEG=1 (a behaviour change, off by default; the owner's
-// play session turns it on): an unblended asp draw into a floating-point
-// colour target writes negative colour components as 0.
-//
-// The first dungeon's lamp-lit rooms (2026-11-07, docs/NATIVE_R8.md section
-// 9.3): the voxel hero's lighting program adds each lamp's N.L unclamped, so
-// faces turned from a lamp come out slightly negative in some channels (all
-// above -0.25 at the room's door). Written to the fp16 scene, those reach
-// YEBIS's bright pass, which divides colour by luminance: where the channels
-// nearly cancel, the quotient runs up to the pass's 64000 cap and the glare
-// draws red, blue and white stars from it -- the "disco ball". RPCS3, at the
-// same spot in the same save, shows none. With this switch the hero matches
-// RPCS3 there (its hood 21,16,18 against RPCS3's 16,12,12; ours unclamped
-// 42,23,43 and starred) and the room is unchanged at the grabs' scale.
-// Why RPCS3 has no such values is not established: the program, its
-// constants, the textures and the vertices were checked equal to what the
-// game gives (exact axis-aligned frames, RPCS3's precision rules), and RPCS3
-// clamps neither fragment outputs nor sampled texels. Blended draws are left
-// alone: one may subtract with a negative colour on purpose.
-static int asp_nonneg_on()
-{
-    static int on = -1;
-    if (on < 0) {
-        const char* e = getenv("DOTHEROES_PPFX_NONNEG");
-        on = e && *e == '1';
-        if (on) fprintf(stderr, "[ppfx] unblended asp colour into float targets: negative components written as 0 "
-                                "(DOTHEROES_PPFX_NONNEG)\n");
-    }
-    return on;
-}
-static void asp_nonneg(std::string& ps)
-{
-    for (int n = -1; n < 4; n++) {
-        char v[8], from[64], to[80];
-        if (n < 0) snprintf(v, sizeof v, "_o"); else snprintf(v, sizeof v, "_o%d", n);
-        snprintf(from, sizeof from, "(%s == %s) ? %s : (float4)0", v, v, v);
-        snprintf(to, sizeof to, "(%s == %s) ? max(%s, (float4)0) : (float4)0", v, v, v);
-        for (size_t k = ps.find(from); k != std::string::npos; k = ps.find(from, k + strlen(to)))
-            ps.replace(k, strlen(from), to);
-    }
-}
-
 const Pipe* pipeline_asp(const Rec* r, const rsx_vertex_layout_plan& layout, VkFormat rt, VkFormat df,
                          rsx_fp_constant_block* consts)
 {
@@ -1583,7 +1548,8 @@ const Pipe* pipeline_asp(const Rec* r, const rsx_vertex_layout_plan& layout, VkF
                               ra.cull, ra.cull_face, ra.blend, ra.blend_sf_rgb, ra.blend_df_rgb, ra.blend_sf_a, ra.blend_df_a,
                               ra.blend_eq_rgb, ra.blend_eq_a, ra.depth_test, ra.depth_write, ra.depth_func,
                               ra.stencil_test, ra.stencil_func, ra.stencil_func_mask, ra.stencil_write_mask,
-                              ra.stencil_fail, ra.stencil_zfail, ra.stencil_zpass, alpha_test, alpha_test ? alpha_func : 0 };
+                              ra.stencil_fail, ra.stencil_zfail, ra.stencil_zpass, alpha_test, alpha_test ? alpha_func : 0,
+                              ra.zminmax };
     k = fnv(ints, sizeof ints, k);
     k = fnv(gamma, sizeof gamma, k); k = fnv(expand, sizeof expand, k);
     k = fnv(unnorm, sizeof unnorm, k); k = fnv(shadow, sizeof shadow, k);
@@ -1602,8 +1568,6 @@ const Pipe* pipeline_asp(const Rec* r, const rsx_vertex_layout_plan& layout, VkF
         return nullptr;
     }
     asp_describe(r, vs, ps, layout, consts);
-    if (asp_nonneg_on() && !ra.blend && (rt == VK_FORMAT_R16G16B16A16_SFLOAT || rt == VK_FORMAT_R32G32B32A32_SFLOAT))
-        asp_nonneg(ps);
     asp_hot_mark(ps);
     VkShaderModule vsm = spirv_module(vs, RSX_SHADER_STAGE_VERTEX), fsm = spirv_module(ps, RSX_SHADER_STAGE_FRAGMENT);
     if (!vsm || !fsm) return nullptr;
@@ -1624,7 +1588,7 @@ const Pipe* pipeline_asp(const Rec* r, const rsx_vertex_layout_plan& layout, VkF
     // cull front faces; the winding judged on screen after the vertex stage's Y flip
     VkPipelineRasterizationStateCreateInfo ras = { VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
     ras.polygonMode = VK_POLYGON_MODE_FILL;
-    ras.depthClampEnable = depth_clamp();
+    ras.depthClampEnable = depth_clamp(ra.zminmax);
     ras.cullMode = !ra.cull ? VK_CULL_MODE_NONE
                  : (ra.cull_face == 0x0404u || ra.cull_face == 0x0408u) ? VK_CULL_MODE_FRONT_BIT : VK_CULL_MODE_BACK_BIT;
     ras.frontFace = ra.front_face == 0x0901u ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE;
@@ -2470,21 +2434,38 @@ const uint8_t* guest_ptr_live(void*, uint32_t location, uint32_t offset, uint32_
 std::unordered_map<uint64_t, Img*> s_depths;   // asp's depth surfaces by address
 VkFormat s_d24s8 = VK_FORMAT_UNDEFINED;
 
-// The engine's own choice (rsx_vulkan_backend.c): one host depth format for
-// every guest depth surface, D32_SFLOAT_S8_UINT first -- so that asp's depth
-// tests resolve as the engine's do (the comparisons are exact)
+// One host depth format for every guest depth surface: D24_UNORM_S8_UINT,
+// the guest's own Z24S8 (a Z16 surface's polygon offset scaled to its 2^-16
+// steps where the bias is set), D32_SFLOAT_S8_UINT where the device has no
+// D24. The old engine's choice (rsx_vulkan_backend.c) was D32_SFLOAT first,
+// so that asp's depth tests resolved exactly as the engine's: kept as
+// DOTHEROES_PPFX_DEPTH_D32=1. A float surface's constant depth bias grows
+// with the largest depth in the primitive (Vulkan's r = 2^(e - 23)), the
+// RSX's and a D24 surface's is one 2^-24 step: once the depth clamp the game
+// enables (z min/max control 0x11) stops clipping at the near plane, the
+// castle's shadow-map floor triangles reach depths far past 1, and their
+// polygon offset pushed them behind the walls -- the hall's pillars lost
+// their shadow (2026-11-09; RPCS3's map, D24, matched the clipped one).
 VkFormat depth_vkformat(uint32_t depth_format)
 {
     (void)depth_format;
     if (s_d24s8 == VK_FORMAT_UNDEFINED) {
-        const VkFormat cand[] = { VK_FORMAT_D32_SFLOAT_S8_UINT, VK_FORMAT_D24_UNORM_S8_UINT };
+        const char* e = getenv("DOTHEROES_PPFX_DEPTH_D32");
+        const bool d32 = e && *e == '1';
+        const VkFormat cand[] = { d32 ? VK_FORMAT_D32_SFLOAT_S8_UINT : VK_FORMAT_D24_UNORM_S8_UINT,
+                                  d32 ? VK_FORMAT_D24_UNORM_S8_UINT : VK_FORMAT_D32_SFLOAT_S8_UINT };
         for (VkFormat c : cand) {
             VkFormatProperties fp;
             F.GetPhysicalDeviceFormatProperties(D.phys, c, &fp);
             if ((fp.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) &&
+                (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) &&
                 (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_TRANSFER_DST_BIT)) { s_d24s8 = c; break; }
         }
         if (s_d24s8 == VK_FORMAT_UNDEFINED) s_d24s8 = VK_FORMAT_D24_UNORM_S8_UINT;
+        char line[160];
+        snprintf(line, sizeof line, "render: depth surfaces as %s%s", s_d24s8 == VK_FORMAT_D24_UNORM_S8_UINT ? "D24_UNORM_S8"
+                 : "D32_SFLOAT_S8", s_d24s8 == VK_FORMAT_D32_SFLOAT_S8_UINT && !d32 ? " (the device has no D24: float bias)" : "");
+        report_add(line);
     }
     return s_d24s8;
 }
@@ -2587,6 +2568,56 @@ void asp_clears(Batch& b, const Rec* r)
     }
 }
 
+// The describe's end of frame (a diagnostic): every colour target this
+// renderer holds, copied out as the next frame's first draw arrives -- the
+// targets' contents at the end of the described frame, as RPCS3 writes them
+// back to guest memory with its "Write Color Buffers" -- into the dump
+// directory: tgt_<location>_<offset>_<w>x<h>_<vk format>_<bytes a texel>_f<frame>.bin, rows tight.
+void dump_targets(uint32_t frame)
+{
+    Batch& b = batch(frame + 1);
+    struct One { Buf buf; uint64_t key; uint32_t w, h, bpp, fmt; };
+    std::vector<One> all;
+    for (auto& kv : s_targets) {
+        Img* t = kv.second;
+        if (!t || !t->written || !t->w || !t->h || !t->bpp) continue;
+        One o; o.key = kv.first; o.w = t->w; o.h = t->h; o.bpp = t->bpp; o.fmt = (uint32_t)t->fmt;
+        if (!make_buffer(o.buf, (VkDeviceSize)t->w * t->h * t->bpp, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true)) continue;
+        access(b.cb, t, kCopySrc);
+        VkBufferImageCopy c = {};
+        c.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+        c.imageExtent = { t->w, t->h, 1 };
+        F.vkCmdCopyImageToBuffer(b.cb, t->img, layout_of(t), o.buf.b, 1, &c);
+        all.push_back(o);
+    }
+    // and every depth surface: its depth aspect, 4 bytes a texel (D32_SFLOAT:
+    // a float; D24: the 24 bits in a word), as dep_..., the format number its own
+    for (auto& kv : s_depths) {
+        Img* t = kv.second;
+        if (!t || !t->written || !t->w || !t->h) continue;
+        One o; o.key = kv.first | 1ull << 63; o.w = t->w; o.h = t->h; o.bpp = 4; o.fmt = (uint32_t)t->fmt;
+        if (!make_buffer(o.buf, (VkDeviceSize)t->w * t->h * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true)) continue;
+        access(b.cb, t, kCopySrc);
+        VkBufferImageCopy c = {};
+        c.imageSubresource = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1 };
+        c.imageExtent = { t->w, t->h, 1 };
+        F.vkCmdCopyImageToBuffer(b.cb, t->img, layout_of(t), o.buf.b, 1, &c);
+        all.push_back(o);
+    }
+    mark(b, kSectReadback);
+    const std::string dir = s_dump;
+    b.done.push_back([all, dir, frame] {
+        for (const One& o : all) {
+            char path[700];
+            snprintf(path, sizeof path, "%s/%s_%u_%08X_%ux%u_%u_%u_f%u.bin", dir.c_str(), o.key >> 63 ? "dep" : "tgt",
+                     (uint32_t)(o.key >> 32) & 0x7FFFFFFFu, (uint32_t)o.key, o.w, o.h, o.fmt, o.bpp, frame);
+            if (FILE* f = fopen(path, "wb")) { fwrite(o.buf.p, 1, (size_t)o.w * o.h * o.bpp, f); fclose(f); }
+            F.vkDestroyBuffer(D.device, o.buf.b, nullptr);
+            F.vkFreeMemory(D.device, o.buf.m, nullptr);
+        }
+    });
+}
+
 // DOTHEROES_ASP_DESCRIBE_FRAME=<frame> (a diagnostic): a line per asp draw
 // of that frame -- what it draws with -- into the dump directory, and each
 // program it draws with, once (fp_<hash>.bin, vp_<hash>.bin: the bytes as
@@ -2613,7 +2644,11 @@ void asp_describe_line(const Rec* r)
         }
     }
     if (want < 0 || (long long)r->frame != want || !s_dump[0]) {
-        if (f && (long long)r->frame > want) { fclose(f); f = nullptr; if (!trigger) want = -1; }
+        if (f && (long long)r->frame > want) {
+            fclose(f); f = nullptr;
+            dump_targets((uint32_t)want);   // the described frame's targets, as it left them
+            if (!trigger) want = -1;
+        }
         return;
     }
     if (!f) {
@@ -2635,7 +2670,7 @@ void asp_describe_line(const Rec* r)
     const State& st = r->st;
     const Raster& ra = st.raster;
     fprintf(f, "%llu%s prim %u n %u v %u | tgt %08X fmt %u dz %08X | vp %016llx | fp %016llx ctl %08X | blend %u %X/%X %X/%X eq %X/%X | alpha %u %X %u | "
-               "depth %u/%u %X | stencil %u %X ref %u mask %X/%X ops %X/%X/%X | cull %u %X | cmask %08X | clears %u | tex",
+               "depth %u/%u %X | stencil %u %X ref %u mask %X/%X ops %X/%X/%X | cull %u %X | cmask %08X | zmm %X vz %g..%g x%g+%g | clears %u | tex",
             (unsigned long long)r->seq, r->kind == kAspDraw ? "" : " ppfx", r->prim, r->count, r->vcount,
             st.surface.color_offset[0], st.surface.color_format,
             st.surface.depth_offset, r->vp ? (unsigned long long)r->vp->hash : 0ull,
@@ -2643,7 +2678,7 @@ void asp_describe_line(const Rec* r)
             ra.blend_sf_a, ra.blend_df_a, ra.blend_eq_rgb, ra.blend_eq_a, ra.alpha_test, ra.alpha_func, ra.alpha_ref,
             ra.depth_test, ra.depth_write, ra.depth_func, ra.stencil_test, ra.stencil_func, ra.stencil_ref, ra.stencil_func_mask,
             ra.stencil_write_mask, ra.stencil_fail, ra.stencil_zfail, ra.stencil_zpass, ra.cull, ra.cull_face, ra.color_mask,
-            r->naclear);
+            ra.zminmax, st.viewport.zmin, st.viewport.zmax, st.viewport.scale[2], st.viewport.offset[2], r->naclear);
     for (uint32_t u = 0; u < 16; u++)
         if (st.samp[u].enable) fprintf(f, " %u:%02X@%08X", u, st.tex[u].format, st.tex[u].offset);
     fprintf(f, "\n");

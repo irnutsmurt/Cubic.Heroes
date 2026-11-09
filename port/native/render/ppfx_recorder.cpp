@@ -148,6 +148,7 @@ void reset_state(State* s)
     r.stencil_fail = r.stencil_zfail = r.stencil_zpass = 0x1E00u;   // CELL_GCM_KEEP
     r.stencil_func_mask = r.stencil_write_mask = 0xFF;
     r.line_width = 8;                     // 1.0 (6.3 fixed point)
+    r.zminmax = 1;                        // near/far culling on, no clamp (RPCS3's reset value; the game sets 0x11)
     s->clear_depth = 0xFFFFFF00u;
     for (auto& v : s->vdata.current) { v[0] = v[1] = v[2] = 0.0f; v[3] = 1.0f; }
 }

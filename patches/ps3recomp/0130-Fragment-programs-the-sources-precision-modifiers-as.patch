@@ -1,0 +1,155 @@
+From a166d8950826c26be55be357795494e46203322a Mon Sep 17 00:00:00 2001
+From: giteaguy <73799093+irnutsmurt@users.noreply.github.com>
+Date: Mon, 9 Nov 2026 09:22:16 -0800
+Subject: [PATCH] Fragment programs: the sources' precision modifiers, as NV40
+ reads them
+
+SRC1 bits 19-27 give each source a precision modifier (0 full, 1 half,
+2 fixed 12, 3 fixed 9, 4 saturate). The translator ignored them; RPCS3's
+GetSRC applies them: saturate before abs, the other clamps after it, the
+negation last; a half modifier on a half temporary and any modifier on
+COL0, COL1 or the facing register ignored. Also: src2's abs bit (SRC2 bit
+18), NaN-safe precision clamps (RPCS3's precision_clamp), a half-precision
+result rounded to fp16 (its clamp16), and NRM as RPCS3 writes it (a zero
+vector stays zero, w is z).
+
+3D Dot Game Heroes' first dungeon: the lamp shader's N.L MAD reads its
+sources saturated; unclamped, faces turned from a lamp went slightly
+negative, and the glare turned those into stars on the hero. Matched
+against RPCS3's own target copies (the scene buffer has no negatives, as
+RPCS3's; the castle's combined buffer within 0.0007).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libs/video/rsx_fp_decompiler.c | 60 +++++++++++++++++++++++++---------
+ 1 file changed, 45 insertions(+), 15 deletions(-)
+
+diff --git a/libs/video/rsx_fp_decompiler.c b/libs/video/rsx_fp_decompiler.c
+index 5d97064..cbbe952 100644
+--- a/libs/video/rsx_fp_decompiler.c
++++ b/libs/video/rsx_fp_decompiler.c
+@@ -362,8 +362,18 @@ static const char* input_expr(u32 input_src)
+ }
+ 
+ /* Build the swizzled/negated/abs'd HLSL for one source into `buf`. */
++/* A source's precision modifier (SRC1 bits 19-21, 22-24, 25-27 for sources
++ * 0, 1, 2: 0 full, 1 half, 2 fixed 12, 3 fixed 9, 4 saturate, 5 none), as
++ * RPCS3's FragmentProgramDecompiler::GetSRC applies it: saturate before abs,
++ * the other clamps after it, negation last; a half modifier on a half
++ * temporary, and any modifier on COL0, COL1 (read saturated already) or the
++ * facing register, ignored. NV40 clamps the operand as it is read: ignoring
++ * it let the first dungeon's lamps subtract light on faces turned away from
++ * them (the MAD of an unclamped N.L the program marks saturated), and those
++ * slightly negative colours were the glare's stars on the hero (2026-11-09,
++ * against RPCS3's own shader for the program). */
+ static void emit_src(const Src* s, u32 input_src, int persp, const float* k, int has_k,
+-                     int buffered, u32 constant_slot, char* buf, u32 bufsz)
++                     int buffered, u32 constant_slot, u32 prec_mod, char* buf, u32 bufsz)
+ {
+     char base[96];
+     if (s->type == FP_REG_TYPE_TEMP) {
+@@ -393,11 +403,20 @@ static void emit_src(const Src* s, u32 input_src, int persp, const float* k, int
+     char swz[160];
+     snprintf(swz, sizeof(swz), "(%s).%s", base, s->swz);
+ 
+-    const char* pre = "";
+-    const char* post = "";
+-    if (s->abs)    { pre = "abs("; post = ")"; }
+-    if (s->negate) snprintf(buf, bufsz, "-(%s%s%s)", pre, swz, post);
+-    else           snprintf(buf, bufsz, "%s%s%s", pre, swz, post);
++    u32 pm = prec_mod & 7u;
++    if (s->type == FP_REG_TYPE_TEMP && s->half && pm == 1) pm = 0;
++    if (s->type == FP_REG_TYPE_INPUT && (input_src == 0x1 || input_src == 0x2 || input_src >= 0xE)) pm = 0;
++    char e1[256], e2[256];
++    if (pm == 4) snprintf(e1, sizeof(e1), "_rsx_pclamp(%s, 0.0, 1.0)", swz);
++    else         snprintf(e1, sizeof(e1), "%s", swz);
++    if (s->abs)  snprintf(e2, sizeof(e2), "abs(%s)", e1);
++    else         snprintf(e2, sizeof(e2), "%s", e1);
++    if (pm == 1)      snprintf(e1, sizeof(e1), "_rsx_h16(%s)", e2);
++    else if (pm == 2) snprintf(e1, sizeof(e1), "_rsx_pclamp(%s, -2.0, 2.0)", e2);
++    else if (pm == 3) snprintf(e1, sizeof(e1), "_rsx_pclamp(%s, -1.0, 1.0)", e2);
++    else              snprintf(e1, sizeof(e1), "%s", e2);
++    if (s->negate) snprintf(buf, bufsz, "-(%s)", e1);
++    else           snprintf(buf, bufsz, "%s", e1);
+ }
+ 
+ /* Dest write-mask letters from OPDEST bits 9..12 (X..W). */
+@@ -781,7 +800,7 @@ static int rsx_fp_decompile_internal(
+         Src s0, s1, s2;
+         decode_src(w1, w1 & FP_SRC0_ABS, &s0);
+         decode_src(w2, w2 & FP_SRC1_ABS, &s1);
+-        decode_src(w3, 0,                &s2);
++        decode_src(w3, w3 & (1u << 18),   &s2);   /* SRC2.abs: bit 18 */
+ 
+         /* Inline constant: any CONST source pulls the next 16 bytes as a
+          * float4 literal and advances past it. */
+@@ -804,15 +823,17 @@ static int rsx_fp_decompile_internal(
+          * (RPCS3 RSXFragmentProgram.h SRC2); on a branch the word is an
+          * address instead. */
+         const int persp = !is_branch && (w3 >> 31) != 0;
+-        char a[200], b[200], c[200];
++        char a[300], b[300], c[300];
++        const u32 pm0 = is_branch ? 0u : (w2 >> 19) & 7u, pm1 = is_branch ? 0u : (w2 >> 22) & 7u,
++                  pm2 = is_branch ? 0u : (w2 >> 25) & 7u;
+         emit_src(
+-            &s0, input_src, persp, k, has_k, buffered, constant_slot,
++            &s0, input_src, persp, k, has_k, buffered, constant_slot, pm0,
+             a, sizeof(a));
+         emit_src(
+-            &s1, input_src, persp, k, has_k, buffered, constant_slot,
++            &s1, input_src, persp, k, has_k, buffered, constant_slot, pm1,
+             b, sizeof(b));
+         emit_src(
+-            &s2, input_src, persp, k, has_k, buffered, constant_slot,
++            &s2, input_src, persp, k, has_k, buffered, constant_slot, pm2,
+             c, sizeof(c));
+         if (has_k)
+             constant_slot++;
+@@ -953,7 +974,7 @@ static int rsx_fp_decompile_internal(
+                      a, a, b);
+             break;
+         case OP_DP2: snprintf(rhs, sizeof(rhs), "dot((%s).xy, (%s).xy)", a, b); break;
+-        case OP_NRM: snprintf(rhs, sizeof(rhs), "float4(normalize((%s).xyz), 1.0)", a); break;
++        case OP_NRM: snprintf(rhs, sizeof(rhs), "_rsx_nrm((%s).xyz)", a); break;
+         case OP_LRP: snprintf(rhs, sizeof(rhs), "lerp((%s), (%s), (%s))", c, b, a); break;
+         /* Lighting coefficients: (1, y, y > 0 ? 2^w : 0, 1) (RPCS3
+          * FragmentProgramDecompiler, RSX_FP_OPCODE_LIF). */
+@@ -1096,7 +1117,7 @@ static int rsx_fp_decompile_internal(
+             char m[5];
+             dest_mask(w0, m);
+ 
+-            const char* sat = (w0 & FP_OUT_SAT) ? " _v = saturate(_v);" : "";
++            const char* sat = (w0 & FP_OUT_SAT) ? " _v = _rsx_pclamp(_v, 0.0, 1.0);" : "";
+             /* The result's precision (OPDEST bits 22-23), when it is not
+              * saturated: NV40 keeps a fixed-point result in its range --
+              * 12-bit fixed point in [-2, 2], 9-bit in [-1, 1] -- and a half
+@@ -1119,8 +1140,8 @@ static int rsx_fp_decompile_internal(
+                     exempt = 1;
+                 if (prec == 1 && !dst_half) exempt = 1;
+                 if (!exempt)
+-                    sat = prec == 1 ? " _v = clamp(_v, -65504.0, 65504.0);"
+-                        : prec == 2 ? " _v = clamp(_v, -2.0, 2.0);" : " _v = clamp(_v, -1.0, 1.0);";
++                    sat = prec == 1 ? " _v = _rsx_h16(_v);"
++                        : prec == 2 ? " _v = _rsx_pclamp(_v, -2.0, 2.0);" : " _v = _rsx_pclamp(_v, -1.0, 1.0);";
+             }
+             /* NV40 per-instruction result-scale modifier (SRC1 word bits
+              * 28-30): 1/2/3 = *2/*4/*8, 5/6/7 = /2//4//8; applied to the
+@@ -1299,6 +1320,15 @@ static int rsx_fp_decompile_internal(
+      * SPIR-V FragCoord (Vulkan, and Metal's [[position]] is (x, y, z, 1/w));
+      * the glslang paths define RSX_FRAGCOORD_W_IS_RCP. Emitted only where the
+      * body uses it, so every other program stays byte-identical. */
++    /* RPCS3's precision_clamp (NaN read as 0, then clamped), clamp16 (a half
++     * register's value: rounded to fp16, past its range infinite) and
++     * _builtin_normalize (a zero vector stays zero; NRM writes xyzz). */
++    if (strstr(o.p, "_rsx_pclamp("))
++        out_puts(&p, "float4 _rsx_pclamp(float4 x, float lo, float hi) { return clamp((x != x) ? (float4)0 : x, lo, hi); }\n");
++    if (strstr(o.p, "_rsx_h16("))
++        out_puts(&p, "float4 _rsx_h16(float4 x) { return f16tof32(f32tof16(x)); }\n");
++    if (strstr(o.p, "_rsx_nrm("))
++        out_puts(&p, "float4 _rsx_nrm(float3 x) { float3 n = dot(x, x) > 0.0 ? normalize(x) : x; return float4(n, n.z); }\n");
+     if (strstr(o.p, "_rsx_inv_w("))
+         out_puts(&p,
+             "#ifdef RSX_FRAGCOORD_W_IS_RCP\n"
+-- 
+2.56.0.windows.3
+
