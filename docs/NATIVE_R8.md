@@ -35,7 +35,7 @@ per-thread work reported apart. An average of 144 is not 144 sustained.
 | Measurement | done (sections 8, 8.2): combat 194 fps at the median (production 148), exploring 235 (production 186) for rel6; 144 sustained exploring (99.8% of frames), not yet in combat (97.8%) |
 | **Stopping a batch** | **fixed**: tools/owned_run.py runs a batch in a job object of its own; a cancel, the launching shell's end or the launcher's end stops every process it started and nothing else. 7 dummy-process tests and one stop of a real background task pass; not yet used for a game batch (section 9.2) |
 | **The recorder's bookkeeping** | **investigated**: one producer thread (measured: no observed call on another thread in the kept fight reports); the lock is needed only against copies into RSX local memory and inline transfers made on other threads, which the native renderer never takes part in. A lock-free producer path, an indexed dispatch and direct handlers are prepared as three measured steps; two counters added to tell whether other threads write at all (compiled, not run) (section 8.4) |
-| **The RPCS3 comparison** | **the dungeon hero's sparkle** traced (small negative scene values through YEBIS's bright pass) and fixed behind DOTHEROES_PPFX_NONNEG, on in the owner's play session; **the castle floor**: the depth clamp ruled out, the reflected ceiling still missing; **the king**: our bloom weaker than RPCS3's; the edited hero draws (harness fixes). Section 9.3 |
+| **The RPCS3 comparison** | traced to their causes against RPCS3's own target copies at matched cameras (section 9.4): **the sparkle** = the translator ignored NV40's source precision modifiers (ps3recomp 0130; NONNEG, the workaround, removed); **the castle floor** = the depth clamp the game enables, never modelled, which needed the guest's 24-bit depth surfaces to work (both now the default); **the king** = no difference at the PS3's 720p (the owner's RPCS3 renders at 150%). The edited hero draws (harness fixes, section 9.3) |
 | What is left | section 9 -- one decision for the owner there (the reservation test) |
 
 ## 1. Inventory: what runs, and what is on the critical path [M, C]
@@ -1404,7 +1404,8 @@ How it was found, each step a run:
   luminance: where the channels nearly cancel, the quotient runs to the
   pass's 64000 cap and the glare draws stars from it.
 
-**Why RPCS3 has no such values is not established.** Checked equal to what
+**Why RPCS3 has no such values is not established** (since established:
+section 9.4, the sources' precision modifiers). Checked equal to what
 the game gives: the program and its inline constants, the vertex constants,
 the colour texture and the normal map (decoded from guest memory), the
 vertex buffer (every frame vector an exact unit axis, the uvs 0 and 1), the
@@ -1435,7 +1436,9 @@ wall-tops at the same height) [M: runs c82f0, c82f1]:
 - with DOTHEROES_PPFX_DEPTH_CLAMP=1 the band is still missing and the
   reflection gains light stepped blocks at the upper right that RPCS3 does
   not show (difference 13.6). **The depth clamp is not the fix**; it stays
-  off.
+  off. (Superseded, section 9.4: this camera did not match RPCS3's, and the
+  blocks came from a second problem the clamp exposed, the float depth
+  surfaces' polygon offset. At RPCS3's own camera the clamp is the fix.)
 
 No draw was refused in the scene (the run's 7 unsupported records are all
 in frame 0), so the band is a difference in how a draw renders, not a missing
@@ -1452,6 +1455,8 @@ image went through the owner's window scaling and WebP; the glow is not an
 artefact of that). So "sharper" is **the bloom weaker in ours**, not texture
 filtering. **Open:** YEBIS's bloom levels compared with a frame of RPCS3's own
 at this moment (the scratch RPCS3 can be driven there from castle-front).
+(Superseded, section 9.4: at the PS3's 720p RPCS3's frame and ours are the
+same, glow included; the owner's RPCS3 renders at 150% in a 1913x1066 window.)
 
 **What is reviewed, implemented, built and runtime-tested**:
 - the harness fixes and the GreenHero edit: implemented, run (ed3, ow7);
@@ -1471,6 +1476,146 @@ fast grabber (build/compare/rpcs3_keys.py, rpcs3_burst.py) are local. One
 control boot of the owner's own RPCS3 (the scratch config passed with
 --config) replaced its current log file (RPCS3 rotates it each boot); its
 configs and saves were not touched.
+
+### 9.4 The three differences traced to their causes (2026-11-09) [C, M]
+
+The owner's instruction: fix the causes, not the look; trace where our
+rendering first diverges from RPCS3 at matched scenes; check each fix against
+the other scenes. Section 9.3's "not established", "ruled out" and "weaker
+bloom" are corrected here.
+
+**Method.** RPCS3 (the scratch copy, scale 100, Write Color Buffers and Write
+Depth Buffer on) is driven to the scene with posted keys; its GDB server then
+reads the render targets from RSX local memory (0xC0000000 + the offset;
+fp16 big-endian, ARGB8, R5G6B5, D24S8), the camera target (0x029B0E18,
+0x029B0E20) and the area. One read a session: the server pauses the game and
+does not resume it. Ours: the frame description on a trigger now also copies
+every colour and depth target at the frame's end (tgt_..., dep_...), so each
+target compares directly (build/compare's f16cmp.py, depcmp.py, reflcmp.py,
+finalcmp.py, local). Where walking stalls short of RPCS3's camera, a drive
+script places the hero (`place x z`: DOTHEROES_DEV_STATE's pos.trigger). Each
+draw's z min/max control and viewport depth range are in the description.
+
+**The sparkle: the sources' precision modifiers** [C, M]. NV40 gives each
+source a precision modifier (SRC1 bits 19-27: half, fixed 12, fixed 9,
+saturate); the shared translator ignored them. The first dungeon's lamp
+shader reads its N.L sources saturated: unclamped, faces turned from a lamp
+went slightly negative, and the bright pass's division by luminance made the
+glare's stars of them. ps3recomp 0130 applies them as RPCS3's GetSRC does
+(saturate before abs, the other clamps after it, negation last; a half
+modifier on a half register and any modifier on COL0, COL1, the facing
+register ignored), with src2's abs bit, NaN-safe precision clamps, fp16
+rounding of half-precision results and NRM as RPCS3 writes it. Our scene
+buffer then has no negative component, as RPCS3's has none, and the hero no
+star. Every YEBIS pass computes in half precision and the scene's lighting
+programs carry source modifiers, so the fix reaches the whole frame: the
+castle's combined buffer is within 0.0007 of RPCS3's (below).
+DOTHEROES_PPFX_NONNEG, the workaround that clamped scene colour at 0, is
+removed.
+
+**The castle floor: the depth clamp, and the depth format it needs** [C, M].
+Every draw is made with z min/max control 0x11 (logged per draw: 129 of 129
+in the corridor's frame), near/far culling and zclamp; RPCS3 clamps the depth
+for it (VKGSRender's decode_rsx_state: clamped where zclamp is set or culling
+is off). At RPCS3's own camera in the corridor's entry hall (14.4, -47.2):
+
+| ours against RPCS3 (mean difference, of 255) | the floor reflection | the final frame |
+|---|---|---|
+| clipped (before) | 4.41 | 1.84 |
+| clamped | 1.73 | 0.97 |
+
+The stair walls RPCS3's floor mirrors are back. Section 9.3 rejected the
+clamp at a camera that was not RPCS3's, and in the corridor the clamp also
+lost the pillars' shadow. That second effect is ours alone: RPCS3's shadow
+map (D24, read at the king) equals our clipped one row for row, while ours
+clamped pushed the floor away (0.546 -> 0.994 at one texel). The cause is
+the host depth format. This renderer kept the old engine's D32_SFLOAT_S8;
+Vulkan's constant depth bias on a float surface is r = 2^(e - 23), e the
+largest depth exponent in the primitive, and the shadow pass's floor
+triangles, no longer clipped at the near plane, reach depths far past 1, so
+their polygon offset grew to push them behind the walls. With
+D24_UNORM_S8_UINT, the guest's own Z24S8 (one 2^-24 step a unit, as the RSX
+and RPCS3), the clamped shadow map matches RPCS3's within 6e-7 (10 steps of
+2^-24, the same offset everywhere) and the pillars keep their shadow. Both are
+now the default (DOTHEROES_PPFX_DEPTH_CLAMP=0 clips as before, =2 clamps every
+draw; DOTHEROES_PPFX_DEPTH_D32=1 the float surfaces; a device without D24 or
+depthClamp falls back and says so in the report). Checked in the other scenes:
+
+| ours (D24) against RPCS3, same camera | clipped | clamped |
+|---|---|---|
+| corridor (14.4, -29.52), hero placed: final / reflection | 1.12 / 2.5 | 1.19 / 2.6 |
+| first dungeon's second room (89.6, -104.0): combined fp16 / final | 0.035 / 2.9 | 0.025 / 2.2 |
+| the king's close-up: combined fp16 | 0.0007 | 0.0007 |
+
+The corridor is the same either way (its residual: the reflection target is
+R5G6B5 in RPCS3 and RGBA8 here, below); the dungeon's enemies move between
+runs.
+
+**The king: no difference at the PS3's resolution** [M]. RPCS3's own frame
+at the close-up (scale 100): its bright pass, bloom, glare and star targets
+are all but empty (max 0.03) and equal ours exactly; its combined buffer is
+within 0.0007 of ours (the difference on the far floor's window-light
+patches, 1-2%). Its presented frame against our final (rel8n, 144 fps, the
+owner's settings): a mean difference of 0.47 of 255, 0.09 on the king --
+the king's gesture and the dialogue's typing are the rest. The soft glow
+round the crown is in both. Edge energy on the king: RPCS3 at 720p 17.78,
+ours 17.78; the owner's screenshot 13.4. That screenshot is RPCS3 at
+Resolution Scale 150 in a 1913x1066 window: its look, not the PS3's 720p.
+0130 does not change it either (rel8x, rel8n without 0130: the same glow;
+its crown difference is the king's pose). No exposure adaptation is involved:
+the bright pass's exposure is an inline 3.0 in every frame seen, and the
+series 1-11 s into the dialogue at 30 and 60 fps shows no transient.
+
+**Left** [M]: the floor's window-light patches at the king (1-2% of their
+value); the reflection target, R5G6B5 on the RSX, is held as RGBA8 (every
+guest 16-bit colour format is: surface_vkformat), so RPCS3's reflection is
+quantised where ours is not (mean 1.9 of 255 after quantising ours); the
+D24 shadow map's constant 10-step offset against RPCS3's.
+
+**Builds and checks.** rel8o (build/r8/rel8o_build.sh): 0130, the D24
+surfaces, the clamp by default, NONNEG removed, the placement trigger, and
+the z min/max control's reset value 0x1 (RPCS3's; it was 0, which would
+clamp the frames before the game's first reset). rel8n is the same without
+that reset value; the diagnostic builds rel8h-rel8m and rel8x (rel8n's tree
+without 0130) are local.
+
+*Validation* [M] (build/r8/val5_run.sh, rel8o): the eight scenarios with
+grabs (river, menus, fields, dungeon, snapshot, after the dungeon, editor,
+the exit after the boss) all completed (exit 0, no drive failure but the
+river's timed end), each report "render: depth surfaces as D24_UNORM_S8" and
+the 7 unsupported records of frame 0 as before; Khronos validation with
+synchronisation validation in the river fight and the dungeon approach: no
+error, no hazard (only the known warning for fragment outputs no attachment
+takes); the capture check and a normal-damage river fight completed. With
+no switch set, rel8o at RPCS3's entry-hall camera gives the clamped figures
+above (reflection 1.73, frame 0.97). The CPU-side checks (lost work, the
+interpreter stops, gameplay timing) were not repeated: nothing on the CPU
+changed. The screen grabs carry a Windows Firewall prompt left open over
+their centre (the Nsight capture tool's, not answered: a security setting);
+the target dumps above are unaffected.
+
+*Performance* [M] (build/r8/bench4_run.sh, bench4b_run.sh; tools/r8_bench.py):
+rel8o against rel8g (the owner's play build before it, NONNEG on) and rel8o
+with its depth changes switched back (DOTHEROES_PPFX_DEPTH_D32=1
+DOTHEROES_PPFX_DEPTH_CLAMP=0), uncapped, real audio, rotated order; four
+river rounds for rel8o and rel8g, two for the third arm, two fields rounds
+each.
+
+| Arm | river fps | p99 ms | busy ms | fields fps | p99 ms | busy ms | GPU time, river run |
+|---|---|---|---|---|---|---|---|
+| rel8o | 197.2-203.9 | 6.84-7.37 | 4.84-5.01 | 240.2-242.5 | 5.59-5.74 | 4.09-4.13 | 25.6-25.8 s |
+| rel8g | 193.5-204.7 | 7.12-7.25 | 4.83-5.10 | 242.0-245.1 | 5.53-5.73 | 4.05-4.10 | 26.1-26.2 s |
+| rel8o, D32, clipped | 197.7-199.5 | 7.16-7.25 | 4.95-5.00 | 239.8-242.6 | 5.68-5.76 | 4.09-4.14 | 26.3-26.4 s |
+
+The river fight is two workloads: a run issues about 23,000 debris tasks or
+about 44,700 (the fight's own randomness), and rel8o drew the light one in
+three rounds of four. Matched by it: light rounds rel8o 200.6-203.9 fps
+against rel8g's one 204.7; heavy rounds rel8o's one 197.2 against
+193.5-200.2. The heavy-debris frames' p50 follows the workload, not the
+build (7.3-7.7 ms in light rounds for both, 6.6 in heavy ones): no
+measurable cost; the D24 surfaces take about 2% less GPU time in the fight.
+144 fps sustained exploring as before (99.8% of frames within 6.94 ms); in
+combat 97.9-99.2% (rel8g 98.1-98.7%).
 
 ## 10. Reproducing
 
