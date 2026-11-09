@@ -2470,6 +2470,20 @@ VkFormat depth_vkformat(uint32_t depth_format)
     return s_d24s8;
 }
 
+// The constant depth bias's unit on a D24 surface: the RSX's 2^-24 everywhere
+// but NVIDIA, whose unit is twice it (RPCS3, VKDraw.cpp); asked once.
+bool nvidia_d24_bias_half()
+{
+    static int half = -1;
+    if (half < 0) {
+        const char* e = getenv("DOTHEROES_PPFX_BIAS_NV");
+        VkPhysicalDeviceProperties p = {};
+        F.GetPhysicalDeviceProperties(D.phys, &p);
+        half = p.vendorID == 0x10DEu && !(e && *e == '0');
+    }
+    return half == 1;
+}
+
 Img* depth_image(uint32_t loc, uint32_t off, VkFormat fmt, uint32_t w, uint32_t h)
 {
     Img*& o = s_depths[akey(loc, off)];
@@ -3440,9 +3454,13 @@ void asp_draw(const Rec* r)
     F.vkCmdSetScissor(b.cb, 0, 1, &s2);
     F.vkCmdSetStencilReference(b.cb, VK_STENCIL_FACE_FRONT_AND_BACK, ra.stencil_ref);
     // polygon offset: the guest's units are the depth format's resolution steps, as Vulkan's
-    // the engine's scaling (vk_eng_set_depth_bias): units in 2^-24 steps, a Z16 surface's in 2^-16
-    if (ra.poly_offset_fill) F.vkCmdSetDepthBias(b.cb, ra.poly_offset_units * (sf.depth_format == 1 ? 256.0f : 1.0f), 0.0f,
-                                                 ra.poly_offset_factor);
+    // the engine's scaling (vk_eng_set_depth_bias): units in 2^-24 steps, a Z16 surface's in 2^-16.
+    // NVIDIA's unit on a D24 surface is two of the RSX's (RPCS3 VKDraw.cpp, derived on hardware:
+    // the bias halved there); the castle's shadow map sat 10 steps of 2^-24 deeper than RPCS3's
+    // until it was (2026-11-09). DOTHEROES_PPFX_BIAS_NV=0: not halved.
+    float units = ra.poly_offset_units * (sf.depth_format == 1 ? 256.0f : 1.0f);
+    if (df == VK_FORMAT_D24_UNORM_S8_UINT && nvidia_d24_bias_half()) units *= 0.5f;
+    if (ra.poly_offset_fill) F.vkCmdSetDepthBias(b.cb, units, 0.0f, ra.poly_offset_factor);
     else F.vkCmdSetDepthBias(b.cb, 0.0f, 0.0f, 0.0f);
     const float bc[4] = { 0, 0, 0, 0 };   // the blend colour: not described yet (asp's constant-colour blends)
     F.vkCmdSetBlendConstants(b.cb, bc);
@@ -3718,6 +3736,14 @@ void report_op(const Rec* r)
                         if (as_is) { memcpy(d, sp, 4); continue; }
                         d[0] = sp[3]; d[1] = bgra ? sp[2] : sp[0]; d[2] = sp[1]; d[3] = bgra ? sp[0] : sp[2];
                     }
+                }
+                stats().occ_writebacks++;
+            } else if (w.bpp == 2 && w.fmt == VK_FORMAT_R5G6B5_UNORM_PACK16) {   // the guest's words are big-endian
+                for (uint32_t y = 0; y < w.h; y++) {
+                    if ((uint64_t)w.ea + (uint64_t)y * w.pitch + w.w * 2 > 0xE0000000ull) break;
+                    uint8_t* d = vm_base + w.ea + y * w.pitch;
+                    const uint8_t* sp = w.buf.p + (size_t)y * w.w * 2;
+                    for (uint32_t x = 0; x < w.w; x++, d += 2, sp += 2) { d[0] = sp[1]; d[1] = sp[0]; }
                 }
                 stats().occ_writebacks++;
             }
@@ -4038,6 +4064,27 @@ void transfer_op(const Rec* r)
                 F.vkDestroyBuffer(D.device, wb.b, nullptr);
                 F.vkFreeMemory(D.device, wb.m, nullptr);
             });
+        } else if (bpp == 2 && d->fmt == VK_FORMAT_R5G6B5_UNORM_PACK16 && dea >= 0x10000u &&
+                   (uint64_t)dea + (uint64_t)r->xd_pitch * (r->xd_y + h) <= 0xE0000000ull &&
+                   make_buffer(wb, (VkDeviceSize)w * h * 2, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true)) {
+            // a 565 surface's words, big-endian in the guest's memory
+            access(b.cb, d, kCopySrc);
+            VkBufferImageCopy bc = {};
+            bc.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+            bc.imageOffset = { (int32_t)r->xd_x, (int32_t)r->xd_y, 0 };
+            bc.imageExtent = { w, h, 1 };
+            F.vkCmdCopyImageToBuffer(b.cb, d->img, layout_of(d), wb.b, 1, &bc);
+            mark(b, kSectReadback);
+            const uint32_t pitch = r->xd_pitch, x0 = r->xd_x, y0 = r->xd_y;
+            b.done.push_back([wb, dea, pitch, x0, y0, w, h] {
+                for (uint32_t y = 0; y < h; y++) {
+                    uint8_t* dp = vm_base + dea + (uint64_t)(y0 + y) * pitch + x0 * 2u;
+                    const uint8_t* sp = wb.p + (size_t)y * w * 2;
+                    for (uint32_t x = 0; x < w; x++, dp += 2, sp += 2) { dp[0] = sp[1]; dp[1] = sp[0]; }
+                }
+                F.vkDestroyBuffer(D.device, wb.b, nullptr);
+                F.vkFreeMemory(D.device, wb.m, nullptr);
+            });
         }
         return;
     }
@@ -4115,6 +4162,60 @@ namespace ppfx {
 namespace {
 
 
+// PS3RECOMP_VK_DUMP=<file> (the test harness's frame dump, tests/boot_smoke.py
+// SHOT_EVERY: its shots/NNNN.png): every PS3RECOMP_VK_DUMP_EVERY-th present
+// (default 15) the display buffer presented is read back and written there as
+// a binary PPM (through a temporary file, renamed) -- the picture the game
+// made, which no window over the game's can hide (the screen grabs can). The
+// old engine's backend wrote it; the native present did not until 2026-11-09.
+// Off when unset (timing runs: DUMP=0).
+void present_dump(Batch& b, Img* t, uint32_t w, uint32_t h)
+{
+    static const char* path = nullptr;
+    static uint32_t every = 15, n = 0;
+    static bool init = false;
+    if (!init) {
+        init = true;
+        const char* e = getenv("PS3RECOMP_VK_DUMP");
+        path = e && *e ? e : nullptr;
+        const char* k = getenv("PS3RECOMP_VK_DUMP_EVERY");
+        if (k && atoi(k) > 0) every = (uint32_t)atoi(k);
+    }
+    if (!path || (n++ % every) || !w || !h || t->bpp != 4) return;
+    Buf buf;
+    if (!make_buffer(buf, (VkDeviceSize)w * h * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true)) return;
+    access(b.cb, t, kCopySrc);
+    VkBufferImageCopy c = {};
+    c.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+    c.imageExtent = { w, h, 1 };
+    F.vkCmdCopyImageToBuffer(b.cb, t->img, layout_of(t), buf.b, 1, &c);
+    mark(b, kSectReadback);
+    const bool bgra = t->fmt == VK_FORMAT_B8G8R8A8_UNORM;
+    const std::string dst = path;
+    b.done.push_back([buf, w, h, bgra, dst] {
+        const std::string tmp = dst + ".tmp";
+        if (FILE* f = fopen(tmp.c_str(), "wb")) {
+            fprintf(f, "P6\n%u %u\n255\n", w, h);
+            std::vector<uint8_t> row((size_t)w * 3);
+            for (uint32_t y = 0; y < h; y++) {
+                const uint8_t* s = buf.p + (size_t)y * w * 4;
+                for (uint32_t x = 0; x < w; x++, s += 4) {
+                    row[x * 3 + 0] = bgra ? s[2] : s[0]; row[x * 3 + 1] = s[1]; row[x * 3 + 2] = bgra ? s[0] : s[2];
+                }
+                fwrite(row.data(), 1, row.size(), f);
+            }
+            fclose(f);
+#ifdef _WIN32
+            MoveFileExA(tmp.c_str(), dst.c_str(), MOVEFILE_REPLACE_EXISTING);
+#else
+            rename(tmp.c_str(), dst.c_str());
+#endif
+        }
+        F.vkDestroyBuffer(D.device, buf.b, nullptr);
+        F.vkFreeMemory(D.device, buf.m, nullptr);
+    });
+}
+
 // A kFlip: the display buffer the flip names, as the native renderer drew
 // it, blitted into the backend's present target on this queue, and the
 // present's own submission (on the backend's queue) made to wait for that.
@@ -4160,6 +4261,7 @@ void present_native(const Rec* r)
         ib.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; ib.dstAccessMask = 0;
         F.vkCmdPipelineBarrier(b.cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1, &ib);
         mark(b, kSectOther);
+        present_dump(b, t, (uint32_t)bl.srcOffsets[1].x, (uint32_t)bl.srcOffsets[1].y);
         // DOTHEROES_R6_HAZARD=present (a negative control for the validation
         // layer): the present's submission does not wait for the blit
         static int hz = -1;
@@ -4468,8 +4570,36 @@ void run()
 
 }  // namespace
 
+// An R5G6B5 colour surface (CELL_GCM_SURFACE_R5G6B5, the castle's floor
+// reflection) as R5G6B5_UNORM_PACK16, the guest's own 16 bits, as RPCS3 keeps
+// it: the old engine's RGBA8 kept 8 bits a channel (RPCS3's reflection is
+// quantised where ours was not) and the alpha the shader wrote, where the RSX
+// reads a 565 surface's alpha as 1. DOTHEROES_PPFX_TARGET_565=0: RGBA8 as
+// before; a device without the format's attachment, blend and sampling
+// features keeps RGBA8 and says so in the report.
+static bool target_565()
+{
+    static int ok = -1;
+    if (ok < 0) {
+        if (!D.phys) return false;   // not yet: asked again once the device is up
+        const char* e = getenv("DOTHEROES_PPFX_TARGET_565");
+        if (e && *e == '0') ok = 0;
+        else {
+            VkFormatProperties fp;
+            F.GetPhysicalDeviceFormatProperties(D.phys, VK_FORMAT_R5G6B5_UNORM_PACK16, &fp);
+            const VkFormatFeatureFlags need = VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT |
+                                              VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT |
+                                              VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+            ok = (fp.optimalTilingFeatures & need) == need;
+            if (!ok) report_add("render: the device cannot render R5G6B5: those surfaces held as RGBA8");
+        }
+    }
+    return ok == 1;
+}
+
 uint32_t surface_vkformat(uint32_t color_format, uint32_t* bpp)
 {
+    if ((color_format & 0x1Fu) == 0x03u && target_565()) { *bpp = 2; return VK_FORMAT_R5G6B5_UNORM_PACK16; }
     rsx_be_format f;   // the engine's eng_surface_format
     switch (color_format & 0x1Fu) {
     case RSX_SURFACE_FMT_F_W16Z16Y16X16: f = RSX_BE_FMT_R16G16B16A16F; break;
