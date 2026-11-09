@@ -983,6 +983,12 @@ def step(lineno, line, op, a):
             f.write(f"{int(a[0])}\n")
         wait(0.5)
         say(f"life set to {int(a[0])} half apples")
+    elif op == "place":   # put the hero at x z (DOTHEROES_DEV_STATE): a camera matched to another capture's
+        acted()
+        with open(os.path.join(run, "pos.trigger"), "w") as f:
+            f.write(f"{float(a[0])} {float(a[1])}\n")
+        wait(0.5)
+        say(f"hero placed at ({float(a[0])}, {float(a[1])})")
     elif op == "shot":
         shot(a[0] if a else f"line{lineno}")
     elif op == "stop":

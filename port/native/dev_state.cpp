@@ -16,6 +16,10 @@
 //     half apples (empty: 1), so the next hit ends the game -- the way to the
 //     game-over screen and its save (tests/scripts/save_game.drive). Needs the
 //     player found (DOTHEROES_DEV_STATE=1 or another switch that looks).
+//   And place the hero: pos.trigger holding "x z" (the area's coordinates)
+//     written to the player's position (+0x428, +0x430) -- a scene matched to
+//     another capture's camera exactly (the RPCS3 comparison), where walking
+//     stalls short. Same need of the player found.
 //
 // DOTHEROES_DEV_MEMSNAP=1: a thread watches the game's working directory (a
 // test run's directory) for memsnap.trigger; when a drive script touches it,
@@ -116,6 +120,12 @@ void wr32(uint32_t ea, uint32_t v)
 {
     volatile uint8_t* p = vm_base + ea;
     p[0] = (uint8_t)(v >> 24); p[1] = (uint8_t)(v >> 16); p[2] = (uint8_t)(v >> 8); p[3] = (uint8_t)v;
+}
+void wrf(uint32_t ea, float f)
+{
+    uint32_t u;
+    memcpy(&u, &f, 4);
+    wr32(ea, u);
 }
 float rdf(uint32_t ea)
 {
@@ -647,6 +657,19 @@ void keys_loop()
             wr32(kLifeShown, life);
             fprintf(stderr, "[dev-state] life set to %u half apples at %.3f s\n", life,
                     (double)(int64_t)(ps3_ft_now() - g_ps3_ft.base) / 1e9);
+        }
+        FILE* pt = p && rd32(p) == kPlayerVtable ? fopen("pos.trigger", "rb") : nullptr;
+        if (pt) {
+            float x = 0.0f, z = 0.0f;
+            const bool ok = fscanf(pt, "%f %f", &x, &z) == 2;
+            fclose(pt);
+            remove("pos.trigger");
+            if (ok) {
+                wrf(p + 0x428, x);
+                wrf(p + 0x430, z);
+                fprintf(stderr, "[dev-state] hero placed at (%.3f, %.3f) at %.3f s\n", x, z,
+                        (double)(int64_t)(ps3_ft_now() - g_ps3_ft.base) / 1e9);
+            }
         }
         if (!our_window_focused()) { f8 = f7 = pad = false; continue; }
         const bool f8_now = (GetAsyncKeyState(VK_F8) & 0x8000) != 0, f7_now = (GetAsyncKeyState(VK_F7) & 0x8000) != 0;
