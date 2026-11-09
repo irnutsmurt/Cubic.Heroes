@@ -304,6 +304,24 @@ size) is a design decision for the owner.
   plays.
 - Saves are untouched: CONTINUE loads the same save.
 
+## 7a. The system's save-data list (found 2026-11-07)
+
+**Today** [M: docs/NATIVE_R8.md section 9.3]: where the PS3 shows its
+save-data list and the player picks (CONTINUE with several saves, EDIT DATA
+on the character select), this port shows nothing and loads the first entry
+the game offers. With the owner's three imported edits (GreenHero, BlueRoyal,
+RedMage) only GreenHero can be chosen.
+
+**Required**: a list in the port's own UI wherever the game calls the
+system's list (cellSaveDataListLoad2 and its save counterpart): each entry's
+title, detail and icon from its PARAM.SFO and ICON0.PNG, the game's focus
+position honoured, the selection returned to the game as the PS3 would, and
+cancelling returned as a cancel. The same prompts as section 6.
+
+**Tests**: a drive that picks the second and third edit on the character
+select and checks which DATA.EDT the game read; CONTINUE with two saves,
+each picked once; a cancel.
+
 ## 8. Launcher and update management (after the base and the settings are stable)
 
 **Today** [C, setup_app.py, tools/self_update.py]:

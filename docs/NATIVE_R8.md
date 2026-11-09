@@ -35,6 +35,7 @@ per-thread work reported apart. An average of 144 is not 144 sustained.
 | Measurement | done (sections 8, 8.2): combat 194 fps at the median (production 148), exploring 235 (production 186) for rel6; 144 sustained exploring (99.8% of frames), not yet in combat (97.8%) |
 | **Stopping a batch** | **fixed**: tools/owned_run.py runs a batch in a job object of its own; a cancel, the launching shell's end or the launcher's end stops every process it started and nothing else. 7 dummy-process tests and one stop of a real background task pass; not yet used for a game batch (section 9.2) |
 | **The recorder's bookkeeping** | **investigated**: one producer thread (measured: no observed call on another thread in the kept fight reports); the lock is needed only against copies into RSX local memory and inline transfers made on other threads, which the native renderer never takes part in. A lock-free producer path, an indexed dispatch and direct handlers are prepared as three measured steps; two counters added to tell whether other threads write at all (compiled, not run) (section 8.4) |
+| **The RPCS3 comparison** | **the dungeon hero's sparkle** traced (small negative scene values through YEBIS's bright pass) and fixed behind DOTHEROES_PPFX_NONNEG, on in the owner's play session; **the castle floor**: the depth clamp ruled out, the reflected ceiling still missing; **the king**: our bloom weaker than RPCS3's; the edited hero draws (harness fixes). Section 9.3 |
 | What is left | section 9 -- one decision for the owner there (the reservation test) |
 
 ## 1. Inventory: what runs, and what is on the critical path [M, C]
@@ -1344,6 +1345,132 @@ and the task stopped. All 8 ended at once.
 **Not yet used for a game batch**: the first batch after testing resumes
 runs through it (section 9.1). To launch one:
 `build/venv/Scripts/python.exe tools/owned_run.py --name <batch> -- sh build/r8/<batch>_run.sh`.
+
+### 9.3 The owner's play session and the RPCS3 comparison (2026-11-07, 11-09) [C, M]
+
+After the meeting the owner played rel8b (section 9.1's queue still waits).
+Three things came of it.
+
+**The edited hero (the Link model).** The owner's downloaded edit saves
+(three edited characters made on a real PS3: GreenHero, BlueRoyal, RedMage)
+were decrypted with tools/edit_import.py and added to the play saves. The
+game lists them and loads GreenHero, and it draws in full: in the first
+dungeon from a SAVES run, and in the owner's own 07-area7 checkpoint
+[M: runs ed3, ow7]. Two harness defects had made it look broken:
+- a run's SAVES copy took only the BLUS30490 folders, but the game names edit
+  data with the Japanese release's ID (BLJM60180...) in every region, so a
+  test found no edit data at all;
+- a play session's checkpoint copied only the save that changed, so a
+  checkpoint whose hero is an edited one loaded with no body (only the
+  shield).
+
+Both now carry the BLJM60180 folders (tests/boot_smoke.py, tests/drive.py);
+owner-play-r8's checkpoints 05-08 had them added. **Left:** this port has no
+save-data list dialog: with several edits the list call loads the first
+(GreenHero), where the PS3 asks. The PC-experience work needs one
+(docs/PC_EXPERIENCE.md section 7a).
+
+**The RPCS3 comparison.** The owner compared three scenes with RPCS3: the
+king's close-up looked sharper in ours; the castle hall's floor reflection
+lacked the ceiling's tiles; in the first dungeon the hero "sparkled like a
+disco ball". RPCS3 was then driven through the same save for a reference at
+the same spot. That needed a scratch copy of RPCS3 on F: with the keyboard as
+its pad (the owner's per-game input profile is the Xbox pad; their config and
+saves were not edited) and a game window smaller than the screen: a window
+the size of the screen is presented full screen, and grabs of it show an old
+frame (tests/rpcs3_capture.py).
+
+*The sparkle* (first dungeon, second room, lamp-lit). The same save, the
+Assassin preset, the room's south door [M: RPCS3 burst; ours sp8]:
+
+| | the hood (median RGB) | stars |
+|---|---|---|
+| RPCS3 | 16, 12, 12 | none (one pink frame: the hit flash) |
+| ours | 42, 23, 43 | in every one of 16 grabs: red, blue, white |
+| ours, DOTHEROES_PPFX_NONNEG=1 | 19, 16, 18 | none in 16; none next to the lamp in 7 |
+
+How it was found, each step a run:
+- the first room matches RPCS3 exactly (the hero, its dotted bevel pattern);
+- the frame described (DOTHEROES_ASP_DESCRIBE_FRAME=trigger): the hero is one
+  non-indexed draw of 5,424 vertices whose lighting program adds two lamps
+  (colour 100, 24.6, 0 over 5.62 x distance + 4, flickering) and a
+  directional light, with a bevel normal map;
+- outputs over 60000 or not finite, marked: none. The specular term
+  removed, the lamps' flame sprites skipped: the stars stay. The colour
+  texture shown raw: correct;
+- every scene output clamped at 0: the stars go. Outputs below -0.25, marked:
+  none. So small negative values, from each lamp's unclamped N.L on faces
+  turned from it, reach YEBIS's bright pass, which divides colour by
+  luminance: where the channels nearly cancel, the quotient runs to the
+  pass's 64000 cap and the glare draws stars from it.
+
+**Why RPCS3 has no such values is not established.** Checked equal to what
+the game gives: the program and its inline constants, the vertex constants,
+the colour texture and the normal map (decoded from guest memory), the
+vertex buffer (every frame vector an exact unit axis, the uvs 0 and 1), the
+precision bits against RPCS3's rules, the post-effects' control words (they
+export h0, as written). RPCS3 clamps neither fragment outputs nor sampled
+texels. Ruled out on the way: the LOD bias (the game binds none), anisotropy
+(1 to 1 on the hero's units), the placeholder for disabled units (no such
+draw), the fragment precision clamp (added anyway, ps3recomp 0128).
+
+**What changed** [C, M]: DOTHEROES_PPFX_NONNEG=1 writes an unblended scene
+draw's negative colour components into a floating-point target as 0
+(blended draws untouched: one may subtract on purpose). Off by default; the
+owner's play session (rel8g) turns it on. Run only in the first dungeon so
+far. Diagnostics added for the next comparison (off unless asked): the frame
+description on a trigger with programs, constants, textures and vertices
+written out; skipping draws by program; marking hot outputs; showing a
+unit's texture; substituting shader text.
+
+*The castle floor.* The owner's view is the throne-room corridor (area 82),
+not the bright entrance hall: the owner's session record (11:10) gives the
+way in -- the entrance hall's altar at x 40.2, north -- and the walk up the
+corridor at x 12-15. Standing at (12.7, -38.3) gives the owner's camera (the
+wall-tops at the same height) [M: runs c82f0, c82f1]:
+- with the depth clamp off, ours is close to RPCS3 (mean difference 5.8 a
+  channel). The owner's point holds there: left of the carpet RPCS3's floor
+  shows a darker, teal-tinted band with fine tile lines (the mirrored
+  ceiling) where ours is plain lighter grey;
+- with DOTHEROES_PPFX_DEPTH_CLAMP=1 the band is still missing and the
+  reflection gains light stepped blocks at the upper right that RPCS3 does
+  not show (difference 13.6). **The depth clamp is not the fix**; it stays
+  off.
+
+No draw was refused in the scene (the run's 7 unsupported records are all
+in frame 0), so the band is a difference in how a draw renders, not a missing
+draw. **Open:** the reflection pass's draws (the 1024x512 R5G6B5 target the
+floors sample) described at this spot, next to RPCS3's frame from the same
+camera.
+
+*The king.* The dialogue close-up reproduces exactly: talking to the king
+at (12.0, -19.9) gives the owner's RPCS3 frame ("King: That is...", the same
+scripted camera) [M: run king2]. RPCS3 shows a soft glow round the light
+cubes, spilling into the red behind them; ours has crisp edges and little
+glow (edge energy on the king 18.1 against 13.4 -- biased, since the RPCS3
+image went through the owner's window scaling and WebP; the glow is not an
+artefact of that). So "sharper" is **the bloom weaker in ours**, not texture
+filtering. **Open:** YEBIS's bloom levels compared with a frame of RPCS3's own
+at this moment (the scratch RPCS3 can be driven there from castle-front).
+
+**What is reviewed, implemented, built and runtime-tested**:
+- the harness fixes and the GreenHero edit: implemented, run (ed3, ow7);
+- NONNEG: implemented, built (rel8g), run in the first dungeon (door, lamp,
+  two rooms); the owner's play session uses it; not yet run elsewhere;
+- the fragment precision clamp (0128): built, in about twenty comparison
+  runs with no visible change; no validation of its own;
+- the depth clamp and anisotropy switches: built; the depth clamp run in
+  the corridor and rejected there; anisotropy not exercised (the scenes seen
+  ask 1 to 1);
+- rel8g: built and run in the dungeon and the castle; the section 9.1 queue
+  (resume1-4) still not run.
+
+A scratch RPCS3 (F:/3d dot game heroes/rpcs3-scratch: the keyboard as its
+pad, a 1280x720 window, copies of the test saves) and its key sender and
+fast grabber (build/compare/rpcs3_keys.py, rpcs3_burst.py) are local. One
+control boot of the owner's own RPCS3 (the scratch config passed with
+--config) replaced its current log file (RPCS3 rotates it each boot); its
+configs and saves were not touched.
 
 ## 10. Reproducing
 
