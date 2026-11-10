@@ -1,0 +1,158 @@
+From 60aee53b5dc23b9e26088251e8130e51aa183bbf Mon Sep 17 00:00:00 2001
+From: giteaguy <73799093+irnutsmurt@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 13:21:37 -0800
+Subject: [PATCH] SPU thread groups: terminate stops the threads; destroy never
+ frees a running one
+
+sys_spu_thread_group_terminate only marked the group stopped, so group_join
+(which waits only on a running group) returned at once and group_destroy freed
+the context and local store of a lifted thread still running on them. A title
+that terminates, joins and destroys its audio group on exit then had that
+thread fault in spu_rdch reading freed memory.
+
+Terminate now stops the group's running lifted threads the way a raw SPU's
+RunCntl = 0 stops one (stop_request, honoured at the next channel operation;
+the channel wait and the stop-and-signal event receive both watch it) and
+waits for their host threads, bounded at about 4 s a thread. Destroy stops any
+thread still running first and keeps (does not free) the context of one that
+will not stop. A thread stopped this way is no longer reported as a fault.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ runtime/spu/spu_lifted_thread.c |  2 +
+ runtime/syscalls/lv2_register.c | 84 ++++++++++++++++++++++++++++++++-
+ 2 files changed, 84 insertions(+), 2 deletions(-)
+
+diff --git a/runtime/spu/spu_lifted_thread.c b/runtime/spu/spu_lifted_thread.c
+index e18d9bd..573ce2a 100644
+--- a/runtime/spu/spu_lifted_thread.c
++++ b/runtime/spu/spu_lifted_thread.c
+@@ -137,6 +137,8 @@ void spu_lifted_thread_run(spu_context* ctx, spu_lifted_thread_result* out)
+         r.group_exit   = 1;
+         r.group_status = (int32_t)ctx->ch_out_mbox.value;
+         ctx->ch_out_mbox.count = 0;
++    } else if (ctx->stop_request) {
++        /* Stopped from outside (sys_spu_thread_group_terminate): not a fault. */
+     } else {
+         /* Anything else -- a halt from the dispatcher's unresolved-branch
+          * unwind, or a stop code outside the exit protocol -- is a fault. The
+diff --git a/runtime/syscalls/lv2_register.c b/runtime/syscalls/lv2_register.c
+index e94d23d..c95618c 100644
+--- a/runtime/syscalls/lv2_register.c
++++ b/runtime/syscalls/lv2_register.c
+@@ -1247,6 +1247,72 @@ static int64_t sys_spu_thread_group_start_handler(ppu_context* ctx)
+     return 0;
+ }
+ 
++/* Stop a group's running lifted threads and wait for their host threads to
++ * leave. lv2's sys_spu_thread_group_terminate returns once the threads have
++ * stopped, and the group_join and group_destroy after it rely on that: terminate
++ * used to only mark the group stopped, so join (which waits only on a running
++ * group) returned at once and destroy freed the context and local store of a
++ * thread still running on them -- FMOD's mixer, on the game's own quit, which
++ * then faulted in spu_rdch. A thread is stopped the way a raw SPU's
++ * RunCntl = 0 stops one (spu_raw.c raw_spu_stop): stop_request, honoured at its
++ * next channel operation -- a channel wait and the stop-and-signal event
++ * receive both watch it -- after which the host thread leaves through the
++ * spu_run_with_halt landing pad. The wait is bounded (about 4 s a thread);
++ * returns how many threads were still running after it. */
++static int spu_group_stop_threads(spu_group_t* g, int* stopped)
++{
++    int left = 0, n = 0;
++    for (int i = 0; i < 8 && i < (int)g->num_threads; i++) {
++        uint32_t idx = g->thread_indices[i];
++        if (idx >= MAX_SPU_THREADS) continue;
++        spu_thread_t* t = &s_spu_threads[idx];
++        if (!t->in_use || !t->running || !t->sctx) continue;
++        t->sctx->stop_request = 1;
++        spu_ch_wake(t->sctx);
++    }
++    for (int i = 0; i < 8 && i < (int)g->num_threads; i++) {
++        uint32_t idx = g->thread_indices[i];
++        if (idx >= MAX_SPU_THREADS) continue;
++        spu_thread_t* t = &s_spu_threads[idx];
++        if (!t->in_use || !t->running || !t->sctx) continue;
++        int done = 0;
++#ifdef _WIN32
++        for (int k = 0; k < 4000 && !done; k++) {
++            spu_ch_wake(t->sctx);
++            done = !t->finish_event || WaitForSingleObject(t->finish_event, 1) == WAIT_OBJECT_0;
++        }
++        if (done && t->host_thread) {
++            WaitForSingleObject(t->host_thread, 1000);
++            CloseHandle(t->host_thread);
++            t->host_thread = NULL;
++        }
++#else
++        for (int k = 0; k < 4000 && !done; k++) {
++            spu_ch_wake(t->sctx);
++            pthread_mutex_lock(&t->finish_event.mu);
++            done = t->finish_event.done;
++            pthread_mutex_unlock(&t->finish_event.mu);
++            if (!done) { struct timespec ts = {0, 1000 * 1000}; nanosleep(&ts, 0); }
++        }
++        if (done) {
++            pthread_join(t->host_thread, NULL);
++            pthread_mutex_destroy(&t->finish_event.mu);
++            pthread_cond_destroy(&t->finish_event.cv);
++        }
++#endif
++        if (done) {
++            n++;
++        } else {
++            left++;
++            fprintf(stderr, "[SPU] group 0x%X thread 0x%X did not stop (pc=0x%05X): it is not "
++                    "reaching a channel operation\n", g->id, t->tid,
++                    (unsigned)(t->sctx->pc & SPU_LS_MASK));
++        }
++    }
++    if (stopped) *stopped = n;
++    return left;
++}
++
+ /* sys_spu_thread_group_join(id, *cause, *status) */
+ static int64_t sys_spu_thread_group_join_handler(ppu_context* ctx)
+ {
+@@ -1357,10 +1423,21 @@ static int64_t sys_spu_thread_group_destroy_handler(ppu_context* ctx)
+     }
+     spu_group_t* g = spu_find_group(id);
+     if (g) {
++        /* Never free a context a host thread still runs on: a group destroyed
++         * without a terminate or join first is stopped here, and a thread that
++         * will not stop keeps its context and local store (leaked, not freed
++         * under it). */
++        spu_group_stop_threads(g, NULL);
+         for (int i = 0; i < 8 && i < (int)g->num_threads; i++) {
+             uint32_t idx = g->thread_indices[i];
+             if (idx < MAX_SPU_THREADS) {
+                 spu_thread_t* t = &s_spu_threads[idx];
++                if (t->running) {
++                    fprintf(stderr, "[SPU] group_destroy id=0x%X: thread 0x%X still running, its "
++                            "context kept\n", id, t->tid);
++                    t->sctx = NULL;
++                    t->local_store = NULL;
++                }
+                 if (t->local_store) {
+                     free(t->local_store);
+                     t->local_store = NULL;
+@@ -1389,12 +1466,15 @@ static int64_t sys_spu_thread_group_terminate_handler(ppu_context* ctx)
+     uint32_t id     = (uint32_t)ctx->gpr[3];
+     int32_t  status = (int32_t)ctx->gpr[4];
+     spu_group_t* g = spu_find_group(id);
++    int stopped = 0, left = 0;
+     if (g) {
+-        g->state = SPU_GROUP_STATE_STOPPED;
+         g->cause = SPU_GROUP_CAUSE_TERMINATED;
+         g->exit_status = status;
++        left = spu_group_stop_threads(g, &stopped);
++        g->state = SPU_GROUP_STATE_STOPPED;
+     }
+-    fprintf(stderr, "[SPU] group_terminate id=0x%X status=%d\n", id, status);
++    fprintf(stderr, "[SPU] group_terminate id=0x%X status=%d (%d thread(s) stopped, %d still running)\n",
++            id, status, stopped, left);
+     fflush(stderr);
+     ctx->gpr[3] = 0;
+     return 0;
+-- 
+2.56.0.windows.3
+
