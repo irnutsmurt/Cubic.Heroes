@@ -1337,8 +1337,23 @@ the game thread's own time in the fields, 13% in the river):
   promoted call, each kept register the function still reads with what the callee left (port/promo_check.cpp).
   Over the nine validation scenes and a normal-damage fight: **2.62 billion calls checked, 0 registers changed
   by a callee**.
-- **Timing**: the A/B against rel13 (build/r8/ab16_run.sh, three rounds rotated, uncapped, real audio) --
-  pending; adopted only if faster beyond the runs' spread.
+- **Timing** (build/r8/ab16_run.sh: rel13, rel14 = rel13's sources lifted with the ten promoted, and rel16,
+  three rounds with the order rotated, uncapped, real audio; tools/r8_bench.py, ranges over the rounds):
+
+  | Scene | | fps | p50 ms | p99 ms | busy ms | heavy p99 ms | other p99 ms |
+  |---|---|---|---|---|---|---|---|
+  | river fight | rel13 | 205.0-209.3 | 4.67-4.75 | 6.69-6.78 | 4.72-4.82 | 7.66-8.44 | 6.60-6.68 |
+  | | rel14 | 204.9-207.0 | 4.71-4.75 | 6.70-6.81 | 4.77-4.82 | 7.82-9.40 | 6.53-6.66 |
+  | fields | rel13 | 240.5-249.1 | 3.99-4.09 | 5.40-5.54 | 3.99-4.13 | - | - |
+  | | rel14 | 239.6-243.4 | 4.10-4.14 | 5.47-5.66 | 4.08-4.14 | - | - |
+
+  **Not faster in either scene -- in the fields slightly slower** (p50 4.10-4.14 against 3.99-4.09). **Not
+  adopted**: tools/r8_lift.sh's default stays --promote-leaf; the option and its check stay in the lifter for a
+  later attempt. What the profile does not show is where these functions' time goes once their registers are
+  in host registers: their guest loads and stores (each a host memory access through vm_base, unchanged by
+  promotion) and the calls themselves, with 1,352 stores and 673 reloads added round 115 calls. A next attempt
+  would need a profile at the instruction level of one of them (perf annotate's equivalent) before more
+  promotion, not more functions.
 
 ### 9.1 Queued until testing resumes
 
