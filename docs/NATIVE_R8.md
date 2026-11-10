@@ -1888,6 +1888,29 @@ then alone at its top multiplier (3.28, 10.4 units a second) and not hit by
 a hero standing still -- **a full kill with the gate on is not yet seen**; a
 play session will show it.
 
+**One clock, and its checks** (2026-11-09, later) [M]. The gate's time was
+per object; now one 30 Hz clock serves every gated object: the frame's time
+is added once a game frame (the game's own frame count, 0x02CF3570, stepped
+at the frame's start by func_0094F290), and in a frame where a step is due
+every gated object takes it, once (a second call in the same frame does
+not step again). The head and the segments that follow its trail step in the
+same frames whenever each was made, as in the original's single frame; an
+object made at an address an old one used inherits nothing. The clock's time
+passes only in frames with a gated call. DOTHEROES_TICK30_LOG=1 logs it.
+Checks at 144 fps unless said, the hero on one half apple
+(build/r8/gatechk_run.sh, build/compare/boss_*.drive):
+
+| Check | What happened |
+|---|---|
+| Two pauses (the system menu, 13.5 and 12.5 s) | the segments' frame counter stood still through each (one change, at the end); after each, at most one step a frame -- no burst of the time spent paused |
+| Room reload (the title, CONTINUE, the boss room again) | new objects at new addresses; the clock picked them up with its 0.003 s carry; 29.97 steps a second after |
+| Frame-rate changes (DIAG_VBLANK_SCHEDULE: 30, 144, 60, 100, 40 Hz, 6 s each, round and round, 100 s) | 29.93-30.15 steps a second in every 5 s window; two frames of 34.1-34.6 ms took two steps; the head 2.80 units a second at multiplier 1.00, as at 30 fps |
+| The boss's intro | its dialogue stops the walk: 239-345 game frames without a gated call, then steps resume one at a time |
+| Speed per multiplier, these runs | 1.00: 2.80 in every run; the higher levels within the spread of section 9.6's table |
+
+DIAG_VBLANK_SCHEDULE=<ms>:<s>,... (port/main.cpp) changes the vblank clock's
+period as the game runs, for such tests.
+
 **Status**: pushed as validated development work, not a stable release (the
 tags stable-2026-11-02, checkpoint-2026-11-04, r4-checkpoint-2026-11-05 are
 unchanged, and none is added). A full boss kill with the fix is unverified

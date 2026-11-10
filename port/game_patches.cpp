@@ -58,8 +58,9 @@
  *   written for the game's locked 30 fps. Measured in real seconds with the hero
  *   standing still (tests/boss_timing.py): the body's median speed 4.5 units a
  *   second at 30 fps, 7.5 at 60, 20 at 144, and 2.5 times the orbs. The gate
- *   runs such an update at 30 Hz: time accumulates per object, and the update
- *   runs only when a 1/30 s step is due, with dt reading whole steps. Above
+ *   runs such an update at 30 Hz: time accumulates on one clock for all of
+ *   them, and the updates run only in a frame where a 1/30 s step is due, with
+ *   dt reading whole steps. Above
  *   30 fps the object moves at the 30 fps game's pace, in 30 Hz steps.
  *   DOTHEROES_TICK30=0 turns it off; at DOTHEROES_FPS=30 it is off (the
  *   original pacing).
@@ -121,25 +122,30 @@ extern "C" void dotheroes_step_round(ppu_context* ctx)
 
 /* See g_dotheroes_tick30. `dt_ea` (r4) is the caller's frame time, shared by
  * the objects it walks: replaced for this call and put back. The update is
- * re-entered through its own hook (`inner` declines). */
+ * re-entered through its own hook (`inner` declines).
+ *
+ * One 30 Hz clock for every gated object, as the original's one frame was:
+ * the frame's time is added once a game frame (the frame is the game's own
+ * count, 0x02CF3570, which func_0094F290 steps at the frame's start, before
+ * the objects' walk), and in a frame where a step is due every gated object
+ * takes it -- the head and the segments that read its trail stay in step,
+ * whenever each was made. Time passes for the clock only in frames with a
+ * gated call: in a pause or a menu that stops the walk, or with no boss, it
+ * stands. DOTHEROES_TICK30_LOG=1: what the clock did (a line per object first
+ * seen or seen again after a gap, a frame with more than one step, a summary
+ * every 5 s). */
 extern "C" { int g_dotheroes_tick30 = 1; }
+static int g_tick30_log = 0;
 
-static float* tick30_acc(uint32_t obj)
+static uint32_t guest_u32(uint32_t ea)
 {
-    static struct { uint32_t obj; float acc; } s[512];
-    uint32_t i = (obj >> 4) * 2654435761u >> 23;
-    for (uint32_t n = 0; n < 512; n++, i = (i + 1) & 511) {
-        if (s[i].obj == obj) return &s[i].acc;
-        if (!s[i].obj) { s[i].obj = obj; s[i].acc = 0.0f; return &s[i].acc; }
-    }
-    s[i].obj = obj; s[i].acc = 0.0f;   /* full: reuse a slot */
-    return &s[i].acc;
+    const uint8_t* p = vm_base + ea;
+    return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
 }
 
 static float guest_float(uint32_t ea)
 {
-    const uint8_t* p = vm_base + ea;
-    const uint32_t u = (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
+    const uint32_t u = guest_u32(ea);
     float f;
     memcpy(&f, &u, 4);
     return f;
@@ -153,20 +159,86 @@ static void guest_float_set(uint32_t ea, float f)
     p[0] = (uint8_t)(u >> 24); p[1] = (uint8_t)(u >> 16); p[2] = (uint8_t)(u >> 8); p[3] = (uint8_t)u;
 }
 
+static const uint32_t kGameFrame = 0x02CF3570;   /* the game's frame count (docs/NATIVE_R8.md section 3) */
+static struct {
+    uint32_t frame;        /* the game frame the clock last advanced in */
+    int      due;          /* steps due in that frame */
+    float    acc;          /* time not yet stepped */
+    /* DOTHEROES_TICK30_LOG */
+    uint32_t log_frame0, frames, due_frames, steps, max_due;
+    double   dt_sum;
+    struct { uint32_t obj, last_frame, calls; } obj[16];
+} g_t30 = { 0xFFFFFFFFu, 0, 0.0f, 0, 0, 0, 0, 0, 0.0, {} };
+
+static void tick30_log_call(uint32_t obj, uint32_t frame, float dt, int due, void (*body)(ppu_context*))
+{
+    const char* what = body == func_001E47C4 ? "head" : "segment";
+    int k = -1, free_k = -1;
+    for (int i = 0; i < 16; i++) {
+        if (g_t30.obj[i].obj == obj) { k = i; break; }
+        if (!g_t30.obj[i].obj && free_k < 0) free_k = i;
+    }
+    if (k < 0) {
+        k = free_k >= 0 ? free_k : (int)(obj >> 4 & 15);
+        g_t30.obj[k].obj = obj; g_t30.obj[k].calls = 0;
+        fprintf(stderr, "[tick30] %s %08X first call at game frame %u (dt %.4f, clock %.4f s owed)\n", what, obj, frame, dt, g_t30.acc);
+    } else if (frame - g_t30.obj[k].last_frame > 30) {
+        fprintf(stderr, "[tick30] %s %08X called again after %u game frames (dt %.4f, %d step%s due)\n",
+                what, obj, frame - g_t30.obj[k].last_frame, dt, due, due == 1 ? "" : "s");
+    }
+    g_t30.obj[k].last_frame = frame;
+    g_t30.obj[k].calls++;
+}
+
 static int tick30_gate(ppu_context* ctx, void (*body)(ppu_context*))
 {
     static thread_local int inner = 0;
     if (inner) return 0;   /* the update itself, called below */
     const uint32_t dt_ea = (uint32_t)ctx->gpr[4];
     const float dt = guest_float(dt_ea);
-    float* acc = tick30_acc((uint32_t)ctx->gpr[3]);
-    *acc += dt;
-    /* the 0.2: a frame a hair under 1/30 s (30 fps with jitter) still takes its step */
-    const int steps = (int)floor(*acc * 30.0f + 0.2f);
-    if (steps <= 0) return 1;   /* not due: this frame's call does nothing */
-    const float pass = (float)steps / 30.0f;
-    *acc -= pass;
-    guest_float_set(dt_ea, pass);
+    const uint32_t frame = guest_u32(kGameFrame);
+    if (frame != g_t30.frame) {   /* the frame's first gated call: the clock advances */
+        if (g_tick30_log && frame - g_t30.frame > 30 && g_t30.frame != 0xFFFFFFFFu)
+            fprintf(stderr, "[tick30] gated calls resume after %u game frames without one\n", frame - g_t30.frame);
+        g_t30.frame = frame;
+        g_t30.acc += dt;
+        /* the 0.2: a frame a hair under 1/30 s (30 fps with jitter) still takes its step */
+        int due = (int)floor(g_t30.acc * 30.0f + 0.2f);
+        if (due < 0) due = 0;
+        g_t30.due = due;
+        g_t30.acc -= (float)due / 30.0f;
+        if (g_tick30_log) {
+            if (!g_t30.frames) g_t30.log_frame0 = frame;
+            g_t30.frames++; g_t30.dt_sum += dt;
+            if (due) g_t30.due_frames++;
+            g_t30.steps += (uint32_t)due;
+            if ((uint32_t)due > g_t30.max_due) g_t30.max_due = (uint32_t)due;
+            if (due > 1) fprintf(stderr, "[tick30] game frame %u: %d steps due at once (dt %.4f)\n", frame, due, dt);
+            if (g_t30.dt_sum >= 5.0) {
+                fprintf(stderr, "[tick30] %.2f s of frame time over %u game frames with gated calls: %u steps "
+                        "(%.2f a second), %u frames stepped, at most %u at once\n",
+                        g_t30.dt_sum, g_t30.frames, g_t30.steps, g_t30.steps / g_t30.dt_sum, g_t30.due_frames, g_t30.max_due);
+                g_t30.frames = g_t30.due_frames = g_t30.steps = g_t30.max_due = 0;
+                g_t30.dt_sum = 0.0;
+            }
+        }
+    }
+    if (g_tick30_log) tick30_log_call((uint32_t)ctx->gpr[3], frame, dt, g_t30.due, body);
+    if (g_t30.due <= 0) return 1;   /* not due: this frame's call does nothing */
+    {   /* an object steps once a game frame, however often it is called in it */
+        static struct { uint32_t obj, frame; } s[64];
+        const uint32_t obj = (uint32_t)ctx->gpr[3];
+        uint32_t i = (obj >> 4) * 2654435761u >> 26, k = 0;
+        while (k < 64 && s[i].obj && s[i].obj != obj) { i = (i + 1) & 63; k++; }
+        if (k == 64) { i = (obj >> 4) * 2654435761u >> 26; s[i].frame = frame - 1; }   /* full: take the slot */
+        if (s[i].obj == obj && s[i].frame == frame) {
+            static int said = 0;
+            if (said++ < 8) fprintf(stderr, "[tick30] %08X called again in game frame %u: not stepped twice\n", obj, frame);
+            return 1;
+        }
+        s[i].obj = obj; s[i].frame = frame;
+    }
+    guest_float_set(dt_ea, (float)g_t30.due / 30.0f);
     inner = 1;
     body(ctx);
     inner = 0;
@@ -187,6 +259,8 @@ extern "C" void dotheroes_configure_patches(void)
     {
         const char* t30 = getenv("DOTHEROES_TICK30");
         g_dotheroes_tick30 = fps != 30 && !(t30 && *t30 == '0');
+        const char* t30log = getenv("DOTHEROES_TICK30_LOG");
+        g_tick30_log = t30log && *t30log == '1';
         fprintf(stderr, "[port] frame-counted boss updates: %s\n", g_dotheroes_tick30 ? "gated to 30 Hz" : "every frame");
     }
     g_dotheroes_fps_nosleep  = fps != 30;

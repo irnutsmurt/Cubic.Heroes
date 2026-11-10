@@ -307,7 +307,10 @@ static void present_guest_frame(void)
  * game's own two-vblank wait gives 20 fps; tests/scripts/speed.drive). It takes
  * fractions (6.944: 144 Hz). The frame rate follows it even with
  * DOTHEROES_FPS=0: the game still waits for each flip, which completes on a
- * tick of this clock.
+ * tick of this clock. DIAG_VBLANK_SCHEDULE=<ms>:<s>[,<ms>:<s>...] changes the
+ * period as the game runs, each for so many seconds, round and round (frame
+ * rate changes in play, for tests: 33.33:6,6.944:6 with DOTHEROES_FPS=60
+ * alternates 30 and 144 fps).
  *
  * DOTHEROES_FPS=display: the clock at a whole number of the display's
  * refreshes, so every frame is shown for the same number of them. At 60 Hz
@@ -375,7 +378,29 @@ static void vblank_clock(void)
         std::chrono::duration<double, std::milli>(ms > 0.0 ? ms : 1000.0 / 60.0));
     auto next = clock::now() + period;
     unsigned ticks = 0;
+    /* DIAG_VBLANK_SCHEDULE */
+    struct { double ms, secs; } sched[16];
+    int nsched = 0, cur = 0;
+    if (const char* s = getenv("DIAG_VBLANK_SCHEDULE")) {
+        while (*s && nsched < 16) {
+            char* end;
+            const double a = strtod(s, &end);
+            if (end == s || *end != ':') break;
+            const double b = strtod(end + 1, &end);
+            if (a > 0.5 && b > 0.0) sched[nsched++] = { a, b };
+            s = *end == ',' ? end + 1 : end;
+            if (end == s && *s) break;
+        }
+    }
+    auto period_now = period;
+    auto sched_until = clock::now();
     for (;;) {
+        if (nsched && clock::now() >= sched_until) {
+            period_now = std::chrono::duration_cast<clock::duration>(std::chrono::duration<double, std::milli>(sched[cur].ms));
+            sched_until = clock::now() + std::chrono::duration_cast<clock::duration>(std::chrono::duration<double>(sched[cur].secs));
+            fprintf(stderr, "[port] vblank schedule: %.3f ms (%.1f Hz) for %.1f s\n", sched[cur].ms, 1000.0 / sched[cur].ms, sched[cur].secs);
+            cur = (cur + 1) % nsched;
+        }
         for (auto now = clock::now(); now < next; now = clock::now()) {
             if (next - now > std::chrono::milliseconds(2))
                 std::this_thread::sleep_for(next - now - std::chrono::milliseconds(1));
@@ -389,8 +414,8 @@ static void vblank_clock(void)
             const uint64_t t = ps3_ft_now();
             ps3_ft_span(PS3_FT_WALKER, 4, ft_cpu(), 0, t, t);
         }
-        next += period;
-        if (clock::now() - next > period * 240) next = clock::now() + period;   /* far behind: resync */
+        next += period_now;
+        if (clock::now() - next > period_now * 240) next = clock::now() + period_now;   /* far behind: resync */
     }
 }
 
