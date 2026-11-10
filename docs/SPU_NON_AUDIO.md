@@ -374,6 +374,29 @@ and the lifted task runs through SPURS [C]. How often that happens is
 occur, each checked as the native collision was (HANDOFF's open problem 3,
 its contact differences, still applies to the native collision as a whole).
 
+**Counted (2026-11-10)** [M]: phys_direct reports what goes through SPURS by kind (the solver's command, the
+collision task's reason), and bullet_cd its unsupported pairs. Across rel13's and rel15's runs (the river, the
+fields, the dungeon, after the dungeon, the menus, the editor, the save list, the boss's exit, normal damage):
+**no collision pair the native code declines** ("unsupported: none") and no solver command declined -- with one
+exception, which was not a pair type but a defect in phys_direct itself:
+
+- **The managers' table filled for good.** phys_direct kept at most four managers, keyed by guest address, and
+  never let one go. The game makes a new pair (collision, solver) for some area loads and frees the old one.
+  From the third pair on, every physics task of the session went through SPURS: rel13's validation run after
+  the dungeon (area 146, its third world) sent 720 tasks and then every task through SPURS, images 4 and 5
+  started lifted 1,093 and 51,170 times, and the waiting thread polled the queues 6.4 million times. An address
+  reused by a manager of the other kind also kept the kind it was first seen with: the "solver task through
+  SPURS: command 371879296" was a collision task seen as a solver's, whose first word is an address. A
+  player would have met this after a few area loads.
+- **Fixed** (port/native/phys_direct.cpp): each lookup reads the manager's task image again (one load) and
+  re-keys an entry whose address now holds the other kind (never one with work out); a full table gives up
+  the least recently used entry with nothing out; eight entries; the report counts managers taken on,
+  re-keyed, evicted, and refusals. rel15: after the dungeon for 420 s, **8 managers taken on, 0 tasks through
+  SPURS** (157,754 native); three river fights with TITLE and CONTINUE between, 6 managers, 0 through SPURS.
+
+Untested: a manager address reused by the other kind (counted, not yet seen), a table full of busy managers
+(the game's protocol never has more than one pair busy).
+
 ## What remains after all five
 
 Kept for FMOD until the audio milestone:

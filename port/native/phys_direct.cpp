@@ -88,7 +88,7 @@ namespace {
 
 constexpr uint32_t kElfCollision = 0xF63600, kElfSolver = 0xF8EC80;
 constexpr int kImageCollision = 4, kImageSolver = 5;   // the runtime's image ids, for the frame trace
-constexpr int kMaxJobs = 64, kMaxManagers = 4;
+constexpr int kMaxJobs = 64, kMaxManagers = 8;
 
 enum : int { kFree = 0, kQueued = 1, kRunning = 2, kDone = 3 };
 
@@ -106,9 +106,25 @@ struct Manager {
     std::atomic<int> native_out{ 0 };   // native jobs issued, not yet taken by a wait
     int lifted_out = 0;                 // lifted tasks issued, their entries not yet popped (the PPU thread's)
     bool described = false;
+    uint64_t used = 0;                  // the last lookup (g_mgr_clock), for eviction
 };
 Manager g_mgr[kMaxManagers];
 int g_nmgr;                             // the PPU thread's
+// The game makes a new pair of managers (collision, solver) for some area loads and frees the old ones,
+// so an address can come back holding the other kind, and the table must not fill for good (2026-11-10:
+// before this, a third pair went entirely through SPURS, and an address reused by the other kind kept
+// the image it was first seen with). The PPU thread's.
+uint64_t g_mgr_clock;
+unsigned long long g_mgr_added, g_mgr_rekeyed, g_mgr_evicted, g_mgr_full, g_mgr_busy_rekey;
+void reset(Manager& g)
+{
+    g.m = 0;
+    g.image = 0;
+    g.native_out.store(0, std::memory_order_relaxed);
+    g.lifted_out = 0;
+    g.described = false;
+    g.used = 0;
+}
 
 std::mutex g_mu;                        // the job table's queued -> running step, and the sleepers
 std::condition_variable g_cv;
@@ -159,16 +175,57 @@ Manager* manager(uint32_t m, bool add)
         fflush(stderr);
         abort();
     }
-    for (int i = 0; i < g_nmgr; i++)
-        if (g_mgr[i].m == m) return &g_mgr[i];
-    if (!add || g_nmgr == kMaxManagers) return nullptr;
+    // the task image the manager at m runs now (its +0x1984), read at every lookup: one load
     const uint32_t elf = vm_read32(m + 0x1984);
-    if (elf != kElfCollision && elf != kElfSolver) return nullptr;
-    Manager& g = g_mgr[g_nmgr];
-    g.m = m;
-    g.image = elf == kElfCollision ? kImageCollision : kImageSolver;
-    g_nmgr++;   // only the PPU thread adds and reads this
-    return &g;
+    const int image = elf == kElfCollision ? kImageCollision : elf == kElfSolver ? kImageSolver : 0;
+    for (int i = 0; i < g_nmgr; i++) {
+        Manager& g = g_mgr[i];
+        if (g.m != m) continue;
+        if (g.image != image) {
+            // another manager at this address since: the entry is the new one's -- unless the old one still
+            // has work out, which a manager the game freed cannot; then leave the address to SPURS and say so
+            if (g.native_out.load(std::memory_order_acquire) || g.lifted_out) {
+                if (!g_mgr_busy_rekey++)
+                    fprintf(stderr, "[phys-direct] manager %08X now runs image %d but has work out as image %d: "
+                            "its tasks go through SPURS\n", m, image, g.image);
+                return nullptr;
+            }
+            g_mgr_rekeyed++;
+            g.image = image;
+            g.described = false;
+            if (!image) {   // no physics manager there any more: the entry freed
+                reset(g);
+                return nullptr;
+            }
+        }
+        g.used = ++g_mgr_clock;
+        return &g;
+    }
+    if (!add || !image) return nullptr;
+    Manager* slot = nullptr;
+    for (int i = 0; i < g_nmgr && !slot; i++)   // a freed entry
+        if (!g_mgr[i].m) slot = &g_mgr[i];
+    if (!slot && g_nmgr < kMaxManagers) slot = &g_mgr[g_nmgr++];   // only the PPU thread adds and reads this
+    if (!slot) {   // full: the least recently used entry with nothing out (it comes back if used again)
+        for (int i = 0; i < g_nmgr; i++) {
+            Manager& c = g_mgr[i];
+            if (c.native_out.load(std::memory_order_acquire) || c.lifted_out) continue;
+            if (!slot || c.used < slot->used) slot = &c;
+        }
+        if (!slot) {
+            if (!g_mgr_full++)
+                fprintf(stderr, "[phys-direct] %d managers with work out at once: manager %08X's tasks go through SPURS\n",
+                        kMaxManagers, m);
+            return nullptr;
+        }
+        g_mgr_evicted++;
+        reset(*slot);
+    }
+    slot->m = m;
+    slot->image = image;
+    slot->used = ++g_mgr_clock;
+    g_mgr_added++;
+    return slot;
 }
 
 // The oldest queued job, now running (nullptr if none). g_mu held.
@@ -302,6 +359,9 @@ void report()
             "through SPURS (%llu queue pops); %llu waits, %.1f ms waiting, %.1f ms of it running jobs\n",
             g_n_native.load(), g_n_by_waiter.load(), g_n_lifted.load(), g_n_hle_pops.load(), g_n_waits.load(),
             g_wait_ns.load() / 1e6, g_ran_ns.load() / 1e6);
+    fprintf(stderr, "[phys-direct] managers: %llu taken on, %llu addresses reused by the other kind, %llu entries "
+            "evicted (idle), %llu issues with the table full of busy managers, %llu reuses with work out\n",
+            g_mgr_added, g_mgr_rekeyed, g_mgr_evicted, g_mgr_full, g_mgr_busy_rekey);
 }
 
 }  // namespace
