@@ -36,7 +36,7 @@ void spu_lockline_unlock(void);
 
 int g_dotheroes_native_inflate = 1;
 int g_dotheroes_native_inflate_check = 0;
-static int s_log_each;
+static int s_log_each, s_crc;
 
 static long s_native, s_fallback, s_checked, s_differ;
 #define COUNT(x) __atomic_add_fetch(&(x), 1, __ATOMIC_RELAXED)
@@ -51,6 +51,10 @@ __attribute__((constructor)) static void edge_inflate_init(void)
     }
     const char* l = getenv("DOTHEROES_INFLATE_LOG");
     s_log_each = l && atoi(l);
+    /* DOTHEROES_INFLATE_CRC=1: each native output's CRC-32, in the line
+     * inflate_direct.cpp logs for the packs it inflates without the task */
+    const char* c = getenv("DOTHEROES_INFLATE_CRC");
+    s_crc = c && atoi(c);
 }
 
 static double now_ms(void)
@@ -128,6 +132,9 @@ int dotheroes_edge_inflate_large(spu_context* ctx)
     }
     if (g_spu_put_hook) g_spu_put_hook(out_ea, out_size);
     memset(&ctx->gpr[3], 0, sizeof ctx->gpr[3]);
+    if (s_crc)
+        fprintf(stderr, "[edge-inflate] crc 0x%08X of %u bytes from %u at 0x%08X (task)\n",
+                dh_crc32(0, vm_base + out_ea, out_size), out_size, in_size, out_ea);
     const long n = COUNT(s_native);
     if (n <= 16 || n % 100 == 0 || s_log_each)
         fprintf(stderr, "[edge-inflate] #%ld native: %u bytes from %u in %.1f ms%s at %.3f s\n", n, out_size,

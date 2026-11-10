@@ -307,3 +307,45 @@ long dh_inflate_raw(const uint8_t* src, size_t src_len, uint8_t* dst, size_t dst
 #undef DROP
 #undef BITS
 }
+
+/* CRC-32 as gzip's trailer has it (reflected, polynomial 0xEDB88320), eight
+ * bytes a step through eight tables built at the first call. */
+static uint32_t s_crc[8][256];
+static int s_crc_state;   /* 0 no tables, 1 one thread building them, 2 built */
+
+static void crc_tables(void)
+{
+    for (unsigned i = 0; i < 256; i++) {
+        uint32_t c = i;
+        for (int k = 0; k < 8; k++) c = (c >> 1) ^ (0xEDB88320u & (0u - (c & 1u)));
+        s_crc[0][i] = c;
+    }
+    for (unsigned i = 0; i < 256; i++)
+        for (int t = 1; t < 8; t++) s_crc[t][i] = (s_crc[t - 1][i] >> 8) ^ s_crc[0][s_crc[t - 1][i] & 0xFFu];
+}
+
+uint32_t dh_crc32(uint32_t crc, const uint8_t* p, size_t n)
+{
+    if (__atomic_load_n(&s_crc_state, __ATOMIC_ACQUIRE) != 2) {
+        int none = 0;
+        if (__atomic_compare_exchange_n(&s_crc_state, &none, 1, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            crc_tables();
+            __atomic_store_n(&s_crc_state, 2, __ATOMIC_RELEASE);
+        } else {
+            while (__atomic_load_n(&s_crc_state, __ATOMIC_ACQUIRE) != 2) { }
+        }
+    }
+    crc = ~crc;
+    while (n && ((uintptr_t)p & 7u)) {
+        crc = s_crc[0][(crc ^ *p++) & 0xFFu] ^ (crc >> 8);
+        n--;
+    }
+    for (; n >= 8; p += 8, n -= 8) {
+        const uint32_t a = crc ^ ((uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24);
+        const uint32_t b = (uint32_t)p[4] | (uint32_t)p[5] << 8 | (uint32_t)p[6] << 16 | (uint32_t)p[7] << 24;
+        crc = s_crc[7][a & 0xFFu] ^ s_crc[6][(a >> 8) & 0xFFu] ^ s_crc[5][(a >> 16) & 0xFFu] ^ s_crc[4][a >> 24] ^
+              s_crc[3][b & 0xFFu] ^ s_crc[2][(b >> 8) & 0xFFu] ^ s_crc[1][(b >> 16) & 0xFFu] ^ s_crc[0][b >> 24];
+    }
+    while (n--) crc = s_crc[0][(crc ^ *p++) & 0xFFu] ^ (crc >> 8);
+    return ~crc;
+}

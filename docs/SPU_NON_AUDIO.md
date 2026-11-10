@@ -206,6 +206,27 @@ waiting (tools/r8_phys.py), against the release before it.
 
 ## 2. Edge zlib's shell (image 3)
 
+**Done (2026-11-10)** [C, M]: the direct path, on by default (port/native/inflate_direct.cpp;
+DOTHEROES_INFLATE_DIRECT=0 keeps SPURS). What the reading found, against the plan below: every map pack
+goes through one function, func_005CF5BC (r3 the .gz image, r4 its size, r5 the output; its only caller
+func_000752A0), which builds **a whole SPURS instance** (1 SPU), a taskset, an event flag, an Edge LF
+queue (16 entries of 32 bytes) and the task for that one pack, pushes **one** request, waits in
+cellSpursEventFlagWait (AND), then frees and finalizes all of it. So one declining entry hook on
+func_005CF5BC replaces the whole of it: the inflate runs in the calling thread (which waited anyway),
+from the gzip header the game walks (FTEXT/FNAME only, as the game's packs all are), into the same
+output; nothing of SPURS is created. Corrections to the plan: no size word (the request carries the
+output size and the stream must fill it); the counter has an error bit (0x80000000), the flag's bit is
+set as it goes from 1 to 0; packs whose output and input are 64 KB or less took the shell's small path,
+lifted, not native (one disc pack does). Declined to the lifted path: anything else in the header,
+odd sizes, memory it cannot use, an output not filled exactly, a CRC mismatch.
+
+Checks: offline, all 167 disc packs (1,950 MB from 463 MB) through the direct path, each CRC-32 equal
+to its trailer (~1.2 GB/s). In the game (rel13, DOTHEROES_INFLATE_CRC=1): river, dungeon, after the
+dungeon, fields -- every pack's CRC, size and address the same as the SPURS path's in the same scene
+("N equal, 0 different", "0 through SPURS"); the SPU census shows image 3 never started; the eight
+scenarios, the reference scenes, sync validation and a normal-damage fight pass. A dungeon pack of
+42-47 MB inflates in 48-66 ms in the calling thread.
+
 **Now** [C, M]:
 - Each area load creates a SPURS taskset, an event flag and a lock-free
   queue, pushes inflate requests, and creates the task.
@@ -264,6 +285,24 @@ PPU side before replacing anything.
 task and context set-up), not frame time.
 
 ## 3. Water (image 1)
+
+**Done (2026-11-10)** [C, M]: native on a worker thread by default (port/native/water_task.cpp;
+DOTHEROES_NATIVE_WATER=0 keeps the SPU task, =check runs both and compares). What the reading found:
+the PPU (func_003C7460) signals the task **once a simulation step** (22.8 a second in the river), not
+every frame, through func_00473668 (cellSpursEventFlagSet(block + 0x3D400, 1)); the task GETs a 24-byte
+block (two 128 x 128 float height layers in main memory, the normal map's texture in RSX local memory,
+the width, the layer index, damping, scale), steps the heights
+(cur = ((left + right + up + down) * 0.5 - cur) * damping, rows wrapping) and writes the normal map
+(x, y from the slopes, normalized with the SPU's estimates, 0x00RRGGBB). Its four atomic sites are
+the libspurs event-flag wait, not water data; the "mailbox calls" an spu_printf error path. The game's
+own DMA order leaves the last row's "down" neighbour as row W-8, not row 0; the native code keeps it.
+A declining hook on func_00473668 runs the step natively (the quit is declined to the lifted task).
+
+Checks: offline against the lifted functions on synthetic inputs (tests/native/water_task_check.cpp,
+widths 4-408, edge values, 300 evolution steps); in the game, check mode over two river fights: 705 and
+2,489 steps compared, heights and texture **all equal**. Native: 22.8 steps a second, 0.78 ms each on
+its worker thread. The census: image 1 still starts once (the task parks in its wait; the instance is
+created by the game's set-up, which is not hooked).
 
 **Now** [C, M]:
 - A persistent SPURS task, its own instance "Water" (1 SPU), resumed from

@@ -43,6 +43,7 @@ per-thread work reported apart. An average of 144 is not 144 sustained.
 | **The store fixes (ps3recomp 0125, 0133)** | **built, validated, free**: memtest 695/695; the line-crossing test folded into the reservation bitmap, rel10b as fast as the play build (section 9.8) |
 | **The recorder's step 1** | **done**: no lock on the producer's path, other threads handed over; the fields +2.5% (section 8.4) |
 | **The player's install** | **all stages pass** on the newest lift (gen8), the installed game's river fight included (section 9.8) |
+| **The inflate and the water** | **native, the default** (rel13): the inflate's direct path replaces each map pack's whole SPURS instance (every pack's CRC as before); the water's step equal to the SPU task's over 3,194 checked steps; river 204.1-208.8 fps against rel11's 202.2-202.3 (docs/SPU_NON_AUDIO.md sections 2-3) |
 | What is left | section 9 -- one decision for the owner there (the reservation test) |
 
 ## 1. Inventory: what runs, and what is on the critical path [M, C]

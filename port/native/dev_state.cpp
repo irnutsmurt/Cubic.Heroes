@@ -104,6 +104,8 @@ extern "C" uint8_t* vm_base;
 // its renderer has finished what it was given (ppfx_recorder.cpp).
 extern "C" { void (*g_dotheroes_stop_hook)(void) = nullptr; }
 extern "C" void phys_direct_report(void);
+extern "C" void inflate_direct_report(void);
+extern "C" void water_task_report(void);
 
 namespace {
 
@@ -567,6 +569,8 @@ void stop_loop()
         rsx_vulkan_cache_save();   // the shader cache's pipelines (a no-op without one)
         if (g_dotheroes_stop_hook) g_dotheroes_stop_hook();
         phys_direct_report();   // phys_direct.cpp: its counts (atexit does not run past TerminateProcess)
+        inflate_direct_report();   // inflate_direct.cpp: the same for the map packs
+        water_task_report();       // water_task.cpp: the water's steps (with DOTHEROES_NATIVE_WATER)
         fflush(stdout);
         fflush(stderr);
 #ifdef _WIN32

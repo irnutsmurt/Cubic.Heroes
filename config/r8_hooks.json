@@ -28,6 +28,20 @@
    "guard": "g_dotheroes_tick30",
    "decline": true,
    "note": "The update of the segmented boss's head (vtable 0x00FE4690 slot 8): it ignores the frame time and advances its object by a constant 1/30 s a call (the only update in the game that does), so above 30 fps it ran fast, and the body segments, which read positions from a trail the head fills, ran after it. The gate calls it at 30 Hz (port/game_patches.cpp)."
+  },
+  {
+   "addr": "0x005CF5BC",
+   "host": "dotheroes_inflate_direct",
+   "guard": "g_dotheroes_inflate_direct",
+   "decline": true,
+   "note": "The game's inflate of one map pack (.gz image r3, size r4, output r5), each through a SPURS instance, taskset, event flag, Edge LF queue and task of its own (func_005CF228). Done in the calling thread by port/native/inflate_direct.cpp; anything it does not recognise is declined to the lifted SPURS path."
+  },
+  {
+   "addr": "0x00473668",
+   "host": "dotheroes_water_signal",
+   "guard": "g_water_hook",
+   "decline": true,
+   "note": "The water's signal to its SPU task, cellSpursEventFlagSet(r3 + 0x3D400, r4): bit 0 once a simulation step (func_003C7460), bit 1 at shutdown (func_003C7AF4). With DOTHEROES_NATIVE_WATER=1 or sync the step is done natively (port/native/water_task.cpp); the quit and any other block are declined. Off by default; =check compares the lifted task's result with the native one."
   }
  ]
 }
