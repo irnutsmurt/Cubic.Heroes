@@ -25,6 +25,11 @@ enum {
  * gets the input bytes the stream took, up to the end of its final block. */
 long dh_inflate_raw(const uint8_t* src, size_t src_len, uint8_t* dst, size_t dst_cap, size_t* src_used);
 
+/* CRC-32 as a gzip trailer holds it, continued from crc (0 to start): the
+ * check of an inflated pack against its .gz (inflate_direct.cpp,
+ * DOTHEROES_INFLATE_CRC). */
+uint32_t dh_crc32(uint32_t crc, const uint8_t* p, size_t n);
+
 #ifdef __cplusplus
 }
 #endif

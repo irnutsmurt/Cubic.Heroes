@@ -281,7 +281,7 @@
    ],
    "area": 82,
    "secs": 150,
-   "notes": "RPCS3's copy was read about 14 s into the dialogue, ours is dumped at 10 s: the king's gesture can differ. RPCS3's final display buffer was the other one (not read). The shadow map's first 512 rows in RPCS3's copy are stale memory.",
+   "notes": "RPCS3's copy was read about 14 s into the dialogue, ours is dumped at 10 s: the king's gesture can differ. RPCS3's final display buffer was the other one (not read). The shadow map's first 512 rows in RPCS3's copy are stale memory. The king's gesture: the combined buffer's and the reflection's averages follow his pose at the dump (2026-11-10: rel13's run caught his arm raised, 0.0039 combined, 0.67 reflection; rel11's lowered, within). Those are advisory; the bright pass, bloom chain, glare, star, the shadow map's share within two depth steps and the negative-component counts stay checked (its mean follows the pose too: 4.5e-6).",
    "targets": [
     {
      "name": "combined",
@@ -407,7 +407,17 @@
      "within_2steps_pct": 100.0
     }
    },
-   "accepted_from": "rel8r"
+   "accepted_from": "rel8r",
+   "advisory": {
+    "combined": [
+     "mean",
+     "far_pct"
+    ],
+    "refl": "*",
+    "shadow": [
+     "mean"
+    ]
+   }
   },
   "editor": {
    "about": "the dot editor's block grid, three blocks placed: its lines (LINES, LINE_STRIP, width 1), which the native renderer skipped before 2026-11-09",

@@ -33,6 +33,7 @@
  * table. It comes first: everything below is written against that struct. */
 #include "diag/diag.h"
 #include "native/bullet_cd_task.h"
+#include "native/water_task.h"
 #include "native/memtest.h"
 #include "ps3emu/ps3_strict.h"
 #include "ps3emu/ps3_ftrace.h"
@@ -841,6 +842,7 @@ int main(int argc, char** argv)
     diag_start_watchdog();
     dotheroes_configure_patches();   /* game_patches.cpp: DOTHEROES_FPS etc. */
     dotheroes_native_init();         /* native/bullet_cd_task.cpp: DOTHEROES_NATIVE_CD */
+    water_task_init();               /* native/water_task.cpp: DOTHEROES_NATIVE_WATER */
 #if defined(PS3RECOMP_SPU_INTERPRETER) && !PS3RECOMP_SPU_INTERPRETER
     /* DOTHEROES_R8_INTERP_TEST=1 (R8, docs/NATIVE_R8.md): ask for the SPU
      * interpreter this build does not have, as SPU code with no lift would --
