@@ -141,7 +141,33 @@ cellAudio's ring and notify, the host backend. The downmix is reviewed
 separately: the console's rule for 7.1 to stereo against ours, as a
 behaviour change of its own.
 
-Status: section 1 mapped (2026-11-10). A0: the counters done, the captures not yet (below). A1 in progress.
+Status: section 1 mapped (2026-11-10). A0: the counters done, the captures not yet (below). A1: ported and
+checked in the game; off by default until the validation scenes run with it on (below).
+
+### A1, codec_raw (2026-11-10) [C, M]
+
+What it is [C, port/native/fmod_codec_raw.h]: not a decoder. `read` GETs raw bytes from main memory into its
+file's 256-byte buffer and copies them on; 16-bit samples are byte-swapped unless a flag says not to; an
+optional key decrypts (bit reversal and XOR). `setposition` seeks (bytes, or position x rate / divisor,
+rounded down to the block). Reads from 0xC0000000-0xCF8FFFFF are paced: once over 1 ms has built up
+between reads, it spins 17,500 decrementer reads. The mixer loads it (link address 0x80, at LS 0x156F0) and
+calls `read` (link 0x490) and `setposition` (0x3D0) through its codec object.
+
+- **The port**: a lane-exact transcription (fmod_codec_raw.cpp); offline (tests/native/fmod_codec_raw_check.cpp,
+  the lifted overlay run relocated as the game does): 5,169 calls equal at x86-64-v3 and v2, 44,077 more at
+  v3 -- every local-store byte, channel operation and kept register, halts at the same PC.
+- **In the game**: the runtime calls a native replacement for a relocatable overlay's function when the
+  port registers one (ps3recomp 0136, `spu_overlay_set_native`, on the indirect branch into a verified
+  resident overlay); port/native/fmod_codec_native.cpp registers codec_raw's three entries.
+  DOTHEROES_NATIVE_FMOD_CODEC=1 runs them natively, =check runs the native call on a copy of the local
+  store and registers, then the lifted one, and compares.
+- **Check** (rel17c, the river fight and the menus' music): **172,958 and 267,484 calls, all equal** apart
+  from the read pacing's clock (the milliseconds and the last decrementer it keeps at delta + 0x2F10 and
+  0x2F20, from the host's time, read at another moment by each run: compared apart; 56k and 87k calls).
+  Before that was known, the check counted those calls as different (rel17).
+- **Native** (rel17): 171,274 and 266,882 calls, none declined, no halt; the mixer's work a block 128.7 us
+  in the river against 125.3 us lifted -- no gain to speak of (it copies memory), and none expected: A1 is
+  a step to A3 (the mixer), which needs its plugins native.
 
 ### A0, the counters (2026-11-10, rel16) [M]
 
