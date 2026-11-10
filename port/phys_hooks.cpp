@@ -297,7 +297,14 @@ extern "C" int dotheroes_spurs_create_task(ppu_context* ctx)
 }
 extern "C" int dotheroes_spurs_wait_task(ppu_context* ctx)
 {
-    if ((uint32_t)ctx->gpr[3] != waver_task::kNativeBlock) return 0;
+    const uint32_t b = (uint32_t)ctx->gpr[3];
+    if (b != waver_task::kNativeBlock) {
+        if (waver_checking() && b) {   // check mode: the block as the game left it before this wait
+            const uint32_t W = g_rd32(waver_task::kStateSlot);
+            if (b == g_rd32(W + 0x5C)) waver_check_wait(W);
+        }
+        return 0;
+    }
     waver_native_wait();
     ctx->gpr[3] = 0;
     return 1;

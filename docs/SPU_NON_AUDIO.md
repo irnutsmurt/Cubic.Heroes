@@ -28,7 +28,7 @@ Sources:
 | Bullet solver, commands 1 and 2 (5) | spu_0004 | **lifted**, run through SPURS: phys_direct declines them [C] | **yes**, in heavy-debris frames: the game thread waits for each command [M, section 6.1] |
 | Edge zlib's shell (3) | spu_0002 | native inflate inside the lifted task; the task's SPURS shell, its queue and its completion lifted [C] | in area loads (load time), not in frames [M, HANDOFF] |
 | Water (1) | spu_0000 | **fully lifted**, a persistent SPURS task signalled every frame [C] | no: 9.4% of one pool thread in the river, 0 in the fields [M, section 1] |
-| Waver (2) | spu_0001 | lifted, registered, **never dispatched in any run so far** [M] | -- |
+| Waver (2) | spu_0001 | **native by default** (2026-11-10): reachable from the hero's update; ported bit-exact, checked offline and in the game (section 4) | -- |
 | Bullet collision, pairs the native code does not cover (4) | spu_0003 | lifted, declined to SPURS by phys_direct [C] | how often: **not measured** |
 | Bullet collision (covered pairs), solver commands 4-6 | -- | native, issued and completed directly (section 6.1) | done |
 
@@ -206,6 +206,27 @@ waiting (tools/r8_phys.py), against the release before it.
 
 ## 2. Edge zlib's shell (image 3)
 
+**Done (2026-11-10)** [C, M]: the direct path, on by default (port/native/inflate_direct.cpp;
+DOTHEROES_INFLATE_DIRECT=0 keeps SPURS). What the reading found, against the plan below: every map pack
+goes through one function, func_005CF5BC (r3 the .gz image, r4 its size, r5 the output; its only caller
+func_000752A0), which builds **a whole SPURS instance** (1 SPU), a taskset, an event flag, an Edge LF
+queue (16 entries of 32 bytes) and the task for that one pack, pushes **one** request, waits in
+cellSpursEventFlagWait (AND), then frees and finalizes all of it. So one declining entry hook on
+func_005CF5BC replaces the whole of it: the inflate runs in the calling thread (which waited anyway),
+from the gzip header the game walks (FTEXT/FNAME only, as the game's packs all are), into the same
+output; nothing of SPURS is created. Corrections to the plan: no size word (the request carries the
+output size and the stream must fill it); the counter has an error bit (0x80000000), the flag's bit is
+set as it goes from 1 to 0; packs whose output and input are 64 KB or less took the shell's small path,
+lifted, not native (one disc pack does). Declined to the lifted path: anything else in the header,
+odd sizes, memory it cannot use, an output not filled exactly, a CRC mismatch.
+
+Checks: offline, all 167 disc packs (1,950 MB from 463 MB) through the direct path, each CRC-32 equal
+to its trailer (~1.2 GB/s). In the game (rel13, DOTHEROES_INFLATE_CRC=1): river, dungeon, after the
+dungeon, fields -- every pack's CRC, size and address the same as the SPURS path's in the same scene
+("N equal, 0 different", "0 through SPURS"); the SPU census shows image 3 never started; the eight
+scenarios, the reference scenes, sync validation and a normal-damage fight pass. A dungeon pack of
+42-47 MB inflates in 48-66 ms in the calling thread.
+
 **Now** [C, M]:
 - Each area load creates a SPURS taskset, an event flag and a lock-free
   queue, pushes inflate requests, and creates the task.
@@ -265,6 +286,45 @@ task and context set-up), not frame time.
 
 ## 3. Water (image 1)
 
+**Done (2026-11-10)** [C, M]: native on a worker thread by default (port/native/water_task.cpp;
+DOTHEROES_NATIVE_WATER=0 keeps the SPU task, =check runs both and compares). What the reading found:
+the PPU (func_003C7460) signals the task **once a simulation step** (22.8 a second in the river), not
+every frame, through func_00473668 (cellSpursEventFlagSet(block + 0x3D400, 1)); the task GETs a 24-byte
+block (two 128 x 128 float height layers in main memory, the normal map's texture in RSX local memory,
+the width, the layer index, damping, scale), steps the heights
+(cur = ((left + right + up + down) * 0.5 - cur) * damping, rows wrapping) and writes the normal map
+(x, y from the slopes, normalized with the SPU's estimates, 0x00RRGGBB). Its four atomic sites are
+the libspurs event-flag wait, not water data; the "mailbox calls" an spu_printf error path. The game's
+own DMA order leaves the last row's "down" neighbour as row W-8, not row 0; the native code keeps it.
+A declining hook on func_00473668 runs the step natively (the quit is declined to the lifted task).
+
+Checks: offline against the lifted functions on synthetic inputs (tests/native/water_task_check.cpp,
+widths 4-408, edge values, 300 evolution steps); in the game, check mode over two river fights: 705 and
+2,489 steps compared, heights and texture **all equal**. Native: 22.8 steps a second, 0.78 ms each on
+its worker thread. The census: image 1 still starts once (the task parks in its wait; the instance is
+created by the game's set-up, which is not hooked).
+
+**The start-up and the idle wait, native too (2026-11-10)** [C, M]: the water's set-up (func_003C7BA8, reached
+from func_000221DC through the TOC stub func_009810A8) built a SPURS instance "Water", a taskset, a 0x3D600-byte
+block, an event flag and the persistent task that parked in its wait; the shutdown (func_003C7AF4) set the quit
+bit, waited for the exit code and tore it all down. Both are now the port's (port/phys_hooks.cpp,
+water_task.h): the set-up does the game's own stores and its two texture calls in the game's frame and puts
+markers (0xFFFFF001-3) where the instance, taskset and block went -- the update (func_003C7460) only tests the
+taskset for non-zero and passes the block to the signal, and nothing else in the lift reads them -- and the
+shutdown waits for the worker's step, then clears the globals as the game's does. DOTHEROES_NATIVE_WATER=0 or
+check, a capture, or DOTHEROES_WATER_SPURS=1 keep the game's set-up.
+- **When they run** (DOTHEROES_WATER_LOG=1, tests/scenarios/river_water.drive): the set-up once, at boot (0.1 s);
+  the water is the game's for the whole session -- TITLE and CONTINUE does not shut it down; the shutdown only in
+  the game's own exit path (the drive's new `quit`: the game asked to exit as closing the window asks it).
+- **Pause, reload, shutdown** (rel15/rel16, the drive with native scheduling and with the SPURS set-up): the same
+  gaps in the signals both ways -- 11.5 s over each 10 s pause, 24.7 s over TITLE and CONTINUE, 2.3 s over
+  each area change -- and the same rate between; at the quit, "shutdown #1, native" after its last step, and
+  the game's SPURS shutdown with the hook declining.
+- **The census** (SPURS starts; FMOD's own lv2 SPU thread is not in it): with native scheduling **no SPU program starts through SPURS** in the river, the menus, the dungeon, after
+  the dungeon, the boss's exit; with the SPURS set-up image 1 starts once, as before.
+- The check mode, the hooks present: 2,495 river steps compared, all equal. rel15's validation scenes and the
+  reference scenes pass.
+
 **Now** [C, M]:
 - A persistent SPURS task, its own instance "Water" (1 SPU), resumed from
   its signal wait each frame by cellSpursEventFlagSet.
@@ -321,8 +381,53 @@ Registered, never dispatched in any run [M]. Only the start of the game has
 been played under test: nothing past the castle area, plus the owner's
 sessions. So "never" means never yet.
 
-**Step**: count its dispatches in the report and say so on stderr the first
-time, so that a run reaching it shows it. Nothing to replace until then.
+**Traced, reachable, replaced (2026-11-10)** [C, M].
+
+*What triggers it* [C, the lift and the ELF]: the waver's three entry points are reached only through 16-byte
+TOC stubs (`std r2,0x28(r1); addis/addi r2; b`), which is why no descriptor or direct call named them:
+- the set-up func_003CEB48 from func_0018B708 (stub func_009842F8), which centres it on the hero (the player's
+  +0x428/+0x430, through func_00983238) and plays sound 0x55;
+- func_0018B708 from func_0011E1A8 at 0x0011E5B4, a sub-state machine run from the hero's update
+  (func_0012476C): in its state 2 (+0x500), once a timer (+0x6FC) runs out, kind 0x11 (+0x5E8) looks an object
+  up (func_00983498) and starts the waver on it; kinds 0x0F, 0x10 and 0x12 take other branches (sounds 0x51,
+  0x57). Which game action sets kind 0x11 is **not established** (+0x5E8 has over a hundred writers in the lift).
+- each frame while it runs (+0 of its state W = 0x02AB2200 set), the frame function func_000810F8 calls its
+  update func_003CEEE8 (stub func_00982788); the update tears it down after its duration (about 5 s, ~300
+  frames); its shutdown func_003CEAC0 is also called by the effects' resets (func_003B64A8, func_003B72D4,
+  func_003B7358).
+
+*What it is* [C, port/native/waver_task.h]: an expanding ripple at the hero, one SPURS task **a frame**: the
+update writes the parameters, waits for the previous frame's task and creates the next, the game thread
+waiting on it. The task GETs a 0x10224-byte block (a 256 x 256 distance map, a 128-entry wave table, phase,
+radius, frequency, amplitude, slope), writes a 256 x 256 float height field, reads it back and writes its
+normal map into one of two 256 x 256 textures (alternating). No atomics, mailbox or event flag (the flag the
+set-up makes is never read).
+
+*Test case*: DOTHEROES_DEV_WAVER=<s>[,...] (port/phys_hooks.cpp, a test switch through an entry hook on the
+frame function) starts it at the hero's position at those times, exactly as func_0018B708 does, through the
+game's own set-up -- the natural trigger aside.
+
+*Native* (port/native/waver_task.cpp, waver_game.cpp; DOTHEROES_NATIVE_WAVER=0 the SPU task, =check both):
+the set-up's own stores and texture calls with markers (0xFFFFF011-3) for its SPURS objects; the shared SPURS
+wrappers (create, wait, free, destroy, finalize) act on the markers only, so a frame runs on a worker thread of
+its own, the game's wait waits for it, the teardown does nothing; anything else goes to the game's code.
+- Offline (tests/native/waver_task_check.cpp, the lifted image run whole): 249 of 249 runs equal byte for byte
+  and in transfer order, at x86-64-v3 and v2, 1,649 more at v3; seven deliberate mutations of the port all
+  caught.
+- In the game, check mode, the fields and the river, 2 starts each: 1,183 frames compared, **the height field
+  equal in all**, the texture in all but 8 -- the first and last frame of each start. The check then also
+  ran the native frame on the block as it was when the game came to wait, and compared both textures
+  (rel17, 4 starts, 1,204 frames): the first frame of a start equals the native frame on the block at the
+  wait (the task read it late: the game rewrites the select word right after the creation), or the one on
+  the creation's block with the other texture; **the last frame of each start equals neither** -- the game
+  writes the next frame's values before it waits, and the task, reading the block while they are being
+  written, gets some of each (field values unchanged, the select or the slope new): a read the two copies
+  cannot reproduce. All are the game's own races on the block; the native frame reads it as the task does,
+  at its start.
+- Native: 4 starts, ~300 frames each, 2.7 ms a frame on its own thread; the frame function (the game thread)
+  0.024-0.028 ms a frame with it running (0.016 ms with the SPU task; the first frame's two tasks back to back
+  waited 3.3 ms once); no SPU program started through SPURS.
+- Untested: the natural trigger (kind 0x11); the effects' resets stopping it midway.
 
 ## 5. Bullet collision: the pairs the native code does not cover (image 4)
 
@@ -334,6 +439,29 @@ and the lifted task runs through SPURS [C]. How often that happens is
 (DOTHEROES_PHYS_STATS). Extend the native narrowphase only for pairs that
 occur, each checked as the native collision was (HANDOFF's open problem 3,
 its contact differences, still applies to the native collision as a whole).
+
+**Counted (2026-11-10)** [M]: phys_direct reports what goes through SPURS by kind (the solver's command, the
+collision task's reason), and bullet_cd its unsupported pairs. Across rel13's and rel15's runs (the river, the
+fields, the dungeon, after the dungeon, the menus, the editor, the save list, the boss's exit, normal damage):
+**no collision pair the native code declines** ("unsupported: none") and no solver command declined -- with one
+exception, which was not a pair type but a defect in phys_direct itself:
+
+- **The managers' table filled for good.** phys_direct kept at most four managers, keyed by guest address, and
+  never let one go. The game makes a new pair (collision, solver) for some area loads and frees the old one.
+  From the third pair on, every physics task of the session went through SPURS: rel13's validation run after
+  the dungeon (area 146, its third world) sent 720 tasks and then every task through SPURS, images 4 and 5
+  started lifted 1,093 and 51,170 times, and the waiting thread polled the queues 6.4 million times. An address
+  reused by a manager of the other kind also kept the kind it was first seen with: the "solver task through
+  SPURS: command 371879296" was a collision task seen as a solver's, whose first word is an address. A
+  player would have met this after a few area loads.
+- **Fixed** (port/native/phys_direct.cpp): each lookup reads the manager's task image again (one load) and
+  re-keys an entry whose address now holds the other kind (never one with work out); a full table gives up
+  the least recently used entry with nothing out; eight entries; the report counts managers taken on,
+  re-keyed, evicted, and refusals. rel15: after the dungeon for 420 s, **8 managers taken on, 0 tasks through
+  SPURS** (157,754 native); three river fights with TITLE and CONTINUE between, 6 managers, 0 through SPURS.
+
+Untested: a manager address reused by the other kind (counted, not yet seen), a table full of busy managers
+(the game's protocol never has more than one pair busy).
 
 ## What remains after all five
 
