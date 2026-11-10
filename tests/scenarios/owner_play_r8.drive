@@ -1,4 +1,4 @@
-# A play session for the owner on R8's release (docs/NATIVE_R8.md: build/r8/rel8t -- rel8b's tree with the RPCS3
+# A play session for the owner on R8's release (docs/NATIVE_R8.md: build/r8/rel8u -- rel8b's tree with the RPCS3
 # comparison's fixes, sections 9.3-9.5: the fragment programs' precision (ps3recomp 0128, 0130: the first
 # dungeon's hero no longer sparkles), the depth clamp the game enables and the 24-bit depth surfaces it needs
 # (the castle floor's reflection), its R5G6B5 target at 16 bits and NVIDIA's depth-bias unit;
@@ -23,7 +23,7 @@
 # saves. Close the window when done. If a scene looks wrong, the session can be
 # started with DOTHEROES_PPFX_DEPTH_CLAMP=0 or DOTHEROES_PPFX_DEPTH_D32=1 in the
 # environment to compare (the depth as before).
-#! env BIN=build/r8/rel8t/dotheroes.exe GAMEDATA=build/play-route/gamedata RUNS_IN=build/sessions KEEP_RUNS=1000 PREEMPT_TESTS=1
+#! env BIN=build/r8/rel8u/dotheroes.exe GAMEDATA=build/play-route/gamedata RUNS_IN=build/sessions KEEP_RUNS=1000 PREEMPT_TESTS=1
 #! env DOTHEROES_PPFX_NATIVE=1 DOTHEROES_NATIVE_CD=1 DOTHEROES_NATIVE_SOLVER=4,5,6 GCM_WRAP_LAP=1 DOTHEROES_PRESENT_ONCE=1
 #! env DOTHEROES_BENCH=1 PS3RECOMP_VK_PRESENT_MODE=fifo DOTHEROES_FPS=0 DOTHEROES_DEV_CANT_DIE=0 PS3_SAVEDATA_PICKER=1
 #! env WINDOW=1 PS3RECOMP_VK_FULLSCREEN=1 AUDIO=1 PS3_OSD_FPS=2 DUMP=0 SHOT_EVERY=0 PS3_VERBOSE=0

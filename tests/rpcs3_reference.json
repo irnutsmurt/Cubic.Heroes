@@ -11,7 +11,7 @@
    ],
    "area": 37,
    "secs": 150,
-   "notes": "enemies move: the frame and combined buffer differ where they stand; the sparkle's measure is no negative component in ours and the bright pass's spread The reflection's mean varies with the lamps and the enemies: 0.38-1.60 in three runs of one build (bt8, 2026-11-09), 0.39-1.07 in two of rel8t; its tolerance is 2.5 times the accepted figure.",
+   "notes": "enemies move: the frame and combined buffer differ where they stand; the sparkle's measure is no negative component in ours and the bright pass's spread The reflection's mean varies with the lamps and the enemies: 0.38-1.60 in three runs of one build (bt8, 2026-11-09), 0.39-1.07 in two of rel8t; its tolerance is 2.5 times the accepted figure. The room's enemies move: where they stand decides the combined buffer's, the reflection's and the frame's averages (2026-11-10: one run of rel11 0.0755 combined, 4.26 frame, the next 0.0122 and within). Those are advisory here; the scene's own measures -- no negative component in ours, the bright pass and the glare as empty as RPCS3's -- are checked.",
    "targets": [
     {
      "name": "combined",
@@ -107,6 +107,14 @@
    "accepted_from": "rel8r",
    "tolerance": {
     "refl": 2.5
+   },
+   "advisory": {
+    "combined": [
+     "mean",
+     "far_pct"
+    ],
+    "refl": "*",
+    "final": "*"
    }
   },
   "entry_hall": {

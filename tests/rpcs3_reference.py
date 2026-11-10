@@ -171,7 +171,8 @@ def check(scene, dump, quiet=False):
         if not a:
             continue
         for key, val in r.items():
-            if key not in a or key.startswith("neg_rpcs3"):
+            adv = m.get("advisory", {}).get(name)   # a scene's measures that vary run to run with what moves in it
+            if key not in a or key.startswith("neg_rpcs3") or adv == "*" or (isinstance(adv, list) and key in adv):
                 continue
             ref = a[key]
             vals = val if isinstance(val, list) else [val]
