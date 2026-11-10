@@ -1,0 +1,147 @@
+From c3a0859edf6b7c357d4e62c99809b3c955954f49 Mon Sep 17 00:00:00 2001
+From: giteaguy <73799093+irnutsmurt@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 10:22:13 -0800
+Subject: [PATCH] SPU threads: receive-event counts and times; overlay loads by
+ image
+
+The audio milestone's evidence (the port's docs/AUDIO.md, step A0): per lv2 SPU
+thread, the events its receive service delivered (by spuq number), the time it
+waited for them and the time it ran between them -- an SPU mixer's work a block
+(lv2_spu_thread_report); and every registered overlay's loads into local store,
+by image, where the [spu-ovl] lines stop at 64 (spu_overlay_report).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ runtime/spu/spu_channels.c      | 19 +++++++++++++
+ runtime/syscalls/lv2_register.c | 49 +++++++++++++++++++++++++++++++++
+ 2 files changed, 68 insertions(+)
+
+diff --git a/runtime/spu/spu_channels.c b/runtime/spu/spu_channels.c
+index 363557d..e02aa23 100644
+--- a/runtime/spu/spu_channels.c
++++ b/runtime/spu/spu_channels.c
+@@ -2191,6 +2191,23 @@ void spu_lockguard_check(spu_context* ctx, uint32_t ea, const uint8_t* src, uint
+                 ea, size, os, on, ns, nn); }
+ }
+ 
++/* Overlay loads by image (docs/AUDIO.md step A0): every time a registered
++ * overlay becomes resident, relocatable or streamed -- the counts the capped
++ * [spu-ovl] lines cannot give. */
++static uint64_t s_ovl_loads[64];
++void spu_overlay_report(FILE* f)
++{
++    char s[512] = "";
++    for (int i = 0; i < 64; i++) {
++        const uint64_t n = __atomic_load_n(&s_ovl_loads[i], __ATOMIC_RELAXED);
++        if (!n) continue;
++        char one[40];
++        snprintf(one, sizeof one, "%s image %d: %llu", s[0] ? "," : "", i, (unsigned long long)n);
++        strncat(s, one, sizeof s - strlen(s) - 1);
++    }
++    fprintf(f, "[spu-ovl] overlay loads by image:%s\n", s[0] ? s : " none");
++}
++
+ void spu_overlay_note_get(spu_context* ctx, uint32_t ea, const uint8_t* ls, uint32_t size)
+ {
+     uint32_t lsa = (uint32_t)(ls - ctx->ls);
+@@ -2242,6 +2259,7 @@ void spu_overlay_note_get(spu_context* ctx, uint32_t ea, const uint8_t* ls, uint
+                     ctx->resident_code[slot].source_index = i;
+                     ctx->resident_code[slot].reloc = o->reloc;
+                     ctx->resident_code[slot].reloc_delta = o->reloc ? lsa - o->load_lsa : 0;
++                    if (o->image_id >= 0 && o->image_id < 64) __atomic_fetch_add(&s_ovl_loads[o->image_id], 1, __ATOMIC_RELAXED);
+                     { static int _n = 0; if (o->reloc && PS3_LOG_FIRST(_n, 64))
+                         fprintf(stderr, "[spu-ovl] img=%d relocatable image %d src=0x%08X -> LS 0x%05X "
+                                 "(link 0x%05X, delta 0x%05X)\n", ctx->image_id, o->image_id, ea, lsa,
+@@ -2254,6 +2272,7 @@ void spu_overlay_note_get(spu_context* ctx, uint32_t ea, const uint8_t* ls, uint
+             }
+             if (ctx->resident_ovl != o->image_id) {
+                 ctx->resident_ovl = o->image_id;
++                if (o->image_id >= 0 && o->image_id < 64) __atomic_fetch_add(&s_ovl_loads[o->image_id], 1, __ATOMIC_RELAXED);
+                 { static int _n = 0; if (PS3_LOG_FIRST(_n, 32))
+                     fprintf(stderr, "[spu-ovl] img=%d streamed overlay src=0x%08X "
+                             "-> LS 0x%05X size=%u -> resident ovl image %d%s\n",
+diff --git a/runtime/syscalls/lv2_register.c b/runtime/syscalls/lv2_register.c
+index 98ae611..e94d23d 100644
+--- a/runtime/syscalls/lv2_register.c
++++ b/runtime/syscalls/lv2_register.c
+@@ -345,6 +345,13 @@ typedef struct {
+      * 0x110/0x111), keyed by the number the SPU names. lv2 allows 32. */
+     struct { uint32_t num; uint32_t queue; } spuq_bind[32];
+     int                 spuq_bind_n;
++    /* The receive-event service's counts (lv2_spu_stop_service; the audio
++     * milestone's evidence, docs/AUDIO.md step A0): events received, by spuq
++     * number (the first four seen), the time blocked waiting for them, and the
++     * time the thread ran between one event's return and its next receive (an
++     * SPU mixer's work a block). The thread's own; read at the report. */
++    uint64_t            rcv_n, rcv_wait_ns, rcv_work_ns, rcv_work_max_ns, rcv_last_ns;
++    uint32_t            rcv_num[4], rcv_num_n[4];
+ } spu_thread_t;
+ 
+ typedef struct {
+@@ -2502,6 +2509,15 @@ static int64_t sys_spu_thread_unbind_queue_handler(ppu_context* ctx)
+  * to the inbound mailbox: {CELL_OK, data1, data2, data3}, or one error word
+  * (EBUSY: mailbox not empty / nothing queued for a try; EINVAL: number not
+  * bound). Semantics follow RPCS3 sys_spu.cpp / SPUThread.cpp. */
++static uint64_t rcv_now_ns(void)
++{
++    static LARGE_INTEGER f;
++    LARGE_INTEGER c;
++    if (!f.QuadPart) QueryPerformanceFrequency(&f);
++    QueryPerformanceCounter(&c);
++    return (uint64_t)((double)c.QuadPart * 1e9 / (double)f.QuadPart);
++}
++
+ static int lv2_spu_stop_service(spu_context* ctx)
+ {
+     const uint32_t code = ctx->stop_code;
+@@ -2535,7 +2551,20 @@ static int lv2_spu_stop_service(spu_context* ctx)
+         return 1;
+     }
+     sys_event_t ev;
++    const uint64_t t0 = rcv_now_ns();
++    if (t->rcv_last_ns) {
++        const uint64_t w = t0 - t->rcv_last_ns;
++        t->rcv_work_ns += w;
++        if (w > t->rcv_work_max_ns) t->rcv_work_max_ns = w;
++    }
+     int rc = sys_event_queue_pop_host(q, &ev, code == 0x110u, &ctx->stop_request);
++    t->rcv_last_ns = rcv_now_ns();
++    t->rcv_wait_ns += t->rcv_last_ns - t0;
++    if (rc == (int)CELL_OK) {
++        t->rcv_n++;
++        for (int k = 0; k < 4; k++)
++            if (t->rcv_num_n[k] == 0 || t->rcv_num[k] == num) { t->rcv_num[k] = num; t->rcv_num_n[k]++; break; }
++    }
+     if (rc == 1) return 2;                                   /* stop requested */
+     if (rc != (int)CELL_OK) {
+         ctx->rcv_evt[0] = (uint32_t)rc; ctx->rcv_evt_n = 1; ctx->rcv_evt_i = 0;
+@@ -2550,6 +2579,26 @@ static int lv2_spu_stop_service(spu_context* ctx)
+     return 1;
+ }
+ 
++/* The receive-event counts of every SPU thread that received any (docs/AUDIO.md step A0). */
++void lv2_spu_thread_report(FILE* f)
++{
++    for (int i = 0; i < MAX_SPU_THREADS; i++) {
++        const spu_thread_t* t = &s_spu_threads[i];
++        if (!t->in_use || !t->rcv_n) continue;
++        const spu_context* c = (const spu_context*)(t->live_ctx ? t->live_ctx : t->sctx);
++        char by[96] = "";
++        for (int k = 0; k < 4 && t->rcv_num_n[k]; k++) {
++            char one[32];
++            snprintf(one, sizeof one, "%s spuq 0x%X: %u", k ? "," : "", t->rcv_num[k], t->rcv_num_n[k]);
++            strncat(by, one, sizeof by - strlen(by) - 1);
++        }
++        fprintf(f, "[spu-thread] 0x%X (image %d): %llu events received (%s), %.1f ms waiting for them; between "
++                "events it ran %.1f us on average, %.1f us at most\n", t->tid, c ? c->image_id : -1,
++                (unsigned long long)t->rcv_n, by, t->rcv_wait_ns / 1e6,
++                t->rcv_n > 1 ? t->rcv_work_ns / 1e3 / (double)(t->rcv_n - 1) : 0.0, t->rcv_work_max_ns / 1e3);
++    }
++}
++
+ static int64_t sys_spu_thread_stub(ppu_context* ctx)
+ {
+     (void)ctx;
+-- 
+2.56.0.windows.3
+
