@@ -2097,7 +2097,37 @@ list, which a player's install shows at CONTINUE (the harness turns it off for i
 written for the title's first entry). The stage now runs 220 s with the list off for that run (it has its
 own drives in the validation set) and passes only on a fight of 30 s or more with native physics tasks
 issued, counting deaths apart (an install takes normal damage). gen12 (rel17's install, 2026-11-10): every
-stage passes, **the installed game's river fight completed, 43,992 native physics tasks**.
+stage passes. What that pass shows is **30 s or more of combat in the installed game, not a won fight**:
+the one fight segment ran the drive's 20 rounds of swings to its end (82.5 s) with the hero alive, and its
+end checks held (the debris physics stepped 20 times or more, the river's enemies lost 5 life or more),
+with 43,992 native physics tasks. "Completed" in the stage's report means that segment ran to its end; no
+check asks that every enemy be defeated.
+
+### 9.9 The owner's session of 2026-11-10; the crash on quitting [C, M]
+
+**The session** (rel16, the owner's saves, 427 s, build/sessions/boot-20261110-130032, kept locally):
+CONTINUE through the save list to the first dungeon's save; the boss room (area 38) at 68 s; the trophy for
+defeating the first dungeon's boss without taking damage unlocked 130 s in; life 6 to 8 at 139 s (the heart
+reward); the next room (area 39, the sage's music) at 149 s for 217 s; four passes through the door
+between areas 38 and 39 (366-378 s); about 45 s idle, then the game was quit and ran its own exit path
+(its threads exited, FMOD shut its SPU group down). **Not covered: the warp out of
+the dungeon and saving** -- no save-data write in the log, and the save copies the drive makes on each save
+are unchanged. The boss-kill-to-save sequence stays open. Nine slow frames were captured (25-92 ms); the
+92 ms one at 150.2 s is the load into area 39.
+
+**The crash.** The quit faulted (0xC0000005, a read) in FMOD's mixer thread, in `spu_rdch` reading its
+context, after the game's last threads had exited. The cause was in the runtime, not in the game's
+native parts: `sys_spu_thread_group_terminate` only marked the group stopped. `group_join` waits only on a
+running group, so it returned at once, and `group_destroy` freed the context and local store of the mixer
+thread, which was still running on them. rel16's quit drive (w16q) shows the same: the mixer's lifted
+function was still being re-entered (eight lines) after `group_destroy`, without faulting that time.
+
+The fix (ps3recomp 0137): terminate stops the group's running threads the way a raw SPU's RunCntl = 0 stops
+one -- a stop request honoured at the next channel operation (the channel wait and the stop-and-signal
+event receive both watch it) -- and waits for their host threads, bounded at about 4 s a thread; destroy
+stops any thread still running and never frees a context a thread still uses. rel19 (rel17's tree at
+542794b with the fix, codec_raw native off) on the quit drive: the mixer stopped at terminate (`1 thread(s)
+stopped, 0 still running`), nothing ran after destroy, no crash, and the run ended as rel16's did.
 
 
 ## 10. Reproducing
