@@ -41,3 +41,4 @@ extern "C" void waver_native_wait(void);           // returns once no native fra
 extern "C" void waver_native_stopped(void);        // the teardown's: waits, counts
 extern "C" void waver_check_create(uint32_t w);    // a lifted task created: the previous compared, this one's inputs taken
 extern "C" void waver_check_end(void);             // the lifted block freed: the last one compared
+extern "C" void waver_check_wait(uint32_t w);      // the game about to wait for a lifted frame: the block as it is now

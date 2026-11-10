@@ -33,6 +33,8 @@ struct Snap {
     uint32_t param_ea = 0;
     Params p;
     std::vector<uint8_t> params, field, tex;
+    std::vector<uint8_t> params_wait;   // the block as it was when the game came to wait for the frame
+    bool have_wait = false;
     unsigned outside = 0;
 };
 
@@ -48,7 +50,7 @@ struct Runner {
     // check mode (the PPU thread's)
     Snap prev;
     Local* check_local = nullptr;
-    uint64_t created = 0, checked = 0, equal = 0, field_bad = 0, tex_bad = 0, tex_other = 0, not_run = 0;
+    uint64_t created = 0, checked = 0, equal = 0, field_bad = 0, tex_bad = 0, tex_other = 0, late = 0, not_run = 0;
     unsigned lines = 12;
 };
 Runner* g;
@@ -132,8 +134,28 @@ void check_previous()
     if (!df && !dt) { g->equal++; return; }
     g->field_bad += df != 0;
     g->tex_bad += dt != 0;
-    // the texture the SPU task chose itself, if it read the select word later than the copy took it
-    if (dt && !df && !memcmp(n.tex.data(), vm_base + n.p.texture[(n.p.select & 1) ^ 1], kTextureBytes)) g->tex_other++;
+    // The SPU task reads the block when it starts, somewhere between the creation (when the copy was
+    // taken) and the game's wait; the game rewrites parts of it in between (the select word after the
+    // creation; the next frame's values before the wait). Which of the two the task read:
+    const char* which = "neither";
+    if (!df && dt && !memcmp(n.tex.data(), vm_base + n.p.texture[(n.p.select & 1) ^ 1], kTextureBytes)) {
+        g->tex_other++;   // the creation's block, but the select word as rewritten after it
+        which = "the creation's block with the other texture";
+    } else if (s.have_wait) {
+        Snap w = s;
+        w.params = s.params_wait;
+        w.p = parse_params(w.params.data());
+        w.outside = 0;
+        if (w.p.field == s.p.field && w.p.texture[0] == s.p.texture[0] && w.p.texture[1] == s.p.texture[1]) {
+            const Io wio{ &w, snap_get, snap_put };
+            if (run_frame(w.param_ea, wio, *g->check_local) == Status::done &&
+                !memcmp(w.field.data(), vm_base + w.p.field, kFieldBytes) &&
+                !memcmp(w.tex.data(), vm_base + w.p.texture_ea(), kTextureBytes)) {
+                g->late++;
+                which = "the block as it was at the wait";
+            }
+        }
+    }
     if (g->lines) {
         g->lines--;
         fprintf(stderr, "[waver-check] frame %llu (select %u): %u field value(s) differ", (unsigned long long)n.n,
@@ -143,7 +165,8 @@ void check_previous()
             fprintf(stderr, " (first row %u x %u: native %08X lifted %08X)", first_f / 256, first_f % 256,
                     (unsigned)(q[0] << 24 | q[1] << 16 | q[2] << 8 | q[3]), gbe32(n.p.field + 4 * first_f));
         }
-        fprintf(stderr, ", %u pixel(s) differ%s\n", dt, n.outside ? "; transfers outside the snapshot" : "");
+        fprintf(stderr, ", %u pixel(s) differ%s; the SPU task's result equals the native frame on %s\n", dt,
+                n.outside ? "; transfers outside the snapshot" : "", which);
     }
 }
 
@@ -162,11 +185,12 @@ void report()
                 g->last_reason ? g->last_reason : "", (unsigned long long)w, g->wait_ns.load() / 1e6);
     } else if (g->mode == kCheck) {
         fprintf(stderr, "[waver-check] %llu lifted frame(s) created, %llu compared: %llu equal, %llu with the field "
-                "differing, %llu with the texture differing (%llu of them equal to the other texture: the select "
-                "word read after the copy took it); %llu the native frame did not run\n",
+                "differing, %llu with the texture differing; of the differing, %llu equal the native frame with the "
+                "other texture (the select word rewritten after the creation) and %llu the native frame on the block "
+                "as it was at the wait (read late by the task); %llu the native frame did not run\n",
                 (unsigned long long)g->created, (unsigned long long)g->checked, (unsigned long long)g->equal,
                 (unsigned long long)g->field_bad, (unsigned long long)g->tex_bad, (unsigned long long)g->tex_other,
-                (unsigned long long)g->not_run);
+                (unsigned long long)g->late, (unsigned long long)g->not_run);
     }
 }
 
@@ -244,3 +268,11 @@ extern "C" void waver_check_create(uint32_t w)
 }
 
 extern "C" void waver_check_end(void) { check_previous(); }
+
+extern "C" void waver_check_wait(uint32_t w)
+{
+    Snap& s = g->prev;
+    if (!s.valid) return;
+    s.params_wait.assign(vm_base + w + 0x80, vm_base + w + 0x80 + kParamBytes);
+    s.have_wait = true;
+}

@@ -415,10 +415,15 @@ its own, the game's wait waits for it, the teardown does nothing; anything else 
   and in transfer order, at x86-64-v3 and v2, 1,649 more at v3; seven deliberate mutations of the port all
   caught.
 - In the game, check mode, the fields and the river, 2 starts each: 1,183 frames compared, **the height field
-  equal in all**, the texture in all but 8 -- the first and last frame of each start. Consistent with the race
-  the task's reading predicted (the game rewrites the texture-select word right after creating the task, the
-  SPU task reads it when it starts, the check's copy took it at the creation), not separately confirmed: a
-  check that also compares the other texture would. The native frame reads it as the task does, at its start.
+  equal in all**, the texture in all but 8 -- the first and last frame of each start. The check then also
+  ran the native frame on the block as it was when the game came to wait, and compared both textures
+  (rel17, 4 starts, 1,204 frames): the first frame of a start equals the native frame on the block at the
+  wait (the task read it late: the game rewrites the select word right after the creation), or the one on
+  the creation's block with the other texture; **the last frame of each start equals neither** -- the game
+  writes the next frame's values before it waits, and the task, reading the block while they are being
+  written, gets some of each (field values unchanged, the select or the slope new): a read the two copies
+  cannot reproduce. All are the game's own races on the block; the native frame reads it as the task does,
+  at its start.
 - Native: 4 starts, ~300 frames each, 2.7 ms a frame on its own thread; the frame function (the game thread)
   0.024-0.028 ms a frame with it running (0.016 ms with the SPU task; the first frame's two tasks back to back
   waited 3.3 ms once); no SPU program started through SPURS.
