@@ -1,0 +1,322 @@
+From 4cba0db327857968485aabe604d3c6348eb3fbe0 Mon Sep 17 00:00:00 2001
+From: giteaguy <73799093+irnutsmurt@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 08:23:09 -0800
+Subject: [PATCH] Lifter: --promote-calls, registers in locals across calls
+ with liveness
+
+For the functions a JSON file names: the guest registers a function uses stay
+in C locals; before each call (the two forms the lift emits, direct and
+PPU_ICALL, with the trampoline's drain) the registers that may have been
+written since the last call are stored back (a forward pass), and after it
+only the registers a callee may change (r0-r13, f0-f13, cr, ctr, xer) that
+the function may still read are reloaded (a backward liveness pass over the
+lines, labels and gotos). Returns store back what may be dirty. r14-r31 and
+f14-f31 are trusted to the PowerPC 64 ABI; a PPU_PROMO_CHECK build tests that
+after every call for each such register still read (ppu_promo_mismatch, the
+port's). Functions with an sjlj frame, a hook or observer, an indexed
+register, another escape form or other control flow are left as they are.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ tools/ppu_lifter.py | 250 ++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 250 insertions(+)
+
+diff --git a/tools/ppu_lifter.py b/tools/ppu_lifter.py
+index 97516a5..49fa31a 100644
+--- a/tools/ppu_lifter.py
++++ b/tools/ppu_lifter.py
+@@ -881,6 +881,20 @@ static inline void ppu_icall_site(ppu_context* ctx, uint64_t* ic)
+  * copy of the memory model (ppu_mm in ppu_recomp.h: the one the runtime
+  * published before the guest's entry, g_ppu_mm). */
+ #define PPU_MM_SNAP const ppu_mm _mm = g_ppu_mm; (void)_mm;
++/* --promote-calls: after a call, the registers the PowerPC 64 ABI has the
++ * callee keep (r14-r31, f14-f31) stay in locals; a PPU_PROMO_CHECK build
++ * compares each one the function still reads with the context, and reports a
++ * callee that changed it (ppu_promo_mismatch, the port's). */
++#ifdef PPU_PROMO_CHECK
++extern "C" void ppu_promo_mismatch(uint32_t site, int reg, uint64_t in_ctx, uint64_t in_local);
++extern "C" uint64_t g_ppu_promo_checks;
++#define PPU_PROMO_G(n, v) do { if (ctx->gpr[n] != (uint64_t)(v)) ppu_promo_mismatch(_pc_site, n, ctx->gpr[n], (v)); } while (0);
++#define PPU_PROMO_F(n, v) do { uint64_t _a, _b; double _v = (v); memcpy(&_a, &ctx->fpr[n], 8); memcpy(&_b, &_v, 8); \
++    if (_a != _b) ppu_promo_mismatch(_pc_site, 32 + (n), _a, _b); } while (0);
++#define PPU_PROMO_CK(site, ...) do { const uint32_t _pc_site = (site); g_ppu_promo_checks++; __VA_ARGS__ } while (0)
++#else
++#define PPU_PROMO_CK(site, ...) ((void)0)
++#endif
+ #ifndef PPU_NO_INLINE_LOADS
+ #undef vm_read8
+ #undef vm_read16
+@@ -1161,6 +1175,205 @@ def _promote_leaf_body(body: list[str]):
+     return out
+ 
+ 
++# --promote-calls FILE (R8, docs/NATIVE_R8.md section 9.0): the leaf form above
++# extended across calls, for the functions FILE names ({"functions": [addr]}).
++# The registers stay in C locals between calls; at a call -- the two forms the
++# lift emits, `ctx->lr = N; func_X(ctx); DRAIN_TRAMPOLINE(ctx);` and the same
++# with PPU_ICALL(ctx) -- the locals that may have been written since the last
++# call are stored back first (a forward "may be dirty" pass), and afterwards
++# only the registers a callee may change AND the function may still read are
++# reloaded (a backward liveness pass over the function's lines, labels and
++# gotos). At every return, the registers that may be dirty there are stored
++# back. What a callee may change: r0-r13, f0-f13, cr, ctr, xer (r1, r2 and r13
++# are reloaded too, though the ABI keeps them: a reload is one load). What it
++# is trusted to keep, by the PowerPC 64 ABI the game's compiler follows:
++# r14-r31 and f14-f31 -- the one assumption; PPU_PROMO_CHECK builds test it
++# after every call (ppu_promo_mismatch) for each such register still read.
++# Not promoted (the function is left as it is): an sjlj frame (a longjmp lands
++# in it), a hook or observer, a register indexed by a variable, any escape of
++# the context in another form, any control flow other than labels, gotos,
++# `if (...) goto` and `return;`.
++_PC_CALL = re.compile(r"^\s*ctx->lr = 0x[0-9A-Fa-f]+; (?:func_[0-9A-Fa-f]+|PPU_ICALL)\(ctx\); DRAIN_TRAMPOLINE\(ctx\);\s*$")
++_PC_LABEL = re.compile(r"^\s*(loc_[0-9A-Fa-f]+):\s*$")
++_PC_GOTO = re.compile(r"^\s*goto (loc_[0-9A-Fa-f]+);\s*$")
++_PC_IFGOTO = re.compile(r"^\s*if \(.*\) goto (loc_[0-9A-Fa-f]+);\s*$")
++_PC_RETURN = re.compile(r"^\s*return;\s*$")
++_PC_REG = re.compile(r"ctx->(?:(gpr|fpr)\[(\d+)\]|(cr|ctr|xer)\b)")
++_PC_VOLATILE = ({("gpr", n) for n in range(14)} | {("fpr", n) for n in range(14)}
++                | {("cr", None), ("ctr", None), ("xer", None)})
++
++
++def _pc_key(m):
++    return (m.group(1), int(m.group(2))) if m.group(1) else (m.group(3), None)
++
++
++def _pc_ref(k):
++    return f"ctx->{k[0]}[{k[1]}]" if k[1] is not None else f"ctx->{k[0]}"
++
++
++def _pc_local(k):
++    return {"gpr": f"_pr{k[1]}", "fpr": f"_pf{k[1]}"}.get(k[0], f"_p{k[0]}")
++
++
++def _pc_written(line):
++    """The registers a line may write: an assignment of any kind, ++/--, or
++    its address taken (a memcpy into it)."""
++    out = set()
++    for m in _PC_REG.finditer(line):
++        after, before = line[m.end():], line[:m.start()]
++        if (re.match(r"\s*(?:=(?!=)|[-+|&^*/%]=|<<=|>>=|\+\+|--)", after)
++                or re.search(r"(?:\+\+|--|(?:^|[(,=;{])\s*&)\s*$", before)):
++            out.add(_pc_key(m))
++    return out
++
++
++def _pc_use_kill(line):
++    """(use, kill) of a line: a register is killed only where every mention of
++    it in a line without control flow is a plain assignment's left side;
++    every other mention is a use (conservative)."""
++    mentions = {}
++    for m in _PC_REG.finditer(line):
++        plain = re.match(r"\s*=(?!=)", line[m.end():]) and not re.search(r"(?:\+\+|--|&|\*)\s*$", line[:m.start()])
++        mentions.setdefault(_pc_key(m), []).append(bool(plain))
++    simple = not re.search(r"\b(?:if|goto|return|while|for|switch)\b|\?", line)
++    use = {k for k, v in mentions.items() if not (simple and all(v))}
++    kill = {k for k, v in mentions.items() if simple and all(v)}
++    return use, kill
++
++
++def _promote_calls_body(body: list[str], site: int, check: bool = True):
++    """The body of a non-leaf function with its registers in locals across
++    its calls (see _PC_CALL above), or (None, why) if it cannot be."""
++    text = "\n".join(body)
++    if "_sjf" in text:
++        return None, "sjlj frame"
++    if re.search(r"ctx->(?:gpr|fpr)(?!\[\d+\])", text):
++        return None, "a register indexed by a variable"
++    n = len(body)
++    labels, calls = {}, set()
++    for i, ln in enumerate(body):
++        m = _PC_LABEL.match(ln)
++        if m:
++            labels[m.group(1)] = i
++        if _PC_CALL.match(ln):
++            calls.add(i)
++        elif re.search(r"\bctx\b(?!\s*->)", ln):
++            return None, f"the context escapes otherwise: {ln.strip()[:80]}"
++        if re.search(r"\b(?:goto|return|switch|while|for|do|break|continue|case|default)\b", ln) and not (
++                _PC_GOTO.match(ln) or _PC_IFGOTO.match(ln) or _PC_RETURN.match(ln)):
++            return None, f"control flow not modelled: {ln.strip()[:80]}"
++        if "g_trampoline_fn" in ln:
++            return None, "a trampoline continuation"
++    if not calls:
++        return None, "no calls (the leaf form's)"
++    EXIT = n
++    succ = []
++    for i, ln in enumerate(body):
++        if _PC_GOTO.match(ln):
++            t = _PC_GOTO.match(ln).group(1)
++            if t not in labels:
++                return None, f"goto out of the function: {t}"
++            succ.append([labels[t]])
++        elif _PC_IFGOTO.match(ln):
++            t = _PC_IFGOTO.match(ln).group(1)
++            if t not in labels:
++                return None, f"goto out of the function: {t}"
++            succ.append([labels[t], i + 1])
++        elif _PC_RETURN.match(ln):
++            succ.append([EXIT])
++        else:
++            succ.append([i + 1])
++    regs = {_pc_key(m) for m in _PC_REG.finditer(text)}
++    if not regs:
++        return None, "no registers"
++    wr = [_pc_written(ln) for ln in body]
++    written = set().union(*wr)
++    # forward: the registers that may be dirty (written since the last call) on entry to each line
++    preds = [[] for _ in range(n + 1)]
++    for i, ss in enumerate(succ):
++        for s in ss:
++            preds[s].append(i)
++    din = [set() for _ in range(n + 1)]
++    dout = [set() for _ in range(n)]
++    changed = True
++    while changed:
++        changed = False
++        for i in range(n + 1):
++            new = set().union(*(dout[p] for p in preds[i])) if preds[i] else set()
++            if new != din[i]:
++                din[i] = new
++                changed = True
++            if i < n:
++                o = set() if i in calls else (din[i] | wr[i])
++                if o != dout[i]:
++                    dout[i] = o
++                    changed = True
++    # backward: liveness. A call reads what it stores back (the dirty registers);
++    # the exit reads what it stores back.
++    uk = [_pc_use_kill(ln) for ln in body]
++    use = [(din[i] if i in calls else uk[i][0]) for i in range(n)]
++    kill = [(set() if i in calls else uk[i][1]) for i in range(n)]
++    lin = [set() for _ in range(n + 1)]
++    lin[EXIT] = set(din[EXIT])
++    changed = True
++    while changed:
++        changed = False
++        for i in range(n - 1, -1, -1):
++            lo = set().union(*(lin[s] for s in succ[i]))
++            if i in calls:
++                # after the call: the callee-changeable registers are reloaded if live;
++                # live-in = the dirty registers stored + whatever is live after, minus
++                # the volatile ones the reload defines
++                new = use[i] | {k for k in lo if k not in _PC_VOLATILE}
++            else:
++                new = use[i] | (lo - kill[i])
++            if new != lin[i]:
++                lin[i] = new
++                changed = True
++    out = []
++    decl = [f"{'double' if k[0] == 'fpr' else 'uint32_t' if k[0] in ('cr', 'xer') else 'uint64_t'} "
++            f"{_pc_local(k)} = {_pc_ref(k)};" for k in sorted(regs, key=lambda k: (k[0], k[1] or 0))]
++    out.append("    " + " ".join(decl) + "  /* --promote-calls */")
++    stores_n = reloads_n = checks_n = 0
++
++    def subst(t):
++        return _PC_REG.sub(lambda m: _pc_local(_pc_key(m)), t)
++
++    def store(keys):
++        return " ".join(f"{_pc_ref(k)} = {_pc_local(k)};" for k in sorted(keys, key=lambda k: (k[0], k[1] or 0)))
++
++    for i, ln in enumerate(body):
++        if i in calls:
++            lo = set().union(*(lin[s] for s in succ[i]))
++            st = din[i] & written
++            rl = {k for k in lo if k in _PC_VOLATILE and k in regs}
++            ck = sorted((k for k in lo if k not in _PC_VOLATILE and k in regs), key=lambda k: (k[0], k[1] or 0))
++            stores_n += len(st)
++            reloads_n += len(rl)
++            pre = ("    " + store(st)) if st else ""
++            post = " ".join(f"{_pc_local(k)} = {_pc_ref(k)};" for k in sorted(rl, key=lambda k: (k[0], k[1] or 0)))
++            if pre:
++                out.append(pre)
++            out.append(ln)
++            if post:
++                out.append("    " + post)
++            if check and ck:
++                checks_n += len(ck)
++                out.append("    PPU_PROMO_CK(0x%08X, " % site + " ".join(
++                    f"PPU_PROMO_{'F' if k[0] == 'fpr' else 'G'}({k[1]}, {_pc_local(k)})" for k in ck) + ");")
++            continue
++        t = subst(ln)
++        if _PC_RETURN.match(ln):
++            st = din[i] & written
++            if st:
++                t = t.replace("return;", "{ " + store(st) + " return; }")
++        out.append(t)
++    # the end of the body: control that falls off it (no `return;`)
++    if n and EXIT in succ[n - 1] and not _PC_RETURN.match(body[n - 1]) and (dout[n - 1] & written):
++        out.append("    " + store(dout[n - 1] & written))
++    return out, (len(calls), stores_n, reloads_n, checks_n)
++
++
+ def load_entry_hooks(path: str) -> dict[int, tuple[str, str, bool]]:
+     """Read the entry hooks of an --insn-patches file:
+ 
+@@ -4728,6 +4941,28 @@ class PPULifter:
+                 if new is not None:
+                     lines[head:end] = new
+                     self.promoted_leaf = getattr(self, "promoted_leaf", 0) + 1
++        pc = getattr(self, "promote_calls", None)
++        if pc and func.start_addr in pc and "/* --promote-leaf */" not in "\n".join(lines):
++            why = None
++            if observed or hook or uses_sjlj:
++                why = "observed, hooked or with an sjlj frame"
++            else:
++                try:
++                    head = lines.index("    PPU_MM_SNAP") + 1
++                except ValueError:
++                    head = -1
++                if head <= 0:
++                    why = "no PPU_MM_SNAP"
++                else:
++                    end = len(lines) - 2
++                    new, info = _promote_calls_body(lines[head:end], func.start_addr)
++                    if new is None:
++                        why = info
++                    else:
++                        lines[head:end] = new
++                        self.promoted_calls.append((func.start_addr, info))
++            if why:
++                self.promote_calls_declined.append((func.start_addr, why))
+         return lines
+ 
+     def _table_lines(self) -> list[str]:
+@@ -5588,6 +5823,9 @@ def main() -> None:
+     parser.add_argument("--promote-leaf", action="store_true",
+                         help="keep the guest registers in C locals in functions where the context never "
+                              "escapes (no calls of any kind): see _PROMO_FIELDS")
++    parser.add_argument("--promote-calls", metavar="FILE", default=None,
++                        help="JSON {functions:[addr]}: keep the guest registers in C locals across the "
++                             "calls of these functions too, with liveness (see _promote_calls_body)")
+     parser.add_argument("--insn-patches", metavar="FILE", default=None, action="append",
+                         help="JSON list of instruction patches to lift as "
+                              "run-time switches: each {addr, orig, new, guard} "
+@@ -6057,6 +6295,10 @@ def main() -> None:
+         print(f"  sjlj: setjmp {sorted(hex(a) for a in lifter.sjlj_setjmp)} "
+               f"longjmp {sorted(hex(a) for a in lifter.sjlj_longjmp)}")
+     lifter.promote_leaf = bool(args.promote_leaf)
++    lifter.promote_calls, lifter.promoted_calls, lifter.promote_calls_declined = None, [], []
++    if args.promote_calls:
++        lifter.promote_calls = {int(str(a), 0) for a in json.load(open(args.promote_calls))["functions"]}
++        print(f"  promote-calls: {len(lifter.promote_calls)} functions from {args.promote_calls}")
+     if args.insn_patches:
+         # Repeatable: each file's patches and entry hooks, merged; an address
+         # in two files is an error, as within one.
+@@ -6179,6 +6421,14 @@ def main() -> None:
+             os.remove(stale)
+             print(f"  removed stale {os.path.basename(stale)}")
+     print(f"  {len(lifter.functions)} functions lifted")
++    if lifter.promote_calls:
++        for a, (c, s, r, k) in sorted(lifter.promoted_calls):
++            print(f"  promote-calls: func_{a:08X} {c} calls, {s} stores before them, {r} reloads after, {k} checked")
++        for a, why in sorted(lifter.promote_calls_declined):
++            print(f"  promote-calls: func_{a:08X} left as it is: {why}")
++        missing = lifter.promote_calls - {a for a, _ in lifter.promoted_calls} - {a for a, _ in lifter.promote_calls_declined}
++        for a in sorted(missing):
++            print(f"  promote-calls: 0x{a:08X} not lifted as a function (or a leaf: --promote-leaf)")
+     print(f"  {len(lifter.call_targets)} unique call targets")
+ 
+ 
+-- 
+2.56.0.windows.3
+
