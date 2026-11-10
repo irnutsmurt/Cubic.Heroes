@@ -12,7 +12,7 @@
 #   system menu open when it should be; shots of each screen (frame dumps on:
 #   not a timing run); the run's report says what PPFX drew.
 #! saves build/checkpoints/castle-front
-#! env DOTHEROES_NATIVE_CD=1 DOTHEROES_NATIVE_SOLVER=4,5,6 GCM_WRAP_LAP=1 DOTHEROES_PRESENT_ONCE=1
+#! env DOTHEROES_NATIVE_CD=1 DOTHEROES_NATIVE_SOLVER=1,2,4,5,6 GCM_WRAP_LAP=1 DOTHEROES_PRESENT_ONCE=1
 #! env DOTHEROES_DEV_STATE=1 DOTHEROES_DEV_KEYS=1 DIAG_FRAMES=frames.log PS3_VERBOSE=0
 #! env WINDOW=1 VISIBLE=1 TOPMOST=1 GRAB_EVERY=5 PS3_OSD_FPS=2 SHOT_EVERY=0
 #! secs 600

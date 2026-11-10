@@ -194,21 +194,27 @@ def read_game_settings(install):
 
 
 # The settings that hold 60 fps in debris-heavy fights (docs/HANDOFF.md,
-# "Performance configuration"): native collision and three native solver
-# commands, the capped command-ring lap, one present per flip. Without them an
+# "Performance configuration"): native collision and five native solver
+# commands (the set-up's two since 2026-11-10, docs/SPU_NON_AUDIO.md section 1),
+# the capped command-ring lap, one present per flip. Without them an
 # install fights at p99 ~27 ms (10-16% of frames over 18 ms); with them 17.3-17.5,
 # as in development. Experimental: native collision is not bit-exact with the
 # game's SPU task. Written for a new install and added to an older one's
 # settings if missing; a player's own value is never replaced.
-PERFORMANCE = {"DOTHEROES_NATIVE_CD": "1", "DOTHEROES_NATIVE_SOLVER": "4,5,6", "GCM_WRAP_LAP": "1",
+PERFORMANCE = {"DOTHEROES_NATIVE_CD": "1", "DOTHEROES_NATIVE_SOLVER": "1,2,4,5,6", "GCM_WRAP_LAP": "1",
                "DOTHEROES_PRESENT_ONCE": "1"}
+# The values earlier versions of this file wrote as defaults: a setting that
+# still holds one is the old default, not a player's choice, and an update
+# brings it to the current one. Any other value is the player's and is kept.
+PREVIOUS_DEFAULTS = {"DOTHEROES_NATIVE_SOLVER": ("4,5,6",)}
 
 
 def ensure_performance_settings(install):
     cur = read_game_settings(install)
     missing = {k: v for k, v in PERFORMANCE.items() if k not in cur}
-    if missing or not os.path.exists(game_settings_path(install)):
-        write_game_settings(install, **missing)
+    stale = {k: PERFORMANCE[k] for k, olds in PREVIOUS_DEFAULTS.items() if cur.get(k) in olds}
+    if missing or stale or not os.path.exists(game_settings_path(install)):
+        write_game_settings(install, **missing, **stale)
 
 
 def write_game_settings(install, **values):

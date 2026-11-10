@@ -94,6 +94,12 @@
 #include "bullet_solver.h"
 #include "ps3emu/ps3_ftrace.h"
 #include "spu_workload.h"
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>   // VirtualQuery, VirtualAlloc: the manifold set-up's check copies guest memory
+#endif
 
 extern "C" uint8_t* vm_base;
 extern "C" void (*g_spurs_create_hook)(uint32_t entry, const uint32_t arg[4]);
@@ -501,6 +507,94 @@ void setup_check(uint32_t cmd, uint32_t desc)
                 g_native.count(1) ? "native" : "lifted", c.steps, c.bodies, c.bodies_bad);
 }
 
+// The manifold set-up's check (DOTHEROES_NATIVE_SOLVER_CHECK=1; every
+// DOTHEROES_SOLVER_CHECK2_EVERY-th step, default 20): as a step's first
+// command-2 task is created -- command 1 done, none of command 2 run -- guest
+// memory below 0x20000000 is copied into a space of its own at the same
+// addresses (what the snapshots hold); each command-2 task's descriptor is noted
+// as it is created; as the next command's first task is created, the PPU having
+// waited for every command-2 task, the native set-up runs on the copy, task after
+// task in creation order, and every span it wrote -- the rows, the solver bodies,
+// the index lists, the hash cells -- is compared with what the game's tasks left.
+// So the offline check (tests/native/bullet_solver_snapcheck.cpp setup-manifolds)
+// runs in the game over many steps; with the native set-up on it compares native
+// with native, a check of the copy itself.
+struct ManifoldCheck {
+    bool armed = false;
+    unsigned every = 20, seen = 0;
+    uint8_t* space = nullptr;
+    std::vector<std::pair<uint32_t, std::array<uint32_t, 36>>> tasks;
+    unsigned long long steps = 0, points = 0, spans = 0, spans_bad = 0, bytes_bad = 0, copy_failed = 0;
+} g_mchk;
+
+bool mchk_copy()
+{
+#ifdef _WIN32
+    ManifoldCheck& c = g_mchk;
+    if (!c.space) c.space = (uint8_t*)VirtualAlloc(nullptr, 0x20000000u, MEM_RESERVE, PAGE_NOACCESS);
+    if (!c.space) return false;
+    for (uint32_t ea = 0x10000u; ea < 0x20000000u;) {
+        MEMORY_BASIC_INFORMATION mbi;
+        if (!VirtualQuery(vm_base + ea, &mbi, sizeof mbi)) return false;
+        uint64_t len = (uint64_t)((uintptr_t)mbi.BaseAddress + mbi.RegionSize - (uintptr_t)(vm_base + ea));
+        if (ea + len > 0x20000000u) len = 0x20000000u - ea;
+        if (mbi.State == MEM_COMMIT && !(mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD))) {
+            if (!VirtualAlloc(c.space + ea, (SIZE_T)len, MEM_COMMIT, PAGE_READWRITE)) return false;
+            memcpy(c.space + ea, vm_base + ea, (size_t)len);
+        }
+        ea += (uint32_t)len;
+    }
+    return true;
+#else
+    return false;
+#endif
+}
+
+void manifold_check(uint32_t cmd, uint32_t desc)   // the PPU thread, as each solver task is created
+{
+    ManifoldCheck& c = g_mchk;
+    if (cmd == 2) {
+        if (!c.armed) {
+            if (c.seen++ % c.every) return;
+            if (!mchk_copy()) { c.copy_failed++; return; }
+            c.armed = true;
+            c.tasks.clear();
+        }
+        std::array<uint32_t, 36> w;
+        for (int k = 0; k < 36; k++) w[k] = be32(vm_base + desc + 4 * k);
+        c.tasks.push_back({ desc, w });
+        return;
+    }
+    if (!c.armed) return;
+    c.armed = false;
+    bullet_solver::ManifoldSetupSpans spans;
+    for (const auto& tk : c.tasks) {
+        uint8_t* d = c.space + tk.first;
+        for (int k = 0; k < 36; k++) { const uint32_t v = tk.second[k]; d[4 * k] = (uint8_t)(v >> 24); d[4 * k + 1] = (uint8_t)(v >> 16); d[4 * k + 2] = (uint8_t)(v >> 8); d[4 * k + 3] = (uint8_t)v; }
+        bullet_solver::ManifoldSetupStats st;
+        bullet_solver::setup_manifolds_task(c.space, tk.first, st, &spans);
+        c.points += st.contacts;
+    }
+    unsigned bad_here = 0;
+    for (const auto* list : { &spans.rows, &spans.bodies, &spans.lists, &spans.cells }) {
+        for (const auto& s : *list) {
+            c.spans++;
+            if (!memcmp(c.space + s.ea, vm_base + s.ea, s.bytes)) continue;
+            unsigned nb = 0;
+            for (uint32_t i = 0; i < s.bytes; i++) nb += c.space[s.ea + i] != vm_base[s.ea + i];
+            c.spans_bad++; c.bytes_bad += nb; bad_here++;
+            if (c.spans_bad <= 8)
+                fprintf(stderr, "[native-solver] manifold set-up check: step %llu, the span at %08X (%u bytes): %u bytes differ\n",
+                        c.steps, s.ea, s.bytes, nb);
+        }
+    }
+    c.steps++;
+    if (c.steps % 10 == 0 || (bad_here && c.steps < 20))
+        fprintf(stderr, "[native-solver] manifold set-up check (%s): %llu steps checked, %llu points, %llu spans: %llu not as "
+                "expected (%llu bytes); %llu copies failed\n", g_native.count(2) ? "native" : "lifted", c.steps, c.points,
+                c.spans, c.spans_bad, c.bytes_bad, c.copy_failed);
+}
+
 void check_on_create(uint32_t entry, const uint32_t arg[4])   // the PPU thread
 {
     Check& k = g_chk;
@@ -508,6 +602,7 @@ void check_on_create(uint32_t entry, const uint32_t arg[4])   // the PPU thread
         const uint32_t d = desc_from_queue(arg[2], arg[0]);
         if (d) copyback_check(be32(vm_base + d), d);
         if (d) setup_check(be32(vm_base + d), d);
+        if (d) manifold_check(be32(vm_base + d), d);
     }
     if (entry == kEntryCollision && k.armed) {
         std::lock_guard<std::mutex> lk(k.mu);
@@ -812,6 +907,7 @@ void bullet_solver_init(bool phys_stats)
     }
     const char* ck = getenv("DOTHEROES_NATIVE_SOLVER_CHECK");
     g_chk.on = ck && *ck == '1';
+    if (const char* ev = getenv("DOTHEROES_SOLVER_CHECK2_EVERY")) { const unsigned v = (unsigned)strtoul(ev, nullptr, 10); if (v) g_mchk.every = v; }
     if (const char* bf = getenv("DOTHEROES_SOLVER_BENCH")) {
         g_bench.f = fopen(bf, "w");
         if (g_bench.f) {

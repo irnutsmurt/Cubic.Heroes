@@ -168,6 +168,13 @@ def stage_settings():
         check("settings", cfg.get("DOTHEROES_FPS") == "0" and cfg.get("DOTHEROES_NATIVE_CD") == "0"
               and cfg.get("PS3RECOMP_VK_FULLSCREEN") == "1", "the player's own values kept")
         check("settings", cfg.get("GCM_WRAP_LAP") == "1", "a missing performance switch added back")
+        # an earlier default (setup_app.PREVIOUS_DEFAULTS) is not the player's: brought up to date
+        old = {k: v[0] for k, v in setup_app.PREVIOUS_DEFAULTS.items()}
+        setup_app.write_game_settings(DIR, **old)
+        settings_pass()
+        cfg = setup_app.read_game_settings(DIR)
+        check("settings", all(cfg.get(k) == setup_app.PERFORMANCE[k] for k in old),
+              "an earlier default brought up to date (%s)" % ", ".join("%s=%s" % (k, cfg.get(k)) for k in old))
     finally:
         with open(path, "w") as f:
             f.write(keep)

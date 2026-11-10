@@ -221,7 +221,7 @@ def run(scene, binary, tag, extra):
         "BIN": os.path.abspath(binary), "DRIVE": os.path.join(ROOT, m["drive"]), "SAVES": os.path.join(REFDIR, scene, "save"),
         "WINDOW": "1", "VISIBLE": "1", "TOPMOST": "1", "AUDIO": "1", "KEEP_RUNS": "60", "RUN_TAG": "ref-%s-%s" % (scene, tag),
         "DOTHEROES_DEV_STATE": "1", "DOTHEROES_DEV_KEYS": "1", "DOTHEROES_DEV_CANT_DIE": "1", "DOTHEROES_PPFX_NATIVE": "1",
-        "DOTHEROES_NATIVE_CD": "1", "DOTHEROES_NATIVE_SOLVER": "4,5,6", "GCM_WRAP_LAP": "1", "DOTHEROES_PRESENT_ONCE": "1",
+        "DOTHEROES_NATIVE_CD": "1", "DOTHEROES_NATIVE_SOLVER": "1,2,4,5,6", "GCM_WRAP_LAP": "1", "DOTHEROES_PRESENT_ONCE": "1",
         "PS3RECOMP_SPIRV_CACHE": "build/play-route/cache", "DOTHEROES_ASP_DESCRIBE_FRAME": "trigger", "DOTHEROES_PPFX_DUMP": dump,
     })
     for kv in extra:

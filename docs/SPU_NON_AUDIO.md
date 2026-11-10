@@ -87,8 +87,20 @@ does the test become removable.
   the task fills it and reads the same bytes; zeros there instead change the friction rows of 8 points in
   two of the four steps. It rests on each task starting with a fresh local store, as the runtime gives
   (unless LBP_PERSIST_LS). On the PS3 the same reads took whatever an earlier task left.
-- **Still to do**: captures over more steps (build/r8/snap9_run.sh: five river steps, two in the fields),
-  then the in-game runs with DOTHEROES_NATIVE_SOLVER=1,2,4,5,6 and the measurement.
+- **Checked in the game, measured, the default (2026-11-10).** Three more captured river steps (200, 400,
+  600: build/r8/snap9_run.sh) pass both commands offline -- seven steps in all. In the game,
+  DOTHEROES_NATIVE_SOLVER_CHECK=1 now also checks command 2: every 10th step guest memory is copied as its
+  first task is created, the native set-up runs on the copy once the game's tasks are done, and every span
+  is compared -- two river fights, 180 steps, 17,398 points, 41,572 spans: **0 differ**. Runs with
+  DOTHEROES_NATIVE_SOLVER=1,2,4,5,6 (river, fields, dungeon, a normal-damage river fight): 81,654 contacts set
+  up natively in a river run, 0 reads outside the modelled local store, 0 tasks with typed constraints, the
+  runs ended at their time. Measured (build/r8/ab12_run.sh, rel11, the river fight uncapped with real audio,
+  three rounds rotated): 203.4-209.3 fps against 198.2-200.9 with the lifted set-up; p99 6.57-6.82 ms
+  against 7.24-7.44; frames over 6.94 ms 0.5-0.8% against 1.6-2.0%; the light frames' p99 6.53-6.80 against
+  6.95-7.26; the heavy-debris frames (one native round had them) p50 5.97 and p99 8.42 against 6.49-6.69 and
+  9.11-9.68. **Now the default**: setup_app.py's performance settings (an install whose value is still the
+  old default "4,5,6" is brought up to date; a player's own value is kept), the scenarios, the reference
+  scenes. No solver task goes through SPURS any more in the runs seen.
 
 **Where** [C]:
 - task image 5 (`PS3_SPURS_BulletSolver_spu_release`, entry 0xF8EC80);
