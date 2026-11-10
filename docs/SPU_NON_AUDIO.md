@@ -304,6 +304,27 @@ widths 4-408, edge values, 300 evolution steps); in the game, check mode over tw
 its worker thread. The census: image 1 still starts once (the task parks in its wait; the instance is
 created by the game's set-up, which is not hooked).
 
+**The start-up and the idle wait, native too (2026-11-10)** [C, M]: the water's set-up (func_003C7BA8, reached
+from func_000221DC through the TOC stub func_009810A8) built a SPURS instance "Water", a taskset, a 0x3D600-byte
+block, an event flag and the persistent task that parked in its wait; the shutdown (func_003C7AF4) set the quit
+bit, waited for the exit code and tore it all down. Both are now the port's (port/phys_hooks.cpp,
+water_task.h): the set-up does the game's own stores and its two texture calls in the game's frame and puts
+markers (0xFFFFF001-3) where the instance, taskset and block went -- the update (func_003C7460) only tests the
+taskset for non-zero and passes the block to the signal, and nothing else in the lift reads them -- and the
+shutdown waits for the worker's step, then clears the globals as the game's does. DOTHEROES_NATIVE_WATER=0 or
+check, a capture, or DOTHEROES_WATER_SPURS=1 keep the game's set-up.
+- **When they run** (DOTHEROES_WATER_LOG=1, tests/scenarios/river_water.drive): the set-up once, at boot (0.1 s);
+  the water is the game's for the whole session -- TITLE and CONTINUE does not shut it down; the shutdown only in
+  the game's own exit path (the drive's new `quit`: the game asked to exit as closing the window asks it).
+- **Pause, reload, shutdown** (rel15/rel16, the drive with native scheduling and with the SPURS set-up): the same
+  gaps in the signals both ways -- 11.5 s over each 10 s pause, 24.7 s over TITLE and CONTINUE, 2.3 s over
+  each area change -- and the same rate between; at the quit, "shutdown #1, native" after its last step, and
+  the game's SPURS shutdown with the hook declining.
+- **The census** (SPURS starts; FMOD's own lv2 SPU thread is not in it): with native scheduling **no SPU program starts through SPURS** in the river, the menus, the dungeon, after
+  the dungeon, the boss's exit; with the SPURS set-up image 1 starts once, as before.
+- The check mode, the hooks present: 2,495 river steps compared, all equal. rel15's validation scenes and the
+  reference scenes pass.
+
 **Now** [C, M]:
 - A persistent SPURS task, its own instance "Water" (1 SPU), resumed from
   its signal wait each frame by cellSpursEventFlagSet.

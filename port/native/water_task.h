@@ -108,7 +108,25 @@ void normal_map(const Params& p, const Io& io, Local& ls);
 //            at the signal, compared with the lifted task's results at the
 //            next signal when the task is back in its wait.
 // The quit (bit 1) is always declined, after the native worker is idle.
+//
+// Native scheduling (DOTHEROES_NATIVE_WATER=1 or sync, no capture): the
+// water's set-up (func_003C7BA8) and shutdown (func_003C7AF4) are the port's
+// too, so that no SPURS instance, taskset, event flag, task or 0x3D600-byte
+// block is made. The set-up does the game's own stores and its two texture
+// calls, then puts the markers below where the instance (globals + 0x9C), the
+// taskset (+0x4) and the block (+0x98) went: the water's update tests +0x4
+// for non-zero and passes +0x98 to the signal; nothing else reads them (the
+// lift: func_003C7460, func_003C7AF4, func_003C7BA8 and the module's static
+// initializer only). The shutdown waits for the worker, then clears +0x4 and
+// +0x9C as the game's does.
+namespace water_task {
+constexpr uint32_t kNativeBlock = 0xFFFFF001u, kNativeTaskset = 0xFFFFF002u, kNativeInstance = 0xFFFFF003u;
+}
 extern "C" int g_water_hook;                  // the hook's guard: 1 when any mode or capture is on
+extern "C" int water_task_native_setup(void);                 // 1: the set-up and shutdown are native
+extern "C" void water_task_native_started(uint32_t params);   // the set-up's: the 24 bytes' EA (globals + 0x80)
+extern "C" void water_task_native_stopped(void);              // the shutdown's: returns once the worker is idle
+extern "C" void water_task_note(const char* what);            // a line in DOTHEROES_WATER_LOG=1's log
 extern "C" void water_task_init(void);        // at start-up, beside dotheroes_native_init
 extern "C" void water_task_report(void);      // the counts, once (the test stop and atexit)
 extern "C" int water_task_signal(uint32_t block, uint32_t bits);
@@ -116,5 +134,6 @@ extern "C" int water_task_signal(uint32_t block, uint32_t bits);
 struct WaterTaskCounts {
     uint64_t signals, steps, coalesced, unsupported, shape;   // shape: blocks not built as the game builds them
     uint64_t checked, equal, busy;                            // check mode
+    uint64_t setups, shutdowns;                               // native scheduling
 };
 extern "C" void water_task_counts(WaterTaskCounts* out);

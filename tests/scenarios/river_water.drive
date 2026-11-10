@@ -1,0 +1,96 @@
+# Scenario: the river's water through a pause, a reload and a shutdown (SCENARIO=river_water
+# tests/boot_smoke.py): the water's native scheduling (docs/SPU_NON_AUDIO.md section 3).
+#
+# Starts from: the kept checkpoint castle-front, as river_fight.
+# Route: river_fight's to the river (area 18); there, with DOTHEROES_WATER_LOG=1, the
+#   water's set-ups, shutdowns and signal counts are logged with their times.
+# Then: 8 s in the river; the system menu open (the game paused) for 10 s and closed;
+#   8 s; TITLE and CONTINUE (the water is set up once at boot and kept for the session:
+#   its steps stop over the reload, 2026-11-10); the route
+#   to the river again; 8 s; a second pause of 10 s; 8 s. The log shows whether the
+#   steps stop while paused and start again after. Last, the game asked to exit as closing
+#   the window asks it (quit.trigger): the water's shutdown runs in the game's own exit path.
+#! saves build/checkpoints/castle-front
+#! env DOTHEROES_NATIVE_CD=1 DOTHEROES_NATIVE_SOLVER=1,2,4,5,6 GCM_WRAP_LAP=1 DOTHEROES_PRESENT_ONCE=1
+#! env DOTHEROES_DEV_STATE=1 DOTHEROES_DEV_KEYS=1 DIAG_FRAMES=frames.log PS3_VERBOSE=0 DOTHEROES_WATER_LOG=1
+#! env WINDOW=1 VISIBLE=1 TOPMOST=1 GRAB_EVERY=60 PS3_OSD_FPS=2 DUMP=0 SHOT_EVERY=0
+#! secs 600
+
+block to_title_and_continue
+  press START               # the system menu, on RESUME
+  sleep 2
+  press UP                  # TITLE (the list wraps)
+  sleep 1
+  press CROSS               # "Exit game? Unsaved data will be lost.", on NO
+  sleep 2
+  press UP
+  sleep 1
+  press CROSS               # YES
+  log TitleMovie 30         # the title's movie opened again
+  sleep 6
+  call continue
+end
+
+block continue
+  press START               # "PRESS START BUTTON"
+  sleep 3
+  press START               # CONTINUE
+  sleep 5
+  press CROSS               # "Change characters?" NO
+end
+
+block route_to_river
+  hold RIGHT 4
+  hold DOWN 1.5
+  hold RIGHT 3
+  hold RIGHT 4
+  hold RIGHT 4
+  hold RIGHT 2.5
+  hold UP 1.5
+  hold RIGHT 2
+end
+
+block pause_10s
+  press START               # the system menu (the game paused), on RESUME
+  sleep 2
+  state menu==1 5
+  shot paused
+  sleep 8
+  press CROSS               # RESUME
+  sleep 2
+  state menu==3 10
+end
+
+log TitleMovie 120
+sleep 5
+call continue
+state life>0,area==17 90
+sleep 3
+segment route castle-to-river
+call route_to_river
+state area==18,life>0 30
+endseg
+sleep 8
+shot river-before-pause
+segment menu pause-1
+call pause_10s
+endseg
+sleep 8
+shot river-after-pause
+segment menu title-continue
+call to_title_and_continue
+state life>0,area==17 60
+endseg
+sleep 3
+segment route castle-to-river-2
+call route_to_river
+state area==18,life>0 30
+endseg
+sleep 8
+segment menu pause-2
+call pause_10s
+endseg
+sleep 8
+shot river-end
+quit
+sleep 10

@@ -554,10 +554,23 @@ void memsnap_loop()
 // harness's TerminateProcess would lose (they are otherwise written at their
 // set time or at exit) -- then the process ends with status 0 without running
 // exit handlers (other threads are mid-frame).
+// quit.trigger instead: the game asked to exit as closing the window asks it
+// (ps3_host_quit: REQUEST_EXITGAME to its sysutil callbacks, a grace period,
+// then exit 0 with the exit handlers) -- the game's own shutdown path, for the
+// tests of what runs there (the water's, the waver's teardown).
+extern "C" void ps3_host_quit(const char* why);   // cellSysutil.c
 void stop_loop()
 {
     for (;;) {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        if (FILE* q = fopen("quit.trigger", "rb")) {
+            fclose(q);
+            remove("quit.trigger");
+            fprintf(stderr, "[dev-state] quit.trigger at %.3f s: the game asked to exit, as closing the window does\n",
+                    (double)(int64_t)(ps3_ft_now() - g_ps3_ft.base) / 1e9);
+            ps3_host_quit("quit.trigger");
+            continue;
+        }
         FILE* t = fopen("stop.trigger", "rb");
         if (!t) continue;
         fclose(t);

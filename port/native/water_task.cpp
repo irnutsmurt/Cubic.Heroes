@@ -261,6 +261,14 @@ struct Runner {
     Local* local = nullptr;
     // counts
     std::atomic<uint64_t> signals{0}, steps{0}, nothing{0}, unsupported{0}, coalesced{0}, shape{0}, ns{0}, max_ns{0};
+    // native scheduling: the set-up's parameter block, and the set-ups and shutdowns
+    bool native_setup = false;
+    std::atomic<uint32_t> native_params{0};
+    std::atomic<uint64_t> setups{0}, shutdowns{0}, signals_after_stop{0};
+    bool live = false;   // between a native set-up and its shutdown
+    // DOTHEROES_WATER_LOG=1: set-ups, shutdowns, gaps in the signals (a pause) and a count every 5 s
+    bool log = false;
+    Clock::time_point t0, log_last, sig_prev;
     const char* last_reason = nullptr;
     Clock::time_point first_signal, last_signal;   // the step rate (the game's period: TOC constants, not read yet)
     // check mode
@@ -435,6 +443,26 @@ void capture(uint32_t step, uint32_t param_ea, uint32_t flag)
     if (g->cap_log) fflush(g->cap_log);
 }
 
+double since_start() { return std::chrono::duration<double>(Clock::now() - g->t0).count(); }
+
+// A signal's time for the log: a gap of over a second (the game paused, or no water) said once it ends.
+void log_signal()
+{
+    const Clock::time_point now = Clock::now();
+    if (g->sig_prev != Clock::time_point{}) {
+        const double gap = std::chrono::duration<double>(now - g->sig_prev).count();
+        if (gap > 1.0)
+            fprintf(stderr, "[water-log] t=%.2f signals again after %.2f s without (signals %llu, steps %llu)\n",
+                    since_start(), gap, (unsigned long long)g->signals.load(), (unsigned long long)g->steps.load());
+    }
+    g->sig_prev = now;
+    if (std::chrono::duration<double>(now - g->log_last).count() >= 5.0) {
+        g->log_last = now;
+        fprintf(stderr, "[water-log] t=%.2f signals %llu, steps %llu\n", since_start(),
+                (unsigned long long)g->signals.load(), (unsigned long long)g->steps.load());
+    }
+}
+
 void report()
 {
     if (!g) return;
@@ -447,6 +475,10 @@ void report()
             n ? g->ns.load() / 1e3 / (double)n : 0.0, g->max_ns.load() / 1e3, (unsigned long long)g->coalesced.load(),
             (unsigned long long)g->nothing.load(), (unsigned long long)g->unsupported.load(),
             g->last_reason ? ": " : "", g->last_reason ? g->last_reason : "", (unsigned long long)g->shape.load());
+    if (g->native_setup)
+        fprintf(stderr, "[water] native scheduling: %llu set-up(s), %llu shutdown(s), no SPURS instance or task; "
+                "%llu signal(s) with no water set up\n", (unsigned long long)g->setups.load(),
+                (unsigned long long)g->shutdowns.load(), (unsigned long long)g->signals_after_stop.load());
     const uint64_t s = g->signals.load();
     const double span = std::chrono::duration<double>(g->last_signal - g->first_signal).count();
     if (s > 1 && span > 0)
@@ -477,6 +509,13 @@ extern "C" void water_task_init(void)
     if (mode == kLifted && !(cap && *cap)) return;
     g = new Runner;   // never destroyed: the worker thread is detached
     g->mode = mode;
+    // The set-up and shutdown native too (water_task.h), unless the SPU task is wanted (lifted, check) or
+    // the steps are captured (the capture reads the task's event flag); DOTHEROES_WATER_SPURS=1 keeps them.
+    const char* lg = getenv("DOTHEROES_WATER_LOG");
+    g->log = lg && !strcmp(lg, "1");
+    g->t0 = g->log_last = Clock::now();
+    const char* sp = getenv("DOTHEROES_WATER_SPURS");
+    g->native_setup = (mode == kAsync || mode == kSync) && !(cap && *cap) && !(sp && !strcmp(sp, "1"));
     if (mode == kAsync || mode == kSync) g->local = new Local;
     if (mode == kCheck) g->check_local = new Local;
     if (cap && *cap) {
@@ -493,8 +532,9 @@ extern "C" void water_task_init(void)
     }
     g_water_hook = 1;
     atexit(report);
-    fprintf(stderr, "[water] the water task: %s%s\n", kModeName[mode],
-            g->cap_count ? "; steps captured (DOTHEROES_WATER_CAPTURE)" : "");
+    fprintf(stderr, "[water] the water task: %s%s%s\n", kModeName[mode],
+            g->cap_count ? "; steps captured (DOTHEROES_WATER_CAPTURE)" : "",
+            g->native_setup ? "; set-up and shutdown native (no SPURS)" : "; the game's SPURS set-up");
 }
 
 extern "C" void water_task_counts(WaterTaskCounts* out)
@@ -509,6 +549,42 @@ extern "C" void water_task_counts(WaterTaskCounts* out)
     out->checked = g->checked;
     out->equal = g->equal;
     out->busy = g->busy;
+    out->setups = g->setups.load();
+    out->shutdowns = g->shutdowns.load();
+}
+
+extern "C" int water_task_native_setup(void) { return g && g->native_setup; }
+
+extern "C" void water_task_native_started(uint32_t params)
+{
+    g->native_params = params;
+    g->setups++;
+    if (g->log)
+        fprintf(stderr, "[water-log] t=%.2f set-up #%llu, native (parameters at %08X)\n", since_start(),
+                (unsigned long long)g->setups.load(), params);
+    std::lock_guard<std::mutex> lk(g->m);
+    g->live = true;
+}
+
+extern "C" void water_task_native_stopped(void)
+{
+    {
+        std::lock_guard<std::mutex> lk(g->m);
+        g->live = false;   // signals from now on (none expected) do nothing
+    }
+    if (g->started) wait_idle();   // the step under way finishes before the game frees the heights and texture
+    g->shutdowns++;
+    if (g->log)
+        fprintf(stderr, "[water-log] t=%.2f shutdown #%llu, native (signals %llu, steps %llu)\n", since_start(),
+                (unsigned long long)g->shutdowns.load(), (unsigned long long)g->signals.load(),
+                (unsigned long long)g->steps.load());
+}
+
+extern "C" void water_task_note(const char* what)
+{
+    if (g && g->log)
+        fprintf(stderr, "[water-log] t=%.2f %s (signals %llu, steps %llu)\n", since_start(), what,
+                (unsigned long long)g->signals.load(), (unsigned long long)g->steps.load());
 }
 
 extern "C" int water_task_signal(uint32_t block, uint32_t bits)
@@ -516,6 +592,27 @@ extern "C" int water_task_signal(uint32_t block, uint32_t bits)
     if (!g) return 0;
     // The task's argument as the game builds it (func_003C7BA8): the 24
     // bytes' EA as a u64, then the flag. Anything else is not this task.
+    if (block == kNativeBlock) {   // the native set-up's: always handled here (there is no flag to set)
+        if (!(bits & 1)) return 1;
+        std::lock_guard<std::mutex> lk(g->m);
+        if (!g->live) { g->signals_after_stop++; return 1; }
+        const uint32_t step = (uint32_t)++g->signals;
+        g->last_signal = Clock::now();
+        if (step == 1) g->first_signal = g->last_signal;
+        if (g->log) log_signal();
+        if (g->mode == kSync) {
+            g->running = true;   // (the lock is held: the sync step runs here, on the signalling thread)
+            timed_run(g->native_params, *g->local);
+            g->running = false;
+            return 1;
+        }
+        if (!g->started) { g->started = true; std::thread(worker_main).detach(); }
+        if (g->pending) g->coalesced++;
+        g->pending = true;
+        g->param_ea = g->native_params;
+        g->wake.notify_one();
+        return 1;
+    }
     const uint32_t arg = block + kBlockArgument, flag = block + kBlockFlag;
     const uint32_t param_ea = gbe32(arg + 4);
     if (gbe32(arg) != 0 || gbe32(arg + 8) != flag) { g->shape++; return 0; }
@@ -529,6 +626,7 @@ extern "C" int water_task_signal(uint32_t block, uint32_t bits)
     const uint32_t step = (uint32_t)++g->signals;
     g->last_signal = Clock::now();
     if (step == 1) g->first_signal = g->last_signal;
+    if (g->log) log_signal();
     if (g->cap_count) capture(step, param_ea, flag);
     switch (g->mode) {
     case kLifted:
