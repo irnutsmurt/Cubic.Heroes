@@ -1,6 +1,6 @@
 # R8: the CPU side -- SPU workloads, physics, scheduling, the game thread
 
-Started 2026-11-06, after the owner accepted R7 (c74a26a, NATIVE_R7.md) as
+Started 2026-11-06, after the owner accepted R7 (811a4dd, NATIVE_R7.md) as
 the graphics architecture checkpoint. R8 is the combined CPU/SPU, physics,
 native scheduling and game-thread work: an inventory of the PS3 execution
 machinery still running and what of it is on the critical path, then
@@ -122,7 +122,7 @@ every build: section 5.5.)
 `git status` has shown config/insn_patches.json modified since 2026-11-02.
 Its bytes are the committed blob's: the working file hashes to 2caa8b4
 (`git hash-object`, with and without filters), 2,866 bytes, LF endings, no
-carriage return -- the blob of commit 0d87837 ("The hero walks at 9 units a
+carriage return -- the blob of commit b6b719a ("The hero walks at 9 units a
 second at any frame rate"). The index still holds the stat data of an
 earlier checkout with CRLF endings (2,927 bytes: 2,866 and 61 line ends,
 cached 2026-11-02 06:46), and git reports a size mismatch as a modification
@@ -134,7 +134,7 @@ the lifter's JSON reader does not see. R8 refreshes the index's stat data
 
 R8's baseline is the R7 release as measured, kept unchanged:
 build/r8/base (dotheroes.exe sha256 1274d538..., its PDB 1b5f7b0b...,
-SDL2.dll 63dbe5be...; build/r8/base/SHA256SUMS), built from repo c74a26a
+SDL2.dll 63dbe5be...; build/r8/base/SHA256SUMS), built from repo 811a4dd
 and ps3recomp 4c22c24 (the 116 patches in patches/ps3recomp), R7's lift of
 build/EBOOT.elf with config/insn_patches.json, config/sjlj.json and
 config/r7_native_hooks.json.
@@ -1775,7 +1775,7 @@ backend's frame dump (PS3RECOMP_VK_DUMP, the presented picture, every 15th
 present), which native runs write too; the scenarios turn it off for timing
 (DUMP=0 SHOT_EVERY=0 in their headers), so validation now passes DUMP=1
 SHOT_EVERY=5. A second dump added to the native present on the belief that
-it had none was a mistake and is removed (e43c618). The backend writes the
+it had none was a mistake and is removed (100ee72). The backend writes the
 dump in place, and a copy taken mid-write had loaded as a truncated image
 with black rows (4 of 19 shots in one river run); the harness now keeps a
 shot only when the copied file holds every pixel, and copies again shortly
@@ -2083,7 +2083,7 @@ performance switch added back); the installed game's `--memtest` exit 0. The ins
 carries the save list ("list dialog"), the boss gate ("frame-counted boss updates"), the editor's lines
 and the SPU census. The last stage, a river fight from the install, failed in the harness, not the game:
 boot_smoke.py took the install's path relative to the repository, which Windows cannot do across drives
-(fixed, 8f5b02d); that stage runs again with the next build. The player's saves and edited characters
+(fixed, 6444c4d); that stage runs again with the next build. The player's saves and edited characters
 are not touched by an install or an update (the install writes its own directory; the game data root
 is the player's, %LOCALAPPDATA%\dotheroes, never written by the tests).
 

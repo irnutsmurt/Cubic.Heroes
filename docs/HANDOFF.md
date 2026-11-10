@@ -119,7 +119,7 @@ edited characters across restarts. That is a small, early part of the game
 
 **Performance configuration.** Four switches, all experimental, hold 60 fps
 in the scenes measured so far. **Every fresh player install turns all four
-on by default** (2026-11-03, commit 45033a0): the setup app writes them into
+on by default** (2026-11-03, commit c88b889): the setup app writes them into
 a new install's dotheroes.cfg and adds missing ones to an older install's,
 keeping a player's own values; the executable's built-in defaults and the
 development runs leave them off unless set. So players now run native
@@ -139,7 +139,7 @@ bit-exact. The default (all four off) still drops to p99 29-38 ms in
 debris-heavy fights. Native inflate (the Edge zlib map packs) is on by
 default and exact (below), not one of the four.
 
-**Stable baseline.** Tag `stable-2026-11-02` (commit db11101; ps3recomp
+**Stable baseline.** Tag `stable-2026-11-02` (commit bf01c0d; ps3recomp
 0001-0085, its local tag `dotheroes-stable-2026-11-02`): the build the
 20-reload soak, the dungeon route and the fullscreen tests ran, with the
 four switches. Its executable (sha256 9a42d867...) is kept locally in
@@ -431,7 +431,7 @@ Finalize fix, wait-free creation) is measured against it.
    2 (main thread: the remaining reservation test 6-7.5% of generated
    samples, condition-register updates, indirect calls, the matrix code;
    render side: barrier tracking, submission waits, the present readback).
-   **Checkpoint:** tag `checkpoint-2026-11-04` (repo 9ea01df, ps3recomp
+   **Checkpoint:** tag `checkpoint-2026-11-04` (repo e8642c5, ps3recomp
    578c9aa, pushed), smoke-tested; executable, symbols and measurements in
    build/checkpoint/2026-11-04.
    **Architecture (direction approved by the owner, 2026-11-04):** zero

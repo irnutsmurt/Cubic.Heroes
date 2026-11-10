@@ -42,7 +42,7 @@ flight when their run ended; comparisons the pools had no buffer for are
 counted apart in each report (dg4 15,232 and st1 3,335 before the pools
 were reworked, dg5 1,122). The runs' builds differ only in the
 measurement plumbing (comparison pools, counters); recording, matching
-and rendering are the same in all of them (since commit 07d848d).
+and rendering are the same in all of them (since commit 4f9778f).
 
 **By chain variant** (a frame's sequence of targets, and as a second level
 of programs by structure) [M, the reports' variant lines]:
