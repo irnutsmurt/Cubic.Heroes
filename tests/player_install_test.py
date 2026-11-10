@@ -17,6 +17,7 @@ Needs the prebuilt parts in their release configuration (build/lib/windows/game_
 "native-release"; tools/zig_build.py build_prebuilt). The folder is INSTALL_TEST_DIR
 (default F:/3d dot game heroes/install-test: an install is ~10 GB); it is replaced by `fresh`.
 Writes <folder>/test-report.json. docs/NATIVE_R8.md section 7.2."""
+import glob
 import hashlib
 import json
 import os
@@ -187,9 +188,43 @@ def stage_game():
     tail = (r.stdout + r.stderr).strip().splitlines()[-3:]
     report["stages"]["game"] = {"memtest_exit": r.returncode, "memtest_tail": tail}
     check("game", r.returncode == 0, f"dotheroes.exe --memtest: exit {r.returncode} ({' / '.join(tail)})")
-    env = dict(os.environ, INSTALLED=DIR, SCENARIO="river_fight", RUN_TAG="install-test", AUDIO="1")
-    r = subprocess.run([PY, os.path.join(ROOT, "tests", "boot_smoke.py"), "60"], cwd=ROOT, env=env, timeout=900)
-    check("game", r.returncode == 0, f"a river fight from the install (tests/boot_smoke.py INSTALLED=): exit {r.returncode}")
+    # The river fight from the install, long enough to reach it (the title, CONTINUE from the kept checkpoint's
+    # saves, the route: the fight starts ~65 s in) and judged by the fight, not the exit: before 2026-11-10 this
+    # ran 60 s, the run ended at the title or the continue, and the stage passed on exit 0 alone.
+    # The save-data list is off for this run (INSTALLED_KEEP): a player's install shows it at CONTINUE, and the
+    # river route is written for the title's first entry; the list has its own drives (save_picker,
+    # save_picker_edit) in the validation set.
+    env = dict(os.environ, INSTALLED=DIR, SCENARIO="river_fight", RUN_TAG="install-test", AUDIO="1",
+               INSTALLED_KEEP="PS3_SAVEDATA_PICKER", PS3_SAVEDATA_PICKER="0")
+    r = subprocess.run([PY, os.path.join(ROOT, "tests", "boot_smoke.py"), "220"], cwd=ROOT, env=env, timeout=1200)
+    check("game", r.returncode == 0, f"the game from the install ran (tests/boot_smoke.py INSTALLED=): exit {r.returncode}")
+    runs = sorted(glob.glob(os.path.join(ROOT, "build", "test", "boot-*-install-test")), key=os.path.getmtime)
+    run = runs[-1] if runs else ""
+    fights, native = [], 0
+    try:
+        for ln in open(os.path.join(run, "segments.jsonl"), encoding="utf-8"):
+            s = json.loads(ln)
+            if s.get("kind") == "fight":
+                fights.append(s)
+    except OSError:
+        pass
+    try:
+        for ln in open(os.path.join(run, "stderr.log"), encoding="utf-8", errors="replace"):
+            m = re.match(r"\[phys-direct\] (\d+) native tasks issued directly", ln)
+            if m:
+                native = max(native, int(m.group(1)))
+    except OSError:
+        pass
+    # Judged by fighting, not by finishing: an install takes normal damage (no can't-die), so the hero may die
+    # and the route start again; a fight of 30 s or more with native physics tasks issued is what is checked.
+    done = [s for s in fights if s.get("ok")]
+    fought = [s for s in fights if (s.get("wall1") or 0) - (s.get("wall0") or 0) >= 30]
+    deaths = sum(1 for s in fights if "life" in str(s.get("why", "")))
+    report["stages"]["game"]["fight"] = {"run": run, "segments": len(fights), "completed": len(done),
+                                         "fought_30s": len(fought), "deaths": deaths, "native_tasks": native}
+    check("game", bool(fought) and native > 0,
+          f"a river fight from the install: {len(fought)} fight segment(s) of 30 s or more ({len(done)} completed, "
+          f"{deaths} ended by the hero's death), native physics ({native} tasks issued directly)")
 
 
 STAGES = {"fresh": stage_fresh, "check": stage_check, "update": stage_update, "relift": stage_relift,

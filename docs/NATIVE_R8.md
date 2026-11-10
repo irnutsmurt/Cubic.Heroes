@@ -42,7 +42,7 @@ per-thread work reported apart. An average of 144 is not 144 sustained.
 | **The solver's set-up (commands 1 and 2)** | **native and the default**: byte for byte on seven captured steps and in the game over 180 checked steps (0 differ); the river fight 203.4-209.3 fps against 198.2-200.9, p99 6.57-6.82 ms against 7.24-7.44 (docs/SPU_NON_AUDIO.md section 1) |
 | **The store fixes (ps3recomp 0125, 0133)** | **built, validated, free**: memtest 695/695; the line-crossing test folded into the reservation bitmap, rel10b as fast as the play build (section 9.8) |
 | **The recorder's step 1** | **done**: no lock on the producer's path, other threads handed over; the fields +2.5% (section 8.4) |
-| **The player's install** | **all stages pass** on the newest lift (gen8), the installed game's river fight included (section 9.8) |
+| **The player's install** | all stages pass on the newest lift (gen12), **the installed game's river fight included since 2026-11-10** -- before that the test never reached it (a 60 s run; corrected, section 9.8) |
 | **The inflate and the water** | **native, the default** (rel13): the inflate's direct path replaces each map pack's whole SPURS instance (every pack's CRC as before); the water's step equal to the SPU task's over 3,194 checked steps; river 204.1-208.8 fps against rel11's 202.2-202.3 (docs/SPU_NON_AUDIO.md sections 2-3) |
 | What is left | section 9 -- one decision for the owner there (the reservation test) |
 
@@ -2086,6 +2086,18 @@ boot_smoke.py took the install's path relative to the repository, which Windows 
 (fixed, 8f5b02d); that stage runs again with the next build. The player's saves and edited characters
 are not touched by an install or an update (the install writes its own directory; the game data root
 is the player's, %LOCALAPPDATA%\dotheroes, never written by the tests).
+
+**Correction (2026-11-10).** "The installed game's river fight" was reported as passing (gen8, gen9);
+it was not reached. The game stage ran the river_fight drive for 60 s and passed on the run's exit code
+alone. The dev runs reach the fight about 65 s in (the title, CONTINUE from the seeded save, the route),
+so every installed run stopped at the title or the continue: the drive's log ends waiting for area 17,
+no physics task ran and the water never stepped. What those runs did show: the install boots, plays the
+title with sound (FMOD's mixer ran its blocks) and exits cleanly. Two causes: the 60 s, and the save-data
+list, which a player's install shows at CONTINUE (the harness turns it off for its own runs; the route is
+written for the title's first entry). The stage now runs 220 s with the list off for that run (it has its
+own drives in the validation set) and passes only on a fight of 30 s or more with native physics tasks
+issued, counting deaths apart (an install takes normal damage). gen12 (rel17's install, 2026-11-10): every
+stage passes, **the installed game's river fight completed, 43,992 native physics tasks**.
 
 
 ## 10. Reproducing
