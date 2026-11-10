@@ -1319,7 +1319,26 @@ Promotion at every call measured worse before (section 5.6: +38% code); a livene
 would have to apply across many functions to pay, not one hot spot. Next, as an experiment of its own:
 promotion with call-site liveness for the ten hottest non-leaf functions of these two profiles (about
 a quarter of the thread's own time in the fields), measured against rel13 in both scenes; adopted only
-if it is faster beyond the runs' spread. Not started.
+if it is faster beyond the runs' spread.
+
+**The trial (2026-11-10)** [C, M]. The lifter's `--promote-calls FILE` (ps3recomp 0134; config/r8_promote.json:
+func_000A7C78, 000A8B5C, 0073E5FC, 0073A70C, 000A7078, 0072E468, 0073EB70, 0070B3FC, 0073A188, 00729F84 -- 24% of
+the game thread's own time in the fields, 13% in the river):
+- **How**: the registers the function uses stay in C locals; before each call (the lift's two forms, direct and
+  PPU_ICALL, with the trampoline's drain) the registers that may have been written since the last call are
+  stored back (a forward "may be dirty" pass over the function's lines, labels and gotos); after it, only the
+  registers a callee may change (r0-r13, f0-f13, cr, ctr, xer) that may still be read are reloaded (a backward
+  liveness pass in which a call reads what it stores and a return what it may store); returns store back what
+  may be dirty. Exact PPU state at every call and return; the one assumption is the PowerPC 64 ABI's: a callee
+  keeps r14-r31 and f14-f31. Left alone: an sjlj frame, a hook or observer, an indexed register, any other
+  escape or control flow (none of the ten has one).
+- **Code**: 115 calls; 1,352 stores before them and 673 reloads after, in all ten.
+- **The assumption tested**: a check build (DOTHEROES_PPU_PROMO_CHECK=ON, build/r8/chk14) compares, after every
+  promoted call, each kept register the function still reads with what the callee left (port/promo_check.cpp).
+  Over the nine validation scenes and a normal-damage fight: **2.62 billion calls checked, 0 registers changed
+  by a callee**.
+- **Timing**: the A/B against rel13 (build/r8/ab16_run.sh, three rounds rotated, uncapped, real audio) --
+  pending; adopted only if faster beyond the runs' spread.
 
 ### 9.1 Queued until testing resumes
 

@@ -1,0 +1,27 @@
+{
+ "note": "--promote-calls (docs/NATIVE_R8.md section 9.0): the ten hottest non-leaf lifted functions of rel13's main-thread profiles (build/r8/prof13_run.sh: the fields and the river fight, uncapped, DIAG_PROF; self time, fields + river %), registers kept in locals across their calls with liveness. A trial: adopted only if faster than rel13 beyond the runs' spread.",
+ "functions": [
+  "0x000A7C78",
+  "0x000A8B5C",
+  "0x0073E5FC",
+  "0x0073A70C",
+  "0x000A7078",
+  "0x0072E468",
+  "0x0073EB70",
+  "0x0070B3FC",
+  "0x0073A188",
+  "0x00729F84"
+ ],
+ "profile_share": {
+  "0x000A7C78": "9.3 + 3.3",
+  "0x000A8B5C": "2.6 + 2.8",
+  "0x0073E5FC": "3.2 + 1.2",
+  "0x0073A70C": "1.4 + 1.8",
+  "0x000A7078": "2.3 + 0.7",
+  "0x0072E468": "1.5 + 1.2",
+  "0x0073EB70": "1.9 + <0.7",
+  "0x0070B3FC": "0.7 + 0.9",
+  "0x0073A188": "1.4 + <0.7",
+  "0x00729F84": "<0.7 + 1.1"
+ }
+}

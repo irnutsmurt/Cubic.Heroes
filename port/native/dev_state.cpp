@@ -106,6 +106,7 @@ extern "C" { void (*g_dotheroes_stop_hook)(void) = nullptr; }
 extern "C" void phys_direct_report(void);
 extern "C" void inflate_direct_report(void);
 extern "C" void water_task_report(void);
+extern "C" void ppu_promo_report(void);
 extern "C" void dev_waver_report(void);
 extern "C" void waver_game_report(void);
 
@@ -593,6 +594,7 @@ void stop_loop()
         phys_direct_report();   // phys_direct.cpp: its counts (atexit does not run past TerminateProcess)
         inflate_direct_report();   // inflate_direct.cpp: the same for the map packs
         water_task_report();       // water_task.cpp: the water's steps (with DOTHEROES_NATIVE_WATER)
+        ppu_promo_report();        // promo_check.cpp: a PPU_PROMO_CHECK build's count (else nothing)
         dev_waver_report();        // phys_hooks.cpp: DOTHEROES_DEV_WAVER's starts and frame times
         waver_game_report();       // waver_game.cpp: the waver's native frames or its check
         fflush(stdout);

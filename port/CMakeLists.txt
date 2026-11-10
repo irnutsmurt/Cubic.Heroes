@@ -230,6 +230,9 @@ target_sources(${PROJECT_NAME} PRIVATE native/memtest.cpp native/memtest_checked
 # R8's physics hooks (config/r8_hooks.json): the guest registers in and out of
 # native/phys_direct.cpp
 target_sources(${PROJECT_NAME} PRIVATE phys_hooks.cpp)
+# The lifter's --promote-calls check (docs/NATIVE_R8.md section 9.0): its report,
+# and with DOTHEROES_PPU_PROMO_CHECK=ON the test after every promoted call
+target_sources(${PROJECT_NAME} PRIVATE promo_check.cpp)
 
 # The lifted SPU sources use bare #include "spu_context.h". Scope that include
 # directory (and their flags) to those TUs alone: adding it to the whole target
@@ -340,6 +343,14 @@ if(DOTHEROES_NATIVE_RELEASE)
     # PPU_BARE_LOADS; a lift from before R8 ignores it). DOTHEROES_PPU_CHECKED_LOADS=ON
     # keeps the tests in a release build.
     option(DOTHEROES_PPU_CHECKED_LOADS "Keep the lifted loads' inline tests in a native release build" OFF)
+    # A lift with --promote-calls (section 9.0): DOTHEROES_PPU_PROMO_CHECK=ON tests,
+    # after every call in a promoted function, that the callee kept r14-r31 and
+    # f14-f31 (port/promo_check.cpp). A test build, not a player's.
+    option(DOTHEROES_PPU_PROMO_CHECK "Test the promoted functions' callees keep r14-r31/f14-f31" OFF)
+    if(DOTHEROES_PPU_PROMO_CHECK)
+        target_compile_definitions(${PROJECT_NAME} PRIVATE PPU_PROMO_CHECK=1)
+        message(STATUS "Promoted calls:  checked (DOTHEROES_PPU_PROMO_CHECK)")
+    endif()
     # Bare only where their assumptions are established (section 5.3): the
     # whole guest space and a guard reserved, pages committed zero-filled on
     # first touch (port/main.cpp's commit handler), x86-64's scalar loads.
