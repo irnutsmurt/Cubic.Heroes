@@ -273,7 +273,8 @@ void capture_on_create(uint32_t entry, const uint32_t arg[4])
 
 // ---- native commands (DOTHEROES_NATIVE_SOLVER)
 std::atomic<unsigned long long> g_ran_native{ 0 }, g_cells{ 0 }, g_contacts{ 0 }, g_waits{ 0 };
-std::atomic<unsigned long long> g_no_command{ 0 }, g_other_desc{ 0 }, g_bodies{ 0 }, g_solved{ 0 }, g_bad_rows{ 0 };
+std::atomic<unsigned long long> g_setup_contacts{ 0 }, g_setup_unmodeled{ 0 }, g_typed_declined{ 0 };
+std::atomic<unsigned long long> g_no_command{ 0 }, g_other_desc{ 0 }, g_bodies{ 0 }, g_bodies_set{ 0 }, g_solved{ 0 }, g_bad_rows{ 0 };
 
 // The command the PPU pushes right after CreateTask: wait for it a while
 // (the task may start before the push); past that the lifted task waits.
@@ -325,6 +326,7 @@ int native_command(uint32_t desc, uint32_t cmd, const uint32_t arg[4])
     uint8_t entry[16];
     if (!peek_command(inq, entry)) { g_no_command++; return 0; }
     if (be32(entry + 4) != 1 || be32(entry + 8) != desc) { g_other_desc++; return 0; }
+    if (cmd == 2 && !bullet_solver::setup_manifolds_supported(vm_base, desc)) { g_typed_declined++; return 0; }
     if (!spurs_queue_spu_pop(inq, entry)) { g_no_command++; return 0; }
     native_work(desc, cmd);
     while (!spurs_queue_spu_push(outq, entry)) std::this_thread::yield();
@@ -340,6 +342,13 @@ void native_work(uint32_t desc, uint32_t cmd)
     if (cmd == 6) bullet_solver::writeback_task(vm_base, desc, sync, st);
     else if (cmd == 5) g_bodies += bullet_solver::copyback_task(vm_base, desc);
     else if (cmd == 4) bullet_solver::iterate_task(vm_base, desc, sync, st);
+    else if (cmd == 1) g_bodies_set += bullet_solver::setup_bodies_task(vm_base, desc);
+    else if (cmd == 2) {
+        bullet_solver::ManifoldSetupStats ms;
+        bullet_solver::setup_manifolds_task(vm_base, desc, ms);
+        g_setup_contacts += ms.contacts;
+        g_setup_unmodeled += ms.unmodeled;
+    }
     check_task_done(cmd);   // before the PPU can see this task done
     g_cells += st.cells; g_waits += st.waits; g_bad_rows += st.bad;
     (cmd == 4 ? g_solved : g_contacts) += st.contacts;
@@ -350,6 +359,10 @@ void native_work(uint32_t desc, uint32_t cmd)
                 "instead: no command within 20 ms %llu, another descriptor %llu\n",
                 n, g_cells.load(), g_solved.load(), g_contacts.load(), g_waits.load(), g_bad_rows.load(), g_bodies.load(),
                 g_no_command.load(), g_other_desc.load());
+    if (n % 5000 == 0 && (g_native.count(1) || g_native.count(2)))
+        fprintf(stderr, "[native-solver] set-up: %llu bodies, %llu contacts (%llu velocity reads outside the modelled local "
+                "store); %llu tasks with typed constraints left to the image\n",
+                g_bodies_set.load(), g_setup_contacts.load(), g_setup_unmodeled.load(), g_typed_declined.load());
 }
 
 // ---- DOTHEROES_NATIVE_SOLVER_CHECK
@@ -448,12 +461,53 @@ void copyback_check(uint32_t cmd, uint32_t desc)
                 g_native.count(5) ? "native" : "lifted", c.steps, c.bodies, c.bodies_bad, c.words_bad);
 }
 
+// The body set-up's check (DOTHEROES_NATIVE_SOLVER_CHECK=1): as each command-1
+// task is created, what it must leave (bullet_solver::setup_bodies_expected, on
+// the descriptor as created and the rigid bodies the PPU has written); as the
+// next command's first task is created, the PPU having waited for every set-up
+// task, each solver body's 0x40 bytes and each rigid body's companion id
+// compared -- lifted or native.
+struct SetupCheck {
+    std::vector<bullet_solver::SetupBody> expect;
+    unsigned long long steps = 0, bodies = 0, bodies_bad = 0;
+} g_setup_chk;
+
+void setup_check(uint32_t cmd, uint32_t desc)
+{
+    SetupCheck& c = g_setup_chk;
+    if (cmd == 1) {
+        const unsigned n = bullet_solver::setup_bodies_expected(vm_base, desc, nullptr, 0);
+        const size_t at = c.expect.size();
+        c.expect.resize(at + n);
+        bullet_solver::setup_bodies_expected(vm_base, desc, c.expect.data() + at, n);
+        return;
+    }
+    if (c.expect.empty()) return;
+    for (const auto& b : c.expect) {
+        unsigned bad = be32(vm_base + b.rb + 0xC4) != b.index;
+        for (int k = 0; k < 16; k++) bad += be32(vm_base + b.sb + 4 * k) != b.w[k];
+        if (bad) {
+            c.bodies_bad++;
+            if (c.bodies_bad <= 8)
+                fprintf(stderr, "[native-solver] body set-up check: solver body %08X (rigid body %08X, index %u): %u words differ\n",
+                        b.sb, b.rb, b.index, bad);
+        }
+    }
+    c.steps++;
+    c.bodies += c.expect.size();
+    c.expect.clear();
+    if (c.steps % 200 == 0 || (c.bodies_bad && c.steps < 20))
+        fprintf(stderr, "[native-solver] body set-up check (%s): %llu steps, %llu bodies: %llu not as expected\n",
+                g_native.count(1) ? "native" : "lifted", c.steps, c.bodies, c.bodies_bad);
+}
+
 void check_on_create(uint32_t entry, const uint32_t arg[4])   // the PPU thread
 {
     Check& k = g_chk;
     if (entry == kEntrySolver) {
         const uint32_t d = desc_from_queue(arg[2], arg[0]);
         if (d) copyback_check(be32(vm_base + d), d);
+        if (d) setup_check(be32(vm_base + d), d);
     }
     if (entry == kEntryCollision && k.armed) {
         std::lock_guard<std::mutex> lk(k.mu);
@@ -706,6 +760,7 @@ bool bullet_solver_direct_accept(const uint32_t entry[4], uint32_t* cmd)
     if (g_native.empty() || entry[1] != 1 || !entry[2]) return false;
     const uint32_t c = be32(vm_base + entry[2]);
     if (!g_native.count(c)) return false;
+    if (c == 2 && !bullet_solver::setup_manifolds_supported(vm_base, entry[2])) { g_typed_declined++; return false; }
     *cmd = c;
     return true;
 }
@@ -747,10 +802,12 @@ void bullet_solver_init(bool phys_stats)
     if (const char* e = getenv("DOTHEROES_NATIVE_SOLVER")) {
         for (const char* p = e; p && *p; p = strchr(p, ',') ? strchr(p, ',') + 1 : nullptr) {
             const unsigned c = (unsigned)strtoul(p, nullptr, 10);
-            if (c >= 4 && c <= 6) g_native.insert(c);
+            if (c == 1 || c == 2 || (c >= 4 && c <= 6)) g_native.insert(c);
             else fprintf(stderr, "[native-solver] command %u has no native version; it runs lifted\n", c);
         }
-        if (!g_native.empty()) fprintf(stderr, "[native-solver] native (experimental):%s%s%s\n", g_native.count(4) ? " iterate" : "",
+        if (!g_native.empty()) fprintf(stderr, "[native-solver] native (experimental):%s%s%s%s%s\n", g_native.count(1) ? " the body set-up" : "",
+                                       g_native.count(2) ? " the manifold set-up" : "",
+                                       g_native.count(4) ? " iterate" : "",
                                        g_native.count(5) ? " the copy-back" : "", g_native.count(6) ? " the warm-start write-back" : "");
     }
     const char* ck = getenv("DOTHEROES_NATIVE_SOLVER_CHECK");

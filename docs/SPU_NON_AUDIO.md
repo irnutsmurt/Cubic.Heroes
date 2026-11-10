@@ -65,6 +65,31 @@ does the test become removable.
 
 ## 1. Bullet solver: body set-up (command 1) and manifold set-up (command 2)
 
+**Progress (2026-11-09)** [M]:
+- **Command 1, the body set-up: native and checked.** bullet_solver::setup_bodies_task: per body, the
+  solver body's whole 0x40 bytes (deltas zero, angular factor from the rigid body's +0x154, inverse mass
+  from +0x150, +0x2C the local-store address of the body's copy, 0xC800 + 0x1F0 x its place in the package
+  of 256, the rest zero) and the companion id (+0xC4). Offline on four captured steps byte for byte
+  (tests/native/bullet_solver_snapcheck.cpp setup-bodies); in the game, DOTHEROES_NATIVE_SOLVER_CHECK=1,
+  200 steps of the river fight with the lifted task (20,950 bodies) and 200 with the native one (20,587):
+  0 not as expected. Behind the switch: DOTHEROES_NATIVE_SOLVER=1,...; not yet the default.
+- **Command 2, the manifold set-up: native, checked offline, not yet in the game.**
+  bullet_solver::setup_manifolds_task, byte for byte on the four captured steps (71-201 points a step:
+  rows, solver bodies, index lists, hash cells; nothing else changed). Read from the lifted image's
+  disassembly: the command table at local store 0x43AC, command 2 at 0x53D4-0x8160. Its descriptor: +0x30
+  the first cell, +0x34 the cell count, +0x38 the body count (this document said "+0x34.. counts"),
+  +0x40 the manifold holders (16 bytes, the manifold at +4), the time step +0x54, erp +0x68, the warm-start
+  factor +0x80; btPersistentManifold is 0x2E0 bytes. Cells with typed constraints are left to the image
+  (setup_manifolds_supported); none has been seen.
+- **A finding the native code has to keep**: the task reads a moving body's velocity through the solver
+  body's +0x2C -- the local-store address command 1 left, which in command 2's own local store holds
+  copies of manifolds, the index list or zeros. The native code models that region (0xBC60-0x10A00) as
+  the task fills it and reads the same bytes; zeros there instead change the friction rows of 8 points in
+  two of the four steps. It rests on each task starting with a fresh local store, as the runtime gives
+  (unless LBP_PERSIST_LS). On the PS3 the same reads took whatever an earlier task left.
+- **Still to do**: captures over more steps (build/r8/snap9_run.sh: five river steps, two in the fields),
+  then the in-game runs with DOTHEROES_NATIVE_SOLVER=1,2,4,5,6 and the measurement.
+
 **Where** [C]:
 - task image 5 (`PS3_SPURS_BulletSolver_spu_release`, entry 0xF8EC80);
 - issued by func_00955CF0 and awaited in func_00955BD4, the two functions

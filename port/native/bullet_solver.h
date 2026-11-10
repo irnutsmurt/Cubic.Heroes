@@ -77,4 +77,38 @@ unsigned copyback_task(uint8_t* base, uint32_t desc);
 struct BodyWords { uint32_t rb, w[9]; };
 unsigned copyback_expected(const uint8_t* base, uint32_t desc, BodyWords* out, unsigned max);
 
+// Command 1, the body set-up, for one task's range of bodies (descriptor +0x30
+// first, +0x34 count, +0x38 the rigid bodies' pointers; +0x14 the solver
+// bodies): each solver body's 0x40 bytes and each rigid body's companion id,
+// as the game's task leaves them (bullet_solver.cpp). Returns the bodies done.
+unsigned setup_bodies_task(uint8_t* base, uint32_t desc);
+
+// The same as what it writes, for checking.
+struct SetupBody { uint32_t sb, w[16], rb, index; };
+unsigned setup_bodies_expected(const uint8_t* base, uint32_t desc, SetupBody* out, unsigned max);
+
+// Command 2, the manifold set-up, for one task's range of cells (descriptor
+// +0x30 first, +0x34 count): per manifold with points, the three contact rows
+// of each point (0x1B0 bytes at +0x18 + 0x90 x (the cell's row offset + 3 x
+// point)), both solver bodies put back after the warm-start impulses (static
+// ones made at +0x38 bodies + the cell's manifold offset), and per cell its
+// body index list (+0x20) and its hash cell (local bodies, typed constraints
+// 0) -- every byte as the game's task leaves it, local-store leftovers
+// included (bullet_solver.cpp). No lock: a task's cells are its own (bodies
+// shared between cells of tasks running at once race in the game as well).
+struct ManifoldSetupStats {
+    unsigned cells = 0, manifolds = 0, contacts = 0;
+    unsigned static_bodies = 0;   // static solver bodies made
+    unsigned plane_space = 0;     // friction directions from btPlaneSpace1
+    unsigned unmodeled = 0;       // velocity reads through +0x2C outside the modelled local store (none expected)
+    unsigned typed = 0;           // cells with typed constraints, not handled (none in the game's steps seen)
+};
+// What it wrote, by kind, for checking: rows (0x1B0 a point), solver bodies
+// (0x40, once per manifold each), index lists, hash cells.
+struct ManifoldSetupSpans { std::vector<Span> rows, bodies, lists, cells; };
+void setup_manifolds_task(uint8_t* base, uint32_t desc, ManifoldSetupStats& st, ManifoldSetupSpans* spans = nullptr);
+// Whether the native set-up covers this task: none of its cells has typed
+// constraints (not modelled; such a task is left to the game's image).
+bool setup_manifolds_supported(const uint8_t* base, uint32_t desc);
+
 }  // namespace bullet_solver

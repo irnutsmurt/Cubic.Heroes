@@ -5,6 +5,8 @@
 //
 //   bullet_solver_snapcheck writeback <c6r1.bin> <c6r2.bin> <descriptor ea>
 //   bullet_solver_snapcheck copyback <c5r1.bin> <c6r1.bin> <tasks.txt>
+//   bullet_solver_snapcheck setup-bodies <c1r1.bin> <c2r1.bin> <tasks.txt>
+//   bullet_solver_snapcheck setup-manifolds <c2r1.bin> <c4r1.bin> <tasks.txt>
 //   bullet_solver_snapcheck iterate <c4rN.bin> <c4rN+k.bin or c5r1.bin> <tasks.txt> <k rounds>
 //
 // Runs the write-back as one task claiming every cell (what the round does
@@ -20,6 +22,7 @@
 //     port/native/bullet_solver.cpp
 #include <windows.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -111,6 +114,149 @@ static int copyback(const char* pre_path, const char* post_path, const char* tas
     snprintf(buf, sizeof buf, "%u of %u bodies, first 0x200 bytes each (%u velocity floats changed); %zu tasks",
              same, bodies, moved, descs.size());
     expect(same == bodies && bodies > 0, "native copy-back = the game's, byte for byte", buf);
+    printf("[bullet_solver_snapcheck] %s (%d failed)\n", fails ? "FAIL" : "PASS", fails);
+    return fails ? 1 : 0;
+}
+
+// setup-bodies <c1r1.bin> <c2r1.bin> <tasks.txt>: each body set-up task's
+// descriptor as created put back in place, the native set-up run, and each
+// solver body's 0x40 bytes and each rigid body's first 0x200 compared with the
+// snapshot taken as command 2's first task was created.
+static int setup_bodies(const char* pre_path, const char* post_path, const char* tasks)
+{
+    uint8_t* pre = load_space(pre_path);
+    uint8_t* post = load_space(post_path);
+    FILE* f = fopen(tasks, "r");
+    if (!f) { fprintf(stderr, "cannot read %s\n", tasks); return 2; }
+    char line[4096], buf[256];
+    std::vector<uint32_t> descs;
+    std::vector<std::vector<uint32_t>> words;
+    while (fgets(line, sizeof line, f)) {
+        unsigned slot, cmd, round, desc;
+        int at = 0;
+        if (sscanf(line, "task slot %u command %u round %u desc %x:%n", &slot, &cmd, &round, &desc, &at) != 4 || cmd != 1) continue;
+        std::vector<uint32_t> w;
+        const char* p = line + at;
+        for (int k = 0; k < 36; k++) { unsigned v; int used; if (sscanf(p, " %x%n", &v, &used) != 1) break; w.push_back(v); p += used; }
+        if (w.size() == 36) { descs.push_back(desc); words.push_back(w); }
+    }
+    fclose(f);
+    unsigned bodies = 0, sb_same = 0, rb_same = 0;
+    std::vector<uint32_t> sbs, rbs;
+    for (size_t t = 0; t < descs.size(); t++) {
+        for (int k = 0; k < 36; k++) wr32(pre, descs[t] + 4 * k, words[t][k]);
+        std::vector<bullet_solver::SetupBody> want(bullet_solver::setup_bodies_expected(pre, descs[t], nullptr, 0));
+        bullet_solver::setup_bodies_expected(pre, descs[t], want.data(), (unsigned)want.size());
+        for (const auto& b : want) { sbs.push_back(b.sb); rbs.push_back(b.rb); }
+        bodies += bullet_solver::setup_bodies_task(pre, descs[t]);
+    }
+    for (uint32_t sb : sbs) sb_same += memcmp(pre + sb, post + sb, 0x40) == 0;
+    for (uint32_t rb : rbs) rb_same += memcmp(pre + rb, post + rb, 0x200) == 0;
+    snprintf(buf, sizeof buf, "solver bodies %u of %u, rigid bodies (first 0x200 bytes) %u of %u; %zu tasks",
+             sb_same, bodies, rb_same, bodies, descs.size());
+    expect(sb_same == bodies && rb_same == bodies && bodies > 0, "native body set-up = the game's, byte for byte", buf);
+    printf("[bullet_solver_snapcheck] %s (%d failed)\n", fails ? "FAIL" : "PASS", fails);
+    return fails ? 1 : 0;
+}
+
+// setup-manifolds <c2r1.bin> <c4r1.bin> <tasks.txt>: each manifold set-up task's
+// descriptor as created put back in place, the native set-up run for every task
+// in the order they were created, and everything it wrote -- each point's three
+// rows (0x1B0 bytes), each solver body it put back (0x40, compared once), each
+// cell's body index list and hash cell -- compared with the snapshot taken as
+// command 4's first task was created; then whatever else the game changed in
+// the rows and solver bodies (none expected). Differences are shown by word.
+static int setup_manifolds(const char* pre_path, const char* post_path, const char* tasks)
+{
+    uint8_t* pre = load_space(pre_path);
+    uint8_t* orig = load_space(pre_path);
+    uint8_t* post = load_space(post_path);
+    FILE* f = fopen(tasks, "r");
+    if (!f) { fprintf(stderr, "cannot read %s\n", tasks); return 2; }
+    char line[4096], buf[512];
+    std::vector<uint32_t> descs;
+    std::vector<std::vector<uint32_t>> words;
+    while (fgets(line, sizeof line, f)) {
+        unsigned slot, cmd, round, desc;
+        int at = 0;
+        if (sscanf(line, "task slot %u command %u round %u desc %x:%n", &slot, &cmd, &round, &desc, &at) != 4 || cmd != 2) continue;
+        std::vector<uint32_t> w;
+        const char* p = line + at;
+        for (int k = 0; k < 36; k++) { unsigned v; int used; if (sscanf(p, " %x%n", &v, &used) != 1) break; w.push_back(v); p += used; }
+        if (w.size() == 36) { descs.push_back(desc); words.push_back(w); }
+    }
+    fclose(f);
+    if (descs.empty()) { fprintf(stderr, "no manifold set-up task in %s\n", tasks); return 2; }
+    bullet_solver::ManifoldSetupStats st;
+    bullet_solver::ManifoldSetupSpans spans;
+    std::vector<std::pair<uint32_t, size_t>> moving;   // (moving solver body, task) pairs: who warm-starts what
+    for (size_t t = 0; t < descs.size(); t++) {
+        for (int k = 0; k < 36; k++) wr32(pre, descs[t] + 4 * k, words[t][k]);
+        const size_t had = spans.bodies.size();
+        bullet_solver::setup_manifolds_task(pre, descs[t], st, &spans);
+        for (size_t b = had; b < spans.bodies.size(); b++)
+            if ((spans.bodies[b].ea - words[t][5]) / 0x40 < words[t][14]) moving.push_back({ spans.bodies[b].ea, t });
+    }
+    std::sort(moving.begin(), moving.end());
+    moving.erase(std::unique(moving.begin(), moving.end()), moving.end());
+    unsigned shared = 0;
+    for (size_t k = 1; k < moving.size(); k++) shared += moving[k].first == moving[k - 1].first && (k < 2 || moving[k - 2].first != moving[k].first);
+    printf("%zu tasks: %u cells, %u manifolds with points, %u points, %u static solver bodies made, "
+           "%u friction pairs from btPlaneSpace1; unmodelled local-store reads %u, cells with typed constraints %u; "
+           "moving bodies put back by more than one task (a race in the game) %u\n",
+           descs.size(), st.cells, st.manifolds, st.contacts, st.static_bodies, st.plane_space, st.unmodeled, st.typed, shared);
+
+    // one kind of span: how many match, how many the game changed, which words differ
+    auto compare = [&](const char* what, std::vector<bullet_solver::Span> v, unsigned stride) {
+        std::sort(v.begin(), v.end(), [](const bullet_solver::Span& a, const bullet_solver::Span& b) { return a.ea < b.ea; });
+        v.erase(std::unique(v.begin(), v.end(), [](const bullet_solver::Span& a, const bullet_solver::Span& b) { return a.ea == b.ea; }), v.end());
+        unsigned same = 0, changed = 0, shown = 0;
+        std::vector<unsigned> by_word(stride / 4, 0);
+        for (const auto& s : v) {
+            const bool ok = memcmp(pre + s.ea, post + s.ea, s.bytes) == 0;
+            same += ok;
+            changed += memcmp(orig + s.ea, post + s.ea, s.bytes) != 0;
+            if (ok) continue;
+            for (uint32_t k = 0; k < s.bytes / 4; k++) {
+                const uint32_t ea = s.ea + 4 * k;
+                if (rd32(pre, ea) == rd32(post, ea)) continue;
+                by_word[(k * 4 % stride) / 4]++;
+                if (shown < 12) {
+                    shown++;
+                    printf("  %s %08X +0x%03X: native %08X game %08X (before %08X)\n", what, s.ea, 4 * k, rd32(pre, ea),
+                           rd32(post, ea), rd32(orig, ea));
+                }
+            }
+        }
+        if (same != v.size()) {
+            printf("  %s: differing words by offset:", what);
+            for (size_t k = 0; k < by_word.size(); k++) if (by_word[k]) printf(" +0x%02zX:%u", 4 * k, by_word[k]);
+            printf("\n");
+        }
+        snprintf(buf, sizeof buf, "%u of %zu (%u changed by the game)", same, v.size(), changed);
+        expect(same == v.size() && !v.empty(), what, buf);
+    };
+    compare("rows (0x1B0 a point)", spans.rows, 0x1B0);
+    compare("solver bodies (0x40)", spans.bodies, 0x40);
+    compare("body index lists", spans.lists, 4);
+    compare("hash cells (16 bytes)", spans.cells, 16);
+
+    // what else the game changed in the rows and solver bodies
+    const uint32_t rows = words[0][6], sbl = words[0][5];
+    uint32_t rows_end = rows, sb_end = sbl;
+    for (const auto& s : spans.rows) rows_end = std::max(rows_end, s.ea + s.bytes);
+    for (const auto& s : spans.bodies) sb_end = std::max(sb_end, s.ea + s.bytes);
+    std::vector<uint8_t> covered(std::max(rows_end - rows, sb_end - sbl), 0);
+    unsigned other = 0;
+    for (int pass = 0; pass < 2; pass++) {
+        const uint32_t lo = pass ? sbl : rows, hi = pass ? sb_end : rows_end;
+        std::fill(covered.begin(), covered.end(), 0);
+        for (const auto& s : pass ? spans.bodies : spans.rows) memset(&covered[s.ea - lo], 1, s.bytes);
+        for (uint32_t ea = lo; ea < hi; ea++) other += !covered[ea - lo] && orig[ea] != post[ea];
+    }
+    snprintf(buf, sizeof buf, "%u bytes (rows %08X..%08X, solver bodies %08X..%08X)", other, rows, rows_end, sbl, sb_end);
+    expect(other == 0, "nothing else changed in the rows and solver bodies", buf);
+    expect(st.unmodeled == 0 && st.typed == 0, "no unmodelled reads, no typed constraints", "");
     printf("[bullet_solver_snapcheck] %s (%d failed)\n", fails ? "FAIL" : "PASS", fails);
     return fails ? 1 : 0;
 }
@@ -251,10 +397,14 @@ static int iterate(const char* pre_path, const char* post_path, const char* task
 int main(int argc, char** argv)
 {
     if (argc == 5 && !strcmp(argv[1], "copyback")) return copyback(argv[2], argv[3], argv[4]);
+    if (argc == 5 && !strcmp(argv[1], "setup-bodies")) return setup_bodies(argv[2], argv[3], argv[4]);
+    if (argc == 5 && !strcmp(argv[1], "setup-manifolds")) return setup_manifolds(argv[2], argv[3], argv[4]);
     if (argc == 6 && !strcmp(argv[1], "iterate")) return iterate(argv[2], argv[3], argv[4], atoi(argv[5]));
     if (argc != 5 || strcmp(argv[1], "writeback")) {
         fprintf(stderr, "usage: bullet_solver_snapcheck writeback <c6r1.bin> <c6r2.bin> <descriptor ea>\n"
                         "       bullet_solver_snapcheck copyback <c5r1.bin> <c6r1.bin> <tasks.txt>\n"
+                        "       bullet_solver_snapcheck setup-bodies <c1r1.bin> <c2r1.bin> <tasks.txt>\n"
+                        "       bullet_solver_snapcheck setup-manifolds <c2r1.bin> <c4r1.bin> <tasks.txt>\n"
                         "       bullet_solver_snapcheck iterate <c4rN.bin> <c4rN+k.bin or c5r1.bin> <tasks.txt> <k>\n");
         return 2;
     }
