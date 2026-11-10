@@ -11,7 +11,7 @@ results. Compiling is not evidence.
 | 4 | Menus and new-game startup | **Met**: title, new game, CONTINUE, the system menu and its pages, the dot editor, save and load |
 | 5 | Core gameplay | **In progress**. Manual play (the owner): the castle, the field, the river's fights, the first dungeon and its boss (2026-11-02/03). Automated: the field, the river's fights, the first dungeon to the boss's door (checkpoint dungeon1-boss-door); the boss route is exploratory (its key chest does not open yet) |
 | 6 | Full-game coverage | Not started (HANDOFF.md, "Game coverage") |
-| 7 | Stability and release preparation | **In progress**: long-session soaks with reloads; the setup app's headless conversion run end to end on Windows (2026-11-02: a working install from the owner's disc and keys); its GUI, the frozen bundle and a first release not yet |
+| 7 | Stability and release preparation | **In progress**: long-session soaks with reloads; the setup app's headless conversion run end to end on Windows (2026-11-02: a working install from the owner's disc and keys); its GUI, the frozen bundle and a first release not yet. Release-readiness requirement added 2026-11-10: shaders and pipelines prepared before play, with empty-cache tests and stated coverage (SHADER_PREPARATION.md) |
 
 The native-port milestones (R0-R7: the PS3 graphics path replaced, then
 retired) are defined in NATIVE_PORT.md; their records follow its section 10
