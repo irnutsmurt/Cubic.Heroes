@@ -366,7 +366,15 @@ void report()
 
 }  // namespace
 
-extern "C" void phys_direct_report(void) { report(); spu_workload_census_report(stderr); }
+extern "C" void lv2_spu_thread_report(FILE* f);   // lv2_register.c: the SPU threads' receive counts
+extern "C" void spu_overlay_report(FILE* f);      // spu_channels.c: overlay loads by image
+extern "C" void phys_direct_report(void)
+{
+    report();
+    spu_workload_census_report(stderr);
+    lv2_spu_thread_report(stderr);
+    spu_overlay_report(stderr);
+}
 
 extern "C" int phys_direct_issue(uint32_t m, uint32_t slot, const uint32_t entry[4])
 {

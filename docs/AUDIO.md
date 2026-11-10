@@ -141,4 +141,20 @@ cellAudio's ring and notify, the host backend. The downmix is reviewed
 separately: the console's rule for 7.1 to stereo against ours, as a
 behaviour change of its own.
 
-Status: section 1 mapped (2026-11-10). A0 not started.
+Status: section 1 mapped (2026-11-10). A0: the counters done, the captures not yet (below). A1 in progress.
+
+### A0, the counters (2026-11-10, rel16) [M]
+
+`lv2_spu_thread_report` (syscalls/lv2_register.c: per SPU thread, the events its receive service delivered by
+spuq number, the time it waited for them, the time it ran between them) and `spu_overlay_report`
+(spu/spu_channels.c: overlay loads by image), printed beside the SPU census at the test stop:
+
+| Run | Mixer events (spuq 0x63) | Rate | Work between events: mean, max | codec_raw loads | sfxreverb loads |
+|---|---|---|---|---|---|
+| the river fight (v16river) | 14,832 | 187.5 a second | 146.6 us, 2,124 us | 70,604 (4.8 a block) | 0 |
+| the fields, the waver started twice (wv16nf) | 25,634 | 187.5 a second | 162.2 us, 2,556 us | 152,972 (6.0 a block) | 0 |
+
+- One event a 256-sample block at 48 kHz (5.33 ms): the mixer is clocked by cellAudio as section 1.3 reads.
+- Its work is 2.8-3.0% of a core on average, with spikes of 2-2.6 ms a block (under half a block's time).
+- codec_raw is loaded 5-6 times a block; **sfxreverb is imported but never loaded, so never run, in these
+  scenes** -- its port waits for evidence that it runs (step A2).
