@@ -27,6 +27,48 @@ block to_title_and_continue
   call continue
 end
 
+block system_save_listed_second  # as system_save, with the system's list on (PS3_SAVEDATA_PICKER=1): the list opens
+  attempt 3 page_dialogues    # on its head (the game's focus), New Save Data the first row: DOWN to the second save, then YES to overwrite
+    press START
+    sleep 2
+    state menu==1 4
+  end
+  press DOWN
+  sleep 1
+  press CROSS
+  log list.dialog:.3.entries 25
+  sleep 2
+  press DOWN
+  sleep 1
+  shot save_list
+  press CROSS
+  sleep 2
+  shot save_overwrite
+  press CROSS
+  log SAVE.complete 15
+  sleep 4
+  press UP
+  sleep 1
+  press CROSS
+  sleep 2
+  state life>0,menu==3 5
+end
+
+block to_title_no_continue    # the system menu's TITLE and its confirmation, stopping at the title
+  attempt 3 page_dialogues
+    press START
+    sleep 2
+    state menu==1 4
+  end
+  press UP
+  sleep 1
+  press CROSS
+  sleep 2
+  press UP
+  sleep 1
+  press CROSS
+end
+
 block continue_after_death
   state life==0 30
   sleep 12                  # GAME OVER, then "Continue?" on YES

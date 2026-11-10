@@ -14,6 +14,20 @@
    "guard": "g_phys_direct",
    "decline": true,
    "note": "the wait for one task of a manager: non-blocking cellSpursQueuePopBody round the slots. Done natively while the hooks are on (native completions, and the SPURS queues of lifted tasks)"
+  },
+  {
+   "addr": "0x001F2DC0",
+   "host": "dotheroes_tick30_boss_segment",
+   "guard": "g_dotheroes_tick30",
+   "decline": true,
+   "note": "The update (this, &dt) of the segmented boss's body segments (vtable 0x00FE4760 slot 8): its movement, turns and attack timing count frames (+0x75C, +0x770: one step a frame), so it ran 2 to 4.8 times too fast above the game's 30 fps. The gate calls it at 30 Hz with a step of 1/30 s (port/game_patches.cpp)."
+  },
+  {
+   "addr": "0x001E47C4",
+   "host": "dotheroes_tick30_boss_head",
+   "guard": "g_dotheroes_tick30",
+   "decline": true,
+   "note": "The update of the segmented boss's head (vtable 0x00FE4690 slot 8): it ignores the frame time and advances its object by a constant 1/30 s a call (the only update in the game that does), so above 30 fps it ran fast, and the body segments, which read positions from a trail the head fills, ran after it. The gate calls it at 30 Hz (port/game_patches.cpp)."
   }
  ]
 }

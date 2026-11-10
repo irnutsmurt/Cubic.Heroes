@@ -211,7 +211,7 @@ void life_loop()
 // the committed heap (tens of ms, on the calling thread).
 struct Near { uint32_t ea, vt; float x, y, z; };
 
-int scan_near(uint32_t p, float radius, Near* out, int max)
+int scan_near(uint32_t p, float radius, Near* out, int max, uint32_t vt_hi = 0x01100000u)
 {
     int n = 0;
 #ifdef _WIN32
@@ -223,7 +223,7 @@ int scan_near(uint32_t p, float radius, Near* out, int max)
         if (mbi.State == MEM_COMMIT && !(mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) && len > 0x440)
             for (uint64_t o = 0; o + 0x440 <= len && n < max; o += 16) {
                 const uint32_t a = (uint32_t)(ea + o), vt = rd32(a);
-                if (vt < 0x00F00000u || vt >= 0x01100000u || a == p) continue;
+                if (vt < 0x00F00000u || vt >= vt_hi || a == p) continue;
                 const float x = rdf(a + 0x428), y = rdf(a + 0x42C), z = rdf(a + 0x430);
                 if (!(fabsf(x - px) < radius && fabsf(z - pz) < radius && fabsf(y - py) < 20.0f)) continue;
                 if (x == 0.0f && z == 0.0f) continue;
@@ -355,19 +355,26 @@ void player_log_loop()
 // position, when it changed, is appended to actors.bin: records of (u64 ns
 // on the trace's clock, u32 ea, u32 vtable, f32 x, y, z), little-endian.
 // Flushed every half second.
-constexpr int kMaxActors = 64;
+constexpr int kMaxActors = 160;
 
 void actor_log_loop()
 {
     FILE* f = fopen("actors.bin", "wb");
     if (!f) return;
-    Near actors[kMaxActors];
+    static Near actors[kMaxActors];
     int n = 0;
+    // =1: rescan every second; =<ms> above 1: that often. Only the character
+    // classes (vtables below 0x01000000: 0x00FE....): near the world's origin
+    // -- the boss's room -- the heap's other small floats pass the position
+    // test and filled the list (2026-11-09).
+    const char* e = getenv("DOTHEROES_DEV_ACTOR_LOG");
+    const int ms = e ? atoi(e) : 1;
+    const unsigned every = ms > 1 ? (unsigned)(ms / 4 > 0 ? ms / 4 : 1) : 250u;
     for (unsigned tick = 0;; tick++) {
         std::this_thread::sleep_for(std::chrono::milliseconds(4));
         const uint32_t p = g_player.load();
         if (!p || rd32(p) != kPlayerVtable) continue;
-        if (tick % 250 == 0) n = scan_near(p, 40.0f, actors, kMaxActors);   // rescan
+        if (tick % every == 0) n = scan_near(p, 40.0f, actors, kMaxActors, 0x01000000u);   // rescan
         const uint64_t t = ps3_ft_now() - g_ps3_ft.base;
         for (int i = 0; i < n; i++) {
             Near& a = actors[i];
@@ -379,6 +386,79 @@ void actor_log_loop()
             fwrite(&x, 4, 1, f); fwrite(&y, 4, 1, f); fwrite(&z, 4, 1, f);
         }
         if (tick % 125 == 0) fflush(f);
+    }
+}
+
+// DOTHEROES_DEV_FIELD_LOG=<vtable>[,<vtable>...]:<offset>[,<offset>...] (hex):
+// chosen words of every object of those classes -- a boss's state, counters and
+// timers, whose layout differs from class to class -- for timing them in real
+// seconds at different frame rates (2026-11-09, tests/boss_timing.py). The heap
+// (0x10000000-0x20000000, 16-aligned) is scanned for the classes every 200 ms;
+// every 2 ms each object's words are read and, when any changed, appended to
+// fields.bin: (u64 ns on the trace's clock, u32 ea, u32 vtable, u32 words[N]),
+// little-endian, the words as the guest holds them (a float's bits, unconverted).
+// fields.txt gives the offsets. Flushed every half second.
+constexpr int kMaxFieldObjs = 128, kMaxFields = 32;
+uint32_t g_field_vt[8], g_field_off[kMaxFields];
+int g_field_nvt, g_field_n;
+
+int scan_classes(uint32_t* out, int max)
+{
+    int n = 0;
+#ifdef _WIN32
+    for (uint64_t ea = 0x10000000u; ea < 0x20000000u && n < max; ) {
+        MEMORY_BASIC_INFORMATION mbi;
+        if (!VirtualQuery(vm_base + ea, &mbi, sizeof mbi)) break;
+        const uint64_t len = (uint64_t)((uintptr_t)mbi.BaseAddress + mbi.RegionSize - (uintptr_t)(vm_base + ea));
+        if (mbi.State == MEM_COMMIT && !(mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) && len > 0x1000)
+            for (uint64_t o = 0; o + 0x1000 <= len && n < max; o += 16) {
+                const uint32_t a = (uint32_t)(ea + o), vt = rd32(a);
+                for (int i = 0; i < g_field_nvt; i++)
+                    if (vt == g_field_vt[i]) { out[n++] = a; break; }
+            }
+        ea += len;
+    }
+#else
+    (void)out; (void)max;
+#endif
+    return n;
+}
+
+void field_log_loop()
+{
+    FILE* f = fopen("fields.bin", "wb");
+    if (!f) return;
+    if (FILE* h = fopen("fields.txt", "w")) {
+        for (int i = 0; i < g_field_n; i++) fprintf(h, "%X ", g_field_off[i]);
+        fprintf(h, "\n");
+        fclose(h);
+    }
+    static uint32_t objs[kMaxFieldObjs], last[kMaxFieldObjs][kMaxFields];
+    int n = 0;
+    for (unsigned tick = 0;; tick++) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        if (tick % 100 == 0) {
+            static uint32_t found[kMaxFieldObjs];
+            const int m = scan_classes(found, kMaxFieldObjs);
+            for (int i = 0; i < m; i++) {
+                int k = 0;
+                while (k < n && objs[k] != found[i]) k++;
+                if (k == n && n < kMaxFieldObjs) { objs[n] = found[i]; memset(last[n], 0, sizeof last[n]); n++; }
+            }
+        }
+        const uint64_t t = ps3_ft_now() - g_ps3_ft.base;
+        for (int i = 0; i < n; i++) {
+            const uint32_t vt = rd32(objs[i]);
+            bool cls = false;
+            for (int v = 0; v < g_field_nvt; v++) cls |= vt == g_field_vt[v];
+            if (!cls) continue;
+            uint32_t w[kMaxFields];
+            for (int k = 0; k < g_field_n; k++) w[k] = rd32(objs[i] + g_field_off[k]);
+            if (!memcmp(w, last[i], sizeof(uint32_t) * g_field_n)) continue;
+            memcpy(last[i], w, sizeof(uint32_t) * g_field_n);
+            fwrite(&t, 8, 1, f); fwrite(&objs[i], 4, 1, f); fwrite(&vt, 4, 1, f); fwrite(w, 4, g_field_n, f);
+        }
+        if (tick % 250 == 0) fflush(f);
     }
 }
 
@@ -915,10 +995,26 @@ void dev_state_init()
                 g_watch_offset + 0x80);
     }
     const char* al = getenv("DOTHEROES_DEV_ACTOR_LOG");
-    const bool actor_log = al && *al == '1';
+    const bool actor_log = al && atoi(al) > 0;
     if (actor_log) {
         start_reader(actor_log_loop);
         fprintf(stderr, "[dev-state] actors.bin: characters near the hero, every 4 ms\n");
+    }
+    if (const char* fl = getenv("DOTHEROES_DEV_FIELD_LOG")) {
+        char* s = const_cast<char*>(fl);
+        while (*s && g_field_nvt < 8) {
+            g_field_vt[g_field_nvt++] = (uint32_t)strtoul(s, &s, 16);
+            if (*s == ',') s++; else break;
+        }
+        if (*s == ':') s++;
+        while (*s && g_field_n < kMaxFields) {
+            g_field_off[g_field_n++] = (uint32_t)strtoul(s, &s, 16);
+            if (*s == ',') s++; else break;
+        }
+        if (g_field_nvt && g_field_n) {
+            start_reader(field_log_loop);
+            fprintf(stderr, "[dev-state] fields.bin: %d classes, %d words each, every 2 ms\n", g_field_nvt, g_field_n);
+        }
     }
     const char* rc = getenv("DOTHEROES_DEV_RECORD");
     if (rc && *rc == '1' && (g_record = fopen("record.log", "w")) != nullptr) {

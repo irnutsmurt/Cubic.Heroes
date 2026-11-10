@@ -1,0 +1,621 @@
+From 657b37ae4fc028de8188c5645db8ec6197d3a83c Mon Sep 17 00:00:00 2001
+From: giteaguy <73799093+irnutsmurt@users.noreply.github.com>
+Date: Mon, 9 Nov 2026 17:11:11 -0800
+Subject: [PATCH] cellSaveData: the system's save-data list, on load and on
+ save
+
+ListLoad2 and ListSave2 took the first entry the title offered: with two
+saves CONTINUE could only load the first, and the title's SAVE (which asks
+for the list's head as its focus) overwrote the first whichever save had
+been loaded. Both now show the list as a panel over the game's picture
+(ps3emu/osd.h, drawn by the Vulkan backend): each entry's PARAM.SFO DETAIL
+and SUB_TITLE and when it was written, sorted and focused as the title
+asked (RPCS3's rules), the save side with the title's New Save Data row and
+a question before an overwrite. Up/Down choose, Cross/Start confirm, Circle
+returns CELL_CANCEL. The game's pad reads released meanwhile
+(cellPad_ui_intercept). PS3_SAVEDATA_PICKER=0, or no window to draw it:
+the first entry, as before.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ include/ps3emu/osd.h            |  58 +++++++
+ libs/input/cellPad.c            |  30 ++++
+ libs/system/cellSaveData.c      | 288 +++++++++++++++++++++++++++++++-
+ libs/video/rsx_vulkan_backend.c |  91 ++++++++++
+ 4 files changed, 464 insertions(+), 3 deletions(-)
+
+diff --git a/include/ps3emu/osd.h b/include/ps3emu/osd.h
+index fe0661b..6a248b9 100644
+--- a/include/ps3emu/osd.h
++++ b/include/ps3emu/osd.h
+@@ -221,6 +221,64 @@ static inline int ps3_osd_current(char out[PS3_OSD_TEXT_MAX])
+     return 0;
+ }
+ 
++/* A list panel over the game's picture, for host dialogs in place of the PS3's
++ * own (the save-data list, cellSaveData.c): a title, rows of upper-case text
++ * (the font above), a highlighted run of rows and a line of prompts. The dialog
++ * posts it whenever it changes and closes it; a windowed backend draws it while
++ * it is open (rsx_vulkan_backend.c, vk_osd_list_draw) and stores in `drawn` the
++ * revision it drew, so a dialog can tell that nobody is drawing (no window). */
++#define PS3_OSD_LIST_ROWS 20
++#define PS3_OSD_LIST_COLS 62
++
++typedef struct {
++    uint32_t seq;                     /* odd while a post is being written */
++    uint32_t open, rev, nrows, sel0, sel1;
++    uint32_t drawn;
++    char     title[PS3_OSD_LIST_COLS], foot[PS3_OSD_LIST_COLS];
++    char     rows[PS3_OSD_LIST_ROWS][PS3_OSD_LIST_COLS];
++} ps3_osd_list_state;
++
++PS3_OSD_SHARED ps3_osd_list_state g_ps3_osd_list = { 0 };
++
++/* Post or replace the panel; rows are copied. Returns its revision. */
++static inline uint32_t ps3_osd_list_post(const char* title, const char* foot, char rows[][PS3_OSD_LIST_COLS],
++                                         uint32_t nrows, uint32_t sel0, uint32_t sel1)
++{
++    ps3_osd_list_state* s = &g_ps3_osd_list;
++    if (nrows > PS3_OSD_LIST_ROWS) nrows = PS3_OSD_LIST_ROWS;
++    __atomic_add_fetch(&s->seq, 1, __ATOMIC_ACQ_REL);
++    strncpy(s->title, title, PS3_OSD_LIST_COLS - 1); s->title[PS3_OSD_LIST_COLS - 1] = 0;
++    strncpy(s->foot, foot, PS3_OSD_LIST_COLS - 1);   s->foot[PS3_OSD_LIST_COLS - 1] = 0;
++    for (uint32_t i = 0; i < nrows; i++) {
++        strncpy(s->rows[i], rows[i], PS3_OSD_LIST_COLS - 1);
++        s->rows[i][PS3_OSD_LIST_COLS - 1] = 0;
++    }
++    s->nrows = nrows; s->sel0 = sel0; s->sel1 = sel1;
++    s->open = 1;
++    const uint32_t rev = ++s->rev;
++    __atomic_add_fetch(&s->seq, 1, __ATOMIC_RELEASE);
++    return rev;
++}
++
++static inline void ps3_osd_list_close(void)
++{
++    ps3_osd_list_state* s = &g_ps3_osd_list;
++    __atomic_add_fetch(&s->seq, 1, __ATOMIC_ACQ_REL);
++    s->open = 0;
++    s->rev++;
++    __atomic_add_fetch(&s->seq, 1, __ATOMIC_RELEASE);
++}
++
++/* The panel as a consistent copy; 0 when closed or being written. */
++static inline int ps3_osd_list_read(ps3_osd_list_state* out)
++{
++    const ps3_osd_list_state* s = &g_ps3_osd_list;
++    const uint32_t a = __atomic_load_n(&s->seq, __ATOMIC_ACQUIRE);
++    if (a & 1) return 0;
++    memcpy(out, s, sizeof *out);
++    return __atomic_load_n(&s->seq, __ATOMIC_ACQUIRE) == a && out->open;
++}
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
+index 0f552db..a0f54fd 100644
+--- a/libs/input/cellPad.c
++++ b/libs/input/cellPad.c
+@@ -853,6 +853,26 @@ void cellPad_poll(void)
+  * were fixed.) These used to be redeclared here with a 64-bit address
+  * parameter, which conflicts with the header now that it is included. */
+ 
++/* While the host shows a dialog of its own (the save-data list, in place of
++ * the PS3's system dialog) the pad is the dialog's: the game reads its pad as
++ * released, as a PS3 title does while the system holds the pad, and the
++ * dialog reads the last report here -- whatever made it, a pad, the keyboard
++ * or a test's PAD_FILE. */
++static volatile int s_ui_intercept = 0;
++static volatile u32 s_ui_buttons = 0, s_ui_ly = 128;
++
++void cellPad_ui_intercept(int on)
++{
++    s_ui_buttons = 0; s_ui_ly = 128;
++    __atomic_store_n(&s_ui_intercept, on ? 1 : 0, __ATOMIC_RELEASE);
++}
++
++u32 cellPad_ui_state(u32* ly)
++{
++    if (ly) *ly = s_ui_ly;
++    return s_ui_buttons;
++}
++
+ s32 cellPadGetData(u32 port_no, CellPadData* data_guest)
+ {
+     { static int _once = 0;
+@@ -1213,6 +1233,16 @@ emit:
+      * attack firing once.
+      *
+      * PAD_ALWAYS_CHANGE=1 restores the old always-a-packet behaviour. */
++    if (__atomic_load_n(&s_ui_intercept, __ATOMIC_ACQUIRE) && port_no == 0) {
++        if (data->len > 0) {
++            s_ui_buttons = (u32)(data->button[CELL_PAD_BTN_OFFSET_DIGITAL1] & 0xFF) |
++                           (u32)(data->button[CELL_PAD_BTN_OFFSET_DIGITAL2] & 0xFF) << 8;
++            s_ui_ly = data->button[CELL_PAD_BTN_OFFSET_ANALOG_LEFT_Y];
++        }
++        for (int _i = CELL_PAD_BTN_OFFSET_DIGITAL1; _i < CELL_PAD_MAX_CODES; _i++) data->button[_i] = 0;
++        data->button[CELL_PAD_BTN_OFFSET_ANALOG_RIGHT_X] = data->button[CELL_PAD_BTN_OFFSET_ANALOG_RIGHT_Y] = 0x80;
++        data->button[CELL_PAD_BTN_OFFSET_ANALOG_LEFT_X] = data->button[CELL_PAD_BTN_OFFSET_ANALOG_LEFT_Y] = 0x80;
++    }
+     {
+         unsigned int ea = (unsigned int)(uintptr_t)data_guest;
+         vm_write32((unsigned long long)ea + 0, (unsigned int)data->len);   /* len (s32) */
+diff --git a/libs/system/cellSaveData.c b/libs/system/cellSaveData.c
+index 7373980..37c7795 100644
+--- a/libs/system/cellSaveData.c
++++ b/libs/system/cellSaveData.c
+@@ -9,6 +9,7 @@
+ #include "ps3_psf.h"
+ #include "ps3emu/guest_call.h"
+ #include "ps3emu/osd.h"
++#include "../input/cellPad.h"
+ #include "../../runtime/ppu/ppu_memory.h"
+ #include "../../runtime/memory/vm.h"
+ #include <stdio.h>
+@@ -412,9 +413,13 @@ static s32 dispatch_func_stat_full(uint32_t func_opd, int is_new, const char* di
+  * `selected` receives the chosen directory ("" when none): the first listed
+  * entry, else the new-save name, else the focus name. For a save with nothing
+  * listed the new-save name wins -- headless, there is no user to pick. */
++/* What funcList asked for, for the list dialog (below). */
++typedef struct { uint32_t fixed_n, fixed_ea, focus_pos, focus_ea, new_name_ea, new_pos; } SaveListSet;
++
+ static s32 dispatch_func_select(uint32_t func_opd, const CellSaveDataDirList* dirList,
+                                 uint32_t dirCount, uint32_t setBuf_ea, int is_save,
+-                                uint32_t userdata_ea, const char* who, char selected[64])
++                                uint32_t userdata_ea, const char* who, char selected[64],
++                                SaveListSet* out_set)
+ {
+     selected[0] = '\0';
+     if (!g_ps3_guest_caller) return CELL_SAVEDATA_CBRESULT_ERR_FAILURE;
+@@ -447,6 +452,7 @@ static s32 dispatch_func_select(uint32_t func_opd, const CellSaveDataDirList* di
+     const uint32_t fixed_n = vm_read32(set_ea + 8), fixed = vm_read32(set_ea + 12);
+     const uint32_t newd = vm_read32(set_ea + 16), focus = vm_read32(set_ea + 4);
+     const uint32_t new_name = newd ? vm_read32(newd + 4) : 0;
++    if (out_set) { out_set->fixed_n = fixed_n; out_set->fixed_ea = fixed; out_set->focus_pos = vm_read32(set_ea + 0); out_set->focus_ea = focus; out_set->new_name_ea = new_name; out_set->new_pos = newd ? vm_read32(newd + 0) : 0; }
+     uint32_t pick = 0;
+     if (is_save && new_name && fixed_n == 0) pick = new_name;
+     else if (fixed_n && fixed)               pick = fixed;
+@@ -1035,6 +1041,12 @@ static s32 savedata_execute_run(const char* dirName, int is_save,
+  * API implementations
+  * -----------------------------------------------------------------------*/
+ 
++#ifndef CELL_CANCEL
++#define CELL_CANCEL 1   /* what the system's dialog returns when the player backs out */
++#endif
++static int savedata_list_dialog(CellSaveDataSetList* setList, const CellSaveDataDirList* dirList, u32 listed,
++                                const SaveListSet* set, char selected[64], int is_save);
++
+ s32 cellSaveDataListSave2(u32 version, CellSaveDataSetList* setList,
+                            CellSaveDataSetBuf* setBuf,
+                            CellSaveDataListCallback funcList,
+@@ -1076,9 +1088,11 @@ s32 cellSaveDataListSave2(u32 version, CellSaveDataSetList* setList,
+     memset(&listSet, 0, sizeof(listSet));
+ 
+     char selectedDir[64];
++    SaveListSet chosen_set;
++    memset(&chosen_set, 0, sizeof chosen_set);
+     cbResult.result = dispatch_func_select((uint32_t)(uintptr_t)funcList, dirList,
+                                           listGet.dirListNum, (uint32_t)(uintptr_t)setBuf, 1,
+-                                          (uint32_t)(uintptr_t)userdata, "funcList", selectedDir);
++                                          (uint32_t)(uintptr_t)userdata, "funcList", selectedDir, &chosen_set);
+     (void)listSet;
+ 
+     if (cbResult.result < 0) {
+@@ -1091,12 +1105,274 @@ s32 cellSaveDataListSave2(u32 version, CellSaveDataSetList* setList,
+         free(dirList);
+         return CELL_SAVEDATA_ERROR_NODATA;
+     }
++    /* The player's pick (the same panel as the load, with the title's new-save row);
++     * nothing saved yet, so no list to choose from: straight on, as before. */
++    if (dirCount > 0 && savedata_list_dialog(setList, dirList, listGet.dirListNum, &chosen_set, selectedDir, 1) == 0) {
++        free(dirList);
++        return CELL_CANCEL;
++    }
+ 
+     s32 result = savedata_execute(selectedDir, 1, setBuf, funcStat, funcFile, userdata);
+     free(dirList);
+     return result;
+ }
+ 
++/* ---- the system's list of saves, as a host dialog -------------------------
++ * A PS3 title's cellSaveDataListLoad2 shows the system's list and the player
++ * picks. Here the list is a panel over the game's picture (ps3emu/osd.h), with
++ * what identifies a save: its PARAM.SFO's DETAIL (3D Dot Game Heroes: the hero's
++ * name, the play time, the location) and when it was last written. The entries
++ * are the ones funcList kept (fixedList), sorted and focused as the title asked
++ * (setList's sort, listSet's focus; RPCS3's savedata_op for the rules); Cross
++ * loads, Circle cancels (CELL_CANCEL to the title, as the PS3's dialog). The
++ * game's pad is held meanwhile (cellPad_ui_intercept). ListSave2 shows the
++ * same panel with the title's new-save row (where newData's iconPosition puts
++ * it), and asks before it overwrites a save. The list exists on the save side
++ * as much as the load's: without it the title's SAVE wrote to the first entry,
++ * whichever save CONTINUE had picked.
++ * PS3_SAVEDATA_PICKER=0: no dialog, the title's first entry as before (what the
++ * test harness uses unless a test asks); so too when nothing draws the panel
++ * (no window). */
++#ifndef CELL_SAVEDATA_ICONPOS_HEAD
++#define CELL_SAVEDATA_ICONPOS_HEAD 0
++#endif
++enum { PICK_MAX = 64, PICK_ROWS_EACH = 3 };
++typedef struct {
++    char      dir[CELL_SAVEDATA_DIRNAME_SIZE];
++    char      l1[PS3_OSD_LIST_COLS], l2[PS3_OSD_LIST_COLS], sub[32];
++    long long mtime;
++    int       is_new;   /* the title's new-save row */
++} SavePick;
++
++/* Upper-case ASCII from UTF-8: full-width forms folded, anything the panel's
++ * font cannot draw shown as '?'. Lines are split at newlines. */
++static int pick_lines(const char* s, char lines[4][PS3_OSD_LIST_COLS])
++{
++    int n = 0, c = 0;
++    memset(lines, 0, 4 * PS3_OSD_LIST_COLS);
++    for (const unsigned char* p = (const unsigned char*)s; *p && n < 4; ) {
++        unsigned cp = *p++;
++        if (cp >= 0xF0)      { cp = (cp & 7) << 18; for (int k = 12; k >= 0 && *p; k -= 6) cp |= (unsigned)(*p++ & 0x3F) << k; }
++        else if (cp >= 0xE0) { cp = (cp & 15) << 12; for (int k = 6; k >= 0 && *p; k -= 6) cp |= (unsigned)(*p++ & 0x3F) << k; }
++        else if (cp >= 0xC0) { cp = (cp & 31) << 6; if (*p) cp |= (unsigned)(*p++ & 0x3F); }
++        if (cp == '\n') { if (c) { n++; c = 0; } continue; }
++        if (cp == 0x3000) cp = ' ';
++        else if (cp >= 0xFF01 && cp <= 0xFF5E) cp -= 0xFEE0;
++        if (cp >= 'a' && cp <= 'z') cp -= 32;
++        if (cp < 32 || cp > 126) cp = '?';
++        if (c < PS3_OSD_LIST_COLS - 1) lines[n][c++] = (char)cp;
++    }
++    return n + (c ? 1 : 0);
++}
++
++static void pick_describe(SavePick* e)
++{
++    char path[1024];
++    snprintf(path, sizeof path, "%s/%s/PARAM.SFO", s_save_root, e->dir);
++    struct stat st;
++    e->mtime = stat(path, &st) == 0 ? (long long)st.st_mtime : 0;
++    char when[32] = "";
++    if (e->mtime) { time_t t = (time_t)e->mtime; struct tm* lt = localtime(&t); if (lt) strftime(when, sizeof when, "%Y-%m-%d %H:%M", lt); }
++    char detail[1024] = "", subtitle[128] = "";
++    FILE* f = fopen(path, "rb");
++    if (f) {
++        static unsigned char buf[8192];
++        size_t n = fread(buf, 1, sizeof buf, f);
++        fclose(f);
++        /* PARAM.SFO: a key table and a data table named by the index after the 20-byte header */
++        if (n >= 20 && !memcmp(buf, "\0PSF", 4)) {
++            const unsigned kt = buf[8] | buf[9] << 8 | buf[10] << 16 | (unsigned)buf[11] << 24;
++            const unsigned dt = buf[12] | buf[13] << 8 | buf[14] << 16 | (unsigned)buf[15] << 24;
++            const unsigned cnt = buf[16] | buf[17] << 8 | buf[18] << 16 | (unsigned)buf[19] << 24;
++            for (unsigned i = 0; i < cnt && 20 + (i + 1) * 16 <= n; i++) {
++                const unsigned char* r = buf + 20 + i * 16;
++                const unsigned ko = r[0] | r[1] << 8, len = r[4] | r[5] << 8 | r[6] << 16 | (unsigned)r[7] << 24;
++                const unsigned dof = r[12] | r[13] << 8 | r[14] << 16 | (unsigned)r[15] << 24;
++                if (kt + ko >= n || dt + dof + len > n) continue;
++                const char* k = (const char*)buf + kt + ko;
++                char* to = !strcmp(k, "DETAIL") ? detail : !strcmp(k, "SUB_TITLE") ? subtitle : NULL;
++                if (!to) continue;
++                const size_t cap = to == detail ? sizeof detail : sizeof subtitle;
++                memcpy(to, buf + dt + dof, len < cap ? len : cap - 1);
++                to[len < cap ? len : cap - 1] = 0;
++            }
++        }
++    }
++    char lines[4][PS3_OSD_LIST_COLS];
++    const int nl = pick_lines(detail, lines);
++    char sub[4][PS3_OSD_LIST_COLS];
++    pick_lines(subtitle, sub);
++    snprintf(e->sub, sizeof e->sub, "%.31s", sub[0]);
++    if (nl >= 2) snprintf(e->l1, sizeof e->l1, "%.28s   %.28s", lines[0], lines[1]);
++    else if (nl == 1) snprintf(e->l1, sizeof e->l1, "%.60s", lines[0]);
++    else snprintf(e->l1, sizeof e->l1, "%.60s", e->dir);
++    snprintf(e->l2, sizeof e->l2, "%.36s%s%s", nl >= 3 ? lines[2] : "", when[0] ? "   SAVED " : "", when);
++}
++
++static void pick_show(const SavePick* e, int n, int cur, int* top, int is_save)
++{
++    const int page = PS3_OSD_LIST_ROWS / PICK_ROWS_EACH;
++    if (cur < *top) *top = cur;
++    if (cur >= *top + page) *top = cur - page + 1;
++    char rows[PS3_OSD_LIST_ROWS][PS3_OSD_LIST_COLS];
++    uint32_t r = 0;
++    int sel0 = 0;
++    for (int i = *top; i < n && i < *top + page; i++) {
++        if (i == cur) sel0 = (int)r;
++        snprintf(rows[r++], PS3_OSD_LIST_COLS, "%c %s", i == cur ? '>' : ' ', e[i].l1);
++        snprintf(rows[r++], PS3_OSD_LIST_COLS, "  %s", e[i].l2);
++        rows[r++][0] = 0;
++    }
++    char title[PS3_OSD_LIST_COLS];
++    const char* kind = "SAVE DATA";
++    for (int i = 0; i < n; i++) if (e[i].sub[0]) { kind = e[i].sub; break; }
++    snprintf(title, sizeof title, "%s %s   (%d/%d)", is_save ? "SAVE TO" : "SELECT", kind, cur + 1, n);
++    ps3_osd_list_post(title, is_save ? "UP/DOWN: CHOOSE   CROSS (Z, ENTER): SAVE   CIRCLE (X): BACK"
++                                     : "UP/DOWN: CHOOSE   CROSS (Z, ENTER): LOAD   CIRCLE (X): BACK",
++                      rows, r, (uint32_t)sel0, (uint32_t)sel0 + 2);
++}
++
++/* The panel for the overwrite question: the save it would replace, and yes or no. */
++static void pick_show_overwrite(const SavePick* e)
++{
++    char rows[PS3_OSD_LIST_ROWS][PS3_OSD_LIST_COLS];
++    uint32_t r = 0;
++    snprintf(rows[r++], PS3_OSD_LIST_COLS, "> %s", e->l1);
++    snprintf(rows[r++], PS3_OSD_LIST_COLS, "  %s", e->l2);
++    ps3_osd_list_post("OVERWRITE THIS SAVE?", "CROSS (Z, ENTER): YES   CIRCLE (X): NO", rows, r, 0, 1);
++}
++
++extern void cellPad_ui_intercept(int on);
++extern u32  cellPad_ui_state(u32* ly);
++extern s32  cellPadGetData(u32 port_no, CellPadData* data_guest);
++
++/* 1: chosen (into `selected`); 0: cancelled; -1: no dialog (off, or no window). */
++static int savedata_list_dialog(CellSaveDataSetList* setList, const CellSaveDataDirList* dirList, u32 listed,
++                                const SaveListSet* set, char selected[64], int is_save)
++{
++    const char* off = getenv("PS3_SAVEDATA_PICKER");
++    if (off && *off == '0') return -1;
++    SavePick* e = (SavePick*)calloc(PICK_MAX + 1, sizeof(SavePick));
++    if (!e) return -1;
++    int n = 0;
++    if (set->fixed_n && set->fixed_ea) {
++        for (u32 i = 0; i < set->fixed_n && n < PICK_MAX; i++) {
++            char name[CELL_SAVEDATA_DIRNAME_SIZE];
++            for (u32 k = 0; k < sizeof name; k++) name[k] = (char)vm_read8(set->fixed_ea + i * 48 + k);
++            name[sizeof name - 1] = 0;
++            if (name[0]) { strncpy(e[n].dir, name, sizeof e[n].dir - 1); n++; }
++        }
++    } else {
++        for (u32 i = 0; i < listed && n < PICK_MAX; i++) { strncpy(e[n].dir, dirList[i].dirName, sizeof e[n].dir - 1); n++; }
++    }
++    if (!n) { free(e); return -1; }
++    for (int i = 0; i < n; i++) pick_describe(&e[i]);
++    /* the title's sort (RPCS3: by modified time or subtitle, the other as the tie-break) */
++    const u32 sort_type = vm_read32((u32)(uintptr_t)setList + 0), sort_order = vm_read32((u32)(uintptr_t)setList + 4);
++    for (int i = 1; i < n; i++) {
++        SavePick x = e[i];
++        int j = i - 1;
++        for (; j >= 0; j--) {
++            int c = sort_type == CELL_SAVEDATA_SORTTYPE_SUBTITLE ? strcmp(e[j].sub, x.sub) : 0;
++            if (!c) c = e[j].mtime < x.mtime ? -1 : e[j].mtime > x.mtime ? 1 : 0;
++            if (!c && sort_type != CELL_SAVEDATA_SORTTYPE_SUBTITLE) c = strcmp(e[j].sub, x.sub);
++            if (sort_order != CELL_SAVEDATA_SORTORDER_ASCENT) c = -c;
++            if (c <= 0) break;
++            e[j + 1] = e[j];
++        }
++        e[j + 1] = x;
++    }
++    /* the title's focus */
++    int cur = 0;
++    switch (set->focus_pos) {
++    case CELL_SAVEDATA_FOCUSPOS_DIRNAME:
++        if (set->focus_ea) {
++            char name[CELL_SAVEDATA_DIRNAME_SIZE];
++            for (u32 k = 0; k < sizeof name; k++) name[k] = (char)vm_read8(set->focus_ea + k);
++            name[sizeof name - 1] = 0;
++            for (int i = 0; i < n; i++) if (!strcmp(e[i].dir, name)) cur = i;
++        }
++        break;
++    case CELL_SAVEDATA_FOCUSPOS_LISTTAIL: cur = n - 1; break;
++    case CELL_SAVEDATA_FOCUSPOS_LATEST: for (int i = 0; i < n; i++) if (e[i].mtime > e[cur].mtime) cur = i; break;
++    case CELL_SAVEDATA_FOCUSPOS_OLDEST: for (int i = 0; i < n; i++) if (e[i].mtime < e[cur].mtime) cur = i; break;
++    default: break;
++    }
++    /* the title's new-save row, after the sort: at the head or the tail as it asked */
++    if (is_save && set->new_name_ea) {
++        const int at_head = set->new_pos == CELL_SAVEDATA_ICONPOS_HEAD;
++        SavePick nw;
++        memset(&nw, 0, sizeof nw);
++        for (u32 k = 0; k < sizeof nw.dir - 1; k++) { nw.dir[k] = (char)vm_read8(set->new_name_ea + k); if (!nw.dir[k]) break; }
++        nw.is_new = 1;
++        snprintf(nw.l1, sizeof nw.l1, "NEW SAVE DATA");
++        if (at_head) { memmove(e + 1, e, (size_t)n * sizeof(SavePick)); e[0] = nw; cur++; n++; }
++        else e[n++] = nw;
++        if (set->focus_pos == CELL_SAVEDATA_FOCUSPOS_NEWDATA) cur = at_head ? 0 : n - 1;
++    }
++    if (cur >= n) cur = n - 1;
++    u32 pad_ea = scratch_alloc(256);
++    int top = 0, result = -2;
++    pick_show(e, n, cur, &top, is_save);
++    const uint32_t first_rev = __atomic_load_n(&g_ps3_osd_list.rev, __ATOMIC_ACQUIRE);
++    cellPad_ui_intercept(1);
++    printf("[cellSaveData] list dialog: %d entries, focus %d (sort %u/%u, focus position %u)%c", n, cur, sort_type, sort_order, set->focus_pos, 10);
++    for (int i = 0; i < n; i++) printf("[cellSaveData]   %d: %s | %s | %s%c", i, e[i].dir, e[i].l1, e[i].l2, 10);
++    fflush(stdout);
++    u32 last = 0xFFFFFFFFu;       /* a button held as the dialog opens must be released first */
++    unsigned waited = 0, held_ms = 0;
++    int confirming = 0;
++    for (;;) {
++#ifdef _WIN32
++        Sleep(15);
++#else
++        { struct timespec ts = { 0, 15000000 }; nanosleep(&ts, NULL); }
++#endif
++        waited += 15;
++        if (waited >= 4000 && __atomic_load_n(&g_ps3_osd_list.drawn, __ATOMIC_ACQUIRE) < first_rev) { result = -1; break; }   /* nothing draws it */
++        if (pad_ea) cellPadGetData(0, (CellPadData*)(uintptr_t)pad_ea);    /* the title may not be polling */
++        u32 ly = 128;
++        u32 b = cellPad_ui_state(&ly);
++        if (ly < 64) b |= CELL_PAD_CTRL_UP;
++        if (ly > 192) b |= CELL_PAD_CTRL_DOWN;
++        if (last == 0xFFFFFFFFu) { if (b == 0) last = 0; continue; }
++        const u32 edge = b & ~last;
++        const u32 dir = b & (CELL_PAD_CTRL_UP | CELL_PAD_CTRL_DOWN);
++        if (dir && dir == (last & (CELL_PAD_CTRL_UP | CELL_PAD_CTRL_DOWN))) held_ms += 15; else held_ms = 0;
++        int step = 0;
++        if (edge & CELL_PAD_CTRL_UP) step = -1;
++        else if (edge & CELL_PAD_CTRL_DOWN) step = 1;
++        else if (held_ms >= 400 && (held_ms - 400) % 120 < 15) step = (b & CELL_PAD_CTRL_UP) ? -1 : 1;
++        last = b;
++        if (confirming) {
++            if (edge & (CELL_PAD_CTRL_CROSS | CELL_PAD_CTRL_START)) { result = 1; break; }
++            if (edge & CELL_PAD_CTRL_CIRCLE) { confirming = 0; pick_show(e, n, cur, &top, is_save); }
++            continue;
++        }
++        if (step) {
++            cur = (cur + step + n) % n;
++            pick_show(e, n, cur, &top, is_save);
++        }
++        if (edge & (CELL_PAD_CTRL_CROSS | CELL_PAD_CTRL_START)) {
++            if (is_save && !e[cur].is_new) { confirming = 1; pick_show_overwrite(&e[cur]); continue; }
++            result = 1;
++            break;
++        }
++        if (edge & CELL_PAD_CTRL_CIRCLE) { result = 0; break; }
++    }
++    ps3_osd_list_close();
++    cellPad_ui_intercept(0);
++    if (result == 1) {
++        strncpy(selected, e[cur].dir, 63); selected[63] = 0;
++        printf("[cellSaveData] list dialog: chose %d '%s'%s%c", cur, selected, e[cur].is_new ? " (new)" : "", 10);
++    } else {
++        printf("[cellSaveData] list dialog: %s%c", result == 0 ? "cancelled" : "not shown (nothing draws it): the title's first entry", 10);
++    }
++    fflush(stdout);
++    free(e);
++    return result;
++}
++
+ s32 cellSaveDataListLoad2(u32 version, CellSaveDataSetList* setList,
+                            CellSaveDataSetBuf* setBuf,
+                            CellSaveDataListCallback funcList,
+@@ -1136,15 +1412,21 @@ s32 cellSaveDataListLoad2(u32 version, CellSaveDataSetList* setList,
+     memset(&listSet, 0, sizeof(listSet));
+ 
+     char selectedDir[64];
++    SaveListSet chosen_set;
++    memset(&chosen_set, 0, sizeof chosen_set);
+     cbResult.result = dispatch_func_select((uint32_t)(uintptr_t)funcList, dirList,
+                                           listGet.dirListNum, (uint32_t)(uintptr_t)setBuf, 0,
+-                                          (uint32_t)(uintptr_t)userdata, "funcList", selectedDir);
++                                          (uint32_t)(uintptr_t)userdata, "funcList", selectedDir, &chosen_set);
+     (void)listSet;
+ 
+     if (cbResult.result < 0) {
+         free(dirList);
+         return CELL_SAVEDATA_ERROR_CBRESULT;
+     }
++    if (dirCount > 0 && savedata_list_dialog(setList, dirList, listGet.dirListNum, &chosen_set, selectedDir, 0) == 0) {
++        free(dirList);
++        return CELL_CANCEL;
++    }
+     if (!selectedDir[0] && dirCount > 0)
+         strncpy(selectedDir, dirList[0].dirName, sizeof selectedDir - 1);
+     if (!selectedDir[0]) {
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index 7f974aa..46908f3 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -2356,6 +2356,10 @@ static const struct { char c; uint8_t r[7]; } k_osd_font[] = {
+     {'8',{0x0E,0x11,0x11,0x0E,0x11,0x11,0x0E}}, {'9',{0x0E,0x11,0x11,0x0F,0x01,0x02,0x0C}},
+     {'.',{0x00,0x00,0x00,0x00,0x00,0x0C,0x0C}}, {'!',{0x04,0x04,0x04,0x04,0x04,0x00,0x04}},
+     {'-',{0x00,0x00,0x00,0x1F,0x00,0x00,0x00}}, {':',{0x00,0x0C,0x0C,0x00,0x0C,0x0C,0x00}},
++    {'/',{0x01,0x02,0x02,0x04,0x08,0x08,0x10}}, {'>',{0x10,0x08,0x04,0x02,0x04,0x08,0x10}},
++    {'(',{0x02,0x04,0x08,0x08,0x08,0x04,0x02}}, {')',{0x08,0x04,0x02,0x02,0x02,0x04,0x08}},
++    {',',{0x00,0x00,0x00,0x00,0x0C,0x04,0x08}}, {'\'',{0x0C,0x04,0x08,0x00,0x00,0x00,0x00}},
++    {'+',{0x00,0x04,0x04,0x1F,0x04,0x04,0x00}}, {'?',{0x0E,0x11,0x01,0x02,0x04,0x00,0x04}},
+ };
+ static struct {
+     vk_buffer buf;
+@@ -2449,6 +2453,92 @@ static void vk_osd_px(uint8_t* p, uint8_t r, uint8_t g, uint8_t b)
+     p[3] = 255;
+ }
+ 
++/* The list panel (ps3emu/osd.h, the save-data list): composed on the CPU when
++ * its revision or the window's size changes, copied into the middle of the
++ * window after the game's picture, as the message above. */
++static struct {
++    vk_buffer buf;
++    uint32_t  rev;
++    u32       w, h, scale;
++    int       fmt, failed;
++} s_olist;
++
++static void vk_osd_text(uint8_t* img, u32 bw, u32 bh, u32 x0, u32 y0, const char* s, u32 scale,
++                        uint8_t r, uint8_t g, uint8_t b)
++{
++    for (; *s; s++, x0 += 6 * scale) {
++        const uint8_t* gl = vk_osd_glyph(*s);
++        if (!gl) continue;
++        for (u32 gy = 0; gy < 7; gy++)
++            for (u32 gx = 0; gx < 5; gx++)
++                if (gl[gy] & (0x10u >> gx))
++                    for (u32 y = y0 + gy * scale; y < y0 + (gy + 1) * scale && y < bh; y++)
++                        for (u32 x = x0 + gx * scale; x < x0 + (gx + 1) * scale && x < bw; x++)
++                            vk_osd_px(img + ((size_t)y * bw + x) * 4, r, g, b);
++    }
++}
++
++static void vk_osd_list_draw(VkCommandBuffer cb, u32 idx)
++{
++    static ps3_osd_list_state L;
++    if (!__atomic_load_n(&g_ps3_osd_list.open, __ATOMIC_ACQUIRE)) return;
++    if (!s_vk.sc_osd || s_olist.failed || !ps3_osd_list_read(&L)) return;
++    const u32 W = s_vk.sc_extent.width, H = s_vk.sc_extent.height;
++    u32 scale = H >= 360 ? H / 360 : 1;
++    const u32 cols = PS3_OSD_LIST_COLS - 1, lines = L.nrows + 4;   /* the title, a gap, the rows, a gap, the prompts */
++    while (scale > 1 && ((cols * 6 + 12) * scale + 8 > W || (lines * 10 + 12) * scale + 8 > H)) scale--;
++    const u32 pad = 6 * scale, rowh = 10 * scale;
++    const u32 bw = cols * 6 * scale + 2 * pad, bh = lines * rowh + 2 * pad;
++    if (bw + 8 > W || bh + 8 > H) return;
++    if (L.rev != s_olist.rev || scale != s_olist.scale || s_vk.sc_osd != s_olist.fmt) {
++        const VkDeviceSize need = (VkDeviceSize)bw * bh * 4;
++        if (s_olist.buf.size < need) {
++            if (s_olist.buf.buf) vk_destroy_present_buffer(&s_olist.buf);
++            if (vk_create_host_buffer(&s_olist.buf, need, VK_BUFFER_USAGE_TRANSFER_SRC_BIT) != 0 || !s_olist.buf.coherent) {
++                if (s_olist.buf.buf) vk_destroy_present_buffer(&s_olist.buf);
++                s_olist.failed = 1;
++                VK_LOG("no coherent host buffer for the list panel; it stays off\n");
++                return;
++            }
++        }
++        uint8_t* img = (uint8_t*)s_olist.buf.ptr;
++        const u32 edge = scale;
++        for (u32 y = 0; y < bh; y++)
++            for (u32 x = 0; x < bw; x++) {
++                const int border = x < edge || y < edge || x >= bw - edge || y >= bh - edge;
++                const u32 row = y >= pad ? (y - pad) / rowh : 0;
++                const int sel = !border && y >= pad && row >= 2 && row - 2 >= L.sel0 && row - 2 < L.sel1;
++                if (border)   vk_osd_px(img + ((size_t)y * bw + x) * 4, 170, 170, 170);
++                else if (sel) vk_osd_px(img + ((size_t)y * bw + x) * 4, 44, 74, 130);
++                else          vk_osd_px(img + ((size_t)y * bw + x) * 4, 16, 16, 24);
++            }
++        vk_osd_text(img, bw, bh, pad, pad, L.title, scale, 255, 255, 255);
++        for (u32 i = 0; i < L.nrows; i++) {
++            const int sel = i >= L.sel0 && i < L.sel1;
++            vk_osd_text(img, bw, bh, pad, pad + (i + 2) * rowh + scale, L.rows[i], scale,
++                        sel ? 255 : 190, sel ? 255 : 190, sel ? 255 : 190);
++        }
++        vk_osd_text(img, bw, bh, pad, pad + (lines - 1) * rowh, L.foot, scale, 200, 200, 120);
++        s_olist.rev = L.rev; s_olist.scale = scale; s_olist.w = bw; s_olist.h = bh; s_olist.fmt = s_vk.sc_osd;
++    }
++    VkImageMemoryBarrier b = {
++        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
++        .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
++        .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
++        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++        .image = s_vk.sc_images[idx], .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 },
++    };
++    pvkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
++                          0, 0, NULL, 0, NULL, 1, &b);
++    VkBufferImageCopy region = {
++        .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
++        .imageOffset = { (int32_t)((W - bw) / 2), (int32_t)((H - bh) / 2), 0 }, .imageExtent = { bw, bh, 1 },
++    };
++    pvkCmdCopyBufferToImage(cb, s_olist.buf.buf, s_vk.sc_images[idx],
++                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
++    __atomic_store_n(&g_ps3_osd_list.drawn, L.rev, __ATOMIC_RELEASE);
++}
++
+ static void vk_osd_fps_draw(VkCommandBuffer cb, u32 idx)
+ {
+     const int mode = ps3_osd_fps_mode();
+@@ -2578,6 +2668,7 @@ static void vk_present_window(void)
+                     1, &blit, VK_FILTER_LINEAR);
+     vk_osd_draw(cb, idx);
+     vk_osd_fps_draw(cb, idx);
++    vk_osd_list_draw(cb, idx);
+     b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+     b.dstAccessMask = 0;
+     b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+-- 
+2.56.0.windows.3
+

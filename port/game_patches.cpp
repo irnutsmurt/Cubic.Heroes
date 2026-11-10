@@ -47,6 +47,22 @@
  *   and add up to the speed at any frame rate. The carry restarts when the
  *   step is 0 or reverses, or the object is another. Every other call
  *   rounds exactly as before.
+ *
+ * g_dotheroes_tick30 (entry hooks: tick30_gate)
+ *   Most of the game's objects scale their motion by the frame's time. The
+ *   segmented boss of the first dungeon does not: its head's update calls on
+ *   with a constant 1/30 s instead of the frame's time (the only update in the
+ *   game that does), and its body segments' update (this, &dt) follows the
+ *   head's trail a step a frame (+0x770), counts frames (+0x75C) for its turns
+ *   and its attacks, and scales only its sideways wobble by dt -- it was
+ *   written for the game's locked 30 fps. Measured in real seconds with the hero
+ *   standing still (tests/boss_timing.py): the body's median speed 4.5 units a
+ *   second at 30 fps, 7.5 at 60, 20 at 144, and 2.5 times the orbs. The gate
+ *   runs such an update at 30 Hz: time accumulates per object, and the update
+ *   runs only when a 1/30 s step is due, with dt reading whole steps. Above
+ *   30 fps the object moves at the 30 fps game's pace, in 30 Hz steps.
+ *   DOTHEROES_TICK30=0 turns it off; at DOTHEROES_FPS=30 it is off (the
+ *   original pacing).
  */
 extern "C" {
 int g_dotheroes_skip_flash_mp3 = 1;
@@ -103,6 +119,64 @@ extern "C" void dotheroes_step_round(ppu_context* ctx)
     ctx->fpr[1] = step;
 }
 
+/* See g_dotheroes_tick30. `dt_ea` (r4) is the caller's frame time, shared by
+ * the objects it walks: replaced for this call and put back. The update is
+ * re-entered through its own hook (`inner` declines). */
+extern "C" { int g_dotheroes_tick30 = 1; }
+
+static float* tick30_acc(uint32_t obj)
+{
+    static struct { uint32_t obj; float acc; } s[512];
+    uint32_t i = (obj >> 4) * 2654435761u >> 23;
+    for (uint32_t n = 0; n < 512; n++, i = (i + 1) & 511) {
+        if (s[i].obj == obj) return &s[i].acc;
+        if (!s[i].obj) { s[i].obj = obj; s[i].acc = 0.0f; return &s[i].acc; }
+    }
+    s[i].obj = obj; s[i].acc = 0.0f;   /* full: reuse a slot */
+    return &s[i].acc;
+}
+
+static float guest_float(uint32_t ea)
+{
+    const uint8_t* p = vm_base + ea;
+    const uint32_t u = (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
+    float f;
+    memcpy(&f, &u, 4);
+    return f;
+}
+
+static void guest_float_set(uint32_t ea, float f)
+{
+    uint32_t u;
+    memcpy(&u, &f, 4);
+    uint8_t* p = vm_base + ea;
+    p[0] = (uint8_t)(u >> 24); p[1] = (uint8_t)(u >> 16); p[2] = (uint8_t)(u >> 8); p[3] = (uint8_t)u;
+}
+
+static int tick30_gate(ppu_context* ctx, void (*body)(ppu_context*))
+{
+    static thread_local int inner = 0;
+    if (inner) return 0;   /* the update itself, called below */
+    const uint32_t dt_ea = (uint32_t)ctx->gpr[4];
+    const float dt = guest_float(dt_ea);
+    float* acc = tick30_acc((uint32_t)ctx->gpr[3]);
+    *acc += dt;
+    /* the 0.2: a frame a hair under 1/30 s (30 fps with jitter) still takes its step */
+    const int steps = (int)floor(*acc * 30.0f + 0.2f);
+    if (steps <= 0) return 1;   /* not due: this frame's call does nothing */
+    const float pass = (float)steps / 30.0f;
+    *acc -= pass;
+    guest_float_set(dt_ea, pass);
+    inner = 1;
+    body(ctx);
+    inner = 0;
+    guest_float_set(dt_ea, dt);
+    return 1;
+}
+
+extern "C" int dotheroes_tick30_boss_segment(ppu_context* ctx) { return tick30_gate(ctx, func_001F2DC0); }
+extern "C" int dotheroes_tick30_boss_head(ppu_context* ctx) { return tick30_gate(ctx, func_001E47C4); }
+
 /* Before the guest starts. */
 extern "C" void dotheroes_configure_patches(void)
 {
@@ -110,6 +184,11 @@ extern "C" void dotheroes_configure_patches(void)
     /* display: a frame a vblank as at 60, the vblank paced to the display
      * (main.cpp, display_frame_ms) */
     const int fps = e && !strcmp(e, "display") ? 60 : e && *e ? atoi(e) : 60;
+    {
+        const char* t30 = getenv("DOTHEROES_TICK30");
+        g_dotheroes_tick30 = fps != 30 && !(t30 && *t30 == '0');
+        fprintf(stderr, "[port] frame-counted boss updates: %s\n", g_dotheroes_tick30 ? "gated to 30 Hz" : "every frame");
+    }
     g_dotheroes_fps_nosleep  = fps != 30;
     g_dotheroes_fps_vblank1  = fps == 60;
     g_dotheroes_fps_novblank = fps != 30 && fps != 60;

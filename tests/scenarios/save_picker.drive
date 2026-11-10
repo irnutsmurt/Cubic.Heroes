@@ -1,0 +1,52 @@
+# The save-data list (ps3recomp cellSaveData.c; docs/PC_EXPERIENCE.md section 7a): CONTINUE with two saves, the
+# second picked, the game loading it; then back to the title, a cancel, CONTINUE again and the first picked.
+#! env PS3_SAVEDATA_PICKER=1
+#! saves build/checkpoints/picker-two
+include common.drive
+
+log TitleMovie 120
+sleep 5
+press START                 # "PRESS START BUTTON"
+sleep 3
+press START                 # CONTINUE
+log list.dialog:.2.entries 25
+sleep 2
+shot list
+press DOWN
+sleep 1
+shot second
+press CROSS
+log chose.1 6
+log LOAD.dir= 10
+sleep 6
+press CROSS                 # "Change characters?" NO
+state area>0,life>0 90
+sleep 3
+shot second_loaded
+call system_save_listed_second  # into the second save: [cellSaveData] SAVE dir=...25F6
+call to_title_no_continue
+
+log TitleMovie 40
+sleep 6
+press START
+sleep 3
+press START                 # CONTINUE
+log list.dialog:.2.entries 25
+sleep 2
+press CIRCLE
+log cancelled 6
+sleep 3
+shot cancelled
+press START                 # the cancel leaves the title at "PRESS START BUTTON"
+sleep 3
+press START                 # CONTINUE again
+log list.dialog:.2.entries 25
+sleep 2
+press CROSS
+log chose.0 6
+log LOAD.dir= 10
+sleep 6
+press CROSS
+state area>0,life>0 90
+sleep 3
+shot first_loaded

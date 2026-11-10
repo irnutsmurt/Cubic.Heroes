@@ -1,0 +1,50 @@
+# The save-data list on the character select (docs/PC_EXPERIENCE.md section 7a): the first save picked,
+# "Change characters?" YES, the third of three edits picked; then a save from the system menu, which must go
+# into the slot CONTINUE loaded.
+#! env PS3_SAVEDATA_PICKER=1
+#! saves build/checkpoints/picker-two
+include common.drive
+
+log TitleMovie 120
+sleep 5
+press START
+sleep 3
+press START                 # CONTINUE
+log list.dialog:.2.entries 25
+sleep 2
+press CROSS
+log chose.0 6
+log LOAD.dir= 10
+sleep 6
+shot change
+press UP                    # "Change characters?" YES
+sleep 1
+press CROSS
+sleep 4
+press DOWN                  # the character grid, from its first entry: to the last row
+sleep 1
+press DOWN
+sleep 1
+press RIGHT                 # its last character, and past it the EDIT DATA button
+sleep 1
+press RIGHT
+sleep 1
+press RIGHT
+sleep 1
+press RIGHT
+sleep 1
+shot on_edit_button
+press CROSS
+log list.dialog:.3.entries 25
+sleep 3
+shot edits
+press DOWN
+sleep 1
+press DOWN
+sleep 2
+shot third
+press CROSS
+log chose.2 6
+log LOAD.dir= 10
+sleep 8
+shot after_edit

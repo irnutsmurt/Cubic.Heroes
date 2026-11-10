@@ -322,6 +322,12 @@ cancelling returned as a cancel. The same prompts as section 6.
 select and checks which DATA.EDT the game read; CONTINUE with two saves,
 each picked once; a cancel.
 
+**Done 2026-11-09** (docs/NATIVE_R8.md section 9.6): the list on load and on
+save (New Save Data, and a question before an overwrite), with the save's
+name, play time, location and when it was written; the tests above pass.
+What is left of this item: the icon (ICON0.PNG), and the prompts in section
+6's styles (the panel says "CROSS (Z, ENTER)" and "CIRCLE (X)").
+
 ## 8. Launcher and update management (after the base and the settings are stable)
 
 **Today** [C, setup_app.py, tools/self_update.py]:

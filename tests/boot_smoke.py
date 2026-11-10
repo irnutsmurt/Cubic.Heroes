@@ -359,6 +359,9 @@ def main():
         "PS3_HDD1_ROOT": os.path.join(gamedata, "dev_hdd1"),
         "PS3_DEV_FLASH": os.path.join(RUN, "dev_flash"),
         "PS3RECOMP_VK_GUEST_PROGRAMS": env.get("PS3RECOMP_VK_GUEST_PROGRAMS", "1"),
+        # the save-data list dialog (cellSaveData.c): off unless a test or a play session asks for it, so the
+        # scripted routes, written for the title's first entry, stay as they are
+        "PS3_SAVEDATA_PICKER": env.get("PS3_SAVEDATA_PICKER", "0"),
         "PS3RECOMP_VK_DUMP": os.path.join(RUN, "frame.ppm"),
         "PS3RECOMP_VK_DUMP_EVERY": env.get("PS3RECOMP_VK_DUMP_EVERY", "15"),
         "PAD_FILE": os.path.join(RUN, "pad.txt"),
@@ -377,6 +380,7 @@ def main():
     if INSTALLED:   # as a player starts it: none of the dev harness's own settings
         for k in ("PS3_STRICT", "PS3_GAMEDATA_ROOT", "PS3_HDD0_ROOT", "PS3_HDD1_ROOT", "PS3_DEV_FLASH",
                   "PS3RECOMP_VK_GUEST_PROGRAMS", "PS3RECOMP_VK_DUMP", "PS3RECOMP_VK_DUMP_EVERY",
+                  "PS3_SAVEDATA_PICKER",
                   "PS3RECOMP_SPIRV_CACHE", "DOTHEROES_NATIVE_CD", "DOTHEROES_NATIVE_SOLVER", "GCM_WRAP_LAP",
                   "DOTHEROES_PRESENT_ONCE"):   # the performance switches: dotheroes.cfg decides
             if k not in INSTALLED_KEEP:

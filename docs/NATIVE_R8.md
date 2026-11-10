@@ -18,7 +18,9 @@ per-thread work reported apart. An average of 144 is not 144 sustained.
 |---|---|
 | Inventory: threads, SPU workloads, where the time goes | done (section 1); re-profiled after part 2 (section 8.3): the main PPU thread is still the critical path, alone |
 | The accepted baseline; config/insn_patches.json | done: the file is the committed one, byte for byte (section 2); unchanged by part 2 (R8's hooks are config/r8_hooks.json) |
-| Frame-counted values | done: none is a clock or moves gameplay (section 3) |
+| Frame-counted values | the engine's: none is a clock or moves gameplay (section 3). **Corrected**: the first dungeon's boss does count frames (section 9.6) |
+| **The first dungeon's boss above 30 fps** | **fixed**: its head and body segments update at 30 Hz at any frame rate; measured at 30, 60 and 144 fps; in rel8t, validated; a full kill with the gate on not yet seen (section 9.6) |
+| **The save-data list** | **a list of the saves, on load and on save** (name, play time, location, when written; ps3recomp 0131); before, the first entry was taken, and the game's SAVE wrote to it whichever save CONTINUE had picked (section 9.6) |
 | The shorter uncapped walk | done: the test harness's input timing; fixed (ps3recomp 0117) |
 | Unimplemented graphics calls | done: named, on screen, counted, fatal under strict (section 4) |
 | The lifted code: -O2 | measured: no gain, not adopted (section 5) |
@@ -207,6 +209,13 @@ state changes rounded to its own frames, which at 60 fps adds a frame or
 two to a swing. The benchmark mode stays a measurement mode for other
 reasons (no vblank pacing, a mailbox present); its frame counters are not
 one of them.
+
+**Corrected (2026-11-09).** "The game plays at the same speed" held for
+what this section measured: the hero, the river's enemies, physics and the
+engine's clocks. It was too broad. The first dungeon's boss counts its own
+frames and ran up to 4.5 times too fast at 144 fps (section 9.6). The hero and
+physics checks above do not reach a boss's own logic; section 9.6 has what
+was and was not checked for the others.
 
 ## 4. Graphics work nothing executes: a diagnostic [C]
 
@@ -1756,6 +1765,128 @@ light rounds give rel8s 202.3-203.3 fps against rel8g's 204.5 and rel8o's
 time about 2% lower than rel8g's (the D24 surfaces). 144 fps sustained
 exploring (99.8-99.9% of frames within 6.94 ms) and 98.9-99.1% in the
 fight.
+
+### 9.6 The first dungeon's boss above 30 fps; the save-data list (2026-11-09) [M]
+
+The owner's report from a session at 144 fps: the boss was too fast.
+
+**How it was measured.** A new log (DOTHEROES_DEV_FIELD_LOG, development
+builds: chosen words of every object of chosen classes, on change, 2 ms
+scan) and tests/boss_timing.py, in real seconds. The fight from the owner's
+save, 90 s or more, the hero standing at the door pressing CROSS (the
+companion's dialogues stop the fight until they are answered), at 30 fps
+(DOTHEROES_FPS=30, the original's pace), 60, and 144 (the owner's setting,
+vsynced), with real audio.
+
+**What the boss is.** A head (class 0x00FE4690) and six body segments
+(0x00FE4760); the shots are 0x00FE4500 objects. Two things are frame-counted:
+- The head's update (func_001E47C4) ignores the frame time it is given and
+  calls the actors' common update with a constant 1/30 s. A static scan of
+  every class's update found no other that does.
+- The segments' update (func_001F2DC0) follows the head's trail through a
+  ring of positions a step a frame, counts frames (+0x75C) and compares them
+  with (+0x778 + 1) x period for its turns and attacks, and uses +0x75C's low
+  bit for an every-other-frame branch. Only its wobble (+0x730) scales by dt.
+
+| | 30 fps | 60 fps | 144 fps |
+|---|---|---|---|
+| Before: the frame counter (+0x75C) | 29.2/s | 55.5/s | 133.5/s |
+| Before: the segments' speed in 0.25 s windows, median (all of the fight's hit levels mixed), units/s | 4.53 | 7.52 | 20.10 |
+| Before: shots seen in the fight | 28 | 70 | 70 |
+| After: the frame counter | 29.3/s | 29.2/s | 29.4/s |
+| After: the update's spacing, median | 33.3 ms | 33.3 ms | 34.2 ms (whole frames of a 144 Hz display) |
+| After: the segments' step an update (no hits yet), median | 0.141 | 0.141 | 0.141 |
+| After: the animation's toggle (+0x514) | 3.9/s | 3.9/s | 3.9/s |
+
+The speed depends on how often the boss has been hit: each hit adds 0.38 to
+its speed multiplier (+0x5C4, from 1.00), so whole runs cannot be compared
+(a hit is a matter of where the boss wandered). Per multiplier, two runs
+each, the hero on one half apple (no sword beam), the head's speed in 0.25 s windows,
+median, units/s:
+
+| Multiplier | 30 fps | 60 fps | 144 fps |
+|---|---|---|---|
+| 1.00 | 2.80 | 2.80 | 2.80 |
+| 1.38 | 4.64 | 3.86 | 3.86 |
+| 1.76 | 5.91 | 5.57 | 5.91 |
+| 2.14 | 6.54 | 7.15 | 6.54 |
+| 2.52 | 7.06 | 8.06 | 7.26 |
+| 2.90 | 8.35 | not reached | 9.08 |
+| 3.28 | 11.02 | not reached | 10.43 |
+
+(Above 1.00 a multiplier lasted 4-60 s of a run, so its median comes from few windows.)
+The turns' spacing at 1.00: 4.86 s (12 turns), 5.10 (15), 7.04 (6); it is
+random. Shots in volleys: 7.0, 4.3 and 5.9 volleys a minute of fight; too few, and too
+dependent on the hit level, to compare closely, with no trend with the frame rate.
+
+**The fix.** An entry hook on each of the two updates
+(config/r8_hooks.json, port/game_patches.cpp tick30_gate): the frame's time
+accumulates per object and the update runs only when a 1/30 s step is due,
+told that step as its dt. A first version gated the segments alone:
+the segments' frame counter was right and the boss was still fast (0.224 a
+step, not 0.141), because the ungated head filled their trail; the
+measurement caught it, and it led to the head's constant dt.
+DOTHEROES_TICK30=0 turns it off, and at DOTHEROES_FPS=30 it is off. Above
+30 fps the boss now moves in 30 Hz steps, as on the PS3: smooth interpolation
+between them is not done.
+
+**The others** [C for the code, M for the river's enemies].
+- Static, every object class's update (slot 8 of 309 vtable-like runs, 206
+  distinct functions): only the head passes a constant for the time; only
+  the segments' update steps a frame counter on every call. Reading each of
+  the other updates and helpers that step a field by one, among them the
+  later bosses' classes (0x00FE45C0-0x00FE5940: +0x544, +0x53C, +0x5BC,
+  +0x7C8), each step is taken when a float timer expires, or counts an event
+  (a hit, a hop): not one a frame. The scan cannot see a float moved by a
+  constant each frame.
+- In play: the river fight's 30 enemies (class 0x00FE4500, the common
+  enemies' class, tests/fps_fields.py) at 30, 60 and 144 fps: speed in 0.25 s windows
+  (median) 3.56, 2.67, 3.05 units a second, no trend; the logic fields' change
+  rates equal (+0x5C0: 0.26, 0.30, 0.25 a second).
+- **Not run**: the later dungeons' bosses (no save reaches them). The code
+  says they are time-based; only a play session will show it.
+
+**The save-data list** [M]. cellSaveDataListLoad2 and ListSave2 took the
+first entry the game offered. So with two saves CONTINUE could only load the
+first, and -- found by this work's own test -- the game's SAVE overwrote the
+first entry, whichever save had been loaded: the game asks for the list's head
+as the focus and expects the player to choose.
+Now both show the system's list as a panel over the game (ps3recomp 0131):
+- each entry's PARAM.SFO DETAIL (the game writes the hero's name, the play
+  time and the location there) and when it was last written; edit data shows
+  its name; the game's sort and focus position honoured (RPCS3's rules);
+- Up/Down, Cross (Z, Enter) to confirm, Circle (X) to go back: CELL_CANCEL to
+  the game, which goes back to where it was (the title on CONTINUE);
+- the save side has the game's New Save Data row, and asks before it
+  overwrites a save;
+- the game's pad reads released meanwhile, so its own screen does not move.
+PS3_SAVEDATA_PICKER=0 restores the first entry (the test harness's default,
+so that scripted routes stay as they were; tests/scenarios/save_picker*.drive
+turn it on). The panel's font is the on-screen readout's, ASCII upper case;
+the entries' ICON0.PNG is not drawn.
+
+Tests on copies of the owner's saves (tests/scenarios/save_picker.drive,
+save_picker_edit.drive): two saves, the second picked, and loaded (the save
+named by the game's log); saved from the system menu into the same slot, the
+other save's file byte-identical; to the title, a cancel, back at PRESS START; the first
+picked and loaded. On the character select, the third of three edits picked
+and read (its DATA.EDT, the character on the next screen). Saves are read as
+before and written only when the player chooses to.
+
+**The build** [M]: build/r8/rel8t (dotheroes.exe sha256 5702298d...; rel8s's
+tree with the two entry hooks in the lift's chunk 008 and ps3recomp 0131;
+the owner's play session, tests/scenarios/owner_play_r8.drive, runs it with
+the list on). Validated as rel8s was (build/r8/val7_run.sh): the two list
+drives and the eight scenarios exit 0; Vulkan sync validation (river,
+dungeon) and the capture check clean; normal damage; the four RPCS3
+reference scenes within the accepted figures (tests/rpcs3_reference.py).
+The river fight uncapped with real audio, two rounds each: rel8t
+205.5-208.1 fps, rel8s 200.1-202.5 (the fight's usual spread; the gate
+runs only in the boss's room). The boss at 144 fps for ten minutes, the hero
+in the room's middle: the six segments destroyed (at 42-274 s), the head
+then alone at its top multiplier (3.28, 10.4 units a second) and not hit by
+a hero standing still -- **a full kill with the gate on is not yet seen**; a
+play session will show it.
 
 ## 10. Reproducing
 
