@@ -161,6 +161,7 @@ def check(scene, dump, quiet=False):
     worse = []
     acc = m.get("accepted", {})
     kinds = {t["name"]: t["kind"] for t in m["targets"]}
+    # a scene's own multiple where its targets vary from run to run of one build ("tolerance": {target: x}), else 1.5
     mean_floor = {"f16": 0.002, "d24": 1e-7, "argb8": 0.25, "r565": 0.25}
     for name, r in out.items():
         a = acc.get(name)
@@ -180,7 +181,7 @@ def check(scene, dump, quiet=False):
                 if key == "within_2steps_pct":
                     if v < rv - 1.0:
                         worse.append("%s %s %s < accepted %s" % (name, key, v, rv))
-                elif v > rv * 1.5 + floor:
+                elif v > rv * m.get("tolerance", {}).get(name, 1.5) + floor:
                     worse.append("%s %s %s > accepted %s" % (name, key, v, rv))
     if not quiet:
         print("scene %s (%s): ours %s" % (scene, m["about"], dump))

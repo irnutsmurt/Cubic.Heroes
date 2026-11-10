@@ -1479,6 +1479,24 @@ static void asp_hot_mark(std::string& ps)
     }
 }
 
+// R8: lines -- the character editor's grid (LINES, LINE_LOOP, LINE_STRIP: 2, 3, 4). Drawn as a Vulkan line
+// list, width 1 (the width the game sets; a wider one is counted, r7_unmodelled), the strip and the loop
+// unrolled into pairs. Points (1) are not drawn yet: none has been seen.
+static inline bool prim_lines(uint32_t prim) { return prim >= 2u && prim <= 4u; }
+static uint32_t line_index_count(uint32_t prim, uint32_t n)
+{
+    if (n < 2) return 0;
+    return prim == 2u ? n - n % 2u : prim == 4u ? 2u * (n - 1u) : 2u * n;
+}
+static void line_indices(uint32_t prim, uint32_t n, const uint32_t* v, uint32_t* out)
+{
+    if (n < 2) return;
+    if (prim == 2u) { for (uint32_t i = 0; i < n - n % 2u; i++) out[i] = v[i]; return; }
+    uint32_t k = 0;
+    for (uint32_t i = 0; i + 1 < n; i++) { out[k++] = v[i]; out[k++] = v[i + 1]; }
+    if (prim == 3u) { out[k++] = v[n - 1]; out[k++] = v[0]; }
+}
+
 const Pipe* pipeline_asp(const Rec* r, const rsx_vertex_layout_plan& layout, VkFormat rt, VkFormat df,
                          rsx_fp_constant_block* consts)
 {
@@ -1549,7 +1567,7 @@ const Pipe* pipeline_asp(const Rec* r, const rsx_vertex_layout_plan& layout, VkF
                               ra.blend_eq_rgb, ra.blend_eq_a, ra.depth_test, ra.depth_write, ra.depth_func,
                               ra.stencil_test, ra.stencil_func, ra.stencil_func_mask, ra.stencil_write_mask,
                               ra.stencil_fail, ra.stencil_zfail, ra.stencil_zpass, alpha_test, alpha_test ? alpha_func : 0,
-                              ra.zminmax };
+                              ra.zminmax, prim_lines(r->prim) ? 1u : 0u };
     k = fnv(ints, sizeof ints, k);
     k = fnv(gamma, sizeof gamma, k); k = fnv(expand, sizeof expand, k);
     k = fnv(unnorm, sizeof unnorm, k); k = fnv(shadow, sizeof shadow, k);
@@ -1581,7 +1599,8 @@ const Pipe* pipeline_asp(const Rec* r, const rsx_vertex_layout_plan& layout, VkF
     vi.vertexBindingDescriptionCount = 1; vi.pVertexBindingDescriptions = &vb;
     vi.vertexAttributeDescriptionCount = layout.count; vi.pVertexAttributeDescriptions = va;
     VkPipelineInputAssemblyStateCreateInfo ia = { VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
-    ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;   // every primitive rebuilt as a triangle list
+    // every primitive rebuilt as a triangle list, but lines: a line list
+    ia.topology = prim_lines(r->prim) ? VK_PRIMITIVE_TOPOLOGY_LINE_LIST : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
     VkPipelineViewportStateCreateInfo vps = { VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
     vps.viewportCount = 1; vps.scissorCount = 1;
     // as the engine (rsx_vulkan_backend.c): CULL_FACE FRONT and FRONT_AND_BACK
@@ -3143,7 +3162,12 @@ void asp_draw(const Rec* r)
     }
     prof.mark(kApLayout);
     int indexed = 0;
-    if (!rsx_vertex_topology_plan(r->prim, 1, &indexed)) { unsupported(r, "asp: a primitive the engine does not rebuild"); return; }
+    const bool lines = prim_lines(r->prim);
+    if (!lines && !rsx_vertex_topology_plan(r->prim, 1, &indexed)) {
+        unsupported(r, r->prim == 1u ? "asp: points" : "asp: a primitive the engine does not rebuild");
+        return;
+    }
+    if (lines) stats().n_asp_lines++;
     const uint32_t nv = r->vcount, n = r->count;
     if (!nv || !n || nv > (1u << 20) || n > (1u << 22)) { unsupported(r, "asp: counts"); return; }
     const bool u16 = r->idx_type == 2;
@@ -3214,7 +3238,7 @@ void asp_draw(const Rec* r)
             }
         }
     }
-    const uint32_t n_draw = rsx_draw_engine_topology_index_count(r->prim, n, nullptr, 0);
+    const uint32_t n_draw = lines ? line_index_count(r->prim, n) : rsx_draw_engine_topology_index_count(r->prim, n, nullptr, 0);
     rsx_vertex_fetch_plan plan;
     fetch_plan(&plan, r, layout);
     plan.guest_ptr = guest_ptr_live; plan.guest_user = nullptr;
@@ -3305,7 +3329,8 @@ void asp_draw(const Rec* r)
             Arena* na = src != ~(VkDeviceSize)0 ? arena_alloc(b, ibytes, &off) : nullptr;
             if (na && !decoded && !decode()) { unsupported(r, "asp: an index past the vertex count"); return; }
             if (na) {
-                rsx_draw_engine_write_topology_indices(r->prim, n, nullptr, 0, occ.data(), (uint32_t*)(b.up.p + src));
+                if (lines) line_indices(r->prim, n, occ.data(), (uint32_t*)(b.up.p + src));
+                else rsx_draw_engine_write_topology_indices(r->prim, n, nullptr, 0, occ.data(), (uint32_t*)(b.up.p + src));
                 b.used = src + ibytes;
                 arena_fill(b, *na, off, src, ibytes);
                 s_vcache[ik] = { na->gen, off, ibytes, n_draw };
@@ -3329,7 +3354,8 @@ void asp_draw(const Rec* r)
     if (!ibuf) {
         if (!decoded && !decode()) { unsupported(r, "asp: an index past the vertex count"); return; }
         idx.resize(n_draw ? n_draw : 1);
-        rsx_draw_engine_write_topology_indices(r->prim, n, nullptr, 0, occ.data(), idx.data());
+        if (lines) line_indices(r->prim, n, occ.data(), idx.data());
+        else rsx_draw_engine_write_topology_indices(r->prim, n, nullptr, 0, occ.data(), idx.data());
     }
     prof.mark(kApVcache);
     // the pipeline

@@ -38,6 +38,7 @@ per-thread work reported apart. An average of 144 is not 144 sustained.
 | **Stopping a batch** | **fixed**: tools/owned_run.py runs a batch in a job object of its own; a cancel, the launching shell's end or the launcher's end stops every process it started and nothing else. 7 dummy-process tests and one stop of a real background task pass; not yet used for a game batch (section 9.2) |
 | **The recorder's bookkeeping** | **investigated**: one producer thread (measured: no observed call on another thread in the kept fight reports); the lock is needed only against copies into RSX local memory and inline transfers made on other threads, which the native renderer never takes part in. A lock-free producer path, an indexed dispatch and direct handlers are prepared as three measured steps; two counters added to tell whether other threads write at all (compiled, not run) (section 8.4) |
 | **The RPCS3 comparison** | traced to their causes against RPCS3's own target copies at matched cameras (section 9.4): **the sparkle** = the translator ignored NV40's source precision modifiers (ps3recomp 0130; NONNEG, the workaround, removed); **the castle floor** = the depth clamp the game enables, never modelled, which needed the guest's 24-bit depth surfaces to work (both now the default); **the reflection** = R5G6B5 targets held as RGBA8 (now 16-bit; also the king's window-light residual, section 9.5); **the king** = the tested close-up matches RPCS3; why the owner's earlier screenshot pair differed is not established. The edited hero draws (harness fixes, section 9.3) |
+| **The editor's lines** | **drawn** (line lists, width 1): the block grid matches RPCS3's frame but for the blinking cursor; a fifth reference scene (section 9.7) |
 | What is left | section 9 -- one decision for the owner there (the reservation test) |
 
 ## 1. Inventory: what runs, and what is on the critical path [M, C]
@@ -1917,6 +1918,34 @@ unchanged, and none is added). A full boss kill with the fix is unverified
 until the owner plays it. Follow-up, not started: smooth visual interpolation
 between the boss's 30 Hz steps above 30 fps (the gameplay timing stays as
 corrected; interpolation would change only what is drawn between steps).
+
+### 9.7 The character editor's lines (2026-11-09) [M]
+
+Every validation since R7 reported the editor's records the native renderer
+skipped: 1,845 a session "asp: a primitive the engine does not rebuild".
+They are the block grid's lines -- the editor's three walls and floor, cell by
+cell (NV40 LINES and LINE_STRIP, width 1). The renderer rebuilds every
+primitive as a triangle list and had no case for lines, so the editor showed
+its blocks floating with no grid.
+
+**Now** (port/native/render/ppfx_render.cpp, the scene path): LINES,
+LINE_STRIP and LINE_LOOP are drawn as a Vulkan line list (the strip and the
+loop unrolled into pairs), width 1 -- the width the game sets (R7 counted
+1,854 calls, all width 1; a wider one is still counted as unmodelled). The
+pipeline key carries the topology. POINTS stay unsupported, with their own
+reason in the report ("asp: points"); none has been seen. The report counts
+the line draws ("native asp line draws").
+
+**Against RPCS3** (the scratch copy, scale 100, display buffer 00000000 read
+over GDB; ours dumped at the same screen by the same button presses): the
+frame's mean difference 0.012-0.018 of 255 and 378 pixels over 8, all of them
+the block cursor's blinking dashed outline and its shadow; the grid's line
+pixels (26,159 in RPCS3's frame) present in ours at the same places, none
+extra. Without lines (rel8t) the same frame differed in 25,804 pixels. The
+editor is now a fifth reference scene (tests/rpcs3_reference.json "editor",
+tests/scenarios/rpcs3ref_editor.drive; RPCS3's frame packed locally in
+build/reference/rpcs3/editor): accepted from bt8, and rel8t fails it.
+
 
 ## 10. Reproducing
 

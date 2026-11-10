@@ -11,7 +11,7 @@
    ],
    "area": 37,
    "secs": 150,
-   "notes": "enemies move: the frame and combined buffer differ where they stand; the sparkle's measure is no negative component in ours and the bright pass's spread",
+   "notes": "enemies move: the frame and combined buffer differ where they stand; the sparkle's measure is no negative component in ours and the bright pass's spread The reflection's mean varies with the lamps and the enemies: 0.38-1.60 in three runs of one build (bt8, 2026-11-09), 0.39-1.07 in two of rel8t; its tolerance is 2.5 times the accepted figure.",
    "targets": [
     {
      "name": "combined",
@@ -104,7 +104,10 @@
      "far_pct": 3.812
     }
    },
-   "accepted_from": "rel8r"
+   "accepted_from": "rel8r",
+   "tolerance": {
+    "refl": 2.5
+   }
   },
   "entry_hall": {
    "about": "castle area 82, the entry hall below the throne-room corridor: the floor reflection's stair walls (the depth clamp)",
@@ -397,6 +400,40 @@
     }
    },
    "accepted_from": "rel8r"
+  },
+  "editor": {
+   "about": "the dot editor's block grid, three blocks placed: its lines (LINES, LINE_STRIP, width 1), which the native renderer skipped before 2026-11-09",
+   "drive": "tests/scenarios/rpcs3ref_editor.drive",
+   "save": "build/checkpoints/castle-front (packed with the scene)",
+   "camera": [
+    0.0,
+    0.0
+   ],
+   "area": 0,
+   "secs": 150,
+   "notes": "not a field scene: no camera or area to match. The block cursor's dashed outline and its shadow blink: the frames differ there (about 380 pixels). RPCS3's copy read from display buffer 00000000.",
+   "targets": [
+    {
+     "name": "final",
+     "offset": "00000000",
+     "w": 1280,
+     "h": 720,
+     "kind": "argb8",
+     "pitch": 5120,
+     "rpcs3_file": "final0.bin"
+    }
+   ],
+   "accepted": {
+    "final": {
+     "mean": [
+      0.012,
+      0.018,
+      0.018
+     ],
+     "far_pct": 0.041
+    }
+   },
+   "accepted_from": "bt8"
   }
  }
 }

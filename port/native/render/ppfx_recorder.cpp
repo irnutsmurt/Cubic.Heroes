@@ -4008,6 +4008,8 @@ void write_report()
         fprintf(f, "native asp draws %llu clears %llu vertex_mb %.1f | clears merged %llu dropped %llu | resident fp binds %llu\n",
                 (unsigned long long)s.n_asp_draws, (unsigned long long)s.n_asp_clears, s.n_asp_vertex_bytes / 1048576.0,
                 (unsigned long long)A.clears_merged, (unsigned long long)A.clears_dropped, (unsigned long long)A.fp_resident_binds);
+    if (s.n_asp_lines)
+        fprintf(f, "native asp line draws %llu (line lists, width 1)\n", (unsigned long long)s.n_asp_lines);
     fprintf(f, "native draws %llu clears %llu unsupported %llu batches %llu pipelines %llu images %llu (%.1f MB) "
                "static_textures %llu own_target_snapshots %llu images_replaced %llu "
                "disabled_unit_draws %llu (units %04llX)\n",

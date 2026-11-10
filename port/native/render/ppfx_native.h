@@ -428,7 +428,7 @@ struct Stats {
     std::atomic<uint64_t> n_draws{0}, n_clears{0}, n_skipped{0}, n_unsupported{0}, n_batches{0};
     std::atomic<uint64_t> n_pipelines{0}, n_images{0}, n_image_bytes{0}, n_static_textures{0}, n_feedback{0};
     std::atomic<uint64_t> n_frames{0};    // frames with PPFX records (the per-frame figures' denominator)
-    std::atomic<uint64_t> n_asp_draws{0}, n_asp_vertex_bytes{0}, n_asp_clears{0};   // R5: asp's records drawn natively
+    std::atomic<uint64_t> n_asp_draws{0}, n_asp_vertex_bytes{0}, n_asp_clears{0}, n_asp_lines{0};   // R5: asp's records drawn natively
     std::atomic<uint64_t> asp_race_checked{0}, asp_race_changed{0};   // R5: guest bytes changed between the record and its native draw
     std::atomic<uint64_t> n_retired{0};   // images replaced at an address (another size or format) and destroyed later
     std::atomic<uint64_t> n_barriers{0}, n_barriers_full{0}, n_handoff_copies{0}, n_snapshot_copies{0};
