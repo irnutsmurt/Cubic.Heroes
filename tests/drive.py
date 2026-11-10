@@ -994,6 +994,9 @@ def step(lineno, line, op, a):
     elif op == "stop":
         open(os.path.join(run, "stop.trigger"), "w").close()
         say("stop")
+    elif op == "quit":   # the game asked to exit as closing the window asks it (quit.trigger): its own shutdown
+        open(os.path.join(run, "quit.trigger"), "w").close()
+        say("quit")
     elif op == "until_exit":
         keep_saves(a[0] if a else None)
     else:

@@ -42,6 +42,20 @@
    "guard": "g_water_hook",
    "decline": true,
    "note": "The water's signal to its SPU task, cellSpursEventFlagSet(r3 + 0x3D400, r4): bit 0 once a simulation step (func_003C7460), bit 1 at shutdown (func_003C7AF4). With DOTHEROES_NATIVE_WATER=1 or sync the step is done natively (port/native/water_task.cpp); the quit and any other block are declined. Off by default; =check compares the lifted task's result with the native one."
+  },
+  {
+   "addr": "0x003C7BA8",
+   "host": "dotheroes_water_setup",
+   "guard": "g_water_hook",
+   "decline": true,
+   "note": "The water's set-up (r3 the water): a SPURS instance 'Water', its taskset, a 0x3D600-byte block, an event flag and the SPU task. With native scheduling (DOTHEROES_NATIVE_WATER=1 or sync, the default) the port does the game's own stores and texture calls and no SPURS (port/phys_hooks.cpp, port/native/water_task.h); declined otherwise."
+  },
+  {
+   "addr": "0x003C7AF4",
+   "host": "dotheroes_water_shutdown",
+   "guard": "g_water_hook",
+   "decline": true,
+   "note": "The water's shutdown: quit bit, the task's exit code, the taskset and instance torn down. Native when the set-up was (its markers in the globals): the worker's step finished, the globals cleared; declined for a real taskset."
   }
  ]
 }
