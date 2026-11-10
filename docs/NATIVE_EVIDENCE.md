@@ -11,7 +11,7 @@ output, **[I]** inferred, **[U]** unknown.
 
 ## Method and runs
 
-Build: the 2026-11-04 checkpoint (repo 9ea01df, ps3recomp 578c9aa) plus the
+Build: the 2026-11-04 checkpoint (repo e8642c5, ps3recomp 578c9aa) plus the
 evidence counters below, all off unless their switches are set. Real audio,
 normal scheduling, uncapped (DIAG_VBLANK_MS=0.5), can't-die, warm shader
 caches, PS3_STRICT=1. Runs and scripts: build/ab/2026-11-04-evidence (local).

@@ -302,8 +302,8 @@ Details and numbers in HANDOFF.md ("Current status", the work log).
   causes ruled out. No in-game performance claim. The two production
   refactors (ps3recomp 0102, 0103) change nothing built: no shader or
   pipeline cache miss in a river fight.
-- **Commits:** ps3recomp 0100-0104; repo 795314b, cdb48e3, fdb5118, 37d91e2,
-  246dc39.
+- **Commits:** ps3recomp 0100-0104; repo ad432a3, 7e58579, c0742fb, 14f7fed,
+  fda4c40.
 - **Next:** R2's scope (the whole PPFX chain offline) awaits review (approved
   2026-11-04; done, below).
 
@@ -339,8 +339,8 @@ Details and numbers in HANDOFF.md ("Current status", the work log).
   an area's first frames; the chain after a return to the title (programs
   reloaded at other offsets); the boss fight and other areas (saves needed;
   the attract mode's demos are movies).
-- **Commits:** ps3recomp 0105-0107; repo 02122f4, 36d4eb6, 9053968, 20e8356,
-  43c705b, 6ac23f5, 380617e, 17c87ca, c16eb0a, and the documents.
+- **Commits:** ps3recomp 0105-0107; repo 2ffa6d7, 7cad690, 9053968, 0f511a1,
+  bce790f, fd35126, e3c52ca, 18e9a85, d102ce0, and the documents.
 - **Next:** R3's scope (PPFX in the game, dual run; NATIVE_R2.md) awaits
   review.
 
@@ -377,8 +377,8 @@ Details and numbers in HANDOFF.md ("Current status", the work log).
   matches the preserved checkpoint build (p99 17.3-17.5 ms both).
 - **Not covered:** the boss fight (owner_boss_r3.drive, to be played),
   other areas (no saves), menus over the game, other frame pacings.
-- **Commits:** ps3recomp 0108-0109; repo 7e76892, f941695, 96d3900,
-  07d848d, baec719, f3efb24, 8c0240d.
+- **Commits:** ps3recomp 0108-0109; repo 01fd730, c47509c, fcf5a4f,
+  4f9778f, 7f04a67, f5487bf, 9f8ec4b.
 - **Next:** the owner's review of R3 (done: a follow-up asked for, below).
 
 ## Native port: R3 follow-up (2026-11-05)
@@ -387,7 +387,7 @@ Details and numbers in HANDOFF.md ("Current status", the work log).
 - **Removed:** the register-shaped record (the 754-word block and the
   scratch register file in the native path); the runtime's image-3 SPU
   probe from default runs.
-- **Changed (behaviour, separate commit 81539ff):** FIFO subchannel 1 no
+- **Changed (behaviour, separate commit 8635433):** FIFO subchannel 1 no
   longer feeds the 3D engine (GCM_SUBCH1_2D=1): PPFX's report copy had been
   setting the 3D colour mask, a one-frame tint after every load.
 - **Evidence:** NATIVE_R3B.md. The first-load "inherited" colour mask was
@@ -413,8 +413,8 @@ Details and numbers in HANDOFF.md ("Current status", the work log).
 - **Not covered:** the boss and magic (owner_boss_r3.drive, to be played),
   areas past the first dungeon (no saves); how a snapshot takes its
   picture; who reads PPFX's report.
-- **Commits:** ps3recomp 0110-0111; repo 097e035, 2387f2b, 81539ff,
-  f86e84f and the document's.
+- **Commits:** ps3recomp 0110-0111; repo a05c047, a1540cc, 8635433,
+  fb1c14a and the document's.
 - **Next:** the owner's review of NATIVE_R3B.md; R4 (its section 9) not
   before.
 
@@ -455,8 +455,8 @@ docs/NATIVE_R4.md. The owner authorised R4 behind an opt-in switch, then R5
 - **Not covered:** the boss and magic (owner_boss_r4.drive, ready), areas
   past the first dungeon's surroundings; the GitHub rename needs a signed-in
   session.
-- **Commits:** ps3recomp 0112-0113; repo dabced3, 45299af, b3f03d6,
-  d2698f0, 6b54767 and the documents'.
+- **Commits:** ps3recomp 0112-0113; repo 3144c6a, c8f8e00, c71c725,
+  fefe338, 4504c33 and the documents'.
 
 ## Planned: the PC experience (requirements agreed 2026-11-07)
 

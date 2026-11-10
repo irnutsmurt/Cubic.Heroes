@@ -390,12 +390,12 @@ blocks checking every 30th handback:
   report would show it.
 - The game saved in area 37 before the boss's room; the session did not
   keep it (tests/drive.py kept saves only for GAMEDATA sessions, fixed in
-  cb01e50) and it was copied by hand to
+  f89c719) and it was copied by hand to
   build/checkpoints/owner-boss-r4/01-area37.
 
 **The owner's second boss session** (2026-11-05, 5.6 minutes,
 build/sessions/boot-20261105-125501), with DOTHEROES_PPFX_COMPARE_NOWAIT=1
-on a build at a266368: the boss beaten again (area 38, 46 s), area 39,
+on a build at afaf98a: the boss beaten again (area 38, 46 s), area 39,
 back out to field 15, saved there (kept: build/checkpoints/owner-boss-r4/
 02-area15, the onward session's start). One mark, 2.5 s after field 15
 loaded, in an R4 block (7 intervals over 25 ms in the R3 block before it).

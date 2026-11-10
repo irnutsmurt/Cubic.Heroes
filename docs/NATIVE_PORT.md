@@ -88,7 +88,7 @@ After the native base, in this order:
    are stable;
 3. RTX.
 
-Baseline: tag `checkpoint-2026-11-04` (repo 9ea01df, ps3recomp 578c9aa),
+Baseline: tag `checkpoint-2026-11-04` (repo e8642c5, ps3recomp 578c9aa),
 executable, symbols and measurements kept locally in build/checkpoint/2026-11-04.
 
 ---

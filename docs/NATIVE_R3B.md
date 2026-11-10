@@ -14,7 +14,7 @@ Labels as elsewhere: **[M]** measured, **[C]** from code, **[I]** inferred,
   colour mask was the existing renderer misreading PPFX's report copy (a
   memory-to-memory transfer on FIFO subchannel 1) as the 3D colour mask --
   a one-frame tint after every load that the game does not have; fixed in
-  the existing renderer (a behaviour change, commit 81539ff). Unit 0's
+  the existing renderer (a behaviour change, commit 8635433). Unit 0's
   address mode is asp's: the recorder now follows it, and asp's colour
   mask, through asp's own state API. Dual runs since: 0 cross-check
   differences and every compared output identical, the first-load frames
@@ -76,7 +76,7 @@ reference, blend enable 0x01A2C500 -- bit 0 clear, so off -- blend factors,
 blend colour and equation, stencil test enable 0). The copy itself was
 never carried out.
 
-Fix (commit 81539ff, a behaviour change of the displayed renderer, separate
+Fix (commit 8635433, a behaviour change of the displayed renderer, separate
 from the rest): the port now sets GCM_SUBCH1_2D=1, routing subchannel 1 to
 the 2D path, where NV0039's methods are counted as unhandled; the copy is
 not carried out, as before. In 75 traced frames nothing else uses
