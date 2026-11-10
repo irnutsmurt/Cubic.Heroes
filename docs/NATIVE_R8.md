@@ -2127,7 +2127,12 @@ one -- a stop request honoured at the next channel operation (the channel wait a
 event receive both watch it) -- and waits for their host threads, bounded at about 4 s a thread; destroy
 stops any thread still running and never frees a context a thread still uses. rel19 (rel17's tree at
 542794b with the fix, codec_raw native off) on the quit drive: the mixer stopped at terminate (`1 thread(s)
-stopped, 0 still running`), nothing ran after destroy, no crash, and the run ended as rel16's did.
+stopped, 0 still running`), nothing ran after destroy, no crash, and the run ended as rel16's did (twice).
+rel19's validation, as rel16's: the nine scenes with no crash, sync validation 0 errors, the normal-damage
+run, the reference scenes all within the accepted figures (5 of 5). The validation set's save-list scene
+stops at its first state check on both builds (it runs without DOTHEROES_DEV_STATE) after the list has
+loaded the chosen save; the full flow runs with the switch on. **rel19 is the play build**
+(tests/scenarios/owner_play_r8.drive).
 
 
 ## 10. Reproducing
