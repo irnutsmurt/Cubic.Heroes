@@ -409,6 +409,9 @@ struct Stats {
     // R8 (docs/NATIVE_R8.md section 8.4): of those and of the inline transfers, the ones made on
     // another thread than the producer's -- what the recorder's lock is there for
     std::atomic<uint64_t> local_copies_other{0}, transfers_other{0};
+    // R8 (section 8.4, step 1): copies and transfers other threads handed over, written into the
+    // shadow by the producer (0 in play; with DOTHEROES_RECORDER_HANDOFF_TEST=1 its own too)
+    std::atomic<uint64_t> shadow_handoffs{0};
     std::atomic<uint64_t> asp_calls{0}, asp_restores{0}, asp_store_mismatch{0};   // asp's state API seen
     std::atomic<uint64_t> transfers{0}, reports{0};   // PPFX's report copies and report requests (side effects)
     std::atomic<uint64_t> draws{0}, clears{0}, depth_clears{0}, frames{0};

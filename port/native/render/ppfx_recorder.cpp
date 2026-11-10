@@ -268,10 +268,14 @@ uint32_t owner_get(uint32_t off) { return shadow_page(off)->own[(off & 0xFFF) >>
 // A copy the game makes into local memory (its memcpy, observed): on pages
 // the shadow keeps (program memory), the bytes it writes, in call order --
 // a program uploaded again, after the title, at an offset that held other
-// programs' patched words before.
-void shadow_cpu_write(uint32_t off, const uint8_t* src, uint32_t n)
+// programs' patched words before. `around`: the words the copy touches, from
+// (off & ~3) on, as memory has them -- local memory itself when the copy is
+// written at its call, the bytes taken at the call when another thread's copy
+// is written later (the hand-off list, below).
+void shadow_cpu_write(uint32_t off, const uint8_t* src, uint32_t n, const uint8_t* around)
 {
     const uint64_t ep = ++s_epoch;
+    const uint32_t a0 = off & ~3u;
     for (uint32_t pg = off & ~0xFFFu; pg < off + n; pg += 0x1000) {
         auto it = s_shadow.find(pg >> 12);
         if (it == s_shadow.end()) continue;
@@ -280,12 +284,16 @@ void shadow_cpu_write(uint32_t off, const uint8_t* src, uint32_t n)
         for (uint32_t w = lo & ~3u; w < hi; w += 4) {
             uint8_t* d = p->b + (w & 0xFFF);
             uint64_t& wep = p->ep[(w & 0xFFF) >> 2];
-            if (!wep) memcpy(d, vm_base + kLocalEa + w, 4);   // a word copied in part: the rest as memory has it
+            if (!wep) memcpy(d, around + (w - a0), 4);   // a word copied in part: the rest as memory has it
             for (uint32_t b = 0; b < 4; b++)
                 if (w + b >= lo && w + b < hi) d[b] = src[w + b - off];
             wep = ep;
         }
     }
+}
+void shadow_cpu_write(uint32_t off, const uint8_t* src, uint32_t n)
+{
+    shadow_cpu_write(off, src, n, vm_base + kLocalEa + (off & ~3u));
 }
 
 // Program memory at a bind. `since`: words a transfer wrote after it are the
@@ -370,8 +378,10 @@ struct Rstate {
     uint32_t final_frame;            // R5: the frame whose final composite has been recorded (~0u none)
     uint32_t ring_ctx;               // the command buffer's CellGcmContextData (PPFX's calls' first argument)
     uint8_t by;                      // who makes the call being encoded (By)
-    // the producer
-    uint32_t tid;
+    // the producer. R8: atomic, because other threads read it without a lock
+    // (section 8.4, step 1); set once, under the hand-off lock (producer_claim)
+    // or, on the locked path, under s_lock
+    std::atomic<uint32_t> tid;
     // R4
     bool r4_frame;                   // this frame's PPFX calls are bypassed
     bool skipping;                   // the call being encoded is (its record is bypassed)
@@ -432,9 +442,174 @@ struct Asp {
 // Calls on other threads than the producer's touch the shadow (an inline
 // transfer by other code) and the frame count; the lock keeps them apart. It
 // is released while the producer waits for room in the queue.
+// R8 (docs/NATIVE_R8.md section 8.4, step 1): the lock is now only the old
+// path, kept for A/B measurement (DOTHEROES_RECORDER_LOCKED=1). By default
+// the producer's calls take no lock: it alone touches the recorder's state,
+// and other threads' copies and transfers reach the shadow through the
+// hand-off list below.
 std::mutex s_lock;
-std::unique_lock<std::mutex>* s_held;   // the producer's hold on it, during a call
+std::unique_lock<std::mutex>* s_held;   // the producer's hold on it, during a call (the locked path only)
 std::mutex s_unm_lock;                   // s_unmodelled_by, which the report reads
+
+// ---- R8: the hand-off list (section 8.4, step 1) ---------------------------------
+// The shadow of program memory has one writer, the producer, except for two
+// kinds of call that may come from other threads: the game's copies into
+// local memory and the inline transfers. Such a call puts what it writes --
+// its bytes, taken at the call -- on this list, under the list's own lock,
+// and raises the flag; the producer, before its next call or return reads
+// anything, sees the flag (one load when the list is empty), takes the list
+// and writes it into the shadow, in the order the entries came. That is the
+// order the lock gave: whichever entered first. A copy the game ordered
+// before one of the producer's calls had to synchronise with the producer to
+// be ordered at all, and the entry is on the list before the copy's thread
+// reaches that synchronisation (the observer runs at the copy's entry), so
+// the producer finds it when it next looks. Other threads never wait for the
+// producer: the producer holds the list's lock only to take the list.
+//
+// DOTHEROES_RECORDER_LOCKED=1: the old path (s_lock on every call), read once
+// at start-up. DOTHEROES_RECORDER_HANDOFF_TEST=1 (the forced test of the
+// list): the producer's own copies go through the list too, written at its
+// next call, and its own transfers through the list at once -- the records
+// must be the same as without it.
+int s_rec_locked = -1;   // -1 not read yet (the locked path until it is)
+int s_ho_force;
+void rec_switches()
+{
+    if (s_rec_locked >= 0) return;
+#ifdef _WIN32
+    const char* e = getenv("DOTHEROES_RECORDER_LOCKED");
+    const char* t = getenv("DOTHEROES_RECORDER_HANDOFF_TEST");
+    s_ho_force = !(e && *e == '1') && t && *t == '1';
+    s_rec_locked = e && *e == '1';
+#else
+    // without a thread id (every thread is 0 here), only the lock keeps the
+    // threads apart
+    s_rec_locked = 1;
+#endif
+}
+
+inline uint32_t this_tid()
+{
+#ifdef _WIN32
+    return GetCurrentThreadId();
+#else
+    return 0;
+#endif
+}
+
+struct Pending {
+    uint8_t transfer;        // 1 an inline transfer, 0 a copy
+    uint32_t off, n;         // where in local memory, how many bytes
+    uint32_t src, lr;        // for the program watch's line (transfers)
+    // a transfer: its words; a copy: the words it touches, from (off & ~3) on,
+    // with the bytes around it as local memory had them at the call
+    std::vector<uint8_t> b;
+};
+std::mutex s_ho_lock;
+std::vector<Pending> s_ho;                  // under s_ho_lock
+std::atomic<bool> s_ho_pending{ false };   // s_ho is not empty (raised under s_ho_lock)
+std::vector<Pending> s_ho_taken;            // the producer's: the list it took
+
+void handoff_push(Pending&& e)
+{
+    std::lock_guard<std::mutex> g(s_ho_lock);
+    s_ho.push_back(std::move(e));
+    s_ho_pending.store(true, std::memory_order_release);
+}
+
+// an entry built before the list's lock is taken, so a large copy never holds
+// the lock (nor the producer behind it) while its bytes are taken
+Pending pending_copy(uint32_t off, const uint8_t* src, uint32_t n)
+{
+    Pending e;
+    e.transfer = 0; e.off = off; e.n = n; e.src = 0; e.lr = 0;
+    const uint32_t a0 = off & ~3u, a1 = (off + n + 3) & ~3u;
+    e.b.resize(a1 - a0);
+    memcpy(e.b.data(), vm_base + kLocalEa + a0, 4);                          // the first word's other bytes
+    memcpy(e.b.data() + (a1 - a0) - 4, vm_base + kLocalEa + a1 - 4, 4);      // the last word's
+    memcpy(e.b.data() + (off - a0), src, n);
+    return e;
+}
+
+void handoff_transfer(uint32_t dst, uint32_t src, uint32_t n, uint32_t lr)
+{
+    Pending e;
+    e.transfer = 1; e.off = dst; e.n = n; e.src = src; e.lr = lr;
+    e.b.assign(vm_base + src, vm_base + src + n);
+    handoff_push(std::move(e));
+}
+
+// The producer: what other threads handed over, into the shadow, in order.
+// The list's lock taken (an acquire) before anything of it is read.
+void handoff_apply()
+{
+    {
+        std::lock_guard<std::mutex> g(s_ho_lock);
+        s_ho_taken.swap(s_ho);
+        s_ho_pending.store(false, std::memory_order_relaxed);   // under the lock: a later push raises it again
+    }
+    for (const Pending& e : s_ho_taken) {
+        if (e.transfer) {
+            shadow_write(e.off, e.b.data(), e.n, ++s_epoch);
+            if (s_pw && e.n / 4 > 4)
+                fprintf(s_pw, "T %u %.3f dst=%08X words=%u src=%08X lr=%08X\n", S.frame, now_s(), e.off, e.n / 4, e.src, e.lr);
+        } else shadow_cpu_write(e.off, e.b.data() + (e.off & 3u), e.n, e.b.data());
+    }
+    bump(stats().shadow_handoffs, s_ho_taken.size());
+    s_ho_taken.clear();
+}
+
+// The first observed call (not a copy) makes its thread the producer. Under
+// the list's lock, so the copies made before there was a producer (written
+// straight into the shadow, under the same lock) are all in it before the
+// producer reads it.
+uint32_t producer_claim(uint32_t tid)
+{
+    std::lock_guard<std::mutex> g(s_ho_lock);
+    uint32_t p = S.tid.load(std::memory_order_relaxed);
+    if (!p) { p = tid; S.tid.store(tid, std::memory_order_release); }
+    return p;
+}
+
+// A copy into local memory (off: where in local memory, src: the source's
+// address), without s_lock. The producer's own is written at once, after what
+// other threads handed over before it: a copy the game ordered after another
+// thread's must not be overtaken by it. Another thread's is handed over. One
+// made before there is a producer is written at once, under the list's lock.
+void copy_observed(uint32_t off, uint32_t src, uint32_t n)
+{
+    Stats& st = stats();
+    const uint32_t tid = this_tid();
+    const uint32_t p = S.tid.load(std::memory_order_acquire);
+    if (p == tid && !s_ho_force) {
+        if (s_ho_pending.load(std::memory_order_acquire)) handoff_apply();
+        shadow_cpu_write(off, vm_base + src, n);
+        st.local_copies++;
+        return;
+    }
+    if (!p) {
+        std::lock_guard<std::mutex> g(s_ho_lock);
+        if (!S.tid.load(std::memory_order_relaxed)) {   // still none: nothing else reads or writes the shadow
+            shadow_cpu_write(off, vm_base + src, n);
+            st.local_copies++;
+            return;
+        }
+    }
+    handoff_push(pending_copy(off, vm_base + src, n));
+    st.local_copies++;
+    if (tid != S.tid.load(std::memory_order_relaxed)) st.local_copies_other++;
+}
+
+// A PPFX call on another thread than the producer's: the single-producer
+// assumption broken, fatal (both paths)
+[[noreturn]] void second_producer(uint32_t addr, uint32_t tid)
+{
+    stats().producer_threads++;
+    fprintf(stderr, "[ppfx] FATAL: a PPFX call (0x%08X) on thread %u, the command stream's producer is "
+                    "thread %u: the single-producer assumption does not hold\n", addr, tid, S.tid.load());
+    fflush(stderr);
+    abort();
+}
 // every address a record drew or cleared into (the report: what the native
 // renderer holds an image of, against what PPFX's draws sample)
 struct TargetSeen { uint64_t records; uint32_t w, h, format, last_frame; };
@@ -1339,6 +1514,10 @@ Rec* acquire()
         const uint64_t t0 = now_ns();
         q.full_waits++;
         flush_for_room();
+        // the locked path lets s_lock go while it waits; R8's lock-free path
+        // holds nothing here (s_held null), and other threads' copies go onto
+        // the hand-off list meanwhile -- written into the shadow at the
+        // producer's next call, not in the middle of this one
         if (s_held) s_held->unlock();
         std::unique_lock<std::mutex> lk(q.m);
         uint64_t waited = 0;
@@ -2970,8 +3149,11 @@ void asp_draw_exit(const VEntry& v)
             stats().asp_bypassed_words += (now - v.cur) / 4;
         } else stats().asp_not_bypassed++;
     }
-    std::unique_lock<std::mutex> g(s_lock);
-    struct Held { Held(std::unique_lock<std::mutex>* h) { s_held = h; } ~Held() { s_held = nullptr; } } held(&g);
+    // R8 (section 8.4, step 1): the lock on the locked path only; on the
+    // lock-free path ppfx_rec_exit has written what other threads handed over
+    std::unique_lock<std::mutex> g(s_lock, std::defer_lock);
+    struct Held { bool on; ~Held() { if (on) s_held = nullptr; } } held{ false };
+    if (s_rec_locked) { g.lock(); s_held = &g; held.on = true; }
     Rec* r = acquire();
     Queue& q = queue();
     r->seq = q.put.load(std::memory_order_relaxed);
@@ -3781,13 +3963,18 @@ void write_report()
     Queue& q = queue();
     fprintf(f, "# ppfx report at %.1f s (mode %d)\n", now_s(), mode());
     write_call_counts(f);
+    // R8 (section 8.4, step 1): the hand-off list's entries the producer
+    // wrote into the shadow, and which path ran (recorder_locked 1: s_lock on
+    // every call; handoff_test 1: the forced test of the list)
     fprintf(f, "calls %llu ppfx %llu nested_ppfx %llu others_on_producer %llu other_threads %llu unmodelled %llu "
-               "producer_threads %llu local_copies %llu local_copies_other_threads %llu transfers_other_threads %llu\n",
+               "producer_threads %llu local_copies %llu local_copies_other_threads %llu transfers_other_threads %llu "
+               "shadow_handoffs_applied %llu recorder_locked %d handoff_test %d\n",
             (unsigned long long)s.calls, (unsigned long long)s.ppfx_calls, (unsigned long long)s.nested_ppfx,
             (unsigned long long)s.foreign_state_calls, (unsigned long long)s.other_thread_calls,
             (unsigned long long)s.unmodelled, (unsigned long long)s.producer_threads,
             (unsigned long long)s.local_copies, (unsigned long long)s.local_copies_other,
-            (unsigned long long)s.transfers_other);
+            (unsigned long long)s.transfers_other, (unsigned long long)s.shadow_handoffs, s_rec_locked != 0 ? 1 : 0,
+            s_ho_force);
     fprintf(f, "records draws %llu clears %llu (depth-only clears %llu) frames %llu put %llu walked %llu done %llu\n",
             (unsigned long long)s.draws, (unsigned long long)s.clears, (unsigned long long)s.depth_clears,
             (unsigned long long)s.frames,
@@ -4078,6 +4265,7 @@ void report_add(const char* line)
 
 void start()
 {
+    rec_switches();   // R8: read at start-up already (ppfx_rec_wanted); here if not
     reset_state(&S.st);
     read_env();
     const char* rp = getenv("DOTHEROES_PPFX_REPORT");
@@ -4139,6 +4327,9 @@ static void r7_defaults()
 extern "C" int ppfx_rec_wanted(void)
 {
     r7_defaults();
+    // R8: the recorder's path (DOTHEROES_RECORDER_LOCKED), read once, before
+    // the guest runs a thread (r1_observe.cpp's static initialiser calls here)
+    ppfx::rec_switches();
     const char* pw = getenv("DOTHEROES_PPFX_PROGWATCH");
     if (pw && *pw) return 1;
     return ppfx::mode() != 0;
@@ -4160,6 +4351,29 @@ void call_count(uint32_t addr)
         if (!s_cc[h].addr) { s_cc[h].addr = addr; s_cc[h].n = 1; return; }
     }
 }
+
+// R8 (section 8.4, step 1): a call on another thread than the producer's,
+// on the lock-free path. It touches none of the producer's state: an inline
+// transfer's words go onto the hand-off list (the producer writes them into
+// the shadow at its next call or return); a PPFX call here is fatal, as it
+// always was; anything else is only counted. Its counters take locked adds
+// (the producer adds to the same ones). The locked path's frame-count test
+// for a flip here had nothing to count either (the producer counts frames);
+// its program-watch flush and census, which read the producer's state, are
+// not made here.
+int other_thread_call(uint32_t addr, ppu_context* ctx, uint32_t tid, bool timed, uint64_t t0)
+{
+    Stats& st = stats();
+    if (addr == 0x0069FC38u) {
+        st.transfers_other++;
+        const uint32_t dst = (uint32_t)ctx->gpr[4], src = (uint32_t)ctx->gpr[5], words = (uint32_t)ctx->gpr[6];
+        if (words && words <= 0x10000u && ea_ok(src, words * 4)) handoff_transfer(dst, src, words * 4u, (uint32_t)ctx->lr);
+    }
+    if (attribute(ctx)) second_producer(addr, tid);
+    st.other_thread_calls++;
+    if (timed) st.rec_ns += 16 * (now_ns() - t0);
+    return 0;
+}
 } }
 
 extern "C" int ppfx_rec_observe(uint32_t addr, ppu_context* ctx)
@@ -4173,12 +4387,14 @@ extern "C" int ppfx_rec_observe(uint32_t addr, ppu_context* ctx)
     if (addr == 0x00963EBCu) {   // the game's memcpy(dst, src, n): only copies into local memory matter
         const uint32_t dst = (uint32_t)ctx->gpr[3], src = (uint32_t)ctx->gpr[4], n = (uint32_t)ctx->gpr[5];
         if (dst >= kLocalEa && dst - kLocalEa < 0x10000000u && n && n <= (64u << 20) && ea_ok(src, n)) {
-            std::lock_guard<std::mutex> g(s_lock);
-            shadow_cpu_write(dst - kLocalEa, vm_base + src, n);
-            stats().local_copies++;
+            if (s_rec_locked) {
+                std::lock_guard<std::mutex> g(s_lock);
+                shadow_cpu_write(dst - kLocalEa, vm_base + src, n);
+                stats().local_copies++;
 #ifdef _WIN32
-            if (S.tid && GetCurrentThreadId() != S.tid) stats().local_copies_other++;   // S.tid: set under this lock
+                if (S.tid && GetCurrentThreadId() != S.tid) stats().local_copies_other++;   // S.tid: set under this lock
 #endif
+            } else copy_observed(dst - kLocalEa, src, n);   // R8: no s_lock (section 8.4, step 1)
         }
         // a diagnostic: the game's copies into RSX local memory below the
         // first PPFX intermediate (the display buffers among them) and from
@@ -4215,8 +4431,20 @@ extern "C" int ppfx_rec_observe(uint32_t addr, ppu_context* ctx)
 #else
         0;
 #endif
-    std::unique_lock<std::mutex> g(s_lock);
-    struct Held { Held(std::unique_lock<std::mutex>* h) { s_held = h; } ~Held() { s_held = nullptr; } } held(&g);
+    // R8 (section 8.4, step 1): the producer's calls take no lock. The first
+    // call makes its thread the producer (producer_claim); another thread's
+    // call leaves here, touching none of the producer's state; the producer
+    // writes what other threads handed over into the shadow before anything
+    // below reads it. DOTHEROES_RECORDER_LOCKED=1: the old path, s_lock held
+    // through the call, the code below unchanged.
+    std::unique_lock<std::mutex> g(s_lock, std::defer_lock);
+    struct Held { bool on; ~Held() { if (on) s_held = nullptr; } } held{ false };
+    if (s_rec_locked) { g.lock(); s_held = &g; held.on = true; }
+    else {
+        const uint32_t p = S.tid.load(std::memory_order_acquire);
+        if (p != tid && (p || producer_claim(tid) != tid)) return other_thread_call(addr, ctx, tid, timed, t0);
+        if (s_ho_pending.load(std::memory_order_acquire)) handoff_apply();
+    }
     if (addr == 0x0069DD60u) {   // cellGcmSetFlip: a frame
         if (tid == S.tid || !S.tid) {
             S.frame++; st.frames++;
@@ -4240,29 +4468,31 @@ extern "C" int ppfx_rec_observe(uint32_t addr, ppu_context* ctx)
     }
     // Inline transfers into the shadow, whoever makes them (the program
     // memory is the GPU's; PPFX's are the ones that matter, but a transfer
-    // by other code lands in the same memory).
+    // by other code lands in the same memory). R8: past the lock-free path's
+    // thread test only the producer's reach here; other threads' are handed
+    // over (other_thread_call).
     if (addr == 0x0069FC38u) {
         if (S.tid && tid != S.tid) bump(st.transfers_other);
         const uint32_t dst = (uint32_t)ctx->gpr[4], src = (uint32_t)ctx->gpr[5], words = (uint32_t)ctx->gpr[6];
         if (words && words <= 0x10000u && ea_ok(src, words * 4)) {
-            shadow_write(dst, vm_base + src, words * 4u, ++s_epoch);
-            if (s_pw && words > 4)
-                fprintf(s_pw, "T %u %.3f dst=%08X words=%u src=%08X lr=%08X\n", S.frame, now_s(), dst, words, src,
-                        (uint32_t)ctx->lr);
+            if (s_ho_force) {   // the forced test: through the list, written at once (the same point in the order)
+                handoff_transfer(dst, src, words * 4u, (uint32_t)ctx->lr);
+                handoff_apply();
+            } else {
+                shadow_write(dst, vm_base + src, words * 4u, ++s_epoch);
+                if (s_pw && words > 4)
+                    fprintf(s_pw, "T %u %.3f dst=%08X words=%u src=%08X lr=%08X\n", S.frame, now_s(), dst, words, src,
+                            (uint32_t)ctx->lr);
+            }
         }
     }
     // The command stream has one producer: the thread of the first observed
     // call. Every PPFX call must be on it (fatal otherwise); calls by other
-    // code on other threads are counted and left out of the state.
+    // code on other threads are counted and left out of the state. (R8: the
+    // locked path's test; the lock-free path made it above.)
     if (!S.tid) S.tid = tid;
     if (tid != S.tid) {
-        if (attribute(ctx)) {
-            st.producer_threads++;
-            fprintf(stderr, "[ppfx] FATAL: a PPFX call (0x%08X) on thread %u, the command stream's producer is "
-                            "thread %u: the single-producer assumption does not hold\n", addr, tid, S.tid);
-            fflush(stderr);
-            abort();
-        }
+        if (attribute(ctx)) second_producer(addr, tid);
         st.other_thread_calls++;
         if (timed) bump(st.rec_ns, 16 * (now_ns() - t0));
         return 0;
@@ -4507,6 +4737,11 @@ extern "C" int ppfx_rec_observe(uint32_t addr, ppu_context* ctx)
 // a kept call's end, or a verified call's results checked.
 extern "C" void ppfx_rec_exit(uint32_t addr, ppu_context* ctx)
 {
+    // R8 (section 8.4, step 1): a return is the producer's too. What other
+    // threads handed over before it is in the shadow before a record built
+    // here (an asp draw's, at its return; the locked path took s_lock for it)
+    // or a verify reads it. The flag is never raised on the locked path.
+    if (s_ho_pending.load(std::memory_order_acquire)) handoff_apply();
     if (s_vstack.empty()) { stats().r4_exit_mismatch++; return; }
     const VEntry v = s_vstack.back();
     s_vstack.pop_back();

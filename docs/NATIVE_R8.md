@@ -1254,6 +1254,26 @@ and measured before the next):
 | 2 | **an indexed dispatch**: the lifter passes each observed entry's index (`ppu_entry_observe_ix(i, addr, ctx)`; the entry list is fixed at lift time) and the recorder keeps a table of handler classes -- memcpy, flip, transfer, R7's calls, asp's calls, the rest -- so a call goes to its class without the chain of tests; the start-up, call-count and timing tests leave the per-call path (counting becomes a build option) | as step 1, plus the calls-by-address report equal in shape to step 0's | as step 1 |
 | 3 | **direct handlers for the hottest entries** (from step 0; in R6 asp's constants, stream bind/unbind, fragment patch, pair bind and draw, and the game's vertex arrays): each does what the generic path does for its address, in the same order (asp_resolve first, then the call), with its preconditions checked once instead of per call (the producer thread, the title's context known, not one of R7's calls) | as step 2, per handler: its records' counts and contents against the generic path's on the same drive | per handler: the recorder's time at that entry |
 
+**Step 0, run** (2026-11-09, rel9's cc9river): 157,765,392 calls a run; other_threads 0,
+local_copies 8,168, local_copies_other_threads 0, transfers_other_threads 0 -- in play every call
+is the producer's. **Step 1, done** (rel11; port/native/render/ppfx_recorder.cpp): the producer's
+calls take no lock; another thread's copies and transfers go onto a hand-off list (its own lock and
+an atomic flag), which the producer applies at the top of its next call, at the top of its next
+return (asp_draw_exit built a record there under the lock too) and before its own copies; another
+thread's PPFX call is fatal, its other calls only counted. Corrections to the plan above: the lock
+also covered asp_draw_exit's record; the list has to be applied before the producer's own copies;
+and the lock never made shadow access exclusive (it was let go during a full-queue wait).
+DOTHEROES_RECORDER_LOCKED=1 keeps the old path; DOTHEROES_RECORDER_HANDOFF_TEST=1 sends the producer's
+own copies and transfers through the list. Checks: the five reference scenes within the accepted
+figures on the new path and under the hand-off test (723,670 entries handed over and applied); the
+capture check clean on both (392,152 and 397,815 records, nothing written between the flush and the
+capture); menus, editor, snapshot, dungeon; `shadow_handoffs_applied 0` in play. Measured (build/r8/rel11_run.sh,
+uncapped, real audio, two rounds rotated): the fields 248.1-250.6 fps, busy 3.96-4.00 ms, against the
+locked path's 242.8 (4.09) and rel10b's 243.4 (4.08; its other round 227.1, an outlier); the river
+fight 203.8-205.3, busy 4.81-4.84, against 201.7-204.4 (4.83-4.90) and 202.3-203.1 (4.86-4.88) --
+within the spread; its heavy-debris frames too few in these runs to compare (p99 10.27-10.73 against
+9.62-9.64 in one round each). Adopted.
+
 The ceiling of steps 1-2 is the measured bookkeeping, about 0.35 ms of a
 fight frame [I]; step 3 trims the handlers' own work and is estimated per
 entry once step 0 gives the counts. Register-level hooks (the physics'
