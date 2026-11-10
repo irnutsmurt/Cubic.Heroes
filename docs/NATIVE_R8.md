@@ -19,7 +19,7 @@ per-thread work reported apart. An average of 144 is not 144 sustained.
 | Inventory: threads, SPU workloads, where the time goes | done (section 1); re-profiled after part 2 (section 8.3): the main PPU thread is still the critical path, alone |
 | The accepted baseline; config/insn_patches.json | done: the file is the committed one, byte for byte (section 2); unchanged by part 2 (R8's hooks are config/r8_hooks.json) |
 | Frame-counted values | the engine's: none is a clock or moves gameplay (section 3). **Corrected**: the first dungeon's boss does count frames (section 9.6) |
-| **The first dungeon's boss above 30 fps** | **fixed**: its head and body segments update at 30 Hz at any frame rate; measured at 30, 60 and 144 fps; in rel8t, validated; a full kill with the gate on not yet seen (section 9.6) |
+| **The first dungeon's boss above 30 fps** | **fixed**: its head and body segments update at 30 Hz at any frame rate; measured at 30, 60 and 144 fps; in rel8t, validated. **A full kill with the fix is unverified** (the owner will play it). rel8t is a validated development build, **not a stable release**: no tag (section 9.6) |
 | **The save-data list** | **a list of the saves, on load and on save** (name, play time, location, when written; ps3recomp 0131); before, the first entry was taken, and the game's SAVE wrote to it whichever save CONTINUE had picked (section 9.6) |
 | The shorter uncapped walk | done: the test harness's input timing; fixed (ps3recomp 0117) |
 | Unimplemented graphics calls | done: named, on screen, counted, fatal under strict (section 4) |
@@ -1887,6 +1887,13 @@ in the room's middle: the six segments destroyed (at 42-274 s), the head
 then alone at its top multiplier (3.28, 10.4 units a second) and not hit by
 a hero standing still -- **a full kill with the gate on is not yet seen**; a
 play session will show it.
+
+**Status**: pushed as validated development work, not a stable release (the
+tags stable-2026-11-02, checkpoint-2026-11-04, r4-checkpoint-2026-11-05 are
+unchanged, and none is added). A full boss kill with the fix is unverified
+until the owner plays it. Follow-up, not started: smooth visual interpolation
+between the boss's 30 Hz steps above 30 fps (the gameplay timing stays as
+corrected; interpolation would change only what is drawn between steps).
 
 ## 10. Reproducing
 
