@@ -1309,6 +1309,18 @@ Left, in the order the measurements point:
 | **Audio** | FMOD's mixer, codecs and DSPs lifted SPU code: the SPU context, channels, DMA, reservations, sys_event | the audio milestone |
 | **R7's open items** | the post-boss warp run (the owner's optional session), occlusion against RPCS3, the depth clamp, the dual run's stall | unchanged |
 
+### 9.0 Register promotion across calls: what the profile says (2026-11-10) [M]
+
+rel13 profiled as rel6 was (build/r8/prof13_run.sh: DIAG_PROF, uncapped; tests/prof_report.py). The
+main thread's own time is spread thin: in the fields func_000A7C78 9.3%, func_000A2834 5.8%, then
+twelve functions of 1.4-3.2%; in the river fight none above 3.3% (func_000A7C78 and the recorder's
+acquire 3.3% each, ppfx_rec_observe 2.8%). The recorder's lock is gone from the profile (step 1).
+Promotion at every call measured worse before (section 5.6: +38% code); a liveness-based promotion
+would have to apply across many functions to pay, not one hot spot. Next, as an experiment of its own:
+promotion with call-site liveness for the ten hottest non-leaf functions of these two profiles (about
+a quarter of the thread's own time in the fields), measured against rel13 in both scenes; adopted only
+if it is faster beyond the runs' spread. Not started.
+
 ### 9.1 Queued until testing resumes
 
 Work done on 2026-11-07 while the owner's PC was in use for a meeting: no
