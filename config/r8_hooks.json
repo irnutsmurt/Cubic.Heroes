@@ -56,6 +56,55 @@
    "guard": "g_water_hook",
    "decline": true,
    "note": "The water's shutdown: quit bit, the task's exit code, the taskset and instance torn down. Native when the set-up was (its markers in the globals): the worker's step finished, the globals cleared; declined for a real taskset."
+  },
+  {
+   "addr": "0x000810F8",
+   "host": "dotheroes_dev_waver",
+   "guard": "g_dev_waver",
+   "decline": true,
+   "note": "The frame function that runs the waver (SPU image 2) while it is active. A test switch only: DOTHEROES_DEV_WAVER=<s>[,...] starts the waver at the hero's position at those times and times this function with it running and without (port/phys_hooks.cpp); the guard is 0 otherwise."
+  },
+  {
+   "addr": "0x003CEB48",
+   "host": "dotheroes_waver_setup",
+   "guard": "g_waver_hook",
+   "decline": true,
+   "note": "The waver's set-up (r3 = &{x, y, z}): a SPURS instance, taskset, block and event flag. Native by default (DOTHEROES_NATIVE_WAVER): the game's own stores and texture calls, markers in place of the SPURS objects (port/phys_hooks.cpp, port/native/waver_game.h); declined with =0 or =check."
+  },
+  {
+   "addr": "0x004736E0",
+   "host": "dotheroes_spurs_create_task",
+   "guard": "g_waver_hook",
+   "decline": true,
+   "note": "The game's create-a-SPURS-task wrapper (r3 taskset, r4 block, r5 image), shared by the water and the waver: the waver's marker taskset runs a native frame on its worker; check mode notes the lifted waver's creations; everything else declined."
+  },
+  {
+   "addr": "0x004735DC",
+   "host": "dotheroes_spurs_wait_task",
+   "guard": "g_waver_hook",
+   "decline": true,
+   "note": "The game's wait-for-the-task wrapper (r3 block): the waver's marker block waits for the native frame; everything else declined."
+  },
+  {
+   "addr": "0x00473510",
+   "host": "dotheroes_spurs_free_block",
+   "guard": "g_waver_hook",
+   "decline": true,
+   "note": "The game's free-the-block wrapper (r3 block): nothing for the waver's marker; check mode compares the last lifted frame; everything else declined."
+  },
+  {
+   "addr": "0x0047353C",
+   "host": "dotheroes_spurs_destroy_taskset",
+   "guard": "g_waver_hook",
+   "decline": true,
+   "note": "The game's destroy-the-taskset wrapper (r3 taskset): the waver's marker waits for the native frame and counts the teardown; everything else declined."
+  },
+  {
+   "addr": "0x004734A0",
+   "host": "dotheroes_spurs_finalize",
+   "guard": "g_waver_hook",
+   "decline": true,
+   "note": "The game's finalize-the-instance wrapper (r3 instance): nothing for the waver's marker; everything else declined."
   }
  ]
 }

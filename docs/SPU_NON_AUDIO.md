@@ -28,7 +28,7 @@ Sources:
 | Bullet solver, commands 1 and 2 (5) | spu_0004 | **lifted**, run through SPURS: phys_direct declines them [C] | **yes**, in heavy-debris frames: the game thread waits for each command [M, section 6.1] |
 | Edge zlib's shell (3) | spu_0002 | native inflate inside the lifted task; the task's SPURS shell, its queue and its completion lifted [C] | in area loads (load time), not in frames [M, HANDOFF] |
 | Water (1) | spu_0000 | **fully lifted**, a persistent SPURS task signalled every frame [C] | no: 9.4% of one pool thread in the river, 0 in the fields [M, section 1] |
-| Waver (2) | spu_0001 | lifted, registered, **never dispatched in any run so far** [M] | -- |
+| Waver (2) | spu_0001 | **native by default** (2026-11-10): reachable from the hero's update; ported bit-exact, checked offline and in the game (section 4) | -- |
 | Bullet collision, pairs the native code does not cover (4) | spu_0003 | lifted, declined to SPURS by phys_direct [C] | how often: **not measured** |
 | Bullet collision (covered pairs), solver commands 4-6 | -- | native, issued and completed directly (section 6.1) | done |
 
@@ -381,8 +381,48 @@ Registered, never dispatched in any run [M]. Only the start of the game has
 been played under test: nothing past the castle area, plus the owner's
 sessions. So "never" means never yet.
 
-**Step**: count its dispatches in the report and say so on stderr the first
-time, so that a run reaching it shows it. Nothing to replace until then.
+**Traced, reachable, replaced (2026-11-10)** [C, M].
+
+*What triggers it* [C, the lift and the ELF]: the waver's three entry points are reached only through 16-byte
+TOC stubs (`std r2,0x28(r1); addis/addi r2; b`), which is why no descriptor or direct call named them:
+- the set-up func_003CEB48 from func_0018B708 (stub func_009842F8), which centres it on the hero (the player's
+  +0x428/+0x430, through func_00983238) and plays sound 0x55;
+- func_0018B708 from func_0011E1A8 at 0x0011E5B4, a sub-state machine run from the hero's update
+  (func_0012476C): in its state 2 (+0x500), once a timer (+0x6FC) runs out, kind 0x11 (+0x5E8) looks an object
+  up (func_00983498) and starts the waver on it; kinds 0x0F, 0x10 and 0x12 take other branches (sounds 0x51,
+  0x57). Which game action sets kind 0x11 is **not established** (+0x5E8 has over a hundred writers in the lift).
+- each frame while it runs (+0 of its state W = 0x02AB2200 set), the frame function func_000810F8 calls its
+  update func_003CEEE8 (stub func_00982788); the update tears it down after its duration (about 5 s, ~300
+  frames); its shutdown func_003CEAC0 is also called by the effects' resets (func_003B64A8, func_003B72D4,
+  func_003B7358).
+
+*What it is* [C, port/native/waver_task.h]: an expanding ripple at the hero, one SPURS task **a frame**: the
+update writes the parameters, waits for the previous frame's task and creates the next, the game thread
+waiting on it. The task GETs a 0x10224-byte block (a 256 x 256 distance map, a 128-entry wave table, phase,
+radius, frequency, amplitude, slope), writes a 256 x 256 float height field, reads it back and writes its
+normal map into one of two 256 x 256 textures (alternating). No atomics, mailbox or event flag (the flag the
+set-up makes is never read).
+
+*Test case*: DOTHEROES_DEV_WAVER=<s>[,...] (port/phys_hooks.cpp, a test switch through an entry hook on the
+frame function) starts it at the hero's position at those times, exactly as func_0018B708 does, through the
+game's own set-up -- the natural trigger aside.
+
+*Native* (port/native/waver_task.cpp, waver_game.cpp; DOTHEROES_NATIVE_WAVER=0 the SPU task, =check both):
+the set-up's own stores and texture calls with markers (0xFFFFF011-3) for its SPURS objects; the shared SPURS
+wrappers (create, wait, free, destroy, finalize) act on the markers only, so a frame runs on a worker thread of
+its own, the game's wait waits for it, the teardown does nothing; anything else goes to the game's code.
+- Offline (tests/native/waver_task_check.cpp, the lifted image run whole): 249 of 249 runs equal byte for byte
+  and in transfer order, at x86-64-v3 and v2, 1,649 more at v3; seven deliberate mutations of the port all
+  caught.
+- In the game, check mode, the fields and the river, 2 starts each: 1,183 frames compared, **the height field
+  equal in all**, the texture in all but 8 -- the first and last frame of each start. Consistent with the race
+  the task's reading predicted (the game rewrites the texture-select word right after creating the task, the
+  SPU task reads it when it starts, the check's copy took it at the creation), not separately confirmed: a
+  check that also compares the other texture would. The native frame reads it as the task does, at its start.
+- Native: 4 starts, ~300 frames each, 2.7 ms a frame on its own thread; the frame function (the game thread)
+  0.024-0.028 ms a frame with it running (0.016 ms with the SPU task; the first frame's two tasks back to back
+  waited 3.3 ms once); no SPU program started through SPURS.
+- Untested: the natural trigger (kind 0x11); the effects' resets stopping it midway.
 
 ## 5. Bullet collision: the pairs the native code does not cover (image 4)
 

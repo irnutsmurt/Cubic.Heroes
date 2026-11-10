@@ -106,6 +106,8 @@ extern "C" { void (*g_dotheroes_stop_hook)(void) = nullptr; }
 extern "C" void phys_direct_report(void);
 extern "C" void inflate_direct_report(void);
 extern "C" void water_task_report(void);
+extern "C" void dev_waver_report(void);
+extern "C" void waver_game_report(void);
 
 namespace {
 
@@ -165,6 +167,13 @@ uint32_t find_player(uint32_t hud_life)
 #endif
     (void)hud_life;
     return 0;
+}
+
+// The player's object for the port's other dev switches (phys_hooks.cpp's waver trigger): 0 until found.
+extern "C" uint32_t dev_state_player(void)
+{
+    const uint32_t p = g_player.load();
+    return p && rd32(p) == kPlayerVtable ? p : 0;
 }
 
 // The player's life: the real one when the player is known, else the HUD's.
@@ -584,6 +593,8 @@ void stop_loop()
         phys_direct_report();   // phys_direct.cpp: its counts (atexit does not run past TerminateProcess)
         inflate_direct_report();   // inflate_direct.cpp: the same for the map packs
         water_task_report();       // water_task.cpp: the water's steps (with DOTHEROES_NATIVE_WATER)
+        dev_waver_report();        // phys_hooks.cpp: DOTHEROES_DEV_WAVER's starts and frame times
+        waver_game_report();       // waver_game.cpp: the waver's native frames or its check
         fflush(stdout);
         fflush(stderr);
 #ifdef _WIN32
@@ -1061,4 +1072,5 @@ void dev_state_init()
 }
 #else
 void dev_state_init() {}
+extern "C" uint32_t dev_state_player(void) { return 0; }   // no player search without the dev switches' build
 #endif
