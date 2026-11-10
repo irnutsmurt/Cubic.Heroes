@@ -1,0 +1,95 @@
+From 57437b032cada438cb564e241622bae12fb16b0d Mon Sep 17 00:00:00 2001
+From: giteaguy <73799093+irnutsmurt@users.noreply.github.com>
+Date: Mon, 9 Nov 2026 21:23:02 -0800
+Subject: [PATCH] SPU workloads: a census of the programs started, by image,
+ lifted or taken natively
+
+The first start of each image is said on stderr; spu_workload_census_report
+writes the counts (the port's exit report). So a run says which SPU programs
+it used, including one no run has shown before.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ runtime/spu/spu_workload.c | 36 ++++++++++++++++++++++++++++++++++++
+ runtime/spu/spu_workload.h |  4 ++++
+ 2 files changed, 40 insertions(+)
+
+diff --git a/runtime/spu/spu_workload.c b/runtime/spu/spu_workload.c
+index ef8664a..be58483 100644
+--- a/runtime/spu/spu_workload.c
++++ b/runtime/spu/spu_workload.c
+@@ -79,6 +79,40 @@ typedef struct {
+ static spu_workload_entry s_registry[SPU_WORKLOAD_MAX];
+ static unsigned           s_registry_count = 0;
+ 
++/* The census: how often each lifted image started (a job, a task, a
++ * workload), and what a native replacement took instead -- so a run says
++ * which SPU programs it used, including one no run has shown before (the
++ * waver, image 2). The first start of each image is said on stderr;
++ * spu_workload_census_report writes the counts (the exit report). */
++static volatile long long s_census_lifted[64], s_census_native[64];
++static const char* census_name(int image_id)
++{
++    for (unsigned i = 0; i < s_registry_count; i++)
++        if (s_registry[i].image_id == image_id && s_registry[i].name) return s_registry[i].name;
++    return "?";
++}
++static void census_start(int image_id, int native)
++{
++    if (image_id < 0 || image_id >= 64) image_id = 0;
++    volatile long long* c = native ? &s_census_native[image_id] : &s_census_lifted[image_id];
++    if (__atomic_add_fetch(c, 1, __ATOMIC_RELAXED) == 1)
++        fprintf(stderr, "[spu-census] first %s start of image %d (%s)\n", native ? "native" : "lifted", image_id,
++                census_name(image_id));
++}
++void spu_workload_census_report(FILE* f)
++{
++    if (!f) f = stderr;
++    int any = 0;
++    for (int i = 0; i < 64; i++) {
++        const long long l = __atomic_load_n(&s_census_lifted[i], __ATOMIC_RELAXED);
++        const long long n = __atomic_load_n(&s_census_native[i], __ATOMIC_RELAXED);
++        if (!l && !n) continue;
++        fprintf(f, "[spu-census] image %d (%s): %lld lifted starts, %lld taken natively\n", i, census_name(i), l, n);
++        any = 1;
++    }
++    if (!any) fprintf(f, "[spu-census] no SPU program started\n");
++}
++
+ void spu_workload_register_img(uint64_t fingerprint, spu_lifted_entry_fn fn,
+                                int image_id, const char* name)
+ {
+@@ -354,6 +388,7 @@ int spu_workload_dispatch(const uint8_t* image, uint32_t image_size,
+     fprintf(stderr,
+         "[spu_workload] dispatch HIT fp=0x%016llX entry=0x%05X args=0x%08X image=%d -> running\n",
+         (unsigned long long)fp, entry, args_ea, image_id);
++    census_start(image_id, 0);
+ 
+     spu_run_lifted_job_img(fn, ls, args_ea, image_id);
+ 
+@@ -797,6 +832,7 @@ static void spu_async_run(spu_async_job* j)
+     uint32_t nat_arg[4] = { 0, 0, 0, 0 };
+     const spu_native_task_fn nat_run = j->image_id > 0 && j->image_id < 64 && j->taskset_ea
+         ? __atomic_load_n(&s_native[j->image_id].run, __ATOMIC_ACQUIRE) : NULL;
++    census_start(j->image_id, 0);   /* a native replacement that takes it is counted too, below */
+     if (nat_run) {
+         extern uint8_t* vm_base;
+         const uint8_t* a = vm_base + j->taskset_ea + 0x80u + j->taskid * 48u;
+diff --git a/runtime/spu/spu_workload.h b/runtime/spu/spu_workload.h
+index b8a8715..a5a2c31 100644
+--- a/runtime/spu/spu_workload.h
++++ b/runtime/spu/spu_workload.h
+@@ -165,6 +165,10 @@ int spu_workload_dispatch_async(const uint8_t* image, uint32_t image_size,
+ typedef int (*spu_native_task_fn)(uint32_t taskset_ea, uint32_t taskid, const uint32_t arg[4]);
+ typedef void (*spu_native_after_fn)(uint32_t taskset_ea, uint32_t taskid, const uint32_t arg[4]);
+ void spu_workload_native_register(int image_id, spu_native_task_fn run, spu_native_after_fn after);
++
++/* The census of SPU programs started (spu_workload.c): a line per image that started. */
++#include <stdio.h>
++void spu_workload_census_report(FILE* f);
+ int spurs_queue_spu_peek(uint32_t q, void* out);
+ int spurs_queue_spu_pop(uint32_t q, void* out);
+ int spurs_queue_spu_push(uint32_t q, const void* in);
+-- 
+2.56.0.windows.3
+

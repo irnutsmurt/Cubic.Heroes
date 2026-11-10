@@ -66,7 +66,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <vector>
 #if defined(__x86_64__) || defined(_M_X64)
@@ -251,9 +253,51 @@ bool take_done(Manager* g, uint32_t slot, uint32_t e[4])
     return true;
 }
 
+// What went through SPURS, by kind: the solver's command (the descriptor's
+// first word), and for collision bullet_cd's reason for not covering it.
+}  // namespace
+extern "C" uint8_t* vm_base;   // the guest's memory (ppu_memory.h)
+namespace {
+inline uint32_t be32(const uint8_t* p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
+std::mutex g_why_mu;
+std::atomic<unsigned long long> g_lifted_cmd[16];
+std::map<std::string, unsigned long long> g_lifted_cd_why;
+void count_declined(const Manager* g, const uint32_t entry[4])
+{
+    if (g->image == kImageCollision) {
+        char why[160] = "";
+        bullet_cd_direct_why(entry, why, sizeof why);
+        std::string k(why[0] ? why : "unknown");
+        const size_t cut = k.find(" at ");
+        if (cut != std::string::npos) k = k.substr(0, cut);
+        std::lock_guard<std::mutex> lk(g_why_mu);
+        if (g_lifted_cd_why.size() < 64 || g_lifted_cd_why.count(k)) {
+            if (!g_lifted_cd_why[k]++) fprintf(stderr, "[phys-direct] a collision task through SPURS: %s\n", k.c_str());
+        }
+    } else {
+        const uint32_t c = entry[1] == 1 && entry[2] ? be32(vm_base + entry[2]) : 15u;
+        if (!g_lifted_cmd[c < 16 ? c : 15].fetch_add(1, std::memory_order_relaxed))
+            fprintf(stderr, "[phys-direct] a solver task through SPURS: command %u\n", c);
+    }
+}
+
 void report()
 {
     if (!g_phys_direct) return;
+    {
+        std::string s;
+        char b[64];
+        for (int c = 0; c < 16; c++) {
+            const unsigned long long n = g_lifted_cmd[c].load(std::memory_order_relaxed);
+            if (n) { snprintf(b, sizeof b, "%s command %d: %llu", s.empty() ? "" : ",", c, n); s += b; }
+        }
+        std::lock_guard<std::mutex> lk(g_why_mu);
+        for (const auto& w : g_lifted_cd_why) {
+            snprintf(b, sizeof b, "%s collision ", s.empty() ? "" : ",");
+            s += b; s += w.first; snprintf(b, sizeof b, ": %llu", w.second); s += b;
+        }
+        if (!s.empty()) fprintf(stderr, "[phys-direct] through SPURS by kind:%s\n", s.c_str());
+    }
     fprintf(stderr, "[phys-direct] %llu native tasks issued directly (%llu run by the waiting PPU thread), %llu lifted "
             "through SPURS (%llu queue pops); %llu waits, %.1f ms waiting, %.1f ms of it running jobs\n",
             g_n_native.load(), g_n_by_waiter.load(), g_n_lifted.load(), g_n_hle_pops.load(), g_n_waits.load(),
@@ -262,7 +306,7 @@ void report()
 
 }  // namespace
 
-extern "C" void phys_direct_report(void) { report(); }
+extern "C" void phys_direct_report(void) { report(); spu_workload_census_report(stderr); }
 
 extern "C" int phys_direct_issue(uint32_t m, uint32_t slot, const uint32_t entry[4])
 {
@@ -274,6 +318,7 @@ extern "C" int phys_direct_issue(uint32_t m, uint32_t slot, const uint32_t entry
     if (!native) {
         g->lifted_out++;   // the lifted body creates the task and pushes its entry
         g_n_lifted.fetch_add(1, std::memory_order_relaxed);
+        count_declined(g, entry);
         return 0;
     }
     // What the SPURS task's creation showed a port before it could run

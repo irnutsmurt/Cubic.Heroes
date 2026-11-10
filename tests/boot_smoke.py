@@ -260,7 +260,10 @@ def build_identity(env):
         "started": time.strftime("%Y-%m-%d %H:%M:%S"),
         "exe": {"name": os.path.basename(exe), "sha256": h.hexdigest(), "bytes": os.path.getsize(exe),
                 "mtime": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(os.path.getmtime(exe)))},
-        "installed": {"dir": os.path.relpath(INSTALLED, ROOT), "cfg": installed_settings()} if INSTALLED else None,
+        # an install on another drive (F:) has no path relative to the repository: its absolute one
+        "installed": {"dir": os.path.relpath(INSTALLED, ROOT) if os.path.splitdrive(os.path.abspath(INSTALLED))[0].lower()
+                      == os.path.splitdrive(ROOT)[0].lower() else os.path.abspath(INSTALLED), "cfg": installed_settings()}
+                     if INSTALLED else None,
         "repo": git(ROOT), "ps3recomp": git(ps3),
         "patches": len(glob.glob(os.path.join(ROOT, "patches", "ps3recomp", "*.patch"))),
         "desktop_locked": desktop_locked(),

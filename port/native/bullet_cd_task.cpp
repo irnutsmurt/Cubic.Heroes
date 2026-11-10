@@ -397,6 +397,17 @@ void cd_after(uint32_t, uint32_t, const uint32_t arg[4])
 
 }  // namespace
 
+// Why a collision task is not native (phys_direct's count of what goes through SPURS).
+void bullet_cd_direct_why(const uint32_t entry[4], char* why, size_t n)
+{
+    if (!n) return;
+    why[0] = 0;
+    if (g_mode != 1) { snprintf(why, n, "native collision off"); return; }
+    if (entry[1] != kCmdGatherAndProcess) { snprintf(why, n, "command %u", entry[1]); return; }
+    if (!entry[2]) { snprintf(why, n, "no descriptor"); return; }
+    if (bullet_cd::supported(bullet_cd::Mem{ vm_base }, entry[2], why, n)) snprintf(why, n, "supported (a pool slot was full)");
+}
+
 bool bullet_cd_direct_accept(const uint32_t entry[4])
 {
     if (g_mode != 1 || entry[1] != kCmdGatherAndProcess || !entry[2]) return false;
