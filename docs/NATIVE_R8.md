@@ -1302,6 +1302,17 @@ stopping it stops all of it (section 9.2).
 | 4 | `owned_run.py --name ab4 -- sh build/r8/ab4_run.sh` | uncapped, real audio, two rounds rotated: rel8 against rel9 (the cost of 0125's two tests) against the player's own build (the x86-64-v2 prebuilt, diagnostics off) | 5.4.1, 7.2 | window, real audio; 1, 2 |
 | 5 | not yet scripted: code first | the SPU captures docs/SPU_NON_AUDIO.md lists: the solver's set-up snapshots (DOTHEROES_SOLVER_SNAP extended), the water task's DMA and atomics, counters for the collision tasks phys_direct declines and for the waver's dispatches | SPU_NON_AUDIO.md | the counters and snapshot code written and built |
 
+**Reconciled with what has run** (2026-11-09, night):
+
+| # | State | Evidence |
+|---|---|---|
+| 0 | **done** in use: every game batch since 11-09 ran through owned_run, and three were stopped mid-run (gate1, gate2: "all 12 stopped"; the RPCS3 boot rpe: "all 4 stopped") with nothing left behind | build/r8/gate1.out, gate2.out, rpe.out |
+| 1 | **done**: build/r8/gen7 (the lift with every hook of config/r8_hooks.json, the boss's included, and 0125's lifter half), rel9 and chk9 built and rebuilt with the night's sources; `--memtest` **695 checks, 0 failed on both** (rel8t, on gen6's header, failed the 12 raw-store checks); the player's prebuilt release parts; tests/test_player_pipeline.py 11/11 | build/r8/resume1.out, rel9b.out, rel9/memtest.txt, chk9/memtest.txt |
+| 2 | running (queue9): the fresh install and the update | section 9.8 when done |
+| 3 | running (queue9): val9 = val4 on rel9, plus the five reference scenes, the save list's two drives and the body set-up's check | section 9.8 when done |
+| 4 | running (queue9): ab9 = ab4 with rel8u (the play build) for rel8 | section 9.8 when done |
+| 5 | the solver's set-up: four steps were already captured (F:/3d dot game heroes/archive/build/snap, sv3_1/2 and sv4_150/300: c1r1, c2r1, c4r1 each), enough to begin; command 1 native, matching all four byte for byte (docs/SPU_NON_AUDIO.md); command 2 mapped, not written; the water's and the inflate's captures not started | tests/native/bullet_solver_snapcheck.cpp setup-bodies |
+
 After 1-4 the record gets each result in its section. rel9 replaces rel8 as
 R8's release only if 3 passes and 4 shows no cost beyond the runs' spread.
 Otherwise 0125's inline test gets the lifter's alignment exemption (section
@@ -1945,6 +1956,65 @@ extra. Without lines (rel8t) the same frame differed in 25,804 pixels. The
 editor is now a fifth reference scene (tests/rpcs3_reference.json "editor",
 tests/scenarios/rpcs3ref_editor.drive; RPCS3's frame packed locally in
 build/reference/rpcs3/editor): accepted from bt8, and rel8t fails it.
+
+
+### 9.8 The store fixes built, priced and made cheap; the player's install (2026-11-09) [M]
+
+**Built and checked.** build/r8/gen7 (r8_lift.sh: every hook in config/r8_hooks.json, the boss's
+included) with 0125's lifter half; rel9 (release) and chk9 (checked loads and stores): `--memtest`
+695 checks, 0 failed on both -- the raw-store groups that failed on gen6's header now pass. rel9
+validated as rel7 was (build/r8/val9_run.sh): the eight scenarios, sync validation, the capture
+check, the lost-work and interpreter stops (the interpreter's: "spu-interpreter-absent", fatal as
+designed), three normal-damage fights, the five reference scenes, the save list's two drives.
+
+**Priced** (uncapped, real audio, two rounds rotated; tools/r8_bench.py). rel9 against the play
+build rel8u (gen6's lift, otherwise the same code): the fields 228.4-230.3 fps against 247.6-248.7,
+the game thread's busy time 4.31-4.35 ms against 3.99-4.01; the river fight 178-195 against 201-207.
+The player's own build of rel9 measured as rel9 (227.3-229.7 in the fields). Two measurement lifts
+told the parts apart (build/r8/m9_run.sh, the fields):
+
+| Build | fps | busy ms |
+|---|---|---|
+| rel8u (no new test) | 243.1-247.7 | 4.01-4.08 |
+| rel9 (both new tests) | 228.6-233.2 | 4.26-4.34 |
+| without the inline line-crossing test | 245.9-249.2 | 3.98-4.04 |
+| without the raw stores' range test | 226.1-231.0 | 4.30-4.39 |
+
+The whole cost was the inline test of a store's end -- an and, a compare and a branch on every 2-,
+4- and 8-byte store. The raw stores' range test costs nothing measurable.
+
+**Made cheap, still correct** (ps3recomp spu_coherency.c, ppu_lifter.py). The reservation bitmap's
+bits are only ever set; now a reservation also sets the bit of the line before it. The inline store
+tests its first line's bit alone, as before 0125, and a misaligned store that runs into a reserved
+line finds its first line's bit set and goes out of line, where VM_WRITE_COH tests and tells both
+lines. The bitmap is a superset: a store to the line before a reserved one takes the out-of-line path
+when it need not -- slower, never wrong. tests/native/store_paths.py (70 checks a variant, both pass):
+nothing reserved, every store at a line's end inline; the next line reserved, every store starting in
+the line out of line. rel10 (lift build/r8/gen8): `--memtest` 695, 0 failed ("stores at a line's end:
+the next line told exactly when the store reaches it"); the fields 237.0-239.5 fps, busy 4.14-4.19 ms
+(rel8u 243.1-245.1, 4.05-4.08; rel9 229.1-233.5, 4.25-4.33); the river fight 203.4-205.0 against
+rel8u's 200.8-205.7, heavy-debris frames p50 7.56 against 6.66-7.66 -- within the spread; six
+scenarios pass. What is left (~0.1 ms in the fields) is the out-of-line path taken for lines before
+reserved ones; rel10b keeps an exact bitmap beside the wide one for the out-of-line test, so those
+stores take no lock. Measured again in one session (build/r8/rel10b_run.sh, the fields, two rounds
+rotated): rel10b 244.0-244.6 fps, busy 4.06-4.07 ms; rel8u 244.3-244.6, 4.06; rel10 243.0-245.6,
+4.04-4.08 -- all three within one spread, so rel10's lower figure above was the session's, not the
+build's. **The store fixes cost nothing measurable now** (ps3recomp 0133); rel10b keeps the exact
+bitmap (it spares those stores the lock-line lock), `--memtest` 695, 0 failed.
+
+**The player's install** (tests/player_install_test.py, build/r8/resume2_install.sh, into
+F:/3d dot game heroes/install-test): a fresh install from the disc image -- its prebuilt parts the
+native release, nothing reused, the lift's stamps, leaf promotion (8,395 functions), R7's 162 entry
+hooks and R8's physics hooks, **the lift equal to the developers' build/r8/gen7 file for file**, the
+settings file with the performance switches; an update (only the build ran, every object reused); a
+re-lift (the SPU step skipped, every object reused); the settings (the player's values kept, a missing
+performance switch added back); the installed game's `--memtest` exit 0. The installed executable
+carries the save list ("list dialog"), the boss gate ("frame-counted boss updates"), the editor's lines
+and the SPU census. The last stage, a river fight from the install, failed in the harness, not the game:
+boot_smoke.py took the install's path relative to the repository, which Windows cannot do across drives
+(fixed, 8f5b02d); that stage runs again with the next build. The player's saves and edited characters
+are not touched by an install or an update (the install writes its own directory; the game data root
+is the player's, %LOCALAPPDATA%\dotheroes, never written by the tests).
 
 
 ## 10. Reproducing

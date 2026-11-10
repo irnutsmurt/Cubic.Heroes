@@ -1,0 +1,92 @@
+From cc6629d435c47ecfe4c9780efd930fc5a35b4530 Mon Sep 17 00:00:00 2001
+From: giteaguy <73799093+irnutsmurt@users.noreply.github.com>
+Date: Mon, 9 Nov 2026 23:11:50 -0800
+Subject: [PATCH] Stores: a misaligned store into a reserved line caught by the
+ bitmap, not by a test on every store
+
+0125's inline test of a store's end (an and, a compare and a branch on
+every 2-, 4- and 8-byte store) cost the game thread 7%. Now a
+reservation also sets the bit of the line before it, so a store that
+starts there and runs into a reserved line finds its first line's bit
+set and goes out of line, where both lines are tested and told. The
+inline test is the single bit test it was before 0125. The out-of-line
+stores test each line against a second, exact bitmap, so a store to the
+line before a reserved one only pays the call.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ runtime/spu/spu_coherency.c | 24 +++++++++++++++++++++++-
+ tools/ppu_lifter.py         | 14 +++++++-------
+ 2 files changed, 30 insertions(+), 8 deletions(-)
+
+diff --git a/runtime/spu/spu_coherency.c b/runtime/spu/spu_coherency.c
+index c4d01b7..c71e186 100644
+--- a/runtime/spu/spu_coherency.c
++++ b/runtime/spu/spu_coherency.c
+@@ -121,6 +121,13 @@ void spu_lockline_unlock(void) { if (pthread_mutex_unlock(&g_lockline)) abort();
+ #define SPU_COH_BITMAP_SZ   (SPU_COH_LINES / 8)                 /* 4 MiB */
+ 
+ static unsigned char s_coh_bitmap[SPU_COH_BITMAP_SZ];
++/* The reserved lines alone (s_coh_bitmap also marks the line before each,
++ * for the inline stores: spu_coh_reserve). The out-of-line stores test each
++ * line they touch against this one, so a store to the line before a reserved
++ * one -- sent out of line by the wider bitmap -- takes no lock and tells no
++ * one; it only paid the call. g_spu_coh_bits (spu_coh_line_reserved) is this
++ * bitmap. */
++static unsigned char s_coh_exact[SPU_COH_BITMAP_SZ];
+ 
+ /* The bitmap's address for the lifted code's inline stores (ppu_recomp.h's
+  * ppu_mm): set from the start, so a function's snapshot can hold it however
+@@ -157,8 +164,23 @@ void spu_coh_reserve(spu_context* ctx, uint32_t ea)
+     const unsigned char bit = (unsigned char)(1u << (line & 7));
+     if (!(s_coh_bitmap[line >> 3] & bit))
+         s_coh_bitmap[line >> 3] |= bit;
++    if (!(s_coh_exact[line >> 3] & bit))
++        s_coh_exact[line >> 3] |= bit;
++    /* The line before too: the lifted code's inline stores test the bit of a
++     * store's first line only (ppu_recomp.h's vm_mm_st_ok), so a misaligned
++     * store starting there and running into this line finds that line's bit
++     * set and goes out of line, where both lines are tested one by one. Bits
++     * are never cleared, so the bitmap stays a superset of the reserved
++     * lines: a store to the line before a reserved one takes the serialized
++     * path when it need not -- slower, never wrong. */
++    if (line) {
++        const uint32_t prev = line - 1;
++        const unsigned char pbit = (unsigned char)(1u << (prev & 7));
++        if (!(s_coh_bitmap[prev >> 3] & pbit))
++            s_coh_bitmap[prev >> 3] |= pbit;
++    }
+     if (!g_spu_coh_bits)
+-        g_spu_coh_bits = s_coh_bitmap;
++        g_spu_coh_bits = s_coh_exact;
+ 
+     if (!ctx) return;
+     for (spu_coh_entry* entry = s_coh_ctxs; entry; entry = entry->next)
+diff --git a/tools/ppu_lifter.py b/tools/ppu_lifter.py
+index 8792b24..97516a5 100644
+--- a/tools/ppu_lifter.py
++++ b/tools/ppu_lifter.py
+@@ -230,13 +230,13 @@ static inline int vm_mm_st_ok(const ppu_mm* m, uint32_t ea, uint32_t n)
+ {
+     if (!__builtin_expect(vm_mm_in(m->st_span, ea, n), 1))
+         return 0;
+-    /* A misaligned store that runs into the next 128-byte line goes out of
+-     * line (R8, docs/NATIVE_R8.md section 5.4.1), where both lines'
+-     * reservations are tested and broken (the loader's VM_WRITE_COH): the
+-     * bit below is the first line's alone. No naturally aligned store
+-     * crosses, nor a byte store (the compiler drops the test for it). */
+-    if (__builtin_expect((ea & 127u) > 128u - n, 0))
+-        return 0;
++    /* A misaligned store that runs into the next 128-byte line must go out
++     * of line when that line is reserved (R8, docs/NATIVE_R8.md section
++     * 5.4.1): there, VM_WRITE_COH tests and breaks both lines' reservations.
++     * It does with no test of its own here: a line's bit is also set when the
++     * line after it is reserved (spu_coh_reserve), so the first line's bit
++     * below covers a store that runs on. (A test of the store's end cost the
++     * game thread 7% -- an and, a compare and a branch on every store.) */
+     const uint32_t line = ea >> 7;
+     if ((m->coh[line >> 3] >> (line & 7)) & 1u) return 0;
+     return 1;
+-- 
+2.56.0.windows.3
+

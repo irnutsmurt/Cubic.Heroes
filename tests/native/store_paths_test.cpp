@@ -54,7 +54,14 @@ static void reset(int64_t span)
     g_ppu_mm.ld_span = g_ppu_mm.st_span = span;
     g_ppu_mm.poll = ppu_hle_inject_base + 0x2008u;
 }
-static void reserve(uint32_t ea) { const uint32_t l = ea >> 7; g_bits[l >> 3] |= (unsigned char)(1u << (l & 7)); }
+/* As spu_coh_reserve: the line's bit and the bit of the line before it (a store
+ * starting there and running into this line is caught by its first line's bit). */
+static void reserve(uint32_t ea)
+{
+    const uint32_t l = ea >> 7;
+    g_bits[l >> 3] |= (unsigned char)(1u << (l & 7));
+    if (l) g_bits[(l - 1) >> 3] |= (unsigned char)(1u << ((l - 1) & 7));
+}
 static bool untouched(uint32_t ea, uint32_t n)
 {
     for (uint32_t i = 0; i < n; i++) if (g_mem[ea + i] != 0xAA) return false;
@@ -97,23 +104,33 @@ int main()
     const uint32_t L = 0x20000;                      /* a 128-byte line; L + 128 the next */
     const uint8_t be4[4] = {0x11, 0x22, 0x33, 0x44}, be8[8] = {1, 2, 3, 4, 5, 6, 7, 8}, be2[2] = {0xAB, 0xCD};
 
-    /* 1. Scalar stores at a line's end: whole inside it, inline; into the next line, out of line */
+    /* 1. Scalar stores at a line's end. Nothing reserved: inline, whether or not they run into the
+     * next line. The next line reserved: every store starting in this line goes out of line (its bit
+     * is set with the next line's), among them each one that runs into the reserved line. */
     for (uint32_t n : {2u, 4u, 8u}) {
         for (uint32_t off = 128 - n - 1; off <= 127; off++) {
-            reset(span);
-            st(L + off, n, n == 2 ? 0xABCD : n == 4 ? 0x11223344 : 0x0102030405060708ull);
-            const bool crosses = off + n > 128;
-            char what[64];
-            snprintf(what, sizeof what, "%u-byte store at line+%u", n, off);
             static const char* fns[9] = {0, 0, "vm_write16", 0, "vm_write32", 0, 0, 0, "vm_write64"};
-            expect(what, crosses ? fns[n] : nullptr, L + off, n, n == 2 ? be2 : n == 4 ? be4 : be8);
+            const uint64_t v = n == 2 ? 0xABCD : n == 4 ? 0x11223344 : 0x0102030405060708ull;
+            const uint8_t* bytes = n == 2 ? be2 : n == 4 ? be4 : be8;
+            char what[80];
+            reset(span);
+            st(L + off, n, v);
+            snprintf(what, sizeof what, "%u-byte store at line+%u, nothing reserved", n, off);
+            expect(what, nullptr, L + off, n, bytes);
+            reset(span);
+            reserve(L + 128);
+            st(L + off, n, v);
+            snprintf(what, sizeof what, "%u-byte store at line+%u, the next line reserved", n, off);
+            expect(what, fns[n], L + off, n);
         }
     }
     reset(span); st(L + 127, 1, 0x5A); { const uint8_t b = 0x5A; expect("byte store at line+127", nullptr, L + 127, 1, &b); }
 
     /* 2. The reservation bitmap: the store's first line reserved, its second reserved, neither */
     reset(span); reserve(L); st(L + 124, 4, 0x11223344); expect("store, its line reserved", "vm_write32", L + 124, 4);
-    reset(span); reserve(L + 128); st(L + 124, 4, 0x11223344); expect("store before a reserved line", nullptr, L + 124, 4, be4);
+    /* inside the line before a reserved one: out of line too (the bitmap's superset), never wrong */
+    reset(span); reserve(L + 128); st(L + 124, 4, 0x11223344); expect("store before a reserved line", "vm_write32", L + 124, 4);
+    reset(span); reserve(L + 256); st(L + 124, 4, 0x11223344); expect("store two lines before a reserved one", nullptr, L + 124, 4, be4);
     reset(span); reserve(L + 128); st(L + 126, 4, 0x11223344); expect("store into a reserved line", "vm_write32", L + 126, 4);
     reset(span); reserve(L); st(L + 126, 4, 0x11223344); expect("store out of a reserved line", "vm_write32", L + 126, 4);
     reset(span); reserve(L + 128); st(L + 121, 8, 0x0102030405060708ull); expect("8 bytes into a reserved line", "vm_write64", L + 121, 8);
