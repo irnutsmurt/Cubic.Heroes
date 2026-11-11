@@ -278,7 +278,7 @@ def recomp(paths, log):
 # which has no RSX command path, draws nothing) and R8's leaf promotion.
 # tests/test_player_pipeline.py checks these against tools/r8_lift.sh.
 LIFT_CONFIG = [("--sjlj", "sjlj.json"), ("--insn-patches", "insn_patches.json"), ("--insn-patches", "r8_hooks.json"),
-               ("--entry-observers", "r7_native_hooks.json")]
+               ("--insn-patches", "audio_hooks.json"), ("--entry-observers", "r7_native_hooks.json")]
 LIFT_FLAGS = ["--chunks", PPU_CHUNKS, "--promote-leaf"]
 
 

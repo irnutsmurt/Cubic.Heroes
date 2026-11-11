@@ -63,7 +63,7 @@ class LiftOptions(unittest.TestCase):
         self.assertIn("--promote-leaf", opts)
         i = opts.index("--entry-observers")
         self.assertTrue(opts[i + 1].endswith("r7_native_hooks.json"))
-        self.assertEqual(sum(1 for o in opts if o == "--insn-patches"), 2)
+        self.assertEqual(sum(1 for o in opts if o == "--insn-patches"), 3)
 
 
 class PortSources(unittest.TestCase):

@@ -1,0 +1,30 @@
+# Scenario: the sound lab (SCENARIO=sound_lab tests/boot_smoke.py; docs/OPENAL_MIGRATION_PLAN.md, M0): the hero
+# standing still in front of the castle while DOTHEROES_DEV_SOUND (port/audio_hooks.cpp) asks the game's own
+# sound manager for chosen sounds at chosen times -- what the scenes never play, to see how the game's audio
+# treats them: the effects and music whose files carry loop points (an intro before the loop, a loop that ends
+# before the file does), a loop asked of music and a play-once. Run with DOTHEROES_AUDIO_TRACE and AUDIO_WAV.
+#
+# The steps (seconds after the sound manager's first update; the hero is in area 17 well before 90 s), the
+# default schedule if the run sets no DOTHEROES_DEV_SOUND of its own:
+#   90 the music and the looping effects faded out (1 s)
+#   95 effect 229 (262_quake: loop 5257-104197 of 104198 frames), stopped at 107
+#   110 effect 236 (269_cheer: loop 20998-280057 of 280058), stopped at 127
+#   130 effect 88 (061_sliding: loop over the whole file, 16.7 s), stopped at 157
+#   160 effect 42 (001_kettei: no loop points)
+#   165 music 6 (bgm_field07, looped: loop 353266 to the end of 5291875 frames, 120.0 s), faded out at 310
+#   315 music 27 (bgm_cave, looped: loop 0-2879356 of 2972903 frames at 48 kHz, 59.98 of 61.94 s), faded at 395
+#   400 music 26 (bgm_title, once: 21.3 s, loop points over the whole file)
+#
+# Starts from: the kept checkpoint castle-front (CONTINUE: field area 17).
+#! saves build/checkpoints/castle-front
+#! env DOTHEROES_NATIVE_CD=1 DOTHEROES_NATIVE_SOLVER=1,2,4,5,6 GCM_WRAP_LAP=1 DOTHEROES_PRESENT_ONCE=1
+#! env DOTHEROES_DEV_STATE=1 DIAG_FRAMES=frames.log PS3_VERBOSE=0
+#! env WINDOW=1 VISIBLE=1 TOPMOST=1 GRAB_EVERY=60 PS3_OSD_FPS=2 DUMP=0 SHOT_EVERY=0
+#! env DOTHEROES_DEV_SOUND=90:fadebgm:1,90:fadeloops:1,95:se:229,107:stopse:229,110:se:236,127:stopse:236,130:se:88,157:stopse:88,160:se:42,165:bgm:6:1,310:fadebgm:1,315:bgm:27:1,395:fadebgm:1,400:bgm:26:0
+#! secs 480
+include common.drive
+log TitleMovie 120
+sleep 5
+call continue
+state life>0,area==17 90
+sleep 420

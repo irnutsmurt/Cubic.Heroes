@@ -230,6 +230,9 @@ target_sources(${PROJECT_NAME} PRIVATE native/memtest.cpp native/memtest_checked
 # R8's physics hooks (config/r8_hooks.json): the guest registers in and out of
 # native/phys_direct.cpp
 target_sources(${PROJECT_NAME} PRIVATE phys_hooks.cpp)
+# The game's audio boundary (config/audio_hooks.json, docs/OPENAL_MIGRATION_PLAN.md): its sound manager's
+# methods, traced with DOTHEROES_AUDIO_TRACE (M0)
+target_sources(${PROJECT_NAME} PRIVATE audio_hooks.cpp)
 # The lifter's --promote-calls check (docs/NATIVE_R8.md section 9.0): its report,
 # and with DOTHEROES_PPU_PROMO_CHECK=ON the test after every promoted call
 target_sources(${PROJECT_NAME} PRIVATE promo_check.cpp)

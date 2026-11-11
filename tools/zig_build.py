@@ -139,7 +139,8 @@ SCAFFOLD = ["runtime/ppu/ppu_loader.cpp", "runtime/ppu/ppu_hle.cpp", "runtime/pp
             "runtime/ppu/ppu_sysprx.cpp"]
 # The executable's own sources (port/CMakeLists.txt's add_executable and
 # target_sources, less the lift and the runtime): main.cpp calls into each.
-PORT_SOURCES = ["main.cpp", "stubs.cpp", "game_patches.cpp", "cpu_place.cpp", "phys_hooks.cpp", "promo_check.cpp",
+PORT_SOURCES = ["main.cpp", "stubs.cpp", "game_patches.cpp", "cpu_place.cpp", "phys_hooks.cpp", "audio_hooks.cpp",
+                "promo_check.cpp",
                 "diag/diag.cpp",
                 "native/memtest.cpp", "native/memtest_checked.cpp", "native/memtest_bare.cpp", "native/memtest_stores.cpp"]
 RUNTIME_LIB = "libps3recomp_runtime.a"
