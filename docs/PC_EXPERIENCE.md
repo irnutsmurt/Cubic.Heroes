@@ -237,7 +237,9 @@ setting's name.
 
 **Assets.** The owner placed them in `button assets/` at the repository's
 top. It is untracked: nothing of it is committed until the prompts are
-implemented and the files they use are chosen. It holds Kenney's Input
+implemented and the files they use are chosen (the save-data screen,
+docs/SAVE_UI.md, ships the four it uses in port/assets/ui, with the
+licence). It holds Kenney's Input
 Prompts sets for:
 - Xbox Series;
 - Nintendo Switch;
