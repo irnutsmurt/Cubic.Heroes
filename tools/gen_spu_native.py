@@ -14,10 +14,11 @@ together: a C++ function per SPU function (each entry: the ELF entry, every brsl
 configuration names as taken), each lifted function a labelled block in it, and rewrites each statement for
 the native interface (the template's header):
 
-  ctx->gpr[N]                       -> rN, a local of the function, loaded from the register file at entry
-                                       and after each call or callback that may change it, stored back before
-                                       each call, callback, return and exit (so the file is, at every exit and
-                                       at every callback, what the lift leaves in ctx->gpr)
+  ctx->gpr[N]                       -> rN, a local of the function, loaded from the register file at entry;
+                                       around a call only the registers the callee can reach are stored and
+                                       only those it can change reloaded (Gen.effects); every assigned one is
+                                       stored at a return, exit, stop, tail jump and branch to the host (so the
+                                       file is, there, what the lift leaves in ctx->gpr)
   spu_ls_read128 / write128         -> lsr / lsw (the same address masking)
   SPU_RELOC(x)                      -> (d + x) (relocatable lifts)
   spu_wrch / spu_rdch / spu_rchcnt  -> wrch / rdch / rchcnt (the host's channels)
@@ -27,9 +28,10 @@ the native interface (the template's header):
   brsl $rN, N != 0                  -> rN = the link; goto
   bisl $r0, $rN (indirect call)     -> the dispatcher: a function the port has, else the host's branch
                                        callback (an overlay, or code the port cannot place), then the return check
-  bi $rN (indirect jump)            -> a jump table (configured): a switch of gotos over the table's targets;
-                                       else (and a target not in the table) jump_to, a tail call into a function
-                                       the port has or the host's branch callback
+  bi $rN (indirect jump)            -> a jump table (configured): a switch of gotos over the table's targets, a
+                                       target outside it an exit (unresolved: the image's text was changed);
+                                       else jump_to, a tail call into a function the port has or the host's
+                                       branch callback
   SPU_RET                           -> return (c.ret = r0 word 0, the pc the lift's SPU_RET sets)
   the HALT-ASSERT (heqi)            -> an exit (halted, the pc)
   stop                              -> the host's stop callback; the lift goes on only past a stop it has
@@ -243,6 +245,62 @@ class Gen:
         for e in sorted(self.entries):
             for b in self.blocks[e]:
                 self.owner.setdefault(b, []).append(e)
+        self.effects()
+
+    # ---- what each function does to the register file ------------------------------------------------------
+    # A function holds the registers it names in locals (regs), loaded at its entry. The ones its own statements
+    # assign (dirty) differ from the file until stored. The file is the one copy callees and the host see, so:
+    #   before a call to G: store the dirty locals G can reach (acc[G]: the registers G and everything it calls or
+    #     jumps to name; all of them where G can reach the host's branch callback, which runs any code on the
+    #     file, or a stop, where the host -- and the checker, comparing every register at each block -- sees it);
+    #   after it: reload the locals G can change (wr[G]: what G and its callees assign; all where it can reach a
+    #     branch to the host);
+    #   on the way out of G with c.exit set: the dirty locals not stored before the call (the rest is in the file);
+    #   at a return, a halt, a stop, a tail jump, a branch to the host: every dirty local.
+    # So the file is complete at every return, exit, stop and branch callback, as before; between them a
+    # callee's registers pass through the file and the caller's stay in its locals.
+    def effects(self):
+        ALL = frozenset(range(128))
+        self.regs, self.dirty, acc, wr, edges = {}, {}, {}, {}, {}
+        for e in self.entries:
+            blocks = self.blocks[e]
+            self.regs[e] = frozenset({int(x) for b in blocks for l in self.funcs[b] for x in R_REG.findall(l)} | {0})
+            dirty, host, stop, out = set(), False, False, set()
+            for b in blocks:
+                for s in self.stmts[b]:
+                    k = s[0]
+                    if k == 'assign':
+                        dirty.add(int(R_REG.fullmatch(s[1]).group(1)))
+                    elif k in ('call', 'icall'):
+                        dirty.add(0)
+                    elif k == 'linkjump':
+                        dirty.add(s[1])
+                    if k == 'call':
+                        out.add(s[2])
+                    if k in ('direct', 'linkjump'):
+                        t = s[2] if k == 'direct' else s[3]
+                        if t not in blocks:
+                            out.add(t)
+                    if k == 'icall' or k == 'xjump' or (k == 'ijump' and b not in self.tables):
+                        host = True
+                    if k == 'stop':
+                        stop = True
+            self.dirty[e] = frozenset(dirty)
+            acc[e] = ALL if host or stop else self.regs[e]
+            wr[e] = ALL if host else self.dirty[e]
+            edges[e] = out
+        changed = True
+        while changed:
+            changed = False
+            for e in sorted(self.entries):
+                a, w = set(acc[e]), set(wr[e])
+                for t in edges[e]:
+                    a |= acc[t]
+                    w |= wr[t]
+                if len(a) != len(acc[e]) or len(w) != len(wr[e]):
+                    acc[e], wr[e] = frozenset(a), frozenset(w)
+                    changed = True
+        self.acc, self.wr = acc, wr
 
     def jumps_of(self, a):
         out = []
@@ -267,12 +325,18 @@ class Gen:
         raise SystemExit('0x%X: instruction not found' % a)
 
     # ---- one function --------------------------------------------------------------------------------
+    # Which of a function's locals may differ from the file (may be dirty) at each statement: a forward dataflow
+    # over its blocks and the lift's labels and jumps (din: the set at each label). An assignment makes a register
+    # dirty; storing it makes it clean, and so does reloading it. So each site stores only what may be dirty there:
+    #   a call to G: the dirty ones G can reach (acc[G]); then reloads what G can change (wr[G]); the dirty ones
+    #     outside acc[G] stay dirty (stored on the way out when G exits);
+    #   a branch to the host, a stop: every dirty one (the host sees the whole file); after a branch every local is
+    #     reloaded, after a stop the host went on past they all equal the file;
+    #   a return, a halt, a tail jump, an exit: every dirty one.
     def gen_function(self, e, block_index, out):
         cfg = self.cfg
         blocks = self.blocks[e]
-        regs = sorted({int(x) for b in blocks for l in self.funcs[b] for x in R_REG.findall(l)} | {0})
-        save = ' '.join('g[%d] = r%d;' % (r, r) for r in regs)
-        load = ' '.join('r%d = g[%d];' % (r, r) for r in regs)
+        regs = sorted(self.regs[e])
         desc = cfg.FUNCS.get(e, '')
         callers = sorted(self.call_sites.get(e, ()))
         how = []
@@ -282,8 +346,19 @@ class Gen:
             how.append('through a pointer: ' + cfg.ADDRESS_TAKEN[e])
         if callers:
             how.append('called from ' + ', '.join('%X' % x for x in callers[:8]) + (' ...' if len(callers) > 8 else ''))
-        text = '---- 0x%05X%s (%d blocks; %s) ----' % (e, ' ' + desc if desc else '', len(blocks), '; '.join(how))
+        text = '---- 0x%05X%s (%d blocks; %s; %d registers, %d assigned; reaches %s, changes %s) ----' % (
+            e, ' ' + desc if desc else '', len(blocks), '; '.join(how), len(regs), len(self.dirty[e]),
+            'all' if len(self.acc[e]) == 128 else '%d' % len(self.acc[e]), 'all' if len(self.wr[e]) == 128 else '%d' % len(self.wr[e]))
         out.extend(wrap_comment(text, '// '))
+        din = {e: frozenset()}
+        for _ in range(1000):
+            before = dict(din)
+            for b in blocks:
+                self.gen_block(e, b, blocks, din, None)
+            if din == before:
+                break
+        else:
+            raise SystemExit('0x%X: the dataflow does not settle' % e)
         out.append('void %s(Run& c)' % self.fname(e))
         out.append('{')
         out.append('    u128* const g = c.g;')
@@ -293,8 +368,6 @@ class Gen:
         decl = ['r%d = g[%d]' % (r, r) for r in regs]
         for i in range(0, len(decl), 8):
             out.append('    Q ' + ', '.join(decl[i:i + 8]) + ';')
-        out.append('#define SAVE() do { %s } while (0)' % save)
-        out.append('#define LOAD() do { %s } while (0)' % load)
         if blocks[0] != e:
             out.append('    goto L_%05X;' % e)
         body = []
@@ -303,111 +376,158 @@ class Gen:
                 body.extend(wrap_comment(cfg.BLOCK_NOTES[b], '    // '))
             body.append('L_%05X:' % b)
             body.append('    COV(%d);' % block_index[b])
-            self.gen_block(e, b, blocks, body)
+            self.gen_block(e, b, blocks, din, body)
         out.extend(body)
-        out.append('#undef SAVE')
-        out.append('#undef LOAD')
         out.append('}')
         out.append('')
 
-    def gen_block(self, e, b, blocks, out):
+    @staticmethod
+    def st(regs):
+        return ''.join('g[%d] = r%d; ' % (r, r) for r in sorted(regs))
+
+    @staticmethod
+    def ld(regs):
+        return ''.join(' r%d = g[%d];' % (r, r) for r in sorted(regs))
+
+    def gen_block(self, e, b, blocks, din, out):
+        """Block b of function e: its code appended to out, or (out None) only the dataflow (din updated)."""
         P = self.P
         ss = self.stmts[b]
+        R = self.regs[e]
+        emit = out.append if out is not None else (lambda x: None)
+        empty = frozenset()
+
+        def flow(target, cur):
+            old = din.get(target)
+            new = cur if old is None else old | cur
+            if old is None or new != old:
+                din[target] = frozenset(new)
+
+        cur = din.get(b)
         for i, s in enumerate(ss):
             k = s[0]
             if k == 'skip':
                 continue
             if k == 'label':
                 if s[1] != b:
-                    out.append('L_%05X:' % s[1])
+                    if cur is not None:
+                        flow(s[1], cur)
+                    cur = din.get(s[1])
+                    emit('L_%05X:' % s[1])
                 continue
+            if cur is None:
+                cur = empty   # after an unconditional transfer, before any label: code no path reaches
             if k == 'goto':
                 cond = expr(s[1]) + ' ' if s[1] else ''
-                out.append('    %sgoto L_%05X;' % (cond, s[2]))
+                flow(s[2], cur)
+                emit('    %sgoto L_%05X;' % (cond, s[2]))
+                if not s[1]:
+                    cur = None
                 continue
             if k == 'call':
                 link, tgt = s[1], s[2]
                 lk = '(d + 0x%Xu)' % link if s[3] else '0x%Xu' % link
-                out.append('    r0 = spu_link(%s);' % lk)
-                out.append('    SAVE(); %s(c); if (c.exit) return; if ((c.ret ^ %s) & 0x3FFFFu) { bad_return(c, %s); return; } '
-                           'LOAD();   // brsl $r0, 0x%X' % (self.fname(tgt), lk, lk, tgt))
+                emit('    r0 = spu_link(%s);   // brsl $r0, 0x%X' % (lk, tgt))
+                cur = cur | {0}
+                before, rest, after = cur & self.acc[tgt], cur - self.acc[tgt], R & self.wr[tgt]
+                ex = ('{ %sreturn; }' % self.st(rest)) if rest else 'return;'
+                bad = '{ %sbad_return(c, %s); return; }' % (self.st(rest), lk)
+                emit('    %s%s(c); if (c.exit) %s if ((c.ret ^ %s) & 0x3FFFFu) %s%s' % (
+                    self.st(before), self.fname(tgt), ex, lk, bad, self.ld(after)))
+                cur = rest
                 continue
             if k == 'icall':
                 n, link = s[1], s[2]
                 lk = '(d + 0x%Xu)' % link if s[3] else '0x%Xu' % link
                 site = link - 4
-                out.append('    { const uint32_t t = r%d._u32[0]; r0 = spu_link(%s); SAVE(); '
-                           'if (!branch(c, t & 0x3FFFFu, 0x%Xu, true)) return; '
-                           'if ((c.ret ^ %s) & 0x3FFFFu) { bad_return(c, %s); return; } LOAD(); }   // bisl $r0, $r%d'
-                           % (n, lk, site, lk, lk, n))
+                cur = cur | {0}
+                emit('    { const uint32_t t = r%d._u32[0]; r0 = spu_link(%s); %s'
+                     'if (!branch(c, t & 0x3FFFFu, 0x%Xu, true)) return; '
+                     'if ((c.ret ^ %s) & 0x3FFFFu) { bad_return(c, %s); return; }%s }   // bisl $r0, $r%d'
+                     % (n, lk, self.st(cur), site, lk, lk, self.ld(R), n))
+                cur = empty
                 continue
             if k == 'ijump':
                 n = s[1]
                 site = self.stmt_pc(b, lambda w, n=n: (w >> 21) == 0x1A8 and (w >> 7) & 0x7F == n)   # bi $rN
                 if b in self.tables:
                     t, targets = self.tables[b]
-                    out.append('    switch (r%d._u32[0] & 0x3FFFFu) {   // bi $r%d at 0x%X: the jump table at 0x%X' % (n, n, site, t))
+                    emit('    switch (r%d._u32[0] & 0x3FFFFu) {   // bi $r%d at 0x%X: the jump table at 0x%X' % (n, n, site, t))
                     for x in sorted(set(targets)):
-                        out.append('    case 0x%05Xu: goto L_%05X;' % (x, x))
-                    out.append('    default: { SAVE(); c.jt = r%d._u32[0] & 0x3FFFFu; c.js = 0x%Xu; TAIL jump_to(c); }' % (n, site))
-                    out.append('    }')
+                        flow(x, cur)
+                        emit('    case 0x%05Xu: goto L_%05X;' % (x, x))
+                    # a target outside the table (the image's text in the local store changed): an exit, not the host
+                    emit('    default: { %sunresolved(c, r%d._u32[0] & 0x3FFFFu, 0x%Xu); return; }' % (self.st(cur), n, site))
+                    emit('    }')
                 else:
-                    out.append('    { SAVE(); c.jt = r%d._u32[0] & 0x3FFFFu; c.js = 0x%Xu; TAIL jump_to(c); }   // bi $r%d at 0x%X'
-                               % (n, site, n, site))
+                    emit('    { %sc.jt = r%d._u32[0] & 0x3FFFFu; c.js = 0x%Xu; TAIL jump_to(c); }   // bi $r%d at 0x%X'
+                         % (self.st(cur), n, site, n, site))
+                cur = None
                 continue
             if k == 'xjump':
-                out.append('    { SAVE(); c.jt = 0x%05Xu; c.js = 0x%Xu; TAIL jump_to(c); }   // a branch out of the image' % (s[1], b))
+                emit('    { %sc.jt = 0x%05Xu; c.js = 0x%Xu; TAIL jump_to(c); }   // a branch out of the image' % (self.st(cur), s[1], b))
+                cur = None
                 continue
             if k == 'linkjump':
                 n, link, tgt = s[1], s[2], s[3]
                 lk = '(d + 0x%Xu)' % link if s[4] else '0x%Xu' % link
-                out.append('    r%d = spu_link(%s);   // brsl $r%d' % (n, lk, n))
+                emit('    r%d = spu_link(%s);   // brsl $r%d' % (n, lk, n))
+                cur = cur | {n}
                 s = ('direct', None, tgt)
                 k = 'direct'
             if k == 'direct':
                 tgt = s[2]
                 cond = expr(s[1]) + ' ' if s[1] else ''
-                if not cond and out[-1] == '    goto L_%05X;' % tgt:
-                    continue
                 if tgt in blocks:
-                    out.append('    %sgoto L_%05X;' % (cond, tgt))
+                    flow(tgt, cur)
+                    if cond or out is None or out[-1] != '    goto L_%05X;' % tgt:
+                        emit('    %sgoto L_%05X;' % (cond, tgt))
                 else:
                     assert tgt in self.entries
-                    out.append('    %s{ SAVE(); TAIL %s(c); }   // a tail jump' % (cond, self.fname(tgt)))
+                    emit('    %s{ %sTAIL %s(c); }   // a tail jump' % (cond, self.st(cur), self.fname(tgt)))
+                if not s[1]:
+                    cur = None
                 continue
             if k == 'ret':
                 cond = expr(s[1]) + ' ' if s[1] else ''
-                out.append('    %s{ SAVE(); c.ret = g[0]._u32[0]; return; }' % cond)
+                emit('    %s{ %sc.ret = r0._u32[0]; return; }' % (cond, self.st(cur)))
+                if not s[1]:
+                    cur = None
                 continue
             if k == 'halt':
-                out.append('    if (%s) { SAVE(); halt(c, 0x%Xu); return; }   // %s' % (expr(s[1]), s[3], s[2]))
+                emit('    if (%s) { %shalt(c, 0x%Xu); return; }   // %s' % (expr(s[1]), self.st(cur), s[3], s[2]))
                 continue
             if k == 'stop':
                 code, cont = s[1], s[2]
                 pc = self.stmt_pc(b, lambda w, code=code: w == code)
                 if cont:
-                    out.append('    { SAVE(); if (!stop(c, 0x%Xu, 0x%Xu, 0x%Xu)) return; }   // stop 0x%X: on past it when the host '
-                               'services it' % (code, pc, b, code))
+                    emit('    { %sif (!stop(c, 0x%Xu, 0x%Xu, 0x%Xu)) return; }   // stop 0x%X: on past it when the host '
+                         'services it' % (self.st(cur), code, pc, b, code))
+                    cur = empty
                 else:
-                    out.append('    { SAVE(); stop_end(c, 0x%Xu, 0x%Xu, 0x%Xu); return; }   // stop 0x%X: the lift returns after it'
-                               % (code, pc, b, code))
+                    emit('    { %sstop_end(c, 0x%Xu, 0x%Xu, 0x%Xu); return; }   // stop 0x%X: the lift returns after it'
+                         % (self.st(cur), code, pc, b, code))
+                    cur = None
                 continue
             if k == 'unsupported':
-                out.append('    unsupported(c, 0x%Xu);   // %s: the lift notes it and goes on' % (s[1], s[2]))
+                emit('    unsupported(c, 0x%Xu);   // %s: the lift notes it and goes on' % (s[1], s[2]))
                 continue
             if k == 'fence':
-                out.append('    spu_arch_fence();')
+                emit('    spu_arch_fence();')
                 continue
             if k == 'lsw':
-                out.append('    lsw(c, %s, %s);' % (expr(s[1]), expr(s[2])))
+                emit('    lsw(c, %s, %s);' % (expr(s[1]), expr(s[2])))
                 continue
             if k == 'wrch':
-                out.append('    wrch(c, %s, %s);' % (s[1], expr(s[2])))
+                emit('    wrch(c, %s, %s);' % (s[1], expr(s[2])))
                 continue
             if k == 'assign':
-                out.append('    %s = %s;' % (expr(s[1]), expr(s[2])))
+                emit('    %s = %s;' % (expr(s[1]), expr(s[2])))
+                cur = cur | {int(R_REG.fullmatch(s[1]).group(1))}
                 continue
             raise SystemExit('0x%X: %s' % (b, s))
+        if cur is not None:
+            raise SystemExit('0x%X: the block does not end in a transfer' % b)
 
     # ---- the report: entries, functions, reach -----------------------------------------------------------
     def report(self):
