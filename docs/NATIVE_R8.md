@@ -2131,8 +2131,33 @@ stopped, 0 still running`), nothing ran after destroy, no crash, and the run end
 rel19's validation, as rel16's: the nine scenes with no crash, sync validation 0 errors, the normal-damage
 run, the reference scenes all within the accepted figures (5 of 5). The validation set's save-list scene
 stops at its first state check on both builds (it runs without DOTHEROES_DEV_STATE) after the list has
-loaded the chosen save; the full flow runs with the switch on. **rel19 is the play build**
-(tests/scenarios/owner_play_r8.drive).
+loaded the chosen save; the full flow runs with the switch on. rel19 was the play build until rel20 (9.10).
+
+### 9.10 The save list was never drawn; the save-data screen; codec_raw exact; rel20 (2026-11-10) [C, M]
+
+**A bug since R7's native release, found by the new screen's tests.** The save-data dialog's picture (the
+placeholder panel as much as the new screen) is drawn in the window's presents, and those follow the game's
+flips. While a dialog is open the game flips nothing [M: every dialog of the save_picker drive, in a
+window, logged no present], and the native release has no FIFO walker presenting on its own, so nothing
+drew it: after 4 s the dialog took the title's first entry. A load then loaded that save; **an in-game SAVE
+went over that save whichever had been loaded** (shown on copies: the second save loaded, the first one
+written). The picker drives never saw it: they ran headless and pressed within the 4 s. Of the owner's
+sessions (build/sessions), only today's used the list: a load, no save; the play saves were backed up
+before it.
+
+The fix (ps3recomp 0139): the dialog presents the last frame again with its picture when no present came
+for 45 ms (`g_ps3_osd_present_again`, under the backend's present mutex). With it, the full-screen
+save-data screen the owner asked for (docs/SAVE_UI.md): rel20 in a window on copies of the saves, the
+load/save/overwrite/cancel flow (PlayStation prompts; fullscreen with the Switch's; the keyboard's) and the
+character editor's list (Xbox's) all passed, **the SAVE wrote the loaded save**, every dialog presented
+itself.
+
+**rel20** (rel19 + the screen + the codec check's replay; codec_raw still lifted by default): the codec
+check bit-exact with the clock replayed (docs/AUDIO.md A1: 267,517 and 102,959 calls, 0 differing); the
+quit drive clean; the eight validation scenes, sync validation and the normal-damage run with no crash;
+the reference scenes passed; the player's install test passes every stage (its prebuilt parts rebuilt:
+they carry the screen's font and prompt images). sfxreverb loads in the first dungeon's scenes (A2 needed).
+**rel20 is the play build** (tests/scenarios/owner_play_r8.drive).
 
 
 ## 10. Reproducing
