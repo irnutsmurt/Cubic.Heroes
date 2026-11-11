@@ -142,7 +142,8 @@ separately: the console's rule for 7.1 to stereo against ours, as a
 behaviour change of its own.
 
 Status: section 1 mapped (2026-11-10). A0: the counters done, the captures not yet (below). A1: ported, checked in the game bit-exact with the clock replayed (rel20), **native by default since
-rel21** (below); DOTHEROES_NATIVE_FMOD_CODEC=0 keeps the lifted overlay.
+rel21** (below); DOTHEROES_NATIVE_FMOD_CODEC=0 keeps the lifted overlay. A2: sfxreverb ported and bit-exact
+in the game (rel22); off by default (DOTHEROES_NATIVE_FMOD_REVERB) until its gate (below).
 
 ### A1, codec_raw (2026-11-10) [C, M]
 
@@ -186,6 +187,28 @@ calls `read` (link 0x490) and `setposition` (0x3D0) through its codec object.
   should be. Run again alone, twice with the codec native and twice lifted: all four within the figures
   as in rel16-rel20. A one-off, not the codec's (which touches no picture); its cause is not known.
 - **The default** (rel21): native; =0 the lifted overlay (checked: a river run each way, the quit drive).
+
+### A2, sfxreverb (2026-11-10) [C, M]
+
+What it is [C, port/native/fmod_sfxreverb.h]: FMOD's SFX reverb as a DSP unit -- 9 SPU functions (about 2,900
+instructions; the lift's 158 pieces). The mixer loads it after the unit's object in its overlay area and calls
+the descriptor (link 0x2CA8, the ELF entry) once, then read (0x2D88) for each block: the input downmixed to
+mono, through filters and an early-reflection ring in local store, and through a main delay ring and eight late
+lines that live in main memory (GETs of the taps before, PUTs of the new samples after); each output channel in
+the speaker mask gets the reflections, its lines' taps and the dry signal. No time, no atomics.
+
+- **The port** is generated from the lift (tools/gen_sfxreverb.py, template tools/fmod_sfxreverb.cpp.in): the
+  nine functions put back together, every statement the lift's own on the same SPU helpers, the whole register
+  file kept. Regenerating it reproduces port/native/fmod_sfxreverb.cpp byte for byte.
+- **Offline** (tests/native/fmod_sfxreverb_check.cpp): every local-store and guest byte, the channel sequence,
+  all 128 registers and the halt PCs compared on every call -- 5,235 calls at x86-64-v3 and v2 (handpicked,
+  random states, streams carrying the reverb's state), 36,589 and 18,185 more in larger runs: all equal; 155 of
+  157 blocks taken (the other two cannot run). Its reverb states are constructed, not captured from the game.
+- **In the game** (rel22, the two scenes that load it): DOTHEROES_NATIVE_FMOD_REVERB=check -- the native call on
+  copies, its PUTs kept aside, then the lifted call, then the local store, all 128 registers and every PUT byte
+  compared: **the first dungeon's approach 17,302 calls, the exit after its boss 1,886, all equal** (77,859 and
+  8,487 PUTs), none run lifted only. Native (=1): 17,176 and 1,870 calls, none declined, no halt; the drives
+  passed.
 
 ### A0, the counters (2026-11-10, rel16) [M]
 

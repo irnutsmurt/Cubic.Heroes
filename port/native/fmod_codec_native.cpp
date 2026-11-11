@@ -9,6 +9,7 @@
 // read at different moments: when the two differ, the native one runs again from the same state with
 // the lifted run's decrementer reads replayed in order, and that run is compared, clock included.
 #include "fmod_codec_raw.h"
+#include "fmod_sfxreverb.h"
 #include "spu_context.h"
 
 #include <atomic>
@@ -100,10 +101,9 @@ bool equal_to_lifted(const uint8_t* ls, const u128* g, const spu_context* ctx)
     return eq;
 }
 
-int native_call(spu_context* ctx, int image, uint32_t link, uint32_t delta)
+int codec_call(spu_context* ctx, uint32_t link, uint32_t delta)
 {
     using namespace fmod_codec_raw;
-    if (image != 9 || t_inner || g_mode == kOff) return 0;
     if (link != kEntryRead && link != kEntrySetPosition && link != kEntryDescriptor) return 0;
     if (g_mode == kNative) {
         const Channels ch{ ctx, wrch_real, rdch_real };
@@ -183,12 +183,142 @@ int native_call(spu_context* ctx, int image, uint32_t link, uint32_t delta)
     }
     return 1;
 }
+
+// ---- FMOD's sfxreverb (image 25; docs/AUDIO.md step A2, fmod_sfxreverb.h) ------------------------------
+// DOTHEROES_NATIVE_FMOD_REVERB: unset or 0 the lifted overlay (until checked in the game); 1 native; check:
+// the native call on copies of the local store and the registers -- its GETs read guest memory, its PUTs
+// kept aside (a later GET in the same call sees them) -- then the lifted one on the context, then the whole
+// local store, all 128 registers and every byte the native one would have PUT compared with what the
+// lifted one left. The reverb reads and writes only its own delay lines in main memory; no time, no atomics.
+int g_rmode = kOff;
+std::atomic<unsigned long long> g_r_handled{0}, g_r_declined{0}, g_r_halted{0}, g_r_equal{0}, g_r_diff{0},
+    g_r_lifted_only{0}, g_r_puts{0};
+unsigned g_r_lines = 8;
+
+struct ShadowMfc {
+    uint8_t* ls;
+    uint32_t lsa = 0, eal = 0, size = 0, mask = 0;
+    bool odd = false;
+    struct Put { uint32_t ea, size; std::vector<uint8_t> bytes; };
+    std::vector<Put> puts;
+};
+void wrch_shadow(void* u, uint32_t ch, uint32_t v)
+{
+    using namespace fmod_codec_raw;   // the MFC channel numbers (architectural)
+    ShadowMfc& m = *(ShadowMfc*)u;
+    switch (ch) {
+    case kMfcLsa: m.lsa = v; break;
+    case kMfcEah: break;
+    case kMfcEal: m.eal = v; break;
+    case kMfcSize: m.size = v; break;
+    case kMfcTagId: break;
+    case kMfcCmd: {
+        const uint32_t cmd = v & 0xFF, lsa = m.lsa & 0x3FFFF;
+        if (m.size > 0x4000 || lsa + m.size > 0x40000) { m.odd = true; break; }
+        if (cmd == 0x40) {   // GET: guest memory, then what this call PUT over it
+            memcpy(m.ls + lsa, vm_base + m.eal, m.size);
+            for (const auto& p : m.puts) {
+                const uint32_t lo = p.ea > m.eal ? p.ea : m.eal;
+                const uint32_t hi = (p.ea + p.size < m.eal + m.size) ? p.ea + p.size : m.eal + m.size;
+                if (lo < hi) memcpy(m.ls + lsa + (lo - m.eal), p.bytes.data() + (lo - p.ea), hi - lo);
+            }
+        } else if (cmd == 0x20) {   // PUT: kept aside
+            m.puts.push_back({ m.eal, m.size, std::vector<uint8_t>(m.ls + lsa, m.ls + lsa + m.size) });
+        } else {
+            m.odd = true;
+        }
+        break;
+    }
+    case kMfcWrTagMask: m.mask = v; break;
+    case kMfcWrTagUpdate: break;
+    default: m.odd = true;
+    }
+}
+uint32_t rdch_shadow(void* u, uint32_t ch)
+{
+    ShadowMfc& m = *(ShadowMfc*)u;
+    if (ch == fmod_codec_raw::kMfcRdTagStat) return m.mask;
+    m.odd = true;
+    return 0;
+}
+
+int reverb_call(spu_context* ctx, uint32_t link, uint32_t delta)
+{
+    using namespace fmod_sfxreverb;
+    if (link != kEntryRead && link != kEntryDescriptor) return 0;
+    if (g_rmode == kNative) {
+        const Channels ch{ ctx, wrch_real, rdch_real };
+        uint32_t hpc = 0;
+        const Result r = call(ctx->ls, ctx->gpr, ctx->pc, delta, ch, &hpc);
+        if (r == Result::declined) { g_r_declined++; return 0; }
+        if (r == Result::halted) {
+            g_r_halted++;
+            fprintf(stderr, "[spu] HALT-ASSERT heqi pc=0x%05X img=%d (sfxreverb, native)\n", hpc, ctx->image_id);
+            ctx->status = SPU_STATUS_STOPPED_BY_HALT;
+            spu_halt(ctx);
+            return 1;
+        }
+        g_r_handled++;
+        ctx->pc = ctx->gpr[0]._u32[0] & SPU_LS_MASK;
+        return 1;
+    }
+    static thread_local std::vector<uint8_t> ls(0x40000);
+    static thread_local u128 g[128];
+    memcpy(ls.data(), ctx->ls, 0x40000);
+    memcpy(g, ctx->gpr, sizeof g);
+    ShadowMfc m;
+    m.ls = ls.data();
+    uint32_t hpc = 0;
+    const Result r = call(ls.data(), g, ctx->pc, delta, Channels{ &m, wrch_shadow, rdch_shadow }, &hpc);
+    const uint32_t ret = ctx->gpr[0]._u32[0] & SPU_LS_MASK;
+    t_inner = 1;
+    spu_indirect_branch(ctx);   // the lifted function (this hook declines inside)
+    spu_drain_call(ctx, ret);
+    t_inner = 0;
+    if (r != Result::handled || m.odd) { g_r_lifted_only++; return 1; }
+    g_r_puts += m.puts.size();
+    const bool ls_eq = !memcmp(ls.data(), ctx->ls, 0x40000);
+    int regs_diff = 0;
+    for (int i = 0; i < 128; i++) regs_diff += !same(g[i], ctx->gpr[i]);
+    size_t puts_diff = 0;
+    for (const auto& p : m.puts)
+        if (memcmp(p.bytes.data(), vm_base + p.ea, p.size)) puts_diff++;
+    if (ls_eq && !regs_diff && !puts_diff) { g_r_equal++; return 1; }
+    g_r_diff++;
+    if (g_r_lines) {
+        g_r_lines--;
+        uint32_t first = 0, last = 0, n = 0;
+        for (uint32_t i = 0; i < 0x40000; i++)
+            if (ls[i] != ctx->ls[i]) { if (!n++) first = i; last = i; }
+        fprintf(stderr, "[sfxreverb-check] call at link 0x%04X differs: %u local-store byte(s) in 0x%05X-0x%05X, "
+                "%d register(s), %zu of %zu PUT(s)\n", link, n, first, last, regs_diff, puts_diff, m.puts.size());
+    }
+    return 1;
+}
+
+// The runtime's native-overlay hook: each image's port, when its switch is on.
+int native_call(spu_context* ctx, int image, uint32_t link, uint32_t delta)
+{
+    if (t_inner) return 0;
+    if (image == 9 && g_mode != kOff) return codec_call(ctx, link, delta);
+    if (image == 25 && g_rmode != kOff) return reverb_call(ctx, link, delta);
+    return 0;
+}
 }  // namespace
 
 extern "C" void fmod_codec_native_report(void)
 {
     static std::atomic<int> once{0};
-    if (g_mode == kOff || once.exchange(1)) return;
+    if (once.exchange(1)) return;
+    if (g_rmode == kNative)
+        fprintf(stderr, "[sfxreverb] native: %llu calls, %llu declined to the lifted overlay, %llu halts\n",
+                g_r_handled.load(), g_r_declined.load(), g_r_halted.load());
+    else if (g_rmode == kCheck)
+        fprintf(stderr, "[sfxreverb-check] %llu calls compared, every byte of the local store, all 128 registers and every "
+                "byte PUT (%llu PUTs): %llu equal, %llu differing; %llu run lifted only (the native one declined, halted or "
+                "met a transfer the check does not model)\n", g_r_equal.load() + g_r_diff.load(), g_r_puts.load(),
+                g_r_equal.load(), g_r_diff.load(), g_r_lifted_only.load());
+    if (g_mode == kOff) return;
     if (g_mode == kNative)
         fprintf(stderr, "[codec-raw] native: %llu calls, %llu declined to the lifted overlay, %llu halts\n",
                 g_handled.load(), g_declined.load(), g_halted.load());
@@ -208,11 +338,17 @@ extern "C" void fmod_codec_native_init(void)
 {
     const char* e = getenv("DOTHEROES_NATIVE_FMOD_CODEC");
     if (e && !strcmp(e, "0")) {
+        g_mode = kOff;
         fprintf(stderr, "[codec-raw] FMOD's codec_raw overlay: lifted (DOTHEROES_NATIVE_FMOD_CODEC=0)\n");
-        return;
+    } else {
+        g_mode = e && !strcmp(e, "check") ? kCheck : kNative;
+        fprintf(stderr, "[codec-raw] FMOD's codec_raw overlay: %s\n", g_mode == kNative ? "native" : "check (native beside lifted)");
     }
-    g_mode = e && !strcmp(e, "check") ? kCheck : kNative;
+    const char* r = getenv("DOTHEROES_NATIVE_FMOD_REVERB");
+    g_rmode = !r || !*r || !strcmp(r, "0") ? kOff : !strcmp(r, "check") ? kCheck : kNative;
+    if (g_rmode != kOff)
+        fprintf(stderr, "[sfxreverb] FMOD's sfxreverb overlay: %s\n", g_rmode == kNative ? "native" : "check (native beside lifted)");
+    if (g_mode == kOff && g_rmode == kOff) return;
     spu_overlay_set_native(native_call);
     atexit(fmod_codec_native_report);
-    fprintf(stderr, "[codec-raw] FMOD's codec_raw overlay: %s\n", g_mode == kNative ? "native" : "check (native beside lifted)");
 }
