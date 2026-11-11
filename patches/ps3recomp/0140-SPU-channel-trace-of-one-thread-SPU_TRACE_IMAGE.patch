@@ -1,0 +1,206 @@
+From 873f362edc2f5c4e1d0b75b4eb551b75e8cff16f Mon Sep 17 00:00:00 2001
+From: giteaguy <73799093+irnutsmurt@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 18:10:41 -0800
+Subject: [PATCH] SPU channel trace of one thread (SPU_TRACE_IMAGE)
+
+The lifted thread that starts in the given image writes its registers and
+local store as it starts, then every channel read with its value, every
+channel write, every MFC command with the local store it filled or sent
+(every DMA is synchronous here), and every stop, up to SPU_TRACE_MB. It is
+everything the thread takes from outside and gives back: a replacement can be
+replayed against the lifted code off-line on a real run's inputs. Inert (one
+thread-local test) unless set.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ runtime/spu/spu_channels.c      | 114 +++++++++++++++++++++++++++++++-
+ runtime/spu/spu_lifted_thread.c |   6 ++
+ 2 files changed, 119 insertions(+), 1 deletion(-)
+
+diff --git a/runtime/spu/spu_channels.c b/runtime/spu/spu_channels.c
+index 4e9d438..792c758 100644
+--- a/runtime/spu/spu_channels.c
++++ b/runtime/spu/spu_channels.c
+@@ -88,6 +88,111 @@ static uint64_t spu_host_ns(void)
+ #else
+ #  define SPU_TLS __thread
+ #endif
++
++/* ---------------------------------------------------------------------------
++ * A channel trace of one SPU thread, for replaying it off-line (a native
++ * replacement's check against the lifted code on the game's own inputs).
++ * SPU_TRACE_IMAGE=<runtime image id>: the lifted thread that starts in that
++ * image writes SPU_TRACE_FILE (default spu_trace_<image>.bin), until
++ * SPU_TRACE_MB megabytes (default 512):
++ *   header  "SPUTRC01", u32 image, u32 entry pc, u32 0, u32 0, the 128
++ *           registers (16 bytes each, the context's layout), the 256 KB local
++ *           store -- as the thread starts;
++ *   records u32 kind, u32 a, u32 b, u32 c, u32 d, u32 n, then n bytes:
++ *     1 rdch   a channel, b the value read (word 0)
++ *     2 wrch   a channel, b the value written (word 0); an MFC command is a
++ *              wrch of MFC_Cmd followed by
++ *     3 dma    a command, b LSA, c EA (low word), d size, and the local store
++ *              [LSA, LSA + n) after the command: what a GET brought, what a PUT
++ *              sent (n = size; for a list command the list's total)
++ *     4 stop   a the stop code, b the PC
++ *     5 end    a 1: the size limit, 2: the thread ended
++ * Every DMA here is synchronous, so the local store after a command is its
++ * effect. Zero cost when off (one thread-local test).
++ * -------------------------------------------------------------------------*/
++typedef struct { FILE* f; uint64_t bytes, limit; } spu_trace_state;
++static SPU_TLS spu_trace_state* t_trace;
++
++static void spu_trace_put(uint32_t kind, uint32_t a, uint32_t b, uint32_t c, uint32_t d,
++                          const void* data, uint32_t n)
++{
++    spu_trace_state* t = t_trace;
++    if (!t) return;
++    const uint32_t h[6] = { kind, a, b, c, d, n };
++    fwrite(h, sizeof h, 1, t->f);
++    if (n) fwrite(data, 1, n, t->f);
++    t->bytes += sizeof h + n;
++    if (t->bytes >= t->limit) {
++        const uint32_t e[6] = { 5, 1, 0, 0, 0, 0 };
++        fwrite(e, sizeof e, 1, t->f);
++        fclose(t->f);
++        fprintf(stderr, "[spu-trace] the size limit reached (%llu MB): the trace ends\n",
++                (unsigned long long)(t->bytes >> 20));
++        t_trace = NULL;
++        free(t);
++    }
++}
++
++/* spu_lifted_thread.c, as a thread starts and ends. */
++void spu_trace_thread_begin(spu_context* ctx)
++{
++    static int s_img = -2;
++    if (s_img == -2) { const char* e = getenv("SPU_TRACE_IMAGE"); s_img = e && *e ? atoi(e) : -1; }
++    if (s_img < 0 || ctx->image_id != s_img || t_trace) return;
++    static int s_taken = 0;   /* one thread a process */
++    if (__atomic_exchange_n(&s_taken, 1, __ATOMIC_ACQ_REL)) return;
++    const char* path = getenv("SPU_TRACE_FILE");
++    char def[64];
++    if (!path || !*path) { snprintf(def, sizeof def, "spu_trace_%d.bin", s_img); path = def; }
++    FILE* f = fopen(path, "wb");
++    if (!f) { fprintf(stderr, "[spu-trace] cannot open %s\n", path); return; }
++    setvbuf(f, NULL, _IOFBF, 4 << 20);
++    spu_trace_state* t = (spu_trace_state*)calloc(1, sizeof *t);
++    const char* mb = getenv("SPU_TRACE_MB");
++    t->f = f;
++    t->limit = (uint64_t)(mb && atoi(mb) > 0 ? atoi(mb) : 512) << 20;
++    const uint32_t h[5] = { (uint32_t)ctx->image_id, ctx->pc & SPU_LS_MASK, 0, 0, 0 };
++    fwrite("SPUTRC01", 8, 1, f);
++    fwrite(h, sizeof h - 4, 1, f);   /* image, entry pc, 0, 0 */
++    fwrite(ctx->gpr, sizeof ctx->gpr, 1, f);
++    fwrite(ctx->ls, 1, 0x40000, f);
++    t->bytes = 8 + 16 + sizeof ctx->gpr + 0x40000;
++    t_trace = t;
++    fprintf(stderr, "[spu-trace] image %d (spu %X) from pc 0x%05X into %s, up to %llu MB\n", ctx->image_id,
++            ctx->spu_id, ctx->pc & SPU_LS_MASK, path, (unsigned long long)(t->limit >> 20));
++}
++
++void spu_trace_thread_end(void)
++{
++    spu_trace_state* t = t_trace;
++    if (!t) return;
++    const uint32_t e[6] = { 5, 2, 0, 0, 0, 0 };
++    fwrite(e, sizeof e, 1, t->f);
++    fclose(t->f);
++    fprintf(stderr, "[spu-trace] the thread ended: %llu MB written\n", (unsigned long long)(t->bytes >> 20));
++    t_trace = NULL;
++    free(t);
++}
++
++/* An MFC command's effect: the local store it filled or sent. */
++static void spu_trace_dma(spu_context* ctx, uint32_t cmd)
++{
++    if (!t_trace) return;
++    const uint32_t lsa = ctx->mfc_lsa & SPU_LS_MASK, ea = ctx->mfc_eal;
++    uint32_t n = ctx->mfc_size;
++    const uint32_t op = cmd & 0xFF;
++    if (op == 0xD0 || op == 0xB4 || op == 0xB0 || op == 0xB8) n = 128;   /* the atomics: a line */
++    else if (op & 0x04) {   /* a list: its elements' sizes, the list at EAL in the local store */
++        n = 0;
++        for (uint32_t i = 0; i + 8 <= ctx->mfc_size && i < 0x4000; i += 8) {
++            const uint8_t* el = ctx->ls + ((ea + i) & SPU_LS_MASK);
++            n += (((uint32_t)el[2] << 8) | el[3]) & 0x7FFF;
++        }
++    }
++    if (lsa + n > 0x40000) n = 0x40000 - lsa;
++    spu_trace_put(3, cmd, lsa, ea, ctx->mfc_size, ctx->ls + lsa, n);
++}
++
+ /* Called after an SPU atomic commits a 128-byte line, with the lock-line lock
+  * released. cellSpurs sets it so a PPU blocked in cellSpursEventFlagWait wakes
+  * when a task sets the flag, instead of on its next 2 ms poll. */
+@@ -230,6 +335,7 @@ static void spu_honour_stop_request(spu_context* ctx);
+ 
+ void spu_stop(spu_context* ctx)
+ {
++    if (t_trace) spu_trace_put(4, ctx->stop_code, ctx->pc & SPU_LS_MASK, 0, 0, NULL, 0);
+     /* A lifted `stop` sets status and RETURNS to its caller -- for a SPURS
+      * policy this is stop-and-signal: it returns up into the kernel/policy
+      * service loop, which continues (i.e. the SPU "resumes" past the stop). That
+@@ -1024,13 +1130,17 @@ void spu_wrch(spu_context* ctx, uint32_t channel, u128 value)
+               for (int i = 0; i < 128; i++) if (w[i])
+                   fprintf(stderr, "   wrch ch%-3d %llu%c", i, w[i], 10); } } }
+     uint32_t v = value._u32[0];  /* channel writes use the preferred slot */
++    if (t_trace) spu_trace_put(2, channel, v, 0, 0, NULL, 0);
+ 
+     if (channel_is_mfc(channel)) {
+         /* Atomic line ops (GETLLAR/PUTLLC/...) need real reservation semantics,
+          * not the plain GET/PUT the DMA engine would do. */
+-        if (channel == MFC_Cmd && spu_mfc_atomic(ctx, v))
++        if (channel == MFC_Cmd && spu_mfc_atomic(ctx, v)) {
++            spu_trace_dma(ctx, v);
+             return;
++        }
+         mfc_channel_write(mfc_for(ctx), ctx, channel, v);
++        if (channel == MFC_Cmd) spu_trace_dma(ctx, v);
+         /* MFC tag-status-update EVENT producer (channel-stall milestone). Our
+          * DMA completes synchronously, so the instant the program arms tag
+          * notification (MFC_WrTagUpdate with a non-zero mode = any/all), the
+@@ -1312,6 +1422,7 @@ u128 spu_rdch(spu_context* ctx, uint32_t channel)
+ 
+     if (channel_is_mfc(channel)) {
+         v = mfc_channel_read(mfc_for(ctx), ctx, channel);
++        if (t_trace) spu_trace_put(1, channel, v, 0, 0, NULL, 0);
+         return spu_make_preferred_u32(v);
+     }
+ 
+@@ -1368,6 +1479,7 @@ u128 spu_rdch(spu_context* ctx, uint32_t channel)
+         v = 0;
+         break;
+     }
++    if (t_trace) spu_trace_put(1, channel, v, 0, 0, NULL, 0);
+     return spu_make_preferred_u32(v);
+ }
+ 
+diff --git a/runtime/spu/spu_lifted_thread.c b/runtime/spu/spu_lifted_thread.c
+index 573ce2a..c11e1a8 100644
+--- a/runtime/spu/spu_lifted_thread.c
++++ b/runtime/spu/spu_lifted_thread.c
+@@ -5,6 +5,10 @@
+ #include "spu_context.h"
+ #include "ps3emu/ps3_tprof.h"   /* PS3_TPROF: in-process thread samples */
+ 
++/* spu_channels.c: SPU_TRACE_IMAGE's channel trace of one thread */
++void spu_trace_thread_begin(spu_context* ctx);
++void spu_trace_thread_end(void);
++
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+@@ -121,7 +125,9 @@ void spu_lifted_thread_run(spu_context* ctx, spu_lifted_thread_result* out)
+     /* The dispatcher resolves ctx->pc in ctx->image_id and runs it; the halt
+      * landing pad catches an SPU that stops from inside a nested call, and
+      * drains the tail-transfer chain when it returns normally. */
++    spu_trace_thread_begin(ctx);   /* SPU_TRACE_IMAGE: a channel trace of this thread (spu_channels.c) */
+     spu_run_with_halt(spu_indirect_branch, ctx);
++    spu_trace_thread_end();
+ 
+     /* What the SPU meant by stopping. The SPU-side sys_spu_thread_exit ABI
+      * writes the status to SPU_WrOutMbox and then executes stop 0x102; lv2 pops
+-- 
+2.56.0.windows.3
+

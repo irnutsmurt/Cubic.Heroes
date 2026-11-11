@@ -141,7 +141,7 @@ cellAudio's ring and notify, the host backend. The downmix is reviewed
 separately: the console's rule for 7.1 to stereo against ours, as a
 behaviour change of its own.
 
-Status: section 1 mapped (2026-11-10). A0: the counters done, the captures not yet (below). A1: ported, checked in the game bit-exact with the clock replayed (rel20), **native by default since
+Status: section 1 mapped (2026-11-10). A0: the counters and the captures done (below). A1: ported, checked in the game bit-exact with the clock replayed (rel20), **native by default since
 rel21** (below); DOTHEROES_NATIVE_FMOD_CODEC=0 keeps the lifted overlay. A2: sfxreverb ported and bit-exact
 in the game (rel22), **native by default since rel23** (DOTHEROES_NATIVE_FMOD_REVERB=0 keeps it lifted).
 
@@ -215,6 +215,30 @@ the speaker mask gets the reflections, its lines' taps and the dry signal. No ti
   door's among them), the quit drive: all passed.
 - **What it retires**: nothing of the runtime yet -- the lifted mixer still loads both plugins as overlays
   and branches to them; the hook answers instead. The overlay mechanism goes with the mixer (A3).
+
+### A0, the captures (2026-11-10, rel24) [C, M]
+
+A channel trace of one SPU thread (ps3recomp spu_channels.c; SPU_TRACE_IMAGE=<runtime image id>,
+SPU_TRACE_FILE, SPU_TRACE_MB; inert unless set): the thread's registers and 256 KB local store as it starts,
+then every channel read with the value it returned, every channel write, every MFC command with the local
+store it filled (a GET, GETLLAR) or sent (a PUT, PUTLLC) -- every DMA here is synchronous -- and every stop.
+It is everything the mixer takes from outside (its block events and mailbox words, the decrementer, the
+memory it reads, the atomics' outcomes) and everything it gives back, so the lifted mixer and a native one
+can be replayed off-line from the start on the game's own inputs and their outputs compared. tools/spu_trace.py
+reads one (and checks its structure).
+
+Two traces of the mixer (image 6), each to its 1,500 MB limit (F:/3d dot game heroes/scratch/a3trace, not in the
+repository):
+
+| Run | Blocks (0x110 receives) | GETs | PUTs | GETLLAR / PUTLLC | Decrementer reads | Mailbox reads |
+|---|---|---|---|---|---|---|
+| the river fight (rel24) | 5,189 | 328,583 (785 MB) | 250,841 (573 MB) | 10,378 / 5,189 | 358,427 | 25,945 |
+| the first dungeon's approach (sfxreverb on) | 5,375 | 331,319 (784 MB) | 253,287 (573 MB) | 10,750 / 5,375 | 362,287 | 26,875 |
+
+A block: one event receive (stop 0x110) and five inbound-mailbox reads, two GETLLAR and one PUTLLC (the
+counters shared with the PPU, section 1.3: one decrement a block, the RdAtomicStat after each), two outbound
+and one interrupt-mailbox write (the reply), about 63 GETs and 48 PUTs, about 70 decrementer reads. The
+mixer's thread runs from its entry (0xF0) in both: the traces replay from the start.
 
 ### A0, the counters (2026-11-10, rel16) [M]
 
