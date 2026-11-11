@@ -55,9 +55,24 @@ Decided by the owner, 2026-11-04:
    execution environment, DMA and mailbox machinery, and PS3-specific
    scheduling.
 5. **No permanent FMOD/SPU exception.** Its migration may come later; the
-   final architecture accounts for it (priority 6).
+   final architecture accounts for it (priority 6). (2026-11-11: FMOD is
+   replaced by OpenAL Soft, not ported; below.)
 6. **Physics:** the existing native physics work is kept. A newer Bullet is
    optional and must justify any behaviour change.
+
+**The architecture requirements (the owner, 2026-11-11)**, which every later decision follows:
+- native Vulkan graphics; **OpenAL Soft** for the game's audio and an **FFmpeg**-based decoder for its video
+  (both open source, dynamically linked, their licence notices shipped);
+- no permanent proprietary-middleware implementation in this project's public source or in anything it
+  distributes: FMOD Ex and Bink are not executed in the final game, and no code translated from them, from the
+  game or from Sony's SDK or firmware is in the repository -- what derives from the game (the lift, the
+  native code generated from the game's SPU programs) is made on the player's machine from the player's own
+  files and keys;
+- no unnecessary PS3 execution machinery in the final architecture;
+- a stable 60 fps with minimal frame-time spikes, and correct behaviour across gameplay, menus, saving,
+  loading and quitting.
+A decision that conflicts with these is flagged to the owner, not made silently. Plans: OPENAL_MIGRATION_PLAN.md
+(audio, then video), LICENSE_AUDIT.md (the repository, file by file).
 
 Working rules: a working baseline at every step (the tagged checkpoint and the
 existing renderer as the reference path); small reviewable commits; every

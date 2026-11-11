@@ -42,9 +42,14 @@ code. The setup checks your disc (SHA-256) before doing anything else.
 
 Nothing from the game ships here: no code, assets, keys or recompiled output.
 The setup reads your disc, verifies it, decrypts the game's program with your
-key, recompiles it and builds the executable on your own machine. Everything
-derived from the game stays on your machine (`build/` in a checkout, or the
-install folder the setup app creates) and must not be redistributed.
+key, recompiles it and builds the executable on your own machine -- including
+the native versions of the game's SPU tasks, which are generated from your own
+copy's recompiled code. Everything derived from the game stays on your machine
+(`build/` in a checkout, or the install folder the setup app creates) and must
+not be redistributed. Nor does any proprietary middleware's code ship here: the
+game's audio middleware and video codec run only as part of your own
+recompiled game, and are being replaced by open-source libraries (OpenAL Soft
+for audio, FFmpeg for video: `docs/OPENAL_MIGRATION_PLAN.md`).
 
 ## 1. Dump your disc
 
@@ -173,3 +178,6 @@ Third-party components keep their own licences:
 | [Vulkan-Headers](https://github.com/KhronosGroup/Vulkan-Headers) | Apache-2.0 / MIT | building the renderer |
 | [Zig](https://ziglang.org) | MIT | the setup app's bundled compiler |
 | [pycryptodome](https://www.pycryptodome.org) | BSD-2-Clause / public domain | decrypting the game's program |
+| [Bullet Physics](https://github.com/bulletphysics/bullet3) 2.74 | zlib | the physics tasks' native code: its narrowphase compiled from its source (fetched by `tools/build_deps.py`); `port/native/bullet_cd.cpp` and `bullet_solver.cpp` are altered versions of its algorithms and carry its notice |
+| [DejaVu Sans](https://dejavu-fonts.github.io) (`port/assets/ui/`) | Bitstream Vera / DejaVu font licence (`LICENSE-DejaVuSans.txt`) | the save-data screen's text |
+| [Kenney input prompts](https://kenney.nl) (`port/assets/ui/`) | CC0 (`LICENSE-Kenney.txt`) | the save-data screen's button prompts |

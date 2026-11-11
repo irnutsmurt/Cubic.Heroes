@@ -1,0 +1,472 @@
+# Repository licensing audit (2026-11-11, after M1)
+
+Every tracked file of the repository with its origin class and what is done with it, as tools/license_audit.py
+classifies it (its header has the rules; docs/OPENAL_MIGRATION_PLAN.md section 5 the findings and the history).
+Classes: BULLET an altered version of Bullet 2.74's algorithms, or code written against Bullet's sources
+(zlib licence, its notice in the altered files); THIRD third-party assets or text kept with their licence files;
+SPUGEN the independently written generation of native code from the player's own lift (the generator, its
+template, its per-image configuration: where an image's code is, no implementation) -- the generated code exists
+only on the player's machine; DOC-GAME documentation of the game's behaviour and of the project's results
+(facts, no code); INDEP this project's own code, configuration, tests and documentation.
+
+Not tracked any more (M1): the FMOD-derived implementation, its glue, generators, templates and checkers (19
+files; the tool fails if one is tracked again), and the hand transcriptions of the game's water and waver tasks
+(replaced by the generation; water_task.cpp and waver_task.cpp are the host around it). Checked: no keys,
+firmware, game data, assets, shader binaries or embedded binaries in any tracked file. Earlier commits still
+hold the removed files: docs/OPENAL_MIGRATION_PLAN.md section 5, "History".
+
+451 files: BULLET 8, DOC-GAME 12, INDEP 416, SPUGEN 7, THIRD 8.
+
+| File | Class | Action |
+|---|---|---|
+| `.gitattributes` | INDEP | keep |
+| `.gitignore` | INDEP | keep |
+| `CLAUDE.md` | INDEP | keep |
+| `LICENSE` | INDEP | keep |
+| `README.md` | INDEP | keep |
+| `assets/icon.png` | INDEP | keep |
+| `config/audio_hooks.json` | INDEP | keep |
+| `config/deps.sha256` | INDEP | keep |
+| `config/dev_capture_observers.json` | INDEP | keep |
+| `config/game_version.json` | INDEP | keep |
+| `config/insn_patches.json` | INDEP | keep |
+| `config/r6_native_observers.json` | INDEP | keep |
+| `config/r7_native_hooks.json` | INDEP | keep |
+| `config/r8_hooks.json` | INDEP | keep |
+| `config/r8_promote.json` | INDEP | keep |
+| `config/sjlj.json` | INDEP | keep |
+| `config/spu_entry_hooks.json` | INDEP | keep |
+| `config/spu_relocatable.json` | INDEP | keep |
+| `docs/AUDIO.md` | INDEP | keep |
+| `docs/BULLET_NATIVE.md` | DOC-GAME | keep: facts about the game's behaviour and the project's results |
+| `docs/FEASIBILITY.md` | INDEP | keep |
+| `docs/HANDOFF.md` | INDEP | keep |
+| `docs/LICENSE_AUDIT.md` | INDEP | keep |
+| `docs/MILESTONES.md` | INDEP | keep |
+| `docs/NATIVE_EVIDENCE.md` | DOC-GAME | keep: facts about the game's behaviour and the project's results |
+| `docs/NATIVE_PORT.md` | INDEP | keep |
+| `docs/NATIVE_R1.md` | DOC-GAME | keep: facts about the game's behaviour and the project's results |
+| `docs/NATIVE_R2.md` | DOC-GAME | keep: facts about the game's behaviour and the project's results |
+| `docs/NATIVE_R3.md` | DOC-GAME | keep: facts about the game's behaviour and the project's results |
+| `docs/NATIVE_R3B.md` | DOC-GAME | keep: facts about the game's behaviour and the project's results |
+| `docs/NATIVE_R4.md` | DOC-GAME | keep: facts about the game's behaviour and the project's results |
+| `docs/NATIVE_R5.md` | DOC-GAME | keep: facts about the game's behaviour and the project's results |
+| `docs/NATIVE_R6.md` | DOC-GAME | keep: facts about the game's behaviour and the project's results |
+| `docs/NATIVE_R7.md` | DOC-GAME | keep: facts about the game's behaviour and the project's results |
+| `docs/NATIVE_R8.md` | DOC-GAME | keep: facts about the game's behaviour and the project's results |
+| `docs/OPENAL_MIGRATION_PLAN.md` | INDEP | keep |
+| `docs/PC_EXPERIENCE.md` | INDEP | keep |
+| `docs/SAVE_UI.md` | INDEP | keep |
+| `docs/SETUP.md` | INDEP | keep |
+| `docs/SHADER_PREPARATION.md` | INDEP | keep |
+| `docs/SPU_NON_AUDIO.md` | DOC-GAME | keep: facts about the game's behaviour and the project's results |
+| `patches/ps3recomp/0001-Add-strict-mode-PS3_STRICT-make-silent-fallbacks-fat.patch` | INDEP | keep |
+| `patches/ps3recomp/0002-ppu_hle-store-the-caller-TOC-slot-on-the-fast-path-a.patch` | INDEP | keep |
+| `patches/ps3recomp/0003-ps3_stdio-chain-SIGABRT-with-sigaction-on-POSIX.patch` | INDEP | keep |
+| `patches/ps3recomp/0004-cellGame-implement-cellGamePatchCheck.patch` | INDEP | keep |
+| `patches/ps3recomp/0005-ppu_lifter-sjlj-guest-setjmp-longjmp-in-lifted-code.patch` | INDEP | keep |
+| `patches/ps3recomp/0006-Give-the-main-thread-its-sys_process_param-priority.patch` | INDEP | keep |
+| `patches/ps3recomp/0007-sysPrxForUser-_sys_spu_printf_initialize-_finalize.patch` | INDEP | keep |
+| `patches/ps3recomp/0008-ppu_sjlj-PS3_SJLJ_LOG-n-logs-the-first-n-guest-longj.patch` | INDEP | keep |
+| `patches/ps3recomp/0009-cellSpurs-decode-the-task-save-config-task-exit-code.patch` | INDEP | keep |
+| `patches/ps3recomp/0010-cellGcmSys-cellGcmSetFlipStatus-takes-no-argument.patch` | INDEP | keep |
+| `patches/ps3recomp/0011-ppu_fs-PS3_FS_FAIL_ABORT-substring-makes-a-failed-op.patch` | INDEP | keep |
+| `patches/ps3recomp/0012-lv2-SPU-thread-receive-event-service-and-sys_spu_thr.patch` | INDEP | keep |
+| `patches/ps3recomp/0013-cellSaveData-cellSaveDataEnableOverlay-NID-0xE7FA820.patch` | INDEP | keep |
+| `patches/ps3recomp/0014-sys_fs-follow-the-cellFs-root-when-PS3_VFS_ROOT-is-u.patch` | INDEP | keep |
+| `patches/ps3recomp/0015-spu_helpers-an-executed-untranslated-SPU-instruction.patch` | INDEP | keep |
+| `patches/ps3recomp/0016-SPU-relocatable-overlays-spu_lifter-relocatable.patch` | INDEP | keep |
+| `patches/ps3recomp/0017-cellGcmSys-GCM_BADBRANCH_REREAD-1-re-reads-a-bad-FIF.patch` | INDEP | keep |
+| `patches/ps3recomp/0018-cellGcmSys-report-areas-in-guest-memory-main-reports.patch` | INDEP | keep |
+| `patches/ps3recomp/0019-cellPad-keyboard-fallback-off-Windows-SDL-keyboard-s.patch` | INDEP | keep |
+| `patches/ps3recomp/0020-cellSpurs-CellSyncLFQueue-push-for-SPURS-LF-queues.patch` | INDEP | keep |
+| `patches/ps3recomp/0021-cellSpurs-CellSpursQueue-as-the-SPU-library-lays-it-.patch` | INDEP | keep |
+| `patches/ps3recomp/0022-find_spu_functions-single-code-pointers-in-data-segm.patch` | INDEP | keep |
+| `patches/ps3recomp/0023-cellSpurs-raw-stores-while-holding-the-lock-line-loc.patch` | INDEP | keep |
+| `patches/ps3recomp/0024-cellAudio-pace-the-POSIX-mixing-thread-like-the-Wind.patch` | INDEP | keep |
+| `patches/ps3recomp/0025-sys_timer_usleep-resume-a-sleep-a-host-signal-interr.patch` | INDEP | keep |
+| `patches/ps3recomp/0026-rsx_vertex_remap_build-range-fast-path-for-contiguou.patch` | INDEP | keep |
+| `patches/ps3recomp/0027-draw-engine-scratch-colour-target-for-work-that-writ.patch` | INDEP | keep |
+| `patches/ps3recomp/0028-Vulkan-keep-render-passes-open-across-draws-double-b.patch` | INDEP | keep |
+| `patches/ps3recomp/0029-rsx_vertex_compact-branchless-half-float-and-bswap-f.patch` | INDEP | keep |
+| `patches/ps3recomp/0030-Vulkan-whole-frame-batches-deferred-view-destruction.patch` | INDEP | keep |
+| `patches/ps3recomp/0031-rsx_vertex_fetch_many-cache-sized-chunks-SSE2-half-f.patch` | INDEP | keep |
+| `patches/ps3recomp/0032-Draw-engine-cross-draw-vertex-cache.patch` | INDEP | keep |
+| `patches/ps3recomp/0033-cellPad-PAD_FILE-an-optional-third-field-holds-a-pre.patch` | INDEP | keep |
+| `patches/ps3recomp/0034-cellGcmGetVBlankCount-return-the-ticked-count-not-on.patch` | INDEP | keep |
+| `patches/ps3recomp/0035-Windows-MinGW-clang-Zig-build-of-the-Vulkan-backend.patch` | INDEP | keep |
+| `patches/ps3recomp/0036-ppu_lifter-write-chunks-as-UTF-8-with-LF-on-every-ho.patch` | INDEP | keep |
+| `patches/ps3recomp/0037-rsx_live_draw-the-no-op-in-Windows-builds-with-the-V.patch` | INDEP | keep |
+| `patches/ps3recomp/0038-Vulkan-honour-the-guest-s-polygon-offset-set_depth_b.patch` | INDEP | keep |
+| `patches/ps3recomp/0039-Vulkan-PS3_FTRACE-spans-sampler-registers-in-the-pas.patch` | INDEP | keep |
+| `patches/ps3recomp/0040-Resident-geometry-static-draws-stay-in-GPU-memory-vm.patch` | INDEP | keep |
+| `patches/ps3recomp/0041-Resident-geometry-admit-on-the-second-sighting-evict.patch` | INDEP | keep |
+| `patches/ps3recomp/0042-cellGcmSys-GCM_FLIP_RING-flip-and-walker-event-recor.patch` | INDEP | keep |
+| `patches/ps3recomp/0043-cellGcmSys-a-wrapped-ring-ends-at-the-walker-until-i.patch` | INDEP | keep |
+| `patches/ps3recomp/0044-cellPad-SDL-s-own-joystick-thread-on-Windows.patch` | INDEP | keep |
+| `patches/ps3recomp/0045-spu_workload-async-SPU-tasks-on-kept-worker-threads.patch` | INDEP | keep |
+| `patches/ps3recomp/0046-cellGcmSys-no-emergency-recycle-of-a-ring-the-runtim.patch` | INDEP | keep |
+| `patches/ps3recomp/0047-cellGcmSys-NV308A-inline-transfer-COLOR-runs-to-0x1F.patch` | INDEP | keep |
+| `patches/ps3recomp/0048-cellGcmSys-the-mirrored-draw-engines-get-3D-methods-.patch` | INDEP | keep |
+| `patches/ps3recomp/0049-Draw-engine-Vulkan-the-constant-blend-colour.patch` | INDEP | keep |
+| `patches/ps3recomp/0050-Draw-engine-diagnostics-dropped-draws-fallback-progr.patch` | INDEP | keep |
+| `patches/ps3recomp/0051-spu_workload-async-SPU-task-runs-in-the-PS3_FTRACE-t.patch` | INDEP | keep |
+| `patches/ps3recomp/0052-spu_channels-the-MFC-lookup-cache-on-by-default.patch` | INDEP | keep |
+| `patches/ps3recomp/0053-Saving-says-so-on-screen-a-host-message-over-the-pic.patch` | INDEP | keep |
+| `patches/ps3recomp/0054-cellSpurs-SPURS_SNAP-guest-memory-around-a-task-pair.patch` | INDEP | keep |
+| `patches/ps3recomp/0055-Vulkan-GPU-time-draws-and-render-passes-in-the-frame.patch` | INDEP | keep |
+| `patches/ps3recomp/0056-cellSpurs-a-PPU-s-wait-on-SPURS-queue-entries-in-the.patch` | INDEP | keep |
+| `patches/ps3recomp/0057-SPU-tasks-native-replacements-by-lifted-image.patch` | INDEP | keep |
+| `patches/ps3recomp/0058-RSX-walker-in-the-frame-trace-GPU-waits-named-by-the.patch` | INDEP | keep |
+| `patches/ps3recomp/0059-cellGcm-the-draw-engine-no-longer-sends-every-FIFO-w.patch` | INDEP | keep |
+| `patches/ps3recomp/0060-Draw-engine-RSX_SURFACE_TRACE-what-a-title-does-with.patch` | INDEP | keep |
+| `patches/ps3recomp/0061-Draw-engine-colour-target-NONE-writes-no-colour-keep.patch` | INDEP | keep |
+| `patches/ps3recomp/0062-Frame-trace-PS3_FT_PHYS_LOAD-a-physics-work-unit-s-s.patch` | INDEP | keep |
+| `patches/ps3recomp/0063-Frame-trace-PS3_FT_PHYS_CMD-a-physics-task-s-command.patch` | INDEP | keep |
+| `patches/ps3recomp/0064-SPURS-tasks-no-per-task-log-line-or-environment-look.patch` | INDEP | keep |
+| `patches/ps3recomp/0065-Frame-trace-PS3_FT_RING_WAIT-the-title-waiting-for-r.patch` | INDEP | keep |
+| `patches/ps3recomp/0066-cellGcmSys-test-aids-for-the-command-ring.patch` | INDEP | keep |
+| `patches/ps3recomp/0067-cellGcmSys-GCM_WRAP_LAP-1-the-buffer-full-wrap-into-.patch` | INDEP | keep |
+| `patches/ps3recomp/0068-SPURS-a-task-creation-hook-for-a-port-and-the-snapsh.patch` | INDEP | keep |
+| `patches/ps3recomp/0069-Testing-aids-a-frame-rate-readout-and-trace-records-.patch` | INDEP | keep |
+| `patches/ps3recomp/0070-Frame-log-for-timing-runs-trace-kinds-for-first-use-.patch` | INDEP | keep |
+| `patches/ps3recomp/0071-PPU-an-indirect-call-s-fast-path-and-the-function-ta.patch` | INDEP | keep |
+| `patches/ps3recomp/0072-cellFs-cellFsReadWithOffset-and-cellFsWriteWithOffse.patch` | INDEP | keep |
+| `patches/ps3recomp/0073-cellSysutil-cellSysCacheMount-creates-every-missing-.patch` | INDEP | keep |
+| `patches/ps3recomp/0074-Photo-utilities-cellPhotoExport-cellPhotoImport-cell.patch` | INDEP | keep |
+| `patches/ps3recomp/0075-cellJpgEnc-the-SDK-s-encoder-and-rendered-pixels-wri.patch` | INDEP | keep |
+| `patches/ps3recomp/0076-cellPngEnc-the-SDK-s-encoder.patch` | INDEP | keep |
+| `patches/ps3recomp/0077-ppu_lifter-entry-hooks-in-the-insn-patches-file.patch` | INDEP | keep |
+| `patches/ps3recomp/0078-cellGame-host-paths-no-longer-cut-at-the-guest-s-128.patch` | INDEP | keep |
+| `patches/ps3recomp/0079-ps3_ftrace-rolling-hitch-captures-the-frame-log-hold.patch` | INDEP | keep |
+| `patches/ps3recomp/0080-draw-engine-only-rebuilds-close-together-make-geomet.patch` | INDEP | keep |
+| `patches/ps3recomp/0081-Vulkan-backend-resident-geometry-in-a-buddy-allocato.patch` | INDEP | keep |
+| `patches/ps3recomp/0082-Vulkan-backend-overlay-buffers-replaced-without-flus.patch` | INDEP | keep |
+| `patches/ps3recomp/0083-draw-engine-only-rebuilds-in-close-succession-make-g.patch` | INDEP | keep |
+| `patches/ps3recomp/0084-vm_watch-hot-pages-by-rate-not-for-life-the-fault-ch.patch` | INDEP | keep |
+| `patches/ps3recomp/0085-ps3_ftrace-a-tester-s-marks-captured-from-a-budget-o.patch` | INDEP | keep |
+| `patches/ps3recomp/0086-spu_lifter-entry-hooks-the-port-s-native-code-in-pla.patch` | INDEP | keep |
+| `patches/ps3recomp/0087-cellSpurs-a-finalized-instance-s-parked-tasks-end.patch` | INDEP | keep |
+| `patches/ps3recomp/0088-Vulkan-backend-a-census-of-device-objects-with-the-g.patch` | INDEP | keep |
+| `patches/ps3recomp/0089-Vulkan-backend-a-new-image-s-first-barrier-and-clear.patch` | INDEP | keep |
+| `patches/ps3recomp/0090-Vulkan-backend-translated-shaders-and-built-pipeline.patch` | INDEP | keep |
+| `patches/ps3recomp/0091-SPIR-V-cache-a-checksum-per-file-a-pipeline-the-driv.patch` | INDEP | keep |
+| `patches/ps3recomp/0092-PPU-stores-the-inline-path-no-longer-tests-the-diagn.patch` | INDEP | keep |
+| `patches/ps3recomp/0093-Frame-trace-kind-26-whether-the-thread-asking-for-fl.patch` | INDEP | keep |
+| `patches/ps3recomp/0094-PPU-loads-the-poll-word-test-as-its-own-branch.patch` | INDEP | keep |
+| `patches/ps3recomp/0095-PPU-float-ops-the-result-s-NaN-test-first.patch` | INDEP | keep |
+| `patches/ps3recomp/0096-PPU-memory-model-published-once-before-the-guest-s-e.patch` | INDEP | keep |
+| `patches/ps3recomp/0097-Vulkan-VK_GPU_PASSES-a-timestamp-around-every-render.patch` | INDEP | keep |
+| `patches/ps3recomp/0098-Evidence-counters-who-writes-what-the-RSX-reads-who-.patch` | INDEP | keep |
+| `patches/ps3recomp/0099-Release-paths-reported-when-they-run-the-SPU-microst.patch` | INDEP | keep |
+| `patches/ps3recomp/0100-Built-in-shader-programs-line-the-counter-read-once-.patch` | INDEP | keep |
+| `patches/ps3recomp/0101-Lifter-entry-observers-a-call-into-the-port-at-a-fun.patch` | INDEP | keep |
+| `patches/ps3recomp/0102-Vulkan-backend-a-pipeline-variant-s-create-info-fill.patch` | INDEP | keep |
+| `patches/ps3recomp/0103-Draw-engine-a-guest-program-pair-s-HLSL-made-in-one-.patch` | INDEP | keep |
+| `patches/ps3recomp/0104-R1-s-consumption-capture-a-named-draw-s-inputs-state.patch` | INDEP | keep |
+| `patches/ps3recomp/0105-R2-s-chain-capture-every-draw-of-a-chain-frame-after.patch` | INDEP | keep |
+| `patches/ps3recomp/0106-R2-s-chain-inventory-and-capture-batches-every-frame.patch` | INDEP | keep |
+| `patches/ps3recomp/0107-R2-s-chain-inventory-lists-up-to-1024-draws-a-frame-.patch` | INDEP | keep |
+| `patches/ps3recomp/0108-R3-s-bridge-engine-hooks-a-second-queue-copies-and-s.patch` | INDEP | keep |
+| `patches/ps3recomp/0109-R3-s-bridge-one-signal-per-command-buffer-by-ordinal.patch` | INDEP | keep |
+| `patches/ps3recomp/0110-Frame-trace-a-state-trigger-arm-frames-path-rsx_fram.patch` | INDEP | keep |
+| `patches/ps3recomp/0111-SPU-image-3-probe-off-unless-SPU_IMAGE3_PROBE-or-LBP.patch` | INDEP | keep |
+| `patches/ps3recomp/0112-Entry-observers-may-replace-or-follow-a-call-ppu_ent.patch` | INDEP | keep |
+| `patches/ps3recomp/0113-R4-s-bridge-stream-marker-and-surface-touch-hooks-th.patch` | INDEP | keep |
+| `patches/ps3recomp/0114-R6-s-engine-hooks-a-native-present-the-flip-gate-a-b.patch` | INDEP | keep |
+| `patches/ps3recomp/0115-Entry-observers-store_probes-false-for-a-lean-lift.patch` | INDEP | keep |
+| `patches/ps3recomp/0116-R7-a-native-front-end-and-a-build-without-the-RSX-co.patch` | INDEP | keep |
+| `patches/ps3recomp/0117-PAD_FILE-a-hold-for-wall-time-on-the-trace-s-clock-e.patch` | INDEP | keep |
+| `patches/ps3recomp/0118-Lifter-indirect-calls-cached-at-their-call-sites-bar.patch` | INDEP | keep |
+| `patches/ps3recomp/0119-A-build-without-the-SPU-interpreter-or-the-microstep.patch` | INDEP | keep |
+| `patches/ps3recomp/0120-Lifter-bare-loads-defined-and-gated-the-stores-varia.patch` | INDEP | keep |
+| `patches/ps3recomp/0121-The-raw-stores-keep-SPU-reservations-vector-byte-rev.patch` | INDEP | keep |
+| `patches/ps3recomp/0122-stvx-one-reservation-test-through-the-function-s-sna.patch` | INDEP | keep |
+| `patches/ps3recomp/0123-Lifter-promote-leaf-guest-registers-in-locals-in-fun.patch` | INDEP | keep |
+| `patches/ps3recomp/0124-Vulkan-without-the-command-path-the-native-renderer-.patch` | INDEP | keep |
+| `patches/ps3recomp/0125-Stores-a-misaligned-store-tells-both-lines-raw-store.patch` | INDEP | keep |
+| `patches/ps3recomp/0126-Event-queues-and-flags-locks-that-outlive-a-destroy-.patch` | INDEP | keep |
+| `patches/ps3recomp/0127-Save-data-PS3_SAVEDATA_SECURE_ID_LOG-names-the-secur.patch` | INDEP | keep |
+| `patches/ps3recomp/0128-Fragment-programs-a-result-s-precision-clamps-it-as-.patch` | INDEP | keep |
+| `patches/ps3recomp/0129-Vulkan-depthClamp-and-samplerAnisotropy-enabled-when.patch` | INDEP | keep |
+| `patches/ps3recomp/0130-Fragment-programs-the-sources-precision-modifiers-as.patch` | INDEP | keep |
+| `patches/ps3recomp/0131-cellSaveData-the-system-s-save-data-list-on-load-and.patch` | INDEP | keep |
+| `patches/ps3recomp/0132-SPU-workloads-a-census-of-the-programs-started-by-im.patch` | INDEP | keep |
+| `patches/ps3recomp/0133-Stores-a-misaligned-store-into-a-reserved-line-caugh.patch` | INDEP | keep |
+| `patches/ps3recomp/0134-Lifter-promote-calls-registers-in-locals-across-call.patch` | INDEP | keep |
+| `patches/ps3recomp/0135-SPU-threads-receive-event-counts-and-times-overlay-l.patch` | INDEP | keep |
+| `patches/ps3recomp/0136-SPU-overlays-a-native-replacement-for-a-relocatable-.patch` | INDEP | keep |
+| `patches/ps3recomp/0137-SPU-thread-groups-terminate-stops-the-threads-destro.patch` | INDEP | keep |
+| `patches/ps3recomp/0138-SPU-decrementer-a-per-thread-log-of-the-values-read.patch` | INDEP | keep |
+| `patches/ps3recomp/0139-Save-data-dialog-a-full-screen-picture-and-it-presen.patch` | INDEP | keep |
+| `patches/ps3recomp/0140-SPU-channel-trace-of-one-thread-SPU_TRACE_IMAGE.patch` | INDEP | keep |
+| `patches/ps3recomp/0141-SPU-trace-the-DMA-size-clamp-no-longer-wraps.patch` | INDEP | keep |
+| `patches/ps3recomp/0142-SPU-threads-a-native-program-in-place-of-the-lifted-.patch` | INDEP | keep |
+| `port/CMakeLists.txt` | INDEP | keep |
+| `port/LICENSE.ps3recomp` | THIRD | keep: licence file beside it; listed in the README |
+| `port/assets/ui/DejaVuSans.ttf` | THIRD | keep: licence file beside it; listed in the README |
+| `port/assets/ui/LICENSE-DejaVuSans.txt` | THIRD | keep: licence file beside it; listed in the README |
+| `port/assets/ui/LICENSE-Kenney.txt` | THIRD | keep: licence file beside it; listed in the README |
+| `port/assets/ui/prompt_switch_back.png` | THIRD | keep: licence file beside it; listed in the README |
+| `port/assets/ui/prompt_switch_confirm.png` | THIRD | keep: licence file beside it; listed in the README |
+| `port/assets/ui/prompt_xbox_back.png` | THIRD | keep: licence file beside it; listed in the README |
+| `port/assets/ui/prompt_xbox_confirm.png` | THIRD | keep: licence file beside it; listed in the README |
+| `port/audio_hook_table.inc` | INDEP | keep |
+| `port/audio_hooks.cpp` | INDEP | keep |
+| `port/cmake/embed_files.cmake` | INDEP | keep |
+| `port/cpu_place.cpp` | INDEP | keep |
+| `port/diag/diag.cpp` | INDEP | keep |
+| `port/diag/diag.h` | INDEP | keep |
+| `port/game_patches.cpp` | INDEP | keep |
+| `port/main.cpp` | INDEP | keep |
+| `port/native/bt_host_alloc.cpp` | INDEP | keep |
+| `port/native/bullet_cd.cpp` | BULLET | keep: Bullet's zlib notice in the altered files (bullet_cd.cpp, bullet_solver.cpp); listed in the README |
+| `port/native/bullet_cd.h` | BULLET | keep: Bullet's zlib notice in the altered files (bullet_cd.cpp, bullet_solver.cpp); listed in the README |
+| `port/native/bullet_cd_task.cpp` | BULLET | keep: Bullet's zlib notice in the altered files (bullet_cd.cpp, bullet_solver.cpp); listed in the README |
+| `port/native/bullet_cd_task.h` | BULLET | keep: Bullet's zlib notice in the altered files (bullet_cd.cpp, bullet_solver.cpp); listed in the README |
+| `port/native/bullet_solver.cpp` | BULLET | keep: Bullet's zlib notice in the altered files (bullet_cd.cpp, bullet_solver.cpp); listed in the README |
+| `port/native/bullet_solver.h` | BULLET | keep: Bullet's zlib notice in the altered files (bullet_cd.cpp, bullet_solver.cpp); listed in the README |
+| `port/native/bullet_solver_task.cpp` | BULLET | keep: Bullet's zlib notice in the altered files (bullet_cd.cpp, bullet_solver.cpp); listed in the README |
+| `port/native/bullet_solver_task.h` | BULLET | keep: Bullet's zlib notice in the altered files (bullet_cd.cpp, bullet_solver.cpp); listed in the README |
+| `port/native/dev_state.cpp` | INDEP | keep |
+| `port/native/dev_state.h` | INDEP | keep |
+| `port/native/edge_inflate.c` | INDEP | keep |
+| `port/native/inflate.c` | INDEP | keep |
+| `port/native/inflate.h` | INDEP | keep |
+| `port/native/inflate_direct.cpp` | INDEP | keep |
+| `port/native/inflate_direct.h` | INDEP | keep |
+| `port/native/memtest.cpp` | INDEP | keep |
+| `port/native/memtest.h` | INDEP | keep |
+| `port/native/memtest_bare.cpp` | INDEP | keep |
+| `port/native/memtest_checked.cpp` | INDEP | keep |
+| `port/native/memtest_stores.cpp` | INDEP | keep |
+| `port/native/phys_direct.cpp` | INDEP | keep |
+| `port/native/phys_direct.h` | INDEP | keep |
+| `port/native/render/ppfx_bridge.cpp` | INDEP | keep |
+| `port/native/render/ppfx_native.h` | INDEP | keep |
+| `port/native/render/ppfx_recorder.cpp` | INDEP | keep |
+| `port/native/render/ppfx_render.cpp` | INDEP | keep |
+| `port/native/render/ppfx_watch.cpp` | INDEP | keep |
+| `port/native/render/r1_json.c` | INDEP | keep |
+| `port/native/render/r1_json.h` | INDEP | keep |
+| `port/native/render/r1_observe.cpp` | INDEP | keep |
+| `port/native/render/r1_replay.c` | INDEP | keep |
+| `port/native/spu_native.cpp` | SPUGEN | keep: generates the water's and the waver's tasks from the player's lift; nothing of an image in it |
+| `port/native/spu_native.h` | SPUGEN | keep: generates the water's and the waver's tasks from the player's lift; nothing of an image in it |
+| `port/native/spu_native_absent.cpp` | SPUGEN | keep: generates the water's and the waver's tasks from the player's lift; nothing of an image in it |
+| `port/native/water_task.cpp` | INDEP | keep |
+| `port/native/water_task.h` | INDEP | keep |
+| `port/native/waver_game.cpp` | INDEP | keep |
+| `port/native/waver_game.h` | INDEP | keep |
+| `port/native/waver_task.cpp` | INDEP | keep |
+| `port/native/waver_task.h` | INDEP | keep |
+| `port/phys_hooks.cpp` | INDEP | keep |
+| `port/promo_check.cpp` | INDEP | keep |
+| `port/stubs.cpp` | INDEP | keep |
+| `port/ui_assets.cpp` | INDEP | keep |
+| `port/win/dotheroes.manifest` | INDEP | keep |
+| `setup_app.py` | INDEP | keep |
+| `tests/actor_steps.py` | INDEP | keep |
+| `tests/batch_report.py` | INDEP | keep |
+| `tests/boot_smoke.py` | INDEP | keep |
+| `tests/boot_smoke.sh` | INDEP | keep |
+| `tests/boss_timing.py` | INDEP | keep |
+| `tests/contact_sheet.py` | INDEP | keep |
+| `tests/drive.py` | INDEP | keep |
+| `tests/fight_bench.py` | INDEP | keep |
+| `tests/fps_check.py` | INDEP | keep |
+| `tests/fps_fields.py` | INDEP | keep |
+| `tests/frame_costs.py` | INDEP | keep |
+| `tests/frame_log.py` | INDEP | keep |
+| `tests/frame_times.py` | INDEP | keep |
+| `tests/geom_newkeys.py` | INDEP | keep |
+| `tests/inflate_frames.py` | INDEP | keep |
+| `tests/keep_baseline.py` | INDEP | keep |
+| `tests/lap_ab.py` | INDEP | keep |
+| `tests/native/bullet_cd_snapcheck.cpp` | INDEP | keep |
+| `tests/native/bullet_solver_snapcheck.cpp` | INDEP | keep |
+| `tests/native/find_state.cpp` | INDEP | keep |
+| `tests/native/inflate_check.py` | INDEP | keep |
+| `tests/native/inflate_test.c` | INDEP | keep |
+| `tests/native/run_gcm_tests.sh` | INDEP | keep |
+| `tests/native/store_paths.py` | INDEP | keep |
+| `tests/native/store_paths_test.cpp` | INDEP | keep |
+| `tests/native/water_task_check.cpp` | INDEP | keep |
+| `tests/native/waver_task_check.cpp` | INDEP | keep |
+| `tests/nsys_capture.py` | INDEP | keep |
+| `tests/owned_dummy.py` | INDEP | keep |
+| `tests/peek.py` | INDEP | keep |
+| `tests/phys_breakdown.py` | INDEP | keep |
+| `tests/phys_frames.py` | INDEP | keep |
+| `tests/player_install_test.py` | INDEP | keep |
+| `tests/prof_report.py` | INDEP | keep |
+| `tests/ring_wait.py` | INDEP | keep |
+| `tests/route_from_record.py` | INDEP | keep |
+| `tests/rpcs3_capture.py` | INDEP | keep |
+| `tests/rpcs3_reference.json` | INDEP | keep |
+| `tests/rpcs3_reference.py` | INDEP | keep |
+| `tests/run_batch.py` | INDEP | keep |
+| `tests/scenarios/OWNER_PLAY.md` | INDEP | keep |
+| `tests/scenarios/README.md` | INDEP | keep |
+| `tests/scenarios/attract.drive` | INDEP | keep |
+| `tests/scenarios/common.drive` | INDEP | keep |
+| `tests/scenarios/dungeon1_approach.drive` | INDEP | keep |
+| `tests/scenarios/dungeon1_boss.drive` | INDEP | keep |
+| `tests/scenarios/dungeon1_deeper.drive` | INDEP | keep |
+| `tests/scenarios/dungeon1_east.drive` | INDEP | keep |
+| `tests/scenarios/dungeon1_exit.drive` | INDEP | keep |
+| `tests/scenarios/dungeon1_exit_after_boss.drive` | INDEP | keep |
+| `tests/scenarios/dungeon1_persist.drive` | INDEP | keep |
+| `tests/scenarios/dungeon1_room2.drive` | INDEP | keep |
+| `tests/scenarios/dungeon1_route.drive` | INDEP | keep |
+| `tests/scenarios/dungeon1_save_continue.drive` | INDEP | keep |
+| `tests/scenarios/editor_r3.drive` | INDEP | keep |
+| `tests/scenarios/field14_building.drive` | INDEP | keep |
+| `tests/scenarios/field14_route.drive` | INDEP | keep |
+| `tests/scenarios/field_after_dungeon.drive` | INDEP | keep |
+| `tests/scenarios/fields_beyond.drive` | INDEP | keep |
+| `tests/scenarios/installed_continue.drive` | INDEP | keep |
+| `tests/scenarios/installed_save.drive` | INDEP | keep |
+| `tests/scenarios/long_session.drive` | INDEP | keep |
+| `tests/scenarios/menus_r3.drive` | INDEP | keep |
+| `tests/scenarios/owner_boss.drive` | INDEP | keep |
+| `tests/scenarios/owner_boss_r3.drive` | INDEP | keep |
+| `tests/scenarios/owner_boss_r4.drive` | INDEP | keep |
+| `tests/scenarios/owner_onward_r4.drive` | INDEP | keep |
+| `tests/scenarios/owner_play.drive` | INDEP | keep |
+| `tests/scenarios/owner_play_r8.drive` | INDEP | keep |
+| `tests/scenarios/owner_warp_r7.drive` | INDEP | keep |
+| `tests/scenarios/river_fight.drive` | INDEP | keep |
+| `tests/scenarios/river_water.drive` | INDEP | keep |
+| `tests/scenarios/rpcs3ref_corridor.drive` | INDEP | keep |
+| `tests/scenarios/rpcs3ref_dungeon_door.drive` | INDEP | keep |
+| `tests/scenarios/rpcs3ref_editor.drive` | INDEP | keep |
+| `tests/scenarios/rpcs3ref_entry_hall.drive` | INDEP | keep |
+| `tests/scenarios/rpcs3ref_king.drive` | INDEP | keep |
+| `tests/scenarios/save_picker.drive` | INDEP | keep |
+| `tests/scenarios/save_picker_edit.drive` | INDEP | keep |
+| `tests/scenarios/snapshot_r3.drive` | INDEP | keep |
+| `tests/scenarios/sound_lab.drive` | INDEP | keep |
+| `tests/scripts/capture_field.drive` | INDEP | keep |
+| `tests/scripts/continue_where.drive` | INDEP | keep |
+| `tests/scripts/editor_roundtrip_1.drive` | INDEP | keep |
+| `tests/scripts/editor_roundtrip_2.drive` | INDEP | keep |
+| `tests/scripts/editor_save.drive` | INDEP | keep |
+| `tests/scripts/explore.drive` | INDEP | keep |
+| `tests/scripts/explore_castle.drive` | INDEP | keep |
+| `tests/scripts/fight_bench.drive` | INDEP | keep |
+| `tests/scripts/fight_field.drive` | INDEP | keep |
+| `tests/scripts/fight_river.drive` | INDEP | keep |
+| `tests/scripts/find_life.drive` | INDEP | keep |
+| `tests/scripts/find_menu.drive` | INDEP | keep |
+| `tests/scripts/find_position.drive` | INDEP | keep |
+| `tests/scripts/fps_check.drive` | INDEP | keep |
+| `tests/scripts/grass_cut.drive` | INDEP | keep |
+| `tests/scripts/install_data.drive` | INDEP | keep |
+| `tests/scripts/intro.drive` | INDEP | keep |
+| `tests/scripts/load_save.drive` | INDEP | keep |
+| `tests/scripts/make_soak_play.py` | INDEP | keep |
+| `tests/scripts/mark_stress.drive` | INDEP | keep |
+| `tests/scripts/menu_album.drive` | INDEP | keep |
+| `tests/scripts/menu_tour.drive` | INDEP | keep |
+| `tests/scripts/new_game.drive` | INDEP | keep |
+| `tests/scripts/perf_walk.drive` | INDEP | keep |
+| `tests/scripts/roundtrip_1.drive` | INDEP | keep |
+| `tests/scripts/roundtrip_2.drive` | INDEP | keep |
+| `tests/scripts/roundtrip_3.drive` | INDEP | keep |
+| `tests/scripts/save_game.drive` | INDEP | keep |
+| `tests/scripts/save_passes.drive` | INDEP | keep |
+| `tests/scripts/snapshot.drive` | INDEP | keep |
+| `tests/scripts/soak.drive` | INDEP | keep |
+| `tests/scripts/soak_play.drive` | INDEP | keep |
+| `tests/scripts/soak_timing.drive` | INDEP | keep |
+| `tests/scripts/speed.drive` | INDEP | keep |
+| `tests/scripts/speed_save.drive` | INDEP | keep |
+| `tests/scripts/system_menu.drive` | INDEP | keep |
+| `tests/scripts/walk_far.drive` | INDEP | keep |
+| `tests/scripts/watch_walk.drive` | INDEP | keep |
+| `tests/slow_frames.py` | INDEP | keep |
+| `tests/snap_read.py` | INDEP | keep |
+| `tests/snap_regions.py` | INDEP | keep |
+| `tests/solver_ab.py` | INDEP | keep |
+| `tests/solver_bench.py` | INDEP | keep |
+| `tests/solver_breakdown.py` | INDEP | keep |
+| `tests/solver_copyback_layout.py` | INDEP | keep |
+| `tests/solver_iterate_layout.py` | INDEP | keep |
+| `tests/solver_layout.py` | INDEP | keep |
+| `tests/solver_setup_diff.py` | INDEP | keep |
+| `tests/stop_tests.py` | INDEP | keep |
+| `tests/test_owned_run.py` | INDEP | keep |
+| `tests/test_player_pipeline.py` | INDEP | keep |
+| `tests/thread_cpu.sh` | INDEP | keep |
+| `tests/walker_breakdown.py` | INDEP | keep |
+| `tests/workload_variation.py` | INDEP | keep |
+| `tools/audio_mix.py` | INDEP | keep |
+| `tools/audio_trace.py` | INDEP | keep |
+| `tools/build_deps.py` | INDEP | keep |
+| `tools/cmake/glslang_doc_O0.cmake` | INDEP | keep |
+| `tools/edit_import.py` | INDEP | keep |
+| `tools/fix_functions.py` | INDEP | keep |
+| `tools/gen_spu_native.py` | SPUGEN | keep: generates the water's and the waver's tasks from the player's lift; nothing of an image in it |
+| `tools/githooks/pre-push` | INDEP | keep |
+| `tools/grab_luma.py` | INDEP | keep |
+| `tools/iso9660.py` | INDEP | keep |
+| `tools/license_audit.py` | INDEP | keep |
+| `tools/make_bundle.py` | INDEP | keep |
+| `tools/owned_run.py` | INDEP | keep |
+| `tools/pipeline.py` | INDEP | keep |
+| `tools/push_guard.py` | INDEP | keep |
+| `tools/r1_boundary_check.py` | INDEP | keep |
+| `tools/r1_capture.sh` | INDEP | keep |
+| `tools/r1_check_deps.py` | INDEP | keep |
+| `tools/r1_compare.py` | INDEP | keep |
+| `tools/r1_dev_lift.sh` | INDEP | keep |
+| `tools/r2_boundary_check.py` | INDEP | keep |
+| `tools/r2_capture.sh` | INDEP | keep |
+| `tools/r2_chain.py` | INDEP | keep |
+| `tools/r2_compare.py` | INDEP | keep |
+| `tools/r2_game_chain_time.py` | INDEP | keep |
+| `tools/r2_inventory.py` | INDEP | keep |
+| `tools/r2_inventory.sh` | INDEP | keep |
+| `tools/r2_prune.py` | INDEP | keep |
+| `tools/r3_gt_encodings.py` | INDEP | keep |
+| `tools/r3_reverse_deps.py` | INDEP | keep |
+| `tools/r3_scene.sh` | INDEP | keep |
+| `tools/r4_blocks.py` | INDEP | keep |
+| `tools/r4_callsites.py` | INDEP | keep |
+| `tools/r4_fight.py` | INDEP | keep |
+| `tools/r4_pacing.py` | INDEP | keep |
+| `tools/r4_present_hash.py` | INDEP | keep |
+| `tools/r4_runs.py` | INDEP | keep |
+| `tools/r4_scene.sh` | INDEP | keep |
+| `tools/r4_trace_audit.py` | INDEP | keep |
+| `tools/r6_measure.py` | INDEP | keep |
+| `tools/r6_native_lift.sh` | INDEP | keep |
+| `tools/r6_scene.sh` | INDEP | keep |
+| `tools/r7_bink_compare.py` | INDEP | keep |
+| `tools/r7_grabs.py` | INDEP | keep |
+| `tools/r7_measure.py` | INDEP | keep |
+| `tools/r7_native_lift.sh` | INDEP | keep |
+| `tools/r7_release_build.sh` | INDEP | keep |
+| `tools/r7_scene.sh` | INDEP | keep |
+| `tools/r7_symbols.py` | INDEP | keep |
+| `tools/r8_bench.py` | INDEP | keep |
+| `tools/r8_lift.sh` | INDEP | keep |
+| `tools/r8_phys.py` | INDEP | keep |
+| `tools/r8_release_build.sh` | INDEP | keep |
+| `tools/r8_scene.sh` | INDEP | keep |
+| `tools/r8_split.py` | INDEP | keep |
+| `tools/r8_threads.py` | INDEP | keep |
+| `tools/save_ui_preview.c` | INDEP | keep |
+| `tools/self_decrypt.py` | INDEP | keep |
+| `tools/self_update.py` | INDEP | keep |
+| `tools/setup_pipeline.py` | INDEP | keep |
+| `tools/shortcuts.py` | INDEP | keep |
+| `tools/sound_inventory.py` | INDEP | keep |
+| `tools/spu_native/water.py` | SPUGEN | keep: generates the water's and the waver's tasks from the player's lift; nothing of an image in it |
+| `tools/spu_native/waver.py` | SPUGEN | keep: generates the water's and the waver's tasks from the player's lift; nothing of an image in it |
+| `tools/spu_native_task.cpp.in` | SPUGEN | keep: generates the water's and the waver's tasks from the player's lift; nothing of an image in it |
+| `tools/spu_trace.py` | INDEP | keep |
+| `tools/symbolize.py` | INDEP | keep |
+| `tools/version.py` | INDEP | keep |
+| `tools/zig_build.py` | INDEP | keep |
