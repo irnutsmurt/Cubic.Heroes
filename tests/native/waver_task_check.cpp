@@ -1,4 +1,5 @@
-// The native waver task (port/native/waver_task.cpp) against the lifted one
+// The native waver task (port/native/waver_task.cpp: the host around the task's code generated from the
+// lift, port/native/spu_native.h) against the lifted one
 // (build/gen/spu/spu_0001_at_00F48F80/spu_recomp.c), offline. The lifted
 // image runs whole, from its entry (LS 0x3050) to its exit through the SPURS
 // kernel's exit entry, on a bare SPU context with its ELF loaded afresh in
@@ -12,7 +13,7 @@
 //   - the outcome: native done = the lifted task exited with code 0 through
 //     the kernel's exit entry; native unsupported = the lifted task halted;
 //   - for a run that is done, the lifted task's transfers, local-store
-//     addresses, tags and tag waits against the order waver_task.h describes;
+//     addresses, tags and tag waits against the order the task was read to make (below);
 // and fails on any channel or MFC command waver_task.h says the task does
 // not use (atomics, mailboxes, list DMA, an EA above 4 GB).
 //
@@ -33,12 +34,14 @@
 // shipped level, PORTABLE_CPU, and takes the helpers' other paths):
 //   build/toolchain/zig-x86_64-windows-0.17.0/zig.exe cc -target x86_64-windows-gnu -mcpu=x86_64_v3 -O2 -c
 //       -I build/ref/ps3recomp/runtime/spu -I build/ref/ps3recomp/include
-//       build/gen/spu/spu_0001_at_00F48F80/spu_recomp.c -o "F:/3d dot game heroes/scratch/waver/waver_lift_v3.o"
+//       build/gen/spu/spu_0001_at_00F48F80/spu_recomp.c -o <scratch>/waver_lift_v3.o
+//   python tools/gen_spu_native.py tools/spu_native/waver.py build/gen/spu/spu_0001_at_00F48F80/spu_recomp.c
+//       build/gen/spu/images/spu_0001_at_00F48F80.elf tools/spu_native_task.cpp.in <scratch>/waver_gen.cpp
 //   build/toolchain/zig-x86_64-windows-0.17.0/zig.exe c++ -target x86_64-windows-gnu -mcpu=x86_64_v3 -O2 -std=c++17
 //       -I port/native -I build/ref/ps3recomp/runtime/spu -I build/ref/ps3recomp/include
-//       tests/native/waver_task_check.cpp port/native/waver_task.cpp "F:/3d dot game heroes/scratch/waver/waver_lift_v3.o"
-//       -o "F:/3d dot game heroes/scratch/waver/waver_task_check_v3.exe"
-//   "F:/3d dot game heroes/scratch/waver/waver_task_check_v3.exe"
+//       tests/native/waver_task_check.cpp port/native/waver_task.cpp port/native/spu_native.cpp
+//       <scratch>/waver_gen.cpp <scratch>/waver_lift_v3.o -o <scratch>/waver_task_check_v3.exe
+//   <scratch>/waver_task_check_v3.exe
 // (the same with x86_64_v2 and _v2 names for the shipped level).
 #define __USE_MINGW_SETJMP_NON_SEH   // setjmp(b) = _setjmp(b, NULL): longjmp restores registers, no SEH unwind
 #include <setjmp.h>
@@ -342,7 +345,7 @@ static void fill(Space& s, const Case& c, uint32_t seed)
 }
 
 // The lifted task's transfers and waits for a run that is done, as
-// waver_task.h describes them.
+// the task was read to make them (2026-11-10).
 static std::vector<Xfer> documented(const Params& p, uint32_t param_ea)
 {
     std::vector<Xfer> v;

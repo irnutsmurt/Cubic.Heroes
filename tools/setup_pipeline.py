@@ -302,6 +302,37 @@ def spu(paths, log):
              ["--images", images, "--lifted", spu_dir, "--out", os.path.join(spu_dir, "spu_workloads.c"),
               "--constructor", "--relift", "--entry-hooks", os.path.join(config_dir(), "spu_entry_hooks.json"),
               *reloc], log)   # entry hooks: native code for hot SPU routines (the map packs' inflate)
+    spu_native(paths, log)
+
+
+# The SPU tasks that run as native code generated from the player's own lift (port/native/spu_native.h):
+# (configuration in tools/spu_native/, the image as the extraction names it).
+SPU_NATIVE = [("water", "spu_0000_at_00F47380"), ("waver", "spu_0001_at_00F48F80")]
+
+
+def spu_native(paths, log):
+    """gen/spu_native/<task>_gen.cpp from gen/spu: tools/gen_spu_native.py on each task's lift and image. An
+    image that is not the one its configuration describes (another executable) is skipped with a note: the
+    build then compiles the stub and the lifted tasks run."""
+    t = os.path.join(ROOT, "tools")
+    out = os.path.join(paths.gen, zig_build.SPU_NATIVE_DIR)
+    if os.path.isdir(out):
+        shutil.rmtree(out)
+    os.makedirs(out)
+    made = []
+    for name, image in SPU_NATIVE:
+        spu_dir = os.path.join(paths.gen, "spu")
+        args = [os.path.join(t, "spu_native", name + ".py"), os.path.join(spu_dir, image, "spu_recomp.c"),
+                os.path.join(spu_dir, "images", image + ".elf"), os.path.join(t, "spu_native_task.cpp.in"),
+                os.path.join(out, name + "_gen.cpp")]
+        try:
+            run_tool(os.path.join(t, "gen_spu_native.py"), args, log)
+            made.append(name)
+        except Exception as e:   # noqa: BLE001 -- any failure: that task stays lifted
+            if log:
+                log(f"spu_native: {name} not generated ({e}); its lifted task runs")
+    if len(made) != len(SPU_NATIVE):   # all or none: the build compiles both or the stub
+        shutil.rmtree(out)
 
 
 def finish(paths, log):

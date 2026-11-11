@@ -68,7 +68,7 @@ void run_one(uint32_t ea)
         while (ns > m && !g->max_ns.compare_exchange_weak(m, ns)) {}
     } else {
         g->unsupported++;
-        g->last_reason = unsupported_reason(p, ea);
+        g->last_reason = g->local->why;
     }
 }
 
@@ -201,7 +201,11 @@ extern "C" void waver_game_report(void) { report(); }
 extern "C" void waver_game_init(void)
 {
     const char* e = getenv("DOTHEROES_NATIVE_WAVER");
-    Mode mode = kNative;   // checked offline bit-exact (tests/native/waver_task_check.cpp) and in the game (check mode)
+    Mode mode = kNative;   // generated from the lift: checked offline (tests/native/waver_task_check.cpp) and in the game
+    if (!waver_task::available()) {   // a build without the task's generated code: the lifted task
+        if (!(e && !strcmp(e, "0"))) fprintf(stderr, "[waver] no native code generated for the task in this build: the lifted task\n");
+        e = "0";
+    }
     if (e && !strcmp(e, "0")) mode = kLifted;
     else if (e && !strcmp(e, "check")) mode = kCheck;
     if (mode == kLifted) return;

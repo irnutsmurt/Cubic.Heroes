@@ -1,23 +1,7 @@
-// The game's water SPU task as native code (water_task.h; docs/SPU_NON_AUDIO.md
-// section 3). Read in the lift (build/gen/spu/spu_0000_at_00F47380/
-// spu_recomp.c, its ELF disassembled: tools/spu_disasm.py) and checked offline
-// against the lifted functions themselves (tests/native/water_task_check.cpp).
-//
-// The task's transfers, one step (tags as the task uses them; W = width,
-// nb = W / 8; `other` = heights + 4W*W*(1 - index), `cur` = heights + 4W*W*index):
-//   GET 24 bytes  <- argument.u64[0]                        (LS r1+0x30, tag 0; 16 + 8)
-//   height step (LS 0x3098), per block i of 8 rows:
-//     i = 0:       GET 4W   <- other + 4W(W-1) -> 0x4610     (tag 2)
-//                  GET 36W  <- other            -> 0x4610+4W (tag 0)
-//     0 < i < nb-1 GET 40W  <- other + 32Wi - 4W -> 0x4610   (tag 0)
-//     i = nb-1:    GET 4W   <- other            -> 0x4610+32W (tag 2, overwritten by the next)
-//                  GET 36W  <- other + 32Wi - 4W -> 0x4610   (tag 0)
-//                  GET 32W  <- cur + 32Wi       -> 0x8610    (tag 1)
-//                  PUT 32W  -> cur + 32Wi       <- 0x8610    (tag 3)
-//   normal map (LS 0x35E0), per block: the same row GETs (tags 1 and 0), then
-//                  PUT 32W  -> texture + 32Wi   <- 0x8610    (tag 3)
-// The runtime runs each command as it is issued (spu_dma.h, mfc_submit), so
-// the last block's row-0 GET is overwritten by the block's own rows.
+// The game's water task run natively (water_task.h; docs/SPU_NON_AUDIO.md section 3): the host around the
+// task's own code, which is generated on this machine from the player's lift (water_gen,
+// port/native/spu_native.h). Checked offline against the lifted task (tests/native/water_task_check.cpp) and
+// in the game (DOTHEROES_NATIVE_WATER=check).
 #include "water_task.h"
 
 #include <algorithm>
@@ -32,63 +16,38 @@
 #include <thread>
 #include <vector>
 
-#include "spu_helpers.h"   // the runtime's exact SPU single-precision arithmetic (the lifted task's own)
+#include "spu_helpers.h"   // spu_pref_u32: a register with its preferred slot set
 
 namespace water_task {
 namespace {
 
-constexpr uint32_t kHalf = 0x3F000000u, kOne = 0x3F800000u, kOneUp = 0x3F800001u, k255 = 0x437F0000u;
-constexpr int kCfltuScale0 = 173;   // cfltu's immediate for no scaling, as the task encodes it
+// Where the task's main enters its two functions (tools/spu_native/water.py): the step's heights, then its
+// normal map, each with r3 = the local-store address of the step's 24 bytes, which main keeps in its frame
+// (r1 + 0x30; main's r1 is the entry's 0x3FFD0 less its 0xE0-byte frame). The links are main's own.
+constexpr uint32_t kStepHeights = 0x3098, kStepNormals = 0x35E0;
+constexpr uint32_t kLinkHeights = 0x3C80, kLinkNormals = 0x3C88;
+constexpr uint32_t kMainStack = 0x3FFD0 - 0xE0, kParamLsa = kMainStack + 0x30;
 
 inline uint32_t be32(const uint8_t* p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
-inline void st32(uint8_t* p, uint32_t v)
-{
-    p[0] = (uint8_t)(v >> 24); p[1] = (uint8_t)(v >> 16); p[2] = (uint8_t)(v >> 8); p[3] = (uint8_t)v;
-}
-inline u128 splat(uint32_t v)
-{
-    u128 r;
-    r._u32[0] = r._u32[1] = r._u32[2] = r._u32[3] = v;
-    return r;
-}
 
 // The task's block count: (W < 0 ? W + 7 : W) >> 3, C's division.
 inline int32_t blocks(int32_t width) { return width / 8; }
 
-// The other layer's rows block i needs, in the task's order (LS 0x34F8, 0x3584,
-// 0x3228; 0x3A80, 0x3B0C, 0x3730): row r of ls.in holds layer row 8i - 1 + r.
-void fetch_rows(const Io& io, Local& ls, uint32_t other, uint32_t W, uint32_t nb, uint32_t i)
-{
-    const uint32_t row = 4u * W, first = other + 32u * W * i;
-    if (i == 0) {
-        io.get(io.user, ls.in, other + row * (W - 1), row);   // the last row, above row 0
-        io.get(io.user, ls.in + row, first, 9 * row);          // rows 0..8
-    } else if (i == nb - 1) {
-        io.get(io.user, ls.in + 8 * row, other, row);          // row 0 into the ninth row ...
-        io.get(io.user, ls.in, first - row, 9 * row);          // ... which rows 8i-1..8i+7 overwrite; the tenth keeps row 8i
-    } else {
-        io.get(io.user, ls.in, first - row, 10 * row);         // rows 8i-1..8i+8
-    }
-}
-
-// Four columns' neighbours from the rows the task holds: left/right wrap
-// round the row (x = 0's left is W-1, W-1's right is 0).
-struct Around { u128 left, right, up, down; };
-inline Around around(const uint8_t* up, const uint8_t* mid, const uint8_t* down, uint32_t W, uint32_t x, uint32_t lanes)
-{
-    Around a;
-    for (uint32_t k = 0; k < lanes; k++) {
-        const uint32_t c = x + k, l = c ? c - 1 : W - 1, r = c + 1 < W ? c + 1 : 0;
-        a.left._u32[k] = be32(mid + 4 * l);
-        a.right._u32[k] = be32(mid + 4 * r);
-        a.up._u32[k] = be32(up + 4 * c);
-        a.down._u32[k] = be32(down + 4 * c);
-    }
-    return a;
-}
-
 void guest_get(void* user, void* dst, uint32_t ea, uint32_t bytes) { memcpy(dst, (uint8_t*)user + ea, bytes); }
 void guest_put(void* user, uint32_t ea, const void* src, uint32_t bytes) { memcpy((uint8_t*)user + ea, src, bytes); }
+
+bool call(Local& l, spu_native::Dma& d, uint32_t entry, uint32_t link)
+{
+    memset(l.c.gpr, 0, sizeof l.c.gpr);
+    l.c.gpr[0] = spu_pref_u32(link);
+    l.c.gpr[1] = spu_pref_u32(kMainStack);
+    l.c.gpr[3] = spu_pref_u32(kParamLsa);
+    spu_native::Outcome o;
+    const spu_native::Result r = water_gen::call(l.c.ls, l.c.gpr, entry, d.host(), &o);
+    if (r == spu_native::Result::handled && !d.trouble && o.ret_pc == link) return true;
+    l.why = d.trouble ? d.trouble : r == spu_native::Result::halted ? "the task halted" : spu_native::result_name(r);
+    return false;
+}
 
 }  // namespace
 
@@ -108,97 +67,34 @@ Io guest_io(uint8_t* base) { return Io{ base, guest_get, guest_put }; }
 
 const char* unsupported_reason(const Params& p, uint32_t param_ea)
 {
-    if (param_ea & 15) return "parameter block not 16-byte aligned (the task halts at LS 0x3C48)";
+    if (param_ea & 15) return "parameter block not 16-byte aligned (the task halts)";
     if (blocks(p.width) <= 0) return nullptr;   // the task does nothing
     const uint32_t W = (uint32_t)p.width;
-    if (W & 3) return "width not a multiple of 4 (the task halts at LS 0x3258)";
-    if (W > 408) return "width above 408 (the task's row buffers would overlap)";
+    if (W & 3) return "width not a multiple of 4 (the task halts)";
+    if (W > 408) return "width above 408";
     if (p.index > 1) return "layer index other than 0 or 1";
     if (p.heights & 15) return "heights not 16-byte aligned (the task halts)";
-    if (p.texture & 15) return "texture not 16-byte aligned (the task halts at LS 0x39C4)";
+    if (p.texture & 15) return "texture not 16-byte aligned (the task halts)";
     return nullptr;
-}
-
-// LS 0x3098: cur = ((left + right + up + down) * 0.5 - cur) * damping, the
-// sums in that order (fa, fa, fa, fms, fm).
-void height_step(const Params& p, const Io& io, Local& ls)
-{
-    const int32_t nb = blocks(p.width);
-    if (nb <= 0) return;
-    const uint32_t W = (uint32_t)p.width, row = 4u * W, layer = 4u * W * W;
-    const uint32_t cur = p.heights + layer * p.index, other = p.heights + layer * (1u - p.index);
-    const u128 half = splat(kHalf), damping = splat(p.damping);
-    for (uint32_t i = 0; i < (uint32_t)nb; i++) {
-        fetch_rows(io, ls, other, W, (uint32_t)nb, i);
-        io.get(io.user, ls.out, cur + 32u * W * i, 32u * W);
-        for (uint32_t j = 0; j < 8; j++) {
-            const uint8_t* up = ls.in + row * j;
-            uint8_t* o = ls.out + row * j;
-            for (uint32_t x = 0; x < W; x += 4) {
-                const uint32_t lanes = std::min(4u, W - x);
-                const Around a = around(up, up + row, up + 2 * row, W, x, lanes);
-                u128 c;
-                for (uint32_t k = 0; k < lanes; k++) c._u32[k] = be32(o + 4 * (x + k));
-                const u128 sum = spu_fa(spu_fa(spu_fa(a.left, a.right), a.up), a.down);
-                const u128 h = spu_fm(spu_fms(sum, half, c), damping);
-                for (uint32_t k = 0; k < lanes; k++) st32(o + 4 * (x + k), h._u32[k]);
-            }
-        }
-        io.put(io.user, cur + 32u * W * i, ls.out, 32u * W);
-    }
-}
-
-// LS 0x35E0: the normal of (dx * scale, dy * scale, 1) as 0x00XXYYZZ.
-void normal_map(const Params& p, const Io& io, Local& ls)
-{
-    const int32_t nb = blocks(p.width);
-    if (nb <= 0) return;
-    const uint32_t W = (uint32_t)p.width, row = 4u * W, layer = 4u * W * W;
-    const uint32_t other = p.heights + layer * (1u - p.index);
-    const u128 half = splat(kHalf), one = splat(kOne), one_up = splat(kOneUp), c255 = splat(k255);
-    const u128 scale = splat(p.scale);
-    for (uint32_t i = 0; i < (uint32_t)nb; i++) {
-        fetch_rows(io, ls, other, W, (uint32_t)nb, i);
-        for (uint32_t j = 0; j < 8; j++) {
-            const uint8_t* up = ls.in + row * j;
-            uint8_t* o = ls.out + row * j;
-            for (uint32_t x = 0; x < W; x += 4) {
-                const uint32_t lanes = std::min(4u, W - x);
-                const Around a = around(up, up + row, up + 2 * row, W, x, lanes);
-                const u128 nx = spu_fm(spu_fs(a.right, a.left), scale);   // fs r17, fm r41
-                const u128 ny = spu_fm(scale, spu_fs(a.up, a.down));       // fs r54, fm r40
-                const u128 s = spu_fma(ny, ny, spu_fma(nx, nx, one));
-                // length: y = fi(s, frsqest(s)), q = y*s, q + (1.0000001 - y*q) * (q*0.5)
-                const u128 y = spu_fi(s, spu_frsqest(s));
-                const u128 q = spu_fm(y, s);
-                const u128 len = spu_fma(spu_fnms(y, q, one_up), spu_fm(q, half), q);
-                // 1/length: r = fi(len, frest(len)), a = 1*r, a + (1 - a*len) * r
-                const u128 r = spu_fi(len, spu_frest(len));
-                const u128 t = spu_fm(one, r);
-                const u128 inv = spu_fma(spu_fnms(t, len, one), r, t);
-                const u128 bz = spu_cfltu(spu_fm(spu_fma(inv, half, half), c255), kCfltuScale0);
-                const u128 bx = spu_cfltu(spu_fm(spu_fma(spu_fm(nx, inv), half, half), c255), kCfltuScale0);
-                const u128 by = spu_cfltu(spu_fm(spu_fma(spu_fm(ny, inv), half, half), c255), kCfltuScale0);
-                for (uint32_t k = 0; k < lanes; k++)
-                    st32(o + 4 * (x + k), bx._u32[k] << 16 | by._u32[k] << 8 | bz._u32[k]);
-            }
-        }
-        io.put(io.user, p.texture + 32u * W * i, ls.out, 32u * W);
-    }
 }
 
 Status run_frame(uint32_t param_ea, const Io& io, Local& ls, Params* used)
 {
-    if (param_ea & 15) return Status::unsupported;   // the task halts before the GET
+    ls.why = nullptr;
+    if (param_ea & 15) { ls.why = "parameter block not 16-byte aligned (the task halts)"; return Status::unsupported; }
     uint8_t b[kParamBytes];
-    io.get(io.user, b, param_ea, kParamBytes);
+    io.get(io.user, b, param_ea, kParamBytes);   // the task's GET of the 24 bytes, into main's frame
     const Params p = parse_params(b);
     if (used) *used = p;
-    if (unsupported_reason(p, param_ea)) return Status::unsupported;
-    if (blocks(p.width) <= 0) return Status::nothing;
-    height_step(p, io, ls);
-    normal_map(p, io, ls);
-    return Status::done;
+    if (!ls.loaded) { water_gen::load(ls.c.ls); ls.loaded = true; }
+    memcpy(ls.c.ls + kParamLsa, b, kParamBytes);
+    spu_native::Dma d;
+    d.user = io.user;
+    d.get = io.get;
+    d.put = io.put;
+    d.ls = ls.c.ls;
+    if (!call(ls, d, kStepHeights, kLinkHeights) || !call(ls, d, kStepNormals, kLinkNormals)) return Status::unsupported;
+    return blocks(p.width) <= 0 ? Status::nothing : Status::done;
 }
 
 }  // namespace water_task
@@ -299,7 +195,7 @@ void timed_run(uint32_t param_ea, Local& ls)
         g->nothing++;
     } else {
         g->unsupported++;
-        g->last_reason = unsupported_reason(p, param_ea);
+        g->last_reason = ls.why;
     }
 }
 
@@ -497,10 +393,15 @@ extern "C" void water_task_report(void) { report(); }
 
 extern "C" void water_task_init(void)
 {
-    // Native on a worker thread by default (2026-11-10: in the game 705 checked steps of the river,
-    // heights and texture equal to the lifted task's); DOTHEROES_NATIVE_WATER=0 keeps the SPU task.
+    // Native on a worker thread by default (the task's code generated from the player's lift: equal to the
+    // lifted task's by construction, checked offline and in the game); DOTHEROES_NATIVE_WATER=0 keeps the SPU task.
     const char* e = getenv("DOTHEROES_NATIVE_WATER");
     Mode mode = kAsync;
+    if (!water_gen::has_entry(kStepHeights) || !water_gen::has_entry(kStepNormals)) {
+        // a build without the task's generated code (no lift of its image: spu_native_absent.cpp)
+        if (!(e && !strcmp(e, "0"))) fprintf(stderr, "[water] no native code generated for the task in this build: the lifted task\n");
+        e = "0";
+    }
     if (e && !strcmp(e, "0")) mode = kLifted;
     else if (e && !strcmp(e, "1")) mode = kAsync;
     else if (e && !strcmp(e, "sync")) mode = kSync;

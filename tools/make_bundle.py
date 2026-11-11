@@ -51,7 +51,7 @@ KEEP = {
 ZIG_DROP = ("doc", "docs", "lldb", "libtsan")
 # this project's tools the setup runs (the rest are developer tools)
 OUR_TOOLS = ["fix_functions.py", "iso9660.py", "self_decrypt.py", "setup_pipeline.py", "zig_build.py",
-             "shortcuts.py", "self_update.py", "version.py"]
+             "shortcuts.py", "self_update.py", "version.py", "gen_spu_native.py", "spu_native_task.cpp.in"]
 
 
 def need(path, hint="see this script's docstring"):
@@ -160,6 +160,9 @@ def copy_tools(out):
         shutil.copy2(os.path.join(ROOT, "tools", f), t)
     shutil.copytree(os.path.join(PS3RECOMP, "tools"), os.path.join(t, "ps3recomp"),
                     ignore=shutil.ignore_patterns("test_*", "tests", "__pycache__", "*.pyc", "host_window"))
+    # gen_spu_native.py's per-task configurations (setup_pipeline.spu_native)
+    shutil.copytree(os.path.join(ROOT, "tools", "spu_native"), os.path.join(t, "spu_native"),
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     shutil.copytree(os.path.join(ROOT, "config"), os.path.join(out, "config"),
                     ignore=shutil.ignore_patterns("deps.sha256"))
     os.makedirs(os.path.join(out, "assets"))

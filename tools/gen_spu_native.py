@@ -6,7 +6,7 @@ returns, and everything that leaves the SPU made an explicit callback.
     py -3 gen_spu_native.py <config.py> <lifted spu_recomp.c> <image .elf> <template .cpp.in> <output .cpp>
                             [--report <file>]
 
-A generalisation of gen_sfxreverb.py (A2) for an image that runs as a thread: stop-and-signal,
+For an image that runs as a thread or a task, with whatever leaves the SPU: stop-and-signal,
 mailboxes, the decrementer, atomics, DMA of every kind (all of them channel operations), indirect calls
 and jumps. The lift (ps3recomp's spu_lifter.py) cuts the image into one C function per branch target that
 reach each other through the runtime (SPU_DIRECT tail calls, the drain loop, ctx). This puts them back
@@ -42,7 +42,9 @@ the native interface (the template's header):
 Every other statement (the instruction helpers of spu_helpers.h) is kept as it is, in the lift's order.
 Fails on any statement it does not recognise.
 """
+import hashlib
 import importlib.util
+import os
 import re
 import struct
 import sys
@@ -73,6 +75,36 @@ def load_image(path):
             ls[vaddr:vaddr + filesz] = d[off:off + filesz]
     entry, = struct.unpack('>I', d[24:28])
     return ls, entry
+
+
+def load_segments(path):
+    """The ELF's loadable segments: (address, file bytes, memory size)."""
+    d = open(path, 'rb').read()
+    phoff, = struct.unpack('>I', d[28:32])
+    phnum, = struct.unpack('>H', d[44:46])
+    out = []
+    for i in range(phnum):
+        typ, off, vaddr, paddr, filesz, memsz, flags, align = struct.unpack('>8I', d[phoff + 32 * i:phoff + 32 * i + 32])
+        if typ == 1:
+            out.append((vaddr, d[off:off + filesz], memsz))
+    return out
+
+
+def image_source(segments):
+    """The template's @IMAGE@: the segments as byte arrays and the kSegments table."""
+    lines = []
+    for k, (addr, data, memsz) in enumerate(segments):
+        lines.append('const uint8_t kSeg%d[%d] = {' % (k, max(1, len(data))))
+        for i in range(0, len(data), 24):
+            lines.append('    ' + ' '.join('0x%02X,' % b for b in data[i:i + 24]))
+        if not data:
+            lines.append('    0')
+        lines.append('};')
+    lines.append('const Segment kSegments[] = {')
+    for k, (addr, data, memsz) in enumerate(segments):
+        lines.append('    { 0x%05Xu, %du, %du, kSeg%d },' % (addr, len(data), memsz, k))
+    lines.append('};')
+    return '\n'.join(lines)
 
 
 def word(ls, a):
@@ -611,6 +643,12 @@ def main():
         del args[i:i + 2]
     cfgpath, lift, elf, template, output = args
     cfg = load_config(cfgpath)
+    want = getattr(cfg, 'IMAGE_SHA256', None)
+    if want:
+        got = hashlib.sha256(open(elf, 'rb').read()).hexdigest()
+        if got != want.lower():
+            raise SystemExit('%s: the image is not the one %s describes (SHA-256 %s, expected %s)' % (
+                os.path.basename(elf), os.path.basename(cfgpath), got, want))
     funcs = parse(lift, cfg.PREFIX)
     image, image_entry = load_image(elf)
     if image_entry != cfg.ENTRY:
@@ -639,6 +677,14 @@ def main():
     t = t.replace('@ENTRY_COUNT@', str(len(g.entries)))
     t = t.replace('@CODE_BEGIN@', '0x%05Xu' % cfg.CODE_BEGIN)
     t = t.replace('@CODE_END@', '0x%05Xu' % cfg.CODE_END)
+    # what the per-image template (tools/spu_native_task.cpp.in) also takes; no local path goes into the output
+    t = t.replace('@NAMESPACE@', getattr(cfg, 'NAMESPACE', 'spu_image'))
+    t = t.replace('@TITLE@', getattr(cfg, 'TITLE', 'An SPU image'))
+    t = t.replace('@SOURCE@', '%s/%s, %s' % (os.path.basename(os.path.dirname(os.path.abspath(lift))),
+                                             os.path.basename(lift), os.path.basename(elf)))
+    t = t.replace('@CONFIG@', 'tools/spu_native/' + os.path.basename(cfgpath))
+    if '// @IMAGE@' in t:
+        t = t.replace('// @IMAGE@', image_source(load_segments(elf)))
     with open(output, 'w', encoding='utf-8', newline='\n') as f:
         f.write(t)
     rep = g.report()

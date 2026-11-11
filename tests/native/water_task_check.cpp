@@ -1,4 +1,5 @@
-// The native water task (port/native/water_task.cpp) against the lifted one
+// The native water task (port/native/water_task.cpp: the host around the task's code generated from the
+// lift, port/native/spu_native.h) against the lifted one
 // (build/gen/spu/spu_0000_at_00F47380/spu_recomp.c), offline: the lifted
 // task's two step functions (LS 0x3098, the height step; LS 0x35E0, the
 // normal map) run on a bare SPU context with its image in local store and a
@@ -23,12 +24,15 @@
 //       capture) on a stand-in guest laid out as the game lays it out.
 //
 // Built with the bundled Zig (from the repository root; <ps3recomp> =
-// build/ref/ps3recomp; -mcpu as the game is built, tools/zig_build.py host_cpu):
+// build/ref/ps3recomp; -mcpu as the game is built, tools/zig_build.py host_cpu), the task's native code
+// generated first from the same lift:
+//   python tools/gen_spu_native.py tools/spu_native/water.py build/gen/spu/spu_0000_at_00F47380/spu_recomp.c
+//       build/gen/spu/images/spu_0000_at_00F47380.elf tools/spu_native_task.cpp.in water_gen.cpp
 //   zig cc -target x86_64-windows-gnu -mcpu=x86_64_v3 -O2 -c -I <ps3recomp>/runtime/spu
 //       -I <ps3recomp>/include build/gen/spu/spu_0000_at_00F47380/spu_recomp.c -o water_lift.o
 //   zig c++ -target x86_64-windows-gnu -mcpu=x86_64_v3 -O2 -std=c++17 -I port/native
 //       -I <ps3recomp>/runtime/spu -I <ps3recomp>/include tests/native/water_task_check.cpp
-//       port/native/water_task.cpp water_lift.o -o water_task_check.exe
+//       port/native/water_task.cpp port/native/spu_native.cpp water_gen.cpp water_lift.o -o water_task_check.exe
 #define NOMINMAX
 #include <windows.h>
 
