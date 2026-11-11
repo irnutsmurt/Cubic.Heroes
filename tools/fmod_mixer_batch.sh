@@ -16,4 +16,9 @@ for t in ${TRACE_NAMES:-river dungeon}; do
     run ${t}_v3 fmod_mixer_check_v3.exe mixer_$t.bin --fuzz 20000 --seed 7
     run ${t}_v2 fmod_mixer_check_v2.exe mixer_$t.bin --fuzz 20000 --seed 3
 done
+# the long traces (8.6 GB each: the dungeon run lifted, and the native mixer's own run), replayed at both levels
+for t in ${LONG_TRACE_NAMES-dungeonlong native_dungeon}; do
+    run trace_${t}_v3 fmod_mixer_check_v3.exe mixer_$t.bin
+    run trace_${t}_v2 fmod_mixer_check_v2.exe mixer_$t.bin
+done
 echo "batch done"

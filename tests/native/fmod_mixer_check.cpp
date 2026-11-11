@@ -50,6 +50,12 @@
 //       lifted run's indirect branches
 //   The trace ends at its size limit inside a block: the blocks before are the complete ones.
 //   MIXER_SHOW_UNTAKEN=1: the port's blocks never taken; MIXER_COVERAGE_FILE=<path>: every block's count.
+//   --profile N [--blocks B] [--sample PREFIX]: no comparison; N passes each of the lifted mixer and the port,
+//     alternating, over the trace preloaded, without the block-boundary snapshots, timing the mixer's code alone
+//     (each pass's time less the time in the model -- every channel operation, DMA copy and compare, stop -- and
+//     in the plugins, counted in TSC ticks at their outermost entry); --sample: the replay thread's instruction
+//     pointer every 250 us in the mixer's code, for tools/fmod_mixer_profile.py. Build it without the block
+//     counters, as the game builds the port: COVERAGE=0 tools/fmod_mixer_check.sh (fmod_mixer_prof_*.exe).
 //
 // Built with the bundled Zig, from the repository root (OUT = a scratch folder, here F:/3d dot game heroes/scratch/mixer/out;
 // tools/fmod_mixer_check.sh does both steps and regenerates the port):
@@ -80,6 +86,23 @@
 //   Two differences the synthesized cases found were in this checker, not in the port: the stand-in dispatch
 //   rounded an odd target down to a word (the runtime's registry matches exactly), and the DMA clamp wrapped
 //   for a size near 4 GB (`lsa + n > 0x40000`; the trace writer in spu_channels.c has the same expression).
+//
+// 2026-11-11, the port with the generator's register effects (stores and reloads around calls by what the
+// callee can reach and change, a dataflow of what may be dirty within each function; tools/fmod_mixer_batch.sh):
+//   the four traces, at x86_64_v3 and x86_64_v2: the river 5,189 blocks, the dungeon 5,375, the long dungeon run
+//     24,070 (15,308 sfxreverb calls through 0x6118), the native mixer's own run in the game 24,445: every record
+//     equal for both, every block boundary equal.
+//   synthesized: 20,000 cases a trace and level (seed 7 at v3, 3 at v2): 19,452 / 19,479 / 19,455 / 19,469
+//     compared (v3 river, v3 dungeon, v2 river, v2 dungeon), all equal -- 77,855, ended returned 65,535, halted
+//     7,645, stopped 1,440, branched to code no plugin has 3,014, returned elsewhere 221; not counted 1,697 over
+//     the budget, 2 looping on registers alone, 440 the lifted run could not finish, 6 handed to the host. The
+//     8,836 block cases with no mutation all returned. Blocks taken, all runs: 750 of 903 (97 functions).
+//     One more difference found here and fixed in the checker: a branch to 0x84 (.SpuGUID, which the lift took
+//     for code) was counted a difference -- the lifted run went on there, the port handed it to its host -- and
+//     is now counted apart with the others like it (the image's span for Branch starts at 0x80 now).
+//   --profile (the mixer's code a block, best of the passes): river v3 the lifted mixer 50.2 us, the port 42.3
+//     (-15.9%; the port without the effects 69.2 against 49.9); river v2 70.6 and 59.9 (-15.2%); the long dungeon
+//     v3 53.0 and 44.3 (-16.6%).
 #define __USE_MINGW_SETJMP_NON_SEH   // setjmp(b) = _setjmp(b, NULL): longjmp restores registers, no SEH unwind
 #include <setjmp.h>
 
@@ -87,6 +110,7 @@
 #define NOMINMAX
 #include <windows.h>
 #include <dbghelp.h>   // the types only (SymFromAddr is looked up at run time)
+#include <intrin.h>    // __rdtsc (--profile)
 
 #include <fcntl.h>
 #include <io.h>
@@ -307,6 +331,7 @@ struct Model {
     jmp_buf* jb = nullptr;
     bool is_port = false;
     bool fuzz = false;              // a synthesized case: any stop ends it
+    bool profile = false;           // a timing pass: no block-boundary snapshots
     // MFC staging and the generated answers
     uint32_t lsa = 0, eah = 0, eal = 0, size = 0, tag = 0, tag_mask = 0, atomic_stat = 0, dec = 0x7FFFFFFF;
     std::mt19937* rng = nullptr;
@@ -375,6 +400,15 @@ struct Model {
 
 static std::atomic<unsigned long long> g_progress{ 0 };   // the watchdog's
 
+// --profile: the time spent outside the mixer's own code -- in the model (every channel operation, the DMA
+// copies and compares, the stops) and in the plugins it calls -- counted in TSC ticks at the outermost entry,
+// so that a pass's time less this is the mixer's code alone. g_cb_depth also tells the sampler (--sample)
+// whether a sample fell in the mixer's code.
+static uint64_t g_cb_ticks = 0, g_cb_t0 = 0;
+static volatile int g_cb_depth = 0;
+static inline void cb_in() { if (g_cb_depth++ == 0) g_cb_t0 = __rdtsc(); }
+static inline void cb_out() { if (--g_cb_depth == 0) g_cb_ticks += __rdtsc() - g_cb_t0; }
+
 static const char* chan_name(uint32_t c)
 {
     switch (c) {
@@ -386,7 +420,7 @@ static const char* chan_name(uint32_t c)
     return "?";
 }
 
-static uint32_t model_rdch(Model& m, uint32_t ch)
+static uint32_t model_rdch_(Model& m, uint32_t ch)
 {
     g_progress++;
     if (m.mode == Model::generate) {
@@ -414,13 +448,23 @@ static uint32_t model_rdch(Model& m, uint32_t ch)
     return r.b;
 }
 
+static uint32_t model_rdch(Model& m, uint32_t ch)
+{
+    cb_in();
+    const uint32_t v = model_rdch_(m, ch);
+    cb_out();
+    return v;
+}
+
 static uint32_t model_rchcnt(Model& m, uint32_t ch)
 {
+    cb_in();
     m.rchcnt++;
+    cb_out();
     return ch == SPU_RdInMbox ? 0u : 1u;   // spu_rchcnt: the MFC channels 1 (synchronous), RdInMbox its count
 }
 
-static void model_wrch(Model& m, uint32_t ch, uint32_t v)
+static void model_wrch_(Model& m, uint32_t ch, uint32_t v)
 {
     g_progress++;
     const bool gen = m.mode == Model::generate;
@@ -508,9 +552,15 @@ static void model_wrch(Model& m, uint32_t ch, uint32_t v)
     }
     if (m.mem) Mem::write(m.mem->base, atomic ? (m.eal & ~127u) : m.eal, d.data, n, nullptr);   // memory as the trace shows it
 }
+static void model_wrch(Model& m, uint32_t ch, uint32_t v)
+{
+    cb_in();
+    model_wrch_(m, ch, v);
+    cb_out();
+}
 
 // A stop: 1 = go on (a receive the trace serviced), 0 = end the run.
-static int model_stop(Model& m, uint32_t code, uint32_t runtime_pc)
+static int model_stop_(Model& m, uint32_t code, uint32_t runtime_pc)
 {
     g_progress++;
     if (m.mode == Model::generate) {
@@ -542,6 +592,10 @@ static int model_stop(Model& m, uint32_t code, uint32_t runtime_pc)
         return 0;
     }
     if (code != 0x110) return 0;
+    if (m.profile) {   // timing passes: no snapshots
+        m.blocks++;
+        return 1;
+    }
     // a block boundary: the state against the other run's
     Snap s;
     memcpy(s.gpr, m.gpr, sizeof s.gpr);
@@ -580,6 +634,13 @@ static int model_stop(Model& m, uint32_t code, uint32_t runtime_pc)
     }
     return 1;
 }
+static int model_stop(Model& m, uint32_t code, uint32_t runtime_pc)
+{
+    cb_in();
+    const int r = model_stop_(m, code, runtime_pc);
+    cb_out();
+    return r;
+}
 
 static void model_unsupported(Model& m, uint32_t pc)
 {
@@ -594,7 +655,7 @@ static uint32_t plug_rdch(void* u, uint32_t ch) { return model_rdch(*(Model*)u, 
 
 // A branch out of the mixer's image: a plugin's entry, run by its native port. 1 with *ret = the pc it returned
 // to; 0 (synthesized cases) at code no plugin has: the run ends there.
-static int run_overlay(Model& m, uint8_t* ls, u128* gpr, uint32_t target, uint32_t* ret)
+static int run_overlay_(Model& m, uint8_t* ls, u128* gpr, uint32_t target, uint32_t* ret)
 {
     for (Plugin& p : g_plugins) {
         for (uint32_t link : p.links) {
@@ -629,12 +690,15 @@ static int run_overlay(Model& m, uint8_t* ls, u128* gpr, uint32_t target, uint32
         if (m.mode == Model::generate) {
             m.put(kUnknownBranch, target, 0, 0, 0, nullptr, 0);
         } else {
+            // The same end as the lifted run's when it could not go there either; when it went on there (code the
+            // lift has at that address -- in the image, the runtime's registry -- but no plugin and no function of
+            // the port), the port has handed the branch to its host, as its contract says: counted apart.
             Rec r;
-            m.need(r);
-            if (r.kind != kUnknownBranch || r.a != target) {
-                char w[160];
-                snprintf(w, sizeof w, "a branch to %05X (no plugin there): the transcript has kind %u a %X", target, r.kind, r.a);
-                m.fail(w, &r);
+            if (!m.t->next(r) || r.kind != kUnknownBranch || r.a != target) {
+                m.unresolved = true;
+                m.unknown_target = target;
+                m.unresolved_site = m.unknown_site;
+                longjmp(*m.jb, 1);
             }
         }
         m.unknown_branch = true;
@@ -644,6 +708,13 @@ static int run_overlay(Model& m, uint8_t* ls, u128* gpr, uint32_t target, uint32
     char w[96];
     snprintf(w, sizeof w, "a branch to %05X: no plugin the replay knows is there", target);
     m.fail(w, nullptr);
+}
+static int run_overlay(Model& m, uint8_t* ls, u128* gpr, uint32_t target, uint32_t* ret)
+{
+    cb_in();
+    const int r = run_overlay_(m, ls, gpr, target, ret);
+    cb_out();
+    return r;
 }
 
 // ---- the lifted side: the stand-in runtime -------------------------------------------------------------------------
@@ -1169,6 +1240,7 @@ static bool fuzz_case(unsigned k, const std::vector<Sample>& samples, Mem& mem, 
             else { pe.kind = 7; pe.why = "ended"; }
             break;
         case mx::Result::bad_return: pe.kind = 5; pe.a = out.pc & kMask; break;
+        case mx::Result::unresolved: pe.kind = 7; pe.why = "a jump table's target outside its table"; break;
         default: pe.kind = 7; pe.why = "declined"; break;
         }
         Rec rest;
@@ -1224,18 +1296,185 @@ static bool fuzz_case(unsigned k, const std::vector<Sample>& samples, Mem& mem, 
     return ok;
 }
 
+// ---- --profile: the mixer's own time, lifted against the port ----------------------------------------------------
+// Passes over a preloaded trace, alternately the lifted mixer and the port, without the block-boundary
+// snapshots; each pass's time less the time in the model and the plugins (cb_in / cb_out) is the mixer's code.
+// --sample PREFIX: a sampler thread reads the replay thread's instruction pointer every 250 us and counts it by
+// RVA in this executable when it is in the mixer's own code; PREFIX_lift.txt and PREFIX_port.txt for
+// tools/fmod_mixer_profile.py (it names the functions from the .pdb).
+static std::atomic<int> g_sample_side{ -1 };   // -1 not sampling, 0 the lifted mixer's pass, 1 the port's
+static std::atomic<bool> g_sampler_quit{ false };
+static std::unordered_map<uint64_t, unsigned> g_samples[2];
+static unsigned long long g_samples_cb[2], g_samples_code[2];
+
+static void sampler(HANDLE target)
+{
+    const uint64_t base = (uint64_t)(uintptr_t)GetModuleHandleA(nullptr);
+    LARGE_INTEGER f, now, next;
+    QueryPerformanceFrequency(&f);
+    const long long period = f.QuadPart / 4000;
+    QueryPerformanceCounter(&next);
+    while (!g_sampler_quit.load()) {
+        next.QuadPart += period;
+        do QueryPerformanceCounter(&now); while (now.QuadPart < next.QuadPart);
+        const int side = g_sample_side.load();
+        if (side < 0) continue;
+        if (SuspendThread(target) == (DWORD)-1) continue;
+        alignas(16) CONTEXT cx{};
+        cx.ContextFlags = CONTEXT_CONTROL;
+        const bool ok = GetThreadContext(target, &cx) != 0;
+        const int cb = g_cb_depth;
+        ResumeThread(target);
+        if (!ok) continue;
+        if (cb) g_samples_cb[side]++;
+        else {
+            g_samples_code[side]++;
+            g_samples[side][cx.Rip - base]++;
+        }
+    }
+}
+
+struct Timing {
+    double wall = 0, cb = 0;
+    uint64_t blocks = 0;
+    bool ok = false;
+    std::string why;
+};
+
+static Timing profile_pass(bool port_side, const char* path, uint64_t block_limit, double tsc_hz)
+{
+    Timing T;
+    Trace t;
+    if (!t.open(path, true)) { T.why = "cannot read the trace"; return T; }
+    std::vector<Snap> snaps;
+    Model m;
+    m.t = &t;
+    m.is_port = port_side;
+    m.block_limit = block_limit;
+    m.profile = true;
+    m.snaps = &snaps;
+    jmp_buf jb;
+    m.jb = &jb;
+    g_cb_ticks = 0;
+    g_cb_depth = 0;
+    std::chrono::steady_clock::time_point t0, t1;
+    if (!port_side) {
+        static spu_context* ctx = (spu_context*)calloc(1, sizeof(spu_context));
+        ctx->ls = ctx->ls_store;
+        memcpy(ctx->ls, t.ls.data(), kLs);
+        memcpy(ctx->gpr, t.gpr, sizeof ctx->gpr);
+        ctx->pc = t.entry;
+        ctx->image_id = 6;
+        ctx->host_depth = 1;
+        ctx->steps = 1;
+        ctx->status = SPU_STATUS_RUNNING;
+        m.ls = ctx->ls;
+        m.gpr = ctx->gpr;
+        g_m = &m;
+        g_spu_trampoline_fn = nullptr;
+        g_sample_side = 0;
+        t0 = std::chrono::steady_clock::now();
+        if (setjmp(jb) == 0) {
+            g_lifted[t.entry >> 2](ctx);
+            spu_drain_call(ctx, 0xFFFFFFFFu);
+        }
+        t1 = std::chrono::steady_clock::now();
+        g_spu_trampoline_fn = nullptr;
+    } else {
+        static std::vector<uint8_t> ls(kLs);
+        static u128 gpr[128];
+        memcpy(ls.data(), t.ls.data(), kLs);
+        memcpy(gpr, t.gpr, sizeof gpr);
+        m.ls = ls.data();
+        m.gpr = gpr;
+        const mx::Host host{ &m, port_wrch, port_rdch, port_rchcnt, port_stop, port_branch, port_unsupported };
+        g_sample_side = 1;
+        t0 = std::chrono::steady_clock::now();
+        if (setjmp(jb) == 0) {
+            mx::Outcome out;
+            mx::call(ls.data(), gpr, t.entry, host, &out);
+        }
+        t1 = std::chrono::steady_clock::now();
+    }
+    g_sample_side = -1;
+    g_cb_depth = 0;
+    T.wall = std::chrono::duration<double>(t1 - t0).count();
+    T.cb = (double)g_cb_ticks / tsc_hz;
+    T.blocks = m.blocks;
+    T.ok = !m.failed;
+    T.why = m.why;
+    t.close();
+    return T;
+}
+
+static int profile_main(const char* path, unsigned passes, uint64_t block_limit, const char* sample_prefix)
+{
+    // the TSC's rate, against the steady clock
+    const auto c0 = std::chrono::steady_clock::now();
+    const uint64_t k0 = __rdtsc();
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    const double tsc_hz = (double)(__rdtsc() - k0) / std::chrono::duration<double>(std::chrono::steady_clock::now() - c0).count();
+    printf("[info] profile: %s preloaded; TSC %.3f GHz; %u pass(es) each, alternating%s\n", path, tsc_hz / 1e9, passes,
+           sample_prefix ? ", sampled at 4 kHz" : "");
+    HANDLE self = nullptr;
+    if (sample_prefix) {
+        DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &self, 0, FALSE, DUPLICATE_SAME_ACCESS);
+        std::thread(sampler, self).detach();
+    }
+    double best[2] = { 1e30, 1e30 }, sum[2] = { 0, 0 }, cbsum[2] = { 0, 0 };
+    uint64_t blocks[2] = { 0, 0 };
+    bool ok = true;
+    for (unsigned p = 0; p < passes; p++)
+        for (int side = 0; side < 2; side++) {
+            const Timing T = profile_pass(side == 1, path, block_limit, tsc_hz);
+            const double code = T.wall - T.cb;
+            printf("  pass %u %-16s %llu blocks: %.3f s in all, %.3f s in the model and plugins, %.3f s the mixer's code = %.1f us a "
+                   "block%s%s\n", p + 1, side ? "the port" : "the lifted mixer", (unsigned long long)T.blocks, T.wall, T.cb, code,
+                   T.blocks ? code * 1e6 / (double)T.blocks : 0.0, T.ok ? "" : "; FAILED: ", T.ok ? "" : T.why.c_str());
+            ok = ok && T.ok;
+            blocks[side] = T.blocks;
+            if (T.blocks) {
+                const double us = code * 1e6 / (double)T.blocks;
+                if (us < best[side]) best[side] = us;
+                sum[side] += us;
+                cbsum[side] += T.cb * 1e6 / (double)T.blocks;
+            }
+        }
+    printf("[%s] the mixer's code a block (%llu blocks; best of %u, mean): the lifted mixer %.1f us (%.1f), the port %.1f us (%.1f): "
+           "the port %+.1f%%; the model and plugins %.1f / %.1f us a block\n",
+           ok ? "info" : "FAIL", (unsigned long long)blocks[0], passes, best[0], sum[0] / passes, best[1], sum[1] / passes,
+           (best[1] / best[0] - 1) * 100, cbsum[0] / passes, cbsum[1] / passes);
+    if (sample_prefix) {
+        g_sampler_quit = true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        for (int side = 0; side < 2; side++) {
+            const std::string fn = std::string(sample_prefix) + (side ? "_port.txt" : "_lift.txt");
+            FILE* f = fopen(fn.c_str(), "w");
+            if (!f) { printf("cannot write %s\n", fn.c_str()); continue; }
+            fprintf(f, "# samples in the mixer's code %llu, in the model and plugins %llu, us a block %.2f\n", g_samples_code[side],
+                    g_samples_cb[side], best[side]);
+            for (const auto& kv : g_samples[side]) fprintf(f, "%llX %u\n", (unsigned long long)kv.first, kv.second);
+            fclose(f);
+            printf("[info] %s: %llu samples in the mixer's code, %llu in the model and plugins\n", fn.c_str(), g_samples_code[side],
+                   g_samples_cb[side]);
+        }
+    }
+    return ok ? 0 : 1;
+}
+
 int main(int argc, char** argv)
 {
     setvbuf(stdout, nullptr, _IONBF, 0);
     if (argc < 2) {
         printf("usage: fmod_mixer_check <trace.bin> [--lift-only | --port-only] [--blocks N] [--preload] [--show N] [--fuzz N [--seed S] "
-               "[--case K]] [--image-dir DIR]\n");
+               "[--case K]] [--profile N [--sample PREFIX]] [--image-dir DIR]\n");
         return 2;
     }
     const char* trace_path = argv[1];
     bool do_lift = true, do_port = true, preload = false;
     uint64_t block_limit = ~0ull;
-    unsigned show = 24, fuzz = 0, seed = 1, only_case = 0;
+    unsigned show = 24, fuzz = 0, seed = 1, only_case = 0, profile = 0;
+    const char* sample_prefix = nullptr;
     std::string image_dir = "build/gen/spu/images";
     for (int i = 2; i < argc; i++) {
         if (!strcmp(argv[i], "--lift-only")) do_port = false;
@@ -1247,6 +1486,8 @@ int main(int argc, char** argv)
         else if (!strcmp(argv[i], "--fuzz") && i + 1 < argc) fuzz = (unsigned)atoi(argv[++i]);
         else if (!strcmp(argv[i], "--seed") && i + 1 < argc) seed = (unsigned)atoi(argv[++i]);
         else if (!strcmp(argv[i], "--case") && i + 1 < argc) only_case = (unsigned)atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--profile") && i + 1 < argc) profile = (unsigned)atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--sample") && i + 1 < argc) sample_prefix = argv[++i];
     }
     if (!load_plugin(g_plugins[0], image_dir + "/spu_0008_at_00FA9B80.elf") ||
         !load_plugin(g_plugins[1], image_dir + "/spu_0024_at_00FC7180.elf")) {
@@ -1256,6 +1497,7 @@ int main(int argc, char** argv)
     capture_stderr();
     std::thread(watchdog).detach();
     spu_0005_at_00F86A80_spu_recomp_register();
+    if (profile) return profile_main(trace_path, profile, block_limit, sample_prefix);
 
     std::vector<Snap> snaps;
     snaps.reserve(8192);

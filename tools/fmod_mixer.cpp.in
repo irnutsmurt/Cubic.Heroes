@@ -8,9 +8,13 @@
 // One C++ function per SPU function (f_<entry>), each of the lift's functions a labelled block in it
 // (L_<address>), every statement the lift's own, in its order: the instruction helpers of spu_helpers.h on
 // registers r0-r127 (word 0 the preferred slot), lsr / lsw the local store as spu_ls_read128 /
-// spu_ls_write128 address it. A function holds the registers it uses in locals: loaded from the register file
-// at entry and after each call (LOAD), stored back before each call, callback, return and exit (SAVE), so the
-// file is always what the lift leaves in ctx->gpr. A comment before each function says what reaches it.
+// spu_ls_write128 address it. A function holds the registers it names in locals, loaded from the register file
+// at entry. Around a call it stores only the assigned ones the callee can reach and reloads only those the
+// callee can change (the generator's interprocedural effects; the comment before each function gives its
+// counts); at a return, exit, stop, tail jump and branch to the host it stores every one it assigned (SAVE;
+// LOAD reloads them all, after a branch to the host). So at every callback for a stop or a branch and at every
+// exit the file is what the lift leaves in ctx->gpr; between them it is what the lift's would be for the
+// registers any code running then can see.
 #include "fmod_mixer.h"
 
 #include <cstring>
@@ -43,7 +47,9 @@ namespace {
 
 using Q = u128;
 
-enum Exit : uint32_t { kNone = 0, kHalted, kStopped, kEnded, kBadReturn };
+enum Exit : uint32_t { kNone = 0, kHalted, kStopped, kEnded, kBadReturn, kUnresolved };
+
+#define FORCE_INLINE inline __attribute__((always_inline))
 
 struct Run {
     uint8_t* ls;
@@ -54,37 +60,26 @@ struct Run {
     uint32_t jt = 0, js = 0;   // an indirect jump's target and site, for jump_to
 };
 
-inline uint32_t be32(const uint8_t* p)
-{
-    return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
-}
-inline void put_be32(uint8_t* p, uint32_t v)
-{
-    p[0] = (uint8_t)(v >> 24);
-    p[1] = (uint8_t)(v >> 16);
-    p[2] = (uint8_t)(v >> 8);
-    p[3] = (uint8_t)v;
-}
-
 // Local store, as spu_ls_read128/spu_ls_write128 address it: the quadword at (address & 0x3FFF0), big-endian
-// words, word 0 first.
-inline Q lsr(const Run& c, uint32_t a)
+// words, word 0 first (the runtime's own form: four words, each byte-swapped). Always inlined: the generated
+// functions are large enough that the compiler would otherwise call them.
+FORCE_INLINE Q lsr(const Run& c, uint32_t a)
 {
     const uint8_t* p = c.ls + (a & 0x3FFF0u);
+    uint32_t w[4];
+    memcpy(w, p, 16);
     Q v;
-    v._u32[0] = be32(p);
-    v._u32[1] = be32(p + 4);
-    v._u32[2] = be32(p + 8);
-    v._u32[3] = be32(p + 12);
+    v._u32[0] = __builtin_bswap32(w[0]);
+    v._u32[1] = __builtin_bswap32(w[1]);
+    v._u32[2] = __builtin_bswap32(w[2]);
+    v._u32[3] = __builtin_bswap32(w[3]);
     return v;
 }
-inline void lsw(Run& c, uint32_t a, const Q& v)
+FORCE_INLINE void lsw(Run& c, uint32_t a, const Q& v)
 {
-    uint8_t* p = c.ls + (a & 0x3FFF0u);
-    put_be32(p, v._u32[0]);
-    put_be32(p + 4, v._u32[1]);
-    put_be32(p + 8, v._u32[2]);
-    put_be32(p + 12, v._u32[3]);
+    const uint32_t w[4] = { __builtin_bswap32(v._u32[0]), __builtin_bswap32(v._u32[1]), __builtin_bswap32(v._u32[2]),
+                            __builtin_bswap32(v._u32[3]) };
+    memcpy(c.ls + (a & 0x3FFF0u), w, 16);
 }
 
 // Channels: the runtime takes word 0 of a written register and returns a read value or a count in word 0 of
@@ -126,6 +121,13 @@ inline void bad_return(Run& c, uint32_t link)
 inline void unsupported(Run& c, uint32_t pc)
 {
     if (c.h->unsupported) c.h->unsupported(c.h->user, pc);
+}
+// A jump table's target outside the table (only if the image's text in the local store was changed).
+inline void unresolved(Run& c, uint32_t target, uint32_t site)
+{
+    c.exit = kUnresolved;
+    c.exit_pc = site;
+    c.exit_code = target;
 }
 
 // @DECLS@
@@ -196,6 +198,7 @@ Result call(uint8_t* ls, u128* gpr, uint32_t entry, const Host& host, Outcome* o
     case kStopped: return Result::stopped;
     case kEnded: return Result::ended;
     case kBadReturn: return Result::bad_return;
+    case kUnresolved: return Result::unresolved;
     default: return Result::handled;
     }
 }

@@ -12,7 +12,8 @@ COVERAGE_MACRO = 'FMOD_MIXER_COVERAGE'
 
 # The ELF's loadable bytes [C]: .SpuGUID 0x80, .init 0x90, .text 0xE0-0x103B0, .fini 0x103B0, .rodata
 # 0x103E0-0x105C0, .ctors 0x10600, .dtors 0x10618, .data 0x10620-0x107F0, .bss 0x10800-0x36470.
-CODE_BEGIN = 0x90          # .init
+CODE_BEGIN = 0x80          # the image's first bytes (.SpuGUID: data, but the lift took it for code, so the
+                           # runtime can branch there: a target in it is the image's, not a plugin's)
 CODE_END = 0x103E0         # the end of .fini: what follows is data (the lift also took .rodata for code)
 IMAGE_END = 0x10800        # the end of the image's loaded bytes (.bss after it)
 ENTRY = 0xF0               # the ELF entry (crt0)

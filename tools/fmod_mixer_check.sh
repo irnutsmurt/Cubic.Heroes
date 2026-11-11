@@ -18,8 +18,10 @@ if [ ! -f "$OUT/mixer_lift_$SFX.o" ]; then
     "$ZIG" cc -target x86_64-windows-gnu -mcpu=$CPU -O2 -g -c -I build/ref/ps3recomp/runtime/spu \
         -I build/ref/ps3recomp/include "$LIFT" -o "$OUT/mixer_lift_$SFX.o"
 fi
-"$ZIG" c++ -target x86_64-windows-gnu -mcpu=$CPU -O2 -std=c++17 -DFMOD_MIXER_COVERAGE \
+# COVERAGE=0: the port without its block counters (as the game builds it), for --profile: fmod_mixer_prof_*.exe
+if [ "${COVERAGE:-1}" = 0 ]; then DEF=""; EXE="$OUT/fmod_mixer_prof_$SFX.exe"; else DEF="-DFMOD_MIXER_COVERAGE"; EXE="$OUT/fmod_mixer_check_$SFX.exe"; fi
+"$ZIG" c++ -target x86_64-windows-gnu -mcpu=$CPU -O2 -g -std=c++17 $DEF \
     -I port/native -I build/ref/ps3recomp/runtime/spu -I build/ref/ps3recomp/include \
     tests/native/fmod_mixer_check.cpp port/native/fmod_mixer.cpp port/native/fmod_codec_raw.cpp \
-    port/native/fmod_sfxreverb.cpp "$OUT/mixer_lift_$SFX.o" -Wl,--stack,67108864 -o "$OUT/fmod_mixer_check_$SFX.exe"
-echo "built $OUT/fmod_mixer_check_$SFX.exe"
+    port/native/fmod_sfxreverb.cpp "$OUT/mixer_lift_$SFX.o" -Wl,--stack,67108864 -o "$EXE"
+echo "built $EXE"

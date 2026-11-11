@@ -46,8 +46,8 @@
 //     kind: overlay_call / overlay_jump for a target outside the image's code (a plugin the mixer loaded:
 //     codec_raw, sfxreverb, ...), unresolved_call / unresolved_jump inside the image but not a function the
 //     port has. The five jump tables (0x231C, 0x245C, 0x873C, 0xCD04, 0xD2FC, read from the image) are
-//     switches of gotos over their targets; a target not in the table goes to the branch callback too.
-//     Nothing falls back silently.
+//     switches of gotos over their targets; a target not in the table -- possible only if the image's text in
+//     the local store was changed -- ends the run (Result::unresolved). Nothing falls back silently.
 //   - the return check of the lift's drain: after a call, the callee must have returned (bi $r0) to the link;
 //     anything else ends the run (Result::bad_return), where the runtime would go on at that pc.
 //   What the port does not do as the runtime does, none of it met in the mixer [C]: the runtime's drain also
@@ -63,10 +63,28 @@
 //
 // ---- Bit-exact ------------------------------------------------------------------------------------------------------
 // fmod_mixer.cpp is generated (gen_spu_native.py, fmod_mixer_config.py, fmod_mixer.cpp.in): each statement the
-// lift's own, in its order, on the same spu_helpers.h helpers; the whole register file kept (a function holds
-// the registers it uses in locals, loaded at entry and after each call, stored back before each call,
-// callback, return and exit). So at every callback and every exit, all 128 registers (all four words) and every
-// local-store byte are what the lifted code has at that point.
+// lift's own, in its order, on the same spu_helpers.h helpers; the whole register file kept. A function holds
+// the registers it names in locals, loaded at entry; around a call it stores only the ones it assigned that the
+// callee can reach and reloads only those the callee can change (the generator's interprocedural effects: a
+// callee that can reach a stop or a branch to the host reaches every register); at a return, exit, stop, tail
+// jump and branch to the host it stores all it assigned. So at every stop and branch callback and at every exit,
+// all 128 registers (all four words) and every local-store byte are what the lifted code has at that point; at a
+// channel callback the local store is, the registers not (no host needs them there). Within a function a forward
+// dataflow keeps the set that may be dirty at each site: each store is of what may differ from the file there.
+//
+// ---- Speed (2026-11-11) ---------------------------------------------------------------------------------------------
+// The first port saved and loaded the function's whole register set around every call: in the game the mixer's
+// work a block was 150.6 us native against 126.0 us lifted (the river fight; docs/AUDIO.md A3 part 2). Measured
+// off-line (fmod_mixer_check --profile: the river trace preloaded, the time in the model's channel operations,
+// DMA and plugins counted apart, so the rest is the mixer's code alone): the lifted mixer 49.9 us a block, the
+// first port 69.2 us (+38.5%); sampled, 18 us of the port's were on its register saves and loads around calls,
+// at entries and at returns (the plugin loader's helpers called per DSP unit saving ~100 registers each time),
+// 2.4 us in lsr / lsw left out of line. With the effects across calls, the dataflow within functions and lsr /
+// lsw always inlined, on the same harness (the mixer's code a block, best of the passes): the river trace
+// x86_64_v3 the port 42.3 us against the lifted 50.2 (-15.9%), x86_64_v2 59.9 against 70.6 (-15.2%); the long
+// dungeon trace (24,070 blocks, sfxreverb through 0x6118) x86_64_v3 44.3 against 53.0 (-16.6%). What is left of
+// the register traffic is mostly where the file must be whole: the plugin loader's calls into a plugin
+// (0xD6A4, 0xD9D4) and the calls that can reach them.
 // Checked by fmod_mixer_check.cpp (2026-11-10): the game's two channel traces of the mixer's thread (rel24:
 // the river fight's run and the first dungeon's, each from the thread's entry to its 1,500 MB limit, about 28 s
 // of audio) replayed into the lifted mixer and into this port, every record fed or checked (each rdch value,
@@ -74,7 +92,10 @@
 // blocks, the dungeon 5,375, all equal for both, and the two equal at every block boundary (all 128 registers,
 // the whole local store), at x86_64_v3 and x86_64_v2. Synthesized cases from the traces' states (the block with
 // what its GETs read mutated, single functions with drawn arguments): the numbers in the checker. Neither trace
-// calls sfxreverb (codec_raw: 31,088 and 30,978 calls), and neither reaches the DSP plugin call at 0x6118.
+// calls sfxreverb (codec_raw: 31,088 and 30,978 calls), and neither reaches the DSP plugin call at 0x6118; the
+// long dungeon trace (24,070 blocks, 15,308 sfxreverb calls through 0x6118) and the trace of the native mixer's
+// own run in the game (24,445 blocks) do, and replay equal too. Rechecked after the register effects (2026-11-11):
+// all four traces, every block boundary equal, at both levels; 77,855 synthesized cases equal.
 //
 // ---- What the host provides in place of the SPU thread (the runtime does each of these today) ----------------
 // Run call(ctx->ls, ctx->gpr, kEntry, host) on the thread's own host thread, from the registers lv2's group start
@@ -110,7 +131,8 @@
 //           0 (the runtime reports an unlifted branch there). unresolved_call / unresolved_jump: never in the game
 //           traces nor in any real block the checker re-ran; report and return 0 (or run the lifted function, if
 //           the lift is kept for diagnostics).
-//   Result::halted: the runtime's halt (its HALT-ASSERT line; the thread stops); bad_return: report, as fatal.
+//   Result::halted: the runtime's halt (its HALT-ASSERT line; the thread stops); bad_return, unresolved: report,
+//   as fatal.
 #pragma once
 #include <cstdint>
 
@@ -121,7 +143,8 @@ namespace fmod_mixer {
 constexpr uint32_t kEntry = 0xF0;              // the ELF entry (crt0): the thread's start
 constexpr uint32_t kEntryMain = 0xE190;
 constexpr uint32_t kEntryBlock = 0xDA30;       // the block, as the main loop calls it
-constexpr uint32_t kCodeBegin = 0x90, kCodeEnd = 0x103E0;   // the image's code ([.init, .fini end))
+// The image's span for Branch: [.SpuGUID, .fini end) -- the lift took .SpuGUID's bytes for code too
+constexpr uint32_t kCodeBegin = 0x80, kCodeEnd = 0x103E0;
 
 enum class Branch : uint32_t {
     overlay_call = 1,      // bisl to code outside the image (a plugin): r0 = the link
@@ -157,12 +180,13 @@ enum class Result {
     stopped,      // a stop the lift does not continue past (*pc, *code), after the stop callback
     ended,        // a callback ended the run (stop returned 0, or branch returned 0)
     bad_return,   // a callee returned to *pc, not to its link (the lift's drain would go on there)
+    unresolved,   // a jump table's target outside its table (*code) at the jump *pc: the image's text was changed
 };
 
 struct Outcome {
     uint32_t ret_pc = 0;   // handled: where it returned
-    uint32_t pc = 0;       // halted, stopped, bad_return: the pc; ended: the stop's or branch's site
-    uint32_t code = 0;     // stopped, ended at a stop: the stop code
+    uint32_t pc = 0;       // halted, stopped, bad_return, unresolved: the pc; ended: the stop's or branch's site
+    uint32_t code = 0;     // stopped, ended at a stop: the stop code; unresolved: the target
 };
 
 // Runs the function at local-store address `entry` on `ls` (256 KB) and `gpr` (128 registers) as the lifted

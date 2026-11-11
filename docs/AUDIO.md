@@ -275,6 +275,23 @@ answer). Only the mixer's code changes. DOTHEROES_NATIVE_FMOD_MIXER=1; **off by 
   registers around a call), then the host's own services in place of the runtime's channels (A3's
   retirements, A4's atomics). The absolute cost is small (about 25 us in a 5,333 us block, on a thread that
   waits the rest), but a native step that is slower is not taken.
+- **Where the time went, then the fix** (2026-11-11): a timing mode in the checker (`--profile N`: the trace
+  preloaded, lifted and port passes alternating, the model's channels, DMA and the plugins timed apart, so what
+  remains is the mixer's own code; `--sample` and tools/fmod_mixer_profile.py name where it is spent). The port
+  lost about 18 of its 19 us a block on the register file stored and reloaded around calls (call sites 13.2,
+  prologues 2.2, returns 2.2 -- worst the unit loop 0x5848's calls to small helpers, about 100 registers each)
+  and 2.4 us on local-store accesses left out of line. The generator now computes, per function and across
+  calls, the registers a callee can read and write (anything that can reach a plugin call or a stop: all of
+  them), stores before a call only the dirty ones the callee can read and reloads after it only those it can
+  write; the whole file is current at every stop, every plugin branch and every exit, as the host needs.
+  Every check again: the four traces (the river, the dungeon, the long dungeon run, the native run) at
+  x86-64-v3 and v2, 77,855 synthesized cases, all equal. The mixer's own code a block, river trace, v3: **the
+  port 42.5 us against the lift 49.4 us** (before: 69.2 against 49.9).
+- **In the game** (rel26, alternating runs, real audio; the mixer's work a block): **the river fight 115.4 and
+  111.3 us native against 128.1 and 122.6 us lifted (-9.6%); the first dungeon's approach 255.1 against
+  290.4 us (-12%)** -- the difference several times the runs' spread. The quit drive native passed (the
+  terminate stopped the thread); a trace of the native dungeon run (24,386 blocks) replayed equal through the
+  lifted mixer and the port.
 
 ### A0, the captures (2026-11-10, rel24) [C, M]
 

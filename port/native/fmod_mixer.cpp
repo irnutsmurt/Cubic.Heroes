@@ -8,9 +8,13 @@
 // One C++ function per SPU function (f_<entry>), each of the lift's functions a labelled block in it
 // (L_<address>), every statement the lift's own, in its order: the instruction helpers of spu_helpers.h on
 // registers r0-r127 (word 0 the preferred slot), lsr / lsw the local store as spu_ls_read128 /
-// spu_ls_write128 address it. A function holds the registers it uses in locals: loaded from the register file
-// at entry and after each call (LOAD), stored back before each call, callback, return and exit (SAVE), so the
-// file is always what the lift leaves in ctx->gpr. A comment before each function says what reaches it.
+// spu_ls_write128 address it. A function holds the registers it names in locals, loaded from the register file
+// at entry. Around a call it stores only the assigned ones the callee can reach and reloads only those the
+// callee can change (the generator's interprocedural effects; the comment before each function gives its
+// counts); at a return, exit, stop, tail jump and branch to the host it stores every one it assigned (SAVE;
+// LOAD reloads them all, after a branch to the host). So at every callback for a stop or a branch and at every
+// exit the file is what the lift leaves in ctx->gpr; between them it is what the lift's would be for the
+// registers any code running then can see.
 #include "fmod_mixer.h"
 
 #include <cstring>
@@ -37,13 +41,15 @@ unsigned long long g_block_hits[kBlockCount];
 #define TAIL return
 #endif
 
-static_assert(kCodeBegin == 0x00090u && kCodeEnd == 0x103E0u, "fmod_mixer.h and the configuration disagree");
+static_assert(kCodeBegin == 0x00080u && kCodeEnd == 0x103E0u, "fmod_mixer.h and the configuration disagree");
 
 namespace {
 
 using Q = u128;
 
-enum Exit : uint32_t { kNone = 0, kHalted, kStopped, kEnded, kBadReturn };
+enum Exit : uint32_t { kNone = 0, kHalted, kStopped, kEnded, kBadReturn, kUnresolved };
+
+#define FORCE_INLINE inline __attribute__((always_inline))
 
 struct Run {
     uint8_t* ls;
@@ -54,37 +60,26 @@ struct Run {
     uint32_t jt = 0, js = 0;   // an indirect jump's target and site, for jump_to
 };
 
-inline uint32_t be32(const uint8_t* p)
-{
-    return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
-}
-inline void put_be32(uint8_t* p, uint32_t v)
-{
-    p[0] = (uint8_t)(v >> 24);
-    p[1] = (uint8_t)(v >> 16);
-    p[2] = (uint8_t)(v >> 8);
-    p[3] = (uint8_t)v;
-}
-
 // Local store, as spu_ls_read128/spu_ls_write128 address it: the quadword at (address & 0x3FFF0), big-endian
-// words, word 0 first.
-inline Q lsr(const Run& c, uint32_t a)
+// words, word 0 first (the runtime's own form: four words, each byte-swapped). Always inlined: the generated
+// functions are large enough that the compiler would otherwise call them.
+FORCE_INLINE Q lsr(const Run& c, uint32_t a)
 {
     const uint8_t* p = c.ls + (a & 0x3FFF0u);
+    uint32_t w[4];
+    memcpy(w, p, 16);
     Q v;
-    v._u32[0] = be32(p);
-    v._u32[1] = be32(p + 4);
-    v._u32[2] = be32(p + 8);
-    v._u32[3] = be32(p + 12);
+    v._u32[0] = __builtin_bswap32(w[0]);
+    v._u32[1] = __builtin_bswap32(w[1]);
+    v._u32[2] = __builtin_bswap32(w[2]);
+    v._u32[3] = __builtin_bswap32(w[3]);
     return v;
 }
-inline void lsw(Run& c, uint32_t a, const Q& v)
+FORCE_INLINE void lsw(Run& c, uint32_t a, const Q& v)
 {
-    uint8_t* p = c.ls + (a & 0x3FFF0u);
-    put_be32(p, v._u32[0]);
-    put_be32(p + 4, v._u32[1]);
-    put_be32(p + 8, v._u32[2]);
-    put_be32(p + 12, v._u32[3]);
+    const uint32_t w[4] = { __builtin_bswap32(v._u32[0]), __builtin_bswap32(v._u32[1]), __builtin_bswap32(v._u32[2]),
+                            __builtin_bswap32(v._u32[3]) };
+    memcpy(c.ls + (a & 0x3FFF0u), w, 16);
 }
 
 // Channels: the runtime takes word 0 of a written register and returns a read value or a count in word 0 of
@@ -126,6 +121,13 @@ inline void bad_return(Run& c, uint32_t link)
 inline void unsupported(Run& c, uint32_t pc)
 {
     if (c.h->unsupported) c.h->unsupported(c.h->user, pc);
+}
+// A jump table's target outside the table (only if the image's text in the local store was changed).
+inline void unresolved(Run& c, uint32_t target, uint32_t site)
+{
+    c.exit = kUnresolved;
+    c.exit_pc = site;
+    c.exit_code = target;
 }
 
 void f_00090(Run& c);
@@ -454,13 +456,12 @@ void jump_to(Run& c)
     }
 }
 
-// ---- 0x00090 .init: the .ctors run backwards from 0x10610 (bisl through each) (12 blocks; called from 128) ----
+// ---- 0x00090 .init: the .ctors run backwards from 0x10610 (bisl through each) (12 blocks; called from 128; 8
+// registers, 8 assigned; reaches all, changes all) ----
 void f_00090(Run& c)
 {
     u128* const g = c.g;
     Q r0 = g[0], r1 = g[1], r2 = g[2], r3 = g[3], r4 = g[4], r80 = g[80], r81 = g[81], r126 = g[126];
-#define SAVE() do { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[80] = r80; g[81] = r81; g[126] = r126; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r80 = g[80]; r81 = g[81]; r126 = g[126]; } while (0)
 L_00090:
     COV(0);
     lsw(c, r1._u32[0] + 0x10, r0);
@@ -485,7 +486,7 @@ L_000A0:
     goto L_000B4;
 L_000B0:
     COV(5);
-    { const uint32_t t = r3._u32[0]; r0 = spu_link(0xB4u); SAVE(); if (!branch(c, t & 0x3FFFFu, 0xB0u, true)) return; if ((c.ret ^ 0xB4u) & 0x3FFFFu) { bad_return(c, 0xB4u); return; } LOAD(); }   // bisl $r0, $r3
+    { const uint32_t t = r3._u32[0]; r0 = spu_link(0xB4u); g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[80] = r80; if (!branch(c, t & 0x3FFFFu, 0xB0u, true)) return; if ((c.ret ^ 0xB4u) & 0x3FFFFu) { bad_return(c, 0xB4u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r80 = g[80]; r81 = g[81]; r126 = g[126]; }   // bisl $r0, $r3
     goto L_000B4;
 L_000B4:
     COV(6);
@@ -514,23 +515,20 @@ L_000D4:
     COV(11);
     r126 = lsr(c, r1._u32[0] + 0x40);
     r1 = spu_ai(r1, 80);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[80] = r80; g[81] = r81; g[126] = r126; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x000E0 exit(status): .fini (0x103B0), then 0x10258 (3 blocks; called from EA98) ----
+// ---- 0x000E0 exit(status): .fini (0x103B0), then 0x10258 (3 blocks; called from EA98; 3 registers, 3 assigned;
+// reaches all, changes 11) ----
 void f_000E0(Run& c)
 {
     u128* const g = c.g;
     Q r0 = g[0], r3 = g[3], r80 = g[80];
-#define SAVE() do { g[0] = r0; g[3] = r3; g[80] = r80; } while (0)
-#define LOAD() do { r0 = g[0]; r3 = g[3]; r80 = g[80]; } while (0)
 L_000E0:
     COV(12);
     r80 = spu_ori(r3, 0);
-    r0 = spu_link(0xE8u);
-    SAVE(); f_103B0(c); if (c.exit) return; if ((c.ret ^ 0xE8u) & 0x3FFFFu) { bad_return(c, 0xE8u); return; } LOAD();   // brsl $r0, 0x103B0
+    r0 = spu_link(0xE8u);   // brsl $r0, 0x103B0
+    g[0] = r0; g[80] = r80; f_103B0(c); if (c.exit) return; if ((c.ret ^ 0xE8u) & 0x3FFFFu) { bad_return(c, 0xE8u); return; } r0 = g[0]; r80 = g[80];
     goto L_000E8;
 L_000E8:
     COV(13);
@@ -538,20 +536,16 @@ L_000E8:
     goto L_000EC;
 L_000EC:
     COV(14);
-    { SAVE(); TAIL f_10258(c); }   // a tail jump
-#undef SAVE
-#undef LOAD
+    { g[3] = r3; TAIL f_10258(c); }   // a tail jump
 }
 
 // ---- 0x000F0 crt0, the ELF entry: the stack at 0x3FFD0, .init, main(r3-r6) (0xE190), then 0xEA98; stop 0 (15
-// blocks; the ELF entry) ----
+// blocks; the ELF entry; 16 registers, 16 assigned; reaches all, changes all) ----
 void f_000F0(Run& c)
 {
     u128* const g = c.g;
     Q r0 = g[0], r1 = g[1], r2 = g[2], r3 = g[3], r4 = g[4], r5 = g[5], r6 = g[6], r7 = g[7];
     Q r8 = g[8], r10 = g[10], r11 = g[11], r12 = g[12], r80 = g[80], r81 = g[81], r82 = g[82], r83 = g[83];
-#define SAVE() do { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[10] = r10; g[11] = r11; g[12] = r12; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; } while (0)
 L_000F0:
     COV(15);
     r8 = spu_ila(0x3FFD0);
@@ -603,8 +597,8 @@ L_00124:
     goto L_00128;
 L_00128:
     COV(27);
-    r0 = spu_link(0x12Cu);
-    SAVE(); f_00090(c); if (c.exit) return; if ((c.ret ^ 0x12Cu) & 0x3FFFFu) { bad_return(c, 0x12Cu); return; } LOAD();   // brsl $r0, 0x90
+    r0 = spu_link(0x12Cu);   // brsl $r0, 0x90
+    g[0] = r0; g[1] = r1; g[2] = r2; g[7] = r7; g[8] = r8; g[10] = r10; g[11] = r11; g[12] = r12; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; f_00090(c); if (c.exit) return; if ((c.ret ^ 0x12Cu) & 0x3FFFFu) { bad_return(c, 0x12Cu); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83];
     goto L_0012C;
 L_0012C:
     COV(28);
@@ -612,19 +606,17 @@ L_0012C:
     r5 = spu_ori(r82, 0);
     r6 = spu_shlqbyi(r83, 0);
     r3 = spu_ori(r80, 0);
-    r0 = spu_link(0x140u);
-    SAVE(); f_0E190(c); if (c.exit) return; if ((c.ret ^ 0x140u) & 0x3FFFFu) { bad_return(c, 0x140u); return; } LOAD();   // brsl $r0, 0xE190
+    r0 = spu_link(0x140u);   // brsl $r0, 0xE190
+    g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; f_0E190(c); if (c.exit) return; if ((c.ret ^ 0x140u) & 0x3FFFFu) { bad_return(c, 0x140u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83];
     goto L_00140;
 L_00140:
     COV(29);
-    r0 = spu_link(0x144u);
-    SAVE(); f_0EA98(c); if (c.exit) return; if ((c.ret ^ 0x144u) & 0x3FFFFu) { bad_return(c, 0x144u); return; } LOAD();   // brsl $r0, 0xEA98
-    { SAVE(); stop_end(c, 0x0u, 0x144u, 0x140u); return; }   // stop 0x0: the lift returns after it
-#undef SAVE
-#undef LOAD
+    r0 = spu_link(0x144u);   // brsl $r0, 0xEA98
+    g[0] = r0; f_0EA98(c); if (c.exit) return; if ((c.ret ^ 0x144u) & 0x3FFFFu) { bad_return(c, 0x144u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83];
+    { stop_end(c, 0x0u, 0x144u, 0x140u); return; }   // stop 0x0: the lift returns after it
 }
 
-// ---- 0x00148 (6 blocks; called from 1D8) ----
+// ---- 0x00148 (6 blocks; called from 1D8; 25 registers, 23 assigned; reaches 25, changes 23) ----
 void f_00148(Run& c)
 {
     u128* const g = c.g;
@@ -632,8 +624,6 @@ void f_00148(Run& c)
     Q r9 = g[9], r10 = g[10], r11 = g[11], r12 = g[12], r13 = g[13], r14 = g[14], r15 = g[15], r16 = g[16];
     Q r17 = g[17], r18 = g[18], r19 = g[19], r20 = g[20], r21 = g[21], r22 = g[22], r23 = g[23], r24 = g[24];
     Q r25 = g[25];
-#define SAVE() do { g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; } while (0)
-#define LOAD() do { r0 = g[0]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; } while (0)
 L_00148:
     COV(30);
     r5 = spu_il(4);
@@ -681,19 +671,15 @@ L_001A0:
 L_001C0:
     COV(35);
     lsw(c, r3._u32[0] + r6._u32[0], r2);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[2] = r2; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x001C8 (4 blocks; called from 618, DC78) ----
+// ---- 0x001C8 (4 blocks; called from 618, DC78; 12 registers, 12 assigned; reaches 27, changes 27) ----
 void f_001C8(Run& c)
 {
     u128* const g = c.g;
     Q r0 = g[0], r1 = g[1], r2 = g[2], r3 = g[3], r4 = g[4], r5 = g[5], r6 = g[6], r7 = g[7];
     Q r8 = g[8], r9 = g[9], r10 = g[10], r80 = g[80];
-#define SAVE() do { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[80] = r80; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r80 = g[80]; } while (0)
 L_001C8:
     COV(36);
     lsw(c, r1._u32[0] + -0x10, r80);
@@ -705,8 +691,8 @@ L_001D8:
     COV(37);
     lsw(c, r1._u32[0] + -0x30, r1);
     r1 = spu_ai(r1, -48);
-    r0 = spu_link(0x1E4u);
-    SAVE(); f_00148(c); if (c.exit) return; if ((c.ret ^ 0x1E4u) & 0x3FFFFu) { bad_return(c, 0x1E4u); return; } LOAD();   // brsl $r0, 0x148
+    r0 = spu_link(0x1E4u);   // brsl $r0, 0x148
+    g[0] = r0; g[3] = r3; f_00148(c); if (c.exit) { g[1] = r1; g[80] = r80; return; } if ((c.ret ^ 0x1E4u) & 0x3FFFFu) { g[1] = r1; g[80] = r80; bad_return(c, 0x1E4u); return; } r2 = g[2]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10];
     r9 = lsr(c, r80._u32[0] + 0x0);
     r10 = spu_ila(0x103F8);
     r5 = spu_cwd(r80, 0);
@@ -727,20 +713,17 @@ L_00210:
     r0 = lsr(c, r1._u32[0] + 0x40);
     r1 = spu_ai(r1, 48);
     r80 = lsr(c, r1._u32[0] + -0x10);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[80] = r80; c.ret = r0._u32[0]; return; }
 }
 
 // ---- 0x00220 (4 blocks; through a pointer: in a static descriptor in .rodata (0x103E8): r6 = this[108]; when set,
-// this[0x20] = 0x608 and a call through r6 (bisl at 0x258); returns 0) ----
+// this[0x20] = 0x608 and a call through r6 (bisl at 0x258); returns 0; 11 registers, 11 assigned; reaches all,
+// changes all) ----
 void f_00220(Run& c)
 {
     u128* const g = c.g;
     Q r0 = g[0], r1 = g[1], r2 = g[2], r3 = g[3], r4 = g[4], r5 = g[5], r6 = g[6], r7 = g[7];
     Q r8 = g[8], r9 = g[9], r10 = g[10];
-#define SAVE() do { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; } while (0)
 L_00220:
     COV(40);
     r4 = spu_ai(r3, 108);
@@ -763,19 +746,18 @@ L_00240:
     r9 = lsr(c, r5._u32[0] + 0x20);
     r8 = spu_shufb(r10, r9, r7);
     lsw(c, r5._u32[0] + 0x20, r8);
-    { const uint32_t t = r6._u32[0]; r0 = spu_link(0x25Cu); SAVE(); if (!branch(c, t & 0x3FFFFu, 0x258u, true)) return; if ((c.ret ^ 0x25Cu) & 0x3FFFFu) { bad_return(c, 0x25Cu); return; } LOAD(); }   // bisl $r0, $r6
+    { const uint32_t t = r6._u32[0]; r0 = spu_link(0x25Cu); g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; if (!branch(c, t & 0x3FFFFu, 0x258u, true)) return; if ((c.ret ^ 0x25Cu) & 0x3FFFFu) { bad_return(c, 0x25Cu); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; }   // bisl $r0, $r6
     goto L_0025C;
 L_0025C:
     COV(43);
     r0 = lsr(c, r1._u32[0] + 0x30);
     r3 = spu_il(0);
     r1 = spu_ai(r1, 32);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x00270 (10 blocks; called from 524, 2AD0, 8D40, 9FD4, B17C, C4F8) ----
+// ---- 0x00270 (10 blocks; called from 524, 2AD0, 8D40, 9FD4, B17C, C4F8; 51 registers, 50 assigned; reaches 51,
+// changes 50) ----
 void f_00270(Run& c)
 {
     u128* const g = c.g;
@@ -786,8 +768,6 @@ void f_00270(Run& c)
     Q r33 = g[33], r34 = g[34], r35 = g[35], r36 = g[36], r37 = g[37], r38 = g[38], r39 = g[39], r40 = g[40];
     Q r41 = g[41], r42 = g[42], r43 = g[43], r44 = g[44], r45 = g[45], r46 = g[46], r47 = g[47], r48 = g[48];
     Q r49 = g[49], r50 = g[50], r51 = g[51];
-#define SAVE() do { g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; } while (0)
-#define LOAD() do { r0 = g[0]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; } while (0)
 L_00270:
     COV(44);
     r11 = spu_ori(r5, 0);
@@ -897,12 +877,10 @@ L_00398:
 L_003C8:
     COV(53);
     r3 = spu_ori(r15, 0);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x003D0 (9 blocks; called from DA30) ----
+// ---- 0x003D0 (9 blocks; called from DA30; 82 registers, 82 assigned; reaches all, changes all) ----
 void f_003D0(Run& c)
 {
     u128* const g = c.g;
@@ -917,8 +895,6 @@ void f_003D0(Run& c)
     Q r64 = g[64], r65 = g[65], r66 = g[66], r67 = g[67], r68 = g[68], r69 = g[69], r70 = g[70], r71 = g[71];
     Q r72 = g[72], r73 = g[73], r74 = g[74], r75 = g[75], r80 = g[80], r81 = g[81], r82 = g[82], r83 = g[83];
     Q r84 = g[84], r85 = g[85];
-#define SAVE() do { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; r85 = g[85]; } while (0)
 L_003D0:
     COV(54);
     r9 = spu_ceqi(r4, 0);
@@ -979,7 +955,7 @@ L_00460:
     r19 = spu_sfi(r21, 0);
     r17 = spu_and(r19, r20);
     r16 = spu_and(r17, r18);
-    if ((int32_t)r16._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0x4A4u); return; }   // heqi
+    if ((int32_t)r16._u32[0] == (int32_t)(0)) { g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[80] = r80; g[82] = r82; g[83] = r83; halt(c, 0x4A4u); return; }   // heqi
     r3 = spu_il(0);
     r4 = spu_fsmbi(0x0);
     r12 = spu_il(1);
@@ -999,8 +975,8 @@ L_004D0:
     wrch(c, MFC_WrTagMask, r10);
     wrch(c, MFC_WrTagUpdate, r10);
     r2 = rdch(c, MFC_RdTagStat);
-    r0 = spu_link(0x4ECu);
-    SAVE(); f_0D278(c); if (c.exit) return; if ((c.ret ^ 0x4ECu) & 0x3FFFFu) { bad_return(c, 0x4ECu); return; } LOAD();   // brsl $r0, 0xD278
+    r0 = spu_link(0x4ECu);   // brsl $r0, 0xD278
+    g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[80] = r80; g[82] = r82; g[83] = r83; g[84] = r84; f_0D278(c); if (c.exit) return; if ((c.ret ^ 0x4ECu) & 0x3FFFFu) { bad_return(c, 0x4ECu); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; r85 = g[85];
     goto L_004EC;
 L_004EC:
     COV(58);
@@ -1040,15 +1016,15 @@ L_00524:
     r6 = lsr(c, r1._u32[0] + 0x20);
     r8 = spu_rotqby(r44, r45);
     r9 = spu_rotqby(r43, r81);
-    r0 = spu_link(0x578u);
-    SAVE(); f_05848(c); if (c.exit) return; if ((c.ret ^ 0x578u) & 0x3FFFFu) { bad_return(c, 0x578u); return; } LOAD();   // brsl $r0, 0x5848
+    r0 = spu_link(0x578u);   // brsl $r0, 0x5848
+    g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[81] = r81; g[82] = r82; g[84] = r84; g[85] = r85; f_05848(c); if (c.exit) return; if ((c.ret ^ 0x578u) & 0x3FFFFu) { bad_return(c, 0x578u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; r85 = g[85];
     r3 = spu_ori(r83, 0);
     r4 = lsr(c, r1._u32[0] + 0x30);
     r42 = spu_ceq(r4, r83);
     if (r42._u32[0] != 0) goto L_00590;
     r5 = spu_il(8192);
-    r0 = spu_link(0x590u);
-    SAVE(); f_00270(c); if (c.exit) return; if ((c.ret ^ 0x590u) & 0x3FFFFu) { bad_return(c, 0x590u); return; } LOAD();   // brsl $r0, 0x270
+    r0 = spu_link(0x590u);   // brsl $r0, 0x270
+    g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; g[42] = r42; f_00270(c); if (c.exit) return; if ((c.ret ^ 0x590u) & 0x3FFFFu) { bad_return(c, 0x590u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51];
     goto L_00590;
 L_00590:
     COV(60);
@@ -1085,54 +1061,42 @@ L_005E4:
     r83 = lsr(c, r1._u32[0] + -0x40);
     r84 = lsr(c, r1._u32[0] + -0x50);
     r85 = lsr(c, r1._u32[0] + -0x60);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[42] = r42; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x00608 (1 blocks; through a pointer: a callback stored into an object (ila at 0x248): this - 28 -> 0x3D0)
-// ----
+// ---- 0x00608 (1 blocks; through a pointer: a callback stored into an object (ila at 0x248): this - 28 -> 0x3D0; 3
+// registers, 2 assigned; reaches all, changes all) ----
 void f_00608(Run& c)
 {
     u128* const g = c.g;
     Q r0 = g[0], r2 = g[2], r3 = g[3];
-#define SAVE() do { g[0] = r0; g[2] = r2; g[3] = r3; } while (0)
-#define LOAD() do { r0 = g[0]; r2 = g[2]; r3 = g[3]; } while (0)
 L_00608:
     COV(63);
     r2 = spu_ai(r3, -28);
     r3 = spu_ceqi(r3, 0);
     r3 = spu_andc(r2, r3);
-    { SAVE(); TAIL f_003D0(c); }   // a tail jump
-#undef SAVE
-#undef LOAD
+    { g[2] = r2; g[3] = r3; TAIL f_003D0(c); }   // a tail jump
 }
 
-// ---- 0x00748 (1 blocks; through a pointer: in static descriptors in .rodata (0x103F8, 0x10438, 0x10448): returns 0)
-// ----
+// ---- 0x00748 (1 blocks; through a pointer: in static descriptors in .rodata (0x103F8, 0x10438, 0x10448): returns 0;
+// 2 registers, 1 assigned; reaches 2, changes 1) ----
 void f_00748(Run& c)
 {
     u128* const g = c.g;
     Q r0 = g[0], r3 = g[3];
-#define SAVE() do { g[0] = r0; g[3] = r3; } while (0)
-#define LOAD() do { r0 = g[0]; r3 = g[3]; } while (0)
 L_00748:
     COV(67);
     r3 = spu_il(0);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[3] = r3; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x00750 (1 blocks; called from D018) ----
+// ---- 0x00750 (1 blocks; called from D018; 20 registers, 17 assigned; reaches 20, changes 17) ----
 void f_00750(Run& c)
 {
     u128* const g = c.g;
     Q r0 = g[0], r1 = g[1], r2 = g[2], r3 = g[3], r4 = g[4], r5 = g[5], r6 = g[6], r7 = g[7];
     Q r8 = g[8], r9 = g[9], r10 = g[10], r11 = g[11], r12 = g[12], r13 = g[13], r14 = g[14], r15 = g[15];
     Q r16 = g[16], r17 = g[17], r18 = g[18], r19 = g[19];
-#define SAVE() do { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; } while (0)
 L_00750:
     COV(68);
     r13 = spu_il(0);
@@ -1155,19 +1119,15 @@ L_00750:
     lsw(c, r3._u32[0] + 0x0, r2);
     lsw(c, r3._u32[0] + 0x20, r5);
     lsw(c, r3._u32[0] + 0x10, r8);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[2] = r2; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x007A8 (1 blocks; called from E380) ----
+// ---- 0x007A8 (1 blocks; called from E380; 11 registers, 9 assigned; reaches 11, changes 9) ----
 void f_007A8(Run& c)
 {
     u128* const g = c.g;
     Q r0 = g[0], r1 = g[1], r2 = g[2], r3 = g[3], r4 = g[4], r5 = g[5], r6 = g[6], r7 = g[7];
     Q r8 = g[8], r9 = g[9], r10 = g[10];
-#define SAVE() do { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; } while (0)
 L_007A8:
     COV(69);
     r6 = spu_ori(r3, 0);
@@ -1181,12 +1141,10 @@ L_007A8:
     r4 = lsr(c, 0x35EC0);
     r2 = spu_shufb(r4, r5, r7);
     lsw(c, r6._u32[0] + 0x0, r2);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x007E0 (7 blocks; called from 20C8) ----
+// ---- 0x007E0 (7 blocks; called from 20C8; 57 registers, 55 assigned; reaches 57, changes 55) ----
 void f_007E0(Run& c)
 {
     u128* const g = c.g;
@@ -1198,8 +1156,6 @@ void f_007E0(Run& c)
     Q r41 = g[41], r42 = g[42], r43 = g[43], r44 = g[44], r45 = g[45], r46 = g[46], r47 = g[47], r48 = g[48];
     Q r49 = g[49], r50 = g[50], r51 = g[51], r52 = g[52], r53 = g[53], r54 = g[54], r55 = g[55], r56 = g[56];
     Q r57 = g[57];
-#define SAVE() do { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; } while (0)
 L_007E0:
     COV(70);
     r40 = spu_il(4);
@@ -1289,7 +1245,7 @@ L_008A8:
 L_00908:
     COV(75);
     r5 = spu_andi(r14, 1);
-    if (r5._u32[0] == 0) { SAVE(); c.ret = g[0]._u32[0]; return; }
+    if (r5._u32[0] == 0) { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; c.ret = r0._u32[0]; return; }
     goto L_00918;
 L_00918:
     COV(76);
@@ -1305,12 +1261,10 @@ L_00918:
     lsw(c, r6._u32[0] + 0x10, r52);
     r6 = spu_ai(r6, 32);
     if (r5._u32[0] != 0) goto L_00918;
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x00950 (5 blocks; called from 16CC) ----
+// ---- 0x00950 (5 blocks; called from 16CC; 63 registers, 61 assigned; reaches 63, changes 61) ----
 void f_00950(Run& c)
 {
     u128* const g = c.g;
@@ -1322,8 +1276,6 @@ void f_00950(Run& c)
     Q r41 = g[41], r42 = g[42], r43 = g[43], r44 = g[44], r45 = g[45], r46 = g[46], r47 = g[47], r48 = g[48];
     Q r49 = g[49], r50 = g[50], r51 = g[51], r52 = g[52], r53 = g[53], r54 = g[54], r55 = g[55], r56 = g[56];
     Q r57 = g[57], r58 = g[58], r59 = g[59], r60 = g[60], r61 = g[61], r62 = g[62], r63 = g[63];
-#define SAVE() do { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; } while (0)
 L_00950:
     COV(77);
     r41 = spu_il(4);
@@ -1412,7 +1364,7 @@ L_00A20:
 L_00A90:
     COV(80);
     r6 = spu_andi(r21, 1);
-    if (r6._u32[0] == 0) { SAVE(); c.ret = g[0]._u32[0]; return; }
+    if (r6._u32[0] == 0) { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; c.ret = r0._u32[0]; return; }
     r7 = spu_ila(0x10203);
     goto L_00AA0;
 L_00AA0:
@@ -1430,12 +1382,10 @@ L_00AA0:
     lsw(c, r5._u32[0] + 0x0, r57);
     r5 = spu_ai(r5, 32);
     if (r6._u32[0] != 0) goto L_00AA0;
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x00AE0 (7 blocks; called from 7640) ----
+// ---- 0x00AE0 (7 blocks; called from 7640; 30 registers, 28 assigned; reaches 30, changes 28) ----
 void f_00AE0(Run& c)
 {
     u128* const g = c.g;
@@ -1443,8 +1393,6 @@ void f_00AE0(Run& c)
     Q r8 = g[8], r9 = g[9], r10 = g[10], r11 = g[11], r12 = g[12], r13 = g[13], r14 = g[14], r15 = g[15];
     Q r16 = g[16], r17 = g[17], r18 = g[18], r19 = g[19], r20 = g[20], r21 = g[21], r22 = g[22], r23 = g[23];
     Q r24 = g[24], r25 = g[25], r26 = g[26], r27 = g[27], r28 = g[28], r29 = g[29];
-#define SAVE() do { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; } while (0)
 L_00AE0:
     COV(82);
     r8 = spu_ori(r3, 0);
@@ -1521,12 +1469,10 @@ L_00BAC:
     r12 = spu_shufb(r25, r24, r26);
     lsw(c, r8._u32[0] + 0xB0, r14);
     lsw(c, r8._u32[0] + 0x90, r12);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x00BE0 (12 blocks; called from 1508) ----
+// ---- 0x00BE0 (12 blocks; called from 1508; 54 registers, 52 assigned; reaches 54, changes 52) ----
 void f_00BE0(Run& c)
 {
     u128* const g = c.g;
@@ -1537,8 +1483,6 @@ void f_00BE0(Run& c)
     Q r33 = g[33], r34 = g[34], r35 = g[35], r36 = g[36], r37 = g[37], r38 = g[38], r39 = g[39], r40 = g[40];
     Q r41 = g[41], r42 = g[42], r43 = g[43], r44 = g[44], r45 = g[45], r46 = g[46], r47 = g[47], r48 = g[48];
     Q r49 = g[49], r50 = g[50], r51 = g[51], r52 = g[52], r53 = g[53], r54 = g[54];
-#define SAVE() do { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; } while (0)
 L_00BE0:
     COV(89);
     r25 = spu_shli(r7, 2);
@@ -1666,20 +1610,16 @@ L_00D5C:
 L_00D78:
     COV(100);
     r3 = spu_il(0);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x00D80 (9 blocks; called from 204C, 76E8) ----
+// ---- 0x00D80 (9 blocks; called from 204C, 76E8; 18 registers, 16 assigned; reaches 18, changes 16) ----
 void f_00D80(Run& c)
 {
     u128* const g = c.g;
     Q r0 = g[0], r2 = g[2], r3 = g[3], r4 = g[4], r5 = g[5], r6 = g[6], r7 = g[7], r8 = g[8];
     Q r9 = g[9], r10 = g[10], r11 = g[11], r12 = g[12], r13 = g[13], r14 = g[14], r15 = g[15], r16 = g[16];
     Q r17 = g[17], r18 = g[18];
-#define SAVE() do { g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; } while (0)
-#define LOAD() do { r0 = g[0]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; } while (0)
 L_00D80:
     COV(101);
     r4 = spu_ceq(r5, r4);
@@ -1747,19 +1687,15 @@ L_00E34:
 L_00E38:
     COV(109);
     r3 = spu_ori(r2, 0);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[2] = r2; g[3] = r3; g[4] = r4; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x00E40 (6 blocks; called from 204C) ----
+// ---- 0x00E40 (6 blocks; called from 204C; 15 registers, 12 assigned; reaches 15, changes 12) ----
 void f_00E40(Run& c)
 {
     u128* const g = c.g;
     Q r0 = g[0], r2 = g[2], r3 = g[3], r4 = g[4], r5 = g[5], r6 = g[6], r7 = g[7], r8 = g[8];
     Q r9 = g[9], r10 = g[10], r11 = g[11], r12 = g[12], r13 = g[13], r14 = g[14], r15 = g[15];
-#define SAVE() do { g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; } while (0)
-#define LOAD() do { r0 = g[0]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; } while (0)
 L_00E40:
     COV(110);
     r2 = spu_ceqi(r5, 1);
@@ -1797,23 +1733,19 @@ L_00E94:
 L_00EA4:
     COV(114);
     r3 = spu_il(79);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
+    { g[2] = r2; g[3] = r3; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; c.ret = r0._u32[0]; return; }
 L_00EAC:
     COV(115);
     r3 = spu_il(0);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[2] = r2; g[3] = r3; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x00EB8 (2 blocks; called from EE8) ----
+// ---- 0x00EB8 (2 blocks; called from EE8; 9 registers, 8 assigned; reaches 9, changes 8) ----
 void f_00EB8(Run& c)
 {
     u128* const g = c.g;
     Q r0 = g[0], r2 = g[2], r3 = g[3], r4 = g[4], r5 = g[5], r6 = g[6], r7 = g[7], r9 = g[9];
     Q r10 = g[10];
-#define SAVE() do { g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[9] = r9; g[10] = r10; } while (0)
-#define LOAD() do { r0 = g[0]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r9 = g[9]; r10 = g[10]; } while (0)
 L_00EB8:
     COV(116);
     r10 = spu_ilhu(0x3F80);
@@ -1828,70 +1760,57 @@ L_00EB8:
 L_00EDC:
     COV(117);
     r3 = spu_fma(r4, r3, r2);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[9] = r9; g[10] = r10; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x00EE8 (1 blocks; called from 13A0) ----
+// ---- 0x00EE8 (1 blocks; called from 13A0; 2 registers, 2 assigned; reaches 10, changes 10) ----
 void f_00EE8(Run& c)
 {
     u128* const g = c.g;
     Q r0 = g[0], r1 = g[1];
-#define SAVE() do { g[0] = r0; g[1] = r1; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; } while (0)
 L_00EE8:
     COV(118);
     lsw(c, r1._u32[0] + 0x10, r0);
     lsw(c, r1._u32[0] + -0x20, r1);
     r1 = spu_ai(r1, -32);
-    r0 = spu_link(0xEF8u);
-    SAVE(); f_00EB8(c); if (c.exit) return; if ((c.ret ^ 0xEF8u) & 0x3FFFFu) { bad_return(c, 0xEF8u); return; } LOAD();   // brsl $r0, 0xEB8
+    r0 = spu_link(0xEF8u);   // brsl $r0, 0xEB8
+    g[0] = r0; f_00EB8(c); if (c.exit) { g[1] = r1; return; } if ((c.ret ^ 0xEF8u) & 0x3FFFFu) { g[1] = r1; bad_return(c, 0xEF8u); return; }
     r0 = lsr(c, r1._u32[0] + 0x30);
     r1 = spu_ai(r1, 32);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[0] = r0; g[1] = r1; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x00F08 (1 blocks; called from F18) ----
+// ---- 0x00F08 (1 blocks; called from F18; 3 registers, 2 assigned; reaches 3, changes 2) ----
 void f_00F08(Run& c)
 {
     u128* const g = c.g;
     Q r0 = g[0], r2 = g[2], r3 = g[3];
-#define SAVE() do { g[0] = r0; g[2] = r2; g[3] = r3; } while (0)
-#define LOAD() do { r0 = g[0]; r2 = g[2]; r3 = g[3]; } while (0)
 L_00F08:
     COV(119);
     r2 = spu_ilhu(0x8000);
     r3 = spu_andc(r3, r2);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[2] = r2; g[3] = r3; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x00F18 (1 blocks; called from F98, 1180, 1220, 1610, 1810) ----
+// ---- 0x00F18 (1 blocks; called from F98, 1180, 1220, 1610, 1810; 2 registers, 2 assigned; reaches 4, changes 4)
+// ----
 void f_00F18(Run& c)
 {
     u128* const g = c.g;
     Q r0 = g[0], r1 = g[1];
-#define SAVE() do { g[0] = r0; g[1] = r1; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; } while (0)
 L_00F18:
     COV(120);
     lsw(c, r1._u32[0] + 0x10, r0);
     lsw(c, r1._u32[0] + -0x20, r1);
     r1 = spu_ai(r1, -32);
-    r0 = spu_link(0xF28u);
-    SAVE(); f_00F08(c); if (c.exit) return; if ((c.ret ^ 0xF28u) & 0x3FFFFu) { bad_return(c, 0xF28u); return; } LOAD();   // brsl $r0, 0xF08
+    r0 = spu_link(0xF28u);   // brsl $r0, 0xF08
+    g[0] = r0; f_00F08(c); if (c.exit) { g[1] = r1; return; } if ((c.ret ^ 0xF28u) & 0x3FFFFu) { g[1] = r1; bad_return(c, 0xF28u); return; }
     r0 = lsr(c, r1._u32[0] + 0x30);
     r1 = spu_ai(r1, 32);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[0] = r0; g[1] = r1; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x01320 (25 blocks; called from 6C80) ----
+// ---- 0x01320 (25 blocks; called from 6C80; 89 registers, 89 assigned; reaches 89, changes 89) ----
 void f_01320(Run& c)
 {
     u128* const g = c.g;
@@ -1907,8 +1826,6 @@ void f_01320(Run& c)
     Q r72 = g[72], r73 = g[73], r74 = g[74], r75 = g[75], r76 = g[76], r77 = g[77], r78 = g[78], r79 = g[79];
     Q r80 = g[80], r81 = g[81], r82 = g[82], r83 = g[83], r84 = g[84], r85 = g[85], r86 = g[86], r87 = g[87];
     Q r88 = g[88];
-#define SAVE() do { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; r85 = g[85]; r86 = g[86]; r87 = g[87]; r88 = g[88]; } while (0)
     goto L_01320;
 L_00F38:
     COV(121);
@@ -1955,8 +1872,8 @@ L_00F98:
     r24 = spu_fms(r25, r27, r26);
     r80 = spu_fm(r24, r85);
     r3 = spu_ori(r80, 0);
-    r0 = spu_link(0xFE8u);
-    SAVE(); f_00F18(c); if (c.exit) return; if ((c.ret ^ 0xFE8u) & 0x3FFFFu) { bad_return(c, 0xFE8u); return; } LOAD();   // brsl $r0, 0xF18
+    r0 = spu_link(0xFE8u);   // brsl $r0, 0xF18
+    g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; f_00F18(c); if (c.exit) { g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; return; } if ((c.ret ^ 0xFE8u) & 0x3FFFFu) { g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; bad_return(c, 0xFE8u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3];
     r23 = lsr(c, r83._u32[0] + 0x0);
     r84 = spu_fa(r84, r3);
     r19 = spu_rotqby(r23, r83);
@@ -1979,8 +1896,8 @@ L_00F98:
     r6 = spu_fms(r7, r9, r8);
     r80 = spu_fm(r6, r85);
     r3 = spu_ori(r80, 0);
-    r0 = spu_link(0x1048u);
-    SAVE(); f_00F18(c); if (c.exit) return; if ((c.ret ^ 0x1048u) & 0x3FFFFu) { bad_return(c, 0x1048u); return; } LOAD();   // brsl $r0, 0xF18
+    r0 = spu_link(0x1048u);   // brsl $r0, 0xF18
+    g[0] = r0; g[3] = r3; f_00F18(c); if (c.exit) { g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; return; } if ((c.ret ^ 0x1048u) & 0x3FFFFu) { g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; bad_return(c, 0x1048u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3];
     r78 = spu_il(4);
     r2 = lsr(c, r83._u32[0] + 0x0);
     r84 = spu_fa(r84, r3);
@@ -2004,8 +1921,8 @@ L_00F98:
     r65 = spu_fms(r66, r68, r67);
     r80 = spu_fm(r65, r85);
     r3 = spu_ori(r80, 0);
-    r0 = spu_link(0x10ACu);
-    SAVE(); f_00F18(c); if (c.exit) return; if ((c.ret ^ 0x10ACu) & 0x3FFFFu) { bad_return(c, 0x10ACu); return; } LOAD();   // brsl $r0, 0xF18
+    r0 = spu_link(0x10ACu);   // brsl $r0, 0xF18
+    g[0] = r0; g[2] = r2; g[3] = r3; f_00F18(c); if (c.exit) { g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; return; } if ((c.ret ^ 0x10ACu) & 0x3FFFFu) { g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; bad_return(c, 0x10ACu); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3];
     r64 = lsr(c, r83._u32[0] + 0x0);
     r59 = spu_il(8);
     r84 = spu_fa(r84, r3);
@@ -2029,8 +1946,8 @@ L_00F98:
     r46 = spu_fms(r47, r49, r48);
     r80 = spu_fm(r46, r85);
     r3 = spu_ori(r80, 0);
-    r0 = spu_link(0x1110u);
-    SAVE(); f_00F18(c); if (c.exit) return; if ((c.ret ^ 0x1110u) & 0x3FFFFu) { bad_return(c, 0x1110u); return; } LOAD();   // brsl $r0, 0xF18
+    r0 = spu_link(0x1110u);   // brsl $r0, 0xF18
+    g[0] = r0; g[3] = r3; f_00F18(c); if (c.exit) { g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; return; } if ((c.ret ^ 0x1110u) & 0x3FFFFu) { g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; bad_return(c, 0x1110u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3];
     r40 = spu_il(12);
     r45 = lsr(c, r83._u32[0] + 0x0);
     r84 = spu_fa(r84, r3);
@@ -2052,8 +1969,8 @@ L_00F98:
     r29 = spu_fms(r30, r32, r31);
     r80 = spu_fm(r29, r85);
     r3 = spu_ori(r80, 0);
-    r0 = spu_link(0x116Cu);
-    SAVE(); f_00F18(c); if (c.exit) return; if ((c.ret ^ 0x116Cu) & 0x3FFFFu) { bad_return(c, 0x116Cu); return; } LOAD();   // brsl $r0, 0xF18
+    r0 = spu_link(0x116Cu);   // brsl $r0, 0xF18
+    g[0] = r0; g[3] = r3; f_00F18(c); if (c.exit) { g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; return; } if ((c.ret ^ 0x116Cu) & 0x3FFFFu) { g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; bad_return(c, 0x116Cu); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3];
     r28 = lsr(c, r83._u32[0] + 0x0);
     r84 = spu_fa(r84, r3);
     r24 = spu_rotqby(r28, r83);
@@ -2079,8 +1996,8 @@ L_01180:
     r11 = spu_fms(r12, r14, r13);
     r80 = spu_fm(r11, r85);
     r3 = spu_ori(r80, 0);
-    r0 = spu_link(0x11CCu);
-    SAVE(); f_00F18(c); if (c.exit) return; if ((c.ret ^ 0x11CCu) & 0x3FFFFu) { bad_return(c, 0x11CCu); return; } LOAD();   // brsl $r0, 0xF18
+    r0 = spu_link(0x11CCu);   // brsl $r0, 0xF18
+    g[0] = r0; g[3] = r3; f_00F18(c); if (c.exit) { g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; return; } if ((c.ret ^ 0x11CCu) & 0x3FFFFu) { g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; bad_return(c, 0x11CCu); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3];
     r10 = lsr(c, r83._u32[0] + 0x0);
     r5 = spu_il(20);
     r84 = spu_fa(r84, r3);
@@ -2123,8 +2040,8 @@ L_01220:
     r39 = spu_fms(r41, r43, r42);
     r80 = spu_fm(r39, r40);
     r3 = spu_ori(r80, 0);
-    r0 = spu_link(0x1254u);
-    SAVE(); f_00F18(c); if (c.exit) return; if ((c.ret ^ 0x1254u) & 0x3FFFFu) { bad_return(c, 0x1254u); return; } LOAD();   // brsl $r0, 0xF18
+    r0 = spu_link(0x1254u);   // brsl $r0, 0xF18
+    g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; f_00F18(c); if (c.exit) { g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; return; } if ((c.ret ^ 0x1254u) & 0x3FFFFu) { g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; bad_return(c, 0x1254u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3];
     r38 = spu_ai(r83, 104);
     r84 = spu_fa(r84, r3);
     r37 = lsr(c, r38._u32[0] + 0x0);
@@ -2186,7 +2103,7 @@ L_012E8:
     r86 = lsr(c, r1._u32[0] + -0x70);
     r87 = lsr(c, r1._u32[0] + -0x80);
     r88 = lsr(c, r1._u32[0] + -0x90);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
+    { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; c.ret = r0._u32[0]; return; }
 L_01320:
     COV(133);
     r10 = spu_ori(r3, 0);
@@ -2242,12 +2159,12 @@ L_013A0:
     r81 = spu_fm(r11, r5);
     if (r10._u32[0] == 0) goto L_01414;
     r3 = spu_fs(r4, r81);
-    r0 = spu_link(0x13D0u);
-    SAVE(); f_00EE8(c); if (c.exit) return; if ((c.ret ^ 0x13D0u) & 0x3FFFFu) { bad_return(c, 0x13D0u); return; } LOAD();   // brsl $r0, 0xEE8
+    r0 = spu_link(0x13D0u);   // brsl $r0, 0xEE8
+    g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[7] = r7; g[9] = r9; g[10] = r10; f_00EE8(c); if (c.exit) { g[8] = r8; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[81] = r81; g[82] = r82; return; } if ((c.ret ^ 0x13D0u) & 0x3FFFFu) { g[8] = r8; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[81] = r81; g[82] = r82; bad_return(c, 0x13D0u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r9 = g[9]; r10 = g[10];
     r80 = spu_ori(r3, 0);
     r3 = spu_shlqbyi(r81, 0);
-    r0 = spu_link(0x13DCu);
-    SAVE(); f_00EE8(c); if (c.exit) return; if ((c.ret ^ 0x13DCu) & 0x3FFFFu) { bad_return(c, 0x13DCu); return; } LOAD();   // brsl $r0, 0xEE8
+    r0 = spu_link(0x13DCu);   // brsl $r0, 0xEE8
+    g[0] = r0; g[3] = r3; f_00EE8(c); if (c.exit) { g[8] = r8; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[80] = r80; g[81] = r81; g[82] = r82; return; } if ((c.ret ^ 0x13DCu) & 0x3FFFFu) { g[8] = r8; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[80] = r80; g[81] = r81; g[82] = r82; bad_return(c, 0x13DCu); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r9 = g[9]; r10 = g[10];
     r23 = lsr(c, r82._u32[0] + 0x20);
     r19 = spu_rotqbyi(r23, 8);
     r21 = lsr(c, r19._u32[0] + 0x0);
@@ -2336,11 +2253,9 @@ L_014D4:
     r81 = lsr(c, r1._u32[0] + -0x20);
     r82 = lsr(c, r1._u32[0] + -0x30);
     goto L_00F38;
-#undef SAVE
-#undef LOAD
 }
 
-// ---- 0x01508 (28 blocks; called from 6CC8) ----
+// ---- 0x01508 (28 blocks; called from 6CC8; 108 registers, 108 assigned; reaches 108, changes 108) ----
 void f_01508(Run& c)
 {
     u128* const g = c.g;
@@ -2358,8 +2273,6 @@ void f_01508(Run& c)
     Q r88 = g[88], r89 = g[89], r90 = g[90], r91 = g[91], r92 = g[92], r93 = g[93], r94 = g[94], r95 = g[95];
     Q r96 = g[96], r97 = g[97], r98 = g[98], r99 = g[99], r100 = g[100], r101 = g[101], r102 = g[102], r103 = g[103];
     Q r104 = g[104], r105 = g[105], r106 = g[106], r107 = g[107];
-#define SAVE() do { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; g[104] = r104; g[105] = r105; g[106] = r106; g[107] = r107; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; r85 = g[85]; r86 = g[86]; r87 = g[87]; r88 = g[88]; r89 = g[89]; r90 = g[90]; r91 = g[91]; r92 = g[92]; r93 = g[93]; r94 = g[94]; r95 = g[95]; r96 = g[96]; r97 = g[97]; r98 = g[98]; r99 = g[99]; r100 = g[100]; r101 = g[101]; r102 = g[102]; r103 = g[103]; r104 = g[104]; r105 = g[105]; r106 = g[106]; r107 = g[107]; } while (0)
 L_01508:
     COV(146);
     r2 = spu_il(-1024);
@@ -2408,8 +2321,8 @@ L_01508:
     r17 = spu_clgt(r86, r16);
     r85 = spu_selb(r86, r16, r17);
     r8 = spu_ori(r85, 0);
-    r0 = spu_link(0x15D0u);
-    SAVE(); f_00BE0(c); if (c.exit) return; if ((c.ret ^ 0x15D0u) & 0x3FFFFu) { bad_return(c, 0x15D0u); return; } LOAD();   // brsl $r0, 0xBE0
+    r0 = spu_link(0x15D0u);   // brsl $r0, 0xBE0
+    g[0] = r0; g[1] = r1; g[2] = r2; g[8] = r8; g[16] = r16; g[17] = r17; f_00BE0(c); if (c.exit) { g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[89] = r89; return; } if ((c.ret ^ 0x15D0u) & 0x3FFFFu) { g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[89] = r89; bad_return(c, 0x15D0u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54];
     r14 = spu_shli(r89, 2);
     r15 = spu_shli(r83, 2);
     r86 = spu_sf(r85, r86);
@@ -2431,8 +2344,8 @@ L_01610:
     if (r86._u32[0] == 0) goto L_02260;
     r20 = lsr(c, r81._u32[0] + 0xB0);
     r3 = spu_rotqbyi(r20, 4);
-    r0 = spu_link(0x1620u);
-    SAVE(); f_00F18(c); if (c.exit) return; if ((c.ret ^ 0x1620u) & 0x3FFFFu) { bad_return(c, 0x1620u); return; } LOAD();   // brsl $r0, 0xF18
+    r0 = spu_link(0x1620u);   // brsl $r0, 0xF18
+    g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; f_00F18(c); if (c.exit) { g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[20] = r20; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[89] = r89; return; } if ((c.ret ^ 0x1620u) & 0x3FFFFu) { g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[20] = r20; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[89] = r89; bad_return(c, 0x1620u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3];
     r19 = spu_ilhu(0x37A7);
     r19 = spu_iohl(r19, 0xC5AC);
     r18 = spu_fcgt(r19, r3);
@@ -2441,8 +2354,8 @@ L_01610:
     r4 = spu_il(0);
     r3 = spu_ori(r80, 0);
     r5 = spu_il(512);
-    r0 = spu_link(0x1648u);
-    SAVE(); f_02640(c); if (c.exit) return; if ((c.ret ^ 0x1648u) & 0x3FFFFu) { bad_return(c, 0x1648u); return; } LOAD();   // brsl $r0, 0x2640
+    r0 = spu_link(0x1648u);   // brsl $r0, 0x2640
+    g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; f_02640(c); if (c.exit) { g[18] = r18; g[19] = r19; g[20] = r20; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[89] = r89; return; } if ((c.ret ^ 0x1648u) & 0x3FFFFu) { g[18] = r18; g[19] = r19; g[20] = r20; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[89] = r89; bad_return(c, 0x1648u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17];
     r7 = spu_ori(r81, 0);
     r23 = lsr(c, r81._u32[0] + 0x20);
     r11 = spu_il(0);
@@ -2564,8 +2477,8 @@ L_016CC:
     r60 = spu_shufb(r40, r62, r63);
     lsw(c, r1._u32[0] + 0x20, r61);
     lsw(c, r1._u32[0] + 0x30, r60);
-    r0 = spu_link(0x180Cu);
-    SAVE(); f_00950(c); if (c.exit) return; if ((c.ret ^ 0x180Cu) & 0x3FFFFu) { bad_return(c, 0x180Cu); return; } LOAD();   // brsl $r0, 0x950
+    r0 = spu_link(0x180Cu);   // brsl $r0, 0x950
+    g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[18] = r18; g[19] = r19; g[20] = r20; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; f_00950(c); if (c.exit) { g[33] = r33; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; g[104] = r104; g[105] = r105; g[106] = r106; g[107] = r107; return; } if ((c.ret ^ 0x180Cu) & 0x3FFFFu) { g[33] = r33; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; g[104] = r104; g[105] = r105; g[106] = r106; g[107] = r107; bad_return(c, 0x180Cu); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63];
     goto L_02260;
 L_01810:
     COV(153);
@@ -2573,74 +2486,74 @@ L_01810:
     if (r73._u32[0] == 0) goto L_0204C;
     r80 = spu_ilhu(0x37A7);
     r3 = spu_shlqbyi(r107, 0);
-    r0 = spu_link(0x1824u);
-    SAVE(); f_00F18(c); if (c.exit) return; if ((c.ret ^ 0x1824u) & 0x3FFFFu) { bad_return(c, 0x1824u); return; } LOAD();   // brsl $r0, 0xF18
+    r0 = spu_link(0x1824u);   // brsl $r0, 0xF18
+    g[0] = r0; g[3] = r3; f_00F18(c); if (c.exit) { g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[18] = r18; g[19] = r19; g[20] = r20; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[73] = r73; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; g[104] = r104; g[105] = r105; g[106] = r106; g[107] = r107; return; } if ((c.ret ^ 0x1824u) & 0x3FFFFu) { g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[18] = r18; g[19] = r19; g[20] = r20; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[73] = r73; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; g[104] = r104; g[105] = r105; g[106] = r106; g[107] = r107; bad_return(c, 0x1824u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3];
     r80 = spu_iohl(r80, 0xC5AC);
     r74 = spu_fcgt(r80, r3);
     if (r74._u32[0] == 0) goto L_0224C;
     r3 = spu_ori(r98, 0);
-    r0 = spu_link(0x1838u);
-    SAVE(); f_00F18(c); if (c.exit) return; if ((c.ret ^ 0x1838u) & 0x3FFFFu) { bad_return(c, 0x1838u); return; } LOAD();   // brsl $r0, 0xF18
+    r0 = spu_link(0x1838u);   // brsl $r0, 0xF18
+    g[0] = r0; g[3] = r3; f_00F18(c); if (c.exit) { g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[18] = r18; g[19] = r19; g[20] = r20; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[73] = r73; g[74] = r74; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; g[104] = r104; g[105] = r105; g[106] = r106; g[107] = r107; return; } if ((c.ret ^ 0x1838u) & 0x3FFFFu) { g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[18] = r18; g[19] = r19; g[20] = r20; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[73] = r73; g[74] = r74; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; g[104] = r104; g[105] = r105; g[106] = r106; g[107] = r107; bad_return(c, 0x1838u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3];
     r75 = spu_fcgt(r80, r3);
     if (r75._u32[0] == 0) goto L_0224C;
     r3 = spu_ori(r100, 0);
-    r0 = spu_link(0x1848u);
-    SAVE(); f_00F18(c); if (c.exit) return; if ((c.ret ^ 0x1848u) & 0x3FFFFu) { bad_return(c, 0x1848u); return; } LOAD();   // brsl $r0, 0xF18
+    r0 = spu_link(0x1848u);   // brsl $r0, 0xF18
+    g[0] = r0; g[3] = r3; f_00F18(c); if (c.exit) { g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[18] = r18; g[19] = r19; g[20] = r20; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[73] = r73; g[74] = r74; g[75] = r75; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; g[104] = r104; g[105] = r105; g[106] = r106; g[107] = r107; return; } if ((c.ret ^ 0x1848u) & 0x3FFFFu) { g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[18] = r18; g[19] = r19; g[20] = r20; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[73] = r73; g[74] = r74; g[75] = r75; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; g[104] = r104; g[105] = r105; g[106] = r106; g[107] = r107; bad_return(c, 0x1848u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3];
     r76 = spu_fcgt(r80, r3);
     if (r76._u32[0] == 0) goto L_0224C;
     r3 = spu_ori(r102, 0);
-    r0 = spu_link(0x1858u);
-    SAVE(); f_00F18(c); if (c.exit) return; if ((c.ret ^ 0x1858u) & 0x3FFFFu) { bad_return(c, 0x1858u); return; } LOAD();   // brsl $r0, 0xF18
+    r0 = spu_link(0x1858u);   // brsl $r0, 0xF18
+    g[0] = r0; g[3] = r3; f_00F18(c); if (c.exit) { g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[18] = r18; g[19] = r19; g[20] = r20; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; g[104] = r104; g[105] = r105; g[106] = r106; g[107] = r107; return; } if ((c.ret ^ 0x1858u) & 0x3FFFFu) { g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[18] = r18; g[19] = r19; g[20] = r20; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; g[104] = r104; g[105] = r105; g[106] = r106; g[107] = r107; bad_return(c, 0x1858u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3];
     r77 = spu_fcgt(r80, r3);
     if (r77._u32[0] == 0) goto L_0224C;
     r3 = spu_ori(r99, 0);
-    r0 = spu_link(0x1868u);
-    SAVE(); f_00F18(c); if (c.exit) return; if ((c.ret ^ 0x1868u) & 0x3FFFFu) { bad_return(c, 0x1868u); return; } LOAD();   // brsl $r0, 0xF18
+    r0 = spu_link(0x1868u);   // brsl $r0, 0xF18
+    g[0] = r0; g[3] = r3; f_00F18(c); if (c.exit) { g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[18] = r18; g[19] = r19; g[20] = r20; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; g[104] = r104; g[105] = r105; g[106] = r106; g[107] = r107; return; } if ((c.ret ^ 0x1868u) & 0x3FFFFu) { g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[18] = r18; g[19] = r19; g[20] = r20; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; g[104] = r104; g[105] = r105; g[106] = r106; g[107] = r107; bad_return(c, 0x1868u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3];
     r78 = spu_fcgt(r80, r3);
     if (r78._u32[0] == 0) goto L_0224C;
     r3 = spu_ori(r101, 0);
-    r0 = spu_link(0x1878u);
-    SAVE(); f_00F18(c); if (c.exit) return; if ((c.ret ^ 0x1878u) & 0x3FFFFu) { bad_return(c, 0x1878u); return; } LOAD();   // brsl $r0, 0xF18
+    r0 = spu_link(0x1878u);   // brsl $r0, 0xF18
+    g[0] = r0; g[3] = r3; f_00F18(c); if (c.exit) { g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[18] = r18; g[19] = r19; g[20] = r20; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; g[104] = r104; g[105] = r105; g[106] = r106; g[107] = r107; return; } if ((c.ret ^ 0x1878u) & 0x3FFFFu) { g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[18] = r18; g[19] = r19; g[20] = r20; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; g[104] = r104; g[105] = r105; g[106] = r106; g[107] = r107; bad_return(c, 0x1878u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3];
     r79 = spu_fcgt(r80, r3);
     if (r79._u32[0] == 0) goto L_0224C;
     r3 = spu_ori(r97, 0);
-    r0 = spu_link(0x1888u);
-    SAVE(); f_00F18(c); if (c.exit) return; if ((c.ret ^ 0x1888u) & 0x3FFFFu) { bad_return(c, 0x1888u); return; } LOAD();   // brsl $r0, 0xF18
+    r0 = spu_link(0x1888u);   // brsl $r0, 0xF18
+    g[0] = r0; g[3] = r3; f_00F18(c); if (c.exit) { g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[18] = r18; g[19] = r19; g[20] = r20; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; g[104] = r104; g[105] = r105; g[106] = r106; g[107] = r107; return; } if ((c.ret ^ 0x1888u) & 0x3FFFFu) { g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[18] = r18; g[19] = r19; g[20] = r20; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; g[104] = r104; g[105] = r105; g[106] = r106; g[107] = r107; bad_return(c, 0x1888u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3];
     r81 = spu_fcgt(r80, r3);
     if (r81._u32[0] == 0) goto L_0224C;
     r3 = spu_ori(r106, 0);
-    r0 = spu_link(0x1898u);
-    SAVE(); f_00F18(c); if (c.exit) return; if ((c.ret ^ 0x1898u) & 0x3FFFFu) { bad_return(c, 0x1898u); return; } LOAD();   // brsl $r0, 0xF18
+    r0 = spu_link(0x1898u);   // brsl $r0, 0xF18
+    g[0] = r0; g[3] = r3; f_00F18(c); if (c.exit) { g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[18] = r18; g[19] = r19; g[20] = r20; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; g[104] = r104; g[105] = r105; g[106] = r106; g[107] = r107; return; } if ((c.ret ^ 0x1898u) & 0x3FFFFu) { g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[18] = r18; g[19] = r19; g[20] = r20; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; g[104] = r104; g[105] = r105; g[106] = r106; g[107] = r107; bad_return(c, 0x1898u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3];
     r83 = spu_fcgt(r80, r3);
     if (r83._u32[0] == 0) goto L_0224C;
     r3 = spu_ori(r96, 0);
-    r0 = spu_link(0x18A8u);
-    SAVE(); f_00F18(c); if (c.exit) return; if ((c.ret ^ 0x18A8u) & 0x3FFFFu) { bad_return(c, 0x18A8u); return; } LOAD();   // brsl $r0, 0xF18
+    r0 = spu_link(0x18A8u);   // brsl $r0, 0xF18
+    g[0] = r0; g[3] = r3; f_00F18(c); if (c.exit) { g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[18] = r18; g[19] = r19; g[20] = r20; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; g[104] = r104; g[105] = r105; g[106] = r106; g[107] = r107; return; } if ((c.ret ^ 0x18A8u) & 0x3FFFFu) { g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[18] = r18; g[19] = r19; g[20] = r20; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; g[104] = r104; g[105] = r105; g[106] = r106; g[107] = r107; bad_return(c, 0x18A8u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3];
     r89 = spu_fcgt(r80, r3);
     if (r89._u32[0] == 0) goto L_0224C;
     r3 = spu_ori(r105, 0);
-    r0 = spu_link(0x18B8u);
-    SAVE(); f_00F18(c); if (c.exit) return; if ((c.ret ^ 0x18B8u) & 0x3FFFFu) { bad_return(c, 0x18B8u); return; } LOAD();   // brsl $r0, 0xF18
+    r0 = spu_link(0x18B8u);   // brsl $r0, 0xF18
+    g[0] = r0; g[3] = r3; f_00F18(c); if (c.exit) { g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[18] = r18; g[19] = r19; g[20] = r20; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; g[104] = r104; g[105] = r105; g[106] = r106; g[107] = r107; return; } if ((c.ret ^ 0x18B8u) & 0x3FFFFu) { g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[18] = r18; g[19] = r19; g[20] = r20; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; g[104] = r104; g[105] = r105; g[106] = r106; g[107] = r107; bad_return(c, 0x18B8u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3];
     r2 = spu_fcgt(r80, r3);
     if (r2._u32[0] == 0) goto L_0224C;
     r3 = spu_ori(r95, 0);
-    r0 = spu_link(0x18C8u);
-    SAVE(); f_00F18(c); if (c.exit) return; if ((c.ret ^ 0x18C8u) & 0x3FFFFu) { bad_return(c, 0x18C8u); return; } LOAD();   // brsl $r0, 0xF18
+    r0 = spu_link(0x18C8u);   // brsl $r0, 0xF18
+    g[0] = r0; g[2] = r2; g[3] = r3; f_00F18(c); if (c.exit) { g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[18] = r18; g[19] = r19; g[20] = r20; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; g[104] = r104; g[105] = r105; g[106] = r106; g[107] = r107; return; } if ((c.ret ^ 0x18C8u) & 0x3FFFFu) { g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[18] = r18; g[19] = r19; g[20] = r20; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; g[104] = r104; g[105] = r105; g[106] = r106; g[107] = r107; bad_return(c, 0x18C8u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3];
     r8 = spu_fcgt(r80, r3);
     if (r8._u32[0] == 0) goto L_0224C;
     r3 = spu_ori(r104, 0);
-    r0 = spu_link(0x18D8u);
-    SAVE(); f_00F18(c); if (c.exit) return; if ((c.ret ^ 0x18D8u) & 0x3FFFFu) { bad_return(c, 0x18D8u); return; } LOAD();   // brsl $r0, 0xF18
+    r0 = spu_link(0x18D8u);   // brsl $r0, 0xF18
+    g[0] = r0; g[3] = r3; f_00F18(c); if (c.exit) { g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[18] = r18; g[19] = r19; g[20] = r20; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; g[104] = r104; g[105] = r105; g[106] = r106; g[107] = r107; return; } if ((c.ret ^ 0x18D8u) & 0x3FFFFu) { g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[18] = r18; g[19] = r19; g[20] = r20; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; g[104] = r104; g[105] = r105; g[106] = r106; g[107] = r107; bad_return(c, 0x18D8u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3];
     r5 = spu_fcgt(r80, r3);
     if (r5._u32[0] == 0) goto L_0224C;
     r3 = spu_ori(r94, 0);
-    r0 = spu_link(0x18E8u);
-    SAVE(); f_00F18(c); if (c.exit) return; if ((c.ret ^ 0x18E8u) & 0x3FFFFu) { bad_return(c, 0x18E8u); return; } LOAD();   // brsl $r0, 0xF18
+    r0 = spu_link(0x18E8u);   // brsl $r0, 0xF18
+    g[0] = r0; g[3] = r3; f_00F18(c); if (c.exit) { g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[18] = r18; g[19] = r19; g[20] = r20; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; g[104] = r104; g[105] = r105; g[106] = r106; g[107] = r107; return; } if ((c.ret ^ 0x18E8u) & 0x3FFFFu) { g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[18] = r18; g[19] = r19; g[20] = r20; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; g[104] = r104; g[105] = r105; g[106] = r106; g[107] = r107; bad_return(c, 0x18E8u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3];
     r3 = spu_fcgt(r80, r3);
     if (r3._u32[0] == 0) goto L_0224C;
     r3 = spu_ori(r103, 0);
-    r0 = spu_link(0x18F8u);
-    SAVE(); f_00F18(c); if (c.exit) return; if ((c.ret ^ 0x18F8u) & 0x3FFFFu) { bad_return(c, 0x18F8u); return; } LOAD();   // brsl $r0, 0xF18
+    r0 = spu_link(0x18F8u);   // brsl $r0, 0xF18
+    g[0] = r0; g[3] = r3; f_00F18(c); if (c.exit) { g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[18] = r18; g[19] = r19; g[20] = r20; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; g[104] = r104; g[105] = r105; g[106] = r106; g[107] = r107; return; } if ((c.ret ^ 0x18F8u) & 0x3FFFFu) { g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[18] = r18; g[19] = r19; g[20] = r20; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; g[104] = r104; g[105] = r105; g[106] = r106; g[107] = r107; bad_return(c, 0x18F8u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3];
     r27 = spu_rotmi(r86, -2);
     r22 = spu_shlqbyi(r82, 0);
     r7 = spu_fcgt(r80, r3);
@@ -3138,8 +3051,8 @@ L_0204C:
     r3 = spu_ori(r81, 0);
     r4 = spu_il(8);
     r5 = spu_il(8);
-    r0 = spu_link(0x2068u);
-    SAVE(); f_00D80(c); if (c.exit) return; if ((c.ret ^ 0x2068u) & 0x3FFFFu) { bad_return(c, 0x2068u); return; } LOAD();   // brsl $r0, 0xD80
+    r0 = spu_link(0x2068u);   // brsl $r0, 0xD80
+    g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[18] = r18; f_00D80(c); if (c.exit) { g[19] = r19; g[20] = r20; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[73] = r73; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; g[104] = r104; g[105] = r105; g[106] = r106; g[107] = r107; return; } if ((c.ret ^ 0x2068u) & 0x3FFFFu) { g[19] = r19; g[20] = r20; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[73] = r73; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; g[104] = r104; g[105] = r105; g[106] = r106; g[107] = r107; bad_return(c, 0x2068u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18];
     r19 = spu_ori(r80, 0);
     r18 = spu_shlqbyi(r85, 0);
     r15 = spu_ori(r87, 0);
@@ -3151,8 +3064,8 @@ L_0204C:
     r3 = spu_ori(r81, 0);
     r4 = spu_il(8);
     r5 = spu_il(8);
-    r0 = spu_link(0x2098u);
-    SAVE(); f_00E40(c); if (c.exit) return; if ((c.ret ^ 0x2098u) & 0x3FFFFu) { bad_return(c, 0x2098u); return; } LOAD();   // brsl $r0, 0xE40
+    r0 = spu_link(0x2098u);   // brsl $r0, 0xE40
+    g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[13] = r13; g[14] = r14; g[15] = r15; f_00E40(c); if (c.exit) { g[16] = r16; g[18] = r18; g[19] = r19; g[20] = r20; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[73] = r73; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; g[104] = r104; g[105] = r105; g[106] = r106; g[107] = r107; return; } if ((c.ret ^ 0x2098u) & 0x3FFFFu) { g[16] = r16; g[18] = r18; g[19] = r19; g[20] = r20; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[73] = r73; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; g[104] = r104; g[105] = r105; g[106] = r106; g[107] = r107; bad_return(c, 0x2098u); return; } r2 = g[2]; r3 = g[3]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15];
     r7 = spu_shli(r83, 2);
     r19 = spu_shlqbyi(r94, 0);
     r18 = spu_ori(r95, 0);
@@ -3188,8 +3101,8 @@ L_020C8:
     r91 = spu_shufb(r19, r96, r95);
     lsw(c, r1._u32[0] + 0x20, r90);
     lsw(c, r1._u32[0] + 0x30, r91);
-    r0 = spu_link(0x2120u);
-    SAVE(); f_007E0(c); if (c.exit) return; if ((c.ret ^ 0x2120u) & 0x3FFFFu) { bad_return(c, 0x2120u); return; } LOAD();   // brsl $r0, 0x7E0
+    r0 = spu_link(0x2120u);   // brsl $r0, 0x7E0
+    g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[10] = r10; g[11] = r11; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; f_007E0(c); if (c.exit) { g[32] = r32; g[58] = r58; g[59] = r59; g[73] = r73; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; g[104] = r104; g[105] = r105; g[106] = r106; g[107] = r107; return; } if ((c.ret ^ 0x2120u) & 0x3FFFFu) { g[32] = r32; g[58] = r58; g[59] = r59; g[73] = r73; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; g[104] = r104; g[105] = r105; g[106] = r106; g[107] = r107; bad_return(c, 0x2120u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57];
     goto L_02260;
 L_02124:
     COV(165);
@@ -3319,19 +3232,15 @@ L_02260:
     r105 = lsr(c, r1._u32[0] + -0x1A0);
     r106 = lsr(c, r1._u32[0] + -0x1B0);
     r107 = lsr(c, r1._u32[0] + -0x1C0);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; g[104] = r104; g[105] = r105; g[106] = r106; g[107] = r107; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x022F0 (8 blocks; called from 23B8, 8690) ----
+// ---- 0x022F0 (8 blocks; called from 23B8, 8690; 10 registers, 9 assigned; reaches 10, changes 9) ----
 void f_022F0(Run& c)
 {
     u128* const g = c.g;
     Q r0 = g[0], r2 = g[2], r3 = g[3], r4 = g[4], r5 = g[5], r6 = g[6], r7 = g[7], r8 = g[8];
     Q r9 = g[9], r10 = g[10];
-#define SAVE() do { g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; } while (0)
-#define LOAD() do { r0 = g[0]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; } while (0)
 L_022F0:
     COV(174);
     r9 = spu_shli(r3, 2);
@@ -3349,7 +3258,7 @@ L_022F0:
     case 0x02370u: goto L_02370;
     case 0x02384u: goto L_02384;
     case 0x02398u: goto L_02398;
-    default: { SAVE(); c.jt = r2._u32[0] & 0x3FFFFu; c.js = 0x2318u; TAIL jump_to(c); }
+    default: { g[2] = r2; g[3] = r3; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; unresolved(c, r2._u32[0] & 0x3FFFFu, 0x2318u); return; }
     }
 L_02348:
     COV(175);
@@ -3394,12 +3303,11 @@ L_023A8:
 L_023B0:
     COV(181);
     r3 = spu_ori(r8, 0);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x023B8 (12 blocks; called from 27B0, 8AC0, 94A8, B508, B998) ----
+// ---- 0x023B8 (12 blocks; called from 27B0, 8AC0, 94A8, B508, B998; 84 registers, 84 assigned; reaches 84, changes
+// 84) ----
 void f_023B8(Run& c)
 {
     u128* const g = c.g;
@@ -3414,8 +3322,6 @@ void f_023B8(Run& c)
     Q r64 = g[64], r65 = g[65], r66 = g[66], r67 = g[67], r68 = g[68], r69 = g[69], r70 = g[70], r71 = g[71];
     Q r72 = g[72], r73 = g[73], r75 = g[75], r76 = g[76], r77 = g[77], r78 = g[78], r79 = g[79], r80 = g[80];
     Q r81 = g[81], r82 = g[82], r83 = g[83], r84 = g[84];
-#define SAVE() do { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; } while (0)
 L_023B8:
     COV(182);
     r2 = spu_il(0);
@@ -3438,15 +3344,15 @@ L_023B8:
     r9 = spu_cwd(r1, 0);
     r8 = spu_shufb(r2, r10, r9);
     lsw(c, r1._u32[0] + 0x20, r8);
-    r0 = spu_link(0x2410u);
-    SAVE(); f_022F0(c); if (c.exit) return; if ((c.ret ^ 0x2410u) & 0x3FFFFu) { bad_return(c, 0x2410u); return; } LOAD();   // brsl $r0, 0x22F0
+    r0 = spu_link(0x2410u);   // brsl $r0, 0x22F0
+    g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[8] = r8; g[9] = r9; g[10] = r10; f_022F0(c); if (c.exit) { g[1] = r1; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; return; } if ((c.ret ^ 0x2410u) & 0x3FFFFu) { g[1] = r1; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; bad_return(c, 0x2410u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10];
     r4 = lsr(c, r1._u32[0] + 0x20);
     if (r4._u32[0] == 0) goto L_0243C;
     r5 = spu_rotqmbyi(r4, -4);
     r3 = spu_rotqmbyi(r83, -4);
     r4 = spu_xswd(r5);
-    r0 = spu_link(0x2428u);
-    SAVE(); f_0EC10(c); if (c.exit) return; if ((c.ret ^ 0x2428u) & 0x3FFFFu) { bad_return(c, 0x2428u); return; } LOAD();   // brsl $r0, 0xEC10
+    r0 = spu_link(0x2428u);   // brsl $r0, 0xEC10
+    g[0] = r0; g[1] = r1; g[3] = r3; g[4] = r4; g[5] = r5; f_0EC10(c); if (c.exit) { g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; return; } if ((c.ret ^ 0x2428u) & 0x3FFFFu) { g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; bad_return(c, 0x2428u); return; } r2 = g[2]; r3 = g[3]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45];
     r2 = lsr(c, r80._u32[0] + 0x0);
     r3 = spu_shlqbii(r3, 5);
     r4 = spu_cwd(r80, 0);
@@ -3468,7 +3374,7 @@ L_0243C:
     case 0x0254Cu: goto L_0254C;
     case 0x025C4u: goto L_025C4;
     case 0x025DCu: goto L_025DC;
-    default: { SAVE(); c.jt = r2._u32[0] & 0x3FFFFu; c.js = 0x2458u; TAIL jump_to(c); }
+    default: { g[1] = r1; g[2] = r2; g[4] = r4; g[6] = r6; g[7] = r7; g[11] = r11; g[12] = r12; g[13] = r13; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; unresolved(c, r2._u32[0] & 0x3FFFFu, 0x2458u); return; }
     }
 L_02488:
     COV(184);
@@ -3600,20 +3506,17 @@ L_0261C:
     r82 = lsr(c, r1._u32[0] + -0x30);
     r83 = lsr(c, r1._u32[0] + -0x40);
     r84 = lsr(c, r1._u32[0] + -0x50);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[6] = r6; g[7] = r7; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x02640 (10 blocks; called from 1610, 2884, 2C2C, 2EE0, 2FA8, 3230, 9160, 94A8 ...) ----
+// ---- 0x02640 (10 blocks; called from 1610, 2884, 2C2C, 2EE0, 2FA8, 3230, 9160, 94A8 ...; 17 registers, 16 assigned;
+// reaches 17, changes 16) ----
 void f_02640(Run& c)
 {
     u128* const g = c.g;
     Q r0 = g[0], r2 = g[2], r3 = g[3], r4 = g[4], r5 = g[5], r6 = g[6], r7 = g[7], r8 = g[8];
     Q r9 = g[9], r10 = g[10], r11 = g[11], r12 = g[12], r13 = g[13], r14 = g[14], r15 = g[15], r16 = g[16];
     Q r17 = g[17];
-#define SAVE() do { g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; } while (0)
-#define LOAD() do { r0 = g[0]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; } while (0)
 L_02640:
     COV(194);
     r2 = spu_ilh(0x303);
@@ -3685,12 +3588,10 @@ L_026FC:
     goto L_02700;
 L_02700:
     COV(203);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x02708 (56 blocks; called from 6534) ----
+// ---- 0x02708 (56 blocks; called from 6534; 93 registers, 93 assigned; reaches all, changes all) ----
 void f_02708(Run& c)
 {
     u128* const g = c.g;
@@ -3706,8 +3607,6 @@ void f_02708(Run& c)
     Q r72 = g[72], r73 = g[73], r74 = g[74], r75 = g[75], r76 = g[76], r77 = g[77], r78 = g[78], r79 = g[79];
     Q r80 = g[80], r81 = g[81], r82 = g[82], r83 = g[83], r84 = g[84], r85 = g[85], r86 = g[86], r87 = g[87];
     Q r88 = g[88], r89 = g[89], r90 = g[90], r91 = g[91], r92 = g[92];
-#define SAVE() do { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; r85 = g[85]; r86 = g[86]; r87 = g[87]; r88 = g[88]; r89 = g[89]; r90 = g[90]; r91 = g[91]; r92 = g[92]; } while (0)
 L_02708:
     COV(204);
     r2 = lsr(c, r3._u32[0] + 0x110);
@@ -3775,8 +3674,8 @@ L_027B0:
     r7 = spu_il(1);
     r5 = lsr(c, r81._u32[0] + 0x1B0);
     r6 = spu_rotqbyi(r32, 8);
-    r0 = spu_link(0x27D0u);
-    SAVE(); f_023B8(c); if (c.exit) return; if ((c.ret ^ 0x27D0u) & 0x3FFFFu) { bad_return(c, 0x27D0u); return; } LOAD();   // brsl $r0, 0x23B8
+    r0 = spu_link(0x27D0u);   // brsl $r0, 0x23B8
+    g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[12] = r12; g[13] = r13; g[32] = r32; g[81] = r81; g[82] = r82; g[83] = r83; f_023B8(c); if (c.exit) { g[89] = r89; g[90] = r90; g[91] = r91; return; } if ((c.ret ^ 0x27D0u) & 0x3FFFFu) { g[89] = r89; g[90] = r90; g[91] = r91; bad_return(c, 0x27D0u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84];
     r31 = lsr(c, r81._u32[0] + 0xD0);
     r30 = lsr(c, r81._u32[0] + 0x1C0);
     r8 = lsr(c, r1._u32[0] + 0x20);
@@ -3821,7 +3720,7 @@ L_02834:
     r37 = spu_rotqbyi(r39, 4);
     r8 = spu_ori(r7, 0);
     lsw(c, r81._u32[0] + 0x10, r38);
-    { const uint32_t t = r37._u32[0]; r0 = spu_link(0x287Cu); SAVE(); if (!branch(c, t & 0x3FFFFu, 0x2878u, true)) return; if ((c.ret ^ 0x287Cu) & 0x3FFFFu) { bad_return(c, 0x287Cu); return; } LOAD(); }   // bisl $r0, $r37
+    { const uint32_t t = r37._u32[0]; r0 = spu_link(0x287Cu); g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[80] = r80; g[89] = r89; g[90] = r90; g[91] = r91; if (!branch(c, t & 0x3FFFFu, 0x2878u, true)) return; if ((c.ret ^ 0x287Cu) & 0x3FFFFu) { bad_return(c, 0x287Cu); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; r85 = g[85]; r86 = g[86]; r87 = g[87]; r88 = g[88]; r89 = g[89]; r90 = g[90]; r91 = g[91]; r92 = g[92]; }   // bisl $r0, $r37
     r11 = spu_ori(r3, 0);
     goto L_028A8;
 L_02884:
@@ -3833,8 +3732,8 @@ L_02884:
     r4 = spu_fsmbi(0x0);
     r43 = spu_a(r45, r46);
     r5 = spu_a(r43, r44);
-    r0 = spu_link(0x28A4u);
-    SAVE(); f_02640(c); if (c.exit) return; if ((c.ret ^ 0x28A4u) & 0x3FFFFu) { bad_return(c, 0x28A4u); return; } LOAD();   // brsl $r0, 0x2640
+    r0 = spu_link(0x28A4u);   // brsl $r0, 0x2640
+    g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[8] = r8; g[9] = r9; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; f_02640(c); if (c.exit) { g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[80] = r80; g[89] = r89; g[90] = r90; g[91] = r91; return; } if ((c.ret ^ 0x28A4u) & 0x3FFFFu) { g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[80] = r80; g[89] = r89; g[90] = r90; g[91] = r91; bad_return(c, 0x28A4u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17];
     r11 = spu_il(0);
     goto L_028A8;
 L_028A8:
@@ -3920,8 +3819,8 @@ L_029AC:
     if (r11._u32[0] != 0) goto L_02AF4;
     r4 = spu_ai(r1, 48);
     r3 = spu_shlqbyi(r81, 0);
-    r0 = spu_link(0x29BCu);
-    SAVE(); f_08FF0(c); if (c.exit) return; if ((c.ret ^ 0x29BCu) & 0x3FFFFu) { bad_return(c, 0x29BCu); return; } LOAD();   // brsl $r0, 0x8FF0
+    r0 = spu_link(0x29BCu);   // brsl $r0, 0x8FF0
+    g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; f_08FF0(c); if (c.exit) { g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[80] = r80; g[89] = r89; g[90] = r90; g[91] = r91; return; } if ((c.ret ^ 0x29BCu) & 0x3FFFFu) { g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[80] = r80; g[89] = r89; g[90] = r90; g[91] = r91; bad_return(c, 0x29BCu); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52];
     r13 = lsr(c, r81._u32[0] + 0x1C0);
     r12 = lsr(c, r1._u32[0] + 0x30);
     r10 = lsr(c, r81._u32[0] + 0x210);
@@ -3990,8 +3889,8 @@ L_02AB8:
     r3 = spu_ori(r81, 0);
     r4 = lsr(c, r1._u32[0] + 0x30);
     r5 = spu_il(1);
-    r0 = spu_link(0x2AC8u);
-    SAVE(); f_08E60(c); if (c.exit) return; if ((c.ret ^ 0x2AC8u) & 0x3FFFFu) { bad_return(c, 0x2AC8u); return; } LOAD();   // brsl $r0, 0x8E60
+    r0 = spu_link(0x2AC8u);   // brsl $r0, 0x8E60
+    g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; f_08E60(c); if (c.exit) { g[52] = r52; g[80] = r80; g[84] = r84; g[86] = r86; g[89] = r89; g[90] = r90; g[91] = r91; return; } if ((c.ret ^ 0x2AC8u) & 0x3FFFFu) { g[52] = r52; g[80] = r80; g[84] = r84; g[86] = r86; g[89] = r89; g[90] = r90; g[91] = r91; bad_return(c, 0x2AC8u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79];
     r11 = spu_ori(r3, 0);
     goto L_02AF4;
 L_02AD0:
@@ -4003,8 +3902,8 @@ L_02AD0:
     r53 = spu_mpyu(r8, r57);
     r54 = spu_a(r55, r56);
     r5 = spu_a(r54, r53);
-    r0 = spu_link(0x2AF0u);
-    SAVE(); f_00270(c); if (c.exit) return; if ((c.ret ^ 0x2AF0u) & 0x3FFFFu) { bad_return(c, 0x2AF0u); return; } LOAD();   // brsl $r0, 0x270
+    r0 = spu_link(0x2AF0u);   // brsl $r0, 0x270
+    g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; g[8] = r8; g[9] = r9; g[11] = r11; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[33] = r33; g[45] = r45; g[47] = r47; f_00270(c); if (c.exit) { g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[80] = r80; g[89] = r89; g[90] = r90; g[91] = r91; return; } if ((c.ret ^ 0x2AF0u) & 0x3FFFFu) { g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[80] = r80; g[89] = r89; g[90] = r90; g[91] = r91; bad_return(c, 0x2AF0u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51];
     r11 = spu_il(0);
     goto L_02AF4;
 L_02AF4:
@@ -4120,8 +4019,8 @@ L_02C2C:
     r5 = spu_shli(r66, 2);
     r63 = spu_a(r64, r65);
     r3 = spu_a(r86, r63);
-    r0 = spu_link(0x2C74u);
-    SAVE(); f_02640(c); if (c.exit) return; if ((c.ret ^ 0x2C74u) & 0x3FFFFu) { bad_return(c, 0x2C74u); return; } LOAD();   // brsl $r0, 0x2640
+    r0 = spu_link(0x2C74u);   // brsl $r0, 0x2640
+    g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; f_02640(c); if (c.exit) { g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; return; } if ((c.ret ^ 0x2C74u) & 0x3FFFFu) { g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; bad_return(c, 0x2C74u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17];
     r35 = lsr(c, r81._u32[0] + 0x210);
     r53 = spu_il(36);
     r52 = spu_fsmbi(0x1);
@@ -4292,8 +4191,8 @@ L_02EE0:
     r5 = spu_a(r41, r40);
     r6 = spu_shli(r39, 2);
     r3 = spu_a(r86, r6);
-    r0 = spu_link(0x2F0Cu);
-    SAVE(); f_02640(c); if (c.exit) return; if ((c.ret ^ 0x2F0Cu) & 0x3FFFFu) { bad_return(c, 0x2F0Cu); return; } LOAD();   // brsl $r0, 0x2640
+    r0 = spu_link(0x2F0Cu);   // brsl $r0, 0x2640
+    g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; f_02640(c); if (c.exit) { g[1] = r1; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[86] = r86; g[89] = r89; g[90] = r90; g[91] = r91; return; } if ((c.ret ^ 0x2F0Cu) & 0x3FFFFu) { g[1] = r1; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[86] = r86; g[89] = r89; g[90] = r90; g[91] = r91; bad_return(c, 0x2F0Cu); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17];
     r3 = lsr(c, r81._u32[0] + 0x210);
     r31 = spu_il(36);
     r30 = spu_fsmbi(0x1);
@@ -4449,8 +4348,8 @@ L_02FA8:
     r5 = spu_a(r11, r28);
     r26 = spu_shli(r27, 2);
     r3 = spu_a(r86, r26);
-    r0 = spu_link(0x3178u);
-    SAVE(); f_02640(c); if (c.exit) return; if ((c.ret ^ 0x3178u) & 0x3FFFFu) { bad_return(c, 0x3178u); return; } LOAD();   // brsl $r0, 0x2640
+    r0 = spu_link(0x3178u);   // brsl $r0, 0x2640
+    g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; f_02640(c); if (c.exit) { g[1] = r1; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[86] = r86; g[89] = r89; g[90] = r90; g[91] = r91; return; } if ((c.ret ^ 0x3178u) & 0x3FFFFu) { g[1] = r1; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[86] = r86; g[89] = r89; g[90] = r90; g[91] = r91; bad_return(c, 0x3178u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17];
     r65 = spu_il(0);
     r24 = lsr(c, r81._u32[0] + 0x110);
     r14 = spu_il(17);
@@ -4604,8 +4503,8 @@ L_03230:
     r53 = spu_mpyu(r80, r16);
     r54 = spu_a(r55, r56);
     r5 = spu_a(r54, r53);
-    r0 = spu_link(0x33DCu);
-    SAVE(); f_02640(c); if (c.exit) return; if ((c.ret ^ 0x33DCu) & 0x3FFFFu) { bad_return(c, 0x33DCu); return; } LOAD();   // brsl $r0, 0x2640
+    r0 = spu_link(0x33DCu);   // brsl $r0, 0x2640
+    g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; f_02640(c); if (c.exit) { g[1] = r1; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[86] = r86; g[89] = r89; g[90] = r90; g[91] = r91; return; } if ((c.ret ^ 0x33DCu) & 0x3FFFFu) { g[1] = r1; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[86] = r86; g[89] = r89; g[90] = r90; g[91] = r91; bad_return(c, 0x33DCu); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17];
     r52 = lsr(c, r81._u32[0] + 0x1D0);
     r50 = spu_cwd(r1, 4);
     r51 = spu_rotqbyi(r52, 4);
@@ -4637,7 +4536,7 @@ L_033F8:
     r9 = spu_rotqbyi(r17, 12);
     r78 = spu_sf(r72, r18);
     r66 = spu_ceqi(r9, -1);
-    if ((int32_t)r79._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0x3450u); return; }   // heqi
+    if ((int32_t)r79._u32[0] == (int32_t)(0)) { g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; halt(c, 0x3450u); return; }   // heqi
     r17 = spu_sfi(r78, 0);
     r18 = spu_sfi(r79, 0);
     r19 = spu_cgti(r78, -1);
@@ -4706,13 +4605,13 @@ L_0354C:
     r80 = spu_ori(r85, 0);
     r4 = spu_ori(r82, 0);
     r3 = spu_shlqbyi(r85, 0);
-    r0 = spu_link(0x355Cu);
-    SAVE(); f_0ECC8(c); if (c.exit) return; if ((c.ret ^ 0x355Cu) & 0x3FFFFu) { bad_return(c, 0x355Cu); return; } LOAD();   // brsl $r0, 0xECC8
+    r0 = spu_link(0x355Cu);   // brsl $r0, 0xECC8
+    g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; f_0ECC8(c); if (c.exit) { g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; return; } if ((c.ret ^ 0x355Cu) & 0x3FFFFu) { g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; bad_return(c, 0x355Cu); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79];
     r4 = spu_ori(r82, 0);
     r85 = spu_ori(r3, 0);
     r3 = spu_shlqbyi(r80, 0);
-    r0 = spu_link(0x356Cu);
-    SAVE(); f_0F788(c); if (c.exit) return; if ((c.ret ^ 0x356Cu) & 0x3FFFFu) { bad_return(c, 0x356Cu); return; } LOAD();   // brsl $r0, 0xF788
+    r0 = spu_link(0x356Cu);   // brsl $r0, 0xF788
+    g[0] = r0; g[3] = r3; g[4] = r4; f_0F788(c); if (c.exit) { g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; return; } if ((c.ret ^ 0x356Cu) & 0x3FFFFu) { g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; bad_return(c, 0x356Cu); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79];
     r31 = spu_il(0);
     r12 = spu_fsmbi(0x101);
     r30 = spu_ceq(r3, r31);
@@ -4768,8 +4667,8 @@ L_035F8:
     r47 = spu_a(r48, r49);
     r46 = spu_a(r47, r45);
     r3 = spu_a(r86, r46);
-    r0 = spu_link(0x3640u);
-    SAVE(); f_03D00(c); if (c.exit) return; if ((c.ret ^ 0x3640u) & 0x3FFFFu) { bad_return(c, 0x3640u); return; } LOAD();   // brsl $r0, 0x3D00
+    r0 = spu_link(0x3640u);   // brsl $r0, 0x3D00
+    g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; f_03D00(c); if (c.exit) { g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; return; } if ((c.ret ^ 0x3640u) & 0x3FFFFu) { g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; bad_return(c, 0x3640u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79];
     r44 = lsr(c, r81._u32[0] + 0x1C0);
     r42 = lsr(c, r81._u32[0] + 0x180);
     r43 = lsr(c, r81._u32[0] + 0x1D0);
@@ -4932,8 +4831,8 @@ L_0389C:
     r4 = lsr(c, r1._u32[0] + 0x40);
     r88 = spu_shufb(r2, r88, r3);
     r3 = spu_rotqmbyi(r80, -4);
-    r0 = spu_link(0x38ACu);
-    SAVE(); f_0EC10(c); if (c.exit) return; if ((c.ret ^ 0x38ACu) & 0x3FFFFu) { bad_return(c, 0x38ACu); return; } LOAD();   // brsl $r0, 0xEC10
+    r0 = spu_link(0x38ACu);   // brsl $r0, 0xEC10
+    g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; f_0EC10(c); if (c.exit) { g[29] = r29; g[34] = r34; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; return; } if ((c.ret ^ 0x38ACu) & 0x3FFFFu) { g[29] = r29; g[34] = r34; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; bad_return(c, 0x38ACu); return; } r2 = g[2]; r3 = g[3]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45];
     r29 = lsr(c, r81._u32[0] + 0x170);
     r4 = lsr(c, 0x10410);
     r13 = spu_cdd(r1, 0);
@@ -5079,8 +4978,8 @@ L_03ABC:
     r4 = lsr(c, r1._u32[0] + 0x40);
     r3 = spu_rotqmbyi(r80, -4);
     r87 = spu_shufb(r64, r87, r65);
-    r0 = spu_link(0x3AD4u);
-    SAVE(); f_0EC10(c); if (c.exit) return; if ((c.ret ^ 0x3AD4u) & 0x3FFFFu) { bad_return(c, 0x3AD4u); return; } LOAD();   // brsl $r0, 0xEC10
+    r0 = spu_link(0x3AD4u);   // brsl $r0, 0xEC10
+    g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; f_0EC10(c); if (c.exit) { g[29] = r29; g[34] = r34; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; return; } if ((c.ret ^ 0x3AD4u) & 0x3FFFFu) { g[29] = r29; g[34] = r34; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; bad_return(c, 0x3AD4u); return; } r2 = g[2]; r3 = g[3]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45];
     r56 = lsr(c, r81._u32[0] + 0x170);
     r63 = lsr(c, 0x10400);
     r57 = spu_cdd(r1, 0);
@@ -5239,12 +5138,10 @@ L_03CB8:
     r90 = lsr(c, r1._u32[0] + -0xB0);
     r91 = lsr(c, r1._u32[0] + -0xC0);
     r92 = lsr(c, r1._u32[0] + -0xD0);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x03D00 (53 blocks; called from 35F8) ----
+// ---- 0x03D00 (53 blocks; called from 35F8; 80 registers, 78 assigned; reaches 80, changes 78) ----
 void f_03D00(Run& c)
 {
     u128* const g = c.g;
@@ -5258,8 +5155,6 @@ void f_03D00(Run& c)
     Q r56 = g[56], r57 = g[57], r58 = g[58], r59 = g[59], r60 = g[60], r61 = g[61], r62 = g[62], r63 = g[63];
     Q r64 = g[64], r65 = g[65], r66 = g[66], r67 = g[67], r68 = g[68], r69 = g[69], r70 = g[70], r71 = g[71];
     Q r72 = g[72], r73 = g[73], r74 = g[74], r75 = g[75], r76 = g[76], r77 = g[77], r78 = g[78], r79 = g[79];
-#define SAVE() do { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79]; } while (0)
 L_03D00:
     COV(260);
     r2 = spu_ceqi(r6, 2);
@@ -5270,7 +5165,7 @@ L_03D00:
     r29 = spu_shlqbyi(r8, 0);
     if (r2._u32[0] != 0) goto L_03E4C;
     r3 = spu_ceqi(r6, 5);
-    if (r3._u32[0] == 0) { SAVE(); c.ret = g[0]._u32[0]; return; }
+    if (r3._u32[0] == 0) { g[2] = r2; g[3] = r3; g[26] = r26; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; c.ret = r0._u32[0]; return; }
     r20 = spu_ceqi(r9, 1);
     if (r20._u32[0] != 0) goto L_03F84;
     r11 = spu_ceqi(r9, 2);
@@ -5345,7 +5240,7 @@ L_03E18:
     r13 = spu_shufb(r32, r61, r49);
     lsw(c, r26._u32[0] + 0x0, r13);
     if (r31._u32[0] != 0) goto L_03D58;
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
+    { g[2] = r2; g[3] = r3; g[4] = r4; g[7] = r7; g[8] = r8; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[49] = r49; g[50] = r50; g[52] = r52; g[53] = r53; g[55] = r55; g[56] = r56; g[58] = r58; g[59] = r59; g[61] = r61; g[68] = r68; g[70] = r70; g[72] = r72; c.ret = r0._u32[0]; return; }
 L_03E4C:
     COV(264);
     r4 = spu_ceqi(r9, 1);
@@ -5434,7 +5329,7 @@ L_03F50:
     r12 = spu_shufb(r63, r68, r64);
     lsw(c, r26._u32[0] + 0x0, r12);
     if (r31._u32[0] != 0) goto L_03E78;
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
+    { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[25] = r25; g[26] = r26; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[49] = r49; g[50] = r50; g[52] = r52; g[53] = r53; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[72] = r72; c.ret = r0._u32[0]; return; }
 L_03F84:
     COV(269);
     r17 = spu_andi(r30, 15);
@@ -5504,7 +5399,7 @@ L_04058:
 L_04064:
     COV(273);
     r12 = spu_andi(r31, 7);
-    if (r12._u32[0] == 0) { SAVE(); c.ret = g[0]._u32[0]; return; }
+    if (r12._u32[0] == 0) { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; c.ret = r0._u32[0]; return; }
     r11 = spu_ori(r20, 0);
     r31 = lsr(c, r29._u32[0] + 0x0);
     r14 = spu_ilhu(0x2F80);
@@ -5546,7 +5441,7 @@ L_04090:
     r29 = spu_shufb(r41, r21, r45);
     lsw(c, r26._u32[0] + 0x0, r29);
     if (r12._u32[0] != 0) goto L_04090;
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
+    { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; c.ret = r0._u32[0]; return; }
 L_04118:
     COV(275);
     r12 = spu_andi(r3, 31);
@@ -5823,7 +5718,7 @@ L_0445C:
 L_04578:
     COV(280);
     r17 = spu_andi(r31, 3);
-    if (r17._u32[0] == 0) { SAVE(); c.ret = g[0]._u32[0]; return; }
+    if (r17._u32[0] == 0) { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; c.ret = r0._u32[0]; return; }
     r16 = spu_ori(r11, 0);
     r30 = lsr(c, r29._u32[0] + 0x0);
     r20 = spu_ilhu(0x2F80);
@@ -5902,7 +5797,7 @@ L_0468C:
     COV(284);
     lsw(c, r26._u32[0] + 0x0, r31);
     if (r17._u32[0] != 0) goto L_045A0;
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
+    { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; c.ret = r0._u32[0]; return; }
 L_04698:
     COV(285);
     r5 = spu_andi(r3, 15);
@@ -5920,7 +5815,7 @@ L_046AC:
     goto L_046B4;
 L_046B4:
     COV(288);
-    if (r12._u32[0] == 0) { SAVE(); c.ret = g[0]._u32[0]; return; }
+    if (r12._u32[0] == 0) { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; c.ret = r0._u32[0]; return; }
     r11 = spu_ori(r21, 0);
     r31 = lsr(c, r29._u32[0] + 0x0);
     r15 = spu_ilhu(0x2F80);
@@ -5970,7 +5865,7 @@ L_046D8:
     r29 = spu_shufb(r45, r23, r40);
     lsw(c, r26._u32[0] + 0x0, r29);
     if (r12._u32[0] != 0) goto L_046D8;
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
+    { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; c.ret = r0._u32[0]; return; }
 L_04780:
     COV(290);
     r10 = spu_ai(r3, 15);
@@ -6511,7 +6406,7 @@ L_04F28:
     goto L_04FF0;
 L_04FF0:
     COV(304);
-    if (r31._u32[0] == 0) { SAVE(); c.ret = g[0]._u32[0]; return; }
+    if (r31._u32[0] == 0) { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[7] = r7; g[8] = r8; g[9] = r9; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[33] = r33; g[34] = r34; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[42] = r42; g[44] = r44; g[45] = r45; g[46] = r46; g[48] = r48; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[58] = r58; g[59] = r59; g[60] = r60; g[68] = r68; g[70] = r70; g[71] = r71; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; c.ret = r0._u32[0]; return; }
     r16 = spu_ori(r30, 0);
     r24 = lsr(c, r29._u32[0] + 0x0);
     r17 = spu_ori(r31, 0);
@@ -6568,7 +6463,7 @@ L_05018:
     r30 = spu_shufb(r29, r43, r22);
     lsw(c, r26._u32[0] + 0x0, r30);
     if (r17._u32[0] != 0) goto L_05018;
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
+    { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; c.ret = r0._u32[0]; return; }
 L_050D8:
     COV(306);
     r73 = spu_il(2);
@@ -7016,15 +6911,13 @@ L_05650:
     goto L_046AC;
 L_05840:
     COV(311);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
+    { g[2] = r2; g[4] = r4; g[17] = r17; g[26] = r26; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; c.ret = r0._u32[0]; return; }
 L_05844:
     COV(312);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[2] = r2; g[3] = r3; g[11] = r11; g[20] = r20; g[26] = r26; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x05848 (138 blocks; called from 524) ----
+// ---- 0x05848 (138 blocks; called from 524; 104 registers, 104 assigned; reaches all, changes all) ----
 void f_05848(Run& c)
 {
     u128* const g = c.g;
@@ -7041,8 +6934,6 @@ void f_05848(Run& c)
     Q r80 = g[80], r81 = g[81], r82 = g[82], r83 = g[83], r84 = g[84], r85 = g[85], r86 = g[86], r87 = g[87];
     Q r88 = g[88], r89 = g[89], r90 = g[90], r91 = g[91], r92 = g[92], r93 = g[93], r94 = g[94], r95 = g[95];
     Q r96 = g[96], r97 = g[97], r98 = g[98], r99 = g[99], r100 = g[100], r101 = g[101], r102 = g[102], r103 = g[103];
-#define SAVE() do { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; r85 = g[85]; r86 = g[86]; r87 = g[87]; r88 = g[88]; r89 = g[89]; r90 = g[90]; r91 = g[91]; r92 = g[92]; r93 = g[93]; r94 = g[94]; r95 = g[95]; r96 = g[96]; r97 = g[97]; r98 = g[98]; r99 = g[99]; r100 = g[100]; r101 = g[101]; r102 = g[102]; r103 = g[103]; } while (0)
 L_05848:
     COV(313);
     r2 = spu_il(-528);
@@ -7180,8 +7071,8 @@ L_05A2C:
 L_05A40:
     COV(318);
     r3 = spu_ori(r89, 0);
-    r0 = spu_link(0x5A48u);
-    SAVE(); f_0D0D0(c); if (c.exit) return; if ((c.ret ^ 0x5A48u) & 0x3FFFFu) { bad_return(c, 0x5A48u); return; } LOAD();   // brsl $r0, 0xD0D0
+    r0 = spu_link(0x5A48u);   // brsl $r0, 0xD0D0
+    g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; f_0D0D0(c); if (c.exit) { g[1] = r1; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; return; } if ((c.ret ^ 0x5A48u) & 0x3FFFFu) { g[1] = r1; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; bad_return(c, 0x5A48u); return; } r2 = g[2]; r4 = g[4]; r5 = g[5]; r6 = g[6];
     r3 = spu_il(296);
     r10 = lsr(c, r1._u32[0] + 0x20);
     r11 = lsr(c, r1._u32[0] + 0x70);
@@ -7217,8 +7108,8 @@ L_05AC8:
     COV(319);
     r4 = spu_ai(r10, 94);
     r3 = lsr(c, r1._u32[0] + 0x40);
-    r0 = spu_link(0x5AD8u);
-    SAVE(); f_0D078(c); if (c.exit) return; if ((c.ret ^ 0x5AD8u) & 0x3FFFFu) { bad_return(c, 0x5AD8u); return; } LOAD();   // brsl $r0, 0xD078
+    r0 = spu_link(0x5AD8u);   // brsl $r0, 0xD078
+    g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; f_0D078(c); if (c.exit) { g[1] = r1; g[10] = r10; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; return; } if ((c.ret ^ 0x5AD8u) & 0x3FFFFu) { g[1] = r1; g[10] = r10; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; bad_return(c, 0x5AD8u); return; } r2 = g[2]; r3 = g[3]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21];
     r3 = spu_ori(r96, 0);
     r55 = lsr(c, r1._u32[0] + 0x20);
     r4 = spu_ori(r97, 0);
@@ -7229,8 +7120,8 @@ L_05AC8:
     r58 = spu_cwd(r55, 0);
     r56 = spu_shufb(r86, r57, r58);
     lsw(c, r55._u32[0] + 0x100, r56);
-    r0 = spu_link(0x5B08u);
-    SAVE(); f_083B8(c); if (c.exit) return; if ((c.ret ^ 0x5B08u) & 0x3FFFFu) { bad_return(c, 0x5B08u); return; } LOAD();   // brsl $r0, 0x83B8
+    r0 = spu_link(0x5B08u);   // brsl $r0, 0x83B8
+    g[0] = r0; g[1] = r1; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[10] = r10; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; f_083B8(c); if (c.exit) return; if ((c.ret ^ 0x5B08u) & 0x3FFFFu) { bad_return(c, 0x5B08u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; r85 = g[85]; r86 = g[86]; r87 = g[87]; r88 = g[88]; r89 = g[89]; r90 = g[90]; r91 = g[91]; r92 = g[92]; r93 = g[93]; r94 = g[94]; r95 = g[95]; r96 = g[96]; r97 = g[97]; r98 = g[98]; r99 = g[99]; r100 = g[100]; r101 = g[101]; r102 = g[102]; r103 = g[103];
     r10 = lsr(c, r1._u32[0] + 0x20);
     r54 = lsr(c, r10._u32[0] + 0x110);
     r9 = spu_cwd(r10, 0);
@@ -7286,21 +7177,21 @@ L_05B70:
     r3 = spu_andi(r11, 3);
     r12 = spu_ceqi(r3, 0);
     r19 = spu_sfi(r12, 0);
-    if ((int32_t)r19._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0x5BE0u); return; }   // heqi
+    if ((int32_t)r19._u32[0] == (int32_t)(0)) { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[16] = r16; g[17] = r17; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[37] = r37; g[48] = r48; g[49] = r49; g[50] = r50; g[52] = r52; g[53] = r53; g[54] = r54; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; halt(c, 0x5BE0u); return; }   // heqi
     r7 = spu_il(32);
     r18 = spu_andi(r11, 15);
     r5 = spu_il(4);
     r3 = spu_a(r92, r18);
     r6 = spu_il(1);
-    r0 = spu_link(0x5C00u);
-    SAVE(); f_0E680(c); if (c.exit) return; if ((c.ret ^ 0x5C00u) & 0x3FFFFu) { bad_return(c, 0x5C00u); return; } LOAD();   // brsl $r0, 0xE680
+    r0 = spu_link(0x5C00u);   // brsl $r0, 0xE680
+    g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; f_0E680(c); if (c.exit) { g[11] = r11; g[12] = r12; g[13] = r13; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[37] = r37; g[48] = r48; g[49] = r49; g[50] = r50; g[52] = r52; g[53] = r53; g[54] = r54; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; return; } if ((c.ret ^ 0x5C00u) & 0x3FFFFu) { g[11] = r11; g[12] = r12; g[13] = r13; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[37] = r37; g[48] = r48; g[49] = r49; g[50] = r50; g[52] = r52; g[53] = r53; g[54] = r54; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; bad_return(c, 0x5C00u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r8 = g[8]; r9 = g[9]; r10 = g[10];
     r3 = spu_ori(r96, 0);
     r4 = spu_shlqbyi(r97, 0);
     r5 = spu_ai(r1, 32);
     r6 = spu_shlqbyi(r98, 0);
     r7 = spu_il(1);
-    r0 = spu_link(0x5C18u);
-    SAVE(); f_08038(c); if (c.exit) return; if ((c.ret ^ 0x5C18u) & 0x3FFFFu) { bad_return(c, 0x5C18u); return; } LOAD();   // brsl $r0, 0x8038
+    r0 = spu_link(0x5C18u);   // brsl $r0, 0x8038
+    g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[11] = r11; g[12] = r12; g[13] = r13; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[37] = r37; g[48] = r48; g[49] = r49; g[50] = r50; g[52] = r52; g[53] = r53; g[54] = r54; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; f_08038(c); if (c.exit) return; if ((c.ret ^ 0x5C18u) & 0x3FFFFu) { bad_return(c, 0x5C18u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; r85 = g[85]; r86 = g[86]; r87 = g[87]; r88 = g[88]; r89 = g[89]; r90 = g[90]; r91 = g[91]; r92 = g[92]; r93 = g[93]; r94 = g[94]; r95 = g[95]; r96 = g[96]; r97 = g[97]; r98 = g[98]; r99 = g[99]; r100 = g[100]; r101 = g[101]; r102 = g[102]; r103 = g[103];
     r14 = spu_il(90);
     r10 = lsr(c, r1._u32[0] + 0x20);
     r88 = spu_ai(r10, 104);
@@ -7352,8 +7243,8 @@ L_05CA0:
     r5 = spu_rotqby(r98, r83);
     r6 = spu_rotqby(r97, r85);
     r7 = spu_rotqby(r96, r81);
-    r0 = spu_link(0x5CD8u);
-    SAVE(); f_07DF8(c); if (c.exit) return; if ((c.ret ^ 0x5CD8u) & 0x3FFFFu) { bad_return(c, 0x5CD8u); return; } LOAD();   // brsl $r0, 0x7DF8
+    r0 = spu_link(0x5CD8u);   // brsl $r0, 0x7DF8
+    g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; f_07DF8(c); if (c.exit) { g[26] = r26; g[66] = r66; g[79] = r79; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; return; } if ((c.ret ^ 0x5CD8u) & 0x3FFFFu) { g[26] = r26; g[66] = r66; g[79] = r79; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; bad_return(c, 0x5CD8u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; r85 = g[85];
     goto L_05CD8;
 L_05CD8:
     COV(324);
@@ -7378,14 +7269,14 @@ L_05CD8:
     r99 = spu_andi(r83, 3);
     r85 = spu_ceqi(r99, 0);
     r84 = spu_sfi(r85, 0);
-    if ((int32_t)r84._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0x5D30u); return; }   // heqi
+    if ((int32_t)r84._u32[0] == (int32_t)(0)) { g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; halt(c, 0x5D30u); return; }   // heqi
     r5 = spu_il(4);
     r82 = spu_andi(r83, 15);
     r6 = spu_il(1);
     r3 = spu_a(r92, r82);
     r7 = spu_il(32);
-    r0 = spu_link(0x5D50u);
-    SAVE(); f_0E680(c); if (c.exit) return; if ((c.ret ^ 0x5D50u) & 0x3FFFFu) { bad_return(c, 0x5D50u); return; } LOAD();   // brsl $r0, 0xE680
+    r0 = spu_link(0x5D50u);   // brsl $r0, 0xE680
+    g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; f_0E680(c); if (c.exit) { g[1] = r1; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; return; } if ((c.ret ^ 0x5D50u) & 0x3FFFFu) { g[1] = r1; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; bad_return(c, 0x5D50u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r8 = g[8]; r9 = g[9]; r10 = g[10];
     r81 = spu_il(528);
     r0 = lsr(c, r1._u32[0] + 0x220);
     r3 = spu_ori(r94, 0);
@@ -7417,7 +7308,7 @@ L_05DC0:
     COV(325);
     r102 = lsr(c, r1._u32[0] + -0x170);
     r103 = lsr(c, r1._u32[0] + -0x180);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
+    { g[0] = r0; g[1] = r1; g[3] = r3; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; c.ret = r0._u32[0]; return; }
 L_05DCC:
     COV(326);
     r47 = lsr(c, r10._u32[0] + 0x120);
@@ -7434,21 +7325,21 @@ L_05DCC:
     r39 = spu_sfi(r41, 0);
     r38 = spu_sfi(r40, 0);
     r36 = spu_and(r38, r39);
-    if ((int32_t)r36._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0x5E0Cu); return; }   // heqi
+    if ((int32_t)r36._u32[0] == (int32_t)(0)) { g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; halt(c, 0x5E0Cu); return; }   // heqi
     r6 = spu_il(1);
     r7 = spu_il(64);
     r35 = lsr(c, r10._u32[0] + 0xD0);
     r33 = spu_rotqby(r35, r10);
     r5 = spu_sf(r34, r33);
-    r0 = spu_link(0x5E30u);
-    SAVE(); f_0E5C8(c); if (c.exit) return; if ((c.ret ^ 0x5E30u) & 0x3FFFFu) { bad_return(c, 0x5E30u); return; } LOAD();   // brsl $r0, 0xE5C8
+    r0 = spu_link(0x5E30u);   // brsl $r0, 0xE5C8
+    g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; f_0E5C8(c); if (c.exit) { g[1] = r1; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; return; } if ((c.ret ^ 0x5E30u) & 0x3FFFFu) { g[1] = r1; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; bad_return(c, 0x5E30u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32];
     r4 = spu_il(0);
     wrch(c, MFC_WrTagMask, r87);
     wrch(c, MFC_WrTagUpdate, r87);
     r2 = rdch(c, MFC_RdTagStat);
     r3 = lsr(c, r1._u32[0] + 0x20);
-    r0 = spu_link(0x5E48u);
-    SAVE(); f_0D278(c); if (c.exit) return; if ((c.ret ^ 0x5E48u) & 0x3FFFFu) { bad_return(c, 0x5E48u); return; } LOAD();   // brsl $r0, 0xD278
+    r0 = spu_link(0x5E48u);   // brsl $r0, 0xD278
+    g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; f_0D278(c); if (c.exit) return; if ((c.ret ^ 0x5E48u) & 0x3FFFFu) { bad_return(c, 0x5E48u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; r85 = g[85]; r86 = g[86]; r87 = g[87]; r88 = g[88]; r89 = g[89]; r90 = g[90]; r91 = g[91]; r92 = g[92]; r93 = g[93]; r94 = g[94]; r95 = g[95]; r96 = g[96]; r97 = g[97]; r98 = g[98]; r99 = g[99]; r100 = g[100]; r101 = g[101]; r102 = g[102]; r103 = g[103];
     r32 = spu_il(472);
     r10 = lsr(c, 0x35EA0);
     r30 = lsr(c, r1._u32[0] + 0x20);
@@ -7501,20 +7392,20 @@ L_05ED0:
     r27 = spu_andi(r24, 3);
     r26 = spu_ceqi(r27, 0);
     r25 = spu_sfi(r26, 0);
-    if ((int32_t)r25._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0x5F14u); return; }   // heqi
+    if ((int32_t)r25._u32[0] == (int32_t)(0)) { g[4] = r4; g[8] = r8; g[9] = r9; g[10] = r10; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[37] = r37; g[48] = r48; g[49] = r49; g[50] = r50; g[52] = r52; g[53] = r53; g[54] = r54; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; halt(c, 0x5F14u); return; }   // heqi
     r5 = spu_il(4);
     r23 = spu_andi(r24, 15);
     r6 = spu_il(1);
     r3 = spu_a(r92, r23);
     r7 = spu_il(32);
-    r0 = spu_link(0x5F30u);
-    SAVE(); f_0E680(c); if (c.exit) return; if ((c.ret ^ 0x5F30u) & 0x3FFFFu) { bad_return(c, 0x5F30u); return; } LOAD();   // brsl $r0, 0xE680
+    r0 = spu_link(0x5F30u);   // brsl $r0, 0xE680
+    g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; f_0E680(c); if (c.exit) { g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[37] = r37; g[48] = r48; g[49] = r49; g[50] = r50; g[52] = r52; g[53] = r53; g[54] = r54; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; return; } if ((c.ret ^ 0x5F30u) & 0x3FFFFu) { g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[37] = r37; g[48] = r48; g[49] = r49; g[50] = r50; g[52] = r52; g[53] = r53; g[54] = r54; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; bad_return(c, 0x5F30u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r8 = g[8]; r9 = g[9]; r10 = g[10];
     goto L_05A2C;
 L_05F38:
     COV(329);
     r3 = spu_ori(r89, 0);
-    r0 = spu_link(0x5F40u);
-    SAVE(); f_0D0D0(c); if (c.exit) return; if ((c.ret ^ 0x5F40u) & 0x3FFFFu) { bad_return(c, 0x5F40u); return; } LOAD();   // brsl $r0, 0xD0D0
+    r0 = spu_link(0x5F40u);   // brsl $r0, 0xD0D0
+    g[0] = r0; g[3] = r3; f_0D0D0(c); if (c.exit) { g[1] = r1; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; return; } if ((c.ret ^ 0x5F40u) & 0x3FFFFu) { g[1] = r1; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; bad_return(c, 0x5F40u); return; } r2 = g[2]; r4 = g[4]; r5 = g[5]; r6 = g[6];
     r41 = spu_il(260);
     r10 = lsr(c, r1._u32[0] + 0x20);
     r40 = spu_ai(r10, 260);
@@ -7588,7 +7479,7 @@ L_06018:
     r51 = spu_sfi(r53, 0);
     r37 = spu_sfi(r52, 0);
     r88 = spu_and(r37, r51);
-    if ((int32_t)r88._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0x6054u); return; }   // heqi
+    if ((int32_t)r88._u32[0] == (int32_t)(0)) { g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; halt(c, 0x6054u); return; }   // heqi
     r7 = spu_il(64);
     r6 = spu_il(1);
     r50 = lsr(c, r10._u32[0] + 0xD0);
@@ -7596,8 +7487,8 @@ L_06018:
     r88 = spu_il(1);
     r48 = spu_rotqby(r50, r10);
     r5 = spu_sf(r49, r48);
-    r0 = spu_link(0x6080u);
-    SAVE(); f_0E5C8(c); if (c.exit) return; if ((c.ret ^ 0x6080u) & 0x3FFFFu) { bad_return(c, 0x6080u); return; } LOAD();   // brsl $r0, 0xE5C8
+    r0 = spu_link(0x6080u);   // brsl $r0, 0xE5C8
+    g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; f_0E5C8(c); if (c.exit) { g[1] = r1; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; return; } if ((c.ret ^ 0x6080u) & 0x3FFFFu) { g[1] = r1; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; bad_return(c, 0x6080u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32];
     r4 = spu_il(0);
     wrch(c, MFC_WrTagMask, r87);
     wrch(c, MFC_WrTagUpdate, r87);
@@ -7608,8 +7499,8 @@ L_06018:
     r3 = spu_ori(r46, 0);
     r6 = spu_shufb(r46, r45, r47);
     lsw(c, r1._u32[0] + 0x20, r6);
-    r0 = spu_link(0x60B0u);
-    SAVE(); f_0D278(c); if (c.exit) return; if ((c.ret ^ 0x60B0u) & 0x3FFFFu) { bad_return(c, 0x60B0u); return; } LOAD();   // brsl $r0, 0xD278
+    r0 = spu_link(0x60B0u);   // brsl $r0, 0xD278
+    g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[6] = r6; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; f_0D278(c); if (c.exit) return; if ((c.ret ^ 0x60B0u) & 0x3FFFFu) { bad_return(c, 0x60B0u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; r85 = g[85]; r86 = g[86]; r87 = g[87]; r88 = g[88]; r89 = g[89]; r90 = g[90]; r91 = g[91]; r92 = g[92]; r93 = g[93]; r94 = g[94]; r95 = g[95]; r96 = g[96]; r97 = g[97]; r98 = g[98]; r99 = g[99]; r100 = g[100]; r101 = g[101]; r102 = g[102]; r103 = g[103];
     r44 = spu_il(148);
     r38 = lsr(c, r1._u32[0] + 0x20);
     r33 = spu_il(28);
@@ -7633,7 +7524,7 @@ L_06018:
     r29 = lsr(c, r35._u32[0] + r80._u32[0]);
     r8 = spu_ori(r7, 0);
     r5 = spu_rotqby(r29, r30);
-    { const uint32_t t = r28._u32[0]; r0 = spu_link(0x611Cu); SAVE(); if (!branch(c, t & 0x3FFFFu, 0x6118u, true)) return; if ((c.ret ^ 0x611Cu) & 0x3FFFFu) { bad_return(c, 0x611Cu); return; } LOAD(); }   // bisl $r0, $r28
+    { const uint32_t t = r28._u32[0]; r0 = spu_link(0x611Cu); g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; if (!branch(c, t & 0x3FFFFu, 0x6118u, true)) return; if ((c.ret ^ 0x611Cu) & 0x3FFFFu) { bad_return(c, 0x611Cu); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; r85 = g[85]; r86 = g[86]; r87 = g[87]; r88 = g[88]; r89 = g[89]; r90 = g[90]; r91 = g[91]; r92 = g[92]; r93 = g[93]; r94 = g[94]; r95 = g[95]; r96 = g[96]; r97 = g[97]; r98 = g[98]; r99 = g[99]; r100 = g[100]; r101 = g[101]; r102 = g[102]; r103 = g[103]; }   // bisl $r0, $r28
     r27 = lsr(c, r82._u32[0] + 0x10);
     r23 = lsr(c, r83._u32[0] + 0x0);
     r5 = spu_cwd(r83, 0);
@@ -7671,8 +7562,8 @@ L_06160:
     r5 = spu_rotqby(r68, r83);
     r6 = spu_rotqby(r9, r85);
     r7 = spu_rotqby(r7, r81);
-    r0 = spu_link(0x61B4u);
-    SAVE(); f_07DF8(c); if (c.exit) return; if ((c.ret ^ 0x61B4u) & 0x3FFFFu) { bad_return(c, 0x61B4u); return; } LOAD();   // brsl $r0, 0x7DF8
+    r0 = spu_link(0x61B4u);   // brsl $r0, 0x7DF8
+    g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; f_07DF8(c); if (c.exit) { g[26] = r26; g[66] = r66; g[79] = r79; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; return; } if ((c.ret ^ 0x61B4u) & 0x3FFFFu) { g[26] = r26; g[66] = r66; g[79] = r79; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; bad_return(c, 0x61B4u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; r85 = g[85];
     r10 = lsr(c, r1._u32[0] + 0x20);
     goto L_061C0;
 L_061C0:
@@ -7686,8 +7577,8 @@ L_061C0:
     r71 = spu_shufb(r72, r70, r73);
     lsw(c, r10._u32[0] + r69._u32[0], r71);
     r3 = lsr(c, r1._u32[0] + 0x40);
-    r0 = spu_link(0x61E8u);
-    SAVE(); f_0D078(c); if (c.exit) return; if ((c.ret ^ 0x61E8u) & 0x3FFFFu) { bad_return(c, 0x61E8u); return; } LOAD();   // brsl $r0, 0xD078
+    r0 = spu_link(0x61E8u);   // brsl $r0, 0xD078
+    g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[7] = r7; g[8] = r8; g[9] = r9; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; f_0D078(c); if (c.exit) { g[1] = r1; g[10] = r10; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; return; } if ((c.ret ^ 0x61E8u) & 0x3FFFFu) { g[1] = r1; g[10] = r10; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; bad_return(c, 0x61E8u); return; } r2 = g[2]; r3 = g[3]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21];
     r10 = lsr(c, r1._u32[0] + 0x20);
     goto L_061EC;
 L_061EC:
@@ -7706,8 +7597,8 @@ L_061EC:
     r6 = spu_ai(r1, 48);
     r18 = spu_shufb(r84, r19, r12);
     lsw(c, r10._u32[0] + r14._u32[0], r18);
-    r0 = spu_link(0x6230u);
-    SAVE(); f_08038(c); if (c.exit) return; if ((c.ret ^ 0x6230u) & 0x3FFFFu) { bad_return(c, 0x6230u); return; } LOAD();   // brsl $r0, 0x8038
+    r0 = spu_link(0x6230u);   // brsl $r0, 0x8038
+    g[0] = r0; g[1] = r1; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; f_08038(c); if (c.exit) return; if ((c.ret ^ 0x6230u) & 0x3FFFFu) { bad_return(c, 0x6230u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; r85 = g[85]; r86 = g[86]; r87 = g[87]; r88 = g[88]; r89 = g[89]; r90 = g[90]; r91 = g[91]; r92 = g[92]; r93 = g[93]; r94 = g[94]; r95 = g[95]; r96 = g[96]; r97 = g[97]; r98 = g[98]; r99 = g[99]; r100 = g[100]; r101 = g[101]; r102 = g[102]; r103 = g[103];
     r79 = spu_il(90);
     r10 = lsr(c, r1._u32[0] + 0x20);
     r78 = spu_ai(r10, 104);
@@ -7795,7 +7686,7 @@ L_062F0:
     r63 = spu_sfi(r64, 0);
     r62 = spu_and(r65, r66);
     r61 = spu_and(r62, r63);
-    if ((int32_t)r61._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0x6368u); return; }   // heqi
+    if ((int32_t)r61._u32[0] == (int32_t)(0)) { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[57] = r57; g[58] = r58; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; halt(c, 0x6368u); return; }   // heqi
     r59 = spu_il(0);
     r60 = spu_ori(r13, 0);
     r56 = spu_cwd(r83, 0);
@@ -7901,7 +7792,7 @@ L_06470:
     r75 = spu_sfi(r76, 0);
     r74 = spu_and(r77, r78);
     r73 = spu_and(r74, r75);
-    if ((int32_t)r73._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0x64F0u); return; }   // heqi
+    if ((int32_t)r73._u32[0] == (int32_t)(0)) { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[88] = r88; halt(c, 0x64F0u); return; }   // heqi
     r71 = spu_il(0);
     wrch(c, MFC_LSA, r72);
     wrch(c, MFC_EAH, r71);
@@ -7936,7 +7827,7 @@ L_06534:
     r29 = spu_sfi(r31, 0);
     r28 = spu_sfi(r30, 0);
     r27 = spu_and(r28, r29);
-    if ((int32_t)r27._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0x6574u); return; }   // heqi
+    if ((int32_t)r27._u32[0] == (int32_t)(0)) { g[1] = r1; g[3] = r3; g[4] = r4; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; halt(c, 0x6574u); return; }   // heqi
     r6 = spu_il(1);
     r7 = spu_il(64);
     r26 = lsr(c, r10._u32[0] + 0xD0);
@@ -7944,15 +7835,15 @@ L_06534:
     r88 = spu_cwd(r1, 0);
     r24 = spu_rotqby(r26, r10);
     r5 = spu_sf(r25, r24);
-    r0 = spu_link(0x65A0u);
-    SAVE(); f_0E5C8(c); if (c.exit) return; if ((c.ret ^ 0x65A0u) & 0x3FFFFu) { bad_return(c, 0x65A0u); return; } LOAD();   // brsl $r0, 0xE5C8
+    r0 = spu_link(0x65A0u);   // brsl $r0, 0xE5C8
+    g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; f_0E5C8(c); if (c.exit) { g[1] = r1; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; return; } if ((c.ret ^ 0x65A0u) & 0x3FFFFu) { g[1] = r1; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; bad_return(c, 0x65A0u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32];
     r4 = spu_il(0);
     wrch(c, MFC_WrTagMask, r80);
     wrch(c, MFC_WrTagUpdate, r80);
     r2 = rdch(c, MFC_RdTagStat);
     r3 = lsr(c, r1._u32[0] + 0x20);
-    r0 = spu_link(0x65B8u);
-    SAVE(); f_0D278(c); if (c.exit) return; if ((c.ret ^ 0x65B8u) & 0x3FFFFu) { bad_return(c, 0x65B8u); return; } LOAD();   // brsl $r0, 0xD278
+    r0 = spu_link(0x65B8u);   // brsl $r0, 0xD278
+    g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; f_0D278(c); if (c.exit) return; if ((c.ret ^ 0x65B8u) & 0x3FFFFu) { bad_return(c, 0x65B8u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; r85 = g[85]; r86 = g[86]; r87 = g[87]; r88 = g[88]; r89 = g[89]; r90 = g[90]; r91 = g[91]; r92 = g[92]; r93 = g[93]; r94 = g[94]; r95 = g[95]; r96 = g[96]; r97 = g[97]; r98 = g[98]; r99 = g[99]; r100 = g[100]; r101 = g[101]; r102 = g[102]; r103 = g[103];
     r5 = spu_ori(r81, 0);
     r6 = spu_ori(r83, 0);
     r23 = lsr(c, 0x35EA0);
@@ -7963,8 +7854,8 @@ L_06534:
     r94 = spu_shufb(r23, r15, r88);
     r4 = spu_rotqby(r8, r85);
     lsw(c, r1._u32[0] + 0x20, r94);
-    r0 = spu_link(0x65E8u);
-    SAVE(); f_02708(c); if (c.exit) return; if ((c.ret ^ 0x65E8u) & 0x3FFFFu) { bad_return(c, 0x65E8u); return; } LOAD();   // brsl $r0, 0x2708
+    r0 = spu_link(0x65E8u);   // brsl $r0, 0x2708
+    g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[15] = r15; g[23] = r23; g[94] = r94; f_02708(c); if (c.exit) return; if ((c.ret ^ 0x65E8u) & 0x3FFFFu) { bad_return(c, 0x65E8u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; r85 = g[85]; r86 = g[86]; r87 = g[87]; r88 = g[88]; r89 = g[89]; r90 = g[90]; r91 = g[91]; r92 = g[92]; r93 = g[93]; r94 = g[94]; r95 = g[95]; r96 = g[96]; r97 = g[97]; r98 = g[98]; r99 = g[99]; r100 = g[100]; r101 = g[101]; r102 = g[102]; r103 = g[103];
     r10 = lsr(c, r1._u32[0] + 0x20);
     r17 = spu_ceqi(r3, 22);
     r5 = lsr(c, r81._u32[0] + 0x0);
@@ -8010,7 +7901,7 @@ L_06534:
     r63 = spu_sfi(r66, 0);
     r62 = spu_and(r64, r65);
     r61 = spu_and(r62, r63);
-    if ((int32_t)r61._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0x66A8u); return; }   // heqi
+    if ((int32_t)r61._u32[0] == (int32_t)(0)) { g[2] = r2; g[3] = r3; g[5] = r5; g[7] = r7; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[14] = r14; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[21] = r21; g[22] = r22; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[88] = r88; g[94] = r94; halt(c, 0x66A8u); return; }   // heqi
     r59 = spu_il(0);
     wrch(c, MFC_LSA, r60);
     wrch(c, MFC_EAH, r59);
@@ -8036,8 +7927,8 @@ L_066E0:
     r88 = spu_ila(0x358A0);
     r24 = spu_shufb(r84, r2, r25);
     lsw(c, r10._u32[0] + r23._u32[0], r24);
-    r0 = spu_link(0x6714u);
-    SAVE(); f_08038(c); if (c.exit) return; if ((c.ret ^ 0x6714u) & 0x3FFFFu) { bad_return(c, 0x6714u); return; } LOAD();   // brsl $r0, 0x8038
+    r0 = spu_link(0x6714u);   // brsl $r0, 0x8038
+    g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; f_08038(c); if (c.exit) return; if ((c.ret ^ 0x6714u) & 0x3FFFFu) { bad_return(c, 0x6714u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; r85 = g[85]; r86 = g[86]; r87 = g[87]; r88 = g[88]; r89 = g[89]; r90 = g[90]; r91 = g[91]; r92 = g[92]; r93 = g[93]; r94 = g[94]; r95 = g[95]; r96 = g[96]; r97 = g[97]; r98 = g[98]; r99 = g[99]; r100 = g[100]; r101 = g[101]; r102 = g[102]; r103 = g[103];
     r3 = spu_ori(r89, 0);
     r13 = lsr(c, r1._u32[0] + 0x20);
     r15 = lsr(c, r13._u32[0] + 0x110);
@@ -8046,8 +7937,8 @@ L_066E0:
     r21 = spu_andi(r16, -17);
     r20 = spu_shufb(r21, r15, r22);
     lsw(c, r13._u32[0] + 0x110, r20);
-    r0 = spu_link(0x6740u);
-    SAVE(); f_0D0D0(c); if (c.exit) return; if ((c.ret ^ 0x6740u) & 0x3FFFFu) { bad_return(c, 0x6740u); return; } LOAD();   // brsl $r0, 0xD0D0
+    r0 = spu_link(0x6740u);   // brsl $r0, 0xD0D0
+    g[0] = r0; g[3] = r3; f_0D0D0(c); if (c.exit) { g[13] = r13; g[15] = r15; g[16] = r16; g[20] = r20; g[21] = r21; g[22] = r22; return; } if ((c.ret ^ 0x6740u) & 0x3FFFFu) { g[13] = r13; g[15] = r15; g[16] = r16; g[20] = r20; g[21] = r21; g[22] = r22; bad_return(c, 0x6740u); return; } r2 = g[2]; r4 = g[4]; r5 = g[5]; r6 = g[6];
     r11 = spu_il(36);
     r12 = lsr(c, r1._u32[0] + 0x60);
     r3 = spu_il(38);
@@ -8083,7 +7974,7 @@ L_066E0:
     r56 = spu_sfi(r59, 0);
     r55 = spu_and(r57, r58);
     r54 = spu_and(r55, r56);
-    if ((int32_t)r54._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0x67D0u); return; }   // heqi
+    if ((int32_t)r54._u32[0] == (int32_t)(0)) { g[3] = r3; g[8] = r8; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[37] = r37; g[51] = r51; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; halt(c, 0x67D0u); return; }   // heqi
     r52 = spu_il(0);
     r53 = spu_ori(r88, 0);
     wrch(c, MFC_LSA, r53);
@@ -8096,8 +7987,8 @@ L_066E0:
     wrch(c, MFC_WrTagUpdate, r87);
     r2 = rdch(c, MFC_RdTagStat);
     r3 = lsr(c, r1._u32[0] + 0x60);
-    r0 = spu_link(0x6808u);
-    SAVE(); f_0CE58(c); if (c.exit) return; if ((c.ret ^ 0x6808u) & 0x3FFFFu) { bad_return(c, 0x6808u); return; } LOAD();   // brsl $r0, 0xCE58
+    r0 = spu_link(0x6808u);   // brsl $r0, 0xCE58
+    g[0] = r0; g[2] = r2; g[3] = r3; g[8] = r8; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; f_0CE58(c); if (c.exit) { g[37] = r37; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; return; } if ((c.ret ^ 0x6808u) & 0x3FFFFu) { g[37] = r37; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; bad_return(c, 0x6808u); return; } r2 = g[2]; r3 = g[3]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26];
     r50 = spu_il(68);
     r10 = lsr(c, r1._u32[0] + 0x20);
     r49 = spu_ai(r10, 68);
@@ -8191,7 +8082,7 @@ L_068D0:
     r79 = spu_and(r19, r20);
     r8 = spu_and(r79, r18);
     r77 = spu_and(r8, r78);
-    if ((int32_t)r77._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0x6954u); return; }   // heqi
+    if ((int32_t)r77._u32[0] == (int32_t)(0)) { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; halt(c, 0x6954u); return; }   // heqi
     r75 = spu_il(0);
     r76 = spu_ori(r14, 0);
     wrch(c, MFC_LSA, r76);
@@ -8321,7 +8212,7 @@ L_06A90:
     r67 = spu_sfi(r71, 0);
     r66 = spu_and(r68, r69);
     r65 = spu_and(r66, r67);
-    if ((int32_t)r65._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0x6B30u); return; }   // heqi
+    if ((int32_t)r65._u32[0] == (int32_t)(0)) { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; halt(c, 0x6B30u); return; }   // heqi
     r64 = spu_ori(r88, 0);
     r88 = spu_fsmbi(0x0);
     wrch(c, MFC_LSA, r64);
@@ -8380,7 +8271,7 @@ L_06B84:
     r29 = spu_sfi(r11, 0);
     r28 = spu_and(r4, r2);
     r27 = spu_and(r28, r29);
-    if ((int32_t)r27._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0x6C00u); return; }   // heqi
+    if ((int32_t)r27._u32[0] == (int32_t)(0)) { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; halt(c, 0x6C00u); return; }   // heqi
     r26 = spu_il(0);
     wrch(c, MFC_LSA, r8);
     wrch(c, MFC_EAH, r26);
@@ -8418,8 +8309,8 @@ L_06C80:
     r4 = spu_fsmbi(0x0);
     r5 = spu_ori(r86, 0);
     r7 = spu_shlqbyi(r101, 0);
-    r0 = spu_link(0x6C98u);
-    SAVE(); f_01320(c); if (c.exit) return; if ((c.ret ^ 0x6C98u) & 0x3FFFFu) { bad_return(c, 0x6C98u); return; } LOAD();   // brsl $r0, 0x1320
+    r0 = spu_link(0x6C98u);   // brsl $r0, 0x1320
+    g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; f_01320(c); if (c.exit) return; if ((c.ret ^ 0x6C98u) & 0x3FFFFu) { bad_return(c, 0x6C98u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; r85 = g[85]; r86 = g[86]; r87 = g[87]; r88 = g[88];
     goto L_06C98;
 L_06C98:
     COV(362);
@@ -8450,8 +8341,8 @@ L_06CC8:
     r5 = spu_rotqby(r35, r83);
     r7 = spu_rotqby(r34, r81);
     r8 = spu_rotqby(r14, r85);
-    r0 = spu_link(0x6CF8u);
-    SAVE(); f_01508(c); if (c.exit) return; if ((c.ret ^ 0x6CF8u) & 0x3FFFFu) { bad_return(c, 0x6CF8u); return; } LOAD();   // brsl $r0, 0x1508
+    r0 = spu_link(0x6CF8u);   // brsl $r0, 0x1508
+    g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; f_01508(c); if (c.exit) return; if ((c.ret ^ 0x6CF8u) & 0x3FFFFu) { bad_return(c, 0x6CF8u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; r85 = g[85]; r86 = g[86]; r87 = g[87]; r88 = g[88]; r89 = g[89]; r90 = g[90]; r91 = g[91]; r92 = g[92]; r93 = g[93]; r94 = g[94]; r95 = g[95]; r96 = g[96]; r97 = g[97]; r98 = g[98]; r99 = g[99]; r100 = g[100]; r101 = g[101]; r102 = g[102]; r103 = g[103];
     r29 = spu_il(252);
     r32 = lsr(c, r83._u32[0] + 0x0);
     r9 = spu_il(4);
@@ -8492,7 +8383,7 @@ L_06CC8:
     r42 = spu_sfi(r40, 0);
     r41 = spu_and(r43, r44);
     r39 = spu_and(r41, r42);
-    if ((int32_t)r39._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0x6D9Cu); return; }   // heqi
+    if ((int32_t)r39._u32[0] == (int32_t)(0)) { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[9] = r9; g[11] = r11; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[36] = r36; g[37] = r37; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; halt(c, 0x6D9Cu); return; }   // heqi
     r9 = spu_il(6);
     r38 = spu_ori(r80, 0);
     r80 = spu_fsmbi(0x0);
@@ -8543,7 +8434,7 @@ L_06DD8:
     r65 = spu_sfi(r68, 0);
     r64 = spu_and(r66, r67);
     r63 = spu_and(r64, r65);
-    if ((int32_t)r63._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0x6E68u); return; }   // heqi
+    if ((int32_t)r63._u32[0] == (int32_t)(0)) { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; halt(c, 0x6E68u); return; }   // heqi
     r61 = spu_il(0);
     r62 = spu_ori(r88, 0);
     r88 = spu_shlqbyi(r9, 0);
@@ -8564,8 +8455,8 @@ L_06E94:
 L_06EA0:
     COV(367);
     r3 = spu_ori(r17, 0);
-    r0 = spu_link(0x6EA8u);
-    SAVE(); f_0CF18(c); if (c.exit) return; if ((c.ret ^ 0x6EA8u) & 0x3FFFFu) { bad_return(c, 0x6EA8u); return; } LOAD();   // brsl $r0, 0xCF18
+    r0 = spu_link(0x6EA8u);   // brsl $r0, 0xCF18
+    g[0] = r0; g[2] = r2; g[3] = r3; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; f_0CF18(c); if (c.exit) { g[4] = r4; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[88] = r88; return; } if ((c.ret ^ 0x6EA8u) & 0x3FFFFu) { g[4] = r4; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[88] = r88; bad_return(c, 0x6EA8u); return; } r2 = g[2]; r3 = g[3]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26];
     r80 = spu_il(4);
     r25 = lsr(c, r1._u32[0] + 0x60);
     r5 = lsr(c, r25._u32[0] + 0xA0);
@@ -8575,8 +8466,8 @@ L_06EB8:
     COV(368);
     r4 = spu_il(1);
     r3 = lsr(c, r1._u32[0] + 0x20);
-    r0 = spu_link(0x6EC4u);
-    SAVE(); f_0CCB0(c); if (c.exit) return; if ((c.ret ^ 0x6EC4u) & 0x3FFFFu) { bad_return(c, 0x6EC4u); return; } LOAD();   // brsl $r0, 0xCCB0
+    r0 = spu_link(0x6EC4u);   // brsl $r0, 0xCCB0
+    g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[11] = r11; g[14] = r14; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; f_0CCB0(c); if (c.exit) { g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[88] = r88; return; } if ((c.ret ^ 0x6EC4u) & 0x3FFFFu) { g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[88] = r88; bad_return(c, 0x6EC4u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73];
     r46 = lsr(c, r1._u32[0] + 0x20);
     r3 = lsr(c, 0x35EA0);
     r45 = lsr(c, r46._u32[0] + 0x120);
@@ -8589,25 +8480,25 @@ L_06EB8:
     r43 = spu_ceqi(r44, 0);
     r41 = spu_sfi(r43, 0);
     r39 = spu_and(r41, r42);
-    if ((int32_t)r39._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0x6F00u); return; }   // heqi
+    if ((int32_t)r39._u32[0] == (int32_t)(0)) { g[3] = r3; g[4] = r4; g[9] = r9; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[88] = r88; halt(c, 0x6F00u); return; }   // heqi
     r5 = lsr(c, 0x36060);
     r6 = spu_il(2);
     r7 = spu_il(32);
-    r0 = spu_link(0x6F14u);
-    SAVE(); f_0E5C8(c); if (c.exit) return; if ((c.ret ^ 0x6F14u) & 0x3FFFFu) { bad_return(c, 0x6F14u); return; } LOAD();   // brsl $r0, 0xE5C8
+    r0 = spu_link(0x6F14u);   // brsl $r0, 0xE5C8
+    g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[9] = r9; f_0E5C8(c); if (c.exit) { g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[88] = r88; return; } if ((c.ret ^ 0x6F14u) & 0x3FFFFu) { g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[88] = r88; bad_return(c, 0x6F14u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32];
     r38 = spu_ori(r80, 0);
     wrch(c, MFC_WrTagMask, r38);
     r4 = spu_il(1);
     wrch(c, MFC_WrTagUpdate, r87);
     r2 = rdch(c, MFC_RdTagStat);
     r3 = lsr(c, r1._u32[0] + 0x20);
-    r0 = spu_link(0x6F3Cu);
-    SAVE(); f_0D278(c); if (c.exit) return; if ((c.ret ^ 0x6F3Cu) & 0x3FFFFu) { bad_return(c, 0x6F3Cu); return; } LOAD();   // brsl $r0, 0xD278
+    r0 = spu_link(0x6F3Cu);   // brsl $r0, 0xD278
+    g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[88] = r88; f_0D278(c); if (c.exit) return; if ((c.ret ^ 0x6F3Cu) & 0x3FFFFu) { bad_return(c, 0x6F3Cu); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; r85 = g[85]; r86 = g[86]; r87 = g[87]; r88 = g[88]; r89 = g[89]; r90 = g[90]; r91 = g[91]; r92 = g[92]; r93 = g[93]; r94 = g[94]; r95 = g[95]; r96 = g[96]; r97 = g[97]; r98 = g[98]; r99 = g[99]; r100 = g[100]; r101 = g[101]; r102 = g[102]; r103 = g[103];
     r80 = lsr(c, r1._u32[0] + 0x20);
     r3 = lsr(c, r1._u32[0] + 0x40);
     r4 = spu_ai(r80, 94);
-    r0 = spu_link(0x6F50u);
-    SAVE(); f_0D078(c); if (c.exit) return; if ((c.ret ^ 0x6F50u) & 0x3FFFFu) { bad_return(c, 0x6F50u); return; } LOAD();   // brsl $r0, 0xD078
+    r0 = spu_link(0x6F50u);   // brsl $r0, 0xD078
+    g[0] = r0; g[3] = r3; g[4] = r4; f_0D078(c); if (c.exit) { g[80] = r80; return; } if ((c.ret ^ 0x6F50u) & 0x3FFFFu) { g[80] = r80; bad_return(c, 0x6F50u); return; } r2 = g[2]; r3 = g[3]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21];
     goto L_05C78;
 L_06F54:
     COV(369);
@@ -8635,7 +8526,7 @@ L_06F54:
     r50 = spu_and(r53, r54);
     r37 = spu_and(r51, r52);
     r49 = spu_and(r50, r37);
-    if ((int32_t)r49._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0x6FB4u); return; }   // heqi
+    if ((int32_t)r49._u32[0] == (int32_t)(0)) { g[1] = r1; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; g[94] = r94; g[95] = r95; g[96] = r96; g[97] = r97; g[98] = r98; g[99] = r99; g[100] = r100; g[101] = r101; g[102] = r102; g[103] = r103; halt(c, 0x6FB4u); return; }   // heqi
     r47 = spu_il(0);
     wrch(c, MFC_LSA, r48);
     wrch(c, MFC_EAH, r47);
@@ -8714,7 +8605,7 @@ L_07058:
     r24 = spu_and(r5, r4);
     r2 = spu_sfi(r25, 0);
     r23 = spu_and(r24, r2);
-    if ((int32_t)r23._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0x70E0u); return; }   // heqi
+    if ((int32_t)r23._u32[0] == (int32_t)(0)) { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[10] = r10; g[11] = r11; g[13] = r13; g[15] = r15; g[16] = r16; g[17] = r17; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; halt(c, 0x70E0u); return; }   // heqi
     r16 = spu_il(0);
     wrch(c, MFC_LSA, r15);
     wrch(c, MFC_EAH, r16);
@@ -8908,7 +8799,7 @@ L_07364:
     r11 = spu_and(r2, r31);
     r4 = spu_and(r103, r30);
     r29 = spu_and(r11, r4);
-    if ((int32_t)r29._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0x73A4u); return; }   // heqi
+    if ((int32_t)r29._u32[0] == (int32_t)(0)) { g[2] = r2; g[4] = r4; g[5] = r5; g[11] = r11; g[14] = r14; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[88] = r88; halt(c, 0x73A4u); return; }   // heqi
     r28 = spu_il(0);
     r80 = spu_il(6);
     wrch(c, MFC_LSA, r99);
@@ -8937,8 +8828,8 @@ L_07410:
     COV(387);
     r3 = spu_ori(r10, 0);
     r4 = spu_fsmbi(0x0);
-    r0 = spu_link(0x741Cu);
-    SAVE(); f_0CCB0(c); if (c.exit) return; if ((c.ret ^ 0x741Cu) & 0x3FFFFu) { bad_return(c, 0x741Cu); return; } LOAD();   // brsl $r0, 0xCCB0
+    r0 = spu_link(0x741Cu);   // brsl $r0, 0xCCB0
+    g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[10] = r10; g[16] = r16; g[17] = r17; g[21] = r21; g[22] = r22; f_0CCB0(c); if (c.exit) { g[94] = r94; return; } if ((c.ret ^ 0x741Cu) & 0x3FFFFu) { g[94] = r94; bad_return(c, 0x741Cu); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73];
     r45 = lsr(c, r1._u32[0] + 0x20);
     r3 = lsr(c, 0x35EA0);
     r52 = lsr(c, r45._u32[0] + 0x120);
@@ -8951,13 +8842,13 @@ L_07410:
     r49 = spu_ceqi(r50, 0);
     r47 = spu_sfi(r49, 0);
     r46 = spu_and(r47, r48);
-    if ((int32_t)r46._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0x7454u); return; }   // heqi
+    if ((int32_t)r46._u32[0] == (int32_t)(0)) { g[3] = r3; g[4] = r4; g[37] = r37; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[94] = r94; halt(c, 0x7454u); return; }   // heqi
     r6 = spu_il(1);
     r7 = spu_il(32);
     r44 = lsr(c, r45._u32[0] + 0xD0);
     r5 = spu_rotqby(r44, r45);
-    r0 = spu_link(0x7470u);
-    SAVE(); f_0E5C8(c); if (c.exit) return; if ((c.ret ^ 0x7470u) & 0x3FFFFu) { bad_return(c, 0x7470u); return; } LOAD();   // brsl $r0, 0xE5C8
+    r0 = spu_link(0x7470u);   // brsl $r0, 0xE5C8
+    g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; f_0E5C8(c); if (c.exit) { g[37] = r37; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[94] = r94; return; } if ((c.ret ^ 0x7470u) & 0x3FFFFu) { g[37] = r37; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[94] = r94; bad_return(c, 0x7470u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32];
     r43 = spu_il(44);
     wrch(c, MFC_WrTagMask, r80);
     wrch(c, MFC_WrTagUpdate, r80);
@@ -8971,8 +8862,8 @@ L_07410:
     r40 = spu_rotqby(r41, r6);
     r38 = spu_shufb(r40, r39, r88);
     lsw(c, r1._u32[0] + 0x70, r38);
-    r0 = spu_link(0x74ACu);
-    SAVE(); f_0D078(c); if (c.exit) return; if ((c.ret ^ 0x74ACu) & 0x3FFFFu) { bad_return(c, 0x74ACu); return; } LOAD();   // brsl $r0, 0xD078
+    r0 = spu_link(0x74ACu);   // brsl $r0, 0xD078
+    g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[6] = r6; f_0D078(c); if (c.exit) { g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[94] = r94; return; } if ((c.ret ^ 0x74ACu) & 0x3FFFFu) { g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[94] = r94; bad_return(c, 0x74ACu); return; } r2 = g[2]; r3 = g[3]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21];
     goto L_05A2C;
 L_074B0:
     COV(388);
@@ -9101,8 +8992,8 @@ L_07614:
 L_07640:
     COV(401);
     r3 = spu_ori(r17, 0);
-    r0 = spu_link(0x7648u);
-    SAVE(); f_00AE0(c); if (c.exit) return; if ((c.ret ^ 0x7648u) & 0x3FFFFu) { bad_return(c, 0x7648u); return; } LOAD();   // brsl $r0, 0xAE0
+    r0 = spu_link(0x7648u);   // brsl $r0, 0xAE0
+    g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; f_00AE0(c); if (c.exit) { g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; return; } if ((c.ret ^ 0x7648u) & 0x3FFFFu) { g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; bad_return(c, 0x7648u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29];
     goto L_06C98;
 L_07650:
     COV(402);
@@ -9156,8 +9047,8 @@ L_076E8:
     r41 = lsr(c, r81._u32[0] + 0x0);
     r5 = spu_ori(r86, 0);
     r4 = spu_rotqby(r41, r81);
-    r0 = spu_link(0x76FCu);
-    SAVE(); f_00D80(c); if (c.exit) return; if ((c.ret ^ 0x76FCu) & 0x3FFFFu) { bad_return(c, 0x76FCu); return; } LOAD();   // brsl $r0, 0xD80
+    r0 = spu_link(0x76FCu);   // brsl $r0, 0xD80
+    g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; g[7] = r7; g[9] = r9; g[10] = r10; f_00D80(c); if (c.exit) { g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[41] = r41; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; return; } if ((c.ret ^ 0x76FCu) & 0x3FFFFu) { g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[41] = r41; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; bad_return(c, 0x76FCu); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18];
     if (r3._u32[0] != 0) goto L_078A4;
     r5 = spu_il(1);
     r10 = lsr(c, r1._u32[0] + 0x20);
@@ -9659,11 +9550,9 @@ L_07DE0:
     r61 = spu_and(r62, r63);
     lsw(c, r5._u32[0] + 0x0, r61);
     goto L_079B0;
-#undef SAVE
-#undef LOAD
 }
 
-// ---- 0x07DF8 (5 blocks; called from 5CA0, 6160) ----
+// ---- 0x07DF8 (5 blocks; called from 5CA0, 6160; 83 registers, 83 assigned; reaches 83, changes 83) ----
 void f_07DF8(Run& c)
 {
     u128* const g = c.g;
@@ -9678,8 +9567,6 @@ void f_07DF8(Run& c)
     Q r65 = g[65], r67 = g[67], r68 = g[68], r69 = g[69], r70 = g[70], r71 = g[71], r72 = g[72], r73 = g[73];
     Q r74 = g[74], r75 = g[75], r76 = g[76], r77 = g[77], r78 = g[78], r80 = g[80], r81 = g[81], r82 = g[82];
     Q r83 = g[83], r84 = g[84], r85 = g[85];
-#define SAVE() do { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; r85 = g[85]; } while (0)
 L_07DF8:
     COV(451);
     r2 = spu_ceq(r4, r3);
@@ -9704,15 +9591,15 @@ L_07DF8:
     r13 = spu_andi(r10, 3);
     r12 = spu_ceqi(r13, 0);
     r11 = spu_sfi(r12, 0);
-    if ((int32_t)r11._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0x7E58u); return; }   // heqi
+    if ((int32_t)r11._u32[0] == (int32_t)(0)) { g[1] = r1; g[2] = r2; g[4] = r4; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; halt(c, 0x7E58u); return; }   // heqi
     r5 = spu_il(4);
     r80 = spu_andi(r10, 15);
     r9 = spu_ai(r1, 32);
     r6 = spu_il(1);
     r3 = spu_a(r9, r80);
     r7 = spu_il(64);
-    r0 = spu_link(0x7E78u);
-    SAVE(); f_0E680(c); if (c.exit) return; if ((c.ret ^ 0x7E78u) & 0x3FFFFu) { bad_return(c, 0x7E78u); return; } LOAD();   // brsl $r0, 0xE680
+    r0 = spu_link(0x7E78u);   // brsl $r0, 0xE680
+    g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[9] = r9; g[10] = r10; f_0E680(c); if (c.exit) { g[1] = r1; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; return; } if ((c.ret ^ 0x7E78u) & 0x3FFFFu) { g[1] = r1; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; bad_return(c, 0x7E78u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r8 = g[8]; r9 = g[9]; r10 = g[10];
     r8 = spu_ai(r1, 32);
     r5 = lsr(c, r81._u32[0] + 0x130);
     r7 = lsr(c, r8._u32[0] + r80._u32[0]);
@@ -9770,7 +9657,7 @@ L_07EBC:
     r36 = spu_and(r40, r41);
     r37 = spu_and(r38, r39);
     r35 = spu_and(r36, r37);
-    if ((int32_t)r35._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0x7F50u); return; }   // heqi
+    if ((int32_t)r35._u32[0] == (int32_t)(0)) { g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[67] = r67; g[68] = r68; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; halt(c, 0x7F50u); return; }   // heqi
     r32 = spu_il(0);
     r34 = spu_ori(r11, 0);
     r30 = spu_shlqbyi(r33, 0);
@@ -9811,15 +9698,15 @@ L_07FAC:
     r72 = spu_ceqi(r73, 0);
     lsw(c, r1._u32[0] + 0x20, r74);
     r71 = spu_sfi(r72, 0);
-    if ((int32_t)r71._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0x7FECu); return; }   // heqi
+    if ((int32_t)r71._u32[0] == (int32_t)(0)) { g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[67] = r67; g[68] = r68; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; halt(c, 0x7FECu); return; }   // heqi
     r5 = spu_il(4);
     r16 = spu_andi(r70, 15);
     r69 = spu_ai(r1, 32);
     r6 = spu_il(1);
     r3 = spu_a(r69, r16);
     r7 = spu_il(32);
-    r0 = spu_link(0x800Cu);
-    SAVE(); f_0E680(c); if (c.exit) return; if ((c.ret ^ 0x800Cu) & 0x3FFFFu) { bad_return(c, 0x800Cu); return; } LOAD();   // brsl $r0, 0xE680
+    r0 = spu_link(0x800Cu);   // brsl $r0, 0xE680
+    g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[10] = r10; f_0E680(c); if (c.exit) { g[1] = r1; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; return; } if ((c.ret ^ 0x800Cu) & 0x3FFFFu) { g[1] = r1; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; bad_return(c, 0x800Cu); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r8 = g[8]; r9 = g[9]; r10 = g[10];
     goto L_0800C;
 L_0800C:
     COV(455);
@@ -9832,12 +9719,10 @@ L_0800C:
     r83 = lsr(c, r1._u32[0] + -0x40);
     r84 = lsr(c, r1._u32[0] + -0x50);
     r85 = lsr(c, r1._u32[0] + -0x60);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x08038 (6 blocks; called from 5B70, 61EC, 66E0) ----
+// ---- 0x08038 (6 blocks; called from 5B70, 61EC, 66E0; 85 registers, 85 assigned; reaches all, changes all) ----
 void f_08038(Run& c)
 {
     u128* const g = c.g;
@@ -9852,8 +9737,6 @@ void f_08038(Run& c)
     Q r64 = g[64], r65 = g[65], r66 = g[66], r67 = g[67], r68 = g[68], r69 = g[69], r70 = g[70], r71 = g[71];
     Q r72 = g[72], r73 = g[73], r74 = g[74], r75 = g[75], r76 = g[76], r77 = g[77], r78 = g[78], r79 = g[79];
     Q r80 = g[80], r81 = g[81], r82 = g[82], r83 = g[83], r84 = g[84];
-#define SAVE() do { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; } while (0)
 L_08038:
     COV(456);
     lsw(c, r1._u32[0] + -0x20, r81);
@@ -9875,8 +9758,8 @@ L_08038:
     r2 = spu_rotqby(r4, r3);
     if (r2._u32[0] == 0) goto L_081F8;
     r4 = spu_ori(r7, 0);
-    r0 = spu_link(0x808Cu);
-    SAVE(); f_0CCB0(c); if (c.exit) return; if ((c.ret ^ 0x808Cu) & 0x3FFFFu) { bad_return(c, 0x808Cu); return; } LOAD();   // brsl $r0, 0xCCB0
+    r0 = spu_link(0x808Cu);   // brsl $r0, 0xCCB0
+    g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; f_0CCB0(c); if (c.exit) { g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; return; } if ((c.ret ^ 0x808Cu) & 0x3FFFFu) { g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; bad_return(c, 0x808Cu); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73];
     r7 = lsr(c, r81._u32[0] + 0x0);
     r8 = spu_ceqbi(r80, 0);
     r6 = spu_xsbh(r8);
@@ -9904,7 +9787,7 @@ L_08038:
     r17 = spu_sfi(r19, 0);
     r15 = spu_and(r17, r18);
     r14 = spu_and(r15, r16);
-    if ((int32_t)r14._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0x80FCu); return; }   // heqi
+    if ((int32_t)r14._u32[0] == (int32_t)(0)) { g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; halt(c, 0x80FCu); return; }   // heqi
     r12 = spu_il(0);
     wrch(c, MFC_LSA, r13);
     wrch(c, MFC_EAH, r12);
@@ -9938,7 +9821,7 @@ L_08118:
     r42 = spu_and(r46, r47);
     r41 = spu_and(r43, r44);
     r40 = spu_and(r41, r42);
-    if ((int32_t)r40._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0x817Cu); return; }   // heqi
+    if ((int32_t)r40._u32[0] == (int32_t)(0)) { g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[33] = r33; g[34] = r34; g[35] = r35; g[37] = r37; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; halt(c, 0x817Cu); return; }   // heqi
     r38 = spu_il(0);
     r39 = spu_ori(r8, 0);
     wrch(c, MFC_LSA, r39);
@@ -9963,13 +9846,13 @@ L_081AC:
     r59 = spu_sfi(r62, 0);
     r60 = spu_sfi(r61, 0);
     r58 = spu_and(r59, r60);
-    if ((int32_t)r58._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0x81D0u); return; }   // heqi
+    if ((int32_t)r58._u32[0] == (int32_t)(0)) { g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[33] = r33; g[34] = r34; g[35] = r35; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; halt(c, 0x81D0u); return; }   // heqi
     r6 = spu_il(1);
     r5 = spu_ori(r7, 0);
     r3 = spu_shlqbyi(r8, 0);
     r7 = spu_il(32);
-    r0 = spu_link(0x81E8u);
-    SAVE(); f_0E5C8(c); if (c.exit) return; if ((c.ret ^ 0x81E8u) & 0x3FFFFu) { bad_return(c, 0x81E8u); return; } LOAD();   // brsl $r0, 0xE5C8
+    r0 = spu_link(0x81E8u);   // brsl $r0, 0xE5C8
+    g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; f_0E5C8(c); if (c.exit) { g[33] = r33; g[34] = r34; g[35] = r35; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; return; } if ((c.ret ^ 0x81E8u) & 0x3FFFFu) { g[33] = r33; g[34] = r34; g[35] = r35; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; bad_return(c, 0x81E8u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32];
     goto L_081E8;
 L_081E8:
     COV(460);
@@ -10014,7 +9897,7 @@ L_081F8:
     r35 = spu_sfi(r37, 0);
     r34 = spu_and(r35, r36);
     r4 = spu_and(r34, r7);
-    if ((int32_t)r4._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0x8284u); return; }   // heqi
+    if ((int32_t)r4._u32[0] == (int32_t)(0)) { g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; halt(c, 0x8284u); return; }   // heqi
     r80 = spu_il(1);
     r33 = spu_ori(r28, 0);
     r79 = spu_il(64);
@@ -10053,7 +9936,7 @@ L_081F8:
     r11 = spu_sfi(r12, 0);
     r8 = spu_and(r11, r10);
     r9 = spu_and(r8, r3);
-    if ((int32_t)r9._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0x8320u); return; }   // heqi
+    if ((int32_t)r9._u32[0] == (int32_t)(0)) { g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; halt(c, 0x8320u); return; }   // heqi
     r2 = spu_il(0);
     r4 = spu_il(1);
     wrch(c, MFC_LSA, r6);
@@ -10080,8 +9963,8 @@ L_081F8:
     r68 = spu_rotqby(r70, r71);
     r66 = spu_shufb(r68, r67, r69);
     lsw(c, r84._u32[0] + 0x0, r66);
-    r0 = spu_link(0x8390u);
-    SAVE(); f_0D278(c); if (c.exit) return; if ((c.ret ^ 0x8390u) & 0x3FFFFu) { bad_return(c, 0x8390u); return; } LOAD();   // brsl $r0, 0xD278
+    r0 = spu_link(0x8390u);   // brsl $r0, 0xD278
+    g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; f_0D278(c); if (c.exit) return; if ((c.ret ^ 0x8390u) & 0x3FFFFu) { bad_return(c, 0x8390u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84];
     r3 = spu_il(0);
     r0 = lsr(c, r1._u32[0] + 0x80);
     r1 = spu_ai(r1, 112);
@@ -10090,12 +9973,10 @@ L_081F8:
     r82 = lsr(c, r1._u32[0] + -0x30);
     r83 = lsr(c, r1._u32[0] + -0x40);
     r84 = lsr(c, r1._u32[0] + -0x50);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[0] = r0; g[1] = r1; g[3] = r3; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x083B8 (2 blocks; called from 5AC8) ----
+// ---- 0x083B8 (2 blocks; called from 5AC8; 85 registers, 85 assigned; reaches all, changes all) ----
 void f_083B8(Run& c)
 {
     u128* const g = c.g;
@@ -10110,8 +9991,6 @@ void f_083B8(Run& c)
     Q r64 = g[64], r65 = g[65], r66 = g[66], r67 = g[67], r68 = g[68], r69 = g[69], r70 = g[70], r71 = g[71];
     Q r72 = g[72], r73 = g[73], r74 = g[74], r75 = g[75], r76 = g[76], r77 = g[77], r78 = g[78], r79 = g[79];
     Q r80 = g[80], r81 = g[81], r82 = g[82], r83 = g[83], r84 = g[84];
-#define SAVE() do { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; } while (0)
 L_083B8:
     COV(462);
     lsw(c, r1._u32[0] + -0x10, r80);
@@ -10133,8 +10012,8 @@ L_083B8:
     r2 = spu_rotqby(r4, r3);
     if (r2._u32[0] == 0) goto L_084A4;
     r4 = spu_il(1);
-    r0 = spu_link(0x840Cu);
-    SAVE(); f_0CCB0(c); if (c.exit) return; if ((c.ret ^ 0x840Cu) & 0x3FFFFu) { bad_return(c, 0x840Cu); return; } LOAD();   // brsl $r0, 0xCCB0
+    r0 = spu_link(0x840Cu);   // brsl $r0, 0xCCB0
+    g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[6] = r6; f_0CCB0(c); if (c.exit) { g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; return; } if ((c.ret ^ 0x840Cu) & 0x3FFFFu) { g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; bad_return(c, 0x840Cu); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73];
     r33 = lsr(c, r80._u32[0] + 0x0);
     r32 = spu_il(16384);
     r9 = lsr(c, 0x36060);
@@ -10159,7 +10038,7 @@ L_083B8:
     r16 = spu_sfi(r18, 0);
     r14 = spu_and(r16, r17);
     r13 = spu_and(r14, r15);
-    if ((int32_t)r13._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0x846Cu); return; }   // heqi
+    if ((int32_t)r13._u32[0] == (int32_t)(0)) { g[9] = r9; g[10] = r10; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; halt(c, 0x846Cu); return; }   // heqi
     r11 = spu_il(0);
     wrch(c, MFC_LSA, r12);
     r7 = spu_il(1);
@@ -10204,7 +10083,7 @@ L_084A4:
     r19 = spu_sfi(r21, 0);
     r17 = spu_and(r19, r20);
     r16 = spu_and(r17, r18);
-    if ((int32_t)r16._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0x8518u); return; }   // heqi
+    if ((int32_t)r16._u32[0] == (int32_t)(0)) { g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; halt(c, 0x8518u); return; }   // heqi
     r62 = spu_il(1);
     r15 = spu_ori(r11, 0);
     r10 = spu_cwd(r82, 0);
@@ -10243,7 +10122,7 @@ L_084A4:
     r70 = spu_sfi(r72, 0);
     r68 = spu_and(r70, r71);
     r67 = spu_and(r68, r69);
-    if ((int32_t)r67._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0x85B4u); return; }   // heqi
+    if ((int32_t)r67._u32[0] == (int32_t)(0)) { g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; halt(c, 0x85B4u); return; }   // heqi
     r65 = spu_il(0);
     wrch(c, MFC_LSA, r66);
     r4 = spu_il(1);
@@ -10287,8 +10166,8 @@ L_084A4:
     r36 = spu_rotqby(r38, r39);
     r34 = spu_shufb(r36, r35, r37);
     lsw(c, r81._u32[0] + 0x0, r34);
-    r0 = spu_link(0x8668u);
-    SAVE(); f_0D278(c); if (c.exit) return; if ((c.ret ^ 0x8668u) & 0x3FFFFu) { bad_return(c, 0x8668u); return; } LOAD();   // brsl $r0, 0xD278
+    r0 = spu_link(0x8668u);   // brsl $r0, 0xD278
+    g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; f_0D278(c); if (c.exit) return; if ((c.ret ^ 0x8668u) & 0x3FFFFu) { bad_return(c, 0x8668u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84];
     r3 = spu_il(0);
     r0 = lsr(c, r1._u32[0] + 0x80);
     r1 = spu_ai(r1, 112);
@@ -10297,12 +10176,10 @@ L_084A4:
     r82 = lsr(c, r1._u32[0] + -0x30);
     r83 = lsr(c, r1._u32[0] + -0x40);
     r84 = lsr(c, r1._u32[0] + -0x50);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[0] = r0; g[1] = r1; g[3] = r3; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x08690 (13 blocks; called from 88D8, 8B18) ----
+// ---- 0x08690 (13 blocks; called from 88D8, 8B18; 54 registers, 54 assigned; reaches 84, changes 84) ----
 void f_08690(Run& c)
 {
     u128* const g = c.g;
@@ -10313,8 +10190,6 @@ void f_08690(Run& c)
     Q r32 = g[32], r33 = g[33], r34 = g[34], r35 = g[35], r36 = g[36], r37 = g[37], r38 = g[38], r39 = g[39];
     Q r40 = g[40], r41 = g[41], r42 = g[42], r43 = g[43], r44 = g[44], r45 = g[45], r47 = g[47], r48 = g[48];
     Q r49 = g[49], r50 = g[50], r80 = g[80], r81 = g[81], r82 = g[82], r83 = g[83];
-#define SAVE() do { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; } while (0)
 L_08690:
     COV(464);
     lsw(c, r1._u32[0] + -0x10, r80);
@@ -10337,8 +10212,8 @@ L_08690:
     r3 = spu_ori(r82, 0);
     r5 = spu_shufb(r2, r7, r6);
     lsw(c, r1._u32[0] + 0x20, r5);
-    r0 = spu_link(0x86E8u);
-    SAVE(); f_022F0(c); if (c.exit) return; if ((c.ret ^ 0x86E8u) & 0x3FFFFu) { bad_return(c, 0x86E8u); return; } LOAD();   // brsl $r0, 0x22F0
+    r0 = spu_link(0x86E8u);   // brsl $r0, 0x22F0
+    g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; f_022F0(c); if (c.exit) { g[1] = r1; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; return; } if ((c.ret ^ 0x86E8u) & 0x3FFFFu) { g[1] = r1; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; bad_return(c, 0x86E8u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10];
     r4 = lsr(c, r1._u32[0] + 0x20);
     if (r4._u32[0] == 0) goto L_0871C;
     r9 = spu_rotqmbyi(r81, -4);
@@ -10347,8 +10222,8 @@ L_08690:
     r4 = spu_xswd(r10);
     r3 = spu_shlqbyi(r8, 8);
     r3 = spu_shlqbii(r3, 3);
-    r0 = spu_link(0x870Cu);
-    SAVE(); f_0ECC8(c); if (c.exit) return; if ((c.ret ^ 0x870Cu) & 0x3FFFFu) { bad_return(c, 0x870Cu); return; } LOAD();   // brsl $r0, 0xECC8
+    r0 = spu_link(0x870Cu);   // brsl $r0, 0xECC8
+    g[0] = r0; g[1] = r1; g[3] = r3; g[4] = r4; g[8] = r8; g[9] = r9; g[10] = r10; f_0ECC8(c); if (c.exit) { g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; return; } if ((c.ret ^ 0x870Cu) & 0x3FFFFu) { g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; bad_return(c, 0x870Cu); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50];
     r2 = lsr(c, r80._u32[0] + 0x0);
     r3 = spu_shlqbyi(r3, 4);
     r4 = spu_cwd(r80, 0);
@@ -10369,7 +10244,7 @@ L_0871C:
     case 0x087F4u: goto L_087F4;
     case 0x08818u: goto L_08818;
     case 0x08830u: goto L_08830;
-    default: { SAVE(); c.jt = r2._u32[0] & 0x3FFFFu; c.js = 0x8738u; TAIL jump_to(c); }
+    default: { g[1] = r1; g[2] = r2; g[4] = r4; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; unresolved(c, r2._u32[0] & 0x3FFFFu, 0x8738u); return; }
     }
 L_08768:
     COV(466);
@@ -10449,7 +10324,7 @@ L_08844:
     r6 = spu_il(0);
     r48 = spu_cwd(r80, 0);
     r49 = spu_rotqby(r50, r80);
-    if ((int32_t)r83._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0x8858u); return; }   // heqi
+    if ((int32_t)r83._u32[0] == (int32_t)(0)) { g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[44] = r44; g[48] = r48; g[49] = r49; g[50] = r50; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; halt(c, 0x8858u); return; }   // heqi
     r11 = spu_clz(r83);
     r8 = spu_clz(r49);
     r9 = spu_il(1);
@@ -10481,12 +10356,10 @@ L_088B0:
     r81 = lsr(c, r1._u32[0] + -0x20);
     r82 = lsr(c, r1._u32[0] + -0x30);
     r83 = lsr(c, r1._u32[0] + -0x40);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x088D8 (13 blocks; called from 976C, 9E48) ----
+// ---- 0x088D8 (13 blocks; called from 976C, 9E48; 82 registers, 82 assigned; reaches all, changes all) ----
 void f_088D8(Run& c)
 {
     u128* const g = c.g;
@@ -10501,8 +10374,6 @@ void f_088D8(Run& c)
     Q r66 = g[66], r67 = g[67], r69 = g[69], r70 = g[70], r71 = g[71], r72 = g[72], r73 = g[73], r74 = g[74];
     Q r75 = g[75], r76 = g[76], r77 = g[77], r78 = g[78], r79 = g[79], r80 = g[80], r81 = g[81], r82 = g[82];
     Q r83 = g[83], r84 = g[84];
-#define SAVE() do { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[66] = r66; g[67] = r67; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r66 = g[66]; r67 = g[67]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; } while (0)
 L_088D8:
     COV(477);
     r10 = spu_ai(r3, 28);
@@ -10548,7 +10419,7 @@ L_088D8:
     r82 = spu_selb(r20, r82, r19);
     r82 = spu_andc(r82, r16);
     r4 = spu_ori(r82, 0);
-    { const uint32_t t = r15._u32[0]; r0 = spu_link(0x8988u); SAVE(); if (!branch(c, t & 0x3FFFFu, 0x8984u, true)) return; if ((c.ret ^ 0x8988u) & 0x3FFFFu) { bad_return(c, 0x8988u); return; } LOAD(); }   // bisl $r0, $r15
+    { const uint32_t t = r15._u32[0]; r0 = spu_link(0x8988u); g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; if (!branch(c, t & 0x3FFFFu, 0x8984u, true)) return; if ((c.ret ^ 0x8988u) & 0x3FFFFu) { bad_return(c, 0x8988u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r66 = g[66]; r67 = g[67]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; }   // bisl $r0, $r15
     r83 = spu_ori(r3, 0);
     if (r3._u32[0] != 0) goto L_08C18;
     r25 = spu_ai(r81, 84);
@@ -10564,8 +10435,8 @@ L_088D8:
     r3 = lsr(c, r1._u32[0] + 0x150);
     r6 = spu_ori(r27, 0);
     r5 = spu_rotqbyi(r27, 4);
-    r0 = spu_link(0x89CCu);
-    SAVE(); f_08690(c); if (c.exit) return; if ((c.ret ^ 0x89CCu) & 0x3FFFFu) { bad_return(c, 0x89CCu); return; } LOAD();   // brsl $r0, 0x8690
+    r0 = spu_link(0x89CCu);   // brsl $r0, 0x8690
+    g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[80] = r80; g[83] = r83; f_08690(c); if (c.exit) return; if ((c.ret ^ 0x89CCu) & 0x3FFFFu) { bad_return(c, 0x89CCu); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r66 = g[66]; r67 = g[67]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83];
     goto L_08B7C;
 L_089D0:
     COV(478);
@@ -10635,8 +10506,8 @@ L_08A58:
     goto L_08AC0;
 L_08AC0:
     COV(481);
-    r0 = spu_link(0x8AC4u);
-    SAVE(); f_023B8(c); if (c.exit) return; if ((c.ret ^ 0x8AC4u) & 0x3FFFFu) { bad_return(c, 0x8AC4u); return; } LOAD();   // brsl $r0, 0x23B8
+    r0 = spu_link(0x8AC4u);   // brsl $r0, 0x23B8
+    g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[23] = r23; g[24] = r24; g[25] = r25; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[66] = r66; g[67] = r67; g[80] = r80; g[83] = r83; f_023B8(c); if (c.exit) return; if ((c.ret ^ 0x8AC4u) & 0x3FFFFu) { bad_return(c, 0x8AC4u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r66 = g[66]; r67 = g[67]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84];
     goto L_08B7C;
 L_08AC8:
     COV(482);
@@ -10669,8 +10540,8 @@ L_08B18:
     r3 = lsr(c, r1._u32[0] + 0x150);
     r6 = spu_ori(r14, 0);
     r5 = spu_rotqbyi(r14, 4);
-    r0 = spu_link(0x8B3Cu);
-    SAVE(); f_08690(c); if (c.exit) return; if ((c.ret ^ 0x8B3Cu) & 0x3FFFFu) { bad_return(c, 0x8B3Cu); return; } LOAD();   // brsl $r0, 0x8690
+    r0 = spu_link(0x8B3Cu);   // brsl $r0, 0x8690
+    g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[14] = r14; g[23] = r23; g[24] = r24; g[25] = r25; g[46] = r46; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[80] = r80; g[83] = r83; f_08690(c); if (c.exit) return; if ((c.ret ^ 0x8B3Cu) & 0x3FFFFu) { bad_return(c, 0x8B3Cu); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r66 = g[66]; r67 = g[67]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83];
     r13 = lsr(c, r1._u32[0] + 0x120);
     r4 = lsr(c, r1._u32[0] + 0x150);
     r5 = spu_cwd(r1, 0);
@@ -10718,7 +10589,7 @@ L_08B98:
     lsw(c, r81._u32[0] + r32._u32[0], r33);
     r30 = lsr(c, r31._u32[0] + 0x0);
     r29 = spu_rotqby(r30, r31);
-    { const uint32_t t = r29._u32[0]; r0 = spu_link(0x8BD0u); SAVE(); if (!branch(c, t & 0x3FFFFu, 0x8BCCu, true)) return; if ((c.ret ^ 0x8BD0u) & 0x3FFFFu) { bad_return(c, 0x8BD0u); return; } LOAD(); }   // bisl $r0, $r29
+    { const uint32_t t = r29._u32[0]; r0 = spu_link(0x8BD0u); g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[46] = r46; g[47] = r47; g[49] = r49; g[50] = r50; g[51] = r51; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[83] = r83; if (!branch(c, t & 0x3FFFFu, 0x8BCCu, true)) return; if ((c.ret ^ 0x8BD0u) & 0x3FFFFu) { bad_return(c, 0x8BD0u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r66 = g[66]; r67 = g[67]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; }   // bisl $r0, $r29
     r28 = spu_ceqi(r3, 0);
     r27 = spu_ceqi(r3, 22);
     r26 = spu_nor(r28, r28);
@@ -10749,12 +10620,10 @@ L_08C18:
     r82 = lsr(c, r1._u32[0] + -0x30);
     r83 = lsr(c, r1._u32[0] + -0x40);
     r84 = lsr(c, r1._u32[0] + -0x50);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[46] = r46; g[47] = r47; g[49] = r49; g[50] = r50; g[51] = r51; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x08C40 (9 blocks; called from 9B20, A570) ----
+// ---- 0x08C40 (9 blocks; called from 9B20, A570; 64 registers, 64 assigned; reaches all, changes all) ----
 void f_08C40(Run& c)
 {
     u128* const g = c.g;
@@ -10766,8 +10635,6 @@ void f_08C40(Run& c)
     Q r40 = g[40], r41 = g[41], r42 = g[42], r43 = g[43], r44 = g[44], r45 = g[45], r46 = g[46], r47 = g[47];
     Q r48 = g[48], r49 = g[49], r51 = g[51], r52 = g[52], r53 = g[53], r54 = g[54], r55 = g[55], r56 = g[56];
     Q r80 = g[80], r81 = g[81], r82 = g[82], r83 = g[83], r84 = g[84], r85 = g[85], r86 = g[86], r87 = g[87];
-#define SAVE() do { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; r85 = g[85]; r86 = g[86]; r87 = g[87]; } while (0)
 L_08C40:
     COV(490);
     r8 = spu_ai(r3, 216);
@@ -10820,7 +10687,7 @@ L_08CC0:
     r4 = spu_rotqby(r21, r8);
     r5 = spu_rotqby(r20, r9);
     r18 = spu_rotqby(r19, r80);
-    { const uint32_t t = r18._u32[0]; r0 = spu_link(0x8D10u); SAVE(); if (!branch(c, t & 0x3FFFFu, 0x8D0Cu, true)) return; if ((c.ret ^ 0x8D10u) & 0x3FFFFu) { bad_return(c, 0x8D10u); return; } LOAD(); }   // bisl $r0, $r18
+    { const uint32_t t = r18._u32[0]; r0 = spu_link(0x8D10u); g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[47] = r47; g[48] = r48; g[49] = r49; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; if (!branch(c, t & 0x3FFFFu, 0x8D0Cu, true)) return; if ((c.ret ^ 0x8D10u) & 0x3FFFFu) { bad_return(c, 0x8D10u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; r85 = g[85]; r86 = g[86]; r87 = g[87]; }   // bisl $r0, $r18
     r6 = spu_il(236);
     r5 = spu_cwd(r80, 12);
     r86 = spu_ori(r3, 0);
@@ -10855,8 +10722,8 @@ L_08D40:
     r81 = spu_selb(r81, r41, r40);
     r5 = spu_ori(r81, 0);
     r84 = spu_sf(r81, r84);
-    r0 = spu_link(0x8D88u);
-    SAVE(); f_00270(c); if (c.exit) return; if ((c.ret ^ 0x8D88u) & 0x3FFFFu) { bad_return(c, 0x8D88u); return; } LOAD();   // brsl $r0, 0x270
+    r0 = spu_link(0x8D88u);   // brsl $r0, 0x270
+    g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; f_00270(c); if (c.exit) { g[1] = r1; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; return; } if ((c.ret ^ 0x8D88u) & 0x3FFFFu) { g[1] = r1; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; bad_return(c, 0x8D88u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r51 = g[51];
     r7 = spu_il(232);
     r35 = lsr(c, r82._u32[0] + 0x0);
     r30 = spu_il(0);
@@ -10897,7 +10764,7 @@ L_08DF4:
     r5 = spu_ori(r84, 0);
     r6 = spu_ai(r1, 32);
     r51 = spu_rotqby(r52, r80);
-    { const uint32_t t = r51._u32[0]; r0 = spu_link(0x8E10u); SAVE(); if (!branch(c, t & 0x3FFFFu, 0x8E0Cu, true)) return; if ((c.ret ^ 0x8E10u) & 0x3FFFFu) { bad_return(c, 0x8E10u); return; } LOAD(); }   // bisl $r0, $r51
+    { const uint32_t t = r51._u32[0]; r0 = spu_link(0x8E10u); g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[51] = r51; g[52] = r52; g[80] = r80; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; if (!branch(c, t & 0x3FFFFu, 0x8E0Cu, true)) return; if ((c.ret ^ 0x8E10u) & 0x3FFFFu) { bad_return(c, 0x8E10u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; r85 = g[85]; r86 = g[86]; r87 = g[87]; }   // bisl $r0, $r51
     r86 = spu_ori(r3, 0);
     goto L_08E14;
 L_08E14:
@@ -10922,12 +10789,10 @@ L_08E2C:
     r85 = lsr(c, r1._u32[0] + -0x60);
     r86 = lsr(c, r1._u32[0] + -0x70);
     r87 = lsr(c, r1._u32[0] + -0x80);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[47] = r47; g[48] = r48; g[49] = r49; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x08E60 (3 blocks; called from 2AB8) ----
+// ---- 0x08E60 (3 blocks; called from 2AB8; 78 registers, 77 assigned; reaches 78, changes 77) ----
 void f_08E60(Run& c)
 {
     u128* const g = c.g;
@@ -10941,8 +10806,6 @@ void f_08E60(Run& c)
     Q r58 = g[58], r59 = g[59], r60 = g[60], r61 = g[61], r62 = g[62], r63 = g[63], r64 = g[64], r65 = g[65];
     Q r66 = g[66], r67 = g[67], r68 = g[68], r69 = g[69], r70 = g[70], r71 = g[71], r72 = g[72], r73 = g[73];
     Q r74 = g[74], r75 = g[75], r76 = g[76], r77 = g[77], r78 = g[78], r79 = g[79];
-#define SAVE() do { g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; } while (0)
-#define LOAD() do { r0 = g[0]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79]; } while (0)
 L_08E60:
     COV(499);
     r2 = spu_ceqbi(r5, 0);
@@ -11048,12 +10911,10 @@ L_08E7C:
 L_08FE4:
     COV(501);
     r3 = spu_il(0);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x08FF0 (3 blocks; called from 29AC) ----
+// ---- 0x08FF0 (3 blocks; called from 29AC; 52 registers, 51 assigned; reaches 52, changes 51) ----
 void f_08FF0(Run& c)
 {
     u128* const g = c.g;
@@ -11064,8 +10925,6 @@ void f_08FF0(Run& c)
     Q r33 = g[33], r34 = g[34], r35 = g[35], r36 = g[36], r37 = g[37], r38 = g[38], r39 = g[39], r40 = g[40];
     Q r41 = g[41], r42 = g[42], r43 = g[43], r44 = g[44], r45 = g[45], r46 = g[46], r47 = g[47], r48 = g[48];
     Q r49 = g[49], r50 = g[50], r51 = g[51], r52 = g[52];
-#define SAVE() do { g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; } while (0)
-#define LOAD() do { r0 = g[0]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; } while (0)
 L_08FF0:
     COV(502);
     r10 = spu_ori(r4, 0);
@@ -11139,19 +10998,16 @@ L_090E8:
 L_090F8:
     COV(504);
     r3 = spu_il(0);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x09150 (2 blocks; through a pointer: .ctors[0] (run last by .init)) ----
+// ---- 0x09150 (2 blocks; through a pointer: .ctors[0] (run last by .init); 14 registers, 12 assigned; reaches 14,
+// changes 12) ----
 void f_09150(Run& c)
 {
     u128* const g = c.g;
     Q r0 = g[0], r1 = g[1], r2 = g[2], r3 = g[3], r4 = g[4], r5 = g[5], r6 = g[6], r7 = g[7];
     Q r8 = g[8], r9 = g[9], r10 = g[10], r12 = g[12], r13 = g[13], r14 = g[14];
-#define SAVE() do { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[12] = r12; g[13] = r13; g[14] = r14; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r12 = g[12]; r13 = g[13]; r14 = g[14]; } while (0)
     goto L_09150;
 L_09100:
     COV(505);
@@ -11165,7 +11021,7 @@ L_09100:
     r4 = spu_nor(r9, r9);
     r5 = spu_ila(0x1085C);
     r3 = spu_or(r3, r4);
-    if (r3._u32[0] != 0) { SAVE(); c.ret = g[0]._u32[0]; return; }
+    if (r3._u32[0] != 0) { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; c.ret = r0._u32[0]; return; }
     r14 = lsr(c, 0x10860);
     r13 = lsr(c, 0x10850);
     r12 = spu_shufb(r5, r14, r8);
@@ -11173,24 +11029,20 @@ L_09100:
     r5 = spu_shufb(r3, r12, r6);
     lsw(c, 0x10850, r8);
     lsw(c, 0x10860, r5);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
+    { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[12] = r12; g[13] = r13; g[14] = r14; c.ret = r0._u32[0]; return; }
 L_09150:
     COV(506);
     r3 = spu_il(1);
     r4 = spu_ila(0xFFFF);
     goto L_09100;
-#undef SAVE
-#undef LOAD
 }
 
-// ---- 0x09160 (3 blocks; called from 976C) ----
+// ---- 0x09160 (3 blocks; called from 976C; 15 registers, 15 assigned; reaches all, changes all) ----
 void f_09160(Run& c)
 {
     u128* const g = c.g;
     Q r0 = g[0], r1 = g[1], r2 = g[2], r3 = g[3], r4 = g[4], r5 = g[5], r6 = g[6], r7 = g[7];
     Q r8 = g[8], r9 = g[9], r10 = g[10], r11 = g[11], r12 = g[12], r13 = g[13], r80 = g[80];
-#define SAVE() do { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[80] = r80; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r80 = g[80]; } while (0)
 L_09160:
     COV(507);
     r6 = spu_il(232);
@@ -11213,8 +11065,8 @@ L_09160:
     if (r2._u32[0] == 0) goto L_091B8;
     r12 = lsr(c, r8._u32[0] + 0x0);
     r5 = spu_rotqby(r12, r8);
-    r0 = spu_link(0x91B8u);
-    SAVE(); f_02640(c); if (c.exit) return; if ((c.ret ^ 0x91B8u) & 0x3FFFFu) { bad_return(c, 0x91B8u); return; } LOAD();   // brsl $r0, 0x2640
+    r0 = spu_link(0x91B8u);   // brsl $r0, 0x2640
+    g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; f_02640(c); if (c.exit) { g[1] = r1; g[80] = r80; return; } if ((c.ret ^ 0x91B8u) & 0x3FFFFu) { g[1] = r1; g[80] = r80; bad_return(c, 0x91B8u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13];
     goto L_091B8;
 L_091B8:
     COV(508);
@@ -11226,27 +11078,23 @@ L_091B8:
     r0 = lsr(c, r1._u32[0] + 0x40);
     r1 = spu_ai(r1, 48);
     r80 = lsr(c, r1._u32[0] + -0x10);
-    { SAVE(); c.jt = r8._u32[0] & 0x3FFFFu; c.js = 0x91D8u; TAIL jump_to(c); }   // bi $r8 at 0x91D8
+    { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[13] = r13; g[80] = r80; c.jt = r8._u32[0] & 0x3FFFFu; c.js = 0x91D8u; TAIL jump_to(c); }   // bi $r8 at 0x91D8
 L_091DC:
     COV(509);
     r0 = lsr(c, r1._u32[0] + 0x40);
     r1 = spu_ai(r1, 48);
     r3 = spu_fsmbi(0x0);
     r80 = lsr(c, r1._u32[0] + -0x10);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[13] = r13; g[80] = r80; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x091F0 (1 blocks; called from 9664, 9C48, 9D18) ----
+// ---- 0x091F0 (1 blocks; called from 9664, 9C48, 9D18; 22 registers, 22 assigned; reaches 41, changes 41) ----
 void f_091F0(Run& c)
 {
     u128* const g = c.g;
     Q r0 = g[0], r1 = g[1], r2 = g[2], r3 = g[3], r4 = g[4], r5 = g[5], r6 = g[6], r7 = g[7];
     Q r8 = g[8], r9 = g[9], r10 = g[10], r11 = g[11], r12 = g[12], r13 = g[13], r15 = g[15], r16 = g[16];
     Q r17 = g[17], r18 = g[18], r80 = g[80], r81 = g[81], r82 = g[82], r83 = g[83];
-#define SAVE() do { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; } while (0)
 L_091F0:
     COV(510);
     lsw(c, r1._u32[0] + 0x10, r0);
@@ -11267,8 +11115,8 @@ L_091F0:
     r16 = spu_shufb(r4, r18, r82);
     r4 = spu_rotqby(r17, r80);
     lsw(c, r1._u32[0] + 0x20, r16);
-    r0 = spu_link(0x9240u);
-    SAVE(); f_0D1C0(c); if (c.exit) return; if ((c.ret ^ 0x9240u) & 0x3FFFFu) { bad_return(c, 0x9240u); return; } LOAD();   // brsl $r0, 0xD1C0
+    r0 = spu_link(0x9240u);   // brsl $r0, 0xD1C0
+    g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; g[16] = r16; g[17] = r17; g[18] = r18; f_0D1C0(c); if (c.exit) { g[1] = r1; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; return; } if ((c.ret ^ 0x9240u) & 0x3FFFFu) { g[1] = r1; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; bad_return(c, 0x9240u); return; } r2 = g[2]; r4 = g[4]; r5 = g[5]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18];
     r5 = spu_shli(r83, 3);
     r12 = lsr(c, r1._u32[0] + 0x20);
     r3 = spu_ai(r1, 32);
@@ -11281,8 +11129,8 @@ L_091F0:
     r9 = lsr(c, r10._u32[0] + 0x0);
     lsw(c, r1._u32[0] + 0x20, r81);
     r4 = spu_rotqby(r9, r10);
-    r0 = spu_link(0x9278u);
-    SAVE(); f_0D1C0(c); if (c.exit) return; if ((c.ret ^ 0x9278u) & 0x3FFFFu) { bad_return(c, 0x9278u); return; } LOAD();   // brsl $r0, 0xD1C0
+    r0 = spu_link(0x9278u);   // brsl $r0, 0xD1C0
+    g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[15] = r15; f_0D1C0(c); if (c.exit) { g[1] = r1; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; return; } if ((c.ret ^ 0x9278u) & 0x3FFFFu) { g[1] = r1; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; bad_return(c, 0x9278u); return; } r2 = g[2]; r4 = g[4]; r5 = g[5]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18];
     r6 = spu_il(156);
     r8 = lsr(c, r80._u32[0] + 0x0);
     r5 = lsr(c, r1._u32[0] + 0x20);
@@ -11297,12 +11145,10 @@ L_091F0:
     r81 = lsr(c, r1._u32[0] + -0x20);
     r82 = lsr(c, r1._u32[0] + -0x30);
     r83 = lsr(c, r1._u32[0] + -0x40);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x092B8 (4 blocks; called from 96B0, 9CB8, 9DF4) ----
+// ---- 0x092B8 (4 blocks; called from 96B0, 9CB8, 9DF4; 67 registers, 67 assigned; reaches all, changes all) ----
 void f_092B8(Run& c)
 {
     u128* const g = c.g;
@@ -11315,8 +11161,6 @@ void f_092B8(Run& c)
     Q r49 = g[49], r50 = g[50], r51 = g[51], r52 = g[52], r53 = g[53], r54 = g[54], r55 = g[55], r56 = g[56];
     Q r57 = g[57], r58 = g[58], r59 = g[59], r60 = g[60], r61 = g[61], r62 = g[62], r80 = g[80], r81 = g[81];
     Q r82 = g[82], r83 = g[83], r84 = g[84];
-#define SAVE() do { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; } while (0)
 L_092B8:
     COV(511);
     r27 = spu_ai(r4, 132);
@@ -11339,7 +11183,7 @@ L_092B8:
     r22 = spu_andi(r19, 3);
     r21 = spu_ceqi(r22, 0);
     r20 = spu_sfi(r21, 0);
-    if ((int32_t)r20._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0x930Cu); return; }   // heqi
+    if ((int32_t)r20._u32[0] == (int32_t)(0)) { g[1] = r1; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[81] = r81; halt(c, 0x930Cu); return; }   // heqi
     r6 = spu_il(1);
     r80 = spu_andi(r19, 15);
     r17 = spu_ai(r1, 32);
@@ -11347,16 +11191,16 @@ L_092B8:
     r7 = spu_il(64);
     r3 = spu_a(r17, r80);
     r5 = spu_il(4);
-    r0 = spu_link(0x9330u);
-    SAVE(); f_0E680(c); if (c.exit) return; if ((c.ret ^ 0x9330u) & 0x3FFFFu) { bad_return(c, 0x9330u); return; } LOAD();   // brsl $r0, 0xE680
+    r0 = spu_link(0x9330u);   // brsl $r0, 0xE680
+    g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; f_0E680(c); if (c.exit) { g[1] = r1; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[80] = r80; g[81] = r81; return; } if ((c.ret ^ 0x9330u) & 0x3FFFFu) { g[1] = r1; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[80] = r80; g[81] = r81; bad_return(c, 0x9330u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r8 = g[8]; r9 = g[9]; r10 = g[10];
     r16 = spu_ai(r1, 32);
     r84 = spu_ai(r1, 384);
     r5 = spu_il(296);
     r15 = lsr(c, r16._u32[0] + r80._u32[0]);
     r3 = spu_ori(r84, 0);
     r4 = spu_rotqby(r15, r80);
-    r0 = spu_link(0x934Cu);
-    SAVE(); f_0D1C0(c); if (c.exit) return; if ((c.ret ^ 0x934Cu) & 0x3FFFFu) { bad_return(c, 0x934Cu); return; } LOAD();   // brsl $r0, 0xD1C0
+    r0 = spu_link(0x934Cu);   // brsl $r0, 0xD1C0
+    g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; f_0D1C0(c); if (c.exit) { g[1] = r1; g[80] = r80; g[81] = r81; g[84] = r84; return; } if ((c.ret ^ 0x934Cu) & 0x3FFFFu) { g[1] = r1; g[80] = r80; g[81] = r81; g[84] = r84; bad_return(c, 0x934Cu); return; } r2 = g[2]; r4 = g[4]; r5 = g[5]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36];
     r11 = lsr(c, r1._u32[0] + 0x210);
     r12 = spu_il(688);
     r13 = spu_ai(r1, 32);
@@ -11371,8 +11215,8 @@ L_092B8:
     r10 = lsr(c, r6._u32[0] + 0x40);
     r9 = spu_rotqby(r10, r6);
     r4 = spu_selb(r8, r9, r7);
-    r0 = spu_link(0x938Cu);
-    SAVE(); f_0D1C0(c); if (c.exit) return; if ((c.ret ^ 0x938Cu) & 0x3FFFFu) { bad_return(c, 0x938Cu); return; } LOAD();   // brsl $r0, 0xD1C0
+    r0 = spu_link(0x938Cu);   // brsl $r0, 0xD1C0
+    g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; f_0D1C0(c); if (c.exit) { g[1] = r1; g[6] = r6; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; return; } if ((c.ret ^ 0x938Cu) & 0x3FFFFu) { g[1] = r1; g[6] = r6; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; bad_return(c, 0x938Cu); return; } r2 = g[2]; r4 = g[4]; r5 = g[5]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36];
     r4 = lsr(c, r1._u32[0] + 0x310);
     r3 = spu_rotqbyi(r4, 4);
     r2 = spu_ceqi(r3, 8);
@@ -11389,8 +11233,8 @@ L_093B8:
     r4 = lsr(c, r1._u32[0] + 0x2F0);
     r5 = spu_il(296);
     r3 = spu_ori(r80, 0);
-    r0 = spu_link(0x93CCu);
-    SAVE(); f_0D1C0(c); if (c.exit) return; if ((c.ret ^ 0x93CCu) & 0x3FFFFu) { bad_return(c, 0x93CCu); return; } LOAD();   // brsl $r0, 0xD1C0
+    r0 = spu_link(0x93CCu);   // brsl $r0, 0xD1C0
+    g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; f_0D1C0(c); if (c.exit) { g[1] = r1; g[6] = r6; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; return; } if ((c.ret ^ 0x93CCu) & 0x3FFFFu) { g[1] = r1; g[6] = r6; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; bad_return(c, 0x93CCu); return; } r2 = g[2]; r4 = g[4]; r5 = g[5]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36];
     r38 = lsr(c, r1._u32[0] + 0x2F0);
     r36 = spu_ila(0x9F68);
     r35 = lsr(c, r1._u32[0] + 0x340);
@@ -11414,7 +11258,7 @@ L_093F0:
     r58 = lsr(c, r59._u32[0] + 0x0);
     r4 = spu_rotqby(r60, r61);
     r57 = spu_rotqby(r58, r59);
-    { const uint32_t t = r57._u32[0]; r0 = spu_link(0x9420u); SAVE(); if (!branch(c, t & 0x3FFFFu, 0x941Cu, true)) return; if ((c.ret ^ 0x9420u) & 0x3FFFFu) { bad_return(c, 0x9420u); return; } LOAD(); }   // bisl $r0, $r57
+    { const uint32_t t = r57._u32[0]; r0 = spu_link(0x9420u); g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[8] = r8; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; if (!branch(c, t & 0x3FFFFu, 0x941Cu, true)) return; if ((c.ret ^ 0x9420u) & 0x3FFFFu) { bad_return(c, 0x9420u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; }   // bisl $r0, $r57
     r54 = spu_ai(r84, 44);
     r56 = spu_il(544);
     r55 = lsr(c, r81._u32[0] + 0x10);
@@ -11423,8 +11267,8 @@ L_093F0:
     r3 = spu_a(r81, r56);
     r4 = spu_rotqbyi(r55, 4);
     r5 = spu_rotqby(r53, r54);
-    r0 = spu_link(0x9448u);
-    SAVE(); f_0BAB8(c); if (c.exit) return; if ((c.ret ^ 0x9448u) & 0x3FFFFu) { bad_return(c, 0x9448u); return; } LOAD();   // brsl $r0, 0xBAB8
+    r0 = spu_link(0x9448u);   // brsl $r0, 0xBAB8
+    g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; f_0BAB8(c); if (c.exit) { g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; return; } if ((c.ret ^ 0x9448u) & 0x3FFFFu) { g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; bad_return(c, 0x9448u); return; } r2 = g[2]; r3 = g[3]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13];
     r52 = spu_il(1120);
     r49 = lsr(c, r81._u32[0] + 0x560);
     r45 = spu_il(0);
@@ -11451,13 +11295,11 @@ L_09480:
     r82 = lsr(c, r1._u32[0] + -0x30);
     r83 = lsr(c, r1._u32[0] + -0x40);
     r84 = lsr(c, r1._u32[0] + -0x50);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[8] = r8; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[62] = r62; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; c.ret = r0._u32[0]; return; }
 }
 
 // ---- 0x09F58 (28 blocks; through a pointer: a callback stored into an object (ila at 0xD458, 0xD6B8): this - 28 ->
-// 0x94A8) ----
+// 0x94A8; 86 registers, 86 assigned; reaches all, changes all) ----
 void f_09F58(Run& c)
 {
     u128* const g = c.g;
@@ -11472,8 +11314,6 @@ void f_09F58(Run& c)
     Q r64 = g[64], r65 = g[65], r66 = g[66], r67 = g[67], r68 = g[68], r69 = g[69], r70 = g[70], r71 = g[71];
     Q r72 = g[72], r73 = g[73], r74 = g[74], r75 = g[75], r76 = g[76], r77 = g[77], r78 = g[78], r79 = g[79];
     Q r80 = g[80], r81 = g[81], r82 = g[82], r83 = g[83], r84 = g[84], r85 = g[85];
-#define SAVE() do { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; r85 = g[85]; } while (0)
     goto L_09F58;
 L_094A8:
     COV(515);
@@ -11509,8 +11349,8 @@ L_094A8:
     lsw(c, r1._u32[0] + 0x20, r4);
     lsw(c, r1._u32[0] + 0x40, r11);
     r4 = spu_ai(r1, 32);
-    r0 = spu_link(0x9530u);
-    SAVE(); f_023B8(c); if (c.exit) return; if ((c.ret ^ 0x9530u) & 0x3FFFFu) { bad_return(c, 0x9530u); return; } LOAD();   // brsl $r0, 0x23B8
+    r0 = spu_link(0x9530u);   // brsl $r0, 0x23B8
+    g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[79] = r79; g[80] = r80; g[83] = r83; g[84] = r84; f_023B8(c); if (c.exit) { g[85] = r85; return; } if ((c.ret ^ 0x9530u) & 0x3FFFFu) { g[85] = r85; bad_return(c, 0x9530u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84];
     r3 = lsr(c, r80._u32[0] + 0x110);
     r2 = spu_andi(r3, 256);
     if (r2._u32[0] == 0) goto L_09568;
@@ -11522,8 +11362,8 @@ L_094A8:
     r7 = spu_mpyu(r83, r21);
     r18 = spu_a(r19, r20);
     r5 = spu_a(r18, r7);
-    r0 = spu_link(0x9564u);
-    SAVE(); f_02640(c); if (c.exit) return; if ((c.ret ^ 0x9564u) & 0x3FFFFu) { bad_return(c, 0x9564u); return; } LOAD();   // brsl $r0, 0x2640
+    r0 = spu_link(0x9564u);   // brsl $r0, 0x2640
+    g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[7] = r7; f_02640(c); if (c.exit) { g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[85] = r85; return; } if ((c.ret ^ 0x9564u) & 0x3FFFFu) { g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[85] = r85; bad_return(c, 0x9564u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17];
     goto L_09F1C;
 L_09568:
     COV(516);
@@ -11605,8 +11445,8 @@ L_09664:
     r4 = spu_ai(r1, 80);
     r5 = spu_ai(r1, 416);
     lsw(c, r80._u32[0] + 0x5D0, r2);
-    r0 = spu_link(0x968Cu);
-    SAVE(); f_091F0(c); if (c.exit) return; if ((c.ret ^ 0x968Cu) & 0x3FFFFu) { bad_return(c, 0x968Cu); return; } LOAD();   // brsl $r0, 0x91F0
+    r0 = spu_link(0x968Cu);   // brsl $r0, 0x91F0
+    g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[9] = r9; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[81] = r81; f_091F0(c); if (c.exit) { g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[85] = r85; return; } if ((c.ret ^ 0x968Cu) & 0x3FFFFu) { g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[85] = r85; bad_return(c, 0x968Cu); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83];
     r82 = lsr(c, r1._u32[0] + 0x40);
     r78 = spu_ai(r82, 156);
     r82 = spu_fsmbi(0x0);
@@ -11634,8 +11474,8 @@ L_096B0:
     r5 = lsr(c, r7._u32[0] + r4._u32[0]);
     r4 = lsr(c, r1._u32[0] + 0x40);
     r5 = spu_rotqby(r5, r6);
-    r0 = spu_link(0x96ECu);
-    SAVE(); f_092B8(c); if (c.exit) return; if ((c.ret ^ 0x96ECu) & 0x3FFFFu) { bad_return(c, 0x96ECu); return; } LOAD();   // brsl $r0, 0x92B8
+    r0 = spu_link(0x96ECu);   // brsl $r0, 0x92B8
+    g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[10] = r10; g[11] = r11; g[13] = r13; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[82] = r82; g[85] = r85; f_092B8(c); if (c.exit) return; if ((c.ret ^ 0x96ECu) & 0x3FFFFu) { bad_return(c, 0x96ECu); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; r85 = g[85];
     r8 = spu_ori(r3, 0);
     if (r3._u32[0] != 0) goto L_09F28;
     r81 = spu_sf(r82, r81);
@@ -11676,15 +11516,15 @@ L_0976C:
     r61 = lsr(c, r80._u32[0] + 0x700);
     lsw(c, r80._u32[0] + 0x580, r4);
     r3 = spu_rotqbyi(r61, 12);
-    r0 = spu_link(0x977Cu);
-    SAVE(); f_09160(c); if (c.exit) return; if ((c.ret ^ 0x977Cu) & 0x3FFFFu) { bad_return(c, 0x977Cu); return; } LOAD();   // brsl $r0, 0x9160
+    r0 = spu_link(0x977Cu);   // brsl $r0, 0x9160
+    g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[8] = r8; g[9] = r9; g[12] = r12; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[79] = r79; g[81] = r81; g[85] = r85; f_09160(c); if (c.exit) return; if ((c.ret ^ 0x977Cu) & 0x3FFFFu) { bad_return(c, 0x977Cu); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; r85 = g[85];
     r60 = lsr(c, r80._u32[0] + 0x700);
     r5 = spu_ori(r81, 0);
     r4 = spu_fsmbi(0x0);
     r6 = spu_il(2);
     r3 = spu_rotqbyi(r60, 12);
-    r0 = spu_link(0x9794u);
-    SAVE(); f_088D8(c); if (c.exit) return; if ((c.ret ^ 0x9794u) & 0x3FFFFu) { bad_return(c, 0x9794u); return; } LOAD();   // brsl $r0, 0x88D8
+    r0 = spu_link(0x9794u);   // brsl $r0, 0x88D8
+    g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[60] = r60; f_088D8(c); if (c.exit) return; if ((c.ret ^ 0x9794u) & 0x3FFFFu) { bad_return(c, 0x9794u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; r85 = g[85];
     r46 = lsr(c, r80._u32[0] + 0x210);
     r39 = spu_il(-1);
     r59 = spu_ai(r46, 53);
@@ -11931,8 +11771,8 @@ L_09B20:
     r4 = spu_shlqbyi(r84, 0);
     r14 = spu_a(r8, r15);
     r5 = spu_a(r14, r12);
-    r0 = spu_link(0x9B4Cu);
-    SAVE(); f_08C40(c); if (c.exit) return; if ((c.ret ^ 0x9B4Cu) & 0x3FFFFu) { bad_return(c, 0x9B4Cu); return; } LOAD();   // brsl $r0, 0x8C40
+    r0 = spu_link(0x9B4Cu);   // brsl $r0, 0x8C40
+    g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; f_08C40(c); if (c.exit) return; if ((c.ret ^ 0x9B4Cu) & 0x3FFFFu) { bad_return(c, 0x9B4Cu); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; r85 = g[85];
     r5 = spu_ceqi(r3, 0);
     r8 = spu_ori(r3, 0);
     r3 = spu_ceqi(r3, 22);
@@ -11949,7 +11789,7 @@ L_09B20:
     r29 = lsr(c, r80._u32[0] + 0x580);
     r11 = lsr(c, r80._u32[0] + 0x1E0);
     r31 = spu_cwd(r1, 0);
-    if ((int32_t)r33._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0x9B90u); return; }   // heqi
+    if ((int32_t)r33._u32[0] == (int32_t)(0)) { g[2] = r2; g[3] = r3; g[5] = r5; g[6] = r6; g[8] = r8; g[10] = r10; g[11] = r11; g[13] = r13; g[29] = r29; g[30] = r30; g[31] = r31; g[33] = r33; g[78] = r78; g[82] = r82; halt(c, 0x9B90u); return; }   // heqi
     r13 = spu_clz(r33);
     r9 = spu_clz(r30);
     r10 = spu_il(1);
@@ -12013,8 +11853,8 @@ L_09C48:
     r4 = spu_ai(r1, 80);
     lsw(c, r80._u32[0] + 0x5D0, r46);
     r5 = spu_ai(r1, 416);
-    r0 = spu_link(0x9C90u);
-    SAVE(); f_091F0(c); if (c.exit) return; if ((c.ret ^ 0x9C90u) & 0x3FFFFu) { bad_return(c, 0x9C90u); return; } LOAD();   // brsl $r0, 0x91F0
+    r0 = spu_link(0x9C90u);   // brsl $r0, 0x91F0
+    g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[35] = r35; g[36] = r36; g[81] = r81; g[82] = r82; g[83] = r83; f_091F0(c); if (c.exit) { g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[46] = r46; g[78] = r78; g[79] = r79; g[84] = r84; return; } if ((c.ret ^ 0x9C90u) & 0x3FFFFu) { g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[46] = r46; g[78] = r78; g[79] = r79; g[84] = r84; bad_return(c, 0x9C90u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83];
     r45 = lsr(c, r1._u32[0] + 0x40);
     r9 = lsr(c, r80._u32[0] + 0x5E0);
     r8 = lsr(c, r80._u32[0] + 0x5D0);
@@ -12048,8 +11888,8 @@ L_09CB8:
     r54 = lsr(c, r56._u32[0] + r6._u32[0]);
     r55 = spu_a(r56, r6);
     r5 = spu_rotqby(r54, r55);
-    r0 = spu_link(0x9D0Cu);
-    SAVE(); f_092B8(c); if (c.exit) return; if ((c.ret ^ 0x9D0Cu) & 0x3FFFFu) { bad_return(c, 0x9D0Cu); return; } LOAD();   // brsl $r0, 0x92B8
+    r0 = spu_link(0x9D0Cu);   // brsl $r0, 0x92B8
+    g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[78] = r78; g[79] = r79; g[84] = r84; f_092B8(c); if (c.exit) return; if ((c.ret ^ 0x9D0Cu) & 0x3FFFFu) { bad_return(c, 0x9D0Cu); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; r85 = g[85];
     r8 = spu_ori(r3, 0);
     if (r3._u32[0] == 0) goto L_09F18;
     goto L_09F28;
@@ -12098,8 +11938,8 @@ L_09D18:
     r4 = spu_ai(r1, 80);
     r5 = spu_ai(r1, 416);
     lsw(c, r80._u32[0] + 0x5D0, r19);
-    r0 = spu_link(0x9DCCu);
-    SAVE(); f_091F0(c); if (c.exit) return; if ((c.ret ^ 0x9DCCu) & 0x3FFFFu) { bad_return(c, 0x9DCCu); return; } LOAD();   // brsl $r0, 0x91F0
+    r0 = spu_link(0x9DCCu);   // brsl $r0, 0x91F0
+    g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[35] = r35; g[36] = r36; g[81] = r81; g[82] = r82; g[83] = r83; f_091F0(c); if (c.exit) { g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[84] = r84; return; } if ((c.ret ^ 0x9DCCu) & 0x3FFFFu) { g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[84] = r84; bad_return(c, 0x9DCCu); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83];
     r18 = lsr(c, r1._u32[0] + 0x40);
     r10 = lsr(c, r80._u32[0] + 0x5E0);
     r79 = spu_ai(r18, 156);
@@ -12131,8 +11971,8 @@ L_09DF4:
     r27 = lsr(c, r8._u32[0] + r6._u32[0]);
     r4 = lsr(c, r1._u32[0] + 0x40);
     r5 = spu_rotqby(r27, r7);
-    r0 = spu_link(0x9E3Cu);
-    SAVE(); f_092B8(c); if (c.exit) return; if ((c.ret ^ 0x9E3Cu) & 0x3FFFFu) { bad_return(c, 0x9E3Cu); return; } LOAD();   // brsl $r0, 0x92B8
+    r0 = spu_link(0x9E3Cu);   // brsl $r0, 0x92B8
+    g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[17] = r17; g[18] = r18; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[26] = r26; g[27] = r27; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[81] = r81; g[84] = r84; f_092B8(c); if (c.exit) return; if ((c.ret ^ 0x9E3Cu) & 0x3FFFFu) { bad_return(c, 0x9E3Cu); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; r85 = g[85];
     r8 = spu_ori(r3, 0);
     if (r3._u32[0] != 0) goto L_09F28;
     r82 = spu_sf(r81, r82);
@@ -12171,8 +12011,8 @@ L_09E48:
     r31 = spu_or(r25, r32);
     r29 = spu_or(r30, r31);
     lsw(c, r80._u32[0] + 0x580, r29);
-    r0 = spu_link(0x9ED0u);
-    SAVE(); f_088D8(c); if (c.exit) return; if ((c.ret ^ 0x9ED0u) & 0x3FFFFu) { bad_return(c, 0x9ED0u); return; } LOAD();   // brsl $r0, 0x88D8
+    r0 = spu_link(0x9ED0u);   // brsl $r0, 0x88D8
+    g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; f_088D8(c); if (c.exit) return; if ((c.ret ^ 0x9ED0u) & 0x3FFFFu) { bad_return(c, 0x9ED0u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; r85 = g[85];
     r3 = lsr(c, r80._u32[0] + 0x200);
     r28 = spu_cgti(r3, 0);
     if (r28._u32[0] == 0) goto L_09F18;
@@ -12190,8 +12030,8 @@ L_09EE8:
     r80 = spu_mpyu(r83, r53);
     r84 = spu_a(r85, r52);
     r5 = spu_a(r84, r80);
-    r0 = spu_link(0x9F14u);
-    SAVE(); f_02640(c); if (c.exit) return; if ((c.ret ^ 0x9F14u) & 0x3FFFFu) { bad_return(c, 0x9F14u); return; } LOAD();   // brsl $r0, 0x2640
+    r0 = spu_link(0x9F14u);   // brsl $r0, 0x2640
+    g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; f_02640(c); if (c.exit) { g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[52] = r52; g[53] = r53; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; return; } if ((c.ret ^ 0x9F14u) & 0x3FFFFu) { g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[52] = r52; g[53] = r53; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; bad_return(c, 0x9F14u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17];
     goto L_09F24;
 L_09F18:
     COV(538);
@@ -12217,26 +12057,23 @@ L_09F28:
     r83 = lsr(c, r1._u32[0] + -0x40);
     r84 = lsr(c, r1._u32[0] + -0x50);
     r85 = lsr(c, r1._u32[0] + -0x60);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
+    { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; c.ret = r0._u32[0]; return; }
 L_09F58:
     COV(542);
     r2 = spu_ai(r3, -28);
     r3 = spu_ceqi(r3, 0);
     r3 = spu_andc(r2, r3);
     goto L_094A8;
-#undef SAVE
-#undef LOAD
 }
 
-// ---- 0x09F68 (4 blocks; through a pointer: a callback stored into an object (ila at 0x93D0, 0xD408, 0xD6A8)) ----
+// ---- 0x09F68 (4 blocks; through a pointer: a callback stored into an object (ila at 0x93D0, 0xD408, 0xD6A8); 19
+// registers, 19 assigned; reaches 52, changes 52) ----
 void f_09F68(Run& c)
 {
     u128* const g = c.g;
     Q r0 = g[0], r1 = g[1], r2 = g[2], r3 = g[3], r4 = g[4], r5 = g[5], r6 = g[6], r7 = g[7];
     Q r8 = g[8], r9 = g[9], r10 = g[10], r11 = g[11], r12 = g[12], r13 = g[13], r14 = g[14], r15 = g[15];
     Q r16 = g[16], r17 = g[17], r18 = g[18];
-#define SAVE() do { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; } while (0)
 L_09F68:
     COV(543);
     r6 = spu_ori(r3, 0);
@@ -12275,8 +12112,8 @@ L_09FD4:
     r5 = spu_il(296);
     r7 = spu_a(r16, r17);
     r4 = spu_a(r9, r7);
-    r0 = spu_link(0x9FF4u);
-    SAVE(); f_00270(c); if (c.exit) return; if ((c.ret ^ 0x9FF4u) & 0x3FFFFu) { bad_return(c, 0x9FF4u); return; } LOAD();   // brsl $r0, 0x270
+    r0 = spu_link(0x9FF4u);   // brsl $r0, 0x270
+    g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; f_00270(c); if (c.exit) { g[1] = r1; return; } if ((c.ret ^ 0x9FF4u) & 0x3FFFFu) { g[1] = r1; bad_return(c, 0x9FF4u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18];
     r4 = spu_il(0);
     goto L_0A000;
 L_09FFC:
@@ -12288,33 +12125,25 @@ L_0A000:
     r3 = spu_ori(r4, 0);
     r0 = lsr(c, r1._u32[0] + 0x30);
     r1 = spu_ai(r1, 32);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x0A010 (1 blocks; called from DC78) ----
+// ---- 0x0A010 (1 blocks; called from DC78; 2 registers, 1 assigned; reaches 25, changes 24) ----
 void f_0A010(Run& c)
 {
     u128* const g = c.g;
     Q r0 = g[0], r3 = g[3];
-#define SAVE() do { g[0] = r0; g[3] = r3; } while (0)
-#define LOAD() do { r0 = g[0]; r3 = g[3]; } while (0)
 L_0A010:
     COV(547);
     r3 = spu_ai(r3, 48);
-    { SAVE(); TAIL f_00148(c); }   // a tail jump
-#undef SAVE
-#undef LOAD
+    { g[3] = r3; TAIL f_00148(c); }   // a tail jump
 }
 
-// ---- 0x0A040 (2 blocks; through a pointer: .ctors[1]) ----
+// ---- 0x0A040 (2 blocks; through a pointer: .ctors[1]; 7 registers, 6 assigned; reaches 25, changes 24) ----
 void f_0A040(Run& c)
 {
     u128* const g = c.g;
     Q r0 = g[0], r2 = g[2], r3 = g[3], r4 = g[4], r5 = g[5], r6 = g[6], r7 = g[7];
-#define SAVE() do { g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; } while (0)
-#define LOAD() do { r0 = g[0]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; } while (0)
     goto L_0A040;
 L_0A018:
     COV(548);
@@ -12325,18 +12154,17 @@ L_0A018:
     r5 = spu_nor(r6, r6);
     r3 = spu_ila(0x10890);
     r4 = spu_or(r2, r5);
-    if (r4._u32[0] != 0) { SAVE(); c.ret = g[0]._u32[0]; return; }
-    { SAVE(); TAIL f_0A010(c); }   // a tail jump
+    if (r4._u32[0] != 0) { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; c.ret = r0._u32[0]; return; }
+    { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; TAIL f_0A010(c); }   // a tail jump
 L_0A040:
     COV(549);
     r3 = spu_il(1);
     r4 = spu_ila(0xFFFF);
     goto L_0A018;
-#undef SAVE
-#undef LOAD
 }
 
-// ---- 0x0A058 (6 blocks; through a pointer: a callback stored into an object (ila at 0xD434)) ----
+// ---- 0x0A058 (6 blocks; through a pointer: a callback stored into an object (ila at 0xD434); 36 registers, 36
+// assigned; reaches 36, changes 36) ----
 void f_0A058(Run& c)
 {
     u128* const g = c.g;
@@ -12345,8 +12173,6 @@ void f_0A058(Run& c)
     Q r16 = g[16], r17 = g[17], r18 = g[18], r19 = g[19], r20 = g[20], r21 = g[21], r22 = g[22], r23 = g[23];
     Q r24 = g[24], r25 = g[25], r26 = g[26], r27 = g[27], r80 = g[80], r81 = g[81], r82 = g[82], r83 = g[83];
     Q r84 = g[84], r85 = g[85], r86 = g[86], r87 = g[87];
-#define SAVE() do { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; r85 = g[85]; r86 = g[86]; r87 = g[87]; } while (0)
     goto L_0A058;
 L_0A050:
     COV(550);
@@ -12389,8 +12215,8 @@ L_0AF78:
     r15 = lsr(c, r3._u32[0] + r83._u32[0]);
     r81 = spu_rotqby(r17, r18);
     r80 = spu_rotqby(r15, r16);
-    r0 = spu_link(0xAFA4u);
-    SAVE(); f_02640(c); if (c.exit) return; if ((c.ret ^ 0xAFA4u) & 0x3FFFFu) { bad_return(c, 0xAFA4u); return; } LOAD();   // brsl $r0, 0x2640
+    r0 = spu_link(0xAFA4u);   // brsl $r0, 0x2640
+    g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; f_02640(c); if (c.exit) { g[1] = r1; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; return; } if ((c.ret ^ 0xAFA4u) & 0x3FFFFu) { g[1] = r1; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; bad_return(c, 0xAFA4u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17];
     r14 = lsr(c, r82._u32[0] + 0x0);
     r12 = spu_il(10112);
     r13 = spu_rotqby(r14, r82);
@@ -12435,12 +12261,11 @@ L_0B014:
     r85 = lsr(c, r1._u32[0] + -0x60);
     r86 = lsr(c, r1._u32[0] + -0x70);
     r87 = lsr(c, r1._u32[0] + -0x80);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x0A710 (26 blocks; through a pointer: a callback stored into an object (ila at 0xD3E0)) ----
+// ---- 0x0A710 (26 blocks; through a pointer: a callback stored into an object (ila at 0xD3E0); 85 registers, 85
+// assigned; reaches all, changes all) ----
 void f_0A710(Run& c)
 {
     u128* const g = c.g;
@@ -12455,8 +12280,6 @@ void f_0A710(Run& c)
     Q r64 = g[64], r65 = g[65], r66 = g[66], r67 = g[67], r68 = g[68], r69 = g[69], r70 = g[70], r71 = g[71];
     Q r72 = g[72], r73 = g[73], r74 = g[74], r75 = g[75], r76 = g[76], r77 = g[77], r78 = g[78], r79 = g[79];
     Q r80 = g[80], r81 = g[81], r82 = g[82], r83 = g[83], r84 = g[84];
-#define SAVE() do { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; } while (0)
     goto L_0A710;
 L_0A068:
     COV(552);
@@ -12482,8 +12305,8 @@ L_0A068:
     r4 = spu_rotqby(r8, r9);
     r3 = spu_rotqby(r3, r7);
     r4 = spu_a(r14, r4);
-    r0 = spu_link(0xA0CCu);
-    SAVE(); f_0BB58(c); if (c.exit) return; if ((c.ret ^ 0xA0CCu) & 0x3FFFFu) { bad_return(c, 0xA0CCu); return; } LOAD();   // brsl $r0, 0xBB58
+    r0 = spu_link(0xA0CCu);   // brsl $r0, 0xBB58
+    g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[14] = r14; f_0BB58(c); if (c.exit) { g[79] = r79; g[80] = r80; return; } if ((c.ret ^ 0xA0CCu) & 0x3FFFFu) { g[79] = r79; g[80] = r80; bad_return(c, 0xA0CCu); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42];
     r82 = spu_ori(r3, 0);
     goto L_0A6E4;
 L_0A0D4:
@@ -12515,7 +12338,7 @@ L_0A0D4:
     r38 = spu_mpyu(r5, r13);
     r37 = spu_a(r39, r40);
     r22 = spu_a(r37, r38);
-    if ((int32_t)r15._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xA140u); return; }   // heqi
+    if ((int32_t)r15._u32[0] == (int32_t)(0)) { g[1] = r1; g[2] = r2; g[3] = r3; g[6] = r6; g[10] = r10; g[13] = r13; g[14] = r14; g[15] = r15; g[18] = r18; g[22] = r22; g[33] = r33; g[35] = r35; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[79] = r79; g[80] = r80; halt(c, 0xA140u); return; }   // heqi
     r8 = spu_clz(r15);
     r5 = spu_clz(r22);
     r6 = spu_il(1);
@@ -12589,7 +12412,7 @@ L_0A238:
     r71 = spu_ceqbi(r72, 0);
     r70 = spu_xsbh(r71);
     if (r70._u16[0] != 0) goto L_0A3B0;
-    if ((int32_t)r13._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xA268u); return; }   // heqi
+    if ((int32_t)r13._u32[0] == (int32_t)(0)) { g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[83] = r83; halt(c, 0xA268u); return; }   // heqi
     r6 = spu_clz(r13);
     r10 = spu_clz(r83);
     r4 = spu_il(1);
@@ -12679,7 +12502,7 @@ L_0A3A8:
     goto L_0A4F4;
 L_0A3B0:
     COV(560);
-    if ((int32_t)r13._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xA3B0u); return; }   // heqi
+    if ((int32_t)r13._u32[0] == (int32_t)(0)) { g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[83] = r83; halt(c, 0xA3B0u); return; }   // heqi
     r7 = spu_clz(r13);
     r4 = spu_clz(r83);
     r5 = spu_il(1);
@@ -12719,7 +12542,7 @@ L_0A418:
     r58 = spu_mpyu(r13, r10);
     r57 = spu_a(r59, r5);
     r56 = spu_a(r57, r58);
-    if ((int32_t)r15._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xA440u); return; }   // heqi
+    if ((int32_t)r15._u32[0] == (int32_t)(0)) { g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[83] = r83; halt(c, 0xA440u); return; }   // heqi
     r7 = spu_clz(r15);
     r10 = spu_clz(r56);
     r5 = spu_il(1);
@@ -12739,7 +12562,7 @@ L_0A468:
     r54 = spu_selb(r8, r54, r6);
     r9 = spu_selb(r7, r9, r6);
     if (r5._u32[0] != 0) goto L_0A468;
-    if ((int32_t)r54._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xA490u); return; }   // heqi
+    if ((int32_t)r54._u32[0] == (int32_t)(0)) { g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[83] = r83; halt(c, 0xA490u); return; }   // heqi
     r7 = spu_clz(r54);
     r10 = spu_clz(r55);
     r5 = spu_il(1);
@@ -12781,8 +12604,8 @@ L_0A4F4:
     r63 = spu_a(r61, r66);
     r18 = spu_clgt(r62, r63);
     r4 = spu_selb(r62, r61, r18);
-    r0 = spu_link(0xA534u);
-    SAVE(); f_0BB58(c); if (c.exit) return; if ((c.ret ^ 0xA534u) & 0x3FFFFu) { bad_return(c, 0xA534u); return; } LOAD();   // brsl $r0, 0xBB58
+    r0 = spu_link(0xA534u);   // brsl $r0, 0xBB58
+    g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; f_0BB58(c); if (c.exit) { g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; return; } if ((c.ret ^ 0xA534u) & 0x3FFFFu) { g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; bad_return(c, 0xA534u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42];
     r82 = spu_ori(r3, 0);
     if (r3._u32[0] != 0) goto L_0A6E4;
     r73 = spu_ai(r80, 200);
@@ -12811,8 +12634,8 @@ L_0A570:
     r5 = spu_ori(r81, 0);
     r6 = spu_ai(r1, 32);
     lsw(c, r1._u32[0] + 0x20, r78);
-    r0 = spu_link(0xA5A8u);
-    SAVE(); f_08C40(c); if (c.exit) return; if ((c.ret ^ 0xA5A8u) & 0x3FFFFu) { bad_return(c, 0xA5A8u); return; } LOAD();   // brsl $r0, 0x8C40
+    r0 = spu_link(0xA5A8u);   // brsl $r0, 0x8C40
+    g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[12] = r12; g[17] = r17; g[19] = r19; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; f_08C40(c); if (c.exit) return; if ((c.ret ^ 0xA5A8u) & 0x3FFFFu) { bad_return(c, 0xA5A8u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84];
     if (r3._u32[0] != 0) goto L_0A410;
     r12 = lsr(c, r1._u32[0] + 0x20);
     r17 = spu_ceqi(r12, 0);
@@ -12920,18 +12743,17 @@ L_0A6E4:
     r82 = lsr(c, r1._u32[0] + -0x30);
     r83 = lsr(c, r1._u32[0] + -0x40);
     r84 = lsr(c, r1._u32[0] + -0x50);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
+    { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[7] = r7; g[12] = r12; g[17] = r17; g[19] = r19; g[20] = r20; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; c.ret = r0._u32[0]; return; }
 L_0A710:
     COV(577);
     r2 = spu_ai(r3, -28);
     r3 = spu_ceqi(r3, 0);
     r3 = spu_andc(r2, r3);
     goto L_0A068;
-#undef SAVE
-#undef LOAD
 }
 
-// ---- 0x0AAF8 (15 blocks; through a pointer: a callback stored into an object (ila at 0xD3B8)) ----
+// ---- 0x0AAF8 (15 blocks; through a pointer: a callback stored into an object (ila at 0xD3B8); 88 registers, 88
+// assigned; reaches all, changes all) ----
 void f_0AAF8(Run& c)
 {
     u128* const g = c.g;
@@ -12946,8 +12768,6 @@ void f_0AAF8(Run& c)
     Q r64 = g[64], r65 = g[65], r67 = g[67], r68 = g[68], r69 = g[69], r70 = g[70], r71 = g[71], r72 = g[72];
     Q r73 = g[73], r74 = g[74], r75 = g[75], r76 = g[76], r77 = g[77], r79 = g[79], r80 = g[80], r81 = g[81];
     Q r82 = g[82], r83 = g[83], r84 = g[84], r85 = g[85], r86 = g[86], r87 = g[87], r88 = g[88], r89 = g[89];
-#define SAVE() do { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r79 = g[79]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; r85 = g[85]; r86 = g[86]; r87 = g[87]; r88 = g[88]; r89 = g[89]; } while (0)
     goto L_0AAF8;
 L_0A720:
     COV(578);
@@ -12980,8 +12800,8 @@ L_0A720:
     r87 = spu_selb(r87, r4, r5);
     r9 = spu_shufb(r80, r10, r8);
     lsw(c, r1._u32[0] + 0x20, r9);
-    r0 = spu_link(0xA7A0u);
-    SAVE(); f_0D0E8(c); if (c.exit) return; if ((c.ret ^ 0xA7A0u) & 0x3FFFFu) { bad_return(c, 0xA7A0u); return; } LOAD();   // brsl $r0, 0xD0E8
+    r0 = spu_link(0xA7A0u);   // brsl $r0, 0xD0E8
+    g[0] = r0; g[2] = r2; g[3] = r3; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; f_0D0E8(c); if (c.exit) { g[1] = r1; g[79] = r79; g[80] = r80; g[81] = r81; g[85] = r85; g[87] = r87; g[89] = r89; return; } if ((c.ret ^ 0xA7A0u) & 0x3FFFFu) { g[1] = r1; g[79] = r79; g[80] = r80; g[81] = r81; g[85] = r85; g[87] = r87; g[89] = r89; bad_return(c, 0xA7A0u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26];
     r4 = lsr(c, r85._u32[0] + 0x0);
     r3 = spu_cwd(r85, 0);
     r2 = spu_shufb(r80, r4, r3);
@@ -13000,8 +12820,8 @@ L_0A7B0:
     r18 = spu_shufb(r21, r20, r22);
     lsw(c, r1._u32[0] + 0x50, r19);
     lsw(c, r1._u32[0] + 0x40, r18);
-    r0 = spu_link(0xA7E4u);
-    SAVE(); f_02640(c); if (c.exit) return; if ((c.ret ^ 0xA7E4u) & 0x3FFFFu) { bad_return(c, 0xA7E4u); return; } LOAD();   // brsl $r0, 0x2640
+    r0 = spu_link(0xA7E4u);   // brsl $r0, 0x2640
+    g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; f_02640(c); if (c.exit) { g[1] = r1; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[44] = r44; g[77] = r77; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; return; } if ((c.ret ^ 0xA7E4u) & 0x3FFFFu) { g[1] = r1; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[44] = r44; g[77] = r77; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; bad_return(c, 0xA7E4u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17];
     r17 = lsr(c, r81._u32[0] + 0x20);
     r16 = spu_rotqby(r17, r81);
     r15 = spu_ai(r16, 260);
@@ -13039,8 +12859,8 @@ L_0A844:
     r4 = spu_ori(r84, 0);
     r6 = spu_il(4);
     r3 = spu_rotqby(r38, r80);
-    r0 = spu_link(0xA868u);
-    SAVE(); f_0C3C0(c); if (c.exit) return; if ((c.ret ^ 0xA868u) & 0x3FFFFu) { bad_return(c, 0xA868u); return; } LOAD();   // brsl $r0, 0xC3C0
+    r0 = spu_link(0xA868u);   // brsl $r0, 0xC3C0
+    g[0] = r0; g[1] = r1; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[73] = r73; g[74] = r74; g[77] = r77; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; f_0C3C0(c); if (c.exit) { g[88] = r88; g[89] = r89; return; } if ((c.ret ^ 0xA868u) & 0x3FFFFu) { g[88] = r88; g[89] = r89; bad_return(c, 0xA868u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r79 = g[79]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; r85 = g[85]; r86 = g[86]; r87 = g[87];
     r82 = spu_ori(r3, 0);
     if (r3._u32[0] != 0) goto L_0AA20;
     r6 = spu_ai(r1, 80);
@@ -13057,30 +12877,30 @@ L_0A844:
     r42 = spu_cwx(r39, r86);
     r40 = spu_shufb(r82, r41, r42);
     lsw(c, r39._u32[0] + r86._u32[0], r40);
-    r0 = spu_link(0xA8B0u);
-    SAVE(); f_0AB08(c); if (c.exit) return; if ((c.ret ^ 0xA8B0u) & 0x3FFFFu) { bad_return(c, 0xA8B0u); return; } LOAD();   // brsl $r0, 0xAB08
+    r0 = spu_link(0xA8B0u);   // brsl $r0, 0xAB08
+    g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; f_0AB08(c); if (c.exit) { g[82] = r82; g[83] = r83; g[86] = r86; g[88] = r88; g[89] = r89; return; } if ((c.ret ^ 0xA8B0u) & 0x3FFFFu) { g[82] = r82; g[83] = r83; g[86] = r86; g[88] = r88; g[89] = r89; bad_return(c, 0xA8B0u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r79 = g[79];
     if (r3._u32[0] != 0) goto L_0A984;
     r44 = lsr(c, r80._u32[0] + 0x0);
     r4 = spu_ai(r1, 48);
     r3 = spu_rotqby(r44, r80);
-    r0 = spu_link(0xA8C4u);
-    SAVE(); f_0BB00(c); if (c.exit) return; if ((c.ret ^ 0xA8C4u) & 0x3FFFFu) { bad_return(c, 0xA8C4u); return; } LOAD();   // brsl $r0, 0xBB00
+    r0 = spu_link(0xA8C4u);   // brsl $r0, 0xBB00
+    g[0] = r0; g[3] = r3; g[4] = r4; f_0BB00(c); if (c.exit) { g[44] = r44; g[82] = r82; g[83] = r83; g[86] = r86; g[88] = r88; g[89] = r89; return; } if ((c.ret ^ 0xA8C4u) & 0x3FFFFu) { g[44] = r44; g[82] = r82; g[83] = r83; g[86] = r86; g[88] = r88; g[89] = r89; bad_return(c, 0xA8C4u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r13 = g[13]; r14 = g[14]; r15 = g[15];
     r82 = spu_ori(r3, 0);
     if (r3._u32[0] != 0) goto L_0AA20;
     r72 = lsr(c, r80._u32[0] + 0x0);
     r5 = spu_il(1);
     r4 = lsr(c, r1._u32[0] + 0x40);
     r3 = spu_rotqby(r72, r80);
-    r0 = spu_link(0xA8E0u);
-    SAVE(); f_0BB58(c); if (c.exit) return; if ((c.ret ^ 0xA8E0u) & 0x3FFFFu) { bad_return(c, 0xA8E0u); return; } LOAD();   // brsl $r0, 0xBB58
+    r0 = spu_link(0xA8E0u);   // brsl $r0, 0xBB58
+    g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; f_0BB58(c); if (c.exit) { g[44] = r44; g[72] = r72; g[82] = r82; g[83] = r83; g[86] = r86; g[88] = r88; g[89] = r89; return; } if ((c.ret ^ 0xA8E0u) & 0x3FFFFu) { g[44] = r44; g[72] = r72; g[82] = r82; g[83] = r83; g[86] = r86; g[88] = r88; g[89] = r89; bad_return(c, 0xA8E0u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42];
     r5 = spu_il(1);
     r71 = lsr(c, r80._u32[0] + 0x0);
     r4 = spu_ai(r1, 96);
     r7 = spu_fsmbi(0x0);
     r6 = spu_il(4);
     r3 = spu_rotqby(r71, r80);
-    r0 = spu_link(0xA8FCu);
-    SAVE(); f_0C3C0(c); if (c.exit) return; if ((c.ret ^ 0xA8FCu) & 0x3FFFFu) { bad_return(c, 0xA8FCu); return; } LOAD();   // brsl $r0, 0xC3C0
+    r0 = spu_link(0xA8FCu);   // brsl $r0, 0xC3C0
+    g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[44] = r44; g[71] = r71; g[72] = r72; g[82] = r82; g[83] = r83; g[86] = r86; f_0C3C0(c); if (c.exit) { g[88] = r88; g[89] = r89; return; } if ((c.ret ^ 0xA8FCu) & 0x3FFFFu) { g[88] = r88; g[89] = r89; bad_return(c, 0xA8FCu); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r79 = g[79]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; r85 = g[85]; r86 = g[86]; r87 = g[87];
     r70 = lsr(c, r83._u32[0] + 0x0);
     r61 = spu_il(564);
     r65 = lsr(c, r80._u32[0] + 0x0);
@@ -13112,8 +12932,8 @@ L_0A844:
     r3 = spu_ori(r5, 0);
     r4 = lsr(c, r1._u32[0] + 0x30);
     r5 = spu_il(0);
-    r0 = spu_link(0xA980u);
-    SAVE(); f_0BB58(c); if (c.exit) return; if ((c.ret ^ 0xA980u) & 0x3FFFFu) { bad_return(c, 0xA980u); return; } LOAD();   // brsl $r0, 0xBB58
+    r0 = spu_link(0xA980u);   // brsl $r0, 0xBB58
+    g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; f_0BB58(c); if (c.exit) { g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[82] = r82; g[88] = r88; g[89] = r89; return; } if ((c.ret ^ 0xA980u) & 0x3FFFFu) { g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[82] = r82; g[88] = r88; g[89] = r89; bad_return(c, 0xA980u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42];
     goto L_0A980;
 L_0A980:
     COV(582);
@@ -13124,8 +12944,8 @@ L_0A984:
     r3 = spu_ai(r1, 112);
     r4 = spu_ila(0x10420);
     r5 = spu_il(3);
-    r0 = spu_link(0xA994u);
-    SAVE(); f_0CC28(c); if (c.exit) return; if ((c.ret ^ 0xA994u) & 0x3FFFFu) { bad_return(c, 0xA994u); return; } LOAD();   // brsl $r0, 0xCC28
+    r0 = spu_link(0xA994u);   // brsl $r0, 0xCC28
+    g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; f_0CC28(c); if (c.exit) { g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[82] = r82; g[83] = r83; g[86] = r86; g[88] = r88; g[89] = r89; return; } if ((c.ret ^ 0xA994u) & 0x3FFFFu) { g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[82] = r82; g[83] = r83; g[86] = r86; g[88] = r88; g[89] = r89; bad_return(c, 0xA994u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21];
     r74 = spu_ai(r81, 252);
     r73 = lsr(c, r74._u32[0] + 0x0);
     r2 = spu_rotqby(r73, r74);
@@ -13141,8 +12961,8 @@ L_0A9B0:
 L_0A9B8:
     COV(585);
     r5 = spu_il(1);
-    r0 = spu_link(0xA9C0u);
-    SAVE(); f_0BB58(c); if (c.exit) return; if ((c.ret ^ 0xA9C0u) & 0x3FFFFu) { bad_return(c, 0xA9C0u); return; } LOAD();   // brsl $r0, 0xBB58
+    r0 = spu_link(0xA9C0u);   // brsl $r0, 0xBB58
+    g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; f_0BB58(c); if (c.exit) { g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[73] = r73; g[74] = r74; g[82] = r82; g[83] = r83; g[86] = r86; g[88] = r88; g[89] = r89; return; } if ((c.ret ^ 0xA9C0u) & 0x3FFFFu) { g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[73] = r73; g[74] = r74; g[82] = r82; g[83] = r83; g[86] = r86; g[88] = r88; g[89] = r89; bad_return(c, 0xA9C0u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42];
     r88 = spu_ai(r88, 1);
     goto L_0A844;
 L_0A9C8:
@@ -13154,8 +12974,8 @@ L_0A9C8:
     r5 = spu_il(1);
     r75 = lsr(c, r76._u32[0] + 0x0);
     r3 = spu_rotqby(r75, r76);
-    r0 = spu_link(0xA9E8u);
-    SAVE(); f_0C3C0(c); if (c.exit) return; if ((c.ret ^ 0xA9E8u) & 0x3FFFFu) { bad_return(c, 0xA9E8u); return; } LOAD();   // brsl $r0, 0xC3C0
+    r0 = spu_link(0xA9E8u);   // brsl $r0, 0xC3C0
+    g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[75] = r75; g[76] = r76; g[82] = r82; f_0C3C0(c); if (c.exit) { g[88] = r88; g[89] = r89; return; } if ((c.ret ^ 0xA9E8u) & 0x3FFFFu) { g[88] = r88; g[89] = r89; bad_return(c, 0xA9E8u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r79 = g[79]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; r85 = g[85]; r86 = g[86]; r87 = g[87];
     r82 = spu_ori(r3, 0);
     if (r3._u32[0] != 0) goto L_0AAB8;
     r4 = spu_ai(r1, 112);
@@ -13163,8 +12983,8 @@ L_0A9C8:
     r5 = spu_ori(r87, 0);
     r84 = spu_cwd(r85, 0);
     r6 = spu_ai(r1, 32);
-    r0 = spu_link(0xAA08u);
-    SAVE(); f_0B048(c); if (c.exit) return; if ((c.ret ^ 0xAA08u) & 0x3FFFFu) { bad_return(c, 0xAA08u); return; } LOAD();   // brsl $r0, 0xB048
+    r0 = spu_link(0xAA08u);   // brsl $r0, 0xB048
+    g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[82] = r82; g[84] = r84; g[88] = r88; g[89] = r89; f_0B048(c); if (c.exit) return; if ((c.ret ^ 0xAA08u) & 0x3FFFFu) { bad_return(c, 0xAA08u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r79 = g[79]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; r85 = g[85]; r86 = g[86]; r87 = g[87]; r88 = g[88]; r89 = g[89];
     r2 = lsr(c, r85._u32[0] + 0x0);
     r88 = lsr(c, r1._u32[0] + 0x20);
     r86 = spu_rotqby(r2, r85);
@@ -13208,16 +13028,16 @@ L_0AA3C:
 L_0AA94:
     COV(589);
     r3 = spu_il(0);
-    r0 = spu_link(0xAA9Cu);
-    SAVE(); f_0D0E8(c); if (c.exit) return; if ((c.ret ^ 0xAA9Cu) & 0x3FFFFu) { bad_return(c, 0xAA9Cu); return; } LOAD();   // brsl $r0, 0xD0E8
+    r0 = spu_link(0xAA9Cu);   // brsl $r0, 0xD0E8
+    g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; f_0D0E8(c); if (c.exit) { g[44] = r44; g[77] = r77; g[79] = r79; g[82] = r82; g[83] = r83; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; return; } if ((c.ret ^ 0xAA9Cu) & 0x3FFFFu) { g[44] = r44; g[77] = r77; g[79] = r79; g[82] = r82; g[83] = r83; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; bad_return(c, 0xAA9Cu); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26];
     goto L_0AAB8;
 L_0AAA0:
     COV(590);
     r4 = spu_ori(r84, 0);
     r3 = spu_shlqbyi(r81, 0);
     r5 = spu_il(0);
-    r0 = spu_link(0xAAB0u);
-    SAVE(); f_0AB08(c); if (c.exit) return; if ((c.ret ^ 0xAAB0u) & 0x3FFFFu) { bad_return(c, 0xAAB0u); return; } LOAD();   // brsl $r0, 0xAB08
+    r0 = spu_link(0xAAB0u);   // brsl $r0, 0xAB08
+    g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; f_0AB08(c); if (c.exit) { g[82] = r82; g[88] = r88; g[89] = r89; return; } if ((c.ret ^ 0xAAB0u) & 0x3FFFFu) { g[82] = r82; g[88] = r88; g[89] = r89; bad_return(c, 0xAAB0u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r79 = g[79];
     r82 = spu_ori(r3, 0);
     goto L_0A980;
 L_0AAB8:
@@ -13236,18 +13056,16 @@ L_0AAB8:
     r87 = lsr(c, r1._u32[0] + -0x80);
     r88 = lsr(c, r1._u32[0] + -0x90);
     r89 = lsr(c, r1._u32[0] + -0xA0);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
+    { g[0] = r0; g[1] = r1; g[3] = r3; g[44] = r44; g[77] = r77; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; c.ret = r0._u32[0]; return; }
 L_0AAF8:
     COV(592);
     r2 = spu_ai(r3, -28);
     r3 = spu_ceqi(r3, 0);
     r3 = spu_andc(r2, r3);
     goto L_0A720;
-#undef SAVE
-#undef LOAD
 }
 
-// ---- 0x0AB08 (15 blocks; called from A844, AAA0) ----
+// ---- 0x0AB08 (15 blocks; called from A844, AAA0; 79 registers, 78 assigned; reaches 79, changes 78) ----
 void f_0AB08(Run& c)
 {
     u128* const g = c.g;
@@ -13261,8 +13079,6 @@ void f_0AB08(Run& c)
     Q r57 = g[57], r58 = g[58], r59 = g[59], r60 = g[60], r61 = g[61], r62 = g[62], r63 = g[63], r64 = g[64];
     Q r65 = g[65], r66 = g[66], r67 = g[67], r68 = g[68], r69 = g[69], r70 = g[70], r71 = g[71], r72 = g[72];
     Q r73 = g[73], r74 = g[74], r75 = g[75], r76 = g[76], r77 = g[77], r78 = g[78], r79 = g[79];
-#define SAVE() do { g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; } while (0)
-#define LOAD() do { r0 = g[0]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79]; } while (0)
 L_0AB08:
     COV(593);
     r30 = spu_ai(r4, 1);
@@ -13452,7 +13268,7 @@ L_0AD58:
     r17 = spu_mpyu(r50, r51);
     r11 = spu_a(r48, r49);
     r47 = spu_a(r11, r17);
-    if ((int32_t)r46._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xADB8u); return; }   // heqi
+    if ((int32_t)r46._u32[0] == (int32_t)(0)) { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; halt(c, 0xADB8u); return; }   // heqi
     r11 = spu_sfi(r47, 0);
     r13 = spu_sfi(r46, 0);
     r15 = spu_cgti(r47, -1);
@@ -13555,12 +13371,10 @@ L_0AF18:
 L_0AF1C:
     COV(607);
     r3 = spu_ori(r5, 0);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x0B048 (8 blocks; called from A9C8, DD70) ----
+// ---- 0x0B048 (8 blocks; called from A9C8, DD70; 52 registers, 52 assigned; reaches all, changes all) ----
 void f_0B048(Run& c)
 {
     u128* const g = c.g;
@@ -13571,8 +13385,6 @@ void f_0B048(Run& c)
     Q r32 = g[32], r33 = g[33], r34 = g[34], r35 = g[35], r36 = g[36], r37 = g[37], r38 = g[38], r39 = g[39];
     Q r40 = g[40], r41 = g[41], r42 = g[42], r43 = g[43], r44 = g[44], r45 = g[45], r46 = g[46], r47 = g[47];
     Q r80 = g[80], r81 = g[81], r82 = g[82], r83 = g[83];
-#define SAVE() do { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; } while (0)
 L_0B048:
     COV(612);
     goto L_0B050;
@@ -13602,8 +13414,8 @@ L_0B050:
     r7 = spu_ai(r1, 32);
     r9 = spu_a(r8, r9);
     r10 = spu_a(r8, r10);
-    r0 = spu_link(0xB0B8u);
-    SAVE(); f_0E8C8(c); if (c.exit) return; if ((c.ret ^ 0xB0B8u) & 0x3FFFFu) { bad_return(c, 0xB0B8u); return; } LOAD();   // brsl $r0, 0xE8C8
+    r0 = spu_link(0xB0B8u);   // brsl $r0, 0xE8C8
+    g[0] = r0; g[1] = r1; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; f_0E8C8(c); if (c.exit) return; if ((c.ret ^ 0xB0B8u) & 0x3FFFFu) { bad_return(c, 0xB0B8u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83];
     r5 = lsr(c, r1._u32[0] + 0x20);
     r8 = spu_ori(r3, 0);
     r2 = spu_cgti(r5, 0);
@@ -13662,8 +13474,8 @@ L_0B17C:
     COV(617);
     r3 = spu_ori(r82, 0);
     r4 = spu_ori(r8, 0);
-    r0 = spu_link(0xB188u);
-    SAVE(); f_00270(c); if (c.exit) return; if ((c.ret ^ 0xB188u) & 0x3FFFFu) { bad_return(c, 0xB188u); return; } LOAD();   // brsl $r0, 0x270
+    r0 = spu_link(0xB188u);   // brsl $r0, 0x270
+    g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; f_00270(c); if (c.exit) return; if ((c.ret ^ 0xB188u) & 0x3FFFFu) { bad_return(c, 0xB188u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47];
     goto L_0B188;
 L_0B188:
     COV(618);
@@ -13694,13 +13506,11 @@ L_0B1CC:
     r81 = lsr(c, r1._u32[0] + -0x20);
     r82 = lsr(c, r1._u32[0] + -0x30);
     r83 = lsr(c, r1._u32[0] + -0x40);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x0BAA8 (39 blocks; through a pointer: a callback kept on the stack (ila at 0x93A0) when a mode word is 8)
-// ----
+// ---- 0x0BAA8 (39 blocks; through a pointer: a callback kept on the stack (ila at 0x93A0) when a mode word is 8; 85
+// registers, 85 assigned; reaches 85, changes 85) ----
 void f_0BAA8(Run& c)
 {
     u128* const g = c.g;
@@ -13715,8 +13525,6 @@ void f_0BAA8(Run& c)
     Q r64 = g[64], r65 = g[65], r66 = g[66], r67 = g[67], r68 = g[68], r69 = g[69], r70 = g[70], r71 = g[71];
     Q r72 = g[72], r73 = g[73], r74 = g[74], r75 = g[75], r76 = g[76], r77 = g[77], r78 = g[78], r79 = g[79];
     Q r80 = g[80], r81 = g[81], r82 = g[82], r83 = g[83], r84 = g[84];
-#define SAVE() do { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; } while (0)
     goto L_0BAA8;
 L_0B1F0:
     COV(620);
@@ -13734,8 +13542,8 @@ L_0B1F0:
     r4 = spu_il(0);
     lsw(c, r1._u32[0] + -0x100, r1);
     r1 = spu_ai(r1, -256);
-    r0 = spu_link(0xB230u);
-    SAVE(); f_02640(c); if (c.exit) return; if ((c.ret ^ 0xB230u) & 0x3FFFFu) { bad_return(c, 0xB230u); return; } LOAD();   // brsl $r0, 0x2640
+    r0 = spu_link(0xB230u);   // brsl $r0, 0x2640
+    g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; f_02640(c); if (c.exit) { g[1] = r1; g[81] = r81; g[83] = r83; g[84] = r84; return; } if ((c.ret ^ 0xB230u) & 0x3FFFFu) { g[1] = r1; g[81] = r81; g[83] = r83; g[84] = r84; bad_return(c, 0xB230u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17];
     r3 = spu_ai(r1, 79);
     r5 = lsr(c, r84._u32[0] + 0x120);
     r4 = spu_rotqbyi(r5, 4);
@@ -13749,8 +13557,8 @@ L_0B1F0:
     r4 = lsr(c, r84._u32[0] + 0x160);
     r10 = spu_shufb(r42, r14, r80);
     lsw(c, r1._u32[0] + 0x20, r10);
-    r0 = spu_link(0xB26Cu);
-    SAVE(); f_0D1C0(c); if (c.exit) return; if ((c.ret ^ 0xB26Cu) & 0x3FFFFu) { bad_return(c, 0xB26Cu); return; } LOAD();   // brsl $r0, 0xD1C0
+    r0 = spu_link(0xB26Cu);   // brsl $r0, 0xD1C0
+    g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[10] = r10; g[14] = r14; f_0D1C0(c); if (c.exit) { g[1] = r1; g[42] = r42; g[80] = r80; g[81] = r81; g[83] = r83; g[84] = r84; return; } if ((c.ret ^ 0xB26Cu) & 0x3FFFFu) { g[1] = r1; g[42] = r42; g[80] = r80; g[81] = r81; g[83] = r83; g[84] = r84; bad_return(c, 0xB26Cu); return; } r2 = g[2]; r4 = g[4]; r5 = g[5]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36];
     r39 = lsr(c, r1._u32[0] + 0x20);
     r37 = spu_il(8192);
     r41 = lsr(c, r84._u32[0] + 0x160);
@@ -13946,8 +13754,8 @@ L_0B508:
     r5 = spu_shlqbyi(r26, 0);
     r3 = spu_il(1);
     r7 = spu_il(1);
-    r0 = spu_link(0xB51Cu);
-    SAVE(); f_023B8(c); if (c.exit) return; if ((c.ret ^ 0xB51Cu) & 0x3FFFFu) { bad_return(c, 0xB51Cu); return; } LOAD();   // brsl $r0, 0x23B8
+    r0 = spu_link(0xB51Cu);   // brsl $r0, 0x23B8
+    g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; f_023B8(c); if (c.exit) { g[74] = r74; return; } if ((c.ret ^ 0xB51Cu) & 0x3FFFFu) { g[74] = r74; bad_return(c, 0xB51Cu); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84];
     goto L_0B51C;
 L_0B51C:
     COV(634);
@@ -14032,7 +13840,7 @@ L_0B610:
     r67 = spu_andi(r20, 3);
     r66 = spu_ceqi(r67, 0);
     r65 = spu_sfi(r66, 0);
-    if ((int32_t)r65._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xB648u); return; }   // heqi
+    if ((int32_t)r65._u32[0] == (int32_t)(0)) { g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[20] = r20; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[81] = r81; g[83] = r83; g[84] = r84; halt(c, 0xB648u); return; }   // heqi
     r6 = spu_il(1);
     r80 = spu_andi(r20, 15);
     r81 = spu_ai(r1, 48);
@@ -14040,15 +13848,15 @@ L_0B610:
     r82 = spu_a(r81, r80);
     r5 = spu_il(4);
     r3 = spu_ori(r82, 0);
-    r0 = spu_link(0xB66Cu);
-    SAVE(); f_0E680(c); if (c.exit) return; if ((c.ret ^ 0xB66Cu) & 0x3FFFFu) { bad_return(c, 0xB66Cu); return; } LOAD();   // brsl $r0, 0xE680
+    r0 = spu_link(0xB66Cu);   // brsl $r0, 0xE680
+    g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; f_0E680(c); if (c.exit) { g[1] = r1; g[20] = r20; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; return; } if ((c.ret ^ 0xB66Cu) & 0x3FFFFu) { g[1] = r1; g[20] = r20; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; bad_return(c, 0xB66Cu); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r8 = g[8]; r9 = g[9]; r10 = g[10];
     r18 = lsr(c, r81._u32[0] + r80._u32[0]);
     r3 = spu_ai(r1, 32);
     r5 = spu_il(80);
     r4 = spu_rotqby(r18, r82);
     r82 = spu_cwd(r83, 12);
-    r0 = spu_link(0xB684u);
-    SAVE(); f_0D1C0(c); if (c.exit) return; if ((c.ret ^ 0xB684u) & 0x3FFFFu) { bad_return(c, 0xB684u); return; } LOAD();   // brsl $r0, 0xD1C0
+    r0 = spu_link(0xB684u);   // brsl $r0, 0xD1C0
+    g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; g[18] = r18; g[20] = r20; f_0D1C0(c); if (c.exit) { g[1] = r1; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; return; } if ((c.ret ^ 0xB684u) & 0x3FFFFu) { g[1] = r1; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; bad_return(c, 0xB684u); return; } r2 = g[2]; r4 = g[4]; r5 = g[5]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36];
     r62 = lsr(c, r84._u32[0] + 0x140);
     r59 = spu_il(8192);
     r61 = lsr(c, r1._u32[0] + 0x20);
@@ -14268,8 +14076,8 @@ L_0B998:
     r5 = spu_shlqbyi(r52, 0);
     r3 = spu_il(1);
     r7 = spu_il(1);
-    r0 = spu_link(0xB9ACu);
-    SAVE(); f_023B8(c); if (c.exit) return; if ((c.ret ^ 0xB9ACu) & 0x3FFFFu) { bad_return(c, 0xB9ACu); return; } LOAD();   // brsl $r0, 0x23B8
+    r0 = spu_link(0xB9ACu);   // brsl $r0, 0x23B8
+    g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; f_023B8(c); if (c.exit) { g[74] = r74; return; } if ((c.ret ^ 0xB9ACu) & 0x3FFFFu) { g[74] = r74; bad_return(c, 0xB9ACu); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84];
     goto L_0B9AC;
 L_0B9AC:
     COV(650);
@@ -14351,25 +14159,21 @@ L_0BA84:
     r82 = lsr(c, r1._u32[0] + -0x30);
     r83 = lsr(c, r1._u32[0] + -0x40);
     r84 = lsr(c, r1._u32[0] + -0x50);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
+    { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; c.ret = r0._u32[0]; return; }
 L_0BAA8:
     COV(658);
     r2 = spu_ai(r3, -28);
     r3 = spu_ceqi(r3, 0);
     r3 = spu_andc(r2, r3);
     goto L_0B1F0;
-#undef SAVE
-#undef LOAD
 }
 
-// ---- 0x0BAB8 (1 blocks; called from 93F0) ----
+// ---- 0x0BAB8 (1 blocks; called from 93F0; 14 registers, 11 assigned; reaches 14, changes 11) ----
 void f_0BAB8(Run& c)
 {
     u128* const g = c.g;
     Q r0 = g[0], r1 = g[1], r2 = g[2], r3 = g[3], r4 = g[4], r5 = g[5], r6 = g[6], r7 = g[7];
     Q r8 = g[8], r9 = g[9], r10 = g[10], r11 = g[11], r12 = g[12], r13 = g[13];
-#define SAVE() do { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; } while (0)
 L_0BAB8:
     COV(659);
     r8 = spu_ori(r3, 0);
@@ -14387,19 +14191,15 @@ L_0BAB8:
     lsw(c, r8._u32[0] + 0x230, r7);
     r5 = spu_shufb(r5, r2, r10);
     lsw(c, r8._u32[0] + 0x10, r5);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[2] = r2; g[3] = r3; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x0BB00 (2 blocks; called from A844) ----
+// ---- 0x0BB00 (2 blocks; called from A844; 15 registers, 13 assigned; reaches 15, changes 13) ----
 void f_0BB00(Run& c)
 {
     u128* const g = c.g;
     Q r0 = g[0], r1 = g[1], r2 = g[2], r3 = g[3], r4 = g[4], r5 = g[5], r6 = g[6], r7 = g[7];
     Q r8 = g[8], r9 = g[9], r10 = g[10], r11 = g[11], r13 = g[13], r14 = g[14], r15 = g[15];
-#define SAVE() do { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[13] = r13; g[14] = r14; g[15] = r15; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r13 = g[13]; r14 = g[14]; r15 = g[15]; } while (0)
 L_0BB00:
     COV(660);
     r6 = spu_ori(r4, 0);
@@ -14425,12 +14225,11 @@ L_0BB00:
 L_0BB50:
     COV(661);
     r3 = spu_ori(r8, 0);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[13] = r13; g[14] = r14; g[15] = r15; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x0BB58 (17 blocks; called from A068, A4F4, A844, A9B8) ----
+// ---- 0x0BB58 (17 blocks; called from A068, A4F4, A844, A9B8; 43 registers, 41 assigned; reaches 43, changes 41)
+// ----
 void f_0BB58(Run& c)
 {
     u128* const g = c.g;
@@ -14440,8 +14239,6 @@ void f_0BB58(Run& c)
     Q r24 = g[24], r25 = g[25], r26 = g[26], r27 = g[27], r28 = g[28], r29 = g[29], r30 = g[30], r31 = g[31];
     Q r32 = g[32], r33 = g[33], r34 = g[34], r35 = g[35], r36 = g[36], r37 = g[37], r38 = g[38], r39 = g[39];
     Q r40 = g[40], r41 = g[41], r42 = g[42];
-#define SAVE() do { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; } while (0)
 L_0BB58:
     COV(662);
     r2 = spu_clgti(r5, 2);
@@ -14537,7 +14334,7 @@ L_0BC68:
     r2 = lsr(c, r6._u32[0] + 0x150);
     lsw(c, r6._u32[0] + 0x1C0, r4);
     if (r2._u32[0] == 0) goto L_0BCCC;
-    if ((int32_t)r2._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xBC78u); return; }   // heqi
+    if ((int32_t)r2._u32[0] == (int32_t)(0)) { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; halt(c, 0xBC78u); return; }   // heqi
     r10 = spu_clz(r2);
     r7 = spu_clz(r4);
     r8 = spu_il(1);
@@ -14565,7 +14362,7 @@ L_0BCCC:
     if (r3._u32[0] == 0) goto L_0BD38;
     r4 = spu_il(0);
     r42 = lsr(c, r6._u32[0] + 0x1C0);
-    if ((int32_t)r3._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xBCE0u); return; }   // heqi
+    if ((int32_t)r3._u32[0] == (int32_t)(0)) { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[42] = r42; halt(c, 0xBCE0u); return; }   // heqi
     r10 = spu_clz(r3);
     r7 = spu_clz(r42);
     r8 = spu_il(1);
@@ -14598,7 +14395,7 @@ L_0BD40:
 L_0BD44:
     COV(677);
     r3 = spu_ori(r4, 0);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
+    { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; c.ret = r0._u32[0]; return; }
 L_0CAC8:
     COV(734);
     r7 = spu_ori(r3, 0);
@@ -14613,20 +14410,16 @@ L_0CAC8:
     r9 = spu_selb(r10, r5, r4);
     r2 = spu_shufb(r9, r6, r8);
     lsw(c, r7._u32[0] + 0x340, r2);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x0BD50 (3 blocks; called from C21C) ----
+// ---- 0x0BD50 (3 blocks; called from C21C; 19 registers, 17 assigned; reaches 19, changes 17) ----
 void f_0BD50(Run& c)
 {
     u128* const g = c.g;
     Q r0 = g[0], r1 = g[1], r2 = g[2], r3 = g[3], r4 = g[4], r5 = g[5], r6 = g[6], r7 = g[7];
     Q r8 = g[8], r9 = g[9], r10 = g[10], r11 = g[11], r12 = g[12], r13 = g[13], r14 = g[14], r15 = g[15];
     Q r16 = g[16], r17 = g[17], r19 = g[19];
-#define SAVE() do { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[19] = r19; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r19 = g[19]; } while (0)
 L_0BD50:
     COV(678);
     r15 = spu_il(0);
@@ -14636,7 +14429,7 @@ L_0BD50:
     lsw(c, r3._u32[0] + 0x1B0, r15);
     r19 = lsr(c, r3._u32[0] + 0x230);
     r10 = spu_cwd(r1, 4);
-    if ((int32_t)r7._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xBD70u); return; }   // heqi
+    if ((int32_t)r7._u32[0] == (int32_t)(0)) { g[7] = r7; g[10] = r10; g[15] = r15; g[16] = r16; g[19] = r19; halt(c, 0xBD70u); return; }   // heqi
     r14 = spu_clz(r7);
     r11 = spu_clz(r16);
     r12 = spu_il(1);
@@ -14685,12 +14478,10 @@ L_0CAC8:
     r9 = spu_selb(r10, r5, r4);
     r2 = spu_shufb(r9, r6, r8);
     lsw(c, r7._u32[0] + 0x340, r2);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[19] = r19; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x0BE08 (12 blocks; called from C244, C2A0) ----
+// ---- 0x0BE08 (12 blocks; called from C244, C2A0; 78 registers, 78 assigned; reaches 84, changes 84) ----
 void f_0BE08(Run& c)
 {
     u128* const g = c.g;
@@ -14704,8 +14495,6 @@ void f_0BE08(Run& c)
     Q r56 = g[56], r57 = g[57], r58 = g[58], r59 = g[59], r60 = g[60], r61 = g[61], r62 = g[62], r63 = g[63];
     Q r64 = g[64], r65 = g[65], r66 = g[66], r67 = g[67], r68 = g[68], r70 = g[70], r71 = g[71], r72 = g[72];
     Q r73 = g[73], r74 = g[74], r80 = g[80], r81 = g[81], r82 = g[82], r83 = g[83];
-#define SAVE() do { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; } while (0)
 L_0BE08:
     COV(680);
     r2 = spu_ceqbi(r4, 0);
@@ -14721,8 +14510,8 @@ L_0BE08:
     if (r4._u16[0] != 0) goto L_0BE44;
     r3 = lsr(c, r3._u32[0] + 0x230);
     if (r3._u32[0] == 0) goto L_0BE44;
-    r0 = spu_link(0xBE44u);
-    SAVE(); f_0CC18(c); if (c.exit) return; if ((c.ret ^ 0xBE44u) & 0x3FFFFu) { bad_return(c, 0xBE44u); return; } LOAD();   // brsl $r0, 0xCC18
+    r0 = spu_link(0xBE44u);   // brsl $r0, 0xCC18
+    g[0] = r0; g[3] = r3; f_0CC18(c); if (c.exit) { g[1] = r1; g[2] = r2; g[4] = r4; g[80] = r80; return; } if ((c.ret ^ 0xBE44u) & 0x3FFFFu) { g[1] = r1; g[2] = r2; g[4] = r4; g[80] = r80; bad_return(c, 0xBE44u); return; } r3 = g[3];
     goto L_0BE44;
 L_0BE44:
     COV(681);
@@ -14750,8 +14539,8 @@ L_0BE84:
     r6 = spu_ai(r1, 32);
     r16 = spu_shufb(r18, r17, r8);
     lsw(c, r1._u32[0] + 0x20, r16);
-    r0 = spu_link(0xBEA4u);
-    SAVE(); f_0CAC0(c); if (c.exit) return; if ((c.ret ^ 0xBEA4u) & 0x3FFFFu) { bad_return(c, 0xBEA4u); return; } LOAD();   // brsl $r0, 0xCAC0
+    r0 = spu_link(0xBEA4u);   // brsl $r0, 0xCAC0
+    g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; f_0CAC0(c); if (c.exit) { g[41] = r41; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; return; } if ((c.ret ^ 0xBEA4u) & 0x3FFFFu) { g[41] = r41; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; bad_return(c, 0xBEA4u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74];
     r7 = lsr(c, r1._u32[0] + 0x20);
     r83 = spu_ori(r3, 0);
     r4 = spu_ceqi(r3, 22);
@@ -14874,8 +14663,8 @@ L_0C010:
     lsw(c, r80._u32[0] + 0x230, r68);
     if (r68._u32[0] == 0) goto L_0C044;
     r4 = spu_il(0);
-    r0 = spu_link(0xC044u);
-    SAVE(); f_0CC20(c); if (c.exit) return; if ((c.ret ^ 0xC044u) & 0x3FFFFu) { bad_return(c, 0xC044u); return; } LOAD();   // brsl $r0, 0xCC20
+    r0 = spu_link(0xC044u);   // brsl $r0, 0xCC20
+    g[0] = r0; g[3] = r3; f_0CC20(c); if (c.exit) { g[1] = r1; g[2] = r2; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; return; } if ((c.ret ^ 0xC044u) & 0x3FFFFu) { g[1] = r1; g[2] = r2; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; bad_return(c, 0xC044u); return; } r3 = g[3];
     goto L_0C044;
 L_0C044:
     COV(691);
@@ -14886,12 +14675,10 @@ L_0C044:
     r81 = lsr(c, r1._u32[0] + -0x20);
     r82 = lsr(c, r1._u32[0] + -0x30);
     r83 = lsr(c, r1._u32[0] + -0x40);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x0C068 (15 blocks; called from C478) ----
+// ---- 0x0C068 (15 blocks; called from C478; 81 registers, 81 assigned; reaches 84, changes 84) ----
 void f_0C068(Run& c)
 {
     u128* const g = c.g;
@@ -14906,8 +14693,6 @@ void f_0C068(Run& c)
     Q r64 = g[64], r65 = g[65], r66 = g[66], r67 = g[67], r68 = g[68], r69 = g[69], r70 = g[70], r71 = g[71];
     Q r72 = g[72], r73 = g[73], r75 = g[75], r76 = g[76], r77 = g[77], r78 = g[78], r79 = g[79], r80 = g[80];
     Q r81 = g[81];
-#define SAVE() do { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79]; r80 = g[80]; r81 = g[81]; } while (0)
 L_0C068:
     COV(692);
     r6 = lsr(c, r3._u32[0] + 0x1D0);
@@ -14969,7 +14754,7 @@ L_0C124:
     r37 = spu_sf(r39, r38);
     r36 = spu_a(r37, r34);
     r35 = spu_ai(r36, -1);
-    if ((int32_t)r34._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xC140u); return; }   // heqi
+    if ((int32_t)r34._u32[0] == (int32_t)(0)) { g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[80] = r80; halt(c, 0xC140u); return; }   // heqi
     r10 = spu_clz(r34);
     r7 = spu_clz(r35);
     r8 = spu_il(1);
@@ -15042,8 +14827,8 @@ L_0C21C:
     r59 = spu_xsbh(r60);
     if (r59._u16[0] != 0) goto L_0C244;
     r3 = spu_ori(r80, 0);
-    r0 = spu_link(0xC23Cu);
-    SAVE(); f_0BD50(c); if (c.exit) return; if ((c.ret ^ 0xC23Cu) & 0x3FFFFu) { bad_return(c, 0xC23Cu); return; } LOAD();   // brsl $r0, 0xBD50
+    r0 = spu_link(0xC23Cu);   // brsl $r0, 0xBD50
+    g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[19] = r19; f_0BD50(c); if (c.exit) { g[18] = r18; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[80] = r80; return; } if ((c.ret ^ 0xC23Cu) & 0x3FFFFu) { g[18] = r18; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[80] = r80; bad_return(c, 0xC23Cu); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r19 = g[19];
     r7 = spu_ori(r3, 0);
     if (r3._u32[0] != 0) goto L_0C3A8;
     goto L_0C244;
@@ -15051,8 +14836,8 @@ L_0C244:
     COV(701);
     r3 = spu_ori(r80, 0);
     r4 = spu_il(1);
-    r0 = spu_link(0xC250u);
-    SAVE(); f_0BE08(c); if (c.exit) return; if ((c.ret ^ 0xC250u) & 0x3FFFFu) { bad_return(c, 0xC250u); return; } LOAD();   // brsl $r0, 0xBE08
+    r0 = spu_link(0xC250u);   // brsl $r0, 0xBE08
+    g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[80] = r80; f_0BE08(c); if (c.exit) return; if ((c.ret ^ 0xC250u) & 0x3FFFFu) { bad_return(c, 0xC250u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79]; r80 = g[80]; r81 = g[81];
     r72 = spu_ceqi(r3, 0);
     r71 = spu_ceqi(r3, 22);
     r7 = spu_shlqbyi(r3, 0);
@@ -15106,8 +14891,8 @@ L_0C2A0:
     if (r24._u32[0] != 0) goto L_0C3A8;
     r3 = spu_ori(r80, 0);
     r4 = spu_il(1);
-    r0 = spu_link(0xC328u);
-    SAVE(); f_0BE08(c); if (c.exit) return; if ((c.ret ^ 0xC328u) & 0x3FFFFu) { bad_return(c, 0xC328u); return; } LOAD();   // brsl $r0, 0xBE08
+    r0 = spu_link(0xC328u);   // brsl $r0, 0xBE08
+    g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[79] = r79; g[81] = r81; f_0BE08(c); if (c.exit) return; if ((c.ret ^ 0xC328u) & 0x3FFFFu) { bad_return(c, 0xC328u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79]; r80 = g[80]; r81 = g[81];
     r35 = spu_ceqi(r3, 0);
     r7 = spu_shlqbyi(r3, 0);
     r34 = spu_ceqi(r3, 22);
@@ -15154,12 +14939,10 @@ L_0C3A8:
     r1 = spu_ai(r1, 64);
     r80 = lsr(c, r1._u32[0] + -0x10);
     r81 = lsr(c, r1._u32[0] + -0x20);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x0C3C0 (23 blocks; called from A844, A9C8) ----
+// ---- 0x0C3C0 (23 blocks; called from A844, A9C8; 88 registers, 88 assigned; reaches 88, changes 88) ----
 void f_0C3C0(Run& c)
 {
     u128* const g = c.g;
@@ -15174,8 +14957,6 @@ void f_0C3C0(Run& c)
     Q r64 = g[64], r65 = g[65], r66 = g[66], r67 = g[67], r68 = g[68], r69 = g[69], r70 = g[70], r71 = g[71];
     Q r72 = g[72], r73 = g[73], r74 = g[74], r75 = g[75], r76 = g[76], r77 = g[77], r78 = g[78], r79 = g[79];
     Q r80 = g[80], r81 = g[81], r82 = g[82], r83 = g[83], r84 = g[84], r85 = g[85], r86 = g[86], r87 = g[87];
-#define SAVE() do { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; r85 = g[85]; r86 = g[86]; r87 = g[87]; } while (0)
 L_0C3C0:
     COV(707);
     lsw(c, r1._u32[0] + -0x20, r81);
@@ -15229,8 +15010,8 @@ L_0C46C:
     goto L_0C574;
 L_0C478:
     COV(709);
-    r0 = spu_link(0xC47Cu);
-    SAVE(); f_0C068(c); if (c.exit) return; if ((c.ret ^ 0xC47Cu) & 0x3FFFFu) { bad_return(c, 0xC47Cu); return; } LOAD();   // brsl $r0, 0xC068
+    r0 = spu_link(0xC47Cu);   // brsl $r0, 0xC068
+    g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[40] = r40; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; f_0C068(c); if (c.exit) { g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; return; } if ((c.ret ^ 0xC47Cu) & 0x3FFFFu) { g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; bad_return(c, 0xC47Cu); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83];
     r12 = spu_ori(r3, 0);
     r3 = spu_a(r82, r85);
     r9 = spu_ceqi(r12, 22);
@@ -15255,7 +15036,7 @@ L_0C4C0:
     r36 = lsr(c, r81._u32[0] + 0x1A0);
     r39 = lsr(c, r81._u32[0] + 0x170);
     r38 = lsr(c, r81._u32[0] + 0x340);
-    if ((int32_t)r36._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xC4D0u); return; }   // heqi
+    if ((int32_t)r36._u32[0] == (int32_t)(0)) { g[3] = r3; g[9] = r9; g[12] = r12; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[36] = r36; g[38] = r38; g[39] = r39; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; halt(c, 0xC4D0u); return; }   // heqi
     r10 = spu_clz(r36);
     r7 = spu_clz(r39);
     r8 = spu_il(1);
@@ -15281,8 +15062,8 @@ L_0C4F8:
     r80 = spu_selb(r34, r83, r35);
     r5 = spu_ori(r80, 0);
     r85 = spu_a(r85, r80);
-    r0 = spu_link(0xC540u);
-    SAVE(); f_00270(c); if (c.exit) return; if ((c.ret ^ 0xC540u) & 0x3FFFFu) { bad_return(c, 0xC540u); return; } LOAD();   // brsl $r0, 0x270
+    r0 = spu_link(0xC540u);   // brsl $r0, 0x270
+    g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; f_00270(c); if (c.exit) { g[80] = r80; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; return; } if ((c.ret ^ 0xC540u) & 0x3FFFFu) { g[80] = r80; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; bad_return(c, 0xC540u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51];
     r83 = spu_sf(r80, r83);
     r33 = lsr(c, r81._u32[0] + 0x170);
     r30 = lsr(c, r81._u32[0] + 0x180);
@@ -15379,7 +15160,7 @@ L_0C65C:
     goto L_0C670;
 L_0C670:
     COV(721);
-    if ((int32_t)r84._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xC670u); return; }   // heqi
+    if ((int32_t)r84._u32[0] == (int32_t)(0)) { g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; halt(c, 0xC670u); return; }   // heqi
     r7 = spu_clz(r84);
     r4 = spu_clz(r85);
     r5 = spu_il(1);
@@ -15548,12 +15329,10 @@ L_0C8B0:
     r85 = lsr(c, r1._u32[0] + -0x60);
     r86 = lsr(c, r1._u32[0] + -0x70);
     r87 = lsr(c, r1._u32[0] + -0x80);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x0CAC0 (4 blocks; called from BE84) ----
+// ---- 0x0CAC0 (4 blocks; called from BE84; 78 registers, 75 assigned; reaches 78, changes 75) ----
 void f_0CAC0(Run& c)
 {
     u128* const g = c.g;
@@ -15567,8 +15346,6 @@ void f_0CAC0(Run& c)
     Q r58 = g[58], r59 = g[59], r60 = g[60], r61 = g[61], r62 = g[62], r63 = g[63], r64 = g[64], r65 = g[65];
     Q r66 = g[66], r67 = g[67], r68 = g[68], r69 = g[69], r70 = g[70], r71 = g[71], r72 = g[72], r73 = g[73];
     Q r74 = g[74], r75 = g[75], r76 = g[76], r77 = g[77], r78 = g[78], r79 = g[79];
-#define SAVE() do { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79]; } while (0)
     goto L_0CAC0;
 L_0C8E8:
     COV(730);
@@ -15666,7 +15443,7 @@ L_0C9DC:
     r69 = spu_and(r71, r72);
     r67 = spu_and(r69, r70);
     r66 = spu_and(r67, r68);
-    if ((int32_t)r66._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xCA50u); return; }   // heqi
+    if ((int32_t)r66._u32[0] == (int32_t)(0)) { g[2] = r2; g[3] = r3; g[4] = r4; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[63] = r63; g[64] = r64; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; halt(c, 0xCA50u); return; }   // heqi
     r61 = spu_il(1);
     r65 = spu_ori(r12, 0);
     r62 = spu_shlqbyi(r11, 0);
@@ -15692,15 +15469,13 @@ L_0C9DC:
     r51 = lsr(c, r10._u32[0] + 0x0);
     r13 = spu_shufb(r16, r51, r52);
     lsw(c, r10._u32[0] + 0x0, r13);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
+    { g[2] = r2; g[3] = r3; g[4] = r4; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; c.ret = r0._u32[0]; return; }
 L_0CAC0:
     COV(733);
     goto L_0C8E8;
-#undef SAVE
-#undef LOAD
 }
 
-// ---- 0x0CC08 (4 blocks; through a pointer: .ctors[2]) ----
+// ---- 0x0CC08 (4 blocks; through a pointer: .ctors[2]; 30 registers, 29 assigned; reaches 30, changes 29) ----
 void f_0CC08(Run& c)
 {
     u128* const g = c.g;
@@ -15708,8 +15483,6 @@ void f_0CC08(Run& c)
     Q r9 = g[9], r10 = g[10], r11 = g[11], r12 = g[12], r13 = g[13], r14 = g[14], r15 = g[15], r16 = g[16];
     Q r17 = g[17], r18 = g[18], r19 = g[19], r20 = g[20], r21 = g[21], r22 = g[22], r23 = g[23], r24 = g[24];
     Q r25 = g[25], r26 = g[26], r27 = g[27], r28 = g[28], r29 = g[29], r30 = g[30];
-#define SAVE() do { g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; } while (0)
-#define LOAD() do { r0 = g[0]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; } while (0)
     goto L_0CC08;
 L_0CB00:
     COV(735);
@@ -15749,7 +15522,7 @@ L_0CB00:
     r5 = lsr(c, r3._u32[0] + r13._u32[0]);
     r2 = spu_shufb(r4, r5, r7);
     lsw(c, r3._u32[0] + r13._u32[0], r2);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
+    { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; c.ret = r0._u32[0]; return; }
 L_0CB98:
     COV(736);
     r4 = spu_ai(r3, 32);
@@ -15778,56 +15551,44 @@ L_0CBE0:
     r5 = spu_nor(r6, r6);
     r3 = spu_ila(0x10940);
     r4 = spu_or(r2, r5);
-    if (r4._u32[0] != 0) { SAVE(); c.ret = g[0]._u32[0]; return; }
+    if (r4._u32[0] != 0) { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; c.ret = r0._u32[0]; return; }
     goto L_0CB98;
 L_0CC08:
     COV(738);
     r3 = spu_il(1);
     r4 = spu_ila(0xFFFF);
     goto L_0CBE0;
-#undef SAVE
-#undef LOAD
 }
 
-// ---- 0x0CC18 (1 blocks; called from BE08) ----
+// ---- 0x0CC18 (1 blocks; called from BE08; 2 registers, 1 assigned; reaches 2, changes 1) ----
 void f_0CC18(Run& c)
 {
     u128* const g = c.g;
     Q r0 = g[0], r3 = g[3];
-#define SAVE() do { g[0] = r0; g[3] = r3; } while (0)
-#define LOAD() do { r0 = g[0]; r3 = g[3]; } while (0)
 L_0CC18:
     COV(739);
     r3 = spu_il(0);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[3] = r3; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x0CC20 (1 blocks; called from C010) ----
+// ---- 0x0CC20 (1 blocks; called from C010; 2 registers, 1 assigned; reaches 2, changes 1) ----
 void f_0CC20(Run& c)
 {
     u128* const g = c.g;
     Q r0 = g[0], r3 = g[3];
-#define SAVE() do { g[0] = r0; g[3] = r3; } while (0)
-#define LOAD() do { r0 = g[0]; r3 = g[3]; } while (0)
 L_0CC20:
     COV(740);
     r3 = spu_il(0);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[3] = r3; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x0CC28 (3 blocks; called from A984) ----
+// ---- 0x0CC28 (3 blocks; called from A984; 21 registers, 20 assigned; reaches 21, changes 20) ----
 void f_0CC28(Run& c)
 {
     u128* const g = c.g;
     Q r0 = g[0], r2 = g[2], r3 = g[3], r4 = g[4], r5 = g[5], r6 = g[6], r7 = g[7], r8 = g[8];
     Q r9 = g[9], r10 = g[10], r11 = g[11], r12 = g[12], r13 = g[13], r14 = g[14], r15 = g[15], r16 = g[16];
     Q r17 = g[17], r18 = g[18], r19 = g[19], r20 = g[20], r21 = g[21];
-#define SAVE() do { g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; } while (0)
-#define LOAD() do { r0 = g[0]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; } while (0)
 L_0CC28:
     COV(741);
     r8 = spu_ori(r3, 0);
@@ -15867,12 +15628,10 @@ L_0CC94:
     r8 = spu_xshw(r10);
     r7 = spu_xshw(r9);
     r3 = spu_sf(r7, r8);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x0CCB0 (7 blocks; called from 6EB8, 7410, 8038, 83B8) ----
+// ---- 0x0CCB0 (7 blocks; called from 6EB8, 7410, 8038, 83B8; 74 registers, 72 assigned; reaches 74, changes 72) ----
 void f_0CCB0(Run& c)
 {
     u128* const g = c.g;
@@ -15886,12 +15645,10 @@ void f_0CCB0(Run& c)
     Q r56 = g[56], r57 = g[57], r58 = g[58], r59 = g[59], r60 = g[60], r61 = g[61], r62 = g[62], r63 = g[63];
     Q r64 = g[64], r65 = g[65], r66 = g[66], r67 = g[67], r68 = g[68], r69 = g[69], r70 = g[70], r71 = g[71];
     Q r72 = g[72], r73 = g[73];
-#define SAVE() do { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; } while (0)
 L_0CCB0:
     COV(744);
     r11 = spu_ori(r3, 0);
-    if (r3._u32[0] == 0) { SAVE(); c.ret = g[0]._u32[0]; return; }
+    if (r3._u32[0] == 0) { g[11] = r11; c.ret = r0._u32[0]; return; }
     r7 = spu_ceqbi(r4, 0);
     r6 = lsr(c, r3._u32[0] + 0x10);
     r2 = lsr(c, 0x36100);
@@ -15899,7 +15656,7 @@ L_0CCB0:
     r4 = spu_xsbh(r7);
     r3 = spu_shufb(r2, r6, r5);
     lsw(c, r11._u32[0] + 0x10, r3);
-    if (r4._u16[0] == 0) { SAVE(); c.ret = g[0]._u32[0]; return; }
+    if (r4._u16[0] == 0) { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[11] = r11; c.ret = r0._u32[0]; return; }
     r13 = spu_ila(0xCD04);
     r16 = lsr(c, r11._u32[0] + 0xD0);
     r15 = spu_rotqbyi(r16, 4);
@@ -15909,14 +15666,14 @@ L_0CCB0:
     r10 = spu_a(r12, r13);
     r9 = lsr(c, r13._u32[0] + r12._u32[0]);
     r3 = spu_rotqby(r9, r10);
-    if (r8._u32[0] != 0) { SAVE(); c.ret = g[0]._u32[0]; return; }
+    if (r8._u32[0] != 0) { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; c.ret = r0._u32[0]; return; }
     switch (r3._u32[0] & 0x3FFFFu) {   // bi $r3 at 0xCD00: the jump table at 0xCD04
     case 0x0CD20u: goto L_0CD20;
     case 0x0CD38u: goto L_0CD38;
     case 0x0CDA4u: goto L_0CDA4;
     case 0x0CE04u: goto L_0CE04;
     case 0x0CE50u: goto L_0CE50;
-    default: { SAVE(); c.jt = r3._u32[0] & 0x3FFFFu; c.js = 0xCD00u; TAIL jump_to(c); }
+    default: { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; unresolved(c, r3._u32[0] & 0x3FFFFu, 0xCD00u); return; }
     }
 L_0CD20:
     COV(745);
@@ -15925,7 +15682,7 @@ L_0CD20:
     r20 = spu_cwd(r1, 0);
     r17 = spu_shufb(r19, r18, r20);
     lsw(c, r11._u32[0] + 0x210, r17);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
+    { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; c.ret = r0._u32[0]; return; }
 L_0CD38:
     COV(746);
     r40 = lsr(c, r11._u32[0] + 0x700);
@@ -15981,7 +15738,7 @@ L_0CDA4:
 L_0CDFC:
     COV(748);
     lsw(c, r11._u32[0] + 0x210, r4);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
+    { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; c.ret = r0._u32[0]; return; }
 L_0CE04:
     COV(749);
     r73 = lsr(c, r11._u32[0] + 0x700);
@@ -16005,12 +15762,10 @@ L_0CE04:
     goto L_0CE50;
 L_0CE50:
     COV(750);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x0CE58 (4 blocks; called from 66E0) ----
+// ---- 0x0CE58 (4 blocks; called from 66E0; 25 registers, 24 assigned; reaches 25, changes 24) ----
 void f_0CE58(Run& c)
 {
     u128* const g = c.g;
@@ -16018,8 +15773,6 @@ void f_0CE58(Run& c)
     Q r10 = g[10], r11 = g[11], r12 = g[12], r13 = g[13], r14 = g[14], r15 = g[15], r16 = g[16], r17 = g[17];
     Q r18 = g[18], r19 = g[19], r20 = g[20], r21 = g[21], r22 = g[22], r23 = g[23], r24 = g[24], r25 = g[25];
     Q r26 = g[26];
-#define SAVE() do { g[0] = r0; g[2] = r2; g[3] = r3; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; } while (0)
-#define LOAD() do { r0 = g[0]; r2 = g[2]; r3 = g[3]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; } while (0)
 L_0CE58:
     COV(751);
     r5 = spu_ori(r3, 0);
@@ -16075,12 +15828,10 @@ L_0CF04:
     r5 = spu_ai(r5, 4);
     r26 = spu_ceqi(r11, 8);
     if (r26._u32[0] == 0) goto L_0CE80;
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[2] = r2; g[3] = r3; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x0CF18 (4 blocks; called from 6EA0) ----
+// ---- 0x0CF18 (4 blocks; called from 6EA0; 25 registers, 24 assigned; reaches 25, changes 24) ----
 void f_0CF18(Run& c)
 {
     u128* const g = c.g;
@@ -16088,8 +15839,6 @@ void f_0CF18(Run& c)
     Q r10 = g[10], r11 = g[11], r12 = g[12], r13 = g[13], r14 = g[14], r15 = g[15], r16 = g[16], r17 = g[17];
     Q r18 = g[18], r19 = g[19], r20 = g[20], r21 = g[21], r22 = g[22], r23 = g[23], r24 = g[24], r25 = g[25];
     Q r26 = g[26];
-#define SAVE() do { g[0] = r0; g[2] = r2; g[3] = r3; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; } while (0)
-#define LOAD() do { r0 = g[0]; r2 = g[2]; r3 = g[3]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; } while (0)
 L_0CF18:
     COV(755);
     r5 = spu_ori(r3, 0);
@@ -16145,18 +15894,14 @@ L_0CFC4:
     r5 = spu_ai(r5, 4);
     r26 = spu_ceqi(r12, 8);
     if (r26._u32[0] == 0) goto L_0CF40;
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[2] = r2; g[3] = r3; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x0CFD8 (2 blocks; called from E380) ----
+// ---- 0x0CFD8 (2 blocks; called from E380; 6 registers, 5 assigned; reaches 6, changes 5) ----
 void f_0CFD8(Run& c)
 {
     u128* const g = c.g;
     Q r0 = g[0], r2 = g[2], r3 = g[3], r4 = g[4], r5 = g[5], r6 = g[6];
-#define SAVE() do { g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; } while (0)
-#define LOAD() do { r0 = g[0]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; } while (0)
 L_0CFD8:
     COV(759);
     r5 = spu_shli(r3, 10);
@@ -16170,16 +15915,15 @@ L_0CFD8:
     r4 = spu_a(r4, r2);
     if (r3._u32[0] == 0) goto L_0D00C;
     lsw(c, 0x35ED0, r6);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
+    { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; c.ret = r0._u32[0]; return; }
 L_0D00C:
     COV(760);
     lsw(c, 0x35ED0, r4);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x0D068 (6 blocks; through a pointer: .ctors[3] (run first)) ----
+// ---- 0x0D068 (6 blocks; through a pointer: .ctors[3] (run first); 54 registers, 54 assigned; reaches 54, changes
+// 54) ----
 void f_0D068(Run& c)
 {
     u128* const g = c.g;
@@ -16190,8 +15934,6 @@ void f_0D068(Run& c)
     Q r32 = g[32], r33 = g[33], r34 = g[34], r35 = g[35], r36 = g[36], r37 = g[37], r38 = g[38], r39 = g[39];
     Q r40 = g[40], r41 = g[41], r42 = g[42], r43 = g[43], r44 = g[44], r45 = g[45], r46 = g[46], r47 = g[47];
     Q r48 = g[48], r49 = g[49], r50 = g[50], r51 = g[51], r52 = g[52], r80 = g[80];
-#define SAVE() do { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[80] = r80; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r80 = g[80]; } while (0)
     goto L_0D068;
 L_00618:
     COV(64);
@@ -16200,8 +15942,8 @@ L_00618:
     lsw(c, r1._u32[0] + 0x10, r0);
     lsw(c, r1._u32[0] + -0x30, r1);
     r1 = spu_ai(r1, -48);
-    r0 = spu_link(0x630u);
-    SAVE(); f_001C8(c); if (c.exit) return; if ((c.ret ^ 0x630u) & 0x3FFFFu) { bad_return(c, 0x630u); return; } LOAD();   // brsl $r0, 0x1C8
+    r0 = spu_link(0x630u);   // brsl $r0, 0x1C8
+    g[0] = r0; g[1] = r1; g[3] = r3; g[80] = r80; f_001C8(c); if (c.exit) return; if ((c.ret ^ 0x630u) & 0x3FFFFu) { bad_return(c, 0x630u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r80 = g[80];
     r47 = spu_il(132);
     r51 = lsr(c, r80._u32[0] + 0x0);
     r52 = spu_ila(0x103E8);
@@ -16276,7 +16018,7 @@ L_00720:
     r0 = lsr(c, r1._u32[0] + 0x40);
     r1 = spu_ai(r1, 48);
     r80 = lsr(c, r1._u32[0] + -0x10);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
+    { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[80] = r80; c.ret = r0._u32[0]; return; }
 L_0D018:
     COV(761);
     r7 = spu_ila(0xFFFF);
@@ -16290,8 +16032,8 @@ L_0D018:
     r4 = spu_or(r2, r5);
     r3 = spu_ila(0x35EE0);
     if (r4._u32[0] != 0) goto L_0D05C;
-    r0 = spu_link(0xD04Cu);
-    SAVE(); f_00750(c); if (c.exit) return; if ((c.ret ^ 0xD04Cu) & 0x3FFFFu) { bad_return(c, 0xD04Cu); return; } LOAD();   // brsl $r0, 0x750
+    r0 = spu_link(0xD04Cu);   // brsl $r0, 0x750
+    g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; f_00750(c); if (c.exit) return; if ((c.ret ^ 0xD04Cu) & 0x3FFFFu) { bad_return(c, 0xD04Cu); return; } r2 = g[2]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19];
     r0 = lsr(c, r1._u32[0] + 0x30);
     r3 = spu_ila(0x35F10);
     r1 = spu_ai(r1, 32);
@@ -16300,25 +16042,21 @@ L_0D05C:
     COV(762);
     r0 = lsr(c, r1._u32[0] + 0x30);
     r1 = spu_ai(r1, 32);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
+    { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; c.ret = r0._u32[0]; return; }
 L_0D068:
     COV(763);
     r3 = spu_il(1);
     r4 = spu_ila(0xFFFF);
     goto L_0D018;
-#undef SAVE
-#undef LOAD
 }
 
-// ---- 0x0D078 (1 blocks; called from 5AC8, 61C0, 6EB8, 7410) ----
+// ---- 0x0D078 (1 blocks; called from 5AC8, 61C0, 6EB8, 7410; 20 registers, 18 assigned; reaches 20, changes 18) ----
 void f_0D078(Run& c)
 {
     u128* const g = c.g;
     Q r0 = g[0], r2 = g[2], r3 = g[3], r4 = g[4], r5 = g[5], r6 = g[6], r7 = g[7], r8 = g[8];
     Q r9 = g[9], r11 = g[11], r12 = g[12], r13 = g[13], r14 = g[14], r15 = g[15], r16 = g[16], r17 = g[17];
     Q r18 = g[18], r19 = g[19], r20 = g[20], r21 = g[21];
-#define SAVE() do { g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; } while (0)
-#define LOAD() do { r0 = g[0]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; } while (0)
 L_0D078:
     COV(764);
     r14 = spu_ilhu(0x4447);
@@ -16341,18 +16079,14 @@ L_0D078:
     r2 = spu_ah(r11, r3);
     r6 = spu_shufb(r2, r16, r9);
     lsw(c, r4._u32[0] + 0x0, r6);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[2] = r2; g[3] = r3; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x0D0D0 (1 blocks; called from 5A40, 5F38, 66E0) ----
+// ---- 0x0D0D0 (1 blocks; called from 5A40, 5F38, 66E0; 6 registers, 4 assigned; reaches 6, changes 4) ----
 void f_0D0D0(Run& c)
 {
     u128* const g = c.g;
     Q r0 = g[0], r2 = g[2], r3 = g[3], r4 = g[4], r5 = g[5], r6 = g[6];
-#define SAVE() do { g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; } while (0)
-#define LOAD() do { r0 = g[0]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; } while (0)
 L_0D0D0:
     COV(765);
     r6 = lsr(c, r3._u32[0] + 0x0);
@@ -16360,12 +16094,10 @@ L_0D0D0:
     r5 = spu_cwd(r3, 0);
     r2 = spu_shufb(r4, r6, r5);
     lsw(c, r3._u32[0] + 0x0, r2);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[2] = r2; g[4] = r4; g[5] = r5; g[6] = r6; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x0D0E8 (4 blocks; called from A720, AA94) ----
+// ---- 0x0D0E8 (4 blocks; called from A720, AA94; 26 registers, 25 assigned; reaches 26, changes 25) ----
 void f_0D0E8(Run& c)
 {
     u128* const g = c.g;
@@ -16373,8 +16105,6 @@ void f_0D0E8(Run& c)
     Q r9 = g[9], r10 = g[10], r11 = g[11], r12 = g[12], r13 = g[13], r14 = g[14], r15 = g[15], r16 = g[16];
     Q r17 = g[17], r18 = g[18], r19 = g[19], r20 = g[20], r21 = g[21], r22 = g[22], r23 = g[23], r24 = g[24];
     Q r25 = g[25], r26 = g[26];
-#define SAVE() do { g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; } while (0)
-#define LOAD() do { r0 = g[0]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; } while (0)
 L_0D0E8:
     COV(766);
     r3 = spu_ceqbi(r3, 0);
@@ -16393,7 +16123,7 @@ L_0D0E8:
     r9 = spu_sfi(r11, 0);
     r10 = spu_sfi(r12, 0);
     r8 = spu_and(r9, r10);
-    if ((int32_t)r8._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xD12Cu); return; }   // heqi
+    if ((int32_t)r8._u32[0] == (int32_t)(0)) { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; halt(c, 0xD12Cu); return; }   // heqi
     r6 = spu_il(0);
     r7 = spu_ori(r5, 0);
     r5 = spu_il(16384);
@@ -16414,7 +16144,7 @@ L_0D15C:
     r20 = spu_sfi(r22, 0);
     r21 = spu_sfi(r23, 0);
     r19 = spu_and(r20, r21);
-    if ((int32_t)r19._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xD178u); return; }   // heqi
+    if ((int32_t)r19._u32[0] == (int32_t)(0)) { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; halt(c, 0xD178u); return; }   // heqi
     r17 = spu_il(0);
     r18 = spu_ori(r5, 0);
     r16 = spu_il(16384);
@@ -16436,12 +16166,11 @@ L_0D1A8:
     wrch(c, MFC_WrTagMask, r26);
     wrch(c, MFC_WrTagUpdate, r26);
     r2 = rdch(c, MFC_RdTagStat);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x0D1C0 (1 blocks; called from 91F0, 92B8, 93B8, B1F0, B610) ----
+// ---- 0x0D1C0 (1 blocks; called from 91F0, 92B8, 93B8, B1F0, B610; 35 registers, 33 assigned; reaches 35, changes
+// 33) ----
 void f_0D1C0(Run& c)
 {
     u128* const g = c.g;
@@ -16450,8 +16179,6 @@ void f_0D1C0(Run& c)
     Q r18 = g[18], r19 = g[19], r20 = g[20], r21 = g[21], r22 = g[22], r23 = g[23], r24 = g[24], r25 = g[25];
     Q r26 = g[26], r27 = g[27], r28 = g[28], r29 = g[29], r30 = g[30], r31 = g[31], r32 = g[32], r33 = g[33];
     Q r34 = g[34], r35 = g[35], r36 = g[36];
-#define SAVE() do { g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; } while (0)
-#define LOAD() do { r0 = g[0]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; } while (0)
 L_0D1C0:
     COV(770);
     r9 = spu_andi(r4, 15);
@@ -16478,7 +16205,7 @@ L_0D1C0:
     r18 = spu_and(r21, r22);
     r19 = spu_sfi(r20, 0);
     r17 = spu_and(r18, r19);
-    if ((int32_t)r17._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xD224u); return; }   // heqi
+    if ((int32_t)r17._u32[0] == (int32_t)(0)) { g[9] = r9; g[13] = r13; g[14] = r14; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; halt(c, 0xD224u); return; }   // heqi
     r15 = spu_il(0);
     wrch(c, MFC_LSA, r16);
     r12 = spu_il(1);
@@ -16498,13 +16225,11 @@ L_0D1C0:
     r2 = spu_a(r7, r9);
     r4 = spu_shufb(r2, r8, r5);
     lsw(c, r3._u32[0] + 0x0, r4);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[2] = r2; g[4] = r4; g[5] = r5; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; c.ret = r0._u32[0]; return; }
 }
 
 // ---- 0x0D278 the plugin loader: a jump table on unit[0xD4] (0 = a DSP: 0xD8E4) (13 blocks; called from 4D0, 5DCC,
-// 6018, 6534, 6EB8, 81F8, 84A4) ----
+// 6018, 6534, 6EB8, 81F8, 84A4; 83 registers, 83 assigned; reaches all, changes all) ----
 void f_0D278(Run& c)
 {
     u128* const g = c.g;
@@ -16519,8 +16244,6 @@ void f_0D278(Run& c)
     Q r64 = g[64], r65 = g[65], r66 = g[66], r67 = g[67], r68 = g[68], r69 = g[69], r70 = g[70], r71 = g[71];
     Q r72 = g[72], r73 = g[73], r74 = g[74], r75 = g[75], r76 = g[76], r77 = g[77], r78 = g[78], r79 = g[79];
     Q r80 = g[80], r81 = g[81], r82 = g[82];
-#define SAVE() do { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79]; r80 = g[80]; r81 = g[81]; r82 = g[82]; } while (0)
 L_0D278:
     COV(771);
     lsw(c, r1._u32[0] + -0x20, r81);
@@ -16563,7 +16286,7 @@ L_0D2B0:
     case 0x0D57Cu: goto L_0D57C;
     case 0x0D8E4u: goto L_0D8E4;
     case 0x0DA14u: goto L_0DA14;
-    default: { SAVE(); c.jt = r3._u32[0] & 0x3FFFFu; c.js = 0xD2F8u; TAIL jump_to(c); }
+    default: { g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[81] = r81; unresolved(c, r3._u32[0] & 0x3FFFFu, 0xD2F8u); return; }
     }
 L_0D320:
     COV(773);
@@ -16583,7 +16306,7 @@ L_0D320:
     r30 = spu_ceqi(r31, 0);
     r28 = spu_sfi(r30, 0);
     r27 = spu_and(r28, r29);
-    if ((int32_t)r27._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xD364u); return; }   // heqi
+    if ((int32_t)r27._u32[0] == (int32_t)(0)) { g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[19] = r19; g[24] = r24; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[81] = r81; halt(c, 0xD364u); return; }   // heqi
     r25 = spu_il(0);
     r26 = spu_ori(r19, 0);
     r22 = spu_il(64);
@@ -16700,7 +16423,7 @@ L_0D3B0:
     r51 = spu_ceqi(r52, 0);
     r49 = spu_sfi(r51, 0);
     r48 = spu_and(r49, r50);
-    if ((int32_t)r48._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xD530u); return; }   // heqi
+    if ((int32_t)r48._u32[0] == (int32_t)(0)) { g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; halt(c, 0xD530u); return; }   // heqi
     r46 = spu_il(0);
     r47 = spu_ori(r40, 0);
     r43 = spu_il(64);
@@ -16736,7 +16459,7 @@ L_0D57C:
     r16 = spu_ceqi(r18, 0);
     r14 = spu_sfi(r16, 0);
     r15 = spu_and(r14, r17);
-    if ((int32_t)r15._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xD5B0u); return; }   // heqi
+    if ((int32_t)r15._u32[0] == (int32_t)(0)) { g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[23] = r23; g[24] = r24; g[81] = r81; halt(c, 0xD5B0u); return; }   // heqi
     r8 = spu_il(0);
     r13 = spu_ori(r12, 0);
     r82 = spu_il(64);
@@ -16768,13 +16491,13 @@ L_0D57C:
     r72 = spu_ceqi(r73, 0);
     r70 = spu_sfi(r72, 0);
     r69 = spu_and(r70, r71);
-    if ((int32_t)r69._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xD630u); return; }   // heqi
+    if ((int32_t)r69._u32[0] == (int32_t)(0)) { g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[23] = r23; g[24] = r24; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; halt(c, 0xD630u); return; }   // heqi
     r6 = spu_il(1);
     r7 = spu_il(64);
     r68 = lsr(c, r81._u32[0] + 0x140);
     r5 = spu_rotqbyi(r68, 4);
-    r0 = spu_link(0xD648u);
-    SAVE(); f_0E5C8(c); if (c.exit) return; if ((c.ret ^ 0xD648u) & 0x3FFFFu) { bad_return(c, 0xD648u); return; } LOAD();   // brsl $r0, 0xE5C8
+    r0 = spu_link(0xD648u);   // brsl $r0, 0xE5C8
+    g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[23] = r23; g[24] = r24; f_0E5C8(c); if (c.exit) { g[1] = r1; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; return; } if ((c.ret ^ 0xD648u) & 0x3FFFFu) { g[1] = r1; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; bad_return(c, 0xD648u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32];
     wrch(c, MFC_WrTagMask, r80);
     wrch(c, MFC_WrTagUpdate, r80);
     r2 = rdch(c, MFC_RdTagStat);
@@ -16789,8 +16512,8 @@ L_0D57C:
     r59 = spu_a(r63, r64);
     r5 = spu_shlqbyi(r61, 0);
     r3 = spu_sf(r60, r59);
-    r0 = spu_link(0xD688u);
-    SAVE(); f_02640(c); if (c.exit) return; if ((c.ret ^ 0xD688u) & 0x3FFFFu) { bad_return(c, 0xD688u); return; } LOAD();   // brsl $r0, 0x2640
+    r0 = spu_link(0xD688u);   // brsl $r0, 0x2640
+    g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; f_02640(c); if (c.exit) { g[1] = r1; g[59] = r59; g[60] = r60; g[61] = r61; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; return; } if ((c.ret ^ 0xD688u) & 0x3FFFFu) { g[1] = r1; g[59] = r59; g[60] = r60; g[61] = r61; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; bad_return(c, 0xD688u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17];
     r56 = lsr(c, r81._u32[0] + 0x140);
     r58 = lsr(c, r81._u32[0] + 0xD0);
     r57 = lsr(c, 0x35EA0);
@@ -16798,7 +16521,7 @@ L_0D57C:
     r54 = spu_a(r57, r58);
     r52 = spu_a(r54, r56);
     r51 = spu_sf(r53, r52);
-    { const uint32_t t = r51._u32[0]; r0 = spu_link(0xD6A8u); SAVE(); if (!branch(c, t & 0x3FFFFu, 0xD6A4u, true)) return; if ((c.ret ^ 0xD6A8u) & 0x3FFFFu) { bad_return(c, 0xD6A8u); return; } LOAD(); }   // bisl $r0, $r51
+    { const uint32_t t = r51._u32[0]; r0 = spu_link(0xD6A8u); g[0] = r0; g[1] = r1; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; if (!branch(c, t & 0x3FFFFu, 0xD6A4u, true)) return; if ((c.ret ^ 0xD6A8u) & 0x3FFFFu) { bad_return(c, 0xD6A8u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79]; r80 = g[80]; r81 = g[81]; r82 = g[82]; }   // bisl $r0, $r51
     r23 = spu_ila(0x9F68);
     r47 = spu_ai(r3, 24);
     r50 = lsr(c, r81._u32[0] + 0xD0);
@@ -16966,13 +16689,13 @@ L_0D8E4:
     r44 = spu_sfi(r47, 0);
     r45 = spu_sfi(r41, 0);
     r24 = spu_and(r44, r45);
-    if ((int32_t)r24._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xD934u); return; }   // heqi
+    if ((int32_t)r24._u32[0] == (int32_t)(0)) { g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[21] = r21; g[22] = r22; g[24] = r24; g[41] = r41; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[81] = r81; halt(c, 0xD934u); return; }   // heqi
     r6 = spu_il(1);
     r23 = lsr(c, r81._u32[0] + 0x140);
     r7 = spu_il(64);
     r5 = spu_rotqbyi(r23, 4);
-    r0 = spu_link(0xD94Cu);
-    SAVE(); f_0E5C8(c); if (c.exit) return; if ((c.ret ^ 0xD94Cu) & 0x3FFFFu) { bad_return(c, 0xD94Cu); return; } LOAD();   // brsl $r0, 0xE5C8
+    r0 = spu_link(0xD94Cu);   // brsl $r0, 0xE5C8
+    g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; f_0E5C8(c); if (c.exit) { g[1] = r1; g[41] = r41; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[81] = r81; return; } if ((c.ret ^ 0xD94Cu) & 0x3FFFFu) { g[1] = r1; g[41] = r41; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[81] = r81; bad_return(c, 0xD94Cu); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32];
     r19 = spu_il(2);
     wrch(c, MFC_WrTagMask, r19);
     wrch(c, MFC_WrTagUpdate, r19);
@@ -16991,8 +16714,8 @@ L_0D8E4:
     r4 = spu_rotqbyi(r4, 4);
     r61 = spu_a(r62, r63);
     r3 = spu_a(r61, r6);
-    r0 = spu_link(0xD99Cu);
-    SAVE(); f_02640(c); if (c.exit) return; if ((c.ret ^ 0xD99Cu) & 0x3FFFFu) { bad_return(c, 0xD99Cu); return; } LOAD();   // brsl $r0, 0x2640
+    r0 = spu_link(0xD99Cu);   // brsl $r0, 0x2640
+    g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; f_02640(c); if (c.exit) { g[1] = r1; g[19] = r19; g[41] = r41; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[81] = r81; return; } if ((c.ret ^ 0xD99Cu) & 0x3FFFFu) { g[1] = r1; g[19] = r19; g[41] = r41; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[81] = r81; bad_return(c, 0xD99Cu); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17];
     goto L_0D99C;
 L_0D99C:
     COV(780);
@@ -17009,7 +16732,7 @@ L_0D99C:
     r75 = spu_a(r5, r6);
     r74 = spu_a(r75, r80);
     r73 = spu_sf(r7, r74);
-    { const uint32_t t = r73._u32[0]; r0 = spu_link(0xD9D8u); SAVE(); if (!branch(c, t & 0x3FFFFu, 0xD9D4u, true)) return; if ((c.ret ^ 0xD9D8u) & 0x3FFFFu) { bad_return(c, 0xD9D8u); return; } LOAD(); }   // bisl $r0, $r73
+    { const uint32_t t = r73._u32[0]; r0 = spu_link(0xD9D8u); g[0] = r0; g[1] = r1; g[2] = r2; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[19] = r19; g[41] = r41; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[73] = r73; g[74] = r74; g[75] = r75; g[80] = r80; g[81] = r81; if (!branch(c, t & 0x3FFFFu, 0xD9D4u, true)) return; if ((c.ret ^ 0xD9D8u) & 0x3FFFFu) { bad_return(c, 0xD9D8u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79]; r80 = g[80]; r81 = g[81]; r82 = g[82]; }   // bisl $r0, $r73
     r69 = lsr(c, r81._u32[0] + 0x90);
     r72 = spu_ai(r3, 52);
     r70 = spu_cwd(r1, 4);
@@ -17038,13 +16761,11 @@ L_0DA14:
     r80 = lsr(c, r1._u32[0] + -0x10);
     r81 = lsr(c, r1._u32[0] + -0x20);
     r82 = lsr(c, r1._u32[0] + -0x30);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; c.ret = r0._u32[0]; return; }
 }
 
 // ---- 0x0DA30 the block (the ring path): one 256-sample block mixed and PUT into the ring [H] (3 blocks; called from
-// E430, E4BC) ----
+// E430, E4BC; 67 registers, 67 assigned; reaches all, changes all) ----
 void f_0DA30(Run& c)
 {
     u128* const g = c.g;
@@ -17057,8 +16778,6 @@ void f_0DA30(Run& c)
     Q r49 = g[49], r50 = g[50], r51 = g[51], r52 = g[52], r53 = g[53], r54 = g[54], r55 = g[55], r56 = g[56];
     Q r57 = g[57], r58 = g[58], r59 = g[59], r60 = g[60], r61 = g[61], r80 = g[80], r81 = g[81], r82 = g[82];
     Q r83 = g[83], r84 = g[84], r85 = g[85];
-#define SAVE() do { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; r85 = g[85]; } while (0)
 L_0DA30:
     COV(784);
     r25 = spu_rotqmbyi(r5, -4);
@@ -17079,7 +16798,7 @@ L_0DA30:
     lsw(c, r1._u32[0] + -0x90, r1);
     r27 = spu_sfi(r28, 0);
     r1 = spu_ai(r1, -144);
-    if ((int32_t)r27._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xDA7Cu); return; }   // heqi
+    if ((int32_t)r27._u32[0] == (int32_t)(0)) { g[1] = r1; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[81] = r81; g[82] = r82; g[84] = r84; g[85] = r85; halt(c, 0xDA7Cu); return; }   // heqi
     r5 = spu_il(4);
     r80 = spu_andi(r26, 15);
     r24 = spu_ai(r1, 32);
@@ -17088,8 +16807,8 @@ L_0DA30:
     r83 = spu_rotqmbyi(r81, -4);
     r3 = spu_a(r24, r80);
     r7 = spu_il(64);
-    r0 = spu_link(0xDAA4u);
-    SAVE(); f_0E680(c); if (c.exit) return; if ((c.ret ^ 0xDAA4u) & 0x3FFFFu) { bad_return(c, 0xDAA4u); return; } LOAD();   // brsl $r0, 0xE680
+    r0 = spu_link(0xDAA4u);   // brsl $r0, 0xE680
+    g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; f_0E680(c); if (c.exit) { g[1] = r1; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; return; } if ((c.ret ^ 0xDAA4u) & 0x3FFFFu) { g[1] = r1; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; bad_return(c, 0xDAA4u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r8 = g[8]; r9 = g[9]; r10 = g[10];
     r17 = spu_ai(r1, 32);
     r18 = spu_shlqbyi(r83, 4);
     r23 = lsr(c, r17._u32[0] + r80._u32[0]);
@@ -17098,15 +16817,15 @@ L_0DA30:
     r22 = spu_rotqby(r23, r80);
     r19 = spu_sfi(r20, 0);
     r80 = spu_ori(r22, 0);
-    if ((int32_t)r19._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xDAC8u); return; }   // heqi
+    if ((int32_t)r19._u32[0] == (int32_t)(0)) { g[1] = r1; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; halt(c, 0xDAC8u); return; }   // heqi
     r6 = spu_il(1);
     r81 = spu_andi(r18, 15);
     r4 = spu_shlqbyi(r83, 0);
     r7 = spu_il(64);
     r3 = spu_a(r17, r81);
     r5 = spu_il(8);
-    r0 = spu_link(0xDAE8u);
-    SAVE(); f_0E680(c); if (c.exit) return; if ((c.ret ^ 0xDAE8u) & 0x3FFFFu) { bad_return(c, 0xDAE8u); return; } LOAD();   // brsl $r0, 0xE680
+    r0 = spu_link(0xDAE8u);   // brsl $r0, 0xE680
+    g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; f_0E680(c); if (c.exit) { g[1] = r1; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; return; } if ((c.ret ^ 0xDAE8u) & 0x3FFFFu) { g[1] = r1; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; bad_return(c, 0xDAE8u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r8 = g[8]; r9 = g[9]; r10 = g[10];
     r15 = spu_ai(r1, 32);
     r4 = spu_il(0);
     r11 = lsr(c, 0x35F00);
@@ -17117,13 +16836,13 @@ L_0DA30:
     r12 = spu_rotqby(r14, r81);
     r10 = spu_shufb(r12, r11, r13);
     lsw(c, 0x35F00, r10);
-    r0 = spu_link(0xDB18u);
-    SAVE(); f_02640(c); if (c.exit) return; if ((c.ret ^ 0xDB18u) & 0x3FFFFu) { bad_return(c, 0xDB18u); return; } LOAD();   // brsl $r0, 0x2640
+    r0 = spu_link(0xDB18u);   // brsl $r0, 0x2640
+    g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[17] = r17; f_02640(c); if (c.exit) { g[1] = r1; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; return; } if ((c.ret ^ 0xDB18u) & 0x3FFFFu) { g[1] = r1; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; bad_return(c, 0xDB18u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r17 = g[17];
     r4 = spu_il(0);
     r5 = lsr(c, 0x107E0);
     r3 = lsr(c, 0x35EC0);
-    r0 = spu_link(0xDB28u);
-    SAVE(); f_02640(c); if (c.exit) return; if ((c.ret ^ 0xDB28u) & 0x3FFFFu) { bad_return(c, 0xDB28u); return; } LOAD();   // brsl $r0, 0x2640
+    r0 = spu_link(0xDB28u);   // brsl $r0, 0x2640
+    g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; f_02640(c); if (c.exit) { g[1] = r1; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; return; } if ((c.ret ^ 0xDB28u) & 0x3FFFFu) { g[1] = r1; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; bad_return(c, 0xDB28u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r17 = g[17];
     r5 = spu_il(0);
     r4 = lsr(c, 0x35ED0);
     r3 = spu_ila(0x35F10);
@@ -17131,8 +16850,8 @@ L_0DA30:
     lsw(c, 0x10920, r5);
     r5 = spu_il(256);
     lsw(c, 0x10930, r9);
-    r0 = spu_link(0xDB48u);
-    SAVE(); f_003D0(c); if (c.exit) return; if ((c.ret ^ 0xDB48u) & 0x3FFFFu) { bad_return(c, 0xDB48u); return; } LOAD();   // brsl $r0, 0x3D0
+    r0 = spu_link(0xDB48u);   // brsl $r0, 0x3D0
+    g[0] = r0; g[1] = r1; g[3] = r3; g[4] = r4; g[5] = r5; g[9] = r9; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; f_003D0(c); if (c.exit) return; if ((c.ret ^ 0xDB48u) & 0x3FFFFu) { bad_return(c, 0xDB48u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; r85 = g[85];
     r8 = spu_ceqi(r82, 6);
     r5 = lsr(c, 0x35ED0);
     r7 = spu_ceqi(r82, 2);
@@ -17151,7 +16870,7 @@ L_0DA30:
     r40 = spu_ceqi(r41, 0);
     r38 = spu_sfi(r40, 0);
     r37 = spu_and(r38, r39);
-    if ((int32_t)r37._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xDB94u); return; }   // heqi
+    if ((int32_t)r37._u32[0] == (int32_t)(0)) { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[34] = r34; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[82] = r82; halt(c, 0xDB94u); return; }   // heqi
     r35 = spu_il(0);
     r4 = spu_fsmbi(0x0);
     r36 = spu_ori(r5, 0);
@@ -17170,8 +16889,8 @@ L_0DA30:
     wrch(c, MFC_WrTagMask, r30);
     wrch(c, MFC_WrTagUpdate, r30);
     r2 = rdch(c, MFC_RdTagStat);
-    r0 = spu_link(0xDBE4u);
-    SAVE(); f_102F8(c); if (c.exit) return; if ((c.ret ^ 0xDBE4u) & 0x3FFFFu) { bad_return(c, 0xDBE4u); return; } LOAD();   // brsl $r0, 0x102F8
+    r0 = spu_link(0xDBE4u);   // brsl $r0, 0x102F8
+    g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; f_102F8(c); if (c.exit) { g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[82] = r82; return; } if ((c.ret ^ 0xDBE4u) & 0x3FFFFu) { g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[82] = r82; bad_return(c, 0xDBE4u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10];
     goto L_0DC54;
 L_0DBE8:
     COV(785);
@@ -17186,7 +16905,7 @@ L_0DBE8:
     r55 = spu_ceqi(r56, 0);
     r53 = spu_sfi(r55, 0);
     r52 = spu_and(r53, r54);
-    if ((int32_t)r52._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xDC14u); return; }   // heqi
+    if ((int32_t)r52._u32[0] == (int32_t)(0)) { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[49] = r49; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[82] = r82; halt(c, 0xDC14u); return; }   // heqi
     r50 = spu_il(0);
     r51 = spu_ori(r5, 0);
     r48 = spu_il(8192);
@@ -17213,20 +16932,16 @@ L_0DC54:
     r83 = lsr(c, r1._u32[0] + -0x40);
     r84 = lsr(c, r1._u32[0] + -0x50);
     r85 = lsr(c, r1._u32[0] + -0x60);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x0DC78 (1 blocks; called from DD18) ----
+// ---- 0x0DC78 (1 blocks; called from DD18; 23 registers, 23 assigned; reaches 28, changes 28) ----
 void f_0DC78(Run& c)
 {
     u128* const g = c.g;
     Q r0 = g[0], r1 = g[1], r2 = g[2], r3 = g[3], r4 = g[4], r5 = g[5], r6 = g[6], r7 = g[7];
     Q r8 = g[8], r9 = g[9], r10 = g[10], r11 = g[11], r12 = g[12], r13 = g[13], r14 = g[14], r15 = g[15];
     Q r16 = g[16], r17 = g[17], r18 = g[18], r19 = g[19], r20 = g[20], r80 = g[80], r81 = g[81];
-#define SAVE() do { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[80] = r80; g[81] = r81; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r80 = g[80]; r81 = g[81]; } while (0)
 L_0DC78:
     COV(787);
     lsw(c, r1._u32[0] + -0x10, r80);
@@ -17235,16 +16950,16 @@ L_0DC78:
     lsw(c, r1._u32[0] + -0x20, r81);
     lsw(c, r1._u32[0] + -0x40, r1);
     r1 = spu_ai(r1, -64);
-    r0 = spu_link(0xDC94u);
-    SAVE(); f_001C8(c); if (c.exit) return; if ((c.ret ^ 0xDC94u) & 0x3FFFFu) { bad_return(c, 0xDC94u); return; } LOAD();   // brsl $r0, 0x1C8
+    r0 = spu_link(0xDC94u);   // brsl $r0, 0x1C8
+    g[0] = r0; g[1] = r1; g[80] = r80; f_001C8(c); if (c.exit) return; if ((c.ret ^ 0xDC94u) & 0x3FFFFu) { bad_return(c, 0xDC94u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r80 = g[80];
     r19 = lsr(c, r80._u32[0] + 0x0);
     r20 = spu_ila(0x10448);
     r81 = spu_cwd(r80, 0);
     r3 = spu_ai(r80, 72);
     r18 = spu_shufb(r20, r19, r81);
     lsw(c, r80._u32[0] + 0x0, r18);
-    r0 = spu_link(0xDCB0u);
-    SAVE(); f_0A010(c); if (c.exit) return; if ((c.ret ^ 0xDCB0u) & 0x3FFFFu) { bad_return(c, 0xDCB0u); return; } LOAD();   // brsl $r0, 0xA010
+    r0 = spu_link(0xDCB0u);   // brsl $r0, 0xA010
+    g[0] = r0; g[3] = r3; g[18] = r18; g[19] = r19; g[20] = r20; f_0A010(c); if (c.exit) { g[81] = r81; return; } if ((c.ret ^ 0xDCB0u) & 0x3FFFFu) { g[81] = r81; bad_return(c, 0xDCB0u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20];
     r17 = spu_ila(0xDD60);
     r16 = lsr(c, r80._u32[0] + 0x30);
     r6 = spu_il(248);
@@ -17269,18 +16984,14 @@ L_0DC78:
     r1 = spu_ai(r1, 64);
     r80 = lsr(c, r1._u32[0] + -0x10);
     r81 = lsr(c, r1._u32[0] + -0x20);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[80] = r80; g[81] = r81; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x0DD18 (1 blocks; called from DD70) ----
+// ---- 0x0DD18 (1 blocks; called from DD70; 7 registers, 7 assigned; reaches 28, changes 28) ----
 void f_0DD18(Run& c)
 {
     u128* const g = c.g;
     Q r0 = g[0], r1 = g[1], r2 = g[2], r3 = g[3], r4 = g[4], r5 = g[5], r80 = g[80];
-#define SAVE() do { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[80] = r80; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r80 = g[80]; } while (0)
 L_0DD18:
     COV(788);
     lsw(c, r1._u32[0] + -0x10, r80);
@@ -17288,8 +16999,8 @@ L_0DD18:
     lsw(c, r1._u32[0] + 0x10, r0);
     lsw(c, r1._u32[0] + -0x30, r1);
     r1 = spu_ai(r1, -48);
-    r0 = spu_link(0xDD30u);
-    SAVE(); f_0DC78(c); if (c.exit) return; if ((c.ret ^ 0xDD30u) & 0x3FFFFu) { bad_return(c, 0xDD30u); return; } LOAD();   // brsl $r0, 0xDC78
+    r0 = spu_link(0xDD30u);   // brsl $r0, 0xDC78
+    g[0] = r0; g[1] = r1; g[80] = r80; f_0DC78(c); if (c.exit) return; if ((c.ret ^ 0xDD30u) & 0x3FFFFu) { bad_return(c, 0xDD30u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r80 = g[80];
     r3 = spu_ila(0x10438);
     r5 = lsr(c, r80._u32[0] + 0x0);
     r4 = spu_cwd(r80, 0);
@@ -17298,44 +17009,37 @@ L_0DD18:
     r0 = lsr(c, r1._u32[0] + 0x40);
     r1 = spu_ai(r1, 48);
     r80 = lsr(c, r1._u32[0] + -0x10);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[80] = r80; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x0DD58 (1 blocks; through a pointer: a callback stored into an object (ila at 0xDCD8): r5 = 0 -> 0xBB58) ----
+// ---- 0x0DD58 (1 blocks; through a pointer: a callback stored into an object (ila at 0xDCD8): r5 = 0 -> 0xBB58; 2
+// registers, 1 assigned; reaches 43, changes 41) ----
 void f_0DD58(Run& c)
 {
     u128* const g = c.g;
     Q r0 = g[0], r5 = g[5];
-#define SAVE() do { g[0] = r0; g[5] = r5; } while (0)
-#define LOAD() do { r0 = g[0]; r5 = g[5]; } while (0)
 L_0DD58:
     COV(789);
     r5 = spu_il(0);
-    { SAVE(); TAIL f_0BB58(c); }   // a tail jump
-#undef SAVE
-#undef LOAD
+    { g[5] = r5; TAIL f_0BB58(c); }   // a tail jump
 }
 
-// ---- 0x0DD60 (1 blocks; through a pointer: a callback stored into an object (ila at 0xDCB0): r5 = 1 -> 0xC3C0) ----
+// ---- 0x0DD60 (1 blocks; through a pointer: a callback stored into an object (ila at 0xDCB0): r5 = 1 -> 0xC3C0; 4
+// registers, 3 assigned; reaches 88, changes 88) ----
 void f_0DD60(Run& c)
 {
     u128* const g = c.g;
     Q r0 = g[0], r5 = g[5], r6 = g[6], r7 = g[7];
-#define SAVE() do { g[0] = r0; g[5] = r5; g[6] = r6; g[7] = r7; } while (0)
-#define LOAD() do { r0 = g[0]; r5 = g[5]; r6 = g[6]; r7 = g[7]; } while (0)
 L_0DD60:
     COV(790);
     r7 = spu_ori(r6, 0);
     r6 = spu_shlqbyi(r5, 0);
     r5 = spu_il(1);
-    { SAVE(); TAIL f_0C3C0(c); }   // a tail jump
-#undef SAVE
-#undef LOAD
+    { g[5] = r5; g[6] = r6; g[7] = r7; TAIL f_0C3C0(c); }   // a tail jump
 }
 
-// ---- 0x0DD70 the block (the other path) [H] (8 blocks; called from E39C, E534) ----
+// ---- 0x0DD70 the block (the other path) [H] (8 blocks; called from E39C, E534; 91 registers, 91 assigned; reaches
+// all, changes all) ----
 void f_0DD70(Run& c)
 {
     u128* const g = c.g;
@@ -17351,8 +17055,6 @@ void f_0DD70(Run& c)
     Q r72 = g[72], r73 = g[73], r74 = g[74], r75 = g[75], r76 = g[76], r77 = g[77], r78 = g[78], r79 = g[79];
     Q r80 = g[80], r81 = g[81], r82 = g[82], r83 = g[83], r84 = g[84], r85 = g[85], r86 = g[86], r87 = g[87];
     Q r88 = g[88], r89 = g[89], r90 = g[90];
-#define SAVE() do { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; r85 = g[85]; r86 = g[86]; r87 = g[87]; r88 = g[88]; r89 = g[89]; r90 = g[90]; } while (0)
 L_0DD70:
     COV(791);
     r55 = spu_il(-816);
@@ -17384,13 +17086,13 @@ L_0DD70:
     r3 = spu_ori(r82, 0);
     r52 = spu_shufb(r54, r53, r84);
     lsw(c, r1._u32[0] + 0x20, r52);
-    r0 = spu_link(0xDDF0u);
-    SAVE(); f_0DD18(c); if (c.exit) return; if ((c.ret ^ 0xDDF0u) & 0x3FFFFu) { bad_return(c, 0xDDF0u); return; } LOAD();   // brsl $r0, 0xDD18
+    r0 = spu_link(0xDDF0u);   // brsl $r0, 0xDD18
+    g[0] = r0; g[1] = r1; g[3] = r3; f_0DD18(c); if (c.exit) { g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[90] = r90; return; } if ((c.ret ^ 0xDDF0u) & 0x3FFFFu) { g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[90] = r90; bad_return(c, 0xDDF0u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r80 = g[80]; r81 = g[81];
     r3 = spu_ori(r87, 0);
     r4 = spu_fsmbi(0x0);
     r5 = spu_il(3072);
-    r0 = spu_link(0xDE00u);
-    SAVE(); f_02640(c); if (c.exit) return; if ((c.ret ^ 0xDE00u) & 0x3FFFFu) { bad_return(c, 0xDE00u); return; } LOAD();   // brsl $r0, 0x2640
+    r0 = spu_link(0xDE00u);   // brsl $r0, 0x2640
+    g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; f_02640(c); if (c.exit) { g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[90] = r90; return; } if ((c.ret ^ 0xDE00u) & 0x3FFFFu) { g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[90] = r90; bad_return(c, 0xDE00u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17];
     r43 = spu_ila(0x36120);
     r50 = spu_rotqmbyi(r88, -4);
     r51 = spu_andi(r43, 15);
@@ -17401,7 +17103,7 @@ L_0DD70:
     r47 = spu_ceqi(r48, 0);
     r45 = spu_sfi(r47, 0);
     r44 = spu_and(r45, r46);
-    if ((int32_t)r44._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xDE2Cu); return; }   // heqi
+    if ((int32_t)r44._u32[0] == (int32_t)(0)) { g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[80] = r80; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[90] = r90; halt(c, 0xDE2Cu); return; }   // heqi
     r42 = spu_il(0);
     r41 = spu_rotqmbyi(r86, -4);
     r40 = spu_il(32);
@@ -17425,7 +17127,7 @@ L_0DD70:
     r88 = spu_sfi(r38, 0);
     r35 = spu_sfi(r36, 0);
     r34 = spu_and(r35, r88);
-    if ((int32_t)r34._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xDE8Cu); return; }   // heqi
+    if ((int32_t)r34._u32[0] == (int32_t)(0)) { g[3] = r3; g[26] = r26; g[28] = r28; g[31] = r31; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[80] = r80; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[90] = r90; halt(c, 0xDE8Cu); return; }   // heqi
     r32 = spu_il(0);
     r33 = spu_ori(r87, 0);
     r29 = spu_il(3072);
@@ -17444,13 +17146,13 @@ L_0DD70:
     r23 = spu_ceqi(r24, 0);
     r22 = spu_sfi(r23, 0);
     r5 = spu_and(r22, r89);
-    if ((int32_t)r5._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xDED8u); return; }   // heqi
+    if ((int32_t)r5._u32[0] == (int32_t)(0)) { g[3] = r3; g[4] = r4; g[5] = r5; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[80] = r80; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; halt(c, 0xDED8u); return; }   // heqi
     r6 = spu_il(2);
     r3 = spu_ori(r83, 0);
     r5 = spu_shlqbyi(r90, 0);
     r7 = spu_il(64);
-    r0 = spu_link(0xDEF0u);
-    SAVE(); f_0E5C8(c); if (c.exit) return; if ((c.ret ^ 0xDEF0u) & 0x3FFFFu) { bad_return(c, 0xDEF0u); return; } LOAD();   // brsl $r0, 0xE5C8
+    r0 = spu_link(0xDEF0u);   // brsl $r0, 0xE5C8
+    g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; f_0E5C8(c); if (c.exit) { g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[80] = r80; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; return; } if ((c.ret ^ 0xDEF0u) & 0x3FFFFu) { g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[80] = r80; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; bad_return(c, 0xDEF0u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32];
     r4 = spu_il(6);
     r7 = spu_ai(r1, 336);
     r13 = spu_cwd(r1, 4);
@@ -17479,8 +17181,8 @@ L_0DD70:
     lsw(c, r1._u32[0] + 0x140, r10);
     lsw(c, r1._u32[0] + 0x50, r11);
     lsw(c, r1._u32[0] + 0x250, r12);
-    r0 = spu_link(0xDF68u);
-    SAVE(); f_0B048(c); if (c.exit) return; if ((c.ret ^ 0xDF68u) & 0x3FFFFu) { bad_return(c, 0xDF68u); return; } LOAD();   // brsl $r0, 0xB048
+    r0 = spu_link(0xDF68u);   // brsl $r0, 0xB048
+    g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; f_0B048(c); if (c.exit) return; if ((c.ret ^ 0xDF68u) & 0x3FFFFu) { bad_return(c, 0xDF68u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; r85 = g[85]; r86 = g[86]; r87 = g[87]; r88 = g[88]; r89 = g[89]; r90 = g[90];
     r3 = lsr(c, r1._u32[0] + 0x250);
     r6 = spu_rotqbyi(r3, 4);
     r2 = spu_cgti(r6, 2);
@@ -17495,13 +17197,13 @@ L_0DD70:
     r64 = spu_ceqi(r65, 0);
     r63 = spu_sfi(r64, 0);
     r62 = spu_and(r63, r88);
-    if ((int32_t)r62._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xDFA4u); return; }   // heqi
+    if ((int32_t)r62._u32[0] == (int32_t)(0)) { g[2] = r2; g[3] = r3; g[4] = r4; g[6] = r6; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[80] = r80; halt(c, 0xDFA4u); return; }   // heqi
     r6 = spu_il(1);
     r7 = spu_il(64);
     r3 = spu_ori(r87, 0);
     r5 = spu_shlqbyi(r80, 0);
-    r0 = spu_link(0xDFBCu);
-    SAVE(); f_0E5C8(c); if (c.exit) return; if ((c.ret ^ 0xDFBCu) & 0x3FFFFu) { bad_return(c, 0xDFBCu); return; } LOAD();   // brsl $r0, 0xE5C8
+    r0 = spu_link(0xDFBCu);   // brsl $r0, 0xE5C8
+    g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; f_0E5C8(c); if (c.exit) { g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[80] = r80; return; } if ((c.ret ^ 0xDFBCu) & 0x3FFFFu) { g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[80] = r80; bad_return(c, 0xDFBCu); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32];
     r61 = spu_a(r81, r81);
     wrch(c, MFC_WrTagMask, r86);
     r6 = spu_il(0);
@@ -17590,27 +17292,27 @@ L_0E0BC:
     r20 = spu_ceqi(r21, 0);
     r14 = spu_sfi(r20, 0);
     r18 = spu_and(r19, r14);
-    if ((int32_t)r18._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xE0E8u); return; }   // heqi
+    if ((int32_t)r18._u32[0] == (int32_t)(0)) { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[85] = r85; g[87] = r87; halt(c, 0xE0E8u); return; }   // heqi
     r6 = spu_il(1);
     r3 = spu_ori(r5, 0);
     r5 = spu_shlqbyi(r80, 0);
     r7 = spu_il(32);
-    r0 = spu_link(0xE100u);
-    SAVE(); f_0E5C8(c); if (c.exit) return; if ((c.ret ^ 0xE100u) & 0x3FFFFu) { bad_return(c, 0xE100u); return; } LOAD();   // brsl $r0, 0xE5C8
+    r0 = spu_link(0xE100u);   // brsl $r0, 0xE5C8
+    g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; f_0E5C8(c); if (c.exit) { g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[85] = r85; g[87] = r87; return; } if ((c.ret ^ 0xE100u) & 0x3FFFFu) { g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[85] = r85; g[87] = r87; bad_return(c, 0xE100u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32];
     r84 = lsr(c, 0x36120);
     r7 = spu_andi(r84, 15);
     r4 = spu_rotqmbyi(r84, -4);
     r17 = spu_ceqi(r7, 0);
     r10 = spu_sfi(r17, 0);
     r16 = spu_and(r10, r89);
-    if ((int32_t)r16._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xE11Cu); return; }   // heqi
+    if ((int32_t)r16._u32[0] == (int32_t)(0)) { g[4] = r4; g[7] = r7; g[10] = r10; g[16] = r16; g[17] = r17; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[87] = r87; halt(c, 0xE11Cu); return; }   // heqi
     r6 = spu_il(2);
     r5 = spu_ori(r90, 0);
     r3 = spu_ila(0x10990);
     r7 = spu_il(32);
     r90 = spu_il(2);
-    r0 = spu_link(0xE138u);
-    SAVE(); f_0E5C8(c); if (c.exit) return; if ((c.ret ^ 0xE138u) & 0x3FFFFu) { bad_return(c, 0xE138u); return; } LOAD();   // brsl $r0, 0xE5C8
+    r0 = spu_link(0xE138u);   // brsl $r0, 0xE5C8
+    g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[10] = r10; g[16] = r16; g[17] = r17; f_0E5C8(c); if (c.exit) { g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[87] = r87; g[90] = r90; return; } if ((c.ret ^ 0xE138u) & 0x3FFFFu) { g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[87] = r87; g[90] = r90; bad_return(c, 0xE138u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32];
     r6 = spu_il(6);
     r89 = spu_il(816);
     wrch(c, MFC_WrTagMask, r6);
@@ -17630,13 +17332,12 @@ L_0E0BC:
     r88 = lsr(c, r1._u32[0] + -0x90);
     r89 = lsr(c, r1._u32[0] + -0xA0);
     r90 = lsr(c, r1._u32[0] + -0xB0);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[6] = r6; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; c.ret = r0._u32[0]; return; }
 }
 
 // ---- 0x0E190 main(ring EA, system object (r4/r5), the parameter block EA (r6)): GET the 0x80-byte parameter block
-// to 0x36180, initialise, then the main loop (0xE39C) (12 blocks; called from 12C) ----
+// to 0x36180, initialise, then the main loop (0xE39C) (12 blocks; called from 12C; 83 registers, 83 assigned; reaches
+// all, changes all) ----
 void f_0E190(Run& c)
 {
     u128* const g = c.g;
@@ -17651,8 +17352,6 @@ void f_0E190(Run& c)
     Q r64 = g[64], r65 = g[65], r66 = g[66], r67 = g[67], r68 = g[68], r80 = g[80], r81 = g[81], r82 = g[82];
     Q r83 = g[83], r84 = g[84], r85 = g[85], r86 = g[86], r87 = g[87], r88 = g[88], r89 = g[89], r90 = g[90];
     Q r91 = g[91], r92 = g[92], r93 = g[93];
-#define SAVE() do { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; r85 = g[85]; r86 = g[86]; r87 = g[87]; r88 = g[88]; r89 = g[89]; r90 = g[90]; r91 = g[91]; r92 = g[92]; r93 = g[93]; } while (0)
 L_0E190:
     COV(799);
     r30 = spu_ila(0x36180);
@@ -17685,7 +17384,7 @@ L_0E190:
     lsw(c, r1._u32[0] + -0xE0, r93);
     lsw(c, r1._u32[0] + -0x100, r1);
     r1 = spu_ai(r1, -256);
-    if ((int32_t)r31._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xE20Cu); return; }   // heqi
+    if ((int32_t)r31._u32[0] == (int32_t)(0)) { g[1] = r1; g[28] = r28; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[83] = r83; g[92] = r92; halt(c, 0xE20Cu); return; }   // heqi
     r29 = spu_il(0);
     wrch(c, MFC_LSA, r30);
     r19 = spu_il(128);
@@ -17786,15 +17485,15 @@ L_0E378:
     goto L_0E380;
 L_0E380:
     COV(803);
-    r0 = spu_link(0xE384u);
-    SAVE(); f_102A0(c); if (c.exit) return; if ((c.ret ^ 0xE384u) & 0x3FFFFu) { bad_return(c, 0xE384u); return; } LOAD();   // brsl $r0, 0x102A0
+    r0 = spu_link(0xE384u);   // brsl $r0, 0x102A0
+    g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; f_102A0(c); if (c.exit) { g[1] = r1; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; return; } if ((c.ret ^ 0xE384u) & 0x3FFFFu) { g[1] = r1; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; bad_return(c, 0xE384u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11];
     r3 = spu_ori(r81, 0);
-    r0 = spu_link(0xE38Cu);
-    SAVE(); f_0CFD8(c); if (c.exit) return; if ((c.ret ^ 0xE38Cu) & 0x3FFFFu) { bad_return(c, 0xE38Cu); return; } LOAD();   // brsl $r0, 0xCFD8
+    r0 = spu_link(0xE38Cu);   // brsl $r0, 0xCFD8
+    g[0] = r0; g[3] = r3; f_0CFD8(c); if (c.exit) { g[1] = r1; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; return; } if ((c.ret ^ 0xE38Cu) & 0x3FFFFu) { g[1] = r1; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; bad_return(c, 0xE38Cu); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6];
     r3 = spu_ila(0x35EE0);
     r4 = spu_ila(0x35F10);
-    r0 = spu_link(0xE398u);
-    SAVE(); f_007A8(c); if (c.exit) return; if ((c.ret ^ 0xE398u) & 0x3FFFFu) { bad_return(c, 0xE398u); return; } LOAD();   // brsl $r0, 0x7A8
+    r0 = spu_link(0xE398u);   // brsl $r0, 0x7A8
+    g[0] = r0; g[1] = r1; g[3] = r3; g[4] = r4; f_007A8(c); if (c.exit) { g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; return; } if ((c.ret ^ 0xE398u) & 0x3FFFFu) { g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; bad_return(c, 0xE398u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10];
     if (r80._u32[0] == 0) goto L_0E4BC;
     goto L_0E39C;
     // the main loop: receive the block event (spuq 0x63, 0x10340), the two counters' decrement-if-nonzero (0xE6C8 on
@@ -17810,17 +17509,17 @@ L_0E39C:
     r5 = spu_il(0);
     r3 = spu_il(88);
     if (r49._u16[0] != 0) goto L_0E430;
-    r0 = spu_link(0xE3C8u);
-    SAVE(); f_10340(c); if (c.exit) return; if ((c.ret ^ 0xE3C8u) & 0x3FFFFu) { bad_return(c, 0xE3C8u); return; } LOAD();   // brsl $r0, 0x10340
+    r0 = spu_link(0xE3C8u);   // brsl $r0, 0x10340
+    g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; f_10340(c); if (c.exit) return; if ((c.ret ^ 0xE3C8u) & 0x3FFFFu) { bad_return(c, 0xE3C8u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16];
     r4 = spu_ori(r80, 0);
     r3 = spu_ila(0x36200);
-    r0 = spu_link(0xE3D4u);
-    SAVE(); f_0E6C8(c); if (c.exit) return; if ((c.ret ^ 0xE3D4u) & 0x3FFFFu) { bad_return(c, 0xE3D4u); return; } LOAD();   // brsl $r0, 0xE6C8
+    r0 = spu_link(0xE3D4u);   // brsl $r0, 0xE6C8
+    g[0] = r0; g[3] = r3; g[4] = r4; f_0E6C8(c); if (c.exit) return; if ((c.ret ^ 0xE3D4u) & 0x3FFFFu) { bad_return(c, 0xE3D4u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20];
     r4 = spu_ori(r81, 0);
     r80 = spu_ori(r3, 0);
     r3 = spu_ila(0x36280);
-    r0 = spu_link(0xE3E4u);
-    SAVE(); f_0E6C8(c); if (c.exit) return; if ((c.ret ^ 0xE3E4u) & 0x3FFFFu) { bad_return(c, 0xE3E4u); return; } LOAD();   // brsl $r0, 0xE6C8
+    r0 = spu_link(0xE3E4u);   // brsl $r0, 0xE6C8
+    g[0] = r0; g[3] = r3; g[4] = r4; f_0E6C8(c); if (c.exit) { g[80] = r80; return; } if ((c.ret ^ 0xE3E4u) & 0x3FFFFu) { g[80] = r80; bad_return(c, 0xE3E4u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20];
     r58 = spu_ilhu(0xFEED);
     r4 = spu_shlqbyi(r88, 0);
     r5 = spu_ori(r86, 0);
@@ -17834,8 +17533,8 @@ L_0E39C:
     r52 = spu_ceqbi(r53, 0);
     r51 = spu_xsbh(r52);
     if (r51._u16[0] == 0) goto L_0E55C;
-    r0 = spu_link(0xE420u);
-    SAVE(); f_0DD70(c); if (c.exit) return; if ((c.ret ^ 0xE420u) & 0x3FFFFu) { bad_return(c, 0xE420u); return; } LOAD();   // brsl $r0, 0xDD70
+    r0 = spu_link(0xE420u);   // brsl $r0, 0xDD70
+    g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[80] = r80; f_0DD70(c); if (c.exit) return; if ((c.ret ^ 0xE420u) & 0x3FFFFu) { bad_return(c, 0xE420u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; r85 = g[85]; r86 = g[86]; r87 = g[87]; r88 = g[88]; r89 = g[89]; r90 = g[90]; r91 = g[91]; r92 = g[92]; r93 = g[93];
     r4 = spu_il(0);
     r5 = spu_ori(r3, 0);
     r3 = spu_il(8);
@@ -17846,17 +17545,17 @@ L_0E430:
     r5 = spu_fsmbi(0x0);
     r6 = spu_il(0);
     r3 = spu_il(99);
-    r0 = spu_link(0xE444u);
-    SAVE(); f_10340(c); if (c.exit) return; if ((c.ret ^ 0xE444u) & 0x3FFFFu) { bad_return(c, 0xE444u); return; } LOAD();   // brsl $r0, 0x10340
+    r0 = spu_link(0xE444u);   // brsl $r0, 0x10340
+    g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; f_10340(c); if (c.exit) return; if ((c.ret ^ 0xE444u) & 0x3FFFFu) { bad_return(c, 0xE444u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16];
     r4 = spu_ori(r80, 0);
     r3 = spu_ila(0x36200);
-    r0 = spu_link(0xE450u);
-    SAVE(); f_0E6C8(c); if (c.exit) return; if ((c.ret ^ 0xE450u) & 0x3FFFFu) { bad_return(c, 0xE450u); return; } LOAD();   // brsl $r0, 0xE6C8
+    r0 = spu_link(0xE450u);   // brsl $r0, 0xE6C8
+    g[0] = r0; g[3] = r3; g[4] = r4; f_0E6C8(c); if (c.exit) return; if ((c.ret ^ 0xE450u) & 0x3FFFFu) { bad_return(c, 0xE450u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20];
     r4 = spu_ori(r81, 0);
     r80 = spu_ori(r3, 0);
     r3 = spu_ila(0x36280);
-    r0 = spu_link(0xE460u);
-    SAVE(); f_0E6C8(c); if (c.exit) return; if ((c.ret ^ 0xE460u) & 0x3FFFFu) { bad_return(c, 0xE460u); return; } LOAD();   // brsl $r0, 0xE6C8
+    r0 = spu_link(0xE460u);   // brsl $r0, 0xE6C8
+    g[0] = r0; g[3] = r3; g[4] = r4; f_0E6C8(c); if (c.exit) { g[80] = r80; return; } if ((c.ret ^ 0xE460u) & 0x3FFFFu) { g[80] = r80; bad_return(c, 0xE460u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20];
     r66 = spu_ilhu(0xFEED);
     r4 = spu_ori(r90, 0);
     r5 = spu_shlqbyi(r89, 0);
@@ -17873,16 +17572,16 @@ L_0E430:
     r60 = spu_ceqbi(r61, 0);
     r59 = spu_xsbh(r60);
     if (r59._u16[0] == 0) goto L_0E55C;
-    r0 = spu_link(0xE4A8u);
-    SAVE(); f_0DA30(c); if (c.exit) return; if ((c.ret ^ 0xE4A8u) & 0x3FFFFu) { bad_return(c, 0xE4A8u); return; } LOAD();   // brsl $r0, 0xDA30
+    r0 = spu_link(0xE4A8u);   // brsl $r0, 0xDA30
+    g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[80] = r80; f_0DA30(c); if (c.exit) return; if ((c.ret ^ 0xE4A8u) & 0x3FFFFu) { bad_return(c, 0xE4A8u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; r85 = g[85]; r86 = g[86]; r87 = g[87]; r88 = g[88]; r89 = g[89]; r90 = g[90]; r91 = g[91]; r92 = g[92]; r93 = g[93];
     r4 = spu_il(0);
     r5 = spu_fsmbi(0x0);
     r3 = spu_il(9);
     goto L_0E4B4;
 L_0E4B4:
     COV(806);
-    r0 = spu_link(0xE4B8u);
-    SAVE(); f_102A0(c); if (c.exit) return; if ((c.ret ^ 0xE4B8u) & 0x3FFFFu) { bad_return(c, 0xE4B8u); return; } LOAD();   // brsl $r0, 0x102A0
+    r0 = spu_link(0xE4B8u);   // brsl $r0, 0x102A0
+    g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; f_102A0(c); if (c.exit) return; if ((c.ret ^ 0xE4B8u) & 0x3FFFFu) { bad_return(c, 0xE4B8u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11];
     goto L_0E39C;
 L_0E4BC:
     COV(807);
@@ -17890,17 +17589,17 @@ L_0E4BC:
     r6 = spu_il(0);
     r5 = spu_fsmbi(0x0);
     r3 = spu_il(99);
-    r0 = spu_link(0xE4D0u);
-    SAVE(); f_10340(c); if (c.exit) return; if ((c.ret ^ 0xE4D0u) & 0x3FFFFu) { bad_return(c, 0xE4D0u); return; } LOAD();   // brsl $r0, 0x10340
+    r0 = spu_link(0xE4D0u);   // brsl $r0, 0x10340
+    g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[67] = r67; g[68] = r68; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; f_10340(c); if (c.exit) return; if ((c.ret ^ 0xE4D0u) & 0x3FFFFu) { bad_return(c, 0xE4D0u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16];
     r3 = spu_ila(0x36200);
     r4 = spu_rotqmbyi(r93, -4);
-    r0 = spu_link(0xE4DCu);
-    SAVE(); f_0E6C8(c); if (c.exit) return; if ((c.ret ^ 0xE4DCu) & 0x3FFFFu) { bad_return(c, 0xE4DCu); return; } LOAD();   // brsl $r0, 0xE6C8
+    r0 = spu_link(0xE4DCu);   // brsl $r0, 0xE6C8
+    g[0] = r0; g[3] = r3; g[4] = r4; f_0E6C8(c); if (c.exit) return; if ((c.ret ^ 0xE4DCu) & 0x3FFFFu) { bad_return(c, 0xE4DCu); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20];
     r4 = spu_rotqmbyi(r85, -4);
     r80 = spu_ori(r3, 0);
     r3 = spu_ila(0x36280);
-    r0 = spu_link(0xE4ECu);
-    SAVE(); f_0E6C8(c); if (c.exit) return; if ((c.ret ^ 0xE4ECu) & 0x3FFFFu) { bad_return(c, 0xE4ECu); return; } LOAD();   // brsl $r0, 0xE6C8
+    r0 = spu_link(0xE4ECu);   // brsl $r0, 0xE6C8
+    g[0] = r0; g[3] = r3; g[4] = r4; f_0E6C8(c); if (c.exit) { g[80] = r80; return; } if ((c.ret ^ 0xE4ECu) & 0x3FFFFu) { g[80] = r80; bad_return(c, 0xE4ECu); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20];
     r68 = spu_ilhu(0xFEED);
     r81 = spu_shlqbyi(r3, 0);
     r4 = spu_ori(r90, 0);
@@ -17913,13 +17612,13 @@ L_0E4BC:
     r7 = spu_ori(r84, 0);
     if (r80._u32[0] == 0) goto L_0E534;
     r8 = spu_ori(r91, 0);
-    r0 = spu_link(0xE524u);
-    SAVE(); f_0DA30(c); if (c.exit) return; if ((c.ret ^ 0xE524u) & 0x3FFFFu) { bad_return(c, 0xE524u); return; } LOAD();   // brsl $r0, 0xDA30
+    r0 = spu_link(0xE524u);   // brsl $r0, 0xDA30
+    g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[67] = r67; g[68] = r68; g[80] = r80; g[81] = r81; f_0DA30(c); if (c.exit) return; if ((c.ret ^ 0xE524u) & 0x3FFFFu) { bad_return(c, 0xE524u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; r85 = g[85]; r86 = g[86]; r87 = g[87]; r88 = g[88]; r89 = g[89]; r90 = g[90]; r91 = g[91]; r92 = g[92]; r93 = g[93];
     r4 = spu_il(0);
     r5 = spu_il(0);
     r3 = spu_il(9);
-    r0 = spu_link(0xE534u);
-    SAVE(); f_102A0(c); if (c.exit) return; if ((c.ret ^ 0xE534u) & 0x3FFFFu) { bad_return(c, 0xE534u); return; } LOAD();   // brsl $r0, 0x102A0
+    r0 = spu_link(0xE534u);   // brsl $r0, 0x102A0
+    g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; f_102A0(c); if (c.exit) return; if ((c.ret ^ 0xE534u) & 0x3FFFFu) { bad_return(c, 0xE534u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11];
     goto L_0E534;
 L_0E534:
     COV(808);
@@ -17927,13 +17626,13 @@ L_0E534:
     if (r81._u32[0] == 0) goto L_0E4BC;
     r5 = spu_ori(r86, 0);
     r3 = spu_ori(r87, 0);
-    r0 = spu_link(0xE548u);
-    SAVE(); f_0DD70(c); if (c.exit) return; if ((c.ret ^ 0xE548u) & 0x3FFFFu) { bad_return(c, 0xE548u); return; } LOAD();   // brsl $r0, 0xDD70
+    r0 = spu_link(0xE548u);   // brsl $r0, 0xDD70
+    g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[67] = r67; g[68] = r68; g[80] = r80; g[81] = r81; f_0DD70(c); if (c.exit) return; if ((c.ret ^ 0xE548u) & 0x3FFFFu) { bad_return(c, 0xE548u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; r85 = g[85]; r86 = g[86]; r87 = g[87]; r88 = g[88]; r89 = g[89]; r90 = g[90]; r91 = g[91]; r92 = g[92]; r93 = g[93];
     r4 = spu_il(0);
     r5 = spu_ori(r3, 0);
     r3 = spu_il(8);
-    r0 = spu_link(0xE558u);
-    SAVE(); f_102A0(c); if (c.exit) return; if ((c.ret ^ 0xE558u) & 0x3FFFFu) { bad_return(c, 0xE558u); return; } LOAD();   // brsl $r0, 0x102A0
+    r0 = spu_link(0xE558u);   // brsl $r0, 0x102A0
+    g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; f_102A0(c); if (c.exit) return; if ((c.ret ^ 0xE558u) & 0x3FFFFu) { bad_return(c, 0xE558u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11];
     goto L_0E4BC;
 L_0E55C:
     COV(809);
@@ -17941,14 +17640,14 @@ L_0E55C:
     r3 = spu_il(11);
     r4 = spu_il(2);
     r5 = spu_il(2);
-    r0 = spu_link(0xE570u);
-    SAVE(); f_102A0(c); if (c.exit) return; if ((c.ret ^ 0xE570u) & 0x3FFFFu) { bad_return(c, 0xE570u); return; } LOAD();   // brsl $r0, 0x102A0
+    r0 = spu_link(0xE570u);   // brsl $r0, 0x102A0
+    g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; f_102A0(c); if (c.exit) { g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[80] = r80; g[81] = r81; return; } if ((c.ret ^ 0xE570u) & 0x3FFFFu) { g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[80] = r80; g[81] = r81; bad_return(c, 0xE570u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11];
     goto L_0E570;
 L_0E570:
     COV(810);
     r3 = spu_il(0);
-    r0 = spu_link(0xE578u);
-    SAVE(); f_10258(c); if (c.exit) return; if ((c.ret ^ 0xE578u) & 0x3FFFFu) { bad_return(c, 0xE578u); return; } LOAD();   // brsl $r0, 0x10258
+    r0 = spu_link(0xE578u);   // brsl $r0, 0x10258
+    g[0] = r0; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[80] = r80; g[81] = r81; f_10258(c); if (c.exit) return; if ((c.ret ^ 0xE578u) & 0x3FFFFu) { bad_return(c, 0xE578u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7];
     r3 = spu_il(0);
     r0 = lsr(c, r1._u32[0] + 0x110);
     r1 = spu_ai(r1, 256);
@@ -17966,12 +17665,11 @@ L_0E570:
     r91 = lsr(c, r1._u32[0] + -0xC0);
     r92 = lsr(c, r1._u32[0] + -0xD0);
     r93 = lsr(c, r1._u32[0] + -0xE0);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[0] = r0; g[1] = r1; g[3] = r3; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[87] = r87; g[88] = r88; g[89] = r89; g[90] = r90; g[91] = r91; g[92] = r92; g[93] = r93; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x0E5C8 (3 blocks; called from 5DCC, 6018, 6534, 6EB8, 7410, 81AC, D57C, D8E4 ...) ----
+// ---- 0x0E5C8 (3 blocks; called from 5DCC, 6018, 6534, 6EB8, 7410, 81AC, D57C, D8E4 ...; 32 registers, 31 assigned;
+// reaches 32, changes 31) ----
 void f_0E5C8(Run& c)
 {
     u128* const g = c.g;
@@ -17979,8 +17677,6 @@ void f_0E5C8(Run& c)
     Q r9 = g[9], r10 = g[10], r11 = g[11], r12 = g[12], r13 = g[13], r14 = g[14], r15 = g[15], r16 = g[16];
     Q r17 = g[17], r18 = g[18], r19 = g[19], r20 = g[20], r21 = g[21], r22 = g[22], r23 = g[23], r24 = g[24];
     Q r25 = g[25], r26 = g[26], r27 = g[27], r28 = g[28], r29 = g[29], r30 = g[30], r31 = g[31], r32 = g[32];
-#define SAVE() do { g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; } while (0)
-#define LOAD() do { r0 = g[0]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; } while (0)
 L_0E5C8:
     COV(811);
     r12 = spu_ori(r6, 0);
@@ -18032,19 +17728,16 @@ L_0E668:
     r6 = spu_clgti(r5, 3);
     r7 = spu_clgti(r5, 1);
     if (r5._u32[0] != 0) goto L_0E5E0;
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x0E680 (1 blocks; called from 5B70, 5CD8, 5ED0, 7DF8, 7FAC, 92B8, B610, DA30) ----
+// ---- 0x0E680 (1 blocks; called from 5B70, 5CD8, 5ED0, 7DF8, 7FAC, 92B8, B610, DA30; 10 registers, 6 assigned;
+// reaches 10, changes 6) ----
 void f_0E680(Run& c)
 {
     u128* const g = c.g;
     Q r0 = g[0], r2 = g[2], r3 = g[3], r4 = g[4], r5 = g[5], r6 = g[6], r7 = g[7], r8 = g[8];
     Q r9 = g[9], r10 = g[10];
-#define SAVE() do { g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; } while (0)
-#define LOAD() do { r0 = g[0]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; } while (0)
 L_0E680:
     COV(814);
     r10 = spu_ori(r4, 0);
@@ -18062,21 +17755,18 @@ L_0E680:
     wrch(c, MFC_WrTagMask, r3);
     wrch(c, MFC_WrTagUpdate, r2);
     r2 = rdch(c, MFC_RdTagStat);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[2] = r2; g[3] = r3; g[4] = r4; g[8] = r8; g[9] = r9; g[10] = r10; c.ret = r0._u32[0]; return; }
 }
 
 // ---- 0x0E6C8 decrement-if-nonzero on a 128-byte line (LS r3 <- EA r4): GETLLAR, the word, PUTLLC until it holds;
-// returns the word before (2 blocks; called from E39C, E430, E4BC) ----
+// returns the word before (2 blocks; called from E39C, E430, E4BC; 20 registers, 19 assigned; reaches 20, changes 19)
+// ----
 void f_0E6C8(Run& c)
 {
     u128* const g = c.g;
     Q r0 = g[0], r2 = g[2], r3 = g[3], r4 = g[4], r5 = g[5], r6 = g[6], r7 = g[7], r8 = g[8];
     Q r9 = g[9], r10 = g[10], r11 = g[11], r12 = g[12], r13 = g[13], r14 = g[14], r15 = g[15], r16 = g[16];
     Q r17 = g[17], r18 = g[18], r19 = g[19], r20 = g[20];
-#define SAVE() do { g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; } while (0)
-#define LOAD() do { r0 = g[0]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; } while (0)
 L_0E6C8:
     COV(815);
     r16 = spu_andi(r3, 127);
@@ -18089,7 +17779,7 @@ L_0E6C8:
     r10 = spu_rotmi(r13, -2);
     r6 = spu_sfi(r12, 0);
     r9 = spu_selb(r11, r6, r7);
-    if ((int32_t)r9._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xE6F0u); return; }   // heqi
+    if ((int32_t)r9._u32[0] == (int32_t)(0)) { g[6] = r6; g[7] = r7; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; halt(c, 0xE6F0u); return; }   // heqi
     r2 = lsr(c, 0x10450);
     r11 = spu_il(128);
     r5 = spu_shli(r10, 2);
@@ -18116,7 +17806,7 @@ L_0E720:
     r6 = spu_cwd(r5, 0);
     r3 = spu_rotqby(r17, r5);
     r4 = spu_ai(r3, -1);
-    if (r3._u32[0] == 0) { SAVE(); c.ret = g[0]._u32[0]; return; }
+    if (r3._u32[0] == 0) { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; c.ret = r0._u32[0]; return; }
     r20 = lsr(c, r5._u32[0] + 0x0);
     r19 = spu_shufb(r4, r20, r6);
     lsw(c, r5._u32[0] + 0x0, r19);
@@ -18129,13 +17819,11 @@ L_0E720:
     wrch(c, MFC_Cmd, r12);
     r18 = rdch(c, MFC_RdAtomicStat);
     if (r18._u32[0] != 0) goto L_0E720;
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; c.ret = r0._u32[0]; return; }
 }
 
 // ---- 0x0E788 load a program header (MP3 decoder) and its code by GET; returns its entry (5 blocks; called from
-// E9D4) ----
+// E9D4; 40 registers, 39 assigned; reaches 40, changes 39) ----
 void f_0E788(Run& c)
 {
     u128* const g = c.g;
@@ -18144,8 +17832,6 @@ void f_0E788(Run& c)
     Q r17 = g[17], r18 = g[18], r19 = g[19], r20 = g[20], r21 = g[21], r22 = g[22], r23 = g[23], r24 = g[24];
     Q r25 = g[25], r26 = g[26], r27 = g[27], r28 = g[28], r29 = g[29], r30 = g[30], r31 = g[31], r32 = g[32];
     Q r33 = g[33], r34 = g[34], r35 = g[35], r36 = g[36], r37 = g[37], r38 = g[38], r39 = g[39], r40 = g[40];
-#define SAVE() do { g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; } while (0)
-#define LOAD() do { r0 = g[0]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; } while (0)
 L_0E788:
     COV(817);
     r9 = spu_ori(r3, 0);
@@ -18234,12 +17920,11 @@ L_0E890:
     r2 = rdch(c, MFC_RdTagStat);
     r38 = spu_sf(r12, r13);
     r3 = spu_a(r38, r9);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x0E8C8 Mp3SpuDecode: load the MP3 decoder (flashMP3.pic) and jump to it (7 blocks; called from B050) ----
+// ---- 0x0E8C8 Mp3SpuDecode: load the MP3 decoder (flashMP3.pic) and jump to it (7 blocks; called from B050; 48
+// registers, 48 assigned; reaches all, changes all) ----
 void f_0E8C8(Run& c)
 {
     u128* const g = c.g;
@@ -18249,8 +17934,6 @@ void f_0E8C8(Run& c)
     Q r24 = g[24], r25 = g[25], r26 = g[26], r27 = g[27], r28 = g[28], r29 = g[29], r30 = g[30], r31 = g[31];
     Q r32 = g[32], r33 = g[33], r34 = g[34], r35 = g[35], r36 = g[36], r37 = g[37], r38 = g[38], r39 = g[39];
     Q r80 = g[80], r81 = g[81], r82 = g[82], r83 = g[83], r84 = g[84], r85 = g[85], r86 = g[86], r126 = g[126];
-#define SAVE() do { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[126] = r126; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r80 = g[80]; r81 = g[81]; r82 = g[82]; r83 = g[83]; r84 = g[84]; r85 = g[85]; r86 = g[86]; r126 = g[126]; } while (0)
 L_0E8C8:
     COV(822);
     r14 = spu_ceqi(r5, 0);
@@ -18311,8 +17994,8 @@ L_0E98C:
     r4 = spu_ila(0x10460);
     r3 = spu_ilhu(0x100);
     r4 = spu_a(r4, r126);
-    r0 = spu_link(0xE9A0u);
-    SAVE(); f_0EAC0(c); if (c.exit) return; if ((c.ret ^ 0xE9A0u) & 0x3FFFFu) { bad_return(c, 0xE9A0u); return; } LOAD();   // brsl $r0, 0xEAC0
+    r0 = spu_link(0xE9A0u);   // brsl $r0, 0xEAC0
+    g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; f_0EAC0(c); if (c.exit) { g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[126] = r126; return; } if ((c.ret ^ 0xE9A0u) & 0x3FFFFu) { g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[126] = r126; bad_return(c, 0xE9A0u); return; } r2 = g[2]; r3 = g[3];
     goto L_0E9A0;
 L_0E9A0:
     COV(825);
@@ -18327,7 +18010,7 @@ L_0E9A0:
     r85 = lsr(c, r1._u32[0] + -0x60);
     r86 = lsr(c, r1._u32[0] + -0x70);
     r126 = lsr(c, r1._u32[0] + -0x80);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
+    { g[0] = r0; g[1] = r1; g[3] = r3; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[126] = r126; c.ret = r0._u32[0]; return; }
 L_0E9D4:
     COV(826);
     if (r86._u32[0] == 0) goto L_0E98C;
@@ -18339,8 +18022,8 @@ L_0E9D4:
     r32 = spu_andc(r34, r33);
     if (r32._u32[0] == 0) goto L_0E98C;
     if (r4._u32[0] == 0) goto L_0EA78;
-    r0 = spu_link(0xEA08u);
-    SAVE(); f_0E788(c); if (c.exit) return; if ((c.ret ^ 0xEA08u) & 0x3FFFFu) { bad_return(c, 0xEA08u); return; } LOAD();   // brsl $r0, 0xE788
+    r0 = spu_link(0xEA08u);   // brsl $r0, 0xE788
+    g[0] = r0; g[2] = r2; g[5] = r5; g[6] = r6; g[7] = r7; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; f_0E788(c); if (c.exit) { g[1] = r1; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[126] = r126; return; } if ((c.ret ^ 0xEA08u) & 0x3FFFFu) { g[1] = r1; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[126] = r126; bad_return(c, 0xEA08u); return; } r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39];
     r14 = spu_ori(r3, 0);
     lsw(c, 0x36300, r3);
     goto L_0EA10;
@@ -18370,7 +18053,7 @@ L_0EA10:
     r7 = spu_a(r82, r38);
     r82 = lsr(c, r1._u32[0] + -0x30);
     r13 = spu_il(0);
-    { SAVE(); c.jt = r14._u32[0] & 0x3FFFFu; c.js = 0xEA74u; TAIL jump_to(c); }   // bi $r14 at 0xEA74
+    { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[126] = r126; c.jt = r14._u32[0] & 0x3FFFFu; c.js = 0xEA74u; TAIL jump_to(c); }   // bi $r14 at 0xEA74
 L_0EA78:
     COV(828);
     r14 = lsr(c, 0x36300);
@@ -18378,20 +18061,16 @@ L_0EA78:
     r3 = spu_ila(0x10490);
     r4 = spu_a(r3, r126);
     r3 = spu_ilhu(0x100);
-    r0 = spu_link(0xEA90u);
-    SAVE(); f_0EAC0(c); if (c.exit) return; if ((c.ret ^ 0xEA90u) & 0x3FFFFu) { bad_return(c, 0xEA90u); return; } LOAD();   // brsl $r0, 0xEAC0
+    r0 = spu_link(0xEA90u);   // brsl $r0, 0xEAC0
+    g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; f_0EAC0(c); if (c.exit) { g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[126] = r126; return; } if ((c.ret ^ 0xEA90u) & 0x3FFFFu) { g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[80] = r80; g[81] = r81; g[82] = r82; g[83] = r83; g[84] = r84; g[85] = r85; g[86] = r86; g[126] = r126; bad_return(c, 0xEA90u); return; } r2 = g[2]; r3 = g[3];
     goto L_0E9A0;
-#undef SAVE
-#undef LOAD
 }
 
-// ---- 0x0EA98 exit (from crt0) (1 blocks; called from 140) ----
+// ---- 0x0EA98 exit (from crt0) (1 blocks; called from 140; 4 registers, 4 assigned; reaches all, changes all) ----
 void f_0EA98(Run& c)
 {
     u128* const g = c.g;
     Q r0 = g[0], r1 = g[1], r3 = g[3], r80 = g[80];
-#define SAVE() do { g[0] = r0; g[1] = r1; g[3] = r3; g[80] = r80; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; r3 = g[3]; r80 = g[80]; } while (0)
 L_0EA98:
     COV(829);
     lsw(c, r1._u32[0] + -0x10, r80);
@@ -18399,25 +18078,22 @@ L_0EA98:
     lsw(c, r1._u32[0] + 0x10, r0);
     lsw(c, r1._u32[0] + -0x30, r1);
     r1 = spu_ai(r1, -48);
-    r0 = spu_link(0xEAB8u);
-    SAVE(); f_0EB40(c); if (c.exit) return; if ((c.ret ^ 0xEAB8u) & 0x3FFFFu) { bad_return(c, 0xEAB8u); return; } LOAD();   // brsl $r0, 0xEB40
+    r0 = spu_link(0xEAB8u);   // brsl $r0, 0xEB40
+    g[0] = r0; g[1] = r1; g[80] = r80; f_0EB40(c); if (c.exit) return; if ((c.ret ^ 0xEAB8u) & 0x3FFFFu) { bad_return(c, 0xEAB8u); return; } r0 = g[0]; r1 = g[1]; r3 = g[3]; r80 = g[80];
     r3 = spu_ori(r80, 0);
-    r0 = spu_link(0xEAC0u);
-    SAVE(); f_000E0(c); if (c.exit) return; if ((c.ret ^ 0xEAC0u) & 0x3FFFFu) { bad_return(c, 0xEAC0u); return; } LOAD();   // brsl $r0, 0xE0
-    { SAVE(); TAIL f_0EAC0(c); }   // a tail jump
-#undef SAVE
-#undef LOAD
+    r0 = spu_link(0xEAC0u);   // brsl $r0, 0xE0
+    g[0] = r0; g[3] = r3; f_000E0(c); if (c.exit) return; if ((c.ret ^ 0xEAC0u) & 0x3FFFFu) { bad_return(c, 0xEAC0u); return; } r0 = g[0]; r1 = g[1]; r3 = g[3]; r80 = g[80];
+    { TAIL f_0EAC0(c); }   // a tail jump
 }
 
-// ---- 0x0EAC0 printf-like: the arguments through the mailboxes (3 blocks; called from E98C, EA78) ----
+// ---- 0x0EAC0 printf-like: the arguments through the mailboxes (3 blocks; called from E98C, EA78; 20 registers, 2
+// assigned; reaches 20, changes 2) ----
 void f_0EAC0(Run& c)
 {
     u128* const g = c.g;
     Q r0 = g[0], r1 = g[1], r2 = g[2], r3 = g[3], r4 = g[4], r5 = g[5], r6 = g[6], r7 = g[7];
     Q r8 = g[8], r9 = g[9], r10 = g[10], r11 = g[11], r12 = g[12], r13 = g[13], r14 = g[14], r15 = g[15];
     Q r16 = g[16], r17 = g[17], r18 = g[18], r19 = g[19];
-#define SAVE() do { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; } while (0)
 L_0EAC0:
     COV(830);
     r2 = spu_pref_u32(rchcnt(c, SPU_RdInMbox));
@@ -18449,23 +18125,19 @@ L_0EAC0:
     goto L_0EB28;
 L_0EB28:
     COV(831);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
+    { g[2] = r2; g[3] = r3; c.ret = r0._u32[0]; return; }
 L_0EB2C:
     COV(832);
     r3 = spu_il(-10);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[2] = r2; g[3] = r3; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x0EB40 (3 blocks; called from EA98) ----
+// ---- 0x0EB40 (3 blocks; called from EA98; 14 registers, 14 assigned; reaches all, changes all) ----
 void f_0EB40(Run& c)
 {
     u128* const g = c.g;
     Q r0 = g[0], r1 = g[1], r2 = g[2], r3 = g[3], r4 = g[4], r5 = g[5], r6 = g[6], r7 = g[7];
     Q r8 = g[8], r9 = g[9], r10 = g[10], r11 = g[11], r80 = g[80], r81 = g[81];
-#define SAVE() do { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[80] = r80; g[81] = r81; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r80 = g[80]; r81 = g[81]; } while (0)
 L_0EB40:
     COV(833);
     r2 = lsr(c, 0x36310);
@@ -18490,7 +18162,7 @@ L_0EB68:
     r5 = lsr(c, r7._u32[0] + r80._u32[0]);
     lsw(c, 0x36310, r9);
     r4 = spu_rotqby(r5, r6);
-    { const uint32_t t = r4._u32[0]; r0 = spu_link(0xEB94u); SAVE(); if (!branch(c, t & 0x3FFFFu, 0xEB90u, true)) return; if ((c.ret ^ 0xEB94u) & 0x3FFFFu) { bad_return(c, 0xEB94u); return; } LOAD(); }   // bisl $r0, $r4
+    { const uint32_t t = r4._u32[0]; r0 = spu_link(0xEB94u); g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[80] = r80; g[81] = r81; if (!branch(c, t & 0x3FFFFu, 0xEB90u, true)) return; if ((c.ret ^ 0xEB94u) & 0x3FFFFu) { bad_return(c, 0xEB94u); return; } r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r80 = g[80]; r81 = g[81]; }   // bisl $r0, $r4
     r3 = lsr(c, 0x36310);
     r2 = spu_rotqbyi(r3, 14);
     if (r2._u16[0] != 0) goto L_0EB68;
@@ -18502,12 +18174,10 @@ L_0EBA0:
     r1 = spu_ai(r1, 64);
     r80 = lsr(c, r1._u32[0] + -0x10);
     r81 = lsr(c, r1._u32[0] + -0x20);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[80] = r80; g[81] = r81; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x0EC10 (1 blocks; called from 23B8, 389C, 3ABC) ----
+// ---- 0x0EC10 (1 blocks; called from 23B8, 389C, 3ABC; 44 registers, 41 assigned; reaches 44, changes 41) ----
 void f_0EC10(Run& c)
 {
     u128* const g = c.g;
@@ -18517,8 +18187,6 @@ void f_0EC10(Run& c)
     Q r24 = g[24], r25 = g[25], r26 = g[26], r27 = g[27], r28 = g[28], r30 = g[30], r31 = g[31], r32 = g[32];
     Q r33 = g[33], r35 = g[35], r36 = g[36], r37 = g[37], r38 = g[38], r39 = g[39], r40 = g[40], r41 = g[41];
     Q r42 = g[42], r43 = g[43], r44 = g[44], r45 = g[45];
-#define SAVE() do { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; } while (0)
 L_0EC10:
     COV(836);
     r44 = spu_ori(r3, 0);
@@ -18563,12 +18231,10 @@ L_0EC10:
     r2 = spu_a(r5, r9);
     r3 = spu_a(r6, r2);
     r3 = spu_shufb(r3, r5, r14);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[2] = r2; g[3] = r3; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; c.ret = r0._u32[0]; return; }
 }
 
-// ---- 0x0ECC8 (27 blocks; called from 354C, 8690) ----
+// ---- 0x0ECC8 (27 blocks; called from 354C, 8690; 80 registers, 78 assigned; reaches 80, changes 78) ----
 void f_0ECC8(Run& c)
 {
     u128* const g = c.g;
@@ -18582,8 +18248,6 @@ void f_0ECC8(Run& c)
     Q r56 = g[56], r57 = g[57], r58 = g[58], r59 = g[59], r60 = g[60], r61 = g[61], r62 = g[62], r63 = g[63];
     Q r64 = g[64], r65 = g[65], r66 = g[66], r67 = g[67], r68 = g[68], r69 = g[69], r70 = g[70], r71 = g[71];
     Q r72 = g[72], r73 = g[73], r74 = g[74], r75 = g[75], r76 = g[76], r77 = g[77], r78 = g[78], r79 = g[79];
-#define SAVE() do { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79]; } while (0)
 L_0ECC8:
     COV(837);
     r13 = spu_ori(r3, 0);
@@ -18607,7 +18271,7 @@ L_0ECC8:
     goto L_0ED10;
 L_0ED10:
     COV(838);
-    if ((int32_t)r11._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xED10u); return; }   // heqi
+    if ((int32_t)r11._u32[0] == (int32_t)(0)) { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; halt(c, 0xED10u); return; }   // heqi
     r23 = spu_clz(r11);
     r20 = spu_clz(r4);
     r21 = spu_il(1);
@@ -18628,7 +18292,7 @@ L_0ED38:
     r35 = spu_selb(r23, r35, r22);
     if (r21._u32[0] != 0) goto L_0ED38;
     r22 = spu_rotmi(r18, -16);
-    if ((int32_t)r11._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xED68u); return; }   // heqi
+    if ((int32_t)r11._u32[0] == (int32_t)(0)) { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; halt(c, 0xED68u); return; }   // heqi
     r16 = spu_clz(r11);
     r10 = spu_clz(r4);
     r13 = spu_il(1);
@@ -18672,7 +18336,7 @@ L_0ED90:
     r7 = spu_selb(r16, r9, r26);
     r2 = spu_sf(r19, r13);
     r10 = spu_selb(r9, r7, r8);
-    if ((int32_t)r11._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xEE20u); return; }   // heqi
+    if ((int32_t)r11._u32[0] == (int32_t)(0)) { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; halt(c, 0xEE20u); return; }   // heqi
     r22 = spu_clz(r11);
     r19 = spu_clz(r2);
     r20 = spu_il(1);
@@ -18692,7 +18356,7 @@ L_0EE48:
     r64 = spu_selb(r23, r64, r21);
     r4 = spu_selb(r22, r4, r21);
     if (r20._u32[0] != 0) goto L_0EE48;
-    if ((int32_t)r11._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xEE70u); return; }   // heqi
+    if ((int32_t)r11._u32[0] == (int32_t)(0)) { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; halt(c, 0xEE70u); return; }   // heqi
     r16 = spu_clz(r11);
     r7 = spu_clz(r2);
     r13 = spu_il(1);
@@ -18748,7 +18412,7 @@ L_0EF28:
     r13 = spu_cwd(r1, 4);
     r20 = spu_shufb(r17, r7, r12);
     r3 = spu_shufb(r5, r20, r13);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
+    { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; c.ret = r0._u32[0]; return; }
 L_0EF3C:
     COV(846);
     r36 = spu_ori(r8, 0);
@@ -18768,7 +18432,7 @@ L_0EF3C:
     r63 = spu_ila(0xFFFF);
     r35 = spu_ila(0xFFFF);
     r36 = spu_or(r11, r64);
-    if ((int32_t)r51._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xEF80u); return; }   // heqi
+    if ((int32_t)r51._u32[0] == (int32_t)(0)) { g[3] = r3; g[4] = r4; g[8] = r8; g[11] = r11; g[12] = r12; g[13] = r13; g[17] = r17; g[18] = r18; g[20] = r20; g[29] = r29; g[35] = r35; g[36] = r36; g[51] = r51; g[52] = r52; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; halt(c, 0xEF80u); return; }   // heqi
     r9 = spu_clz(r51);
     r2 = spu_clz(r52);
     r3 = spu_il(1);
@@ -18816,7 +18480,7 @@ L_0EFA8:
     r43 = spu_selb(r48, r44, r47);
     r7 = spu_sf(r45, r7);
     r38 = spu_selb(r44, r43, r42);
-    if ((int32_t)r51._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xF040u); return; }   // heqi
+    if ((int32_t)r51._u32[0] == (int32_t)(0)) { g[2] = r2; g[3] = r3; g[4] = r4; g[7] = r7; g[8] = r8; g[9] = r9; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[17] = r17; g[18] = r18; g[20] = r20; g[23] = r23; g[24] = r24; g[29] = r29; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[78] = r78; halt(c, 0xF040u); return; }   // heqi
     r22 = spu_clz(r51);
     r15 = spu_clz(r7);
     r17 = spu_il(1);
@@ -18881,7 +18545,7 @@ L_0F068:
     r67 = spu_ceqi(r73, 0);
     r61 = spu_shli(r72, 16);
     r63 = spu_selb(r68, r66, r67);
-    if ((int32_t)r51._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xF148u); return; }   // heqi
+    if ((int32_t)r51._u32[0] == (int32_t)(0)) { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; halt(c, 0xF148u); return; }   // heqi
     r10 = spu_clz(r51);
     r3 = spu_clz(r7);
     r8 = spu_il(1);
@@ -18907,7 +18571,7 @@ L_0F170:
     r59 = spu_ceq(r57, r56);
     r58 = spu_clgt(r15, r60);
     r54 = spu_sfi(r59, 0);
-    if ((int32_t)r51._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xF1B8u); return; }   // heqi
+    if ((int32_t)r51._u32[0] == (int32_t)(0)) { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; halt(c, 0xF1B8u); return; }   // heqi
     r19 = spu_clz(r51);
     r14 = spu_clz(r52);
     r15 = spu_il(1);
@@ -18952,7 +18616,7 @@ L_0F240:
     r61 = spu_rotm(r18, r62);
     r32 = spu_ila(0xFFFF);
     r18 = spu_shl(r18, r14);
-    if ((int32_t)r11._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xF268u); return; }   // heqi
+    if ((int32_t)r11._u32[0] == (int32_t)(0)) { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[18] = r18; g[32] = r32; g[58] = r58; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; halt(c, 0xF268u); return; }   // heqi
     r19 = spu_clz(r11);
     r15 = spu_clz(r58);
     r16 = spu_il(1);
@@ -18973,7 +18637,7 @@ L_0F290:
     r59 = spu_selb(r19, r59, r17);
     if (r16._u32[0] != 0) goto L_0F290;
     r33 = spu_or(r60, r61);
-    if ((int32_t)r11._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xF2C0u); return; }   // heqi
+    if ((int32_t)r11._u32[0] == (int32_t)(0)) { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[32] = r32; g[33] = r33; g[34] = r34; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; halt(c, 0xF2C0u); return; }   // heqi
     r13 = spu_clz(r11);
     r21 = spu_clz(r58);
     r22 = spu_il(1);
@@ -19018,7 +18682,7 @@ L_0F2E8:
     r41 = spu_selb(r47, r45, r46);
     r39 = spu_selb(r44, r40, r43);
     r36 = spu_sf(r42, r41);
-    if ((int32_t)r11._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xF378u); return; }   // heqi
+    if ((int32_t)r11._u32[0] == (int32_t)(0)) { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[32] = r32; g[33] = r33; g[34] = r34; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; halt(c, 0xF378u); return; }   // heqi
     r22 = spu_clz(r11);
     r19 = spu_clz(r36);
     r20 = spu_il(1);
@@ -19038,7 +18702,7 @@ L_0F3A0:
     r79 = spu_selb(r23, r79, r21);
     r35 = spu_selb(r22, r35, r21);
     if (r20._u32[0] != 0) goto L_0F3A0;
-    if ((int32_t)r11._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xF3C8u); return; }   // heqi
+    if ((int32_t)r11._u32[0] == (int32_t)(0)) { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[79] = r79; halt(c, 0xF3C8u); return; }   // heqi
     r17 = spu_clz(r11);
     r5 = spu_clz(r36);
     r13 = spu_il(1);
@@ -19090,7 +18754,7 @@ L_0F48C:
     COV(856);
     r72 = spu_il(1);
     r73 = spu_ila(0xFFFF);
-    if ((int32_t)r12._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xF498u); return; }   // heqi
+    if ((int32_t)r12._u32[0] == (int32_t)(0)) { g[2] = r2; g[3] = r3; g[4] = r4; g[8] = r8; g[12] = r12; g[13] = r13; g[18] = r18; g[72] = r72; g[73] = r73; halt(c, 0xF498u); return; }   // heqi
     r8 = spu_clz(r12);
     r5 = spu_clz(r72);
     r6 = spu_il(1);
@@ -19137,7 +18801,7 @@ L_0F510:
     r34 = spu_and(r24, r57);
     r31 = spu_selb(r62, r13, r64);
     r29 = spu_selb(r60, r18, r64);
-    if ((int32_t)r30._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xF550u); return; }   // heqi
+    if ((int32_t)r30._u32[0] == (int32_t)(0)) { g[2] = r2; g[3] = r3; g[4] = r4; g[8] = r8; g[12] = r12; g[13] = r13; g[18] = r18; g[24] = r24; g[29] = r29; g[30] = r30; g[31] = r31; g[34] = r34; g[57] = r57; g[60] = r60; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; halt(c, 0xF550u); return; }   // heqi
     r14 = spu_clz(r30);
     r9 = spu_clz(r31);
     r10 = spu_il(1);
@@ -19179,7 +18843,7 @@ L_0F578:
     r40 = spu_selb(r46, r44, r45);
     r37 = spu_selb(r43, r38, r42);
     r35 = spu_sf(r41, r40);
-    if ((int32_t)r30._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xF5F8u); return; }   // heqi
+    if ((int32_t)r30._u32[0] == (int32_t)(0)) { g[2] = r2; g[3] = r3; g[4] = r4; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[18] = r18; g[23] = r23; g[24] = r24; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[34] = r34; g[35] = r35; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[60] = r60; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; halt(c, 0xF5F8u); return; }   // heqi
     r21 = spu_clz(r30);
     r17 = spu_clz(r35);
     r19 = spu_il(1);
@@ -19201,7 +18865,7 @@ L_0F620:
     if (r19._u32[0] != 0) goto L_0F620;
     r21 = spu_ceqi(r23, 0);
     r22 = spu_selb(r38, r37, r39);
-    if ((int32_t)r30._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xF650u); return; }   // heqi
+    if ((int32_t)r30._u32[0] == (int32_t)(0)) { g[2] = r2; g[3] = r3; g[4] = r4; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[60] = r60; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; halt(c, 0xF650u); return; }   // heqi
     r16 = spu_clz(r30);
     r23 = spu_clz(r35);
     r9 = spu_il(1);
@@ -19224,7 +18888,7 @@ L_0F678:
     r26 = spu_mpyu(r34, r7);
     r25 = spu_mpyh(r7, r34);
     r27 = spu_selb(r22, r32, r21);
-    if ((int32_t)r30._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xF6B0u); return; }   // heqi
+    if ((int32_t)r30._u32[0] == (int32_t)(0)) { g[2] = r2; g[3] = r3; g[4] = r4; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[60] = r60; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; halt(c, 0xF6B0u); return; }   // heqi
     r22 = spu_clz(r30);
     r19 = spu_clz(r31);
     r20 = spu_il(1);
@@ -19276,11 +18940,9 @@ L_0F750:
     r37 = spu_xsbh(r38);
     if (r37._u16[0] == 0) goto L_0EF28;
     goto L_0EF20;
-#undef SAVE
-#undef LOAD
 }
 
-// ---- 0x0F788 (28 blocks; called from 354C) ----
+// ---- 0x0F788 (28 blocks; called from 354C; 80 registers, 78 assigned; reaches 80, changes 78) ----
 void f_0F788(Run& c)
 {
     u128* const g = c.g;
@@ -19294,8 +18956,6 @@ void f_0F788(Run& c)
     Q r56 = g[56], r57 = g[57], r58 = g[58], r59 = g[59], r60 = g[60], r61 = g[61], r62 = g[62], r63 = g[63];
     Q r64 = g[64], r65 = g[65], r66 = g[66], r67 = g[67], r68 = g[68], r69 = g[69], r70 = g[70], r71 = g[71];
     Q r72 = g[72], r73 = g[73], r74 = g[74], r75 = g[75], r76 = g[76], r77 = g[77], r78 = g[78], r79 = g[79];
-#define SAVE() do { g[0] = r0; g[1] = r1; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; r17 = g[17]; r18 = g[18]; r19 = g[19]; r20 = g[20]; r21 = g[21]; r22 = g[22]; r23 = g[23]; r24 = g[24]; r25 = g[25]; r26 = g[26]; r27 = g[27]; r28 = g[28]; r29 = g[29]; r30 = g[30]; r31 = g[31]; r32 = g[32]; r33 = g[33]; r34 = g[34]; r35 = g[35]; r36 = g[36]; r37 = g[37]; r38 = g[38]; r39 = g[39]; r40 = g[40]; r41 = g[41]; r42 = g[42]; r43 = g[43]; r44 = g[44]; r45 = g[45]; r46 = g[46]; r47 = g[47]; r48 = g[48]; r49 = g[49]; r50 = g[50]; r51 = g[51]; r52 = g[52]; r53 = g[53]; r54 = g[54]; r55 = g[55]; r56 = g[56]; r57 = g[57]; r58 = g[58]; r59 = g[59]; r60 = g[60]; r61 = g[61]; r62 = g[62]; r63 = g[63]; r64 = g[64]; r65 = g[65]; r66 = g[66]; r67 = g[67]; r68 = g[68]; r69 = g[69]; r70 = g[70]; r71 = g[71]; r72 = g[72]; r73 = g[73]; r74 = g[74]; r75 = g[75]; r76 = g[76]; r77 = g[77]; r78 = g[78]; r79 = g[79]; } while (0)
 L_0F788:
     COV(864);
     r9 = spu_ori(r3, 0);
@@ -19319,7 +18979,7 @@ L_0F788:
     goto L_0F7D0;
 L_0F7D0:
     COV(865);
-    if ((int32_t)r11._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xF7D0u); return; }   // heqi
+    if ((int32_t)r11._u32[0] == (int32_t)(0)) { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; halt(c, 0xF7D0u); return; }   // heqi
     r23 = spu_clz(r11);
     r18 = spu_clz(r3);
     r19 = spu_il(1);
@@ -19339,7 +18999,7 @@ L_0F7F8:
     r71 = spu_selb(r24, r71, r21);
     r70 = spu_selb(r23, r70, r21);
     if (r19._u32[0] != 0) goto L_0F7F8;
-    if ((int32_t)r11._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xF820u); return; }   // heqi
+    if ((int32_t)r11._u32[0] == (int32_t)(0)) { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; halt(c, 0xF820u); return; }   // heqi
     r14 = spu_clz(r11);
     r8 = spu_clz(r3);
     r9 = spu_il(1);
@@ -19381,7 +19041,7 @@ L_0F848:
     r59 = spu_selb(r62, r60, r61);
     r55 = spu_selb(r59, r57, r58);
     r54 = spu_sf(r56, r55);
-    if ((int32_t)r11._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xF8D0u); return; }   // heqi
+    if ((int32_t)r11._u32[0] == (int32_t)(0)) { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[51] = r51; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; halt(c, 0xF8D0u); return; }   // heqi
     r23 = spu_clz(r11);
     r18 = spu_clz(r54);
     r19 = spu_il(1);
@@ -19401,7 +19061,7 @@ L_0F8F8:
     r53 = spu_selb(r24, r53, r21);
     r52 = spu_selb(r23, r52, r21);
     if (r19._u32[0] != 0) goto L_0F8F8;
-    if ((int32_t)r11._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xF920u); return; }   // heqi
+    if ((int32_t)r11._u32[0] == (int32_t)(0)) { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; halt(c, 0xF920u); return; }   // heqi
     r10 = spu_clz(r11);
     r4 = spu_clz(r54);
     r8 = spu_il(1);
@@ -19440,7 +19100,7 @@ L_0F948:
     r74 = spu_rotm(r2, r76);
     r72 = spu_shufb(r74, r5, r75);
     r3 = spu_shufb(r15, r72, r73);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
+    { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; g[77] = r77; g[78] = r78; g[79] = r79; c.ret = r0._u32[0]; return; }
 L_0F9C8:
     COV(870);
     r77 = spu_clgt(r8, r9);
@@ -19452,7 +19112,7 @@ L_0F9D0:
     r24 = spu_cwd(r1, 0);
     r26 = spu_shufb(r17, r5, r27);
     r3 = spu_shufb(r9, r26, r24);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
+    { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[8] = r8; g[9] = r9; g[10] = r10; g[12] = r12; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[77] = r77; g[78] = r78; c.ret = r0._u32[0]; return; }
 L_0F9E8:
     COV(872);
     r12 = spu_shl(r12, r14);
@@ -19466,7 +19126,7 @@ L_0F9E8:
     r36 = spu_rotm(r17, r37);
     r13 = spu_ila(0xFFFF);
     r17 = spu_shl(r17, r14);
-    if ((int32_t)r11._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xFA18u); return; }   // heqi
+    if ((int32_t)r11._u32[0] == (int32_t)(0)) { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[8] = r8; g[9] = r9; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[17] = r17; g[23] = r23; g[24] = r24; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; halt(c, 0xFA18u); return; }   // heqi
     r19 = spu_clz(r11);
     r10 = spu_clz(r34);
     r16 = spu_il(1);
@@ -19487,7 +19147,7 @@ L_0FA40:
     r32 = spu_selb(r19, r32, r18);
     if (r16._u32[0] != 0) goto L_0FA40;
     r7 = spu_or(r35, r36);
-    if ((int32_t)r11._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xFA70u); return; }   // heqi
+    if ((int32_t)r11._u32[0] == (int32_t)(0)) { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[21] = r21; g[23] = r23; g[24] = r24; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; halt(c, 0xFA70u); return; }   // heqi
     r10 = spu_clz(r11);
     r23 = spu_clz(r34);
     r24 = spu_il(1);
@@ -19526,7 +19186,7 @@ L_0FA98:
     r9 = spu_selb(r23, r19, r21);
     r6 = spu_selb(r9, r16, r18);
     r25 = spu_sf(r10, r6);
-    if ((int32_t)r11._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xFB10u); return; }   // heqi
+    if ((int32_t)r11._u32[0] == (int32_t)(0)) { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[21] = r21; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; halt(c, 0xFB10u); return; }   // heqi
     r23 = spu_clz(r11);
     r18 = spu_clz(r25);
     r19 = spu_il(1);
@@ -19546,7 +19206,7 @@ L_0FB38:
     r22 = spu_selb(r24, r22, r21);
     r20 = spu_selb(r23, r20, r21);
     if (r19._u32[0] != 0) goto L_0FB38;
-    if ((int32_t)r11._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xFB60u); return; }   // heqi
+    if ((int32_t)r11._u32[0] == (int32_t)(0)) { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; halt(c, 0xFB60u); return; }   // heqi
     r14 = spu_clz(r11);
     r5 = spu_clz(r25);
     r9 = spu_il(1);
@@ -19587,7 +19247,7 @@ L_0FBF8:
     COV(877);
     r65 = spu_il(1);
     r66 = spu_ila(0xFFFF);
-    if ((int32_t)r12._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xFC00u); return; }   // heqi
+    if ((int32_t)r12._u32[0] == (int32_t)(0)) { g[2] = r2; g[3] = r3; g[4] = r4; g[8] = r8; g[9] = r9; g[12] = r12; g[17] = r17; g[65] = r65; g[66] = r66; halt(c, 0xFC00u); return; }   // heqi
     r5 = spu_clz(r12);
     r23 = spu_clz(r65);
     r24 = spu_il(1);
@@ -19637,7 +19297,7 @@ L_0FC80:
     r27 = spu_and(r20, r50);
     r49 = spu_selb(r56, r9, r61);
     r25 = spu_selb(r54, r17, r61);
-    if ((int32_t)r28._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xFCD0u); return; }   // heqi
+    if ((int32_t)r28._u32[0] == (int32_t)(0)) { g[2] = r2; g[3] = r3; g[4] = r4; g[8] = r8; g[9] = r9; g[12] = r12; g[17] = r17; g[20] = r20; g[25] = r25; g[27] = r27; g[28] = r28; g[32] = r32; g[37] = r37; g[49] = r49; g[50] = r50; g[54] = r54; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[73] = r73; g[75] = r75; halt(c, 0xFCD0u); return; }   // heqi
     r14 = spu_clz(r28);
     r8 = spu_clz(r49);
     r10 = spu_il(1);
@@ -19658,7 +19318,7 @@ L_0FCF8:
     r51 = spu_selb(r14, r51, r11);
     if (r10._u32[0] != 0) goto L_0FCF8;
     r48 = spu_rotmi(r25, -16);
-    if ((int32_t)r28._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xFD28u); return; }   // heqi
+    if ((int32_t)r28._u32[0] == (int32_t)(0)) { g[2] = r2; g[3] = r3; g[4] = r4; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[14] = r14; g[15] = r15; g[17] = r17; g[20] = r20; g[25] = r25; g[27] = r27; g[28] = r28; g[32] = r32; g[37] = r37; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[54] = r54; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[73] = r73; g[75] = r75; halt(c, 0xFD28u); return; }   // heqi
     r23 = spu_clz(r28);
     r18 = spu_clz(r49);
     r19 = spu_il(1);
@@ -19699,7 +19359,7 @@ L_0FD50:
     r36 = spu_selb(r40, r38, r39);
     r30 = spu_selb(r36, r34, r35);
     r29 = spu_sf(r31, r30);
-    if ((int32_t)r28._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xFDD0u); return; }   // heqi
+    if ((int32_t)r28._u32[0] == (int32_t)(0)) { g[2] = r2; g[3] = r3; g[4] = r4; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[23] = r23; g[24] = r24; g[25] = r25; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[54] = r54; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[73] = r73; g[75] = r75; g[76] = r76; halt(c, 0xFDD0u); return; }   // heqi
     r10 = spu_clz(r28);
     r5 = spu_clz(r29);
     r7 = spu_il(1);
@@ -19719,7 +19379,7 @@ L_0FDF8:
     r26 = spu_selb(r11, r26, r9);
     r24 = spu_selb(r10, r24, r9);
     if (r7._u32[0] != 0) goto L_0FDF8;
-    if ((int32_t)r28._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xFE20u); return; }   // heqi
+    if ((int32_t)r28._u32[0] == (int32_t)(0)) { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[54] = r54; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[73] = r73; g[75] = r75; g[76] = r76; halt(c, 0xFE20u); return; }   // heqi
     r18 = spu_clz(r28);
     r13 = spu_clz(r29);
     r14 = spu_il(1);
@@ -19758,7 +19418,7 @@ L_0FE48:
     r74 = spu_rotm(r2, r76);
     r72 = spu_shufb(r74, r5, r75);
     r3 = spu_shufb(r15, r72, r73);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
+    { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[54] = r54; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[76] = r76; c.ret = r0._u32[0]; return; }
 L_0FEC8:
     COV(884);
     r78 = spu_ori(r8, 0);
@@ -19800,7 +19460,7 @@ L_0FF20:
     r61 = spu_ila(0xFFFF);
     r40 = spu_ila(0xFFFF);
     r41 = spu_or(r15, r72);
-    if ((int32_t)r47._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0xFF58u); return; }   // heqi
+    if ((int32_t)r47._u32[0] == (int32_t)(0)) { g[3] = r3; g[4] = r4; g[8] = r8; g[9] = r9; g[12] = r12; g[15] = r15; g[17] = r17; g[20] = r20; g[36] = r36; g[40] = r40; g[41] = r41; g[47] = r47; g[48] = r48; g[59] = r59; g[61] = r61; g[72] = r72; g[73] = r73; g[77] = r77; g[78] = r78; halt(c, 0xFF58u); return; }   // heqi
     r4 = spu_clz(r47);
     r23 = spu_clz(r48);
     r24 = spu_il(1);
@@ -19850,7 +19510,7 @@ L_10000:
     r54 = spu_selb(r57, r52, r56);
     r51 = spu_sf(r51, r9);
     r44 = spu_selb(r52, r54, r55);
-    if ((int32_t)r47._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0x10018u); return; }   // heqi
+    if ((int32_t)r47._u32[0] == (int32_t)(0)) { g[2] = r2; g[3] = r3; g[4] = r4; g[7] = r7; g[8] = r8; g[9] = r9; g[12] = r12; g[14] = r14; g[15] = r15; g[17] = r17; g[20] = r20; g[23] = r23; g[24] = r24; g[25] = r25; g[36] = r36; g[40] = r40; g[41] = r41; g[42] = r42; g[44] = r44; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[77] = r77; g[78] = r78; halt(c, 0x10018u); return; }   // heqi
     r23 = spu_clz(r47);
     r11 = spu_clz(r51);
     r19 = spu_il(1);
@@ -19917,7 +19577,7 @@ L_10040:
     r73 = spu_ceqi(r79, 0);
     r68 = spu_shli(r78, 16);
     r70 = spu_selb(r74, r72, r73);
-    if ((int32_t)r47._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0x10128u); return; }   // heqi
+    if ((int32_t)r47._u32[0] == (int32_t)(0)) { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[77] = r77; g[78] = r78; g[79] = r79; halt(c, 0x10128u); return; }   // heqi
     r19 = spu_clz(r47);
     r12 = spu_clz(r51);
     r17 = spu_il(1);
@@ -19951,7 +19611,7 @@ L_10150:
     r57 = spu_xsbh(r58);
     r54 = spu_clgt(r56, r44);
     r55 = spu_ceqhi(r57, 0);
-    if ((int32_t)r47._u32[0] == (int32_t)(0)) { SAVE(); halt(c, 0x101B0u); return; }   // heqi
+    if ((int32_t)r47._u32[0] == (int32_t)(0)) { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[77] = r77; g[78] = r78; g[79] = r79; halt(c, 0x101B0u); return; }   // heqi
     r10 = spu_clz(r47);
     r23 = spu_clz(r48);
     r24 = spu_il(1);
@@ -19990,19 +19650,15 @@ L_101D8:
     r30 = spu_or(r32, r33);
     r5 = spu_shufb(r30, r29, r31);
     r3 = spu_shufb(r28, r5, r9);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; g[17] = r17; g[18] = r18; g[19] = r19; g[20] = r20; g[21] = r21; g[22] = r22; g[23] = r23; g[24] = r24; g[25] = r25; g[26] = r26; g[27] = r27; g[28] = r28; g[29] = r29; g[30] = r30; g[31] = r31; g[32] = r32; g[33] = r33; g[34] = r34; g[35] = r35; g[36] = r36; g[37] = r37; g[38] = r38; g[39] = r39; g[40] = r40; g[41] = r41; g[42] = r42; g[43] = r43; g[44] = r44; g[45] = r45; g[46] = r46; g[47] = r47; g[48] = r48; g[49] = r49; g[50] = r50; g[51] = r51; g[52] = r52; g[53] = r53; g[54] = r54; g[55] = r55; g[56] = r56; g[57] = r57; g[58] = r58; g[59] = r59; g[60] = r60; g[61] = r61; g[62] = r62; g[63] = r63; g[64] = r64; g[65] = r65; g[66] = r66; g[67] = r67; g[68] = r68; g[69] = r69; g[70] = r70; g[71] = r71; g[72] = r72; g[73] = r73; g[74] = r74; g[75] = r75; g[77] = r77; g[78] = r78; g[79] = r79; c.ret = r0._u32[0]; return; }
 }
 
 // ---- 0x10258 sys_spu_thread_exit(status): wait for the tags, WrOutMbox status, stop 0x102 (2 blocks; called from
-// E570) ----
+// E570; 7 registers, 6 assigned; reaches all, changes 6) ----
 void f_10258(Run& c)
 {
     u128* const g = c.g;
     Q r0 = g[0], r2 = g[2], r3 = g[3], r4 = g[4], r5 = g[5], r6 = g[6], r7 = g[7];
-#define SAVE() do { g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; } while (0)
-#define LOAD() do { r0 = g[0]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; } while (0)
 L_10258:
     COV(892);
     r2 = spu_il(0);
@@ -20021,20 +19677,17 @@ L_10260:
     wrch(c, MFC_WrTagUpdate, r3);
     r2 = rdch(c, MFC_RdTagStat);
     wrch(c, SPU_WrOutMbox, r6);
-    { SAVE(); stop_end(c, 0x102u, 0x10294u, 0x10260u); return; }   // stop 0x102: the lift returns after it
-#undef SAVE
-#undef LOAD
+    { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; stop_end(c, 0x102u, 0x10294u, 0x10260u); return; }   // stop 0x102: the lift returns after it
 }
 
 // ---- 0x102A0 sys_spu_thread_send_event(spup, data0, data1): WrOutMbox data1, WrOutIntrMbox spup<<24|data0, RdInMbox
-// the result (3 blocks; called from E380, E4B4, E4BC, E534, E55C) ----
+// the result (3 blocks; called from E380, E4B4, E4BC, E534, E55C; 11 registers, 9 assigned; reaches 11, changes 9)
+// ----
 void f_102A0(Run& c)
 {
     u128* const g = c.g;
     Q r0 = g[0], r2 = g[2], r3 = g[3], r4 = g[4], r5 = g[5], r6 = g[6], r7 = g[7], r8 = g[8];
     Q r9 = g[9], r10 = g[10], r11 = g[11];
-#define SAVE() do { g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; } while (0)
-#define LOAD() do { r0 = g[0]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; } while (0)
 L_102A0:
     COV(894);
     r7 = spu_clgtbi(r3, 63);
@@ -20047,7 +19700,7 @@ L_102A0:
 L_102B8:
     COV(895);
     r3 = spu_ori(r6, 0);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
+    { g[2] = r2; g[3] = r3; g[4] = r4; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; c.ret = r0._u32[0]; return; }
 L_102C0:
     COV(896);
     r8 = spu_shli(r3, 24);
@@ -20063,18 +19716,15 @@ L_102C0:
     wrch(c, SPU_WrOutIntrMbox, r2);
     r6 = rdch(c, SPU_RdInMbox);
     goto L_102B8;
-#undef SAVE
-#undef LOAD
 }
 
-// ---- 0x102F8 sys_spu_thread_throw_event(spup, data0, data1) (2 blocks; called from DA30) ----
+// ---- 0x102F8 sys_spu_thread_throw_event(spup, data0, data1) (2 blocks; called from DA30; 10 registers, 9 assigned;
+// reaches 10, changes 9) ----
 void f_102F8(Run& c)
 {
     u128* const g = c.g;
     Q r0 = g[0], r2 = g[2], r3 = g[3], r4 = g[4], r5 = g[5], r6 = g[6], r7 = g[7], r8 = g[8];
     Q r9 = g[9], r10 = g[10];
-#define SAVE() do { g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; } while (0)
-#define LOAD() do { r0 = g[0]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; } while (0)
 L_102F8:
     COV(897);
     r8 = spu_clgtbi(r3, 63);
@@ -20095,20 +19745,17 @@ L_102F8:
 L_10338:
     COV(898);
     r3 = spu_ori(r6, 0);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; c.ret = r0._u32[0]; return; }
 }
 
 // ---- 0x10340 sys_spu_thread_receive_event(spuq, &d1, &d2, &d3): WrOutMbox spuq, stop 0x110, RdInMbox the result and
-// the three data words (3 blocks; called from E39C, E430, E4BC) ----
+// the three data words (3 blocks; called from E39C, E430, E4BC; 16 registers, 14 assigned; reaches all, changes 14)
+// ----
 void f_10340(Run& c)
 {
     u128* const g = c.g;
     Q r0 = g[0], r2 = g[2], r3 = g[3], r4 = g[4], r5 = g[5], r6 = g[6], r7 = g[7], r8 = g[8];
     Q r9 = g[9], r10 = g[10], r11 = g[11], r12 = g[12], r13 = g[13], r14 = g[14], r15 = g[15], r16 = g[16];
-#define SAVE() do { g[0] = r0; g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[6] = r6; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; } while (0)
-#define LOAD() do { r0 = g[0]; r2 = g[2]; r3 = g[3]; r4 = g[4]; r5 = g[5]; r6 = g[6]; r7 = g[7]; r8 = g[8]; r9 = g[9]; r10 = g[10]; r11 = g[11]; r12 = g[12]; r13 = g[13]; r14 = g[14]; r15 = g[15]; r16 = g[16]; } while (0)
 L_10340:
     COV(899);
     r8 = spu_ilhu(0x8001);
@@ -20120,12 +19767,12 @@ L_10340:
 L_10354:
     COV(900);
     r3 = spu_ori(r8, 0);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
+    { g[2] = r2; g[3] = r3; g[4] = r4; g[5] = r5; g[7] = r7; g[8] = r8; g[9] = r9; g[10] = r10; g[11] = r11; g[12] = r12; g[13] = r13; g[14] = r14; g[15] = r15; g[16] = r16; c.ret = r0._u32[0]; return; }
     // stop 0x110: the receive-event service; the reply (status, data1-3) is read from the inbound mailbox
 L_1035C:
     COV(901);
     wrch(c, SPU_WrOutMbox, r3);
-    { SAVE(); if (!stop(c, 0x110u, 0x10364u, 0x1035Cu)) return; }   // stop 0x110: on past it when the host services it
+    { g[2] = r2; g[8] = r8; g[9] = r9; if (!stop(c, 0x110u, 0x10364u, 0x1035Cu)) return; }   // stop 0x110: on past it when the host services it
     r8 = rdch(c, SPU_RdInMbox);
     r10 = spu_cwd(r4, 0);
     r11 = spu_cwd(r5, 0);
@@ -20144,17 +19791,13 @@ L_1035C:
     r3 = spu_shufb(r5, r4, r12);
     lsw(c, r6._u32[0] + 0x0, r3);
     goto L_10354;
-#undef SAVE
-#undef LOAD
 }
 
-// ---- 0x103B0 .fini (1 blocks; called from E0) ----
+// ---- 0x103B0 .fini (1 blocks; called from E0; 5 registers, 5 assigned; reaches 5, changes 5) ----
 void f_103B0(Run& c)
 {
     u128* const g = c.g;
     Q r0 = g[0], r1 = g[1], r80 = g[80], r81 = g[81], r126 = g[126];
-#define SAVE() do { g[0] = r0; g[1] = r1; g[80] = r80; g[81] = r81; g[126] = r126; } while (0)
-#define LOAD() do { r0 = g[0]; r1 = g[1]; r80 = g[80]; r81 = g[81]; r126 = g[126]; } while (0)
 L_103B0:
     COV(902);
     lsw(c, r1._u32[0] + 0x10, r0);
@@ -20168,9 +19811,7 @@ L_103B0:
     r81 = lsr(c, r1._u32[0] + 0x30);
     r126 = lsr(c, r1._u32[0] + 0x40);
     r1 = spu_ai(r1, 80);
-    { SAVE(); c.ret = g[0]._u32[0]; return; }
-#undef SAVE
-#undef LOAD
+    { g[0] = r0; g[1] = r1; g[80] = r80; g[81] = r81; g[126] = r126; c.ret = r0._u32[0]; return; }
 }
 
 struct BlockInfo { uint32_t address, function; };
@@ -21295,6 +20936,7 @@ Result call(uint8_t* ls, u128* gpr, uint32_t entry, const Host& host, Outcome* o
     case kStopped: return Result::stopped;
     case kEnded: return Result::ended;
     case kBadReturn: return Result::bad_return;
+    case kUnresolved: return Result::unresolved;
     default: return Result::handled;
     }
 }
