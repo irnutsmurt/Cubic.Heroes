@@ -186,7 +186,10 @@ setting's name.
 - [C] The port has no volume setting.
 - [M] The game's own OPTIONS screen has never had its settings changed
   under test (HANDOFF "Game coverage").
-- [H] Whether it offers its own music and effects volumes is not known.
+- [C] It has its own music and effects levels (2026-11-11, the audio boundary's audit: options +0x948 and
+  +0x94C, each an integer level the game's sound manager multiplies by 0.11; music = the sound list's volume
+  x the music master x the music level x 0.11 x the fade; effects = the list's volume x the effects level x
+  0.11; docs/OPENAL_MIGRATION_PLAN.md section 1).
 
 **Required.**
 - Three sliders, 0-100%, default 100, applied live and remembered.
@@ -199,11 +202,10 @@ setting's name.
   - or the game's own options, if it has music and effect volumes; the
     sliders then drive those.
 
-  Which of the two is to be established first, by reading the game's FMOD
-  set-up in the lift and its OPTIONS screen. Until then the music/effects
-  split is an open requirement, not a design.
-- The audio milestone (a native replacement for FMOD's mixing path) may
-  move where the split is made. The settings stay the same.
+  Established (2026-11-11): the game makes the split itself, in its own sound manager (above), which no
+  channel group or FMOD category is involved in. With OpenAL Soft in place of FMOD (the plan's M3-M5) the
+  sliders act in the native sound manager on the same two groups; the master on OpenAL Soft's listener
+  gain. The settings stay the same.
 
 **Tests.**
 - The output captured over a fixed scene with each slider at 0, 50 and 100:
@@ -364,5 +366,5 @@ update rolled back.
 - Remapping's own design (only its separation from the prompts is
   required here).
 - RTX.
-- The audio milestone's FMOD replacement (section 5's split may wait on
-  its findings).
+- OpenAL Soft in place of FMOD (docs/OPENAL_MIGRATION_PLAN.md): section 5's sliders land with its
+  native sound manager.

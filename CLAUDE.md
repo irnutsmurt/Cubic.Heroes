@@ -35,3 +35,12 @@ Technical updates describe the change and the relevant test results, nothing els
 - Do not rewrite pushed history or move the tags (`stable-2026-11-02`, `checkpoint-2026-11-04`,
   `r4-checkpoint-2026-11-05`) without the owner's explicit approval of the specific cleanup.
 - Never commit game data, extracted or generated files, keys or firmware, or the build directory.
+
+## Architecture requirements
+
+The final PC recompilation: native Vulkan graphics, OpenAL Soft audio, FFmpeg-based video decoding; no
+proprietary-middleware implementation (FMOD, Bink) or code translated from the game, Sony's SDK or firmware in
+public source or distributed artifacts -- game-derived code is generated on the player's machine from their own
+files and keys; no unnecessary PS3 machinery; a stable 60 fps with minimal spikes; correct behaviour throughout.
+Flag any decision that conflicts with these to the owner instead of changing the plan silently
+(docs/NATIVE_PORT.md section 1, docs/OPENAL_MIGRATION_PLAN.md).

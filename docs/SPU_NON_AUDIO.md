@@ -27,10 +27,50 @@ Sources:
 |---|---|---|---|
 | Bullet solver, commands 1 and 2 (5) | spu_0004 | **lifted**, run through SPURS: phys_direct declines them [C] | **yes**, in heavy-debris frames: the game thread waits for each command [M, section 6.1] |
 | Edge zlib's shell (3) | spu_0002 | native inflate inside the lifted task; the task's SPURS shell, its queue and its completion lifted [C] | in area loads (load time), not in frames [M, HANDOFF] |
-| Water (1) | spu_0000 | **fully lifted**, a persistent SPURS task signalled every frame [C] | no: 9.4% of one pool thread in the river, 0 in the fields [M, section 1] |
-| Waver (2) | spu_0001 | **native by default** (2026-11-10): reachable from the hero's update; ported bit-exact, checked offline and in the game (section 4) | -- |
+| Water (1) | spu_0000 | **native by default, generated on the player's machine** (2026-11-11; below): no SPURS instance, task or SPU thread | no: the PPU awaits nothing |
+| Waver (2) | spu_0001 | **native by default, generated on the player's machine** (2026-11-11; below): reachable from the hero's update | only while it runs: the game thread waits for the previous frame's task |
 | Bullet collision, pairs the native code does not cover (4) | spu_0003 | lifted, declined to SPURS by phys_direct [C] | how often: **not measured** |
 | Bullet collision (covered pairs), solver commands 4-6 | -- | native, issued and completed directly (section 6.1) | done |
+
+**Generated on the player's machine (2026-11-11, docs/OPENAL_MIGRATION_PLAN.md M1)** [C, M]. The owner's
+requirement: no code transcribed from the game in the repository. The water's and the waver's tasks were
+native through hand transcriptions of their SPU code (2026-11-10, sections 3 and 4); those are gone. Their
+native code is now **generated from the player's own lift** -- tools/gen_spu_native.py (generic: it turns any
+lifted SPU image into C++, every statement the lift's own) with tools/spu_native_task.cpp.in and a per-task
+configuration holding only where things are in the image (tools/spu_native/water.py, waver.py: its span, its
+entry, the functions the host calls, the image's SHA-256) -- by the setup (tools/setup_pipeline.py, the `spu`
+step) or the developer build (port/CMakeLists.txt), never committed and never in the prebuilt library. What
+stays in the repository is the host around it (port/native/spu_native.{h,cpp}, water_task.cpp, waver_task.cpp):
+the task's start as its main does it (the parameters in local store, its functions called with their
+registers), its transfers done at once on guest memory, and the game's side (the hooks, the worker threads,
+the native set-up and shutdown, the check modes). No SPU thread, SPURS or channel machinery runs: the
+generated code calls the host's DMA directly. A tree without the lift (or another executable's images, which
+the configuration's hash refuses) builds a stub, and the lifted tasks run.
+- **Bit-exact by construction, and checked**: offline against the lifted tasks (tests/native/water_task_check.cpp,
+  waver_task_check.cpp; x86-64-v3 and v2): the water's 300-step evolution and its made-up cases all equal; the
+  waver's 600-frame evolution and 1,049 runs all equal (1,046 done in the transfer order the task was read to
+  make, 3 halting as the lifted task does). In the game, check mode (rel29, M1's gate): the water at the
+  river, **2,475 of 2,475 steps equal** to the lifted task run beside it; the waver, 4 starts forced in the
+  fields, **1,085 of 1,092 frames equal** -- the 7 others at the starts and ends, the game's own races on the
+  block described in section 4 (5 equal the native frame on the block as it was at the wait, 1 with the other
+  texture; the first frame of the first start equals neither, as the last frames of a start did with the hand
+  port).
+- **Cost** [M, offline, this PC]: the water's step at width 128: **2,336 us generated (x86-64-v3; 6,437 us at
+  v2)** against **783 us for the hand transcription** in the game (rel27) and about 4 ms lifted on the SPU
+  pool; the waver's frame: **6,176 us generated** against 8,892 us lifted (the check's stand-in runtime) and
+  2.7 ms for the hand transcription in the game. -O3 changes nothing; the local store's byte order costs one
+  shuffle a load. About 13% of the waver's time is the float helpers' exact slow path (12% of its float
+  vectors -- an exponent gap over 29 in an add, a denormal or extended-range operand -- redone lane by lane;
+  measured by stubbing it out: 5.4 ms); the rest is the SPU code's own form, which the hand transcription
+  (the same helpers, far fewer calls a value) did not keep. The player's build compiles the generated code for
+  the player's own CPU (zig_build host_cpu), so v3's figure applies on a machine like this one.
+- **In the game** [M, rel29, uncapped]: the water's step **2.85 ms** on its worker thread (rel27: 0.78 ms),
+  22.7 steps a second at the river: about 6.5% of one core, off the critical path. The waver's frame **4.58 ms**
+  on its thread (rel27: 2.63 ms), max 9.61 ms; the game's frame waits for the previous frame's task, **0.90 ms
+  a frame on average while a ripple runs** (rel27: 0.005 ms). Against rel27 (docs/OPENAL_MIGRATION_PLAN.md
+  section 4.2): with 4 ripples forced in the fields, 3% fewer frames and the p99 7.4 ms against 5.4 (frames
+  over 6.94 ms 2.8% against 0.2%); at the river within the scene's spread. Always far above 60 fps; the
+  headroom above 144 fps while a ripple runs comes back with a faster generator (a follow-up).
 
 **What decides the order.**
 1. Solver commands 1 and 2 are the only remaining non-audio SPU work the
