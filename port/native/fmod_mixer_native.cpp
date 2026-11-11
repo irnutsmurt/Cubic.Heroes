@@ -5,7 +5,8 @@
 // spu_stop (the block event's receive, the thread's exit), and the indirect calls into plugins through the
 // runtime's overlay dispatch (where the native codec_raw and sfxreverb answer). So only the mixer's own code
 // changes; the SPU environment around it is the runtime's still (A3's retirements come after).
-// DOTHEROES_NATIVE_FMOD_MIXER: unset or 0 the lifted mixer (until checked in the game); 1 the native one.
+// DOTHEROES_NATIVE_FMOD_MIXER: unset or 1 the native mixer (the default since 2026-11-11: bit-exact on every
+// trace, faster in the game, the validation set passed with it); 0 the lifted one.
 #include "fmod_mixer.h"
 #include "spu_context.h"
 #include "spu_lifted_thread.h"
@@ -112,8 +113,11 @@ extern "C" void fmod_mixer_native_report(void)
 extern "C" void fmod_mixer_native_init(void)
 {
     const char* e = getenv("DOTHEROES_NATIVE_FMOD_MIXER");
-    g_on = e && *e && strcmp(e, "0") != 0;
-    if (!g_on) return;
+    g_on = !(e && !strcmp(e, "0"));
+    if (!g_on) {
+        fprintf(stderr, "[fmod-mixer] FMOD's mixer (image %d): lifted (DOTHEROES_NATIVE_FMOD_MIXER=0)\n", kMixerImage);
+        return;
+    }
     spu_thread_set_native(kMixerImage, mixer_thread);
     atexit(fmod_mixer_native_report);
     fprintf(stderr, "[fmod-mixer] FMOD's mixer (image %d): native\n", kMixerImage);

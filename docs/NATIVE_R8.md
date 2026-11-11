@@ -2160,8 +2160,11 @@ they carry the screen's font and prompt images). sfxreverb loads in the first du
 rel20 was the play build until rel21: rel20 with FMOD's codec_raw native by default (docs/AUDIO.md A1:
 rel20's validation set passed with it on; the default and =0 checked, the quit drive clean). rel21 was
 the play build until rel23: FMOD's sfxreverb native by default as well (docs/AUDIO.md A2: bit-exact in
-the game's check, the dungeon scenes, the reference scenes and the quit drive passed). **rel23 is the play
-build** (tests/scenarios/owner_play_r8.drive).
+the game's check, the dungeon scenes, the reference scenes and the quit drive passed). rel23 was the play
+build until rel27: FMOD's mixer native by default as well (docs/AUDIO.md A3: bit-exact on every trace,
+10-12% less work a block than the lifted mixer in the game; the validation set, the reference scenes, the
+save-data screen's flows, the quit drive and the install test passed). **rel27 is the play build**
+(tests/scenarios/owner_play_r8.drive).
 
 
 ## 10. Reproducing

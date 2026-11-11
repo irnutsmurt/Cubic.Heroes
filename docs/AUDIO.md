@@ -292,6 +292,14 @@ answer). Only the mixer's code changes. DOTHEROES_NATIVE_FMOD_MIXER=1; **off by 
   290.4 us (-12%)** -- the difference several times the runs' spread. The quit drive native passed (the
   terminate stopped the thread); a trace of the native dungeon run (24,386 blocks) replayed equal through the
   lifted mixer and the port.
+- **The default** (rel27, 2026-11-11): native; DOTHEROES_NATIVE_FMOD_MIXER=0 the lifted mixer. Its gate, as the
+  codec's: the eight validation scenes, sync validation (0 messages) and the normal-damage run with no crash,
+  the reference scenes 5 of 5 within the accepted figures, the save-data screen's four flows in a window (each
+  SAVE into the loaded save), the quit drive (the terminate stopped the native thread), =0 once, and the
+  player's install test (every stage, its prebuilt parts rebuilt with the mixer in them).
+- **What it retires**: the lifted mixer's code in normal running. The SPU thread, its context, the runtime's
+  channels, DMA, mailboxes, the overlay registry and the lock-line atomics are still what the native mixer
+  calls through: they go when the host provides them itself (the rest of A3, and A4).
 
 ### A0, the captures (2026-11-10, rel24) [C, M]
 
