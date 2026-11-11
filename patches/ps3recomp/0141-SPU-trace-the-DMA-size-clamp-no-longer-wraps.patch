@@ -1,0 +1,29 @@
+From ce271e600e77967357028495613e7997dae76631 Mon Sep 17 00:00:00 2001
+From: giteaguy <73799093+irnutsmurt@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 08:01:14 -0800
+Subject: [PATCH] SPU trace: the DMA size clamp no longer wraps
+
+A size near 4 GB made lsa + n wrap below the local store's end, so the clamp
+did not apply; compare against what is left instead.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ runtime/spu/spu_channels.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/runtime/spu/spu_channels.c b/runtime/spu/spu_channels.c
+index 792c758..c41320a 100644
+--- a/runtime/spu/spu_channels.c
++++ b/runtime/spu/spu_channels.c
+@@ -189,7 +189,7 @@ static void spu_trace_dma(spu_context* ctx, uint32_t cmd)
+             n += (((uint32_t)el[2] << 8) | el[3]) & 0x7FFF;
+         }
+     }
+-    if (lsa + n > 0x40000) n = 0x40000 - lsa;
++    if (n > 0x40000 - lsa) n = 0x40000 - lsa;   /* not lsa + n: a size near 4 GB would wrap */
+     spu_trace_put(3, cmd, lsa, ea, ctx->mfc_size, ctx->ls + lsa, n);
+ }
+ 
+-- 
+2.56.0.windows.3
+

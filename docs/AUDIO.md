@@ -216,6 +216,39 @@ the speaker mask gets the reflections, its lines' taps and the dry signal. No ti
 - **What it retires**: nothing of the runtime yet -- the lifted mixer still loads both plugins as overlays
   and branches to them; the hook answers instead. The overlay mechanism goes with the mixer (A3).
 
+### A3, the mixer: part 1, the port checked off-line (2026-11-11) [C, M]
+
+The mixer (image 6, entry 0xF0, 922 lifted pieces) as native code, generated from its lift: tools/gen_spu_native.py
+(general; the mixer's own facts in tools/fmod_mixer_config.py, the template tools/fmod_mixer.cpp.in) puts the
+pieces back into the image's 97 real functions (903 blocks): jumps as gotos, tail jumps as `musttail` calls (the
+host stack stays flat), the five jump tables read from the ELF as switches, every statement the lift's own on
+the same SPU helpers, the whole register file kept. What the lift does through the runtime becomes callbacks the
+host provides (port/native/fmod_mixer.h): the channel reads and writes (DMA, atomics, mailboxes, the
+decrementer), `rchcnt`, `stop` (0x110, the block event's receive; 0x102 and 0, the end) and `branch` (an
+indirect call into a resident plugin: codec_raw and sfxreverb can run natively, anything else lifted; a target
+no plugin holds is reported, never guessed). Regenerating reproduces port/native/fmod_mixer.cpp byte for byte.
+
+- **Structure** [C]: crt0 (0xF0) runs the constructors and main (0xE190): the parameter block GET, an event to
+  port 9, then the loop (0xE39C): receive the block event (spuq 0x63, stop 0x110), decrement the two counters
+  shared with the PPU (0xE6C8 on LS 0x36200 and 0x36280: GETLLAR, PUTLLC until it holds; 0xFEEDBEEF ends the
+  loop), the block (0xDA30: the DSP network over 256 samples, the plugin loader 0xD278, the units 0x5848, the
+  0x2000-byte PUT into the ring), the reply (an event to port 9).
+- **Checked on the game's inputs** (tests/native/fmod_mixer_check.cpp; the traces of section A0, replayed from
+  the thread's start: every channel value fed back, every output compared): **the river trace, 5,189 blocks,
+  and the dungeon trace, 5,375 blocks, every record equal for the lifted mixer and for the port, and the two
+  equal at every block boundary (all 128 registers, the whole local store)**; at x86-64-v3 and v2.
+- **Synthesized cases** (block states sampled from the traces, mutated, and single functions with drawn
+  arguments): 77,858 compared at both levels, all equal (returns, halts at the same PC, stops).
+- **Coverage**: 347 of 903 blocks from the traces, 753 with the synthesized cases. Not taken: DSP-unit
+  variants not active in the traces' span, 64-bit divide paths for operands that never occur, a mode-8
+  callback, codec setposition paths, the main loop's other path (the thread's r3 = -1), the quit path.
+- **Not yet covered on real inputs**: both traces end about 28 s after the mixer starts, before their scenes'
+  gameplay -- sfxreverb is never called in them and the plugin call at 0x6118 never runs. A trace that reaches
+  the dungeon is the next step, then the port in the game (part 2: in place of the SPU thread, its callbacks on
+  the runtime's channels), then the host's own services (A3's retirements, A4's atomics).
+- No speed difference yet (the replays run equally fast; the whole register file is saved and loaded around
+  each call -- liveness analysis is the obvious next optimisation).
+
 ### A0, the captures (2026-11-10, rel24) [C, M]
 
 A channel trace of one SPU thread (ps3recomp spu_channels.c; SPU_TRACE_IMAGE=<runtime image id>,
