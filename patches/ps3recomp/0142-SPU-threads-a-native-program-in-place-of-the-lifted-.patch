@@ -1,0 +1,83 @@
+From b96346a2f05bd8d182539f9a7671015c48ac27f0 Mon Sep 17 00:00:00 2001
+From: giteaguy <73799093+irnutsmurt@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 08:22:46 -0800
+Subject: [PATCH] SPU threads: a native program in place of the lifted one
+
+spu_thread_set_native(image, fn): a thread that starts in that image runs fn
+on its context, under the same halt landing pad, instead of the lifted code
+from the entry; fn returns when the thread ends with the status and stop code
+a lifted stop would leave. The native program's channel operations and stops
+go through the same spu_rdch/spu_wrch/spu_stop, so the trace, terminate and
+the stop services work unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ runtime/spu/spu_lifted_thread.c | 23 ++++++++++++++++++++++-
+ runtime/spu/spu_lifted_thread.h | 10 ++++++++++
+ 2 files changed, 32 insertions(+), 1 deletion(-)
+
+diff --git a/runtime/spu/spu_lifted_thread.c b/runtime/spu/spu_lifted_thread.c
+index c11e1a8..ec15bd2 100644
+--- a/runtime/spu/spu_lifted_thread.c
++++ b/runtime/spu/spu_lifted_thread.c
+@@ -9,6 +9,19 @@
+ void spu_trace_thread_begin(spu_context* ctx);
+ void spu_trace_thread_end(void);
+ 
++/* spu_thread_set_native: the images whose threads run a native program. */
++#define SPU_NATIVE_THREADS 8
++static struct { int image; spu_thread_native_fn fn; } s_native[SPU_NATIVE_THREADS];
++
++void spu_thread_set_native(int image_id, spu_thread_native_fn fn)
++{
++    for (int i = 0; i < SPU_NATIVE_THREADS; i++)
++        if (s_native[i].fn && s_native[i].image == image_id) { s_native[i].fn = fn; return; }
++    for (int i = 0; i < SPU_NATIVE_THREADS; i++)
++        if (!s_native[i].fn) { s_native[i].image = image_id; s_native[i].fn = fn; return; }
++    fprintf(stderr, "[SPU] spu_thread_set_native: no room for image %d\n", image_id);
++}
++
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+@@ -126,7 +139,15 @@ void spu_lifted_thread_run(spu_context* ctx, spu_lifted_thread_result* out)
+      * landing pad catches an SPU that stops from inside a nested call, and
+      * drains the tail-transfer chain when it returns normally. */
+     spu_trace_thread_begin(ctx);   /* SPU_TRACE_IMAGE: a channel trace of this thread (spu_channels.c) */
+-    spu_run_with_halt(spu_indirect_branch, ctx);
++    {
++        spu_thread_native_fn nat = NULL;
++        for (int i = 0; i < SPU_NATIVE_THREADS; i++)
++            if (s_native[i].fn && s_native[i].image == ctx->image_id) nat = s_native[i].fn;
++        if (nat)
++            fprintf(stderr, "[SPU] tid=0x%X image %d: its native program in place of the lifted one\n",
++                    ctx->spu_id, ctx->image_id);
++        spu_run_with_halt(nat ? nat : spu_indirect_branch, ctx);
++    }
+     spu_trace_thread_end();
+ 
+     /* What the SPU meant by stopping. The SPU-side sys_spu_thread_exit ABI
+diff --git a/runtime/spu/spu_lifted_thread.h b/runtime/spu/spu_lifted_thread.h
+index 21384ba..b71f69d 100644
+--- a/runtime/spu/spu_lifted_thread.h
++++ b/runtime/spu/spu_lifted_thread.h
+@@ -63,6 +63,16 @@ void spu_lifted_thread_setup(struct spu_context* ctx,
+ void spu_lifted_thread_run(struct spu_context* ctx,
+                            spu_lifted_thread_result* out);
+ 
++/* A native program in place of a thread's lifted one: registered for the
++ * runtime image id a thread starts in, the thread runs it -- on the same
++ * context, under the same halt landing pad, its channel operations through
++ * the same spu_rdch/spu_wrch/spu_stop -- instead of the lifted code from the
++ * entry. It returns when the thread ends, with ctx->status and stop_code set
++ * as the lifted program's stop would leave them. Register before the thread
++ * starts; a NULL fn removes it. */
++typedef void (*spu_thread_native_fn)(struct spu_context* ctx);
++void spu_thread_set_native(int image_id, spu_thread_native_fn fn);
++
+ #ifdef __cplusplus
+ }
+ #endif
+-- 
+2.56.0.windows.3
+

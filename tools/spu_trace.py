@@ -32,7 +32,11 @@ def main():
     while off + 24 <= len(data):
         kind, a, b, c, d, ln = struct.unpack_from("<IIIIII", data, off)
         off += 24
-        if kind not in KIND or off + ln > len(data):
+        if kind in KIND and off + ln > len(data):   # the process ended mid-write: the last record cut off
+            print("the last record is cut off (kind %s at offset %d): the trace ends there" % (KIND[kind], off - 24))
+            off = len(data)
+            break
+        if kind not in KIND:
             sys.exit("bad record at offset %d (kind %d, n %d)" % (off - 24, kind, ln))
         n += 1
         kinds[kind] += 1
@@ -57,8 +61,8 @@ def main():
             elif kind == 3: seq.append("%s(%X<-%08X,%X)" % (CMD.get(a & 0xFF, hex(a & 0xFF)), b, c, d))
             elif kind == 4: seq.append("stop%X" % a)
         off += ln
-    if off != len(data):
-        sys.exit("trailing %d bytes" % (len(data) - off))
+    if off < len(data):   # a partial record header at the end: cut off as above
+        print("the last %d bytes are a cut-off record header" % (len(data) - off))
     print("records: %d; %s; ended: %s" % (n, ", ".join("%s %d" % (KIND[k], v) for k, v in sorted(kinds.items())),
                                           {1: "the size limit", 2: "the thread ended", None: "no end record (cut off)"}[end]))
     print("stops: %s; blocks (0x110 receives): %d" % (", ".join("0x%X x%d" % (k, v) for k, v in sorted(stops.items())), stops[0x110]))

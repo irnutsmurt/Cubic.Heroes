@@ -248,6 +248,33 @@ no plugin holds is reported, never guessed). Regenerating reproduces port/native
   the runtime's channels), then the host's own services (A3's retirements, A4's atomics).
 - No speed difference yet (the replays run equally fast; the whole register file is saved and loaded around
   each call -- liveness analysis is the obvious next optimisation).
+- **On real inputs into the dungeon** (2026-11-11): a trace of the whole dungeon run (9,000 MB budget; 24,070
+  blocks, about 128 s; the process ended mid-record, which the reader and the checker take as the trace's end):
+  15,308 sfxreverb calls through the plugin call at 0x6118 and 152,857 codec_raw calls; **every record equal for
+  the lifted mixer and the port, equal at every block boundary**. The plugin path is covered on the game's inputs.
+
+### A3, the mixer: part 2, in the game (2026-11-11, rel25) [C, M]
+
+The mixer's thread runs the port in place of its lifted program: ps3recomp's spu_thread_set_native (a native
+program for the image a thread starts in, on the same context and halt landing pad) and
+port/native/fmod_mixer_native.cpp, its callbacks on the runtime's own services -- spu_rdch / spu_wrch / spu_rchcnt
+(DMA, the atomics, the mailboxes, the decrementer), spu_stop as the lift does it (0x110 the block event's receive,
+0x102 the exit), and the plugin calls through the runtime's overlay dispatch (the native codec_raw and sfxreverb
+answer). Only the mixer's code changes. DOTHEROES_NATIVE_FMOD_MIXER=1; **off by default**.
+
+- **rel25, native**: the river fight, the menus' music, the first dungeon's approach (17,138 sfxreverb calls), the
+  exit after its boss: no crash, no halt, the drives passed. The quit drive: the group's terminate stopped the
+  native thread (`1 thread(s) stopped`), 28,721 blocks and 181,028 plugin calls in that run.
+- **Its own run checked**: a trace of the native mixer's dungeon run (24,445 blocks) replayed off-line by the
+  lifted mixer and by the port: every record equal, every block boundary equal -- what the native mixer did in
+  the game is what the lifted one does on the same inputs.
+- **Speed: slower.** The mixer's work a block (the SPU thread report: its run between events), the river fight:
+  **150.6 us native against 126.0 us lifted** (the menus 169.0 us native; the dungeon 324.1 us native). The
+  port saves and loads the whole register file around every call and callback; the lift works on the context's
+  registers in place. Not adopted as the default: the next steps are the generator's liveness (only the live
+  registers around a call), then the host's own services in place of the runtime's channels (A3's
+  retirements, A4's atomics). The absolute cost is small (about 25 us in a 5,333 us block, on a thread that
+  waits the rest), but a native step that is slower is not taken.
 
 ### A0, the captures (2026-11-10, rel24) [C, M]
 
