@@ -301,6 +301,7 @@ add_library(dotheroes_native STATIC native/bullet_cd_task.cpp native/bullet_solv
     native/phys_direct.cpp
     native/dev_state.cpp native/inflate.c native/edge_inflate.c native/inflate_direct.cpp native/water_task.cpp native/waver_task.cpp native/waver_game.cpp
     native/fmod_codec_raw.cpp native/fmod_codec_native.cpp native/fmod_sfxreverb.cpp
+    native/fmod_mixer.cpp native/fmod_mixer_native.cpp
     # R1's boundary capture and R3's recorder and target watch: linked only
     # when a development lift's entry observers reference them
     # (tools/r1_dev_lift.sh)

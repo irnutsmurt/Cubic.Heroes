@@ -38,6 +38,7 @@ extern "C" void dev_waver_init(void);   /* phys_hooks.cpp */
 #include "native/waver_game.h"
 extern "C" void fmod_codec_native_init(void);   /* native/fmod_codec_native.cpp */
 extern "C" void dotheroes_ui_assets_init(void); /* ui_assets.cpp */
+extern "C" void fmod_mixer_native_init(void);   /* native/fmod_mixer_native.cpp */
 #include "native/memtest.h"
 #include "ps3emu/ps3_strict.h"
 #include "ps3emu/ps3_ftrace.h"
@@ -851,6 +852,7 @@ int main(int argc, char** argv)
     waver_game_init();               /* native/waver_game.cpp: DOTHEROES_NATIVE_WAVER */
     fmod_codec_native_init();        /* native/fmod_codec_native.cpp: DOTHEROES_NATIVE_FMOD_CODEC */
     dotheroes_ui_assets_init();      /* ui_assets.cpp: the save-data screen's font and prompt images */
+    fmod_mixer_native_init();        /* native/fmod_mixer_native.cpp: DOTHEROES_NATIVE_FMOD_MIXER */
 #if defined(PS3RECOMP_SPU_INTERPRETER) && !PS3RECOMP_SPU_INTERPRETER
     /* DOTHEROES_R8_INTERP_TEST=1 (R8, docs/NATIVE_R8.md): ask for the SPU
      * interpreter this build does not have, as SPU code with no lift would --
