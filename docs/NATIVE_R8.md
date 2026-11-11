@@ -2157,7 +2157,9 @@ check bit-exact with the clock replayed (docs/AUDIO.md A1: 267,517 and 102,959 c
 quit drive clean; the eight validation scenes, sync validation and the normal-damage run with no crash;
 the reference scenes passed; the player's install test passes every stage (its prebuilt parts rebuilt:
 they carry the screen's font and prompt images). sfxreverb loads in the first dungeon's scenes (A2 needed).
-**rel20 is the play build** (tests/scenarios/owner_play_r8.drive).
+rel20 was the play build until rel21: rel20 with FMOD's codec_raw native by default (docs/AUDIO.md A1:
+rel20's validation set passed with it on; the default and =0 checked, the quit drive clean). **rel21 is
+the play build** (tests/scenarios/owner_play_r8.drive).
 
 
 ## 10. Reproducing

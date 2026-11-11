@@ -1,4 +1,5 @@
-# A play session for the owner on R8's release (docs/NATIVE_R8.md: build/r8/rel20 -- 2026-11-10: rel19 with the
+# A play session for the owner on R8's release (docs/NATIVE_R8.md: build/r8/rel21 -- 2026-11-10: rel20 with FMOD's
+# codec_raw native by default (docs/AUDIO.md A1); rel20: rel19 with the
 # save-data screen that draws itself (docs/SAVE_UI.md: in-game saves go to the save chosen); rel19: rel16 with
 # quitting fixed (section 9.9: the SPU group terminate) and FMOD's codec_raw port built in, off; rel16: rel13 with the
 # water's and the waver's native scheduling, the physics managers' table, the audio counters; before it rel8b's tree with the RPCS3
@@ -26,7 +27,7 @@
 # saves. Close the window when done. If a scene looks wrong, the session can be
 # started with DOTHEROES_PPFX_DEPTH_CLAMP=0 or DOTHEROES_PPFX_DEPTH_D32=1 in the
 # environment to compare (the depth as before).
-#! env BIN=build/r8/rel20/dotheroes.exe GAMEDATA=build/play-route/gamedata RUNS_IN=build/sessions KEEP_RUNS=1000 PREEMPT_TESTS=1
+#! env BIN=build/r8/rel21/dotheroes.exe GAMEDATA=build/play-route/gamedata RUNS_IN=build/sessions KEEP_RUNS=1000 PREEMPT_TESTS=1
 #! env DOTHEROES_PPFX_NATIVE=1 DOTHEROES_NATIVE_CD=1 DOTHEROES_NATIVE_SOLVER=1,2,4,5,6 GCM_WRAP_LAP=1 DOTHEROES_PRESENT_ONCE=1
 #! env DOTHEROES_BENCH=1 PS3RECOMP_VK_PRESENT_MODE=fifo DOTHEROES_FPS=0 DOTHEROES_DEV_CANT_DIE=0 PS3_SAVEDATA_PICKER=1
 #! env WINDOW=1 PS3RECOMP_VK_FULLSCREEN=1 AUDIO=1 PS3_OSD_FPS=2 DUMP=0 SHOT_EVERY=0 PS3_VERBOSE=0

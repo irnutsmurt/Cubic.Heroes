@@ -1,8 +1,8 @@
 // FMOD's codec_raw overlay (SPU image 9) run natively in the game (docs/AUDIO.md step A1;
 // fmod_codec_raw.h for the port itself): the runtime's native-overlay hook (spu_overlay_set_native,
 // ps3recomp 0136) calls this on the FMOD mixer's indirect branches into the resident overlay.
-// DOTHEROES_NATIVE_FMOD_CODEC: unset or 0 the lifted overlay (until checked in the game); 1 native;
-// check: at each call the native one on a copy of the local store and the registers (its DMA a GET
+// DOTHEROES_NATIVE_FMOD_CODEC: unset or 1 native (the default since 2026-11-10: bit-exact in the check,
+// the validation scenes passed with it); 0 the lifted overlay; check: at each call the native one on a copy of the local store and the registers (its DMA a GET
 // stand-in from guest memory, the decrementer the runtime's), then the lifted one run to its return
 // with its decrementer reads logged, then the two compared (the whole local store, r0, r1, r3,
 // r80-r127). The read pacing keeps a clock in the local store from the decrementer, which the two runs
@@ -207,8 +207,11 @@ extern "C" void fmod_codec_native_report(void)
 extern "C" void fmod_codec_native_init(void)
 {
     const char* e = getenv("DOTHEROES_NATIVE_FMOD_CODEC");
-    if (!e || !*e || !strcmp(e, "0")) return;
-    g_mode = !strcmp(e, "check") ? kCheck : kNative;
+    if (e && !strcmp(e, "0")) {
+        fprintf(stderr, "[codec-raw] FMOD's codec_raw overlay: lifted (DOTHEROES_NATIVE_FMOD_CODEC=0)\n");
+        return;
+    }
+    g_mode = e && !strcmp(e, "check") ? kCheck : kNative;
     spu_overlay_set_native(native_call);
     atexit(fmod_codec_native_report);
     fprintf(stderr, "[codec-raw] FMOD's codec_raw overlay: %s\n", g_mode == kNative ? "native" : "check (native beside lifted)");

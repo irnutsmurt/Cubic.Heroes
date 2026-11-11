@@ -141,9 +141,8 @@ cellAudio's ring and notify, the host backend. The downmix is reviewed
 separately: the console's rule for 7.1 to stereo against ours, as a
 behaviour change of its own.
 
-Status: section 1 mapped (2026-11-10). A0: the counters done, the captures not yet (below). A1: ported and
-checked in the game, bit-exact with the clock replayed (rel20); off by default until the validation scenes
-run with it on (below).
+Status: section 1 mapped (2026-11-10). A0: the counters done, the captures not yet (below). A1: ported, checked in the game bit-exact with the clock replayed (rel20), **native by default since
+rel21** (below); DOTHEROES_NATIVE_FMOD_CODEC=0 keeps the lifted overlay.
 
 ### A1, codec_raw (2026-11-10) [C, M]
 
@@ -180,6 +179,13 @@ calls `read` (link 0x490) and `setposition` (0x3D0) through its codec object.
 - **Native** (rel17): 171,274 and 266,882 calls, none declined, no halt; the mixer's work a block 128.7 us
   in the river against 125.3 us lifted -- no gain to speak of (it copies memory), and none expected: A1 is
   a step to A3 (the mixer), which needs its plugins native.
+- **The validation set with it on** (rel20, DOTHEROES_NATIVE_FMOD_CODEC=1, build/r8/cc20on_run.sh): the eight
+  scenes, sync validation (0 messages) and the normal-damage run with no crash -- 1,582,504 native calls,
+  none declined, no halt. The reference scenes: 4 of 5 within the accepted figures; entry_hall's floor
+  reflection was far outside them once (refl mean 2.56 against 0.18 accepted), with the camera where it
+  should be. Run again alone, twice with the codec native and twice lifted: all four within the figures
+  as in rel16-rel20. A one-off, not the codec's (which touches no picture); its cause is not known.
+- **The default** (rel21): native; =0 the lifted overlay (checked: a river run each way, the quit drive).
 
 ### A0, the counters (2026-11-10, rel16) [M]
 
