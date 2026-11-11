@@ -185,7 +185,8 @@ int codec_call(spu_context* ctx, uint32_t link, uint32_t delta)
 }
 
 // ---- FMOD's sfxreverb (image 25; docs/AUDIO.md step A2, fmod_sfxreverb.h) ------------------------------
-// DOTHEROES_NATIVE_FMOD_REVERB: unset or 0 the lifted overlay (until checked in the game); 1 native; check:
+// DOTHEROES_NATIVE_FMOD_REVERB: unset or 1 native (the default since 2026-11-10: bit-exact in the game's
+// check); 0 the lifted overlay; check:
 // the native call on copies of the local store and the registers -- its GETs read guest memory, its PUTs
 // kept aside (a later GET in the same call sees them) -- then the lifted one on the context, then the whole
 // local store, all 128 registers and every byte the native one would have PUT compared with what the
@@ -345,9 +346,9 @@ extern "C" void fmod_codec_native_init(void)
         fprintf(stderr, "[codec-raw] FMOD's codec_raw overlay: %s\n", g_mode == kNative ? "native" : "check (native beside lifted)");
     }
     const char* r = getenv("DOTHEROES_NATIVE_FMOD_REVERB");
-    g_rmode = !r || !*r || !strcmp(r, "0") ? kOff : !strcmp(r, "check") ? kCheck : kNative;
-    if (g_rmode != kOff)
-        fprintf(stderr, "[sfxreverb] FMOD's sfxreverb overlay: %s\n", g_rmode == kNative ? "native" : "check (native beside lifted)");
+    g_rmode = r && !strcmp(r, "0") ? kOff : r && !strcmp(r, "check") ? kCheck : kNative;
+    fprintf(stderr, "[sfxreverb] FMOD's sfxreverb overlay: %s\n", g_rmode == kNative ? "native" : g_rmode == kCheck ?
+            "check (native beside lifted)" : "lifted (DOTHEROES_NATIVE_FMOD_REVERB=0)");
     if (g_mode == kOff && g_rmode == kOff) return;
     spu_overlay_set_native(native_call);
     atexit(fmod_codec_native_report);

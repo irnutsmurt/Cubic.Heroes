@@ -143,7 +143,7 @@ behaviour change of its own.
 
 Status: section 1 mapped (2026-11-10). A0: the counters done, the captures not yet (below). A1: ported, checked in the game bit-exact with the clock replayed (rel20), **native by default since
 rel21** (below); DOTHEROES_NATIVE_FMOD_CODEC=0 keeps the lifted overlay. A2: sfxreverb ported and bit-exact
-in the game (rel22); off by default (DOTHEROES_NATIVE_FMOD_REVERB) until its gate (below).
+in the game (rel22), **native by default since rel23** (DOTHEROES_NATIVE_FMOD_REVERB=0 keeps it lifted).
 
 ### A1, codec_raw (2026-11-10) [C, M]
 
@@ -209,6 +209,12 @@ the speaker mask gets the reflections, its lines' taps and the dry signal. No ti
   compared: **the first dungeon's approach 17,302 calls, the exit after its boss 1,886, all equal** (77,859 and
   8,487 PUTs), none run lifted only. Native (=1): 17,176 and 1,870 calls, none declined, no halt; the drives
   passed.
+- **The default** (rel23): native. Its gate -- it runs only in the scenes that load it, both of which passed
+  native and in check mode -- the dungeon scene with the default (14,070 native calls) and with =0 (lifted),
+  the exit after the boss (1,886), the reference scenes (5 of 5 within the accepted figures, the dungeon
+  door's among them), the quit drive: all passed.
+- **What it retires**: nothing of the runtime yet -- the lifted mixer still loads both plugins as overlays
+  and branches to them; the hook answers instead. The overlay mechanism goes with the mixer (A3).
 
 ### A0, the counters (2026-11-10, rel16) [M]
 

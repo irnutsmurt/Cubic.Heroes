@@ -2158,8 +2158,10 @@ quit drive clean; the eight validation scenes, sync validation and the normal-da
 the reference scenes passed; the player's install test passes every stage (its prebuilt parts rebuilt:
 they carry the screen's font and prompt images). sfxreverb loads in the first dungeon's scenes (A2 needed).
 rel20 was the play build until rel21: rel20 with FMOD's codec_raw native by default (docs/AUDIO.md A1:
-rel20's validation set passed with it on; the default and =0 checked, the quit drive clean). **rel21 is
-the play build** (tests/scenarios/owner_play_r8.drive).
+rel20's validation set passed with it on; the default and =0 checked, the quit drive clean). rel21 was
+the play build until rel23: FMOD's sfxreverb native by default as well (docs/AUDIO.md A2: bit-exact in
+the game's check, the dungeon scenes, the reference scenes and the quit drive passed). **rel23 is the play
+build** (tests/scenarios/owner_play_r8.drive).
 
 
 ## 10. Reproducing
