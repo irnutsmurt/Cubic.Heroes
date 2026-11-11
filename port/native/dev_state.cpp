@@ -109,7 +109,6 @@ extern "C" void water_task_report(void);
 extern "C" void ppu_promo_report(void);
 extern "C" void dev_waver_report(void);
 extern "C" void waver_game_report(void);
-extern "C" void fmod_codec_native_report(void);
 
 namespace {
 
@@ -598,7 +597,6 @@ void stop_loop()
         ppu_promo_report();        // promo_check.cpp: a PPU_PROMO_CHECK build's count (else nothing)
         dev_waver_report();        // phys_hooks.cpp: DOTHEROES_DEV_WAVER's starts and frame times
         waver_game_report();       // waver_game.cpp: the waver's native frames or its check
-        fmod_codec_native_report();   // fmod_codec_native.cpp: codec_raw's native calls or its check
         fflush(stdout);
         fflush(stderr);
 #ifdef _WIN32

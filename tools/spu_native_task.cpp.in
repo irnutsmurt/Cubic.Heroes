@@ -1,0 +1,207 @@
+// @TITLE@ -- native code GENERATED on this machine by tools/gen_spu_native.py from the lift of the player's
+// own executable (@SOURCE@) and the configuration @CONFIG@ with tools/spu_native_task.cpp.in. It is not
+// part of the project's source and is not distributed: regenerate it, do not edit it
+// (port/native/spu_native.h: the interface).
+//
+// One C++ function per SPU function (f_<entry>), each of the lift's functions a labelled block in it
+// (L_<address>), every statement the lift's own, in its order: the instruction helpers of spu_helpers.h on
+// registers r0-r127 (word 0 the preferred slot), lsr / lsw the local store as spu_ls_read128 / spu_ls_write128
+// address it. A function holds the registers it names in locals, loaded from the register file at entry;
+// around a call it stores only the assigned ones the callee can reach and reloads only those the callee can
+// change; at a return, exit, stop, tail jump and branch to the host it stores every one it assigned. So at
+// every callback and at every exit the register file is what the lift leaves in ctx->gpr.
+#include "spu_native.h"
+
+#include <cstring>
+
+#include "spu_helpers.h"   // the runtime's exact SPU semantics (the lift's own)
+
+// Generated: every block of the lift is a label, some reached by no goto, and not every image uses every helper.
+#if defined(__clang__) || defined(__GNUC__)
+#pragma GCC diagnostic ignored "-Wunused-label"
+#pragma GCC diagnostic ignored "-Wunused-function"
+#pragma GCC diagnostic ignored "-Wunused-const-variable"
+#endif
+
+namespace @NAMESPACE@ {
+
+using namespace spu_native;
+
+constexpr uint32_t kCodeBegin = @CODE_BEGIN@, kCodeEnd = @CODE_END@;
+constexpr int kBlockCount = @BLOCK_COUNT@;
+constexpr int kEntryCount = @ENTRY_COUNT@;
+
+const char* const kSource = "@SOURCE@";
+
+#define COV(k) ((void)0)
+
+#if defined(__clang__)
+#define TAIL [[clang::musttail]] return
+#else
+#define TAIL return
+#endif
+
+namespace {
+
+using Q = u128;
+
+enum Exit : uint32_t { kNone = 0, kHalted, kStopped, kEnded, kBadReturn, kUnresolved };
+
+#define FORCE_INLINE inline __attribute__((always_inline))
+
+struct Run {
+    uint8_t* ls;
+    u128* g;
+    const Host* h;
+    uint32_t ret = 0;
+    uint32_t exit = kNone, exit_pc = 0, exit_code = 0;
+    uint32_t jt = 0, js = 0;
+};
+
+FORCE_INLINE Q lsr(const Run& c, uint32_t a)
+{
+    const uint8_t* p = c.ls + (a & 0x3FFF0u);
+    uint32_t w[4];
+    memcpy(w, p, 16);
+    Q v;
+    v._u32[0] = __builtin_bswap32(w[0]);
+    v._u32[1] = __builtin_bswap32(w[1]);
+    v._u32[2] = __builtin_bswap32(w[2]);
+    v._u32[3] = __builtin_bswap32(w[3]);
+    return v;
+}
+FORCE_INLINE void lsw(Run& c, uint32_t a, const Q& v)
+{
+    const uint32_t w[4] = { __builtin_bswap32(v._u32[0]), __builtin_bswap32(v._u32[1]), __builtin_bswap32(v._u32[2]),
+                            __builtin_bswap32(v._u32[3]) };
+    memcpy(c.ls + (a & 0x3FFF0u), w, 16);
+}
+
+inline Q rdch(Run& c, uint32_t channel) { return spu_pref_u32(c.h->rdch(c.h->user, channel)); }
+inline uint32_t rchcnt(Run& c, uint32_t channel) { return c.h->rchcnt(c.h->user, channel); }
+inline void wrch(Run& c, uint32_t channel, const Q& v) { c.h->wrch(c.h->user, channel, v._u32[0]); }
+
+inline void halt(Run& c, uint32_t pc)
+{
+    c.exit = kHalted;
+    c.exit_pc = pc;
+}
+inline bool stop(Run& c, uint32_t code, uint32_t pc, uint32_t block)
+{
+    if (c.h->stop(c.h->user, code, pc, block)) return true;
+    c.exit = kEnded;
+    c.exit_pc = pc;
+    c.exit_code = code;
+    return false;
+}
+inline void stop_end(Run& c, uint32_t code, uint32_t pc, uint32_t block)
+{
+    c.h->stop(c.h->user, code, pc, block);
+    c.exit = kStopped;
+    c.exit_pc = pc;
+    c.exit_code = code;
+}
+inline void bad_return(Run& c, uint32_t link)
+{
+    (void)link;
+    c.exit = kBadReturn;
+    c.exit_pc = c.ret;
+}
+inline void unsupported(Run& c, uint32_t pc)
+{
+    if (c.h->unsupported) c.h->unsupported(c.h->user, pc);
+}
+inline void unresolved(Run& c, uint32_t target, uint32_t site)
+{
+    c.exit = kUnresolved;
+    c.exit_pc = site;
+    c.exit_code = target;
+}
+
+// @DECLS@
+
+bool host_branch(Run& c, uint32_t t, uint32_t site, bool call)
+{
+    const bool inside = t >= kCodeBegin && t < kCodeEnd;
+    const Branch k = call ? (inside ? Branch::unresolved_call : Branch::overlay_call)
+                          : (inside ? Branch::unresolved_jump : Branch::overlay_jump);
+    uint32_t ret = 0;
+    if (!c.h->branch(c.h->user, k, t, site, &ret)) {
+        c.exit = kEnded;
+        c.exit_pc = site;
+        return false;
+    }
+    c.ret = ret;
+    return true;
+}
+
+bool branch(Run& c, uint32_t t, uint32_t site, bool call)
+{
+    switch (t) {
+// @DISPATCH@
+    default: return host_branch(c, t, site, call);
+    }
+    return !c.exit;
+}
+
+void jump_to(Run& c)
+{
+    switch (c.jt) {
+// @JUMPS@
+    default: host_branch(c, c.jt, c.js, false); return;
+    }
+}
+
+// @FUNCTIONS@
+
+const uint32_t kEntries[kEntryCount] = {
+// @ENTRIES@
+};
+
+// The image's loadable segments (its ELF's program headers): address, bytes in the file, bytes in memory.
+struct Segment { uint32_t address, file_bytes, mem_bytes; const uint8_t* bytes; };
+// @IMAGE@
+
+}  // namespace
+
+void load(uint8_t* ls)
+{
+    for (const Segment& s : kSegments) {
+        memcpy(ls + s.address, s.bytes, s.file_bytes);
+        memset(ls + s.address + s.file_bytes, 0, s.mem_bytes - s.file_bytes);
+    }
+}
+
+Result call(uint8_t* ls, u128* gpr, uint32_t entry, const Host& host, Outcome* out)
+{
+    Run c{ ls, gpr, &host };
+    switch (entry & 0x3FFFFu) {
+// @DISPATCH@
+    default: return Result::declined;
+    }
+    Outcome o;
+    o.ret_pc = c.ret;
+    o.pc = c.exit_pc;
+    o.code = c.exit_code;
+    if (out) *out = o;
+    switch (c.exit) {
+    case kHalted: return Result::halted;
+    case kStopped: return Result::stopped;
+    case kEnded: return Result::ended;
+    case kBadReturn: return Result::bad_return;
+    case kUnresolved: return Result::unresolved;
+    default: return Result::handled;
+    }
+}
+
+bool has_entry(uint32_t lsa)
+{
+    int lo = 0, hi = kEntryCount;
+    while (lo < hi) {
+        const int m = (lo + hi) / 2;
+        if (kEntries[m] < lsa) lo = m + 1; else hi = m;
+    }
+    return lo < kEntryCount && kEntries[lo] == lsa;
+}
+
+}  // namespace @NAMESPACE@

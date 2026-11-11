@@ -211,6 +211,51 @@ elseif(PORT_ENABLE_SPU)
     endif()
 endif()
 
+# The water's and the waver's SPU tasks as native code, generated at build time from this tree's lift of the
+# player's SPU images (tools/gen_spu_native.py with tools/spu_native_task.cpp.in and tools/spu_native/<task>.py;
+# port/native/spu_native.h). Never committed, never in the prebuilt library: they are made from the player's
+# own files, like the lift. A tree without those images builds the stub, and the lifted tasks run.
+set(SPU_NATIVE_TASKS water:spu_0000_at_00F47380 waver:spu_0001_at_00F48F80)
+set(SPU_NATIVE_SOURCES "")
+set(_spu_native_tools "${CMAKE_CURRENT_SOURCE_DIR}/../tools")
+set(_spu_native_all ON)
+foreach(t IN LISTS SPU_NATIVE_TASKS)
+    string(REPLACE ":" ";" _p "${t}")
+    list(GET _p 1 _img)
+    if(NOT PORT_ENABLE_SPU OR NOT EXISTS "${SPU_DIR}/${_img}/spu_recomp.c" OR NOT EXISTS "${SPU_DIR}/images/${_img}.elf")
+        set(_spu_native_all OFF)
+    endif()
+endforeach()
+if(_spu_native_all)
+    if(NOT Python3_EXECUTABLE)
+        find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    endif()
+    foreach(t IN LISTS SPU_NATIVE_TASKS)
+        string(REPLACE ":" ";" _p "${t}")
+        list(GET _p 0 _name)
+        list(GET _p 1 _img)
+        set(_out "${CMAKE_CURRENT_BINARY_DIR}/spu_native/${_name}_gen.cpp")
+        add_custom_command(
+            OUTPUT "${_out}"
+            COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/spu_native"
+            COMMAND "${Python3_EXECUTABLE}" "${_spu_native_tools}/gen_spu_native.py"
+                    "${_spu_native_tools}/spu_native/${_name}.py" "${SPU_DIR}/${_img}/spu_recomp.c"
+                    "${SPU_DIR}/images/${_img}.elf" "${_spu_native_tools}/spu_native_task.cpp.in" "${_out}"
+            DEPENDS "${_spu_native_tools}/gen_spu_native.py" "${_spu_native_tools}/spu_native/${_name}.py"
+                    "${_spu_native_tools}/spu_native_task.cpp.in" "${SPU_DIR}/${_img}/spu_recomp.c"
+                    "${SPU_DIR}/images/${_img}.elf"
+            COMMENT "Generating the ${_name} task's native code from the lift (${_img})")
+        list(APPEND SPU_NATIVE_SOURCES "${_out}")
+    endforeach()
+    message(STATUS "Native SPU tasks: generated from ${SPU_DIR} (water, waver)")
+else()
+    set(SPU_NATIVE_SOURCES native/spu_native_absent.cpp)
+    message(STATUS "Native SPU tasks: none (no lifted water/waver images in ${SPU_DIR}): the lifted tasks run")
+endif()
+set_source_files_properties(${SPU_NATIVE_SOURCES} PROPERTIES
+    INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR};${CMAKE_CURRENT_SOURCE_DIR}/native;${PS3RECOMP_DIR}/include;${PS3RECOMP_DIR}/runtime/spu"
+    COMPILE_OPTIONS "-O2")
+
 add_executable(${PROJECT_NAME}
     main.cpp
     stubs.cpp
@@ -221,6 +266,7 @@ add_executable(${PROJECT_NAME}
     ${HLE_NID_TABLE}
     ${RECOMP_SOURCES}
     ${SPU_SOURCES}
+    ${SPU_NATIVE_SOURCES}
 )
 # `dotheroes --memtest` (docs/NATIVE_R8.md sections 5.3, 5.4.1): the lifted loads'
 # checked and bare forms, compiled from this lift's ppu_recomp.h, tested
@@ -303,8 +349,7 @@ set(BULLET_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../build/deps/src/bullet-2.74" CACHE
 add_library(dotheroes_native STATIC native/bullet_cd_task.cpp native/bullet_solver_task.cpp native/bullet_solver.cpp
     native/phys_direct.cpp
     native/dev_state.cpp native/inflate.c native/edge_inflate.c native/inflate_direct.cpp native/water_task.cpp native/waver_task.cpp native/waver_game.cpp
-    native/fmod_codec_raw.cpp native/fmod_codec_native.cpp native/fmod_sfxreverb.cpp
-    native/fmod_mixer.cpp native/fmod_mixer_native.cpp
+    native/spu_native.cpp
     # R1's boundary capture and R3's recorder and target watch: linked only
     # when a development lift's entry observers reference them
     # (tools/r1_dev_lift.sh)

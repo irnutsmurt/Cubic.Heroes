@@ -131,6 +131,9 @@ COMMON = ["-fno-strict-aliasing", "-fwrapv", "-DPS3RECOMP_RSX_VULKAN"]
 PORT_FLAGS = [CXX_STD, "-O1", "-w"] + COMMON
 PPU_FLAGS = [CXX_STD, "-O1", "-w", "-ffp-contract=off"] + COMMON
 SPU_FLAGS = [C_STD, "-O2", "-w", "-DSPU_USE_DISPATCH_MT"] + COMMON
+# the SPU tasks' native code generated from the player's lift (setup_pipeline.spu, port/native/spu_native.h)
+SPU_NATIVE_FLAGS = [CXX_STD, "-O2", "-w"] + COMMON
+SPU_NATIVE_DIR = "spu_native"   # in the setup's gen directory, beside "spu"
 # No build paths in what ships: the checkout and the home folder, as given and
 # (Windows) with forward slashes, which is how CMake hands sources over.
 SHIP_FLAGS = ["-g0"] + [f"-ffile-prefix-map={d}={to}" for d, to in ((ROOT, "."), (os.path.expanduser("~"), "~"))
@@ -307,6 +310,15 @@ def game_jobs(src, gen_dir, obj_dir, zig, platform=HOST):
             if os.path.exists(os.path.join(gen_spu, f))]
     spu.append(os.path.join(src.ps3, "runtime", "spu", "spu_dispatch_mt.c"))
     groups += [(s, "cc", SPU_FLAGS) for s in spu]
+    # the water's and the waver's tasks as native code, generated from the lift by the setup; without them
+    # (another executable's images) the stub, and the lifted tasks run
+    native = os.path.join(gen_dir, SPU_NATIVE_DIR)
+    gen_native = sorted(os.path.join(native, f) for f in os.listdir(native) if f.endswith("_gen.cpp")) \
+        if os.path.isdir(native) else []
+    if len(gen_native) == 2:
+        groups += [(s, "c++", SPU_NATIVE_FLAGS + ["-I" + os.path.join(src.port, "native")]) for s in gen_native]
+    else:
+        groups.append((os.path.join(src.port, "native", "spu_native_absent.cpp"), "c++", PORT_FLAGS))
     jobs = []
     for s, tool, flags in groups:
         flags = flags + cpu
