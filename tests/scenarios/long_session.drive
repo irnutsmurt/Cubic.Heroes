@@ -1,0 +1,34 @@
+# Scenario: a long session (SCENARIO=long_session; docs/OPENAL_MIGRATION_PLAN.md section 4, M0 and M4): the river
+# for about half an hour -- the field music looping over and over, the river's and the birds' ambiences looping,
+# the hero's steps and swings and the river's enemies now and then -- to see sound over a long run: music
+# streams and loops, looping effects, no drift, no dropouts. Run with AUDIO_RATE=1 (and DOTHEROES_AUDIO_TRACE,
+# AUDIO_WAV for the baseline).
+#
+# Starts from: the kept checkpoint castle-front (CONTINUE: field area 17), as river_fight.
+#! saves build/checkpoints/castle-front
+#! env DOTHEROES_NATIVE_CD=1 DOTHEROES_NATIVE_SOLVER=1,2,4,5,6 GCM_WRAP_LAP=1 DOTHEROES_PRESENT_ONCE=1
+#! env DOTHEROES_DEV_STATE=1 DIAG_FRAMES=frames.log PS3_VERBOSE=0
+#! env WINDOW=1 VISIBLE=1 TOPMOST=1 GRAB_EVERY=600 PS3_OSD_FPS=2 DUMP=0 SHOT_EVERY=0
+#! secs 1900
+include common.drive
+log TitleMovie 120
+sleep 5
+call continue
+state life>0,area==17 90
+sleep 3
+hold RIGHT 4
+hold DOWN 1.5
+hold RIGHT 3
+hold RIGHT 4
+hold RIGHT 4
+hold RIGHT 2.5
+hold UP 1.5
+hold RIGHT 2
+loop 30
+  hold LEFT 0.6
+  repeat 2 CROSS 0.35
+  hold RIGHT 0.6
+  repeat 2 CROSS 0.35
+  sleep 54
+end
+sleep 30

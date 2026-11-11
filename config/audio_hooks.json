@@ -1,0 +1,397 @@
+{
+ "_comment": "The game's audio boundary (docs/OPENAL_MIGRATION_PLAN.md section 1): entry hooks on its sound manager's methods and, for M0's baseline only, on the FMOD API functions it calls. Lifted beside config/r8_hooks.json (tools/r8_lift.sh, tools/setup_pipeline.py). Every hook declines while g_audio_hooks is 0 (the default): the lifted function runs as before.",
+ "entry_hooks": [
+  {
+   "addr": "0x0046E0EC",
+   "host": "dotheroes_audio_0046E0EC",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "the game's sound manager: SM.playSE. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x00465AC0",
+   "host": "dotheroes_audio_00465AC0",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "the game's sound manager: SM.isPlaying. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x0046638C",
+   "host": "dotheroes_audio_0046638C",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "the game's sound manager: SM.fadeOutBGM. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x0046F4BC",
+   "host": "dotheroes_audio_0046F4BC",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "the game's sound manager: SM.playBGM. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x0046C3F0",
+   "host": "dotheroes_audio_0046C3F0",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "the game's sound manager: SM.applyVolumeOptions. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x00466324",
+   "host": "dotheroes_audio_00466324",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "the game's sound manager: SM.fadeOutLoopSEs. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x004662A8",
+   "host": "dotheroes_audio_004662A8",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "the game's sound manager: SM.isBGMActive. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x00465D60",
+   "host": "dotheroes_audio_00465D60",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "the game's sound manager: SM.setReverb. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x0046DD6C",
+   "host": "dotheroes_audio_0046DD6C",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "the game's sound manager: SM.playSEFadeIn. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x00465C28",
+   "host": "dotheroes_audio_00465C28",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "the game's sound manager: SM.stopChannel. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x00465D9C",
+   "host": "dotheroes_audio_00465D9C",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "the game's sound manager: SM.setListener. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x0046624C",
+   "host": "dotheroes_audio_0046624C",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "the game's sound manager: SM.duckBGM. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x004661F4",
+   "host": "dotheroes_audio_004661F4",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "the game's sound manager: SM.unduckBGM. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x00466184",
+   "host": "dotheroes_audio_00466184",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "the game's sound manager: SM.duckSE. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x00466128",
+   "host": "dotheroes_audio_00466128",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "the game's sound manager: SM.unduckSE. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x004666FC",
+   "host": "dotheroes_audio_004666FC",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "the game's sound manager: SM.fadeOutSE. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x00466A1C",
+   "host": "dotheroes_audio_00466A1C",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "the game's sound manager: SM.stopSE. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x00466418",
+   "host": "dotheroes_audio_00466418",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "the game's sound manager: SM.pauseById. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x004660AC",
+   "host": "dotheroes_audio_004660AC",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "the game's sound manager: SM.currentBGMId. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x0046C1AC",
+   "host": "dotheroes_audio_0046C1AC",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "the game's sound manager: SM.setBGMMaster. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x0046C364",
+   "host": "dotheroes_audio_0046C364",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "the game's sound manager: SM.setSoundVolume. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x004664E0",
+   "host": "dotheroes_audio_004664E0",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "the game's sound manager: SM.isLoaded. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x00465E30",
+   "host": "dotheroes_audio_00465E30",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "the game's sound manager: SM.init. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x00471604",
+   "host": "dotheroes_audio_00471604",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "the game's sound manager: SM.loadSounds. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x00472A14",
+   "host": "dotheroes_audio_00472A14",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "the game's sound manager: SM.preload. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x0046DB40",
+   "host": "dotheroes_audio_0046DB40",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "the game's sound manager: SM.update. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x0046E6D4",
+   "host": "dotheroes_audio_0046E6D4",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "the game's sound manager: SM.shutdown. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x004708B4",
+   "host": "dotheroes_audio_004708B4",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "the game's sound manager: SM.openCallback. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x00837478",
+   "host": "dotheroes_audio_00837478",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "FMOD Ex's API (traced only, M0): FMOD.System_Create. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x00858A10",
+   "host": "dotheroes_audio_00858A10",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "FMOD Ex's API (traced only, M0): FMOD.System.init. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x00858540",
+   "host": "dotheroes_audio_00858540",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "FMOD Ex's API (traced only, M0): FMOD.System.setStreamBufferSize. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x00858920",
+   "host": "dotheroes_audio_00858920",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "FMOD Ex's API (traced only, M0): FMOD.System.set3DSettings. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x00857ED0",
+   "host": "dotheroes_audio_00857ED0",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "FMOD Ex's API (traced only, M0): FMOD.System.createDSPByType. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x008579CC",
+   "host": "dotheroes_audio_008579CC",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "FMOD Ex's API (traced only, M0): FMOD.System.addDSP. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x00858010",
+   "host": "dotheroes_audio_00858010",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "FMOD Ex's API (traced only, M0): FMOD.System.createSound. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x00857F90",
+   "host": "dotheroes_audio_00857F90",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "FMOD Ex's API (traced only, M0): FMOD.System.createStream. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x00857D40",
+   "host": "dotheroes_audio_00857D40",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "FMOD Ex's API (traced only, M0): FMOD.System.playSound. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x00858780",
+   "host": "dotheroes_audio_00858780",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "FMOD Ex's API (traced only, M0): FMOD.System.set3DListenerAttributes. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x00858990",
+   "host": "dotheroes_audio_00858990",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "FMOD Ex's API (traced only, M0): FMOD.System.update. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x008589D0",
+   "host": "dotheroes_audio_008589D0",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "FMOD Ex's API (traced only, M0): FMOD.System.close. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x008595B0",
+   "host": "dotheroes_audio_008595B0",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "FMOD Ex's API (traced only, M0): FMOD.System.release. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x0084F1B0",
+   "host": "dotheroes_audio_0084F1B0",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "FMOD Ex's API (traced only, M0): FMOD.Sound.set3DMinMaxDistance. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x0084EB34",
+   "host": "dotheroes_audio_0084EB34",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "FMOD Ex's API (traced only, M0): FMOD.Sound.getName. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x0084F0F8",
+   "host": "dotheroes_audio_0084F0F8",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "FMOD Ex's API (traced only, M0): FMOD.Sound.f84F0F8. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x0084F814",
+   "host": "dotheroes_audio_0084F814",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "FMOD Ex's API (traced only, M0): FMOD.Sound.f84F814. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x00838004",
+   "host": "dotheroes_audio_00838004",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "FMOD Ex's API (traced only, M0): FMOD.Channel.isPlaying. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x008397A4",
+   "host": "dotheroes_audio_008397A4",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "FMOD Ex's API (traced only, M0): FMOD.Channel.setPaused. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x008397F4",
+   "host": "dotheroes_audio_008397F4",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "FMOD Ex's API (traced only, M0): FMOD.Channel.stop. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x008396CC",
+   "host": "dotheroes_audio_008396CC",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "FMOD Ex's API (traced only, M0): FMOD.Channel.setVolume. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x00839648",
+   "host": "dotheroes_audio_00839648",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "FMOD Ex's API (traced only, M0): FMOD.Channel.getVolume. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x00838DFC",
+   "host": "dotheroes_audio_00838DFC",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "FMOD Ex's API (traced only, M0): FMOD.Channel.setPriority. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x00838994",
+   "host": "dotheroes_audio_00838994",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "FMOD Ex's API (traced only, M0): FMOD.Channel.set3DAttributes. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x008DC060",
+   "host": "dotheroes_audio_008DC060",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "FMOD Ex's API (traced only, M0): FMOD.DSP.setBypass. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x008DC160",
+   "host": "dotheroes_audio_008DC160",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "FMOD Ex's API (traced only, M0): FMOD.DSP.setActive. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x008DBDE0",
+   "host": "dotheroes_audio_008DBDE0",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "FMOD Ex's API (traced only, M0): FMOD.DSP.setParameter. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x008DC32C",
+   "host": "dotheroes_audio_008DC32C",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "FMOD Ex's API (traced only, M0): FMOD.DSP.release. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  }
+ ]
+}
