@@ -1,0 +1,1381 @@
+From 641b295381bf46c59f66017e0d55442058da3025 Mon Sep 17 00:00:00 2001
+From: giteaguy <73799093+irnutsmurt@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 16:30:55 -0800
+Subject: [PATCH 139/139] Save-data dialog: a full-screen picture, and it
+ presents itself
+
+The host's save-data dialog (cellSaveDataListLoad2/ListSave2, the new-save row,
+the overwrite question) drawn as a full-screen picture in place of the text
+panel: libs/video/osd_saves.c composes it on the CPU at the window's size (a
+heading and a clock, the saves as rows with their ICON0.PNG, title, date, size
+and DETAIL lines in mixed case, the selection, a scroll bar, the question, the
+confirm and back prompts in a prompt style), with a font and prompt images the
+title registers (ps3_ui_set_font, ps3_ui_set_prompt_png); the panel stays the
+fallback without a font. cellSaveData.c posts the picture's model beside the
+panel; its selection, sorting, focus, cancel and overwrite rules are unchanged.
+cellPad.c keeps the device last used for the automatic prompt style, and Esc and
+Backspace go back while a dialog is open (the window no longer quits on Esc
+then). PS3_SAVES_SCREEN_DUMP=<dir> writes each picture (tests).
+
+The dialog presents itself: a title that calls it flips nothing until it
+returns, and the overlays were drawn only in presents that follow the title's
+flips, so in a windowed native release nothing drew the dialog; after 4 s it
+took the title's first entry (a SAVE over that save, whichever was loaded).
+The backend now counts its window presents and offers present_again (the last
+frame again with the overlays, under the present mutex); the dialog calls it
+when no present came for 45 ms.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ include/ps3emu/osd.h            | 101 +++++
+ libs/input/cellPad.c            |  54 +++
+ libs/system/cellSaveData.c      | 197 +++++++++-
+ libs/video/osd_saves.c          | 636 ++++++++++++++++++++++++++++++++
+ libs/video/rsx_vulkan_backend.c | 115 +++++-
+ 5 files changed, 1088 insertions(+), 15 deletions(-)
+ create mode 100644 libs/video/osd_saves.c
+
+diff --git a/include/ps3emu/osd.h b/include/ps3emu/osd.h
+index 6a248b9..45a9090 100644
+--- a/include/ps3emu/osd.h
++++ b/include/ps3emu/osd.h
+@@ -12,6 +12,7 @@
+ #ifndef PS3EMU_OSD_H
+ #define PS3EMU_OSD_H
+ 
++#include <stddef.h>
+ #include <stdint.h>
+ #include <stdlib.h>
+ #include <string.h>
+@@ -279,6 +280,106 @@ static inline int ps3_osd_list_read(ps3_osd_list_state* out)
+     return __atomic_load_n(&s->seq, __ATOMIC_ACQUIRE) == a && out->open;
+ }
+ 
++/* The save-data screen: the same dialog (cellSaveData.c) drawn as a full-screen
++ * picture in place of the panel above -- a heading, the saves as rows with their
++ * ICON0.PNG, title, date and size and DETAIL lines, the selection, the overwrite
++ * question, and the confirm and back prompts in the player's prompt style. It is
++ * composed on the CPU at the window's size by libs/video/osd_saves.c, which needs
++ * a font the title registers (ps3_ui_set_font); without one the panel above is
++ * drawn. The dialog posts both; a backend draws one and stores its revision in
++ * `drawn`. Text is UTF-8. */
++#define PS3_OSD_SAVES_MAX   64
++#define PS3_OSD_SAVES_LINES 4
++
++typedef struct {
++    char     title[64];                       /* SUB_TITLE, else TITLE */
++    char     date[40], size[16];              /* when it was written, its size ("281 KB") */
++    char     lines[PS3_OSD_SAVES_LINES][96];  /* DETAIL's lines */
++    char     icon[512];                       /* its ICON0.PNG, or "" */
++    uint32_t is_new;                          /* the title's new-save row */
++} ps3_osd_save_entry;
++
++enum { PS3_UI_PROMPTS_KEYBOARD = 0, PS3_UI_PROMPTS_PLAYSTATION, PS3_UI_PROMPTS_XBOX, PS3_UI_PROMPTS_SWITCH,
++       PS3_UI_PROMPTS_N };
++
++typedef struct {
++    uint32_t seq;                             /* odd while a post is being written */
++    uint32_t open, rev, drawn;
++    uint32_t n, cur;                          /* the rows and the selected one */
++    uint32_t confirm;                         /* 1: the overwrite question, about row `cur` */
++    uint32_t prompts;                         /* PS3_UI_PROMPTS_* */
++    char     heading[64];                     /* "Load Save", "Save Game"... */
++    char     empty[96];                       /* shown when there are no rows */
++    char     question[96];                    /* the overwrite question */
++    char     ok_label[24], back_label[24];    /* the prompts' words */
++    ps3_osd_save_entry e[PS3_OSD_SAVES_MAX];
++} ps3_osd_saves_state;
++
++PS3_OSD_SHARED ps3_osd_saves_state g_ps3_osd_saves = { 0 };
++
++/* The title's icon for its new-save row (a PNG, from the title's own memory),
++ * set before the screen opens and unchanged while it is open. */
++#define PS3_OSD_NEW_ICON_MAX (256 * 1024)
++typedef struct { uint32_t size, gen; uint8_t png[PS3_OSD_NEW_ICON_MAX]; } ps3_osd_new_icon_state;
++PS3_OSD_SHARED ps3_osd_new_icon_state g_ps3_osd_new_icon = { 0 };
++
++/* Post or replace the screen (copied); returns its revision. */
++static inline uint32_t ps3_osd_saves_post(const ps3_osd_saves_state* in)
++{
++    ps3_osd_saves_state* s = &g_ps3_osd_saves;
++    const uint32_t seq = __atomic_add_fetch(&s->seq, 1, __ATOMIC_ACQ_REL);   /* odd: being written */
++    /* everything from `n` on; seq, open, rev and drawn are this function's and the backend's */
++    memcpy(&s->n, &in->n, sizeof *s - offsetof(ps3_osd_saves_state, n));
++    if (s->n > PS3_OSD_SAVES_MAX) s->n = PS3_OSD_SAVES_MAX;
++    s->open = 1;
++    const uint32_t rev = ++s->rev;
++    __atomic_store_n(&s->seq, seq + 1, __ATOMIC_RELEASE);
++    return rev;
++}
++
++static inline void ps3_osd_saves_close(void)
++{
++    ps3_osd_saves_state* s = &g_ps3_osd_saves;
++    __atomic_add_fetch(&s->seq, 1, __ATOMIC_ACQ_REL);
++    s->open = 0;
++    s->rev++;
++    __atomic_add_fetch(&s->seq, 1, __ATOMIC_RELEASE);
++}
++
++/* The screen as a consistent copy; 0 when closed or being written. */
++static inline int ps3_osd_saves_read(ps3_osd_saves_state* out)
++{
++    const ps3_osd_saves_state* s = &g_ps3_osd_saves;
++    const uint32_t a = __atomic_load_n(&s->seq, __ATOMIC_ACQUIRE);
++    if (a & 1) return 0;
++    memcpy(out, s, sizeof *out);
++    return __atomic_load_n(&s->seq, __ATOMIC_ACQUIRE) == a && out->open;
++}
++
++/* libs/video/osd_saves.c. The font and the prompt images are the title's
++ * (redistributable; nothing of the PS3's): kept by the caller, not copied.
++ * button: 0 confirm, 1 back. */
++void ps3_ui_set_font(const void* ttf, size_t size);
++void ps3_ui_set_prompt_png(int style, int button, const void* png, size_t size);
++int  ps3_ui_have_font(void);
++/* Compose the screen at w x h (4 bytes a pixel; BGRA when bgra, else RGBA).
++ * 1 when composed, 0 when it cannot be (no font). */
++int  ps3_osd_saves_compose(const ps3_osd_saves_state* s, uint8_t* img, uint32_t w, uint32_t h, int bgra);
++/* The minute the screen's clock shows (it is recomposed when this changes). */
++long ps3_osd_saves_clock(void);
++/* A screen closed: the next one starts at its first rows. */
++void ps3_osd_saves_reset(void);
++
++/* Window presents, for a host dialog. The overlays above are drawn in the
++ * window's presents, and those follow the guest's flips: a title that calls
++ * the save dialog from its render thread (3D Dot Game Heroes' in-game SAVE)
++ * flips nothing until the dialog returns, so nothing would draw it. The
++ * backend counts its presents here and sets present_again (the last frame
++ * presented once more, with the overlays); the dialog calls it while the
++ * count stands still. */
++PS3_OSD_SHARED volatile uint32_t g_ps3_osd_presents = 0;
++PS3_OSD_SHARED int (*g_ps3_osd_present_again)(void) = 0;
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
+index a0f54fd..380cdb5 100644
+--- a/libs/input/cellPad.c
++++ b/libs/input/cellPad.c
+@@ -72,6 +72,10 @@ static double pad_clock(unsigned long long t0_ms)
+ 
+ #define PAD_MAX_HOST_PORTS  4  /* XInput supports max 4; SDL may support more */
+ 
++/* The device the player last used, for a host dialog's prompts (ps3emu/osd.h
++ * PS3_UI_PROMPTS_*: 0 keyboard, 1 PlayStation, 2 Xbox, 3 Switch); -1 none yet. */
++static volatile int s_ui_device = -1;
++
+ typedef struct {
+     int  connected;
+     u16  buttons;           /* CELL_PAD_CTRL_* bitmask */
+@@ -310,6 +314,7 @@ static void pad_poll_keyboard(void)
+         if (GetAsyncKeyState(map[i].vk) & 0x8000) btns |= map[i].btn;
+ 
+     hs->buttons   = btns;
++    if (btns) s_ui_device = 0;
+     hs->connected = 1;
+     hs->analog_lx = (u8)((btns & CELL_PAD_CTRL_LEFT) ? 0 :
+                          (btns & CELL_PAD_CTRL_RIGHT) ? 255 : 128);
+@@ -379,6 +384,7 @@ static void pad_poll_xinput(void)
+         if (gp->wButtons & XINPUT_GAMEPAD_X)              btns |= CELL_PAD_CTRL_SQUARE;
+ 
+         s_host_state[i].buttons = btns;
++        if (btns) s_ui_device = 2;
+ 
+         /* Analog sticks. PS3 Y axis is inverted vs XInput (up = 0). Reflect about
+          * 128 (256 - x), NOT 255 - x: the latter turns a centered stick into 127,
+@@ -562,6 +568,24 @@ static void pad_sdl_hotplug(int force)
+     pad_sdl_scan();
+ }
+ 
++/* A pad's family for the prompts (s_ui_device): PlayStation, Switch, else Xbox's. */
++static int pad_sdl_family(SDL_GameController* gc)
++{
++    switch (SDL_GameControllerGetType(gc)) {
++    case SDL_CONTROLLER_TYPE_PS3:
++    case SDL_CONTROLLER_TYPE_PS4:
++    case SDL_CONTROLLER_TYPE_PS5:
++        return 1;
++    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_PRO:
++    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_LEFT:
++    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT:
++    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_PAIR:
++        return 3;
++    default:
++        return 2;
++    }
++}
++
+ static void pad_poll_sdl2(void)
+ {
+     SDL_GameControllerUpdate();
+@@ -604,6 +628,7 @@ static void pad_poll_sdl2(void)
+         if (rt > 3000) btns |= CELL_PAD_CTRL_R2;
+ 
+         s_host_state[i].buttons = btns;
++        if (btns) s_ui_device = pad_sdl_family(gc);
+ 
+         /* Analog sticks */
+         s_host_state[i].analog_lx = pad_sdl_axis_to_u8(SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_LEFTX));
+@@ -672,6 +697,7 @@ static void pad_poll_keyboard(void)
+     /* No focus: everything released, so a key held while switching away
+      * does not stay down. */
+     hs->buttons   = btns;
++    if (btns) s_ui_device = 0;
+     hs->connected = 1;
+     hs->analog_lx = (u8)((btns & CELL_PAD_CTRL_LEFT) ? 0 : (btns & CELL_PAD_CTRL_RIGHT) ? 255 : 128);
+     hs->analog_ly = (u8)((btns & CELL_PAD_CTRL_UP) ? 0 : (btns & CELL_PAD_CTRL_DOWN) ? 255 : 128);
+@@ -873,6 +899,34 @@ u32 cellPad_ui_state(u32* ly)
+     return s_ui_buttons;
+ }
+ 
++/* The device the player last used (s_ui_device), for the dialog's prompts. */
++int cellPad_ui_device(void)
++{
++    return s_ui_device;
++}
++
++/* Keys a host dialog reads beside the pad: Esc and Backspace go back (Circle).
++ * The window does not quit on Esc while a dialog is open (rsx_vulkan_backend.c). */
++u32 cellPad_ui_keys(void)
++{
++#if PAD_BACKEND_SDL2
++    if (!SDL_WasInit(SDL_INIT_VIDEO) || !SDL_GetKeyboardFocus()) return 0;
++    int n = 0;
++    const Uint8* ks = SDL_GetKeyboardState(&n);
++    if (ks && ((SDL_SCANCODE_ESCAPE < n && ks[SDL_SCANCODE_ESCAPE]) || (SDL_SCANCODE_BACKSPACE < n && ks[SDL_SCANCODE_BACKSPACE]))) {
++        s_ui_device = 0;
++        return CELL_PAD_CTRL_CIRCLE;
++    }
++#elif defined(_WIN32)
++    if (!pad_host_window_focused()) return 0;
++    if ((GetAsyncKeyState(VK_ESCAPE) & 0x8000) || (GetAsyncKeyState(VK_BACK) & 0x8000)) {
++        s_ui_device = 0;
++        return CELL_PAD_CTRL_CIRCLE;
++    }
++#endif
++    return 0;
++}
++
+ s32 cellPadGetData(u32 port_no, CellPadData* data_guest)
+ {
+     { static int _once = 0;
+diff --git a/libs/system/cellSaveData.c b/libs/system/cellSaveData.c
+index 37c7795..02ec867 100644
+--- a/libs/system/cellSaveData.c
++++ b/libs/system/cellSaveData.c
+@@ -414,7 +414,7 @@ static s32 dispatch_func_stat_full(uint32_t func_opd, int is_new, const char* di
+  * entry, else the new-save name, else the focus name. For a save with nothing
+  * listed the new-save name wins -- headless, there is no user to pick. */
+ /* What funcList asked for, for the list dialog (below). */
+-typedef struct { uint32_t fixed_n, fixed_ea, focus_pos, focus_ea, new_name_ea, new_pos; } SaveListSet;
++typedef struct { uint32_t fixed_n, fixed_ea, focus_pos, focus_ea, new_name_ea, new_pos, new_icon_ea; } SaveListSet;
+ 
+ static s32 dispatch_func_select(uint32_t func_opd, const CellSaveDataDirList* dirList,
+                                 uint32_t dirCount, uint32_t setBuf_ea, int is_save,
+@@ -452,7 +452,7 @@ static s32 dispatch_func_select(uint32_t func_opd, const CellSaveDataDirList* di
+     const uint32_t fixed_n = vm_read32(set_ea + 8), fixed = vm_read32(set_ea + 12);
+     const uint32_t newd = vm_read32(set_ea + 16), focus = vm_read32(set_ea + 4);
+     const uint32_t new_name = newd ? vm_read32(newd + 4) : 0;
+-    if (out_set) { out_set->fixed_n = fixed_n; out_set->fixed_ea = fixed; out_set->focus_pos = vm_read32(set_ea + 0); out_set->focus_ea = focus; out_set->new_name_ea = new_name; out_set->new_pos = newd ? vm_read32(newd + 0) : 0; }
++    if (out_set) { out_set->fixed_n = fixed_n; out_set->fixed_ea = fixed; out_set->focus_pos = vm_read32(set_ea + 0); out_set->focus_ea = focus; out_set->new_name_ea = new_name; out_set->new_pos = newd ? vm_read32(newd + 0) : 0; out_set->new_icon_ea = newd ? vm_read32(newd + 8) : 0; }
+     uint32_t pick = 0;
+     if (is_save && new_name && fixed_n == 0) pick = new_name;
+     else if (fixed_n && fixed)               pick = fixed;
+@@ -1142,8 +1142,75 @@ typedef struct {
+     char      l1[PS3_OSD_LIST_COLS], l2[PS3_OSD_LIST_COLS], sub[32];
+     long long mtime;
+     int       is_new;   /* the title's new-save row */
++    ps3_osd_save_entry ui;   /* the same save for the full-screen picture (ps3emu/osd.h) */
+ } SavePick;
+ 
++/* UTF-8 for the full-screen picture: full-width forms as their ASCII, case kept,
++ * and a label's colon ("NAME:", "TIME：") spaced as " : ". Other characters are
++ * kept; the font draws what it has. */
++static void ui_fold(const char* in, char* out, size_t cap)
++{
++    size_t o = 0;
++    int label = 1, spaced = 0;   /* still in the leading capitals; a colon spaced already */
++    const unsigned char* p = (const unsigned char*)in;
++    while (*p && o + 8 < cap) {
++        unsigned cp = *p++;
++        if (cp >= 0xF0 && p[0] && p[1] && p[2]) { cp = ((cp & 7) << 18) | ((p[0] & 63u) << 12) | ((p[1] & 63u) << 6) | (p[2] & 63u); p += 3; }
++        else if (cp >= 0xE0 && p[0] && p[1])   { cp = ((cp & 15) << 12) | ((p[0] & 63u) << 6) | (p[1] & 63u); p += 2; }
++        else if (cp >= 0xC0 && p[0])           { cp = ((cp & 31) << 6) | (p[0] & 63u); p += 1; }
++        if (cp == 0x3000) cp = ' ';
++        else if (cp >= 0xFF01 && cp <= 0xFF5E) cp -= 0xFEE0;
++        if (cp == '\r' || cp == '\n' || cp < 32) continue;
++        if (cp == ':' && label && !spaced && o) {
++            while (o && out[o - 1] == ' ') o--;
++            memcpy(out + o, " : ", 3); o += 3;
++            spaced = 1;
++            while (*p == ' ') p++;
++            continue;
++        }
++        if (!((cp >= 'A' && cp <= 'Z') || cp == ' ' || cp == '_')) label = 0;
++        if (cp < 0x80) out[o++] = (char)cp;
++        else if (cp < 0x800) { out[o++] = (char)(0xC0 | (cp >> 6)); out[o++] = (char)(0x80 | (cp & 63)); }
++        else if (cp < 0x10000) { out[o++] = (char)(0xE0 | (cp >> 12)); out[o++] = (char)(0x80 | ((cp >> 6) & 63)); out[o++] = (char)(0x80 | (cp & 63)); }
++        else { out[o++] = (char)(0xF0 | (cp >> 18)); out[o++] = (char)(0x80 | ((cp >> 12) & 63)); out[o++] = (char)(0x80 | ((cp >> 6) & 63)); out[o++] = (char)(0x80 | (cp & 63)); }
++    }
++    if (*p && o + 4 <= cap) { memcpy(out + o, "\xE2\x80\xA6", 3); o += 3; }   /* cut short: an ellipsis */
++    out[o] = 0;
++}
++
++/* a save directory's size as the PS3 shows it: every file, in kilobytes of 1000 bytes, rounded up */
++static void ui_dir_size(const char* dir, char* out, size_t cap)
++{
++    unsigned long long total = 0;
++#ifdef _WIN32
++    char search[1100];
++    snprintf(search, sizeof search, "%s\\*", dir);
++    WIN32_FIND_DATAA fd;
++    HANDLE h = FindFirstFileA(search, &fd);
++    if (h != INVALID_HANDLE_VALUE) {
++        do {
++            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
++                total += ((unsigned long long)fd.nFileSizeHigh << 32) | fd.nFileSizeLow;
++        } while (FindNextFileA(h, &fd));
++        FindClose(h);
++    }
++#else
++    DIR* dp = opendir(dir);
++    if (dp) {
++        struct dirent* de;
++        while ((de = readdir(dp)) != NULL) {
++            char full[1100];
++            struct stat st;
++            snprintf(full, sizeof full, "%s/%s", dir, de->d_name);
++            if (de->d_name[0] != '.' && stat(full, &st) == 0 && S_ISREG(st.st_mode)) total += (unsigned long long)st.st_size;
++        }
++        closedir(dp);
++    }
++#endif
++    if (!total) { out[0] = 0; return; }
++    snprintf(out, cap, "%llu KB", (total + 999) / 1000);
++}
++
+ /* Upper-case ASCII from UTF-8: full-width forms folded, anything the panel's
+  * font cannot draw shown as '?'. Lines are split at newlines. */
+ static int pick_lines(const char* s, char lines[4][PS3_OSD_LIST_COLS])
+@@ -1172,8 +1239,15 @@ static void pick_describe(SavePick* e)
+     struct stat st;
+     e->mtime = stat(path, &st) == 0 ? (long long)st.st_mtime : 0;
+     char when[32] = "";
+-    if (e->mtime) { time_t t = (time_t)e->mtime; struct tm* lt = localtime(&t); if (lt) strftime(when, sizeof when, "%Y-%m-%d %H:%M", lt); }
+-    char detail[1024] = "", subtitle[128] = "";
++    if (e->mtime) {
++        time_t t = (time_t)e->mtime;
++        struct tm* lt = localtime(&t);
++        if (lt) {
++            strftime(when, sizeof when, "%Y-%m-%d %H:%M", lt);
++            strftime(e->ui.date, sizeof e->ui.date, "%a %b %d %H:%M:%S %Y", lt);
++        }
++    }
++    char detail[1024] = "", subtitle[128] = "", title[128] = "";
+     FILE* f = fopen(path, "rb");
+     if (f) {
+         static unsigned char buf[8192];
+@@ -1190,9 +1264,10 @@ static void pick_describe(SavePick* e)
+                 const unsigned dof = r[12] | r[13] << 8 | r[14] << 16 | (unsigned)r[15] << 24;
+                 if (kt + ko >= n || dt + dof + len > n) continue;
+                 const char* k = (const char*)buf + kt + ko;
+-                char* to = !strcmp(k, "DETAIL") ? detail : !strcmp(k, "SUB_TITLE") ? subtitle : NULL;
++                char* to = !strcmp(k, "DETAIL") ? detail : !strcmp(k, "SUB_TITLE") ? subtitle :
++                           !strcmp(k, "TITLE") ? title : NULL;
+                 if (!to) continue;
+-                const size_t cap = to == detail ? sizeof detail : sizeof subtitle;
++                const size_t cap = to == detail ? sizeof detail : to == subtitle ? sizeof subtitle : sizeof title;
+                 memcpy(to, buf + dt + dof, len < cap ? len : cap - 1);
+                 to[len < cap ? len : cap - 1] = 0;
+             }
+@@ -1207,6 +1282,66 @@ static void pick_describe(SavePick* e)
+     else if (nl == 1) snprintf(e->l1, sizeof e->l1, "%.60s", lines[0]);
+     else snprintf(e->l1, sizeof e->l1, "%.60s", e->dir);
+     snprintf(e->l2, sizeof e->l2, "%.36s%s%s", nl >= 3 ? lines[2] : "", when[0] ? "   SAVED " : "", when);
++
++    /* the full-screen picture's version: mixed case, the save's own icon and size */
++    ui_fold(subtitle[0] ? subtitle : title[0] ? title : "Save Data", e->ui.title, sizeof e->ui.title);
++    {
++        int li = 0;
++        const char* p = detail;
++        while (*p && li < PS3_OSD_SAVES_LINES) {
++            const char* nlp = strchr(p, '\n');
++            const size_t len = nlp ? (size_t)(nlp - p) : strlen(p);
++            char one[256];
++            snprintf(one, sizeof one, "%.*s", (int)(len < sizeof one ? len : sizeof one - 1), p);
++            ui_fold(one, e->ui.lines[li], sizeof e->ui.lines[li]);
++            if (e->ui.lines[li][0]) li++;
++            p += len + (nlp ? 1 : 0);
++        }
++    }
++    char dirpath[1024];
++    snprintf(dirpath, sizeof dirpath, "%s/%s", s_save_root, e->dir);
++    ui_dir_size(dirpath, e->ui.size, sizeof e->ui.size);
++    snprintf(path, sizeof path, "%s/ICON0.PNG", dirpath);
++    if (stat(path, &st) == 0) snprintf(e->ui.icon, sizeof e->ui.icon, "%s", path);
++}
++
++/* The prompt style for the full-screen picture: PS3_UI_PROMPTS (keyboard,
++ * playstation, xbox, switch, auto), else the device the player last used. */
++extern int cellPad_ui_device(void);
++static int ui_prompt_style(void)
++{
++    const char* e = getenv("PS3_UI_PROMPTS");
++    if (e && *e) {
++        if (!strcmp(e, "keyboard")) return PS3_UI_PROMPTS_KEYBOARD;
++        if (!strcmp(e, "playstation")) return PS3_UI_PROMPTS_PLAYSTATION;
++        if (!strcmp(e, "xbox")) return PS3_UI_PROMPTS_XBOX;
++        if (!strcmp(e, "switch")) return PS3_UI_PROMPTS_SWITCH;
++    }
++    const int d = cellPad_ui_device();
++    return d >= 0 && d < PS3_UI_PROMPTS_N ? d : PS3_UI_PROMPTS_KEYBOARD;
++}
++
++/* The full-screen picture of the dialog's state (posted beside the list panel). */
++static ps3_osd_saves_state s_ui_screen;
++static void pick_post_screen(const SavePick* e, int n, int cur, int is_save, int confirm)
++{
++    ps3_osd_saves_state* S = &s_ui_screen;
++    memset(S, 0, sizeof *S);
++    const char* kind = "";
++    for (int i = 0; i < n; i++) if (!e[i].is_new && e[i].sub[0]) { kind = e[i].sub; break; }
++    const int edit = !strcmp(kind, "EDIT DATA");
++    snprintf(S->heading, sizeof S->heading, "%s", is_save ? (edit ? "Save Character" : "Save Game")
++                                                          : (edit ? "Load Character" : "Load Save"));
++    snprintf(S->empty, sizeof S->empty, "There is no saved data.");
++    snprintf(S->question, sizeof S->question, "Overwrite this save data?");
++    snprintf(S->ok_label, sizeof S->ok_label, "%s", confirm ? "Yes" : "Enter");
++    snprintf(S->back_label, sizeof S->back_label, "%s", confirm ? "No" : "Back");
++    S->prompts = (uint32_t)ui_prompt_style();
++    S->n = (uint32_t)(n < PS3_OSD_SAVES_MAX ? n : PS3_OSD_SAVES_MAX);
++    S->cur = (uint32_t)cur;
++    S->confirm = confirm ? 1u : 0u;
++    for (uint32_t i = 0; i < S->n; i++) S->e[i] = e[i].ui;
++    ps3_osd_saves_post(S);
+ }
+ 
+ static void pick_show(const SavePick* e, int n, int cur, int* top, int is_save)
+@@ -1230,20 +1365,23 @@ static void pick_show(const SavePick* e, int n, int cur, int* top, int is_save)
+     ps3_osd_list_post(title, is_save ? "UP/DOWN: CHOOSE   CROSS (Z, ENTER): SAVE   CIRCLE (X): BACK"
+                                      : "UP/DOWN: CHOOSE   CROSS (Z, ENTER): LOAD   CIRCLE (X): BACK",
+                       rows, r, (uint32_t)sel0, (uint32_t)sel0 + 2);
++    pick_post_screen(e, n, cur, is_save, 0);
+ }
+ 
+ /* The panel for the overwrite question: the save it would replace, and yes or no. */
+-static void pick_show_overwrite(const SavePick* e)
++static void pick_show_overwrite(const SavePick* e, int n, int cur, int is_save)
+ {
+     char rows[PS3_OSD_LIST_ROWS][PS3_OSD_LIST_COLS];
+     uint32_t r = 0;
+-    snprintf(rows[r++], PS3_OSD_LIST_COLS, "> %s", e->l1);
+-    snprintf(rows[r++], PS3_OSD_LIST_COLS, "  %s", e->l2);
++    snprintf(rows[r++], PS3_OSD_LIST_COLS, "> %s", e[cur].l1);
++    snprintf(rows[r++], PS3_OSD_LIST_COLS, "  %s", e[cur].l2);
+     ps3_osd_list_post("OVERWRITE THIS SAVE?", "CROSS (Z, ENTER): YES   CIRCLE (X): NO", rows, r, 0, 1);
++    pick_post_screen(e, n, cur, is_save, 1);
+ }
+ 
+ extern void cellPad_ui_intercept(int on);
+ extern u32  cellPad_ui_state(u32* ly);
++extern u32  cellPad_ui_keys(void);
+ extern s32  cellPadGetData(u32 port_no, CellPadData* data_guest);
+ 
+ /* 1: chosen (into `selected`); 0: cancelled; -1: no dialog (off, or no window). */
+@@ -1305,7 +1443,20 @@ static int savedata_list_dialog(CellSaveDataSetList* setList, const CellSaveData
+         memset(&nw, 0, sizeof nw);
+         for (u32 k = 0; k < sizeof nw.dir - 1; k++) { nw.dir[k] = (char)vm_read8(set->new_name_ea + k); if (!nw.dir[k]) break; }
+         nw.is_new = 1;
++        nw.ui.is_new = 1;
+         snprintf(nw.l1, sizeof nw.l1, "NEW SAVE DATA");
++        snprintf(nw.ui.title, sizeof nw.ui.title, "New Save Data");
++        /* the title's own icon for the row (CellSaveDataNewDataIcon: title*, iconBufSize, iconBuf*), if any */
++        ps3_osd_new_icon_state* ni = &g_ps3_osd_new_icon;
++        ni->size = 0;
++        if (set->new_icon_ea) {
++            const u32 isz = vm_read32(set->new_icon_ea + 4), ibuf = vm_read32(set->new_icon_ea + 8);
++            if (ibuf && isz >= 8 && isz <= PS3_OSD_NEW_ICON_MAX) {
++                for (u32 k = 0; k < isz; k++) ni->png[k] = vm_read8(ibuf + k);
++                ni->size = isz;
++            }
++        }
++        __atomic_add_fetch(&ni->gen, 1, __ATOMIC_RELEASE);
+         if (at_head) { memmove(e + 1, e, (size_t)n * sizeof(SavePick)); e[0] = nw; cur++; n++; }
+         else e[n++] = nw;
+         if (set->focus_pos == CELL_SAVEDATA_FOCUSPOS_NEWDATA) cur = at_head ? 0 : n - 1;
+@@ -1315,12 +1466,14 @@ static int savedata_list_dialog(CellSaveDataSetList* setList, const CellSaveData
+     int top = 0, result = -2;
+     pick_show(e, n, cur, &top, is_save);
+     const uint32_t first_rev = __atomic_load_n(&g_ps3_osd_list.rev, __ATOMIC_ACQUIRE);
++    const uint32_t first_screen = __atomic_load_n(&g_ps3_osd_saves.rev, __ATOMIC_ACQUIRE);
+     cellPad_ui_intercept(1);
+     printf("[cellSaveData] list dialog: %d entries, focus %d (sort %u/%u, focus position %u)%c", n, cur, sort_type, sort_order, set->focus_pos, 10);
+     for (int i = 0; i < n; i++) printf("[cellSaveData]   %d: %s | %s | %s%c", i, e[i].dir, e[i].l1, e[i].l2, 10);
+     fflush(stdout);
+     u32 last = 0xFFFFFFFFu;       /* a button held as the dialog opens must be released first */
+-    unsigned waited = 0, held_ms = 0;
++    unsigned waited = 0, held_ms = 0, still_ms = 0, self_presents = 0;
++    uint32_t seen_presents = __atomic_load_n(&g_ps3_osd_presents, __ATOMIC_ACQUIRE);
+     int confirming = 0;
+     for (;;) {
+ #ifdef _WIN32
+@@ -1329,10 +1482,27 @@ static int savedata_list_dialog(CellSaveDataSetList* setList, const CellSaveData
+         { struct timespec ts = { 0, 15000000 }; nanosleep(&ts, NULL); }
+ #endif
+         waited += 15;
+-        if (waited >= 4000 && __atomic_load_n(&g_ps3_osd_list.drawn, __ATOMIC_ACQUIRE) < first_rev) { result = -1; break; }   /* nothing draws it */
++        /* The title presenting nothing meanwhile (its render thread is the one
++         * waiting here: the in-game SAVE), the dialog presents its picture
++         * itself; without that nothing drew it and the save went to the title's
++         * first entry (ps3emu/osd.h g_ps3_osd_present_again). */
++        {
++            const uint32_t pc = __atomic_load_n(&g_ps3_osd_presents, __ATOMIC_ACQUIRE);
++            if (pc != seen_presents) { seen_presents = pc; still_ms = 0; }
++            else if ((still_ms += 15) >= 45 && g_ps3_osd_present_again) {
++                if (g_ps3_osd_present_again() && !self_presents++) {
++                    printf("[cellSaveData] list dialog: the title presents nothing meanwhile; the dialog presents itself%c", 10);
++                    fflush(stdout);
++                }
++                seen_presents = __atomic_load_n(&g_ps3_osd_presents, __ATOMIC_ACQUIRE);
++                still_ms = 0;
++            }
++        }
++        if (waited >= 4000 && __atomic_load_n(&g_ps3_osd_list.drawn, __ATOMIC_ACQUIRE) < first_rev &&
++            __atomic_load_n(&g_ps3_osd_saves.drawn, __ATOMIC_ACQUIRE) < first_screen) { result = -1; break; }   /* nothing draws it */
+         if (pad_ea) cellPadGetData(0, (CellPadData*)(uintptr_t)pad_ea);    /* the title may not be polling */
+         u32 ly = 128;
+-        u32 b = cellPad_ui_state(&ly);
++        u32 b = cellPad_ui_state(&ly) | cellPad_ui_keys();   /* the keyboard's Esc and Backspace: back */
+         if (ly < 64) b |= CELL_PAD_CTRL_UP;
+         if (ly > 192) b |= CELL_PAD_CTRL_DOWN;
+         if (last == 0xFFFFFFFFu) { if (b == 0) last = 0; continue; }
+@@ -1354,12 +1524,13 @@ static int savedata_list_dialog(CellSaveDataSetList* setList, const CellSaveData
+             pick_show(e, n, cur, &top, is_save);
+         }
+         if (edge & (CELL_PAD_CTRL_CROSS | CELL_PAD_CTRL_START)) {
+-            if (is_save && !e[cur].is_new) { confirming = 1; pick_show_overwrite(&e[cur]); continue; }
++            if (is_save && !e[cur].is_new) { confirming = 1; pick_show_overwrite(e, n, cur, is_save); continue; }
+             result = 1;
+             break;
+         }
+         if (edge & CELL_PAD_CTRL_CIRCLE) { result = 0; break; }
+     }
++    ps3_osd_saves_close();
+     ps3_osd_list_close();
+     cellPad_ui_intercept(0);
+     if (result == 1) {
+diff --git a/libs/video/osd_saves.c b/libs/video/osd_saves.c
+new file mode 100644
+index 0000000..efb4e4d
+--- /dev/null
++++ b/libs/video/osd_saves.c
+@@ -0,0 +1,636 @@
++/*
++ * The save-data screen (include/ps3emu/osd.h, ps3_osd_saves_state), composed on
++ * the CPU into a picture the size of the window: a dark full-screen background, a
++ * heading and a clock, the saves as large rows (the save's own ICON0.PNG on the
++ * left, aspect kept; its title, date and size, and its DETAIL lines), a distinct
++ * highlight on the selected row, thin separators, a scroll bar when the rows do
++ * not fit, the overwrite question as a box over the list, and the confirm and
++ * back prompts along the bottom in the player's prompt style.
++ *
++ * Everything drawn here is the runtime's or the title's: the text font and the
++ * prompt images are registered by the title (ps3_ui_set_font,
++ * ps3_ui_set_prompt_png; redistributable files of its own), the icons are the
++ * player's save data, and a prompt style without images is drawn from shapes.
++ * Nothing comes from PS3 firmware.
++ *
++ * Sizes are set for a 1280x720 screen and scaled by the window's height (the
++ * width scaled the same, the rows stretched to the window's width), so the screen
++ * reads the same in a small window and in fullscreen.
++ */
++#include <math.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <time.h>
++#include <sys/stat.h>
++
++#include "../../include/ps3emu/osd.h"
++
++#define STB_TRUETYPE_IMPLEMENTATION
++#define STBTT_STATIC
++#include "../font/stb_truetype.h"
++
++#define STB_IMAGE_IMPLEMENTATION
++#define STB_IMAGE_STATIC
++#define STBI_ONLY_PNG
++#define STBI_NO_STDIO
++#include "../codec/stb_image.h"
++
++/* ---- the title's font and prompt images --------------------------------- */
++
++static struct {
++    const unsigned char* data;
++    stbtt_fontinfo       info;
++    int                  ok;
++} s_font;
++
++void ps3_ui_set_font(const void* ttf, size_t size)
++{
++    s_font.ok = 0;
++    if (!ttf || size < 64) return;
++    s_font.data = (const unsigned char*)ttf;
++    if (stbtt_InitFont(&s_font.info, s_font.data, stbtt_GetFontOffsetForIndex(s_font.data, 0)))
++        s_font.ok = 1;
++}
++
++int ps3_ui_have_font(void) { return s_font.ok; }
++
++typedef struct { const void* png; size_t size; int w, h; unsigned char* rgba; int tried; } UiImage;
++static UiImage s_prompt[PS3_UI_PROMPTS_N][2];
++
++void ps3_ui_set_prompt_png(int style, int button, const void* png, size_t size)
++{
++    if (style < 0 || style >= PS3_UI_PROMPTS_N || button < 0 || button > 1) return;
++    UiImage* im = &s_prompt[style][button];
++    if (im->rgba) stbi_image_free(im->rgba);
++    memset(im, 0, sizeof *im);
++    im->png = png;
++    im->size = size;
++}
++
++static const UiImage* prompt_image(int style, int button)
++{
++    UiImage* im = &s_prompt[style][button];
++    if (!im->png) return NULL;
++    if (!im->tried) {
++        int n = 0;
++        im->tried = 1;
++        im->rgba = stbi_load_from_memory((const stbi_uc*)im->png, (int)im->size, &im->w, &im->h, &n, 4);
++    }
++    return im->rgba ? im : NULL;
++}
++
++/* ---- the canvas --------------------------------------------------------- */
++
++typedef struct { uint8_t* p; int w, h, bgra; } Canvas;
++
++#define UI_RGB(r, g, b) (((uint32_t)(r) << 16) | ((uint32_t)(g) << 8) | (uint32_t)(b))
++
++static inline void px_blend(const Canvas* c, int x, int y, uint32_t rgb, int a)
++{
++    if ((unsigned)x >= (unsigned)c->w || (unsigned)y >= (unsigned)c->h || a <= 0) return;
++    if (a > 255) a = 255;
++    uint8_t* q = c->p + ((size_t)y * c->w + x) * 4;
++    int r = (int)(rgb >> 16) & 255, g = (int)(rgb >> 8) & 255, b = (int)rgb & 255;
++    if (c->bgra) { int t = r; r = b; b = t; }
++    q[0] = (uint8_t)((q[0] * (255 - a) + r * a + 127) / 255);
++    q[1] = (uint8_t)((q[1] * (255 - a) + g * a + 127) / 255);
++    q[2] = (uint8_t)((q[2] * (255 - a) + b * a + 127) / 255);
++    q[3] = 255;
++}
++
++static void fill_rect(const Canvas* c, int x0, int y0, int x1, int y1, uint32_t rgb, int a)
++{
++    if (x0 < 0) x0 = 0;
++    if (y0 < 0) y0 = 0;
++    if (x1 > c->w) x1 = c->w;
++    if (y1 > c->h) y1 = c->h;
++    for (int y = y0; y < y1; y++)
++        for (int x = x0; x < x1; x++) px_blend(c, x, y, rgb, a);
++}
++
++static float clampf(float v, float lo, float hi) { return v < lo ? lo : v > hi ? hi : v; }
++
++/* coverage of a pixel centre by a rounded rectangle (x0,y0)-(x1,y1), radius r */
++static float rrect_cov(float px, float py, float x0, float y0, float x1, float y1, float r)
++{
++    const float cx = (x0 + x1) * 0.5f, cy = (y0 + y1) * 0.5f;
++    const float hw = (x1 - x0) * 0.5f, hh = (y1 - y0) * 0.5f;
++    if (r > hw) r = hw;
++    if (r > hh) r = hh;
++    const float qx = fabsf(px - cx) - (hw - r), qy = fabsf(py - cy) - (hh - r);
++    const float ox = qx > 0 ? qx : 0, oy = qy > 0 ? qy : 0;
++    const float inside = (qx > qy ? qx : qy) < 0 ? (qx > qy ? qx : qy) : 0;
++    const float d = sqrtf(ox * ox + oy * oy) + inside - r;
++    return clampf(0.5f - d, 0.f, 1.f);
++}
++
++static void rrect(const Canvas* c, float x0, float y0, float x1, float y1, float r, uint32_t rgb, int a)
++{
++    const int ix0 = (int)floorf(x0), iy0 = (int)floorf(y0), ix1 = (int)ceilf(x1), iy1 = (int)ceilf(y1);
++    for (int y = iy0 < 0 ? 0 : iy0; y < iy1 && y < c->h; y++)
++        for (int x = ix0 < 0 ? 0 : ix0; x < ix1 && x < c->w; x++) {
++            const float cv = rrect_cov(x + 0.5f, y + 0.5f, x0, y0, x1, y1, r);
++            if (cv > 0) px_blend(c, x, y, rgb, (int)(a * cv + 0.5f));
++        }
++}
++
++/* an outline t wide inside the rounded rectangle */
++static void rrect_outline(const Canvas* c, float x0, float y0, float x1, float y1, float r, float t,
++                          uint32_t rgb, int a)
++{
++    const int ix0 = (int)floorf(x0), iy0 = (int)floorf(y0), ix1 = (int)ceilf(x1), iy1 = (int)ceilf(y1);
++    const float ri = r - t > 0 ? r - t : 0;
++    for (int y = iy0 < 0 ? 0 : iy0; y < iy1 && y < c->h; y++)
++        for (int x = ix0 < 0 ? 0 : ix0; x < ix1 && x < c->w; x++) {
++            const float px = x + 0.5f, py = y + 0.5f;
++            if (px > x0 + t + r && px < x1 - t - r && py > y0 + t + 1 && py < y1 - t - 1) continue;
++            const float cv = rrect_cov(px, py, x0, y0, x1, y1, r) - rrect_cov(px, py, x0 + t, y0 + t, x1 - t, y1 - t, ri);
++            if (cv > 0) px_blend(c, x, y, rgb, (int)(a * cv + 0.5f));
++        }
++}
++
++static void disc(const Canvas* c, float cx, float cy, float rad, uint32_t rgb, int a)
++{
++    rrect(c, cx - rad, cy - rad, cx + rad, cy + rad, rad, rgb, a);
++}
++
++static void ring(const Canvas* c, float cx, float cy, float rad, float t, uint32_t rgb, int a)
++{
++    for (int y = (int)(cy - rad - 1); y <= (int)(cy + rad + 1); y++)
++        for (int x = (int)(cx - rad - 1); x <= (int)(cx + rad + 1); x++) {
++            const float d = fabsf(hypotf(x + 0.5f - cx, y + 0.5f - cy) - (rad - t * 0.5f)) - t * 0.5f;
++            const float cv = clampf(0.5f - d, 0.f, 1.f);
++            if (cv > 0) px_blend(c, x, y, rgb, (int)(a * cv + 0.5f));
++        }
++}
++
++static void segment(const Canvas* c, float ax, float ay, float bx, float by, float t, uint32_t rgb, int a)
++{
++    const float minx = (ax < bx ? ax : bx) - t, maxx = (ax > bx ? ax : bx) + t;
++    const float miny = (ay < by ? ay : by) - t, maxy = (ay > by ? ay : by) + t;
++    const float dx = bx - ax, dy = by - ay, len2 = dx * dx + dy * dy;
++    for (int y = (int)miny; y <= (int)maxy; y++)
++        for (int x = (int)minx; x <= (int)maxx; x++) {
++            const float px = x + 0.5f - ax, py = y + 0.5f - ay;
++            float u = len2 > 0 ? (px * dx + py * dy) / len2 : 0;
++            u = clampf(u, 0.f, 1.f);
++            const float d = hypotf(px - u * dx, py - u * dy) - t * 0.5f;
++            const float cv = clampf(0.5f - d, 0.f, 1.f);
++            if (cv > 0) px_blend(c, x, y, rgb, (int)(a * cv + 0.5f));
++        }
++}
++
++/* an RGBA image fitted into a box, its aspect kept (bilinear), centred */
++static void draw_image_fit(const Canvas* c, const unsigned char* rgba, int iw, int ih,
++                           float bx, float by, float bw, float bh, int alpha)
++{
++    if (!rgba || iw <= 0 || ih <= 0 || bw < 1 || bh < 1) return;
++    const float sc = fminf(bw / iw, bh / ih);
++    const float dw = iw * sc, dh = ih * sc;
++    const float x0 = bx + (bw - dw) * 0.5f, y0 = by + (bh - dh) * 0.5f;
++    const int ix0 = (int)floorf(x0), iy0 = (int)floorf(y0), ix1 = (int)ceilf(x0 + dw), iy1 = (int)ceilf(y0 + dh);
++    for (int y = iy0; y < iy1; y++) {
++        if (y < 0 || y >= c->h) continue;
++        const float sy = clampf((y + 0.5f - y0) / sc - 0.5f, 0.f, (float)(ih - 1));
++        const int y_0 = (int)sy, y_1 = y_0 + 1 < ih ? y_0 + 1 : y_0;
++        const float fy = sy - y_0;
++        for (int x = ix0; x < ix1; x++) {
++            if (x < 0 || x >= c->w) continue;
++            const float sx = clampf((x + 0.5f - x0) / sc - 0.5f, 0.f, (float)(iw - 1));
++            const int x_0 = (int)sx, x_1 = x_0 + 1 < iw ? x_0 + 1 : x_0;
++            const float fx = sx - x_0;
++            const unsigned char* p00 = rgba + ((size_t)y_0 * iw + x_0) * 4;
++            const unsigned char* p01 = rgba + ((size_t)y_0 * iw + x_1) * 4;
++            const unsigned char* p10 = rgba + ((size_t)y_1 * iw + x_0) * 4;
++            const unsigned char* p11 = rgba + ((size_t)y_1 * iw + x_1) * 4;
++            float v[4];
++            for (int k = 0; k < 4; k++)
++                v[k] = (p00[k] * (1 - fx) + p01[k] * fx) * (1 - fy) + (p10[k] * (1 - fx) + p11[k] * fx) * fy;
++            /* edge pixels partly covered by the fitted rectangle */
++            const float cvx = clampf(fminf(x + 1 - x0, x0 + dw - x), 0.f, 1.f);
++            const float cvy = clampf(fminf(y + 1 - y0, y0 + dh - y), 0.f, 1.f);
++            const int a = (int)(v[3] * cvx * cvy * alpha / 255.f + 0.5f);
++            px_blend(c, x, y, UI_RGB((int)(v[0] + 0.5f), (int)(v[1] + 0.5f), (int)(v[2] + 0.5f)), a);
++        }
++    }
++}
++
++/* ---- text --------------------------------------------------------------- */
++
++typedef struct { int cp, px, w, h, xoff, yoff, used; unsigned char* bm; } Glyph;
++#define GLYPH_SLOTS 1024
++static Glyph s_glyphs[GLYPH_SLOTS];
++
++static const Glyph* glyph_get(int cp, int px)
++{
++    unsigned hsh = ((unsigned)cp * 2654435761u) ^ ((unsigned)px * 40503u);
++    for (int probe = 0; probe < 16; probe++) {
++        Glyph* g = &s_glyphs[(hsh + probe) % GLYPH_SLOTS];
++        if (g->used && g->cp == cp && g->px == px) return g;
++        if (!g->used) {
++            const float sc = stbtt_ScaleForPixelHeight(&s_font.info, (float)px);
++            g->bm = stbtt_GetCodepointBitmap(&s_font.info, 0, sc, cp, &g->w, &g->h, &g->xoff, &g->yoff);
++            g->cp = cp; g->px = px; g->used = 1;
++            return g;
++        }
++    }
++    /* the table is full around here: start again (sizes change when the window does) */
++    for (int i = 0; i < GLYPH_SLOTS; i++) {
++        if (s_glyphs[i].bm) stbtt_FreeBitmap(s_glyphs[i].bm, NULL);
++        memset(&s_glyphs[i], 0, sizeof s_glyphs[i]);
++    }
++    return glyph_get(cp, px);
++}
++
++/* the next codepoint of UTF-8 text; full-width forms read as their ASCII */
++static int utf8_next(const char** s)
++{
++    const unsigned char* p = (const unsigned char*)*s;
++    unsigned cp = *p++;
++    if (cp >= 0xF0 && p[0] && p[1] && p[2]) { cp = ((cp & 7) << 18) | ((p[0] & 63u) << 12) | ((p[1] & 63u) << 6) | (p[2] & 63u); p += 3; }
++    else if (cp >= 0xE0 && p[0] && p[1])   { cp = ((cp & 15) << 12) | ((p[0] & 63u) << 6) | (p[1] & 63u); p += 2; }
++    else if (cp >= 0xC0 && p[0])           { cp = ((cp & 31) << 6) | (p[0] & 63u); p += 1; }
++    *s = (const char*)p;
++    if (cp == 0x3000) return ' ';
++    if (cp >= 0xFF01 && cp <= 0xFF5E) return (int)(cp - 0xFEE0);
++    return (int)cp;
++}
++
++static float text_width(const char* s, int px)
++{
++    if (!s_font.ok) return 0;
++    const float sc = stbtt_ScaleForPixelHeight(&s_font.info, (float)px);
++    float w = 0;
++    int prev = 0;
++    while (*s) {
++        const int cp = utf8_next(&s);
++        int adv, lsb;
++        stbtt_GetCodepointHMetrics(&s_font.info, cp, &adv, &lsb);
++        if (prev) w += sc * stbtt_GetCodepointKernAdvance(&s_font.info, prev, cp);
++        w += sc * adv;
++        prev = cp;
++    }
++    return w;
++}
++
++/* draws `s` with its baseline at y; returns the x after it. Text wider than
++ * maxw (when > 0) ends in an ellipsis. */
++static float draw_text(const Canvas* c, float x, float y, const char* s, int px, uint32_t rgb, int a, float maxw)
++{
++    if (!s_font.ok || !s) return x;
++    char buf[512];
++    if (maxw > 0 && text_width(s, px) > maxw) {
++        const float ell = text_width("\xE2\x80\xA6", px);
++        size_t n = 0;
++        const char* p = s;
++        float w = 0;
++        const float sc = stbtt_ScaleForPixelHeight(&s_font.info, (float)px);
++        while (*p) {
++            const char* q = p;
++            const int cp = utf8_next(&q);
++            int adv, lsb;
++            stbtt_GetCodepointHMetrics(&s_font.info, cp, &adv, &lsb);
++            if (w + sc * adv + ell > maxw || (size_t)(q - s) + 4 >= sizeof buf) break;
++            w += sc * adv;
++            p = q;
++        }
++        n = (size_t)(p - s);
++        while (n && s[n - 1] == ' ') n--;
++        memcpy(buf, s, n);
++        memcpy(buf + n, "\xE2\x80\xA6", 4);
++        s = buf;
++    }
++    const float sc = stbtt_ScaleForPixelHeight(&s_font.info, (float)px);
++    int prev = 0;
++    while (*s) {
++        const int cp = utf8_next(&s);
++        if (prev) x += sc * stbtt_GetCodepointKernAdvance(&s_font.info, prev, cp);
++        const Glyph* g = glyph_get(cp, px);
++        if (g && g->bm) {
++            const int gx = (int)floorf(x + 0.5f) + g->xoff, gy = (int)floorf(y + 0.5f) + g->yoff;
++            for (int j = 0; j < g->h; j++)
++                for (int i = 0; i < g->w; i++) {
++                    const int v = g->bm[j * g->w + i];
++                    if (v) px_blend(c, gx + i, gy + j, rgb, v * a / 255);
++                }
++        }
++        int adv, lsb;
++        stbtt_GetCodepointHMetrics(&s_font.info, cp, &adv, &lsb);
++        x += sc * adv;
++        prev = cp;
++    }
++    return x;
++}
++
++/* ---- the saves' icons --------------------------------------------------- */
++
++typedef struct { char path[512]; long long mtime, fsize; int w, h; unsigned char* rgba; unsigned last; } IconSlot;
++#define ICON_SLOTS 24
++static IconSlot s_icons[ICON_SLOTS];
++static unsigned s_icon_clock;
++
++static unsigned char* load_file(const char* path, size_t* n)
++{
++    FILE* f = fopen(path, "rb");
++    if (!f) return NULL;
++    fseek(f, 0, SEEK_END);
++    const long sz = ftell(f);
++    fseek(f, 0, SEEK_SET);
++    unsigned char* b = (sz > 0 && sz < (16 << 20)) ? (unsigned char*)malloc((size_t)sz) : NULL;
++    if (b && fread(b, 1, (size_t)sz, f) != (size_t)sz) { free(b); b = NULL; }
++    fclose(f);
++    if (b) *n = (size_t)sz;
++    return b;
++}
++
++static const IconSlot* icon_get(const char* path)
++{
++    if (!path || !path[0]) return NULL;
++    struct stat st;
++    if (stat(path, &st) != 0) return NULL;
++    IconSlot* lru = &s_icons[0];
++    for (int i = 0; i < ICON_SLOTS; i++) {
++        IconSlot* s = &s_icons[i];
++        if (s->path[0] && !strcmp(s->path, path) && s->mtime == (long long)st.st_mtime && s->fsize == (long long)st.st_size) {
++            s->last = ++s_icon_clock;
++            return s->rgba ? s : NULL;
++        }
++        if (s->last < lru->last) lru = s;
++    }
++    if (lru->rgba) stbi_image_free(lru->rgba);
++    memset(lru, 0, sizeof *lru);
++    snprintf(lru->path, sizeof lru->path, "%s", path);
++    lru->mtime = (long long)st.st_mtime;
++    lru->fsize = (long long)st.st_size;
++    lru->last = ++s_icon_clock;
++    size_t n = 0;
++    unsigned char* b = load_file(path, &n);
++    if (b) {
++        int comp = 0;
++        lru->rgba = stbi_load_from_memory(b, (int)n, &lru->w, &lru->h, &comp, 4);
++        free(b);
++    }
++    return lru->rgba ? lru : NULL;
++}
++
++static struct { uint32_t gen; int w, h; unsigned char* rgba; } s_new_icon;
++
++static const unsigned char* new_icon(int* w, int* h)
++{
++    const ps3_osd_new_icon_state* ni = &g_ps3_osd_new_icon;
++    const uint32_t gen = __atomic_load_n(&ni->gen, __ATOMIC_ACQUIRE);
++    if (gen != s_new_icon.gen) {
++        if (s_new_icon.rgba) stbi_image_free(s_new_icon.rgba);
++        s_new_icon.rgba = NULL;
++        s_new_icon.gen = gen;
++        if (ni->size && ni->size <= PS3_OSD_NEW_ICON_MAX) {
++            int comp = 0;
++            s_new_icon.rgba = stbi_load_from_memory(ni->png, (int)ni->size, &s_new_icon.w, &s_new_icon.h, &comp, 4);
++        }
++    }
++    *w = s_new_icon.w; *h = s_new_icon.h;
++    return s_new_icon.rgba;
++}
++
++/* ---- the pieces of the screen ------------------------------------------- */
++
++/* colours */
++#define C_BG_TOP   UI_RGB(22, 23, 28)
++#define C_BG_BOT   UI_RGB(9, 9, 12)
++#define C_ROW      UI_RGB(38, 39, 45)
++#define C_ROW_SEL  UI_RGB(58, 72, 102)
++#define C_SEL_EDGE UI_RGB(214, 226, 255)
++#define C_TEXT     UI_RGB(240, 240, 242)
++#define C_TEXT_DIM UI_RGB(176, 178, 186)
++#define C_SEP      UI_RGB(255, 255, 255)
++#define C_TILE     UI_RGB(24, 25, 30)
++
++/* a prompt's button: size is the glyph's height; returns its width */
++static float draw_button(const Canvas* c, int style, int button, float x, float cy, float size)
++{
++    const UiImage* im = prompt_image(style, button);
++    if (im) {
++        const float w = size * im->w / (float)im->h;
++        draw_image_fit(c, im->rgba, im->w, im->h, x, cy - size * 0.5f, w, size, 255);
++        return w;
++    }
++    const float r = size * 0.5f, cx = x + r;
++    switch (style) {
++    case PS3_UI_PROMPTS_PLAYSTATION:
++        disc(c, cx, cy, r, UI_RGB(236, 236, 238), 255);
++        if (button == 0) {
++            const float k = r * 0.42f;
++            segment(c, cx - k, cy - k, cx + k, cy + k, size * 0.11f, UI_RGB(58, 110, 205), 255);
++            segment(c, cx - k, cy + k, cx + k, cy - k, size * 0.11f, UI_RGB(58, 110, 205), 255);
++        } else {
++            ring(c, cx, cy, r * 0.52f, size * 0.1f, UI_RGB(214, 64, 58), 255);
++        }
++        return size;
++    case PS3_UI_PROMPTS_XBOX:
++    case PS3_UI_PROMPTS_SWITCH: {
++        /* the button that does it, by its label on that pad: Xbox A/B; on a
++         * Switch pad the confirm (bottom) button is B and back (right) is A */
++        const char* l = style == PS3_UI_PROMPTS_XBOX ? (button == 0 ? "A" : "B") : (button == 0 ? "B" : "A");
++        const uint32_t col = style == PS3_UI_PROMPTS_SWITCH ? UI_RGB(60, 60, 66)
++                             : button == 0 ? UI_RGB(46, 150, 68) : UI_RGB(200, 54, 46);
++        disc(c, cx, cy, r, col, 255);
++        const int px = (int)(size * 0.62f);
++        draw_text(c, cx - text_width(l, px) * 0.5f, cy + px * 0.36f, l, px, UI_RGB(255, 255, 255), 255, 0);
++        return size;
++    }
++    default: {   /* a key */
++        const char* l = button == 0 ? "Enter" : "Esc";
++        const int px = (int)(size * 0.5f);
++        const float w = text_width(l, px) + size * 0.6f;
++        rrect(c, x, cy - r, x + w, cy + r, size * 0.18f, UI_RGB(232, 232, 236), 255);
++        rrect_outline(c, x, cy - r, x + w, cy + r, size * 0.18f, size * 0.06f, UI_RGB(150, 150, 160), 255);
++        draw_text(c, x + size * 0.3f, cy + px * 0.36f, l, px, UI_RGB(30, 30, 34), 255, 0);
++        return w;
++    }
++    }
++}
++
++/* the prompts, right-aligned to `right`, centred on cy; returns their left edge */
++static float draw_prompts(const Canvas* c, const ps3_osd_saves_state* S, int with_ok, float right, float cy, float s)
++{
++    const int px = (int)(20 * s);
++    const float bsz = 30 * s, gap = 10 * s, between = 34 * s;
++    float w = 0;
++    /* measure: [button] label  [button] label */
++    for (int b = with_ok ? 0 : 1; b < 2; b++) {
++        const char* l = b == 0 ? S->ok_label : S->back_label;
++        float bw = bsz;
++        const UiImage* im = prompt_image((int)S->prompts, b);
++        if (im) bw = bsz * im->w / (float)im->h;
++        else if (S->prompts == PS3_UI_PROMPTS_KEYBOARD)
++            bw = text_width(b == 0 ? "Enter" : "Esc", (int)(bsz * 0.5f)) + bsz * 0.6f;
++        w += bw + gap + text_width(l, px) + (b == 0 ? between : 0);
++    }
++    float x = right - w;
++    const float left = x;
++    for (int b = with_ok ? 0 : 1; b < 2; b++) {
++        x += draw_button(c, (int)S->prompts, b, x, cy, bsz) + gap;
++        x = draw_text(c, x, cy + px * 0.36f, b == 0 ? S->ok_label : S->back_label, px, C_TEXT, 255, 0);
++        x += b == 0 ? between : 0;
++    }
++    return left;
++}
++
++/* a generic tile where a save has no icon (or the title gave none for a new save) */
++static void draw_tile(const Canvas* c, float x, float y, float w, float h, float s, int plus)
++{
++    rrect(c, x, y, x + w, y + h, 4 * s, C_TILE, 255);
++    rrect_outline(c, x, y, x + w, y + h, 4 * s, fmaxf(1.f, s), UI_RGB(90, 92, 102), 255);
++    const float cx = x + w * 0.5f, cy = y + h * 0.5f, k = h * 0.22f, t = fmaxf(2.f, 5 * s);
++    if (plus) {
++        segment(c, cx - k, cy, cx + k, cy, t, UI_RGB(170, 172, 182), 255);
++        segment(c, cx, cy - k, cx, cy + k, t, UI_RGB(170, 172, 182), 255);
++    } else {   /* a plain save-data card */
++        rrect_outline(c, cx - k * 1.1f, cy - k, cx + k * 1.1f, cy + k, 3 * s, t * 0.6f, UI_RGB(130, 132, 142), 255);
++        segment(c, cx - k * 0.6f, cy - k * 0.35f, cx + k * 0.6f, cy - k * 0.35f, t * 0.6f, UI_RGB(130, 132, 142), 255);
++        segment(c, cx - k * 0.6f, cy + k * 0.15f, cx + k * 0.3f, cy + k * 0.15f, t * 0.6f, UI_RGB(130, 132, 142), 255);
++    }
++}
++
++/* one save's row content (the panel drawn by the caller): its icon and its text */
++static void draw_entry(const Canvas* c, const ps3_osd_save_entry* e, float x, float y, float w, float h, float s, int sel)
++{
++    const float tw = 256 * s, th = 141 * s;
++    const float ix = x + 18 * s, iy = y + (h - th) * 0.5f;
++    const IconSlot* ic = e->is_new ? NULL : icon_get(e->icon);
++    int nw = 0, nh = 0;
++    const unsigned char* nrgba = e->is_new ? new_icon(&nw, &nh) : NULL;
++    if (ic) {
++        fill_rect(c, (int)ix, (int)iy, (int)(ix + tw), (int)(iy + th), UI_RGB(0, 0, 0), 255);
++        draw_image_fit(c, ic->rgba, ic->w, ic->h, ix, iy, tw, th, 255);
++    } else if (nrgba) {
++        fill_rect(c, (int)ix, (int)iy, (int)(ix + tw), (int)(iy + th), UI_RGB(0, 0, 0), 255);
++        draw_image_fit(c, nrgba, nw, nh, ix, iy, tw, th, 255);
++    } else {
++        draw_tile(c, ix, iy, tw, th, s, e->is_new);
++    }
++    rrect_outline(c, ix - 1, iy - 1, ix + tw + 1, iy + th + 1, 2 * s, fmaxf(1.f, s), sel ? C_SEL_EDGE : UI_RGB(70, 72, 80),
++                  sel ? 200 : 255);
++    const float tx = ix + tw + 28 * s, maxw = x + w - tx - 20 * s;
++    const uint32_t fg = C_TEXT, dim = C_TEXT_DIM;
++    if (e->is_new) {
++        draw_text(c, tx, y + h * 0.5f + 9 * s, e->title, (int)(26 * s), fg, 255, maxw);
++        return;
++    }
++    float by = y + 38 * s;
++    draw_text(c, tx, by, e->title, (int)(23 * s), fg, 255, maxw);
++    by += 26 * s;
++    char meta[96];
++    snprintf(meta, sizeof meta, "%s%s%s", e->date, e->date[0] && e->size[0] ? "     " : "", e->size);
++    draw_text(c, tx, by, meta, (int)(17 * s), dim, 255, maxw);
++    by += 31 * s;
++    for (int i = 0; i < PS3_OSD_SAVES_LINES && by < y + h - 6 * s; i++) {
++        if (!e->lines[i][0]) continue;
++        draw_text(c, tx, by, e->lines[i], (int)(19 * s), fg, 235, maxw);
++        by += 24 * s;
++    }
++}
++
++long ps3_osd_saves_clock(void)
++{
++    return (long)(time(NULL) / 60);
++}
++
++/* the first row shown: kept across posts so the list scrolls only as far as the
++ * selection needs; back to the top when a screen closes */
++static int s_top;
++
++void ps3_osd_saves_reset(void) { s_top = 0; }
++
++int ps3_osd_saves_compose(const ps3_osd_saves_state* S, uint8_t* img, uint32_t W, uint32_t H, int bgra)
++{
++    if (!s_font.ok || !img || W < 64 || H < 64) return 0;
++    const Canvas cv = { img, (int)W, (int)H, bgra };
++    const Canvas* c = &cv;
++    const float s = fminf(H / 720.f, W / 1280.f * 1.25f);   /* a narrow window scales by its width */
++
++    /* the background: a dark vertical gradient over the whole window */
++    for (uint32_t y = 0; y < H; y++) {
++        const float t = (float)y / (float)(H - 1);
++        const int r = (int)(22 + (9 - 22) * t), g = (int)(23 + (9 - 23) * t), b = (int)(28 + (12 - 28) * t);
++        uint8_t* q = img + (size_t)y * W * 4;
++        for (uint32_t x = 0; x < W; x++, q += 4) {
++            q[0] = (uint8_t)(bgra ? b : r); q[1] = (uint8_t)g; q[2] = (uint8_t)(bgra ? r : b); q[3] = 255;
++        }
++    }
++
++    const float mx = 72 * s;
++    /* the heading and the clock */
++    draw_text(c, mx, 78 * s, S->heading, (int)(36 * s), C_TEXT, 255, W - 2 * mx - 260 * s);
++    {
++        char clk[48];
++        const time_t now = time(NULL);
++        const struct tm* lt = localtime(&now);
++        clk[0] = 0;
++        if (lt) strftime(clk, sizeof clk, "%m/%d/%Y  %H:%M", lt);
++        const int px = (int)(20 * s);
++        draw_text(c, W - mx - text_width(clk, px), 74 * s, clk, px, C_TEXT_DIM, 255, 0);
++    }
++    fill_rect(c, (int)mx, (int)(102 * s), (int)(W - mx), (int)(102 * s) + (int)fmaxf(1.f, s), C_SEP, 70);
++
++    /* the rows */
++    const float top = 118 * s, bottom = H - 76 * s, rh = 172 * s;
++    const int n = (int)S->n;
++    int vis = (int)((bottom - top) / rh);
++    if (vis < 1) vis = 1;
++    const int cur = n ? ((int)S->cur < n ? (int)S->cur : n - 1) : 0;
++    if (cur < s_top) s_top = cur;
++    if (cur >= s_top + vis) s_top = cur - vis + 1;
++    if (s_top > n - vis) s_top = n - vis > 0 ? n - vis : 0;
++    if (s_top < 0) s_top = 0;
++    const float scroll_w = n > vis ? 16 * s : 0;
++    const float rx0 = mx, rx1 = W - mx - scroll_w;
++    if (!n) {
++        const int px = (int)(24 * s);
++        const char* msg = S->empty[0] ? S->empty : "There is no saved data.";
++        draw_text(c, (W - text_width(msg, px)) * 0.5f, (top + bottom) * 0.5f, msg, px, C_TEXT_DIM, 255, W - 2 * mx);
++    }
++    for (int i = s_top; i < n && i < s_top + vis; i++) {
++        const float y = top + (i - s_top) * rh;
++        const int sel = i == cur && !S->confirm;
++        if (sel) {
++            rrect(c, rx0 - 3 * s, y + 1 * s, rx1 + 3 * s, y + rh - 1 * s, 9 * s, C_SEL_EDGE, 34);   /* the glow */
++            rrect(c, rx0, y + 4 * s, rx1, y + rh - 4 * s, 7 * s, C_ROW_SEL, 255);
++            rrect_outline(c, rx0, y + 4 * s, rx1, y + rh - 4 * s, 7 * s, fmaxf(1.5f, 2 * s), C_SEL_EDGE, 235);
++        } else {
++            rrect(c, rx0, y + 4 * s, rx1, y + rh - 4 * s, 7 * s, C_ROW, 255);
++        }
++        draw_entry(c, &S->e[i], rx0, y + 4 * s, rx1 - rx0, rh - 8 * s, s, sel);
++        if (i + 1 < n && i + 1 < s_top + vis)   /* a thin separator between rows */
++            fill_rect(c, (int)(rx0 + 12 * s), (int)(y + rh), (int)(rx1 - 12 * s), (int)(y + rh) + (int)fmaxf(1.f, s * 0.75f),
++                      C_SEP, 55);
++    }
++    if (n > vis) {   /* the scroll bar */
++        const float bx = W - mx - 5 * s, by0 = top + 4 * s, by1 = top + vis * rh - 4 * s;
++        rrect(c, bx, by0, bx + 4 * s, by1, 2 * s, C_SEP, 40);
++        const float tl = (by1 - by0) * vis / n, ty = by0 + (by1 - by0 - tl) * s_top / (float)(n - vis);
++        rrect(c, bx, ty, bx + 4 * s, ty + tl, 2 * s, C_SEP, 170);
++    }
++
++    /* the bottom bar */
++    fill_rect(c, (int)mx, (int)(H - 64 * s), (int)(W - mx), (int)(H - 64 * s) + (int)fmaxf(1.f, s), C_SEP, 70);
++    if (!S->confirm)
++        draw_prompts(c, S, n > 0, W - mx, H - 32 * s, s);
++
++    /* the overwrite question: the list dimmed, a box with the save it would replace */
++    if (S->confirm && n) {
++        fill_rect(c, 0, 0, (int)W, (int)H, UI_RGB(0, 0, 0), 150);
++        const float bw = fminf(W - 2 * mx, 940 * s), bh = 330 * s;
++        const float bx = (W - bw) * 0.5f, by = (H - bh) * 0.5f;
++        rrect(c, bx, by, bx + bw, by + bh, 10 * s, UI_RGB(30, 31, 37), 255);
++        rrect_outline(c, bx, by, bx + bw, by + bh, 10 * s, fmaxf(1.f, 1.5f * s), UI_RGB(140, 150, 175), 255);
++        const char* q = S->question[0] ? S->question : "Overwrite this save data?";
++        draw_text(c, bx + 32 * s, by + 52 * s, q, (int)(25 * s), C_TEXT, 255, bw - 64 * s);
++        rrect(c, bx + 24 * s, by + 72 * s, bx + bw - 24 * s, by + 72 * s + 172 * s, 7 * s, C_ROW, 255);
++        draw_entry(c, &S->e[cur], bx + 24 * s, by + 72 * s, bw - 48 * s, 172 * s, s, 0);
++        draw_prompts(c, S, 1, bx + bw - 32 * s, by + bh - 36 * s, s);
++    }
++    return 1;
++}
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index 46908f3..c5be620 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -2167,6 +2167,8 @@ static void vk_window_drop(const char* why)
+     s_vk.windowed = 0;
+ }
+ 
++static int vk_present_again(void);   /* below: a host dialog's own presents */
++
+ static void vk_window_open(const char* title)
+ {
+     if (!vk_env_on("PS3RECOMP_VK_WINDOW")) return;
+@@ -2180,6 +2182,7 @@ static void vk_window_open(const char* title)
+                                    SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+                                    (int)s_vk.width, (int)s_vk.height, flags);
+     s_vk.windowed = 1;          /* so vk_window_drop also shuts SDL video down */
++    g_ps3_osd_present_again = vk_present_again;   /* a host dialog's own presents (ps3emu/osd.h) */
+     if (!s_vk.window) {
+         char why[256];
+         snprintf(why, sizeof why, "SDL_CreateWindow failed: %s", SDL_GetError());
+@@ -2539,6 +2542,91 @@ static void vk_osd_list_draw(VkCommandBuffer cb, u32 idx)
+     __atomic_store_n(&g_ps3_osd_list.drawn, L.rev, __ATOMIC_RELEASE);
+ }
+ 
++/* The save-data screen (ps3emu/osd.h, libs/video/osd_saves.c): the whole window,
++ * composed on the CPU when its revision, the window's size or the clock's minute
++ * changes, and copied over the game's picture every frame while it is open.
++ * Returns 1 when it drew (the list panel is then not drawn); 0 without a font. */
++static struct {
++    vk_buffer buf;
++    uint32_t  rev;
++    u32       w, h;
++    long      minute;
++    int       fmt, failed, shown;
++} s_osaves;
++
++static int vk_osd_saves_draw(VkCommandBuffer cb, u32 idx)
++{
++    static ps3_osd_saves_state S;
++    if (!__atomic_load_n(&g_ps3_osd_saves.open, __ATOMIC_ACQUIRE)) {
++        if (s_osaves.shown) { s_osaves.shown = 0; ps3_osd_saves_reset(); }
++        return 0;
++    }
++    if (!s_vk.sc_osd || s_osaves.failed || !ps3_ui_have_font()) return 0;
++    const u32 W = s_vk.sc_extent.width, H = s_vk.sc_extent.height;
++    const uint32_t rev = __atomic_load_n(&g_ps3_osd_saves.rev, __ATOMIC_ACQUIRE);
++    const long minute = ps3_osd_saves_clock();
++    if (!s_osaves.shown || rev != s_osaves.rev || W != s_osaves.w || H != s_osaves.h ||
++        minute != s_osaves.minute || s_vk.sc_osd != s_osaves.fmt) {
++        if (ps3_osd_saves_read(&S)) {
++            const VkDeviceSize need = (VkDeviceSize)W * H * 4;
++            if (s_osaves.buf.size < need) {
++                if (s_osaves.buf.buf) vk_destroy_present_buffer(&s_osaves.buf);
++                if (vk_create_host_buffer(&s_osaves.buf, need, VK_BUFFER_USAGE_TRANSFER_SRC_BIT) != 0 ||
++                    !s_osaves.buf.coherent) {
++                    if (s_osaves.buf.buf) vk_destroy_present_buffer(&s_osaves.buf);
++                    s_osaves.failed = 1;
++                    VK_LOG("no coherent host buffer for the save-data screen; the list panel is drawn\n");
++                    return 0;
++                }
++            }
++            if (!ps3_osd_saves_compose(&S, (uint8_t*)s_osaves.buf.ptr, W, H, s_vk.sc_osd == 2)) return 0;
++            /* PS3_SAVES_SCREEN_DUMP=<dir> (tests): each picture as composed, <dir>/saves-<n>.ppm --
++             * what goes into the window (a drive's `shot` reads the game's frame, not the window) */
++            {
++                static const char* dir = (const char*)-1;
++                static unsigned n;
++                if (dir == (const char*)-1) dir = getenv("PS3_SAVES_SCREEN_DUMP");
++                if (dir && *dir) {
++                    char path[1024];
++                    snprintf(path, sizeof path, "%s/saves-%03u.ppm", dir, ++n);
++                    FILE* f = fopen(path, "wb");
++                    if (f) {
++                        const uint8_t* px = (const uint8_t*)s_osaves.buf.ptr;
++                        const int bgra = s_vk.sc_osd == 2;
++                        fprintf(f, "P6\n%u %u\n255\n", W, H);
++                        for (size_t i = 0; i < (size_t)W * H; i++) {
++                            const uint8_t rgb[3] = { px[i * 4 + (bgra ? 2 : 0)], px[i * 4 + 1], px[i * 4 + (bgra ? 0 : 2)] };
++                            fwrite(rgb, 1, 3, f);
++                        }
++                        fclose(f);
++                    }
++                }
++            }
++            s_osaves.rev = S.rev; s_osaves.w = W; s_osaves.h = H; s_osaves.minute = minute;
++            s_osaves.fmt = s_vk.sc_osd; s_osaves.shown = 1;
++        }
++        /* being written: the last picture again, if it still fits the window */
++        if (!s_osaves.shown || s_osaves.w != W || s_osaves.h != H) return 0;
++    }
++    VkImageMemoryBarrier b = {
++        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
++        .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
++        .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
++        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++        .image = s_vk.sc_images[idx], .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 },
++    };
++    pvkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
++                          0, 0, NULL, 0, NULL, 1, &b);
++    VkBufferImageCopy region = {
++        .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
++        .imageOffset = { 0, 0, 0 }, .imageExtent = { W, H, 1 },
++    };
++    pvkCmdCopyBufferToImage(cb, s_osaves.buf.buf, s_vk.sc_images[idx],
++                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
++    __atomic_store_n(&g_ps3_osd_saves.drawn, s_osaves.rev, __ATOMIC_RELEASE);
++    return 1;
++}
++
+ static void vk_osd_fps_draw(VkCommandBuffer cb, u32 idx)
+ {
+     const int mode = ps3_osd_fps_mode();
+@@ -2668,7 +2756,8 @@ static void vk_present_window(void)
+                     1, &blit, VK_FILTER_LINEAR);
+     vk_osd_draw(cb, idx);
+     vk_osd_fps_draw(cb, idx);
+-    vk_osd_list_draw(cb, idx);
++    if (!vk_osd_saves_draw(cb, idx))
++        vk_osd_list_draw(cb, idx);
+     b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+     b.dstAccessMask = 0;
+     b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+@@ -2698,6 +2787,7 @@ static void vk_present_window(void)
+     };
+     r = vk_queue_present(&pi);
+     ps3_osd_log_note(1);   /* DIAG_FRAMES: the present returned */
++    __atomic_add_fetch(&g_ps3_osd_presents, 1, __ATOMIC_RELEASE);   /* a host dialog's watch (ps3emu/osd.h) */
+     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) vk_swapchain_lost();
+     else if (r != VK_SUCCESS) VK_LOG("vkQueuePresentKHR failed (VkResult %d)\n", (int)r);
+ }
+@@ -2763,6 +2853,22 @@ static void vk_present_complete_locked(void)
+     if (ft0) ps3_ft_span(PS3_FT_PRESENT, 1, 0, 0, ft0, ps3_ft_now());
+ }
+ 
++/* The last frame presented once more, with the overlays (ps3emu/osd.h
++ * g_ps3_osd_present_again): for a host dialog while the guest flips nothing.
++ * Any thread; under the present mutex, after a present in flight completes
++ * (vk_present_window reuses its command buffer). 1 when it presented. */
++static int vk_present_again(void)
++{
++    if (!s_vk.device || !s_vk.windowed || !s_vk.swapchain) return 0;
++    vk_mutex_lock(&s_vk.present_mu);
++    vk_present_complete_locked();
++    const uint32_t before = __atomic_load_n(&g_ps3_osd_presents, __ATOMIC_ACQUIRE);
++    vk_present_window();
++    const int presented = __atomic_load_n(&g_ps3_osd_presents, __ATOMIC_ACQUIRE) != before;
++    vk_mutex_unlock(&s_vk.present_mu);
++    return presented;
++}
++
+ /* present_mu held: a previous present finished, the present's command
+  * buffer begun and ordered after everything submitted so far. */
+ static VkCommandBuffer vk_present_record_begin(void)
+@@ -6089,7 +6195,12 @@ int rsx_vulkan_backend_pump_messages(void)
+     SDL_Event e;
+     while (SDL_PollEvent(&e)) {
+         if (e.type == SDL_QUIT) quit = 1;
+-        else if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE) quit = 1;
++        /* Esc quits, except while a host dialog is open: there it goes back
++         * (cellPad_ui_keys), and a player backing out of the save list must
++         * not lose the game */
++        else if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE &&
++                 !__atomic_load_n(&g_ps3_osd_saves.open, __ATOMIC_ACQUIRE) &&
++                 !__atomic_load_n(&g_ps3_osd_list.open, __ATOMIC_ACQUIRE)) quit = 1;
+     }
+     return quit ? -1 : 0;
+ }
+-- 
+2.56.0.windows.3
+

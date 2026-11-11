@@ -1,0 +1,11 @@
+The prompt images in this folder (prompt_*.png) are from Kenney's "Input Prompts"
+pack (www.kenney.nl), unmodified:
+
+  prompt_xbox_confirm.png      Xbox Series/Double/xbox_button_color_a.png
+  prompt_xbox_back.png         Xbox Series/Double/xbox_button_color_b.png
+  prompt_switch_confirm.png    Nintendo Switch/Double/switch_button_b.png
+  prompt_switch_back.png       Nintendo Switch/Double/switch_button_a.png
+
+Licence: Creative Commons Zero, CC0 1.0 Universal
+(https://creativecommons.org/publicdomain/zero/1.0/). The assets may be used in
+personal and commercial projects; credit to Kenney is appreciated, not required.

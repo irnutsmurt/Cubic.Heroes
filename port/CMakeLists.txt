@@ -233,6 +233,22 @@ target_sources(${PROJECT_NAME} PRIVATE phys_hooks.cpp)
 # The lifter's --promote-calls check (docs/NATIVE_R8.md section 9.0): its report,
 # and with DOTHEROES_PPU_PROMO_CHECK=ON the test after every promoted call
 target_sources(${PROJECT_NAME} PRIVATE promo_check.cpp)
+# The save-data screen's font and prompt images (assets/ui, docs/SAVE_UI.md), embedded
+# in the executable so every copy of it (a release folder, an install) has them.
+set(UI_ASSET_FILES DejaVuSans.ttf
+    prompt_xbox_confirm.png prompt_xbox_back.png prompt_switch_confirm.png prompt_switch_back.png)
+set(_ui_assets_c "${CMAKE_CURRENT_BINARY_DIR}/ui_assets_data.c")
+set(_ui_asset_paths "")
+foreach(_f IN LISTS UI_ASSET_FILES)
+    list(APPEND _ui_asset_paths "${CMAKE_CURRENT_SOURCE_DIR}/assets/ui/${_f}")
+endforeach()
+string(REPLACE ";" "|" _ui_asset_arg "${UI_ASSET_FILES}")   # a list through -D: '|' between the names
+add_custom_command(OUTPUT "${_ui_assets_c}"
+    COMMAND ${CMAKE_COMMAND} "-DOUT=${_ui_assets_c}" "-DDIR=${CMAKE_CURRENT_SOURCE_DIR}/assets/ui"
+            "-DFILES=${_ui_asset_arg}" -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_files.cmake"
+    DEPENDS ${_ui_asset_paths} "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_files.cmake"
+    COMMENT "Embedding the UI's font and prompt images" VERBATIM)
+# (in dotheroes_native, below: the player's install links that library prebuilt)
 
 # The lifted SPU sources use bare #include "spu_context.h". Scope that include
 # directory (and their flags) to those TUs alone: adding it to the whole target
@@ -290,6 +306,8 @@ add_library(dotheroes_native STATIC native/bullet_cd_task.cpp native/bullet_solv
     # (tools/r1_dev_lift.sh)
     native/render/r1_observe.cpp native/render/ppfx_recorder.cpp native/render/ppfx_watch.cpp
     native/render/ppfx_render.cpp)
+# the save-data screen's font and prompt images (above), registered by main.cpp
+target_sources(dotheroes_native PRIVATE ui_assets.cpp "${_ui_assets_c}")
 if(NOT DOTHEROES_NATIVE_RELEASE)
     # R4's bridge to the FIFO walker and the existing renderer (development)
     target_sources(dotheroes_native PRIVATE native/render/ppfx_bridge.cpp)
