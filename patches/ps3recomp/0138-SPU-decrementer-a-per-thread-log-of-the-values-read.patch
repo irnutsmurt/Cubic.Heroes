@@ -1,0 +1,60 @@
+From 7240b09ce5088088e04008cbf33f32041ae8bc9e Mon Sep 17 00:00:00 2001
+From: giteaguy <73799093+irnutsmurt@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 16:30:55 -0800
+Subject: [PATCH 138/139] SPU decrementer: a per-thread log of the values read
+
+spu_dec_log_begin(buf, cap) / spu_dec_log_end(): the decrementer values this
+host thread reads in between, in order (the count may exceed the capacity).
+For a native replacement's check: the lifted run's reads are replayed into the
+native run, so state a function computes from the time compares exactly.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ runtime/spu/spu_channels.c | 24 ++++++++++++++++++++++++
+ 1 file changed, 24 insertions(+)
+
+diff --git a/runtime/spu/spu_channels.c b/runtime/spu/spu_channels.c
+index c246559..4e9d438 100644
+--- a/runtime/spu/spu_channels.c
++++ b/runtime/spu/spu_channels.c
+@@ -1254,6 +1254,26 @@ static void spu_ch_wait(spu_context* ctx, uint32_t channel, const char* op)
+     ctx->status = SPU_STATUS_RUNNING;
+ }
+ 
++/* The decrementer values this host thread reads, logged between spu_dec_log_begin
++ * and spu_dec_log_end (a native replacement's check: the lifted run's reads are
++ * logged and fed to the native run, so state computed from the time compares
++ * exactly). Returns how many reads there were, which may exceed the capacity. */
++static SPU_TLS uint32_t* t_dec_log;
++static SPU_TLS uint32_t t_dec_log_n, t_dec_log_cap;
++void spu_dec_log_begin(uint32_t* buf, uint32_t cap)
++{
++    t_dec_log = buf;
++    t_dec_log_cap = buf ? cap : 0;
++    t_dec_log_n = 0;
++}
++uint32_t spu_dec_log_end(void)
++{
++    const uint32_t n = t_dec_log_n;
++    t_dec_log = NULL;
++    t_dec_log_cap = t_dec_log_n = 0;
++    return n;
++}
++
+ /* ===========================================================================
+  * Channel read (returns value in the preferred word slot)
+  * ===========================================================================*/
+@@ -1332,6 +1352,10 @@ u128 spu_rdch(spu_context* ctx, uint32_t channel)
+         uint32_t ticks   = (uint32_t)(secs * SPU_DECREMENTER_HZ +
+                                       (rem * SPU_DECREMENTER_HZ) / 1000000000ull);
+         v = ctx->decrementer - ticks;
++        if (t_dec_log) {
++            if (t_dec_log_n < t_dec_log_cap) t_dec_log[t_dec_log_n] = v;
++            t_dec_log_n++;
++        }
+         break;
+     }
+     case SPU_RdEventMask:   v = ctx->event_mask;                        break;
+-- 
+2.56.0.windows.3
+

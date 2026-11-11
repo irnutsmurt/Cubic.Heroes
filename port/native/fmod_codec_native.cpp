@@ -3,8 +3,11 @@
 // ps3recomp 0136) calls this on the FMOD mixer's indirect branches into the resident overlay.
 // DOTHEROES_NATIVE_FMOD_CODEC: unset or 0 the lifted overlay (until checked in the game); 1 native;
 // check: at each call the native one on a copy of the local store and the registers (its DMA a GET
-// stand-in from guest memory, the decrementer the runtime's), then the lifted one run to its return,
-// then the two compared (the whole local store, r0, r1, r3, r80-r127).
+// stand-in from guest memory, the decrementer the runtime's), then the lifted one run to its return
+// with its decrementer reads logged, then the two compared (the whole local store, r0, r1, r3,
+// r80-r127). The read pacing keeps a clock in the local store from the decrementer, which the two runs
+// read at different moments: when the two differ, the native one runs again from the same state with
+// the lifted run's decrementer reads replayed in order, and that run is compared, clock included.
 #include "fmod_codec_raw.h"
 #include "spu_context.h"
 
@@ -18,12 +21,18 @@ extern "C" uint8_t* vm_base;
 extern "C" void spu_halt(spu_context* ctx);
 extern "C" void spu_wrch(spu_context* ctx, uint32_t channel, u128 value);   // spu_channels.c
 extern "C" u128 spu_rdch(spu_context* ctx, uint32_t channel);
+// spu_channels.c: the decrementer values this host thread reads, logged into buf (cap entries) until
+// spu_dec_log_end, which returns how many reads there were (it may exceed cap)
+extern "C" void spu_dec_log_begin(uint32_t* buf, uint32_t cap);
+extern "C" uint32_t spu_dec_log_end(void);
 
 namespace {
 enum Mode { kOff, kNative, kCheck };
 int g_mode = kOff;
-std::atomic<unsigned long long> g_handled{0}, g_declined{0}, g_halted{0}, g_checked{0}, g_equal{0}, g_diff{0},
-    g_check_lifted_only{0}, g_diff_source{0}, g_diff_same{0}, g_clock_only{0};
+// Each comparison is counted once, when it is decided (a call still running at the report is not in it).
+std::atomic<unsigned long long> g_handled{0}, g_declined{0}, g_halted{0}, g_equal{0}, g_equal_replayed{0},
+    g_diff{0}, g_check_lifted_only{0}, g_diff_source{0}, g_diff_same{0}, g_replay_reads{0};
+constexpr uint32_t kDecLogCap = 20000;   // the pacing spin reads the decrementer 17,500 times
 thread_local int t_inner;
 unsigned g_lines = 12;
 
@@ -40,6 +49,10 @@ struct CopyMfc {
     // rewrote in between (FMOD's stream) from a different result on the same input
     struct Get { uint32_t lsa, ea, size; std::vector<uint8_t> bytes; };
     std::vector<Get> gets;
+    // the decrementer: the runtime's, or these values in order (the lifted run's reads, replayed)
+    const uint32_t* replay = nullptr;
+    uint32_t nreplay = 0, replay_i = 0;
+    bool replay_over = false;
 };
 void wrch_copy(void* u, uint32_t ch, uint32_t v)
 {
@@ -66,12 +79,26 @@ uint32_t rdch_copy(void* u, uint32_t ch)
 {
     CopyMfc& m = *(CopyMfc*)u;
     if (ch == fmod_codec_raw::kMfcRdTagStat) return m.mask;
-    if (ch == fmod_codec_raw::kSpuRdDec) return spu_rdch(m.ctx, ch)._u32[0];
+    if (ch == fmod_codec_raw::kSpuRdDec) {
+        if (!m.replay) return spu_rdch(m.ctx, ch)._u32[0];
+        if (m.replay_i < m.nreplay) return m.replay[m.replay_i++];
+        m.replay_over = true;
+        return 0;
+    }
     m.odd = true;
     return 0;
 }
 
 bool same(const u128& a, const u128& b) { return !memcmp(&a, &b, sizeof a); }
+
+// the native run's local store and registers against the lifted run's (the context)
+bool equal_to_lifted(const uint8_t* ls, const u128* g, const spu_context* ctx)
+{
+    bool eq = !memcmp(ls, ctx->ls, 0x40000) && same(g[0], ctx->gpr[0]) && same(g[1], ctx->gpr[1]) &&
+              same(g[3], ctx->gpr[3]);
+    for (int i = 80; i < 128 && eq; i++) eq = same(g[i], ctx->gpr[i]);
+    return eq;
+}
 
 int native_call(spu_context* ctx, int image, uint32_t link, uint32_t delta)
 {
@@ -95,37 +122,50 @@ int native_call(spu_context* ctx, int image, uint32_t link, uint32_t delta)
         return 1;
     }
     // check: the native call on copies, then the lifted one on the context, then the two compared
-    static thread_local std::vector<uint8_t> ls(0x40000);
-    static thread_local u128 g[128];
-    memcpy(ls.data(), ctx->ls, 0x40000);
-    memcpy(g, ctx->gpr, sizeof g);
+    static thread_local std::vector<uint8_t> pre(0x40000), ls(0x40000);
+    static thread_local u128 gpre[128], g[128];
+    static thread_local std::vector<uint32_t> declog(kDecLogCap);
+    memcpy(pre.data(), ctx->ls, 0x40000);
+    memcpy(gpre, ctx->gpr, sizeof gpre);
+    memcpy(ls.data(), pre.data(), 0x40000);
+    memcpy(g, gpre, sizeof g);
+    const uint32_t pc = ctx->pc;
     CopyMfc m;
     m.ctx = ctx;
     m.ls = ls.data();
-    const Channels ch{ &m, wrch_copy, rdch_copy };
     uint32_t hpc = 0;
-    const Result r = call(ls.data(), g, ctx->pc, delta, ch, &hpc);
+    const Result r = call(ls.data(), g, pc, delta, Channels{ &m, wrch_copy, rdch_copy }, &hpc);
     const uint32_t ret = ctx->gpr[0]._u32[0] & SPU_LS_MASK;
     t_inner = 1;
+    spu_dec_log_begin(declog.data(), kDecLogCap);
     spu_indirect_branch(ctx);   // the lifted function (this hook declines inside)
     spu_drain_call(ctx, ret);
+    const uint32_t ndec = spu_dec_log_end();
     t_inner = 0;
     if (r != Result::handled || m.odd) { g_check_lifted_only++; return 1; }
-    g_checked++;
-    // The read pacing's clock (fmod_codec_raw.cpp really_read): the milliseconds accumulated at delta + 0x2F10
-    // and the previous decrementer at delta + 0x2F20, from the host's time, which the two runs read at
-    // different moments. Compared apart: everything else must be equal.
-    const uint32_t clk = (delta + 0x2F10u) & 0x3FFFFu;
-    if (clk + 0x20 <= 0x40000 && memcmp(ls.data() + clk, ctx->ls + clk, 0x20)) {
-        g_clock_only++;
-        memcpy(ls.data() + clk, ctx->ls + clk, 0x20);
+    if (equal_to_lifted(ls.data(), g, ctx)) { g_equal++; return 1; }
+    // The read pacing (fmod_codec_raw.cpp really_read) keeps the milliseconds between reads at delta + 0x2F10
+    // and the last decrementer at delta + 0x2F20, from the time, which the two runs read at different
+    // moments: the native one again from the same state, with the lifted run's reads replayed.
+    bool replay_reads_ok = false;
+    if (ndec <= kDecLogCap) {
+        memcpy(ls.data(), pre.data(), 0x40000);
+        memcpy(g, gpre, sizeof g);
+        CopyMfc m2;
+        m2.ctx = ctx;
+        m2.ls = ls.data();
+        m2.replay = declog.data();
+        m2.nreplay = ndec;
+        const Result r2 = call(ls.data(), g, pc, delta, Channels{ &m2, wrch_copy, rdch_copy }, &hpc);
+        replay_reads_ok = !m2.replay_over && m2.replay_i == ndec;
+        if (r2 == Result::handled && !m2.odd && replay_reads_ok && equal_to_lifted(ls.data(), g, ctx)) {
+            g_equal_replayed++;
+            return 1;
+        }
     }
-    bool eq = !memcmp(ls.data(), ctx->ls, 0x40000) && same(g[0], ctx->gpr[0]) && same(g[1], ctx->gpr[1]) &&
-              same(g[3], ctx->gpr[3]);
-    for (int i = 80; i < 128 && eq; i++) eq = same(g[i], ctx->gpr[i]);
-    if (eq) { g_equal++; return 1; }
     g_diff++;
-    // the source rewritten between the two runs (another thread's), or the same input giving another result
+    if (!replay_reads_ok) g_replay_reads++;
+    // the source rewritten between the runs (another thread's), or the same input giving another result
     bool source_changed = false;
     for (const auto& gt : m.gets)
         if (memcmp(gt.bytes.data(), vm_base + gt.ea, gt.size)) { source_changed = true; break; }
@@ -136,8 +176,10 @@ int native_call(spu_context* ctx, int image, uint32_t link, uint32_t delta)
         for (uint32_t i = 0; i < 0x40000; i++)
             if (ls[i] != ctx->ls[i]) { if (!n++) first = i; last = i; }
         fprintf(stderr, "[codec-raw-check] call at link 0x%03X differs: %u local-store byte(s) in 0x%05X-0x%05X, r3 %08X "
-                "native %08X lifted; %zu GET(s), the source %s\n", link, n, first, last, g[3]._u32[0], ctx->gpr[3]._u32[0],
-                m.gets.size(), source_changed ? "rewritten between the runs" : "the same in both");
+                "native %08X lifted; %zu GET(s), the source %s; the lifted run read the decrementer %u time(s)%s\n",
+                link, n, first, last, g[3]._u32[0], ctx->gpr[3]._u32[0], m.gets.size(),
+                source_changed ? "rewritten between the runs" : "the same in both", ndec,
+                replay_reads_ok ? "" : ", the replay read it a different number of times");
     }
     return 1;
 }
@@ -150,12 +192,16 @@ extern "C" void fmod_codec_native_report(void)
     if (g_mode == kNative)
         fprintf(stderr, "[codec-raw] native: %llu calls, %llu declined to the lifted overlay, %llu halts\n",
                 g_handled.load(), g_declined.load(), g_halted.load());
-    else
-        fprintf(stderr, "[codec-raw-check] %llu calls compared: %llu equal, %llu differing (%llu with the source rewritten "
-                "between the two runs, %llu on the same source); the pacing clock read at another moment in %llu "
-                "(compared apart); %llu run lifted only (the native one declined, halted or met a transfer the check "
-                "does not model)\n", g_checked.load(), g_equal.load(), g_diff.load(), g_diff_source.load(),
-                g_diff_same.load(), g_clock_only.load(), g_check_lifted_only.load());
+    else {
+        const unsigned long long eq = g_equal.load(), rep = g_equal_replayed.load(), diff = g_diff.load();
+        fprintf(stderr, "[codec-raw-check] %llu calls compared, every byte of the local store and the registers: %llu "
+                "equal as run, %llu equal with the lifted run's decrementer reads replayed into the native one (the "
+                "read pacing's clock), %llu differing (%llu with the source rewritten between the runs, %llu on the "
+                "same source; %llu where the replay read the decrementer a different number of times); %llu run "
+                "lifted only (the native one declined, halted or met a transfer the check does not model)\n",
+                eq + rep + diff, eq, rep, diff, g_diff_source.load(), g_diff_same.load(), g_replay_reads.load(),
+                g_check_lifted_only.load());
+    }
 }
 
 extern "C" void fmod_codec_native_init(void)

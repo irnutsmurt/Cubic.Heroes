@@ -142,7 +142,8 @@ separately: the console's rule for 7.1 to stereo against ours, as a
 behaviour change of its own.
 
 Status: section 1 mapped (2026-11-10). A0: the counters done, the captures not yet (below). A1: ported and
-checked in the game; off by default until the validation scenes run with it on (below).
+checked in the game, bit-exact with the clock replayed (rel20); off by default until the validation scenes
+run with it on (below).
 
 ### A1, codec_raw (2026-11-10) [C, M]
 
@@ -164,7 +165,18 @@ calls `read` (link 0x490) and `setposition` (0x3D0) through its codec object.
 - **Check** (rel17c, the river fight and the menus' music): **172,958 and 267,484 calls, all equal** apart
   from the read pacing's clock (the milliseconds and the last decrementer it keeps at delta + 0x2F10 and
   0x2F20, from the host's time, read at another moment by each run: compared apart; 56k and 87k calls).
-  Before that was known, the check counted those calls as different (rel17).
+  Before that was known, the check counted those calls as different (rel17). rel17c's menus report also
+  counted one call more than it settled (267,484 checked, 267,483 equal, 0 differing): the count was taken
+  before the comparison, and a call still running when the report printed was in it.
+- **Check with the clock replayed** (rel20, 2026-11-10): the clock is no longer compared apart. The lifted
+  run's decrementer reads are logged (ps3recomp spu_channels.c `spu_dec_log_begin`/`_end`), and when the
+  two runs differ the native one runs again from the same state with those reads fed to it in order; the
+  whole local store and the registers are compared, the clock included, and each call is counted once,
+  when it is decided. **The menus: 267,517 calls, 180,923 equal as run, 86,594 equal with the reads
+  replayed, 0 differing. The river fight: 102,959 calls, 69,630 and 33,329, 0 differing.** No call read
+  the decrementer a different number of times in the two runs. Every mismatch of the earlier checks is
+  thereby explained -- the two runs' different moments of reading the time, and nothing else -- and the
+  port is bit-exact on every call these runs made, clock included.
 - **Native** (rel17): 171,274 and 266,882 calls, none declined, no halt; the mixer's work a block 128.7 us
   in the river against 125.3 us lifted -- no gain to speak of (it copies memory), and none expected: A1 is
   a step to A3 (the mixer), which needs its plugins native.
@@ -184,3 +196,8 @@ spuq number, the time it waited for them, the time it ran between them) and `spu
 - Its work is 2.8-3.0% of a core on average, with spikes of 2-2.6 ms a block (under half a block's time).
 - codec_raw is loaded 5-6 times a block; **sfxreverb is imported but never loaded, so never run, in these
   scenes** -- its port waits for evidence that it runs (step A2).
+- **sfxreverb does run, in the dungeons** (rel20's validation scenes, 2026-11-10): overlay loads by image
+  -- the first dungeon's approach (v20dungeon) image 9: 103,101, **image 25: 7,102**; the exit after its
+  boss (v20exitboss) image 9: 21,314, **image 25: 928**. None in the river, the fields, the menus, the
+  editor, the field after the dungeon or the snapshot scene. So the dungeons' sound has reverb, and **A2
+  is needed**: sfxreverb ported as codec_raw was, before the mixer (A3) can be native.
