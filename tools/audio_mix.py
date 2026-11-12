@@ -23,9 +23,21 @@ HOP = 0.01   # s
 
 
 def read_mix(path):
+    """raw f32le stereo, or a float WAV (OpenAL Soft's wave writer): its data chunk"""
     a = array.array('f')
     with open(path, 'rb') as f:
-        a.frombytes(f.read())
+        data = f.read()
+    if data[:4] == b'RIFF' and data[8:12] == b'WAVE':
+        pos = 12
+        while pos + 8 <= len(data):
+            cid, size = data[pos:pos + 4], struct.unpack_from('<I', data, pos + 4)[0]
+            if cid == b'data':
+                end = len(data) if size in (0, 0xFFFFFFFF) else min(len(data), pos + 8 + size)
+                data = data[pos + 8:end]
+                break
+            pos += 8 + size + (size & 1)
+        data = data[:len(data) // 8 * 8]
+    a.frombytes(data)
     if sys.byteorder != 'little':
         a.byteswap()
     return a   # interleaved L R

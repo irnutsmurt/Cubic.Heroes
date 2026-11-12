@@ -1,4 +1,4 @@
-# Repository licensing audit (2026-11-11, after M2)
+# Repository licensing audit (2026-11-12, after M3)
 
 Every tracked file of the repository with its origin class and what is done with it, as tools/license_audit.py
 classifies it (its header has the rules; docs/OPENAL_MIGRATION_PLAN.md section 5 the findings and the history).
@@ -18,7 +18,7 @@ Earlier commits still hold the removed files: docs/OPENAL_MIGRATION_PLAN.md sect
 libraries the setup ships (OpenAL Soft since M2) are not in the repository: tools/build_deps.py fetches them at
 pinned versions (config/deps.sha256) and the download carries their licences (README, "License").
 
-468 files: BULLET 8, DOC-GAME 12, INDEP 433, SPUGEN 7, THIRD 8.
+477 files: BULLET 8, DOC-GAME 12, INDEP 442, SPUGEN 7, THIRD 8.
 
 | File | Class | Action |
 |---|---|---|
@@ -228,8 +228,12 @@ pinned versions (config/deps.sha256) and the download carries their licences (RE
 | `port/native/audio/al_device.h` | INDEP | keep |
 | `port/native/audio/al_stream.cpp` | INDEP | keep |
 | `port/native/audio/al_stream.h` | INDEP | keep |
+| `port/native/audio/native_sound.h` | INDEP | keep |
+| `port/native/audio/native_sound_absent.cpp` | INDEP | keep |
 | `port/native/audio/sound_list.cpp` | INDEP | keep |
 | `port/native/audio/sound_list.h` | INDEP | keep |
+| `port/native/audio/sound_manager.cpp` | INDEP | keep |
+| `port/native/audio/sound_manager.h` | INDEP | keep |
 | `port/native/audio/voice_pool.cpp` | INDEP | keep |
 | `port/native/audio/voice_pool.h` | INDEP | keep |
 | `port/native/audio/wav_pcm.cpp` | INDEP | keep |
@@ -306,8 +310,12 @@ pinned versions (config/deps.sha256) and the download carries their licences (RE
 | `tests/native/openal_check.cpp` | INDEP | keep |
 | `tests/native/openal_check.sh` | INDEP | keep |
 | `tests/native/run_gcm_tests.sh` | INDEP | keep |
+| `tests/native/sound_manager_check.cpp` | INDEP | keep |
+| `tests/native/sound_replay.cpp` | INDEP | keep |
+| `tests/native/sound_replay.sh` | INDEP | keep |
 | `tests/native/store_paths.py` | INDEP | keep |
 | `tests/native/store_paths_test.cpp` | INDEP | keep |
+| `tests/native/trace_reader.h` | INDEP | keep |
 | `tests/native/water_task_check.cpp` | INDEP | keep |
 | `tests/native/waver_task_check.cpp` | INDEP | keep |
 | `tests/nsys_capture.py` | INDEP | keep |
@@ -421,6 +429,7 @@ pinned versions (config/deps.sha256) and the download carries their licences (RE
 | `tests/workload_variation.py` | INDEP | keep |
 | `tools/audio_mix.py` | INDEP | keep |
 | `tools/audio_trace.py` | INDEP | keep |
+| `tools/audio_trace_compare.py` | INDEP | keep |
 | `tools/binsyms.py` | INDEP | keep |
 | `tools/boundary_check.py` | INDEP | keep |
 | `tools/build_deps.py` | INDEP | keep |
