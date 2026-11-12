@@ -18,7 +18,8 @@ Makes build/dist/DotHeroes-Setup-<platform>-x86_64/ and a .tar.xz (Linux) / .zip
                             per-game configuration they read
     licenses/               third-party licences; licenses/source/ OpenAL Soft's source
                             (LGPL: the corresponding source of the library shipped)
-Nothing from the game is in it: players convert their own disc.
+Nothing from the game is in it: players convert their own disc. tools/boundary_check.py
+checks the folder before it is archived, and the archive after.
 
 The Windows app is made by Windows Python + PyInstaller running under Wine, in the
 prefix build/wine (C:\\Python314, with pycryptodome); Windows Zig is in build/toolchain/win/.
@@ -54,6 +55,23 @@ ZIG_DROP = ("doc", "docs", "lldb", "libtsan")
 # this project's tools the setup runs (the rest are developer tools)
 OUR_TOOLS = ["fix_functions.py", "iso9660.py", "self_decrypt.py", "setup_pipeline.py", "zig_build.py",
              "shortcuts.py", "self_update.py", "version.py", "gen_spu_native.py", "spu_native_task.cpp.in"]
+
+
+def copy_tracked(rel, dst, skip=()):
+    """The files git tracks under ROOT/rel copied to dst (keeping the layout), never untracked ones: a file made
+    from the player's game (a generated task, a lift) lying in the folder cannot reach a bundle. skip: path parts
+    or name patterns left out."""
+    import fnmatch
+    r = subprocess.run(["git", "-C", ROOT, "ls-files", "-z", "--", rel], capture_output=True)
+    files = [f for f in r.stdout.decode("utf-8").split("\0") if f] if r.returncode == 0 else None
+    if not files:
+        sys.exit(f"{rel}: no tracked files (the bundle is made from a git checkout)")
+    for f in files:
+        sub = os.path.relpath(f, rel).replace(os.sep, "/")
+        if any(fnmatch.fnmatch(part, pat) for part in sub.split("/") for pat in skip):
+            continue
+        os.makedirs(os.path.dirname(os.path.join(dst, sub)) or dst, exist_ok=True)
+        shutil.copy2(os.path.join(ROOT, f), os.path.join(dst, sub))
 
 
 def need(path, hint="see this script's docstring"):
@@ -136,8 +154,7 @@ def copy_zig(platform, out):
 def copy_sources(out, lib_dir):
     """src/: the port's main program and the runtime's headers and PPU scaffold"""
     src = os.path.join(out, "src")
-    shutil.copytree(os.path.join(ROOT, "port"), os.path.join(src, "port"),
-                    ignore=shutil.ignore_patterns("CMakeLists.txt", "LICENSE*", "win"))
+    copy_tracked("port", os.path.join(src, "port"), skip=("CMakeLists.txt", "LICENSE*", "win"))
     ps3 = os.path.join(src, "ps3recomp")
     for top in ("include", "runtime", "libs"):
         for d, _, fs in os.walk(os.path.join(PS3RECOMP, top)):
@@ -163,10 +180,8 @@ def copy_tools(out):
     shutil.copytree(os.path.join(PS3RECOMP, "tools"), os.path.join(t, "ps3recomp"),
                     ignore=shutil.ignore_patterns("test_*", "tests", "__pycache__", "*.pyc", "host_window"))
     # gen_spu_native.py's per-task configurations (setup_pipeline.spu_native)
-    shutil.copytree(os.path.join(ROOT, "tools", "spu_native"), os.path.join(t, "spu_native"),
-                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
-    shutil.copytree(os.path.join(ROOT, "config"), os.path.join(out, "config"),
-                    ignore=shutil.ignore_patterns("deps.sha256"))
+    copy_tracked("tools/spu_native", os.path.join(t, "spu_native"))
+    copy_tracked("config", os.path.join(out, "config"), skip=("deps.sha256",))
     os.makedirs(os.path.join(out, "assets"))
     shutil.copy2(os.path.join(ROOT, "assets", "icon.png"), os.path.join(out, "assets"))
 
@@ -229,6 +244,10 @@ def bundle(platform):
                 "install folder, press Convert, then Play.\n\n"
                 "Nothing from the game is included: the game is rebuilt from your disc on your machine.\n"
                 f"The game needs {needs}\n")
+    print("boundary check (the folder)", flush=True)
+    import boundary_check
+    if boundary_check.check_artifact(out, bundle=True):
+        sys.exit(f"{out}: the boundary check failed; nothing archived")
     print("archive", flush=True)
     if platform == "windows":
         arc = out + ".zip"
@@ -241,6 +260,9 @@ def bundle(platform):
         arc = out + ".tar.xz"
         with tarfile.open(arc, "w:xz", preset=6) as t:
             t.add(out, arcname=name)
+    if boundary_check.check_artifact(arc, bundle=True):
+        os.remove(arc)
+        sys.exit(f"{arc}: the boundary check failed; the archive was removed")
     size = sum(os.path.getsize(os.path.join(d, f)) for d, _, fs in os.walk(out) for f in fs)
     print(f"{out} ({size / 2**20:.0f} MB)\n{arc} ({os.path.getsize(arc) / 2**20:.0f} MB)")
 

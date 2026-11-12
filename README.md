@@ -40,16 +40,31 @@ code. The setup checks your disc (SHA-256) before doing anything else.
 
 ## This repository contains no game data
 
-Nothing from the game ships here: no code, assets, keys or recompiled output.
-The setup reads your disc, verifies it, decrypts the game's program with your
-key, recompiles it and builds the executable on your own machine -- including
-the native versions of the game's SPU tasks, which are generated from your own
-copy's recompiled code. Everything derived from the game stays on your machine
-(`build/` in a checkout, or the install folder the setup app creates) and must
-not be redistributed. Nor does any proprietary middleware's code ship here: the
-game's audio middleware and video codec run only as part of your own
-recompiled game, and are being replaced by open-source libraries (OpenAL Soft
-for audio, FFmpeg for video: `docs/OPENAL_MIGRATION_PLAN.md`).
+This project distributes the **tools that rebuild the game from your own
+disc**, not the game. Nothing from the game ships here: no code, assets, keys
+or recompiled output. The setup reads your disc, verifies it, decrypts the
+game's program with your key, recompiles it and builds the executable on your
+own machine -- including the native versions of the game's SPU tasks, which are
+generated from your own copy's recompiled code. Everything derived from the game
+stays on your machine (`build/` in a checkout, or the install folder the setup
+app creates) and must not be redistributed. Nor does any proprietary
+middleware's code ship here: the game's audio middleware and video codec run
+only as part of your own recompiled game, and are being replaced by open-source
+libraries (OpenAL Soft for audio, FFmpeg for video:
+`docs/OPENAL_MIGRATION_PLAN.md`).
+
+What the repository and the setup's downloads hold: the recompilation tools and
+the setup, this project's independently written runtime code, the open-source
+libraries it builds on (Vulkan, OpenAL Soft, SDL2, ...), configuration,
+compatibility patches, tests and documentation. What they never hold: the
+game's code (extracted, lifted or translated), a built game or any object made
+from it, the game's assets, sounds, music, textures or movies, proprietary
+middleware, decryption keys or firmware. A clone without the game builds the
+tools and the runtime, not a playable game. `tools/boundary_check.py` checks
+this: every push (the pre-push hook: the tree of each pushed commit), the
+setup's download before it is archived and after, and a developer's working
+tree (`tools/boundary_check.py tree`: what `git add -A` would add, and that the
+build's outputs are ignored).
 
 ## 1. Dump your disc
 
