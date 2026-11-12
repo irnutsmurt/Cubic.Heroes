@@ -1,4 +1,4 @@
-# Repository licensing audit (2026-11-11, after M1)
+# Repository licensing audit (2026-11-11, after M2)
 
 Every tracked file of the repository with its origin class and what is done with it, as tools/license_audit.py
 classifies it (its header has the rules; docs/OPENAL_MIGRATION_PLAN.md section 5 the findings and the history).
@@ -12,10 +12,13 @@ only on the player's machine; DOC-GAME documentation of the game's behaviour and
 Not tracked any more (M1): the FMOD-derived implementation, its glue, generators, templates and checkers (19
 files; the tool fails if one is tracked again), and the hand transcriptions of the game's water and waver tasks
 (replaced by the generation; water_task.cpp and waver_task.cpp are the host around it). Checked: no keys,
-firmware, game data, assets, shader binaries or embedded binaries in any tracked file. Earlier commits still
-hold the removed files: docs/OPENAL_MIGRATION_PLAN.md section 5, "History".
+firmware, game data, assets, shader binaries or embedded binaries in any tracked file -- since M2 by
+tools/boundary_check.py too, on every push (the tree of each pushed commit) and on the setup's download.
+Earlier commits still hold the removed files: docs/OPENAL_MIGRATION_PLAN.md section 5, "History". Third-party
+libraries the setup ships (OpenAL Soft since M2) are not in the repository: tools/build_deps.py fetches them at
+pinned versions (config/deps.sha256) and the download carries their licences (README, "License").
 
-451 files: BULLET 8, DOC-GAME 12, INDEP 416, SPUGEN 7, THIRD 8.
+468 files: BULLET 8, DOC-GAME 12, INDEP 433, SPUGEN 7, THIRD 8.
 
 | File | Class | Action |
 |---|---|---|
@@ -219,6 +222,18 @@ hold the removed files: docs/OPENAL_MIGRATION_PLAN.md section 5, "History".
 | `port/diag/diag.h` | INDEP | keep |
 | `port/game_patches.cpp` | INDEP | keep |
 | `port/main.cpp` | INDEP | keep |
+| `port/native/audio/al_api.cpp` | INDEP | keep |
+| `port/native/audio/al_api.h` | INDEP | keep |
+| `port/native/audio/al_device.cpp` | INDEP | keep |
+| `port/native/audio/al_device.h` | INDEP | keep |
+| `port/native/audio/al_stream.cpp` | INDEP | keep |
+| `port/native/audio/al_stream.h` | INDEP | keep |
+| `port/native/audio/sound_list.cpp` | INDEP | keep |
+| `port/native/audio/sound_list.h` | INDEP | keep |
+| `port/native/audio/voice_pool.cpp` | INDEP | keep |
+| `port/native/audio/voice_pool.h` | INDEP | keep |
+| `port/native/audio/wav_pcm.cpp` | INDEP | keep |
+| `port/native/audio/wav_pcm.h` | INDEP | keep |
 | `port/native/bt_host_alloc.cpp` | INDEP | keep |
 | `port/native/bullet_cd.cpp` | BULLET | keep: Bullet's zlib notice in the altered files (bullet_cd.cpp, bullet_solver.cpp); listed in the README |
 | `port/native/bullet_cd.h` | BULLET | keep: Bullet's zlib notice in the altered files (bullet_cd.cpp, bullet_solver.cpp); listed in the README |
@@ -288,6 +303,8 @@ hold the removed files: docs/OPENAL_MIGRATION_PLAN.md section 5, "History".
 | `tests/native/find_state.cpp` | INDEP | keep |
 | `tests/native/inflate_check.py` | INDEP | keep |
 | `tests/native/inflate_test.c` | INDEP | keep |
+| `tests/native/openal_check.cpp` | INDEP | keep |
+| `tests/native/openal_check.sh` | INDEP | keep |
 | `tests/native/run_gcm_tests.sh` | INDEP | keep |
 | `tests/native/store_paths.py` | INDEP | keep |
 | `tests/native/store_paths_test.cpp` | INDEP | keep |
@@ -396,6 +413,7 @@ hold the removed files: docs/OPENAL_MIGRATION_PLAN.md section 5, "History".
 | `tests/solver_layout.py` | INDEP | keep |
 | `tests/solver_setup_diff.py` | INDEP | keep |
 | `tests/stop_tests.py` | INDEP | keep |
+| `tests/test_boundary_check.py` | INDEP | keep |
 | `tests/test_owned_run.py` | INDEP | keep |
 | `tests/test_player_pipeline.py` | INDEP | keep |
 | `tests/thread_cpu.sh` | INDEP | keep |
@@ -403,6 +421,8 @@ hold the removed files: docs/OPENAL_MIGRATION_PLAN.md section 5, "History".
 | `tests/workload_variation.py` | INDEP | keep |
 | `tools/audio_mix.py` | INDEP | keep |
 | `tools/audio_trace.py` | INDEP | keep |
+| `tools/binsyms.py` | INDEP | keep |
+| `tools/boundary_check.py` | INDEP | keep |
 | `tools/build_deps.py` | INDEP | keep |
 | `tools/cmake/glslang_doc_O0.cmake` | INDEP | keep |
 | `tools/edit_import.py` | INDEP | keep |
