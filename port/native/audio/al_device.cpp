@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstdarg>
 #include <cstdio>
+#include <thread>
 
 namespace al_device {
 namespace {
@@ -151,7 +152,14 @@ Stats Device::stats() const
 bool Device::reopen()
 {
     const al_api::Api& al = *api_;
-    if (!caps_.reopen || options_.loopback) return false;
+    if (const int ms = reopen_delay_ms_.load())   // tests: a slow output (a USB device waking)
+        std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+    if (fail_reopens_.load() > 0) {   // tests: a reopen that fails
+        fail_reopens_--;
+        return false;
+    }
+    if (options_.loopback) return true;   // nothing to reopen: only a simulated loss gets here
+    if (!caps_.reopen) return false;
     const char* name = options_.device_name.empty() ? nullptr : options_.device_name.c_str();
     if (!al.alcReopenDeviceSOFT((ALCdevice*)dev_, name, attrs_.data())) return false;
     const char* n = al.alcGetString((ALCdevice*)dev_, ALC_ALL_DEVICES_SPECIFIER);
@@ -162,16 +170,19 @@ bool Device::reopen()
 
 uint32_t Device::poll()
 {
-    if (!ctx_ || options_.loopback) return generation_.load();
+    // a loopback device (tests) is never lost, but a simulated loss is recovered as a real one would be
+    polls_++;
+    if (!ctx_ || (options_.loopback && !waiting_ && !lost_.load())) return generation_.load();
     const al_api::Api& al = *api_;
     if (!waiting_) {
         ALCint c = 1;
-        if (caps_.disconnect) al.alcGetIntegerv((ALCdevice*)dev_, ALC_CONNECTED, 1, &c);
-        const bool lost = !c || lost_.exchange(false);
+        if (caps_.disconnect && !options_.loopback) al.alcGetIntegerv((ALCdevice*)dev_, ALC_CONNECTED, 1, &c);
+        const bool lost = !c || lost_.load();
         const bool moved = default_changed_.exchange(false);
         if (lost) {
             disconnects_++;
-            connected_.store(false);
+            connected_.store(false);   // before the flag clears: connected_now() never sees a gap
+            lost_.store(false);
             log("device lost: %s", name_.c_str());
             waiting_ = true;
             next_retry_ms_ = 0;
@@ -185,9 +196,9 @@ uint32_t Device::poll()
     if (waiting_ && now_ms() >= next_retry_ms_) {
         if (reopen()) {
             waiting_ = false;
-            connected_.store(true);
             reopens_++;
-            generation_++;
+            generation_++;            // before connected_: a channel stopped by the loss is never taken as ended
+            connected_.store(true);
             log("device reopened: %s, %d Hz", name_.c_str(), frequency_);
         } else {
             const uint64_t f = ++reopen_failures_;
@@ -196,6 +207,17 @@ uint32_t Device::poll()
         }
     }
     return generation_.load();
+}
+
+bool Device::connected_now() const { return connected_.load() && !lost_.load(); }
+
+bool Device::query_connected() const
+{
+    if (!connected_now()) return false;
+    if (!caps_.disconnect || options_.loopback || !dev_) return true;
+    ALCint c = 1;
+    api_->alcGetIntegerv((ALCdevice*)dev_, ALC_CONNECTED, 1, &c);
+    return c != 0;
 }
 
 void Device::render(float* out, int frames)

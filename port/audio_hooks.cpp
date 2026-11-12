@@ -216,6 +216,7 @@ void lab_tick(ppu_context* ctx)
         else if (op == "bgm") lab_call(ctx, func_0046F4BC, st.id, 128, st.loop, 0.0);
         else if (op == "fadebgm") lab_call(ctx, func_0046638C, 0, 0, 0, st.f);
         else if (op == "fadeloops") lab_call(ctx, func_00466324, 0, 0, 0, st.f);
+        else if (op == "reverb") lab_call(ctx, func_00465D60, st.id, 0, 0, 0.0);   // setReverb(on): the dungeon reverb
         else fprintf(stderr, "[sound-lab] unknown step %s\n", st.op);
     }
 }
@@ -237,6 +238,7 @@ bool rdvec(uint32_t ea, float out[3])
 }
 
 extern "C" const char* ppu_vfs_root;   // the host folder the game's /dev_bdvd maps to (the runtime's ppu_fs.cpp)
+extern "C" int32_t cellAudioInit(void);   // the runtime's cellAudio (libs/audio/cellAudio.c)
 
 // The game's own state the sound manager reads (rel27's class reads the same): the options' music and effect
 // levels, the system menu's pause byte, the exit-request byte (cleared when the system asks the game to quit),
@@ -247,6 +249,45 @@ constexpr uint32_t kMenuPause = kGame + 0x764, kNotExiting = kGame + 0x761;
 constexpr uint32_t kNoShutdown = 0x0159B558;
 
 void native_log(const char* line) { fprintf(stderr, "[audio] %s\n", line); }
+
+// DOTHEROES_AUDIO_TEST_LOSS=<s>[:<failed reopens>[:<ms>]],... (tests, M4): the output device lost at these seconds
+// after the manager's init, as a disconnect loses it, then reopened by the audio thread (the first <failed> reopens
+// failing, each taking <ms>): the recovery in a game run, through the real output's reopen
+struct TestLoss {
+    double at;
+    int failed, ms;
+};
+std::vector<TestLoss> g_losses;
+std::chrono::steady_clock::time_point g_native_t0;
+bool g_native_started = false;   // the class's init has run (the game updates the class before it)
+
+void losses_parse(const char* spec)
+{
+    for (const char* p = spec; p && *p;) {
+        TestLoss l{strtod(p, nullptr), 0, 0};
+        const char* end = strchr(p, ',');
+        const char* c1 = strchr(p, ':');
+        if (c1 && (!end || c1 < end)) {
+            l.failed = atoi(c1 + 1);
+            const char* c2 = strchr(c1 + 1, ':');
+            if (c2 && (!end || c2 < end)) l.ms = atoi(c2 + 1);
+        }
+        g_losses.push_back(l);
+        p = end ? end + 1 : nullptr;
+    }
+}
+
+void losses_tick()
+{
+    if (g_losses.empty() || !g_native_started) return;
+    const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - g_native_t0).count();
+    while (!g_losses.empty() && g_losses.front().at <= t) {
+        const TestLoss l = g_losses.front();
+        g_losses.erase(g_losses.begin());
+        fprintf(stderr, "[audio] test: the output lost at %.1f s (%d reopens to fail, %d ms each)\n", t, l.failed, l.ms);
+        nsm_debug_device_loss(l.failed, l.ms);
+    }
+}
 
 void native_state()
 {
@@ -266,6 +307,14 @@ void native_init()
     o.sound_dir = dir.c_str();
     o.log = native_log;
     if (!nsm_init(&o)) fprintf(stderr, "[audio] the native sound manager is silent (no library, device or list)\n");
+    g_native_t0 = std::chrono::steady_clock::now();
+    g_native_started = true;
+    // The movies' sound (Bink, until M8 replaces it) goes through cellAudio: the movie player opens a port of its
+    // own (2 channels) on the cellAudio that FMOD's start-up initialised -- in rel27 FMOD's Init and port 0, then
+    // a port for each movie. With FMOD not started nothing else initialises it, and the movie's port would not
+    // open (NOT_INIT). cellAudio's own output carries only the movies' sound now.
+    const int32_t rc = cellAudioInit();
+    fprintf(stderr, "[audio] cellAudio initialised for the movies' sound (%s)\n", rc == 0 ? "ok" : "failed: movies silent");
 }
 
 int native_call(ppu_context* ctx, uint32_t addr)
@@ -301,7 +350,7 @@ int native_call(ppu_context* ctx, uint32_t addr)
         break;
     case 0x00465D60: nsm_set_reverb(r4); break;                        // setReverb(on)
     case 0x004664E0: r3 = (uint64_t)nsm_is_loaded(r4); break;          // isLoaded(id)
-    case 0x0046DB40: nsm_update(f1); break;                            // update(dt)
+    case 0x0046DB40: losses_tick(); nsm_update(f1); break;            // update(dt)
     case 0x00465E30: native_init(); break;                             // init()
     case 0x00471604: nsm_load_sounds(); break;                         // loadSounds(): the effects resident
     case 0x00472A14: break;                                            // preload(): the files are read by loadSounds
@@ -356,6 +405,11 @@ extern "C" void dotheroes_audio_hooks_init(void)
         g_native = 1;
         g_audio_hooks = 1;
         fprintf(stderr, "[audio] the native sound manager (OpenAL Soft) in place of FMOD (DOTHEROES_NATIVE_AUDIO)\n");
+        const char* loss = getenv("DOTHEROES_AUDIO_TEST_LOSS");
+        if (loss && *loss) {
+            losses_parse(loss);
+            fprintf(stderr, "[audio] test: %zu output losses scheduled (DOTHEROES_AUDIO_TEST_LOSS)\n", g_losses.size());
+        }
         atexit([] {
             fprintf(stderr, "[audio] at exit: FMOD API calls reached %llu\n", (unsigned long long)g_fmod_reached.load());
         });

@@ -184,7 +184,8 @@ void Streamer::service_once()
             if (s.state == State::playing && s.source) {
                 ALint st = 0;
                 dev_.al().alGetSourcei(s.source, AL_SOURCE_STATE, &st);
-                if (st != AL_PLAYING) {
+                if (st != AL_PLAYING) {   // from where it stopped (its queue was kept)
+                    dev_.al().alSourcei(s.source, AL_SAMPLE_OFFSET, s.last_offset);
                     dev_.al().alSourcePlay(s.source);
                     totals_.restarts_after_reopen++;
                 }
@@ -266,9 +267,9 @@ void Streamer::apply(Command& c)
         return;
     }
     if (c.kind == Command::debug_stop_all) {
-        for (Stream& s : streams_)
+        dev_.simulate_loss();   // first, as OpenAL Soft marks a device disconnected before it stops the sources;
+        for (Stream& s : streams_)   // seen by the poll that follows the commands
             if (s.source) dev_.al().alSourceStop(s.source);
-        dev_.simulate_loss();   // seen by the poll that follows the commands
         return;
     }
     Stream* sp = find(c.h);
@@ -300,11 +301,16 @@ void Streamer::apply(Command& c)
     case Command::pause:
         if (s.state == State::playing) {
             al.alSourcePause(s.source);
+            al.alGetSourcei(s.source, AL_SAMPLE_OFFSET, &s.paused_offset);
             s.state = State::paused;
         }
         break;
     case Command::unpause:
         if (s.state == State::paused) {
+            // a device lost while paused stopped the source and rewound its queue: from where it was paused
+            ALint st = 0;
+            al.alGetSourcei(s.source, AL_SOURCE_STATE, &st);
+            if (st == AL_STOPPED) al.alSourcei(s.source, AL_SAMPLE_OFFSET, s.paused_offset);
             al.alSourcePlay(s.source);
             s.state = State::playing;
         }
@@ -408,9 +414,12 @@ void Streamer::service(Stream& s)
     }
     if (s.state != State::playing) return;
     ALint processed = 0, queued = 0, st = 0;
+    al.alGetSourcei(s.source, AL_SOURCE_STATE, &st);
+    // a lost device stopped it: its queue is left as it was, for the restart from where it stopped
+    if (st == AL_STOPPED && !dev_.query_connected()) return;
     al.alGetSourcei(s.source, AL_BUFFERS_PROCESSED, &processed);
     al.alGetSourcei(s.source, AL_BUFFERS_QUEUED, &queued);
-    if (processed > 0 && processed == queued && !s.eof && dev_.connected()) {
+    if (processed > 0 && processed == queued && !s.eof && dev_.query_connected()) {
         s.near_underruns++;
         totals_.near_underruns++;
     }
@@ -426,7 +435,7 @@ void Streamer::service(Stream& s)
     al.alGetSourcei(s.source, AL_SOURCE_STATE, &st);
     al.alGetSourcei(s.source, AL_BUFFERS_QUEUED, &queued);
     if (st != AL_PLAYING && st != AL_PAUSED) {
-        if (queued > 0 && dev_.connected()) {   // ran dry with more to play (a lost device is not an underrun)
+        if (queued > 0 && dev_.query_connected()) {   // ran dry with more to play (a lost device is not an underrun)
             s.underruns++;
             totals_.underruns++;
             dev_.log("stream underrun (%llu)", (unsigned long long)totals_.underruns);
@@ -482,8 +491,12 @@ void Streamer::publish()
         p.st.loops = s.loops;
         double frames = (double)s.frames_unqueued;
         if (s.source && s.info.rate) {
-            ALint off = 0;
+            ALint off = 0, st = 0;
             dev_.al().alGetSourcei(s.source, AL_SAMPLE_OFFSET, &off);
+            dev_.al().alGetSourcei(s.source, AL_SOURCE_STATE, &st);
+            if (st == AL_PLAYING) s.last_offset = off;   // where a restart after a loss goes on from
+            else if (st == AL_STOPPED && s.state == State::playing) off = s.last_offset;   // lost: held there
+            else if (st == AL_STOPPED && s.state == State::paused) off = s.paused_offset;
             frames += off;
         }
         // frames heard -> a position in the file: the intro once, then around the loop region
