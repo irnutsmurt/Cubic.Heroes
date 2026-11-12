@@ -1,7 +1,7 @@
 # Audio: FMOD Ex out, OpenAL Soft in -- audit and migration plan (for review)
 
-Status: **approved by the owner 2026-11-11 with the adjustments below; M0 and M1 done (sections 4.1, 4.2),
-M2-M4 authorized; M5 and M6 only once their validation requirements are met; M7 (history) needs a separate
+Status: **approved by the owner 2026-11-11 with the adjustments below; M0, M1 and M2 done (sections 4.1-4.3),
+M3-M4 authorized; M5 and M6 only once their validation requirements are met; M7 (history) needs a separate
 approval; M8 (Bink) afterwards.** Requirement (the owner, 2026-11-11): the PC recompilation's game audio runs on OpenAL Soft; FMOD Ex is not executed and no
 FMOD-derived implementation code is in the public source or any distributed artifact. The FMOD work so far
 (docs/AUDIO.md A0-A3) stays a local compatibility reference only. Tags: [C] read in the code, [M] measured,
@@ -247,6 +247,72 @@ mixer, codec and reverb lifted, as rel29 runs them):
   while a ripple runs. Recovering it is the generic generator's work (a follow-up, not M2-M4's): the
   waver's time is mostly the SPU code's own form (the profile in docs/SPU_NON_AUDIO.md, "Generated on the
   player's machine"), 13% the float helpers' exact slow path.
+
+### 4.3 M2, OpenAL Soft and the audio layer alone (2026-11-11) [M]
+
+**The library**: OpenAL Soft 1.25.2, the release archive from openal-soft.org (sha256 1dbaac44...1089, pinned
+in config/deps.sha256; the same tree as the project's tag 1.25.2 on GitHub, checked file by file), built by
+tools/build_deps.py with the bundled Zig as a shared library for both platforms -- OpenAL32.dll (Windows: WASAPI,
+DirectSound, WinMM; imports only system DLLs) and libopenal.so.1 (Linux: the SDL2 backend, through the SDL2 the
+game ships, plus PipeWire, PulseAudio and ALSA when their headers are on the build host -- this Windows host has
+none, so the Linux build here has SDL2 and the wave writer). No utilities, examples, configuration, presets,
+legacy EAX API or HRTF data. The game loads it at run time from its own folder (dynamic linking, LGPL); the
+prebuilt folder, the player's install and the setup's download carry it with its notice
+(OpenAL-Soft-NOTICE.txt), its licences (LGPL-2.0, BSD-3-Clause, PFFFT, {fmt}, GSL) and, in the download, its
+source (licenses/source/openal-soft-1.25.2.tar.xz).
+
+**The HRTF data set** (the question left open in M2's draft): OpenAL Soft's default HRTF is derived from MIT's
+KEMAR measurements, whose terms (MIT Media Lab, 1994) allow use with a citation and say nothing about
+redistribution. Rather than ship it on an unclear basis, the build neither embeds nor installs it
+(ALSOFT_EMBED_HRTF_DATA=OFF; checked: none of its bytes are in the DLL) and the shipped source leaves the file
+out (the release archive less hrtf/Default HRTF.mhr, which the build never reads). Nothing is lost: the game's
+sound never had HRTF (FMOD mixed for speakers), and the device is opened with HRTF off.
+
+**The layer** (port/native/audio, in the native library; independent of the game):
+- wav_pcm: our RIFF/WAVE reader -- PCM (and extensible PCM) 8/16-bit, mono/stereo, any rate; the `smpl` loop
+  (intro, loop end before the file's end); a loop outside the data dropped, not fatal.
+- al_api: the library loaded by full path beside the game (no other OpenAL on the system is picked up); its
+  absence reported, the game going on without sound.
+- al_device: the device (default output, HRTF off, one auxiliary send); its health from the audio thread --
+  ALC_CONNECTED, and the default output changing (ALC_SOFT_system_events: WASAPI reports it but does not move
+  the output itself) -- reopened in place (ALC_SOFT_reopen_device: context, sources, buffers survive), retried
+  every second; every source, buffer, effect and slot counted, a leak reported at shutdown; the sound files as
+  buffers with their loop points (AL_SOFT_loop_points); one EFX reverb (EAX reverb when present) in one slot.
+- al_stream: music on one audio thread -- 4 x 250 ms of buffers ahead read from the file, the loop region (the
+  intro once, then the loop; or the whole file; or once), linear fades and crossfades, underruns (restarted and
+  counted) and near-underruns, the device's recovery (streams restarted); the game's thread only queues
+  commands in a bounded queue (1,024: a full queue refuses and counts, never blocks) and reads statuses;
+  handles go stale when a stream ends; shutdown releases everything and ends the thread. Stereo music plays
+  its channels straight to the output (AL_SOFT_direct_channels), as FMOD's 2D music did.
+- sound_list: the player's sound.lua.eu read independently (324 entries, ids 32 and 323 empty, 238 3D,
+  BGM_FadeTime 2.0: as tools/sound_inventory.py).
+
+**The gate** (tests/native/openal_check.sh; tests/native/openal_check.cpp, no game running):
+- every sound file: 326 of 326 load (282 mono, 44 stereo, 669 MB of samples), the 42 loops all set as loop
+  points, no object left;
+- every looped file played looped and compared **sample by sample** with the file at its own rate (nothing
+  resampled), over the intro and two passes of the loop: 42 of 42 exact (0 frames off) -- the 15 effects
+  resident, the 27 music tracks streamed, among them the intros (field07 8.01 s, arkanoid 15.69 s, deepforest,
+  defence, race, spelunker_field) and the loops ending before the file's end (cave at 59.99 of 61.94 s,
+  spelunker_field at 77.28 of 80.98 s);
+- made-up files: the loop forms resident and streamed (intro and loop, loop end before the file's end, mono
+  effect loop, whole file, once, once of a looped file) exact; a 2 s crossfade's two gain curves within 0.5%
+  of full scale of linear ramps, the outgoing stream released at its end; positional stereo (ahead balanced,
+  left and right) and attenuation (inverse distance clamped, reference 2, maximum 30) within 0.001 dB of
+  2/(2+(d-2)) from 1 to 100; the EFX reverb: no tail when off, a tail decaying at 63 dB/s (decay time 0.95 s
+  for 1.0 s set) when on; the command queue's bound (41 commands into 16 places: 25 refused, counted, none
+  blocking; stale handles ignored); 100 streamer lifetimes with their threads, 300 samples, a missing file, a
+  ninth stream refused, 20 device opens: no object left, nothing hung;
+- real time: an hour of music (bgm_field07, its intro and 32 passes of its loop) streamed in real time through the audio thread on OpenAL Soft's wave writer (paced as a device, silent), alongside game runs and builds, with a disconnect simulated at 30 minutes: 0 underruns, 0 near-underruns, the stream restarted after the reopen, the audio thread's worst period 16.5 ms of 231,551 (the open and the reopen; 4 ms otherwise) against 1 s of audio queued, nothing left at shutdown; a minute with a device loss half way (the sources stopped as a disconnect stops
+  them, the device reopened, the stream restarted: no underrun); on a real output device (WASAPI)
+  20 s with a loss and reopen: no underrun, the audio thread's worst period 49 ms (the reopen), against 1 s of
+  audio queued;
+- both platforms compile it (Windows run; Linux built, not run: no Linux machine here).
+
+**Found, recorded as intended differences**: OpenAL Soft holds a finished play-once source's last frame to the
+end of its mixing update (up to 784 frames, 18 ms, at 44.1 kHz) before silence; of the game's 284 files without
+a loop, one effect ends above -40 dBFS (085_boss_attack14, -36.7 dBFS, named by no id), so the step is
+inaudible. Not tested here: a physical unplug (the loss is simulated; the owner's sessions, M4).
 
 ## 5. Repository licensing audit and cleanup
 
