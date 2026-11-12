@@ -358,6 +358,7 @@
 | `tests/scenarios/save_picker_edit.drive` | INDEP | keep |
 | `tests/scenarios/snapshot_r3.drive` | INDEP | keep |
 | `tests/scenarios/sound_lab.drive` | INDEP | keep |
+| `tests/scenarios/sound_pan.drive` | INDEP | keep |
 | `tests/scripts/capture_field.drive` | INDEP | keep |
 | `tests/scripts/continue_where.drive` | INDEP | keep |
 | `tests/scripts/editor_roundtrip_1.drive` | INDEP | keep |
@@ -429,6 +430,7 @@
 | `tools/license_audit.py` | INDEP | keep |
 | `tools/make_bundle.py` | INDEP | keep |
 | `tools/owned_run.py` | INDEP | keep |
+| `tools/pan_check.py` | INDEP | keep |
 | `tools/pipeline.py` | INDEP | keep |
 | `tools/push_guard.py` | INDEP | keep |
 | `tools/r1_boundary_check.py` | INDEP | keep |

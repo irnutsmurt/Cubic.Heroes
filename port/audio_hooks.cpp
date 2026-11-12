@@ -18,9 +18,11 @@
  *
  * DOTHEROES_DEV_SOUND=<t>:<op>[:<arg>[:<arg>]],... (a test switch, M0's sound lab): at <t> seconds after the
  * sound manager's first update, on the game thread at the start of an update, ask the game's own sound
- * manager for something -- `se:<id>` (playSE, no position), `stopse:<id>`, `bgm:<id>:<loop 0/1>` (playBGM),
- * `fadebgm:<seconds>` (fadeOutBGM), `fadeloops:<seconds>` (fadeOutLoopSEs) -- through its lifted methods, as
- * a call from the game would (traced like one when the trace is on). Nothing else changes. */
+ * manager for something -- `se:<id>` (playSE, no position), `sepos:<id>:<dx>:<dy>:<dz>` (playSE at the
+ * listener's last position plus that offset, in the game's frame: +x right, +y up, +z forward), `stopse:<id>`,
+ * `bgm:<id>:<loop 0/1>` (playBGM), `fadebgm:<seconds>` (fadeOutBGM), `fadeloops:<seconds>` (fadeOutLoopSEs) --
+ * through its lifted methods, as a call from the game would (traced like one when the trace is on). Nothing else
+ * changes. */
 #include "ppu_recomp.h"   /* ppu_context, vm_base, the lifted functions */
 #include "native/audio/native_sound.h"   /* DOTHEROES_NATIVE_AUDIO: the native sound manager (M3) */
 
@@ -48,6 +50,7 @@ std::atomic<int> g_thread_ids{0};
 
 inline uint32_t rd32(uint32_t ea) { const uint8_t* p = vm_base + ea; return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
 inline float rdf(uint32_t ea) { const uint32_t u = rd32(ea); float f; memcpy(&f, &u, 4); return f; }
+inline void wr32(uint32_t ea, uint32_t v) { uint8_t* p = vm_base + ea; p[0] = (uint8_t)(v >> 24); p[1] = (uint8_t)(v >> 16); p[2] = (uint8_t)(v >> 8); p[3] = (uint8_t)v; }
 
 int thread_no()
 {
@@ -151,8 +154,10 @@ void traced_call(ppu_context* ctx, const Hook& h, int& inner, bool native = fals
 }
 
 // ---- DOTHEROES_DEV_SOUND: the sound lab -----------------------------------------------------------------------
-struct LabStep { double t; char op[12]; int id; float f; int loop; bool done; };
+struct LabStep { double t; char op[12]; int id; float f; int loop; float d[3]; bool done; };
 std::vector<LabStep> g_lab;
+float g_lab_listener[3];   // the listener's last position the game gave (setListener), for `sepos`
+bool g_lab_have_listener = false;
 std::chrono::steady_clock::time_point g_lab_t0;
 bool g_lab_started = false;
 
@@ -167,20 +172,23 @@ void lab_parse(const char* spec)
         at = end + 1;
         LabStep st{};
         char op[12] = {};
-        double a = 0, b = 0;
-        const int n = sscanf(one.c_str(), "%lf:%11[a-z]:%lf:%lf", &st.t, op, &a, &b);
+        double a = 0, b = 0, c = 0, e = 0;
+        const int n = sscanf(one.c_str(), "%lf:%11[a-z]:%lf:%lf:%lf:%lf", &st.t, op, &a, &b, &c, &e);
         if (n < 2) { fprintf(stderr, "[sound-lab] not understood: %s\n", one.c_str()); continue; }
         memcpy(st.op, op, sizeof st.op);
         st.id = (int)a;
         st.f = (float)a;
         st.loop = n >= 4 ? (int)b : 0;
+        st.d[0] = (float)b; st.d[1] = (float)c; st.d[2] = (float)e;
+        if (!strcmp(op, "sepos") && n < 6) { fprintf(stderr, "[sound-lab] sepos needs <id>:<dx>:<dy>:<dz>: %s\n", one.c_str()); continue; }
         g_lab.push_back(st);
     }
 }
 
 // One of the sound manager's methods called from the start of its update, as a call from the game would: the
-// registers the update was entered with put back afterwards.
-void lab_call(ppu_context* ctx, void (*fn)(ppu_context*), int r4, int r5, int r6, double f1)
+// registers the update was entered with put back afterwards. With `pos`, r6 points to it: three floats in a frame
+// of the call's own below the update's stack pointer (the method's frames go below that one).
+void lab_call(ppu_context* ctx, void (*fn)(ppu_context*), int r4, int r5, int r6, double f1, const float* pos = nullptr)
 {
     uint64_t gpr[32];
     double fpr[32];
@@ -192,6 +200,13 @@ void lab_call(ppu_context* ctx, void (*fn)(ppu_context*), int r4, int r5, int r6
     ctx->gpr[5] = (uint64_t)(int64_t)r5;
     ctx->gpr[6] = (uint64_t)(int64_t)r6;
     ctx->fpr[1] = f1;
+    if (pos) {
+        const uint32_t sp = (uint32_t)ctx->gpr[1], frame = (sp - 0x100) & ~0xFu, v = frame + 0x80;
+        wr32(frame, sp);   // the back chain
+        for (int k = 0; k < 3; k++) { uint32_t u; memcpy(&u, &pos[k], 4); wr32(v + 4 * k, u); }
+        ctx->gpr[1] = frame;
+        ctx->gpr[6] = v;
+    }
     ctx->lr = kUpdate;
     fn(ctx);
     while (g_trampoline_fn) { void (*f)(void*) = g_trampoline_fn; g_trampoline_fn = nullptr; f(ctx); }
@@ -212,6 +227,13 @@ void lab_tick(ppu_context* ctx)
         fprintf(stderr, "[sound-lab] t=%.2f (frame %u) %s %g%s\n", t, rd32(kGameFrame), st.op, (double)st.f,
                 op == "bgm" ? (st.loop ? " loop" : " once") : "");
         if (op == "se") lab_call(ctx, func_0046E0EC, st.id, 128, 0, 0.0);
+        else if (op == "sepos") {
+            if (!g_lab_have_listener) { fprintf(stderr, "[sound-lab] sepos: no listener position yet, skipped\n"); continue; }
+            const float p[3] = {g_lab_listener[0] + st.d[0], g_lab_listener[1] + st.d[1], g_lab_listener[2] + st.d[2]};
+            fprintf(stderr, "[sound-lab]   at (%g,%g,%g), the listener at (%g,%g,%g)\n", (double)p[0], (double)p[1],
+                    (double)p[2], (double)g_lab_listener[0], (double)g_lab_listener[1], (double)g_lab_listener[2]);
+            lab_call(ctx, func_0046E0EC, st.id, 128, 0, 0.0, p);
+        }
         else if (op == "stopse") lab_call(ctx, func_00466A1C, st.id, 0, 0, 0.0);
         else if (op == "bgm") lab_call(ctx, func_0046F4BC, st.id, 128, st.loop, 0.0);
         else if (op == "fadebgm") lab_call(ctx, func_0046638C, 0, 0, 0, st.f);
@@ -365,6 +387,8 @@ int native_call(ppu_context* ctx, uint32_t addr)
 int hook(ppu_context* ctx, int index, int& inner)
 {
     if (inner || index < 0) return 0;   // the lifted function re-entered from traced_call
+    if (!g_lab.empty() && g_hooks[index].addr == 0x00465D9C)   // setListener(pos, velocity): kept for `sepos`
+        g_lab_have_listener = rdvec((uint32_t)ctx->gpr[4], g_lab_listener);
     if (!g_lab.empty() && g_hooks[index].addr == kUpdate) lab_tick(ctx);
     if (g_native) {
         const uint32_t addr = g_hooks[index].addr;
