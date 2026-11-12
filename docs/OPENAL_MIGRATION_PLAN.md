@@ -1,8 +1,8 @@
 # Audio: FMOD Ex out, OpenAL Soft in -- audit and migration plan (for review)
 
-Status: **approved by the owner 2026-11-11 with the adjustments below; M0-M3 done (sections 4.1-4.4), M4
-(the owner's listening) next; M5 and M6 only once their validation requirements are met; M7 (history) needs a separate
-approval; M8 (Bink) afterwards.** Requirement (the owner, 2026-11-11): the PC recompilation's game audio runs on OpenAL Soft; FMOD Ex is not executed and no
+Status: **approved by the owner 2026-11-11 with the adjustments below; M0-M3 done (sections 4.1-4.4); M4's automated
+part done (section 4.5), M4 open until the owner's listening and acceptance; M5 and M6 prepared (sections 9, 10), not
+begun; M7 (history) needs a separate approval; M8 (Bink) afterwards.** Requirement (the owner, 2026-11-11): the PC recompilation's game audio runs on OpenAL Soft; FMOD Ex is not executed and no
 FMOD-derived implementation code is in the public source or any distributed artifact. The FMOD work so far
 (docs/AUDIO.md A0-A3) stays a local compatibility reference only. Tags: [C] read in the code, [M] measured,
 [L] run logs, [I] inferred.
@@ -100,14 +100,14 @@ frame of the file's end -- the 10 Hz throttle only paces FMOD's own update) [M, 
 
 | Behaviour | Approach |
 |---|---|
-| Device, context, failure, shutdown | ALC device open on the default output (stereo, 5.1, 7.1 as the system reports; OpenAL Soft's own mixing and downmix); disconnect detection (ALC_EXT_disconnect) and reopen (ALC_SOFT_reopen_device); clean release of sources, buffers, effects at shutdown |
+| Device, context, failure, shutdown | ALC device open on the default output (stereo, 5.1, 7.1 as the system reports; OpenAL Soft's own mixing and downmix); disconnect detection (ALC_EXT_disconnect) and reopen (ALC_SOFT_reopen_device), retried every second, on the audio thread (the game's thread makes no ALC call: a reopen holds OpenAL Soft's device lock); a source a loss stopped is never taken as ended (a poll after it settles it, M4), the effects restarted where their time is, the music where it stopped, a sound paused through a loss resumed where it was paused; clean release of sources, buffers, effects at shutdown |
 | Effects (SE) | the 281 effect files resident as AL buffers (33.7 MB): our own RIFF/PCM loader (all files are 16-bit PCM, mono or stereo, 44.1 or 48 kHz; no other codec), reading the `smpl` loop points (AL_SOFT_loop_points) [M] |
 | Music (BGM) | our own streaming thread: buffer queue (e.g. 4 x 250 ms) from the WAV file on disk; the loop as rel27 plays it (the `smpl` loop with its intro, or the whole file: M0 decides), crossfades with two streams; underrun detection and counters |
 | 3D | AL_INVERSE_DISTANCE_CLAMPED with reference = the list's min, max = its max, rolloff 1 (FMOD's default inverse rolloff with the game's set3DSettings(1,1,1)); listener from setListener, forward (0,0,1), up (0,1,0), never turning. The game's frame is FMOD's default left-handed one (System::init flags 0: +x is the right), OpenAL's right-handed: x is mirrored (taken as written, the plan would have swapped left and right). A 3D effect played with no position sounds at the listener (measured in rel27's mix: loud and centred), not at the world origin [C, M] |
 | Reverb | an EFX EAX reverb in one auxiliary slot, every source sending to it, the slot enabled by setReverb: the game's settings are FMOD's default SFX reverb with Room -100 mB, applied to the whole mix, music included [C] -- in I3DL2 terms gain 0.89, HF gain 1.0, decay 1.0 s, HF ratio 0.5, reflections off (-10000 mB), reflections delay 0.02 s, late gain 1.0, late delay 0.04 s, diffusion 1.0, density 1.0, HF reference 5 kHz, LF reference 250 Hz, dry full. EFX implements I3DL2's model itself; we set the parameters, nothing of FMOD's reverb code |
-| Voices | a voice cap (FMOD's default 32 real voices) chosen by priority then audibility; 100 virtual |
+| Voices | FMOD's default 32 real voices for the effects, given by priority, then audibility (the gain times the distance attenuation from the listener); the rest virtual (their time and handles kept, isPlaying answering), re-ranked at each update (an equal-priority channel takes a real one's voice when 1.6 dB more audible); 100 channels (the game's System::init(100)): at the limit the least important stops if the new one is at least as important, else it is refused. The music has its own streams outside the 32 -- in rel27 it shared FMOD's 32 at the same priority (128) -- so effects never take its voice (M4) |
 | Pitch | not used by the game (no frequency or pan calls) [C] |
-| Pause/resume, looping | AL source pause/play; whole-buffer loop for looping SE; music loop by the stream |
+| Pause/resume, looping | AL source pause/play; the file's `smpl` loop (or the whole buffer) for looping SE; music loop by the stream. The class's own pause (its flag set by the PS3's system overlay, sysutil 0x131) holds every sound and the class's clock; the PC port never sends that event, and the game's START menu does not pause the sound (rel27's traces: the music and ambience go on, only the menu's own sounds play) |
 | Timing | a sound's end reported within a frame, as FMOD reported it (M3); the music's open answered asynchronously, as FMOD's callback was; no audio clock drives the game |
 
 Decoding libraries: none needed (PCM only). OpenAL Soft (**LGPL-2.0-or-later**) is fetched from its official
@@ -426,6 +426,106 @@ rel31 with the switch; the frame trace's window, and the process's CPU from 60 s
 - **Not tested**: the boss fight and a crowded scene (no drive reaches them: the owner's sessions, M4); the system
   menu's pause (no drive opens it); a physical unplug of the output device (simulated in M2).
 
+### 4.5 M4, the automated part (2026-11-12) [M]
+
+The owner's listening sessions and acceptance close M4; this is everything that needed no one at the screen.
+**The owner's decision on positioned effects** (2026-11-12): OpenAL Soft's own spatialization stays, no compensating
+gain (section 4.4, "Differences").
+
+**What changed in the audio layer** (each found by these tests):
+- **Device recovery without a race.** A disconnect stops OpenAL Soft's sources before the audio thread's next poll
+  sees it (up to 10 ms): an update in between found a looping ambience's source stopped with the device still
+  "connected" and freed it -- the loop lost for good after the reopen, its record gone with it. Now a source found
+  stopped early is taken as ended only once a poll begun after that still finds the device connected and not
+  reopened (al_device's poll count, voice_pool's stop state); a one-shot at its length ends at once, as before. No
+  ALC call on the game's thread: OpenAL Soft's ALC queries take the device's lock, which a reopen holds for as long
+  as the output takes to open (alc.cpp's alcReopenDeviceSOFT, read in the shipped source).
+- **Where sounds resume after a loss.** The effects from where their time is (a one-shot whose time ran out during
+  the loss is not restarted); the music from where it stopped -- its queue is no longer emptied and refilled while
+  the device is out, and its source restarted at the offset last heard (it replayed up to a 250 ms buffer, or
+  skipped the queued second); a sound paused through a loss from where it was paused (it restarted from the file's
+  start).
+- **Voices as FMOD's virtual voices rank them**: by priority, then audibility (the gain times the distance
+  attenuation from the listener, which the pool now knows) -- a new sound quieter than every real one starts
+  virtual instead of taking the quietest's voice; at each update a virtual channel that has become more important
+  (a fade-in rising, the listener walking up to it) takes a real one's voice, with a 1.6 dB margin between equal
+  priorities; the game's 100 channels (System::init(100)) as the channel limit (the least important stopped for a
+  new one at least as important, else refused), where 512 records were allowed. The music keeps its own streams
+  outside the 32 voices (rel27: shared, same priority): effects never take its voice.
+- Diagnostics for tests (native_sound.h): a channel's state (real, paused, offset, gain, audibility, priority), the
+  loopback's output, a device loss with failing or slow reopens; the stats count promotions, swaps, channel steals,
+  refusals, restarts and failed reopens. DOTHEROES_AUDIO_TEST_LOSS=<s>[:<failed>[:<ms>]],... loses the output in a
+  game run; the sound lab's `reverb` step.
+
+**tests/native/sound_stress_check** (no game; in tests/native/openal_check.sh), all passed:
+
+| Mode | What | Result |
+|---|---|---|
+| voices | 40 effects on 32 voices; priorities 64/128/200; a volume change, a fade-in and the listener's movement re-ranking; 12 stopped; 3 s effects ending; a reused slot; 100 channels and a 101st | the 32 most audible real, the rest virtual and answering isPlaying; the output: the 32 at their levels (within 0.3 dB), the 8 virtual silent; a swap or promotion resumes at the channel's time (0.000 s off); ends within a frame of 3 s whether real, stolen or promoted; stale handles answer 2 and stop nothing; the 101st refused or stopping the least important |
+| voices: soak | 5 minutes, random plays (fade-ins, 3D, priorities), stops, stale stops, pauseById, fades, ducks, listener moves, the game's pause every 20 s; checked after every update | 4,548 plays, 835 stolen voices, 765 promotions, 60 swaps; never over 32 voices or 100 channels; never a virtual channel more important than a real one; AL objects constant; **the music untouched**: active, its gain unchanged, every one-second window within 0.07 dB, no underrun |
+| pause | the class's pause with music, a loop, a one-shot, a fade-in, a fade-out and a duck under way; 200 pause cycles of random lengths; a crossfade paused; a virtual channel paused; quitting while paused | 5 s paused: everything answers as playing, nothing moves (offsets within 0.0000 s, fades held), silence; on resume the fades go on from where they were (within 1e-4); through 200 cycles a loop within 0.0000 s and the music within 0.01 s of their unpaused time, a 3 s one-shot ends after 3 s unpaused, a 1 s fade-out after 1 s; the crossfade completes; the shutdown while paused: 4.7 ms, nothing left. The music's pause reaches its audio thread at that thread's next step (10 ms) |
+| device | a loss and reopen; an outage of two failing reopens (2 s) with the volume changed during it; a loss while paused; 30 losses in a row (loopback, output measured) | the effects resume where their time is, the music where it stopped (within 0.02 s), each at its level (0.00 dB); during the outage the loops and the music answer as playing, a one-shot ending in it answers by its time and is not restarted, silence; after it the levels set during it (-3.52 dB, as asked); 30 of 30 recovered; no object more, no underrun |
+| realtime | 20 losses on the real-time path (OpenAL Soft's mixer thread through the wave writer, the music's audio thread), every third with two failing reopens, every fifth with a 300 ms reopen | 20 losses, 20 reopens, 12 failed reopens retried; the loops and the music answered as playing at every update; the game's thread never waited (update and isPlaying p50 0.013 ms, p99 0.106 ms, worst 0.190 ms); threads 7 before and after; AL objects as before; no underrun; a second manager's life in the process leaves no thread more |
+
+The M2 and M3 suites again with these changes: openal_check (every file, every loop exact, a minute streamed in
+real time with a loss), sound_manager_check (32 cases): passed. **rel27's 14 traces replayed** (tests/native/
+sound_replay.sh): about 360,000 answers, 0 different; about 400,000 volumes, 0 off -- as in M3 (the sound lab's
+three in-update music starts one update earlier, as recorded there).
+
+**In the game** (rel32: rel31 with the work above; rel34: with the movies' sound; rel35: with the reverb calibrated --
+the owner's play build):
+- **M3's scene set again** on rel32, traced and its mix captured: the menus, the fields, the river, the dungeon's
+  approach and its deeper rooms, the exit after the boss, save and continue, the save list, quitting and the
+  30-minute session. No crash; against rel27's M0 traces the same music in the same order, the same reverb
+  switches, every play with a handle, 0 FMOD API calls; the quit's shutdown left nothing; the 30 minutes kept
+  their memory flat (957 MB at 2-5 minutes, 958-959 MB at 25-30) with no underrun.
+- **The game's pause** (tests/scenarios/m4_pause.drive: the system menu opened ten times at different lengths
+  over the field's music and ambience, TITLE and CONTINUE, then the exit asked with the menu open) on rel32 and on
+  rel34, against the same drive on M0's traced rel27 build: the same music and reverb switches and **the same
+  isPlaying answers** (4,380 times not playing and 4,372 playing in each), effect counts as two runs differ; the
+  exit with the menu open went through the game's own exit path, the shutdown leaving nothing. A correction to
+  M3's record: the class's own pause is the PS3 system overlay's (sysutil 0x131), which the port never sends; the
+  game's START menu pauses the game, not its sound (rel27's traces: the music and ambience go on).
+- **The movies' sound** (found by the M5 inventory, section 9; fixed in rel34): Bink's player plays a movie's
+  sound through a cellAudio port of its own, on the cellAudio that FMOD's start-up initialised; with the native
+  manager nothing initialised it. On rel32 the attract mode's demo movie played twice without sound (no Bink audio
+  thread, no cellAudio); M3's scenes had played no movie with sound. Now the native start-up initialises cellAudio
+  for the movies (port/audio_hooks.cpp); on rel34 the movie opens its port and starts its audio thread as on rel27,
+  and its sound in cellAudio's capture matches rel27's: -0.02 dB over both demo plays (correlation 0.99, 0.92).
+- **Losses of the real output** (rel34; the river fight on the default output, WASAPI;
+  DOTHEROES_AUDIO_TEST_LOSS: five losses -- one with two failing reopens retried a second apart, one with a 400 ms
+  reopen, one failing once): each lost and reopened through OpenAL Soft's own WASAPI reopen, no crash; the frames:
+  the same long frames as the drive's runs without losses (its area loads, at the same moments: 233 ms against 179
+  and 223 ms at 20 s, 278 ms against 269 and 265 ms at 35 s), none at the losses. (rel32's run of it tested
+  nothing: the hook fired before the class's init -- its clock, fixed.)
+- **The dungeon reverb, measured and calibrated** (tests/scenarios/reverb_lab.drive: a dry 0.5 s effect eight
+  times with the reverb on; tools/reverb_tail.py): on the FMOD path (the lifted SFX reverb, as rel27's) the tail
+  starts 30 dB under the sound and falls about 68 dB a second (0.87 s to -60 dB), -42.6 dB under it over 1.2 s; EFX
+  with the game's parameters as I3DL2 states them, -37.3 dB and slower (0.97 s): 5 dB more reverb, which is what
+  made the dungeons' mix 0.4-0.85 dB louder for the same calls (below). The late reverb's level, decay and HF
+  ratio searched (300 sets, the FMOD run's own calls replayed natively, then the dungeons' windows): late -1.5 dB,
+  decay 0.95 s, HF ratio 0.3 -- the dungeons' reverb windows -0.19, +0.27 and -0.01 dB against rel27, the dry
+  effect's tail within 2.6 dB RMS of FMOD's step by step (its energy 1.7 dB less). Calibrated by measurement of
+  the game's output, nothing of FMOD's code. On rel35 in the game the effect's tail is -43.7 dB under it
+  (FMOD's -42.6; -37.3 before), each 100 ms of it within 3 dB of FMOD's, and the dungeon's approach plays the same
+  music and reverb switches as rel27 with 0 FMOD calls.
+- **The same calls on both engines** (the fidelity review): rel27's own traces replayed natively with the mix
+  captured (tests/native/sound_replay --wav) against rel27's capture of the same run, aligned (correlation 0.99),
+  10 s windows: with no positioned effect and no reverb, within 0.05 dB (the fields, the river, the menus, the save
+  list, the exit after the boss); with positioned effects, the approved spatialization (the fields -0.61, the river
+  -0.77 dB on average); with the reverb, after the calibration, within 0.3 dB. So M3's game-run differences (the
+  river -0.67, the fields -0.46 dB) are the approved difference, not the runs' chance, and none is left unexplained.
+
+**Remaining differences, recorded**: positioned effects (approved); the reverb's tail not identical (calibrated:
+within 2.6 dB of FMOD's on the measured effect, within 0.3 dB on the dungeons' mix); the music outside the 32
+voices (rel27: shared); the sound lab's in-update music starts one update earlier; OpenAL Soft's last-frame hold
+(up to 18 ms); the music's pause reaching its audio thread within 10 ms. 217_enemy_appear (FMOD's own end
+reporting, not reproduced): nothing in the game depends on it -- the game never asks isPlaying of it while the
+two engines' answers would differ (the replays: every answer the game read, 0 different).
+**Not tested, the owner's sessions**: the boss fight and a crowded scene in the game (the 32-voice limit is
+tested synthetically above: no scene reaches more than 6 voices), a physical unplug or a change of the default
+output, the listening comparison itself. Not run: the Linux build (it builds; no Linux host here).
+
 ## 5. Repository licensing audit and cleanup
 
 File by file: docs/LICENSE_AUDIT.md (every tracked file classified). Findings before M1 (453 files) and what
@@ -470,7 +570,8 @@ M1 did with them (section 4.2):
   switch itself is expected to be small; the larger effect is step 7's retirements (the reservation test on
   every PPU store). Measured, not assumed: CPU per thread, mean and p99 frame times and spikes against rel27.
 - Sync: no audio clock drives the game; music and effects start when the game asks, as before. Bink's movie
-  audio does not go through FMOD or cellAudio [C]; how it is played is established in the Bink milestone.
+  audio does not go through FMOD, but it does go through cellAudio (corrected in M4, section 4.5: the movie player
+  opens a 2-channel port of its own on the cellAudio FMOD's start-up initialised) [L]; M8 replaces it.
 
 ## 7. Milestones and gates
 
@@ -493,3 +594,110 @@ implementation in public source; game files and keys supplied by the player; no 
 machinery in the final architecture; stable 60 fps with minimal frame-time spikes; correct behaviour across
 gameplay, menus, saving, loading and quitting. A decision that conflicts with these is flagged to the owner,
 not made silently. docs/AUDIO.md's "switching audio libraries is not the plan" is withdrawn.
+
+## 9. M5 prepared: what goes with FMOD (2026-11-12; an inventory, nothing removed)
+
+Read in the lift (build/r8/gen13: names, addresses and counts only), the runtime, the port and the run logs [C: code;
+S: a static scan of the lift; L: logs; I: inferred]. M5 waits for the owner's acceptance of M4.
+
+**FMOD's PPU code** [S]: 2,819 lifted functions -- [0x82F650, 0x908584) (2,793, in five of the generated files) and
+[0xA42E10, 0xA43800) (26) -- about 8.5% of the lifted PPU source. Nothing outside reaches it directly except 28 call
+stubs, each called only from the sound manager's class (59 calling functions; the plan's 72 call sites); indirect
+calls cannot be followed statically, so the traps are the proof. FMOD alone imports cellMic, sys_net and
+cellSysutilAvconfExt's extensions, and issues the SPU thread-group, mailbox and event-port syscalls (170-193).
+- **Traps need a lifter option** [C]: ps3recomp's lifter has no trap or stub list (its entry hooks run a host
+  function in place but still compile the lifted body; the function list does not remove code). M5 adds one: each
+  function in FMOD's ranges lifted as a trap -- a call reports the address and ends the game -- so the executable
+  holds no FMOD implementation, not even unused, and any path still reaching it shows itself in validation. The 28
+  FMOD API hooks (config/audio_hooks.json) and their trace lines go (the hook table links against them; the lift
+  refuses an entry hook at no lifted function), and with them `g_fmod_reached` (today it counts and lets the lifted
+  body run: a count, not a trap). The flashMP3 patch (config/insn_patches.json, game_patches.cpp) lies in FMOD's
+  range and goes.
+- **FMOD's SPU programs**: the setup extracts and lifts all 26 SPU images (setup_pipeline.py's SPU step:
+  extract_spu_images.py, build_spu_workloads.py, ids by position); 21 are FMOD's -- image 6 (the mixer), 7 (its
+  NeuralTHX variant) and 8-26 (its 19 relocatable plugins: config/spu_relocatable.json). M5 stops lifting and
+  compiling them (an exclusion in the SPU step; the game's 1-5 keep their ids). The runtime's overlays,
+  relocatable images and SPU thread groups lose their only user: retired in M6 after the census.
+- **FMOD's start-up and what it creates** (rel29's log) [L]: cellAudio's AudioOutConfigure, Init (its output and
+  mixing thread), port 0 (8 channels) and its notify queue; the mixer's image; five PPU threads (the stream, the
+  file, the event receive, FMOD_NONBLOCKING, the music status query); event queues and ports; the "FMOD" SPU thread
+  group. With the native manager none of it exists (M3), except cellAudio, below.
+
+**cellAudio and SDL2 stay until M8** -- found here, and a fix in M4: Bink's movie player opens a 2-channel cellAudio
+port of its own for each movie with sound (the attract mode's demo: 6 ports, 6 "Bink Audio Thread"s in a run)
+[L], on the cellAudio that only FMOD's start-up initialised. With the native manager nothing initialised it: the
+movie's port would not open (NOT_INIT) [C] -- untested before M4 (no native run had played a movie with sound). The
+native start-up now initialises cellAudio for the movies (port/audio_hooks.cpp; tested in section 4.5). So M5 keeps
+cellAudio (its SDL2 output carries the movies' sound) and SDL2's audio; M8 (FFmpeg) moves the movies' sound to
+OpenAL Soft and retires both. SDL2 stays in any case: the window and Vulkan surface (SDL video), the game
+controllers and the keyboard (cellPad), timers; on Linux OpenAL Soft's own output goes through SDL2.
+
+**The switch, the old path and the build**:
+- DOTHEROES_NATIVE_AUDIO (read only in port/audio_hooks.cpp; the setup never sets it, so a player's install runs
+  FMOD today) goes: the native manager the only path, its hooks always on. Drives that set it keep working.
+- The lift configuration changes (the traps, the hooks, the SPU exclusion): a player's update relifts (the
+  configuration is in the tools' fingerprint), as M1's generation did.
+- native_sound_absent.cpp (a build without OpenAL Soft's headers) would then be a silent game: the build requires
+  OpenAL Soft's headers instead (they ship in the prebuilt folder).
+- Kept for the native path: DOTHEROES_AUDIO_TRACE (the sound manager's calls), the sound lab, the test losses,
+  tools/audio_mix.py and audio_trace_compare.py (its "0 FMOD calls" check becomes M5's gate with the traps),
+  tests/native (sound_replay reads rel27's traces: the developer's local captures). FMOD-only: the FMOD API trace
+  lines, tools/audio_trace.py's FMOD analysis. cellAudio's AUDIO_WAV stays while the movies use cellAudio.
+- at3_standalone (the runtime's ATRAC decoder for cellAtrac) is not FMOD's and unused by this game: left to M6's
+  review of the runtime.
+- Docs that still describe FMOD as the running path: AUDIO.md's title and section 1, NATIVE_PORT.md, PC_EXPERIENCE.md,
+  this plan's status; updated in M5.
+
+**M5's gates** (section 7): the validation set and the install test on the build with the traps; no trap reached in
+any run (every drive, the long session, a movie with sound, the owner's session); the executable's FMOD ranges
+holding only traps (the boundary check of a built game can count them).
+
+## 10. M6 prepared: the SPU machinery left after M5 (2026-11-12; an inventory, nothing changed)
+
+Read in the runtime (build/ref/ps3recomp), the port and the M3 runs [R: read in code or a log; D: the docs; I:
+inferred]. **What runs today with the native audio** (M3's A/B, the river fight, rel30 with the switch) [R]: no SPU
+program at all -- `[spu-census] no SPU program started`, no overlay loaded, the physics' 51,231 tasks issued natively
+(0 lifted through SPURS), the maps' two packs inflated in the calling thread. **What the game still creates**: the
+physics manager's SPURS instances (two Initialize, 3 SPUs each: per instance a kernel thread waking every 1 ms and 3
+policy-module threads), their tasksets, 6 queues bound to lv2 event queues and barriers -- with no task ever run in
+them [R]. One scene only: M6's first gate is the census over the whole game (every drive, the long sessions, the
+owner's sessions), as section 7 says.
+
+| Machinery | Where | Users after M5 | Removable when | Proof |
+|---|---|---|---|---|
+| The per-store SPU reservation test | ppu_lifter.py (the store emission; `vm_mm_st_ok`), ppu_loader.cpp `VM_WRITE_COH` | none seen in the native river run | nothing can take an SPU reservation or a line watch: the lifted fallbacks gone or fatal (below), the solver's lock and the SPURS host's line writes moved off the lock-line lock | a counter of reservations and watches over the whole-game census at 0; then GETLLAR made fatal (as the absent SPU interpreter is); then the A/B |
+| The lock-line lock, coherence bitmaps (2 x 4 MiB), holder list, watches | spu_coherency.c; the SPU branch of ppu_stwcx32 | the native solver's libsync ticket lock (bullet_solver_task.cpp), inflate_direct's per-line notify, the SPURS host kernel's workload lines | as above; the solver's lock a host atomic if the PPU never touches it (not established) | memtest without its watch groups |
+| PPU lwarx/stwcx reservations (1,024 sharded locks) | ppu_loader.cpp | the game's own PPU threads | **kept**: only their SPU branch goes | -- |
+| MFC/DMA and the SPU channels | spu_dma.h, spu_channels.c | the lifted fallbacks of images 1-5 only (the native water, waver, physics and inflate bypass it) | the fallbacks gone | the census: 0 lifted runs |
+| Mailboxes, signal notification, SPU event ports | lv2_register.c, spu_channels.c | FMOD's mixer (each block); none after M5 | M5 | no SPU thread started |
+| Overlays and the SPU function dispatcher | spu_channels.c (registry, overlays, `spu_indirect_branch`), spu_dispatch_mt.c | overlays: FMOD's image 6 alone (its plugins); the dispatcher: the lifted fallbacks | overlays at M5; the dispatcher with the fallbacks | `[spu-ovl]` none |
+| lv2 SPU thread groups | lv2_register.c | FMOD only | M5 | the thread count |
+| SPURS (instances, kernel, policy modules, tasksets, queues, event flags, the job pool) | cellSpurs.c, spurs_pm.c, spurs_policy.c, spu_workload.c | the physics manager's instances, created but given no task | their set-up hooked as the water's and the waver's were (marker values in place of SPURS objects) | threads and CPU at the 60 cap |
+
+**The lifted SPU images** (26: build/gen/spu, runtime ids 1-26) [R]: 1 the water and 2 the waver -- generated natively
+(the lifted code a fallback, DOTHEROES_NATIVE_WATER=0; the generator reads their lifts, so they stay lifted as its
+input); 3 Edge zlib -- inflate_direct, the lifted shell when it declines; 4 collision and 5 the solver -- native when
+the settings ask (the player's dotheroes.cfg does: DOTHEROES_NATIVE_CD=1, DOTHEROES_NATIVE_SOLVER=1,2,4,5,6), lifted
+otherwise and for the cases they decline (none seen); 6-26 FMOD's -- not lifted from M5. What blocks retiring the
+machinery is these fallbacks and their declines: M6 makes native the default in code, covers or makes fatal every
+decline, and keeps the lifted images only as the generator's input.
+
+**The per-store test** (the owner's question). Every lifted scalar store -- about 780,000 write sites in the lift, and
+737 vector stores -- tests its 128-byte line's bit in the coherence bitmap before writing (DOTHEROES_PPU_STORES=mov,
+the release's and the setup's default on Windows x86-64): a load, a shift, a test and a branch, though the bitmap's
+bits are set only by an SPU GETLLAR or a SPURS task's signal watch and never cleared [R]. Its measured price is 0.4 ms
+of the game thread's 4.2 ms exploring and of its 5 ms in a fight -- about a tenth -- with the range test and the
+diagnostics' span 0.2 ms more (docs/NATIVE_R8.md section 5.4: fields 234-235 fps with the test, 259-260 without it,
+measurement-only builds) [D]; measured with FMOD running, whose mixer took two GETLLAR and a PUTLLC per block -- the
+main live user, gone at M5. It is a price, not a candidate, while anything can reserve a line the PPU writes; after M5
+and the fallbacks, nothing in the native configuration does (to be established by the census). The vector stores'
+test goes with it (PPU_RAW_ST_NO_COH).
+
+**M6's benchmark** (the owner's list), with what exists [R]: tools/r8_bench.py (fps; mean, p50/p90/p99/p99.9, max;
+the share of frames over 6.94 ms and 5 ms; the game thread's busy time; heavy and light frames); the builds per store
+mode (tools/r8_release_build.sh -DDOTHEROES_PPU_STORES=...; the measurement modes need DOTHEROES_MEASURE_ONLY=1); the
+A/B scripts of R8 and M3 (uncapped with DOTHEROES_BENCH=1; the 60 fps cap; three rounds rotated, real audio); 120 and
+144 fps targets with DOTHEROES_FPS=60 and DIAG_VBLANK_MS=8.333 or 6.944; spikes from tests/slow_frames.py and
+frame_times.py. **Missing**: per-thread CPU on Windows -- the process's CPU (memory.csv) exists, per thread only
+sampled profiles in development builds; M6 adds a per-thread CPU-time reading (GetThreadTimes) to the runs. The arms:
+rel27, rel31 (M3) and the M6 build, on the river fight and the fields, each target three rounds.

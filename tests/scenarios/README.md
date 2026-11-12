@@ -42,6 +42,9 @@ point, not where the save was made.
 | `editor_r3` | castle-front | coverage for native PPFX's dual run: the dot editor's NEW DATA, a pose's block grid, then PREVIEW; nothing saved |
 | `attract` | a fresh root (no saves) | the attract mode's demos, no input, for `ATTRACT_SECS` (default 44 min): the demos are movies, so video playback and stability coverage -- not the game rendering those areas, and not gameplay; hitch captures of frames of 40 ms+ |
 | `owner_play` | build/play-route/gamedata (a copy of the owner's save, played in place) | a play session: the validated configuration, sound, the readout; frames, input/area/position record, hitch captures around marks and slow frames, memory; a copy of every save into build/checkpoints/owner-play/ |
+| `owner_play_m4`, `owner_boss_m4` | build/play-route/gamedata (shared with `owner_play_r8`); dungeon1-boss-door | the owner's M4 listening sessions on OpenAL Soft (the native sound manager, DOTHEROES_NATIVE_AUDIO=1): a play session, and the first dungeon's boss (on rel27 too, with BIN and DOTHEROES_NATIVE_AUDIO=0 in the environment) |
+| `m4_pause` | castle-front | the game's system menu (START: the game paused) opened and closed ten times over the field's music and ambience, TITLE and CONTINUE, then the game asked to exit with the menu open; traced on both audio paths for docs/OPENAL_MIGRATION_PLAN.md section 4.5 |
+| `reverb_lab` | a fresh root (the title) | the dungeon reverb measured: the title's music faded out, the reverb on, one dry effect eight times, the reverb off, six times more (DOTHEROES_DEV_SOUND); with a capture, tools/reverb_tail.py gives each play's tail against its dry sound |
 
 To add one (the first dungeon, its boss): a checkpoint from a play session's
 saves, a route from its record (`tests/route_from_record.py <run>` gives

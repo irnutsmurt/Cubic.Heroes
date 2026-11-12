@@ -43,7 +43,7 @@ console's) and plays through SDL2 [C].
 | Native thread programs (ps3recomp 0142) | spu_lifted_thread.c | none by default since M1 |
 | lv2 SPU thread group and event syscalls; sys_event ports and queues | lv2_register.c, sys_event.c | the group, the PPU-SPU events |
 | Decrementer (host time at 79.8 MHz) | spu_channels.c | the mixer |
-| cellAudio ring and notify; the SDL2 backend; the host downmix | libs/audio/cellAudio.c | the output (only FMOD opens cellAudio) |
+| cellAudio ring and notify; the SDL2 backend; the host downmix | libs/audio/cellAudio.c | the output: FMOD's port 0; the movie player (Bink) opens a 2-channel port of its own for each movie with sound (M4) |
 
 ## 2. The game's own audio layer, and where OpenAL Soft goes in
 
@@ -63,11 +63,18 @@ docs/OPENAL_MIGRATION_PLAN.md.
   loops, the device with its loss and reopen, the music streamer with fades, the reverb, the sound list),
   tested alone (tests/native/openal_check.sh; the plan's section 4.3).
 - **M3 (2026-11-11)**: the game's sound manager answered natively on OpenAL Soft with **DOTHEROES_NATIVE_AUDIO=1**
-  (port/native/audio/sound_manager.cpp; FMOD never initialised: no FMOD thread, SPU mixer or cellAudio); the
+  (port/native/audio/sound_manager.cpp; FMOD never initialised: no FMOD thread or SPU mixer; cellAudio initialised
+  only for the movies' sound, M4); the
   default is still the lifted FMOD path until M5. Its gates (rel27's traced calls replayed, the scenes in the game,
   their mixes against rel27's) and the measured differences: the plan's section 4.4. Positioned effects keep
   OpenAL Soft's own spatialization (the owner's decision, 2026-11-12): no gain to reproduce FMOD's 7.1-to-stereo
   downmix, whose directional attenuation is not recreated.
+- **M4 (2026-11-12), the automated part**: the audio layer through voice pressure, the game's pause and output
+  losses (tests/native/sound_stress_check), a device loss no longer able to drop a looping sound; voices ranked
+  as FMOD's (priority, then audibility); the movies' sound (Bink's own cellAudio port: cellAudio now initialised
+  by the native start-up); the dungeon reverb calibrated by measurement against rel27's output; the scenes, the
+  pause, the movies, losses of the real output and 30 minutes in the game. The plan's section 4.5; M4 closes with
+  the owner's listening and acceptance.
 
 ## 3. A record: FMOD's SPU programs as native code (A0-A3, 2026-11-10/11), withdrawn
 
