@@ -44,3 +44,8 @@ public source or distributed artifacts -- game-derived code is generated on the 
 files and keys; no unnecessary PS3 machinery; a stable 60 fps with minimal spikes; correct behaviour throughout.
 Flag any decision that conflicts with these to the owner instead of changing the plan silently
 (docs/NATIVE_PORT.md section 1, docs/OPENAL_MIGRATION_PLAN.md).
+
+The player-side recompilation boundary (README, "This repository contains no game data") is checked by
+`tools/boundary_check.py`: the pre-push hook runs it on every pushed tree, `tools/make_bundle.py` on the setup's
+download; run `tools/boundary_check.py tree` before staging with `git add -A`. Never weaken a rule to make a
+finding go away: a finding means something game-derived is about to be published.

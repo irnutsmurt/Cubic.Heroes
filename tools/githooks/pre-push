@@ -1,7 +1,12 @@
 #!/bin/sh
-# Every push is checked first (tools/push_guard.py): no Claude session links, personal email addresses,
-# account names or local home-directory paths in the outgoing commit messages, added lines or tag messages.
+# Every push is checked first:
+# - tools/boundary_check.py: no game data, lifted or generated game code, game-derived objects, PS3 binaries,
+#   keys or FMOD-derived files in the tree of any pushed commit (the player-side recompilation boundary);
+# - tools/push_guard.py: no Claude session links, personal email addresses, account names or local
+#   home-directory paths in the outgoing commit messages, added lines or tag messages.
 top=$(git rev-parse --show-toplevel)
 py="$top/build/venv/Scripts/python.exe"
 [ -x "$py" ] || py=$(command -v python3 || command -v python || echo py)
-exec "$py" "$top/tools/push_guard.py" pre-push "$@"
+refs=$(cat)
+printf '%s\n' "$refs" | "$py" "$top/tools/boundary_check.py" pre-push || exit 1
+printf '%s\n' "$refs" | exec "$py" "$top/tools/push_guard.py" pre-push "$@"
