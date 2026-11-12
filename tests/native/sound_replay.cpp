@@ -9,7 +9,10 @@
 //     fades) against the native channel's gain at that moment, effects and music (music channels paired in the
 //     order they started); and each music start's update against rel27's;
 //   - no underrun, nothing left at shutdown.
-//   sound_replay <trace> <sound dir> [--levels <bgm> <se>] [--report <file>] [--limit-s <seconds>]
+//   sound_replay <trace> <sound dir> [--levels <bgm> <se>] [--report <file>] [--limit-s <seconds>] [--wav <file>]
+//                [--reverb name=value,...]
+// --wav: the native mix written (48 kHz stereo float WAV) from the trace's SM.init, as rel27's capture starts there
+// (its device opened): the same calls on both engines, for comparing their output (M4).
 // The library: OpenAL32.dll beside this program, or OPENAL_LIB=<path>.
 #include <algorithm>
 #include <cmath>
@@ -25,6 +28,31 @@
 #include "trace_reader.h"
 
 namespace {
+
+FILE* g_wav = nullptr;
+bool g_wav_on = false;   // from the trace's SM.init (the game updates the class before it, silently)
+uint64_t g_wav_frames = 0;
+
+void wav_header(FILE* f, uint64_t frames)
+{
+    const uint32_t data = (uint32_t)(frames * 8), rate = 48000;
+    auto u32 = [&](uint32_t v) { fwrite(&v, 4, 1, f); };
+    auto u16 = [&](uint16_t v) { fwrite(&v, 2, 1, f); };
+    fseek(f, 0, SEEK_SET);
+    fwrite("RIFF", 1, 4, f);
+    u32(36 + data);
+    fwrite("WAVEfmt ", 1, 8, f);
+    u32(16); u16(3); u16(2); u32(rate); u32(rate * 8); u16(8); u16(32);
+    fwrite("data", 1, 4, f);
+    u32(data);
+}
+
+void wav_capture(const float* lr, int n, void*)
+{
+    if (!g_wav_on) return;
+    fwrite(lr, sizeof(float) * 2, (size_t)n, g_wav);
+    g_wav_frames += (uint64_t)n;
+}
 
 using trace_reader::Call;
 
@@ -50,6 +78,7 @@ int main(int argc, char** argv)
     int bgm_level = 3, se_level = 3;
     const char* report = nullptr;
     double limit_s = 1e30;
+    const char* reverb = nullptr;   // --reverb name=value,...: the reverb's parameters changed (the calibration)
     for (int i = 3; i < argc; i++) {
         if (!strcmp(argv[i], "--levels") && i + 2 < argc) {
             bgm_level = atoi(argv[++i]);
@@ -58,6 +87,11 @@ int main(int argc, char** argv)
             report = argv[++i];
         } else if (!strcmp(argv[i], "--limit-s") && i + 1 < argc) {
             limit_s = atof(argv[++i]);
+        } else if (!strcmp(argv[i], "--reverb") && i + 1 < argc) {
+            reverb = argv[++i];
+        } else if (!strcmp(argv[i], "--wav") && i + 1 < argc) {
+            g_wav = fopen(argv[++i], "wb");
+            if (g_wav) wav_header(g_wav, 0);
         }
     }
     std::vector<Call> calls = trace_reader::read(argv[1]);
@@ -69,11 +103,13 @@ int main(int argc, char** argv)
     o.sound_dir = argv[2];
     o.log = [](const char* l) { fprintf(stderr, "[audio] %s\n", l); };
     o.loopback = 1;
+    o.reverb = reverb;
     if (!nsm_init(&o)) {
         fprintf(stderr, "the native sound manager did not start\n");
         return 2;
     }
     nsm_set_game_state(bgm_level, se_level, 0, 0);
+    if (g_wav) nsm_debug_capture(wav_capture, nullptr);
     std::vector<Diff> diffs;
     std::map<std::string, std::pair<uint64_t, uint64_t>> queries;   // name -> (same, different)
     std::map<uint32_t, uint32_t> handles;                            // rel27's channel -> native
@@ -119,6 +155,7 @@ int main(int argc, char** argv)
             last_sm = n;
         }
         float v1[3], v2[3];
+        if (n == "SM.init") g_wav_on = true;
         if (n == "SM.update") {
             nsm_update(argf(c, 0));
             updates++;
@@ -181,6 +218,10 @@ int main(int argc, char** argv)
     nsm_stats st{};
     nsm_get_stats(&st);
     nsm_shutdown();
+    if (g_wav) {
+        wav_header(g_wav, g_wav_frames);
+        fclose(g_wav);
+    }
     nsm_stats after{};
     nsm_get_stats(&after);
     uint64_t q_same = 0, q_diff = 0;

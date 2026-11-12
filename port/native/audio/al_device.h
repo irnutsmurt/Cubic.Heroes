@@ -66,6 +66,15 @@ public:
 
     uint32_t poll();                  // the audio thread: health and recovery; returns generation()
     bool connected() const { return connected_.load(); }
+    // connected as far as this class knows, from any thread, without an ALC call (those wait on OpenAL Soft's
+    // device lock, which a reopen holds for as long as the output takes to open): false from a loss seen by the
+    // poll or reported (a removal event, a simulated loss) until the reopen. A disconnect is seen by the poll
+    // that follows it: a source found stopped is known to have ended by itself once a poll that began after
+    // that was seen (poll_count) still found the device connected, generation() unchanged.
+    bool connected_now() const;
+    uint64_t poll_count() const { return polls_.load(); }
+    // the audio thread only: connected_now() and OpenAL Soft's own ALC_CONNECTED, as of this call
+    bool query_connected() const;
     uint32_t generation() const { return generation_.load(); }
     const Caps& caps() const { return caps_; }
     Stats stats() const;
@@ -87,8 +96,10 @@ public:
     void delete_slot(unsigned& id);
     Live live() const;
 
-    // forced from outside (tests): treat the device as lost now
+    // forced from outside (tests): treat the device as lost now; make the next n reopens fail
     void simulate_loss() { lost_.store(true); }
+    void debug_fail_reopens(int n) { fail_reopens_.store(n); }
+    void debug_reopen_delay(int ms) { reopen_delay_ms_.store(ms); }   // tests: each reopen takes this long
 
 private:
     static void ALC_APIENTRY event_callback(ALCenum type, ALCenum device_type, ALCdevice* device, ALCsizei length,
@@ -107,6 +118,9 @@ private:
     std::atomic<uint32_t> generation_{0};
     std::atomic<uint64_t> disconnects_{0}, default_changes_{0}, reopens_{0}, reopen_failures_{0};
     std::atomic<int> sources_{0}, buffers_{0}, effects_{0}, slots_{0};
+    std::atomic<int> fail_reopens_{0};
+    std::atomic<uint64_t> polls_{0};
+    std::atomic<int> reopen_delay_ms_{0};
     std::vector<int> attrs_;
     uint64_t next_retry_ms_ = 0;
     bool waiting_ = false;            // lost, not reopened yet

@@ -35,4 +35,7 @@ void nsm_update(float) {}
 void nsm_get_stats(struct nsm_stats* out) { *out = nsm_stats{}; }
 int nsm_debug_channel_gain(uint32_t, float*) { return 0; }
 uint32_t nsm_debug_last_bgm_channel(void) { return 0; }
+int nsm_debug_channel(uint32_t, struct nsm_channel_debug* out) { *out = nsm_channel_debug{}; return 0; }
+void nsm_debug_capture(nsm_capture_fn, void*) {}
+void nsm_debug_device_loss(int, int) {}
 }

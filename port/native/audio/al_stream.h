@@ -120,6 +120,8 @@ private:
         std::vector<int16_t> mono;             // centre: the file's frames before they are doubled
         bool fading = false, fade_stop = false;
         double fade_t0 = 0;
+        int paused_offset = 0;                 // the source's sample offset when paused
+        int last_offset = 0;                   // its sample offset last seen playing (a restart after a loss)
         uint64_t underruns = 0, near_underruns = 0, loops = 0;
     };
 

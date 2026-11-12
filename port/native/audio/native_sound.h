@@ -18,6 +18,9 @@ struct nsm_options {
     nsm_log_fn log;             // diagnostics ("[audio] ..."), may be null
     int voices;                 // effect voices (0: 32, FMOD's default)
     int loopback;               // tests: no device; each update renders its dt of audio (silently)
+    const char* reverb;         // tests: the reverb's parameters changed, "name=value,..." (gain, gain_hf, decay,
+                                // hf_ratio, reflections, reflections_delay, late, late_delay, diffusion, density);
+                                // null: the game's
 };
 
 // The manager's life. init: the library, the device, the reverb, the music streamer, the effect voices and the
@@ -63,12 +66,33 @@ struct nsm_stats {
     uint64_t se_plays, bgm_plays, steals, virtual_starts, stream_underruns, queue_overflows, device_losses,
         device_reopens;
     int peak_voices, peak_records, live_sources, live_buffers;
+    // the effect voices: virtual channels given a freed voice, a voice taken by a more important virtual channel,
+    // a channel stopped for a new one at the channel limit, a play refused there, effects restarted after a
+    // device reopen; the music streams restarted after one; reopens that failed (retried)
+    uint64_t promotions, swaps, channel_steals, refused, effect_restarts, stream_restarts, reopen_failures;
+    int peak_channels, live_channels, live_records;   // effect channels and sound-manager records now
 };
 void nsm_get_stats(struct nsm_stats* out);
 // tests: the gain the volume model last gave a channel (what rel27 gave FMOD's setVolume): an effect's handle,
 // or a music channel's (nsm_debug_last_bgm_channel); 0 when it is not a live channel
 int nsm_debug_channel_gain(uint32_t handle, float* gain);
 uint32_t nsm_debug_last_bgm_channel(void);   // the music channel the last update started, 0 if none
+// tests: a channel as the voices see it (an effect's handle, or a music channel's): on a voice (or, music,
+// playing), paused, the gain last given, where it is in its file (seconds), its audibility, its record's state
+// (0: none), its priority; 0 when it is not a live channel
+struct nsm_channel_debug {
+    int exists, music, real, paused, state, priority;
+    float gain, audibility;
+    double offset;
+};
+int nsm_debug_channel(uint32_t handle, struct nsm_channel_debug* out);
+// tests: each block a loopback manager renders (stereo float frames) handed to fn
+typedef void (*nsm_capture_fn)(const float* stereo, int frames, void* user);
+void nsm_debug_capture(nsm_capture_fn fn, void* user);
+// tests: the output device lost now (every source stopped, as a disconnect does), then reopened by the audio
+// thread -- the first failed_reopens attempts failing (each retried a second later), each attempt taking
+// reopen_ms (a slow output)
+void nsm_debug_device_loss(int failed_reopens, int reopen_ms);
 
 #ifdef __cplusplus
 }

@@ -7,7 +7,11 @@
 #     loaded; every looped file played and compared sample by sample; a minute streamed in real time with a
 #     device loss half way; with `hour`, an hour streamed in real time;
 #   sound_manager_check (tests/native/sound_manager_check.cpp, M3): the native sound manager's behaviour on
-#     made-up sounds (records, fades, ducks, music, pause).
+#     made-up sounds (records, fades, ducks, music, pause);
+#   sound_stress_check (tests/native/sound_stress_check.cpp, M4): the manager under pressure (more effects than
+#     voices, priorities, virtual channels, stale handles, the channel limit, a 5-minute soak), paused (200
+#     cycles, a crossfade, quitting), through device losses (loopback, measured; and the real-time path:
+#     threads, the game's thread timed, failing and slow reopens).
 # Real-time runs use OpenAL Soft's wave writer into the null device (DEVICE_TEST=real: the default output).
 # M3's replay against rel27's traces is tests/native/sound_replay.sh (it needs the developer's own captures).
 set -e
@@ -29,6 +33,8 @@ LAYER="$A/wav_pcm.cpp $A/al_api.cpp $A/al_device.cpp $A/al_stream.cpp $A/voice_p
   $LAYER tests/native/openal_check.cpp -o "$OUT/openal_check$X"
 "$Z" c++ -target "$T" -O2 -std=c++17 -Wall -Wextra -Wno-unused-result -I $A -I "build/deps/$P/include" \
   $LAYER $A/sound_list.cpp $A/sound_manager.cpp tests/native/sound_manager_check.cpp -o "$OUT/sound_manager_check$X"
+"$Z" c++ -target "$T" -O2 -std=c++17 -Wall -Wextra -Wno-unused-result -I $A -I "build/deps/$P/include" \
+  $LAYER $A/sound_list.cpp $A/sound_manager.cpp tests/native/sound_stress_check.cpp -o "$OUT/sound_stress_check$X"
 printf '[general]\ndrivers = wave\n\n[wave]\nfile = %s\n' "$NUL" > "$OUT/wave_null.ini"
 [ "$DEVICE_TEST" = real ] || export ALSOFT_CONF="$OUT/wave_null.ini"
 set +e
@@ -45,5 +51,9 @@ run 5 device "$SND/bgm_cave.wav" 60 reopen
 [ "$2" = hour ] && run 5 device "$SND/bgm_field07.wav" 3600 reopen
 "$OUT/sound_manager_check$X" > "$OUT/sound_manager_check.out" 2>&1 || rc=1
 tail -n 1 "$OUT/sound_manager_check.out"
+for m in voices pause device realtime; do
+  "$OUT/sound_stress_check$X" $m > "$OUT/sound_stress_$m.out" 2>&1 || rc=1
+  tail -n 1 "$OUT/sound_stress_$m.out"
+done
 echo "openal_check: $([ $rc = 0 ] && echo passed || echo FAILED)"
 exit $rc

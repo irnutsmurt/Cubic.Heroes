@@ -31,6 +31,7 @@
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
+#include <cstring>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -100,11 +101,13 @@ struct Manager {
     int level_bgm = 3, level_se = 3;
     bool menu_flag = false, exit_requested = false;
     bool menu_paused = false;
-    uint32_t last_bgm = 0, device_gen = 0;
+    uint32_t last_bgm = 0;
     uint64_t se_plays = 0, bgm_plays = 0;
     int peak_records = 0;
     double render_carry = 0.0;
     std::vector<float> render_buf;
+    nsm_capture_fn capture = nullptr;   // tests: the loopback's rendered audio
+    void* capture_user = nullptr;
 };
 
 Manager& M()
@@ -294,6 +297,7 @@ void render(double dt)   // loopback (tests): the audio of dt seconds, discarded
         const int n = std::min(left, step);
         m.render_buf.resize((size_t)n * 2);
         m.dev.render(m.render_buf.data(), n);
+        if (m.capture) m.capture(m.render_buf.data(), n, m.capture_user);
         m.streamer->service_once();
         left -= n;
     }
@@ -331,15 +335,19 @@ int nsm_init(const nsm_options* o)
         return 0;
     }
     // the reverb the game asked for: its old library's SFX reverb with only Room changed (-100 mB), in I3DL2 terms
+    // The late reverb's level, decay and HF ratio calibrated by measurement (M4, docs/OPENAL_MIGRATION_PLAN.md section
+    // 4.5): as I3DL2 states them (late 0 mB, decay 1.0 s, HF ratio 0.5) EFX's reverb left a 5 dB louder, slower tail
+    // than the game's own mix (rel27's capture of a dry effect, tools/reverb_tail.py) and made the dungeons' mix
+    // 0.4-0.85 dB louder for the same calls; with these the dungeons match within 0.3 dB and the tail within 2.6 dB.
     al_device::ReverbParams p;
     p.gain = 0.891251f;        // Room -100 mB
     p.gain_hf = 1.0f;          // RoomHF 0 mB
     p.gain_lf = 1.0f;          // RoomLF 0 mB
-    p.decay_time = 1.0f;
-    p.decay_hf_ratio = 0.5f;
+    p.decay_time = 0.95f;      // DecayTime 1.0 s, calibrated
+    p.decay_hf_ratio = 0.3f;   // DecayHFRatio 0.5, calibrated
     p.reflections_gain = 0.0f;        // Reflections -10000 mB
     p.reflections_delay = 0.02f;
-    p.late_gain = 1.0f;               // Reverb 0 mB
+    p.late_gain = 0.8414f;            // Reverb 0 mB, calibrated: -1.5 dB
     p.late_delay = 0.04f;
     p.diffusion = 1.0f;
     p.density = 1.0f;
@@ -347,17 +355,37 @@ int nsm_init(const nsm_options* o)
     p.lf_reference = 250.0f;
     p.air_absorption_gain_hf = 1.0f;
     p.room_rolloff = 0.0f;
+    for (const char* s = o->reverb; s && *s;) {   // tests: parameters changed (the calibration, M4)
+        char name[24] = {};
+        float v = 0;
+        if (sscanf(s, "%23[a-z_]=%f", name, &v) == 2) {
+            const std::string n = name;
+            if (n == "gain") p.gain = v;
+            else if (n == "gain_hf") p.gain_hf = v;
+            else if (n == "decay") p.decay_time = v;
+            else if (n == "hf_ratio") p.decay_hf_ratio = v;
+            else if (n == "reflections") p.reflections_gain = v;
+            else if (n == "reflections_delay") p.reflections_delay = v;
+            else if (n == "late") p.late_gain = v;
+            else if (n == "late_delay") p.late_delay = v;
+            else if (n == "diffusion") p.diffusion = v;
+            else if (n == "density") p.density = v;
+            else logf("reverb override: unknown %s", name);
+        }
+        s = strchr(s, ',');
+        if (s) s++;
+    }
     const bool rev = m.reverb.create(m.dev, p);
     al_stream::Config sc;
     sc.manual = m.loopback;
     sc.reverb = rev ? &m.reverb : nullptr;
     m.streamer.reset(new al_stream::Streamer(m.dev, sc));
-    m.pool.create(m.dev, o->voices > 0 ? o->voices : 32, 512, rev ? &m.reverb : nullptr);
+    // FMOD's default 32 real voices for the effects, and the game's System::init(100) channels
+    m.pool.create(m.dev, o->voices > 0 ? o->voices : 32, 100, rev ? &m.reverb : nullptr);
     const al_api::Api& al = m.api;
     const float ori[6] = {0, 0, 1, 0, 1, 0};   // the game's forward +z, up +y (x mirrored: +x is the right)
     al.alListenerfv(AL_ORIENTATION, ori);
     al.alListener3f(AL_POSITION, 0, 0, 0);
-    m.device_gen = m.dev.generation();
     m.active = true;
     logf("native sound manager: %zu sounds listed, %d voices, reverb %s", m.list.entries.size(), m.pool.voices(),
          rev ? "yes" : "none");
@@ -667,6 +695,7 @@ void nsm_set_listener(const float* pos, const float* velocity)
     float p[3];
     to_al(pos, p);
     m.api.alListenerfv(AL_POSITION, p);
+    m.pool.set_listener(p);
     (void)velocity;   // always zero in the game; no Doppler
 }
 
@@ -692,10 +721,6 @@ void nsm_update(float dt)
     if (m.loopback) {   // tests: the audio of the frame, then the streams' work
         render(dt);
         m.streamer->service_once();
-    }
-    if (m.dev.generation() != m.device_gen) {   // a lost device reopened: the effects go on where they were
-        m.device_gen = m.dev.generation();
-        m.pool.restart_after_loss();
     }
     // the system menu: everything paused, the manager's clock stopped, until it closes
     if (m.menu_flag && !m.menu_paused) {
@@ -810,15 +835,26 @@ void nsm_get_stats(nsm_stats* out)
     out->bgm_plays = m.bgm_plays;
     out->peak_records = m.peak_records;
     if (!m.active) return;
-    out->steals = m.pool.stats().steals;
-    out->virtual_starts = m.pool.stats().virtual_starts;
-    out->peak_voices = m.pool.stats().peak_real;
+    const voice_pool::Pool::Stats& ps = m.pool.stats();
+    out->steals = ps.steals;
+    out->virtual_starts = ps.virtual_starts;
+    out->peak_voices = ps.peak_real;
+    out->promotions = ps.promotions;
+    out->swaps = ps.swaps;
+    out->channel_steals = ps.channel_steals;
+    out->refused = ps.refused;
+    out->effect_restarts = ps.restarts;
+    out->peak_channels = ps.peak_channels;
+    out->live_channels = m.pool.channels_in_use();
+    out->live_records = (int)m.records.size();
     const al_stream::Totals t = m.streamer->totals();
     out->stream_underruns = t.underruns;
     out->queue_overflows = t.queue_overflows;
+    out->stream_restarts = t.restarts_after_reopen;
     const al_device::Stats ds = m.dev.stats();
     out->device_losses = ds.disconnects;
     out->device_reopens = ds.reopens;
+    out->reopen_failures = ds.reopen_failures;
     const al_device::Live l = m.dev.live();
     out->live_sources = l.sources;
     out->live_buffers = l.buffers;
@@ -841,6 +877,60 @@ uint32_t nsm_debug_last_bgm_channel(void)
 {
     std::lock_guard<std::mutex> lk(M().mu);
     return M().last_bgm;
+}
+
+int nsm_debug_channel(uint32_t handle, nsm_channel_debug* out)
+{
+    Manager& m = M();
+    std::lock_guard<std::mutex> lk(m.mu);
+    *out = nsm_channel_debug{};
+    if (!m.active) return 0;
+    const bool music = (handle & kMusicTag) != 0;
+    const uint32_t ch = handle & ~kMusicTag;
+    const Record* rec = nullptr;
+    for (const Record& r : m.records)
+        if (r.music == music && r.ch == ch) rec = &r;
+    if (music) {
+        const al_stream::Status st = m.streamer->status(ch);
+        if (st.state == al_stream::State::free) return 0;
+        out->real = st.state == al_stream::State::playing || st.state == al_stream::State::paused;
+        out->paused = st.state == al_stream::State::paused;
+        out->offset = st.position;
+        out->gain = rec ? rec->gain : st.gain;
+    } else {
+        if (!m.pool.valid(ch)) return 0;
+        out->real = m.pool.real(ch);
+        out->paused = m.pool.paused(ch);
+        m.pool.debug_offset(ch, &out->offset);
+        out->gain = rec ? rec->gain : m.pool.info(ch)->gain;
+        out->audibility = (float)m.pool.audibility(*m.pool.info(ch));
+        out->priority = m.pool.info(ch)->priority;
+    }
+    out->exists = 1;
+    out->music = music;
+    out->state = rec ? rec->state : 0;
+    return 1;
+}
+
+void nsm_debug_capture(nsm_capture_fn fn, void* user)
+{
+    std::lock_guard<std::mutex> lk(M().mu);
+    M().capture = fn;
+    M().capture_user = user;
+}
+
+void nsm_debug_device_loss(int failed_reopens, int reopen_ms)
+{
+    Manager& m = M();
+    std::lock_guard<std::mutex> lk(m.mu);
+    if (!m.active) return;
+    // as OpenAL Soft loses a device: marked disconnected, then every source stopped -- the music's by the audio
+    // thread in one step of it (waited for), the effects' here -- then the reopen, failing failed_reopens times
+    m.dev.debug_fail_reopens(failed_reopens);
+    m.dev.debug_reopen_delay(reopen_ms);
+    m.streamer->debug_simulate_disconnect();
+    m.streamer->sync();
+    m.pool.debug_stop_sources();
 }
 
 }  // extern "C"
