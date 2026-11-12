@@ -1,7 +1,7 @@
 # Audio: FMOD Ex out, OpenAL Soft in -- audit and migration plan (for review)
 
-Status: **approved by the owner 2026-11-11 with the adjustments below; M0, M1 and M2 done (sections 4.1-4.3),
-M3-M4 authorized; M5 and M6 only once their validation requirements are met; M7 (history) needs a separate
+Status: **approved by the owner 2026-11-11 with the adjustments below; M0-M3 done (sections 4.1-4.4), M4
+(the owner's listening) next; M5 and M6 only once their validation requirements are met; M7 (history) needs a separate
 approval; M8 (Bink) afterwards.** Requirement (the owner, 2026-11-11): the PC recompilation's game audio runs on OpenAL Soft; FMOD Ex is not executed and no
 FMOD-derived implementation code is in the public source or any distributed artifact. The FMOD work so far
 (docs/AUDIO.md A0-A3) stays a local compatibility reference only. Tags: [C] read in the code, [M] measured,
@@ -79,8 +79,9 @@ id first); the fade engine's states (SE, BGM, BGM duck/restore, looping-SE fade-
 stop); the music start sequence (open, ready, play; loop count; crossfade with two streams open); the volume
 model (BGM = list volume x BGM master x option level x 0.11 x fade; SE = list volume x option level x 0.11;
 linear, clamped 0-1); pause-all from the game's flag; handles that are non-zero, 0 on failure, and safe when
-stale (three callers keep a playSE handle to stop it later); `isPlaying` timing (FMOD's state advanced at the
-game's 10 Hz update throttle; 37 game sites poll it).
+stale (three callers keep a playSE handle to stop it later); `isPlaying` timing (37 game sites poll it; M3's
+reading corrected the earlier "FMOD's state advanced at the game's 10 Hz update": a sound's end shows within a
+frame of the file's end -- the 10 Hz throttle only paces FMOD's own update) [M, T].
 
 ## 2. What the migration eliminates
 
@@ -102,12 +103,12 @@ game's 10 Hz update throttle; 37 game sites poll it).
 | Device, context, failure, shutdown | ALC device open on the default output (stereo, 5.1, 7.1 as the system reports; OpenAL Soft's own mixing and downmix); disconnect detection (ALC_EXT_disconnect) and reopen (ALC_SOFT_reopen_device); clean release of sources, buffers, effects at shutdown |
 | Effects (SE) | the 281 effect files resident as AL buffers (33.7 MB): our own RIFF/PCM loader (all files are 16-bit PCM, mono or stereo, 44.1 or 48 kHz; no other codec), reading the `smpl` loop points (AL_SOFT_loop_points) [M] |
 | Music (BGM) | our own streaming thread: buffer queue (e.g. 4 x 250 ms) from the WAV file on disk; the loop as rel27 plays it (the `smpl` loop with its intro, or the whole file: M0 decides), crossfades with two streams; underrun detection and counters |
-| 3D | AL_INVERSE_DISTANCE_CLAMPED with reference = the list's min, max = its max, rolloff 1 (FMOD's default inverse rolloff with the game's set3DSettings(1,1,1)); listener from setListener, forward (0,0,1), up (0,1,0); sounds with no position at the default position, as the game gives them (to be measured against rel27, section 4) |
+| 3D | AL_INVERSE_DISTANCE_CLAMPED with reference = the list's min, max = its max, rolloff 1 (FMOD's default inverse rolloff with the game's set3DSettings(1,1,1)); listener from setListener, forward (0,0,1), up (0,1,0), never turning. The game's frame is FMOD's default left-handed one (System::init flags 0: +x is the right), OpenAL's right-handed: x is mirrored (taken as written, the plan would have swapped left and right). A 3D effect played with no position sounds at the listener (measured in rel27's mix: loud and centred), not at the world origin [C, M] |
 | Reverb | an EFX EAX reverb in one auxiliary slot, every source sending to it, the slot enabled by setReverb: the game's settings are FMOD's default SFX reverb with Room -100 mB, applied to the whole mix, music included [C] -- in I3DL2 terms gain 0.89, HF gain 1.0, decay 1.0 s, HF ratio 0.5, reflections off (-10000 mB), reflections delay 0.02 s, late gain 1.0, late delay 0.04 s, diffusion 1.0, density 1.0, HF reference 5 kHz, LF reference 250 Hz, dry full. EFX implements I3DL2's model itself; we set the parameters, nothing of FMOD's reverb code |
 | Voices | a voice cap (FMOD's default 32 real voices) chosen by priority then audibility; 100 virtual |
 | Pitch | not used by the game (no frequency or pan calls) [C] |
 | Pause/resume, looping | AL source pause/play; whole-buffer loop for looping SE; music loop by the stream |
-| Timing | sound states reported at the game's 10 Hz update throttle, as FMOD's were; no audio clock drives the game |
+| Timing | a sound's end reported within a frame, as FMOD reported it (M3); the music's open answered asynchronously, as FMOD's callback was; no audio clock drives the game |
 
 Decoding libraries: none needed (PCM only). OpenAL Soft (**LGPL-2.0-or-later**) is fetched from its official
 source at a pinned release, its archive verified (SHA-256 recorded), and built by tools/build_deps.py as a DLL
@@ -184,9 +185,12 @@ What the baseline shows (the behaviour the native sound manager has to match):
 - **Voices**: at most 4-6 channels at once in every scene: the 32-voice cap was never reached.
 - **Position**: 3D effects with a position are a minority in menus (52 of 151) and the majority in the fields
   (379 of 413); the listener is set every frame from the hero, forward (0,0,1), up (0,1,0).
-- **Open**: one channel of 217_enemy_appear (1.03 s, no loop points) answered "playing" for 8.55 s until the
-  game stopped it (its other 17 plays ended on time; it was never paused; 6 channels at most): whether it was
-  audible that long is checked in the mix before M3.
+- **217_enemy_appear** (resolved in M3): the channel that answered "playing" for 8.55 s was the third of three
+  plays of the id in one frame (the class stops the id's earlier channels first); it was never paused, looped
+  (no loop points, no loop mode) or played again, FMOD's update ran throughout, and the class's code holds
+  nothing that could keep it alive: FMOD's own end reporting missed it. The game polled no other answer of that
+  id meanwhile (no effect on play). The native manager ends a channel at its file's end and does not reproduce
+  it; whether it was audible that long is not established (the dungeon's music masks it in the mix).
 
 **The sound lab** (tests/scenarios/sound_lab.drive, DOTHEROES_DEV_SOUND in port/audio_hooks.cpp): the hero
 standing still while the game's own sound manager is asked for the sounds the scenes never play -- effects
@@ -313,6 +317,112 @@ sound never had HRTF (FMOD mixed for speakers), and the device is opened with HR
 end of its mixing update (up to 784 frames, 18 ms, at 44.1 kHz) before silence; of the game's 284 files without
 a loop, one effect ends above -40 dBFS (085_boss_attack14, -36.7 dBFS, named by no id), so the step is
 inaudible. Not tested here: a physical unplug (the loss is simulated; the owner's sessions, M4).
+
+### 4.4 M3, the native sound manager (2026-11-11) [M]
+
+**Done**: the game's sound-manager class answered natively on OpenAL Soft (port/native/audio/sound_manager.cpp,
+interface native_sound.h; the glue in port/audio_hooks.cpp), behind **DOTHEROES_NATIVE_AUDIO=1** -- the default is
+still the lifted FMOD path (rel29's), kept for comparisons until M5. With the switch FMOD is never initialised: no
+FMOD thread, SPU mixer or cellAudio port. Written from the class's behaviour as M0 traced it and as its methods
+read (a behavioural description, kept locally; the facts that matter are below), not translated from it:
+- **Records and states**: every sound the game started, until it ends or is stopped -- an effect, an effect fading
+  in, the music -- each in one of the class's states (effect; music; music ducking/unducking; fade-in armed for one
+  update, fading in, steady; effect ducking out, ducked silent but playing; music and effect fade-outs armed for
+  one update, then fading); fades linear in the game's own dt; a music fade-out ends in stop and unload.
+- **One instance per id**; the volume model as M0 found it (list volume x level x 0.11, music also x master; the
+  game's option integers read at each call, clamped 0-1); isPlaying true until a sound's end, within a frame;
+  isBGMActive / currentBGMId from the music's records (323: none).
+- **Music**: playBGM opens the stream (asynchronously, as FMOD's callback was); it starts at full volume on the
+  second update after the open; the same track asked again restarts it; a track already open is left as it is; a
+  "once" track that ends is unloaded; a file with loop points loops whatever is asked (section 4.1).
+- **Pause**: the system menu's flag pauses every sound and stops the manager's clock until it clears (which also
+  ends any pauseById); pauseById pauses an id's sounds while their fades go on.
+- **3D**: corrected in section 3 (the game's frame is left-handed: x mirrored; a 3D effect without a position at
+  the listener); positions given at the start only, the listener every frame, never turning.
+- **Centred mono**: a mono sound not placed in 3D (2D effects, 3D effects without a position, the one mono music
+  track) plays as a stereo copy straight to the outputs at 0.707 a side, as rel27's mix had it (0.712 measured in
+  the sound lab's capture; OpenAL's own centre on stereo speakers is 1.5 dB lower: 0.603 measured in the game
+  before this was done; 0.715 after).
+- **Not done**: the class's preload (33.7 MB of effect files read into the game heap at boot, freed again by
+  loadSounds, read by nothing else): the native loadSounds reads the player's files itself.
+
+**Gates**:
+- **Replay** (tests/native/sound_replay.sh; needs the developer's local M0 captures): rel27's own traced calls
+  given to the native manager in order, on a loopback device stepped by the game's dt -- all 14 traces (every M0
+  scene, the 30-minute session, the sound lab): **about 360,000 answers the game read, 0 different**; about 400,000
+  channel volumes rel27 gave FMOD, all within 0.002; every music start on rel27's update except three in the sound
+  lab (its playBGM calls are made from inside the update hook: the open completes within that update natively,
+  after it in rel27 -- a call site the game's own scenes never use); no underrun; nothing left at shutdown.
+- **Behaviour** (tests/native/sound_manager_check.cpp, made-up sounds, no game data): 32 cases (records, fades,
+  ducks, music start and unload, the restart of a playing track, pause, stale handles).
+- **In the game** (rel30, then rel31 with the centred mono; both the gen13 lift): memtest 695/695; M0's scenes with
+  the switch, traced and captured (OpenAL's wave writer in place of the speakers): no crash, every drive done; the
+  same music in the same order and the same reverb switches as rel27 in every scene; **0 FMOD API calls**; the
+  quit's shutdown left 0 sources, buffers, effects and slots; the 30-minute session's memory flat (working set
+  904 MB from 150 s on), 47-48 threads against rel27's 50-51 (FMOD's gone, OpenAL's added).
+
+| Scene | effect plays rel27 / native | mix level native - rel27 (mean, worst 10 s) | balance (mean, worst) |
+|---|---|---|---|
+| title and menus | 151 / 151 | 0.00, 0.12 dB | 0.00, 0.09 dB |
+| overworld (rel31) | 413 / 427 | -0.46, 1.29 dB | +0.37, 1.35 dB |
+| river fight (rel31) | 180 / 168 | -0.67, 1.76 dB | +0.05, 1.26 dB |
+| dungeon approach | 159 / 172 | +0.08, 2.07 dB | -0.10, 0.64 dB |
+| dungeon deeper | 190 / 168 | -0.24, 7.61 dB | -0.23, 1.78 dB |
+| exit after the boss | 19 / 21 | -0.12, 0.32 dB | -0.04, 0.09 dB |
+| save inside the dungeon, continue | 212 / 183 | +0.09, 1.34 dB | +0.01, 0.43 dB |
+| save-data list | 33 / 33 | -0.01, 0.19 dB | +0.04, 0.17 dB |
+| pause, reload, quit | 110 / 89 | -0.09, 0.60 dB | -0.07, 0.50 dB |
+| 30 minutes at the river (rel31) | 121 / 49 | +0.02, 0.55 dB | -0.02, 0.51 dB |
+
+- **Effect plays differ by themselves** between runs of a fight (the scenes' runs differ frame to frame): two FMOD
+  runs, rel27 and rel29 (traced for this), differ as much as rel27 and the native manager -- the river 180 / 169
+  (native 168), the overworld 413 / 487 (427), the dungeon's approach 159 / 205 (172); one hit sound 21 / 82 times.
+  The music, the reverb and the scripted scenes (the menus, the save-data list: 151 / 151, 33 / 33) agree exactly;
+  and given the same calls, the native manager answers exactly as rel27 (the replay).
+- **Left and right**: positioned effects 30-150 degrees off centre, the side the mix put each on against the side
+  it should be on: at the river rel27 40 of 44, native 34 of 38 (rel31: 32 of 34) on the expected side (a wrong
+  mirror would put most on the other); in the fields, crowded, both about 55%.
+- **The player's install** (the setup's build of the game, the manager in the prebuilt library, OpenAL Soft beside
+  the game): a river fight with the switch: the device opened, 281 effects loaded, no crash.
+
+**Its cost against rel27 and rel29** (uncapped, real audio on the default output, three rounds rotated per arm;
+rel31 with the switch; the frame trace's window, and the process's CPU from 60 s to the end):
+
+| | rel27 | rel29 | rel31, native audio |
+|---|---|---|---|
+| river fight: fps | 198.7-208.6 | 206.1-211.0 | 209.5-211.0 |
+| river: mean / p95 / p99 frame time | 4.79-5.03 / 5.32-5.87 / 6.43-7.10 ms | 4.74-4.85 / 5.36-5.98 / 6.53-7.16 ms | 4.74-4.77 / 5.28-5.66 / 6.34-6.41 ms |
+| river: frames over 6.94 ms | 0.4-1.4% | 0.4-1.6% | 0.4% (each round) |
+| river: CPU (cores) | 1.87-1.91 | 1.92-1.97 | 1.92-1.94 |
+| fields, 4 ripples forced: fps | 245.7-248.1 | 239.6-242.1 | 237.5-245.4 |
+| fields: mean / p95 / p99 | 4.03-4.07 / 4.63-4.70 / 5.51-5.57 ms | 4.13-4.17 / 5.51-5.73 / 7.44-7.46 ms | 4.08-4.21 / 5.58-5.79 / 7.34-7.62 ms |
+| fields: CPU (cores) | 1.68-1.75 | 1.67-1.72 | 1.67-1.69 |
+| river at the game's 60 fps cap (2 rounds): CPU (cores) | 1.51-1.55 | 1.57-1.59 | 1.54-1.55 |
+| river at 60 fps: p95 / p99 | 16.96-16.98 / 17.12-17.16 ms | 17.01-17.07 / 17.22-17.24 ms | 16.98-17.03 / 17.17-17.31 ms |
+| threads (river, 60 fps) | 55 | 55 | 51 |
+
+- **No measurable change in frame time from the audio**: the native arm is within rel29's range in the fields and
+  at the top of the range at the river (its p99 6.34-6.41 ms, every round's frames over 6.94 ms 0.4%, against
+  rel29's 6.53-7.16 ms) -- a hint, not established at three rounds. The fields' p99 against rel27 is M1's
+  generated water and waver (section 4.2), the same with either audio path.
+- **CPU**: uncapped, each build renders as fast as it can, so its CPU follows its frame rate (all three alike). At the
+  game's 60 fps cap the arms do the same work: the native audio used 1.54-1.55 cores against rel29's 1.57-1.59
+  (about 0.03 of a core, the size of FMOD's SPU mixer's work in docs/AUDIO.md), the same as rel27 (whose FMOD
+  mixer, codec and reverb were native ports), with 4 threads fewer. Small and measured in two rounds: section 6's
+  hypothesis holds in direction and size, not as a gain that matters.
+
+**Differences, recorded** (for the owner's listening, M4):
+- **Positioned 3D effects** keep OpenAL's panning: on stereo speakers a sound straight ahead is 1.5 dB lower than in
+  rel27, one at the sides as loud as straight ahead -- rel27's host downmix put the sides 10 dB and the rear 6 dB
+  lower (the matrix that goes, section 4). The river's -0.67 dB is mostly this (two rel27 runs of it differ by
+  +0.08 dB). Raising positioned effects by 1.5 dB would match rel27 ahead and leave the sides louder still: the
+  owner's choice in M4.
+- OpenAL Soft holds a finished one-shot's last frame up to 18 ms (section 4.3); EFX's reverb is its own
+  implementation of the same I3DL2 parameters (its tail is not sample-identical); positions are applied every frame
+  (FMOD applied them at its ~9 Hz update); voices beyond 32 go virtual by priority, then quietness (never reached:
+  6 at most in every scene); the sound lab's in-update music starts one update earlier.
+- **Not tested**: the boss fight and a crowded scene (no drive reaches them: the owner's sessions, M4); the system
+  menu's pause (no drive opens it); a physical unplug of the output device (simulated in M2).
 
 ## 5. Repository licensing audit and cleanup
 

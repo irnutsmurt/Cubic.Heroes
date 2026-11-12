@@ -61,7 +61,11 @@ docs/OPENAL_MIGRATION_PLAN.md.
 - **M2 (2026-11-11)**: OpenAL Soft 1.25.2 built (Windows, Linux) and shipped beside the game with its licences
   and source, without its HRTF data; the audio layer on it (port/native/audio: the WAV reader with the `smpl`
   loops, the device with its loss and reopen, the music streamer with fades, the reverb, the sound list),
-  tested alone (tests/native/openal_check.sh; the plan's section 4.3). The game does not use it yet.
+  tested alone (tests/native/openal_check.sh; the plan's section 4.3).
+- **M3 (2026-11-11)**: the game's sound manager answered natively on OpenAL Soft with **DOTHEROES_NATIVE_AUDIO=1**
+  (port/native/audio/sound_manager.cpp; FMOD never initialised: no FMOD thread, SPU mixer or cellAudio); the
+  default is still the lifted FMOD path until M5. Its gates (rel27's traced calls replayed, the scenes in the game,
+  their mixes against rel27's) and the measured differences: the plan's section 4.4.
 
 ## 3. A record: FMOD's SPU programs as native code (A0-A3, 2026-11-10/11), withdrawn
 

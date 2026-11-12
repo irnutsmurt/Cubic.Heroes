@@ -581,8 +581,9 @@ def main():
 
     def mem_sampler():
         """Windows: the game's working set and private bytes every MEM_EVERY seconds
-        (default 30) into memory.csv: "<s>,<working set MB>,<private MB>,<threads>,<handles>"
-        (threads and handles: what an area reload leaves behind besides memory)."""
+        (default 30) into memory.csv: "<s>,<working set MB>,<private MB>,<threads>,<handles>,<CPU s>"
+        (threads and handles: what an area reload leaves behind besides memory; CPU: the process's user and
+        kernel time so far)."""
         import ctypes, ctypes.wintypes as wt
 
         class PMC(ctypes.Structure):
@@ -615,8 +616,12 @@ def main():
                 if h and ctypes.WinDLL("psapi").GetProcessMemoryInfo(h, ctypes.byref(c), c.cb):
                     hc = wt.DWORD(0)
                     k.GetProcessHandleCount(h, ctypes.byref(hc))
+                    ft = [wt.FILETIME() for _ in range(4)]   # creation, exit, kernel, user
+                    cpu = 0.0
+                    if k.GetProcessTimes(h, *[ctypes.byref(x) for x in ft]):
+                        cpu = sum((x.dwHighDateTime << 32 | x.dwLowDateTime) for x in ft[2:]) / 1e7
                     f.write(f"{time.monotonic() - t0:.0f},{c.WorkingSetSize / 2**20:.1f},{c.PrivateUsage / 2**20:.1f},"
-                            f"{threads()},{hc.value}\n")
+                            f"{threads()},{hc.value},{cpu:.1f}\n")
                     f.flush()
                 if stop.wait(every):
                     break
