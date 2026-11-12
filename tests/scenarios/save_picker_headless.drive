@@ -1,0 +1,14 @@
+# The save-data list headless (no window: the harness's automated runs; docs/SAVE_UI.md): nothing can draw the
+# list and no player sees it, so after 4 s the dialog takes the title's first entry, as it always has for the
+# automation -- kept apart from a player's dialog, which never does (save_picker_stall.drive). Run without WINDOW.
+#! env PS3_SAVEDATA_PICKER=1
+#! saves build/checkpoints/picker-two
+include common.drive
+log TitleMovie 120
+sleep 5
+press START                 # "PRESS START BUTTON"
+sleep 3
+press START                 # CONTINUE
+log list.dialog:.2.entries 25
+log not.shown 10            # the headless fallback: the title's first entry
+sleep 6

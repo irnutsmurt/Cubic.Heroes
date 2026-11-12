@@ -1,0 +1,18 @@
+# The save-data list when its picture is never drawn (docs/SAVE_UI.md, "The dialog presents itself"): with a
+# window, PS3_SAVES_TEST_NODRAW=1 keeps the backend from drawing the dialog's picture, as a stalled renderer would.
+# The dialog must wait for the player however long that lasts -- never pick, load or overwrite a save by itself:
+# 8 s pass (twice the headless fallback's 4 s), then the player's cancel is what closes it. Run with WINDOW=1.
+# (Headless, the 4 s fallback stays: save_picker_headless.drive.)
+#! env PS3_SAVEDATA_PICKER=1 PS3_SAVES_TEST_NODRAW=1
+#! saves build/checkpoints/picker-two
+include common.drive
+log TitleMovie 120
+sleep 5
+press START                 # "PRESS START BUTTON"
+sleep 3
+press START                 # CONTINUE: the list opens, its picture never drawn
+log list.dialog:.2.entries 25
+sleep 8
+press CIRCLE
+log cancelled 6             # closed by the player's cancel, not by "not shown"
+sleep 3

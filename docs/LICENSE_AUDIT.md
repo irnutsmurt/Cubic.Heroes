@@ -184,6 +184,8 @@
 | `patches/ps3recomp/0141-SPU-trace-the-DMA-size-clamp-no-longer-wraps.patch` | INDEP | keep |
 | `patches/ps3recomp/0142-SPU-threads-a-native-program-in-place-of-the-lifted-.patch` | INDEP | keep |
 | `patches/ps3recomp/0143-Save-data-screen-composed-in-cached-memory-copied-on.patch` | INDEP | keep |
+| `patches/ps3recomp/0144-Save-data-dialog-the-4-s-fallback-only-headless-test.patch` | INDEP | keep |
+| `patches/ps3recomp/0145-cellPad-a-dialog-s-last-press-stays-the-dialog-s-unt.patch` | INDEP | keep |
 | `port/CMakeLists.txt` | INDEP | keep |
 | `port/LICENSE.ps3recomp` | THIRD | keep: licence file beside it; listed in the README |
 | `port/assets/ui/DejaVuSans.ttf` | THIRD | keep: licence file beside it; listed in the README |
@@ -356,6 +358,10 @@
 | `tests/scenarios/rpcs3ref_king.drive` | INDEP | keep |
 | `tests/scenarios/save_picker.drive` | INDEP | keep |
 | `tests/scenarios/save_picker_edit.drive` | INDEP | keep |
+| `tests/scenarios/save_picker_editor.drive` | INDEP | keep |
+| `tests/scenarios/save_picker_headless.drive` | INDEP | keep |
+| `tests/scenarios/save_picker_long.drive` | INDEP | keep |
+| `tests/scenarios/save_picker_stall.drive` | INDEP | keep |
 | `tests/scenarios/snapshot_r3.drive` | INDEP | keep |
 | `tests/scenarios/sound_lab.drive` | INDEP | keep |
 | `tests/scenarios/sound_pan.drive` | INDEP | keep |
@@ -475,6 +481,7 @@
 | `tools/r8_split.py` | INDEP | keep |
 | `tools/r8_threads.py` | INDEP | keep |
 | `tools/reverb_tail.py` | INDEP | keep |
+| `tools/save_diff.py` | INDEP | keep |
 | `tools/save_ui_preview.c` | INDEP | keep |
 | `tools/self_decrypt.py` | INDEP | keep |
 | `tools/self_update.py` | INDEP | keep |
