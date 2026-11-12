@@ -65,7 +65,9 @@ docs/OPENAL_MIGRATION_PLAN.md.
 - **M3 (2026-11-11)**: the game's sound manager answered natively on OpenAL Soft with **DOTHEROES_NATIVE_AUDIO=1**
   (port/native/audio/sound_manager.cpp; FMOD never initialised: no FMOD thread, SPU mixer or cellAudio); the
   default is still the lifted FMOD path until M5. Its gates (rel27's traced calls replayed, the scenes in the game,
-  their mixes against rel27's) and the measured differences: the plan's section 4.4.
+  their mixes against rel27's) and the measured differences: the plan's section 4.4. Positioned effects keep
+  OpenAL Soft's own spatialization (the owner's decision, 2026-11-12): no gain to reproduce FMOD's 7.1-to-stereo
+  downmix, whose directional attenuation is not recreated.
 
 ## 3. A record: FMOD's SPU programs as native code (A0-A3, 2026-11-10/11), withdrawn
 

@@ -59,12 +59,13 @@ libraries it builds on (Vulkan, OpenAL Soft, SDL2, ...), configuration,
 compatibility patches, tests and documentation. What they never hold: the
 game's code (extracted, lifted or translated), a built game or any object made
 from it, the game's assets, sounds, music, textures or movies, proprietary
-middleware, decryption keys or firmware. A clone without the game builds the
+middleware, decryption keys or firmware, or a player's saves. A clone without the game builds the
 tools and the runtime, not a playable game. `tools/boundary_check.py` checks
 this: every push (the pre-push hook: the tree of each pushed commit), the
 setup's download before it is archived and after, and a developer's working
 tree (`tools/boundary_check.py tree`: what `git add -A` would add, and that the
-build's outputs are ignored).
+build's outputs and any save or PS3 file-system folder beside the checkout
+are ignored).
 
 ## 1. Dump your disc
 

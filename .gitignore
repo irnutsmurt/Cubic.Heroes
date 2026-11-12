@@ -10,3 +10,13 @@ __pycache__/
 *.pyc
 *.o
 *.obj
+# A player's saves and PS3 file systems: a save copy beside the checkout, a run's gamedata folder, an RPCS3 or
+# PS3 file system or disc folder (tools/boundary_check.py refuses them too).
+/gamespy_3ddot_link/
+/gamedata/
+SAVEDATA/
+savedata/
+dev_hdd0/
+dev_flash/
+dev_bdvd/
+PS3_GAME/

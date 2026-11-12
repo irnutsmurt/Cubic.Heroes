@@ -412,11 +412,13 @@ rel31 with the switch; the frame trace's window, and the process's CPU from 60 s
   hypothesis holds in direction and size, not as a gain that matters.
 
 **Differences, recorded** (for the owner's listening, M4):
-- **Positioned 3D effects** keep OpenAL's panning: on stereo speakers a sound straight ahead is 1.5 dB lower than in
-  rel27, one at the sides as loud as straight ahead -- rel27's host downmix put the sides 10 dB and the rear 6 dB
-  lower (the matrix that goes, section 4). The river's -0.67 dB is mostly this (two rel27 runs of it differ by
-  +0.08 dB). Raising positioned effects by 1.5 dB would match rel27 ahead and leave the sides louder still: the
-  owner's choice in M4.
+- **Positioned 3D effects** keep OpenAL Soft's own spatialization -- **an intentional difference, approved by the
+  owner on 2026-11-12**: on stereo speakers a sound straight ahead is 1.5 dB lower than in rel27, one at the sides as
+  loud as straight ahead -- rel27's host downmix put the sides 10 dB and the rear 6 dB lower (the matrix that goes,
+  section 4). The river's -0.67 dB is mostly this (two rel27 runs of it differ by +0.08 dB). The owner's decision:
+  no compensating gain on positioned effects, and the old downmix's directional attenuation is not recreated (it
+  was an artefact of FMOD's 7.1 output folded to stereo, not the game's intent). Centred 2D mono keeps rel27's
+  level (0.707 per side, above): that is the game's own non-positioned mix, not a pan law.
 - OpenAL Soft holds a finished one-shot's last frame up to 18 ms (section 4.3); EFX's reverb is its own
   implementation of the same I3DL2 parameters (its tail is not sample-identical); positions are applied every frame
   (FMOD applied them at its ~9 Hz update); voices beyond 32 go virtual by priority, then quietness (never reached:
