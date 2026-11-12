@@ -662,6 +662,17 @@ def main():
     stray = [a for a in cfg.BLOCK_NOTES if a not in block_index]
     if stray:
         raise SystemExit('notes for addresses that start no generated block: ' + ' '.join('%X' % a for a in stray))
+    # The SPU's float mode (the template's SPU_NATIVE_RZ): on when the image calls no helper that needs the
+    # host's own float mode (the double-precision ones, the FPSCR's); a configuration can keep it off
+    # (FLOAT_MODE = 'host'). The single-precision arithmetic goes through the template's rz_* forms either
+    # way (the runtime's spu_* when the mode is off).
+    body = '\n'.join(out)
+    used = set(re.findall(r'\b(spu_[a-z0-9_]+)\(', body))
+    needs_host = sorted(h for h in used if re.match(r'spu_(df|fesd|frds|fscr)', h))
+    float_rz = 0 if needs_host or getattr(cfg, 'FLOAT_MODE', 'spu') == 'host' else 1
+    out = [re.sub(r'\bspu_(fa|fs|fm|fma|fms|fnms)\(', r'rz_\1(', line) for line in out]
+    float_note = ('the SPU float mode (round toward zero, flush to zero) for its single-precision arithmetic'
+                  if float_rz else 'the host float mode (%s)' % (', '.join(needs_host) or 'FLOAT_MODE'))
     decls = ['void %s(Run& c);' % g.fname(e) for e in sorted(g.entries)]
     table = ['    { 0x%05Xu, 0x%05Xu },' % (a, g.owner[a][0]) for a in gen_blocks]
     cases = ['    case 0x%05Xu: %s(c); break;' % (e, g.fname(e)) for e in sorted(g.entries)]
@@ -677,6 +688,7 @@ def main():
     t = t.replace('@ENTRY_COUNT@', str(len(g.entries)))
     t = t.replace('@CODE_BEGIN@', '0x%05Xu' % cfg.CODE_BEGIN)
     t = t.replace('@CODE_END@', '0x%05Xu' % cfg.CODE_END)
+    t = t.replace('@FLOAT_RZ@', str(float_rz))
     # what the per-image template (tools/spu_native_task.cpp.in) also takes; no local path goes into the output
     t = t.replace('@NAMESPACE@', getattr(cfg, 'NAMESPACE', 'spu_image'))
     t = t.replace('@TITLE@', getattr(cfg, 'TITLE', 'An SPU image'))
@@ -694,6 +706,7 @@ def main():
     print('%d lifted functions: %d blocks in %d functions; %d lines' % (len(funcs), len(gen_blocks), len(g.entries), t.count('\n')))
     print(rep.split('\n')[0])
     print(rep.split('\n')[1])
+    print('float mode: ' + float_note)
 
 
 if __name__ == '__main__':

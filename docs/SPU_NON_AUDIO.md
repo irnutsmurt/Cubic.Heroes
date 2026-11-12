@@ -71,6 +71,57 @@ the configuration's hash refuses) builds a stub, and the lifted tasks run.
   section 4.2): with 4 ripples forced in the fields, 3% fewer frames and the p99 7.4 ms against 5.4 (frames
   over 6.94 ms 2.8% against 0.2%); at the river within the scene's spread. Always far above 60 fps; the
   headroom above 144 fps while a ripple runs comes back with a faster generator (a follow-up).
+- **The SPU's float mode** (2026-11-12, rel37; the follow-up above, task A). What the generated code spent its
+  time on [M, offline, the helper calls counted per block]: about 5.2 million helper calls a waver frame, 1 ns
+  each; with the single-precision helpers replaced by the host's plain operations (not exact: a ceiling) the
+  waver's frame fell from 5,279 to 2,055 us and the water's step from 2,410 to 823 us -- **60-65% of their time
+  was spu_helpers.h's exact float forms** (on x86 each widens the four lanes to double and checks them, ~25
+  instructions), not the SPU code's form. So the generator now runs an image's code in the SPU's own float
+  mode when the image allows it: MXCSR at round toward zero, flush-to-zero, denormals-are-zero while the
+  generated code runs (the template's call(); every call into the host has the host's mode back), where the
+  host's single-precision operations truncate like the SPU and read and write denormals as zero, so fa, fs, fm,
+  fma, fms and fnms are one host operation each (the FMA where the build has one, else in double) with integer
+  checks for the +0 rule, the SPU's zeros and the range; a vector with an extended-range operand or a result at
+  or above FLT_MAX is redone whole in double built from the words' bits (port/native/spu_native_float.h). The
+  generator turns the mode on only when the image calls no helper that needs the host's own mode (the
+  double-precision ones, the FPSCR's): the water and the waver call none; every other helper they use is
+  integer work on the bit fields. ps3recomp's NEON helpers already did the same under FPCR. Generic: it reads
+  which helpers an image's code calls, nothing of what it computes.
+  - **Exact** [M]: tests/native/spu_float_rz_check.cpp (no game data) against spu_helpers.h's exact per-lane
+    forms, words from every class the SPU distinguishes (its zeros, denormal patterns, extended range, FLT_MAX,
+    the smallest normals, exponent gaps 0-64, every sign), four mixed lanes a vector: 216 million lanes
+    per operation and as many again through the wide form alone, x86-64-v3 and v2, **0 different**. The tasks'
+    own checks: the water's 300 steps and edge cases, the waver's 249 runs, both levels, all equal. In the game,
+    check mode: the water at the river **2,475 of 2,475 steps equal**; the waver, four starts in the fields, in
+    four runs 1,162 of 1,169, 989 of 997, 1,090 of 1,097 and 1,076 of 1,083 frames equal (rel35, the generator
+    before, in the same check: 1,196 of 1,204). The differing frames are at a ripple's starts and ends (one run
+    had one in a ripple's middle), where the game rewrites the block around the SPU task's read; fewer of them
+    than with rel35 matched the native frame on the block as it was at the wait, so the inputs of each were
+    dumped (DOTHEROES_WAVER_CHECK_DUMP) and replayed off-line (waver_task_check replay) in the last two runs: on
+    every one's inputs -- 14 frames, the block at the creation and at the wait, 28 replays -- **the native frame
+    equals the lifted task byte for byte**; the game's own result, at the check, matched neither replay in most,
+    so what the SPU task read or what was left in the texture had moved around it. The generated code is exact
+    on the game's inputs; the check's mismatches are its timing against the game (as M1's and the hand port's).
+  - **Cost** [M, offline, this PC]: the waver's frame **2,621 us** (v3; 3,709 us at v2) against 5,279 (10,067)
+    before; the water's step **1,306 us** (1,944 at v2) against 2,410 (6,450). The waver is at the hand
+    transcription's speed; the water's step is the SPU code's own form now (its pixel loop is scalar: one value
+    a vector, where the hand transcription did four) -- generic loop work, not float semantics, is what is left.
+  - **In the game** [M, uncapped, real audio, three rounds rotated per arm; rel35 = M4's play build, rel37 = it
+    with the float mode; both native audio]:
+
+    | | rel27 (hand ports) | rel35 | rel37 |
+    |---|---|---|---|
+    | fields, 4 ripples forced: fps | 242.6-247.2 | 238.7-239.7 | 243.8-246.1 |
+    | fields: mean / p95 / p99 / p99.9 | 4.04-4.12 / 4.68-4.80 / 5.59-5.74 / 7.38-8.30 ms | 4.17-4.19 / 5.65-5.81 / 7.39-7.49 / 8.87-9.04 ms | 4.06-4.10 / 4.74-4.79 / 5.58-5.67 / 7.41-8.00 ms |
+    | fields: frames over 6.94 ms | 0.2% | 2.8-3.0% | 0.1-0.2% |
+    | fields: the waver's frame (its thread) / the game's waits for it, a run | 2.62-2.63 ms / 14 ms | 4.42-4.59 ms / 1.92-2.21 s | 2.84-3.02 ms / 34-39 ms |
+    | river fight: fps | 206.7-210.3 | 205.9-211.2 | 207.6-208.7 |
+    | river: mean / p95 / p99 / p99.9 | 4.76-4.84 / 5.46-5.83 / 6.58-6.76 / 7.93-8.38 ms | 4.73-4.86 / 5.44-5.83 / 6.56-6.83 / 8.03-8.83 ms | 4.79-4.82 / 5.42-5.56 / 6.59-6.77 / 7.92-8.53 ms |
+    | river: the water's step (its worker thread) | 0.78 ms | 2.84 ms | 1.60 ms |
+
+    M1's loss in the fields is recovered: rel37 is within rel27's range in every figure. At the river all
+    three are within one another's spread (the game does not wait for the water); the water's worker takes
+    1.60 ms a step against the hand port's 0.78 -- about 3.6% of a core at 22.7 steps a second.
 
 **What decides the order.**
 1. Solver commands 1 and 2 are the only remaining non-audio SPU work the

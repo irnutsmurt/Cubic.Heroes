@@ -24,6 +24,10 @@
 //       <frames> (default 160) of the game's evolution: phase and radius from
 //       the elapsed time (the radius capped at 0x80), the amplitude fading,
 //       the texture alternating, on persistent memory.
+//   waver_task_check replay <waver_N.bin>...
+//       frames the game's check mode dumped (DOTHEROES_WAVER_CHECK_DUMP=<dir>): the native frame and the
+//       lifted task on each one's inputs (the block at the creation, and at the game's wait), and which of
+//       them the SPU task's result in the game equals.
 //   WAVER_TRACE=1: a line at each run's end (how the lifted task ended, its
 //   transfers so far).
 // 2026-11-10: x86_64_v3 and x86_64_v2 builds, 249 runs each (89 cases, 160
@@ -78,12 +82,17 @@ struct Space {
     std::vector<uint8_t> mem;
     std::vector<Xfer> log;
     unsigned outside = 0;
+    struct Seg { uint32_t base; std::vector<uint8_t> mem; };
+    std::vector<Seg> extra;   // more regions (replay: the game's field and textures lie apart from the block)
     uint8_t* at(uint32_t ea, uint32_t n)
     {
         if (ea >= base && (uint64_t)ea + n <= (uint64_t)base + mem.size()) return mem.data() + (ea - base);
+        for (Seg& s : extra)
+            if (ea >= s.base && (uint64_t)ea + n <= (uint64_t)s.base + s.mem.size()) return s.mem.data() + (ea - s.base);
         if (!outside++) printf("  transfer outside the region: ea %08X, %u bytes\n", ea, n);
         return nullptr;
     }
+    uint8_t* seg(uint32_t ea) { for (Seg& s : extra) if (s.base == ea) return s.mem.data(); return nullptr; }
 };
 
 // ---- the native side's transfers ---------------------------------------------
@@ -494,11 +503,69 @@ static Case make(const char* name, uint32_t select, uint32_t phase, uint32_t rad
     return Case{ name, standard(0x02AB2200u), select, phase, radius, frequency, fbits(amplitude), fbits(slope), map, table, false };
 }
 
+// ---- replay: frames the game's check mode dumped (DOTHEROES_WAVER_CHECK_DUMP, port/native/waver_game.cpp) -----
+// Each dumped frame's inputs -- the block as it was at the creation and as it was at the game's wait, the field
+// at the creation -- run through the native frame and the lifted task, which must agree byte for byte (the
+// field, the texture, the transfers); then which of the two the SPU task's result in the game equals.
+static bool replay(const char* path)
+{
+    FILE* f = fopen(path, "rb");
+    if (!f) { printf("[FAIL] %s: cannot open\n", path); return false; }
+    uint32_t h[8];
+    std::vector<uint8_t> pc(waver_task::kParamBytes), pw(waver_task::kParamBytes), field(waver_task::kFieldBytes),
+        gf(waver_task::kFieldBytes), gt0(waver_task::kTextureBytes), gt1(waver_task::kTextureBytes);
+    const bool read = fread(h, sizeof h, 1, f) == 1 && h[0] == 0x4B435657u && h[1] == 1 &&
+                      fread(pc.data(), 1, pc.size(), f) == pc.size() && fread(pw.data(), 1, pw.size(), f) == pw.size() &&
+                      fread(field.data(), 1, field.size(), f) == field.size() && fread(gf.data(), 1, gf.size(), f) == gf.size() &&
+                      fread(gt0.data(), 1, gt0.size(), f) == gt0.size() && fread(gt1.data(), 1, gt1.size(), f) == gt1.size();
+    fclose(f);
+    if (!read) { printf("[FAIL] %s: not a dumped frame\n", path); return false; }
+    const uint32_t param_ea = h[3], field_ea = h[4], tex[2] = { h[5], h[6] }, W = param_ea - 0x80;
+    bool ok = true;
+    printf("frame %u (block %08X, field %08X, textures %08X %08X):\n", h[2], param_ea, field_ea, tex[0], tex[1]);
+    for (int state = 0; state < (h[7] ? 2 : 1); state++) {
+        const std::vector<uint8_t>& params = state ? pw : pc;
+        const Params p = waver_task::parse_params(params.data());
+        Space a, b;
+        for (Space* s : { &a, &b }) {
+            s->base = W;
+            s->mem.assign(0x3D500, 0);
+            memcpy(s->mem.data() + 0x80, params.data(), params.size());
+            s->extra.push_back({ field_ea, field });
+            s->extra.push_back({ tex[0], std::vector<uint8_t>(waver_task::kTextureBytes, 0) });
+            s->extra.push_back({ tex[1], std::vector<uint8_t>(waver_task::kTextureBytes, 0x5A) });
+        }
+        const waver_task::Status st = waver_task::run_frame(param_ea, waver_task::Io{ &a, space_get, space_put }, g_local);
+        lifted_run(&b, param_ea, W + waver_task::kBlockFlag, false, 0);
+        const bool lifted_done = g_end == 2 && g_exit_code == 0 && g_end_pc == kKernelExit;
+        const bool same = (st == waver_task::Status::done) == lifted_done &&
+                          !memcmp(a.seg(field_ea), b.seg(field_ea), waver_task::kFieldBytes) &&
+                          !memcmp(a.seg(tex[0]), b.seg(tex[0]), waver_task::kTextureBytes) &&
+                          !memcmp(a.seg(tex[1]), b.seg(tex[1]), waver_task::kTextureBytes) &&
+                          transfers(a.log).size() == transfers(b.log).size() && !a.outside && !b.outside;
+        const uint8_t* lt = b.seg(p.texture_ea());
+        const bool game_field = !memcmp(b.seg(field_ea), gf.data(), gf.size());
+        const bool game_tex = lt && !memcmp(lt, (p.select & 1) ? gt1.data() : gt0.data(), waver_task::kTextureBytes);
+        printf("  [%s] the block at the %s (select %u): native %s the lifted task; the game's result: field %s, texture %s\n",
+               same ? "PASS" : "FAIL", state ? "wait" : "creation", p.select, same ? "equals" : "DIFFERS FROM",
+               game_field ? "equal" : "different", game_tex ? "equal" : "different");
+        ok = ok && same;
+    }
+    return ok;
+}
+
 int main(int argc, char** argv)
 {
     setvbuf(stdout, nullptr, _IONBF, 0);   // each line as it is printed
     g_spu_ls_rdiag = 0;   // no local-store diagnostics in this stand-in
     g_spu_ls_wdiag = 0;
+    if (argc >= 3 && !strcmp(argv[1], "replay")) {   // waver_task_check replay <dumped frame>...
+        load_elf("build/gen/spu/images/spu_0001_at_00F48F80.elf");
+        bool ok = true;
+        for (int i = 2; i < argc; i++) ok = replay(argv[i]) && ok;
+        puts(ok ? "all passed" : "FAILED");
+        return ok ? 0 : 1;
+    }
     const unsigned random_cases = argc >= 2 ? (unsigned)atoi(argv[1]) : 40u;
     const unsigned frames = argc >= 3 ? (unsigned)atoi(argv[2]) : 160u;
     load_elf(argc >= 4 ? argv[3] : "build/gen/spu/images/spu_0001_at_00F48F80.elf");
