@@ -501,13 +501,19 @@ def build_prebuilt(platform, ps3recomp, gen_ppu, log=print, release=True):
     with open(os.path.join(out, GAME_BUILD), "w") as f:
         json.dump({"config": "native-release" if release else "development", "defines": defines}, f, indent=1)
     for f in os.listdir(os.path.join(deps, "lib")):
-        if f.endswith(".a"):
+        if f.endswith(".a") and "OpenAL" not in f:   # OpenAL Soft is loaded at run time, never linked
             shutil.copy2(os.path.join(deps, "lib", f), out)
     if platform == "windows":
         shutil.copy2(os.path.join(deps, "bin", "SDL2.dll"), out)
         windows_resources(os.path.join(out, "dotheroes.res"), os.path.join(ROOT, "assets", "icon.png"))
     else:
         shutil.copy2(os.path.join(deps, "lib", "libSDL2-2.0.so.0"), out)
+    # OpenAL Soft (the game's audio, LGPL: a shared library beside the game) and its notice
+    import build_deps
+    sub, name = build_deps.OPENAL_LIB[platform]
+    shutil.copy2(os.path.join(deps, sub, name), out)
+    with open(os.path.join(out, build_deps.OPENAL_NOTICE), "w", encoding="utf-8", newline="\n") as f:
+        f.write(build_deps.openal_notice())
     log(f"prebuilt: {os.path.relpath(out, ROOT)}")
     return out
 

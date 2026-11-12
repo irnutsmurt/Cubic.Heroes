@@ -102,7 +102,7 @@ def install_info(install):
 class Paths:
     """An install folder:
         <install>/dotheroes[.exe]   the game
-        <install>/lib/              Linux: SDL2 (Windows: SDL2.dll beside the game)
+        <install>/lib/              Linux: SDL2 and OpenAL Soft (Windows: SDL2.dll and OpenAL32.dll beside the game)
         <install>/data/disc/        the disc's files, EBOOT.elf decrypted
         <install>/data/gen/         the recompiled code (work files)
         <install>/data/cache/       compiled objects (updates reuse them)
@@ -337,11 +337,13 @@ def spu_native(paths, log):
 
 def finish(paths, log):
     lib = zig_build.Sources().lib_dir
-    if os.name == "nt":
-        shutil.copy2(os.path.join(lib, "SDL2.dll"), paths.install)
-    else:
-        os.makedirs(os.path.join(paths.install, "lib"), exist_ok=True)
-        shutil.copy2(os.path.join(lib, "libSDL2-2.0.so.0"), os.path.join(paths.install, "lib"))
+    # the shared libraries beside the game: SDL2, OpenAL Soft (the game's audio) with its notice
+    dlls = ["SDL2.dll", "OpenAL32.dll"] if os.name == "nt" else ["libSDL2-2.0.so.0", "libopenal.so.1"]
+    dest = paths.install if os.name == "nt" else os.path.join(paths.install, "lib")
+    os.makedirs(dest, exist_ok=True)
+    for name in dlls + ["OpenAL-Soft-NOTICE.txt"]:
+        if os.path.exists(os.path.join(lib, name)) or name.startswith(("SDL2", "libSDL2")):
+            shutil.copy2(os.path.join(lib, name), dest)
     for icon in (os.path.join(ROOT, "assets", "icon.png"), os.path.join(ROOT, "lib", "icon.png")):
         if os.path.exists(icon):
             shutil.copy2(icon, os.path.join(paths.install, "icon.png"))

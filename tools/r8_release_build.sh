@@ -22,4 +22,5 @@ fi
 start=$(date +%s)
 cmake --build "$R/bld" --target dotheroes > "$R/build.log" 2>&1
 cp build/port-win/SDL2.dll "$R/bld/" 2>/dev/null || true
+cp build/deps/windows/bin/OpenAL32.dll "$R/bld/" 2>/dev/null || true
 echo "built $R/bld/dotheroes.exe in $(( $(date +%s) - start )) s"

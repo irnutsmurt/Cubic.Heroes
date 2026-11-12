@@ -109,6 +109,10 @@ def stage_check():
     exe = os.path.join(DIR, pipeline.exe_name())
     check("check", os.path.exists(exe), "the game is there")
     check("check", os.path.exists(os.path.join(DIR, "SDL2.dll")) or os.name != "nt", "SDL2.dll beside it")
+    libdir = DIR if os.name == "nt" else os.path.join(DIR, "lib")
+    al = "OpenAL32.dll" if os.name == "nt" else "libopenal.so.1"
+    check("check", os.path.exists(os.path.join(libdir, al)), f"OpenAL Soft ({al}) beside it")
+    check("check", os.path.exists(os.path.join(libdir, "OpenAL-Soft-NOTICE.txt")), "OpenAL Soft's notice beside it")
     info = pipeline.install_info(DIR) or {}
     check("check", {"recomp", "spu"} <= set(info.get("stamps", {})), "install.json has the lift's stamps")
     import setup_app
