@@ -106,11 +106,33 @@ class Refused(unittest.TestCase):
         gen = coff_object(["_ZN9water_gen4callEPh", "_ZN9water_gen12_GLOBAL__N_17f_03050ERNS0_3RunE"])
         self.assertEqual(["GENERATED"], classes("g.o", gen))
         self.assertEqual(["LIFTED-CODE"], classes("dotheroes.exe", b"MZ" + bytes(62)))
+        self.assertEqual(["LIFTED-CODE"], classes("install/dotheroes", elf_header(62, big_endian=False)))
 
     def test_keys(self):
         line = b"APP 1C " + b"0123456789abcdef" * 4 + b" " + b"fedcba9876543210" * 2 + b"\n"
         self.assertEqual(["KEYS"], classes("k.txt", line))
         self.assertEqual(["KEYS"], classes("k.cfg", b"klic = " + b"00112233445566778899aabbccddeeff" + b"\n"))
+
+    def test_save_data(self):
+        png = b"\x89PNG\r\n\x1a\n" + bytes(24)
+        # a save copied beside the checkout: its icon is an ordinary PNG, refused by where it sits and its name
+        for n in ("gamespy_3ddot_link/PS3/SAVEDATA/BLJM60180T0019C558F0/ICON0.PNG",
+                  "x/dev_hdd0/home/00000001/savedata/BLUS30490SYSTEM/ICON0.PNG", "copy/PIC1.PNG"):
+            self.assertIn("SAVE-DATA", classes(n, png), n)
+        # a save's data file without a known extension, by its folders alone
+        self.assertIn("SAVE-DATA", classes("backup/BLUS30490GAME-DATA66BE2553/SYS-DATA", bytes(32)))
+        self.assertIn("SAVE-DATA", classes("a/SaveData/slot/x.bin", bytes(32)))
+        self.assertIn("SAVE-DATA", classes("bundle.zip!/BLES00000/USRDIR/x.bin", bytes(32)))
+        self.assertIn("GAME-DATA", classes("gamedata/dev_hdd0/game/x/y.bin", bytes(32)))
+        self.assertIn("GAME-DATA", classes("disc/PS3_GAME/USRDIR/data/x.bin", bytes(32)))
+        self.assertIn("PS3-BINARY", classes("fw/dev_flash/sys/x.bin", bytes(32)))
+
+    def test_save_folders_ignored(self):
+        for p in ("gamespy_3ddot_link/PS3/SAVEDATA/BLJM60180T0019/ICON0.PNG",
+                  "gamedata/dev_hdd0/home/00000001/savedata/BLUS30490SYSTEM/PARAM.SFO",
+                  "anywhere/PS3/SAVEDATA/BLUS30490X/DATA.EDT", "anywhere/dev_flash/x.bin"):
+            r = subprocess.run(["git", "-C", ROOT, "check-ignore", "-q", "--no-index", p])
+            self.assertEqual(0, r.returncode, p)
 
     def test_middleware_and_data_set(self):
         self.assertIn("MIDDLEWARE", classes("port/native/fmod_mixer.cpp", b"// x\n"))
@@ -133,9 +155,16 @@ class Allowed(unittest.TestCase):
 
     def test_ordinary_files(self):
         self.assertEqual([], classes("x.dll", b"MZ" + bytes(200)))
+        # the setup app (make_bundle.py's PyInstaller output) is not the game
+        self.assertEqual([], classes("DotHeroes-Setup-windows-x86_64/DotHeroes-Setup.exe", b"MZ" + bytes(200)))
+        self.assertEqual([], classes("DotHeroes-Setup-linux-x86_64/DotHeroes-Setup", elf_header(62, big_endian=False)))
         self.assertEqual([], classes("x.so", elf_header(62, big_endian=False)))   # x86-64
         self.assertEqual([], classes("config/deps.sha256", b"0b75" * 16 + b" Bullet\n"))
         self.assertEqual([], classes("docs/x.md", b"the keys file's lines are APP <revision> <erk-hex-64> <riv-hex-32>\n"))
+        png = b"\x89PNG\r\n\x1a\n" + bytes(24)
+        self.assertEqual([], classes("assets/icon.png", png))
+        self.assertEqual([], classes("port/assets/ui/prompt_xbox_back.png", png))
+        self.assertEqual([], classes("docs/SAVES.md", b"saves live in dev_hdd0/home/00000001/savedata/BLUS30490SYSTEM\n"))
 
     def test_repository_tracked_files(self):
         findings, n = bc.tracked()

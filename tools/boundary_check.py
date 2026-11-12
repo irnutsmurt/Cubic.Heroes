@@ -16,7 +16,11 @@ player's machine, under the install's data/gen and data/cache, or in a developer
 
 What is refused (each file by its name and its bytes, not by where it sits):
   GAME-DATA      the game's file types (.tpk .dsb .dpk .edt .bik .sav .sfo .trp .pfd .spk .gtf .dds .at3 .vag
-                 .wav .spv ...) and their contents (RIFF WAVE, Bink, DDS, PARAM.SFO)
+                 .wav .spv ...) and their contents (RIFF WAVE, Bink, DDS, PARAM.SFO); anything inside a PS3 file
+                 system or disc folder (dev_hdd0, dev_bdvd, PS3_GAME, USRDIR)
+  SAVE-DATA      a player's saves: anything inside a SAVEDATA folder or a folder named for a PS3 title ID
+                 (BLUS30490..., BLJM60180T...), and the PS3 metadata files (ICON0.PNG, PARAM.SFO, PARAM.PFD,
+                 PIC1.PNG, TROPUSR.DAT ...) wherever they are
   PS3-BINARY     PS3 executables and containers: PPU/SPU ELF (big-endian PPC64, SPU), SCE (SELF, SPRX), PKG,
                  PUP (firmware), NPD (EDAT/SDAT)
   LIFTED-CODE    the lifter's output (its header, or lifted function definitions in bulk); an object or library
@@ -63,6 +67,23 @@ PPU_SYM = re.compile(r"func_[0-9A-F]{8}")
 SPU_SYM = re.compile(r"spu_[0-9a-f]{4}_at_[0-9A-F]{8}_spu_func_")
 KEY_LINE = re.compile(rb"^\s*APP\s+(?:0x)?[0-9A-Fa-f]+\s+[0-9A-Fa-f]{64}\s+[0-9A-Fa-f]{32}\b", re.M)
 KEY_NAMED = re.compile(rb"\b(?:erk|riv|klic(?:ensee)?|idps)\b\s*[=:]\s*(?:0x)?[0-9A-Fa-f]{32}", re.I)
+# A player's saves and the PS3 file system around the game: refused by where they sit as well as by name and bytes
+# (a save's DATA.EDT and PARAM.SFO are caught above, but its icon is an ordinary PNG). The folders, by name:
+PS3_FOLDERS = {
+    "savedata": ("SAVE-DATA", "inside a PS3 save folder"),
+    "dev_hdd0": ("GAME-DATA", "inside a PS3 file system (dev_hdd0: saves, installed game data)"),
+    "dev_hdd1": ("GAME-DATA", "inside a PS3 file system (dev_hdd1)"),
+    "dev_usb000": ("GAME-DATA", "inside a PS3 file system (dev_usb000)"),
+    "dev_bdvd": ("GAME-DATA", "inside a PS3 disc (dev_bdvd)"),
+    "ps3_game": ("GAME-DATA", "inside a PS3 disc's game folder (PS3_GAME)"),
+    "usrdir": ("GAME-DATA", "inside a PS3 game's data folder (USRDIR)"),
+    "dev_flash": ("PS3-BINARY", "inside PS3 firmware (dev_flash)"),
+}
+# a save, a game install or a patch folder is named for the game's title ID (BLUS30490..., BLJM60180T0019...)
+TITLE_FOLDER = re.compile(r"^(?:BL|BC|NP)[A-Z]{2}\d{5}")
+# the metadata files every PS3 game, save and trophy set carries
+PS3_META = {"icon0.png", "icon1.pam", "pic0.png", "pic1.png", "pic2.png", "snd0.at3", "param.sfo", "param.pfd",
+            "trophy.trp", "tropconf.sfm", "tropusr.dat", "tropsys.dat"}
 # a definition count this high is lifted code, not a hand-written override
 LIFTED_DEFS = 8
 LIFTED_STRINGS = 500   # a linked binary naming this many lifted functions was built from the lift
@@ -116,6 +137,15 @@ def check_bytes(path, data, findings, linked_ok=()):
 
     if any(name.startswith(p) or ("/" + p) in name for p in forbidden_paths()):
         add("MIDDLEWARE", "an FMOD-derived file removed in M1")
+    folders = [c for c in name.replace("!/", "/").split("/")[:-1] if c]
+    for c in folders:
+        if c.lower() in PS3_FOLDERS:
+            add(*PS3_FOLDERS[c.lower()])
+            break
+    if any(TITLE_FOLDER.match(c) for c in folders):
+        add("SAVE-DATA", "in a folder named for a PS3 title ID (a save, a game install or a patch)")
+    if base.lower() in PS3_META:
+        add("SAVE-DATA", f"a PS3 game or save metadata file ({base})")
     if ext in GAME_EXT:
         add("DATA-SET" if ext == ".mhr" else "PS3-BINARY" if ext in (".self", ".sprx", ".pup", ".pkg", ".sdat", ".edat")
             else "KEYS" if ext == ".rap" else "GAME-DATA", f"a {ext} file")
@@ -153,7 +183,8 @@ def check_bytes(path, data, findings, linked_ok=()):
         n = len(set(re.findall(rb"func_[0-9A-F]{8}", data)))
         if n >= LIFTED_STRINGS and base not in linked_ok:
             add("LIFTED-CODE", f"a binary naming {n} lifted functions (a built game)")
-        if base.lower().startswith("dotheroes") and ext in ("", ".exe"):
+        # the game's name (tools/setup_pipeline.py GAME, port/CMakeLists.txt): not the setup app, DotHeroes-Setup
+        if base.lower() in ("dotheroes", "dotheroes.exe"):
             add("LIFTED-CODE", "a built game executable")
 
 
@@ -180,11 +211,16 @@ def tracked(rev=None, findings=None):
     return findings, len(files)
 
 
-# where generated output and temporaries go; each must be ignored by git (a sample path inside each)
+# where generated output, temporaries and a player's saves go; each must be ignored by git (a sample path inside
+# each): the build, the keys, a save copy beside the checkout, a run's gamedata, a PS3 or RPCS3 file system
 GENERATED_PATHS = ["build/gen/recompiled/ppu_recomp_000.cpp", "build/gen/spu/images/x.elf", "build/lib/windows/x.a",
                    "build/dist/DotHeroes-Setup-windows-x86_64/lib/x.dll", "build/deps/src/x.tar.bz2",
                    "build/r8/x/dotheroes.exe", "build/disc/PS3_GAME/USRDIR/EBOOT.BIN", "keys/keys.txt",
-                   "EBOOT.BIN", "x.elf", "x.iso", "build/port-win/spu_native/water_gen.cpp"]
+                   "EBOOT.BIN", "x.elf", "x.iso", "build/port-win/spu_native/water_gen.cpp",
+                   "gamespy_3ddot_link/PS3/SAVEDATA/BLJM60180T0000/ICON0.PNG",
+                   "gamedata/dev_hdd0/home/00000001/savedata/BLUS30490SYSTEM/PARAM.SFO",
+                   "x/PS3/SAVEDATA/BLUS30490X/ICON0.PNG", "x/dev_hdd0/home/00000001/savedata/BLUS30490X/DATA.EDT",
+                   "x/dev_flash/vsh/module/x.sprx", "x/PS3_GAME/USRDIR/data/x.bin"]
 
 
 def tree(findings=None):
