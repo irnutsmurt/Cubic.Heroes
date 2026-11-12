@@ -340,9 +340,10 @@ read (a behavioural description, kept locally; the facts that matter are below),
 - **3D**: corrected in section 3 (the game's frame is left-handed: x mirrored; a 3D effect without a position at
   the listener); positions given at the start only, the listener every frame, never turning.
 - **Centred mono**: a mono sound not placed in 3D (2D effects, 3D effects without a position, the one mono music
-  track) plays as a stereo copy straight to the outputs at 0.707 a side, as rel27's mix had it (0.712 measured in
-  the sound lab's capture; OpenAL's own centre on stereo speakers is 1.5 dB lower: 0.603 measured in the game
-  before this was done; 0.715 after).
+  track) plays as a stereo copy straight to the outputs at 0.707 a side, as rel27's mix had it for a 2D effect
+  (0.712 measured in the sound lab's capture; OpenAL's own centre on stereo speakers is 1.5 dB lower: 0.603
+  measured in the game before this was done; 0.715 after). A 3D effect without a position was louder in rel27's
+  mix, about 1.0 a side (measured in M4, section 4.6).
 - **Not done**: the class's preload (33.7 MB of effect files read into the game heap at boot, freed again by
   loadSounds, read by nothing else): the native loadSounds reads the player's files itself.
 
@@ -415,7 +416,9 @@ rel31 with the switch; the frame trace's window, and the process's CPU from 60 s
 - **Positioned 3D effects** keep OpenAL Soft's own spatialization -- **an intentional difference, approved by the
   owner on 2026-11-12**: on stereo speakers a sound straight ahead is 1.5 dB lower than in rel27, one at the sides as
   loud as straight ahead -- rel27's host downmix put the sides 10 dB and the rear 6 dB lower (the matrix that goes,
-  section 4). The river's -0.67 dB is mostly this (two rel27 runs of it differ by +0.08 dB). The owner's decision:
+  section 4). **Corrected in section 4.6**: those figures are the matrix's coefficients; measured end to end, the
+  native manager's 3D effects are 2.9-6.1 dB under rel27's in the stereo mix (ahead the most), rel27's sides as loud
+  as ahead. The river's -0.67 dB is mostly this (two rel27 runs of it differ by +0.08 dB). The owner's decision:
   no compensating gain on positioned effects, and the old downmix's directional attenuation is not recreated (it
   was an artefact of FMOD's 7.1 output folded to stereo, not the game's intent). Centred 2D mono keeps rel27's
   level (0.707 per side, above): that is the game's own non-positioned mix, not a pan law.
@@ -525,6 +528,71 @@ two engines' answers would differ (the replays: every answer the game read, 0 di
 **Not tested, the owner's sessions**: the boss fight and a crowded scene in the game (the 32-voice limit is
 tested synthetically above: no scene reaches more than 6 voices), a physical unplug or a change of the default
 output, the listening comparison itself. Not run: the Linux build (it builds; no Linux host here).
+
+### 4.6 M4, the owner's listening (2026-11-12) [M]
+
+The owner's session (rel35, the native manager): the audio good overall; one observation -- sword impacts on the
+left of the screen seemed slightly louder than the same impacts on the right (with FMOD not known).
+
+**The sounds** (M0's and M3's traces, every play of them): the impact is effect 202 (221_knock, mono, 0.38 s, 3D,
+min 8.8, max 160), placed by the game on the hero's facing axis at the contact point -- (+-d, 0.3, 0) or
+(0, 0.3, +-d) from the listener, d 1.5 to 10 -- so left and right impacts are mirror images in the game's own
+coordinates; a blow landing (302, 375_hit_01) is placed at the enemy; the swing (148, 156_Anchor_throw) is played
+without a position. Every effect file is mono: no channel of a file is louder than the other.
+**The listener** is the hero's position, forward +z, up +y. **The screen's directions**, from the owner's session's
+own input (record.log: the stick held one way, the hero's position after): right is +x, up is +z -- the frame the
+sound manager assumes (section 3), so screen-left is the listener's left. **The outputs the owner had**: OpenAL Soft
+opens the G432 headset as 7.1 (its Windows format, Logitech's virtual surround) and the Realtek output as stereo;
+the session moved to the Realtek at the demo movie and stayed there, so the gameplay was heard in stereo.
+
+**Measured** (tests/scenarios/sound_pan.drive: the sound lab's `sepos`, an effect at the listener plus an offset,
+then the same offset mirrored, in ABBA order; the same calls on both paths of rel38 = rel37 with the lab step;
+tools/pan_check.py: each play's level per channel, the noise before it subtracted, over the effect's length). FMOD
+is the lifted path, bit-exact with rel27's mix (section 4.2), captured at cellAudio (AUDIO_WAV: the stereo the
+device gets); OpenAL Soft through its wave writer in stereo (the Realtek's format) and in 7.1 (the G432's):
+
+| | FMOD (rel27's mix) | OpenAL Soft, stereo | OpenAL Soft, 7.1 |
+|---|---|---|---|
+| knock at x -1.5 / +1.5: total, left minus right | +0.01 dB | +0.03 dB | +0.02 dB |
+| the same, the near channel / the far one, against the mirror | +0.00 / +0.04 dB | +0.02 dB / (silent) | each pair within 0.16 dB |
+| knock at x -4 / +4 | -0.01 dB | +0.01 dB | -0.01 dB |
+| knock at x -12 / +12 (beyond the min distance) | -0.01 dB | -0.05 dB | -0.05 dB |
+| knock at 45 degrees ahead, left / right | +0.02 dB | +0.01 dB | +0.04 dB |
+| a blow at x -1.29 / +1.29 (302) | -0.01 dB | -0.02 dB | -0.02 dB |
+
+- **No left/right asymmetry on either path**: every mirrored pair, total and channel by channel, within 0.05 dB
+  (0.16 dB for a 7.1 speaker pair), repeats within 0.2 dB. The coordinate conversion, the listener's orientation
+  and position, and the attenuation are as section 3 states: beyond the min distance the inverse-distance law
+  gives 20 log10(8.8/12) = -2.69 dB from 4 to 12 units; FMOD -2.69, OpenAL Soft -2.64 dB. Nothing in the native
+  path to correct; what the owner heard is not in either implementation's output (the listening setup, or the
+  game's own impacts -- their contact points vary from 1.5 to 10 units, and other sounds overlap them -- are
+  left; neither is measurable from here).
+- **How the paths spread an effect at the side**: FMOD's mix keeps the far channel 9.9 dB under the near one at
+  90 degrees (9.5 dB at 45); OpenAL Soft's stereo pans hard -- nothing in the far channel at 90 degrees, 20 dB
+  under at 45. In 7.1 OpenAL Soft puts a 90-degree effect in the side speakers, the fronts and rears 10 dB under.
+
+**The levels: a correction to section 4.4.** The same plays' totals (all channels, dBFS):
+
+| play | FMOD (rel27's mix) | OpenAL Soft, stereo | difference |
+|---|---|---|---|
+| knock at the side (1.5 or 4) | -27.3 | -31.5 | -4.2 dB |
+| knock at the side, 12 units | -30.0 | -34.1 | -4.1 dB |
+| knock ahead (z +1.5) | -26.9 | -33.0 | -6.1 dB |
+| knock behind (z -1.5) | -31.6 | -36.3 | -4.8 dB |
+| knock at 45 degrees ahead | -27.6 | -31.5 | -3.9 dB |
+| blow at the side (302) | -23.8 | -27.8 | -4.0 dB |
+| swing, no position (148) | -23.4 | -26.5 | -3.1 dB |
+| knock, no position | -28.5 | -31.4 | -2.9 dB |
+
+Section 4.4 described rel27's directions from the host downmix's matrix (the side channels x0.3, the rear x0.5:
+"the sides 10 dB and the rear 6 dB lower"); measured end to end, rel27's impact at the side is as loud as ahead
+(0.3 dB under) and 4.6 dB under behind it -- FMOD spreads an effect this close over several of its 7.1 channels
+and the fold to stereo adds them up. So the native manager's 3D effects are 2.9 to 6.1 dB under rel27's in the
+stereo mix (straight ahead the most), not 1.5 dB under ahead and louder at the sides; and a 3D effect played
+without a position was about 1.0 a side in rel27's mix, not 0.707 -- the 0.707 holds for the 2D effects (section
+3's "centred mono" was measured on one). The music and the 2D effects are unchanged (section 4.5: the mixes with
+no positioned effect within 0.05 dB). This is the owner's approved spatialization (OpenAL Soft's own, no gain
+added, the old fold not recreated) with its size corrected; nothing in the audio was changed for it.
 
 ## 5. Repository licensing audit and cleanup
 
