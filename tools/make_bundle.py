@@ -10,12 +10,14 @@ Makes build/dist/DotHeroes-Setup-<platform>-x86_64/ and a .tar.xz (Linux) / .zip
     _internal/              the app's Python runtime and modules
     toolchain/zig-*/        the C/C++ compiler (Zig), trimmed to the target used
     lib/                    the runtime library (ps3recomp + this port's patches,
-                            prebuilt), glslang, SDL2 (installed next to the game)
+                            prebuilt), glslang, SDL2 and OpenAL Soft (installed next to
+                            the game)
     src/                    what is compiled against the player's recompiled code:
                             the port's main program, the runtime's PPU scaffold, headers
     tools/, config/         the lifting tools (ps3recomp's and this project's) and the
                             per-game configuration they read
-    licenses/               third-party licences
+    licenses/               third-party licences; licenses/source/ OpenAL Soft's source
+                            (LGPL: the corresponding source of the library shipped)
 Nothing from the game is in it: players convert their own disc.
 
 The Windows app is made by Windows Python + PyInstaller running under Wine, in the
@@ -189,6 +191,11 @@ def licenses(out, zsrc):
                 break
         else:
             print(f"  warning: no licence file for {name} ({path})")
+    import build_deps
+    build_deps.openal_licences(lic)
+    arc, digest = build_deps.openal_source_archive(os.path.join(lic, "source"))
+    with open(os.path.join(lic, build_deps.OPENAL_NOTICE), "w", encoding="utf-8", newline="\n") as f:
+        f.write(build_deps.openal_notice(digest))
 
 
 def bundle(platform):
