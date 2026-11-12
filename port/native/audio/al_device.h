@@ -114,13 +114,17 @@ private:
 
 // A sound file resident as an AL buffer, its `smpl` loop set as the buffer's loop points (AL_SOFT_loop_points)
 // so that a looping source plays the intro once, then the loop region.
+// centre_stereo (mono files): a second buffer of the same sound as stereo, both channels the file's samples, for
+// playing it unpanned at the centre straight to the outputs (AL_SOFT_direct_channels) at a fixed per-side level
+// -- OpenAL's own panning of a mono source at the centre is 1.5 dB down on its sides, and depends on the speakers.
 struct Sample {
     unsigned buffer = 0;
+    unsigned centre_stereo = 0;
     wav_pcm::Info info;
     bool loop_points_set = false;
     double seconds() const { return info.seconds(); }
 };
-bool load_sample(Device& dev, const std::string& path, Sample* out, std::string* error);
+bool load_sample(Device& dev, const std::string& path, Sample* out, std::string* error, bool centre_stereo = false);
 void free_sample(Device& dev, Sample* s);
 
 // The reverb in I3DL2 terms (EFX implements the model; nothing here is any other library's code).

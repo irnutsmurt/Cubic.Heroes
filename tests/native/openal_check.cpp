@@ -231,7 +231,7 @@ double rendered_clock(void*) { return g_rendered; }
 // Plays `path` looped (or once) on a loopback device at its own rate for `seconds` and compares. Resident: a
 // buffer with its loop points on a looping source; else streamed through a manual Streamer.
 bool play_and_compare(const std::string& path, bool resident, al_stream::Loop loop, double seconds, Compare* cmp,
-                      al_stream::Totals* totals, unsigned buffer_ms = 250, unsigned nbuf = 4)
+                      al_stream::Totals* totals, unsigned buffer_ms = 250, unsigned nbuf = 4, bool centre = false)
 {
     wav_pcm::Info info;
     std::vector<int16_t> pcm;
@@ -276,7 +276,7 @@ bool play_and_compare(const std::string& path, bool resident, al_stream::Loop lo
         }
         al.alSourcePlay(src);
     } else {
-        h = st.open(path, loop, 1.0f, true);
+        h = st.open(path, loop, 1.0f, true, centre);
         st.service_once();
         // direct channels: a stereo stream's channels straight to the output's
         // (the streamer's own source; set through the AL with the handle's source -- tests only)
@@ -453,6 +453,16 @@ void synth_loops()
                   c.k[0], c.k[1]);
         }
     }
+    // a mono file streamed centred (the sound manager's mono music): both sides the file's samples at 0.7071
+    const std::string mono = write_wav("mono_centred", 1, 44100, ramp_frames(1, 44100 * 2), 11025, 44100 * 2);
+    Compare c;
+    al_stream::Totals t;
+    if (play_and_compare(mono, false, al_stream::Loop::file_loop_points, 6.6, &c, &t, 100, 3, true))
+        CHECK(c.bad == 0 && std::fabs(c.k[0] - 0.70711) < 1e-3 && std::fabs(c.k[1] - 0.70711) < 1e-3,
+              "mono_centred             streamed 6.6 s: max error %.1e, %llu frames off, sides %.4f/%.4f (0.7071)",
+              c.max_err, (unsigned long long)c.bad, c.k[0], c.k[1]);
+    else
+        g_fail++;
 }
 
 // the amplitude of `hz` in a window of one channel (a single-bin DFT)

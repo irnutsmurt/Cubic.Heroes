@@ -26,6 +26,7 @@ struct ChannelInfo {
     double length = 0.0;        // seconds of the whole buffer
     double loop_start = 0.0, loop_end = 0.0;   // seconds; loop_end 0: the buffer's end
     float gain = 1.0f;          // the AL gain wanted (the sound manager's volume model)
+    float level = 1.0f;         // a fixed factor on it (a centred mono sound played as stereo: its per-side level)
     bool positional = false;    // 3D: at `position`, attenuated; else at the listener, unattenuated
     bool direct = false;        // a stereo buffer's channels straight to the output (AL_SOFT_direct_channels)
     float position[3] = {0, 0, 0};   // OpenAL's frame

@@ -407,11 +407,13 @@ find_path(OPENAL_INCLUDE_DIR AL/alext.h HINTS "${PS3RECOMP_VULKAN_INCLUDE_DIR}"
 if(OPENAL_INCLUDE_DIR)
     message(STATUS "OpenAL Soft:     headers in ${OPENAL_INCLUDE_DIR}")
     target_sources(dotheroes_native PRIVATE native/audio/wav_pcm.cpp native/audio/al_api.cpp
-        native/audio/al_device.cpp native/audio/al_stream.cpp native/audio/voice_pool.cpp native/audio/sound_list.cpp)
+        native/audio/al_device.cpp native/audio/al_stream.cpp native/audio/voice_pool.cpp native/audio/sound_list.cpp
+        native/audio/sound_manager.cpp)
     target_include_directories(dotheroes_native PRIVATE "${OPENAL_INCLUDE_DIR}"
         "${CMAKE_CURRENT_SOURCE_DIR}/native/audio")
 else()
-    message(STATUS "OpenAL Soft:     no headers (tools/build_deps.py builds it): no native audio")
+    message(STATUS "OpenAL Soft:     no headers (tools/build_deps.py builds it): the native sound manager is silent")
+    target_sources(dotheroes_native PRIVATE native/audio/native_sound_absent.cpp)
 endif()
 
 target_link_libraries(${PROJECT_NAME} PRIVATE

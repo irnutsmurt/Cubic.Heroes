@@ -54,14 +54,15 @@ bool Streamer::push(Command&& c)
     return true;
 }
 
-Handle Streamer::open(const std::string& path, Loop loop, float gain, bool play_now)
+Handle Streamer::open(const std::string& path, Loop loop, float gain, bool play_now, bool centre_mono,
+                      float centre_level)
 {
     for (unsigned k = 0; k < cfg_.max_streams; k++) {
         bool expected = false;
         if (!slots_[k].busy.compare_exchange_strong(expected, true)) continue;
         const uint32_t gen = (slots_[k].gen.fetch_add(1) + 1) & 0xFFFFFF;
         const Handle h = make_handle(k, gen);
-        Command c{Command::open, h, loop, play_now, gain, 0.0f, path};
+        Command c{Command::open, h, loop, play_now, gain, centre_level, path, centre_mono};
         if (!push(std::move(c))) {
             slots_[k].busy.store(false);
             return kNone;
@@ -202,7 +203,7 @@ void Streamer::set_al_gain(Stream& s)
 {
     if (!s.source) return;
     const float g = std::clamp(s.gain, 0.0f, 1.0f);
-    dev_.al().alSourcef(s.source, AL_GAIN, cfg_.gain_curve ? cfg_.gain_curve(g) : g);
+    dev_.al().alSourcef(s.source, AL_GAIN, (cfg_.gain_curve ? cfg_.gain_curve(g) : g) * s.level);
 }
 
 void Streamer::apply(Command& c)
@@ -225,6 +226,8 @@ void Streamer::apply(Command& c)
             s.f = nullptr;
             return;   // stays failed until stopped (its handle reports it)
         }
+        s.centre = c.centre && s.info.channels == 1;
+        s.level = s.centre ? c.b : 1.0f;
         s.region_start = 0;
         s.region_end = s.info.frames;
         if (s.loop == Loop::loop_points_only) s.loop = s.info.has_loop ? Loop::file_loop_points : Loop::once;
@@ -343,6 +346,7 @@ bool Streamer::fill(Stream& s, unsigned buffer)
     const unsigned ch = s.info.channels;
     const size_t want_frames = std::max<size_t>(1, (size_t)s.info.rate * cfg_.buffer_ms / 1000);
     scratch_.resize(want_frames * ch);
+    int16_t* dst = scratch_.data();
     size_t have = 0;
     while (have < want_frames) {
         uint64_t end = s.loop == Loop::once ? s.info.frames : s.region_end;
@@ -361,7 +365,7 @@ bool Streamer::fill(Stream& s, unsigned buffer)
             }
         }
         const size_t want = (size_t)std::min<uint64_t>(want_frames - have, end - s.pos);
-        const size_t got = wav_pcm::read_frames(s.f, s.info, s.pos, want, &scratch_[have * ch]);
+        const size_t got = wav_pcm::read_frames(s.f, s.info, s.pos, want, &dst[have * ch]);
         have += got;
         s.pos += got;
         if (got < want) {
@@ -372,8 +376,14 @@ bool Streamer::fill(Stream& s, unsigned buffer)
     }
     if (!have) return false;
     const al_api::Api& al = dev_.al();
-    al.alBufferData(buffer, ch == 1 ? AL_FORMAT_MONO16 : AL_FORMAT_STEREO16, scratch_.data(),
-                    (ALsizei)(have * ch * sizeof(int16_t)), (ALsizei)s.info.rate);
+    if (s.centre) {   // mono doubled into stereo
+        s.mono.assign(scratch_.begin(), scratch_.begin() + (ptrdiff_t)have);
+        scratch_.resize(have * 2);
+        for (size_t i = 0; i < have; i++) scratch_[2 * i] = scratch_[2 * i + 1] = s.mono[i];
+    }
+    const bool stereo = ch == 2 || s.centre;
+    al.alBufferData(buffer, stereo ? AL_FORMAT_STEREO16 : AL_FORMAT_MONO16, scratch_.data(),
+                    (ALsizei)(have * (stereo ? 2 : 1) * sizeof(int16_t)), (ALsizei)s.info.rate);
     al.alSourceQueueBuffers(s.source, 1, &buffer);
     s.queued_frames.push_back(have);
     return true;

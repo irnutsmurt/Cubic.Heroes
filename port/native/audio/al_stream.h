@@ -72,7 +72,10 @@ public:
     Streamer& operator=(const Streamer&) = delete;
 
     // the game's thread: commands, applied by the audio thread in order
-    Handle open(const std::string& path, Loop loop, float gain, bool play_now);   // kNone: no free stream
+    // centre_mono: a mono file played as stereo, both sides the file's samples at `centre_level` each, straight to
+    // the outputs (OpenAL's own panning of a mono source at the centre is 1.5 dB down on its sides)
+    Handle open(const std::string& path, Loop loop, float gain, bool play_now, bool centre_mono = false,
+                float centre_level = 0.70710678f);   // kNone: no free stream
     void play(Handle h);
     void pause(Handle h, bool paused);
     void stop(Handle h);              // stops and releases (the handle goes stale)
@@ -97,6 +100,7 @@ private:
         bool flag;
         float a, b;
         std::string path;
+        bool centre = false;
     };
     struct Stream {
         uint32_t gen = 0;
@@ -111,6 +115,9 @@ private:
         std::vector<unsigned> buffers;
         bool eof = false;
         float gain = 1.0f, fade_from = 0, fade_to = 0, fade_seconds = 0;
+        bool centre = false;                   // a mono file played as centred stereo
+        float level = 1.0f;                    // a fixed factor on the gain (the centred level)
+        std::vector<int16_t> mono;             // centre: the file's frames before they are doubled
         bool fading = false, fade_stop = false;
         double fade_t0 = 0;
         uint64_t underruns = 0, near_underruns = 0, loops = 0;
