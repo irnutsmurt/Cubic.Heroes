@@ -183,6 +183,7 @@
 | `patches/ps3recomp/0140-SPU-channel-trace-of-one-thread-SPU_TRACE_IMAGE.patch` | INDEP | keep |
 | `patches/ps3recomp/0141-SPU-trace-the-DMA-size-clamp-no-longer-wraps.patch` | INDEP | keep |
 | `patches/ps3recomp/0142-SPU-threads-a-native-program-in-place-of-the-lifted-.patch` | INDEP | keep |
+| `patches/ps3recomp/0143-Save-data-screen-composed-in-cached-memory-copied-on.patch` | INDEP | keep |
 | `port/CMakeLists.txt` | INDEP | keep |
 | `port/LICENSE.ps3recomp` | THIRD | keep: licence file beside it; listed in the README |
 | `port/assets/ui/DejaVuSans.ttf` | THIRD | keep: licence file beside it; listed in the README |

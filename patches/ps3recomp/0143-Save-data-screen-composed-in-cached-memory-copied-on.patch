@@ -1,0 +1,76 @@
+From e9bbb9fee133c41aea9300f946c6a883e13ddbb6 Mon Sep 17 00:00:00 2001
+From: giteaguy <73799093+irnutsmurt@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 10:55:57 -0800
+Subject: [PATCH] Save-data screen: composed in cached memory, copied once
+
+The save-data screen's picture (libs/video/osd_saves.c) was composed
+straight into the host-visible, coherent buffer the present copies from.
+That memory is write-combined on the desktop drivers: the CPU's reads of it
+are uncached, and composing blends every pixel it covers, reading it first.
+A 1920x1080 picture took about a second there (1,034 ms; 15 ms in cached
+memory, the compose timed in both off-line), with the present mutex held:
+each move of the cursor froze the title's flips and the dialog's own input
+for 0.4-1.1 s in a play session, fullscreen at 1920x1080.
+
+The picture is now composed in a cached buffer of its own and copied into
+the present's buffer in one pass (15 ms in all at 1920x1080, the same
+picture byte for byte); PS3_SAVES_SCREEN_DUMP reads the cached copy.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libs/video/rsx_vulkan_backend.c | 23 ++++++++++++++++++++---
+ 1 file changed, 20 insertions(+), 3 deletions(-)
+
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index c5be620..f40ebc2 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -2545,9 +2545,20 @@ static void vk_osd_list_draw(VkCommandBuffer cb, u32 idx)
+ /* The save-data screen (ps3emu/osd.h, libs/video/osd_saves.c): the whole window,
+  * composed on the CPU when its revision, the window's size or the clock's minute
+  * changes, and copied over the game's picture every frame while it is open.
+- * Returns 1 when it drew (the list panel is then not drawn); 0 without a font. */
++ * Returns 1 when it drew (the list panel is then not drawn); 0 without a font.
++ *
++ * Composed in ordinary (cached) memory, `cpu`, then copied into the buffer the
++ * GPU reads in one pass. The buffer's memory is host-visible and coherent, which
++ * on the desktop drivers is write-combined: the CPU's reads of it are uncached,
++ * and composing blends every pixel it covers (reads the pixel, then writes it).
++ * Composed there, a 1920x1080 picture took about a second (1,034 ms against
++ * 15 ms in cached memory, tools/save_ui_preview.c's compose timed in both), with
++ * the present mutex held -- each move of the cursor froze the game's flips and
++ * the dialog's own input for that long. */
+ static struct {
+     vk_buffer buf;
++    uint8_t*  cpu;
++    size_t    cpu_size;
+     uint32_t  rev;
+     u32       w, h;
+     long      minute;
+@@ -2579,7 +2590,13 @@ static int vk_osd_saves_draw(VkCommandBuffer cb, u32 idx)
+                     return 0;
+                 }
+             }
+-            if (!ps3_osd_saves_compose(&S, (uint8_t*)s_osaves.buf.ptr, W, H, s_vk.sc_osd == 2)) return 0;
++            if (s_osaves.cpu_size < (size_t)need) {
++                uint8_t* p = (uint8_t*)realloc(s_osaves.cpu, (size_t)need);
++                if (!p) return 0;
++                s_osaves.cpu = p; s_osaves.cpu_size = (size_t)need;
++            }
++            if (!ps3_osd_saves_compose(&S, s_osaves.cpu, W, H, s_vk.sc_osd == 2)) return 0;
++            memcpy(s_osaves.buf.ptr, s_osaves.cpu, (size_t)need);
+             /* PS3_SAVES_SCREEN_DUMP=<dir> (tests): each picture as composed, <dir>/saves-<n>.ppm --
+              * what goes into the window (a drive's `shot` reads the game's frame, not the window) */
+             {
+@@ -2591,7 +2608,7 @@ static int vk_osd_saves_draw(VkCommandBuffer cb, u32 idx)
+                     snprintf(path, sizeof path, "%s/saves-%03u.ppm", dir, ++n);
+                     FILE* f = fopen(path, "wb");
+                     if (f) {
+-                        const uint8_t* px = (const uint8_t*)s_osaves.buf.ptr;
++                        const uint8_t* px = s_osaves.cpu;
+                         const int bgra = s_vk.sc_osd == 2;
+                         fprintf(f, "P6\n%u %u\n255\n", W, H);
+                         for (size_t i = 0; i < (size_t)W * H; i++) {
+-- 
+2.56.0.windows.3
+

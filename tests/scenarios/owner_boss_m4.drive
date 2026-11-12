@@ -1,19 +1,22 @@
 # The first dungeon's boss for the owner's M4 listening (docs/OPENAL_MIGRATION_PLAN.md section 4.5): from a copy of
 # the boss-door checkpoint (CONTINUE: the dungeon's door; the special key is in the room north of the north room,
-# the boss's portal beyond), the game's audio on OpenAL Soft (DOTHEROES_NATIVE_AUDIO=1, build/r8/rel35):
+# the boss's portal beyond), the game's audio on OpenAL Soft (DOTHEROES_NATIVE_AUDIO=1, build/r8/rel36:
+# rel35 with the save-data screen's fix, the audio the same):
 #   SCENARIO=owner_boss_m4 build/venv/Scripts/python.exe tests/boot_smoke.py
 # The same fight on rel27 (FMOD, the reference), the environment winning over the lines below:
 #   BIN=build/r8/rel27/dotheroes.exe DOTHEROES_NATIVE_AUDIO=0 SCENARIO=owner_boss_m4 build/venv/Scripts/python.exe tests/boot_smoke.py
 # Each run starts from a fresh copy of the checkpoint (nothing carries over; the owner's own saves are not touched).
 # Normal damage, sound on the default output, fullscreen, 144 fps synced to the display. F8 (or L3+R3) marks a
-# moment that sounds wrong. Close the window when done.
+# moment that sounds wrong. The floor warp after the boss is recorded as owner_warp_r7 records it: the frame its 2D
+# transfer copied, as the copy left it (xfer_dump/, a PPM per copy; only the warp makes one), and the run's
+# ppfx_report.txt. Close the window when done.
 #! saves build/checkpoints/dungeon1-boss-door
-#! env BIN=build/r8/rel35/dotheroes.exe DOTHEROES_NATIVE_AUDIO=1 RUNS_IN=build/sessions KEEP_RUNS=1000 PREEMPT_TESTS=1
+#! env BIN=build/r8/rel36/dotheroes.exe DOTHEROES_NATIVE_AUDIO=1 RUNS_IN=build/sessions KEEP_RUNS=1000 PREEMPT_TESTS=1
 #! env DOTHEROES_PPFX_NATIVE=1 DOTHEROES_NATIVE_CD=1 DOTHEROES_NATIVE_SOLVER=1,2,4,5,6 GCM_WRAP_LAP=1 DOTHEROES_PRESENT_ONCE=1
 #! env DOTHEROES_BENCH=1 PS3RECOMP_VK_PRESENT_MODE=fifo DOTHEROES_FPS=0 DOTHEROES_DEV_CANT_DIE=0
 #! env WINDOW=1 PS3RECOMP_VK_FULLSCREEN=1 AUDIO=1 PS3_OSD_FPS=2 DUMP=0 SHOT_EVERY=0 PS3_VERBOSE=0
 #! env DOTHEROES_DEV_KEYS=1 DOTHEROES_DEV_STATE=1 DOTHEROES_DEV_RECORD=1 DIAG_FRAMES=frames.log
-#! env PS3_FTRACE_ROLL=hitch PS3_FTRACE_ROLL_FROM=60
+#! env PS3_FTRACE_ROLL=hitch PS3_FTRACE_ROLL_FROM=60 DOTHEROES_R7_XFER_DUMP=xfer_dump
 #! env PS3RECOMP_SPIRV_CACHE=build/play-boss/cache
 #! secs 14400
 until_exit ${SAVE_COPIES:-build/checkpoints/owner-boss-m4}

@@ -36,6 +36,12 @@ What to listen for, OpenAL against rel27:
 
 M4 is complete only with your acceptance.
 
+The first session (2026-11-12, rel35, 15 minutes: the title, CONTINUE, play through eight areas, two saves): exited cleanly, 0 FMOD calls, no underrun, one move to another output (the G432 to the
+speakers) recovered. Its two marks were the save-data screen freezing (0.4-1.1 s a cursor move), not the
+audio: fixed in rel36 (docs/SAVE_UI.md, "The picture's cost"), which the launchers now start (the audio as
+rel35's). Freezes on the title screen (0.4-1.5 s about every 2 s, twice) are not explained yet: the next
+session's trace starts at 5 s to catch them.
+
 ## R7's one request (2026-11-06, optional, about 10-15 minutes)
 
 **The post-boss warp on the R7 build.** R7's release build has no PS3
