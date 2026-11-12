@@ -5,8 +5,9 @@
 // either sign), the smallest and largest normals, extended range (biased exponent 255, any fraction), words
 // at FLT_MAX, ordinary values, and pairs and triples whose exponents differ by 0 to 64 (an add's alignment,
 // cancellation, an fma's addend far from the product); every vector mixes the classes across its four lanes,
-// so the fix-up paths run beside the fast one; then the wide form (the fix-up) alone on every vector. No
-// game data.
+// so the fix-up paths run beside the fast one; then the wide form (the fix-up) alone on every vector. Then the
+// other single-precision helpers the generated code calls unchanged (the compares, frest, frsqest, fi, cflts,
+// cfltu, csflt, cuflt): the same words in the SPU's mode as in the host's. No game data.
 //
 //   spu_float_rz_check [<millions of vectors per operation> [<seed>]]   (default 4, 1)
 //
@@ -99,6 +100,40 @@ const Op kOps[] = {
     { "wide fma", 3, w_fma, e_fma }, { "wide fms", 3, w_fms, e_fms }, { "wide fnms", 3, w_fnms, e_fnms },
 };
 
+// The other single-precision helpers, which the generated code calls as they are, in whichever mode it runs:
+// the compares, the estimates and their interpolation, the conversions. Each must give the same words in the
+// SPU's mode as in the host's (their forms are integer code, or conversions exact in double) -- checked here,
+// not assumed.
+struct ModeOp {
+    const char* name;
+    u128 (*f)(const u128&, const u128&, int);
+    bool ints;   // its input is integers (csflt, cuflt)
+};
+u128 m_fceq(const u128& a, const u128& b, int) { return spu_fceq(a, b); }
+u128 m_fcgt(const u128& a, const u128& b, int) { return spu_fcgt(a, b); }
+u128 m_fcmeq(const u128& a, const u128& b, int) { return spu_fcmeq(a, b); }
+u128 m_fcmgt(const u128& a, const u128& b, int) { return spu_fcmgt(a, b); }
+u128 m_frest(const u128& a, const u128&, int) { return spu_frest(a); }
+u128 m_frsqest(const u128& a, const u128&, int) { return spu_frsqest(a); }
+u128 m_fi(const u128& a, const u128& b, int) { return spu_fi(a, b); }
+u128 m_cflts(const u128& a, const u128&, int s) { return spu_cflts(a, s); }
+u128 m_cfltu(const u128& a, const u128&, int s) { return spu_cfltu(a, s); }
+u128 m_csflt(const u128& a, const u128&, int s) { return spu_csflt(a, s); }
+u128 m_cuflt(const u128& a, const u128&, int s) { return spu_cuflt(a, s); }
+const ModeOp kModeOps[] = {
+    { "fceq", m_fceq, false },   { "fcgt", m_fcgt, false },   { "fcmeq", m_fcmeq, false }, { "fcmgt", m_fcmgt, false },
+    { "frest", m_frest, false }, { "frsqest", m_frsqest, false }, { "fi", m_fi, false },
+    { "cflts", m_cflts, false }, { "cfltu", m_cfltu, false }, { "csflt", m_csflt, true },  { "cuflt", m_cuflt, true },
+};
+__attribute__((noinline)) void run_mode(const ModeOp& op, unsigned mxcsr, const u128* a, const u128* b, const int* s,
+                                        u128* out, size_t n)
+{
+    const unsigned host = _mm_getcsr();
+    _mm_setcsr(mxcsr);
+    for (size_t i = 0; i < n; i++) out[i] = op.f(a[i], b[i], s[i]);
+    _mm_setcsr(host);
+}
+
 // the SPU mode's results, in a function of its own so that nothing of the exact side runs in that mode
 __attribute__((noinline)) void run_fast(const Op& op, const u128* a, const u128* b, const u128* c, u128* out, size_t n)
 {
@@ -151,6 +186,35 @@ int main(int argc, char** argv)
                 }
         }
         std::printf("[%s] %-9s %llu lanes, %llu different\n", bad ? "FAIL" : "PASS", op.name,
+                    (unsigned long long)lanes, (unsigned long long)bad);
+        if (bad) ok = false;
+    }
+    // the other helpers: the SPU's mode against the host's
+    std::vector<int> s(batch);
+    std::vector<u128> in_spu(batch), in_host(batch);
+    for (const ModeOp& op : kModeOps) {
+        uint64_t lanes = 0, bad = 0;
+        for (size_t done = 0; done < total; done += batch) {
+            for (size_t i = 0; i < batch; i++) {
+                for (int l = 0; l < 4; l++) {
+                    const uint32_t x = word();
+                    a[i]._u32[l] = op.ints && rnd32() % 2 ? rnd32() >> (rnd32() % 32) ^ (rnd32() % 2 ? 0xFFFFFFFFu : 0) : x;
+                    b[i]._u32[l] = rnd32() % 4 ? word((int)(x >> 23 & 0xFF)) : word();
+                }
+                s[i] = (int)(rnd32() % 128);   // the conversions' scale (the ISA's 0..127)
+            }
+            run_mode(op, spu_native_rz::kMxcsrSpu, a.data(), b.data(), s.data(), in_spu.data(), batch);
+            run_mode(op, 0x1F80u, a.data(), b.data(), s.data(), in_host.data(), batch);
+            for (size_t i = 0; i < batch; i++)
+                for (int l = 0; l < 4; l++) {
+                    lanes++;
+                    if (in_spu[i]._u32[l] == in_host[i]._u32[l]) continue;
+                    if (bad++ < 8)
+                        std::printf("[FAIL] %s(%08X, %08X, %d): %08X in the SPU's mode, %08X in the host's\n", op.name,
+                                    a[i]._u32[l], b[i]._u32[l], s[i], in_spu[i]._u32[l], in_host[i]._u32[l]);
+                }
+        }
+        std::printf("[%s] %-9s %llu lanes, %llu different between the modes\n", bad ? "FAIL" : "PASS", op.name,
                     (unsigned long long)lanes, (unsigned long long)bad);
         if (bad) ok = false;
     }
