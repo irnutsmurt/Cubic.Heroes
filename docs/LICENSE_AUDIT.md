@@ -1,25 +1,3 @@
-# Repository licensing audit (2026-11-12, after M3)
-
-Every tracked file of the repository with its origin class and what is done with it, as tools/license_audit.py
-classifies it (its header has the rules; docs/OPENAL_MIGRATION_PLAN.md section 5 the findings and the history).
-Classes: BULLET an altered version of Bullet 2.74's algorithms, or code written against Bullet's sources
-(zlib licence, its notice in the altered files); THIRD third-party assets or text kept with their licence files;
-SPUGEN the independently written generation of native code from the player's own lift (the generator, its
-template, its per-image configuration: where an image's code is, no implementation) -- the generated code exists
-only on the player's machine; DOC-GAME documentation of the game's behaviour and of the project's results
-(facts, no code); INDEP this project's own code, configuration, tests and documentation.
-
-Not tracked any more (M1): the FMOD-derived implementation, its glue, generators, templates and checkers (19
-files; the tool fails if one is tracked again), and the hand transcriptions of the game's water and waver tasks
-(replaced by the generation; water_task.cpp and waver_task.cpp are the host around it). Checked: no keys,
-firmware, game data, assets, shader binaries or embedded binaries in any tracked file -- since M2 by
-tools/boundary_check.py too, on every push (the tree of each pushed commit) and on the setup's download.
-Earlier commits still hold the removed files: docs/OPENAL_MIGRATION_PLAN.md section 5, "History". Third-party
-libraries the setup ships (OpenAL Soft since M2) are not in the repository: tools/build_deps.py fetches them at
-pinned versions (config/deps.sha256) and the download carries their licences (README, "License").
-
-477 files: BULLET 8, DOC-GAME 12, INDEP 442, SPUGEN 7, THIRD 8.
-
 | File | Class | Action |
 |---|---|---|
 | `.gitattributes` | INDEP | keep |
@@ -313,6 +291,7 @@ pinned versions (config/deps.sha256) and the download carries their licences (RE
 | `tests/native/sound_manager_check.cpp` | INDEP | keep |
 | `tests/native/sound_replay.cpp` | INDEP | keep |
 | `tests/native/sound_replay.sh` | INDEP | keep |
+| `tests/native/sound_stress_check.cpp` | INDEP | keep |
 | `tests/native/store_paths.py` | INDEP | keep |
 | `tests/native/store_paths_test.cpp` | INDEP | keep |
 | `tests/native/trace_reader.h` | INDEP | keep |
@@ -353,14 +332,18 @@ pinned versions (config/deps.sha256) and the download carries their licences (RE
 | `tests/scenarios/installed_continue.drive` | INDEP | keep |
 | `tests/scenarios/installed_save.drive` | INDEP | keep |
 | `tests/scenarios/long_session.drive` | INDEP | keep |
+| `tests/scenarios/m4_pause.drive` | INDEP | keep |
 | `tests/scenarios/menus_r3.drive` | INDEP | keep |
 | `tests/scenarios/owner_boss.drive` | INDEP | keep |
+| `tests/scenarios/owner_boss_m4.drive` | INDEP | keep |
 | `tests/scenarios/owner_boss_r3.drive` | INDEP | keep |
 | `tests/scenarios/owner_boss_r4.drive` | INDEP | keep |
 | `tests/scenarios/owner_onward_r4.drive` | INDEP | keep |
 | `tests/scenarios/owner_play.drive` | INDEP | keep |
+| `tests/scenarios/owner_play_m4.drive` | INDEP | keep |
 | `tests/scenarios/owner_play_r8.drive` | INDEP | keep |
 | `tests/scenarios/owner_warp_r7.drive` | INDEP | keep |
+| `tests/scenarios/reverb_lab.drive` | INDEP | keep |
 | `tests/scenarios/river_fight.drive` | INDEP | keep |
 | `tests/scenarios/river_water.drive` | INDEP | keep |
 | `tests/scenarios/rpcs3ref_corridor.drive` | INDEP | keep |
@@ -486,6 +469,7 @@ pinned versions (config/deps.sha256) and the download carries their licences (RE
 | `tools/r8_scene.sh` | INDEP | keep |
 | `tools/r8_split.py` | INDEP | keep |
 | `tools/r8_threads.py` | INDEP | keep |
+| `tools/reverb_tail.py` | INDEP | keep |
 | `tools/save_ui_preview.c` | INDEP | keep |
 | `tools/self_decrypt.py` | INDEP | keep |
 | `tools/self_update.py` | INDEP | keep |

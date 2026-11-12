@@ -1,0 +1,18 @@
+# Scenario: the dungeon reverb measured (SCENARIO=reverb_lab tests/boot_smoke.py; docs/OPENAL_MIGRATION_PLAN.md
+# section 4.5, M4): at the title screen (no ambience, no footsteps), DOTHEROES_DEV_SOUND (port/audio_hooks.cpp)
+# asks the game's own sound manager to fade the title music out, turn its reverb on (setReverb, as the dungeons
+# do) and play a short dry effect eight times three seconds apart, then the reverb off and the effect six times
+# more. Run with DOTHEROES_AUDIO_TRACE and a capture of the mix (AUDIO_WAV on the lifted FMOD path, the wave writer
+# on the native one): the tail each play leaves after its dry sound ends is the reverb's, on either engine; the
+# native manager's replay of the FMOD run's trace (tests/native/sound_replay --wav) gives the same calls on both.
+# The steps (seconds after the sound manager's first update; the title's music starts at about 21 s):
+#   30 the music faded out (0.5 s); 35 the reverb on; 37-58 effect 42 (001_kettei) every 3 s;
+#   60 the reverb off; 62-77 effect 42 every 3 s
+# Starts from: a fresh root, no saves (the title's PRESS START, left there).
+#! env DOTHEROES_DEV_SOUND=30:fadebgm:0.5,35:reverb:1,37:se:42,40:se:42,43:se:42,46:se:42,49:se:42,52:se:42,55:se:42,58:se:42,60:reverb:0,62:se:42,65:se:42,68:se:42,71:se:42,74:se:42,77:se:42
+#! env DIAG_FRAMES=frames.log PS3_VERBOSE=0 DUMP=0 SHOT_EVERY=0
+#! secs 120
+log TitleMovie 120
+sleep 70
+quit
+sleep 10

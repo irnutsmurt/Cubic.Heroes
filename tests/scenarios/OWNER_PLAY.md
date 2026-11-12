@@ -1,5 +1,41 @@
 # Play session checklist (for the owner)
 
+## M4: the listening sessions (2026-11-12)
+
+The game's audio on OpenAL Soft (the native sound manager) against rel27 (FMOD), by ear
+(docs/OPENAL_MIGRATION_PLAN.md section 4.5). Four launchers in `build\m4-play\`, double-click:
+
+| Launcher | What |
+|---|---|
+| `1 Play - OpenAL Soft (M4).cmd` | play on, from your save's copy (`build/play-route`), OpenAL Soft |
+| `2 Play - rel27 FMOD reference.cmd` | the same save on rel27, to hear the same place on FMOD |
+| `3 Boss - OpenAL Soft (M4).cmd` | the first dungeon's boss, from a fresh copy of the boss-door save each time |
+| `4 Boss - rel27 FMOD reference.cmd` | the same boss on rel27 |
+
+Each opens fullscreen with sound on your default output at 144 fps, normal damage, the frame-rate readout. Your own
+saves are not touched; progress in 1 and 2 shares `build/play-route`. **F8** (or L3+R3) marks a moment that sounds
+wrong; say roughly what and where. Close the window to end.
+
+What to listen for, OpenAL against rel27:
+1. **Music**: each track starts cleanly; a loop's seam (no click, gap or jump); the change of track between areas
+   (the old one fading, the new one starting: no overlap or silence that rel27 does not have); the title's music.
+2. **Dungeon transitions**: the reverb coming on as you enter a dungeon and off as you leave, at the same moment as
+   rel27; whether the dungeon sounds more (or less) reverberant than rel27 (measured: see the plan, section 4.5).
+3. **The boss fight**: the boss music's start, the boss's attacks and roars, hits, many sounds at once (anything
+   missing, cut short or late), the boss's defeat, the jingle and the music after; the portal and the warp.
+4. **Positioned sounds**: enemies, water, objects on the correct side; louder at the sides than rel27 and 1.5 dB
+   quieter straight ahead -- your decision, kept.
+5. **Menus and jingles**: cursor, confirm, item-get jingles, at rel27's level.
+6. **The options' volumes**: music and effect volume changed in the game's options apply at once, as in rel27.
+7. **The pause menu (START)**: the music and ambience go on behind it, as in rel27; the menu's sounds.
+8. **Saving, the title, loading**: the music through SAVE, TITLE and CONTINUE, and loading another save.
+9. **A longer stretch**: any dropout, crackle, stuck or endless sound, or a sound late after its action.
+10. **The output device** (only you can do this): unplug and replug headphones, or change the default output in
+    Windows, while playing. Expected: the sound moves to or returns on the output within about a second, the music
+    and ambience carry on, the game does not stall.
+
+M4 is complete only with your acceptance.
+
 ## R7's one request (2026-11-06, optional, about 10-15 minutes)
 
 **The post-boss warp on the R7 build.** R7's release build has no PS3

@@ -1,0 +1,69 @@
+# Scenario: the game's pause and the sound (SCENARIO=m4_pause; docs/OPENAL_MIGRATION_PLAN.md section 4.5, M4).
+# Coverage of what the sound manager is asked and answers, traced (DOTHEROES_AUDIO_TRACE) on the native sound
+# manager and on rel27 and compared (tools/audio_trace_compare.py): the game's system menu (START: the game paused,
+# its music and ambience going on, the menu's own sounds) opened and closed ten times in a row at different lengths
+# with steps between (footsteps); the system menu's TITLE and CONTINUE (the title's music, the save loaded again);
+# the system menu once more; then the game asked to exit while the menu is open, as closing the window asks it
+# (quit.trigger: the game's own exit path, the sound manager's shutdown).
+#
+# Starts from: the kept checkpoint castle-front (CONTINUE: field area 17, in front of the castle: the field's music
+#   and its ambience).
+# Checks: in play (life > 0, the menu shut) before each opening, the menu open when it should be.
+#! saves build/checkpoints/castle-front
+#! env DOTHEROES_NATIVE_CD=1 DOTHEROES_NATIVE_SOLVER=1,2,4,5,6 GCM_WRAP_LAP=1 DOTHEROES_PRESENT_ONCE=1
+#! env DOTHEROES_DEV_STATE=1 DIAG_FRAMES=frames.log PS3_VERBOSE=0
+#! env DUMP=0 SHOT_EVERY=0
+#! secs 600
+include common.drive
+
+block open_menu
+  attempt 3 page_dialogues
+    press START               # the system menu (the game paused), on RESUME
+    sleep 2
+    state menu==1 4
+  end
+end
+
+block pause_short
+  call open_menu
+  sleep 1
+  press CROSS                 # RESUME
+  sleep 2
+  state life>0,menu==3 10
+  hold LEFT 1                 # a few steps: footsteps
+  hold RIGHT 1
+end
+
+block pause_long
+  call open_menu
+  sleep 6
+  press CROSS                 # RESUME
+  sleep 2
+  state life>0,menu==3 10
+  hold RIGHT 1
+  hold LEFT 1
+end
+
+log TitleMovie 120
+sleep 5
+call continue
+state life>0,area==17 90
+sleep 10
+segment pause cycles
+loop 5
+  call pause_short
+  call pause_long
+end
+endseg
+sleep 4
+segment menu title-continue
+call to_title_and_continue
+state life>0,area==17 90
+endseg
+sleep 8
+call pause_long
+sleep 3
+call open_menu
+sleep 4
+quit                          # asked to exit with the system menu open
+sleep 10
