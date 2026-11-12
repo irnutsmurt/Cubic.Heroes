@@ -79,7 +79,11 @@ Now the dialog watches the window's presents (ps3emu/osd.h `g_ps3_osd_presents`)
 for 45 ms, presents the last frame again with the overlays itself (`g_ps3_osd_present_again`, the
 backend's `vk_present_again`: under the present mutex, after any present in flight completes). The log
 says so once per dialog ("the title presents nothing meanwhile; the dialog presents itself"). Without a
-window (a headless run) there is nothing to present and the 4 s fallback stays.
+window (a headless run) there is nothing to present and the 4 s fallback stays -- **headless only** since
+rel39 (ps3recomp patch 0144): with a window the dialog is the player's, and it waits for their choice however
+long the picture takes; a stall in the drawing never picks, loads or overwrites a save. "Headless" is decided
+by the window, not by the drawing: no window was opened, or it was dropped (the backend clears its present
+hook then). The harness's automated runs keep their fallback (save_picker_headless.drive).
 
 The harness's picker drives ran headless (no `WINDOW=1`), so they never saw a list drawn; they passed
 because their presses came within the 4 s, and the SAVE in save_picker went to the first entry. They run in
@@ -106,7 +110,46 @@ the scenario's area loads.
 A correction to the section above: the game does flip while one of these dialogs is open. On rel36 it
 presented throughout every dialog and the dialog never presented itself; the "presents nothing" seen
 before was the game's flips waiting for the slow picture under the present mutex, not the game waiting for
-the dialog. The dialog's own present stays for a title that does wait.
+the dialog. The dialog's own present stays for a title that does wait (on rel39 it still steps in now and
+then, once in a dialog: a 45 ms gap in the game's presents).
+
+## Verified on rel39 (2026-11-12)
+
+The owner approved the fix and asked for it to be checked at the sizes a player has, with every way through
+the lists, and for the 4 s fallback to be reviewed. rel39 = rel37 (the play build's audio with the generated
+SPU tasks' float mode) with the fallback headless only (above) and two test switches: PS3_SAVES_LATENCY=1 (each
+move's delay from the input the dialog read to the backend drawing the picture that shows it, in the dialog's
+15 ms steps) and PS3_SAVES_TEST_NODRAW=1 (the dialog's picture never drawn, as a stalled renderer). Copies of
+the owner's saves only; after every run tools/save_diff.py compares each save folder's files with the
+checkpoint's (build/r8/saves39_run.sh, saves39b_run.sh; xbox prompts) [M]:
+
+| Run | What | Which saves changed |
+|---|---|---|
+| save_picker, fullscreen 1920x1080 | CONTINUE's two saves, the second loaded; the system menu's SAVE over it (the question, Yes); a cancel; the first loaded | only the one chosen (66BE25F6) |
+| save_picker_long, fullscreen, and again in the 1280x720 window | 12 saves (build/checkpoints/picker-many: copies under other names): 9 quick presses (the list scrolls), down held 2 s (14 steps: the repeat, wrapping), a cancel; 3 up from the head (wraps) and row 9 loaded; SAVE (13 rows, opened on row 1, the game's focus), the question refused, one more down, accepted | only the one chosen (66BE27A6), both runs |
+| save_picker_edit, fullscreen | the character select's edit list: the third edit loaded | none |
+| save_picker_editor, fullscreen | the title menu's EDITOR: LOAD's list (3 edits), the second loaded; the editor's SAVE: New Save Data and the 3 edits, opened on row 1; one down, the question refused, then accepted | only the one chosen (the edit loaded, ...24AFA) |
+| save_picker_stall, window, picture never drawn | the list open 8 s (twice the fallback's time), then the player's cancel | none: "cancelled", no pick by itself |
+| save_picker_headless, no window | the automation: after 4 s "not shown (nothing draws it): the title's first entry", loaded | none |
+
+- **The delay a player sees**: every move, both lists, both sizes: the picture with the move drawn 15-62 ms
+  after the dialog read the input (most 30-31 ms: two of the game's frames at its 60 fps flips; the overwrite
+  question 31-48 ms). The 0.4-1.1 s freezes rel35 had are gone.
+- **1440p and 4K**: this PC's displays are 1920x1080, and the window is not resizable yet (PC_EXPERIENCE.md
+  section 1: required, not done), so the picture is drawn at the desktop's size in fullscreen and at 1280x720 in
+  the window. Off-line, its cost per change (the composition in cached memory and the one copy; the same
+  picture byte for byte): **16 ms at 1920x1080, 28 ms at 2560x1440, 64 ms at 3840x2160** -- before the fix
+  1.0, 1.8 and 4.1 s. At 4K a move would show about 80 ms after the input: responsive, left as it is.
+- **Found and fixed: the press that answers a dialog reached the game** [M]. The game reads its pad as
+  released while a dialog holds it; when the dialog closed on the confirming press, the rest of that press
+  reached the game as a new one -- in the character editor, whose menu stays on SAVE, the save list opened
+  again by itself (rel39: a third list after the save; nothing written, the second list's own question stood
+  in the way). Now what the dialog's last press leaves held as it closes stays the dialog's until let go (the
+  buttons, and the left stick if it was off centre: cellPad.c, ps3recomp patch 0145). rel40: the editor's
+  lists open twice, load and save, and the system menu's flow (save_picker) is unchanged; only the chosen
+  saves written in both.
+- **Not tested here**: a real 1440p or 4K display, live resizing (no resizable window yet), the PlayStation and
+  Switch prompt styles in these runs (the layout is the same; rel20's runs covered them).
 
 ## Results (rel20, 2026-11-10)
 
@@ -143,4 +186,8 @@ build/r8/ui20*/screens, kept locally: they show the saves' names):
   as new, cancel at each step; the character editor's load and save; then the files compared (only
   the chosen save written).
 - The validation scenes with the screen (save_picker, save_picker_edit) and without it (the harness's
-  default, PS3_SAVEDATA_PICKER=0), unchanged.
+  default, PS3_SAVEDATA_PICKER=0), unchanged. With rel39: save_picker_long (12 saves: quick and held
+  presses, scrolling, wrapping, the question refused then accepted), save_picker_editor (the character
+  editor's own load and save), save_picker_stall (a window whose dialog picture is never drawn: no pick by
+  itself) and save_picker_headless (the automation's fallback); after each, tools/save_diff.py names the
+  saves written.

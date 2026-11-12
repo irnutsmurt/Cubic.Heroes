@@ -1,0 +1,139 @@
+From 6776c4727425817e8dcca2bdd6fa47cd2b885f2e Mon Sep 17 00:00:00 2001
+From: giteaguy <73799093+irnutsmurt@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 14:06:55 -0800
+Subject: [PATCH] Save-data dialog: the 4 s fallback only headless; test
+ switches
+
+The list dialog's fallback -- after 4 s with nothing drawn, the title's first
+entry (a load of it, or a SAVE over it) -- applied whenever the picture had
+not been drawn, a window or not. With a window the dialog is the player's: a
+stall in the drawing must never pick, load or overwrite a save. The fallback
+now applies only headless (no present hook: no window was opened, or the
+backend dropped it -- vk_window_drop now clears g_ps3_osd_present_again), as
+the automated runs need; with a window the dialog waits for the player.
+
+Test switches: PS3_SAVES_LATENCY=1 logs each move's delay from the input the
+dialog read to the backend drawing the picture that shows it;
+PS3_SAVES_TEST_NODRAW=1 keeps the backend from drawing the dialog's picture,
+as a stalled renderer would.
+
+Tested in the game: a window with the picture never drawn, the list open 8 s,
+then cancelled by the player, nothing written; headless, the fallback as
+before; the lists' moves drawn 15-62 ms after the input at 1920x1080 and
+1280x720.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libs/system/cellSaveData.c      | 36 ++++++++++++++++++++++++++++++---
+ libs/video/rsx_vulkan_backend.c |  7 ++++++-
+ 2 files changed, 39 insertions(+), 4 deletions(-)
+
+diff --git a/libs/system/cellSaveData.c b/libs/system/cellSaveData.c
+index 02ec867..eca3cc3 100644
+--- a/libs/system/cellSaveData.c
++++ b/libs/system/cellSaveData.c
+@@ -1385,6 +1385,16 @@ extern u32  cellPad_ui_keys(void);
+ extern s32  cellPadGetData(u32 port_no, CellPadData* data_guest);
+ 
+ /* 1: chosen (into `selected`); 0: cancelled; -1: no dialog (off, or no window). */
++/* PS3_SAVES_LATENCY=1 (tests): for each move of the cursor (and the overwrite question, and back from it) the
++ * time from the dialog reading the input to the backend drawing the picture that shows it, in the dialog's own
++ * 15 ms steps -- the delay the player sees. */
++static double savedata_now_ms(void)
++{
++    struct timespec ts;
++    timespec_get(&ts, TIME_UTC);
++    return (double)ts.tv_sec * 1e3 + (double)ts.tv_nsec / 1e6;
++}
++
+ static int savedata_list_dialog(CellSaveDataSetList* setList, const CellSaveDataDirList* dirList, u32 listed,
+                                 const SaveListSet* set, char selected[64], int is_save)
+ {
+@@ -1475,6 +1485,14 @@ static int savedata_list_dialog(CellSaveDataSetList* setList, const CellSaveData
+     unsigned waited = 0, held_ms = 0, still_ms = 0, self_presents = 0;
+     uint32_t seen_presents = __atomic_load_n(&g_ps3_osd_presents, __ATOMIC_ACQUIRE);
+     int confirming = 0;
++    const char* lat_env = getenv("PS3_SAVES_LATENCY");
++    const int lat_on = lat_env && *lat_env == '1';
++    double move_t = 0;
++    uint32_t move_rev_s = 0, move_rev_l = 0;
++    int move_row = -1;
++#define SAVES_MOVED(row) do { if (lat_on) { move_t = savedata_now_ms(); move_row = (row); \
++        move_rev_s = __atomic_load_n(&g_ps3_osd_saves.rev, __ATOMIC_ACQUIRE); \
++        move_rev_l = __atomic_load_n(&g_ps3_osd_list.rev, __ATOMIC_ACQUIRE); } } while (0)
+     for (;;) {
+ #ifdef _WIN32
+         Sleep(15);
+@@ -1498,8 +1516,18 @@ static int savedata_list_dialog(CellSaveDataSetList* setList, const CellSaveData
+                 still_ms = 0;
+             }
+         }
+-        if (waited >= 4000 && __atomic_load_n(&g_ps3_osd_list.drawn, __ATOMIC_ACQUIRE) < first_rev &&
++        /* Headless (no window: nothing can draw the list, no player to see it): after 4 s with nothing drawn, the
++         * title's first entry, as before. With a window the dialog is the player's: it waits for their choice
++         * however long the picture takes -- a stall in the drawing never picks, loads or overwrites a save. */
++        if (!g_ps3_osd_present_again && waited >= 4000 &&
++            __atomic_load_n(&g_ps3_osd_list.drawn, __ATOMIC_ACQUIRE) < first_rev &&
+             __atomic_load_n(&g_ps3_osd_saves.drawn, __ATOMIC_ACQUIRE) < first_screen) { result = -1; break; }   /* nothing draws it */
++        if (move_row >= 0 && ((int32_t)(__atomic_load_n(&g_ps3_osd_saves.drawn, __ATOMIC_ACQUIRE) - move_rev_s) >= 0 ||
++                              (int32_t)(__atomic_load_n(&g_ps3_osd_list.drawn, __ATOMIC_ACQUIRE) - move_rev_l) >= 0)) {
++            printf("[cellSaveData] list dialog: row %d%s drawn %.0f ms after the input%c", move_row,
++                   confirming ? " (the overwrite question)" : "", savedata_now_ms() - move_t, 10);
++            move_row = -1;
++        }
+         if (pad_ea) cellPadGetData(0, (CellPadData*)(uintptr_t)pad_ea);    /* the title may not be polling */
+         u32 ly = 128;
+         u32 b = cellPad_ui_state(&ly) | cellPad_ui_keys();   /* the keyboard's Esc and Backspace: back */
+@@ -1516,20 +1544,22 @@ static int savedata_list_dialog(CellSaveDataSetList* setList, const CellSaveData
+         last = b;
+         if (confirming) {
+             if (edge & (CELL_PAD_CTRL_CROSS | CELL_PAD_CTRL_START)) { result = 1; break; }
+-            if (edge & CELL_PAD_CTRL_CIRCLE) { confirming = 0; pick_show(e, n, cur, &top, is_save); }
++            if (edge & CELL_PAD_CTRL_CIRCLE) { confirming = 0; pick_show(e, n, cur, &top, is_save); SAVES_MOVED(cur); }
+             continue;
+         }
+         if (step) {
+             cur = (cur + step + n) % n;
+             pick_show(e, n, cur, &top, is_save);
++            SAVES_MOVED(cur);
+         }
+         if (edge & (CELL_PAD_CTRL_CROSS | CELL_PAD_CTRL_START)) {
+-            if (is_save && !e[cur].is_new) { confirming = 1; pick_show_overwrite(e, n, cur, is_save); continue; }
++            if (is_save && !e[cur].is_new) { confirming = 1; pick_show_overwrite(e, n, cur, is_save); SAVES_MOVED(cur); continue; }
+             result = 1;
+             break;
+         }
+         if (edge & CELL_PAD_CTRL_CIRCLE) { result = 0; break; }
+     }
++#undef SAVES_MOVED
+     ps3_osd_saves_close();
+     ps3_osd_list_close();
+     cellPad_ui_intercept(0);
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index f40ebc2..ce96b44 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -2165,6 +2165,7 @@ static void vk_window_drop(const char* why)
+     s_vk.sem_acquire = VK_NULL_HANDLE;
+     s_vk.sc_count = 0;
+     s_vk.windowed = 0;
++    g_ps3_osd_present_again = 0;   /* headless from here: no window for a host dialog to present in */
+ }
+ 
+ static int vk_present_again(void);   /* below: a host dialog's own presents */
+@@ -2773,7 +2774,11 @@ static void vk_present_window(void)
+                     1, &blit, VK_FILTER_LINEAR);
+     vk_osd_draw(cb, idx);
+     vk_osd_fps_draw(cb, idx);
+-    if (!vk_osd_saves_draw(cb, idx))
++    /* PS3_SAVES_TEST_NODRAW=1 (tests): a host dialog's picture never drawn, as when the drawing has stalled --
++     * the dialog must still wait for the player (cellSaveData.c) */
++    static int nodraw = -1;
++    if (nodraw < 0) { const char* e = getenv("PS3_SAVES_TEST_NODRAW"); nodraw = e && *e == '1'; }
++    if (!nodraw && !vk_osd_saves_draw(cb, idx))
+         vk_osd_list_draw(cb, idx);
+     b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+     b.dstAccessMask = 0;
+-- 
+2.56.0.windows.3
+

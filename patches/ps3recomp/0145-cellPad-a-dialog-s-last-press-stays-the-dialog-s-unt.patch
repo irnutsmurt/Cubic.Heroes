@@ -1,0 +1,73 @@
+From 8a4fb9e15bcef633717a8c4e27b6e0758b5a893d Mon Sep 17 00:00:00 2001
+From: giteaguy <73799093+irnutsmurt@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 14:06:56 -0800
+Subject: [PATCH] cellPad: a dialog's last press stays the dialog's until
+ released
+
+While a host dialog holds the pad the title reads it as released. When the
+dialog closed on the press that answered it, the rest of that press reached
+the title as a new press: in a character editor whose menu stays on its SAVE
+item, the save list opened again by itself.
+
+Now the digital buttons held as the dialog closes, and the left stick if it
+was off centre, read as released to the title until they are let go -- the
+same rule the dialog applies to a button held as it opens.
+
+Tested in the game: the character editor's load and save lists open once
+each; the system menu's save flow unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libs/input/cellPad.c | 26 ++++++++++++++++++++++++++
+ 1 file changed, 26 insertions(+)
+
+diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
+index 380cdb5..6bfcdc7 100644
+--- a/libs/input/cellPad.c
++++ b/libs/input/cellPad.c
+@@ -886,9 +886,22 @@ void cellPad_poll(void)
+  * or a test's PAD_FILE. */
+ static volatile int s_ui_intercept = 0;
+ static volatile u32 s_ui_buttons = 0, s_ui_ly = 128;
++/* What the dialog's last press leaves held as it closes stays the dialog's until let go: the game, which read
++ * the pad as released all along, would otherwise take the rest of the press that answered the dialog as a new
++ * press of its own (the character editor's SAVE item, still selected, opened its list again). The digital
++ * buttons held then, and the left stick if it was off centre, read as released until they are. */
++static volatile u32 s_ui_after_mask = 0;
++static volatile int s_ui_after_stick = 0;
+ 
+ void cellPad_ui_intercept(int on)
+ {
++    if (!on && __atomic_load_n(&s_ui_intercept, __ATOMIC_ACQUIRE)) {
++        s_ui_after_mask = s_ui_buttons;
++        s_ui_after_stick = s_ui_ly < 64 || s_ui_ly > 192;
++    } else if (on) {
++        s_ui_after_mask = 0;
++        s_ui_after_stick = 0;
++    }
+     s_ui_buttons = 0; s_ui_ly = 128;
+     __atomic_store_n(&s_ui_intercept, on ? 1 : 0, __ATOMIC_RELEASE);
+ }
+@@ -1296,6 +1309,19 @@ emit:
+         for (int _i = CELL_PAD_BTN_OFFSET_DIGITAL1; _i < CELL_PAD_MAX_CODES; _i++) data->button[_i] = 0;
+         data->button[CELL_PAD_BTN_OFFSET_ANALOG_RIGHT_X] = data->button[CELL_PAD_BTN_OFFSET_ANALOG_RIGHT_Y] = 0x80;
+         data->button[CELL_PAD_BTN_OFFSET_ANALOG_LEFT_X] = data->button[CELL_PAD_BTN_OFFSET_ANALOG_LEFT_Y] = 0x80;
++    } else if ((s_ui_after_mask || s_ui_after_stick) && port_no == 0 && data->len > 0) {
++        /* a dialog just closed: its last press, until let go (s_ui_after_mask above) */
++        const u32 held = (u32)(data->button[CELL_PAD_BTN_OFFSET_DIGITAL1] & 0xFF) |
++                         (u32)(data->button[CELL_PAD_BTN_OFFSET_DIGITAL2] & 0xFF) << 8;
++        const u32 still = s_ui_after_mask & held;
++        s_ui_after_mask = still;
++        data->button[CELL_PAD_BTN_OFFSET_DIGITAL1] &= (u16)~(still & 0xFF);
++        data->button[CELL_PAD_BTN_OFFSET_DIGITAL2] &= (u16)~(still >> 8);
++        if (s_ui_after_stick) {
++            const u32 ly = data->button[CELL_PAD_BTN_OFFSET_ANALOG_LEFT_Y];
++            if (ly >= 64 && ly <= 192) s_ui_after_stick = 0;
++            else data->button[CELL_PAD_BTN_OFFSET_ANALOG_LEFT_Y] = 0x80;
++        }
+     }
+     {
+         unsigned int ea = (unsigned int)(uintptr_t)data_guest;
+-- 
+2.56.0.windows.3
+

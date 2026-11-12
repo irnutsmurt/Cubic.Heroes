@@ -1,0 +1,51 @@
+# The character editor's own save-data lists (docs/SAVE_UI.md, "Tests"): the title menu's EDITOR opens the list of
+# edit data ("Load Character": three edits in build/checkpoints/picker-two), the second loaded; the editor's menu
+# (EDIT, SETTING, SAVE, PREVIEW) SAVE opens "Save Character" (New Save Data and the edits): one row down from the
+# game's focus, the overwrite question refused (No), asked again and accepted -- the batch checks that the chosen
+# edit's folder is the only one written; back to the title.
+#! env PS3_SAVEDATA_PICKER=1 PS3_SAVES_LATENCY=1
+#! saves build/checkpoints/picker-two
+include common.drive
+log TitleMovie 120
+sleep 5
+press START                 # "PRESS START BUTTON"
+sleep 3
+press DOWN                  # EDITOR (the menu opens on CONTINUE)
+sleep 1
+press CROSS
+sleep 8
+press CROSS                 # LOAD (or NEW DATA)
+log list.dialog:.3.entries 25
+sleep 2
+press DOWN                  # the second edit
+sleep 1
+press CROSS
+log chose.1 6
+log LOAD.dir= 10
+sleep 4
+shot editor_menu
+press DOWN                  # SETTING
+sleep 1
+press DOWN                  # SAVE
+sleep 1
+press CROSS
+log list.dialog:.4.entries 25
+sleep 2
+shot editor_save_list
+press DOWN
+sleep 1
+press CROSS                 # an edit there: the overwrite question
+sleep 2
+shot editor_question
+press CIRCLE                # No: back to the list, nothing written
+sleep 1
+press CROSS
+sleep 2
+press CROSS                 # Yes
+log SAVE.dir= 15
+sleep 5
+shot editor_saved           # back on the editor's menu, SAVE selected (no message)
+press START                 # TITLE
+sleep 4
+shot editor_title
+sleep 2

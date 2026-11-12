@@ -1,6 +1,6 @@
 # The save-data list on the character select (docs/PC_EXPERIENCE.md section 7a): the first save picked,
-# "Change characters?" YES, the third of three edits picked; then a save from the system menu, which must go
-# into the slot CONTINUE loaded.
+# "Change characters?" YES, the third of three edits picked and loaded ("Is this okay?" ends the drive). The
+# character editor's own save list: save_picker_editor.drive.
 #! env PS3_SAVEDATA_PICKER=1
 #! saves build/checkpoints/picker-two
 include common.drive

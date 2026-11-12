@@ -1,0 +1,74 @@
+# The save-data list with many saves (docs/SAVE_UI.md, "Tests"): build/checkpoints/picker-many, copies of the
+# owner's saves -- the two of picker-two and ten copies of the first under other names, each with its own time, so
+# the list (newest first, the title's order) is known: 66BE2553, 66BE25F6, 66BE27A0 ... 66BE27A9.
+#   CONTINUE: the 12-row list; 9 quick presses down (the list scrolls), then down held 2 s (the repeat); cancelled.
+#   CONTINUE again: 3 quick presses up from the head (the list wraps) -- row 9, 66BE27A7 -- loaded.
+#   The system menu's SAVE: "New Save Data" and the 12 saves, opened on row 1 (the game's focus); 7 down, the
+#   overwrite question refused (No), one more down, the question accepted: row 9 of that list, the 9th save
+#   (66BE27A6), written -- and nothing else (the batch compares every save's files with the checkpoint's).
+# PS3_SAVES_LATENCY=1: each move's delay from the input to the picture that shows it, in the log.
+#! env PS3_SAVEDATA_PICKER=1 PS3_SAVES_LATENCY=1
+#! saves build/checkpoints/picker-many
+include common.drive
+log TitleMovie 120
+sleep 5
+press START                 # "PRESS START BUTTON"
+sleep 3
+press START                 # CONTINUE
+log list.dialog:.12.entries 25
+sleep 2
+shot long_head
+repeat 9 DOWN 0.2           # quick presses: row 9, the list scrolled
+sleep 1
+shot long_row9
+hold DOWN 2                 # held: one step, then the repeat after 0.4 s every 0.12 s
+sleep 1
+shot long_held
+press CIRCLE
+log cancelled 6
+sleep 3
+press START                 # the cancel leaves the title at "PRESS START BUTTON"
+sleep 3
+press START                 # CONTINUE again
+log list.dialog:.12.entries 25
+sleep 2
+repeat 3 UP 0.2             # up from the head wraps: row 9
+sleep 1
+shot long_wrapped
+press CROSS
+log chose.9 6
+log LOAD.dir= 10
+sleep 6
+press CROSS                 # "Change characters?" NO
+state area>0,life>0 90
+sleep 3
+attempt 3 page_dialogues
+  press START               # the system menu, on RESUME
+  sleep 2
+  state menu==1 4
+end
+press DOWN                  # SAVE
+sleep 1
+press CROSS
+log list.dialog:.13.entries 25
+sleep 2
+repeat 7 DOWN 0.2           # from row 1 to row 8 (row 0 is New Save Data)
+sleep 1
+press CROSS                 # the overwrite question
+sleep 2
+shot long_question
+press CIRCLE                # No: back to the list, nothing written
+sleep 1
+press DOWN                  # row 9
+sleep 1
+press CROSS
+sleep 2
+press CROSS                 # Yes
+log SAVE.complete 15
+sleep 4
+press UP
+sleep 1
+press CROSS
+sleep 2
+state life>0,menu==3 5
+sleep 2
