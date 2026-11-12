@@ -85,6 +85,29 @@ The harness's picker drives ran headless (no `WINDOW=1`), so they never saw a li
 because their presses came within the 4 s, and the SAVE in save_picker went to the first entry. They run in
 a window now (build/r8/ui20_run.sh).
 
+## The picture's cost (2026-11-12, rel36)
+
+The owner's M4 play session (rel35, fullscreen 1920x1080) found the screen very slow: each move of the
+cursor took effect late, and the game froze 0.4-1.1 s at a time while a list was open (two marks; the
+session's trace: the game's thread 0.42-0.83 s in one import call at a time, running 7% of it). The picture
+was composed straight into the buffer the present copies from: host-visible, coherent memory, which the
+desktop drivers make write-combined, so the CPU's reads of it are uncached -- and composing blends every
+pixel it covers, reading it first. Off-line (tools/save_ui_preview.c's compose timed, the save list, 1920x1080):
+**1,034 ms** in write-combined memory against **15 ms** in cached memory [M]. It ran under the present
+mutex, so the game's next flip (its import calls deliver flips) waited for it, and the dialog's own loop,
+composing, read no input meanwhile.
+
+Now the picture is composed in a cached buffer of its own and copied into the present's buffer in one pass:
+15 ms in all at 1920x1080, the same picture byte for byte [M] (ps3recomp patch 0143). save_picker in a
+window (1280x720), rel35 against rel36 [M]: rel35 froze seven times while a list was open (0.35-1.13 s);
+rel36 not once, the same choices and the drive passed; the frame gaps both builds share (0.13-0.27 s) are
+the scenario's area loads.
+
+A correction to the section above: the game does flip while one of these dialogs is open. On rel36 it
+presented throughout every dialog and the dialog never presented itself; the "presents nothing" seen
+before was the game's flips waiting for the slow picture under the present mutex, not the game waiting for
+the dialog. The dialog's own present stays for a title that does wait.
+
 ## Results (rel20, 2026-11-10)
 
 In the game, in a window, on the drives' copies of the saves (build/r8/ui20_run.sh; the pictures in
