@@ -67,7 +67,7 @@ int Pool::victim(const ChannelInfo& want) const
 void Pool::apply(unsigned src, const ChannelInfo& i)
 {
     const al_api::Api& al = dev_->al();
-    al.alSourcef(src, AL_GAIN, std::clamp(i.gain, 0.0f, 1.0f));
+    al.alSourcef(src, AL_GAIN, std::clamp(i.gain, 0.0f, 1.0f) * i.level);
     al.alSourcei(src, AL_LOOPING, i.looping ? AL_TRUE : AL_FALSE);
     if (i.positional) {
         al.alSourcei(src, AL_SOURCE_RELATIVE, AL_FALSE);
@@ -200,7 +200,8 @@ void Pool::set_gain(Handle h, float gain)
     Channel* c = get(h);
     if (!c || c->info.gain == gain) return;
     c->info.gain = gain;
-    if (c->voice >= 0) dev_->al().alSourcef(voices_[(size_t)c->voice].source, AL_GAIN, std::clamp(gain, 0.0f, 1.0f));
+    if (c->voice >= 0)
+        dev_->al().alSourcef(voices_[(size_t)c->voice].source, AL_GAIN, std::clamp(gain, 0.0f, 1.0f) * c->info.level);
 }
 
 void Pool::set_position(Handle h, const float pos[3])

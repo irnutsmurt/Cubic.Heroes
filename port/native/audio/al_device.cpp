@@ -294,30 +294,54 @@ Live Device::live() const
 
 // ---- samples ----
 
-bool load_sample(Device& dev, const std::string& path, Sample* out, std::string* error)
+namespace {
+
+// One AL buffer of `frames` frames, its loop points from `info`; 0 on failure.
+unsigned make_buffer(Device& dev, const std::string& path, const wav_pcm::Info& info, const int16_t* pcm, bool stereo,
+                     bool* loop_points_set, std::string* error)
+{
+    const al_api::Api& al = dev.al();
+    unsigned b = dev.new_buffer();
+    if (!b) {
+        if (error) *error = "no AL buffer";
+        return 0;
+    }
+    al.alGetError();
+    al.alBufferData(b, stereo ? AL_FORMAT_STEREO16 : AL_FORMAT_MONO16, pcm,
+                    (ALsizei)(info.frames * (stereo ? 2 : 1) * sizeof(int16_t)), (ALsizei)info.rate);
+    if (al.alGetError() != AL_NO_ERROR) {
+        if (error) *error = "alBufferData refused the samples";
+        dev.delete_buffer(b);
+        return 0;
+    }
+    if (info.has_loop && dev.caps().loop_points) {
+        const ALint lp[2] = {(ALint)info.loop_start, (ALint)info.loop_end};
+        al.alBufferiv(b, AL_LOOP_POINTS_SOFT, lp);
+        const bool ok = al.alGetError() == AL_NO_ERROR;
+        if (loop_points_set) *loop_points_set = ok;
+        if (!ok) dev.log("%s: loop points refused (%d-%d)", path.c_str(), lp[0], lp[1]);
+    }
+    return b;
+}
+
+}  // namespace
+
+bool load_sample(Device& dev, const std::string& path, Sample* out, std::string* error, bool centre_stereo)
 {
     *out = Sample{};
     std::vector<int16_t> pcm;
     if (!wav_pcm::load(path, &out->info, &pcm, error)) return false;
-    const al_api::Api& al = dev.al();
-    out->buffer = dev.new_buffer();
-    if (!out->buffer) {
-        if (error) *error = "no AL buffer";
-        return false;
-    }
-    al.alGetError();
-    al.alBufferData(out->buffer, out->info.channels == 1 ? AL_FORMAT_MONO16 : AL_FORMAT_STEREO16, pcm.data(),
-                    (ALsizei)(pcm.size() * sizeof(int16_t)), (ALsizei)out->info.rate);
-    if (al.alGetError() != AL_NO_ERROR) {
-        if (error) *error = "alBufferData refused the samples";
-        dev.delete_buffer(out->buffer);
-        return false;
-    }
-    if (out->info.has_loop && dev.caps().loop_points) {
-        const ALint lp[2] = {(ALint)out->info.loop_start, (ALint)out->info.loop_end};
-        al.alBufferiv(out->buffer, AL_LOOP_POINTS_SOFT, lp);
-        out->loop_points_set = al.alGetError() == AL_NO_ERROR;
-        if (!out->loop_points_set) dev.log("%s: loop points refused (%d-%d)", path.c_str(), lp[0], lp[1]);
+    const bool stereo = out->info.channels == 2;
+    out->buffer = make_buffer(dev, path, out->info, pcm.data(), stereo, &out->loop_points_set, error);
+    if (!out->buffer) return false;
+    if (centre_stereo && !stereo) {
+        std::vector<int16_t> dup(pcm.size() * 2);
+        for (size_t i = 0; i < pcm.size(); i++) dup[2 * i] = dup[2 * i + 1] = pcm[i];
+        out->centre_stereo = make_buffer(dev, path, out->info, dup.data(), true, nullptr, error);
+        if (!out->centre_stereo) {
+            dev.delete_buffer(out->buffer);
+            return false;
+        }
     }
     return true;
 }
@@ -325,6 +349,7 @@ bool load_sample(Device& dev, const std::string& path, Sample* out, std::string*
 void free_sample(Device& dev, Sample* s)
 {
     dev.delete_buffer(s->buffer);
+    dev.delete_buffer(s->centre_stereo);
 }
 
 // ---- reverb ----

@@ -22,6 +22,7 @@
  * `fadebgm:<seconds>` (fadeOutBGM), `fadeloops:<seconds>` (fadeOutLoopSEs) -- through its lifted methods, as
  * a call from the game would (traced like one when the trace is on). Nothing else changes. */
 #include "ppu_recomp.h"   /* ppu_context, vm_base, the lifted functions */
+#include "native/audio/native_sound.h"   /* DOTHEROES_NATIVE_AUDIO: the native sound manager (M3) */
 
 #include <atomic>
 #include <chrono>
@@ -90,9 +91,12 @@ int hook_index(uint32_t addr)
     return -1;
 }
 
+int native_call(ppu_context* ctx, uint32_t addr);
+
 /* One traced call: the arguments as the hook found them, the lifted function run (its own hook declines while
- * `inner` is set) with its tail calls drained, the outputs as the function left them. */
-void traced_call(ppu_context* ctx, const Hook& h, int& inner)
+ * `inner` is set) with its tail calls drained -- or, with the native sound manager, its answer -- and the outputs
+ * as the function left them. */
+void traced_call(ppu_context* ctx, const Hook& h, int& inner, bool native = false)
 {
     const uint64_t g[8] = { ctx->gpr[3], ctx->gpr[4], ctx->gpr[5], ctx->gpr[6], ctx->gpr[7], ctx->gpr[8], ctx->gpr[9], ctx->gpr[10] };
     const double f[4] = { ctx->fpr[1], ctx->fpr[2], ctx->fpr[3], ctx->fpr[4] };
@@ -119,10 +123,14 @@ void traced_call(ppu_context* ctx, const Hook& h, int& inner)
         default: if (nout < 4) outs[nout++] = { *sp, (uint32_t)g[gi], 0 }; gi++; break;   // o b F
         }
     }
-    inner = 1;
-    h.fn(ctx);
-    while (g_trampoline_fn) { void (*fn)(void*) = g_trampoline_fn; g_trampoline_fn = nullptr; fn(ctx); }
-    inner = 0;
+    if (native) {
+        native_call(ctx, h.addr);
+    } else {
+        inner = 1;
+        h.fn(ctx);
+        while (g_trampoline_fn) { void (*fn)(void*) = g_trampoline_fn; g_trampoline_fn = nullptr; fn(ctx); }
+        inner = 0;
+    }
     snprintf(b, sizeof b, " -> %X", (uint32_t)ctx->gpr[3]);
     line += b;
     for (int k = 0; k < nout; k++) {
@@ -212,10 +220,115 @@ void lab_tick(ppu_context* ctx)
     }
 }
 
+// ---- DOTHEROES_NATIVE_AUDIO: the native sound manager (port/native/audio/native_sound.h, M3) -----------------
+// Each of the game's sound-manager methods answered by the native manager on OpenAL Soft; the lifted method
+// does not run, FMOD is never initialised. An FMOD API function reached anyway is counted (it should never be:
+// the sound manager is FMOD's only caller) and reported at exit.
+int g_native = 0;
+std::atomic<uint64_t> g_fmod_reached{0};
+
+bool rdvec(uint32_t ea, float out[3])
+{
+    if (!ea) return false;
+    out[0] = rdf(ea);
+    out[1] = rdf(ea + 4);
+    out[2] = rdf(ea + 8);
+    return true;
+}
+
+extern "C" const char* ppu_vfs_root;   // the host folder the game's /dev_bdvd maps to (the runtime's ppu_fs.cpp)
+
+// The game's own state the sound manager reads (rel27's class reads the same): the options' music and effect
+// levels, the system menu's pause byte, the exit-request byte (cleared when the system asks the game to quit),
+// and the byte that makes the class's shutdown return at once.
+constexpr uint32_t kGame = 0x0159AB58;
+constexpr uint32_t kBgmLevel = kGame + 0x948, kSeLevel = kGame + 0x94C;
+constexpr uint32_t kMenuPause = kGame + 0x764, kNotExiting = kGame + 0x761;
+constexpr uint32_t kNoShutdown = 0x0159B558;
+
+void native_log(const char* line) { fprintf(stderr, "[audio] %s\n", line); }
+
+void native_state()
+{
+    nsm_set_game_state((int)rd32(kBgmLevel), (int)rd32(kSeLevel), vm_base[kMenuPause] != 0, vm_base[kNotExiting] == 0);
+}
+
+// The class's init, natively: the device, the reverb, the music streamer, the voices and the player's sound list.
+// The sound folder is the disc's: the game's /dev_bdvd/PS3_GAME/USRDIR/data/sound, mapped as the runtime maps the
+// game's own file access (ppu_fs.cpp: /dev_bdvd/ -> the VFS root).
+void native_init()
+{
+    static bool done = false;
+    if (done) return;
+    done = true;
+    const std::string dir = std::string(ppu_vfs_root ? ppu_vfs_root : ".") + "/PS3_GAME/USRDIR/data/sound";
+    nsm_options o{};
+    o.sound_dir = dir.c_str();
+    o.log = native_log;
+    if (!nsm_init(&o)) fprintf(stderr, "[audio] the native sound manager is silent (no library, device or list)\n");
+}
+
+int native_call(ppu_context* ctx, uint32_t addr)
+{
+    const int r4 = (int)(int32_t)(uint32_t)ctx->gpr[4], r5 = (int)(int32_t)(uint32_t)ctx->gpr[5];
+    const int r6 = (int)(int32_t)(uint32_t)ctx->gpr[6];
+    const float f1 = (float)ctx->fpr[1], f2 = (float)ctx->fpr[2];
+    float a[3], b[3];
+    uint64_t r3 = 0;
+    native_state();
+    switch (addr) {
+    case 0x0046E0EC: r3 = nsm_play_se(r4, r5, rdvec((uint32_t)r6, a) ? a : nullptr); break;   // playSE(id, prio, pos)
+    case 0x0046DD6C: r3 = nsm_play_se_fade_in(r4, r6, f1); break;     // playSEFadeIn(id, (unused), prio, T)
+    case 0x00465AC0: r3 = (uint64_t)nsm_is_playing(r4); break;         // isPlaying(id)
+    case 0x00466A1C: r3 = (uint64_t)nsm_stop_se(r4); break;            // stopSE(id)
+    case 0x00465C28: r3 = (uint64_t)nsm_stop_channel((uint32_t)ctx->gpr[4]); break;   // stopChannel(handle)
+    case 0x004666FC: r3 = (uint64_t)nsm_fade_out_se(r4, f1); break;    // fadeOutSE(id, T)
+    case 0x00466324: r3 = (uint64_t)nsm_fade_out_loop_ses(f1); break;  // fadeOutLoopSEs(T)
+    case 0x00466418: r3 = (uint64_t)nsm_pause_by_id(r4, r5); break;    // pauseById(id, paused)
+    case 0x0046F4BC: nsm_play_bgm(r4, r5, r6); break;                  // playBGM(id, prio, loop)
+    case 0x0046638C: r3 = (uint64_t)nsm_fade_out_bgm(f1); break;       // fadeOutBGM(T)
+    case 0x004662A8: r3 = (uint64_t)nsm_is_bgm_active(); break;        // isBGMActive()
+    case 0x004660AC: r3 = (uint64_t)(int64_t)nsm_current_bgm_id(); break;   // currentBGMId()
+    case 0x0046624C: nsm_duck_bgm(f1, f2); break;                      // duckBGM(T, level)
+    case 0x004661F4: nsm_unduck_bgm(f1); break;                        // unduckBGM(T)
+    case 0x00466184: nsm_duck_se(f1); break;                           // duckSE(T)
+    case 0x00466128: nsm_unduck_se(f1); break;                         // unduckSE(T)
+    case 0x0046C1AC: nsm_set_bgm_master(f1); break;                    // setBGMMaster(m)
+    case 0x0046C364: nsm_set_sound_volume(r4, f1); break;              // setSoundVolume(id, volume)
+    case 0x0046C3F0: nsm_apply_volume_options(); break;                // applyVolumeOptions()
+    case 0x00465D9C:                                                   // setListener(pos, velocity)
+        if (rdvec((uint32_t)ctx->gpr[4], a)) nsm_set_listener(a, rdvec((uint32_t)ctx->gpr[5], b) ? b : nullptr);
+        break;
+    case 0x00465D60: nsm_set_reverb(r4); break;                        // setReverb(on)
+    case 0x004664E0: r3 = (uint64_t)nsm_is_loaded(r4); break;          // isLoaded(id)
+    case 0x0046DB40: nsm_update(f1); break;                            // update(dt)
+    case 0x00465E30: native_init(); break;                             // init()
+    case 0x00471604: nsm_load_sounds(); break;                         // loadSounds(): the effects resident
+    case 0x00472A14: break;                                            // preload(): the files are read by loadSounds
+    case 0x0046E6D4: if (!vm_base[kNoShutdown]) nsm_shutdown(); break; // shutdown()
+    case 0x004708B4: break;                                            // the stream-open callback: never called
+    default: return 0;
+    }
+    ctx->gpr[3] = r3;
+    return 1;
+}
+
 int hook(ppu_context* ctx, int index, int& inner)
 {
     if (inner || index < 0) return 0;   // the lifted function re-entered from traced_call
     if (!g_lab.empty() && g_hooks[index].addr == kUpdate) lab_tick(ctx);
+    if (g_native) {
+        const uint32_t addr = g_hooks[index].addr;
+        if (addr >= 0x00800000) {   // an FMOD API function: never expected with the native manager
+            if (g_fmod_reached++ == 0) fprintf(stderr, "[audio] FMOD reached with the native sound manager: %s\n", g_hooks[index].name);
+            return 0;
+        }
+        if (g_trace) {
+            traced_call(ctx, g_hooks[index], inner, true);
+            return 1;
+        }
+        return native_call(ctx, addr);
+    }
     if (!g_trace) return 0;
     traced_call(ctx, g_hooks[index], inner);
     return 1;
@@ -237,6 +350,16 @@ int hook(ppu_context* ctx, int index, int& inner)
 /* Before the guest starts (main.cpp). */
 extern "C" void dotheroes_audio_hooks_init(void)
 {
+    // DOTHEROES_NATIVE_AUDIO=1 (M3, a switch while the old path is kept for comparisons): the native sound manager
+    const char* nat = getenv("DOTHEROES_NATIVE_AUDIO");
+    if (nat && *nat == '1') {
+        g_native = 1;
+        g_audio_hooks = 1;
+        fprintf(stderr, "[audio] the native sound manager (OpenAL Soft) in place of FMOD (DOTHEROES_NATIVE_AUDIO)\n");
+        atexit([] {
+            fprintf(stderr, "[audio] at exit: FMOD API calls reached %llu\n", (unsigned long long)g_fmod_reached.load());
+        });
+    }
     const char* lab = getenv("DOTHEROES_DEV_SOUND");
     if (lab && *lab) {
         lab_parse(lab);
