@@ -252,6 +252,7 @@
 | `port/native/spu_native.cpp` | SPUGEN | keep: generates the water's and the waver's tasks from the player's lift; nothing of an image in it |
 | `port/native/spu_native.h` | SPUGEN | keep: generates the water's and the waver's tasks from the player's lift; nothing of an image in it |
 | `port/native/spu_native_absent.cpp` | SPUGEN | keep: generates the water's and the waver's tasks from the player's lift; nothing of an image in it |
+| `port/native/spu_native_float.h` | SPUGEN | keep: generates the water's and the waver's tasks from the player's lift; nothing of an image in it |
 | `port/native/water_task.cpp` | INDEP | keep |
 | `port/native/water_task.h` | INDEP | keep |
 | `port/native/waver_game.cpp` | INDEP | keep |
@@ -293,6 +294,7 @@
 | `tests/native/sound_replay.cpp` | INDEP | keep |
 | `tests/native/sound_replay.sh` | INDEP | keep |
 | `tests/native/sound_stress_check.cpp` | INDEP | keep |
+| `tests/native/spu_float_rz_check.cpp` | INDEP | keep |
 | `tests/native/store_paths.py` | INDEP | keep |
 | `tests/native/store_paths_test.cpp` | INDEP | keep |
 | `tests/native/trace_reader.h` | INDEP | keep |

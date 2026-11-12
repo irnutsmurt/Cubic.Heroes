@@ -16,6 +16,25 @@
 
 #include "spu_helpers.h"   // the runtime's exact SPU semantics (the lift's own)
 
+// The SPU's float mode for the image's single-precision arithmetic (port/native/spu_native_float.h): 1 when
+// the generator found no helper in the image's code that needs the host's own float mode (the
+// double-precision ones, the FPSCR's), on x86-64 with SSE4.1. Otherwise the runtime's spu_fa and the rest.
+#define SPU_NATIVE_FLOAT_RZ @FLOAT_RZ@
+#if SPU_NATIVE_FLOAT_RZ
+#include "spu_native_float.h"
+#endif
+#if SPU_NATIVE_FLOAT_RZ && SPU_NATIVE_FLOAT_RZ_AVAILABLE
+#define SPU_NATIVE_RZ 1
+#else
+#define SPU_NATIVE_RZ 0
+#define rz_fa spu_fa
+#define rz_fs spu_fs
+#define rz_fm spu_fm
+#define rz_fma spu_fma
+#define rz_fms spu_fms
+#define rz_fnms spu_fnms
+#endif
+
 // Generated: every block of the lift is a label, some reached by no goto, and not every image uses every helper.
 #if defined(__clang__) || defined(__GNUC__)
 #pragma GCC diagnostic ignored "-Wunused-label"
@@ -56,7 +75,30 @@ struct Run {
     uint32_t ret = 0;
     uint32_t exit = kNone, exit_pc = 0, exit_code = 0;
     uint32_t jt = 0, js = 0;
+    uint32_t host_mxcsr = 0;   // the host's float mode, for its calls (SPU_NATIVE_RZ)
 };
+
+// ---- The SPU's float mode --------------------------------------------------------------------------------
+// With SPU_NATIVE_RZ (the generator found no helper that needs the host's own float mode), the image's code
+// runs with MXCSR at the SPU's mode -- round toward zero, flush-to-zero, denormals-are-zero
+// (spu_native_float.h, whose fa/fs/fm/fma/fms/fnms are then one host operation each): call() sets it, and
+// every call into the host (a channel, a stop, a branch it takes) has the host's own back for its duration.
+#if SPU_NATIVE_RZ
+struct HostMode {
+    explicit HostMode(const Run& c) { _mm_setcsr(c.host_mxcsr); }
+    ~HostMode() { _mm_setcsr(spu_native_rz::kMxcsrSpu); }
+};
+struct SpuMode {
+    uint32_t host;
+    explicit SpuMode(Run& c) : host(_mm_getcsr()) { c.host_mxcsr = host; _mm_setcsr(spu_native_rz::kMxcsrSpu); }
+    ~SpuMode() { _mm_setcsr(host); }
+};
+#define HOST_MODE(c) HostMode host_mode_(c)
+#define SPU_MODE(c) SpuMode spu_mode_(c)
+#else
+#define HOST_MODE(c) ((void)0)
+#define SPU_MODE(c) ((void)0)
+#endif
 
 FORCE_INLINE Q lsr(const Run& c, uint32_t a)
 {
@@ -77,9 +119,9 @@ FORCE_INLINE void lsw(Run& c, uint32_t a, const Q& v)
     memcpy(c.ls + (a & 0x3FFF0u), w, 16);
 }
 
-inline Q rdch(Run& c, uint32_t channel) { return spu_pref_u32(c.h->rdch(c.h->user, channel)); }
-inline uint32_t rchcnt(Run& c, uint32_t channel) { return c.h->rchcnt(c.h->user, channel); }
-inline void wrch(Run& c, uint32_t channel, const Q& v) { c.h->wrch(c.h->user, channel, v._u32[0]); }
+inline Q rdch(Run& c, uint32_t channel) { HOST_MODE(c); return spu_pref_u32(c.h->rdch(c.h->user, channel)); }
+inline uint32_t rchcnt(Run& c, uint32_t channel) { HOST_MODE(c); return c.h->rchcnt(c.h->user, channel); }
+inline void wrch(Run& c, uint32_t channel, const Q& v) { HOST_MODE(c); c.h->wrch(c.h->user, channel, v._u32[0]); }
 
 inline void halt(Run& c, uint32_t pc)
 {
@@ -88,7 +130,10 @@ inline void halt(Run& c, uint32_t pc)
 }
 inline bool stop(Run& c, uint32_t code, uint32_t pc, uint32_t block)
 {
-    if (c.h->stop(c.h->user, code, pc, block)) return true;
+    {
+        HOST_MODE(c);
+        if (c.h->stop(c.h->user, code, pc, block)) return true;
+    }
     c.exit = kEnded;
     c.exit_pc = pc;
     c.exit_code = code;
@@ -96,7 +141,10 @@ inline bool stop(Run& c, uint32_t code, uint32_t pc, uint32_t block)
 }
 inline void stop_end(Run& c, uint32_t code, uint32_t pc, uint32_t block)
 {
-    c.h->stop(c.h->user, code, pc, block);
+    {
+        HOST_MODE(c);
+        c.h->stop(c.h->user, code, pc, block);
+    }
     c.exit = kStopped;
     c.exit_pc = pc;
     c.exit_code = code;
@@ -109,6 +157,7 @@ inline void bad_return(Run& c, uint32_t link)
 }
 inline void unsupported(Run& c, uint32_t pc)
 {
+    HOST_MODE(c);
     if (c.h->unsupported) c.h->unsupported(c.h->user, pc);
 }
 inline void unresolved(Run& c, uint32_t target, uint32_t site)
@@ -126,7 +175,12 @@ bool host_branch(Run& c, uint32_t t, uint32_t site, bool call)
     const Branch k = call ? (inside ? Branch::unresolved_call : Branch::overlay_call)
                           : (inside ? Branch::unresolved_jump : Branch::overlay_jump);
     uint32_t ret = 0;
-    if (!c.h->branch(c.h->user, k, t, site, &ret)) {
+    bool taken;
+    {
+        HOST_MODE(c);
+        taken = c.h->branch(c.h->user, k, t, site, &ret);
+    }
+    if (!taken) {
         c.exit = kEnded;
         c.exit_pc = site;
         return false;
@@ -175,9 +229,12 @@ void load(uint8_t* ls)
 Result call(uint8_t* ls, u128* gpr, uint32_t entry, const Host& host, Outcome* out)
 {
     Run c{ ls, gpr, &host };
-    switch (entry & 0x3FFFFu) {
+    {
+        SPU_MODE(c);
+        switch (entry & 0x3FFFFu) {
 // @DISPATCH@
-    default: return Result::declined;
+        default: return Result::declined;
+        }
     }
     Outcome o;
     o.ret_pc = c.ret;

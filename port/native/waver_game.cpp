@@ -112,6 +112,33 @@ void snap_put(void* u, uint32_t ea, const void* src, uint32_t n)
     if (uint8_t* d = snap_at(*(Snap*)u, ea, n)) memcpy(d, src, n);
 }
 
+// DOTHEROES_WAVER_CHECK_DUMP=<dir> (check mode, tests): each differing frame's inputs and what the SPU task left,
+// <dir>/waver_<n>.bin, for tests/native/waver_task_check.cpp's replay (the lifted task and the native frame on
+// exactly these inputs, off-line). Game data: keep it local. Little-endian header of 8 words -- "WVCK", 1, the
+// frame's number, the block's EA, the field's, the two textures', 1 if the block at the wait follows -- then
+// the block at the creation, the block at the wait (zeros without one), the field at the creation, and the
+// field and the two textures as the game had them when the frame was checked.
+void dump_frame(const Snap& s)
+{
+    static const char* dir = getenv("DOTHEROES_WAVER_CHECK_DUMP");
+    if (!dir || !*dir) return;
+    char path[1024];
+    snprintf(path, sizeof path, "%s/waver_%llu.bin", dir, (unsigned long long)s.n);
+    FILE* f = fopen(path, "wb");
+    if (!f) return;
+    const uint32_t head[8] = { 0x4B435657u, 1, (uint32_t)s.n, s.param_ea, s.p.field, s.p.texture[0], s.p.texture[1],
+                               s.have_wait ? 1u : 0u };
+    fwrite(head, sizeof head, 1, f);
+    fwrite(s.params.data(), 1, kParamBytes, f);
+    const std::vector<uint8_t> none(kParamBytes, 0);
+    fwrite(s.have_wait ? s.params_wait.data() : none.data(), 1, kParamBytes, f);
+    fwrite(s.field.data(), 1, kFieldBytes, f);
+    fwrite(vm_base + s.p.field, 1, kFieldBytes, f);
+    fwrite(vm_base + s.p.texture[0], 1, kTextureBytes, f);
+    fwrite(vm_base + s.p.texture[1], 1, kTextureBytes, f);
+    fclose(f);
+}
+
 // The previous lifted frame (waited for by the game by now): the native frame
 // on its inputs, against what the SPU task left in the field and the texture.
 void check_previous()
@@ -132,6 +159,7 @@ void check_previous()
         if (memcmp(n.tex.data() + 4 * k, got_t + 4 * k, 4) && !dt++) first_t = k;
     }
     if (!df && !dt) { g->equal++; return; }
+    dump_frame(s);   // s: the inputs as captured (n has the native frame's writes)
     g->field_bad += df != 0;
     g->tex_bad += dt != 0;
     // The SPU task reads the block when it starts, somewhere between the creation (when the copy was
