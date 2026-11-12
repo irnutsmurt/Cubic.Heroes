@@ -122,6 +122,27 @@ the configuration's hash refuses) builds a stub, and the lifted tasks run.
     M1's loss in the fields is recovered: rel37 is within rel27's range in every figure. At the river all
     three are within one another's spread (the game does not wait for the water); the water's worker takes
     1.60 ms a step against the hand port's 0.78 -- about 3.6% of a core at 22.7 steps a second.
+  - **The mode's switches, checked** [M, 2026-11-12]: MXCSR is each thread's own (the system keeps it with the
+    thread), and the template sets and restores it in scoped guards -- call() saves the caller's and gives it
+    back on every way out (each return, an unwinding exception); each call into the host (a channel, a stop, a
+    branch it takes, an instruction the lift could not translate) runs in the caller's mode and puts the SPU's
+    back after; a host that leaves by longjmp leaves from the host's mode. Measured
+    (tests/native/water_task_check.cpp `mxcsr`, both levels): every transfer the generated water asked of the
+    host ran in its caller's MXCSR, and the caller had its MXCSR back after every step (0 wrong); four threads at
+    once in four modes (round down, up, toward zero; FTZ with DAZ) each gave 40 steps byte for byte as in the
+    default mode; a whole step run inside another step's transfer (a nested call) left both right. The helpers
+    the generated code still calls in the SPU's mode -- the compares, frest, frsqest, fi, cflts, cfltu, csflt,
+    cuflt -- are integer work or conversions exact in double: spu_float_rz_check gives each the same words in
+    both modes (16 million lanes each, both levels, 0 different), so a compiler moving one of them across a
+    switch changes nothing; the float operations that depend on the mode are spu_native_float.h's, in volatile
+    asm that does not move.
+  - **Watched**: the one waver mismatch in a ripple's middle (the first two check runs, before the dump existed)
+    was not replayed -- it is the only differing frame not shown to be the game's timing. The check mode with the
+    dump (DOTHEROES_WAVER_CHECK_DUMP, then waver_task_check replay) stays in the validation of each M6 retirement
+    that touches the SPU tasks; a recurrence is replayed before anything else.
+  - **Follow-ups, not scheduled** (the owner, 2026-11-12: about 0.8 ms on a worker the game does not wait for):
+    the water's pixel loop -- generic peepholes in the generator (the mpyh/mpyh/mpyu multiply idiom, rotate and
+    shift pairs) and loop vectorization.
 
 **What decides the order.**
 1. Solver commands 1 and 2 are the only remaining non-audio SPU work the

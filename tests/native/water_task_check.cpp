@@ -19,6 +19,10 @@
 //       mismatch's wbadN pair): native and lifted on its inputs, against each
 //       other and, given the _out file, against what the game's lifted task
 //       left (the layer it wrote and the texture).
+//   water_task_check mxcsr
+//       the float mode's switches: every transfer in the caller's MXCSR, the caller's MXCSR back after each step,
+//       a step nested in another's transfer, four threads in four modes at once; the outputs as in the default
+//       mode (mode_check below).
 //   water_task_check game <1|sync|check> [<steps>] [<capture prefix>]
 //       the game's side (water_task_signal, its modes, the check and the
 //       capture) on a stand-in guest laid out as the game lays it out.
@@ -37,6 +41,10 @@
 #include <windows.h>
 
 #include <chrono>
+#include <immintrin.h>
+#include <memory>
+#include <thread>
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -417,6 +425,94 @@ static void game(const char* mode, unsigned steps, const char* capture)
     g_fails += !ok;
 }
 
+// ---- the float mode's switches (tools/spu_native_task.cpp.in) --------------------------------------------------
+// The generated code runs in the SPU's float mode (MXCSR: round toward zero, flush-to-zero, denormals-are-zero)
+// and gives every call into the host its caller's mode back. Checked here: each transfer the task asks of the host
+// runs in its caller's MXCSR, whatever that is; the caller has its MXCSR back after every step; a whole step run
+// inside one of another step's transfers (a nested call) leaves both right; four threads at once, each in a mode of
+// its own, see only theirs -- and every step's output is the same as in the host's default mode, byte for byte.
+struct ModeIo {
+    Space* s;
+    unsigned want;
+    std::atomic<unsigned>* bad;
+    Space* nested;                    // run a whole step on this inside the first transfer, once
+    water_task::Local* nested_local;
+};
+static void mode_put(void* u, uint32_t ea, const void* src, uint32_t n);
+static void mode_get(void* u, void* dst, uint32_t ea, uint32_t n)
+{
+    ModeIo* m = (ModeIo*)u;
+    if (_mm_getcsr() != m->want) m->bad->fetch_add(1);
+    if (m->nested) {
+        Space* inner = m->nested;
+        m->nested = nullptr;
+        ModeIo im{ inner, m->want, m->bad, nullptr, nullptr };
+        const water_task::Io io{ &im, mode_get, mode_put };
+        if (water_task::run_frame(kParamEa, io, *m->nested_local) != water_task::Status::done) m->bad->fetch_add(1);
+        if (_mm_getcsr() != m->want) m->bad->fetch_add(1);   // the inner step gave this transfer its mode back
+    }
+    space_get(m->s, dst, ea, n);
+}
+static void mode_put(void* u, uint32_t ea, const void* src, uint32_t n)
+{
+    ModeIo* m = (ModeIo*)u;
+    if (_mm_getcsr() != m->want) m->bad->fetch_add(1);
+    space_put(m->s, ea, src, n);
+}
+
+static void mode_check()
+{
+    std::mt19937 rng(20261112);
+    const Space base = make_space(128, 0, fbits(0.98f), fbits(8.0f), rng, true);
+    std::atomic<unsigned> bad{ 0 };
+    // 40 steps of the game's evolution in the caller's mode `mx`; at step 5 a whole step on `nested` inside it
+    auto evolve = [&](Space& s, water_task::Local& l, unsigned mx, Space* nested, water_task::Local* nl) {
+        _mm_setcsr(mx);
+        std::mt19937 r(7);
+        std::uniform_int_distribution<uint32_t> cell(0, 125);
+        for (unsigned n = 0; n < 40; n++) {
+            const uint32_t index = n & 1, x = cell(r) + 1, y = cell(r) + 1;
+            wr32(s.at(kParamEa + 12, 4), index);
+            wr32(s.at(kHeightsEa + 0x10000u * index + 4u * (x * 128u + y), 4), 0x3F800000u);
+            ModeIo m{ &s, mx, &bad, n == 5 ? nested : nullptr, nl };
+            const water_task::Io io{ &m, mode_get, mode_put };
+            if (water_task::run_frame(kParamEa, io, l) != water_task::Status::done) bad++;
+            if (_mm_getcsr() != mx) bad++;
+        }
+        _mm_setcsr(0x1F80u);
+    };
+    auto local = [] { return std::unique_ptr<water_task::Local>(new water_task::Local()); };
+    Space ref = base;
+    auto lr = local();
+    evolve(ref, *lr, 0x1F80u, nullptr, nullptr);
+    // four threads at once: round down, round up, toward zero, and flush-to-zero with denormals-are-zero
+    const unsigned modes[4] = { 0x1F80u | 0x2000u, 0x1F80u | 0x4000u, 0x1F80u | 0x6000u, 0x1F80u | 0x8000u | 0x0040u };
+    std::vector<Space> s(4, base);
+    std::vector<std::unique_ptr<water_task::Local>> l;
+    for (int i = 0; i < 4; i++) l.push_back(local());
+    std::vector<std::thread> th;
+    for (int i = 0; i < 4; i++) th.emplace_back([&, i] { evolve(s[i], *l[i], modes[i], nullptr, nullptr); });
+    for (auto& t : th) t.join();
+    for (int i = 0; i < 4; i++) {
+        char what[64];
+        snprintf(what, sizeof what, "thread %d, the caller's MXCSR %04X", i, modes[i]);
+        if (same(s[i], ref, what)) printf("[PASS] %s: 40 steps as in the default mode\n", what);
+    }
+    // nested: a whole step inside a transfer of the outer one's sixth step
+    Space outer = base, inner = base, one = base;
+    auto lo = local(), li = local(), l1 = local();
+    evolve(outer, *lo, 0x1F80u | 0x2000u, &inner, li.get());
+    {
+        ModeIo m{ &one, 0x1F80u, &bad, nullptr, nullptr };
+        const water_task::Io io{ &m, mode_get, mode_put };
+        water_task::run_frame(kParamEa, io, *l1);
+    }
+    if (same(outer, ref, "the outer evolution, a step nested in it")) printf("[PASS] the outer evolution with a nested step\n");
+    if (same(inner, one, "the nested step")) printf("[PASS] the nested step as a step of its own\n");
+    printf("[%s] the caller's MXCSR in every transfer and after every step: %u wrong\n", bad ? "FAIL" : "PASS", bad.load());
+    g_fails += bad != 0;
+}
+
 int main(int argc, char** argv)
 {
     g_spu_ls_rdiag = 0;   // no local-store diagnostics in this stand-in
@@ -430,6 +526,8 @@ int main(int argc, char** argv)
         if (argc >= 5) elf = argv[4];
         load_elf(elf);
         snap(argv[2], argc >= 4 ? argv[3] : nullptr);
+    } else if (argc >= 2 && !strcmp(argv[1], "mxcsr")) {
+        mode_check();
     } else if (argc >= 3 && !strcmp(argv[1], "game")) {
         load_elf(elf);
         game(argv[2], argc >= 4 ? (unsigned)atoi(argv[3]) : 20u, argc >= 5 ? argv[4] : nullptr);
