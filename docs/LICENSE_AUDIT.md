@@ -194,6 +194,9 @@
 | `patches/ps3recomp/0149-Census-counters-of-the-SPU-machinery-s-use-reported-.patch` | INDEP | keep |
 | `patches/ps3recomp/0150-cellPad-an-SDL-controller-update-of-50-ms-or-more-re.patch` | INDEP | keep |
 | `patches/ps3recomp/0151-cellPad-SDL-s-controllers-polled-on-a-thread-of-thei.patch` | INDEP | keep |
+| `patches/ps3recomp/0152-sys_timer_usleep-a-flip-wait-sleeps-on-the-flip-s-co.patch` | INDEP | keep |
+| `patches/ps3recomp/0153-cellSpurs-an-instance-s-threads-start-with-its-first.patch` | INDEP | keep |
+| `patches/ps3recomp/0154-sys_timer_usleep-every-sleep-under-a-millisecond-wai.patch` | INDEP | keep |
 | `port/CMakeLists.txt` | INDEP | keep |
 | `port/LICENSE.ps3recomp` | THIRD | keep: licence file beside it; listed in the README |
 | `port/assets/ui/DejaVuSans.ttf` | THIRD | keep: licence file beside it; listed in the README |

@@ -1,0 +1,164 @@
+From 45caac935cceff401e7b6bf1fdb40817db588aa9 Mon Sep 17 00:00:00 2001
+From: giteaguy <73799093+irnutsmurt@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 22:08:26 -0800
+Subject: [PATCH] cellSpurs: an instance's threads start with its first
+ workload, task or job chain
+
+cellSpursInitialize started each instance's kernel thread (a pass every
+millisecond) and one policy-module thread per SPU at once. A title that only
+makes an instance and the objects around it -- tasksets, queues, barriers,
+event flags -- then ran threads with nothing to schedule: 3D Dot Game Heroes'
+physics set-up makes two such instances, which its native physics never uses
+(0.4-0.8% of a core for the kernel thread). The threads now start with the
+first cellSpursAddWorkload(WithAttribute) on the instance, or the first task
+or job chain created anywhere. The SPU line-commit hook (event flags'
+wake-ups) is installed at initialisation as before; cellSpursFinalize stops
+an instance whose threads never started as before. PS3_SPURS_EAGER=1 starts
+them at initialisation, as before.
+---
+ libs/spurs/cellSpurs.c | 54 ++++++++++++++++++++++++++++++++++++++----
+ 1 file changed, 49 insertions(+), 5 deletions(-)
+
+diff --git a/libs/spurs/cellSpurs.c b/libs/spurs/cellSpurs.c
+index c1f0c39..267f092 100644
+--- a/libs/spurs/cellSpurs.c
++++ b/libs/spurs/cellSpurs.c
+@@ -454,6 +454,7 @@ static struct SpursInst {
+     u32 ea, nspus;
+     char prefix[16];
+     int kernel_live, stopping, starting;
++    int threads;   /* its kernel and policy-module threads are running (spurs_scheduler_ensure) */
+     int kick;   /* an SPU committed the request line since the coordinator last looked */
+     SRWLOCK lock;
+     CONDITION_VARIABLE wake;
+@@ -498,6 +499,40 @@ static SRWLOCK s_workload_registry_lock = SRWLOCK_INIT;
+ 
+ static s32 spurs_scheduler_start(struct SpursInst* si);
+ static s32 spurs_scheduler_stop(struct SpursInst* si, u32 ea);
++
++/* An instance's kernel thread (a pass every millisecond) and its policy-module threads start with the first thing
++ * that can give them work -- a workload added, a task or a job chain created -- not at cellSpursInitialize. A title
++ * that only makes an instance and the objects around it (tasksets, queues, barriers, event flags) runs no SPURS
++ * thread: 3D Dot Game Heroes' physics set-up makes two such instances, which its native physics never schedules
++ * on. The SPU line-commit hook (event flags' wake-ups) is installed at initialisation as before. PS3_SPURS_EAGER=1:
++ * the threads at initialisation, as before. */
++static int spurs_eager(void)
++{
++    static int e = -1;
++    if (e < 0) { const char* v = getenv("PS3_SPURS_EAGER"); e = v && *v && *v != '0'; }
++    return e;
++}
++static SRWLOCK s_lazy_start_lock = SRWLOCK_INIT;
++static void spurs_scheduler_ensure(struct SpursInst* si)
++{
++    if (__atomic_load_n(&si->threads, __ATOMIC_ACQUIRE)) return;
++    AcquireSRWLockExclusive(&s_lazy_start_lock);
++    AcquireSRWLockShared(&si->lock);
++    const int startable = si->ea && si->kernel_live && !si->stopping && !si->starting && !si->threads;
++    const u32 ea = si->ea;
++    ReleaseSRWLockShared(&si->lock);
++    if (startable && spurs_scheduler_start(si) == CELL_OK) {
++        __atomic_store_n(&si->threads, 1, __ATOMIC_RELEASE);
++        printf("[cellSpurs] \"%s\" ea=0x%08X: its kernel started (its first workload, task or job chain)\n",
++               si->prefix, ea);
++    }
++    ReleaseSRWLockExclusive(&s_lazy_start_lock);
++}
++static void spurs_scheduler_ensure_all(void)
++{
++    for (int i = 0; i < MAX_SPURS_INST; i++)
++        if (__atomic_load_n(&s_inst[i].ea, __ATOMIC_ACQUIRE)) spurs_scheduler_ensure(&s_inst[i]);
++}
+ static void spurs_scheduler_retire(u32 ea);
+ static void spurs_scheduler_forget(u32 wid);
+ 
+@@ -566,14 +601,18 @@ static s32 spurs_initialize_common(u32 spurs_ea, u32 nspus, const char* prefix)
+     *(vm_base + spurs_ea + SPURS_NSPUS) = (u8)si->nspus;
+     vm_write64(spurs_ea + SPURS_WKL_FLAG, 0xFFFFFFFFFFFFFFFFull); /* no receiver */
+ 
+-    s32 start_rc = spurs_scheduler_start(si);
++    { extern void (*g_spu_line_commit_hook)(uint32_t);
++      g_spu_line_commit_hook = spurs_commit_hook; }
++    si->threads = 0;
++    s32 start_rc = spurs_eager() ? spurs_scheduler_start(si) : CELL_OK;
+     AcquireSRWLockExclusive(&si->lock);
+     si->starting = 0;
++    if (!start_rc && spurs_eager()) si->threads = 1;
+     if (start_rc) __atomic_store_n(&si->ea, 0, __ATOMIC_RELEASE);
+     ReleaseSRWLockExclusive(&si->lock);
+     if (start_rc) return start_rc;
+-    printf("[cellSpurs] Initialize \"%s\" ea=0x%08X nSpus=%u (real BE instance + kernel poll)\n",
+-           si->prefix, spurs_ea, si->nspus);
++    printf("[cellSpurs] Initialize \"%s\" ea=0x%08X nSpus=%u (real BE instance; its kernel %s)\n",
++           si->prefix, spurs_ea, si->nspus, spurs_eager() ? "started" : "starts with its first workload, task or job chain");
+     return CELL_OK;
+ }
+ 
+@@ -1104,6 +1143,7 @@ s32 cellSpursCreateTask(CellSpursTaskset* taskset, CellSpursTaskId* taskId,
+                         u32 lsPattern_ea, u32 argument_ea)
+ {
+     ps3_census(PS3_CENSUS_SPURS_TASK, (unsigned)(uintptr_t)elf, 0);
++    spurs_scheduler_ensure_all();   /* lazy start: a task's taskset may be on any instance */
+     (void)context; (void)sizeContext;
+ 
+     /* Read the 16-byte CellSpursTaskArgument + optional LS pattern from guest mem. */
+@@ -1343,6 +1383,7 @@ s32 cellSpursCreateTaskWithAttribute(CellSpursTaskset* taskset,
+                                      CellSpursTaskAttribute* attr)
+ {
+     ps3_census(PS3_CENSUS_SPURS_TASK, 0, 0);
++    spurs_scheduler_ensure_all();
+     if (!attr) return CELL_SPURS_TASK_ERROR_NULL_POINTER;
+     CellSpursTaskAttribute* attr_h = GUEST_PTR(attr, CellSpursTaskAttribute*);
+     /* Dump the raw attribute: our struct doesn't model lsPattern/argument, and
+@@ -1508,6 +1549,7 @@ s32 cellSpursAddWorkload(CellSpurs* spurs, CellSpursWorkloadId* wid,
+     /* spurs/wid/priority are guest EAs; pm stays a guest EA (it's the SPU
+      * program address consumed later by the workload dispatch). */
+     uint32_t spurs_ea = (uint32_t)(uintptr_t)spurs;
++    { struct SpursInst* lz = spurs_inst_find(spurs_ea); if (lz) spurs_scheduler_ensure(lz); }   /* lazy start */
+     struct SpursInst* si;
+     s32 lock_rc = spurs_api_lock(spurs_ea, &si);
+     if (lock_rc) return lock_rc;
+@@ -1616,6 +1658,7 @@ s32 cellSpursAddWorkloadWithAttribute(CellSpurs* spurs,
+ {
+     if (!attr) return CELL_SPURS_CORE_ERROR_NULL_POINTER;
+     uint32_t attr_ea = (uint32_t)(uintptr_t)attr;
++    { struct SpursInst* lz = spurs_inst_find((u32)(uintptr_t)spurs); if (lz) spurs_scheduler_ensure(lz); }
+ 
+     /* Decode the REAL BE attribute from guest memory. */
+     u32 pm_ea = vm_read32(attr_ea + WKATTR_PM);
+@@ -1949,8 +1992,6 @@ static s32 spurs_scheduler_start(struct SpursInst* si)
+ {
+     si->stopping = 0; si->cursor = si->pass_no = 0;
+     __atomic_store_n(&si->kick, 0, __ATOMIC_RELAXED);
+-    { extern void (*g_spu_line_commit_hook)(uint32_t);
+-      g_spu_line_commit_hook = spurs_commit_hook; }
+     memset(si->active, 0, sizeof(si->active));
+     memset(si->idle, 0, sizeof(si->idle));
+     for (u32 sn = 0; sn < si->nspus; sn++) {
+@@ -1993,6 +2034,7 @@ static s32 spurs_scheduler_stop(struct SpursInst* si, u32 ea)
+     }
+     AcquireSRWLockExclusive(&si->lock);
+     si->kernel_live = 0;
++    __atomic_store_n(&si->threads, 0, __ATOMIC_RELEASE);
+     ReleaseSRWLockExclusive(&si->lock);
+     return CELL_OK;
+ }
+@@ -2493,6 +2535,7 @@ static s32 jc_register(u32 jc_ea, u32 entry_ea, u16 size_desc, u16 max_grab,
+ s32 cellSpursCreateJobChainWithAttribute(u64 spurs_ea, u64 jc_ea, u64 attr_ea)
+ {
+     if (!spurs_ea || !jc_ea || !attr_ea) return CELL_SPURS_TASK_ERROR_NULL_POINTER;
++    spurs_scheduler_ensure_all();
+     u32 entry   = vm_read32((u32)attr_ea + JCATTR_ENTRY);
+     u32 sd_mg   = vm_read32((u32)attr_ea + JCATTR_SIZE_DESC);
+     u32 name_ea = vm_read32((u32)attr_ea + JCATTR_NAME);
+@@ -2541,6 +2584,7 @@ s32 cellSpursCreateJobChain(u64 spurs_ea, u64 jc_ea, u64 entry_ea,
+ {
+     (void)spurs_ea; (void)prio_ea;
+     if (!jc_ea) return CELL_SPURS_TASK_ERROR_NULL_POINTER;
++    spurs_scheduler_ensure_all();
+ 
+     static int _n = 0;
+     if (PS3_LOG_FIRST(_n, 3)) {
+-- 
+2.56.0.windows.3
+
