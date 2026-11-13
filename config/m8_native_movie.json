@@ -1,0 +1,16 @@
+{
+ "_comment": "M8.2: the movies on FFmpeg (docs/FFMPEG_MIGRATION_PLAN.md sections 2.3 and 3). Entry hooks on the eleven call stubs through which the game's movie class calls Bink (tools/movie_inventory.py; the stubs lie outside Bink's range, which M8.4 excludes): port/native/movie/bink_native.cpp answers each call natively when DOTHEROES_NATIVE_MOVIE turns the guard on; a call it declines (the guard 0, a handle that is not the native player's, a file FFmpeg cannot open) runs the stub, and Bink, as before. Each answer stores the caller's TOC where the stub would (sp + 0x28). Addresses only.",
+ "entry_hooks": [
+  {"addr": "0x009873F8", "host": "bink_native_sound_system", "guard": "g_native_movie", "decline": true, "note": "Bink's sound module given, before an open (-> 0x00A56B20)"},
+  {"addr": "0x009873C8", "host": "bink_native_open", "guard": "g_native_movie", "decline": true, "note": "open(path, flags) -> the handle (-> 0x00A5B438)"},
+  {"addr": "0x009873D8", "host": "bink_native_frame_buffers", "guard": "g_native_movie", "decline": true, "note": "the texture sets' description (-> 0x00A56EF0)"},
+  {"addr": "0x00987428", "host": "bink_native_take_buffers", "guard": "g_native_movie", "decline": true, "note": "the sets' planes, before a decode (-> 0x00A56FE8)"},
+  {"addr": "0x00987418", "host": "bink_native_wait", "guard": "g_native_movie", "decline": true, "note": "is the next frame due? (-> 0x00A5A178)"},
+  {"addr": "0x00987438", "host": "bink_native_decode", "guard": "g_native_movie", "decline": true, "note": "the next frame into the next set (-> 0x00A5B158)"},
+  {"addr": "0x00987458", "host": "bink_native_behind", "guard": "g_native_movie", "decline": true, "note": "is the frame after due too? (-> 0x00A5D960)"},
+  {"addr": "0x00987448", "host": "bink_native_next", "guard": "g_native_movie", "decline": true, "note": "the next frame (-> 0x00A5D138)"},
+  {"addr": "0x009873A8", "host": "bink_native_pause", "guard": "g_native_movie", "decline": true, "note": "pause 1 / resume 0 (-> 0x00A58F18)"},
+  {"addr": "0x009873B8", "host": "bink_native_close", "guard": "g_native_movie", "decline": true, "note": "close (-> 0x00A59358)"},
+  {"addr": "0x009873E8", "host": "bink_native_sound_end", "guard": "g_native_movie", "decline": true, "note": "the sound's end, after a close (-> 0x00A560E8)"}
+ ]
+}

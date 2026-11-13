@@ -1,0 +1,51 @@
+# Scenario: M8.2's movie behaviour (docs/FFMPEG_MIGRATION_PLAN.md section 5): the attract demo (a movie with sound)
+# closed at varied moments, and the game quit during a movie. A fresh save root. Each cycle: the title (its movie,
+# 32 s with no input), the demo's movie opened, then START after 1 to 110 s -- the game closes the movie and its
+# sound and goes back to the title, whose movie opens again. Eleven cycles; then, during the next demo, the game
+# asked to exit as closing its window asks it (its own shutdown: the movie's thread, sound and files released).
+# With DOTHEROES_NATIVE_MOVIE=1 the native player answers (a lift with config/m8_native_movie.json); without it,
+# Bink. Checked afterwards from the logs: every open closed, no movie left at the exit, the run's memory. The
+# wait matches the demo's open only (Bink's file open, the native player's "opened"), not its close line.
+#! env DOTHEROES_DEV_KEYS=1 PS3_VERBOSE=0 DIAG_FRAMES=frames.log
+#! env WINDOW=1 VISIBLE=1 GRAB_EVERY=10 PS3_OSD_FPS=2 DUMP=0 SHOT_EVERY=0
+#! secs 1500
+log TitleMovie 120
+segment skips eleven demos closed at varied moments
+log (?m)PlayDemoMovieUS\.bik(\sopened|$) 90
+sleep 1
+press START
+log (?m)PlayDemoMovieUS\.bik(\sopened|$) 90
+sleep 3
+press START
+log (?m)PlayDemoMovieUS\.bik(\sopened|$) 90
+sleep 7
+press START
+log (?m)PlayDemoMovieUS\.bik(\sopened|$) 90
+sleep 13
+press START
+log (?m)PlayDemoMovieUS\.bik(\sopened|$) 90
+sleep 20
+press START
+log (?m)PlayDemoMovieUS\.bik(\sopened|$) 90
+sleep 31
+press START
+log (?m)PlayDemoMovieUS\.bik(\sopened|$) 90
+sleep 45
+press START
+log (?m)PlayDemoMovieUS\.bik(\sopened|$) 90
+sleep 60
+press START
+log (?m)PlayDemoMovieUS\.bik(\sopened|$) 90
+sleep 77
+press START
+log (?m)PlayDemoMovieUS\.bik(\sopened|$) 90
+sleep 95
+press START
+log (?m)PlayDemoMovieUS\.bik(\sopened|$) 90
+sleep 110
+press START
+endseg
+log (?m)PlayDemoMovieUS\.bik(\sopened|$) 90
+sleep 30
+quit
+sleep 20

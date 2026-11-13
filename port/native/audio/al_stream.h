@@ -50,11 +50,28 @@ struct Config {
 using Handle = uint32_t;              // 0: none
 constexpr Handle kNone = 0;
 
+// A stream fed by its owner instead of a file (the movies' sound, docs/FFMPEG_MIGRATION_PLAN.md section 3): the
+// audio thread pulls interleaved 16-bit frames from it as it fills its buffers. Called on the audio thread only.
+class PcmSource {
+public:
+    virtual ~PcmSource() = default;
+    virtual unsigned rate() const = 0;
+    virtual unsigned channels() const = 0;   // 1 or 2
+    // up to `frames` frames into out; 0 when none is ready yet (the buffer waits for a later period); *ended set
+    // when nothing more will come
+    virtual size_t read(int16_t* out, size_t frames, bool* ended) = 0;
+};
+
 struct Status {
     State state = State::free;
     double position = 0.0;            // seconds into the file of the frame being heard (approximate)
     float gain = 0.0f;                // the fade value now
     uint64_t underruns = 0, near_underruns = 0, loops = 0;
+    // a fed stream (open_source): `position` is the frames heard (the source's offset less the output's latency,
+    // when the library reports it: AL_SOFT_source_latency) over the rate, taken at `taken` (the steady clock's
+    // seconds); a reader extrapolates from there while the stream plays
+    double taken = 0.0;
+    double latency = 0.0;             // the output's latency in seconds (0 when unknown)
 };
 
 struct Totals {
@@ -76,6 +93,8 @@ public:
     // the outputs (OpenAL's own panning of a mono source at the centre is 1.5 dB down on its sides)
     Handle open(const std::string& path, Loop loop, float gain, bool play_now, bool centre_mono = false,
                 float centre_level = 0.70710678f);   // kNone: no free stream
+    // a stream fed by `src` (played once, to the source's end); kNone: no free stream
+    Handle open_source(std::shared_ptr<PcmSource> src, float gain, bool play_now);
     void play(Handle h);
     void pause(Handle h, bool paused);
     void stop(Handle h);              // stops and releases (the handle goes stale)
@@ -83,6 +102,7 @@ public:
     void set_gain(Handle h, float gain);
     void fade(Handle h, float to, float seconds, bool stop_at_end);
     Status status(Handle h) const;    // State::free for a stale or unknown handle
+    double clock_now() const { return now(); }   // the clock Status::taken is on
     Totals totals() const;
     void sync();                      // waits until every queued command is applied (tests, shutdown)
     void shutdown();                  // stops every stream, releases every object, ends the thread
@@ -101,6 +121,7 @@ private:
         float a, b;
         std::string path;
         bool centre = false;
+        std::shared_ptr<PcmSource> src = nullptr;   // open: a fed stream
     };
     struct Stream {
         uint32_t gen = 0;
@@ -123,6 +144,8 @@ private:
         int paused_offset = 0;                 // the source's sample offset when paused
         int last_offset = 0;                   // its sample offset last seen playing (a restart after a loss)
         uint64_t underruns = 0, near_underruns = 0, loops = 0;
+        std::shared_ptr<PcmSource> src;        // a fed stream: its frames come from here, not a file
+        std::vector<unsigned> idle;            // a fed stream's buffers its source could not fill yet
     };
 
     bool push(Command&& c);

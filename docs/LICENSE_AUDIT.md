@@ -14,6 +14,7 @@
 | `config/insn_patches.json` | INDEP | keep |
 | `config/m8_dev_credits.json` | INDEP | keep |
 | `config/m8_movie_trace.json` | INDEP | keep |
+| `config/m8_native_movie.json` | INDEP | keep |
 | `config/r6_native_observers.json` | INDEP | keep |
 | `config/r7_native_hooks.json` | INDEP | keep |
 | `config/r8_hooks.json` | INDEP | keep |
@@ -256,8 +257,11 @@
 | `port/native/memtest_bare.cpp` | INDEP | keep |
 | `port/native/memtest_checked.cpp` | INDEP | keep |
 | `port/native/memtest_stores.cpp` | INDEP | keep |
+| `port/native/movie/bink_native.cpp` | INDEP | keep |
 | `port/native/movie/ff_api.cpp` | INDEP | keep |
 | `port/native/movie/ff_api.h` | INDEP | keep |
+| `port/native/movie/movie_player.cpp` | INDEP | keep |
+| `port/native/movie/movie_player.h` | INDEP | keep |
 | `port/native/movie/movie_trace.cpp` | INDEP | keep |
 | `port/native/phys_direct.cpp` | INDEP | keep |
 | `port/native/phys_direct.h` | INDEP | keep |
@@ -311,6 +315,7 @@
 | `tests/native/gz_walk_check.cpp` | INDEP | keep |
 | `tests/native/inflate_check.py` | INDEP | keep |
 | `tests/native/inflate_test.c` | INDEP | keep |
+| `tests/native/movie_player_check.cpp` | INDEP | keep |
 | `tests/native/openal_check.cpp` | INDEP | keep |
 | `tests/native/openal_check.sh` | INDEP | keep |
 | `tests/native/run_gcm_tests.sh` | INDEP | keep |
@@ -361,6 +366,7 @@
 | `tests/scenarios/long_session.drive` | INDEP | keep |
 | `tests/scenarios/m4_pause.drive` | INDEP | keep |
 | `tests/scenarios/m8_credits_trace.drive` | INDEP | keep |
+| `tests/scenarios/m8_movie_skips.drive` | INDEP | keep |
 | `tests/scenarios/m8_movie_trace.drive` | INDEP | keep |
 | `tests/scenarios/menus_r3.drive` | INDEP | keep |
 | `tests/scenarios/owner_boss.drive` | INDEP | keep |
@@ -373,6 +379,7 @@
 | `tests/scenarios/owner_play_m6.drive` | INDEP | keep |
 | `tests/scenarios/owner_play_m6r.drive` | INDEP | keep |
 | `tests/scenarios/owner_play_r8.drive` | INDEP | keep |
+| `tests/scenarios/owner_view_m8.drive` | INDEP | keep |
 | `tests/scenarios/owner_warp_r7.drive` | INDEP | keep |
 | `tests/scenarios/reverb_lab.drive` | INDEP | keep |
 | `tests/scenarios/river_fight.drive` | INDEP | keep |
@@ -462,6 +469,8 @@
 | `tools/grab_luma.py` | INDEP | keep |
 | `tools/iso9660.py` | INDEP | keep |
 | `tools/license_audit.py` | INDEP | keep |
+| `tools/m8_frames_compare.py` | INDEP | keep |
+| `tools/m8_sound_compare.py` | INDEP | keep |
 | `tools/m8_trace_lift.sh` | INDEP | keep |
 | `tools/make_bundle.py` | INDEP | keep |
 | `tools/movie_inventory.py` | INDEP | keep |

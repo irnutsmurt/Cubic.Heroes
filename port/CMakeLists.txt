@@ -443,6 +443,21 @@ else()
     message(FATAL_ERROR "OpenAL Soft's headers not found: run tools/build_deps.py (it builds OpenAL Soft and "
                         "installs its headers into build/deps/<platform>/include)")
 endif()
+# The movies on FFmpeg (docs/FFMPEG_MIGRATION_PLAN.md, M8.2): the native answers to the movie class's calls into
+# Bink (config/m8_native_movie.json), the decoder and FFmpeg's loader. Only FFmpeg's headers are needed here -- the
+# game loads the libraries at run time from its own folder (native/movie/ff_api.cpp), nothing links against them.
+find_path(FFMPEG_INCLUDE_DIR libavformat/avformat.h HINTS "${PS3RECOMP_VULKAN_INCLUDE_DIR}"
+          DOC "FFmpeg's headers (tools/build_deps.py installs them)")
+if(FFMPEG_INCLUDE_DIR)
+    message(STATUS "FFmpeg:          headers in ${FFMPEG_INCLUDE_DIR}")
+    target_sources(dotheroes_native PRIVATE native/movie/ff_api.cpp native/movie/movie_player.cpp
+        native/movie/bink_native.cpp)
+    target_include_directories(dotheroes_native PRIVATE "${FFMPEG_INCLUDE_DIR}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/native/movie")
+else()
+    message(FATAL_ERROR "FFmpeg's headers not found: run tools/build_deps.py (it builds FFmpeg and installs its "
+                        "headers into build/deps/<platform>/include)")
+endif()
 
 target_link_libraries(${PROJECT_NAME} PRIVATE
     dotheroes_native
