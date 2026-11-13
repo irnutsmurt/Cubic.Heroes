@@ -107,6 +107,7 @@ extern "C" void spurs_snap_write_file(const char* path);
 extern "C" void spu_lockline_lock(void);
 extern "C" void spu_lockline_unlock(void);
 extern "C" void spu_coh_notify_write(uint32_t ea);
+extern "C" void ppu_resv_break_line(uint32_t ea);   // ppu_loader.cpp: a store breaks PPU reservations on its line
 
 namespace {
 
@@ -305,6 +306,57 @@ inline uint16_t rd16v(const uint8_t* p)
 }
 inline void wr16(uint8_t* p, uint16_t v) { p[0] = (uint8_t)(v >> 8); p[1] = (uint8_t)v; }
 
+#if defined(DOTHEROES_NO_SPU_COH)
+// M6 (this build forbids SPU reservations: spu_coh_forbid at start): only native threads take the lock, so its
+// words change by a host compare-and-swap on the aligned word that holds both, off the runtime's lock-line lock;
+// a PPU reservation on the line is broken as any store to it breaks one on a Cell (ppu_resv_break_line).
+inline uint32_t* lock_word(uint8_t* base, uint32_t ea) { return (uint32_t*)(base + ea); }
+uint16_t lock_bump(uint8_t* base, uint32_t ea, int half)   // half 0: now serving (+0), 1: next ticket (+2)
+{
+    uint32_t* w = lock_word(base, ea);
+    uint32_t old = __atomic_load_n(w, __ATOMIC_RELAXED), nw;
+    uint16_t was;
+    do {
+        uint8_t b[4];
+        memcpy(b, &old, 4);
+        was = (uint16_t)(b[half * 2] << 8 | b[half * 2 + 1]);
+        wr16(b + half * 2, (uint16_t)(was + 1));
+        memcpy(&nw, b, 4);
+    } while (!__atomic_compare_exchange_n(w, &old, nw, true, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED));
+    ppu_resv_break_line(ea);
+    return was;
+}
+void lock_acquire(uint8_t* base, uint32_t ea)
+{
+    if (ea & 3u) {   // the word must be aligned for the CAS (libsync's lock is): otherwise as before
+        spu_lockline_lock();
+        const uint16_t ticket = rd16v(base + ea + 2);
+        wr16(base + ea + 2, (uint16_t)(ticket + 1));
+        spu_coh_notify_write(ea);
+        spu_lockline_unlock();
+        for (unsigned n = 0; rd16v(base + ea) != ticket; n++)
+            if (n > 64) std::this_thread::yield();
+        return;
+    }
+    const uint16_t ticket = lock_bump(base, ea, 1);
+    for (unsigned n = 0; rd16v(base + ea) != ticket; n++)
+        if (n > 64) std::this_thread::yield();
+    __atomic_thread_fence(__ATOMIC_ACQUIRE);
+}
+
+void lock_release(uint8_t* base, uint32_t ea)
+{
+    if (ea & 3u) {
+        spu_lockline_lock();
+        wr16(base + ea, (uint16_t)(rd16v(base + ea) + 1));
+        spu_coh_notify_write(ea);
+        spu_lockline_unlock();
+        return;
+    }
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+    lock_bump(base, ea, 0);
+}
+#else
 void lock_acquire(uint8_t* base, uint32_t ea)
 {
     spu_lockline_lock();
@@ -323,6 +375,7 @@ void lock_release(uint8_t* base, uint32_t ea)
     spu_coh_notify_write(ea);
     spu_lockline_unlock();
 }
+#endif
 
 void native_work(uint32_t desc, uint32_t cmd);
 

@@ -455,27 +455,40 @@ if(DOTHEROES_NATIVE_RELEASE)
     # memcpy). mov: the same tests, then one store -- measured, the default on
     # Windows x86-64. nocoh-measure and bare-measure leave out the reservation
     # test, or every test: builds for measurement only, which refuse to start
-    # without DOTHEROES_MEASURE_ONLY=1.
+    # without DOTHEROES_MEASURE_ONLY=1. mov-nospu (M6, the native release's
+    # default): mov without the SPU reservation test -- no lifted SPU code takes
+    # a reservation in the game (docs/OPENAL_MIGRATION_PLAN.md section 10), and
+    # the runtime makes one fatal (spu_coh_forbid at start). The check modes
+    # that run lifted SPU code beside the native (DOTHEROES_NATIVE_WATER=check
+    # ...) need a comparison build: -DDOTHEROES_PPU_STORES=mov.
     if(WIN32 AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|x86_64|X86_64|amd64)$")
-        set(_stores_default mov)
+        if(DOTHEROES_NATIVE_RELEASE)
+            set(_stores_default mov-nospu)
+        else()
+            set(_stores_default mov)
+        endif()
     else()
         set(_stores_default checked)
     endif()
     set(DOTHEROES_PPU_STORES "${_stores_default}" CACHE STRING
-        "The lifted code's guest stores: checked, mov, nocoh-measure, bare-measure")
-    set_property(CACHE DOTHEROES_PPU_STORES PROPERTY STRINGS checked mov nocoh-measure bare-measure)
+        "The lifted code's guest stores: checked, mov, mov-nospu, nocoh-measure, bare-measure")
+    set_property(CACHE DOTHEROES_PPU_STORES PROPERTY STRINGS checked mov mov-nospu nocoh-measure bare-measure)
     if(NOT DOTHEROES_PPU_STORES STREQUAL "checked" AND
        NOT (WIN32 AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|x86_64|X86_64|amd64)$"))
         message(FATAL_ERROR "DOTHEROES_PPU_STORES=${DOTHEROES_PPU_STORES} is established on Windows x86-64 only")
     endif()
     if(DOTHEROES_PPU_STORES STREQUAL "mov")
         target_compile_definitions(${PROJECT_NAME} PRIVATE PPU_STORE_MOV=1)
+    elseif(DOTHEROES_PPU_STORES STREQUAL "mov-nospu")
+        target_compile_definitions(${PROJECT_NAME} PRIVATE PPU_STORE_MOV=1 PPU_STORES_NO_SPU_COH=1
+                                   DOTHEROES_NO_SPU_COH=1)
+        target_compile_definitions(dotheroes_native PRIVATE DOTHEROES_NO_SPU_COH=1)
     elseif(DOTHEROES_PPU_STORES STREQUAL "nocoh-measure")
         target_compile_definitions(${PROJECT_NAME} PRIVATE PPU_STORES_NO_COH_MEASURE=1)
     elseif(DOTHEROES_PPU_STORES STREQUAL "bare-measure")
         target_compile_definitions(${PROJECT_NAME} PRIVATE PPU_STORES_BARE_MEASURE=1)
     elseif(NOT DOTHEROES_PPU_STORES STREQUAL "checked")
-        message(FATAL_ERROR "DOTHEROES_PPU_STORES: checked, mov, nocoh-measure or bare-measure")
+        message(FATAL_ERROR "DOTHEROES_PPU_STORES: checked, mov, mov-nospu, nocoh-measure or bare-measure")
     endif()
     message(STATUS "Lifted stores:   ${DOTHEROES_PPU_STORES}")
 endif()

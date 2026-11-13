@@ -422,6 +422,16 @@ void t_store_pages()
 
 void count_wake(void* p) { ++*(std::atomic<int>*)p; }
 
+/* M6 (DOTHEROES_PPU_STORES=mov-nospu, the native release's default): the lifted stores leave the SPU reservation
+ * test out and no reservation or line watch may exist (spu_coh_forbid at start makes one fatal), so a store at a
+ * line's end is checked for its bytes only; whether it tells the next line's holders is the comparison build's
+ * check (-DDOTHEROES_PPU_STORES=mov). */
+#if defined(DOTHEROES_NO_SPU_COH)
+constexpr bool kWatch = false;
+#else
+constexpr bool kWatch = true;
+#endif
+
 void t_store_lines()
 {
     group("stores: line boundaries");
@@ -430,9 +440,11 @@ void t_store_lines()
     const uint32_t W = 0x30000000;   /* a line; W + 128 the next */
     std::atomic<int> first{0}, second{0};
     spu_coh_watch w1{}, w2{};
-    spu_lockline_lock();
-    spu_coh_watch_add(&w2, W + 128, count_wake, &second);
-    spu_lockline_unlock();
+    if (kWatch) {
+        spu_lockline_lock();
+        spu_coh_watch_add(&w2, W + 128, count_wake, &second);
+        spu_lockline_unlock();
+    }
     struct Case { int kind; uint32_t off; bool reaches; };
     /* the second line watched: a store reaches it if it runs past W + 127 */
     const Case cases[] = {
@@ -450,10 +462,17 @@ void t_store_lines()
         const int before = second.load();
         store(c.kind, W + c.off, seed++, true);
         n += check_bytes(W + c.off, mt_store_size(c.kind), "a store at a line boundary", c.kind);
+        if (!kWatch) continue;
         g_checks++; n++;
         if ((second.load() != before) != c.reaches)
             fail("%s of %d bytes at line+%u: the next line was %s", kind_name(c.kind), mt_store_size(c.kind), c.off,
                  c.reaches ? "not told (its reservations would survive the store)" : "told, though the store ends before it");
+    }
+    if (!kWatch) {
+        mt_store_model(0);
+        group_end("stores at a line's end: their bytes (the reservation tests are the comparison build's: this build "
+                  "forbids reservations)", n);
+        return;
     }
     /* both lines watched: a store across the boundary tells both */
     spu_lockline_lock();

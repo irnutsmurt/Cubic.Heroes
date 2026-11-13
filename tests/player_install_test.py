@@ -35,8 +35,8 @@ import zig_build  # noqa: E402
 DIR = os.path.abspath(os.environ.get("INSTALL_TEST_DIR", "F:/3d dot game heroes/install-test"))
 ISO = os.path.join(ROOT, "3D DOT GAME HEROES [BLUS-30490].iso")
 ELF = os.path.join(ROOT, "build", "EBOOT.elf")
-# the developers' release lift to compare with (tools/r8_lift.sh; M5's, rel41's)
-DEV_LIFT = os.environ.get("DEV_LIFT", os.path.join(ROOT, "build", "r8", "gen14"))
+# the developers' release lift to compare with (tools/r8_lift.sh; M6's, rel47's: the stores without the SPU reservation test)
+DEV_LIFT = os.environ.get("DEV_LIFT", os.path.join(ROOT, "build", "r8", "gen15"))
 PY = sys.executable
 report = {"dir": DIR, "stages": {}}
 failed = []

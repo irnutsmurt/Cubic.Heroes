@@ -197,6 +197,7 @@
 | `patches/ps3recomp/0152-sys_timer_usleep-a-flip-wait-sleeps-on-the-flip-s-co.patch` | INDEP | keep |
 | `patches/ps3recomp/0153-cellSpurs-an-instance-s-threads-start-with-its-first.patch` | INDEP | keep |
 | `patches/ps3recomp/0154-sys_timer_usleep-every-sleep-under-a-millisecond-wai.patch` | INDEP | keep |
+| `patches/ps3recomp/0155-Lifter-PPU_STORES_NO_SPU_COH-stores-without-the-SPU-.patch` | INDEP | keep |
 | `port/CMakeLists.txt` | INDEP | keep |
 | `port/LICENSE.ps3recomp` | THIRD | keep: licence file beside it; listed in the README |
 | `port/assets/ui/DejaVuSans.ttf` | THIRD | keep: licence file beside it; listed in the README |
