@@ -1,6 +1,6 @@
 # M8: the movies through FFmpeg -- a plan for review
 
-**Status: a plan, nothing implemented** (2026-11-12). The owner's requirement (CLAUDE.md, "Architecture
+**Status: approved by the owner 2026-11-12 (the architecture); M8.0 begun 2026-11-13 (section 2.1).** The owner's requirement (CLAUDE.md, "Architecture
 requirements"; docs/NATIVE_PORT.md section 1): the game's video is decoded by FFmpeg, dynamically linked under the
 LGPL; Bink's implementation is not executed and not in anything this project distributes; the movies are the
 player's own files, read as they are (no conversion, no converted copies, nothing of them distributed); the
@@ -38,6 +38,8 @@ the runtime's mix thread, SDL2's audio). The decoded frames become GCM textures 
 gcmtextures", the game's own code), which the game's renderer draws as one quad (the attract demo's frames: one
 to 19 draws, the video's quad, no post-effects; docs/NATIVE_R2.md); the title menu is drawn over the title movie.
 
+**Settled since** (2026-11-12, docs/PC_EXPERIENCE.md section 7b): the freezes were SDL re-enumerating input devices
+after a device change, not the movie; fixed by ps3recomp patch 0151. The original note follows.
 **Linked to an open question** [H]: the title-screen freezes of the owner's first M4 session (0.4-1.5 s about
 every 2 s, at 12.6-21 s and 40.5-51 s, flips and presents both stalled; unexplained, tracked separately) happened
 while the lifted Bink decoder played the title movie -- 160 MB streamed at about 2.2 MB a second by its IO
@@ -62,6 +64,22 @@ unrelated constants in large functions): the calls are traced instead.
   were) or Bink's API functions (more of them, more of Bink's semantics to match). The trace decides.
 - **Bink's extent in the executable**: as FMOD's was found (docs/OPENAL_MIGRATION_PLAN.md section 9: the library's
   range, then the out-of-line methods its tables hold), so that M8.4 can exclude it exactly.
+
+### 2.1 M8.0 under way (2026-11-13): the anchors [S]
+
+From the executable's strings and the lift's direct calls (gen15):
+- **Bink's library**: func_00A5B438 holds "Not a Bink file." and "Error reading Bink header." (Bink's open); it has
+  no direct caller (reached through a function pointer). The thread names "Bink IO Thread" and "Bink Audio Thread"
+  sit beside those strings (0x00F55161, 0x00F5528F). Bink's code lies near FMOD's out-of-line methods
+  ([0x00A42AA0, 0x00A440E0)); its exact extent is still to be drawn as FMOD's was.
+- **The engine's movie manager**: aspMovieScheduleManager.cpp (asp, the game's engine), functions
+  0x006E5C50-0x006E68C8; they call a further layer at 0x00A25EC0-0x00A26020 (a movie player between the manager and
+  Bink, to be confirmed) -- the likely boundary, as the sound manager was FMOD's.
+- **The game's movie opens**: "%s/movie/%s" built in four functions (0x0048C424, 0x004A9814, 0x00585BF0, 0x005CD374):
+  four places that start a movie (the title, the attract mode, the opening, the credits: to be confirmed by the
+  trace).
+- **The movie's textures**: gcmtextures.cpp, func_0045AE14 and func_0045B55C (the game's own texture creation).
+Next: the chain from the manager to Bink's API, Bink's extent, then the run-time trace (section 2).
 
 ## 3. The native movie player
 
