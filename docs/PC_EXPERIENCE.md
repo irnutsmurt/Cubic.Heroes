@@ -388,8 +388,24 @@ which ran on rel42):
 - An A/B against rel42 (uncapped, two rounds rotated): the fields 244.0-244.5 fps against 242.1-243.9; the river
   fight 209.7-211.6 against rel42's 212.7 and 201.6 (that round a heavier fight). No cost.
 
-**Still to do**: the owner's hands-on check of what a test cannot press: the buttons and sticks, the rumble in a
-fight, unplugging and replugging the controller during play.
+**The owner's hands-on check** (2026-11-13, rel48 and rel48r: M6's last build, and the same with patch 0156's
+rumble diagnostics; tests/scenarios/owner_play_m6.drive, owner_play_m6r.drive) [M, the owner]: four sessions, 31
+minutes, each exiting cleanly.
+- Buttons, sticks and directions, in menus and combat: as expected, through the pad thread.
+- Unplugging and reconnecting the controller while playing (twice, once by restarting the owner's controller
+  converter): the disconnect and the reconnect on the same port seen at once; SDL's re-enumerations (281-516 ms
+  each, up to ten in a row) all on the pad thread, the game never held. Two frames of 35-39 ms right after one
+  reconnect came from the system: the frame trace shows every other processor about 99% busy while Windows set the
+  device up.
+- Frame pacing over the first 13.7 minutes at 144 fps: median 6.95 ms, p99 7.86 ms, p99.9 10.5 ms; 7 frames over
+  33 ms, the longest three during start-up and loading.
+- **Rumble**: the game never asks for it. Its only rumble call switches the motors off (the per-frame pad update's
+  loop over the ports); its vibrate function (func_00035228) and the setter of the byte that gates it are
+  referenced nowhere in the executable, and the game has no vibration option -- the PS3 game itself does not
+  vibrate the controller. The path works: a test pulse (F9 in a DOTHEROES_DEV_KEYS session: both motors for 0.6 s
+  through the pad thread, as a title's request goes) reaches the controller on the release's default input path.
+  A first silence was the owner's controller converter (a Stadia controller presented as an Xbox 360 one), fixed
+  on their side. Making the PC version vibrate (hits, a boss's quake) would be a new feature, for M9 if wanted.
 
 ## 8. Launcher and update management (after the base and the settings are stable)
 

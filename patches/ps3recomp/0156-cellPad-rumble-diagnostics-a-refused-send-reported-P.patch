@@ -1,0 +1,121 @@
+From 40c59c47e77fa07efa32833bd9667505e9d64ee7 Mon Sep 17 00:00:00 2001
+From: giteaguy <73799093+irnutsmurt@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 10:53:20 -0800
+Subject: [PATCH] cellPad: rumble diagnostics -- a refused send reported,
+ PAD_DEBUG logs requests and sends; a test pulse
+
+A send SDL refuses (a driver without rumble, a failed call) is now reported
+with SDL's reason, the first few times. With PAD_DEBUG each change of the
+title's request (cellPadSetActDirect: both motors) and of what is sent to
+the controller is logged. cellPad_dev_rumble_pulse(ms) drives both motors
+for a while through the same path a title's request takes (the pad thread
+sends it), for a port's tester: 3D Dot Game Heroes' F9. They showed that a
+rumble path silent to the player was the player's controller converter, and
+that the game itself never asks for rumble (its vibrate function has no
+caller; it only switches the motors off).
+---
+ libs/input/cellPad.c | 66 ++++++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 64 insertions(+), 2 deletions(-)
+
+diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
+index 60353f4..ada0469 100644
+--- a/libs/input/cellPad.c
++++ b/libs/input/cellPad.c
+@@ -461,16 +461,48 @@ static u8 pad_sdl_trigger_to_u8(int raw)
+ }
+ 
+ /* Send port i's rumble state to its controller, with a fresh duration. */
++static int pad_debug(void)
++{
++    static int dbg = -1;
++    if (dbg < 0) dbg = getenv("PAD_DEBUG") ? 1 : 0;
++    return dbg;
++}
++
+ static void pad_sdl_rumble_send(int i)
+ {
+     SDL_GameController* gc = s_sdl_controllers[i];
+-    if (!gc) return;
++    if (!gc) {
++        if (pad_debug() && (s_rumble[i].lo || s_rumble[i].hi))
++            fprintf(stderr, "[cellPad] rumble on port %d: no controller there to send it to\n", i);
++        return;
++    }
+     PadRumble* r = &s_rumble[i];
+     const int on = r->lo || r->hi;
+-    SDL_GameControllerRumble(gc, r->lo, r->hi, on ? PAD_RUMBLE_HOLD_MS : 0);
++    /* A send SDL refuses is reported (the device's driver has no rumble, or the call failed), the first few times;
++     * PAD_DEBUG: each change of what is sent, too (the renewals of the same values are not). */
++    static unsigned short last_lo[PAD_MAX_HOST_PORTS], last_hi[PAD_MAX_HOST_PORTS];
++    static int fails;
++    const int rc = SDL_GameControllerRumble(gc, r->lo, r->hi, on ? PAD_RUMBLE_HOLD_MS : 0);
++    if (rc != 0 && fails++ < 8)
++        fprintf(stderr, "[cellPad] rumble on port %d (low %u, high %u) refused by SDL: %s\n", i, r->lo, r->hi,
++                SDL_GetError());
++    else if (pad_debug() && (r->lo != last_lo[i] || r->hi != last_hi[i]))
++        fprintf(stderr, "[cellPad] rumble on port %d sent: low-frequency motor %u, high-frequency %u (of 65535)\n", i,
++                r->lo, r->hi);
++    last_lo[i] = r->lo;
++    last_hi[i] = r->hi;
+     r->sent_ms = on ? pad_now_ms() : 0;
+ }
+ 
++/* A test pulse for a port's tester (a port's dev key): both motors for ms, through the same path as a title's
++ * request (the pad thread sends it), then off. */
++static volatile unsigned long long s_rumble_test_until;
++void cellPad_dev_rumble_pulse(unsigned ms)
++{
++    s_rumble_test_until = pad_now_ms() + ms;
++    fprintf(stderr, "[cellPad] rumble test: both motors for %u ms on port 0\n", ms);
++}
++
+ /* ---- hot-plug ------------------------------------------------------------
+  * A DualSense over Bluetooth drops off when it is switched off or idles, and
+  * comes back as a NEW SDL device (a new instance id, maybe another index).
+@@ -858,6 +890,25 @@ static void pad_pub_unlock(void) { __atomic_clear(&s_pub_lock, __ATOMIC_RELEASE)
+ 
+ static void pad_sdl_rumble_take(void)   /* cellPadSetActDirect's requests since the last pass, sent */
+ {
++    {   /* the tester's pulse (cellPad_dev_rumble_pulse): on until its time, then the title's own state again */
++        static int pulsing;
++        const unsigned long long until = s_rumble_test_until;
++        if (until && pad_now_ms() < until) {
++            if (!pulsing) {
++                pulsing = 1;
++                s_rumble[0].lo = 0xC000;
++                s_rumble[0].hi = 0xFFFF;
++                pad_sdl_rumble_send(0);
++            }
++            return;
++        }
++        if (pulsing) {
++            pulsing = 0;
++            s_rumble_test_until = 0;
++            s_rumble[0].lo = s_rumble[0].hi = 0;
++            pad_sdl_rumble_send(0);
++        }
++    }
+     for (int i = 0; i < PAD_MAX_HOST_PORTS; i++) {
+         pad_pub_lock();
+         const int req = s_rumble_req[i];
+@@ -1713,6 +1764,17 @@ s32 cellPadSetActDirect(u32 port_no, CellPadActParam* param)
+     u16 lo, hi;
+     pad_rumble_levels(param->motor[CELL_PAD_ACTUATOR_PARAM_SMALL],
+                       param->motor[CELL_PAD_ACTUATOR_PARAM_LARGE], &lo, &hi);
++    {   /* PAD_DEBUG: each change of what the title asks for (it may repeat the same values every frame) */
++        static u8 last_small[CELL_PAD_MAX_PORT_NUM], last_large[CELL_PAD_MAX_PORT_NUM];
++        static unsigned long long n;
++        n++;
++        if (pad_debug() && (param->motor[CELL_PAD_ACTUATOR_PARAM_SMALL] != last_small[port_no] ||
++                            param->motor[CELL_PAD_ACTUATOR_PARAM_LARGE] != last_large[port_no]))
++            fprintf(stderr, "[cellPad] the title's rumble request %llu on port %u: small motor %u, large %u\n", n,
++                    port_no, param->motor[CELL_PAD_ACTUATOR_PARAM_SMALL], param->motor[CELL_PAD_ACTUATOR_PARAM_LARGE]);
++        last_small[port_no] = param->motor[CELL_PAD_ACTUATOR_PARAM_SMALL];
++        last_large[port_no] = param->motor[CELL_PAD_ACTUATOR_PARAM_LARGE];
++    }
+ #if PAD_BACKEND_XINPUT
+     s_rumble[port_no].lo = lo;
+     s_rumble[port_no].hi = hi;
+-- 
+2.56.0.windows.3
+

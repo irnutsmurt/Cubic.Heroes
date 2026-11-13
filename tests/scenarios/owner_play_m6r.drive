@@ -1,0 +1,25 @@
+# rel48r: rel48 with the rumble diagnostics (each change of the game's rumble request, each send's result, F9: a test pulse
+# through the same path, with the game's vibration setting printed); otherwise owner_play_m6.
+# A play session for the owner on M6's last build (docs/OPENAL_MIGRATION_PLAN.md sections 10.4-10.7): build/r8/rel48
+# -- OpenAL Soft, FMOD out of the lift, the short sleeps on the GCM delivery, SPURS's threads lazy, the stores without
+# the SPU reservation test, no lifted SPU program linked -- with the controller on its own thread (ps3recomp 0151,
+# docs/PC_EXPERIENCE.md section 7b). The owner tests the controller (buttons, sticks, directions, responsiveness in
+# combat and menus, rumble in combat, unplugging and reconnecting it while playing), the save/load screens, and
+# general stability and frame pacing:
+#   SCENARIO=owner_play_m6 build/venv/Scripts/python.exe tests/boot_smoke.py
+# As owner_play_m4: the validated configuration, sound on the default output, the frame-rate readout, normal damage,
+# fullscreen, 144 fps synced to the display. Saves in build/play-route/gamedata (the copy the M4 sessions played on;
+# backed up before this session; the owner's own saves are not touched), a copy of the save each time the game
+# saves. Lightweight diagnostics: the controller's events (PAD_DEBUG: each change of a port's buttons or left stick,
+# its connects and disconnects, any slow SDL update), frames.log, the frame trace's hitch captures from 5 s, F8 (or
+# L3+R3) to mark a moment, the census and the short sleeps' report at the exit. Close the window when done.
+#! env BIN=build/r8/rel48r/dotheroes.exe
+#! env GAMEDATA=build/play-route/gamedata RUNS_IN=build/sessions KEEP_RUNS=1000 PREEMPT_TESTS=1
+#! env DOTHEROES_PPFX_NATIVE=1 DOTHEROES_NATIVE_CD=1 DOTHEROES_NATIVE_SOLVER=1,2,4,5,6 GCM_WRAP_LAP=1 DOTHEROES_PRESENT_ONCE=1
+#! env DOTHEROES_BENCH=1 PS3RECOMP_VK_PRESENT_MODE=fifo DOTHEROES_FPS=0 DOTHEROES_DEV_CANT_DIE=0 PS3_SAVEDATA_PICKER=1
+#! env WINDOW=1 PS3RECOMP_VK_FULLSCREEN=1 AUDIO=1 PS3_OSD_FPS=2 DUMP=0 SHOT_EVERY=0 PS3_VERBOSE=0
+#! env DOTHEROES_DEV_KEYS=1 DOTHEROES_DEV_STATE=1 DOTHEROES_DEV_RECORD=1 DIAG_FRAMES=frames.log
+#! env PS3_FTRACE_ROLL=hitch PS3_FTRACE_ROLL_FROM=5 DOTHEROES_PHYS_STATS=1 PAD_DEBUG=1
+#! env PS3RECOMP_SPIRV_CACHE=build/play-route/cache
+#! secs 14400
+until_exit ${SAVE_COPIES:-build/checkpoints/owner-play-m6r}
