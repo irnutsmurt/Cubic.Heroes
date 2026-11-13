@@ -332,6 +332,42 @@ name, play time, location and when it was written; the tests above pass.
 What is left of this item: the icon (ICON0.PNG), and the prompts in section
 6's styles (the panel says "CROSS (Z, ENTER)" and "CIRCLE (X)").
 
+## 7b. Freezes on a device change (found 2026-11-12; the cause established, not yet reproduced)
+
+**What the owner saw** [M: the M4 session's frames.log and its frame trace]: on the title screen the game froze
+0.3-1.5 s at a time, about every 2 s, in three bursts -- 12.6-21 s, 40.5-51 s, 57.6-61.3 s after the start, the
+picture and the game's flips stopped together. In the two freezes the trace covers (57.56 s, 1.15 s; 59.11 s,
+1.11 s) the game's thread sat in one import call, cellPadGetInfo2 (0.46-0.83 s each), running 2.8% of the time:
+blocked, not working.
+
+**Why** [C, M, L]:
+- cellPadGetInfo2 and cellPadGetData poll SDL on the game's thread (cellPad.c: SDL_GameControllerUpdate, and a
+  rescan of the device list every second while a pad port is free -- always, with one controller).
+- SDL2 (2.32.10, its source) on Windows: a device interface arriving or leaving anywhere on the system arms
+  detection 300 ms and 2 s later; the next SDL_JoystickUpdate then enumerates every DirectInput and XInput device,
+  holding SDL's joystick lock. The window's event pump (SDL_PumpEvents, on the window's thread) runs
+  SDL_JoystickUpdate too and waits on that lock: the game's thread and the presents stop together.
+- One enumeration costs **about 275 ms on this PC** (DirectInput's game-controller enumeration, five times
+  273-278 ms; 27 input devices: the mouse's and keyboards' several interfaces, a guitar adapter, the controller;
+  SDL's whole first detection 295 ms); with nothing changing, SDL's update takes about 1 us.
+- The session had device changes at those times: the controller was detected late, while the title played; the
+  default audio output moved from the G432 headset (a USB device with audio and HID interfaces) to the Realtek
+  output at the attract demo's start. A device that comes and goes with several interfaces gives a run of such
+  enumerations, 2 s apart.
+
+The title's background is a Bink movie (docs/FFMPEG_MIGRATION_PLAN.md section 1), and the bursts may each have come
+near a movie's opening (the log's order suggests it; its lines carry no times). In the two traced freezes the
+movie's threads were in short periodic syscalls, not holding anything the game's thread waited on: the movie is
+not what blocked it.
+
+**Still to do**: (1) reproduce on purpose -- a session on the title screen with the frame trace from 5 s and a
+device plugged in and out (the controller, the headset): since rel42 the pad poll reports any SDL update of 50 ms
+or more with its time ("[cellPad] SDL controller update took ...", ps3recomp cellPad.c), so a freeze names its
+cause in the log; (2) then the fix: SDL's controller work off the game's and the window's threads -- one thread of
+its own polls SDL and publishes each port's state, cellPadGetData/GetInfo2 read that without calling SDL, the
+window's pump no longer updates joysticks (SDL_HINT_AUTO_UPDATE_JOYSTICKS=0), rumble goes through the pad thread;
+an enumeration then delays input for its 0.3 s and stops nothing else.
+
 ## 8. Launcher and update management (after the base and the settings are stable)
 
 **Today** [C, setup_app.py, tools/self_update.py]:

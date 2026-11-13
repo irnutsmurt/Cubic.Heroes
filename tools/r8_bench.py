@@ -33,9 +33,11 @@ def frames(run):
 def stats(iv):
     s = sorted(iv)
     n = len(s)
-    return {"fps": 1000.0 / (sum(s) / n), "p50": m6.pct(s, .5), "p90": m6.pct(s, .9), "p99": m6.pct(s, .99),
-            "p999": m6.pct(s, .999), "max": s[-1], "o144": 100.0 * sum(1 for x in s if x > 1000 / 144) / n,
-            "o200": 100.0 * sum(1 for x in s if x > 5.0) / n, "n": n}
+    p50 = m6.pct(s, .5)
+    return {"fps": 1000.0 / (sum(s) / n), "mean": sum(s) / n, "p50": p50, "p90": m6.pct(s, .9), "p95": m6.pct(s, .95),
+            "p99": m6.pct(s, .99), "p999": m6.pct(s, .999), "max": s[-1],
+            "o144": 100.0 * sum(1 for x in s if x > 1000 / 144) / n, "o200": 100.0 * sum(1 for x in s if x > 5.0) / n,
+            "spk": sum(1 for x in s if x > 2.0 * p50), "n": n}
 
 
 def row(run, heavy_at):
@@ -58,7 +60,8 @@ def row(run, heavy_at):
 
 
 COLS = [("fps", "%.1f"), ("p50", "%.2f"), ("p90", "%.2f"), ("p99", "%.2f"), ("p999", "%.2f"), ("o144", "%.1f%%"),
-        ("o200", "%.1f%%"), ("busy", "%.2f"), ("h_fps", "%.0f"), ("h_p50", "%.2f"), ("h_p99", "%.2f"), ("l_p99", "%.2f")]
+        ("o200", "%.1f%%"), ("busy", "%.2f"), ("h_fps", "%.0f"), ("h_p50", "%.2f"), ("h_p99", "%.2f"), ("l_p99", "%.2f"),
+        ("mean", "%.2f"), ("p95", "%.2f"), ("max", "%.1f"), ("spk", "%d")]
 
 
 def main():
@@ -76,7 +79,8 @@ def main():
         name = os.path.basename(d)
         arm, rnd = name[len(prefix) + 1:].rsplit("-", 1)
         by_arm.setdefault(arm, []).append((rnd, os.path.join(d, "run")))
-    print("arm    round " + " ".join("%7s" % c for c, _ in COLS) + "   (ms; o144/o200: frames over 6.94/5.00 ms; h_: heavy debris, l_: the rest)")
+    print("arm    round " + " ".join("%7s" % c for c, _ in COLS) + "   (ms; o144/o200: frames over 6.94/5.00 ms; h_: heavy debris, "
+          "l_: the rest; spk: frames over twice the median)")
     for arm in (arms or sorted(by_arm)):
         rows = []
         for rnd, run in sorted(by_arm.get(arm, [])):
