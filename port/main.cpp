@@ -33,6 +33,7 @@
  * table. It comes first: everything below is written against that struct. */
 #include "diag/diag.h"
 #include "ps3emu/census.h"   /* M6: the SPU machinery's use, reported at exit */
+extern "C" void spu_coh_forbid(const char* why);   /* spu_coherency.c: M6, the release without the store test */
 #include "native/bullet_cd_task.h"
 #include "native/water_task.h"
 extern "C" void dev_waver_init(void);   /* phys_hooks.cpp */
@@ -856,6 +857,12 @@ int main(int argc, char** argv)
     dotheroes_configure_patches();   /* game_patches.cpp: DOTHEROES_FPS etc. */
     /* the census at the game's own exit (a test's stop.trigger reports it itself: phys_direct_report) */
     atexit([] { ps3_census_report(stderr); });
+#if defined(DOTHEROES_NO_SPU_COH)
+    /* M6: this build's lifted stores leave the SPU reservation test out (DOTHEROES_PPU_STORES=mov-nospu), so no SPU
+     * reservation may exist: the runtime makes one fatal, naming why. */
+    spu_coh_forbid("the release's lifted stores leave the SPU reservation test out; the check modes that run lifted "
+                   "SPU code need a comparison build, -DDOTHEROES_PPU_STORES=mov");
+#endif
     dotheroes_native_init();         /* native/bullet_cd_task.cpp: DOTHEROES_NATIVE_CD */
     water_task_init();               /* native/water_task.cpp: DOTHEROES_NATIVE_WATER */
     dev_waver_init();                /* phys_hooks.cpp: DOTHEROES_DEV_WAVER (a test switch) */

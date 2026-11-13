@@ -1051,3 +1051,40 @@ millisecond, 0.4-0.8% of a core) and three policy-module threads that never ran.
 with its first workload, task or job chain. In every native run none started (39 threads where there were 43); the
 water and waver check modes, which create SPURS tasks, start them on demand (the water check 2,462 of 2,462 steps
 equal, the waver 1,151 of 1,158 frames, the known class). PS3_SPURS_EAGER=1 starts them at initialisation.
+
+### 10.5 The SPU reservation test retired from the release's stores (2026-11-13; rel47)
+
+R8 priced the test every lifted store makes for an SPU reservation on its line at 0.4 ms of the game thread a frame
+and left it to the owner (docs/NATIVE_R8.md section 9: keep it while any lifted SPU code takes reservations). That
+condition is now met: FMOD's SPU code is out of the lift (M5), and every other SPU workload is native with its
+reachable fallbacks native too (section 10.2); the census shows no SPU reservation and no line watch in any run.
+
+**What changed** (ps3recomp patch 0155; port/CMakeLists.txt, port/main.cpp, port/native/bullet_solver_task.cpp,
+port/native/memtest.cpp; the lift gen15, which differs from gen14 only in its header):
+- The store mode mov-nospu, the native release's default on Windows x86-64: every scalar, raw and vector store keeps
+  its range test and loses the reservation test (the lifter's PPU_STORES_NO_SPU_COH).
+- The runtime refuses what the stores no longer honour: the port calls spu_coh_forbid at start, and any SPU
+  reservation or line watch after it ends the game with a diagnostic naming why. Shown: the water's check mode, which
+  runs lifted SPU code that takes them, stops 1.2 s in with "[fatal] spu_coherence: an SPU reservation or line watch
+  ... the check modes that run lifted SPU code need a comparison build".
+- The comparison build keeps the old stores: -DDOTHEROES_PPU_STORES=mov (the check modes and the lifted fallbacks'
+  switches, DOTHEROES_NATIVE_*=0 or =check, need it).
+- The native solver's lock (libsync's ticket lock its tasks share) moves off the runtime's lock-line lock onto a
+  host compare-and-swap; it still breaks PPU reservations on its line, as any store does on a Cell.
+- The PPU's own atomics are unchanged: lwarx/stwcx. keep their reservation table, a successful stwcx. still breaks
+  the other threads' reservations on the address, and the native stores that stand in for an SPU's still break PPU
+  reservations on their line.
+- The memory test checks the stores at a line's end for their bytes in this mode (668 checks pass); whether they
+  tell the next line's holders is the comparison build's check (695).
+
+**Validated** (build/r8/m6ns_run.sh) [M]: the 11 drives, the menu's quit, the movie, the seven save flows, the
+reference scenes (5 of 5 within): no crash, trap or fatal diagnostic, no reservation or watch in any census. The A/B
+against rel46 (two rounds rotated):
+
+| Scene | rel46 | rel47 | Game thread a frame | p99 (ms) | p99.9 (ms) |
+|---|---|---|---|---|---|
+| River fight, uncapped | 210.0-213.7 fps | 235.1-237.7 fps | 4.63-4.71 -> 4.16-4.20 ms | 6.55-6.59 -> 5.79-6.03 | 8.13-8.17 -> 7.13-7.38 |
+| Fields, uncapped | 246.6-247.6 fps | 277.2-281.6 fps | 4.01-4.03 -> 3.53-3.58 ms | 5.55-5.68 -> 5.11-5.12 | 7.71-8.06 -> 6.71-6.79 |
+| River fight, 144 cap | 144.0 | 143.9-144.0 | 5.01-5.24 -> 4.56-4.59 ms | 7.09-7.18 -> 7.04-7.11 | 8.15-8.41 -> 7.42-9.78 |
+
+The game thread does 0.47 ms less a frame (R8's estimate: 0.4): 11-13% more frames uncapped.

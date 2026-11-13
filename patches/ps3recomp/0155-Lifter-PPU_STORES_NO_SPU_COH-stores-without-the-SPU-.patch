@@ -1,0 +1,94 @@
+From 11cc8c6dd70946d31851c527da3eed0b62415459 Mon Sep 17 00:00:00 2001
+From: giteaguy <73799093+irnutsmurt@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 05:33:18 -0800
+Subject: [PATCH] Lifter: PPU_STORES_NO_SPU_COH, stores without the SPU
+ reservation test; spu_coh_forbid
+
+A port whose SPU code takes no reservation can lift its stores without the
+reservation test (every scalar, raw and vector store keeps its range test and
+loses the bitmap test): the lifter's header takes PPU_STORES_NO_SPU_COH as it
+takes the measurement-only PPU_STORES_NO_COH_MEASURE, for production. Such a
+port calls spu_coh_forbid(why) at start: any SPU reservation or line watch
+after it is fatal, naming why -- never a store that silently fails to break a
+reservation. The test cost 3D Dot Game Heroes' game thread about 0.47 ms a
+frame.
+---
+ runtime/spu/spu_coherency.c | 11 +++++++++++
+ runtime/spu/spu_coherency.h |  3 +++
+ tools/ppu_lifter.py         |  8 +++++---
+ 3 files changed, 19 insertions(+), 3 deletions(-)
+
+diff --git a/runtime/spu/spu_coherency.c b/runtime/spu/spu_coherency.c
+index 85c060b..5326624 100644
+--- a/runtime/spu/spu_coherency.c
++++ b/runtime/spu/spu_coherency.c
+@@ -155,8 +155,19 @@ static spu_coh_watch* s_coh_watches;
+ 
+ unsigned long g_spu_lr_raise = 0;
+ 
++/* A port whose lifted PPU stores leave the reservation test out (the lifter's PPU_STORES_NO_SPU_COH) calls
++ * spu_coh_forbid at start: no SPU reservation or line watch may exist then, since those stores would not break
++ * it. An attempt is fatal, with the reason given -- never a store silently missed. */
++static const char* volatile s_coh_forbidden;
++void spu_coh_forbid(const char* why) { s_coh_forbidden = why ? why : "forbidden"; }
++
+ void spu_coh_reserve(spu_context* ctx, uint32_t ea)
+ {
++    if (__builtin_expect(s_coh_forbidden != NULL, 0)) {
++        extern void ps3_fatal(const char* kind, const char* fmt, ...);
++        ps3_fatal("spu_coherence", "an SPU reservation or line watch on 0x%08X in a build whose PPU stores do not test "
++                  "for one (%s)", ea, s_coh_forbidden);
++    }
+     /* Read before writing. The kernel reserves the same few lines over and
+      * over, and a store of the same value still takes the cache line away
+      * from every other core: each PPU store then missed on the pointer and on
+diff --git a/runtime/spu/spu_coherency.h b/runtime/spu/spu_coherency.h
+index ea2e835..f2753fa 100644
+--- a/runtime/spu/spu_coherency.h
++++ b/runtime/spu/spu_coherency.h
+@@ -50,6 +50,9 @@ void spu_lockline_unlock(void);
+  * reserved again microseconds later, so unmarking would buy nothing; a stale
+  * mark costs one locked PPU store to a line the kernel owns anyway. */
+ void spu_coh_reserve(spu_context* ctx, uint32_t ea);
++/* No reservation or line watch may exist from now on (a port whose lifted stores leave the test out): any is
++ * fatal, naming why. */
++void spu_coh_forbid(const char* why);
+ 
+ /* GETLLAR fast path: publish ctx's reservation of ea WITHOUT the lock-line
+  * lock, when ctx is already a registered holder and ea's line already marked.
+diff --git a/tools/ppu_lifter.py b/tools/ppu_lifter.py
+index 54ce586..6c29022 100644
+--- a/tools/ppu_lifter.py
++++ b/tools/ppu_lifter.py
+@@ -273,7 +273,7 @@ void vm_raw_zero_slow(uint64_t ea, uint32_t n);
+ #endif
+ static inline int vm_coh_reserved(uint32_t ea, uint32_t n)
+ {
+-#ifdef PPU_RAW_ST_NO_COH
++#if defined(PPU_RAW_ST_NO_COH) || defined(PPU_STORES_NO_SPU_COH)
+     (void)ea; (void)n; return 0;
+ #else
+     const uint32_t l0 = ea >> 7, l1 = (uint32_t)(ea + n - 1) >> 7;
+@@ -422,7 +422,9 @@ static inline uint64_t vm_read64_mm(const ppu_mm* m, uint64_t a)
+ #if defined(PPU_STORE_MOV)
+ #if defined(PPU_STORES_BARE_MEASURE)
+ #  define PPU_ST_OK(m, ea, n) 1
+-#elif defined(PPU_STORES_NO_COH_MEASURE)
++#elif defined(PPU_STORES_NO_COH_MEASURE) || defined(PPU_STORES_NO_SPU_COH)
++/* PPU_STORES_NO_SPU_COH: a port whose SPU code takes no reservation (it calls spu_coh_forbid at start, which makes
++ * one fatal) leaves the reservation test out of every store; the range test stays. */
+ #  define PPU_ST_OK(m, ea, n) vm_mm_in((m)->st_span, (ea), (n))
+ #else
+ #  define PPU_ST_OK(m, ea, n) vm_mm_st_ok((m), (ea), (n))
+@@ -498,7 +500,7 @@ static inline void vm_raw_st16_mm(const ppu_mm* m, uint64_t a, const void* src)
+ {
+     const uint32_t ea = (uint32_t)a, line = ea >> 7;
+     if (__builtin_expect(!VM_RAW_ST_IN(m->st_span, ea, 16), 0)) { vm_raw_store_slow(ea, src, 16); return; }
+-#ifndef PPU_RAW_ST_NO_COH
++#if !defined(PPU_RAW_ST_NO_COH) && !defined(PPU_STORES_NO_SPU_COH)
+     if (__builtin_expect((m->coh[line >> 3] >> (line & 7)) & 1u, 0)) { vm_write_block_coh(ea, src, 16); return; }
+ #else
+     (void)line;
+-- 
+2.56.0.windows.3
+
