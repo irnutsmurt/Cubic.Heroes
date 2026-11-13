@@ -192,6 +192,7 @@ Third-party components keep their own licences:
 | at3_standalone (in ps3recomp, from PPSSPP/FFmpeg) | LGPL-2.1 | ATRAC3plus decoding |
 | [SDL2](https://libsdl.org) | zlib | window, input, audio |
 | [OpenAL Soft](https://openal-soft.org) 1.25.2 | LGPL-2.0-or-later (parts BSD-3-Clause, PFFFT's licence, and {fmt}'s and Microsoft GSL's MIT) | the game's audio (replacing FMOD: `docs/OPENAL_MIGRATION_PLAN.md`): a shared library the game loads at run time from its own folder, unmodified, built by `tools/build_deps.py` without its HRTF data set; the setup's download carries its licences and its source (`licenses/source/`) |
+| [FFmpeg](https://ffmpeg.org) 9.0.2 | LGPL-2.1-or-later | the movies (replacing Bink: `docs/FFMPEG_MIGRATION_PLAN.md`, in progress): libavutil, libavcodec and libavformat with the Bink demuxer and FFmpeg's own Bink decoders only, shared libraries beside the game for its native movie player, unmodified, built by `tools/build_ffmpeg.py`; the setup's download carries its licence, its source, the build driver and the configuration as built (`licenses/source/`) |
 | [glslang](https://github.com/KhronosGroup/glslang) | BSD-3-Clause and others | the game's shaders, translated at run time |
 | [Vulkan-Headers](https://github.com/KhronosGroup/Vulkan-Headers) | Apache-2.0 / MIT | building the renderer |
 | [Zig](https://ziglang.org) | MIT | the setup app's bundled compiler |

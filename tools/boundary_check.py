@@ -279,7 +279,7 @@ def nested(name, data):
 
 
 def bundle_licences(names, findings, where):
-    """A bundle carries the licence and notice of each library it ships, and OpenAL Soft's source."""
+    """A bundle carries the licence and notice of each library it ships, and OpenAL Soft's and FFmpeg's source."""
     import build_deps
     has = lambda suffix: any(n.endswith(suffix) for n in names)  # noqa: E731
     if has("/OpenAL32.dll") or has("/libopenal.so.1") or has("OpenAL32.dll") or has("libopenal.so.1"):
@@ -290,6 +290,14 @@ def bundle_licences(names, findings, where):
             findings.append(("LICENCE", where, "OpenAL Soft shipped without its notice"))
         if not has("licenses/source/" + build_deps.openal_archive_name()):
             findings.append(("LICENCE", where, "OpenAL Soft shipped without its source (LGPL)"))
+    import build_ffmpeg
+    if any(has("/" + lib) or has(lib) for _, libs in build_ffmpeg.LIB_FILES.values() for lib in libs):
+        for name, what in ((build_ffmpeg.LICENCE[1], "its licence"), (build_ffmpeg.NOTICE, "its notice"),
+                           ("source/" + build_ffmpeg.SOURCE_ARCHIVE, "its source (LGPL)"),
+                           ("source/%s/build_ffmpeg.py" % build_ffmpeg.BUILD_DIR, "its build driver"),
+                           ("source/%s/config.h" % build_ffmpeg.BUILD_DIR, "its configuration as built")):
+            if not has("licenses/" + name):
+                findings.append(("LICENCE", where, f"FFmpeg shipped without {what} (licenses/{name})"))
     for lib, lic in (("SDL2.dll", "SDL2.txt"), ("libSDL2-2.0.so.0", "SDL2.txt")):
         if has(lib) and not has("licenses/" + lic):
             findings.append(("LICENCE", where, f"{lib} shipped without licenses/{lic}"))

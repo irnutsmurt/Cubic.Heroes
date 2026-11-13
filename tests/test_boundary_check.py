@@ -201,6 +201,29 @@ class Bundles(unittest.TestCase):
             bc.check_artifact(d, bundle=True, findings=f)
             self.assertEqual([], f)
 
+    def test_ffmpeg_licences_required(self):
+        """FFmpeg's libraries in a bundle need its licence, notice, source archive, build driver and configuration."""
+        import build_ffmpeg
+        needed = [build_ffmpeg.LICENCE[1], build_ffmpeg.NOTICE, "source/" + build_ffmpeg.SOURCE_ARCHIVE,
+                  "source/%s/build_ffmpeg.py" % build_ffmpeg.BUILD_DIR, "source/%s/config.h" % build_ffmpeg.BUILD_DIR]
+        for platform, (_, libs) in build_ffmpeg.LIB_FILES.items():
+            for missing in [None] + needed:
+                with tempfile.TemporaryDirectory() as d:
+                    self.make(d, with_licences=True)
+                    open(os.path.join(d, "lib", libs[1]), "wb").write(b"MZ" + bytes(100))
+                    for rel in needed:
+                        if rel != missing:
+                            p = os.path.join(d, "licenses", *rel.split("/"))
+                            os.makedirs(os.path.dirname(p), exist_ok=True)
+                            open(p, "w").write("x")
+                    f = []
+                    bc.check_artifact(d, bundle=True, findings=f)
+                    if missing is None:
+                        self.assertEqual([], f, platform)
+                    else:
+                        self.assertEqual(["LICENCE"], [c for c, _, _ in f], (platform, missing))
+                        self.assertIn(missing, f[0][2])
+
     def test_inside_archives(self):
         with tempfile.TemporaryDirectory() as d:
             self.make(d, with_licences=True)

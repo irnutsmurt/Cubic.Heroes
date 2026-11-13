@@ -25,6 +25,11 @@ builds, per platform, into build/deps/<platform>/:
               tree, which is what make_bundle.py ships as the library's source.
               Linux: the SDL2 backend as well (SDL2 ships beside the game), and
               PipeWire, PulseAudio and ALSA when their headers are on the host.
+    FFmpeg    9.0.2, shared (avutil-61.dll, avcodec-63.dll, avformat-63.dll |
+              libavutil.so.61, libavcodec.so.63, libavformat.so.63;
+              LGPL-2.1-or-later): the movies (docs/FFMPEG_MIGRATION_PLAN.md),
+              loaded by the game at run time from its own folder. The Bink
+              demuxer and decoders only; built by tools/build_ffmpeg.py.
 Linux targets glibc 2.31 (Ubuntu 20.04, Debian 11 and newer); Windows the
 MinGW ABI. Nothing here comes from the game.
 """
@@ -54,6 +59,9 @@ SOURCES = {
     "Bullet": ("https://storage.googleapis.com/google-code-archive-downloads/v2/code.google.com/bullet/bullet-2.74.tgz",
                "bullet-2.74", None),
     "OpenAL-Soft": ("https://openal-soft.org/openal-releases/openal-soft-1.25.2.tar.bz2", "openal-soft-1.25.2", None),
+    # M8 (docs/FFMPEG_MIGRATION_PLAN.md): FFmpeg 9.0.2 from the project's official GitHub mirror (ffmpeg.org refused
+    # connections from the build host on 2026-11-13); the tag n9.0.2 is commit 946fcce07b6dcd0331c8cc609192aeff5e1924f8
+    "FFmpeg": ("https://github.com/FFmpeg/FFmpeg/archive/refs/tags/n9.0.2.tar.gz", "FFmpeg-n9.0.2", None),
 }
 # OpenAL Soft's build: the library alone, as a DLL / shared object (LGPL: dynamically linked). No utilities,
 # examples or tests; no configuration, HRTF or preset files installed and no HRTF data embedded; no legacy EAX
@@ -173,7 +181,7 @@ def fetch(name):
     if name in known and known[name] != digest:
         sys.exit(f"[deps] {archive}: sha256 {digest} does not match config/deps.sha256")
     if name not in known:
-        with open(PINS, "a") as f:
+        with open(PINS, "a", newline="\n") as f:   # LF on every host (.gitattributes)
             if not known:
                 f.write("# sha256 of the third-party source archives tools/build_deps.py builds\n")
             f.write(f"{digest} {name}\n")
@@ -215,6 +223,9 @@ def build(platform):
     fetch("Bullet")   # source only: built with the port (BULLET_DIR)
     print(f"[deps] {platform}: OpenAL Soft", flush=True)
     cmake_build("OpenAL-Soft", openal_source(), platform, openal_options(platform), host_headers=True)
+    print(f"[deps] {platform}: FFmpeg", flush=True)
+    import build_ffmpeg   # here: it imports this module
+    build_ffmpeg.build(platform)
     print(f"[deps] {platform}: done -> {os.path.relpath(os.path.join(DEPS, platform), ROOT)}", flush=True)
 
 

@@ -514,6 +514,9 @@ def build_prebuilt(platform, ps3recomp, gen_ppu, log=print, release=True):
     shutil.copy2(os.path.join(deps, sub, name), out)
     with open(os.path.join(out, build_deps.OPENAL_NOTICE), "w", encoding="utf-8", newline="\n") as f:
         f.write(build_deps.openal_notice())
+    # FFmpeg (the movies, LGPL: shared libraries beside the game), its notice and licence
+    import build_ffmpeg
+    build_ffmpeg.ship(platform, out)
     log(f"prebuilt: {os.path.relpath(out, ROOT)}")
     return out
 
