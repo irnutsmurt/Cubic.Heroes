@@ -332,7 +332,7 @@ name, play time, location and when it was written; the tests above pass.
 What is left of this item: the icon (ICON0.PNG), and the prompts in section
 6's styles (the panel says "CROSS (Z, ENTER)" and "CIRCLE (X)").
 
-## 7b. Freezes on a device change (found 2026-11-12; the cause established, not yet reproduced)
+## 7b. Freezes on a device change (found 2026-11-12; reproduced and fixed: ps3recomp patches 0150-0151)
 
 **What the owner saw** [M: the M4 session's frames.log and its frame trace]: on the title screen the game froze
 0.3-1.5 s at a time, about every 2 s, in three bursts -- 12.6-21 s, 40.5-51 s, 57.6-61.3 s after the start, the
@@ -360,13 +360,36 @@ near a movie's opening (the log's order suggests it; its lines carry no times). 
 movie's threads were in short periodic syscalls, not holding anything the game's thread waited on: the movie is
 not what blocked it.
 
-**Still to do**: (1) reproduce on purpose -- a session on the title screen with the frame trace from 5 s and a
-device plugged in and out (the controller, the headset): since rel42 the pad poll reports any SDL update of 50 ms
-or more with its time ("[cellPad] SDL controller update took ...", ps3recomp cellPad.c), so a freeze names its
-cause in the log; (2) then the fix: SDL's controller work off the game's and the window's threads -- one thread of
-its own polls SDL and publishes each port's state, cellPadGetData/GetInfo2 read that without calling SDL, the
-window's pump no longer updates joysticks (SDL_HINT_AUTO_UPDATE_JOYSTICKS=0), rumble goes through the pad thread;
-an enumeration then delays input for its 0.3 s and stops nothing else.
+**Reproduced** [M] (build/r8/pad42_run.sh, rel42): tools/sdl_device_poke.py posts SDL's own device-change timer
+message to the game's SDL window -- what a device plugged in or out makes SDL do, with nothing plugged and nothing
+outside the game touched -- six times, 5 s apart, on the title screen. Each poke gave one "[cellPad] SDL controller
+update took 312 ms" (the pad poll reports any SDL update of 50 ms or more, with the system tick: patch 0150), at
+the poke's own tick, and the frame trace six frames over 25 ms, the longest 335 ms. The same session without the
+pokes: no long update, the longest frame 17.7 ms. It also struck during M6's benchmark: an 86 ms frame in a river
+fight, the main thread 75 ms in cellPadGetInfo2 while SDL re-enumerated after a device change elsewhere on the
+system (docs/OPENAL_MIGRATION_PLAN.md section 10.3).
+
+**The fix** (patch 0151, ps3recomp cellPad.c): every SDL joystick and controller call runs on one thread of its
+own ("pad"), which every 4 ms sends the rumble the title asked for, reads SDL and publishes each port's state;
+cellPadGetData, GetInfo2 and the rest copy the latest reading and never call SDL; the window's event pump no
+longer updates joysticks (SDL_HINT_AUTO_UPDATE_JOYSTICKS=0), so it no longer waits on SDL's joystick lock either.
+Rumble is renewed only while the title still reads its pad, so a hung title's motors still stop within the hold.
+A re-enumeration now delays input by its own length and stops nothing else. PAD_SDL_THREAD=0 restores the old way.
+The XInput backend (the default without SDL2) is unchanged.
+
+**Validated on its own** [M] (build/r8/pad43_run.sh, rel43 = rel42 with the fix; apart from M6's measurements,
+which ran on rel42):
+- The same six pokes: six 313 ms enumerations, now on the pad thread; the title at 60.0 fps throughout, no frame
+  over 25 ms, the longest 17.7 ms (as without pokes). The same build with PAD_SDL_THREAD=0: six frames over 33 ms,
+  the longest 334 ms -- the freeze comes back with the old way, so the thread is what removed it.
+- The drives that read the attached controller through the thread (the river fight, the menus, the fields, a
+  dungeon, the editor, continue from a save) and the seven save-data flows: all as before, the controller
+  connected throughout, no crash.
+- An A/B against rel42 (uncapped, two rounds rotated): the fields 244.0-244.5 fps against 242.1-243.9; the river
+  fight 209.7-211.6 against rel42's 212.7 and 201.6 (that round a heavier fight). No cost.
+
+**Still to do**: the owner's hands-on check of what a test cannot press: the buttons and sticks, the rumble in a
+fight, unplugging and replugging the controller during play.
 
 ## 8. Launcher and update management (after the base and the settings are stable)
 
