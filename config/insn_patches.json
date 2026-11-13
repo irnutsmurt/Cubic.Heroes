@@ -8,13 +8,6 @@
   ],
   "patches": [
     {
-      "addr": "0x008D0F4C",
-      "orig": "0x39600021",
-      "new": "0x39600000",
-      "guard": "g_dotheroes_skip_flash_mp3",
-      "note": "func_008D0EBC (FMOD MultiStream MP3 codec load): its failure exit `li r11,33` becomes `li r11,0`, so a missing /dev_flash/sys/external/flashMP3.pic reports success with no codec loaded (the stat fails before anything is allocated)"
-    },
-    {
       "addr": "0x0002A6A0",
       "orig": "0x2FA3752F",
       "new": "0x2FA3FFFF",

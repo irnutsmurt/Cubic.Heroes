@@ -1,7 +1,11 @@
 # The remaining non-audio SPU workloads: what replacing each takes
 
-Written 2026-11-07 (R8). This is a plan with its evidence, not a record of
-work done. Nothing here is implemented, and nothing is validated.
+Written 2026-11-07 (R8) as a plan with its evidence. **Status 2026-11-12: every workload in it is done** --
+native by default, or generated on the player's machine from their own lift -- and validated; the table below is
+current. Each section keeps the record of what was done first, then its original plan as written on 2026-11-07
+(marked "The plan of 2026-11-07"), which describes the state before the work and is history, not the present.
+What is left of the SPU machinery itself (the runtime's SPU environment, SPURS, the overlays) and its
+retirement: docs/OPENAL_MIGRATION_PLAN.md section 10 (M6).
 
 Markers:
 - [C] read in the code or the lift;
@@ -10,8 +14,9 @@ Markers:
 - [I] inferred from measurements.
 
 The audio workloads (FMOD's mixers, codecs and DSPs: images 6-26, an lv2
-SPU thread group) belong to the audio milestone and are left out, except
-where they decide what can be removed.
+SPU thread group) belonged to the audio milestone and are left out: since M5
+(2026-11-12) FMOD's PPU code is excluded from the player's lift and its SPU
+images are not lifted (docs/OPENAL_MIGRATION_PLAN.md).
 
 Sources:
 - R8's inventory (docs/NATIVE_R8.md section 1; the static read in
@@ -21,16 +26,20 @@ Sources:
 - port/native/edge_inflate.c;
 - the lift (build/gen/spu).
 
-## Where things stand
+## Where things stand (2026-11-12)
 
-| Workload (runtime image) | Lifted image | Now | On the critical path? |
+| Workload (runtime image) | Lifted image | Now | Its fallback |
 |---|---|---|---|
-| Bullet solver, commands 1 and 2 (5) | spu_0004 | **lifted**, run through SPURS: phys_direct declines them [C] | **yes**, in heavy-debris frames: the game thread waits for each command [M, section 6.1] |
-| Edge zlib's shell (3) | spu_0002 | native inflate inside the lifted task; the task's SPURS shell, its queue and its completion lifted [C] | in area loads (load time), not in frames [M, HANDOFF] |
-| Water (1) | spu_0000 | **native by default, generated on the player's machine** (2026-11-11; below): no SPURS instance, task or SPU thread | no: the PPU awaits nothing |
-| Waver (2) | spu_0001 | **native by default, generated on the player's machine** (2026-11-11; below): reachable from the hero's update | only while it runs: the game thread waits for the previous frame's task |
-| Bullet collision, pairs the native code does not cover (4) | spu_0003 | lifted, declined to SPURS by phys_direct [C] | how often: **not measured** |
-| Bullet collision (covered pairs), solver commands 4-6 | -- | native, issued and completed directly (section 6.1) | done |
+| Bullet solver, commands 1 and 2 (5) | spu_0004 | **native by default** (2026-11-10, section 1): checked in the game against the lifted task, 0 spans different | DOTHEROES_NATIVE_SOLVER without 1,2: the lifted task through SPURS |
+| Edge zlib's shell (3) | spu_0002 | **native by default** (2026-11-10, section 2): the whole shell replaced at its one caller, no SPURS created; every disc pack's CRC checked | packs it declines (one disc pack: the shell's small path) and DOTHEROES_INFLATE_DIRECT=0: the lifted task |
+| Water (1) | spu_0000 | **native by default, generated on the player's machine** (2026-11-11, section 3), its start-up and shutdown the port's; the SPU's float mode since rel37 | DOTHEROES_NATIVE_WATER=0: the lifted task |
+| Waver (2) | spu_0001 | **native by default, generated on the player's machine** (2026-11-11, section 4); the SPU's float mode since rel37 | DOTHEROES_NATIVE_WAVER=0: the lifted task |
+| Bullet collision, pairs the native code does not cover (4) | spu_0003 | counted (2026-11-10, section 5): **none declined** in any scene run | an uncovered pair type: the lifted task through SPURS (never seen) |
+| Bullet collision (covered pairs), solver commands 4-6 | -- | native, issued and completed directly (section 6.1) | -- |
+
+Every fallback above keeps the SPU environment, SPURS and the lifted images alive until M6's census shows
+what the whole game reaches (the parts of the game no scene has run yet -- later areas, uncommon collision
+pairs, typed constraints, unusual pack sizes -- cannot be ruled out by the scenes so far).
 
 **Generated on the player's machine (2026-11-11, docs/OPENAL_MIGRATION_PLAN.md M1)** [C, M]. The owner's
 requirement: no code transcribed from the game in the repository. The water's and the waver's tasks were
@@ -214,6 +223,8 @@ does the test become removable.
   old default "4,5,6" is brought up to date; a player's own value is kept), the scenarios, the reference
   scenes. No solver task goes through SPURS any more in the runs seen.
 
+*The plan of 2026-11-07, as written (done: above).*
+
 **Where** [C]:
 - task image 5 (`PS3_SPURS_BulletSolver_spu_release`, entry 0xF8EC80);
 - issued by func_00955CF0 and awaited in func_00955BD4, the two functions
@@ -339,7 +350,9 @@ dungeon, fields -- every pack's CRC, size and address the same as the SPURS path
 scenarios, the reference scenes, sync validation and a normal-damage fight pass. A dungeon pack of
 42-47 MB inflates in 48-66 ms in the calling thread.
 
-**Now** [C, M]:
+*The plan of 2026-11-07, as written (done: above).*
+
+**Before** [C, M]:
 - Each area load creates a SPURS taskset, an event flag and a lock-free
   queue, pushes inflate requests, and creates the task.
 - The task's body for large inflates is native (an SPU entry hook,
@@ -437,7 +450,9 @@ check, a capture, or DOTHEROES_WATER_SPURS=1 keep the game's set-up.
 - The check mode, the hooks present: 2,495 river steps compared, all equal. rel15's validation scenes and the
   reference scenes pass.
 
-**Now** [C, M]:
+*The plan of 2026-11-07, as written (done: above).*
+
+**Before** [C, M]:
 - A persistent SPURS task, its own instance "Water" (1 SPU), resumed from
   its signal wait each frame by cellSpursEventFlagSet.
 - Fully lifted.
@@ -575,20 +590,17 @@ exception, which was not a pair type but a defect in phys_direct itself:
 Untested: a manager address reused by the other kind (counted, not yet seen), a table full of busy managers
 (the game's protocol never has more than one pair busy).
 
-## What remains after all five
+## What remains after all five (2026-11-12)
 
-Kept for FMOD until the audio milestone:
-- the SPU context, channels, mailboxes, MFC and DMA;
-- the lock-line lock and reservations, the dispatcher;
-- sys_event, the lifted registry with its overlays.
+All five are done; FMOD's SPU programs are gone from the player's build (M5). What is left is machinery, not
+workloads: the SPU context, channels, mailboxes, MFC and DMA, the lock-line lock and the per-store
+reservation test, the dispatcher, sys_event, the lifted registry and its overlays, SPU thread groups, and
+SPURS (the physics manager's two instances, which the game's own set-up still creates though no task runs in
+them; Water's and the inflate's are no longer
+created). Each stays while a fallback above can reach it; their retirement, one at a time with the census and
+validation after each, is M6 (docs/OPENAL_MIGRATION_PLAN.md section 10).
 
-The SPURS instances (Water, PhysXManager, the inflate's) and their
-emulation are no longer used by any workload: SPURS itself can go once
-nothing creates an instance. That is not the case until each step above is
-done and validated. Until then the SPURS path stays as each workload's
-fallback switch.
-
-## Queued (runtime evidence each needs; docs/NATIVE_R8.md section 9.1)
+## Queued (2026-11-07; all done since -- sections 1-5)
 
 - The solver's set-up captures (section 1, step 1): a river fight with the
   extended snapshot.

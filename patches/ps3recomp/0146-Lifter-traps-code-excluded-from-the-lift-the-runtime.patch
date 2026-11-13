@@ -1,0 +1,532 @@
+From 5a1d92cff1f525270f866c2a832ef1fbf0ea97ee Mon Sep 17 00:00:00 2001
+From: giteaguy <73799093+irnutsmurt@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 14:18:35 -0800
+Subject: [PATCH] Lifter: --traps, code excluded from the lift; the runtime
+ traps it
+
+A title's port may replace a whole library of the executable with code of
+its own (an audio middleware with a native implementation, say) and must
+then hold none of the library's implementation, not even unused, while any
+path still reaching it shows itself.
+
+ppu_lifter.py --traps FILE: {"traps": [{"lo", "hi", "what"}]}, half-open
+guest ranges. Every function that starts in one is emitted as a call of
+ppu_trap(addr, what, ctx) -- not one instruction of its body is in the
+output, nor its fall-through chain -- and the ranges are registered with the
+runtime (ppu_trap_ranges_register, from the function table's file). The
+ranges must follow the lift's function boundaries: a lifted function that
+runs into one, or a trapped one that runs out of it, is refused, as is an
+entry hook, an instruction patch, an entry observer or --promote-calls
+inside excluded code.
+
+runtime/ppu/ppu_loader.cpp: ppu_trap reports the address, the range's name,
+the caller (lr, r3, the thread), the host chain and the guest's stack, then
+ends the run (ps3_fatal). A lookup that finds no function (ppu_lookup's
+miss) checks the ranges: an indirect call or a function pointer into the
+middle of excluded code, or a thread or callback entering it, ends in the
+same trap rather than as an unknown address. A lift from before --traps
+compiles as before (PPU_RECOMP_HAS_TRAPS).
+
+tools/test_ppu_traps.py (runtime/ppu/tests/test_ppu_traps.cpp): a made-up
+program with two excluded functions, lifted, checked and built against the
+real ppu_loader.cpp: neither body in the source; an entry hook in the range
+and a function that runs into it refused; a direct call, an indirect call
+through CTR, a function pointer read from guest memory, a tail call, a call
+into the middle of an excluded function and a fall-through into one each end
+the run at the trap naming the address reached; a call to a function not
+excluded runs and returns. 16 checks, all pass (Windows, zig c++).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ runtime/ppu/ppu_loader.cpp           |  51 ++++++++-
+ runtime/ppu/tests/test_ppu_traps.cpp |  86 +++++++++++++++
+ tools/ppu_lifter.py                  | 104 ++++++++++++++++++
+ tools/test_ppu_traps.py              | 157 +++++++++++++++++++++++++++
+ 4 files changed, 396 insertions(+), 2 deletions(-)
+ create mode 100644 runtime/ppu/tests/test_ppu_traps.cpp
+ create mode 100644 tools/test_ppu_traps.py
+
+diff --git a/runtime/ppu/ppu_loader.cpp b/runtime/ppu/ppu_loader.cpp
+index 683fd56..898b34f 100644
+--- a/runtime/ppu/ppu_loader.cpp
++++ b/runtime/ppu/ppu_loader.cpp
+@@ -2537,15 +2537,62 @@ extern "C" uint32_t ppu_prof_resolve_host(void* ra)
+     return lo ? g_inv[lo - 1].guest : 0;
+ }
+ 
++/* --traps (tools/ppu_lifter.py): code excluded from the lift. The lifted program registers its excluded ranges
++ * (ppu_trap_ranges_register, from the file that holds its function table); each function starting in one was
++ * lifted as a call of ppu_trap, and a lookup of any other address in one -- an indirect call or a function pointer
++ * into the middle of excluded code, a thread or a callback entering it -- ends in ppu_trap as well: the address,
++ * what the range is, the caller and the guest's stack reported, then the run ends (ps3_fatal). Nothing of the
++ * excluded code exists to run in its place. */
++#ifndef PPU_RECOMP_HAS_TRAPS
++typedef struct { uint32_t lo, hi; const char* what; } ppu_trap_range;   /* a lift from before --traps */
++#endif
++static struct { const ppu_trap_range* r; unsigned n; } s_trap_sets[8];
++static unsigned s_trap_set_n;
++extern "C" int ppu_trap_ranges_register(const ppu_trap_range* ranges, unsigned count)
++{
++    if (s_trap_set_n >= 8) ps3_fatal("traps", "more than 8 images register excluded ranges");
++    s_trap_sets[s_trap_set_n].r = ranges;
++    s_trap_sets[s_trap_set_n].n = count;
++    s_trap_set_n++;
++    return 1;
++}
++static const char* ppu_trap_find(uint32_t a)
++{
++    for (unsigned i = 0; i < s_trap_set_n; i++)
++        for (unsigned k = 0; k < s_trap_sets[i].n; k++)
++            if (a >= s_trap_sets[i].r[k].lo && a < s_trap_sets[i].r[k].hi) return s_trap_sets[i].r[k].what;
++    return nullptr;
++}
++extern "C" void ppu_trap(uint32_t addr, const char* what, ppu_context* ctx)
++{
++    if (!ctx) ctx = g_active_ctx;
++    fflush(stdout);
++    fprintf(stderr, "[ppu] TRAP: excluded code reached at 0x%08X (%s; not lifted, --traps): lr=0x%08X r3=0x%08X tid=%llu\n",
++            addr, what ? what : "?", ctx ? (uint32_t)ctx->lr : 0u, ctx ? (uint32_t)ctx->gpr[3] : 0u,
++            ctx ? (unsigned long long)ctx->thread_id : 0ull);
++    ppu_log_host_chain("trap");
++    if (ctx) ppu_dump_guest_stack(ctx, "trap");
++    ps3_fatal("excluded-code", "0x%08X (%s) was excluded from the lift", addr, what ? what : "?");
++}
++/* a lookup that found no function: inside an excluded range that is the trap, not an unknown address */
++static ppu_fn ppu_lookup_miss(uint32_t a)
++{
++    if (__builtin_expect(s_trap_set_n != 0, 0)) {
++        const char* w = ppu_trap_find(a);
++        if (w) ppu_trap(a, w, nullptr);
++    }
++    return nullptr;
++}
++
+ static ppu_fn ppu_lookup(uint32_t a)
+ {
+     uint32_t i = (a * 2654435761u) & PPU_HASH_MASK;
+     for (uint32_t probes = 0; probes < PPU_HASH_SIZE; probes++) {
+-        if (g_fn(i) == nullptr) return nullptr;
++        if (g_fn(i) == nullptr) return ppu_lookup_miss(a);
+         if (g_addr(i) == a) return g_fn(i);
+         i = (i + 1) & PPU_HASH_MASK;
+     }
+-    return nullptr;
++    return ppu_lookup_miss(a);
+ }
+ /* R8: the lifted code's call-site cache fills itself from this (PPU_ICALL) */
+ extern "C" ppu_fn ps3_icall_lookup(uint32_t a) { return a ? ppu_lookup(a) : nullptr; }
+diff --git a/runtime/ppu/tests/test_ppu_traps.cpp b/runtime/ppu/tests/test_ppu_traps.cpp
+new file mode 100644
+index 0000000..dc15885
+--- /dev/null
++++ b/runtime/ppu/tests/test_ppu_traps.cpp
+@@ -0,0 +1,86 @@
++// --traps (tools/ppu_lifter.py) end to end, no game: tools/test_ppu_traps.py lifts a made-up program in which
++// two functions are excluded, and builds this against the lift and the real ppu_loader.cpp. One scenario per
++// run (argv[1]), each an entry of the program started through ps3_indirect_call:
++//   direct       a `bl` to an excluded function
++//   ctr          an indirect call (mtctr; bctrl) to an excluded function
++//   pointer      an indirect call through a function pointer read from guest memory
++//   tail         a `b` (a tail call) to an excluded function
++//   middle       an indirect call into the middle of an excluded function (no function starts there)
++//   fallthrough  a function that runs off its end into an excluded one
++//   normal       a call to a function that is not excluded: it must run (r3 = 42)
++// A trap ends the run (ps3_fatal: abort) after its report; returning from an excluded entry is a failure.
++#include "ppu_recomp.h"
++#include <cstdint>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++
++extern "C" {
++uint8_t* vm_base;
++uint32_t ppu_hle_inject_base = 0x20000000;
++int spu_coh_is_reserved(uint32_t) { return 0; }
++void spu_coh_notify_write(uint32_t) { std::abort(); }
++void spu_lockline_lock(void) { std::abort(); }
++void spu_lockline_unlock(void) { std::abort(); }
++int spu_raw_reg_load(uint32_t, uint32_t*) { std::abort(); }
++void spu_raw_reg_store(uint32_t, uint32_t, unsigned) { std::abort(); }
++void cellGcm_ref_on_poll(void) { std::abort(); }
++uint64_t ppu_thread_register_main(void) { return 1; }
++void (*g_ppu_thread_entry_trampoline)(uint32_t, uint64_t, uint32_t, uint64_t);
++uint32_t ps3_hle_count(void) { return 0; }
++// the rest of the runtime ppu_loader.cpp refers to (the GCM front end, the syscalls, the memory mapper, the
++// milestone log): never reached by these scenarios
++void cellGcm_get_on_poll(void) { std::abort(); }
++volatile unsigned long g_gcm_drain_tid;
++uint32_t (*g_gcm_word_caller)(uint32_t ea);
++uint64_t (*g_gcm_word_writer)(uint32_t ea);
++int32_t g_ppu_primary_prio;
++extern const unsigned char* const g_spu_coh_map = nullptr;
++int lv2_try_syscall(ppu_context*) { std::abort(); }
++void ppu_prof_stamp(void*, unsigned) {}
++uint32_t ps3_mmapper_block_size(uint32_t) { std::abort(); }
++unsigned long long ps3_ms_now(void) { return 0; }
++void ps3_msf(const char*, ...) {}
++void ps3_stdio_init(void) {}
++uint32_t spu_registry_size(void) { return 0; }
++int spu_registry_entry(uint32_t, void**, uint32_t*) { return 0; }
++void sys_memory_set_image_query(uint64_t (*)(uint64_t, uint64_t)) {}
++int64_t sys_mmapper_allocate_address(ppu_context*) { std::abort(); }
++int64_t sys_mmapper_search_map_address(uint32_t, uint32_t, uint32_t*) { std::abort(); }
++void ppu_register_function(uint64_t addr, void (*fn)(ppu_context*));
++void ps3_indirect_call(ppu_context* ctx);
++}
++
++static void wr32(uint32_t ea, uint32_t v)
++{
++    vm_base[ea] = (uint8_t)(v >> 24);
++    vm_base[ea + 1] = (uint8_t)(v >> 16);
++    vm_base[ea + 2] = (uint8_t)(v >> 8);
++    vm_base[ea + 3] = (uint8_t)v;
++}
++
++int main(int argc, char** argv)
++{
++    static const struct { const char* name; uint32_t entry; } kScenarios[] = {
++        { "direct", 0x10000 }, { "ctr", 0x10010 }, { "pointer", 0x10030 }, { "tail", 0x10050 },
++        { "middle", 0x10060 }, { "fallthrough", 0x1FFF8 }, { "normal", 0x100A0 },
++    };
++    if (argc < 2) { std::fprintf(stderr, "usage: test_ppu_traps <scenario>\n"); return 2; }
++    uint32_t entry = 0;
++    for (const auto& s : kScenarios)
++        if (!std::strcmp(argv[1], s.name)) entry = s.entry;
++    if (!entry) { std::fprintf(stderr, "unknown scenario %s\n", argv[1]); return 2; }
++    vm_base = (uint8_t*)std::calloc(1, 0x100000);
++    wr32(0x40000, 0x20000);   // a function pointer to the first excluded function, in guest memory
++    for (uint64_t i = 0; i < function_table_count; i++)
++        ppu_register_function(function_table[i].addr, function_table[i].func);
++    static ppu_context ctx;
++    ctx.gpr[1] = 0x80000;     // a stack
++    ctx.gpr[3] = 0x40000;     // the pointer's address, for `pointer`
++    ctx.ctr = entry;
++    ps3_indirect_call(&ctx);
++    std::printf("returned: r3=%llu\n", (unsigned long long)ctx.gpr[3]);
++    if (!std::strcmp(argv[1], "normal")) return ctx.gpr[3] == 42 ? 0 : 1;
++    std::printf("NO TRAP: the excluded code was not stopped\n");
++    return 3;
++}
+diff --git a/tools/ppu_lifter.py b/tools/ppu_lifter.py
+index 49fa31a..8510b01 100644
+--- a/tools/ppu_lifter.py
++++ b/tools/ppu_lifter.py
+@@ -560,6 +560,22 @@ extern const uint64_t  function_table_count;  /* entries, excluding sentinel */
+ }
+ #endif
+ 
++/* --traps: code excluded from the lift (runtime/ppu/ppu_trap.cpp). Each function
++ * that starts in an excluded range is lifted as a call of ppu_trap -- its body is
++ * not in the output -- and the ranges are registered so that a jump or a function
++ * pointer to any address inside them is reported the same way: the address, what
++ * the range is, the caller; then the run ends. */
++#define PPU_RECOMP_HAS_TRAPS 1
++typedef struct { uint32_t lo, hi; const char* what; } ppu_trap_range;
++#ifdef __cplusplus
++extern "C" {
++#endif
++void ppu_trap(uint32_t addr, const char* what, ppu_context* ctx);
++int ppu_trap_ranges_register(const ppu_trap_range* ranges, unsigned count);
++#ifdef __cplusplus
++}
++#endif
++
+ """
+ 
+ SOURCE_PREAMBLE = """\
+@@ -1402,6 +1418,38 @@ def load_entry_hooks(path: str) -> dict[int, tuple[str, str, bool]]:
+     return out
+ 
+ 
++def load_traps(path: str) -> list[tuple[int, int, str]]:
++    """Read a --traps file:
++
++        {"traps": [{"lo": "0x0082F650", "hi": "0x00908584", "what": "FMOD",
++                    "note": "..."}, ...]}
++
++    -> [(lo, hi, what)], sorted: half-open guest address ranges whose code is not
++    lifted. Every function that starts in one is emitted as a trap (a call of
++    ppu_trap with its address and `what`: the run reports it and ends), and the
++    ranges are registered with the runtime, which treats any other address in
++    them the same way (a jump or a function pointer into the middle of excluded
++    code). The ranges must follow function boundaries: a lifted function that
++    runs into one, or a trapped one that runs out of it, is an error -- the
++    output would hold part of the excluded code, or lose code that is not."""
++    with open(path) as f:
++        spec = json.load(f)
++    out = []
++    for e in spec.get("traps", []):
++        lo, hi = int(str(e["lo"]), 0), int(str(e["hi"]), 0)
++        what = str(e.get("what", "excluded"))
++        if lo & 3 or hi & 3 or lo >= hi:
++            sys.exit(f"[ppu_lifter] {path}: bad trap range 0x{lo:08X}-0x{hi:08X}")
++        if not re.fullmatch(r"[A-Za-z0-9_ .+-]{1,40}", what):
++            sys.exit(f"[ppu_lifter] {path}: {what!r}: a trap's name is letters, digits, spaces and _.+- (40 at most)")
++        out.append((lo, hi, what))
++    out.sort()
++    for (a_lo, a_hi, _), (b_lo, b_hi, _) in zip(out, out[1:]):
++        if b_lo < a_hi:
++            sys.exit(f"[ppu_lifter] {path}: trap ranges 0x{a_lo:08X}-0x{a_hi:08X} and 0x{b_lo:08X}-0x{b_hi:08X} overlap")
++    return out
++
++
+ _OBS_STORE_RE = re.compile(r"\b(vm_write(8|16|32|64)|vm_raw_st16)\(")
+ 
+ 
+@@ -4809,6 +4857,13 @@ class PPULifter:
+                              f"0x{best[a].end_addr:08X} end\n")
+         return out
+ 
++    def _trap_of(self, addr: int):
++        """The --traps range addr lies in, as (lo, hi, what), else None."""
++        for r in getattr(self, "traps", ()):
++            if r[0] <= addr < r[1]:
++                return r
++        return None
++
+     def _outside_code(self, tgt: int) -> bool:
+         """True if tgt is outside the executable window AND not an import stub.
+ 
+@@ -4837,6 +4892,15 @@ class PPULifter:
+         if label:
+             lines.append(f"/* {label} */")
+         weak = "__attribute__((weak)) " if getattr(self, "weak_emit", False) else ""
++        trap = self._trap_of(func.start_addr)
++        if trap:
++            # --traps: excluded code. Not one of its instructions is emitted; a call,
++            # a jump or a function pointer that reaches it reports itself and ends.
++            self.trapped = getattr(self, "trapped", 0) + 1
++            lines += [f"void {weak}{func.name}(ppu_context* ctx) {{  /* excluded (--traps: {trap[2]}) */",
++                      f'    ppu_trap(0x{func.start_addr:08X}u, "{trap[2]}", ctx);',
++                      "}", ""]
++            return lines
+         # The guard of each --insn-patches line in this body: the port defines it.
+         guards = sorted({m.group(1) for bl in func.body_lines
+                          for m in [_INSN_PATCH_RE.match(bl.strip())] if m})
+@@ -4978,6 +5042,16 @@ class PPULifter:
+         lines.append("};")
+         lines.append(f"const uint64_t {self.prefix}function_table_count = {len(funcs)};")
+         lines.append("")
++        traps = getattr(self, "traps", ())
++        if traps:
++            lines.append("/* --traps: the excluded ranges, for the runtime's lookup of a guest address */")
++            lines.append(f"static const ppu_trap_range {self.prefix}ppu_trap_ranges[] = {{")
++            for lo, hi, what in traps:
++                lines.append(f'    {{ 0x{lo:08X}u, 0x{hi:08X}u, "{what}" }},')
++            lines.append("};")
++            lines.append(f"static const int {self.prefix}ppu_trap_ranges_on = ppu_trap_ranges_register("
++                         f"{self.prefix}ppu_trap_ranges, {len(traps)});")
++            lines.append("")
+         return lines
+ 
+     def emit_source(self) -> str:
+@@ -5826,6 +5900,10 @@ def main() -> None:
+     parser.add_argument("--promote-calls", metavar="FILE", default=None,
+                         help="JSON {functions:[addr]}: keep the guest registers in C locals across the "
+                              "calls of these functions too, with liveness (see _promote_calls_body)")
++    parser.add_argument("--traps", metavar="FILE", default=None,
++                        help="JSON {\"traps\": [{\"lo\", \"hi\", \"what\"}]}: guest code ranges not "
++                             "lifted -- each function starting in one becomes a call of ppu_trap "
++                             "(reported, the run ends), and the runtime traps any address in them")
+     parser.add_argument("--insn-patches", metavar="FILE", default=None, action="append",
+                         help="JSON list of instruction patches to lift as "
+                              "run-time switches: each {addr, orig, new, guard} "
+@@ -6383,6 +6461,32 @@ def main() -> None:
+         if missing:
+             sys.exit("[ppu_lifter] entry hooks at no lifted function's start: " +
+                      ", ".join(f"0x{a:08X}" for a in missing))
++    lifter.traps = load_traps(args.traps) if args.traps else []
++    if lifter.traps:
++        # Nothing may attach to excluded code, and the ranges must follow the
++        # functions: no lifted function may run into one, no trapped one out of it.
++        attached = [("an entry hook", getattr(lifter, "entry_hooks", None) or {}),
++                    ("an instruction patch", getattr(lifter, "insn_patches", None) or {}),
++                    ("an entry observer", getattr(lifter, "entry_observers", None) or ()),
++                    ("--promote-calls", getattr(lifter, "promote_calls", None) or ())]
++        for what, addrs in attached:
++            inside = sorted(a for a in addrs if lifter._trap_of(a))
++            if inside:
++                sys.exit(f"[ppu_lifter] {what} in excluded code (--traps): " +
++                         ", ".join(f"0x{a:08X}" for a in inside[:8]))
++        for f in lifter._emit_functions():
++            t = lifter._trap_of(f.start_addr)
++            if t and f.end_addr > t[1]:
++                sys.exit(f"[ppu_lifter] --traps: {f.name} (0x{f.start_addr:08X}-0x{f.end_addr:08X}) "
++                         f"runs out of the excluded range 0x{t[0]:08X}-0x{t[1]:08X} ({t[2]})")
++            if not t:
++                for lo, hi, what in lifter.traps:
++                    if f.start_addr < lo < f.end_addr:
++                        sys.exit(f"[ppu_lifter] --traps: {f.name} (0x{f.start_addr:08X}-0x{f.end_addr:08X}) "
++                                 f"runs into the excluded range 0x{lo:08X}-0x{hi:08X} ({what})")
++        n = sum(1 for f in lifter._emit_functions() if lifter._trap_of(f.start_addr))
++        print(f"  traps: {len(lifter.traps)} excluded range(s), {n} function(s) lifted as traps "
++              f"from {args.traps}")
+ 
+     os.makedirs(args.output, exist_ok=True)
+ 
+diff --git a/tools/test_ppu_traps.py b/tools/test_ppu_traps.py
+new file mode 100644
+index 0000000..0594443
+--- /dev/null
++++ b/tools/test_ppu_traps.py
+@@ -0,0 +1,157 @@
++#!/usr/bin/env python3
++"""--traps end to end: code excluded from the lift is not in the output, and every way of reaching it is stopped.
++
++A made-up PPU program (assembled here; no game) -- entries that call two excluded functions directly, through
++CTR, through a function pointer in guest memory, by a tail call, into the middle of one, and by running off
++their end into one; and a normal call that must still work -- is lifted with --traps naming the excluded range,
++then:
++  1. the source: neither excluded body is there (their constants absent), each is a call of ppu_trap, the range
++     is registered, the normal function's body is there;
++  2. the lifter refuses what would attach to excluded code or cut a function: an entry hook inside the range,
++     a function that runs into it;
++  3. built against the real runtime/ppu/ppu_loader.cpp (runtime/ppu/tests/test_ppu_traps.cpp) and run once per
++     scenario: each excluded path ends the run with the trap's report naming the address reached, and the
++     normal call returns 42.
++
++  python tools/test_ppu_traps.py        (CXX: the C++ compiler, default c++; e.g. "zig c++ -target x86_64-windows-gnu")
++"""
++import json
++import os
++import re
++import shlex
++import struct
++import subprocess
++import sys
++import tempfile
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parents[1]
++BASE, END = 0x10000, 0x20200
++X1, X2 = 0x20000, 0x20100   # the excluded functions
++WHAT = "TEST excluded"
++
++
++def li(rd, imm): return 0x38000000 | rd << 21 | (imm & 0xFFFF)
++def lis(rd, imm): return 0x3C000000 | rd << 21 | (imm & 0xFFFF)
++def ori(ra, rs, imm): return 0x60000000 | rs << 21 | ra << 16 | (imm & 0xFFFF)
++def mtctr(rs): return 0x7C0903A6 | rs << 21
++def lwz(rd, d, ra): return 0x80000000 | rd << 21 | ra << 16 | (d & 0xFFFF)
++BCTRL, BLR = 0x4E800421, 0x4E800020
++def bl(pc, t): return 0x48000001 | ((t - pc) & 0x03FFFFFC)
++def b(pc, t): return 0x48000000 | ((t - pc) & 0x03FFFFFC)
++
++
++def program():
++    """{start: [words]} and the function list"""
++    f = {
++        0x10000: [bl(0x10000, X1), BLR],                                      # direct
++        0x10010: [lis(12, 2), ori(12, 12, 0x0100), mtctr(12), BCTRL, BLR],    # ctr -> X2
++        0x10030: [lwz(12, 0, 3), mtctr(12), BCTRL, BLR],                      # pointer: [r3] = X1
++        0x10050: [b(0x10050, X1)],                                            # tail
++        0x10060: [lis(12, 2), ori(12, 12, 0x0108), mtctr(12), BCTRL, BLR],   # middle of X2
++        0x100A0: [bl(0x100A0, 0x100C0), BLR],                                 # normal
++        0x100C0: [li(3, 42), BLR],
++        0x1FFF8: [li(3, 5), li(4, 6)],                                        # runs off its end into X1
++        X1: [li(3, 0x777), BLR],
++        X2: [li(3, 0x778), li(4, 0x779), li(5, 0x77A), BLR],
++    }
++    blob = bytearray(END - BASE)
++    for start, words in f.items():
++        for k, w in enumerate(words):
++            struct.pack_into(">I", blob, start - BASE + 4 * k, w)
++    funcs = [{"start": hex(s), "end": hex(s + 4 * len(w))} for s, w in sorted(f.items())]
++    return bytes(blob), funcs
++
++
++def lift(tmp, funcs, extra=()):
++    blob, _ = program()
++    (tmp / "prog.bin").write_bytes(blob)
++    (tmp / "funcs.json").write_text(json.dumps(funcs))
++    (tmp / "traps.json").write_text(json.dumps({"traps": [{"lo": hex(X1), "hi": hex(END), "what": WHAT}]}))
++    out = tmp / "out"
++    r = subprocess.run([sys.executable, str(ROOT / "tools/ppu_lifter.py"), str(tmp / "prog.bin"), "--raw",
++                        "--base", hex(BASE), "--functions", str(tmp / "funcs.json"), "--traps", str(tmp / "traps.json"),
++                        "--output", str(out), "--single-file", "--source-name", "ppu_recomp.cpp", *extra],
++                       capture_output=True, text=True)
++    return r, out
++
++
++def main():
++    fails = []
++
++    def check(ok, what):
++        print(("PASS: " if ok else "FAIL: ") + what)
++        if not ok:
++            fails.append(what)
++
++    with tempfile.TemporaryDirectory(prefix="ppu-traps-") as tmp:
++        tmp = Path(tmp)
++        _, funcs = program()
++        r, out = lift(tmp, funcs)
++        if r.returncode:
++            sys.stderr.write(r.stdout[-2000:] + r.stderr[-2000:])
++            raise SystemExit("FAIL: the lift")
++        src = (out / "ppu_recomp.cpp").read_text()
++        body = lambda a: re.search(r"void func_%08X\(ppu_context\* ctx\) \{(.*?)\n\}" % a, src, re.S)
++        for a, consts in ((X1, ("0x777", "1911")), (X2, ("0x778", "0x779", "0x77A", "1912", "1913", "1914"))):
++            m = body(a)
++            check(m is not None and f'ppu_trap(0x{a:08X}u, "{WHAT}", ctx);' in m.group(1)
++                  and m.group(1).count(";") == 1, f"func_{a:08X} is only its trap")
++            check(not any(re.search(r"\b%s\b" % c, src) for c in consts), f"nothing of func_{a:08X}'s body in the source")
++        check(f'{{ 0x{X1:08X}u, 0x{END:08X}u, "{WHAT}" }}' in src and "ppu_trap_ranges_register(" in src,
++              "the excluded range is registered")
++        m = body(0x100C0)
++        check(m is not None and "(0x2A)" in m.group(1), "the normal function is lifted (li r3,42 there)")
++        check("traps: 1 excluded range(s), 2 function(s) lifted as traps" in r.stdout, "the lift reports the traps")
++
++        # 2. refusals
++        (tmp / "hooks.json").write_text(json.dumps({"entry_hooks": [{"addr": hex(X1), "host": "h", "guard": "g"}]}))
++        r2, _ = lift(tmp / "", funcs, ("--insn-patches", str(tmp / "hooks.json")))
++        check(r2.returncode != 0 and "entry hook in excluded code" in (r2.stdout + r2.stderr),
++              "an entry hook in the excluded range is refused")
++        bad = [dict(e) for e in funcs]
++        for e in bad:
++            if int(e["start"], 16) == 0x1FFF8:
++                e["end"] = hex(X1 + 8)   # a function that runs into the range
++        r3, _ = lift(tmp, bad)
++        check(r3.returncode != 0 and "runs into the excluded range" in (r3.stdout + r3.stderr),
++              "a function that runs into the excluded range is refused")
++
++        # 3. built against the real dispatcher, each scenario run
++        r, out = lift(tmp, funcs)   # the good lift again (the refused ones may have left files)
++        cxx = shlex.split(os.environ.get("CXX", "c++"))
++        exe = tmp / ("test_ppu_traps" + (".exe" if os.name == "nt" else ""))
++        flags = ["-ffunction-sections", "-fdata-sections", "-Wl,--gc-sections"] + ([] if os.name == "nt" else ["-pthread", "-ldl"])
++        strict = tmp / "ps3_strict.o"   # C: compiled on its own
++        b_ = subprocess.run([*cxx, "-x", "c", "-O1", "-w", "-I" + str(ROOT / "include"), "-c",
++                             str(ROOT / "runtime/platform/ps3_strict.c"), "-o", str(strict)],
++                            capture_output=True, text=True)
++        cmd = [*cxx, "-std=c++17", "-O1", "-w", "-I" + str(out), "-I" + str(ROOT / "include"),
++               "-I" + str(ROOT / "runtime/platform"), "-I" + str(ROOT / "runtime/ppu"),
++               str(out / "ppu_recomp.cpp"), str(ROOT / "runtime/ppu/ppu_loader.cpp"),
++               str(ROOT / "runtime/ppu/tests/test_ppu_traps.cpp"), str(strict), *flags, "-o", str(exe)]
++        if not b_.returncode:
++            b_ = subprocess.run(cmd, capture_output=True, text=True)
++        if b_.returncode:
++            sys.stderr.write(b_.stdout[-3000:] + b_.stderr[-6000:])
++            raise SystemExit("FAIL: the test program did not build")
++        env = {k: v for k, v in os.environ.items() if not k.startswith(("PPU_", "PS3_", "PS3RECOMP_", "SPU_"))}
++        for scen, addr in (("direct", X1), ("ctr", X2), ("pointer", X1), ("tail", X1), ("middle", X2 + 8),
++                           ("fallthrough", X1)):
++            p = subprocess.run([str(exe), scen], env=env, capture_output=True, text=True, timeout=60)
++            want = f"TRAP: excluded code reached at 0x{addr:08X} ({WHAT}"
++            ok = p.returncode != 0 and want in p.stderr and "NO TRAP" not in p.stdout and "returned" not in p.stdout
++            check(ok, f"{scen}: the run ends at the trap for 0x{addr:08X}")
++            if not ok:
++                sys.stderr.write(p.stdout[-800:] + p.stderr[-1500:])
++        p = subprocess.run([str(exe), "normal"], env=env, capture_output=True, text=True, timeout=60)
++        check(p.returncode == 0 and "r3=42" in p.stdout and "TRAP" not in p.stderr, "normal: the call runs (r3 = 42)")
++        if p.returncode:
++            sys.stderr.write(p.stdout[-800:] + p.stderr[-1500:])
++    if fails:
++        raise SystemExit(f"FAIL: {len(fails)} check(s)")
++    print("PASS: excluded code is not lifted and every path into it traps")
++
++
++if __name__ == "__main__":
++    main()
+-- 
+2.56.0.windows.3
+

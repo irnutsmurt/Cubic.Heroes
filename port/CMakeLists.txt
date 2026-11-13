@@ -412,8 +412,9 @@ if(OPENAL_INCLUDE_DIR)
     target_include_directories(dotheroes_native PRIVATE "${OPENAL_INCLUDE_DIR}"
         "${CMAKE_CURRENT_SOURCE_DIR}/native/audio")
 else()
-    message(STATUS "OpenAL Soft:     no headers (tools/build_deps.py builds it): the native sound manager is silent")
-    target_sources(dotheroes_native PRIVATE native/audio/native_sound_absent.cpp)
+    # the game's only audio since M5 (FMOD is not in the lift): a build without it would be a silent game
+    message(FATAL_ERROR "OpenAL Soft's headers not found: run tools/build_deps.py (it builds OpenAL Soft and "
+                        "installs its headers into build/deps/<platform>/include)")
 endif()
 
 target_link_libraries(${PROJECT_NAME} PRIVATE

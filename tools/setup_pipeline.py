@@ -278,8 +278,15 @@ def recomp(paths, log):
 # which has no RSX command path, draws nothing) and R8's leaf promotion.
 # tests/test_player_pipeline.py checks these against tools/r8_lift.sh.
 LIFT_CONFIG = [("--sjlj", "sjlj.json"), ("--insn-patches", "insn_patches.json"), ("--insn-patches", "r8_hooks.json"),
-               ("--insn-patches", "audio_hooks.json"), ("--entry-observers", "r7_native_hooks.json")]
+               ("--insn-patches", "audio_hooks.json"), ("--entry-observers", "r7_native_hooks.json"),
+               ("--traps", "excluded_code.json")]   # FMOD's code is not lifted (M5): traps in its place
 LIFT_FLAGS = ["--chunks", PPU_CHUNKS, "--promote-leaf"]
+
+
+def excluded_spu_images():
+    """the SPU images config/excluded_code.json names: code the game never runs here (FMOD's), not lifted"""
+    with open(os.path.join(config_dir(), "excluded_code.json")) as f:
+        return list(json.load(f).get("spu_images", []))
 
 
 def lift_options():
@@ -294,14 +301,16 @@ def spu(paths, log):
         shutil.rmtree(spu_dir)
     images = os.path.join(spu_dir, "images")
     run_tool(os.path.join(t, "extract_spu_images.py"), [paths.elf, "--output", images], log)
+    excluded = excluded_spu_images()   # FMOD's SPU programs (M5): not lifted
     reloc = []
     with open(os.path.join(config_dir(), "spu_relocatable.json")) as f:
         for img in json.load(f)["images"]:
-            reloc += ["--relocatable", f"{img}=0x{spu_text_ea(paths.elf, os.path.join(images, img + '.elf')):08X}"]
+            if img not in excluded:
+                reloc += ["--relocatable", f"{img}=0x{spu_text_ea(paths.elf, os.path.join(images, img + '.elf')):08X}"]
     run_tool(os.path.join(t, "build_spu_workloads.py"),
              ["--images", images, "--lifted", spu_dir, "--out", os.path.join(spu_dir, "spu_workloads.c"),
               "--constructor", "--relift", "--entry-hooks", os.path.join(config_dir(), "spu_entry_hooks.json"),
-              *reloc], log)   # entry hooks: native code for hot SPU routines (the map packs' inflate)
+              *reloc, *[a for img in excluded for a in ("--exclude", img)]], log)   # entry hooks: native code for hot SPU routines (the map packs' inflate)
     spu_native(paths, log)
 
 

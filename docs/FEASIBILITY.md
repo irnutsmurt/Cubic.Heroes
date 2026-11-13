@@ -286,7 +286,8 @@ Licensing:
 
 ### Explicit exceptions (recorded as they arise)
 
-**E1: FMOD's MP3 codec (firmware file), skipped. [measured]**
+**E1: FMOD's MP3 codec (firmware file), skipped. [measured]** -- *Retired 2026-11-12 (M5): FMOD is no longer in
+the lift (docs/OPENAL_MIGRATION_PLAN.md) and the patch is gone; what follows is the record.*
 - **What the game does:** FMOD Ex's PS3 MultiStream backend loads `/dev_flash/sys/external/flashMP3.pic` from the console firmware while it initialises. That file is an SPU ELF that FMOD runs on its mixer SPU. Without it, FMOD init fails and the game retries it forever.
 - **Why we can't supply it:**
   - this project ships no firmware;

@@ -81,15 +81,15 @@ no broad code-generation campaign while the rendering boundary is settled.
 
 ## 2. Priorities
 
-| # | Priority | State, 2026-11-04 |
+| # | Priority | State, 2026-11-12 |
 |---|---|---|
-| 1 | Native Vulkan graphics replacing the PS3 graphics path | Evidence stage done; R1 proposed (section 5) |
-| 2 | Native implementations of the remaining SPU workloads | Collision and solver native (DOTHEROES_NATIVE_CD, _SOLVER), commands 1-2 still lifted; Edge zlib native with a lifted fallback; FMOD mixer, codecs and DSPs lifted |
+| 1 | Native Vulkan graphics replacing the PS3 graphics path | Done: the native renderer (R1-R7, NATIVE_R7.md); the release has no RSX command path |
+| 2 | Native implementations of the remaining SPU workloads | Done, each native by default (SPU_NON_AUDIO.md): the collision, the solver's commands 1, 2 and 4-6 (3, the typed constraints', unused by the game), Edge zlib's shell, the water and the waver (their code generated on the player's machine); their lifted fallbacks kept until M6's census. FMOD's SPU programs not lifted since M5 |
 | 3 | Native task scheduling and synchronisation, retiring SPURS, DMA, mailboxes and polling | R8 (NATIVE_R8.md): inventoried and measured; the native physics tasks issued and completed directly, without SPURS (no task, image hash, queue or SPURS polling; heavy-debris frames 0.2-0.5 ms shorter); the SPU interpreter and microstepper gone from every build. Left: the lifted solver commands 1-2, the water task, the inflate's shell; the SPU reservation test on every store (0.4 ms) a decision in NATIVE_R8.md section 9 |
 | 4 | Remaining PS3 platform mechanisms as native services | Partly (file system, save data, input are native-backed HLE); inventory in zero-emulation-audit.md §2.8-2.10 |
 | 5 | Physics correctness and further optimisation; Bullet upgrades only if worthwhile | Native collision is not bit-exact (BULLET_NATIVE.md); no upgrade planned |
-| 6 | Native audio, including an open-source replacement for the FMOD mixing path | FMOD's SPU side mapped (AUDIO.md, 2026-11-10: the mixer, codec_raw and sfxreverb in use, 19 images never imported; an lv2 SPU thread group clocked by cellAudio's notify); the incremental plan A0-A5 there, A0 (counters and captures) next |
-| 7 | Native video decoding and playback | Bink runs recompiled; FFmpeg's decoders verified on all 5 movies (M1) |
+| 6 | Native audio, including an open-source replacement for the FMOD mixing path | Done: the native sound manager on OpenAL Soft (M3-M4, accepted by the owner 2026-11-12); FMOD excluded from the lift (M5: its code lifted as traps); cellAudio and SDL2's audio kept for the movies until M8 (OPENAL_MIGRATION_PLAN.md) |
+| 7 | Native video decoding and playback | Bink runs recompiled; FFmpeg's decoders verified on all 5 movies; the plan, for review: FFMPEG_MIGRATION_PLAN.md (M8) |
 | 8 | Asset preparation, loading, decompression, persistent shader and pipeline caches | translated shaders (SPIR-V) kept on disk between sessions and preloaded at start-up (ps3recomp 0090; the install's data/cache/shaders); the 0090 VkPipelineCache is the backend's -- **the native renderer's pipelines have none** (2026-11-10: created with VK_NULL_HANDLE); shaders and pipelines still compiled at first sight. **First-launch preparation is a release-readiness requirement** (SHADER_PREPARATION.md: requirement and plan, not started) |
 | 9 | Further x64 code generation and CPU optimisation | R8 (NATIVE_R8.md, ps3recomp 0118-0123): the native release's lifted loads without their inline tests (the game thread 1.1-1.2 ms faster; their assumptions tested by `--memtest` and gated to Windows x86-64), indirect calls cached at their call sites, the stores priced (one mov after the tests), registers in locals in functions that call nothing (+3.5% exploring); -O2 and promotion at every call measured without gain; next promotion across calls with liveness, the recorder's bookkeeping |
 | 10 | Full-game correctness, stability and performance validation throughout | Continuous; the checkpoint below is the current baseline |

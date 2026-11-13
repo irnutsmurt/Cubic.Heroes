@@ -35,8 +35,8 @@ import zig_build  # noqa: E402
 DIR = os.path.abspath(os.environ.get("INSTALL_TEST_DIR", "F:/3d dot game heroes/install-test"))
 ISO = os.path.join(ROOT, "3D DOT GAME HEROES [BLUS-30490].iso")
 ELF = os.path.join(ROOT, "build", "EBOOT.elf")
-# the developers' release lift to compare with (tools/r8_lift.sh; rel7/rel8's)
-DEV_LIFT = os.environ.get("DEV_LIFT", os.path.join(ROOT, "build", "r8", "gen6"))
+# the developers' release lift to compare with (tools/r8_lift.sh; M5's, rel41's)
+DEV_LIFT = os.environ.get("DEV_LIFT", os.path.join(ROOT, "build", "r8", "gen14"))
 PY = sys.executable
 report = {"dir": DIR, "stages": {}}
 failed = []
@@ -125,7 +125,8 @@ def stage_check():
     leaf, obs = text.count("/* --promote-leaf */"), text.count("entry observer")
     report["stages"]["check"]["lift"] = {"promote_leaf": leaf, "entry_observers": obs,
                                          "phys_hooks": text.count("g_phys_direct")}
-    check("check", leaf > 8000, f"leaf promotion in the lift ({leaf} functions; R8's lift: 8,395)")
+    # M5's lift: 7,428 (R8's 8,385 less FMOD's 957, now traps; the same set outside config/excluded_code.json)
+    check("check", leaf > 7000, f"leaf promotion in the lift ({leaf} functions; M5's lift: 7,428)")
     check("check", obs > 0, f"R7's entry hooks in the lift ({obs})")
     check("check", text.count("g_phys_direct") >= 2, "R8's physics hooks in the lift")
     if os.path.isdir(DEV_LIFT):   # the same lifter, options and program: the same code
