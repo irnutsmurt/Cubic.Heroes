@@ -1,8 +1,9 @@
 # M8: the movies through FFmpeg -- a plan for review
 
-**Status: approved by the owner 2026-11-12 (the architecture); M8.0 begun 2026-11-13 (section 2.1); M8.1 done
-2026-11-13 on Windows (section 6.1; the Linux libraries are built, their run-time validation is outstanding with
-the rest of Linux's).** The owner's requirement (CLAUDE.md, "Architecture
+**Status: approved by the owner 2026-11-12 (the architecture); M8.0, M8.1 (on Windows; the Linux libraries are
+built, their run-time validation is outstanding with the rest of Linux's) and M8.2 done 2026-11-13 (sections 2.2,
+2.3, 6.1, 6.2); M8.3 -- the owner's viewing of build/r8/rel49 -- next; M8.4 after the owner's acceptance.** The
+owner's requirement (CLAUDE.md, "Architecture
 requirements"; docs/NATIVE_PORT.md section 1): the game's video is decoded by FFmpeg, dynamically linked under the
 LGPL; Bink's implementation is not executed and not in anything this project distributes; the movies are the
 player's own files, read as they are (no conversion, no converted copies, nothing of them distributed); the
@@ -368,6 +369,10 @@ losses through DOTHEROES_AUDIO_TEST_LOSS):
 - **Output losses during the demo** (at 80 s; at 110 s with two failing reopens; at 140 s with a 400 ms reopen):
   the output reopened each time, the demo played to its end with every sample (5,543,995), its picture following
   the sound through the losses (+2.0 ms on average, +19.4 at most).
+- **The soak**: the attract cycle for 44 minutes (35 movies opened and closed, 18 demos with their sound): every
+  frame shown on time (none skipped), no underrun; the process's threads 45 and handles 813-814 from the first
+  cycle to the last; its private memory flat (1,093.6 MB at 7.5 minutes, 1,097.0 at the end; the dips where a demo
+  is released). No leak of threads, handles or memory.
 - **The credits** on demand (castle-front): all 7,860 frames, every sample (11,554,189), +1.4 ms on average, +6.5
   at most. **The opening** (a new game): all 4,620 frames, -3.4 ms on average, +13.1 at most (before the
   nearest-frame timing above).
