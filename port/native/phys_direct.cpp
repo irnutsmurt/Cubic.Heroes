@@ -58,6 +58,7 @@
 #include "bullet_solver_task.h"
 #include "ps3emu/ps3_ftrace.h"
 #include "ps3emu/thread_name.h"
+#include "ps3emu/census.h"
 #include "spu_workload.h"   /* spurs_queue_spu_pop */
 
 #include <atomic>
@@ -66,7 +67,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -88,7 +91,8 @@ namespace {
 
 constexpr uint32_t kElfCollision = 0xF63600, kElfSolver = 0xF8EC80;
 constexpr int kImageCollision = 4, kImageSolver = 5;   // the runtime's image ids, for the frame trace
-constexpr int kMaxJobs = 64, kMaxManagers = 8;
+constexpr int kJobChunk = 64;     // the pool grows by this many jobs when every job is in use
+constexpr int kIdleManagers = 8;  // the table reuses idle entries once it holds this many
 
 enum : int { kFree = 0, kQueued = 1, kRunning = 2, kDone = 3 };
 
@@ -98,7 +102,21 @@ struct Job {
     int image = 0;
     uint64_t seq = 0, t_issue = 0;
 };
-Job g_jobs[kMaxJobs];
+// The pool's jobs, in chunks: the first static, more added by the issuing thread (under g_mu) when every job is
+// in use, so a task is never left to SPURS for want of one (M6, docs/OPENAL_MIGRATION_PLAN.md section 10.2; the
+// game's protocol keeps far fewer out). Read under g_mu (the pool's threads) or by the issuing thread, the only one
+// that adds a chunk.
+Job g_job_chunk0[kJobChunk];
+std::vector<std::unique_ptr<Job[]>> g_job_more;
+template <class F> bool for_each_job(F f)   // f(job) true: stop, and say so
+{
+    for (Job& j : g_job_chunk0)
+        if (f(j)) return true;
+    for (auto& c : g_job_more)
+        for (int i = 0; i < kJobChunk; i++)
+            if (f(c[i])) return true;
+    return false;
+}
 
 struct Manager {
     uint32_t m = 0;
@@ -108,14 +126,16 @@ struct Manager {
     bool described = false;
     uint64_t used = 0;                  // the last lookup (g_mgr_clock), for eviction
 };
-Manager g_mgr[kMaxManagers];
-int g_nmgr;                             // the PPU thread's
+// One entry per (address, image): an address the game reuses for the other kind while the old manager still has
+// work out gets an entry of its own beside the old one, so neither's work goes to SPURS. The table grows; it reuses
+// idle entries (nothing out) once it holds kIdleManagers. The PPU thread's (a deque: entries never move).
+std::deque<Manager> g_mgr;
 // The game makes a new pair of managers (collision, solver) for some area loads and frees the old ones,
 // so an address can come back holding the other kind, and the table must not fill for good (2026-11-10:
 // before this, a third pair went entirely through SPURS, and an address reused by the other kind kept
 // the image it was first seen with). The PPU thread's.
 uint64_t g_mgr_clock;
-unsigned long long g_mgr_added, g_mgr_rekeyed, g_mgr_evicted, g_mgr_full, g_mgr_busy_rekey;
+unsigned long long g_mgr_added, g_mgr_rekeyed, g_mgr_evicted, g_mgr_beside, g_job_grown;
 void reset(Manager& g)
 {
     g.m = 0;
@@ -178,49 +198,39 @@ Manager* manager(uint32_t m, bool add)
     // the task image the manager at m runs now (its +0x1984), read at every lookup: one load
     const uint32_t elf = vm_read32(m + 0x1984);
     const int image = elf == kElfCollision ? kImageCollision : elf == kElfSolver ? kImageSolver : 0;
-    for (int i = 0; i < g_nmgr; i++) {
-        Manager& g = g_mgr[i];
+    Manager* other = nullptr;   // an entry at this address for the other image
+    for (Manager& g : g_mgr) {
         if (g.m != m) continue;
-        if (g.image != image) {
-            // another manager at this address since: the entry is the new one's -- unless the old one still
-            // has work out, which a manager the game freed cannot; then leave the address to SPURS and say so
-            if (g.native_out.load(std::memory_order_acquire) || g.lifted_out) {
-                if (!g_mgr_busy_rekey++)
-                    fprintf(stderr, "[phys-direct] manager %08X now runs image %d but has work out as image %d: "
-                            "its tasks go through SPURS\n", m, image, g.image);
-                return nullptr;
-            }
-            g_mgr_rekeyed++;
-            g.image = image;
-            g.described = false;
-            if (!image) {   // no physics manager there any more: the entry freed
-                reset(g);
-                return nullptr;
-            }
+        if (g.image == image) {
+            g.used = ++g_mgr_clock;
+            return &g;
         }
-        g.used = ++g_mgr_clock;
-        return &g;
+        other = &g;
+    }
+    if (other && !other->native_out.load(std::memory_order_acquire) && !other->lifted_out) {
+        // another manager at this address since, and the old one has nothing out: the entry is the new one's
+        g_mgr_rekeyed++;
+        if (!image) { reset(*other); return nullptr; }   // no physics manager there any more: the entry freed
+        other->image = image;
+        other->described = false;
+        other->used = ++g_mgr_clock;
+        return other;
     }
     if (!add || !image) return nullptr;
+    if (other && !g_mgr_beside++)   // a manager freed with work out: its entry drains beside the new one's
+        fprintf(stderr, "[phys-direct] manager %08X now runs image %d while its work as image %d is out: an entry "
+                "of its own beside the old one\n", m, image, other->image);
     Manager* slot = nullptr;
-    for (int i = 0; i < g_nmgr && !slot; i++)   // a freed entry
-        if (!g_mgr[i].m) slot = &g_mgr[i];
-    if (!slot && g_nmgr < kMaxManagers) slot = &g_mgr[g_nmgr++];   // only the PPU thread adds and reads this
-    if (!slot) {   // full: the least recently used entry with nothing out (it comes back if used again)
-        for (int i = 0; i < g_nmgr; i++) {
-            Manager& c = g_mgr[i];
+    for (Manager& c : g_mgr)   // a freed entry
+        if (!c.m) { slot = &c; break; }
+    if (!slot && g_mgr.size() >= (size_t)kIdleManagers) {   // the least recently used entry with nothing out
+        for (Manager& c : g_mgr) {
             if (c.native_out.load(std::memory_order_acquire) || c.lifted_out) continue;
             if (!slot || c.used < slot->used) slot = &c;
         }
-        if (!slot) {
-            if (!g_mgr_full++)
-                fprintf(stderr, "[phys-direct] %d managers with work out at once: manager %08X's tasks go through SPURS\n",
-                        kMaxManagers, m);
-            return nullptr;
-        }
-        g_mgr_evicted++;
-        reset(*slot);
+        if (slot) { g_mgr_evicted++; reset(*slot); }
     }
+    if (!slot) slot = &g_mgr.emplace_back();   // else the table grows
     slot->m = m;
     slot->image = image;
     slot->used = ++g_mgr_clock;
@@ -232,8 +242,10 @@ Manager* manager(uint32_t m, bool add)
 Job* take_locked()
 {
     Job* best = nullptr;
-    for (Job& j : g_jobs)
+    for_each_job([&](Job& j) {
         if (j.state.load(std::memory_order_relaxed) == kQueued && (!best || j.seq < best->seq)) best = &j;
+        return false;
+    });
     if (best) {
         best->state.store(kRunning, std::memory_order_relaxed);
         g_queued.fetch_sub(1, std::memory_order_relaxed);
@@ -300,9 +312,12 @@ bool take_done(Manager* g, uint32_t slot, uint32_t e[4])
 {
     if (!g->native_out.load(std::memory_order_relaxed)) return false;
     Job* best = nullptr;
-    for (Job& j : g_jobs)
-        if (j.state.load(std::memory_order_acquire) == kDone && j.m == g->m && j.slot == slot && (!best || j.seq < best->seq))
+    for_each_job([&](Job& j) {
+        if (j.state.load(std::memory_order_acquire) == kDone && j.m == g->m && j.image == g->image && j.slot == slot &&
+            (!best || j.seq < best->seq))
             best = &j;
+        return false;
+    });
     if (!best) return false;
     memcpy(e, best->entry, 16);
     best->state.store(kFree, std::memory_order_release);
@@ -360,8 +375,8 @@ void report()
             g_n_native.load(), g_n_by_waiter.load(), g_n_lifted.load(), g_n_hle_pops.load(), g_n_waits.load(),
             g_wait_ns.load() / 1e6, g_ran_ns.load() / 1e6);
     fprintf(stderr, "[phys-direct] managers: %llu taken on, %llu addresses reused by the other kind, %llu entries "
-            "evicted (idle), %llu issues with the table full of busy managers, %llu reuses with work out\n",
-            g_mgr_added, g_mgr_rekeyed, g_mgr_evicted, g_mgr_full, g_mgr_busy_rekey);
+            "evicted (idle), %llu reuses with work out (an entry beside), %zu entries; the job pool grown %llu time(s)\n",
+            g_mgr_added, g_mgr_rekeyed, g_mgr_evicted, g_mgr_beside, g_mgr.size(), g_job_grown);
 }
 
 }  // namespace
@@ -372,6 +387,7 @@ extern "C" void phys_direct_report(void)
 {
     report();
     spu_workload_census_report(stderr);
+    ps3_census_report(stderr);   // M6: the SPU machinery's use, counted (ps3emu/census.h)
     lv2_spu_thread_report(stderr);
     spu_overlay_report(stderr);
 }
@@ -379,11 +395,16 @@ extern "C" void phys_direct_report(void)
 extern "C" int phys_direct_issue(uint32_t m, uint32_t slot, const uint32_t entry[4])
 {
     Manager* g = manager(m, true);
-    if (!g) return 0;   // not a physics manager seen here: the lifted body
+    if (!g) {   // not a physics manager seen here: the lifted body (unreachable: docs/OPENAL_MIGRATION_PLAN.md 10.2)
+        ps3_census(PS3_CENSUS_NATIVE_DECLINE, 1, m);
+        return 0;
+    }
     uint32_t cmd = 0;
     const bool native = g->image == kImageCollision ? bullet_cd_direct_accept(entry)
                                                     : bullet_solver_direct_accept(entry, &cmd);
     if (!native) {
+        // M6's census (docs/OPENAL_MIGRATION_PLAN.md section 10.2): a = 2 collision, 3 solver; b = the command
+        ps3_census(PS3_CENSUS_NATIVE_DECLINE, g->image == kImageCollision ? 2u : 3u, entry[1]);
         g->lifted_out++;   // the lifted body creates the task and pushes its entry
         g_n_lifted.fetch_add(1, std::memory_order_relaxed);
         count_declined(g, entry);
@@ -401,9 +422,14 @@ extern "C" int phys_direct_issue(uint32_t m, uint32_t slot, const uint32_t entry
     bool wake = false;
     {
         std::lock_guard<std::mutex> lk(g_mu);
-        for (Job& c : g_jobs)
-            if (c.state.load(std::memory_order_relaxed) == kFree) { j = &c; break; }
-        if (j) {
+        for_each_job([&](Job& c) { return c.state.load(std::memory_order_relaxed) == kFree && (j = &c); });
+        if (!j) {   // every job in use: the pool grows (under g_mu, which every reader but this thread holds)
+            g_job_more.emplace_back(new Job[kJobChunk]);
+            j = &g_job_more.back()[0];
+            if (!g_job_grown++)
+                fprintf(stderr, "[phys-direct] %d jobs out at once: the pool grows\n", kJobChunk);
+        }
+        {
             j->m = m; j->slot = slot; memcpy(j->entry, entry, 16); j->cmd = cmd; j->image = g->image;
             j->seq = ++g_seq;
             j->t_issue = PS3_FT_ON() ? ps3_ft_now() : 0;
@@ -412,13 +438,6 @@ extern "C" int phys_direct_issue(uint32_t m, uint32_t slot, const uint32_t entry
             g_queued.fetch_add(1, std::memory_order_release);
             wake = g_sleepers > 0;
         }
-    }
-    if (!j) {   // more jobs out than the game's protocol makes: leave it to SPURS
-        static std::atomic<int> once{ 0 };
-        if (!once.exchange(1)) fprintf(stderr, "[phys-direct] %d jobs out at once: this task and any more go through SPURS\n", kMaxJobs);
-        g->lifted_out++;
-        g_n_lifted.fetch_add(1, std::memory_order_relaxed);
-        return 0;
     }
     if (wake) g_cv.notify_one();
     // the pool, started by the first native task: a lift without the hooks

@@ -1,0 +1,276 @@
+From 7b6c5c132fa3a3395af720d2b4e585231622257e Mon Sep 17 00:00:00 2001
+From: giteaguy <73799093+irnutsmurt@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 16:48:36 -0800
+Subject: [PATCH] Census: counters of the SPU machinery's use, reported at exit
+
+ps3_census(kind, a, b) counts each use of a piece of the SPU environment --
+atomics and reservations, line watches, coherent PPU stores, DMA, mailboxes,
+thread groups, overlays, SPURS instances and tasks -- by kind and its first
+arguments, and ps3_census_report prints the counts. native_decline is a
+port's: a native implementation handing work back to the lifted code.
+PS3_CENSUS_FATAL=<kind,...> makes a kind's first use fatal, with a report:
+the assertion that a retired piece is not reached.
+---
+ include/ps3emu/census.h         | 59 +++++++++++++++++++++++++++++++++
+ libs/spurs/cellSpurs.c          |  4 +++
+ runtime/platform/ps3_census.c   | 51 ++++++++++++++++++++++++++++
+ runtime/spu/spu_channels.c      | 12 +++++++
+ runtime/spu/spu_coherency.c     |  3 ++
+ runtime/syscalls/lv2_register.c |  2 ++
+ 6 files changed, 131 insertions(+)
+ create mode 100644 include/ps3emu/census.h
+ create mode 100644 runtime/platform/ps3_census.c
+
+diff --git a/include/ps3emu/census.h b/include/ps3emu/census.h
+new file mode 100644
+index 0000000..57b1236
+--- /dev/null
++++ b/include/ps3emu/census.h
+@@ -0,0 +1,59 @@
++/*
++ * ps3_census: how often a run used each piece of the PS3 machinery a native port means to retire -- the SPU
++ * environment's atomics, line watches, DMA, mailboxes and signals, overlays, SPU thread groups, SPURS instances and
++ * tasks, and the PPU stores that found a line an SPU holds (the per-store coherence test's slow path). A port whose
++ * work is native should see none of them; the census says which still happen, over every run, so each can be
++ * retired only once nothing uses it.
++ *
++ * Each kind's first use is said once on stderr with what it was ("[census] first ..."), its count at exit
++ * (ps3_census_report). PS3_CENSUS_FATAL=<kind>[,<kind>...] (or "all") makes a kind's first use fatal: the
++ * assertion to turn on once the census has shown a kind unused, so a path no run has reached yet cannot use it
++ * unnoticed. The kinds' names: spu_atomic, spu_watch, ppu_coh_store, spu_dma, spu_mailbox, spu_group, spu_overlay,
++ * spurs_instance, spurs_task, native_decline.
++ *
++ * native_decline is the port's: a native implementation handing a piece of work back to the lifted SPU code or to
++ * SPURS (a case it does not cover). A port whose native paths cover everything the game can do never counts one;
++ * PS3_CENSUS_FATAL=native_decline is the assertion that it does not.
++ *
++ * The counters are relaxed atomics on paths a native run does not take; the hot paths that do run (the PPU's
++ * stores) reach them only in their slow branch.
++ */
++#ifndef PS3EMU_CENSUS_H
++#define PS3EMU_CENSUS_H
++
++#include <stdio.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++enum {
++    PS3_CENSUS_SPU_ATOMIC,      /* an SPU's GETLLAR, PUTLLC, PUTLLUC or PUTQLLUC: a = the command, b = the EA */
++    PS3_CENSUS_SPU_WATCH,       /* a line watch armed (a SPURS task's signal, an event flag): a = the EA */
++    PS3_CENSUS_PPU_COH_STORE,   /* a PPU store to a line an SPU holds: a = the line */
++    PS3_CENSUS_SPU_DMA,         /* an MFC transfer (GET, PUT, a list): a = the command, b = the EA */
++    PS3_CENSUS_SPU_MAILBOX,     /* an SPU mailbox or signal-notification channel: a = the channel */
++    PS3_CENSUS_SPU_GROUP,       /* an lv2 SPU thread group created: a = its threads */
++    PS3_CENSUS_SPU_OVERLAY,     /* an SPU overlay or relocatable image made resident: a = the image, b = the LS address */
++    PS3_CENSUS_SPURS_INSTANCE,  /* a SPURS instance initialised: a = its SPUs, b = its address */
++    PS3_CENSUS_SPURS_TASK,      /* a SPURS task created: a = its ELF's address */
++    PS3_CENSUS_NATIVE_DECLINE,  /* a native path handed work back to the lifted code: a = the path, b = the case */
++    PS3_CENSUS_KINDS
++};
++
++extern volatile long long g_ps3_census[PS3_CENSUS_KINDS];
++void ps3_census_first(int kind, unsigned a, unsigned b);
++
++static inline void ps3_census(int kind, unsigned a, unsigned b)
++{
++    if (__atomic_add_fetch(&g_ps3_census[kind], 1, __ATOMIC_RELAXED) == 1) ps3_census_first(kind, a, b);
++}
++
++/* every kind's count (the zeros too: a census says what was not used) */
++void ps3_census_report(FILE* f);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* PS3EMU_CENSUS_H */
+diff --git a/libs/spurs/cellSpurs.c b/libs/spurs/cellSpurs.c
+index a45606d..c1f0c39 100644
+--- a/libs/spurs/cellSpurs.c
++++ b/libs/spurs/cellSpurs.c
+@@ -11,6 +11,7 @@
+ 
+ #include "cellSpurs.h"
+ #include "ps3emu/ps3_strict.h"
++#include "ps3emu/census.h"
+ #include "../../runtime/platform/win32_compat.h"
+ #include "../../runtime/ps3_log.h"
+ #include "spu_workload.h"   /* SPU image -> lifted-entry dispatch (runtime/spu) */
+@@ -533,6 +534,7 @@ static DWORD WINAPI spurs_kernel_thread(LPVOID p);
+ 
+ static s32 spurs_initialize_common(u32 spurs_ea, u32 nspus, const char* prefix)
+ {
++    ps3_census(PS3_CENSUS_SPURS_INSTANCE, nspus, spurs_ea);
+     if (!nspus || nspus > 6) return CELL_SPURS_CORE_ERROR_INVAL;
+     AcquireSRWLockExclusive(&s_inst_directory_lock);
+     struct SpursInst* si = spurs_inst_find(spurs_ea);
+@@ -1101,6 +1103,7 @@ s32 cellSpursCreateTask(CellSpursTaskset* taskset, CellSpursTaskId* taskId,
+                         void* elf, void* context, u32 sizeContext,
+                         u32 lsPattern_ea, u32 argument_ea)
+ {
++    ps3_census(PS3_CENSUS_SPURS_TASK, (unsigned)(uintptr_t)elf, 0);
+     (void)context; (void)sizeContext;
+ 
+     /* Read the 16-byte CellSpursTaskArgument + optional LS pattern from guest mem. */
+@@ -1339,6 +1342,7 @@ s32 cellSpursCreateTaskWithAttribute(CellSpursTaskset* taskset,
+                                      CellSpursTaskId* taskId,
+                                      CellSpursTaskAttribute* attr)
+ {
++    ps3_census(PS3_CENSUS_SPURS_TASK, 0, 0);
+     if (!attr) return CELL_SPURS_TASK_ERROR_NULL_POINTER;
+     CellSpursTaskAttribute* attr_h = GUEST_PTR(attr, CellSpursTaskAttribute*);
+     /* Dump the raw attribute: our struct doesn't model lsPattern/argument, and
+diff --git a/runtime/platform/ps3_census.c b/runtime/platform/ps3_census.c
+new file mode 100644
+index 0000000..623e755
+--- /dev/null
++++ b/runtime/platform/ps3_census.c
+@@ -0,0 +1,51 @@
++/* ps3_census (ps3emu/census.h): the machinery a native port means to retire, counted. */
++#include "ps3emu/census.h"
++
++#include <stdlib.h>
++#include <string.h>
++
++void ps3_fatal(const char* kind, const char* fmt, ...);   /* ps3_strict.c */
++
++volatile long long g_ps3_census[PS3_CENSUS_KINDS];
++
++static const char* const k_names[PS3_CENSUS_KINDS] = {
++    "spu_atomic", "spu_watch", "ppu_coh_store", "spu_dma", "spu_mailbox", "spu_group", "spu_overlay",
++    "spurs_instance", "spurs_task", "native_decline",
++};
++static const char* const k_what[PS3_CENSUS_KINDS] = {
++    "SPU atomic (lock-line reservation)", "line watch armed", "PPU store to a line an SPU holds",
++    "SPU DMA transfer", "SPU mailbox or signal channel", "lv2 SPU thread group created",
++    "SPU overlay made resident", "SPURS instance initialised", "SPURS task created",
++    "native path declined (the lifted code runs)",
++};
++
++static int fatal_kind(int kind)
++{
++    const char* e = getenv("PS3_CENSUS_FATAL");
++    if (!e || !*e) return 0;
++    if (!strcmp(e, "all")) return 1;
++    const size_t n = strlen(k_names[kind]);
++    for (const char* p = e; (p = strstr(p, k_names[kind])) != NULL; p += n)
++        if ((p == e || p[-1] == ',') && (p[n] == 0 || p[n] == ',')) return 1;
++    return 0;
++}
++
++void ps3_census_first(int kind, unsigned a, unsigned b)
++{
++    if (kind < 0 || kind >= PS3_CENSUS_KINDS) return;
++    fprintf(stderr, "[census] first %s (%s): 0x%08X 0x%08X\n", k_what[kind], k_names[kind], a, b);
++    fflush(stderr);
++    if (fatal_kind(kind))
++        ps3_fatal("census", "%s used, which PS3_CENSUS_FATAL forbids (0x%08X 0x%08X)", k_names[kind], a, b);
++}
++
++void ps3_census_report(FILE* f)
++{
++    if (!f) f = stderr;
++    char line[512];
++    int p = snprintf(line, sizeof line, "[census]");
++    for (int k = 0; k < PS3_CENSUS_KINDS && p < (int)sizeof line - 40; k++)
++        p += snprintf(line + p, sizeof line - (size_t)p, " %s %lld", k_names[k],
++                      __atomic_load_n(&g_ps3_census[k], __ATOMIC_RELAXED));
++    fprintf(f, "%s\n", line);
++}
+diff --git a/runtime/spu/spu_channels.c b/runtime/spu/spu_channels.c
+index c41320a..47e531a 100644
+--- a/runtime/spu/spu_channels.c
++++ b/runtime/spu/spu_channels.c
+@@ -13,6 +13,7 @@
+  */
+ 
+ #include "ps3emu/ps3_strict.h"
++#include "ps3emu/census.h"   /* M6: the machinery a native port retires, counted */
+ #include "spu_dma.h"
+ #include "spu_coherency.h" /* lock-line lock + PPU-write coherence bitmap */
+ #include "spu_helpers.h"   /* spu_splat_u32 / spu_ls_read128 (SMC microstep) */
+@@ -1119,6 +1120,14 @@ static int channel_is_mfc(uint32_t ch)
+  * ===========================================================================*/
+ void spu_wrch(spu_context* ctx, uint32_t channel, u128 value)
+ {
++    /* the census (ps3emu/census.h): only lifted SPU code writes channels -- the native tasks call the host directly */
++    if (channel == MFC_Cmd) {
++        const uint32_t c = value._u32[0] & 0xFF;
++        const int atomic = c == MFC_GETLLAR_CMD || c == MFC_PUTLLC_CMD || c == MFC_PUTLLUC_CMD || c == MFC_PUTQLLUC_CMD;
++        ps3_census(atomic ? PS3_CENSUS_SPU_ATOMIC : PS3_CENSUS_SPU_DMA, c, ctx->mfc_eal);
++    } else if (channel == SPU_WrOutMbox || channel == SPU_WrOutIntrMbox) {
++        ps3_census(PS3_CENSUS_SPU_MAILBOX, channel, value._u32[0]);
++    }
+     /* SPU_CHHIST=1: which channels a job actually touches, and how often. A
+      * worker that never issues an MFC command is either not being handed its
+      * work descriptor or is waiting on a channel we never satisfy; the channel
+@@ -1426,6 +1435,8 @@ u128 spu_rdch(spu_context* ctx, uint32_t channel)
+         return spu_make_preferred_u32(v);
+     }
+ 
++    if (channel == SPU_RdInMbox || channel == SPU_RdSigNotify1 || channel == SPU_RdSigNotify2)
++        ps3_census(PS3_CENSUS_SPU_MAILBOX, channel, 0);
+     switch (channel) {
+     case SPU_RdInMbox:
+         if (ctx->rcv_evt_n > 0) { v = ctx->rcv_evt[ctx->rcv_evt_i++]; ctx->rcv_evt_n--; }
+@@ -2396,6 +2407,7 @@ void spu_overlay_note_get(spu_context* ctx, uint32_t ea, const uint8_t* ls, uint
+                     ctx->resident_code[slot].reloc = o->reloc;
+                     ctx->resident_code[slot].reloc_delta = o->reloc ? lsa - o->load_lsa : 0;
+                     if (o->image_id >= 0 && o->image_id < 64) __atomic_fetch_add(&s_ovl_loads[o->image_id], 1, __ATOMIC_RELAXED);
++                    ps3_census(PS3_CENSUS_SPU_OVERLAY, (unsigned)o->image_id, lsa);
+                     { static int _n = 0; if (o->reloc && PS3_LOG_FIRST(_n, 64))
+                         fprintf(stderr, "[spu-ovl] img=%d relocatable image %d src=0x%08X -> LS 0x%05X "
+                                 "(link 0x%05X, delta 0x%05X)\n", ctx->image_id, o->image_id, ea, lsa,
+diff --git a/runtime/spu/spu_coherency.c b/runtime/spu/spu_coherency.c
+index c71e186..85c060b 100644
+--- a/runtime/spu/spu_coherency.c
++++ b/runtime/spu/spu_coherency.c
+@@ -18,6 +18,7 @@
+ #include <stdint.h>
+ #include <stdio.h>
+ #include "ps3emu/log_first.h"
++#include "ps3emu/census.h"
+ 
+ #ifdef __cplusplus
+ extern "C" {
+@@ -200,6 +201,7 @@ void spu_coh_reserve(spu_context* ctx, uint32_t ea)
+ void spu_coh_watch_add(spu_coh_watch* watch, uint32_t ea,
+                        void (*wake)(void*), void* opaque)
+ {
++    ps3_census(PS3_CENSUS_SPU_WATCH, ea, 0);
+     /* Arming the existing bitmap makes PPU stores/CAS and MFC writes use
+      * the same serialized commit/notify path as SPU reservations. */
+     spu_coh_reserve(NULL, ea);
+@@ -396,6 +398,7 @@ void spu_coh_notify_write_except(uint32_t ea, const void* self)
+ void spu_coh_notify_write(uint32_t ea)
+ {
+     uint32_t line = ea & ~127u;
++    ps3_census(PS3_CENSUS_PPU_COH_STORE, line, 0);
+     ppu_resv_break_line(ea);
+     spu_coh_writer_fence();
+     spu_coh_wake_watches(line);
+diff --git a/runtime/syscalls/lv2_register.c b/runtime/syscalls/lv2_register.c
+index c95618c..68ff5bb 100644
+--- a/runtime/syscalls/lv2_register.c
++++ b/runtime/syscalls/lv2_register.c
+@@ -11,6 +11,7 @@
+  */
+ 
+ #include "ps3emu/ps3_strict.h"
++#include "ps3emu/census.h"
+ #include <stdlib.h>   /* calloc, free */
+ #include "ps3emu/nid.h"   /* ps3_compute_nid (static inline) */
+ #include "lv2_syscall_table.h"
+@@ -521,6 +522,7 @@ static int64_t sys_spu_thread_group_create_handler(ppu_context* ctx)
+     extern uint8_t* vm_base;
+     uint32_t out_ea   = (uint32_t)ctx->gpr[3];
+     uint32_t num      = (uint32_t)ctx->gpr[4];
++    ps3_census(PS3_CENSUS_SPU_GROUP, num, (uint32_t)ctx->lr);
+     int32_t  prio     = (int32_t)ctx->gpr[5];
+     uint32_t attr_ea  = (uint32_t)ctx->gpr[6];
+     fprintf(stderr, "[SPU] thread_group_create(num=%u prio=%d)\n", num, prio);
+-- 
+2.56.0.windows.3
+

@@ -32,6 +32,7 @@
 /* The lifter's generated header, which declares ppu_context and the function
  * table. It comes first: everything below is written against that struct. */
 #include "diag/diag.h"
+#include "ps3emu/census.h"   /* M6: the SPU machinery's use, reported at exit */
 #include "native/bullet_cd_task.h"
 #include "native/water_task.h"
 extern "C" void dev_waver_init(void);   /* phys_hooks.cpp */
@@ -838,6 +839,14 @@ int main(int argc, char** argv)
         }
     }
 
+    /* M6 (docs/OPENAL_MIGRATION_PLAN.md section 10.2): the native physics tasks are the code's defaults, as they
+     * are the setup's (setup_app.py PERFORMANCE), so a settings file without the lines does not run the game's
+     * SPU tasks. Applied after dotheroes.cfg: the environment or the player's file still picks otherwise (0 or
+     * empty: the lifted SPU tasks, kept for comparison until M6 retires them). Water and waver are native by
+     * default in their own init. */
+    set_default_env("DOTHEROES_NATIVE_CD", "1");
+    set_default_env("DOTHEROES_NATIVE_SOLVER", "1,2,4,5,6");
+
     /* Before the runtime installs its own fault handlers, so they chain here. */
     diag_install_crash_handler();
     /* On this thread, which runs the guest's entry (the PPU main thread),
@@ -845,6 +854,8 @@ int main(int argc, char** argv)
     dotheroes_cpu_place();
     diag_start_watchdog();
     dotheroes_configure_patches();   /* game_patches.cpp: DOTHEROES_FPS etc. */
+    /* the census at the game's own exit (a test's stop.trigger reports it itself: phys_direct_report) */
+    atexit([] { ps3_census_report(stderr); });
     dotheroes_native_init();         /* native/bullet_cd_task.cpp: DOTHEROES_NATIVE_CD */
     water_task_init();               /* native/water_task.cpp: DOTHEROES_NATIVE_WATER */
     dev_waver_init();                /* phys_hooks.cpp: DOTHEROES_DEV_WAVER (a test switch) */

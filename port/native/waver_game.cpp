@@ -2,6 +2,10 @@
 // check mode beside the SPU task.
 #include "waver_game.h"
 #include "waver_task.h"
+#ifndef NOMINMAX
+#define NOMINMAX   // ps3emu/thread_name.h brings windows.h: no min/max macros
+#endif
+#include "ps3emu/thread_name.h"
 
 #include <algorithm>
 #include <atomic>
@@ -74,6 +78,7 @@ void run_one(uint32_t ea)
 
 void worker_main()
 {
+    ps3_thread_name("waver native");   // its line in a per-thread CPU table (tools/thread_cpu.py)
     std::unique_lock<std::mutex> lk(g->m);
     for (;;) {
         g->wake.wait(lk, [] { return g->pending; });

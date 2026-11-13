@@ -1,10 +1,29 @@
 // Music streams (al_stream.h).
 #include "al_stream.h"
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 #include <algorithm>
 #include <cmath>
 
 namespace al_stream {
+
+namespace {
+// The streamer's thread named, for a per-thread CPU table (tools/thread_cpu.py): SetThreadDescription, Windows 10
+// 1607 and later, looked up at run time (elsewhere nothing).
+void name_this_thread()
+{
+#ifdef _WIN32
+    typedef HRESULT(WINAPI * set_fn)(HANDLE, PCWSTR);
+    static const set_fn set = (set_fn)(void*)GetProcAddress(GetModuleHandleA("kernel32.dll"), "SetThreadDescription");
+    if (set) set(GetCurrentThread(), L"audio stream");
+#endif
+}
+}  // namespace
 
 const char* state_name(State s)
 {
@@ -154,6 +173,7 @@ Streamer::Stream* Streamer::find(Handle h)
 
 void Streamer::run()
 {
+    name_this_thread();
     while (!quit_) {
         service_once();
         std::unique_lock<std::mutex> lk(q_mutex_);
