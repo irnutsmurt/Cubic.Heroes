@@ -176,6 +176,25 @@ set(PS3RECOMP_SCAFFOLD
 set(SPU_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../build/gen/spu" CACHE PATH
     "Directory holding the lifted SPU images (<SPU_DIR>/<image>/spu_recomp.c)")
 option(PORT_ENABLE_SPU "Compile and register the title's lifted SPU images" ON)
+# M6 (docs/OPENAL_MIGRATION_PLAN.md section 10.6): the native release links no lifted SPU program. Every SPU workload
+# the game reaches is native, and with the stores' reservation test gone (mov-nospu) the lifted fallbacks that take
+# reservations could not run anyway. The lift of the SPU images is still made and read -- the water's and the waver's
+# native code is generated from it (below) -- but not compiled into the game. The comparison build
+# (-DDOTHEROES_PPU_STORES=mov) links them, for the check modes and the switches that run the lifted tasks.
+if(DEFINED DOTHEROES_PPU_STORES)
+    set(_stores_hint "${DOTHEROES_PPU_STORES}")
+elseif(DOTHEROES_NATIVE_RELEASE AND WIN32 AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|x86_64|X86_64|amd64)$")
+    set(_stores_hint mov-nospu)
+else()
+    set(_stores_hint mov)
+endif()
+if(_stores_hint STREQUAL "mov-nospu")
+    set(_lifted_spu_default OFF)
+else()
+    set(_lifted_spu_default ON)
+endif()
+option(DOTHEROES_LIFTED_SPU "Link the lifted SPU programs (the comparison build; the release links none)"
+       ${_lifted_spu_default})
 
 set(PORT_SPU_INPUTS "" CACHE STRING
     "Input files to scan for all embedded SPU ELF programs (semicolon-separated decrypted ELF/PRX/data paths)")
@@ -185,6 +204,9 @@ if(PORT_ENABLE_SPU AND PORT_SPU_INPUTS)
     ps3recomp_generate_spu("${CMAKE_CURRENT_BINARY_DIR}/generated_spu" ${PORT_SPU_INPUTS})
     list(APPEND SPU_SOURCES ${SPU_GENERATED_SOURCES}
          "${PS3RECOMP_DIR}/runtime/spu/spu_dispatch_mt.c")
+elseif(PORT_ENABLE_SPU AND NOT DOTHEROES_LIFTED_SPU)
+    message(STATUS "Lifted SPU:      not linked (DOTHEROES_LIFTED_SPU=OFF: the release; the native tasks are generated "
+                   "from ${SPU_DIR})")
 elseif(PORT_ENABLE_SPU)
     file(GLOB SPU_LIFTED CONFIGURE_DEPENDS "${SPU_DIR}/*/spu_recomp.c")
     if(SPU_LIFTED)
@@ -491,6 +513,10 @@ if(DOTHEROES_NATIVE_RELEASE)
         message(FATAL_ERROR "DOTHEROES_PPU_STORES: checked, mov, mov-nospu, nocoh-measure or bare-measure")
     endif()
     message(STATUS "Lifted stores:   ${DOTHEROES_PPU_STORES}")
+endif()
+if(PORT_ENABLE_SPU AND NOT DOTHEROES_LIFTED_SPU)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE DOTHEROES_NO_LIFTED_SPU=1)
+    target_compile_definitions(dotheroes_native PRIVATE DOTHEROES_NO_LIFTED_SPU=1)
 endif()
 
 # The runtime is C++, and on Apple also Objective-C. Letting CMake infer the

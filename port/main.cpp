@@ -847,6 +847,52 @@ int main(int argc, char** argv)
      * default in their own init. */
     set_default_env("DOTHEROES_NATIVE_CD", "1");
     set_default_env("DOTHEROES_NATIVE_SOLVER", "1,2,4,5,6");
+#if defined(DOTHEROES_NO_LIFTED_SPU)
+    /* M6 (docs/OPENAL_MIGRATION_PLAN.md section 10.6): this release links no lifted SPU program, so a switch that
+     * asks for one is set back to the native path, with a line saying so (the comparison build,
+     * -DDOTHEROES_PPU_STORES=mov, keeps them); and what only the lifted SPU code makes -- a SPURS task, an SPU
+     * thread group, a native path handing work back -- is fatal, naming it, instead of a task no program runs. */
+    {
+        auto put = [](const char* name, const char* v) {
+#ifdef _WIN32
+            _putenv_s(name, v ? v : "");
+#else
+            if (v) setenv(name, v, 1); else unsetenv(name);
+#endif
+        };
+        struct Pin { const char* name; const char* native; const char* lifted[3]; };
+        static const Pin pins[] = {
+            { "DOTHEROES_NATIVE_CD", "1", { "0", "2", "3" } },
+            { "DOTHEROES_PHYS_DIRECT", nullptr, { "0", nullptr, nullptr } },
+            { "DOTHEROES_NATIVE_WATER", nullptr, { "0", "check", nullptr } },
+            { "DOTHEROES_NATIVE_WAVER", nullptr, { "0", "check", nullptr } },
+        };
+        for (const Pin& p : pins) {
+            const char* v = getenv(p.name);
+            if (!v) continue;
+            for (const char* l : p.lifted)
+                if (l && !strcmp(v, l)) {
+                    fprintf(stderr, "[port] %s=%s asks for the lifted SPU task, which this release does not link: "
+                            "%s (a comparison build, -DDOTHEROES_PPU_STORES=mov, runs it)\n", p.name, v,
+                            p.native ? "native" : "native, the default");
+                    put(p.name, p.native);
+                    break;
+                }
+        }
+        const char* sv = getenv("DOTHEROES_NATIVE_SOLVER");
+        if (!sv || strcmp(sv, "1,2,4,5,6")) {
+            fprintf(stderr, "[port] DOTHEROES_NATIVE_SOLVER=%s leaves solver commands to the lifted SPU task, which "
+                    "this release does not link: 1,2,4,5,6\n", sv ? sv : "");
+            put("DOTHEROES_NATIVE_SOLVER", "1,2,4,5,6");
+        }
+        std::string fatal = getenv("PS3_CENSUS_FATAL") ? getenv("PS3_CENSUS_FATAL") : "";
+        if (fatal != "all")
+            for (const char* k : { "native_decline", "spurs_task", "spu_group" })
+                if (("," + fatal + ",").find(std::string(",") + k + ",") == std::string::npos)
+                    fatal += (fatal.empty() ? "" : ",") + std::string(k);
+        put("PS3_CENSUS_FATAL", fatal.c_str());
+    }
+#endif
 
     /* Before the runtime installs its own fault handlers, so they chain here. */
     diag_install_crash_handler();

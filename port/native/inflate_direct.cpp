@@ -207,7 +207,14 @@ struct Init {
         const char* c = getenv("DOTHEROES_INFLATE_CRC");
         g_log_each = l && atoi(l);
         g_crc = c && atoi(c);
+#if defined(DOTHEROES_NO_LIFTED_SPU)
+        // M6: this release links no lifted SPU program, so the SPURS path is not there to take a pack
+        if ((e && *e == '0') || native_off)
+            fprintf(stderr, "[inflate-direct] DOTHEROES_INFLATE_DIRECT=0 or DOTHEROES_NATIVE_INFLATE=0/check asks for "
+                    "the lifted SPU inflate, which this release does not link: the direct path\n");
+#else
         if ((e && *e == '0') || native_off) return;
+#endif
         g_dotheroes_inflate_direct = 1;   // the hook's guard: only a lift with the hook calls in
         atexit(report);
     }

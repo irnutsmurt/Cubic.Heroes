@@ -1088,3 +1088,33 @@ against rel46 (two rounds rotated):
 | River fight, 144 cap | 144.0 | 143.9-144.0 | 5.01-5.24 -> 4.56-4.59 ms | 7.09-7.18 -> 7.04-7.11 | 8.15-8.41 -> 7.42-9.78 |
 
 The game thread does 0.47 ms less a frame (R8's estimate: 0.4): 11-13% more frames uncapped.
+
+### 10.6 The release links no lifted SPU program (2026-11-13; rel48)
+
+With the stores' reservation test gone (section 10.5), the lifted fallbacks that take reservations could not run
+in the release anyway; none of the five lifted SPU programs (water, waver, the inflate's shell, collision, the
+solver) is reached by the game (section 10.2). The release now leaves them out of the link (port/CMakeLists.txt,
+DOTHEROES_LIFTED_SPU, off by default with the mov-nospu stores): the setup still lifts them, and the water's and the
+waver's native code is still generated from that lift, but no lifted SPU program, nor its dispatcher or registry, is
+compiled into the game. In such a build:
+- a switch that asks for a lifted task (DOTHEROES_NATIVE_CD=0, DOTHEROES_NATIVE_SOLVER without every native
+  command, DOTHEROES_PHYS_DIRECT=0, DOTHEROES_NATIVE_WATER or _WAVER =0 or =check, DOTHEROES_INFLATE_DIRECT=0,
+  DOTHEROES_NATIVE_INFLATE=0 or =check) is set back to the native path, with a line naming it (port/main.cpp,
+  inflate_direct.cpp);
+- what only lifted SPU code makes -- a SPURS task, an SPU thread group, a native path handing work back -- is fatal,
+  naming it (PS3_CENSUS_FATAL gains native_decline, spurs_task and spu_group): never a task no program runs.
+The comparison build (-DDOTHEROES_PPU_STORES=mov) keeps the old stores and links the lifted programs, for the check
+modes.
+
+**Validated** (build/r8/m6nl_run.sh) [M]: the memory test; the 11 drives, the menu's quit, the movie, the seven save
+flows, the reference scenes (5 of 5 within): no crash, trap or fatal diagnostic. A river fight with
+DOTHEROES_NATIVE_CD=0, DOTHEROES_NATIVE_WATER=check, DOTHEROES_INFLATE_DIRECT=0 and DOTHEROES_NATIVE_SOLVER=4,5 ran
+native, each switch named on its line. The comparison build (rel48c): its memory test (695 checks), the water check
+2,427 of 2,427 steps equal, the waver check 1,087 of 1,094 (the known class). A fresh installation, update, relift and
+a river fight from it pass. Against rel47 (uncapped, river fight): 238.4-239.6 fps against 230.0-237.2. The
+executable: 120.4 MB (rel46) to 92.5 MB with the stores' reservation test gone (rel47) to 87.4 MB without the lifted
+SPU programs (rel48).
+
+What M6 still holds (section 10's inventory): SPURS's HLE (the game's physics set-up makes its instances, tasksets,
+queues and barriers; no thread runs since 10.4), the runtime's SPU environment (channels, MFC, mailboxes, thread
+groups: unused, and fatal where they could matter), cellAudio and SDL2's audio for the movies (M8).
