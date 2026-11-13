@@ -3,6 +3,11 @@
 // port/native/spu_native.h). Checked offline against the lifted task (tests/native/water_task_check.cpp) and
 // in the game (DOTHEROES_NATIVE_WATER=check).
 #include "water_task.h"
+#ifndef NOMINMAX
+#define NOMINMAX   // ps3emu/thread_name.h brings windows.h: no min/max macros
+#endif
+#include "ps3emu/thread_name.h"
+#include "ps3emu/census.h"
 
 #include <algorithm>
 #include <atomic>
@@ -201,6 +206,7 @@ void timed_run(uint32_t param_ea, Local& ls)
 
 void worker_main()
 {
+    ps3_thread_name("water native");   // its line in a per-thread CPU table (tools/thread_cpu.py)
     std::unique_lock<std::mutex> lk(g->m);
     for (;;) {
         g->wake.wait(lk, [] { return g->pending; });
@@ -516,7 +522,11 @@ extern "C" int water_task_signal(uint32_t block, uint32_t bits)
     }
     const uint32_t arg = block + kBlockArgument, flag = block + kBlockFlag;
     const uint32_t param_ea = gbe32(arg + 4);
-    if (gbe32(arg) != 0 || gbe32(arg + 8) != flag) { g->shape++; return 0; }
+    if (gbe32(arg) != 0 || gbe32(arg + 8) != flag) {   // not the water's block: the lifted set (M6's census: a = 5)
+        g->shape++;
+        ps3_census(PS3_CENSUS_NATIVE_DECLINE, 5, block);
+        return 0;
+    }
     if (bits & 2) {   // the quit: to the lifted task, once nothing native touches the water's memory
         if (g->started) wait_idle();
         if (g->mode == kCheck) check_previous(flag);   // the last step's results, before the game frees them

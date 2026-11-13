@@ -848,3 +848,153 @@ A/B scripts of R8 and M3 (uncapped with DOTHEROES_BENCH=1; the 60 fps cap; three
 frame_times.py. **Missing**: per-thread CPU on Windows -- the process's CPU (memory.csv) exists, per thread only
 sampled profiles in development builds; M6 adds a per-thread CPU-time reading (GetThreadTimes) to the runs. The arms:
 rel27, rel31 (M3) and the M6 build, on the river fight and the fields, each target three rounds.
+
+### 10.1 M6 under way (2026-11-12): the static census, the counters, the tools
+
+**Where the game's own code can start SPU work** (tools/spu_census_static.py over the M5 lift, gen14: every call
+site of the cellSpurs, cellSync and cellAudio imports and of the SPU syscalls, each caller marked excluded, hooked
+or lifted) [R]. A scene that starts no SPU program shows what that scene does; this shows what the whole executable
+can do:
+- **cellAudio**: the port calls (open, start, stop, close, the port's configuration) are all in one cluster of the
+  executable, Bink's sound output (M8 retires it); the notification-queue calls FMOD made have no caller left.
+- **SPURS, by owner**: the water's set-up and signal (hooked; three helpers behind the set-up still lifted, reached
+  only through it); the inflate's SPURS shell and its lock-free queue (hooked; lifted only as the direct path's
+  fallback); **the physics manager's set-up** -- its SPURS instance, tasksets, queues and barriers -- **still lifted
+  and run** (its task creation and queue pushes hooked: no task ever runs), which is why the game still creates two
+  SPURS instances. Retiring SPURS means hooking that set-up as the water's was (marker values in place of the SPURS
+  objects), after reading in the lift what else reads them.
+- **SPU syscalls in the game's code**: the SPU-printf server's local-store reads (it serves SPU programs' printf),
+  one sys_spu_initialize in the game's start-up, one image open; the thread groups themselves are created only by
+  the runtime's SPURS.
+
+**The counters** (ps3recomp include/ps3emu/census.h, runtime/platform/ps3_census.c): each run reports at its exit
+how often it used each piece of the machinery -- SPU atomics, line watches, PPU stores reaching a line an SPU holds
+(the per-store test's slow path), SPU DMA, mailboxes and signals, overlays, lv2 SPU thread groups, SPURS instances
+and tasks -- and says the first use of each with what it was. PS3_CENSUS_FATAL=<kinds> makes a kind's first use
+fatal: the diagnostic assertion to turn on for each kind the census shows unused, so a part of the game no run has
+reached cannot use it unnoticed.
+
+**The tools**: tools/thread_cpu.py (each thread's CPU time from the system's own accounting, named as the runtime
+names them; the port's water, waver and audio-stream threads now named too); tools/r8_bench.py with the mean, p95,
+the worst frame and the frames over twice the median; build/r8/m6bench_run.sh (local): 60, 120 and 144 fps caps and
+uncapped, the river and the fields, two rounds rotated, each thread's CPU beside each run.
+
+### 10.2 The fallbacks, case by case (2026-11-12): which the game can reach
+
+The owner's rule for M6 (2026-11-12): every fallback case the game can legitimately reach gets a proper native
+implementation before the machinery behind it is removed; a fatal diagnostic detects unexpected execution and is
+no substitute for supporting a real gameplay path. So each case where a native path hands work back to the lifted
+SPU code or to SPURS is classed by what the whole executable and the player's data can do, not by what the test
+scenes did:
+- **reachable**: the game's code or data can produce it (or nothing rules it out) -- it gets a native implementation;
+- **unreachable, shown statically**: no code in the executable can construct or issue it, read in the executable and
+  the lift (below) -- a fatal diagnostic, with the evidence recorded beside it;
+- **corrupt input**: only a damaged installation produces it -- handled natively as the game's own code handles it.
+
+**The evidence** [R]: tools/class_census_static.py reads the executable's RTTI (130 classes: Bullet's, the SPU
+support's, a few others; the game's own classes have none), finds each class's vtable, every instruction that puts
+its address in a register (lis/addi pairs, and TOC loads with each function's own TOC -- the executable has six,
+one per group of object files, read from the function descriptors), the function each is in and that function's
+callers in the lift. A class whose vtable is materialised only in code nothing calls cannot be constructed. A
+second check compares every vtable in the data with each concrete Bullet shape's: no other vtable resembles one
+(the game defines no shape subclass of its own).
+
+| Path | Case | Class | Evidence | M6 |
+|---|---|---|---|---|
+| collision (bullet_cd) | box, cylinder (any axis) or triangle mesh pairs | native today | -- | -- |
+| | another shape type: sphere, capsule, cone, convex hull, compound, plane | unreachable | the executable links only box, cylinder (X, Y, Z), sphere, BVH triangle mesh and triangle shapes; no capsule, cone, hull, compound or plane class exists. The sphere: the game's own sphere maker (0x000DC2E8, beside its box, cylinder and mesh makers) has no caller and no pointer to it anywhere; Bullet's other spheres are stack temporaries of the PPU's CCD and sweep tests, never in the pair cache | fatal diagnostic |
+| | mesh against mesh | unreachable | one mesh maker, static objects only; Bullet's broadphase filter keeps static pairs apart | fatal diagnostic |
+| | a BVH layout or index type it does not read | unreachable | the game's only mesh maker (0x000DC8EC) has Bullet build the BVH at load (quantized, built: r5 = r6 = 1 at 0x000DCDA4), with 16-bit indices and 12-byte vertices | fatal diagnostic |
+| | more than one work unit a task | unreachable | Bullet 2.74's dispatcher issues one unit a task (one page of one unit) | fatal diagnostic |
+| solver | commands 1, 2, 4, 5, 6 | native today | -- | -- |
+| | command 3 (typed-constraint set-up), cells with typed constraints | unreachable | the only typed-constraint class is btRaycastVehicle (no hinge, point-to-point, cone-twist, 6-DOF or slider class exists), and its constructors have no caller | fatal diagnostic |
+| physics issue (phys_direct) | 64 jobs out at once (the pool) | reachable in principle | the game's protocol stays far below, but nothing in the native layer guarantees it | native: the job runs on the issuing thread |
+| | 8 managers with work out, an address reused while its work is out | reachable in principle | the game makes two managers | native: the table grows; a reused address keeps its own entry |
+| | a manager running another task image | unreachable | the issue and wait functions (func_00955CF0, func_00955BD4) are called only from two virtual methods each, slots 2 and 3 of BulletCollisionSpursSupport's and BulletConstraintSolverSpursSupport's vtables: the collision and solver images | fatal diagnostic |
+| inflate (inflate_direct) | gzip header with only FNAME, whole packs | native today | all 167 map packs on the disc (the only input: the map-pack loader is the inflate's only caller) | -- |
+| | FEXTRA, FCOMMENT, the reserved bits 0x40 and 0x80 | reachable (the game accepts them) | none on the disc, but the game's own header walk (func_0052EE34) takes them -- FEXTRA by adding XLEN without the length field's two bytes, which is the game's to keep | native: the game's walk, exactly |
+| | compressed data bigger than its output | reachable in principle (none on the disc) | Edge's push (func_0069C60C) only prints a warning ("Pointless?") and pushes the request as any other | native: inflated, the warning printed |
+| | FHCRC, bit 0x20, another magic or method | corrupt input | the game's walk refuses them by returning a null data pointer, which its caller (func_005CF228) passes on unchecked: on a PS3 the SPU task would read from address 0 and fault | native: nothing written, the counter's error bit set, a line naming the pack (the fault is not reproduced; the game goes on with what the output holds) |
+| | an inflate that fails or a CRC that differs | corrupt input | the SPU task ORs 0x80000000 into the counter and nothing reads it: the game goes on with the output as written | native: the same (the output as inflated, the counter left at 0x80000000) |
+| | buffers on a stack, memory not mapped | unreachable | the loader's buffers are heap allocations; Edge's own PPU side refuses a stack buffer | fatal diagnostic |
+| water, waver | the quit, an unsupported step | native today | with the set-up hooked (the player's settings) every signal is handled natively, the quit included; an unsupported step is one the SPU task would halt on | -- |
+| generated code | absent (a build without the player's generated water and waver) | build configuration | the player's setup always generates it | the release build requires it (no lifted fallback linked) |
+
+**Done (rel42, validated 2026-11-12; build/r8/m6a_run.sh):**
+- *The physics issue* (port/native/phys_direct.cpp): the job pool grows in chunks of 64 when every job is in use,
+  and the manager table grows and keeps one entry per (address, image), so an address reused while its old work is
+  out gets an entry beside the old one; neither case goes to SPURS any more.
+- *The inflate* (port/native/inflate_direct.cpp): the header is walked as the game's walk walks it (FEXTRA with the
+  game's arithmetic, FNAME, FCOMMENT, FTEXT and bits 0x40/0x80 ignored; port/native/gz_walk.h, every branch checked
+  by tests/native/gz_walk_check.cpp: 42 checks pass); compressed data bigger than its output is inflated, as Edge
+  only warns of it; a damaged pack (a header the game refuses, a name or comment running into the trailer, a
+  stream that does not fill the output) is
+  finished natively as the SPU task finishes a failed inflate -- the output as inflated, the error bit in the
+  counter, which nothing reads -- with a line naming the pack. Declined still: another static block, a buffer on a
+  stack or outside guest memory, a failed host allocation (none of them the game's code can produce).
+- *The defaults*: native collision and the five native solver commands are the code's defaults (port/main.cpp,
+  after dotheroes.cfg is read, so a player's own value still wins); water and waver were already.
+- *The census*: a tenth kind, native_decline -- a native path handing work back to the lifted code (a = 1 the
+  physics issue for an unknown manager, 2 a collision task, 3 a solver task, 4 the inflate, 5 the water's signal
+  for a block not its own). Every run reports it; PS3_CENSUS_FATAL=native_decline is the fatal diagnostic the table
+  names for the unreachable cases, turned on for M6's validation and made unconditional when the SPU machinery
+  behind the declines is removed.
+
+**rel42's validation** [M] (rel41's lift, gen14, with the above; PS3_CENSUS_FATAL=native_decline and the inflate's
+CRC check in every run): no crash, no trap, no fatal diagnostic, native_decline 0 in every census.
+- The memory test (695 of 695); the 11 validation drives; Vulkan validation (0 messages); the damage run; the menu's
+  quit (exit 0); the movie with sound; a 30-minute session (the working set 969 MB from the fifth minute, flat;
+  rel41's 960 MB); the seven save flows (each wrote the folders expected); the reference scenes (5 of 5 within).
+- The water check: 2,498 of 2,498 steps equal. The waver check: 1,093 of 1,100 (the known mid-ripple class).
+- Every pack the runs loaded: 40, inflated natively, every CRC-32 the trailer's. No physics work went to SPURS; the
+  job pool never grew and no address was reused with work out (the growth paths exist for what the scenes do not
+  reach).
+- The A/B against rel41 (uncapped, two rounds each, rotated):
+
+  | Scene | rel41 fps | rel42 fps | rel41 p99 (ms) | rel42 p99 (ms) |
+  |---|---|---|---|---|
+  | River fight | 211.9 | 210.9-211.2 | 6.48-6.50 | 6.48-6.68 |
+  | Fields | 243.7-246.4 | 242.2-244.5 | 5.59-5.85 | 5.58-5.69 |
+
+  The river 0.3% slower in both rounds (the game thread's busy time 4.68 against 4.66 ms a frame; the census's
+  counters the likely cost); the fields within each other's range.
+
+### 10.3 M6's baseline (rel42, 2026-11-12): frame times and each thread's CPU
+
+build/r8/m6bench_run.sh: the river fight and the fields (the waver started four times), the game capped at 60, 120
+and 144 fps (a frame a vblank, the vblank clock at 16.67, 8.33 and 6.94 ms, mailbox present) and uncapped, two
+rounds rotated, real audio; tools/r8_bench.py over the frame trace's 60 s window; tools/thread_cpu.py over 50 s of
+it [M]. One run (the river at 120, round 1) was overlapped by a file search of the developer's and was run again.
+
+| Scene | Cap | fps | p50 (ms) | p99 (ms) | p99.9 (ms) | Worst (ms) | Spikes | Process (cores) | Main thread |
+|---|---|---|---|---|---|---|---|---|---|
+| River fight | 60 | 60.0 | 16.68-16.69 | 17.32-17.45 | 17.53-17.59 | 17.8 | 0 | 1.54-1.56 | 99% |
+| River fight | 120 | 120.0 | 8.35-8.36 | 9.22-9.37 | 9.57-10.53 | 12.6 | 0 | 1.69-1.74 | 99% |
+| River fight | 144 | 140.8-143.3 | 6.94-6.95 | 9.11-11.32 | 10.94-13.86 | 86.4 | 0-8 | 1.84 | 99% |
+| River fight | none | 203.5-204.2 | 4.75-4.77 | 7.12-7.25 | 8.77-9.32 | 12.4 | 4-6 | 1.91-1.94 | 99% |
+| Fields | 60 | 60.0 | 16.68 | 17.21-17.50 | 17.60-17.63 | 18.3 | 0 | 1.47-1.49 | 99% |
+| Fields | 120 | 120.0 | 8.36-8.37 | 9.30-9.35 | 9.58-10.17 | 11.3 | 0 | 1.52-1.54 | 99% |
+| Fields | 144 | 144.0 | 6.94 | 7.40-7.46 | 9.01-9.27 | 13.3 | 0 | 1.59-1.61 | 99-100% |
+| Fields | none | 235.9-240.3 | 4.13-4.17 | 5.79-6.13 | 7.50-8.35 | 10.1 | 12-15 | 1.68-1.73 | 98-99% |
+
+(Spikes: frames over twice the median. Other threads: the native graphics 31-69% of a core, rising with the frame
+rate; 22 threads the runtime does not name -- the GPU driver's, OpenAL Soft's, the system's pool -- 7-10% together;
+water or waver 2-6%; the audio stream 3.5%; the SPURS kernel 0.4-0.8%.)
+
+What it shows:
+- **60 and 120 hold** in both scenes: no frame over 18.3 ms at 60, none over 12.6 ms at 120. **144 holds in the
+  fields** (p99 7.4 ms). **The river fight does not hold 144**: its heavy-debris frames reach 10 ms (p99 9.1 ms in
+  the round without a stall), the game thread's own work in them more than a 6.94 ms frame.
+- **The 86.4 ms frame** at 144 (round 1) was the title-screen freeze's cause in a fight: the main thread 75.4 ms in
+  cellPadGetInfo2 while SDL re-enumerated after a device change elsewhere on the system ("[cellPad] SDL controller
+  update took 78 ms"), then a run of shorter ones. The pad thread (docs/PC_EXPERIENCE.md section 7b) removes it;
+  validated apart from these measurements.
+- **The main thread uses a whole core at every cap.** Its own work is 4-5.6 ms a frame; the rest is the game's
+  frame wait at 0x00029CC0, which calls sys_timer_usleep for about 200 us some 3,300 times a second, and the
+  runtime's usleep spins below 1 ms (sys_timer.c: a QPC deadline, SwitchToThread in the loop) -- 40 s of the 60 s
+  window at 60 fps. The next M6 candidate: that wait made a sleep on what it polls for (the evidence first: what
+  the loop reads, who writes it), measured by these same runs. Not a correctness issue; a core's worth of power and
+  heat, and a core taken from the other threads on a machine with few.
+- **SPURS still runs a kernel thread** (0.4-0.8% of a core) for the physics manager's two instances, which the
+  game's own set-up creates and no task uses; its three worker threads stay idle. Their retirement (section 10.2)
+  removes it.

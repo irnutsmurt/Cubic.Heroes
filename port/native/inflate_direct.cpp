@@ -35,11 +35,23 @@
 // it for the task), in the calling thread, then the guest state the task
 // leaves behind that anyone could read: the output bytes and the counter's
 // final 0. None of the SPURS objects is created, so nothing is left to set,
-// clear, free or join. Anything not recognised -- a header flag other than
-// FTEXT and FNAME (the game's own walk prints a message for those), sizes the
-// task would treat differently, memory not usable, an inflate that does not
-// fill the output exactly, a CRC-32 that differs (DOTHEROES_INFLATE_CRC) -- is
-// declined: the lifted body runs the SPURS path as before.
+// clear, free or join.
+//
+// The header is walked as the game's own walk (func_0052EE34) walks it
+// (gz_walk.h, checked branch by branch in tests/native/gz_walk_check.cpp): every
+// flag it takes is taken the same way, and the flags it refuses are a damaged
+// pack. Compressed data bigger than its output is inflated, as Edge's push
+// (func_0069C60C) only warns of it. M6 (docs/OPENAL_MIGRATION_PLAN.md section
+// 10.2): the map-pack loader is this function's only caller and every pack on
+// the disc has FNAME alone, so only a damaged installation reaches the rest.
+// A damaged pack -- a header the game refuses, a name or comment running into
+// the trailer, a stream that does not fill the output -- is handled natively
+// as the game's SPU task ends one: the output as far as it was inflated, the
+// counter left with its error bit (0x80000000; nothing in the game reads it),
+// and a line saying which pack and why. Declined still (the lifted body runs
+// the SPURS path): what the game's own code cannot produce -- another static
+// block, a buffer on a stack or outside guest memory -- and a host allocation
+// that fails.
 //
 // DOTHEROES_INFLATE_DIRECT=0 leaves every pack to SPURS. The direct path is
 // also off with DOTHEROES_NATIVE_INFLATE=0 (the lifted SPU routine) or =check
@@ -50,8 +62,10 @@
 // by pack.
 #include "inflate_direct.h"
 
+#include "gz_walk.h"
 #include "inflate.h"
 #include "ps3emu/ps3_ftrace.h"
+#include "ps3emu/census.h"
 
 #include <atomic>
 #include <cstdio>
@@ -79,28 +93,21 @@ constexpr int kImageEdgeZlib = 3;          // the runtime's image id of Edge zli
 constexpr uint32_t kBlockAt = 0x1AF8;      // r2 + this: the static block B (func_005CF5BC, func_005CF228)
 constexpr uint32_t kCounter = 0x1980;      // B + this: the request's work-to-do counter
 constexpr uint32_t kSmall = 0x10000;       // the shell's local-store path: output and input both at most this
-constexpr uint8_t kFText = 0x01, kFName = 0x08;
 
 enum Why : int {
     kWhyBlock,    // r2+0x1AF8 is not the 128-aligned block the game's function uses
-    kWhyGz,       // not a .gz image func_0052EE34 takes (magic, method, a short image)
-    kWhyFlags,    // a header flag the game's walk prints a message for, or refuses
-    kWhyName,     // FNAME's name does not end before the trailer
-    kWhySizes,    // empty, or ISIZE below the compressed size (Edge prints a message)
+    kWhyGz,       // the image not in usable guest memory
     kWhyStack,    // an address in the stack area (Edge's sys_process_is_stack check prints one)
     kWhyMemory,   // a range outside usable guest memory
     kWhyNoTemp,   // in place, and no host buffer for it
-    kWhyInflate,  // the stream did not fill the output exactly
-    kWhyCrc,      // the output's CRC-32 is not the trailer's (DOTHEROES_INFLATE_CRC)
     kWhyCount
 };
-const char* const kWhyText[kWhyCount] = { "static block", "not gzip", "header flags", "name",
-                                          "sizes",        "stack",    "memory",       "no buffer",
-                                          "inflate",      "CRC-32" };
+const char* const kWhyText[kWhyCount] = { "static block", "image", "stack", "memory", "no buffer" };
 
 int g_log_each, g_crc;
 std::atomic<unsigned long long> g_n{ 0 }, g_small{ 0 }, g_in_place{ 0 }, g_in{ 0 }, g_out{ 0 }, g_ns{ 0 },
-    g_inflate_ns{ 0 }, g_max_ns{ 0 }, g_crc_equal{ 0 }, g_declined{ 0 }, g_why[kWhyCount];
+    g_inflate_ns{ 0 }, g_max_ns{ 0 }, g_crc_equal{ 0 }, g_crc_differ{ 0 }, g_damaged{ 0 }, g_bigger{ 0 },
+    g_declined{ 0 }, g_why[kWhyCount];
 
 inline uint32_t host_tid()
 {
@@ -111,16 +118,12 @@ inline uint32_t host_tid()
 #endif
 }
 
-inline uint32_t le32(const uint8_t* p)
-{
-    return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
-}
-
 int decline(Why why, uint32_t gz, uint32_t size, uint32_t out, const char* detail)
 {
+    ps3_census(PS3_CENSUS_NATIVE_DECLINE, 4, (unsigned)why);   // M6's census: a = 4 the inflate, b = why
     g_why[why].fetch_add(1, std::memory_order_relaxed);
     const unsigned long long n = g_declined.fetch_add(1, std::memory_order_relaxed) + 1;
-    if (n <= 16 || why == kWhyCrc)
+    if (n <= 16)
         fprintf(stderr, "[inflate-direct] through SPURS (%s%s%s): .gz 0x%08X %u B, output 0x%08X\n", kWhyText[why],
                 detail ? ": " : "", detail ? detail : "", gz, size, out);
     return 0;
@@ -175,9 +178,10 @@ void report()
         return;
     }
     fprintf(stderr, "[inflate-direct] %llu packs inflated in the calling thread (%.1f MB from %.1f MB; %.1f ms "
-            "inflating, %.1f ms in all, the longest call %.1f ms; %llu small, %llu in place), %llu through SPURS\n",
+            "inflating, %.1f ms in all, the longest call %.1f ms; %llu small, %llu in place; %llu damaged), %llu "
+            "through SPURS\n",
             n, g_out.load() / 1e6, g_in.load() / 1e6, g_inflate_ns.load() / 1e6, g_ns.load() / 1e6,
-            g_max_ns.load() / 1e6, g_small.load(), g_in_place.load(), d);
+            g_max_ns.load() / 1e6, g_small.load(), g_in_place.load(), g_damaged.load(), d);
     if (d) {
         char b[256] = "";
         size_t at = 0;
@@ -190,7 +194,7 @@ void report()
     }
     if (g_crc)
         fprintf(stderr, "[inflate-direct] CRC-32 against the .gz trailers: %llu equal, %llu different\n",
-                g_crc_equal.load(), g_why[kWhyCrc].load());
+                g_crc_equal.load(), g_crc_differ.load());
 }
 
 struct Init {
@@ -222,76 +226,77 @@ extern "C" int inflate_direct_call(uint32_t gz, uint32_t gz_size, uint32_t out, 
     const uint32_t block = vm_read32((uint64_t)toc + kBlockAt);
     if (!block || (block & 0x7Fu)) return decline(kWhyBlock, gz, gz_size, out, nullptr);
 
-    // func_0052EE34's walk, for the headers it takes without a message.
-    if (gz_size < 18 || !usable(gz, gz_size, false)) return decline(kWhyGz, gz, gz_size, out, "size or memory");
+    if (!usable(gz, gz_size ? gz_size : 1, false)) return decline(kWhyGz, gz, gz_size, out, "not guest memory");
+    if (on_stack(gz) || on_stack(out)) return decline(kWhyStack, gz, gz_size, out, nullptr);
     const uint8_t* const g = vm_base + gz;
-    if (g[0] != 0x1F || g[1] != 0x8B || g[2] != 8) return decline(kWhyGz, gz, gz_size, out, "magic or method");
-    const uint8_t flg = g[3];
-    if (flg & ~(kFText | kFName)) {
-        char d[16];
-        snprintf(d, sizeof d, "0x%02X", flg);
-        return decline(kWhyFlags, gz, gz_size, out, d);
-    }
-    uint32_t start = 10;
-    if (flg & kFName) {
-        const void* nul = memchr(g + 10, 0, gz_size - 18);
-        if (!nul) return decline(kWhyName, gz, gz_size, out, nullptr);
-        start = (uint32_t)((const uint8_t*)nul - g) + 1;
-    }
-    // func_0052EFF8 and func_0052EDF8: the request's sizes.
-    const uint32_t csize = gz_size - start - 8, usize = le32(g + gz_size - 4), crc_want = le32(g + gz_size - 8);
-    const uint32_t in_ea = gz + start;
-    if (!csize || !usize || usize < csize) return decline(kWhySizes, gz, gz_size, out, nullptr);
-    if (on_stack(in_ea) || on_stack(out)) return decline(kWhyStack, gz, gz_size, out, nullptr);
-    if (!usable(out, usize, true)) return decline(kWhyMemory, gz, gz_size, out, "the output");
+
+    // func_0052EE34's walk (gz_walk.h): the deflate data's start, or why the pack is damaged (a header the game
+    // refuses, or one its walk would run past the image with).
+    const GzWalk w = gz_walk(g, gz_size);
+    const char* const refused = w.refused;
+    const uint32_t usize = w.usize, csize = w.csize, crc_want = w.crc;
+    const uint32_t in_ea = gz + w.start;
+    // Edge's push (func_0069C60C) only warns of compressed data bigger than its output ("Pointless?") and inflates
+    // it as any other: so here.
+    if (!refused && csize > usize && g_bigger.fetch_add(1, std::memory_order_relaxed) < 4)
+        fprintf(stderr, "[inflate-direct] .gz 0x%08X: the compressed data is bigger than its output (%u > %u), as "
+                "Edge's warning says; inflated all the same\n", gz, csize, usize);
+    if (!refused && usize && !usable(out, usize, true)) return decline(kWhyMemory, gz, gz_size, out, "the output");
 
     // The inflate, as edge_inflate.c runs it for the task: in place (the
     // deflate data inside the output) through a buffer of its own.
-    const bool overlap = (uint64_t)in_ea < (uint64_t)out + usize && (uint64_t)out < (uint64_t)in_ea + csize;
-    uint8_t* tmp = overlap ? (uint8_t*)malloc(usize) : nullptr;
-    if (overlap && !tmp) return decline(kWhyNoTemp, gz, gz_size, out, nullptr);
-    uint8_t* const dst = overlap ? tmp : vm_base + out;
+    const bool overlap = usize && (uint64_t)in_ea < (uint64_t)out + usize && (uint64_t)out < (uint64_t)in_ea + csize;
+    uint8_t* tmp = overlap && !refused ? (uint8_t*)malloc(usize) : nullptr;
+    if (overlap && !refused && !tmp) return decline(kWhyNoTemp, gz, gz_size, out, nullptr);
+    uint8_t* const dst = tmp ? tmp : vm_base + out;
     const uint64_t i0 = ps3_ft_now();
-    const long got = dh_inflate_raw(vm_base + in_ea, csize, dst, usize, nullptr);
+    const long got = refused ? 0 : dh_inflate_raw(vm_base + in_ea, csize, dst, usize, nullptr);
     const uint64_t i1 = ps3_ft_now();
-    if (got != (long)usize) {
-        free(tmp);
-        char d[48];
-        snprintf(d, sizeof d, "gave %ld of %u", got, usize);
-        return decline(kWhyInflate, gz, gz_size, out, d);   // the lifted path writes the whole output again
-    }
-    if (g_crc) {
+    const bool damaged = refused || got != (long)usize;
+    if (damaged) {
+        g_damaged.fetch_add(1, std::memory_order_relaxed);
+        char d[64];
+        if (!refused) snprintf(d, sizeof d, "the stream gave %ld of %u bytes", got, usize);
+        fprintf(stderr, "[inflate-direct] DAMAGED map pack (.gz 0x%08X, %u B): %s; the output left as inflated and "
+                "the request's error bit set, as the game's SPU task leaves a failed inflate (the game file may need "
+                "reinstalling)\n", gz, gz_size, refused ? refused : d);
+    } else if (g_crc) {   // the task does not check the trailer's CRC; this diagnostic does
         const uint32_t crc = dh_crc32(0, dst, usize);
         if (crc != crc_want) {
-            free(tmp);
-            char d[48];
-            snprintf(d, sizeof d, "0x%08X, the trailer's 0x%08X", crc, crc_want);
-            return decline(kWhyCrc, gz, gz_size, out, d);
+            g_crc_differ.fetch_add(1, std::memory_order_relaxed);
+            fprintf(stderr, "[inflate-direct] CRC-32 0x%08X, the trailer's 0x%08X: .gz 0x%08X %u B, output 0x%08X\n",
+                    crc, crc_want, gz, gz_size, out);
+        } else {
+            g_crc_equal.fetch_add(1, std::memory_order_relaxed);
+            fprintf(stderr, "[edge-inflate] crc 0x%08X of %u bytes from %u at 0x%08X (direct: the trailer's)\n", crc,
+                    usize, csize, out);
         }
-        g_crc_equal.fetch_add(1, std::memory_order_relaxed);
-        fprintf(stderr, "[edge-inflate] crc 0x%08X of %u bytes from %u at 0x%08X (direct: the trailer's)\n", crc,
-                usize, csize, out);
     }
     if (tmp) {
-        memcpy(vm_base + out, tmp, usize);
+        if (got > 0) memcpy(vm_base + out, tmp, (size_t)got);   // in place: the bytes the stream gave
         free(tmp);
     }
-    // As a store: an SPU holding a reservation on a line written loses it.
-    const uint32_t a0 = out & ~127u, a1 = (out + usize - 1) & ~127u;
-    for (uint32_t a = a0;; a += 128u) {
-        if (spu_coh_is_reserved(a)) {
-            spu_lockline_lock();
-            spu_coh_notify_write(a);
-            spu_lockline_unlock();
+    // As a store: an SPU holding a reservation on a line written loses it. The range the inflate may have
+    // written: the whole output (a refused header writes nothing).
+    const uint32_t wrote = refused ? 0 : usize;
+    if (wrote) {
+        const uint32_t a0 = out & ~127u, a1 = (out + wrote - 1) & ~127u;
+        for (uint32_t a = a0;; a += 128u) {
+            if (spu_coh_is_reserved(a)) {
+                spu_lockline_lock();
+                spu_coh_notify_write(a);
+                spu_lockline_unlock();
+            }
+            if (a == a1) break;
         }
-        if (a == a1) break;
+        if (g_spu_put_hook) g_spu_put_hook(out, wrote);   // what the task's write showed the RSX command path
     }
-    if (g_spu_put_hook) g_spu_put_hook(out, usize);   // what the task's write showed the RSX command path
 
     // The task's completion: the counter func_005CF228 set to 1, decremented
-    // to 0. The event flag it would then set, and the wait that would clear
+    // to 0 -- with the error bit ORed in first on a failed inflate, as the task
+    // does. The event flag it would then set, and the wait that would clear
     // it, belong to objects not made here.
-    vm_write32((uint64_t)block + kCounter, 0);
+    vm_write32((uint64_t)block + kCounter, damaged ? 0x80000000u : 0u);
 
     const uint64_t t1 = ps3_ft_now();
     if (PS3_FT_ON()) ps3_ft_span(PS3_FT_SPU_TASK, host_tid(), (uint32_t)kImageEdgeZlib, 0, i0, i1);
