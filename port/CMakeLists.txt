@@ -298,6 +298,9 @@ target_sources(${PROJECT_NAME} PRIVATE native/memtest.cpp native/memtest_checked
 # R8's physics hooks (config/r8_hooks.json): the guest registers in and out of
 # native/phys_direct.cpp
 target_sources(${PROJECT_NAME} PRIVATE phys_hooks.cpp)
+# M8's credits on demand (config/m8_dev_credits.json, DOTHEROES_DEV_CREDITS): defines its hook and guard; a lift
+# without the hook references neither
+target_sources(${PROJECT_NAME} PRIVATE movie_hooks.cpp)
 # The game's audio boundary (config/audio_hooks.json, docs/OPENAL_MIGRATION_PLAN.md): its sound manager's
 # methods, traced with DOTHEROES_AUDIO_TRACE (M0)
 target_sources(${PROJECT_NAME} PRIVATE audio_hooks.cpp)
@@ -376,7 +379,9 @@ add_library(dotheroes_native STATIC native/bullet_cd_task.cpp native/bullet_solv
     # when a development lift's entry observers reference them
     # (tools/r1_dev_lift.sh)
     native/render/r1_observe.cpp native/render/ppfx_recorder.cpp native/render/ppfx_watch.cpp
-    native/render/ppfx_render.cpp)
+    native/render/ppfx_render.cpp
+    # M8.0's movie trace (DOTHEROES_MOVIE_TRACE; a lift with config/m8_movie_trace.json's observers)
+    native/movie/movie_trace.cpp)
 # the save-data screen's font and prompt images (above), registered by main.cpp
 target_sources(dotheroes_native PRIVATE ui_assets.cpp "${_ui_assets_c}")
 if(NOT DOTHEROES_NATIVE_RELEASE)

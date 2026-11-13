@@ -1,0 +1,12 @@
+{
+ "_comment": "M8's credits on demand (docs/FFMPEG_MIGRATION_PLAN.md section 2.2), a developer's test switch: an entry hook on GameClass's frame function that declines, so its body always runs; with DOTHEROES_DEV_CREDITS set, port/movie_hooks.cpp first makes the call the game's Lua function Ending makes (func_004CDF70: GameClass's Ending method on the game's GameClass). The guard is 0 otherwise. Lifted by tools/m8_trace_lift.sh. Addresses only.",
+ "entry_hooks": [
+  {
+   "addr": "0x00514F8C",
+   "host": "dotheroes_dev_credits",
+   "guard": "g_dev_credits",
+   "decline": true,
+   "note": "GameClass's frame function (called through the stub 0x00989A98 by the main frame function, r2 = 0x01057910). DOTHEROES_DEV_CREDITS=key: on F6; =<s>: also <s> seconds after its first call."
+  }
+ ]
+}

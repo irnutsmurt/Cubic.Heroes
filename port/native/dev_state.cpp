@@ -110,6 +110,9 @@ extern "C" void ppu_promo_report(void);
 extern "C" void dev_waver_report(void);
 extern "C" void waver_game_report(void);
 extern "C" void cellPad_dev_rumble_pulse(unsigned ms);   // ps3recomp cellPad.c: a tester's rumble pulse
+// F6: the credits on demand (port/movie_hooks.cpp sets it when DOTHEROES_DEV_CREDITS arms its hook; else null)
+extern "C" void (*g_dev_credits_request)(void);
+void (*g_dev_credits_request)(void) = nullptr;
 extern "C" void cellGcm_flip_wake_report(void);     // ps3recomp cellGcmSys.c (the flip wait's wake-up)
 extern "C" void sys_timer_flip_wait_report(void);   // ps3recomp sys_timer.c (Windows: how flip waits slept)
 
@@ -742,7 +745,7 @@ void keys_loop()
     if (!xi) xi = LoadLibraryA("xinput9_1_0.dll");
     const GetStateFn get_state = xi ? (GetStateFn)(void*)GetProcAddress(xi, "XInputGetState") : nullptr;
     const WORD sticks = XINPUT_GAMEPAD_LEFT_THUMB | XINPUT_GAMEPAD_RIGHT_THUMB;
-    bool f8 = false, f7 = false, pad = false, f9 = false;
+    bool f8 = false, f7 = false, pad = false, f9 = false, f6 = false;
     unsigned n = 0;
     for (;;) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -788,7 +791,7 @@ void keys_loop()
                         (double)(int64_t)(ps3_ft_now() - g_ps3_ft.base) / 1e9);
             }
         }
-        if (!our_window_focused()) { f8 = f7 = pad = f9 = false; continue; }
+        if (!our_window_focused()) { f8 = f7 = pad = f9 = f6 = false; continue; }
         const bool f8_now = (GetAsyncKeyState(VK_F8) & 0x8000) != 0, f7_now = (GetAsyncKeyState(VK_F7) & 0x8000) != 0;
         bool pad_now = false;
         for (DWORD u = 0; get_state && u < 4 && !pad_now; u++) {
@@ -808,7 +811,9 @@ void keys_loop()
                     on < 0 ? "not readable yet" : on ? "on" : "off", on);
             cellPad_dev_rumble_pulse(600);
         }
-        f8 = f8_now; f7 = f7_now; pad = pad_now; f9 = f9_now;
+        const bool f6_now = (GetAsyncKeyState(VK_F6) & 0x8000) != 0;
+        if (f6_now && !f6 && g_dev_credits_request) g_dev_credits_request();
+        f8 = f8_now; f7 = f7_now; pad = pad_now; f9 = f9_now; f6 = f6_now;
     }
 }
 

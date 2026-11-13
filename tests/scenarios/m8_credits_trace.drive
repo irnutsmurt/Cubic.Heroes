@@ -1,0 +1,25 @@
+# Scenario: M8.0's trace of the credits (docs/FFMPEG_MIGRATION_PLAN.md section 2) on a trace build (a release from
+# tools/m8_trace_lift.sh's lift: BIN=build/r8/rel48m/bld/dotheroes.exe), without a cleared save: CONTINUE from
+# castle-front (field area 17), then the credits on demand -- the run's `touch credits.trigger`, which
+# port/movie_hooks.cpp answers at GameClass's next frame with the call the game's Lua function Ending makes
+# (DOTHEROES_DEV_CREDITS) -- and seven minutes for the ending and the credits movie (262 s). Every call of the movie
+# class, Bink's API, the textures' creation and the movie paths goes to <run>/movie_trace.txt; a grab every 5 s.
+# A copy of the checkpoint's saves: whatever the game does after its credits stays in the run.
+#! saves build/checkpoints/castle-front
+#! env DOTHEROES_MOVIE_TRACE=movie_trace.txt DOTHEROES_DEV_CREDITS=key DOTHEROES_DEV_KEYS=1 DOTHEROES_DEV_STATE=1
+#! env PS3_VERBOSE=0
+#! env WINDOW=1 VISIBLE=1 GRAB_EVERY=5 PS3_OSD_FPS=0 DUMP=0 SHOT_EVERY=0
+#! secs 900
+include common.drive
+log TitleMovie 120
+sleep 5
+call continue
+state life>0,area==17 90
+sleep 10
+shot before
+segment credits the ending on demand and the credits movie
+touch credits.trigger
+sleep 420
+endseg
+shot after
+stop

@@ -84,6 +84,83 @@ From the executable's strings and the lift's direct calls (gen15):
 - **The movie's textures**: gcmtextures.cpp, func_0045AE14 and func_0045B55C (the game's own texture creation).
 Next: the chain from the manager to Bink's API, Bink's extent, then the run-time trace (section 2).
 
+### 2.2 M8.0: Bink's extent and the game's side, read from the lift (2026-11-13) [S]
+
+tools/movie_inventory.py (on the player's executable and the developer's lift; addresses only) checks a range of
+lifted functions for what an exclusion needs: who calls into it, who takes its functions' addresses, which tables
+hold them and who refers to those, the constructor tables, the strings.
+- **Bink's library is [0x00A54DD0, 0x00A76208)**: 151 functions and 49 alignment pads (a nop before a function, lifted
+  as a function of its own). Closed: nothing outside reaches it but **eleven call stubs** (TOC-switching glue,
+  0x009873A8-0x00987458, beside FMOD's 28 at 0x00987478); the 35 members reached through a pointer (its sound
+  module's functions, its IO and sound threads' entries, its decoders' tables) have descriptors held only in TOC
+  slots that Bink's own code loads; no constructor; its strings ("Not a Bink file.", "Error reading Bink header.",
+  the two thread names) used only inside. Its neighbours are not Bink's: below, the game's SpursTask and
+  BulletSpursTask methods (their vtables); above, Bullet's out-of-line methods (btCollisionPairCallback ...). The
+  section 2.1 guess ("near FMOD's out-of-line methods", 0x00A5B438 as its open) holds; the range is M8.4's traps.
+- **The game's side**: the eleven stubs are called only by six methods of the game's movie class, beside
+  gcmtextures (system/, func_0045CDD8-func_0045D2F8: one opens the file through Bink's open, func_00A5B438, one
+  calls seven of Bink's functions -- the frame's work). The class has seven public methods (0x0045CDD8, CE64,
+  CEE0, CF3C, CFF8, D088, D2F8), called only by four scenes' movie code, each reading its scene table's
+  Movie.FileName and building "%s/movie/%s": 0x005CD374 in Title.cpp (the title movie), 0x00585BF0 (between
+  NewGamePlusClass.cpp and OptionClass.cpp: the opening, by the link order), 0x0048C424 (between ContinueClass.cpp
+  and Difficulty.cpp, made by MainClass's scene factory: the attract demo [I]) and 0x004A9814 (after
+  DungeonName.cpp, made by GameClass: the credits [I], below). The asp engine's movie schedule manager
+  (aspMovieScheduleManager.cpp, 0x006E5C50-0x006E68C8) reaches neither the class nor Bink's stubs in six direct
+  calls (its indirect calls are the trace's to show): the "movie" of its name is not these files [I].
+- **The credits' way in**: the game's Lua function Ending (the binding func_004F0EB4, called by the ending's event
+  script) calls func_004CDF70, which calls GameClass's Ending method (func_00509A98) on the game's GameClass (a
+  global: TOC 0x01057910 + 0x3A80). Ending sets GameClass's mode and step (+0x20 = 3, +0x28 = 1) and initialises
+  the object at +0x258 with func_004A97C4 -- in the module of the opener 0x004A9814, whose next function calls the
+  movie class. GameClass's frame function (func_00514F8C, called each frame by MainClass's) calls that object's
+  frame function (func_004A99E4), which opens the movie. So **a developer's hook can start the ending without a
+  cleared save** by making the same call the Lua function makes, on the game's own thread at the start of
+  GameClass's frame: port/movie_hooks.cpp (DOTHEROES_DEV_CREDITS=key: on F6; a test drive's `touch
+  credits.trigger`), lifted by tools/m8_trace_lift.sh (config/m8_dev_credits.json). Whether the ending runs
+  correctly from an arbitrary place is the trace's question (section 2.3).
+
+### 2.3 M8.0: the trace of every movie (2026-11-13) [L]
+
+A trace build (rel48m: rel48's options on tools/m8_trace_lift.sh's lift, port/native/movie/movie_trace.cpp) logged
+every call of the class, of Bink's eleven functions, of the textures' creation and of the movie paths, with their
+arguments, results and the objects before and after, in four runs (build/test/*-m8-trace-*; local): SCENARIO=attract
+for 10 minutes, a new game (the opening; tests/scenarios/m8_movie_trace.drive), and the credits on demand from the
+castle-front checkpoint (tests/scenarios/m8_credits_trace.drive).
+- **The movies and their openers, confirmed**: the title (Title.cpp, 0x005CD374) opens TitleMovie_Omote_eng.bik and
+  closes it after 961-962 frames (32 s) with no input, when the attract demo replaces it (0x0048C424:
+  PlayDemoMovieUS.bik, played to its 3,465th frame, then the title again: four cycles in 10 minutes), or at START
+  (the main menu has no movie). A new game opens OpeningMovie_eng.bik (0x00585BF0), played to its 4,620th frame.
+  The credits (0x004A9814) open CreditMovie_eng.bik at once when the Ending call is made (the hero in field 17),
+  play to the 7,860th frame with their sound (Bink's audio thread), then the game asks "Okay to save?" -- the
+  cleared game's save (not answered in the run; the saves were the run's copy). **The credits on demand work**:
+  the original sequence, from GameClass's mode 9 to mode 3, without a cleared save.
+- **Bink's eleven functions, by what the game does with them** (stub -> function): 0x009873F8 -> 0x00A56B20 gives
+  Bink its sound module (Bink's own cellAudio driver, the table at 0x0101F048) before each open; 0x009873C8 ->
+  0x00A5B438 opens (the path, flags 0x4400) and returns the handle: +0 width 1280, +4 height 720, +8 frames, +0xC
+  the current frame (from 1), +0x10 the last frame, +0x14/+0x18 the rate 10000000/333333; 0x009873D8 -> 0x00A56EF0
+  describes the frame buffers into the class's object (2 sets of a 1280x720 Y plane and two 640x360 chroma planes);
+  the game's 0x0045B55C then allocates the planes in main memory (Y pitch 1280, chroma 640); each frame
+  0x00987418 -> 0x00A5A178 answers whether the next frame is due (1 not yet, 0 due), and when due 0x00987428 ->
+  0x00A56FE8 takes the planes, 0x00987438 -> 0x00A5B158 decodes the frame into the next set (its index then at
+  the description's +0x14), 0x00987458 -> 0x00A5D960 answers whether it is behind (then the next frame is decoded
+  too: every frame is decoded, a late one is not shown) and 0x00987448 -> 0x00A5D138 advances the current frame;
+  0x009873A8 -> 0x00A58F18 pauses (1) and resumes (0); 0x009873B8 -> 0x00A59358 closes; 0x009873E8 -> 0x00A560E8,
+  after a close, ends the sound (0.1-2 ms). No volume call: the movies' sound plays at Bink's own level, not the
+  options' (the sound validation compares the level with rel41's).
+- **The picture is the game's own**: the class's draw (0x0045CE64, each game frame, when a movie is open and a frame
+  decoded) calls 0x0045BB6C, the game's drawing through libgcm: the current set's Y, U and V planes as textures,
+  its own shader for the colours, one quad -- the title menu drawn over it as the game composes it. Bink only
+  writes the planes. At 60 game frames a second the class's update runs every frame; the wait answers "due"
+  every second frame.
+- **Not traced**: TitleMovie_Ura_eng.bik, the title after a cleared game (a cleared save; the same opener and
+  path, by its name in the title's table [I]).
+- **The boundary chosen**: Bink's eleven functions at their stubs. The class's methods call the game's own
+  texture creation, drawing and states, which the native player has no reason to replace; the eleven calls the
+  class makes into Bink have the plain meanings above, all observed. The native player answers them (M8.2):
+  open and close an FFmpeg decoder, write each frame's planes into the set the class gave, keep the handle's
+  fields, answer due and behind from the clock, pause and resume the clock and the sound -- and the game's own
+  class, textures, shader, states and the menus over the title stay as they are. The stubs lie outside Bink's
+  range, so M8.4's traps and these hooks do not overlap.
+
 ## 3. The native movie player
 
 - **Reading** [design]: FFmpeg's Bink demuxer (libavformat) reads the player's .bik through a custom I/O context
