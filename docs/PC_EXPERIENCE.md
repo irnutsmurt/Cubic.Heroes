@@ -393,6 +393,12 @@ fight, unplugging and replugging the controller during play.
 
 ## 8. Launcher and update management (after the base and the settings are stable)
 
+This is M10 of the roadmap (docs/MILESTONES.md, "Roadmap: M9-M11", 2026-11-12): a launcher inspired by Dusklight,
+with installation, settings, GitHub updates, incremental recompilation, rollback, save management,
+diagnostics, and shader and pipeline precompilation before the game starts, detecting on its own
+when the caches need rebuilding. Sections 1-7b are M9. Documented only until the core architecture work
+(M6, M8) is finished.
+
 **Today** [C, setup_app.py, tools/self_update.py]:
 - The setup app converts the disc into an install and updates an install,
   redoing only the steps whose inputs changed and reusing compiled objects.

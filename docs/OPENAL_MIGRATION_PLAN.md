@@ -658,6 +658,9 @@ M1 did with them (section 4.2):
 | M6 | Retirements: a census of SPU workloads over the whole game (every drive, long sessions, the owner's sessions); then the FMOD SPU machinery, the overlay dispatch, cellAudio if unused, and the per-store SPU reservation test only if no workload takes reservations | the census; the validation set; CPU and frame-time A/B against rel27 |
 | M7 | History, if the owner approves a cleanup | the bounded rewrite verified as on 2026-11-10; the Support request |
 | M8 | Bink 1 through FFmpeg (LGPL build, dynamic): a separate plan | -- |
+| M9 | Native PC experience: display settings, VSync, custom frame caps, audio settings, controller remapping, button prompts and the other agreed PC improvements (docs/MILESTONES.md, "Roadmap: M9-M11") | documented only (2026-11-12); after the core architecture work |
+| M10 | Launcher and update management (docs/MILESTONES.md, "Roadmap: M9-M11") | documented only; after M9 |
+| M11 | Character library and community sharing (docs/MILESTONES.md, "Roadmap: M9-M11") | documented only; after M10 |
 
 ## 8. Architecture requirements (to be written into docs/NATIVE_PORT.md and CLAUDE.md at M1)
 
