@@ -191,6 +191,9 @@
 | `patches/ps3recomp/0146-Lifter-traps-code-excluded-from-the-lift-the-runtime.patch` | INDEP | keep |
 | `patches/ps3recomp/0147-build_spu_workloads-exclude-an-image.patch` | INDEP | keep |
 | `patches/ps3recomp/0148-Lifter-traps-inert-functions-an-excluded-library-s-s.patch` | INDEP | keep |
+| `patches/ps3recomp/0149-Census-counters-of-the-SPU-machinery-s-use-reported-.patch` | INDEP | keep |
+| `patches/ps3recomp/0150-cellPad-an-SDL-controller-update-of-50-ms-or-more-re.patch` | INDEP | keep |
+| `patches/ps3recomp/0151-cellPad-SDL-s-controllers-polled-on-a-thread-of-thei.patch` | INDEP | keep |
 | `port/CMakeLists.txt` | INDEP | keep |
 | `port/LICENSE.ps3recomp` | THIRD | keep: licence file beside it; listed in the README |
 | `port/assets/ui/DejaVuSans.ttf` | THIRD | keep: licence file beside it; listed in the README |
@@ -235,6 +238,7 @@
 | `port/native/dev_state.cpp` | INDEP | keep |
 | `port/native/dev_state.h` | INDEP | keep |
 | `port/native/edge_inflate.c` | INDEP | keep |
+| `port/native/gz_walk.h` | INDEP | keep |
 | `port/native/inflate.c` | INDEP | keep |
 | `port/native/inflate.h` | INDEP | keep |
 | `port/native/inflate_direct.cpp` | INDEP | keep |
@@ -291,6 +295,7 @@
 | `tests/native/bullet_cd_snapcheck.cpp` | INDEP | keep |
 | `tests/native/bullet_solver_snapcheck.cpp` | INDEP | keep |
 | `tests/native/find_state.cpp` | INDEP | keep |
+| `tests/native/gz_walk_check.cpp` | INDEP | keep |
 | `tests/native/inflate_check.py` | INDEP | keep |
 | `tests/native/inflate_test.c` | INDEP | keep |
 | `tests/native/openal_check.cpp` | INDEP | keep |
