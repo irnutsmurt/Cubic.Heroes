@@ -1,0 +1,194 @@
+From 44f029afe2d7f9acfc5fa3244a4013f4acf5774d Mon Sep 17 00:00:00 2001
+From: giteaguy <73799093+irnutsmurt@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 01:13:10 -0800
+Subject: [PATCH] sys_timer_usleep: every sleep under a millisecond waits on
+ the GCM delivery event
+
+The flip wait was not the only short-sleep poll: 3D Dot Game Heroes also waits
+for a flag its vblank handler sets, with usleep(300) between the looks, and at
+120 and 144 fps its main thread spun there instead (225,000 sleeps a minute).
+Every sleep under a millisecond now waits on the GCM delivery event and a
+high-resolution timer at its deadline: a vblank or a flip's completion runs
+the pump at once (the handler run, as at a syscall's entry) and the rest of
+the requested time is spun, as before; a thread in a flip wait keeps waiting
+through a delivery that did not complete its flip. A sleep no delivery
+interrupts ends with the timer, up to its granularity after the deadline --
+reported per call site. PS3_FLIP_WAIT=flip keeps only the flip waits
+(the first form), =spin spins every short sleep as before.
+---
+ runtime/syscalls/sys_timer.c | 114 +++++++++++++++++++++++++----------
+ 1 file changed, 82 insertions(+), 32 deletions(-)
+
+diff --git a/runtime/syscalls/sys_timer.c b/runtime/syscalls/sys_timer.c
+index 063d411..fdda2f5 100644
+--- a/runtime/syscalls/sys_timer.c
++++ b/runtime/syscalls/sys_timer.c
+@@ -135,16 +135,22 @@ static void write_be64(uint32_t addr, uint64_t val)
+  * r3 = microseconds
+  * -----------------------------------------------------------------------*/
+ #ifdef _WIN32
+-/* The flip wait. A title waiting for its flip polls cellGcmGetFlipStatus with a sleep of a few hundred us
+- * between the calls (Sony's samples: `while (cellGcmGetFlipStatus() != 0) sys_timer_usleep(200);`). A sleep under
+- * a millisecond spins to its deadline (below), so such a wait took a whole core for nothing -- 3D Dot Game
+- * Heroes' main thread spent two thirds of every 60 fps frame there. A thread whose last cellGcmGetFlipStatus
+- * answered WAITING sleeps instead on the GCM delivery event (ppu_gcm_wait_pump: set when a vblank or a flip's
+- * completion is pending) and a high-resolution timer at the deadline. When the event fires the pump runs at once
+- * -- the flip is marked done and the title's flip handler runs, as at a syscall's entry -- and the rest of the
+- * requested time is still slept: usleep never returns early. Only the flip wait changes; every other sleep keeps
+- * its exact deadline. PS3_FLIP_WAIT=spin: the spin, for comparison. Weak: the runtime also links without GCM. */
++/* Sleeps under a millisecond. A title paces itself with short sleeps between polls of something its GCM handlers
++ * change: Sony's samples wait for the flip with `while (cellGcmGetFlipStatus() != 0) sys_timer_usleep(200);`, and
++ * 3D Dot Game Heroes also waits for a flag its vblank handler sets, with usleep(300) between the looks. A sleep
++ * under a millisecond spun to its deadline (below), so such waits took a whole core: the game's main thread spent
++ * up to two thirds of every frame there, at every frame cap. Such a sleep now waits on the GCM delivery event
++ * (ppu_gcm_wait_pump: set when a vblank or a flip's completion is pending) and a high-resolution timer at the
++ * deadline. A delivery runs the pump at once -- the flip marked done, the title's vblank or flip handler run, as
++ * at a syscall's entry -- and the rest of the requested time is then spun, as before: usleep never returns early,
++ * and the title sees what its handler changed no later than with the spin. A thread whose last
++ * cellGcmGetFlipStatus answered WAITING keeps waiting through a delivery that did not complete its flip. A sleep
++ * no delivery interrupts ends with the timer, up to its granularity (half a millisecond here) after the deadline:
++ * the only change for a poll of something no GCM handler changes, measured per call site below.
++ * PS3_FLIP_WAIT=spin: every short sleep spun, as before; =flip: only the flip waits slept (the first form).
++ * Weak: the runtime also links without GCM. */
+ void* ppu_gcm_wait_pump(void (**pump)(void));   /* its fallback: sys_semaphore.c */
++#if defined(_MSC_VER)
+ int ppu_gcm_flip_poll_take(void);
+ int ppu_gcm_flip_poll_take_absent(void) { return 0; }
+ #pragma comment(linker, "/alternatename:ppu_gcm_flip_poll_take=ppu_gcm_flip_poll_take_absent")
+@@ -154,38 +160,73 @@ int ppu_gcm_flip_done_absent(void) { return 1; }
+ void ppu_gcm_flip_wait_ended(int how);
+ void ppu_gcm_flip_wait_ended_absent(int how) { (void)how; }
+ #pragma comment(linker, "/alternatename:ppu_gcm_flip_wait_ended=ppu_gcm_flip_wait_ended_absent")
++#else   /* clang and gcc: weak fallbacks, which cellGcmSys.c's definitions override */
++__attribute__((weak)) int ppu_gcm_flip_poll_take(void) { return 0; }
++__attribute__((weak)) int ppu_gcm_flip_done(void) { return 1; }
++__attribute__((weak)) void ppu_gcm_flip_wait_ended(int how) { (void)how; }
++#endif
+ 
+ #ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+ #define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+ #endif
+-static volatile LONG64 s_fw_waits, s_fw_flip, s_fw_timer, s_fw_late, s_fw_tail_us, s_fw_spun;
++static volatile LONG64 s_fw_waits, s_fw_flip, s_fw_event, s_fw_timer, s_fw_late, s_fw_tail_us, s_fw_spun;
++/* by call site (the guest's lr), the first eight seen */
++#define FW_SITES 8
++static struct { volatile LONG lr; volatile LONG64 n, by_timer, by_event, over_us, over_max; } s_fw_site[FW_SITES];
++
++static void fw_site_note(uint32_t lr, int by_timer, int64_t over_us)
++{
++    for (int i = 0; i < FW_SITES; i++) {
++        LONG cur = s_fw_site[i].lr;
++        if (!cur) cur = InterlockedCompareExchange(&s_fw_site[i].lr, (LONG)lr, 0) ? s_fw_site[i].lr : (LONG)lr;
++        if ((uint32_t)cur != lr) continue;
++        InterlockedIncrement64(&s_fw_site[i].n);
++        if (by_timer) {
++            InterlockedIncrement64(&s_fw_site[i].by_timer);
++            if (over_us > 0) {
++                InterlockedAdd64(&s_fw_site[i].over_us, over_us);
++                if (over_us > s_fw_site[i].over_max) s_fw_site[i].over_max = over_us;
++            }
++        } else {
++            InterlockedIncrement64(&s_fw_site[i].by_event);
++        }
++        return;
++    }
++}
+ 
+ /* also called by a port whose test stop ends the process without atexit */
+ void sys_timer_flip_wait_report(void)
+ {
+     if (!s_fw_waits && !s_fw_spun) return;
+-    fprintf(stderr, "[flip-wait] %lld sleeps in a flip wait slept, not spun: %lld ended by the flip's completion "
+-            "(the rest of the sleep then kept: %.1f ms in all), %lld by the timer, %lld of those late (the flip "
+-            "completed and no wake came: the delivery event taken by another waiter); %lld sleeps spun "
+-            "(PS3_FLIP_WAIT=spin)\n", (long long)s_fw_waits, (long long)s_fw_flip, s_fw_tail_us / 1000.0,
+-            (long long)s_fw_timer, (long long)s_fw_late, (long long)s_fw_spun);
++    fprintf(stderr, "[flip-wait] %lld sleeps under 1 ms slept, not spun: %lld ended by the flip's completion in a "
++            "flip wait, %lld by another delivery (its handler run at once), the rest of the sleep then kept (%.1f ms "
++            "in all); %lld by the timer, %lld of those flip waits late (the flip completed and no wake came: the "
++            "delivery event taken by another waiter); %lld sleeps spun (PS3_FLIP_WAIT)\n", (long long)s_fw_waits,
++            (long long)s_fw_flip, (long long)s_fw_event, s_fw_tail_us / 1000.0, (long long)s_fw_timer,
++            (long long)s_fw_late, (long long)s_fw_spun);
++    for (int i = 0; i < FW_SITES && s_fw_site[i].lr; i++)
++        fprintf(stderr, "[flip-wait]   the sleeps at lr 0x%08X: %lld, %lld ended by a delivery, %lld by the timer "
++                "(past their deadline by %.0f us on average, %lld us at most)\n", (uint32_t)s_fw_site[i].lr,
++                (long long)s_fw_site[i].n, (long long)s_fw_site[i].by_event, (long long)s_fw_site[i].by_timer,
++                s_fw_site[i].by_timer ? (double)s_fw_site[i].over_us / (double)s_fw_site[i].by_timer : 0.0,
++                (long long)s_fw_site[i].over_max);
+ }
+ 
+-/* 1: slept; 0: not a flip wait, or no event or timer here (the caller spins as before). */
+-static int flip_wait_sleep(uint64_t usec)
++/* 1: slept; 0: the caller spins to the deadline as before (a flip already done, PS3_FLIP_WAIT, no event or timer). */
++static int short_sleep(uint64_t usec, uint32_t lr)
+ {
+-    static int mode = -1;   /* 1 sleep, 0 spin */
++    static int mode = -1;   /* 2 every short sleep, 1 the flip waits only, 0 none */
+     if (mode < 0) {
+         const char* e = getenv("PS3_FLIP_WAIT");
+-        mode = !(e && !strcmp(e, "spin"));
++        mode = !e ? 2 : !strcmp(e, "spin") ? 0 : !strcmp(e, "flip") ? 1 : 2;
+         atexit(sys_timer_flip_wait_report);
+     }
+-    if (!ppu_gcm_flip_poll_take()) return 0;
+-    if (ppu_gcm_flip_done()) {   /* completed already (the syscall's entry pumped): the exact sleep */
++    const int flip = ppu_gcm_flip_poll_take();
++    if (flip && ppu_gcm_flip_done()) {   /* completed already (the syscall's entry pumped): the exact sleep */
+         ppu_gcm_flip_wait_ended(3);
+         return 0;
+     }
+-    if (!mode) {
++    if (!mode || (mode == 1 && !flip)) {
+         InterlockedIncrement64(&s_fw_spun);
+         return 0;
+     }
+@@ -210,18 +251,27 @@ static int flip_wait_sleep(uint64_t usec)
+     HANDLE hs[2] = { ev, t_timer };
+     for (;;) {
+         if (WaitForMultipleObjects(2, hs, FALSE, INFINITE) != WAIT_OBJECT_0) {   /* the timer */
++            QueryPerformanceCounter(&now);
+             InterlockedIncrement64(&s_fw_timer);
+-            if (ppu_gcm_flip_done()) InterlockedIncrement64(&s_fw_late);
+-            ppu_gcm_flip_wait_ended(2);
++            if (flip) {
++                if (ppu_gcm_flip_done()) InterlockedIncrement64(&s_fw_late);
++                ppu_gcm_flip_wait_ended(2);
++            }
++            fw_site_note(lr, 1, (int64_t)((now.QuadPart - deadline) * 1000000 / s_qpc_freq.QuadPart));
+             return 1;
+         }
+-        pump();   /* a vblank or the flip's completion: delivered now, on this thread */
+-        if (!ppu_gcm_flip_done()) continue;   /* a vblank only: the flip still to come */
++        pump();   /* a vblank or a flip's completion: delivered now, on this thread */
++        if (flip && !ppu_gcm_flip_done()) continue;   /* the flip wait: a vblank only, the flip still to come */
+         CancelWaitableTimer(t_timer);
+-        InterlockedIncrement64(&s_fw_flip);
+-        ppu_gcm_flip_wait_ended(1);
+-        /* The rest of the requested time, as lv2 sleeps the whole interval: at most the sleep's length (200 us
+-         * in the samples' loop), once a frame, below the timer's granularity, so spun. */
++        if (flip) {
++            InterlockedIncrement64(&s_fw_flip);
++            ppu_gcm_flip_wait_ended(1);
++        } else {
++            InterlockedIncrement64(&s_fw_event);
++        }
++        fw_site_note(lr, 0, 0);
++        /* The rest of the requested time, as lv2 sleeps the whole interval: at most the sleep's length, below the
++         * timer's granularity, so spun. */
+         QueryPerformanceCounter(&now);
+         if (now.QuadPart < deadline)
+             InterlockedAdd64(&s_fw_tail_us, (LONG64)((deadline - now.QuadPart) * 1000000 / s_qpc_freq.QuadPart));
+@@ -356,8 +406,8 @@ int64_t sys_timer_usleep(ppu_context* ctx)
+         } else {
+             Sleep((DWORD)(usec / 1000));
+         }
+-    } else if (usec > 0 && flip_wait_sleep(usec)) {
+-        /* a flip wait: slept until the flip completed and the time was up (flip_wait_sleep) */
++    } else if (usec > 0 && short_sleep(usec, (uint32_t)ctx->lr)) {
++        /* slept: on the GCM delivery event and a timer (short_sleep) */
+     } else if (usec > 0) {
+         /* Sub-millisecond sleep. Sleep()/waitable timers round up to the
+          * ~0.5-1 ms scheduler quantum, far too coarse for a guest that relies
+-- 
+2.56.0.windows.3
+

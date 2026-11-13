@@ -1004,3 +1004,50 @@ What it shows:
 - **SPURS still runs a kernel thread** (0.4-0.8% of a core) for the physics manager's two instances, which the
   game's own set-up creates and no task uses; its three worker threads stay idle. Their retirement (section 10.2)
   removes it.
+
+### 10.4 The main thread's waits, and SPURS's threads (2026-11-13; rel44-rel46)
+
+**The short sleeps** (ps3recomp patches 0152 and 0154; rel44, then rel46). The main thread paces itself with two
+loops in func_00029BD8 [S]: it waits for a flag its vblank handler sets (0x00029C20, sys_timer_usleep(300) between
+the looks), then for the previous frame's flip (0x00029CC0, the samples' cellGcmGetFlipStatus loop,
+sys_timer_usleep(200)). The runtime spun every sleep under a millisecond to its deadline, so the main thread took a
+whole core at every frame cap. Such a sleep now waits on the GCM delivery event (set when a vblank or a flip's
+completion is pending) and a high-resolution timer: a delivery runs the pump at once -- the handler run, the flip
+marked done, as at a syscall's entry -- and the rest of the requested time is still spun, so a sleep never ends
+early and the game sees its handler's change no later than before; a thread in the flip loop keeps waiting through
+a vblank that did not complete its flip. A sleep no delivery interrupts ends with the timer, about 0.3-0.4 ms past
+its deadline (the timer's granularity here is 0.5 ms). Across every drive, the save flows, the quit and the movie,
+the only sleeps under a millisecond are the frame pacing's three call sites (0x00029BF4, 0x00029C20, 0x00029CC0) and
+one during the quit. PS3_FLIP_WAIT=spin restores the spin; =flip the flip loop alone (rel44's form). Reported at
+exit: how the sleeps ended, by call site, the missed wake-ups, and the time from a flip's completion to the game's
+next frame (its next cellGcmResetFlipStatus).
+
+The same binary against itself (rel46; PS3_FLIP_WAIT=spin the other arm; uncapped and capped at 30, 60, 120 and 144
+fps; two rounds rotated; build/r8/m6ss_run.sh) [M]:
+
+| Cap | Main thread, slept / spun | Process (cores), river | River p99 (ms) | Fields p99 (ms) |
+|---|---|---|---|---|
+| 30 | 16-20% / 25-26% | 0.64-0.71 / 0.70-0.76 | 33.51-33.53 / 34.01-34.14 | 33.52-33.73 / 33.96-34.25 |
+| 60 | 28-38% / 99% | 0.86-0.91 / 1.50-1.53 | 16.85-16.86 / 17.22-17.25 | 16.88-17.02 / 17.22-17.26 |
+| 120 | 54-65% / 99% | 1.31-1.33 / 1.68-1.73 | 8.69-8.70 / 9.32-9.35 | 8.69 / 9.24-9.37 |
+| 144 | 64-76% / 99% | 1.59-1.61 / 1.83-1.85 | 7.12-7.18 / 7.46-7.47 | 7.04 / 7.40-7.43 |
+| none | 99% / 99% | 1.88-1.93 / 1.92 | 6.42-6.54 / 6.49-6.69 | 5.69 / 5.60-5.61 |
+
+- Every cap holds, with better pacing: p99, p99.9 and the worst frame lower at 30-144 (the river at 120: the worst
+  9.9-10.3 ms against 10.7-16.3).
+- The game's own work a frame is 0.2-0.3 ms longer at 120 and 144 after a sleep (a core's caches and clock, cold
+  after sleeping) -- inside every frame budget.
+- Uncapped the main thread is busy all the time and the frame rates overlap (river 209.8-214.4 against
+  212.2-212.6 fps, fields 247.0-248.0 against 246.7-249.3); the fields' p99.9 0.4 ms higher (7.78-8.16 against
+  7.32-7.41 ms), from the waking.
+- The flip's completion to the next frame (input delay at the frame's start): at 60, 105-125 us on average against
+  154-169 us spun (rel44's runs); at 120 and 144 unchanged, 90-110 us. Missed wake-ups (a completion while another
+  waiter took the delivery event, caught by the timer within half a millisecond): 1-21 a 150 s run.
+- The validation set on rel46 (the memory test, 11 drives, the menu's quit, the movie, seven save flows): no crash,
+  trap or fatal diagnostic; quitting while the main thread sleeps in the flip loop exits 0.
+
+**SPURS's threads** (patch 0153; rel45). The physics set-up's two instances made a kernel thread (a pass every
+millisecond, 0.4-0.8% of a core) and three policy-module threads that never ran. An instance's threads now start
+with its first workload, task or job chain. In every native run none started (39 threads where there were 43); the
+water and waver check modes, which create SPURS tasks, start them on demand (the water check 2,462 of 2,462 steps
+equal, the waver 1,151 of 1,158 frames, the known class). PS3_SPURS_EAGER=1 starts them at initialisation.
