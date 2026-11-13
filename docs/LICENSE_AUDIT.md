@@ -9,6 +9,7 @@
 | `config/audio_hooks.json` | INDEP | keep |
 | `config/deps.sha256` | INDEP | keep |
 | `config/dev_capture_observers.json` | INDEP | keep |
+| `config/excluded_code.json` | INDEP | keep |
 | `config/game_version.json` | INDEP | keep |
 | `config/insn_patches.json` | INDEP | keep |
 | `config/r6_native_observers.json` | INDEP | keep |
@@ -21,6 +22,7 @@
 | `docs/AUDIO.md` | INDEP | keep |
 | `docs/BULLET_NATIVE.md` | DOC-GAME | keep: facts about the game's behaviour and the project's results |
 | `docs/FEASIBILITY.md` | INDEP | keep |
+| `docs/FFMPEG_MIGRATION_PLAN.md` | INDEP | keep |
 | `docs/HANDOFF.md` | INDEP | keep |
 | `docs/LICENSE_AUDIT.md` | INDEP | keep |
 | `docs/MILESTONES.md` | INDEP | keep |
@@ -186,6 +188,9 @@
 | `patches/ps3recomp/0143-Save-data-screen-composed-in-cached-memory-copied-on.patch` | INDEP | keep |
 | `patches/ps3recomp/0144-Save-data-dialog-the-4-s-fallback-only-headless-test.patch` | INDEP | keep |
 | `patches/ps3recomp/0145-cellPad-a-dialog-s-last-press-stays-the-dialog-s-unt.patch` | INDEP | keep |
+| `patches/ps3recomp/0146-Lifter-traps-code-excluded-from-the-lift-the-runtime.patch` | INDEP | keep |
+| `patches/ps3recomp/0147-build_spu_workloads-exclude-an-image.patch` | INDEP | keep |
+| `patches/ps3recomp/0148-Lifter-traps-inert-functions-an-excluded-library-s-s.patch` | INDEP | keep |
 | `port/CMakeLists.txt` | INDEP | keep |
 | `port/LICENSE.ps3recomp` | THIRD | keep: licence file beside it; listed in the README |
 | `port/assets/ui/DejaVuSans.ttf` | THIRD | keep: licence file beside it; listed in the README |
@@ -210,7 +215,6 @@
 | `port/native/audio/al_stream.cpp` | INDEP | keep |
 | `port/native/audio/al_stream.h` | INDEP | keep |
 | `port/native/audio/native_sound.h` | INDEP | keep |
-| `port/native/audio/native_sound_absent.cpp` | INDEP | keep |
 | `port/native/audio/sound_list.cpp` | INDEP | keep |
 | `port/native/audio/sound_list.h` | INDEP | keep |
 | `port/native/audio/sound_manager.cpp` | INDEP | keep |
@@ -426,6 +430,7 @@
 | `tools/binsyms.py` | INDEP | keep |
 | `tools/boundary_check.py` | INDEP | keep |
 | `tools/build_deps.py` | INDEP | keep |
+| `tools/class_census_static.py` | INDEP | keep |
 | `tools/cmake/glslang_doc_O0.cmake` | INDEP | keep |
 | `tools/edit_import.py` | INDEP | keep |
 | `tools/fix_functions.py` | INDEP | keep |
@@ -483,15 +488,18 @@
 | `tools/reverb_tail.py` | INDEP | keep |
 | `tools/save_diff.py` | INDEP | keep |
 | `tools/save_ui_preview.c` | INDEP | keep |
+| `tools/sdl_device_poke.py` | INDEP | keep |
 | `tools/self_decrypt.py` | INDEP | keep |
 | `tools/self_update.py` | INDEP | keep |
 | `tools/setup_pipeline.py` | INDEP | keep |
 | `tools/shortcuts.py` | INDEP | keep |
 | `tools/sound_inventory.py` | INDEP | keep |
+| `tools/spu_census_static.py` | INDEP | keep |
 | `tools/spu_native/water.py` | SPUGEN | keep: generates the water's and the waver's tasks from the player's lift; nothing of an image in it |
 | `tools/spu_native/waver.py` | SPUGEN | keep: generates the water's and the waver's tasks from the player's lift; nothing of an image in it |
 | `tools/spu_native_task.cpp.in` | SPUGEN | keep: generates the water's and the waver's tasks from the player's lift; nothing of an image in it |
 | `tools/spu_trace.py` | INDEP | keep |
 | `tools/symbolize.py` | INDEP | keep |
+| `tools/thread_cpu.py` | INDEP | keep |
 | `tools/version.py` | INDEP | keep |
 | `tools/zig_build.py` | INDEP | keep |
