@@ -198,6 +198,7 @@
 | `patches/ps3recomp/0153-cellSpurs-an-instance-s-threads-start-with-its-first.patch` | INDEP | keep |
 | `patches/ps3recomp/0154-sys_timer_usleep-every-sleep-under-a-millisecond-wai.patch` | INDEP | keep |
 | `patches/ps3recomp/0155-Lifter-PPU_STORES_NO_SPU_COH-stores-without-the-SPU-.patch` | INDEP | keep |
+| `patches/ps3recomp/0156-cellPad-rumble-diagnostics-a-refused-send-reported-P.patch` | INDEP | keep |
 | `port/CMakeLists.txt` | INDEP | keep |
 | `port/LICENSE.ps3recomp` | THIRD | keep: licence file beside it; listed in the README |
 | `port/assets/ui/DejaVuSans.ttf` | THIRD | keep: licence file beside it; listed in the README |
@@ -359,6 +360,8 @@
 | `tests/scenarios/owner_onward_r4.drive` | INDEP | keep |
 | `tests/scenarios/owner_play.drive` | INDEP | keep |
 | `tests/scenarios/owner_play_m4.drive` | INDEP | keep |
+| `tests/scenarios/owner_play_m6.drive` | INDEP | keep |
+| `tests/scenarios/owner_play_m6r.drive` | INDEP | keep |
 | `tests/scenarios/owner_play_r8.drive` | INDEP | keep |
 | `tests/scenarios/owner_warp_r7.drive` | INDEP | keep |
 | `tests/scenarios/reverb_lab.drive` | INDEP | keep |

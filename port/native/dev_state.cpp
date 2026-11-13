@@ -109,6 +109,7 @@ extern "C" void water_task_report(void);
 extern "C" void ppu_promo_report(void);
 extern "C" void dev_waver_report(void);
 extern "C" void waver_game_report(void);
+extern "C" void cellPad_dev_rumble_pulse(unsigned ms);   // ps3recomp cellPad.c: a tester's rumble pulse
 extern "C" void cellGcm_flip_wake_report(void);     // ps3recomp cellGcmSys.c (the flip wait's wake-up)
 extern "C" void sys_timer_flip_wait_report(void);   // ps3recomp sys_timer.c (Windows: how flip waits slept)
 
@@ -741,7 +742,7 @@ void keys_loop()
     if (!xi) xi = LoadLibraryA("xinput9_1_0.dll");
     const GetStateFn get_state = xi ? (GetStateFn)(void*)GetProcAddress(xi, "XInputGetState") : nullptr;
     const WORD sticks = XINPUT_GAMEPAD_LEFT_THUMB | XINPUT_GAMEPAD_RIGHT_THUMB;
-    bool f8 = false, f7 = false, pad = false;
+    bool f8 = false, f7 = false, pad = false, f9 = false;
     unsigned n = 0;
     for (;;) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -787,7 +788,7 @@ void keys_loop()
                         (double)(int64_t)(ps3_ft_now() - g_ps3_ft.base) / 1e9);
             }
         }
-        if (!our_window_focused()) { f8 = f7 = pad = false; continue; }
+        if (!our_window_focused()) { f8 = f7 = pad = f9 = false; continue; }
         const bool f8_now = (GetAsyncKeyState(VK_F8) & 0x8000) != 0, f7_now = (GetAsyncKeyState(VK_F7) & 0x8000) != 0;
         bool pad_now = false;
         for (DWORD u = 0; get_state && u < 4 && !pad_now; u++) {
@@ -797,7 +798,17 @@ void keys_loop()
         if (f8_now && !f8) mark(n, 1);
         if (pad_now && !pad) mark(n, 2);
         if (f7_now && !f7) ps3_osd_fps_set_mode((ps3_osd_fps_mode() + 1) % 3);
-        f8 = f8_now; f7 = f7_now; pad = pad_now;
+        const bool f9_now = (GetAsyncKeyState(VK_F9) & 0x8000) != 0;
+        if (f9_now && !f9) {
+            // the game's vibration setting: the byte its vibrate function (func_00035228) tests, at its pad
+            // manager (the word at 0x01021CE4: TOC 0x01028658 - 0x6974) + 0x458; nonzero: on
+            const uint32_t mgr = rd32(0x01021CE4u);
+            const int on = mgr ? (int)vm_base[mgr + 0x458u] : -1;
+            fprintf(stderr, "[dev-keys] F9: rumble test pulse; the game's vibration setting %s (byte %d)\n",
+                    on < 0 ? "not readable yet" : on ? "on" : "off", on);
+            cellPad_dev_rumble_pulse(600);
+        }
+        f8 = f8_now; f7 = f7_now; pad = pad_now; f9 = f9_now;
     }
 }
 
@@ -1074,7 +1085,8 @@ void dev_state_init()
     const char* k = getenv("DOTHEROES_DEV_KEYS");
     if (k && *k == '1') {
         std::thread(keys_loop).detach();
-        fprintf(stderr, "[dev-keys] F8 or L3+R3: mark a hitch; F7: frame-rate readout off / text / graph\n");
+        fprintf(stderr, "[dev-keys] F8 or L3+R3: mark a hitch; F7: frame-rate readout off / text / graph; F9: a rumble "
+                "test pulse\n");
     }
 #endif
 }
