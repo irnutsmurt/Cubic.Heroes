@@ -992,8 +992,11 @@ What it shows:
 - **The main thread uses a whole core at every cap.** Its own work is 4-5.6 ms a frame; the rest is the game's
   frame wait at 0x00029CC0, which calls sys_timer_usleep for about 200 us some 3,300 times a second, and the
   runtime's usleep spins below 1 ms (sys_timer.c: a QPC deadline, SwitchToThread in the loop) -- 40 s of the 60 s
-  window at 60 fps. The next M6 candidate: that wait made a sleep on what it polls for (the evidence first: what
-  the loop reads, who writes it), measured by these same runs. Not a correctness issue; a core's worth of power and
+  window at 60 fps. The loop [S] (func_00029BD8) is the flip wait of Sony's samples: cellGcmGetFlipStatus
+  (NID 0x72A577CE) until it returns 0, sys_timer_usleep(200) between the calls, then cellGcmResetFlipStatus
+  (0xB2E761D4) -- the main thread waiting for its previous frame's flip. The next M6 candidate: that wait made a
+  sleep on the flip's completion (the runtime's flip status and the event that clears it; a hook at the loop or the
+  status call), measured by these same runs. Not a correctness issue; a core's worth of power and
   heat, and a core taken from the other threads on a machine with few.
 - **SPURS still runs a kernel thread** (0.4-0.8% of a core) for the physics manager's two instances, which the
   game's own set-up creates and no task uses; its three worker threads stay idle. Their retirement (section 10.2)
