@@ -1,6 +1,8 @@
 # M8: the movies through FFmpeg -- a plan for review
 
-**Status: approved by the owner 2026-11-12 (the architecture); M8.0 begun 2026-11-13 (section 2.1).** The owner's requirement (CLAUDE.md, "Architecture
+**Status: approved by the owner 2026-11-12 (the architecture); M8.0 begun 2026-11-13 (section 2.1); M8.1 done
+2026-11-13 on Windows (section 6.1; the Linux libraries are built, their run-time validation is outstanding with
+the rest of Linux's).** The owner's requirement (CLAUDE.md, "Architecture
 requirements"; docs/NATIVE_PORT.md section 1): the game's video is decoded by FFmpeg, dynamically linked under the
 LGPL; Bink's implementation is not executed and not in anything this project distributes; the movies are the
 player's own files, read as they are (no conversion, no converted copies, nothing of them distributed); the
@@ -24,8 +26,9 @@ no error in the feasibility study, docs/FEASIBILITY.md section 4]:
 | PlayDemoMovieUS.bik | 277 MB | 3,465 | 115.5 s | 48 kHz stereo, Bink audio (DCT) | the attract mode's demo [L] |
 | CreditMovie_eng.bik | 518 MB | 7,860 | 262.0 s | 44.1 kHz stereo, Bink audio (DCT) | the ending's credits [I] |
 
-All are Bink 1, version i (BIKi), 1280x720, **30 frames a second exactly** (the header's 30/1; FEASIBILITY.md's
-29.97 is corrected here), and **each has one keyframe, its first frame**: a movie can be played from its start
+All are Bink 1, version i (BIKi), 1280x720, **10000000/333333 frames a second** (30.00003: the header's rate, read
+byte by byte and by FFmpeg's demuxer in M8.1; FEASIBILITY.md's 29.97 and this plan's earlier "30/1" are corrected
+here -- the lengths above are rounded), and **each has one keyframe, its first frame**: a movie can be played from its start
 and stopped, not entered in the middle -- skipping is closing. The title movie and the opening are silent: their
 music is the game's own (the sound manager, OpenAL Soft since M4). The game's movie list (Movie.lua.eu) names the
 files.
@@ -86,8 +89,9 @@ Next: the chain from the manager to Bink's API, Bink's extent, then the run-time
 - **Reading** [design]: FFmpeg's Bink demuxer (libavformat) reads the player's .bik through a custom I/O context
   on the runtime's file access (the disc's folder, as the game's own file opens map it) -- the file as it is, read
   ahead on the decoder's thread. Nothing converted, nothing cached to disk.
-- **Decoding**: libavcodec's binkvideo (planar YUV 4:2:0, with the alpha plane where a file has one -- these five
-  have none [M: the video flags]) and binkaudio_dct (binkaudio_rdft for completeness), on a decoder thread of the
+- **Decoding**: libavcodec's Bink video decoder (configure's name `bink`, the codec binkvideo; planar YUV 4:2:0,
+  with the alpha plane where a file has one -- these five have none [M: the video flags; M8.1: every frame
+  yuv420p]) and binkaudio_dct (binkaudio_rdft for completeness), on a decoder thread of the
   movie's own; three or four decoded frames ahead, so the game's thread never waits for a decode except when the
   frame due is not ready (then the previous frame stays).
 - **Video on Vulkan**: the Y, U and V planes uploaded as textures and converted to RGB in a shader at the point
@@ -101,8 +105,12 @@ Next: the chain from the manager to Bink's API, Bink's extent, then the run-time
   streamer: port/native/audio/al_stream.cpp), at the file's rate (44.1 or 48 kHz; OpenAL Soft resamples), with
   the game's volume for it (from the trace: the sound track's volume, the options' levels).
 - **The clock and A/V sync**: for a movie with sound, the sound's own position is the clock (OpenAL Soft's
-  played-sample position with its latency, AL_SOFT_source_latency); the frame due is position x 30. For a silent
-  movie, a steady clock from its start. The game's "is the next frame due?" calls answer from that clock; a
+  played-sample position with its latency, AL_SOFT_source_latency); the frame due is position x 10000000/333333
+  (the header's rate, not 30). For a silent movie, a steady clock from its start. [M8.1, M] The sound was made
+  to the picture's length: the declared samples last 115.49990 s against the demo's 3,465 frames' 115.49988 s,
+  261.99975 s against the credits' 261.99974 s. Every sound packet decodes to exactly the samples it declares
+  but the last, whose final transform block FFmpeg decodes whole (965 and 371 samples more, 20 and 8 ms): the
+  player plays the declared samples, so the sound ends with the picture. The game's "is the next frame due?" calls answer from that clock; a
   pause (the game's, or the system's) holds the clock and the sound together.
 - **Timing at every frame-rate cap**: the movie advances by its clock, not by the game's calls: at 60, 120, 144
   and uncapped the same frame is shown for 2, 4, 4.8 and more game frames; at 30 (the game's own cap) one each. A
@@ -119,10 +127,13 @@ Next: the chain from the manager to Bink's API, Bink's extent, then the run-time
 ## 4. Licensing and the build
 
 - **FFmpeg**, a pinned release, fetched from its official source with the archive's SHA-256 recorded (the owner
-  approves the download first, as for OpenAL Soft), built by tools/build_deps.py as shared libraries:
-  `--disable-gpl --disable-nonfree --disable-everything --enable-shared --disable-static --disable-programs
-  --disable-doc --disable-network --enable-demuxer=bink --enable-decoder=binkvideo,binkaudio_dct,binkaudio_rdft`
-  (avformat, avcodec, avutil: about 2-4 MB) [I: the size, to be measured]. The libraries go beside the game and
+  approves the download first, as for OpenAL Soft), built by tools/build_deps.py (tools/build_ffmpeg.py) as
+  shared libraries. As built (M8.1, section 6.1): `--disable-everything --disable-autodetect --disable-asm
+  --disable-programs --disable-doc --disable-network --disable-avdevice --disable-avfilter --disable-swscale
+  --disable-swresample --enable-shared --disable-static --enable-demuxer=bink
+  --enable-decoder=bink,binkaudio_dct,binkaudio_rdft` (GPL and non-free parts are off by default; the video
+  decoder's configure name is `bink`) -- avutil, avcodec, avformat: 2.0 MB on Windows, 1.4 MB on Linux
+  [M]. The libraries go beside the game and
   are loaded at run time by full path (as OpenAL Soft is: port/native/audio/al_api.cpp), so a player can replace
   them; the licence (LGPL-2.1-or-later for this configuration), the source location, the version and the
   configure line ship with them, and docs/LICENSE_AUDIT.md and the README list them.
@@ -163,6 +174,53 @@ Against rel41 (the lifted Bink, its sound through cellAudio), the developer's lo
 | M8.2 | The native movie player behind a switch (the lifted Bink the default) | the validation of section 5 except the owner's viewing |
 | M8.3 | The owner's viewing; the native player the default | the owner's acceptance |
 | M8.4 | Bink excluded from the lift (traps), cellAudio's initialisation and SDL2's audio retired | the validation set, the install test, no trap reached, no cellAudio call |
+
+### 6.1 M8.1: FFmpeg built, loaded and decoding (2026-11-13) [M]
+
+- **The source**: FFmpeg 9.0.2 from the project's official GitHub mirror (ffmpeg.org refused the build host's
+  connections that day), the tag n9.0.2 = commit 946fcce07b6dcd0331c8cc609192aeff5e1924f8, the archive's
+  sha256 6e374ed6...27e9 pinned in config/deps.sha256. Used as it is.
+- **The build** (tools/build_ffmpeg.py, called by tools/build_deps.py): FFmpeg's own configure (section 4's line)
+  under Git Bash on Windows, cross-compiling with the bundled Zig for x86_64-windows-gnu and
+  x86_64-linux-gnu.2.31; without make, the driver compiles the objects configure selects (186: avutil 93,
+  avcodec 57, avformat 36) with configure's flags and links each library with FFmpeg's version script (Windows:
+  the .def its makedef would derive; Linux: soname, symbol versions LIBAVUTIL_61 ..., runpath $ORIGIN,
+  stripped as `make install` does). One correction to configure's output, Linux only, listed in the shipped
+  notice: config.h's HAVE_SYSCTL set to 0 (configure's link-only probe finds glibc's compatibility symbol;
+  the header is gone since glibc 2.32; the path is never taken on Linux). No build path is in the libraries:
+  the tools are named, not given by path, in the configure line avutil embeds, and `__FILE__` is mapped to
+  FFmpeg-n9.0.2/ (checked: no hit for the folder, a home or user path in any of the six libraries).
+- **The libraries**: avutil-61.dll 0.93 MB, avcodec-63.dll 0.59 MB, avformat-63.dll 0.49 MB (624/153/153
+  exports, the same on both platforms); libavutil.so.61 0.69 MB, libavcodec.so.63 0.42 MB, libavformat.so.63 0.25 MB (needing libc, libm,
+  libpthread; glibc 2.29 at most). av_version_info "n9.0.2", avcodec_license "LGPL version 2.1 or later".
+- **Loaded the game's way**: port/native/movie/ff_api.cpp loads the three by full path from the game's folder
+  (Windows) or its lib/ (Linux), in dependency order, every function the player needs looked up, and refuses a
+  library of another major version (the ABI its headers declare). M8.2's player uses it.
+- **What ships** (tools/zig_build.py's prebuilt folder, tools/setup_pipeline.py's install, tools/make_bundle.py's
+  download): the libraries beside the game with FFmpeg-NOTICE.txt (the source, its sha256 and commit, the
+  configure line, the correction, how to rebuild) and FFmpeg-LGPL-2.1.txt; in the setup's licenses/ the notice,
+  the licence and licenses/source/: the release archive itself (FFmpeg-n9.0.2.tar.gz, the pinned sha256) and
+  FFmpeg-build/ (the driver, config.h and config_components.h as built). tools/boundary_check.py requires all
+  of them in a bundle that ships the libraries (tests/test_boundary_check.py), and the install test checks them
+  beside the game.
+- **Open, for the owner**: the boundary check refuses two files inside FFmpeg's archive,
+  tests/ref/lavf/peak.wav and peak_only.wav -- FFmpeg's FATE references (three text lines each: an md5, a size,
+  a CRC), refused by the .wav extension alone. Nothing else in FFmpeg's tree is refused. Either the check takes
+  an exception pinned to those two files' exact bytes inside the pinned archive, or the shipped source leaves
+  them out (as OpenAL Soft's HRTF file is, the notice saying so). CLAUDE.md forbids weakening a rule to clear a
+  finding, so neither is done until the owner decides; until then make_bundle.py refuses to archive a bundle.
+- **The standalone test** (tests/native/ffmpeg_decode_check.sh, on the player's own data/movie): each file read
+  through an I/O context of the test's own (as the player will read it), every packet demuxed, every frame and
+  sound sample decoded, the decoders flushed. **All five passed**: every frame decoded (2,160, 2,160, 4,620,
+  3,465, 7,860, as their headers say), one keyframe each, 1280x720 yuv420p, the header's 10000000/333333; every
+  sound packet decoded to its declared samples but the last (section 3, the clock); no warning from FFmpeg;
+  each movie read once, front to back, without a seek. A frame's hash (FNV-1a over its planes) is kept per frame
+  (build/m8/*.frames.txt) for M8.2's comparisons; two runs gave the same hashes for every frame and the same
+  sound. Distinct frames: the opening holds 1,617 different pictures in 4,620 frames, the credits 6,301 in
+  7,860 (still pictures held).
+- **The cost** (one thread, C only, no assembly; the owner's PC): 1.91-3.40 ms a frame on average, p99 5.4-7.6
+  ms, the worst 11.3 ms, against the 33.3 ms a frame lasts; the sound 124 ms for the demo's 115.5 s and 291 ms
+  for the credits' 262 s.
 
 ## 7. Risks and open questions
 

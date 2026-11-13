@@ -253,6 +253,8 @@
 | `port/native/memtest_bare.cpp` | INDEP | keep |
 | `port/native/memtest_checked.cpp` | INDEP | keep |
 | `port/native/memtest_stores.cpp` | INDEP | keep |
+| `port/native/movie/ff_api.cpp` | INDEP | keep |
+| `port/native/movie/ff_api.h` | INDEP | keep |
 | `port/native/phys_direct.cpp` | INDEP | keep |
 | `port/native/phys_direct.h` | INDEP | keep |
 | `port/native/render/ppfx_bridge.cpp` | INDEP | keep |
@@ -299,6 +301,8 @@
 | `tests/lap_ab.py` | INDEP | keep |
 | `tests/native/bullet_cd_snapcheck.cpp` | INDEP | keep |
 | `tests/native/bullet_solver_snapcheck.cpp` | INDEP | keep |
+| `tests/native/ffmpeg_decode_check.cpp` | INDEP | keep |
+| `tests/native/ffmpeg_decode_check.sh` | INDEP | keep |
 | `tests/native/find_state.cpp` | INDEP | keep |
 | `tests/native/gz_walk_check.cpp` | INDEP | keep |
 | `tests/native/inflate_check.py` | INDEP | keep |
@@ -442,6 +446,7 @@
 | `tools/binsyms.py` | INDEP | keep |
 | `tools/boundary_check.py` | INDEP | keep |
 | `tools/build_deps.py` | INDEP | keep |
+| `tools/build_ffmpeg.py` | INDEP | keep |
 | `tools/class_census_static.py` | INDEP | keep |
 | `tools/cmake/glslang_doc_O0.cmake` | INDEP | keep |
 | `tools/edit_import.py` | INDEP | keep |

@@ -102,7 +102,7 @@ def install_info(install):
 class Paths:
     """An install folder:
         <install>/dotheroes[.exe]   the game
-        <install>/lib/              Linux: SDL2 and OpenAL Soft (Windows: SDL2.dll and OpenAL32.dll beside the game)
+        <install>/lib/              Linux: SDL2, OpenAL Soft and FFmpeg (Windows: their DLLs beside the game)
         <install>/data/disc/        the disc's files, EBOOT.elf decrypted
         <install>/data/gen/         the recompiled code (work files)
         <install>/data/cache/       compiled objects (updates reuse them)
@@ -317,6 +317,11 @@ def spu(paths, log):
 # The SPU tasks that run as native code generated from the player's own lift (port/native/spu_native.h):
 # (configuration in tools/spu_native/, the image as the extraction names it).
 SPU_NATIVE = [("water", "spu_0000_at_00F47380"), ("waver", "spu_0001_at_00F48F80")]
+# FFmpeg beside the game (the movies; LGPL): the libraries, the notice and the licence, as tools/build_ffmpeg.py
+# (LIB_FILES, NOTICE, LICENCE) names them -- the setup carries no copy of that developer tool
+FFMPEG_FILES = (["avutil-61.dll", "avcodec-63.dll", "avformat-63.dll"] if os.name == "nt" else
+                ["libavutil.so.61", "libavcodec.so.63", "libavformat.so.63"]) + ["FFmpeg-NOTICE.txt",
+                                                                                 "FFmpeg-LGPL-2.1.txt"]
 
 
 def spu_native(paths, log):
@@ -346,11 +351,12 @@ def spu_native(paths, log):
 
 def finish(paths, log):
     lib = zig_build.Sources().lib_dir
-    # the shared libraries beside the game: SDL2, OpenAL Soft (the game's audio) with its notice
+    # the shared libraries beside the game: SDL2, OpenAL Soft (the game's audio) with its notice, FFmpeg (the
+    # movies) with its notice and licence
     dlls = ["SDL2.dll", "OpenAL32.dll"] if os.name == "nt" else ["libSDL2-2.0.so.0", "libopenal.so.1"]
     dest = paths.install if os.name == "nt" else os.path.join(paths.install, "lib")
     os.makedirs(dest, exist_ok=True)
-    for name in dlls + ["OpenAL-Soft-NOTICE.txt"]:
+    for name in dlls + ["OpenAL-Soft-NOTICE.txt"] + FFMPEG_FILES:
         if os.path.exists(os.path.join(lib, name)) or name.startswith(("SDL2", "libSDL2")):
             shutil.copy2(os.path.join(lib, name), dest)
     for icon in (os.path.join(ROOT, "assets", "icon.png"), os.path.join(ROOT, "lib", "icon.png")):

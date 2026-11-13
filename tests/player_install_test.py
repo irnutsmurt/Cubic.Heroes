@@ -113,6 +113,8 @@ def stage_check():
     al = "OpenAL32.dll" if os.name == "nt" else "libopenal.so.1"
     check("check", os.path.exists(os.path.join(libdir, al)), f"OpenAL Soft ({al}) beside it")
     check("check", os.path.exists(os.path.join(libdir, "OpenAL-Soft-NOTICE.txt")), "OpenAL Soft's notice beside it")
+    for name in pipeline.FFMPEG_FILES:
+        check("check", os.path.exists(os.path.join(libdir, name)), f"FFmpeg's {name} beside it")
     info = pipeline.install_info(DIR) or {}
     check("check", {"recomp", "spu"} <= set(info.get("stamps", {})), "install.json has the lift's stamps")
     import setup_app

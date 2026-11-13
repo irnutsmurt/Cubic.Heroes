@@ -10,14 +10,16 @@ Makes build/dist/DotHeroes-Setup-<platform>-x86_64/ and a .tar.xz (Linux) / .zip
     _internal/              the app's Python runtime and modules
     toolchain/zig-*/        the C/C++ compiler (Zig), trimmed to the target used
     lib/                    the runtime library (ps3recomp + this port's patches,
-                            prebuilt), glslang, SDL2 and OpenAL Soft (installed next to
-                            the game)
+                            prebuilt), glslang, SDL2, OpenAL Soft and FFmpeg (installed
+                            next to the game)
     src/                    what is compiled against the player's recompiled code:
                             the port's main program, the runtime's PPU scaffold, headers
     tools/, config/         the lifting tools (ps3recomp's and this project's) and the
                             per-game configuration they read
-    licenses/               third-party licences; licenses/source/ OpenAL Soft's source
-                            (LGPL: the corresponding source of the library shipped)
+    licenses/               third-party licences; licenses/source/ OpenAL Soft's and
+                            FFmpeg's source (LGPL: the corresponding source of the
+                            libraries shipped; FFmpeg's with its build driver and
+                            configuration, licenses/source/FFmpeg-build/)
 Nothing from the game is in it: players convert their own disc. tools/boundary_check.py
 checks the folder before it is archived, and the archive after.
 
@@ -186,7 +188,7 @@ def copy_tools(out):
     shutil.copy2(os.path.join(ROOT, "assets", "icon.png"), os.path.join(out, "assets"))
 
 
-def licenses(out, zsrc):
+def licenses(out, zsrc, platform):
     lic = os.path.join(out, "licenses")
     os.makedirs(lic)
     shutil.copy2(os.path.join(ROOT, "LICENSE"), os.path.join(out, "LICENSE.txt"))  # this project: GPL-3.0
@@ -211,6 +213,13 @@ def licenses(out, zsrc):
     arc, digest = build_deps.openal_source_archive(os.path.join(lic, "source"))
     with open(os.path.join(lic, build_deps.OPENAL_NOTICE), "w", encoding="utf-8", newline="\n") as f:
         f.write(build_deps.openal_notice(digest))
+    # FFmpeg: its licence and notice, and its source -- the release archive, the build driver and the
+    # configuration as built for this platform
+    import build_ffmpeg
+    deps_lib = os.path.join(build_deps.DEPS, platform, build_ffmpeg.LIB_FILES[platform][0])
+    for name in (build_ffmpeg.LICENCE[1], build_ffmpeg.NOTICE):
+        shutil.copy2(os.path.join(deps_lib, name), lic)
+    build_ffmpeg.source_files(os.path.join(lic, "source"), platform)
 
 
 def bundle(platform):
@@ -232,7 +241,7 @@ def bundle(platform):
     shutil.copytree(lib_dir, os.path.join(out, "lib"), ignore=shutil.ignore_patterns("src"))
     copy_sources(out, lib_dir)
     copy_tools(out)
-    licenses(out, zsrc)
+    licenses(out, zsrc, platform)
     needs = ("Windows 10 or 11 and a graphics driver with Vulkan (any recent AMD, NVIDIA or Intel driver)."
              if platform == "windows" else
              "a Vulkan-capable graphics driver and glibc 2.31 or newer\n"
