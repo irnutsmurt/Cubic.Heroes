@@ -92,6 +92,26 @@ Handle Streamer::open(const std::string& path, Loop loop, float gain, bool play_
     return kNone;
 }
 
+Handle Streamer::open_source(std::shared_ptr<PcmSource> src, float gain, bool play_now)
+{
+    if (!src || !src->rate() || src->channels() < 1 || src->channels() > 2) return kNone;
+    for (unsigned k = 0; k < cfg_.max_streams; k++) {
+        bool expected = false;
+        if (!slots_[k].busy.compare_exchange_strong(expected, true)) continue;
+        const uint32_t gen = (slots_[k].gen.fetch_add(1) + 1) & 0xFFFFFF;
+        const Handle h = make_handle(k, gen);
+        Command c{Command::open, h, Loop::once, play_now, gain, 1.0f, std::string("(fed)"), false};
+        c.src = std::move(src);
+        if (!push(std::move(c))) {
+            slots_[k].busy.store(false);
+            return kNone;
+        }
+        return h;
+    }
+    dev_.log("stream open refused: all %u streams in use (a fed stream)", cfg_.max_streams);
+    return kNone;
+}
+
 void Streamer::debug_simulate_disconnect()
 {
     push(Command{Command::debug_stop_all, kNone, Loop::once, false, 0, 0, {}});
@@ -239,13 +259,20 @@ void Streamer::apply(Command& c)
         s.loop = c.loop;
         s.gain = c.a;
         std::string err;
-        s.f = wav_pcm::open_utf8(c.path);
-        if (!s.f || !wav_pcm::parse_file(s.f, &s.info, &err)) {
-            dev_.log("stream: %s: %s", c.path.c_str(), s.f ? err.c_str() : "cannot open");
-            totals_.open_failures++;
-            if (s.f) fclose(s.f);
-            s.f = nullptr;
-            return;   // stays failed until stopped (its handle reports it)
+        if (c.src) {   // a fed stream: its source's format, played once to the source's end
+            s.src = std::move(c.src);
+            s.info.rate = s.src->rate();
+            s.info.channels = s.src->channels();
+            s.info.frames = UINT64_MAX;
+        } else {
+            s.f = wav_pcm::open_utf8(c.path);
+            if (!s.f || !wav_pcm::parse_file(s.f, &s.info, &err)) {
+                dev_.log("stream: %s: %s", c.path.c_str(), s.f ? err.c_str() : "cannot open");
+                totals_.open_failures++;
+                if (s.f) fclose(s.f);
+                s.f = nullptr;
+                return;   // stays failed until stopped (its handle reports it)
+            }
         }
         s.centre = c.centre && s.info.channels == 1;
         s.level = s.centre ? c.b : 1.0f;
@@ -276,7 +303,7 @@ void Streamer::apply(Command& c)
         // a stereo file's channels straight to the output's left and right, as the game's 2D music played (a mono
         // file plays centred: OpenAL Soft pans mono even then)
         if (dev_.caps().direct_channels) al.alSourcei(s.source, AL_DIRECT_CHANNELS_SOFT, AL_TRUE);
-        if (cfg_.reverb) cfg_.reverb->attach(s.source);
+        if (cfg_.reverb && !s.src) cfg_.reverb->attach(s.source);   // a movie's sound never went through the reverb
         set_al_gain(s);
         totals_.opened++;
         s.state = State::stopped;
@@ -313,9 +340,13 @@ void Streamer::apply(Command& c)
         s.eof = false;
         s.frames_unqueued = 0;
         s.queued_frames.clear();
+        s.idle.clear();
         for (unsigned b : s.buffers)
-            if (!fill(s, b)) break;
-        al.alSourcePlay(s.source);
+            if (!fill(s, b)) {
+                if (!s.src) break;
+                s.idle.push_back(b);   // a fed stream's source not ready yet: filled by a later period
+            }
+        if (!s.queued_frames.empty()) al.alSourcePlay(s.source);   // else at the first frames (service)
         s.state = State::playing;
         break;
     case Command::pause:
@@ -374,7 +405,16 @@ bool Streamer::fill(Stream& s, unsigned buffer)
     scratch_.resize(want_frames * ch);
     int16_t* dst = scratch_.data();
     size_t have = 0;
-    while (have < want_frames) {
+    if (s.src) {   // a fed stream: what its source has ready, up to a buffer's length
+        bool ended = false;
+        while (have < want_frames && !ended) {
+            const size_t got = s.src->read(&dst[have * ch], want_frames - have, &ended);
+            if (!got) break;
+            have += got;
+        }
+        if (ended) s.eof = true;
+    }
+    while (!s.src && have < want_frames) {
         uint64_t end = s.loop == Loop::once ? s.info.frames : s.region_end;
         if (s.pos >= end) {
             if (s.loop == Loop::once) {
@@ -450,11 +490,16 @@ void Streamer::service(Stream& s)
             s.frames_unqueued += s.queued_frames.front();
             s.queued_frames.erase(s.queued_frames.begin());
         }
-        if (!s.eof) fill(s, b);
+        if (!s.eof && !fill(s, b) && s.src) s.idle.push_back(b);
+        else if (s.eof && s.src) s.idle.push_back(b);
     }
+    // a fed stream's buffers its source could not fill before: what it has now
+    while (s.src && !s.eof && !s.idle.empty() && fill(s, s.idle.back())) s.idle.pop_back();
     al.alGetSourcei(s.source, AL_SOURCE_STATE, &st);
     al.alGetSourcei(s.source, AL_BUFFERS_QUEUED, &queued);
-    if (st != AL_PLAYING && st != AL_PAUSED) {
+    if (st == AL_INITIAL && queued > 0) {   // a fed stream's first frames: its start, not an underrun
+        al.alSourcePlay(s.source);
+    } else if (st != AL_PLAYING && st != AL_PAUSED) {
         if (queued > 0 && dev_.query_connected()) {   // ran dry with more to play (a lost device is not an underrun)
             s.underruns++;
             totals_.underruns++;
@@ -475,6 +520,8 @@ void Streamer::free_objects(Stream& s)
     for (unsigned& b : s.buffers) dev_.delete_buffer(b);
     s.buffers.clear();
     s.queued_frames.clear();
+    s.idle.clear();
+    s.src.reset();   // a fed stream's source: its owner may still hold it
     if (s.f) fclose(s.f);
     s.f = nullptr;
 }
@@ -510,6 +557,8 @@ void Streamer::publish()
         p.st.near_underruns = s.near_underruns;
         p.st.loops = s.loops;
         double frames = (double)s.frames_unqueued;
+        p.st.taken = now();
+        p.st.latency = 0.0;
         if (s.source && s.info.rate) {
             ALint off = 0, st = 0;
             dev_.al().alGetSourcei(s.source, AL_SAMPLE_OFFSET, &off);
@@ -518,6 +567,16 @@ void Streamer::publish()
             else if (st == AL_STOPPED && s.state == State::playing) off = s.last_offset;   // lost: held there
             else if (st == AL_STOPPED && s.state == State::paused) off = s.paused_offset;
             frames += off;
+            // a fed stream (a movie's sound, its picture's clock): the offset with its fraction, less the output's
+            // latency -- the frame being heard rather than the one being mixed
+            if (s.src && st == AL_PLAYING && dev_.al().alGetSourcei64vSOFT) {
+                ALint64SOFT v[2] = {0, 0};
+                dev_.al().alGetSourcei64vSOFT(s.source, AL_SAMPLE_OFFSET_LATENCY_SOFT, v);
+                const double lat = (double)v[1] / 1e9;
+                frames = (double)s.frames_unqueued + (double)v[0] / 4294967296.0 - lat * s.info.rate;
+                if (frames < 0) frames = 0;
+                p.st.latency = lat;
+            }
         }
         // frames heard -> a position in the file: the intro once, then around the loop region
         const double region = (double)(s.region_end - s.region_start);

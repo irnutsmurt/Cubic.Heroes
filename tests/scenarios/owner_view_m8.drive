@@ -1,0 +1,23 @@
+# The owner's viewing of the movies for M8.3's acceptance (docs/FFMPEG_MIGRATION_PLAN.md sections 5 and 6): the
+# viewing build build/r8/rel49 (rel48's configuration -- the controller on its own thread, OpenAL Soft, FMOD out of
+# the lift -- with M8.2's native movie player and the credits on demand in its lift, tools/m8_trace_lift.sh with
+# M8_TRACE=0). By default the movies play on FFmpeg (DOTHEROES_NATIVE_MOVIE=1); the reference launcher sets it to 0:
+# the same build with Bink, the lifted original, for a side-by-side viewing.
+#   - the title: its movie with the menu over it; left alone 32 s, the attract mode's demo (a movie with sound);
+#   - NEW GAME: the opening movie;
+#   - F6 while playing: the ending's credits movie (the call the game's Lua function Ending makes; its sound), then
+#     the game's own "Okay to save?" -- answer NO (the saves are a copy, backed up before the session).
+# As owner_play_m6: the validated configuration, sound on the default output, the frame-rate readout, fullscreen,
+# 144 fps synced to the display; saves in build/play-route/gamedata; a copy of the save each time the game saves.
+# Lightweight diagnostics: the movies' open and close lines (frames, the decoder, the sound), frames.log, F8 (or
+# L3+R3) to mark a moment. Close the window when done.
+#! env BIN=build/r8/rel49/dotheroes.exe
+#! env GAMEDATA=build/play-route/gamedata RUNS_IN=build/sessions KEEP_RUNS=1000 PREEMPT_TESTS=1
+#! env DOTHEROES_PPFX_NATIVE=1 DOTHEROES_NATIVE_CD=1 DOTHEROES_NATIVE_SOLVER=1,2,4,5,6 GCM_WRAP_LAP=1 DOTHEROES_PRESENT_ONCE=1
+#! env DOTHEROES_BENCH=1 PS3RECOMP_VK_PRESENT_MODE=fifo DOTHEROES_FPS=0 DOTHEROES_DEV_CANT_DIE=0 PS3_SAVEDATA_PICKER=1
+#! env WINDOW=1 PS3RECOMP_VK_FULLSCREEN=1 AUDIO=1 PS3_OSD_FPS=2 DUMP=0 SHOT_EVERY=0 PS3_VERBOSE=0
+#! env DOTHEROES_DEV_KEYS=1 DOTHEROES_DEV_STATE=1 DOTHEROES_DEV_RECORD=1 DIAG_FRAMES=frames.log
+#! env DOTHEROES_NATIVE_MOVIE=1 DOTHEROES_DEV_CREDITS=key
+#! env PS3RECOMP_SPIRV_CACHE=build/play-route/cache
+#! secs 14400
+until_exit ${SAVE_COPIES:-build/checkpoints/owner-view-m8}

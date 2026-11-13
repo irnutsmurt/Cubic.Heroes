@@ -43,7 +43,8 @@ namespace al_api {
     X(LPALEFFECTF, alEffectf) X(LPALEFFECTFV, alEffectfv) X(LPALGENAUXILIARYEFFECTSLOTS, alGenAuxiliaryEffectSlots) \
     X(LPALDELETEAUXILIARYEFFECTSLOTS, alDeleteAuxiliaryEffectSlots)                                                \
     X(LPALAUXILIARYEFFECTSLOTI, alAuxiliaryEffectSloti) X(LPALAUXILIARYEFFECTSLOTF, alAuxiliaryEffectSlotf)        \
-    X(LPALGENFILTERS, alGenFilters) X(LPALDELETEFILTERS, alDeleteFilters)
+    X(LPALGENFILTERS, alGenFilters) X(LPALDELETEFILTERS, alDeleteFilters)                                         \
+    X(LPALGETSOURCEI64VSOFT, alGetSourcei64vSOFT)   /* AL_SOFT_source_latency: a fed stream's heard position */
 
 // ALC extension functions, through alcGetProcAddress (a null device asks for the library's own).
 #define AL_API_ALC_EXT_FUNCTIONS(X)                                                                                 \

@@ -122,9 +122,10 @@ hold them and who refers to those, the constructor tables, the strings.
 
 A trace build (rel48m: rel48's options on tools/m8_trace_lift.sh's lift, port/native/movie/movie_trace.cpp) logged
 every call of the class, of Bink's eleven functions, of the textures' creation and of the movie paths, with their
-arguments, results and the objects before and after, in four runs (build/test/*-m8-trace-*; local): SCENARIO=attract
-for 10 minutes, a new game (the opening; tests/scenarios/m8_movie_trace.drive), and the credits on demand from the
-castle-front checkpoint (tests/scenarios/m8_credits_trace.drive).
+arguments, results and the objects before and after, in four runs: SCENARIO=attract for 10 minutes, a new game (the
+opening; tests/scenarios/m8_movie_trace.drive), and the credits on demand from the castle-front checkpoint
+(tests/scenarios/m8_credits_trace.drive). The runs themselves were not kept (the test harness keeps its last five;
+KEEP_RUNS=50 since): the trace build and the scenarios reproduce them.
 - **The movies and their openers, confirmed**: the title (Title.cpp, 0x005CD374) opens TitleMovie_Omote_eng.bik and
   closes it after 961-962 frames (32 s) with no input, when the attract demo replaces it (0x0048C424:
   PlayDemoMovieUS.bik, played to its 3,465th frame, then the title again: four cycles in 10 minutes), or at START
@@ -298,6 +299,81 @@ Against rel41 (the lifted Bink, its sound through cellAudio), the developer's lo
 - **The cost** (one thread, C only, no assembly; the owner's PC): 1.91-3.40 ms a frame on average, p99 5.4-7.6
   ms, the worst 11.3 ms, against the 33.3 ms a frame lasts; the sound 124 ms for the demo's 115.5 s and 291 ms
   for the credits' 262 s.
+
+### 6.2 M8.2: the native movie player (2026-11-13) [M, L]
+
+**What it is** (section 2.3's boundary): port/native/movie/bink_native.cpp answers the movie class's eleven calls
+into Bink at their stubs (config/m8_native_movie.json: entry hooks that may decline; each answer stores the
+caller's TOC where the stub would, sp + 0x28); movie_player.cpp decodes on a thread of its own per movie: the file
+read through its own I/O context (the runtime's path mapping, sys_fs_translate_path), the sound decoded as it
+comes and cut to each packet's declared samples, the compressed video queued, six frames decoded ahead, every
+frame decoded in order (a restart, for a looping movie, starts again from frame 1). The frames' Y, U and V planes
+go into the texture sets the class allocated; the game draws them with its own shader. The sound is a stream fed
+by the decoder on the native sound manager's streamer (al_stream's PcmSource: the music's thread, device recovery
+and gains; no reverb send -- Bink's sound never had one); the picture's clock is the sound's heard position
+(AL_SOFT_source_latency) for a movie with sound, a steady clock less the pauses for a silent one. The handles
+live in one 64 KB guest page from the runtime's allocator (Bink's own allocations are gone). Behind
+DOTHEROES_NATIVE_MOVIE=1 (Bink, still lifted, the default); a call the player cannot answer goes to Bink.
+
+**The decoder against M8.1's decode** (tests/native/movie_player_check.cpp, in tests/native/ffmpeg_decode_check.sh):
+every frame of the five movies through the player the same as the plain decode, asked for in order and every third
+frame (the frames between decoded, not shown), and again after a restart; the sound pulled as the stream pulls it:
+exactly the declared samples (965 and 371 cut).
+
+**The pictures, in the game, bit for bit** (DOTHEROES_MOVIE_PLANES on the trace build: each decoded frame's planes
+hashed in guest memory right after the decode; tools/m8_frames_compare.py against the offline decode's hashes):
+- Bink's own decode, lifted, in the game: every frame recorded the same as FFmpeg's decode of that frame -- the
+  demo (6,928 frames: two plays), the credits (7,823), the opening (4,595), the title (2,366). **Bink's and
+  FFmpeg's decoders give the same planes**: the colours, through the game's own shader, cannot differ.
+- The native player in the game: the same (the demo's 6,928, the title's 2,366). Each run's last record, taken as
+  the run was stopped and the game exiting, differs on both paths (the planes going away); every other frame
+  is the same.
+
+**The sound** (the attract demo; Bink's at cellAudio, AUDIO_WAV, the native player's at OpenAL Soft's wave writer;
+tools/m8_sound_compare.py): the same level (-30.75 and -30.70 dBFS over the movie; 10 s windows within 0.2 dB,
+the last within 0.4) and the same left/right balance window by window; the envelopes correlate 1.000 for the first
+minute. After it, Bink's capture falls behind (30 ms at 60-70 s, 510 ms at the end): on the lifted path (SDL's dummy
+output in the test runs) the demo's sound lasted 116.06 s against its file's 115.50 -- no silence of 20 ms or more,
+so short gaps or repeated blocks in Bink's audio thread or cellAudio's mixing. The native player played exactly
+the file's samples (5,543,995) with no underrun, its picture following them.
+
+**In the game** (rel48m, the trace build: rel48 with these hooks; the attract cycle at 60 fps): no Bink thread
+created; the title closed at frame 962 as with Bink (961-962: the game's own 32 s), the demo played to its end,
+the cycle repeated; every frame decoded, the decoder never waited for (2.6-2.9 ms a frame on its thread); a frame
+decoded on average 7-13 ms after its start by the clock, at most 30 ms (within a movie frame, at 60 game frames a
+second); the title's logo and lines over its movie, "DEMO PLAY" over the demo, as the game draws them.
+
+**The frame shown, at every cap** (rel49, below; the attract cycle; a frame's decode against its start by the clock:
+average and worst; no frame decoded and not shown in any run). A frame is shown at the game's frame nearest its
+start (due from half a game frame before it, the game's frame measured between the class's questions; skipped
+only when the next is half a movie frame late), and a silent movie's clock starts at the class's first question
+-- at 30 game frames a second the game and the movie keep one phase, which a clock started at the open left a
+whole frame late (the first measurement: +29 ms, a frame skipped now and then):
+
+| Cap | The title (silent: the steady clock) | The demo (its sound's clock) |
+|---|---|---|
+| 30 | +0.6 ms, +2.0 at most | +17.5 ms, +22.5 at most |
+| 60 | +0.4 ms, +1.2 | -0.3 ms, +4.8 |
+| 144 | +0.2 ms, +4.0 | +0.3 ms, +13.3 |
+| uncapped | +0.4 ms, +9.8 | +0.5 ms, +9.5 |
+
+At 30 the demo's picture follows the sound card's clock while the game paces itself: their phase drifts, the
+picture within a movie frame of its sound.
+
+**Behaviour** (rel49; tests/scenarios/m8_movie_skips.drive, the credits and the opening scenarios, the output
+losses through DOTHEROES_AUDIO_TEST_LOSS):
+- **Skips**: the demo closed with START after 1, 3, 7, 13, 20, 31, 45, 60, 77, 95 and 110 s (frames 37 to 3,307,
+  each where the drive pressed), then the game asked to exit 30 s into the next demo: every movie the game opened
+  closed (24), the decoder's thread and the sound's stream released at each close, the game's own exit.
+- **Output losses during the demo** (at 80 s; at 110 s with two failing reopens; at 140 s with a 400 ms reopen):
+  the output reopened each time, the demo played to its end with every sample (5,543,995), its picture following
+  the sound through the losses (+2.0 ms on average, +19.4 at most).
+- **The credits** on demand (castle-front): all 7,860 frames, every sample (11,554,189), +1.4 ms on average, +6.5
+  at most. **The opening** (a new game): all 4,620 frames, -3.4 ms on average, +13.1 at most (before the
+  nearest-frame timing above).
+- **The viewing build for M8.3**: build/r8/rel49 -- rel48's configuration on tools/m8_trace_lift.sh's lift with
+  M8_TRACE=0 (the release lift with config/m8_native_movie.json and config/m8_dev_credits.json, no trace
+  observers: build/r8/gen16).
 
 ## 7. Risks and open questions
 

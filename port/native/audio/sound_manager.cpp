@@ -934,3 +934,13 @@ void nsm_debug_device_loss(int failed_reopens, int reopen_ms)
 }
 
 }  // extern "C"
+
+// The movies' sound (docs/FFMPEG_MIGRATION_PLAN.md section 3, native/movie/bink_native.cpp): a stream fed by the
+// movie's decoder on this manager's streamer -- the same device, its recovery and its thread as the music. Null when
+// the manager is not running (no sound at all).
+al_stream::Streamer* nsm_movie_streamer()
+{
+    Manager& m = M();
+    std::lock_guard<std::mutex> lk(m.mu);
+    return m.active ? m.streamer.get() : nullptr;
+}

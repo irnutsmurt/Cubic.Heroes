@@ -23,4 +23,6 @@ start=$(date +%s)
 cmake --build "$R/bld" --target dotheroes > "$R/build.log" 2>&1
 cp build/port-win/SDL2.dll "$R/bld/" 2>/dev/null || true
 cp build/deps/windows/bin/OpenAL32.dll "$R/bld/" 2>/dev/null || true
+cp build/deps/windows/bin/avutil-61.dll build/deps/windows/bin/avcodec-63.dll build/deps/windows/bin/avformat-63.dll \
+   "$R/bld/" 2>/dev/null || true   # FFmpeg (M8): the movies, loaded at run time from the game's folder
 echo "built $R/bld/dotheroes.exe in $(( $(date +%s) - start )) s"
