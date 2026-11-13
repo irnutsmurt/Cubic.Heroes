@@ -1,0 +1,315 @@
+From eeec065f07e5f869718a856f58480ea5b617df17 Mon Sep 17 00:00:00 2001
+From: giteaguy <73799093+irnutsmurt@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 20:40:52 -0800
+Subject: [PATCH] cellPad: SDL's controllers polled on a thread of their own
+
+SDL's controller update takes microseconds, except after a device arrives or
+leaves anywhere on the system: SDL2's Windows driver then re-enumerates every
+DirectInput and XInput device under its joystick lock (312 ms measured with 27
+input devices), which the window's event pump takes too, and the title's
+thread stopped in its pad read for that long. Every SDL joystick and controller
+call is now one thread's: every 4 ms it sends the rumble the title asked for,
+reads SDL and publishes each port's state; the title's reads copy the latest
+and never call SDL, and the window's pump no longer updates joysticks
+(SDL_HINT_AUTO_UPDATE_JOYSTICKS=0). Rumble is renewed only while the title
+still reads its pad, so a hung title's motors still stop within the hold.
+PAD_SDL_THREAD=0: SDL polled in the title's reads, as before. The XInput
+backend is unchanged.
+---
+ libs/input/cellPad.c | 173 ++++++++++++++++++++++++++++++++++---------
+ 1 file changed, 139 insertions(+), 34 deletions(-)
+
+diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
+index 4ff169d..60353f4 100644
+--- a/libs/input/cellPad.c
++++ b/libs/input/cellPad.c
+@@ -64,6 +64,7 @@ static double pad_clock(unsigned long long t0_ms)
+ 
+ #if PAD_BACKEND_SDL2
+   #include <SDL2/SDL.h>
++  #include "ps3emu/thread_name.h"
+ #endif
+ 
+ /* ---------------------------------------------------------------------------
+@@ -114,6 +115,15 @@ static SDL_JoystickGUID    s_sdl_last_guid[PAD_MAX_HOST_PORTS];
+ static int                 s_sdl_had[PAD_MAX_HOST_PORTS];
+ static unsigned long long  s_sdl_scan_ms;   /* last device-list scan (pad_now_ms) */
+ static int s_sdl_inited = 0;
++/* The pad thread (pad_sdl_thread): once it runs, every SDL joystick and controller call is its own. */
++static SDL_Thread*         s_pad_thread;
++static volatile int        s_pad_thread_stop;
++static PadHostState        s_pub_state[PAD_MAX_HOST_PORTS];   /* its latest reading of each port */
++static volatile char       s_pub_lock;                        /* s_pub_state and the rumble requests */
++static u16                 s_rumble_req_lo[PAD_MAX_HOST_PORTS], s_rumble_req_hi[PAD_MAX_HOST_PORTS];
++static int                 s_rumble_req[PAD_MAX_HOST_PORTS];  /* a request the thread has not sent yet */
++static volatile unsigned long long s_guest_poll_ms;           /* the guest's last pad read (the rumble's renewal) */
++static int SDLCALL pad_sdl_thread(void* arg);
+ #endif
+ 
+ /* A port with no device behind it: nothing pressed and both sticks CENTRED.
+@@ -504,7 +514,6 @@ static void pad_sdl_close(int p, int gone)
+     s_sdl_controllers[p] = NULL;
+     s_sdl_ids[p] = -1;
+     memset(&s_rumble[p], 0, sizeof s_rumble[p]);
+-    pad_host_release(&s_host_state[p]);
+ }
+ 
+ /* Open every game controller SDL lists that no port has yet. */
+@@ -586,7 +595,9 @@ static int pad_sdl_family(SDL_GameController* gc)
+     }
+ }
+ 
+-static void pad_poll_sdl2(void)
++/* One reading of SDL: its controller update, the device changes, then each port into out[] (and the rumble kept
++ * going). On the pad thread (on_thread), or -- PAD_SDL_THREAD=0 -- in the guest's own poll, into the state it reads. */
++static void pad_sdl_read(PadHostState* out, int on_thread)
+ {
+     /* SDL's controller update normally takes microseconds; after a device arrives or leaves anywhere on the system
+      * (SDL2's Windows driver re-arms detection 0.3 s and 2 s after each), it enumerates every input device under
+@@ -600,22 +611,25 @@ static void pad_poll_sdl2(void)
+         static unsigned long long boot;
+         if (!boot) boot = t0;
+         if (took >= 50)
+-            fprintf(stderr, "[cellPad] SDL controller update took %llu ms at %.1f s (tick %llu; SDL re-enumerating input devices after a device change)\n",
+-                    took, (double)(t0 - boot) / 1000.0, t0);
++            fprintf(stderr, "[cellPad] SDL controller update took %llu ms at %.1f s (tick %llu; SDL re-enumerating input "
++                    "devices after a device change)%s\n", took, (double)(t0 - boot) / 1000.0, t0,
++                    on_thread ? " on the pad thread: no game thread held" : "");
+     }
+ 
+     for (int i = 0; i < PAD_MAX_HOST_PORTS; i++) {
+         SDL_GameController* gc = s_sdl_controllers[i];
+         if (!gc) {
+-            pad_host_release(&s_host_state[i]);
++            pad_host_release(&out[i]);
+             memset(&s_rumble[i], 0, sizeof s_rumble[i]);
+             continue;
+         }
+ 
+-        s_host_state[i].connected = 1;
++        out[i].connected = 1;
+ 
+-        /* Keep a rumble the title set going (see PAD_RUMBLE_HOLD_MS). */
+-        if (s_rumble[i].sent_ms && pad_now_ms() - s_rumble[i].sent_ms >= PAD_RUMBLE_RENEW_MS)
++        /* Keep a rumble the title set going (see PAD_RUMBLE_HOLD_MS) -- on the pad thread only while the title
++         * still reads its pad, so a title that stops (a hang) still has its motors stop within the hold. */
++        if (s_rumble[i].sent_ms && pad_now_ms() - s_rumble[i].sent_ms >= PAD_RUMBLE_RENEW_MS &&
++            (!on_thread || pad_now_ms() - s_guest_poll_ms < PAD_RUMBLE_HOLD_MS))
+             pad_sdl_rumble_send(i);
+ 
+         u16 btns = 0;
+@@ -640,45 +654,47 @@ static void pad_poll_sdl2(void)
+         if (lt > 3000) btns |= CELL_PAD_CTRL_L2;
+         if (rt > 3000) btns |= CELL_PAD_CTRL_R2;
+ 
+-        s_host_state[i].buttons = btns;
++        out[i].buttons = btns;
+         if (btns) s_ui_device = pad_sdl_family(gc);
+ 
+         /* Analog sticks */
+-        s_host_state[i].analog_lx = pad_sdl_axis_to_u8(SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_LEFTX));
+-        s_host_state[i].analog_ly = pad_sdl_axis_to_u8(SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_LEFTY));
+-        s_host_state[i].analog_rx = pad_sdl_axis_to_u8(SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_RIGHTX));
+-        s_host_state[i].analog_ry = pad_sdl_axis_to_u8(SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_RIGHTY));
++        out[i].analog_lx = pad_sdl_axis_to_u8(SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_LEFTX));
++        out[i].analog_ly = pad_sdl_axis_to_u8(SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_LEFTY));
++        out[i].analog_rx = pad_sdl_axis_to_u8(SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_RIGHTX));
++        out[i].analog_ry = pad_sdl_axis_to_u8(SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_RIGHTY));
+ 
+         /* Triggers */
+-        s_host_state[i].trigger_l2 = pad_sdl_trigger_to_u8(lt);
+-        s_host_state[i].trigger_r2 = pad_sdl_trigger_to_u8(rt);
++        out[i].trigger_l2 = pad_sdl_trigger_to_u8(lt);
++        out[i].trigger_r2 = pad_sdl_trigger_to_u8(rt);
+ 
+         /* Pressure: SDL has digital buttons, so 0 or 255 */
+-        s_host_state[i].press_up       = (btns & CELL_PAD_CTRL_UP)       ? 255 : 0;
+-        s_host_state[i].press_down     = (btns & CELL_PAD_CTRL_DOWN)     ? 255 : 0;
+-        s_host_state[i].press_left     = (btns & CELL_PAD_CTRL_LEFT)     ? 255 : 0;
+-        s_host_state[i].press_right    = (btns & CELL_PAD_CTRL_RIGHT)    ? 255 : 0;
+-        s_host_state[i].press_triangle = (btns & CELL_PAD_CTRL_TRIANGLE) ? 255 : 0;
+-        s_host_state[i].press_circle   = (btns & CELL_PAD_CTRL_CIRCLE)   ? 255 : 0;
+-        s_host_state[i].press_cross    = (btns & CELL_PAD_CTRL_CROSS)    ? 255 : 0;
+-        s_host_state[i].press_square   = (btns & CELL_PAD_CTRL_SQUARE)   ? 255 : 0;
+-        s_host_state[i].press_l1       = (btns & CELL_PAD_CTRL_L1)       ? 255 : 0;
+-        s_host_state[i].press_r1       = (btns & CELL_PAD_CTRL_R1)       ? 255 : 0;
++        out[i].press_up       = (btns & CELL_PAD_CTRL_UP)       ? 255 : 0;
++        out[i].press_down     = (btns & CELL_PAD_CTRL_DOWN)     ? 255 : 0;
++        out[i].press_left     = (btns & CELL_PAD_CTRL_LEFT)     ? 255 : 0;
++        out[i].press_right    = (btns & CELL_PAD_CTRL_RIGHT)    ? 255 : 0;
++        out[i].press_triangle = (btns & CELL_PAD_CTRL_TRIANGLE) ? 255 : 0;
++        out[i].press_circle   = (btns & CELL_PAD_CTRL_CIRCLE)   ? 255 : 0;
++        out[i].press_cross    = (btns & CELL_PAD_CTRL_CROSS)    ? 255 : 0;
++        out[i].press_square   = (btns & CELL_PAD_CTRL_SQUARE)   ? 255 : 0;
++        out[i].press_l1       = (btns & CELL_PAD_CTRL_L1)       ? 255 : 0;
++        out[i].press_r1       = (btns & CELL_PAD_CTRL_R1)       ? 255 : 0;
+ 
+         /* PAD_DEBUG=1: each change of a port's buttons or (coarsely) its left
+          * stick, as SDL reports it -- whether the host sees the controller at
+          * all, before anything the title does with it. */
+         { static int dbg = -1; static u16 last_b[PAD_MAX_HOST_PORTS]; static u8 last_x[PAD_MAX_HOST_PORTS], last_y[PAD_MAX_HOST_PORTS];
+           if (dbg < 0) dbg = getenv("PAD_DEBUG") ? 1 : 0;
+-          const u8 x = s_host_state[i].analog_lx >> 5, y = s_host_state[i].analog_ly >> 5;
++          const u8 x = out[i].analog_lx >> 5, y = out[i].analog_ly >> 5;
+           if (dbg && (btns != last_b[i] || x != last_x[i] || y != last_y[i])) {
+               last_b[i] = btns; last_x[i] = x; last_y[i] = y;
+               fprintf(stderr, "[cellPad] port %d: buttons %04X stick %u,%u\n", i, btns,
+-                      s_host_state[i].analog_lx, s_host_state[i].analog_ly);
++                      out[i].analog_lx, out[i].analog_ly);
+           } }
+     }
+ }
+ 
++static void pad_poll_sdl2(void) { pad_sdl_read(s_host_state, 0); }
++
+ #if PAD_BACKEND_SDL2
+ /* Keyboard fallback with the SDL2 backend: the same key map as the XInput one above,
+  * read from SDL's keyboard state while one of this process's SDL windows (the
+@@ -758,12 +774,41 @@ static void pad_init_backend(void)
+ 
+     /* Open any controllers already connected */
+     pad_sdl_hotplug(1);
++
++    /* The pad thread (pad_sdl_thread): a first reading here, so the ports a title finds at cellPadInit are the
++     * controllers there now, then the thread; the window's event pump stops updating joysticks, which would take
++     * SDL's joystick lock beside it. PAD_SDL_THREAD=0: SDL polled in the guest's own pad reads, as before. */
++    pad_sdl_read(s_pub_state, 0);
++    const char* th = getenv("PAD_SDL_THREAD");
++    if (!s_pad_thread && !(th && *th == '0')) {
++        SDL_SetHint(SDL_HINT_AUTO_UPDATE_JOYSTICKS, "0");
++        __atomic_store_n(&s_pad_thread_stop, 0, __ATOMIC_RELEASE);
++        s_pad_thread = SDL_CreateThread(pad_sdl_thread, "pad", NULL);
++        if (s_pad_thread) {
++            fprintf(stderr, "[cellPad] SDL's controllers polled on a thread of their own (a device change's "
++                    "re-enumeration holds no game thread; PAD_SDL_THREAD=0: in the guest's reads)\n");
++        } else {
++            fprintf(stderr, "[cellPad] no pad thread (%s): SDL polled in the guest's reads\n", SDL_GetError());
++            SDL_SetHint(SDL_HINT_AUTO_UPDATE_JOYSTICKS, "1");
++        }
++    }
+ }
+ 
+ static void pad_shutdown_backend(void)
+ {
+-    for (int i = 0; i < PAD_MAX_HOST_PORTS; i++) pad_sdl_close(i, 0);
++    if (s_pad_thread) {   /* stopped first: the controllers are then this thread's to close */
++        __atomic_store_n(&s_pad_thread_stop, 1, __ATOMIC_RELEASE);
++        SDL_WaitThread(s_pad_thread, NULL);
++        s_pad_thread = NULL;
++        SDL_SetHint(SDL_HINT_AUTO_UPDATE_JOYSTICKS, "1");
++    }
++    for (int i = 0; i < PAD_MAX_HOST_PORTS; i++) {
++        pad_sdl_close(i, 0);
++        pad_host_release(&s_pub_state[i]);
++        pad_host_release(&s_host_state[i]);
++    }
+     memset(s_rumble, 0, sizeof s_rumble);
++    memset(s_rumble_req, 0, sizeof s_rumble_req);
+ }
+ 
+ #endif /* PAD_BACKEND_SDL2 */
+@@ -799,6 +844,50 @@ static unsigned long long pad_now_ms(void)
+ #endif
+ }
+ 
++#if PAD_BACKEND_SDL2
++/* ---- the pad thread ---------------------------------------------------------
++ * SDL's controller update takes microseconds, except after a device arrives or leaves anywhere on the system:
++ * SDL2's Windows driver then re-enumerates every DirectInput and XInput device under its joystick lock, which the
++ * window's event pump takes too -- 312 ms each time on a PC with 27 input devices, and the game's thread and its
++ * presents stopped for that long (docs/PC_EXPERIENCE.md section 7b). Every SDL joystick and controller call is
++ * therefore this thread's: every PAD_POLL_INTERVAL_MS it sends the rumble the title asked for, reads SDL
++ * (pad_sdl_read) and publishes each port's state; the guest's reads copy the latest (pad_poll_backend) and never
++ * call SDL. A re-enumeration now delays input by its own length and stops nothing else. */
++static void pad_pub_lock(void)   { while (__atomic_test_and_set(&s_pub_lock, __ATOMIC_ACQUIRE)) pad_yield(); }
++static void pad_pub_unlock(void) { __atomic_clear(&s_pub_lock, __ATOMIC_RELEASE); }
++
++static void pad_sdl_rumble_take(void)   /* cellPadSetActDirect's requests since the last pass, sent */
++{
++    for (int i = 0; i < PAD_MAX_HOST_PORTS; i++) {
++        pad_pub_lock();
++        const int req = s_rumble_req[i];
++        const u16 lo = s_rumble_req_lo[i], hi = s_rumble_req_hi[i];
++        s_rumble_req[i] = 0;
++        pad_pub_unlock();
++        if (!req) continue;
++        s_rumble[i].lo = lo;
++        s_rumble[i].hi = hi;
++        pad_sdl_rumble_send(i);
++    }
++}
++
++static int SDLCALL pad_sdl_thread(void* arg)
++{
++    (void)arg;
++    ps3_thread_name("pad");
++    while (!__atomic_load_n(&s_pad_thread_stop, __ATOMIC_ACQUIRE)) {
++        PadHostState snap[PAD_MAX_HOST_PORTS];
++        pad_sdl_rumble_take();
++        pad_sdl_read(snap, 1);
++        pad_pub_lock();
++        memcpy(s_pub_state, snap, sizeof snap);
++        pad_pub_unlock();
++        SDL_Delay(PAD_POLL_INTERVAL_MS);
++    }
++    return 0;
++}
++#endif
++
+ static void pad_poll_backend(void)
+ {
+     static unsigned long long s_last_ms = 0;
+@@ -814,7 +903,14 @@ static void pad_poll_backend(void)
+ #if PAD_BACKEND_XINPUT
+     pad_poll_xinput();
+ #elif PAD_BACKEND_SDL2
+-    pad_poll_sdl2();
++    if (s_pad_thread) {   /* the pad thread's latest reading: no SDL call on the guest's thread */
++        s_guest_poll_ms = now;
++        pad_pub_lock();
++        memcpy(s_host_state, s_pub_state, sizeof s_host_state);
++        pad_pub_unlock();
++    } else {
++        pad_poll_sdl2();
++    }
+ #endif
+ #if defined(_WIN32) || PAD_BACKEND_SDL2
+     if (!s_host_state[0].connected) pad_poll_keyboard();
+@@ -1617,10 +1713,9 @@ s32 cellPadSetActDirect(u32 port_no, CellPadActParam* param)
+     u16 lo, hi;
+     pad_rumble_levels(param->motor[CELL_PAD_ACTUATOR_PARAM_SMALL],
+                       param->motor[CELL_PAD_ACTUATOR_PARAM_LARGE], &lo, &hi);
++#if PAD_BACKEND_XINPUT
+     s_rumble[port_no].lo = lo;
+     s_rumble[port_no].hi = hi;
+-
+-#if PAD_BACKEND_XINPUT
+     /* XInput keeps the motors at what they were last set to: no renewal. */
+     if (s_host_state[port_no].connected) {
+         XINPUT_VIBRATION vib;
+@@ -1631,9 +1726,19 @@ s32 cellPadSetActDirect(u32 port_no, CellPadActParam* param)
+ #endif
+ 
+ #if PAD_BACKEND_SDL2
+-    pad_lock();
+-    pad_sdl_rumble_send((int)port_no);
+-    pad_unlock();
++    if (s_pad_thread) {   /* the pad thread sends it: every SDL controller call is its */
++        pad_pub_lock();
++        s_rumble_req_lo[port_no] = lo;
++        s_rumble_req_hi[port_no] = hi;
++        s_rumble_req[port_no] = 1;
++        pad_pub_unlock();
++    } else {
++        pad_lock();
++        s_rumble[port_no].lo = lo;
++        s_rumble[port_no].hi = hi;
++        pad_sdl_rumble_send((int)port_no);
++        pad_unlock();
++    }
+ #endif
+ 
+     return CELL_OK;
+-- 
+2.56.0.windows.3
+
