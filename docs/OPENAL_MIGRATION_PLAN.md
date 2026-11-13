@@ -1,8 +1,8 @@
 # Audio: FMOD Ex out, OpenAL Soft in -- audit and migration plan (for review)
 
 Status: **approved by the owner 2026-11-11 with the adjustments below; M0-M3 done (sections 4.1-4.4); M4 accepted by
-the owner 2026-11-12 (sections 4.5, 4.6); M5 done (section 9.1); M6 begun (section 10); M7 (history) needs a separate
-approval; M8 (Bink: docs/FFMPEG_MIGRATION_PLAN.md) after M6.** Requirement (the owner, 2026-11-11): the PC recompilation's game audio runs on OpenAL Soft; FMOD Ex is not executed and no
+the owner 2026-11-12 (sections 4.5, 4.6); M5 done (section 9.1); M6 done 2026-11-13 (sections 10-10.7); M7 (history)
+needs a separate approval; M8 (Bink: docs/FFMPEG_MIGRATION_PLAN.md) next; M9-M11 documented only (docs/MILESTONES.md).** Requirement (the owner, 2026-11-11): the PC recompilation's game audio runs on OpenAL Soft; FMOD Ex is not executed and no
 FMOD-derived implementation code is in the public source or any distributed artifact. The FMOD work so far
 (docs/AUDIO.md A0-A3) stays a local compatibility reference only. Tags: [C] read in the code, [M] measured,
 [L] run logs, [I] inferred.
@@ -1118,3 +1118,30 @@ SPU programs (rel48).
 What M6 still holds (section 10's inventory): SPURS's HLE (the game's physics set-up makes its instances, tasksets,
 queues and barriers; no thread runs since 10.4), the runtime's SPU environment (channels, MFC, mailboxes, thread
 groups: unused, and fatal where they could matter), cellAudio and SDL2's audio for the movies (M8).
+
+### 10.7 M6 closed (2026-11-13): against rel27
+
+M6's gate (section 7: the census, the validation set, CPU and frame times against rel27). The census and the
+validation set ran on every M6 build (sections 10.2-10.6): no SPU reservation, line watch, SPURS task, SPU thread
+group or native decline in any run of the game, and none can happen unnoticed now (fatal, named). The comparison
+with rel27 -- the reference kept from before the migration, FMOD lifted and the SPU machinery in use -- against
+rel48 (build/r8/m6gate_run.sh; the river fight and the fields; capped at 60 and 144 fps and uncapped; two rounds
+rotated; each thread's CPU) [M]:
+
+| Scene, cap | Process (cores) | Main thread | p99 (ms) | p99.9 (ms) | Frame rate |
+|---|---|---|---|---|---|
+| River fight, 60 | 1.52-1.56 -> 0.80-0.84 | 99% -> 28-34% | 17.19-17.24 -> 16.85 | 17.45-17.53 -> 16.96-17.15 | 60 |
+| River fight, 144 | 1.81-1.83 -> 1.48-1.50 | 99% -> 69-70% | 7.48-7.53 -> 7.04 | 9.36-9.60 -> 7.45-8.23 | 144 |
+| River fight, uncapped | 1.92-1.96 -> 1.96 | 99% -> 99% | 6.57-6.77 -> 5.86-6.50 | 9.11 -> 7.11-7.82 | 207.0-211.5 -> 224.9-233.6 |
+| Fields, 60 | 1.43-1.48 -> 0.71-0.76 | 99% -> 23-30% | 17.18-17.29 -> 16.85 | 17.51-17.60 -> 16.97-16.99 | 60 |
+| Fields, 144 | 1.58-1.62 -> 1.20-1.22 | 99% -> 57-59% | 7.43-7.45 -> 7.03-7.04 | 8.47-8.97 -> 8.49-8.51 | 144 |
+| Fields, uncapped | 1.66-1.69 -> 1.73-1.74 | 99% -> 99% | 5.75-5.84 -> 5.10-5.18 | 7.71-8.52 -> 7.04-7.18 | 240.0-244.6 -> 279.2-283.8 |
+
+The game thread's own work a frame 4.67-4.77 to 4.23-4.39 ms in the river fight and 4.06-4.13 to 3.50-3.56 in the
+fields (uncapped); 44 threads to 39 in the river fight, 42 to 37 in the fields; the executable 132.9 MB to 87.4 MB.
+
+**Left after M6**: cellAudio and SDL2's audio, which carry the movies' sound until FFmpeg replaces Bink (M8); SPURS's
+HLE, which the game's physics set-up still calls (its instances, tasksets, queues and barriers: no thread, no task);
+the runtime's SPU environment, unused by the release and fatal where it could matter. The owner's sessions on an M6
+build (the census's third source in section 7) are asked for whenever convenient; Linux runtime validation stays
+open (docs/NATIVE_PORT.md).
