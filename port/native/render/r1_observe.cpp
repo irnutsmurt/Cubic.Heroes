@@ -55,6 +55,11 @@ extern "C" void ppfx_rec_exit(uint32_t addr, ppu_context* ctx);
 extern "C" void ppfx_rec_store(uint64_t ea, uint32_t bytes);
 extern "C" void ppfx_watch_start(void);
 static int s_rec = 0;
+// native/movie/movie_trace.cpp: M8.0's trace of the movies (DOTHEROES_MOVIE_TRACE), first in line for its addresses
+extern "C" int movie_trace_wanted(void);
+extern "C" int movie_trace_observe(uint32_t addr, ppu_context* ctx);
+extern "C" int movie_trace_exit(uint32_t addr, ppu_context* ctx);
+static int s_movie = 0;
 
 namespace {
 
@@ -162,8 +167,14 @@ void step(double t)
 
 }  // namespace
 
+extern "C" unsigned r1_frame_count(void)   // the flips seen (0x0069DD60's calls), for movie_trace.cpp
+{
+    return s_frame.load(std::memory_order_relaxed);
+}
+
 extern "C" void ppu_exit_observe(uint32_t addr, ppu_context* ctx)
 {
+    if (s_movie && movie_trace_exit(addr, ctx)) return;
     if (s_rec) ppfx_rec_exit(addr, ctx);
 }
 
@@ -176,6 +187,10 @@ static void r1_log(uint32_t addr, ppu_context* ctx);
 
 extern "C" int ppu_entry_observe(uint32_t addr, ppu_context* ctx)
 {
+    if (s_movie) {
+        const int m = movie_trace_observe(addr, ctx);
+        if (m >= 0) return m;
+    }
     const int act = s_rec ? ppfx_rec_observe(addr, ctx) : 0;
     r1_log(addr, ctx);
     return act;
@@ -222,7 +237,8 @@ struct R1ObserveInit {
         const char* dir = getenv("DOTHEROES_R1_DIR");
         const char* at = getenv("DOTHEROES_R1_AT");
         s_rec = ppfx_rec_wanted();
-        g_ppu_entry_observe = (dir && *dir && at && *at) || s_rec;
+        s_movie = movie_trace_wanted();
+        g_ppu_entry_observe = (dir && *dir && at && *at) || s_rec || s_movie;
         ppfx_watch_start();
     }
 } s_r1_observe_init;

@@ -1,0 +1,34 @@
+# Scenario: M8.0's trace of the movies (docs/FFMPEG_MIGRATION_PLAN.md section 2) on a trace build (a release from
+# tools/m8_trace_lift.sh's lift: BIN=build/r8/rel48m/bld/dotheroes.exe). A fresh save root. The title (its movie
+# plays about 32 s before the attract mode's demo replaces it, so START comes within that), NEW GAME with the first
+# character and the default name, the opening movie played to its end (154 s), the first area. Every call of the
+# movie class, Bink's API, the textures' creation and the movie paths goes to <run>/movie_trace.txt. The menus do
+# not always take a press as the drive expects, and the opening may start before the last press: fixed waits, no
+# log wait after the presses (a log wait sees only output after the last action).
+# The title's cycle with the attract mode's demo is traced by SCENARIO=attract with the same build and
+# DOTHEROES_MOVIE_TRACE; the credits by SCENARIO=m8_credits_trace.
+#! env DOTHEROES_MOVIE_TRACE=movie_trace.txt DOTHEROES_DEV_KEYS=1 PS3_VERBOSE=0
+#! env WINDOW=1 VISIBLE=1 GRAB_EVERY=5 PS3_OSD_FPS=0 DUMP=0 SHOT_EVERY=0
+#! secs 600
+log TitleMovie 120
+sleep 5
+press START                 # "PRESS START BUTTON"
+sleep 3
+press START                 # -> main menu
+sleep 3
+press CROSS                 # NEW GAME
+sleep 4
+press CROSS                 # first character
+sleep 2
+press CROSS                 # "Is this okay?" YES
+sleep 3
+press START                 # cursor to END
+sleep 2
+press CROSS                 # END
+sleep 2
+press CROSS                 # "Is this name okay?" YES
+segment opening the opening movie to its end (and the first area)
+sleep 200
+endseg
+shot ingame
+stop

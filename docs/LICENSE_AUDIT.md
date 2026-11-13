@@ -12,6 +12,8 @@
 | `config/excluded_code.json` | INDEP | keep |
 | `config/game_version.json` | INDEP | keep |
 | `config/insn_patches.json` | INDEP | keep |
+| `config/m8_dev_credits.json` | INDEP | keep |
+| `config/m8_movie_trace.json` | INDEP | keep |
 | `config/r6_native_observers.json` | INDEP | keep |
 | `config/r7_native_hooks.json` | INDEP | keep |
 | `config/r8_hooks.json` | INDEP | keep |
@@ -216,6 +218,7 @@
 | `port/diag/diag.h` | INDEP | keep |
 | `port/game_patches.cpp` | INDEP | keep |
 | `port/main.cpp` | INDEP | keep |
+| `port/movie_hooks.cpp` | INDEP | keep |
 | `port/native/audio/al_api.cpp` | INDEP | keep |
 | `port/native/audio/al_api.h` | INDEP | keep |
 | `port/native/audio/al_device.cpp` | INDEP | keep |
@@ -255,6 +258,7 @@
 | `port/native/memtest_stores.cpp` | INDEP | keep |
 | `port/native/movie/ff_api.cpp` | INDEP | keep |
 | `port/native/movie/ff_api.h` | INDEP | keep |
+| `port/native/movie/movie_trace.cpp` | INDEP | keep |
 | `port/native/phys_direct.cpp` | INDEP | keep |
 | `port/native/phys_direct.h` | INDEP | keep |
 | `port/native/render/ppfx_bridge.cpp` | INDEP | keep |
@@ -356,6 +360,8 @@
 | `tests/scenarios/installed_save.drive` | INDEP | keep |
 | `tests/scenarios/long_session.drive` | INDEP | keep |
 | `tests/scenarios/m4_pause.drive` | INDEP | keep |
+| `tests/scenarios/m8_credits_trace.drive` | INDEP | keep |
+| `tests/scenarios/m8_movie_trace.drive` | INDEP | keep |
 | `tests/scenarios/menus_r3.drive` | INDEP | keep |
 | `tests/scenarios/owner_boss.drive` | INDEP | keep |
 | `tests/scenarios/owner_boss_m4.drive` | INDEP | keep |
@@ -456,7 +462,9 @@
 | `tools/grab_luma.py` | INDEP | keep |
 | `tools/iso9660.py` | INDEP | keep |
 | `tools/license_audit.py` | INDEP | keep |
+| `tools/m8_trace_lift.sh` | INDEP | keep |
 | `tools/make_bundle.py` | INDEP | keep |
+| `tools/movie_inventory.py` | INDEP | keep |
 | `tools/owned_run.py` | INDEP | keep |
 | `tools/pan_check.py` | INDEP | keep |
 | `tools/pipeline.py` | INDEP | keep |
