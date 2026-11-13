@@ -48,10 +48,11 @@ own machine -- including the native versions of the game's SPU tasks, which are
 generated from your own copy's recompiled code. Everything derived from the game
 stays on your machine (`build/` in a checkout, or the install folder the setup
 app creates) and must not be redistributed. Nor does any proprietary
-middleware's code ship here: the game's audio middleware and video codec run
-only as part of your own recompiled game, and are being replaced by open-source
-libraries (OpenAL Soft for audio, FFmpeg for video:
-`docs/OPENAL_MIGRATION_PLAN.md`).
+middleware's code ship here. The game's audio runs on OpenAL Soft, and the audio
+middleware's code is left out of your recompiled game altogether (its functions
+are recompiled as traps: `docs/OPENAL_MIGRATION_PLAN.md`); the video codec still
+runs as part of your own recompiled game until FFmpeg replaces it
+(`docs/FFMPEG_MIGRATION_PLAN.md`).
 
 What the repository and the setup's downloads hold: the recompilation tools and
 the setup, this project's independently written runtime code, the open-source

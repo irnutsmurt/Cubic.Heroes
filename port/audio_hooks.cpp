@@ -1,12 +1,10 @@
 /* The game's audio boundary (docs/OPENAL_MIGRATION_PLAN.md section 1): entry hooks on its sound manager's
- * methods (config/audio_hooks.json) and -- for M0's baseline only -- on the FMOD Ex API functions those
- * methods call.
+ * methods (config/audio_hooks.json), each answered by the native sound manager on OpenAL Soft
+ * (port/native/audio/native_sound.h). The lifted methods never run: they called FMOD Ex, which is not in the
+ * lift (M5: config/excluded_code.json, its functions lifted as traps).
  *
- * M0: DOTHEROES_AUDIO_TRACE=<file> records every call through the hooks, its arguments and its results, and
- * changes nothing: each hook runs the lifted function itself (re-entering through its own hook, which then
- * declines), drains the lift's tail calls as a call site does, records the results and returns to the
- * caller as the lifted function would have. Without the variable every hook declines at its guard
- * (g_audio_hooks = 0) and the lifted functions run exactly as before.
+ * DOTHEROES_AUDIO_TRACE=<file> records every call through the hooks, its arguments and the native manager's
+ * results (M0 traced rel27's own FMOD calls the same way; tools/audio_trace.py reads both).
  *
  * A line of the trace (tools/audio_trace.py reads it):
  *   <us since the start> <the game's frame count> <thread> <name> [this=<hex>] <arguments> -> <r3 hex> [out=...]
@@ -24,7 +22,7 @@
  * through its lifted methods, as a call from the game would (traced like one when the trace is on). Nothing else
  * changes. */
 #include "ppu_recomp.h"   /* ppu_context, vm_base, the lifted functions */
-#include "native/audio/native_sound.h"   /* DOTHEROES_NATIVE_AUDIO: the native sound manager (M3) */
+#include "native/audio/native_sound.h"   /* the native sound manager (M3; the only one since M5) */
 
 #include <atomic>
 #include <chrono>
@@ -79,9 +77,9 @@ void put_str(std::string& s, uint32_t ea, size_t max)
     s += '"';
 }
 
-struct Hook { uint32_t addr; const char* name; const char* spec; void (*fn)(ppu_context*); };
+struct Hook { uint32_t addr; const char* name; const char* spec; };
 
-#define AUDIO_HOOK(hex, name, spec) { 0x##hex, name, spec, func_##hex },
+#define AUDIO_HOOK(hex, name, spec) { 0x##hex, name, spec },
 const Hook g_hooks[] = {
 #include "audio_hook_table.inc"
 };
@@ -96,10 +94,9 @@ int hook_index(uint32_t addr)
 
 int native_call(ppu_context* ctx, uint32_t addr);
 
-/* One traced call: the arguments as the hook found them, the lifted function run (its own hook declines while
- * `inner` is set) with its tail calls drained -- or, with the native sound manager, its answer -- and the outputs
- * as the function left them. */
-void traced_call(ppu_context* ctx, const Hook& h, int& inner, bool native = false)
+/* One traced call: the arguments as the hook found them, the native sound manager's answer, and the outputs as
+ * it left them. */
+void traced_call(ppu_context* ctx, const Hook& h)
 {
     const uint64_t g[8] = { ctx->gpr[3], ctx->gpr[4], ctx->gpr[5], ctx->gpr[6], ctx->gpr[7], ctx->gpr[8], ctx->gpr[9], ctx->gpr[10] };
     const double f[4] = { ctx->fpr[1], ctx->fpr[2], ctx->fpr[3], ctx->fpr[4] };
@@ -126,14 +123,7 @@ void traced_call(ppu_context* ctx, const Hook& h, int& inner, bool native = fals
         default: if (nout < 4) outs[nout++] = { *sp, (uint32_t)g[gi], 0 }; gi++; break;   // o b F
         }
     }
-    if (native) {
-        native_call(ctx, h.addr);
-    } else {
-        inner = 1;
-        h.fn(ctx);
-        while (g_trampoline_fn) { void (*fn)(void*) = g_trampoline_fn; g_trampoline_fn = nullptr; fn(ctx); }
-        inner = 0;
-    }
+    native_call(ctx, h.addr);
     snprintf(b, sizeof b, " -> %X", (uint32_t)ctx->gpr[3]);
     line += b;
     for (int k = 0; k < nout; k++) {
@@ -243,12 +233,9 @@ void lab_tick(ppu_context* ctx)
     }
 }
 
-// ---- DOTHEROES_NATIVE_AUDIO: the native sound manager (port/native/audio/native_sound.h, M3) -----------------
+// ---- the native sound manager (port/native/audio/native_sound.h, M3) ---------------------------------------
 // Each of the game's sound-manager methods answered by the native manager on OpenAL Soft; the lifted method
-// does not run, FMOD is never initialised. An FMOD API function reached anyway is counted (it should never be:
-// the sound manager is FMOD's only caller) and reported at exit.
-int g_native = 0;
-std::atomic<uint64_t> g_fmod_reached{0};
+// does not run.
 
 bool rdvec(uint32_t ea, float out[3])
 {
@@ -384,27 +371,17 @@ int native_call(ppu_context* ctx, uint32_t addr)
     return 1;
 }
 
-int hook(ppu_context* ctx, int index, int& inner)
+int hook(ppu_context* ctx, int index)
 {
-    if (inner || index < 0) return 0;   // the lifted function re-entered from traced_call
+    if (index < 0) return 0;
     if (!g_lab.empty() && g_hooks[index].addr == 0x00465D9C)   // setListener(pos, velocity): kept for `sepos`
         g_lab_have_listener = rdvec((uint32_t)ctx->gpr[4], g_lab_listener);
     if (!g_lab.empty() && g_hooks[index].addr == kUpdate) lab_tick(ctx);
-    if (g_native) {
-        const uint32_t addr = g_hooks[index].addr;
-        if (addr >= 0x00800000) {   // an FMOD API function: never expected with the native manager
-            if (g_fmod_reached++ == 0) fprintf(stderr, "[audio] FMOD reached with the native sound manager: %s\n", g_hooks[index].name);
-            return 0;
-        }
-        if (g_trace) {
-            traced_call(ctx, g_hooks[index], inner, true);
-            return 1;
-        }
-        return native_call(ctx, addr);
+    if (g_trace) {
+        traced_call(ctx, g_hooks[index]);
+        return 1;
     }
-    if (!g_trace) return 0;
-    traced_call(ctx, g_hooks[index], inner);
-    return 1;
+    return native_call(ctx, g_hooks[index].addr);
 }
 
 }  // namespace
@@ -413,9 +390,8 @@ int hook(ppu_context* ctx, int index, int& inner)
 #define AUDIO_HOOK(hex, name, spec)                                                                                \
     extern "C" int dotheroes_audio_##hex(ppu_context* ctx)                                                         \
     {                                                                                                              \
-        static thread_local int inner = 0;                                                                         \
         static const int index = hook_index(0x##hex);                                                              \
-        return hook(ctx, index, inner);                                                                            \
+        return hook(ctx, index);                                                                                   \
     }
 #include "audio_hook_table.inc"
 #undef AUDIO_HOOK
@@ -423,25 +399,20 @@ int hook(ppu_context* ctx, int index, int& inner)
 /* Before the guest starts (main.cpp). */
 extern "C" void dotheroes_audio_hooks_init(void)
 {
-    // DOTHEROES_NATIVE_AUDIO=1 (M3, a switch while the old path is kept for comparisons): the native sound manager
+    // The native sound manager is the game's audio (M5: FMOD is not in the lift; DOTHEROES_NATIVE_AUDIO, M3's
+    // switch, is gone -- a run that still sets it gets the same audio).
+    g_audio_hooks = 1;
+    fprintf(stderr, "[audio] the native sound manager (OpenAL Soft)\n");
     const char* nat = getenv("DOTHEROES_NATIVE_AUDIO");
-    if (nat && *nat == '1') {
-        g_native = 1;
-        g_audio_hooks = 1;
-        fprintf(stderr, "[audio] the native sound manager (OpenAL Soft) in place of FMOD (DOTHEROES_NATIVE_AUDIO)\n");
-        const char* loss = getenv("DOTHEROES_AUDIO_TEST_LOSS");
-        if (loss && *loss) {
-            losses_parse(loss);
-            fprintf(stderr, "[audio] test: %zu output losses scheduled (DOTHEROES_AUDIO_TEST_LOSS)\n", g_losses.size());
-        }
-        atexit([] {
-            fprintf(stderr, "[audio] at exit: FMOD API calls reached %llu\n", (unsigned long long)g_fmod_reached.load());
-        });
+    if (nat && *nat == '0') fprintf(stderr, "[audio] DOTHEROES_NATIVE_AUDIO=0 ignored: FMOD is not in this build\n");
+    const char* loss = getenv("DOTHEROES_AUDIO_TEST_LOSS");
+    if (loss && *loss) {
+        losses_parse(loss);
+        fprintf(stderr, "[audio] test: %zu output losses scheduled (DOTHEROES_AUDIO_TEST_LOSS)\n", g_losses.size());
     }
     const char* lab = getenv("DOTHEROES_DEV_SOUND");
     if (lab && *lab) {
         lab_parse(lab);
-        g_audio_hooks = 1;
         fprintf(stderr, "[sound-lab] %zu step(s) (DOTHEROES_DEV_SOUND)\n", g_lab.size());
     }
     const char* path = getenv("DOTHEROES_AUDIO_TRACE");
@@ -451,7 +422,6 @@ extern "C" void dotheroes_audio_hooks_init(void)
     setvbuf(g_trace, nullptr, _IOFBF, 1 << 20);
     g_t0 = g_last_flush = std::chrono::steady_clock::now();
     fprintf(g_trace, "# audio trace v1: <us> <game frame> <thread> <name> <args> -> <r3> <outs> (port/audio_hooks.cpp)\n");
-    g_audio_hooks = 1;
     atexit([] { std::lock_guard<std::mutex> lk(g_trace_mu); fflush(g_trace); });   // the game's own exit
     fprintf(stderr, "[audio-trace] %d hooks, writing %s\n", kHooks, path);
 }

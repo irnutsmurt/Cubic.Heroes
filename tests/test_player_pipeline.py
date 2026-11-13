@@ -43,7 +43,7 @@ class LiftOptions(unittest.TestCase):
     def test_matches_r8_lift(self):
         """every configuration file and flag of the developers' release lift is in the player's"""
         sh = read("tools", "r8_lift.sh")
-        dev = re.findall(r"(--sjlj|--insn-patches|--entry-observers) config/(\S+)", sh)
+        dev = re.findall(r"(--sjlj|--insn-patches|--entry-observers|--traps) config/(\S+)", sh)
         player = setup_pipeline.LIFT_CONFIG
         self.assertEqual(sorted(dev), sorted(player))
         self.assertIn("--chunks 48", sh)

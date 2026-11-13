@@ -1,0 +1,189 @@
+From 93eef6f729af87096dc29f9e677637f004b5911b Mon Sep 17 00:00:00 2001
+From: giteaguy <73799093+irnutsmurt@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 14:33:18 -0800
+Subject: [PATCH] Lifter: --traps inert functions (an excluded library's
+ start-up and exit)
+
+An excluded library's static constructors and destructors are reached by
+design: the C runtime's start-up and exit call every file's, through the
+executable's constructor and destructor tables, before anything else runs.
+As traps they end the program at its first instruction (found on the first
+title with a library excluded: FMOD Ex's 39 constructors and 2 destructors).
+
+The --traps file's "inert" list ({"addr", "note"}) names such functions: each
+must be a lifted function's start inside an excluded range, and is lifted as
+a plain return -- nothing of its body, no effect. They set up and tear down
+only the excluded library's own state, which nothing else reads.
+
+tools/test_ppu_traps.py: an inert function in the made-up program; its body
+is not in the source, and an indirect call to it returns with the registers
+as they were. 19 checks, all pass.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ runtime/ppu/tests/test_ppu_traps.cpp |  4 +++-
+ tools/ppu_lifter.py                  | 33 +++++++++++++++++++++++++++-
+ tools/test_ppu_traps.py              | 17 ++++++++++++--
+ 3 files changed, 50 insertions(+), 4 deletions(-)
+
+diff --git a/runtime/ppu/tests/test_ppu_traps.cpp b/runtime/ppu/tests/test_ppu_traps.cpp
+index dc15885..faaef50 100644
+--- a/runtime/ppu/tests/test_ppu_traps.cpp
++++ b/runtime/ppu/tests/test_ppu_traps.cpp
+@@ -8,6 +8,7 @@
+ //   middle       an indirect call into the middle of an excluded function (no function starts there)
+ //   fallthrough  a function that runs off its end into an excluded one
+ //   normal       a call to a function that is not excluded: it must run (r3 = 42)
++//   inert        an indirect call to an excluded function listed inert: it returns, nothing done (r3 as it was)
+ // A trap ends the run (ps3_fatal: abort) after its report; returning from an excluded entry is a failure.
+ #include "ppu_recomp.h"
+ #include <cstdint>
+@@ -63,7 +64,7 @@ int main(int argc, char** argv)
+ {
+     static const struct { const char* name; uint32_t entry; } kScenarios[] = {
+         { "direct", 0x10000 }, { "ctr", 0x10010 }, { "pointer", 0x10030 }, { "tail", 0x10050 },
+-        { "middle", 0x10060 }, { "fallthrough", 0x1FFF8 }, { "normal", 0x100A0 },
++        { "middle", 0x10060 }, { "fallthrough", 0x1FFF8 }, { "normal", 0x100A0 }, { "inert", 0x10100 },
+     };
+     if (argc < 2) { std::fprintf(stderr, "usage: test_ppu_traps <scenario>\n"); return 2; }
+     uint32_t entry = 0;
+@@ -81,6 +82,7 @@ int main(int argc, char** argv)
+     ps3_indirect_call(&ctx);
+     std::printf("returned: r3=%llu\n", (unsigned long long)ctx.gpr[3]);
+     if (!std::strcmp(argv[1], "normal")) return ctx.gpr[3] == 42 ? 0 : 1;
++    if (!std::strcmp(argv[1], "inert")) return ctx.gpr[3] == 0x40000 ? 0 : 1;
+     std::printf("NO TRAP: the excluded code was not stopped\n");
+     return 3;
+ }
+diff --git a/tools/ppu_lifter.py b/tools/ppu_lifter.py
+index 8510b01..54ce586 100644
+--- a/tools/ppu_lifter.py
++++ b/tools/ppu_lifter.py
+@@ -1418,6 +1418,22 @@ def load_entry_hooks(path: str) -> dict[int, tuple[str, str, bool]]:
+     return out
+ 
+ 
++def load_inert(path: str) -> dict[int, str]:
++    """The --traps file's "inert" list: {"inert": [{"addr": "0x...", "note": "..."}, ...]} -> {addr: note}.
++    Functions inside the excluded ranges that the program reaches by design and that only touch the excluded
++    code's own state -- a library's static constructors and destructors, which the C runtime's start-up and exit
++    call for every file -- lifted as a plain return instead of a trap: nothing of their body, no effect."""
++    with open(path) as f:
++        spec = json.load(f)
++    out: dict[int, str] = {}
++    for e in spec.get("inert", []):
++        a = int(str(e["addr"] if isinstance(e, dict) else e), 0)
++        if a & 3 or a in out:
++            sys.exit(f"[ppu_lifter] {path}: bad or duplicate inert function 0x{a:08X}")
++        out[a] = str(e.get("note", "")) if isinstance(e, dict) else ""
++    return out
++
++
+ def load_traps(path: str) -> list[tuple[int, int, str]]:
+     """Read a --traps file:
+ 
+@@ -4893,6 +4909,14 @@ class PPULifter:
+             lines.append(f"/* {label} */")
+         weak = "__attribute__((weak)) " if getattr(self, "weak_emit", False) else ""
+         trap = self._trap_of(func.start_addr)
++        if trap and func.start_addr in getattr(self, "inert", {}):
++            # --traps, inert: reached by design (a static constructor or destructor of the excluded code), only
++            # the excluded code's own state behind it -- a return, nothing of its body
++            self.inert_emitted = getattr(self, "inert_emitted", 0) + 1
++            lines += [f"void {weak}{func.name}(ppu_context* ctx) {{  /* excluded (--traps: {trap[2]}), inert */",
++                      "    (void)ctx;",
++                      "}", ""]
++            return lines
+         if trap:
+             # --traps: excluded code. Not one of its instructions is emitted; a call,
+             # a jump or a function pointer that reaches it reports itself and ends.
+@@ -6462,6 +6486,13 @@ def main() -> None:
+             sys.exit("[ppu_lifter] entry hooks at no lifted function's start: " +
+                      ", ".join(f"0x{a:08X}" for a in missing))
+     lifter.traps = load_traps(args.traps) if args.traps else []
++    lifter.inert = load_inert(args.traps) if args.traps else {}
++    if lifter.inert:
++        starts = {f.start_addr for f in lifter.functions}
++        bad = sorted(a for a in lifter.inert if a not in starts or not lifter._trap_of(a))
++        if bad:
++            sys.exit("[ppu_lifter] --traps: an inert function must be a lifted function's start in an excluded "
++                     "range: " + ", ".join(f"0x{a:08X}" for a in bad))
+     if lifter.traps:
+         # Nothing may attach to excluded code, and the ranges must follow the
+         # functions: no lifted function may run into one, no trapped one out of it.
+@@ -6486,7 +6517,7 @@ def main() -> None:
+                                  f"runs into the excluded range 0x{lo:08X}-0x{hi:08X} ({what})")
+         n = sum(1 for f in lifter._emit_functions() if lifter._trap_of(f.start_addr))
+         print(f"  traps: {len(lifter.traps)} excluded range(s), {n} function(s) lifted as traps "
+-              f"from {args.traps}")
++              f"({len(lifter.inert)} of them inert) from {args.traps}")
+ 
+     os.makedirs(args.output, exist_ok=True)
+ 
+diff --git a/tools/test_ppu_traps.py b/tools/test_ppu_traps.py
+index 0594443..bce42cc 100644
+--- a/tools/test_ppu_traps.py
++++ b/tools/test_ppu_traps.py
+@@ -28,6 +28,7 @@ from pathlib import Path
+ ROOT = Path(__file__).resolve().parents[1]
+ BASE, END = 0x10000, 0x20200
+ X1, X2 = 0x20000, 0x20100   # the excluded functions
++X3 = 0x20180                 # excluded and inert (a static constructor's place: reached by design, returns)
+ WHAT = "TEST excluded"
+ 
+ 
+@@ -50,10 +51,12 @@ def program():
+         0x10050: [b(0x10050, X1)],                                            # tail
+         0x10060: [lis(12, 2), ori(12, 12, 0x0108), mtctr(12), BCTRL, BLR],   # middle of X2
+         0x100A0: [bl(0x100A0, 0x100C0), BLR],                                 # normal
++        0x10100: [lis(12, 2), ori(12, 12, 0x0180), mtctr(12), BCTRL, BLR],   # inert: X3 returns
+         0x100C0: [li(3, 42), BLR],
+         0x1FFF8: [li(3, 5), li(4, 6)],                                        # runs off its end into X1
+         X1: [li(3, 0x777), BLR],
+         X2: [li(3, 0x778), li(4, 0x779), li(5, 0x77A), BLR],
++        X3: [li(3, 0x77B), li(4, 0x77C), BLR],
+     }
+     blob = bytearray(END - BASE)
+     for start, words in f.items():
+@@ -67,7 +70,8 @@ def lift(tmp, funcs, extra=()):
+     blob, _ = program()
+     (tmp / "prog.bin").write_bytes(blob)
+     (tmp / "funcs.json").write_text(json.dumps(funcs))
+-    (tmp / "traps.json").write_text(json.dumps({"traps": [{"lo": hex(X1), "hi": hex(END), "what": WHAT}]}))
++    (tmp / "traps.json").write_text(json.dumps({"traps": [{"lo": hex(X1), "hi": hex(END), "what": WHAT}],
++                                                "inert": [{"addr": hex(X3), "note": "a test"}]}))
+     out = tmp / "out"
+     r = subprocess.run([sys.executable, str(ROOT / "tools/ppu_lifter.py"), str(tmp / "prog.bin"), "--raw",
+                         "--base", hex(BASE), "--functions", str(tmp / "funcs.json"), "--traps", str(tmp / "traps.json"),
+@@ -98,11 +102,15 @@ def main():
+             check(m is not None and f'ppu_trap(0x{a:08X}u, "{WHAT}", ctx);' in m.group(1)
+                   and m.group(1).count(";") == 1, f"func_{a:08X} is only its trap")
+             check(not any(re.search(r"\b%s\b" % c, src) for c in consts), f"nothing of func_{a:08X}'s body in the source")
++        m = body(X3)
++        check(m is not None and "ppu_trap" not in m.group(1) and "(void)ctx;" in m.group(1)
++              and not re.search(r"0x77[BC]", src), f"func_{X3:08X} is inert: a return, nothing of its body")
+         check(f'{{ 0x{X1:08X}u, 0x{END:08X}u, "{WHAT}" }}' in src and "ppu_trap_ranges_register(" in src,
+               "the excluded range is registered")
+         m = body(0x100C0)
+         check(m is not None and "(0x2A)" in m.group(1), "the normal function is lifted (li r3,42 there)")
+-        check("traps: 1 excluded range(s), 2 function(s) lifted as traps" in r.stdout, "the lift reports the traps")
++        check("traps: 1 excluded range(s), 3 function(s) lifted as traps (1 of them inert)" in r.stdout,
++              "the lift reports the traps")
+ 
+         # 2. refusals
+         (tmp / "hooks.json").write_text(json.dumps({"entry_hooks": [{"addr": hex(X1), "host": "h", "guard": "g"}]}))
+@@ -148,6 +156,11 @@ def main():
+         check(p.returncode == 0 and "r3=42" in p.stdout and "TRAP" not in p.stderr, "normal: the call runs (r3 = 42)")
+         if p.returncode:
+             sys.stderr.write(p.stdout[-800:] + p.stderr[-1500:])
++        p = subprocess.run([str(exe), "inert"], env=env, capture_output=True, text=True, timeout=60)
++        check(p.returncode == 0 and "r3=262144" in p.stdout and "TRAP" not in p.stderr,
++              "inert: the call returns, nothing done (r3 as it was)")
++        if p.returncode:
++            sys.stderr.write(p.stdout[-800:] + p.stderr[-1500:])
+     if fails:
+         raise SystemExit(f"FAIL: {len(fails)} check(s)")
+     print("PASS: excluded code is not lifted and every path into it traps")
+-- 
+2.56.0.windows.3
+

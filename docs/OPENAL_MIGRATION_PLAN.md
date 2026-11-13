@@ -1,8 +1,8 @@
 # Audio: FMOD Ex out, OpenAL Soft in -- audit and migration plan (for review)
 
-Status: **approved by the owner 2026-11-11 with the adjustments below; M0-M3 done (sections 4.1-4.4); M4's automated
-part done (section 4.5), M4 open until the owner's listening and acceptance; M5 and M6 prepared (sections 9, 10), not
-begun; M7 (history) needs a separate approval; M8 (Bink) afterwards.** Requirement (the owner, 2026-11-11): the PC recompilation's game audio runs on OpenAL Soft; FMOD Ex is not executed and no
+Status: **approved by the owner 2026-11-11 with the adjustments below; M0-M3 done (sections 4.1-4.4); M4 accepted by
+the owner 2026-11-12 (sections 4.5, 4.6); M5 done (section 9.1); M6 begun (section 10); M7 (history) needs a separate
+approval; M8 (Bink: docs/FFMPEG_MIGRATION_PLAN.md) after M6.** Requirement (the owner, 2026-11-11): the PC recompilation's game audio runs on OpenAL Soft; FMOD Ex is not executed and no
 FMOD-derived implementation code is in the public source or any distributed artifact. The FMOD work so far
 (docs/AUDIO.md A0-A3) stays a local compatibility reference only. Tags: [C] read in the code, [M] measured,
 [L] run logs, [I] inferred.
@@ -594,6 +594,10 @@ without a position was about 1.0 a side in rel27's mix, not 0.707 -- the 0.707 h
 no positioned effect within 0.05 dB). This is the owner's approved spatialization (OpenAL Soft's own, no gain
 added, the old fold not recreated) with its size corrected; nothing in the audio was changed for it.
 
+**The owner's decision on the corrected levels (2026-11-12):** kept as they are. The owner heard them in play and
+found them good; OpenAL Soft's own spatialization and levels stay, with no compensating gain and no recreation of
+FMOD's downmix. M4 is closed.
+
 ## 5. Repository licensing audit and cleanup
 
 File by file: docs/LICENSE_AUDIT.md (every tracked file classified). Findings before M1 (453 files) and what
@@ -719,6 +723,81 @@ controllers and the keyboard (cellPad), timers; on Linux OpenAL Soft's own outpu
 **M5's gates** (section 7): the validation set and the install test on the build with the traps; no trap reached in
 any run (every drive, the long session, a movie with sound, the owner's session); the executable's FMOD ranges
 holding only traps (the boundary check of a built game can count them).
+
+### 9.1 M5 done (2026-11-12): FMOD excluded from the lift
+
+M4 was accepted on 2026-11-12 (section 4.6), and M5 went ahead as prepared above, with these differences found on
+the way [C: code; S: the lift; L: run logs; M: measured].
+
+**The lifter's exclusion** (ps3recomp patches 0146-0148; generic, not FMOD's): `ppu_lifter.py --traps <json>` lifts
+every function starting in an excluded range as a call of `ppu_trap(address, what, ctx)` -- it reports the address,
+the host call chain and the guest stack, then ends the game ("excluded-code") -- and registers the ranges with the
+runtime, so `ppu_lookup` answers any other address inside them (an indirect call, a pointer, a jump into a
+function's middle) with the same trap. A range that cuts a function is refused, as is a hook, a patch, an observer or
+a promoted call inside one. Tested on a synthetic program (tools/test_ppu_traps.py: direct calls, CTR calls, a
+function pointer, a tail call, a jump into an excluded function's middle, falling through into one, an ordinary
+function beside them, an inert one: 19 checks). build_spu_workloads.py `--exclude` leaves an SPU image out of the
+lift.
+
+**The inventory, corrected** [S]: FMOD's code is [0x0082F650, 0x00908584) -- 2,792 functions -- and
+[0x00A42AA0, 0x00A440E0), 60 functions: the out-of-line methods of FMOD's classes, each held only by FMOD's own
+vtables (read from the vtables and the function descriptors). Section 9's second range, [0xA42E10, 0xA43800), cut a
+function in two (0xA43784 runs to 0xA43860) and missed 34 of those methods. The 28 call stubs at
+0x00987478-0x00987658 stay lifted (TOC-switching glue): a call through one lands in a trap. 2,853 functions
+excluded in all.
+
+**What the traps found at once** [L]: the first M5 build stopped at its start, in FMOD's code at 0x008F476C, called
+from 0x0069C264 -- the C runtime's start-up walking its table of static constructors (0x00FE0000-0x00FE0718, 453
+entries, 39 of them FMOD's; the destructors' table after it, 273 entries, 2 FMOD's). No inventory of calls had
+listed them: they are reached only through that table. The 41 are lifted as a plain return (`inert` in
+config/excluded_code.json): they set up and tear down only FMOD's own globals. The lift reports "2,853 traps (41 of
+them inert)".
+
+**What went with FMOD**: its 21 SPU programs (the mixer, its NeuralTHX variant, the 19 plugins; build/gen/spu holds
+the game's five); the 28 FMOD API hooks (config/audio_hooks.json: the sound manager's 28 stay); the flashMP3 patch
+(config/insn_patches.json, its guard in game_patches.cpp); the switch DOTHEROES_NATIVE_AUDIO (=0 is now ignored,
+with a line saying so: the native sound manager on OpenAL Soft is the only path); native_sound_absent.cpp (a build
+without OpenAL Soft's headers now stops with an error instead of making a silent game). The setup's lift
+(tools/setup_pipeline.py, tools/pipeline.py, tools/r8_lift.sh) passes `--traps config/excluded_code.json` and leaves
+the excluded SPU images out; the configuration is in the tools' fingerprint, so a player's update relifts. The
+executable: 131.7 MB to 120.4 MB.
+
+**Kept until M8**: cellAudio and SDL2's audio output, which carry the movies' sound (Bink's own cellAudio ports).
+
+**M5's gate** (rel41; build/r8/m5_run.sh, local) [M]:
+Every run ended without a crash and without reaching a trap.
+- The memory test: 695 of 695.
+- The validation drives: the river fight, the menus, the fields, a dungeon, the snapshot scene, the after-boss
+  scene, the editor, the boss exit, the deeper dungeon, continue from a save, the sound lab.
+- Vulkan validation on the river fight: 0 messages. The damage run.
+- Quitting through the game's own menu: exit 0 (FMOD's two static destructors inert).
+- The water check: 2,483 of 2,483 steps equal. The waver check: 1,170 of 1,177 frames equal (4 with the field
+  and 7 with the texture differing, the known mid-ripple class: rel37's 1,162 of 1,169).
+- The attract movie with its sound: Bink's 2 audio threads, its 2 cellAudio ports; the level within 0.1 dB of
+  M4's capture in every 10 s window.
+- A 30-minute session (1,804 s): the working set 960 MB from the fifth minute to the end.
+- The save flows (seven drives): each wrote the folders expected and no others.
+- The four reference scenes against RPCS3: 5 of 5 within.
+- The A/B against rel40 (uncapped, two rounds each, rotated) found no regression:
+
+  | Scene | rel40 fps | rel41 fps | rel40 p99 (ms) | rel41 p99 (ms) |
+  |---|---|---|---|---|
+  | River fight | 208.3-208.9 | 209.3 | 6.59-6.75 | 6.62-6.72 |
+  | Fields | 239.3-243.3 | 237.1-247.1 | 5.69-5.72 | 5.80-6.21 |
+
+- The player side: tests/test_player_pipeline.py's 11 tests; a fresh installation from the disc image (its lift
+  equal to the developers', 0 files differ), an update, a relift, the settings, and a river fight from the
+  installation (native physics). The installation's build took the port's sources as they stood then, with M6's
+  first native changes already in them (not yet committed; section 10): its river fight was also their first run.
+- The lift's FMOD ranges hold 2,853 functions: 2,812 traps and the 41 inert ones; no function outside them calls the
+  trap.
+
+The installation test's leaf-promotion check expected over 8,000 (R8's lift). M5's lift promotes 7,428: R8's 8,385
+less FMOD's 957, the same set outside the excluded ranges. The check now expects over 7,000, and the test compares
+with M5's lift (build/r8/gen14) by default.
+
+**Not yet**: the owner's session on a build with the traps. The next build (M6's first, rel42) carries M5 unchanged
+and serves for it.
 
 ## 10. M6 prepared: the SPU machinery left after M5 (2026-11-12; an inventory, nothing changed)
 

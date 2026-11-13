@@ -1,4 +1,10 @@
-# Audio: FMOD Ex today, OpenAL Soft next
+# Audio: OpenAL Soft (FMOD Ex excluded from the lift since M5)
+
+**Now (2026-11-12, M5)**: the game's audio is the native sound manager on OpenAL Soft, the only path; FMOD Ex's
+PPU code is lifted as traps (config/excluded_code.json; reaching it ends the game with a report) and its SPU
+programs are not lifted. Section 1 below describes FMOD as it ran until then (lifted), kept as the record of what
+the native layer replaced; the migration's record and its validation: docs/OPENAL_MIGRATION_PLAN.md. The movies'
+sound still goes through cellAudio and SDL2 until M8 (docs/FFMPEG_MIGRATION_PLAN.md).
 
 **The requirement (the owner, 2026-11-11)**: the PC recompilation's game audio runs on **OpenAL Soft**
 (dynamically linked, its LGPL notices shipped); FMOD Ex is not executed in the final game, and no
@@ -11,7 +17,7 @@ replaced and validated (docs/NATIVE_R8.md section 9; the plan's M6).
 Labels: [C] read in the code, [L] seen in run logs, [M] measured, [I] inferred, [D] from an earlier
 document. Addresses are this game's (BLUS-30490).
 
-## 1. What runs today (2026-11-11, after M1)
+## 1. What ran until M5 (2026-11-11, after M1): FMOD lifted
 
 FMOD Ex 4 for PS3 is statically linked into the game. All of it runs **as lifted code**: its PPU side as the
 rest of the game's lifted code, its SPU side (a mixer program and the codec and DSP plugins it loads) as

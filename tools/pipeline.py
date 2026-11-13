@@ -178,13 +178,15 @@ def main():
     rec = os.path.join(GEN, "recompiled")
     sjlj = os.path.join(ROOT, "config", "sjlj.json")
     patches = os.path.join(ROOT, "config", "insn_patches.json")
+    excl_cfg = os.path.join(ROOT, "config", "excluded_code.json")   # code not lifted: FMOD's (M5)
     # The lifter leaves unchanged chunks untouched (good for incremental
     # builds), so freshness is tracked with a stamp, not the outputs' mtimes.
     lift_stamp = os.path.join(GEN, ".lift_stamp")
     if not (os.path.exists(os.path.join(rec, "ppu_recomp.h"))
-            and fresh([lift_stamp], [fixed, imp_json, sjlj, patches, os.path.join(TOOLS, "ppu_lifter.py")])):
+            and fresh([lift_stamp], [fixed, imp_json, sjlj, patches, excl_cfg, os.path.join(TOOLS, "ppu_lifter.py")])):
         run("lift", [PY, os.path.join(TOOLS, "ppu_lifter.py"), elf, "--functions", fixed,
-                     "--hle-stubs", imp_json, "--sjlj", sjlj, "--insn-patches", patches, "--chunks", PPU_CHUNKS, "-o", rec + "/"])
+                     "--hle-stubs", imp_json, "--sjlj", sjlj, "--insn-patches", patches, "--chunks", PPU_CHUNKS,
+                     "--traps", excl_cfg, "-o", rec + "/"])
         open(lift_stamp, "w").close()
 
     # spu
@@ -193,15 +195,18 @@ def main():
     spu_stamp = os.path.join(GEN, ".spu_stamp")
     reloc_cfg = os.path.join(ROOT, "config", "spu_relocatable.json")
     hooks_cfg = os.path.join(ROOT, "config", "spu_entry_hooks.json")
-    if not (os.path.exists(wl) and fresh([spu_stamp], [elf, reloc_cfg, hooks_cfg, os.path.join(TOOLS, "spu_lifter.py"), os.path.join(TOOLS, "find_spu_functions.py"),
+    excluded = json.load(open(excl_cfg)).get("spu_images", [])   # FMOD's SPU programs (M5): not lifted
+    if not (os.path.exists(wl) and fresh([spu_stamp], [elf, reloc_cfg, hooks_cfg, excl_cfg, os.path.join(TOOLS, "spu_lifter.py"), os.path.join(TOOLS, "find_spu_functions.py"),
                                                        os.path.join(TOOLS, "build_spu_workloads.py")])):
         images = os.path.join(spu, "images")
         run("spu", [PY, os.path.join(TOOLS, "extract_spu_images.py"), elf, "--output", images])
         reloc = []
         for img in json.load(open(reloc_cfg))["images"]:
-            reloc += ["--relocatable", f"{img}=0x{spu_text_ea(elf, os.path.join(images, img + '.elf')):08X}"]
+            if img not in excluded:
+                reloc += ["--relocatable", f"{img}=0x{spu_text_ea(elf, os.path.join(images, img + '.elf')):08X}"]
         run("spu", [PY, os.path.join(TOOLS, "build_spu_workloads.py"), "--images", images,
-                    "--lifted", spu, "--out", wl, "--constructor", "--relift", "--entry-hooks", hooks_cfg, *reloc])
+                    "--lifted", spu, "--out", wl, "--constructor", "--relift", "--entry-hooks", hooks_cfg, *reloc,
+                    *[a for img in excluded for a in ("--exclude", img)]])
         open(spu_stamp, "w").close()
 
     log("done", f"generated sources in {os.path.relpath(GEN, ROOT)}/")
