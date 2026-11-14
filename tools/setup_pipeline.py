@@ -138,7 +138,7 @@ class Paths:
 # tools -- not every file in tools/ (a launcher's or a developer's script changes no lift), but everything the
 # lift reads: the SPU tasks' generator, its template and its per-task configurations (tools/spu_native/) too.
 LIFT_TOOLS = ["fix_functions.py", "setup_pipeline.py", "gen_spu_native.py", "spu_native_task.cpp.in"]
-NOT_LIFT_CONFIG = {"release_keys.json"}   # the launcher's, not the lift's (M9.3)
+NOT_LIFT_CONFIG = {"release_keys.json", "settings_schema.json"}   # the launcher's, not the lift's (M9.3-M9.4)
 
 
 def tool_fingerprint(*names):

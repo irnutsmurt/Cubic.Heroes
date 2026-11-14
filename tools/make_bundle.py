@@ -58,7 +58,7 @@ ZIG_DROP = ("doc", "docs", "lldb", "libtsan")
 OUR_TOOLS = ["fix_functions.py", "iso9660.py", "self_decrypt.py", "setup_pipeline.py", "zig_build.py",
              "shortcuts.py", "self_update.py", "version.py", "gen_spu_native.py", "spu_native_task.cpp.in",
              "worker.py", "game_settings.py", "install_layout.py", "updates.py",
-             "release_trust.py"]   # the launcher's worker (M9.0-M9.3)
+             "release_trust.py", "settings.py", "diagnostics.py"]   # the launcher's worker (M9.0-M9.4)
 
 
 def copy_tracked(rel, dst, skip=()):
@@ -131,7 +131,8 @@ def pyinstaller(platform, dist):
                     "python3 -m venv build/venv && build/venv/bin/pip install pyinstaller pycryptodome pillow")]
     args[args.index(None)] = paths["icon"]
     hidden = ["setup_pipeline", "zig_build", "iso9660", "self_decrypt", "shortcuts", "self_update", "version",
-              "worker", "game_settings", "install_layout", "updates", "release_trust", "Crypto.Cipher.AES",
+              "worker", "game_settings", "install_layout", "updates", "release_trust", "settings", "diagnostics",
+              "Crypto.Cipher.AES",
               "Crypto.Util.Counter"]
     hidden += tool_imports()
     subprocess.check_call(cmd + args + [

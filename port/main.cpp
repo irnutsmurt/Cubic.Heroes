@@ -951,7 +951,7 @@ static int dotheroes_prepare(int argc, char** argv)
         fflush(stdout);
         return 4;
     }
-    char summary[700];
+    char summary[1200];
     const int r = ppfx_native_prepare(prepare_progress, nullptr, summary, (int)sizeof summary, check);
     printf("{\"ev\":\"prepared\",\"result\":%s}\n", summary);
     fflush(stdout);

@@ -747,6 +747,42 @@ def cmd_swap_launcher(a, ev, control):
     return {"result": out}
 
 
+# ---- M9.4's back end: the settings, the diagnostics (docs/M9_LAUNCHER_PLAN.md section 13) ----
+
+def cmd_settings(a, ev, control):
+    """the settings as the game and launcher will use them, with any problems; --set KEY=VALUE (each checked; none
+    written if one is not valid), --reset KEY (or --reset all), --repair (a damaged file written again, the damaged
+    one kept)"""
+    import settings
+    install = os.path.abspath(a.install)
+    try:
+        if a.repair:
+            return settings.repair(install)
+        if a.reset:
+            return settings.reset(install, None if a.reset == ["all"] else a.reset)
+        if a.set:
+            changes = {}
+            for kv in a.set:
+                if "=" not in kv:
+                    raise pipeline.SetupError(f"--set {kv}: not KEY=VALUE.", "usage")
+                k, v = kv.split("=", 1)
+                changes[k.strip()] = v.strip()
+            return settings.set_values(install, changes)
+        return settings.effective(install)
+    except settings.SettingsError as e:
+        raise pipeline.SetupError(str(e), e.code)
+
+
+def cmd_diagnostics(a, ev, control):
+    """a report for the player to review: its files, privacy-sanitized, into --out DIR (the launcher shows them; the
+    player may remove any); --pack ZIP: exactly what is in --out now, as one zip"""
+    import diagnostics
+    out = os.path.abspath(a.out)
+    if a.pack:
+        return diagnostics.pack(out, os.path.abspath(a.pack))
+    return {"folder": out, "files": diagnostics.collect(os.path.abspath(a.install), out)}
+
+
 def cmd_prepare(a, ev, control):
     """the shaders and pipelines made before play (--check: only whether the cache is valid for this GPU and driver,
     and how many recipes there are)"""
@@ -809,7 +845,8 @@ COMMANDS = {"version": cmd_version, "probe-disc": cmd_probe_disc, "probe-keys": 
             "migrate": cmd_migrate, "builds": cmd_builds, "rollback": cmd_rollback, "retention": cmd_retention,
             "repair-link": cmd_repair_link, "saves": cmd_saves, "prepare": cmd_prepare,
             "check-update": cmd_check_update, "download-update": cmd_download_update,
-            "stage-launcher": cmd_stage_launcher, "swap-launcher": cmd_swap_launcher, "selftest": cmd_selftest}
+            "stage-launcher": cmd_stage_launcher, "swap-launcher": cmd_swap_launcher, "settings": cmd_settings,
+            "diagnostics": cmd_diagnostics, "selftest": cmd_selftest}
 
 
 def parser():
@@ -828,6 +865,11 @@ def parser():
     p.add_argument("--note", help="saves backup: a note kept with it")
     p.add_argument("--confirm", action="store_true", help="saves restore/delete: the player confirmed")
     p.add_argument("--check", action="store_true", help="prepare: only whether a preparation is due")
+    p.add_argument("--set", action="append", help="settings: KEY=VALUE (repeatable)")
+    p.add_argument("--reset", action="append", help="settings: a key to its default (repeatable; all: every one)")
+    p.add_argument("--repair", action="store_true", help="settings: write a damaged settings file again")
+    p.add_argument("--out", help="diagnostics: the folder the report's files are written into")
+    p.add_argument("--pack", help="diagnostics: the zip to make from --out as it is now")
     p.add_argument("--channel", choices=("stable", "prerelease"), default="stable", help="updates: the channel")
     p.add_argument("--source", help="updates: a release list other than GitHub's (a mirror, for tests)")
     p.add_argument("--trusted-keys", dest="keys_file",
@@ -853,7 +895,7 @@ REQUIRED = {"probe-disc": ("disc",), "probe-keys": ("disc", "keys"), "space": ("
             "builds": ("install",), "rollback": ("install",), "retention": ("install", "keep"),
             "repair-link": ("install",), "saves": ("install",), "prepare": ("install",),
             "download-update": ("install",), "stage-launcher": ("package", "launcher"),
-            "swap-launcher": ("launcher", "start")}
+            "swap-launcher": ("launcher", "start"), "settings": ("install",), "diagnostics": ("install", "out")}
 
 
 def main(argv=None):

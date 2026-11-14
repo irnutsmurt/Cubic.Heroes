@@ -5334,17 +5334,35 @@ extern "C" int ppfx_native_prepare(void (*progress)(uint32_t done, uint32_t tota
         snprintf(summary, (size_t)n, "{\"error\":\"the renderer did not start\"}");
         return -1;
     }
+    // the GPU and its driver (the diagnostics; a cache is valid for these only)
+    VkPhysicalDeviceProperties props;
+    ppfx::F.GetPhysicalDeviceProperties(ppfx::D.phys, &props);
+    char gpu[400], name[VK_MAX_PHYSICAL_DEVICE_NAME_SIZE + 1];
+    size_t j = 0;
+    for (size_t i = 0; props.deviceName[i] && j + 1 < sizeof name; i++)
+        if (props.deviceName[i] != '"' && props.deviceName[i] != '\\' && (unsigned char)props.deviceName[i] >= 0x20)
+            name[j++] = props.deviceName[i];
+    name[j] = 0;
+    const uint32_t dv = props.driverVersion;
+    char driver[48];
+    if (props.vendorID == 0x10DE)   // NVIDIA's packing: 10.8.8.6 bits
+        snprintf(driver, sizeof driver, "%u.%u", dv >> 22, (dv >> 14) & 0xFF);
+    else
+        snprintf(driver, sizeof driver, "%u.%u.%u", VK_VERSION_MAJOR(dv), VK_VERSION_MINOR(dv), VK_VERSION_PATCH(dv));
+    snprintf(gpu, sizeof gpu, "\"gpu\":{\"name\":\"%s\",\"vendor\":\"0x%04X\",\"device\":\"0x%04X\",\"driver\":\"%s\","
+             "\"driver_raw\":%u,\"vulkan\":\"%u.%u.%u\"}", name, props.vendorID, props.deviceID, driver, dv,
+             VK_VERSION_MAJOR(props.apiVersion), VK_VERSION_MINOR(props.apiVersion), VK_VERSION_PATCH(props.apiVersion));
     if (check_only) {   // the state a launcher decides by: the cache valid here, how many recipes
         snprintf(summary, (size_t)n, "{\"check\":true,\"recipes\":%u,\"cache\":\"%s\",\"cache_mb\":%.2f,"
-                 "\"prepared\":%s}", ppfx::s_rc_loaded, ppfx::s_pc_state.c_str(), ppfx::s_pc_loaded / 1048576.0,
-                 ppfx::s_pc_state == "reused" ? "true" : "false");
+                 "\"prepared\":%s,%s}", ppfx::s_rc_loaded, ppfx::s_pc_state.c_str(), ppfx::s_pc_loaded / 1048576.0,
+                 ppfx::s_pc_state == "reused" ? "true" : "false", gpu);
         return 0;
     }
     const ppfx::PrepareResult r = ppfx::prepare_run(progress, ctx);
     snprintf(summary, (size_t)n,
              "{\"recipes\":%u,\"made\":%u,\"failed\":%u,\"translated\":%u,\"from_cache\":%u,\"ms\":%.1f,"
-             "\"cache\":\"%s\",\"cache_mb_before\":%.2f,\"cache_mb\":%.2f}",
+             "\"cache\":\"%s\",\"cache_mb_before\":%.2f,\"cache_mb\":%.2f,%s}",
              r.recipes, r.made, r.failed, r.translated, r.from_cache, r.ms, ppfx::s_pc_state.c_str(),
-             ppfx::s_pc_loaded / 1048576.0, ppfx::s_pc_saved / 1048576.0);
+             ppfx::s_pc_loaded / 1048576.0, ppfx::s_pc_saved / 1048576.0, gpu);
     return r.failed ? 1 : 0;
 }

@@ -1,0 +1,33 @@
+{
+ "about": "The one authoritative settings file's schema (M9: docs/M9_LAUNCHER_PLAN.md section 13). The file is <install>/config/dotheroes.cfg, NAME=value lines: the game reads it at start (port/main.cpp), the launcher and the game's own menus read and write it through these rules. owner: who uses the value; applies: 'live' (taken while the game runs) or 'restart' (at the game's next start). M10 adds the remaining PC settings here.",
+ "format": 1,
+ "settings": [
+  {"key": "DOTHEROES_FPS", "owner": "game", "type": "enum", "values": ["60", "30", "0"], "default": "60",
+   "applies": "restart", "category": "Display", "label": "Frame limit",
+   "labels": {"60": "60 fps (smoother; the game runs at the same speed)", "30": "30 fps (the original)", "0": "Unlimited"}},
+  {"key": "PS3RECOMP_VK_FULLSCREEN", "owner": "game", "type": "bool", "default": "0", "applies": "restart",
+   "category": "Display", "label": "Fullscreen"},
+  {"key": "DOTHEROES_NATIVE_CD", "owner": "game", "type": "bool", "default": "1", "applies": "restart",
+   "category": "Performance", "label": "Native collision", "advanced": true,
+   "help": "Holds 60 fps in debris-heavy fights; off: the original's way, slower."},
+  {"key": "DOTHEROES_NATIVE_SOLVER", "owner": "game", "type": "list", "values": ["1", "2", "4", "5", "6"],
+   "default": "1,2,4,5,6", "previous_defaults": ["4,5,6"], "applies": "restart", "category": "Performance",
+   "label": "Native physics solver commands", "advanced": true},
+  {"key": "GCM_WRAP_LAP", "owner": "game", "type": "bool", "default": "1", "applies": "restart",
+   "category": "Performance", "label": "Capped command-ring lap", "advanced": true},
+  {"key": "DOTHEROES_PRESENT_ONCE", "owner": "game", "type": "bool", "default": "1", "applies": "restart",
+   "category": "Performance", "label": "One present per flip", "advanced": true},
+  {"key": "LAUNCHER_UPDATE_CHANNEL", "owner": "launcher", "type": "enum", "values": ["stable", "prerelease"],
+   "default": "stable", "applies": "live", "category": "Updates", "label": "Update channel",
+   "labels": {"stable": "Stable releases", "prerelease": "Test releases too (prereleases)"}},
+  {"key": "LAUNCHER_CHECK_UPDATES", "owner": "launcher", "type": "bool", "default": "1", "applies": "live",
+   "category": "Updates", "label": "Check for updates when the launcher starts"},
+  {"key": "LAUNCHER_BUILDS_KEPT", "owner": "launcher", "type": "int", "min": 0, "max": 5, "default": "1",
+   "applies": "live", "category": "Updates", "label": "Previous game builds kept for rollback"},
+  {"key": "LAUNCHER_SAVE_BACKUPS_KEPT", "owner": "launcher", "type": "int", "min": 1, "max": 100, "default": "10",
+   "applies": "live", "category": "Saves", "label": "Automatic save backups kept",
+   "help": "Backups you make yourself are kept until you delete them."},
+  {"key": "LAUNCHER_LOG_LEVEL", "owner": "launcher", "type": "enum", "values": ["info", "debug"], "default": "info",
+   "applies": "live", "category": "Diagnostics", "label": "Log detail"}
+ ]
+}
