@@ -603,3 +603,65 @@ probes, the space check, the install with its progress, elapsed and remaining ti
 active build, an update and its notes, the preparation when its check says so), builds and rollback, caches,
 saves, diagnostics, settings; keyboard, mouse and controller; DPI; window placement; the Steam shortcut; its side of
 the self-update (`--after-update`, `--update-failed`, `.started-ok`); a fallback when Vulkan is missing.
+
+## 14. M9.4, part 2: the launcher (2026-11-14) [C, M]
+
+**What it is** (launcher/main.cpp, json.h, worker_client.h; built by tools/build_launcher.py into
+build/launcher/CubicHeroes.exe): a native window (SDL2, Dear ImGui 1.93.0 -- the release archive pinned by its
+SHA-256 in config/deps.sha256, compiled in, its MIT licence shipped beside the launcher with SDL2's) that runs every
+operation through the pipeline worker (docs/M9_WORKER_PROTOCOL.md). Its pages:
+- **Play**: the active build, PLAY (the game through `<install>/game`), the shaders' state for this GPU and driver
+  (`prepare --check`; "Prepare now" when one is due), the update state; a setup app's install found: "Move it now"
+  (`migrate`); none: the way to Install.
+- **Install** (the wizard): 1 the disc (a file browser, or dropped onto the window; `probe-disc` names another game,
+  version or a damaged image), 2 its keys (`probe-keys`), 3 the folder (`space`); Install only when all three are
+  checked; an interrupted install continued (`--resume`); on an existing install: repair from the disc.
+- **Updates**: the channel, a check, the notes, a download checked against the signed manifest; offline and "no
+  release key" said plainly.
+- **Builds**: every build, the active one and the kept ones; "Go back to it" (confirmed) -- `rollback`.
+- **Saves**: a backup now (with a note typed on the on-screen keyboard), every backup with its date, size, files and
+  why it was made; Restore and Delete, each confirmed.
+- **Shaders**: the GPU, the driver, the cache's state and size, the pipelines known; Prepare now; Rebuild the cache
+  (confirmed; `prepare --rebuild`).
+- **Settings**: the authoritative file's settings by category, each changed with A or left/right, those that apply
+  at the game's next start marked; Restore the defaults (confirmed); Add to Steam (no artwork downloaded); a
+  Start-menu shortcut; another install folder.
+- **Diagnostics**: a report made, every file listed and readable before it is packed, any left out (X), the zip in
+  Documents.
+- Over the pages: an operation's progress (the steps, the bar, elapsed and remaining time -- "about" when it rests
+  on the reference PC's figures --, the step's detail), Cancel (B); messages with expandable technical details;
+  confirmations whose safe choice has the focus.
+
+**With a controller alone** (the owner's requirement): every page, button, list, the file browser (drives and the
+known folders, A opens or chooses, B goes up, Y closes) and the on-screen keyboard (A types, X deletes, Y a space,
+MENU done, B cancels) is reached with the D-pad or the left stick; A confirms, B goes back or cancels, LB/RB change
+pages; the focused item carries a two-ring outline (white on the accent-coloured buttons); the bottom bar shows the
+buttons that do something here and now. The prompts follow the device last used -- the controller's A/B/X/Y in their
+colours and LB/RB, or Enter, Esc, X, Y, Q/E keycaps -- and start as the controller's when one is connected.
+Controllers are taken as they are plugged in or out (SDL's game-controller layer, Dear ImGui's "all gamepads" mode).
+The keyboard and mouse do everything too (Q/E or Page Up/Down for the pages, a click on a page's name).
+
+**The window**: its size, position and maximized state remembered (%APPDATA%\CubicHeroes\launcher.json, with the
+install folder and the last disc and keys paths -- paths only), per-monitor DPI-aware and scaled to the display, a GUI
+program (no console; the worker started with no window). `--page NAME` opens on a page; `--after-update` writes the
+health file the self-update waits for; `--update-failed` says the previous launcher was put back.
+
+**Drawing, and a decision for the owner**: the launcher draws through SDL2's renderer (Direct3D 11 or OpenGL, or
+software when neither works), not Vulkan. That is how it opens, with diagnostics and recovery reachable, on a PC
+whose Vulkan device is missing or unusable (section 8.1) -- the game's own Vulkan check is what the launcher reports.
+A Vulkan drawing path (Dear ImGui's Vulkan backend) can be added as the first choice with this as its fallback; it
+changes nothing visible in a 2D interface.
+
+**Tried** (build/m9: the launcher on the test install, each page grabbed from its own start, nothing typed into any
+window): Play read the install, the build, the shaders' state (68 pipelines ready on the RTX 3070, driver 616.92) and
+the update state; Install showed the three steps and the space check; Builds the active and the kept build with "Go
+back to it"; Saves the automatic backup with Restore and Delete; Shaders the GPU and cache; Settings every setting in
+its category; Updates "no release key"; the controller's prompts and the focus. **Not yet tried by hand**: a whole
+install, a rollback, a restore, the file browser and the on-screen keyboard with a controller -- the owner's review.
+
+**Not yet**: the launcher in the release download (M9.5's packaging: the launcher, the frozen worker beside it);
+first-session shader preparation (section 15).
+
+To try it from the checkout: `build/venv/Scripts/python.exe tools/build_launcher.py`, then
+`build/launcher/CubicHeroes.exe` (it finds the worker in the checkout; choose the install folder on the Settings page,
+or install).

@@ -64,6 +64,9 @@ SOURCES = {
     # M8 (docs/FFMPEG_MIGRATION_PLAN.md): FFmpeg 9.0.2 from the project's official GitHub mirror (ffmpeg.org refused
     # connections from the build host on 2026-11-13); the tag n9.0.2 is commit 946fcce07b6dcd0331c8cc609192aeff5e1924f8
     "FFmpeg": ("https://github.com/FFmpeg/FFmpeg/archive/refs/tags/n9.0.2.tar.gz", "FFmpeg-n9.0.2", None),
+    # M9.4 (docs/M9_LAUNCHER_PLAN.md section 14): Dear ImGui (MIT), the launcher's interface; its sources are
+    # compiled into the launcher (no library built here), its LICENSE.txt shipped with it
+    "imgui": ("https://github.com/ocornut/imgui/archive/refs/tags/v1.93.0.tar.gz", "imgui-1.93.0", None),
 }
 # OpenAL Soft's build: the library alone, as a DLL / shared object (LGPL: dynamically linked). No utilities,
 # examples or tests; no configuration, HRTF or preset files installed and no HRTF data embedded; no legacy EAX

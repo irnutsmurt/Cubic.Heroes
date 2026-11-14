@@ -496,10 +496,15 @@ def op_install(install, source, keys, elf, prog, resume=False, validate=validate
 PREPARE_TIMEOUT_S = 1800
 
 
-def op_prepare(install, prog, check=False):
+def op_prepare(install, prog, check=False, rebuild=False):
     lay = layout.Layout(install)
     if lay.kind() != "slots":
         raise pipeline.SetupError("This folder has no install with build slots.", "no_install")
+    if rebuild and not check:   # the manual rebuild: the active build's pipeline cache made again from its recipes
+        sid = (lay.build_info(lay.read_active()["active"]) or {}).get("shader_cache") or "default"
+        pc = os.path.join(lay.shaders, sid, "native-pipelines.vkpc")
+        if os.path.exists(pc):
+            os.remove(pc)
     exe = os.path.join(lay.game_link, layout.exe_name())
     env = {k: v for k, v in os.environ.items() if not k.startswith(("DOTHEROES_", "PS3_", "PS3RECOMP_"))}
     kw = {"creationflags": 0x08000000} if os.name == "nt" else {}
@@ -783,11 +788,28 @@ def cmd_diagnostics(a, ev, control):
     return {"folder": out, "files": diagnostics.collect(os.path.abspath(a.install), out)}
 
 
+def cmd_shortcuts(a, ev, control):
+    """the launcher in the Start menu (and on the desktop with --desktop), or in Steam's library (--steam: Steam
+    must be closed, it rewrites its shortcuts when it exits); the shortcut starts the launcher, the single entry
+    point. No artwork is downloaded (the network is the updates' alone)."""
+    import shortcuts
+    exe = os.path.abspath(a.exe)
+    icon = a.icon or ""
+    if a.steam:
+        if not shortcuts.steam_roots():
+            raise pipeline.SetupError("Steam wasn't found on this PC.", "no_steam")
+        if shortcuts.steam_running():
+            raise pipeline.SetupError("Close Steam first: it rewrites its library's shortcuts when it exits.",
+                                      "steam_running")
+        return {"steam": len(shortcuts.add_to_steam(exe, icon, artwork=False))}
+    return {"made": len(shortcuts.create_shortcuts(exe, icon, desktop=a.desktop))}
+
+
 def cmd_prepare(a, ev, control):
     """the shaders and pipelines made before play (--check: only whether the cache is valid for this GPU and driver,
     and how many recipes there are)"""
     prog = _progress(ev, control, [] if a.check else ["prepare"])
-    out = op_prepare(os.path.abspath(a.install), prog, check=a.check)
+    out = op_prepare(os.path.abspath(a.install), prog, check=a.check, rebuild=a.rebuild)
     out["seconds"], _ = prog.finish()
     return out
 
@@ -846,7 +868,7 @@ COMMANDS = {"version": cmd_version, "probe-disc": cmd_probe_disc, "probe-keys": 
             "repair-link": cmd_repair_link, "saves": cmd_saves, "prepare": cmd_prepare,
             "check-update": cmd_check_update, "download-update": cmd_download_update,
             "stage-launcher": cmd_stage_launcher, "swap-launcher": cmd_swap_launcher, "settings": cmd_settings,
-            "diagnostics": cmd_diagnostics, "selftest": cmd_selftest}
+            "diagnostics": cmd_diagnostics, "shortcuts": cmd_shortcuts, "selftest": cmd_selftest}
 
 
 def parser():
@@ -865,6 +887,11 @@ def parser():
     p.add_argument("--note", help="saves backup: a note kept with it")
     p.add_argument("--confirm", action="store_true", help="saves restore/delete: the player confirmed")
     p.add_argument("--check", action="store_true", help="prepare: only whether a preparation is due")
+    p.add_argument("--exe", help="shortcuts: the program the shortcut starts (the launcher)")
+    p.add_argument("--icon", help="shortcuts: its icon")
+    p.add_argument("--steam", action="store_true", help="shortcuts: in Steam's library")
+    p.add_argument("--desktop", action="store_true", help="shortcuts: on the desktop too")
+    p.add_argument("--rebuild", action="store_true", help="prepare: the pipeline cache made again from scratch")
     p.add_argument("--set", action="append", help="settings: KEY=VALUE (repeatable)")
     p.add_argument("--reset", action="append", help="settings: a key to its default (repeatable; all: every one)")
     p.add_argument("--repair", action="store_true", help="settings: write a damaged settings file again")
@@ -895,7 +922,8 @@ REQUIRED = {"probe-disc": ("disc",), "probe-keys": ("disc", "keys"), "space": ("
             "builds": ("install",), "rollback": ("install",), "retention": ("install", "keep"),
             "repair-link": ("install",), "saves": ("install",), "prepare": ("install",),
             "download-update": ("install",), "stage-launcher": ("package", "launcher"),
-            "swap-launcher": ("launcher", "start"), "settings": ("install",), "diagnostics": ("install", "out")}
+            "swap-launcher": ("launcher", "start"), "settings": ("install",), "diagnostics": ("install", "out"),
+            "shortcuts": ("exe",)}
 
 
 def main(argv=None):
