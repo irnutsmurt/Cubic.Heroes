@@ -138,6 +138,7 @@ class Paths:
 # tools -- not every file in tools/ (a launcher's or a developer's script changes no lift), but everything the
 # lift reads: the SPU tasks' generator, its template and its per-task configurations (tools/spu_native/) too.
 LIFT_TOOLS = ["fix_functions.py", "setup_pipeline.py", "gen_spu_native.py", "spu_native_task.cpp.in"]
+NOT_LIFT_CONFIG = {"release_keys.json"}   # the launcher's, not the lift's (M9.3)
 
 
 def tool_fingerprint(*names):
@@ -145,7 +146,7 @@ def tool_fingerprint(*names):
     h = hashlib.sha1()
     files = []
     for d, exts in ((ps3_tools(), (".py",)), (config_dir(), (".json",))):
-        files += [os.path.join(d, n) for n in sorted(os.listdir(d)) if n.endswith(exts)]
+        files += [os.path.join(d, n) for n in sorted(os.listdir(d)) if n.endswith(exts) and n not in NOT_LIFT_CONFIG]
     files += [os.path.join(ROOT, "tools", n) for n in LIFT_TOOLS]
     sn = os.path.join(ROOT, "tools", "spu_native")
     if os.path.isdir(sn):

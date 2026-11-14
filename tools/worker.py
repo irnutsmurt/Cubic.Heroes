@@ -667,6 +667,86 @@ def cmd_retention(a, ev, control):
     return {"retention": st["retention"], "previous": st["previous"], "pruned": lay.prune()["removed"]}
 
 
+# ---- M9.3: updates (tools/updates.py, tools/release_trust.py; docs/RELEASE_SIGNING.md) ----
+
+def _update_error(e):
+    return pipeline.SetupError(str(e), e.code)
+
+
+def _keys(a):
+    """the keys trusted: config/release_keys.json, or --trusted-keys FILE (tests; the owner's trial of a new key)"""
+    import release_trust
+    return release_trust.trusted_keys(a.keys_file) if a.keys_file else None
+
+
+def cmd_check_update(a, ev, control):
+    """the newest release of the channel, its manifest verified; never an error for being offline (the result says
+    offline, play goes on)"""
+    import updates
+    from version import VERSION
+    try:
+        r = updates.check(a.channel, a.installed or VERSION, a.source, _keys(a))
+    except updates.trust.ReleaseError as e:
+        if e.code == "offline":
+            return {"available": False, "offline": True, "why": str(e)}
+        raise _update_error(e)
+    r.pop("manifest", None)
+    r["installed"] = a.installed or VERSION
+    return r
+
+
+def cmd_download_update(a, ev, control):
+    """the platform's download of the newest release of the channel (its manifest verified again), resumed where a
+    previous attempt stopped, checked against the manifest (size, SHA-256) before it is kept"""
+    import updates
+    from version import VERSION
+    try:
+        r = updates.check(a.channel, a.installed or VERSION, a.source, _keys(a))
+    except updates.trust.ReleaseError as e:
+        raise _update_error(e)
+    if not r.get("available") or not r.get("assets"):
+        raise pipeline.SetupError("No release for this platform to download.", "no_release")
+    if a.version and r["version"] != a.version:
+        raise pipeline.SetupError(f"The release to download is {r['version']}, not {a.version}.", "no_release")
+    asset = r["assets"][0]
+    dest = a.dest or os.path.join(os.path.abspath(a.install), "downloads", r["version"])
+    prog = _progress(ev, control, ["download"])
+    try:
+        path = updates.download(asset, r["urls"][asset["name"]], dest,
+                                progress=lambda done, total: prog.progress("download", done / max(1, total),
+                                                                           f"{done >> 20} of {total >> 20} MB"),
+                                cancelled=lambda: control.cancel.is_set())
+    except updates.trust.ReleaseError as e:
+        if e.code == "cancelled":
+            raise pipeline.Cancelled()
+        raise _update_error(e)
+    with open(os.path.join(dest, "release.json"), "w", encoding="utf-8") as f:   # the verified manifest, kept
+        json.dump(updates.check(a.channel, a.installed or VERSION, a.source, _keys(a))["manifest"], f, indent=1)
+    out = {"version": r["version"], "path": path, "size": asset["size"], "notes": r.get("notes", "")}
+    out["seconds"], _ = prog.finish()
+    return out
+
+
+def cmd_stage_launcher(a, ev, control):
+    """a downloaded launcher package (checked by download-update) unpacked beside the launcher's folder"""
+    import updates
+    try:
+        return {"staged": updates.stage_launcher(a.package, a.launcher)}
+    except updates.trust.ReleaseError as e:
+        raise _update_error(e)
+    except (OSError, ValueError) as e:
+        raise pipeline.SetupError(f"The launcher's package couldn't be unpacked ({e}).", "bad_download")
+
+
+def cmd_swap_launcher(a, ev, control):
+    """the helper the launcher starts as it exits to update itself: the staged launcher in its place, started; the
+    previous one put back if it does not come up"""
+    import updates
+    out = updates.swap_launcher(a.launcher, a.start, a.wait_pid, log=lambda t: ev.emit("log", level="info", text=t),
+                                health_timeout=a.health_timeout)
+    return {"result": out}
+
+
 def cmd_prepare(a, ev, control):
     """the shaders and pipelines made before play (--check: only whether the cache is valid for this GPU and driver,
     and how many recipes there are)"""
@@ -727,7 +807,9 @@ def cmd_selftest(a, ev, control):
 COMMANDS = {"version": cmd_version, "probe-disc": cmd_probe_disc, "probe-keys": cmd_probe_keys,
             "space": cmd_space, "info": cmd_info, "install": cmd_install, "update": cmd_update,
             "migrate": cmd_migrate, "builds": cmd_builds, "rollback": cmd_rollback, "retention": cmd_retention,
-            "repair-link": cmd_repair_link, "saves": cmd_saves, "prepare": cmd_prepare, "selftest": cmd_selftest}
+            "repair-link": cmd_repair_link, "saves": cmd_saves, "prepare": cmd_prepare,
+            "check-update": cmd_check_update, "download-update": cmd_download_update,
+            "stage-launcher": cmd_stage_launcher, "swap-launcher": cmd_swap_launcher, "selftest": cmd_selftest}
 
 
 def parser():
@@ -746,6 +828,18 @@ def parser():
     p.add_argument("--note", help="saves backup: a note kept with it")
     p.add_argument("--confirm", action="store_true", help="saves restore/delete: the player confirmed")
     p.add_argument("--check", action="store_true", help="prepare: only whether a preparation is due")
+    p.add_argument("--channel", choices=("stable", "prerelease"), default="stable", help="updates: the channel")
+    p.add_argument("--source", help="updates: a release list other than GitHub's (a mirror, for tests)")
+    p.add_argument("--trusted-keys", dest="keys_file",
+                   help="updates: a trusted-keys file other than config/release_keys.json")
+    p.add_argument("--installed", help="updates: the installed version (default: this worker's)")
+    p.add_argument("--version", dest="version", help="download-update: the version expected")
+    p.add_argument("--dest", help="download-update: the folder (default <install>/downloads/<version>)")
+    p.add_argument("--package", help="stage-launcher: the downloaded launcher package")
+    p.add_argument("--launcher", help="stage-launcher, swap-launcher: the launcher's folder")
+    p.add_argument("--start", help="swap-launcher: the launcher's executable in its folder")
+    p.add_argument("--wait-pid", dest="wait_pid", type=int, help="swap-launcher: the launcher's process to wait for")
+    p.add_argument("--health-timeout", dest="health_timeout", type=float, default=60.0, help=argparse.SUPPRESS)
     p.add_argument("--seconds", type=float, default=3.0, help=argparse.SUPPRESS)   # selftest
     p.add_argument("--block", action="store_true", help=argparse.SUPPRESS)        # selftest
     p.add_argument("--child", action="store_true", help=argparse.SUPPRESS)        # selftest
@@ -757,7 +851,9 @@ def parser():
 REQUIRED = {"probe-disc": ("disc",), "probe-keys": ("disc", "keys"), "space": ("install",), "info": ("install",),
             "install": ("disc", "keys", "install"), "update": ("install",), "migrate": ("install",),
             "builds": ("install",), "rollback": ("install",), "retention": ("install", "keep"),
-            "repair-link": ("install",), "saves": ("install",), "prepare": ("install",)}
+            "repair-link": ("install",), "saves": ("install",), "prepare": ("install",),
+            "download-update": ("install",), "stage-launcher": ("package", "launcher"),
+            "swap-launcher": ("launcher", "start")}
 
 
 def main(argv=None):

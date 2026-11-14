@@ -65,17 +65,38 @@ def _releases(timeout):
         return json.load(r)
 
 
+_VERIFIED = {}   # download URL -> its record in a verified release manifest (M9.3)
+
+
 def latest(timeout=6):
-    """The newest release (pre-releases included) that has this platform's download."""
-    releases = _releases(timeout)
-    best = None
-    for rel in releases:
-        if rel.get("draft"):
-            continue
-        url = next((a["browser_download_url"] for a in rel.get("assets", []) if a.get("name") == ASSET), None)
-        if url and (best is None or parse(rel["tag_name"]) > parse(best[0])):
-            best = (rel["tag_name"].lstrip("v"), url)
-    return best
+    """The newest stable release whose manifest is signed by a trusted key (tools/updates.py, M9.3) and that has
+    this platform's download, as (version, url); None when there is none -- an unsigned release is never offered.
+    The download is checked against the manifest before it is unpacked (_checked)."""
+    import updates
+    try:
+        r = updates.check("stable", None)
+    except updates.trust.ReleaseError:
+        return None
+    if not r.get("available") or not r.get("assets"):
+        return None
+    asset = r["assets"][0]
+    url = r["urls"].get(asset["name"])
+    if not url:
+        return None
+    _VERIFIED[url] = asset
+    return r["version"], url
+
+
+def _checked(archive, url):
+    """the downloaded archive against the verified manifest's record: OSError when it is not the file signed for"""
+    import updates
+    asset = _VERIFIED.get(url)
+    if not asset:
+        raise OSError("the download is not from a verified release")
+    try:
+        updates.trust.verify_download(archive, asset)
+    except updates.trust.ReleaseError as e:
+        raise OSError(str(e))
 
 
 def download_and_unpack(url, version, parent, progress=None):
@@ -92,6 +113,7 @@ def download_and_unpack(url, version, parent, progress=None):
             done += len(chunk)
             if progress:
                 progress(done, total)
+    _checked(archive, url)
     unpacked = os.path.join(work, "unpacked")
     if archive.endswith(".zip"):
         with zipfile.ZipFile(archive) as z:
@@ -129,6 +151,7 @@ def stage(url, version, app_dir, progress=None):
             done += len(chunk)
             if progress:
                 progress(done, total)
+    _checked(archive, url)
     unpacked = os.path.join(root, "unpacked")
     if archive.endswith(".zip"):
         with zipfile.ZipFile(archive) as z:
