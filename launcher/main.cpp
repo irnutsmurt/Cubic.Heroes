@@ -1864,9 +1864,10 @@ struct Diag {
 static void page_diagnostics()
 {
     title("Diagnostics");
-    text_col(col::dim, "A report for a bug or a question: you see every file before it is packed. Never in it: your saves, "
-                       "keys, the game's files. Your user name, folders and addresses are replaced.");
-    if (big_button("Make a report", ImVec2(S(300), 0), Kind::Primary)) {
+    text_col(col::dim, "Export Logs gathers what is needed to look into a problem -- even after the game crashed -- and "
+                       "shows you every file before anything is saved. Never in it: your saves, keys or the game's files; "
+                       "your user name, folders and addresses are replaced. Nothing is ever uploaded.");
+    if (big_button("Export Logs", ImVec2(S(300), 0), Kind::Primary)) {
         g_diag.folder = path_str(u8path(data_dir()) / "report");
         g_diag.viewing.clear();
         run("diagnostics", { "--install", install_dir(), "--out", g_diag.folder }, "Making the report", true,
@@ -1877,18 +1878,21 @@ static void page_diagnostics()
     }
     focus_first();
     if (g_diag.files.size() == 0) return;
-    ImGui::SameLine();
-    if (big_button("Pack it as a zip", ImVec2(S(300), 0))) {
-        char name[80];
-        std::time_t now = std::time(nullptr);
-        std::strftime(name, sizeof name, "CubicHeroes-report-%Y%m%d-%H%M%S.zip", std::localtime(&now));
-        const std::string zip = path_str(u8path(known_folder(kDocuments)) / name);
-        run("diagnostics", { "--install", install_dir(), "--out", g_diag.folder, "--pack", zip }, "Packing the report", true,
-            [zip](const json::Value& r) {
-                if (r["ok"].truthy()) g_msg = { true, "Report packed", "Saved in your Documents folder.", zip, false, false };
-                else show_result_error(r, "The report wasn't packed");
-            });
+    same_line_fits(S(360));
+    if (big_button("Save the zip to...", ImVec2(S(360), 0))) {   // where: the player's choice (Documents to start)
+        browse("Where to save the logs", true, {}, "folders", known_folder(kDocuments), [](const std::string& dir) {
+            char name[80];
+            std::time_t now = std::time(nullptr);
+            std::strftime(name, sizeof name, "CubicHeroes-logs-%Y%m%d-%H%M%S.zip", std::localtime(&now));
+            const std::string zip = path_str(u8path(dir) / name);
+            run("diagnostics", { "--install", install_dir(), "--out", g_diag.folder, "--pack", zip }, "Saving the logs", true,
+                [zip](const json::Value& r) {
+                    if (r["ok"].truthy()) g_msg = { true, "Logs saved", "The zip is ready to attach to a report.", zip, false, false };
+                    else show_result_error(r, "The logs weren't saved");
+                });
+        });
     }
+    text_col(col::dim, "Review: choose a file to see it; X leaves it out. Then save the zip where you like.");
     ImGui::BeginChild("##files", ImVec2(S(380), 0), ImGuiChildFlags_NavFlattened);
     for (size_t i = 0; i < g_diag.files.size(); i++) {
         const std::string f = g_diag.files[i]["file"].str();

@@ -840,6 +840,14 @@ which the update engine's release manifests already list):
   longest 2.5 ms, none over 16 ms, none met that the preparation lacked; the worst frame 401 ms, a load with no
   pipeline in it. (The manifest was put into that test copy only; it is not distributed.)
 
+- **The whole install test with the day's worker** (build/m9/m95t_run.sh, its own folder; evidence m95t): every
+  stage passed -- the fresh install, the check, an update with nothing changed (nothing built), a relink (76 of 76
+  objects reused, the saves backed up first), rollback (0.06 s) and forward, two failed updates refused with the
+  active build intact, a relift (the same lift), an install cancelled in its build and resumed (12 objects reused),
+  a setup app's install migrated (saves, settings and shaders kept), the settings pass, the game from the install (its
+  memory test, a river fight) and the preparation (after a driver change: not prepared; prepared, 65 of 65 in 49 ms;
+  then valid).
+
 ## 18. Shader preparation in the launcher: the first-run offer, in the background (2026-11-14) [C, M]
 
 **The owner's additions** (2026-11-14): after the first install, an offer -- "Would you like to precompile shaders
@@ -974,8 +982,12 @@ the launcher-side items are done here.
   game's log as one session (replaced each start) with a size cap and timed flushes; the five levels in the game and
   the launcher (Error to Trace; Debug and Trace off by default); the events named above tagged in the game's log
   (Vulkan validation messages, compile events, frame spikes, audio and controller errors, exceptions, a crash
-  record); the active settings in the report; Export Logs choosing the zip's destination. The game's part needs a
-  game build and a run to check it -- after the cutoff.
+  record); the active settings in the report. The game's part needs a game build and a run to check it -- after the
+  cutoff.
+- **Export Logs, the launcher's part -- done**: the Diagnostics page's button is "Export Logs" (it gathers the report,
+  which works with no game running, after a crash too: it reads the files left behind); every file is shown and can
+  be left out (X); "Save the zip to..." opens the controller's folder browser at Documents, and the zip is written
+  where the player chooses. Nothing is uploaded.
 
 ## 21. A gaming application, not a development tool (the owner, 2026-11-14) [C]
 
