@@ -4264,6 +4264,7 @@ void write_report()
 
 }  // namespace
 
+extern "C" void ppfx_native_cache_save(void);   // ppfx_render.cpp (M9.2): the pipeline cache saved
 void report_add(const char* line)
 {
     std::lock_guard<std::mutex> g(s_rep_lock);
@@ -4283,10 +4284,10 @@ void start()
     // runs first (atexit is last in, first out): the native renderer finishes
     // what was walked and the comparisons in flight, so the report counts
     // what is left as unfinished
-    if (mode() == 2) atexit([] { render_drain(15000); report_add("report: final, after the native renderer's drain"); });
+    if (mode() == 2) atexit([] { render_drain(15000); ppfx_native_cache_save(); report_add("report: final, after the native renderer's drain"); });
     // a test's stop ends the process without exit handlers: the same there
     g_dotheroes_stop_hook = [] {
-        if (mode() == 2) { render_drain(15000); report_add("report: final, after the native renderer's drain (test stop)"); }
+        if (mode() == 2) { render_drain(15000); ppfx_native_cache_save(); report_add("report: final, after the native renderer's drain (test stop)"); }
         r7_lost_summary();
         write_report();
     };

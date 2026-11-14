@@ -21,6 +21,9 @@ Stages, in order (default: all but game):
     settings   a player's own values kept by an update's settings pass, missing performance switches added back
     game       (only with --run-game: it starts the game) the game a shortcut starts (game/) runs its memory test,
                then a river fight as a player starts the install (tests/boot_smoke.py INSTALLED=)
+    prepare    (with --run-game, after game) the recipes the run recorded; the launcher's check; a driver change
+               (the cache's recorded version changed): not prepared; the worker's prepare: every recipe made; the
+               check again: prepared
 Needs the prebuilt parts in their release configuration (build/lib/windows/game_build.json "native-release";
 tools/zig_build.py build_prebuilt). The folder is INSTALL_TEST_DIR (default F:/3d dot game heroes/install-test: an
 install is ~4 GB); `fresh` replaces it. Writes <folder>/test-report.json. docs/M9_LAUNCHER_PLAN.md section 10."""
@@ -440,15 +443,46 @@ def stage_game():
           f"{deaths} ended by the hero's death), native physics ({native} tasks issued directly)")
 
 
+def stage_prepare():
+    """after the game has been played from the install (its recipes recorded): the launcher's check, a driver
+    change (the cache's recorded driver version changed, as the 2026-11-02 cache-tamper test), the check again, the
+    preparation through the worker, the check once more"""
+    rec = os.path.join(DIR, "data", "cache", "native-recipes.bin")
+    check("prepare", os.path.exists(rec), f"the recipes recorded by the game's run ({rec})")
+    cb = Run("prepare").cb
+    first = worker.op_prepare(DIR, cb, check=True)
+    report["stages"]["prepare"]["check_before"] = first
+    check("prepare", first.get("recipes", 0) > 0 and first.get("prepared"),
+          f"check: {first.get('recipes')} recipes, the cache {first.get('cache')}")
+    sid = (lay().build_info(lay().read_active()["active"]) or {}).get("shader_cache")
+    pc = os.path.join(DIR, "data", "cache", "shaders", sid or "?", "native-pipelines.vkpc")
+    import struct
+    with open(pc, "r+b") as f:
+        f.seek(20)
+        d = struct.unpack("<I", f.read(4))[0]
+        f.seek(20)
+        f.write(struct.pack("<I", d + 1))
+    after = worker.op_prepare(DIR, cb, check=True)
+    check("prepare", not after.get("prepared") and "driver" in str(after.get("cache")),
+          f"after a driver change, check: not prepared ({after.get('cache')})")
+    r = Run("prepare")
+    out = r.done(worker.op_prepare(DIR, r.cb))
+    check("prepare", out.get("made") == first.get("recipes") and out.get("failed") == 0,
+          f"prepared: {out.get('made')} of {out.get('recipes')} pipelines made in {out.get('ms')} ms, "
+          f"{out.get('translated')} translated by glslang")
+    last = worker.op_prepare(DIR, cb, check=True)
+    check("prepare", last.get("prepared"), f"check again: prepared ({last.get('cache')}, {last.get('cache_mb')} MB)")
+
+
 STAGES = {"fresh": stage_fresh, "check": stage_check, "update": stage_update, "relink": stage_relink,
           "rollback": stage_rollback, "failed": stage_failed, "relift": stage_relift, "resume": stage_resume,
-          "migrate": stage_migrate, "settings": stage_settings, "game": stage_game}
+          "migrate": stage_migrate, "settings": stage_settings, "game": stage_game, "prepare": stage_prepare}
 
 
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     run_game = "--run-game" in sys.argv
-    stages = args or [s for s in STAGES if s != "game" or run_game]
+    stages = args or [s for s in STAGES if s not in ("game", "prepare") or run_game]
     if "game" in stages and not run_game:
         sys.exit("the game stage starts the game: add --run-game")
     for s in stages:

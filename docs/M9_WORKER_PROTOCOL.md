@@ -29,12 +29,11 @@ The launcher starts it with no console window (Windows: `CREATE_NO_WINDOW`), std
 | `retention` | `--install DIR --keep N` | how many previous builds are kept (default 1); the ones beyond it removed with what only they used | `retention`, `previous`, `pruned` |
 | `repair-link` | `--install DIR` | `game/` pointed at the active build again | `game` |
 | `saves` | `--install DIR [--action list\|backup\|restore\|delete] [--backup ID] [--note TEXT] [--confirm]` | the save backups: list them (dates, sizes, why made), make one, restore one (the current saves backed up first), delete one; restore and delete only with `--confirm` (the player confirmed) | the list (`backups`, `saves_bytes`), or the backup made, or `restored` and `previous_saves`, or `deleted` |
+| `prepare` | `--install DIR [--check]` | M9.2: the shaders and Vulkan pipelines made before play -- the active build's `dotheroes --prepare`: every recipe the game has recorded translated by this build and made through its pipeline cache, which is then saved (progress per pipeline); also run by `install`, `update` (when the build changed) and `migrate` when there are recipes. `--check`: only whether the cache is valid for this GPU, driver and renderer, and how many recipes there are (the launcher asks at every start; a preparation is due when `prepared` is false and there are recipes) | `recipes`, `made`, `failed`, `translated` (by glslang), `from_cache`, `ms`, `cache` (its state before: `reused`, `none yet`, `made with another driver version`, `made on another GPU`, `damaged (its checksum differs)`, ...), `cache_mb_before`, `cache_mb`; with `--check`: `recipes`, `cache`, `cache_mb`, `prepared` |
 | `selftest` | `[--seconds S] [--block]` | a pretend three-step operation with progress, for the protocol's tests and for the launcher's progress screens without a disc; `--block` stops calling back in its second step, as a long compile does | `seconds`, `skipped` |
 
 Every command also takes `--control` (section 3) and `--log FILE` (every event appended to the file as it is
 sent: the launcher's log of the operation).
-
-M9.2 adds the preparation pass; it is added here when it exists.
 
 ## 2. The event stream
 
@@ -97,6 +96,7 @@ last lines, a trace), shown only on request.
 | `no_previous` | a rollback with no kept build (or not that one) | -- |
 | `needs_confirmation` | a save restore or delete without `--confirm` | ask the player, then send `--confirm` |
 | `no_backup` | no save backup by that id | -- |
+| `prepare_failed` | the preparation pass did not finish (no Vulkan device, the renderer did not start; details: its log, `logs/prepare.log`) -- after an install or update it is reported in the result, not raised: the game still prepares what it meets | retry; the diagnostics export |
 | `io_error` | a file could not be read or written (details: the trace) | retry; the diagnostics export |
 | `cancelled` | cancelled (`data.forced` if a step had to be ended) | resume or start again |
 | `internal` | anything else (details: the trace) | the diagnostics export |

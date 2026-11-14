@@ -61,6 +61,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <deque>
+#include <filesystem>
 #include <functional>
 #include <map>
 #include <set>
@@ -114,7 +115,8 @@ void r7_unmodelled(const Raster& ra, uint32_t prim);
     X(vkCmdCopyImage) X(vkCmdCopyImageToBuffer) X(vkCmdCopyBufferToImage) X(vkCmdClearColorImage) X(vkCmdClearDepthStencilImage) X(vkCmdCopyBuffer) \
     X(vkCmdClearAttachments) X(vkCmdWriteTimestamp) X(vkCmdResetQueryPool) X(vkCreateQueryPool) \
     X(vkGetQueryPoolResults) X(vkCreateFence) X(vkGetFenceStatus) X(vkResetFences) X(vkWaitForFences) \
-    X(vkQueueSubmit) X(vkCreateSemaphore) X(vkCmdBlitImage) X(vkCmdBeginQuery) X(vkCmdEndQuery)
+    X(vkQueueSubmit) X(vkCreateSemaphore) X(vkCmdBlitImage) X(vkCmdBeginQuery) X(vkCmdEndQuery) \
+    X(vkCreatePipelineCache) X(vkDestroyPipelineCache) X(vkGetPipelineCacheData) X(vkDestroyPipeline)
 
 struct Fn {
 #define X(f) PFN_##f f;
@@ -1065,6 +1067,26 @@ Img* target_image(uint32_t loc, uint32_t off, VkFormat fmt, uint32_t bpp, uint32
 struct Pipe { VkPipeline p; uint32_t nconst; };
 std::unordered_map<uint64_t, Pipe> s_pipes;
 
+// M9.2: everything a pipeline is made from besides its two programs' text -- what the two creation sites read
+// (PPFX's: its layout, target and a few raster bits; asp's: the guest's whole render state). Kept with the
+// programs' text as a recipe in the install's own shader folder, so a preparation pass can make the pipeline
+// again before play (after a driver or GPU change, or a new build) without the game. Plain words, one layout:
+// the recipes file is this machine's own and its format is versioned (kRecipeFormat).
+enum : uint32_t { kPipePpfx = 1, kPipeAsp = 2 };
+struct PipeState {
+    uint32_t kind, rt, df, stride, count, lines;
+    uint32_t color_mask, front_face, zminmax, cull, cull_face, blend;
+    uint32_t blend_sf_rgb, blend_df_rgb, blend_sf_a, blend_df_a, blend_eq_rgb, blend_eq_a;
+    uint32_t depth_test, depth_write, depth_func;
+    uint32_t stencil_test, stencil_func, stencil_func_mask, stencil_write_mask, stencil_fail, stencil_zfail, stencil_zpass;
+    uint32_t nconst, reserved[3];
+};
+static_assert(sizeof(PipeState) == 32 * 4, "the recipes' record");
+VkPipelineCache s_pcache = VK_NULL_HANDLE;   // M9.2: the native renderer's own, kept on disk (pcache_open)
+VkResult make_pipeline(const PipeState& s, VkShaderModule vsm, VkShaderModule fsm, VkPipeline* out);
+struct ProgParams;
+void recipe_record(uint64_t key, const PipeState& s, const ProgParams& pp);
+
 // The engine's eng_programs_text, step for step, under the translators' lock.
 struct ProgParams {
     const uint8_t* vp; uint32_t vp_bytes; const uint8_t* fp; uint32_t fp_size;
@@ -1074,6 +1096,44 @@ struct ProgParams {
     const rsx_fp_shadow_desc* shadow; const uint8_t* gamma_masks; const uint8_t* expand_masks;
     const uint32_t (*unnorm_dim)[3];
 };
+
+// M9.2: ProgParams by value (its arrays copied in, its programs' bytes kept beside it): what a recipe keeps, so the
+// preparation pass translates the programs with the build that will run them -- a recipe outlives a change of the
+// translator, where kept text would not
+struct ProgFixed {
+    uint32_t fp_ctrl, cube_mask, vol_mask, vtex_mask, layout_mask, vp_branch_bits, ucp, srgb_output, alpha_test,
+             alpha_func, unnorm_mask, shadow_mask, gamma_units, expand_units, wpos[2], wpos_scaled, has_shadow,
+             has_gamma, has_expand, has_unnorm, reserved[3];
+    rsx_fp_shadow_desc shadow[16];
+    uint8_t gamma[16], expand[16];
+    uint32_t unnorm[16][3];
+};
+
+ProgFixed prog_fixed(const ProgParams& p)
+{
+    ProgFixed f = {};
+    f.fp_ctrl = p.fp_ctrl; f.cube_mask = p.cube_mask; f.vol_mask = p.vol_mask; f.vtex_mask = p.vtex_mask;
+    f.layout_mask = p.layout_mask; f.vp_branch_bits = p.vp_branch_bits; f.ucp = p.ucp; f.srgb_output = p.srgb_output;
+    f.alpha_test = p.alpha_test; f.alpha_func = p.alpha_func; f.unnorm_mask = p.unnorm_mask;
+    f.shadow_mask = p.shadow_mask; f.gamma_units = p.gamma_units; f.expand_units = p.expand_units;
+    f.wpos[0] = p.wpos[0]; f.wpos[1] = p.wpos[1]; f.wpos_scaled = (uint32_t)p.wpos_scaled;
+    if ((f.has_shadow = p.shadow != nullptr)) memcpy(f.shadow, p.shadow, sizeof f.shadow);
+    if ((f.has_gamma = p.gamma_masks != nullptr)) memcpy(f.gamma, p.gamma_masks, sizeof f.gamma);
+    if ((f.has_expand = p.expand_masks != nullptr)) memcpy(f.expand, p.expand_masks, sizeof f.expand);
+    if ((f.has_unnorm = p.unnorm_dim != nullptr)) memcpy(f.unnorm, p.unnorm_dim, sizeof f.unnorm);
+    return f;
+}
+
+ProgParams prog_params(const ProgFixed& f, const std::string& vp, const std::string& fp)
+{
+    ProgParams p = { (const uint8_t*)vp.data(), (uint32_t)vp.size(), (const uint8_t*)fp.data(), (uint32_t)fp.size(),
+                     f.fp_ctrl, f.cube_mask, f.vol_mask, f.vtex_mask, f.layout_mask, f.vp_branch_bits, f.ucp,
+                     f.srgb_output, f.alpha_test, f.alpha_func, f.unnorm_mask, f.shadow_mask, f.gamma_units,
+                     f.expand_units, { f.wpos[0], f.wpos[1] }, (int)f.wpos_scaled,
+                     f.has_shadow ? f.shadow : nullptr, f.has_gamma ? f.gamma : nullptr,
+                     f.has_expand ? f.expand : nullptr, f.has_unnorm ? (const uint32_t (*)[3])f.unnorm : nullptr };
+    return p;
+}
 
 bool programs_text(const ProgParams& p, std::string& vs_out, std::string& ps_out, uint32_t* nconst)
 {
@@ -1281,45 +1341,16 @@ const Pipe* pipeline(const Rec* r, const rsx_vertex_layout_plan& layout, VkForma
     }
     VkShaderModule vsm = spirv_module(vs, RSX_SHADER_STAGE_VERTEX), fsm = spirv_module(ps, RSX_SHADER_STAGE_FRAGMENT);
     if (!vsm || !fsm) return nullptr;
-    VkPipelineShaderStageCreateInfo stg[2] = {
-        { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, vsm, "main", nullptr },
-        { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, fsm, "main", nullptr } };
-    VkVertexInputBindingDescription vb = { 0, layout.stride, VK_VERTEX_INPUT_RATE_VERTEX };
-    VkVertexInputAttributeDescription va[16];
-    for (uint32_t s = 0; s < layout.count; s++) va[s] = { s, 0, VK_FORMAT_R32G32B32A32_SFLOAT, s * 16u };
-    VkPipelineVertexInputStateCreateInfo vi = { VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
-    vi.vertexBindingDescriptionCount = 1; vi.pVertexBindingDescriptions = &vb;
-    vi.vertexAttributeDescriptionCount = layout.count; vi.pVertexAttributeDescriptions = va;
-    VkPipelineInputAssemblyStateCreateInfo ia = { VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
-    ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-    VkPipelineViewportStateCreateInfo vps = { VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
-    vps.viewportCount = 1; vps.scissorCount = 1;
-    VkPipelineRasterizationStateCreateInfo ras = { VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
-    ras.polygonMode = VK_POLYGON_MODE_FILL;
-    ras.depthClampEnable = depth_clamp(ra.zminmax);
-    ras.cullMode = VK_CULL_MODE_NONE;   // culling off (checked by the caller)
-    ras.frontFace = ra.front_face == 0x0901u ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE;
-    ras.depthBiasEnable = VK_TRUE; ras.lineWidth = 1.0f;
-    VkPipelineMultisampleStateCreateInfo ms = { VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
-    ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
-    VkPipelineColorBlendAttachmentState cba = {};
-    cba.blendEnable = VK_FALSE; cba.colorWriteMask = write_mask(ra.color_mask);
-    VkPipelineColorBlendStateCreateInfo cb = { VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
-    cb.attachmentCount = 1; cb.pAttachments = &cba;
-    const VkDynamicState dyn[5] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_STENCIL_REFERENCE,
-                                    VK_DYNAMIC_STATE_DEPTH_BIAS, VK_DYNAMIC_STATE_BLEND_CONSTANTS };
-    VkPipelineDynamicStateCreateInfo dy = { VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
-    dy.dynamicStateCount = 5; dy.pDynamicStates = dyn;
-    VkGraphicsPipelineCreateInfo gci = { VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
-    gci.stageCount = 2; gci.pStages = stg; gci.pVertexInputState = &vi; gci.pInputAssemblyState = &ia;
-    gci.pViewportState = &vps; gci.pRasterizationState = &ras; gci.pMultisampleState = &ms; gci.pColorBlendState = &cb;
-    gci.pDynamicState = &dy; gci.layout = s_pl; gci.renderPass = render_pass(rt);
+    PipeState s = {};   // M9.2: what make_pipeline builds it from (kept, with the programs' text, for preparation)
+    s.kind = kPipePpfx; s.rt = (uint32_t)rt; s.stride = layout.stride; s.count = layout.count;
+    s.color_mask = ra.color_mask; s.front_face = ra.front_face; s.zminmax = ra.zminmax; s.nconst = nconst;
     const uint64_t c_driver = now_ns();
-    const VkResult res = F.vkCreateGraphicsPipelines(D.device, VK_NULL_HANDLE, 1, &gci, nullptr, &P.p);
+    const VkResult res = make_pipeline(s, vsm, fsm, &P.p);
     compile_account("ppfx", k, c_start, c_driver, now_ns());
     F.vkDestroyShaderModule(D.device, vsm, nullptr);
     F.vkDestroyShaderModule(D.device, fsm, nullptr);
     if (res != VK_SUCCESS) { fail("vkCreateGraphicsPipelines", res); P.p = VK_NULL_HANDLE; return nullptr; }
+    recipe_record(k, s, pp);
     P.nconst = nconst;
     stats().n_pipelines++;
     return &P;
@@ -1641,29 +1672,62 @@ const Pipe* pipeline_asp(const Rec* r, const rsx_vertex_layout_plan& layout, VkF
     asp_hot_mark(ps);
     VkShaderModule vsm = spirv_module(vs, RSX_SHADER_STAGE_VERTEX), fsm = spirv_module(ps, RSX_SHADER_STAGE_FRAGMENT);
     if (!vsm || !fsm) return nullptr;
+    PipeState s = {};   // M9.2: what make_pipeline builds it from (kept, with the programs' text, for preparation)
+    s.kind = kPipeAsp; s.rt = (uint32_t)rt; s.df = (uint32_t)df; s.stride = layout.stride; s.count = layout.count;
+    s.lines = prim_lines(r->prim) ? 1u : 0u;
+    s.color_mask = ra.color_mask; s.front_face = ra.front_face; s.zminmax = ra.zminmax;
+    s.cull = ra.cull; s.cull_face = ra.cull_face; s.blend = ra.blend;
+    s.blend_sf_rgb = ra.blend_sf_rgb; s.blend_df_rgb = ra.blend_df_rgb; s.blend_sf_a = ra.blend_sf_a;
+    s.blend_df_a = ra.blend_df_a; s.blend_eq_rgb = ra.blend_eq_rgb; s.blend_eq_a = ra.blend_eq_a;
+    s.depth_test = ra.depth_test; s.depth_write = ra.depth_write; s.depth_func = ra.depth_func;
+    s.stencil_test = ra.stencil_test; s.stencil_func = ra.stencil_func; s.stencil_func_mask = ra.stencil_func_mask;
+    s.stencil_write_mask = ra.stencil_write_mask; s.stencil_fail = ra.stencil_fail; s.stencil_zfail = ra.stencil_zfail;
+    s.stencil_zpass = ra.stencil_zpass; s.nconst = nconst;
+    const uint64_t c_driver = now_ns();
+    const VkResult res = make_pipeline(s, vsm, fsm, &P.p);
+    compile_account("asp", k, c_start, c_driver, now_ns());
+    F.vkDestroyShaderModule(D.device, vsm, nullptr);
+    F.vkDestroyShaderModule(D.device, fsm, nullptr);
+    if (res != VK_SUCCESS) { fail("vkCreateGraphicsPipelines (asp)", res); P.p = VK_NULL_HANDLE; return nullptr; }
+    recipe_record(k, s, pp);
+    P.nconst = nconst;
+    stats().n_pipelines++;
+    return &P;
+}
+
+// ---- M9.2: one pipeline from its state; the pipeline cache; the recipes; the preparation pass -----------
+// (docs/M9_LAUNCHER_PLAN.md section 11, docs/SHADER_PREPARATION.md steps 1-3)
+
+// the pipeline the two creation sites made inline until M9.2, from the state they read: PPFX's (no depth, no
+// blending, culling off) and asp's (the guest's whole render state), through the pipeline cache
+VkResult make_pipeline(const PipeState& s, VkShaderModule vsm, VkShaderModule fsm, VkPipeline* out)
+{
+    const VkFormat rt = (VkFormat)s.rt, df = (VkFormat)s.df;
+    const bool asp = s.kind == kPipeAsp;
     VkPipelineShaderStageCreateInfo stg[2] = {
         { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, vsm, "main", nullptr },
         { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, fsm, "main", nullptr } };
-    VkVertexInputBindingDescription vb = { 0, layout.stride, VK_VERTEX_INPUT_RATE_VERTEX };
+    VkVertexInputBindingDescription vb = { 0, s.stride, VK_VERTEX_INPUT_RATE_VERTEX };
     VkVertexInputAttributeDescription va[16];
-    for (uint32_t i = 0; i < layout.count; i++) va[i] = { i, 0, VK_FORMAT_R32G32B32A32_SFLOAT, i * 16u };
+    const uint32_t count = s.count < 16 ? s.count : 16;
+    for (uint32_t i = 0; i < count; i++) va[i] = { i, 0, VK_FORMAT_R32G32B32A32_SFLOAT, i * 16u };
     VkPipelineVertexInputStateCreateInfo vi = { VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
     vi.vertexBindingDescriptionCount = 1; vi.pVertexBindingDescriptions = &vb;
-    vi.vertexAttributeDescriptionCount = layout.count; vi.pVertexAttributeDescriptions = va;
+    vi.vertexAttributeDescriptionCount = count; vi.pVertexAttributeDescriptions = va;
     VkPipelineInputAssemblyStateCreateInfo ia = { VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
-    // every primitive rebuilt as a triangle list, but lines: a line list
-    ia.topology = prim_lines(r->prim) ? VK_PRIMITIVE_TOPOLOGY_LINE_LIST : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    // every primitive rebuilt as a triangle list, but asp's lines: a line list
+    ia.topology = asp && s.lines ? VK_PRIMITIVE_TOPOLOGY_LINE_LIST : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
     VkPipelineViewportStateCreateInfo vps = { VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
     vps.viewportCount = 1; vps.scissorCount = 1;
-    // as the engine (rsx_vulkan_backend.c): CULL_FACE FRONT and FRONT_AND_BACK
-    // cull front faces; the winding judged on screen after the vertex stage's Y flip
     VkPipelineRasterizationStateCreateInfo ras = { VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
     ras.polygonMode = VK_POLYGON_MODE_FILL;
-    ras.depthClampEnable = depth_clamp(ra.zminmax);
-    ras.cullMode = !ra.cull ? VK_CULL_MODE_NONE
-                 : (ra.cull_face == 0x0404u || ra.cull_face == 0x0408u) ? VK_CULL_MODE_FRONT_BIT : VK_CULL_MODE_BACK_BIT;
-    ras.frontFace = ra.front_face == 0x0901u ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE;
-    {   // DOTHEROES_ASP_CULL_FLIP=1 (a test of the winding's orientation): the other face front
+    ras.depthClampEnable = depth_clamp(s.zminmax);
+    // PPFX: culling off (checked by the caller). asp, as the engine (rsx_vulkan_backend.c): CULL_FACE FRONT and
+    // FRONT_AND_BACK cull front faces; the winding judged on screen after the vertex stage's Y flip
+    ras.cullMode = !asp || !s.cull ? VK_CULL_MODE_NONE
+                 : (s.cull_face == 0x0404u || s.cull_face == 0x0408u) ? VK_CULL_MODE_FRONT_BIT : VK_CULL_MODE_BACK_BIT;
+    ras.frontFace = s.front_face == 0x0901u ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE;
+    if (asp) {   // DOTHEROES_ASP_CULL_FLIP=1 (a test of the winding's orientation): the other face front
         static int flip = -1;
         if (flip < 0) { const char* e = getenv("DOTHEROES_ASP_CULL_FLIP"); flip = e && *e == '1'; }
         if (flip) ras.frontFace = ras.frontFace == VK_FRONT_FACE_CLOCKWISE ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE;
@@ -1672,25 +1736,27 @@ const Pipe* pipeline_asp(const Rec* r, const rsx_vertex_layout_plan& layout, VkF
     VkPipelineMultisampleStateCreateInfo ms = { VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
     ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
     VkStencilOpState face = {};
-    face.failOp = gcm_stencil_op(ra.stencil_fail); face.depthFailOp = gcm_stencil_op(ra.stencil_zfail);
-    face.passOp = gcm_stencil_op(ra.stencil_zpass); face.compareOp = gcm_compare(ra.stencil_func);
-    face.compareMask = ra.stencil_func_mask; face.writeMask = ra.stencil_write_mask; face.reference = 0;   // dynamic
+    face.failOp = gcm_stencil_op(s.stencil_fail); face.depthFailOp = gcm_stencil_op(s.stencil_zfail);
+    face.passOp = gcm_stencil_op(s.stencil_zpass); face.compareOp = gcm_compare(s.stencil_func);
+    face.compareMask = s.stencil_func_mask; face.writeMask = s.stencil_write_mask; face.reference = 0;   // dynamic
     VkPipelineDepthStencilStateCreateInfo ds = { VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
-    ds.depthTestEnable = df != VK_FORMAT_UNDEFINED && ra.depth_test ? VK_TRUE : VK_FALSE;
-    ds.depthWriteEnable = ds.depthTestEnable && ra.depth_write ? VK_TRUE : VK_FALSE;
-    ds.depthCompareOp = gcm_compare(ra.depth_func);
-    ds.stencilTestEnable = df != VK_FORMAT_UNDEFINED && has_stencil(df) && ra.stencil_test ? VK_TRUE : VK_FALSE;
+    ds.depthTestEnable = df != VK_FORMAT_UNDEFINED && s.depth_test ? VK_TRUE : VK_FALSE;
+    ds.depthWriteEnable = ds.depthTestEnable && s.depth_write ? VK_TRUE : VK_FALSE;
+    ds.depthCompareOp = gcm_compare(s.depth_func);
+    ds.stencilTestEnable = df != VK_FORMAT_UNDEFINED && has_stencil(df) && s.stencil_test ? VK_TRUE : VK_FALSE;
     ds.front = face; ds.back = face;
     ds.minDepthBounds = 0.0f; ds.maxDepthBounds = 1.0f;
     VkPipelineColorBlendAttachmentState cba = {};
-    cba.blendEnable = ra.blend ? VK_TRUE : VK_FALSE;
-    cba.srcColorBlendFactor = gcm_blend_factor(ra.blend_sf_rgb); cba.dstColorBlendFactor = gcm_blend_factor(ra.blend_df_rgb);
-    cba.colorBlendOp = gcm_blend_op(ra.blend_eq_rgb);
-    cba.srcAlphaBlendFactor = gcm_blend_factor(ra.blend_sf_a); cba.dstAlphaBlendFactor = gcm_blend_factor(ra.blend_df_a);
-    cba.alphaBlendOp = gcm_blend_op(ra.blend_eq_a);
-    cba.colorWriteMask = write_mask(ra.color_mask);
+    cba.blendEnable = asp && s.blend ? VK_TRUE : VK_FALSE;
+    if (asp) {
+        cba.srcColorBlendFactor = gcm_blend_factor(s.blend_sf_rgb); cba.dstColorBlendFactor = gcm_blend_factor(s.blend_df_rgb);
+        cba.colorBlendOp = gcm_blend_op(s.blend_eq_rgb);
+        cba.srcAlphaBlendFactor = gcm_blend_factor(s.blend_sf_a); cba.dstAlphaBlendFactor = gcm_blend_factor(s.blend_df_a);
+        cba.alphaBlendOp = gcm_blend_op(s.blend_eq_a);
+    }
+    cba.colorWriteMask = write_mask(s.color_mask);
     VkPipelineColorBlendStateCreateInfo cb = { VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
-    cb.attachmentCount = rt != VK_FORMAT_UNDEFINED ? 1u : 0u; cb.pAttachments = &cba;
+    cb.attachmentCount = !asp || rt != VK_FORMAT_UNDEFINED ? 1u : 0u; cb.pAttachments = &cba;
     const VkDynamicState dyn[5] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_STENCIL_REFERENCE,
                                     VK_DYNAMIC_STATE_DEPTH_BIAS, VK_DYNAMIC_STATE_BLEND_CONSTANTS };
     VkPipelineDynamicStateCreateInfo dy = { VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
@@ -1698,16 +1764,259 @@ const Pipe* pipeline_asp(const Rec* r, const rsx_vertex_layout_plan& layout, VkF
     VkGraphicsPipelineCreateInfo gci = { VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
     gci.stageCount = 2; gci.pStages = stg; gci.pVertexInputState = &vi; gci.pInputAssemblyState = &ia;
     gci.pViewportState = &vps; gci.pRasterizationState = &ras; gci.pMultisampleState = &ms; gci.pColorBlendState = &cb;
-    gci.pDepthStencilState = &ds; gci.pDynamicState = &dy; gci.layout = s_pl; gci.renderPass = render_pass2(rt, df);
-    const uint64_t c_driver = now_ns();
-    const VkResult res = F.vkCreateGraphicsPipelines(D.device, VK_NULL_HANDLE, 1, &gci, nullptr, &P.p);
-    compile_account("asp", k, c_start, c_driver, now_ns());
-    F.vkDestroyShaderModule(D.device, vsm, nullptr);
-    F.vkDestroyShaderModule(D.device, fsm, nullptr);
-    if (res != VK_SUCCESS) { fail("vkCreateGraphicsPipelines (asp)", res); P.p = VK_NULL_HANDLE; return nullptr; }
-    P.nconst = nconst;
-    stats().n_pipelines++;
-    return &P;
+    gci.pDepthStencilState = asp ? &ds : nullptr; gci.pDynamicState = &dy; gci.layout = s_pl;
+    gci.renderPass = asp ? render_pass2(rt, df) : render_pass(rt);
+    return F.vkCreateGraphicsPipelines(D.device, s_pcache, 1, &gci, nullptr, out);
+}
+
+// The pipeline cache: <shader folder>/native-pipelines.vkpc, used for the same renderer (kPipeVersion: raised
+// when make_pipeline's pipelines change), GPU, driver version and driver cache UUID only, its data checked by a
+// checksum (a damaged file is not handed to the driver), at most kPcMaxBytes; saved by a thread of its own when it
+// has grown, after a preparation pass, at exit and at a test's stop. Anything else: the cache starts empty and the
+// report says why.
+constexpr uint32_t kPcMagic = 0x4350564Eu;   // "NVPC"
+constexpr uint32_t kPcFormat = 1, kPipeVersion = 1;
+constexpr uint32_t kPcMaxBytes = 256u << 20;
+struct PcHeader {
+    uint32_t magic, format, renderer, vendor, device, driver;
+    uint8_t uuid[VK_UUID_SIZE];
+    uint32_t bytes, reserved;
+    uint64_t sum;
+};
+std::string s_pc_path, s_pc_state = "none";
+size_t s_pc_saved = 0, s_pc_loaded = 0;
+std::mutex s_pc_mu;
+
+uint64_t fnv64(const void* p, size_t n)
+{
+    uint64_t h = 0xcbf29ce484222325ull;
+    const uint8_t* b = (const uint8_t*)p;
+    for (size_t i = 0; i < n; i++) { h ^= b[i]; h *= 0x100000001b3ull; }
+    return h;
+}
+
+std::string cache_dir()
+{
+    const char* d = getenv("PS3RECOMP_SPIRV_CACHE");
+    return d && *d && strcmp(d, "off") && strcmp(d, "0") ? std::string(d) : std::string();
+}
+
+void pcache_save()
+{
+    std::lock_guard<std::mutex> lk(s_pc_mu);
+    if (!s_pcache || s_pc_path.empty()) return;
+    size_t n = 0;
+    if (F.vkGetPipelineCacheData(D.device, s_pcache, &n, nullptr) != VK_SUCCESS || !n || n == s_pc_saved ||
+        n > kPcMaxBytes)
+        return;
+    std::vector<uint8_t> d(n);
+    if (F.vkGetPipelineCacheData(D.device, s_pcache, &n, d.data()) != VK_SUCCESS) return;
+    d.resize(n);
+    VkPhysicalDeviceProperties p;
+    F.GetPhysicalDeviceProperties(D.phys, &p);
+    PcHeader h = { kPcMagic, kPcFormat, kPipeVersion, p.vendorID, p.deviceID, p.driverVersion, {}, (uint32_t)n, 0,
+                   fnv64(d.data(), n) };
+    memcpy(h.uuid, p.pipelineCacheUUID, VK_UUID_SIZE);
+    const std::string tmp = s_pc_path + ".part";
+    FILE* f = fopen(tmp.c_str(), "wb");
+    bool ok = f && fwrite(&h, sizeof h, 1, f) == 1 && fwrite(d.data(), 1, n, f) == n;
+    if (f) ok = fclose(f) == 0 && ok;
+#ifdef _WIN32
+    if (ok) remove(s_pc_path.c_str());
+#endif
+    if (ok && rename(tmp.c_str(), s_pc_path.c_str()) == 0) s_pc_saved = n;
+    else remove(tmp.c_str());
+}
+
+void pcache_open()
+{
+    const std::string dir = cache_dir();
+    VkPipelineCacheCreateInfo ci = { VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO };
+    std::vector<uint8_t> data;
+    const char* why = nullptr;
+    if (dir.empty()) {
+        why = "no cache folder (PS3RECOMP_SPIRV_CACHE)";
+    } else {
+        std::error_code ec;
+        std::filesystem::create_directories(dir, ec);
+        s_pc_path = dir + "/native-pipelines.vkpc";
+        VkPhysicalDeviceProperties p;
+        F.GetPhysicalDeviceProperties(D.phys, &p);
+        FILE* f = fopen(s_pc_path.c_str(), "rb");
+        PcHeader h = {};
+        if (!f) why = "none yet";
+        else if (fread(&h, sizeof h, 1, f) != 1 || h.magic != kPcMagic || h.format != kPcFormat)
+            why = "not a pipeline cache of this format";
+        else if (h.renderer != kPipeVersion) why = "made by another version of the renderer";
+        else if (h.vendor != p.vendorID || h.device != p.deviceID) why = "made on another GPU";
+        else if (h.driver != p.driverVersion) why = "made with another driver version";
+        else if (memcmp(h.uuid, p.pipelineCacheUUID, VK_UUID_SIZE)) why = "the driver's cache UUID differs";
+        else if (!h.bytes || h.bytes > kPcMaxBytes) why = "its size is out of bounds";
+        else {
+            data.resize(h.bytes);
+            if (fread(data.data(), 1, h.bytes, f) != h.bytes) why = "short";
+            else if (fnv64(data.data(), data.size()) != h.sum) why = "damaged (its checksum differs)";
+        }
+        if (f) fclose(f);
+    }
+    if (!why) { ci.initialDataSize = data.size(); ci.pInitialData = data.data(); }
+    if (F.vkCreatePipelineCache(D.device, &ci, nullptr, &s_pcache) != VK_SUCCESS) {
+        s_pcache = VK_NULL_HANDLE;
+        if (ci.pInitialData) {
+            why = "the driver refused the saved data";
+            ci.initialDataSize = 0;
+            ci.pInitialData = nullptr;
+            if (F.vkCreatePipelineCache(D.device, &ci, nullptr, &s_pcache) != VK_SUCCESS) s_pcache = VK_NULL_HANDLE;
+        }
+    }
+    s_pc_loaded = why ? 0 : data.size();
+    s_pc_saved = s_pc_loaded;
+    char line[600];
+    if (why) snprintf(line, sizeof line, "render: pipeline cache %s: starting empty (%s)", s_pc_path.c_str(), why);
+    else snprintf(line, sizeof line, "render: pipeline cache %s: %.1f MB for this GPU and driver, reused",
+                  s_pc_path.c_str(), data.size() / 1048576.0);
+    s_pc_state = why ? why : "reused";
+    report_add(line);
+    fprintf(stderr, "[%s]\n", line);
+    if (!s_pc_path.empty() && s_pcache) {
+        std::thread([] {
+            for (;;) {
+                std::this_thread::sleep_for(std::chrono::seconds(10));
+                pcache_save();
+            }
+        }).detach();
+    }
+}
+
+// The recipes: native-recipes.bin (DOTHEROES_RECIPES: an install's data/cache/, shared by every build; else the
+// shader folder), appended as pipelines are first made -- each a record (its key, its state, the translation's
+// parameters, the two programs' bytes as the game gave them) and a checksum; a record cut short by a crash ends
+// the file there. The programs are the player's own game's: the file stays in their install (never distributed).
+// Format 2 (M9.2): the programs, not their text, so a later build's translator makes the text again.
+constexpr uint32_t kRecipeMagic = 0x32504352u;   // "RCP2"
+constexpr uint32_t kRecipeFormat = 2;
+constexpr uint64_t kRecipeMaxBytes = 128ull << 20;
+struct RecipeHead { uint32_t magic, format; uint64_t key; PipeState s; ProgFixed f; uint32_t vp_len, fp_len; };
+struct Recipe { uint64_t key; PipeState s; ProgFixed f; std::string vp, fp; };
+std::mutex s_rc_mu;
+FILE* s_rc = nullptr;
+std::unordered_set<uint64_t> s_rc_keys;
+uint64_t s_rc_bytes = 0;
+uint32_t s_rc_loaded = 0, s_rc_new = 0;
+
+std::string recipes_path()
+{
+    const char* e = getenv("DOTHEROES_RECIPES");
+    if (e && *e) return e;
+    const std::string dir = cache_dir();
+    return dir.empty() ? std::string() : dir + "/native-recipes.bin";
+}
+
+uint32_t recipe_sum(const RecipeHead& h, const std::string& vp, const std::string& fp)
+{
+    uint64_t x = fnv64(&h, sizeof h) ^ (fnv64(vp.data(), vp.size()) * 31) ^ (fnv64(fp.data(), fp.size()) * 131);
+    return (uint32_t)(x ^ (x >> 32));
+}
+
+// every whole record of the file (and where the whole ones end); a record of another format ends the reading
+std::vector<Recipe> recipes_read(const std::string& path, long* good_end)
+{
+    std::vector<Recipe> out;
+    *good_end = 0;
+    FILE* f = fopen(path.c_str(), "rb");
+    if (!f) return out;
+    for (;;) {
+        RecipeHead h;
+        if (fread(&h, sizeof h, 1, f) != 1 || h.magic != kRecipeMagic || h.format != kRecipeFormat ||
+            h.vp_len > (1u << 20) || h.fp_len > (1u << 20))
+            break;
+        Recipe r{ h.key, h.s, h.f, std::string(h.vp_len, '\0'), std::string(h.fp_len, '\0') };
+        uint32_t sum = 0;
+        if ((h.vp_len && fread(&r.vp[0], 1, h.vp_len, f) != h.vp_len) ||
+            (h.fp_len && fread(&r.fp[0], 1, h.fp_len, f) != h.fp_len) || fread(&sum, 4, 1, f) != 1 ||
+            sum != recipe_sum(h, r.vp, r.fp))
+            break;
+        out.push_back(std::move(r));
+        *good_end = ftell(f);
+    }
+    fclose(f);
+    return out;
+}
+
+void recipes_open()
+{
+    const std::string path = recipes_path();
+    if (path.empty()) return;
+    std::error_code ec;
+    std::filesystem::create_directories(std::filesystem::path(path).parent_path(), ec);
+    long end = 0;
+    const std::vector<Recipe> rs = recipes_read(path, &end);
+    for (const Recipe& r : rs) s_rc_keys.insert(r.key);
+    s_rc_loaded = (uint32_t)s_rc_keys.size();
+    if (std::filesystem::exists(path, ec) && (uintmax_t)end != std::filesystem::file_size(path, ec))
+        std::filesystem::resize_file(path, (uintmax_t)end, ec);   // a record cut short, or an older format: rewritten
+    s_rc_bytes = (uint64_t)end;
+    s_rc = fopen(path.c_str(), "ab");
+}
+
+void recipe_record(uint64_t key, const PipeState& s, const ProgParams& pp)
+{
+    std::lock_guard<std::mutex> lk(s_rc_mu);
+    if (!s_rc || s_rc_keys.count(key) || s_rc_bytes > kRecipeMaxBytes) return;
+    const std::string vp((const char*)pp.vp, pp.vp_bytes), fp((const char*)pp.fp, pp.fp_size);
+    RecipeHead h = { kRecipeMagic, kRecipeFormat, key, s, prog_fixed(pp), (uint32_t)vp.size(), (uint32_t)fp.size() };
+    const uint32_t sum = recipe_sum(h, vp, fp);
+    bool ok = fwrite(&h, sizeof h, 1, s_rc) == 1 && fwrite(vp.data(), 1, vp.size(), s_rc) == vp.size() &&
+              fwrite(fp.data(), 1, fp.size(), s_rc) == fp.size() && fwrite(&sum, 4, 1, s_rc) == 1;
+    fflush(s_rc);
+    if (ok) {
+        s_rc_keys.insert(key);
+        s_rc_bytes += sizeof h + vp.size() + fp.size() + 4;
+        s_rc_new++;
+    }
+}
+
+// The preparation pass (`dotheroes --prepare`, main.cpp): every recipe's programs translated by this build (the
+// text, then SPIR-V: the translation cache first) and its pipeline made through the pipeline cache, so the driver
+// compiles it now and keeps it -- not when the game first draws with it. Single-threaded: the translators'
+// buffers are shared (programs_text, spirv_module). progress(done, total) after each.
+struct PrepareResult { uint32_t recipes, made, failed, translated, from_cache; double ms; };
+
+PrepareResult prepare_run(void (*progress)(uint32_t done, uint32_t total, void* ctx), void* ctx)
+{
+    PrepareResult out = {};
+    const std::string path = recipes_path();
+    if (path.empty()) return out;
+    long end = 0;
+    std::vector<Recipe> rs = recipes_read(path, &end);
+    out.recipes = (uint32_t)rs.size();
+    const uint64_t t0 = now_ns();
+    for (uint32_t i = 0; i < rs.size(); i++) {
+        const Recipe& r = rs[i];
+        const ProgParams pp = prog_params(r.f, r.vp, r.fp);
+        std::string vs, ps;
+        uint32_t nconst = 0;
+        VkShaderModule vsm = VK_NULL_HANDLE, fsm = VK_NULL_HANDLE;
+        RsxSpirvCacheStats c0 = {}, c1 = {};
+        rsx_hlsl_to_spirv_cache_stats(&c0);
+        if (programs_text(pp, vs, ps, &nconst)) {
+            vsm = spirv_module(vs, RSX_SHADER_STAGE_VERTEX);
+            fsm = spirv_module(ps, RSX_SHADER_STAGE_FRAGMENT);
+        }
+        rsx_hlsl_to_spirv_cache_stats(&c1);
+        out.translated += c1.translations - c0.translations;
+        out.from_cache += (c1.disk_hits - c0.disk_hits) + (c1.memory_hits - c0.memory_hits);
+        VkPipeline p = VK_NULL_HANDLE;
+        if (vsm && fsm && make_pipeline(r.s, vsm, fsm, &p) == VK_SUCCESS && p) out.made++;
+        else out.failed++;
+        if (p) F.vkDestroyPipeline(D.device, p, nullptr);
+        if (vsm) F.vkDestroyShaderModule(D.device, vsm, nullptr);
+        if (fsm) F.vkDestroyShaderModule(D.device, fsm, nullptr);
+        if (progress) progress(i + 1, out.recipes, ctx);
+    }
+    out.ms = (now_ns() - t0) / 1e6;
+    pcache_save();
+    return out;
 }
 
 // ---- a record's inputs ---------------------------------------------------------------------
@@ -3644,6 +3953,8 @@ bool init()
     VkPipelineLayoutCreateInfo plci = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
     plci.setLayoutCount = 1; plci.pSetLayouts = &s_dsl;
     F.vkCreatePipelineLayout(D.device, &plci, nullptr, &s_pl);
+    pcache_open();     // M9.2: the pipelines kept on disk, and the recipes they are made from
+    recipes_open();
     for (Batch& b : s_b) {
         VkCommandBufferAllocateInfo ai = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
         ai.commandPool = s_pool; ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; ai.commandBufferCount = 1;
@@ -4999,3 +5310,41 @@ void render_start()
 }
 
 }  // namespace ppfx
+
+// ---- M9.2's entry points ----------------------------------------------------------------------------------
+
+// the pipeline cache saved now (a test's stop, the game's exit: ppfx_recorder.cpp, dev_state.cpp)
+extern "C" void ppfx_native_cache_save(void)
+{
+    ppfx::pcache_save();
+    std::lock_guard<std::mutex> lk(ppfx::s_rc_mu);
+    char line[200];
+    snprintf(line, sizeof line, "render: recipes %u kept, %u new this session; pipeline cache: %s",
+             ppfx::s_rc_loaded, ppfx::s_rc_new, ppfx::s_pc_state.c_str());
+    ppfx::report_add(line);
+}
+
+// `dotheroes --prepare` (main.cpp): the renderer's device and state set up on this thread (no game, no window),
+// then every recipe's pipeline made through the pipeline cache; a JSON summary into `summary`. 0: every recipe
+// made; 1: some failed; -1: the renderer did not start.
+extern "C" int ppfx_native_prepare(void (*progress)(uint32_t done, uint32_t total, void* ctx), void* ctx,
+                                   char* summary, int n, int check_only)
+{
+    if (!ppfx::init()) {
+        snprintf(summary, (size_t)n, "{\"error\":\"the renderer did not start\"}");
+        return -1;
+    }
+    if (check_only) {   // the state a launcher decides by: the cache valid here, how many recipes
+        snprintf(summary, (size_t)n, "{\"check\":true,\"recipes\":%u,\"cache\":\"%s\",\"cache_mb\":%.2f,"
+                 "\"prepared\":%s}", ppfx::s_rc_loaded, ppfx::s_pc_state.c_str(), ppfx::s_pc_loaded / 1048576.0,
+                 ppfx::s_pc_state == "reused" ? "true" : "false");
+        return 0;
+    }
+    const ppfx::PrepareResult r = ppfx::prepare_run(progress, ctx);
+    snprintf(summary, (size_t)n,
+             "{\"recipes\":%u,\"made\":%u,\"failed\":%u,\"translated\":%u,\"from_cache\":%u,\"ms\":%.1f,"
+             "\"cache\":\"%s\",\"cache_mb_before\":%.2f,\"cache_mb\":%.2f}",
+             r.recipes, r.made, r.failed, r.translated, r.from_cache, r.ms, ppfx::s_pc_state.c_str(),
+             ppfx::s_pc_loaded / 1048576.0, ppfx::s_pc_saved / 1048576.0);
+    return r.failed ? 1 : 0;
+}

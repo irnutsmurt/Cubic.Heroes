@@ -46,7 +46,7 @@ CANCEL_GRACE_S = 5.0
 # Each step's typical length on the reference PC (seconds; M9.0's measurement, docs/M9_WORKER_PROTOCOL.md
 # section 6): the weights of the overall progress, and the remaining time before a step's own rate is known
 STAGE_SECONDS = {"verify": 15.0, "extract": 25.0, "decrypt": 1.0, "recomp": 40.0, "spu": 12.0, "build": 275.0,
-                 "finish": 1.0, "validate": 5.0, "activate": 1.0}
+                 "finish": 1.0, "validate": 5.0, "activate": 1.0, "prepare": 3.0}
 CPU_STAGES = {"recomp", "spu", "build"}   # bound by the processor (the others by the drive)
 # What an operation needs on the install's drive (bytes; measured, section 6)
 NEEDED = {"install": 6 << 30, "update": 3 << 29}
@@ -433,8 +433,9 @@ def validate_build(slot, log):
 
 
 # The steps of a build into a new slot, after the conversion's
-BUILD_TAIL = ["validate", "activate"]
-STEP_NAMES_M9 = {"validate": "Checking the new build", "activate": "Making it the active build"}
+BUILD_TAIL = ["validate", "activate", "prepare"]
+STEP_NAMES_M9 = {"validate": "Checking the new build", "activate": "Making it the active build",
+                 "prepare": "Preparing shaders and pipelines"}
 
 
 def build_slot(lay, prog, source=None, keys=None, elf=None, full=False, resume=False, validate=validate_build):
@@ -483,7 +484,69 @@ def op_install(install, source, keys, elf, prog, resume=False, validate=validate
     bid, info, _ = build_slot(lay, prog, source, keys, elf, resume=resume, validate=validate)
     game_settings.settle_after_conversion(install)
     pruned = lay.prune()
-    return {"build": bid, "exe": os.path.join(lay.game_link, layout.exe_name()), "pruned": pruned["removed"]}
+    prepared = prepare_after(lay, prog, validate)
+    return {"build": bid, "exe": os.path.join(lay.game_link, layout.exe_name()), "pruned": pruned["removed"],
+            "prepared": prepared}
+
+
+# M9.2: the shaders and pipelines made before play (the game's `--prepare`: its recipes, recorded as the game
+# first makes each pipeline, translated by this build and made through its pipeline cache). After an install, a
+# repair or an update -- when there are recipes (a first install has none until the game has been played) -- and
+# whenever the launcher's check finds the cache not valid for this GPU and driver.
+PREPARE_TIMEOUT_S = 1800
+
+
+def op_prepare(install, prog, check=False):
+    lay = layout.Layout(install)
+    if lay.kind() != "slots":
+        raise pipeline.SetupError("This folder has no install with build slots.", "no_install")
+    exe = os.path.join(lay.game_link, layout.exe_name())
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("DOTHEROES_", "PS3_", "PS3RECOMP_"))}
+    kw = {"creationflags": 0x08000000} if os.name == "nt" else {}
+    os.makedirs(lay.logs, exist_ok=True)
+    result, last = None, []
+    if not check:
+        prog.progress("prepare", 0.0, step_name("prepare"))
+    with open(os.path.join(lay.logs, "prepare.log"), "w", encoding="utf-8", errors="replace") as err:
+        p = subprocess.Popen([exe, "--prepare"] + (["--check"] if check else []), stdin=subprocess.DEVNULL,
+                             stdout=subprocess.PIPE, stderr=err, text=True, encoding="utf-8", errors="replace",
+                             cwd=lay.root, env=env, **kw)
+        try:
+            for ln in p.stdout:
+                try:
+                    e = json.loads(ln)
+                except ValueError:
+                    continue
+                if e.get("ev") == "prepare" and not check:
+                    prog.progress("prepare", e["done"] / max(1, e["total"]), f"{e['done']} of {e['total']} pipelines")
+                elif e.get("ev") == "prepared":
+                    result = e.get("result")
+            p.wait(timeout=PREPARE_TIMEOUT_S)
+        except BaseException:
+            p.kill()
+            p.wait()
+            raise
+    if not isinstance(result, dict) or "error" in result:
+        with open(os.path.join(lay.logs, "prepare.log"), encoding="utf-8", errors="replace") as f:
+            last = f.read()[-3000:]
+        raise pipeline.SetupError("Preparing the shaders and pipelines failed" + (
+            f": {result['error']}." if isinstance(result, dict) and result.get("error") else "."), "prepare_failed",
+            last)
+    result["exit"] = p.returncode
+    return result
+
+
+def prepare_after(lay, prog, validate):
+    """after a build became active: a preparation when there are recipes; its failure is reported, never the
+    operation's (the game still prepares what it meets). Not with the tests' stand-in builds (validate given)."""
+    if validate is not validate_build or not os.path.exists(os.path.join(lay.cache, "native-recipes.bin")):
+        prog.skip("prepare")
+        return None
+    try:
+        return op_prepare(lay.root, prog)
+    except pipeline.SetupError as e:
+        prog.log(f"preparation: {e} ({e.details or ''})"[:2000])
+        return {"error": str(e)}
 
 
 def op_update(install, prog, full=False, validate=validate_build):
@@ -500,7 +563,9 @@ def op_update(install, prog, full=False, validate=validate_build):
     game_settings.settle_after_conversion(install)
     pruned = lay.prune()
     lay.prune_backups()
-    return {"build": bid, "changed": changed, "saves_backup": backup and backup["id"], "pruned": pruned["removed"]}
+    prepared = prepare_after(lay, prog, validate) if changed else prog.skip("prepare")
+    return {"build": bid, "changed": changed, "saves_backup": backup and backup["id"], "pruned": pruned["removed"],
+            "prepared": prepared}
 
 
 def op_migrate(install, prog, validate=validate_build):
@@ -536,6 +601,7 @@ def op_migrate(install, prog, validate=validate_build):
     removed = lay.remove_legacy_game()
     game_settings.settle_after_conversion(install)
     lay.prune()
+    prepare_after(lay, prog, validate)
     return {"build": bid, "lift_kept": bool(old_lift), "moved": moved, "removed": removed,
             "saves_backup": backup["id"], "exe": os.path.join(lay.game_link, layout.exe_name()),
             "shortcuts": "the old shortcuts started the setup app's game: make them again (they start game/)"}
@@ -601,6 +667,15 @@ def cmd_retention(a, ev, control):
     return {"retention": st["retention"], "previous": st["previous"], "pruned": lay.prune()["removed"]}
 
 
+def cmd_prepare(a, ev, control):
+    """the shaders and pipelines made before play (--check: only whether the cache is valid for this GPU and driver,
+    and how many recipes there are)"""
+    prog = _progress(ev, control, [] if a.check else ["prepare"])
+    out = op_prepare(os.path.abspath(a.install), prog, check=a.check)
+    out["seconds"], _ = prog.finish()
+    return out
+
+
 def cmd_repair_link(a, ev, control):
     lay = _layout(a)
     lay.point_game(lay.read_active()["active"])
@@ -652,7 +727,7 @@ def cmd_selftest(a, ev, control):
 COMMANDS = {"version": cmd_version, "probe-disc": cmd_probe_disc, "probe-keys": cmd_probe_keys,
             "space": cmd_space, "info": cmd_info, "install": cmd_install, "update": cmd_update,
             "migrate": cmd_migrate, "builds": cmd_builds, "rollback": cmd_rollback, "retention": cmd_retention,
-            "repair-link": cmd_repair_link, "saves": cmd_saves, "selftest": cmd_selftest}
+            "repair-link": cmd_repair_link, "saves": cmd_saves, "prepare": cmd_prepare, "selftest": cmd_selftest}
 
 
 def parser():
@@ -670,6 +745,7 @@ def parser():
     p.add_argument("--backup", help="saves: a backup's id")
     p.add_argument("--note", help="saves backup: a note kept with it")
     p.add_argument("--confirm", action="store_true", help="saves restore/delete: the player confirmed")
+    p.add_argument("--check", action="store_true", help="prepare: only whether a preparation is due")
     p.add_argument("--seconds", type=float, default=3.0, help=argparse.SUPPRESS)   # selftest
     p.add_argument("--block", action="store_true", help=argparse.SUPPRESS)        # selftest
     p.add_argument("--child", action="store_true", help=argparse.SUPPRESS)        # selftest
@@ -681,7 +757,7 @@ def parser():
 REQUIRED = {"probe-disc": ("disc",), "probe-keys": ("disc", "keys"), "space": ("install",), "info": ("install",),
             "install": ("disc", "keys", "install"), "update": ("install",), "migrate": ("install",),
             "builds": ("install",), "rollback": ("install",), "retention": ("install", "keep"),
-            "repair-link": ("install",), "saves": ("install",)}
+            "repair-link": ("install",), "saves": ("install",), "prepare": ("install",)}
 
 
 def main(argv=None):

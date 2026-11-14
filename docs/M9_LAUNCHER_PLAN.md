@@ -457,3 +457,65 @@ F:\3d dot game heroes\m9\evidence\m91):
 them again at game/); save compatibility across versions is the game's own format, the same in every build (the
 saves are never converted); disk space is checked before an install (6 GB) and an update (1.5 GB) and a full drive
 fails cleanly (the staged slot removed), not yet tested by filling a drive.
+
+## 11. M9.2: shaders and pipelines prepared before play (2026-11-14) [M, C]
+
+**What was missing** (section 9): the native renderer made its pipelines with no VkPipelineCache, so a session was
+warm only when NVIDIA's own driver cache was; nothing was prepared before play; the driver's pipeline creation was
+the cold cost.
+
+**The native renderer** (port/native/render/ppfx_render.cpp):
+- **One builder**: the two creation sites (PPFX's, asp's) now fill a `PipeState` -- everything they read besides the
+  programs -- and call `make_pipeline`, which builds exactly what each built inline before, through the cache.
+- **Its own pipeline cache**: `<shader folder>/native-pipelines.vkpc`, used only for the same renderer version,
+  GPU, driver version and driver cache UUID, its data checked by a checksum, at most 256 MB; anything else starts
+  empty and the report says why ("made with another driver version", "damaged (its checksum differs)", ...). Saved
+  every 10 s when grown, after a preparation, at exit and at a test's stop.
+- **Recipes** (`native-recipes.bin`; in an install `data/cache/`, shared by every build): each pipeline the game
+  first makes is recorded once -- its key, its `PipeState`, the translation's parameters and the two programs'
+  bytes as the game gave them, with a checksum; a record cut short by a crash ends the file there. They are the
+  player's own game's programs and stay in their install. Programs, not translated text: a later build's
+  translator makes the text again, so coverage survives a translator change.
+- **`dotheroes --prepare [--check] [--cache DIR]`**: no window and no game -- the backend's device offscreen, the
+  renderer set up on its own -- every recipe translated by this build and made through the pipeline cache, which
+  is then saved; JSON progress on stdout. `--check`: the cache's state for this GPU and driver and the recipes
+  counted, nothing made (the launcher's question at every start).
+- **The worker** (docs/M9_WORKER_PROTOCOL.md): `prepare [--check]`; `install`, `update` (when the build changed)
+  and `migrate` prepare after activation when there are recipes. Unseen variants are still made when first drawn,
+  as before, and recorded for the next preparation.
+
+**Measured** (build/m9/m92_run.sh, m92b_run.sh on rel52/rel53: rel51 with these changes; NVIDIA's own cache
+pointed at an empty folder per run so that only ours could be warm; F:\3d dot game heroes\m9\evidence\m92, m92b):
+
+| Run | Pipelines | In all (the driver) | Longest | Over 16 ms | The worst frame (compiles in it) | Frames over 33 ms |
+|---|---|---|---|---|---|---|
+| the river, cold | 65 | 1,079 ms (906) | 62 ms | 31 | 560 ms (489) | 20 (11 with compiles) |
+| a driver change, then `--prepare` (65 recipes, 0.79 s), then the river with the driver's cache empty | 65 | 67 ms (64) | 2.6 ms | 0 | 226 ms, the load's (26) | 12 (3) |
+| the fields with only the river's recipes prepared | 38 | 86 ms | 40 ms | 1 | -- | 7 |
+| the fields after `--prepare` with its 7 new recipes | 38 | 45 ms | 2.8 ms | 0 | -- | 7 |
+| a new translator (an empty shader folder, the same recipes): `--prepare` translated 73 shaders and made 65 pipelines in 0.99 s; then the river | 63 | 100 ms | 38 ms (1 not recorded before) | 1 | -- | -- |
+
+- A cache made on another driver, or damaged (a byte changed), is refused and said why; `--prepare` makes it again
+  from the recipes (65 of 65, none failed).
+- **The install test** (on the real conversion, then the game from game/: a river fight that recorded 68 recipes):
+  the check found the cache valid; after the cache's recorded driver version was changed, not valid ("made with
+  another driver version"); `prepare` made 68 of 68; the check valid again.
+- **The rendering is unchanged** by the refactoring: the reference scenes against RPCS3, 5 of 5 within the accepted
+  figures; the menus, dungeon and snapshot drives; the memory test.
+
+**Coverage, stated as measured** (requirement 4 of docs/SHADER_PREPARATION.md): a preparation covers the pipelines
+this install has met -- each scene's set is mostly shared (the river's recipes covered 31 of the fields' 38), and a
+run of the same route meets one or two pipelines the run before did not (the river: 1-2 of 65). **A player's first
+session is not prepared** beyond what the driver's own cache holds: nothing is distributed yet.
+
+**The enumeration from the player's own data, investigated** (requirement 5's question): the disc's
+`shaders.ps3.pkg` is a container ("spkg", version 4) of 567 records, each a program beginning "CGB", with a table of
+16-byte entries (offset, size, group, an id) after a 64-byte header, uncompressed. Against the 68 recipes of the
+install test's run: 16 of the 31 vertex programs the renderer was given are in the package with each 32-bit word's
+bytes reversed; 25 of the 49 fragment programs match the package in their first 16 bytes (the game patches a
+fragment program's constants into its microcode when it loads it), 1 whole, 2 are in the EBOOT; the rest (PPFX's own
+among them) are not in the package as they are. So a distributed list could name variants by independently authored
+metadata (a program's package record and a hash of its normalized form, the translation's parameters, the pipeline
+state -- no program bytes, no text), resolved on the player's machine against their own package: possible for about
+half the programs seen, after the package's record format and the game's load transforms are worked out. Not done in
+M9.2 -- the next step for first-session coverage, with the coverage it reaches measured as above.

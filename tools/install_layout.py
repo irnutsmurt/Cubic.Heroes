@@ -464,6 +464,10 @@ class Layout:
             if os.path.isfile(p) and (n.endswith(".o") or n == "timings.json"):
                 os.replace(p, os.path.join(self.objects, n))
                 moved.append(f"data/cache/{n} -> data/cache/objects/")
+        rec = os.path.join(self.shaders, "native-recipes.bin")   # M9.2's recipes: shared by every build here
+        if os.path.isfile(rec) and not os.path.exists(os.path.join(self.cache, "native-recipes.bin")):
+            os.replace(rec, os.path.join(self.cache, "native-recipes.bin"))
+            moved.append("data/cache/shaders/native-recipes.bin -> data/cache/native-recipes.bin")
         loose = [n for n in os.listdir(self.shaders) if os.path.isfile(os.path.join(self.shaders, n))]
         if loose:
             dst = os.path.join(self.shaders, shader_id)
