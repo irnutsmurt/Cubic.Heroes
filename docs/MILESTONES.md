@@ -513,6 +513,37 @@ and the other PC interface improvements agreed earlier (the PS3 Install Game
 option removed, the host save list). The requirements and their tests:
 docs/PC_EXPERIENCE.md sections 1-7b.
 
+Added by the owner, 2026-11-14 (M10 requirements; not begun in M9):
+- **The game-side display and graphics** behind the settings the launcher already
+  shows: windowed, borderless fullscreen and exclusive fullscreen; VSync on/off;
+  independent frame-rate limits (30, 60, 75, 100, 120, 144, 165, 240, a custom
+  value, unlimited); resizable windowed mode; the aspect ratio preserved; never a
+  change to the monitor's refresh rate or the desktop resolution. Gameplay speed,
+  physics, animation and audio timing correct at every supported frame rate.
+- **The in-game Cubic.Heroes overlay**: a native settings overlay like
+  Dusklight's, in the launcher's 3D Dot Game Heroes-inspired look (its visual
+  components reused where practical).
+  - Opened by holding L3 + R3 for 500 ms, or F1; the shortcut configurable from
+    the launcher and in the game, other controller combinations supported; both
+    buttons released before it can trigger again; no input leaking into the game
+    on opening or closing; the original controller functions kept (the character
+    editor's undo/redo among them); the shortcut shown briefly when the game
+    starts, with an option to turn that notice off.
+  - Its menu: Resume Game, Display & Graphics, Audio, Controls, Performance,
+    Return to Launcher, Exit Game.
+  - Gameplay paused safely while it is open; the original START pause menu kept;
+    a translucent background over the paused game; full controller, keyboard and
+    mouse navigation; settings applied at once where possible, those needing a
+    restart marked; settings shared with the launcher through the one
+    configuration.
+  - Return to Launcher: the game shut down gracefully, the launcher restored or
+    reopened with the controller's focus. Exit Game: the game and the launcher
+    closed gracefully, back to the desktop or Steam. Both confirmed first, with a
+    warning about unsaved progress and Cancel as the default; the shader caches,
+    settings and logs flushed and every resource released before the end.
+- **A launcher preference** to close the launcher when the game starts, instead
+  of keeping it running in the background.
+
 ### M11 -- Release readiness, full-game and platform validation
 The whole game played through on the native build (every area, boss and
 movie), the platforms validated (Linux's run-time validation, outstanding since

@@ -27,6 +27,11 @@
 #include <string>
 #include <vector>
 
+#ifndef _WIN32
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
+
 #include "json.h"
 #include "worker_client.h"
 
@@ -206,7 +211,7 @@ static std::vector<std::string> worker_argv(const std::string& cmd, const std::v
 namespace col {
 const ImU32 bg = IM_COL32(14, 18, 44, 255), panel = IM_COL32(24, 34, 84, 250), panel2 = IM_COL32(34, 48, 108, 255);
 const ImU32 accent = IM_COL32(255, 206, 72, 255), accent_dim = IM_COL32(255, 206, 72, 70);
-const ImU32 warm = IM_COL32(255, 168, 76, 255), text = IM_COL32(250, 246, 232, 255), dim = IM_COL32(176, 186, 220, 255);
+const ImU32 warm = IM_COL32(255, 168, 76, 255), text = IM_COL32(250, 246, 232, 255), dim = IM_COL32(198, 206, 234, 255);
 const ImU32 danger = IM_COL32(255, 108, 96, 255), ok = IM_COL32(128, 226, 108, 255);
 const ImU32 ink = IM_COL32(8, 8, 22, 255), frame = IM_COL32(238, 234, 216, 255), inset = IM_COL32(14, 20, 54, 255);
 const ImU32 steel = IM_COL32(58, 78, 152, 255), gold = IM_COL32(240, 182, 44, 255), brick = IM_COL32(176, 60, 52, 255);
@@ -220,7 +225,7 @@ static ImFont* g_font = nullptr;   // the body font, drawn at several sizes (Dea
 static float g_scale = 1.0f;
 static float S(float px) { return px * g_scale; }
 static float snap(float v) { return floorf(v + 0.5f); }
-static const float kBody = 21.0f, kSmall = 17.0f, kTitle = 34.0f, kHuge = 54.0f;
+static const float kBody = 23.0f, kSmall = 19.0f, kTitle = 34.0f, kHuge = 54.0f;   // couch- and handheld-readable
 
 // a colour under the current alpha (a page fading in, a disabled button)
 static ImU32 A(ImU32 c)
@@ -516,6 +521,7 @@ enum class Act { A, B, X, Y, LB, RB, Start, Back };
 
 // false while the page is drawn under a dialog: the page's own buttons and prompts belong to the dialog then
 static bool g_page_input = true;
+static bool g_quit = false;   // the launcher closes after this frame
 
 static bool pressed(Act a)
 {
@@ -775,6 +781,8 @@ static std::vector<std::unique_ptr<Op>> g_queries; // quick ones
 static std::unique_ptr<Op> g_bg;                   // the shaders' preparation, in the background (one at a time)
 struct BgDone { bool shown = false, ok = false; std::string title, text; float t0 = 0; };
 static BgDone g_bg_done;                           // how it ended, shown in the bar for a while
+static bool g_play_after_bg = false;    // the preparation is being paused for the game
+static bool g_prepare_after_game = false;   // a preparation asked for while the game ran: once it has closed
 static SDL_Window* g_window = nullptr;
 static void show_msg(const std::string& t, const std::string& text);
 
@@ -1036,9 +1044,19 @@ static void check_updates()
 
 // the preparation in the background: the launcher stays usable, the bar at the bottom shows it; one at a time (the
 // worker also refuses a second for the same install, whoever starts it)
+static bool game_running();
 static bool bg_prepare(bool rebuild, const std::string& why)
 {
     if (g_bg) return false;
+    if (game_running()) {   // the game uses the cache and the GPU: after it closes
+        g_prepare_after_game = true;
+        g_bg_done = BgDone();
+        g_bg_done.shown = true;
+        g_bg_done.t0 = (float)ImGui::GetTime();
+        g_bg_done.title = "Waiting for the game";
+        g_bg_done.text = "Shaders are prepared when the game closes.";
+        return false;
+    }
     std::vector<std::string> a = { "--install", install_dir() };
     if (rebuild) a.push_back("--rebuild");
     auto op = std::make_unique<Op>();
@@ -1093,6 +1111,17 @@ static void bg_stop()
     });
 }
 
+// exit, asked first (a preparation running is stopped: what it made is kept)
+static void ask_exit()
+{
+    ask("Exit the launcher?", g_bg ? "Shaders are being prepared: exiting stops the preparation. What is prepared is kept."
+                                   : "The game, if it is running, keeps running.", "Exit", false, [] {
+        if (g_bg) g_bg->job->cancel();
+        g_quit = true;
+    });
+    g_confirm.no = "Stay";
+}
+
 // after an install (or a move into the launcher's layout): the setting decides -- ask (the first time), on or off
 static void after_install_shaders()
 {
@@ -1116,7 +1145,7 @@ static void auto_prepare_check()
 {
     static bool done = false;
     const json::Value& c = g_st.check;
-    if (done || g_bg || g_op || c.is_null() || c["prepared"].truthy() || g_st.settings.is_null()) return;
+    if (done || g_bg || g_op || c.is_null() || c["prepared"].truthy() || g_st.settings.is_null() || game_running()) return;
     if (c["recipes"].num() + c["pending"].num() <= 0) return;
     const std::string state = c["cache"].str();
     const bool invalid = state.rfind("made ", 0) == 0 || state.rfind("damaged", 0) == 0;
@@ -1147,7 +1176,28 @@ static void focus_first()
     }
 }
 
-static void start_game()
+#ifdef _WIN32
+static HANDLE g_game_proc = nullptr;   // the game the launcher started, while it runs
+#else
+static pid_t g_game_pid = 0;
+#endif
+static bool game_running()
+{
+#ifdef _WIN32
+    if (!g_game_proc) return false;
+    if (WaitForSingleObject(g_game_proc, 0) == WAIT_TIMEOUT) return true;
+    CloseHandle(g_game_proc);
+    g_game_proc = nullptr;
+    return false;
+#else
+    if (g_game_pid <= 0) return false;
+    if (waitpid(g_game_pid, nullptr, WNOHANG) == 0) return true;
+    g_game_pid = 0;
+    return false;
+#endif
+}
+
+static void start_game_now()
 {
     const std::string exe = path_str(u8path(install_dir()) / "game" /
 #ifdef _WIN32
@@ -1162,21 +1212,86 @@ static void start_game()
     std::wstring cmd = launcher::quote_arg(launcher::widen(exe));
     if (CreateProcessW(nullptr, &cmd[0], nullptr, nullptr, FALSE, 0, nullptr, launcher::widen(install_dir()).c_str(), &si, &pi)) {
         CloseHandle(pi.hThread);
-        CloseHandle(pi.hProcess);
+        if (g_game_proc) CloseHandle(g_game_proc);
+        g_game_proc = pi.hProcess;
         g_st.playing = "The game is running.";
     } else {
         g_msg = { true, "The game didn't start", "Its program couldn't be started. Try Repair on the Install page.",
                   exe, true, false };
     }
 #else
-    if (fork() == 0) { setsid(); execl(exe.c_str(), exe.c_str(), (char*)nullptr); _exit(127); }
+    const pid_t pid = fork();
+    if (pid == 0) { setsid(); execl(exe.c_str(), exe.c_str(), (char*)nullptr); _exit(127); }
+    g_game_pid = pid;
     g_st.playing = "The game is running.";
 #endif
+}
+
+
+static void start_game()
+{
+    if (!g_bg) { start_game_now(); return; }
+    ask("Shaders are being prepared", "Playing now pauses the preparation, so the game and the preparation never share "
+        "the shader cache or the GPU. What is prepared is kept; preparing again after playing continues from there.",
+        "Pause and play", false, [] {
+        if (g_bg) { g_play_after_bg = true; g_bg->job->cancel(); }
+        else start_game_now();
+    });
+    g_confirm.no = "Keep preparing";
+    g_confirm.focus_yes = true;
 }
 
 static void prepare_now(bool rebuild)
 {
     bg_prepare(rebuild, rebuild ? "asked for" : "asked for");
+}
+
+// below the Play page's cards, when there is room: a small voxel landscape of the project's own -- a grass hill, a
+// stream, a tree, a gold block on a stone -- drawn with the logo's voxels; still, but for the water's glint
+static void play_landscape()
+{
+    const ImVec2 a = ImGui::GetCursorScreenPos();
+    const float w = ImGui::GetContentRegionAvail().x, h = ImGui::GetContentRegionAvail().y;
+    if (h < S(110) || w < S(400)) return;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const int Wmax = 10, D = 3;
+    const float s = floorf(std::min(S(28), h / (5.6f + (Wmax + D) * 0.5f)));   // a block's edge
+    const ImU32 grass_top = col::grass, side_l = col::dirt, side_r = col::dirt_dk;
+    const ImU32 stone_t = IM_COL32(150, 156, 176, 255), stone_l = IM_COL32(112, 118, 140, 255), stone_r = IM_COL32(84, 88, 108, 255);
+    const float t = (float)ImGui::GetTime();
+    struct B { int gx, gy, gz; int kind; };   // kind: 0 grass, 1 water, 2 trunk, 3 leaves, 4 stone, 5 gold
+    std::vector<B> bs;
+    const int W = std::max(6, std::min(Wmax, (int)(w / (s * 0.87f)) - D - 2));
+    // isometric: x along (gx - gz), y along (gx + gz), up by gy; centred, the tree's top within the room
+    const float x0 = a.x + w * 0.5f - (W - D) * s * 0.87f * 0.5f, y0 = a.y + s * 5.0f;
+    for (int x = 0; x < W; x++)
+        for (int z = 0; z < D; z++) {
+            const bool stream = x == W / 3 || (x == W / 3 + 1 && z >= 2);
+            bs.push_back({ x, 0, z, stream ? 1 : 0 });
+            if (!stream && x >= W - 4 && z <= 1) bs.push_back({ x, 1, z, 0 });   // the hill
+        }
+    bs.push_back({ W - 2, 2, 0, 2 });
+    for (int dx = -1; dx <= 1; dx++)
+        for (int dz = 0; dz <= 1; dz++) bs.push_back({ W - 2 + dx, 3, dz, 3 });
+    bs.push_back({ W - 2, 4, 0, 3 });
+    bs.push_back({ 1, 1, 1, 4 }); bs.push_back({ 1, 2, 1, 5 });
+    // back to front: the far diagonal first, low before high
+    std::sort(bs.begin(), bs.end(), [](const B& p, const B& q) {
+        if (p.gx + p.gz != q.gx + q.gz) return p.gx + p.gz < q.gx + q.gz;
+        return p.gy < q.gy;
+    });
+    for (const B& b : bs) {
+        const ImVec2 c(floorf(x0 + (b.gx - b.gz) * s * 0.87f), floorf(y0 + (b.gx + b.gz) * s * 0.5f - b.gy * s));
+        ImU32 top = grass_top, l = side_l, r = side_r;
+        if (b.kind == 1) { const int gl = (int)(30 * (0.5f + 0.5f * sinf(t * 1.5f + b.gx + b.gz)));
+                           top = IM_COL32(60 + gl / 2, 130 + gl, 210, 255); l = IM_COL32(40, 90, 170, 255); r = IM_COL32(30, 70, 140, 255); }
+        if (b.kind == 2) { top = IM_COL32(150, 100, 60, 255); l = IM_COL32(120, 76, 44, 255); r = IM_COL32(92, 58, 34, 255); }
+        if (b.kind == 3) { top = IM_COL32(70, 170, 70, 255); l = IM_COL32(46, 130, 52, 255); r = IM_COL32(34, 100, 40, 255); }
+        if (b.kind == 4) { top = stone_t; l = stone_l; r = stone_r; }
+        if (b.kind == 5) { top = IM_COL32(255, 222, 110, 255); l = col::gold; r = IM_COL32(186, 126, 26, 255); }
+        voxel(dl, c, s, top, l, r);
+    }
+    ImGui::Dummy(ImVec2(w, h - S(4)));
 }
 
 static void page_play()
@@ -1240,6 +1355,7 @@ static void page_play()
         } else text_col(col::ok, "Up to date.");
         card_end();
         prompt(Act::Y, "Check for updates");
+        play_landscape();
         if (pressed(Act::Y)) check_updates();
     } else if (kind == "setup-app") {
         title("An install made by the setup app was found", 26);
@@ -1345,6 +1461,18 @@ static void page_install()
                                          "files onto this window.");
     ImGui::Dummy(ImVec2(0, S(4)));
     const bool disc_ok = !g_wiz.disc_info.is_null();
+    if (kind != "slots") {
+        card_begin("##need");
+        title("What you need", 24);
+        text_col(col::text, "Your disc: a decrypted ISO of the US release (BLUS-30490) -- a dump whose disc encryption "
+                            "was removed as it was made -- or the disc's files in a folder. An encrypted ISO (a raw dump "
+                            "that still needs its disc key) is not supported yet: the check below says so.");
+        text_col(col::text, "Its keys: a text file with the game's program keys -- lines \"APP <revision> <erk> <riv>\" "
+                            "in hexadecimal -- or an EBOOT.elf you decrypted yourself. The installer decrypts the game's "
+                            "program (EBOOT.BIN) with them on its own and checks the result; the keys are never copied "
+                            "or written to any log.");
+        card_end();
+    }
     std::string dv = g_wiz.disc.empty() ? "Choose your disc image (a decrypted ISO) or the disc's folder."
                                         : g_wiz.disc + (disc_ok ? "\n" + g_wiz.disc_info["title"].str() + " -- " +
                                                                       g_wiz.disc_info["title_id"].str() + " v" +
@@ -1573,8 +1701,15 @@ static void page_shaders()
         text_col(c["prepared"].truthy() ? col::ok : col::warm, "The pipeline cache: %s, %s.",
                  c["prepared"].truthy() ? "ready for this GPU and driver" : c["cache"].str().c_str(),
                  human_bytes(c["cache_mb"].num() * 1048576).c_str());
-        text_col(col::dim, "Pipelines known on this PC: %s (recorded as you play)%s.", c["recipes"].str("0").c_str(),
-                 c["pending"].num() > 0 ? (", " + c["pending"].str() + " more listed for a first session").c_str() : "");
+        const int known = (int)c["recipes"].num(), listed = (int)c["listed"].num(), from_list = (int)c["listed_held"].num();
+        text_col(col::text, "Recorded coverage: %d pipelines known%s -- %d from the first-session list, %d recorded on "
+                            "this PC as you play.", known, c["prepared"].truthy() ? " and prepared" : "", from_list,
+                 std::max(0, known - from_list));
+        if (c["pending"].num() > 0)
+            text_col(col::warm, "%d more on the first-session list are added at the next preparation.", (int)c["pending"].num());
+        text_col(col::dim, "Complete coverage -- every shader the game could ever combine -- can't be known in advance%s: a "
+                           "combination met for the first time is made then (a short stutter at most), recorded, and "
+                           "prepared from then on.", listed > 0 ? "" : " (no first-session list in this release)");
         if (!c["disk_mb"].is_null())
             text_col(col::dim, "On disk: %s (the translated shaders, the pipeline cache and the recipes).",
                      human_bytes(c["disk_mb"].num() * 1048576).c_str());
@@ -1601,6 +1736,13 @@ static void settings_shader_status()
     shader_actions(false);
 }
 
+// the next item beside the last one only when it fits there (else it starts a line): no sideways overflow
+static void same_line_fits(float next_w)
+{
+    const float limit = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x;
+    if (ImGui::GetItemRectMax().x + ImGui::GetStyle().ItemSpacing.x + next_w <= limit) ImGui::SameLine();
+}
+
 static void page_settings()
 {
     title("Settings");
@@ -1614,13 +1756,15 @@ static void page_settings()
         { "LAUNCHER_UPDATE_CHANNEL", { { "stable", "Stable releases" }, { "prerelease", "Test releases too" } } },
         { "LAUNCHER_LOG_LEVEL", { { "info", "Normal" }, { "debug", "Detailed" } } },
         { "LAUNCHER_SHADERS_AFTER_INSTALL", { { "ask", "Ask" }, { "1", "On" }, { "0", "Off" } } },
+        { "LAUNCHER_DISPLAY_MODE", { { "windowed", "Windowed" }, { "borderless", "Borderless fullscreen" },
+                                     { "exclusive", "Exclusive fullscreen" } } },
     };
     std::string last_cat;
     bool first = true;
     ImGui::BeginChild("##settings", ImVec2(0, 0), ImGuiChildFlags_NavFlattened, ImGuiWindowFlags_NoBackground);
     // the categories in a fixed order, each setting in the schema's order within it
     std::vector<std::pair<std::string, const json::Value*>> ordered;
-    static const char* cats[] = { "Display", "Shaders", "Updates", "Saves", "Diagnostics" };
+    static const char* cats[] = { "Display", "Launcher", "Shaders", "Updates", "Saves", "Diagnostics" };
     for (const char* c : cats)
         for (const auto& kv : s.o)
             if (kv.second["category"].str() == c) ordered.push_back({ kv.first, &kv.second });
@@ -1641,7 +1785,8 @@ static void page_settings()
         if (ch != choices.end()) {
             for (auto& c : ch->second) { cycle.push_back(c.first); if (c.first == val) shown = c.second; }
         } else if (key == "PS3RECOMP_VK_FULLSCREEN" || key == "LAUNCHER_CHECK_UPDATES" ||
-                   key == "LAUNCHER_SHADERS_AFTER_UPDATE" || key == "LAUNCHER_SHADERS_ON_DRIVER_CHANGE") {
+                   key == "LAUNCHER_SHADERS_AFTER_UPDATE" || key == "LAUNCHER_SHADERS_ON_DRIVER_CHANGE" ||
+                   key == "LAUNCHER_VSYNC") {
             cycle = { "0", "1" };
             shown = val == "1" ? "On" : "Off";
         } else if (key == "LAUNCHER_BUILDS_KEPT") {
@@ -1652,11 +1797,16 @@ static void page_settings()
         std::string label = x["label"].str(key) + (x["applies"].str() == "restart" ? " *" : "");
         char btn[300];
         snprintf(btn, sizeof btn, "<     %s     >##%s", shown.c_str(), key.c_str());   // left and right change it
+        // the value's button in a column that fits the page (no sideways scrolling at any scale)
+        const float room = ImGui::GetContentRegionAvail().x;
+        const float bw = std::min(S(340), room * 0.4f), bx = std::max(room * 0.45f, room - bw - S(24));
         ImGui::AlignTextToFramePadding();
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + bx - S(30));
         ImGui::TextUnformatted(label.c_str());
-        ImGui::SameLine(S(520));
+        ImGui::PopTextWrapPos();
+        ImGui::SameLine(bx);
         int dir = 0;
-        if (big_button(btn, ImVec2(S(340), S(50)))) dir = 1;
+        if (big_button(btn, ImVec2(bw, S(50)))) dir = 1;
         if (first) { focus_first(); first = false; }
         if (ImGui::IsItemFocused()) {
             if (ImGui::IsKeyPressed(ImGuiKey_GamepadDpadLeft) || ImGui::IsKeyPressed(ImGuiKey_LeftArrow)) dir = -1;
@@ -1681,7 +1831,7 @@ static void page_settings()
                 if (r["ok"].truthy()) g_st.settings = r["data"];
             });
         });
-    ImGui::SameLine();
+    same_line_fits(S(260));
     if (big_button("Add to Steam", ImVec2(S(260), 0)))
         ask("Add the launcher to Steam?", "It appears in your Steam library (as a non-Steam game) and opens this launcher. "
             "Close Steam first: it rewrites its library when it exits.", "Add it", false, [] {
@@ -1691,12 +1841,14 @@ static void page_settings()
                     else show_result_error(r, "It wasn't added to Steam");
                 });
         });
-    ImGui::SameLine();
+    same_line_fits(S(300));
     if (big_button("Start-menu shortcut", ImVec2(S(300), 0)))
         run("shortcuts", { "--exe", path_str(u8path(g_exe_dir) / "CubicHeroes.exe") }, "", false, [](const json::Value& r) {
             if (r["ok"].truthy()) g_msg = { true, "Shortcut made", "The launcher is in your Start menu.", "", false, false };
             else show_result_error(r, "The shortcut wasn't made");
         });
+    if (big_button("Exit the launcher", ImVec2(S(320), 0))) ask_exit();
+    same_line_fits(S(420));
     if (big_button("Choose another install folder", ImVec2(S(420), 0)))
         browse("Choose the install folder", true, {}, "folders", install_dir(), [](const std::string& p) {
             g_prefs.install = p;
@@ -2106,7 +2258,7 @@ static void prepare_strip(ImDrawList* dl, ImVec2 a, ImVec2 b, float t)
     for (char& ch : up) ch = (char)toupper((unsigned char)ch);
     const float hx = a.x + S(20) + ip * 10 + S(18);
     pix_text(dl, ImVec2(hx, cy - tp * 3.5f), up.c_str(), tp, head_col);
-    const float fs = S(18);
+    const float fs = S(20);
     const ImVec2 rs = g_font->CalcTextSizeA(fs, FLT_MAX, 0, right.c_str());
     const float rx = b.x - S(24) - rs.x;
     dl->AddText(g_font, fs, ImVec2(rx + 2, cy - rs.y / 2 + 2), A(col::ink), right.c_str());
@@ -2175,6 +2327,33 @@ static void frame()
             json::Value r = g_bg->result;
             g_bg.reset();
             if (then) then(r);
+            if (g_play_after_bg) {   // paused for the game: what was made is kept
+                g_play_after_bg = false;
+                g_bg_done.title = "Paused for the game";
+                g_bg_done.text = "What was prepared is kept. Prepare again after playing to finish.";
+                start_game_now();
+            }
+        }
+    }
+    {   // the launcher's game closing: the note cleared, the cache checked, a preparation it held back started
+        static bool was_running = false;
+        const bool running = game_running();
+        if (was_running && !running) {
+            g_st.playing.clear();
+            if (g_prepare_after_game) { g_prepare_after_game = false; bg_prepare(false, "after the game closed"); }
+            refresh_info();
+        }
+        was_running = running;
+    }
+    {   // the right stick scrolls the list or text under the focus (the D-pad and left stick move the focus)
+        ImGuiContext& g = *ImGui::GetCurrentContext();
+        const float ry = ImGui::GetKeyData(ImGuiKey_GamepadRStickDown)->AnalogValue -
+                         ImGui::GetKeyData(ImGuiKey_GamepadRStickUp)->AnalogValue;
+        if (fabsf(ry) > 0.15f) {
+            ImGuiWindow* w = g.NavWindow ? g.NavWindow : g.HoveredWindow;
+            while (w && w->ScrollMax.y <= 0.0f && w->ParentWindow) w = w->ParentWindow;
+            if (w && w->ScrollMax.y > 0.0f)
+                ImGui::SetScrollY(w, std::min(w->ScrollMax.y, std::max(0.0f, w->Scroll.y + ry * S(1500) * ImGui::GetIO().DeltaTime)));
         }
     }
     if (g_auto_check_due) { g_auto_check_due = false; auto_prepare_check(); }
@@ -2215,7 +2394,8 @@ static void frame()
     pix_text(dl, ImVec2(sa.x + S(104), sa.y + S(30) + lp * 9), ".HEROES", lp, col::text);
     for (float x = sa.x + S(24); x < sb.x - S(24); x += S(12))   // a dotted rule under the logo
         dl->AddRectFilled(ImVec2(snap(x), snap(sa.y + S(136))), ImVec2(snap(x + S(6)), snap(sa.y + S(139))), A(col::steel));
-    const float row = floorf(S(52)), ip = std::max(2.0f, floorf(S(3))), np = std::max(2.0f, floorf(S(3)));
+    const float row = floorf(std::min(S(52), (sb.y - S(78) - (sa.y + S(156))) / (kPages + 1.2f)));
+    const float ip = std::max(2.0f, floorf(std::min(S(3), row / 14.0f))), np = std::max(2.0f, floorf(std::min(S(3), row / 13.0f)));
     float y = sa.y + S(156);
     for (int i = 0; i < kPages; i++) {
         const ImVec2 ra(sa.x + S(14), y), rb(sb.x - S(14), y + row - S(6));
@@ -2232,6 +2412,21 @@ static void frame()
                  on ? col::accent : hov ? col::text : col::dim);
         if (hov && ImGui::IsMouseClicked(0)) { g_page = i; g_focus_page = true; }
         y += row;
+    }
+    {   // EXIT, above LB/RB: a click, or MENU from anywhere
+        const ImVec2 ea(sa.x + S(14), y + row * 0.2f), eb(sb.x - S(14), y + row * 1.2f - S(6));
+        const bool hov = !overlay_open() && ImGui::IsMouseHoveringRect(ea, eb);
+        if (hov) dl->AddRectFilled(ea, eb, A(IM_COL32(34, 48, 108, 255)));
+        const float ey = (ea.y + eb.y) / 2;
+        // a door, drawn in blocks: the frame, the door, its knob
+        const float d = ip;
+        const ImVec2 da(ea.x + S(22) + d, ey - d * 5);
+        dl->AddRectFilled(ImVec2(da.x - d, da.y - d), ImVec2(da.x + d * 9, da.y + d * 11), A(col::ink));
+        dl->AddRectFilled(da, ImVec2(da.x + d * 8, da.y + d * 10), A(IM_COL32(150, 96, 52, 255)));
+        dl->AddRectFilled(ImVec2(da.x + d, da.y + d), ImVec2(da.x + d * 7, da.y + d * 10), A(IM_COL32(110, 66, 36, 255)));
+        dl->AddRectFilled(ImVec2(da.x + d * 5, da.y + d * 5), ImVec2(da.x + d * 6, da.y + d * 6), A(col::accent));
+        pix_text(dl, ImVec2(ea.x + S(22) + ip * 10 + S(22), ey - np * 3.5f), "EXIT", np, hov ? col::text : col::dim);
+        if (hov && ImGui::IsMouseClicked(0)) ask_exit();
     }
     {   // LB / RB beside "PAGES" at the menu's foot
         const float gh = floorf(S(30));
@@ -2292,6 +2487,10 @@ static void frame()
         prompt(Act::Back, "Stop preparing");
         if (pressed(Act::Back)) bg_stop();
     }
+    if (!overlay_open()) {   // MENU (F10): exit, asked first
+        prompt(Act::Start, "Exit");
+        if (pressed(Act::Start)) ask_exit();
+    }
     if (!overlay_open()) {
         prompt(Act::A, "Select");
         prompt(Act::LB, "");
@@ -2301,11 +2500,11 @@ static void frame()
     ImDrawList* fg = ImGui::GetForegroundDrawList();
     const float fy = o.y + sz.y - foot, gy = fy + S(14), gh2 = foot - S(14);   // below the grass
     auto shadow_text = [&](ImVec2 at, ImU32 c, const char* s) {
-        fg->AddText(g_font, S(19), ImVec2(at.x + 2, at.y + 2), col::ink, s);
-        fg->AddText(g_font, S(19), at, c, s);
+        fg->AddText(g_font, S(21), ImVec2(at.x + 2, at.y + 2), col::ink, s);
+        fg->AddText(g_font, S(21), at, c, s);
     };
     {
-        const ImVec2 ds = g_font->CalcTextSizeA(S(19), FLT_MAX, 0, dev);
+        const ImVec2 ds = g_font->CalcTextSizeA(S(21), FLT_MAX, 0, dev);
         shadow_text(ImVec2(o.x + S(28), gy + (gh2 - ds.y) / 2), col::text, dev);
     }
     float px = o.x + sz.x - S(28);
@@ -2316,7 +2515,7 @@ static void frame()
     const float gsz = floorf(S(34));
     for (auto it = listed.rbegin(); it != listed.rend(); ++it) {   // right to left: each glyph measured, then drawn
         const bool pair_next = std::next(it) != listed.rend() && std::next(it)->label.empty();   // LB, then RB "Pages"
-        const ImVec2 ts = g_font->CalcTextSizeA(S(19), FLT_MAX, 0, it->label.c_str());
+        const ImVec2 ts = g_font->CalcTextSizeA(S(21), FLT_MAX, 0, it->label.c_str());
         px -= ts.x;
         shadow_text(ImVec2(px, gy + (gh2 - ts.y) / 2), col::text, it->label.c_str());
         if (!it->label.empty()) px -= S(10);
@@ -2406,11 +2605,10 @@ int main(int argc, char** argv)
     ImGui_ImplSDL2_InitForSDLRenderer(win, ren);
     ImGui_ImplSDL2_SetGamepadMode(ImGui_ImplSDL2_GamepadMode_AutoAll);   // any controller, connected or plugged in later
     ImGui_ImplSDLRenderer2_Init(ren);
-    g_scale = std::max(1.0f, ImGui_ImplSDL2_GetContentScaleForDisplay(SDL_GetWindowDisplayIndex(win)));
-    {   // a window smaller than the content needs: the scale down to fit
+    {   // the scale follows the window (as each frame does after)
         int w, h;
         SDL_GetWindowSize(win, &w, &h);
-        g_scale = std::min(g_scale, std::max(0.75f, std::min(w / 1280.0f, h / 800.0f) * g_scale));
+        g_scale = std::max(0.75f, std::min(4.0f, floorf(std::min(w / 1280.0f, h / 800.0f) * 20.0f + 0.5f) / 20.0f));
     }
     apply_theme();
     ImGui::GetStyle().ScaleAllSizes(g_scale);
@@ -2441,7 +2639,7 @@ int main(int argc, char** argv)
                                                    "changed.", "", true, false };
     bool wrote_health = false, quit = false;
     bool checked_updates = false;
-    while (!quit) {
+    while (!quit && !g_quit) {
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
             ImGui_ImplSDL2_ProcessEvent(&e);
@@ -2477,6 +2675,43 @@ int main(int argc, char** argv)
                 break;
             }
         }
+        {   // the scale follows the window: 1280x800 is 1; the smaller ratio rules (ultrawide: the height)
+            int w, h;
+            SDL_GetWindowSize(win, &w, &h);
+            float want = std::min(w / 1280.0f, h / 800.0f);
+            want = std::max(0.75f, std::min(4.0f, floorf(want * 20.0f + 0.5f) / 20.0f));
+            if (fabsf(want - g_scale) > 0.001f) {
+                g_scale = want;
+                ImGui::GetStyle() = ImGuiStyle();
+                apply_theme();
+                ImGui::GetStyle().ScaleAllSizes(g_scale);
+                ImGui::GetStyle().FontSizeBase = S(kBody);
+            }
+        }
+        {   // the launcher's own display mode and VSync (Settings, Launcher): applied as they change
+            static std::string mode_now = "windowed";
+            static int vsync_now = 1;
+            const std::string mode = setting("LAUNCHER_DISPLAY_MODE", "windowed");
+            if (mode != mode_now) {
+                if (mode == "exclusive") {   // the display's own mode: its resolution and refresh rate unchanged
+                    SDL_DisplayMode dm;
+                    if (SDL_GetDesktopDisplayMode(SDL_GetWindowDisplayIndex(win), &dm) != 0 ||
+                        SDL_SetWindowDisplayMode(win, &dm) != 0 || SDL_SetWindowFullscreen(win, SDL_WINDOW_FULLSCREEN) != 0)
+                        SDL_SetWindowFullscreen(win, SDL_WINDOW_FULLSCREEN_DESKTOP);   // not supported: borderless
+                } else {
+                    SDL_SetWindowFullscreen(win, mode == "borderless" ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
+                }
+                mode_now = mode;
+            }
+            const int vsync = setting("LAUNCHER_VSYNC", "1") == "1";
+            if (vsync != vsync_now) { SDL_RenderSetVSync(ren, vsync); vsync_now = vsync; }
+            static Uint64 last = SDL_GetPerformanceCounter();
+            if (!vsync) {   // no VSync: at most 240 frames a second, not a busy loop
+                const double since = (double)(SDL_GetPerformanceCounter() - last) / SDL_GetPerformanceFrequency();
+                if (since < 1.0 / 240) SDL_Delay((Uint32)((1.0 / 240 - since) * 1000));
+            }
+            last = SDL_GetPerformanceCounter();
+        }
         g_pad_connected = SDL_NumJoysticks() > 0;
         if (g_pad_connected && !g_saw_input) g_device = Device::Pad;   // a controller at hand: its prompts from the start
         io.ConfigNavCursorVisibleAlways = g_device == Device::Pad;
@@ -2502,7 +2737,7 @@ int main(int argc, char** argv)
     // the window's placement for next time
     const Uint32 fl = SDL_GetWindowFlags(win);
     g_prefs.maximized = (fl & SDL_WINDOW_MAXIMIZED) != 0;
-    if (!g_prefs.maximized && !(fl & SDL_WINDOW_MINIMIZED)) {
+    if (!g_prefs.maximized && !(fl & (SDL_WINDOW_MINIMIZED | SDL_WINDOW_FULLSCREEN | SDL_WINDOW_FULLSCREEN_DESKTOP))) {
         SDL_GetWindowPosition(win, &g_prefs.x, &g_prefs.y);
         SDL_GetWindowSize(win, &g_prefs.w, &g_prefs.h);
     }

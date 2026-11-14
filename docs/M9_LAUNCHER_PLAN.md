@@ -894,3 +894,37 @@ second part) ended "cancelled", no lock or part file left; preparing again found
 and made the 68 with 76 ms of pipeline work, against 769 ms for an uninterrupted rebuild; once more, 12 ms. **Not
 tried by hand**: stopping from the bar with VIEW, the automatic triggers after a real driver change or update --
 the owner's review.
+
+## 19. Launcher refinements after the owner's review of the look (2026-11-14) [C]
+
+**The owner's direction**: keep the look (the pixel icons, the grass footer, the selection, the segmented bar) and
+refine. Game-side display modes, VSync and frame-rate limits, and the in-game overlay, are M10 (docs/MILESTONES.md);
+the launcher-side items are done here.
+- **Exit**: EXIT in the command menu (a door, in blocks), MENU (F10) anywhere, and a button on the Settings page --
+  each asked first ("The game, if it is running, keeps running"; a preparation running is stopped, what it made kept).
+- **Scrolling**: the right stick scrolls the list or text under the focus; the D-pad and the left stick move the
+  focus (Dear ImGui's navigation scrolls to it, with the keys' repeat).
+- **Readability and scale**: body text 23 and small text 19 (from 21 and 17) at 1280x800, secondary text brighter,
+  the prompts larger. The scale now follows the window every frame -- 1280x800 is 1, the smaller of the width's and
+  the height's ratios rules, so an ultrawide window is scaled by its height -- from 0.75 to 4 (720p 0.9, 1080p 1.35,
+  1440p 1.8, 4K 2.7). The command menu's rows fit the window's height; the Settings page's value column and its
+  buttons fit its width (no sideways scrolling). Tried at 1280x720, 1440x900 and 1900x800 (the widest this PC's
+  1080p display allows); 1440p, 4K and real ultrawide displays not tried -- the same rule.
+- **The launcher's own display** (Settings, Launcher): windowed (resizable; its size and place remembered, never a
+  full screen's size), borderless fullscreen, or exclusive fullscreen where supported -- at the display's own mode,
+  so neither its resolution nor its refresh rate changes; VSync on by default (off: at most 240 frames a second, not
+  a busy loop). The game's display settings stay as they are until M10.
+- **The Play page**: a small isometric voxel landscape of the project's own (grass, a stream with a glint, a tree on
+  a hill, a gold block on a stone) in the room below the cards, when there is room.
+- **The install**: before a first install, "What you need" says what the disc must be (a decrypted ISO of the US
+  release, or its files in a folder; an encrypted ISO that still needs its disc key is not supported yet, and the
+  disc check says so) and what the keys are (a text file of `APP <revision> <erk> <riv>` lines, or an EBOOT.elf the
+  player decrypted) -- the installer decrypts EBOOT.BIN itself with them and checks the result; the keys are never
+  copied or logged.
+- **Shader coverage, stated as it is** (the Shaders page): "Recorded coverage: N pipelines known and prepared -- K
+  from the first-session list, M recorded on this PC"; complete coverage (every combination the game could make)
+  cannot be known in advance -- a combination met for the first time is made then, recorded and prepared after.
+- **Playing during a preparation**: PLAY asks first -- "Pause and play" stops the preparation (what it made is kept)
+  and starts the game once it has stopped, so the game and the preparation never share the shader cache or the GPU;
+  a preparation asked for (or due automatically) while the launcher's game runs waits for the game to close and then
+  starts. The preparation is the launcher's, not a page's: it carries on as the pages change.
