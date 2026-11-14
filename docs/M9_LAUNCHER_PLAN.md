@@ -560,3 +560,46 @@ offering nothing unverified.
 **Not yet**: the owner's key (config/release_keys.json is empty: the owner makes the key); no release has been
 published, so the GitHub path has run against the mirror only (the same JSON shape as GitHub's API); the launcher's
 side of its self-update (`--after-update`, `--update-failed`, `.started-ok`) is M9.4's launcher.
+
+## 13. M9.4, part 1: the launcher's back end -- settings, diagnostics, the GPU (2026-11-14) [C, M]
+
+The native launcher's window (C++, SDL2, Vulkan, Dear ImGui) needs Dear ImGui's source, a download the owner is
+asked for first (section 6); this part is everything the launcher stands on that needs no window.
+
+**One authoritative settings file** (decision 7, section 8.9; tools/settings.py, config/settings_schema.json):
+config/dotheroes.cfg holds the game's settings and the launcher's (LAUNCHER_*: the update channel, checking for
+updates, the builds and automatic save backups kept, the log detail), so the launcher's settings page and the game's
+own menus read and write one file. The schema gives each setting its type and rule, default, owner, whether it
+applies live or at the game's next start, its category and label. A value that breaks its rule is reported and its
+default used; a line that is not NAME=value is left out and reported; a damaged file (binary data, unreadable) is
+reported and `repair` writes it again with its valid values, the damaged one kept beside it; keys the schema does not
+know are kept; a change is checked whole before anything is written; defaults can be restored per setting or all.
+The file is written whole (a temporary file renamed over it). The worker's `settings` command
+(docs/M9_WORKER_PROTOCOL.md). Every existing setting applies at the game's next start; M10 adds the remaining PC
+settings, the game's in-game settings menu over this file and the live ones.
+
+**Diagnostics** (section 8.7; tools/diagnostics.py, the worker's `diagnostics`): a report for the player to review --
+about.json (the versions, the operating system, the processor and memory, the GPU and its driver, the install's
+state and sizes, whether there are saves) and the logs' ends -- every text with the home and install folders, the
+user's and computer's names and e-mail addresses replaced by placeholders; never the saves, keys, the disc's or the
+game's files, recipes or shader caches (their sizes only). The player reviews the files and may remove any; the zip
+is exactly what remains. Nothing is sent anywhere.
+
+**The GPU and its driver** (port/native/render/ppfx_render.cpp): `dotheroes --prepare` and `--prepare --check` now
+report the device (name, vendor and device ids, the driver's version as its vendor writes it, the Vulkan version) --
+for the diagnostics, and for the launcher's own "a preparation is due" decision.
+
+**Validated**: tests/test_settings_diagnostics.py (9: the rules, invalid values and lines, a change refused whole,
+defaults, a damaged file repaired, the worker's command; the report's sanitizing, saves and recipes never in it, the
+zip as reviewed); with the other modules 103 unit tests pass. On the test install (F:\3d dot game heroes\m9\evidence\m94):
+the check reported the GPU (an RTX 3070, driver 616.92, Vulkan 1.4.351); **a real update onto a new prebuilt** -- the
+saves backed up first, the lift redone (its tools had changed), the build relinked with its objects reused, checked,
+made active, the previous kept, then **prepared automatically**: the 68 recipes recorded by the earlier river fight
+translated by the new build's translator into its new shader folder (71 translations) and their pipelines made in
+0.45 s; the diagnostics report and its zip hold no user name, computer name, home path or e-mail address.
+
+**Next, M9.4 part 2** (with Dear ImGui): the launcher's window and pages over these -- the first-run wizard (the
+probes, the space check, the install with its progress, elapsed and remaining time, cancel and resume), Play (the
+active build, an update and its notes, the preparation when its check says so), builds and rollback, caches,
+saves, diagnostics, settings; keyboard, mouse and controller; DPI; window placement; the Steam shortcut; its side of
+the self-update (`--after-update`, `--update-failed`, `.started-ok`); a fallback when Vulkan is missing.

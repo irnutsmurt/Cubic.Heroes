@@ -55,20 +55,29 @@ def ensure_performance_settings(install):
         write_game_settings(install, **missing, **stale)
 
 
-def write_game_settings(install, **values):
+def write_game_settings(install, strict=False, **values):
+    """the file written whole (a temporary file renamed over it: never half a file); strict: a failure raised
+    (the settings API, tools/settings.py), else ignored as the setup app always did"""
     cur = read_game_settings(install)
     cur.update(values)
+    path = game_settings_path(install)
+    tmp = path + ".part"
     try:
-        with open(game_settings_path(install), "w") as f:
-            f.write("# Cubic.Heroes settings (the setup app writes this; editing by hand is fine)\n")
+        with open(tmp, "w", newline="\n") as f:
+            f.write("# Cubic.Heroes settings: the launcher and the game's menus write this (the rules:\n")
+            f.write("#   config/settings_schema.json); editing by hand is fine\n")
             f.write("# DOTHEROES_FPS: 60, 30 (the original) or 0 (no limit)\n")
             f.write("# PS3RECOMP_VK_FULLSCREEN: 1 = fullscreen\n")
             f.write("# DOTHEROES_NATIVE_CD, DOTHEROES_NATIVE_SOLVER, GCM_WRAP_LAP, DOTHEROES_PRESENT_ONCE: the\n")
             f.write("#   settings that hold 60 fps in fights (0 / empty: the original's way, slower)\n")
             for k, v in sorted(cur.items()):
                 f.write(f"{k}={v}\n")
+        os.replace(tmp, path)
     except OSError:
-        pass
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        if strict:
+            raise
 
 
 def settle_after_conversion(install):
