@@ -907,8 +907,9 @@ the owner's review.
 **The owner's direction**: keep the look (the pixel icons, the grass footer, the selection, the segmented bar) and
 refine. Game-side display modes, VSync and frame-rate limits, and the in-game overlay, are M10 (docs/MILESTONES.md);
 the launcher-side items are done here.
-- **Exit**: EXIT in the command menu (a door, in blocks), MENU (F10) anywhere, and a button on the Settings page --
-  each asked first ("The game, if it is running, keeps running"; a preparation running is stopped, what it made kept).
+- **Exit**: EXIT in the command menu (a door, in blocks) and MENU (F10) anywhere -- each asked first ("The game, if
+  it is running, keeps running"; a preparation running is stopped, what it made kept). (The Settings page's own Exit
+  button was a duplicate: removed in section 23.)
 - **Scrolling**: the right stick scrolls the list or text under the focus; the D-pad and the left stick move the
   focus (Dear ImGui's navigation scrolls to it, with the keys' repeat).
 - **Readability and scale**: body text 23 and small text 19 (from 21 and 17) at 1280x800, secondary text brighter,
@@ -923,9 +924,9 @@ the launcher-side items are done here.
   a busy loop). The game's display settings stay as they are until M10.
 - **The Play page**: a small isometric voxel landscape of the project's own (grass, a stream with a glint, a tree on
   a hill, a gold block on a stone) in the room below the cards, when there is room.
-- **The install**: before a first install, "What you need" says what the disc must be (a decrypted ISO of the US
-  release, or its files in a folder; an encrypted ISO that still needs its disc key is not supported yet, and the
-  disc check says so) and what the keys are (a text file of `APP <revision> <erk> <riv>` lines, or an EBOOT.elf the
+- **The install**: before a first install, "What you need" says what the disc must be (an ISO of the US release, or
+  its files in a folder; an encrypted ISO also needs its disc key, asked for only then -- section 22) and what the
+  keys are (a text file of `APP <revision> <erk> <riv>` lines, or an EBOOT.elf the
   player decrypted) -- the installer decrypts EBOOT.BIN itself with them and checks the result; the keys are never
   copied or logged.
 - **Shader coverage, stated as it is** (the Shaders page): "Recorded coverage: N pipelines known and prepared -- K
@@ -985,8 +986,8 @@ the launcher-side items are done here.
   cutoff.
 - **Export Logs, the launcher's part -- done**: the Diagnostics page's button is "Export Logs" (it gathers the report,
   which works with no game running, after a crash too: it reads the files left behind); every file is shown and can
-  be left out (X); "Save the zip to..." opens the controller's folder browser at Documents, and the zip is written
-  where the player chooses. Nothing is uploaded.
+  be left out (X); "Save the zip to..." opens the controller's folder browser (where it starts: section 23), and the
+  zip is written where the player chooses. Nothing is uploaded.
 
 ## 21. A gaming application, not a development tool (the owner, 2026-11-14) [C]
 
@@ -1049,3 +1050,84 @@ decrypted image's.
   SHA-256 as the supported version's), the program decrypted, the lift, the build, its check -- the image unchanged
   (its size and time), the key in none of the install's output, log or errors. IRD files: covered by the unit tests
   with a made-up constant; a real IRD needs the player's D1 line.
+
+## 23. The owner's hands-on review: the controller, shaders, settings, the browser (2026-11-14) [C]
+
+**The owner's list** (after trying the launcher by hand):
+1. **Uninstalling**: no mention of Steam; a shortcut Cubic.Heroes made removed by itself; no other Steam entry changed.
+2. **The menu by controller**: LB/RB kept; left (D-pad or stick) into the command menu, up and down through it, right
+   back to the page; EXIT selectable.
+3. **Prompts**: Xbox, PlayStation, Switch and Steam prompts, following the controller in use; Steam Input; a generic
+   fallback; a manual choice.
+4. **Shaders**: Precompile hidden when everything is prepared, offered again when something needs preparing; Rebuild
+   clearer, and truly from scratch; "preparation complete" kept apart from "every possible shader"; Rebuild checked.
+5. **Settings**: the focus outline kept after a value changes; no duplicate buttons; "Precompile Shaders After
+   Installing" gone (the first-run offer decides); the focus never moved or lost.
+6. **The file browser**: it starts in the install folder (before an install: the launcher's own); remembers the
+   folder last browsed in the session; falls back when that folder is gone; works fully by controller.
+7. **A controller-only test** of every page and dialog: everything reached, chosen, changed and cancelled.
+
+**Done**:
+- **Uninstalling** (tools/uninstall.py): the dialog says nothing of Steam. The launcher's own Steam entry (the one
+  whose program is the launcher) is removed with the shortcuts; a list without it is never written, and every other
+  entry stays as it is. Steam rewrites its list as it exits, so while it runs the entry waits: the uninstall reports it
+  (`steam_later`), and the launcher removes it quietly -- at its start and every 20 s -- once Steam is closed (the
+  worker's `shortcuts --remove-steam`). tests/test_uninstall.py.
+- **The command menu**: its rows (the pages and EXIT) are navigation items. From a page, only left reaches the menu
+  -- when nothing further left on the page takes it; a Settings row keeps left and right for its value -- and up and
+  down stay on the page. In the menu, up and down move through it, stopping at its ends; A opens a page (the focus
+  stays in the menu) or asks to exit; right goes to the page's first item. B on a page goes to the menu; LB/RB as
+  before. The left stick moves the focus as the D-pad does (a push, then a repeat while held).
+- **The focus, kept**: a controller always has one. When the focused item goes away -- a button replaced as a job
+  starts or ends, a dialog closing whose opener is gone -- the page's first item takes it; leaving a report file out
+  focuses the next. A B that closes a dialog is the dialog's alone (it no longer also sends the page's focus to the
+  menu). B never drops the focus (Dear ImGui's default would), and X is the launcher's own (ImGui took a tap of it to a
+  window's menu layer, losing the focus).
+- **Prompts**: the controller's type comes from SDL -- Xbox 360/One, PS3/4/5, a Switch Pro controller or Joy-Cons --
+  and they follow the controller in use (connected, removed, or the one pressed last). Behind Steam Input, the physical
+  controller's type is used when SDL reads it from Steam; otherwise, and for a Steam Deck or Steam Controller, Steam's
+  own prompts. Anything else gets generic prompts: a diamond marking the button's position. Settings, "Controller
+  button prompts": Automatic, Xbox, PlayStation, Nintendo Switch, Steam, Generic (LAUNCHER_PROMPTS). PlayStation:
+  ✕ ○ □ △, L1/R1, OPTIONS/CREATE. Switch: the buttons by their labels (SDL's labels, so A is the labelled A), L/R, +/-.
+  Generic: START/SELECT.
+- **Shaders**: "Precompile now" only when something is not prepared. "Rebuild shader cache" asks first: everything
+  prepared on this PC is deleted and made again from scratch, in the background, in a few seconds. The worker's
+  rebuild now deletes every translated shader and the pipeline cache and keeps the recipes (the list of what to
+  prepare), not just the pipeline cache. The page says "Preparation complete: every shader this PC has needed so far
+  is ready (N)" or "Preparation needed", plus a line that the game can combine more shaders than anyone can list in
+  advance. While a preparation runs: "Being prepared for this graphics card and driver now." The Shaders page's
+  automatic-preparation block and the Settings page's shader status are gone (duplicates).
+- **Settings**: each row keeps its id when its value changes (`###key`), so the focus and its outline stay on it.
+  LAUNCHER_SHADERS_AFTER_INSTALL is gone from the schema: after an install, preparation is automatic if "Prepare
+  shaders after a game update" is on, and the first-run offer otherwise (accepting it turns that and the driver-change
+  rebuild on). The Settings page's Exit button is gone (EXIT and MENU remain).
+- **The file browser**: it starts in the folder last browsed this session; else the install folder (if it exists);
+  else the launcher's own folder. B goes up a folder and focuses the folder just left; Y closes. Every row is a
+  navigation item.
+- **The wording**: the Install page, the Play page, the worker's disc errors, the download's README and the project's
+  README speak of an ISO -- decrypted, or encrypted with its disc key -- not of a decrypted ISO only (section 22).
+
+**The controller-only test** (the launcher's `--nav-test FILE`, a developers' switch): the script drives the launcher
+through the gamepad's input -- the D-pad, A B X Y, LB RB, MENU VIEW, the right stick. `wait`, `shot NAME` (a BMP of
+the launcher's own frame) and `expect TEXT` (the focus must be on that item, or the test stops before pressing anything
+else) check it as it goes, and the log beside the script records each step's page, dialog and focus. During a test the
+game never starts (the log notes it) and the mouse is ignored.
+- The full script (kept beside the build, not in the repository) visits every page and dialog:
+  - the menu and EXIT (asked, cancelled); LB/RB;
+  - Install's Choose... and the browser (moved in, up a folder, closed, reopened where it was left);
+  - the uninstall dialog (a choice changed and back, cancelled);
+  - Updates; Saves (the on-screen keyboard; Restore and Delete asked and cancelled);
+  - Shaders: Rebuild confirmed -- the one destructive choice, on the test install -- then stopping asked and cancelled;
+  - Settings during the preparation (a value changed and back, the focus kept; the right stick scrolling);
+  - Diagnostics (a report made, a file viewed and scrolled, one left out, the save browser opened and closed);
+  - MENU (asked, cancelled); the Shaders page after the rebuild.
+- Result: every step as expected, 42 screenshots, the game never started. The rebuild remade 98 pipelines in 1.7 s
+  (RTX 3070) while the test moved on to other pages.
+- A second script cycles the prompt styles on the Settings row and ends on Automatic.
+- What it found, fixed above: the focus pulled back from the menu by a nested card; up and down crossing between the
+  page and the menu; a dialog's closing B also moving the page's focus; ImGui's B and X handling dropping the focus; no
+  focus after the stop dialog; the "complete" wording during a rebuild; a report file left out losing the focus. The
+  harness also got two fixes of its own: a shot's name starting with a digit, and the right stick injected as an event
+  beside a real controller's.
+- Not tried by the test: a real PlayStation, Switch or Steam controller (the prompts are checked by the manual choice);
+  the controller connected or removed while the launcher runs; a drive list (no browsing to "This PC").

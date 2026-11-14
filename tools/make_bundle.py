@@ -287,8 +287,9 @@ def bundle(platform):
     with open(os.path.join(out, "README.txt"), "w", newline="\r\n" if platform == "windows" else "\n") as f:
         f.write(f"Cubic.Heroes (3D Dot Game Heroes Recomp) - native PC port, version {VERSION}\n\n"
                 f"Run CubicHeroes{zig_build.exe_suffix(platform)}, the launcher: it installs the game from your own\n"
-                "disc (a decrypted ISO of the US release BLUS-30490, or its folder) and its keys file (or an\n"
-                "EBOOT.elf you decrypted), keeps it up to date, and plays it. A controller does everything.\n"
+                "disc (an ISO of the US release BLUS-30490 -- decrypted, or encrypted with its disc key -- or\n"
+                "its folder) and its keys file (or an EBOOT.elf you decrypted), keeps it up to date, and plays\n"
+                "it. A controller does everything.\n"
                 "worker/ holds what the launcher runs to convert and build the game.\n\n"
                 "Nothing from the game is included: the game is rebuilt from your disc on your machine.\n"
                 f"The game needs {needs}\n")

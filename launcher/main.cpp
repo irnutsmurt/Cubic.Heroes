@@ -136,6 +136,7 @@ struct Prefs {
     int x = SDL_WINDOWPOS_CENTERED, y = SDL_WINDOWPOS_CENTERED, w = 1280, h = 800;
     bool maximized = false;
     bool prepared_once = false;   // shaders prepared at least once: a new build's empty cache is an update's
+    bool steam_cleanup = false;   // an uninstall left the launcher's Steam entry (Steam ran): removed once it's closed
 
     std::string file() const { return path_str(u8path(data_dir()) / "launcher.json"); }
     void load()
@@ -151,6 +152,7 @@ struct Prefs {
         }
         maximized = v["window"]["maximized"].truthy();
         prepared_once = v["prepared_once"].truthy();
+        steam_cleanup = v["steam_cleanup"].truthy();
     }
     void save() const
     {
@@ -159,7 +161,8 @@ struct Prefs {
                  maximized ? "true" : "false");
         write_text(file(), "{\n \"install\": " + json::quote(install) + ",\n \"disc\": " + json::quote(disc) +
                                ",\n \"keys\": " + json::quote(keys) + ",\n \"window\": " + win +
-                               ",\n \"prepared_once\": " + (prepared_once ? "true" : "false") + "\n}\n");
+                               ",\n \"prepared_once\": " + (prepared_once ? "true" : "false") +
+                               ",\n \"steam_cleanup\": " + (steam_cleanup ? "true" : "false") + "\n}\n");
     }
 } g_prefs;
 
@@ -522,7 +525,12 @@ enum class Act { A, B, X, Y, LB, RB, Start, Back };
 
 // false while the page is drawn under a dialog: the page's own buttons and prompts belong to the dialog then
 static bool g_page_input = true;
+static std::string g_focus_label;   // the focused item's name, for the scripted controller test's log
+static bool g_focus_owns_lr = false;  // the focused item uses left and right itself (a settings value)
 static bool g_quit = false;   // the launcher closes after this frame
+static bool g_nav_test = false;   // a scripted controller test (--nav-test) drives the launcher: the game never starts
+static std::string g_nav_event;   // what the test's log notes beside the next step
+static float g_nav_rstick = 0;    // the test's right stick (beside a real controller's own, which the backend reports)
 
 static bool pressed(Act a)
 {
@@ -543,24 +551,131 @@ static bool pressed(Act a)
     return false;
 }
 
-// a button's glyph, in pixels: the controller's face buttons as round-cornered blocks in their colours, bumpers and
-// menu buttons as steel blocks, or a parchment keycap
+// which controller's buttons the prompts show: the one used last (SDL's type for it, then its name; Steam Input's
+// virtual pads report the controller behind them), or the player's choice in Settings (LAUNCHER_PROMPTS)
+enum class PadStyle { Xbox, PlayStation, Nintendo, Steam, Generic };
+static PadStyle g_pad_detected = PadStyle::Xbox;
+static std::string g_prompt_choice = "auto";
+static PadStyle style_from(SDL_GameControllerType type, const char* name)
+{
+    std::string n = name ? name : "";
+    std::transform(n.begin(), n.end(), n.begin(), [](unsigned char c) { return (char)tolower(c); });
+    auto has = [&](const char* w) { return n.find(w) != std::string::npos; };
+    if (has("steam")) return PadStyle::Steam;
+    switch (type) {
+    case SDL_CONTROLLER_TYPE_XBOX360: case SDL_CONTROLLER_TYPE_XBOXONE: return PadStyle::Xbox;
+    case SDL_CONTROLLER_TYPE_PS3: case SDL_CONTROLLER_TYPE_PS4: case SDL_CONTROLLER_TYPE_PS5: return PadStyle::PlayStation;
+    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_PRO: case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_LEFT:
+    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT: case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_PAIR:
+        return PadStyle::Nintendo;
+    default: break;
+    }
+    if (has("xbox") || has("xinput")) return PadStyle::Xbox;
+    if (has("playstation") || has("dualshock") || has("dualsense") || has("ps4") || has("ps5") || has("wireless controller"))
+        return PadStyle::PlayStation;
+    if (has("nintendo") || has("switch") || has("joy-con") || has("pro controller")) return PadStyle::Nintendo;
+    return PadStyle::Generic;
+}
+static std::vector<SDL_GameController*> g_pads;   // the controllers connected (their left sticks steer the focus)
+static void stick_nav(ImGuiIO& io)
+{
+    static int held = -1;
+    static double next = 0;
+    float x = 0, y = 0;
+    for (SDL_GameController* gc : g_pads) {
+        const float ax = SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_LEFTX) / 32767.0f;
+        const float ay = SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_LEFTY) / 32767.0f;
+        if (fabsf(ax) + fabsf(ay) > fabsf(x) + fabsf(y)) { x = ax; y = ay; }
+    }
+    int dir = -1;   // left, right, up, down
+    if (fabsf(x) > 0.55f && fabsf(x) >= fabsf(y)) dir = x < 0 ? 0 : 1;
+    else if (fabsf(y) > 0.55f) dir = y < 0 ? 2 : 3;
+    const double now = SDL_GetTicks() / 1000.0;
+    if (dir < 0) { held = -1; return; }
+    if (dir != held) { held = dir; next = now + 0.35; }
+    else if (now < next) return;
+    else next = now + 0.12;
+    static const ImGuiKey keys[4] = { ImGuiKey_GamepadDpadLeft, ImGuiKey_GamepadDpadRight, ImGuiKey_GamepadDpadUp,
+                                      ImGuiKey_GamepadDpadDown };
+    io.AddKeyEvent(keys[dir], true);   // released by the next frame's real D-pad state
+}
+
+static PadStyle pad_style()
+{
+    const std::string& c = g_prompt_choice;
+    if (c == "xbox") return PadStyle::Xbox;
+    if (c == "playstation") return PadStyle::PlayStation;
+    if (c == "nintendo") return PadStyle::Nintendo;
+    if (c == "steam") return PadStyle::Steam;
+    if (c == "generic") return PadStyle::Generic;
+    return g_pad_detected;
+}
+
+// a 7x7 pixel symbol: PlayStation's cross, circle, square, triangle; a generic pad's four positions (one filled)
+static void pad_symbol(ImDrawList* dl, ImVec2 c, float px, int sym, ImU32 col)
+{
+    static const char* shapes[4][7] = {
+        { "#.....#", ".#...#.", "..#.#..", "...#...", "..#.#..", ".#...#.", "#.....#" },
+        { "..###..", ".#...#.", "#.....#", "#.....#", "#.....#", ".#...#.", "..###.." },
+        { "#######", "#.....#", "#.....#", "#.....#", "#.....#", "#.....#", "#######" },
+        { "...#...", "..#.#..", "..#.#..", ".#...#.", ".#...#.", "#.....#", "#######" } };
+    const ImVec2 o(snap(c.x - 3.5f * px), snap(c.y - 3.5f * px));
+    if (sym < 4) {
+        for (int r = 0; r < 7; r++)
+            for (int i = 0; i < 7; i++)
+                if (shapes[sym][r][i] == '#')
+                    dl->AddRectFilled(ImVec2(o.x + i * px, o.y + r * px), ImVec2(o.x + (i + 1) * px, o.y + (r + 1) * px), A(col));
+        return;
+    }
+    // a generic pad: south, east, west, north as four blocks, the one meant filled
+    const int on = sym - 4;
+    const ImVec2 at[4] = { ImVec2(3, 5), ImVec2(5, 3), ImVec2(1, 3), ImVec2(3, 1) };
+    for (int k = 0; k < 4; k++) {
+        const ImVec2 a0(o.x + (at[k].x - 1) * px, o.y + (at[k].y - 1) * px), a1(a0.x + 2 * px, a0.y + 2 * px);
+        if (k == on) dl->AddRectFilled(a0, a1, A(col));
+        else dl->AddRect(a0, a1, A(shade(col, 0.6f)), 0.0f, std::max(1.0f, floorf(px * 0.5f)));
+    }
+}
+
+// a button's glyph, in pixels: the controller's face buttons as round-cornered blocks (in the style of the controller in
+// use: Xbox's coloured letters, PlayStation's symbols, Nintendo's and Steam's letters, a generic pad's positions),
+// bumpers and menu buttons as steel blocks, or a parchment keycap
 static float glyph(ImDrawList* dl, ImVec2 p, Act a, float h)
 {
     const bool pad = g_device == Device::Pad;
     const char* t = "";
     ImU32 fill = col::steel;
     bool round = false;
+    int sym = -1;
+    ImU32 symcol = IM_COL32_WHITE;
     if (pad) {
-        switch (a) {
-        case Act::A: t = "A"; fill = IM_COL32(64, 176, 74, 255); round = true; break;
-        case Act::B: t = "B"; fill = IM_COL32(214, 60, 60, 255); round = true; break;
-        case Act::X: t = "X"; fill = IM_COL32(44, 112, 220, 255); round = true; break;
-        case Act::Y: t = "Y"; fill = IM_COL32(222, 168, 30, 255); round = true; break;
-        case Act::LB: t = "LB"; break;
-        case Act::RB: t = "RB"; break;
-        case Act::Start: t = "MENU"; break;
-        case Act::Back: t = "VIEW"; break;
+        const PadStyle st = pad_style();
+        const int face = a == Act::A ? 0 : a == Act::B ? 1 : a == Act::X ? 2 : a == Act::Y ? 3 : -1;   // S, E, W, N
+        if (face >= 0) {
+            round = true;
+            static const char* letters[4] = { "A", "B", "X", "Y" };
+            static const ImU32 xbox[4] = { IM_COL32(64, 176, 74, 255), IM_COL32(214, 60, 60, 255),
+                                           IM_COL32(44, 112, 220, 255), IM_COL32(222, 168, 30, 255) };
+            static const ImU32 ps[4] = { IM_COL32(120, 160, 255, 255), IM_COL32(255, 100, 100, 255),
+                                         IM_COL32(240, 130, 210, 255), IM_COL32(90, 220, 170, 255) };
+            static const int ps_sym[4] = { 0, 1, 2, 3 };   // cross, circle, square, triangle
+            switch (st) {
+            case PadStyle::Xbox: t = letters[face]; fill = xbox[face]; break;
+            case PadStyle::PlayStation: fill = IM_COL32(36, 38, 52, 255); sym = ps_sym[face]; symcol = ps[face]; break;
+            case PadStyle::Nintendo: t = letters[face]; fill = IM_COL32(72, 74, 84, 255); break;
+            case PadStyle::Steam: t = letters[face]; fill = IM_COL32(32, 36, 48, 255); break;
+            case PadStyle::Generic: fill = IM_COL32(72, 78, 96, 255); sym = 4 + face; break;
+            }
+        } else {
+            const bool sony = st == PadStyle::PlayStation, nin = st == PadStyle::Nintendo, gen = st == PadStyle::Generic;
+            const bool steam = st == PadStyle::Steam;
+            switch (a) {
+            case Act::LB: t = sony || steam ? "L1" : nin ? "L" : "LB"; break;
+            case Act::RB: t = sony || steam ? "R1" : nin ? "R" : "RB"; break;
+            case Act::Start: t = sony ? "OPTIONS" : nin ? "+" : gen ? "START" : "MENU"; break;
+            case Act::Back: t = sony ? "CREATE" : nin ? "-" : gen ? "SELECT" : "VIEW"; break;
+            default: break;
+            }
         }
     } else {
         switch (a) {
@@ -576,7 +691,7 @@ static float glyph(ImDrawList* dl, ImVec2 p, Act a, float h)
     }
     const float px = std::max(2.0f, floorf(h / 11.0f));   // the label's pixel
     const float tw = pix_w(t, px);
-    const float w = round ? h : std::max(h, tw + px * 6);
+    const float w = round ? h : std::max(h, tw + px * 6);   // (a symbol: a round face)
     if (!dl) return w;   // measured, not drawn
     p = ImVec2(snap(p.x), snap(p.y));
     const ImVec2 b(p.x + w, p.y + h);
@@ -594,6 +709,10 @@ static float glyph(ImDrawList* dl, ImVec2 p, Act a, float h)
         dl->AddRectFilled(ImVec2(p.x + n, b.y - 2 * px), ImVec2(b.x - n, b.y - px), A(shade(face, 0.65f)));
     } else {
         bevel_block(dl, p, b, face, px);
+    }
+    if (sym >= 0) {
+        pad_symbol(dl, ImVec2(p.x + w / 2, p.y + h / 2), std::max(2.0f, floorf(h / 12.0f)), sym, symcol);
+        return w;
     }
     pix_text(dl, ImVec2(p.x + (w - tw) / 2, p.y + (h - 7 * px) / 2 - px * 0.5f), t, px,
              pad ? IM_COL32_WHITE : IM_COL32(40, 30, 24, 255), pad ? col::ink : 0);
@@ -650,6 +769,10 @@ static bool big_button(const char* label, ImVec2 size = ImVec2(0, 0), Kind k = K
     ImGui::BeginDisabled(!enabled);
     const std::string id = pixel > 0 ? std::string("##") + label : std::string(label);
     const bool r = ImGui::Button(id.c_str(), size);
+    if (ImGui::IsItemFocused()) {
+        const char* e = strstr(label, "##");
+        g_focus_label = e ? std::string(label, e) : std::string(label);
+    }
     const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
     const bool down = ImGui::IsItemActive(), hov = ImGui::IsItemHovered();
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -888,6 +1011,12 @@ static void show_result_error(const json::Value& r, const std::string& what)
 }
 
 // --- the file browser: drives and known folders, folders first, then the files the filter takes ---
+static std::string& browse_last()   // the folder last browsed this session
+{
+    static std::string last;
+    return last;
+}
+
 struct Browser {
     bool open = false, folders = false;   // folders: a folder is what is chosen
     std::string title, dir, filter_desc;
@@ -939,9 +1068,12 @@ struct Browser {
         entries = ds;
         entries.insert(entries.end(), fl.begin(), fl.end());
     }
+    std::string from;   // after "up a folder": the folder left, which takes the focus in its parent's list
     void go(const std::string& d)
     {
         dir = d;
+        from.clear();
+        if (!d.empty()) browse_last() = d;
         list();
         refocus = 4;
     }
@@ -952,6 +1084,8 @@ struct Browser {
         fs::path parent = p.parent_path();
         if (parent == p || path_str(p).size() <= 3) go("");
         else go(path_str(parent));
+        for (const Entry& e : entries)
+            if (u8path(e.path) == p) from = e.path;
     }
 } g_browser;
 
@@ -964,14 +1098,14 @@ static void browse(const std::string& t, bool folders, std::vector<std::string> 
     g_browser.exts = std::move(exts);
     g_browser.filter_desc = desc;
     g_browser.on_pick = std::move(f);
+    // where it opens: the folder last browsed this session; else the install's folder; else the launcher's own
+    (void)start;
     std::error_code ec;
-    std::string d = start;
-    while (!d.empty() && !fs::is_directory(u8path(d), ec)) {
-        std::string up = path_str(u8path(d).parent_path());
-        if (up == d) { d.clear(); break; }
-        d = up;
-    }
-    g_browser.go(d.empty() ? known_folder(kDownloads) : d);
+    extern std::string install_dir_or_empty();
+    std::string d = browse_last();
+    if (d.empty() || !fs::is_directory(u8path(d), ec)) d = install_dir_or_empty();
+    if (d.empty() || !fs::is_directory(u8path(d), ec)) d = g_exe_dir;
+    g_browser.go(d);
 }
 
 // --- the on-screen keyboard: letters, digits and a few signs; A types, X deletes, Y a space, MENU done ---
@@ -998,6 +1132,7 @@ struct Status {
 } g_st;
 
 static std::string install_dir() { return g_prefs.install.empty() ? default_install() : g_prefs.install; }
+std::string install_dir_or_empty() { return install_dir(); }
 
 void auto_prepare_check_later();
 
@@ -1126,13 +1261,11 @@ static void ask_exit()
 // after an install (or a move into the launcher's layout): the setting decides -- ask (the first time), on or off
 static void after_install_shaders()
 {
-    const std::string s = setting("LAUNCHER_SHADERS_AFTER_INSTALL", "ask");
-    if (s == "1") { bg_prepare(false, "after the install"); return; }
-    if (s != "ask") return;
+    if (setting("LAUNCHER_SHADERS_AFTER_UPDATE", "0") == "1") { bg_prepare(false, "after the install"); return; }
     ask("The game is installed", "Would you like to precompile shaders now? This is recommended to reduce stuttering "
         "during gameplay.", "Precompile Now (recommended)", false, [] {
-        run("settings", { "--install", install_dir(), "--set", "LAUNCHER_SHADERS_AFTER_INSTALL=1",
-                          "--set", "LAUNCHER_SHADERS_AFTER_UPDATE=1", "--set", "LAUNCHER_SHADERS_ON_DRIVER_CHANGE=1" },
+        run("settings", { "--install", install_dir(), "--set", "LAUNCHER_SHADERS_AFTER_UPDATE=1",
+                          "--set", "LAUNCHER_SHADERS_ON_DRIVER_CHANGE=1" },
             "", false, [](const json::Value& r) { if (r["ok"].truthy()) g_st.settings = r["data"]; });
         bg_prepare(false, "after the install");
     });
@@ -1169,6 +1302,7 @@ static const char* kPageNames[kPages] = { "Play", "Install", "Updates", "Saves",
 static const int kPageIcon[kPages] = { 0, 1, 2, 4, 5, 6, 7 };   // kIcons: the sword, chest, arrow, book, gem, gear, glass
 static int g_page = kPlay;
 static bool g_focus_page = true;   // give the new page's first item the focus
+static bool g_focus_menu = false;  // B on a page: the menu's row for it takes the focus
 
 static void focus_first()
 {
@@ -1201,6 +1335,7 @@ static bool game_running()
 
 static void start_game_now()
 {
+    if (g_nav_test) { g_nav_event = "  [the game would start: not during a scripted controller test]"; return; }
     const std::string exe = path_str(u8path(install_dir()) / "game" /
 #ifdef _WIN32
                                      "dotheroes.exe"
@@ -1374,7 +1509,7 @@ static void page_play()
     } else {
         title(kind == "partial" ? "An install was interrupted" : "The game isn't installed yet", 26);
         text_col(col::dim, kind == "partial" ? "Continue it on the Install page: what was done is kept."
-                                             : "You'll need your own disc image (a decrypted ISO) and its keys file.");
+                                             : "You'll need your own disc (an ISO or its folder) and its keys file.");
         if (big_button(kind == "partial" ? "Continue the install" : "Install the game", ImVec2(S(360), 0), Kind::Primary)) {
             g_page = kInstall;
             g_focus_page = true;
@@ -1501,16 +1636,16 @@ static void page_install()
     if (kind != "slots") {
         card_begin("##need");
         title("What you need", 24);
-        text_col(col::text, "Your disc: a decrypted ISO of the US release (BLUS-30490) -- a dump whose disc encryption "
-                            "was removed as it was made -- or the disc's files in a folder. An encrypted ISO (a raw dump "
-                            "that still needs its disc key) is not supported yet: the check below says so.");
+        text_col(col::text, "Your disc: an ISO of the US release (BLUS-30490), or the disc's files in a folder. An "
+                            "encrypted ISO (a raw dump) also needs its disc key -- a .dkey or IRD file, or the key typed "
+                            "in -- and the check below asks for it only then.");
         text_col(col::text, "Its keys: a text file with the game's program keys -- lines \"APP <revision> <erk> <riv>\" "
                             "in hexadecimal -- or an EBOOT.elf you decrypted yourself. The installer decrypts the game's "
                             "program (EBOOT.BIN) with them on its own and checks the result; the keys are never copied "
                             "or written to any log.");
         card_end();
     }
-    std::string dv = g_wiz.disc.empty() ? "Choose your disc image (a decrypted ISO) or the disc's folder."
+    std::string dv = g_wiz.disc.empty() ? "Choose your disc image (an ISO) or the disc's folder."
                                         : g_wiz.disc + (disc_ok ? "\n" + g_wiz.disc_info["title"].str() + " -- " +
                                                                       g_wiz.disc_info["title_id"].str() + " v" +
                                                                       g_wiz.disc_info["app_ver"].str() + ": supported"
@@ -1729,12 +1864,18 @@ static void shader_actions(bool focus = true)
         text_col(col::dim, "Preparing now: the bar at the bottom shows how far.");
         return;
     }
-    if (big_button("Precompile now", ImVec2(S(300), 0), Kind::Primary)) prepare_now(false);
-    if (focus) focus_first();
-    ImGui::SameLine();
-    if (big_button("Rebuild the cache", ImVec2(S(300), 0)))
-        ask("Rebuild the shader cache?", "The pipeline cache is made again from scratch for this GPU and driver. It "
-            "runs in the background; nothing else changes.", "Rebuild", false, [] { prepare_now(true); });
+    const json::Value& c = g_st.check;
+    const bool ready = !c.is_null() && c["prepared"].truthy() && c["pending"].num() <= 0;
+    if (!ready) {   // something to prepare: offered first
+        if (big_button("Precompile now", ImVec2(S(300), 0), Kind::Primary)) prepare_now(false);
+        if (focus) focus_first();
+        same_line_fits(S(360));
+    }
+    if (big_button("Rebuild shader cache", ImVec2(S(360), 0)))
+        ask("Rebuild the shader cache?", "Every shader prepared on this PC is deleted and made again from scratch. Use it "
+            "if graphics look wrong, for example after a graphics driver problem. It runs in the background and takes a "
+            "few seconds; you can keep using the launcher.", "Rebuild", false, [] { prepare_now(true); });
+    if (ready && focus) focus_first();
 }
 
 static void page_shaders()
@@ -1747,46 +1888,25 @@ static void page_shaders()
     if (!g_st.check_error.empty()) text_col(col::danger, "%s", g_st.check_error.c_str());
     else if (c.is_null()) text_col(col::dim, "Checking...");
     else {
-        text_col(col::text, "GPU: %s (driver %s, Vulkan %s)", c["gpu"]["name"].str().c_str(), c["gpu"]["driver"].str().c_str(),
-                 c["gpu"]["vulkan"].str().c_str());
-        text_col(c["prepared"].truthy() ? col::ok : col::warm, "The pipeline cache: %s, %s.",
-                 c["prepared"].truthy() ? "ready for this GPU and driver" : c["cache"].str().c_str(),
-                 human_bytes(c["cache_mb"].num() * 1048576).c_str());
-        const int known = (int)c["recipes"].num(), listed = (int)c["listed"].num(), from_list = (int)c["listed_held"].num();
-        text_col(col::text, "Recorded coverage: %d pipelines known%s -- %d from the first-session list, %d recorded on "
-                            "this PC as you play.", known, c["prepared"].truthy() ? " and prepared" : "", from_list,
-                 std::max(0, known - from_list));
-        if (c["pending"].num() > 0)
-            text_col(col::warm, "%d more on the first-session list are added at the next preparation.", (int)c["pending"].num());
-        text_col(col::dim, "Complete coverage -- every shader the game could ever combine -- can't be known in advance%s: a "
-                           "combination met for the first time is made then (a short stutter at most), recorded, and "
-                           "prepared from then on.", listed > 0 ? "" : " (no first-session list in this release)");
+        text_col(col::text, "Graphics card: %s (driver %s)", c["gpu"]["name"].str().c_str(), c["gpu"]["driver"].str().c_str());
+        const bool ready = c["prepared"].truthy() && c["pending"].num() <= 0;
+        if (g_bg)   // the check from before it started is out of date until it ends
+            text_col(col::warm, "Being prepared for this graphics card and driver now.");
+        else if (ready)
+            text_col(col::ok, "Preparation complete: every shader this PC has needed so far is ready (%d).",
+                     (int)c["recipes"].num());
+        else
+            text_col(col::warm, "Preparation needed: some shaders aren't ready for this graphics card and driver yet.");
+        text_col(col::dim, "The game can combine more shaders than anyone can list in advance. One it uses for the first "
+                           "time is prepared right then -- a brief stutter at most -- and is ready from then on.");
         if (!c["disk_mb"].is_null())
-            text_col(col::dim, "On disk: %s (the translated shaders, the pipeline cache and the recipes).",
-                     human_bytes(c["disk_mb"].num() * 1048576).c_str());
+            text_col(col::dim, "On disk: %s.", human_bytes(c["disk_mb"].num() * 1048576).c_str());
     }
     card_end();
     shader_actions();
-    ImGui::Dummy(ImVec2(0, S(4)));
-    title("Automatic preparation", 24);
-    auto onoff = [](const char* k) { const std::string v = setting(k, "0"); return v == "1" ? "On" : v == "ask" ? "Ask" : "Off"; };
-    text_col(col::dim, "After installing: %s.  After a game update: %s.  After a GPU or driver change: %s.  "
-                       "(Settings page, Shaders.)", onoff("LAUNCHER_SHADERS_AFTER_INSTALL"),
-             onoff("LAUNCHER_SHADERS_AFTER_UPDATE"), onoff("LAUNCHER_SHADERS_ON_DRIVER_CHANGE"));
 }
 
 // --- settings ---
-// under the Settings page's Shaders category: the cache's state and disk use, and the actions
-static void settings_shader_status()
-{
-    const json::Value& c = g_st.check;
-    if (!c.is_null())
-        text_col(c["prepared"].truthy() ? col::ok : col::warm, "The shader cache: %s; %s on disk.",
-                 c["prepared"].truthy() ? "ready for this GPU and driver" : c["cache"].str().c_str(),
-                 human_bytes(c["disk_mb"].num() * 1048576).c_str());
-    shader_actions(false);
-}
-
 // the next item beside the last one only when it fits there (else it starts a line): no sideways overflow
 static void same_line_fits(float next_w)
 {
@@ -1806,7 +1926,8 @@ static void page_settings()
         { "DOTHEROES_FPS", { { "60", "60 fps" }, { "30", "30 fps (the original)" }, { "0", "Unlimited" } } },
         { "LAUNCHER_UPDATE_CHANNEL", { { "stable", "Stable releases" }, { "prerelease", "Test releases too" } } },
         { "LAUNCHER_LOG_LEVEL", { { "info", "Normal" }, { "debug", "Detailed" } } },
-        { "LAUNCHER_SHADERS_AFTER_INSTALL", { { "ask", "Ask" }, { "1", "On" }, { "0", "Off" } } },
+        { "LAUNCHER_PROMPTS", { { "auto", "Automatic" }, { "xbox", "Xbox" }, { "playstation", "PlayStation" },
+                                { "nintendo", "Nintendo Switch" }, { "steam", "Steam" }, { "generic", "Generic" } } },
         { "LAUNCHER_DISPLAY_MODE", { { "windowed", "Windowed" }, { "borderless", "Borderless fullscreen" },
                                      { "exclusive", "Exclusive fullscreen" } } },
     };
@@ -1825,7 +1946,6 @@ static void page_settings()
         const std::string cat = x["category"].str();
         if (x["advanced"].truthy()) continue;   // developers' switches: the worker's command line, not this page
         if (cat != last_cat) {
-            if (last_cat == "Shaders") settings_shader_status();
             ImGui::Dummy(ImVec2(0, S(6)));
             title(cat.c_str(), 24);
             last_cat = cat;
@@ -1848,7 +1968,7 @@ static void page_settings()
         }
         std::string label = x["label"].str(key) + (x["applies"].str() == "restart" ? " *" : "");
         char btn[300];
-        snprintf(btn, sizeof btn, "<     %s     >##%s", shown.c_str(), key.c_str());   // left and right change it
+        snprintf(btn, sizeof btn, "<     %s     >###%s", shown.c_str(), key.c_str());   // its id: the key alone
         // the value's button in a column that fits the page (no sideways scrolling at any scale)
         const float room = ImGui::GetContentRegionAvail().x;
         const float bw = std::min(S(340), room * 0.4f), bx = std::max(room * 0.45f, room - bw - S(24));
@@ -1861,6 +1981,10 @@ static void page_settings()
         if (big_button(btn, ImVec2(bw, S(50)))) dir = 1;
         if (first) { focus_first(); first = false; }
         if (ImGui::IsItemFocused()) {
+            const ImGuiID id = ImGui::GetItemID();   // left and right are this row's: they change its value
+            g_focus_owns_lr = true;
+            for (ImGuiKey k : { ImGuiKey_GamepadDpadLeft, ImGuiKey_GamepadDpadRight, ImGuiKey_LeftArrow, ImGuiKey_RightArrow })
+                ImGui::SetKeyOwner(k, id);
             if (ImGui::IsKeyPressed(ImGuiKey_GamepadDpadLeft) || ImGui::IsKeyPressed(ImGuiKey_LeftArrow)) dir = -1;
             if (ImGui::IsKeyPressed(ImGuiKey_GamepadDpadRight) || ImGui::IsKeyPressed(ImGuiKey_RightArrow)) dir = 1;
             prompt(Act::A, "Change");
@@ -1899,8 +2023,6 @@ static void page_settings()
             if (r["ok"].truthy()) g_msg = { true, "Shortcut made", "The launcher is in your Start menu.", "", false, false };
             else show_result_error(r, "The shortcut wasn't made");
         });
-    if (big_button("Exit the launcher", ImVec2(S(320), 0))) ask_exit();
-    same_line_fits(S(420));
     if (big_button("Choose another install folder", ImVec2(S(420), 0)))
         browse("Choose the install folder", true, {}, "folders", install_dir(), [](const std::string& p) {
             g_prefs.install = p;
@@ -1915,7 +2037,9 @@ static void page_settings()
 struct Diag {
     json::Value files;
     std::string folder, viewing, view_text, zip;
+    int refocus = -1, last = -1;   // after X: the next file (-2: the last one) takes the focus
 } g_diag;
+static ImGuiWindow* g_rs_window = nullptr;   // this frame's text the right stick scrolls first (a file being viewed)
 
 static void page_diagnostics()
 {
@@ -1950,27 +2074,44 @@ static void page_diagnostics()
     }
     text_col(col::dim, "Review: choose a file to see it; X leaves it out. Then save the zip where you like.");
     ImGui::BeginChild("##files", ImVec2(S(380), 0), ImGuiChildFlags_NavFlattened);
+    int last = -1;
     for (size_t i = 0; i < g_diag.files.size(); i++) {
         const std::string f = g_diag.files[i]["file"].str();
         if (!fs::exists(u8path(g_diag.folder) / f)) continue;
-        if (ImGui::Selectable((f + "\n" + human_bytes(g_diag.files[i]["bytes"].num())).c_str(), g_diag.viewing == f, 0,
-                              ImVec2(0, S(56)))) {
+        if (ImGui::Selectable(("  " + f + "\n  " + human_bytes(g_diag.files[i]["bytes"].num())).c_str(), g_diag.viewing == f,
+                              0, ImVec2(0, S(56)))) {
             g_diag.viewing = f;
             g_diag.view_text = read_text(path_str(u8path(g_diag.folder) / f), 200000);
         }
+        if ((g_diag.refocus >= 0 && (int)i >= g_diag.refocus) || (g_diag.refocus == -2 && (int)i == g_diag.last)) {
+            ImGui::SetKeyboardFocusHere(-1);   // the file after the one left out (or the last)
+            g_diag.refocus = -1;
+        }
+        last = (int)i;
         focus_ring();
-        if (ImGui::IsItemFocused()) { prompt(Act::A, "View"); prompt(Act::X, "Leave out of the report"); }
+        if (ImGui::IsItemFocused()) {
+            g_focus_label = "file: " + f;
+            prompt(Act::A, "View");
+            prompt(Act::X, "Leave out of the report");
+        }
         if (ImGui::IsItemFocused() && pressed(Act::X)) {
             std::error_code ec;
             fs::remove(u8path(g_diag.folder) / f, ec);
             if (g_diag.viewing == f) g_diag.viewing.clear();
+            g_diag.refocus = (int)i + 1;
         }
     }
+    if (g_diag.refocus >= 0) g_diag.refocus = last >= 0 ? -2 : -1;   // nothing after it: the last one, next frame
+    g_diag.last = last;
     ImGui::EndChild();
     ImGui::SameLine();
     ImGui::BeginChild("##view", ImVec2(0, 0), ImGuiChildFlags_FrameStyle);
-    if (g_diag.viewing.empty()) text_col(col::dim, "Choose a file to see what it holds.");
-    else ImGui::TextUnformatted(g_diag.view_text.c_str());
+    if (g_diag.viewing.empty()) {
+        text_col(col::dim, "Choose a file to see what it holds.");
+    } else {
+        ImGui::TextUnformatted(g_diag.view_text.c_str());
+        g_rs_window = ImGui::GetCurrentWindow();   // the right stick scrolls the file being read
+    }
     ImGui::EndChild();
 }
 
@@ -2150,7 +2291,8 @@ static void overlay_browser()
             if (ImGui::Selectable((room + "..   (up a folder)").c_str(), false, 0, ImVec2(0, S(48)))) b.up();
             entry_icon(kIconFolder);
             focus_ring();
-            if (b.refocus) { ImGui::SetKeyboardFocusHere(-1); }
+            if (ImGui::IsItemFocused()) g_focus_label = "browse: ..";
+            if (b.refocus && b.from.empty()) { ImGui::SetKeyboardFocusHere(-1); }
         }
         bool picked = false;
         for (size_t i = 0; i < b.entries.size() && !picked; i++) {
@@ -2168,7 +2310,8 @@ static void overlay_browser()
                 if (f) f(p);
             }
             focus_ring();
-            if (b.refocus && b.dir.empty() && i == 0) ImGui::SetKeyboardFocusHere(-1);
+            if (ImGui::IsItemFocused()) g_focus_label = "browse: " + e.name;
+            if (b.refocus && (b.from.empty() ? b.dir.empty() && i == 0 : e.path == b.from)) ImGui::SetKeyboardFocusHere(-1);
         }
         ImGui::PopStyleVar();
         if (b.refocus > 0) b.refocus--;
@@ -2230,10 +2373,10 @@ static void overlay_uninstall()
             if (g_uninst.on[pr.first]) total += g_uninst.parts[pr.first]["bytes"].num();
         ImGui::PushStyleVar(ImGuiStyleVar_ButtonTextAlign, ImVec2(0.0f, 0.5f));
         const bool keep_saves = !g_uninst.on["saves"], keep_settings = !g_uninst.on["settings"];
-        if (big_button(keep_saves ? "[x]  Keep my saves and backups##u_saves" : "[  ]  Keep my saves and backups##u_saves",
+        if (big_button(keep_saves ? "[x]  Keep my saves and backups###u_saves" : "[  ]  Keep my saves and backups###u_saves",
                        ImVec2(-1, S(52)), keep_saves ? Kind::Normal : Kind::Danger))
             g_uninst.on["saves"] = keep_saves;
-        if (big_button(keep_settings ? "[x]  Keep my settings##u_set" : "[  ]  Keep my settings##u_set", ImVec2(-1, S(52)),
+        if (big_button(keep_settings ? "[x]  Keep my settings###u_set" : "[  ]  Keep my settings###u_set", ImVec2(-1, S(52)),
                        keep_settings ? Kind::Normal : Kind::Danger))
             g_uninst.on["settings"] = keep_settings;
         ImGui::PopStyleVar();
@@ -2257,6 +2400,10 @@ static void overlay_uninstall()
                 run("uninstall", { "--install", install_dir(), "--confirm", "--parts", parts, "--exe",
                                    path_str(u8path(g_exe_dir) / "CubicHeroes.exe") },
                     "Uninstalling", true, [](const json::Value& r) {
+                        if (r["data"]["removed"]["shortcuts"]["steam_later"].truthy()) {   // Steam ran: once it's closed
+                            g_prefs.steam_cleanup = true;
+                            g_prefs.save();
+                        }
                         if (!r["ok"].truthy()) show_result_error(r, "Uninstalling didn't finish");
                         else g_msg = { true, "Uninstalled", "About " + human_bytes(r["data"]["bytes"].num()) +
                                        " freed. Install again whenever you like: what you kept is used again.", "", false, false };
@@ -2464,6 +2611,12 @@ static void backdrop(ImDrawList* dl, ImVec2 o, ImVec2 sz, float foot, float t)
 static void frame()
 {
     g_prompts.clear();
+    const bool owned_lr = g_focus_owns_lr;   // last frame's (the item sets it as it is drawn)
+    g_focus_owns_lr = false;
+    const bool dialog_at_start = overlay_open();   // a press that closes a dialog this frame is the dialog's alone
+    // X is the launcher's own (leave a file out, delete a letter): ImGui would take a tap of it to move the focus to a
+    // window's menu layer -- to the root window when there is none, the focus lost -- and a hold to switch windows
+    ImGui::SetKeyOwner(ImGuiKey_GamepadFaceLeft, ImHashStr("cubicheroes: X"));
     if (g_bg) {   // the background preparation
         pump(*g_bg);
         if (g_bg->finished) {
@@ -2492,15 +2645,34 @@ static void frame()
     {   // the right stick scrolls the list or text under the focus (the D-pad and left stick move the focus)
         ImGuiContext& g = *ImGui::GetCurrentContext();
         const float ry = ImGui::GetKeyData(ImGuiKey_GamepadRStickDown)->AnalogValue -
-                         ImGui::GetKeyData(ImGuiKey_GamepadRStickUp)->AnalogValue;
+                         ImGui::GetKeyData(ImGuiKey_GamepadRStickUp)->AnalogValue + g_nav_rstick;
         if (fabsf(ry) > 0.15f) {
-            ImGuiWindow* w = g.NavWindow ? g.NavWindow : g.HoveredWindow;
+            ImGuiWindow* w = g_rs_window && g_rs_window->ScrollMax.y > 0.0f ? g_rs_window
+                           : g.NavWindow ? g.NavWindow : g.HoveredWindow;
             while (w && w->ScrollMax.y <= 0.0f && w->ParentWindow) w = w->ParentWindow;
             if (w && w->ScrollMax.y > 0.0f)
                 ImGui::SetScrollY(w, std::min(w->ScrollMax.y, std::max(0.0f, w->Scroll.y + ry * S(1500) * ImGui::GetIO().DeltaTime)));
         }
+        g_rs_window = nullptr;   // the page sets it again as it is drawn
     }
     if (g_auto_check_due) { g_auto_check_due = false; auto_prepare_check(); }
+    if (g_prefs.steam_cleanup && !g_nav_test) {   // the launcher's Steam entry an uninstall left: tried at start, then
+        static double next = 0;                   // every 20 s, quietly, until Steam is closed and it is gone
+        static bool asking = false;
+        const double now = SDL_GetTicks() / 1000.0;
+        if (!asking && now >= next) {
+            asking = true;
+            next = now + 20;
+            run("shortcuts", { "--exe", path_str(u8path(g_exe_dir) / "CubicHeroes.exe"), "--remove-steam" }, "", false,
+                [](const json::Value& r) {
+                    asking = false;
+                    if (!r["data"]["later"].truthy()) {   // removed, or nothing left to remove (an error isn't retried)
+                        g_prefs.steam_cleanup = false;
+                        g_prefs.save();
+                    }
+                });
+        }
+    }
     for (size_t i = 0; i < g_queries.size();) {   // the quick queries: their callbacks run here, on this thread
         pump(*g_queries[i]);
         if (g_queries[i]->finished) {
@@ -2541,37 +2713,79 @@ static void frame()
     const float row = floorf(std::min(S(52), (sb.y - S(78) - (sa.y + S(156))) / (kPages + 1.2f)));
     const float ip = std::max(2.0f, floorf(std::min(S(3), row / 14.0f))), np = std::max(2.0f, floorf(std::min(S(3), row / 13.0f)));
     float y = sa.y + S(156);
-    for (int i = 0; i < kPages; i++) {
-        const ImVec2 ra(sa.x + S(14), y), rb(sb.x - S(14), y + row - S(6));
-        const bool on = i == g_page;
-        const bool hov = !overlay_open() && ImGui::IsMouseHoveringRect(ra, rb);
-        if (on) {
-            dl->AddRectFilled(ra, rb, A(col::inset));
-            dl->AddRectFilled(ra, ImVec2(ra.x + S(6), rb.y), A(col::accent));
-        } else if (hov) {
-            dl->AddRectFilled(ra, rb, A(IM_COL32(34, 48, 108, 255)));
+    // the rows are items of their own (a child flattened into the window's navigation): left from the page reaches them,
+    // up and down move through them, right goes back to the page; A (or a click) opens a page, or EXIT asks to exit
+    ImGui::SetCursorScreenPos(sa);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    ImGui::BeginChild("##side", ImVec2(sb.x - sa.x, sb.y - sa.y), ImGuiChildFlags_NavFlattened,
+                      ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    ImGui::PopStyleVar();
+    ImDrawList* sdl = ImGui::GetWindowDrawList();
+    // from a page only left reaches the menu (below, when nothing on the page is further left): up and down never cross
+    // into it, so the rows are no navigation targets while the page has the focus
+    bool menu_has_focus = false;   // (by ImGui's focus itself: a dialog closing gives the focus back to a row)
+    for (int i = 0; i <= kPages; i++) {
+        ImGui::PushID(i);
+        if (ImGui::GetID("##row") == ImGui::GetFocusID()) menu_has_focus = true;
+        ImGui::PopID();
+    }
+    for (int i = 0; i <= kPages; i++) {   // the pages, then EXIT
+        const bool exit_row = i == kPages;
+        const float ry = exit_row ? y + row * 0.2f : y;
+        const ImVec2 ra(sa.x + S(14), ry), rb(sb.x - S(14), ry + row - S(6));
+        ImGui::SetCursorScreenPos(ra);
+        ImGui::PushID(i);
+        if (!menu_has_focus) ImGui::PushItemFlag(ImGuiItemFlags_NoNav, true);
+        const bool click = ImGui::InvisibleButton("##row", ImVec2(rb.x - ra.x, rb.y - ra.y), ImGuiButtonFlags_EnableNav);
+        if (!menu_has_focus) ImGui::PopItemFlag();
+        ImGui::PopID();
+        if (g_focus_menu && i == g_page) {   // at once (a focus request would resolve a frame late, and the page's
+            // focused item, drawn after the menu, would take the window back from it)
+            ImGui::SetFocusID(ImGui::GetItemID(), ImGui::GetCurrentWindow());
+            ImGui::SetNavCursorVisibleAfterMove();
+            g_focus_menu = false;
         }
-        pix_icon(dl, ImVec2(ra.x + S(22), (ra.y + rb.y) / 2 - ip * 5), kIcons[kPageIcon[i]], ip);
-        pix_text(dl, ImVec2(ra.x + S(22) + ip * 10 + S(22), (ra.y + rb.y) / 2 - np * 3.5f), kPageNames[i], np,
+        const bool focused = ImGui::IsItemFocused() && ImGui::GetIO().NavVisible;
+        const bool hov = ImGui::IsItemHovered() || focused;
+        const bool on = !exit_row && i == g_page;
+        if (on) {
+            sdl->AddRectFilled(ra, rb, A(col::inset));
+            sdl->AddRectFilled(ra, ImVec2(ra.x + S(6), rb.y), A(col::accent));
+        } else if (hov) {
+            sdl->AddRectFilled(ra, rb, A(IM_COL32(34, 48, 108, 255)));
+        }
+        const float cy = (ra.y + rb.y) / 2;
+        if (exit_row) {   // a door, drawn in blocks: the frame, the door, its knob
+            const float d = ip;
+            const ImVec2 da(ra.x + S(22) + d, cy - d * 5);
+            sdl->AddRectFilled(ImVec2(da.x - d, da.y - d), ImVec2(da.x + d * 9, da.y + d * 11), A(col::ink));
+            sdl->AddRectFilled(da, ImVec2(da.x + d * 8, da.y + d * 10), A(IM_COL32(150, 96, 52, 255)));
+            sdl->AddRectFilled(ImVec2(da.x + d, da.y + d), ImVec2(da.x + d * 7, da.y + d * 10), A(IM_COL32(110, 66, 36, 255)));
+            sdl->AddRectFilled(ImVec2(da.x + d * 5, da.y + d * 5), ImVec2(da.x + d * 6, da.y + d * 6), A(col::accent));
+        } else {
+            pix_icon(sdl, ImVec2(ra.x + S(22), cy - ip * 5), kIcons[kPageIcon[i]], ip);
+        }
+        pix_text(sdl, ImVec2(ra.x + S(22) + ip * 10 + S(22), cy - np * 3.5f), exit_row ? "EXIT" : kPageNames[i], np,
                  on ? col::accent : hov ? col::text : col::dim);
-        if (hov && ImGui::IsMouseClicked(0)) { g_page = i; g_focus_page = true; }
-        y += row;
+        if (ImGui::IsItemFocused()) {
+            g_focus_label = std::string("menu: ") + (exit_row ? "Exit" : kPageNames[i]);
+            // the menu's own keys: left and right (right goes to the page's first item, below), up on its first row and
+            // down on its last (the navigation would otherwise find the page's items beside them)
+            const ImGuiID id = ImGui::GetItemID();
+            for (ImGuiKey k : { ImGuiKey_GamepadDpadLeft, ImGuiKey_GamepadDpadRight, ImGuiKey_LeftArrow, ImGuiKey_RightArrow })
+                ImGui::SetKeyOwner(k, id);
+            if (i == 0) for (ImGuiKey k : { ImGuiKey_GamepadDpadUp, ImGuiKey_UpArrow }) ImGui::SetKeyOwner(k, id);
+            if (exit_row) for (ImGuiKey k : { ImGuiKey_GamepadDpadDown, ImGuiKey_DownArrow }) ImGui::SetKeyOwner(k, id);
+        }
+        if (focused) prompt(Act::A, exit_row ? "Exit" : "Open");
+        focus_ring();
+        if (click) {
+            if (exit_row) ask_exit();
+            else { g_page = i; g_focus_page = false; }   // the focus stays in the menu; right goes to the page
+        }
+        if (!exit_row) y += row;
     }
-    {   // EXIT, above LB/RB: a click, or MENU from anywhere
-        const ImVec2 ea(sa.x + S(14), y + row * 0.2f), eb(sb.x - S(14), y + row * 1.2f - S(6));
-        const bool hov = !overlay_open() && ImGui::IsMouseHoveringRect(ea, eb);
-        if (hov) dl->AddRectFilled(ea, eb, A(IM_COL32(34, 48, 108, 255)));
-        const float ey = (ea.y + eb.y) / 2;
-        // a door, drawn in blocks: the frame, the door, its knob
-        const float d = ip;
-        const ImVec2 da(ea.x + S(22) + d, ey - d * 5);
-        dl->AddRectFilled(ImVec2(da.x - d, da.y - d), ImVec2(da.x + d * 9, da.y + d * 11), A(col::ink));
-        dl->AddRectFilled(da, ImVec2(da.x + d * 8, da.y + d * 10), A(IM_COL32(150, 96, 52, 255)));
-        dl->AddRectFilled(ImVec2(da.x + d, da.y + d), ImVec2(da.x + d * 7, da.y + d * 10), A(IM_COL32(110, 66, 36, 255)));
-        dl->AddRectFilled(ImVec2(da.x + d * 5, da.y + d * 5), ImVec2(da.x + d * 6, da.y + d * 6), A(col::accent));
-        pix_text(dl, ImVec2(ea.x + S(22) + ip * 10 + S(22), ey - np * 3.5f), "EXIT", np, hov ? col::text : col::dim);
-        if (hov && ImGui::IsMouseClicked(0)) ask_exit();
-    }
+    ImGui::EndChild();
     {   // LB / RB beside "PAGES" at the menu's foot
         const float gh = floorf(S(30));
         float gx = sa.x + S(28);
@@ -2627,18 +2841,45 @@ static void frame()
     overlay_message();
     ImGui::PopFont();
     // the prompts
-    if (!overlay_open() && g_bg) {
+    if (!overlay_open() && !dialog_at_start && g_bg) {
         prompt(Act::Back, "Stop preparing");
         if (pressed(Act::Back)) bg_stop();
     }
-    if (!overlay_open()) {   // MENU (F10): exit, asked first
+    if (!overlay_open() && !dialog_at_start) {   // MENU (F10): exit, asked first
         prompt(Act::Start, "Exit");
         if (pressed(Act::Start)) ask_exit();
+        // between the menu and the page: right from the menu goes to the page's first item; left on a page goes to
+        // the menu when nothing further left takes it (a settings row keeps left and right: they change its value)
+        static std::string left_from;
+        static int left_wait = 0;
+        const bool in_menu = g_focus_label.rfind("menu: ", 0) == 0;
+        auto free_press = [owned_lr](ImGuiKey k) { return !owned_lr && !g_focus_owns_lr && ImGui::IsKeyPressed(k, false); };
+        if (in_menu && (free_press(ImGuiKey_GamepadDpadRight) || free_press(ImGuiKey_RightArrow))) g_focus_page = true;
+        if (!in_menu && (free_press(ImGuiKey_GamepadDpadLeft) || free_press(ImGuiKey_LeftArrow))) {
+            left_from = g_focus_label;
+            left_wait = 2;
+        } else if (left_wait > 0 && --left_wait == 0 && g_focus_label == left_from) {
+            g_focus_menu = true;   // nothing to its left: the menu
+        }
+        if (g_focus_label.rfind("menu: ", 0) != 0) {   // on a page: B goes to the menu
+            prompt(Act::B, "Menu");
+            if (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false))
+                g_focus_menu = true;
+        }
     }
     if (!overlay_open()) {
         prompt(Act::A, "Select");
         prompt(Act::LB, "");
         prompt(Act::RB, "Pages");
+    }
+    {   // a controller always has a focus: when the focused item went away (a button replaced as a job started or ended,
+        // a list emptied, a dialog closed whose opener is gone), the page's first item takes it
+        static int lost = 0;
+        if (g_device == Device::Pad && !overlay_open() && !ImGui::GetCurrentContext()->NavIdIsAlive) {
+            if (++lost >= 2) { g_focus_page = true; lost = 0; }
+        } else {
+            lost = 0;
+        }
     }
     // the prompts, on the ground: what each button does here and now (drawn over the overlays' dimming)
     ImDrawList* fg = ImGui::GetForegroundDrawList();
@@ -2706,6 +2947,135 @@ static std::string font_path()
     return {};
 }
 
+// --nav-test FILE: a controller driven by a script, inside the launcher only (no input reaches any other window): one
+// step a line -- up, down, left, right (the D-pad), a, b, x, y, lb, rb, menu, view [times]; rs FRAMES (the right
+// stick down); wait FRAMES; shot NAME (the launcher saves its own frame, NAME.bmp beside the script); quit. Each step
+// is logged with the page, any dialog and the focused item after it settles (FILE.log)
+struct NavScript {
+    struct Step { std::string op; int n = 1; std::string arg; };
+    std::vector<Step> steps;
+    size_t at = 0;
+    int wait = 30, phase = 0, done_n = 0, rs = 0, idle = 0;
+    std::string dir, shot;
+    FILE* log = nullptr;
+    bool active() const { return !steps.empty(); }
+    void load(const char* path)
+    {
+        std::ifstream in(path);
+        std::string line;
+        while (std::getline(in, line)) {
+            std::istringstream ls(line);
+            Step st;
+            if (!(ls >> st.op) || st.op[0] == '#') continue;
+            std::string rest;   // a count, or a name (a shot's name is a name, even "01-play")
+            if (st.op == "expect") {   // "expect TEXT": the rest of the line
+                std::getline(ls, rest);
+                st.arg = rest.substr(std::min(rest.size(), rest.find_first_not_of(' ')));
+            } else if (ls >> rest) {
+                if (st.op != "shot" && isdigit((unsigned char)rest[0])) st.n = atoi(rest.c_str());
+                else st.arg = rest;
+            }
+            steps.push_back(st);
+        }
+        dir = path_str(u8path(path).parent_path());
+        log = fopen((std::string(path) + ".log").c_str(), "w");
+    }
+    static ImGuiKey key(const std::string& op)
+    {
+        if (op == "up") return ImGuiKey_GamepadDpadUp;
+        if (op == "down") return ImGuiKey_GamepadDpadDown;
+        if (op == "left") return ImGuiKey_GamepadDpadLeft;
+        if (op == "right") return ImGuiKey_GamepadDpadRight;
+        if (op == "a") return ImGuiKey_GamepadFaceDown;
+        if (op == "b") return ImGuiKey_GamepadFaceRight;
+        if (op == "x") return ImGuiKey_GamepadFaceLeft;
+        if (op == "y") return ImGuiKey_GamepadFaceUp;
+        if (op == "lb") return ImGuiKey_GamepadL1;
+        if (op == "rb") return ImGuiKey_GamepadR1;
+        if (op == "menu") return ImGuiKey_GamepadStart;
+        if (op == "view") return ImGuiKey_GamepadBack;
+        return ImGuiKey_None;
+    }
+    void note(const Step& st)
+    {
+        if (!log) return;
+        const char* dlg = g_confirm.open ? g_confirm.title.c_str() : g_msg.open ? g_msg.title.c_str()
+                        : g_browser.open ? "file browser" : g_osk.open ? "keyboard" : g_uninst.open ? "uninstall"
+                        : g_op ? "operation" : "";
+        fprintf(log, "%-6s %-14s page=%-12s dialog=%-28s focus=%s%s%s\n", st.op.c_str(), st.arg.c_str(), kPageNames[g_page],
+                dlg, g_focus_label.c_str(), g_bg ? "  [preparing]" : "", g_nav_event.c_str());
+        g_nav_event.clear();
+        fflush(log);
+    }
+    void inject(ImGuiIO& io)
+    {
+        io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
+        g_device = Device::Pad;
+        g_saw_input = true;
+        // the right stick as a value of the launcher's own, not an input event: a connected controller's backend reports
+        // its stick every frame, and two differing values a frame would queue up (ImGui trickles them) and delay the rest
+        g_nav_rstick = rs > 1 ? 1.0f : 0.0f;
+        if (rs > 0) { rs--; return; }
+        if (wait > 0) { wait--; return; }
+        if (idle > 0) {   // "idle N": until the background preparation ends (N frames at most)
+            if (g_bg && --idle > 0) return;
+            idle = 0;
+        }
+        if (at >= steps.size()) return;
+        Step& st = steps[at];
+        const ImGuiKey k = key(st.op);
+        if (k != ImGuiKey_None) {
+            io.AddKeyAnalogEvent(k, phase == 0, phase == 0 ? 1.0f : 0.0f);
+            if (phase == 0) { phase = 1; wait = 2; return; }
+            phase = 0;
+            if (++done_n < st.n) { wait = 6; return; }
+            done_n = 0;
+            wait = 12;
+        } else if (st.op == "wait") {
+            wait = st.n;
+        } else if (st.op == "rs") {
+            rs = st.n + 1;
+        } else if (st.op == "idle") {
+            idle = st.n;
+        } else if (st.op == "expect") {   // the focus must be on this (part of its label), or the test stops at once:
+            // a script out of step must never press A on something it didn't mean to
+            if (g_focus_label.find(st.arg) == std::string::npos) {
+                if (log) fprintf(log, "FAILED: expected the focus on \"%s\", it is on \"%s\": the test stops here\n",
+                                 st.arg.c_str(), g_focus_label.c_str());
+                at = steps.size();
+                g_quit = true;
+                return;
+            }
+        } else if (st.op == "shot") {
+            shot = st.arg;
+        } else if (st.op == "quit") {
+            g_quit = true;
+        }
+        at++;
+        pending_note = true;
+        noted = st;
+    }
+    bool pending_note = false;
+    Step noted;
+    void after_render(SDL_Renderer* ren)
+    {
+        if (pending_note && wait <= 1 && phase == 0) { note(noted); pending_note = false; }
+        if (shot.empty()) return;
+        int w = 0, h = 0;
+        SDL_GetRendererOutputSize(ren, &w, &h);
+        if (SDL_Surface* sf = SDL_CreateRGBSurfaceWithFormat(0, w, h, 32, SDL_PIXELFORMAT_ARGB8888)) {
+            const std::string out = dir + "/" + shot + ".bmp";
+            if (SDL_RenderReadPixels(ren, nullptr, SDL_PIXELFORMAT_ARGB8888, sf->pixels, sf->pitch) != 0 ||
+                SDL_SaveBMP(sf, out.c_str()) != 0)
+                if (log) fprintf(log, "shot %s failed: %s\n", shot.c_str(), SDL_GetError());
+            SDL_FreeSurface(sf);
+        } else if (log) {
+            fprintf(log, "shot %s: no surface (%s)\n", shot.c_str(), SDL_GetError());
+        }
+        shot.clear();
+    }
+} nav;
+
 int main(int argc, char** argv)
 {
     g_exe_dir = exe_dir_of(argv[0]);
@@ -2715,6 +3085,10 @@ int main(int argc, char** argv)
         if (!strcmp(argv[i], "--after-update")) after_update = true;
         if (!strcmp(argv[i], "--update-failed")) update_failed = true;
         if (!strcmp(argv[i], "--show") && i + 1 < argc) show = argv[i + 1];   // a dialog opened at start (the review's)
+        if (!strcmp(argv[i], "--nav-test") && i + 1 < argc) {   // the scripted controller test
+            nav.load(argv[i + 1]);
+            g_nav_test = true;
+        }
         if (!strcmp(argv[i], "--page") && i + 1 < argc)   // a page to open on (a shortcut's choice; the review's)
             for (int p = 0; p < kPages; p++)
                 if (!SDL_strcasecmp(argv[i + 1], kPageNames[p])) g_page = p;
@@ -2746,6 +3120,7 @@ int main(int argc, char** argv)
                                                     ImGuiDebugLogFlags_EventNav | ImGuiDebugLogFlags_OutputToTTY;
     io.IniFilename = nullptr;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
+    io.ConfigNavEscapeClearFocusItem = false;   // B (Escape) never drops the focus: the next press continues from it
     ImGui_ImplSDL2_InitForSDLRenderer(win, ren);
     ImGui_ImplSDL2_SetGamepadMode(ImGui_ImplSDL2_GamepadMode_AutoAll);   // any controller, connected or plugged in later
     ImGui_ImplSDLRenderer2_Init(ren);
@@ -2794,14 +3169,36 @@ int main(int argc, char** argv)
                 g_device = Device::Keys;
                 g_saw_input = true;
                 break;
-            case SDL_MOUSEMOTION:
-                if (std::abs(e.motion.xrel) + std::abs(e.motion.yrel) > 3) { g_device = Device::Keys; g_saw_input = true; }
+            case SDL_MOUSEMOTION:   // (not during a scripted controller test: someone else's mouse is no player)
+                if (!nav.active() && std::abs(e.motion.xrel) + std::abs(e.motion.yrel) > 3) { g_device = Device::Keys; g_saw_input = true; }
                 break;
-            case SDL_CONTROLLERBUTTONDOWN: g_device = Device::Pad; g_saw_input = true; break;
+            case SDL_CONTROLLERBUTTONDOWN: {
+                g_device = Device::Pad;
+                g_saw_input = true;
+                if (SDL_GameController* gc = SDL_GameControllerFromInstanceID(e.cbutton.which))
+                    g_pad_detected = style_from(SDL_GameControllerGetType(gc), SDL_GameControllerName(gc));
+                break;
+            }
             case SDL_CONTROLLERAXISMOTION:
                 if (std::abs(e.caxis.value) > 12000) g_device = Device::Pad;
                 break;
-            case SDL_CONTROLLERDEVICEADDED: case SDL_CONTROLLERDEVICEREMOVED:
+            case SDL_CONTROLLERDEVICEADDED:
+                if (SDL_GameController* gc = SDL_GameControllerOpen(e.cdevice.which)) g_pads.push_back(gc);
+                [[fallthrough]];
+            case SDL_CONTROLLERDEVICEREMOVED:
+                if (e.type == SDL_CONTROLLERDEVICEREMOVED)
+                    for (size_t j = 0; j < g_pads.size(); j++)
+                        if (SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(g_pads[j])) == e.cdevice.which) {
+                            SDL_GameControllerClose(g_pads[j]);
+                            g_pads.erase(g_pads.begin() + j);
+                            break;
+                        }
+                if (!g_saw_input || g_device != Device::Pad)   // the first controller at hand names the prompts
+                    for (int j = 0; j < SDL_NumJoysticks(); j++)
+                        if (SDL_IsGameController(j)) {
+                            g_pad_detected = style_from(SDL_GameControllerTypeForIndex(j), SDL_GameControllerNameForIndex(j));
+                            break;
+                        }
                 break;
             case SDL_DROPFILE: {   // a disc image or a keys file dropped onto the window
                 std::string p = e.drop.file;
@@ -2859,9 +3256,12 @@ int main(int argc, char** argv)
         }
         g_pad_connected = SDL_NumJoysticks() > 0;
         if (g_pad_connected && !g_saw_input) g_device = Device::Pad;   // a controller at hand: its prompts from the start
-        io.ConfigNavCursorVisibleAlways = g_device == Device::Pad;
+        io.ConfigNavCursorVisibleAlways = g_device == Device::Pad || nav.active();
         ImGui_ImplSDLRenderer2_NewFrame();
         ImGui_ImplSDL2_NewFrame();
+        g_prompt_choice = setting("LAUNCHER_PROMPTS", "auto");
+        stick_nav(io);
+        if (nav.active()) nav.inject(io);   // the scripted controller (--nav-test)
         ImGui::NewFrame();
         if (!checked_updates && !g_st.settings.is_null()) {
             checked_updates = true;
@@ -2873,6 +3273,7 @@ int main(int argc, char** argv)
         SDL_SetRenderDrawColor(ren, 14, 18, 44, 255);
         SDL_RenderClear(ren);
         ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData(), ren);
+        if (nav.active()) nav.after_render(ren);
         SDL_RenderPresent(ren);
         if (after_update && !wrote_health) {   // the new launcher is up: the update is kept (tools/updates.py)
             write_text(path_str(u8path(g_exe_dir) / ".started-ok"), "ok\n");

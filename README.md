@@ -69,11 +69,16 @@ are ignored).
 
 ## 1. Dump your disc
 
-You need the disc as a **decrypted** dump, either:
+You need a dump of your disc, either:
 
 - a **decrypted ISO** (3,332,812,800 bytes), as made by a PS3 running homebrew
-  backup software in "decrypted ISO" mode, or by decrypting a Blu-ray rip with
-  its disc key; or
+  backup software in "decrypted ISO" mode;
+- an **encrypted ISO** (the same size: a raw Blu-ray rip) with its **disc key**:
+  a `.dkey` file, the 32-character key typed in, or an IRD file for the disc
+  (an IRD's key is converted with the `D1` line of your own keys file). The
+  setup detects an encrypted image, asks for the key only then, checks it
+  before anything is written, and decrypts as it extracts; the ISO itself is
+  never changed, and the key is never copied or logged; or
 - the disc's **folder** (the one holding `PS3_GAME/`), as a PS3 or a PC
   Blu-ray dumper writes it.
 

@@ -252,7 +252,7 @@ def verify(source, progress, disc_key=None):
         return "folder"
     if os.path.getsize(source) != want["disc_image"]["size"]:
         raise SetupError("This disc image isn't the supported one: 3D Dot Game Heroes BLUS-30490 v01.00 (US), "
-                         "a decrypted ISO (the size doesn't match).", "unsupported_version")
+                         "an ISO of the whole disc (the size doesn't match).", "unsupported_version")
     img, encrypted = _open_disc(source, disc_key)
     img.close()
     if encrypted:   # its bytes are not the decrypted dump's: its files are checked as they are extracted
@@ -398,7 +398,7 @@ def probe_disc(source, disc_key=None):
                                  "ISO of your disc.", "not_a_disc")
         sfo_b = _disc_file(source, "PS3_GAME/PARAM.SFO", files, f)
         if sfo_b is None:
-            raise SetupError("This isn't a PS3 game disc (no PS3_GAME/PARAM.SFO). Choose a decrypted ISO of "
+            raise SetupError("This isn't a PS3 game disc (no PS3_GAME/PARAM.SFO). Choose an ISO of "
                              "your disc, or its top folder.", "not_a_disc")
         try:
             sfo = parse_sfo(sfo_b)

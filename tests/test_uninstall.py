@@ -114,10 +114,28 @@ class UninstallTest(unittest.TestCase):
         vdf = os.path.join(cfg, "shortcuts.vdf")
         shortcuts.write_shortcuts(vdf, {"0": {"AppName": "Other", "Exe": '"C:\\\\other.exe"'},
                                         "1": {"AppName": shortcuts.NAME, "Exe": f'"{exe}"'}})
-        done = uninstall.remove_shortcuts(exe, roots=[steam])
-        self.assertIn(vdf, done)
+        with open(vdf, "rb") as f:
+            before = f.read()
+        # Steam running: its list left alone, quietly (no error); the entry is reported as left for later
+        self.assertNotIn(vdf, uninstall.remove_shortcuts(exe, roots=[steam], steam_running=True))
+        with open(vdf, "rb") as f:
+            self.assertEqual(f.read(), before)
+        self.assertTrue(uninstall.steam_entry_left(exe, roots=[steam]))
+        # Steam closed: removed (only the Steam entry when links=False: the launcher's later clean-up)
+        done = uninstall.remove_shortcuts(exe, roots=[steam], steam_running=False, links=False)
+        self.assertEqual(done, [vdf])
+        self.assertFalse(uninstall.steam_entry_left(exe, roots=[steam]))
         left = shortcuts.read_shortcuts(vdf)
         self.assertEqual([e["AppName"] for e in left.values()], ["Other"])
+        # a list with nothing of ours is never written
+        other = os.path.join(steam, "userdata", "456", "config")
+        os.makedirs(other)
+        ovdf = os.path.join(other, "shortcuts.vdf")
+        shortcuts.write_shortcuts(ovdf, {"0": {"AppName": "Other", "Exe": '"C:\\\\other.exe"'}})
+        t0 = os.path.getmtime(ovdf)
+        os.utime(ovdf, (t0 - 100, t0 - 100))
+        self.assertNotIn(ovdf, uninstall.remove_shortcuts(exe, roots=[steam], steam_running=False))
+        self.assertEqual(os.path.getmtime(ovdf), t0 - 100)
 
 
 if __name__ == "__main__":

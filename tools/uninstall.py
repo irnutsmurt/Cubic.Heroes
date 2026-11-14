@@ -212,7 +212,10 @@ def remove(install, parts=DEFAULT_PARTS, exe=None, roots=None):
     removed, protected_seen = {}, []
     for part in parts:
         if part == "shortcuts":
-            removed[part] = {"removed": remove_shortcuts(exe, roots) if exe else []}
+            removed[part] = {"removed": remove_shortcuts(exe, roots) if exe else [],
+                             # Steam running: its entry for the launcher waits; the launcher removes it once Steam is
+                             # closed (the worker's `shortcuts --remove-steam`)
+                             "steam_later": bool(exe) and steam_entry_left(exe, roots)}
             continue
         acc = _measure(lay, part, True)
         removed[part] = {"bytes": acc["bytes"], "files": acc["files"], "links": acc["links"]}
@@ -227,12 +230,45 @@ def remove(install, parts=DEFAULT_PARTS, exe=None, roots=None):
             "bytes": sum(v.get("bytes", 0) for v in removed.values())}
 
 
-def remove_shortcuts(exe, roots=None):
-    """the Start-menu and desktop shortcuts named for the launcher that start `exe`, and the Steam entries that do
-    (Steam must be closed: it rewrites its list as it exits)"""
+def _steam_lists(roots=None):
+    """every Steam account's shortcuts list on this PC (or under `roots`)"""
+    import shortcuts
+    found = list(roots) if roots is not None else shortcuts.steam_roots()
+    targets = []
+    for root in found:
+        try:
+            targets += [os.path.join(cfg, "shortcuts.vdf") for cfg in shortcuts.steam_accounts(root)]
+        except OSError:
+            pass
+    return [t for t in targets if os.path.exists(t)]
+
+
+def _our_keys(entries, exe):
+    want = os.path.normcase(os.path.abspath(exe))
+    return [k for k, e in entries.items()
+            if os.path.normcase(os.path.abspath(str(e.get("Exe", "")).strip().strip('"'))) == want]
+
+
+def steam_entry_left(exe, roots=None):
+    """a Steam list still holds the launcher's entry (read only)"""
+    import shortcuts
+    for t in _steam_lists(roots):
+        try:
+            if _our_keys(shortcuts.read_shortcuts(t), exe):
+                return True
+        except Exception:   # noqa: BLE001 -- a list this can't read is not ours to judge
+            pass
+    return False
+
+
+def remove_shortcuts(exe, roots=None, steam_running=None, links=True):
+    """the shortcuts Cubic.Heroes made for the launcher `exe`, removed: its Start-menu and desktop shortcuts (`links`)
+    and its own Steam entry (the one whose program is `exe`; every other entry is left exactly as it is). Steam
+    rewrites its list as it exits, so while it runs its entry is left alone -- quietly: uninstalling never fails over
+    it, and the launcher removes it once Steam is closed."""
     import shortcuts
     done = []
-    if os.name == "nt":
+    if links and os.name == "nt":
         for folder in ("Programs", "Desktop"):
             try:
                 shortcuts._powershell(
@@ -243,22 +279,20 @@ def remove_shortcuts(exe, roots=None):
                 done.append(folder)
             except Exception:   # noqa: BLE001 -- a shortcut that can't be read is left as it is
                 pass
-    found = list(roots) if roots is not None else shortcuts.steam_roots()
-    targets = []
-    for root in found:
-        try:
-            targets += [os.path.join(cfg, "shortcuts.vdf") for cfg in shortcuts.steam_accounts(root)]
-        except OSError:
-            pass
-    targets = [t for t in targets if os.path.exists(t)]
-    if targets and roots is None and shortcuts.steam_running():
-        raise UninstallError("Close Steam first: it rewrites its library as it exits.", "steam_running")
-    want = os.path.normcase(os.path.abspath(exe))
+    targets = _steam_lists(roots)
+    running = shortcuts.steam_running() if steam_running is None else steam_running
+    if not targets or running:
+        return done
     for t in targets:
-        entries = shortcuts.read_shortcuts(t)   # Steam's numbered map
-        keep = [e for _, e in sorted(entries.items(), key=lambda kv: int(kv[0]) if str(kv[0]).isdigit() else 0)
-                if os.path.normcase(os.path.abspath(str(e.get("Exe", "")).strip().strip('"'))) != want]
-        if len(keep) != len(entries):
-            shortcuts.write_shortcuts(t, {str(i): e for i, e in enumerate(keep)})
-            done.append(t)
+        try:
+            entries = shortcuts.read_shortcuts(t)   # Steam's numbered map
+        except Exception:   # noqa: BLE001 -- a list this can't read is left as it is
+            continue
+        ours = _our_keys(entries, exe)
+        if not ours:
+            continue   # nothing of ours: the file isn't written at all
+        keep = [e for k, e in sorted(entries.items(), key=lambda kv: int(kv[0]) if str(kv[0]).isdigit() else 0)
+                if k not in ours]
+        shortcuts.write_shortcuts(t, {str(i): e for i, e in enumerate(keep)})
+        done.append(t)
     return done

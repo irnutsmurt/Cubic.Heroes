@@ -543,10 +543,13 @@ def op_prepare(install, prog, check=False, rebuild=False):
         return out
     with PrepareLock(lay):
         listed = first_session_recipes(lay, prog)
-        if rebuild:   # the manual rebuild: the active build's pipeline cache made again from its recipes
-            pc = os.path.join(shader_folder(lay), "native-pipelines.vkpc")
-            if os.path.exists(pc):
-                os.remove(pc)
+        if rebuild:   # the manual rebuild: the active build's translated shaders and pipeline cache deleted, all made
+            sf = shader_folder(lay)   # again from the recipes (kept: they are the list of what to prepare)
+            if os.path.isdir(sf) and not layout.is_link(sf):
+                for n in os.listdir(sf):
+                    q = os.path.join(sf, n)
+                    if os.path.isfile(q) and not layout.is_link(q):
+                        os.remove(q)
         recipes = os.path.join(lay.cache, "native-recipes.bin")
         records = pipeline_manifest.read_recipes(recipes)
         prog.progress("prepare", 0.0, step_name("prepare"))
@@ -957,6 +960,12 @@ def cmd_shortcuts(a, ev, control):
     import shortcuts
     exe = os.path.abspath(a.exe)
     icon = a.icon or ""
+    if a.remove_steam:   # the launcher's own Steam entry, left by an uninstall while Steam ran: removed once it's closed
+        import uninstall
+        if shortcuts.steam_running():
+            return {"later": uninstall.steam_entry_left(exe)}
+        return {"removed": len(uninstall.remove_shortcuts(exe, steam_running=False, links=False)),
+                "later": False}
     if a.steam:
         if not shortcuts.steam_roots():
             raise pipeline.SetupError("Steam wasn't found on this PC.", "no_steam")
@@ -1054,6 +1063,8 @@ def parser():
     p.add_argument("--icon", help="shortcuts: its icon")
     p.add_argument("--steam", action="store_true", help="shortcuts: in Steam's library")
     p.add_argument("--desktop", action="store_true", help="shortcuts: on the desktop too")
+    p.add_argument("--remove-steam", action="store_true",
+                   help="shortcuts: the launcher's own Steam entry removed (later: true while Steam runs)")
     p.add_argument("--rebuild", action="store_true", help="prepare: the pipeline cache made again from scratch")
     p.add_argument("--disc-key", help="an encrypted disc image's key: a .dkey or IRD file, or a file of the 32 digits")
     p.add_argument("--parts", help="uninstall: the parts, comma-separated (builds,data,shaders,objects,settings,saves,shortcuts)")
