@@ -100,6 +100,27 @@ class Cancel(unittest.TestCase):
         out, _ = p.communicate(timeout=30)
         return p.returncode, [json.loads(ln) for ln in out.splitlines()]
 
+    def test_children_start_with_stdin_held_open(self):
+        """the worker's tools start and end while the launcher holds its stdin open (M9.1: a child inheriting the
+        pipe the worker's cancel thread was reading stopped in its start-up -- the resume test hung for 25 min)"""
+        p = self.start("selftest", "--seconds", "0.3", "--child")
+        try:
+            out = []
+            deadline = time.monotonic() + 60
+            while time.monotonic() < deadline:
+                ln = p.stdout.readline()
+                if not ln:
+                    break
+                out.append(json.loads(ln))
+                if out[-1]["ev"] == "result":
+                    break
+            self.assertTrue(out and out[-1]["ev"] == "result" and out[-1]["ok"], out[-3:])
+            self.assertIn("child ran", [e.get("text") for e in out if e["ev"] == "log"])
+        finally:
+            p.stdin.close()
+            p.wait(timeout=30)
+            p.stdout.close()
+
     def test_cancel_asked(self):
         p = self.start("selftest", "--seconds", "20")
         time.sleep(1.0)

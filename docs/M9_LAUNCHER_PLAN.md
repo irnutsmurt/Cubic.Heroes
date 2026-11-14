@@ -382,3 +382,78 @@ kept per GPU and driver), not only translate shaders; the first area's load burs
 single target; a pipeline's identity needs the programs' bytes, which are the player's own data -- so the variants
 seen are recorded locally with what is needed to recreate them, and a distributed list (if any) names them only by
 hash and parameters (section 8.5).
+
+## 10. M9.1: the install with build slots, migration, rollback, saves (2026-11-14) [M, C]
+
+**The layout** (tools/install_layout.py; section 3.3 as built):
+
+```
+<install>/
+  game/                     the active build: a junction (Windows; no privilege needed) or a symlink to
+                            builds/<id> -- the stable path shortcuts start, re-pointed when another build is made
+                            active; a removal never follows it
+  active.json               {"layout": 2, "active", "previous" (newest first), "retention" (default 1)}
+  builds/<id>/              the game, its libraries and notices, build.json (its lift, objects, shader folder,
+                            inputs, SHA-256, size, what checked it), build.cfg (its id and shader folder, for the game)
+  config/dotheroes.cfg      the settings: outside every build
+  data/disc/                the player's disc, extracted (the disc image is not needed after the install)
+  data/gen/<lift-id>/       one lift (a done.json when finished), shared by the builds made from it
+  data/cache/objects/       the compiled objects, shared
+  data/cache/shaders/<id>/  the translations and pipelines of one translator and glslang (the build's link
+                            fingerprint): a build never removes another's
+  data/gamedata/            the saves: never in a build, never written by an update
+  backups/saves/<id>/       save backups (backup.json: when, why, size, files, a note)
+  logs/                     the game's: game.log and the five before it
+```
+
+**The game** (port/main.cpp): finds its install from the parent or grandparent holding active.json -- so it
+starts the same through game/ or from its slot -- reads config/dotheroes.cfg and its build.cfg, logs to
+logs/game.log (rotated), keeps its translations in its translator's folder. `dotheroes --info`: one JSON line --
+the layout, the build id, the shader folder, the native release, the disc found, FFmpeg loading beside it (the
+movie player's own loader) -- with no window and no game data read. The setup app's layout still works as before.
+
+**The worker** (tools/worker.py, docs/M9_WORKER_PROTOCOL.md): `install` and `update` build into a staged slot
+(builds/.staging-*), **check it** (`--info`: FFmpeg loads, the native release; its memory test) and only then
+record it, make it active and re-point game/; any failure or cancel removes the staged slot and leaves the active
+build as it was. An update with the same inputs as the active build (the lift, every object's fingerprint, the
+libraries and linker) builds nothing. `update` backs the saves up first. `rollback` rewrites active.json and
+game/ (the kept build's SHA-256 checked first). `retention`, `builds`, `repair-link`, `saves` (list, backup,
+restore -- the current saves backed up first --, delete; restore and delete only with `--confirm`), `migrate` (the
+setup app's install: the saves backed up, the current build made from its own disc copy, lift and objects, the
+data moved, the old game removed), `install --resume` (an interrupted install's disc steps and finished lift kept).
+Pruning removes only what no kept build uses: other slots, lifts, objects (the build's own clean-up of objects
+now spares the kept builds'), shader folders. The setup app runs the same operations in-process until the
+launcher replaces it.
+
+**Found and fixed on the way**:
+- **A hang**: the worker's cancel thread reads its stdin; every tool it started inherited that pipe, and on
+  Windows a process started on a pipe with a read pending stops in its start-up until the read ends -- the
+  resume test's lifter sat 25 minutes at 0.02 s of CPU. The worker's children get no stdin now
+  (tools/setup_pipeline.py run_tool, tools/zig_build.py); tests/test_worker.py starts tools with the stdin held
+  open (it hangs without the fix).
+- **The lift's fingerprint** covered every Python and JSON file in tools/ -- any developer's script, the
+  launcher's worker -- and missed tools/spu_native/ and spu_native_task.cpp.in, which the SPU step reads. It
+  now covers ps3recomp's tools, the configuration and the lifting tools (setup_pipeline.LIFT_TOOLS, spu_native/).
+
+**Validated** (tests/test_install_layout.py, 22 tests on made-up installs; tests/test_worker.py, 20; with the
+pipeline and boundary tests 74 in all, pass; tests/player_install_test.py on the real conversion,
+F:\3d dot game heroes\m9\evidence\m91):
+
+| Stage | Result |
+|---|---|
+| fresh | 376 s; the build checked (FFmpeg n9.0.2; memory test 668 checks, 0 failed) and made active; game/ starts it |
+| check | the slot's libraries and notices, build.json and build.cfg; `--info` from game/: the slots layout, the disc found; the settings in config/; the lift equal to the developers' gen17 (0 files differ) |
+| update, nothing changed | 0 s: nothing built, the active build kept |
+| an update whose link changed | 2 s: every object reused (76 of 76), a new slot active, the one before kept; the saves backed up first and byte for byte untouched; a slot is 94 MB |
+| rollback | 0.06 s, offline: game/ starts the kept build (`--info` names it), its game as recorded, the saves untouched; forward again |
+| a build that fails to compile; one that fails its check | each refused (compile_failed, build_invalid); the active build as it was, no staged slot left, the game still starts |
+| relift | the lift redone (50 s), the same lift: nothing rebuilt |
+| an install cancelled in its build, resumed | cancelled (the build ended by force: compiles in flight), no build active; `info` names the interrupted install and its done steps; `install --resume`: the disc's steps and the lift not redone, the 12 objects compiled before the cancel reused, 241 s |
+| migration of a setup app's install (a copy of M9.0's) | 56 s: the disc not needed, relifted (its tools were older) with 75 of 76 objects reused, the saves untouched, the player's settings kept, the translated shaders kept in the build's folder, the old game removed |
+| settings | the player's values kept; a missing switch added back; an old default brought up to date |
+| the game (on screen) | game/ --memtest exit 0; a river fight from the install as a player starts it: completed, native physics (44,035 tasks); its translations in its build's shader folder |
+
+**Not yet**: shortcuts (the setup app's still start its old game after a migration: the launcher, M9.4, makes
+them again at game/); save compatibility across versions is the game's own format, the same in every build (the
+saves are never converted); disk space is checked before an install (6 GB) and an update (1.5 GB) and a full drive
+fails cleanly (the staged slot removed), not yet tested by filling a drive.

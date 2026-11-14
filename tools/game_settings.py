@@ -7,6 +7,10 @@ import os
 
 
 def game_settings_path(install):
+    """<install>/config/dotheroes.cfg in an install with build slots (M9.1: independent of the builds), else the
+    setup app's <install>/dotheroes.cfg"""
+    if os.path.exists(os.path.join(install, "active.json")) or os.path.isdir(os.path.join(install, "config")):
+        return os.path.join(install, "config", "dotheroes.cfg")
     return os.path.join(install, "dotheroes.cfg")
 
 
@@ -14,11 +18,12 @@ def read_game_settings(install):
     """<install>/dotheroes.cfg: NAME=value lines the game reads at start (port/main.cpp)"""
     out = {}
     try:
-        for line in open(game_settings_path(install)):
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                k, v = line.split("=", 1)
-                out[k.strip()] = v.strip()
+        with open(game_settings_path(install)) as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    out[k.strip()] = v.strip()
     except OSError:
         pass
     return out

@@ -103,6 +103,7 @@ struct Movie {
 struct State {
     std::mutex mu;
     bool tried = false, loaded = false;
+    std::string load_error;   // why FFmpeg did not load (`dotheroes --info`)
     ff_api::Api ff;
     uint32_t pool = 0;
     Movie slots[kSlots];
@@ -120,6 +121,7 @@ bool ready()
         fprintf(stderr, "[movie] native: FFmpeg %s loaded from %s (%s)\n", S.ff.version.c_str(), S.ff.dir.c_str(),
                 S.ff.licence.c_str());
     } else {
+        S.load_error = err;
         fprintf(stderr, "[movie] native: %s -- the movies are not played\n", err.c_str());
     }
     return S.loaded;
@@ -290,6 +292,15 @@ void release(Movie& m)
 }  // namespace
 
 extern "C" {
+
+// `dotheroes --info` (main.cpp): whether FFmpeg loads beside this build and which (1), or why not (0)
+int bink_native_ffmpeg_probe(char* out, int n)
+{
+    std::lock_guard<std::mutex> lk(S.mu);
+    const bool ok = ready();
+    snprintf(out, (size_t)n, "%s", ok ? ("FFmpeg " + S.ff.version + ", " + S.ff.licence).c_str() : S.load_error.c_str());
+    return ok ? 1 : 0;
+}
 
 // 0x009873F8: Bink's sound module given, before an open: nothing to do here
 int bink_native_sound_system(ppu_context* ctx)

@@ -1,27 +1,35 @@
 #!/usr/bin/env python3
-"""A player's fresh install and its updates, through the setup app's own path
-(tools/setup_pipeline.py and setup_app.py's settings), into a test folder:
+"""A player's fresh install and its updates, through the launcher's pipeline worker (tools/worker.py: the
+operations op_install, op_update, op_migrate on an install with build slots, tools/install_layout.py), into a
+test folder:
     build/venv/Scripts/python.exe tests/player_install_test.py [stages...] [--run-game]
 Stages, in order (default: all but game):
-    fresh     setup_app --convert's steps: the disc image, build/EBOOT.elf, a new folder
-    check     what the install holds: the native release's lift and configuration
-    update    an update with nothing changed: every step but the build skipped, every
-              object reused, the game relinked
-    relift    an update whose lift has to be redone (its stamp cleared): the same lift
-              again (deterministic), so every object is still reused
-    settings  a player's own dotheroes.cfg values kept by an update's settings pass,
-              missing performance switches added back
-    game      (only with --run-game: it starts the game) `dotheroes.exe --memtest`, then
-              a river fight as a player starts the install (tests/boot_smoke.py INSTALLED=)
-Needs the prebuilt parts in their release configuration (build/lib/windows/game_build.json
-"native-release"; tools/zig_build.py build_prebuilt). The folder is INSTALL_TEST_DIR
-(default F:/3d dot game heroes/install-test: an install is ~10 GB); it is replaced by `fresh`.
-Writes <folder>/test-report.json. docs/NATIVE_R8.md section 7.2."""
+    fresh      a new install from the disc image and build/EBOOT.elf: the disc's steps, the lift, the build into
+               a slot, checked (`dotheroes --info`, its memory test), made active; game/ points at it
+    check      what the install holds: the slot's game and libraries, the lift, the settings, `--info`
+    update     an update with nothing changed: nothing rebuilt, the active build kept (the same inputs)
+    relink     an update whose link changed (the active build's record of its inputs made stale): a new slot,
+               every object reused, the build before it kept for rollback; the saves backed up first and
+               untouched
+    rollback   back to the kept build (offline, nothing rebuilt), its game the one game/ starts, then forward again
+    failed     an update whose build fails, and one whose new build fails its check: the active build as it was
+    relift     the lift's completion marker removed: the lift redone, the same lift, nothing rebuilt
+    resume     an install in a second folder cancelled in its build, then taken up again (--resume): the disc's
+               steps and the lift not redone, the objects compiled before the cancel reused
+    migrate    a copy of a setup app's install (MIGRATE_FROM) moved into this layout: the disc not needed again,
+               the saves, settings and translated shaders kept
+    settings   a player's own values kept by an update's settings pass, missing performance switches added back
+    game       (only with --run-game: it starts the game) the game a shortcut starts (game/) runs its memory test,
+               then a river fight as a player starts the install (tests/boot_smoke.py INSTALLED=)
+Needs the prebuilt parts in their release configuration (build/lib/windows/game_build.json "native-release";
+tools/zig_build.py build_prebuilt). The folder is INSTALL_TEST_DIR (default F:/3d dot game heroes/install-test: an
+install is ~4 GB); `fresh` replaces it. Writes <folder>/test-report.json. docs/M9_LAUNCHER_PLAN.md section 10."""
 import glob
 import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -29,15 +37,22 @@ import time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "tools"))
 sys.path.insert(0, ROOT)
+import game_settings  # noqa: E402
+import install_layout as layout  # noqa: E402
 import setup_pipeline as pipeline  # noqa: E402
+import worker  # noqa: E402
 import zig_build  # noqa: E402
 
 DIR = os.path.abspath(os.environ.get("INSTALL_TEST_DIR", "F:/3d dot game heroes/install-test"))
+DIR2 = DIR + "-resume"
+MIGRATE_FROM = os.environ.get("MIGRATE_FROM", "F:/3d dot game heroes/m9/install-w")   # a setup app's install
+MIGRATED = DIR + "-migrated"
 ISO = os.path.join(ROOT, "3D DOT GAME HEROES [BLUS-30490].iso")
 ELF = os.path.join(ROOT, "build", "EBOOT.elf")
-# the developers' release lift to compare with (tools/r8_lift.sh; M6's, rel47's: the stores without the SPU reservation test)
+# the developers' release lift to compare with (tools/r8_lift.sh)
 DEV_LIFT = os.environ.get("DEV_LIFT", os.path.join(ROOT, "build", "r8", "gen15"))
 PY = sys.executable
+EXE = layout.exe_name()
 report = {"dir": DIR, "stages": {}}
 failed = []
 
@@ -57,26 +72,22 @@ def sha(p):
     return h.hexdigest()
 
 
-def run_pipeline(stage, source=None):
-    """pipeline.run as the app runs it; returns (skipped steps, log lines, seconds)"""
-    skipped, lines = [], []
-    t = time.monotonic()
-    pipeline.run(DIR, source=source, elf=ELF if source else None, log=lines.append, skip=skipped.append,
-                 progress=lambda s, f, m: None)
-    secs = time.monotonic() - t
-    report["stages"].setdefault(stage, {})["seconds"] = round(secs)
-    report["stages"][stage]["skipped"] = skipped
-    print(f"  {stage}: {secs:.0f} s, skipped {skipped}", flush=True)
-    return skipped, lines, secs
+class Run:
+    """an operation in-process, its log lines and skipped steps kept"""
 
+    def __init__(self, stage):
+        self.stage, self.lines, self.skipped = stage, [], []
+        self.cb = worker.Callbacks(log=self.lines.append, skip=self.skipped.append)
+        self.t = time.monotonic()
 
-def settings_pass():
-    """what the app does after a conversion or an update (setup_app.convert_headless)"""
-    import setup_app
-    if not os.path.exists(setup_app.game_settings_path(DIR)):
-        setup_app.write_game_settings(DIR, DOTHEROES_FPS="60", PS3RECOMP_VK_FULLSCREEN="0")
-    setup_app.ensure_performance_settings(DIR)
-    return setup_app
+    def done(self, out=None):
+        secs = time.monotonic() - self.t
+        st = report["stages"].setdefault(self.stage, {})
+        st.update(seconds=round(secs), skipped=sorted(set(self.skipped)))
+        if out is not None:
+            st["result"] = {k: v for k, v in out.items() if k != "pruned"}
+        print(f"  {self.stage}: {secs:.0f} s, skipped {sorted(set(self.skipped))}", flush=True)
+        return out
 
 
 def reuse_counts(lines):
@@ -85,6 +96,34 @@ def reuse_counts(lines):
         if m:
             return int(m.group(1)), int(m.group(2))
     return 0, None
+
+
+def lay():
+    return layout.Layout(DIR)
+
+
+def active_exe():
+    return os.path.join(DIR, "game", EXE)
+
+
+def game_info(exe):
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("DOTHEROES_", "PS3_", "PS3RECOMP_"))}
+    r = subprocess.run([exe, "--info"], capture_output=True, text=True, timeout=120, env=env)
+    try:
+        return json.loads(r.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return {"exit": r.returncode, "out": r.stdout[-500:]}
+
+
+def saves_hash(d):
+    h = hashlib.sha256()
+    for root, _, fs in sorted(os.walk(d)):
+        for f in sorted(fs):
+            p = os.path.join(root, f)
+            h.update(os.path.relpath(p, d).encode() + b"\n")
+            with open(p, "rb") as fh:
+                h.update(fh.read())
+    return h.hexdigest()
 
 
 def stage_fresh():
@@ -98,45 +137,57 @@ def stage_fresh():
     if failed:
         return
     if os.path.isdir(DIR):
-        import shutil
-        shutil.rmtree(DIR)
+        layout.rmtree(DIR)
     os.makedirs(DIR)
-    _, lines, _ = run_pipeline("fresh", source=ISO)
-    settings_pass()
-    n, total = reuse_counts(lines)
+    r = Run("fresh")
+    out = r.done(worker.op_install(DIR, ISO, None, ELF, r.cb))
+    n, total = reuse_counts(r.lines)
     check("fresh", n == 0, f"nothing reused in a fresh install's build ({n})")
-    report["stages"]["fresh"]["exe_sha256"] = sha(os.path.join(DIR, pipeline.exe_name()))
+    check("fresh", lay().kind() == "slots" and lay().read_active()["active"] == out["build"],
+          f"the new build active ({out['build']})")
+    check("fresh", layout.is_link(lay().game_link) and os.path.exists(active_exe()), "game/ starts it")
+    report["stages"]["fresh"]["exe_sha256"] = sha(active_exe())
 
 
 def stage_check():
-    exe = os.path.join(DIR, pipeline.exe_name())
-    check("check", os.path.exists(exe), "the game is there")
+    exe = active_exe()
+    check("check", os.path.exists(exe), "the game is there (game/)")
     if os.path.exists(exe):   # M8.4: the runtime's cellAudio built without host output (its retired Init's line)
-        check("check", b"retired in this build" in open(exe, "rb").read(), "cellAudio retired in the built game")
-    check("check", os.path.exists(os.path.join(DIR, "SDL2.dll")) or os.name != "nt", "SDL2.dll beside it")
-    libdir = DIR if os.name == "nt" else os.path.join(DIR, "lib")
+        with open(exe, "rb") as f:
+            check("check", b"retired in this build" in f.read(), "cellAudio retired in the built game")
+    slot = lay().build_dir(lay().read_active()["active"])
+    libdir = slot if os.name == "nt" else os.path.join(slot, "lib")
+    check("check", os.path.exists(os.path.join(libdir, "SDL2.dll")) or os.name != "nt", "SDL2.dll beside it")
     al = "OpenAL32.dll" if os.name == "nt" else "libopenal.so.1"
     check("check", os.path.exists(os.path.join(libdir, al)), f"OpenAL Soft ({al}) beside it")
     check("check", os.path.exists(os.path.join(libdir, "OpenAL-Soft-NOTICE.txt")), "OpenAL Soft's notice beside it")
     for name in pipeline.FFMPEG_FILES:
         check("check", os.path.exists(os.path.join(libdir, name)), f"FFmpeg's {name} beside it")
-    info = pipeline.install_info(DIR) or {}
-    check("check", {"recomp", "spu"} <= set(info.get("stamps", {})), "install.json has the lift's stamps")
-    import setup_app
-    cfg = setup_app.read_game_settings(DIR)
-    for k, v in setup_app.PERFORMANCE.items():
+    for name in ("build.json", "build.cfg"):
+        check("check", os.path.exists(os.path.join(slot, name)), f"the slot's {name}")
+    info = game_info(exe)
+    report["stages"]["check"]["info"] = info
+    check("check", info.get("layout") == "slots" and info.get("disc") and info.get("ffmpeg", {}).get("ok"),
+          f"--info from game/: {info.get('layout')}, the disc found, {info.get('ffmpeg', {}).get('what')}")
+    binfo = lay().build_info(lay().read_active()["active"]) or {}
+    check("check", binfo.get("checked", {}).get("memtest", "").find("0 failed") >= 0,
+          f"the memory test passed before it became active ({binfo.get('checked', {}).get('memtest')})")
+    cfg = game_settings.read_game_settings(DIR)
+    check("check", os.path.exists(os.path.join(DIR, "config", "dotheroes.cfg")), "the settings in config/")
+    for k, v in game_settings.PERFORMANCE.items():
         check("check", cfg.get(k) == v, f"dotheroes.cfg {k}={v}")
-    rec = os.path.join(DIR, "data", "gen", "recompiled")
+    info = pipeline.install_info(DIR) or {}
+    rec = os.path.join(DIR, "data", "gen", info.get("lift", "?"), "recompiled")
+    check("check", os.path.isdir(rec), f"the lift in data/gen/{info.get('lift')}")
     text = "".join(open(os.path.join(rec, f), encoding="utf-8", errors="replace").read()
-                   for f in sorted(os.listdir(rec)) if f.endswith(".cpp"))
+                   for f in sorted(os.listdir(rec)) if f.endswith(".cpp")) if os.path.isdir(rec) else ""
     leaf, obs = text.count("/* --promote-leaf */"), text.count("entry observer")
     report["stages"]["check"]["lift"] = {"promote_leaf": leaf, "entry_observers": obs,
                                          "phys_hooks": text.count("g_phys_direct")}
-    # M5's lift: 7,428 (R8's 8,385 less FMOD's 957, now traps; the same set outside config/excluded_code.json)
     check("check", leaf > 7000, f"leaf promotion in the lift ({leaf} functions; M5's lift: 7,428)")
     check("check", obs > 0, f"R7's entry hooks in the lift ({obs})")
     check("check", text.count("g_phys_direct") >= 2, "R8's physics hooks in the lift")
-    if os.path.isdir(DEV_LIFT):   # the same lifter, options and program: the same code
+    if os.path.isdir(DEV_LIFT) and os.path.isdir(rec):   # the same lifter, options and program: the same code
         diff = [f for f in sorted(os.listdir(DEV_LIFT)) if f.endswith((".cpp", ".h"))
                 and (not os.path.exists(os.path.join(rec, f)) or sha(os.path.join(rec, f)) != sha(os.path.join(DEV_LIFT, f)))]
         report["stages"]["check"]["lift_differs_from_dev"] = diff
@@ -144,49 +195,201 @@ def stage_check():
                                  f"{len(diff)} files differ")
 
 
+def put_save():
+    """a save file of the test's own in the install's save root (the hash is what is compared)"""
+    p = os.path.join(DIR, "data", "gamedata", "dev_hdd0", "home", "00000001", "savedata", "TEST", "DATA.BIN")
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "wb") as f:
+        f.write(os.urandom(4096))
+
+
 def stage_update():
-    before = sha(os.path.join(DIR, pipeline.exe_name()))
-    skipped, lines, secs = run_pipeline("update")
-    check("update", set(skipped) >= {"verify", "extract", "decrypt", "recomp", "spu"}, "only the build ran")
-    n, total = reuse_counts(lines)
-    check("update", total is not None and n == total, f"every object reused ({n} of {total})")
-    after = sha(os.path.join(DIR, pipeline.exe_name()))
-    report["stages"]["update"]["exe_same"] = before == after
-    print(f"  relinked game {'identical' if before == after else 'differs'} (information)")
+    before = lay().read_active()
+    r = Run("update")
+    out = r.done(worker.op_update(DIR, r.cb))
+    check("update", not out["changed"] and lay().read_active()["active"] == before["active"],
+          "nothing changed: the active build kept, nothing built")
+    check("update", {"recomp", "spu", "build"} <= set(r.skipped), "the lift and the build skipped")
+
+
+def stage_relink():
+    put_save()
+    saves = saves_hash(lay().gamedata)
+    a = lay().read_active()["active"]
+    p = os.path.join(lay().build_dir(a), "build.json")
+    info = layout.read_json(p)
+    info["inputs"] = "made stale by the test"
+    layout.write_json(p, info)
+    r = Run("relink")
+    out = r.done(worker.op_update(DIR, r.cb))
+    n, total = reuse_counts(r.lines)
+    check("relink", total is not None and n == total, f"every object reused ({n} of {total})")
+    st = lay().read_active()
+    check("relink", out["changed"] and st["active"] != a and st["previous"] == [a],
+          f"a new slot active ({st['active']}), the one before kept ({a})")
+    check("relink", out.get("saves_backup") and os.path.isdir(os.path.join(lay().backups_dir, out["saves_backup"])),
+          f"the saves backed up first ({out.get('saves_backup')})")
+    check("relink", saves_hash(lay().gamedata) == saves, "the saves untouched")
+    report["stages"]["relink"]["slot_mb"] = round(layout.tree_size(lay().build_dir(st["active"])) / 2**20, 1)
+
+
+def stage_rollback():
+    st = lay().read_active()
+    if not st["previous"]:
+        return check("rollback", False, "a kept build to go back to (run relink first)")
+    cur, prev = st["active"], st["previous"][0]
+    saves = saves_hash(lay().gamedata)
+    t = time.monotonic()
+    lay().rollback()
+    secs = time.monotonic() - t
+    check("rollback", lay().read_active()["active"] == prev and game_info(active_exe()).get("build_id") == prev,
+          f"back to {prev} in {secs:.2f} s: game/ starts it (--info says so)")
+    check("rollback", sha(active_exe()) == (lay().build_info(prev) or {}).get("exe_sha256"), "its game as recorded")
+    check("rollback", saves_hash(lay().gamedata) == saves, "the saves untouched")
+    lay().rollback()
+    check("rollback", lay().read_active()["active"] == cur, f"forward again to {cur}")
+
+
+def stage_failed():
+    st = lay().read_active()
+    real = pipeline.zig_build.build_game
+
+    def broken(*a, **kw):
+        raise pipeline.zig_build.BuildError("compiling failed: made to fail by the test")
+    pipeline.zig_build.build_game = broken
+    p = os.path.join(lay().build_dir(st["active"]), "build.json")
+    info = layout.read_json(p)
+    keep_inputs = info.get("inputs")
+    info["inputs"] = "made stale by the test"
+    layout.write_json(p, info)
+    try:
+        r = Run("failed")
+        try:
+            worker.op_update(DIR, r.cb)
+            check("failed", False, "the broken build refused")
+        except pipeline.zig_build.BuildError:
+            check("failed", True, "the broken build refused (compile_failed)")
+        r.done()
+    finally:
+        pipeline.zig_build.build_game = real
+    check("failed", lay().read_active() == st and not [n for n in os.listdir(lay().builds_dir) if n.startswith(".")],
+          "the active build as it was, no staged slot left")
+
+    def bad(slot, log):
+        raise pipeline.SetupError("The new build failed its self-test.", "build_invalid")
+    try:
+        worker.op_update(DIR, Run("failed").cb, validate=bad)
+        check("failed", False, "the build failing its check refused")
+    except pipeline.SetupError as e:
+        check("failed", e.code == "build_invalid", "the build failing its check refused (build_invalid)")
+    check("failed", lay().read_active() == st, "the active build as it was")
+    info["inputs"] = keep_inputs
+    layout.write_json(p, info)
+    check("failed", game_info(active_exe()).get("ffmpeg", {}).get("ok"), "the active game still starts (--info)")
 
 
 def stage_relift():
-    p = os.path.join(DIR, "data", "install.json")
-    info = json.load(open(p))
-    info["stamps"]["recomp"] = "cleared by the test"
-    json.dump(info, open(p, "w"), indent=1)
-    skipped, lines, _ = run_pipeline("relift")
-    check("relift", "recomp" not in skipped and "spu" in skipped, "the lift redone, the SPU step skipped")
-    n, total = reuse_counts(lines)
-    check("relift", total is not None and n == total, f"the same lift: every object reused ({n} of {total})")
+    info = pipeline.install_info(DIR) or {}
+    done = os.path.join(DIR, "data", "gen", info.get("lift", "?"), "done.json")
+    if os.path.exists(done):
+        os.remove(done)
+    r = Run("relift")
+    out = r.done(worker.op_update(DIR, r.cb))
+    check("relift", "recomp" not in r.skipped and "spu" not in r.skipped, "the lift redone")
+    check("relift", not out["changed"], "the same lift: the same build, nothing rebuilt")
+
+
+def stage_resume():
+    if os.path.isdir(DIR2):
+        layout.rmtree(DIR2)
+    os.makedirs(DIR2)
+    cmd = [PY, os.path.join(ROOT, "tools", "worker.py"), "install", "--disc", ISO, "--keys", ELF, "--install", DIR2,
+           "--control"]
+    p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, encoding="utf-8")
+    compiled, res = 0, {}
+    for ln in p.stdout:
+        e = json.loads(ln)
+        if e["ev"] == "log" and e["text"].startswith("compiled "):
+            compiled += 1
+            if compiled == 10:   # ten objects in: cancel
+                p.stdin.write("cancel\n")
+                p.stdin.flush()
+        if e["ev"] == "result":
+            res = e
+    p.wait(timeout=60)
+    check("resume", res.get("code") == "cancelled", f"the install cancelled in its build ({res.get('code')}, "
+                                                    f"forced: {(res.get('data') or {}).get('forced', False)})")
+    l2 = layout.Layout(DIR2)
+    check("resume", not os.path.exists(l2.active_json), "no build active after the cancel")
+    info = worker.cmd_info(type("A", (), {"install": DIR2})(), None, None)
+    check("resume", info["kind"] == "partial" and set(info["interrupted"]["done"]) == {"verify", "extract", "decrypt"},
+          f"info: an interrupted install, its disc's steps done ({info['interrupted']})")
+    r = Run("resume")
+    out = r.done(worker.op_install(DIR2, ISO, None, ELF, r.cb, resume=True))
+    check("resume", {"verify", "extract", "decrypt", "recomp", "spu"} <= set(r.skipped),
+          "the disc's steps and the lift not redone")
+    n, total = reuse_counts(r.lines)
+    check("resume", n >= 10, f"the objects compiled before the cancel reused ({n} of {total})")
+    check("resume", l2.read_active()["active"] == out["build"], "the resumed install's build active")
+    layout.rmtree(DIR2)
+
+
+def stage_migrate():
+    if not os.path.isdir(MIGRATE_FROM) or layout.Layout(MIGRATE_FROM).kind() != "setup-app":
+        return check("migrate", False, f"a setup app's install to copy ({MIGRATE_FROM})")
+    if os.path.isdir(MIGRATED):
+        layout.rmtree(MIGRATED)
+    t = time.monotonic()
+    shutil.copytree(MIGRATE_FROM, MIGRATED)
+    print(f"  copied {MIGRATE_FROM} in {time.monotonic() - t:.0f} s", flush=True)
+    m = layout.Layout(MIGRATED)
+    os.makedirs(os.path.join(m.gamedata, "savedata"), exist_ok=True)
+    with open(os.path.join(m.gamedata, "savedata", "TEST.BIN"), "wb") as f:
+        f.write(os.urandom(2048))
+    saves = saves_hash(m.gamedata)
+    with open(os.path.join(MIGRATED, "dotheroes.cfg"), "a") as f:
+        f.write("DOTHEROES_FPS=30\n")
+    os.makedirs(os.path.join(m.data, "cache", "shaders"), exist_ok=True)
+    with open(os.path.join(m.data, "cache", "shaders", "test-translation.spv"), "wb") as f:
+        f.write(b"x")
+    r = Run("migrate")
+    out = r.done(worker.op_migrate(MIGRATED, r.cb))
+    check("migrate", m.kind() == "slots" and not os.path.exists(os.path.join(MIGRATED, EXE)),
+          "the layout with build slots; the setup app's game removed")
+    check("migrate", {"verify", "extract", "decrypt"} <= set(r.skipped), "the disc not needed (its steps skipped)")
+    n, total = reuse_counts(r.lines)
+    report["stages"]["migrate"]["objects_reused"] = [n, total]
+    print(f"  lift kept: {out['lift_kept']}; objects reused {n} of {total}")
+    check("migrate", saves_hash(m.gamedata) == saves, "the saves untouched")
+    check("migrate", game_settings.read_game_settings(MIGRATED).get("DOTHEROES_FPS") == "30",
+          "the player's settings kept (config/dotheroes.cfg)")
+    sh = os.path.join(m.shaders, (m.build_info(m.read_active()["active"]) or {}).get("shader_cache", "?"),
+                      "test-translation.spv")
+    check("migrate", os.path.exists(sh), "the translated shaders kept, in the build's translator's folder")
+    check("migrate", game_info(os.path.join(MIGRATED, "game", EXE)).get("disc"), "the migrated game finds its disc")
+    layout.rmtree(MIGRATED)
 
 
 def stage_settings():
-    import setup_app
-    path = setup_app.game_settings_path(DIR)
-    keep = open(path).read()
+    path = game_settings.game_settings_path(DIR)
+    with open(path) as f:
+        keep = f.read()
     try:
-        setup_app.write_game_settings(DIR, DOTHEROES_FPS="0", DOTHEROES_NATIVE_CD="0", PS3RECOMP_VK_FULLSCREEN="1")
-        cur = setup_app.read_game_settings(DIR)
+        game_settings.write_game_settings(DIR, DOTHEROES_FPS="0", DOTHEROES_NATIVE_CD="0", PS3RECOMP_VK_FULLSCREEN="1")
+        cur = game_settings.read_game_settings(DIR)
         cur.pop("GCM_WRAP_LAP", None)
         with open(path, "w") as f:
             f.write("".join(f"{k}={v}\n" for k, v in cur.items()))
-        settings_pass()
-        cfg = setup_app.read_game_settings(DIR)
+        game_settings.settle_after_conversion(DIR)
+        cfg = game_settings.read_game_settings(DIR)
         check("settings", cfg.get("DOTHEROES_FPS") == "0" and cfg.get("DOTHEROES_NATIVE_CD") == "0"
               and cfg.get("PS3RECOMP_VK_FULLSCREEN") == "1", "the player's own values kept")
         check("settings", cfg.get("GCM_WRAP_LAP") == "1", "a missing performance switch added back")
-        # an earlier default (setup_app.PREVIOUS_DEFAULTS) is not the player's: brought up to date
-        old = {k: v[0] for k, v in setup_app.PREVIOUS_DEFAULTS.items()}
-        setup_app.write_game_settings(DIR, **old)
-        settings_pass()
-        cfg = setup_app.read_game_settings(DIR)
-        check("settings", all(cfg.get(k) == setup_app.PERFORMANCE[k] for k in old),
+        old = {k: v[0] for k, v in game_settings.PREVIOUS_DEFAULTS.items()}
+        game_settings.write_game_settings(DIR, **old)
+        game_settings.settle_after_conversion(DIR)
+        cfg = game_settings.read_game_settings(DIR)
+        check("settings", all(cfg.get(k) == game_settings.PERFORMANCE[k] for k in old),
               "an earlier default brought up to date (%s)" % ", ".join("%s=%s" % (k, cfg.get(k)) for k in old))
     finally:
         with open(path, "w") as f:
@@ -194,20 +397,18 @@ def stage_settings():
 
 
 def stage_game():
-    exe = os.path.join(DIR, pipeline.exe_name())
+    exe = active_exe()
     env = dict(os.environ, DOTHEROES_LOG_TO_CONSOLE="1")
     r = subprocess.run([exe, "--memtest"], cwd=DIR, env=env, capture_output=True, text=True, timeout=300)
     tail = (r.stdout + r.stderr).strip().splitlines()[-3:]
     report["stages"]["game"] = {"memtest_exit": r.returncode, "memtest_tail": tail}
-    check("game", r.returncode == 0, f"dotheroes.exe --memtest: exit {r.returncode} ({' / '.join(tail)})")
+    check("game", r.returncode == 0, f"game/{EXE} --memtest: exit {r.returncode} ({' / '.join(tail)})")
     # The river fight from the install, long enough to reach it (the title, CONTINUE from the kept checkpoint's
-    # saves, the route: the fight starts ~65 s in) and judged by the fight, not the exit: before 2026-11-10 this
-    # ran 60 s, the run ended at the title or the continue, and the stage passed on exit 0 alone.
-    # The save-data list is off for this run (INSTALLED_KEEP): a player's install shows it at CONTINUE, and the
-    # river route is written for the title's first entry; the list has its own drives (save_picker,
-    # save_picker_edit) in the validation set.
+    # saves, the route: the fight starts ~65 s in) and judged by the fight, not the exit. The save-data list is off
+    # for this run (INSTALLED_KEEP): a player's install shows it at CONTINUE, and the river route is written for the
+    # title's first entry; the list has its own drives (save_picker, save_picker_edit) in the validation set.
     env = dict(os.environ, INSTALLED=DIR, SCENARIO="river_fight", RUN_TAG="install-test", AUDIO="1",
-               INSTALLED_KEEP="PS3_SAVEDATA_PICKER", PS3_SAVEDATA_PICKER="0")
+               INSTALLED_KEEP="PS3_SAVEDATA_PICKER", PS3_SAVEDATA_PICKER="0", KEEP_RUNS="50")
     r = subprocess.run([PY, os.path.join(ROOT, "tests", "boot_smoke.py"), "220"], cwd=ROOT, env=env, timeout=1200)
     check("game", r.returncode == 0, f"the game from the install ran (tests/boot_smoke.py INSTALLED=): exit {r.returncode}")
     runs = sorted(glob.glob(os.path.join(ROOT, "build", "test", "boot-*-install-test")), key=os.path.getmtime)
@@ -239,8 +440,9 @@ def stage_game():
           f"{deaths} ended by the hero's death), native physics ({native} tasks issued directly)")
 
 
-STAGES = {"fresh": stage_fresh, "check": stage_check, "update": stage_update, "relift": stage_relift,
-          "settings": stage_settings, "game": stage_game}
+STAGES = {"fresh": stage_fresh, "check": stage_check, "update": stage_update, "relink": stage_relink,
+          "rollback": stage_rollback, "failed": stage_failed, "relift": stage_relift, "resume": stage_resume,
+          "migrate": stage_migrate, "settings": stage_settings, "game": stage_game}
 
 
 def main():
@@ -251,7 +453,12 @@ def main():
         sys.exit("the game stage starts the game: add --run-game")
     for s in stages:
         print(f"== {s}", flush=True)
-        STAGES[s]()
+        try:
+            STAGES[s]()
+        except Exception as e:  # noqa: BLE001 -- a stage that throws is a failed stage, the others still run
+            import traceback
+            traceback.print_exc()
+            check(s, False, f"the stage raised {e!r}")
         if failed and s == "fresh":
             break
     report["failed"] = failed

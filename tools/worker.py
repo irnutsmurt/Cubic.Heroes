@@ -23,6 +23,7 @@ import argparse
 import json
 import os
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -33,6 +34,7 @@ ROOT = (os.path.dirname(sys.executable) if getattr(sys, "frozen", False)
 sys.path.insert(0, os.path.join(ROOT, "tools"))
 
 import game_settings  # noqa: E402
+import install_layout as layout  # noqa: E402
 import setup_pipeline as pipeline  # noqa: E402
 
 PROTOCOL = 1
@@ -44,7 +46,7 @@ CANCEL_GRACE_S = 5.0
 # Each step's typical length on the reference PC (seconds; M9.0's measurement, docs/M9_WORKER_PROTOCOL.md
 # section 6): the weights of the overall progress, and the remaining time before a step's own rate is known
 STAGE_SECONDS = {"verify": 15.0, "extract": 25.0, "decrypt": 1.0, "recomp": 40.0, "spu": 12.0, "build": 275.0,
-                 "finish": 1.0}
+                 "finish": 1.0, "validate": 5.0, "activate": 1.0}
 CPU_STAGES = {"recomp", "spu", "build"}   # bound by the processor (the others by the drive)
 # What an operation needs on the install's drive (bytes; measured, section 6)
 NEEDED = {"install": 6 << 30, "update": 3 << 29}
@@ -172,6 +174,46 @@ def hard_exit(code):
     os._exit(code)   # Windows: the job's last handle closes with the process; its children end
 
 
+def step_name(s):
+    return pipeline.STEP_NAMES.get(s) or STEP_NAMES_M9.get(s, s)
+
+
+class Callbacks:
+    """the operations (op_install, op_update, op_migrate) driven in-process, without the event stream: the setup
+    app until the launcher replaces it. cancel: a threading.Event, set to cancel."""
+
+    def __init__(self, progress=None, log=None, skip=None, cancel=None):
+        self._progress, self._log, self._skip = progress, log, skip
+        self.control = self
+        self.cancel = cancel or threading.Event()
+
+    def check(self):
+        if self.cancel.is_set():
+            raise pipeline.Cancelled()
+
+    def progress(self, step, frac, message):
+        self.check()
+        if self._progress:
+            self._progress(step, frac, message)
+
+    def log(self, text):
+        self.check()
+        if self._log:
+            self._log(text)
+
+    def skip(self, step):
+        if self._skip:
+            self._skip(step)
+
+
+def installed_game(install):
+    """the game a shortcut starts: game/ in an install with build slots, the setup app's beside its data"""
+    lay = layout.Layout(install)
+    if lay.kind() == "slots":
+        return os.path.join(lay.game_link, layout.exe_name())
+    return os.path.join(lay.root, layout.exe_name())
+
+
 class Progress:
     """The pipeline's progress, log and skip callbacks -> stage and progress events: each step's fraction,
     the overall fraction (STAGE_SECONDS as weights, skipped steps leaving the total), elapsed time and, once
@@ -191,7 +233,7 @@ class Progress:
         self.t0 = self.now()
 
     def plan(self):
-        self.ev.emit("plan", stages=[{"id": s, "name": pipeline.STEP_NAMES.get(s, s), "weight": self.weight[s]}
+        self.ev.emit("plan", stages=[{"id": s, "name": step_name(s), "weight": self.weight[s]}
                                      for s in self.stages])
 
     def _end_current(self):
@@ -204,7 +246,7 @@ class Progress:
         self._end_current()
         self.cur, self.cur_t0, self.frac = step, self.now(), 0.0
         self.state[step] = "running"
-        self.ev.emit("stage", id=step, state="start", name=pipeline.STEP_NAMES.get(step, step))
+        self.ev.emit("stage", id=step, state="start", name=step_name(step))
 
     def overall(self):
         live = [s for s in self.stages if self.state[s] != "skipped"]
@@ -335,49 +377,267 @@ def cmd_space(a, ev, control):
 
 def cmd_info(a, ev, control):
     install = os.path.abspath(a.install)
-    info = pipeline.install_info(install)
-    paths = pipeline.Paths(install)
-    return {"exists": info is not None, "version": (info or {}).get("version"),
-            "steps_done": sorted((info or {}).get("stamps", {})), "game": os.path.exists(paths.exe),
-            "disc_copy": os.path.exists(paths.elf)}
+    lay = layout.Layout(install)
+    info = pipeline.install_info(install) or {}
+    st = info.get("stamps", {})
+    out = lay.summary()
+    out.update(version=info.get("version"), disc_copy=os.path.exists(pipeline.Paths(install).elf),
+               lift=info.get("lift"),
+               # an install interrupted before its first build: the disc's steps it finished (install --resume)
+               interrupted=None if out["kind"] != "partial" else
+               {"source": info.get("source"), "done": [s for s in ("verify", "extract", "decrypt") if st.get(s)]})
+    return out
 
 
-def _convert(a, ev, control, source, keys, elf, full=False):
-    install = os.path.abspath(a.install)
+def check_space(install, need):
     free, _ = free_bytes(install)
-    need = NEEDED["install" if source else "update"]
     if free < need:
         raise pipeline.SetupError(f"Not enough free space on the install's drive: about {need / 2**30:.1f} GB "
                                   f"is needed, {free / 2**30:.1f} GB is free.", "disk_space",
                                   json.dumps({"free": free, "needed": need}))
-    steps = pipeline.STEPS if source else [s for s in pipeline.STEPS if s not in ("verify", "extract", "decrypt")]
+
+
+# A new build is checked before it becomes active (docs/M9_LAUNCHER_PLAN.md section 8.4): its own report
+# (`dotheroes --info`: FFmpeg loads beside it, the native release) and its memory test. The environment the game
+# reads its developers' switches from is not passed on.
+VALIDATE_TIMEOUT_S = 120
+
+
+def validate_build(slot, log):
+    exe = os.path.join(slot, layout.exe_name())
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("DOTHEROES_", "PS3_", "PS3RECOMP_"))}
+    kw = {"creationflags": 0x08000000} if os.name == "nt" else {}
+    try:
+        r = subprocess.run([exe, "--info"], capture_output=True, text=True, timeout=VALIDATE_TIMEOUT_S, env=env,
+                           stdin=subprocess.DEVNULL,
+                           cwd=slot, **kw)
+        info = json.loads(r.stdout.strip().splitlines()[-1]) if r.stdout.strip() else {}
+    except (OSError, subprocess.TimeoutExpired, ValueError) as e:
+        raise pipeline.SetupError("The new build doesn't start.", "build_invalid", repr(e))
+    if not info.get("native_release") or not info.get("ffmpeg", {}).get("ok"):
+        raise pipeline.SetupError("The new build is incomplete: " + ("FFmpeg doesn't load beside it" if not
+                                  info.get("ffmpeg", {}).get("ok") else "not the native release") + ".",
+                                  "build_invalid", json.dumps(info))
+    try:
+        m = subprocess.run([exe, "--memtest"], capture_output=True, text=True, timeout=VALIDATE_TIMEOUT_S, env=env,
+                           stdin=subprocess.DEVNULL,
+                           cwd=slot, **kw)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise pipeline.SetupError("The new build's self-test didn't finish.", "build_invalid", repr(e))
+    if m.returncode:
+        raise pipeline.SetupError("The new build failed its self-test.", "build_invalid",
+                                  (m.stdout + m.stderr)[-3000:])
+    last = [ln for ln in (m.stdout + m.stderr).splitlines() if "checks" in ln][-1:]
+    log("checked: " + info.get("ffmpeg", {}).get("what", "") + "; " + (last[0] if last else "memory test passed"))
+    return {"info": info, "memtest": last[0] if last else "passed"}
+
+
+# The steps of a build into a new slot, after the conversion's
+BUILD_TAIL = ["validate", "activate"]
+STEP_NAMES_M9 = {"validate": "Checking the new build", "activate": "Making it the active build"}
+
+
+def build_slot(lay, prog, source=None, keys=None, elf=None, full=False, resume=False, validate=validate_build):
+    """the conversion (or a rebuild) into a staged slot, checked, recorded, promoted and made active; any failure
+    leaves the active build as it was (the staged slot removed). Returns (build id, info, changed)."""
+    lay.ensure_dirs()
+    lay.clean_staging()
+    active = lay.read_active()["active"] if os.path.exists(lay.active_json) else None
+    same_as = None if full or not active or lay.check_build(active) else (lay.build_info(active) or {}).get("inputs")
+    staging = lay.stage()
+    try:
+        made = pipeline.run(lay.root, source=source, keys=keys, elf=elf, progress=prog.progress, log=prog.log,
+                            skip=prog.skip, full=full, out_dir=staging, keep_objects=lay.kept_objects(), resume=resume,
+                            unchanged_inputs=same_as)
+        prog.control.check()
+        if made.get("unchanged"):   # the active build is made of exactly this: nothing to build or switch
+            layout.rmtree(staging)
+            prog.log(f"nothing changed: the active build ({active}) is made of the same lift, objects and libraries")
+            return active, lay.build_info(active), False
+        prog.progress("validate", 0.0, STEP_NAMES_M9["validate"])
+        checked = validate(staging, prog.log)
+        prog.control.check()
+        prog.progress("activate", 0.0, STEP_NAMES_M9["activate"])
+        info = lay.record(staging, {k: made[k] for k in ("lift", "objects", "shader_cache", "version", "inputs")})
+        info["checked"] = checked
+        layout.write_json(os.path.join(staging, "build.json"), info)
+        before = lay.read_active()["active"] if os.path.exists(lay.active_json) else None
+        bid = lay.promote(staging, info)
+        lay.activate(bid)
+        prog.progress("activate", 1.0, STEP_NAMES_M9["activate"])
+        return bid, lay.build_info(bid), bid != before
+    except BaseException:
+        if os.path.isdir(staging):
+            layout.rmtree(staging)
+        raise
+
+
+def op_install(install, source, keys, elf, prog, resume=False, validate=validate_build):
+    """a first install, a reinstall or a repair from the disc: the disc's steps, then a new build (the saves, the
+    settings and the kept builds untouched)"""
+    lay = layout.Layout(install)
+    if lay.kind() == "setup-app":
+        raise pipeline.SetupError("This folder holds an install made by the setup app: migrate it (no need to "
+                                  "choose the disc again).", "needs_migration")
+    check_space(install, NEEDED["install"])
+    bid, info, _ = build_slot(lay, prog, source, keys, elf, resume=resume, validate=validate)
+    game_settings.settle_after_conversion(install)
+    pruned = lay.prune()
+    return {"build": bid, "exe": os.path.join(lay.game_link, layout.exe_name()), "pruned": pruned["removed"]}
+
+
+def op_update(install, prog, full=False, validate=validate_build):
+    """the game rebuilt from the install's own copy of the disc into a new slot (only what changed redone), the
+    saves backed up first; the build before it kept for rollback"""
+    lay = layout.Layout(install)
+    if lay.kind() != "slots":
+        raise pipeline.SetupError("This folder has no active build to update" + (": migrate it first." if lay.kind()
+                                  == "setup-app" else "."), "needs_migration" if lay.kind() == "setup-app" else
+                                  "no_install")
+    check_space(install, NEEDED["update"])
+    backup = lay.backup_saves("before-update") if os.path.isdir(lay.gamedata) and os.listdir(lay.gamedata) else None
+    bid, info, changed = build_slot(lay, prog, full=full, validate=validate)
+    game_settings.settle_after_conversion(install)
+    pruned = lay.prune()
+    lay.prune_backups()
+    return {"build": bid, "changed": changed, "saves_backup": backup and backup["id"], "pruned": pruned["removed"]}
+
+
+def op_migrate(install, prog, validate=validate_build):
+    """the setup app's install into the layout with build slots, the disc not asked for again and nothing redone
+    that is still valid: the current build made from the install's own lift and objects (when the tools are the
+    same, a link with every object reused), then the data moved and the old game removed"""
+    lay = layout.Layout(install)
+    if lay.kind() != "setup-app":
+        raise pipeline.SetupError("This folder isn't an install made by the setup app.", "not_setup_app")
+    backup = lay.backup_saves("before-migration")
+    info = pipeline.install_info(install) or {}
+    st = info.get("stamps", {})
+    elf_sha = info.get("elf_sha256")
+    old_lift = None
+    if elf_sha and st.get("recomp") == pipeline.tool_fingerprint("recomp", elf_sha) and \
+            st.get("spu") == pipeline.tool_fingerprint("spu", elf_sha):
+        old_lift = pipeline.lift_id(elf_sha)   # the same tools made it: kept, not lifted again
+    lay.ensure_dirs()
+    moved = lay.move_legacy_data(old_lift, "setup-app")
+    if old_lift:
+        with open(os.path.join(lay.gen_root, old_lift, "done.json"), "w") as f:
+            json.dump({"lift": old_lift, "elf_sha256": elf_sha, "migrated": True}, f)
+    bid, binfo, _ = build_slot(lay, prog, validate=validate)
+    legacy_shaders = os.path.join(lay.shaders, "setup-app")
+    mine = os.path.join(lay.shaders, binfo.get("shader_cache") or "default")
+    if os.path.isdir(legacy_shaders):   # the translations it made: the game keeps those of its own translator
+        os.makedirs(mine, exist_ok=True)
+        for n in os.listdir(legacy_shaders):
+            if not os.path.exists(os.path.join(mine, n)):
+                os.replace(os.path.join(legacy_shaders, n), os.path.join(mine, n))
+        layout.rmtree(legacy_shaders)
+        moved.append(f"data/cache/shaders/setup-app -> data/cache/shaders/{os.path.basename(mine)}")
+    removed = lay.remove_legacy_game()
+    game_settings.settle_after_conversion(install)
+    lay.prune()
+    return {"build": bid, "lift_kept": bool(old_lift), "moved": moved, "removed": removed,
+            "saves_backup": backup["id"], "exe": os.path.join(lay.game_link, layout.exe_name()),
+            "shortcuts": "the old shortcuts started the setup app's game: make them again (they start game/)"}
+
+
+def _progress(ev, control, steps):
     prog = Progress(ev, control, steps)
     prog.plan()
-    exe = pipeline.run(install, source=source, keys=keys, elf=elf, progress=prog.progress, log=prog.log,
-                       skip=prog.skip, full=full)
-    control.check()
-    game_settings.settle_after_conversion(install)
-    took, skipped = prog.finish()
-    return {"exe": exe, "seconds": took, "skipped": skipped}
+    return prog
 
 
 def cmd_install(a, ev, control):
     k = os.path.abspath(a.keys)
     elf = pipeline.is_elf(k)
-    return _convert(a, ev, control, os.path.abspath(a.disc), None if elf else k, k if elf else None)
+    prog = _progress(ev, control, pipeline.STEPS + BUILD_TAIL)
+    out = op_install(os.path.abspath(a.install), os.path.abspath(a.disc), None if elf else k, k if elf else None,
+                     prog, resume=a.resume)
+    out["seconds"], out["skipped"] = prog.finish()
+    return out
 
 
 def cmd_update(a, ev, control):
-    return _convert(a, ev, control, None, None, None, full=a.full)
+    prog = _progress(ev, control, [s for s in pipeline.STEPS if s not in ("verify", "extract", "decrypt")] +
+                     BUILD_TAIL)
+    out = op_update(os.path.abspath(a.install), prog, full=a.full)
+    out["seconds"], out["skipped"] = prog.finish()
+    return out
+
+
+def cmd_migrate(a, ev, control):
+    prog = _progress(ev, control, [s for s in pipeline.STEPS if s not in ("verify", "extract", "decrypt")] +
+                     BUILD_TAIL)
+    out = op_migrate(os.path.abspath(a.install), prog)
+    out["seconds"], out["skipped"] = prog.finish()
+    return out
+
+
+def _layout(a, kind="slots"):
+    lay = layout.Layout(os.path.abspath(a.install))
+    if kind and lay.kind() != kind:
+        raise pipeline.SetupError("This folder has no install with build slots.", "no_install")
+    return lay
+
+
+def cmd_builds(a, ev, control):
+    lay = _layout(a)
+    st = lay.read_active()
+    return {"active": st["active"], "previous": st["previous"], "retention": st["retention"],
+            "builds": [dict(info, id=bid, state="active" if bid == st["active"] else "kept" if bid in st["previous"]
+                            else "unused", damaged=lay.check_build(bid))
+                       for bid, info in sorted(lay.builds().items())]}
+
+
+def cmd_rollback(a, ev, control):
+    lay = _layout(a)
+    st = lay.rollback(a.to)
+    return {"active": st["active"], "previous": st["previous"]}
+
+
+def cmd_retention(a, ev, control):
+    lay = _layout(a)
+    st = lay.set_retention(a.keep)
+    return {"retention": st["retention"], "previous": st["previous"], "pruned": lay.prune()["removed"]}
+
+
+def cmd_repair_link(a, ev, control):
+    lay = _layout(a)
+    lay.point_game(lay.read_active()["active"])
+    return {"game": lay.game_link}
+
+
+def cmd_saves(a, ev, control):
+    """--action list (default) | backup [--note] | restore --backup ID --confirm | delete --backup ID --confirm"""
+    lay = _layout(a, kind=None)
+    act = a.action or "list"
+    if act in ("restore", "delete") and not a.confirm:
+        raise pipeline.SetupError(f"{act} needs --confirm (it replaces or removes saves).", "needs_confirmation")
+    if act in ("restore", "delete") and not a.backup:
+        raise pipeline.SetupError(f"{act} needs --backup ID.", "usage")
+    if act == "backup":
+        return lay.backup_saves("manual", a.note)
+    if act == "restore":
+        return lay.restore_saves(a.backup)
+    if act == "delete":
+        return lay.delete_backup(a.backup)
+    return {"backups": lay.backups(), "saves_bytes": layout.tree_size(lay.gamedata)}
 
 
 def cmd_selftest(a, ev, control):
     """A pretend operation of three steps over --seconds, with progress, for the protocol's tests and for
     developing the launcher's progress screens without converting a disc. --block: the second step stops
-    calling back (as a long compile does), so cancelling it takes the forced path."""
+    calling back (as a long compile does), so cancelling it takes the forced path. --child: first a tool run as
+    the conversion runs its tools (pipeline.run_tool) and a compiler-style process (zig_build._run), each to its
+    end -- a child must start while the launcher holds the worker's stdin open (M9.1: it once could not)."""
     steps = ["verify", "build", "finish"]
     prog = Progress(ev, control, steps)
     prog.plan()
+    if a.child:
+        pipeline.run_tool(os.path.join(ROOT, "tools", "version.py"), [], prog.log)
+        r = pipeline.zig_build._run([sys.executable, "-c", "print('child ran')"], capture_output=True, text=True,
+                                    timeout=60)
+        prog.log(r.stdout.strip())
     n = max(1, int(a.seconds * 20))
     for s in steps:
         for i in range(n):
@@ -391,7 +651,8 @@ def cmd_selftest(a, ev, control):
 
 COMMANDS = {"version": cmd_version, "probe-disc": cmd_probe_disc, "probe-keys": cmd_probe_keys,
             "space": cmd_space, "info": cmd_info, "install": cmd_install, "update": cmd_update,
-            "selftest": cmd_selftest}
+            "migrate": cmd_migrate, "builds": cmd_builds, "rollback": cmd_rollback, "retention": cmd_retention,
+            "repair-link": cmd_repair_link, "saves": cmd_saves, "selftest": cmd_selftest}
 
 
 def parser():
@@ -402,20 +663,30 @@ def parser():
     p.add_argument("--install")
     p.add_argument("--for", dest="op", choices=sorted(NEEDED), default="install")
     p.add_argument("--full", action="store_true")
+    p.add_argument("--resume", action="store_true", help="install: keep the disc's steps a previous run finished")
+    p.add_argument("--to", help="rollback: the kept build to go back to (default: the newest)")
+    p.add_argument("--keep", type=int, help="retention: how many previous builds to keep")
+    p.add_argument("--action", choices=("list", "backup", "restore", "delete"), help="saves")
+    p.add_argument("--backup", help="saves: a backup's id")
+    p.add_argument("--note", help="saves backup: a note kept with it")
+    p.add_argument("--confirm", action="store_true", help="saves restore/delete: the player confirmed")
     p.add_argument("--seconds", type=float, default=3.0, help=argparse.SUPPRESS)   # selftest
     p.add_argument("--block", action="store_true", help=argparse.SUPPRESS)        # selftest
+    p.add_argument("--child", action="store_true", help=argparse.SUPPRESS)        # selftest
     p.add_argument("--control", action="store_true")
     p.add_argument("--log")
     return p
 
 
 REQUIRED = {"probe-disc": ("disc",), "probe-keys": ("disc", "keys"), "space": ("install",), "info": ("install",),
-            "install": ("disc", "keys", "install"), "update": ("install",)}
+            "install": ("disc", "keys", "install"), "update": ("install",), "migrate": ("install",),
+            "builds": ("install",), "rollback": ("install",), "retention": ("install", "keep"),
+            "repair-link": ("install",), "saves": ("install",)}
 
 
 def main(argv=None):
     a = parser().parse_args(argv)
-    missing = [f"--{x}" for x in REQUIRED.get(a.command, ()) if not getattr(a, x)]
+    missing = [f"--{x}" for x in REQUIRED.get(a.command, ()) if getattr(a, x) in (None, "")]
     out = sys.stdout
     try:   # UTF-8 and bare newlines whatever the console's code page (a path may hold any character)
         out.reconfigure(encoding="utf-8", errors="replace", newline="\n")
@@ -440,6 +711,8 @@ def main(argv=None):
         result, code = {"ok": False, "code": "cancelled", "message": "Cancelled."}, EXIT_CANCELLED
     except pipeline.SetupError as e:
         result, code = {"ok": False, "code": e.code, "message": str(e), "details": e.details}, EXIT_FAILED
+    except layout.LayoutError as e:
+        result, code = {"ok": False, "code": e.code, "message": str(e), "details": None}, EXIT_FAILED
     except pipeline.zig_build.BuildError as e:
         result, code = {"ok": False, "code": "compile_failed", "message": "Building the game failed.",
                         "details": str(e)[-4000:]}, EXIT_FAILED

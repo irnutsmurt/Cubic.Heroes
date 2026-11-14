@@ -21,6 +21,8 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(ROOT, "tools"))
 
 import setup_pipeline as pipeline  # noqa: E402
+import install_layout  # noqa: E402
+import worker  # noqa: E402
 import self_update  # noqa: E402
 import shortcuts  # noqa: E402
 from version import VERSION  # noqa: E402
@@ -357,7 +359,7 @@ class App:
 
     def find_existing(self):
         install = self.install.get().strip()
-        exe = os.path.join(install, pipeline.exe_name())
+        exe = worker.installed_game(install) if install else ""
         self.info = pipeline.install_info(install) if os.path.exists(exe) else None
         installed = os.path.exists(exe)
         self.game = exe if installed else None
@@ -456,13 +458,10 @@ class App:
 
     def work(self, image, install, desktop, keys, elf, full=False):
         try:
-            out = pipeline.run(install, source=image, keys=keys, elf=elf,
-                               progress=lambda st, f, m: self.events.put(("progress", st, f, m)),
-                               log=lambda m: self.events.put(("log", m)),
-                               skip=lambda st: self.events.put(("skip", st)), full=full)
-            if not os.path.exists(game_settings_path(install)):
-                write_game_settings(install, DOTHEROES_FPS="60", PS3RECOMP_VK_FULLSCREEN="0")
-            ensure_performance_settings(install)
+            out = converted(image, install, keys, elf, full,
+                            progress=lambda st, f, m: self.events.put(("progress", st, f, m)),
+                            log=lambda m: self.events.put(("log", m)),
+                            skip=lambda st: self.events.put(("skip", st)))
             if image is not None:  # an update keeps the shortcuts as the player left them
                 try:
                     made = shortcuts.create_shortcuts(out, self.icon_for(out), desktop=desktop)
@@ -649,14 +648,28 @@ def convert_headless(image, install, keys=None, full=False):
         print(f"\r[{pipeline.STEPS.index(step) + 1}/{len(pipeline.STEPS)}] {pipeline.STEP_NAMES[step]}: unchanged")
     is_elf = bool(keys) and open(keys, "rb").read(4) == b"\x7fELF"
     try:
-        out = pipeline.run(install, source=image, keys=None if is_elf else keys, elf=keys if is_elf else None,
-                           progress=show, log=lambda m: None, skip=skipped, full=full)
-    except (pipeline.SetupError, pipeline.zig_build.BuildError) as e:
+        out = converted(image, install, None if is_elf else keys, keys if is_elf else None, full, progress=show,
+                        log=lambda m: None, skip=skipped)
+    except (pipeline.SetupError, pipeline.zig_build.BuildError, install_layout.LayoutError) as e:
         sys.exit(f"\nfailed: {e}")
-    if not os.path.exists(game_settings_path(install)):
-        write_game_settings(install, DOTHEROES_FPS="60", PS3RECOMP_VK_FULLSCREEN="0")
-    ensure_performance_settings(install)
     print(f"\ndone: {out}")
+
+
+def converted(image, install, keys, elf, full, progress, log, skip):
+    """the conversion (image given) or the update, through the pipeline worker's operations (M9.1: a new build
+    slot, checked, then made active; the setup app's own installs moved into that layout first). Returns the game
+    a shortcut starts. The steps after the build (checking it, making it active) are shown as finishing."""
+    def step(st):
+        return st if st in pipeline.STEPS else "finish"
+    cb = worker.Callbacks(progress=lambda st, f, m: progress(step(st), f, m), log=log,
+                          skip=lambda st: skip(st) if st in pipeline.STEPS else None)
+    if install_layout.Layout(install).kind() == "setup-app":
+        worker.op_migrate(install, cb)
+    if image is None:
+        worker.op_update(install, cb, full=full)
+    else:
+        worker.op_install(install, image, keys, elf, cb)
+    return worker.installed_game(install)
 
 
 def run_script():
