@@ -519,6 +519,10 @@ def main():
                 else:
                     covered_since = None
             elif seen and proc.poll() is None:
+                if os.path.exists(os.path.join(RUN, "stop.requested")):
+                    break   # the drive's own `stop` (tests/drive.py; the game removes stop.trigger as it takes it):
+                    #         the game closing its window on the way out, not a guard failure (2026-11-13: the
+                    #         attract runs' window gone 0.1-0.4 s after the drive's stop)
                 why = "game window gone"
             if why and ending.is_set():
                 break   # the window went with the run's own stop, after the check began

@@ -24,7 +24,10 @@
 // whose start t has reached: (n - 1) x rate_den / rate_num seconds.
 //
 // Every call is answered here: nothing reaches Bink (its stubs would land in its traps). A file FFmpeg cannot open
-// (or FFmpeg missing beside the game) is a movie that does not open -- the class's own failure path: no movie. A
+// (or FFmpeg missing beside the game) plays **blank**: its header's length, size and rate, every frame black, no
+// sound -- the game's own flow goes on as with the movie (2026-11-13, M8.4's validation: a failed open is not a
+// path the game survives -- the title asks it, then the game exits by itself about 20 s later, as a disc read
+// error would). Only a file that is not there, or not a movie by its header, is a movie that does not open. A
 // handle that is not this player's cannot come (Bink opens none); were one to, it is counted as a native path
 // declining (fatal in the native release: PS3_CENSUS_FATAL's native_decline) and answered as an empty movie.
 #include "ppu_context.h"
@@ -78,7 +81,7 @@ inline void wr64(uint32_t ea, uint64_t v)
 struct Movie {
     uint32_t handle = 0;
     std::string name;
-    std::unique_ptr<movie::Player> player;
+    std::unique_ptr<movie::Player> player;   // null: a blank movie (no decoder: black frames on the steady clock)
     al_stream::Streamer* streamer = nullptr;
     al_stream::Handle sound = al_stream::kNone;
     uint32_t fb = 0;         // the class's description of its texture sets (take buffers)
@@ -105,7 +108,7 @@ struct State {
     Movie slots[kSlots];
 } S;
 
-// FFmpeg loaded once, at the first movie (beside the game; a missing library: Bink, or no movie)
+// FFmpeg loaded once, at the first movie (beside the game; a missing library: every movie shown blank)
 bool ready()
 {
     if (S.tried) return S.loaded;
@@ -120,6 +123,32 @@ bool ready()
         fprintf(stderr, "[movie] native: %s -- the movies are not played\n", err.c_str());
     }
     return S.loaded;
+}
+
+// A blank movie's length, size and rate from the file's header (the container's published layout, little-endian:
+// "BIK" and a revision letter, the file's size, the frames, the largest frame, the frames again, the width, the
+// height, the rate's numerator and denominator). False: no file, or not a movie by its header.
+bool movie_header(const char* host_path, movie::Info* in)
+{
+    FILE* f = fopen(host_path, "rb");
+    if (!f) return false;
+    uint8_t h[36];
+    const bool got = fread(h, 1, sizeof h, f) == sizeof h;
+    fclose(f);
+    auto le = [&](int at) { return (uint32_t)h[at] | (uint32_t)h[at + 1] << 8 | (uint32_t)h[at + 2] << 16 |
+                                   (uint32_t)h[at + 3] << 24; };
+    if (!got || h[0] != 'B' || h[1] != 'I' || h[2] != 'K') return false;
+    const uint32_t frames = le(8), w = le(20), hgt = le(24), num = le(28), den = le(32);
+    if (!frames || frames > 1000000u || !w || w > 4096u || !hgt || hgt > 4096u || (w | hgt) & 1u || !num || !den ||
+        num > 0x7FFFFFFFu || den > 0x7FFFFFFFu)
+        return false;
+    in->width = (int)w;
+    in->height = (int)hgt;
+    in->frames = (int)frames;
+    in->rate_num = (int)num;
+    in->rate_den = (int)den;
+    in->sound_rate = in->sound_channels = 0;
+    return true;
 }
 
 // the handles' guest page: one 64 KB allocation from the runtime's user memory (its result through a word below
@@ -235,6 +264,10 @@ void release(Movie& m)
 {
     if (m.sound && m.streamer) m.streamer->stop(m.sound);
     m.sound = al_stream::kNone;
+    if (!m.player && m.handle)
+        fprintf(stderr, "[movie] native: %s (blank) closed at frame %d of %d (%lld frames through, %llu loop(s), %llu "
+                "not shown: late)\n", m.name.c_str(), cur_of(m), m.frames, m.seq - 1, (unsigned long long)m.loops,
+                (unsigned long long)m.shown_late);
     if (m.player) {
         const movie::Stats st = m.player->stats();
         fprintf(stderr, "[movie] native: %s closed at frame %d of %d (%lld frames through, %llu loop(s), %llu not shown: "
@@ -269,7 +302,8 @@ int bink_native_sound_system(ppu_context* ctx)
 int bink_native_open(ppu_context* ctx)
 {
     std::lock_guard<std::mutex> lk(S.mu);
-    if (!ready() || !pool(ctx)) return answer(ctx, 0);   // no movie (the class's failure path)
+    if (!pool(ctx)) return answer(ctx, 0);   // no movie (the class's failure path)
+    const bool decoder = ready();
     char ps3[512], host[1024];
     const uint32_t p = (uint32_t)ctx->gpr[3];
     size_t n = 0;
@@ -279,18 +313,22 @@ int bink_native_open(ppu_context* ctx)
     int slot = -1;
     for (uint32_t i = 0; i < kSlots; i++)
         if (!S.slots[i].handle) { slot = (int)i; break; }
-    std::string err;
-    auto player = slot < 0 ? nullptr : movie::Player::open(&S.ff, host, &err);
-    if (!player) {
+    std::string err = decoder ? "" : "FFmpeg is not available";
+    std::unique_ptr<movie::Player> player;
+    if (slot >= 0 && decoder) player = movie::Player::open(&S.ff, host, &err);
+    movie::Info blank;
+    if (!player && (slot < 0 || !movie_header(host, &blank))) {
         fprintf(stderr, "[movie] native: %s: %s -- %s\n", ps3, slot < 0 ? "no free handle" : err.c_str(),
                 "not played");
         return answer(ctx, 0);
     }
+    if (!player)
+        fprintf(stderr, "[movie] native: %s: %s -- shown blank (black, silent, its own length)\n", ps3, err.c_str());
     Movie& m = S.slots[slot];
     m.handle = S.pool + (uint32_t)slot * kSlotBytes;
     const char* base = strrchr(ps3, '/');
     m.name = base ? base + 1 : ps3;
-    const movie::Info& in = player->info();
+    const movie::Info& in = player ? player->info() : blank;
     m.frames = in.frames;
     m.period = (double)in.rate_den / in.rate_num;
     m.seq = 1;
@@ -306,7 +344,7 @@ int bink_native_open(ppu_context* ctx)
     wr32(h + 0x14, (uint32_t)in.rate_num);
     wr32(h + 0x18, (uint32_t)in.rate_den);
     wr32(h + 0x20, (uint32_t)ctx->gpr[4]);
-    if (auto src = m.player->sound()) {
+    if (auto src = m.player ? m.player->sound() : nullptr) {
         m.streamer = nsm_movie_streamer();
         if (m.streamer) m.sound = m.streamer->open_source(src, 1.0f, true);
         if (!m.sound) fprintf(stderr, "[movie] native: %s: no sound stream (the picture on a steady clock)\n", ps3);
@@ -386,8 +424,26 @@ int bink_native_decode(ppu_context* ctx)
     Movie* m = ours((uint32_t)ctx->gpr[3]);
     if (!m) return foreign(ctx, 0x00987438u, 0);
     const int cur = cur_of(*m);
-    auto f = m->player->frame(cur, 500);
     const uint32_t fb = m->fb;
+    if (!m->player) {   // a blank movie: the next set's planes black (luma 0, chroma at their middle)
+        if (fb && rd32(fb) >= 1) {
+            const uint32_t set_i = (rd32(fb + 0x14) + 1) % rd32(fb);
+            const uint32_t set = fb + 0x18 + set_i * 0x30;
+            const uint32_t w = rd32(m->handle), hgt = rd32(m->handle + 4);
+            const struct { uint32_t at, w, h; uint8_t v; } planes[3] = {
+                {set + 0x00, w, hgt, 0}, {set + 0x0C, w / 2, hgt / 2, 128}, {set + 0x18, w / 2, hgt / 2, 128}};
+            for (const auto& pl : planes) {
+                const uint32_t buf = rd32(pl.at + 4), pitch = rd32(pl.at + 8);
+                if (!buf || pitch < pl.w || buf >= 0x40000000u) continue;
+                for (uint32_t r = 0; r < pl.h; r++) memset(vm_base + buf + (size_t)r * pitch, pl.v, pl.w);
+            }
+            wr32(fb + 0x14, set_i);
+        }
+        m->decoded++;
+        wr32(m->handle + 0x10, (uint32_t)cur);
+        return answer(ctx, 0);
+    }
+    auto f = m->player->frame(cur, 500);
     if (f && fb && rd32(fb) >= 1) {
         const uint32_t total = rd32(fb);
         const uint32_t set_i = (rd32(fb + 0x14) + 1) % total;
@@ -440,7 +496,7 @@ int bink_native_next(ppu_context* ctx)
     m->seq++;
     if (before == m->frames) {   // a looping movie: from its start again
         m->loops++;
-        m->player->restart();
+        if (m->player) m->player->restart();
     }
     wr32(m->handle + 0x0C, (uint32_t)cur_of(*m));
     return answer(ctx, 0);

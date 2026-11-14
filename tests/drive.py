@@ -992,6 +992,7 @@ def step(lineno, line, op, a):
     elif op == "shot":
         shot(a[0] if a else f"line{lineno}")
     elif op == "stop":
+        open(os.path.join(run, "stop.requested"), "w").close()   # for the guard: the game removes stop.trigger
         open(os.path.join(run, "stop.trigger"), "w").close()
         say("stop")
     elif op == "quit":   # the game asked to exit as closing the window asks it (quit.trigger): its own shutdown
