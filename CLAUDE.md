@@ -55,8 +55,9 @@ it explicitly and at once -- never only state that something "needs the owner's 
 - exactly what is needed from the owner (the decision, the command to run, the test to do);
 - the recommended decision, where there is one.
 
-Keep working on everything that does not depend on the answer: a decision that affects one part of the project
-does not stop the rest. This applies to every milestone.
+Ask as soon as the question is identified -- never batched into an end-of-session report unless it truly depends
+on the result of unfinished work. Keep working on everything that does not depend on the answer: a decision that
+affects one part of the project does not stop the rest. This applies to every milestone.
 
 ## The recompilation boundary
 

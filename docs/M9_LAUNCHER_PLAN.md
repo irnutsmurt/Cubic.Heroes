@@ -744,10 +744,9 @@ pipeline -- 2 to 4 ms of it in a first session -- but was long for its load.)
   coverage to expect where no route has been recorded yet (later dungeons, other fields, the editor): most of a new
   place's pipelines are shared, a fifth to a quarter are its own -- made in play as before, recorded, and prepared at
   the next preparation. The manifest grows by recording more routes (`make` takes any number of recipes files).
-- **Not distributed yet**: the manifest made here (98 lines, 112 KB of numbers, places and hashes; the boundary check
-  finds nothing) stays out of the repository until the owner agrees that it is the "independently authored
-  metadata" requirement 5 allows -- the worker uses config/pipeline_manifest.txt when it is there and nothing
-  otherwise.
+- **Distributed** (the owner agreed, 2026-11-14): config/pipeline_manifest.txt, the manifest made here (98 lines of
+  numbers, places and hashes; the boundary check finds nothing), ships in the download's worker/config; the worker
+  uses it before every preparation.
 
 ## 16. The launcher's look: the game's world as the reference (2026-11-14) [C]
 
