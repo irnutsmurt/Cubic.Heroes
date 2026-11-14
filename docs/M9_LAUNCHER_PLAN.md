@@ -519,3 +519,44 @@ metadata (a program's package record and a hash of its normalized form, the tran
 state -- no program bytes, no text), resolved on the player's machine against their own package: possible for about
 half the programs seen, after the package's record format and the game's load transforms are worked out. Not done in
 M9.2 -- the next step for first-session coverage, with the coverage it reaches measured as above.
+
+## 12. M9.3: signed updates and release management (2026-11-14) [C, M]
+
+**Trust** (tools/release_trust.py; docs/RELEASE_SIGNING.md): a release's manifest (release.json: the version, the
+channel, the notes, the minimum launcher, each download's name, platform, size and SHA-256, the signing key's id) and
+its Ed25519 signature (release.json.sig). The worker verifies with OpenSSL's Ed25519 -- the libcrypto Python's own
+ssl module already carries, called through ctypes: nothing downloaded, no cryptography of the project's own --
+against the public keys in config/release_keys.json; an unsigned, altered, foreign-signed or rule-breaking release is
+refused and the newest release that passes is offered; every download is checked against the manifest's size and
+SHA-256 before it is kept. **config/release_keys.json ships with no key**: until the owner makes theirs
+(`tools/release.py keygen`, on their own machine, the private key encrypted and kept offline) and adds its public
+key, every update is refused and no request is made at all.
+
+**The owner's tooling** (tools/release.py): `keygen`, `manifest`, `sign` (OpenSSL's command line; then verified as
+a launcher will), `verify`. docs/RELEASE_SIGNING.md: making the key and a backup key, signing a release, rotation
+(a new key trusted beside the old in a release signed by the old), recovery (a lost key, an exposed key, a bad
+release).
+
+**The update engine** (tools/updates.py; the worker's `check-update`, `download-update`, `stage-launcher`,
+`swap-launcher`): the release list from GitHub's API (or a mirror for the tests); the channel (stable by default,
+prerelease opt-in); offline is a result, never a block on play; downloads resumed from their `.part` (a Range
+request), too little space refused first; the launcher's own update -- its package staged beside it, swapped in by
+a helper after the launcher exits, kept only if the new launcher comes up (it writes `.started-ok` within 60 s),
+else put back and the previous one started. The setup app's own self-update (tools/self_update.py) now offers only
+a release whose manifest verifies and unpacks only a download that matches it, until the launcher replaces it. The
+game itself is rebuilt by the new launcher's worker into a new slot (section 10): the active build untouched until
+the new one is checked, the previous kept for rollback.
+
+**Validated** (tests/test_updates.py, 20 tests; with the other modules 94 pass): Ed25519 against RFC 8032's vectors
+(a changed bit, another message, a short signature refused) and signatures from OpenSSL's command line; a mirror
+signed with throwaway keys made in a temporary folder: the channels; an altered, an unsigned and a foreign-signed
+release refused and the next valid one offered; a manifest naming a key other than the one that signed it refused;
+no trusted key: refused before any request; a download checked, a damaged one refused and removed, an interrupted
+one resumed (over a local HTTP server that cuts the connection), too little space refused; offline reported by the
+worker as a result; a package with a path escaping it refused; the launcher's swap kept when the new launcher comes
+up and put back when it does not (stand-in launchers); the worker's check and download end to end; the setup app
+offering nothing unverified.
+
+**Not yet**: the owner's key (config/release_keys.json is empty: the owner makes the key); no release has been
+published, so the GitHub path has run against the mirror only (the same JSON shape as GitHub's API); the launcher's
+side of its self-update (`--after-update`, `--update-failed`, `.started-ok`) is M9.4's launcher.
