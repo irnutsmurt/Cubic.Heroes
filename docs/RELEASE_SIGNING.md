@@ -41,6 +41,20 @@ py -3 tools/release.py keygen --out <a folder outside the repository>
 - Recommended: make a **second key** the same way (a backup key, kept in yet another place) and add its public key
   to config/release_keys.json too. A launcher trusts both, so losing one key (or retiring it) does not strand the
   players (section 5).
+- After the key is made, keygen asks for the passphrase once more to read the public key (the passphrase goes to
+  OpenSSL on its standard input: never on a command line, in a file or a log).
+
+**If keygen made the private key but couldn't extract its public key** -- don't make a new key. The private key is
+kept, and keygen (run again, it refuses to write over the key) names this command:
+
+```
+py -3 tools/release.py pubkey --key <folder>/release-signing-key.pem [--out <entry.json>]
+```
+
+It asks for the passphrase (not echoed; a wrong one may be tried again, three times a run), reads the private key
+without changing it, and prints and writes the public key's entry for config/release_keys.json (by default
+`release-signing-key.pub.json` beside the key; never over the key itself). The same command gives the entry of any
+existing encrypted key later -- a backup key's, say.
 
 ## 3. Signing a release
 

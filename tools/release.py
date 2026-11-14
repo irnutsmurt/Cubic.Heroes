@@ -6,6 +6,10 @@ never in the repository, a build machine or CI.
     py -3 tools/release.py keygen --out DIR
         a new Ed25519 key: DIR/release-signing-key.pem, encrypted with a passphrase OpenSSL asks for, and the public
         key's entry for config/release_keys.json (printed: add it in a commit of its own)
+    py -3 tools/release.py pubkey --key DIR/release-signing-key.pem [--out FILE]
+        the public key's entry of an existing encrypted private key (its passphrase asked for, never echoed; a wrong one
+        may be tried again); the private key is only read -- the recovery when keygen made the key but couldn't
+        extract its public key
     py -3 tools/release.py manifest --version 0.2.0 [--channel stable|prerelease] [--notes NOTES.md]
                                     [--min-launcher 0.2.0] --key-id ID --out release.json  DOWNLOAD...
         the release's manifest: each download's name, platform (from its name), size and SHA-256
@@ -18,6 +22,7 @@ Upload the downloads, release.json and release.json.sig to the GitHub release.
 import argparse
 import base64
 import datetime
+import getpass
 import hashlib
 import json
 import os
@@ -46,21 +51,65 @@ def platform_of(name):
     sys.exit(f"{name}: say its platform in its name (windows / linux)")
 
 
+def _genpkey(key):
+    """a new encrypted Ed25519 private key (OpenSSL asks for its passphrase itself)"""
+    subprocess.check_call([openssl(), "genpkey", "-algorithm", "ed25519", "-aes256", "-out", key])
+
+
+def extract_public(key, attempts=3, prompt=getpass.getpass):
+    """the 32-byte public key of an encrypted private key file. Its passphrase is asked for (never echoed) and given to
+    OpenSSL on its standard input -- never on a command line, in a file or a log; a wrong one may be tried again. The
+    private key file is only read."""
+    if not os.path.isfile(key):
+        sys.exit(f"{key}: no such file")
+    for i in range(attempts):
+        pw = prompt(f"Passphrase of {os.path.basename(key)}: ")
+        r = subprocess.run([openssl(), "pkey", "-in", key, "-passin", "stdin", "-pubout", "-outform", "DER"],
+                           input=(pw + "\n").encode("utf-8"), capture_output=True)
+        pw = None
+        if r.returncode == 0:
+            return trust.public_key_from(r.stdout)
+        print("That passphrase didn't open the key (or the file isn't an encrypted private key)." +
+              (" Try again." if i + 1 < attempts else ""), file=sys.stderr)
+    sys.exit("The public key wasn't extracted. The private key is unchanged; run this command again when ready.")
+
+
+def key_entry(pub, note):
+    return {"id": trust.key_id(pub), "ed25519": base64.b64encode(pub).decode(),
+            "added": datetime.date.today().isoformat(), "note": note}
+
+
+def _write_entry(entry, path, key):
+    if os.path.abspath(path) == os.path.abspath(key):
+        sys.exit("The entry would be written over the private key: choose another --out.")
+    with open(path, "w") as f:
+        json.dump(entry, f, indent=1)
+    print("add to config/release_keys.json's keys:")
+    print(json.dumps(entry, indent=1))
+
+
 def cmd_keygen(a):
     os.makedirs(a.out, exist_ok=True)
     key = os.path.join(a.out, "release-signing-key.pem")
     if os.path.exists(key):
-        sys.exit(f"{key} exists: a key is never written over (rotate: docs/RELEASE_SIGNING.md)")
-    subprocess.check_call([openssl(), "genpkey", "-algorithm", "ed25519", "-aes256", "-out", key])
-    der = subprocess.check_output([openssl(), "pkey", "-in", key, "-pubout", "-outform", "DER"])
-    pub = trust.public_key_from(der)
-    entry = {"id": trust.key_id(pub), "ed25519": base64.b64encode(pub).decode(), "added": datetime.date.today()
-             .isoformat(), "note": a.note}
-    with open(os.path.join(a.out, "release-signing-key.pub.json"), "w") as f:
-        json.dump(entry, f, indent=1)
+        sys.exit(f"{key} exists: a key is never written over (rotate: docs/RELEASE_SIGNING.md). If its public key was "
+                 f"never extracted: py -3 tools/release.py pubkey --key \"{key}\"")
+    _genpkey(key)
     print("private key (keep it offline, with a backup):", key)
-    print("add to config/release_keys.json's keys:")
-    print(json.dumps(entry, indent=1))
+    try:
+        pub = extract_public(key)
+    except (SystemExit, OSError, subprocess.SubprocessError, trust.ReleaseError) as e:
+        sys.exit(f"The private key was made and is kept: {key}\nIts public key wasn't extracted ({e}). Nothing is "
+                 f"lost -- don't make a new key. Run:\n    py -3 tools/release.py pubkey --key \"{key}\"\nIt asks for "
+                 f"the passphrase and prints the entry for config/release_keys.json.")
+    _write_entry(key_entry(pub, a.note), os.path.join(a.out, "release-signing-key.pub.json"), key)
+
+
+def cmd_pubkey(a):
+    """the public key's entry of an existing encrypted private key; the key only read"""
+    pub = extract_public(os.path.abspath(a.key))
+    out = a.out or os.path.join(os.path.dirname(os.path.abspath(a.key)), "release-signing-key.pub.json")
+    _write_entry(key_entry(pub, a.note), out, a.key)
 
 
 def cmd_manifest(a):
@@ -120,6 +169,10 @@ def main():
     s.add_argument("--key", required=True)
     s.add_argument("--keys", help="the trusted keys file to verify with (default config/release_keys.json)")
     s.add_argument("manifest")
+    pk = sub.add_parser("pubkey")
+    pk.add_argument("--key", required=True, help="the encrypted private key (only read)")
+    pk.add_argument("--out", help="where the entry is written (default: beside the key, release-signing-key.pub.json)")
+    pk.add_argument("--note", default="release key")
     v = sub.add_parser("verify")
     v.add_argument("--keys")
     v.add_argument("manifest")
@@ -127,7 +180,8 @@ def main():
     a = p.parse_args()
     if a.cmd == "sign":
         a.signature = None
-    {"keygen": cmd_keygen, "manifest": cmd_manifest, "sign": cmd_sign, "verify": cmd_verify}[a.cmd](a)
+    {"keygen": cmd_keygen, "pubkey": cmd_pubkey, "manifest": cmd_manifest, "sign": cmd_sign,
+     "verify": cmd_verify}[a.cmd](a)
 
 
 if __name__ == "__main__":
