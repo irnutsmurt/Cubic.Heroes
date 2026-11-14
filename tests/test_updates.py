@@ -146,13 +146,16 @@ class Releases(unittest.TestCase):
 
     def test_setup_app_offers_only_verified_releases(self):
         import self_update
-        # the repository's keys file has no key yet: nothing is offered, and nothing is asked of the network
-        real = updates.releases
+        # a launcher trusting no key: nothing is offered, and nothing is asked of the network
+        real, real_keys = updates.releases, updates.trust.KEYS_FILE
+        empty = os.path.join(self.tmp, "no-keys.json")
+        put(empty, json.dumps({"keys": []}))
         updates.releases = lambda source=None: self.fail("the release list was requested")
+        updates.trust.KEYS_FILE = empty
         try:
             self.assertIsNone(self_update.latest())
         finally:
-            updates.releases = real
+            updates.releases, updates.trust.KEYS_FILE = real, real_keys
         with self.assertRaises(OSError):   # a download not from a verified release: never unpacked
             self_update._checked(os.path.join(self.tmp, "x.zip"), "https://example.invalid/x.zip")
 
@@ -211,8 +214,10 @@ class Releases(unittest.TestCase):
         res = json.loads(p.stdout.splitlines()[-1])
         self.assertTrue(res["ok"], res)
         self.assertEqual(get(res["data"]["path"]), get(z))
-        p = subprocess.run(w + ["check-update", "--source", self.mirror, "--installed", "0.1.0"],
-                           capture_output=True, text=True, timeout=60)   # the repository's keys: none yet
+        empty = os.path.join(self.tmp, "no-keys.json")   # a launcher trusting no key: every update refused
+        put(empty, json.dumps({"keys": []}))
+        p = subprocess.run(w + ["check-update", "--source", self.mirror, "--trusted-keys", empty, "--installed", "0.1.0"],
+                           capture_output=True, text=True, timeout=60)
         self.assertEqual(json.loads(p.stdout.splitlines()[-1])["code"], "no_trusted_keys")
 
     def test_worker_check_offline_is_not_an_error(self):
@@ -339,7 +344,8 @@ class Manifest(unittest.TestCase):
             put(os.path.join(tmp, "k.json"), json.dumps({"keys": [good, dict(good, id="wrong"),
                                                                   dict(good, revoked=True)]}))
             self.assertEqual(trust.trusted_keys(os.path.join(tmp, "k.json")), [(trust.key_id(pk), pk)])
-            self.assertEqual(trust.trusted_keys(), [], "the repository's file: no key until the owner adds one")
+            # the repository's file: the owner's release key (2026-11-14), and only it
+            self.assertEqual([k for k, _ in trust.trusted_keys()], ["6b5e12ec2cc5791f"])
         finally:
             shutil.rmtree(tmp)
 

@@ -1,4 +1,11 @@
 {
- "about": "The Ed25519 public keys the launcher trusts for release manifests (docs/RELEASE_SIGNING.md). Each: id (the first 16 hex digits of the key's SHA-256), ed25519 (the 32-byte key, base64), added, note; a revoked key is kept with \"revoked\": true. Empty until the owner generates the release key (tools/release.py keygen): until then every update is refused.",
- "keys": []
+ "about": "The Ed25519 public keys the launcher trusts for release manifests (docs/RELEASE_SIGNING.md). Each: id (the first 16 hex digits of the key's SHA-256), ed25519 (the 32-byte key, base64), added, note; a revoked key is kept with \"revoked\": true.",
+ "keys": [
+  {
+   "id": "6b5e12ec2cc5791f",
+   "ed25519": "gwVlJCp93n4BsZkbVBJ4niZjiglNqW3x2ZOUceh6DQU=",
+   "added": "2026-11-14",
+   "note": "the owner's release key"
+  }
+ ]
 }
