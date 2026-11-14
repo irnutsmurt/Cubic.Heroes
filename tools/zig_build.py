@@ -413,7 +413,7 @@ def build_game(gen_dir, out_exe, cache_dir, zig=None, platform=HOST, progress=No
         timings = json.load(open(timings_path))
     except (OSError, ValueError):
         timings = {}
-    per_file, link_est = float(timings.get("per_file", 20.0)), float(timings.get("link", 30.0))
+    per_file, link_est = float(timings.get("per_file", 3.6)), float(timings.get("link", 2.0))   # M9.0: measured
     todo = sum(1 for j in jobs if not os.path.exists(j[1]))
     est = todo * per_file
     share = est / (est + link_est) if est else 0.0

@@ -318,3 +318,67 @@ No M10-M14 work during M9 unless the owner authorizes it (M10 now also removes t
 option; M11 adds Linux and AMD validation). Every architecture, licensing, privacy and distribution safeguard stays
 binding: no game data, proprietary implementation code, decryption keys or locally generated game executables
 distributed. M7 stays unauthorized.
+
+## 9. M9.0: the baseline and the worker's protocol (2026-11-14) [M, C]
+
+**The worker** (tools/worker.py; docs/M9_WORKER_PROTOCOL.md): the existing pipeline run headless with one JSON
+event per line -- `hello`, `plan`, `stage`, `progress` (the step's fraction, the overall fraction, the elapsed
+time, the remaining time and what it rests on), `log`, `cancelling`, `result` -- and the probes the wizard needs
+before anything is written: `probe-disc` (PARAM.SFO's title and version and EBOOT.BIN's SHA-256: another game,
+another version, an encrypted or damaged image each named) and `probe-keys` (the keys file, or an EBOOT.elf,
+decrypting this disc's program to the supported one, in memory); `space`; `info`; `install` and `update`.
+Cancelling: a `cancel` line on stdin, or stdin's end (the launcher gone); a step that does not call back within
+5 s is ended with the worker, whose job object (Windows) or process group ends everything it started. Failures
+carry a code (`unsupported_version`, `wrong_key`, `disk_space`, `compile_failed`, ...) with a sentence for the
+player and the technical details apart; the keys' contents are never in an event, a log or an error. The setup
+app's settings helpers moved to tools/game_settings.py (unchanged) so the worker needs no window toolkit; the
+frozen app runs the worker as `--worker`. tests/test_worker.py (19 tests): the framing, the exit codes, the three
+ways a cancel ends, the probes on made-up discs and keys and on the real image and keys where present locally
+(their output checked for the keys' contents), the remaining time on a reference and a slower PC.
+
+**A fresh install through the worker** (the reference PC; the disc image in the file cache): 352 s -- verify 2.3,
+extract 24.6, decrypt 0.5, the PPU recompile 39.1, the SPU programs 11.8, **the build 273.9** (76 files, ten at a
+time, 3.6 s each on average; the link 0.27 s), finish 0.03. The first version's remaining time was badly wrong
+(80 s said with 340 s to go: placeholder weights, and the fast disc steps taken for this PC's speed); with the
+measured weights and the speed taken from the compute-bound steps only, a replay of the same install's events is
+within 11% of what remained from the first second to 80% done, and about 20 s long at the end.
+
+**On disk** (the same install): the extracted disc 3.2 GB, the recompiled code 166 MB, the compiled objects 99 MB,
+the game and its libraries 93 MB. **A build slot** (section 3.3) is the 93 MB; an update whose lift changed adds a
+second recompiled tree (166 MB) while the previous build is kept, one whose port changed only the objects that
+changed. The worker asks for 6 GB free for an install and 1.5 GB for an update.
+
+**Shaders and pipelines, cold and warm** (docs/SHADER_PREPARATION.md step 0; build/m9/m90_measure.sh on rel51:
+the M8 release with the native renderer's compile accounting -- each pipeline's first use timed in its parts, a
+`[vk-compile]` line per translation and pipeline with VK_COMPILE_LOG=1, the totals in the renderer's report).
+Four scenes, three cache states each: **cold** (our SPIR-V cache empty and NVIDIA's own disk cache pointed at an
+empty folder, `__GL_SHADER_DISK_CACHE_PATH`), **ours** (our SPIR-V cache kept, NVIDIA's emptied again), **warm**
+(both kept):
+
+| Scene | Pipelines | Cold: in all (glslang; the driver) | Ours: in all (the driver) | Warm: in all | Cold: the worst frame (compiles in it) | Warm: the worst frame with a compile |
+|---|---|---|---|---|---|---|
+| the river fight | 66 | 1,257 ms (161; 1,094) | 721 ms (718) | 11 ms | 542 ms (471) | 71 ms (5) |
+| the fields | 38 | 694 ms (120; 572) | 540 ms (538) | 8 ms | 450 ms (397) | 57 ms (4) |
+| the dungeon's approach | 81 | 1,127 ms (168; 954) | 881 ms (876) | 13 ms | 526 ms (452) | 73 ms (5) |
+| the menus | 56 | 753 ms (132; 618) | 593 ms (590) | 9 ms | 529 ms (459) | 91 ms (6) |
+
+- **The driver's pipeline creation is the cost**, not the translation: glslang is 13-17% of a cold scene's
+  compile time; with our SPIR-V cache warm the driver still takes 0.5-0.9 s per scene; with the driver's own
+  cache warm everything takes 8-13 ms. The programs to text: 2-4 ms per scene.
+- **Where it lands**: cold, a scene's pipelines are created in 13-24 frames; the worst holds 400-470 ms of them
+  (the first area's load: 23-39 pipelines in one burst), and 8-13 of a scene's frames over 33 ms have compiles in
+  them (river 11 of 18, dungeon 13 of 25). Warm, the compile frames hold at most 6 ms of compiles; the frames over
+  33 ms that remain (6-15 per scene; the loads' 210-240 ms frames among them) are not shaders'.
+- **Our pipeline cache does not exist yet**: the native renderer creates its pipelines without a VkPipelineCache
+  (section 1; docs/SHADER_PREPARATION.md section 1), so a warm run here is warm only because NVIDIA's driver kept
+  its own cache. M9.2's own cache, filled by a preparation pass, is what makes "warm" ours to guarantee (and
+  AMD's and Intel's alike).
+- **Coverage so far**: the four scenes need 98 distinct pipelines between them (river 66, fields 38, dungeon 81,
+  menus 56: most shared -- the title's, the HUD's, the common materials'); a scene's set varies a little between
+  runs (63-66 for the river). 98 is what four test routes see, not the game's number.
+
+**Decided for M9.1-M9.2 by these numbers**: the preparation pass must create pipelines (through a VkPipelineCache
+kept per GPU and driver), not only translate shaders; the first area's load burst (400-470 ms) is the largest
+single target; a pipeline's identity needs the programs' bytes, which are the player's own data -- so the variants
+seen are recorded locally with what is needed to recreate them, and a distributed list (if any) names them only by
+hash and parameters (section 8.5).

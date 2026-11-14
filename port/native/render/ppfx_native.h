@@ -430,6 +430,10 @@ struct Stats {
     // the native renderer
     std::atomic<uint64_t> n_draws{0}, n_clears{0}, n_skipped{0}, n_unsupported{0}, n_batches{0};
     std::atomic<uint64_t> n_pipelines{0}, n_images{0}, n_image_bytes{0}, n_static_textures{0}, n_feedback{0};
+    // M9.0: what the pipelines' first uses cost (ppfx_render.cpp compile_account; docs/SHADER_PREPARATION.md
+    // requirement 5): the programs to text, the text to SPIR-V (glslang or the cache), the driver's pipeline
+    std::atomic<uint64_t> pipe_text_ns{0}, pipe_spirv_ns{0}, pipe_driver_ns{0}, pipe_max_ns{0};
+    std::atomic<uint64_t> n_spirv_glslang{0}, n_spirv_cached{0}, n_pipe_over_4ms{0}, n_pipe_over_16ms{0};
     std::atomic<uint64_t> n_frames{0};    // frames with PPFX records (the per-frame figures' denominator)
     std::atomic<uint64_t> n_asp_draws{0}, n_asp_vertex_bytes{0}, n_asp_clears{0}, n_asp_lines{0};   // R5: asp's records drawn natively
     std::atomic<uint64_t> asp_race_checked{0}, asp_race_changed{0};   // R5: guest bytes changed between the record and its native draw

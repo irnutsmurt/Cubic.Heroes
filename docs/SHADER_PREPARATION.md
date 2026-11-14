@@ -7,7 +7,9 @@ release: prepare the known shaders and pipelines before gameplay, keep what is
 still valid, throw away what is stale, test with caches that are really empty,
 and never claim complete coverage from the areas the tests happen to visit.
 
-Status: **not started** -- the inventory below, then the plan. Labels as in
+Status: **step 0 done** (M9.0, 2026-11-14: the cold and warm costs of four scenes, docs/M9_LAUNCHER_PLAN.md
+section 9 -- the driver's pipeline creation is the cost, 0.7-1.3 s a scene cold, the worst frame 450-540 ms); the
+rest is M9.2 (docs/M9_LAUNCHER_PLAN.md sections 3.4 and 8.5). The inventory below, then the plan. Labels as in
 the other records: [C] read in the code, [M] measured, [H] hypothesis.
 
 ## 1. What is compiled at run time in the native release today
