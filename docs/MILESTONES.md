@@ -474,41 +474,58 @@ The settings agreed with the owner, as requirements with tests:
 
 Then the launcher and update management, before RTX. Details:
 docs/PC_EXPERIENCE.md. Nothing implemented yet.
-These two are M9 and M10 below.
+These are M10 (the settings) and M9 (the launcher) below.
 
-## Roadmap: M9-M11 (set by the owner 2026-11-12; documented only)
+## Roadmap: M9-M14 (set by the owner 2026-11-12; revised 2026-11-13)
 
-After the core architecture work -- M6 (the SPU machinery's retirement) and M8
-(Bink through FFmpeg) -- and not before: nothing here is to be implemented
-until then. M7 (history) stays unauthorized. Each milestone keeps the project's
-rules: requirements with tests, evidence before "done", no game data, code or
+The core architecture work is done or closing (M6: the SPU machinery's
+retirement; M8: the movies on FFmpeg, Bink excluded, cellAudio retired --
+M8.4's on-screen validation outstanding). The owner's
+priorities, in order, revised on 2026-11-13 (the 2026-11-12 roadmap had the PC
+settings as M9, the launcher as M10 and the character library as M11). M7
+(history) stays unauthorized. Each milestone keeps the project's rules:
+requirements with tests, evidence before "done", no game data, code or
 proprietary middleware in public material, the player's own files the only
-source of anything game-derived.
+source of anything game-derived. M9's architecture and implementation plan
+goes to the owner for review before anything of it is implemented.
 
-### M9 -- Native PC experience
+### M9 -- Launcher, precompilation, caches, updates and rollback
+A polished launcher; Dusklight is the reference for the overall experience:
+- game installation (the disc conversion the setup app does today) and the
+  game's launch;
+- shader and Vulkan pipeline precompilation before the game starts
+  (docs/SHADER_PREPARATION.md), and the caches managed: built, verified,
+  rebuilt on their own when a driver, a GPU or the game's build changed;
+- updates from GitHub Releases, the game rebuilt by incremental
+  recompilation (only the steps whose inputs changed), the previous build
+  kept with a way back (rollback);
+- what the 2026-11-12 roadmap listed with it, to settle in M9's plan: save
+  management (backups, restore; never touching saves on an update) and
+  diagnostics (logs, a report bundle without personal data).
+The requirements so far: docs/PC_EXPERIENCE.md section 8; the plan for review:
+docs/M9_LAUNCHER_PLAN.md.
+
+### M10 -- Native PC settings, controls and interface
 Display settings (windowed, borderless, fullscreen, resolution), VSync apart
 from the frame limit, custom frame caps (presets, a number, uncapped), audio
 settings (master, music, effects), controller remapping, button prompts
 (automatic, Xbox, PlayStation, Switch, keyboard; the owner's `button assets/`)
-and the other PC improvements agreed earlier (the PS3 Install Game option
-removed, the host save list). The requirements and their tests:
+and the other PC interface improvements agreed earlier (the PS3 Install Game
+option removed, the host save list). The requirements and their tests:
 docs/PC_EXPERIENCE.md sections 1-7b.
 
-### M10 -- Launcher and update management
-A polished launcher, inspired by Dusklight:
-- game installation (the disc conversion the setup app does today) and the
-  settings;
-- updates from GitHub releases, the game rebuilt by incremental
-  recompilation (only the steps whose inputs changed), the previous build
-  kept with a way back (rollback);
-- save management (backups, restore; never touching saves on an update);
-- diagnostics (logs, a report bundle without personal data);
-- shader and pipeline precompilation before the game starts
-  (docs/SHADER_PREPARATION.md), and detecting on its own when the caches must
-  be rebuilt (a driver, a GPU or the game's build changed).
-The requirements so far: docs/PC_EXPERIENCE.md section 8.
+### M11 -- Release readiness, full-game and platform validation
+The whole game played through on the native build (every area, boss and
+movie), the platforms validated (Linux's run-time validation, outstanding since
+the native port began; Windows 10 and 11; the GPU vendors), the setup's
+download and its licences, and the release's own checks, before a public
+release.
 
-### M11 -- Character library and community sharing
+### M12 -- Optional RTX and graphics enhancements
+Optional enhancements of the native renderer, off by default and never in
+place of the game's own look.
+
+### M13 -- Character import/export and the GitHub community library
 - Import and export the original PS3 custom character models; existing
   community character files stay compatible.
 - Interactive 3D previews of a character and of its animations.
@@ -524,3 +541,9 @@ The requirements so far: docs/PC_EXPERIENCE.md section 8.
   made, never the game's own characters or anything extracted from the disc,
   and the validation must enforce that without the repository holding game
   data (no copy of the game's models or their contents to compare against).
+
+### M14 -- Optional native controller vibration from gameplay events
+The game never vibrates the controller (it has no option for it and never
+calls its own vibrate function: docs/PC_EXPERIENCE.md section 7b). An optional
+PC feature, off by default: vibration from gameplay events (a hit taken, a
+boss's quake), through the controller layer that already carries it.

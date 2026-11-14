@@ -28,6 +28,7 @@
 | `docs/FFMPEG_MIGRATION_PLAN.md` | INDEP | keep |
 | `docs/HANDOFF.md` | INDEP | keep |
 | `docs/LICENSE_AUDIT.md` | INDEP | keep |
+| `docs/M9_LAUNCHER_PLAN.md` | INDEP | keep |
 | `docs/MILESTONES.md` | INDEP | keep |
 | `docs/NATIVE_EVIDENCE.md` | DOC-GAME | keep: facts about the game's behaviour and the project's results |
 | `docs/NATIVE_PORT.md` | INDEP | keep |
