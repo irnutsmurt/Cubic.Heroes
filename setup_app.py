@@ -674,8 +674,15 @@ def converted(image, install, keys, elf, full, progress, log, skip):
 
 def run_script():
     """`DotHeroes-Setup <tool>.py args`: the lifting tools run as their own processes
-    (setup_pipeline.run_tool); in the packaged app this executable runs them."""
+    (setup_pipeline.run_tool); in the packaged app this executable runs them.
+    A tool's worker processes (the lifter's parallel lift): Windows starts each fresh (spawn) as this executable, and
+    for a frozen executable Python does not have them import the main script -- here the tool, run by its path -- so
+    they cannot find the pool's functions and wait for ever (M9.5, docs/M9_LAUNCHER_PLAN.md section 17). They are
+    told to import it by its path: spawn.WINEXE, which governs only that, is cleared."""
     import runpy
+    if getattr(sys, "frozen", False) and sys.platform == "win32":
+        import multiprocessing.spawn
+        multiprocessing.spawn.WINEXE = False
     script = sys.argv[1]
     sys.argv = sys.argv[1:]
     sys.path.insert(0, os.path.dirname(os.path.abspath(script)))

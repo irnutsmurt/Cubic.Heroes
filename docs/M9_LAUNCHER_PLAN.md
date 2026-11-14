@@ -817,20 +817,28 @@ which the update engine's release manifests already list):
 - **Built on Windows itself** now: PyInstaller from the checkout's own venv and the Windows Zig beside the Linux one
   (Wine stays the way from Linux). The launcher is built on the platform it is for.
 - **The boundary check** gained a rule (none loosened): a launcher shipped without Dear ImGui's licence is refused.
-  The folder and the zip pass (19,904 files; the two pinned FFmpeg test references as before); 426 MB, 130 MB zipped.
+  The folder and the zip pass (19,904 files; the two pinned FFmpeg test references as before); 427 MB, 130 MB zipped.
 
 **Tried** (build/m9/m95p_run.sh; evidence on F:\3d dot game heroes\m9\evidence\m95p):
 - **The packaged launcher runs its own worker**: started from the download's folder, it found
   `worker/DotHeroes-Setup.exe` and read the install, the builds, the GPU and the cache's state through it.
-- **A fresh install through the packaged worker did not finish -- a defect, open**: the frozen app ran the lifter
+- **A fresh install through the packaged worker hung at first -- found and fixed**: the frozen app ran the lifter
   (`worker/DotHeroes-Setup.exe ...ppu_lifter.py`), which started its parallel lift ("16 workers") and then waited for
-  ever: one `--multiprocessing-fork` child, idle, and no progress for 8 minutes (the lift takes ~40 s from the
-  checkout). Stopped (`owned_run --cancel`); the logs kept. Windows starts Python's worker processes fresh (spawn),
-  and in the frozen app they are the app itself: that path has not worked here. The new layout does not change the
-  frozen app (the same files, one folder down), but whether this predates it is not known: the setup app's download
-  was last tried with a conversion before the lift ran in parallel. **The download is not releasable until this is
-  fixed** (M9.5: the frozen lift's worker processes, or the lift run single-process in the frozen app, then the whole
-  install test through the download).
+  ever: an idle `--multiprocessing-fork` child, no progress for 8 minutes (the lift takes ~40 s). Stopped
+  (`owned_run --cancel`), the logs kept. **Reproduced** with a four-worker pool run the same way (the frozen app given
+  a script): it hangs too. **The cause**: Windows starts a pool's worker processes fresh (spawn), as the frozen
+  executable; for a frozen executable Python's multiprocessing does not have them import the main script
+  (`multiprocessing.spawn.WINEXE`), and here the main script is a tool the app runs by its path (setup_app.py's
+  `run_script`) -- so the workers cannot find the pool's functions, and the pool waits. Not the new layout's doing:
+  the frozen app is the same one folder down. **The fix** (setup_app.py `run_script`, frozen on Windows only):
+  `spawn.WINEXE` cleared, which governs only that choice -- the workers import the tool by its path. The probe pool
+  then ran in 0.16 s (0.64 s with 50 MB of start-up arguments), nothing left running.
+- **Then the whole first session through the download** (m95p2): a fresh install by the packaged worker -- 373 s
+  (verify 2, extract 12, decrypt 2, the lift 40, SPU 13, the build 302, the check and activation 1, the preparation
+  1: the first-session manifest's 98 pipelines added from the install's own disc copy and prepared in 4 parts) --
+  then the river played from the new install with NVIDIA's cache empty: 64 pipelines made in play in 65 ms, the
+  longest 2.5 ms, none over 16 ms, none met that the preparation lacked; the worst frame 401 ms, a load with no
+  pipeline in it. (The manifest was put into that test copy only; it is not distributed.)
 
 ## 18. Shader preparation in the launcher: the first-run offer, in the background (2026-11-14) [C, M]
 
