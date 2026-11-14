@@ -888,5 +888,9 @@ the bar at 17% and 79% with the count and the time left, then "SHADERS READY"; a
 the Play page's card saying a preparation is running; the Settings page's Shaders category and actions. Unit tests:
 the parts and their progress under the lock, a stop part-way leaving no lock or part file and the recipes intact,
 one at a time (a live holder refuses, a dead one is taken over), the check counting the list without writing (11 in
-tests/test_pipeline_manifest.py). **Not tried by hand**: stopping from the bar with VIEW, the automatic triggers
-after a real driver change or update -- the owner's review.
+tests/test_pipeline_manifest.py). **Stop and resume, for real** (build/m9/cancel_resume.py: the worker as the
+launcher runs it, on the test install, NVIDIA's cache empty): a rebuild stopped at 55 of its 68 pipelines (in its
+second part) ended "cancelled", no lock or part file left; preparing again found the first part's cache ("reused")
+and made the 68 with 76 ms of pipeline work, against 769 ms for an uninterrupted rebuild; once more, 12 ms. **Not
+tried by hand**: stopping from the bar with VIEW, the automatic triggers after a real driver change or update --
+the owner's review.
