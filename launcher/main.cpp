@@ -5,6 +5,7 @@
 #include <SDL.h>
 
 #include "imgui.h"
+#include "imgui_internal.h"   // the focus and navigation log (CUBICHEROES_DEBUG_NAV)
 #include "imgui_impl_sdl2.h"
 #include "imgui_impl_sdlrenderer2.h"
 
@@ -192,43 +193,310 @@ static std::vector<std::string> worker_argv(const std::string& cmd, const std::v
 }
 
 // ============================================================================================================
-// look: a dark, high-contrast theme with large type, a teal accent and a clearly drawn focus
+// look (docs/M9_LAUNCHER_PLAN.md section 16): the game's own world as the reference -- a toy-block fantasy in
+// chunky pixels: a night-blue sky, voxel grass and earth, retro windows with light borders and stepped corners,
+// gold for what is chosen, a bobbing pixel cursor. Every element is drawn here, in code -- the pixel font, the
+// icons, the blocks: no image files, nothing taken from the game. Body text stays a clean system font.
 // ============================================================================================================
 
 namespace col {
-const ImU32 bg = IM_COL32(9, 12, 22, 255), panel = IM_COL32(19, 25, 41, 255), panel2 = IM_COL32(28, 36, 58, 255);
-const ImU32 accent = IM_COL32(57, 211, 192, 255), accent_dim = IM_COL32(57, 211, 192, 70);
-const ImU32 warm = IM_COL32(255, 181, 71, 255), text = IM_COL32(234, 238, 247, 255), dim = IM_COL32(140, 150, 172, 255);
-const ImU32 danger = IM_COL32(255, 92, 108, 255), ok = IM_COL32(92, 219, 139, 255);
+const ImU32 bg = IM_COL32(14, 18, 44, 255), panel = IM_COL32(24, 34, 84, 250), panel2 = IM_COL32(34, 48, 108, 255);
+const ImU32 accent = IM_COL32(255, 206, 72, 255), accent_dim = IM_COL32(255, 206, 72, 70);
+const ImU32 warm = IM_COL32(255, 168, 76, 255), text = IM_COL32(250, 246, 232, 255), dim = IM_COL32(176, 186, 220, 255);
+const ImU32 danger = IM_COL32(255, 108, 96, 255), ok = IM_COL32(128, 226, 108, 255);
+const ImU32 ink = IM_COL32(8, 8, 22, 255), frame = IM_COL32(238, 234, 216, 255), inset = IM_COL32(14, 20, 54, 255);
+const ImU32 steel = IM_COL32(58, 78, 152, 255), gold = IM_COL32(240, 182, 44, 255), brick = IM_COL32(176, 60, 52, 255);
+const ImU32 grass = IM_COL32(92, 184, 72, 255), grass_hi = IM_COL32(156, 226, 104, 255);
+const ImU32 dirt = IM_COL32(116, 76, 46, 255), dirt_dk = IM_COL32(84, 54, 34, 255);
 }  // namespace col
 
 static ImVec4 v4(ImU32 c) { return ImGui::ColorConvertU32ToFloat4(c); }
 
-static ImFont* g_font = nullptr;   // one font, drawn at several sizes (Dear ImGui 1.92+'s dynamic fonts)
+static ImFont* g_font = nullptr;   // the body font, drawn at several sizes (Dear ImGui 1.92+'s dynamic fonts)
 static float g_scale = 1.0f;
 static float S(float px) { return px * g_scale; }
+static float snap(float v) { return floorf(v + 0.5f); }
 static const float kBody = 21.0f, kSmall = 17.0f, kTitle = 34.0f, kHuge = 54.0f;
+
+// a colour under the current alpha (a page fading in, a disabled button)
+static ImU32 A(ImU32 c)
+{
+    const float a = ImGui::GetStyle().Alpha;
+    if (a >= 1.0f) return c;
+    const ImU32 al = (ImU32)(((c >> IM_COL32_A_SHIFT) & 0xFF) * a);
+    return (c & ~IM_COL32_A_MASK) | (al << IM_COL32_A_SHIFT);
+}
+static ImU32 shade(ImU32 c, float f)
+{
+    auto ch = [&](int s) { return (ImU32)std::min(255.0f, (float)((c >> s) & 0xFF) * f) << s; };
+    return ch(IM_COL32_R_SHIFT) | ch(IM_COL32_G_SHIFT) | ch(IM_COL32_B_SHIFT) | (c & IM_COL32_A_MASK);
+}
+static uint32_t hash32(uint32_t x)
+{
+    x ^= x >> 16; x *= 0x7feb352dU; x ^= x >> 15; x *= 0x846ca68bU; x ^= x >> 16;
+    return x;
+}
+
+// --- the pixel font: the project's own 5x7 capitals, digits and signs (titles, the logo, labels on blocks) ---
+struct PixGlyph { char c; const char* rows[7]; };
+static const PixGlyph kPixFont[] = {
+    { 'A', { ".###.", "#...#", "#...#", "#####", "#...#", "#...#", "#...#" } },
+    { 'B', { "####.", "#...#", "#...#", "####.", "#...#", "#...#", "####." } },
+    { 'C', { ".###.", "#...#", "#....", "#....", "#....", "#...#", ".###." } },
+    { 'D', { "####.", "#...#", "#...#", "#...#", "#...#", "#...#", "####." } },
+    { 'E', { "#####", "#....", "#....", "####.", "#....", "#....", "#####" } },
+    { 'F', { "#####", "#....", "#....", "####.", "#....", "#....", "#...." } },
+    { 'G', { ".###.", "#...#", "#....", "#.###", "#...#", "#...#", ".####" } },
+    { 'H', { "#...#", "#...#", "#...#", "#####", "#...#", "#...#", "#...#" } },
+    { 'I', { "###", ".#.", ".#.", ".#.", ".#.", ".#.", "###" } },
+    { 'J', { "..###", "...#.", "...#.", "...#.", "...#.", "#..#.", ".##.." } },
+    { 'K', { "#...#", "#..#.", "#.#..", "##...", "#.#..", "#..#.", "#...#" } },
+    { 'L', { "#....", "#....", "#....", "#....", "#....", "#....", "#####" } },
+    { 'M', { "#...#", "##.##", "#.#.#", "#.#.#", "#...#", "#...#", "#...#" } },
+    { 'N', { "#...#", "#...#", "##..#", "#.#.#", "#..##", "#...#", "#...#" } },
+    { 'O', { ".###.", "#...#", "#...#", "#...#", "#...#", "#...#", ".###." } },
+    { 'P', { "####.", "#...#", "#...#", "####.", "#....", "#....", "#...." } },
+    { 'Q', { ".###.", "#...#", "#...#", "#...#", "#.#.#", "#..#.", ".##.#" } },
+    { 'R', { "####.", "#...#", "#...#", "####.", "#.#..", "#..#.", "#...#" } },
+    { 'S', { ".####", "#....", "#....", ".###.", "....#", "....#", "####." } },
+    { 'T', { "#####", "..#..", "..#..", "..#..", "..#..", "..#..", "..#.." } },
+    { 'U', { "#...#", "#...#", "#...#", "#...#", "#...#", "#...#", ".###." } },
+    { 'V', { "#...#", "#...#", "#...#", "#...#", "#...#", ".#.#.", "..#.." } },
+    { 'W', { "#...#", "#...#", "#...#", "#.#.#", "#.#.#", "#.#.#", ".#.#." } },
+    { 'X', { "#...#", "#...#", ".#.#.", "..#..", ".#.#.", "#...#", "#...#" } },
+    { 'Y', { "#...#", "#...#", ".#.#.", "..#..", "..#..", "..#..", "..#.." } },
+    { 'Z', { "#####", "....#", "...#.", "..#..", ".#...", "#....", "#####" } },
+    { '0', { ".###.", "#...#", "#..##", "#.#.#", "##..#", "#...#", ".###." } },
+    { '1', { ".#.", "##.", ".#.", ".#.", ".#.", ".#.", "###" } },
+    { '2', { ".###.", "#...#", "....#", "...#.", "..#..", ".#...", "#####" } },
+    { '3', { "####.", "....#", "....#", ".###.", "....#", "....#", "####." } },
+    { '4', { "...#.", "..##.", ".#.#.", "#..#.", "#####", "...#.", "...#." } },
+    { '5', { "#####", "#....", "####.", "....#", "....#", "#...#", ".###." } },
+    { '6', { "..##.", ".#...", "#....", "####.", "#...#", "#...#", ".###." } },
+    { '7', { "#####", "....#", "...#.", "..#..", ".#...", ".#...", ".#..." } },
+    { '8', { ".###.", "#...#", "#...#", ".###.", "#...#", "#...#", ".###." } },
+    { '9', { ".###.", "#...#", "#...#", ".####", "....#", "...#.", ".##.." } },
+    { ' ', { "...", "...", "...", "...", "...", "...", "..." } },
+    { '.', { ".", ".", ".", ".", ".", ".", "#" } },
+    { ',', { "..", "..", "..", "..", "..", ".#", "#." } },
+    { ':', { ".", ".", "#", ".", ".", "#", "." } },
+    { '!', { "#", "#", "#", "#", "#", ".", "#" } },
+    { '\'', { "#", "#", ".", ".", ".", ".", "." } },
+    { '"', { "#.#", "#.#", "...", "...", "...", "...", "..." } },
+    { '-', { "....", "....", "....", "####", "....", "....", "...." } },
+    { '+', { ".....", "..#..", "..#..", "#####", "..#..", "..#..", "....." } },
+    { '/', { "....#", "...#.", "...#.", "..#..", ".#...", ".#...", "#...." } },
+    { '(', { "..#", ".#.", "#..", "#..", "#..", ".#.", "..#" } },
+    { ')', { "#..", ".#.", "..#", "..#", "..#", ".#.", "#.." } },
+    { '?', { ".###.", "#...#", "....#", "...#.", "..#..", ".....", "..#.." } },
+    { '&', { ".##..", "#..#.", ".##..", ".#...", "#.#.#", "#..#.", ".##.#" } },
+    { '%', { "##..#", "##..#", "...#.", "..#..", ".#...", "#..##", "#..##" } },
+    { '_', { ".....", ".....", ".....", ".....", ".....", ".....", "#####" } },
+    { '*', { ".....", "#.#.#", ".###.", "#####", ".###.", "#.#.#", "....." } },
+};
+static const PixGlyph* pix_glyph(char c)
+{
+    static const PixGlyph* table[128] = {};
+    static bool made = false;
+    if (!made) {
+        for (const PixGlyph& g : kPixFont) table[(int)g.c] = &g;
+        made = true;
+    }
+    if (c >= 'a' && c <= 'z') c = (char)(c - 32);
+    const PixGlyph* g = (c > 0 && c < 128) ? table[(int)c] : nullptr;
+    return g ? g : table[(int)'?'];
+}
+static float pix_w(const char* t, float p)
+{
+    int cols = 0, n = 0;
+    for (const char* s = t; *s; s++, n++) cols += (int)strlen(pix_glyph(*s)->rows[0]);
+    return n ? (float)(cols + n - 1) * p : 0.0f;
+}
+// a line of pixel text at pos (its top left), each row's runs drawn as one block; a shadow below and right
+static void pix_text(ImDrawList* dl, ImVec2 pos, const char* t, float p, ImU32 c, ImU32 shadow = col::ink)
+{
+    p = std::max(1.0f, floorf(p));
+    const float so = std::max(1.0f, floorf(p * 0.5f));
+    for (int pass = shadow ? 0 : 1; pass < 2; pass++) {
+        float x = snap(pos.x) + (pass ? 0 : so);
+        const float y = snap(pos.y) + (pass ? 0 : so);
+        const ImU32 cc = A(pass ? c : shadow);
+        for (const char* s = t; *s; s++) {
+            const PixGlyph* g = pix_glyph(*s);
+            const int w = (int)strlen(g->rows[0]);
+            for (int r = 0; r < 7; r++)
+                for (int i = 0; i < w; i++) {
+                    if (g->rows[r][i] != '#') continue;
+                    int j = i;
+                    while (j + 1 < w && g->rows[r][j + 1] == '#') j++;
+                    dl->AddRectFilled(ImVec2(x + i * p, y + r * p), ImVec2(x + (j + 1) * p, y + (r + 1) * p), cc);
+                    i = j;
+                }
+            x += (w + 1) * p;
+        }
+    }
+}
+// the pixel size for a title of `size` body-pixels
+static float pix_size(float size) { return std::max(2.0f, floorf(S(size) / 8.5f + 0.5f)); }
+
+// --- the pixel icons: 10x10, up to four colours ('#', '+', '*', 'g'), an ink outline drawn around them ---
+struct PixIcon { const char* rows[10]; ImU32 pal[4]; };
+static const PixIcon kIcons[] = {
+    { { "....++....", "....+#....", "....+#....", "....+#....", "....+#....", "....+#....", "..******..", "....gg....",
+        "....gg....", "...****..." },   // a sword: Play
+      { IM_COL32(150, 170, 206, 255), IM_COL32(244, 246, 255, 255), IM_COL32(255, 200, 64, 255), IM_COL32(150, 90, 48, 255) } },
+    { { "..........", ".++++++++.", "gggggggggg", "gggggggggg", "**********", "gggg**gggg", "gggg##gggg", "gggggggggg",
+        "gggggggggg", "##########" },   // a chest: Install
+      { IM_COL32(96, 54, 28, 255), IM_COL32(214, 148, 84, 255), IM_COL32(255, 200, 64, 255), IM_COL32(172, 104, 52, 255) } },
+    { { "...++##...", "...+###...", "...+###...", "...+###...", ".+#######.", "..+#####..", "...+###...", "....+#....",
+        "..........", "**********" },   // an arrow down to the ground: Updates
+      { IM_COL32(96, 200, 96, 255), IM_COL32(176, 240, 150, 255), IM_COL32(200, 190, 170, 255), 0 } },
+    { { ".++++++++.", ".########.", ".########.", "....gg....", "....gg....", "....gg....", "....gg....", "....gg....",
+        "....gg....", "....gg...." },   // a hammer: Builds
+      { IM_COL32(150, 160, 184, 255), IM_COL32(224, 230, 244, 255), 0, IM_COL32(166, 102, 52, 255) } },
+    { { "*#######..", "*########.", "*##****##.", "*##****##.", "*########.", "*########.", "*########.", "*########.",
+        "*++++++++.", ".++++++++." },   // a book: Saves
+      { IM_COL32(196, 64, 64, 255), IM_COL32(244, 234, 210, 255), IM_COL32(255, 200, 64, 255), 0 } },
+    { { "....##....", "...+###...", "..++####..", ".++######.", "++########", ".********.", "..******..", "...****...",
+        "....**....", ".........." },   // a gem: Shaders
+      { IM_COL32(84, 200, 236, 255), IM_COL32(210, 250, 255, 255), IM_COL32(40, 120, 190, 255), 0 } },
+    { { "....##....", ".#.####.#.", "..######..", ".###..###.", "####..####", "####..####", ".###..###.", "..######..",
+        ".#.####.#.", "....##...." },   // a gear: Settings
+      { IM_COL32(176, 182, 204, 255), 0, 0, 0 } },
+    { { "..####....", ".#++++#...", "#++++++#..", "#++++++#..", "#++++++#..", ".#++++#...", "..####g...", "......gg..",
+        ".......gg.", "........gg" },   // a magnifying glass: Diagnostics
+      { IM_COL32(214, 178, 90, 255), IM_COL32(170, 222, 250, 255), 0, IM_COL32(150, 90, 48, 255) } },
+    { { "..........", ".####.....", "#++++####.", "#++++++++#", "##########", "##########", "##########", "##########",
+        "##########", ".........." },   // a folder (the file browser)
+      { IM_COL32(232, 176, 64, 255), IM_COL32(255, 224, 130, 255), 0, 0 } },
+    { { "...####...", ".##++####.", ".#++#####.", "##+#######", "####..####", "####..####", "#########*", ".#######*.",
+        "..##****..", "...####..." },   // a disc (a file in the browser)
+      { IM_COL32(196, 204, 224, 255), IM_COL32(250, 250, 255, 255), IM_COL32(130, 140, 170, 255), 0 } },
+};
+enum { kIconFolder = 8, kIconDisc = 9 };
+static void pix_icon(ImDrawList* dl, ImVec2 pos, const PixIcon& ic, float p)
+{
+    p = std::max(1.0f, floorf(p));
+    pos = ImVec2(snap(pos.x), snap(pos.y));
+    static const char keys[4] = { '#', '+', '*', 'g' };
+    for (int pass = 0; pass < 2; pass++)
+        for (int r = 0; r < 10; r++)
+            for (int i = 0; i < 10; i++) {
+                const char ch = ic.rows[r][i];
+                if (ch == '.') continue;
+                const ImVec2 a(pos.x + i * p, pos.y + r * p);
+                if (pass == 0) { dl->AddRectFilled(ImVec2(a.x - p, a.y - p), ImVec2(a.x + 2 * p, a.y + 2 * p), A(col::ink)); continue; }
+                for (int k = 0; k < 4; k++)
+                    if (ch == keys[k] && ic.pal[k]) dl->AddRectFilled(a, ImVec2(a.x + p, a.y + p), A(ic.pal[k]));
+            }
+}
+// the cursor: a pixel arrow pointing right (7 rows), white with an ink outline
+static void pix_arrow(ImDrawList* dl, ImVec2 pos, float p, ImU32 c = IM_COL32_WHITE)
+{
+    static const char* rows[7] = { "#....", "##...", "###..", "####.", "###..", "##...", "#...." };
+    pos = ImVec2(snap(pos.x), snap(pos.y));
+    for (int pass = 0; pass < 2; pass++)
+        for (int r = 0; r < 7; r++)
+            for (int i = 0; i < 5; i++) {
+                if (rows[r][i] != '#') continue;
+                const ImVec2 a(pos.x + i * p, pos.y + r * p);
+                if (pass == 0) dl->AddRectFilled(ImVec2(a.x - p, a.y - p), ImVec2(a.x + 2 * p, a.y + 2 * p), A(col::ink));
+                else dl->AddRectFilled(a, ImVec2(a.x + p, a.y + p), A(c));
+            }
+}
+
+// --- blocks and windows ---
+// a raised block's edges over its fill: lit above and left, shaded below and right, an ink outline
+static void bevel_edges(ImDrawList* dl, ImVec2 a, ImVec2 b, ImU32 fill, float t, bool sunken = false)
+{
+    t = std::max(1.0f, floorf(t));
+    ImU32 hi = A(shade(fill, 1.38f)), lo = A(shade(fill, 0.58f));
+    if (sunken) std::swap(hi, lo);
+    dl->AddRectFilled(a, ImVec2(b.x, a.y + t), hi);
+    dl->AddRectFilled(a, ImVec2(a.x + t, b.y), hi);
+    dl->AddRectFilled(ImVec2(a.x, b.y - t), b, lo);
+    dl->AddRectFilled(ImVec2(b.x - t, a.y + t), b, lo);
+    dl->AddRect(ImVec2(a.x - 1, a.y - 1), ImVec2(b.x + 1, b.y + 1), A(col::ink), 0.0f, std::max(2.0f, floorf(t * 0.7f)));
+}
+static void bevel_block(ImDrawList* dl, ImVec2 a, ImVec2 b, ImU32 fill, float t)
+{
+    dl->AddRectFilled(a, b, A(fill));
+    bevel_edges(dl, a, b, fill, t);
+}
+// a retro window's frame: a light border with stepped corners, ink outside it, a dark line inside
+static void retro_frame(ImDrawList* dl, ImVec2 a, ImVec2 b, ImU32 border = col::frame, float t = 0)
+{
+    if (t <= 0) t = std::max(2.0f, floorf(S(4)));
+    const float o = std::max(2.0f, floorf(S(2)));
+    const ImU32 ink = A(col::ink), br = A(border);
+    // ink outside, the corners cut
+    dl->AddRectFilled(ImVec2(a.x + t, a.y - o), ImVec2(b.x - t, a.y), ink);
+    dl->AddRectFilled(ImVec2(a.x + t, b.y), ImVec2(b.x - t, b.y + o), ink);
+    dl->AddRectFilled(ImVec2(a.x - o, a.y + t), ImVec2(a.x, b.y - t), ink);
+    dl->AddRectFilled(ImVec2(b.x, a.y + t), ImVec2(b.x + o, b.y - t), ink);
+    for (int cx = 0; cx < 2; cx++)
+        for (int cy = 0; cy < 2; cy++) {
+            const float x = cx ? b.x - t : a.x, y = cy ? b.y - t : a.y;
+            dl->AddRectFilled(ImVec2(x, y), ImVec2(x + t, y + t), ink);   // the cut corner
+            const float ix = cx ? b.x - 2 * t : a.x + t, iy = cy ? b.y - 2 * t : a.y + t;
+            dl->AddRectFilled(ImVec2(ix, iy), ImVec2(ix + t, iy + t), br);   // the step inside it
+        }
+    // the border
+    dl->AddRectFilled(ImVec2(a.x + t, a.y), ImVec2(b.x - t, a.y + t), br);
+    dl->AddRectFilled(ImVec2(a.x + t, b.y - t), ImVec2(b.x - t, b.y), br);
+    dl->AddRectFilled(ImVec2(a.x, a.y + t), ImVec2(a.x + t, b.y - t), br);
+    dl->AddRectFilled(ImVec2(b.x - t, a.y + t), ImVec2(b.x, b.y - t), br);
+}
+// the current window (a popup, a card) framed, drawn inside its rectangle and past its clipping
+static void frame_window(ImU32 border = col::frame, float t = 0)
+{
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 a = ImGui::GetWindowPos(), sz = ImGui::GetWindowSize();
+    const float o = std::max(2.0f, floorf(S(2)));
+    const ImVec2 b(a.x + sz.x, a.y + sz.y);
+    dl->PushClipRect(a, b, false);
+    retro_frame(dl, ImVec2(a.x + o, a.y + o), ImVec2(b.x - o, b.y - o), border, t);
+    dl->PopClipRect();
+}
+// an isometric voxel: its top, left and right faces, outlined (the logo's blocks)
+static void voxel(ImDrawList* dl, ImVec2 c, float s, ImU32 top, ImU32 left, ImU32 right)
+{
+    const ImVec2 t(c.x, c.y - s), r(c.x + s * 0.87f, c.y - s * 0.5f), b(c.x, c.y), l(c.x - s * 0.87f, c.y - s * 0.5f);
+    const ImVec2 bl(l.x, l.y + s), bb(b.x, b.y + s), br(r.x, r.y + s);
+    dl->AddQuadFilled(t, r, b, l, A(top));
+    dl->AddQuadFilled(l, b, bb, bl, A(left));
+    dl->AddQuadFilled(b, r, br, bb, A(right));
+    const ImVec2 hull[6] = { t, r, br, bb, bl, l };
+    const float w = std::max(2.0f, floorf(S(2.5f)));
+    dl->AddPolyline(hull, 6, A(col::ink), w, ImDrawFlags_Closed);
+    dl->AddLine(l, b, A(shade(top, 0.7f)), w * 0.6f);
+    dl->AddLine(b, r, A(shade(top, 0.7f)), w * 0.6f);
+    dl->AddLine(b, bb, A(col::ink), w * 0.6f);
+}
 
 static void apply_theme()
 {
     ImGuiStyle& s = ImGui::GetStyle();
-    s.WindowRounding = 0; s.ChildRounding = 14; s.FrameRounding = 10; s.PopupRounding = 14; s.GrabRounding = 10;
-    s.WindowPadding = ImVec2(28, 24); s.FramePadding = ImVec2(20, 12); s.ItemSpacing = ImVec2(14, 14);
-    s.ItemInnerSpacing = ImVec2(10, 8); s.ScrollbarSize = 14; s.ScrollbarRounding = 8; s.WindowBorderSize = 0;
-    s.ChildBorderSize = 0; s.PopupBorderSize = 0; s.FrameBorderSize = 0;
+    s.WindowRounding = 0; s.ChildRounding = 0; s.FrameRounding = 0; s.PopupRounding = 0; s.GrabRounding = 0;
+    s.WindowPadding = ImVec2(30, 26); s.FramePadding = ImVec2(20, 12);
+    s.ItemSpacing = ImVec2(46, 14);   // wide between buttons side by side: the cursor sits in the gap
+    s.ItemInnerSpacing = ImVec2(10, 8); s.ScrollbarSize = 16; s.ScrollbarRounding = 0; s.WindowBorderSize = 0;
+    s.ChildBorderSize = 0; s.PopupBorderSize = 0; s.FrameBorderSize = 0; s.DisabledAlpha = 0.6f;
     ImVec4* c = s.Colors;
-    c[ImGuiCol_WindowBg] = v4(col::bg); c[ImGuiCol_ChildBg] = v4(col::panel); c[ImGuiCol_PopupBg] = v4(col::panel);
+    c[ImGuiCol_WindowBg] = v4(col::bg); c[ImGuiCol_ChildBg] = v4(col::panel2); c[ImGuiCol_PopupBg] = v4(IM_COL32(24, 34, 84, 255));
     c[ImGuiCol_Text] = v4(col::text); c[ImGuiCol_TextDisabled] = v4(col::dim);
-    c[ImGuiCol_Button] = v4(col::panel2); c[ImGuiCol_ButtonHovered] = v4(IM_COL32(40, 52, 82, 255));
-    c[ImGuiCol_ButtonActive] = v4(col::accent_dim);
-    c[ImGuiCol_FrameBg] = v4(col::panel2); c[ImGuiCol_FrameBgHovered] = v4(IM_COL32(40, 52, 82, 255));
-    c[ImGuiCol_FrameBgActive] = v4(IM_COL32(48, 62, 96, 255));
-    c[ImGuiCol_Header] = v4(col::panel2); c[ImGuiCol_HeaderHovered] = v4(IM_COL32(40, 52, 82, 255));
-    c[ImGuiCol_HeaderActive] = v4(col::accent_dim);
-    c[ImGuiCol_NavCursor] = v4(col::accent); c[ImGuiCol_PlotHistogram] = v4(col::accent);
-    c[ImGuiCol_ScrollbarBg] = v4(IM_COL32(0, 0, 0, 0)); c[ImGuiCol_ScrollbarGrab] = v4(col::panel2);
-    c[ImGuiCol_ModalWindowDimBg] = v4(IM_COL32(0, 0, 0, 170)); c[ImGuiCol_CheckMark] = v4(col::accent);
-    c[ImGuiCol_SliderGrab] = v4(col::accent); c[ImGuiCol_Separator] = v4(col::panel2);
+    c[ImGuiCol_Button] = v4(col::steel); c[ImGuiCol_ButtonHovered] = v4(shade(col::steel, 1.15f));
+    c[ImGuiCol_ButtonActive] = v4(shade(col::steel, 0.85f));
+    c[ImGuiCol_FrameBg] = v4(col::inset); c[ImGuiCol_FrameBgHovered] = v4(IM_COL32(24, 32, 76, 255));
+    c[ImGuiCol_FrameBgActive] = v4(IM_COL32(30, 40, 92, 255));
+    c[ImGuiCol_Header] = v4(IM_COL32(44, 62, 136, 255)); c[ImGuiCol_HeaderHovered] = v4(IM_COL32(58, 80, 168, 255));
+    c[ImGuiCol_HeaderActive] = v4(IM_COL32(120, 96, 40, 255));
+    c[ImGuiCol_NavCursor] = v4(col::accent); c[ImGuiCol_PlotHistogram] = v4(col::grass);
+    c[ImGuiCol_ScrollbarBg] = v4(col::inset); c[ImGuiCol_ScrollbarGrab] = v4(col::steel);
+    c[ImGuiCol_ScrollbarGrabHovered] = v4(shade(col::steel, 1.2f)); c[ImGuiCol_ScrollbarGrabActive] = v4(col::gold);
+    c[ImGuiCol_ModalWindowDimBg] = v4(IM_COL32(4, 6, 20, 190)); c[ImGuiCol_CheckMark] = v4(col::accent);
+    c[ImGuiCol_SliderGrab] = v4(col::accent); c[ImGuiCol_Separator] = v4(col::steel);
+    c[ImGuiCol_TextSelectedBg] = v4(IM_COL32(255, 206, 72, 90));
 }
 
 // ============================================================================================================
@@ -242,9 +510,13 @@ static bool g_pad_connected = false;
 
 enum class Act { A, B, X, Y, LB, RB, Start, Back };
 
+// false while the page is drawn under a dialog: the page's own buttons and prompts belong to the dialog then
+static bool g_page_input = true;
+
 static bool pressed(Act a)
 {
     using namespace ImGui;
+    if (!g_page_input) return false;
     switch (a) {
     case Act::A: return IsKeyPressed(ImGuiKey_GamepadFaceDown, false);
     case Act::B: return IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || IsKeyPressed(ImGuiKey_Escape, false);
@@ -260,19 +532,20 @@ static bool pressed(Act a)
     return false;
 }
 
-// a button's glyph: the controller's face buttons in their colours, bumpers and menu buttons as pills, or a keycap
+// a button's glyph, in pixels: the controller's face buttons as round-cornered blocks in their colours, bumpers and
+// menu buttons as steel blocks, or a parchment keycap
 static float glyph(ImDrawList* dl, ImVec2 p, Act a, float h)
 {
     const bool pad = g_device == Device::Pad;
     const char* t = "";
-    ImU32 fill = col::panel2;
+    ImU32 fill = col::steel;
     bool round = false;
     if (pad) {
         switch (a) {
         case Act::A: t = "A"; fill = IM_COL32(64, 176, 74, 255); round = true; break;
         case Act::B: t = "B"; fill = IM_COL32(214, 60, 60, 255); round = true; break;
         case Act::X: t = "X"; fill = IM_COL32(44, 112, 220, 255); round = true; break;
-        case Act::Y: t = "Y"; fill = IM_COL32(222, 178, 40, 255); round = true; break;
+        case Act::Y: t = "Y"; fill = IM_COL32(222, 168, 30, 255); round = true; break;
         case Act::LB: t = "LB"; break;
         case Act::RB: t = "RB"; break;
         case Act::Start: t = "MENU"; break;
@@ -290,59 +563,97 @@ static float glyph(ImDrawList* dl, ImVec2 p, Act a, float h)
         case Act::Back: t = "F1"; break;
         }
     }
-    const float fs = h * 0.6f;
-    const ImVec2 ts = g_font->CalcTextSizeA(fs, FLT_MAX, 0, t);
-    if (!dl) return round ? h : std::max(h, ts.x + h * 0.6f);   // measured, not drawn
-    if (round) {
-        dl->AddCircleFilled(ImVec2(p.x + h / 2, p.y + h / 2), h / 2, fill, 24);
-        dl->AddText(g_font, fs, ImVec2(p.x + (h - ts.x) / 2, p.y + (h - ts.y) / 2), IM_COL32_WHITE, t);
-        return h;
+    const float px = std::max(2.0f, floorf(h / 11.0f));   // the label's pixel
+    const float tw = pix_w(t, px);
+    const float w = round ? h : std::max(h, tw + px * 6);
+    if (!dl) return w;   // measured, not drawn
+    p = ImVec2(snap(p.x), snap(p.y));
+    const ImVec2 b(p.x + w, p.y + h);
+    const float n = floorf(h * 0.22f);   // the stepped corners
+    const ImU32 face = pad ? fill : IM_COL32(232, 224, 200, 255);
+    const ImU32 ink = A(col::ink);
+    if (round) {   // an octagon of blocks: ink, the face, a highlight
+        dl->AddRectFilled(ImVec2(p.x + n, p.y - 2), ImVec2(b.x - n, b.y + 2), ink);
+        dl->AddRectFilled(ImVec2(p.x - 2, p.y + n), ImVec2(b.x + 2, b.y - n), ink);
+        dl->AddRectFilled(ImVec2(p.x + n * 0.5f - 1, p.y + n * 0.5f - 1), ImVec2(b.x - n * 0.5f + 1, b.y - n * 0.5f + 1), ink);
+        dl->AddRectFilled(ImVec2(p.x + n, p.y), ImVec2(b.x - n, b.y), A(face));
+        dl->AddRectFilled(ImVec2(p.x, p.y + n), ImVec2(b.x, b.y - n), A(face));
+        dl->AddRectFilled(ImVec2(p.x + n * 0.5f, p.y + n * 0.5f), ImVec2(b.x - n * 0.5f, b.y - n * 0.5f), A(face));
+        dl->AddRectFilled(ImVec2(p.x + n, p.y + px), ImVec2(b.x - n, p.y + 2 * px), A(shade(face, 1.4f)));
+        dl->AddRectFilled(ImVec2(p.x + n, b.y - 2 * px), ImVec2(b.x - n, b.y - px), A(shade(face, 0.65f)));
+    } else {
+        bevel_block(dl, p, b, face, px);
     }
-    const float w = std::max(h, ts.x + h * 0.6f);
-    dl->AddRectFilled(p, ImVec2(p.x + w, p.y + h), pad ? IM_COL32(60, 68, 92, 255) : col::panel2, h * (pad ? 0.5f : 0.22f));
-    if (!pad) dl->AddRect(p, ImVec2(p.x + w, p.y + h), IM_COL32(90, 100, 128, 255), h * 0.22f, 1.5f);
-    dl->AddText(g_font, fs, ImVec2(p.x + (w - ts.x) / 2, p.y + (h - ts.y) / 2), col::text, t);
+    pix_text(dl, ImVec2(p.x + (w - tw) / 2, p.y + (h - 7 * px) / 2 - px * 0.5f), t, px,
+             pad ? IM_COL32_WHITE : IM_COL32(40, 30, 24, 255), pad ? col::ink : 0);
     return w;
 }
 
 struct Prompt { Act act; std::string label; };
 static std::vector<Prompt> g_prompts;   // this frame's, drawn in the bottom bar
-static void prompt(Act a, const std::string& label) { g_prompts.push_back({ a, label }); }
+static void prompt(Act a, const std::string& label)
+{
+    if (g_page_input) g_prompts.push_back({ a, label });
+}
 
 // ============================================================================================================
 // widgets: big buttons with a clear focus, cards, a selector, status lines
 // ============================================================================================================
 
-static void focus_ring(float rounding = 10.0f, ImU32 ring = col::accent)
+// the focus: a chunky gold ring with stepped corners, pulsing gently, and the pixel cursor bobbing at its left --
+// drawn past the window's clipping (the cursor sits in the margin), only while the item can be seen
+static void focus_ring(float = 0.0f, ImU32 = 0)
 {
-    if (!ImGui::IsItemFocused() || !ImGui::GetIO().NavVisible) return;
-    ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+    if (!ImGui::IsItemFocused() || !ImGui::GetIO().NavVisible || !ImGui::IsItemVisible()) return;
+    const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    dl->AddRect(ImVec2(a.x - S(4), a.y - S(4)), ImVec2(b.x + S(4), b.y + S(4)), ring, rounding + S(4), S(3));
-    dl->AddRect(ImVec2(a.x - S(8), a.y - S(8)), ImVec2(b.x + S(8), b.y + S(8)), col::accent_dim, rounding + S(8), S(2));
+    ImGuiViewport* vp = ImGui::GetMainViewport();
+    dl->PushClipRect(vp->Pos, ImVec2(vp->Pos.x + vp->Size.x, vp->Pos.y + vp->Size.y), false);
+    const float t = (float)ImGui::GetTime();
+    const float pulse = 0.5f + 0.5f * sinf(t * 4.5f);
+    const ImU32 ring = IM_COL32(255, (int)(206 + 40 * pulse), (int)(72 + 120 * pulse), 255);
+    const float g = floorf(S(7)), w = std::max(3.0f, floorf(S(4)));
+    const float gap = std::max(2.0f, floorf(S(3)));   // ink between the ring and the item: clear on any colour
+    dl->AddRect(ImVec2(a.x - g + w, a.y - g + w), ImVec2(b.x + g - w, b.y + g - w), col::ink, 0.0f, gap);
+    retro_frame(dl, ImVec2(a.x - g, a.y - g), ImVec2(b.x + g, b.y + g), ring, w);
+    const float p = std::max(3.0f, floorf(S(4)));
+    const float bob = floorf((0.5f + 0.5f * sinf(t * 7.0f)) * 2.5f) * p;
+    pix_arrow(dl, ImVec2(a.x - g - p * 7 - bob, (a.y + b.y) / 2 - p * 3.5f), p);
+    dl->PopClipRect();
 }
 
 enum class Kind { Normal, Primary, Danger };
 
-static bool big_button(const char* label, ImVec2 size = ImVec2(0, 0), Kind k = Kind::Normal, bool enabled = true)
+// a block button: steel, gold for the main choice, brick for what removes something; a pixel label when `pixel`
+static bool big_button(const char* label, ImVec2 size = ImVec2(0, 0), Kind k = Kind::Normal, bool enabled = true,
+                       float pixel = 0.0f)
 {
-    if (k == Kind::Primary) {
-        ImGui::PushStyleColor(ImGuiCol_Button, v4(col::accent));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, v4(IM_COL32(90, 230, 212, 255)));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive, v4(IM_COL32(40, 170, 156, 255)));
-        ImGui::PushStyleColor(ImGuiCol_Text, v4(IM_COL32(8, 20, 24, 255)));
-    } else if (k == Kind::Danger) {
-        ImGui::PushStyleColor(ImGuiCol_Button, v4(IM_COL32(92, 30, 40, 255)));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, v4(IM_COL32(130, 40, 54, 255)));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive, v4(col::danger));
-        ImGui::PushStyleColor(ImGuiCol_Text, v4(col::text));
-    }
+    if (!enabled) k = Kind::Normal;   // a choice not open yet is plain steel, its label still readable
+    const ImU32 base = k == Kind::Primary ? col::gold : k == Kind::Danger ? col::brick : col::steel;
+    const ImU32 ink_text = k == Kind::Primary ? IM_COL32(52, 30, 8, 255) : col::text;
+    ImGui::PushStyleColor(ImGuiCol_Button, v4(base));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, v4(shade(base, 1.14f)));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, v4(shade(base, 0.86f)));
+    ImGui::PushStyleColor(ImGuiCol_Text, v4(ink_text));
     if (size.y == 0) size.y = S(56);
     ImGui::BeginDisabled(!enabled);
-    const bool r = ImGui::Button(label, size);
+    const std::string id = pixel > 0 ? std::string("##") + label : std::string(label);
+    const bool r = ImGui::Button(id.c_str(), size);
+    const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+    const bool down = ImGui::IsItemActive(), hov = ImGui::IsItemHovered();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImU32 fill = down ? shade(base, 0.86f) : hov ? shade(base, 1.14f) : base;
+    bevel_edges(dl, a, b, fill, S(4), down);
+    if (pixel > 0) {
+        const char* end = strstr(label, "##");
+        const std::string text = end ? std::string(label, end) : std::string(label);
+        const float px = floorf(pixel), tw = pix_w(text.c_str(), px);
+        pix_text(dl, ImVec2((a.x + b.x - tw) / 2, (a.y + b.y - 7 * px) / 2 + (down ? px * 0.5f : 0)), text.c_str(), px,
+                 ink_text, k == Kind::Primary ? shade(base, 1.45f) : col::ink);
+    }
     ImGui::EndDisabled();
-    if (k != Kind::Normal) ImGui::PopStyleColor(4);
-    focus_ring(10.0f, k == Kind::Primary ? IM_COL32_WHITE : col::accent);   // a teal button: a white ring
+    ImGui::PopStyleColor(4);
+    focus_ring();
     return r;
 }
 
@@ -356,22 +667,67 @@ static void text_col(ImU32 c, const char* fmt, ...)
     va_end(ap);
 }
 
+// a title in the pixel font, in the current text colour, its words wrapped to the room there is
 static void title(const char* t, float size = kTitle)
 {
-    ImGui::PushFont(nullptr, S(size));
-    ImGui::TextUnformatted(t);
-    ImGui::PopFont();
+    const float p = pix_size(size);
+    const float room = std::max(p * 12, ImGui::GetContentRegionAvail().x);
+    const ImU32 c = ImGui::ColorConvertFloat4ToU32(ImGui::GetStyleColorVec4(ImGuiCol_Text));   // A() adds the alpha
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    std::string line, word;
+    std::vector<std::string> lines;
+    std::istringstream in(t);
+    while (in >> word) {
+        const std::string next = line.empty() ? word : line + " " + word;
+        if (!line.empty() && pix_w(next.c_str(), p) > room) { lines.push_back(line); line = word; }
+        else line = next;
+    }
+    if (!line.empty() || lines.empty()) lines.push_back(line);
+    for (size_t i = 0; i < lines.size(); i++) {
+        const ImVec2 at = ImGui::GetCursorScreenPos();
+        pix_text(dl, ImVec2(at.x, at.y + p), lines[i].c_str(), p, c);
+        ImGui::Dummy(ImVec2(pix_w(lines[i].c_str(), p), p * 9));
+    }
 }
 
+// a card: a sunken retro window inside the page
 static bool card_begin(const char* id, ImVec2 size = ImVec2(0, 0))
 {
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(S(26), S(22)));
-    const bool open = ImGui::BeginChild(id, size, ImGuiChildFlags_AlwaysUseWindowPadding |
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(S(28), S(24)));
+    // flattened: a card's buttons are reached directly, as the page's own (not the card first, then its buttons)
+    const bool open = ImGui::BeginChild(id, size, ImGuiChildFlags_AlwaysUseWindowPadding | ImGuiChildFlags_NavFlattened |
                                                      (size.y == 0 ? ImGuiChildFlags_AutoResizeY : 0), 0);
     ImGui::PopStyleVar();
+    frame_window(IM_COL32(150, 166, 220, 255), std::max(2.0f, floorf(S(3))));
     return open;
 }
 static void card_end() { ImGui::EndChild(); }
+
+// a progress bar of blocks: green segments filling a sunken trough; `frac` < 0: working, its share unknown
+static void pix_bar(float frac, float h)
+{
+    const ImVec2 a = ImGui::GetCursorScreenPos();
+    const float w = ImGui::GetContentRegionAvail().x;
+    ImGui::Dummy(ImVec2(w, h));
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 b(a.x + w, a.y + h);
+    dl->AddRectFilled(a, b, A(col::inset));
+    bevel_edges(dl, a, b, col::inset, std::max(2.0f, floorf(S(2))), true);
+    const float pad = std::max(2.0f, floorf(S(4))), seg = std::max(6.0f, floorf(S(14))), gap = std::max(2.0f, floorf(S(3)));
+    const float x0 = a.x + pad, x1 = b.x - pad, y0 = a.y + pad, y1 = b.y - pad;
+    float from = x0, to = x0 + (x1 - x0) * std::min(1.0f, std::max(0.0f, frac));
+    if (frac < 0) {   // a group of blocks travelling along the trough
+        const float span = seg * 5, t = (float)ImGui::GetTime();
+        from = x0 + fmodf(t * S(260), (x1 - x0) + span) - span;
+        to = from + span;
+    }
+    for (float x = x0; x < x1; x += seg + gap) {
+        const float l = std::max(x, from), r = std::min(std::min(x + seg, x1), to);
+        if (r <= l) continue;
+        dl->AddRectFilled(ImVec2(l, y0), ImVec2(r, y1), A(col::grass));
+        dl->AddRectFilled(ImVec2(l, y0), ImVec2(r, y0 + std::max(1.0f, floorf((y1 - y0) * 0.3f))), A(col::grass_hi));
+    }
+}
 
 static std::string human_bytes(double b)
 {
@@ -507,7 +863,7 @@ struct Browser {
     struct Entry { std::string name, path; bool dir; uintmax_t size; };
     std::vector<Entry> entries;
     std::string error;
-    bool refocus = true;
+    int refocus = 4;   // frames left to put the focus on the first entry (see OpenFocus)
 
     void list()
     {
@@ -554,7 +910,7 @@ struct Browser {
     {
         dir = d;
         list();
-        refocus = true;
+        refocus = 4;
     }
     void up()
     {
@@ -656,7 +1012,7 @@ static bool g_focus_page = true;   // give the new page's first item the focus
 
 static void focus_first()
 {
-    if (g_focus_page) {
+    if (g_focus_page && g_page_input) {   // not from under a dialog: the page's content can arrive after it opened
         ImGui::SetKeyboardFocusHere(-1);   // the item just drawn
         g_focus_page = false;
     }
@@ -702,9 +1058,9 @@ static void prepare_now(bool rebuild)
 static void page_play()
 {
     const std::string kind = g_st.info["kind"].str();
-    ImGui::PushFont(nullptr, S(kHuge));
-    ImGui::TextUnformatted("3D Dot Game Heroes");
-    ImGui::PopFont();
+    ImGui::PushStyleColor(ImGuiCol_Text, v4(col::accent));
+    title("3D Dot Game Heroes", kHuge);
+    ImGui::PopStyleColor();
     text_col(col::dim, "Cubic.Heroes -- the native PC port, built on this PC from your own disc.");
     ImGui::Dummy(ImVec2(0, S(10)));
     if (!g_st.info_ok && g_st.info.is_null()) {
@@ -713,9 +1069,7 @@ static void page_play()
     }
     if (kind == "slots") {
         const json::Value& b = g_st.builds;
-        ImGui::PushFont(nullptr, S(kTitle));
-        const bool play = big_button("PLAY", ImVec2(S(360), S(92)), Kind::Primary);
-        ImGui::PopFont();
+        const bool play = big_button("PLAY", ImVec2(S(360), S(92)), Kind::Primary, true, std::max(4.0f, floorf(S(7))));
         if (play) start_game();
         focus_first();
         if (ImGui::IsItemFocused()) prompt(Act::A, "Play");
@@ -829,10 +1183,16 @@ static void step_row(int n, const char* name, bool ok, const std::string& value,
                      const char* button, std::function<void()> on_press)
 {
     card_begin((std::string("##step") + std::to_string(n)).c_str());
-    ImGui::PushFont(nullptr, S(26));
-    ImGui::TextColored(v4(ok ? col::ok : col::dim), ok ? "  %d  " : "  %d  ", n);
-    ImGui::PopFont();
-    ImGui::SameLine();
+    {   // the step's number on a block: green once it is checked
+        const ImVec2 a = ImGui::GetCursorScreenPos();
+        const float bs = floorf(S(52)), p = std::max(3.0f, floorf(S(4)));
+        ImGui::Dummy(ImVec2(bs, bs));
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        bevel_block(dl, a, ImVec2(a.x + bs, a.y + bs), ok ? col::grass : col::steel, S(4));
+        const std::string d = std::to_string(n);
+        pix_text(dl, ImVec2(a.x + (bs - pix_w(d.c_str(), p)) / 2, a.y + (bs - 7 * p) / 2), d.c_str(), p, col::text);
+    }
+    ImGui::SameLine(0, S(20));
     ImGui::BeginGroup();
     title(name, 24);
     if (busy) text_col(col::dim, "Checking...");
@@ -841,6 +1201,7 @@ static void step_row(int n, const char* name, bool ok, const std::string& value,
     ImGui::EndGroup();
     ImGui::SameLine(ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX() - S(230));
     if (big_button(button, ImVec2(S(220), 0))) on_press();
+    if (n == 1) focus_first();   // the page opens on the first step's button (the cards are flattened into the page)
     card_end();
 }
 
@@ -869,7 +1230,6 @@ static void page_install()
             probe_disc();
         });
     });
-    focus_first();
     const bool keys_ok = !g_wiz.keys_info.is_null();
     if (disc_ok && !g_wiz.keys.empty() && g_wiz.keys_info.is_null() && g_wiz.keys_err.empty() && !g_wiz.probing_keys) probe_keys();
     std::string kv = g_wiz.keys.empty() ? "Choose the keys file for your disc (or an EBOOT.elf you decrypted)."
@@ -1239,8 +1599,21 @@ static void page_diagnostics()
 // overlays drawn over the pages
 // ============================================================================================================
 
+// a dialog's first frames: its chosen button takes the focus. A popup's first frame is laid out unseen and a focus
+// request made then can be lost, so it is made on its first few frames.
+struct OpenFocus { bool was = false; int left = 0; };
+static void open_focus(OpenFocus& f, bool open)
+{
+    if (!open) f.was = false;
+    else if (!f.was) { f.was = true; f.left = 4; }
+}
+static void want_focus(OpenFocus& f) { if (f.left > 0) ImGui::SetKeyboardFocusHere(-1); }
+static void focus_tick(OpenFocus& f) { if (f.left > 0) f.left--; }
+
 static void overlay_op()
 {
+    static OpenFocus of;
+    open_focus(of, g_op != nullptr);
     if (!g_op) return;
     pump(*g_op);
     Op& op = *g_op;
@@ -1256,13 +1629,13 @@ static void overlay_op()
     ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSize(ImVec2(std::min(vp->Size.x - S(80), S(900)), 0));
     if (ImGui::BeginPopupModal("##op", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize)) {
+        frame_window();
         title(op.title.c_str(), 30);
         const double now = std::chrono::duration<double>(std::chrono::steady_clock::now() - op.t0).count();
         std::string line = "Elapsed " + human_time(now);
         if (op.eta >= 0) line += "  --  " + std::string(op.eta_basis == "reference" ? "about " : "") + human_time(op.eta) + " left";
         text_col(col::dim, "%s", line.c_str());
-        ImGui::ProgressBar(op.plan.empty() ? (op.fraction >= 0 ? (float)op.fraction : -1.0f * (float)ImGui::GetTime())
-                                           : (float)op.overall, ImVec2(-1, S(22)), "");
+        pix_bar(op.plan.empty() ? (op.fraction >= 0 ? (float)op.fraction : -1.0f) : (float)op.overall, floorf(S(30)));
         ImGui::Dummy(ImVec2(0, S(4)));
         for (auto& st : op.plan) {
             const std::string s = op.state.count(st.first) ? op.state[st.first] : "";
@@ -1270,7 +1643,7 @@ static void overlay_op()
             const char* mark = s == "done" ? "[done]" : s == "skipped" ? "[not needed]" : st.first == op.stage ? "[now]" : "";
             text_col(c, "%s  %s", st.second.c_str(), mark);
             if (st.first == op.stage && op.fraction >= 0) {
-                ImGui::ProgressBar((float)op.fraction, ImVec2(-1, S(8)), "");
+                pix_bar((float)op.fraction, floorf(S(16)));
             }
         }
         if (!op.detail.empty()) text_col(col::dim, "%s", op.detail.c_str());
@@ -1278,7 +1651,8 @@ static void overlay_op()
         if (big_button(op.job->cancel_sent ? "Cancelling..." : "Cancel", ImVec2(S(240), 0), Kind::Danger, !op.job->cancel_sent) ||
             (pressed(Act::B) && !op.job->cancel_sent))
             op.job->cancel();
-        ImGui::SetItemDefaultFocus();
+        want_focus(of);
+        focus_tick(of);
         prompt(Act::B, "Cancel");
         ImGui::EndPopup();
     }
@@ -1286,19 +1660,23 @@ static void overlay_op()
 
 static void overlay_confirm()
 {
+    static OpenFocus cf;
+    open_focus(cf, g_confirm.open);
     if (!g_confirm.open) return;
     ImGui::OpenPopup("##confirm");
     ImGuiViewport* vp = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSize(ImVec2(std::min(vp->Size.x - S(80), S(760)), 0));
     if (ImGui::BeginPopupModal("##confirm", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize)) {
+        frame_window();
         title(g_confirm.title.c_str(), 28);
         ImGui::TextWrapped("%s", g_confirm.text.c_str());
         ImGui::Dummy(ImVec2(0, S(8)));
         bool yes = big_button(g_confirm.yes.c_str(), ImVec2(S(260), 0), g_confirm.danger ? Kind::Danger : Kind::Primary);
         ImGui::SameLine();
         bool no = big_button("Cancel", ImVec2(S(260), 0));
-        if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere(-1);   // the safe choice first
+        want_focus(cf);   // the safe choice first
+        focus_tick(cf);
         prompt(Act::A, "Choose");
         prompt(Act::B, "Cancel");
         if (pressed(Act::B)) no = true;
@@ -1314,12 +1692,15 @@ static void overlay_confirm()
 
 static void overlay_message()
 {
+    static OpenFocus mf;
+    open_focus(mf, g_msg.open);
     if (!g_msg.open) return;
     ImGui::OpenPopup("##msg");
     ImGuiViewport* vp = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSize(ImVec2(std::min(vp->Size.x - S(80), S(820)), 0));
     if (ImGui::BeginPopupModal("##msg", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize)) {
+        frame_window();
         ImGui::PushStyleColor(ImGuiCol_Text, v4(g_msg.error ? col::danger : col::ok));
         title(g_msg.title.c_str(), 28);
         ImGui::PopStyleColor();
@@ -1331,7 +1712,8 @@ static void overlay_message()
         }
         ImGui::Dummy(ImVec2(0, S(8)));
         bool close = big_button("OK", ImVec2(S(200), 0), Kind::Primary);
-        if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere(-1);
+        want_focus(mf);
+        focus_tick(mf);
         if (!g_msg.details.empty()) {
             ImGui::SameLine();
             if (big_button(g_msg.show_details ? "Hide the details" : "Technical details", ImVec2(S(300), 0)))
@@ -1352,6 +1734,7 @@ static void overlay_browser()
     ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSize(ImVec2(vp->Size.x - S(120), vp->Size.y - S(140)));
     if (ImGui::BeginPopupModal("##browser", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize)) {
+        frame_window();
         Browser& b = g_browser;
         title(b.title.c_str(), 28);
         text_col(col::dim, "%s   (%s)", b.dir.empty() ? "This PC" : b.dir.c_str(), b.filter_desc.c_str());
@@ -1375,16 +1758,26 @@ static void overlay_browser()
         }
         ImGui::BeginChild("##entries", ImVec2(0, -S(10)), ImGuiChildFlags_NavFlattened);
         if (!b.error.empty()) text_col(col::danger, "%s", b.error.c_str());
+        const std::string room(8, ' ');   // the icon's place before the name
+        auto entry_icon = [](int icon) {
+            const ImVec2 a = ImGui::GetItemRectMin(), z = ImGui::GetItemRectMax();
+            const float p = std::max(2.0f, floorf(S(2.6f)));
+            pix_icon(ImGui::GetWindowDrawList(), ImVec2(a.x + S(12), (a.y + z.y) / 2 - p * 5), kIcons[icon], p);
+        };
+        ImGui::PushStyleVar(ImGuiStyleVar_SelectableTextAlign, ImVec2(0.0f, 0.5f));
         if (!b.dir.empty()) {
-            if (ImGui::Selectable("..   (up a folder)", false, 0, ImVec2(0, S(48)))) b.up();
+            if (ImGui::Selectable((room + "..   (up a folder)").c_str(), false, 0, ImVec2(0, S(48)))) b.up();
+            entry_icon(kIconFolder);
             focus_ring();
             if (b.refocus) { ImGui::SetKeyboardFocusHere(-1); }
         }
         bool picked = false;
         for (size_t i = 0; i < b.entries.size() && !picked; i++) {
             const Browser::Entry& e = b.entries[i];
-            std::string label = (e.dir ? "[folder]  " : "") + e.name + (e.dir ? "" : "    " + human_bytes((double)e.size));
-            if (ImGui::Selectable((label + "##" + std::to_string(i)).c_str(), false, 0, ImVec2(0, S(48)))) {
+            std::string label = room + e.name + (e.dir ? "" : "    " + human_bytes((double)e.size));
+            const bool chosen = ImGui::Selectable((label + "##" + std::to_string(i)).c_str(), false, 0, ImVec2(0, S(48)));
+            entry_icon(e.dir ? kIconFolder : kIconDisc);
+            if (chosen) {
                 if (e.dir) { b.go(e.path); break; }
                 auto f = b.on_pick;
                 std::string p = e.path;
@@ -1396,7 +1789,8 @@ static void overlay_browser()
             focus_ring();
             if (b.refocus && b.dir.empty() && i == 0) ImGui::SetKeyboardFocusHere(-1);
         }
-        b.refocus = false;
+        ImGui::PopStyleVar();
+        if (b.refocus > 0) b.refocus--;
         if (b.entries.empty() && b.error.empty()) text_col(col::dim, b.folders ? "No folders here." : "Nothing here that fits.");
         ImGui::EndChild();
         prompt(Act::A, b.folders ? "Open" : "Choose");
@@ -1411,12 +1805,15 @@ static void overlay_browser()
 
 static void overlay_osk()
 {
+    static OpenFocus kf;
+    open_focus(kf, g_osk.open);
     if (!g_osk.open) return;
     ImGui::OpenPopup("##osk");
     ImGuiViewport* vp = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSize(ImVec2(std::min(vp->Size.x - S(60), S(1100)), 0));
     if (ImGui::BeginPopupModal("##osk", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize)) {
+        frame_window();
         title(g_osk.title.c_str(), 26);
         // the text as typed (a keyboard types into it directly too)
         char buf[256];
@@ -1435,7 +1832,7 @@ static void overlay_osk()
                 char id[24];
                 snprintf(id, sizeof id, "%s##k%d_%d", k, r, i);
                 if (big_button(id, ImVec2(key, key))) g_osk.text += row[i];
-                if (first && ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere(-1);
+                if (first) { want_focus(kf); focus_tick(kf); }
                 first = false;
                 if (row[i + 1]) ImGui::SameLine(0, S(8));
             }
@@ -1473,6 +1870,55 @@ static void overlay_osk()
 
 static bool overlay_open() { return g_op || g_confirm.open || g_msg.open || g_browser.open || g_osk.open; }
 
+// behind everything: a night sky (twinkling stars, blocky clouds drifting by) over a ground of voxel blocks -- grass on
+// earth -- that the button prompts stand on
+static void backdrop(ImDrawList* dl, ImVec2 o, ImVec2 sz, float foot, float t)
+{
+    const float gy = o.y + sz.y - foot;
+    dl->AddRectFilledMultiColor(o, ImVec2(o.x + sz.x, gy), IM_COL32(10, 12, 34, 255), IM_COL32(10, 12, 34, 255),
+                                IM_COL32(40, 56, 120, 255), IM_COL32(40, 56, 120, 255));
+    const float px = std::max(2.0f, floorf(S(3)));
+    for (uint32_t i = 0; i < 70; i++) {   // stars
+        const uint32_t h = hash32(i * 2654435761U + 17);
+        const float x = o.x + (float)(h % 10007) / 10007.0f * sz.x, y = o.y + (float)((h >> 14) % 997) / 997.0f * (gy - o.y) * 0.7f;
+        const float tw = 0.5f + 0.5f * sinf(t * (0.8f + (h & 7) * 0.15f) + (float)(h % 628) / 100.0f);
+        const int a = (int)(60 + 150 * tw);
+        dl->AddRectFilled(ImVec2(snap(x), snap(y)), ImVec2(snap(x) + px * ((h >> 3 & 3) == 0 ? 2 : 1), snap(y) + px * ((h >> 3 & 3) == 0 ? 2 : 1)),
+                          IM_COL32(230, 236, 255, a));
+    }
+    for (int i = 0; i < 4; i++) {   // clouds: three blocks each, drifting slowly to the right
+        const float w = S(150 + 40 * (i % 3)), span = sz.x + w * 2;
+        const float x = o.x + fmodf(i * span * 0.29f + t * S(5.0f + 3.0f * (i % 2)), span) - w;
+        const float y = snap(o.y + sz.y * (0.18f + 0.17f * i));
+        const ImU32 c = IM_COL32(52, 68, 140, 150);
+        const float u = floorf(S(12));
+        dl->AddRectFilled(ImVec2(snap(x), y), ImVec2(snap(x + w), y + u * 2), c);
+        dl->AddRectFilled(ImVec2(snap(x + w * 0.2f), y - u), ImVec2(snap(x + w * 0.62f), y), c);
+        dl->AddRectFilled(ImVec2(snap(x + w * 0.38f), y - u * 2), ImVec2(snap(x + w * 0.52f), y - u), c);
+    }
+    // the ground: a row of blocks, grass on top, earth with darker grains, seams between them
+    const float bw = floorf(S(40)), grass = floorf(S(12)), hi = floorf(S(4));
+    dl->AddRectFilled(ImVec2(o.x, gy), ImVec2(o.x + sz.x, o.y + sz.y), col::dirt);
+    dl->AddRectFilled(ImVec2(o.x, gy - 2), ImVec2(o.x + sz.x, gy), col::ink);
+    dl->AddRectFilled(ImVec2(o.x, gy), ImVec2(o.x + sz.x, gy + grass), col::grass);
+    dl->AddRectFilled(ImVec2(o.x, gy), ImVec2(o.x + sz.x, gy + hi), col::grass_hi);
+    int k = 0;
+    for (float x = o.x; x < o.x + sz.x; x += bw, k++) {
+        const uint32_t h = hash32((uint32_t)k * 7919U + 3);
+        for (int d = 0; d < 2; d++) {   // grass hanging over the edge
+            const float gx = snap(x + (float)((h >> (d * 8)) % 9) / 9.0f * (bw - px * 2));
+            dl->AddRectFilled(ImVec2(gx, gy + grass), ImVec2(gx + px * 2, gy + grass + px * (1 + (h >> (d + 20) & 1))), col::grass);
+        }
+        for (int d = 0; d < 3; d++) {   // grains in the earth
+            const uint32_t hh = hash32(h + d * 101);
+            const float ex = snap(x + (float)(hh % 97) / 97.0f * (bw - px * 2));
+            const float ey = snap(gy + grass + px * 3 + (float)((hh >> 8) % 89) / 89.0f * (foot - grass - px * 6));
+            dl->AddRectFilled(ImVec2(ex, ey), ImVec2(ex + px * 2, ey + px), col::dirt_dk);
+        }
+        dl->AddRectFilled(ImVec2(snap(x), gy + grass), ImVec2(snap(x) + std::max(1.0f, floorf(S(2))), o.y + sz.y), col::dirt_dk);
+    }
+}
+
 static void frame()
 {
     g_prompts.clear();
@@ -1493,43 +1939,68 @@ static void frame()
     ImGui::Begin("##main", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
                                         ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoScrollbar);
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    // the header
-    const float head = S(84);
-    dl->AddRectFilled(vp->Pos, ImVec2(vp->Pos.x + vp->Size.x, vp->Pos.y + head), col::panel);
-    dl->AddRectFilled(ImVec2(vp->Pos.x, vp->Pos.y + head - S(3)), ImVec2(vp->Pos.x + vp->Size.x, vp->Pos.y + head), col::accent_dim);
-    dl->AddText(g_font, S(30), ImVec2(vp->Pos.x + S(28), vp->Pos.y + S(24)), col::accent, "CUBIC");
-    dl->AddText(g_font, S(30), ImVec2(vp->Pos.x + S(28) + g_font->CalcTextSizeA(S(30), FLT_MAX, 0, "CUBIC").x + S(2),
-                                      vp->Pos.y + S(24)), col::text, ".HEROES");
-    // the page tabs: LB/RB (or Q/E, or a click)
-    float x = vp->Pos.x + S(300);
-    const float gh = S(30);
-    x += glyph(dl, ImVec2(x, vp->Pos.y + (head - gh) / 2), Act::LB, gh) + S(14);
+    const ImVec2 o = vp->Pos, sz = vp->Size;
+    const float t = (float)ImGui::GetTime();
+    const float foot = S(68), m = floorf(S(18));
+    dl->PushClipRectFullScreen();   // the window's own clipping leaves out its padding: the scene is the whole window
+    backdrop(dl, o, sz, foot, t);
+    // the command menu: the logo, the pages with their icons (LB/RB, Q/E, or a click), the active one marked
+    const float side_w = floorf(S(318));
+    const ImVec2 sa(o.x + m, o.y + m), sb(o.x + m + side_w, o.y + sz.y - foot - m);
+    dl->AddRectFilled(sa, sb, A(col::panel));
+    retro_frame(dl, sa, sb);
+    const float bobc = floorf((0.5f + 0.5f * sinf(t * 2.2f)) * S(4));
+    voxel(dl, ImVec2(sa.x + S(56), sa.y + S(86)), S(26), col::grass, col::dirt, col::dirt_dk);
+    voxel(dl, ImVec2(sa.x + S(56), sa.y + S(46) - bobc), S(12), IM_COL32(255, 222, 110, 255), col::gold, IM_COL32(186, 126, 26, 255));
+    const float lp = std::max(3.0f, floorf(S(4.5f)));
+    pix_text(dl, ImVec2(sa.x + S(104), sa.y + S(30)), "CUBIC", lp, col::accent);
+    pix_text(dl, ImVec2(sa.x + S(104), sa.y + S(30) + lp * 9), ".HEROES", lp, col::text);
+    for (float x = sa.x + S(24); x < sb.x - S(24); x += S(12))   // a dotted rule under the logo
+        dl->AddRectFilled(ImVec2(snap(x), snap(sa.y + S(136))), ImVec2(snap(x + S(6)), snap(sa.y + S(139))), A(col::steel));
+    const float row = floorf(S(52)), ip = std::max(2.0f, floorf(S(3))), np = std::max(2.0f, floorf(S(3)));
+    float y = sa.y + S(156);
     for (int i = 0; i < kPages; i++) {
-        const ImVec2 ts = g_font->CalcTextSizeA(S(22), FLT_MAX, 0, kPageNames[i]);
-        const ImVec2 a(x, vp->Pos.y + S(18)), b(x + ts.x + S(28), vp->Pos.y + head - S(18));
-        if (i == g_page) {
-            dl->AddRectFilled(a, b, col::accent, S(10));
-            dl->AddText(g_font, S(22), ImVec2(x + S(14), a.y + (b.y - a.y - ts.y) / 2), IM_COL32(8, 20, 24, 255), kPageNames[i]);
-        } else {
-            dl->AddText(g_font, S(22), ImVec2(x + S(14), a.y + (b.y - a.y - ts.y) / 2), col::dim, kPageNames[i]);
+        const ImVec2 ra(sa.x + S(14), y), rb(sb.x - S(14), y + row - S(6));
+        const bool on = i == g_page;
+        const bool hov = !overlay_open() && ImGui::IsMouseHoveringRect(ra, rb);
+        if (on) {
+            dl->AddRectFilled(ra, rb, A(col::inset));
+            dl->AddRectFilled(ra, ImVec2(ra.x + S(6), rb.y), A(col::accent));
+        } else if (hov) {
+            dl->AddRectFilled(ra, rb, A(IM_COL32(34, 48, 108, 255)));
         }
-        if (!overlay_open() && ImGui::IsMouseHoveringRect(a, b) && ImGui::IsMouseClicked(0)) { g_page = i; g_focus_page = true; }
-        x = b.x + S(6);
+        pix_icon(dl, ImVec2(ra.x + S(22), (ra.y + rb.y) / 2 - ip * 5), kIcons[i], ip);
+        pix_text(dl, ImVec2(ra.x + S(22) + ip * 10 + S(22), (ra.y + rb.y) / 2 - np * 3.5f), kPageNames[i], np,
+                 on ? col::accent : hov ? col::text : col::dim);
+        if (hov && ImGui::IsMouseClicked(0)) { g_page = i; g_focus_page = true; }
+        y += row;
     }
-    glyph(dl, ImVec2(x + S(8), vp->Pos.y + (head - gh) / 2), Act::RB, gh);
+    {   // LB / RB beside "PAGES" at the menu's foot
+        const float gh = floorf(S(30));
+        float gx = sa.x + S(28);
+        const float gy = sb.y - S(26) - gh;
+        gx += glyph(dl, ImVec2(gx, gy), Act::LB, gh) + S(8);
+        gx += glyph(dl, ImVec2(gx, gy), Act::RB, gh) + S(14);
+        pix_text(dl, ImVec2(gx, gy + (gh - 7 * np) / 2), "PAGES", np, col::dim);
+    }
     if (!overlay_open()) {
         if (pressed(Act::LB)) { g_page = (g_page + kPages - 1) % kPages; g_focus_page = true; }
         if (pressed(Act::RB)) { g_page = (g_page + 1) % kPages; g_focus_page = true; }
     }
-    // the device in use
-    const char* dev = g_device == Device::Pad ? "Controller" : g_pad_connected ? "Keyboard and mouse (a controller is connected)"
-                                                                              : "Keyboard and mouse";
-    const ImVec2 dsz = g_font->CalcTextSizeA(S(16), FLT_MAX, 0, dev);
-    dl->AddText(g_font, S(16), ImVec2(vp->Pos.x + vp->Size.x - dsz.x - S(24), vp->Pos.y + head + S(8)), col::dim, dev);
-    // the page
-    const float foot = S(64);
-    ImGui::SetCursorScreenPos(ImVec2(vp->Pos.x + S(48), vp->Pos.y + head + S(28)));
-    ImGui::BeginChild("##page", ImVec2(vp->Size.x - S(96), vp->Size.y - head - foot - S(40)), ImGuiChildFlags_NavFlattened,
+    // the page's window; a new page slides in and fades up
+    static int shown = -1;
+    static float since = 0;
+    if (shown != g_page) { shown = g_page; since = t; }
+    const float e = std::min(1.0f, (t - since) / 0.22f), ease = 1.0f - (1.0f - e) * (1.0f - e) * (1.0f - e);
+    const ImVec2 ca(sb.x + m, sa.y), cb(o.x + sz.x - m, sb.y);
+    dl->AddRectFilled(ca, cb, A(col::panel));
+    retro_frame(dl, ca, cb);
+    dl->PopClipRect();
+    const float in_x = floorf(S(58)), in_y = floorf(S(34));
+    ImGui::SetCursorScreenPos(ImVec2(ca.x + in_x + floorf((1.0f - ease) * S(28)), ca.y + in_y));
+    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, 0.2f + 0.8f * ease);
+    g_page_input = !overlay_open();
+    ImGui::BeginChild("##page", ImVec2(cb.x - ca.x - in_x - S(34), cb.y - ca.y - in_y - S(26)), ImGuiChildFlags_NavFlattened,
                       ImGuiWindowFlags_NoBackground);
     ImGui::PushFont(nullptr, S(kBody));
     switch (g_page) {
@@ -1544,6 +2015,11 @@ static void frame()
     }
     ImGui::PopFont();
     ImGui::EndChild();
+    g_page_input = true;
+    ImGui::PopStyleVar();
+    // the device in use, at the ground's left
+    const char* dev = g_device == Device::Pad ? "Controller" : g_pad_connected ? "Keyboard and mouse (a controller is connected)"
+                                                                              : "Keyboard and mouse";
     // overlays
     ImGui::PushFont(nullptr, S(kBody));
     overlay_op();
@@ -1558,22 +2034,32 @@ static void frame()
         prompt(Act::LB, "");
         prompt(Act::RB, "Pages");
     }
-    const float fy = vp->Pos.y + vp->Size.y - foot;
-    dl->AddRectFilled(ImVec2(vp->Pos.x, fy), ImVec2(vp->Pos.x + vp->Size.x, vp->Pos.y + vp->Size.y), col::panel);
-    float px = vp->Pos.x + vp->Size.x - S(28);
+    // the prompts, on the ground: what each button does here and now (drawn over the overlays' dimming)
+    ImDrawList* fg = ImGui::GetForegroundDrawList();
+    const float fy = o.y + sz.y - foot, gy = fy + S(14), gh2 = foot - S(14);   // below the grass
+    auto shadow_text = [&](ImVec2 at, ImU32 c, const char* s) {
+        fg->AddText(g_font, S(19), ImVec2(at.x + 2, at.y + 2), col::ink, s);
+        fg->AddText(g_font, S(19), at, c, s);
+    };
+    {
+        const ImVec2 ds = g_font->CalcTextSizeA(S(19), FLT_MAX, 0, dev);
+        shadow_text(ImVec2(o.x + S(28), gy + (gh2 - ds.y) / 2), col::text, dev);
+    }
+    float px = o.x + sz.x - S(28);
     std::set<int> seen;   // the first prompt given for a button wins
-    std::vector<Prompt> shown;
+    std::vector<Prompt> listed;
     for (const Prompt& p : g_prompts)
-        if (seen.insert((int)p.act).second) shown.push_back(p);
-    for (auto it = shown.rbegin(); it != shown.rend(); ++it) {   // right to left: each glyph measured, then drawn
-        const bool pair_next = std::next(it) != shown.rend() && std::next(it)->label.empty();   // LB, then RB "Pages"
+        if (seen.insert((int)p.act).second) listed.push_back(p);
+    const float gsz = floorf(S(34));
+    for (auto it = listed.rbegin(); it != listed.rend(); ++it) {   // right to left: each glyph measured, then drawn
+        const bool pair_next = std::next(it) != listed.rend() && std::next(it)->label.empty();   // LB, then RB "Pages"
         const ImVec2 ts = g_font->CalcTextSizeA(S(19), FLT_MAX, 0, it->label.c_str());
         px -= ts.x;
-        dl->AddText(g_font, S(19), ImVec2(px, fy + (foot - ts.y) / 2), col::text, it->label.c_str());
+        shadow_text(ImVec2(px, gy + (gh2 - ts.y) / 2), col::text, it->label.c_str());
         if (!it->label.empty()) px -= S(10);
-        const float gw = glyph(nullptr, ImVec2(0, 0), it->act, S(32));
+        const float gw = glyph(nullptr, ImVec2(0, 0), it->act, gsz);
         px -= gw;
-        glyph(dl, ImVec2(px, fy + (foot - S(32)) / 2), it->act, S(32));
+        glyph(fg, ImVec2(px, gy + (gh2 - gsz) / 2), it->act, gsz);
         px -= pair_next ? S(6) : S(30);   // LB beside RB: one "Pages"
     }
     ImGui::End();
@@ -1601,7 +2087,7 @@ static std::string font_path()
 {
 #ifdef _WIN32
     const std::string win = known_folder(kLocalAppData);   // fonts installed for the user, then the system's
-    const char* sys[] = { "C:\\Windows\\Fonts\\segoeui.ttf", "C:\\Windows\\Fonts\\arial.ttf" };
+    const char* sys[] = { "C:\\Windows\\Fonts\\seguisb.ttf", "C:\\Windows\\Fonts\\segoeui.ttf", "C:\\Windows\\Fonts\\arial.ttf" };
     (void)win;
     for (const char* f : sys)
         if (fs::exists(f)) return f;
@@ -1618,9 +2104,11 @@ int main(int argc, char** argv)
 {
     g_exe_dir = exe_dir_of(argv[0]);
     bool after_update = false, update_failed = false;
+    std::string show;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--after-update")) after_update = true;
         if (!strcmp(argv[i], "--update-failed")) update_failed = true;
+        if (!strcmp(argv[i], "--show") && i + 1 < argc) show = argv[i + 1];   // a dialog opened at start (the review's)
         if (!strcmp(argv[i], "--page") && i + 1 < argc)   // a page to open on (a shortcut's choice; the review's)
             for (int p = 0; p < kPages; p++)
                 if (!SDL_strcasecmp(argv[i + 1], kPageNames[p])) g_page = p;
@@ -1646,6 +2134,9 @@ int main(int argc, char** argv)
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
+    if (getenv("CUBICHEROES_DEBUG_NAV"))   // a developer's look at where the focus goes, on stdout
+        ImGui::GetCurrentContext()->DebugLogFlags |= ImGuiDebugLogFlags_EventFocus | ImGuiDebugLogFlags_EventPopup |
+                                                    ImGuiDebugLogFlags_EventNav | ImGuiDebugLogFlags_OutputToTTY;
     io.IniFilename = nullptr;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
     ImGui_ImplSDL2_InitForSDLRenderer(win, ren);
@@ -1664,6 +2155,20 @@ int main(int argc, char** argv)
     if (!g_font) g_font = io.Fonts->AddFontDefault();
     ImGui::GetStyle().FontSizeBase = S(kBody);
     refresh_info();
+    // --show: each dialog as a player meets it, opened once the page has settled; nothing done by it (closing it is
+    // all it does)
+    auto open_show = [&show] {
+        if (show == "browser") browse("Choose your disc image", false, { ".iso" }, "disc images (.iso)", "", [](const std::string&) {});
+        if (show == "keyboard") type_text("A note for this backup", "before the boss", [](const std::string&) {});
+        if (show == "confirm")
+            ask("Go back to this build?", "The game starts from it next time. The build you have now is kept, so you can "
+                "come back to it.", "Go back to it", false, [] {});
+        if (show == "message")
+            g_msg = { true, "The update didn't finish", "The download didn't match the release's signature, so nothing was "
+                      "changed. Try again later.", "release.json: checked against key 1 -- the signature differs", true, false };
+        show.clear();
+    };
+    int frames = 0;
     if (update_failed)
         g_msg = { true, "The update didn't start", "The new launcher didn't come up, so this one was put back. Nothing else "
                                                    "changed.", "", true, false };
@@ -1716,8 +2221,9 @@ int main(int argc, char** argv)
             if (setting("LAUNCHER_CHECK_UPDATES", "1") == "1") check_updates();
         }
         frame();
+        if (++frames == 20 && !show.empty()) open_show();
         ImGui::Render();
-        SDL_SetRenderDrawColor(ren, 9, 12, 22, 255);
+        SDL_SetRenderDrawColor(ren, 14, 18, 44, 255);
         SDL_RenderClear(ren);
         ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData(), ren);
         SDL_RenderPresent(ren);

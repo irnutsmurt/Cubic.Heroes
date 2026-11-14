@@ -659,9 +659,148 @@ back to it"; Saves the automatic backup with Restore and Delete; Shaders the GPU
 its category; Updates "no release key"; the controller's prompts and the focus. **Not yet tried by hand**: a whole
 install, a rollback, a restore, the file browser and the on-screen keyboard with a controller -- the owner's review.
 
-**Not yet**: the launcher in the release download (M9.5's packaging: the launcher, the frozen worker beside it);
-first-session shader preparation (section 15).
+**Not yet**: the launcher in the release download (M9.5's packaging: the launcher, the frozen worker beside it).
+First-session preparation: section 15; the launcher's look after the owner's direction: section 16.
 
 To try it from the checkout: `build/venv/Scripts/python.exe tools/build_launcher.py`, then
 `build/launcher/CubicHeroes.exe` (it finds the worker in the checkout; choose the install folder on the Settings page,
 or install).
+
+## 15. The first session prepared: the pipeline manifest (2026-11-14) [M, C]
+
+**The question** (the owner's requirement, 2026-11-14: a player's first session prepared before it is played, its
+coverage measured): section 11 left a new install with no recipes until the game had been played, so the first
+session made every pipeline as it was first drawn (the river, cold: 64 pipelines, about a second of the driver's
+work, a 500 ms frame).
+
+**Where the programs come from** (build/m9/program_search.py, local: counts and offsets, never bytes): every program
+the renderer was handed in the recorded sessions is on the disc.
+- **Vertex programs**: each whole, with every 32-bit word's bytes reversed (the game's loading swaps them to the
+  RSX's order): 18 of 33 in `shaders.ps3.pkg`, 15 in the EBOOT.
+- **Fragment programs**: in the package or the EBOOT as stored, but the game patches each one's inline constants
+  (16-byte blocks after the instructions that read them) as it loads and draws; 10 of 60 are found whole, the other
+  50 where the first block and most blocks are equal.
+- So all of the recorded pipelines have both programs on the disc (70 of 70 at first; 98 of 98 with the four routes
+  below: 36 vertex programs -- 21 in the package, 15 in the EBOOT, every one words-reversed -- and 49 fragment
+  programs -- 19 in the package, 30 in the EBOOT, as stored; 3 of them byte for byte as the game handed them over,
+  the others differing only in constant blocks). The renderer keeps fragment constants out of the translation (they
+  are buffered; a pipeline's key holds the program's structural hash), so the stored program translates to the same
+  shader as the patched one.
+
+**The manifest** (tools/pipeline_manifest.py `make`, on a developer's machine, from recorded recipes and the disc):
+a line per pipeline -- its recipe's record without the programs (the key; `PipeState`, the render state; `ProgFixed`,
+the translation's parameters: the renderer's own structures, only numbers -- masks, formats, texture sizes, blend and
+depth state), and for each program a file under PS3_GAME/USRDIR, an offset, the transform (0 as stored, 1 words
+reversed) and a 64-bit FNV-1a hash of the bytes there. No program bytes, no shader text, nothing of the game's
+copied: tools/boundary_check.py finds nothing in it.
+
+**Resolved on the player's machine** (`resolve`; the worker's `first_session_recipes`): against the install's own
+copy of the disc (`data/disc`, kept by the install), each listed pipeline the install's recipes lack is added -- its
+programs read from the disc at the listed place, checked by the hash, the transform applied -- in the recipes'
+format; a disc whose bytes differ adds nothing for that pipeline. The worker does this before every preparation
+(after an install, a repair, an update, a migration, and "Prepare now"), so a first install prepares the listed
+pipelines before it is played. The recipes it writes are the player's own programs and stay in their install.
+
+**Checked**:
+- The disc-resolved recipes against the recorded ones (build/m9/m95_verify.sh, rel54): the recorded set prepared
+  into an empty shader folder (75 shaders translated, 70 pipelines); the resolved set then prepared into the same
+  folder translated **none** again (140 of 140 from the cache) and made its 70 pipelines from the pipeline cache in
+  12 ms; prepared alone into another empty folder, it made the same 75 SPIR-V files (names and sizes identical).
+- tests/test_pipeline_manifest.py (7): a made-up disc and recipes -- places, transforms and hashes named and no
+  program bytes; the recipes given back (a fragment program with its stored constants); a changed disc adds
+  nothing; a second resolve adds nothing; held recipes kept, a damaged tail cut; the worker adds them to an install.
+
+**The first session, measured** (build/m9/m95_run.sh on rel54, the install test's build; evidence on F:\3d dot game
+heroes\m9\evidence\m95). Four routes cold -- our shader folder, NVIDIA's own disk cache and the recipes all empty --
+each recording its recipes; the manifest made from those and the earlier river recordings (98 pipelines, none left
+out); resolved against the disc into an empty recipes file, as a new install's (98 added); `--prepare` into an empty
+shader folder (88 shaders translated, 98 pipelines made, 1.42 s, 1.5 MB); then the four routes again as a first
+session, NVIDIA's cache emptied again for each:
+
+| Route | Pipelines made in play | Their cost: in all, the longest, over 16 ms | The worst frame (compiles in it) | Frames over 33 ms (with compiles) | Met that the manifest lacked |
+|---|---|---|---|---|---|
+| the river, cold | 64 | 1,014 ms, 53 ms, 31 | 545 ms (475) | 20 (10) | -- |
+| the river, first session | 63 | 76 ms, 3.6 ms, 0 | 1,556 ms (0: the title's load) | 11 (3) | 0 |
+| the fields, cold | 38 | 725 ms, 48 ms, 23 | 475 ms (420) | 14 (9) | -- |
+| the fields, first session | 38 | 58 ms, 3.5 ms, 0 | 451 ms (0: a load) | 10 (2) | 0 |
+| the dungeon, cold | 81 | 1,202 ms, 55 ms, 36 | 545 ms (472) | 26 (12) | -- |
+| the dungeon, first session | 79 | 91 ms, 3.4 ms, 0 | 478 ms (0: a load) | 19 (5) | 0 |
+| the menus, cold | 56 | 765 ms, 55 ms, 24 | 537 ms (470) | 784 (8) | -- |
+| the menus, first session | 56 | 52 ms, 2.5 ms, 0 | 259 ms (0) | 781 (4) | 0 |
+
+(The menus' frames over 33 ms are their 30 fps screens, the same in both. "With compiles": a frame that also made a
+pipeline -- 2 to 4 ms of it in a first session -- but was long for its load.)
+
+- **On these routes the first session is prepared**: every pipeline they made was in the manifest; what is left
+  of pipeline creation in play is the driver taking a pipeline from the prepared cache, 2-4 ms each (NVIDIA's own
+  cache empty), never a frame's worth.
+- **The river's 1,556 ms frame was the PC's, not the preparation's**: it is the title's load (20 s in, no pipeline
+  made near it; 459 ms in the cold run), and it did not come back -- two more first-session runs of the river
+  (m95r_run.sh) had worst frames of 234 and 230 ms with no pipeline in them, as the earlier prepared runs (229 ms).
+  One of those two met one pipeline the manifest lacked (made in play: 198 ms), the other none -- the run-to-run
+  variation section 11 found (a run meets one or two pipelines the run before did not): 63 of 64 covered there.
+- **What a route not recorded meets** (leave one out: each route's pipelines against a manifest made without its own
+  recordings): the dungeon 59 of 81, the fields 32 of 38, the river 55 of 64, the menus 56 of 56. That is the
+  coverage to expect where no route has been recorded yet (later dungeons, other fields, the editor): most of a new
+  place's pipelines are shared, a fifth to a quarter are its own -- made in play as before, recorded, and prepared at
+  the next preparation. The manifest grows by recording more routes (`make` takes any number of recipes files).
+- **Not distributed yet**: the manifest made here (98 lines, 112 KB of numbers, places and hashes; the boundary check
+  finds nothing) stays out of the repository until the owner agrees that it is the "independently authored
+  metadata" requirement 5 allows -- the worker uses config/pipeline_manifest.txt when it is there and nothing
+  otherwise.
+
+## 16. The launcher's look: the game's world as the reference (2026-11-14) [C]
+
+**The owner's direction** (2026-11-14): Dusklight stays the reference for what the launcher does and how a
+controller drives it; 3D Dot Game Heroes is the reference for how it looks -- voxel and pixel-art elements, colours
+from the game's environments and menus, retro fantasy with modern usability, chunky borders and bevelled panels,
+pixel icons, a selection and prompts in the same style, subtle animation, one consistent identity -- clean,
+readable, at a desk or on a couch, usability first; original assets only, nothing taken from the game.
+
+**What it is** (launcher/main.cpp; everything drawn in code -- no image file, no font file of the project's, nothing
+extracted from the game):
+- **The scene**: a night sky (a gradient, stars that twinkle, blocky clouds drifting slowly) over a row of voxel
+  ground blocks -- grass on earth, seams and grains -- that the button prompts stand on.
+- **A command menu** on the left, as in a role-playing game's menu window: the logo (a grass voxel with a small gold
+  one floating over it; CUBIC.HEROES in the pixel font), the eight pages each with its own pixel icon (a sword,
+  a chest, an arrow to the ground, a hammer, a book, a gem, a gear, a magnifying glass), the active page in gold
+  with a gold bookmark; LB/RB with "PAGES" at its foot. A click on a page works too.
+- **Windows**: the page sits in a retro window -- a light border with stepped corners, an ink outline, a deep blue
+  inside; cards and dialogs are the same window, a card's border quieter.
+- **Blocks for buttons**: square, bevelled (lit above and left, shaded below and right, an ink outline), pressed in
+  when held; steel for most, gold for the main choice (PLAY, Install, OK), brick for what removes or cancels.
+- **The selection**: a chunky gold ring with stepped corners, pulsing gently, and a white pixel cursor bobbing at
+  its left -- visible from across a room, the same on every page, in every dialog, the file browser and the
+  on-screen keyboard.
+- **Type**: the project's own 5x7 pixel font (capitals, digits, signs) for titles, the logo, the PLAY block, the
+  step numbers and the button glyphs; a clean system font (Segoe UI Semibold on Windows) for everything to be read
+  -- descriptions, paths, values, messages.
+- **Prompts**: the controller's A/B/X/Y as round-cornered pixel blocks in their colours, LB/RB/MENU/VIEW as steel
+  blocks, the keyboard's keys as parchment keycaps -- switching with the device last used, as before.
+- **Progress**: a trough of green blocks filling, a travelling group of blocks while the share is unknown.
+- **Motion**: a new page slides in a little and fades up (0.22 s); the cursor bobs, the ring pulses, the gold block
+  floats, stars twinkle, clouds drift -- all slow and small, none of them in the way.
+
+**Colours** (the palette, `col::` in the source): night blues for the sky and windows, parchment for borders and
+text, gold for what is chosen, grass greens and earth browns for the ground and for "done", steel blue for buttons,
+brick red for danger.
+
+**Usability fixes made with it** (found in the review grabs, each a fault of the controller path, not of the look):
+- **The install steps' cards** were each one stop for the controller (the card first, then its button): cards are now
+  flattened into the page, and the Install page opens on the first step's "Choose..." button.
+- **A page's prompts and buttons under a dialog**: the page below kept adding its prompts ("Play", "Check for
+  updates") and answering its buttons -- Y on the on-screen keyboard (a space) also started an update check. While a
+  dialog is open the page's prompts and button presses now belong to the dialog.
+- **A dialog's focus**: a page whose content arrived after a dialog opened (the Play page waits for the install's
+  details) took the focus back from under the dialog. A page now waits for the dialog to close; a dialog puts the focus
+  on its chosen button over its first frames (Cancel in a confirmation, OK in a message, the first key, the first
+  entry of the browser) -- checked with Dear ImGui's own focus log (`CUBICHEROES_DEBUG_NAV=1`, on stdout).
+- **A disabled main button** (Repair before the steps are checked) is plain steel with a readable label, not dim gold.
+
+**Tried** (build/m9/shots10: every page with `--page NAME` and every dialog with the review's `--show
+browser|keyboard|confirm|message`, each grabbed from its own start with the window kept on top; no input sent to any
+window): the command menu, the windows, the blocks, the gold ring and cursor on the focused item of each page and
+dialog, the prompts of the device in use (a controller connected) on the ground, the browser's folder icons, the
+keyboard's keys. The focus ring and cursor move with the D-pad, the stick and the keys as before (Dear ImGui's
+navigation is unchanged); the motion was checked by grabs, not by hand. **The owner's review**: by hand, with a
+controller.

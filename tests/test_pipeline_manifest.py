@@ -1,0 +1,151 @@
+#!/usr/bin/env python3
+"""The first-session pipeline manifest (tools/pipeline_manifest.py; docs/M9_LAUNCHER_PLAN.md section 15):
+    build/venv/Scripts/python.exe -m unittest tests.test_pipeline_manifest
+On made-up discs and recipes in temporary folders (programs are random bytes): a manifest made from recipes names
+each program's place, transform and hash and none of its bytes; resolving it against the same disc gives the
+recorded recipes back (a fragment program as the disc holds it: its constants as stored); a disc whose bytes differ
+adds nothing; a second resolve adds nothing; recipes already held are kept and a damaged tail is cut; the worker
+adds the manifest's recipes to an install's before it prepares."""
+import os
+import random
+import struct
+import sys
+import tempfile
+import unittest
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "tools"))
+import install_layout as layout  # noqa: E402
+import pipeline_manifest as pm  # noqa: E402
+import worker  # noqa: E402
+
+rng = random.Random(9)
+
+
+def blob(n):
+    return bytes(rng.randrange(256) for _ in range(n))
+
+
+def head(key, vl, fl):
+    body = blob(pm.HEAD - 24)   # PipeState and ProgFixed: numbers
+    return struct.pack("<IIQ", pm.MAGIC, pm.FORMAT, key) + body + struct.pack("<II", vl, fl)
+
+
+def record(h, vp, fp):
+    return h + vp + fp + struct.pack("<I", pm.recipe_sum(h, vp, fp))
+
+
+class Fixture:
+    """a disc with a shader package (a vertex program word-reversed, a fragment program as stored) and an EBOOT
+    (another pair), and the recipes the game would record (the first fragment program's constant block patched)"""
+
+    def __init__(self, tmp):
+        self.disc = os.path.join(tmp, "disc")
+        usr = os.path.join(self.disc, "PS3_GAME", "USRDIR")
+        os.makedirs(os.path.join(usr, "data", "shaders"))
+        self.vp1, self.fp1, self.vp2, self.fp2 = blob(64), blob(96), blob(48), blob(32)
+        self.pkg = blob(100) + pm.wswap(self.vp1) + blob(37) + self.fp1 + blob(50)
+        self.elf = b"\x7fELF" + blob(200) + self.vp2 + blob(11) + self.fp2 + blob(20)
+        with open(os.path.join(usr, "data", "shaders", "shaders.ps3.pkg"), "wb") as f:
+            f.write(self.pkg)
+        with open(os.path.join(usr, "EBOOT.elf"), "wb") as f:
+            f.write(self.elf)
+        self.fp1_patched = self.fp1[:32] + blob(16) + self.fp1[48:]   # one 16-byte constant changed at load
+        self.h1, self.h2 = head(0x1111, len(self.vp1), len(self.fp1)), head(0x2222, len(self.vp2), len(self.fp2))
+        self.recorded = os.path.join(tmp, "recorded.bin")
+        with open(self.recorded, "wb") as f:
+            f.write(record(self.h1, self.vp1, self.fp1_patched) + record(self.h2, self.vp2, self.fp2))
+        self.manifest = os.path.join(tmp, "manifest.txt")
+
+
+class ManifestTest(unittest.TestCase):
+    def setUp(self):
+        self.tmpd = tempfile.TemporaryDirectory()
+        self.tmp = self.tmpd.name
+        self.f = Fixture(self.tmp)
+
+    def tearDown(self):
+        self.tmpd.cleanup()
+
+    def test_make_names_places_not_bytes(self):
+        res = pm.make(self.f.disc, [self.f.recorded], self.f.manifest)
+        self.assertEqual(res, {"pipelines": 2, "left_out": 0})
+        with open(self.f.manifest, encoding="ascii") as f:
+            text = f.read()
+        for prog in (self.f.vp1, self.f.fp1, self.f.vp2, self.f.fp2, pm.wswap(self.f.vp1)):
+            self.assertNotIn(prog.hex(), text)
+        entries = {k: (v, fp) for k, _, v, fp in pm.parse(self.f.manifest)}
+        self.assertEqual(entries[0x1111][0][:3], ("data/shaders/shaders.ps3.pkg", 100, 1))
+        self.assertEqual(entries[0x1111][1][:3], ("data/shaders/shaders.ps3.pkg", 100 + 64 + 37, 0))
+        self.assertEqual(entries[0x2222][0][:3], ("EBOOT.elf", 204, 0))
+
+    def test_resolve_gives_the_recipes_back(self):
+        pm.make(self.f.disc, [self.f.recorded], self.f.manifest)
+        out = os.path.join(self.tmp, "cache", "native-recipes.bin")
+        self.assertEqual(pm.resolve(self.f.manifest, self.f.disc, out),
+                         {"listed": 2, "held": 0, "added": 2, "not_on_disc": 0})
+        got = {k: (h, v, fp) for k, h, v, fp in pm.read_recipes(out)}
+        self.assertEqual(got[0x1111], (self.f.h1, self.f.vp1, self.f.fp1))   # the stored constants
+        self.assertEqual(got[0x2222], (self.f.h2, self.f.vp2, self.f.fp2))
+        self.assertEqual(pm.resolve(self.f.manifest, self.f.disc, out)["added"], 0)
+        self.assertEqual(len(pm.read_recipes(out)), 2)
+
+    def test_a_different_disc_adds_nothing(self):
+        pm.make(self.f.disc, [self.f.recorded], self.f.manifest)
+        pkg = os.path.join(self.f.disc, "PS3_GAME", "USRDIR", "data", "shaders", "shaders.ps3.pkg")
+        b = bytearray(self.f.pkg)
+        b[110] ^= 0xFF   # inside the vertex program
+        with open(pkg, "wb") as f:
+            f.write(b)
+        out = os.path.join(self.tmp, "r.bin")
+        self.assertEqual(pm.resolve(self.f.manifest, self.f.disc, out),
+                         {"listed": 2, "held": 0, "added": 1, "not_on_disc": 1})
+        self.assertEqual([k for k, _, _, _ in pm.read_recipes(out)], [0x2222])
+
+    def test_held_recipes_kept_and_a_damaged_tail_cut(self):
+        pm.make(self.f.disc, [self.f.recorded], self.f.manifest)
+        out = os.path.join(self.tmp, "r.bin")
+        own = record(head(0x3333, 16, 16), blob(16), blob(16))
+        with open(out, "wb") as f:
+            f.write(own + record(self.f.h2, self.f.vp2, self.f.fp2) + b"cut short")
+        res = pm.resolve(self.f.manifest, self.f.disc, out)
+        self.assertEqual(res, {"listed": 2, "held": 1, "added": 1, "not_on_disc": 0})
+        self.assertEqual([k for k, _, _, _ in pm.read_recipes(out)], [0x3333, 0x2222, 0x1111])
+        self.assertEqual(os.path.getsize(out), len(own) + sum(
+            pm.HEAD + len(v) + len(fp) + 4 for v, fp in ((self.f.vp2, self.f.fp2), (self.f.vp1, self.f.fp1))))
+
+    def test_a_program_not_on_the_disc_is_left_out(self):
+        with open(self.f.recorded, "ab") as f:
+            f.write(record(head(0x4444, 32, 32), blob(32), blob(32)))
+        self.assertEqual(pm.make(self.f.disc, [self.f.recorded], self.f.manifest), {"pipelines": 2, "left_out": 1})
+
+    def test_a_line_of_another_format_is_refused(self):
+        with open(self.f.manifest, "w") as f:
+            f.write("# x\n00 a 1 0 ff b 2 0 ee\n")
+        with self.assertRaises(ValueError):
+            pm.parse(self.f.manifest)
+
+    def test_the_worker_adds_them_to_an_install(self):
+        pm.make(self.f.disc, [self.f.recorded], self.f.manifest)
+        lay = layout.Layout(os.path.join(self.tmp, "install"))
+        os.makedirs(os.path.dirname(lay.disc))
+        os.rename(self.f.disc, lay.disc)
+        logs = []
+
+        class Prog:
+            def log(self, m):
+                logs.append(m)
+        old = worker.MANIFEST
+        worker.MANIFEST = self.f.manifest
+        try:
+            self.assertEqual(worker.first_session_recipes(lay, Prog())["added"], 2)
+            self.assertEqual(len(pm.read_recipes(os.path.join(lay.cache, "native-recipes.bin"))), 2)
+            worker.MANIFEST = os.path.join(self.tmp, "none.txt")
+            self.assertIsNone(worker.first_session_recipes(lay, Prog()))
+        finally:
+            worker.MANIFEST = old
+        self.assertEqual(logs, [])
+
+
+if __name__ == "__main__":
+    unittest.main()

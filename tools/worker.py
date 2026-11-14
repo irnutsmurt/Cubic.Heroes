@@ -35,6 +35,7 @@ sys.path.insert(0, os.path.join(ROOT, "tools"))
 
 import game_settings  # noqa: E402
 import install_layout as layout  # noqa: E402
+import pipeline_manifest  # noqa: E402
 import setup_pipeline as pipeline  # noqa: E402
 
 PROTOCOL = 1
@@ -491,15 +492,31 @@ def op_install(install, source, keys, elf, prog, resume=False, validate=validate
 
 # M9.2: the shaders and pipelines made before play (the game's `--prepare`: its recipes, recorded as the game
 # first makes each pipeline, translated by this build and made through its pipeline cache). After an install, a
-# repair or an update -- when there are recipes (a first install has none until the game has been played) -- and
-# whenever the launcher's check finds the cache not valid for this GPU and driver.
+# repair or an update -- when there are recipes (a first install's: the manifest's, below) -- and whenever the
+# launcher's check finds the cache not valid for this GPU and driver.
 PREPARE_TIMEOUT_S = 1800
+# The first session (docs/M9_LAUNCHER_PLAN.md section 15): the pipelines the project's test routes met, listed by
+# where their programs are on the disc; resolved against the install's own copy of the disc into its recipes, so a
+# first install prepares them before it is played. No list, or a disc that differs: nothing added.
+MANIFEST = os.path.join(pipeline.config_dir(), "pipeline_manifest.txt")
+
+
+def first_session_recipes(lay, prog):
+    """the manifest's pipelines added to the install's recipes (those it lacks); the counts, or None"""
+    if not os.path.exists(MANIFEST) or not os.path.isdir(lay.disc):
+        return None
+    try:
+        return pipeline_manifest.resolve(MANIFEST, lay.disc, os.path.join(lay.cache, "native-recipes.bin"))
+    except (OSError, ValueError) as e:
+        prog.log(f"the pipeline manifest was not used: {e}"[:2000])
+        return {"error": str(e)}
 
 
 def op_prepare(install, prog, check=False, rebuild=False):
     lay = layout.Layout(install)
     if lay.kind() != "slots":
         raise pipeline.SetupError("This folder has no install with build slots.", "no_install")
+    listed = None if check else first_session_recipes(lay, prog)
     if rebuild and not check:   # the manual rebuild: the active build's pipeline cache made again from its recipes
         sid = (lay.build_info(lay.read_active()["active"]) or {}).get("shader_cache") or "default"
         pc = os.path.join(lay.shaders, sid, "native-pipelines.vkpc")
@@ -538,13 +555,20 @@ def op_prepare(install, prog, check=False, rebuild=False):
             f": {result['error']}." if isinstance(result, dict) and result.get("error") else "."), "prepare_failed",
             last)
     result["exit"] = p.returncode
+    if listed is not None:
+        result["manifest"] = listed
     return result
 
 
 def prepare_after(lay, prog, validate):
-    """after a build became active: a preparation when there are recipes; its failure is reported, never the
-    operation's (the game still prepares what it meets). Not with the tests' stand-in builds (validate given)."""
-    if validate is not validate_build or not os.path.exists(os.path.join(lay.cache, "native-recipes.bin")):
+    """after a build became active: a preparation when there are recipes (the manifest's added first); its failure
+    is reported, never the operation's (the game still prepares what it meets). Not with the tests' stand-in
+    builds (validate given)."""
+    if validate is not validate_build:
+        prog.skip("prepare")
+        return None
+    first_session_recipes(lay, prog)
+    if not os.path.exists(os.path.join(lay.cache, "native-recipes.bin")):
         prog.skip("prepare")
         return None
     try:
