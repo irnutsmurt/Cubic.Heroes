@@ -84,6 +84,7 @@
 #include "rsx_vertex_formats.h"
 #include "rsx_vp_decompiler.h"
 #include "rsx_vulkan_bridge.h"
+#include "ps3emu/ps3_ftrace.h"   // the compile log's clock: the backend's (M9.0)
 
 extern "C" uint8_t* vm_base;
 extern "C" uint32_t cellGcmResolveLocated(int local, uint32_t offset);
@@ -1094,12 +1095,38 @@ bool programs_text(const ProgParams& p, std::string& vs_out, std::string& ps_out
     return vi > 0 && fi > 0;
 }
 
+// M9.0: the compile log (VK_COMPILE_LOG=1, as the backend's: tests/batch_report.py counts the lines per
+// segment, on the trace's clock) and the totals in the report (stats(): pipe_*)
+bool compile_log()
+{
+    static const bool on = getenv("VK_COMPILE_LOG") != nullptr;
+    return on;
+}
+
+double compile_clock()
+{
+    return (double)(int64_t)(ps3_ft_now() - g_ps3_ft.base) / 1e9;
+}
+
 VkShaderModule spirv_module(const std::string& hlsl, int stage)
 {
     static std::vector<uint32_t> words(262144);
     uint32_t n = 0;
     char log[2048];
-    if (rsx_hlsl_to_spirv(hlsl.c_str(), stage, words.data(), (uint32_t)words.size(), &n, log, sizeof log) || !n) {
+    RsxSpirvCacheStats c0 = {}, c1 = {};
+    rsx_hlsl_to_spirv_cache_stats(&c0);
+    const uint64_t t0 = now_ns();
+    const int bad = rsx_hlsl_to_spirv(hlsl.c_str(), stage, words.data(), (uint32_t)words.size(), &n, log, sizeof log);
+    const uint64_t t1 = now_ns();
+    rsx_hlsl_to_spirv_cache_stats(&c1);
+    stats().pipe_spirv_ns += t1 - t0;
+    const bool glslang = c1.translations != c0.translations;
+    (glslang ? stats().n_spirv_glslang : stats().n_spirv_cached)++;
+    if (compile_log())
+        fprintf(stderr, "[vk-compile] t=%.3f translate %s %u words %.2f ms %s\n", compile_clock(),
+                stage == RSX_SHADER_STAGE_VERTEX ? "vertex" : "fragment", n, (t1 - t0) / 1e6,
+                glslang ? "glslang" : c1.disk_hits != c0.disk_hits ? "disk" : "memory");
+    if (bad || !n) {
         report_add((std::string("render: SPIR-V translation failed: ") + log).c_str());
         return VK_NULL_HANDLE;
     }
@@ -1108,6 +1135,23 @@ VkShaderModule spirv_module(const std::string& hlsl, int stage)
     VkShaderModule m = VK_NULL_HANDLE;
     F.vkCreateShaderModule(D.device, &ci, nullptr, &m);
     return m;
+}
+
+// M9.0: one pipeline's first use, accounted: its text and SPIR-V (counted in programs_text's caller and
+// spirv_module), the driver's part, the whole from c_start; with VK_COMPILE_LOG a line per pipeline (the
+// backend's format: tests/batch_report.py takes the driver's milliseconds)
+void compile_account(const char* kind, uint64_t key, uint64_t c_start, uint64_t c_driver, uint64_t c_end)
+{
+    Stats& s = stats();
+    s.pipe_driver_ns += c_end - c_driver;
+    const uint64_t all = c_end - c_start;
+    uint64_t m = s.pipe_max_ns.load();
+    while (all > m && !s.pipe_max_ns.compare_exchange_weak(m, all)) {}
+    if (all > 4000000u) s.n_pipe_over_4ms++;
+    if (all > 16000000u) s.n_pipe_over_16ms++;
+    if (compile_log())
+        fprintf(stderr, "[vk-compile] t=%.3f pipeline %s key %016llX total %.2f ms driver %.2f ms\n", compile_clock(),
+                kind, (unsigned long long)key, all / 1e6, (c_end - c_driver) / 1e6);
 }
 
 // The fragment translator's control word, made from the program's
@@ -1228,7 +1272,10 @@ const Pipe* pipeline(const Rec* r, const rsx_vertex_layout_plan& layout, VkForma
                       { wpos[0], wpos[1] }, 0, shadow, gamma, expand, (const uint32_t (*)[3])unnorm };
     std::string vs, ps;
     uint32_t nconst = 0;
-    if (!programs_text(pp, vs, ps, &nconst) || nconst != consts->count) {
+    const uint64_t c_start = now_ns();   // M9.0: the pipeline's first use, from here (compile_account)
+    const bool text_ok = programs_text(pp, vs, ps, &nconst);
+    stats().pipe_text_ns += now_ns() - c_start;
+    if (!text_ok || nconst != consts->count) {
         report_add("render: a record's programs did not translate");
         return nullptr;
     }
@@ -1267,7 +1314,9 @@ const Pipe* pipeline(const Rec* r, const rsx_vertex_layout_plan& layout, VkForma
     gci.stageCount = 2; gci.pStages = stg; gci.pVertexInputState = &vi; gci.pInputAssemblyState = &ia;
     gci.pViewportState = &vps; gci.pRasterizationState = &ras; gci.pMultisampleState = &ms; gci.pColorBlendState = &cb;
     gci.pDynamicState = &dy; gci.layout = s_pl; gci.renderPass = render_pass(rt);
+    const uint64_t c_driver = now_ns();
     const VkResult res = F.vkCreateGraphicsPipelines(D.device, VK_NULL_HANDLE, 1, &gci, nullptr, &P.p);
+    compile_account("ppfx", k, c_start, c_driver, now_ns());
     F.vkDestroyShaderModule(D.device, vsm, nullptr);
     F.vkDestroyShaderModule(D.device, fsm, nullptr);
     if (res != VK_SUCCESS) { fail("vkCreateGraphicsPipelines", res); P.p = VK_NULL_HANDLE; return nullptr; }
@@ -1581,7 +1630,10 @@ const Pipe* pipeline_asp(const Rec* r, const rsx_vertex_layout_plan& layout, VkF
                       { wpos[0], wpos[1] }, 0, shadow, gamma, expand, (const uint32_t (*)[3])unnorm };
     std::string vs, ps;
     uint32_t nconst = 0;
-    if (!programs_text(pp, vs, ps, &nconst) || nconst != consts->count) {
+    const uint64_t c_start = now_ns();   // M9.0: the pipeline's first use, from here (compile_account)
+    const bool text_ok = programs_text(pp, vs, ps, &nconst);
+    stats().pipe_text_ns += now_ns() - c_start;
+    if (!text_ok || nconst != consts->count) {
         report_add("render: an asp record's programs did not translate");
         return nullptr;
     }
@@ -1647,7 +1699,9 @@ const Pipe* pipeline_asp(const Rec* r, const rsx_vertex_layout_plan& layout, VkF
     gci.stageCount = 2; gci.pStages = stg; gci.pVertexInputState = &vi; gci.pInputAssemblyState = &ia;
     gci.pViewportState = &vps; gci.pRasterizationState = &ras; gci.pMultisampleState = &ms; gci.pColorBlendState = &cb;
     gci.pDepthStencilState = &ds; gci.pDynamicState = &dy; gci.layout = s_pl; gci.renderPass = render_pass2(rt, df);
+    const uint64_t c_driver = now_ns();
     const VkResult res = F.vkCreateGraphicsPipelines(D.device, VK_NULL_HANDLE, 1, &gci, nullptr, &P.p);
+    compile_account("asp", k, c_start, c_driver, now_ns());
     F.vkDestroyShaderModule(D.device, vsm, nullptr);
     F.vkDestroyShaderModule(D.device, fsm, nullptr);
     if (res != VK_SUCCESS) { fail("vkCreateGraphicsPipelines (asp)", res); P.p = VK_NULL_HANDLE; return nullptr; }

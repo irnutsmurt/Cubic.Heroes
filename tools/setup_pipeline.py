@@ -54,7 +54,18 @@ PPU_CHUNKS = "48"
 
 
 class SetupError(Exception):
-    pass
+    """A failure the player can act on. code: what kind (docs/M9_WORKER_PROTOCOL.md section 4), for the
+    launcher to choose its advice by; details: the technical part, shown on request."""
+
+    def __init__(self, message, code="failed", details=None):
+        super().__init__(message)
+        self.code = code
+        self.details = details
+
+
+class Cancelled(BaseException):
+    """Raised from a progress or log callback when the player cancelled: a BaseException, so no step's own
+    `except Exception` (spu_native's) takes it for a failure of that step."""
 
 
 def config_dir():
@@ -134,20 +145,26 @@ def tool_fingerprint(*names):
     return h.hexdigest()
 
 
-def run_tool(script, args, log):
+def run_tool(script, args, log, code="lift_failed"):
     """Run one of the lifting tools as its own process: `python script args` from a
     checkout; in the packaged app, the app itself runs it (setup_app.py main)."""
     cmd = [sys.executable, script, *args]
     kw = {"creationflags": 0x08000000} if os.name == "nt" else {}
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, **kw)
     tail = []
-    for line in p.stdout:
-        line = line.rstrip()
-        tail = (tail + [line])[-40:]
-        if log:
-            log(line)
+    try:
+        for line in p.stdout:
+            line = line.rstrip()
+            tail = (tail + [line])[-40:]
+            if log:
+                log(line)   # the worker's log may raise its cancellation here
+    except BaseException:
+        p.kill()
+        p.wait()
+        raise
     if p.wait():
-        raise SetupError(f"{os.path.basename(script)} failed:\n" + "\n".join(tail[-12:]))
+        raise SetupError(f"Recompiling the game failed in {os.path.basename(script)}.", code,
+                         "\n".join(tail[-12:]))
 
 
 def spu_text_ea(eboot, image):
@@ -176,19 +193,24 @@ def spu_text_ea(eboot, image):
 def verify(source, progress):
     """source: the ISO or a disc folder. Returns its kind."""
     want = version_info()
+    if not os.path.exists(source):
+        raise SetupError("The disc image wasn't found: it may have been moved, or its drive is not connected.",
+                         "not_found")
     if os.path.isdir(source):
         bin_ = os.path.join(source, "PS3_GAME", "USRDIR", "EBOOT.BIN")
         if not os.path.exists(bin_):
-            raise SetupError("That folder has no PS3_GAME/USRDIR/EBOOT.BIN: choose the disc's top folder.")
+            raise SetupError("That folder has no PS3_GAME/USRDIR/EBOOT.BIN: choose the disc's top folder.",
+                             "not_a_disc")
         if sha256_file(bin_) != want["files"]["PS3_GAME/USRDIR/EBOOT.BIN"]:
-            raise SetupError("This isn't 3D Dot Game Heroes BLUS-30490 v01.00 (US): EBOOT.BIN doesn't match.")
+            raise SetupError("This isn't 3D Dot Game Heroes BLUS-30490 v01.00 (US): EBOOT.BIN doesn't match.",
+                             "unsupported_version")
         return "folder"
     if os.path.getsize(source) != want["disc_image"]["size"]:
         raise SetupError("This disc image isn't the supported one: 3D Dot Game Heroes BLUS-30490 v01.00 (US), "
-                         "a decrypted ISO (the size doesn't match).")
+                         "a decrypted ISO (the size doesn't match).", "unsupported_version")
     if sha256_file(source, progress) != want["disc_image"]["sha256"]:
         raise SetupError("This disc image doesn't match BLUS-30490 v01.00 (US) (SHA-256). "
-                         "Is it a decrypted dump of the US disc?")
+                         "Is it a decrypted dump of the US disc?", "damaged_disc")
     return "iso"
 
 
@@ -226,30 +248,164 @@ def extract(source, kind, paths, progress, log):
                         progress(done / total)
     want = version_info()["files"]["PS3_GAME/USRDIR/EBOOT.BIN"]
     if sha256_file(paths.eboot_bin) != want:
-        raise SetupError("The extracted EBOOT.BIN doesn't match: the disc image may be damaged.")
+        raise SetupError("The extracted EBOOT.BIN doesn't match: the disc image may be damaged.", "damaged_disc")
     log(f"extracted {len(ents)} files")
 
 
-def decrypt(paths, keys=None, elf=None):
+def decrypt_eboot(eboot_bytes, keys=None, elf=None):
+    """EBOOT.BIN's bytes -> the decrypted program's, checked against the supported version's SHA-256.
+    keys: the player's keys file; elf: an EBOOT.elf they decrypted themselves. The keys are read here and
+    nowhere else, and never written, logged or put in an error's text."""
     want = version_info()["decrypted_elf"]["sha256"]
     if elf:
-        data = open(elf, "rb").read()
+        try:
+            data = open(elf, "rb").read()
+        except OSError as e:
+            raise SetupError(f"Can't read that EBOOT.elf ({e.strerror}).", "keys_unreadable")
     else:
         import self_decrypt
         try:
             k = self_decrypt.load_keys(keys)
-        except OSError as e:
-            raise SetupError(f"Can't read the keys file ({e.strerror}).")
+        except (OSError, UnicodeDecodeError) as e:
+            raise SetupError("Can't read the keys file" + (f" ({e.strerror})." if isinstance(e, OSError) else
+                                                          ": it isn't a text file."), "keys_unreadable")
+        except ValueError:
+            raise SetupError("The keys file has a line that isn't a key (APP <revision> <erk> <riv>, in hex).",
+                             "keys_unreadable")
         if not k:
-            raise SetupError("The keys file has no APP keys (lines: APP <revision> <erk> <riv>).")
+            raise SetupError("The keys file has no APP keys (lines: APP <revision> <erk> <riv>).", "keys_empty")
         try:
-            data = self_decrypt.decrypt_self(open(paths.eboot_bin, "rb").read(), k)
-        except Exception as e:
-            raise SetupError(f"Decrypting EBOOT.BIN failed ({e}). The keys file needs the APP key "
-                             "revision 0x0001.")
+            data = self_decrypt.decrypt_self(eboot_bytes, k)
+        except Exception as e:  # noqa: BLE001 -- the reason only: never the keys
+            raise SetupError("Decrypting the game program failed: the keys file needs the APP key revision "
+                             "0x0001.", "wrong_key", type(e).__name__)
     if hashlib.sha256(data).hexdigest() != want:
-        raise SetupError("The decrypted program doesn't match the expected one: wrong keys, or a different "
-                         "EBOOT.elf.")
+        raise SetupError("The keys don't match this game: the decrypted program isn't the expected one.",
+                         "wrong_key")
+    return data
+
+
+# ---------------- probes: what the player chose, checked before anything is written ----------------
+
+def parse_sfo(b):
+    """PARAM.SFO's entries (TITLE_ID, APP_VER, TITLE, ...)."""
+    if b[:4] != b"\0PSF":
+        raise ValueError("not a PARAM.SFO")
+    key_tab, data_tab, n = struct.unpack_from("<III", b, 8)
+    out = {}
+    for i in range(n):
+        ko, fmt, ln, _, do = struct.unpack_from("<HHIII", b, 20 + i * 16)
+        k = b[key_tab + ko:b.index(b"\0", key_tab + ko)].decode("ascii", "replace")
+        v = b[data_tab + do:data_tab + do + ln]
+        out[k] = struct.unpack("<I", v[:4])[0] if fmt == 0x0404 else v.rstrip(b"\0").decode("utf-8", "replace")
+    return out
+
+
+def _iso_files(f):
+    """{path: extents} of an ISO9660 image, or None when it isn't one"""
+    import iso9660
+    try:
+        vd, _ = iso9660.find_volume(f)
+        if vd is None:
+            return None
+        return dict(iso9660.entries(f))
+    except (OSError, struct.error, IndexError, ValueError):
+        return None
+
+
+def _iso_read(f, extents, limit=1 << 30):
+    import iso9660
+    out = bytearray()
+    for lba, n in extents:
+        f.seek(lba * iso9660.SECTOR)
+        out += f.read(min(n, limit - len(out)))
+    return bytes(out)
+
+
+def _disc_file(source, rel, files=None, f=None):
+    """one file of the disc (a folder or an ISO), or None"""
+    if os.path.isdir(source):
+        p = os.path.join(source, *rel.split("/"))
+        return open(p, "rb").read() if os.path.isfile(p) else None
+    return _iso_read(f, files[rel]) if rel in files else None
+
+
+def probe_disc(source):
+    """What the chosen disc is, without extracting it: PARAM.SFO's title and version, EBOOT.BIN's SHA-256
+    (a few seconds; the whole image's SHA-256 is the install's first step). Returns a dict; raises
+    SetupError (not_found, not_a_disc, unsupported_version, damaged_disc)."""
+    want = version_info()
+    if not source or not os.path.exists(source):
+        raise SetupError("The disc image wasn't found.", "not_found")
+    f = files = None
+    try:
+        if not os.path.isdir(source):
+            f = open(source, "rb")
+            files = _iso_files(f)
+            if files is None:
+                raise SetupError("This file isn't a disc image (no ISO 9660 file system). Choose a decrypted "
+                                 "ISO of your disc.", "not_a_disc")
+        sfo_b = _disc_file(source, "PS3_GAME/PARAM.SFO", files, f)
+        if sfo_b is None:
+            raise SetupError("This isn't a PS3 game disc (no PS3_GAME/PARAM.SFO). Choose a decrypted ISO of "
+                             "your disc, or its top folder.", "not_a_disc")
+        try:
+            sfo = parse_sfo(sfo_b)
+        except (ValueError, struct.error, IndexError):
+            raise SetupError("The disc's PARAM.SFO is unreadable: the image may be encrypted or damaged.",
+                             "damaged_disc")
+        info = {"kind": "folder" if files is None else "iso", "title_id": sfo.get("TITLE_ID", ""),
+                "app_ver": sfo.get("APP_VER", ""), "title": sfo.get("TITLE", ""),
+                "size": None if files is None else os.path.getsize(source)}
+        supported = f"{want['title']} {want['title_id'][:4]}-{want['title_id'][4:]} v{want['app_ver']} (US)"
+        if info["title_id"] != want["title_id"]:
+            raise SetupError(f"This is {info['title'] or 'another game'} ({info['title_id'] or 'no title ID'}). "
+                             f"Supported: {supported}.", "unsupported_version", json.dumps(info))
+        if info["app_ver"] != want["app_ver"]:
+            raise SetupError(f"This is version {info['app_ver']} of the game; supported: {supported}.",
+                             "unsupported_version", json.dumps(info))
+        eboot = _disc_file(source, "PS3_GAME/USRDIR/EBOOT.BIN", files, f)
+        if eboot is None or hashlib.sha256(eboot).hexdigest() != want["files"]["PS3_GAME/USRDIR/EBOOT.BIN"]:
+            raise SetupError("The disc's game program (EBOOT.BIN) isn't the expected one: the image may be "
+                             "encrypted, damaged or modified.", "damaged_disc", json.dumps(info))
+        if files is not None and info["size"] != want["disc_image"]["size"]:
+            raise SetupError("The disc image's size isn't the supported dump's: it may be incomplete or "
+                             "modified.", "damaged_disc", json.dumps(info))
+        return info
+    finally:
+        if f:
+            f.close()
+
+
+def probe_keys(source, keys=None, elf=None):
+    """Whether the keys file (or EBOOT.elf) decrypts this disc's program to the supported one, in memory:
+    nothing is written. Raises SetupError (keys_missing, keys_unreadable, keys_empty, wrong_key)."""
+    if not (keys or elf):
+        raise SetupError("Choose your keys file, or an EBOOT.elf you decrypted.", "keys_missing")
+    if not os.path.isfile(keys or elf):
+        raise SetupError("The keys file wasn't found.", "keys_unreadable")
+    if os.path.isdir(source):
+        eboot = _disc_file(source, "PS3_GAME/USRDIR/EBOOT.BIN")
+    else:
+        with open(source, "rb") as f:
+            eboot = _disc_file(source, "PS3_GAME/USRDIR/EBOOT.BIN", _iso_files(f) or {}, f)
+    if eboot is None:
+        raise SetupError("The disc's game program (EBOOT.BIN) wasn't found.", "not_a_disc")
+    decrypt_eboot(eboot, keys, elf)
+    return {"match": True, "via": "elf" if elf else "keys"}
+
+
+def is_elf(path):
+    """an EBOOT.elf the player decrypted, chosen in place of a keys file"""
+    try:
+        with open(path, "rb") as f:
+            return f.read(4) == b"\x7fELF"
+    except OSError:
+        return False
+
+
+def decrypt(paths, keys=None, elf=None):
+    data = decrypt_eboot(open(paths.eboot_bin, "rb").read(), keys, elf)
     tmp = paths.elf + ".part"
     with open(tmp, "wb") as f:
         f.write(data)
@@ -400,12 +556,13 @@ def run(install, source=None, keys=None, elf=None, progress=None, log=None, skip
         extract(source, kind, paths, lambda f: progress("extract", f, STEP_NAMES["extract"]), log)
         progress("decrypt", 0.0, STEP_NAMES["decrypt"])
         if not (keys or elf):
-            raise SetupError("Choose your keys file, or an EBOOT.elf you decrypted.")
+            raise SetupError("Choose your keys file, or an EBOOT.elf you decrypted.", "keys_missing")
         decrypt(paths, keys, elf)
         save(source=os.path.abspath(source), stamps={})
     else:
         if not os.path.exists(paths.elf):
-            raise SetupError("This install has no copy of the disc: choose your disc image to set it up again.")
+            raise SetupError("This install has no copy of the disc: choose your disc image to set it up again.",
+                             "no_disc_copy")
         for s in ("verify", "extract", "decrypt"):
             skip(s)
 

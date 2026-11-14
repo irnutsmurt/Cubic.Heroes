@@ -4205,6 +4205,13 @@ void write_report()
             s.n_image_bytes / 1048576.0, (unsigned long long)s.n_static_textures, (unsigned long long)s.n_feedback,
             (unsigned long long)s.n_retired, (unsigned long long)s.n_disabled_unit_draws,
             (unsigned long long)s.disabled_units.load());
+    // M9.0: what the pipelines' first uses cost (ppfx_render.cpp compile_account)
+    fprintf(f, "native compiles: pipelines %llu in %.1f ms (programs to text %.1f, SPIR-V %.1f: %llu translated by "
+               "glslang, %llu from the cache; the driver %.1f), longest %.2f ms, over 4 ms %llu, over 16 ms %llu\n",
+            (unsigned long long)s.n_pipelines,
+            (s.pipe_text_ns + s.pipe_spirv_ns + s.pipe_driver_ns) / 1e6, s.pipe_text_ns / 1e6, s.pipe_spirv_ns / 1e6,
+            (unsigned long long)s.n_spirv_glslang, (unsigned long long)s.n_spirv_cached, s.pipe_driver_ns / 1e6,
+            s.pipe_max_ns / 1e6, (unsigned long long)s.n_pipe_over_4ms, (unsigned long long)s.n_pipe_over_16ms);
     fprintf(f, "native_ms record_cpu %.1f gpu %.1f wait_walker %.1f wait_signal %.1f compare %.1f\n",
             s.cpu_record_ns / 1e6, s.gpu_ns / 1e6, s.wait_walker_us / 1e3, s.wait_signal_us / 1e3, s.compare_ns / 1e6);
     fprintf(f, "native_gpu_ms draws %.1f copies %.1f readbacks %.1f other %.1f | barriers %llu (full %llu) "
