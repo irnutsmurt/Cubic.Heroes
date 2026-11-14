@@ -269,6 +269,10 @@ def _run(cmd, **kw):
     # no console window flashing up for every compile on Windows
     if os.name == "nt":
         kw.setdefault("creationflags", 0x08000000)  # CREATE_NO_WINDOW
+    # No stdin inherited: the pipeline worker reads its own stdin on a thread (the launcher's cancel), and on
+    # Windows a child started on a pipe with a read pending stops in its start-up until that read ends (M9.1)
+    if "input" not in kw:
+        kw.setdefault("stdin", subprocess.DEVNULL)
     return subprocess.run(cmd, **kw)
 
 
@@ -396,11 +400,15 @@ def link_args(lib_dir, platform=HOST):
                            "-Wl,-rpath,$ORIGIN/lib"]
 
 
-def build_game(gen_dir, out_exe, cache_dir, zig=None, platform=HOST, progress=None, log=None):
+def build_game(gen_dir, out_exe, cache_dir, zig=None, platform=HOST, progress=None, log=None, keep=(),
+               used_out=None):
     """Compile what the player's disc became (gen_dir) with the port's sources and
     link it with the prebuilt runtime. progress(fraction, message) for the whole
     build. cache_dir keeps the objects (fingerprinted): an update recompiles only
-    what changed, often nothing, and relinks."""
+    what changed, often nothing, and relinks. keep: object file names another
+    build still needs (M9.1: the builds an install keeps for rollback), never
+    removed with the ones this build no longer uses; used_out: a list given the
+    names of the objects this build linked."""
     zig = zig or find_zig()
     src = Sources(platform)
     lib = os.path.join(src.lib_dir, RUNTIME_LIB)
@@ -427,8 +435,10 @@ def build_game(gen_dir, out_exe, cache_dir, zig=None, platform=HOST, progress=No
     if compiled:
         timings["per_file"] = (time.monotonic() - t0) / compiled
     used = {os.path.basename(j[1]) for j in jobs}
-    for f in os.listdir(cache_dir):  # objects this build no longer uses
-        if f.endswith(".o") and f not in used:
+    if used_out is not None:
+        used_out[:] = sorted(used)
+    for f in os.listdir(cache_dir):  # objects neither this build nor a kept one uses
+        if f.endswith(".o") and f not in used and f not in keep:
             os.remove(os.path.join(cache_dir, f))
     if log:
         log(f"linking {os.path.basename(out_exe)}...")
@@ -436,7 +446,8 @@ def build_game(gen_dir, out_exe, cache_dir, zig=None, platform=HOST, progress=No
            *link_args(src.lib_dir, platform), "-s"]
     t1 = time.monotonic()
     kw = {"creationflags": 0x08000000} if os.name == "nt" else {}
-    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **kw)
+    p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                         **kw)
     while True:
         try:
             _, err = p.communicate(timeout=0.25)

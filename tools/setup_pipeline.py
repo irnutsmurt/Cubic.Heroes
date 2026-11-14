@@ -111,38 +111,58 @@ def install_info(install):
 
 
 class Paths:
-    """An install folder:
-        <install>/dotheroes[.exe]   the game
-        <install>/lib/              Linux: SDL2, OpenAL Soft and FFmpeg (Windows: their DLLs beside the game)
-        <install>/data/disc/        the disc's files, EBOOT.elf decrypted
-        <install>/data/gen/         the recompiled code (work files)
-        <install>/data/cache/       compiled objects (updates reuse them)
-        <install>/data/gamedata/    saves
-        <install>/data/install.json what this setup did"""
+    """An install folder (M9.1's layout with build slots: tools/install_layout.py):
+        <install>/data/disc/              the disc's files, EBOOT.elf decrypted
+        <install>/data/gen/<lift-id>/     one lift's recompiled code (out, recompiled, spu, spu_native; done.json)
+        <install>/data/cache/objects/     compiled objects (every build reuses them)
+        <install>/data/gamedata/          saves
+        <install>/data/install.json       what the conversion did
+        <out>/dotheroes[.exe]             the game built: a staged build slot (out_dir), its libraries beside it
+                                          (Linux: in its lib/)"""
 
-    def __init__(self, install):
+    def __init__(self, install, gen=None, out_dir=None):
         self.install = os.path.abspath(install)
         self.data = os.path.join(self.install, "data")
         self.disc = os.path.join(self.data, "disc")
-        self.gen = os.path.join(self.data, "gen")
-        self.cache = os.path.join(self.data, "cache")
-        self.exe = os.path.join(self.install, exe_name())
+        self.gen_root = os.path.join(self.data, "gen")
+        self.gen = gen or self.gen_root
+        self.cache = os.path.join(self.data, "cache", "objects")
+        self.out = os.path.abspath(out_dir or self.install)
+        self.exe = os.path.join(self.out, exe_name())
         self.eboot_bin = os.path.join(self.disc, "PS3_GAME", "USRDIR", "EBOOT.BIN")
         self.elf = os.path.join(self.disc, "PS3_GAME", "USRDIR", "EBOOT.elf")
+        self.extracted = os.path.join(self.disc, ".extracted")   # the extraction finished
+
+
+# What a lift is made from (M9.1): ps3recomp's tools, the configuration they read, and this project's lifting
+# tools -- not every file in tools/ (a launcher's or a developer's script changes no lift), but everything the
+# lift reads: the SPU tasks' generator, its template and its per-task configurations (tools/spu_native/) too.
+LIFT_TOOLS = ["fix_functions.py", "setup_pipeline.py", "gen_spu_native.py", "spu_native_task.cpp.in"]
 
 
 def tool_fingerprint(*names):
     """the code of the tools a step runs, and the configuration they read"""
     h = hashlib.sha1()
-    for d in (ps3_tools(), os.path.join(ROOT, "tools"), config_dir()):
-        for n in sorted(os.listdir(d)):
-            if n.endswith((".py", ".json")):
-                h.update(n.encode() + b"\0")
-                with open(os.path.join(d, n), "rb") as f:
-                    h.update(f.read())
+    files = []
+    for d, exts in ((ps3_tools(), (".py",)), (config_dir(), (".json",))):
+        files += [os.path.join(d, n) for n in sorted(os.listdir(d)) if n.endswith(exts)]
+    files += [os.path.join(ROOT, "tools", n) for n in LIFT_TOOLS]
+    sn = os.path.join(ROOT, "tools", "spu_native")
+    if os.path.isdir(sn):
+        files += [os.path.join(sn, n) for n in sorted(os.listdir(sn)) if n.endswith(".py")]
+    for f in files:
+        if os.path.isfile(f):
+            h.update(os.path.basename(f).encode() + b"\0")
+            with open(f, "rb") as fh:
+                h.update(fh.read())
     for n in names:
         h.update(n.encode())
     return h.hexdigest()
+
+
+def lift_id(elf_sha):
+    """the lift's folder name: its two steps' fingerprints (the same tools and program: the same lift)"""
+    return hashlib.sha1((tool_fingerprint("recomp", elf_sha) + tool_fingerprint("spu", elf_sha)).encode()).hexdigest()[:16]
 
 
 def run_tool(script, args, log, code="lift_failed"):
@@ -150,7 +170,10 @@ def run_tool(script, args, log, code="lift_failed"):
     checkout; in the packaged app, the app itself runs it (setup_app.py main)."""
     cmd = [sys.executable, script, *args]
     kw = {"creationflags": 0x08000000} if os.name == "nt" else {}
-    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, **kw)
+    # no stdin: the worker reads its own on a thread (the launcher's cancel); a child on a pipe with a read
+    # pending would stop in its start-up on Windows until that read ends (M9.1: the resume test's hang)
+    p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                         **kw)
     tail = []
     try:
         for line in p.stdout:
@@ -508,39 +531,61 @@ def spu_native(paths, log):
 
 
 def finish(paths, log):
+    """the shared libraries beside the built game (a build slot carries its own): SDL2, OpenAL Soft (the game's
+    audio) with its notice, FFmpeg (the movies) with its notice and licence; its icon"""
     lib = zig_build.Sources().lib_dir
-    # the shared libraries beside the game: SDL2, OpenAL Soft (the game's audio) with its notice, FFmpeg (the
-    # movies) with its notice and licence
     dlls = ["SDL2.dll", "OpenAL32.dll"] if os.name == "nt" else ["libSDL2-2.0.so.0", "libopenal.so.1"]
-    dest = paths.install if os.name == "nt" else os.path.join(paths.install, "lib")
+    dest = paths.out if os.name == "nt" else os.path.join(paths.out, "lib")
     os.makedirs(dest, exist_ok=True)
     for name in dlls + ["OpenAL-Soft-NOTICE.txt"] + FFMPEG_FILES:
         if os.path.exists(os.path.join(lib, name)) or name.startswith(("SDL2", "libSDL2")):
             shutil.copy2(os.path.join(lib, name), dest)
     for icon in (os.path.join(ROOT, "assets", "icon.png"), os.path.join(ROOT, "lib", "icon.png")):
         if os.path.exists(icon):
-            shutil.copy2(icon, os.path.join(paths.install, "icon.png"))
+            shutil.copy2(icon, os.path.join(paths.out, "icon.png"))
             break
     for d in ("gamedata", "dev_flash"):
         os.makedirs(os.path.join(paths.data, d), exist_ok=True)
 
 
+def source_stamp(source):
+    """the chosen disc as found now: an image's size and time, or a folder's EBOOT.BIN's"""
+    p = os.path.join(source, "PS3_GAME", "USRDIR", "EBOOT.BIN") if os.path.isdir(source) else source
+    st = os.stat(p)
+    return f"{os.path.abspath(source)}|{st.st_size}|{st.st_mtime_ns}"
+
+
 # ---------------- the whole thing ----------------
 
-def run(install, source=None, keys=None, elf=None, progress=None, log=None, skip=None, full=False):
-    """Set up (source given) or update (source None: the install's own copy of the
-    disc) the game in `install`. keys / elf: how EBOOT.BIN is decrypted (an update
-    reuses the decrypted program). Returns the game's path."""
+def build_inputs(gen, cache, lid):
+    """what a build is made of, as one fingerprint: the lift, the objects (each named by its own fingerprint:
+    source, flags, headers, compiler) and the libraries and linker -- equal inputs, an equal game"""
+    zig = zig_build.find_zig()
+    jobs = zig_build.game_jobs(zig_build.Sources(), gen, cache, zig)
+    h = hashlib.sha1(lid.encode())
+    for name in sorted(os.path.basename(j[1]) for j in jobs):
+        h.update(name.encode() + b"\n")
+    h.update(zig_build.link_fingerprint(zig=zig).encode())
+    return h.hexdigest()
+
+
+def run(install, source=None, keys=None, elf=None, progress=None, log=None, skip=None, full=False, out_dir=None,
+        keep_objects=(), resume=False, unchanged_inputs=None):
+    """Convert (source given) or rebuild (source None: the install's own copy of the disc) the game into out_dir,
+    a staged build slot of `install` (tools/install_layout.py; the worker records, checks and activates it).
+    keys / elf: how EBOOT.BIN is decrypted. resume: the disc's steps a previous run of the same disc finished
+    are not done again (an interrupted install taken up again). full: everything again, the lift and every
+    object. keep_objects: the objects the install's kept builds link. Returns what the build is made of: the
+    game's path, its lift, its objects, its shader cache's id, the version that made it."""
     from version import VERSION
-    paths = Paths(install)
+    paths = Paths(install, out_dir=out_dir)
     progress = progress or (lambda s, f, m: None)
     log = log or (lambda m: None)
     skip = skip or (lambda s: None)
     info = install_info(install) or {}
-    stamps = {} if full or source else dict(info.get("stamps", {}))
-    os.makedirs(paths.data, exist_ok=True)
-    if full and os.path.isdir(paths.cache):
-        shutil.rmtree(paths.cache)
+    stamps = {} if full else dict(info.get("stamps", {}))
+    for d in (paths.data, paths.gen_root, paths.cache, paths.out):
+        os.makedirs(d, exist_ok=True)
 
     def save(**kw):
         info.update(kw, version=VERSION, stamps=stamps)
@@ -550,15 +595,37 @@ def run(install, source=None, keys=None, elf=None, progress=None, log=None, skip
         os.replace(tmp, os.path.join(paths.data, "install.json"))
 
     if source:
-        progress("verify", 0.0, STEP_NAMES["verify"])
-        kind = verify(source, lambda f: progress("verify", f, STEP_NAMES["verify"]))
-        progress("extract", 0.0, STEP_NAMES["extract"])
-        extract(source, kind, paths, lambda f: progress("extract", f, STEP_NAMES["extract"]), log)
-        progress("decrypt", 0.0, STEP_NAMES["decrypt"])
-        if not (keys or elf):
-            raise SetupError("Choose your keys file, or an EBOOT.elf you decrypted.", "keys_missing")
-        decrypt(paths, keys, elf)
-        save(source=os.path.abspath(source), stamps={})
+        here = source_stamp(source)
+        same = resume and stamps.get("source") == here
+        if not same:   # another disc, or a fresh start: every disc step again
+            stamps = {}
+        if same and stamps.get("verify") == here:
+            skip("verify")
+        else:
+            progress("verify", 0.0, STEP_NAMES["verify"])
+            kind = verify(source, lambda f: progress("verify", f, STEP_NAMES["verify"]))
+            stamps.update(source=here, verify=here)
+            stamps.pop("extract", None)
+            save(source=os.path.abspath(source))
+        if same and stamps.get("extract") == here and os.path.exists(paths.extracted):
+            skip("extract")
+        else:
+            kind = "folder" if os.path.isdir(source) else "iso"
+            progress("extract", 0.0, STEP_NAMES["extract"])
+            extract(source, kind, paths, lambda f: progress("extract", f, STEP_NAMES["extract"]), log)
+            open(paths.extracted, "w").close()
+            stamps["extract"] = here
+            stamps.pop("decrypt", None)
+            save()
+        if same and stamps.get("decrypt") and os.path.exists(paths.elf) and sha256_file(paths.elf) == stamps["decrypt"]:
+            skip("decrypt")
+        else:
+            progress("decrypt", 0.0, STEP_NAMES["decrypt"])
+            if not (keys or elf):
+                raise SetupError("Choose your keys file, or an EBOOT.elf you decrypted.", "keys_missing")
+            decrypt(paths, keys, elf)
+            stamps["decrypt"] = sha256_file(paths.elf)
+            save()
     else:
         if not os.path.exists(paths.elf):
             raise SetupError("This install has no copy of the disc: choose your disc image to set it up again.",
@@ -566,24 +633,39 @@ def run(install, source=None, keys=None, elf=None, progress=None, log=None, skip
         for s in ("verify", "extract", "decrypt"):
             skip(s)
 
-    elf_sha = info.get("elf_sha256") or sha256_file(paths.elf)
-    for step, fn in (("recomp", recomp), ("spu", spu)):
-        fp = tool_fingerprint(step, elf_sha)
-        marker = os.path.join(paths.gen, "recompiled" if step == "recomp" else "spu")
-        if stamps.get(step) == fp and os.path.isdir(marker):
-            skip(step)
-            continue
-        progress(step, 0.0, STEP_NAMES[step])
-        stamps.pop(step, None)
-        fn(paths, log)
-        stamps[step] = fp
-        save(elf_sha256=elf_sha)
+    elf_sha = stamps.get("decrypt") or info.get("elf_sha256") or sha256_file(paths.elf)
+    lid = lift_id(elf_sha)
+    paths.gen = os.path.join(paths.gen_root, lid)
+    done = os.path.join(paths.gen, "done.json")
+    if os.path.exists(done) and not full:
+        skip("recomp")
+        skip("spu")
+    else:   # a lift not finished is begun again: never half of one
+        if os.path.isdir(paths.gen):
+            shutil.rmtree(paths.gen)
+        os.makedirs(paths.gen)
+        for step, fn in (("recomp", recomp), ("spu", spu)):
+            progress(step, 0.0, STEP_NAMES[step])
+            fn(paths, log)
+        with open(done, "w") as f:
+            json.dump({"lift": lid, "elf_sha256": elf_sha, "version": VERSION}, f)
+    save(elf_sha256=elf_sha, lift=lid)
 
+    inputs = build_inputs(paths.gen, paths.cache, lid)
+    if unchanged_inputs and inputs == unchanged_inputs and not full:
+        skip("build")
+        skip("finish")
+        return {"unchanged": True, "inputs": inputs, "lift": lid}
+    if full and os.path.isdir(paths.cache):
+        for n in os.listdir(paths.cache):
+            if n.endswith(".o") and n not in keep_objects:
+                os.remove(os.path.join(paths.cache, n))
     progress("build", 0.0, STEP_NAMES["build"])
-    zig_build.build_game(paths.gen, paths.exe, paths.cache,
-                         progress=lambda f, m: progress("build", f, m), log=log)
+    used = []
+    zig_build.build_game(paths.gen, paths.exe, paths.cache, progress=lambda f, m: progress("build", f, m), log=log,
+                         keep=set(keep_objects), used_out=used)
     progress("finish", 0.0, STEP_NAMES["finish"])
     finish(paths, log)
-    save(elf_sha256=elf_sha)
     progress("finish", 1.0, "Done")
-    return paths.exe
+    return {"exe": paths.exe, "lift": lid, "objects": used, "shader_cache": zig_build.link_fingerprint()[:16],
+            "version": VERSION, "inputs": inputs}

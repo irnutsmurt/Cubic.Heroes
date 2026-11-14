@@ -210,11 +210,21 @@ def desktop_locked():
         return None
 
 
+def installed_path(what):
+    """an install's game as its shortcuts start it, and its settings file: game/ and config/ in an install with
+    build slots (M9.1, tools/install_layout.py), beside the data in the setup app's"""
+    slots = os.path.exists(os.path.join(INSTALLED, "active.json"))
+    exe = "dotheroes.exe" if os.name == "nt" else "dotheroes"
+    if what == "exe":
+        return os.path.join(INSTALLED, "game", exe) if slots else os.path.join(INSTALLED, exe)
+    return os.path.join(INSTALLED, "config", "dotheroes.cfg") if slots else os.path.join(INSTALLED, "dotheroes.cfg")
+
+
 def installed_settings():
     """An install's dotheroes.cfg (NAME=value): the defaults its game starts with."""
     cfg = {}
     try:
-        for ln in open(os.path.join(INSTALLED, "dotheroes.cfg"), encoding="utf-8", errors="replace"):
+        for ln in open(installed_path("cfg"), encoding="utf-8", errors="replace"):
             ln = ln.strip()
             if ln and not ln.startswith("#") and "=" in ln:
                 k, v = ln.split("=", 1)
@@ -231,7 +241,7 @@ def build_identity(env):
     what that leaves unset, as the game does).
     Written to <run>/run.json; tests/keep_baseline.py keeps it with a summary."""
     import hashlib, json, subprocess
-    exe = os.path.join(INSTALLED, "dotheroes.exe") if INSTALLED else BIN
+    exe = installed_path("exe") if INSTALLED else BIN
     h = hashlib.sha256()
     with open(exe, "rb") as f:
         for chunk in iter(lambda: f.read(1 << 22), b""):
@@ -416,7 +426,7 @@ def main():
         kw["preexec_fn"] = lambda: resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     with open(os.path.join(RUN, "stdout.log"), "wb") as out, open(os.path.join(RUN, "stderr.log"), "wb") as err:
         wrap = json.loads(os.environ["WRAP"]) if os.environ.get("WRAP") else []
-        args = [os.path.join(INSTALLED, "dotheroes.exe")] if INSTALLED else [BIN, ELF]
+        args = [installed_path("exe")] if INSTALLED else [BIN, ELF]
         proc = subprocess.Popen(wrap + args, cwd=RUN, env=env, stdout=out, stderr=err, **kw)
 
     stop = threading.Event()

@@ -57,6 +57,7 @@ extern "C" void dotheroes_audio_hooks_init(void); /* audio_hooks.cpp */
 #include <string.h>
 #include <chrono>
 #include <condition_variable>
+#include <filesystem>
 #include <string>
 #include <mutex>
 #include <thread>
@@ -774,14 +775,59 @@ static void read_settings(const std::string& path)
     fclose(f);
 }
 
+/* M9.1 (docs/M9_LAUNCHER_PLAN.md section 3.3): an install with build slots keeps each build in
+ * <install>/builds/<id>/ and starts the active one through <install>/game (a junction, or a symlink, to it). Its
+ * root is the nearer of the game's folder's parent and grandparent that holds active.json; the settings are in
+ * <install>/config/dotheroes.cfg, the slot's own facts in its build.cfg (DOTHEROES_BUILD_ID,
+ * DOTHEROES_SHADER_CACHE_ID), the logs in <install>/logs. Neither holds active.json: the setup app's layout, every
+ * file beside the game as before. */
+static bool file_exists(const std::string& p)
+{
+    std::error_code ec;
+    return std::filesystem::exists(p, ec);
+}
+
+static std::string install_root(const std::string& dir, bool* slots)
+{
+    for (const char* up : { "/..", "/../.." }) {
+        const std::string r = std::filesystem::path(dir + up).lexically_normal().generic_string();
+        if (file_exists(r + "/active.json")) { *slots = true; return r; }
+    }
+    *slots = false;
+    return dir;
+}
+
+/* <dir>/<stem>.log kept with the `keep` before it (<stem>.1.log the newest) */
+static std::string rotated_log(const std::string& dir, const char* stem, int keep)
+{
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    auto name = [&](int i) { return dir + "/" + stem + (i ? "." + std::to_string(i) : std::string()) + ".log"; };
+    std::filesystem::remove(name(keep), ec);
+    for (int i = keep - 1; i >= 0; i--)
+        if (file_exists(name(i))) std::filesystem::rename(name(i), name(i + 1), ec);
+    return name(0);
+}
+
+static bool s_slots = false;
+static std::string s_install_root;
+
 static const char* installed_defaults(void)
 {
     const std::string dir = exe_dir();
-    const std::string data = dir + "/data";
-    read_settings(dir + "/dotheroes.cfg");
-    /* No console: started from a shortcut. The log goes next to the data. */
+    const std::string root = install_root(dir, &s_slots);
+    s_install_root = root;
+    const std::string data = root + "/data";
+    if (s_slots) {
+        read_settings(dir + "/build.cfg");
+        read_settings(root + "/config/dotheroes.cfg");
+    } else {
+        read_settings(dir + "/dotheroes.cfg");
+    }
+    /* No console: started from a shortcut. The log: <install>/logs/game.log with the five before it (build
+     * slots), or next to the data (the setup app's layout). */
     if (!getenv("DOTHEROES_LOG_TO_CONSOLE")) {
-        const std::string log = data + "/dotheroes.log";
+        const std::string log = s_slots ? rotated_log(root + "/logs", "game", 5) : data + "/dotheroes.log";
         if (freopen(log.c_str(), "w", stdout)) setvbuf(stdout, NULL, _IOLBF, 0);
         freopen(log.c_str(), "a", stderr);
     }
@@ -792,9 +838,57 @@ static const char* installed_defaults(void)
     set_default_env("PS3_DEV_FLASH", data + "/dev_flash");
     set_default_env("PS3RECOMP_VK_WINDOW", "1");
     set_default_env("PS3_TITLE", "Cubic.Heroes - 3D Dot Game Heroes Recomp");
-    // Translated shaders and built pipelines, kept between sessions ("off": none).
-    set_default_env("PS3RECOMP_SPIRV_CACHE", data + "/cache/shaders");
+    // Translated shaders and built pipelines, kept between sessions ("off": none). With build slots, a folder per
+    // translator and glslang (the build's DOTHEROES_SHADER_CACHE_ID): a build never removes another's files.
+    if (s_slots) {
+        const char* id = getenv("DOTHEROES_SHADER_CACHE_ID");
+        set_default_env("PS3RECOMP_SPIRV_CACHE", data + "/cache/shaders/" + (id && *id ? id : "default"));
+    } else {
+        set_default_env("PS3RECOMP_SPIRV_CACHE", data + "/cache/shaders");
+    }
     return s_installed_elf.c_str();
+}
+
+/* `dotheroes --info`: what this build is and whether it can run here, as one JSON object on stdout, then exit:
+ * no window, no game data read. The pipeline worker checks a new build with it before making it active
+ * (docs/M9_LAUNCHER_PLAN.md section 8.4); the diagnostics show it. */
+extern "C" int bink_native_ffmpeg_probe(char* out, int n);   /* native/movie/bink_native.cpp */
+
+static std::string json_str(const char* s)
+{
+    std::string o = "\"";
+    for (; s && *s; s++) {
+        const unsigned char c = (unsigned char)*s;
+        if (c == '"' || c == '\\') { o += '\\'; o += (char)c; }
+        else if (c < 0x20) { char b[8]; snprintf(b, sizeof b, "\\u%04x", c); o += b; }
+        else o += (char)c;
+    }
+    return o + "\"";
+}
+
+static int dotheroes_info(void)
+{
+    const std::string dir = exe_dir();
+    bool slots = false;
+    const std::string root = install_root(dir, &slots);
+    if (slots) read_settings(dir + "/build.cfg");
+    char ff[512] = { 0 };
+    const int ffmpeg = bink_native_ffmpeg_probe(ff, (int)sizeof ff);
+    const char* id = getenv("DOTHEROES_BUILD_ID");
+    const char* cache = getenv("DOTHEROES_SHADER_CACHE_ID");
+#if defined(DOTHEROES_NATIVE_RELEASE)
+    const bool native = true;
+#else
+    const bool native = false;
+#endif
+    printf("{\"game\":\"dotheroes\",\"layout\":%s,\"build_id\":%s,\"shader_cache_id\":%s,\"native_release\":%s,"
+           "\"disc\":%s,\"ffmpeg\":{\"ok\":%s,\"what\":%s}}\n",
+           slots ? "\"slots\"" : "\"beside\"", json_str(id ? id : "").c_str(), json_str(cache ? cache : "").c_str(),
+           native ? "true" : "false",
+           file_exists(root + "/data/disc/PS3_GAME/USRDIR/EBOOT.elf") ? "true" : "false", ffmpeg ? "true" : "false",
+           json_str(ff).c_str());
+    fflush(stdout);
+    return ffmpeg ? 0 : 3;
 }
 
 int main(int argc, char** argv)
@@ -808,6 +902,7 @@ int main(int argc, char** argv)
         }
         return dotheroes_memtest(VM_SIZE);
     }
+    if (argc >= 2 && strcmp(argv[1], "--info") == 0) return dotheroes_info();
     const char* elf = argc >= 2 ? argv[1] : installed_defaults();
     if (argc < 2) {
         FILE* f = fopen(elf, "rb");

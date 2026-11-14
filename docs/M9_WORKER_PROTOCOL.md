@@ -20,16 +20,21 @@ The launcher starts it with no console window (Windows: `CREATE_NO_WINDOW`), std
 | `probe-disc` | `--disc PATH` | what the chosen disc image or disc folder is: PARAM.SFO's title and version, EBOOT.BIN's SHA-256, the image's size; seconds, nothing written | `kind`, `title_id`, `app_ver`, `title`, `size` |
 | `probe-keys` | `--disc PATH --keys PATH` | whether the keys file (or an EBOOT.elf the player decrypted) turns this disc's program into the supported one; in memory, nothing written | `match`, `via` (`keys` or `elf`) |
 | `space` | `--install DIR [--for install\|update]` | the free space on the folder's drive (the nearest existing parent) against what the operation needs | `free`, `needed`, `enough`, `checked_at` |
-| `info` | `--install DIR` | what an install folder holds | `exists`, `version`, `steps_done`, `game`, `disc_copy` |
-| `install` | `--disc PATH --keys PATH --install DIR` | the conversion: verify, extract, decrypt, recompile (PPU, SPU), build, finish; then the settings file's defaults | `exe`, `seconds` (per step), `skipped` |
-| `update` | `--install DIR [--full]` | redo only what changed since the install (its per-step fingerprints); `--full`: everything | as `install` |
+| `info` | `--install DIR` | what an install folder holds (M9.1: `none`, `partial` -- a first install interrupted, with the disc's steps it finished --, `setup-app` -- to migrate --, or `slots`) | `kind`, `active`, `previous`, `retention`, `builds`, `game_link`, `backups`, `version`, `disc_copy`, `lift`, `interrupted` |
+| `install` | `--disc PATH --keys PATH --install DIR [--resume]` | the conversion into a new build slot (docs/M9_LAUNCHER_PLAN.md section 10): verify, extract, decrypt, the lift (PPU, SPU), the build, finish; the new build checked (`validate`), then made active (`activate`); the settings file's defaults. `--resume`: the disc's steps an interrupted install of the same disc finished are not done again. Also a reinstall or repair from the disc: the saves, settings and kept builds untouched | `build`, `exe` (the game a shortcut starts: `<install>/game/...`), `seconds` (per step), `skipped`, `pruned` |
+| `update` | `--install DIR [--full]` | the saves backed up, then the game rebuilt from the install's own disc copy into a new slot -- only what changed (the lift when the tools changed; objects by fingerprint); nothing at all when the inputs equal the active build's -- checked, made active, the one before kept; `--full`: the lift and every object again | `build`, `changed`, `saves_backup`, `seconds`, `skipped`, `pruned` |
+| `migrate` | `--install DIR` | a setup app's install moved into the layout with build slots: the saves backed up, the current build made from the install's own disc copy, its lift and objects (relifted only when the tools changed), checked, made active; the settings, the objects and the translated shaders moved; the old game removed | `build`, `lift_kept`, `moved`, `removed`, `saves_backup`, `exe` |
+| `builds` | `--install DIR` | the slots: each one's record and state (`active`, `kept`, `unused`), whether it is whole | `active`, `previous`, `retention`, `builds` |
+| `rollback` | `--install DIR [--to ID]` | back to a kept build (the newest by default): `active.json` and `game/` only -- offline, nothing rebuilt; the build left becomes the kept one (forward again: rollback once more) | `active`, `previous` |
+| `retention` | `--install DIR --keep N` | how many previous builds are kept (default 1); the ones beyond it removed with what only they used | `retention`, `previous`, `pruned` |
+| `repair-link` | `--install DIR` | `game/` pointed at the active build again | `game` |
+| `saves` | `--install DIR [--action list\|backup\|restore\|delete] [--backup ID] [--note TEXT] [--confirm]` | the save backups: list them (dates, sizes, why made), make one, restore one (the current saves backed up first), delete one; restore and delete only with `--confirm` (the player confirmed) | the list (`backups`, `saves_bytes`), or the backup made, or `restored` and `previous_saves`, or `deleted` |
 | `selftest` | `[--seconds S] [--block]` | a pretend three-step operation with progress, for the protocol's tests and for the launcher's progress screens without a disc; `--block` stops calling back in its second step, as a long compile does | `seconds`, `skipped` |
 
 Every command also takes `--control` (section 3) and `--log FILE` (every event appended to the file as it is
 sent: the launcher's log of the operation).
 
-M9.1 adds the build-slot commands (an update into a new slot, rollback, migration, resume of an interrupted
-install) and M9.2 the preparation pass; each is added here when it exists.
+M9.2 adds the preparation pass; it is added here when it exists.
 
 ## 2. The event stream
 
@@ -63,8 +68,9 @@ meaning).
 - **Nothing the worker started outlives it**: on Windows it puts itself in a job object that ends every
   process in it when the worker's handle closes (any exit, a crash included); elsewhere it leads a process
   group of its own and ends the group. `hello.owned_children` says whether that was set up.
-- What a cancelled install leaves behind is resumed or discarded by M9.1's commands; today an install starts
-  again from the disc, an update from its last finished step.
+- What a cancel leaves (M9.1): an install is taken up again with `install --resume` -- the disc's steps it
+  finished and a finished lift are not redone, the objects compiled before the cancel are reused; the staged
+  slot it was building is removed by the next operation. A cancelled update leaves the active build as it was.
 
 ## 4. Errors
 
@@ -84,6 +90,13 @@ last lines, a trace), shown only on request.
 | `disk_space` | too little free space before starting, or the drive filled during the operation | free space, or another folder |
 | `lift_failed`, `compile_failed` | a recompiling tool, the compiler or the linker failed (details: their last lines) | retry; the diagnostics export |
 | `no_disc_copy` | an update of an install that has no extracted disc | reinstall from the disc |
+| `needs_migration` | an install or update asked of a setup app's install | migrate it first (no disc needed) |
+| `not_setup_app`, `no_install` | migrate asked of a folder that is not a setup app's install; an update, rollback or the like of a folder with no build slots | install, or choose the right folder |
+| `build_invalid` | the new build failed its check (`dotheroes --info`: FFmpeg loads beside it, the native release; its memory test): it is not made active | retry; the diagnostics export |
+| `build_damaged` | a kept build's game is not the one recorded (size, or SHA-256 before a rollback) | update, or reinstall |
+| `no_previous` | a rollback with no kept build (or not that one) | -- |
+| `needs_confirmation` | a save restore or delete without `--confirm` | ask the player, then send `--confirm` |
+| `no_backup` | no save backup by that id | -- |
 | `io_error` | a file could not be read or written (details: the trace) | retry; the diagnostics export |
 | `cancelled` | cancelled (`data.forced` if a step had to be ended) | resume or start again |
 | `internal` | anything else (details: the trace) | the diagnostics export |
