@@ -1005,3 +1005,34 @@ gaming application. Applied:
   preparing), not pipeline counts and driver versions; the install page no longer speaks of "kept builds".
 - Still to apply on the same principle (the owner's review): the Shaders and Diagnostics pages keep their detail for
   now -- the coverage wording the owner asked for (section 19) and the report's file list.
+
+## 22. Encrypted disc images (the owner, 2026-11-14: required in M9) [C]
+
+**The requirement**: the wizard takes an encrypted PS3 ISO with its disc key (a .dkey file, or the key typed) or a
+supported IRD file, an already decrypted ISO, or the game's files in a folder; it tells which it was given and asks
+for a key only when one is needed; decryption is part of the install (no other tool); the key is checked before
+anything is written; the ISO is never changed; keys never appear in logs, diagnostics or screenshots; plain
+messages when a key is missing. IRD files (owner's decision): their data1 becomes the disc key through a constant
+read from the player's own keys file (a "D1 <key> <iv>" line) -- no Sony key is ever in the repository, hard-coded,
+downloaded or fetched; .dkey files and typed keys work without it.
+
+**Done -- the core** (tools/ps3_disc.py): the disc's region table (sector 0: the plain regions; everything else
+encrypted, sector by sector, AES-128-CBC with the sector's number as the IV); `kind` -- decrypted or encrypted, from
+whether the game's program (PS3_GAME/USRDIR/EBOOT.BIN) shows its header as stored; `DiscImage` -- the image read
+through, decrypting as it reads, so the existing ISO 9660 reader and the extraction work unchanged; `load_key` -- a
+.dkey file (16 bytes, or 32 hexadecimal digits), the digits typed, or an IRD file (gzip, "3IRD", its data1 at the
+place its version gives) with the keys file's D1 line, each failing with a plain message that never quotes a key;
+`check_key` -- the key opens this disc (the program's first sector decrypts to its header). tests/test_ps3_disc.py
+(3): the view and the table on made-up sectors; every key source and its errors (made-up keys and constant); and on
+the player's decrypted ISO (when it is beside the checkout): it reads as decrypted, and its encrypted original --
+simulated in memory, the file system plain and the rest encrypted with a random key, nothing written -- reads as
+encrypted, the right key is accepted and a wrong one refused, and the game's program and PARAM.SFO read back as the
+decrypted image's.
+
+**Still to do** (after the owner's go-ahead to resume): the pipeline opening every image through `DiscImage`
+(`probe_disc`, `probe_keys`, the extraction) with the disc key; `probe_disc` saying "encrypted: choose its disc key"
+(a code the launcher acts on) and checking a given key before anything is written; the worker's `--disc-key`
+(a file -- a typed key written by the launcher to a private temporary file, never on a command line or in a log);
+the wizard's step 1 asking for the key only for an encrypted image (a .dkey or IRD file by the file browser, or the
+32 digits on the on-screen keyboard); the install test from an encrypted image (made once from the decrypted ISO with
+a test key, outside the repository).
