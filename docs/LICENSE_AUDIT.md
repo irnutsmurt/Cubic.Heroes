@@ -202,6 +202,7 @@
 | `patches/ps3recomp/0154-sys_timer_usleep-every-sleep-under-a-millisecond-wai.patch` | INDEP | keep |
 | `patches/ps3recomp/0155-Lifter-PPU_STORES_NO_SPU_COH-stores-without-the-SPU-.patch` | INDEP | keep |
 | `patches/ps3recomp/0156-cellPad-rumble-diagnostics-a-refused-send-reported-P.patch` | INDEP | keep |
+| `patches/ps3recomp/0157-cellAudio-retired-in-a-build-without-its-output-ever.patch` | INDEP | keep |
 | `port/CMakeLists.txt` | INDEP | keep |
 | `port/LICENSE.ps3recomp` | THIRD | keep: licence file beside it; listed in the README |
 | `port/assets/ui/DejaVuSans.ttf` | THIRD | keep: licence file beside it; listed in the README |
@@ -365,6 +366,7 @@
 | `tests/scenarios/installed_save.drive` | INDEP | keep |
 | `tests/scenarios/long_session.drive` | INDEP | keep |
 | `tests/scenarios/m4_pause.drive` | INDEP | keep |
+| `tests/scenarios/m8_cleared_title.drive` | INDEP | keep |
 | `tests/scenarios/m8_credits_trace.drive` | INDEP | keep |
 | `tests/scenarios/m8_movie_skips.drive` | INDEP | keep |
 | `tests/scenarios/m8_movie_trace.drive` | INDEP | keep |

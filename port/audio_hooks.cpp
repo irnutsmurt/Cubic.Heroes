@@ -247,7 +247,6 @@ bool rdvec(uint32_t ea, float out[3])
 }
 
 extern "C" const char* ppu_vfs_root;   // the host folder the game's /dev_bdvd maps to (the runtime's ppu_fs.cpp)
-extern "C" int32_t cellAudioInit(void);   // the runtime's cellAudio (libs/audio/cellAudio.c)
 
 // The game's own state the sound manager reads (rel27's class reads the same): the options' music and effect
 // levels, the system menu's pause byte, the exit-request byte (cleared when the system asks the game to quit),
@@ -318,12 +317,8 @@ void native_init()
     if (!nsm_init(&o)) fprintf(stderr, "[audio] the native sound manager is silent (no library, device or list)\n");
     g_native_t0 = std::chrono::steady_clock::now();
     g_native_started = true;
-    // The movies' sound (Bink, until M8 replaces it) goes through cellAudio: the movie player opens a port of its
-    // own (2 channels) on the cellAudio that FMOD's start-up initialised -- in rel27 FMOD's Init and port 0, then
-    // a port for each movie. With FMOD not started nothing else initialises it, and the movie's port would not
-    // open (NOT_INIT). cellAudio's own output carries only the movies' sound now.
-    const int32_t rc = cellAudioInit();
-    fprintf(stderr, "[audio] cellAudio initialised for the movies' sound (%s)\n", rc == 0 ? "ok" : "failed: movies silent");
+    // M8.4: the movies' sound is OpenAL Soft's too (native/movie/bink_native.cpp: a stream on this manager's
+    // streamer). cellAudio, which M4 initialised here for Bink's own sound, is retired: nothing initialises it.
 }
 
 int native_call(ppu_context* ctx, uint32_t addr)

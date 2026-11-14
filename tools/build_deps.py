@@ -6,9 +6,11 @@
 Downloads pinned sources into build/deps/src/ (checked against SHA-256) and
 builds, per platform, into build/deps/<platform>/:
     SDL2      shared (libSDL2-2.0.so.0 | SDL2.dll + libSDL2.dll.a): the
-              window, input and audio. Installed next to the game. On Linux its
-              X11 / Wayland / audio backends are loaded at run time, so the
-              system's headers are needed only here.
+              window and input, and on Linux OpenAL Soft's audio output (its
+              SDL2 backend; the game's own cellAudio output is retired since
+              M8.4). Installed next to the game. On Linux its X11 / Wayland /
+              audio backends are loaded at run time, so the system's headers
+              are needed only here.
     glslang   static (libglslang.a and friends): the game's shaders, translated
               to SPIR-V at run time.
     Vulkan    headers only: the backend loads the driver's loader at run time.

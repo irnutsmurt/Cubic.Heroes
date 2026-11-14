@@ -9,12 +9,14 @@
     "the sound manager's methods are answered natively, so nothing calls FMOD's API. The 28 call stubs the sound",
     "manager's class used to call FMOD's API (0x00987478-0x00987658, TOC-switching glue, no FMOD code) stay lifted:",
     "a call through one lands in a trap.",
+    "Bink (M8.4, 2026-11-13; docs/FFMPEG_MIGRATION_PLAN.md sections 2.2 and 6.4): its PPU library, closed as tools/movie_inventory.py checks it -- nothing outside it but its eleven call stubs (0x009873A8-0x00987458, TOC-switching glue, no Bink code; they stay lifted) reaches it, its pointer-reached functions held only by its own tables, no constructor. The game's movie class's calls through those stubs are answered natively (config/m8_native_movie.json: FFmpeg).",
     "spu_images: FMOD's SPU programs (the mixer, its NeuralTHX variant, its 19 relocatable plugins), not lifted.",
     "inert: FMOD's static constructors (39, in the C runtime's constructor table, 0x00FE0000-0x00FE0718) and destructors (2, its destructor table after it), which the start-up and the exit call for every file: lifted as a plain return -- they set up and tear down only FMOD's own globals."
   ],
   "traps": [
     { "lo": "0x0082F650", "hi": "0x00908584", "what": "FMOD", "note": "FMOD Ex's PPU library: 2,792 functions in the function list" },
-    { "lo": "0x00A42AA0", "hi": "0x00A440E0", "what": "FMOD", "note": "FMOD's classes' out-of-line methods: 60 functions, each held only by FMOD's vtables" }
+    { "lo": "0x00A42AA0", "hi": "0x00A440E0", "what": "FMOD", "note": "FMOD's classes' out-of-line methods: 60 functions, each held only by FMOD's vtables" },
+    { "lo": "0x00A54DD0", "hi": "0x00A76208", "what": "Bink", "note": "Bink's PPU library: 151 functions and 49 alignment pads in the function list, reached only through its eleven call stubs" }
   ],
   "spu_images": [
     "spu_0005_at_00F86A80",

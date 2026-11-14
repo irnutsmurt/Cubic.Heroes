@@ -113,6 +113,15 @@ if(DOTHEROES_SPU_INTERPRETER AND
     message(FATAL_ERROR "DOTHEROES_SPU_INTERPRETER is for development builds only")
 endif()
 set(PS3RECOMP_SPU_INTERPRETER ${DOTHEROES_SPU_INTERPRETER} CACHE BOOL "" FORCE)
+# M8.4 (docs/FFMPEG_MIGRATION_PLAN.md): the game's sound is OpenAL Soft's (the native sound manager, the movies'
+# streams); cellAudio's host output (SDL2's audio, WASAPI) and its mixing thread are retired in the native release.
+# SDL2 stays for the window and the controllers (and, on Linux, OpenAL Soft's own SDL2 backend).
+# DOTHEROES_CELL_AUDIO_OUTPUT=ON brings them back in a development build (the comparison against the lifted path).
+option(DOTHEROES_CELL_AUDIO_OUTPUT "Development only: cellAudio's host output and mixing thread" OFF)
+if(DOTHEROES_CELL_AUDIO_OUTPUT AND DOTHEROES_NATIVE_RELEASE)
+    message(FATAL_ERROR "DOTHEROES_CELL_AUDIO_OUTPUT is for development builds only (M8.4 retired cellAudio)")
+endif()
+set(PS3RECOMP_CELL_AUDIO_OUTPUT ${DOTHEROES_CELL_AUDIO_OUTPUT} CACHE BOOL "" FORCE)
 add_subdirectory("${PS3RECOMP_DIR}" "${CMAKE_BINARY_DIR}/ps3recomp_sdk"
                  EXCLUDE_FROM_ALL)
 

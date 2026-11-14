@@ -160,6 +160,18 @@ GAME_BUILD = "game_build.json"
 # path, no bridge) with R8's loads and stores -- as tools/r8_release_build.sh,
 # less the development diagnostics.
 RELEASE_CMAKE = ["-DDOTHEROES_NATIVE_RELEASE=ON"]
+
+
+def release_cmake(platform):
+    """The native release's configuration for build_prebuilt, every choice said explicitly -- CMake keeps what a build
+    folder was configured with, so a default changed since (M6's) never reaches a folder configured before it:
+    Windows x86-64, M6's stores without the SPU reservation test and no lifted SPU program (rel48 on); Linux, the
+    checked stores with the lifted SPU programs (M6 measured Windows; Linux's run-time validation is M11's);
+    everywhere, cellAudio retired (M8.4: no host audio output)."""
+    common = RELEASE_CMAKE + ["-DDOTHEROES_CELL_AUDIO_OUTPUT=OFF"]
+    if platform == "windows":
+        return common + ["-DDOTHEROES_PPU_STORES=mov-nospu", "-DDOTHEROES_LIFTED_SPU=OFF"]
+    return common + ["-DDOTHEROES_PPU_STORES=checked", "-DDOTHEROES_LIFTED_SPU=ON"]
 # CMake's per-file definitions of the game's sources that are not the build's:
 # main.cpp's development diagnostics (set only when they are on)
 _NOT_GAME_WIDE = ("DOTHEROES_DEV_DIAGNOSTICS",)
@@ -488,7 +500,7 @@ def build_prebuilt(platform, ps3recomp, gen_ppu, log=print, release=True):
                            f"-DCMAKE_PREFIX_PATH={deps}", f"-DCMAKE_FIND_ROOT_PATH={deps}",
                            "-DCMAKE_C_FLAGS=" + cmake_flags(SHIP_FLAGS), "-DCMAKE_CXX_FLAGS=" + cmake_flags(SHIP_FLAGS)]
                           # a configuration chosen once stays in CMake's cache: say it either way
-                          + (RELEASE_CMAKE if release else ["-DDOTHEROES_NATIVE_RELEASE=OFF"]),
+                          + (release_cmake(platform) if release else ["-DDOTHEROES_NATIVE_RELEASE=OFF"]),
                           stdout=subprocess.DEVNULL)
     defines = ninja_game_defines(os.path.join(work, "build.ninja"))
     nids = os.path.join(work, "ppu_hle_nids.cpp")
@@ -501,7 +513,8 @@ def build_prebuilt(platform, ps3recomp, gen_ppu, log=print, release=True):
     with open(os.path.join(out, GAME_BUILD), "w") as f:
         json.dump({"config": "native-release" if release else "development", "defines": defines}, f, indent=1)
     for f in os.listdir(os.path.join(deps, "lib")):
-        if f.endswith(".a") and "OpenAL" not in f:   # OpenAL Soft is loaded at run time, never linked
+        # OpenAL Soft and FFmpeg are loaded at run time, never linked: their import libraries stay out
+        if f.endswith(".a") and "OpenAL" not in f and not f.startswith("libav"):
             shutil.copy2(os.path.join(deps, "lib", f), out)
     if platform == "windows":
         shutil.copy2(os.path.join(deps, "bin", "SDL2.dll"), out)

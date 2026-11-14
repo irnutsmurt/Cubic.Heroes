@@ -2,7 +2,9 @@
 
 **Status: approved by the owner 2026-11-12 (the architecture); M8.0, M8.1 (on Windows; the Linux libraries are
 built, their run-time validation is outstanding with the rest of Linux's) and M8.2 done 2026-11-13 (sections 2.2,
-2.3, 6.1, 6.2); M8.3 -- the owner's viewing of build/r8/rel49 -- next; M8.4 after the owner's acceptance.** The
+2.3, 6.1, 6.2); M8.3 -- the owner's viewing of build/r8/rel49 -- accepted by the owner 2026-11-13; M8.4 implemented
+2026-11-13 (section 6.4), its checks without a game window passed, its on-screen validation outstanding: M8 closes
+with it.** The
 owner's requirement (CLAUDE.md, "Architecture
 requirements"; docs/NATIVE_PORT.md section 1): the game's video is decoded by FFmpeg, dynamically linked under the
 LGPL; Bink's implementation is not executed and not in anything this project distributes; the movies are the
@@ -379,6 +381,68 @@ losses through DOTHEROES_AUDIO_TEST_LOSS):
 - **The viewing build for M8.3**: build/r8/rel49 -- rel48's configuration on tools/m8_trace_lift.sh's lift with
   M8_TRACE=0 (the release lift with config/m8_native_movie.json and config/m8_dev_credits.json, no trace
   observers: build/r8/gen16).
+
+### 6.3 M8.3: accepted (2026-11-13)
+
+The owner viewed the movies on rel49 (FFmpeg) against the same build with Bink and accepted M8.3 on 2026-11-13. With
+it, the owner decided the bundle's open question (section 6.1): **a pinned exception** for FFmpeg's two FATE test
+references -- tools/boundary_check.py's PINNED: excused only when the archive's own SHA-256 (the pinned release
+archive's), the member's path inside it and the member's SHA-256 all match; no exception for a file type or for
+FFmpeg's archives (every other member of the archive checked in full; tests/test_boundary_check.py: a byte changed,
+another path, another archive, another .wav beside it -- each refused).
+
+### 6.4 M8.4: Bink excluded, cellAudio retired (2026-11-13)
+
+**What changed** [C]:
+- **Bink out of the lift**: config/excluded_code.json's third range, [0x00A54DD0, 0x00A76208) -- 151 functions and
+  49 pads lifted as traps (3,053 traps in the lift with FMOD's 2,853). The eleven call stubs stay lifted; their
+  entry hooks (config/m8_native_movie.json) are in the release lift (tools/setup_pipeline.py's LIFT_CONFIG,
+  tools/r8_lift.sh; tests/test_player_pipeline.py keeps the two the same).
+- **No way back to Bink**: port/native/movie/bink_native.cpp answers every call -- the guard always on, no switch,
+  no fallback. A file FFmpeg cannot open, or FFmpeg missing beside the game, is a movie that does not open (the
+  class's own failure path: no movie, the game goes on). A handle the player did not open cannot come; were one
+  to, it is counted as a native path declining (fatal in the native release) and answered as an empty movie.
+- **cellAudio retired** (ps3recomp 0157): PS3RECOMP_CELL_AUDIO_OUTPUT=OFF (the port's DOTHEROES_CELL_AUDIO_OUTPUT,
+  OFF by default and refused in a native release) builds cellAudio without any host output -- no SDL2 audio, no
+  WASAPI, no mixing thread -- and its Init answers as an unavailable audio library; every cellAudio entry point is
+  counted (the census's cell_audio). The native start-up's cellAudioInit (M4's, for Bink's own sound) is gone. The
+  game's movie class itself calls cellAudioInit and cellAudioQuit only on a path none of the movies takes (its
+  sound set-up with a nonzero mode; every traced call passed 0), and Bink's other cellAudio calls went with Bink.
+  SDL2 stays for the window and the controllers, and on Linux as OpenAL Soft's own output backend.
+- **The credits on demand stay a developer's switch**: config/m8_dev_credits.json is in tools/m8_trace_lift.sh's
+  development lifts only, never in the release lift (tests/test_player_pipeline.py checks it is not).
+- **A hitch test**: DOTHEROES_MOVIE_TEST_HITCH=<s>:<ms>,... stalls the game's thread when a movie's clock passes
+  each time (a test switch; nothing without it).
+- **The cleared game's title**: tests/scenarios/m8_cleared_title.drive -- the credits on demand from a copy of
+  castle-front, YES at "Okay to save?", then the title, untouched.
+- The builds: build/r8/rel50 (the release lift, gen17) and rel50d (the development lift with the credits on demand
+  and the trace's observers, gen17d).
+- **Found on the way, in the player's side since M6**: the prebuilt parts players' installs are built from
+  (tools/zig_build.py's build_prebuilt, the build folder build/rel-windows) passed only DOTHEROES_NATIVE_RELEASE=ON,
+  and CMake keeps what a folder was configured with: that folder still had M5's choices cached -- the stores with
+  the SPU reservation test (mov) and the lifted SPU programs linked -- so a player's game since M6 was built as M5's
+  (correct, but without M6's stores and not what rel48 and later were tested as). release_cmake(platform) now says
+  every choice: Windows x86-64, mov-nospu and no lifted SPU program; Linux, the checked stores and the lifted SPU
+  programs (M6 measured Windows; Linux's validation is M11's); everywhere cellAudio retired. The install test now
+  checks the prebuilt's choices and the built game's retired cellAudio. FFmpeg's import libraries are no longer
+  copied into the prebuilt (nothing links against them).
+
+**Validated so far** [M, L]:
+- FFmpeg's archive with the pinned exception: no boundary finding; the exception refuses a changed byte, another
+  member path, another archive and another WAV file (tests/test_boundary_check.py, 21 tests).
+- The unit tests (32) and the memory test (668 checks, 0 failures).
+- rel50, the release lift: a start-up and the attract mode for 60 s -- the movies open, play and close on the native
+  player; the census's cell_audio 0 and native_decline 0, no trap reached (run with PS3_CENSUS_FATAL=cell_audio).
+- The player's side (tests/player_install_test.py, on the prebuilt from gen17 with release_cmake): fresh, check
+  (the prebuilt's choices, cellAudio retired in the built game, the lift equal to gen17's), update (76 of 76 parts
+  reused), relift, settings -- all passed.
+
+**Outstanding, to close M8** (on-screen runs, build/m8/m84_batch.sh and m84val_run.sh): the movies at 30, 120 and
+144 fps and uncapped; the deliberate hitches (DOTHEROES_MOVIE_TEST_HITCH=5:250,12:600,40:120,70:1000,95:2000); the
+window's focus lost during a movie; the skips; a new game's opening; the credits and the cleared game's title on
+rel50d; the regression drives, the water, the save flows and the reference scenes on rel50; FFmpeg missing beside
+the game; the installed game's run. The raw evidence goes to F:\3d dot game heroes\m8\evidence (outside the
+automated cleanup).
 
 ## 7. Risks and open questions
 

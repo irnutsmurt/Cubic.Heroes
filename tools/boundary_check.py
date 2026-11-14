@@ -33,6 +33,7 @@ What is refused (each file by its name and its bytes, not by where it sits):
   LICENCE        (--bundle) a shipped library without its licence, notice or, for OpenAL Soft, its source
 Exit 1 with each finding listed when anything is found.
 """
+import hashlib
 import io
 import os
 import re
@@ -239,6 +240,40 @@ def tree(findings=None):
     return findings, len(files)
 
 
+# Pinned exceptions (the owner's decision of 2026-11-13, docs/FFMPEG_MIGRATION_PLAN.md section 6.1): files inside one
+# exact third-party archive that a rule refuses by their name alone, though they are not what the rule is for. Each
+# is excused only when the archive's own SHA-256, the member's path inside it and the member's own SHA-256 all match;
+# anything else -- another archive, another path, a byte changed -- is checked as before. Not an exception for a
+# file type or for the archive: every other member of it is checked in full.
+PINNED = [
+    # FFmpeg 9.0.2's release archive (config/deps.sha256), shipped as the libraries' corresponding source: two of
+    # FFmpeg's FATE test references, three lines of text each (an md5, a size, a CRC), named for the test that
+    # writes peak.wav -- no sound in them
+    {"archive": "6e374ed621e48faa40639307dff48ba6fe574a509977956d2cce9669b7cc27e9",
+     "member": "FFmpeg-n9.0.2/tests/ref/lavf/peak.wav",
+     "sha256": "f609e9a152cbdcd35e6969a57df5792c8f74cfc4787718af2da806e809c5f7b3",
+     "why": "FFmpeg's FATE test reference (text), not a sound"},
+    {"archive": "6e374ed621e48faa40639307dff48ba6fe574a509977956d2cce9669b7cc27e9",
+     "member": "FFmpeg-n9.0.2/tests/ref/lavf/peak_only.wav",
+     "sha256": "97d101ddb1f01fad7929008b40214fc4c72f91b01940e20f38b99507972c1ded",
+     "why": "FFmpeg's FATE test reference (text), not a sound"},
+]
+_archive_sha = {}   # an archive's name in a walk -> its SHA-256 (nested() records it as it opens one)
+
+
+def pinned(name, data):
+    """The pinned exception covering this file of a walk (its archive, its path in it and its bytes all as pinned),
+    else None."""
+    if "!/" not in name:
+        return None
+    archive, member = name.rsplit("!/", 1)
+    sha = _archive_sha.get(archive)
+    for p in PINNED:
+        if p["archive"] == sha and p["member"] == member and p["sha256"] == hashlib.sha256(data).hexdigest():
+            return p
+    return None
+
+
 def walk_artifact(path):
     """(name, bytes) of every file in a folder, a .zip or a .tar(.xz/.gz/.bz2), archives inside included."""
     if os.path.isdir(path):
@@ -259,6 +294,9 @@ def walk_artifact(path):
 
 def nested(name, data):
     low = name.lower()
+    if (low.endswith(".zip") and data[:2] == b"PK") or low.endswith((".tar", ".tar.xz", ".txz", ".tar.gz", ".tgz",
+                                                                        ".tar.bz2")):
+        _archive_sha[name] = hashlib.sha256(data).hexdigest()
     if low.endswith(".zip") and data[:2] == b"PK":
         with zipfile.ZipFile(io.BytesIO(data)) as z:
             for i in z.infolist():
@@ -310,9 +348,17 @@ def check_artifact(path, bundle=False, findings=None, quiet=False):
     own = findings is None
     findings = [] if own else findings
     names = []
+    excused = []
     for name, data in walk_artifact(path):
         names.append(name)
+        p = pinned(name, data)
+        if p:
+            excused.append((name, p["why"]))
+            continue
         check_bytes(name, data, findings)
+    if not quiet:
+        for name, why in excused:
+            print(f"[boundary] pinned exception: {name} ({why}; the archive, the path and the bytes as pinned)")
     if bundle:
         bundle_licences(names, findings, os.path.basename(path))
     if own and not quiet:
