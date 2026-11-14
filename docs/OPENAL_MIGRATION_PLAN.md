@@ -2,7 +2,7 @@
 
 Status: **approved by the owner 2026-11-11 with the adjustments below; M0-M3 done (sections 4.1-4.4); M4 accepted by
 the owner 2026-11-12 (sections 4.5, 4.6); M5 done (section 9.1); M6 done 2026-11-13 (sections 10-10.7); M7 (history)
-needs a separate approval; M8 (Bink: docs/FFMPEG_MIGRATION_PLAN.md) next; M9-M11 documented only (docs/MILESTONES.md).** Requirement (the owner, 2026-11-11): the PC recompilation's game audio runs on OpenAL Soft; FMOD Ex is not executed and no
+needs a separate approval; M8 (Bink: docs/FFMPEG_MIGRATION_PLAN.md) implemented 2026-11-13 -- cellAudio and its SDL2 output retired with it -- and closing with M8.4's on-screen validation; the roadmap M9-M14 as the owner revised it on 2026-11-13 (docs/MILESTONES.md).** Requirement (the owner, 2026-11-11): the PC recompilation's game audio runs on OpenAL Soft; FMOD Ex is not executed and no
 FMOD-derived implementation code is in the public source or any distributed artifact. The FMOD work so far
 (docs/AUDIO.md A0-A3) stays a local compatibility reference only. Tags: [C] read in the code, [M] measured,
 [L] run logs, [I] inferred.
@@ -657,10 +657,13 @@ M1 did with them (section 4.2):
 | M5 | OpenAL the default; FMOD lifted as traps only, its SPU images not lifted; the old path removed; the installer and setup rebuilt | the validation set, the install test, no trap reached |
 | M6 | Retirements: a census of SPU workloads over the whole game (every drive, long sessions, the owner's sessions); then the FMOD SPU machinery, the overlay dispatch, cellAudio if unused, and the per-store SPU reservation test only if no workload takes reservations | the census; the validation set; CPU and frame-time A/B against rel27 |
 | M7 | History, if the owner approves a cleanup | the bounded rewrite verified as on 2026-11-10; the Support request |
-| M8 | Bink 1 through FFmpeg (LGPL build, dynamic): a separate plan | -- |
-| M9 | Native PC experience: display settings, VSync, custom frame caps, audio settings, controller remapping, button prompts and the other agreed PC improvements (docs/MILESTONES.md, "Roadmap: M9-M11") | documented only (2026-11-12); after the core architecture work |
-| M10 | Launcher and update management (docs/MILESTONES.md, "Roadmap: M9-M11") | documented only; after M9 |
-| M11 | Character library and community sharing (docs/MILESTONES.md, "Roadmap: M9-M11") | documented only; after M10 |
+| M8 | Bink 1 through FFmpeg (LGPL build, dynamic): a separate plan (docs/FFMPEG_MIGRATION_PLAN.md) | implemented 2026-11-13 (M8.4): Bink excluded from the lift, the movies on FFmpeg, cellAudio and its SDL2 output retired; closing with the on-screen validation |
+| M9 | Launcher, shader and Vulkan pipeline precompilation, cache management, GitHub Release updates and rollback (docs/MILESTONES.md, "Roadmap: M9-M14"; the plan for review: docs/M9_LAUNCHER_PLAN.md) | the owner's review of the plan first |
+| M10 | Native PC settings, controls and interface improvements (docs/PC_EXPERIENCE.md sections 1-7b) | after M9 |
+| M11 | Release readiness, full-game and platform validation | after M10 |
+| M12 | Optional RTX and graphics enhancements | after M11 |
+| M13 | Character import/export and the GitHub community library | after M12 |
+| M14 | Optional native controller vibration from gameplay events | after M13 |
 
 ## 8. Architecture requirements (to be written into docs/NATIVE_PORT.md and CLAUDE.md at M1)
 

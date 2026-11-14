@@ -405,15 +405,17 @@ minutes, each exiting cleanly.
   vibrate the controller. The path works: a test pulse (F9 in a DOTHEROES_DEV_KEYS session: both motors for 0.6 s
   through the pad thread, as a title's request goes) reaches the controller on the release's default input path.
   A first silence was the owner's controller converter (a Stadia controller presented as an Xbox 360 one), fixed
-  on their side. Making the PC version vibrate (hits, a boss's quake) would be a new feature, for M9 if wanted.
+  on their side. Making the PC version vibrate (hits, a boss's quake) is a new feature: M14 of the roadmap, optional
+  (docs/MILESTONES.md, "Roadmap: M9-M14").
 
-## 8. Launcher and update management (after the base and the settings are stable)
+## 8. Launcher and update management
 
-This is M10 of the roadmap (docs/MILESTONES.md, "Roadmap: M9-M11", 2026-11-12): a launcher inspired by Dusklight,
-with installation, settings, GitHub updates, incremental recompilation, rollback, save management,
-diagnostics, and shader and pipeline precompilation before the game starts, detecting on its own
-when the caches need rebuilding. Sections 1-7b are M9. Documented only until the core architecture work
-(M6, M8) is finished.
+This is M9 of the roadmap as the owner revised it on 2026-11-13 (docs/MILESTONES.md, "Roadmap: M9-M14"): a
+launcher with Dusklight as the reference for the overall experience -- installation, shader and Vulkan pipeline
+precompilation before the game starts with the caches managed (rebuilt on their own when a driver, a GPU or the
+game's build changed), updates from GitHub Releases with incremental recompilation and rollback; save management
+and diagnostics to settle in its plan. Sections 1-7b are M10 (the native PC settings, controls and interface). The
+architecture and implementation plan for the owner's review: docs/M9_LAUNCHER_PLAN.md.
 
 **Today** [C, setup_app.py, tools/self_update.py]:
 - The setup app converts the disc into an install and updates an install,
