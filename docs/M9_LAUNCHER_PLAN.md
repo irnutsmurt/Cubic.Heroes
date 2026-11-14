@@ -804,3 +804,81 @@ dialog, the prompts of the device in use (a controller connected) on the ground,
 keyboard's keys. The focus ring and cursor move with the D-pad, the stick and the keys as before (Dear ImGui's
 navigation is unchanged); the motion was checked by grabs, not by hand. **The owner's review**: by hand, with a
 controller.
+
+## 17. M9.5, part 1: the launcher in the download (2026-11-14) [C, M]
+
+**The download's layout** (tools/make_bundle.py; the archive keeps its name, DotHeroes-Setup-windows-x86_64.zip,
+which the update engine's release manifests already list):
+- at its root the launcher -- `CubicHeroes.exe`, SDL2's library, `licenses/` (Dear ImGui's MIT licence, SDL2's zlib
+  licence), the project's `LICENSE.txt`, a README saying to run the launcher;
+- `worker/`: the pipeline worker the launcher runs (`worker/DotHeroes-Setup.exe --worker`, where the launcher already
+  looked for it) -- the frozen app with its Python, the Zig toolchain, the libraries, the sources, the tools and
+  configuration, and their licences and sources, exactly as the setup app's download held them.
+- **Built on Windows itself** now: PyInstaller from the checkout's own venv and the Windows Zig beside the Linux one
+  (Wine stays the way from Linux). The launcher is built on the platform it is for.
+- **The boundary check** gained a rule (none loosened): a launcher shipped without Dear ImGui's licence is refused.
+  The folder and the zip pass (19,904 files; the two pinned FFmpeg test references as before); 426 MB, 130 MB zipped.
+
+**Tried** (build/m9/m95p_run.sh; evidence on F:\3d dot game heroes\m9\evidence\m95p):
+- **The packaged launcher runs its own worker**: started from the download's folder, it found
+  `worker/DotHeroes-Setup.exe` and read the install, the builds, the GPU and the cache's state through it.
+- **A fresh install through the packaged worker did not finish -- a defect, open**: the frozen app ran the lifter
+  (`worker/DotHeroes-Setup.exe ...ppu_lifter.py`), which started its parallel lift ("16 workers") and then waited for
+  ever: one `--multiprocessing-fork` child, idle, and no progress for 8 minutes (the lift takes ~40 s from the
+  checkout). Stopped (`owned_run --cancel`); the logs kept. Windows starts Python's worker processes fresh (spawn),
+  and in the frozen app they are the app itself: that path has not worked here. The new layout does not change the
+  frozen app (the same files, one folder down), but whether this predates it is not known: the setup app's download
+  was last tried with a conversion before the lift ran in parallel. **The download is not releasable until this is
+  fixed** (M9.5: the frozen lift's worker processes, or the lift run single-process in the frozen app, then the whole
+  install test through the download).
+
+## 18. Shader preparation in the launcher: the first-run offer, in the background (2026-11-14) [C, M]
+
+**The owner's additions** (2026-11-14): after the first install, an offer -- "Would you like to precompile shaders
+now? This is recommended to reduce stuttering during gameplay." (Precompile Now (recommended) / Skip for Now);
+preparation in the background with a persistent bar along the bottom (the operation, the percentage, the pipeline
+count, the time left), the launcher usable meanwhile, cancel and resume, a completion notice, no duplicate jobs; the
+settings (automatic after installing, after game updates, after GPU or driver changes; precompile now; rebuild;
+the cache's state and disk use), automatic preparation on once the offer is accepted; a segmented, voxel-style bar;
+everything by controller.
+
+**In the launcher** (launcher/main.cpp):
+- **The offer**: after an install (or a move into the launcher's layout) that succeeded, by the setting
+  "Precompile shaders after installing": Ask (the default) shows the offer, its recommended choice focused; On
+  prepares at once; Off does nothing. Accepting sets the three automatic settings to On and starts the preparation;
+  Skip for Now changes nothing (the Play page then says a preparation is due, with Prepare now).
+- **In the background**: one preparation at a time, beside the launcher's other work -- pages, settings, saves and
+  diagnostics stay usable; what would change the active build or its cache (install, update, move, rollback,
+  another preparation) waits for it, and says so. A bar between the windows and the ground: a gem, the operation in
+  the pixel font ("PREPARING SHADERS", "REBUILDING THE SHADER CACHE"), a trough of voxel blocks (a lit top, a shaded
+  side; the newest one glinting; a travelling group while the share is unknown), and "19%   13 of 68 pipelines
+  about 2 s left". The ground's prompts gain VIEW (F1) "Stop preparing" -- confirmed, then the worker stops the game's
+  `--prepare`. Its end stays in the bar for eight seconds ("SHADERS READY", "68 pipelines ready for this GPU and
+  driver (0 failed), in N s" -- the time the launcher measured; "PREPARATION STOPPED: what was made is kept"); a
+  failure also opens a message with its details; the window's taskbar button flashes when the launcher is not in
+  front.
+- **Automatic preparation**, at each cache check (the launcher's start, after any job), once a session and never
+  over another job: a cache made invalid (another driver, another GPU, damaged) when "Rebuild the shader cache after
+  a GPU or driver change" is On; a new build's empty cache (an update; the launcher remembers having prepared
+  before) when "Prepare shaders after a game update" is On.
+- **The settings** (config/settings_schema.json, category Shaders, second on the Settings page): the three above;
+  under them the cache's state and disk use, Precompile now and Rebuild the cache (or Stop preparing while one runs).
+  The Shaders page: the GPU and driver, the cache's state and size, the pipelines known and those the first-session
+  list adds, the disk the shaders use, the same actions, the automatic settings' values.
+- `--show first-run|prepare|rebuild` opens the offer or starts a real preparation, for review.
+
+**In the worker** (tools/worker.py; docs/M9_WORKER_PROTOCOL.md): `install`, `update` and `migrate` take
+`--no-prepare` (the launcher's own preparation follows); `prepare` runs under the install's lock
+(`data/cache/prepare.lock`; a second is refused, `already_preparing`, whoever starts it; a lock whose process is gone
+is taken over) and in parts (32 recipes or more, at most eight), each part's pipeline cache saved as it ends -- a
+preparation stopped part-way keeps what it made, and the next one passes quickly over it (resuming); `--check` adds
+the disk the shaders use and the first-session list's pipelines not yet among the recipes (counted, nothing written).
+
+**Tried** (build/m9/shots11-13; the test install, the checkout's worker; no input sent to any window): the offer
+(its recommended choice focused, B = Skip for Now); a real preparation in the background (68 recipes in 3 parts) --
+the bar at 17% and 79% with the count and the time left, then "SHADERS READY"; a rebuild with NVIDIA's cache empty;
+the Play page's card saying a preparation is running; the Settings page's Shaders category and actions. Unit tests:
+the parts and their progress under the lock, a stop part-way leaving no lock or part file and the recipes intact,
+one at a time (a live holder refuses, a dead one is taken over), the check counting the list without writing (11 in
+tests/test_pipeline_manifest.py). **Not tried by hand**: stopping from the bar with VIEW, the automatic triggers
+after a real driver change or update -- the owner's review.

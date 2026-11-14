@@ -147,5 +147,93 @@ class ManifestTest(unittest.TestCase):
         self.assertEqual(logs, [])
 
 
+class Prog:
+    def __init__(self):
+        self.logs, self.fracs = [], []
+
+    def log(self, m):
+        self.logs.append(m)
+
+    def progress(self, step, frac, message):
+        self.fracs.append(frac)
+
+    def skip(self, step):
+        pass
+
+
+class PrepareTest(unittest.TestCase):
+    """the worker's preparation (the launcher's background job): in parts, one at a time per install, resumable"""
+
+    def setUp(self):
+        self.tmpd = tempfile.TemporaryDirectory()
+        self.install = os.path.join(self.tmpd.name, "install")
+        self.lay = layout.Layout(self.install)
+        os.makedirs(self.lay.cache)
+        with open(self.lay.active_json, "w") as f:
+            f.write('{"layout": 2, "active": "b1", "previous": [], "retention": 1}')
+        self.recipes = os.path.join(self.lay.cache, "native-recipes.bin")
+        with open(self.recipes, "wb") as f:
+            for k in range(70):
+                f.write(record(head(1000 + k, 16, 16), blob(16), blob(16)))
+        self.calls = []
+        self.old = worker._run_prepare, worker.MANIFEST
+        worker.MANIFEST = os.path.join(self.tmpd.name, "no-manifest.txt")
+
+        def fake(lay, prog, extra, recipes, at):   # the game's --prepare: the part's recipes made
+            n = len(pm.read_recipes(recipes)) if recipes else 0
+            self.calls.append((extra, n, at, os.path.exists(os.path.join(lay.cache, "prepare.lock"))))
+            if self.cancel_at is not None and len(self.calls) == self.cancel_at:
+                raise worker.pipeline.Cancelled()
+            return {"recipes": n, "made": n, "failed": 0, "translated": n, "from_cache": 0, "ms": 1.0,
+                    "cache": "none yet", "cache_mb": 0.1, "gpu": {}, "exit": 0}
+        self.cancel_at = None
+        worker._run_prepare = fake
+
+    def tearDown(self):
+        worker._run_prepare, worker.MANIFEST = self.old
+        self.tmpd.cleanup()
+
+    def test_in_parts_under_the_lock(self):
+        out = worker.op_prepare(self.install, Prog())
+        self.assertEqual([c[1] for c in self.calls], [32, 32, 6])
+        self.assertEqual([c[2] for c in self.calls], [(0, 70), (32, 70), (64, 70)])
+        self.assertTrue(all(c[3] for c in self.calls))   # each part under the lock
+        self.assertEqual((out["recipes"], out["made"], out["parts"]), (70, 70, 3))
+        self.assertFalse(os.path.exists(os.path.join(self.lay.cache, "prepare.lock")))
+        self.assertFalse(os.path.exists(os.path.join(self.lay.cache, "prepare-part.bin")))
+        self.assertIn("disk_mb", out)
+
+    def test_stopped_part_way_leaves_nothing_behind(self):
+        self.cancel_at = 2
+        with self.assertRaises(worker.pipeline.Cancelled):
+            worker.op_prepare(self.install, Prog())
+        self.assertEqual(len(self.calls), 2)
+        self.assertFalse(os.path.exists(os.path.join(self.lay.cache, "prepare.lock")))
+        self.assertFalse(os.path.exists(os.path.join(self.lay.cache, "prepare-part.bin")))
+        self.assertEqual(len(pm.read_recipes(self.recipes)), 70)   # the recipes untouched: the next run resumes
+
+    def test_one_at_a_time(self):
+        lock = os.path.join(self.lay.cache, "prepare.lock")
+        with open(lock, "w") as f:
+            f.write(str(os.getppid()))   # a live process holds it
+        with self.assertRaises(worker.pipeline.SetupError) as e:
+            worker.op_prepare(self.install, Prog())
+        self.assertEqual(e.exception.code, "already_preparing")
+        self.assertEqual(self.calls, [])
+        with open(lock, "w") as f:
+            f.write("999999")   # its process is gone: taken over
+        worker.op_prepare(self.install, Prog())
+        self.assertEqual(len(self.calls), 3)
+
+    def test_check_counts_the_manifest_without_writing(self):
+        f = Fixture(self.tmpd.name)
+        pm.make(f.disc, [f.recorded], f.manifest)
+        worker.MANIFEST = f.manifest
+        out = worker.op_prepare(self.install, Prog(), check=True)
+        self.assertEqual(out["pending"], 2)
+        self.assertEqual(len(pm.read_recipes(self.recipes)), 70)
+        self.assertEqual(self.calls[0][0], ["--check"])
+
+
 if __name__ == "__main__":
     unittest.main()

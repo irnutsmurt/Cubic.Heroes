@@ -37,6 +37,7 @@ import game_settings  # noqa: E402
 import install_layout as layout  # noqa: E402
 import pipeline_manifest  # noqa: E402
 import setup_pipeline as pipeline  # noqa: E402
+import updates  # noqa: E402
 
 PROTOCOL = 1
 # Exit codes: the result event says the same
@@ -474,7 +475,7 @@ def build_slot(lay, prog, source=None, keys=None, elf=None, full=False, resume=F
         raise
 
 
-def op_install(install, source, keys, elf, prog, resume=False, validate=validate_build):
+def op_install(install, source, keys, elf, prog, resume=False, validate=validate_build, prepare=True):
     """a first install, a reinstall or a repair from the disc: the disc's steps, then a new build (the saves, the
     settings and the kept builds untouched)"""
     lay = layout.Layout(install)
@@ -485,7 +486,7 @@ def op_install(install, source, keys, elf, prog, resume=False, validate=validate
     bid, info, _ = build_slot(lay, prog, source, keys, elf, resume=resume, validate=validate)
     game_settings.settle_after_conversion(install)
     pruned = lay.prune()
-    prepared = prepare_after(lay, prog, validate)
+    prepared = prepare_after(lay, prog, validate, prepare)
     return {"build": bid, "exe": os.path.join(lay.game_link, layout.exe_name()), "pruned": pruned["removed"],
             "prepared": prepared}
 
@@ -513,34 +514,142 @@ def first_session_recipes(lay, prog):
 
 
 def op_prepare(install, prog, check=False, rebuild=False):
+    """the active build's `--prepare`: --check says whether the cache is valid for this GPU and driver (nothing
+    made; with the recipes counted, the manifest's not yet added, and the disk the shaders use). Else, under the
+    install's preparation lock (one at a time, whoever starts it), the manifest's pipelines added to the recipes,
+    then the recipes prepared in parts -- each part's pipeline cache saved as it ends, so a preparation stopped
+    part-way keeps what it made and the next one goes quickly over those (resuming where it stopped)."""
     lay = layout.Layout(install)
     if lay.kind() != "slots":
         raise pipeline.SetupError("This folder has no install with build slots.", "no_install")
-    listed = None if check else first_session_recipes(lay, prog)
-    if rebuild and not check:   # the manual rebuild: the active build's pipeline cache made again from its recipes
-        sid = (lay.build_info(lay.read_active()["active"]) or {}).get("shader_cache") or "default"
-        pc = os.path.join(lay.shaders, sid, "native-pipelines.vkpc")
-        if os.path.exists(pc):
-            os.remove(pc)
+    if check:
+        out = _run_prepare(lay, prog, ["--check"], None, None)
+        out.update(prepare_disk(lay))
+        return out
+    with PrepareLock(lay):
+        listed = first_session_recipes(lay, prog)
+        if rebuild:   # the manual rebuild: the active build's pipeline cache made again from its recipes
+            pc = os.path.join(shader_folder(lay), "native-pipelines.vkpc")
+            if os.path.exists(pc):
+                os.remove(pc)
+        recipes = os.path.join(lay.cache, "native-recipes.bin")
+        records = pipeline_manifest.read_recipes(recipes)
+        prog.progress("prepare", 0.0, step_name("prepare"))
+        part_file = os.path.join(lay.cache, "prepare-part.bin")
+        size = max(PREPARE_PART, -(-len(records) // 8))
+        parts = [records[i:i + size] for i in range(0, len(records), size)] or [[]]
+        total, done, result = len(records), 0, None
+        try:
+            for part in parts:
+                with open(part_file, "wb") as f:
+                    for _, head, vp, fp in part:
+                        f.write(head + vp + fp + pipeline_manifest.struct.pack(
+                            "<I", pipeline_manifest.recipe_sum(head, vp, fp)))
+                r = _run_prepare(lay, prog, [], part_file, (done, total))
+                done += len(part)
+                if result is None:
+                    result = dict(r)
+                else:
+                    for k in ("made", "failed", "translated", "from_cache"):
+                        result[k] = result.get(k, 0) + r.get(k, 0)
+                    result["ms"] = round(result.get("ms", 0) + r.get("ms", 0), 1)
+                    result["cache_mb"], result["gpu"], result["exit"] = r.get("cache_mb"), r.get("gpu"), r.get("exit")
+        finally:
+            if os.path.exists(part_file):
+                os.remove(part_file)
+        result["recipes"], result["parts"] = total, len(parts)
+        if listed is not None:
+            result["manifest"] = listed
+        result.update(prepare_disk(lay))
+        return result
+
+
+PREPARE_PART = 32   # recipes per part (at least; at most eight parts)
+
+
+def shader_folder(lay):
+    sid = (lay.build_info(lay.read_active()["active"]) or {}).get("shader_cache") or "default"
+    return os.path.join(lay.shaders, sid)
+
+
+def prepare_disk(lay):
+    """what the shaders use on disk: the active build's shader folder (its translations and pipeline cache) and
+    the recipes; with --check, the manifest's pipelines not yet among the recipes"""
+    def size(path):
+        if os.path.isfile(path):
+            return os.path.getsize(path)
+        return sum(os.path.getsize(os.path.join(d, f)) for d, _, fs in os.walk(path) for f in fs)
+    out = {"disk_mb": round((size(shader_folder(lay)) + size(os.path.join(lay.cache, "native-recipes.bin"))) / 2**20, 2)}
+    if os.path.exists(MANIFEST):
+        try:
+            out["pending"] = pipeline_manifest.resolve(MANIFEST, lay.disc, os.path.join(lay.cache, "native-recipes.bin"),
+                                                       dry_run=True)["added"]
+        except (OSError, ValueError):
+            pass
+    return out
+
+
+class PrepareLock:
+    """one preparation at a time per install, whoever starts it (the launcher twice, the launcher and an update):
+    data/cache/prepare.lock holding the preparing worker's process id; a lock whose process is gone is taken over"""
+
+    def __init__(self, lay):
+        self.path = os.path.join(lay.cache, "prepare.lock")
+
+    def __enter__(self):
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        for _ in range(3):
+            try:
+                fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except FileExistsError:
+                try:
+                    with open(self.path) as f:
+                        pid = int(f.read().strip() or 0)
+                except (OSError, ValueError):
+                    pid = 0
+                if pid and pid != os.getpid() and updates._alive(pid):
+                    raise pipeline.SetupError("Shaders are already being prepared for this install.", "already_preparing")
+                try:
+                    os.remove(self.path)   # its process is gone
+                except OSError:
+                    pass
+                continue
+            os.write(fd, str(os.getpid()).encode())
+            os.close(fd)
+            return self
+        raise pipeline.SetupError("Shaders are already being prepared for this install.", "already_preparing")
+
+    def __exit__(self, *exc):
+        try:
+            os.remove(self.path)
+        except OSError:
+            pass
+        return False
+
+
+def _run_prepare(lay, prog, extra, recipes, at):
+    """one run of the active build's --prepare (recipes: a file of them, else the install's); at = (done before
+    this run, the whole preparation's total) for the progress"""
     exe = os.path.join(lay.game_link, layout.exe_name())
     env = {k: v for k, v in os.environ.items() if not k.startswith(("DOTHEROES_", "PS3_", "PS3RECOMP_"))}
+    if recipes:
+        env["DOTHEROES_RECIPES"] = recipes
     kw = {"creationflags": 0x08000000} if os.name == "nt" else {}
     os.makedirs(lay.logs, exist_ok=True)
-    result, last = None, []
-    if not check:
-        prog.progress("prepare", 0.0, step_name("prepare"))
-    with open(os.path.join(lay.logs, "prepare.log"), "w", encoding="utf-8", errors="replace") as err:
-        p = subprocess.Popen([exe, "--prepare"] + (["--check"] if check else []), stdin=subprocess.DEVNULL,
-                             stdout=subprocess.PIPE, stderr=err, text=True, encoding="utf-8", errors="replace",
-                             cwd=lay.root, env=env, **kw)
+    result = None
+    with open(os.path.join(lay.logs, "prepare.log"), "a" if at and at[0] else "w", encoding="utf-8",
+              errors="replace") as err:
+        p = subprocess.Popen([exe, "--prepare"] + extra, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=err,
+                             text=True, encoding="utf-8", errors="replace", cwd=lay.root, env=env, **kw)
         try:
             for ln in p.stdout:
                 try:
                     e = json.loads(ln)
                 except ValueError:
                     continue
-                if e.get("ev") == "prepare" and not check:
-                    prog.progress("prepare", e["done"] / max(1, e["total"]), f"{e['done']} of {e['total']} pipelines")
+                if e.get("ev") == "prepare" and at:
+                    d, n = at[0] + e["done"], max(1, at[1])
+                    prog.progress("prepare", d / n, f"{d} of {at[1]} pipelines")
                 elif e.get("ev") == "prepared":
                     result = e.get("result")
             p.wait(timeout=PREPARE_TIMEOUT_S)
@@ -555,16 +664,14 @@ def op_prepare(install, prog, check=False, rebuild=False):
             f": {result['error']}." if isinstance(result, dict) and result.get("error") else "."), "prepare_failed",
             last)
     result["exit"] = p.returncode
-    if listed is not None:
-        result["manifest"] = listed
     return result
 
 
-def prepare_after(lay, prog, validate):
+def prepare_after(lay, prog, validate, enabled=True):
     """after a build became active: a preparation when there are recipes (the manifest's added first); its failure
     is reported, never the operation's (the game still prepares what it meets). Not with the tests' stand-in
-    builds (validate given)."""
-    if validate is not validate_build:
+    builds (validate given), nor when the launcher asked to prepare in the background itself (--no-prepare)."""
+    if validate is not validate_build or not enabled:
         prog.skip("prepare")
         return None
     first_session_recipes(lay, prog)
@@ -578,7 +685,7 @@ def prepare_after(lay, prog, validate):
         return {"error": str(e)}
 
 
-def op_update(install, prog, full=False, validate=validate_build):
+def op_update(install, prog, full=False, validate=validate_build, prepare=True):
     """the game rebuilt from the install's own copy of the disc into a new slot (only what changed redone), the
     saves backed up first; the build before it kept for rollback"""
     lay = layout.Layout(install)
@@ -592,12 +699,12 @@ def op_update(install, prog, full=False, validate=validate_build):
     game_settings.settle_after_conversion(install)
     pruned = lay.prune()
     lay.prune_backups()
-    prepared = prepare_after(lay, prog, validate) if changed else prog.skip("prepare")
+    prepared = prepare_after(lay, prog, validate, prepare) if changed else prog.skip("prepare")
     return {"build": bid, "changed": changed, "saves_backup": backup and backup["id"], "pruned": pruned["removed"],
             "prepared": prepared}
 
 
-def op_migrate(install, prog, validate=validate_build):
+def op_migrate(install, prog, validate=validate_build, prepare=True):
     """the setup app's install into the layout with build slots, the disc not asked for again and nothing redone
     that is still valid: the current build made from the install's own lift and objects (when the tools are the
     same, a link with every object reused), then the data moved and the old game removed"""
@@ -630,7 +737,7 @@ def op_migrate(install, prog, validate=validate_build):
     removed = lay.remove_legacy_game()
     game_settings.settle_after_conversion(install)
     lay.prune()
-    prepare_after(lay, prog, validate)
+    prepare_after(lay, prog, validate, prepare)
     return {"build": bid, "lift_kept": bool(old_lift), "moved": moved, "removed": removed,
             "saves_backup": backup["id"], "exe": os.path.join(lay.game_link, layout.exe_name()),
             "shortcuts": "the old shortcuts started the setup app's game: make them again (they start game/)"}
@@ -647,7 +754,7 @@ def cmd_install(a, ev, control):
     elf = pipeline.is_elf(k)
     prog = _progress(ev, control, pipeline.STEPS + BUILD_TAIL)
     out = op_install(os.path.abspath(a.install), os.path.abspath(a.disc), None if elf else k, k if elf else None,
-                     prog, resume=a.resume)
+                     prog, resume=a.resume, prepare=not a.no_prepare)
     out["seconds"], out["skipped"] = prog.finish()
     return out
 
@@ -655,7 +762,7 @@ def cmd_install(a, ev, control):
 def cmd_update(a, ev, control):
     prog = _progress(ev, control, [s for s in pipeline.STEPS if s not in ("verify", "extract", "decrypt")] +
                      BUILD_TAIL)
-    out = op_update(os.path.abspath(a.install), prog, full=a.full)
+    out = op_update(os.path.abspath(a.install), prog, full=a.full, prepare=not a.no_prepare)
     out["seconds"], out["skipped"] = prog.finish()
     return out
 
@@ -663,7 +770,7 @@ def cmd_update(a, ev, control):
 def cmd_migrate(a, ev, control):
     prog = _progress(ev, control, [s for s in pipeline.STEPS if s not in ("verify", "extract", "decrypt")] +
                      BUILD_TAIL)
-    out = op_migrate(os.path.abspath(a.install), prog)
+    out = op_migrate(os.path.abspath(a.install), prog, prepare=not a.no_prepare)
     out["seconds"], out["skipped"] = prog.finish()
     return out
 
@@ -916,6 +1023,8 @@ def parser():
     p.add_argument("--steam", action="store_true", help="shortcuts: in Steam's library")
     p.add_argument("--desktop", action="store_true", help="shortcuts: on the desktop too")
     p.add_argument("--rebuild", action="store_true", help="prepare: the pipeline cache made again from scratch")
+    p.add_argument("--no-prepare", action="store_true",
+                   help="install/update/migrate: no preparation at the end (the launcher prepares in the background)")
     p.add_argument("--set", action="append", help="settings: KEY=VALUE (repeatable)")
     p.add_argument("--reset", action="append", help="settings: a key to its default (repeatable; all: every one)")
     p.add_argument("--repair", action="store_true", help="settings: write a damaged settings file again")

@@ -30,7 +30,8 @@ What is refused (each file by its name and its bytes, not by where it sits):
   KEYS           decryption keys (the keys file's APP lines, erk/riv/klic values)
   MIDDLEWARE     the FMOD-derived files removed in M1 (tools/license_audit.py's FORBIDDEN)
   DATA-SET       data sets the project does not redistribute (OpenAL Soft's default HRTF, .mhr)
-  LICENCE        (--bundle) a shipped library without its licence, notice or, for OpenAL Soft, its source
+  LICENCE        (--bundle) a shipped library without its licence, notice or, for OpenAL Soft, its source;
+                 the launcher without Dear ImGui's licence
 Exit 1 with each finding listed when anything is found.
 """
 import hashlib
@@ -339,6 +340,8 @@ def bundle_licences(names, findings, where):
     for lib, lic in (("SDL2.dll", "SDL2.txt"), ("libSDL2-2.0.so.0", "SDL2.txt")):
         if has(lib) and not has("licenses/" + lic):
             findings.append(("LICENCE", where, f"{lib} shipped without licenses/{lic}"))
+    if (has("CubicHeroes.exe") or has("/CubicHeroes")) and not has("licenses/Dear-ImGui.txt"):
+        findings.append(("LICENCE", where, "the launcher shipped without Dear ImGui's licence (licenses/Dear-ImGui.txt)"))
     if not has("LICENSE.txt"):
         findings.append(("LICENCE", where, "the project's own licence (LICENSE.txt) missing"))
 

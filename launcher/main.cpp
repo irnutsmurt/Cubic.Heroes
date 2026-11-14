@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
@@ -129,6 +130,7 @@ struct Prefs {
     std::string install, disc, keys;
     int x = SDL_WINDOWPOS_CENTERED, y = SDL_WINDOWPOS_CENTERED, w = 1280, h = 800;
     bool maximized = false;
+    bool prepared_once = false;   // shaders prepared at least once: a new build's empty cache is an update's
 
     std::string file() const { return path_str(u8path(data_dir()) / "launcher.json"); }
     void load()
@@ -143,6 +145,7 @@ struct Prefs {
             w = (int)v["window"]["w"].num(); h = (int)v["window"]["h"].num();
         }
         maximized = v["window"]["maximized"].truthy();
+        prepared_once = v["prepared_once"].truthy();
     }
     void save() const
     {
@@ -150,7 +153,8 @@ struct Prefs {
         snprintf(win, sizeof win, "{\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d,\"maximized\":%s}", x, y, w, h,
                  maximized ? "true" : "false");
         write_text(file(), "{\n \"install\": " + json::quote(install) + ",\n \"disc\": " + json::quote(disc) +
-                               ",\n \"keys\": " + json::quote(keys) + ",\n \"window\": " + win + "\n}\n");
+                               ",\n \"keys\": " + json::quote(keys) + ",\n \"window\": " + win +
+                               ",\n \"prepared_once\": " + (prepared_once ? "true" : "false") + "\n}\n");
     }
 } g_prefs;
 
@@ -768,10 +772,22 @@ struct Op {
 
 static std::unique_ptr<Op> g_op;                   // the long operation, if any
 static std::vector<std::unique_ptr<Op>> g_queries; // quick ones
+static std::unique_ptr<Op> g_bg;                   // the shaders' preparation, in the background (one at a time)
+struct BgDone { bool shown = false, ok = false; std::string title, text; float t0 = 0; };
+static BgDone g_bg_done;                           // how it ended, shown in the bar for a while
+static SDL_Window* g_window = nullptr;
+static void show_msg(const std::string& t, const std::string& text);
 
 static Op* run(const std::string& cmd, const std::vector<std::string>& args, const std::string& title, bool long_op,
                std::function<void(const json::Value&)> then)
 {
+    // what changes the active build or its shaders waits for the background preparation (one job on the cache)
+    static const std::set<std::string> exclusive = { "install", "update", "migrate", "rollback", "prepare" };
+    if (long_op && g_bg && exclusive.count(cmd)) {
+        show_msg("Shaders are being prepared", "Wait for the preparation at the bottom to finish, or stop it first "
+                 "(the VIEW button, or F1): what it made is kept.");
+        return nullptr;
+    }
     auto op = std::make_unique<Op>();
     op->job = std::make_unique<Job>();
     op->title = title;
@@ -836,11 +852,17 @@ struct Confirm {
     std::string title, text, yes;
     bool danger = false;
     std::function<void()> on_yes;
+    std::string no = "Cancel";   // the other choice's label
+    std::function<void()> on_no;
+    bool focus_yes = false;      // an offer: the recommended choice has the focus (else the safe one, "no")
 } g_confirm;
 
 static void ask(const std::string& t, const std::string& text, const std::string& yes, bool danger, std::function<void()> f)
 {
-    g_confirm = { true, t, text, yes, danger, std::move(f) };
+    g_confirm = Confirm();
+    g_confirm.open = true;
+    g_confirm.title = t; g_confirm.text = text; g_confirm.yes = yes; g_confirm.danger = danger;
+    g_confirm.on_yes = std::move(f);
 }
 
 struct Message {
@@ -848,6 +870,8 @@ struct Message {
     std::string title, text, details;
     bool error = false, show_details = false;
 } g_msg;
+
+static void show_msg(const std::string& t, const std::string& text) { g_msg = { true, t, text, "", true, false }; }
 
 static void show_result_error(const json::Value& r, const std::string& what)
 {
@@ -966,6 +990,8 @@ struct Status {
 
 static std::string install_dir() { return g_prefs.install.empty() ? default_install() : g_prefs.install; }
 
+void auto_prepare_check_later();
+
 static void refresh_info()
 {
     run("info", { "--install", install_dir() }, "", false, [](const json::Value& r) {
@@ -978,12 +1004,19 @@ static void refresh_info()
             run("prepare", { "--install", install_dir(), "--check" }, "", false, [](const json::Value& c) {
                 g_st.check = c["data"];
                 g_st.check_error = c["ok"].truthy() ? "" : c["message"].str();
+                auto_prepare_check_later();
             });
         }
         if (kind == "slots" || kind == "setup-app")
-            run("settings", { "--install", install_dir() }, "", false, [](const json::Value& s) { g_st.settings = s["data"]; });
+            run("settings", { "--install", install_dir() }, "", false, [](const json::Value& s) {
+                g_st.settings = s["data"];
+                auto_prepare_check_later();
+            });
     });
 }
+
+static bool g_auto_check_due = false;   // a cache check arrived: the automatic preparation looks at it next frame
+void auto_prepare_check_later() { g_auto_check_due = true; }
 
 static std::string setting(const char* key, const char* dflt)
 {
@@ -999,6 +1032,102 @@ static void check_updates()
         g_st.checking_update = false;
         g_st.checked_once = true;
     });
+}
+
+// the preparation in the background: the launcher stays usable, the bar at the bottom shows it; one at a time (the
+// worker also refuses a second for the same install, whoever starts it)
+static bool bg_prepare(bool rebuild, const std::string& why)
+{
+    if (g_bg) return false;
+    std::vector<std::string> a = { "--install", install_dir() };
+    if (rebuild) a.push_back("--rebuild");
+    auto op = std::make_unique<Op>();
+    op->job = std::make_unique<Job>();
+    op->title = rebuild ? "Rebuilding the shader cache" : "Preparing shaders";
+    op->command = "prepare";
+    op->detail = why;
+    const auto t0 = std::chrono::steady_clock::now();
+    op->then = [rebuild, t0](const json::Value& r) {
+        const double took = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        g_bg_done = BgDone();
+        g_bg_done.shown = true;
+        g_bg_done.t0 = (float)ImGui::GetTime();
+        g_bg_done.ok = r["ok"].truthy();
+        const json::Value& d = r["data"];
+        char text[256];
+        if (g_bg_done.ok) {
+            snprintf(text, sizeof text, "%d pipelines ready for this GPU and driver (%d failed), in %.1f s.",
+                     (int)d["recipes"].num(), (int)d["failed"].num(), took);
+            g_bg_done.title = rebuild ? "Shader cache rebuilt" : "Shaders ready";
+            g_bg_done.text = text;
+            g_prefs.prepared_once = true;
+            g_prefs.save();
+        } else if (r["code"].str() == "cancelled") {
+            g_bg_done.title = "Preparation stopped";
+            g_bg_done.text = "What was made is kept: preparing again continues from there.";
+        } else {
+            g_bg_done.title = "Preparation didn't finish";
+            g_bg_done.text = r["message"].str("Something went wrong.");
+            if (r["code"].str() != "already_preparing") show_result_error(r, "Preparing shaders didn't finish");
+        }
+        if (g_window && !(SDL_GetWindowFlags(g_window) & SDL_WINDOW_INPUT_FOCUS))
+            SDL_FlashWindow(g_window, SDL_FLASH_UNTIL_FOCUSED);   // the end, noticed from another window too
+        refresh_info();
+    };
+    if (!op->job->start(worker_argv("prepare", a), "prepare")) {
+        show_msg("The launcher's worker could not be started", "Shaders can't be prepared now.");
+        return false;
+    }
+    g_bg = std::move(op);
+    g_bg_done.shown = false;
+    return true;
+}
+
+// a stop asked for: confirmed, then the worker told (it ends the game's --prepare; the parts done are kept)
+static void bg_stop()
+{
+    if (!g_bg) return;
+    ask("Stop preparing shaders?", "What is prepared so far is kept: preparing again continues from there. Until "
+        "then, effects not prepared may stutter the first time they appear.", "Stop", true, [] {
+        if (g_bg) g_bg->job->cancel();
+    });
+}
+
+// after an install (or a move into the launcher's layout): the setting decides -- ask (the first time), on or off
+static void after_install_shaders()
+{
+    const std::string s = setting("LAUNCHER_SHADERS_AFTER_INSTALL", "ask");
+    if (s == "1") { bg_prepare(false, "after the install"); return; }
+    if (s != "ask") return;
+    ask("The game is installed", "Would you like to precompile shaders now? This is recommended to reduce stuttering "
+        "during gameplay.", "Precompile Now (recommended)", false, [] {
+        run("settings", { "--install", install_dir(), "--set", "LAUNCHER_SHADERS_AFTER_INSTALL=1",
+                          "--set", "LAUNCHER_SHADERS_AFTER_UPDATE=1", "--set", "LAUNCHER_SHADERS_ON_DRIVER_CHANGE=1" },
+            "", false, [](const json::Value& r) { if (r["ok"].truthy()) g_st.settings = r["data"]; });
+        bg_prepare(false, "after the install");
+    });
+    g_confirm.no = "Skip for Now";
+    g_confirm.focus_yes = true;
+}
+
+// at each cache check: a cache made invalid (another GPU or driver, damaged) or a new build's empty one (an update),
+// prepared on its own when the settings say so -- once a session, never over another job
+static void auto_prepare_check()
+{
+    static bool done = false;
+    const json::Value& c = g_st.check;
+    if (done || g_bg || g_op || c.is_null() || c["prepared"].truthy() || g_st.settings.is_null()) return;
+    if (c["recipes"].num() + c["pending"].num() <= 0) return;
+    const std::string state = c["cache"].str();
+    const bool invalid = state.rfind("made ", 0) == 0 || state.rfind("damaged", 0) == 0;
+    const bool new_build = state == "none yet" && g_prefs.prepared_once;
+    if (invalid && setting("LAUNCHER_SHADERS_ON_DRIVER_CHANGE", "0") == "1") {
+        done = true;
+        bg_prepare(false, "the cache was " + state);
+    } else if (new_build && setting("LAUNCHER_SHADERS_AFTER_UPDATE", "0") == "1") {
+        done = true;
+        bg_prepare(false, "a new game build");
+    }
 }
 
 // ============================================================================================================
@@ -1047,12 +1176,7 @@ static void start_game()
 
 static void prepare_now(bool rebuild)
 {
-    std::vector<std::string> a = { "--install", install_dir() };
-    if (rebuild) a.push_back("--rebuild");
-    run("prepare", a, rebuild ? "Rebuilding the shader cache" : "Preparing shaders and pipelines", true, [](const json::Value& r) {
-        if (!r["ok"].truthy()) show_result_error(r, "Preparing shaders didn't finish");
-        refresh_info();
-    });
+    bg_prepare(rebuild, rebuild ? "asked for" : "asked for");
 }
 
 static void page_play()
@@ -1081,17 +1205,20 @@ static void page_play()
         ImGui::EndGroup();
         ImGui::Dummy(ImVec2(0, S(8)));
         // shaders
-        card_begin("##shaders_card", ImVec2(ImGui::GetContentRegionAvail().x * 0.5f - S(8), S(190)));
+        card_begin("##shaders_card", ImVec2(ImGui::GetContentRegionAvail().x * 0.5f - S(8), S(214)));
         title("Shaders and pipelines", 24);
         const json::Value& c = g_st.check;
-        if (!g_st.check_error.empty()) {
+        if (g_bg) {
+            text_col(col::accent, "Being prepared now: the bar at the bottom shows how far. You can play meanwhile; "
+                                  "effects not prepared yet may stutter the first time.");
+        } else if (!g_st.check_error.empty()) {
             text_col(col::danger, "No usable Vulkan device was found: the game can't start. %s", g_st.check_error.c_str());
         } else if (c.is_null()) {
             text_col(col::dim, "Checking...");
         } else if (c["prepared"].truthy()) {
             text_col(col::ok, "Ready for this GPU and driver (%s pipelines).", c["recipes"].str("0").c_str());
             text_col(col::dim, "%s, driver %s", c["gpu"]["name"].str().c_str(), c["gpu"]["driver"].str().c_str());
-        } else if (c["recipes"].num() > 0) {
+        } else if (c["recipes"].num() + c["pending"].num() > 0) {
             text_col(col::warm, "A preparation is due (%s). It takes a few seconds and prevents stutter.",
                      c["cache"].str().c_str());
             if (big_button("Prepare now")) prepare_now(false);
@@ -1100,7 +1227,7 @@ static void page_play()
         }
         card_end();
         ImGui::SameLine();
-        card_begin("##update_card", ImVec2(0, S(190)));
+        card_begin("##update_card", ImVec2(0, S(214)));
         title("Updates", 24);
         const json::Value& u = g_st.update;
         if (g_st.checking_update) text_col(col::dim, "Checking...");
@@ -1118,8 +1245,9 @@ static void page_play()
         title("An install made by the setup app was found", 26);
         text_col(col::dim, "Move it into the launcher's layout: your disc isn't needed again, your saves and settings stay.");
         if (big_button("Move it now", ImVec2(S(320), 0), Kind::Primary))
-            run("migrate", { "--install", install_dir() }, "Moving your install", true, [](const json::Value& r) {
+            run("migrate", { "--install", install_dir(), "--no-prepare" }, "Moving your install", true, [](const json::Value& r) {
                 if (!r["ok"].truthy()) show_result_error(r, "Moving the install didn't finish");
+                else after_install_shaders();
                 refresh_info();
             });
         focus_first();
@@ -1264,12 +1392,13 @@ static void page_install()
         g_prefs.save();
         std::vector<std::string> a = { "--disc", g_wiz.disc, "--keys", g_wiz.keys, "--install", g_wiz.folder };
         if (resume) a.push_back("--resume");
+        a.push_back("--no-prepare");   // the launcher prepares in the background, as the settings or the player say
         run("install", a, "Installing 3D Dot Game Heroes", true, [](const json::Value& r) {
             if (!r["ok"].truthy() && r["code"].str() != "cancelled") show_result_error(r, "The install didn't finish");
             else if (r["ok"].truthy()) {
-                g_msg = { true, "Installed", "The game is ready to play.", "", false, false };
                 g_page = kPlay;
                 g_focus_page = true;
+                after_install_shaders();
             }
             refresh_info();
         });
@@ -1410,6 +1539,25 @@ static void page_saves()
 }
 
 // --- shaders ---
+// the shaders' actions: precompile now, rebuild the cache, or stop the preparation running (one at a time)
+static void shader_actions(bool focus = true)
+{
+    if (g_bg) {
+        const bool stopping = g_bg->job->cancel_sent;
+        if (big_button(stopping ? "Stopping..." : "Stop preparing", ImVec2(S(300), 0), Kind::Danger, !stopping)) bg_stop();
+        if (focus) focus_first();
+        ImGui::SameLine();
+        text_col(col::dim, "Preparing now: the bar at the bottom shows how far.");
+        return;
+    }
+    if (big_button("Precompile now", ImVec2(S(300), 0), Kind::Primary)) prepare_now(false);
+    if (focus) focus_first();
+    ImGui::SameLine();
+    if (big_button("Rebuild the cache", ImVec2(S(300), 0)))
+        ask("Rebuild the shader cache?", "The pipeline cache is made again from scratch for this GPU and driver. It "
+            "runs in the background; nothing else changes.", "Rebuild", false, [] { prepare_now(true); });
+}
+
 static void page_shaders()
 {
     title("Shaders and pipelines");
@@ -1425,18 +1573,34 @@ static void page_shaders()
         text_col(c["prepared"].truthy() ? col::ok : col::warm, "The pipeline cache: %s, %s.",
                  c["prepared"].truthy() ? "ready for this GPU and driver" : c["cache"].str().c_str(),
                  human_bytes(c["cache_mb"].num() * 1048576).c_str());
-        text_col(col::dim, "Pipelines known on this PC: %s (recorded as you play).", c["recipes"].str("0").c_str());
+        text_col(col::dim, "Pipelines known on this PC: %s (recorded as you play)%s.", c["recipes"].str("0").c_str(),
+                 c["pending"].num() > 0 ? (", " + c["pending"].str() + " more listed for a first session").c_str() : "");
+        if (!c["disk_mb"].is_null())
+            text_col(col::dim, "On disk: %s (the translated shaders, the pipeline cache and the recipes).",
+                     human_bytes(c["disk_mb"].num() * 1048576).c_str());
     }
     card_end();
-    if (big_button("Prepare now", ImVec2(S(300), 0), Kind::Primary)) prepare_now(false);
-    focus_first();
-    ImGui::SameLine();
-    if (big_button("Rebuild the cache", ImVec2(S(300), 0)))
-        ask("Rebuild the shader cache?", "The pipeline cache is made again from scratch for this GPU and driver. It takes "
-            "a few seconds; nothing else changes.", "Rebuild", false, [] { prepare_now(true); });
+    shader_actions();
+    ImGui::Dummy(ImVec2(0, S(4)));
+    title("Automatic preparation", 24);
+    auto onoff = [](const char* k) { const std::string v = setting(k, "0"); return v == "1" ? "On" : v == "ask" ? "Ask" : "Off"; };
+    text_col(col::dim, "After installing: %s.  After a game update: %s.  After a GPU or driver change: %s.  "
+                       "(Settings page, Shaders.)", onoff("LAUNCHER_SHADERS_AFTER_INSTALL"),
+             onoff("LAUNCHER_SHADERS_AFTER_UPDATE"), onoff("LAUNCHER_SHADERS_ON_DRIVER_CHANGE"));
 }
 
 // --- settings ---
+// under the Settings page's Shaders category: the cache's state and disk use, and the actions
+static void settings_shader_status()
+{
+    const json::Value& c = g_st.check;
+    if (!c.is_null())
+        text_col(c["prepared"].truthy() ? col::ok : col::warm, "The shader cache: %s; %s on disk.",
+                 c["prepared"].truthy() ? "ready for this GPU and driver" : c["cache"].str().c_str(),
+                 human_bytes(c["disk_mb"].num() * 1048576).c_str());
+    shader_actions(false);
+}
+
 static void page_settings()
 {
     title("Settings");
@@ -1449,13 +1613,14 @@ static void page_settings()
         { "DOTHEROES_FPS", { { "60", "60 fps" }, { "30", "30 fps (the original)" }, { "0", "Unlimited" } } },
         { "LAUNCHER_UPDATE_CHANNEL", { { "stable", "Stable releases" }, { "prerelease", "Test releases too" } } },
         { "LAUNCHER_LOG_LEVEL", { { "info", "Normal" }, { "debug", "Detailed" } } },
+        { "LAUNCHER_SHADERS_AFTER_INSTALL", { { "ask", "Ask" }, { "1", "On" }, { "0", "Off" } } },
     };
     std::string last_cat;
     bool first = true;
     ImGui::BeginChild("##settings", ImVec2(0, 0), ImGuiChildFlags_NavFlattened, ImGuiWindowFlags_NoBackground);
     // the categories in a fixed order, each setting in the schema's order within it
     std::vector<std::pair<std::string, const json::Value*>> ordered;
-    static const char* cats[] = { "Display", "Updates", "Saves", "Diagnostics" };
+    static const char* cats[] = { "Display", "Shaders", "Updates", "Saves", "Diagnostics" };
     for (const char* c : cats)
         for (const auto& kv : s.o)
             if (kv.second["category"].str() == c) ordered.push_back({ kv.first, &kv.second });
@@ -1463,14 +1628,20 @@ static void page_settings()
         const std::pair<std::string, const json::Value&> kv(kv0.first, *kv0.second);
         const json::Value& x = kv.second;
         const std::string cat = x["category"].str();
-        if (cat != last_cat) { ImGui::Dummy(ImVec2(0, S(6))); title(cat.c_str(), 24); last_cat = cat; }
+        if (cat != last_cat) {
+            if (last_cat == "Shaders") settings_shader_status();
+            ImGui::Dummy(ImVec2(0, S(6)));
+            title(cat.c_str(), 24);
+            last_cat = cat;
+        }
         const std::string key = kv.first, val = x["value"].str();
         std::string shown = val;
         auto ch = choices.find(key);
         std::vector<std::string> cycle;
         if (ch != choices.end()) {
             for (auto& c : ch->second) { cycle.push_back(c.first); if (c.first == val) shown = c.second; }
-        } else if (key == "PS3RECOMP_VK_FULLSCREEN" || key == "LAUNCHER_CHECK_UPDATES") {
+        } else if (key == "PS3RECOMP_VK_FULLSCREEN" || key == "LAUNCHER_CHECK_UPDATES" ||
+                   key == "LAUNCHER_SHADERS_AFTER_UPDATE" || key == "LAUNCHER_SHADERS_ON_DRIVER_CHANGE") {
             cycle = { "0", "1" };
             shown = val == "1" ? "On" : "Off";
         } else if (key == "LAUNCHER_BUILDS_KEPT") {
@@ -1672,19 +1843,21 @@ static void overlay_confirm()
         title(g_confirm.title.c_str(), 28);
         ImGui::TextWrapped("%s", g_confirm.text.c_str());
         ImGui::Dummy(ImVec2(0, S(8)));
-        bool yes = big_button(g_confirm.yes.c_str(), ImVec2(S(260), 0), g_confirm.danger ? Kind::Danger : Kind::Primary);
+        const float bw = std::max(S(260), ImGui::CalcTextSize(g_confirm.yes.c_str()).x + S(60));
+        bool yes = big_button(g_confirm.yes.c_str(), ImVec2(bw, 0), g_confirm.danger ? Kind::Danger : Kind::Primary);
+        if (g_confirm.focus_yes) want_focus(cf);   // an offer: the recommended choice first
         ImGui::SameLine();
-        bool no = big_button("Cancel", ImVec2(S(260), 0));
-        want_focus(cf);   // the safe choice first
+        bool no = big_button(g_confirm.no.c_str(), ImVec2(S(260), 0));
+        if (!g_confirm.focus_yes) want_focus(cf);   // else the safe choice first
         focus_tick(cf);
         prompt(Act::A, "Choose");
-        prompt(Act::B, "Cancel");
+        prompt(Act::B, g_confirm.no);
         if (pressed(Act::B)) no = true;
         if (yes || no) {
-            auto f = g_confirm.on_yes;
+            auto f = yes ? g_confirm.on_yes : g_confirm.on_no;
             g_confirm.open = false;
             ImGui::CloseCurrentPopup();
-            if (yes && f) f();
+            if (f) f();
         }
         ImGui::EndPopup();
     }
@@ -1870,6 +2043,79 @@ static void overlay_osk()
 
 static bool overlay_open() { return g_op || g_confirm.open || g_msg.open || g_browser.open || g_osk.open; }
 
+static void voxel_bar(ImDrawList* dl, ImVec2 a, ImVec2 b, float frac, float t)
+{
+    dl->AddRectFilled(a, b, A(col::inset));
+    bevel_edges(dl, a, b, col::inset, std::max(2.0f, floorf(S(2))), true);
+    const float pad = std::max(3.0f, floorf(S(5)));
+    const float h = floorf(b.y - a.y - 2 * pad), gap = std::max(2.0f, floorf(S(3)));
+    const float bw = std::max(8.0f, floorf(h * 0.9f));
+    const int n = std::max(1, (int)((b.x - a.x - 2 * pad + gap) / (bw + gap)));
+    const float x0 = a.x + pad + floorf(((b.x - a.x - 2 * pad) - (n * (bw + gap) - gap)) / 2), y0 = a.y + pad;
+    const int filled = frac < 0 ? 0 : (int)floorf(frac * n + 0.0001f);
+    const int run_at = frac < 0 ? (int)fmodf(t * 14.0f, (float)(n + 5)) - 5 : -100;
+    for (int i = 0; i < n; i++) {
+        const ImVec2 p(x0 + i * (bw + gap), y0), q(p.x + bw, y0 + h);
+        const bool on = i < filled || (i >= run_at && i < run_at + 5);
+        if (!on) {   // an empty slot: a faint block outline
+            dl->AddRect(p, q, A(IM_COL32(40, 54, 110, 255)), 0.0f, std::max(1.0f, floorf(S(1.5f))));
+            continue;
+        }
+        const bool edge = !(frac < 0) && i == filled - 1 && filled < n;   // the newest block glints
+        const ImU32 face = edge ? IM_COL32(150, 236, 120, 255) : col::grass;
+        const float top = floorf(h * 0.3f), side = std::max(2.0f, floorf(bw * 0.18f));
+        dl->AddRectFilled(p, q, A(face));
+        dl->AddRectFilled(p, ImVec2(q.x, p.y + top), A(shade(face, 1.3f)));               // the lit top
+        dl->AddRectFilled(ImVec2(q.x - side, p.y + top), q, A(shade(face, 0.62f)));       // the shaded side
+        dl->AddRectFilled(ImVec2(p.x, p.y + top), ImVec2(q.x - side, p.y + top + std::max(1.0f, floorf(S(1.5f)))),
+                          A(shade(face, 0.8f)));                                         // the top's edge
+        dl->AddRect(ImVec2(p.x - 1, p.y - 1), ImVec2(q.x + 1, q.y + 1), A(col::ink), 0.0f, std::max(1.0f, floorf(S(1.5f))));
+    }
+}
+
+// the persistent bar along the bottom while shaders are prepared (and for a while after, saying how it ended)
+static void prepare_strip(ImDrawList* dl, ImVec2 a, ImVec2 b, float t)
+{
+    dl->AddRectFilled(a, b, A(col::panel));
+    retro_frame(dl, a, b, col::frame, std::max(2.0f, floorf(S(3))));
+    const float ip = std::max(2.0f, floorf(S(2.6f))), tp = std::max(2.0f, floorf(S(2.4f)));
+    const float cy = (a.y + b.y) / 2;
+    pix_icon(dl, ImVec2(a.x + S(20), cy - ip * 5), kIcons[5], ip);
+    std::string head, right;
+    float frac = -1;
+    ImU32 head_col = col::accent;
+    char buf[200];
+    if (g_bg) {
+        const Op& op = *g_bg;
+        head = op.job->cancel_sent ? "Stopping..." : op.title;
+        frac = op.fraction >= 0 ? (float)op.fraction : -1.0f;
+        if (frac >= 0) {
+            std::string eta = op.eta >= 0 ? std::string(op.eta_basis == "reference" ? "about " : "") + human_time(op.eta) + " left" : "";
+            snprintf(buf, sizeof buf, "%d%%   %s%s%s", (int)(frac * 100), op.detail.c_str(), eta.empty() ? "" : "   ", eta.c_str());
+            right = buf;
+        } else {
+            right = "Starting" + (op.detail.empty() ? std::string() : " (" + op.detail + ")") + "...";
+        }
+    } else {
+        head = g_bg_done.title;
+        head_col = g_bg_done.ok ? col::ok : col::warm;
+        frac = g_bg_done.ok ? 1.0f : 0.0f;
+        right = g_bg_done.text;
+    }
+    std::string up = head;
+    for (char& ch : up) ch = (char)toupper((unsigned char)ch);
+    const float hx = a.x + S(20) + ip * 10 + S(18);
+    pix_text(dl, ImVec2(hx, cy - tp * 3.5f), up.c_str(), tp, head_col);
+    const float fs = S(18);
+    const ImVec2 rs = g_font->CalcTextSizeA(fs, FLT_MAX, 0, right.c_str());
+    const float rx = b.x - S(24) - rs.x;
+    dl->AddText(g_font, fs, ImVec2(rx + 2, cy - rs.y / 2 + 2), A(col::ink), right.c_str());
+    dl->AddText(g_font, fs, ImVec2(rx, cy - rs.y / 2), A(col::text), right.c_str());
+    const float bx0 = hx + pix_w(up.c_str(), tp) + S(24), bx1 = rx - S(24);
+    if (bx1 - bx0 > S(120) && (g_bg || g_bg_done.ok))
+        voxel_bar(dl, ImVec2(bx0, a.y + S(12)), ImVec2(bx1, b.y - S(12)), frac, t);
+}
+
 // behind everything: a night sky (twinkling stars, blocky clouds drifting by) over a ground of voxel blocks -- grass on
 // earth -- that the button prompts stand on
 static void backdrop(ImDrawList* dl, ImVec2 o, ImVec2 sz, float foot, float t)
@@ -1922,6 +2168,16 @@ static void backdrop(ImDrawList* dl, ImVec2 o, ImVec2 sz, float foot, float t)
 static void frame()
 {
     g_prompts.clear();
+    if (g_bg) {   // the background preparation
+        pump(*g_bg);
+        if (g_bg->finished) {
+            auto then = g_bg->then;
+            json::Value r = g_bg->result;
+            g_bg.reset();
+            if (then) then(r);
+        }
+    }
+    if (g_auto_check_due) { g_auto_check_due = false; auto_prepare_check(); }
     for (size_t i = 0; i < g_queries.size();) {   // the quick queries: their callbacks run here, on this thread
         pump(*g_queries[i]);
         if (g_queries[i]->finished) {
@@ -1946,7 +2202,9 @@ static void frame()
     backdrop(dl, o, sz, foot, t);
     // the command menu: the logo, the pages with their icons (LB/RB, Q/E, or a click), the active one marked
     const float side_w = floorf(S(318));
-    const ImVec2 sa(o.x + m, o.y + m), sb(o.x + m + side_w, o.y + sz.y - foot - m);
+    const bool strip = g_bg || (g_bg_done.shown && t - g_bg_done.t0 < 8.0f);
+    const float strip_h = floorf(S(64));
+    const ImVec2 sa(o.x + m, o.y + m), sb(o.x + m + side_w, o.y + sz.y - foot - m - (strip ? strip_h + m : 0));
     dl->AddRectFilled(sa, sb, A(col::panel));
     retro_frame(dl, sa, sb);
     const float bobc = floorf((0.5f + 0.5f * sinf(t * 2.2f)) * S(4));
@@ -1995,6 +2253,7 @@ static void frame()
     const ImVec2 ca(sb.x + m, sa.y), cb(o.x + sz.x - m, sb.y);
     dl->AddRectFilled(ca, cb, A(col::panel));
     retro_frame(dl, ca, cb);
+    if (strip) prepare_strip(dl, ImVec2(sa.x, sb.y + m), ImVec2(cb.x, sb.y + m + strip_h), t);
     dl->PopClipRect();
     const float in_x = floorf(S(58)), in_y = floorf(S(34));
     ImGui::SetCursorScreenPos(ImVec2(ca.x + in_x + floorf((1.0f - ease) * S(28)), ca.y + in_y));
@@ -2029,6 +2288,10 @@ static void frame()
     overlay_message();
     ImGui::PopFont();
     // the prompts
+    if (!overlay_open() && g_bg) {
+        prompt(Act::Back, "Stop preparing");
+        if (pressed(Act::Back)) bg_stop();
+    }
     if (!overlay_open()) {
         prompt(Act::A, "Select");
         prompt(Act::LB, "");
@@ -2127,6 +2390,7 @@ int main(int argc, char** argv)
                                SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     }
     if (!win) return 1;
+    g_window = win;
     SDL_SetWindowMinimumSize(win, 960, 600);
     SDL_Renderer* ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_PRESENTVSYNC | SDL_RENDERER_ACCELERATED);
     if (!ren) ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_SOFTWARE);   // no GPU acceleration: still a launcher
@@ -2163,6 +2427,9 @@ int main(int argc, char** argv)
         if (show == "confirm")
             ask("Go back to this build?", "The game starts from it next time. The build you have now is kept, so you can "
                 "come back to it.", "Go back to it", false, [] {});
+        if (show == "first-run") after_install_shaders();   // the offer after an install (nothing installed)
+        if (show == "prepare") bg_prepare(false, "asked for");   // a real preparation, in the background
+        if (show == "rebuild") bg_prepare(true, "asked for");    // the same, the pipeline cache made again
         if (show == "message")
             g_msg = { true, "The update didn't finish", "The download didn't match the release's signature, so nothing was "
                       "changed. Try again later.", "release.json: checked against key 1 -- the signature differs", true, false };

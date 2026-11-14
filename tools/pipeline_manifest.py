@@ -152,11 +152,15 @@ def parse(path):
     return out
 
 
-def resolve(manifest, disc, recipes):
+def resolve(manifest, disc, recipes, dry_run=False):
     """each pipeline of the manifest that the recipes file does not hold, its programs taken from the player's disc
-    and checked by their hash, appended to the file; {"listed", "held", "added", "not_on_disc"}"""
+    and checked by their hash, appended to the file; {"listed", "held", "added", "not_on_disc"}. dry_run: nothing
+    read from the disc or written -- "added" is what the file lacks"""
     entries = parse(manifest)
     held = {k for k, _, _, _ in read_recipes(recipes)}
+    if dry_run:
+        lacked = sum(1 for k, _, _, _ in entries if k not in held)
+        return {"listed": len(entries), "held": len(entries) - lacked, "added": lacked, "not_on_disc": 0}
     good = 0
     if os.path.exists(recipes):     # whole records only (the game cuts a damaged tail the same way)
         good = sum(HEAD + len(vp) + len(fp) + 4 for _, _, vp, fp in read_recipes(recipes))

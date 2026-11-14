@@ -6,7 +6,11 @@
     python3 tools/make_bundle.py [--platform linux|windows|all]
 
 Makes build/dist/DotHeroes-Setup-<platform>-x86_64/ and a .tar.xz (Linux) / .zip (Windows) of it:
-    DotHeroes-Setup[.exe]   the app (PyInstaller, with its Python inside)
+    CubicHeroes[.exe]       the launcher (M9.4; tools/build_launcher.py), SDL2's library beside it and
+                            licenses/ (Dear ImGui's, SDL2's); it runs the worker below
+    LICENSE.txt, README.txt
+    worker/                 the pipeline worker the launcher runs (M9.5), holding:
+    DotHeroes-Setup[.exe]   the app (PyInstaller, with its Python inside; `--worker`)
     _internal/              the app's Python runtime and modules
     toolchain/zig-*/        the C/C++ compiler (Zig), trimmed to the target used
     lib/                    the runtime library (ps3recomp + this port's patches,
@@ -24,7 +28,9 @@ Nothing from the game is in it: players convert their own disc. tools/boundary_c
 checks the folder before it is archived, and the archive after.
 
 The Windows app is made by Windows Python + PyInstaller running under Wine, in the
-prefix build/wine (C:\\Python314, with pycryptodome); Windows Zig is in build/toolchain/win/.
+prefix build/wine (C:\\Python314, with pycryptodome); Windows Zig is in build/toolchain/win/. On Windows itself:
+the checkout's own build/venv (PyInstaller) and build/toolchain/zig-x86_64-windows-<version>. The launcher is built
+on the platform it is for.
 """
 import argparse
 import ast
@@ -122,7 +128,11 @@ def pyinstaller(platform, dist):
     Image.open(os.path.join(ROOT, "assets", "icon.png")).save(paths["icon"], sizes=[(256, 256), (48, 48), (32, 32),
                                                                                    (16, 16)])
     args = ["--noconfirm", "--onedir", "--windowed", "--name", APP, "--icon", None]
-    if platform == "windows":
+    if platform == "windows" and os.name == "nt":   # on Windows itself: the checkout's own venv
+        env = None
+        cmd = [need(os.path.join(ROOT, "build", "venv", "Scripts", "pyinstaller.exe"),
+                    "build/venv/Scripts/pip install pyinstaller pycryptodome pillow")]
+    elif platform == "windows":
         paths = {k: winpath(v) for k, v in paths.items()}
         env = dict(os.environ, WINEPREFIX=os.path.join(ROOT, "build", "wine"), WINEDEBUG="-all")
         cmd = ["wine", "C:\\Python314\\python.exe", "-m", "PyInstaller"]
@@ -144,6 +154,8 @@ def pyinstaller(platform, dist):
 def copy_zig(platform, out):
     src = (os.path.join(ROOT, "build", "toolchain", "win", f"zig-x86_64-windows-{ZIG_VERSION}") if platform == "windows"
            else os.path.join(ROOT, "build", "toolchain", f"zig-x86_64-linux-{ZIG_VERSION}"))
+    if platform == "windows" and not os.path.isdir(src):   # a Windows checkout keeps it beside the Linux one
+        src = os.path.join(ROOT, "build", "toolchain", f"zig-x86_64-windows-{ZIG_VERSION}")
     need(src, f"unpack Zig {ZIG_VERSION} for {platform} there")
     dst = os.path.join(out, "toolchain", os.path.basename(src))
     shutil.copytree(src, dst, symlinks=True, ignore=shutil.ignore_patterns(*ZIG_DROP))
@@ -227,35 +239,57 @@ def licenses(out, zsrc, platform):
     build_ffmpeg.source_files(os.path.join(lic, "source"), platform)
 
 
+def launcher(out, platform):
+    """the launcher at the download's root (M9.5): built for this platform, SDL2's library beside it, its licences"""
+    if platform != zig_build.HOST:
+        sys.exit(f"the launcher is built on the platform it is for: run this on {platform} (this is {zig_build.HOST})")
+    built = os.path.join(ROOT, "build", "launcher")
+    subprocess.check_call([sys.executable, os.path.join(ROOT, "tools", "build_launcher.py"), "--out", built])
+    shutil.copy2(os.path.join(built, "CubicHeroes" + zig_build.exe_suffix(platform)), out)
+    if platform == "windows":
+        shutil.copy2(os.path.join(built, "SDL2.dll"), out)
+    else:
+        shutil.copytree(os.path.join(built, "lib"), os.path.join(out, "lib"))
+    lic = os.path.join(out, "licenses")
+    os.makedirs(lic, exist_ok=True)
+    shutil.copy2(os.path.join(built, "licenses", "Dear-ImGui-LICENSE.txt"), os.path.join(lic, "Dear-ImGui.txt"))
+    shutil.copy2(os.path.join(built, "licenses", "SDL2-LICENSE.txt"), os.path.join(lic, "SDL2.txt"))
+    shutil.copy2(os.path.join(ROOT, "LICENSE"), os.path.join(out, "LICENSE.txt"))   # this project: GPL-3.0
+
+
 def bundle(platform):
     name = f"{APP}-{platform}-x86_64"
     out = os.path.join(DIST, name)
+    work = os.path.join(out, "worker")   # the launcher's pipeline worker: the frozen app and what it runs
     lib_dir = os.path.join(ROOT, "build", "lib", platform)
     need(os.path.join(lib_dir, zig_build.RUNTIME_LIB), "make_bundle.py --prebuilt")
     shutil.rmtree(out, ignore_errors=True)
-    os.makedirs(DIST, exist_ok=True)
+    os.makedirs(out)
     print(f"== {platform}: app (PyInstaller)", flush=True)
     tmp = os.path.join(DIST, "pyi-" + platform)
     shutil.rmtree(tmp, ignore_errors=True)
     pyinstaller(platform, tmp)
-    os.rename(os.path.join(tmp, APP), out)
+    os.rename(os.path.join(tmp, APP), work)
     shutil.rmtree(tmp)
     print("toolchain (Zig, trimmed)", flush=True)
-    zsrc = copy_zig(platform, out)
+    zsrc = copy_zig(platform, work)
     print("libraries, sources, tools, licences", flush=True)
-    shutil.copytree(lib_dir, os.path.join(out, "lib"), ignore=shutil.ignore_patterns("src"))
-    copy_sources(out, lib_dir)
-    copy_tools(out)
-    licenses(out, zsrc, platform)
+    shutil.copytree(lib_dir, os.path.join(work, "lib"), ignore=shutil.ignore_patterns("src"))
+    copy_sources(work, lib_dir)
+    copy_tools(work)
+    licenses(work, zsrc, platform)
+    print("the launcher", flush=True)
+    launcher(out, platform)
     needs = ("Windows 10 or 11 and a graphics driver with Vulkan (any recent AMD, NVIDIA or Intel driver)."
              if platform == "windows" else
              "a Vulkan-capable graphics driver and glibc 2.31 or newer\n"
              "(Ubuntu 20.04, Debian 11, Fedora 32 or anything more recent).")
     with open(os.path.join(out, "README.txt"), "w", newline="\r\n" if platform == "windows" else "\n") as f:
-        f.write(f"Cubic.Heroes (3D Dot Game Heroes Recomp) - native PC port setup, version {VERSION}\n\n"
-                f"Run {APP}{zig_build.exe_suffix(platform)}, choose your own disc (a decrypted ISO of the US\n"
-                "release BLUS-30490, or its folder), your keys file (or an EBOOT.elf you decrypted) and an\n"
-                "install folder, press Convert, then Play.\n\n"
+        f.write(f"Cubic.Heroes (3D Dot Game Heroes Recomp) - native PC port, version {VERSION}\n\n"
+                f"Run CubicHeroes{zig_build.exe_suffix(platform)}, the launcher: it installs the game from your own\n"
+                "disc (a decrypted ISO of the US release BLUS-30490, or its folder) and its keys file (or an\n"
+                "EBOOT.elf you decrypted), keeps it up to date, and plays it. A controller does everything.\n"
+                "worker/ holds what the launcher runs to convert and build the game.\n\n"
                 "Nothing from the game is included: the game is rebuilt from your disc on your machine.\n"
                 f"The game needs {needs}\n")
     print("boundary check (the folder)", flush=True)

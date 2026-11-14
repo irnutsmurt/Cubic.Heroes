@@ -202,6 +202,21 @@ class Bundles(unittest.TestCase):
             bc.check_artifact(d, bundle=True, findings=f)
             self.assertEqual([], f)
 
+    def test_launcher_needs_dear_imgui_licence(self):
+        """M9.5: the launcher at a download's root carries Dear ImGui's licence"""
+        for with_imgui in (False, True):
+            with tempfile.TemporaryDirectory() as d:
+                self.make(d, with_licences=True)
+                with open(os.path.join(d, "CubicHeroes.exe"), "wb") as f:
+                    f.write(b"MZ" + bytes(100))
+                if with_imgui:
+                    with open(os.path.join(d, "licenses", "Dear-ImGui.txt"), "w") as f:
+                        f.write("x")
+                f = []
+                bc.check_artifact(d, bundle=True, findings=f)
+                imgui = [x for x in f if x[0] == "LICENCE" and "Dear ImGui" in x[2]]
+                self.assertEqual(bool(imgui), not with_imgui, f)
+
     def test_ffmpeg_licences_required(self):
         """FFmpeg's libraries in a bundle need its licence, notice, source archive, build driver and configuration."""
         import build_ffmpeg
