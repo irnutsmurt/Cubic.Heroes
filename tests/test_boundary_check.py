@@ -4,6 +4,7 @@
 generated-code stub, the template, third-party libraries, licences). Also: the repository's own tracked files
 pass, and a bundle without OpenAL Soft's licences or source fails.
     py -3 tests/test_boundary_check.py"""
+import hashlib
 import io
 import os
 import struct
@@ -223,6 +224,53 @@ class Bundles(unittest.TestCase):
                     else:
                         self.assertEqual(["LICENCE"], [c for c, _, _ in f], (platform, missing))
                         self.assertIn(missing, f[0][2])
+
+    def test_pinned_exception_exact(self):
+        """A pinned exception covers a file only with its archive's checksum, its path and its bytes as pinned."""
+        def tar_with(members):
+            buf = io.BytesIO()
+            with tarfile.open(fileobj=buf, mode="w:gz") as t:
+                for name, data in members:
+                    info = tarfile.TarInfo(name)
+                    info.size = len(data)
+                    t.addfile(info, io.BytesIO(data))
+            return buf.getvalue()
+        ref = b"0123 *tests/data/lavf/lavf.peak.wav\n"
+        arc = tar_with([("pkg/tests/ref/lavf/peak.wav", ref), ("pkg/README", b"x")])
+        pin = {"archive": hashlib.sha256(arc).hexdigest(), "member": "pkg/tests/ref/lavf/peak.wav",
+               "sha256": hashlib.sha256(ref).hexdigest(), "why": "test"}
+        saved = bc.PINNED
+        bc.PINNED = [pin]
+        try:
+            def classes(data):
+                with tempfile.TemporaryDirectory() as d:
+                    p = os.path.join(d, "src.tar.gz")
+                    open(p, "wb").write(data)
+                    f = []
+                    bc.check_artifact(p, findings=f, quiet=True)
+                    return sorted({c for c, _, _ in f})
+            self.assertEqual([], classes(arc))                                  # pinned: excused
+            self.assertEqual(["GAME-DATA"], classes(tar_with([("pkg/tests/ref/lavf/peak.wav", ref + b"!"),
+                                                               ("pkg/README", b"x")])))   # a byte changed
+            self.assertEqual(["GAME-DATA"], classes(tar_with([("pkg/other/peak.wav", ref), ("pkg/README", b"x")])))
+            self.assertEqual(["GAME-DATA"], classes(tar_with([("pkg/tests/ref/lavf/peak.wav", ref),
+                                                               ("pkg/README", b"y")])))   # another archive
+            self.assertEqual(["GAME-DATA"], classes(tar_with([("pkg/tests/ref/lavf/peak.wav", ref),
+                                                               ("pkg/README", b"x"),
+                                                               ("pkg/sound.wav", b"RIFF")])))   # another file in it
+        finally:
+            bc.PINNED = saved
+
+    def test_pinned_exception_ffmpeg(self):
+        """FFmpeg's release archive as pinned in config/deps.sha256: nothing refused (its two FATE references excused)."""
+        arc = os.path.join(build_deps.DEPS, "src", os.path.basename(build_deps.SOURCES["FFmpeg"][0]))
+        if not os.path.exists(arc):
+            self.skipTest("FFmpeg's archive not fetched")
+        f = []
+        bc.check_artifact(arc, findings=f, quiet=True)
+        self.assertEqual([], f)
+        self.assertEqual(2, len(bc.PINNED))
+        self.assertTrue(all(p["archive"] == build_deps.pins()["FFmpeg"] for p in bc.PINNED))
 
     def test_inside_archives(self):
         with tempfile.TemporaryDirectory() as d:

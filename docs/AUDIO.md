@@ -3,8 +3,12 @@
 **Now (2026-11-12, M5)**: the game's audio is the native sound manager on OpenAL Soft, the only path; FMOD Ex's
 PPU code is lifted as traps (config/excluded_code.json; reaching it ends the game with a report) and its SPU
 programs are not lifted. Section 1 below describes FMOD as it ran until then (lifted), kept as the record of what
-the native layer replaced; the migration's record and its validation: docs/OPENAL_MIGRATION_PLAN.md. The movies'
-sound still goes through cellAudio and SDL2 until M8 (docs/FFMPEG_MIGRATION_PLAN.md).
+the native layer replaced; the migration's record and its validation: docs/OPENAL_MIGRATION_PLAN.md. **Since M8.4
+(2026-11-13)** the movies' sound is OpenAL Soft's too (a stream the movie decoder feeds on the music's streamer:
+docs/FFMPEG_MIGRATION_PLAN.md), and cellAudio is retired: the native release builds it without any host output (no
+SDL2 audio, no WASAPI, no mixing thread), nothing initialises it, and every call to it is counted (the census's
+cell_audio). SDL2 stays for the window and the controllers, and on Linux as OpenAL Soft's own output backend. The
+sections below that describe cellAudio's ring, its SDL2 backend and AUDIO_WAV are the record of the lifted path.
 
 **The requirement (the owner, 2026-11-11)**: the PC recompilation's game audio runs on **OpenAL Soft**
 (dynamically linked, its LGPL notices shipped); FMOD Ex is not executed in the final game, and no

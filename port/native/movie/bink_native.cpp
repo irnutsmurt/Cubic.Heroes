@@ -1,6 +1,6 @@
-// The movies on FFmpeg (docs/FFMPEG_MIGRATION_PLAN.md sections 2.3 and 3, M8.2): the eleven calls the game's movie
-// class makes into Bink, answered natively at their call stubs (config/m8_native_movie.json: entry hooks that may
-// decline). The class itself -- its states, the textures it allocates, its drawing with its own shader, the title
+// The movies on FFmpeg (docs/FFMPEG_MIGRATION_PLAN.md sections 2.3 and 3, M8.2-M8.4): the eleven calls the game's
+// movie class makes into Bink, answered natively at their call stubs (config/m8_native_movie.json; Bink's code is not
+// in the lift since M8.4: its functions are traps). The class itself -- its states, the textures it allocates, its drawing with its own shader, the title
 // menu over the title movie, the end of a movie -- stays the game's: the player decodes each frame with FFmpeg
 // (movie_player.cpp) and writes its Y, U and V planes into the set of textures the class gave, as Bink did.
 //
@@ -23,10 +23,12 @@
 // fed stream); a silent one a steady clock from its open, less its pauses. The frame due at a time t is the one
 // whose start t has reached: (n - 1) x rate_den / rate_num seconds.
 //
-// DOTHEROES_NATIVE_MOVIE=1 turns it on (M8.2: Bink, still in the lift, is the default; =0 keeps it off). While Bink
-// is in the lift, a handle that is not this player's, or a file FFmpeg cannot open, is left to Bink (the hooks
-// decline).
+// Every call is answered here: nothing reaches Bink (its stubs would land in its traps). A file FFmpeg cannot open
+// (or FFmpeg missing beside the game) is a movie that does not open -- the class's own failure path: no movie. A
+// handle that is not this player's cannot come (Bink opens none); were one to, it is counted as a native path
+// declining (fatal in the native release: PS3_CENSUS_FATAL's native_decline) and answered as an empty movie.
 #include "ppu_context.h"
+#include "ps3emu/census.h"   /* a handle not this player's: a native path declining */
 
 #include "ff_api.h"
 #include "movie_player.h"
@@ -41,6 +43,8 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
+#include <vector>
 
 extern "C" uint8_t* vm_base;
 extern "C" void sys_fs_translate_path(const char* ps3_path, char* host_path, int host_path_size);
@@ -49,12 +53,11 @@ al_stream::Streamer* nsm_movie_streamer();   // native/audio/sound_manager.cpp: 
 // native/movie/movie_trace.cpp: a decoded frame's planes hashed (DOTHEROES_MOVIE_PLANES; else nothing)
 extern "C" void movie_planes_record(const char* name, int frame, uint32_t fb);
 
-extern "C" int g_native_movie = 0;
+extern "C" int g_native_movie = 1;   // the hooks' guard: always on (M8.4: Bink is not in the lift)
 
 namespace {
 
 constexpr uint32_t kSlots = 16, kSlotBytes = 0x100, kPoolBytes = 0x10000;
-constexpr bool kBinkFallback = true;   // M8.2: Bink is still lifted; what this player cannot do goes to it
 
 inline uint32_t rd32(uint32_t ea)
 {
@@ -86,6 +89,7 @@ struct Movie {
     bool started = false;    // the steady clock (a silent movie's) runs from the class's first wait
     double game_frame = 0;   // the game's frame: the time between the class's questions, smoothed
     std::chrono::steady_clock::time_point last_wait;
+    size_t hitch_next = 0;   // DOTHEROES_MOVIE_TEST_HITCH: the next stall due in this movie
     std::chrono::steady_clock::time_point t0, paused_at;
     double paused_total = 0;
     // what the close reports
@@ -96,7 +100,6 @@ struct Movie {
 struct State {
     std::mutex mu;
     bool tried = false, loaded = false;
-    bool last_closed_ours = false;   // the sound's end after a close: this player's, or Bink's
     ff_api::Api ff;
     uint32_t pool = 0;
     Movie slots[kSlots];
@@ -114,8 +117,7 @@ bool ready()
         fprintf(stderr, "[movie] native: FFmpeg %s loaded from %s (%s)\n", S.ff.version.c_str(), S.ff.dir.c_str(),
                 S.ff.licence.c_str());
     } else {
-        fprintf(stderr, "[movie] native: %s -- the movies %s\n", err.c_str(),
-                kBinkFallback ? "go to Bink" : "are not played");
+        fprintf(stderr, "[movie] native: %s -- the movies are not played\n", err.c_str());
     }
     return S.loaded;
 }
@@ -154,6 +156,16 @@ inline int answer(ppu_context* ctx, uint64_t r3)
     return 1;
 }
 
+// a handle this player did not open (none can come: Bink opens none, and is not in the lift): counted as a native
+// path declining -- fatal in the native release -- and answered as an empty movie would be
+int foreign(ppu_context* ctx, uint32_t stub, uint64_t r3)
+{
+    fprintf(stderr, "[movie] native: the stub 0x%08X called with 0x%08X, not this player's handle\n", stub,
+            (uint32_t)ctx->gpr[3]);
+    ps3_census(PS3_CENSUS_NATIVE_DECLINE, stub, (unsigned)ctx->gpr[3]);
+    return answer(ctx, r3);
+}
+
 double elapsed(Movie& m)
 {
     if (m.sound && m.streamer) {
@@ -167,6 +179,32 @@ double elapsed(Movie& m)
     if (!m.started) return 0.0;
     const auto end = m.paused ? m.paused_at : std::chrono::steady_clock::now();
     return std::chrono::duration<double>(end - m.t0).count() - m.paused_total;
+}
+
+// DOTHEROES_MOVIE_TEST_HITCH=<s>:<ms>[,...] (a test): the game's own thread stalled for <ms> when a movie's clock
+// passes <s>, in every movie -- a game frame that long, as the player meets one: the frames it passed decoded and
+// not shown, the sound unbroken
+struct Hitch {
+    double at;
+    int ms;
+};
+const std::vector<Hitch>& test_hitches()
+{
+    static std::vector<Hitch> h;
+    static bool read = false;
+    if (!read) {
+        read = true;
+        const char* e = getenv("DOTHEROES_MOVIE_TEST_HITCH");
+        for (const char* p = e; p && *p;) {
+            double at = 0;
+            int ms = 0;
+            if (sscanf(p, "%lf:%d", &at, &ms) == 2 && ms > 0) h.push_back({at, ms});
+            p = strchr(p, ',');
+            if (p) p++;
+        }
+        if (!h.empty()) fprintf(stderr, "[movie] test: %zu stall(s) of the game's thread in each movie\n", h.size());
+    }
+    return h;
 }
 
 int cur_of(const Movie& m)
@@ -215,25 +253,15 @@ void release(Movie& m)
     m = Movie{};
 }
 
-struct Init {
-    Init()
-    {
-        const char* e = getenv("DOTHEROES_NATIVE_MOVIE");
-        g_native_movie = e && *e == '1';
-        if (g_native_movie) fprintf(stderr, "[movie] native: the movies on FFmpeg (DOTHEROES_NATIVE_MOVIE=1)\n");
-    }
-} s_init;
 
 }  // namespace
 
 extern "C" {
 
-// 0x009873F8: Bink's sound module given, before an open. While Bink is lifted it records it (a movie it may still
-// play needs it; this player has no use for it)
+// 0x009873F8: Bink's sound module given, before an open: nothing to do here
 int bink_native_sound_system(ppu_context* ctx)
 {
     std::lock_guard<std::mutex> lk(S.mu);
-    if (!ready() || kBinkFallback) return 0;
     return answer(ctx, 1);
 }
 
@@ -241,7 +269,7 @@ int bink_native_sound_system(ppu_context* ctx)
 int bink_native_open(ppu_context* ctx)
 {
     std::lock_guard<std::mutex> lk(S.mu);
-    if (!ready() || !pool(ctx)) return 0;
+    if (!ready() || !pool(ctx)) return answer(ctx, 0);   // no movie (the class's failure path)
     char ps3[512], host[1024];
     const uint32_t p = (uint32_t)ctx->gpr[3];
     size_t n = 0;
@@ -255,8 +283,7 @@ int bink_native_open(ppu_context* ctx)
     auto player = slot < 0 ? nullptr : movie::Player::open(&S.ff, host, &err);
     if (!player) {
         fprintf(stderr, "[movie] native: %s: %s -- %s\n", ps3, slot < 0 ? "no free handle" : err.c_str(),
-                kBinkFallback ? "Bink plays it" : "not played");
-        if (kBinkFallback) return 0;
+                "not played");
         return answer(ctx, 0);
     }
     Movie& m = S.slots[slot];
@@ -296,7 +323,7 @@ int bink_native_frame_buffers(ppu_context* ctx)
 {
     std::lock_guard<std::mutex> lk(S.mu);
     Movie* m = ours((uint32_t)ctx->gpr[3]);
-    if (!m) return 0;
+    if (!m) return foreign(ctx, 0x009873D8u, 2);
     const uint32_t fb = (uint32_t)ctx->gpr[4];
     const uint32_t w = rd32(m->handle), hgt = rd32(m->handle + 4);
     memset(vm_base + fb, 0, 0x18 + 2 * 0x30);
@@ -320,7 +347,7 @@ int bink_native_take_buffers(ppu_context* ctx)
 {
     std::lock_guard<std::mutex> lk(S.mu);
     Movie* m = ours((uint32_t)ctx->gpr[3]);
-    if (!m) return 0;
+    if (!m) return foreign(ctx, 0x00987428u, ctx->gpr[3]);
     m->fb = (uint32_t)ctx->gpr[4];
     return answer(ctx, m->handle);
 }
@@ -330,7 +357,7 @@ int bink_native_wait(ppu_context* ctx)
 {
     std::lock_guard<std::mutex> lk(S.mu);
     Movie* m = ours((uint32_t)ctx->gpr[3]);
-    if (!m) return 0;
+    if (!m) return foreign(ctx, 0x00987418u, 1);
     const auto now = std::chrono::steady_clock::now();
     if (!m->started) {   // the steady clock's start: the game's first frame with the movie open
         m->started = true;
@@ -342,6 +369,13 @@ int bink_native_wait(ppu_context* ctx)
         m->game_frame = m->game_frame > 0 ? 0.9 * m->game_frame + 0.1 * dt : dt;
     }
     m->last_wait = now;
+    const std::vector<Hitch>& hitches = test_hitches();
+    if (m->hitch_next < hitches.size() && elapsed(*m) >= hitches[m->hitch_next].at) {
+        const Hitch h = hitches[m->hitch_next++];
+        fprintf(stderr, "[movie] test: the game's thread stalled %d ms at %.2f s of %s\n", h.ms, elapsed(*m),
+                m->name.c_str());
+        std::this_thread::sleep_for(std::chrono::milliseconds(h.ms));
+    }
     return answer(ctx, due(*m, m->seq) ? 0 : 1);
 }
 
@@ -350,7 +384,7 @@ int bink_native_decode(ppu_context* ctx)
 {
     std::lock_guard<std::mutex> lk(S.mu);
     Movie* m = ours((uint32_t)ctx->gpr[3]);
-    if (!m) return 0;
+    if (!m) return foreign(ctx, 0x00987438u, 0);
     const int cur = cur_of(*m);
     auto f = m->player->frame(cur, 500);
     const uint32_t fb = m->fb;
@@ -390,7 +424,7 @@ int bink_native_behind(ppu_context* ctx)
 {
     std::lock_guard<std::mutex> lk(S.mu);
     Movie* m = ours((uint32_t)ctx->gpr[3]);
-    if (!m) return 0;
+    if (!m) return foreign(ctx, 0x00987458u, 0);
     const bool behind = cur_of(*m) < m->frames - 1 && late(*m, m->seq + 1);
     if (behind) m->shown_late++;
     return answer(ctx, behind ? 1 : 0);
@@ -401,7 +435,7 @@ int bink_native_next(ppu_context* ctx)
 {
     std::lock_guard<std::mutex> lk(S.mu);
     Movie* m = ours((uint32_t)ctx->gpr[3]);
-    if (!m) return 0;
+    if (!m) return foreign(ctx, 0x00987448u, 0);
     const int before = cur_of(*m);
     m->seq++;
     if (before == m->frames) {   // a looping movie: from its start again
@@ -417,7 +451,7 @@ int bink_native_pause(ppu_context* ctx)
 {
     std::lock_guard<std::mutex> lk(S.mu);
     Movie* m = ours((uint32_t)ctx->gpr[3]);
-    if (!m) return 0;
+    if (!m) return foreign(ctx, 0x009873A8u, ctx->gpr[4] != 0 ? 1 : 0);
     const bool p = ctx->gpr[4] != 0;
     if (p != m->paused) {
         if (p) m->paused_at = std::chrono::steady_clock::now();
@@ -433,17 +467,15 @@ int bink_native_close(ppu_context* ctx)
 {
     std::lock_guard<std::mutex> lk(S.mu);
     Movie* m = ours((uint32_t)ctx->gpr[3]);
-    S.last_closed_ours = m != nullptr;
-    if (!m) return 0;
+    if (!m) return foreign(ctx, 0x009873B8u, 0);
     release(*m);
     return answer(ctx, 0);
 }
 
-// 0x009873E8: the sound's end, after a close: this player's sound is already released; Bink's is Bink's
+// 0x009873E8: the sound's end, after a close: the movie's stream is already released
 int bink_native_sound_end(ppu_context* ctx)
 {
     std::lock_guard<std::mutex> lk(S.mu);
-    if (!S.loaded || (kBinkFallback && !S.last_closed_ours)) return 0;
     return answer(ctx, 0);
 }
 

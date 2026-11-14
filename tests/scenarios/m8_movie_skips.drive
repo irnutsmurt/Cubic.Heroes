@@ -3,9 +3,10 @@
 # 32 s with no input), the demo's movie opened, then START after 1 to 110 s -- the game closes the movie and its
 # sound and goes back to the title, whose movie opens again. Eleven cycles; then, during the next demo, the game
 # asked to exit as closing its window asks it (its own shutdown: the movie's thread, sound and files released).
-# With DOTHEROES_NATIVE_MOVIE=1 the native player answers (a lift with config/m8_native_movie.json); without it,
-# Bink. Checked afterwards from the logs: every open closed, no movie left at the exit, the run's memory. The
-# wait matches the demo's open only (Bink's file open, the native player's "opened"), not its close line.
+# The native player answers (config/m8_native_movie.json in the release lift; since M8.4 it is the only path, and on
+# an older build without it, Bink). Checked afterwards from the logs: every open closed, no movie left at the exit,
+# the run's memory. The wait matches the demo's open only (Bink's file open, the native player's "opened"), not its
+# close line.
 #! env DOTHEROES_DEV_KEYS=1 PS3_VERBOSE=0 DIAG_FRAMES=frames.log
 #! env WINDOW=1 VISIBLE=1 GRAB_EVERY=10 PS3_OSD_FPS=2 DUMP=0 SHOT_EVERY=0
 #! secs 1500

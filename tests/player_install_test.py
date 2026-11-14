@@ -92,6 +92,9 @@ def stage_fresh():
     gb = zig_build.game_defines(lib)
     check("fresh", gb and any(d.startswith("-DDOTHEROES_NATIVE_RELEASE") for d in gb),
           f"the prebuilt parts are the native release ({os.path.join(lib, zig_build.GAME_BUILD)})")
+    if os.name == "nt":   # M6's release on Windows (zig_build.release_cmake): what rel48 and later were tested as
+        check("fresh", gb and "-DPPU_STORES_NO_SPU_COH=1" in gb and "-DDOTHEROES_NO_LIFTED_SPU=1" in gb,
+              "the prebuilt parts are M6's release: the stores without the SPU reservation test, no lifted SPU program")
     if failed:
         return
     if os.path.isdir(DIR):
@@ -108,6 +111,8 @@ def stage_fresh():
 def stage_check():
     exe = os.path.join(DIR, pipeline.exe_name())
     check("check", os.path.exists(exe), "the game is there")
+    if os.path.exists(exe):   # M8.4: the runtime's cellAudio built without host output (its retired Init's line)
+        check("check", b"retired in this build" in open(exe, "rb").read(), "cellAudio retired in the built game")
     check("check", os.path.exists(os.path.join(DIR, "SDL2.dll")) or os.name != "nt", "SDL2.dll beside it")
     libdir = DIR if os.name == "nt" else os.path.join(DIR, "lib")
     al = "OpenAL32.dll" if os.name == "nt" else "libopenal.so.1"

@@ -19,6 +19,7 @@ start=$(date +%s)
 "$PY" build/ref/ps3recomp/tools/ppu_lifter.py build/EBOOT.elf \
   --functions build/gen/out/EBOOT.functions.fixed.json --hle-stubs build/gen/out/EBOOT.imports.json \
   --sjlj config/sjlj.json --insn-patches config/insn_patches.json --insn-patches config/r8_hooks.json --insn-patches config/audio_hooks.json \
+  --insn-patches config/m8_native_movie.json \
   --entry-observers config/r7_native_hooks.json --traps config/excluded_code.json --chunks 48 $FLAGS \
   -o "$O/" > "$O.lift.log" 2>&1
 grep -c "entry observer" "$O"/*.cpp | awk -F: '{n+=$2} END{print n " observed functions in the lift"}'

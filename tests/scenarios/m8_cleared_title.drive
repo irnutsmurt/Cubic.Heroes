@@ -1,0 +1,30 @@
+# Scenario: M8.4's cleared-game title movie (TitleMovie_Ura_eng.bik, docs/FFMPEG_MIGRATION_PLAN.md section 6.4) on a
+# developers' build with the credits on demand (tools/m8_trace_lift.sh: BIN=build/r8/rel50d/dotheroes.exe). From a
+# copy of castle-front: CONTINUE, the credits on demand (DOTHEROES_DEV_CREDITS: `touch credits.trigger`), the credits
+# movie to its end, YES at the game's "Okay to save?" -- the run's copy of the saves becomes a cleared game's --
+# then whatever the game does next, untouched, while the title's movie opens (the run's log: which file).
+# The saves stay in the run (a copy).
+#! saves build/checkpoints/castle-front
+#! env DOTHEROES_DEV_CREDITS=key DOTHEROES_DEV_KEYS=1 DOTHEROES_DEV_STATE=1 PS3_VERBOSE=0
+#! env WINDOW=1 VISIBLE=1 GRAB_EVERY=5 PS3_OSD_FPS=0 DUMP=0 SHOT_EVERY=0
+#! secs 1200
+include common.drive
+log TitleMovie 120
+sleep 5
+call continue
+state life>0,area==17 90
+sleep 10
+segment credits the credits on demand to their end
+touch credits.trigger
+log (?m)CreditMovie_eng\.bik(\sopened|$) 60
+sleep 268
+endseg
+shot okay-to-save
+press CROSS                 # "Okay to save?" YES (the cursor starts on YES)
+sleep 15
+shot after-save
+segment after what the game does after the save, untouched
+sleep 150
+endseg
+shot end
+stop

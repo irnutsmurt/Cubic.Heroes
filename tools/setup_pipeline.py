@@ -278,8 +278,10 @@ def recomp(paths, log):
 # which has no RSX command path, draws nothing) and R8's leaf promotion.
 # tests/test_player_pipeline.py checks these against tools/r8_lift.sh.
 LIFT_CONFIG = [("--sjlj", "sjlj.json"), ("--insn-patches", "insn_patches.json"), ("--insn-patches", "r8_hooks.json"),
-               ("--insn-patches", "audio_hooks.json"), ("--entry-observers", "r7_native_hooks.json"),
-               ("--traps", "excluded_code.json")]   # FMOD's code is not lifted (M5): traps in its place
+               ("--insn-patches", "audio_hooks.json"),
+               ("--insn-patches", "m8_native_movie.json"),   # the movies on FFmpeg (M8): the movie class's Bink calls
+               ("--entry-observers", "r7_native_hooks.json"),
+               ("--traps", "excluded_code.json")]   # FMOD's (M5) and Bink's (M8.4) code is not lifted: traps in its place
 LIFT_FLAGS = ["--chunks", PPU_CHUNKS, "--promote-leaf"]
 
 

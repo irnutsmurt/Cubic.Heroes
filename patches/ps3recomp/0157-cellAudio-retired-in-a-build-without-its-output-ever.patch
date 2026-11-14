@@ -1,0 +1,285 @@
+From de1381c59af7a1f77a17c4a1f503ecf08993a2a0 Mon Sep 17 00:00:00 2001
+From: giteaguy <73799093+irnutsmurt@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 18:39:35 -0800
+Subject: [PATCH] cellAudio: retired in a build without its output; every call
+ counted
+
+PS3RECOMP_CELL_AUDIO_OUTPUT (default ON) builds cellAudio's host output --
+SDL2's audio or WASAPI -- and its mixing thread. OFF retires them for a native
+port whose sound is its own (PS3RECOMP_CELL_AUDIO_RETIRED): no host audio
+output is compiled, cellAudioInit answers as an unavailable audio library
+(CELL_AUDIO_ERROR_NOT_INIT), the other calls as on an uninitialised
+cellAudio, and SDL2 serves the window and input only. Every cellAudio entry
+point is counted in the census (cell_audio: the call and its port), so a run
+shows whether anything still reaches it; PS3_CENSUS_FATAL=cell_audio makes
+the first call fatal.
+---
+ CMakeLists.txt                | 19 ++++++++++++++---
+ include/ps3emu/census.h       |  1 +
+ libs/audio/cellAudio.c        | 40 ++++++++++++++++++++++++++++++++++-
+ runtime/platform/ps3_census.c |  4 ++--
+ 4 files changed, 58 insertions(+), 6 deletions(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 703aae0..a449350 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -48,6 +48,10 @@ list(FILTER HLE_SOURCES EXCLUDE REGEX "/tests/")
+ # It loads libvulkan at run time, so building needs only the Vulkan headers --
+ # no target-architecture libvulkan, which keeps cross-compiling simple.
+ option(PS3RECOMP_RSX_VULKAN "Build the Vulkan RSX backend (Linux, Windows)" OFF)
++# cellAudio's host output (SDL2's audio, or WASAPI) and its mixing thread. OFF retires them for a native port whose
++# sound is its own: cellAudioInit answers as an unavailable audio library, every cellAudio call is counted (the
++# census's cell_audio), and SDL2 serves the window and input only.
++option(PS3RECOMP_CELL_AUDIO_OUTPUT "cellAudio's host audio output and mixing thread (OFF: retired)" ON)
+ list(FILTER HLE_SOURCES EXCLUDE REGEX "rsx_vulkan_backend\\.c$")
+ if(PS3RECOMP_RSX_VULKAN)
+     if(APPLE)
+@@ -175,9 +179,14 @@ if(WIN32)
+     if(PS3RECOMP_RSX_VULKAN)
+         find_package(SDL2 REQUIRED)
+         target_link_libraries(ps3recomp_runtime PUBLIC SDL2::SDL2)
+-        target_compile_definitions(ps3recomp_runtime PRIVATE
+-            PS3RECOMP_PAD_USE_SDL2 PS3RECOMP_AUDIO_USE_SDL2)
+-        message(STATUS "  SDL2:         window, input and audio (Vulkan backend)")
++        if(PS3RECOMP_CELL_AUDIO_OUTPUT)
++            target_compile_definitions(ps3recomp_runtime PRIVATE
++                PS3RECOMP_PAD_USE_SDL2 PS3RECOMP_AUDIO_USE_SDL2)
++            message(STATUS "  SDL2:         window, input and audio (Vulkan backend)")
++        else()
++            target_compile_definitions(ps3recomp_runtime PRIVATE PS3RECOMP_PAD_USE_SDL2)
++            message(STATUS "  SDL2:         window and input (Vulkan backend; cellAudio retired: no audio output)")
++        endif()
+     endif()
+ else()
+     # cellPad and cellAudio select their SDL2 backends unconditionally off
+@@ -205,6 +214,10 @@ else()
+     find_package(Threads REQUIRED)
+     target_link_libraries(ps3recomp_runtime PRIVATE Threads::Threads)
+ endif()
++if(NOT PS3RECOMP_CELL_AUDIO_OUTPUT)
++    target_compile_definitions(ps3recomp_runtime PRIVATE PS3RECOMP_CELL_AUDIO_RETIRED)
++    message(STATUS "  cellAudio:    retired (no host audio output, no mixing thread; every call counted)")
++endif()
+ 
+ if(APPLE)
+     target_link_libraries(ps3recomp_runtime PUBLIC
+diff --git a/include/ps3emu/census.h b/include/ps3emu/census.h
+index 57b1236..3a27f41 100644
+--- a/include/ps3emu/census.h
++++ b/include/ps3emu/census.h
+@@ -38,6 +38,7 @@ enum {
+     PS3_CENSUS_SPURS_INSTANCE,  /* a SPURS instance initialised: a = its SPUs, b = its address */
+     PS3_CENSUS_SPURS_TASK,      /* a SPURS task created: a = its ELF's address */
+     PS3_CENSUS_NATIVE_DECLINE,  /* a native path handed work back to the lifted code: a = the path, b = the case */
++    PS3_CENSUS_CELL_AUDIO,      /* a cellAudio call (a native port's sound is its own): a = the call, b = its port */
+     PS3_CENSUS_KINDS
+ };
+ 
+diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
+index c61a49f..9b70a24 100644
+--- a/libs/audio/cellAudio.c
++++ b/libs/audio/cellAudio.c
+@@ -22,6 +22,8 @@
+ #include <math.h>
+ #include "ps3emu/log_first.h"
+ #include "ps3emu/thread_name.h"
++#include "ps3emu/census.h"   /* every call counted: a native port that retired cellAudio shows none */
++#define CA_CENSUS(call, port) ps3_census(PS3_CENSUS_CELL_AUDIO, (call), (unsigned)(port))
+ 
+ /* Event-queue push/lookup (runtime/syscalls/sys_event.c). Forward-declared
+  * rather than including sys_event.h to avoid pulling PPU context/syscall
+@@ -36,7 +38,13 @@ extern uint32_t sys_event_queue_create_direct(uint64_t key, int32_t size);
+  * Backend selection
+  * -----------------------------------------------------------------------*/
+ 
+-#if defined(PS3RECOMP_AUDIO_USE_SDL2)
++#if defined(PS3RECOMP_CELL_AUDIO_RETIRED)
++  /* A native port whose sound is its own (PS3RECOMP_CELL_AUDIO_OUTPUT=OFF): no host output at all -- no SDL2 audio,
++   * no WASAPI, no mixing thread. cellAudioInit answers as an unavailable audio library; every call is counted
++   * (the census's cell_audio). */
++  #define AUDIO_BACKEND_SDL2    0
++  #define AUDIO_BACKEND_WASAPI  0
++#elif defined(PS3RECOMP_AUDIO_USE_SDL2)
+   #define AUDIO_BACKEND_SDL2    1
+   #define AUDIO_BACKEND_WASAPI  0
+ #elif defined(_WIN32)
+@@ -90,6 +98,7 @@ extern uint32_t sys_event_queue_create_direct(uint64_t key, int32_t size);
+ /* Portable threading */
+ #ifdef _WIN32
+   #include <windows.h>
++  #include <process.h>   /* _beginthreadex (SDL2's headers brought it in before; a retired build has none) */
+   typedef HANDLE thread_t;
+   typedef CRITICAL_SECTION mutex_t;
+   #define mutex_init(m)    InitializeCriticalSection(m)
+@@ -415,6 +424,16 @@ static void audio_backend_wait(void)
+ 
+ #endif /* AUDIO_BACKEND_WASAPI */
+ 
++#if !AUDIO_BACKEND_SDL2 && !AUDIO_BACKEND_WASAPI
++/* No host output (PS3RECOMP_CELL_AUDIO_RETIRED): nothing to open, nothing played. */
++static int audio_backend_init(void) { return -1; }
++static void audio_backend_shutdown(void) {}
++static void audio_backend_submit(const float* stereo_samples, u32 num_samples) { (void)stereo_samples; (void)num_samples; }
++static int audio_backend_room(void) { return -1; }
++static void audio_backend_wait(void) {}
++static u32 audio_backend_queued_samples(void) { return 0; }
++#endif
++
+ /* ---------------------------------------------------------------------------
+  * Mixing
+  * -----------------------------------------------------------------------*/
+@@ -756,6 +775,7 @@ static void audio_stop_mix_thread(void)
+ 
+ s32 cellAudioInit(void)
+ {
++    CA_CENSUS(1, 0);   /* cellAudioInit */
+     /* PS3_NO_AUDIO=1: report that the audio library is unavailable. Middleware
+      * that drives its mixer through SPU jobs will otherwise block the whole boot
+      * waiting on work we cannot yet complete; failing here lets a title take its
+@@ -764,6 +784,10 @@ s32 cellAudioInit(void)
+         printf("[cellAudio] PS3_NO_AUDIO -- reporting audio unavailable\n");
+         return (s32)CELL_AUDIO_ERROR_NOT_INIT;
+     }
++#if defined(PS3RECOMP_CELL_AUDIO_RETIRED)
++    printf("[cellAudio] retired in this build (the port's sound is its own) -- reporting audio unavailable\n");
++    return (s32)CELL_AUDIO_ERROR_NOT_INIT;
++#endif
+     printf("[cellAudio] Init()\n");
+ 
+     if (s_audio_initialized)
+@@ -798,6 +822,7 @@ s32 cellAudioInit(void)
+ 
+ s32 cellAudioQuit(void)
+ {
++    CA_CENSUS(2, 0);   /* cellAudioQuit */
+     printf("[cellAudio] Quit()\n");
+ 
+     if (!s_audio_initialized)
+@@ -821,6 +846,7 @@ s32 cellAudioQuit(void)
+ 
+ s32 cellAudioPortOpen(const CellAudioPortParam* param, u32* portNum)
+ {
++    CA_CENSUS(3, 0);   /* cellAudioPortOpen */
+     if (!s_audio_initialized)
+         return CELL_AUDIO_ERROR_NOT_INIT;
+ 
+@@ -901,6 +927,7 @@ s32 cellAudioPortOpen(const CellAudioPortParam* param, u32* portNum)
+ 
+ s32 cellAudioPortClose(u32 portNum)
+ {
++    CA_CENSUS(4, portNum);   /* cellAudioPortClose */
+     printf("[cellAudio] PortClose(port=%u)\n", portNum);
+ 
+     if (!s_audio_initialized)
+@@ -930,6 +957,7 @@ s32 cellAudioPortClose(u32 portNum)
+ 
+ s32 cellAudioPortStart(u32 portNum)
+ {
++    CA_CENSUS(5, portNum);   /* cellAudioPortStart */
+     printf("[cellAudio] PortStart(port=%u)\n", portNum);
+ 
+     if (!s_audio_initialized)
+@@ -950,6 +978,7 @@ s32 cellAudioPortStart(u32 portNum)
+ 
+ s32 cellAudioPortStop(u32 portNum)
+ {
++    CA_CENSUS(6, portNum);   /* cellAudioPortStop */
+     printf("[cellAudio] PortStop(port=%u)\n", portNum);
+ 
+     if (!s_audio_initialized)
+@@ -970,6 +999,7 @@ s32 cellAudioPortStop(u32 portNum)
+ 
+ s32 cellAudioGetPortBlockTag(u32 portNum, u64 blockNo, u64* tag)
+ {
++    CA_CENSUS(7, portNum);   /* cellAudioGetPortBlockTag */
+     uint32_t tag_ea = (uint32_t)(uintptr_t)tag;
+     if (!s_audio_initialized)
+         return CELL_AUDIO_ERROR_NOT_INIT;
+@@ -997,6 +1027,7 @@ s32 cellAudioGetPortBlockTag(u32 portNum, u64 blockNo, u64* tag)
+ 
+ s32 cellAudioGetPortTimestamp(u32 portNum, u64 tag, u64* stamp)
+ {
++    CA_CENSUS(8, portNum);   /* cellAudioGetPortTimestamp */
+     uint32_t stamp_ea = (uint32_t)(uintptr_t)stamp;
+     if (!s_audio_initialized)
+         return CELL_AUDIO_ERROR_NOT_INIT;
+@@ -1033,6 +1064,7 @@ s32 cellAudioGetPortTimestamp(u32 portNum, u64 tag, u64* stamp)
+  * is 32-bit and the key 64-bit, so they cannot be written with a plain store. */
+ s32 cellAudioCreateNotifyEventQueue(u32* id, u64* key)
+ {
++    CA_CENSUS(9, 0);   /* cellAudioCreateNotifyEventQueue */
+     uint32_t id_ea  = (uint32_t)(uintptr_t)id;
+     uint32_t key_ea = (uint32_t)(uintptr_t)key;
+ 
+@@ -1073,6 +1105,7 @@ s32 cellAudioCreateNotifyEventQueue(u32* id, u64* key)
+ 
+ s32 cellAudioSetNotifyEventQueue(u64 key)
+ {
++    CA_CENSUS(10, 0);   /* cellAudioSetNotifyEventQueue */
+     printf("[cellAudio] SetNotifyEventQueue(key=0x%llX)\n",
+            (unsigned long long)key);
+ 
+@@ -1096,6 +1129,7 @@ s32 cellAudioSetNotifyEventQueue(u64 key)
+ 
+ s32 cellAudioRemoveNotifyEventQueue(u64 key)
+ {
++    CA_CENSUS(11, 0);   /* cellAudioRemoveNotifyEventQueue */
+     printf("[cellAudio] RemoveNotifyEventQueue(key=0x%llX)\n",
+            (unsigned long long)key);
+ 
+@@ -1118,6 +1152,7 @@ s32 cellAudioRemoveNotifyEventQueue(u64 key)
+ 
+ s32 cellAudioGetPortConfig(u32 portNum, CellAudioPortConfig* config)
+ {
++    CA_CENSUS(12, portNum);   /* cellAudioGetPortConfig */
+     if (!s_audio_initialized)
+         return CELL_AUDIO_ERROR_NOT_INIT;
+ 
+@@ -1165,6 +1200,7 @@ s32 cellAudioGetPortConfig(u32 portNum, CellAudioPortConfig* config)
+ 
+ s32 cellAudioPortGetStatus(u32 portNum, u32* status)
+ {
++    CA_CENSUS(13, portNum);   /* cellAudioPortGetStatus */
+     if (!s_audio_initialized)
+         return CELL_AUDIO_ERROR_NOT_INIT;
+ 
+@@ -1184,6 +1220,7 @@ s32 cellAudioPortGetStatus(u32 portNum, u32* status)
+ 
+ s32 cellAudioSetPersonalDevice(s32 iPersonalStream, s32 iDevice)
+ {
++    CA_CENSUS(14, 0);   /* cellAudioSetPersonalDevice */
+     (void)iPersonalStream;
+     (void)iDevice;
+     printf("[cellAudio] SetPersonalDevice(stream=%d, device=%d) - stub\n",
+@@ -1193,6 +1230,7 @@ s32 cellAudioSetPersonalDevice(s32 iPersonalStream, s32 iDevice)
+ 
+ s32 cellAudioUnsetPersonalDevice(s32 iPersonalStream)
+ {
++    CA_CENSUS(15, 0);   /* cellAudioUnsetPersonalDevice */
+     (void)iPersonalStream;
+     printf("[cellAudio] UnsetPersonalDevice(stream=%d) - stub\n", iPersonalStream);
+     return CELL_OK;
+diff --git a/runtime/platform/ps3_census.c b/runtime/platform/ps3_census.c
+index 623e755..53d3410 100644
+--- a/runtime/platform/ps3_census.c
++++ b/runtime/platform/ps3_census.c
+@@ -10,13 +10,13 @@ volatile long long g_ps3_census[PS3_CENSUS_KINDS];
+ 
+ static const char* const k_names[PS3_CENSUS_KINDS] = {
+     "spu_atomic", "spu_watch", "ppu_coh_store", "spu_dma", "spu_mailbox", "spu_group", "spu_overlay",
+-    "spurs_instance", "spurs_task", "native_decline",
++    "spurs_instance", "spurs_task", "native_decline", "cell_audio",
+ };
+ static const char* const k_what[PS3_CENSUS_KINDS] = {
+     "SPU atomic (lock-line reservation)", "line watch armed", "PPU store to a line an SPU holds",
+     "SPU DMA transfer", "SPU mailbox or signal channel", "lv2 SPU thread group created",
+     "SPU overlay made resident", "SPURS instance initialised", "SPURS task created",
+-    "native path declined (the lifted code runs)",
++    "native path declined (the lifted code runs)", "cellAudio called",
+ };
+ 
+ static int fatal_kind(int kind)
+-- 
+2.56.0.windows.3
+
