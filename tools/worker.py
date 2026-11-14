@@ -56,6 +56,25 @@ DISK_FULL_ERRNO = {28}          # ENOSPC
 DISK_FULL_WINERROR = {39, 112}  # ERROR_HANDLE_DISK_FULL, ERROR_DISK_FULL
 
 
+LOG_LEVELS = {"error": 0, "warning": 1, "info": 2, "debug": 3, "trace": 4}
+LOG_KEEP = 4 << 20   # a worker log past this keeps its last quarter (its newest jobs): no clean-up ever needed
+
+
+def _trim_log(path):
+    try:
+        size = os.path.getsize(path)
+        if size <= LOG_KEEP:
+            return
+        with open(path, "rb") as f:
+            f.seek(size - LOG_KEEP // 4)
+            tail = f.read()
+        tail = tail[tail.find(b"\n") + 1:]
+        with open(path, "wb") as f:
+            f.write(tail)
+    except OSError:
+        pass
+
+
 class Events:
     """The event stream: one JSON object per line, flushed, from any thread."""
 
@@ -66,8 +85,12 @@ class Events:
         self.log = None
         if log_path:
             os.makedirs(os.path.dirname(os.path.abspath(log_path)), exist_ok=True)
+            _trim_log(log_path)
             self.log = open(log_path, "a", encoding="utf-8", newline="\n")
         self.closed = False
+        # the log file's detail (the settings' DOTHEROES_LOG_LEVEL, which the launcher passes on): "log" events above
+        # it are left out of the file (the launcher still sees them); errors and the other events always written
+        self.level = LOG_LEVELS.get(os.environ.get("DOTHEROES_LOG_LEVEL", "info"), 2)
 
     def emit(self, ev, **kw):
         obj = {"ev": ev, "t": round(time.monotonic() - self.t0, 3)}
@@ -81,7 +104,7 @@ class Events:
                 self.out.flush()
             except (OSError, ValueError):   # the launcher went away: carry on to the end
                 pass
-            if self.log:
+            if self.log and (ev != "log" or LOG_LEVELS.get(kw.get("level"), 2) <= self.level):
                 self.log.write(line + "\n")
                 self.log.flush()
 
@@ -153,7 +176,9 @@ def own_children():
                         ("j", ctypes.c_size_t), ("k", ctypes.c_size_t), ("l", ctypes.c_size_t)]
         job = k32.CreateJobObjectW(None, None)
         lim = Extended()
-        lim.Basic.LimitFlags = 0x2000   # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, and BREAKAWAY_OK: only a process started with CREATE_BREAKAWAY_FROM_JOB
+        # leaves it (remove-launcher's helper, which must outlive this worker)
+        lim.Basic.LimitFlags = 0x2000 | 0x0800
         if job and k32.SetInformationJobObject(job, 9, ctypes.byref(lim), ctypes.sizeof(lim)):
             return bool(k32.AssignProcessToJobObject(job, k32.GetCurrentProcess()))
         return False
@@ -943,6 +968,72 @@ def cmd_uninstall(a, ev, control):
         raise pipeline.SetupError(str(e), e.code)
 
 
+def cmd_remove_launcher(a, ev, control):
+    """the launcher itself removed (docs/M9_LAUNCHER_PLAN.md section 20): --dry-run what goes (nothing removed);
+    --confirm --wait-pid PID: this worker -- inside the folder being removed -- puts a copy of itself in a temporary
+    folder and starts it (--stage2), which waits for the launcher (PID) and this worker to exit, removes the
+    launcher's package, its data folder's items (--data-dir) and its shortcuts, then its own temporary folder. The
+    game's install (--install), its saves and settings are never touched."""
+    import uninstall
+    folder = os.path.abspath(a.launcher)
+    try:
+        if a.dry_run:
+            return uninstall.launcher_plan(folder, a.data_dir, a.install)
+        if not a.confirm:
+            raise pipeline.SetupError("Removing the launcher needs the player's confirmation.", "needs_confirmation")
+        if a.stage2:
+            for pid in a.also_wait or ():   # the worker that started this one (its files are in the folder too)
+                uninstall._wait_exit(pid, 30)
+            try:
+                res = uninstall.remove_launcher(folder, a.data_dir, a.install, wait_pid=a.wait_pid)
+            finally:
+                _remove_own_copy()
+            return res
+        uninstall.launcher_plan(folder, a.data_dir, a.install)   # refused now, while the launcher can say why
+        if not getattr(sys, "frozen", False):
+            raise pipeline.SetupError("Only a downloaded launcher removes itself.", "not_packaged")
+        import shutil
+        import tempfile
+        here = os.path.dirname(sys.executable)
+        tmp = tempfile.mkdtemp(prefix="CubicHeroes-remove-")
+        shutil.copy2(sys.executable, tmp)
+        for d in ("_internal", "tools", "config"):
+            if os.path.isdir(os.path.join(here, d)):
+                shutil.copytree(os.path.join(here, d), os.path.join(tmp, d), symlinks=True)
+        cmd = [os.path.join(tmp, os.path.basename(sys.executable)), "--worker", "remove-launcher", "--launcher",
+               folder, "--confirm", "--stage2", "--wait-pid", str(a.wait_pid or 0), "--also-wait", str(os.getpid()),
+               "--log", os.path.join(tmp, "remove.jsonl")]
+        if a.data_dir:
+            cmd += ["--data-dir", os.path.abspath(a.data_dir)]
+        if a.install:
+            cmd += ["--install", os.path.abspath(a.install)]
+        # detached, no window, out of this worker's job (which ends its processes with it)
+        kw = ({"creationflags": 0x00000008 | 0x00000200 | 0x08000000 | 0x01000000} if os.name == "nt"
+              else {"start_new_session": True})
+        subprocess.Popen(cmd, cwd=tmp, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, **kw)
+        return {"started": True, "helper": tmp}
+    except uninstall.UninstallError as e:
+        raise pipeline.SetupError(str(e), e.code)
+
+
+def _remove_own_copy():
+    """the temporary copy this worker runs from (a CubicHeroes-remove-* folder in the temporary folder), removed a
+    moment after it exits -- never anything else"""
+    import tempfile
+    here = os.path.dirname(os.path.abspath(sys.executable))
+    tmp = os.path.abspath(tempfile.gettempdir())
+    if not (getattr(sys, "frozen", False) and os.path.basename(here).startswith("CubicHeroes-remove-")
+            and os.path.normcase(os.path.dirname(here)) == os.path.normcase(tmp)):
+        return
+    if os.name == "nt":
+        subprocess.Popen(f'cmd /d /c ping -n 3 127.0.0.1 >nul & rmdir /s /q "{here}"', cwd=tmp,
+                         creationflags=0x00000008 | 0x00000200 | 0x08000000 | 0x01000000, stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    else:
+        subprocess.Popen(["sh", "-c", 'sleep 2; rm -rf -- "$0"', here], cwd=tmp, start_new_session=True)
+
+
 def cmd_diagnostics(a, ev, control):
     """a report for the player to review: its files, privacy-sanitized, into --out DIR (the launcher shows them; the
     player may remove any); --pack ZIP: exactly what is in --out now, as one zip"""
@@ -1040,7 +1131,7 @@ COMMANDS = {"version": cmd_version, "probe-disc": cmd_probe_disc, "probe-keys": 
             "check-update": cmd_check_update, "download-update": cmd_download_update,
             "stage-launcher": cmd_stage_launcher, "swap-launcher": cmd_swap_launcher, "settings": cmd_settings,
             "diagnostics": cmd_diagnostics, "shortcuts": cmd_shortcuts, "selftest": cmd_selftest,
-            "uninstall": cmd_uninstall}
+            "uninstall": cmd_uninstall, "remove-launcher": cmd_remove_launcher}
 
 
 def parser():
@@ -1091,6 +1182,9 @@ def parser():
     p.add_argument("--seconds", type=float, default=3.0, help=argparse.SUPPRESS)   # selftest
     p.add_argument("--block", action="store_true", help=argparse.SUPPRESS)        # selftest
     p.add_argument("--child", action="store_true", help=argparse.SUPPRESS)        # selftest
+    p.add_argument("--data-dir", dest="data_dir", help="remove-launcher: the launcher's own data folder")
+    p.add_argument("--stage2", action="store_true", help=argparse.SUPPRESS)        # remove-launcher's helper
+    p.add_argument("--also-wait", dest="also_wait", type=int, action="append", help=argparse.SUPPRESS)
     p.add_argument("--control", action="store_true")
     p.add_argument("--log")
     return p
@@ -1102,7 +1196,7 @@ REQUIRED = {"probe-disc": ("disc",), "probe-keys": ("disc", "keys"), "space": ("
             "repair-link": ("install",), "saves": ("install",), "prepare": ("install",), "uninstall": ("install",),
             "download-update": ("install",), "stage-launcher": ("package", "launcher"),
             "swap-launcher": ("launcher", "start"), "settings": ("install",), "diagnostics": ("install", "out"),
-            "shortcuts": ("exe",)}
+            "shortcuts": ("exe",), "remove-launcher": ("launcher",)}
 
 
 def main(argv=None):

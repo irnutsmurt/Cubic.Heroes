@@ -54,6 +54,7 @@
 // DOTHEROES_PPFX_DUMP=<dir>: the first differing outputs, both sides, raw.
 
 #define VK_NO_PROTOTYPES
+#include <atomic>
 #include <vulkan/vulkan.h>
 
 #include "ppfx_native.h"
@@ -90,6 +91,10 @@
 extern "C" uint8_t* vm_base;
 extern "C" uint32_t cellGcmResolveLocated(int local, uint32_t offset);
 extern "C" int g_dotheroes_native_present;   // main.cpp (R6)
+
+// port/diag/game_log.h, in the game's executable: weak here, so a program linking this library without it still links
+extern "C" int dh_log_session_active(void) __attribute__((weak));
+extern "C" void dh_log(int level, const char* tag, const char* fmt, ...) __attribute__((weak, format(printf, 3, 4)));
 
 namespace ppfx {
 namespace {
@@ -1212,6 +1217,18 @@ void compile_account(const char* kind, uint64_t key, uint64_t c_start, uint64_t 
     if (compile_log())
         fprintf(stderr, "[vk-compile] t=%.3f pipeline %s key %016llX total %.2f ms driver %.2f ms\n", compile_clock(),
                 kind, (unsigned long long)key, all / 1e6, (c_end - c_driver) / 1e6);
+    /* M9: in a game session's log (port/diag/game_log.h), a pipeline built during play -- one the preparation did
+     * not make -- that took over 16 ms, at most 20 lines and then every 100th; every one at Debug */
+    else if (dh_log_session_active && dh_log_session_active()) {
+        static std::atomic<unsigned> slow{0};
+        if (all > 16000000u) {
+            const unsigned k = ++slow;
+            if (k <= 20 || k % 100 == 0)
+                dh_log(1, "shader", "a pipeline built during play took %.1f ms (%u over 16 ms so far)", all / 1e6, k);
+        } else {
+            dh_log(3, "shader", "a pipeline built during play: %.1f ms", all / 1e6);
+        }
+    }
 }
 
 // The fragment translator's control word, made from the program's

@@ -32,6 +32,7 @@
 /* The lifter's generated header, which declares ppu_context and the function
  * table. It comes first: everything below is written against that struct. */
 #include "diag/diag.h"
+#include "diag/game_log.h"   /* M9: the log's levels, session record, tagged events, size cap */
 #include "ps3emu/census.h"   /* M6: the SPU machinery's use, reported at exit */
 extern "C" void spu_coh_forbid(const char* why);   /* spu_coherency.c: M6, the release without the store test */
 #include "native/bullet_cd_task.h"
@@ -770,7 +771,7 @@ static void read_settings(const std::string& path)
         v[strcspn(v, "\r\n")] = 0;
         char* k_end = eq;
         while (k_end > s && (k_end[-1] == ' ' || k_end[-1] == '\t')) *--k_end = 0;
-        if (*s) set_default_env(s, v);
+        if (*s) { set_default_env(s, v); dh_log_note_setting(s, v); }
     }
     fclose(f);
 }
@@ -797,20 +798,21 @@ static std::string install_root(const std::string& dir, bool* slots)
     return dir;
 }
 
-/* <dir>/<stem>.log kept with the `keep` before it (<stem>.1.log the newest) */
-static std::string rotated_log(const std::string& dir, const char* stem, int keep)
+/* <dir>/<stem>.log: this session's log alone (M9, docs/M9_LAUNCHER_PLAN.md section 20) -- a new session replaces
+ * the last one's, which stays until then (after a crash too, for Export Logs); the numbered logs earlier versions
+ * kept (<stem>.1.log ...) are removed, so no cleanup is ever needed */
+static std::string session_log(const std::string& dir, const char* stem)
 {
     std::error_code ec;
     std::filesystem::create_directories(dir, ec);
-    auto name = [&](int i) { return dir + "/" + stem + (i ? "." + std::to_string(i) : std::string()) + ".log"; };
-    std::filesystem::remove(name(keep), ec);
-    for (int i = keep - 1; i >= 0; i--)
-        if (file_exists(name(i))) std::filesystem::rename(name(i), name(i + 1), ec);
-    return name(0);
+    for (int i = 1; i <= 9; i++)
+        std::filesystem::remove(dir + "/" + stem + "." + std::to_string(i) + ".log", ec);
+    return dir + "/" + stem + ".log";
 }
 
 static bool s_slots = false;
 static std::string s_install_root;
+static std::string s_log_path;   /* the session's log file (empty: the console) */
 
 static const char* installed_defaults(void)
 {
@@ -824,12 +826,15 @@ static const char* installed_defaults(void)
     } else {
         read_settings(dir + "/dotheroes.cfg");
     }
-    /* No console: started from a shortcut. The log: <install>/logs/game.log with the five before it (build
-     * slots), or next to the data (the setup app's layout). */
+    /* No console: started from a shortcut. The log: <install>/logs/game.log, this session's (build slots), or next to
+     * the data (the setup app's layout). Emptied, then both streams append -- neither writes over the other's lines;
+     * each line is written out as it ends (a crash keeps everything before it); its size is capped. */
     if (!getenv("DOTHEROES_LOG_TO_CONSOLE")) {
-        const std::string log = s_slots ? rotated_log(root + "/logs", "game", 5) : data + "/dotheroes.log";
-        if (freopen(log.c_str(), "w", stdout)) setvbuf(stdout, NULL, _IOLBF, 0);
+        const std::string log = s_slots ? session_log(root + "/logs", "game") : data + "/dotheroes.log";
+        if (FILE* f = fopen(log.c_str(), "w")) fclose(f);
+        if (freopen(log.c_str(), "a", stdout)) setvbuf(stdout, NULL, _IOLBF, 0);
         freopen(log.c_str(), "a", stderr);
+        s_log_path = log;
     }
     s_installed_elf = data + "/disc/PS3_GAME/USRDIR/EBOOT.elf";
     set_default_env("PS3_GAMEDATA_ROOT", data + "/gamedata");
@@ -1059,6 +1064,10 @@ int main(int argc, char** argv)
 
     /* Before the runtime installs its own fault handlers, so they chain here. */
     diag_install_crash_handler();
+    /* M9: the session's record and the log's watch (game_log.h); also before the runtime, whose crash flush chains
+     * to the crash record. Debug and Trace add the driver's information messages. */
+    if (dh_log_level() >= DH_LOG_DEBUG) set_default_env("PS3RECOMP_VK_MESSAGES", "2");
+    dh_log_session_start(s_log_path.c_str());
     /* On this thread, which runs the guest's entry (the PPU main thread),
      * and before the others start, so they take the process's placement. */
     dotheroes_cpu_place();

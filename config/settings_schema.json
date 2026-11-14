@@ -42,7 +42,10 @@
   {"key": "LAUNCHER_SAVE_BACKUPS_KEPT", "owner": "launcher", "type": "int", "min": 1, "max": 100, "default": "10",
    "applies": "live", "category": "Saves", "label": "Automatic save backups kept",
    "help": "Backups you make yourself are kept until you delete them."},
-  {"key": "LAUNCHER_LOG_LEVEL", "owner": "launcher", "type": "enum", "values": ["info", "debug"], "default": "info",
-   "applies": "live", "category": "Diagnostics", "label": "Log detail"}
+  {"key": "DOTHEROES_LOG_LEVEL", "owner": "both", "type": "enum", "values": ["error", "warning", "info", "debug", "trace"],
+   "default": "info", "applies": "restart", "category": "Diagnostics", "label": "Log detail",
+   "labels": {"error": "Errors only", "warning": "Errors and warnings", "info": "Normal", "debug": "Detailed",
+              "trace": "Everything (large logs)"},
+   "help": "How much the game and the launcher write in their logs. Normal is enough for a report."}
  ]
 }

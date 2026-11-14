@@ -1131,6 +1131,21 @@ struct Status {
     std::string playing;   // a running game's note
 } g_st;
 
+// the settings as the worker reported them; the log's detail handed on to the jobs the launcher starts (their
+// environment: tools/worker.py) -- the game reads the same setting from the file itself
+static void set_settings(const json::Value& v)
+{
+    g_st.settings = v;
+    const std::string lv = g_st.settings["settings"]["DOTHEROES_LOG_LEVEL"]["value"].str();
+    if (!lv.empty()) {
+#ifdef _WIN32
+        _putenv_s("DOTHEROES_LOG_LEVEL", lv.c_str());
+#else
+        setenv("DOTHEROES_LOG_LEVEL", lv.c_str(), 1);
+#endif
+    }
+}
+
 static std::string install_dir() { return g_prefs.install.empty() ? default_install() : g_prefs.install; }
 std::string install_dir_or_empty() { return install_dir(); }
 
@@ -1153,7 +1168,7 @@ static void refresh_info()
         }
         if (kind == "slots" || kind == "setup-app")
             run("settings", { "--install", install_dir() }, "", false, [](const json::Value& s) {
-                g_st.settings = s["data"];
+                set_settings(s["data"]);
                 auto_prepare_check_later();
             });
     });
@@ -1266,7 +1281,7 @@ static void after_install_shaders()
         "during gameplay.", "Precompile Now (recommended)", false, [] {
         run("settings", { "--install", install_dir(), "--set", "LAUNCHER_SHADERS_AFTER_UPDATE=1",
                           "--set", "LAUNCHER_SHADERS_ON_DRIVER_CHANGE=1" },
-            "", false, [](const json::Value& r) { if (r["ok"].truthy()) g_st.settings = r["data"]; });
+            "", false, [](const json::Value& r) { if (r["ok"].truthy()) set_settings(r["data"]); });
         bg_prepare(false, "after the install");
     });
     g_confirm.no = "Skip for Now";
@@ -1619,6 +1634,7 @@ static void step_row(int n, const char* name, bool ok, const std::string& value,
 }
 
 static void uninstall_open();
+static void remove_launcher_open();
 static void same_line_fits(float next_w);
 
 static void page_install()
@@ -1750,7 +1766,11 @@ static void page_install()
         same_line_fits(S(360));
         if (big_button("Uninstall the game...", ImVec2(S(360), 0), Kind::Danger)) uninstall_open();
         if (!previous) text_col(col::dim, "Rollback becomes available after an update.");
+    } else {
+        ImGui::Dummy(ImVec2(0, S(10)));
+        title("Maintenance", 24);
     }
+    if (big_button("Remove the launcher...", ImVec2(S(360), 0), Kind::Danger)) remove_launcher_open();
 }
 
 // --- updates ---
@@ -1925,7 +1945,8 @@ static void page_settings()
     static const std::map<std::string, std::vector<std::pair<std::string, std::string>>> choices = {
         { "DOTHEROES_FPS", { { "60", "60 fps" }, { "30", "30 fps (the original)" }, { "0", "Unlimited" } } },
         { "LAUNCHER_UPDATE_CHANNEL", { { "stable", "Stable releases" }, { "prerelease", "Test releases too" } } },
-        { "LAUNCHER_LOG_LEVEL", { { "info", "Normal" }, { "debug", "Detailed" } } },
+        { "DOTHEROES_LOG_LEVEL", { { "error", "Errors only" }, { "warning", "Errors and warnings" }, { "info", "Normal" },
+                                   { "debug", "Detailed" }, { "trace", "Everything" } } },
         { "LAUNCHER_PROMPTS", { { "auto", "Automatic" }, { "xbox", "Xbox" }, { "playstation", "PlayStation" },
                                 { "nintendo", "Nintendo Switch" }, { "steam", "Steam" }, { "generic", "Generic" } } },
         { "LAUNCHER_DISPLAY_MODE", { { "windowed", "Windowed" }, { "borderless", "Borderless fullscreen" },
@@ -1994,7 +2015,7 @@ static void page_settings()
             int at = it == cycle.end() ? 0 : (int)(it - cycle.begin());
             at = (at + dir + (int)cycle.size()) % (int)cycle.size();
             run("settings", { "--install", install_dir(), "--set", key + "=" + cycle[at] }, "", false, [](const json::Value& r) {
-                if (r["ok"].truthy()) g_st.settings = r["data"];
+                if (r["ok"].truthy()) set_settings(r["data"]);
                 else show_result_error(r, "That setting wasn't saved");
             });
         }
@@ -2004,7 +2025,7 @@ static void page_settings()
         ask("Restore every setting's default?", "Every setting goes back to its default. Your saves are not touched.",
             "Restore", false, [] {
             run("settings", { "--install", install_dir(), "--reset", "all" }, "", false, [](const json::Value& r) {
-                if (r["ok"].truthy()) g_st.settings = r["data"];
+                if (r["ok"].truthy()) set_settings(r["data"]);
             });
         });
     same_line_fits(S(260));
@@ -2325,6 +2346,46 @@ static void overlay_browser()
         if (!b.open) ImGui::CloseCurrentPopup();
         ImGui::EndPopup();
     }
+}
+
+// --- removing the launcher itself (docs/M9_LAUNCHER_PLAN.md section 20): only a downloaded copy; the game, its saves
+// and settings stay where they are. The worker measures first (nothing removed; it refuses a source folder or an
+// install inside the launcher's folder), then, confirmed, starts a helper from a temporary folder that waits for
+// the launcher to exit and removes it -- so the launcher closes right away.
+static void remove_launcher_open()
+{
+    if (game_running() || g_bg || g_op) {
+        show_msg("Not now", "The game, a shader preparation or another job is running: wait until it ends.");
+        return;
+    }
+    std::vector<std::string> base = { "--launcher", g_exe_dir, "--data-dir", data_dir() };
+    if (g_st.info["kind"].str() != "none" && !install_dir().empty()) { base.push_back("--install"); base.push_back(install_dir()); }
+    std::vector<std::string> dry = base;
+    dry.push_back("--dry-run");
+    run("remove-launcher", dry, "", false, [base](const json::Value& r) {
+        if (!r["ok"].truthy()) { show_result_error(r, "The launcher can't be removed"); return; }
+        const json::Value& d = r["data"];
+        std::string text = "The launcher, its preferences and its shortcuts are removed from this PC (" +
+                           human_bytes(d["bytes"].num()) + "). The game stays installed, with your saves and settings: "
+                           "download the launcher again to play. To remove the game too, uninstall it first.";
+        if (d["steam_open"].truthy()) text += "\n\nSteam is open: close it first, or the launcher's Steam entry stays.";
+        if (d["kept_items"].size()) text += "\n\nOther files you keep in the launcher's folder stay.";
+        ask("Remove the launcher?", text, "Remove", true, [base] {
+            if (g_nav_test) { g_nav_event = "  [the launcher would be removed: not during a scripted controller test]"; return; }
+            std::vector<std::string> go = base;
+            go.push_back("--confirm");
+            go.push_back("--wait-pid");
+#ifdef _WIN32
+            go.push_back(std::to_string((unsigned long)GetCurrentProcessId()));
+#else
+            go.push_back(std::to_string((long)getpid()));
+#endif
+            run("remove-launcher", go, "Removing the launcher", true, [](const json::Value& r) {
+                if (!r["ok"].truthy()) { show_result_error(r, "The launcher couldn't be removed"); return; }
+                g_quit = true;   // the helper removes the launcher once it has exited
+            });
+        });
+    });
 }
 
 // --- uninstalling: the parts chosen (saves, backups and settings kept unless chosen), what each frees ---
@@ -3100,8 +3161,12 @@ int main(int argc, char** argv)
         fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
         return 1;
     }
+    // CUBIC_NAV_HIDDEN=1 with --nav-test: the scripted test's window never shown (it reads its pictures back itself)
+    const char* hid = getenv("CUBIC_NAV_HIDDEN");
+    const Uint32 hidden = g_nav_test && hid && *hid == '1' ? SDL_WINDOW_HIDDEN : 0;
     SDL_Window* win = SDL_CreateWindow("Cubic.Heroes", g_prefs.x, g_prefs.y, g_prefs.w, g_prefs.h,
-                                       SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI | (g_prefs.maximized ? SDL_WINDOW_MAXIMIZED : 0));
+                                       SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI | hidden |
+                                       (g_prefs.maximized && !hidden ? SDL_WINDOW_MAXIMIZED : 0));
     if (!win) {   // the remembered place may be on a display that is gone
         win = SDL_CreateWindow("Cubic.Heroes", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1280, 800,
                                SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);

@@ -970,20 +970,73 @@ the launcher-side items are done here.
   install, a folder that isn't one, a live preparation's lock), the Steam entries for the launcher removed and others
   kept. Tried: the dialog on the review install by a dry run (3.7 GB to free; nothing removed).
 
-**Not done yet -- for after the owner's go-ahead** (nothing of it started):
-- **Removing the launcher itself**: its own folder deleted after it exits (a running program cannot delete itself),
-  only a packaged download's folder (the launcher and worker/ there, no checkout), never an install inside it, its
-  preferences in %APPDATA% too -- destructive enough to be tried with the owner.
-- **The logs and their export**: what exists -- the game writes `logs/game.log` line-buffered (a crash keeps what was
-  written) and keeps the five sessions before it; the launcher's worker logs by level (info, debug); Diagnostics
-  makes a report (about.json: versions, OS, CPU, memory, GPU and driver, the install's state and sizes; the logs'
-  ends), every file shown before it is packed, sanitized (home and install folders, user and computer names, e-mail
-  addresses), never saves, keys, disc or game files or the caches, into Documents, nothing uploaded. Missing: the
-  game's log as one session (replaced each start) with a size cap and timed flushes; the five levels in the game and
-  the launcher (Error to Trace; Debug and Trace off by default); the events named above tagged in the game's log
-  (Vulkan validation messages, compile events, frame spikes, audio and controller errors, exceptions, a crash
-  record); the active settings in the report. The game's part needs a game build and a run to check it -- after the
-  cutoff.
+**Done after the owner's go-ahead** (2026-11-14 afternoon; the owner authorized finishing M9 without another
+hands-on session):
+- **The game's log** (port/diag/game_log.{h,cpp}, port/main.cpp; the runtime's ps3_stdio.c already buffers both
+  streams and flushes them every 50 ms, at exit, on abort() and on a crash):
+  - one session: `<install>/logs/game.log` is emptied when a session starts, both streams append to it; the
+    numbered logs earlier versions kept (`game.1.log`...) are removed; the last session's log stays until the next
+    session starts (after a crash too, for Export Logs);
+  - size cap: DOTHEROES_LOG_CAP_MB (64 by default); past it a line says so and the rest of the session is dropped (its
+    start, with the set-up and first errors, kept);
+  - levels: the setting DOTHEROES_LOG_LEVEL (Settings, Diagnostics: "Log detail": Errors only, Errors and warnings,
+    Normal, Detailed, Everything; Normal by default), shared by the game and the launcher's jobs (the launcher passes
+    it to the worker, whose log files leave out "log" events above it; a worker log past 4 MB keeps its newest
+    quarter). The game's tagged events below honour it; the game's and runtime's own lines are written at every level;
+  - the session's record: `[session]` time, build, log level, OS, CPU, threads, memory; `[settings]` every setting
+    read from the player's files (a name that looks like a secret is never written); the GPU and driver are the
+    renderer's own lines;
+  - tagged events: `[frame]` frames over 100 ms (a warning, at most one line a second, the rest counted; every one
+    over 50 ms at Detailed) and the session's summary at exit (frames, over 50 ms, over 100 ms, the longest);
+    `[shader]` a pipeline built during play that took over 16 ms (the first 20, then every 100th; every one at
+    Detailed); `[vulkan]` the driver's and loader's warnings and errors (VK_EXT_debug_utils when the loader has it;
+    information messages too at Detailed; PS3RECOMP_VK_VALIDATION=1 the Khronos layer, when installed -- never
+    shipped); `[crash]` an unhandled exception (its kind, code, module and offset, thread, the address read or
+    written) or an unexpected C++ exception, flushed before the process ends; the audio's and controllers' errors are
+    the existing `[audio]` and `[cellPad]` lines;
+  - the watch thread (frame spikes, the cap) wakes every 4 ms: about 1 ms of CPU time a second (measured: 47 ms in
+    45 s).
+- **Export Logs**: the report adds `settings.txt`, the settings in use (from the file or the default, each named) and
+  the file's other lines (names that look like secrets left out), besides about.json and the logs.
+- **Removing the launcher itself** (tools/uninstall.py `launcher_plan`, `remove_launcher`; the worker's
+  `remove-launcher`; the Install page, Maintenance, "Remove the launcher...", always shown):
+  - only a downloaded copy (the launcher beside `worker/DotHeroes-Setup`, no source checkout), never through a link,
+    never a drive or home folder; refused when an install is inside the launcher's folder;
+  - only the package's own items (the launcher, its SDL2, README, LICENSE, licenses/, worker/): anything else the
+    player keeps there stays, and the folder goes only when nothing is left; the launcher's data folder's own items
+    (launcher.json, logs/, report/) likewise; its Start-menu and desktop shortcuts and its own Steam entry (Steam open:
+    the dialog says to close it first, or the entry stays);
+  - the game's install, its saves and settings are never touched (to remove the game too, the dialog says to
+    uninstall it first);
+  - the dialog: what goes and its size, "Remove" (brick) and Cancel (focused); confirmed, the worker copies itself
+    (its program, `_internal`, `tools`, `config`: about 45 MB) to a `CubicHeroes-remove-*` temporary folder and starts
+    that copy, which waits for the launcher and the first worker to exit, removes the launcher, then its own
+    temporary folder; the launcher closes at once. Never during a scripted controller test.
+
+**Tests** (2026-11-14): the game's log on a disposable test install, the installed game started as a player starts
+it but offscreen and silent (no window, OpenAL Soft's null driver), ended through its own quit path
+(build/m9/gamelog_test.py, local): a session (the older numbered logs removed, the record, a frame spike at the
+title's load and the session's summary, a slow pipeline); a deliberate crash (DOTHEROES_CRASH_TEST: the `[crash]`
+record kept in the log); the report collected after the crash (the crash record and settings.txt in it, zipped); the
+next session replacing the crashed one's log; a 0.02 MB cap; Detailed (the driver's messages, every pipeline built in
+play). Unit tests: settings.txt (a secret-looking name left out), the worker log's level and trim, the launcher's
+removal (sizes, only the package's items, the player's file kept, a junction removed as a link with its target
+intact, the install and its saves and settings kept, the folder gone when only the package was there) and its
+refusals (an install inside, a source checkout, a link, a folder that isn't a launcher's).
+Remove Launcher on a disposable copy of the packaged download (build/m9/remove_launcher_test.py, local): measured,
+then confirmed while a stand-in "launcher" process ran -- nothing removed until it exited; then the package's items
+and the data folder's items gone, the player's own file in the folder kept, the install beside it with its saves
+and settings intact, the helper's temporary folder gone. The launcher's dialog by a scripted controller with its
+window hidden (CUBIC_NAV_HIDDEN=1, so the owner's screen stays untouched): the source build's refusal ("isn't a
+downloaded copy"), and on a packaged copy the confirmation (428.6 MB, Cancel focused) cancelled with B.
+
+**Physical tests the owner can do later** (M9's hands-on acceptance; nothing in M10 waits on them):
+- the launcher by a real PlayStation, Switch and Steam controller (the prompt styles follow each), and a controller
+  plugged in and out while the launcher runs;
+- the file browser's drive list;
+- Remove the launcher from a real downloaded copy (the launcher closes; its folder goes a moment later);
+- a played session's game.log and Export Logs after it.
+
 - **Export Logs, the launcher's part -- done**: the Diagnostics page's button is "Export Logs" (it gathers the report,
   which works with no game running, after a crash too: it reads the files left behind); every file is shown and can
   be left out (X); "Save the zip to..." opens the controller's folder browser (where it starts: section 23), and the

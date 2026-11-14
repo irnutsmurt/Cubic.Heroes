@@ -138,5 +138,82 @@ class UninstallTest(unittest.TestCase):
         self.assertEqual(os.path.getmtime(ovdf), t0 - 100)
 
 
+class RemoveLauncherTest(unittest.TestCase):
+    """the launcher itself removed: only a packaged download's own items, never an install inside, never through a
+    link, the player's other files and the game's install kept"""
+
+    def setUp(self):
+        self.tmpd = tempfile.TemporaryDirectory()
+        t = self.tmpd.name
+        self.pkg = os.path.join(t, "Cubic.Heroes")
+        exe = "CubicHeroes.exe" if os.name == "nt" else "CubicHeroes"
+        put(os.path.join(self.pkg, exe), 100)
+        put(os.path.join(self.pkg, "worker", "DotHeroes-Setup.exe" if os.name == "nt" else "DotHeroes-Setup"), 50)
+        put(os.path.join(self.pkg, "worker", "_internal", "python.dll"), 30)
+        put(os.path.join(self.pkg, "licenses", "SDL2.txt"), 5)
+        put(os.path.join(self.pkg, "README.txt"), 5)
+        put(os.path.join(self.pkg, "my notes.txt"), 7)               # the player's: kept
+        self.outside = os.path.join(t, "elsewhere")
+        put(os.path.join(self.outside, "precious.txt"), 11)
+        layout.make_link(os.path.join(self.pkg, "worker", "outlink"), self.outside)
+        self.data = os.path.join(t, "appdata", "CubicHeroes")
+        put(os.path.join(self.data, "launcher.json"), 20)
+        put(os.path.join(self.data, "logs", "worker-install.jsonl"), 20)
+        put(os.path.join(self.data, "other app file.txt"), 3)        # not the launcher's: kept
+        self.install = os.path.join(t, "install")
+        put(os.path.join(self.install, "active.json"), 5)
+        put(os.path.join(self.install, "data", "gamedata", "save.bin"), 9)
+        put(os.path.join(self.install, "config", "dotheroes.cfg"), 4)
+
+    def tearDown(self):
+        self.tmpd.cleanup()
+
+    def test_plan_and_remove(self):
+        p = uninstall.launcher_plan(self.pkg, self.data, self.install)
+        self.assertEqual(p["bytes"], 100 + 50 + 30 + 5 + 5 + 20 + 20)
+        self.assertEqual(p["kept_items"], ["my notes.txt"])
+        self.assertTrue(os.path.exists(os.path.join(self.pkg, "README.txt")))   # the plan removes nothing
+        out = uninstall.remove_launcher(self.pkg, self.data, self.install)
+        self.assertEqual(sorted(os.listdir(self.pkg)), ["my notes.txt"])
+        self.assertFalse(out["folder_removed"])
+        self.assertEqual(sorted(os.listdir(self.data)), ["other app file.txt"])
+        self.assertTrue(os.path.exists(os.path.join(self.outside, "precious.txt")))   # through the link: untouched
+        for kept in ("active.json", os.path.join("data", "gamedata", "save.bin"), os.path.join("config", "dotheroes.cfg")):
+            self.assertTrue(os.path.exists(os.path.join(self.install, kept)), kept)
+
+    def test_folder_gone_when_only_the_package(self):
+        os.remove(os.path.join(self.pkg, "my notes.txt"))
+        out = uninstall.remove_launcher(self.pkg, self.data)
+        self.assertTrue(out["folder_removed"])
+        self.assertFalse(os.path.exists(self.pkg))
+
+    def test_refusals(self):
+        inner = os.path.join(self.pkg, "game install")
+        put(os.path.join(inner, "active.json"), 5)
+        with self.assertRaises(uninstall.UninstallError) as e:
+            uninstall.launcher_plan(self.pkg, self.data)
+        self.assertEqual(e.exception.code, "install_inside")
+        with self.assertRaises(uninstall.UninstallError) as e:
+            uninstall.remove_launcher(self.pkg, self.data, install=inner)
+        self.assertEqual(e.exception.code, "install_inside")
+        self.assertTrue(os.path.exists(os.path.join(self.pkg, "README.txt")))   # nothing removed
+        import shutil
+        shutil.rmtree(inner)
+        os.makedirs(os.path.join(self.pkg, ".git"))   # a source checkout
+        with self.assertRaises(uninstall.UninstallError) as e:
+            uninstall.launcher_plan(self.pkg)
+        self.assertEqual(e.exception.code, "not_packaged")
+        os.rmdir(os.path.join(self.pkg, ".git"))
+        link = os.path.join(self.tmpd.name, "pkg-link")
+        layout.make_link(link, self.pkg)
+        with self.assertRaises(uninstall.UninstallError) as e:
+            uninstall.launcher_plan(link)
+        self.assertEqual(e.exception.code, "unsafe_path")
+        layout.remove_link(link)
+        with self.assertRaises(uninstall.UninstallError) as e:
+            uninstall.launcher_plan(self.outside)
+        self.assertEqual(e.exception.code, "not_packaged")
+
+
 if __name__ == "__main__":
     unittest.main()

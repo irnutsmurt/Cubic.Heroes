@@ -130,6 +130,28 @@ def about(install):
     return out
 
 
+SECRET_WORDS = ("KEY", "TOKEN", "PASS", "SECRET")
+
+
+def active_settings(install):
+    """the settings in use (config/dotheroes.cfg through the schema: a value from the file or the default) and the
+    file's other lines, as text; a name that looks like a secret never written"""
+    import settings
+    try:
+        eff = settings.effective(install)
+    except (OSError, ValueError) as e:
+        return f"the settings could not be read: {e}\n"
+    lines = ["# the settings in use: NAME=value (where it comes from)"]
+    for k, s in sorted(eff["settings"].items()):
+        lines.append(f"{k}={s['value']}  ({s['source']})")
+    extra = {k: v for k, v in eff["unknown"].items() if not any(w in k.upper() for w in SECRET_WORDS)}
+    if extra:
+        lines.append("# other lines in the settings file")
+        lines += [f"{k}={v}" for k, v in sorted(extra.items())]
+    lines += [f"# problem: {p}" for p in eff["problems"]]
+    return "\n".join(lines) + "\n"
+
+
 def collect(install, out_dir, launcher_logs=()):
     """the report's files into out_dir (made empty first): about.json and the logs, sanitized. Returns the list of
     {file, bytes, what}."""
@@ -151,6 +173,7 @@ def collect(install, out_dir, launcher_logs=()):
     a["install"].pop("source", None)
     put("about.json", json.dumps(a, indent=1), "versions, system, GPU and driver, the install's state and sizes")
     lay = layout.Layout(install)
+    put("settings.txt", active_settings(install), "the game's and the launcher's settings in use")
     logs = []
     if os.path.isdir(lay.logs):
         logs += [os.path.join(lay.logs, n) for n in sorted(os.listdir(lay.logs)) if n.endswith((".log", ".jsonl"))]

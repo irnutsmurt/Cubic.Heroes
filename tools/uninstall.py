@@ -296,3 +296,129 @@ def remove_shortcuts(exe, roots=None, steam_running=None, links=True):
         shortcuts.write_shortcuts(t, {str(i): e for i, e in enumerate(keep)})
         done.append(t)
     return done
+
+
+# ---- removing the launcher itself (M9: docs/M9_LAUNCHER_PLAN.md section 20) ----
+#
+# Only a packaged download's folder (the launcher beside worker/, as tools/make_bundle.py lays it out; never a source
+# checkout) and only the package's own items in it: anything else the player keeps there stays, and the folder
+# goes only when nothing is left. Never an install inside it (the game, its saves and settings stay wherever the
+# install is). The launcher's own data folder (its preferences, its job logs, a report being reviewed) goes too:
+# only those items. The Start-menu and desktop shortcuts and the Steam entry made for the launcher go (Steam open:
+# its entry is left -- the dialog says to close Steam first). The launcher can't delete itself while it runs: it
+# starts a copy of the worker from a temporary folder (`remove-launcher --wait-pid`), which waits for it to exit.
+
+PACKAGE_ITEMS = ("CubicHeroes.exe", "CubicHeroes", "LICENSE.txt", "README.txt", "SDL2.dll", "libSDL2-2.0.so.0",
+                 "licenses", "worker")
+DATA_ITEMS = ("launcher.json", "logs", "report", "imgui.ini")
+
+
+def _worker_exe(folder):
+    return os.path.join(folder, "worker", "DotHeroes-Setup.exe" if os.name == "nt" else "DotHeroes-Setup")
+
+
+def _check_launcher_folder(folder, install=None):
+    folder = os.path.abspath(folder)
+    if layout.is_link(folder):
+        raise UninstallError("The launcher's folder is a link: nothing is removed through it.", "unsafe_path")
+    if not os.path.isdir(folder):
+        raise UninstallError("The launcher's folder isn't there.", "not_packaged")
+    drive_root = os.path.splitdrive(folder)[0] + os.sep
+    if os.path.normcase(folder) in (os.path.normcase(drive_root), os.path.normcase(os.path.expanduser("~")), "/"):
+        raise UninstallError("This folder is a drive or home folder.", "unsafe_path")
+    exe = os.path.join(folder, "CubicHeroes.exe" if os.name == "nt" else "CubicHeroes")
+    if not (os.path.isfile(exe) and os.path.isfile(_worker_exe(folder))):
+        raise UninstallError("This launcher isn't a downloaded copy: there is nothing to remove here.", "not_packaged")
+    if os.path.exists(os.path.join(folder, ".git")) or os.path.exists(os.path.join(folder, "tools", "worker.py")):
+        raise UninstallError("This launcher runs from a source folder: it isn't removed this way.", "not_packaged")
+    # an install inside the launcher's folder: never removed with it
+    homes = [install] if install else []
+    with os.scandir(folder) as it:
+        for e in it:
+            if e.is_dir(follow_symlinks=False) and (os.path.exists(os.path.join(e.path, "active.json")) or
+                                                    os.path.exists(os.path.join(e.path, "data", "install.json"))):
+                homes.append(e.path)
+    for h in homes:
+        h = os.path.abspath(h)
+        if os.path.normcase(h) == os.path.normcase(folder) or _inside(folder, h):
+            raise UninstallError("The game is installed inside the launcher's folder. Uninstall the game first, or "
+                                 "keep the launcher.", "install_inside")
+    return folder, exe
+
+
+def launcher_plan(folder, data_dir=None, install=None):
+    """what removing the launcher removes, nothing removed: {folder, bytes, files, items, kept_items, data_bytes}"""
+    folder, exe = _check_launcher_folder(folder, install)
+    acc = {"bytes": 0, "files": 0, "links": 0, "protected": [], "left": []}
+    items = [n for n in PACKAGE_ITEMS if os.path.lexists(os.path.join(folder, n))]
+    for n in items:
+        _walk(os.path.join(folder, n), folder, False, acc)
+    others = sorted(n for n in os.listdir(folder) if n not in PACKAGE_ITEMS)
+    dacc = {"bytes": 0, "files": 0, "links": 0, "protected": [], "left": []}
+    if data_dir and os.path.isdir(data_dir) and not layout.is_link(data_dir):
+        for n in DATA_ITEMS:
+            _walk(os.path.join(data_dir, n), data_dir, False, dacc)
+    import shortcuts
+    return {"folder": folder, "exe": exe, "bytes": acc["bytes"] + dacc["bytes"], "files": acc["files"] + dacc["files"],
+            "items": items, "kept_items": others, "data_bytes": dacc["bytes"],
+            "steam_open": bool(steam_entry_left(exe)) and bool(shortcuts.steam_running())}
+
+
+def _wait_exit(pid, timeout):
+    import time
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < timeout:
+        if not _pid_alive(pid):
+            return True
+        time.sleep(0.25)
+    return False
+
+
+def _pid_alive(pid):
+    if os.name == "nt":
+        import ctypes
+        k = ctypes.windll.kernel32
+        h = k.OpenProcess(0x1000 | 0x00100000, False, int(pid))   # QUERY_LIMITED_INFORMATION | SYNCHRONIZE
+        if not h:
+            return False
+        try:
+            return k.WaitForSingleObject(h, 0) == 0x102   # WAIT_TIMEOUT: still running
+        finally:
+            k.CloseHandle(h)
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except OSError:
+        return False
+
+
+def remove_launcher(folder, data_dir=None, install=None, wait_pid=None, timeout=120):
+    """the launcher's package items, its data folder's items and its shortcuts removed (after `wait_pid` exits)"""
+    if wait_pid and not _wait_exit(wait_pid, timeout):
+        raise UninstallError("The launcher is still running: nothing was removed.", "busy")
+    folder, exe = _check_launcher_folder(folder, install)
+    out = {"folder": folder, "shortcuts": [], "bytes": 0, "files": 0, "left": []}
+    try:
+        out["shortcuts"] = remove_shortcuts(exe)
+    except Exception:   # noqa: BLE001 -- a shortcut that can't be removed never stops the rest
+        pass
+    out["steam_left"] = bool(steam_entry_left(exe))
+    acc = {"bytes": 0, "files": 0, "links": 0, "protected": [], "left": []}
+    for n in PACKAGE_ITEMS:
+        p = os.path.join(folder, n)
+        if os.path.lexists(p):
+            _walk(p, folder, True, acc)
+    if data_dir and os.path.isdir(data_dir) and not layout.is_link(data_dir):
+        for n in DATA_ITEMS:
+            _walk(os.path.join(data_dir, n), data_dir, True, acc)
+        try:
+            os.rmdir(data_dir)   # only when nothing else is in it
+        except OSError:
+            pass
+    try:
+        os.rmdir(folder)   # only when the player kept nothing else there
+        out["folder_removed"] = True
+    except OSError:
+        out["folder_removed"] = False
+    out.update(bytes=acc["bytes"], files=acc["files"], left=acc["left"] + acc["protected"])
+    return out

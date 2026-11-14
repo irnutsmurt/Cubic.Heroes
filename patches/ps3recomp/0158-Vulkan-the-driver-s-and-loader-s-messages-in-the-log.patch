@@ -1,0 +1,114 @@
+From bdbe43b7b88f3c4839a9ebb9ef2f2d796b392b29 Mon Sep 17 00:00:00 2001
+From: giteaguy <73799093+irnutsmurt@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 15:19:54 -0800
+Subject: [PATCH] Vulkan: the driver's and loader's messages in the log
+ (VK_EXT_debug_utils)
+
+PS3RECOMP_VK_MESSAGES=0 none, 1 warnings and errors (the default), 2 information too; the first 100, then
+every 1000th. PS3RECOMP_VK_VALIDATION=1 enables the Khronos validation layer when installed. An instance
+refused with them is made again without.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libs/video/rsx_vulkan_backend.c | 77 +++++++++++++++++++++++++++++++++
+ 1 file changed, 77 insertions(+)
+
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index ce96b44..7e5f0cf 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -298,6 +298,42 @@ typedef struct vk_state {
+ static vk_state s_vk;
+ 
+ #define VK_LOG(...)  fprintf(stderr, "[RSX vulkan] " __VA_ARGS__)
++
++/* The driver's and loader's messages (PS3RECOMP_VK_MESSAGES, at the instance's creation): a line each, as
++ * "[vulkan] error|warning|info: ...", the first 100, then every 1000th, with the count */
++static int vk_messages_level;
++static VKAPI_ATTR VkBool32 VKAPI_CALL vk_messages_cb(VkDebugUtilsMessageSeverityFlagBitsEXT sev,
++                                                     VkDebugUtilsMessageTypeFlagsEXT type,
++                                                     const VkDebugUtilsMessengerCallbackDataEXT* d, void* user)
++{
++    (void)type; (void)user;
++    static unsigned n;
++    const unsigned k = __atomic_add_fetch(&n, 1u, __ATOMIC_RELAXED);
++    if (k > 100 && k % 1000) return VK_FALSE;
++    const char* what = sev >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT ? "error"
++                     : sev >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT ? "warning" : "info";
++    fprintf(stderr, "[vulkan] %s: %s%s\n", what, d && d->pMessage ? d->pMessage : "(no text)",
++            k == 100 ? " (further messages: every 1000th)" : "");
++    return VK_FALSE;
++}
++
++static void vk_messages_start(int level)
++{
++    PFN_vkCreateDebugUtilsMessengerEXT mk = (PFN_vkCreateDebugUtilsMessengerEXT)
++        pvkGetInstanceProcAddr(s_vk.instance, "vkCreateDebugUtilsMessengerEXT");
++    if (!mk) return;
++    VkDebugUtilsMessengerCreateInfoEXT mi = { .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT };
++    mi.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
++                         (level >= 2 ? VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT : 0);
++    mi.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
++                     VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
++    mi.pfnUserCallback = vk_messages_cb;
++    VkDebugUtilsMessengerEXT m = VK_NULL_HANDLE;
++    if (mk(s_vk.instance, &mi, NULL, &m) == VK_SUCCESS) {
++        vk_messages_level = level;
++        VK_LOG("the driver's %s are logged\n", level >= 2 ? "messages" : "warnings and errors");
++    }
++}
+ #define VK_CHECK(call, what)                                               \
+     do { VkResult r_ = (call);                                             \
+          if (r_ != VK_SUCCESS) {                                           \
+@@ -5945,7 +5981,48 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+         ci.enabledExtensionCount   = s_vk.inst_ext_count;
+         ci.ppEnabledExtensionNames = s_vk.inst_exts;
+     }
++    /* The driver's and loader's own warnings and errors in the log (VK_EXT_debug_utils, when the loader has it):
++     * PS3RECOMP_VK_MESSAGES=0 none, 1 warnings and errors (the default), 2 also information; and
++     * PS3RECOMP_VK_VALIDATION=1 the Khronos validation layer when it is installed (never shipped). */
++    const char* exts2[18];
++    const char* layers[1];
++    int dbg = 0;
++    {
++        const char* m = getenv("PS3RECOMP_VK_MESSAGES");
++        const int level = m && *m ? atoi(m) : 1;
++        PFN_vkEnumerateInstanceExtensionProperties en = (PFN_vkEnumerateInstanceExtensionProperties)
++            pvkGetInstanceProcAddr(VK_NULL_HANDLE, "vkEnumerateInstanceExtensionProperties");
++        u32 have = 0;
++        if (level > 0 && en && en(NULL, &have, NULL) == VK_SUCCESS && have && have < 512) {
++            VkExtensionProperties* ep = (VkExtensionProperties*)calloc(have, sizeof *ep);
++            if (ep && en(NULL, &have, ep) == VK_SUCCESS)
++                for (u32 i = 0; i < have; i++)
++                    if (!strcmp(ep[i].extensionName, VK_EXT_DEBUG_UTILS_EXTENSION_NAME)) dbg = level;
++            free(ep);
++        }
++        u32 n = 0;
++        if (s_vk.windowed) for (u32 i = 0; i < s_vk.inst_ext_count; i++) exts2[n++] = s_vk.inst_exts[i];
++        if (dbg) exts2[n++] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
++        ci.enabledExtensionCount = n;
++        ci.ppEnabledExtensionNames = n ? exts2 : NULL;
++        const char* v = getenv("PS3RECOMP_VK_VALIDATION");
++        if (v && *v == '1') {
++            layers[0] = "VK_LAYER_KHRONOS_validation";
++            ci.enabledLayerCount = 1;
++            ci.ppEnabledLayerNames = layers;
++        }
++    }
+     VkResult ir = pvkCreateInstance(&ci, NULL, &s_vk.instance);
++    if (ir != VK_SUCCESS && (dbg || ci.enabledLayerCount)) {   /* without the messages and the layer */
++        VK_LOG("vkCreateInstance with the driver's messages failed (VkResult %d): without them\n", (int)ir);
++        dbg = 0;
++        ci.enabledLayerCount = 0;
++        ci.ppEnabledLayerNames = NULL;
++        ci.enabledExtensionCount = s_vk.windowed ? s_vk.inst_ext_count : 0;
++        ci.ppEnabledExtensionNames = s_vk.windowed ? s_vk.inst_exts : NULL;
++        ir = pvkCreateInstance(&ci, NULL, &s_vk.instance);
++    }
++    if (ir == VK_SUCCESS && dbg) vk_messages_start(dbg);
+     if (ir != VK_SUCCESS && s_vk.windowed) {
+         vk_window_drop("vkCreateInstance with the surface extensions failed");
+         ci.enabledExtensionCount = 0;
+-- 
+2.56.0.windows.3
+

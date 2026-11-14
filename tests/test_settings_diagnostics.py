@@ -145,6 +145,41 @@ class Diagnostics(unittest.TestCase):
         self.assertTrue(about["saves"]["present"])
         self.assertIsNotNone(about["sizes_mb"]["recipes_kb"])
 
+    def test_active_settings_in_the_report(self):
+        put(self.lay.cfg, "DOTHEROES_FPS=30\nSOME_API_KEY=abc\nMY_SWITCH=1\n")
+        out = os.path.join(self.tmp, "report")
+        names = [f["file"] for f in diagnostics.collect(self.install, out)]
+        self.assertIn("settings.txt", names)
+        with open(os.path.join(out, "settings.txt"), encoding="utf-8") as f:
+            t = f.read()
+        self.assertIn("DOTHEROES_FPS=30  (file)", t)
+        self.assertIn("DOTHEROES_LOG_LEVEL=info  (default)", t)
+        self.assertIn("MY_SWITCH=1", t)
+        self.assertNotIn("abc", t)   # a name that looks like a secret: never written
+
+    def test_worker_log_level_and_size(self):
+        import worker
+        log = os.path.join(self.tmp, "w.jsonl")
+        with open(log, "wb") as f:
+            f.write(b"x" * (worker.LOG_KEEP + 10) + b"\n{\"last\":1}\n")
+        os.environ["DOTHEROES_LOG_LEVEL"] = "warning"
+        try:
+            import io
+            ev = worker.Events(io.StringIO(), log)
+            ev.emit("log", level="info", text="left out at warning")
+            ev.emit("log", level="error", text="kept")
+            ev.emit("stage", id="x", state="done")
+            ev.close()
+        finally:
+            del os.environ["DOTHEROES_LOG_LEVEL"]
+        with open(log, encoding="utf-8") as f:
+            t = f.read()
+        self.assertLess(os.path.getsize(log), worker.LOG_KEEP)   # trimmed to its newest part
+        self.assertIn("{\"last\":1}", t)
+        self.assertNotIn("left out", t)
+        self.assertIn("kept", t)
+        self.assertIn("\"stage\"", t)
+
     def test_pack_is_what_was_reviewed(self):
         out = os.path.join(self.tmp, "report")
         diagnostics.collect(self.install, out)

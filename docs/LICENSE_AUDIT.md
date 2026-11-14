@@ -15,10 +15,13 @@
 | `config/m8_dev_credits.json` | INDEP | keep |
 | `config/m8_movie_trace.json` | INDEP | keep |
 | `config/m8_native_movie.json` | INDEP | keep |
+| `config/pipeline_manifest.txt` | INDEP | keep |
 | `config/r6_native_observers.json` | INDEP | keep |
 | `config/r7_native_hooks.json` | INDEP | keep |
 | `config/r8_hooks.json` | INDEP | keep |
 | `config/r8_promote.json` | INDEP | keep |
+| `config/release_keys.json` | INDEP | keep |
+| `config/settings_schema.json` | INDEP | keep |
 | `config/sjlj.json` | INDEP | keep |
 | `config/spu_entry_hooks.json` | INDEP | keep |
 | `config/spu_relocatable.json` | INDEP | keep |
@@ -29,6 +32,7 @@
 | `docs/HANDOFF.md` | INDEP | keep |
 | `docs/LICENSE_AUDIT.md` | INDEP | keep |
 | `docs/M9_LAUNCHER_PLAN.md` | INDEP | keep |
+| `docs/M9_WORKER_PROTOCOL.md` | INDEP | keep |
 | `docs/MILESTONES.md` | INDEP | keep |
 | `docs/NATIVE_EVIDENCE.md` | DOC-GAME | keep: facts about the game's behaviour and the project's results |
 | `docs/NATIVE_PORT.md` | INDEP | keep |
@@ -43,10 +47,14 @@
 | `docs/NATIVE_R8.md` | DOC-GAME | keep: facts about the game's behaviour and the project's results |
 | `docs/OPENAL_MIGRATION_PLAN.md` | INDEP | keep |
 | `docs/PC_EXPERIENCE.md` | INDEP | keep |
+| `docs/RELEASE_SIGNING.md` | INDEP | keep |
 | `docs/SAVE_UI.md` | INDEP | keep |
 | `docs/SETUP.md` | INDEP | keep |
 | `docs/SHADER_PREPARATION.md` | INDEP | keep |
 | `docs/SPU_NON_AUDIO.md` | DOC-GAME | keep: facts about the game's behaviour and the project's results |
+| `launcher/json.h` | INDEP | keep |
+| `launcher/main.cpp` | INDEP | keep |
+| `launcher/worker_client.h` | INDEP | keep |
 | `patches/ps3recomp/0001-Add-strict-mode-PS3_STRICT-make-silent-fallbacks-fat.patch` | INDEP | keep |
 | `patches/ps3recomp/0002-ppu_hle-store-the-caller-TOC-slot-on-the-fast-path-a.patch` | INDEP | keep |
 | `patches/ps3recomp/0003-ps3_stdio-chain-SIGABRT-with-sigaction-on-POSIX.patch` | INDEP | keep |
@@ -204,6 +212,7 @@
 | `patches/ps3recomp/0155-Lifter-PPU_STORES_NO_SPU_COH-stores-without-the-SPU-.patch` | INDEP | keep |
 | `patches/ps3recomp/0156-cellPad-rumble-diagnostics-a-refused-send-reported-P.patch` | INDEP | keep |
 | `patches/ps3recomp/0157-cellAudio-retired-in-a-build-without-its-output-ever.patch` | INDEP | keep |
+| `patches/ps3recomp/0158-Vulkan-the-driver-s-and-loader-s-messages-in-the-log.patch` | INDEP | keep |
 | `port/CMakeLists.txt` | INDEP | keep |
 | `port/LICENSE.ps3recomp` | THIRD | keep: licence file beside it; listed in the README |
 | `port/assets/ui/DejaVuSans.ttf` | THIRD | keep: licence file beside it; listed in the README |
@@ -219,6 +228,8 @@
 | `port/cpu_place.cpp` | INDEP | keep |
 | `port/diag/diag.cpp` | INDEP | keep |
 | `port/diag/diag.h` | INDEP | keep |
+| `port/diag/game_log.cpp` | INDEP | keep |
+| `port/diag/game_log.h` | INDEP | keep |
 | `port/game_patches.cpp` | INDEP | keep |
 | `port/main.cpp` | INDEP | keep |
 | `port/movie_hooks.cpp` | INDEP | keep |
@@ -451,8 +462,16 @@
 | `tests/solver_setup_diff.py` | INDEP | keep |
 | `tests/stop_tests.py` | INDEP | keep |
 | `tests/test_boundary_check.py` | INDEP | keep |
+| `tests/test_install_layout.py` | INDEP | keep |
 | `tests/test_owned_run.py` | INDEP | keep |
+| `tests/test_pipeline_manifest.py` | INDEP | keep |
 | `tests/test_player_pipeline.py` | INDEP | keep |
+| `tests/test_ps3_disc.py` | INDEP | keep |
+| `tests/test_release_keys.py` | INDEP | keep |
+| `tests/test_settings_diagnostics.py` | INDEP | keep |
+| `tests/test_uninstall.py` | INDEP | keep |
+| `tests/test_updates.py` | INDEP | keep |
+| `tests/test_worker.py` | INDEP | keep |
 | `tests/thread_cpu.sh` | INDEP | keep |
 | `tests/walker_breakdown.py` | INDEP | keep |
 | `tests/workload_variation.py` | INDEP | keep |
@@ -463,13 +482,17 @@
 | `tools/boundary_check.py` | INDEP | keep |
 | `tools/build_deps.py` | INDEP | keep |
 | `tools/build_ffmpeg.py` | INDEP | keep |
+| `tools/build_launcher.py` | INDEP | keep |
 | `tools/class_census_static.py` | INDEP | keep |
 | `tools/cmake/glslang_doc_O0.cmake` | INDEP | keep |
+| `tools/diagnostics.py` | INDEP | keep |
 | `tools/edit_import.py` | INDEP | keep |
 | `tools/fix_functions.py` | INDEP | keep |
+| `tools/game_settings.py` | INDEP | keep |
 | `tools/gen_spu_native.py` | SPUGEN | keep: generates the water's and the waver's tasks from the player's lift; nothing of an image in it |
 | `tools/githooks/pre-push` | INDEP | keep |
 | `tools/grab_luma.py` | INDEP | keep |
+| `tools/install_layout.py` | INDEP | keep |
 | `tools/iso9660.py` | INDEP | keep |
 | `tools/license_audit.py` | INDEP | keep |
 | `tools/m8_frames_compare.py` | INDEP | keep |
@@ -480,6 +503,8 @@
 | `tools/owned_run.py` | INDEP | keep |
 | `tools/pan_check.py` | INDEP | keep |
 | `tools/pipeline.py` | INDEP | keep |
+| `tools/pipeline_manifest.py` | INDEP | keep |
+| `tools/ps3_disc.py` | INDEP | keep |
 | `tools/push_guard.py` | INDEP | keep |
 | `tools/r1_boundary_check.py` | INDEP | keep |
 | `tools/r1_capture.sh` | INDEP | keep |
@@ -522,12 +547,15 @@
 | `tools/r8_scene.sh` | INDEP | keep |
 | `tools/r8_split.py` | INDEP | keep |
 | `tools/r8_threads.py` | INDEP | keep |
+| `tools/release.py` | INDEP | keep |
+| `tools/release_trust.py` | INDEP | keep |
 | `tools/reverb_tail.py` | INDEP | keep |
 | `tools/save_diff.py` | INDEP | keep |
 | `tools/save_ui_preview.c` | INDEP | keep |
 | `tools/sdl_device_poke.py` | INDEP | keep |
 | `tools/self_decrypt.py` | INDEP | keep |
 | `tools/self_update.py` | INDEP | keep |
+| `tools/settings.py` | INDEP | keep |
 | `tools/setup_pipeline.py` | INDEP | keep |
 | `tools/shortcuts.py` | INDEP | keep |
 | `tools/sound_inventory.py` | INDEP | keep |
@@ -538,5 +566,8 @@
 | `tools/spu_trace.py` | INDEP | keep |
 | `tools/symbolize.py` | INDEP | keep |
 | `tools/thread_cpu.py` | INDEP | keep |
+| `tools/uninstall.py` | INDEP | keep |
+| `tools/updates.py` | INDEP | keep |
 | `tools/version.py` | INDEP | keep |
+| `tools/worker.py` | INDEP | keep |
 | `tools/zig_build.py` | INDEP | keep |
