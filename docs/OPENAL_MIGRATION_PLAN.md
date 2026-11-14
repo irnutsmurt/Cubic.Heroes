@@ -2,7 +2,7 @@
 
 Status: **approved by the owner 2026-11-11 with the adjustments below; M0-M3 done (sections 4.1-4.4); M4 accepted by
 the owner 2026-11-12 (sections 4.5, 4.6); M5 done (section 9.1); M6 done 2026-11-13 (sections 10-10.7); M7 (history)
-needs a separate approval; M8 (Bink: docs/FFMPEG_MIGRATION_PLAN.md) implemented 2026-11-13 -- cellAudio and its SDL2 output retired with it -- and closing with M8.4's on-screen validation; the roadmap M9-M14 as the owner revised it on 2026-11-13 (docs/MILESTONES.md).** Requirement (the owner, 2026-11-11): the PC recompilation's game audio runs on OpenAL Soft; FMOD Ex is not executed and no
+needs a separate approval; M8 (Bink: docs/FFMPEG_MIGRATION_PLAN.md) done 2026-11-14 -- cellAudio and its SDL2 output retired with it, M8.4 validated on screen; the roadmap M9-M14 as the owner revised it on 2026-11-13 (docs/MILESTONES.md).** Requirement (the owner, 2026-11-11): the PC recompilation's game audio runs on OpenAL Soft; FMOD Ex is not executed and no
 FMOD-derived implementation code is in the public source or any distributed artifact. The FMOD work so far
 (docs/AUDIO.md A0-A3) stays a local compatibility reference only. Tags: [C] read in the code, [M] measured,
 [L] run logs, [I] inferred.
@@ -657,7 +657,7 @@ M1 did with them (section 4.2):
 | M5 | OpenAL the default; FMOD lifted as traps only, its SPU images not lifted; the old path removed; the installer and setup rebuilt | the validation set, the install test, no trap reached |
 | M6 | Retirements: a census of SPU workloads over the whole game (every drive, long sessions, the owner's sessions); then the FMOD SPU machinery, the overlay dispatch, cellAudio if unused, and the per-store SPU reservation test only if no workload takes reservations | the census; the validation set; CPU and frame-time A/B against rel27 |
 | M7 | History, if the owner approves a cleanup | the bounded rewrite verified as on 2026-11-10; the Support request |
-| M8 | Bink 1 through FFmpeg (LGPL build, dynamic): a separate plan (docs/FFMPEG_MIGRATION_PLAN.md) | implemented 2026-11-13 (M8.4): Bink excluded from the lift, the movies on FFmpeg, cellAudio and its SDL2 output retired; closing with the on-screen validation |
+| M8 | Bink 1 through FFmpeg (LGPL build, dynamic): a separate plan (docs/FFMPEG_MIGRATION_PLAN.md) | done 2026-11-14 (M8.4, validated on screen): Bink excluded from the lift, the movies on FFmpeg (a movie that cannot be decoded shown blank), cellAudio and its SDL2 output retired |
 | M9 | Launcher, shader and Vulkan pipeline precompilation, cache management, GitHub Release updates and rollback (docs/MILESTONES.md, "Roadmap: M9-M14"; the plan for review: docs/M9_LAUNCHER_PLAN.md) | the owner's review of the plan first |
 | M10 | Native PC settings, controls and interface improvements (docs/PC_EXPERIENCE.md sections 1-7b) | after M9 |
 | M11 | Release readiness, full-game and platform validation | after M10 |

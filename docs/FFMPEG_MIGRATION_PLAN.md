@@ -2,9 +2,10 @@
 
 **Status: approved by the owner 2026-11-12 (the architecture); M8.0, M8.1 (on Windows; the Linux libraries are
 built, their run-time validation is outstanding with the rest of Linux's) and M8.2 done 2026-11-13 (sections 2.2,
-2.3, 6.1, 6.2); M8.3 -- the owner's viewing of build/r8/rel49 -- accepted by the owner 2026-11-13; M8.4 implemented
-2026-11-13 (section 6.4), its checks without a game window passed, its on-screen validation outstanding: M8 closes
-with it.** The
+2.3, 6.1, 6.2); M8.3 -- the owner's viewing of build/r8/rel49 -- accepted by the owner 2026-11-13; M8.4 done
+2026-11-14 (section 6.4): Bink excluded, cellAudio retired, validated on screen (the caps, 120 fps among them, the
+hitches, the cleared game's title, the regression, the install), the one failure found (a movie that cannot be
+decoded) fixed and validated. M8 is closed.** The
 owner's requirement (CLAUDE.md, "Architecture
 requirements"; docs/NATIVE_PORT.md section 1): the game's video is decoded by FFmpeg, dynamically linked under the
 LGPL; Bink's implementation is not executed and not in anything this project distributes; the movies are the
@@ -399,8 +400,9 @@ another path, another archive, another .wav beside it -- each refused).
   entry hooks (config/m8_native_movie.json) are in the release lift (tools/setup_pipeline.py's LIFT_CONFIG,
   tools/r8_lift.sh; tests/test_player_pipeline.py keeps the two the same).
 - **No way back to Bink**: port/native/movie/bink_native.cpp answers every call -- the guard always on, no switch,
-  no fallback. A file FFmpeg cannot open, or FFmpeg missing beside the game, is a movie that does not open (the
-  class's own failure path: no movie, the game goes on). A handle the player did not open cannot come; were one
+  no fallback. A file FFmpeg cannot open, or FFmpeg missing beside the game, was planned as a movie that does not
+  open (the class's own failure path); the on-screen validation showed the game exits after that, so such a movie
+  is now shown blank at its own length (below, "Found"). A handle the player did not open cannot come; were one
   to, it is counted as a native path declining (fatal in the native release) and answered as an empty movie.
 - **cellAudio retired** (ps3recomp 0157): PS3RECOMP_CELL_AUDIO_OUTPUT=OFF (the port's DOTHEROES_CELL_AUDIO_OUTPUT,
   OFF by default and refused in a native release) builds cellAudio without any host output -- no SDL2 audio, no
@@ -437,12 +439,57 @@ another path, another archive, another .wav beside it -- each refused).
   (the prebuilt's choices, cellAudio retired in the built game, the lift equal to gen17's), update (76 of 76 parts
   reused), relift, settings -- all passed.
 
-**Outstanding, to close M8** (on-screen runs, build/m8/m84_batch.sh and m84val_run.sh): the movies at 30, 120 and
-144 fps and uncapped; the deliberate hitches (DOTHEROES_MOVIE_TEST_HITCH=5:250,12:600,40:120,70:1000,95:2000); the
-window's focus lost during a movie; the skips; a new game's opening; the credits and the cleared game's title on
-rel50d; the regression drives, the water, the save flows and the reference scenes on rel50; FFmpeg missing beside
-the game; the installed game's run. The raw evidence goes to F:\3d dot game heroes\m8\evidence (outside the
-automated cleanup).
+**The on-screen validation** (2026-11-13; build/m8/m84_batch.sh and m84val_run.sh on rel50 and rel50d, the game's
+window kept on top: TOPMOST=1; every run with PS3_CENSUS_FATAL=cell_audio) [M, L]:
+
+| Run | Result |
+|---|---|
+| attract, 60 fps (5.5 min) | 60.0 presents a second; every movie frame shown (0 late) |
+| 30 fps cap | 30.0 a second; 0 late |
+| **120 fps** (DIAG_VBLANK_MS=8.333, mailbox) | 119.9 a second; 0 late; the title 961 frames through, the demo all 3,465, 2.6-3.0 ms a decode |
+| 144 fps | 143.8 a second; 0 late |
+| uncapped | ~1,200 a second; 0 late |
+| **deliberate hitches** (5:250,12:600,40:120,70:1000,95:2000 ms in every movie) | each stall logged at its movie time; the frames due during it skipped, not shown late (25, 121 and 24 in the three movies), the demo to its last frame with all 5,543,995 of its sound's samples (the sound plays on its own thread: the stalls are the game's); the cycle went on |
+| the output lost during the demo (80 s; 110 s with two failing reopens; 140 s, 400 ms) | the demo to its end; 0 late |
+| the skips (START after 1-110 s, eleven times; the exit during the next demo) | every movie opened closed; the game's own exit |
+| a new game's opening | OpeningMovie_eng.bik to its end |
+| the credits on demand (rel50d) | all 7,860 frames, 0 late, with their sound |
+| **the cleared game's title** (rel50d; tests/scenarios/m8_cleared_title.drive) | after the credits and YES at "Okay to save?", the title opened **TitleMovie_Ura_eng.bik** (the cleared game's), then the demo, then Ura again |
+| the regression drives (11: the river fight, the menus, the fields, the dungeon's approach, the snapshot, after the first dungeon, the editor, the exit after the boss, deeper, save and continue, the sound lab), the water (pause, reload, exit), the attract cycle | each exit 0, no crash, no trap reached, no fatal census |
+| the save flows (saves39, saves39b) | every expected save written; the editor's two lists |
+| the reference scenes against RPCS3 | 5 of 5 within the accepted figures |
+| the install test (fresh, check, update, relift, settings, then the installed game: its memory test and a river fight) | all passed; the update reused 76 of 76 objects |
+
+Every run: no crash, no trap reached, the census's cell_audio 0 and native_decline 0. One frame of 214-359 ms about
+21 s into every run, before the title's movie, is the start-up's (the same on M8.2's rel49 and its Bink reference),
+not a movie's. Two runs were flagged by the harness at their very end ("game window gone" 0.1-0.4 s after the
+drive's own stop: the game closing its window on the way out, as on earlier milestones' runs); the guard now knows
+the drive's stop (tests/drive.py leaves stop.requested, which the game does not take; tests/boot_smoke.py).
+
+**Found: a movie that does not open is not a path the game survives.** With FFmpeg's libraries missing beside the
+game (rel50nf), the title asked for its movie, the native player answered "no movie" as planned -- and about 20 s
+later the game called sys_process_exit(0) by itself, as after a disc read error. Section 6.4's "the class's own
+failure path: no movie, the game goes on" was an assumption, and wrong. **The fix** (port/native/movie/bink_native.cpp,
+build rel51): a movie FFmpeg cannot open, or any movie with FFmpeg missing, is played **blank** -- its own length,
+size and rate from the file's header (the container's published header fields), every frame black, no sound -- so
+the game's flow (the title's 32 s, the demo's 115 s, the opening, the credits) goes on as with the movie. Only a
+file that is not there, or not a movie by its header, is still refused (the disc's files are checked at install).
+No path leads to Bink. The launcher's build check (M9.1) also refuses a build whose FFmpeg libraries do not load.
+
+**rel51** (rel50 + the blank movie + M9.0's compile accounting, diagnostics only; build/m8/m84b_batch.sh), the
+movie runs repeated with every run's folder kept: its memory test 668 checks, 0 failed; attract at 60 fps 60.0
+presents a second, 30 fps 30.0, **120 fps 119.8**, 144 fps 143.8, uncapped ~1,210 -- every movie frame shown on
+time (0 late); the hitches 169 frames not shown late across the stalls, nothing else late; the output loss 0 late;
+the skips 24 movies opened and 24 closed; every run exit 0, no crash, no trap, cell_audio 0, native_decline 0.
+**FFmpeg missing** (rel51nf, the attract cycle for 5 minutes): every movie shown blank at its own length (the
+title closed at its frame 961-962 as with the picture, the demo through all 3,465 frames), the cycle title, demo,
+title, demo, and **no exit** (no sys_process_exit; the run ended by its own stop at 302.8 s).
+
+The raw evidence: F:\3d dot game heroes\m8\evidence\m84 (rel50's runs that survived, the regression folders, the
+batch logs, the reports) and m84b (rel51's runs, each copied as it ended). Seven of rel50's movie runs (attract60,
+the four caps, the hitches, the output loss) were removed by the harness's own cleanup of build/test before they were
+copied -- the figures above for them are from the batch's log and the summaries read before; rel51's runs repeat
+them, kept.
 
 ## 7. Risks and open questions
 

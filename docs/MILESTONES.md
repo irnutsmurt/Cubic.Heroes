@@ -478,9 +478,8 @@ These are M10 (the settings) and M9 (the launcher) below.
 
 ## Roadmap: M9-M14 (set by the owner 2026-11-12; revised 2026-11-13)
 
-The core architecture work is done or closing (M6: the SPU machinery's
-retirement; M8: the movies on FFmpeg, Bink excluded, cellAudio retired --
-M8.4's on-screen validation outstanding). The owner's
+The core architecture work is done (M6: the SPU machinery's retirement; M8,
+closed 2026-11-14: the movies on FFmpeg, Bink excluded, cellAudio retired). The owner's
 priorities, in order, revised on 2026-11-13 (the 2026-11-12 roadmap had the PC
 settings as M9, the launcher as M10 and the character library as M11). M7
 (history) stays unauthorized. Each milestone keeps the project's rules:
