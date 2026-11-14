@@ -7,9 +7,11 @@ release: prepare the known shaders and pipelines before gameplay, keep what is
 still valid, throw away what is stale, test with caches that are really empty,
 and never claim complete coverage from the areas the tests happen to visit.
 
-Status: **step 0 done** (M9.0, 2026-11-14: the cold and warm costs of four scenes, docs/M9_LAUNCHER_PLAN.md
-section 9 -- the driver's pipeline creation is the cost, 0.7-1.3 s a scene cold, the worst frame 450-540 ms); the
-rest is M9.2 (docs/M9_LAUNCHER_PLAN.md sections 3.4 and 8.5). The inventory below, then the plan. Labels as in
+Status: **steps 0-3 done** (M9.0-M9.2, 2026-11-14: docs/M9_LAUNCHER_PLAN.md sections 9 and 11) -- the cold
+and warm costs measured; the native renderer's own pipeline cache (validated, checksummed); the variant record
+(recipes: the programs and parameters, kept in the install); `dotheroes --prepare`, run by the pipeline worker after
+an install, an update, a driver or GPU change. **Step 5 investigated** (section 11 there: about half the programs
+seen can be found in the player's shaders.ps3.pkg; not yet used). Step 4 not started. The inventory below, then the plan. Labels as in
 the other records: [C] read in the code, [M] measured, [H] hypothesis.
 
 ## 1. What is compiled at run time in the native release today

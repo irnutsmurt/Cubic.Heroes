@@ -843,6 +843,8 @@ static const char* installed_defaults(void)
     if (s_slots) {
         const char* id = getenv("DOTHEROES_SHADER_CACHE_ID");
         set_default_env("PS3RECOMP_SPIRV_CACHE", data + "/cache/shaders/" + (id && *id ? id : "default"));
+        // M9.2: the pipelines' recipes, shared by every build (a build translates them itself: --prepare)
+        set_default_env("DOTHEROES_RECIPES", data + "/cache/native-recipes.bin");
     } else {
         set_default_env("PS3RECOMP_SPIRV_CACHE", data + "/cache/shaders");
     }
@@ -891,6 +893,71 @@ static int dotheroes_info(void)
     return ffmpeg ? 0 : 3;
 }
 
+/* `dotheroes --prepare [--cache DIR]` (M9.2, docs/M9_LAUNCHER_PLAN.md section 11): the shaders and Vulkan pipelines
+ * this install has recorded (the native renderer's recipes, in its shader folder) made again before play -- after a
+ * driver, a GPU or the build changed, or a cache was lost -- through the renderer's own pipeline cache, which is
+ * then saved. No window and no game: the backend's device offscreen, the native renderer set up on this thread.
+ * stdout: JSON lines ({"ev":"prepare",...} as it goes, {"ev":"prepared","result":{...}} at the end) for the
+ * pipeline worker. --check: only the cache's state for this GPU and driver and the recipes counted (the launcher
+ * asks at every start whether a preparation is due). Exit 0: every recipe made; 1: some failed; 4: no device or
+ * renderer. */
+extern "C" int ppfx_native_prepare(void (*progress)(uint32_t done, uint32_t total, void* ctx), void* ctx,
+                                   char* summary, int n, int check_only);
+
+static void prepare_progress(uint32_t done, uint32_t total, void*)
+{
+    static const auto t0 = std::chrono::steady_clock::now();
+    static double last = -1.0;
+    const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    if (done == total || t - last >= 0.1) {
+        last = t;
+        printf("{\"ev\":\"prepare\",\"done\":%u,\"total\":%u,\"elapsed\":%.2f}\n", done, total, t);
+        fflush(stdout);
+    }
+}
+
+static int dotheroes_prepare(int argc, char** argv)
+{
+    for (int i = 2; i + 1 < argc; i++)
+        if (strcmp(argv[i], "--cache") == 0) {
+#ifdef _WIN32
+            _putenv_s("PS3RECOMP_SPIRV_CACHE", argv[i + 1]);
+#else
+            setenv("PS3RECOMP_SPIRV_CACHE", argv[i + 1], 1);
+#endif
+        }
+    const std::string dir = exe_dir();
+    bool slots = false;
+    const std::string root = install_root(dir, &slots);
+    if (slots) read_settings(dir + "/build.cfg");
+    if (!getenv("PS3RECOMP_SPIRV_CACHE")) {   // the folders the game itself uses (installed_defaults)
+        const char* id = getenv("DOTHEROES_SHADER_CACHE_ID");
+        set_default_env("PS3RECOMP_SPIRV_CACHE", slots ? root + "/data/cache/shaders/" + (id && *id ? id : "default")
+                                                       : root + "/data/cache/shaders");
+    }
+    if (slots) set_default_env("DOTHEROES_RECIPES", root + "/data/cache/native-recipes.bin");
+    bool check = false;   // --check: the cache's state and the recipes counted, nothing made
+    for (int i = 2; i < argc; i++)
+        if (strcmp(argv[i], "--check") == 0) check = true;
+#ifdef _WIN32
+    _putenv_s("PS3RECOMP_VK_WINDOW", "");   /* no window: the device renders offscreen */
+#else
+    unsetenv("PS3RECOMP_VK_WINDOW");
+#endif
+    printf("{\"ev\":\"prepare-start\",\"cache\":%s}\n", json_str(getenv("PS3RECOMP_SPIRV_CACHE")).c_str());
+    fflush(stdout);
+    if (rsx_vulkan_backend_init(1280, 720, "Cubic.Heroes - preparing")) {
+        printf("{\"ev\":\"prepared\",\"result\":{\"error\":\"no Vulkan device\"}}\n");
+        fflush(stdout);
+        return 4;
+    }
+    char summary[700];
+    const int r = ppfx_native_prepare(prepare_progress, nullptr, summary, (int)sizeof summary, check);
+    printf("{\"ev\":\"prepared\",\"result\":%s}\n", summary);
+    fflush(stdout);
+    return r < 0 ? 4 : r;
+}
+
 int main(int argc, char** argv)
 {
     /* `dotheroes --memtest`: the guest loads' assumptions, tested on a guest
@@ -903,6 +970,7 @@ int main(int argc, char** argv)
         return dotheroes_memtest(VM_SIZE);
     }
     if (argc >= 2 && strcmp(argv[1], "--info") == 0) return dotheroes_info();
+    if (argc >= 2 && strcmp(argv[1], "--prepare") == 0) return dotheroes_prepare(argc, argv);
     const char* elf = argc >= 2 ? argv[1] : installed_defaults();
     if (argc < 2) {
         FILE* f = fopen(elf, "rb");
