@@ -114,7 +114,7 @@ class Diagnostics(unittest.TestCase):
         home = os.path.expanduser("~")
         user = os.environ.get("USERNAME") or os.environ.get("USER") or "player"
         put(os.path.join(self.lay.logs, "game.log"),
-            f"opened {home}\\Documents\\x.txt\nthe install {self.install}/data/disc\nuser {user} mail a.b@example.com\n")
+            f"opened {home}\\Documents\\x.txt\nthe install {self.install}/data/disc\nuser {user} mail {MAIL}\n")
         put(os.path.join(self.lay.gamedata, "dev_hdd0", "SAVE.BIN"), b"the hero's name")
         put(os.path.join(self.lay.cache, "native-recipes.bin"), b"program bytes")
         put(os.path.join(self.lay.disc, "PS3_GAME", "PARAM.SFO"), b"game")
@@ -156,7 +156,8 @@ class Diagnostics(unittest.TestCase):
 
     def test_sanitizer(self):
         s = diagnostics.Sanitizer("C:\\Games\\Cubic", extra=("Alexandra",))
-        t = s.text("C:\\Games\\Cubic\\logs and c:/games/cubic/data, by Alexandra (" + "alexandra" + AT + "x.org), not Alexandrite")
+        t = s.text("C:\\Games\\Cubic\\logs and c:/games/cubic/data, by Alexandra (" + "alexandra" + AT +
+                   "x.org), not Alexandrite")
         self.assertEqual(t, "<install>\\logs and <install>/data, by <name> (<email>), not Alexandrite")
 
 
