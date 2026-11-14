@@ -214,7 +214,28 @@ def spu_text_ea(eboot, image):
 
 # ---------------- the steps ----------------
 
-def verify(source, progress):
+def _open_disc(source, disc_key=None):
+    """the image to read: as stored, or (an encrypted image's key given) decrypted as it is read. Raises SetupError
+    when the image is encrypted and no key was given (needs_disc_key) or the key doesn't open it (wrong_disc_key);
+    never quotes a key."""
+    import ps3_disc
+    f = open(source, "rb")
+    try:
+        if ps3_disc.kind(f) == "encrypted":
+            if not disc_key:
+                raise SetupError("This disc image is encrypted. Choose its disc key -- a .dkey or IRD file -- or type "
+                                 "the 32-character key.", "needs_disc_key")
+            if not ps3_disc.check_key(f, disc_key):
+                raise SetupError("That disc key doesn't open this disc image. Check that it is the key for this disc.",
+                                 "wrong_disc_key")
+            return ps3_disc.DiscImage(f, disc_key), True
+    except BaseException:
+        f.close()
+        raise
+    return f, False
+
+
+def verify(source, progress, disc_key=None):
     """source: the ISO or a disc folder. Returns its kind."""
     want = version_info()
     if not os.path.exists(source):
@@ -232,13 +253,18 @@ def verify(source, progress):
     if os.path.getsize(source) != want["disc_image"]["size"]:
         raise SetupError("This disc image isn't the supported one: 3D Dot Game Heroes BLUS-30490 v01.00 (US), "
                          "a decrypted ISO (the size doesn't match).", "unsupported_version")
+    img, encrypted = _open_disc(source, disc_key)
+    img.close()
+    if encrypted:   # its bytes are not the decrypted dump's: its files are checked as they are extracted
+        progress(1.0)
+        return "iso"
     if sha256_file(source, progress) != want["disc_image"]["sha256"]:
         raise SetupError("This disc image doesn't match BLUS-30490 v01.00 (US) (SHA-256). "
                          "Is it a decrypted dump of the US disc?", "damaged_disc")
     return "iso"
 
 
-def extract(source, kind, paths, progress, log):
+def extract(source, kind, paths, progress, log, disc_key=None):
     if os.path.isdir(paths.disc):
         shutil.rmtree(paths.disc)
     os.makedirs(paths.disc)
@@ -254,7 +280,8 @@ def extract(source, kind, paths, progress, log):
             progress(done / total)
         return
     import iso9660
-    with open(source, "rb") as f:
+    img, _ = _open_disc(source, disc_key)
+    with img as f:
         ents = [(p, ext) for p, ext in iso9660.entries(f) if p.startswith("PS3_GAME/")]
         total = sum(n for _, ext in ents for _, n in ext) or 1
         done = 0
@@ -354,7 +381,7 @@ def _disc_file(source, rel, files=None, f=None):
     return _iso_read(f, files[rel]) if rel in files else None
 
 
-def probe_disc(source):
+def probe_disc(source, disc_key=None):
     """What the chosen disc is, without extracting it: PARAM.SFO's title and version, EBOOT.BIN's SHA-256
     (a few seconds; the whole image's SHA-256 is the install's first step). Returns a dict; raises
     SetupError (not_found, not_a_disc, unsupported_version, damaged_disc)."""
@@ -364,7 +391,7 @@ def probe_disc(source):
     f = files = None
     try:
         if not os.path.isdir(source):
-            f = open(source, "rb")
+            f, encrypted = _open_disc(source, disc_key)
             files = _iso_files(f)
             if files is None:
                 raise SetupError("This file isn't a disc image (no ISO 9660 file system). Choose a decrypted "
@@ -401,7 +428,7 @@ def probe_disc(source):
             f.close()
 
 
-def probe_keys(source, keys=None, elf=None):
+def probe_keys(source, keys=None, elf=None, disc_key=None):
     """Whether the keys file (or EBOOT.elf) decrypts this disc's program to the supported one, in memory:
     nothing is written. Raises SetupError (keys_missing, keys_unreadable, keys_empty, wrong_key)."""
     if not (keys or elf):
@@ -411,7 +438,8 @@ def probe_keys(source, keys=None, elf=None):
     if os.path.isdir(source):
         eboot = _disc_file(source, "PS3_GAME/USRDIR/EBOOT.BIN")
     else:
-        with open(source, "rb") as f:
+        img, _ = _open_disc(source, disc_key)
+        with img as f:
             eboot = _disc_file(source, "PS3_GAME/USRDIR/EBOOT.BIN", _iso_files(f) or {}, f)
     if eboot is None:
         raise SetupError("The disc's game program (EBOOT.BIN) wasn't found.", "not_a_disc")
@@ -571,7 +599,7 @@ def build_inputs(gen, cache, lid):
 
 
 def run(install, source=None, keys=None, elf=None, progress=None, log=None, skip=None, full=False, out_dir=None,
-        keep_objects=(), resume=False, unchanged_inputs=None):
+        keep_objects=(), resume=False, unchanged_inputs=None, disc_key=None):
     """Convert (source given) or rebuild (source None: the install's own copy of the disc) the game into out_dir,
     a staged build slot of `install` (tools/install_layout.py; the worker records, checks and activates it).
     keys / elf: how EBOOT.BIN is decrypted. resume: the disc's steps a previous run of the same disc finished
@@ -604,7 +632,7 @@ def run(install, source=None, keys=None, elf=None, progress=None, log=None, skip
             skip("verify")
         else:
             progress("verify", 0.0, STEP_NAMES["verify"])
-            kind = verify(source, lambda f: progress("verify", f, STEP_NAMES["verify"]))
+            kind = verify(source, lambda f: progress("verify", f, STEP_NAMES["verify"]), disc_key)
             stamps.update(source=here, verify=here)
             stamps.pop("extract", None)
             save(source=os.path.abspath(source))
@@ -613,7 +641,7 @@ def run(install, source=None, keys=None, elf=None, progress=None, log=None, skip
         else:
             kind = "folder" if os.path.isdir(source) else "iso"
             progress("extract", 0.0, STEP_NAMES["extract"])
-            extract(source, kind, paths, lambda f: progress("extract", f, STEP_NAMES["extract"]), log)
+            extract(source, kind, paths, lambda f: progress("extract", f, STEP_NAMES["extract"]), log, disc_key)
             open(paths.extracted, "w").close()
             stamps["extract"] = here
             stamps.pop("decrypt", None)

@@ -76,6 +76,12 @@ class DiscImage(io.RawIOBase):
     def readable(self):
         return True
 
+    def close(self):
+        try:
+            self.f.close()
+        finally:
+            super().close()
+
     def seekable(self):
         return True
 
@@ -119,9 +125,12 @@ class DiscImage(io.RawIOBase):
 def _program_sector(f):
     """the first sector of the disc's program (PS3_GAME/USRDIR/EBOOT.BIN): where a decrypted image shows SCE's header"""
     import iso9660
-    for path, ext in iso9660.entries(f):
-        if path.upper() == "PS3_GAME/USRDIR/EBOOT.BIN":
-            return ext[0][0]   # the first extent's sector
+    try:
+        for path, ext in iso9660.entries(f):
+            if path.upper() == "PS3_GAME/USRDIR/EBOOT.BIN":
+                return ext[0][0]   # the first extent's sector
+    except (OSError, ValueError, IndexError, TypeError, AttributeError, struct.error, UnicodeError):
+        return None   # not an ISO 9660 image: the caller says what it is
     return None
 
 

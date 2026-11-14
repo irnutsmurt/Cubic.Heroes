@@ -1029,10 +1029,23 @@ simulated in memory, the file system plain and the rest encrypted with a random 
 encrypted, the right key is accepted and a wrong one refused, and the game's program and PARAM.SFO read back as the
 decrypted image's.
 
-**Still to do** (after the owner's go-ahead to resume): the pipeline opening every image through `DiscImage`
-(`probe_disc`, `probe_keys`, the extraction) with the disc key; `probe_disc` saying "encrypted: choose its disc key"
-(a code the launcher acts on) and checking a given key before anything is written; the worker's `--disc-key`
-(a file -- a typed key written by the launcher to a private temporary file, never on a command line or in a log);
-the wizard's step 1 asking for the key only for an encrypted image (a .dkey or IRD file by the file browser, or the
-32 digits on the on-screen keyboard); the install test from an encrypted image (made once from the decrypted ISO with
-a test key, outside the repository).
+**Done -- the pipeline, the worker and the wizard** (2026-11-14, before the cutoff):
+- The pipeline (tools/setup_pipeline.py `_open_disc`): every read of an image -- `probe_disc`, `probe_keys`, the
+  verify and extract steps -- goes through the key when the image is encrypted; no key: "This disc image is encrypted.
+  Choose its disc key -- a .dkey or IRD file -- or type the 32-character key." (`needs_disc_key`); a key that doesn't
+  open it: `wrong_disc_key`, before anything is written. An encrypted image's bytes can't match the decrypted dump's
+  SHA-256 (even its sector 0 differs), so its check is the extraction's: the game's program is verified against the
+  supported version's SHA-256 as it is extracted. The image is only read.
+- The worker: `--disc-key FILE` for `probe-disc`, `probe-keys` and `install` (an IRD's key with `--keys`); the key
+  loaded in memory, never printed, logged or returned (`probe-disc` says `encrypted`).
+- The wizard: the disc check finding an encrypted image adds step 2, "Its disc key" -- Choose... (the file browser:
+  .dkey, .ird) or "Type the key instead" (the on-screen keyboard; the launcher keeps it in a file only the user can
+  read, passes the file, never the key, and deletes it when the install ends); a decrypted ISO or a folder never asks.
+- Tried: an encrypted image made from the player's decrypted ISO with a random test key (on F:, outside the
+  repository: build/m9/make_encrypted.py) -- the worker's disc check with no key (asks for it), the right key
+  (BLUS30490 v01.00), a wrong key (refused), the keys check through the key; the decrypted ISO still needs no key; the
+  wizard's step 2 on screen. **A full install from the encrypted image** through the worker with its .dkey
+  (build/m9/m95enc_run.sh): 394 s -- the disc check, the extraction decrypting as it read (35 s; the game's program's
+  SHA-256 as the supported version's), the program decrypted, the lift, the build, its check -- the image unchanged
+  (its size and time), the key in none of the install's output, log or errors. IRD files: covered by the unit tests
+  with a made-up constant; a real IRD needs the player's D1 line.

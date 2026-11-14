@@ -361,14 +361,28 @@ def cmd_version(a, ev, control):
             "game": pipeline.version_info()["title_id"]}
 
 
+def disc_key(a):
+    """the disc key the player gave (--disc-key: a .dkey or IRD file, or a file holding the 32 digits typed), or None;
+    an IRD's needs the D1 line of the keys file (--keys). The key itself is never logged or returned."""
+    if not getattr(a, "disc_key", None):
+        return None
+    import ps3_disc
+    try:
+        return ps3_disc.load_key(os.path.abspath(a.disc_key), os.path.abspath(a.keys) if a.keys else None)
+    except ps3_disc.DiscKeyError as e:
+        raise pipeline.SetupError(str(e), e.code)
+
+
 def cmd_probe_disc(a, ev, control):
-    return pipeline.probe_disc(os.path.abspath(a.disc))
+    out = pipeline.probe_disc(os.path.abspath(a.disc), disc_key(a))
+    out["encrypted"] = bool(getattr(a, "disc_key", None))
+    return out
 
 
 def cmd_probe_keys(a, ev, control):
     k = os.path.abspath(a.keys)
     elf = pipeline.is_elf(k)
-    return pipeline.probe_keys(os.path.abspath(a.disc), None if elf else k, k if elf else None)
+    return pipeline.probe_keys(os.path.abspath(a.disc), None if elf else k, k if elf else None, disc_key(a))
 
 
 def cmd_space(a, ev, control):
@@ -440,7 +454,8 @@ STEP_NAMES_M9 = {"validate": "Checking the new build", "activate": "Making it th
                  "prepare": "Preparing shaders and pipelines"}
 
 
-def build_slot(lay, prog, source=None, keys=None, elf=None, full=False, resume=False, validate=validate_build):
+def build_slot(lay, prog, source=None, keys=None, elf=None, full=False, resume=False, validate=validate_build,
+               disc_key=None):
     """the conversion (or a rebuild) into a staged slot, checked, recorded, promoted and made active; any failure
     leaves the active build as it was (the staged slot removed). Returns (build id, info, changed)."""
     lay.ensure_dirs()
@@ -451,7 +466,7 @@ def build_slot(lay, prog, source=None, keys=None, elf=None, full=False, resume=F
     try:
         made = pipeline.run(lay.root, source=source, keys=keys, elf=elf, progress=prog.progress, log=prog.log,
                             skip=prog.skip, full=full, out_dir=staging, keep_objects=lay.kept_objects(), resume=resume,
-                            unchanged_inputs=same_as)
+                            unchanged_inputs=same_as, disc_key=disc_key)
         prog.control.check()
         if made.get("unchanged"):   # the active build is made of exactly this: nothing to build or switch
             layout.rmtree(staging)
@@ -475,7 +490,7 @@ def build_slot(lay, prog, source=None, keys=None, elf=None, full=False, resume=F
         raise
 
 
-def op_install(install, source, keys, elf, prog, resume=False, validate=validate_build, prepare=True):
+def op_install(install, source, keys, elf, prog, resume=False, validate=validate_build, prepare=True, disc_key=None):
     """a first install, a reinstall or a repair from the disc: the disc's steps, then a new build (the saves, the
     settings and the kept builds untouched)"""
     lay = layout.Layout(install)
@@ -483,7 +498,7 @@ def op_install(install, source, keys, elf, prog, resume=False, validate=validate
         raise pipeline.SetupError("This folder holds an install made by the setup app: migrate it (no need to "
                                   "choose the disc again).", "needs_migration")
     check_space(install, NEEDED["install"])
-    bid, info, _ = build_slot(lay, prog, source, keys, elf, resume=resume, validate=validate)
+    bid, info, _ = build_slot(lay, prog, source, keys, elf, resume=resume, validate=validate, disc_key=disc_key)
     game_settings.settle_after_conversion(install)
     pruned = lay.prune()
     prepared = prepare_after(lay, prog, validate, prepare)
@@ -754,7 +769,7 @@ def cmd_install(a, ev, control):
     elf = pipeline.is_elf(k)
     prog = _progress(ev, control, pipeline.STEPS + BUILD_TAIL)
     out = op_install(os.path.abspath(a.install), os.path.abspath(a.disc), None if elf else k, k if elf else None,
-                     prog, resume=a.resume, prepare=not a.no_prepare)
+                     prog, resume=a.resume, prepare=not a.no_prepare, disc_key=disc_key(a))
     out["seconds"], out["skipped"] = prog.finish()
     return out
 
@@ -1040,6 +1055,7 @@ def parser():
     p.add_argument("--steam", action="store_true", help="shortcuts: in Steam's library")
     p.add_argument("--desktop", action="store_true", help="shortcuts: on the desktop too")
     p.add_argument("--rebuild", action="store_true", help="prepare: the pipeline cache made again from scratch")
+    p.add_argument("--disc-key", help="an encrypted disc image's key: a .dkey or IRD file, or a file of the 32 digits")
     p.add_argument("--parts", help="uninstall: the parts, comma-separated (builds,data,shaders,objects,settings,saves,shortcuts)")
     p.add_argument("--dry-run", action="store_true", help="uninstall: what each part would free; nothing removed")
     p.add_argument("--no-prepare", action="store_true",

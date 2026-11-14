@@ -463,7 +463,8 @@ static void frame_window(ImU32 border = col::frame, float t = 0)
     const ImVec2 a = ImGui::GetWindowPos(), sz = ImGui::GetWindowSize();
     const float o = std::max(2.0f, floorf(S(2)));
     const ImVec2 b(a.x + sz.x, a.y + sz.y);
-    dl->PushClipRect(a, b, false);
+    const ImRect vis = ImGui::GetCurrentWindow()->OuterRectClipped;   // a card scrolled partly away: only what shows
+    dl->PushClipRect(vis.Min, vis.Max, false);
     retro_frame(dl, ImVec2(a.x + o, a.y + o), ImVec2(b.x - o, b.y - o), border, t);
     dl->PopClipRect();
 }
@@ -1385,20 +1386,45 @@ static void page_play()
 // --- the install wizard ---
 struct Wizard {
     std::string disc, keys, folder;
+    std::string disc_key;          // an encrypted image's key: a .dkey or IRD file, or the private file of a typed key
+    bool needs_key = false;        // the disc check found the image encrypted
     json::Value disc_info, keys_info, space;
     std::string disc_err, keys_err, space_err;
     bool probing_disc = false, probing_keys = false;
 } g_wiz;
+
+// the worker's arguments for the disc (its key, when the image is encrypted; the keys file too: an IRD's key needs it)
+static std::vector<std::string> disc_args()
+{
+    std::vector<std::string> a = { "--disc", g_wiz.disc };
+    if (!g_wiz.disc_key.empty()) {
+        a.push_back("--disc-key");
+        a.push_back(g_wiz.disc_key);
+        if (!g_wiz.keys.empty()) { a.push_back("--keys"); a.push_back(g_wiz.keys); }
+    }
+    return a;
+}
+
+// a typed disc key, kept in a file only this user can read (never on a command line, never in a log)
+static std::string typed_key_file(const std::string& text)
+{
+    const std::string path = path_str(u8path(data_dir()) / "disc-key.txt");
+    write_text(path, text + "\n");
+    return path;
+}
 
 static void probe_disc()
 {
     g_wiz.disc_info = json::Value();
     g_wiz.disc_err.clear();
     g_wiz.probing_disc = true;
-    run("probe-disc", { "--disc", g_wiz.disc }, "", false, [](const json::Value& r) {
+    run("probe-disc", disc_args(), "", false, [](const json::Value& r) {
         g_wiz.probing_disc = false;
         if (r["ok"].truthy()) g_wiz.disc_info = r["data"];
         else g_wiz.disc_err = r["message"].str();
+        const std::string code = r["code"].str();
+        if (code == "needs_disc_key" || code == "wrong_disc_key" || r["data"]["encrypted"].truthy()) g_wiz.needs_key = true;
+        if (code == "needs_disc_key") g_wiz.disc_err.clear();   // said by the key's own step instead
         if (!g_wiz.keys.empty()) { g_wiz.keys_info = json::Value(); }
     });
 }
@@ -1409,7 +1435,9 @@ static void probe_keys()
     g_wiz.keys_err.clear();
     if (g_wiz.disc.empty()) return;
     g_wiz.probing_keys = true;
-    run("probe-keys", { "--disc", g_wiz.disc, "--keys", g_wiz.keys }, "", false, [](const json::Value& r) {
+    std::vector<std::string> a = disc_args();
+    if (std::find(a.begin(), a.end(), "--keys") == a.end()) { a.push_back("--keys"); a.push_back(g_wiz.keys); }
+    run("probe-keys", a, "", false, [](const json::Value& r) {
         g_wiz.probing_keys = false;
         if (r["ok"].truthy()) g_wiz.keys_info = r["data"];
         else g_wiz.keys_err = r["message"].str();
@@ -1495,11 +1523,31 @@ static void page_install()
             probe_disc();
         });
     });
+    if (g_wiz.needs_key) {   // an encrypted image: its key, by file or typed
+        const bool key_ok = disc_ok;
+        std::string kv = key_ok ? "The key opens this disc."
+                                : g_wiz.disc_key.empty() ? "This disc image is encrypted: choose its disc key (a .dkey or IRD "
+                                                           "file), or type the 32-character key."
+                                                         : "";
+        step_row(2, "Its disc key", key_ok, kv, g_wiz.disc_key.empty() ? "" : g_wiz.disc_err, g_wiz.probing_disc,
+                 "Choose...", [] {
+            browse("Choose the disc key", false, { ".dkey", ".key", ".ird", ".txt" }, "disc keys (.dkey, .ird)",
+                   g_wiz.disc_key, [](const std::string& p) {
+                g_wiz.disc_key = p;
+                probe_disc();
+            });
+        });
+        if (!key_ok && big_button("Type the key instead", ImVec2(S(360), 0)))
+            type_text("The disc key (32 characters, 0-9 and A-F)", "", [](const std::string& t) {
+                g_wiz.disc_key = typed_key_file(t);
+                probe_disc();
+            });
+    }
     const bool keys_ok = !g_wiz.keys_info.is_null();
     if (disc_ok && !g_wiz.keys.empty() && g_wiz.keys_info.is_null() && g_wiz.keys_err.empty() && !g_wiz.probing_keys) probe_keys();
     std::string kv = g_wiz.keys.empty() ? "Choose the keys file for your disc (or an EBOOT.elf you decrypted)."
                                         : g_wiz.keys + (keys_ok ? "\nThe keys match this disc." : "");
-    step_row(2, "Its keys", keys_ok, kv, g_wiz.keys_err, g_wiz.probing_keys, "Choose...", [] {
+    step_row(g_wiz.needs_key ? 3 : 2, "Its keys", keys_ok, kv, g_wiz.keys_err, g_wiz.probing_keys, "Choose...", [] {
         browse("Choose the keys file", false, { ".txt", ".keys", ".elf", ".bin" }, "keys files", g_wiz.keys, [](const std::string& p) {
             g_wiz.keys = p;
             g_prefs.keys = p;
@@ -1512,7 +1560,7 @@ static void page_install()
     if (!g_wiz.space.is_null())
         fv += "\n" + human_bytes(g_wiz.space["free"].num()) + " free, " + human_bytes(g_wiz.space["needed"].num()) + " needed" +
               (space_ok ? "" : ": not enough");
-    step_row(3, "Where to install it", space_ok, fv, g_wiz.space_err, false, "Choose...", [] {
+    step_row(g_wiz.needs_key ? 4 : 3, "Where to install it", space_ok, fv, g_wiz.space_err, false, "Choose...", [] {
         browse("Choose where to install", true, {}, "folders", g_wiz.folder, [](const std::string& p) {
             std::string f = path_str(u8path(p) / "Cubic.Heroes");
             if (fs::exists(u8path(p) / "active.json") || fs::exists(u8path(p) / "data" / "install.json")) f = p;
@@ -1527,10 +1575,18 @@ static void page_install()
                    ImVec2(S(360), S(64)), Kind::Primary, ready)) {
         g_prefs.install = g_wiz.folder;
         g_prefs.save();
-        std::vector<std::string> a = { "--disc", g_wiz.disc, "--keys", g_wiz.keys, "--install", g_wiz.folder };
+        std::vector<std::string> a = disc_args();
+        if (std::find(a.begin(), a.end(), "--keys") == a.end()) { a.push_back("--keys"); a.push_back(g_wiz.keys); }
+        a.push_back("--install");
+        a.push_back(g_wiz.folder);
         if (resume) a.push_back("--resume");
         a.push_back("--no-prepare");   // the launcher prepares in the background, as the settings or the player say
         run("install", a, "Installing 3D Dot Game Heroes", true, [](const json::Value& r) {
+            {   // a typed disc key's file: gone once the install is over (keys are never kept)
+                std::error_code ec;
+                const fs::path typed = u8path(data_dir()) / "disc-key.txt";
+                if (u8path(g_wiz.disc_key) == typed) { fs::remove(typed, ec); g_wiz.disc_key.clear(); }
+            }
             if (!r["ok"].truthy() && r["code"].str() != "cancelled") show_result_error(r, "The install didn't finish");
             else if (r["ok"].truthy()) {
                 g_page = kPlay;
