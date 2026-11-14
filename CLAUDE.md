@@ -45,6 +45,21 @@ files and keys; no unnecessary PS3 machinery; a stable 60 fps with minimal spike
 Flag any decision that conflicts with these to the owner instead of changing the plan silently
 (docs/NATIVE_PORT.md section 1, docs/OPENAL_MIGRATION_PLAN.md).
 
+## When work is blocked on the owner
+
+If development is blocked by a decision, an authorization, a manual test or any input from the owner, ask for
+it explicitly and at once -- never only state that something "needs the owner's input". Each request says:
+
+- what is blocked;
+- why it is blocked;
+- exactly what is needed from the owner (the decision, the command to run, the test to do);
+- the recommended decision, where there is one.
+
+Keep working on everything that does not depend on the answer: a decision that affects one part of the project
+does not stop the rest. This applies to every milestone.
+
+## The recompilation boundary
+
 The player-side recompilation boundary (README, "This repository contains no game data") is checked by
 `tools/boundary_check.py`: the pre-push hook runs it on every pushed tree, `tools/make_bundle.py` on the setup's
 download; run `tools/boundary_check.py tree` before staging with `git add -A`. Never weaken a rule to make a
