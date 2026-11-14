@@ -1163,8 +1163,9 @@ static void auto_prepare_check()
 // pages
 // ============================================================================================================
 
-enum Page { kPlay, kInstall, kUpdates, kBuilds, kSaves, kShaders, kSettings, kDiagnostics, kPages };
-static const char* kPageNames[kPages] = { "Play", "Install", "Updates", "Builds", "Saves", "Shaders", "Settings", "Diagnostics" };
+enum Page { kPlay, kInstall, kUpdates, kSaves, kShaders, kSettings, kDiagnostics, kPages };
+static const char* kPageNames[kPages] = { "Play", "Install", "Updates", "Saves", "Shaders", "Settings", "Diagnostics" };
+static const int kPageIcon[kPages] = { 0, 1, 2, 4, 5, 6, 7 };   // kIcons: the sword, chest, arrow, book, gem, gear, glass
 static int g_page = kPlay;
 static bool g_focus_page = true;   // give the new page's first item the focus
 
@@ -1314,9 +1315,12 @@ static void page_play()
         if (ImGui::IsItemFocused()) prompt(Act::A, "Play");
         ImGui::SameLine(0, S(24));
         ImGui::BeginGroup();
-        text_col(col::text, "Build %s", b["active"].str("-").c_str());
+        std::string version = "-";
+        for (size_t i = 0; i < b["builds"].size(); i++)
+            if (b["builds"][i]["state"].str() == "active") version = b["builds"][i]["version"].str("-");
+        text_col(col::text, "Version %s", version.c_str());
         if (!g_st.playing.empty()) text_col(col::ok, "%s", g_st.playing.c_str());
-        else text_col(col::dim, "%s", install_dir().c_str());
+        else text_col(col::dim, "Installed and ready.");
         ImGui::EndGroup();
         ImGui::Dummy(ImVec2(0, S(8)));
         // shaders
@@ -1331,11 +1335,10 @@ static void page_play()
         } else if (c.is_null()) {
             text_col(col::dim, "Checking...");
         } else if (c["prepared"].truthy()) {
-            text_col(col::ok, "Ready for this GPU and driver (%s pipelines).", c["recipes"].str("0").c_str());
-            text_col(col::dim, "%s, driver %s", c["gpu"]["name"].str().c_str(), c["gpu"]["driver"].str().c_str());
+            text_col(col::ok, "Shaders are ready for your graphics card.");
+            text_col(col::dim, "%s", c["gpu"]["name"].str().c_str());
         } else if (c["recipes"].num() + c["pending"].num() > 0) {
-            text_col(col::warm, "A preparation is due (%s). It takes a few seconds and prevents stutter.",
-                     c["cache"].str().c_str());
+            text_col(col::warm, "Shaders need preparing: it takes a few seconds and prevents stutter.");
             if (big_button("Prepare now")) prepare_now(false);
         } else {
             text_col(col::dim, "Prepared as you play: each new effect is kept for next time.");
@@ -1437,17 +1440,23 @@ static void step_row(int n, const char* name, bool ok, const std::string& value,
         pix_text(dl, ImVec2(a.x + (bs - pix_w(d.c_str(), p)) / 2, a.y + (bs - 7 * p) / 2), d.c_str(), p, col::text);
     }
     ImGui::SameLine(0, S(20));
+    const float wrap_at = ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - S(270);   // clear of the button
     ImGui::BeginGroup();
+    ImGui::PushTextWrapPos(wrap_at);
     title(name, 24);
     if (busy) text_col(col::dim, "Checking...");
     else if (!err.empty()) text_col(col::danger, "%s", err.c_str());
     else if (!value.empty()) text_col(ok ? col::text : col::dim, "%s", value.c_str());
+    ImGui::PopTextWrapPos();
     ImGui::EndGroup();
     ImGui::SameLine(ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX() - S(230));
     if (big_button(button, ImVec2(S(220), 0))) on_press();
     if (n == 1) focus_first();   // the page opens on the first step's button (the cards are flattened into the page)
     card_end();
 }
+
+static void uninstall_open();
+static void same_line_fits(float next_w);
 
 static void page_install()
 {
@@ -1456,7 +1465,7 @@ static void page_install()
     if (g_wiz.folder.empty()) { g_wiz.folder = install_dir(); check_space(); }
     if (g_wiz.disc.empty() && !g_prefs.disc.empty()) { g_wiz.disc = g_prefs.disc; probe_disc(); }
     if (g_wiz.keys.empty() && !g_prefs.keys.empty()) g_wiz.keys = g_prefs.keys;
-    text_col(col::dim, kind == "slots" ? "Repair or reinstall from your disc: your saves, settings and kept builds stay."
+    text_col(col::dim, kind == "slots" ? "Repair or reinstall from your disc: your saves and settings stay."
                                        : "Your own disc and keys, checked before anything is written. You can also drop the "
                                          "files onto this window.");
     ImGui::Dummy(ImVec2(0, S(4)));
@@ -1532,6 +1541,25 @@ static void page_install()
         });
     }
     if (!ready) text_col(col::dim, "Each step above must be checked first.");
+    if (kind == "slots") {
+        ImGui::Dummy(ImVec2(0, S(10)));
+        title("Maintenance", 24);
+        bool previous = false;   // the one earlier version kept after an update
+        for (size_t i = 0; i < g_st.builds["builds"].size(); i++)
+            if (g_st.builds["builds"][i]["state"].str() != "active") previous = true;
+        if (big_button("Rollback Last Update", ImVec2(S(360), 0), Kind::Normal, previous))
+            ask("Roll back the last update?", "The game goes back to the version you had before the last update. Your saves "
+                "and settings stay as they are.", "Roll back", false, [] {
+                run("rollback", { "--install", install_dir() }, "Rolling back", true, [](const json::Value& r) {
+                    if (!r["ok"].truthy()) show_result_error(r, "The rollback didn't work");
+                    else g_msg = { true, "Rolled back", "The previous version is the one you play now.", "", false, false };
+                    refresh_info();
+                });
+            });
+        same_line_fits(S(360));
+        if (big_button("Uninstall the game...", ImVec2(S(360), 0), Kind::Danger)) uninstall_open();
+        if (!previous) text_col(col::dim, "Rollback becomes available after an update.");
+    }
 }
 
 // --- updates ---
@@ -1577,39 +1605,6 @@ static void page_updates()
                 });
     }
     card_end();
-}
-
-// --- builds and rollback ---
-static void page_builds()
-{
-    title("Game builds");
-    text_col(col::dim, "Each update builds the game anew beside the last one. Going back is instant and works offline.");
-    const json::Value& b = g_st.builds["builds"];
-    bool first = true;
-    for (size_t i = b.size(); i-- > 0;) {
-        const json::Value& x = b[i];
-        const std::string id = x["id"].str(), state = x["state"].str();
-        card_begin(("##b" + id).c_str());
-        title(id.c_str(), 22);
-        text_col(state == "active" ? col::ok : col::dim, "%s  --  version %s, made %s%s", state == "active" ? "Active" : "Kept for rollback",
-                 x["version"].str("?").c_str(), x["made"].str("?").c_str(),
-                 x["damaged"].is_null() ? "" : ("  --  damaged: " + x["damaged"].str()).c_str());
-        if (state != "active") {
-            ImGui::SameLine(ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX() - S(250));
-            if (big_button(("Go back to it##" + id).c_str(), ImVec2(S(240), 0))) {
-                ask("Go back to this build?", "Build " + id + " becomes the one the game starts. Your saves and settings "
-                    "stay as they are. You can come forward again the same way.", "Go back", false, [id] {
-                    run("rollback", { "--install", install_dir(), "--to", id }, "Going back", true, [](const json::Value& r) {
-                        if (!r["ok"].truthy()) show_result_error(r, "Going back didn't work");
-                        refresh_info();
-                    });
-                });
-            }
-            if (first) { focus_first(); first = false; }
-        }
-        card_end();
-    }
-    if (b.size() == 0) text_col(col::dim, "No builds yet.");
 }
 
 // --- saves ---
@@ -1772,6 +1767,7 @@ static void page_settings()
         const std::pair<std::string, const json::Value&> kv(kv0.first, *kv0.second);
         const json::Value& x = kv.second;
         const std::string cat = x["category"].str();
+        if (x["advanced"].truthy()) continue;   // developers' switches: the worker's command line, not this page
         if (cat != last_cat) {
             if (last_cat == "Shaders") settings_shader_status();
             ImGui::Dummy(ImVec2(0, S(6)));
@@ -2128,6 +2124,94 @@ static void overlay_browser()
     }
 }
 
+// --- uninstalling: the parts chosen (saves, backups and settings kept unless chosen), what each frees ---
+struct Uninst {
+    bool open = false;
+    json::Value parts;   // the worker's plan: {part: {bytes, files}}
+    std::map<std::string, bool> on;
+} g_uninst;
+static const std::pair<const char*, const char*> kUninstParts[] = {
+    { "builds", "" }, { "data", "" }, { "shaders", "" }, { "objects", "" }, { "settings", "" }, { "saves", "" },
+    { "shortcuts", "" } };
+
+static bool game_running();
+static void uninstall_open()
+{
+    if (game_running() || g_bg || g_op) {
+        show_msg("Not now", "The game, a shader preparation or another job is running: uninstalling waits until it ends.");
+        return;
+    }
+    run("uninstall", { "--install", install_dir(), "--dry-run" }, "", false, [](const json::Value& r) {
+        if (!r["ok"].truthy()) { show_result_error(r, "The install couldn't be measured"); return; }
+        g_uninst = Uninst();
+        g_uninst.open = true;
+        g_uninst.parts = r["data"]["parts"];
+        for (const auto& pr : kUninstParts) g_uninst.on[pr.first] = true;   // everything the game installed goes...
+        g_uninst.on["saves"] = g_uninst.on["settings"] = false;            // ...but these stay unless the player says
+    });
+}
+
+static void overlay_uninstall()
+{
+    static OpenFocus uf;
+    open_focus(uf, g_uninst.open);
+    if (!g_uninst.open) return;
+    ImGui::OpenPopup("##uninstall");
+    ImGuiViewport* vp = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(std::min(vp->Size.x - S(80), S(900)), 0));
+    if (ImGui::BeginPopupModal("##uninstall", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize)) {
+        frame_window();
+        title("Uninstall the game?", 28);
+        text_col(col::text, "The game and everything it installed on this PC are removed. Your disc image and keys are "
+                            "never touched.");
+        double total = 0;
+        for (const auto& pr : kUninstParts)
+            if (g_uninst.on[pr.first]) total += g_uninst.parts[pr.first]["bytes"].num();
+        ImGui::PushStyleVar(ImGuiStyleVar_ButtonTextAlign, ImVec2(0.0f, 0.5f));
+        const bool keep_saves = !g_uninst.on["saves"], keep_settings = !g_uninst.on["settings"];
+        if (big_button(keep_saves ? "[x]  Keep my saves and backups##u_saves" : "[  ]  Keep my saves and backups##u_saves",
+                       ImVec2(-1, S(52)), keep_saves ? Kind::Normal : Kind::Danger))
+            g_uninst.on["saves"] = keep_saves;
+        if (big_button(keep_settings ? "[x]  Keep my settings##u_set" : "[  ]  Keep my settings##u_set", ImVec2(-1, S(52)),
+                       keep_settings ? Kind::Normal : Kind::Danger))
+            g_uninst.on["settings"] = keep_settings;
+        ImGui::PopStyleVar();
+        text_col(col::warm, "About %s freed.", human_bytes(total).c_str());
+        ImGui::Dummy(ImVec2(0, S(6)));
+        bool go = big_button("Uninstall", ImVec2(S(260), 0), Kind::Danger);
+        same_line_fits(S(260));
+        bool no = big_button("Cancel", ImVec2(S(260), 0));
+        want_focus(uf);   // the safe choice first
+        focus_tick(uf);
+        prompt(Act::A, "Choose");
+        prompt(Act::B, "Cancel");
+        if (pressed(Act::B)) no = true;
+        if (go) {
+            std::string parts;
+            for (const auto& pr : kUninstParts)
+                if (g_uninst.on[pr.first]) parts += std::string(parts.empty() ? "" : ",") + pr.first;
+            g_uninst.open = false;
+            ImGui::CloseCurrentPopup();
+            if (!parts.empty())
+                run("uninstall", { "--install", install_dir(), "--confirm", "--parts", parts, "--exe",
+                                   path_str(u8path(g_exe_dir) / "CubicHeroes.exe") },
+                    "Uninstalling", true, [](const json::Value& r) {
+                        if (!r["ok"].truthy()) show_result_error(r, "Uninstalling didn't finish");
+                        else g_msg = { true, "Uninstalled", "About " + human_bytes(r["data"]["bytes"].num()) +
+                                       " freed. Install again whenever you like: what you kept is used again.", "", false, false };
+                        g_page = kInstall;
+                        g_focus_page = true;
+                        refresh_info();
+                    });
+        } else if (no) {
+            g_uninst.open = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+}
+
 static void overlay_osk()
 {
     static OpenFocus kf;
@@ -2193,7 +2277,7 @@ static void overlay_osk()
 // the frame: the header (the pages, LB/RB), the page, the prompts
 // ============================================================================================================
 
-static bool overlay_open() { return g_op || g_confirm.open || g_msg.open || g_browser.open || g_osk.open; }
+static bool overlay_open() { return g_op || g_confirm.open || g_msg.open || g_browser.open || g_osk.open || g_uninst.open; }
 
 static void voxel_bar(ImDrawList* dl, ImVec2 a, ImVec2 b, float frac, float t)
 {
@@ -2407,7 +2491,7 @@ static void frame()
         } else if (hov) {
             dl->AddRectFilled(ra, rb, A(IM_COL32(34, 48, 108, 255)));
         }
-        pix_icon(dl, ImVec2(ra.x + S(22), (ra.y + rb.y) / 2 - ip * 5), kIcons[i], ip);
+        pix_icon(dl, ImVec2(ra.x + S(22), (ra.y + rb.y) / 2 - ip * 5), kIcons[kPageIcon[i]], ip);
         pix_text(dl, ImVec2(ra.x + S(22) + ip * 10 + S(22), (ra.y + rb.y) / 2 - np * 3.5f), kPageNames[i], np,
                  on ? col::accent : hov ? col::text : col::dim);
         if (hov && ImGui::IsMouseClicked(0)) { g_page = i; g_focus_page = true; }
@@ -2461,7 +2545,6 @@ static void frame()
     case kPlay: page_play(); break;
     case kInstall: page_install(); break;
     case kUpdates: page_updates(); break;
-    case kBuilds: page_builds(); break;
     case kSaves: page_saves(); break;
     case kShaders: page_shaders(); break;
     case kSettings: page_settings(); break;
@@ -2480,6 +2563,7 @@ static void frame()
     overlay_browser();
     overlay_osk();
     overlay_confirm();
+    overlay_uninstall();
     overlay_message();
     ImGui::PopFont();
     // the prompts
@@ -2626,6 +2710,7 @@ int main(int argc, char** argv)
             ask("Go back to this build?", "The game starts from it next time. The build you have now is kept, so you can "
                 "come back to it.", "Go back to it", false, [] {});
         if (show == "first-run") after_install_shaders();   // the offer after an install (nothing installed)
+        if (show == "uninstall") uninstall_open();          // the choice, measured (a dry run: nothing removed)
         if (show == "prepare") bg_prepare(false, "asked for");   // a real preparation, in the background
         if (show == "rebuild") bg_prepare(true, "asked for");    // the same, the pipeline cache made again
         if (show == "message")

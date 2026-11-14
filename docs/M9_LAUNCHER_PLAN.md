@@ -928,3 +928,69 @@ the launcher-side items are done here.
   and starts the game once it has stopped, so the game and the preparation never share the shader cache or the GPU;
   a preparation asked for (or due automatically) while the launcher's game runs waits for the game to close and then
   starts. The preparation is the launcher's, not a page's: it carries on as the pages change.
+
+## 20. Before M9 closes: diagnostics and log export, uninstalling (the owner, 2026-11-14) [C]
+
+**The owner's requirements** (M9):
+1. **Diagnostics and log export**: an Export Logs button; the game's log the current or most recent session only
+   (a new session replaces it), kept after a crash, size-limited, flushed periodically, no manual cleanup; versions,
+   OS, CPU, GPU, memory and driver, the active settings, Vulkan errors and warnings, shader and pipeline compilation
+   events, significant frame-time spikes, audio and controller device errors, native runtime errors and unexpected
+   exceptions, crash information where available; levels Error, Warning, Info (default), Debug, Trace (Debug and
+   Trace off by default); the export working after a crash, a ZIP to a destination the player chooses, sanitized,
+   never keys, assets, saves or game code, reviewed before export, never uploaded.
+2. **Uninstalling**: Uninstall Game under Maintenance, choosing what goes (builds, extracted data, shader and pipeline
+   caches, compilation caches, settings, saves and their backups, the launcher's shortcuts), saves, backups and
+   settings kept by default, the space freed shown, never the player's ISO or keys, every path validated inside the
+   managed install, no symbolic link or junction followed, refused while the game, a compilation or an update runs,
+   the first-run screen after; and a separate option removing the launcher itself. Controller-accessible, in the
+   launcher's look.
+
+**Done** (2026-11-14, before the owner's 10:00 cutoff):
+- **Uninstalling, the game** (tools/uninstall.py; the worker's `uninstall`, docs/M9_WORKER_PROTOCOL.md): the parts
+  above measured (`--dry-run`) and removed (`--confirm`), defaulting to all but the settings and the saves; only in a
+  folder the launcher made (active.json, install.json or builds/), never one that is itself a link, a drive or the home
+  folder; every path checked to lie inside it with no link on the way; a link met inside removed as a link (its target
+  untouched); disc images and keys files never removed; refused while the game runs from the install (its processes
+  found by their program's path) or a preparation holds its lock; folders left empty removed; the install's folder
+  then holds only what was kept, so the launcher shows its first-run screen. The launcher (simplified at the owner's
+  word, section 21): Install page, Maintenance, "Uninstall the game..." -- everything the game installed goes (its
+  files, builds, caches, logs, shortcuts); two choices, both ticked: "Keep my saves and backups", "Keep my settings";
+  the space freed; Uninstall (brick) and Cancel (focused); refused while the game, a preparation or another job runs. tests/test_uninstall.py (6): the
+  sizes, the default keeping the saves, backups and settings and leaving a first-run folder, a junction out of the
+  install removed as a link with its target intact, a disc image and keys file kept, the refusals (a link as the
+  install, a folder that isn't one, a live preparation's lock), the Steam entries for the launcher removed and others
+  kept. Tried: the dialog on the review install by a dry run (3.7 GB to free; nothing removed).
+
+**Not done yet -- for after the owner's go-ahead** (nothing of it started):
+- **Removing the launcher itself**: its own folder deleted after it exits (a running program cannot delete itself),
+  only a packaged download's folder (the launcher and worker/ there, no checkout), never an install inside it, its
+  preferences in %APPDATA% too -- destructive enough to be tried with the owner.
+- **The logs and their export**: what exists -- the game writes `logs/game.log` line-buffered (a crash keeps what was
+  written) and keeps the five sessions before it; the launcher's worker logs by level (info, debug); Diagnostics
+  makes a report (about.json: versions, OS, CPU, memory, GPU and driver, the install's state and sizes; the logs'
+  ends), every file shown before it is packed, sanitized (home and install folders, user and computer names, e-mail
+  addresses), never saves, keys, disc or game files or the caches, into Documents, nothing uploaded. Missing: the
+  game's log as one session (replaced each start) with a size cap and timed flushes; the five levels in the game and
+  the launcher (Error to Trace; Debug and Trace off by default); the events named above tagged in the game's log
+  (Vulkan validation messages, compile events, frame spikes, audio and controller errors, exceptions, a crash
+  record); the active settings in the report; Export Logs choosing the zip's destination. The game's part needs a
+  game build and a run to check it -- after the cutoff.
+
+## 21. A gaming application, not a development tool (the owner, 2026-11-14) [C]
+
+**The owner's direction**: hide the implementation from players -- the launcher behaves like a finished consumer
+gaming application. Applied:
+- **No build management in sight**: the Builds page is gone. A player sees the installed version ("Version 0.1.0",
+  "Installed and ready"), update availability and PLAY. Underneath nothing changed: each update builds a new slot,
+  checked before it is used; one previous working build is kept on its own; obsolete builds and unused compilation
+  objects are pruned after each build (they were already); the recovery and rollback machinery stays. Maintenance
+  (the Install page) offers "Rollback Last Update" -- back to the version before the last update, confirmed --
+  available once an update has kept one. The retention setting is gone from the Settings page (marked `advanced`
+  in the schema, like the developers' performance switches: none of those is shown); developers keep the worker's
+  commands (`builds`, `rollback --to`, `retention --keep`).
+- **Uninstalling**: two choices instead of seven parts (section 20).
+- **Plain words**: the Play page's shader card says "Shaders are ready for your graphics card" (or that they need
+  preparing), not pipeline counts and driver versions; the install page no longer speaks of "kept builds".
+- Still to apply on the same principle (the owner's review): the Shaders and Diagnostics pages keep their detail for
+  now -- the coverage wording the owner asked for (section 19) and the report's file list.

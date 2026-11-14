@@ -244,7 +244,8 @@ def _write_map(m):
 def read_shortcuts(path):
     if not os.path.exists(path):
         return {}
-    buf = open(path, "rb").read()
+    with open(path, "rb") as f:
+        buf = f.read()
     if not buf:
         return {}
     root, _ = _read_map(buf, 0)

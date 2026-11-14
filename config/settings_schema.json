@@ -37,7 +37,7 @@
   {"key": "LAUNCHER_CHECK_UPDATES", "owner": "launcher", "type": "bool", "default": "1", "applies": "live",
    "category": "Updates", "label": "Check for updates when the launcher starts"},
   {"key": "LAUNCHER_BUILDS_KEPT", "owner": "launcher", "type": "int", "min": 0, "max": 5, "default": "1",
-   "applies": "live", "category": "Updates", "label": "Previous game builds kept for rollback"},
+   "applies": "live", "category": "Updates", "label": "Previous game builds kept for rollback", "advanced": true},
   {"key": "LAUNCHER_SAVE_BACKUPS_KEPT", "owner": "launcher", "type": "int", "min": 1, "max": 100, "default": "10",
    "applies": "live", "category": "Saves", "label": "Automatic save backups kept",
    "help": "Backups you make yourself are kept until you delete them."},

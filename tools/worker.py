@@ -909,6 +909,22 @@ def cmd_settings(a, ev, control):
         raise pipeline.SetupError(str(e), e.code)
 
 
+def cmd_uninstall(a, ev, control):
+    """--dry-run: what each part would free (nothing removed). Else, with --confirm: the parts removed (--parts, comma-
+    separated; default: all but the saves, their backups and the settings) -- docs/M9_LAUNCHER_PLAN.md section 20"""
+    import uninstall
+    parts = tuple(p for p in (a.parts or ",".join(uninstall.DEFAULT_PARTS)).split(",") if p)
+    try:
+        if a.dry_run:
+            return {"parts": uninstall.plan(os.path.abspath(a.install), uninstall.PARTS),
+                    "default": list(uninstall.DEFAULT_PARTS)}
+        if not a.confirm:
+            raise pipeline.SetupError("Uninstalling needs the player's confirmation.", "needs_confirmation")
+        return uninstall.remove(os.path.abspath(a.install), parts, exe=a.exe)
+    except uninstall.UninstallError as e:
+        raise pipeline.SetupError(str(e), e.code)
+
+
 def cmd_diagnostics(a, ev, control):
     """a report for the player to review: its files, privacy-sanitized, into --out DIR (the launcher shows them; the
     player may remove any); --pack ZIP: exactly what is in --out now, as one zip"""
@@ -999,7 +1015,8 @@ COMMANDS = {"version": cmd_version, "probe-disc": cmd_probe_disc, "probe-keys": 
             "repair-link": cmd_repair_link, "saves": cmd_saves, "prepare": cmd_prepare,
             "check-update": cmd_check_update, "download-update": cmd_download_update,
             "stage-launcher": cmd_stage_launcher, "swap-launcher": cmd_swap_launcher, "settings": cmd_settings,
-            "diagnostics": cmd_diagnostics, "shortcuts": cmd_shortcuts, "selftest": cmd_selftest}
+            "diagnostics": cmd_diagnostics, "shortcuts": cmd_shortcuts, "selftest": cmd_selftest,
+            "uninstall": cmd_uninstall}
 
 
 def parser():
@@ -1023,6 +1040,8 @@ def parser():
     p.add_argument("--steam", action="store_true", help="shortcuts: in Steam's library")
     p.add_argument("--desktop", action="store_true", help="shortcuts: on the desktop too")
     p.add_argument("--rebuild", action="store_true", help="prepare: the pipeline cache made again from scratch")
+    p.add_argument("--parts", help="uninstall: the parts, comma-separated (builds,data,shaders,objects,settings,saves,shortcuts)")
+    p.add_argument("--dry-run", action="store_true", help="uninstall: what each part would free; nothing removed")
     p.add_argument("--no-prepare", action="store_true",
                    help="install/update/migrate: no preparation at the end (the launcher prepares in the background)")
     p.add_argument("--set", action="append", help="settings: KEY=VALUE (repeatable)")
@@ -1053,7 +1072,7 @@ def parser():
 REQUIRED = {"probe-disc": ("disc",), "probe-keys": ("disc", "keys"), "space": ("install",), "info": ("install",),
             "install": ("disc", "keys", "install"), "update": ("install",), "migrate": ("install",),
             "builds": ("install",), "rollback": ("install",), "retention": ("install", "keep"),
-            "repair-link": ("install",), "saves": ("install",), "prepare": ("install",),
+            "repair-link": ("install",), "saves": ("install",), "prepare": ("install",), "uninstall": ("install",),
             "download-update": ("install",), "stage-launcher": ("package", "launcher"),
             "swap-launcher": ("launcher", "start"), "settings": ("install",), "diagnostics": ("install", "out"),
             "shortcuts": ("exe",)}
