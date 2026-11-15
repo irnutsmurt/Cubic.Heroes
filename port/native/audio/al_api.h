@@ -50,7 +50,7 @@ namespace al_api {
 #define AL_API_ALC_EXT_FUNCTIONS(X)                                                                                 \
     X(LPALCREOPENDEVICESOFT, alcReopenDeviceSOFT) X(LPALCLOOPBACKOPENDEVICESOFT, alcLoopbackOpenDeviceSOFT)       \
     X(LPALCISRENDERFORMATSUPPORTEDSOFT, alcIsRenderFormatSupportedSOFT) X(LPALCRENDERSAMPLESSOFT, alcRenderSamplesSOFT) \
-    X(LPALCEVENTCONTROLSOFT, alcEventControlSOFT) X(LPALCEVENTCALLBACKSOFT, alcEventCallbackSOFT)
+    X(LPALCEVENTCONTROLSOFT, alcEventControlSOFT) X(LPALCEVENTCALLBACKSOFT, alcEventCallbackSOFT)                     X(LPALCDEVICEPAUSESOFT, alcDevicePauseSOFT) X(LPALCDEVICERESUMESOFT, alcDeviceResumeSOFT)
 
 struct Api {
 #define AL_API_MEMBER(type, name) type name = nullptr;

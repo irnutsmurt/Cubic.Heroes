@@ -34,6 +34,7 @@
 #include <cstring>
 #include <map>
 #include <memory>
+#include <chrono>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -99,6 +100,10 @@ struct Manager {
     std::vector<Record> records;
     float master = 1.0f;
     int level_bgm = 3, level_se = 3;
+    // M10.3: the player's volumes (the PC settings, on top of the game's own levels): music and effects as factors
+    // on their sources, master and mute on OpenAL's listener (every source, a movie's sound too). 1: the original.
+    float pc_master = 1.0f, pc_music = 1.0f, pc_sfx = 1.0f;
+    bool pc_mute = false;
     bool menu_flag = false, exit_requested = false;
     bool menu_paused = false;
     uint32_t last_bgm = 0;
@@ -150,16 +155,16 @@ void to_al(const float* game, float* al)   // the game's left-handed frame to Op
 
 // ---- channels: an effect on the voice pool, the music on the streamer ----
 
-void ch_gain(Record& r, float g)
+void ch_gain(Record& r, float g, bool force = false)
 {
     Manager& m = M();
     g = clamp01(g);
     if (r.music) {
-        if (std::fabs(g - r.gain) > 1e-7f || r.pending) m.streamer->set_gain(r.ch, g);
+        if (std::fabs(g - r.gain) > 1e-7f || r.pending || force) m.streamer->set_gain(r.ch, g * m.pc_music);
     } else {
-        m.pool.set_gain(r.ch, g);
+        m.pool.set_gain(r.ch, g * m.pc_sfx);
     }
-    r.gain = g;
+    r.gain = g;   // the game's own gain; the player's factor applied on the way to OpenAL
 }
 
 bool ch_playing(Record& r)
@@ -257,6 +262,8 @@ uint32_t start_effect(int id, int priority, const float* pos, bool fade_in, floa
         ci.direct = true;
         ci.level = kCentre;
     }
+    const float game_gain = ci.gain;
+    ci.gain = game_gain * m.pc_sfx;
     const uint32_t h = m.pool.play(buffer, ci);
     if (!h) return 0;
     Record r;
@@ -264,7 +271,7 @@ uint32_t start_effect(int id, int priority, const float* pos, bool fade_in, floa
     r.id = id;
     r.T = T;
     r.ch = h;
-    r.gain = ci.gain;
+    r.gain = game_gain;
     push(r);
     m.se_plays++;
     return h;
@@ -306,6 +313,26 @@ void render(double dt)   // loopback (tests): the audio of dt seconds, discarded
 }  // namespace
 
 extern "C" {
+
+/* M10.2: the whole output held while the game is (its in-game menu): OpenAL Soft's device paused
+ * (ALC_SOFT_pause_device), so music, effects and a movie's sound stop and go on exactly where they were */
+void nsm_host_pause(int on)
+{
+    Manager& m = M();
+    ALCdevice* d = nullptr;
+    {
+        std::lock_guard<std::mutex> lk(m.mu);
+        if (!m.active || m.loopback || !m.dev.alc_device()) return;
+        d = (ALCdevice*)m.dev.alc_device();
+    }
+    // outside the manager's lock: a device's pause or resume can take a while (its output stopped or started),
+    // and the game's own sound calls take that lock
+    const auto t0 = std::chrono::steady_clock::now();
+    if (on && m.api.alcDevicePauseSOFT) m.api.alcDevicePauseSOFT(d);
+    else if (!on && m.api.alcDeviceResumeSOFT) m.api.alcDeviceResumeSOFT(d);
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    if (ms > 20) logf("the device's %s took %.0f ms", on ? "pause" : "resume", ms);
+}
 
 int nsm_init(const nsm_options* o)
 {
@@ -386,6 +413,7 @@ int nsm_init(const nsm_options* o)
     const float ori[6] = {0, 0, 1, 0, 1, 0};   // the game's forward +z, up +y (x mirrored: +x is the right)
     al.alListenerfv(AL_ORIENTATION, ori);
     al.alListener3f(AL_POSITION, 0, 0, 0);
+    al.alListenerf(AL_GAIN, m.pc_mute ? 0.0f : m.pc_master);   // M10.3: the player's master volume, set before
     m.active = true;
     logf("native sound manager: %zu sounds listed, %d voices, reverb %s", m.list.entries.size(), m.pool.voices(),
          rev ? "yes" : "none");
@@ -655,6 +683,22 @@ void nsm_unduck_bgm(float seconds)
             r.T = seconds;
             r.t = 0.0f;
         }
+}
+
+/* M10.3: the player's volumes, 0-1 each, applied at once to what is playing */
+void nsm_set_volumes(float master, float music, float effects, int mute)
+{
+    Manager& m = M();
+    std::lock_guard<std::mutex> lk(m.mu);
+    m.pc_master = clamp01(master);
+    m.pc_music = clamp01(music);
+    m.pc_sfx = clamp01(effects);
+    m.pc_mute = mute != 0;
+    if (!m.active) return;
+    m.api.alListenerf(AL_GAIN, m.pc_mute ? 0.0f : m.pc_master);
+    for (Record& r : m.records) ch_gain(r, r.gain, true);
+    logf("volumes: master %.0f%%, music %.0f%%, effects %.0f%%%s", m.pc_master * 100, m.pc_music * 100,
+         m.pc_sfx * 100, m.pc_mute ? ", muted" : "");
 }
 
 void nsm_set_bgm_master(float master)

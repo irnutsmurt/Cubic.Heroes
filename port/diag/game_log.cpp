@@ -1,5 +1,6 @@
 /* The game's log: levels, the session's record, tagged events, the size cap (game_log.h). */
 #include "game_log.h"
+#include "ps3emu/guest_pause.h"   /* M10.2: time the game is held is no frame spike */
 
 #include <atomic>
 #include <chrono>
@@ -229,13 +230,16 @@ void watch(std::string log, double cap_mb)
 #endif
     unsigned last = cellGcm_flip_request_count();
     double last_at = now_ms(), size_at = last_at;
+    uint64_t held_at = ps3_guest_paused_ns();
     bool capped = cap_mb <= 0 || log.empty();
     for (;;) {
         std::this_thread::sleep_for(std::chrono::milliseconds(4));
         const double t = now_ms();
         const unsigned n = cellGcm_flip_request_count();
         if (n != last) {
-            const double dt = t - last_at;
+            const uint64_t held = ps3_guest_paused_ns();   /* the time the game was held meanwhile: not a frame's */
+            const double dt = t - last_at - (double)(held - held_at) / 1e6;
+            held_at = held;
             std::lock_guard<std::mutex> g(g_sp_mu);
             /* the first flip's wait is the start-up, not a spike */
             if (last) {

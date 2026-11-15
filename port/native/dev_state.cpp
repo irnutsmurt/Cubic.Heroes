@@ -94,6 +94,7 @@
 
 #include "ps3emu/osd.h"
 #include "ps3emu/ps3_ftrace.h"
+#include "ps3emu/guest_pause.h"   /* M10.2: the game held by its host */
 extern "C" void rsx_vulkan_cache_save(void);   // libs/video/rsx_vulkan_backend.h
 
 extern "C" void spurs_snap_write_file(const char* path);
@@ -574,11 +575,31 @@ void memsnap_loop()
 // (ps3_host_quit: REQUEST_EXITGAME to its sysutil callbacks, a grace period,
 // then exit 0 with the exit handlers) -- the game's own shutdown path, for the
 // tests of what runs there (the water's, the waver's teardown).
+extern "C" void nsm_host_pause(int on);          // native/audio/sound_manager.cpp
+// M10.2 (docs/M10_PLAN.md): the game held (1) or released (0) by its host -- its in-game menu: the guest's clocks
+// stand still and its render thread waits at its next flip (ps3emu/guest_pause.h), and the sound output pauses
+extern "C" void dotheroes_host_pause(int on)
+{
+    if (!!on == !!ps3_guest_paused()) return;
+    // held: the game first, then its sound; released: the sound first, so the game's next frame finds it running
+    if (on) ps3_guest_pause_set(1);
+    nsm_host_pause(on);
+    if (!on) ps3_guest_pause_set(0);
+    fprintf(stderr, "[pause] the game %s (held %.3f s in all)\n", on ? "held" : "released",
+            (double)ps3_guest_paused_ns() / 1e9);
+}
 extern "C" void ps3_host_quit(const char* why);   // cellSysutil.c
 void stop_loop()
 {
     for (;;) {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        // pause.trigger (tests): the game held as the in-game menu holds it, or released (dotheroes_host_pause)
+        if (FILE* q = fopen("pause.trigger", "rb")) {
+            fclose(q);
+            remove("pause.trigger");
+            dotheroes_host_pause(!ps3_guest_paused());
+            continue;
+        }
         if (FILE* q = fopen("quit.trigger", "rb")) {
             fclose(q);
             remove("quit.trigger");

@@ -32,7 +32,9 @@
 /* The lifter's generated header, which declares ppu_context and the function
  * table. It comes first: everything below is written against that struct. */
 #include "diag/diag.h"
-#include "diag/game_log.h"   /* M9: the log's levels, session record, tagged events, size cap */
+#include "diag/game_log.h"
+#include "ps3emu/guest_pause.h"
+#include "ps3emu/osd.h"   /* M10.4: the save-data screen ends the logos' speed-up */   /* M10.1: the host frame limiter */   /* M9: the log's levels, session record, tagged events, size cap */
 #include "ps3emu/census.h"   /* M6: the SPU machinery's use, reported at exit */
 extern "C" void spu_coh_forbid(const char* why);   /* spu_coherency.c: M6, the release without the store test */
 #include "native/bullet_cd_task.h"
@@ -56,6 +58,7 @@ extern "C" void dotheroes_audio_hooks_init(void); /* audio_hooks.cpp */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <filesystem>
@@ -161,6 +164,7 @@ extern "C" void rsx_vulkan_backend_present(void);
 extern "C" void rsx_vulkan_backend_present_begin(void);
 extern "C" void rsx_vulkan_backend_present_finish(void);
 extern "C" int  rsx_vulkan_backend_pump_messages(void);
+extern "C" int  rsx_vulkan_backend_window_rect(int out[5]);   /* M10.1: the window's place, kept for next time */
 #  define rsx_backend_init    rsx_vulkan_backend_init
 #  define rsx_backend_present rsx_vulkan_backend_present
 #  define rsx_backend_pump    rsx_vulkan_backend_pump_messages
@@ -963,6 +967,196 @@ static int dotheroes_prepare(int argc, char** argv)
     return r < 0 ? 4 : r;
 }
 
+/* ---- M10.1 (docs/M10_PLAN.md): the player's display and frame settings, turned into the runtime's switches ----
+ * DOTHEROES_FPS: 30 (the original pacing), 60, any whole number 20-1000 (75, 100, 120, 144, 165, 240 the presets;
+ * "custom" takes DOTHEROES_FPS_CUSTOM), display (the display's refresh), 0 (unlimited). A number other than 30 and
+ * 60 is one vblank a frame with the vblank clock at its period (DIAG_VBLANK_MS: vblank_clock above); unlimited
+ * also completes each flip when it is executed, as the benchmark mode does, so no clock holds it.
+ * DOTHEROES_VSYNC=0: presentation that never waits for the display (IMMEDIATE, else MAILBOX); 1 FIFO.
+ * DOTHEROES_DISPLAY_MODE: windowed, borderless, exclusive (the runtime's window: never another display mode).
+ * DOTHEROES_PERF_OVERLAY: off, fps, graph (PS3_OSD_FPS). Each set only where the environment has not set the
+ * runtime's own switch already (tests and benchmarks keep theirs). The effective values go in the log. */
+static void put_env(const char* name, const std::string& value)
+{
+#ifdef _WIN32
+    _putenv_s(name, value.c_str());
+#else
+    setenv(name, value.c_str(), 1);
+#endif
+}
+
+static std::string window_state_path()
+{
+    return s_install_root.empty() ? std::string() : s_install_root + (s_slots ? "/config/window.json" : "/window.json");
+}
+
+static void save_window_state()
+{
+    int r[5];
+    const std::string path = window_state_path();
+#if defined(PS3RECOMP_RSX_VULKAN)
+    if (path.empty() || !rsx_vulkan_backend_window_rect(r)) return;
+#else
+    return;
+#endif
+    if (FILE* f = fopen((path + ".part").c_str(), "w")) {
+        fprintf(f, "{\"x\": %d, \"y\": %d, \"w\": %d, \"h\": %d, \"maximized\": %d}\n", r[0], r[1], r[2], r[3], r[4]);
+        fclose(f);
+        std::error_code ec;
+        std::filesystem::rename(path + ".part", path, ec);
+    }
+}
+
+extern "C" void dotheroes_overlay_start(const char* settings_path, const char* install_root);   /* overlay.cpp */
+
+static int64_t limit_period_ns(const std::string& v);
+
+/* M10.2: a frame limit from the in-game menu: applied at once between any two limits but the original 30 (which
+ * runs the game's own pacing: changed at the next start). 1 when applied. */
+extern "C" int dotheroes_set_frame_limit(const char* v)
+{
+    const char* cur = getenv("DOTHEROES_FPS");
+    if (!v || !cur || strcmp(cur, "0")) return 0;
+    const int64_t p = limit_period_ns(v);
+    if (p < 0) return 0;
+    ps3_frame_limit_set((uint64_t)p);
+    dh_log(DH_LOG_INFO, "settings", "frame limit now %s", p ? (std::to_string(1e9 / (double)p) + " fps").c_str() : "unlimited");
+    return 1;
+}
+
+/* the display's refresh period in ms (DWM's, else the display mode's); 0 when not known */
+static double display_refresh_ms(void)
+{
+#ifdef _WIN32
+    typedef HRESULT(WINAPI * timing_fn)(HWND, DWM_TIMING_INFO*);
+    if (HMODULE dwm = LoadLibraryA("dwmapi.dll"))
+        if (timing_fn get = (timing_fn)(void*)GetProcAddress(dwm, "DwmGetCompositionTimingInfo")) {
+            DWM_TIMING_INFO ti = {};
+            ti.cbSize = sizeof ti;
+            LARGE_INTEGER f;
+            if (get(NULL, &ti) == S_OK && ti.qpcRefreshPeriod && QueryPerformanceFrequency(&f))
+                return (double)ti.qpcRefreshPeriod * 1000.0 / (double)f.QuadPart;
+        }
+    DEVMODEW dm = {};
+    dm.dmSize = sizeof dm;
+    if (EnumDisplaySettingsW(NULL, ENUM_CURRENT_SETTINGS, &dm) && dm.dmDisplayFrequency > 1) return 1000.0 / dm.dmDisplayFrequency;
+#endif
+    return 0.0;
+}
+
+/* a frame limit's period in ns for the host limiter: 0 unlimited, -1 the original 30 (the game's own pacing) */
+static int64_t limit_period_ns(const std::string& v)
+{
+    if (v == "30") return -1;
+    if (v == "0") return 0;
+    if (v == "display") {
+        const double r = display_refresh_ms();
+        return (int64_t)((r >= 2.0 && r <= 50.0 ? r : 1000.0 / 60.0) * 1e6);
+    }
+    const double n = atof(v.c_str());
+    return n >= 20.0 && n <= 1000.0 ? (int64_t)(1e9 / n) : (int64_t)(1e9 / 60.0);
+}
+
+/* M10.4 (docs/M10_PLAN.md): the start-up logos skipped (DOTHEROES_SKIP_LOGOS, on by default) -- not by cutting
+ * anything out: the original start-up runs whole, every initialization in it, with the game's clocks eight times
+ * as fast and no frame limit (ps3emu/guest_pause.h ps3_guest_warp_set), so its developer, publisher and middleware
+ * screens pass in a moment. It ends when the first movie opens (the title's background: the interactive title,
+ * its music, animation and attract mode at their own pace), at a save-data screen, or after 30 s at most -- before
+ * any new game, so its opening plays as it is. */
+static std::atomic<int> s_logo_warp{ 0 };
+static uint64_t s_logo_period = 0;
+
+static void logos_end(const char* why)
+{
+    if (!s_logo_warp.exchange(0)) return;
+    ps3_guest_warp_set(0, 1);
+    ps3_frame_limit_set(s_logo_period);
+    dh_log(DH_LOG_INFO, "startup", "the start-up's speed-up ended (%s); %.1f s of the game's time passed quickly",
+           why, (double)ps3_guest_ahead_ns() / 1e9);
+}
+
+extern "C" void dotheroes_movie_opened(const char* name)
+{
+    logos_end(name && *name ? name : "a movie opened");
+}
+
+static void logos_begin(void)
+{
+    const char* e = getenv("DOTHEROES_SKIP_LOGOS");
+    if (e && *e == '0') return;
+    s_logo_period = g_ps3_frame_period_ns;
+    s_logo_warp = 1;
+    ps3_frame_limit_set(0);
+    ps3_guest_warp_set(1, 8);
+    dh_log(DH_LOG_INFO, "startup", "the start-up logos sped through (the original sequence, its clocks x8)");
+    std::thread([] {
+        for (int i = 0; i < 300 && s_logo_warp.load(); i++) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            if (__atomic_load_n(&g_ps3_osd_saves.open, __ATOMIC_ACQUIRE) ||
+                __atomic_load_n(&g_ps3_osd_list.open, __ATOMIC_ACQUIRE)) { logos_end("a save-data screen"); return; }
+        }
+        logos_end("30 s passed");
+    }).detach();
+}
+
+static void apply_pc_settings(void)
+{
+    /* The frame limit: 30 is the original pacing (the game's own sleep and two vblanks). Any other limit turns the
+     * game's own pacing off (DOTHEROES_FPS=0, each flip completing when executed, as the benchmark mode does) and
+     * holds the frames to the limit with a host limiter at the flip (ps3emu/guest_pause.h ps3_frame_limit_wait):
+     * a deadline on the high-resolution clock, so the limit holds evenly at any number -- through the game's
+     * vblank pacing a frame a little over one tick of the clock waited for two (144 ran at 65 in play). */
+    std::string fps = getenv("DOTHEROES_FPS") ? getenv("DOTHEROES_FPS") : "60";
+    if (fps == "custom") fps = getenv("DOTHEROES_FPS_CUSTOM") ? getenv("DOTHEROES_FPS_CUSTOM") : "60";
+    const int64_t period = getenv("DOTHEROES_BENCH") && *getenv("DOTHEROES_BENCH") == '1' ? 0 : limit_period_ns(fps);
+    std::string shown;
+    if (period < 0) {
+        shown = "30 (the original pacing)";
+    } else {
+        if (!getenv("DIAG_VBLANK_MS")) {   /* a test's own vblank clock keeps the game's pacing as it asks */
+            cellGcm_set_flip_immediate(1);
+            fps = "0";
+            ps3_frame_limit_set((uint64_t)period);
+        }
+        char b[64];
+        snprintf(b, sizeof b, "%.2f fps", period ? 1e9 / (double)period : 0.0);
+        shown = period ? b : "unlimited";
+    }
+    put_env("DOTHEROES_FPS", fps);
+    const char* v = getenv("DOTHEROES_VSYNC");
+    const bool vsync_off = v && *v == '0';
+    if (vsync_off) set_default_env("PS3RECOMP_VK_PRESENT_MODE", "immediate");
+    if (const char* d = getenv("DOTHEROES_DISPLAY_MODE")) set_default_env("PS3RECOMP_VK_DISPLAY_MODE", d);
+    if (const char* o = getenv("DOTHEROES_PERF_OVERLAY"))
+        set_default_env("PS3_OSD_FPS", !strcmp(o, "graph") ? "2" : !strcmp(o, "fps") ? "1" : "0");
+    /* the prompt style the launcher and the in-game menu share (LAUNCHER_PROMPTS) for the game's own host screens
+     * (the save list); automatic: the controller in use. Steam and generic draw Xbox's shapes there. */
+    if (const char* pr = getenv("LAUNCHER_PROMPTS")) {
+        const std::string p = pr;
+        const char* st = p == "xbox" || p == "steam" || p == "generic" ? "xbox" : p == "playstation" ? "playstation"
+                       : p == "nintendo" ? "switch" : nullptr;
+        if (st) set_default_env("PS3_UI_PROMPTS", st);
+    }
+    /* the window's place and size from the last windowed session */
+    const std::string wpath = window_state_path();
+    if (!wpath.empty())
+        if (FILE* f = fopen(wpath.c_str(), "r")) {
+            int x, y, w, h, m = 0;
+            if (fscanf(f, " { \"x\": %d, \"y\": %d, \"w\": %d, \"h\": %d, \"maximized\": %d", &x, &y, &w, &h, &m) >= 4) {
+                char r[96];
+                snprintf(r, sizeof r, "%d,%d,%d,%d,%d", x, y, w, h, m);
+                set_default_env("PS3RECOMP_VK_WINDOW_RECT", r);
+            }
+            fclose(f);
+        }
+    atexit(save_window_state);
+    const char* mode = getenv("PS3RECOMP_VK_DISPLAY_MODE");
+    dh_log(DH_LOG_INFO, "settings", "in effect: frame limit %s%s; VSync %s; display %s; performance overlay %s",
+           shown.c_str(), "", vsync_off ? "off" : "on",
+           mode ? mode : (getenv("PS3RECOMP_VK_FULLSCREEN") && *getenv("PS3RECOMP_VK_FULLSCREEN") == '1' ? "borderless" : "windowed"),
+           getenv("PS3_OSD_FPS") && *getenv("PS3_OSD_FPS") != '0' ? getenv("PS3_OSD_FPS") : "off");
+}
+
 int main(int argc, char** argv)
 {
     /* `dotheroes --memtest`: the guest loads' assumptions, tested on a guest
@@ -1068,6 +1262,13 @@ int main(int argc, char** argv)
      * to the crash record. Debug and Trace add the driver's information messages. */
     if (dh_log_level() >= DH_LOG_DEBUG) set_default_env("PS3RECOMP_VK_MESSAGES", "2");
     dh_log_session_start(s_log_path.c_str());
+    apply_pc_settings();   /* M10.1: before the patches read DOTHEROES_FPS and the window opens */
+    logos_begin();         /* M10.4: after the frame limit is known (it is lifted while the logos pass) */
+    {   /* M10.2: the in-game settings menu (port/overlay.cpp) */
+        const std::string cfg = s_install_root.empty() ? std::string()
+                              : s_install_root + (s_slots ? "/config/dotheroes.cfg" : "/dotheroes.cfg");
+        dotheroes_overlay_start(cfg.c_str(), s_install_root.c_str());
+    }
     /* On this thread, which runs the guest's entry (the PPU main thread),
      * and before the others start, so they take the process's placement. */
     dotheroes_cpu_place();

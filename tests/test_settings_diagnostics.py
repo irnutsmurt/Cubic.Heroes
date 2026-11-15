@@ -95,6 +95,21 @@ class Settings(unittest.TestCase):
         self.assertTrue(settings.effective(self.install)["readable"])
         self.assertEqual(r["settings"]["DOTHEROES_NATIVE_CD"]["value"], "1", "the performance switches back")
 
+    def test_m10_display_and_frame_settings(self):
+        eff = settings.effective(self.install)["settings"]
+        self.assertEqual(eff["DOTHEROES_DISPLAY_MODE"]["value"], "windowed")
+        self.assertEqual(eff["DOTHEROES_VSYNC"]["value"], "1")
+        self.assertEqual(eff["DOTHEROES_PERF_OVERLAY"]["value"], "off")
+        for v in ("30", "60", "75", "100", "120", "144", "165", "240", "display", "0", "custom"):
+            settings.set_values(self.install, {"DOTHEROES_FPS": v})
+        settings.set_values(self.install, {"DOTHEROES_FPS_CUSTOM": "113", "DOTHEROES_VSYNC": "0",
+                                           "DOTHEROES_DISPLAY_MODE": "exclusive"})
+        eff = settings.effective(self.install)["settings"]
+        self.assertEqual((eff["DOTHEROES_FPS"]["value"], eff["DOTHEROES_FPS_CUSTOM"]["value"]), ("custom", "113"))
+        for bad in ({"DOTHEROES_FPS": "77"}, {"DOTHEROES_FPS_CUSTOM": "5"}, {"DOTHEROES_DISPLAY_MODE": "1024x768"}):
+            with self.assertRaises(settings.SettingsError):
+                settings.set_values(self.install, bad)
+
     def test_worker(self):
         w = [sys.executable, os.path.join(ROOT, "tools", "worker.py"), "settings", "--install", self.install]
         p = subprocess.run(w + ["--set", "DOTHEROES_FPS=30"], capture_output=True, text=True, timeout=60)

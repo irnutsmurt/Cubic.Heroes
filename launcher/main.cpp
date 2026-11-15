@@ -249,75 +249,8 @@ static uint32_t hash32(uint32_t x)
     return x;
 }
 
-// --- the pixel font: the project's own 5x7 capitals, digits and signs (titles, the logo, labels on blocks) ---
-struct PixGlyph { char c; const char* rows[7]; };
-static const PixGlyph kPixFont[] = {
-    { 'A', { ".###.", "#...#", "#...#", "#####", "#...#", "#...#", "#...#" } },
-    { 'B', { "####.", "#...#", "#...#", "####.", "#...#", "#...#", "####." } },
-    { 'C', { ".###.", "#...#", "#....", "#....", "#....", "#...#", ".###." } },
-    { 'D', { "####.", "#...#", "#...#", "#...#", "#...#", "#...#", "####." } },
-    { 'E', { "#####", "#....", "#....", "####.", "#....", "#....", "#####" } },
-    { 'F', { "#####", "#....", "#....", "####.", "#....", "#....", "#...." } },
-    { 'G', { ".###.", "#...#", "#....", "#.###", "#...#", "#...#", ".####" } },
-    { 'H', { "#...#", "#...#", "#...#", "#####", "#...#", "#...#", "#...#" } },
-    { 'I', { "###", ".#.", ".#.", ".#.", ".#.", ".#.", "###" } },
-    { 'J', { "..###", "...#.", "...#.", "...#.", "...#.", "#..#.", ".##.." } },
-    { 'K', { "#...#", "#..#.", "#.#..", "##...", "#.#..", "#..#.", "#...#" } },
-    { 'L', { "#....", "#....", "#....", "#....", "#....", "#....", "#####" } },
-    { 'M', { "#...#", "##.##", "#.#.#", "#.#.#", "#...#", "#...#", "#...#" } },
-    { 'N', { "#...#", "#...#", "##..#", "#.#.#", "#..##", "#...#", "#...#" } },
-    { 'O', { ".###.", "#...#", "#...#", "#...#", "#...#", "#...#", ".###." } },
-    { 'P', { "####.", "#...#", "#...#", "####.", "#....", "#....", "#...." } },
-    { 'Q', { ".###.", "#...#", "#...#", "#...#", "#.#.#", "#..#.", ".##.#" } },
-    { 'R', { "####.", "#...#", "#...#", "####.", "#.#..", "#..#.", "#...#" } },
-    { 'S', { ".####", "#....", "#....", ".###.", "....#", "....#", "####." } },
-    { 'T', { "#####", "..#..", "..#..", "..#..", "..#..", "..#..", "..#.." } },
-    { 'U', { "#...#", "#...#", "#...#", "#...#", "#...#", "#...#", ".###." } },
-    { 'V', { "#...#", "#...#", "#...#", "#...#", "#...#", ".#.#.", "..#.." } },
-    { 'W', { "#...#", "#...#", "#...#", "#.#.#", "#.#.#", "#.#.#", ".#.#." } },
-    { 'X', { "#...#", "#...#", ".#.#.", "..#..", ".#.#.", "#...#", "#...#" } },
-    { 'Y', { "#...#", "#...#", ".#.#.", "..#..", "..#..", "..#..", "..#.." } },
-    { 'Z', { "#####", "....#", "...#.", "..#..", ".#...", "#....", "#####" } },
-    { '0', { ".###.", "#...#", "#..##", "#.#.#", "##..#", "#...#", ".###." } },
-    { '1', { ".#.", "##.", ".#.", ".#.", ".#.", ".#.", "###" } },
-    { '2', { ".###.", "#...#", "....#", "...#.", "..#..", ".#...", "#####" } },
-    { '3', { "####.", "....#", "....#", ".###.", "....#", "....#", "####." } },
-    { '4', { "...#.", "..##.", ".#.#.", "#..#.", "#####", "...#.", "...#." } },
-    { '5', { "#####", "#....", "####.", "....#", "....#", "#...#", ".###." } },
-    { '6', { "..##.", ".#...", "#....", "####.", "#...#", "#...#", ".###." } },
-    { '7', { "#####", "....#", "...#.", "..#..", ".#...", ".#...", ".#..." } },
-    { '8', { ".###.", "#...#", "#...#", ".###.", "#...#", "#...#", ".###." } },
-    { '9', { ".###.", "#...#", "#...#", ".####", "....#", "...#.", ".##.." } },
-    { ' ', { "...", "...", "...", "...", "...", "...", "..." } },
-    { '.', { ".", ".", ".", ".", ".", ".", "#" } },
-    { ',', { "..", "..", "..", "..", "..", ".#", "#." } },
-    { ':', { ".", ".", "#", ".", ".", "#", "." } },
-    { '!', { "#", "#", "#", "#", "#", ".", "#" } },
-    { '\'', { "#", "#", ".", ".", ".", ".", "." } },
-    { '"', { "#.#", "#.#", "...", "...", "...", "...", "..." } },
-    { '-', { "....", "....", "....", "####", "....", "....", "...." } },
-    { '+', { ".....", "..#..", "..#..", "#####", "..#..", "..#..", "....." } },
-    { '/', { "....#", "...#.", "...#.", "..#..", ".#...", ".#...", "#...." } },
-    { '(', { "..#", ".#.", "#..", "#..", "#..", ".#.", "..#" } },
-    { ')', { "#..", ".#.", "..#", "..#", "..#", ".#.", "#.." } },
-    { '?', { ".###.", "#...#", "....#", "...#.", "..#..", ".....", "..#.." } },
-    { '&', { ".##..", "#..#.", ".##..", ".#...", "#.#.#", "#..#.", ".##.#" } },
-    { '%', { "##..#", "##..#", "...#.", "..#..", ".#...", "#..##", "#..##" } },
-    { '_', { ".....", ".....", ".....", ".....", ".....", ".....", "#####" } },
-    { '*', { ".....", "#.#.#", ".###.", "#####", ".###.", "#.#.#", "....." } },
-};
-static const PixGlyph* pix_glyph(char c)
-{
-    static const PixGlyph* table[128] = {};
-    static bool made = false;
-    if (!made) {
-        for (const PixGlyph& g : kPixFont) table[(int)g.c] = &g;
-        made = true;
-    }
-    if (c >= 'a' && c <= 'z') c = (char)(c - 32);
-    const PixGlyph* g = (c > 0 && c < 128) ? table[(int)c] : nullptr;
-    return g ? g : table[(int)'?'];
-}
+// --- the pixel font: the project's own 5x7 capitals, digits and signs (port/ui_pixel_font.h, shared with the game) ---
+#include "../port/ui_pixel_font.h"
 static float pix_w(const char* t, float p)
 {
     int cols = 0, n = 0;
@@ -1359,6 +1292,14 @@ static void start_game_now()
 #endif
     );
 #ifdef _WIN32
+    // the game's in-game menu: Return to Launcher reopens this launcher if it has closed itself, and says how the
+    // session ended in <install>/logs/session-end (read when the game's process ends)
+    {
+        std::error_code ec;
+        fs::remove(u8path(install_dir()) / "logs" / "session-end", ec);
+        _putenv_s("CUBIC_LAUNCHER", path_str(u8path(g_exe_dir) / "CubicHeroes.exe").c_str());
+        _putenv_s("CUBIC_LAUNCHER_PID", std::to_string((unsigned long)GetCurrentProcessId()).c_str());
+    }
     STARTUPINFOW si = { sizeof si };
     PROCESS_INFORMATION pi = {};
     std::wstring cmd = launcher::quote_arg(launcher::widen(exe));
@@ -1367,6 +1308,7 @@ static void start_game_now()
         if (g_game_proc) CloseHandle(g_game_proc);
         g_game_proc = pi.hProcess;
         g_st.playing = "The game is running.";
+        if (setting("LAUNCHER_CLOSE_ON_START", "0") == "1") g_quit = true;   // the game reopens it (Return to Launcher)
     } else {
         g_msg = { true, "The game didn't start", "Its program couldn't be started. Try Repair on the Install page.",
                   exe, true, false };
@@ -1943,7 +1885,14 @@ static void page_settings()
     for (size_t i = 0; i < g_st.settings["problems"].size(); i++)
         text_col(col::warm, "%s", g_st.settings["problems"][i].str().c_str());
     static const std::map<std::string, std::vector<std::pair<std::string, std::string>>> choices = {
-        { "DOTHEROES_FPS", { { "60", "60 fps" }, { "30", "30 fps (the original)" }, { "0", "Unlimited" } } },
+        { "DOTHEROES_FPS", { { "30", "30 fps (the original)" }, { "60", "60 fps" }, { "75", "75 fps" }, { "100", "100 fps" },
+                             { "120", "120 fps" }, { "144", "144 fps" }, { "165", "165 fps" }, { "240", "240 fps" },
+                             { "display", "The display's rate" }, { "0", "Unlimited" }, { "custom", "Custom" } } },
+        { "DOTHEROES_DISPLAY_MODE", { { "windowed", "Windowed" }, { "borderless", "Borderless fullscreen" },
+                                      { "exclusive", "Exclusive fullscreen" } } },
+        { "DOTHEROES_PERF_OVERLAY", { { "off", "Off" }, { "fps", "Frame rate" }, { "graph", "Frame rate and times" } } },
+        { "DOTHEROES_OVERLAY_COMBO", { { "l3r3", "L3 + R3" }, { "selectstart", "Back/Select + Start" },
+                                       { "l1r1select", "L1 + R1 + Back/Select" } } },
         { "LAUNCHER_UPDATE_CHANNEL", { { "stable", "Stable releases" }, { "prerelease", "Test releases too" } } },
         { "DOTHEROES_LOG_LEVEL", { { "error", "Errors only" }, { "warning", "Errors and warnings" }, { "info", "Normal" },
                                    { "debug", "Detailed" }, { "trace", "Everything" } } },
@@ -1957,7 +1906,7 @@ static void page_settings()
     ImGui::BeginChild("##settings", ImVec2(0, 0), ImGuiChildFlags_NavFlattened, ImGuiWindowFlags_NoBackground);
     // the categories in a fixed order, each setting in the schema's order within it
     std::vector<std::pair<std::string, const json::Value*>> ordered;
-    static const char* cats[] = { "Display", "Launcher", "Shaders", "Updates", "Saves", "Diagnostics" };
+    static const char* cats[] = { "Game", "Display", "Audio", "Controls", "Launcher", "Shaders", "Updates", "Saves", "Diagnostics" };
     for (const char* c : cats)
         for (const auto& kv : s.o)
             if (kv.second["category"].str() == c) ordered.push_back({ kv.first, &kv.second });
@@ -1977,7 +1926,17 @@ static void page_settings()
         std::vector<std::string> cycle;
         if (ch != choices.end()) {
             for (auto& c : ch->second) { cycle.push_back(c.first); if (c.first == val) shown = c.second; }
-        } else if (key == "PS3RECOMP_VK_FULLSCREEN" || key == "LAUNCHER_CHECK_UPDATES" ||
+        } else if (key == "DOTHEROES_FPS_CUSTOM") {
+            if (setting("DOTHEROES_FPS", "60") != "custom") continue;   // only with a custom limit chosen
+            cycle = { "20", "24", "25", "40", "45", "48", "50", "72", "80", "85", "90", "110", "180", "200", "300", "360", "500" };
+            if (std::find(cycle.begin(), cycle.end(), val) == cycle.end()) cycle.insert(cycle.begin(), val);
+            std::sort(cycle.begin(), cycle.end(), [](const std::string& a, const std::string& b) { return atoi(a.c_str()) < atoi(b.c_str()); });
+            shown = val + " fps";
+        } else if (key == "DOTHEROES_VOLUME_MASTER" || key == "DOTHEROES_VOLUME_MUSIC" || key == "DOTHEROES_VOLUME_SFX") {
+            cycle = { "0", "10", "20", "30", "40", "50", "60", "70", "80", "90", "100" };
+            shown = val + "%";
+        } else if (key == "DOTHEROES_SKIP_LOGOS" || key == "DOTHEROES_VSYNC" || key == "DOTHEROES_MUTE" || key == "DOTHEROES_OVERLAY_HINT" ||
+                   key == "LAUNCHER_CLOSE_ON_START" || key == "PS3RECOMP_VK_FULLSCREEN" || key == "LAUNCHER_CHECK_UPDATES" ||
                    key == "LAUNCHER_SHADERS_AFTER_UPDATE" || key == "LAUNCHER_SHADERS_ON_DRIVER_CHANGE" ||
                    key == "LAUNCHER_VSYNC") {
             cycle = { "0", "1" };
@@ -2698,6 +2657,15 @@ static void frame()
         const bool running = game_running();
         if (was_running && !running) {
             g_st.playing.clear();
+            // how the session ended (the game's menu): Exit Game closes the launcher too; Return to Launcher (or the
+            // game closed any other way) brings it back to the front with the controller's focus
+            const std::string how = read_text(path_str(u8path(install_dir()) / "logs" / "session-end"), 64);
+            if (how.rfind("exit", 0) == 0) g_quit = true;
+            else if (g_window) {
+                SDL_RestoreWindow(g_window);
+                SDL_RaiseWindow(g_window);
+                g_focus_page = true;
+            }
             if (g_prepare_after_game) { g_prepare_after_game = false; bg_prepare(false, "after the game closed"); }
             refresh_info();
         }

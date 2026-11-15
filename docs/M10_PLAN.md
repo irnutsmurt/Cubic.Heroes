@@ -7,14 +7,49 @@ measured, [H] a hypothesis still to check.
 
 ## Checkpoint (kept current; the newest state first)
 
-- **Stage**: M10.0 (this plan and the inventory) done; M10.1 next.
-- **Done**: M9 finished and pushed (c2c251d). M10.0: the inventory below.
-- **Tests**: --
-- **Known issues**: see "Found in the inventory".
-- **Outstanding decisions**: none blocking. Proposed defaults are marked "decided here" and can be changed by the
-  owner at review.
-- **Next steps**: M10.1 in the order of its section (the settings keys and their mapping; the frame limit; VSync;
-  the display modes and the window; the performance overlay; the frame-rate verification runs).
+- **Stage** (2026-11-14 evening): M10.1 and M10.2 done and tested; M10.3's volumes and bindings done (the
+  bindings tested through the menu, not yet in play); M10.4's logo skip done and timed; the INSTALL removal and the
+  save screens' polish not started; M10.5 not started.
+- **Done**: M9 (c2c251d). M10.0 the inventory. M10.1: display modes, the remembered window, VSync, the frame
+  limits through a host limiter, the performance overlay, the picture's aspect. M10.2: the in-game overlay (the
+  hold, the pages, the shortcut kept from the game, Return to Launcher and Exit Game with the launcher's side, the
+  one-writer settings). M10.3: volumes, controller and keyboard bindings, the shared prompts. M10.4: the logo skip.
+- **Tests** (all offscreen or with a hidden window, silent; evidence on F: m10/evidence):
+  - frame limits at the title: 30, 60, 75, 100, 120, 144, 165, 240, display (144.00) and a custom 113 each within
+    0.15% of the cap; unlimited about 1,100 fps. The host limiter with its high-resolution timer: 60 at 60.00 fps,
+    p99 18.0 ms, 43% of a core (the vblank pacing it replaced: 42%; a Sleep-and-yield wait: 64%); 144 at 144.00,
+    p99 8.2 ms, 76%; 240 at 240.01, p99 4.9 ms, 65%;
+  - the logo skip: the title's movie opened 3.6 s after the start against 21.4 s without (twice each); 24.7 s of
+    the game's time passed in the speed-up; the title's movie then at its own pace (243 frames in 8 s);
+  - the bindings through the menu: Cross given the pad's Circle wrote `DOTHEROES_PAD_MAP=Circle=Cross,Cross=Circle`
+    (the clash swapped); "Restore the defaults" emptied it;
+  - frame-rate independence in play (tests/fps_check.py, R8's castle-front drive) at 30, 60, 144, 240 and
+    unlimited: the hero's walk 5.00 units a second (one camera-target measure missed a walk the drive's own
+    measure saw: +9.15), physics 60 steps a second, the time-based clocks x1.00 at every rate; 60 and 144 held
+    exactly (60.0, 143.8-143.9);
+  - the hidden window: VSync on caps unlimited at the display's 141-144 Hz, off reaches 883 fps (IMMEDIATE); the
+    window's place and size written at exit and restored (1000x700 at 140,120); the display's mode unchanged
+    before, during and after every run;
+  - the hold in play: 10.01 s between two snapshots with 6.03 s held -- the game's clocks advanced 3.99 s and
+    4.00 s; no flip while held; no long frame after it;
+  - the overlay through its test input: opened (the game held), Audio's master 100 -> 90 applied at once and
+    written, the performance overlay turned on and written, the exit question (Cancel focused) cancelled, resumed
+    (the game released); Return to Launcher: `session-end` "launcher", the game's own exit path;
+  - unit tests: the new settings (every frame-limit value, custom, VSync, display mode; invalid ones refused).
+- **Known issues**:
+  - in play on this PC, 240 and unlimited stop at about 144 fps (143.8-143.9, the display's refresh, offscreen
+    too); R8 measured 200+ uncapped with the benchmark's present settings -- what holds it is not found yet;
+  - a hold over the title's movie: the movie catches up on its own clock after release (one 0.68 s frame); the
+    movie player's clock should follow the hold;
+  - borderless and exclusive fullscreen, tearing with VSync off, the overlay over a real frame on the owner's
+    monitor, the remapped buttons in play and real controllers (PlayStation, Switch, Steam): the owner's
+    hands-on checks (nothing automated may cover the owner's screen).
+- **Outstanding decisions**: none blocking. Proposed defaults ("decided here") can be changed at review: the
+  shortcut chords offered, the window state file, the logo skip's x8 speed-up.
+- **Next steps**: (1) the INSTALL item removed from the title menu (read the menu's table in the lift; a guarded
+  instruction patch, PC_EXPERIENCE section 7); (2) the movie clock through a hold; (3) what caps play at 144; (4)
+  the bindings in play (a drive with a remapped button); (5) the save screens' polish; (6) M10.5: README and the
+  launcher plan, the regression runs, the package rebuilt.
 
 ## The owner's request (2026-11-14)
 
@@ -152,11 +187,15 @@ The owner asked to be asked before the screen is taken over. Every automated run
   closes a windowed session (decided here: a state file of its own keeps the game from writing the settings file
   for a window move).
 
-**The frame limit** (decided here: the existing vblank clock is the limiter -- a deadline on the high-resolution
-clock with a sleep and a short wait, as PC_EXPERIENCE section 4 asks, already verified for frame-rate independence
-at several rates): 30 the original pacing; any other number: one vblank a frame with the clock's period
-1000/limit ms; display as today; unlimited: flips completing when executed (as the benchmark mode) with the
-game's own pacing off.
+**The frame limit** -- a host limiter at the flip, as PC_EXPERIENCE section 4 asked (ps3recomp
+include/ps3emu/guest_pause.h ps3_frame_limit_wait, called by the guest's render thread at each flip request;
+port/main.cpp apply_pc_settings): 30 keeps the original pacing (the game's own sleep and two vblanks); every other
+limit turns the game's own pacing off (DOTHEROES_FPS=0, each flip completing when executed, as the benchmark mode)
+and holds each frame to its deadline on the high-resolution clock (a high-resolution waitable timer to 0.2 ms
+before it, then a yield); "display" is the display's refresh period (read from DWM, never set); unlimited has no
+deadline. Tried first and replaced: the limit through the game's vblank pacing (one vblank a frame, the vblank
+clock at the limit's period) held exactly at the title, but in play a frame a little over one tick waited for two
+-- 144 and 240 ran at 65 fps on the castle-front drive while unlimited ran at 144.
 
 **VSync**: on FIFO; off IMMEDIATE where the surface has it, else MAILBOX; logged.
 
@@ -174,34 +213,75 @@ and the player's state following time); CPU use (the process's CPU time a second
 before/during/after EnumDisplaySettings unchanged (needs a window: the owner's session, or a hidden window if the
 driver allows); input-to-frame latency estimated from the pad's poll to the next flip (the frame time bounds it).
 
-## M10.2: the in-game overlay
+## M10.2: the in-game overlay (port/overlay.cpp)
 
-- **Drawing**: a CPU-composed picture like the save-data screen (libs/video/osd_saves.c's primitives and font),
-  over a dimmed copy of the last game frame (one read-back when it opens), in the launcher's look (its colours,
-  pixel title font, panels, the gold focus, the prompts bar).
-- **Input**: while open, the pads and keyboard go to the overlay (cellPad_ui_intercept), the game sees nothing;
-  the opening buttons must be released before it can open again; the mouse moves and clicks.
-- **Shortcut**: L3+R3 held 500 ms (configurable: a list of combinations), F1; a brief hint at start
+- **The hold** (ps3recomp include/ps3emu/guest_pause.h; port/native/dev_state.cpp dotheroes_host_pause): every
+  guest clock stands still (the timebase, sys_time_get_system_time, sys_time_get_current_time take off the time
+  held), the guest's render thread waits at its next flip request (its frame loop stops between two frames), and
+  OpenAL Soft's device pauses (ALC_SOFT_pause_device: music, effects and a movie's sound resume where they were).
+  Its other threads run on but see no time pass. The log's frame watch leaves the held time out.
+- **Drawing**: composed on the CPU at the window's size -- the paused frame (read back once when it opens: the
+  renderer copies its last frame for it) scaled with its aspect kept and dimmed toward the launcher's night blue; a
+  panel in the launcher's look (its colours, its stepped-corner frame, the project's 5x7 pixel font for titles --
+  port/ui_pixel_font.h, now shared by the launcher and the game -- the gold focus and the pixel cursor); text in the
+  game's UI font and the prompts in the player's style (libs/video/osd_saves.c's drawing, made public as
+  ps3_ui_*). The renderer copies the picture over the frame in each present (g_ps3_osd_menu); while the game is
+  held the overlay presents itself (g_ps3_osd_present_again).
+- **Input**: the pads read directly (cellPad_host_buttons), the keys and mouse while the window has the keyboard
+  (cellPad_host_keys); the game's pad withheld while it is open (cellPad_ui_intercept). D-pad, left stick
+  (repeat after 400 ms), A/Cross or Start choose, B/Circle back; arrows, Enter, Space, Esc, Backspace; the mouse
+  focuses a row under it and a click chooses it.
+- **Shortcut**: the chosen chord held 500 ms (`DOTHEROES_OVERLAY_COMBO`: L3+R3 by default, Back/Select+Start,
+  L1+R1+Back/Select), F1, Escape; the window's close button opens Exit Game's question (a second close then
+  closes). The chord kept from the game (cellPad_set_chord_guard): its buttons alone reach the game as before
+  (each held back at most 120 ms in case the rest follows; a quicker tap is passed on afterwards), the whole chord
+  never does -- the character editor's undo and redo stay the player's. Released before it can open again; the
+  menu closes only once every button and key is up. Not over the game's own save screen. A hint at start for 6 s
   (`DOTHEROES_OVERLAY_HINT`).
-- **Pause**: the guest held while the overlay is open [H: the safest point -- the PPU main thread at its frame
-  wait, with the vblank clock and audio paused; to be designed after reading how the save-data dialog waits].
-- **Pages**: Resume; Display & Graphics; Audio; Controls; Performance; Return to Launcher; Exit Game (each
-  confirmed, Cancel focused). Settings written through one writer that merges (below).
-- **One writer**: the game writes the settings file by read-merge-write under a lock file
-  (`config/dotheroes.cfg.lock`), the worker the same, so neither overwrites the other's unrelated values.
+- **Pages**: PAUSED (Resume Game, Display & Graphics, Audio, Controls, Performance, Return to Launcher, Exit
+  Game); Display & Graphics (display mode, VSync -- both at once, on the window's thread); Audio (master, music,
+  effects, mute -- at once); Controls (button prompts -- shared with the launcher -- the shortcut, the start hint);
+  Performance (frame limit -- at once between any two limits but 30 --, the performance overlay, log detail -- at
+  the next start, said under the items). Return to Launcher and Exit Game ask first ("Progress since your last save
+  will be lost."), Cancel focused.
+- **Ending the session**: `<install>/logs/session-end` says how (launcher, exit); the game is released, its own
+  shutdown runs (ps3_host_quit: the request to its callbacks, then exit with the exit handlers: the window's place,
+  the caches, the log). The launcher reads the file when the game's process ends: Exit closes it too; Return
+  brings it to the front with the controller's focus. With the new launcher setting "Close the launcher when the
+  game starts" (`LAUNCHER_CLOSE_ON_START`) the game starts it again (`CUBIC_LAUNCHER`, `--after-game`).
+- **One writer**: the game writes the settings file by read-merge-write under `config/dotheroes.cfg.lock`, and
+  the worker (tools/game_settings.py) takes the same lock, so neither overwrites the other's values.
 
 ## M10.3: audio and input
 
-- Master (listener gain), music and effects (factors in the native sound manager and the Streamer), mute; live.
-- Remapping: a binding table (pad buttons and keys to the PS3's buttons) in the settings, applied in cellPad;
-  conflicts shown; defaults restorable; prompt style shared (LAUNCHER_PROMPTS becomes the game's too).
+- **Volumes** (port/native/audio/sound_manager.cpp nsm_set_volumes; settings DOTHEROES_VOLUME_MASTER, _MUSIC,
+  _SFX 0-100 and DOTHEROES_MUTE; the launcher's Settings and the overlay's Audio page): music and effects as factors
+  on their own sources, on top of the game's own levels (its options' music and effects levels stay as the game
+  sets them); master and mute on OpenAL's listener -- every source of the context, a movie's sound too; applied at
+  once to what is playing (every source's gain set again). 100/100/100 unmuted: factors of 1, the original output.
+- **Bindings** (ps3recomp libs/input/cellPad.c; settings DOTHEROES_PAD_MAP, DOTHEROES_KEY_MAP; the overlay's
+  Controls page: "Controller buttons..." and "Keyboard keys..."): each of the game's sixteen buttons pressed by a
+  pad button of the player's choice (applied to what the game is given -- the menu reads the pads as they are, so
+  a binding can never lock the player out of it) and a key of their choice. Choosing a row waits for the button
+  or key (5 s; Esc keeps a key); one already bound to another of the game's buttons is swapped onto it -- never two
+  on one, never one left without -- and the menu says which; "Restore the defaults". The keyboard's defaults gain
+  L3 and R3 (3 and 4), which it lacked. The rows name the pad's buttons in the player's prompt style.
+- **Prompts**: the launcher's LAUNCHER_PROMPTS is the game's too (its own host screens: the save list) from the
+  start and when changed in the overlay; Steam and generic draw Xbox's shapes there. Automatic follows the
+  controller in use (cellPad's device family), as before. Hot-plug and reconnection: the runtime's (cellPad's pad
+  thread, docs/PC_EXPERIENCE.md section 7b).
+- Not here: new vibration (M14).
 
 ## M10.4: logos, the menu, saves
 
-- Skip the startup logos (`DOTHEROES_SKIP_LOGOS`, on by default) by a guarded patch at the branch the lift shows;
-  the title's music, animation and attract mode untouched; the new game's opening kept.
-- The title menu without INSTALL (PC_EXPERIENCE section 7).
-- The save-data screens' polish (docs/SAVE_UI.md).
+- **The start-up logos** (port/main.cpp logos_begin; DOTHEROES_SKIP_LOGOS, on by default, the launcher's Settings,
+  Game): nothing is cut out -- the original start-up runs whole, every initialization in it, with the guest's
+  clocks eight times as fast (ps3emu/guest_pause.h ps3_guest_warp_set: a time added to every guest clock, never
+  decreasing) and no frame limit, so its screens pass in a moment. It ends when the first movie opens (the
+  title's background: the interactive title with its music, animation and attract mode at their own pace), at a
+  save-data screen, or after 30 s -- always before a new game, so its opening is untouched. Off: the original pace.
+- The title menu without INSTALL (PC_EXPERIENCE section 7): not started (needs the menu's table read in the lift).
+- The save-data screens' polish (docs/SAVE_UI.md): not started.
 
 ## M10.5: integration
 

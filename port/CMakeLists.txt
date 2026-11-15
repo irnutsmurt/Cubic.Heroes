@@ -292,6 +292,7 @@ add_executable(${PROJECT_NAME}
     stubs.cpp
     diag/diag.cpp
     diag/game_log.cpp
+    overlay.cpp
     game_patches.cpp
     cpu_place.cpp
     ${PS3RECOMP_SCAFFOLD}

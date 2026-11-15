@@ -1,0 +1,1018 @@
+From 3072ad7c4d1304f34514741ea4a1f12c013989a5 Mon Sep 17 00:00:00 2001
+From: giteaguy <73799093+irnutsmurt@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 17:36:55 -0800
+Subject: [PATCH] M10: display modes, a host frame limiter, the game held by
+ its host, a port's own menu, bindings
+
+- Vulkan window: PS3RECOMP_VK_DISPLAY_MODE windowed (resizable, PS3RECOMP_VK_WINDOW_RECT restored on a display
+  that exists) / borderless / exclusive (the display's current mode, never another; refused: borderless);
+  rsx_vulkan_backend_window_rect for the next session; PS3RECOMP_VK_WINDOW_HIDDEN for tests; VSync off falls
+  back to MAILBOX without IMMEDIATE; the frame's aspect kept (black bars); a minimized window skips its presents
+  and makes its swapchain again when back; live display-mode and VSync changes on the window's thread
+  (rsx_vulkan_backend_request_display).
+- include/ps3emu/guest_pause.h: the game held (every guest clock -- the timebase, sys_time_get_system_time,
+  sys_time_get_current_time -- stands still; the render thread waits at its flip request); a host frame limiter
+  at the flip request (a high-resolution waitable timer, then a yield); a clock warp (a time added to every
+  guest clock, never decreasing).
+- A port's own menu (osd.h g_ps3_osd_menu): its picture copied over the frame in each present, the last frame
+  read back once for its background; g_ps3_host_close_request: the window's close and Escape asked first; the
+  save screen's drawing public (ps3_ui_*).
+- cellPad: cellPad_host_buttons / cellPad_host_keys (the pads, keys and mouse as they are, for a port's menu); a
+  chord guard (a shortcut's buttons alone reach the game, the whole chord never); the player's bindings (each of
+  the game's buttons from a pad button of their choice, applied to what the game is given; the keyboard's keys
+  changeable, L3 and R3 on 3 and 4 by default).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ include/ps3emu/guest_pause.h    | 192 ++++++++++++++++++++++++
+ include/ps3emu/osd.h            |  36 +++++
+ libs/input/cellPad.c            | 201 +++++++++++++++++++++++--
+ libs/video/cellGcmSys.c         |   3 +
+ libs/video/osd_saves.c          |  30 ++++
+ libs/video/rsx_vulkan_backend.c | 253 ++++++++++++++++++++++++++++++--
+ libs/video/rsx_vulkan_backend.h |   6 +
+ runtime/ppu/ppu_sysprx.cpp      |   8 +-
+ runtime/syscalls/sys_timer.c    |  20 ++-
+ 9 files changed, 723 insertions(+), 26 deletions(-)
+ create mode 100644 include/ps3emu/guest_pause.h
+
+diff --git a/include/ps3emu/guest_pause.h b/include/ps3emu/guest_pause.h
+new file mode 100644
+index 0000000..d436477
+--- /dev/null
++++ b/include/ps3emu/guest_pause.h
+@@ -0,0 +1,192 @@
++/*
++ * ps3_guest_pause -- the game held by its host (a port's in-game menu): every guest clock stands still while it
++ * is held (the timebase, sys_time_get_system_time, sys_time_get_current_time: their readings exclude the time
++ * held, so the game resumes exactly where it was, with no long frame), and the guest's render thread waits at
++ * its next flip request (cellGcmSys), so the game's frame loop stops between two frames. Its other threads run on
++ * but see no time pass. Header-only, one shared object (as ps3emu/osd.h); one writer (the port), any reader;
++ * the readers retry a torn read (seqlock).
++ */
++#ifndef PS3EMU_GUEST_PAUSE_H
++#define PS3EMU_GUEST_PAUSE_H
++
++#include <stdint.h>
++#ifdef _WIN32
++#  include <windows.h>
++#else
++#  include <time.h>
++#  include <sched.h>
++#endif
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#if defined(_MSC_VER)
++#  define PS3_GUEST_PAUSE_SHARED __declspec(selectany)
++#else
++#  define PS3_GUEST_PAUSE_SHARED __attribute__((weak))
++#endif
++
++typedef struct {
++    uint32_t seq;        /* odd while being changed */
++    int      on;
++    uint64_t since_ns;   /* when the current hold began (on the clock below) */
++    uint64_t total_ns;   /* every earlier hold, added up */
++} ps3_guest_pause_state;
++
++PS3_GUEST_PAUSE_SHARED ps3_guest_pause_state g_ps3_guest_pause = { 0, 0, 0, 0 };
++
++static inline uint64_t ps3_guest_pause_now_ns(void)
++{
++#ifdef _WIN32
++    static LARGE_INTEGER f;
++    LARGE_INTEGER c;
++    if (!f.QuadPart) QueryPerformanceFrequency(&f);
++    QueryPerformanceCounter(&c);
++    return (uint64_t)(c.QuadPart / f.QuadPart) * 1000000000ull +
++           (uint64_t)(c.QuadPart % f.QuadPart) * 1000000000ull / (uint64_t)f.QuadPart;
++#else
++    struct timespec ts;
++    clock_gettime(CLOCK_MONOTONIC, &ts);
++    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
++#endif
++}
++
++/* A guest clock's speed-up (a port skipping its title's start-up logos: the original sequence, its clocks run
++ * `factor` times as fast until the port ends it): the time added so far, never decreasing. One writer. */
++typedef struct { uint32_t seq; int on; uint32_t factor; uint64_t since_ns, total_ns; } ps3_guest_warp_state;
++PS3_GUEST_PAUSE_SHARED ps3_guest_warp_state g_ps3_guest_warp = { 0, 0, 1, 0, 0 };
++
++static inline uint64_t ps3_guest_pause_now_ns(void);
++static inline uint64_t ps3_guest_ahead_ns(void)
++{
++    const ps3_guest_warp_state* w = &g_ps3_guest_warp;
++    for (;;) {
++        const uint32_t a = __atomic_load_n(&w->seq, __ATOMIC_ACQUIRE);
++        if (a & 1) continue;
++        const int on = __atomic_load_n(&w->on, __ATOMIC_RELAXED);
++        const uint32_t f = __atomic_load_n(&w->factor, __ATOMIC_RELAXED);
++        const uint64_t since = __atomic_load_n(&w->since_ns, __ATOMIC_RELAXED);
++        const uint64_t total = __atomic_load_n(&w->total_ns, __ATOMIC_RELAXED);
++        if (!on && !total) return 0;   /* the common case: never warped */
++        const uint64_t now = on ? ps3_guest_pause_now_ns() : 0;
++        __atomic_thread_fence(__ATOMIC_ACQUIRE);
++        if (__atomic_load_n(&w->seq, __ATOMIC_RELAXED) != a) continue;
++        return total + (on && now > since ? (now - since) * (f > 1 ? f - 1 : 0) : 0);
++    }
++}
++
++static inline void ps3_guest_warp_set(int on, uint32_t factor)
++{
++    ps3_guest_warp_state* w = &g_ps3_guest_warp;
++    if (!!on == !!__atomic_load_n(&w->on, __ATOMIC_ACQUIRE)) return;
++    const uint64_t now = ps3_guest_pause_now_ns();
++    __atomic_add_fetch(&w->seq, 1, __ATOMIC_ACQ_REL);
++    if (on) {
++        __atomic_store_n(&w->factor, factor > 1 ? factor : 1, __ATOMIC_RELAXED);
++        __atomic_store_n(&w->since_ns, now, __ATOMIC_RELAXED);
++    } else {
++        const uint64_t since = __atomic_load_n(&w->since_ns, __ATOMIC_RELAXED);
++        const uint32_t f = __atomic_load_n(&w->factor, __ATOMIC_RELAXED);
++        __atomic_store_n(&w->total_ns, __atomic_load_n(&w->total_ns, __ATOMIC_RELAXED) +
++                                       (now > since ? (now - since) * (f > 1 ? f - 1 : 0) : 0), __ATOMIC_RELAXED);
++    }
++    __atomic_store_n(&w->on, on ? 1 : 0, __ATOMIC_RELAXED);
++    __atomic_add_fetch(&w->seq, 1, __ATOMIC_RELEASE);
++}
++
++/* The time held so far, to take off a guest clock's reading: never decreasing, so a held clock never runs back */
++static inline uint64_t ps3_guest_paused_ns(void)
++{
++    const ps3_guest_pause_state* s = &g_ps3_guest_pause;
++    for (;;) {
++        const uint32_t a = __atomic_load_n(&s->seq, __ATOMIC_ACQUIRE);
++        if (a & 1) continue;
++        const int on = __atomic_load_n(&s->on, __ATOMIC_RELAXED);
++        const uint64_t since = __atomic_load_n(&s->since_ns, __ATOMIC_RELAXED);
++        const uint64_t total = __atomic_load_n(&s->total_ns, __ATOMIC_RELAXED);
++        const uint64_t now = on ? ps3_guest_pause_now_ns() : 0;
++        __atomic_thread_fence(__ATOMIC_ACQUIRE);
++        if (__atomic_load_n(&s->seq, __ATOMIC_RELAXED) != a) continue;
++        return total + (on && now > since ? now - since : 0);
++    }
++}
++
++static inline int ps3_guest_paused(void) { return __atomic_load_n(&g_ps3_guest_pause.on, __ATOMIC_ACQUIRE); }
++
++/* the port: hold (1) or release (0) the game */
++static inline void ps3_guest_pause_set(int on)
++{
++    ps3_guest_pause_state* s = &g_ps3_guest_pause;
++    if (!!on == !!__atomic_load_n(&s->on, __ATOMIC_ACQUIRE)) return;
++    const uint64_t now = ps3_guest_pause_now_ns();
++    __atomic_add_fetch(&s->seq, 1, __ATOMIC_ACQ_REL);
++    if (on) {
++        __atomic_store_n(&s->since_ns, now, __ATOMIC_RELAXED);
++    } else {
++        const uint64_t since = __atomic_load_n(&s->since_ns, __ATOMIC_RELAXED);
++        __atomic_store_n(&s->total_ns, __atomic_load_n(&s->total_ns, __ATOMIC_RELAXED) + (now > since ? now - since : 0),
++                         __ATOMIC_RELAXED);
++    }
++    __atomic_store_n(&s->on, on ? 1 : 0, __ATOMIC_RELAXED);
++    __atomic_add_fetch(&s->seq, 1, __ATOMIC_RELEASE);
++}
++
++/* the guest's render thread, at its flip request: waits while the game is held */
++static inline void ps3_guest_pause_wait(void)
++{
++    while (ps3_guest_paused()) {
++#ifdef _WIN32
++        Sleep(4);
++#else
++        struct timespec ts = { 0, 4000000 };
++        nanosleep(&ts, NULL);
++#endif
++    }
++}
++
++/* A host frame limiter at the flip request (a port's frame-rate setting): each frame's request waits for its
++ * deadline on the high-resolution clock -- a sleep to within 2 ms, then a yield -- so the limit holds evenly at any
++ * rate, never quantized to a vblank. 0: none. The deadlines resynchronize after a frame far behind. */
++PS3_GUEST_PAUSE_SHARED volatile uint64_t g_ps3_frame_period_ns = 0;
++
++static inline void ps3_frame_limit_set(uint64_t period_ns) { __atomic_store_n(&g_ps3_frame_period_ns, period_ns, __ATOMIC_RELEASE); }
++
++static inline void ps3_frame_limit_wait(void)
++{
++    static uint64_t next;
++    const uint64_t p = __atomic_load_n(&g_ps3_frame_period_ns, __ATOMIC_ACQUIRE);
++    if (!p) { next = 0; return; }
++    uint64_t now = ps3_guest_pause_now_ns();
++    if (!next || now > next + 4 * p || next > now + 4 * p) { next = now + p; return; }   /* (re)started, or far off */
++#ifdef _WIN32
++    /* a high-resolution waitable timer (Windows 10 1803 and later): a sleep to within a fraction of a millisecond,
++     * with no spinning; without it, Sleep to within 2 ms and then a yield */
++    static HANDLE timer = (HANDLE)-1;
++    if (timer == (HANDLE)-1) timer = CreateWaitableTimerExW(NULL, NULL, 0x00000002 /* HIGH_RESOLUTION */, TIMER_ALL_ACCESS);
++    if (timer && now + 300000ull < next) {
++        LARGE_INTEGER due;
++        due.QuadPart = -(LONGLONG)((next - now - 200000ull) / 100ull);   /* 100 ns units, relative; 0.2 ms early */
++        if (SetWaitableTimer(timer, &due, 0, NULL, NULL, FALSE)) WaitForSingleObject(timer, INFINITE);
++        now = ps3_guest_pause_now_ns();
++    }
++#endif
++    while (now < next) {
++        const uint64_t left = next - now;
++#ifdef _WIN32
++        if (left > 2000000ull) Sleep((DWORD)((left - 1000000ull) / 1000000ull));
++        else SwitchToThread();
++#else
++        if (left > 2000000ull) { struct timespec ts = { 0, (long)(left - 1000000ull) }; nanosleep(&ts, NULL); }
++        else sched_yield();
++#endif
++        now = ps3_guest_pause_now_ns();
++    }
++    next += p;
++}
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* PS3EMU_GUEST_PAUSE_H */
+diff --git a/include/ps3emu/osd.h b/include/ps3emu/osd.h
+index 45a9090..811090a 100644
+--- a/include/ps3emu/osd.h
++++ b/include/ps3emu/osd.h
+@@ -365,6 +365,17 @@ int  ps3_ui_have_font(void);
+ /* Compose the screen at w x h (4 bytes a pixel; BGRA when bgra, else RGBA).
+  * 1 when composed, 0 when it cannot be (no font). */
+ int  ps3_osd_saves_compose(const ps3_osd_saves_state* s, uint8_t* img, uint32_t w, uint32_t h, int bgra);
++/* M10.2: the screen's drawing for a port's own menu -- the same font, shapes and prompts. A canvas: w x h pixels of
++ * 4 bytes (BGRA when bgra). Colours 0xRRGGBB, a the opacity (0-255); text at baseline y, px high; a prompt's
++ * button 0 confirm, 1 back, size its height; text and buttons return their width. */
++typedef struct { uint8_t* p; int w, h, bgra; } ps3_ui_canvas;
++void  ps3_ui_fill(const ps3_ui_canvas* c, int x0, int y0, int x1, int y1, uint32_t rgb, int a);
++void  ps3_ui_rrect(const ps3_ui_canvas* c, float x0, float y0, float x1, float y1, float r, uint32_t rgb, int a);
++void  ps3_ui_rrect_outline(const ps3_ui_canvas* c, float x0, float y0, float x1, float y1, float r, float t,
++                           uint32_t rgb, int a);
++float ps3_ui_text(const ps3_ui_canvas* c, float x, float y, const char* s, int px, uint32_t rgb, int a, float maxw);
++float ps3_ui_text_width(const char* s, int px);
++float ps3_ui_button(const ps3_ui_canvas* c, int style, int button, float x, float cy, float size);
+ /* The minute the screen's clock shows (it is recomposed when this changes). */
+ long ps3_osd_saves_clock(void);
+ /* A screen closed: the next one starts at its first rows. */
+@@ -380,6 +391,31 @@ void ps3_osd_saves_reset(void);
+ PS3_OSD_SHARED volatile uint32_t g_ps3_osd_presents = 0;
+ PS3_OSD_SHARED int (*g_ps3_osd_present_again)(void) = 0;
+ 
++/* A port's own full-window menu (its in-game settings, M10): the port composes the whole picture at the window's
++ * size (want_w x want_h, BGRA when bgra -- both the backend's) and posts it; the backend copies it over the game's
++ * picture in every present while `open`. The frame under it: the port sets snap_want, the backend reads the game's
++ * last frame (RGBA, snap_w x snap_h) into `snap` and sets snap_ready. `lock` guards px/w/h/rev against the copy. */
++typedef struct {
++    volatile char  lock;
++    int            open;
++    uint32_t       rev, w, h;
++    const uint8_t* px;
++    uint32_t       want_w, want_h, drawn;
++    int            bgra;
++    int            snap_want, snap_ready;
++    uint32_t       snap_w, snap_h;
++    uint8_t*       snap;
++} ps3_osd_menu_state;
++
++PS3_OSD_SHARED ps3_osd_menu_state g_ps3_osd_menu = { 0 };
++
++/* A port that asks before the game closes: the window's close button (why 0) and Escape (why 1) go to it first;
++ * it returns 1 when it has taken the request (its own question), 0 to let the game close as before. */
++PS3_OSD_SHARED int (*g_ps3_host_close_request)(int why) = 0;
++
++static inline void ps3_osd_menu_lock(void)   { while (__atomic_test_and_set(&g_ps3_osd_menu.lock, __ATOMIC_ACQUIRE)) { } }
++static inline void ps3_osd_menu_unlock(void) { __atomic_clear(&g_ps3_osd_menu.lock, __ATOMIC_RELEASE); }
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
+index ada0469..876f4d6 100644
+--- a/libs/input/cellPad.c
++++ b/libs/input/cellPad.c
+@@ -728,6 +728,47 @@ static void pad_sdl_read(PadHostState* out, int on_thread)
+ static void pad_poll_sdl2(void) { pad_sdl_read(s_host_state, 0); }
+ 
+ #if PAD_BACKEND_SDL2
++/* M10.3: the keyboard's binding for each of the game's buttons (bit i of CELL_PAD_CTRL_*): an SDL scancode */
++static volatile int s_keymap[16] = {
++    SDL_SCANCODE_TAB, SDL_SCANCODE_3, SDL_SCANCODE_4, SDL_SCANCODE_RETURN,          /* Select, L3, R3, Start */
++    SDL_SCANCODE_UP, SDL_SCANCODE_RIGHT, SDL_SCANCODE_DOWN, SDL_SCANCODE_LEFT,
++    SDL_SCANCODE_1, SDL_SCANCODE_2, SDL_SCANCODE_Q, SDL_SCANCODE_W,                 /* L2, R2, L1, R1 */
++    SDL_SCANCODE_S, SDL_SCANCODE_X, SDL_SCANCODE_Z, SDL_SCANCODE_A };               /* Triangle, Circle, Cross, Square */
++static const int k_keymap_default[16] = {
++    SDL_SCANCODE_TAB, SDL_SCANCODE_3, SDL_SCANCODE_4, SDL_SCANCODE_RETURN, SDL_SCANCODE_UP, SDL_SCANCODE_RIGHT,
++    SDL_SCANCODE_DOWN, SDL_SCANCODE_LEFT, SDL_SCANCODE_1, SDL_SCANCODE_2, SDL_SCANCODE_Q, SDL_SCANCODE_W,
++    SDL_SCANCODE_S, SDL_SCANCODE_X, SDL_SCANCODE_Z, SDL_SCANCODE_A };
++
++/* a key (its SDL name, "Z", "Left Shift" ...) for one of the game's buttons; empty or unknown: the default. 1 when
++ * the name was known. */
++int cellPad_set_key_binding(int game_bit, const char* key_name)
++{
++    if (game_bit < 0 || game_bit > 15) return 0;
++    const SDL_Scancode sc = key_name && *key_name ? SDL_GetScancodeFromName(key_name) : SDL_SCANCODE_UNKNOWN;
++    __atomic_store_n(&s_keymap[game_bit], sc != SDL_SCANCODE_UNKNOWN ? (int)sc : k_keymap_default[game_bit], __ATOMIC_RELEASE);
++    return sc != SDL_SCANCODE_UNKNOWN;
++}
++
++const char* cellPad_key_binding_name(int game_bit)
++{
++    if (game_bit < 0 || game_bit > 15) return "";
++    return SDL_GetScancodeName((SDL_Scancode)__atomic_load_n(&s_keymap[game_bit], __ATOMIC_ACQUIRE));
++}
++
++/* a port's menu, binding a key: the first key held now (its SDL name), F1 and Escape left out; 0 when none */
++int cellPad_host_key_held(char* name, int n)
++{
++    if (!SDL_WasInit(SDL_INIT_VIDEO) || !SDL_GetKeyboardFocus()) return 0;
++    int count = 0;
++    const Uint8* ks = SDL_GetKeyboardState(&count);
++    for (int sc = 4; ks && sc < count; sc++)
++        if (ks[sc] && sc != SDL_SCANCODE_F1 && sc != SDL_SCANCODE_ESCAPE) {
++            snprintf(name, (size_t)n, "%s", SDL_GetScancodeName((SDL_Scancode)sc));
++            return name[0] != 0;
++        }
++    return 0;
++}
++
+ /* Keyboard fallback with the SDL2 backend: the same key map as the XInput one above,
+  * read from SDL's keyboard state while one of this process's SDL windows (the
+  * Vulkan backend's, PS3RECOMP_VK_WINDOW=1) has keyboard focus. That window's
+@@ -741,19 +782,12 @@ static void pad_poll_keyboard(void)
+     PadHostState* hs = &s_host_state[0];
+     u16 btns = 0;
+     if (SDL_GetKeyboardFocus()) {
+-        static const struct { SDL_Scancode sc; u16 btn; } map[] = {
+-            { SDL_SCANCODE_UP,     CELL_PAD_CTRL_UP },      { SDL_SCANCODE_DOWN,  CELL_PAD_CTRL_DOWN },
+-            { SDL_SCANCODE_LEFT,   CELL_PAD_CTRL_LEFT },    { SDL_SCANCODE_RIGHT, CELL_PAD_CTRL_RIGHT },
+-            { SDL_SCANCODE_Z,      CELL_PAD_CTRL_CROSS },   { SDL_SCANCODE_X,     CELL_PAD_CTRL_CIRCLE },
+-            { SDL_SCANCODE_A,      CELL_PAD_CTRL_SQUARE },  { SDL_SCANCODE_S,     CELL_PAD_CTRL_TRIANGLE },
+-            { SDL_SCANCODE_Q,      CELL_PAD_CTRL_L1 },      { SDL_SCANCODE_W,     CELL_PAD_CTRL_R1 },
+-            { SDL_SCANCODE_1,      CELL_PAD_CTRL_L2 },      { SDL_SCANCODE_2,     CELL_PAD_CTRL_R2 },
+-            { SDL_SCANCODE_RETURN, CELL_PAD_CTRL_START },   { SDL_SCANCODE_TAB,   CELL_PAD_CTRL_SELECT },
+-        };
+         int n = 0;
+         const Uint8* ks = SDL_GetKeyboardState(&n);
+-        for (unsigned i = 0; ks && i < sizeof map / sizeof map[0]; i++)
+-            if ((int)map[i].sc < n && ks[map[i].sc]) btns |= map[i].btn;
++        for (unsigned i = 0; ks && i < 16; i++) {
++            const int sc = __atomic_load_n(&s_keymap[i], __ATOMIC_RELAXED);
++            if (sc > 0 && sc < n && ks[sc]) btns |= (u16)(1u << i);
++        }
+     }
+     /* No focus: everything released, so a key held while switching away
+      * does not stay down. */
+@@ -939,6 +973,114 @@ static int SDLCALL pad_sdl_thread(void* arg)
+ }
+ #endif
+ 
++/* M10.2: a port's own shortcut (its in-game menu: L3+R3 held, say) kept from the game. The buttons of the chord
++ * (s_chord_mask) reach the game as they always did when pressed alone -- each held back for at most s_chord_ms
++ * when it goes down, in case the rest of the chord follows; when the whole chord is held, none of its buttons
++ * reaches the game until every one is released (the character editor's undo and redo, on L3 and R3 alone,
++ * still work; the chord never triggers them). */
++static volatile u32 s_chord_mask = 0;
++static volatile unsigned s_chord_ms = 120;
++static struct { int swallow; u32 pending, shown, pulse; unsigned long long since, pulse_until; } s_chord[PAD_MAX_HOST_PORTS];
++
++void cellPad_set_chord_guard(u32 mask, unsigned ms)
++{
++    s_chord_ms = ms;
++    __atomic_store_n(&s_chord_mask, mask, __ATOMIC_RELEASE);
++}
++
++static void pad_chord_filter(unsigned long long now)
++{
++    const u32 m = __atomic_load_n(&s_chord_mask, __ATOMIC_ACQUIRE);
++    if (!m) return;
++    for (int i = 0; i < PAD_MAX_HOST_PORTS; i++) {
++        PadHostState* hs = &s_host_state[i];
++        const u32 held = hs->buttons & m;
++        if (held == m) s_chord[i].swallow = 1;               /* the whole chord: the shortcut's */
++        if (s_chord[i].swallow) {
++            if (!held) s_chord[i].swallow = 0;
++            hs->buttons &= ~m;
++            s_chord[i].pending = s_chord[i].shown = s_chord[i].pulse = 0;
++            continue;
++        }
++        const u32 fresh = held & ~s_chord[i].pending;
++        if (fresh && !s_chord[i].pending) s_chord[i].since = now;
++        s_chord[i].pending |= fresh;
++        /* a press released while still held back (a tap): given to the game afterwards, for 50 ms */
++        const u32 released = s_chord[i].pending & ~held;
++        if (released) {
++            const u32 never = released & ~s_chord[i].shown;
++            if (never) { s_chord[i].pulse |= never; s_chord[i].pulse_until = now + 50; }
++            s_chord[i].pending &= ~released;
++            s_chord[i].shown &= ~released;
++        }
++        if (now - s_chord[i].since >= s_chord_ms) s_chord[i].shown |= s_chord[i].pending;   /* no chord: the game's */
++        if (now >= s_chord[i].pulse_until) s_chord[i].pulse = 0;
++        hs->buttons = (hs->buttons & ~m) | (s_chord[i].pending & s_chord[i].shown) | s_chord[i].pulse;
++    }
++}
++
++/* M10.2: the host pads' digital buttons as last read (any pad, OR-ed; CELL_PAD_CTRL_*), and the left stick's y
++ * (128 centred) -- what a port's own shortcut and menu read, whatever the game is given */
++u32 cellPad_host_buttons(u32* ly)
++{
++    PadHostState snap[PAD_MAX_HOST_PORTS];
++#if PAD_BACKEND_SDL2
++    if (s_pad_thread) {
++        pad_pub_lock();
++        memcpy(snap, s_pub_state, sizeof snap);
++        pad_pub_unlock();
++    } else
++#endif
++    memcpy(snap, s_host_state, sizeof snap);
++    u32 b = 0, y = 128;
++    for (int i = 0; i < PAD_MAX_HOST_PORTS; i++) {
++        if (!snap[i].connected) continue;
++        b |= snap[i].buttons;
++        if (y == 128 && (snap[i].analog_ly < 64 || snap[i].analog_ly > 192)) y = snap[i].analog_ly;
++    }
++    if (ly) *ly = y;
++    return b;
++}
++
++/* M10.3: the player's bindings. The pads: for each of the game's sixteen buttons (bit i of CELL_PAD_CTRL_*), the
++ * pad's own buttons that press it (s_remap[i]; by default its own bit) -- applied to what the game is given, never
++ * to what a port's menu reads (cellPad_host_buttons: the pads as they are). The keyboard: the key for each of the
++ * game's buttons (an SDL scancode; s_keymap; L3 and R3 on 3 and 4). */
++static volatile u32 s_remap[16] = { 1u << 0, 1u << 1, 1u << 2, 1u << 3, 1u << 4, 1u << 5, 1u << 6, 1u << 7,
++                                    1u << 8, 1u << 9, 1u << 10, 1u << 11, 1u << 12, 1u << 13, 1u << 14, 1u << 15 };
++static volatile int s_remap_on = 0;
++
++void cellPad_set_pad_binding(int game_bit, u32 pad_bits)
++{
++    if (game_bit < 0 || game_bit > 15) return;
++    s_remap[game_bit] = pad_bits ? pad_bits : 1u << game_bit;
++    int on = 0;
++    for (int i = 0; i < 16; i++) if (s_remap[i] != 1u << i) on = 1;
++    __atomic_store_n(&s_remap_on, on, __ATOMIC_RELEASE);
++}
++
++static void pad_remap_all(void)
++{
++    if (!__atomic_load_n(&s_remap_on, __ATOMIC_ACQUIRE)) return;
++    for (int p = 0; p < PAD_MAX_HOST_PORTS; p++) {
++        PadHostState* hs = &s_host_state[p];
++        if (!hs->connected) continue;
++        const u32 b = hs->buttons;
++        u32 o = 0;
++        for (int i = 0; i < 16; i++) if (b & s_remap[i]) o |= 1u << i;
++        hs->buttons = (u16)o;
++        hs->press_up = (o & CELL_PAD_CTRL_UP) ? 255 : 0;       hs->press_down = (o & CELL_PAD_CTRL_DOWN) ? 255 : 0;
++        hs->press_left = (o & CELL_PAD_CTRL_LEFT) ? 255 : 0;   hs->press_right = (o & CELL_PAD_CTRL_RIGHT) ? 255 : 0;
++        hs->press_triangle = (o & CELL_PAD_CTRL_TRIANGLE) ? 255 : 0;
++        hs->press_circle = (o & CELL_PAD_CTRL_CIRCLE) ? 255 : 0;
++        hs->press_cross = (o & CELL_PAD_CTRL_CROSS) ? 255 : 0;
++        hs->press_square = (o & CELL_PAD_CTRL_SQUARE) ? 255 : 0;
++        hs->press_l1 = (o & CELL_PAD_CTRL_L1) ? 255 : 0;       hs->press_r1 = (o & CELL_PAD_CTRL_R1) ? 255 : 0;
++        if (s_remap[8] != CELL_PAD_CTRL_L2) hs->trigger_l2 = (o & CELL_PAD_CTRL_L2) ? 255 : 0;
++        if (s_remap[9] != CELL_PAD_CTRL_R2) hs->trigger_r2 = (o & CELL_PAD_CTRL_R2) ? 255 : 0;
++    }
++}
++
+ static void pad_poll_backend(void)
+ {
+     static unsigned long long s_last_ms = 0;
+@@ -963,6 +1105,8 @@ static void pad_poll_backend(void)
+         pad_poll_sdl2();
+     }
+ #endif
++    pad_chord_filter(now);   /* the shortcut's chord, on the pads' own buttons */
++    pad_remap_all();         /* then the player's bindings */
+ #if defined(_WIN32) || PAD_BACKEND_SDL2
+     if (!s_host_state[0].connected) pad_poll_keyboard();
+ #endif
+@@ -1817,3 +1961,38 @@ s32 cellPadClearBuf(u32 port_no)
+     /* Nothing to clear in our implementation -- state is polled fresh */
+     return CELL_OK;
+ }
++
++/* M10.2: the keys and the mouse a port's own menu reads -- only while the game's window has the keyboard (else 0
++ * and the mouse at -1): bit 0 F1, 1 up, 2 down, 3 left, 4 right, 5 Enter (or the keypad's), 6 Esc, 7 Backspace,
++ * 8 space; the mouse in the window's pixels, its buttons (bit 0 the left) */
++u32 cellPad_host_keys(int* mx, int* my, int* mbuttons)
++{
++    if (mx) *mx = -1;
++    if (my) *my = -1;
++    if (mbuttons) *mbuttons = 0;
++#if PAD_BACKEND_SDL2
++    if (!SDL_WasInit(SDL_INIT_VIDEO)) return 0;
++    SDL_Window* w = SDL_GetKeyboardFocus();
++    if (!w) return 0;
++    int n = 0;
++    const Uint8* ks = SDL_GetKeyboardState(&n);
++    if (!ks) return 0;
++    static const SDL_Scancode sc[] = { SDL_SCANCODE_F1, SDL_SCANCODE_UP, SDL_SCANCODE_DOWN, SDL_SCANCODE_LEFT,
++                                       SDL_SCANCODE_RIGHT, SDL_SCANCODE_RETURN, SDL_SCANCODE_ESCAPE,
++                                       SDL_SCANCODE_BACKSPACE, SDL_SCANCODE_SPACE };
++    u32 k = 0;
++    for (unsigned i = 0; i < sizeof sc / sizeof sc[0]; i++)
++        if ((int)sc[i] < n && ks[sc[i]]) k |= 1u << i;
++    if (SDL_SCANCODE_KP_ENTER < n && ks[SDL_SCANCODE_KP_ENTER]) k |= 1u << 5;
++    if (SDL_GetMouseFocus() == w) {
++        int x = 0, y = 0;
++        const Uint32 b = SDL_GetMouseState(&x, &y);
++        if (mx) *mx = x;
++        if (my) *my = y;
++        if (mbuttons) *mbuttons = (b & SDL_BUTTON_LMASK) ? 1 : 0;
++    }
++    return k;
++#else
++    return 0;
++#endif
++}
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index 17bf545..ad283e0 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -33,6 +33,7 @@
+ #endif
+ #include "../../include/ps3emu/guest_call.h" /* g_ps3_guest_caller for direct handler dispatch */
+ #include "../../include/ps3emu/ps3_ftrace.h"  /* PS3_FTRACE timeline */
++#include "../../include/ps3emu/guest_pause.h" /* the game held by its host: the render thread waits at its flip */
+ #include "../../include/ps3emu/osd.h"         /* the frame-rate readout's frame times (PS3_OSD_FPS) */
+ 
+ /* Guest EA of the GCM context (begin/end/current/callback) the title writes its
+@@ -4062,6 +4063,8 @@ static s32 gcm_flip_request(u32 bufferId, int in_fifo)
+                        ps3_ft_span(PS3_FT_FLIP_REQ, 0, bufferId, (uint32_t)in_fifo, t, t);
+                        ps3_ft_cpu_frame(t); }
+     ps3_osd_frame_note();
++    ps3_frame_limit_wait();   /* a port's frame limit: this frame's deadline */
++    ps3_guest_pause_wait();   /* held by the host (a port's in-game menu): the frame loop stops here, between frames */
+ 
+     /* Invoke via OPD resolution, not a raw call into guest code.
+      *
+diff --git a/libs/video/osd_saves.c b/libs/video/osd_saves.c
+index efb4e4d..955a50e 100644
+--- a/libs/video/osd_saves.c
++++ b/libs/video/osd_saves.c
+@@ -634,3 +634,33 @@ int ps3_osd_saves_compose(const ps3_osd_saves_state* S, uint8_t* img, uint32_t W
+     }
+     return 1;
+ }
++
++/* ---- M10.2: the same drawing for a port's own menu (its in-game settings; ps3emu/osd.h) ------------------ */
++
++void ps3_ui_fill(const ps3_ui_canvas* c, int x0, int y0, int x1, int y1, uint32_t rgb, int a)
++{
++    fill_rect((const Canvas*)c, x0, y0, x1, y1, rgb, a);
++}
++
++void ps3_ui_rrect(const ps3_ui_canvas* c, float x0, float y0, float x1, float y1, float r, uint32_t rgb, int a)
++{
++    rrect((const Canvas*)c, x0, y0, x1, y1, r, rgb, a);
++}
++
++void ps3_ui_rrect_outline(const ps3_ui_canvas* c, float x0, float y0, float x1, float y1, float r, float t,
++                          uint32_t rgb, int a)
++{
++    rrect_outline((const Canvas*)c, x0, y0, x1, y1, r, t, rgb, a);
++}
++
++float ps3_ui_text(const ps3_ui_canvas* c, float x, float y, const char* s, int px, uint32_t rgb, int a, float maxw)
++{
++    return draw_text((const Canvas*)c, x, y, s, px, rgb, a, maxw);
++}
++
++float ps3_ui_text_width(const char* s, int px) { return text_width(s, px); }
++
++float ps3_ui_button(const ps3_ui_canvas* c, int style, int button, float x, float cy, float size)
++{
++    return draw_button((const Canvas*)c, style, button, x, cy, size);
++}
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index 7e5f0cf..85f7cf1 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -2206,6 +2206,40 @@ static void vk_window_drop(const char* why)
+ 
+ static int vk_present_again(void);   /* below: a host dialog's own presents */
+ 
++/* The window's display mode (0 windowed, 1 borderless, 2 exclusive) and, while windowed and not maximized, its
++ * place and size (rect[4]: maximized) -- the port keeps them for the next session (rsx_vulkan_backend_window_rect) */
++static struct { int mode; int rect[5]; int pending; } s_win;
++
++/* M10.2: a display mode (0 windowed, 1 borderless, 2 exclusive) and VSync asked for while the game runs: made on
++ * the window's thread at its next message pump; VSync makes the swapchain again with the new present mode */
++static struct { int mode; int vsync_changed; } s_win_req = { -1, 0 };
++
++void rsx_vulkan_backend_request_display(int mode, int vsync)
++{
++    if (mode >= 0 && mode <= 2) __atomic_store_n(&s_win_req.mode, mode, __ATOMIC_RELEASE);
++    if (vsync >= 0) {
++        const char* cur = getenv("PS3RECOMP_VK_PRESENT_MODE");
++        const int now_on = !cur || !*cur || !strcmp(cur, "fifo");
++        if (now_on != !!vsync) {
++#ifdef _WIN32
++            _putenv_s("PS3RECOMP_VK_PRESENT_MODE", vsync ? "fifo" : "immediate");
++#else
++            setenv("PS3RECOMP_VK_PRESENT_MODE", vsync ? "fifo" : "immediate", 1);
++#endif
++            __atomic_store_n(&s_win_req.vsync_changed, 1, __ATOMIC_RELEASE);
++        }
++    }
++}
++
++int rsx_vulkan_backend_window_mode(void) { return s_vk.window ? s_win.mode : -1; }
++
++int rsx_vulkan_backend_window_rect(int out[5])
++{
++    if (!s_win.rect[2] || s_win.mode != 0) return 0;   /* kept after the window closes: read at exit */
++    memcpy(out, s_win.rect, sizeof s_win.rect);
++    return 1;
++}
++
+ static void vk_window_open(const char* title)
+ {
+     if (!vk_env_on("PS3RECOMP_VK_WINDOW")) return;
+@@ -2213,11 +2247,55 @@ static void vk_window_open(const char* title)
+         VK_LOG("window disabled, continuing headless: SDL video init failed: %s\n", SDL_GetError());
+         return;
+     }
+-    Uint32 flags = SDL_WINDOW_VULKAN | SDL_WINDOW_SHOWN;
+-    if (vk_env_on("PS3RECOMP_VK_FULLSCREEN")) flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
+-    s_vk.window = SDL_CreateWindow(title && title[0] ? title : "ps3recomp",
+-                                   SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+-                                   (int)s_vk.width, (int)s_vk.height, flags);
++    /* PS3RECOMP_VK_DISPLAY_MODE=windowed|borderless|exclusive (PS3RECOMP_VK_FULLSCREEN=1 alone: borderless).
++     * windowed: decorated and resizable, at PS3RECOMP_VK_WINDOW_RECT=x,y,w,h[,maximized] when that lies on a
++     * display (else centred at the frame's size); borderless: the display's own mode, covered; exclusive:
++     * fullscreen at the display's *current* mode (the same resolution and refresh -- the display's mode is
++     * never changed; refused: borderless). PS3RECOMP_VK_WINDOW_HIDDEN=1 (tests): never shown. */
++    const char* dm = getenv("PS3RECOMP_VK_DISPLAY_MODE");
++    s_win.mode = dm && !strcmp(dm, "exclusive") ? 2 : dm && !strcmp(dm, "borderless") ? 1
++               : dm && !strcmp(dm, "windowed") ? 0 : vk_env_on("PS3RECOMP_VK_FULLSCREEN") ? 1 : 0;
++    Uint32 flags = SDL_WINDOW_VULKAN | (vk_env_on("PS3RECOMP_VK_WINDOW_HIDDEN") ? SDL_WINDOW_HIDDEN : SDL_WINDOW_SHOWN);
++    int wx = SDL_WINDOWPOS_CENTERED, wy = SDL_WINDOWPOS_CENTERED, ww = (int)s_vk.width, wh = (int)s_vk.height, wmax = 0;
++    if (s_win.mode == 0) {
++        flags |= SDL_WINDOW_RESIZABLE;
++        int r[5] = { 0, 0, 0, 0, 0 };
++        const char* e = getenv("PS3RECOMP_VK_WINDOW_RECT");
++        if (e && sscanf(e, "%d,%d,%d,%d,%d", &r[0], &r[1], &r[2], &r[3], &r[4]) >= 4 && r[2] >= 320 && r[3] >= 180) {
++            for (int d = 0; d < SDL_GetNumVideoDisplays(); d++) {   /* its title bar on a display that exists */
++                SDL_Rect b;
++                if (SDL_GetDisplayBounds(d, &b) == 0 && r[0] + 64 > b.x && r[0] < b.x + b.w - 64 &&
++                    r[1] >= b.y - 8 && r[1] < b.y + b.h - 32) {
++                    wx = r[0]; wy = r[1]; ww = r[2]; wh = r[3]; wmax = r[4] == 1;
++                    break;
++                }
++            }
++        }
++        if (wmax) flags |= SDL_WINDOW_MAXIMIZED;
++    } else if (s_win.mode == 1) {
++        flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
++    }
++    s_vk.window = SDL_CreateWindow(title && title[0] ? title : "ps3recomp", wx, wy, ww, wh, flags);
++    if (s_vk.window && s_win.mode == 2) {
++        SDL_DisplayMode cur;
++        const int d = SDL_GetWindowDisplayIndex(s_vk.window);
++        if (SDL_GetDesktopDisplayMode(d < 0 ? 0 : d, &cur) != 0 || SDL_SetWindowDisplayMode(s_vk.window, &cur) != 0 ||
++            SDL_SetWindowFullscreen(s_vk.window, SDL_WINDOW_FULLSCREEN) != 0) {
++            VK_LOG("window: exclusive fullscreen refused (%s): borderless\n", SDL_GetError());
++            SDL_SetWindowFullscreen(s_vk.window, SDL_WINDOW_FULLSCREEN_DESKTOP);
++            s_win.mode = 1;
++        } else {
++            VK_LOG("window: exclusive fullscreen at the display's mode %dx%d %d Hz\n", cur.w, cur.h, cur.refresh_rate);
++        }
++    }
++    if (s_vk.window) {
++        SDL_GetWindowPosition(s_vk.window, &s_win.rect[0], &s_win.rect[1]);
++        SDL_GetWindowSize(s_vk.window, &s_win.rect[2], &s_win.rect[3]);
++        s_win.rect[4] = (SDL_GetWindowFlags(s_vk.window) & SDL_WINDOW_MAXIMIZED) != 0;
++        VK_LOG("window: %s, %dx%d at %d,%d%s\n", s_win.mode == 2 ? "exclusive fullscreen" : s_win.mode == 1 ?
++               "borderless fullscreen" : "windowed", s_win.rect[2], s_win.rect[3], s_win.rect[0], s_win.rect[1],
++               s_win.rect[4] ? ", maximized" : "");
++    }
+     s_vk.windowed = 1;          /* so vk_window_drop also shuts SDL video down */
+     g_ps3_osd_present_again = vk_present_again;   /* a host dialog's own presents (ps3emu/osd.h) */
+     if (!s_vk.window) {
+@@ -2315,7 +2393,10 @@ static int vk_create_swapchain(void)
+             if (nm > 16) nm = 16;
+             pvkGetPhysicalDeviceSurfacePresentModesKHR(s_vk.phys, s_vk.surface, &nm, modes);
+             for (u32 i = 0; i < nm; i++) if (modes[i] == want) mode = want;
+-            if (mode != want) VK_LOG("present mode %s not offered; FIFO\n", e);
++            /* VSync off (immediate) where the surface has no IMMEDIATE: MAILBOX, which never waits either */
++            if (mode != want && want == VK_PRESENT_MODE_IMMEDIATE_KHR)
++                for (u32 i = 0; i < nm; i++) if (modes[i] == VK_PRESENT_MODE_MAILBOX_KHR) mode = VK_PRESENT_MODE_MAILBOX_KHR;
++            if (mode == VK_PRESENT_MODE_FIFO_KHR) VK_LOG("present mode %s not offered; FIFO\n", e);
+             if (mode == VK_PRESENT_MODE_MAILBOX_KHR && count < 3) count = 3;
+             if (caps.maxImageCount && count > caps.maxImageCount) count = caps.maxImageCount;
+         }
+@@ -2363,8 +2444,19 @@ static int vk_create_swapchain(void)
+     return 0;
+ }
+ 
++static int vk_window_minimized(void)
++{
++    if (!s_vk.window) return 0;
++    int w = 0, h = 0;
++    SDL_Vulkan_GetDrawableSize(s_vk.window, &w, &h);
++    return (SDL_GetWindowFlags(s_vk.window) & SDL_WINDOW_MINIMIZED) || w <= 0 || h <= 0;
++}
++
+ static void vk_swapchain_lost(void)
+ {
++    /* minimized (no drawable area): made again once the window is back (vk_present_window) */
++    if (vk_window_minimized()) { s_win.pending = 1; return; }
++    s_win.pending = 0;
+     vk_device_idle();
+     if (vk_create_swapchain()) vk_window_drop("the swapchain could not be recreated");
+ }
+@@ -2681,6 +2773,82 @@ static int vk_osd_saves_draw(VkCommandBuffer cb, u32 idx)
+     return 1;
+ }
+ 
++/* A port's own menu (ps3emu/osd.h g_ps3_osd_menu): its picture, composed by the port at the window's size,
++ * copied over the game's every present while open; and the game's last frame read back once when asked (the
++ * menu's background), recorded in one present and handed over at the next (its fence then waited for). */
++static struct {
++    vk_buffer buf, snap;
++    uint8_t*  snap_cpu;
++    int       snap_pending, failed;
++} s_omenu;
++
++static int vk_osd_menu_draw(VkCommandBuffer cb, u32 idx)
++{
++    ps3_osd_menu_state* M = &g_ps3_osd_menu;
++    const u32 W = s_vk.sc_extent.width, H = s_vk.sc_extent.height;
++    __atomic_store_n(&M->want_w, W, __ATOMIC_RELAXED);
++    __atomic_store_n(&M->want_h, H, __ATOMIC_RELAXED);
++    __atomic_store_n(&M->bgra, s_vk.sc_osd == 2, __ATOMIC_RELEASE);
++    if (s_omenu.snap_pending) {   /* the copy recorded in the last present: done */
++        const size_t n = (size_t)s_vk.width * s_vk.height * 4;
++        if (!s_omenu.snap_cpu) s_omenu.snap_cpu = (uint8_t*)malloc(n);
++        if (s_omenu.snap_cpu) {
++            memcpy(s_omenu.snap_cpu, s_omenu.snap.ptr, n);
++            M->snap = s_omenu.snap_cpu; M->snap_w = s_vk.width; M->snap_h = s_vk.height;
++            __atomic_store_n(&M->snap_ready, 1, __ATOMIC_RELEASE);
++        }
++        s_omenu.snap_pending = 0;
++    }
++    if (__atomic_load_n(&M->snap_want, __ATOMIC_ACQUIRE) && !s_omenu.failed) {
++        const VkDeviceSize n = (VkDeviceSize)s_vk.width * s_vk.height * 4;
++        if (!s_omenu.snap.buf && (vk_create_host_buffer(&s_omenu.snap, n, VK_BUFFER_USAGE_TRANSFER_DST_BIT) != 0 ||
++                                  !s_omenu.snap.coherent)) {
++            if (s_omenu.snap.buf) vk_destroy_present_buffer(&s_omenu.snap);
++            s_omenu.failed = 1;
++            VK_LOG("no coherent host buffer for the menu's background\n");
++        } else {
++            VkBufferImageCopy rg = { .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
++                                     .imageExtent = { s_vk.width, s_vk.height, 1 } };
++            pvkCmdCopyImageToBuffer(cb, s_vk.color.img, VK_IMAGE_LAYOUT_GENERAL, s_omenu.snap.buf, 1, &rg);
++            s_omenu.snap_pending = 1;
++            __atomic_store_n(&M->snap_want, 0, __ATOMIC_RELEASE);
++        }
++    }
++    if (!__atomic_load_n(&M->open, __ATOMIC_ACQUIRE) || s_omenu.failed || !s_vk.sc_osd) return 0;
++    const VkDeviceSize need = (VkDeviceSize)W * H * 4;
++    if (s_omenu.buf.size < need) {
++        if (s_omenu.buf.buf) vk_destroy_present_buffer(&s_omenu.buf);
++        if (vk_create_host_buffer(&s_omenu.buf, need, VK_BUFFER_USAGE_TRANSFER_SRC_BIT) != 0 || !s_omenu.buf.coherent) {
++            if (s_omenu.buf.buf) vk_destroy_present_buffer(&s_omenu.buf);
++            s_omenu.failed = 1;
++            VK_LOG("no coherent host buffer for the menu\n");
++            return 0;
++        }
++    }
++    uint32_t rev = 0;
++    int have = 0;
++    ps3_osd_menu_lock();
++    if (M->px && M->w == W && M->h == H) {
++        memcpy(s_omenu.buf.ptr, M->px, (size_t)need);
++        rev = M->rev;
++        have = 1;
++    }
++    ps3_osd_menu_unlock();
++    if (!have) return 0;
++    VkImageMemoryBarrier b = {
++        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
++        .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
++        .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
++        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++        .image = s_vk.sc_images[idx], .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 },
++    };
++    pvkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &b);
++    VkBufferImageCopy region = { .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .imageExtent = { W, H, 1 } };
++    pvkCmdCopyBufferToImage(cb, s_omenu.buf.buf, s_vk.sc_images[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
++    __atomic_store_n(&M->drawn, rev, __ATOMIC_RELEASE);
++    return 1;
++}
++
+ static void vk_osd_fps_draw(VkCommandBuffer cb, u32 idx)
+ {
+     const int mode = ps3_osd_fps_mode();
+@@ -2772,6 +2940,11 @@ static void vk_osd_fps_draw(VkCommandBuffer cb, u32 idx)
+ static void vk_present_window(void)
+ {
+     if (!s_vk.windowed || !s_vk.swapchain) return;
++    if (vk_window_minimized()) return;   /* nothing to show: the game runs on */
++    if (s_win.pending) {
++        vk_swapchain_lost();
++        if (s_win.pending || !s_vk.swapchain) return;
++    }
+ 
+     u32 idx = 0;
+     VkResult r = pvkAcquireNextImageKHR(s_vk.device, s_vk.swapchain, UINT64_MAX,
+@@ -2798,12 +2971,30 @@ static void vk_present_window(void)
+     };
+     pvkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                           0, 0, NULL, 0, NULL, 1, &b);
++    /* the frame's aspect ratio kept in any window: scaled to fit, centred, the rest black */
++    int32_t dx0 = 0, dy0 = 0, dx1 = (int32_t)s_vk.sc_extent.width, dy1 = (int32_t)s_vk.sc_extent.height;
++    {
++        const double fa = (double)s_vk.width / (double)s_vk.height, wa = (double)dx1 / (double)dy1;
++        if (wa > fa + 1e-3) {   /* wider: bars left and right */
++            const int32_t w = (int32_t)((double)dy1 * fa + 0.5);
++            dx0 = (dx1 - w) / 2; dx1 = dx0 + w;
++        } else if (wa < fa - 1e-3) {   /* taller: bars above and below */
++            const int32_t h = (int32_t)((double)dx1 / fa + 0.5);
++            dy0 = (dy1 - h) / 2; dy1 = dy0 + h;
++        }
++        if (dx0 || dy0) {
++            const VkClearColorValue black = { .float32 = { 0.0f, 0.0f, 0.0f, 1.0f } };
++            const VkImageSubresourceRange all = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
++            pvkCmdClearColorImage(cb, s_vk.sc_images[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &all);
++            pvkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
++                                  0, 0, NULL, 0, NULL, 1, &b);
++        }
++    }
+     VkImageBlit blit = {
+         .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+         .srcOffsets = { { 0, 0, 0 }, { (int32_t)s_vk.width, (int32_t)s_vk.height, 1 } },
+         .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+-        .dstOffsets = { { 0, 0, 0 },
+-                        { (int32_t)s_vk.sc_extent.width, (int32_t)s_vk.sc_extent.height, 1 } },
++        .dstOffsets = { { dx0, dy0, 0 }, { dx1, dy1, 1 } },
+     };
+     pvkCmdBlitImage(cb, s_vk.color.img, VK_IMAGE_LAYOUT_GENERAL,
+                     s_vk.sc_images[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+@@ -2816,6 +3007,7 @@ static void vk_present_window(void)
+     if (nodraw < 0) { const char* e = getenv("PS3_SAVES_TEST_NODRAW"); nodraw = e && *e == '1'; }
+     if (!nodraw && !vk_osd_saves_draw(cb, idx))
+         vk_osd_list_draw(cb, idx);
++    vk_osd_menu_draw(cb, idx);   /* a port's own menu, over everything */
+     b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+     b.dstAccessMask = 0;
+     b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+@@ -6292,14 +6484,55 @@ int rsx_vulkan_backend_pump_messages(void)
+     if (!s_vk.windowed) return 0;
+     int quit = 0;
+     SDL_Event e;
++    /* a display change asked for (rsx_vulkan_backend_request_display): made here, on the window's own thread */
++    const int req = __atomic_exchange_n(&s_win_req.mode, -1, __ATOMIC_ACQ_REL);
++    if (req >= 0 && s_vk.window && req != s_win.mode) {
++        if (req == 0) {
++            SDL_SetWindowFullscreen(s_vk.window, 0);
++            SDL_SetWindowResizable(s_vk.window, SDL_TRUE);
++            if (s_win.rect[2] >= 320) {
++                SDL_SetWindowSize(s_vk.window, s_win.rect[2], s_win.rect[3]);
++                SDL_SetWindowPosition(s_vk.window, s_win.rect[0], s_win.rect[1]);
++            }
++            s_win.mode = 0;
++        } else if (req == 2) {
++            SDL_DisplayMode cur;
++            const int d = SDL_GetWindowDisplayIndex(s_vk.window);
++            if (SDL_GetDesktopDisplayMode(d < 0 ? 0 : d, &cur) == 0 && SDL_SetWindowDisplayMode(s_vk.window, &cur) == 0 &&
++                SDL_SetWindowFullscreen(s_vk.window, SDL_WINDOW_FULLSCREEN) == 0) {
++                s_win.mode = 2;
++            } else {
++                SDL_SetWindowFullscreen(s_vk.window, SDL_WINDOW_FULLSCREEN_DESKTOP);
++                s_win.mode = 1;
++            }
++        } else {
++            SDL_SetWindowFullscreen(s_vk.window, SDL_WINDOW_FULLSCREEN_DESKTOP);
++            s_win.mode = 1;
++        }
++        s_win.pending = 1;   /* the swapchain made again at the window's new size */
++        VK_LOG("window: now %s\n", s_win.mode == 2 ? "exclusive fullscreen" : s_win.mode == 1 ? "borderless fullscreen" : "windowed");
++    }
++    if (__atomic_exchange_n(&s_win_req.vsync_changed, 0, __ATOMIC_ACQ_REL)) s_win.pending = 1;
+     while (SDL_PollEvent(&e)) {
+-        if (e.type == SDL_QUIT) quit = 1;
++        if (e.type == SDL_QUIT) {
++            if (!g_ps3_host_close_request || !g_ps3_host_close_request(0)) quit = 1;   /* the port asks first */
++        }
++        else if (e.type == SDL_WINDOWEVENT && s_vk.window && s_win.mode == 0) {
++            const Uint32 f = SDL_GetWindowFlags(s_vk.window);
++            const int maxed = (f & SDL_WINDOW_MAXIMIZED) != 0;
++            s_win.rect[4] = maxed;
++            if (!maxed && !(f & (SDL_WINDOW_MINIMIZED | SDL_WINDOW_FULLSCREEN_DESKTOP))) {
++                SDL_GetWindowPosition(s_vk.window, &s_win.rect[0], &s_win.rect[1]);
++                SDL_GetWindowSize(s_vk.window, &s_win.rect[2], &s_win.rect[3]);
++            }
++        }
+         /* Esc quits, except while a host dialog is open: there it goes back
+          * (cellPad_ui_keys), and a player backing out of the save list must
+          * not lose the game */
+         else if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE &&
+                  !__atomic_load_n(&g_ps3_osd_saves.open, __ATOMIC_ACQUIRE) &&
+-                 !__atomic_load_n(&g_ps3_osd_list.open, __ATOMIC_ACQUIRE)) quit = 1;
++                 !__atomic_load_n(&g_ps3_osd_list.open, __ATOMIC_ACQUIRE) &&
++                 (!g_ps3_host_close_request || !g_ps3_host_close_request(1))) quit = 1;
+     }
+     return quit ? -1 : 0;
+ }
+diff --git a/libs/video/rsx_vulkan_backend.h b/libs/video/rsx_vulkan_backend.h
+index fc33758..b2931a4 100644
+--- a/libs/video/rsx_vulkan_backend.h
++++ b/libs/video/rsx_vulkan_backend.h
+@@ -75,6 +75,12 @@ void rsx_vulkan_cache_save(void);
+ /* Headless: always 0. Windowed: drains SDL's event queue; -1 once the
+  * window has been closed or Esc pressed. */
+ int  rsx_vulkan_backend_pump_messages(void);
++/* M10: the window's place and size while windowed (out: x, y, w, h, maximized); 0 when not windowed */
++int  rsx_vulkan_backend_window_rect(int out[5]);
++/* M10.2: a display mode (0 windowed, 1 borderless, 2 exclusive; -1 unchanged) and VSync (1, 0; -1 unchanged) while
++ * the game runs -- made on the window's thread; the current mode (-1 without a window) */
++void rsx_vulkan_backend_request_display(int mode, int vsync);
++int  rsx_vulkan_backend_window_mode(void);
+ 
+ /* Read the frame back to host memory (and to PS3RECOMP_VK_DUMP if set), and
+  * show it in the window if there is one. Same as _present_begin() followed
+diff --git a/runtime/ppu/ppu_sysprx.cpp b/runtime/ppu/ppu_sysprx.cpp
+index 5a6fee7..eb6d0cc 100644
+--- a/runtime/ppu/ppu_sysprx.cpp
++++ b/runtime/ppu/ppu_sysprx.cpp
+@@ -26,6 +26,7 @@
+ extern "C" uint64_t host_monotonic_ns(void);
+ #endif
+ #include "ps3emu/log_first.h"
++#include "ps3emu/guest_pause.h"   /* the guest held: its clocks stand still */
+ 
+ extern "C" uint8_t* vm_base;
+ extern "C" void ps3_hle_register_ctx(uint32_t nid, const char* name, void (*fn)(ppu_context*));
+@@ -74,12 +75,15 @@ static void sys_time_get_system_time(ppu_context* ctx)
+     static LARGE_INTEGER s_freq, s_base;
+     if (!s_freq.QuadPart) { QueryPerformanceFrequency(&s_freq); QueryPerformanceCounter(&s_base); }
+     LARGE_INTEGER now; QueryPerformanceCounter(&now);
+-    ctx->gpr[3] = (uint64_t)((now.QuadPart - s_base.QuadPart) * 1000000ull / (uint64_t)s_freq.QuadPart);
++    uint64_t us = (uint64_t)((now.QuadPart - s_base.QuadPart) * 1000000ull / (uint64_t)s_freq.QuadPart);
+ #else
+     /* The same host clock as the timebase (sys_timer.h), so guest code that
+      * mixes mftb and this stays consistent. */
+-    ctx->gpr[3] = host_monotonic_ns() / 1000ull;
++    uint64_t us = host_monotonic_ns() / 1000ull;
+ #endif
++    const uint64_t held = ps3_guest_paused_ns() / 1000ull;   /* the time the host held the game, taken off */
++    us += ps3_guest_ahead_ns() / 1000ull;                    /* and a warp's time added */
++    ctx->gpr[3] = us > held ? us - held : 0;
+ }
+ 
+ /* sys_process_is_stack(u32 addr) -> 1 if addr is in the stack region. We model
+diff --git a/runtime/syscalls/sys_timer.c b/runtime/syscalls/sys_timer.c
+index fdda2f5..87c761f 100644
+--- a/runtime/syscalls/sys_timer.c
++++ b/runtime/syscalls/sys_timer.c
+@@ -14,6 +14,7 @@
+ #include <string.h>
+ #include <stdlib.h>
+ #include "ps3emu/log_first.h"
++#include "ps3emu/guest_pause.h"   /* the guest held: its clocks stand still */
+ #ifdef __APPLE__
+ #include <mach/mach_time.h>
+ #endif
+@@ -74,12 +75,17 @@ uint64_t ppu_timebase_now(void)
+     if (!t0) t0 = now.QuadPart;   /* benign race: same anchor either way */
+     uint64_t d = (uint64_t)(now.QuadPart - t0);
+     uint64_t q = (uint64_t)s_qpc_freq.QuadPart;
+-    return (d / q) * PS3_TIMEBASE_FREQ + (d % q) * PS3_TIMEBASE_FREQ / q;
++    const uint64_t tb = (d / q) * PS3_TIMEBASE_FREQ + (d % q) * PS3_TIMEBASE_FREQ / q;
+ #else
+     const uint64_t ns = host_monotonic_ns();
+-    return (ns / 1000000000ull) * PS3_TIMEBASE_FREQ +
+-           (ns % 1000000000ull) * PS3_TIMEBASE_FREQ / 1000000000ull;
++    const uint64_t tb = (ns / 1000000000ull) * PS3_TIMEBASE_FREQ +
++                        (ns % 1000000000ull) * PS3_TIMEBASE_FREQ / 1000000000ull;
+ #endif
++    /* the time the host held the game, taken off (ps3emu/guest_pause.h) */
++    const uint64_t held = ps3_guest_paused_ns(), ahead = ps3_guest_ahead_ns();   /* held taken off, a warp added */
++    const uint64_t off = (held / 1000000000ull) * PS3_TIMEBASE_FREQ + (held % 1000000000ull) * PS3_TIMEBASE_FREQ / 1000000000ull;
++    const uint64_t add = (ahead / 1000000000ull) * PS3_TIMEBASE_FREQ + (ahead % 1000000000ull) * PS3_TIMEBASE_FREQ / 1000000000ull;
++    return tb + add > off ? tb + add - off : 0;
+ }
+ 
+ #ifndef _WIN32
+@@ -528,6 +534,14 @@ int64_t sys_time_get_current_time(ppu_context* ctx)
+     nsec = (uint64_t)ts.tv_nsec;
+ #endif
+ 
++    {   /* the time the host held the game, taken off (ps3emu/guest_pause.h) */
++        uint64_t t = sec * 1000000000ULL + nsec;
++        const uint64_t held = ps3_guest_paused_ns();
++        t += ps3_guest_ahead_ns();
++        t = t > held ? t - held : 0;
++        sec = t / 1000000000ULL;
++        nsec = t % 1000000000ULL;
++    }
+     if (sec_addr != 0) {
+         write_be64(sec_addr, sec);
+     }
+-- 
+2.56.0.windows.3
+

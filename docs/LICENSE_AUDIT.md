@@ -31,6 +31,7 @@
 | `docs/FFMPEG_MIGRATION_PLAN.md` | INDEP | keep |
 | `docs/HANDOFF.md` | INDEP | keep |
 | `docs/LICENSE_AUDIT.md` | INDEP | keep |
+| `docs/M10_PLAN.md` | INDEP | keep |
 | `docs/M9_LAUNCHER_PLAN.md` | INDEP | keep |
 | `docs/M9_WORKER_PROTOCOL.md` | INDEP | keep |
 | `docs/MILESTONES.md` | INDEP | keep |
@@ -213,6 +214,7 @@
 | `patches/ps3recomp/0156-cellPad-rumble-diagnostics-a-refused-send-reported-P.patch` | INDEP | keep |
 | `patches/ps3recomp/0157-cellAudio-retired-in-a-build-without-its-output-ever.patch` | INDEP | keep |
 | `patches/ps3recomp/0158-Vulkan-the-driver-s-and-loader-s-messages-in-the-log.patch` | INDEP | keep |
+| `patches/ps3recomp/0159-M10-display-modes-a-host-frame-limiter-the-game-held.patch` | INDEP | keep |
 | `port/CMakeLists.txt` | INDEP | keep |
 | `port/LICENSE.ps3recomp` | THIRD | keep: licence file beside it; listed in the README |
 | `port/assets/ui/DejaVuSans.ttf` | THIRD | keep: licence file beside it; listed in the README |
@@ -297,10 +299,12 @@
 | `port/native/waver_game.h` | INDEP | keep |
 | `port/native/waver_task.cpp` | INDEP | keep |
 | `port/native/waver_task.h` | INDEP | keep |
+| `port/overlay.cpp` | INDEP | keep |
 | `port/phys_hooks.cpp` | INDEP | keep |
 | `port/promo_check.cpp` | INDEP | keep |
 | `port/stubs.cpp` | INDEP | keep |
 | `port/ui_assets.cpp` | INDEP | keep |
+| `port/ui_pixel_font.h` | INDEP | keep |
 | `port/win/dotheroes.manifest` | INDEP | keep |
 | `setup_app.py` | INDEP | keep |
 | `tests/actor_steps.py` | INDEP | keep |
@@ -435,6 +439,7 @@
 | `tests/scripts/menu_album.drive` | INDEP | keep |
 | `tests/scripts/menu_tour.drive` | INDEP | keep |
 | `tests/scripts/new_game.drive` | INDEP | keep |
+| `tests/scripts/pause_check.drive` | INDEP | keep |
 | `tests/scripts/perf_walk.drive` | INDEP | keep |
 | `tests/scripts/roundtrip_1.drive` | INDEP | keep |
 | `tests/scripts/roundtrip_2.drive` | INDEP | keep |

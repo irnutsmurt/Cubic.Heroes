@@ -1,0 +1,21 @@
+# M10.2's hold (docs/M10_PLAN.md): the game held by its host -- as its in-game menu holds it -- for 6 s while
+# standing at the castle front, between two guest-memory snapshots 10 s apart (build/m10/pause_test.py reads the
+# game's clocks from them: they must advance by the 4 s not held). Needs DOTHEROES_DEV_STATE=1,
+# DOTHEROES_DEV_MEMSNAP=1, DOTHEROES_DEV_STOP=1 (pause.trigger) and a save at the castle (SAVES=).
+log TitleMovie 120
+sleep 5
+press START
+sleep 3
+press START
+sleep 5
+press CROSS
+state life>0,area==17 60
+sleep 5
+touch memsnap.trigger
+sleep 2
+touch pause.trigger
+sleep 6
+touch pause.trigger
+sleep 2
+touch memsnap.trigger
+sleep 3

@@ -55,9 +55,56 @@ def ensure_performance_settings(install):
         write_game_settings(install, **missing, **stale)
 
 
+class _Lock:
+    """<settings>.lock, the one writer at a time: the launcher's worker here, the game's in-game menu
+    (port/overlay.cpp CfgLock) -- each reads, merges and writes the whole file under it, so neither drops the
+    other's values. A lock older than 10 s (its writer died) is taken over."""
+
+    def __init__(self, path):
+        self.path = path + ".lock"
+        self.ok = False
+
+    def __enter__(self):
+        import time
+        for _ in range(100):
+            try:
+                fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(fd, b"worker\n")
+                os.close(fd)
+                self.ok = True
+                return self
+            except FileExistsError:
+                try:
+                    if time.time() - os.path.getmtime(self.path) > 10:
+                        os.remove(self.path)
+                        continue
+                except OSError:
+                    pass
+                time.sleep(0.02)
+            except OSError:
+                break
+        return self
+
+    def __exit__(self, *a):
+        if self.ok:
+            try:
+                os.remove(self.path)
+            except OSError:
+                pass
+
+
 def write_game_settings(install, strict=False, **values):
-    """the file written whole (a temporary file renamed over it: never half a file); strict: a failure raised
-    (the settings API, tools/settings.py), else ignored as the setup app always did"""
+    """the file written whole (a temporary file renamed over it: never half a file), read and merged under the
+    settings' lock (_Lock: the game's in-game menu writes it too); strict: a failure raised (the settings API,
+    tools/settings.py), else ignored as the setup app always did"""
+    path = game_settings_path(install)
+    if os.path.isdir(os.path.dirname(path)):
+        with _Lock(path):
+            return _write_locked(install, strict, values)
+    return _write_locked(install, strict, values)
+
+
+def _write_locked(install, strict, values):
     cur = read_game_settings(install)
     cur.update(values)
     path = game_settings_path(install)
@@ -66,8 +113,8 @@ def write_game_settings(install, strict=False, **values):
         with open(tmp, "w", newline="\n") as f:
             f.write("# Cubic.Heroes settings: the launcher and the game's menus write this (the rules:\n")
             f.write("#   config/settings_schema.json); editing by hand is fine\n")
-            f.write("# DOTHEROES_FPS: 60, 30 (the original) or 0 (no limit)\n")
-            f.write("# PS3RECOMP_VK_FULLSCREEN: 1 = fullscreen\n")
+            f.write("# DOTHEROES_FPS: 30 (the original), 60, 75 ... 240, display, custom (DOTHEROES_FPS_CUSTOM) or 0\n")
+            f.write("#   (no limit); DOTHEROES_DISPLAY_MODE: windowed, borderless, exclusive\n")
             f.write("# DOTHEROES_NATIVE_CD, DOTHEROES_NATIVE_SOLVER, GCM_WRAP_LAP, DOTHEROES_PRESENT_ONCE: the\n")
             f.write("#   settings that hold 60 fps in fights (0 / empty: the original's way, slower)\n")
             for k, v in sorted(cur.items()):

@@ -58,6 +58,10 @@ extern "C" void movie_planes_record(const char* name, int frame, uint32_t fb);
 
 extern "C" int g_native_movie = 1;   // the hooks' guard: always on (M8.4: Bink is not in the lift)
 
+// M10.4: the game's executable (port/main.cpp) is told when a movie opens -- the title's ends the start-up logos'
+// speed-up. Weak: a program linking this library without it still links.
+extern "C" void dotheroes_movie_opened(const char* name) __attribute__((weak));
+
 namespace {
 
 constexpr uint32_t kSlots = 16, kSlotBytes = 0x100, kPoolBytes = 0x10000;
@@ -360,6 +364,7 @@ int bink_native_open(ppu_context* ctx)
         if (m.streamer) m.sound = m.streamer->open_source(src, 1.0f, true);
         if (!m.sound) fprintf(stderr, "[movie] native: %s: no sound stream (the picture on a steady clock)\n", ps3);
     }
+    if (dotheroes_movie_opened) dotheroes_movie_opened(m.name.c_str());   /* main.cpp: the start-up logos' end */
     fprintf(stderr, "[movie] native: %s opened: %dx%d, %d frames at %d/%d, %s\n", m.name.c_str(), in.width,
             in.height, in.frames, in.rate_num, in.rate_den,
             in.sound_rate ? (std::to_string(in.sound_rate) + " Hz sound x " + std::to_string(in.sound_channels)).c_str()

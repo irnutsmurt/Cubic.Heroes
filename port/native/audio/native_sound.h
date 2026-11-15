@@ -93,6 +93,10 @@ void nsm_debug_capture(nsm_capture_fn fn, void* user);
 // thread -- the first failed_reopens attempts failing (each retried a second later), each attempt taking
 // reopen_ms (a slow output)
 void nsm_debug_device_loss(int failed_reopens, int reopen_ms);
+/* M10.2: the output held (1) or resumed (0) while the game is held by its in-game menu (ALC_SOFT_pause_device) */
+void nsm_host_pause(int on);
+/* M10.3: the player's volumes (0-1) and mute, applied at once to what is playing; 1, 1, 1, 0: the original */
+void nsm_set_volumes(float master, float music, float effects, int mute);
 
 #ifdef __cplusplus
 }

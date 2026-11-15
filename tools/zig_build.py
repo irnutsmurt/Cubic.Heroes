@@ -144,7 +144,7 @@ SCAFFOLD = ["runtime/ppu/ppu_loader.cpp", "runtime/ppu/ppu_hle.cpp", "runtime/pp
 # target_sources, less the lift and the runtime): main.cpp calls into each.
 PORT_SOURCES = ["main.cpp", "stubs.cpp", "game_patches.cpp", "cpu_place.cpp", "phys_hooks.cpp", "audio_hooks.cpp",
                 "movie_hooks.cpp", "promo_check.cpp",
-                "diag/diag.cpp", "diag/game_log.cpp",
+                "diag/diag.cpp", "diag/game_log.cpp", "overlay.cpp",
                 "native/memtest.cpp", "native/memtest_checked.cpp", "native/memtest_bare.cpp", "native/memtest_stores.cpp"]
 RUNTIME_LIB = "libps3recomp_runtime.a"
 NATIVE_LIB = "libdotheroes_native.a"   # port/native: the native SPU-task replacements (Bullet 2.74 in it)
