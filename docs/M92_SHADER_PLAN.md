@@ -556,6 +556,11 @@ building. **The cost of M9.2g's configuration**: 9.4 s to prepare (M9.2f's 9.9 s
 libraries, 21 s and 163 MB. The reference scenes against RPCS3: 5 of 5 within the accepted figures (libraries off,
 and every pipeline linked).
 
+**A fresh install, as a player makes it** (tests/player_install_test.py fresh check game prepare --run-game; the
+updated runtime and configuration): every stage passed; the worker's comprehensive preparation made 2,454 pipelines
+(2,265 from the package's 569 records) and 3,486 shaders, none failed; the install's river fight built no pipeline in
+play (the warm-up made the 2,454 in 0.6 s; the draws took 53).
+
 ### What is static, and what genuinely needs run time
 - **Static**: every program (M9.2a); the record a key reaches (the lookup rule); what each record is (the decoded
   key); the state vocabulary and the material presets (tables in the EBOOT); every material's technique and shader
