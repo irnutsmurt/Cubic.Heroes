@@ -31,6 +31,7 @@
 // handle that is not this player's cannot come (Bink opens none); were one to, it is counted as a native path
 // declining (fatal in the native release: PS3_CENSUS_FATAL's native_decline) and answered as an empty movie.
 #include "ppu_context.h"
+#include "ps3emu/guest_pause.h"   /* M10.2: a hold of the game is no time for a movie */
 #include "ps3emu/census.h"   /* a handle not this player's: a native path declining */
 
 #include "ff_api.h"
@@ -98,6 +99,7 @@ struct Movie {
     std::chrono::steady_clock::time_point last_wait;
     size_t hitch_next = 0;   // DOTHEROES_MOVIE_TEST_HITCH: the next stall due in this movie
     std::chrono::steady_clock::time_point t0, paused_at;
+    uint64_t held0 = 0;   // the time the game had been held (ps3_guest_paused_ns) when it started
     double paused_total = 0;
     // what the close reports
     uint64_t decoded = 0, shown_late = 0, missing = 0, loops = 0;
@@ -213,7 +215,8 @@ double elapsed(Movie& m)
     }
     if (!m.started) return 0.0;
     const auto end = m.paused ? m.paused_at : std::chrono::steady_clock::now();
-    return std::chrono::duration<double>(end - m.t0).count() - m.paused_total;
+    return std::chrono::duration<double>(end - m.t0).count() - m.paused_total -
+           (double)(ps3_guest_paused_ns() - m.held0) / 1e9;   /* the game held by its menu: the movie too */
 }
 
 // DOTHEROES_MOVIE_TEST_HITCH=<s>:<ms>[,...] (a test): the game's own thread stalled for <ms> when a movie's clock
@@ -348,6 +351,7 @@ int bink_native_open(ppu_context* ctx)
     m.period = (double)in.rate_den / in.rate_num;
     m.seq = 1;
     m.t0 = std::chrono::steady_clock::now();
+    m.held0 = ps3_guest_paused_ns();
     m.player = std::move(player);
     const uint32_t h = m.handle;
     memset(vm_base + h, 0, kSlotBytes);

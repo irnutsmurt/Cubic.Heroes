@@ -148,18 +148,29 @@ Making the setup app's downloads (both platforms, from Linux):
 | Z / X / A / S | Cross / Circle / Square / Triangle |
 | Q / W | L1 / R1 |
 | 1 / 2 | L2 / R2 |
+| 3 / 4 | L3 / R3 |
 | Enter | Start |
 | Tab | Select |
 
-Gamepads work too (anything SDL2 recognises).
+Gamepads work too (anything SDL2 recognises), plugged in or out while the game runs.
 
-**Settings** are in the setup app (*Game settings*) and in `dotheroes.cfg`
-next to the game:
+**The in-game menu**: hold **L3 + R3** for half a second (another combination can be chosen), or press **F1** or
+**Esc**. The game pauses while it is open. It has Display & Graphics, Audio, Controls (button prompts, the
+shortcut, and your own controller buttons and keyboard keys), Performance, Return to Launcher and Exit Game.
+Pressing L3 or R3 on its own still reaches the game (the character editor's undo and redo); only the held pair
+opens the menu. The game's own START menu is unchanged.
+
+**Settings** are shared by the launcher (*Settings*) and the in-game menu, kept in the install's
+`config/dotheroes.cfg`. The main ones:
 
 | Setting | Values |
 |---|---|
-| `DOTHEROES_FPS` | `60` (default), `30` (the original cap) or `0` (no limit). The game's logic runs on measured time, so a higher frame rate does not speed it up. |
-| `PS3RECOMP_VK_FULLSCREEN` | `1` fullscreen, `0` window |
+| Display mode (`DOTHEROES_DISPLAY_MODE`) | windowed (resizable; its size and place remembered), borderless, exclusive fullscreen (at your display's own resolution and refresh rate -- the display's mode is never changed) |
+| VSync (`DOTHEROES_VSYNC`) | on / off, independent of the frame limit |
+| Frame limit (`DOTHEROES_FPS`) | 30 (the original), 60 (default), 75, 100, 120, 144, 165, 240, your display's rate, a custom number, unlimited. The game's logic runs on measured time, so the frame rate never changes its speed. |
+| Volumes (`DOTHEROES_VOLUME_MASTER`, `_MUSIC`, `_SFX`, `DOTHEROES_MUTE`) | 0-100 each, applied at once |
+| Skip the start-up logos (`DOTHEROES_SKIP_LOGOS`) | on (default): straight to the title screen; the new game's opening is kept |
+| Performance overlay (`DOTHEROES_PERF_OVERLAY`) | off, the frame rate, or the frame rate and frame times |
 
 Saves are kept in the install folder (`data/gamedata`).
 

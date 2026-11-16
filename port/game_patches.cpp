@@ -54,6 +54,7 @@ int g_dotheroes_fps_nosleep = 0;
 int g_dotheroes_fps_vblank1 = 0;
 int g_dotheroes_fps_novblank = 0;
 int g_dotheroes_step_carry = 1;
+int g_dotheroes_no_install_item = 1;   /* M10.4: the title menu without INSTALL (config/insn_patches.json) */
 }
 
 #include "ppu_recomp.h"   /* ppu_context */
@@ -252,6 +253,10 @@ extern "C" void dotheroes_configure_patches(void)
     fprintf(stderr, "[port] frame cap: %s\n",
             fps == 30 ? "30 fps (original)" : e && !strcmp(e, "display") ? "a frame a vblank, the display's pace"
             : fps == 60 ? "60 fps (vblank)" : "none");
+    /* M10.4: the PS3's INSTALL (a copy of the game to the hard disk) is no use on PC: the title menu ends at ALBUM.
+     * DOTHEROES_TITLE_INSTALL=1 shows it again (tests of the install round trip). */
+    const char* ti = getenv("DOTHEROES_TITLE_INSTALL");
+    g_dotheroes_no_install_item = !(ti && *ti == '1');
     const char* sc = getenv("DOTHEROES_STEP_CARRY");
     g_dotheroes_step_carry = !(sc && *sc == '0');
     fprintf(stderr, "[port] hero step rounding: %s\n",

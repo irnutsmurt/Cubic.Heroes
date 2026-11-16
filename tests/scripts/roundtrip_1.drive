@@ -1,4 +1,5 @@
 # Restart round trips, session 1 of 3 (GAMEDATA=<a persistent root with
+# M10.4: the title menu hides INSTALL unless DOTHEROES_TITLE_INSTALL=1 is in the run's environment
 # saves>): INSTALL from the title menu. Session 2 (roundtrip_2.drive) plays
 # from the installed data and takes a snapshot; session 3 (roundtrip_3.drive)
 # finds the snapshot in ALBUM. With saves the title menu's cursor starts on

@@ -399,6 +399,10 @@ def main():
             if k not in INSTALLED_KEEP:
                 env.pop(k, None)
         env["DOTHEROES_LOG_TO_CONSOLE"] = "1"
+        # the installed game opens its window by default (a player's): offscreen unless WINDOW=1 asks for one, so a
+        # test never appears on the owner's desktop
+        if not window:
+            env["PS3RECOMP_VK_WINDOW"] = "0"
     if os.environ.get("AUDIO") != "1" and not INSTALLED:
         env["SDL_AUDIODRIVER"] = "dummy"
     if os.environ.get("DUMP") == "0":

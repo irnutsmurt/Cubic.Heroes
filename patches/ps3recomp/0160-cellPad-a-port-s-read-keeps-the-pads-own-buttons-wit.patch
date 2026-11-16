@@ -1,0 +1,199 @@
+From de96d5f9d513e7c60a4a3caaabfa7d9f33974f12 Mon Sep 17 00:00:00 2001
+From: giteaguy <73799093+irnutsmurt@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 06:32:39 -0800
+Subject: [PATCH] cellPad: a port's read keeps the pads' own buttons without
+ the pad thread; the bindings' test
+
+cellPad_host_buttons read the remapped state when no pad thread runs (PAD_SDL_THREAD=0): each port's own
+buttons are kept before the chord guard and the bindings. libs/input/tests/test_pad_bindings.c (a fake pad):
+a binding swaps Cross and Circle for the game while the port still sees the pad; the defaults back; L3 alone
+reaches the game after its hold-back, a quick R3 tap is passed on, L3+R3 held never reaches it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libs/input/cellPad.c                 |   8 +-
+ libs/input/tests/test_pad_bindings.c | 139 +++++++++++++++++++++++++++
+ 2 files changed, 146 insertions(+), 1 deletion(-)
+ create mode 100644 libs/input/tests/test_pad_bindings.c
+
+diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
+index 876f4d6..46adb57 100644
+--- a/libs/input/cellPad.c
++++ b/libs/input/cellPad.c
+@@ -1021,6 +1021,8 @@ static void pad_chord_filter(unsigned long long now)
+ 
+ /* M10.2: the host pads' digital buttons as last read (any pad, OR-ed; CELL_PAD_CTRL_*), and the left stick's y
+  * (128 centred) -- what a port's own shortcut and menu read, whatever the game is given */
++static volatile u32 s_host_raw[PAD_MAX_HOST_PORTS];   /* each port's own buttons, before the chord and the bindings */
++
+ u32 cellPad_host_buttons(u32* ly)
+ {
+     PadHostState snap[PAD_MAX_HOST_PORTS];
+@@ -1031,7 +1033,10 @@ u32 cellPad_host_buttons(u32* ly)
+         pad_pub_unlock();
+     } else
+ #endif
+-    memcpy(snap, s_host_state, sizeof snap);
++    {
++        memcpy(snap, s_host_state, sizeof snap);
++        for (int i = 0; i < PAD_MAX_HOST_PORTS; i++) snap[i].buttons = (u16)s_host_raw[i];   /* as the pad is */
++    }
+     u32 b = 0, y = 128;
+     for (int i = 0; i < PAD_MAX_HOST_PORTS; i++) {
+         if (!snap[i].connected) continue;
+@@ -1105,6 +1110,7 @@ static void pad_poll_backend(void)
+         pad_poll_sdl2();
+     }
+ #endif
++    for (int p = 0; p < PAD_MAX_HOST_PORTS; p++) s_host_raw[p] = s_host_state[p].connected ? s_host_state[p].buttons : 0;
+     pad_chord_filter(now);   /* the shortcut's chord, on the pads' own buttons */
+     pad_remap_all();         /* then the player's bindings */
+ #if defined(_WIN32) || PAD_BACKEND_SDL2
+diff --git a/libs/input/tests/test_pad_bindings.c b/libs/input/tests/test_pad_bindings.c
+new file mode 100644
+index 0000000..4d85de1
+--- /dev/null
++++ b/libs/input/tests/test_pad_bindings.c
+@@ -0,0 +1,139 @@
++/* cellPad's player bindings and a port's shortcut chord (M10): what the game is given against what the pad does.
++ *   - a binding: the game's Cross pressed by the pad's Circle and the reverse; the port's own read
++ *     (cellPad_host_buttons) still sees the pad as it is;
++ *   - the chord guard (L3+R3): L3 alone reaches the game after its short hold-back; a quick tap is passed on
++ *     afterwards; the whole chord never reaches it.
++ *
++ *   zig cc -std=gnu17 -target x86_64-windows-gnu -I include -I <SDL2 include> libs/input/tests/test_pad_bindings.c \
++ *          <libSDL2.dll.a> -o test_pad_bindings.exe     (PAD_SDL_THREAD=0; SDL2.dll beside it)
++ *   clang -std=gnu17 -I include $(sdl2-config --cflags) libs/input/tests/test_pad_bindings.c $(sdl2-config --libs)
++ *
++ * No controller is opened: the controller calls are the test's own (over one fake pad), as test_pad_hotplug.c.
++ */
++#include "../cellPad.c"
++#include <assert.h>
++#ifdef _WIN32
++#  include <windows.h>
++static void sleep_ms(unsigned ms) { Sleep(ms); }
++#else
++#  include <unistd.h>
++static void sleep_ms(unsigned ms) { usleep(ms * 1000); }
++#endif
++uint8_t* vm_base;
++uint32_t ppu_vm_size;
++int g_resv_store_active;
++uint32_t g_ww_lo, g_ww_hi;
++void ppu_resv_break_store(uint64_t ea) { (void)ea; }
++void ps3_ww_report_inline(uint32_t a, uint64_t v, int w) { (void)a; (void)v; (void)w; }
++int spu_coh_is_reserved(uint32_t a) { (void)a; return 0; }
++u32 cellGcm_flip_request_count(void) { return 0; }
++void spu_coh_notify_write(uint32_t a) { (void)a; }
++void spu_lockline_lock(void) {}
++void spu_lockline_unlock(void) {}
++
++static uint32_t s_sdl_buttons;   /* the fake pad's SDL_GameControllerButton bits */
++static int s_present = 1;
++int SDL_NumJoysticks(void) { return s_present; }
++SDL_bool SDL_IsGameController(int idx) { return idx == 0 && s_present ? SDL_TRUE : SDL_FALSE; }
++SDL_JoystickID SDL_JoystickGetDeviceInstanceID(int idx) { return idx == 0 ? 1 : -1; }
++SDL_JoystickGUID SDL_JoystickGetDeviceGUID(int idx) { SDL_JoystickGUID g; memset(&g, 0, sizeof g); g.data[0] = (Uint8)idx; return g; }
++const char* SDL_JoystickNameForIndex(int idx) { (void)idx; return "Fake pad"; }
++SDL_GameController* SDL_GameControllerOpen(int idx) { (void)idx; return (SDL_GameController*)&s_sdl_buttons; }
++void SDL_GameControllerClose(SDL_GameController* gc) { (void)gc; }
++SDL_bool SDL_GameControllerGetAttached(SDL_GameController* gc) { (void)gc; return SDL_TRUE; }
++const char* SDL_GameControllerName(SDL_GameController* gc) { (void)gc; return "Fake pad"; }
++SDL_bool SDL_GameControllerHasRumble(SDL_GameController* gc) { (void)gc; return SDL_FALSE; }
++int SDL_GameControllerRumble(SDL_GameController* gc, Uint16 lo, Uint16 hi, Uint32 ms) { (void)gc; (void)lo; (void)hi; (void)ms; return 0; }
++Uint8 SDL_GameControllerGetButton(SDL_GameController* gc, SDL_GameControllerButton b) { (void)gc; return (Uint8)((s_sdl_buttons >> b) & 1u); }
++Sint16 SDL_GameControllerGetAxis(SDL_GameController* gc, SDL_GameControllerAxis a) { (void)gc; (void)a; return 0; }
++void SDL_GameControllerUpdate(void) {}
++int SDL_PeepEvents(SDL_Event* ev, int n, SDL_eventaction action, Uint32 lo, Uint32 hi) { (void)ev; (void)n; (void)action; (void)lo; (void)hi; return 0; }
++Uint32 SDL_WasInit(Uint32 flags) { return flags & SDL_INIT_GAMECONTROLLER; }   /* no video: no keyboard */
++int SDL_InitSubSystem(Uint32 flags) { (void)flags; return 0; }
++const char* SDL_GetError(void) { return "fake"; }
++
++/* what the game is given: the two digital words of cellPadGetData(0), as one CELL_PAD_CTRL_* value */
++static u32 game_buttons(void)
++{
++    const uint32_t ea = 0x2000;
++    sleep_ms(PAD_POLL_INTERVAL_MS + 2);
++    memset(vm_base + ea, 0, 0x100);
++    assert(cellPadGetData(0, (CellPadData*)(uintptr_t)ea) == CELL_OK);
++    const uint8_t* d1 = vm_base + ea + 4 + CELL_PAD_BTN_OFFSET_DIGITAL1 * 2;
++    const uint8_t* d2 = vm_base + ea + 4 + CELL_PAD_BTN_OFFSET_DIGITAL2 * 2;
++    return (u32)d1[1] | (u32)d2[1] << 8;
++}
++
++int main(void)
++{
++#ifdef _WIN32
++    _putenv_s("PAD_SDL_THREAD", "0");
++    vm_base = (uint8_t*)VirtualAlloc(NULL, 0x10000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
++#else
++    setenv("PAD_SDL_THREAD", "0", 1);
++    vm_base = (uint8_t*)calloc(1, 0x10000);
++#endif
++    assert(vm_base);
++    assert(cellPadInit(4) == CELL_OK);
++
++    /* no bindings: the pad's A is the game's Cross */
++    s_sdl_buttons = 1u << SDL_CONTROLLER_BUTTON_A;
++    assert(game_buttons() & CELL_PAD_CTRL_CROSS);
++    s_sdl_buttons = 0;
++    game_buttons();
++
++    /* Cross and Circle swapped: the pad's B (its Circle) presses the game's Cross; the port still sees Circle */
++    cellPad_set_pad_binding(14, CELL_PAD_CTRL_CIRCLE);   /* the game's Cross <- the pad's Circle */
++    cellPad_set_pad_binding(13, CELL_PAD_CTRL_CROSS);    /* the game's Circle <- the pad's Cross */
++    s_sdl_buttons = 1u << SDL_CONTROLLER_BUTTON_B;
++    u32 g = game_buttons();
++    assert((g & CELL_PAD_CTRL_CROSS) && !(g & CELL_PAD_CTRL_CIRCLE));
++    assert(cellPad_host_buttons(NULL) & CELL_PAD_CTRL_CIRCLE);
++    s_sdl_buttons = 1u << SDL_CONTROLLER_BUTTON_A;
++    g = game_buttons();
++    assert((g & CELL_PAD_CTRL_CIRCLE) && !(g & CELL_PAD_CTRL_CROSS));
++    s_sdl_buttons = 0;
++    game_buttons();
++    cellPad_set_pad_binding(14, 0);   /* back to the defaults */
++    cellPad_set_pad_binding(13, 0);
++    s_sdl_buttons = 1u << SDL_CONTROLLER_BUTTON_A;
++    assert(game_buttons() & CELL_PAD_CTRL_CROSS);
++    s_sdl_buttons = 0;
++    game_buttons();
++
++    /* the chord L3+R3 kept from the game */
++    cellPad_set_chord_guard(CELL_PAD_CTRL_L3 | CELL_PAD_CTRL_R3, 120);
++    s_sdl_buttons = 1u << SDL_CONTROLLER_BUTTON_LEFTSTICK;           /* L3 alone, held */
++    assert(!(game_buttons() & CELL_PAD_CTRL_L3));                     /* held back at first */
++    sleep_ms(150);
++    assert(game_buttons() & CELL_PAD_CTRL_L3);                        /* then the game's */
++    s_sdl_buttons = 0;
++    sleep_ms(80);
++    assert(!(game_buttons() & CELL_PAD_CTRL_L3));
++
++    s_sdl_buttons = 1u << SDL_CONTROLLER_BUTTON_RIGHTSTICK;          /* R3 tapped: 30 ms */
++    game_buttons();
++    sleep_ms(20);
++    s_sdl_buttons = 0;
++    assert(game_buttons() & CELL_PAD_CTRL_R3);                        /* passed on afterwards */
++    sleep_ms(80);
++    assert(!(game_buttons() & CELL_PAD_CTRL_R3));
++
++    s_sdl_buttons = 1u << SDL_CONTROLLER_BUTTON_LEFTSTICK;           /* the chord: L3, then R3 at once */
++    game_buttons();
++    s_sdl_buttons |= 1u << SDL_CONTROLLER_BUTTON_RIGHTSTICK;
++    for (int i = 0; i < 40; i++)                                      /* held 600 ms: never the game's */
++        assert(!(game_buttons() & (CELL_PAD_CTRL_L3 | CELL_PAD_CTRL_R3)));
++    assert((cellPad_host_buttons(NULL) & (CELL_PAD_CTRL_L3 | CELL_PAD_CTRL_R3)) == (CELL_PAD_CTRL_L3 | CELL_PAD_CTRL_R3));
++    s_sdl_buttons = 1u << SDL_CONTROLLER_BUTTON_LEFTSTICK;           /* released one by one: still not */
++    assert(!(game_buttons() & CELL_PAD_CTRL_L3));
++    s_sdl_buttons = 0;
++    game_buttons();
++    s_sdl_buttons = 1u << SDL_CONTROLLER_BUTTON_A;                    /* the other buttons all along */
++    assert(game_buttons() & CELL_PAD_CTRL_CROSS);
++    s_sdl_buttons = 0;
++
++    assert(cellPadEnd() == CELL_OK);
++    printf("test_pad_bindings: ok\n");
++    return 0;
++}
+-- 
+2.56.0.windows.3
+

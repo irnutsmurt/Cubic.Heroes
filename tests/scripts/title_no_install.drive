@@ -1,0 +1,25 @@
+# M10.4 (docs/M10_PLAN.md): the title menu without the PS3's INSTALL -- NEW GAME, CONTINUE, EDITOR, ALBUM. With a
+# save (SAVES=) the cursor starts on CONTINUE. Down twice reaches ALBUM, the last item; down again wraps to NEW
+# GAME (it went to INSTALL before); up from NEW GAME wraps back to ALBUM; then CROSS on ALBUM opens the album,
+# as before. DOTHEROES_TITLE_INSTALL=1 shows INSTALL again (install_data.drive, roundtrip_1.drive).
+log TitleMovie 120
+sleep 5
+press START                 # "PRESS START BUTTON" -> main menu, CONTINUE
+sleep 3
+shot menu-continue
+press DOWN
+sleep 1
+press DOWN
+sleep 1
+shot menu-album
+press DOWN
+sleep 1
+shot menu-wrapped-down
+press UP
+sleep 1
+shot menu-wrapped-up
+press CROSS                 # ALBUM
+sleep 4
+shot album
+press CIRCLE
+sleep 3

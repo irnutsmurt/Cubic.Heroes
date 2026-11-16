@@ -1123,6 +1123,10 @@ static void apply_pc_settings(void)
         shown = period ? b : "unlimited";
     }
     put_env("DOTHEROES_FPS", fps);
+    /* No copy of every presented frame back into host memory unless a frame dump asks for it: only the test
+     * tooling reads it (the centre pixel, the dump), and it held play at about 144 fps on the owner's PC (the
+     * benchmark mode, R6-R8's measurements, has always run without it) */
+    if (!getenv("PS3RECOMP_VK_DUMP")) set_default_env("PS3RECOMP_VK_READBACK", "0");
     const char* v = getenv("DOTHEROES_VSYNC");
     const bool vsync_off = v && *v == '0';
     if (vsync_off) set_default_env("PS3RECOMP_VK_PRESENT_MODE", "immediate");

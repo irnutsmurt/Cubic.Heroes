@@ -7,9 +7,8 @@ measured, [H] a hypothesis still to check.
 
 ## Checkpoint (kept current; the newest state first)
 
-- **Stage** (2026-11-14 evening): M10.1 and M10.2 done and tested; M10.3's volumes and bindings done (the
-  bindings tested through the menu, not yet in play); M10.4's logo skip done and timed; the INSTALL removal and the
-  save screens' polish not started; M10.5 not started.
+- **Stage** (2026-11-16): M10 done -- M10.1-M10.5 implemented and tested without the owner; the owner's hands-on
+  checks (below) remain, as M9's do.
 - **Done**: M9 (c2c251d). M10.0 the inventory. M10.1: display modes, the remembered window, VSync, the frame
   limits through a host limiter, the performance overlay, the picture's aspect. M10.2: the in-game overlay (the
   hold, the pages, the shortcut kept from the game, Return to Launcher and Exit Game with the launcher's side, the
@@ -36,20 +35,40 @@ measured, [H] a hypothesis still to check.
     written, the performance overlay turned on and written, the exit question (Cancel focused) cancelled, resumed
     (the game released); Return to Launcher: `session-end` "launcher", the game's own exit path;
   - unit tests: the new settings (every frame-limit value, custom, VSync, display mode; invalid ones refused).
-- **Known issues**:
-  - in play on this PC, 240 and unlimited stop at about 144 fps (143.8-143.9, the display's refresh, offscreen
-    too); R8 measured 200+ uncapped with the benchmark's present settings -- what holds it is not found yet;
-  - a hold over the title's movie: the movie catches up on its own clock after release (one 0.68 s frame); the
-    movie player's clock should follow the hold;
-  - borderless and exclusive fullscreen, tearing with VSync off, the overlay over a real frame on the owner's
-    monitor, the remapped buttons in play and real controllers (PlayStation, Switch, Steam): the owner's
-    hands-on checks (nothing automated may cover the owner's screen).
+- **Added after the first push (c07944a)**:
+  - the title menu without INSTALL (config/insn_patches.json, guard g_dotheroes_no_install_item;
+    DOTHEROES_TITLE_INSTALL=1 shows it again for the install round-trip drives): the menu's item count -- the
+    Title script's Menu.Size, or ClearMenu.Size after the game is cleared -- read at run time by the menu's drawing
+    (func_005CD8E8) and its input (func_005CE018), one fewer after each read; INSTALL is the last item in both
+    menus, so the cursor wraps at ALBUM and INSTALL's action is never chosen. tests/scripts/title_no_install.drive:
+    NEW GAME, CONTINUE, EDITOR, ALBUM; down from ALBUM to NEW GAME, up back to ALBUM, ALBUM opens; with
+    DOTHEROES_TITLE_INSTALL=1 the same drive reaches INSTALL. The cleared game's menu (6 items to 5) is covered by
+    the same two reads but was not run (no cleared save at hand);
+  - a silent movie's clock follows a hold (port/native/movie/bink_native.cpp): a hold over the title's movie no
+    longer leaves a long frame after it (0.68 s before; none now);
+  - no copy of every presented frame into host memory for a player (PS3RECOMP_VK_READBACK=0 unless a frame dump
+    is asked for: only the test tooling reads it);
+  - the bindings and the chord guard tested in the runtime (libs/input/tests/test_pad_bindings.c, a fake pad): the
+    game's Cross pressed by the pad's Circle and the reverse, the port's own read unchanged, the defaults back;
+    L3 alone reaching the game after its hold-back, a quick R3 tap passed on afterwards, L3+R3 held 600 ms never
+    reaching it;
+  - the save screens: they already follow the reference the owner gave (2026-11-10); here they take the shared
+    prompt choice (LAUNCHER_PROMPTS) from the start; their look is unchanged pending the owner's view.
+- **The "144 fps cap" was VSync, and a test fault**: tests/boot_smoke.py with INSTALLED= dropped the window switch,
+  so the installed game opened its (visible) window with VSync on -- the play drives at 240 and unlimited in
+  batches 1, 2 and 4 ran in a window on the owner's desktop at the display's 144 Hz, and the river-fight
+  regression run asked for a visible, topmost window itself (its scenario's `#! env WINDOW=1 VISIBLE=1
+  TOPMOST=1`). Both against the owner's instruction; reported to the owner. Fixed: boot_smoke keeps an INSTALLED
+  run offscreen unless WINDOW=1; scenario runs pass WINDOW=0 VISIBLE=0 TOPMOST=0. Offscreen, play at 240 and
+  unlimited runs at 143-160 fps (the castle front's own cost), the walk 5.01-5.16 units a second, physics 60
+  steps a second, the clocks x1.00.
+- **Known issues**: none open in M10's code. Not covered automatically (the owner's hands-on checks): borderless
+  and exclusive fullscreen and the live switch between modes, tearing with VSync off, the overlay over a real
+  frame and its mouse use, L3+R3 on a real controller in the character editor, the remapped buttons in play,
+  PlayStation, Switch and Steam controllers, the cleared game's title menu.
 - **Outstanding decisions**: none blocking. Proposed defaults ("decided here") can be changed at review: the
-  shortcut chords offered, the window state file, the logo skip's x8 speed-up.
-- **Next steps**: (1) the INSTALL item removed from the title menu (read the menu's table in the lift; a guarded
-  instruction patch, PC_EXPERIENCE section 7); (2) the movie clock through a hold; (3) what caps play at 144; (4)
-  the bindings in play (a drive with a remapped button); (5) the save screens' polish; (6) M10.5: README and the
-  launcher plan, the regression runs, the package rebuilt.
+  shortcut chords offered, the window state file, the logo skip's x8 speed-up, the save screens' look.
+- **Next**: the owner's M9 and M10 hands-on acceptance; then M11 (full-game testing and release readiness).
 
 ## The owner's request (2026-11-14)
 
@@ -280,8 +299,8 @@ driver allows); input-to-frame latency estimated from the pad's poll to the next
   decreasing) and no frame limit, so its screens pass in a moment. It ends when the first movie opens (the
   title's background: the interactive title with its music, animation and attract mode at their own pace), at a
   save-data screen, or after 30 s -- always before a new game, so its opening is untouched. Off: the original pace.
-- The title menu without INSTALL (PC_EXPERIENCE section 7): not started (needs the menu's table read in the lift).
-- The save-data screens' polish (docs/SAVE_UI.md): not started.
+- The title menu without INSTALL: done (the checkpoint above).
+- The save-data screens: the shared prompt choice; their look unchanged pending the owner (the checkpoint above).
 
 ## M10.5: integration
 

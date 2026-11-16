@@ -41,6 +41,20 @@
       "new": "0x38000002",
       "guard": "g_dotheroes_fps_novblank",
       "note": "the same in that wait's loop"
+    },
+    {
+      "addr": "0x005CD98C",
+      "orig": "0x60000000",
+      "new": "0x3863FFFF",
+      "guard": "g_dotheroes_no_install_item",
+      "note": "M10.4: the title menu without the PS3's INSTALL. func_005CD8E8 (the menu's drawing) reads the item count, the Title script's Menu.Size (5) or ClearMenu.Size (6), with `bl 0x558E84`; INSTALL is the last item in both. The nop after the call becomes `addi r3,r3,-1`: one item fewer drawn"
+    },
+    {
+      "addr": "0x005CE150",
+      "orig": "0x60000000",
+      "new": "0x3863FFFF",
+      "guard": "g_dotheroes_no_install_item",
+      "note": "M10.4: the same count in func_005CE018 (the menu's input: the cursor wraps at count-1 and 0), so the cursor never reaches INSTALL and its action (5) is never chosen"
     }
   ],
   "entry_hooks": [

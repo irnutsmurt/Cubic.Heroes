@@ -215,6 +215,7 @@
 | `patches/ps3recomp/0157-cellAudio-retired-in-a-build-without-its-output-ever.patch` | INDEP | keep |
 | `patches/ps3recomp/0158-Vulkan-the-driver-s-and-loader-s-messages-in-the-log.patch` | INDEP | keep |
 | `patches/ps3recomp/0159-M10-display-modes-a-host-frame-limiter-the-game-held.patch` | INDEP | keep |
+| `patches/ps3recomp/0160-cellPad-a-port-s-read-keeps-the-pads-own-buttons-wit.patch` | INDEP | keep |
 | `port/CMakeLists.txt` | INDEP | keep |
 | `port/LICENSE.ps3recomp` | THIRD | keep: licence file beside it; listed in the README |
 | `port/assets/ui/DejaVuSans.ttf` | THIRD | keep: licence file beside it; listed in the README |
@@ -453,6 +454,7 @@
 | `tests/scripts/speed.drive` | INDEP | keep |
 | `tests/scripts/speed_save.drive` | INDEP | keep |
 | `tests/scripts/system_menu.drive` | INDEP | keep |
+| `tests/scripts/title_no_install.drive` | INDEP | keep |
 | `tests/scripts/walk_far.drive` | INDEP | keep |
 | `tests/scripts/watch_walk.drive` | INDEP | keep |
 | `tests/slow_frames.py` | INDEP | keep |
