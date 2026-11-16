@@ -7,6 +7,9 @@ release: prepare the known shaders and pipelines before gameplay, keep what is
 still valid, throw away what is stale, test with caches that are really empty,
 and never claim complete coverage from the areas the tests happen to visit.
 
+**2026-11-16: superseded for the release by docs/M92_SHADER_PLAN.md** (comprehensive preparation from the
+player's own data, M9.2a-f); the record below is kept as the history of steps 0-3.
+
 Status: **steps 0-3 done** (M9.0-M9.2, 2026-11-14: docs/M9_LAUNCHER_PLAN.md sections 9 and 11) -- the cold
 and warm costs measured; the native renderer's own pipeline cache (validated, checksummed); the variant record
 (recipes: the programs and parameters, kept in the install); `dotheroes --prepare`, run by the pipeline worker after

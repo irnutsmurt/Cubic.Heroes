@@ -3129,15 +3129,17 @@ int main(int argc, char** argv)
         fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
         return 1;
     }
-    // CUBIC_NAV_HIDDEN=1 with --nav-test: the scripted test's window never shown (it reads its pictures back itself)
+    // --nav-test: the scripted test's window is never shown (it reads its pictures back itself) unless
+    // CUBIC_NAV_HIDDEN=0 asks for it -- which the test harness's desktop guard (tests/desktop_guard.py) sets only
+    // while the owner has approved an on-screen run
     const char* hid = getenv("CUBIC_NAV_HIDDEN");
-    const Uint32 hidden = g_nav_test && hid && *hid == '1' ? SDL_WINDOW_HIDDEN : 0;
+    const Uint32 hidden = g_nav_test && !(hid && *hid == '0') ? SDL_WINDOW_HIDDEN : 0;
     SDL_Window* win = SDL_CreateWindow("Cubic.Heroes", g_prefs.x, g_prefs.y, g_prefs.w, g_prefs.h,
                                        SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI | hidden |
                                        (g_prefs.maximized && !hidden ? SDL_WINDOW_MAXIMIZED : 0));
     if (!win) {   // the remembered place may be on a display that is gone
         win = SDL_CreateWindow("Cubic.Heroes", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1280, 800,
-                               SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
+                               SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI | hidden);
     }
     if (!win) return 1;
     g_window = win;

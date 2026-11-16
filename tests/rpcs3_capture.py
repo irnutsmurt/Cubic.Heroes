@@ -39,6 +39,9 @@ ap.add_argument("--secs", type=float, default=90)
 ap.add_argument("--every", type=float, default=5)
 ap.add_argument("--gui", action="store_true", help="boot with RPCS3's main window too (as from its GUI), not --no-gui")
 a = ap.parse_args()
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import desktop_guard  # noqa: E402
+desktop_guard.require_onscreen("an RPCS3 capture")   # RPCS3 only renders on screen: the owner's approval first
 
 u = ctypes.windll.user32
 u.SetProcessDPIAware()

@@ -62,8 +62,11 @@ Environment
                      trophies) in place, read and written, instead of a fresh
                      per-run root: for play sessions whose saves must last, e.g.
                      %LOCALAPPDATA%/dotheroes/gamedata. Not with SAVES.
-  WINDOW=1           show the game's window (PS3RECOMP_VK_WINDOW=1). By default
-                     nothing appears on the desktop: rendering is offscreen.
+  WINDOW=1           show the game's window (PS3RECOMP_VK_WINDOW=1) -- only while the
+                     owner has approved an on-screen run (tests/desktop_guard.py);
+                     otherwise WINDOW, VISIBLE, TOPMOST and GRAB_EVERY are overridden
+                     and the game renders offscreen, and a window the game shows
+                     anyway ends the run (result.json: "desktop guard: ...").
   AUDIO=1            play through the real audio device instead of SDL's dummy
                      driver.
   BIN=<exe>          the game (default build/port/dotheroes, or
@@ -142,6 +145,18 @@ TAG = os.environ.get("RUN_TAG")
 RUNS_IN = os.path.join(ROOT, os.environ.get("RUNS_IN") or os.path.join("build", "test"))
 RUN = os.path.join(RUNS_IN, "boot-" + time.strftime("%Y%m%d-%H%M%S") + (f"-{TAG}" if TAG else ""))
 SHOT_EVERY = int(os.environ.get("SHOT_EVERY", "10"))
+# The desktop guard (tests/desktop_guard.py): a window only while the owner has approved an on-screen run; any
+# request for one otherwise (WINDOW, VISIBLE, TOPMOST, GRAB_EVERY: the caller's, a scenario's `#! env` line) is
+# overridden here, and the run is watched for a window all the same.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import desktop_guard  # noqa: E402
+_WANTS_WINDOW = any(os.environ.get(k) == "1" for k in ("WINDOW", "VISIBLE", "TOPMOST")) or \
+    float(os.environ.get("GRAB_EVERY") or 0) > 0
+SHOW_WINDOW = os.environ.get("WINDOW") == "1" and desktop_guard.onscreen_allowed()
+if _WANTS_WINDOW and not SHOW_WINDOW:
+    print("desktop guard: a window was asked for, but no on-screen run is approved: the game renders offscreen")
+    for _k in ("WINDOW", "VISIBLE", "TOPMOST", "GRAB_EVERY"):
+        os.environ.pop(_k, None)
 VISIBLE = os.environ.get("VISIBLE") == "1"
 TOPMOST = os.environ.get("TOPMOST") == "1"
 GRAB_EVERY = float(os.environ.get("GRAB_EVERY", "0"))
@@ -361,8 +376,8 @@ def main():
     drive = os.path.abspath(os.environ["DRIVE"]) if os.environ.get("DRIVE") else None
 
     env = dict(os.environ)
-    window = os.environ.get("WINDOW") == "1"
-    for k in ("PS3RECOMP_VK_WINDOW",) + (() if window else ("DISPLAY", "WAYLAND_DISPLAY")):
+    window = SHOW_WINDOW
+    for k in ("PS3RECOMP_VK_WINDOW", "PS3RECOMP_VK_WINDOW_HIDDEN") + (() if window else ("DISPLAY", "WAYLAND_DISPLAY")):
         env.pop(k, None)
     env.update({
         "DOTHEROES_DEV_STOP": env.get("DOTHEROES_DEV_STOP", "1"),   # stop.trigger: logs written, then exit
@@ -388,8 +403,8 @@ def main():
     })
     if env["PS3RECOMP_SPIRV_CACHE"] not in ("off", "0", "") and not os.path.isabs(env["PS3RECOMP_SPIRV_CACHE"]):
         env["PS3RECOMP_SPIRV_CACHE"] = os.path.join(ROOT, env["PS3RECOMP_SPIRV_CACHE"])   # the game runs in the run dir
-    if window:
-        env["PS3RECOMP_VK_WINDOW"] = "1"
+    # explicit either way (an install opens its window by default; the guard decides, never a default)
+    env["PS3RECOMP_VK_WINDOW"] = "1" if window else "0"
     if INSTALLED:   # as a player starts it: none of the dev harness's own settings
         for k in ("PS3_STRICT", "PS3_GAMEDATA_ROOT", "PS3_HDD0_ROOT", "PS3_HDD1_ROOT", "PS3_DEV_FLASH",
                   "PS3RECOMP_VK_GUEST_PROGRAMS", "PS3RECOMP_VK_DUMP", "PS3RECOMP_VK_DUMP_EVERY",
@@ -399,10 +414,8 @@ def main():
             if k not in INSTALLED_KEEP:
                 env.pop(k, None)
         env["DOTHEROES_LOG_TO_CONSOLE"] = "1"
-        # the installed game opens its window by default (a player's): offscreen unless WINDOW=1 asks for one, so a
-        # test never appears on the owner's desktop
-        if not window:
-            env["PS3RECOMP_VK_WINDOW"] = "0"
+        # the installed game opens its window by default (a player's): set above, from the guard's decision
+        env["PS3RECOMP_VK_WINDOW"] = "1" if window else "0"
     if os.environ.get("AUDIO") != "1" and not INSTALLED:
         env["SDL_AUDIODRIVER"] = "dummy"
     if os.environ.get("DUMP") == "0":
@@ -432,6 +445,8 @@ def main():
         wrap = json.loads(os.environ["WRAP"]) if os.environ.get("WRAP") else []
         args = [installed_path("exe")] if INSTALLED else [BIN, ELF]
         proc = subprocess.Popen(wrap + args, cwd=RUN, env=env, stdout=out, stderr=err, **kw)
+    # a window the guard did not approve ends the run at once (whatever opened it)
+    watch = desktop_guard.Watch(proc).start() if not window else None
 
     stop = threading.Event()
 
@@ -690,6 +705,10 @@ def main():
                 ended_by = f"drive {'done' if dr.returncode == 0 else 'failed'} ({how})"
     open(os.path.join(RUN, ".done"), "w").close()
     stop.set()
+    if watch:
+        watch.stop()
+        if watch.violation:
+            ended_by = "desktop guard: " + watch.violation
     if shots:
         shots.join(15)
     if guarded:

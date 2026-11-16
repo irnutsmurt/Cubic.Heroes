@@ -59,6 +59,15 @@ Ask as soon as the question is identified -- never batched into an end-of-sessio
 on the result of unfinished work. Keep working on everything that does not depend on the answer: a decision that
 affects one part of the project does not stop the rest. This applies to every milestone.
 
+## Tests stay off the desktop
+
+Automated tests never open anything on the owner's desktop. `tests/desktop_guard.py` decides it for every runner:
+without an approval in force, requests for a window (WINDOW, VISIBLE, TOPMOST, GRAB_EVERY, a scenario's `#! env`
+line) are overridden, the game renders offscreen, the launcher's `--nav-test` stays hidden, a window that appears
+anyway ends the run, and on-screen-only tools (RPCS3 captures) refuse to start. Ask the owner before any on-screen
+run; only after their yes, for that run: `py -3 tests/desktop_guard.py allow MINUTES "WHAT"`, then `revoke`.
+New runners that start the game or the launcher go through the guard (`game_env`, `launcher_env`, `Watch`).
+
 ## The recompilation boundary
 
 The player-side recompilation boundary (README, "This repository contains no game data") is checked by
