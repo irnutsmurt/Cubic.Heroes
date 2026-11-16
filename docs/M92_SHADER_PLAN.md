@@ -8,7 +8,8 @@ limits are established. Labels as in the other records: [C] read in the code, [M
 
 ## Checkpoint
 
-- **Stage**: **M9.2 done** (2026-11-16); its limits established (section 2g); ready for M11.
+- **Stage**: **M9.2g, static pipeline discovery, done** (section 2h; the owner's review of M9.2a-f, 2026-11-16) and
+  awaiting the owner's acceptance: M9.2 is not closed and M11 not begun without it.
 - **Done**: the investigation (section 2); the test harness keeps every automated run off the desktop, enforced
   centrally (section 7); **M9.2a**: the inventory in the game (section 2a) -- 636 vertex and 2,481 fragment records
   read, none unparsed; every program of 332 recorded pipelines found; layout and control word derived exactly;
@@ -20,9 +21,17 @@ limits are established. Labels as in the other records: [C] read in the code, [M
   from every recording, a second visit building nothing -- as it ships, 2,202 pipelines and 2,716 translations in
   8.4 s cold, no translation compiled in play on any measured run, pipeline coverage 98.8-100% on the routes
   measured since, 96-99% measured on areas no recording had reached.
-- **Next**: M11 (validation), with M9.2's limits (2g) carried: later areas recorded as the drives reach them;
-  AMD and Intel measured.
-- **Open questions for the owner**: none (pipeline libraries not adopted, section 2f; the owner may ask for them).
+  **M9.2g** (2h): the engine's pipeline selection read and traced (the shader key, its lookup and layout; the render
+  state's tables); all 10,458 materials of the game's data parsed; PPFX's selection read; every package record
+  accounted for; every map visited headlessly through the game's own map change; the preparation rebuilt from those
+  (every record now gets pipelines; PPFX's reachable techniques; alpha-test translations); graphics pipeline libraries
+  implemented behind a capability check, off by default. As it ships: 2,454 pipelines and 3,486 translations in 9.4 s
+  cold, 133 MB; on 55 maps the learning had not swept, 93% of the pipelines first met prepared (M9.2f: 84%), 2.0 ms of
+  building in all (18.2 ms); the routes unchanged (no frame held by building, p99.9 21-23 ms).
+- **Next**: the owner's review of M9.2g; then M11 (validation).
+- **Open questions for the owner**: whether to turn the pipeline-library path on by default where a driver has it
+  (section 2h: rendering checked, a link 0.01-0.08 ms, but only worth it with every program's libraries prepared --
+  21 s and 163 MB -- and unmeasured on AMD and Intel). Recommended: keep it off until M11 measures AMD and Intel.
 
 ## 1. What decides a pipeline (the renderer, port/native/render/ppfx_render.cpp) [C]
 
@@ -345,6 +354,9 @@ recipes of the comprehensive preparation, cold (our folder and NVIDIA's cache em
 
 ## 2g. What M9.2 leaves (the established limits, 2026-11-16)
 
+(As M9.2f left them. M9.2g -- section 2h -- revised them: the 62 records now have pipelines, PPFX's reachable
+techniques are prepared, the libraries implemented; its own limits are at 2h's end.)
+
 **Shader coverage** and **pipeline coverage**, stated separately:
 - **Shaders**: every program on the disc is found (636 vertex, 2,481 fragment records; none unparsed) and
   translated before play with the parameters its own header gives, and the variants the profiles name (2,716
@@ -373,6 +385,209 @@ recipes of the comprehensive preparation, cold (our folder and NVIDIA's cache em
 5. **Re-preparation**: a driver change invalidates the pipeline cache, and any change to the translator's source
    (the SPIR-V cache's key) the translations; the launcher prepares again (automatically, by its setting).
 6. **Pipeline libraries** not adopted (section 2f): measured, kept as a probe, a renderer change of its own.
+
+## 2h. M9.2g: static pipeline discovery (2026-11-16) [C, M]
+
+The owner's review of M9.2a-f: account for all 569 package records; find where the game decides each pipeline's
+programs and state rather than relying on play; enumerate from the game's data; investigate PPFX's selection; visit
+areas headlessly where static analysis falls short; investigate graphics pipeline libraries as the fast path for
+what stays unforeseen; never claim more than the evidence shows. The tools are local (build/m92g, build/m92/agents:
+development only, never shipped); every run offscreen (section 7).
+
+### How the engine decides a draw's pipeline (read in the lifted code, confirmed by tracing)
+A development lift observing all 2,773 functions of asp (the engine) and PPFX (build/m92g/lift.sh; the play lift
+otherwise) recorded each call's guest stack and arguments (DOTHEROES_FN_TRACE; port/native/render/ppfx_recorder.cpp)
+on six routes and the map sweep below.
+- **The programs: one 64-bit key per draw.** 0x00A2AB14 builds it from the render context, ORing 16 feature
+  functions (cached at context+0x1378 and rebuilt when the context's dirty bits are set: 0x007081CC). The draw's
+  shader pair is the package record with that key with bit 60 set when the package has one (a preferred precompiled
+  variant), else the key's own (0x006D8BC8). The package is loaded into a map at start (0x007053C8: its 567 records,
+  shaders_0's 2 and 6 built-in pairs). Traced: 62 distinct run-time keys over every route and map, each resolved by
+  that rule.
+- **The key is the engine's shader generator's description** (aspShaderGenPerPixel/PerVertex: the Cg source for a
+  key, "P%016llX.psh"): K0 per-pixel lighting; K1 vertex colour; K2-4 the normal frame; K6-8 skinning; K9-11 morph and
+  sway; K12-23 three texture layers; K24-35 the lighting (light counts by kind and their attenuation; toon shading;
+  normal output; shadow casters 0xE80/0xF00/0xF01; unlit 0xFFF); K36-38 shadow receive; K39-42 specular kinds;
+  K43-47 texture combine; K48-50 environment map; K51-52 gloss source; K53-54 outline; K55-56 fog; K57 compressed
+  normal map; K58-59 palette; K60 the preferred variant; K61 depth-of-field output (which also takes the alpha test
+  into the shader). Every record decoded (build/m92/agents/keydecode.py).
+- **The render state**: a mesh's draw (0x0071BCC0) applies its material (0x0071B440): the blend preset is
+  table[depth-write flag][technique][pass value] (static data, 0x00E2AA48), one of 14 presets (0x00E18650: depth
+  write, alpha test and reference, blend factors); 0x006D7B00 sets the cull, depth write, alpha test and blend from it,
+  and a pass flag forces LEQUAL with the stencil off. Targets, depth function, stencil and colour mask are the pass's.
+  The game's own effect and interface code sets state directly. Across every trace the engine's whole state
+  vocabulary: blend SRC_ALPHA/ONE_MINUS_SRC_ALPHA, SRC_ALPHA/ONE, ZERO/SRC_ALPHA and a constant-colour pair; depth
+  LESS, LEQUAL or off; cull none or back; alpha test > 0 or >= 0.5; stencil off, ALWAYS ref 1 (the reflection mask)
+  or EQUAL ref 1.
+
+### The game's data: every material parsed
+- **10,458 materials** (1,792 in the 460 .dsb scene files; 8,666 in the 167 map packages, which are grids of the same
+  DSBF scenes): 4 techniques (OPACITY 9,630, BLEND 819, ALPHATEST 7, ADD 2), 47 shader signatures, **4 render
+  states** -- the presets above: opaque; alpha blend without depth write (cutout 0.5 in the depth pass); cutout 0.5;
+  additive. The material fields feed the key's material part (textures, lighting, fog, shadow receive, specular;
+  skinning from the vertex layout); lights, the shadow pass and the fog mode are the scene's (DSBF reader
+  0x0071F998..0x007323A4; build/m92/agents/dsb).
+- **No material in the files binds a second texture layer.** The package's records with one (groups 0x38, 0x3C, 0x70,
+  0x74, 0x75; 116 records) come from materials changed at run time -- the items and events that change the hero's
+  rendering (the game's Lua setReflectionMaterial) [I].
+
+### PPFX (post-processing)
+One effect file embedded in the EBOOT ("TexUtil_GCM": 1,899 techniques; 22 vertex and 1,857 fragment programs). A
+pass's program pair is fixed by its technique; technique names are formed at start from the game's settings (per-
+area Lua tables reduce to 5 classes) and indexed at draw time by blur taps, the tonemap options and the
+depth-of-field level counts, which are recomputed every frame from the focus. Reachable from the game's settings: 56
+techniques, 51 pipelines (27 recorded before M9.2g); render state constant (no blend, depth or cull); intermediate
+targets FP16, the last RGBA8. **The other 29 are now made from that logic** (build/m92g/ppfx_candidates.py: a
+recorded technique with the same vertex program and target, the fragment program from the player's EBOOT, its
+control word from its Cg header -- checked first: 434 of 434 recorded PPFX pipelines made again that way from a
+sibling are equal in every key field); the feedback chain (switched on by events) also with the display target. The
+map sweep met 2 PPFX pipelines the shipped preparation lacked -- both depth-of-field composites -- and both are among
+those made without the sweep, equal in every key field; the held-out sweep below met 2 more (the feedback chain into
+the display target), which the display-target rule now makes.
+
+### Every package record accounted for (build/m92g/account.py; the table local, F:\3d dot game heroes\m92\evidence)
+| Category | Records | Evidence |
+|---|---|---|
+| drawn | 68 (+ shaders_0's 2) | a traced run-time key resolved to it, or a recorded pipeline used its programs |
+| a drawn material in another context | 160 | the key's material part equals a drawn record's; differs in the light counts only (69), lights and shadow (39), shadow only (24), with the depth-of-field output (28) -- decided at run time by the lights near an object and the pass [C] |
+| conditional | 116 | a second texture layer: materials changed at run time (items, events) [I] |
+| other materials | 223 | a material part no route or map entry drew: characters, bosses and effects the sweep's entries do not spawn [I] |
+
+None is shown unused: the package holds the keys the developers' content generated, and every category has a path
+in the code that reaches it. The 62 records the M9.2f profiles left without pipelines are ordinary materials (lit or
+unlit, no special pass); the old group classes split records by material features (the key's byte 1), not passes.
+
+### The map sweep: every map, headlessly, through the game's own map change
+DOTHEROES_MAP_SWEEP (development builds; tests/scenarios/map_sweep.drive; build/m92g/sweep*.py): after CONTINUE, the
+build calls the game's own native Event:SetMap (0x004D5958, which queues the change with the game manager) on the
+game's thread at a frame's flip, one map every 15 s, the entry point from the map's alignment file ("-gDebug" in 114
+of 167). **All 167 maps visited**, none failed. Over the shipped (M9.2f) preparation, warm-up off: 190 pipelines first
+met after the start, **164 prepared, 26 unforeseen in 16 maps** (most under 1 ms: only their state was new; the
+longest 52 ms); one translation compiled in play (an alpha-test variant: now prepared for every engine program).
+Maps are uniform (8,666 map-block materials in 3 shader signatures): the 26 were the game's effect and interface
+draws (the unlit records 0x0F/0x40F, the EBOOT's built-in programs) with blend, depth-function, cull or target
+variants their group had not been recorded with, a depth-of-field material faded with the constant-colour blend, and
+the 2 PPFX composites.
+
+### The new preparation (the configuration as it would ship)
+- **The manifest** made from every recording (the routes, the held-out batch, the traces, the sweep) and PPFX's
+  candidates: **240 pipelines** (was 131).
+- **The profiles** (tools/pipeline_profiles.py learn --key-classes --group-product): per group, its recorded pass
+  states each with its recorded material presets (the engine sets them apart: 0x006D7B00); per **key class** -- the
+  pass and lighting the decoded key says (shadow caster, depth-of-field output, neither; per-pixel; unlit) -- for the
+  records no recording reached, consulted before the old group classes (ppfx_render.cpp key_class). **Every one of
+  the 569 records gets pipelines** (157 by group, 412 by class; was 62 with none).
+- **Translations**: every engine fragment program also with the two alpha tests its presets use.
+- Prepared cold (RTX 3070, 15 threads): **2,454 pipelines** (189 recorded, 2,265 from the package) and **3,486
+  translations** in **9.8 s**, none failed; **133 MB** on disk (27 MB of pipeline cache). (M9.2f: 2,202 and 2,716 in
+  8.4 s, 105 MB.)
+- **Choosing the model** (build/m92g/model_eval.py, crossval.sh: trained on every recording but one sweep chunk's,
+  tested on what that chunk met that the training had not): of 38 such pipelines the M9.2f model covered 58%, the
+  group product 71% (+570 pipelines), every recorded material preset with each group's passes 74% (+2,000). The
+  group product ships; the wider products cost more than they add.
+
+### Graphics pipeline libraries (implemented, capability-gated, off by default)
+- **The runtime** (PS3RECOMP_VK_GPL=1; rsx_vulkan_backend.c): VK_EXT_graphics_pipeline_library with fast linking and
+  extended dynamic state (the extension, or Vulkan 1.3's core commands), each checked with the driver's own feature
+  and property queries; only then does the instance ask for the loader's version (at most 1.3). Without any of them
+  nothing changes. AMD's Windows driver lists the extension in current releases (Adrenalin 25.5.1), as do NVIDIA's
+  and Intel's; older drivers fall back.
+- **The renderer** (ppfx_render.cpp gpl_*): a pipeline neither prepared nor warmed is linked from four libraries made
+  from make_pipeline's own create info, cull, winding, depth and stencil dynamic: the two shader libraries depend on
+  the programs and the render pass only, so they serve any state; the whole static pipeline is made on a background
+  thread and replaces the linked one at a later draw. DOTHEROES_GPL=link links every pipeline (the rendering test).
+- **Ahead of play**: DOTHEROES_GPL_PREPARE=1 the shader libraries of every prepared pipeline; =all of every program on
+  the disc for every render pass the recipes use: 10,913 libraries in 7.7 s (15 threads).
+- **Measured** (build/m92g/gpl_test.py, gpl_report.py; F:\3d dot game heroes\m92\evidence\gpl2; RTX 3070, NVIDIA
+  616.92; offscreen, cold caches; the first-session set as the preparation so that most of a route is unforeseen;
+  the warm-up off; every pipeline met went through the libraries in these runs):
+
+| Route | Libraries | Built in play | Building, all (ms) | Longest (ms) | Frames held by building | Pre-rasterisation library (mean / max ms) | Fragment library (mean / max ms) | Link (max ms) |
+|---|---|---|---|---|---|---|---|---|
+| the first boss | off | 79 | 647 | 61 | 9 | -- | -- | -- |
+| the first boss | none prepared | 78 | 1,518 | 74 | 11 | 16.5 / 57.0 | 10.7 / 36.0 | 0.015 |
+| the first boss | the prepared pipelines' | 74 | 384 | 50 | 6 | 1.8 / 41.4 | 3.8 / 32.1 | 0.026 |
+| the first boss | every program's | 77 | 389 | 54 | 7 | 0.09 / 0.3 | 4.1 / 36.3 | 0.032 |
+| the editor | off | 52 | 265 | 64 | 5 | -- | -- | -- |
+| the editor | none prepared | 52 | 778 | 66 | 9 | 11.9 / 46.2 | 8.3 / 25.8 | 0.015 |
+| the editor | every program's | 52 | 89 | 39 | 3 | 0.10 / 0.4 | 0.54 / 19.9 | 0.076 |
+
+  - **A link is hundredths of a millisecond; a library found in the pipeline cache a tenth of one**: with every
+    program's libraries prepared, 64 of the boss route's 77 pipelines took under 1 ms (54 the preparation had made,
+    10 it had not). The slow ones were fragment translations no preparation had made (9 compiled in play: variants
+    the minimal first-session set does not translate) -- with no translation, no library.
+  - **A library made in play costs more than the whole pipeline it replaces** (10-17 ms on average, against ~8 ms for
+    a whole pipeline from scratch, with the background thread making that whole pipeline at the same time): the path
+    pays only where the libraries were made ahead. So the renderer now links only a pipeline the preparation did
+    not make (gpl_use); one it made comes from the pipeline cache whole, as without the libraries.
+  - **Preparing every program's libraries** (DOTHEROES_GPL_PREPARE=all): 10,913 libraries in 7.7 s over the minimal
+    set, 12,153 in 6.1 s over the M9.2g configuration (15 threads); the shader folder 146-163 MB (133 MB without).
+
+### Validation (build/m92g/validate.py; F:\3d dot game heroes\m92\evidence\val; offscreen, cold caches)
+**A first visit to 55 maps the configuration's learning had not swept**: the M9.2g configuration learned again
+without the map sweep's last two chunks (55 maps: a later dungeon's 15 floors and all 40 fields -- three of them,
+fields 14, 17 and 18, were on routes recorded before), prepared cold, and those maps swept over it, each pipeline met
+built and logged (the warm-up off) -- against the shipped M9.2f configuration over the same maps:
+
+| Preparation | Pipelines first met after the start | Prepared | Unforeseen (building) | Maps with any | Translations in play |
+|---|---|---|---|---|---|
+| M9.2f, as shipped | 43 | 36 (84%) | 7 (18.2 ms) | 4 | 0 |
+| M9.2g, those maps held out | 44 | 41 (93%) | 3 (2.0 ms) | 2 | 0 |
+| the same, with every program's libraries (on) | 45 | 42 (93%) | 3 (5.7 ms, linked) | 2 | 0 |
+
+Two of the three were the feedback chain into the display target (made since: the display-target rule above; both
+in the preparation as it ships, checked by their keys); the third, an effect drawn by one of the EBOOT's built-in
+programs with the additive blend its pair had not been recorded with (0.2 ms: only its state was new).
+
+**Routes, as a player starts them** (the warm-up on; the driver's cache as the preparation left it; recorded routes:
+no regression, the cost):
+
+| Route | Configuration | Pipelines used | From the warm-up | Built in play | Frames held by building | p99 / p99.9 / worst (ms) | Private memory | Warm-up |
+|---|---|---|---|---|---|---|---|---|
+| the first boss | M9.2f | 75 | 75 | 0 | 0 | 19.7 / 23.6 / 67.1 | 1,385 MB | 2,202 in 2.7 s |
+| the first boss | M9.2g | 78 | 78 | 0 | 0 | 19.7 / 22.7 / 70.3 | 1,421 MB | 2,454 in 3.5 s |
+| the first boss | M9.2g, libraries on | 79 | 78 | 1 (linked: 0.9 ms) | 0 | 19.2 / 23.2 / 128.6 | 1,432 MB | 2,454 |
+| field 14's building | M9.2f | 49 | 49 | 0 | 0 | 18.6 / 21.8 / 53.1 | 990 MB | 2,202 in 2.6 s |
+| field 14's building | M9.2g | 52 | 52 | 0 | 0 | 18.2 / 21.3 / 53.6 | 1,015 MB | 2,454 in 2.8 s |
+
+Every route averaged 16.67 ms (60 fps); play was reached in 21.6-21.9 s both ways; the worst frames held no
+building. **The cost of M9.2g's configuration**: 9.4 s to prepare (M9.2f's 9.9 s with this build's translations),
+133 MB on disk (123 MB), ~25-36 MB more memory in play, the warm-up ~0.2-0.8 s longer; with every program's
+libraries, 21 s and 163 MB. The reference scenes against RPCS3: 5 of 5 within the accepted figures (libraries off,
+and every pipeline linked).
+
+### What is static, and what genuinely needs run time
+- **Static**: every program (M9.2a); the record a key reaches (the lookup rule); what each record is (the decoded
+  key); the state vocabulary and the material presets (tables in the EBOOT); every material's technique and shader
+  features (the data files); PPFX's reachable techniques (its selection logic and the game's settings).
+- **Run time**: which lighting context an object is drawn in (the lights near it, the shadow pass: 160 records are
+  such variants of drawn materials); materials changed by items and events (116); which pass and preset each record
+  meets in each area -- known for what was recorded and for what the profiles generalise to; PPFX's depth-of-field
+  level counts and tonemap options within the reachable set (prepared).
+- **Exhaustive enumeration is finite but not valid in general**: every record x every pass state x every preset is
+  roughly 567 x ~20 x 4 pipelines -- most of them combinations the game never draws (a shadow caster in the
+  reflection pass, a depth-of-field key with the alpha test) -- and its cost (tens of thousands of pipelines, warmed
+  at every start) is what the owner ruled out. What closes the rest without that cost is the library path: with the
+  shader libraries of every program prepared, any combination is a link.
+
+### What M9.2g leaves (the limits, with their evidence)
+1. **Pipeline coverage stays a prediction for what no route or map entry drew**: 68 records are drawn on the
+   measured routes and maps; the other 499 get pipelines from their group's or key class's recorded states, unverified
+   in play. Measured on maps the learning had not swept: 93% of the pipelines first met were prepared (3 of 44 not:
+   2.0 ms of building in all). Not 100%, and not claimed.
+2. **Shader coverage**: every program on the disc translated, with the variants the profiles name and the alpha tests
+   the presets use; across the sweep and the validation (about 280 map visits and the routes), one translation was
+   compiled in play -- the alpha-test variant the alpha-test translations now make. A texture-kind or sRGB variant no
+   header or profile names would still be translated when first drawn; none was seen.
+3. **Run time decides**: the lighting context of each draw (160 records are drawn materials' variants under other
+   lights or shadows), materials changed by items and events (116), the states the game's effect and interface code
+   sets for its built-in programs, PPFX's depth-of-field level counts (the composites prepared up to three levels
+   each way: the levels the settings reach) and its tonemap options. What is not prepared is still built when first
+   drawn, logged, recorded and made at every later start (2d, 2f).
+4. **The sweep visits each map at its entry point**: it does not walk, fight, trigger events or spawn every
+   character; bosses, events, items and the full interface are covered by the routes recorded and by prediction.
+5. **One GPU measured** (RTX 3070, NVIDIA 616.92). The library path is capability-gated and off by default; it is
+   unmeasured on AMD and Intel.
 
 ## 3. The design
 
@@ -404,6 +619,7 @@ recipes of the comprehensive preparation, cold (our folder and NVIDIA's cache em
 | M9.2d | the runtime fallback, warm-up, logging; pipeline libraries measured (3.4) | every runtime compile in the log with its frame; the warm-up's time and memory |
 | M9.2e | the launcher (3.5) | progress, time left, stop/resume, rebuild, coverage shown |
 | M9.2f | validation: fresh installs, empty caches, the 98-pipeline build against the comprehensive one on the same routes, areas never recorded | average, p95, p99, p99.9, worst frames and compile stalls; shader and pipeline coverage stated separately |
+| M9.2g | static pipeline discovery (2h): the engine's selection read; the data's materials; PPFX's selection; every record accounted for; every map visited headlessly; pipeline libraries capability-gated | all 569 records accounted for; static and run-time-only stated; first-visit coverage measured on maps the configuration had not seen; preparation time, memory, cache size, frame times |
 
 ## 5. Validation method
 
