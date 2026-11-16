@@ -1,0 +1,20 @@
+# Scenario: developer mode in an install keeps the player's saves out (M11.0a, docs/M11_PLAN.md section 3.2), part 2:
+# after `worker devsaves --action copy-player` (tests/devtools_suite.py does it), CONTINUE loads the copy of the
+# player's save from the test saves and plays; the suite checks the player's save tree byte for byte before and after.
+#! env DOTHEROES_DEV_STATE=1 DIAG_FRAMES=frames.log DUMP=0 SHOT_EVERY=0
+#! secs 360
+
+include common.drive
+
+log TitleMovie 180
+sleep 5
+press START               # "PRESS START BUTTON"
+sleep 3
+press START               # CONTINUE
+# an install's first session (no shader cache) loads longer than the checkpoint runs: "Change characters?" comes
+# late, so NO (CROSS) is answered until play starts (a CROSS in play only swings the sword)
+repeat 8 CROSS 4
+state life>0 90
+sleep 5
+dev status
+devstate frames>+60 30

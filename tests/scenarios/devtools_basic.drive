@@ -1,0 +1,36 @@
+# Scenario: the developer tools' foundation (M11.0a, docs/M11_PLAN.md sections 3.3-3.4): the command channel at the
+# title and in play, the Lua runner (values back, the game's own natives) and its error paths (a runtime error, a
+# syntax error, an unknown command) leaving the game running, the run-time open points (the scripts' Event object is
+# the game manager's), and commands answered while the in-game menu holds the game (the hold's hook on the main
+# thread). Starts from: the kept checkpoint castle-front.
+#! saves build/checkpoints/castle-front
+#! env DOTHEROES_DEVELOPER_MODE=1 DOTHEROES_OVERLAY_TEST=1
+#! env DOTHEROES_NATIVE_CD=1 DOTHEROES_NATIVE_SOLVER=1,2,4,5,6 GCM_WRAP_LAP=1 DOTHEROES_PRESENT_ONCE=1
+#! env DOTHEROES_DEV_STATE=1 DIAG_FRAMES=frames.log PS3_VERBOSE=0 DUMP=0 SHOT_EVERY=0
+#! secs 400
+
+include common.drive
+
+log TitleMovie 120
+dev ping
+dev status
+sleep 5
+call continue
+state life>0 60
+sleep 5
+devstate event_same==1 30
+dev check
+dev lua return 1+1, "two", nil, true
+dev lua local Event=EventClass.Event; return Event:GetMoney()
+devfail lua error("a deliberate error")
+devfail lua this is not lua
+devfail no-such-command
+dev lua return 2*21
+devstate frames>+60 30
+write overlay.input open
+devstate held==1,hold_runs>=1 30
+dev check
+dev lua local Event=EventClass.Event; return Event:GetMoney()
+write overlay.input b
+sleep 2
+devstate held==0,frames>+30 30

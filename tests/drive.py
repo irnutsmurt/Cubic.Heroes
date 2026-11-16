@@ -27,6 +27,13 @@ scenario header):
                               `state area==18,life>0 60` or `state steps>+20` (a
                               signed value is relative to the step's start); a
                               timeout fails the step
+  dev <command ...> [@<timeout>]  a developer-tools command (M11.0, docs/M11_PLAN.md:
+                              DOTHEROES_DEVELOPER_MODE=1; tests/devtools.py): its answer
+                              logged; a refusal or no answer (30 s) fails the step
+  devfail <command ...>       a developer-tools command that must be refused (an error path)
+  write <file> <text ...>     <run>/<file> written with the text (whole, at once)
+  devstate <cond>[,<cond>] [timeout]  as `state`, on the developer tools' `status`
+                              (area, frames, hud_life, money, event_state, ...)
   repeat <n> <BUTTON> <sec>   press n times, <sec> apart
   hold <BUTTON> <sec>         hold for <sec> of wall time (not guest reports:
                               those pass twice as fast at 60 fps); logs where
@@ -302,6 +309,7 @@ def holds(cs, s, ref=None):
 
 # Invariants (`expect`), checked through every wait.
 expecting = []
+dev_channel = None   # the developer tools' channel (tests/devtools.py), made at the first `dev`
 
 
 def check():
@@ -836,7 +844,7 @@ def run_steps(steps):
 
 
 def step(lineno, line, op, a):
-    global expecting
+    global expecting, dev_channel
     if op == "log":
         rx, tmo = re.compile(a[0]), float(a[1]) if len(a) > 1 else 120
         t0 = time.time()
@@ -938,6 +946,55 @@ def step(lineno, line, op, a):
             if time.time() - t0 > tmo:
                 raise Fail(f"state not reached in {tmo:g} s: " + ", ".join(holds(cs, s, s0) if s else ["no state"]))
             wait(0.1)
+    elif op == "dev":
+        import devtools   # tests/devtools.py
+        rest = line.split(None, 1)[1] if len(line.split(None, 1)) > 1 else ""
+        tmo = 30.0
+        m = re.search(r"\s@(\d+(?:\.\d+)?)$", rest)
+        if m:
+            tmo, rest = float(m.group(1)), rest[:m.start()]
+        if dev_channel is None:
+            dev_channel = devtools.Channel(run)
+        try:
+            ans = dev_channel.send(rest, tmo, alive)
+        except devtools.Refused as e:
+            raise Fail(f"dev {rest}: refused: {e}")
+        except TimeoutError as e:
+            raise Fail(f"dev {rest}: {e}")
+        out = ans["out"]
+        say(f"dev {rest}: {out if isinstance(out, str) else json.dumps(out)}"[:600])
+    elif op == "devfail":   # a developer-tools command that must be refused (its error path)
+        import devtools
+        rest = line.split(None, 1)[1] if len(line.split(None, 1)) > 1 else ""
+        if dev_channel is None:
+            dev_channel = devtools.Channel(run)
+        try:
+            ans = dev_channel.send(rest, 30.0, alive)
+            raise Fail(f"devfail {rest}: answered, not refused: {ans['out']}")
+        except devtools.Refused as e:
+            say(f"devfail {rest}: refused as expected: {e}"[:600])
+        except TimeoutError as e:
+            raise Fail(f"devfail {rest}: {e}")
+    elif op == "devstate":
+        import devtools
+        cs, tmo = conds(a[0]), float(a[1]) if len(a) > 1 else 60
+        if dev_channel is None:
+            dev_channel = devtools.Channel(run)
+        t0, s0, s = time.time(), None, None
+        while True:
+            try:
+                st = dev_channel.status(timeout=10, alive=alive)
+                s = {k: float(v) for k, v in st.items() if isinstance(v, (int, float))}
+            except (devtools.Refused, TimeoutError):
+                s = None
+            if s is not None:
+                s0 = s0 or s
+                if not holds(cs, s, s0):
+                    say("devstate " + " ".join(f"{k}={v:g}" for k, v in s.items()))
+                    break
+            if time.time() - t0 > tmo:
+                raise Fail(f"devstate not reached in {tmo:g} s: " + ", ".join(holds(cs, s, s0) if s else ["no status"]))
+            wait(0.5)
     elif op == "expect":
         expecting = conds(a[0]) if a else []
         check()
@@ -977,6 +1034,12 @@ def step(lineno, line, op, a):
     elif op == "touch":
         acted()
         open(os.path.join(run, a[0]), "w").close()
+    elif op == "write":   # write <file> <text ...>: the text as one line (the in-game menu's overlay.input, say)
+        acted()
+        parts = line.split(None, 2)
+        with open(os.path.join(run, a[0]) + ".tmp", "w", newline="\n") as f:
+            f.write((parts[2] if len(parts) > 2 else "") + "\n")
+        os.replace(os.path.join(run, a[0]) + ".tmp", os.path.join(run, a[0]))
     elif op == "life":   # set the hero's life once (DOTHEROES_DEV_STATE): route discovery, not measurement
         acted()
         with open(os.path.join(run, "life.trigger"), "w") as f:

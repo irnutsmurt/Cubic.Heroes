@@ -7,7 +7,8 @@ manages (tools/install_layout.py) -- never anything outside it.
 
 The parts (DEFAULT_PARTS keeps the saves, their backups and the settings):
     builds     the generated game builds (builds/), game/ (a link: the link only), active.json, the logs
-    data       the disc's files and the lift made from them (data/disc, data/gen, data/dev_flash, install.json)
+    data       the disc's files and the lift made from them (data/disc, data/gen, data/dev_flash, install.json), and
+               developer mode's test saves and lists (data/devmode: test data only, never the player's saves)
     shaders    the shader and pipeline caches (data/cache/shaders) and the recipes
     objects    the compilation cache (data/cache/objects)
     settings   the settings (config/)
@@ -42,7 +43,8 @@ def part_paths(lay):
     """each part's paths (files or folders) in the install"""
     return {
         "builds": [lay.builds_dir, lay.game_link, lay.active_json, lay.logs],
-        "data": [lay.disc, lay.gen_root, os.path.join(lay.data, "dev_flash"), lay.install_json],
+        "data": [lay.disc, lay.gen_root, os.path.join(lay.data, "dev_flash"), lay.install_json,
+                 os.path.join(lay.data, "devmode")],
         "shaders": [lay.shaders, os.path.join(lay.cache, "native-recipes.bin"), os.path.join(lay.cache, "prepare.lock"),
                     os.path.join(lay.cache, "prepare-part.bin")],
         "objects": [lay.objects],

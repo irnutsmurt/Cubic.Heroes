@@ -185,8 +185,11 @@ extern "C" void ppu_obs_store(uint64_t ea, uint32_t bytes)
 
 static void r1_log(uint32_t addr, ppu_context* ctx);
 
+#include "../../devtools/devtools.h"   // M11.0: g_devtools_flip, null unless developer mode
+
 extern "C" int ppu_entry_observe(uint32_t addr, ppu_context* ctx)
 {
+    if (addr == 0x0069DD60u && g_devtools_flip) g_devtools_flip(ctx);   // the flip: the developer tools' commands
     if (s_movie) {
         const int m = movie_trace_observe(addr, ctx);
         if (m >= 0) return m;

@@ -1,0 +1,17 @@
+# Scenario: developer mode off changes nothing (M11.0a, docs/M11_PLAN.md section 2, principle 2): a command left in
+# dev.cmd is never read (tests/devtools_suite.py checks afterwards that dev.cmd is still there, that no dev.out was
+# written and that the log has no "[dev]" line). Starts from: the kept checkpoint castle-front; the title, then play.
+#! saves build/checkpoints/castle-front
+#! env DOTHEROES_NATIVE_CD=1 DOTHEROES_NATIVE_SOLVER=1,2,4,5,6 GCM_WRAP_LAP=1 DOTHEROES_PRESENT_ONCE=1
+#! env DOTHEROES_DEV_STATE=1 DIAG_FRAMES=frames.log PS3_VERBOSE=0 DUMP=0 SHOT_EVERY=0
+#! secs 240
+
+include common.drive
+
+log TitleMovie 120
+write dev.cmd @off-1 status
+sleep 3
+call continue
+state life>0 60
+sleep 5
+state frames>+60 30

@@ -1,0 +1,15 @@
+# Scenario: developer mode in an install keeps the player's saves out (M11.0a, docs/M11_PLAN.md section 3.2), part 1:
+# the game started as a player starts it (tests/devtools_suite.py --installed DIR: an install whose settings have
+# DOTHEROES_DEVELOPER_MODE=1) boots on its test saves (data/devmode/gamedata, empty at first) to the title, and the
+# tools answer. The suite checks the player's save tree byte for byte before and after, and that the test tree was
+# made. No `#! saves`: the harness would copy them into the player's tree.
+#! env DOTHEROES_DEV_STATE=1 DIAG_FRAMES=frames.log DUMP=0 SHOT_EVERY=0
+#! secs 300
+
+include common.drive
+
+log TitleMovie 180
+dev status
+devstate event_same==1 60
+sleep 10
+dev status

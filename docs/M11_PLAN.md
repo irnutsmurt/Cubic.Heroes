@@ -6,13 +6,16 @@ read in the code or the data, [M] measured, [I] inferred, [H] a hypothesis still
 
 ## Checkpoint (kept current; the newest state first)
 
-- **Stage** (2026-11-16): M11.0 (developer debugging tools) -- the design and its stages written (this document);
-  M11.0a next.
+- **Stage** (2026-11-16): M11.0 (developer debugging tools) -- the design and its stages written (sections 2-4);
+  **M11.0a, the foundation, done** (section 6): the developer-mode setting, the test saves and their worker command,
+  the command channel and the Lua runner in the game's own state, at the flip and in the in-game menu's hold; M11.0b
+  (warp, the catalog, the Developer pages) next.
 - **Done**: the map sweep made a regression test (tests/map_sweep.py `check`; section 5): the full sweep passes, 166
   maps arrived in their own areas, 0 pipelines unprepared, 0 translations in play; the check found that M9.2g's sweep
   never reached fields 1-9 (named by their files, not the engine's names) -- fixed, swept, all their pipelines were
   already prepared; docs/M92_SHADER_PLAN.md corrected.
-- **Next**: M11.0a (section 4).
+- **Next**: M11.0b (section 4): `warp` and `maps` through Event:SetMap, the catalog made in the game, the overlay's
+  scrolling lists and the Warp page, the map sweep moved onto `warp`.
 - **Outstanding decisions**: none blocking; the defaults "decided here" in section 3 can be changed at review.
 
 ## 1. The owner's request (2026-11-16)
@@ -292,3 +295,53 @@ Field_99, a map file the game's map list lacks, cannot be reached by the map cha
 before it); the sweep leaves it out. The check also fails, with no baseline, a map that arrives in the area of the
 map before it -- that alone flags all ten of the first sweep's misses. Every other map: 157 arrived, each in its own
 area but Field_80 (in D_24_1's, 108, consistently); the baseline (build/m11/sweep_baseline.tsv) holds the 166.
+
+## 6. M11.0a: the foundation (2026-11-16) [C, M]
+
+**Built**:
+- **The setting**: `DOTHEROES_DEVELOPER_MODE` in config/settings_schema.json (Diagnostics, "Developer mode", off;
+  applies at the next start); the launcher's Settings show it with the other switches (launcher/main.cpp); the
+  worker's `settings --set` checks it (0 or 1).
+- **The test saves** (port/main.cpp, installed layout): with it on, the save roots are `data/devmode/gamedata`
+  (made empty on a first session); a test's own roots still win. tools/dev_saves.py and the worker's `devsaves`
+  (docs/M9_WORKER_PROTOCOL.md): `copy-player` (the player's tree only read; the copy checked file by file before the
+  old test tree goes), `keep`/`restore`/`delete` named test states, `states`; all refused while the game runs from
+  the install. tools/uninstall.py removes `data/devmode` with the game's data (test data only).
+- **port/devtools/devtools.{h,cpp}**: inert unless developer mode is on. The command queue run on the game's main
+  thread at the entry of its flip (r1_observe.cpp's observer of 0x0069DD60) and, while the in-game menu holds the
+  game, from the runtime's hold (`g_ps3_guest_hold_work`, ps3recomp patch 0164) when the held thread is the flip's;
+  the test channel (`dev.cmd` read and removed every 50 ms, `@ID` lines; JSON answers appended to `dev.out`; every
+  command and answer in the log as `[dev]`); the tools' guest memory (384 KB from the runtime's user memory: a 256 KB
+  stack for their calls, a chunk buffer); lifted calls through the function table with the callee's TOC (any
+  trampoline of the interrupted guest code kept aside); the Lua runner (`luaL_loadbuffer`, `lua_pcall`, values back
+  by `lua_type`/`lua_tolstring`/`lua_toboolean`, the stack restored with `lua_settop`; refused while biLua's call
+  level is not -1). Commands so far: `ping`, `status` (the map's number, the guest's frames, the HUD's life, money
+  through `Event:GetMoney()`, the Lua state and call level, the event state, the scripts' Event object and the game
+  manager's, held, hold runs), `lua CHUNK`, `check`.
+- **The tag**: "DEVELOPER MODE - TEST SAVES" in the window's top-left corner (ps3recomp patch 0164: `g_ps3_osd_tag`,
+  drawn by the Vulkan backend with the messages' box routine).
+- **Test hooks**: tests/devtools.py (the client; `--wait-ready`); tests/drive.py `dev`, `devfail`, `devstate`,
+  `write`; scenarios devtools_basic, devtools_off, devtools_install, devtools_install_play; tests/devtools_suite.py.
+
+**Tested** (offscreen, silent; the development build of the play lift):
+- devtools_basic **PASS**: at the title and in play the channel answers; `lua return 1+1, "two", nil, true` gives
+  `2 two nil true`; `Event:GetMoney()` 45 on the castle-front save; a runtime error (`error(...)`), a syntax error
+  and an unknown command are each refused with the Lua or tool message, and the game goes on (its frames advance);
+  **the open points of section 3.4 hold**: the scripts' Event object is the game manager's (0x02B38540 both);
+  **commands are answered while the in-game menu holds the game**, on the main thread (hold runs 3, from another
+  thread 0), the guest's frame counter standing still across the hold (350 to 350) and running again after it.
+- devtools_off **PASS**: developer mode off, a `dev.cmd` left in the game's folder is never taken, no `dev.out`, no
+  `[dev]` line.
+- The install (a throwaway install with the setting on, linked to the test install's disc data, a copy of its saves;
+  the game started as a player starts it): part 1 **PASS** -- the game boots on its own empty test tree (4 files
+  written there: its system data), **the player's 12 save files byte for byte the same**; part 2 **PASS** -- the
+  worker's `devsaves --action copy-player` (12 files, 636 KB), then CONTINUE loads the copy and plays (the castle's
+  area, money 45, the frames running), **the player's saves again byte for byte the same**. (A first try failed on
+  the drive's timing: an install's first session, with no shader cache, loads longer, so "Change characters?" came
+  after the drive's answer; the scenario now answers until play starts.)
+- Unit tests: tests/test_dev_saves.py (5: the player's tree only read, states kept and restored, refusals while the
+  game runs and for bad names), tests/test_map_sweep.py (8); test_worker, test_uninstall, test_settings_diagnostics
+  and the others unchanged and passing (the project's venv). The launcher builds.
+
+**Not verified here**: the tag on screen (drawn only in a window: an on-screen check is the owner's, or a run they
+allow); the launcher's Settings page with the new switch (the same code path as every other on/off setting).

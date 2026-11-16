@@ -1144,6 +1144,28 @@ def cmd_saves(a, ev, control):
     return {"backups": lay.backups(), "saves_bytes": layout.tree_size(lay.gamedata)}
 
 
+def cmd_devsaves(a, ev, control):
+    """developer mode's test saves (tools/dev_saves.py; docs/M11_PLAN.md section 3.2): --action states (default) |
+    copy-player | keep --name N [--confirm: replace] | restore --name N | delete --name N"""
+    import dev_saves
+    lay = _layout(a, kind=None)
+    act = a.action or "states"
+    try:
+        if act == "copy-player":
+            return dev_saves.copy_player(lay)
+        if act == "keep":
+            return dev_saves.keep(lay, a.name, replace=a.confirm)
+        if act == "restore":
+            return dev_saves.restore(lay, a.name)
+        if act == "delete":
+            return dev_saves.delete(lay, a.name)
+        if act == "states":
+            return dev_saves.states(lay)
+    except dev_saves.DevSavesError as e:
+        raise pipeline.SetupError(str(e), e.code)
+    raise pipeline.SetupError(f"devsaves: no action {act}", "usage")
+
+
 def cmd_selftest(a, ev, control):
     """A pretend operation of three steps over --seconds, with progress, for the protocol's tests and for
     developing the launcher's progress screens without converting a disc. --block: the second step stops
@@ -1176,7 +1198,7 @@ COMMANDS = {"version": cmd_version, "probe-disc": cmd_probe_disc, "probe-keys": 
             "check-update": cmd_check_update, "download-update": cmd_download_update,
             "stage-launcher": cmd_stage_launcher, "swap-launcher": cmd_swap_launcher, "settings": cmd_settings,
             "diagnostics": cmd_diagnostics, "shortcuts": cmd_shortcuts, "selftest": cmd_selftest,
-            "uninstall": cmd_uninstall, "remove-launcher": cmd_remove_launcher}
+            "uninstall": cmd_uninstall, "remove-launcher": cmd_remove_launcher, "devsaves": cmd_devsaves}
 
 
 def parser():
@@ -1190,7 +1212,9 @@ def parser():
     p.add_argument("--resume", action="store_true", help="install: keep the disc's steps a previous run finished")
     p.add_argument("--to", help="rollback: the kept build to go back to (default: the newest)")
     p.add_argument("--keep", type=int, help="retention: how many previous builds to keep")
-    p.add_argument("--action", choices=("list", "backup", "restore", "delete"), help="saves")
+    p.add_argument("--action", choices=("list", "backup", "restore", "delete", "states", "copy-player", "keep"),
+                   help="saves; devsaves")
+    p.add_argument("--name", help="devsaves: a test state's name")
     p.add_argument("--backup", help="saves: a backup's id")
     p.add_argument("--note", help="saves backup: a note kept with it")
     p.add_argument("--confirm", action="store_true", help="saves restore/delete: the player confirmed")
@@ -1241,7 +1265,8 @@ REQUIRED = {"probe-disc": ("disc",), "probe-keys": ("disc", "keys"), "space": ("
             "repair-link": ("install",), "saves": ("install",), "prepare": ("install",), "uninstall": ("install",),
             "download-update": ("install",), "stage-launcher": ("package", "launcher"),
             "swap-launcher": ("launcher", "start"), "settings": ("install",), "diagnostics": ("install", "out"),
-            "shortcuts": ("exe",), "remove-launcher": ("launcher",)}
+            "shortcuts": ("exe",), "remove-launcher": ("launcher",),
+            "devsaves": ("install",)}
 
 
 def main(argv=None):

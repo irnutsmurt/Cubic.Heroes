@@ -841,9 +841,19 @@ static const char* installed_defaults(void)
         s_log_path = log;
     }
     s_installed_elf = data + "/disc/PS3_GAME/USRDIR/EBOOT.elf";
-    set_default_env("PS3_GAMEDATA_ROOT", data + "/gamedata");
-    set_default_env("PS3_HDD0_ROOT", data + "/gamedata/dev_hdd0");
-    set_default_env("PS3_HDD1_ROOT", data + "/gamedata/dev_hdd1");
+    /* M11.0 (docs/M11_PLAN.md section 3.2): developer mode plays on test saves of its own -- the player's saves, system
+     * data and trophies (data/gamedata) are never opened while it is on. The roots set here are defaults: a test sets
+     * its own. */
+    const char* devmode = getenv("DOTHEROES_DEVELOPER_MODE");
+    const std::string saves = devmode && !strcmp(devmode, "1") ? data + "/devmode/gamedata" : data + "/gamedata";
+    if (devmode && !strcmp(devmode, "1") && !getenv("PS3_GAMEDATA_ROOT")) {   /* a first developer session: empty */
+        std::error_code ec;
+        std::filesystem::create_directories(saves + "/dev_hdd0/home/00000001/savedata", ec);
+        std::filesystem::create_directories(saves + "/dev_hdd1", ec);
+    }
+    set_default_env("PS3_GAMEDATA_ROOT", saves);
+    set_default_env("PS3_HDD0_ROOT", saves + "/dev_hdd0");
+    set_default_env("PS3_HDD1_ROOT", saves + "/dev_hdd1");
     set_default_env("PS3_DEV_FLASH", data + "/dev_flash");
     set_default_env("PS3RECOMP_VK_WINDOW", "1");
     set_default_env("PS3_TITLE", "Cubic.Heroes - 3D Dot Game Heroes Recomp");
@@ -1035,6 +1045,7 @@ static void save_window_state()
 }
 
 extern "C" void dotheroes_overlay_start(const char* settings_path, const char* install_root);   /* overlay.cpp */
+#include "devtools/devtools.h"   /* M11.0: the developer tools (docs/M11_PLAN.md) */
 
 static int64_t limit_period_ns(const std::string& v);
 
@@ -1305,6 +1316,7 @@ int main(int argc, char** argv)
                               : s_install_root + (s_slots ? "/config/dotheroes.cfg" : "/dotheroes.cfg");
         dotheroes_overlay_start(cfg.c_str(), s_install_root.c_str());
     }
+    devtools_start(s_install_root.c_str());   /* M11.0: inert unless DOTHEROES_DEVELOPER_MODE=1 */
     /* On this thread, which runs the guest's entry (the PPU main thread),
      * and before the others start, so they take the process's placement. */
     dotheroes_cpu_place();

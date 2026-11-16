@@ -1967,7 +1967,7 @@ static void page_settings()
         } else if (key == "DOTHEROES_SKIP_LOGOS" || key == "DOTHEROES_VSYNC" || key == "DOTHEROES_MUTE" || key == "DOTHEROES_OVERLAY_HINT" ||
                    key == "LAUNCHER_CLOSE_ON_START" || key == "PS3RECOMP_VK_FULLSCREEN" || key == "LAUNCHER_CHECK_UPDATES" ||
                    key == "LAUNCHER_SHADERS_AFTER_UPDATE" || key == "LAUNCHER_SHADERS_ON_DRIVER_CHANGE" ||
-                   key == "LAUNCHER_VSYNC") {
+                   key == "LAUNCHER_VSYNC" || key == "DOTHEROES_DEVELOPER_MODE") {
             cycle = { "0", "1" };
             shown = val == "1" ? "On" : "Off";
         } else if (key == "LAUNCHER_BUILDS_KEPT") {

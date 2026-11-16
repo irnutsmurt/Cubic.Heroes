@@ -89,6 +89,9 @@
    "default": "info", "applies": "restart", "category": "Diagnostics", "label": "Log detail",
    "labels": {"error": "Errors only", "warning": "Errors and warnings", "info": "Normal", "debug": "Detailed",
               "trace": "Everything (large logs)"},
-   "help": "How much the game and the launcher write in their logs. Normal is enough for a report."}
+   "help": "How much the game and the launcher write in their logs. Normal is enough for a report."},
+  {"key": "DOTHEROES_DEVELOPER_MODE", "owner": "game", "type": "bool", "default": "0", "applies": "restart",
+   "category": "Diagnostics", "label": "Developer mode",
+   "help": "Testing tools in the in-game menu, for developers. While it is on, the game plays on separate test saves: your own saves are not used or changed."}
  ]
 }

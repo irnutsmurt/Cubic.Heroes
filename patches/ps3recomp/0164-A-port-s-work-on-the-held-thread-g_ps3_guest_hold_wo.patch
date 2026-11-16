@@ -1,0 +1,160 @@
+From bbd7e5ef9881dfc7c8418c7cec1d2ce2e45eaf30 Mon Sep 17 00:00:00 2001
+From: giteaguy <73799093+irnutsmurt@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 15:43:35 -0800
+Subject: [PATCH] A port's work on the held thread (g_ps3_guest_hold_work) and
+ a permanent corner tag (ps3_osd_set_tag)
+
+guest_pause.h: while the game is held, ps3_guest_pause_wait calls the port's g_ps3_guest_hold_work (null: none) on
+the thread that waits -- a developer tool acting on the paused game from the game's own thread. osd.h /
+rsx_vulkan_backend.c: g_ps3_osd_tag, a permanent tag drawn in the window's top-left corner at half the message's
+scale (the message's drawing made a box routine both use).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ include/ps3emu/guest_pause.h    |  6 +++++
+ include/ps3emu/osd.h            | 11 ++++++++
+ libs/video/rsx_vulkan_backend.c | 46 ++++++++++++++++++++-------------
+ 3 files changed, 45 insertions(+), 18 deletions(-)
+
+diff --git a/include/ps3emu/guest_pause.h b/include/ps3emu/guest_pause.h
+index d436477..0f1b244 100644
+--- a/include/ps3emu/guest_pause.h
++++ b/include/ps3emu/guest_pause.h
+@@ -132,10 +132,16 @@ static inline void ps3_guest_pause_set(int on)
+     __atomic_add_fetch(&s->seq, 1, __ATOMIC_RELEASE);
+ }
+ 
++/* Work a port does on the held thread while it waits (a developer tool acting on the paused game from that thread);
++ * null: none. Called every few milliseconds of the hold. */
++PS3_GUEST_PAUSE_SHARED void (*g_ps3_guest_hold_work)(void) = 0;
++
+ /* the guest's render thread, at its flip request: waits while the game is held */
+ static inline void ps3_guest_pause_wait(void)
+ {
+     while (ps3_guest_paused()) {
++        void (*const work)(void) = __atomic_load_n(&g_ps3_guest_hold_work, __ATOMIC_ACQUIRE);
++        if (work) work();
+ #ifdef _WIN32
+         Sleep(4);
+ #else
+diff --git a/include/ps3emu/osd.h b/include/ps3emu/osd.h
+index 811090a..46e25c8 100644
+--- a/include/ps3emu/osd.h
++++ b/include/ps3emu/osd.h
+@@ -67,6 +67,17 @@ static inline void ps3_osd_post(const char* text, unsigned ms)
+     __atomic_add_fetch(&s->seq, 1, __ATOMIC_RELEASE);
+ }
+ 
++/* A port's permanent tag in the window's top-left corner, at half the message's scale (a developer mode's "DEVELOPER
++ * MODE - TEST SAVES", so such a session is never taken for normal play); empty: none. Same font. Set once, before
++ * the window opens. */
++PS3_OSD_SHARED char g_ps3_osd_tag[PS3_OSD_TEXT_MAX] = { 0 };
++
++static inline void ps3_osd_set_tag(const char* text)
++{
++    strncpy(g_ps3_osd_tag, text ? text : "", PS3_OSD_TEXT_MAX - 1);
++    g_ps3_osd_tag[PS3_OSD_TEXT_MAX - 1] = 0;
++}
++
+ /* A frame-rate readout in the window's top-right corner, for testing (off by
+  * default): PS3_OSD_FPS=1 shows frames a second and the mean and longest
+  * frame of the last half second, =2 adds a graph of the last frames' times
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index 2cb4044..710fec6 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -2497,12 +2497,14 @@ static const struct { char c; uint8_t r[7]; } k_osd_font[] = {
+     {',',{0x00,0x00,0x00,0x00,0x0C,0x04,0x08}}, {'\'',{0x0C,0x04,0x08,0x00,0x00,0x00,0x00}},
+     {'+',{0x00,0x04,0x04,0x1F,0x04,0x04,0x00}}, {'?',{0x0E,0x11,0x01,0x02,0x04,0x00,0x04}},
+ };
+-static struct {
++typedef struct {
+     vk_buffer buf;
+     char      text[PS3_OSD_TEXT_MAX];
+     u32       w, h, scale;
+     int       fmt, failed;
+-} s_osd;
++} vk_osd_box;
++static vk_osd_box s_osd;       /* the message (ps3_osd_post), bottom left */
++static vk_osd_box s_osd_tag;   /* a port's permanent tag (ps3_osd_set_tag), top left, at half the scale */
+ 
+ static const uint8_t* vk_osd_glyph(char c)
+ {
+@@ -2514,28 +2516,28 @@ static const uint8_t* vk_osd_glyph(char c)
+ /* Called between the window blit and the switch to PRESENT_SRC, with the
+  * swapchain image in TRANSFER_DST_OPTIMAL. The window present waits for its
+  * fence before returning, so the staging buffer is free to rewrite here. */
+-static void vk_osd_draw(VkCommandBuffer cb, u32 idx)
++static void vk_osd_box_draw(VkCommandBuffer cb, u32 idx, const char* text, vk_osd_box* st, int top)
+ {
+-    char text[PS3_OSD_TEXT_MAX];
+-    if (!s_vk.sc_osd || s_osd.failed || !ps3_osd_current(text)) return;
++    if (!s_vk.sc_osd || st->failed) return;
+     const u32 W = s_vk.sc_extent.width, H = s_vk.sc_extent.height;
+-    const u32 scale = H >= 360 ? H / 180 : 2, pad = 4 * scale, n = (u32)strlen(text);
++    const u32 full = H >= 360 ? H / 180 : 2, scale = top ? (full / 2 ? full / 2 : 1) : full, pad = 4 * scale,
++              n = (u32)strlen(text);
+     const u32 bw = n * 6 * scale - scale + 2 * pad, bh = 7 * scale + 2 * pad, m = H / 30;
+     if (!n || bw + 2 * m > W || bh + 2 * m > H) return;
+-    if (strcmp(text, s_osd.text) || scale != s_osd.scale || s_vk.sc_osd != s_osd.fmt) {
++    if (strcmp(text, st->text) || scale != st->scale || s_vk.sc_osd != st->fmt) {
+         const VkDeviceSize need = (VkDeviceSize)bw * bh * 4;
+-        if (s_osd.buf.size < need) {
+-            if (s_osd.buf.buf) vk_destroy_present_buffer(&s_osd.buf);
+-            if (vk_create_host_buffer(&s_osd.buf, need, VK_BUFFER_USAGE_TRANSFER_SRC_BIT) != 0 ||
+-                !s_osd.buf.coherent) {           /* nothing here can flush a non-coherent write */
+-                if (s_osd.buf.buf) vk_destroy_present_buffer(&s_osd.buf);
+-                s_osd.failed = 1;
++        if (st->buf.size < need) {
++            if (st->buf.buf) vk_destroy_present_buffer(&st->buf);
++            if (vk_create_host_buffer(&st->buf, need, VK_BUFFER_USAGE_TRANSFER_SRC_BIT) != 0 ||
++                !st->buf.coherent) {           /* nothing here can flush a non-coherent write */
++                if (st->buf.buf) vk_destroy_present_buffer(&st->buf);
++                st->failed = 1;
+                 VK_LOG("no coherent host buffer for messages; they stay off\n");
+                 return;
+             }
+         }
+         const u32 edge = scale / 2 ? scale / 2 : 1;
+-        uint8_t* p = (uint8_t*)s_osd.buf.ptr;
++        uint8_t* p = (uint8_t*)st->buf.ptr;
+         for (u32 y = 0; y < bh; y++)
+             for (u32 x = 0; x < bw; x++, p += 4) {
+                 uint8_t v = 24;                                         /* the box */
+@@ -2548,8 +2550,9 @@ static void vk_osd_draw(VkCommandBuffer cb, u32 idx)
+                 }
+                 p[0] = p[1] = p[2] = v; p[3] = 255;                     /* grey: RGBA and BGRA alike */
+             }
+-        memcpy(s_osd.text, text, sizeof text);
+-        s_osd.scale = scale; s_osd.w = bw; s_osd.h = bh; s_osd.fmt = s_vk.sc_osd;
++        strncpy(st->text, text, PS3_OSD_TEXT_MAX - 1);
++        st->text[PS3_OSD_TEXT_MAX - 1] = 0;
++        st->scale = scale; st->w = bw; st->h = bh; st->fmt = s_vk.sc_osd;
+     }
+     /* After the blit's write to the same image. */
+     VkImageMemoryBarrier b = {
+@@ -2563,12 +2566,19 @@ static void vk_osd_draw(VkCommandBuffer cb, u32 idx)
+                           0, 0, NULL, 0, NULL, 1, &b);
+     VkBufferImageCopy region = {
+         .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+-        .imageOffset = { (int32_t)m, (int32_t)(H - bh - m), 0 }, .imageExtent = { bw, bh, 1 },
++        .imageOffset = { (int32_t)m, (int32_t)(top ? m : H - bh - m), 0 }, .imageExtent = { bw, bh, 1 },
+     };
+-    pvkCmdCopyBufferToImage(cb, s_osd.buf.buf, s_vk.sc_images[idx],
++    pvkCmdCopyBufferToImage(cb, st->buf.buf, s_vk.sc_images[idx],
+                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+ }
+ 
++static void vk_osd_draw(VkCommandBuffer cb, u32 idx)
++{
++    char text[PS3_OSD_TEXT_MAX];
++    if (g_ps3_osd_tag[0]) vk_osd_box_draw(cb, idx, g_ps3_osd_tag, &s_osd_tag, 1);
++    if (ps3_osd_current(text)) vk_osd_box_draw(cb, idx, text, &s_osd, 0);
++}
++
+ /* The frame-rate readout (PS3_OSD_FPS, include/ps3emu/osd.h), one row in the
+  * top right corner above the game's HUD, at half the message's scale: frames
+  * a second, the mean and longest frame of the last second (the text refreshed
+-- 
+2.56.0.windows.3
+
