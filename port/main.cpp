@@ -912,6 +912,10 @@ static int dotheroes_info(void)
  * renderer. */
 extern "C" int ppfx_native_prepare(void (*progress)(uint32_t done, uint32_t total, void* ctx), void* ctx,
                                    char* summary, int n, int check_only);
+/* `dotheroes --shader-inventory [--disc USRDIR] [--recipes FILE ...]` (M9.2a, docs/M92_SHADER_PLAN.md): the shader
+ * programs on the player's own disc, counted and identified as the renderer identifies them; with recipes files,
+ * every recorded program looked up in it. JSON on stdout; no device, no window. */
+extern "C" int dotheroes_shader_inventory(int argc, char** argv, const char* default_usrdir);
 
 static void prepare_progress(uint32_t done, uint32_t total, void*)
 {
@@ -1174,6 +1178,11 @@ int main(int argc, char** argv)
     }
     if (argc >= 2 && strcmp(argv[1], "--info") == 0) return dotheroes_info();
     if (argc >= 2 && strcmp(argv[1], "--prepare") == 0) return dotheroes_prepare(argc, argv);
+    if (argc >= 2 && strcmp(argv[1], "--shader-inventory") == 0) {   /* M9.2a: the disc's shader programs */
+        bool slots = false;
+        const std::string usr = install_root(exe_dir(), &slots) + "/data/disc/PS3_GAME/USRDIR";
+        return dotheroes_shader_inventory(argc, argv, usr.c_str());
+    }
     const char* elf = argc >= 2 ? argv[1] : installed_defaults();
     if (argc < 2) {
         FILE* f = fopen(elf, "rb");

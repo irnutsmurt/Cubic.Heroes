@@ -58,6 +58,7 @@
 #include <vulkan/vulkan.h>
 
 #include "ppfx_native.h"
+#include "shader_discovery.h"   // M9.2a: the inventory checks recorded recipes (recipe_views)
 
 #include <chrono>
 #include <condition_variable>
@@ -5383,3 +5384,16 @@ extern "C" int ppfx_native_prepare(void (*progress)(uint32_t done, uint32_t tota
              ppfx::s_pc_loaded / 1048576.0, ppfx::s_pc_saved / 1048576.0, gpu);
     return r.failed ? 1 : 0;
 }
+
+// M9.2a (shader_discovery.cpp): a recipes file's records as the inventory checks them
+namespace ppfx {
+std::vector<sd::RecipeView> recipe_views(const std::string& path)
+{
+    long end = 0;
+    std::vector<sd::RecipeView> out;
+    for (const Recipe& r : recipes_read(path, &end))
+        out.push_back({ r.s.kind, r.vp, r.fp, r.f.fp_ctrl, r.f.layout_mask, r.f.alpha_test, r.f.shadow_mask, r.s.rt,
+                        r.s.df });
+    return out;
+}
+}  // namespace ppfx

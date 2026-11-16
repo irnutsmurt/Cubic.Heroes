@@ -390,7 +390,7 @@ add_library(dotheroes_native STATIC native/bullet_cd_task.cpp native/bullet_solv
     # when a development lift's entry observers reference them
     # (tools/r1_dev_lift.sh)
     native/render/r1_observe.cpp native/render/ppfx_recorder.cpp native/render/ppfx_watch.cpp
-    native/render/ppfx_render.cpp
+    native/render/ppfx_render.cpp native/render/shader_discovery.cpp
     # M8.0's movie trace (DOTHEROES_MOVIE_TRACE; a lift with config/m8_movie_trace.json's observers)
     native/movie/movie_trace.cpp)
 # the save-data screen's font and prompt images (above), registered by main.cpp

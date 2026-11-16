@@ -8,10 +8,12 @@ limits are established. Labels as in the other records: [C] read in the code, [M
 
 ## Checkpoint
 
-- **Stage**: M9.2a (inventory and static discovery) in progress.
-- **Done**: the investigation below (section 2); the test harness keeps every automated run off the desktop,
-  enforced centrally (section 7).
-- **Next**: the inventory in the game binary (`--shader-inventory`), checked against every recorded program.
+- **Stage**: M9.2b/c (every shader translated; pipelines from structure) in progress.
+- **Done**: the investigation (section 2); the test harness keeps every automated run off the desktop, enforced
+  centrally (section 7); **M9.2a**: the inventory in the game (section 2a) -- 636 vertex and 2,481 fragment records
+  read, none unparsed; every program of 332 recorded pipelines found; layout and control word derived exactly.
+- **Next**: normalised render state and one key function; the comprehensive `--prepare` (every program
+  translated in parallel, pipelines for every package record by its group's profiles).
 - **Open questions for the owner**: none yet.
 
 ## 1. What decides a pipeline (the renderer, port/native/render/ppfx_render.cpp) [C]
@@ -74,6 +76,49 @@ linking and independent interpolation, VK_EXT_extended_dynamic_state3 (blend, co
 other vendors: Intel's Arc Windows driver lists graphics pipeline libraries (2025); AMD's Windows driver lists
 extended dynamic state 3 (since 23.3.2); AMD's Windows support of pipeline libraries not established. So these
 can only be accelerators over a path that works without them.
+
+## 2a. M9.2a: the inventory, in the game (2026-11-16) [M, C]
+
+`dotheroes --shader-inventory [--disc USRDIR] [--recipes FILE ...]` (port/native/render/shader_discovery.cpp; the
+install's own disc copy by default; no device, no window): every container parsed with its header checked, each
+program put in the form the renderer is handed (vertex: little-endian words; fragment: as stored) and identified
+with the renderer's own functions (`rsx_vp_analyze_inputs`, `rsx_fp_structural_hash`, `rsx_fp_texture_units`,
+`rsx_fp_collect_constants`). JSON: counts, distinct programs, constant-only variants; with recipes, every recorded
+program looked up. On the test install's disc (build/m92/inventory_check.sh; F:\3d dot game heroes\m92\evidence):
+
+| Source | Vertex records (distinct) | Fragment records (distinct structures) | Unparsed |
+|---|---|---|---|
+| shaders.ps3.pkg | 567 (292) | 567 (357) | 0 |
+| shaders_0.ps3.pkg | 2 (2) | 2 (1) | 0 |
+| SasShader.ps3.spk | 30 (30) | 30 (8) | 0 |
+| SasShader2.ps3.spk | 1 (1) | 1 (1) | 0 |
+| EBOOT, CGB records | 13 (12) | 22 (19) | 0 |
+| EBOOT, Cg binary programs | 23 (23) | 1,859 (1,738) | 0 |
+| **all** | **636 (356)** | **2,481 (2,118)** | **0** |
+
+- **Duplicates and constant-only variants**: 636 vertex records are 356 programs; 2,481 fragment records are 2,118
+  structures, and on the disc no two fragment programs differ in constants alone (2,118 distinct byte strings for
+  2,118 structures). Constant-only variants exist only at run time -- the game patches a program's constants as it
+  draws -- and the renderer's structural identity already makes one translation serve them all;
+- **569 package records are 562 distinct program pairs**;
+- **every vertex program's inputs are known exactly** by the renderer's analysis (636 of 636), and agree with what
+  its header declares (636 of 636);
+- **no cube or volume sampler** is declared by any Cg program's parameters; the package's CGB records carry no
+  sampler types (per-draw texture kinds stay predicted).
+
+**Checked against everything recorded** (332 pipelines in five recipes files: the four M9.5 routes, the river
+fights, the install tests):
+- **both programs of all 332 found** (36 of 36 vertex programs, 49 of 49 fragment structures): 189 from one package
+  record, the rest the EBOOT's (102 Cg, 41 CGB, some mixed);
+- **the vertex layout derived from the program equals the recorded one in 332 of 332** (both renderer paths take
+  it from the program's analysis alone);
+- **the fragment control word derived from the header equals the recorded one in 332 of 332**: the package's and
+  CGB records' as stored; the Cg programs' from registerCount (4 more when the output is from H0, as the game sets
+  it in all 102 recorded), outputFromH0, depthReplace, pixelKill. The translator reads only its H0 and depth bits.
+
+So the programs, their pairing in the package, the vertex layout and the fragment control word are static; what
+remains per draw is the pass's targets and render state, the alpha test, a shadow sampler, and which
+post-processing programs are paired -- section 3.
 
 ## 3. The design
 
