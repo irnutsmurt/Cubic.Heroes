@@ -1,0 +1,151 @@
+From 4f128f3a93223d9ce003d63cada37adeb27dbb6a Mon Sep 17 00:00:00 2001
+From: giteaguy <73799093+irnutsmurt@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 13:16:51 -0800
+Subject: [PATCH] Graphics pipeline libraries for a port, capability-gated
+ (PS3RECOMP_VK_GPL)
+
+PS3RECOMP_VK_GPL=1 (or the M9.2d probe's PS3RECOMP_VK_GPL_PROBE=1) enables VK_EXT_graphics_pipeline_library with
+fast linking and extended dynamic state -- all of them, or none: the driver's features (vkGetPhysicalDeviceFeatures2:
+graphicsPipelineLibrary, extendedDynamicState) and properties (graphicsPipelineLibraryFastLinking) are asked first,
+the extended dynamic state taken from its extension or, on a Vulkan 1.3 device without it, from the core commands
+(rsx_vk_gpl_core_eds). Only then does the instance ask for the loader's own version, at most 1.3. A Vulkan 1.0
+loader, a device without the extension or a feature: logged, and Vulkan 1.0 as always; by default nothing changes.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libs/video/rsx_vulkan_backend.c | 95 ++++++++++++++++++++++++++-------
+ 1 file changed, 76 insertions(+), 19 deletions(-)
+
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index 5dacf96..2cb4044 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -269,7 +269,10 @@ typedef struct vk_state {
+     int              bc_ok;           /* textureCompressionBC enabled       */
+     int              depth_bounds_ok; /* depthBounds enabled                */
+     int              depth_clamp_ok;  /* depthClamp enabled                 */
+-    int              gpl_ok;          /* graphics pipeline libraries enabled (PS3RECOMP_VK_GPL_PROBE) */
++    int              gpl_ok;          /* graphics pipeline libraries, fast linking and extended dynamic state
++                                         enabled (PS3RECOMP_VK_GPL=1, when the device has all of them) */
++    int              gpl_core_eds;    /* the dynamic state is Vulkan 1.3's core commands (no extension) */
++    u32              api;             /* the instance's API version asked for */
+     int              aniso_ok;        /* samplerAnisotropy enabled          */
+     int              indep_blend_ok;  /* independentBlend: per-target MRT state */
+     u32              max_dim;         /* maxImageDimension2D of the device  */
+@@ -6156,12 +6159,24 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+     vk_window_open(title);           /* no-op unless PS3RECOMP_VK_WINDOW is set */
+     if (vk_load_library()) return -1;
+ 
+-    /* PS3RECOMP_VK_GPL_PROBE=1 (a measurement, a port's preparation pass): Vulkan 1.3 and graphics pipeline
+-     * libraries where the device has them (rsx_vk_gpl_ok); otherwise, and by default, Vulkan 1.0 as always */
+-    const int gpl_probe = vk_env_on("PS3RECOMP_VK_GPL_PROBE");
++    /* PS3RECOMP_VK_GPL=1 (or the M9.2d probe's PS3RECOMP_VK_GPL_PROBE=1): graphics pipeline libraries with fast
++     * linking and extended dynamic state, enabled only where the loader, the device and its driver have all of them
++     * (rsx_vk_gpl_ok); the instance then asks for the loader's own version, at most 1.3. Otherwise, and by default,
++     * Vulkan 1.0 as always: nothing more is required of a machine. */
++    const int gpl_probe = vk_env_on("PS3RECOMP_VK_GPL") || vk_env_on("PS3RECOMP_VK_GPL_PROBE");
++    s_vk.api = VK_API_VERSION_1_0;
++    if (gpl_probe) {
++        PFN_vkEnumerateInstanceVersion ev =
++            (PFN_vkEnumerateInstanceVersion)pvkGetInstanceProcAddr(VK_NULL_HANDLE, "vkEnumerateInstanceVersion");
++        u32 v = VK_API_VERSION_1_0;
++        if (ev && ev(&v) == VK_SUCCESS && v >= VK_API_VERSION_1_1)
++            s_vk.api = v < VK_API_VERSION_1_3 ? (v & ~0xFFFu) : VK_API_VERSION_1_3;
++        else
++            VK_LOG("graphics pipeline libraries: the Vulkan loader is 1.0 -- not used\n");
++    }
+     VkApplicationInfo app = { .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
+                               .pApplicationName = "ps3recomp", .pEngineName = "ps3recomp RSX",
+-                              .apiVersion = gpl_probe ? VK_API_VERSION_1_3 : VK_API_VERSION_1_0 };
++                              .apiVersion = s_vk.api };
+     VkInstanceCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+                                 .pApplicationInfo = &app };
+     if (s_vk.windowed) {
+@@ -6293,21 +6308,61 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+                                .enabledExtensionCount = s_vk.windowed ? 1u : 0u,
+                                .ppEnabledExtensionNames = s_vk.windowed ? dev_exts : NULL,
+                                .pEnabledFeatures = &want };
+-    /* the probe's graphics pipeline libraries (above): both extensions and the feature, when the device has them */
+-    const char* probe_exts[3];
++    /* Graphics pipeline libraries (above, PS3RECOMP_VK_GPL): the extensions, the features (asked of the driver with
++     * vkGetPhysicalDeviceFeatures2) and fast linking (its properties) -- all of them, or none is enabled. Extended
++     * dynamic state from its extension, or Vulkan 1.3's core commands where the device is 1.3 without it. */
++    const char* probe_exts[4];
++    VkPhysicalDeviceExtendedDynamicStateFeaturesEXT edsf = {
++        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT };
+     VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT gplf = {
+-        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT, .graphicsPipelineLibrary = VK_TRUE };
+-    if (gpl_probe && vk_has_device_extension(s_vk.phys, VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME) &&
+-        vk_has_device_extension(s_vk.phys, VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME)) {
+-        uint32_t n = 0;
+-        if (s_vk.windowed) probe_exts[n++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+-        probe_exts[n++] = VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME;
+-        probe_exts[n++] = VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME;
+-        dci.enabledExtensionCount = n;
+-        dci.ppEnabledExtensionNames = probe_exts;
+-        dci.pNext = &gplf;
+-        s_vk.gpl_ok = 1;
+-        VK_LOG("graphics pipeline libraries enabled (PS3RECOMP_VK_GPL_PROBE)\n");
++        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT };
++    if (gpl_probe && s_vk.api >= VK_API_VERSION_1_1) {
++        VkPhysicalDeviceProperties dp;
++        pvkGetPhysicalDeviceProperties(s_vk.phys, &dp);
++        PFN_vkGetPhysicalDeviceFeatures2 gf2 =
++            (PFN_vkGetPhysicalDeviceFeatures2)pvkGetInstanceProcAddr(s_vk.instance, "vkGetPhysicalDeviceFeatures2");
++        PFN_vkGetPhysicalDeviceProperties2 gp2 =
++            (PFN_vkGetPhysicalDeviceProperties2)pvkGetInstanceProcAddr(s_vk.instance, "vkGetPhysicalDeviceProperties2");
++        const int ext_eds = vk_has_device_extension(s_vk.phys, VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME);
++        const int core_eds = !ext_eds && dp.apiVersion >= VK_API_VERSION_1_3 && s_vk.api >= VK_API_VERSION_1_3;
++        const char* why = NULL;
++        if (dp.apiVersion < VK_API_VERSION_1_1 || !gf2 || !gp2) why = "the device is Vulkan 1.0";
++        else if (!vk_has_device_extension(s_vk.phys, VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME) ||
++                 !vk_has_device_extension(s_vk.phys, VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME))
++            why = "the driver has no VK_EXT_graphics_pipeline_library";
++        else if (!ext_eds && !core_eds) why = "the driver has no extended dynamic state";
++        else {
++            VkPhysicalDeviceGraphicsPipelineLibraryPropertiesEXT gplp = {
++                .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_PROPERTIES_EXT };
++            VkPhysicalDeviceProperties2 p2 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &gplp };
++            gp2(s_vk.phys, &p2);
++            gplf.pNext = ext_eds ? &edsf : NULL;
++            VkPhysicalDeviceFeatures2 f2 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &gplf };
++            gf2(s_vk.phys, &f2);
++            if (!gplf.graphicsPipelineLibrary) why = "the graphicsPipelineLibrary feature is off";
++            else if (!gplp.graphicsPipelineLibraryFastLinking) why = "the driver links libraries without fast linking";
++            else if (ext_eds && !edsf.extendedDynamicState) why = "the extendedDynamicState feature is off";
++        }
++        if (why) {
++            VK_LOG("graphics pipeline libraries not used: %s\n", why);
++        } else {
++            uint32_t n = 0;
++            if (s_vk.windowed) probe_exts[n++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
++            probe_exts[n++] = VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME;
++            probe_exts[n++] = VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME;
++            if (ext_eds) probe_exts[n++] = VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME;
++            gplf.pNext = ext_eds ? &edsf : NULL;
++            gplf.graphicsPipelineLibrary = VK_TRUE;
++            edsf.pNext = NULL;
++            edsf.extendedDynamicState = VK_TRUE;
++            dci.enabledExtensionCount = n;
++            dci.ppEnabledExtensionNames = probe_exts;
++            dci.pNext = &gplf;
++            s_vk.gpl_ok = 1;
++            s_vk.gpl_core_eds = core_eds;
++            VK_LOG("graphics pipeline libraries enabled, fast linking, extended dynamic state (%s)\n",
++                   core_eds ? "Vulkan 1.3" : "extension");
++        }
+     }
+     VK_CHECK(pvkCreateDevice(s_vk.phys, &dci, NULL, &s_vk.device), "vkCreateDevice");
+     if (vk_load_device_functions()) return -1;
+@@ -6824,6 +6879,8 @@ unsigned long long rsx_vk_bridge_signals(unsigned long long* lost)
+ 
+ /* Whether the device was created with graphics pipeline libraries (PS3RECOMP_VK_GPL_PROBE: a measurement). */
+ int rsx_vk_gpl_ok(void) { return s_vk.gpl_ok; }
++/* 1: the extended dynamic state is Vulkan 1.3's core commands (vkCmdSetCullMode, ...), not the EXT ones */
++int rsx_vk_gpl_core_eds(void) { return s_vk.gpl_core_eds; }
+ 
+ /* Whether the device was created with depthClamp (a native renderer's pipelines may ask for it). */
+ int rsx_vk_depth_clamp_ok(void) { return s_vk.depth_clamp_ok; }
+-- 
+2.56.0.windows.3
+

@@ -71,6 +71,7 @@
 #include "ppfx_native.h"
 #include "rsx_dispatch.h"
 #include "rsx_texture_layout.h"
+#include "ps3emu/ps3_ftrace.h"   // M9.2g: the compile log's clock (the map sweep)
 #include "ps3emu/osd.h"          // ps3_osd_post: an unimplemented graphics call, on screen (R8)
 #include "ps3emu/ps3_strict.h"   // ps3_strict_fail: the same, fatal under PS3_STRICT=1
 #include <atomic>
@@ -1091,8 +1092,79 @@ bool asp_state_bypass_enter(uint32_t addr, ppu_context* c);
 int asp_state_skip(uint32_t addr, ppu_context* c);   // R6, below
 bool asp_state_verify_enter(uint32_t addr, ppu_context* c);
 int r6_skip();
+
+// M9.2g (development: DOTHEROES_SHADER_TRACE=FILE): where asp's program binds, draws and state setters are called
+// from -- each distinct (function, guest call stack) once, with its arguments; a program pair's object and a
+// shader object's microcode identity once each. For finding the engine's material and pass code; off by default.
+void shader_trace(uint32_t addr, ppu_context* c)
+{
+    static std::mutex mu;
+    static FILE* out;
+    static std::unordered_set<uint64_t> seen;
+    static std::unordered_set<uint32_t> objs;
+    switch (addr) {
+    case 0x006C99B0: case 0x006CA3D0: case 0x006C6F88: case 0x006C5298: case 0x006C048C: case 0x006C4284:
+    case 0x006C05AC: case 0x006C49BC: case 0x006C01C4: case 0x006C0A70: case 0x006C4508: case 0x006C4D1C:
+    case 0x006D1764: case 0x006C8A34: case 0x006CB070: case 0x006D0E84: case 0x006C02E8:
+        break;
+    default:
+        return;
+    }
+    uint32_t st[14];
+    int n = 0;
+    st[n++] = (uint32_t)c->lr;
+    uint32_t fp = (uint32_t)c->gpr[1];
+    while (n < 14 && ea_ok(fp, 8)) {
+        const uint32_t prev = g32(fp + 4);   // the back chain (a doubleword: its low word)
+        if (prev <= fp || !ea_ok(prev, 0x18)) break;
+        st[n++] = g32(prev + 0x14);          // the caller's saved link register (prev + 0x10, low word)
+        fp = prev;
+    }
+    uint64_t h = 0xcbf29ce484222325ull ^ addr;
+    for (int i = 0; i < n; i++) h = (h ^ st[i]) * 0x100000001b3ull;
+    const uint32_t r3 = (uint32_t)c->gpr[3];
+    if (addr == 0x006C99B0) h = (h ^ r3) * 0x100000001b3ull;   // per program pair
+    std::lock_guard<std::mutex> lk(mu);
+    if (!out) {
+        const char* p = getenv("DOTHEROES_SHADER_TRACE");
+        out = p ? fopen(p, "w") : nullptr;
+        if (!out) return;
+    }
+    if (!seen.insert(h).second) return;
+    fprintf(out, "call %08X r3 %08X r4 %08X r5 %08X r6 %08X r7 %08X r8 %08X f1 %g stack", addr, r3,
+            (uint32_t)c->gpr[4], (uint32_t)c->gpr[5], (uint32_t)c->gpr[6], (uint32_t)c->gpr[7], (uint32_t)c->gpr[8],
+            c->fpr[1]);
+    for (int i = 0; i < n; i++) fprintf(out, " %08X", st[i]);
+    fputc('\n', out);
+    auto dump = [&](const char* what, uint32_t o, uint32_t len) {
+        if (!ea_ok(o, len) || !objs.insert(o).second) return;
+        fprintf(out, "%s %08X", what, o);
+        for (uint32_t i = 0; i < len; i += 4) fprintf(out, " %08X", g32(o + i));
+        fputc('\n', out);
+    };
+    auto shader = [&](const char* what, uint32_t so) {   // a shader object: its container and microcode identity
+        if (!ea_ok(so, 0x74) || objs.count(so)) return;
+        dump(what, so, 0x74);
+        const uint32_t cont = g32(so + 0x18), uc = g32(so + 0x1C);
+        if (!ea_ok(cont, 0x20)) return;
+        const uint32_t bytes = g16(cont + 8);
+        if (!bytes || !ea_ok(uc, bytes)) return;
+        uint64_t f = 0xcbf29ce484222325ull;
+        for (uint32_t i = 0; i < bytes; i++) f = (f ^ g8(uc + i)) * 0x100000001b3ull;
+        fprintf(out, "code %08X cont %08X bytes %u fnv %016llX\n", so, cont, bytes, (unsigned long long)f);
+    };
+    if (addr == 0x006C99B0 && ea_ok(r3, 0x100)) {
+        dump("pair", r3, 0x100);
+        shader("fobj", g32(r3 + 0xF0));
+    }
+    if (addr == 0x006CA3D0) shader("vobj", r3);
+    fflush(out);
+}
+
 int asp_call(uint32_t addr, ppu_context* c)
 {
+    static const int s_strace = getenv("DOTHEROES_SHADER_TRACE") ? 1 : 0;
+    if (s_strace) shader_trace(addr, c);
     bump(stats().asp_calls);
     if (r6_skip() == 3) { const int k = asp_state_skip(addr, c); if (k) return k - 1; }   // R6: =all
     if (r6_skip() == 2 && asp_state_verify_enter(addr, c)) {   // R6's verify: the body runs, the R5 path records
@@ -4386,9 +4458,151 @@ int other_thread_call(uint32_t addr, ppu_context* ctx, uint32_t tid, bool timed,
 }
 } }
 
+// M9.2g (development lifts only: build/m92g, DOTHEROES_FN_TRACE=FILE with DOTHEROES_FN_TRACE_EXTRA=LIST): the
+// functions a tracing lift observes beyond the play build's hooks -- each distinct (function, guest call stack)
+// once with its arguments, and for the functions DOTHEROES_FN_TRACE_ARGS lists each distinct argument tuple; call
+// counts every 600 frames to FILE.counts. An extra function returns at once (its body runs as in play); nothing of
+// the recorder sees it. A play lift observes none of them.
+namespace {
+struct FnTrace {
+    std::mutex mu;
+    FILE* out = nullptr;
+    std::unordered_set<uint32_t> extra, args;
+    std::unordered_set<uint64_t> seen;
+    std::unordered_map<uint32_t, uint64_t> calls, lines;
+    std::string counts;
+    int on = -1;
+};
+FnTrace& fnt() { static FnTrace* t = new FnTrace; return *t; }
+void fnt_load(std::unordered_set<uint32_t>& s, const char* path)
+{
+    FILE* f = path ? fopen(path, "r") : nullptr;
+    if (!f) return;
+    unsigned a;
+    while (fscanf(f, "%x", &a) == 1) s.insert(a);
+    fclose(f);
+}
+void fnt_counts(FnTrace& t)
+{
+    FILE* f = fopen(t.counts.c_str(), "w");
+    if (!f) return;
+    for (auto& kv : t.calls) fprintf(f, "%08X %llu\n", kv.first, (unsigned long long)kv.second);
+    fclose(f);
+}
+// 1: an extra function (traced; the caller returns 0); 0: not one
+int fn_trace(uint32_t addr, ppu_context* c)
+{
+    FnTrace& t = fnt();
+    if (t.on < 0) {
+        std::lock_guard<std::mutex> lk(t.mu);
+        if (t.on < 0) {
+            const char* p = getenv("DOTHEROES_FN_TRACE");
+            fnt_load(t.extra, getenv("DOTHEROES_FN_TRACE_EXTRA"));
+            fnt_load(t.args, getenv("DOTHEROES_FN_TRACE_ARGS"));
+            t.out = p ? fopen(p, "w") : nullptr;
+            if (p) t.counts = std::string(p) + ".counts";
+            t.on = t.out ? 1 : 0;
+        }
+    }
+    const bool extra = t.extra.count(addr) != 0;
+    if (t.on != 1) return extra ? 1 : 0;
+    uint32_t st[8];
+    int n = 0;
+    st[n++] = (uint32_t)c->lr;
+    uint32_t fp = (uint32_t)c->gpr[1];
+    while (n < 8 && ppfx::ea_ok(fp, 8)) {
+        const uint32_t prev = ppfx::g32(fp + 4);
+        if (prev <= fp || !ppfx::ea_ok(prev, 0x18)) break;
+        st[n++] = ppfx::g32(prev + 0x14);
+        fp = prev;
+    }
+    uint64_t h = 0xcbf29ce484222325ull ^ addr;
+    for (int i = 0; i < n; i++) h = (h ^ st[i]) * 0x100000001b3ull;
+    const bool by_args = t.args.count(addr) != 0;
+    if (by_args)
+        for (int r = 4; r <= 10; r++) h = (h ^ c->gpr[r]) * 0x100000001b3ull;
+    std::lock_guard<std::mutex> lk(t.mu);
+    const uint64_t k = ++t.calls[addr];
+    if (addr == 0x0069DD60u && k % 600 == 0) fnt_counts(t);
+    if (addr == 0x006D7B00u && k == 1) {   // asp's blend-mode table (0x006D7558: TOC -0x2AA4, +8, 28 bytes an entry)
+        const uint32_t tb = ppfx::g32((uint32_t)c->gpr[2] - 0x2AA4u) + 8u;
+        if (ppfx::ea_ok(tb, 64 * 28)) {
+            fprintf(t.out, "D blendmodes %08X", tb);
+            for (uint32_t i = 0; i < 64 * 28; i += 4) fprintf(t.out, " %08X", ppfx::g32(tb + i));
+            fputc('\n', t.out);
+        }
+    }
+    if (t.lines[addr] >= (by_args ? 20000u : 3000u) || !t.seen.insert(h).second) return extra ? 1 : 0;
+    t.lines[addr]++;
+    fprintf(t.out, "F %08X n %llu", addr, (unsigned long long)k);
+    for (int r = 3; r <= 10; r++) fprintf(t.out, " %llX", (unsigned long long)c->gpr[r]);
+    fprintf(t.out, " f %g %g s", c->fpr[1], c->fpr[2]);
+    for (int i = 0; i < n; i++) fprintf(t.out, " %08X", st[i]);
+    fputc('\n', t.out);
+    if (t.lines[addr] % 64 == 1) fflush(t.out);
+    return extra ? 1 : 0;
+}
+// M9.2g (development only: DOTHEROES_MAP_SWEEP=LIST): every map of a list visited in turn through the game's own
+// map change -- its native Event:SetMap (0x004D5958(event, map, entry), which queues the change with the game
+// manager) called on the game's thread at a frame's flip, one map every LIST's seconds, from
+// DOTHEROES_MAP_SWEEP_START seconds on. A line of LIST: "MAP ENTRY SECONDS". Each change is written to stderr with
+// the compile log's clock, so what each map built can be told apart. Never in a play session.
+struct SweepFn { uint64_t addr; void (*func)(ppu_context*); const char* name; };   // the lift's func_entry
+extern "C" const SweepFn function_table[];
+extern "C" const uint64_t function_table_count;
+extern "C" __thread void (*g_trampoline_fn)(void*);   // the lift's (PPU_THREAD_LOCAL)
+double ps3_ftrace_clock() { return (double)(int64_t)(ps3_ft_now() - g_ps3_ft.base) / 1e9; }   // the compile log's
+struct SweepMap { std::string map, entry; double secs; };
+void map_sweep(ppu_context* c)
+{
+    static std::vector<SweepMap>* list = nullptr;
+    static size_t next = 0;
+    static double due = -1, t0 = 0;
+    static void (*setmap)(ppu_context*) = nullptr;
+    if (!list) {
+        list = new std::vector<SweepMap>;
+        if (FILE* f = fopen(getenv("DOTHEROES_MAP_SWEEP"), "r")) {
+            char m[128], e[128];
+            double s;
+            while (fscanf(f, "%127s %127s %lf", m, e, &s) == 3) list->push_back({ m, e, s });
+            fclose(f);
+        }
+        for (uint64_t i = 0; i < function_table_count; i++)
+            if (function_table[i].addr == 0x004D5958u) setmap = function_table[i].func;
+        const char* st = getenv("DOTHEROES_MAP_SWEEP_START");
+        t0 = ppfx::now_s();
+        due = t0 + (st ? atof(st) : 45.0);
+        fprintf(stderr, "[sweep] %zu maps, SetMap %s, the first at %.0f s\n", list->size(), setmap ? "found" : "MISSING",
+                due - t0);
+    }
+    if (!setmap || next >= list->size() || ppfx::now_s() < due) return;
+    const SweepMap& m = (*list)[next++];
+    // the two names on the guest's stack, well below its frame; the call's own frame below them
+    const uint32_t sp = (uint32_t)c->gpr[1];
+    const uint32_t s_map = (sp - 0x4000u) & ~15u, s_entry = s_map + 0x100u, frame = (sp - 0x8000u) & ~15u;
+    if (!ppfx::ea_ok(frame, 0x8000)) return;
+    memset(vm_base + s_map, 0, 0x200);
+    memcpy(vm_base + s_map, m.map.c_str(), m.map.size() < 0xFF ? m.map.size() : 0xFF);
+    memcpy(vm_base + s_entry, m.entry.c_str(), m.entry.size() < 0xFF ? m.entry.size() : 0xFF);
+    memset(vm_base + frame, 0, 16);   // a null back chain
+    ppu_context g = *c;
+    g.gpr[1] = frame; g.gpr[2] = 0x01057910u;   // the function's module TOC (build/m92/func_toc.tsv)
+    g.gpr[3] = 0; g.gpr[4] = s_map; g.gpr[5] = s_entry; g.lr = 0;
+    fprintf(stderr, "[sweep] t=%.3f map %zu/%zu %s %s\n", ps3_ftrace_clock(), next, list->size(), m.map.c_str(),
+            m.entry.c_str());
+    setmap(&g);
+    while (g_trampoline_fn) { void (*tf)(void*) = g_trampoline_fn; g_trampoline_fn = nullptr; tf(&g); }
+    due = ppfx::now_s() + m.secs;
+}
+}  // namespace
+
 extern "C" int ppfx_rec_observe(uint32_t addr, ppu_context* ctx)
 {
     static int started = 0;
+    static const bool s_fnt = getenv("DOTHEROES_FN_TRACE_EXTRA") != nullptr;
+    static const bool s_sweep = getenv("DOTHEROES_MAP_SWEEP") != nullptr;
+    if (s_sweep && addr == 0x0069DD60u) map_sweep(ctx);
+    if (s_fnt && fn_trace(addr, ctx)) return 0;
     if (!started) { started = 1; ppfx::start(); }
     if (ppfx::s_cc_on) {
         if (ppfx::s_cc_on < 0) { const char* e = getenv("DOTHEROES_R6_CALL_COUNTS"); ppfx::s_cc_on = e && *e == '1'; }

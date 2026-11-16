@@ -1075,7 +1075,10 @@ Img* target_image(uint32_t loc, uint32_t off, VkFormat fmt, uint32_t bpp, uint32
 
 // ---- programs and pipelines -----------------------------------------------------------------
 
-struct Pipe { VkPipeline p; uint32_t nconst; };
+// M9.2g: dyn -- linked from graphics pipeline libraries (gpl_make), its depth, stencil, cull and winding dynamic,
+// set from ds at each draw (gpl_dyn) until the whole pipeline replaces it (gpl_swap)
+struct PipeState;
+struct Pipe { VkPipeline p; uint32_t nconst; uint8_t dyn; const PipeState* ds; };
 std::unordered_map<uint64_t, Pipe> s_pipes;
 
 // M9.2: everything a pipeline is made from besides its two programs' text -- what the two creation sites read
@@ -1095,6 +1098,13 @@ struct PipeState {
 static_assert(sizeof(PipeState) == 32 * 4, "the recipes' record");
 VkPipelineCache s_pcache = VK_NULL_HANDLE;   // M9.2: the native renderer's own, kept on disk (pcache_open)
 bool warm_take(uint64_t key, struct Pipe* out);   // M9.2d (below)
+// M9.2g (below): graphics pipeline libraries for a pipeline not made before its first draw
+int gpl_mode();
+VkResult gpl_make(uint64_t key, const PipeState& s, const std::string& vs, const std::string& ps, VkShaderModule vsm,
+                  VkShaderModule fsm, Pipe* P);
+void gpl_swap(uint64_t key, Pipe& P);
+void gpl_dyn(VkCommandBuffer cb, const PipeState& s);
+bool gpl_use(uint64_t key);   // linked from libraries: a pipeline the preparation did not make (all: DOTHEROES_GPL=link)
 void warm_start(const std::string& dir);
 using PipeCreator = VkResult (*)(VkGraphicsPipelineCreateInfo& gci, void* ctx, VkPipeline* out);
 VkResult make_pipeline(const PipeState& s, VkShaderModule vsm, VkShaderModule fsm, VkPipeline* out,
@@ -1466,13 +1476,16 @@ const Pipe* pipeline(const Rec* r, const rsx_vertex_layout_plan& layout, VkForma
                     gamma, expand, (const uint32_t (*)[3])unnorm, shadow };
     const uint64_t k = key_ppfx(vp, vp_bytes, fp, fp_size, s, tr);
     auto it = s_pipes.find(k);
-    if (it != s_pipes.end()) return it->second.p ? &it->second : nullptr;
+    if (it != s_pipes.end()) {
+        if (it->second.dyn) gpl_swap(k, it->second);   // M9.2g: the whole pipeline, once made, replaces the linked one
+        return it->second.p ? &it->second : nullptr;
+    }
     Pipe& P = s_pipes[k];
     P.p = VK_NULL_HANDLE;
     ProgParams pp = { vp, vp_bytes, fp, fp_size, fp_ctrl, cube, vol, vtex, layout.mask, bb, ucp, srgb,
                       0u, 0u, unnorm_mask, shadow_mask, gamma_units, expand_units,
                       { wpos[0], wpos[1] }, 0, shadow, gamma, expand, (const uint32_t (*)[3])unnorm };
-    if (warm_take(k, &P)) {   // M9.2d: made by the warm-up before the draw; recorded as play met it
+    if (gpl_mode() != 2 && warm_take(k, &P)) {   // M9.2d: made by the warm-up before the draw; recorded as play met it
         s.nconst = P.nconst;
         recipe_record(k, s, pp);
         return &P;
@@ -1490,7 +1503,7 @@ const Pipe* pipeline(const Rec* r, const rsx_vertex_layout_plan& layout, VkForma
     if (!vsm || !fsm) return nullptr;
     s.nconst = nconst;
     const uint64_t c_driver = now_ns();
-    const VkResult res = make_pipeline(s, vsm, fsm, &P.p);
+    const VkResult res = gpl_use(k) ? gpl_make(k, s, vs, ps, vsm, fsm, &P) : make_pipeline(s, vsm, fsm, &P.p);
     compile_account("ppfx", k, c_start, c_driver, now_ns());
     F.vkDestroyShaderModule(D.device, vsm, nullptr);
     F.vkDestroyShaderModule(D.device, fsm, nullptr);
@@ -1802,14 +1815,17 @@ const Pipe* pipeline_asp(const Rec* r, const rsx_vertex_layout_plan& layout, VkF
                     alpha_test, alpha_func, gamma, expand, (const uint32_t (*)[3])unnorm, shadow };
     const uint64_t k = key_asp(r->vp->hash, vp_bytes, fi.shash, s, tr);
     auto it = s_pipes.find(k);
-    if (it != s_pipes.end()) return it->second.p ? &it->second : nullptr;
+    if (it != s_pipes.end()) {
+        if (it->second.dyn) gpl_swap(k, it->second);   // M9.2g: the whole pipeline, once made, replaces the linked one
+        return it->second.p ? &it->second : nullptr;
+    }
     Pipe& P = s_pipes[k];
     P.p = VK_NULL_HANDLE;
     const uint32_t wpos[2] = { 1u, 1u };
     ProgParams pp = { vp, vp_bytes, fp, fp_size, fp_ctrl, cube, vol, 0u, layout.mask, 0u, 0u, srgb,
                       alpha_test, alpha_func, unnorm_mask, shadow_mask, gamma_units, expand_units,
                       { wpos[0], wpos[1] }, 0, shadow, gamma, expand, (const uint32_t (*)[3])unnorm };
-    if (warm_take(k, &P)) {   // M9.2d: made by the warm-up before the draw; recorded as play met it
+    if (gpl_mode() != 2 && warm_take(k, &P)) {   // M9.2d: made by the warm-up before the draw; recorded as play met it
         s.nconst = P.nconst;
         recipe_record(k, s, pp);
         return &P;
@@ -1829,7 +1845,7 @@ const Pipe* pipeline_asp(const Rec* r, const rsx_vertex_layout_plan& layout, VkF
     if (!vsm || !fsm) return nullptr;
     s.nconst = nconst;
     const uint64_t c_driver = now_ns();
-    const VkResult res = make_pipeline(s, vsm, fsm, &P.p);
+    const VkResult res = gpl_use(k) ? gpl_make(k, s, vs, ps, vsm, fsm, &P) : make_pipeline(s, vsm, fsm, &P.p);
     compile_account("asp", k, c_start, c_driver, now_ns());
     F.vkDestroyShaderModule(D.device, vsm, nullptr);
     F.vkDestroyShaderModule(D.device, fsm, nullptr);
@@ -2176,7 +2192,7 @@ struct PrepareResult {
 
 // a pass profile (tools/pipeline_profiles.py): a normalised pipeline state, the alpha test, the shadow sampler template
 struct Profile { PipeState s; uint32_t alpha_test, alpha_func; rsx_fp_shadow_desc shadow[16]; };
-struct Profiles { std::map<uint32_t, std::vector<Profile>> group, cls; uint32_t n = 0; };
+struct Profiles { std::map<uint32_t, std::vector<Profile>> group, keyc, cls; uint32_t n = 0; };   // keyc: M9.2g
 
 // a group's class for groups no recording reached: scene materials by the top four bits, the rest by those and the
 // second byte (tools/pipeline_profiles.py's group_class())
@@ -2184,6 +2200,18 @@ uint32_t group_class(uint32_t g)
 {
     const uint32_t top = g >> 28;
     return top >= 2 ? top << 8 : (top << 8 | (g >> 8 & 0xFFu));
+}
+
+// M9.2g: a record's class by what its key says of the pass (the decoded key: docs/M92_SHADER_PLAN.md section 2h) --
+// a shadow caster (the lighting field 0xE80, 0xF00, 0xF01), the depth-of-field output (K61: the HDR scene) or
+// neither -- and of its lighting (per-pixel, K0; unlit, 0xFFF); K60, the preferred variant, ignored
+// (tools/pipeline_profiles.py's key_class())
+uint32_t key_class(uint32_t g, uint32_t id)
+{
+    const uint64_t k = ((uint64_t)g << 32 | id) & ~(1ull << 60);
+    const uint32_t L = (uint32_t)(k >> 24) & 0xFFFu;
+    const uint32_t pass = L == 0xE80u || L == 0xF00u || L == 0xF01u ? 1u : (k >> 61 & 1) ? 2u : 0u;
+    return 0x100u | pass | (uint32_t)(k & 1) << 4 | (L == 0xFFFu ? 1u : 0u) << 5;
 }
 
 bool unhex(const std::string& h, void* out, size_t n)
@@ -2214,6 +2242,7 @@ Profiles profiles_read(const char* path)
         p.alpha_test = at; p.alpha_func = af;
         const uint32_t key = (uint32_t)strtoul(id, nullptr, 16);
         if (kind == 'g') pf.group[key].push_back(p);
+        else if (kind == 'k') pf.keyc[key].push_back(p);   // M9.2g
         else if (kind == 'c') pf.cls[key].push_back(p);
         else continue;
         pf.n++;
@@ -2237,7 +2266,9 @@ std::vector<Recipe> static_recipes(const sd::Inventory& inv, const Profiles& pf,
         const std::vector<Profile>* ps = nullptr;
         auto g = pf.group.find(pr.group);
         if (g != pf.group.end()) { ps = &g->second; out.pairs_group++; }
-        else {
+        else if (auto k = pf.keyc.find(key_class(pr.group, pr.id)); k != pf.keyc.end()) {   // M9.2g
+            ps = &k->second; out.pairs_class++;
+        } else {
             auto c = pf.cls.find(group_class(pr.group));
             if (c != pf.cls.end()) { ps = &c->second; out.pairs_class++; }
         }
@@ -2350,6 +2381,335 @@ VkResult gpl_probe_create(VkGraphicsPipelineCreateInfo& g, void* vctx, VkPipelin
     for (VkPipeline p : L) if (p) F.vkDestroyPipeline(D.device, p, nullptr);
     if (r != VK_SUCCESS) c.failed++;
     return r;
+}
+
+// ---- M9.2g: graphics pipeline libraries for the pipelines not made before their first draw ---------------------
+// (docs/M92_SHADER_PLAN.md section 2h). Where the runtime enabled them (PS3RECOMP_VK_GPL=1, and the device has the
+// libraries, fast linking and extended dynamic state: rsx_vk_gpl_ok), a pipeline neither prepared nor warmed is
+// linked from four libraries -- vertex input; pre-rasterisation (the vertex shader); the fragment shader; fragment
+// output -- made from make_pipeline's own state, with depth, stencil, cull and winding dynamic: the two shader
+// libraries then depend on the programs and the render pass alone and serve every render state those programs are
+// drawn with. Libraries are kept in memory by what they are made of, through the pipeline cache (a preparation makes
+// the shader libraries of every pipeline it makes with DOTHEROES_GPL_PREPARE=1). The whole pipeline -- the one a
+// preparation makes, static state -- is made on a background thread and replaces the linked one at a later draw.
+// DOTHEROES_GPL: 0 off; 1 (the default where the runtime enabled them) the pipelines not made before their first draw;
+// "link" every pipeline linked and kept (a test of the libraries' rendering: no warm-up, no replacement). Without
+// the runtime's libraries nothing here runs: the pipelines are made as before.
+extern "C" int rsx_vk_gpl_core_eds(void);
+struct GplStat {
+    uint64_t n = 0, ns = 0, max_ns = 0;
+    void add(uint64_t d) { n++; ns += d; if (d > max_ns) max_ns = d; }
+};
+struct GplJob { uint64_t key; PipeState s; std::string vs, ps; };
+struct GplCtx { uint64_t vh, fh; bool parts_only; };
+struct Gpl {
+    std::mutex mu;
+    std::unordered_map<uint64_t, VkPipeline> part[4];   // vertex input, pre-rasterisation, fragment shader, output
+    GplStat made[4], link, whole_made, fallback;
+    uint64_t reused[4] = {}, swapped = 0;
+    std::deque<GplJob> jobs;
+    std::unordered_map<uint64_t, VkPipeline> whole;     // made by the background thread, not yet swapped in
+    std::vector<VkPipeline> retired;                    // linked pipelines replaced (command buffers may hold them)
+    std::condition_variable cv;
+    bool worker = false;
+    PFN_vkCmdSetCullModeEXT cull = nullptr;
+    PFN_vkCmdSetFrontFaceEXT front = nullptr;
+    PFN_vkCmdSetDepthTestEnableEXT dtest = nullptr;
+    PFN_vkCmdSetDepthWriteEnableEXT dwrite = nullptr;
+    PFN_vkCmdSetDepthCompareOpEXT dcmp = nullptr;
+    PFN_vkCmdSetStencilTestEnableEXT stest = nullptr;
+    PFN_vkCmdSetStencilOpEXT sop = nullptr;
+    PFN_vkCmdSetStencilCompareMask scm = nullptr;
+    PFN_vkCmdSetStencilWriteMask swm = nullptr;
+};
+Gpl& gpl() { static Gpl* g = new Gpl; return *g; }
+int s_gpl_mode = 0;
+
+int gpl_mode()
+{
+    static std::once_flag once;
+    std::call_once(once, [] {
+        if (!rsx_vk_gpl_ok()) return;
+        const char* e = getenv("DOTHEROES_GPL");
+        if (e && *e == '0') return;
+        Gpl& g = gpl();
+        const bool core = rsx_vk_gpl_core_eds() != 0;
+        auto ld = [&](const char* name) { return D.get_device_proc(D.device, name); };
+        g.cull = (PFN_vkCmdSetCullModeEXT)ld(core ? "vkCmdSetCullMode" : "vkCmdSetCullModeEXT");
+        g.front = (PFN_vkCmdSetFrontFaceEXT)ld(core ? "vkCmdSetFrontFace" : "vkCmdSetFrontFaceEXT");
+        g.dtest = (PFN_vkCmdSetDepthTestEnableEXT)ld(core ? "vkCmdSetDepthTestEnable" : "vkCmdSetDepthTestEnableEXT");
+        g.dwrite = (PFN_vkCmdSetDepthWriteEnableEXT)ld(core ? "vkCmdSetDepthWriteEnable" : "vkCmdSetDepthWriteEnableEXT");
+        g.dcmp = (PFN_vkCmdSetDepthCompareOpEXT)ld(core ? "vkCmdSetDepthCompareOp" : "vkCmdSetDepthCompareOpEXT");
+        g.stest = (PFN_vkCmdSetStencilTestEnableEXT)ld(core ? "vkCmdSetStencilTestEnable" : "vkCmdSetStencilTestEnableEXT");
+        g.sop = (PFN_vkCmdSetStencilOpEXT)ld(core ? "vkCmdSetStencilOp" : "vkCmdSetStencilOpEXT");
+        g.scm = (PFN_vkCmdSetStencilCompareMask)ld("vkCmdSetStencilCompareMask");
+        g.swm = (PFN_vkCmdSetStencilWriteMask)ld("vkCmdSetStencilWriteMask");
+        if (!g.cull || !g.front || !g.dtest || !g.dwrite || !g.dcmp || !g.stest || !g.sop || !g.scm || !g.swm) {
+            report_add("render: graphics pipeline libraries not used: the dynamic state functions are missing");
+            return;
+        }
+        s_gpl_mode = e && !strcmp(e, "link") ? 2 : 1;
+        report_add(s_gpl_mode == 2 ? "render: graphics pipeline libraries: every pipeline linked (DOTHEROES_GPL=link)"
+                                   : "render: graphics pipeline libraries for the pipelines not made before play");
+    });
+    return s_gpl_mode;
+}
+
+// A library, made through the pipeline cache, or found made (kept in memory by the key of what it is made of)
+const VkDynamicState kGplDynPre[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_DEPTH_BIAS,
+                                      VK_DYNAMIC_STATE_CULL_MODE_EXT, VK_DYNAMIC_STATE_FRONT_FACE_EXT };
+const VkDynamicState kGplDynFrag[] = { VK_DYNAMIC_STATE_STENCIL_REFERENCE, VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK,
+                                       VK_DYNAMIC_STATE_STENCIL_WRITE_MASK, VK_DYNAMIC_STATE_DEPTH_TEST_ENABLE_EXT,
+                                       VK_DYNAMIC_STATE_DEPTH_WRITE_ENABLE_EXT, VK_DYNAMIC_STATE_DEPTH_COMPARE_OP_EXT,
+                                       VK_DYNAMIC_STATE_STENCIL_TEST_ENABLE_EXT, VK_DYNAMIC_STATE_STENCIL_OP_EXT };
+const VkDynamicState kGplDynOut[] = { VK_DYNAMIC_STATE_BLEND_CONSTANTS };
+VkPipeline gpl_part(int i, uint64_t key, VkGraphicsPipelineCreateInfo li, VkGraphicsPipelineLibraryFlagsEXT what,
+                    const VkDynamicState* ds, uint32_t nds)
+{
+    Gpl& G = gpl();
+    {
+        std::lock_guard<std::mutex> lk(G.mu);
+        auto it = G.part[i].find(key);
+        if (it != G.part[i].end()) { G.reused[i]++; return it->second; }
+    }
+    VkGraphicsPipelineLibraryCreateInfoEXT gl = { VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_LIBRARY_CREATE_INFO_EXT };
+    gl.flags = what;
+    VkPipelineDynamicStateCreateInfo dy = { VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
+    dy.dynamicStateCount = nds; dy.pDynamicStates = ds;
+    li.pNext = &gl;
+    li.flags = VK_PIPELINE_CREATE_LIBRARY_BIT_KHR;
+    li.pDynamicState = nds ? &dy : nullptr;
+    VkPipeline p = VK_NULL_HANDLE;
+    const uint64_t t = now_ns();
+    if (F.vkCreateGraphicsPipelines(D.device, s_pcache, 1, &li, nullptr, &p) != VK_SUCCESS) return VK_NULL_HANDLE;
+    const uint64_t dt = now_ns() - t;
+    std::lock_guard<std::mutex> lk(G.mu);
+    auto ins = G.part[i].emplace(key, p);
+    if (!ins.second) { F.vkDestroyPipeline(D.device, p, nullptr); G.reused[i]++; return ins.first->second; }
+    G.made[i].add(dt);
+    return p;
+}
+
+// The two shader libraries, from what they are made of alone: the state their dynamic state covers is set to one
+// value (cull, winding; depth and stencil), so the library a preparation makes ahead and the one a pipeline in play
+// asks for are the same -- to the in-memory key and to the driver's pipeline cache
+VkPipeline gpl_pre(uint64_t vh, VkShaderModule vsm, VkRenderPass rp, VkBool32 clamp)
+{
+    const uint64_t k[5] = { vh, (uint64_t)rp, clamp, (uint64_t)VK_POLYGON_MODE_FILL, VK_TRUE };
+    VkPipelineShaderStageCreateInfo st = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0,
+                                           VK_SHADER_STAGE_VERTEX_BIT, vsm, "main", nullptr };
+    VkPipelineViewportStateCreateInfo vps = { VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
+    vps.viewportCount = 1; vps.scissorCount = 1;
+    VkPipelineRasterizationStateCreateInfo ras = { VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
+    ras.polygonMode = VK_POLYGON_MODE_FILL; ras.depthClampEnable = clamp; ras.cullMode = VK_CULL_MODE_NONE;
+    ras.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE; ras.depthBiasEnable = VK_TRUE; ras.lineWidth = 1.0f;
+    VkGraphicsPipelineCreateInfo li = { VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+    li.stageCount = 1; li.pStages = &st; li.pViewportState = &vps; li.pRasterizationState = &ras;
+    li.layout = s_pl; li.renderPass = rp;
+    return gpl_part(1, fnv64(k, sizeof k), li, VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT,
+                    kGplDynPre, 5);
+}
+VkPipeline gpl_frag(uint64_t fh, VkShaderModule fsm, VkRenderPass rp, bool with_ds)
+{
+    const uint64_t k[3] = { fh, (uint64_t)rp, with_ds };
+    VkPipelineShaderStageCreateInfo st = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0,
+                                           VK_SHADER_STAGE_FRAGMENT_BIT, fsm, "main", nullptr };
+    VkPipelineMultisampleStateCreateInfo ms = { VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
+    ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    VkPipelineDepthStencilStateCreateInfo ds = { VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
+    ds.minDepthBounds = 0.0f; ds.maxDepthBounds = 1.0f;
+    VkGraphicsPipelineCreateInfo li = { VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+    li.stageCount = 1; li.pStages = &st; li.pDepthStencilState = with_ds ? &ds : nullptr; li.pMultisampleState = &ms;
+    li.layout = s_pl; li.renderPass = rp;
+    return gpl_part(2, fnv64(k, sizeof k), li, VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT, kGplDynFrag, 8);
+}
+
+// make_pipeline's creator: the four libraries (made, or found made) and their fast link; with parts_only (a
+// preparation) the two shader libraries only, kept, nothing linked
+VkResult gpl_create(VkGraphicsPipelineCreateInfo& g, void* vctx, VkPipeline* out)
+{
+    Gpl& G = gpl();
+    const GplCtx& c = *(const GplCtx*)vctx;
+    *out = VK_NULL_HANDLE;
+    const uint64_t rp = (uint64_t)g.renderPass;
+    const VkPipelineVertexInputStateCreateInfo& vi = *g.pVertexInputState;
+    const VkPipelineColorBlendStateCreateInfo& cb = *g.pColorBlendState;
+    const uint64_t kvi[3] = { vi.vertexBindingDescriptionCount ? vi.pVertexBindingDescriptions[0].stride : 0u,
+                              vi.vertexAttributeDescriptionCount, (uint64_t)g.pInputAssemblyState->topology };
+    uint64_t kfo[2 + sizeof(VkPipelineColorBlendAttachmentState) / 8 + 1] = { rp, cb.attachmentCount };
+    if (cb.attachmentCount) memcpy(&kfo[2], cb.pAttachments, sizeof(VkPipelineColorBlendAttachmentState));
+    VkGraphicsPipelineCreateInfo l1 = { VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+    l1.pVertexInputState = g.pVertexInputState; l1.pInputAssemblyState = g.pInputAssemblyState;
+    VkGraphicsPipelineCreateInfo l4 = { VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+    l4.pColorBlendState = g.pColorBlendState; l4.pMultisampleState = g.pMultisampleState; l4.renderPass = g.renderPass;
+    const VkPipeline pr = gpl_pre(c.vh, g.pStages[0].module, g.renderPass, g.pRasterizationState->depthClampEnable);
+    const VkPipeline fs = gpl_frag(c.fh, g.pStages[1].module, g.renderPass, g.pDepthStencilState != nullptr);
+    if (c.parts_only) return pr && fs ? VK_SUCCESS : VK_ERROR_UNKNOWN;
+    auto part = [&](int i, const uint64_t* k, size_t n, VkGraphicsPipelineCreateInfo li,
+                    VkGraphicsPipelineLibraryFlagsEXT what, const VkDynamicState* ds, uint32_t nds) {
+        return gpl_part(i, fnv64(k, n), li, what, ds, nds);
+    };
+    const uint64_t* kv = kvi;
+    const uint64_t* kf = kfo;
+    const VkPipeline L[4] = { part(0, kv, sizeof kvi, l1, VK_GRAPHICS_PIPELINE_LIBRARY_VERTEX_INPUT_INTERFACE_BIT_EXT,
+                                   nullptr, 0), pr, fs,
+                              part(3, kf, sizeof kfo, l4, VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT,
+                                   kGplDynOut, 1) };
+    if (!L[0] || !L[1] || !L[2] || !L[3]) return VK_ERROR_UNKNOWN;
+    VkPipelineLibraryCreateInfoKHR pl = { VK_STRUCTURE_TYPE_PIPELINE_LIBRARY_CREATE_INFO_KHR, nullptr, 4, L };
+    VkGraphicsPipelineCreateInfo lk = { VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, &pl };
+    lk.layout = g.layout;
+    const uint64_t t = now_ns();
+    const VkResult r = F.vkCreateGraphicsPipelines(D.device, VK_NULL_HANDLE, 1, &lk, nullptr, out);
+    std::lock_guard<std::mutex> lkk(G.mu);
+    if (r == VK_SUCCESS) G.link.add(now_ns() - t);
+    return r;
+}
+
+void gpl_worker()
+{
+#ifdef _WIN32
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);
+#endif
+    Gpl& G = gpl();
+    std::vector<uint32_t> words(262144);
+    auto module = [&](const std::string& text, int stage) -> VkShaderModule {
+        uint32_t nw = 0;
+        char log[64];
+        if (rsx_hlsl_to_spirv(text.c_str(), stage, words.data(), (uint32_t)words.size(), &nw, log, sizeof log) || !nw)
+            return VK_NULL_HANDLE;
+        VkShaderModuleCreateInfo ci = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
+        ci.codeSize = nw * 4u; ci.pCode = words.data();
+        VkShaderModule m = VK_NULL_HANDLE;
+        F.vkCreateShaderModule(D.device, &ci, nullptr, &m);
+        return m;
+    };
+    for (;;) {
+        GplJob j;
+        {
+            std::unique_lock<std::mutex> lk(G.mu);
+            G.cv.wait(lk, [&] { return !G.jobs.empty(); });
+            j = std::move(G.jobs.front());
+            G.jobs.pop_front();
+        }
+        VkShaderModule vsm = module(j.vs, RSX_SHADER_STAGE_VERTEX), fsm = module(j.ps, RSX_SHADER_STAGE_FRAGMENT);
+        VkPipeline p = VK_NULL_HANDLE;
+        const uint64_t t = now_ns();
+        if (vsm && fsm && make_pipeline(j.s, vsm, fsm, &p) != VK_SUCCESS) p = VK_NULL_HANDLE;
+        const uint64_t dt = now_ns() - t;
+        if (vsm) F.vkDestroyShaderModule(D.device, vsm, nullptr);
+        if (fsm) F.vkDestroyShaderModule(D.device, fsm, nullptr);
+        std::lock_guard<std::mutex> lk(G.mu);
+        if (p) { G.whole[j.key] = p; G.whole_made.add(dt); }
+    }
+}
+
+VkResult gpl_make(uint64_t key, const PipeState& s, const std::string& vs, const std::string& ps, VkShaderModule vsm,
+                  VkShaderModule fsm, Pipe* P)
+{
+    Gpl& G = gpl();
+    GplCtx c = { fnv64(vs.data(), vs.size()), fnv64(ps.data(), ps.size()), false };
+    VkPipeline lp = VK_NULL_HANDLE;
+    const uint64_t t0 = now_ns();
+    if (make_pipeline(s, vsm, fsm, &lp, gpl_create, &c) == VK_SUCCESS && lp) {
+        P->p = lp; P->dyn = 1; P->ds = new PipeState(canon(s));
+        if (s_gpl_mode == 1) {
+            std::lock_guard<std::mutex> lk(G.mu);
+            G.jobs.push_back(GplJob{ key, s, vs, ps });
+            if (!G.worker) { G.worker = true; std::thread(gpl_worker).detach(); }
+            G.cv.notify_one();
+        }
+        return VK_SUCCESS;
+    }
+    {
+        std::lock_guard<std::mutex> lk(G.mu);
+        G.fallback.add(now_ns() - t0);
+    }
+    return make_pipeline(s, vsm, fsm, &P->p);   // as without the libraries
+}
+
+void gpl_swap(uint64_t key, Pipe& P)
+{
+    Gpl& G = gpl();
+    if (!G.mu.try_lock()) return;   // the background thread holds it: at a later draw
+    auto it = G.whole.find(key);
+    if (it != G.whole.end()) {
+        G.retired.push_back(P.p);
+        P.p = it->second; P.dyn = 0;
+        G.whole.erase(it);
+        G.swapped++;
+    }
+    G.mu.unlock();
+}
+
+// the dynamic state a linked pipeline leaves to the draw: as make_pipeline would have made it static
+void gpl_dyn(VkCommandBuffer cb, const PipeState& s)
+{
+    Gpl& g = gpl();
+    static const bool flip = [] { const char* e = getenv("DOTHEROES_ASP_CULL_FLIP"); return e && *e == '1'; }();
+    const bool asp = s.kind == kPipeAsp;
+    const VkFormat df = (VkFormat)s.df;
+    g.cull(cb, !asp || !s.cull ? VK_CULL_MODE_NONE
+               : (s.cull_face == 0x0404u || s.cull_face == 0x0408u) ? VK_CULL_MODE_FRONT_BIT : VK_CULL_MODE_BACK_BIT);
+    VkFrontFace ff = s.front_face == 0x0901u ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE;
+    if (asp && flip) ff = ff == VK_FRONT_FACE_CLOCKWISE ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE;
+    g.front(cb, ff);
+    const bool dt = df != VK_FORMAT_UNDEFINED && s.depth_test;
+    g.dtest(cb, dt ? VK_TRUE : VK_FALSE);
+    g.dwrite(cb, dt && s.depth_write ? VK_TRUE : VK_FALSE);
+    g.dcmp(cb, gcm_compare(s.depth_func));
+    g.stest(cb, df != VK_FORMAT_UNDEFINED && has_stencil(df) && s.stencil_test ? VK_TRUE : VK_FALSE);
+    g.sop(cb, VK_STENCIL_FACE_FRONT_AND_BACK, gcm_stencil_op(s.stencil_fail), gcm_stencil_op(s.stencil_zpass),
+          gcm_stencil_op(s.stencil_zfail), gcm_compare(s.stencil_func));
+    g.scm(cb, VK_STENCIL_FACE_FRONT_AND_BACK, s.stencil_func_mask);
+    g.swm(cb, VK_STENCIL_FACE_FRONT_AND_BACK, s.stencil_write_mask);
+}
+
+// A pipeline the preparation made comes from the pipeline cache whole, as without the libraries (a few ms: measured,
+// section 2h -- a library made cold costs more than that); one it did not make is linked (its libraries made ahead,
+// or from the cache, or made now)
+bool gpl_use(uint64_t key)
+{
+    const int m = gpl_mode();
+    return m == 2 || (m == 1 && !s_prepared.count(key));
+}
+
+// a preparation (DOTHEROES_GPL_PREPARE=1): the two shader libraries of a pipeline it makes, through the pipeline cache
+bool gpl_prepare()
+{
+    static const bool on = [] { const char* e = getenv("DOTHEROES_GPL_PREPARE"); return e && (*e == '1' || !strcmp(e, "all")); }();
+    return on && gpl_mode();
+}
+bool gpl_prepare_all()
+{
+    static const bool on = [] { const char* e = getenv("DOTHEROES_GPL_PREPARE"); return e && !strcmp(e, "all"); }();
+    return on && gpl_mode();
+}
+void gpl_parts(const PipeState& s, VkShaderModule vsm, VkShaderModule fsm, const std::string& vs, const std::string& ps)
+{
+    GplCtx c = { fnv64(vs.data(), vs.size()), fnv64(ps.data(), ps.size()), true };
+    VkPipeline unused = VK_NULL_HANDLE;
+    make_pipeline(s, vsm, fsm, &unused, gpl_create, &c);
+}
+
+std::string gpl_report()
+{
+    Gpl& G = gpl();
+    std::lock_guard<std::mutex> lk(G.mu);
+    auto ms = [](const GplStat& x) { return x.n ? x.ns / 1e6 / x.n : 0.0; };
+    char line[700];
+    snprintf(line, sizeof line, "render: graphics pipeline libraries (%s): %llu linked (mean %.3f ms, max %.3f ms); "
+             "libraries made: vertex input %llu (%.3f ms max), pre-rasterisation %llu (mean %.2f, max %.1f ms), fragment "
+             "shader %llu (mean %.2f, max %.1f ms), output %llu (%.3f ms max); found made: %llu, %llu, %llu, %llu; whole "
+             "pipelines made behind %llu (mean %.1f ms), swapped in %llu; failed to link %llu",
+             s_gpl_mode == 2 ? "every pipeline" : "pipelines not made before play", (unsigned long long)G.link.n,
+             ms(G.link), G.link.max_ns / 1e6, (unsigned long long)G.made[0].n, G.made[0].max_ns / 1e6,
+             (unsigned long long)G.made[1].n, ms(G.made[1]), G.made[1].max_ns / 1e6, (unsigned long long)G.made[2].n,
+             ms(G.made[2]), G.made[2].max_ns / 1e6, (unsigned long long)G.made[3].n, G.made[3].max_ns / 1e6,
+             (unsigned long long)G.reused[0], (unsigned long long)G.reused[1], (unsigned long long)G.reused[2],
+             (unsigned long long)G.reused[3], (unsigned long long)G.whole_made.n, ms(G.whole_made),
+             (unsigned long long)G.swapped, (unsigned long long)G.fallback.n);
+    return line;
 }
 
 std::string gpl_stats(const char* name, std::vector<double> v)
@@ -2466,6 +2826,18 @@ PrepareResult prepare_run(void (*progress)(uint32_t done, uint32_t total, void* 
                 if (!fp_text(pp, ps, &nconst)) { out.programs_failed++; fail_json("translate", who, "the fragment translator"); continue; }
                 add_text(RSX_SHADER_STAGE_FRAGMENT, std::move(ps), who);
                 out.programs_fp++;
+                // M9.2g: the engine's programs also with the alpha test its blend presets use (alpha > 0, alpha >= 0.5:
+                // the table at 0x00E18650; docs/M92_SHADER_PLAN.md section 2h) -- the translation a material with one
+                // of those presets draws with. PPFX's programs draw with the alpha test off.
+                if (p.source != sd::kEbootCg)
+                    for (uint32_t af : { 0x204u, 0x206u }) {
+                        ProgFixed fa = f;
+                        fa.alpha_test = 1; fa.alpha_func = af;
+                        std::string pa;
+                        uint32_t na = 0;
+                        if (fp_text(prog_params(fa, std::string(), p.code), pa, &na))
+                            add_text(RSX_SHADER_STAGE_FRAGMENT, std::move(pa), who);
+                    }
             }
         }
     out.texts = (uint32_t)texts.size();
@@ -2573,8 +2945,10 @@ PrepareResult prepare_run(void (*progress)(uint32_t done, uint32_t total, void* 
         VkShaderModule vsm = module(rtexts[i].first), fsm = module(rtexts[i].second);
         VkPipeline pl = VK_NULL_HANDLE;
         const VkResult res = vsm && fsm ? make_pipeline(rs[i].s, vsm, fsm, &pl) : VK_ERROR_UNKNOWN;
-        if (res == VK_SUCCESS && pl) { (from_disc ? smade : made)++; made_at[i] = 1; }
-        else {
+        if (res == VK_SUCCESS && pl) {
+            (from_disc ? smade : made)++; made_at[i] = 1;
+            if (gpl_prepare()) gpl_parts(rs[i].s, vsm, fsm, texts[rtexts[i].first].text, texts[rtexts[i].second].text);
+        } else {
             (from_disc ? sfailed : failed)++;
             if (vsm && fsm) {
                 char who[64], why[64];
@@ -2589,6 +2963,57 @@ PrepareResult prepare_run(void (*progress)(uint32_t done, uint32_t total, void* 
         if (fsm) F.vkDestroyShaderModule(D.device, fsm, nullptr);
     }, done);
     out.ms_pipelines = (now_ns() - t2) / 1e6;
+    // M9.2g: DOTHEROES_GPL_PREPARE=all -- the two shader libraries of every translation above, for every render pass
+    // the recipes draw into: the engine's programs (the package's, SAS, the EBOOT's CGB) into its passes, PPFX's (the
+    // EBOOT's Cg programs) into PPFX's. A pipeline met in play whose programs are on the disc is then a link.
+    if (gpl_prepare_all()) {
+        std::vector<uint8_t> tk(texts.size(), 0);   // 1 the engine's, 2 PPFX's
+        std::set<std::pair<VkRenderPass, VkBool32>> vs_rp[2];
+        std::set<VkRenderPass> fs_rp[2];
+        for (size_t i = 0; i < rs.size(); i++) {
+            const bool asp = rs[i].s.kind == kPipeAsp;
+            const int k = asp ? 0 : 1;
+            if (rtexts[i].first != ~0u) tk[rtexts[i].first] |= (uint8_t)(1 << k);
+            if (rtexts[i].second != ~0u) tk[rtexts[i].second] |= (uint8_t)(1 << k);
+            const VkRenderPass rp = asp ? render_pass2((VkFormat)rs[i].s.rt, (VkFormat)rs[i].s.df)
+                                        : render_pass((VkFormat)rs[i].s.rt);
+            vs_rp[k].insert({ rp, depth_clamp(canon(rs[i].s).zminmax) });
+            fs_rp[k].insert(rp);
+        }
+        for (size_t i = 0; i < texts.size(); i++)
+            if (!tk[i]) tk[i] = texts[i].what.compare(0, 9, "eboot_cg ") == 0 ? 2 : 1;
+        std::atomic<uint32_t> libs{0}, lfail{0}, ldone{0};
+        const uint64_t t3 = now_ns();
+        parallel_for((uint32_t)texts.size(), out.threads, [&](uint32_t i) {
+            if (!text_ok[i]) return;
+            thread_local std::vector<uint32_t> words(262144);
+            uint32_t n = 0;
+            char log[64];
+            if (rsx_hlsl_to_spirv(texts[i].text.c_str(), texts[i].stage, words.data(), (uint32_t)words.size(), &n, log,
+                                  sizeof log) || !n)
+                return;
+            VkShaderModuleCreateInfo ci = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
+            ci.codeSize = n * 4u; ci.pCode = words.data();
+            VkShaderModule m = VK_NULL_HANDLE;
+            if (F.vkCreateShaderModule(D.device, &ci, nullptr, &m) != VK_SUCCESS) return;
+            const uint64_t h = fnv64(texts[i].text.data(), texts[i].text.size());
+            for (int k = 0; k < 2; k++) {
+                if (!(tk[i] >> k & 1)) continue;
+                if (texts[i].stage == RSX_SHADER_STAGE_VERTEX) {
+                    for (const auto& p : vs_rp[k]) (gpl_pre(h, m, p.first, p.second) ? libs : lfail)++;
+                } else {
+                    for (VkRenderPass rp : fs_rp[k]) (gpl_frag(h, m, rp, k == 0) ? libs : lfail)++;
+                }
+            }
+            F.vkDestroyShaderModule(D.device, m, nullptr);
+        }, ldone);
+        char line[200];
+        snprintf(line, sizeof line, "render: graphics pipeline libraries for every program: %u made, %u failed, %.1f s "
+                 "(render passes: the engine's %zu, PPFX's %zu)", libs.load(), lfail.load(), (now_ns() - t3) / 1e9,
+                 fs_rp[0].size(), fs_rp[1].size());
+        report_add(line);
+        fprintf(stderr, "%s\n", line);
+    }
     busy = false;
     reporter.join();
     if (progress) progress(done.load(), total, ctx);
@@ -2664,7 +3089,7 @@ bool warm_take(uint64_t key, Pipe* out)
 void warm_start(const std::string& dir)
 {
     const char* e = getenv("DOTHEROES_WARM");
-    if (s_no_warm || (e && *e == '0') || getenv("DOTHEROES_PPFX_HOT") || getenv("DOTHEROES_ASP_DESCRIBE")) return;
+    if (s_no_warm || (e && *e == '0') || getenv("DOTHEROES_PPFX_HOT") || getenv("DOTHEROES_ASP_DESCRIBE") || gpl_mode() == 2) return;
     long end = 0;
     auto rs = std::make_shared<std::vector<Recipe>>(recipes_read(dir + "/prepared-recipes.bin", &end));
     // M9.2f: and the pipelines met in play before that the preparation had not made (recorded in the recipes as
@@ -3385,6 +3810,7 @@ void draw(const Rec* r)
     rbi.renderArea = { { 0, 0 }, { t->w, t->h } };
     F.vkCmdBeginRenderPass(b.cb, &rbi, VK_SUBPASS_CONTENTS_INLINE);
     F.vkCmdBindPipeline(b.cb, VK_PIPELINE_BIND_POINT_GRAPHICS, P->p);
+    if (P->dyn) gpl_dyn(b.cb, *P->ds);   // M9.2g: a linked pipeline's depth, stencil, cull and winding
     VkViewport v = { 0.0f, 0.0f, Wf, Hf, 0.0f, 1.0f };
     F.vkCmdSetViewport(b.cb, 0, 1, &v);
     uint32_t sc[4];
@@ -4539,6 +4965,7 @@ void asp_draw(const Rec* r)
         if (pass_merge()) s_open = { b.cb, rbi.renderPass, rbi.framebuffer, fw, fh };
     }
     F.vkCmdBindPipeline(b.cb, VK_PIPELINE_BIND_POINT_GRAPHICS, P->p);
+    if (P->dyn) gpl_dyn(b.cb, *P->ds);   // M9.2g: a linked pipeline's depth, stencil, cull and winding
     VkViewport v = { 0.0f, 0.0f, Wf, Hf, 0.0f, 1.0f };
     F.vkCmdSetViewport(b.cb, 0, 1, &v);
     uint32_t sc[4];
@@ -6033,6 +6460,11 @@ extern "C" void ppfx_native_cache_save(void)
                  (unsigned long long)st.n_build_frames, st.build_frame_max_ns / 1e6, st.build_frame_max_build_ns / 1e6,
                  ppfx::s_prepared.size(), ppfx::s_met_before);
         ppfx::report_add(line);
+        if (ppfx::s_gpl_mode) {   // M9.2g
+            const std::string g = ppfx::gpl_report();
+            ppfx::report_add(g.c_str());
+            if (dh_log_session_active && dh_log_session_active()) dh_log(2, "shader", "%s", g.c_str() + 8);
+        }
         if (ppfx::s_warm_total) {
             char w[300];
             const uint64_t t1 = ppfx::s_warm_t1.load();

@@ -11,7 +11,12 @@ its group's class (group_class).
 
     tools/pipeline_profiles.py learn --disc DISC --out PROFILES RECIPES.bin [RECIPES.bin ...]
 
-A line: `g <group>` or `c <class>`, then the profile -- the renderer's pipeline state (PipeState, 128 bytes, hex,
+M9.2g (docs/M92_SHADER_PLAN.md section 2h): `--key-classes` adds `k <class>` lines -- the profiles of a key class
+(key_class: the pass and lighting the decoded key says), which the game consults for a group no recording reached
+before the group class; `--group-product` gives each group its recorded pass states each with its recorded material
+presets (split, product: the engine sets the two apart).
+
+A line: `g <group>`, `k <key class>` or `c <class>`, then the profile -- the renderer's pipeline state (PipeState, 128 bytes, hex,
 normalised: state the GPU ignores zeroed; the vertex stride and count and the constant count zeroed, as they come
 from the record's own programs), the alpha test and its function, and the shadow-sampler template (16 descriptors of
 4 bytes, hex; applied to the units a record's fragment program samples) -- and how many recorded pipelines had it.
@@ -112,6 +117,57 @@ def group_class(g):
     return top << 8 if top >= 2 else top << 8 | (g >> 8 & 0xFF)
 
 
+def key_class(g, rid):
+    """M9.2g: a record's class by what its key says of the pass (the decoded key: docs/M92_SHADER_PLAN.md section 2h)
+    -- a shadow caster (the lighting field 0xE80, 0xF00, 0xF01), the depth-of-field output (K61: the HDR scene) or
+    neither -- and of its lighting (per-pixel, K0; unlit, 0xFFF); K60, the preferred variant, ignored --
+    ppfx_render.cpp's key_class()"""
+    k = (g << 32 | rid) & ~(1 << 60)
+    L = k >> 24 & 0xFFF
+    p = 1 if L in (0xE80, 0xF00, 0xF01) else 2 if k >> 61 & 1 else 0
+    return 0x100 | p | (k & 1) << 4 | (L == 0xFFF) << 5
+
+
+def package_keys(disc):
+    """[(group, id)] of the disc's shader package, in package_records' order"""
+    with open(os.path.join(disc, "PS3_GAME", "USRDIR", *PKG.split("/")), "rb") as f:
+        d = f.read()
+    n = struct.unpack_from(">I", d, 0x14)[0]
+    out = []
+    for i in range(n):
+        voff, vsize, group, rid = struct.unpack_from(">IIII", d, 0x40 + 16 * i)
+        foff, fsize, _, _ = struct.unpack_from(">IIII", d, 0x40 + 16 * (n + i))
+        if d[voff:voff + 4] == b"CGB\0" and d[foff:foff + 4] == b"CGB\0":
+            out.append((group, rid))
+    return out
+
+
+MATERIAL = {"blend", "blend_sf_rgb", "blend_df_rgb", "blend_sf_a", "blend_df_a", "blend_eq_rgb", "blend_eq_a",
+            "depth_write"}
+
+
+def split(prof):
+    """a profile's pass part (targets, depth test and function, stencil, cull, colour mask, winding, depth range; the
+    shadow template) and material part (the blend preset: blend, depth write, alpha test) -- set apart in the engine
+    (0x006D7B00 sets the material's preset over the pass's state)"""
+    st, at, af, sh = prof
+    w = struct.unpack("<32I", bytes.fromhex(st))
+    return (tuple(0 if PS[j] in MATERIAL else w[j] for j in range(32)), sh),            (tuple(w[j] if PS[j] in MATERIAL else 0 for j in range(32)), at, af)
+
+
+def join(pass_part, mat_part):
+    (p, sh), (m, at, af) = pass_part, mat_part
+    s = canon(dict(zip(PS, (a | b for a, b in zip(p, m)))))
+    return struct.pack("<32I", *(s[k] for k in PS)).hex(), at, af, sh
+
+
+def product(profs):
+    """every pass part with every material part of a set of profiles"""
+    ps = {split(x)[0] for x in profs}
+    ms = {split(x)[1] for x in profs}
+    return {join(a, b) for a in ps for b in ms}
+
+
 def profile_of(head):
     s = dict(zip(PS, struct.unpack_from("<32I", head, HEAD_PS)))
     pf = struct.unpack_from("<24I", head, HEAD_PF)
@@ -123,8 +179,12 @@ def profile_of(head):
     return state.hex(), at, pf[PF_ALPHA_FUNC] if at else 0, shadow.hex()
 
 
-def learn(disc, recipe_files, out):
+def learn(disc, recipe_files, out, key_classes=False, group_product=False, class_product=False):
+    """the profiles of the recorded pipelines: per group, per group class; with key_classes (M9.2g) also per key class
+    (key_class: the pass and the lighting the key says), which the game consults before the group class; with
+    group_product / class_product each group's / key class's pass parts combined with its material parts (split)"""
     recs = package_records(disc)
+    keys = package_keys(disc)
     by_v = collections.defaultdict(set)
     by_f = collections.defaultdict(set)
     for i, (_, vcode, fs) in enumerate(recs):
@@ -132,6 +192,7 @@ def learn(disc, recipe_files, out):
         by_f[fs].add(i)
     groups = collections.defaultdict(collections.Counter)
     classes = collections.defaultdict(collections.Counter)
+    kclasses = collections.defaultdict(collections.Counter)
     seen = set()
     n = matched = 0
     for path in recipe_files:
@@ -146,23 +207,36 @@ def learn(disc, recipe_files, out):
             if not common:
                 continue
             matched += 1
-            g = recs[min(common)][0]
+            g, rid = keys[min(common)]
             p = profile_of(head)
             groups[g][p] += 1
             classes[group_class(g)][p] += 1
-    lines = ["# Cubic.Heroes' pass profiles (tools/pipeline_profiles.py; docs/M92_SHADER_PLAN.md section 3.3): per line a",
-             "# package group (g) or group class (c), the normalised pipeline state (hex), the alpha test and function,",
-             "# the shadow-sampler template (hex) and how many recorded pipelines had it. Numbers only."]
+            kclasses[key_class(g, rid)][p] += 1
+    # combined parts: counted 0 (none recorded as such)
+    for table, on in ((groups, group_product), (kclasses, class_product)):
+        if on:
+            for c in table:
+                for p in product(set(table[c])):
+                    table[c].setdefault(p, 0)
+    lines = ["# Cubic.Heroes' pass profiles (tools/pipeline_profiles.py; docs/M92_SHADER_PLAN.md sections 3.3, 2h): per",
+             "# line a package group (g), key class (k) or group class (c), the normalised pipeline state (hex), the alpha",
+             "# test and function, the shadow-sampler template (hex) and how many recorded pipelines had it. Numbers only."]
     for g in sorted(groups):
         for (st, at, af, sh), k in sorted(groups[g].items()):
             lines.append(f"g {g:08x} {st} {at} {af} {sh} {k}")
+    if key_classes:
+        for c in sorted(kclasses):
+            for (st, at, af, sh), k in sorted(kclasses[c].items()):
+                lines.append(f"k {c:04x} {st} {at} {af} {sh} {k}")
     for c in sorted(classes):
         for (st, at, af, sh), k in sorted(classes[c].items()):
             lines.append(f"c {c:04x} {st} {at} {af} {sh} {k}")
     with open(out, "w", encoding="utf-8", newline="\n") as f:
         f.write("\n".join(lines) + "\n")
     print(f"{n} recorded pipelines, {matched} of one package record: {sum(len(v) for v in groups.values())} profiles "
-          f"in {len(groups)} groups, {sum(len(v) for v in classes.values())} in {len(classes)} classes -> {out}")
+          f"in {len(groups)} groups, {sum(len(v) for v in kclasses.values()) if key_classes else 0} in "
+          f"{len(kclasses) if key_classes else 0} key classes, {sum(len(v) for v in classes.values())} in "
+          f"{len(classes)} classes -> {out}")
     return 0
 
 
@@ -172,9 +246,12 @@ def main(argv=None):
     a = sub.add_parser("learn")
     a.add_argument("--disc", required=True)
     a.add_argument("--out", required=True)
+    a.add_argument("--key-classes", action="store_true", help="also the key classes (M9.2g)")
+    a.add_argument("--group-product", action="store_true", help="each group's pass parts with its material parts")
+    a.add_argument("--class-product", action="store_true", help="each key class's pass parts with its material parts")
     a.add_argument("recipes", nargs="+")
     args = ap.parse_args(argv)
-    return learn(args.disc, args.recipes, args.out)
+    return learn(args.disc, args.recipes, args.out, args.key_classes, args.group_product, args.class_product)
 
 
 if __name__ == "__main__":

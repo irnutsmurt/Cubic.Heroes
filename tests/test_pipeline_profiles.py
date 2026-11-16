@@ -120,6 +120,27 @@ class ProfilesTest(unittest.TestCase):
             self.assertEqual((st[3], st[4], st[28]), (0, 0, 0))
             self.assertEqual(len(ln[5]), 128)
 
+    def test_key_class(self):   # M9.2g: the pass and the lighting the key says; the preferred-variant bit ignored
+        self.assertEqual(pp.key_class(0x20000014, 0xBF5A102D), 0x112)    # depth-of-field output, per-pixel
+        self.assertEqual(pp.key_class(0x30000014, 0xBF5A102D), 0x112)    # its preferred variant: the same class
+        self.assertEqual(pp.key_class(0x0000000F, 0x01000000), 0x101)    # a shadow caster
+        self.assertEqual(pp.key_class(0x0000000F, 0xFF001001), 0x130)    # unlit, per-pixel, neither pass
+        self.assertEqual(pp.key_class(0x00000004, 0xBF001010), 0x100)    # per-vertex lit, neither pass
+
+    def test_product(self):   # a pass part with every material part, normalised as the renderer would
+        def prof(**kw):
+            s = {k: 0 for k in pp.PS}
+            s.update(kind=2, rt=97, df=129, depth_test=1, depth_func=0x203, **kw)
+            return struct.pack("<32I", *(s[k] for k in pp.PS)).hex(), 0, 0, "00" * 64
+        opaque = prof(depth_write=1)
+        blend = prof(cull=1, cull_face=0x405, blend=1, blend_sf_rgb=0x302, blend_df_rgb=0x303, blend_eq_rgb=0x8006)
+        out = pp.product({opaque, blend})
+        self.assertEqual(len(out), 4)                    # two pass parts (cull or not) x two materials
+        self.assertIn(opaque, out)
+        self.assertIn(blend, out)
+        culled_opaque = prof(depth_write=1, cull=1, cull_face=0x405)
+        self.assertIn(culled_opaque, out)
+
 
 if __name__ == "__main__":
     unittest.main()
