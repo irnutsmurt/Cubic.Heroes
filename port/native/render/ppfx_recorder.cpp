@@ -2056,6 +2056,8 @@ Rec* r7_rec(uint32_t kind)
 // between its flush and the native thread's capture; everything else it
 // found stable. DOTHEROES_R7_TEX_AT_FLUSH=0 (development): at consumption.
 }  // namespace
+// M9.2c: a program's identity as blob_of interns it (Blob::hash), for a pipeline's key made from a recipe
+uint64_t program_hash(const uint8_t* p, size_t n) { return blob_hash(p, n) ^ (uint64_t)n; }
 bool r7_take_at_flush(Rec* r)
 {
     static int on = -1;

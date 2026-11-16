@@ -1,0 +1,139 @@
+From 9bc1f2f255d03b0be0048df0e6497fa0a9032200 Mon Sep 17 00:00:00 2001
+From: giteaguy <73799093+irnutsmurt@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 08:01:00 -0800
+Subject: [PATCH] SPIR-V: several translations at a time; glslang set up once
+ from any thread
+
+rsx_hlsl_to_spirv held one lock around the whole lookup and translation. The translation cache's map,
+statistics and folder stay under its lock; glslang now compiles outside it (after InitializeProcess, run once
+with std::call_once, glslang compiles different shaders on different threads, each with its own pool
+allocator). Two threads translating the same text both translate it and the first result is kept; the disk
+file is written under a per-thread temporary name and renamed, as before.
+
+A preparation pass translating 2,726 shaders on 15 threads wrote the same 2,726 files, byte for byte, as
+on one thread (6.2 s -> 2.3 s).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libs/video/rsx_shader_spirv.cpp | 77 +++++++++++++++------------------
+ 1 file changed, 36 insertions(+), 41 deletions(-)
+
+diff --git a/libs/video/rsx_shader_spirv.cpp b/libs/video/rsx_shader_spirv.cpp
+index 64453eb..e9bd839 100644
+--- a/libs/video/rsx_shader_spirv.cpp
++++ b/libs/video/rsx_shader_spirv.cpp
+@@ -55,12 +55,11 @@ void put_log(char* log, u32 log_size, const char* what, const char* detail)
+ 
+ bool glslang_ready()
+ {
+-    static bool inited = false;
+-    if (!inited) {
+-        if (!glslang::InitializeProcess()) return false;
+-        inited = true;
+-    }
+-    return true;
++    /* once, whichever thread comes first (translations run on several threads: rsx_hlsl_to_spirv) */
++    static std::once_flag once;
++    static bool ok = false;
++    std::call_once(once, [] { ok = glslang::InitializeProcess(); });
++    return ok;
+ }
+ 
+ int translate(const char* hlsl, int stage, std::vector<unsigned int>& spirv,
+@@ -254,25 +253,13 @@ void cache_store(const std::string& path, const std::string& key,
+ 
+ extern "C" int rsx_hlsl_to_spirv_available(void) { return 1; }
+ 
+-static int rsx_hlsl_to_spirv_locked(const char* hlsl, int stage,
+-                                    u32* words, u32 max_words, u32* out_words,
+-                                    char* log, u32 log_size);
+-
+-/* One translation at a time: glslang's set-up and the cache above are shared
+- * by every caller, and a native renderer on its own thread (the port's R3,
+- * DOTHEROES_PPFX_NATIVE) translates beside the backend. */
++/* Several translations at a time (a preparation pass translates on several threads, docs/M92_SHADER_PLAN.md):
++ * the cache's map, statistics and folder under its lock; glslang itself outside it -- after InitializeProcess
++ * (once, glslang_ready) glslang compiles different shaders on different threads, each with its own pool
++ * allocator. Two threads translating the same text both translate it; the first result is kept. */
+ extern "C" int rsx_hlsl_to_spirv(const char* hlsl, int stage,
+                                  u32* words, u32 max_words, u32* out_words,
+                                  char* log, u32 log_size)
+-{
+-    static std::mutex m;
+-    std::lock_guard<std::mutex> g(m);
+-    return rsx_hlsl_to_spirv_locked(hlsl, stage, words, max_words, out_words, log, log_size);
+-}
+-
+-static int rsx_hlsl_to_spirv_locked(const char* hlsl, int stage,
+-                                    u32* words, u32 max_words, u32* out_words,
+-                                    char* log, u32 log_size)
+ {
+     if (out_words) *out_words = 0;
+     if (!hlsl || !words || !out_words || max_words == 0) {
+@@ -283,29 +270,33 @@ static int rsx_hlsl_to_spirv_locked(const char* hlsl, int stage,
+         put_log(log, log_size, "unknown shader stage", nullptr);
+         return -1;
+     }
+-
+-    /* One lock around the whole lookup and translation: glslang's process
+-     * state is not documented as thread-safe either. */
+     Cache& c = cache();
+-    std::lock_guard<std::mutex> guard(c.lock);
+     const std::string key = cache_key(hlsl, stage);
+-    auto it = c.map.find(key);
+-    if (it != c.map.end()) {
+-        c.stats.memory_hits++;
+-    } else {
+-        std::vector<unsigned int> spirv;
+-        const std::string& dir = cache_dir(c);
+-        const std::string path = dir.empty() ? std::string() : cache_path(dir, key);
+-        if (!dir.empty() && cache_load(path, key, spirv)) {
+-            c.stats.disk_hits++;
+-        } else {
+-            if (translate(hlsl, stage, spirv, log, log_size)) return -1;
+-            c.stats.translations++;
+-            if (!dir.empty()) cache_store(path, key, spirv);
++    std::string dir;
++    {
++        std::lock_guard<std::mutex> guard(c.lock);
++        auto it = c.map.find(key);
++        if (it != c.map.end()) {
++            c.stats.memory_hits++;
++            if (it->second.size() > max_words) {
++                char n[64];
++                snprintf(n, sizeof n, "%zu words, room for %u", it->second.size(), max_words);
++                put_log(log, log_size, "SPIR-V output too large", n);
++                return -1;
++            }
++            memcpy(words, it->second.data(), it->second.size() * sizeof(u32));
++            *out_words = (u32)it->second.size();
++            return 0;
+         }
+-        it = c.map.emplace(key, std::move(spirv)).first;
++        dir = cache_dir(c);
++    }
++    std::vector<unsigned int> spirv;
++    const std::string path = dir.empty() ? std::string() : cache_path(dir, key);
++    bool from_disk = !dir.empty() && cache_load(path, key, spirv);
++    if (!from_disk) {
++        if (translate(hlsl, stage, spirv, log, log_size)) return -1;
++        if (!dir.empty()) cache_store(path, key, spirv);
+     }
+-    const std::vector<unsigned int>& spirv = it->second;
+     if (spirv.size() > max_words) {
+         char n[64];
+         snprintf(n, sizeof n, "%zu words, room for %u", spirv.size(), max_words);
+@@ -314,6 +305,10 @@ static int rsx_hlsl_to_spirv_locked(const char* hlsl, int stage,
+     }
+     memcpy(words, spirv.data(), spirv.size() * sizeof(u32));
+     *out_words = (u32)spirv.size();
++    std::lock_guard<std::mutex> guard(c.lock);
++    if (from_disk) c.stats.disk_hits++;
++    else c.stats.translations++;
++    c.map.emplace(key, std::move(spirv));
+     return 0;
+ }
+ 
+-- 
+2.56.0.windows.3
+

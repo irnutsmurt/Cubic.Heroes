@@ -159,6 +159,7 @@ struct Blob {
     std::vector<uint8_t> bytes;
 };
 using BlobP = std::shared_ptr<const Blob>;
+uint64_t program_hash(const uint8_t* p, size_t n);   // Blob::hash of these bytes (M9.2c)
 uint64_t fnv(const void* p, size_t n, uint64_t h = 1469598103934665603ull);
 
 // ---- records ---------------------------------------------------------------

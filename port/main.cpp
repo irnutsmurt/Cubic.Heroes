@@ -950,8 +950,31 @@ static int dotheroes_prepare(int argc, char** argv)
     }
     if (slots) set_default_env("DOTHEROES_RECIPES", root + "/data/cache/native-recipes.bin");
     bool check = false;   // --check: the cache's state and the recipes counted, nothing made
-    for (int i = 2; i < argc; i++)
+    std::string usr = root + "/data/disc/PS3_GAME/USRDIR";
+    for (int i = 2; i < argc; i++) {
         if (strcmp(argv[i], "--check") == 0) check = true;
+        /* M9.2b/c (docs/M92_SHADER_PLAN.md): --static PROFILES -- every program on the player's disc translated and
+         * a pipeline for each shader package record by its group's pass profiles; --disc USRDIR (the install's own
+         * copy by default); --threads N */
+        if (i + 1 < argc && strcmp(argv[i], "--disc") == 0) usr = argv[i + 1];
+        if (i + 1 < argc && strcmp(argv[i], "--threads") == 0) {
+#ifdef _WIN32
+            _putenv_s("DOTHEROES_PREPARE_THREADS", argv[i + 1]);
+#else
+            setenv("DOTHEROES_PREPARE_THREADS", argv[i + 1], 1);
+#endif
+        }
+    }
+    for (int i = 2; i + 1 < argc; i++)
+        if (strcmp(argv[i], "--static") == 0) {
+#ifdef _WIN32
+            _putenv_s("DOTHEROES_PIPELINE_PROFILES", argv[i + 1]);
+            _putenv_s("DOTHEROES_PREPARE_USRDIR", usr.c_str());
+#else
+            setenv("DOTHEROES_PIPELINE_PROFILES", argv[i + 1], 1);
+            setenv("DOTHEROES_PREPARE_USRDIR", usr.c_str(), 1);
+#endif
+        }
 #ifdef _WIN32
     _putenv_s("PS3RECOMP_VK_WINDOW", "");   /* no window: the device renders offscreen */
 #else
@@ -964,7 +987,7 @@ static int dotheroes_prepare(int argc, char** argv)
         fflush(stdout);
         return 4;
     }
-    char summary[1200];
+    static char summary[16384];   /* M9.2b: with the list of what failed */
     const int r = ppfx_native_prepare(prepare_progress, nullptr, summary, (int)sizeof summary, check);
     printf("{\"ev\":\"prepared\",\"result\":%s}\n", summary);
     fflush(stdout);

@@ -8,12 +8,16 @@ limits are established. Labels as in the other records: [C] read in the code, [M
 
 ## Checkpoint
 
-- **Stage**: M9.2b/c (every shader translated; pipelines from structure) in progress.
+- **Stage**: M9.2d (the runtime: what play builds logged with its frame, the warm-up) and the coverage of areas
+  never recorded (M9.2f's measurement) in progress.
 - **Done**: the investigation (section 2); the test harness keeps every automated run off the desktop, enforced
   centrally (section 7); **M9.2a**: the inventory in the game (section 2a) -- 636 vertex and 2,481 fragment records
-  read, none unparsed; every program of 332 recorded pipelines found; layout and control word derived exactly.
-- **Next**: normalised render state and one key function; the comprehensive `--prepare` (every program
-  translated in parallel, pipelines for every package record by its group's profiles).
+  read, none unparsed; every program of 332 recorded pipelines found; layout and control word derived exactly;
+  **M9.2b/c** (section 2b): one pipeline identity with the ignored state normalised (98 recorded -> 76); every
+  program on the disc translated before play (2,726, none failed) and 1,785 pipelines from the package's records
+  by pass profiles, on 15 threads in 7.3 s cold.
+- **Next**: M9.2d; the held-out comparison (the 98-pipeline set against the comprehensive one on the same routes,
+  and on areas never recorded); the launcher (M9.2e).
 - **Open questions for the owner**: none yet.
 
 ## 1. What decides a pipeline (the renderer, port/native/render/ppfx_render.cpp) [C]
@@ -119,6 +123,52 @@ fights, the install tests):
 So the programs, their pairing in the package, the vertex layout and the fragment control word are static; what
 remains per draw is the pass's targets and render state, the alpha test, a shadow sampler, and which
 post-processing programs are paired -- section 3.
+
+## 2b. M9.2b/c: every shader translated, pipelines from structure (2026-11-16) [M, C]
+
+**One identity for a pipeline** (port/native/render/ppfx_render.cpp):
+- `canon()`: the render state the GPU ignores zeroed before the key and before `vkCreateGraphicsPipelines` (a
+  disabled stencil test's functions and operations, a disabled blend's factors, a disabled depth test's function
+  and write, a disabled cull's face, a missing target's state). The recorded 98 pipelines are **76** pipelines;
+- `key_ppfx` / `key_asp`: the one key function the draws use and a recipe's key is made by (`recipe_key`), so a
+  pipeline prepared from a recipe -- recorded, the manifest's, or made from the disc -- is the one a draw looks up.
+  Checked at every new recipe in play: the key made again from what is kept must equal the draw's (five reference
+  runs, ~100 new recipes: no difference).
+
+**`dotheroes --prepare --static PROFILES [--disc USRDIR] [--threads N]`** (the install's disc copy by default):
+- the recipes (recorded, the manifest's); with the disc and the profiles, a recipe for each package record and
+  each profile its group has (else its group's class): its programs from the disc, its vertex layout from the
+  program's analysis, its fragment control word from its header, a shadow sampler where the profile has one and
+  the program samples that unit, its render state from the profile;
+- **every program on the disc translated on its own** (vertex with its layout, fragment with its control word),
+  besides each recipe's two -- the SPIR-V the game will look up for each, made now;
+- translations and pipelines on all but one of the CPU's threads (the SPIR-V translator's lock narrowed to its
+  cache: patches/ps3recomp/0161), the pipeline cache saved as it grows; `prepared-keys.bin` beside it: the keys of
+  every pipeline made (what play is measured against);
+- what did not translate or make is listed (what, which, why), never skipped silently.
+
+**The pass profiles** (tools/pipeline_profiles.py `learn`; config/pipeline_profiles.txt, 70 lines of numbers):
+learned from the manifest's own recordings (the four M9.5 routes and the river fights: 98 pipelines, 58 of one
+package record): 37 profiles in 17 groups, 30 in 5 classes. Of the package's 569 records, 60 have their group's
+profiles, 402 their class's, 107 neither (classes no recording reached). tests/test_pipeline_profiles.py (4).
+
+**Measured** (build/m92/prep_test.py: the test install, our shader folder and NVIDIA's own cache empty per run; RTX
+3070, 16 threads; F:\3d dot game heroes\m92\evidence\prep1):
+
+| Preparation | Pipelines | Translations | One thread | 15 threads | Our cache |
+|---|---|---|---|---|---|
+| the first-session manifest (as M9.5) | 76 | 88 | 1.3 s | 0.3 s | 2.9 MB |
+| comprehensive | 76 + 1,785 from the package | 2,726 (every program on the disc, and the variants) | 25.9 s | 7.3 s | 94 MB of SPIR-V, 19 MB of pipelines |
+
+- nothing failed: 2,726 of 2,726 translated, 1,861 of 1,861 pipelines made;
+- on 15 threads the 2,726 SPIR-V files are the same, byte for byte, as on one;
+- the reference scenes against RPCS3 (offscreen), 5 of 5 within the accepted figures with the normalised state
+  and the new keys.
+
+**Shader coverage of the disc**: every program found (636 vertex records, 2,481 fragment) translated before play
+with the parameters its own header gives. A draw whose texture kinds, alpha test or sRGB output differ from those
+is a different translation; the variants the profiles name are translated with their pipelines. **Pipeline
+coverage** of play is section 2c's measurement.
 
 ## 3. The design
 

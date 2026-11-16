@@ -54,6 +54,7 @@
 // DOTHEROES_PPFX_DUMP=<dir>: the first differing outputs, both sides, raw.
 
 #define VK_NO_PROTOTYPES
+#include <algorithm>
 #include <atomic>
 #include <vulkan/vulkan.h>
 
@@ -1141,13 +1142,24 @@ ProgParams prog_params(const ProgFixed& f, const std::string& vp, const std::str
     return p;
 }
 
-bool programs_text(const ProgParams& p, std::string& vs_out, std::string& ps_out, uint32_t* nconst)
+// M9.2b: each program's text on its own (a program translated before play without a partner), under the
+// translators' lock: their buffers and the vertex translator's branch bits are shared
+bool vp_text(const ProgParams& p, std::string& vs_out)
 {
-    static char vs[16384], ps[65536];
+    static char vs[16384];
     rsx_shader_text_lock();
     rsx_vp_set_branch_bits(p.vp_branch_bits);
     int vi = rsx_vp_decompile_compact_ex(p.vp, p.vp_bytes, p.vtex_mask, p.layout_mask, vs, sizeof vs);
     if (vi > 0 && p.ucp && rsx_vp_apply_user_clip(vs, sizeof vs, p.ucp) < 0) vi = -1;
+    if (vi > 0) vs_out = vs;
+    rsx_shader_text_unlock();
+    return vi > 0;
+}
+
+bool fp_text(const ProgParams& p, std::string& ps_out, uint32_t* nconst)
+{
+    static char ps[65536];
+    rsx_shader_text_lock();
     int fi = rsx_fp_decompile_buffered_shadow_color_expand_vol_ex(p.fp, p.fp_size, p.fp_ctrl, p.cube_mask, p.vol_mask,
             p.shadow_mask ? p.shadow : nullptr, p.gamma_masks, p.expand_units ? p.expand_masks : nullptr, ps, sizeof ps,
             nconst);
@@ -1156,9 +1168,85 @@ bool programs_text(const ProgParams& p, std::string& vs_out, std::string& ps_out
         fi = -1;
     if (fi > 0 && p.srgb_output && rsx_fp_apply_srgb_output(ps, sizeof ps) < 0) fi = -1;
     if (fi > 0 && p.alpha_test && rsx_fp_apply_alpha_test_buffered(ps, sizeof ps, p.alpha_func) < 0) fi = -1;
-    if (vi > 0 && fi > 0) { vs_out = vs; ps_out = ps; }
+    if (fi > 0) ps_out = ps;
     rsx_shader_text_unlock();
-    return vi > 0 && fi > 0;
+    return fi > 0;
+}
+
+bool programs_text(const ProgParams& p, std::string& vs_out, std::string& ps_out, uint32_t* nconst)
+{
+    std::string vs, ps;
+    if (!vp_text(p, vs) || !fp_text(p, ps, nconst)) return false;
+    vs_out = std::move(vs);
+    ps_out = std::move(ps);
+    return true;
+}
+
+// M9.2c (docs/M92_SHADER_PLAN.md): state the GPU ignores, zeroed, so draws that differ only in it share one
+// pipeline -- Vulkan reads none of a disabled stencil test's functions and operations, a disabled blend's factors
+// and equations, a disabled depth test's function and write, a disabled cull's face, a missing colour target's
+// mask, a missing depth target's depth and stencil state. PPFX's pipelines read none of these. The same in
+// tools/pipeline_profiles.py's canon().
+PipeState canon(PipeState s)
+{
+    if (s.kind != kPipeAsp) return s;
+    const bool has_rt = s.rt != VK_FORMAT_UNDEFINED, has_df = s.df != VK_FORMAT_UNDEFINED;
+    if (!has_df || !s.stencil_test || !has_stencil((VkFormat)s.df))
+        s.stencil_test = s.stencil_func = s.stencil_func_mask = s.stencil_write_mask = s.stencil_fail = s.stencil_zfail =
+            s.stencil_zpass = 0;
+    if (!has_rt || !s.blend)
+        s.blend = s.blend_sf_rgb = s.blend_df_rgb = s.blend_sf_a = s.blend_df_a = s.blend_eq_rgb = s.blend_eq_a = 0;
+    if (!has_df || !s.depth_test) s.depth_test = s.depth_write = s.depth_func = 0;
+    if (!s.cull) s.cull_face = 0;
+    if (!has_rt) s.color_mask = 0;
+    return s;
+}
+
+// M9.2c: the translation's parameters a pipeline's key holds -- one key function for the draws and for a recipe
+// (recipe_key), so a pipeline prepared from a recipe is the one a draw looks up
+struct Tr {
+    uint32_t fp_ctrl, srgb, cube, vol, shadow_mask, unnorm_mask, gamma_units, expand_units, layout_mask, alpha_test,
+             alpha_func;
+    const uint8_t* gamma; const uint8_t* expand; const uint32_t (*unnorm)[3]; const rsx_fp_shadow_desc* shadow;
+};
+
+Tr tr_of(const ProgFixed& f)
+{
+    return { f.fp_ctrl, f.srgb_output, f.cube_mask, f.vol_mask, f.shadow_mask, f.unnorm_mask, f.gamma_units,
+             f.expand_units, f.layout_mask, f.alpha_test, f.alpha_func, f.gamma, f.expand,
+             (const uint32_t (*)[3])f.unnorm, f.shadow };
+}
+
+uint64_t key_arrays(const Tr& t, uint64_t k)
+{
+    k = fnv(t.gamma, 16, k); k = fnv(t.expand, 16, k);
+    k = fnv(t.unnorm, 16 * 3 * sizeof(uint32_t), k); k = fnv(t.shadow, 16 * sizeof(rsx_fp_shadow_desc), k);
+    return k;
+}
+
+// PPFX's: the vertex program's bytes, the fragment program's structure, the translation, the target
+uint64_t key_ppfx(const uint8_t* vp, uint32_t vpn, const uint8_t* fp, uint32_t fpn, const PipeState& s, const Tr& t)
+{
+    uint64_t k = fnv(vp, vpn);
+    k = rsx_fp_structural_hash(fp, fpn, k);
+    const uint32_t ints[] = { t.fp_ctrl & 0x4Eu, t.srgb, t.cube, t.vol, t.shadow_mask, t.unnorm_mask, t.gamma_units,
+                              t.expand_units, t.layout_mask, s.stride, s.rt, s.color_mask, s.front_face, s.zminmax };
+    return key_arrays(t, fnv(ints, sizeof ints, k));
+}
+
+// asp's: the programs' identities (Blob::hash and size; the structural hash, seed 0xF5), the translation, the
+// normalised render state
+uint64_t key_asp(uint64_t vph, uint32_t vpn, uint64_t fsh, const PipeState& c, const Tr& t)
+{
+    const uint64_t vk[2] = { vph, (uint64_t)vpn };
+    uint64_t k = fnv(&fsh, 8, fnv(vk, sizeof vk, 0xA5Bull));
+    const uint32_t ints[] = { t.fp_ctrl & 0x4Eu, t.srgb, t.cube, t.vol, t.shadow_mask, t.unnorm_mask, t.gamma_units,
+                              t.expand_units, t.layout_mask, c.stride, c.rt, c.df, c.color_mask, c.front_face, c.cull,
+                              c.cull_face, c.blend, c.blend_sf_rgb, c.blend_df_rgb, c.blend_sf_a, c.blend_df_a,
+                              c.blend_eq_rgb, c.blend_eq_a, c.depth_test, c.depth_write, c.depth_func, c.stencil_test,
+                              c.stencil_func, c.stencil_func_mask, c.stencil_write_mask, c.stencil_fail, c.stencil_zfail,
+                              c.stencil_zpass, t.alpha_test, t.alpha_test ? t.alpha_func : 0u, c.zminmax, c.lines };
+    return key_arrays(t, fnv(ints, sizeof ints, k));
 }
 
 // M9.0: the compile log (VK_COMPILE_LOG=1, as the backend's: tests/batch_report.py counts the lines per
@@ -1333,14 +1421,13 @@ const Pipe* pipeline(const Rec* r, const rsx_vertex_layout_plan& layout, VkForma
     const uint32_t vtex = 0, bb = 0, ucp = 0;
     const uint32_t wpos[2] = { 1u, 1u };
     const Raster& ra = st.raster;
-    // identity: everything the translation and the pipeline are made from
-    uint64_t k = fnv(vp, vp_bytes);
-    k = rsx_fp_structural_hash(fp, fp_size, k);
-    const uint32_t ints[] = { fp_ctrl & 0x4Eu, srgb, cube, vol, shadow_mask, unnorm_mask, gamma_units, expand_units,
-                              layout.mask, layout.stride, (uint32_t)rt, ra.color_mask, ra.front_face, ra.zminmax };
-    k = fnv(ints, sizeof ints, k);
-    k = fnv(gamma, sizeof gamma, k); k = fnv(expand, sizeof expand, k);
-    k = fnv(unnorm, sizeof unnorm, k); k = fnv(shadow, sizeof shadow, k);
+    // identity: everything the translation and the pipeline are made from (M9.2c: key_ppfx, as a recipe's)
+    PipeState s = {};   // M9.2: what make_pipeline builds it from (kept, with the programs, for preparation)
+    s.kind = kPipePpfx; s.rt = (uint32_t)rt; s.stride = layout.stride; s.count = layout.count;
+    s.color_mask = ra.color_mask; s.front_face = ra.front_face; s.zminmax = ra.zminmax;
+    const Tr tr = { fp_ctrl, srgb, cube, vol, shadow_mask, unnorm_mask, gamma_units, expand_units, layout.mask, 0u, 0u,
+                    gamma, expand, (const uint32_t (*)[3])unnorm, shadow };
+    const uint64_t k = key_ppfx(vp, vp_bytes, fp, fp_size, s, tr);
     auto it = s_pipes.find(k);
     if (it != s_pipes.end()) return it->second.p ? &it->second : nullptr;
     Pipe& P = s_pipes[k];
@@ -1359,9 +1446,7 @@ const Pipe* pipeline(const Rec* r, const rsx_vertex_layout_plan& layout, VkForma
     }
     VkShaderModule vsm = spirv_module(vs, RSX_SHADER_STAGE_VERTEX), fsm = spirv_module(ps, RSX_SHADER_STAGE_FRAGMENT);
     if (!vsm || !fsm) return nullptr;
-    PipeState s = {};   // M9.2: what make_pipeline builds it from (kept, with the programs' text, for preparation)
-    s.kind = kPipePpfx; s.rt = (uint32_t)rt; s.stride = layout.stride; s.count = layout.count;
-    s.color_mask = ra.color_mask; s.front_face = ra.front_face; s.zminmax = ra.zminmax; s.nconst = nconst;
+    s.nconst = nconst;
     const uint64_t c_driver = now_ns();
     const VkResult res = make_pipeline(s, vsm, fsm, &P.p);
     compile_account("ppfx", k, c_start, c_driver, now_ns());
@@ -1657,18 +1742,23 @@ const Pipe* pipeline_asp(const Rec* r, const rsx_vertex_layout_plan& layout, VkF
     }
     const Raster& ra = st.raster;
     const uint32_t alpha_test = ra.alpha_test ? 1u : 0u, alpha_func = ra.alpha_func;
-    const uint64_t vk[2] = { r->vp->hash, (uint64_t)vp_bytes };
-    uint64_t k = fnv(&fi.shash, 8, fnv(vk, sizeof vk, 0xA5Bull));
-    const uint32_t ints[] = { fp_ctrl & 0x4Eu, srgb, cube, vol, shadow_mask, unnorm_mask, gamma_units, expand_units,
-                              layout.mask, layout.stride, (uint32_t)rt, (uint32_t)df, ra.color_mask, ra.front_face,
-                              ra.cull, ra.cull_face, ra.blend, ra.blend_sf_rgb, ra.blend_df_rgb, ra.blend_sf_a, ra.blend_df_a,
-                              ra.blend_eq_rgb, ra.blend_eq_a, ra.depth_test, ra.depth_write, ra.depth_func,
-                              ra.stencil_test, ra.stencil_func, ra.stencil_func_mask, ra.stencil_write_mask,
-                              ra.stencil_fail, ra.stencil_zfail, ra.stencil_zpass, alpha_test, alpha_test ? alpha_func : 0,
-                              ra.zminmax, prim_lines(r->prim) ? 1u : 0u };
-    k = fnv(ints, sizeof ints, k);
-    k = fnv(gamma, sizeof gamma, k); k = fnv(expand, sizeof expand, k);
-    k = fnv(unnorm, sizeof unnorm, k); k = fnv(shadow, sizeof shadow, k);
+    // M9.2: what make_pipeline builds it from (kept, with the programs, for preparation); M9.2c: normalised, and
+    // keyed by key_asp, as a recipe's
+    PipeState s = {};
+    s.kind = kPipeAsp; s.rt = (uint32_t)rt; s.df = (uint32_t)df; s.stride = layout.stride; s.count = layout.count;
+    s.lines = prim_lines(r->prim) ? 1u : 0u;
+    s.color_mask = ra.color_mask; s.front_face = ra.front_face; s.zminmax = ra.zminmax;
+    s.cull = ra.cull; s.cull_face = ra.cull_face; s.blend = ra.blend;
+    s.blend_sf_rgb = ra.blend_sf_rgb; s.blend_df_rgb = ra.blend_df_rgb; s.blend_sf_a = ra.blend_sf_a;
+    s.blend_df_a = ra.blend_df_a; s.blend_eq_rgb = ra.blend_eq_rgb; s.blend_eq_a = ra.blend_eq_a;
+    s.depth_test = ra.depth_test; s.depth_write = ra.depth_write; s.depth_func = ra.depth_func;
+    s.stencil_test = ra.stencil_test; s.stencil_func = ra.stencil_func; s.stencil_func_mask = ra.stencil_func_mask;
+    s.stencil_write_mask = ra.stencil_write_mask; s.stencil_fail = ra.stencil_fail; s.stencil_zfail = ra.stencil_zfail;
+    s.stencil_zpass = ra.stencil_zpass;
+    s = canon(s);
+    const Tr tr = { fp_ctrl, srgb, cube, vol, shadow_mask, unnorm_mask, gamma_units, expand_units, layout.mask,
+                    alpha_test, alpha_func, gamma, expand, (const uint32_t (*)[3])unnorm, shadow };
+    const uint64_t k = key_asp(r->vp->hash, vp_bytes, fi.shash, s, tr);
     auto it = s_pipes.find(k);
     if (it != s_pipes.end()) return it->second.p ? &it->second : nullptr;
     Pipe& P = s_pipes[k];
@@ -1690,17 +1780,7 @@ const Pipe* pipeline_asp(const Rec* r, const rsx_vertex_layout_plan& layout, VkF
     asp_hot_mark(ps);
     VkShaderModule vsm = spirv_module(vs, RSX_SHADER_STAGE_VERTEX), fsm = spirv_module(ps, RSX_SHADER_STAGE_FRAGMENT);
     if (!vsm || !fsm) return nullptr;
-    PipeState s = {};   // M9.2: what make_pipeline builds it from (kept, with the programs' text, for preparation)
-    s.kind = kPipeAsp; s.rt = (uint32_t)rt; s.df = (uint32_t)df; s.stride = layout.stride; s.count = layout.count;
-    s.lines = prim_lines(r->prim) ? 1u : 0u;
-    s.color_mask = ra.color_mask; s.front_face = ra.front_face; s.zminmax = ra.zminmax;
-    s.cull = ra.cull; s.cull_face = ra.cull_face; s.blend = ra.blend;
-    s.blend_sf_rgb = ra.blend_sf_rgb; s.blend_df_rgb = ra.blend_df_rgb; s.blend_sf_a = ra.blend_sf_a;
-    s.blend_df_a = ra.blend_df_a; s.blend_eq_rgb = ra.blend_eq_rgb; s.blend_eq_a = ra.blend_eq_a;
-    s.depth_test = ra.depth_test; s.depth_write = ra.depth_write; s.depth_func = ra.depth_func;
-    s.stencil_test = ra.stencil_test; s.stencil_func = ra.stencil_func; s.stencil_func_mask = ra.stencil_func_mask;
-    s.stencil_write_mask = ra.stencil_write_mask; s.stencil_fail = ra.stencil_fail; s.stencil_zfail = ra.stencil_zfail;
-    s.stencil_zpass = ra.stencil_zpass; s.nconst = nconst;
+    s.nconst = nconst;
     const uint64_t c_driver = now_ns();
     const VkResult res = make_pipeline(s, vsm, fsm, &P.p);
     compile_account("asp", k, c_start, c_driver, now_ns());
@@ -1718,8 +1798,9 @@ const Pipe* pipeline_asp(const Rec* r, const rsx_vertex_layout_plan& layout, VkF
 
 // the pipeline the two creation sites made inline until M9.2, from the state they read: PPFX's (no depth, no
 // blending, culling off) and asp's (the guest's whole render state), through the pipeline cache
-VkResult make_pipeline(const PipeState& s, VkShaderModule vsm, VkShaderModule fsm, VkPipeline* out)
+VkResult make_pipeline(const PipeState& in, VkShaderModule vsm, VkShaderModule fsm, VkPipeline* out)
 {
+    const PipeState s = canon(in);   // M9.2c: a recipe recorded before the normalisation makes the same pipeline
     const VkFormat rt = (VkFormat)s.rt, df = (VkFormat)s.df;
     const bool asp = s.kind == kPipeAsp;
     VkPipelineShaderStageCreateInfo stg[2] = {
@@ -1746,8 +1827,7 @@ VkResult make_pipeline(const PipeState& s, VkShaderModule vsm, VkShaderModule fs
                  : (s.cull_face == 0x0404u || s.cull_face == 0x0408u) ? VK_CULL_MODE_FRONT_BIT : VK_CULL_MODE_BACK_BIT;
     ras.frontFace = s.front_face == 0x0901u ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE;
     if (asp) {   // DOTHEROES_ASP_CULL_FLIP=1 (a test of the winding's orientation): the other face front
-        static int flip = -1;
-        if (flip < 0) { const char* e = getenv("DOTHEROES_ASP_CULL_FLIP"); flip = e && *e == '1'; }
+        static const bool flip = [] { const char* e = getenv("DOTHEROES_ASP_CULL_FLIP"); return e && *e == '1'; }();
         if (flip) ras.frontFace = ras.frontFace == VK_FRONT_FACE_CLOCKWISE ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE;
     }
     ras.depthBiasEnable = VK_TRUE; ras.lineWidth = 1.0f;
@@ -1916,11 +1996,26 @@ constexpr uint32_t kRecipeFormat = 2;
 constexpr uint64_t kRecipeMaxBytes = 128ull << 20;
 struct RecipeHead { uint32_t magic, format; uint64_t key; PipeState s; ProgFixed f; uint32_t vp_len, fp_len; };
 struct Recipe { uint64_t key; PipeState s; ProgFixed f; std::string vp, fp; };
+
+// M9.2c: the key a draw would look this recipe's pipeline up by (key_ppfx / key_asp, as the draws make it): a
+// recipe's stored key is not trusted -- one recorded before the normalisation, or made before play from the
+// player's disc (key 0), gets its key here
+uint64_t recipe_key(const Recipe& r)
+{
+    const PipeState c = canon(r.s);
+    const Tr t = tr_of(r.f);
+    const uint8_t* vp = (const uint8_t*)r.vp.data();
+    const uint8_t* fp = (const uint8_t*)r.fp.data();
+    if (r.s.kind == kPipeAsp)
+        return key_asp(program_hash(vp, r.vp.size()), (uint32_t)r.vp.size(),
+                       rsx_fp_structural_hash(fp, (uint32_t)r.fp.size(), 0xF5ull), c, t);
+    return key_ppfx(vp, (uint32_t)r.vp.size(), fp, (uint32_t)r.fp.size(), c, t);
+}
 std::mutex s_rc_mu;
 FILE* s_rc = nullptr;
 std::unordered_set<uint64_t> s_rc_keys;
 uint64_t s_rc_bytes = 0;
-uint32_t s_rc_loaded = 0, s_rc_new = 0;
+uint32_t s_rc_loaded = 0, s_rc_new = 0, s_rc_keymiss = 0;
 
 std::string recipes_path()
 {
@@ -1969,7 +2064,7 @@ void recipes_open()
     std::filesystem::create_directories(std::filesystem::path(path).parent_path(), ec);
     long end = 0;
     const std::vector<Recipe> rs = recipes_read(path, &end);
-    for (const Recipe& r : rs) s_rc_keys.insert(r.key);
+    for (const Recipe& r : rs) s_rc_keys.insert(recipe_key(r));   // M9.2c: as the draws key them now
     s_rc_loaded = (uint32_t)s_rc_keys.size();
     if (std::filesystem::exists(path, ec) && (uintmax_t)end != std::filesystem::file_size(path, ec))
         std::filesystem::resize_file(path, (uintmax_t)end, ec);   // a record cut short, or an older format: rewritten
@@ -1983,6 +2078,14 @@ void recipe_record(uint64_t key, const PipeState& s, const ProgParams& pp)
     if (!s_rc || s_rc_keys.count(key) || s_rc_bytes > kRecipeMaxBytes) return;
     const std::string vp((const char*)pp.vp, pp.vp_bytes), fp((const char*)pp.fp, pp.fp_size);
     RecipeHead h = { kRecipeMagic, kRecipeFormat, key, s, prog_fixed(pp), (uint32_t)vp.size(), (uint32_t)fp.size() };
+    {   // M9.2c: the key made again from what is kept must be the draw's, or a prepared pipeline would never be found
+        const Recipe r{ key, s, h.f, vp, fp };
+        if (recipe_key(r) != key && s_rc_keymiss++ < 4) {
+            char line[160];
+            snprintf(line, sizeof line, "render: a recipe's key made again differs from its draw's (kind %u)", s.kind);
+            report_add(line);
+        }
+    }
     const uint32_t sum = recipe_sum(h, vp, fp);
     bool ok = fwrite(&h, sizeof h, 1, s_rc) == 1 && fwrite(vp.data(), 1, vp.size(), s_rc) == vp.size() &&
               fwrite(fp.data(), 1, fp.size(), s_rc) == fp.size() && fwrite(&sum, 4, 1, s_rc) == 1;
@@ -1994,46 +2097,339 @@ void recipe_record(uint64_t key, const PipeState& s, const ProgParams& pp)
     }
 }
 
-// The preparation pass (`dotheroes --prepare`, main.cpp): every recipe's programs translated by this build (the
-// text, then SPIR-V: the translation cache first) and its pipeline made through the pipeline cache, so the driver
-// compiles it now and keeps it -- not when the game first draws with it. Single-threaded: the translators'
-// buffers are shared (programs_text, spirv_module). progress(done, total) after each.
-struct PrepareResult { uint32_t recipes, made, failed, translated, from_cache; double ms; };
+// The preparation pass (`dotheroes --prepare`, main.cpp; M9.2, comprehensive since M9.2b/c, docs/M92_SHADER_PLAN.md):
+// the pipelines to make -- this install's recipes (recorded in play, and the first-session manifest's) and, with the
+// player's disc (DOTHEROES_PREPARE_USRDIR) and the pass profiles (DOTHEROES_PIPELINE_PROFILES), one for each shader
+// package record by its group's profiles -- and every program the disc holds, each translated by this build to
+// SPIR-V (the translation cache) on several threads; then every pipeline made through the pipeline cache on several
+// threads, so the driver compiles it now and keeps it, not when the game first draws with it.
+struct PrepareResult {
+    uint32_t recipes, made, failed, translated, from_cache, threads;
+    uint32_t static_recipes, static_made, static_failed;       // the pipelines made from the disc and the profiles
+    uint32_t texts, text_failed, spirv_failed;                 // every distinct translation: made, failed
+    uint32_t programs_vp, programs_fp, programs_failed;        // the disc's programs translated on their own
+    uint32_t pairs, pairs_group, pairs_class, pairs_none;      // package records: profiles by group, class, none
+    double ms, ms_translate, ms_pipelines;
+    std::string failures;                                      // JSON objects: what did not translate or make
+};
+
+// a pass profile (tools/pipeline_profiles.py): a normalised pipeline state, the alpha test, the shadow sampler template
+struct Profile { PipeState s; uint32_t alpha_test, alpha_func; rsx_fp_shadow_desc shadow[16]; };
+struct Profiles { std::map<uint32_t, std::vector<Profile>> group, cls; uint32_t n = 0; };
+
+// a group's class for groups no recording reached: scene materials by the top four bits, the rest by those and the
+// second byte (tools/pipeline_profiles.py's group_class())
+uint32_t group_class(uint32_t g)
+{
+    const uint32_t top = g >> 28;
+    return top >= 2 ? top << 8 : (top << 8 | (g >> 8 & 0xFFu));
+}
+
+bool unhex(const std::string& h, void* out, size_t n)
+{
+    if (h.size() != n * 2) return false;
+    uint8_t* o = (uint8_t*)out;
+    for (size_t i = 0; i < n; i++) {
+        unsigned v = 0;
+        if (sscanf(h.c_str() + 2 * i, "%2x", &v) != 1) return false;
+        o[i] = (uint8_t)v;
+    }
+    return true;
+}
+
+Profiles profiles_read(const char* path)
+{
+    Profiles pf;
+    FILE* f = path && *path ? fopen(path, "r") : nullptr;
+    if (!f) return pf;
+    char line[1024];
+    while (fgets(line, sizeof line, f)) {
+        char kind = 0, id[16], st[300], sh[160];
+        unsigned at = 0, af = 0, seen = 0;
+        if (line[0] == '#' || sscanf(line, "%c %15s %299s %u %u %159s %u", &kind, id, st, &at, &af, sh, &seen) != 7)
+            continue;
+        Profile p = {};
+        if (!unhex(st, &p.s, sizeof p.s) || !unhex(sh, p.shadow, sizeof p.shadow) || p.s.kind != kPipeAsp) continue;
+        p.alpha_test = at; p.alpha_func = af;
+        const uint32_t key = (uint32_t)strtoul(id, nullptr, 16);
+        if (kind == 'g') pf.group[key].push_back(p);
+        else if (kind == 'c') pf.cls[key].push_back(p);
+        else continue;
+        pf.n++;
+    }
+    fclose(f);
+    return pf;
+}
+
+// M9.2c: a recipe for each package record and each profile of its group (else its group's class): its programs
+// from the disc, its translation's parameters from them (the vertex layout from the program's analysis, the
+// fragment control word from its header, a shadow sampler where the profile has one and the program samples that
+// unit), its render state from the profile. What the draws would key it by decides duplicates.
+std::vector<Recipe> static_recipes(const sd::Inventory& inv, const Profiles& pf, std::unordered_set<uint64_t>& seen,
+                                   PrepareResult& out)
+{
+    std::vector<Recipe> rs;
+    for (const sd::Pair& pr : inv.pairs) {
+        const sd::Program& vp = inv.programs[pr.vp];
+        const sd::Program& fp = inv.programs[pr.fp];
+        out.pairs++;
+        const std::vector<Profile>* ps = nullptr;
+        auto g = pf.group.find(pr.group);
+        if (g != pf.group.end()) { ps = &g->second; out.pairs_group++; }
+        else {
+            auto c = pf.cls.find(group_class(pr.group));
+            if (c != pf.cls.end()) { ps = &c->second; out.pairs_class++; }
+        }
+        if (!ps || !vp.ok || !fp.ok || !vp.inputs_exact) { out.pairs_none++; continue; }
+        rsx_vertex_layout_plan layout;
+        rsx_vertex_layout_plan_init(&layout, vp.inputs);
+        for (const Profile& p : *ps) {
+            Recipe r = {};
+            r.s = p.s;
+            r.s.kind = kPipeAsp; r.s.stride = layout.stride; r.s.count = layout.count; r.s.nconst = fp.consts;
+            r.f.fp_ctrl = fp.fp_ctrl; r.f.layout_mask = layout.mask;
+            r.f.alpha_test = p.alpha_test; r.f.alpha_func = p.alpha_func;
+            for (uint32_t u = 0; u < 16; u++)
+                if ((fp.units >> u & 1) && p.shadow[u].enabled) { r.f.shadow[u] = p.shadow[u]; r.f.shadow_mask |= 1u << u; }
+            r.f.wpos[0] = r.f.wpos[1] = 1;
+            r.f.has_shadow = r.f.has_gamma = r.f.has_expand = r.f.has_unnorm = 1;
+            r.vp = vp.code; r.fp = fp.code;
+            r.key = recipe_key(r);
+            if (seen.insert(r.key).second) rs.push_back(std::move(r));
+        }
+    }
+    return rs;
+}
+
+void json_escape_into(std::string& j, const char* s, size_t max)
+{
+    for (size_t i = 0; s[i] && i < max; i++) {
+        const char c = s[i];
+        if (c == '"' || c == '\\') { j += '\\'; j += c; }
+        else if ((unsigned char)c >= 0x20) j += c;
+        else j += ' ';
+    }
+}
+
+// A thread pool over [0, n): fn(i) on `threads` threads; tick() after each on the calling thread's progress
+template <class Fn> void parallel_for(uint32_t n, uint32_t threads, Fn fn, std::atomic<uint32_t>& done)
+{
+    std::atomic<uint32_t> next{0};
+    auto work = [&] { for (uint32_t i; (i = next++) < n;) { fn(i); done++; } };
+    std::vector<std::thread> ts;
+    for (uint32_t t = 1; t < threads; t++) ts.emplace_back(work);
+    work();
+    for (std::thread& t : ts) t.join();
+}
+
+uint32_t prepare_threads()
+{
+    const char* e = getenv("DOTHEROES_PREPARE_THREADS");
+    uint32_t n = e && *e ? (uint32_t)atoi(e) : 0;
+    if (!n) {
+        const uint32_t hw = std::thread::hardware_concurrency();
+        n = hw > 1 ? hw - 1 : 1;   // the game is not running beside it (the launcher waits): all but one
+    }
+    return n < 1 ? 1 : n > 32 ? 32 : n;
+}
 
 PrepareResult prepare_run(void (*progress)(uint32_t done, uint32_t total, void* ctx), void* ctx)
 {
     PrepareResult out = {};
-    const std::string path = recipes_path();
-    if (path.empty()) return out;
-    long end = 0;
-    std::vector<Recipe> rs = recipes_read(path, &end);
-    out.recipes = (uint32_t)rs.size();
     const uint64_t t0 = now_ns();
-    for (uint32_t i = 0; i < rs.size(); i++) {
+    out.threads = prepare_threads();
+    // what to make: the recipes, then (with the disc and the profiles) the package's records
+    std::vector<Recipe> rs;
+    std::unordered_set<uint64_t> seen;
+    {
+        const std::string path = recipes_path();
+        long end = 0;
+        if (!path.empty())
+            for (Recipe& r : recipes_read(path, &end)) {
+                r.key = recipe_key(r);
+                if (seen.insert(r.key).second) rs.push_back(std::move(r));
+            }
+    }
+    out.recipes = (uint32_t)rs.size();
+    const char* usr = getenv("DOTHEROES_PREPARE_USRDIR");
+    sd::Inventory inv;
+    const bool disc = usr && *usr && sd::discover(usr, inv);
+    if (disc) {
+        const Profiles pf = profiles_read(getenv("DOTHEROES_PIPELINE_PROFILES"));
+        std::vector<Recipe> st = static_recipes(inv, pf, seen, out);
+        out.static_recipes = (uint32_t)st.size();
+        for (Recipe& r : st) rs.push_back(std::move(r));
+    }
+    // the translations: each recipe's two texts, and every program on the disc on its own
+    struct Text { int stage; std::string text; std::string what; };
+    std::vector<Text> texts;
+    std::unordered_map<std::string, uint32_t> text_at;
+    auto add_text = [&](int stage, std::string&& t, const std::string& what) -> uint32_t {
+        std::string key(1, (char)('0' + stage));
+        key += t;
+        auto it = text_at.find(key);
+        if (it != text_at.end()) return it->second;
+        const uint32_t i = (uint32_t)texts.size();
+        texts.push_back({ stage, std::move(t), what });
+        text_at.emplace(std::move(key), i);
+        return i;
+    };
+    std::vector<std::pair<uint32_t, uint32_t>> rtexts(rs.size(), { ~0u, ~0u });
+    std::string& fails = out.failures;
+    auto fail_json = [&](const char* what, const std::string& who, const char* why) {
+        if (fails.size() > 6000) return;
+        if (!fails.empty()) fails += ",";
+        fails += "{\"what\":\"";
+        json_escape_into(fails, what, 40);
+        fails += "\",\"which\":\"";
+        json_escape_into(fails, who.c_str(), 120);
+        fails += "\",\"why\":\"";
+        json_escape_into(fails, why, 200);
+        fails += "\"}";
+    };
+    for (size_t i = 0; i < rs.size(); i++) {
         const Recipe& r = rs[i];
         const ProgParams pp = prog_params(r.f, r.vp, r.fp);
         std::string vs, ps;
         uint32_t nconst = 0;
-        VkShaderModule vsm = VK_NULL_HANDLE, fsm = VK_NULL_HANDLE;
-        RsxSpirvCacheStats c0 = {}, c1 = {};
-        rsx_hlsl_to_spirv_cache_stats(&c0);
-        if (programs_text(pp, vs, ps, &nconst)) {
-            vsm = spirv_module(vs, RSX_SHADER_STAGE_VERTEX);
-            fsm = spirv_module(ps, RSX_SHADER_STAGE_FRAGMENT);
+        char who[64];
+        snprintf(who, sizeof who, "%s pipeline %016llx", i < out.recipes ? "recorded" : "package",
+                 (unsigned long long)r.key);
+        if (!programs_text(pp, vs, ps, &nconst)) { out.text_failed++; fail_json("translate", who, "the translator"); continue; }
+        rtexts[i] = { add_text(RSX_SHADER_STAGE_VERTEX, std::move(vs), who), add_text(RSX_SHADER_STAGE_FRAGMENT, std::move(ps), who) };
+    }
+    if (disc)
+        for (const sd::Program& p : inv.programs) {
+            char who[160];
+            snprintf(who, sizeof who, "%s %s %u%s%s", sd::source_name(p.source), p.stage ? "fragment" : "vertex", p.index,
+                     p.name.empty() ? "" : " ", p.name.c_str());
+            if (!p.ok) { out.programs_failed++; fail_json("read", who, "its microcode's end was not found"); continue; }
+            ProgFixed f = {};
+            f.wpos[0] = f.wpos[1] = 1;
+            f.has_shadow = f.has_gamma = f.has_expand = f.has_unnorm = 1;
+            if (p.stage == 0) {
+                rsx_vertex_layout_plan layout;
+                rsx_vertex_layout_plan_init(&layout, p.inputs);
+                f.layout_mask = layout.mask;
+                const ProgParams pp = prog_params(f, p.code, std::string());
+                std::string vs;
+                if (!vp_text(pp, vs)) { out.programs_failed++; fail_json("translate", who, "the vertex translator"); continue; }
+                add_text(RSX_SHADER_STAGE_VERTEX, std::move(vs), who);
+                out.programs_vp++;
+            } else {
+                f.fp_ctrl = p.fp_ctrl; f.cube_mask = p.sampler_cube; f.vol_mask = p.sampler_3d;
+                const ProgParams pp = prog_params(f, std::string(), p.code);
+                std::string ps;
+                uint32_t nconst = 0;
+                if (!fp_text(pp, ps, &nconst)) { out.programs_failed++; fail_json("translate", who, "the fragment translator"); continue; }
+                add_text(RSX_SHADER_STAGE_FRAGMENT, std::move(ps), who);
+                out.programs_fp++;
+            }
         }
-        rsx_hlsl_to_spirv_cache_stats(&c1);
-        out.translated += c1.translations - c0.translations;
-        out.from_cache += (c1.disk_hits - c0.disk_hits) + (c1.memory_hits - c0.memory_hits);
-        VkPipeline p = VK_NULL_HANDLE;
-        if (vsm && fsm && make_pipeline(r.s, vsm, fsm, &p) == VK_SUCCESS && p) out.made++;
-        else out.failed++;
-        if (p) F.vkDestroyPipeline(D.device, p, nullptr);
+    out.texts = (uint32_t)texts.size();
+    const uint32_t total = out.texts + (uint32_t)rs.size();
+    std::atomic<uint32_t> done{0};
+    std::atomic<bool> busy{true};
+    std::thread reporter([&] {   // the progress, from one thread
+        uint32_t last = ~0u;
+        while (busy) {
+            const uint32_t d = done.load();
+            if (d != last && progress) progress(d, total, ctx);
+            last = d;
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    });
+    // SPIR-V for every distinct text, on several threads (the translation cache's own lock only around its map)
+    RsxSpirvCacheStats c0 = {}, c1 = {};
+    rsx_hlsl_to_spirv_cache_stats(&c0);
+    std::vector<uint8_t> text_ok(texts.size(), 0);
+    std::mutex fail_mu;
+    const uint64_t t1 = now_ns();
+    parallel_for((uint32_t)texts.size(), out.threads, [&](uint32_t i) {
+        thread_local std::vector<uint32_t> words(262144);
+        uint32_t n = 0;
+        char log[512] = "";
+        const int bad = rsx_hlsl_to_spirv(texts[i].text.c_str(), texts[i].stage, words.data(), (uint32_t)words.size(),
+                                          &n, log, sizeof log);
+        text_ok[i] = !bad && n;
+        if (!text_ok[i]) {
+            std::lock_guard<std::mutex> lk(fail_mu);
+            out.spirv_failed++;
+            fail_json("spirv", texts[i].what, log);
+        }
+    }, done);
+    rsx_hlsl_to_spirv_cache_stats(&c1);
+    out.translated = c1.translations - c0.translations;
+    out.from_cache = (c1.disk_hits - c0.disk_hits) + (c1.memory_hits - c0.memory_hits);
+    out.ms_translate = (now_ns() - t1) / 1e6;
+    // the pipelines, on several threads: what they share made first, on this one (render passes, switches read once)
+    depth_clamp(0);
+    for (const Recipe& r : rs) {
+        if (r.s.kind == kPipeAsp) render_pass2((VkFormat)r.s.rt, (VkFormat)r.s.df);
+        else render_pass((VkFormat)r.s.rt);
+    }
+    std::atomic<uint32_t> made{0}, failed{0}, smade{0}, sfailed{0};
+    std::vector<uint8_t> made_at(rs.size(), 0);
+    const uint64_t t2 = now_ns();
+    parallel_for((uint32_t)rs.size(), out.threads, [&](uint32_t i) {
+        const bool from_disc = i >= out.recipes;
+        auto module = [&](uint32_t ti) -> VkShaderModule {
+            thread_local std::vector<uint32_t> words(262144);
+            uint32_t n = 0;
+            char log[64];
+            if (ti == ~0u || !text_ok[ti] ||
+                rsx_hlsl_to_spirv(texts[ti].text.c_str(), texts[ti].stage, words.data(), (uint32_t)words.size(), &n,
+                                  log, sizeof log) || !n)
+                return VK_NULL_HANDLE;
+            VkShaderModuleCreateInfo ci = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
+            ci.codeSize = n * 4u; ci.pCode = words.data();
+            VkShaderModule m = VK_NULL_HANDLE;
+            F.vkCreateShaderModule(D.device, &ci, nullptr, &m);
+            return m;
+        };
+        VkShaderModule vsm = module(rtexts[i].first), fsm = module(rtexts[i].second);
+        VkPipeline pl = VK_NULL_HANDLE;
+        const VkResult res = vsm && fsm ? make_pipeline(rs[i].s, vsm, fsm, &pl) : VK_ERROR_UNKNOWN;
+        if (res == VK_SUCCESS && pl) { (from_disc ? smade : made)++; made_at[i] = 1; }
+        else {
+            (from_disc ? sfailed : failed)++;
+            if (vsm && fsm) {
+                char who[64], why[64];
+                snprintf(who, sizeof who, "pipeline %016llx", (unsigned long long)rs[i].key);
+                snprintf(why, sizeof why, "vkCreateGraphicsPipelines %d", (int)res);
+                std::lock_guard<std::mutex> lk(fail_mu);
+                fail_json("pipeline", who, why);
+            }
+        }
+        if (pl) F.vkDestroyPipeline(D.device, pl, nullptr);
         if (vsm) F.vkDestroyShaderModule(D.device, vsm, nullptr);
         if (fsm) F.vkDestroyShaderModule(D.device, fsm, nullptr);
-        if (progress) progress(i + 1, out.recipes, ctx);
-    }
+    }, done);
+    out.ms_pipelines = (now_ns() - t2) / 1e6;
+    busy = false;
+    reporter.join();
+    if (progress) progress(done.load(), total, ctx);
+    out.made = made; out.failed = failed; out.static_made = smade; out.static_failed = sfailed;
     out.ms = (now_ns() - t0) / 1e6;
     pcache_save();
+    // M9.2c/d: the keys of every pipeline made, beside the pipeline cache (prepared-keys.bin: "PKY1", a count, the
+    // keys): what a draw's pipeline is checked against -- prepared, or met for the first time in play
+    const std::string dir = cache_dir();
+    if (!dir.empty()) {
+        std::vector<uint64_t> keys;
+        for (size_t i = 0; i < rs.size(); i++) if (made_at[i]) keys.push_back(rs[i].key);
+        std::sort(keys.begin(), keys.end());
+        const std::string path = dir + "/prepared-keys.bin", tmp = path + ".part";
+        FILE* f = fopen(tmp.c_str(), "wb");
+        const uint32_t head[2] = { 0x31594B50u, (uint32_t)keys.size() };
+        bool ok = f && fwrite(head, sizeof head, 1, f) == 1 &&
+                  (keys.empty() || fwrite(keys.data(), 8, keys.size(), f) == keys.size());
+        if (f) ok = fclose(f) == 0 && ok;
+#ifdef _WIN32
+        if (ok) remove(path.c_str());
+#endif
+        if (!ok || rename(tmp.c_str(), path.c_str()) != 0) remove(tmp.c_str());
+    }
     return out;
 }
 
@@ -5377,12 +5773,21 @@ extern "C" int ppfx_native_prepare(void (*progress)(uint32_t done, uint32_t tota
         return 0;
     }
     const ppfx::PrepareResult r = ppfx::prepare_run(progress, ctx);
+    // M9.2b/c: the recorded recipes (made, failed: as before), the package's records from the disc, every distinct
+    // translation and the disc's programs on their own, the time of each phase, what failed
     snprintf(summary, (size_t)n,
              "{\"recipes\":%u,\"made\":%u,\"failed\":%u,\"translated\":%u,\"from_cache\":%u,\"ms\":%.1f,"
-             "\"cache\":\"%s\",\"cache_mb_before\":%.2f,\"cache_mb\":%.2f,%s}",
+             "\"cache\":\"%s\",\"cache_mb_before\":%.2f,\"cache_mb\":%.2f,\"threads\":%u,"
+             "\"package\":{\"records\":%u,\"by_group\":%u,\"by_class\":%u,\"none\":%u,\"pipelines\":%u,"
+             "\"made\":%u,\"failed\":%u},\"shaders\":{\"translations\":%u,\"text_failed\":%u,"
+             "\"spirv_failed\":%u,\"disc_vertex\":%u,\"disc_fragment\":%u,\"disc_failed\":%u},"
+             "\"ms_translate\":%.1f,\"ms_pipelines\":%.1f,\"failures\":[%s],%s}",
              r.recipes, r.made, r.failed, r.translated, r.from_cache, r.ms, ppfx::s_pc_state.c_str(),
-             ppfx::s_pc_loaded / 1048576.0, ppfx::s_pc_saved / 1048576.0, gpu);
-    return r.failed ? 1 : 0;
+             ppfx::s_pc_loaded / 1048576.0, ppfx::s_pc_saved / 1048576.0, r.threads, r.pairs, r.pairs_group,
+             r.pairs_class, r.pairs_none, r.static_recipes, r.static_made, r.static_failed, r.texts, r.text_failed,
+             r.spirv_failed, r.programs_vp, r.programs_fp, r.programs_failed, r.ms_translate, r.ms_pipelines,
+             r.failures.c_str(), gpu);
+    return r.failed || r.static_failed ? 1 : 0;
 }
 
 // M9.2a (shader_discovery.cpp): a recipes file's records as the inventory checks them
