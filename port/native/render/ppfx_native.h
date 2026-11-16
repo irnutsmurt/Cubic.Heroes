@@ -435,6 +435,11 @@ struct Stats {
     // requirement 5): the programs to text, the text to SPIR-V (glslang or the cache), the driver's pipeline
     std::atomic<uint64_t> pipe_text_ns{0}, pipe_spirv_ns{0}, pipe_driver_ns{0}, pipe_max_ns{0};
     std::atomic<uint64_t> n_spirv_glslang{0}, n_spirv_cached{0}, n_pipe_over_4ms{0}, n_pipe_over_16ms{0};
+    // M9.2d (docs/M92_SHADER_PLAN.md): pipelines built in play that the preparation had made (from its cache) or
+    // had not (compiled now); the frames that held building
+    std::atomic<uint64_t> n_pipe_prepared{0}, n_pipe_unforeseen{0}, pipe_prepared_ns{0}, pipe_unforeseen_ns{0};
+    std::atomic<uint64_t> n_build_frames{0}, build_frame_max_ns{0}, build_frame_max_build_ns{0};
+    std::atomic<uint64_t> n_pipe_warm{0};   // M9.2d: pipelines a draw took from the warm-up, made before it
     std::atomic<uint64_t> n_frames{0};    // frames with PPFX records (the per-frame figures' denominator)
     std::atomic<uint64_t> n_asp_draws{0}, n_asp_vertex_bytes{0}, n_asp_clears{0}, n_asp_lines{0};   // R5: asp's records drawn natively
     std::atomic<uint64_t> asp_race_checked{0}, asp_race_changed{0};   // R5: guest bytes changed between the record and its native draw

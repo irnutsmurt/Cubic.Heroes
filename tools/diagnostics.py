@@ -113,6 +113,15 @@ def about(install):
         exe = os.path.join(lay.game_link, layout.exe_name())
         out["game_info"] = _run_json([exe, "--info"])
         out["graphics"] = _run_json([exe, "--prepare", "--check"], timeout=120).get("result")
+        # M9.2 (docs/M92_SHADER_PLAN.md): the last comprehensive preparation's figures -- shaders translated,
+        # pipelines made by source, failures, times -- kept beside the shader cache (no program, no shader text)
+        sid = info.get("shader_cache") or "default"
+        try:
+            import json as _json
+            with open(os.path.join(lay.shaders, sid, "prepare-result.json"), encoding="utf-8") as f:
+                out["shader_preparation"] = _json.load(f)
+        except (OSError, ValueError):
+            out["shader_preparation"] = None
     try:
         import shutil
         out["disk_free_mb"] = shutil.disk_usage(lay.root).free >> 20

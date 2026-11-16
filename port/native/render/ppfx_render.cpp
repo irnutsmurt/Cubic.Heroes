@@ -950,8 +950,11 @@ void shadow_desc(rsx_fp_shadow_desc* out, const Texture& t, const Sampler& s)
 
 std::map<VkFormat, VkRenderPass> s_rps;
 
+std::recursive_mutex s_rp_mu;   // M9.2d: the warm-up makes pipelines beside the draws
+
 VkRenderPass render_pass(VkFormat f)
 {
+    std::lock_guard<std::recursive_mutex> lk(s_rp_mu);
     auto it = s_rps.find(f);
     if (it != s_rps.end()) return it->second;
     const VkImageLayout l = s_full ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
@@ -985,6 +988,7 @@ VkFramebuffer framebuffer(Img* o)
 std::map<std::pair<VkFormat, VkFormat>, VkRenderPass> s_rps2;
 VkRenderPass render_pass2(VkFormat c, VkFormat d)
 {
+    std::lock_guard<std::recursive_mutex> lk(s_rp_mu);
     auto it = s_rps2.find({ c, d });
     if (it != s_rps2.end()) return it->second;
     VkAttachmentDescription a[2] = {};
@@ -1090,7 +1094,11 @@ struct PipeState {
 };
 static_assert(sizeof(PipeState) == 32 * 4, "the recipes' record");
 VkPipelineCache s_pcache = VK_NULL_HANDLE;   // M9.2: the native renderer's own, kept on disk (pcache_open)
-VkResult make_pipeline(const PipeState& s, VkShaderModule vsm, VkShaderModule fsm, VkPipeline* out);
+bool warm_take(uint64_t key, struct Pipe* out);   // M9.2d (below)
+void warm_start(const std::string& dir);
+using PipeCreator = VkResult (*)(VkGraphicsPipelineCreateInfo& gci, void* ctx, VkPipeline* out);
+VkResult make_pipeline(const PipeState& s, VkShaderModule vsm, VkShaderModule fsm, VkPipeline* out,
+                       PipeCreator create = nullptr, void* ctx = nullptr);
 struct ProgParams;
 void recipe_record(uint64_t key, const PipeState& s, const ProgParams& pp);
 
@@ -1294,9 +1302,21 @@ VkShaderModule spirv_module(const std::string& hlsl, int stage)
 // M9.0: one pipeline's first use, accounted: its text and SPIR-V (counted in programs_text's caller and
 // spirv_module), the driver's part, the whole from c_start; with VK_COMPILE_LOG a line per pipeline (the
 // backend's format: tests/batch_report.py takes the driver's milliseconds)
+// M9.2d: the keys of the pipelines the last preparation made (prepared-keys.bin, read with the pipeline cache when
+// that cache is valid here: pcache_open), and what the frame being drawn has spent building pipelines
+std::unordered_set<uint64_t> s_prepared;
+uint64_t s_frame_build_ns = 0, s_last_present_ns = 0;
+uint32_t s_frame_builds = 0, s_frame_unforeseen = 0;
+
 void compile_account(const char* kind, uint64_t key, uint64_t c_start, uint64_t c_driver, uint64_t c_end)
 {
     Stats& s = stats();
+    const bool prepared = s_prepared.count(key) != 0;
+    (prepared ? s.n_pipe_prepared : s.n_pipe_unforeseen)++;
+    (prepared ? s.pipe_prepared_ns : s.pipe_unforeseen_ns) += c_end - c_start;
+    s_frame_build_ns += c_end - c_start;
+    s_frame_builds++;
+    if (!prepared) s_frame_unforeseen++;
     s.pipe_driver_ns += c_end - c_driver;
     const uint64_t all = c_end - c_start;
     uint64_t m = s.pipe_max_ns.load();
@@ -1304,20 +1324,37 @@ void compile_account(const char* kind, uint64_t key, uint64_t c_start, uint64_t 
     if (all > 4000000u) s.n_pipe_over_4ms++;
     if (all > 16000000u) s.n_pipe_over_16ms++;
     if (compile_log())
-        fprintf(stderr, "[vk-compile] t=%.3f pipeline %s key %016llX total %.2f ms driver %.2f ms\n", compile_clock(),
-                kind, (unsigned long long)key, all / 1e6, (c_end - c_driver) / 1e6);
-    /* M9: in a game session's log (port/diag/game_log.h), a pipeline built during play -- one the preparation did
-     * not make -- that took over 16 ms, at most 20 lines and then every 100th; every one at Debug */
+        fprintf(stderr, "[vk-compile] t=%.3f pipeline %s key %016llX total %.2f ms driver %.2f ms %s\n", compile_clock(),
+                kind, (unsigned long long)key, all / 1e6, (c_end - c_driver) / 1e6, prepared ? "prepared" : "unforeseen");
+    /* M9.2d: in a game session's log (port/diag/game_log.h), every pipeline built during play with its time --
+     * one the preparation had not made at Info (compiled now; recorded for the next preparation), one it had made
+     * at Debug (taken from the prepared cache); its frame's whole time at present_native */
     else if (dh_log_session_active && dh_log_session_active()) {
-        static std::atomic<unsigned> slow{0};
-        if (all > 16000000u) {
-            const unsigned k = ++slow;
-            if (k <= 20 || k % 100 == 0)
-                dh_log(1, "shader", "a pipeline built during play took %.1f ms (%u over 16 ms so far)", all / 1e6, k);
-        } else {
-            dh_log(3, "shader", "a pipeline built during play: %.1f ms", all / 1e6);
-        }
+        if (!prepared)
+            dh_log(2, "shader", "a pipeline not prepared before play was built: %.1f ms (%s; recorded for the next "
+                   "preparation)", all / 1e6, kind);
+        else
+            dh_log(3, "shader", "a prepared pipeline was built from the cache: %.1f ms (%s)", all / 1e6, kind);
     }
+}
+
+// M9.2d: at each frame's end, a frame that built pipelines: its whole time beside the building's, in the session log
+// (Info when a pipeline in it was not prepared, or it held 4 ms or more of building), and the worst such frame
+void frame_builds_end()
+{
+    const uint64_t now = now_ns();
+    const uint64_t frame = s_last_present_ns ? now - s_last_present_ns : 0;
+    s_last_present_ns = now;
+    if (!s_frame_builds) return;
+    Stats& s = stats();
+    s.n_build_frames++;
+    uint64_t m = s.build_frame_max_ns.load();
+    if (frame > m) { s.build_frame_max_ns = frame; s.build_frame_max_build_ns = s_frame_build_ns; }
+    if (dh_log_session_active && dh_log_session_active() && (s_frame_unforeseen || s_frame_build_ns >= 4000000u))
+        dh_log(s_frame_unforeseen ? 2 : 3, "shader", "a frame of %.1f ms built %u pipeline(s) in %.1f ms (%u not prepared)",
+               frame / 1e6, s_frame_builds, s_frame_build_ns / 1e6, s_frame_unforeseen);
+    s_frame_build_ns = 0;
+    s_frame_builds = s_frame_unforeseen = 0;
 }
 
 // The fragment translator's control word, made from the program's
@@ -1435,6 +1472,11 @@ const Pipe* pipeline(const Rec* r, const rsx_vertex_layout_plan& layout, VkForma
     ProgParams pp = { vp, vp_bytes, fp, fp_size, fp_ctrl, cube, vol, vtex, layout.mask, bb, ucp, srgb,
                       0u, 0u, unnorm_mask, shadow_mask, gamma_units, expand_units,
                       { wpos[0], wpos[1] }, 0, shadow, gamma, expand, (const uint32_t (*)[3])unnorm };
+    if (warm_take(k, &P)) {   // M9.2d: made by the warm-up before the draw; recorded as play met it
+        s.nconst = P.nconst;
+        recipe_record(k, s, pp);
+        return &P;
+    }
     std::string vs, ps;
     uint32_t nconst = 0;
     const uint64_t c_start = now_ns();   // M9.0: the pipeline's first use, from here (compile_account)
@@ -1767,6 +1809,11 @@ const Pipe* pipeline_asp(const Rec* r, const rsx_vertex_layout_plan& layout, VkF
     ProgParams pp = { vp, vp_bytes, fp, fp_size, fp_ctrl, cube, vol, 0u, layout.mask, 0u, 0u, srgb,
                       alpha_test, alpha_func, unnorm_mask, shadow_mask, gamma_units, expand_units,
                       { wpos[0], wpos[1] }, 0, shadow, gamma, expand, (const uint32_t (*)[3])unnorm };
+    if (warm_take(k, &P)) {   // M9.2d: made by the warm-up before the draw; recorded as play met it
+        s.nconst = P.nconst;
+        recipe_record(k, s, pp);
+        return &P;
+    }
     std::string vs, ps;
     uint32_t nconst = 0;
     const uint64_t c_start = now_ns();   // M9.0: the pipeline's first use, from here (compile_account)
@@ -1798,7 +1845,8 @@ const Pipe* pipeline_asp(const Rec* r, const rsx_vertex_layout_plan& layout, VkF
 
 // the pipeline the two creation sites made inline until M9.2, from the state they read: PPFX's (no depth, no
 // blending, culling off) and asp's (the guest's whole render state), through the pipeline cache
-VkResult make_pipeline(const PipeState& in, VkShaderModule vsm, VkShaderModule fsm, VkPipeline* out)
+VkResult make_pipeline(const PipeState& in, VkShaderModule vsm, VkShaderModule fsm, VkPipeline* out,
+                       PipeCreator create, void* ctx)
 {
     const PipeState s = canon(in);   // M9.2c: a recipe recorded before the normalisation makes the same pipeline
     const VkFormat rt = (VkFormat)s.rt, df = (VkFormat)s.df;
@@ -1864,6 +1912,7 @@ VkResult make_pipeline(const PipeState& in, VkShaderModule vsm, VkShaderModule f
     gci.pViewportState = &vps; gci.pRasterizationState = &ras; gci.pMultisampleState = &ms; gci.pColorBlendState = &cb;
     gci.pDepthStencilState = asp ? &ds : nullptr; gci.pDynamicState = &dy; gci.layout = s_pl;
     gci.renderPass = asp ? render_pass2(rt, df) : render_pass(rt);
+    if (create) return create(gci, ctx, out);   // M9.2d: the graphics pipeline library probe
     return F.vkCreateGraphicsPipelines(D.device, s_pcache, 1, &gci, nullptr, out);
 }
 
@@ -1873,7 +1922,7 @@ VkResult make_pipeline(const PipeState& in, VkShaderModule vsm, VkShaderModule f
 // has grown, after a preparation pass, at exit and at a test's stop. Anything else: the cache starts empty and the
 // report says why.
 constexpr uint32_t kPcMagic = 0x4350564Eu;   // "NVPC"
-constexpr uint32_t kPcFormat = 1, kPipeVersion = 1;
+constexpr uint32_t kPcFormat = 1, kPipeVersion = 2;   // 2 (M9.2c): the ignored render state normalised
 constexpr uint32_t kPcMaxBytes = 256u << 20;
 struct PcHeader {
     uint32_t magic, format, renderer, vendor, device, driver;
@@ -1975,6 +2024,17 @@ void pcache_open()
                   s_pc_path.c_str(), data.size() / 1048576.0);
     s_pc_state = why ? why : "reused";
     report_add(line);
+    // M9.2d: the keys the last preparation made -- prepared, as long as the cache they were made into is valid here
+    if (!why) {
+        FILE* kf = fopen((dir + "/prepared-keys.bin").c_str(), "rb");
+        uint32_t head[2] = {};
+        if (kf && fread(head, sizeof head, 1, kf) == 1 && head[0] == 0x31594B50u && head[1] < (1u << 22)) {
+            std::vector<uint64_t> keys(head[1]);
+            if (!keys.empty() && fread(keys.data(), 8, keys.size(), kf) == keys.size()) s_prepared.insert(keys.begin(), keys.end());
+        }
+        if (kf) fclose(kf);
+        warm_start(dir);   // M9.2d
+    }
     fprintf(stderr, "[%s]\n", line);
     if (!s_pc_path.empty() && s_pcache) {
         std::thread([] {
@@ -2111,6 +2171,7 @@ struct PrepareResult {
     uint32_t pairs, pairs_group, pairs_class, pairs_none;      // package records: profiles by group, class, none
     double ms, ms_translate, ms_pipelines;
     std::string failures;                                      // JSON objects: what did not translate or make
+    std::string probe;                                         // M9.2d: the pipeline library probe's figures (JSON)
 };
 
 // a pass profile (tools/pipeline_profiles.py): a normalised pipeline state, the alpha test, the shadow sampler template
@@ -2220,6 +2281,87 @@ template <class Fn> void parallel_for(uint32_t n, uint32_t threads, Fn fn, std::
     for (uint32_t t = 1; t < threads; t++) ts.emplace_back(work);
     work();
     for (std::thread& t : ts) t.join();
+}
+
+// ---- M9.2d: graphics pipeline libraries measured (docs/M92_SHADER_PLAN.md) ------------------------------------
+// DOTHEROES_GPL_PROBE=full|gpl with PS3RECOMP_VK_GPL_PROBE=1 (the device made with the libraries), in a preparation
+// pass, on one thread, no pipeline cache (the driver's own pointed at an empty folder by the caller): for the first
+// DOTHEROES_GPL_PROBE_N recipes, "full" makes each pipeline whole; "gpl" makes its four parts as libraries (vertex
+// input, pre-rasterisation with the vertex shader, the fragment shader, fragment output) and links them, fast
+// (unoptimised) and optimised. Separate processes, so neither is warmed by the other. Nothing is kept.
+extern "C" int rsx_vk_gpl_ok(void);
+struct GplProbe { bool gpl = false; std::vector<double> full, vi, pr, fs, fo, link, lto; uint32_t failed = 0; };
+
+VkResult gpl_probe_create(VkGraphicsPipelineCreateInfo& g, void* vctx, VkPipeline* out)
+{
+    GplProbe& c = *(GplProbe*)vctx;
+    *out = VK_NULL_HANDLE;
+    auto ms = [](uint64_t a) { return (now_ns() - a) / 1e6; };
+    if (!c.gpl) {
+        VkPipeline p = VK_NULL_HANDLE;
+        const uint64_t t = now_ns();
+        const VkResult r = F.vkCreateGraphicsPipelines(D.device, VK_NULL_HANDLE, 1, &g, nullptr, &p);
+        if (r != VK_SUCCESS) { c.failed++; return r; }
+        c.full.push_back(ms(t));
+        F.vkDestroyPipeline(D.device, p, nullptr);
+        return VK_SUCCESS;
+    }
+    auto lib = [&](VkGraphicsPipelineLibraryFlagsEXT what, VkGraphicsPipelineCreateInfo li, std::vector<double>& into) {
+        VkGraphicsPipelineLibraryCreateInfoEXT gl = { VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_LIBRARY_CREATE_INFO_EXT };
+        gl.flags = what;
+        li.pNext = &gl;
+        li.flags = VK_PIPELINE_CREATE_LIBRARY_BIT_KHR | VK_PIPELINE_CREATE_RETAIN_LINK_TIME_OPTIMIZATION_INFO_BIT_EXT;
+        li.pDynamicState = g.pDynamicState;
+        VkPipeline p = VK_NULL_HANDLE;
+        const uint64_t t = now_ns();
+        if (F.vkCreateGraphicsPipelines(D.device, VK_NULL_HANDLE, 1, &li, nullptr, &p) != VK_SUCCESS) p = VK_NULL_HANDLE;
+        into.push_back(ms(t));
+        return p;
+    };
+    VkGraphicsPipelineCreateInfo l1 = { VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+    l1.pVertexInputState = g.pVertexInputState; l1.pInputAssemblyState = g.pInputAssemblyState;
+    VkGraphicsPipelineCreateInfo l2 = { VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+    l2.stageCount = 1; l2.pStages = &g.pStages[0]; l2.pViewportState = g.pViewportState;
+    l2.pRasterizationState = g.pRasterizationState; l2.layout = g.layout; l2.renderPass = g.renderPass;
+    VkGraphicsPipelineCreateInfo l3 = { VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+    l3.stageCount = 1; l3.pStages = &g.pStages[1]; l3.pDepthStencilState = g.pDepthStencilState;
+    l3.pMultisampleState = g.pMultisampleState; l3.layout = g.layout; l3.renderPass = g.renderPass;
+    VkGraphicsPipelineCreateInfo l4 = { VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+    l4.pColorBlendState = g.pColorBlendState; l4.pMultisampleState = g.pMultisampleState; l4.renderPass = g.renderPass;
+    VkPipeline L[4] = {
+        lib(VK_GRAPHICS_PIPELINE_LIBRARY_VERTEX_INPUT_INTERFACE_BIT_EXT, l1, c.vi),
+        lib(VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT, l2, c.pr),
+        lib(VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT, l3, c.fs),
+        lib(VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT, l4, c.fo) };
+    VkResult r = L[0] && L[1] && L[2] && L[3] ? VK_SUCCESS : VK_ERROR_UNKNOWN;
+    if (r == VK_SUCCESS) {
+        VkPipelineLibraryCreateInfoKHR pl = { VK_STRUCTURE_TYPE_PIPELINE_LIBRARY_CREATE_INFO_KHR, nullptr, 4, L };
+        for (int lto = 0; lto < 2 && r == VK_SUCCESS; lto++) {
+            VkGraphicsPipelineCreateInfo lk = { VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, &pl };
+            lk.layout = g.layout;
+            lk.flags = lto ? VK_PIPELINE_CREATE_LINK_TIME_OPTIMIZATION_BIT_EXT : 0;
+            VkPipeline p = VK_NULL_HANDLE;
+            const uint64_t t = now_ns();
+            r = F.vkCreateGraphicsPipelines(D.device, VK_NULL_HANDLE, 1, &lk, nullptr, &p);
+            (lto ? c.lto : c.link).push_back(ms(t));
+            if (p) F.vkDestroyPipeline(D.device, p, nullptr);
+        }
+    }
+    for (VkPipeline p : L) if (p) F.vkDestroyPipeline(D.device, p, nullptr);
+    if (r != VK_SUCCESS) c.failed++;
+    return r;
+}
+
+std::string gpl_stats(const char* name, std::vector<double> v)
+{
+    std::sort(v.begin(), v.end());
+    double sum = 0;
+    for (double x : v) sum += x;
+    auto at = [&](double q) { return v.empty() ? 0.0 : v[(size_t)(q * (v.size() - 1) + 0.5)]; };
+    char b[200];
+    snprintf(b, sizeof b, "\"%s\":{\"n\":%zu,\"mean\":%.3f,\"median\":%.3f,\"p95\":%.3f,\"max\":%.3f}", name, v.size(),
+             v.empty() ? 0.0 : sum / v.size(), at(0.5), at(0.95), v.empty() ? 0.0 : v.back());
+    return b;
 }
 
 uint32_t prepare_threads()
@@ -2362,6 +2504,47 @@ PrepareResult prepare_run(void (*progress)(uint32_t done, uint32_t total, void* 
     out.translated = c1.translations - c0.translations;
     out.from_cache = (c1.disk_hits - c0.disk_hits) + (c1.memory_hits - c0.memory_hits);
     out.ms_translate = (now_ns() - t1) / 1e6;
+    // M9.2d: the graphics pipeline library probe, instead of making the pipelines (DOTHEROES_GPL_PROBE)
+    if (const char* probe = getenv("DOTHEROES_GPL_PROBE")) {
+        GplProbe g;
+        g.gpl = !strcmp(probe, "gpl");
+        const char* ne = getenv("DOTHEROES_GPL_PROBE_N");
+        const uint32_t n = std::min<uint32_t>((uint32_t)rs.size(), ne && *ne ? (uint32_t)atoi(ne) : 300u);
+        depth_clamp(0);
+        if (g.gpl && !rsx_vk_gpl_ok()) {
+            out.probe = "{\"mode\":\"gpl\",\"error\":\"the device has no graphics pipeline libraries\"}";
+        } else {
+            std::vector<uint32_t> words(262144);
+            for (uint32_t i = 0; i < n; i++) {
+                auto module = [&](uint32_t ti) -> VkShaderModule {
+                    uint32_t nw = 0;
+                    char log[64];
+                    if (ti == ~0u || !text_ok[ti] || rsx_hlsl_to_spirv(texts[ti].text.c_str(), texts[ti].stage, words.data(),
+                                                                        (uint32_t)words.size(), &nw, log, sizeof log) || !nw)
+                        return VK_NULL_HANDLE;
+                    VkShaderModuleCreateInfo ci = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
+                    ci.codeSize = nw * 4u; ci.pCode = words.data();
+                    VkShaderModule m = VK_NULL_HANDLE;
+                    F.vkCreateShaderModule(D.device, &ci, nullptr, &m);
+                    return m;
+                };
+                VkShaderModule vsm = module(rtexts[i].first), fsm = module(rtexts[i].second);
+                VkPipeline unused = VK_NULL_HANDLE;
+                if (vsm && fsm) make_pipeline(rs[i].s, vsm, fsm, &unused, gpl_probe_create, &g);
+                if (vsm) F.vkDestroyShaderModule(D.device, vsm, nullptr);
+                if (fsm) F.vkDestroyShaderModule(D.device, fsm, nullptr);
+            }
+            out.probe = std::string("{\"mode\":\"") + (g.gpl ? "gpl" : "full") + "\"," + gpl_stats("full", g.full) + "," +
+                        gpl_stats("vertex_input", g.vi) + "," + gpl_stats("pre_raster", g.pr) + "," +
+                        gpl_stats("fragment_shader", g.fs) + "," + gpl_stats("fragment_output", g.fo) + "," +
+                        gpl_stats("link", g.link) + "," + gpl_stats("link_optimised", g.lto) + ",\"failed\":" +
+                        std::to_string(g.failed) + "}";
+        }
+        busy = false;
+        reporter.join();
+        out.ms = (now_ns() - t0) / 1e6;
+        return out;
+    }
     // the pipelines, on several threads: what they share made first, on this one (render passes, switches read once)
     depth_clamp(0);
     for (const Recipe& r : rs) {
@@ -2429,8 +2612,115 @@ PrepareResult prepare_run(void (*progress)(uint32_t done, uint32_t total, void* 
         if (ok) remove(path.c_str());
 #endif
         if (!ok || rename(tmp.c_str(), path.c_str()) != 0) remove(tmp.c_str());
+        // M9.2d: the recipes made, as recipes (their keys as the draws make them), for the game's warm-up: the
+        // player's own programs, kept in their shader folder (prepared-recipes.bin)
+        const std::string rpath = dir + "/prepared-recipes.bin", rtmp = rpath + ".part";
+        FILE* rf = fopen(rtmp.c_str(), "wb");
+        bool rok = rf != nullptr;
+        for (size_t i = 0; rok && i < rs.size(); i++) {
+            if (!made_at[i]) continue;
+            const Recipe& r = rs[i];
+            RecipeHead h = { kRecipeMagic, kRecipeFormat, r.key, r.s, r.f, (uint32_t)r.vp.size(), (uint32_t)r.fp.size() };
+            const uint32_t sum = recipe_sum(h, r.vp, r.fp);
+            rok = fwrite(&h, sizeof h, 1, rf) == 1 && fwrite(r.vp.data(), 1, r.vp.size(), rf) == r.vp.size() &&
+                  fwrite(r.fp.data(), 1, r.fp.size(), rf) == r.fp.size() && fwrite(&sum, 4, 1, rf) == 1;
+        }
+        if (rf) rok = fclose(rf) == 0 && rok;
+#ifdef _WIN32
+        if (rok) remove(rpath.c_str());
+#endif
+        if (!rok || rename(rtmp.c_str(), rpath.c_str()) != 0) remove(rtmp.c_str());
     }
     return out;
+}
+
+// ---- M9.2d: the warm-up -------------------------------------------------------------------------------------
+// In the game (not a preparation), when the pipeline cache is valid here: the pipelines the last preparation
+// made (prepared-recipes.bin), and those met in play before it had not made (the recipes), created again on
+// low-priority threads from that cache during start-up and the title, so a draw finds its pipeline made
+// (warm_take) instead of building it as it is first drawn. The same
+// pipelines, the same keys; nothing is drawn differently, and a pipeline not yet warmed is built as before.
+// DOTHEROES_WARM=0: off; DOTHEROES_WARM_THREADS (2).
+bool s_no_warm = false;   // a preparation's process
+std::mutex s_warm_mu;
+std::unordered_map<uint64_t, Pipe> s_warm;
+std::atomic<uint32_t> s_warm_total{0}, s_warm_made{0}, s_warm_failed{0}, s_warm_left{0};
+std::atomic<uint64_t> s_warm_t0{0}, s_warm_t1{0};
+uint32_t s_met_before = 0;   // of the warm-up's: met in play before, not prepared (set before its threads start)
+
+bool warm_take(uint64_t key, Pipe* out)
+{
+    if (!s_warm_total.load(std::memory_order_relaxed)) return false;
+    std::lock_guard<std::mutex> lk(s_warm_mu);
+    auto it = s_warm.find(key);
+    if (it == s_warm.end()) return false;
+    *out = it->second;
+    s_warm.erase(it);
+    stats().n_pipe_warm++;
+    stats().n_pipelines++;
+    return true;
+}
+
+void warm_start(const std::string& dir)
+{
+    const char* e = getenv("DOTHEROES_WARM");
+    if (s_no_warm || (e && *e == '0') || getenv("DOTHEROES_PPFX_HOT") || getenv("DOTHEROES_ASP_DESCRIBE")) return;
+    long end = 0;
+    auto rs = std::make_shared<std::vector<Recipe>>(recipes_read(dir + "/prepared-recipes.bin", &end));
+    // M9.2f: and the pipelines met in play before that the preparation had not made (recorded in the recipes as
+    // they were built; their pipelines in the cache since that session ended) -- known now, so made with the rest
+    const std::string rp = recipes_path();
+    if (!rp.empty())
+        for (Recipe& r : recipes_read(rp, &end)) {
+            r.key = recipe_key(r);
+            if (s_prepared.insert(r.key).second) { rs->push_back(std::move(r)); s_met_before++; }
+        }
+    if (rs->empty()) return;
+    const char* te = getenv("DOTHEROES_WARM_THREADS");
+    const uint32_t n = te && *te ? (uint32_t)atoi(te) : 2u;
+    depth_clamp(0);   // its switch read here, before any other thread reads it
+    s_warm_total = (uint32_t)rs->size();
+    s_warm_left = n < 1 ? 1 : n;
+    s_warm_t0 = now_ns();
+    for (uint32_t t = 0; t < (n < 1 ? 1 : n); t++)
+        std::thread([rs, t, n] {
+#ifdef _WIN32
+            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);
+#endif
+            thread_local std::vector<uint32_t> words(262144);
+            auto module = [&](const std::string& text, int stage) -> VkShaderModule {
+                uint32_t nw = 0;
+                char log[64];
+                if (rsx_hlsl_to_spirv(text.c_str(), stage, words.data(), (uint32_t)words.size(), &nw, log, sizeof log) || !nw)
+                    return VK_NULL_HANDLE;
+                VkShaderModuleCreateInfo ci = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
+                ci.codeSize = nw * 4u; ci.pCode = words.data();
+                VkShaderModule m = VK_NULL_HANDLE;
+                F.vkCreateShaderModule(D.device, &ci, nullptr, &m);
+                return m;
+            };
+            for (size_t i = t; i < rs->size(); i += (n < 1 ? 1 : n)) {
+                const Recipe& r = (*rs)[i];
+                const ProgParams pp = prog_params(r.f, r.vp, r.fp);
+                std::string vs, ps;
+                uint32_t nconst = 0;
+                VkPipeline pl = VK_NULL_HANDLE;
+                if (programs_text(pp, vs, ps, &nconst)) {
+                    VkShaderModule vsm = module(vs, RSX_SHADER_STAGE_VERTEX), fsm = module(ps, RSX_SHADER_STAGE_FRAGMENT);
+                    if (vsm && fsm && make_pipeline(r.s, vsm, fsm, &pl) != VK_SUCCESS) pl = VK_NULL_HANDLE;
+                    if (vsm) F.vkDestroyShaderModule(D.device, vsm, nullptr);
+                    if (fsm) F.vkDestroyShaderModule(D.device, fsm, nullptr);
+                }
+                if (!pl) { s_warm_failed++; continue; }
+                std::lock_guard<std::mutex> lk(s_warm_mu);
+                if (!s_warm.count(r.key)) { s_warm[r.key] = { pl, nconst }; s_warm_made++; }
+                else F.vkDestroyPipeline(D.device, pl, nullptr);
+            }
+            if (--s_warm_left == 0) {   // the SPIR-V it read not kept resident: its files stay
+                s_warm_t1 = now_ns();
+                rsx_hlsl_to_spirv_cache_drop_memory();
+            }
+        }).detach();
 }
 
 // ---- a record's inputs ---------------------------------------------------------------------
@@ -4975,6 +5265,7 @@ namespace {
 // presented: the game's flip status follows (the flip gate).
 void present_native(const Rec* r)
 {
+    frame_builds_end();   // M9.2d
     const uint64_t t0 = now_ns();
     // the clears made after the frame's last draw first (a frame that draws
     // nothing after the game's frame-start clear shows the cleared buffer)
@@ -5731,6 +6022,29 @@ void render_start()
 extern "C" void ppfx_native_cache_save(void)
 {
     ppfx::pcache_save();
+    {   // M9.2d: what play built, prepared or not, and the worst frame that held building
+        ppfx::Stats& st = ppfx::stats();
+        char line[400];
+        snprintf(line, sizeof line, "render: pipelines built in play %llu: %llu prepared (%.1f ms), %llu not prepared "
+                 "(%.1f ms, recorded for the next preparation); %llu frames held building, the longest %.1f ms (%.1f ms "
+                 "of building); %zu pipelines prepared for this GPU (%u of them met in play before)",
+                 (unsigned long long)(st.n_pipe_prepared + st.n_pipe_unforeseen), (unsigned long long)st.n_pipe_prepared,
+                 st.pipe_prepared_ns / 1e6, (unsigned long long)st.n_pipe_unforeseen, st.pipe_unforeseen_ns / 1e6,
+                 (unsigned long long)st.n_build_frames, st.build_frame_max_ns / 1e6, st.build_frame_max_build_ns / 1e6,
+                 ppfx::s_prepared.size(), ppfx::s_met_before);
+        ppfx::report_add(line);
+        if (ppfx::s_warm_total) {
+            char w[300];
+            const uint64_t t1 = ppfx::s_warm_t1.load();
+            snprintf(w, sizeof w, "render: warm-up: %u of %u prepared pipelines made %s %.1f s, %llu taken by draws, %u "
+                     "failed", ppfx::s_warm_made.load(), ppfx::s_warm_total.load(), t1 ? "in" : "so far, over",
+                     ((t1 ? t1 : ppfx::now_ns()) - ppfx::s_warm_t0.load()) / 1e9,
+                     (unsigned long long)st.n_pipe_warm.load(), ppfx::s_warm_failed.load());
+            ppfx::report_add(w);
+            if (dh_log_session_active && dh_log_session_active()) dh_log(2, "shader", "%s", w + 8);
+        }
+        if (dh_log_session_active && dh_log_session_active()) dh_log(2, "shader", "%s", line + 8);
+    }
     std::lock_guard<std::mutex> lk(ppfx::s_rc_mu);
     char line[200];
     snprintf(line, sizeof line, "render: recipes %u kept, %u new this session; pipeline cache: %s",
@@ -5744,6 +6058,7 @@ extern "C" void ppfx_native_cache_save(void)
 extern "C" int ppfx_native_prepare(void (*progress)(uint32_t done, uint32_t total, void* ctx), void* ctx,
                                    char* summary, int n, int check_only)
 {
+    ppfx::s_no_warm = true;   // M9.2d: the warm-up is the game's
     if (!ppfx::init()) {
         snprintf(summary, (size_t)n, "{\"error\":\"the renderer did not start\"}");
         return -1;
@@ -5781,12 +6096,12 @@ extern "C" int ppfx_native_prepare(void (*progress)(uint32_t done, uint32_t tota
              "\"package\":{\"records\":%u,\"by_group\":%u,\"by_class\":%u,\"none\":%u,\"pipelines\":%u,"
              "\"made\":%u,\"failed\":%u},\"shaders\":{\"translations\":%u,\"text_failed\":%u,"
              "\"spirv_failed\":%u,\"disc_vertex\":%u,\"disc_fragment\":%u,\"disc_failed\":%u},"
-             "\"ms_translate\":%.1f,\"ms_pipelines\":%.1f,\"failures\":[%s],%s}",
+             "\"ms_translate\":%.1f,\"ms_pipelines\":%.1f,\"failures\":[%s],\"probe\":%s,%s}",
              r.recipes, r.made, r.failed, r.translated, r.from_cache, r.ms, ppfx::s_pc_state.c_str(),
              ppfx::s_pc_loaded / 1048576.0, ppfx::s_pc_saved / 1048576.0, r.threads, r.pairs, r.pairs_group,
              r.pairs_class, r.pairs_none, r.static_recipes, r.static_made, r.static_failed, r.texts, r.text_failed,
              r.spirv_failed, r.programs_vp, r.programs_fp, r.programs_failed, r.ms_translate, r.ms_pipelines,
-             r.failures.c_str(), gpu);
+             r.failures.c_str(), r.probe.empty() ? "null" : r.probe.c_str(), gpu);
     return r.failed || r.static_failed ? 1 : 0;
 }
 

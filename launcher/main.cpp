@@ -1157,7 +1157,14 @@ static bool bg_prepare(bool rebuild, const std::string& why)
         g_bg_done.ok = r["ok"].truthy();
         const json::Value& d = r["data"];
         char text[256];
-        if (g_bg_done.ok) {
+        if (g_bg_done.ok && !d["pipelines"].is_null()) {   // M9.2: the comprehensive preparation
+            snprintf(text, sizeof text, "%d shaders and %d pipelines ready for this GPU and driver (%d failed), in %.1f s.",
+                     (int)d["translations"].num(), (int)d["pipelines"].num(), (int)d["failed_all"].num(), took);
+            g_bg_done.title = rebuild ? "Shader cache rebuilt" : "Shaders ready";
+            g_bg_done.text = text;
+            g_prefs.prepared_once = true;
+            g_prefs.save();
+        } else if (g_bg_done.ok) {
             snprintf(text, sizeof text, "%d pipelines ready for this GPU and driver (%d failed), in %.1f s.",
                      (int)d["recipes"].num(), (int)d["failed"].num(), took);
             g_bg_done.title = rebuild ? "Shader cache rebuilt" : "Shaders ready";
@@ -1221,17 +1228,32 @@ static void after_install_shaders()
     g_confirm.focus_yes = true;
 }
 
+// M9.2: the shaders are ready when the cache is valid for this GPU and driver, the first-session list is in it and,
+// where the comprehensive preparation can run (the profiles and the install's disc copy), it has run into this cache
+static bool shaders_ready(const json::Value& c)
+{
+    return c["prepared"].truthy() && c["pending"].num() <= 0 &&
+           (!c["comprehensive"].truthy() || c["comprehensive_done"].truthy());
+}
+
+static bool shaders_preparable(const json::Value& c)
+{
+    return c["recipes"].num() + c["pending"].num() > 0 || c["comprehensive"].truthy();
+}
+
 // at each cache check: a cache made invalid (another GPU or driver, damaged) or a new build's empty one (an update),
 // prepared on its own when the settings say so -- once a session, never over another job
 static void auto_prepare_check()
 {
     static bool done = false;
     const json::Value& c = g_st.check;
-    if (done || g_bg || g_op || c.is_null() || c["prepared"].truthy() || g_st.settings.is_null() || game_running()) return;
-    if (c["recipes"].num() + c["pending"].num() <= 0) return;
+    if (done || g_bg || g_op || c.is_null() || shaders_ready(c) || g_st.settings.is_null() || game_running()) return;
+    if (!shaders_preparable(c)) return;
     const std::string state = c["cache"].str();
     const bool invalid = state.rfind("made ", 0) == 0 || state.rfind("damaged", 0) == 0;
-    const bool new_build = state == "none yet" && g_prefs.prepared_once;
+    // a new build's empty cache, or a valid one the comprehensive preparation has not run into yet (an update)
+    const bool new_build = (state == "none yet" || (c["prepared"].truthy() && c["comprehensive"].truthy())) &&
+                           g_prefs.prepared_once;
     if (invalid && setting("LAUNCHER_SHADERS_ON_DRIVER_CHANGE", "0") == "1") {
         done = true;
         bg_prepare(false, "the cache was " + state);
@@ -1427,11 +1449,11 @@ static void page_play()
             text_col(col::danger, "No usable Vulkan device was found: the game can't start. %s", g_st.check_error.c_str());
         } else if (c.is_null()) {
             text_col(col::dim, "Checking...");
-        } else if (c["prepared"].truthy()) {
+        } else if (shaders_ready(c)) {
             text_col(col::ok, "Shaders are ready for your graphics card.");
             text_col(col::dim, "%s", c["gpu"]["name"].str().c_str());
-        } else if (c["recipes"].num() + c["pending"].num() > 0) {
-            text_col(col::warm, "Shaders need preparing: it takes a few seconds and prevents stutter.");
+        } else if (shaders_preparable(c)) {
+            text_col(col::warm, "Shaders need preparing: it takes under a minute and prevents stutter.");
             if (big_button("Prepare now")) prepare_now(false);
         } else {
             text_col(col::dim, "Prepared as you play: each new effect is kept for next time.");
@@ -1827,7 +1849,7 @@ static void shader_actions(bool focus = true)
         return;
     }
     const json::Value& c = g_st.check;
-    const bool ready = !c.is_null() && c["prepared"].truthy() && c["pending"].num() <= 0;
+    const bool ready = !c.is_null() && shaders_ready(c);
     if (!ready) {   // something to prepare: offered first
         if (big_button("Precompile now", ImVec2(S(300), 0), Kind::Primary)) prepare_now(false);
         if (focus) focus_first();
@@ -1851,14 +1873,21 @@ static void page_shaders()
     else if (c.is_null()) text_col(col::dim, "Checking...");
     else {
         text_col(col::text, "Graphics card: %s (driver %s)", c["gpu"]["name"].str().c_str(), c["gpu"]["driver"].str().c_str());
-        const bool ready = c["prepared"].truthy() && c["pending"].num() <= 0;
+        const bool ready = shaders_ready(c);
+        const json::Value& cov = c["coverage"];
         if (g_bg)   // the check from before it started is out of date until it ends
             text_col(col::warm, "Being prepared for this graphics card and driver now.");
+        else if (ready && !cov.is_null())
+            text_col(col::ok, "Preparation complete: %d shaders and %d pipelines from the game's files are ready.",
+                     (int)cov["translations"].num(), (int)cov["pipelines"].num());
         else if (ready)
             text_col(col::ok, "Preparation complete: every shader this PC has needed so far is ready (%d).",
                      (int)c["recipes"].num());
         else
             text_col(col::warm, "Preparation needed: some shaders aren't ready for this graphics card and driver yet.");
+        if (ready && !cov.is_null())   // the details (M9.2): where the prepared pipelines come from
+            text_col(col::dim, "Pipelines: %d from the game's shader package (%d records), %d recorded in play.",
+                     (int)cov["from_package"].num(), (int)cov["package_records"].num(), (int)cov["recorded"].num());
         text_col(col::dim, "The game can combine more shaders than anyone can list in advance. One it uses for the first "
                            "time is prepared right then -- a brief stutter at most -- and is ready from then on.");
         if (!c["disk_mb"].is_null())

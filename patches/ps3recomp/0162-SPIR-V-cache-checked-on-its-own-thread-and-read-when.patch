@@ -1,0 +1,238 @@
+From 68ef640c17ec06dfc418a3d53761c2c8b7eaf00f Mon Sep 17 00:00:00 2001
+From: giteaguy <73799093+irnutsmurt@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 10:13:21 -0800
+Subject: [PATCH] SPIR-V cache checked on its own thread and read when needed;
+ a pipeline-library probe
+
+At start-up rsx_hlsl_to_spirv_cache_preload read every translation in the shader folder into memory before the
+first frame: after a comprehensive preparation (2,726 translations) that held the start-up for 8-12 s. The folder
+is now checked by the files' headers alone on a thread of its own (another build's or glslang's and unreadable
+files removed, as before; the counts logged when it ends), and a translation is read from its file when it is
+first asked for. rsx_hlsl_to_spirv_cache_drop_memory() drops the translations held in memory (their files stay),
+for a port after a burst that read many.
+
+PS3RECOMP_VK_GPL_PROBE=1 (a measurement; off by default): a Vulkan 1.3 instance and, where the device has them,
+VK_KHR_pipeline_library and VK_EXT_graphics_pipeline_library with the feature enabled; rsx_vk_gpl_ok() says
+whether it was.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libs/video/rsx_shader_spirv.cpp | 85 +++++++++++++++++----------------
+ libs/video/rsx_shader_spirv.h   |  3 ++
+ libs/video/rsx_vulkan_backend.c | 38 ++++++++++-----
+ 3 files changed, 72 insertions(+), 54 deletions(-)
+
+diff --git a/libs/video/rsx_shader_spirv.cpp b/libs/video/rsx_shader_spirv.cpp
+index e9bd839..ab08c1e 100644
+--- a/libs/video/rsx_shader_spirv.cpp
++++ b/libs/video/rsx_shader_spirv.cpp
+@@ -335,56 +335,55 @@ extern "C" const char* rsx_hlsl_to_spirv_cache_dir(void)
+     return cache_dir(c).c_str();
+ }
+ 
++/* At start-up: the folder's translations checked by their headers alone, and those another build or glslang wrote
++ * removed -- on a thread of its own, so a folder of thousands (a preparation pass translates every program on the
++ * disc) never holds the start up. Nothing is read into memory: a translation is read from its file when it is
++ * first asked for (rsx_hlsl_to_spirv), which is when a pipeline is made. `out` (if given) is filled at once with
++ * zeros; the counts are logged when the check ends. */
+ extern "C" int rsx_hlsl_to_spirv_cache_preload(RsxSpirvCachePreload* out)
+ {
+-    RsxSpirvCachePreload r = {};
+-    Cache& c = cache();
+-    std::lock_guard<std::mutex> guard(c.lock);
+-    const std::string dir = cache_dir(c);
+-    if (dir.empty()) {
+-        if (out) *out = r;
+-        return 0;
++    if (out) *out = RsxSpirvCachePreload{};
++    std::string dir;
++    {
++        Cache& c = cache();
++        std::lock_guard<std::mutex> guard(c.lock);
++        dir = cache_dir(c);
+     }
+-    u32 want[kHeaderWords];
+-    cache_header(want, std::string(), 0);
+-    std::error_code ec;
+-    for (const auto& ent : std::filesystem::directory_iterator(dir, ec)) {
+-        if (ent.path().extension() != ".spv") continue;
+-        const std::string path = ent.path().string();
+-        FILE* f = fopen(path.c_str(), "rb");
+-        if (!f) continue;
+-        u32 hdr[kHeaderWords];
+-        bool ok = fread(hdr, sizeof hdr, 1, f) == 1;
+-        /* magic, format, glslang version, translator build: words 0-10 */
+-        const bool same = ok && memcmp(hdr, want, 11 * sizeof(u32)) == 0;
+-        std::string key;
+-        std::vector<unsigned int> spirv;
+-        if (same) {
+-            ok = hdr[11] != 0 && hdr[11] <= (1u << 20) && hdr[12] != 0 && hdr[12] <= (1u << 24);
+-            if (ok) {
+-                key.resize(hdr[11]);
+-                spirv.resize(hdr[12]);
+-                u32 sum = 0;
+-                ok = fread(&key[0], 1, key.size(), f) == key.size() &&
+-                     fread(spirv.data(), sizeof(u32), spirv.size(), f) == spirv.size() &&
+-                     fread(&sum, sizeof sum, 1, f) == 1 && sum == cache_sum(key, spirv) &&
+-                     cache_path(dir, key) == dir + "/" + ent.path().filename().string();
+-            }
+-        }
+-        fclose(f);
+-        if (same && ok) {
+-            r.bytes += spirv.size() * sizeof(u32);
+-            c.map.emplace(std::move(key), std::move(spirv));
+-            r.loaded++;
+-        } else {
+-            if (same || !ok) r.bad++; else r.stale++;
++    if (dir.empty()) return 0;
++    std::thread([dir] {
++        u32 want[kHeaderWords];
++        cache_header(want, std::string(), 0);
++        u32 kept = 0, stale = 0, bad = 0;
++        std::error_code ec;
++        for (const auto& ent : std::filesystem::directory_iterator(dir, ec)) {
++            if (ent.path().extension() != ".spv") continue;
++            FILE* f = fopen(ent.path().string().c_str(), "rb");
++            if (!f) continue;
++            u32 hdr[kHeaderWords];
++            const bool ok = fread(hdr, sizeof hdr, 1, f) == 1 && hdr[11] != 0 && hdr[11] <= (1u << 20) &&
++                            hdr[12] != 0 && hdr[12] <= (1u << 24);
++            /* magic, format, glslang version, translator build: words 0-10 */
++            const bool same = ok && memcmp(hdr, want, 11 * sizeof(u32)) == 0;
++            fclose(f);
++            if (same) { kept++; continue; }
++            if (ok) stale++; else bad++;
+             std::filesystem::remove(ent.path(), ec);
+         }
+-    }
+-    if (out) *out = r;
++        fprintf(stderr, "[RSX vulkan] shader cache %s: %u translations for this build kept (read when needed), %u of "
++                        "another build or glslang and %u unreadable removed\n", dir.c_str(), kept, stale, bad);
++    }).detach();
+     return 1;
+ }
+ 
++/* The translations held in memory dropped (their files stay): after a burst that read many -- a port's warm-up at
++ * start-up -- so they do not stay resident for the session. */
++extern "C" void rsx_hlsl_to_spirv_cache_drop_memory(void)
++{
++    Cache& c = cache();
++    std::lock_guard<std::mutex> guard(c.lock);
++    std::unordered_map<std::string, std::vector<unsigned int>>().swap(c.map);
++}
++
+ #else /* !PS3RECOMP_HAVE_SPIRV_TRANSLATION */
+ 
+ extern "C" int rsx_hlsl_to_spirv_available(void) { return 0; }
+@@ -409,6 +408,8 @@ extern "C" void rsx_hlsl_to_spirv_cache_reset(void) {}
+ 
+ extern "C" const char* rsx_hlsl_to_spirv_cache_dir(void) { return ""; }
+ 
++extern "C" void rsx_hlsl_to_spirv_cache_drop_memory(void) {}
++
+ extern "C" int rsx_hlsl_to_spirv_cache_preload(RsxSpirvCachePreload* out)
+ {
+     if (out) memset(out, 0, sizeof *out);
+diff --git a/libs/video/rsx_shader_spirv.h b/libs/video/rsx_shader_spirv.h
+index 914ca26..15c72e2 100644
+--- a/libs/video/rsx_shader_spirv.h
++++ b/libs/video/rsx_shader_spirv.h
+@@ -84,6 +84,9 @@ typedef struct RsxSpirvCachePreload {
+ } RsxSpirvCachePreload;
+ 
+ int rsx_hlsl_to_spirv_cache_preload(RsxSpirvCachePreload* out);
++
++/* The translations held in memory dropped; their files stay (read again when asked for). */
++void rsx_hlsl_to_spirv_cache_drop_memory(void);
+ /* The cache directory (PS3RECOMP_SPIRV_CACHE; empty, "0" or "off": none), "" if none. */
+ const char* rsx_hlsl_to_spirv_cache_dir(void);
+ 
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index 85f7cf1..5dacf96 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -269,6 +269,7 @@ typedef struct vk_state {
+     int              bc_ok;           /* textureCompressionBC enabled       */
+     int              depth_bounds_ok; /* depthBounds enabled                */
+     int              depth_clamp_ok;  /* depthClamp enabled                 */
++    int              gpl_ok;          /* graphics pipeline libraries enabled (PS3RECOMP_VK_GPL_PROBE) */
+     int              aniso_ok;        /* samplerAnisotropy enabled          */
+     int              indep_blend_ok;  /* independentBlend: per-target MRT state */
+     u32              max_dim;         /* maxImageDimension2D of the device  */
+@@ -4241,14 +4242,7 @@ static void vk_pcache_open(void)
+     u8* data = NULL;
+     if (dir && *dir) {
+         RsxSpirvCachePreload r;
+-        struct timespec a, b;
+-        vk_monotonic(&a);
+-        rsx_hlsl_to_spirv_cache_preload(&r);
+-        vk_monotonic(&b);
+-        VK_LOG("shader cache %s: %u translations read (%.1f MB, %.0f ms), %u of another build or glslang removed%s\n",
+-               dir, r.loaded, (double)r.bytes / 1048576.0,
+-               (b.tv_sec - a.tv_sec) * 1e3 + (b.tv_nsec - a.tv_nsec) * 1e-6, r.stale,
+-               r.bad ? ", some unreadable removed" : "");
++        rsx_hlsl_to_spirv_cache_preload(&r);   /* checked on a thread of its own, which logs when it ends */
+         snprintf(s_pc.path, sizeof s_pc.path, "%s/pipelines.vkpc", dir);
+         VkPhysicalDeviceProperties p;
+         pvkGetPhysicalDeviceProperties(s_vk.phys, &p);
+@@ -6139,9 +6133,7 @@ static void vk_pcache_open(void)
+     const char* dir = rsx_hlsl_to_spirv_cache_dir();
+     if (!dir || !*dir) return;
+     RsxSpirvCachePreload r;
+-    rsx_hlsl_to_spirv_cache_preload(&r);
+-    VK_LOG("shader cache %s: %u translations read (%.1f MB), %u of another build or glslang removed\n",
+-           dir, r.loaded, (double)r.bytes / 1048576.0, r.stale);
++    rsx_hlsl_to_spirv_cache_preload(&r);   /* checked on a thread of its own, which logs when it ends */
+ }
+ #endif  /* PS3RECOMP_RSX_COMMAND_PATH */
+ 
+@@ -6164,9 +6156,12 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+     vk_window_open(title);           /* no-op unless PS3RECOMP_VK_WINDOW is set */
+     if (vk_load_library()) return -1;
+ 
++    /* PS3RECOMP_VK_GPL_PROBE=1 (a measurement, a port's preparation pass): Vulkan 1.3 and graphics pipeline
++     * libraries where the device has them (rsx_vk_gpl_ok); otherwise, and by default, Vulkan 1.0 as always */
++    const int gpl_probe = vk_env_on("PS3RECOMP_VK_GPL_PROBE");
+     VkApplicationInfo app = { .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
+                               .pApplicationName = "ps3recomp", .pEngineName = "ps3recomp RSX",
+-                              .apiVersion = VK_API_VERSION_1_0 };
++                              .apiVersion = gpl_probe ? VK_API_VERSION_1_3 : VK_API_VERSION_1_0 };
+     VkInstanceCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+                                 .pApplicationInfo = &app };
+     if (s_vk.windowed) {
+@@ -6298,6 +6293,22 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+                                .enabledExtensionCount = s_vk.windowed ? 1u : 0u,
+                                .ppEnabledExtensionNames = s_vk.windowed ? dev_exts : NULL,
+                                .pEnabledFeatures = &want };
++    /* the probe's graphics pipeline libraries (above): both extensions and the feature, when the device has them */
++    const char* probe_exts[3];
++    VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT gplf = {
++        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT, .graphicsPipelineLibrary = VK_TRUE };
++    if (gpl_probe && vk_has_device_extension(s_vk.phys, VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME) &&
++        vk_has_device_extension(s_vk.phys, VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME)) {
++        uint32_t n = 0;
++        if (s_vk.windowed) probe_exts[n++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
++        probe_exts[n++] = VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME;
++        probe_exts[n++] = VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME;
++        dci.enabledExtensionCount = n;
++        dci.ppEnabledExtensionNames = probe_exts;
++        dci.pNext = &gplf;
++        s_vk.gpl_ok = 1;
++        VK_LOG("graphics pipeline libraries enabled (PS3RECOMP_VK_GPL_PROBE)\n");
++    }
+     VK_CHECK(pvkCreateDevice(s_vk.phys, &dci, NULL, &s_vk.device), "vkCreateDevice");
+     if (vk_load_device_functions()) return -1;
+     vk_pcache_open();
+@@ -6811,6 +6822,9 @@ unsigned long long rsx_vk_bridge_signals(unsigned long long* lost)
+     return n;
+ }
+ 
++/* Whether the device was created with graphics pipeline libraries (PS3RECOMP_VK_GPL_PROBE: a measurement). */
++int rsx_vk_gpl_ok(void) { return s_vk.gpl_ok; }
++
+ /* Whether the device was created with depthClamp (a native renderer's pipelines may ask for it). */
+ int rsx_vk_depth_clamp_ok(void) { return s_vk.depth_clamp_ok; }
+ 
+-- 
+2.56.0.windows.3
+

@@ -225,6 +225,40 @@ class PrepareTest(unittest.TestCase):
         worker.op_prepare(self.install, Prog())
         self.assertEqual(len(self.calls), 3)
 
+    def test_comprehensive_in_one_run_and_its_figures_kept(self):
+        """M9.2b/c: with the profiles shipped and the install's disc copy, one --prepare --static run (its own
+        progress), the figures kept beside the cache, and the check saying it is done"""
+        os.makedirs(os.path.join(self.lay.disc, "PS3_GAME", "USRDIR"))
+        profiles = os.path.join(self.tmpd.name, "profiles.txt")
+        with open(profiles, "w") as f:
+            f.write("# none\n")
+        old_profiles, worker.PROFILES = worker.PROFILES, profiles
+
+        def fake(lay, prog, extra, recipes, at):
+            self.calls.append((extra, recipes, at))
+            if extra == ["--check"]:
+                return {"check": True, "recipes": 70, "cache": "reused", "prepared": True, "gpu": {}, "exit": 0}
+            return {"recipes": 70, "made": 70, "failed": 0, "translated": 300, "from_cache": 0, "ms": 9.0,
+                    "package": {"records": 569, "pipelines": 1785, "made": 1785, "failed": 0},
+                    "shaders": {"translations": 2726, "spirv_failed": 0, "text_failed": 0, "disc_failed": 0},
+                    "cache": "none yet", "cache_mb": 20.0, "gpu": {}, "exit": 0}
+        worker._run_prepare = fake
+        try:
+            out = worker.op_prepare(self.install, Prog())
+            self.assertEqual(self.calls, [(["--static", profiles], None, (0, 0))])
+            self.assertEqual((out["pipelines"], out["translations"], out["failed_all"]), (1855, 2726, 0))
+            self.assertEqual((out["recorded"], out["from_package"], out["package_records"]), (70, 1785, 569))
+            chk = worker.op_prepare(self.install, Prog(), check=True)
+            self.assertTrue(chk["comprehensive"])
+            self.assertTrue(chk["comprehensive_done"])
+            self.assertEqual(chk["coverage"]["pipelines"], 1855)
+            # a rebuild clears the folder: the check says it is not done until the preparation ends
+            sf = worker.shader_folder(self.lay)
+            os.remove(os.path.join(sf, worker.PREPARED))
+            self.assertFalse(worker.op_prepare(self.install, Prog(), check=True)["comprehensive_done"])
+        finally:
+            worker.PROFILES = old_profiles
+
     def test_check_counts_the_manifest_without_writing(self):
         f = Fixture(self.tmpd.name)
         pm.make(f.disc, [f.recorded], f.manifest)

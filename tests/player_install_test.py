@@ -52,8 +52,9 @@ MIGRATE_FROM = os.environ.get("MIGRATE_FROM", "F:/3d dot game heroes/m9/install-
 MIGRATED = DIR + "-migrated"
 ISO = os.path.join(ROOT, "3D DOT GAME HEROES [BLUS-30490].iso")
 ELF = os.path.join(ROOT, "build", "EBOOT.elf")
-# the developers' release lift to compare with (tools/r8_lift.sh)
-DEV_LIFT = os.environ.get("DEV_LIFT", os.path.join(ROOT, "build", "r8", "gen15"))
+# the developers' release lift to compare with (R8_GEN=build/r8/gen18 tools/r8_lift.sh: made again whenever the
+# lift's configuration changes -- gen18 has M10.5's title-menu patches)
+DEV_LIFT = os.environ.get("DEV_LIFT", os.path.join(ROOT, "build", "r8", "gen18"))
 PY = sys.executable
 EXE = layout.exe_name()
 report = {"dir": DIR, "stages": {}}
@@ -468,10 +469,17 @@ def stage_prepare():
     r = Run("prepare")
     out = r.done(worker.op_prepare(DIR, r.cb))
     check("prepare", out.get("made") == first.get("recipes") and out.get("failed") == 0,
-          f"prepared: {out.get('made')} of {out.get('recipes')} pipelines made in {out.get('ms')} ms, "
+          f"prepared: {out.get('made')} of {out.get('recipes')} recorded pipelines made in {out.get('ms')} ms, "
           f"{out.get('translated')} translated by glslang")
+    if worker.comprehensive(lay()):   # M9.2b/c: the disc's programs and the package's records too
+        check("prepare", out.get("from_package", 0) > 0 and out.get("translations", 0) > out.get("made", 0) and
+              out.get("failed_all") == 0,
+              f"comprehensive: {out.get('pipelines')} pipelines ({out.get('from_package')} from the package's "
+              f"{out.get('package_records')} records), {out.get('translations')} shaders, {out.get('failed_all')} failed")
     last = worker.op_prepare(DIR, cb, check=True)
-    check("prepare", last.get("prepared"), f"check again: prepared ({last.get('cache')}, {last.get('cache_mb')} MB)")
+    check("prepare", last.get("prepared") and (not last.get("comprehensive") or last.get("comprehensive_done")),
+          f"check again: prepared ({last.get('cache')}, {last.get('cache_mb')} MB; comprehensive "
+          f"{last.get('comprehensive_done')}, {last.get('coverage')})")
 
 
 STAGES = {"fresh": stage_fresh, "check": stage_check, "update": stage_update, "relink": stage_relink,

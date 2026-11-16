@@ -540,6 +540,17 @@ PREPARE_TIMEOUT_S = 1800
 # where their programs are on the disc; resolved against the install's own copy of the disc into its recipes, so a
 # first install prepares them before it is played. No list, or a disc that differs: nothing added.
 MANIFEST = os.path.join(pipeline.config_dir(), "pipeline_manifest.txt")
+# M9.2b/c (docs/M92_SHADER_PLAN.md): the comprehensive preparation -- every program on the install's own copy of the
+# disc translated, and a pipeline for each shader package record by its group's pass profiles (numbers learned from
+# the project's recordings: tools/pipeline_profiles.py), besides the recipes. Its figures are kept beside the
+# pipeline cache (PREPARED) for the check and the Shaders page.
+PROFILES = os.path.join(pipeline.config_dir(), "pipeline_profiles.txt")
+PREPARED = "prepare-result.json"
+
+
+def comprehensive(lay):
+    """whether the comprehensive preparation can run: the profiles shipped, the install's disc copy present"""
+    return os.path.exists(PROFILES) and os.path.isdir(os.path.join(lay.disc, "PS3_GAME", "USRDIR"))
 
 
 def first_session_recipes(lay, prog):
@@ -565,6 +576,15 @@ def op_prepare(install, prog, check=False, rebuild=False):
     if check:
         out = _run_prepare(lay, prog, ["--check"], None, None)
         out.update(prepare_disk(lay))
+        out["comprehensive"] = comprehensive(lay)
+        try:   # the last comprehensive preparation's figures, kept with the cache they were made into
+            with open(os.path.join(shader_folder(lay), PREPARED), encoding="utf-8") as f:
+                done = json.load(f)
+            out["comprehensive_done"] = bool(done.get("package", {}).get("made"))
+            out["coverage"] = {k: done.get(k) for k in ("pipelines", "translations", "recorded", "from_package",
+                                                         "package_records", "failed_all")}
+        except (OSError, ValueError):
+            out["comprehensive_done"] = False
         return out
     with PrepareLock(lay):
         listed = first_session_recipes(lay, prog)
@@ -576,6 +596,28 @@ def op_prepare(install, prog, check=False, rebuild=False):
                     if os.path.isfile(q) and not layout.is_link(q):
                         os.remove(q)
         recipes = os.path.join(lay.cache, "native-recipes.bin")
+        if comprehensive(lay):   # one run: the recipes, the disc's programs and the package's records
+            prog.progress("prepare", 0.0, step_name("prepare"))
+            result = _run_prepare(lay, prog, ["--static", PROFILES], None, (0, 0))
+            pk = result.get("package") or {}
+            sh = result.get("shaders") or {}
+            result["recorded"] = result.get("made", 0)
+            result["from_package"] = pk.get("made", 0)
+            result["package_records"] = pk.get("records", 0)
+            result["pipelines"] = result.get("made", 0) + pk.get("made", 0)
+            result["failed_all"] = result.get("failed", 0) + pk.get("failed", 0) + sh.get("spirv_failed", 0) + \
+                sh.get("text_failed", 0) + sh.get("disc_failed", 0)
+            result["translations"] = sh.get("translations", 0)
+            if listed is not None:
+                result["manifest"] = listed
+            if result.get("exit") == 0:
+                os.makedirs(shader_folder(lay), exist_ok=True)
+                tmp = os.path.join(shader_folder(lay), PREPARED + ".part")
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump({k: v for k, v in result.items() if k != "failures"}, f)
+                os.replace(tmp, os.path.join(shader_folder(lay), PREPARED))
+            result.update(prepare_disk(lay))
+            return result
         records = pipeline_manifest.read_recipes(recipes)
         prog.progress("prepare", 0.0, step_name("prepare"))
         part_file = os.path.join(lay.cache, "prepare-part.bin")
@@ -690,7 +732,10 @@ def _run_prepare(lay, prog, extra, recipes, at):
                     e = json.loads(ln)
                 except ValueError:
                     continue
-                if e.get("ev") == "prepare" and at:
+                if e.get("ev") == "prepare" and at == (0, 0):   # one run: the game's own total
+                    d, n = e["done"], max(1, e.get("total", 0))
+                    prog.progress("prepare", d / n, f"{d} of {n} shaders and pipelines")
+                elif e.get("ev") == "prepare" and at:
                     d, n = at[0] + e["done"], max(1, at[1])
                     prog.progress("prepare", d / n, f"{d} of {at[1]} pipelines")
                 elif e.get("ev") == "prepared":
