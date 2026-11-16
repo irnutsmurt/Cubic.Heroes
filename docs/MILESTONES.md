@@ -489,6 +489,8 @@ source of anything game-derived. M9's architecture and implementation plan
 goes to the owner for review before anything of it is implemented.
 
 ### M9 -- Launcher, precompilation, caches, updates and rollback
+**Closed 2026-11-16** with M9.2 (comprehensive pipeline preparation, docs/M92_SHADER_PLAN.md), accepted by the
+owner; graphics pipeline libraries stay off by default until further hardware validation.
 A polished launcher; Dusklight is the reference for the overall experience:
 - game installation (the disc conversion the setup app does today) and the
   game's launch;
@@ -550,6 +552,22 @@ movie), the platforms validated (Linux's run-time validation, outstanding since
 the native port began; Windows 10 and 11; the GPU vendors), the setup's
 download and its licences, and the release's own checks, before a public
 release.
+
+Begun 2026-11-16 (plan and checkpoint: docs/M11_PLAN.md), in the owner's order:
+- **M11.0, developer debugging tools** before full-game testing: warp to any map,
+  floor or entry; bosses and enemies; progression, quests, inventory and
+  equipment; health, magic and money; invulnerability and no death; events and
+  cinematics; pipeline coverage; performance and runtime diagnostics; automated
+  testing hooks for all of it -- through the game's own script layer, behind a
+  developer-mode setting off by default, on test saves that never touch the
+  player's;
+- comprehensive Windows gameplay validation, bug fixes, release preparation;
+  pipelines no recording met collected on the way (bosses, enemies, items,
+  effects, events), complete coverage never claimed undemonstrated;
+- Linux and AMD on the owner's laptop: the launcher as an AppImage that makes
+  the game's AppImage locally from the player's files;
+- Steam Deck through community volunteers.
+The map sweep (tests/map_sweep.py) is a permanent regression test.
 
 ### M12 -- Optional RTX and graphics enhancements
 Optional enhancements of the native renderer, off by default and never in

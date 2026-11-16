@@ -4575,7 +4575,15 @@ void map_sweep(ppu_context* c)
         fprintf(stderr, "[sweep] %zu maps, SetMap %s, the first at %.0f s\n", list->size(), setmap ? "found" : "MISSING",
                 due - t0);
     }
-    if (!setmap || next >= list->size() || ppfx::now_s() < due) return;
+    if (!setmap || ppfx::now_s() < due) return;
+    // where the previous change arrived (tests/map_sweep.py check): the field area's number (dev_state.cpp kArea) and
+    // the guest's frame counter (kFrames) -- frames that advanced in the map, and an area that changed, mean it ran
+    if (next > 0 && next <= list->size()) {
+        fprintf(stderr, "[sweep] t=%.3f arrived %zu/%zu %s area %u frames %u\n", ps3_ftrace_clock(), next, list->size(),
+                (*list)[next - 1].map.c_str(), ppfx::g32(0x029A6488u), ppfx::g32(0x02CF3570u));
+        if (next == list->size()) { next++; fprintf(stderr, "[sweep] done\n"); }
+    }
+    if (next >= list->size()) return;
     const SweepMap& m = (*list)[next++];
     // the two names on the guest's stack, well below its frame; the call's own frame below them
     const uint32_t sp = (uint32_t)c->gpr[1];

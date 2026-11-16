@@ -1,5 +1,8 @@
 # M9: the launcher -- architecture and implementation plan, for review
 
+**Closed (2026-11-16): the owner accepted M9 with M9.2 (pipeline preparation, docs/M92_SHADER_PLAN.md). The
+hands-on checks listed in section 20 remain the owner's to do whenever convenient; they do not hold M11.**
+
 **Status: reviewed by the owner 2026-11-13; the decisions and the owner's further requirements are in sections 7
 and 8, and they take precedence over anything earlier in this plan that differs. Implementation starts once M8 is
 closed, in the steps of section 4, each validated and recorded before the next.** The milestone as the owner set it

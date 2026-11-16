@@ -8,8 +8,8 @@ limits are established. Labels as in the other records: [C] read in the code, [M
 
 ## Checkpoint
 
-- **Stage**: **M9.2g, static pipeline discovery, done** (section 2h; the owner's review of M9.2a-f, 2026-11-16) and
-  awaiting the owner's acceptance: M9.2 is not closed and M11 not begun without it.
+- **Stage**: **M9.2 closed** -- accepted by the owner on 2026-11-16 after M9.2g, static pipeline discovery
+  (section 2h). M9 is closed with it.
 - **Done**: the investigation (section 2); the test harness keeps every automated run off the desktop, enforced
   centrally (section 7); **M9.2a**: the inventory in the game (section 2a) -- 636 vertex and 2,481 fragment records
   read, none unparsed; every program of 332 recorded pipelines found; layout and control word derived exactly;
@@ -23,15 +23,19 @@ limits are established. Labels as in the other records: [C] read in the code, [M
   measured since, 96-99% measured on areas no recording had reached.
   **M9.2g** (2h): the engine's pipeline selection read and traced (the shader key, its lookup and layout; the render
   state's tables); all 10,458 materials of the game's data parsed; PPFX's selection read; every package record
-  accounted for; every map visited headlessly through the game's own map change; the preparation rebuilt from those
+  accounted for; every map but nine visited headlessly through the game's own map change (fields 1-9 were not
+  reached: found and corrected in M11, section 2h); the preparation rebuilt from those
   (every record now gets pipelines; PPFX's reachable techniques; alpha-test translations); graphics pipeline libraries
   implemented behind a capability check, off by default. As it ships: 2,454 pipelines and 3,486 translations in 9.4 s
-  cold, 133 MB; on 55 maps the learning had not swept, 93% of the pipelines first met prepared (M9.2f: 84%), 2.0 ms of
+  cold, 133 MB; on the maps the learning had not swept (46 reached of 55), 93% of the pipelines first met prepared (M9.2f: 84%), 2.0 ms of
   building in all (18.2 ms); the routes unchanged (no frame held by building, p99.9 21-23 ms).
-- **Next**: the owner's review of M9.2g; then M11 (validation).
-- **Open questions for the owner**: whether to turn the pipeline-library path on by default where a driver has it
-  (section 2h: rendering checked, a link 0.01-0.08 ms, but only worth it with every program's libraries prepared --
-  21 s and 163 MB -- and unmeasured on AMD and Intel). Recommended: keep it off until M11 measures AMD and Intel.
+- **The owner's decisions at acceptance (2026-11-16)**:
+  - graphics pipeline libraries stay **off by default** until further hardware validation; the capability-gated
+    implementation and the standard Vulkan pipeline path (the fallback) are both kept;
+  - the map sweep (tests/map_sweep.py) becomes part of the permanent regression tests;
+  - M11 keeps collecting pipelines no recording has met and improving the preparation's coverage, aiming at what the
+    map sweep does not exercise: bosses, enemies, items, equipment, special effects, events and rendering that
+    depends on progression. Complete pipeline coverage is not claimed until it is demonstrated.
 
 ## 1. What decides a pipeline (the renderer, port/native/render/ppfx_render.cpp) [C]
 
@@ -461,7 +465,10 @@ unlit, no special pass); the old group classes split records by material feature
 DOTHEROES_MAP_SWEEP (development builds; tests/scenarios/map_sweep.drive; build/m92g/sweep*.py): after CONTINUE, the
 build calls the game's own native Event:SetMap (0x004D5958, which queues the change with the game manager) on the
 game's thread at a frame's flip, one map every 15 s, the entry point from the map's alignment file ("-gDebug" in 114
-of 167). **All 167 maps visited**, none failed. Over the shipped (M9.2f) preparation, warm-up off: 190 pipelines first
+of 167). **All 167 maps visited**, none failed. **Corrected 2026-11-16 (M11, docs/M11_PLAN.md section 5): 158, not
+167** -- the sweep named the first nine fields by their files (Field_01..Field_09), the engine by Field_1..Field_9,
+and the map change given a name it does not know reloads the current map; the sweep then counted only its own calls,
+not where the game arrived. M11's arrival check found it; the nine fields are swept since. Over the shipped (M9.2f) preparation, warm-up off: 190 pipelines first
 met after the start, **164 prepared, 26 unforeseen in 16 maps** (most under 1 ms: only their state was new; the
 longest 52 ms); one translation compiled in play (an alpha-test variant: now prepared for every engine program).
 Maps are uniform (8,666 map-block materials in 3 shader signatures): the 26 were the game's effect and interface
@@ -526,7 +533,8 @@ the 2 PPFX composites.
 ### Validation (build/m92g/validate.py; F:\3d dot game heroes\m92\evidence\val; offscreen, cold caches)
 **A first visit to 55 maps the configuration's learning had not swept**: the M9.2g configuration learned again
 without the map sweep's last two chunks (55 maps: a later dungeon's 15 floors and all 40 fields -- three of them,
-fields 14, 17 and 18, were on routes recorded before), prepared cold, and those maps swept over it, each pipeline met
+fields 14, 17 and 18, were on routes recorded before; **corrected 2026-11-16: 46 of the 55 were reached** -- fields 1
+to 9 were not, as above -- so the figures below are over 46 maps), prepared cold, and those maps swept over it, each pipeline met
 built and logged (the warm-up off) -- against the shipped M9.2f configuration over the same maps:
 
 | Preparation | Pipelines first met after the start | Prepared | Unforeseen (building) | Maps with any | Translations in play |

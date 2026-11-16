@@ -5,7 +5,19 @@ Event:SetMap called on its own thread at a frame's flip) on tests/scenarios/map_
 guard: tests/boot_smoke.py), no sound device, the pipelines each map builds logged with the compile log's clock.
 
     tests/map_sweep.py run EVIDENCE [--bin EXE] [--shaders DIR] [--seconds 15] [--chunk 28] [--first N --last M]
+                           [--only MAP,MAP...]
     tests/map_sweep.py report RUN_DIR [...]
+    tests/map_sweep.py check EVIDENCE [--baseline FILE] [--write-baseline FILE]
+
+`check` (the regression test; the owner, 2026-11-16: the sweep is part of the permanent regression tests): passes
+only when every chunk's game ran to its planned end and exited cleanly; every map of every chunk was changed to and
+*arrived* -- the build logs, before the next change, the field area's number and the guest's frame counter it
+reached ("[sweep] ... arrived"): the guest's frames advanced in the map, and, against a baseline (a TSV "map area"
+from an accepted run: --write-baseline), the area is the one that map reached then, and not the area of the map
+before it (each map has its own number in the game's map list: the same number means the change did not happen);
+and, with a preparation given
+(--shaders), no shader translation was compiled in play. The pipelines met unprepared are reported (and against the
+baseline's figure), not failed: new content legitimately meets new state.
 
 `run`: the list of maps is made from the development data (data/map/pac_data, each map's entry point from its
 alignment file: "-gDebug" where the map has the debug entry, else its first named group) -- it stays local, under
@@ -27,10 +39,16 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA = os.path.join(ROOT, "build", "disc", "PS3_GAME", "USRDIR", "data")
 
 
+# a map file the game's map list lacks: the map change cannot reach it (it reloads the current map) [M: M11's first
+# full sweep with the arrival check; C: no entry in the game's map list]
+NOT_IN_MAP_LIST = {"Field_99"}
+
+
 def map_list(secs, first=None, last=None):
     pac = os.path.join(DATA, "map", "pac_data")
     ali = os.path.join(DATA, "map", "map_alignment")
-    maps = sorted(f[:-len(".ps3.pac.gz")] for f in os.listdir(pac) if f.endswith(".ps3.pac.gz"))[first:last]
+    maps = sorted(f[:-len(".ps3.pac.gz")] for f in os.listdir(pac) if f.endswith(".ps3.pac.gz")
+                  and f[:-len(".ps3.pac.gz")] not in NOT_IN_MAP_LIST)[first:last]
     out = []
     for m in maps:
         gs = []
@@ -43,13 +61,24 @@ def map_list(secs, first=None, last=None):
         else:
             named = [g for g in gs if not g.endswith("Exit") and not g[2:].isdigit()]
             e = named[0] if named else (gs[0] if gs else "-gDebug")
-        out.append(f"{m} {e} {secs:g}")
+        out.append(f"{engine_name(m)} {e} {secs:g}")
     return out
+
+
+def engine_name(stem):
+    """the name the game's map change takes for a map file: the first nine fields' files are Field_01..Field_09, but
+    the engine (its links between maps, MapParameter) calls them Field_1..Field_9 -- SetMap with the file's name
+    reloads the current map (M11's arrival check found it: the M9.2g sweep never reached those nine)"""
+    m = re.fullmatch(r"Field_0([1-9])", stem)
+    return f"Field_{m.group(1)}" if m else stem
 
 
 def run(a):
     os.makedirs(a.evidence, exist_ok=True)
     maps = map_list(a.seconds, a.first, a.last)
+    if a.only:
+        want = set(a.only.split(","))
+        maps = [ln for ln in maps if ln.split()[0] in want]
     for c in range(0, len(maps), a.chunk):
         part = maps[c:c + a.chunk]
         r = os.path.join(a.evidence, f"chunk{c // a.chunk}")
@@ -126,6 +155,106 @@ def report(dirs):
     return 0
 
 
+def chunk_dirs(evidence):
+    return sorted((os.path.join(evidence, d) for d in os.listdir(evidence) if re.fullmatch(r"chunk\d+", d)),
+                  key=lambda p: int(re.search(r"\d+$", p).group()))
+
+
+def check(a):
+    """0 when the sweep passes; 1 with each failure listed"""
+    import json
+    fails, rows = [], []
+    base = {}
+    if a.baseline:
+        with open(a.baseline, encoding="utf-8") as f:
+            for ln in f:
+                t = ln.split()
+                if len(t) >= 2 and not ln.startswith("#"):
+                    base[t[0]] = t[1:]
+    chunks = chunk_dirs(a.evidence)
+    if not chunks:
+        fails.append(f"no chunk under {a.evidence}")
+    unforeseen = translated = planned_total = 0
+    for r in chunks:
+        name = os.path.basename(r)
+        with open(os.path.join(r, "maps.txt"), encoding="utf-8") as f:
+            planned = [ln.split() for ln in f if ln.strip()]
+        planned_total += len(planned)
+        log = os.path.join(r, "run", "stderr.log")
+        res = os.path.join(r, "run", "result.json")
+        if not os.path.exists(log) or not os.path.exists(res):
+            fails.append(f"{name}: no run (stderr.log or result.json missing)")
+            continue
+        with open(res, encoding="utf-8") as f:
+            result = json.load(f)
+        if result.get("exit") != 0 or not str(result.get("ended_by", "")).startswith("time"):
+            fails.append(f"{name}: the game did not run to its planned end (ended by {result.get('ended_by')!r}, "
+                         f"exit {result.get('exit')})")
+        changed, arrived, swept = set(), {}, False
+        with open(log, encoding="utf-8", errors="replace") as f:
+            log_lines = f.readlines()
+        for ln in log_lines:
+            m = re.search(r"\[sweep\] t=[\d.]+ map \d+/\d+ (\S+)", ln)
+            if m:
+                changed.add(m.group(1))
+                swept = True
+                continue
+            m = re.search(r"\[sweep\] t=[\d.]+ arrived \d+/\d+ (\S+) area (\d+) frames (\d+)", ln)
+            if m:
+                arrived[m.group(1)] = (int(m.group(2)), int(m.group(3)))
+                continue
+            if not swept:
+                continue
+            m = re.search(r"\[vk-compile\] t=[\d.]+ pipeline \w+ key [0-9A-F]+ total ([\d.]+) ms .* (prepared|unforeseen)", ln)
+            if m:
+                unforeseen += m.group(2) == "unforeseen"
+            elif re.search(r"\[vk-compile\] t=[\d.]+ translate \S+ \d+ words [\d.]+ ms glslang", ln):
+                translated += 1
+        # the frame counter at each arrival: the previous map's arrival (or the first change) to this one
+        prev_frames = prev_area = None
+        for i, (m, entry, secs) in enumerate(planned):
+            if m not in changed:
+                fails.append(f"{name}: {m} never changed to")
+                continue
+            if m not in arrived:
+                fails.append(f"{name}: {m} changed to, no arrival logged (the build lacks the arrival line?)")
+                continue
+            area, frames = arrived[m]
+            ran = None if prev_frames is None else frames - prev_frames
+            prev_frames = frames
+            same = prev_area is not None and area == prev_area
+            prev_area = area
+            ok_frames = ran is None or ran >= float(secs) * 10   # the guest's frames: 30 or 60 a second in play
+            note = ""
+            if not ok_frames:
+                fails.append(f"{name}: {m}: the game hardly ran there ({ran} guest frames in {secs} s)")
+                note = "STALLED"
+            if same:   # every map has its own number in the game's map list: the change did not happen
+                fails.append(f"{name}: {m} arrived in the area of the map before it ({area}): not reached")
+                note = "SAME"
+            if m in base and base[m][0] != str(area):
+                fails.append(f"{name}: {m} arrived in area {area}, the baseline's is {base[m][0]}")
+                note = "AREA"
+            rows.append((m, entry, area, ran, note))
+    if a.write_baseline:
+        with open(a.write_baseline, "w", encoding="utf-8", newline="\n") as f:
+            f.write("# map area (tests/map_sweep.py check --write-baseline): where each map arrived in an accepted sweep\n")
+            for m, entry, area, ran, note in rows:
+                f.write(f"{m} {area}\n")
+        print(f"baseline: {len(rows)} maps -> {a.write_baseline}")
+    if a.shaders_prepared and translated:
+        fails.append(f"{translated} shader translation(s) compiled in play (a preparation was given)")
+    print(f"{len(rows)} maps arrived of {planned_total} planned; {unforeseen} pipelines met unprepared; {translated} "
+          f"translations compiled in play")
+    if fails:
+        print(f"FAIL ({len(fails)}):")
+        for x in fails:
+            print("  " + x)
+        return 1
+    print("PASS")
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -137,9 +266,18 @@ def main():
     r.add_argument("--chunk", type=int, default=28)
     r.add_argument("--first", type=int)
     r.add_argument("--last", type=int)
+    r.add_argument("--only", help="these maps only (names as the game's map change takes them, comma-separated)")
     p = sub.add_parser("report")
     p.add_argument("dirs", nargs="+")
+    c = sub.add_parser("check")
+    c.add_argument("evidence")
+    c.add_argument("--baseline", help="TSV 'map area' from an accepted sweep: each map must arrive where it did then")
+    c.add_argument("--write-baseline", help="write this sweep's arrivals as a baseline (after reviewing it)")
+    c.add_argument("--no-prepared", dest="shaders_prepared", action="store_false",
+                   help="the sweep ran without a preparation: translations in play are not a failure")
     a = ap.parse_args()
+    if a.cmd == "check":
+        return check(a)
     return run(a) if a.cmd == "run" else report(a.dirs)
 
 
