@@ -176,10 +176,11 @@ Saves are kept in the install folder (`data/gamedata`).
 
 **Developer mode** (`DOTHEROES_DEVELOPER_MODE`, Settings, Diagnostics; off by default) is for testing the port: the
 in-game menu gains a Developer page -- warp to any map or entry point, the player's life, magic and money,
-invulnerability and no death, the story's progress, flags and items, bosses and events, pipeline coverage and frame
-times -- all through the game's own functions. While it is on, the game plays on separate test saves
+invulnerability and no death, the story's progress, flags and items, bosses, any enemy type and events, pipeline
+coverage and frame times -- all through the game's own functions. While it is on, the game plays on separate test saves
 (`data/devmode/gamedata`) and shows a "DEVELOPER MODE" tag; your own saves are never used or changed. Turn it off to
-play normally again. The design and its tests: [docs/M11_PLAN.md](docs/M11_PLAN.md).
+play normally again: with it off, none of it is active, and the older test switches that change the game are
+ignored. The design and its tests: [docs/M11_PLAN.md](docs/M11_PLAN.md).
 
 ## Layout
 

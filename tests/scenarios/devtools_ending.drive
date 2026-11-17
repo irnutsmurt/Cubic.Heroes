@@ -1,0 +1,63 @@
+# Scenario: the ending, the game's own way (M11.1a, docs/M11_PLAN.md section 20): the story set to the tower's
+# rematches won (step 24), the last enemy's arena entered the game's way (`boss last`: its own introduction), then
+# the event its defeat starts -- DevilAfterEvent stops the music and calls mainevent_ending -- and everything the
+# game chains from it: the tower's last room, the ending maps (Field_90, then the castle's epilogue, Field_91, where
+# the player walks up the stairs into the castle), the throne room's event, Event:Ending and the credits movie; at
+# "Okay to save?" YES (the run's copy of the saves becomes a cleared game's), then the cleared game's title. No
+# death and invulnerable on (the tools'): the last enemy stays alive in its arena until the ending moves the hero
+# away. Pictures every 10 s. tests/devtools_suite.py checks the maps the ending passed through, the credits and the
+# cleared title. Starts from: the kept checkpoint castle-front (a copy: the cleared save stays in the run).
+#! saves build/checkpoints/castle-front
+#! env DOTHEROES_DEVELOPER_MODE=1 DOTHEROES_NATIVE_CD=1 DOTHEROES_NATIVE_SOLVER=1,2,4,5,6 GCM_WRAP_LAP=1
+#! env DOTHEROES_PRESENT_ONCE=1 DOTHEROES_DEV_STATE=1 DIAG_FRAMES=frames.log PS3_VERBOSE=0 SHOT_EVERY=10
+#! secs 1800
+
+include common.drive
+
+log TitleMovie 120
+sleep 5
+call continue
+state life>0,area==17 90
+sleep 3
+dev nodeath on
+dev invulnerable on
+dev progress set 24
+dev boss last @150
+sleep 2
+shot arena
+loop 30                       # its introduction: lines wait for a button
+  press CROSS
+  sleep 1.5
+end
+devstate event_state==0 90
+shot fight
+dev lua local E=EventClass.Event; E:StopBgm()
+dev event mainevent_ending
+sleep 2
+dev status
+segment cinematic the ending's events and maps up to the castle's epilogue (Field_91)
+pressuntil (?m)map_alignment/Field_91\.dat 1200 CROSS 2
+endseg
+sleep 5
+shot epilogue
+loop 10                       # the epilogue's arrival: whatever it says first
+  press CROSS
+  sleep 1.5
+end
+goto 49.6 -72.0 0.8 30        # the player's part: to the stairs before the castle (the epilogue's people about)
+cross UP any 30               # up them and through the castle's door: the throne room (D_20_9), its own event
+sleep 3
+shot castle
+segment cinematic the castle's events up to the credits
+pressuntil (?m)CreditMovie_eng\.bik 900 CROSS 2
+endseg
+shot credits
+dev status
+sleep 268
+shot okay-to-save
+press CROSS                   # "Okay to save?" YES (the cursor starts on YES)
+sleep 15
+shot after-save
+log (?m)TitleMovie_Ura 300
+sleep 10
+shot cleared-title

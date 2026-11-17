@@ -15,7 +15,7 @@
 namespace {
 
 enum Kind { V_ROOT, V_WARP, V_GROUP, V_ENTRIES, V_STATUS, V_PLAYER, V_CHOICE, V_STORY, V_FLAGS, V_QUESTS, V_QFLAGS,
-            V_ITEMS, V_ITEM, V_BOSSES, V_ENEMIES, V_EVENTS, V_EVENTLIST, V_COVERAGE, V_DIAG, V_SAVES };
+            V_ITEMS, V_ITEM, V_BOSSES, V_ENEMIES, V_SPAWN, V_EVENTS, V_EVENTLIST, V_COVERAGE, V_DIAG, V_SAVES };
 struct Level { Kind kind; std::string arg; int focus; };
 std::vector<Level> g_stack;
 std::string g_note;
@@ -315,6 +315,7 @@ DevView dev_menu_view()
     case V_ENEMIES: {
         v.title = "ENEMIES";
         v.rows.push_back({ "Enter this map again", "Its own enemies again" });
+        v.rows.push_back({ "Create an enemy here", "Any type, the game's own set-up" });
         for (const std::string& o : objects(g_list)) {
             const std::string k = sfield(o, "kind");
             if (k == "ENEMY" || k == "NPC" || k == "BOSS")
@@ -331,6 +332,13 @@ DevView dev_menu_view()
         v.note = "An event runs as the game runs it; its lines wait for a button.";
         break;
     }
+    case V_SPAWN:
+        v.title = "CREATE AN ENEMY";
+        for (const std::string& o : objects(g_list))
+            if (field(o, "minigame") != 1)
+                v.rows.push_back({ sfield(o, "name"), field(o, "rare") == 1 ? "Rare (shown at once)" : "" });
+        v.note = "Choose one: it appears three cells from the hero.";
+        break;
     case V_EVENTLIST:
         v.title = "EVENTS: " + L.arg;
         for (const std::string& o : objects(g_list))
@@ -441,7 +449,19 @@ int dev_menu_pick(int row)
     }
     case V_ENEMIES:
         if (row == 0) { devtools_submit("respawn", nullptr, nullptr); return 1; }
+        if (row == 1) {   /* M11.1: the enemy types the scripts define */
+            if (!devtools::run_sync("spawnables", g_list, 5000)) { g_note = g_list; g_list.clear(); return 0; }
+            g_stack.push_back({ V_SPAWN, "", 0 });
+        }
         return 0;
+    case V_SPAWN: {
+        std::vector<std::string> es;
+        for (const std::string& o : objects(g_list)) if (field(o, "minigame") != 1) es.push_back(o);
+        if (row < 0 || row >= (int)es.size()) return 0;
+        std::string out;
+        if (!devtools::run_sync("spawn " + sfield(es[row], "name"), out)) { g_note = out; return 0; }
+        return 1;   /* it appears once the menu lets the game go */
+    }
     case V_EVENTS: {
         if (row == 0) {
             if (!g_ending_armed) { g_ending_armed = true; return 0; }
@@ -567,6 +587,8 @@ bool dev_menu_back()
 {
     g_note.clear();
     if (g_stack.size() <= 1) return false;
+    const Kind from = g_stack.back().kind;
     g_stack.pop_back();
+    if (from == V_SPAWN) devtools::run_sync("enemies", g_list, 5000);   /* the Enemies page's own list again */
     return true;
 }

@@ -1,0 +1,70 @@
+# Scenario: a boss from its introduction through its defeat, its rewards and the progression it sets (M11.1a,
+# docs/M11_PLAN.md section 18): temple 1's guardian, its arena entered the game's way (`boss temple1`: its defeat
+# flags cleared, the arena's own event introduces it), its lines answered; the fight -- `devfight`: the nearest of
+# the game's own ENEMY actors (the snake's head and its six segments) walked to and struck with the sword -- until
+# the game sets the defeat flag (6); the money it drops and the life vessel its script places at its grid (13, 10)
+# walked over (`devcollect`); the north passage (the door script's map change to the sage's room, D_1_3);
+# the sage's event paged through until the game sets the orb's flag (7). No death on (the tools'): the snake's
+# contact damage never ends the run. tests/devtools_suite.py checks the flags, the life, the money and the items.
+# Starts from: the kept checkpoint dungeon1-boss-door (the hero with the dungeon's items, five hearts).
+#! saves build/checkpoints/dungeon1-boss-door
+#! env DOTHEROES_DEVELOPER_MODE=1 DOTHEROES_NATIVE_CD=1 DOTHEROES_NATIVE_SOLVER=1,2,4,5,6 GCM_WRAP_LAP=1
+#! env DOTHEROES_PRESENT_ONCE=1 DOTHEROES_DEV_STATE=1 DIAG_FRAMES=frames.log PS3_VERBOSE=0 SHOT_EVERY=0
+#! secs 1800
+
+include common.drive
+
+log TitleMovie 120
+sleep 5
+call continue
+state life>0 90
+sleep 3
+dev nodeath on
+dev player
+dev flags 0 100
+dev items
+dev boss temple1 @150
+sleep 2
+shot arena
+loop 30                       # the introduction: its lines wait for a button
+  press CROSS
+  sleep 1.5
+end
+devstate event_state==0 60
+shot fight
+segment fight temple 1's guardian to its defeat
+devfight 1500 flag6
+endseg
+shot defeated
+devcollect 180                # at once (dropped money does not stay): the money and the life vessel
+dev flags 0 100
+loop 6                        # whatever the defeat says
+  press CROSS
+  sleep 1.5
+end
+devcollect 60                 # the vessel, should it come after the money
+sleep 2
+loop 6                        # the vessel's message
+  press CROSS
+  sleep 1.5
+end
+dev player
+shot vessel
+goto 20.8 -4.0 0.6 30         # the north passage: the door script's map change to the sage's room
+cross UP any 20
+sleep 3
+dev status
+shot sage-room
+segment cinematic the sage's event
+loop 40
+  press CROSS
+  sleep 1.5
+end
+devstate flag7==1 120
+endseg
+sleep 3
+shot after-sage
+dev flags 0 100
+dev items
+dev player
+dev progress

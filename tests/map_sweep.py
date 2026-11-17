@@ -40,7 +40,9 @@ DATA = os.path.join(ROOT, "build", "disc", "PS3_GAME", "USRDIR", "data")
 
 
 # a map file the game's map list lacks: the map change cannot reach it (it reloads the current map) [M: M11's first
-# full sweep with the arrival check; C: no entry in the game's map list]
+# full sweep with the arrival check; C: no entry in the game's map list]. Field_99 is the character editor's world
+# (the executable's map table pairs the editor with its alignment; the editor's runs load it): reached through the
+# title's editor, not the map change (docs/M11_PLAN.md section 16)
 NOT_IN_MAP_LIST = {"Field_99"}
 
 

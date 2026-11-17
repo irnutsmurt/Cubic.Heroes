@@ -1,0 +1,20 @@
+# Scenario: what the developer tools change survives the game's own save and load (M11.1a, docs/M11_PLAN.md
+# section 17), part 2: a new process CONTINUEs from the saves part 1 (devtools_persist) wrote -- tests/devtools_suite.py
+# keeps them as the local checkpoint build/checkpoints/m111-persist -- and reads the same values back; the suite
+# compares them with part 1's.
+#! saves build/checkpoints/m111-persist
+#! env DOTHEROES_DEVELOPER_MODE=1 DOTHEROES_NATIVE_CD=1 DOTHEROES_NATIVE_SOLVER=1,2,4,5,6 GCM_WRAP_LAP=1
+#! env DOTHEROES_PRESENT_ONCE=1 DOTHEROES_DEV_STATE=1 DIAG_FRAMES=frames.log PS3_VERBOSE=0 DUMP=0 SHOT_EVERY=0
+#! secs 300
+
+include common.drive
+
+log TitleMovie 120
+sleep 5
+call continue
+state life>0 90
+sleep 3
+dev flags 0 330
+dev items
+dev player
+dev progress

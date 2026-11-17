@@ -561,9 +561,14 @@ Begun 2026-11-16 (plan and checkpoint: docs/M11_PLAN.md), in the owner's order:
   testing hooks for all of it -- through the game's own script layer, behind a
   developer-mode setting off by default, on test saves that never touch the
   player's;
-- comprehensive Windows gameplay validation, bug fixes, release preparation;
-  pipelines no recording met collected on the way (bosses, enemies, items,
-  effects, events), complete coverage never claimed undemonstrated;
+- **M11.1, comprehensive Windows gameplay validation and bug fixes** (accepted
+  M11.0 on 2026-11-16; docs/M11_VALIDATION.md: the matrix and the bug list),
+  then release preparation; pipelines no recording met collected on the way
+  (bosses, enemies, items, effects, events), complete coverage never claimed
+  undemonstrated. M11.1a, the owner's items before the broad validation: field
+  14's pipelines traced to a rare enemy and three rendering faults fixed, every
+  enemy type spawnable, flags through the game's own save and load, a boss to
+  its rewards, the ending to the credits, developer mode off meaning off;
 - Linux and AMD on the owner's laptop: the launcher as an AppImage that makes
   the game's AppImage locally from the player's files;
 - Steam Deck through community volunteers.

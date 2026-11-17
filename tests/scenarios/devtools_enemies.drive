@@ -1,0 +1,205 @@
+# Scenario: every enemy type outside the minigames (M11.1, docs/M11_PLAN.md section 19; docs/M11_VALIDATION.md section 3): each created in
+# turn on field 14 by the tools' `spawn` -- the game's own Event:CreateNpc running the type's script, its set-up as
+# the game's spawns run it (the rare ones shown at once) -- five cells from the hero, two seconds to act, a picture;
+# the map entered again every five types (its own enemies back, the created ones gone). Invulnerable and no death
+# (the tools'). At the end the session's pipelines not prepared are exported (`coverage export enemies`): what the
+# enemy types need that the preparation lacks. tests/devtools_suite.py checks every type was created and acted.
+#! saves build/checkpoints/castle-front
+#! env DOTHEROES_DEVELOPER_MODE=1 DOTHEROES_NATIVE_CD=1 DOTHEROES_NATIVE_SOLVER=1,2,4,5,6 GCM_WRAP_LAP=1
+#! env DOTHEROES_PRESENT_ONCE=1 DOTHEROES_DEV_STATE=1 DIAG_FRAMES=frames.log PS3_VERBOSE=0 SHOT_EVERY=0
+#! secs 900
+
+include common.drive
+
+log TitleMovie 120
+sleep 5
+call continue
+state life>0,area==17 90
+sleep 3
+dev nodeath on
+dev invulnerable on
+dev warp Field_14 -gDebug @150
+sleep 3
+dev spawnables
+dev spawn Bat 8 0
+sleep 2
+shot Bat
+dev enemies
+dev spawn Bee 8 0
+sleep 2
+shot Bee
+dev enemies
+dev spawn BlackKnight 8 0
+sleep 2
+shot BlackKnight
+dev enemies
+dev spawn BlueDragon 8 0
+sleep 2
+shot BlueDragon
+dev enemies
+dev spawn CentaurusBlue 8 0
+sleep 2
+shot CentaurusBlue
+dev enemies
+dev respawn @150
+sleep 2
+dev spawn CentaurusRed 8 0
+sleep 2
+shot CentaurusRed
+dev enemies
+dev spawn Cyclops 8 0
+sleep 2
+shot Cyclops
+dev enemies
+dev spawn DarkEye 8 0
+sleep 2
+shot DarkEye
+dev enemies
+dev spawn Ghost 8 0
+sleep 2
+shot Ghost
+dev enemies
+dev spawn GoblinBlue 8 0
+sleep 2
+shot GoblinBlue
+dev enemies
+dev respawn @150
+sleep 2
+dev spawn GoblinRed 8 0
+sleep 2
+shot GoblinRed
+dev enemies
+dev spawn GolemChild 8 0
+sleep 2
+shot GolemChild
+dev enemies
+dev spawn Golem 8 0
+sleep 2
+shot Golem
+dev enemies
+dev spawn HagureSlime 8 0
+sleep 2
+shot HagureSlime
+dev enemies
+dev spawn Jyugemu 8 0
+sleep 2
+shot Jyugemu
+dev enemies
+dev respawn @150
+sleep 2
+dev spawn MageBlue 8 0
+sleep 2
+shot MageBlue
+dev enemies
+dev spawn MageGray 8 0
+sleep 2
+shot MageGray
+dev enemies
+dev spawn Mummy 8 0
+sleep 2
+shot Mummy
+dev enemies
+dev spawn Rabbit 8 0
+sleep 2
+shot Rabbit
+dev enemies
+dev spawn Rock 8 0
+sleep 2
+shot Rock
+dev enemies
+dev respawn @150
+sleep 2
+dev spawn RoperBlue 8 0
+sleep 2
+shot RoperBlue
+dev enemies
+dev spawn RoperRed 8 0
+sleep 2
+shot RoperRed
+dev enemies
+dev spawn ScorpionBlue 8 0
+sleep 2
+shot ScorpionBlue
+dev enemies
+dev spawn ScorpionRed 8 0
+sleep 2
+shot ScorpionRed
+dev enemies
+dev spawn Shadow 8 0
+sleep 2
+shot Shadow
+dev enemies
+dev respawn @150
+sleep 2
+dev spawn SilverKnight 8 0
+sleep 2
+shot SilverKnight
+dev enemies
+dev spawn Skeleton 8 0
+sleep 2
+shot Skeleton
+dev enemies
+dev spawn SlimeBlue 8 0
+sleep 2
+shot SlimeBlue
+dev enemies
+dev spawn SlimeRed 8 0
+sleep 2
+shot SlimeRed
+dev enemies
+dev spawn SpiderBlue 8 0
+sleep 2
+shot SpiderBlue
+dev enemies
+dev respawn @150
+sleep 2
+dev spawn SpiderRed 8 0
+sleep 2
+shot SpiderRed
+dev enemies
+dev spawn Squid 8 0
+sleep 2
+shot Squid
+dev enemies
+dev spawn Succubus1 8 0
+sleep 2
+shot Succubus1
+dev enemies
+dev spawn Succubus2 8 0
+sleep 2
+shot Succubus2
+dev enemies
+dev spawn Togetoge 8 0
+sleep 2
+shot Togetoge
+dev enemies
+dev spawn TogetogeDash 8 0
+sleep 2
+shot TogetogeDash
+dev enemies
+dev respawn @150
+sleep 2
+dev spawn Vampire 8 0
+sleep 2
+shot Vampire
+dev enemies
+dev spawn Wood 8 0
+sleep 2
+shot Wood
+dev enemies
+dev spawn WormBlue 8 0
+sleep 2
+shot WormBlue
+dev enemies
+dev spawn WormRed 8 0
+sleep 2
+shot WormRed
+dev enemies
+dev spawn Zombie 8 0
+sleep 2
+shot Zombie
+dev enemies
+devfail spawn MGRabbit
+sleep 2
+dev coverage
+dev coverage export enemies

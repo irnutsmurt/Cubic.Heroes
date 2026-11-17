@@ -954,6 +954,55 @@ void make_events()
     DLOG(DH_LOG_INFO, "dev", "the event functions: %zu", g_events.size());
 }
 
+/* M11.1 (docs/M11_PLAN.md section 19): the enemy types, read in the scripts the game runs as make_events reads its
+ * events -- each `function <Name>Initialize(Object)` whose body makes its object an enemy
+ * (SetType(actor_manager.AT_ENEMY)); `rare`: its body can hide the object instead (AT_UNKNOWN: a chance to appear);
+ * `minigame`: a minigame's own version (its scripts' MG prefix), which expects its minigame's state -- not made
+ * elsewhere (a script error inside the engine's own calls silences every later script call) */
+struct Spawnable { std::string name; bool rare, minigame; };
+std::vector<Spawnable> g_spawnables;
+bool g_spawnables_made = false;
+/* the scripts' math.random given back a few frames after a rare enemy's set-up (`spawn`): its Initialize may run in
+ * the frame after its object is made (on_flip counts down) */
+int g_random_restore = 0;
+
+void make_spawnables()
+{
+    if (g_spawnables_made) return;
+    const char* text = (const char*)vm_base + kBundle;
+    auto at_line = [&](uint32_t i) { return i == 0 || text[i - 1] == '\n'; };
+    auto enemy_type = [](const std::string& body) {
+        for (size_t p = body.find("actor_manager.AT_ENEMY"); p != std::string::npos; p = body.find("actor_manager.AT_ENEMY", p + 1)) {
+            size_t q = p + 22;
+            while (q < body.size() && body[q] == ' ') q++;
+            if (q < body.size() && body[q] == ')') return true;   /* AT_ENEMY itself, not AT_ENEMYWEAPON */
+        }
+        return false;
+    };
+    uint32_t i = 0;
+    while (i + 9 < kBundleSize) {
+        if (!(at_line(i) && !strncmp(text + i, "function ", 9))) { i++; continue; }
+        uint32_t j = i + 9;
+        while (j < kBundleSize && (isalnum((unsigned char)text[j]) || text[j] == '_')) j++;
+        const std::string name(text + i + 9, j - i - 9);
+        uint32_t e = j;
+        while (e + 9 < kBundleSize && !(at_line(e) && !strncmp(text + e, "function ", 9))) e++;
+        const size_t n = name.size();
+        if (n > 10 && name.compare(n - 10, 10, "Initialize") == 0) {
+            const std::string body(text + j, e - j);
+            if (enemy_type(body))
+                g_spawnables.push_back({ name.substr(0, n - 10), body.find("AT_UNKNOWN") != std::string::npos,
+                                         name.compare(0, 2, "MG") == 0 });
+        }
+        i = e;
+    }
+    std::sort(g_spawnables.begin(), g_spawnables.end(), [](const Spawnable& a, const Spawnable& b) { return a.name < b.name; });
+    g_spawnables.erase(std::unique(g_spawnables.begin(), g_spawnables.end(),
+                                   [](const Spawnable& a, const Spawnable& b) { return a.name == b.name; }), g_spawnables.end());
+    g_spawnables_made = true;
+    DLOG(DH_LOG_INFO, "dev", "the enemy types: %zu", g_spawnables.size());
+}
+
 /* the game's own StartEvent on `name` (a global script function), only while no event runs */
 bool start_event(const ppu_context* c, const std::string& name, std::string& why)
 {
@@ -1063,6 +1112,43 @@ int encounter_command(const ppu_context* c, const Cmd& cmd, const std::string& w
         if (run_lua(c, def, out) != 1) { answer(cmd, false, "the scene's event: " + out); return 0; }
         if (!start_event(c, "__devtools_scene", why)) { answer(cmd, false, why); return 0; }
         answer(cmd, true, "{\"scene\":" + std::to_string(n) + ",\"started\":true}", true);
+        return 1;
+    }
+    if (w == "spawnables") {   /* M11.1: the enemy types the scripts define (make_spawnables) */
+        make_spawnables();
+        std::string o = "[";
+        for (const Spawnable& e : g_spawnables)
+            o += std::string(o.size() > 1 ? "," : "") + "{\"name\":" + json_str(e.name) + ",\"rare\":" + (e.rare ? "true" : "false") +
+                 ",\"minigame\":" + (e.minigame ? "true" : "false") + "}";
+        answer(cmd, true, o + "]", true);
+        return 0;
+    }
+    if (w == "spawn") {   /* M11.1: an enemy made by the game's own Event:CreateNpc running its script, near the hero */
+        make_spawnables();
+        const std::string name = word(rest);
+        const Spawnable* sp = nullptr;
+        for (const Spawnable& e : g_spawnables) if (e.name == name) sp = &e;
+        if (!sp) { answer(cmd, false, "no enemy type " + name + " (`spawnables` lists them)"); return 0; }
+        if (sp->minigame) { answer(cmd, false, name + " is a minigame's own enemy: met in its minigame"); return 0; }
+        double dx = 4.8, dz = 0.0;   /* three cells beside the hero, by default */
+        const std::string a = word(rest), b = word(rest);
+        if (!a.empty()) dx = atof(a.c_str());
+        if (!b.empty()) dz = atof(b.c_str());
+        if (dx < -40 || dx > 40 || dz < -40 || dz > 40) { answer(cmd, false, "spawn NAME [DX DZ]: within 40 units"); return 0; }
+        char xyz[96];
+        snprintf(xyz, sizeof xyz, "%.2f,0,%.2f", dx, dz);
+        /* a rare one hides itself at random in its set-up: the scripts' math.random answers 1 until it has run */
+        std::string chunk = "local E=EventClass.Event; ";
+        if (sp->rare) chunk += "if not __devtools_random then __devtools_random=math.random end; math.random=function(a,b) return 1 end; ";
+        chunk += "E:CreateNpc(" + std::string(xyz) + ",\"" + name + "\")";   /* a name from the list: letters, digits */
+        if (run_lua(c, chunk, out) != 1) {
+            if (sp->rare) run_lua(c, "if __devtools_random then math.random=__devtools_random; __devtools_random=nil end", why);
+            answer(cmd, false, "Event:CreateNpc: " + out);
+            return 0;
+        }
+        if (sp->rare) g_random_restore = 3;
+        answer(cmd, true, "{\"spawn\":" + json_str(name) + ",\"dx\":" + std::to_string(dx) + ",\"dz\":" + std::to_string(dz) +
+                          ",\"rare\":" + (sp->rare ? "true" : "false") + "}", true);
         return 1;
     }
     if (w == "ending") {   /* the game's own Ending: its ending and the credits movie (as M8's credits switch) */
@@ -1407,6 +1493,11 @@ void on_flip(ppu_context* c)
     g_flip_ctx.store(c, std::memory_order_release);
     note_frame();
     check_warp();
+    if (g_random_restore && --g_random_restore == 0 && (g_region || ensure_region(c))) {
+        std::string out;
+        try { run_lua(c, "if __devtools_random then math.random=__devtools_random; __devtools_random=nil end", out); }
+        catch (const CallError&) {}
+    }
     if (g_invulnerable.load(std::memory_order_relaxed) && (g_region || ensure_region(c))) {
         try { keep_invulnerable(c); } catch (const CallError&) {}
     }

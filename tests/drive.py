@@ -14,6 +14,9 @@ scenario header):
                               hold, repeat, touch, segment) counts, so an old
                               line from an earlier cycle cannot satisfy it
   sleep <sec>
+  pressuntil <regex> <timeout> <BUTTON> [<every>]  press BUTTON every <every> s (1.5) until a new log
+                              line matches (a long event chain paged through to a marker; nothing is
+                              pressed after it); a timeout fails
   press <BUTTON|0xMASK> [hold]   press; hold = guest pad reports (default 10)
   change [timeout]            wait until the frame differs from the frame at
                               the last press (the game reacted)
@@ -33,9 +36,15 @@ scenario header):
   devtry <command ...> [@<timeout>]  as `dev`, but a refusal or no answer is logged and the script
                               goes on (a sweep's map that does not arrive: tests/map_sweep.py's check fails it)
   devfail <command ...>       a developer-tools command that must be refused (an error path)
+  devcollect [timeout]        walk over every visible ITEM the tools' `enemies` lists (dropped money, a life
+                              vessel), nearest first; one not reached in 6 s passed over
+  devfight <timeout> [flagN] [soft]  fight what the tools' `enemies` lists (the game's own actors: a boss's
+                              parts too): the nearest visible ENEMY, walked to and swung at, until none is
+                              left or the event flag N is set (a boss's defeat); a timeout fails (`soft`: logged)
   write <file> <text ...>     <run>/<file> written with the text (whole, at once)
   devstate <cond>[,<cond>] [timeout]  as `state`, on the developer tools' `status`
-                              (area, frames, hud_life, money, event_state, ...)
+                              (area, frames, hud_life, money, event_state, ...); flagN is
+                              the game's event flag N (`flag get N`), e.g. devstate flag42==1
   repeat <n> <BUTTON> <sec>   press n times, <sec> apart
   hold <BUTTON> <sec>         hold for <sec> of wall time (not guest reports:
                               those pass twice as fast at 60 fps); logs where
@@ -672,6 +681,94 @@ def fight(cls, tmo, reach, radius=25.0, soft=False):
         wait(0.35)
 
 
+def devfight(chan, tmo, flag=None, reach=2.4, soft=False):
+    """M11.1: fight what the developer tools' `enemies` lists -- the game's actor manager's visible ENEMY actors (a
+    boss's parts among them, which the actor scan behind `fight` does not see): walk to the nearest, turn to it and
+    swing, until none is left or, with `flag` (an event flag number), until the game sets that flag (a boss's
+    defeat); fails after `tmo` s (`soft`: logged)."""
+    t0, swings, said = time.time(), 0, None
+    while True:
+        if flag is not None:
+            o = chan.send(f"flag get {flag}", timeout=10, alive=alive)["out"]
+            if (o if isinstance(o, dict) else json.loads(o)).get("value", 0) >= 1:
+                say(f"  devfight: flag {flag} set ({swings} swings, {time.time() - t0:.0f} s)")
+                return
+        o = chan.send("enemies", timeout=10, alive=alive)["out"]
+        o = o if isinstance(o, list) else json.loads(o)
+        hero = next((x for x in o if x["kind"] == "PLAYER"), None)
+        es = [x for x in o if x["kind"] == "ENEMY" and x.get("visible")]
+        if not es and flag is None:
+            say(f"  devfight: none left ({swings} swings, {time.time() - t0:.0f} s)")
+            return
+        if time.time() - t0 > tmo:
+            why = f"devfight: {len(es)} enemies left after {tmo:g} s ({swings} swings)" + (f", flag {flag} not set" if flag is not None else "")
+            if soft:
+                say(f"  (soft) {why}")
+                return
+            raise Fail(why)
+        if not es or not hero:
+            wait(0.5)
+            continue
+        tgt = min(es, key=lambda a: (a["x"] - hero["x"]) ** 2 + (a["z"] - hero["z"]) ** 2)
+        if said != len(es):
+            say(f"  devfight: {len(es)} enemies, the nearest (slot {tgt['slot']}) at ({tgt['x']:.1f}, {tgt['z']:.1f})")
+            said = len(es)
+        dx, dz = tgt["x"] - hero["x"], tgt["z"] - hero["z"]
+        dist = (dx * dx + dz * dz) ** 0.5
+        face = (BTN["RIGHT"] if dx > 0 else BTN["LEFT"]) if abs(dx) >= abs(dz) else (BTN["UP"] if dz > 0 else BTN["DOWN"])
+        if dist > reach:
+            mask = 0
+            if abs(dx) > reach / 3: mask |= BTN["RIGHT"] if dx > 0 else BTN["LEFT"]
+            if abs(dz) > reach / 3: mask |= BTN["UP"] if dz > 0 else BTN["DOWN"]
+            secs = max(0.05, min(0.25, (dist - reach) / 9.0))
+            press(mask or face, 1, int(secs * 1000))
+            wait(secs)
+            continue
+        press(face, 1)
+        wait(0.05)
+        press(BTN["CROSS"])
+        swings += 1
+        wait(0.35)
+
+
+def devcollect(chan, tmo):
+    """M11.1: walk over every visible ITEM the tools' `enemies` lists (the game's actor manager: dropped money, a
+    life vessel), nearest first, until none is left; one the hero gets no nearer to in 6 s is passed over. Fails
+    after `tmo` s with how many are left."""
+    t0, skipped, near = time.time(), set(), {}
+    while True:
+        o = chan.send("enemies", timeout=10, alive=alive)["out"]
+        o = o if isinstance(o, list) else json.loads(o)
+        hero = next((x for x in o if x["kind"] == "PLAYER"), None)
+        items = [x for x in o if x["kind"] == "ITEM" and x.get("visible") and x["slot"] not in skipped]
+        if not items:
+            say(f"  devcollect: none left ({len(skipped)} passed over, {time.time() - t0:.0f} s)")
+            return
+        if time.time() - t0 > tmo:
+            raise Fail(f"devcollect: {len(items)} items left after {tmo:g} s")
+        if not hero:
+            wait(0.5)
+            continue
+        tgt = min(items, key=lambda a: (a["x"] - hero["x"]) ** 2 + (a["z"] - hero["z"]) ** 2)
+        dx, dz = tgt["x"] - hero["x"], tgt["z"] - hero["z"]
+        dist = (dx * dx + dz * dz) ** 0.5
+        g = near.setdefault(tgt["slot"], [dist, time.time()])
+        if dist < g[0] - 0.3:
+            g[0], g[1] = dist, time.time()
+        elif time.time() - g[1] > 6:
+            skipped.add(tgt["slot"])
+            say(f"  devcollect: the item in slot {tgt['slot']} at ({tgt['x']:.1f}, {tgt['z']:.1f}) out of reach")
+            continue
+        mask = 0
+        if abs(dx) > 0.3: mask |= BTN["RIGHT"] if dx > 0 else BTN["LEFT"]
+        if abs(dz) > 0.3: mask |= BTN["UP"] if dz > 0 else BTN["DOWN"]
+        if not mask:
+            mask = BTN["UP"]
+        secs = max(0.05, min(0.25, dist / 9.0))
+        press(mask, 1, int(secs * 1000))
+        wait(secs)
+
+
 def open_obj(cls, tries):
     """Open what the objects of one class are (a chest): walk up to each, nearest first, from
     the south, at small offsets across it, facing it, and press CROSS (then
@@ -856,6 +953,22 @@ def step(lineno, line, op, a):
             wait(0.25)
     elif op == "sleep":
         wait(float(a[0]))
+    elif op == "pressuntil":   # M11.1: <regex> <timeout> <BUTTON> [<every>]: page an event chain until a log line
+        rx, tmo, btn = re.compile(a[0]), float(a[1]), mask_of(a[2])
+        every = float(a[3]) if len(a) > 3 else 1.5
+        t0 = time.time()
+        while True:
+            t1 = time.time()
+            while time.time() - t1 < every:   # the lines since the last press (or the step's start)
+                if rx.search(new_log()):
+                    break
+                wait(0.25)
+            else:
+                if time.time() - t0 > tmo:
+                    shot("timeout"); raise Fail(f"no new log line matching {a[0]!r} in {tmo:g} s of {a[2]} presses")
+                press(btn)
+                continue
+            break
     elif op == "press":
         if not press(mask_of(a[0]), int(a[1]) if len(a) > 1 else 10):
             say(f"press not taken at line {lineno}")
@@ -993,6 +1106,17 @@ def step(lineno, line, op, a):
             say(f"devfail {rest}: refused as expected: {e}"[:600])
         except TimeoutError as e:
             raise Fail(f"devfail {rest}: {e}")
+    elif op == "devfight":   # devfight <timeout> [flagN] [soft]
+        import devtools
+        if dev_channel is None:
+            dev_channel = devtools.Channel(run)
+        flag = next((int(x[4:]) for x in a[1:] if re.fullmatch(r"flag\d+", x)), None)
+        devfight(dev_channel, float(a[0]) if a else 120, flag, soft="soft" in a)
+    elif op == "devcollect":   # devcollect [timeout]
+        import devtools
+        if dev_channel is None:
+            dev_channel = devtools.Channel(run)
+        devcollect(dev_channel, float(a[0]) if a else 120)
     elif op == "devstate":
         import devtools
         cs, tmo = conds(a[0]), float(a[1]) if len(a) > 1 else 60
@@ -1003,6 +1127,10 @@ def step(lineno, line, op, a):
             try:
                 st = dev_channel.status(timeout=10, alive=alive)
                 s = {k: float(v) for k, v in st.items() if isinstance(v, (int, float))}
+                for k, _, _, _ in cs:   # M11.1: flagN -- the game's event flag N, through `flag get N`
+                    if re.fullmatch(r"flag\d+", k):
+                        o = dev_channel.send(f"flag get {k[4:]}", timeout=10, alive=alive)["out"]
+                        s[k] = float((o if isinstance(o, dict) else json.loads(o))["value"])
             except (devtools.Refused, TimeoutError):
                 s = None
             if s is not None:

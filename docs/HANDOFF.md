@@ -95,7 +95,13 @@ log) and [FEASIBILITY.md](FEASIBILITY.md) (design and the explicit exceptions).
   `nodeath` (only a lethal hit stopped -- the requirement above, now through the
   game's own damage function), `flag`/`progress`/`quests`/`items`/`give`,
   `boss`/`respawn`/`enemies`/`event`/`scene`, `coverage`/`perf`/`runtime`/`mark`,
-  test `state`s, `lua`. A true in-game restart is now `respawn` (the map entered
+  test `state`s, `lua`; since M11.1 `spawn` (any enemy type, the game's own
+  Event:CreateNpc) and the drive's `devfight` (a boss's parts fought) and
+  `pressuntil` (an event chain paged to a log line). In an installed game with
+  developer mode off the older test switches that change the game
+  (DOTHEROES_DEV_CANT_DIE, life/pos triggers, the credits, waver and sound labs)
+  are ignored; outside an install (the repository's test runs) they work as
+  before. A true in-game restart is now `respawn` (the map entered
   again) or a kept test state. The regression suite: tests/devtools_suite.py;
   the map sweep runs through `warp` (tests/map_sweep.py).
 - Commit identity for this repo is the owner's own git config; ps3recomp

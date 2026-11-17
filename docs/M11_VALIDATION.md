@@ -1,0 +1,167 @@
+# M11.1: the Windows validation matrix and the bug list
+
+The owner's M11.1 (docs/M11_PLAN.md section 13): the game validated area by area before a Windows beta, with the
+developer tools and automated scenarios wherever they can see the thing checked, RPCS3 where rendering is in doubt,
+and the owner's own play only where nothing else can. This file is the matrix and the bug list; it is kept current
+as each stage runs. Map, script and enemy names below are the game's own identifiers (as in the other plans); no
+game text, data or picture is in this repository.
+
+**Methods**: **S** an automated scenario (tests/scenarios/*.drive, offscreen); **W** the map sweep
+(tests/map_sweep.py); **T** the developer tools (dev.cmd; docs/M11_PLAN.md section 12); **R** compared with RPCS3
+(tests/rpcs3_reference.py, or a capture); **O** the owner's own hands (asked for, never assumed). **States**:
+`pass` (with its evidence), `fail` (a bug below), `partial` (what is missing said), `todo` (not run in M11.1 yet),
+`owner` (waiting on a hands-on check). Evidence older than M11 is named but counts as `todo` until run again on
+the M11.1 build.
+
+**Running what is automated** (every one offscreen and silent; a build's results go into the rows below):
+- `tests/devtools_suite.py --bin EXE [NAMES]` -- the developer tools' scenarios: basic, off, warp, menu, player,
+  progress, encounter, diag, persist (+ persist_load), boss, enemies, ending; `--shaders DIR` over a preparation;
+- `tests/devtools_suite.py --installed DIR` -- the install checks (a throwaway install: developer mode on, then off);
+- `tests/map_sweep.py run EVIDENCE --bin EXE --shaders DIR` then `check EVIDENCE --baseline BASELINE` -- every map;
+- `tests/rpcs3_reference.py run all --bin EXE` -- the reference scenes against RPCS3's captures;
+- the unit tests (tests/test_*.py; the runtime's tests/test_rsx_texture_layout.c and the others).
+
+## 1. Places: every map (167)
+
+| Group | Maps | Method | M11.1 state | Evidence, notes |
+|---|---|---|---|---|
+| Fields (overworld) | 32 (Field_1..Field_35 less the missing numbers) | W, S | partial | sweep-warp1: every one arrived at its own number, frames advancing, no translation in play; Field_14's pipelines explained (PLAN 15). Visual review: todo |
+| Towns (field screens with a village or the castle) | 4 | W | partial | arrived (sweep); visual: todo |
+| Castle grounds, castle interiors | Field_50, D_20_1/2/9 | W | partial | arrived; visual: todo |
+| Village and town interiors | 24 (D_21_x .. D_26_x) | W | partial | arrived; visual: todo |
+| Caves, springs, mountain paths | 38 (D_60_x) | W | partial | arrived; visual: todo |
+| Temple 1 (Grass) | D_1_1_1, D_1_2, D_1_3 | W, S | partial | arrived; R-series routes through the dungeon (dungeon1_*); M11.1 boss row below |
+| Temple 2 (Forest) | D_2_1_1, D_2_2, D_2_3 | W | partial | arrived |
+| Temple 3 (Desert) | D_3_1_1-2, D_3_2, D_3_3 | W | partial | arrived |
+| Temple 4 (Aqua) | D_4_1_1-2, D_4_2, D_4_3 | W | partial | arrived |
+| Temple 5 (Flame) | D_5_1_1-3, D_5_2, D_5_3 | W | partial | arrived |
+| Temple 6 (Wind) | D_6_1_1-5, D_6_2, D_6_3 | W | partial | arrived |
+| The tower | D_7_1_1-7, D_7_2_1-9, D_7_3 | W | partial | arrived |
+| The castle battle | D_8_2 | W | partial | arrived |
+| Minigame arenas | 18 (D_80_x) | W | partial | arrived; each minigame played: todo (section 5) |
+| Ending maps | Field_90, Field_91 | W | partial | arrived; the ending's own path: section 10 |
+| The inn's dream map | Field_80 | W | partial | arrives through its own arrival record (M11.0b) |
+| The character editor's world | Field_99 | S | partial | not in the map list: reached only through the editor (PLAN 16); archived editor runs load it; M11.1 editor rows: section 7 |
+
+## 2. Bosses (15 encounters)
+
+Each: entered the game's way (the arena's own event), the introduction, the fight to its **defeat**, its
+**rewards** (the life vessel, money, items) and the **progression** it sets (the defeat flags, the sage's room or
+what follows). Method: T to enter (`boss ID`), S to fight (no death on; the drive's `fight`), T to read the flags.
+
+| Encounter | Arena | M11.1 state | Notes |
+|---|---|---|---|
+| Temple 1's guardian | D_1_2 | pass | devtools_boss (PLAN 18): introduction, the fight to the defeat (flags 6, 8), its money, the life vessel (max life 10 -> 12), the sage's room (flag 7, the first spell); its look and sound against RPCS3: todo |
+| Temple 2's guardian | D_2_2 | todo | |
+| Temple 3's guardian | D_3_2 | todo | |
+| Temple 4's guardian | D_4_2 | todo | |
+| Temple 5's guardian | D_5_2 | todo | |
+| Temple 6's guardian | D_6_2 | todo | |
+| The castle battle | D_8_2 | todo | |
+| The tower's rematches 1-6 | D_7_2_1..6 | todo | the tower's flag 310 makes each stronger (life, damage, attacks) |
+| Before the last | D_7_2_7 | todo | |
+| The last enemy | D_7_2_8 | partial | introduction the game's way (devtools_ending); its defeat: todo; its after-event onward: pass (section 10) |
+
+## 3. Enemy types (41, and 21 minigame versions)
+
+Each type seen, its model and effects drawn (and its pipelines prepared), its movement and collisions, its sounds,
+damage both ways, its death and drops. Method: T (spawned through the game's own object set-up: PLAN 19) or met on
+its maps (W/S); R where a material is in doubt.
+
+| Types | M11.1 state | Notes |
+|---|---|---|
+| Rabbit, SpiderBlue, Skeleton, MageGray, Ghost, Wood, WormRed, WormBlue, Bee, Jyugemu, Rock, Golem, SpiderRed, GoblinRed, GoblinBlue, Zombie, MageBlue, Squid, ScorpionRed, ScorpionBlue, Vampire, Bat, SlimeRed, SlimeBlue, DarkEye, CentaurusBlue, Mummy, RoperRed, RoperBlue, SilverKnight, BlackKnight, CentaurusRed, Cyclops, Succubus1, Succubus2, Shadow, Togetoge, TogetogeDash, GolemChild | partial | devtools_enemies (PLAN 19): every type created by the game's own set-up, found in the game's actor list, drawn (pictures reviewed); damage both ways, death, drops and sounds per type: todo. About 29 take a stronger version at random (StrongRate) |
+| HagureSlime (rare: 5%, 10% in the second mode) | fixed (B-002, B-004); look against RPCS3: todo | was never drawn; now drawn with the engine's own cube map, decoded right; its pipelines in the preparation (PLAN 15) |
+| BlueDragon (rare: 1%, 20% in the second mode) | partial | spawned at once and drawn (devtools_enemies) |
+| The 21 minigame versions (MG*) | todo | met in their minigames (section 5); `spawn` refuses them elsewhere |
+
+## 4. The main story (26 steps)
+
+| Rows | Method | M11.1 state |
+|---|---|---|
+| Each step's flags set by playing it, in order (the story's own events, items and map progress) | S, T, O | todo |
+| `progress set` (the tools) against the game's own state after each step | T | partial (devtools_progress: temple 1's boss room before and after; devtools_ending: step 24 lets the ending chain run) |
+
+## 5. Side quests and optional content
+
+| Rows | Method | M11.1 state |
+|---|---|---|
+| The quests the scripts keep (`quests`: each script function's flags), each started and finished | T, S | todo |
+| The 18 minigames (D_80_x), each played to a result and its record | S | todo |
+| Shops (buy, sell, the wallet), the inns, the sages' rooms, the signs and the people | S | partial (installed_save: an arrow bought, kept across a save) |
+
+## 6. Items, equipment, magic and abilities
+
+| Rows | Method | M11.1 state |
+|---|---|---|
+| Every sub-weapon used (bow, bombs, boomerang, anchor rod, fire rod, ...) and its effect and sound | T, S | todo |
+| Swords (95-118) and shields (89-94): given, equipped in the game's own screen, swung; the sword's full-life beam | T, S, O | todo |
+| Magic: each spell cast, its effect, its cost | T, S | todo |
+| Consumables (potions, apples), keys, orbs, maps | T, S | todo |
+
+## 7. Character creation and editing
+
+| Rows | Method | M11.1 state |
+|---|---|---|
+| The editor opened from the title, a hero edited and saved, played with (its world: Field_99) | S | todo (R3 editor_r3, save_picker_edit/editor: older evidence) |
+| A preset hero chosen; "change characters?" on CONTINUE | S | todo |
+
+## 8. Death, respawn and checkpoints
+
+| Rows | Method | M11.1 state |
+|---|---|---|
+| Death in a field, a dungeon and a boss arena; the game over and CONTINUE; where the hero comes back | S | todo (common.drive's continue_after_death: older evidence) |
+| No death and invulnerability off again: the game's own damage | T | pass (devtools_player, M11.0c) |
+
+## 9. Saving, loading and persistence
+
+| Rows | Method | M11.1 state |
+|---|---|---|
+| Flags, story steps, money and items changed, saved with the game's own SAVE, loaded by CONTINUE and by a new process | T, S | pass (devtools_persist, PLAN 17) |
+| A purchase kept across a save, an exit and a relaunch (an install as a player starts it) | S | todo (installed_save/installed_continue: M9 evidence) |
+| The player's saves never touched by developer mode; with it off, nothing of it active | S | pass (the install checks and devtools_install_off, PLAN 14) |
+
+## 10. Cinematics, the ending and post-game
+
+| Rows | Method | M11.1 state |
+|---|---|---|
+| The opening and title movies, their skips | S | todo (M8 evidence) |
+| Scenes inside events (`scene N`) | T | partial (devtools_encounter: scene 1) |
+| **The ending**: the last enemy's after-event through the tower, the ending maps, the castle, the credits | T, S | pass (devtools_ending, PLAN 20) |
+| The clear save, the title after it, the second mode | S | partial (devtools_ending: the save, the cleared title movie; the second mode played: todo) |
+
+## 11. Audio, music, environmental effects, visual correctness
+
+| Rows | Method | M11.1 state |
+|---|---|---|
+| Each map's music (the map list's BGM) on arrival; sound effects of combat, items, menus; positional sound | S | todo (M4/M5 sound labs: older evidence) |
+| Water, fire, lava, weather and post-processing (depth of field, bloom, the shadow map) | S, R | partial (the RPCS3 reference scenes: 5 of 5 on the M11.1a build) |
+| Visual review of every map's arrival (pictures from the sweep) | W | todo |
+
+## 12. Frame-rate independence and performance
+
+| Rows | Method | M11.1 state |
+|---|---|---|
+| 60 fps held on the routes (the frame-time figures: p99, the longest, frames over 50/100 ms) | S | todo on the M11.1 build |
+| Game speed the same at 30, 60, 120 and 144 Hz presents (movement, animation, timers, audio sync) | S, O | todo |
+| Loading times per map; hitches named (the sweep's and the routes' frame logs) | W, S | todo |
+
+## 13. Shader and pipeline coverage
+
+| Rows | Method | M11.1 state |
+|---|---|---|
+| Every map's first visit: no translation in play, pipelines met unprepared listed | W | pass (sweep-m111 over the M11.1a preparation: 166/166, none unprepared, no translation; PLAN 15) |
+| Bosses, enemies (the rare ones included), items, effects, events and the ending: `coverage export` from each stage's runs into the preparation | T, S | todo |
+
+## Bugs
+
+Severity: **S1** a crash, a hang, lost progress or damaged saves; **S2** wrong behaviour or rendering a player meets;
+**S3** minor; **S4** cosmetic.
+
+| ID | Sev | Area | Found | Reproduction | Root cause | Fix | Regression test | State |
+|---|---|---|---|---|---|---|---|---|
+| B-001 | S3 | Developer mode | M11.1a audit | an installed game started with DOTHEROES_DEV_CANT_DIE=1 (or life.trigger and DOTHEROES_DEV_STATE=1, ...) in its environment, developer mode off | older test switches (R1-M8) read from the environment whatever the setting | in an installed game with developer mode off they are ignored and named in the log (PLAN 14) | devtools_install_off (tests/devtools_suite.py --installed) | fixed, verified |
+| B-002 | S2 | Rendering | M11.1a, Field_14 | the rare metal slime on a field (5% a spawn point; or spawned with the tools) | the native renderer had no source for a cube-map texture: every draw reading one was dropped | cube maps sampled as cube images (PLAN 15) | the spawn scenario with the slime; the sweep | fixed, verified |
+| B-003 | S3 | Rendering (pipelines) | M11.1a, Field_14 | the same | the pipeline key and translation took texture kinds of units the program never reads: a cube left bound made 14 needless pipelines and translations, a 166-226 ms frame on arrival | texture kinds limited to the units read (PLAN 15) | the sweep on Field_13/14; the spawn scenario's coverage | fixed, verified |
+| B-004 | S2 | Rendering (textures) | M11.1a, the slime's cube map | a linear mipmapped texture (the engine's default cube map: the metal slime's reflection) | the runtime's layout packed a linear image's lower mip levels at their own width; the RSX keeps the row pitch on every level, so lower levels and every cube face after the first were read from the wrong bytes | each level of a linear image at the pitch register's row pitch (patches/ps3recomp/0165) | the runtime's test_rsx_texture_layout; the spawn scenario's cube faces | fixed, verified |
+| B-005 | S4 | Tests | M11.1a, the unit tests run in full | tests/test_player_pipeline.py | since M9.2g tools/r8_lift.sh names its observers file through a variable (OBS=${R8_OBSERVERS:-config/...}), which the test's pattern did not read: the test failed though the player's lift and the developers' agree | the test reads such a variable's default | the test itself (15 of 15 unit test files pass) | fixed, verified |

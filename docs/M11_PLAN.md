@@ -6,26 +6,19 @@ read in the code or the data, [M] measured, [I] inferred, [H] a hypothesis still
 
 ## Checkpoint (kept current; the newest state first)
 
-- **Stage** (2026-11-16): **M11.0, the developer debugging tools, complete** (sections 2-12) and **awaiting the
-  owner's review**. Every requirement is met through the game's own logic, behind a developer-mode setting off by
-  default, on test saves that never touch the player's; every stage validated offscreen and pushed (7738d7e, d58c85f,
-  f045f4a, 4f1fa45, 6282559, 4ad7f3b, 1eff51a and M11.0g's commit).
-- **What it does** (section 12 has the table): warp to any of 166 maps and their 395 arrival points; life, magic,
-  money, invulnerability, no death; flags, the story in 26 steps, quests, items; bosses fought again the game's way,
-  the actors, a map's enemies again, events and scenes by name, the ending; pipeline coverage live and exported,
-  frame times, memory, the native systems' reports, hitch marks; test states; a test channel and a regression suite
-  for all of it; the in-game menu's Developer pages for all of it.
-- **Tests**: tests/devtools_suite.py -- eight scenarios and the install checks -- all pass on the final build; the
-  map sweep through `warp` passes but for Field_14's 16 new pipelines (content that differs between runs, kept for the
-  coverage work); unit tests (test_dev_saves, test_map_sweep and the existing ones) pass.
-- **Known limits** (section 12): no arbitrary enemy or boss outside its arena (no script native; the game's own
-  arenas and spawns are used); which sword or shield is equipped is the game's own equipment screen; a flag through
-  the game's own save and load, the ending, and a boss fought to its end are not run in a test; the on-screen tag and
-  the launcher's switch not seen on screen (offscreen only, by the owner's rule).
-- **Outstanding decisions**: none blocking. Proposed ("decided here", can change at review): the developer-mode switch
-  on the launcher's Settings, Diagnostics; the 26 story steps' labels; the Developer pages' order.
-- **Next** (the owner's order, after the review): comprehensive Windows gameplay validation with these tools, bug
-  fixes, release preparation; collecting the pipelines M11's play meets (`coverage export`) into the preparation.
+- **Stage** (2026-11-16): **M11.1a done** -- the owner's items before the broad validation (sections 13-20); M11.1b
+  (the matrix's areas, docs/M11_VALIDATION.md) next. M11.0 accepted by the owner on 2026-11-16.
+- **Found and fixed**: field 14's pipelines were the fields' rare metal slime (5% a spawn point), which exposed three
+  rendering faults -- cube maps never drawn (B-002), texture kinds keyed for units no program reads (B-003), linear mip
+  levels and cube faces read from the wrong bytes (B-004, runtime patch 0165); older test switches honoured with
+  developer mode off (B-001); a unit test failing since M9.2g (B-005).
+- **Validated** (offscreen): flags, story, money and items through the game's own save and load and a new process;
+  temple 1's guardian from its introduction to its rewards and the sage's room; the ending from the last arena to the
+  credits and the cleared title; every enemy type spawned the game's way; developer mode off meaning off in an
+  install; the full map sweep (166/166, nothing unprepared) and the RPCS3 reference scenes (5/5) on the new build.
+- **Not done**: the other 14 boss encounters, the enemies' damage, deaths, drops and sounds per type, the minigames,
+  the side quests, the editor, death and respawn, audio, frame-rate independence -- the matrix's todo rows.
+- **Outstanding decisions**: none blocking.
 
 ## 1. The owner's request (2026-11-16)
 
@@ -590,3 +583,218 @@ winning it is the game's).
 **Not verified here** (offscreen only, by the owner's rule): the "DEVELOPER MODE - TEST SAVES" tag and the menu over
 a real frame (the pictures are composed and reviewed offscreen); the launcher's Settings showing the switch (the same
 code path as every other switch; the worker's `settings --set` checked).
+
+## 13. M11.1: the owner's request and the plan (2026-11-16)
+
+The owner accepted M11.0 and started **M11.1 -- comprehensive Windows gameplay validation and bug fixes**, preparing
+for a Windows beta: correctness and stability before features; the developer tools and automated scenarios used
+wherever possible, not only the owner's own play; rendering compared with RPCS3 where a difference is suspected;
+graphics pipeline libraries still off by default; every test offscreen; the owner's saves protected; every
+licensing and distribution safeguard binding; M7 unauthorized, no public release.
+
+**Before the broad validation** (the owner's list; M11.1a):
+1. Field_14's unprepared pipelines: the content responsible, not just the recorded pipelines added; whether similar
+   random or conditional content exists elsewhere (section 15).
+2. The newly found shaders and pipelines into the preparation.
+3. The 167 maps against the 166 reachable (section 16).
+4. Progression and event flags changed with the tools survive the game's own save and load.
+5. One boss from its introduction through defeat, rewards and progression.
+6. The ending and the credits.
+7. The developer command interface inert with developer mode off (section 14).
+8. Arbitrary enemy spawning, through the game's own actor set-up where possible (every enemy type's rendering,
+   physics and audio). Equipment chosen in the game's own screen stays.
+
+**The validation** (M11.1b onward): a structured matrix, docs/M11_VALIDATION.md -- every dungeon, floor, field and
+interior; every boss and enemy type; the main story; side quests and optional events; items, equipment, magic and
+special abilities; character creation and editing; death, respawn and checkpoints; saving, loading and persistence;
+cinematics, the ending and post-game content; audio, music, environmental effects and visual correctness; frame-rate
+independence and performance; shader and pipeline coverage. Each row names its method (an automated scenario, a
+sweep, the tools, a comparison with RPCS3, or the owner's hands -- the last only where nothing else can see it), its
+evidence and its state. Every bug found gets an entry there: its severity (S1 crash, hang, lost progress or save
+damage; S2 wrong behaviour or rendering a player meets; S3 minor; S4 cosmetic), how to reproduce it, its root cause,
+its fix and the regression test that keeps it fixed.
+
+**Stages**: M11.1a the pre-validation items; M11.1b the matrix, its runner and the first full pass of what the
+existing scenarios and sweeps cover; M11.1c onward the matrix's areas in turn (maps and visuals, bosses and enemies,
+story and quests, items and abilities, the editor, death and saves, cinematics, audio, performance), bugs fixed as
+found, each stage validated and pushed.
+
+## 14. M11.1a: developer mode off means off (2026-11-16) [C]
+
+The developer tools themselves were already inert with developer mode off (M11.0a: nothing set up, dev.cmd never
+read, no hook installed, the in-game menu without its Developer item; devtools_off and the install checks). An audit
+of every developer switch found older test switches (R1-M8) a player's own build still honoured from the
+environment, whatever the setting: **life.trigger and pos.trigger** (with DOTHEROES_DEV_STATE: the hero's life and
+position set from a file in the game's folder), **DOTHEROES_DEV_CANT_DIE**, **DOTHEROES_DEV_CREDITS** (the ending on a
+key or a timer), **DOTHEROES_DEV_WAVER** and **DOTHEROES_DEV_SOUND** (an effect and sounds started).
+
+**Changed**: in an installed game (started as a player starts it) with developer mode off, those switches are off --
+named once in the log (`[dev-switches] developer mode is off: ignored in an installed game: ...`); the read-only
+ones a test follows stay (DOTHEROES_DEV_STATE's state and actors, the logs, hitch marks, the harness's stop). Outside
+an installed game -- the repository's own test runs -- every switch works as before. And with developer mode on, the
+saves' roots are always developer mode's own: a root inherited from the environment, which could be the player's,
+is replaced (port/main.cpp; port/devtools/devtools.cpp `devtools_gate`).
+
+**Test**: the install checks gain devtools_install_off -- the same install with its setting at 0, every one of those
+switches set and a command, a life and a place left for it: none taken, the switches named as ignored, no
+developer-mode folder, the player's saves unchanged. **PASS** (a throwaway install as a player starts it, offscreen):
+dev.cmd, life.trigger and pos.trigger left where they were, no dev.out, no `[dev]` line, `[dev-switches] developer mode
+is off: ignored in an installed game: DOTHEROES_DEV_CANT_DIE DOTHEROES_DEV_CREDITS DOTHEROES_DEV_WAVER`, the state a
+test reads still written, no data/devmode, the player's 12 save files byte for byte unchanged; devtools_install and
+devtools_install_play (developer mode on) **PASS** on the same build.
+
+## 15. M11.1a: Field_14's pipelines -- a rare enemy, a renderer gap and a key too wide (2026-11-16) [M, C]
+
+**What met them** (probes over the shipped preparation, the tools' warp, F:\3d dot game heroes\m11\evidence\
+probe-f14, probe-f14b, probe-f14c): not the first visit after start-up as such -- in 76 arrivals on Field_14 the
+16 (or the 8 of them a run had not met yet) came on 5, at any visit, always about 0.2 s after the arrival, and the
+same loading screens and the same nearby enemies came on visits without them. A diagnostic of the renderer's own
+(each frame's cube maps, which draws read them) and the frame described as it happened found the content: **a cube
+map (32x32, 6 levels, in main memory) on texture unit 3, read by one model and left bound for the ~200 draws after
+it**, for as long as the hero stayed on the map. The model: a small voxel creature whose vertex colours are the
+script's (0.18, 0.18, 0.34) -- **the "HagureSlime"**, the fields' rare metal slime. Its script
+(lua/Object/36HagureSlime) gives each of its spawn points a **5% chance** to show it when the map loads (10% in the
+game's harder second mode); otherwise the object stays hidden. Field_14 has 18 such points, Field_13 10.
+
+**Three things it showed**:
+1. **A renderer gap (a real bug, S2)**: the native renderer had no source for a cube map, so every draw reading one
+   was not drawn (`not rendered: asp: unit 3 (format A5 32x32 mips 6 dim 2 cube 1) has no source`, 691 draws in the
+   sweep's visit). **The metal slime was invisible.** Fixed: a cube map is now a cube-compatible image of six layers
+   with a cube view, each face's mip chain read from its place in guest memory (the six faces one after another,
+   each a whole mip chain aligned to 128 bytes, as the runtime's layout code describes); port/native/render/
+   ppfx_render.cpp `guest_texture_live`, `make_image`, `make_view`.
+2. **A key too wide**: the pipeline key and the translation took each unit's texture kind (cube, volume) whether or
+   not the program reads that unit -- the shadow and unnormalised kinds were already limited to the units read. So
+   the cube map left on unit 3 made a second pipeline and a second translation of every later draw that never reads
+   unit 3: **14 of the 16** (the ninth post-processing pass among them). Fixed: those kinds limited to the units the
+   fragment program samples; the textures bound for a draw were already only those it samples.
+3. **The cube map's own bytes read wrongly (a runtime bug)**: the slime's material (package record
+   20020414:BF5A102F) binds a texture descriptor the engine keeps at a fixed address -- a 32x32 six-level linear
+   ARGB cube whose image is **in the game's executable itself** (the engine's default cube map: six faces, each one
+   coloured marker; found byte for byte in EBOOT.elf). Decoded, our faces after the first began inside the one
+   before: the runtime's layout code packed a linear image's lower mip levels at their own width, where the RSX keeps
+   the pitch register's row pitch on every level (as RPCS3 lays out a texture that is not swizzled) -- 8064 bytes a
+   face here, not 5504. Every linear mipmapped texture's lower levels were read from the wrong bytes too. Fixed in
+   the runtime's shared layout (both renderers use it): patches/ps3recomp/0165; its unit test
+   tests/test_rsx_texture_layout.c.
+4. **What is genuinely new**: the slime's own reflective material with the cube map (the model's pass, and an 8-bit
+   pass seen once). No program on the disc declares a cube sampler (the inventory: 0), so neither the programs'
+   headers nor the pass profiles can predict it: **the two recorded pipelines are added to the manifest**
+   (config/pipeline_manifest.txt, 244 lines: a header of numbers and where the two programs are on the player's
+   disc, as every line). **Prepared again** with this build (the throwaway install's worker, `prepare --rebuild`):
+   191 recorded and 2,265 package pipelines, 3,488 translations, none failed, 5.8 s; **both slime pipelines among
+   the prepared keys**. Over that preparation **every enemy type created (devtools_enemies, the slime and the dragon
+   shown at once): 51 pipelines built, all 51 prepared, no translation in play**.
+
+**Regression, on this build** (offscreen): **the full map sweep over the new preparation PASS** -- 166 of 166 maps
+arrived, **no pipeline met unprepared, no translation compiled in play** (M9.2g's sweep: 202 of 218 prepared,
+Field_14's 16 not); nothing drawn left out but the 7 known records of the first frame (evidence sweep-m111).
+**The RPCS3 reference scenes: 5 of 5 within the accepted figures** (the first dungeon's lamp-lit door, the entry hall,
+the corridor, the king's close-up, the editor's lines). The slime's look itself has no RPCS3 capture: the cube map's
+contents are the game's own bytes decoded as every other texture, the faces now each one marker, as the image in the
+executable holds them.
+
+**Similar content elsewhere** (every enemy script read): two enemies are hidden at random -- **HagureSlime** (5%;
+10% in the second mode) and **BlueDragon** (1%; 20% in the second mode), both on many fields' spawn lists -- and
+about 29 others take a **stronger version** at random (their scripts' StrongRate: the same model and materials,
+other speeds and colours). Conditional content beside: the spawn sets (A-H) the maps' records name, the second
+mode (bosses' life, spawn rates), the tower's rematches (flag 310: bosses' life, damage, attacks). The matrix covers
+each (docs/M11_VALIDATION.md).
+
+## 16. M11.1a: 167 map files, 166 reachable (2026-11-16) [C, M]
+
+The disc has **167 map packages** (map/pac_data/*.ps3.pac.gz, each with its alignment file) and the game's map list
+(the scripts' MS_ constants, 210 entries with the capture slots and the editor) names **166** of them; the map change
+(Event:SetMap) knows a map only by that list's names, and a name it does not know reloads the current map. The one
+package outside the list is **Field_99**, and it is not unused: the executable's own table of maps pairs the
+**character editor's world** ("Editor", MS_EDITOR) with Field_99's alignment, and every kept run of the editor loads
+Field_99's alignment, collision and package (archived editor runs, R3-R8). So all 167 are reachable -- 166 by the map
+change (the sweep), Field_99 through the title's character editor (the matrix's editor rows; the M9.2 preparation
+recorded the editor). The sweep's list stays at 166 and says why.
+
+## 17. M11.1a: what the tools change survives the game's own save and load (2026-11-16) [M]
+
+**Test** (tests/scenarios/devtools_persist.drive, devtools_persist_load.drive; tests/devtools_suite.py
+`devtools_persist`): from castle-front, the tools set event flags of three kinds (a counter to 9, another to 5, a
+quest's to 1), the story to step 4 (its flags, the world map's progress, its items), the money to 1234 and the
+arrows' count to 23; every flag 0-330, every item held, the money and the story's steps are read; the game's own
+SAVE (the system menu); back to the title and CONTINUE -- the game reads its save again -- and everything read
+again; then **a new process** continues from the saves that run wrote (kept as the local checkpoint
+build/checkpoints/m111-persist) and reads them a third time.
+
+**Result: PASS** -- the three reads identical: the 12 flags that are not 0 with the values set, the 6 items held
+(arrows 23), money 1234, the story's steps 1-4 and 7 done (7, the ancient sword, was the save's own). The game's
+save carries every change the tools make through its own functions; nothing the tools set lives outside it.
+
+## 19. M11.1a: any enemy, anywhere -- through the game's own object set-up (2026-11-16) [C, M]
+
+**How the game makes its objects** [C]: an enemy is an object running its type's script -- `<Name>Initialize`
+sets it up (its type AT_ENEMY, its model's nodes, its life, its colours), `<Name>Update` moves it; the map's
+alignment records create them on load. The scripts' own `Event:CreateNpc(dx, dy, dz, "<script>")` makes an object
+beside the hero running the named script (the game uses it 114 times for its people), and the developers' own
+test object (`Soldier`) made enemies by name with `Object:CreateObject`. Enemy models are not map-bound: every
+type's nodes are there on any map.
+
+**Built** (port/devtools/devtools.cpp, dev_menu.cpp):
+- `spawnables`: the enemy types, read in the scripts the game runs (as the events are): each `<Name>Initialize`
+  that makes an enemy -- 41 field and dungeon types (39 types, the temple-3 guardian's child, the spiked roller's
+  dashing version) and 21 minigame versions; `rare` for the two that hide themselves at random, `minigame` for those.
+- `spawn NAME [DX DZ]`: `Event:CreateNpc` with the type's script, three cells from the hero by default; a rare type
+  is shown at once (the scripts' `math.random` answers 1 until its set-up has run, a few frames, then is given
+  back); a minigame's version is refused outside its minigame (it expects its minigame's state, and a script error
+  inside the engine's own calls silences every later script call).
+- The in-game menu: Enemies, "Create an enemy here", the types.
+
+**Tested** (tests/scenarios/devtools_enemies.drive; offscreen): on field 14 every field and dungeon type created
+in turn, eight cells from the hero, two seconds to act, a picture, the map entered again every five types: **all
+40 types of the first run created, each one an enemy of the game's own actor list near the hero, and drawn** (the
+pictures reviewed: models, colours, effects -- the metal slime and the blue dragon among them, both shown at once);
+the slime's script life (88) and the rabbit's (16) as their scripts set them. The run's pipelines exported
+(`coverage export enemies`) for the preparation (section 15).
+
+## 18. M11.1a: a boss from its introduction to its rewards and what follows (2026-11-16) [M]
+
+**Test** (tests/scenarios/devtools_boss.drive; tests/devtools_suite.py `devtools_boss`): from the checkpoint at the
+first temple's boss door (the hero with the dungeon's items, five hearts), `boss temple1` -- its defeat flags cleared,
+its arena entered, the arena's own event introducing it -- its lines answered; the fight, automated: the drive's new
+`devfight` walks the hero to the nearest of the game's own ENEMY actors (the tools' `enemies`: the snake's head and
+its six segments, which the drive's older actor scan did not see) and strikes, until the game sets the defeat's flag
+(6); the drive's new `devcollect` walks over what the game lists as items (the money the boss drops, the life vessel
+its script places at grid 13, 10); the north passage, whose door script changes the map to the sage's room; the
+sage's event paged until the game sets the orb's flag (7). No death (the tools') keeps the snake's contact damage
+from ending the run; the game's own damage, knockback and the boss's attacks are untouched.
+
+**Results** (offscreen; five runs while the scenario was built, the last the whole scenario: **PASS**): the guardian
+**defeated by the automated fight every time** -- 45, 28, 54 and 60 swings, 6.5 to 17 minutes; no death absorbed
+47-124 hits that would have ended the hero --
+the game then set **flags 6 and 8** (the snake's scene and its tomb); its money dropped and the life vessel appeared
+where the script puts it; **the vessel taken: maximum life 10 -> 12**; the door to the sage's room open; in the
+sage's room the game's event ran, set **flag 7** (orb 1) and gave the first spell (**magic 1 -> 4**). The dropped
+money does not stay: collected at once after the defeat (the first run's walk over it gained 110; the passing run's
+`devcollect`, 13 -- most coins were out of the hero's reach while the boss's end played, and gone after it).
+**Not covered**: the boss's own look and sound against RPCS3 (no capture of this fight exists; the matrix's boss rows);
+the other 14 encounters (the matrix, section 2 of docs/M11_VALIDATION.md, with this scenario as their pattern).
+
+## 20. M11.1a: the ending and the credits, the game's own way (2026-11-16) [C, M]
+
+**The chain** [C: the scripts]: the last enemy's defeat runs its after-event (DevilAfterEvent: the music stopped,
+mainevent_ending); that plays its scene, sets the ending's flag and moves to the tower's last room (D_7_2_9), whose
+event moves to the ending field (Field_90), whose event moves to the castle's epilogue (Field_91, -gtf91): there the
+game gives the hero back to the player -- the people gathered to talk -- and the player walks up the stairs and
+through the castle's door into the throne room (D_20_9), whose own event ends with Event:Ending: the credits movie,
+"Okay to save?", and the title of a cleared game.
+
+**Test** (tests/scenarios/devtools_ending.drive; tests/devtools_suite.py `devtools_ending`): from castle-front, the
+story set to the tower's rematches won (step 24), `boss last` (the last arena entered the game's way, its
+introduction answered), then the after-event's own call (mainevent_ending, as DevilAfterEvent makes it; the boss's
+defeat itself is the matrix's boss row); the chain paged with the drive's new `pressuntil` up to the epilogue; the
+player's part walked (to the stairs, up through the door); the throne room's event paged to the credits; the credits
+watched to their end; YES; the cleared title. Invulnerable and no death (the tools'), as the last enemy stays alive
+in its arena until the ending moves the hero away.
+
+**Result: PASS** (offscreen, 25 minutes): the maps in the game's order -- D_7_2_8, D_7_2_9, Field_90, Field_91,
+D_20_9; up to the epilogue 110 s, the throne room to the credits 79 s; **the credits movie played to its last frame**
+(7,860 of 7,860, none late, 1.97 ms a frame to decode); "Okay to save?" answered; **the cleared game's title movie**
+opened after the save. The pictures reviewed (the throne room's crowd, the credits, the question, the cleared title).
+Two of the scenario's first versions stopped where the game waits for the player (the epilogue's walk, which paging
+alone never does): the scenario's, not the game's.

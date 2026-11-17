@@ -1,0 +1,39 @@
+# Scenario: what the developer tools change survives the game's own save and load (M11.1a, docs/M11_PLAN.md
+# section 17), part 1: event flags of several kinds (a counter, a quest's, a boss's defeat through the story's
+# steps), the money and an item's count changed with the tools; the game's own SAVE (the system menu); back to the
+# title and CONTINUE -- the game reads its save again; the same values read back. tests/devtools_suite.py compares
+# the answers before the save and after the load, then runs part 2 (devtools_persist_load: a new process continuing
+# from this run's saves). No death (the tools') so a passing enemy never ends the run.
+# Starts from: the kept checkpoint castle-front.
+#! saves build/checkpoints/castle-front
+#! env DOTHEROES_DEVELOPER_MODE=1 DOTHEROES_NATIVE_CD=1 DOTHEROES_NATIVE_SOLVER=1,2,4,5,6 GCM_WRAP_LAP=1
+#! env DOTHEROES_PRESENT_ONCE=1 DOTHEROES_DEV_STATE=1 DIAG_FRAMES=frames.log PS3_VERBOSE=0 DUMP=0 SHOT_EVERY=0
+#! secs 600
+
+include common.drive
+
+log TitleMovie 120
+sleep 5
+call continue
+state life>0,area==17 90
+sleep 3
+dev nodeath on
+dev progress
+dev flag set 145 9
+dev flag set 221 5
+dev flag set 250 1
+dev progress set 4
+dev money 1234
+dev count 10 23
+dev flags 0 330
+dev items
+dev player
+dev progress
+call system_save
+call to_title_and_continue
+state life>0 90
+sleep 3
+dev flags 0 330
+dev items
+dev player
+dev progress

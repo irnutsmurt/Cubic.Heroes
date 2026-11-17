@@ -16,6 +16,14 @@ Scenarios (tests/scenarios/<name>.drive):
   devtools_diag    coverage before and after a warp, its export, frame times, the runtime's reports, test states
   devtools_player  life, magic, money through the game's functions; no death on a lethal hit; invulnerable among the
                    river's enemies, a control without, no death at low life
+  devtools_boss    temple 1's guardian from its introduction to its defeat (devfight), the life vessel taken, the
+                   sage's room and its event: the defeat's flags, more life and money, the orb's flag and items
+  devtools_enemies every enemy type created by the tools' `spawn` (the game's own CreateNpc), a picture of each,
+                   the session's pipelines exported
+  devtools_ending  the ending the game's way from the last enemy's arena to the credits and the cleared title
+  devtools_persist flags, the story's steps, money and an item's count set with the tools, the game's own SAVE, back
+                   to the title and CONTINUE: the same values; then devtools_persist_load, a new process continuing
+                   from those saves (kept as build/checkpoints/m111-persist): the same again
   --installed: devtools_install (the game as a player starts it boots on its empty test saves), then the worker's
     `devsaves --action copy-player` and devtools_install_play (CONTINUE loads the copy and plays); the player's save
     tree (data/gamedata) byte for byte the same after each, the test tree (data/devmode/gamedata) made; then
@@ -34,10 +42,20 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-def run(name, exe, installed=None):
+def run(name, exe, installed=None, shaders=None):
+    """one scenario through tests/boot_smoke.py; with `shaders` (a preparation's shader folder, M11.1) over a copy of
+    it, the warm-up off, every pipeline built logged prepared or not and the new ones' recipes kept in the run"""
+    import shutil
+    import tempfile
     env = dict(os.environ)
     for k in ("PS3RECOMP_VK_WINDOW", "WINDOW", "VISIBLE", "TOPMOST", "INSTALLED", "DOTHEROES_DEVELOPER_MODE"):
         env.pop(k, None)
+    tmp = None
+    if shaders:
+        tmp = tempfile.mkdtemp(prefix="suite-shaders-", dir=os.path.join(ROOT, "build", "test"))
+        shutil.copytree(shaders, os.path.join(tmp, "shaders"))
+        env.update({"PS3RECOMP_SPIRV_CACHE": os.path.join(tmp, "shaders"), "DOTHEROES_WARM": "0", "VK_COMPILE_LOG": "1",
+                    "DOTHEROES_RECIPES": os.path.join(tmp, "recipes.bin")})
     tag = f"suite-{name}"
     env.update({"BIN": exe, "SCENARIO": name, "RUN_TAG": tag, "ALSOFT_DRIVERS": "null", "KEEP_RUNS": "80",
                 "WINDOW": "0", "VISIBLE": "0", "TOPMOST": "0"})
@@ -46,7 +64,12 @@ def run(name, exe, installed=None):
     p = subprocess.run([sys.executable, os.path.join(ROOT, "tests", "boot_smoke.py")], cwd=ROOT, env=env,
                        capture_output=True, text=True)
     runs = sorted(d for d in os.listdir(os.path.join(ROOT, "build", "test")) if d.endswith(tag))
-    return os.path.join(ROOT, "build", "test", runs[-1]) if runs else None, p
+    rd = os.path.join(ROOT, "build", "test", runs[-1]) if runs else None
+    if tmp:   # the recipes the run recorded stay with it; the copied preparation goes
+        if rd and os.path.exists(os.path.join(tmp, "recipes.bin")):
+            shutil.copy2(os.path.join(tmp, "recipes.bin"), os.path.join(rd, "recipes.bin"))
+        shutil.rmtree(tmp, ignore_errors=True)
+    return rd, p
 
 
 def drive_failures(rd):
@@ -238,9 +261,170 @@ def check_diag(rd):
     return bad
 
 
+def persist_reads(rd):
+    """the persist run's two reads of the same values: before the save and after the load"""
+    reads, cur = [], {}
+    for x in answers(rd):
+        o = x.get("out")
+        if not x.get("ok"):
+            continue
+        if isinstance(o, list) and o and "flag" in o[0]:
+            cur = {"flags": {f["flag"]: f["value"] for f in o}}
+            reads.append(cur)
+        elif isinstance(o, list) and o and "count" in o[0] and cur:
+            cur["items"] = {i["id"]: i["count"] for i in o}
+        elif isinstance(o, list) and o and "step" in o[0] and cur:
+            cur["steps"] = [p["step"] for p in o if p.get("done")]
+        elif isinstance(o, dict) and "money" in o and "nodeath" in o and cur:
+            cur["money"] = o["money"]
+    return reads
+
+
+def persist_differences(a, b):
+    bad = []
+    for k in ("flags", "items", "money", "steps"):
+        if a.get(k) != b.get(k):
+            if isinstance(a.get(k), dict) and isinstance(b.get(k), dict):
+                d = {i: (a[k].get(i), b[k].get(i)) for i in set(a[k]) | set(b[k]) if a[k].get(i) != b[k].get(i)}
+                bad.append(f"{k} differ: {dict(sorted(d.items())[:8])}")
+            else:
+                bad.append(f"{k} differ: {a.get(k)} / {b.get(k)}")
+    return bad
+
+
+def check_persist(rd):
+    """devtools_persist: the values set before the save, the same after the game's own load"""
+    reads = persist_reads(rd)
+    if len(reads) < 2:
+        return [f"{len(reads)} reads of the values (2 expected)"]
+    saved, loaded = reads[-2], reads[-1]
+    bad = []
+    want = {145: 9, 221: 5, 250: 1}
+    got = {k: saved["flags"].get(k) for k in want}
+    if got != want:
+        bad.append(f"the flags as set: {got} (wanted {want})")
+    if saved.get("money") != 1234:
+        bad.append(f"money {saved.get('money')} (1234 set)")
+    if saved.get("items", {}).get(10) != 23:
+        bad.append(f"item 10's count {saved.get('items', {}).get(10)} (23 set)")
+    if not set(range(1, 5)) <= set(saved.get("steps", [])):
+        bad.append(f"story steps done {saved.get('steps')} (1-4 set)")
+    return bad + persist_differences(saved, loaded)
+
+
+def check_ending(rd):
+    """devtools_ending: the maps the game's ending chain loaded, in order, the credits movie, the cleared title"""
+    bad = []
+    lines = log_lines(rd)
+    maps = []
+    for ln in lines:
+        m = re.search(r"open '/dev_bdvd/PS3_GAME/USRDIR/data/map/map_alignment/(\w+)\.dat'", ln)
+        if m and (not maps or maps[-1] != m.group(1)):
+            maps.append(m.group(1))
+    after = maps[maps.index("D_7_2_8") + 1:] if "D_7_2_8" in maps else []
+    for want in ("D_7_2_9", "Field_90", "Field_91", "D_20_9"):
+        if want not in after:
+            bad.append(f"the ending never loaded {want} (maps after the last arena: {after})")
+    credits = [i for i, ln in enumerate(lines) if re.search(r"CreditMovie_eng\.bik", ln)]
+    if not credits:
+        bad.append("the credits movie never opened")
+    if credits and not any(re.search(r"TitleMovie_Ura", ln) for ln in lines[credits[0]:]):
+        bad.append("no cleared-game title movie after the credits")
+    return bad
+
+
+def check_enemies(rd):
+    """devtools_enemies: every enemy type created (its `spawn` answered) and an enemy of the game's actor list near
+    the hero after each; the coverage exported"""
+    bad, spawned, missing = [], [], []
+    types = None
+    pending = None
+    for x in answers(rd):
+        o = x.get("out")
+        if isinstance(o, list) and o and "rare" in o[0]:
+            types = [t["name"] for t in o if not t.get("minigame")]
+        elif isinstance(o, dict) and "spawn" in o:
+            pending = o["spawn"]
+            spawned.append(pending)
+        elif isinstance(o, list) and o and "kind" in o[0] and pending:
+            hero = next((a for a in o if a["kind"] == "PLAYER"), None)
+            near = [a for a in o if a["kind"] == "ENEMY" and a.get("visible") and hero and
+                    ((a["x"] - hero["x"]) ** 2 + (a["z"] - hero["z"]) ** 2) ** 0.5 < 14]
+            if not near:
+                missing.append(pending)
+            pending = None
+    if not types:
+        bad.append("no `spawnables` answer")
+    elif set(types) != set(spawned):
+        bad.append(f"types not created: {sorted(set(types) - set(spawned))}; created but not listed: "
+                   f"{sorted(set(spawned) - set(types))}")
+    if missing:
+        bad.append(f"no enemy near the hero after creating: {missing}")
+    if not any(isinstance(x.get("out"), dict) and "dir" in x["out"] for x in answers(rd)):
+        bad.append("no coverage export")
+    return bad
+
+
+def check_boss(rd):
+    """devtools_boss: the defeat, the reward and the progression, as the game's own state says"""
+    bad = []
+    flags, players, items = [], [], []
+    for x in answers(rd):
+        o = x.get("out")
+        if not x.get("ok"):
+            continue
+        if isinstance(o, list) and o and "flag" in o[0]:
+            flags.append({f["flag"]: f["value"] for f in o})
+        elif isinstance(o, list) and o and "count" in o[0]:
+            items.append({i["id"]: i["count"] for i in o})
+        elif isinstance(o, dict) and "max_life" in o:
+            players.append(o)
+    if len(flags) < 3 or len(players) < 3 or len(items) < 2:
+        return [f"{len(flags)} flag reads, {len(players)} player reads, {len(items)} item reads (3, 3, 2 expected)"]
+    before, defeated, after = flags[0], flags[1], flags[-1]
+    if before.get(6) or before.get(8):
+        bad.append(f"the defeat's flags were set before the fight: 6={before.get(6)}, 8={before.get(8)}")
+    if defeated.get(6) != 1 or defeated.get(8) != 1:
+        bad.append(f"after the fight the defeat's flags 6, 8 = {defeated.get(6)}, {defeated.get(8)} (1, 1 expected)")
+    if after.get(7) != 1:
+        bad.append(f"after the sage's room the orb's flag 7 = {after.get(7)} (1 expected)")
+    p0, p_vessel = players[0], players[-1]   # before the arena, after the sage's room
+    if p_vessel.get("max_life", 0) <= p0.get("max_life", 0):
+        bad.append(f"the life vessel: max life {p0.get('max_life')} -> {p_vessel.get('max_life')} (more expected)")
+    if (p_vessel.get("money") or 0) <= (p0.get("money") or 0):
+        bad.append(f"the boss's money: {p0.get('money')} -> {p_vessel.get('money')} (more expected)")
+    new_items = sorted(set(items[-1]) - set(items[0]))
+    if not new_items:
+        bad.append("no item gained in the sage's room")
+    return bad
+
+
 CHECKS = {"devtools_basic": check_basic, "devtools_off": check_off, "devtools_warp": check_warp,
           "devtools_menu": check_menu, "devtools_player": check_player, "devtools_progress": check_progress,
-          "devtools_encounter": check_encounter, "devtools_diag": check_diag}
+          "devtools_encounter": check_encounter, "devtools_diag": check_diag, "devtools_persist": check_persist,
+          "devtools_ending": check_ending, "devtools_enemies": check_enemies, "devtools_boss": check_boss}
+
+
+def persist_load(rd, exe):
+    """part 2: a new process CONTINUEs from part 1's saves (kept as build/checkpoints/m111-persist) and reads them"""
+    import shutil
+    src = os.path.join(rd, "gamedata", "dev_hdd0", "home", "00000001", "savedata")
+    ck = os.path.join(ROOT, "build", "checkpoints", "m111-persist")
+    if not os.path.isdir(src):
+        return [f"no saves in {src}"]
+    shutil.rmtree(ck, ignore_errors=True)
+    shutil.copytree(src, ck)
+    rd2, _ = run("devtools_persist_load", exe)
+    bad = ["no run directory"] if not rd2 else drive_failures(rd2)
+    if rd2:
+        reads = persist_reads(rd)
+        again = persist_reads(rd2)
+        if not reads or not again:
+            bad.append("no values read in one of the two runs")
+        else:
+            bad += [f"after a new process: {b}" for b in persist_differences(reads[-1], again[-1])]
+    print(f"devtools_persist_load: {'PASS' if not bad else 'FAIL'} ({rd2})")
+    return bad
 
 
 def tree_digest(tree):
@@ -349,6 +533,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--bin", default=os.path.join("build", "port-win", "dotheroes.exe"))
     ap.add_argument("--installed", help="a throwaway developer install: the install checks only")
+    ap.add_argument("--shaders", help="a preparation's shader folder: the scenarios over a copy of it (M11.1)")
     ap.add_argument("names", nargs="*")
     a = ap.parse_args()
     if a.installed:
@@ -356,10 +541,12 @@ def main():
     names = a.names or list(CHECKS)
     failed = 0
     for n in names:
-        rd, p = run(n, a.bin)
+        rd, p = run(n, a.bin, shaders=a.shaders)
         bad = ["no run directory"] if not rd else drive_failures(rd)
         if rd:
             bad += CHECKS[n](rd)
+        if rd and n == "devtools_persist" and not bad:
+            bad += persist_load(rd, a.bin)
         print(f"{n}: {'PASS' if not bad else 'FAIL'} ({rd})")
         for b in bad:
             print("  " + b)

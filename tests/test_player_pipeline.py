@@ -43,6 +43,9 @@ class LiftOptions(unittest.TestCase):
     def test_matches_r8_lift(self):
         """every configuration file and flag of the developers' release lift is in the player's"""
         sh = read("tools", "r8_lift.sh")
+        # a file named through a variable with a default (OBS=${R8_OBSERVERS:-config/...}, since M9.2g): its default
+        for name, default in re.findall(r"^(\w+)=\$\{\w+:-(config/[^}\s]+)\}", sh, re.M):
+            sh = sh.replace(f'"${name}"', default).replace(f"${name}", default)
         dev = re.findall(r"(--sjlj|--insn-patches|--entry-observers|--traps) config/(\S+)", sh)
         player = setup_pipeline.LIFT_CONFIG
         self.assertEqual(sorted(dev), sorted(player))
