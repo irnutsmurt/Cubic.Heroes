@@ -13,6 +13,7 @@ Scenarios (tests/scenarios/<name>.drive):
   devtools_menu    the in-game menu's Developer pages (pictures dumped): Warp to D_1_1_1 chosen and arrived; Status
   devtools_progress  flags, the story's steps, quests, items; a boss room before and after `progress set`
   devtools_encounter  a boss fought the game's way, the actors, a scene, an event by name, the map again
+  devtools_diag    coverage before and after a warp, its export, frame times, the runtime's reports, test states
   devtools_player  life, magic, money through the game's functions; no death on a lethal hit; invulnerable among the
                    river's enemies, a control without, no death at low life
   --installed: devtools_install (the game as a player starts it boots on its empty test saves), then the worker's
@@ -205,9 +206,38 @@ def check_encounter(rd):
     return bad
 
 
+def check_diag(rd):
+    """the diagnostics scenario's answers, and its export"""
+    bad = []
+    a = [x["out"] for x in answers(rd) if x.get("ok")]
+    cov = [o for o in a if isinstance(o, dict) and "built_unforeseen" in o]
+    if len(cov) < 2 or cov[1]["built_unforeseen"] <= cov[0]["built_unforeseen"] or not cov[1]["unforeseen_listed"]:
+        bad.append(f"coverage before and after a warp: {[(c.get('built_unforeseen'), c.get('unforeseen_listed')) for c in cov]}")
+    exp = next((o for o in a if isinstance(o, dict) and "dir" in o), None)
+    if not exp or not exp.get("pipelines"):
+        bad.append(f"the export: {exp}")
+    else:
+        try:
+            with open(os.path.join(exp["dir"], "coverage.json"), encoding="utf-8") as f:
+                listed = json.load(f)
+            if not any(p.get("map") == "D_1_1_1" for p in listed):
+                bad.append("the export names no pipeline met in D_1_1_1")
+        except (OSError, ValueError) as e:
+            bad.append(f"the export's coverage.json: {e}")
+    perf = next((o for o in a if isinstance(o, dict) and "fps" in o), {})
+    if perf.get("frames", 0) < 100 or perf.get("fps", 0) <= 0:
+        bad.append(f"perf: {perf}")
+    rt = next((o for o in a if isinstance(o, dict) and "written_to_the_log" in o), {})
+    if not rt.get("written_to_the_log"):
+        bad.append("no native report written")
+    if not any(isinstance(o, dict) and o.get("kept") for o in a) or not any(isinstance(o, dict) and o.get("restored") for o in a):
+        bad.append("a test state not kept and restored")
+    return bad
+
+
 CHECKS = {"devtools_basic": check_basic, "devtools_off": check_off, "devtools_warp": check_warp,
           "devtools_menu": check_menu, "devtools_player": check_player, "devtools_progress": check_progress,
-          "devtools_encounter": check_encounter}
+          "devtools_encounter": check_encounter, "devtools_diag": check_diag}
 
 
 def tree_digest(tree):

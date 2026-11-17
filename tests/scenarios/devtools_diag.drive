@@ -1,0 +1,33 @@
+# Scenario: the developer tools' coverage, diagnostics and test states (M11.0f, docs/M11_PLAN.md): the renderer's
+# own counters before and after a warp (a test runs without a preparation: every pipeline it builds is new), this
+# session's new pipelines exported with the maps they were met in (and their recipes, for the next preparation), the
+# frame times and memory, the native systems' reports written now, a hitch mark, the test saves kept as a state and
+# restored. tests/devtools_suite.py checks the answers and the export. Starts from: the kept checkpoint castle-front.
+#! saves build/checkpoints/castle-front
+#! env DOTHEROES_DEVELOPER_MODE=1 DOTHEROES_NATIVE_CD=1 DOTHEROES_NATIVE_SOLVER=1,2,4,5,6 GCM_WRAP_LAP=1
+#! env DOTHEROES_PRESENT_ONCE=1 DOTHEROES_DEV_STATE=1 DOTHEROES_DEV_CANT_DIE=1 DIAG_FRAMES=frames.log PS3_VERBOSE=0
+#! env DUMP=0 SHOT_EVERY=0
+#! secs 400
+
+include common.drive
+
+log TitleMovie 120
+sleep 5
+call continue
+state life>0,area==17 90
+sleep 3
+dev coverage
+dev warp D_1_1_1 @150
+sleep 5
+dev coverage
+dev coverage export cov1
+dev perf
+dev runtime
+dev mark
+dev states
+dev state keep s1
+dev states
+dev state restore s1
+devfail state restore no_such_state
+devfail saves copy-player
+devstate frames>+30 30

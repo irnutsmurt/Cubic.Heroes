@@ -15,14 +15,15 @@ read in the code or the data, [M] measured, [I] inferred, [H] a hypothesis still
   through the game's own functions, invulnerability, no death (a lethal hit leaves half a heart), the Player page.
   **M11.0d done** (section 9): the event flags, the main story in 26 steps, quests, items (give, count, remove),
   their pages. **M11.0e done** (section 10): bosses fought again the game's way, the actors near, a map's enemies
-  again, events started by name, scenes, the ending and its credits, their pages. M11.0f (pipeline coverage,
-  performance and runtime diagnostics) next.
+  again, events started by name, scenes, the ending and its credits, their pages. **M11.0f done** (section 11):
+  pipeline coverage live and exported for the next preparation, frame times and memory, the native systems' reports
+  on demand, hitch marks, test states kept and restored in the game, their pages. M11.0g (integration) next.
 - **Done**: the map sweep made a regression test (tests/map_sweep.py `check`; section 5): the full sweep passes, 166
   maps arrived in their own areas, 0 pipelines unprepared, 0 translations in play; the check found that M9.2g's sweep
   never reached fields 1-9 (named by their files, not the engine's names) -- fixed, swept, all their pipelines were
   already prepared; docs/M92_SHADER_PLAN.md corrected.
-- **Next**: M11.0f (section 4): pipeline coverage (the renderer's own counters live; an export the manifest can
-  take), performance (frame times, threads, memory) and the native runtime's reports on demand, test-state pages.
+- **Next**: M11.0g (section 4): the suites as one regression run (with the install checks), the documents
+  (HANDOFF's debugging tools, the README's developer note), the owner's review of M11.0.
 - **Outstanding decisions**: none blocking; the defaults "decided here" in section 3 can be changed at review.
 
 ## 1. The owner's request (2026-11-16)
@@ -519,3 +520,39 @@ given through the game's own item-get and equipped in the game's own equipment s
 **Not covered yet**: `ending` was not run in a test (it ends the session in the game's credits; M8's credits tests
 cover the game's own Ending); a boss fought to its end with the tools (the fight starts and its enemies are there;
 winning it is the game's).
+
+## 11. M11.0f: coverage, diagnostics, test states (2026-11-16) [C, M]
+
+**Built** (port/devtools/devtools.cpp, dev_menu.cpp; port/native/render/ppfx_render.cpp):
+- **Pipeline coverage** (`coverage`): the renderer's own counters now -- the pipelines built in play that the
+  preparation had made and had not, their time, the frames held building and the longest, the pipelines prepared for
+  this GPU, the warm-up -- and the runtime's translations (in play, from disk, from memory)
+  (ppfx_render_coverage; rsx_hlsl_to_spirv_cache_stats). Every pipeline built in play that the preparation had not
+  made is also handed to the tools as it is built (g_ppfx_unforeseen_hook) with the map it was met in.
+  **`coverage export [NAME]`**: this session's new pipelines with their maps and times (coverage.json) and the
+  recipes the renderer recorded for them (DOTHEROES_RECIPES), into `<install>/data/devmode/exports/NAME` -- what M11's
+  play-throughs feed the manifest with (the owner's request: keep collecting bosses, enemies, items, effects, events).
+- **Performance** (`perf`): frame times measured at the game's own frame boundary (the flip), the time the in-game
+  menu held the game left out -- frames per second, the mean, the 99th percentile and the longest of the last 600,
+  the frames over 50 and 100 ms and the longest of the session -- and the process's working set and private memory;
+  the frame limit and VSync as set.
+- **The native runtime** (`runtime`): the native systems' reports (physics tasks, inflation, water, waver, flip
+  waits) written to the game's log now rather than at its exit; `mark`: a hitch mark as F8 makes one (the log, the
+  frame trace, the screen).
+- **Test states in the game** (`states`, `state keep NAME`, `state restore NAME`, `saves copy-player`): the test saves
+  kept or put back as named copies (`<install>/data/devmode/states`), and the player's saves copied into them (an
+  installed game only; the player's tree only read) -- only ever on a save root that is developer mode's own or a
+  test's run directory; a restored state is loaded from the title (CONTINUE). The worker's `devsaves` (M11.0a) does
+  the same with the game closed.
+- **Pages**: Coverage (its counters; "Export this session's new pipelines"), Diagnostics (frame times, memory, the
+  limit; "Write the native systems' reports to the log", "Mark a hitch"), Test saves (keep a new state, copy my
+  saves, restore one).
+
+**Tested** (offscreen; build/m11/dev):
+- devtools_diag **PASS**: coverage before and after a warp (a test runs without a preparation: 42, then 54 new
+  pipelines, 60 then 70 translations); the export lists all 54 with their maps (those met in D_1_1_1 named); frame
+  times (59.5 fps over the last 600 frames), memory; the five native reports written; a mark; a test state kept,
+  listed and restored; an unknown state and `saves copy-player` (not an installed game) refused.
+- devtools_menu **PASS** with the Coverage and Diagnostics pages viewed (pictures reviewed: 60.5 fps, mean 16.5 ms;
+  the menu's own hold no longer counted as a frame -- a first version showed it as a 2 s "frame").
+- The whole suite (basic, off, warp, menu, player, progress, encounter, diag) **PASS**.

@@ -15,7 +15,7 @@
 namespace {
 
 enum Kind { V_ROOT, V_WARP, V_GROUP, V_ENTRIES, V_STATUS, V_PLAYER, V_CHOICE, V_STORY, V_FLAGS, V_QUESTS, V_QFLAGS,
-            V_ITEMS, V_ITEM, V_BOSSES, V_ENEMIES, V_EVENTS, V_EVENTLIST };
+            V_ITEMS, V_ITEM, V_BOSSES, V_ENEMIES, V_EVENTS, V_EVENTLIST, V_COVERAGE, V_DIAG, V_SAVES };
 struct Level { Kind kind; std::string arg; int focus; };
 std::vector<Level> g_stack;
 std::string g_note;
@@ -155,6 +155,18 @@ std::string event_group(const std::string& name)
     return u == std::string::npos || u == 0 ? std::string("other") : name.substr(0, u);
 }
 std::string g_player;   /* the last `player` answer */
+
+/* a number field shown with at most one decimal */
+std::string fnum(const std::string& json, const char* key)
+{
+    const std::string k = std::string("\"") + key + "\":";
+    const size_t i = json.find(k);
+    if (i == std::string::npos) return "?";
+    const double v = strtod(json.c_str() + i + k.size(), nullptr);
+    char b[32];
+    snprintf(b, sizeof b, v == (long long)v ? "%.0f" : "%.1f", v);
+    return b;
+}
 void read_player()
 {
     if (!devtools::run_sync("player", g_player)) g_note = "The player could not be read: " + g_player;
@@ -203,7 +215,9 @@ DevView dev_menu_view()
                    { "Story", "The main story's steps" }, { "Flags", "The game's event flags" },
                    { "Quests", "Flags by the script that sets them" }, { "Items", "Give, count, remove" },
                    { "Bosses", "Fight one again, the game's way" }, { "Enemies", "This map's, again" },
-                   { "Events", "Start one by name; cinematics" }, { "Status", "The game's state now" } };
+                   { "Events", "Start one by name; cinematics" }, { "Coverage", "Pipelines built in play" },
+                   { "Diagnostics", "Frame times, memory, the runtime" }, { "Test saves", "Keep and restore test states" },
+                   { "Status", "The game's state now" } };
         v.note = "Test saves only. Actions apply to the paused game.";
         break;
     case V_WARP:
@@ -323,6 +337,45 @@ DevView dev_menu_view()
             if (event_group(sfield(o, "name")) == L.arg)
                 v.rows.push_back({ sfield(o, "name"), field(o, "cinematic") == 1 ? "Cinematic" : "" });
         break;
+    case V_COVERAGE: {
+        v.title = "COVERAGE";
+        auto num = [&](const char* k) { return fnum(g_list, k); };
+        v.rows = { { "Export this session's new pipelines", "For the next preparation" },
+                   { "Pipelines built in play, prepared", num("built_prepared") },
+                   { "Pipelines built in play, not prepared", num("built_unforeseen") },
+                   { "Their building (ms)", num("unforeseen_ms") },
+                   { "Shaders translated in play", num("translations") },
+                   { "Frames held building, the longest (ms)", num("frames_held") + ", " + num("longest_held_ms") },
+                   { "Pipelines prepared for this GPU", num("prepared_for_gpu") } };
+        v.note = "Each new one is recorded for the next preparation.";
+        break;
+    }
+    case V_DIAG: {
+        v.title = "DIAGNOSTICS";
+        auto num = [&](const char* k) { return fnum(g_list, k); };
+        v.rows = { { "Write the native systems' reports to the log", "" }, { "Mark a hitch", "In the log and the trace" },
+                   { "Frames per second (the last 600 frames)", num("fps") },
+                   { "Frame times (ms): mean, p99, longest", num("mean_ms") + ", " + num("p99_ms") + ", " + num("max_ms") },
+                   { "Frames over 50 ms, over 100 ms", num("over_50ms") + ", " + num("over_100ms") },
+                   { "The longest frame (ms)", num("longest_ms") },
+                   { "Memory: working set, private (MB)", num("working_set_mb") + ", " + num("private_mb") },
+                   { "Frame limit, VSync", (sfield(g_list, "frame_limit").empty() ? std::string("default") : sfield(g_list, "frame_limit")) +
+                                           ", " + (sfield(g_list, "vsync").empty() ? std::string("default") : sfield(g_list, "vsync")) } };
+        break;
+    }
+    case V_SAVES: {
+        v.title = "TEST SAVES";
+        v.rows = { { "Keep the test saves as a new state", "" }, { "Copy my saves into the test saves", "Only read" } };
+        size_t a = 0;
+        while ((a = g_list.find('"', a)) != std::string::npos) {   /* the states' names */
+            const size_t e = g_list.find('"', a + 1);
+            if (e == std::string::npos) break;
+            v.rows.push_back({ "Restore " + g_list.substr(a + 1, e - a - 1), "" });
+            a = e + 1;
+        }
+        v.note = "A restored state is loaded from the title (CONTINUE).";
+        break;
+    }
     case V_STATUS:
         v.title = "STATUS";
         v.rows = status_rows();
@@ -345,10 +398,10 @@ int dev_menu_pick(int row)
         if (row == 1) { g_player.clear(); g_stack.push_back({ V_PLAYER, "", 0 }); }
         {
             static const Kind kinds[] = { V_WARP, V_PLAYER, V_STORY, V_FLAGS, V_QUESTS, V_ITEMS, V_BOSSES, V_ENEMIES,
-                                          V_EVENTS, V_STATUS };
+                                          V_EVENTS, V_COVERAGE, V_DIAG, V_SAVES, V_STATUS };
             static const char* lists[] = { nullptr, nullptr, "progress", "flags 0 330 all", "quests", "items all", "bosses",
-                                           "enemies", "events", nullptr };
-            if (row >= 2 && row < 10) {
+                                           "enemies", "events", "coverage", "perf", "states", nullptr };
+            if (row >= 2 && row < 13) {
                 g_ending_armed = false;
                 if (lists[row] && !devtools::run_sync(lists[row], g_list, 5000)) { g_note = g_list; g_list.clear(); }
                 g_stack.push_back({ kinds[row], "", 0 });
@@ -411,6 +464,40 @@ int dev_menu_pick(int row)
         std::string out;
         if (!devtools::run_sync("event " + names[row], out)) { g_note = out; return 0; }
         return 1;   /* the event runs once the menu lets the game go */
+    }
+    case V_COVERAGE: {
+        std::string out;
+        if (row == 0) g_note = devtools::run_sync("coverage export", out, 8000) ? "Exported: " + sfield(out, "dir") : out;
+        devtools::run_sync("coverage", g_list);
+        return 0;
+    }
+    case V_DIAG: {
+        std::string out;
+        if (row == 0) g_note = devtools::run_sync("runtime", out) ? "Written to the game's log." : out;
+        if (row == 1) g_note = devtools::run_sync("mark", out) ? "Marked." : out;
+        devtools::run_sync("perf", g_list);
+        return 0;
+    }
+    case V_SAVES: {
+        std::string out;
+        int n = 0;
+        for (size_t a = 0; (a = g_list.find('"', a)) != std::string::npos; a = g_list.find('"', a + 1) + 1) n++;
+        if (row == 0) g_note = devtools::run_sync("state keep state-" + std::to_string(n + 1), out) ? "Kept as state-" + std::to_string(n + 1) + "." : out;
+        else if (row == 1) g_note = devtools::run_sync("saves copy-player", out) ? "Copied: load them from the title." : out;
+        else {
+            std::vector<std::string> names;
+            for (size_t a = 0; (a = g_list.find('"', a)) != std::string::npos;) {
+                const size_t e = g_list.find('"', a + 1);
+                if (e == std::string::npos) break;
+                names.push_back(g_list.substr(a + 1, e - a - 1));
+                a = e + 1;
+            }
+            const int k = row - 2;
+            if (k >= 0 && k < (int)names.size())
+                g_note = devtools::run_sync("state restore " + names[k], out) ? "Restored " + names[k] + ": load it from the title." : out;
+        }
+        devtools::run_sync("states", g_list);
+        return 0;
     }
     case V_ITEMS: {
         const auto its = objects(g_list);

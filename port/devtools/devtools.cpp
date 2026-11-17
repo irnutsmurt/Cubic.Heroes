@@ -21,7 +21,12 @@
 #include "ppu_context.h"
 #include "ps3emu/guest_pause.h"
 #include "ps3emu/osd.h"
-#include "ps3emu/ps3_ftrace.h"   /* the compile log's clock: [warp] lines line up with [vk-compile] (map_sweep.py) */
+#include "ps3emu/ps3_ftrace.h"
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <psapi.h>
+#endif   /* the compile log's clock: [warp] lines line up with [vk-compile] (map_sweep.py) */
 
 #include <algorithm>
 #include <atomic>
@@ -45,6 +50,7 @@ enum { DH_LOG_ERROR = 0, DH_LOG_WARNING = 1, DH_LOG_INFO = 2 };
 #define DLOG(...) do { if (dh_log) dh_log(__VA_ARGS__); } while (0)
 
 extern "C" uint8_t* vm_base;
+extern "C" void (*g_ppfx_unforeseen_hook)(uint64_t key, const char* kind, double ms);   /* ppfx_render.cpp (M11.0f) */
 extern "C" int64_t sys_memory_allocate(ppu_context* ctx);
 struct DevFnEntry { uint64_t addr; void (*func)(ppu_context*); const char* name; };   /* the lift's func_entry */
 extern "C" const DevFnEntry function_table[];
@@ -1067,6 +1073,252 @@ int encounter_command(const ppu_context* c, const Cmd& cmd, const std::string& w
     return -1;
 }
 
+/* ---- coverage, performance, the native runtime, test states (M11.0f) ---- */
+struct Unforeseen { uint64_t key; std::string kind; double ms; uint32_t area; double t; };
+std::mutex g_unf_mu;
+std::vector<Unforeseen> g_unforeseen;   /* this session's pipelines built in play that the preparation had not made */
+
+void on_unforeseen(uint64_t key, const char* kind, double ms)
+{
+    std::lock_guard<std::mutex> g(g_unf_mu);
+    if (g_unforeseen.size() < 100000) g_unforeseen.push_back({ key, kind ? kind : "", ms, g32(kArea), ft_clock() });
+}
+
+/* the frames, measured at the flip (the game's own frame boundary), the time the menu held the game left out */
+struct Frames {
+    std::mutex mu;
+    std::deque<double> recent;   /* the last 600 frame times (ms) */
+    uint64_t n = 0, over50 = 0, over100 = 0;
+    double longest = 0;
+    std::chrono::steady_clock::time_point last;
+    bool have_last = false;
+    std::atomic<bool> held{ false };   /* the menu held the game since the last flip: that interval is not a frame */
+} g_frames;
+
+void note_frame()
+{
+    const auto now = std::chrono::steady_clock::now();
+    std::lock_guard<std::mutex> g(g_frames.mu);
+    const bool held = g_frames.held.exchange(false);
+    if (g_frames.have_last && !held && !ps3_guest_paused()) {
+        const double ms = std::chrono::duration<double, std::milli>(now - g_frames.last).count();
+        if (ms < 60000) {
+            g_frames.recent.push_back(ms);
+            if (g_frames.recent.size() > 600) g_frames.recent.pop_front();
+            g_frames.n++;
+            g_frames.over50 += ms > 50;
+            g_frames.over100 += ms > 100;
+            if (ms > g_frames.longest) g_frames.longest = ms;
+        }
+    }
+    g_frames.last = now;
+    g_frames.have_last = true;
+}
+
+std::string perf_json()
+{
+    std::vector<double> v;
+    uint64_t n, o50, o100;
+    double longest;
+    {
+        std::lock_guard<std::mutex> g(g_frames.mu);
+        v.assign(g_frames.recent.begin(), g_frames.recent.end());
+        n = g_frames.n; o50 = g_frames.over50; o100 = g_frames.over100; longest = g_frames.longest;
+    }
+    double sum = 0, mx = 0;
+    for (double x : v) { sum += x; mx = std::max(mx, x); }
+    std::vector<double> s = v;
+    std::sort(s.begin(), s.end());
+    const double p99 = s.empty() ? 0 : s[std::min(s.size() - 1, (size_t)(s.size() * 0.99))];
+    double ws = 0, pb = 0;   /* the process's memory (MB) */
+#ifdef _WIN32
+    PROCESS_MEMORY_COUNTERS_EX pm = {};
+    pm.cb = sizeof pm;
+    if (K32GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS*)&pm, sizeof pm)) {
+        ws = pm.WorkingSetSize / 1048576.0; pb = pm.PrivateUsage / 1048576.0;
+    }
+#endif
+    const char* fps = getenv("DOTHEROES_FPS");
+    const char* vs = getenv("DOTHEROES_VSYNC");
+    char b[600];
+    snprintf(b, sizeof b,
+             "{\"frames\":%llu,\"window\":%zu,\"fps\":%.1f,\"mean_ms\":%.2f,\"p99_ms\":%.2f,\"max_ms\":%.2f,"
+             "\"over_50ms\":%llu,\"over_100ms\":%llu,\"longest_ms\":%.1f,\"frame_limit\":%s,\"vsync\":%s,"
+             "\"working_set_mb\":%.0f,\"private_mb\":%.0f}",
+             (unsigned long long)n, v.size(), v.empty() ? 0.0 : 1000.0 * v.size() / sum, v.empty() ? 0.0 : sum / v.size(),
+             p99, mx, (unsigned long long)o50, (unsigned long long)o100, longest, json_str(fps ? fps : "").c_str(),
+             json_str(vs ? vs : "").c_str(), ws, pb);
+    return b;
+}
+
+/* the developer tools' own folder: <install>/data/devmode, or the working directory (a test's run) */
+std::string devmode_dir()
+{
+    std::error_code ec;
+    return g_install_root.empty() ? std::filesystem::current_path(ec).generic_string() : g_install_root + "/data/devmode";
+}
+
+bool safe_name(const std::string& s)
+{
+    if (s.empty() || s.size() > 40 || !isalnum((unsigned char)s[0])) return false;
+    for (char ch : s) if (!isalnum((unsigned char)ch) && ch != '_' && ch != '-') return false;
+    return true;
+}
+
+/* the test saves (the save root in use): only ever one in developer mode's own folder or a test's run directory */
+std::string test_saves_root(std::string& why)
+{
+    const char* r = getenv("PS3_GAMEDATA_ROOT");
+    if (!r || !*r) { why = "no save root"; return std::string(); }
+    std::error_code ec;
+    const std::filesystem::path root = std::filesystem::weakly_canonical(r, ec);
+    const std::filesystem::path cwd = std::filesystem::current_path(ec);
+    const std::string rs = root.generic_string(), cs = cwd.generic_string();
+    const bool devmode = rs.find("/devmode/") != std::string::npos || (rs.size() >= 8 && rs.compare(rs.size() - 8, 8, "/devmode") == 0);
+    const bool test_run = g_install_root.empty() && rs.compare(0, cs.size(), cs) == 0;
+    if (!devmode && !test_run) { why = "the save root is not developer mode's own: " + rs; return std::string(); }
+    return rs;
+}
+
+/* dest replaced by a copy of src (src only read), through a folder beside it and a rename */
+bool replace_tree(const std::string& src, const std::string& dest, std::string& why)
+{
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const std::string part = dest + ".incoming", old = dest + ".replaced";
+    fs::remove_all(part, ec);
+    fs::remove_all(old, ec);
+    fs::create_directories(fs::path(dest).parent_path(), ec);
+    if (fs::exists(src, ec)) fs::copy(src, part, fs::copy_options::recursive, ec);
+    else fs::create_directories(part, ec);
+    if (ec) { why = "the copy failed: " + ec.message(); fs::remove_all(part, ec); return false; }
+    if (fs::exists(dest)) fs::rename(dest, old, ec);
+    if (ec) { why = "the old tree could not be moved aside: " + ec.message(); return false; }
+    fs::rename(part, dest, ec);
+    if (ec) { why = "the new tree could not be put in place: " + ec.message(); fs::rename(old, dest, ec); return false; }
+    fs::remove_all(old, ec);
+    return true;
+}
+
+extern "C" void phys_direct_report(void) __attribute__((weak));
+extern "C" void inflate_direct_report(void) __attribute__((weak));
+extern "C" void water_task_report(void) __attribute__((weak));
+extern "C" void waver_game_report(void) __attribute__((weak));
+extern "C" void cellGcm_flip_wake_report(void) __attribute__((weak));
+extern "C" void ppfx_render_coverage(double out[8]) __attribute__((weak));
+struct SpirvStats { uint32_t memory_hits, disk_hits, translations; };   /* the runtime's RsxSpirvCacheStats */
+extern "C" void rsx_hlsl_to_spirv_cache_stats(SpirvStats* out) __attribute__((weak));
+
+/* 1 answered (a change), 0 answered, -1 not one of these */
+int diagnostics_command(const ppu_context* c, const Cmd& cmd, const std::string& w, std::string rest)
+{
+    (void)c;
+    std::string why;
+    if (w == "coverage") {
+        const std::string op = word(rest);
+        if (op == "export") {   /* the session's new pipelines with the maps they were met in, and their recipes */
+            std::string name = word(rest);
+            if (name.empty()) name = "coverage-" + std::to_string((long long)ft_clock());
+            if (!safe_name(name)) { answer(cmd, false, "coverage export NAME: letters, digits, - and _"); return 0; }
+            namespace fs = std::filesystem;
+            std::error_code ec;
+            const std::string dir = devmode_dir() + "/exports/" + name;
+            fs::create_directories(dir, ec);
+            size_t n = 0;
+            if (FILE* f = fopen((dir + "/coverage.json").c_str(), "w")) {
+                std::lock_guard<std::mutex> g(g_unf_mu);
+                fprintf(f, "[");
+                for (const Unforeseen& u : g_unforeseen) {
+                    std::string map;
+                    for (const MapInfo& m : g_maps) if (m.number == (int)u.area) map = m.name;
+                    fprintf(f, "%s\n{\"key\":\"%016llX\",\"kind\":%s,\"ms\":%.2f,\"area\":%u,\"map\":%s,\"t\":%.3f}", n++ ? "," : "",
+                            (unsigned long long)u.key, json_str(u.kind).c_str(), u.ms, u.area, json_str(map).c_str(), u.t);
+                }
+                fprintf(f, "\n]\n");
+                fclose(f);
+            }
+            const char* rec = getenv("DOTHEROES_RECIPES");
+            bool copied = false;
+            if (rec && *rec && fs::exists(rec, ec)) {
+                fs::copy_file(rec, dir + "/recipes.bin", fs::copy_options::overwrite_existing, ec);
+                copied = !ec;
+            }
+            answer(cmd, true, "{\"dir\":" + json_str(fs::absolute(dir, ec).generic_string()) + ",\"pipelines\":" +
+                              std::to_string(n) + ",\"recipes\":" + (copied ? "true" : "false") + "}", true);
+            return 0;
+        }
+        double cv[8] = { 0 };
+        if (ppfx_render_coverage) ppfx_render_coverage(cv);
+        SpirvStats sp = { 0, 0, 0 };
+        if (rsx_hlsl_to_spirv_cache_stats) rsx_hlsl_to_spirv_cache_stats(&sp);
+        size_t nu;
+        { std::lock_guard<std::mutex> g(g_unf_mu); nu = g_unforeseen.size(); }
+        char b[600];
+        snprintf(b, sizeof b,
+                 "{\"built_prepared\":%.0f,\"built_unforeseen\":%.0f,\"prepared_ms\":%.1f,\"unforeseen_ms\":%.1f,"
+                 "\"frames_held\":%.0f,\"longest_held_ms\":%.1f,\"prepared_for_gpu\":%.0f,\"warmed\":%.0f,"
+                 "\"translations\":%u,\"translations_from_disk\":%u,\"translations_from_memory\":%u,\"unforeseen_listed\":%zu}",
+                 cv[0], cv[1], cv[2], cv[3], cv[4], cv[5], cv[6], cv[7], sp.translations, sp.disk_hits, sp.memory_hits, nu);
+        answer(cmd, true, b, true);
+        return 0;
+    }
+    if (w == "perf") { answer(cmd, true, perf_json(), true); return 0; }
+    if (w == "runtime") {   /* the native systems' reports, into the game's log now rather than at the exit */
+        std::string o = "[";
+        auto run = [&](void (*f)(void), const char* n) { if (f) { f(); o += std::string(o.size() > 1 ? "," : "") + json_str(n); } };
+        run(phys_direct_report, "physics tasks");
+        run(inflate_direct_report, "inflation");
+        run(water_task_report, "water");
+        run(waver_game_report, "waver");
+        run(cellGcm_flip_wake_report, "flip waits");
+        fflush(stderr);
+        answer(cmd, true, "{\"written_to_the_log\":" + o + "]}", true);
+        return 0;
+    }
+    if (w == "mark") {   /* a hitch mark, as F8 makes one (dev_state.cpp): the trace, the log, the screen */
+        static unsigned n = 0;
+        n++;
+        const uint64_t t = ps3_ft_now();
+        if (PS3_FT_ON()) ps3_ft_span(PS3_FT_MARK, 8, n, 0, t, t);
+        fprintf(stderr, "[mark] %u at %.3f s (developer tools)\n", n, (double)(int64_t)(t - g_ps3_ft.base) / 1e9);
+        char text[24];
+        snprintf(text, sizeof text, "MARK %u", n);
+        ps3_osd_post(text, 1500);
+        answer(cmd, true, "{\"mark\":" + std::to_string(n) + "}", true);
+        return 0;
+    }
+    if (w == "states") {
+        std::string o = "[";
+        std::error_code ec;
+        for (const auto& de : std::filesystem::directory_iterator(devmode_dir() + "/states", ec))
+            if (de.is_directory()) o += std::string(o.size() > 1 ? "," : "") + json_str(de.path().filename().string());
+        answer(cmd, true, o + "]", true);
+        return 0;
+    }
+    if (w == "state") {   /* the test saves kept as a named state, or one put back (the game reads saves at its load) */
+        const std::string op = word(rest), name = word(rest);
+        if ((op != "keep" && op != "restore") || !safe_name(name)) { answer(cmd, false, "state keep|restore NAME"); return 0; }
+        const std::string root = test_saves_root(why);
+        if (root.empty()) { answer(cmd, false, why); return 0; }
+        const std::string st = devmode_dir() + "/states/" + name + "/gamedata";
+        if (op == "restore" && !std::filesystem::exists(st)) { answer(cmd, false, "no test state " + name); return 0; }
+        if (!(op == "keep" ? replace_tree(root, st, why) : replace_tree(st, root, why))) { answer(cmd, false, why); return 0; }
+        answer(cmd, true, "{\"state\":" + json_str(name) + ",\"" + (op == "keep" ? "kept" : "restored") +
+                          "\":true,\"note\":" + json_str(op == "keep" ? "" : "load it from the title (CONTINUE)") + "}", true);
+        return 0;
+    }
+    if (w == "saves") {   /* the player's saves copied into the test saves (only read; never the other way) */
+        if (word(rest) != "copy-player") { answer(cmd, false, "saves copy-player"); return 0; }
+        if (g_install_root.empty()) { answer(cmd, false, "not an installed game (a test has its own saves)"); return 0; }
+        const std::string root = test_saves_root(why);
+        if (root.empty()) { answer(cmd, false, why); return 0; }
+        if (!replace_tree(g_install_root + "/data/gamedata", root, why)) { answer(cmd, false, why); return 0; }
+        answer(cmd, true, "{\"copied\":\"the player's saves into the test saves\",\"note\":\"load them from the title\"}", true);
+        return 0;
+    }
+    return -1;
+}
+
 /* true when the command changed the game (the next one waits for the next frame) */
 bool execute(const ppu_context* c, const Cmd& cmd)
 {
@@ -1085,6 +1337,10 @@ bool execute(const ppu_context* c, const Cmd& cmd)
         {
             const int r = encounter_command(c, cmd, w, rest);
             if (r >= 0) return r >= 1;
+        }
+        {
+            const int r = diagnostics_command(c, cmd, w, rest);
+            if (r >= 0) return r == 1;
         }
         if (w == "warp") return start_warp(c, cmd, rest) == 1;
         if (w == "maps" || w == "catalog") {
@@ -1149,6 +1405,7 @@ void on_flip(ppu_context* c)
 {
     g_flip_thread.store(this_thread_key(), std::memory_order_relaxed);
     g_flip_ctx.store(c, std::memory_order_release);
+    note_frame();
     check_warp();
     if (g_invulnerable.load(std::memory_order_relaxed) && (g_region || ensure_region(c))) {
         try { keep_invulnerable(c); } catch (const CallError&) {}
@@ -1161,6 +1418,7 @@ void on_flip(ppu_context* c)
 /* the runtime's hold (the in-game menu open): where the held thread waits; only the main thread runs commands */
 void on_hold()
 {
+    g_frames.held = true;
     ppu_context* c = g_flip_ctx.load(std::memory_order_acquire);
     if (!c) return;
     if (this_thread_key() != g_flip_thread.load(std::memory_order_relaxed)) { g_hold_other_thread++; return; }
@@ -1296,6 +1554,7 @@ extern "C" void devtools_start(const char* install_root, const char* elf)
     g_usrdir = elf ? std::filesystem::path(elf).parent_path().generic_string() : std::string();
     g_devtools_flip = on_flip;
     g_ps3_guest_hold_work = on_hold;
+    g_ppfx_unforeseen_hook = on_unforeseen;
     ps3_osd_set_tag("DEVELOPER MODE - TEST SAVES");
     std::thread(file_loop).detach();
     DLOG(DH_LOG_INFO, "dev", "developer mode: the tools are on; saves in %s; commands from dev.cmd, answers in dev.out",

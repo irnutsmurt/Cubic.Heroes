@@ -96,6 +96,8 @@ extern "C" int g_dotheroes_native_present;   // main.cpp (R6)
 
 // port/diag/game_log.h, in the game's executable: weak here, so a program linking this library without it still links
 extern "C" int dh_log_session_active(void) __attribute__((weak));
+// M11.0f: the developer tools' coverage (port/devtools): each pipeline built in play that the preparation had not made
+extern "C" void (*g_ppfx_unforeseen_hook)(uint64_t key, const char* kind, double ms);
 extern "C" void dh_log(int level, const char* tag, const char* fmt, ...) __attribute__((weak, format(printf, 3, 4)));
 
 namespace ppfx {
@@ -1327,6 +1329,7 @@ void compile_account(const char* kind, uint64_t key, uint64_t c_start, uint64_t 
     s_frame_build_ns += c_end - c_start;
     s_frame_builds++;
     if (!prepared) s_frame_unforeseen++;
+    if (!prepared && g_ppfx_unforeseen_hook) g_ppfx_unforeseen_hook(key, kind, (c_end - c_start) / 1e6);
     s.pipe_driver_ns += c_end - c_driver;
     const uint64_t all = c_end - c_start;
     uint64_t m = s.pipe_max_ns.load();
@@ -6444,6 +6447,20 @@ void render_start()
 }  // namespace ppfx
 
 // ---- M9.2's entry points ----------------------------------------------------------------------------------
+
+void (*g_ppfx_unforeseen_hook)(uint64_t key, const char* kind, double ms) = nullptr;
+
+// M11.0f: the counters the session's report gives, now (port/devtools `coverage`): [0] pipelines built in play that the
+// preparation had made, [1] that it had not, [2] [3] their milliseconds, [4] frames held building, [5] the longest
+// (ms), [6] pipelines prepared for this GPU, [7] the warm-up's made so far
+extern "C" void ppfx_render_coverage(double out[8])
+{
+    ppfx::Stats& st = ppfx::stats();
+    out[0] = (double)st.n_pipe_prepared; out[1] = (double)st.n_pipe_unforeseen;
+    out[2] = st.pipe_prepared_ns / 1e6; out[3] = st.pipe_unforeseen_ns / 1e6;
+    out[4] = (double)st.n_build_frames; out[5] = st.build_frame_max_ns / 1e6;
+    out[6] = (double)ppfx::s_prepared.size(); out[7] = (double)ppfx::s_warm_made.load();
+}
 
 // the pipeline cache saved now (a test's stop, the game's exit: ppfx_recorder.cpp, dev_state.cpp)
 extern "C" void ppfx_native_cache_save(void)

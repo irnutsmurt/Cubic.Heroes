@@ -9,7 +9,7 @@
 #! env DOTHEROES_DEVELOPER_MODE=1 DOTHEROES_OVERLAY_TEST=1 DOTHEROES_OVERLAY_DUMP=.
 #! env DOTHEROES_NATIVE_CD=1 DOTHEROES_NATIVE_SOLVER=1,2,4,5,6 GCM_WRAP_LAP=1 DOTHEROES_PRESENT_ONCE=1
 #! env DOTHEROES_DEV_STATE=1 DOTHEROES_DEV_CANT_DIE=1 DIAG_FRAMES=frames.log PS3_VERBOSE=0 DUMP=0 SHOT_EVERY=0
-#! secs 500
+#! secs 600
 
 include common.drive
 
@@ -21,7 +21,7 @@ sleep 5
 write overlay.input open wait wait wait down down down down down wait a wait wait a wait wait wait wait wait down wait a wait wait a wait wait a
 devstate area==37 120
 sleep 5
-write overlay.input open wait wait wait down down down down down wait a wait wait down down down down down down down down down wait a wait wait wait wait b wait b wait b wait b
+write overlay.input open wait wait wait down down down down down wait a wait wait down down down down down down down down down down down down wait a wait wait wait wait b wait b wait b wait b
 sleep 5
 devstate held==0,frames>+30 30
 write overlay.input open wait wait wait down down down down down wait a wait wait down wait a wait wait wait wait down down wait a wait wait down down down down down wait a wait wait wait b wait b wait b wait b
@@ -29,5 +29,7 @@ devstate money==9999,held==0 60
 write overlay.input open wait wait wait down down down down down wait a wait wait down down wait a wait wait wait b wait down wait a wait wait wait b wait down wait a wait wait wait b wait down wait a wait wait wait a wait wait a wait wait wait b wait b wait b wait b
 devstate held==0,frames>+30 60
 write overlay.input open wait wait wait down down down down down wait a wait wait down down down down down down wait a wait wait wait b wait b wait b
+devstate held==0,frames>+30 60
+write overlay.input open wait wait wait down down down down down wait a wait wait down down down down down down down down down wait a wait wait wait b wait down wait a wait wait wait b wait b wait b
 devstate held==0,frames>+30 60
 dev items
