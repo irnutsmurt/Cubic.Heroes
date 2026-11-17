@@ -11,6 +11,7 @@ Scenarios (tests/scenarios/<name>.drive):
   devtools_off     developer mode off: dev.cmd never read, no dev.out, no [dev] line in the log
   devtools_warp    the catalog; a warp to each kind of place, each arriving at its own map number; refusals
   devtools_menu    the in-game menu's Developer pages (pictures dumped): Warp to D_1_1_1 chosen and arrived; Status
+  devtools_progress  flags, the story's steps, quests, items; a boss room before and after `progress set`
   devtools_player  life, magic, money through the game's functions; no death on a lethal hit; invulnerable among the
                    river's enemies, a control without, no death at low life
   --installed: devtools_install (the game as a player starts it boots on its empty test saves), then the worker's
@@ -127,6 +128,9 @@ def check_menu(rd):
         bad.append(f"{len(dumps)} menu pictures dumped (6 or more expected)")
     if not any("[warp]" in ln and "arrived D_1_1_1" in ln for ln in log_lines(rd)):
         bad.append("no warp to D_1_1_1 arrived from the menu")
+    lists = [x["out"] for x in answers(rd) if x.get("ok") and isinstance(x.get("out"), list)]
+    if not lists or not any(i.get("id") == 4 and i.get("count", 0) >= 1 for i in lists[-1]):
+        bad.append("the Boomerang (4) was not given from the menu's Items page")
     return bad
 
 
@@ -152,8 +156,34 @@ def check_player(rd):
     return bad
 
 
+def check_progress(rd):
+    """the progression scenario's answers"""
+    bad = []
+    a = [x["out"] for x in answers(rd) if x.get("ok")]
+    flags = next((o for o in a if isinstance(o, list) and o and "flag" in o[0]), [])
+    if not any(f.get("flag") == 0 and f.get("name") for f in flags):
+        bad.append("the flags list has no named flag 0 (the scripts' EventFlag names)")
+    sets = [o for o in a if isinstance(o, dict) and o.get("flag") == 300 and "value" in o]
+    if [s["value"] for s in sets][:3] != [1, 1, 0]:
+        bad.append(f"flag 300 set, read, set back: {[s['value'] for s in sets]}")
+    one = [o for o in a if isinstance(o, dict) and "id" in o and "count" in o]
+    if [(o["id"], o["count"]) for o in one][:3] != [(4, 1), (10, 30), (4, 0)]:
+        bad.append(f"give 4, count 10 30, remove 4: {[(o['id'], o['count']) for o in one][:3]}")
+    quests = next((o for o in a if isinstance(o, list) and o and "function" in o[0]), [])
+    if len(quests) < 20:
+        bad.append(f"{len(quests)} quest functions (20 or more expected)")
+    st = [o for o in a if isinstance(o, dict) and "event_state" in o and o.get("area") == 38]
+    if len(st) < 2 or st[0]["event_state"] == 0 or st[1]["event_state"] != 0:
+        bad.append("temple 1's boss room: its event before the story was set past it, none after: "
+                   f"{[s['event_state'] for s in st]}")
+    snake = [o for o in a if isinstance(o, dict) and o.get("flag") == 6]
+    if [s.get("value") for s in snake] != [0, 0, 1]:
+        bad.append(f"flag 6 before, after the boss room, after `progress set 9`: {[s.get('value') for s in snake]}")
+    return bad
+
+
 CHECKS = {"devtools_basic": check_basic, "devtools_off": check_off, "devtools_warp": check_warp,
-          "devtools_menu": check_menu, "devtools_player": check_player}
+          "devtools_menu": check_menu, "devtools_player": check_player, "devtools_progress": check_progress}
 
 
 def tree_digest(tree):

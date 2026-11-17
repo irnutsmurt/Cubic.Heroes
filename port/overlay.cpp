@@ -494,7 +494,8 @@ void compose()
         snprintf(m, sizeof m, "%d more below", n - S.top - S.vis);
         ps3_ui_text(&c, x1 - 36 * s - ps3_ui_text_width(m, (int)(17 * s)), y + 4 * s, m, (int)(17 * s), C_DIM, 255, 0);
     }
-    if (!S.note.empty()) ps3_ui_text(&c, x0 + 60 * s, y + 20 * s, S.note.c_str(), (int)(19 * s), C_GOLD, 255, pw - 96 * s);
+    if (!S.note.empty())   /* below the "more below" line when the list goes on */
+        ps3_ui_text(&c, x0 + 60 * s, y + (S.top + S.vis < n ? 40 : 20) * s, S.note.c_str(), (int)(19 * s), C_GOLD, 255, pw - 96 * s);
     /* the prompts, along the panel's foot */
     const int st = prompt_style();
     const float fy = y1 - 34 * s, bs = 30 * s, fpx = (int)(20 * s);

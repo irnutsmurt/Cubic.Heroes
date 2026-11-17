@@ -1,0 +1,44 @@
+# Scenario: the developer tools' progression, quests and items (M11.0d, docs/M11_PLAN.md): the game's event flags
+# read and set (and set back), the main story's steps, the quests (the script functions that set flags of 100 and
+# above, read in the scripts the game runs), items given through the game's own item-get (Event:AddItem2), counted
+# and removed through the item's own object; then the story set past temple 1's guardian and its boss room entered
+# again: the game's own scripts now treat it as beaten. tests/devtools_suite.py checks the answers.
+# Starts from: the kept checkpoint castle-front.
+#! saves build/checkpoints/castle-front
+#! env DOTHEROES_DEVELOPER_MODE=1 DOTHEROES_NATIVE_CD=1 DOTHEROES_NATIVE_SOLVER=1,2,4,5,6 GCM_WRAP_LAP=1
+#! env DOTHEROES_PRESENT_ONCE=1 DOTHEROES_DEV_STATE=1 DOTHEROES_DEV_CANT_DIE=1 DIAG_FRAMES=frames.log PS3_VERBOSE=0
+#! env DUMP=0 SHOT_EVERY=0
+#! secs 600
+
+include common.drive
+
+log TitleMovie 120
+sleep 5
+call continue
+state life>0,area==17 90
+sleep 3
+dev flags 0 330
+dev progress
+dev flag get 6
+dev flag set 300 1
+dev flag get 300
+dev flag set 300 0
+dev items
+dev give 4
+dev count 10 30
+dev items
+dev remove 4
+dev items
+dev quests
+dev warp D_1_2 @150
+sleep 10
+dev status
+dev flag get 6
+dev warp Field_18 @150
+sleep 5
+dev progress set 9
+dev flag get 6
+dev warp D_1_2 @150
+sleep 10
+dev status
+devstate frames>+30 30

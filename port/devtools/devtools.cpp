@@ -33,6 +33,7 @@
 #include <deque>
 #include <filesystem>
 #include <initializer_list>
+#include <map>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -610,6 +611,277 @@ void keep_invulnerable(const ppu_context* c)
     g_invuln_reasserts++;
 }
 
+/* ---- progression, quests, items (M11.0d) ---- */
+constexpr uint32_t kEventToc = 0x01057910;        /* EventClass's module TOC */
+constexpr uint32_t fn_player_data = 0x00985C08;   /* GetItem's first call: the player's data, by the name in its TOC */
+constexpr uint32_t fn_item_object = 0x00985D88;   /* GetItem's second: (player data, id) -> the item's object */
+constexpr uint32_t kItemCount = 0x54;             /* the item object's count (CItem::setNum/getNum) */
+constexpr uint32_t kBundle = 0x00A7C908, kBundleSize = 0x39B7D5;   /* the scripts the game runs, in its EBOOT */
+
+/* the main story in steps (docs/M11_PLAN.md section 9): our own labels; the flags the game's scripts set at each
+ * (flag, value), the world map's progress flags, the items the step gives -- read in the scripts the game runs */
+struct Step { const char* label; std::vector<std::pair<int, int>> flags; std::vector<int> progress, items; };
+const std::vector<Step>& story()
+{
+    static const std::vector<Step> s = {
+        { "The hero's dream", { { 92, 1 } }, {}, {} },
+        { "The dream ends", { { 93, 1 }, { 95, 1 } }, {}, {} },
+        { "Waking at the inn", {}, {}, {} },
+        { "The castle: the story begins", { { 0, 1 } }, { 1 }, { 105, 89 } },
+        { "The king's request", { { 2, 1 } }, { 2 }, {} },
+        { "Setting out", { { 9, 1 } }, {}, {} },
+        { "The ancient sword", { { 1, 1 }, { 5, 1 } }, {}, { 95 } },
+        { "Temple 1 entered", { { 4, 1 }, { 98, 1 } }, {}, {} },
+        { "Temple 1: its guardian defeated", { { 6, 1 }, { 8, 1 } }, {}, {} },
+        { "Orb 1 and spell 1", { { 7, 1 }, { 82, 1 } }, { 3 }, { 70, 15 } },
+        { "Temple 2: its guardian defeated, orb 2", { { 11, 1 }, { 14, 1 }, { 15, 1 }, { 12, 1 }, { 82, 2 } }, {}, { 6, 71 } },
+        { "Spell 2", { { 13, 1 } }, { 4 }, { 19, 55 } },
+        { "Temple 3: its guardian defeated, orb 3", { { 21, 1 }, { 22, 1 }, { 25, 1 }, { 23, 1 }, { 82, 3 } }, {}, { 72 } },
+        { "Spell 3", { { 24, 1 } }, { 5 }, { 17, 55 } },
+        { "Temple 4: its guardian defeated, orb 4",
+          { { 31, 1 }, { 38, 1 }, { 32, 1 }, { 33, 1 }, { 34, 1 }, { 37, 1 }, { 35, 1 }, { 82, 4 } }, {}, { 54, 73 } },
+        { "Spell 4", { { 36, 1 }, { 309, 1 } }, { 6 }, { 18, 55 } },
+        { "Temple 5: its guardian defeated, orb 5",
+          { { 97, 1 }, { 40, 1 }, { 41, 1 }, { 229, 1 }, { 42, 1 }, { 91, 1 }, { 43, 1 }, { 82, 5 } }, {}, { 62, 74 } },
+        { "Spell 5", { { 44, 1 }, { 45, 1 }, { 46, 1 }, { 47, 1 }, { 48, 1 }, { 49, 1 } }, { 7 }, { 20, 55 } },
+        { "Temple 6: its guardian defeated, orb 6", { { 50, 1 }, { 52, 1 }, { 51, 1 }, { 82, 6 } }, { 8 }, { 75 } },
+        { "The princess", { { 60, 1 }, { 61, 1 }, { 236, 1 }, { 62, 1 } }, {}, {} },
+        { "The battle at the castle", { { 63, 1 }, { 64, 1 } }, {}, {} },
+        { "Spell 6 and the orb of light", { { 66, 1 } }, { 9 }, { 16, 76, 55 } },
+        { "The tower entered", { { 70, 1 } }, {}, {} },
+        { "The tower's rematches won",
+          { { 310, 1 }, { 311, 1 }, { 312, 1 }, { 313, 1 }, { 314, 1 }, { 315, 1 }, { 316, 1 }, { 317, 1 }, { 318, 1 },
+            { 319, 1 }, { 320, 1 }, { 321, 1 } }, {}, {} },
+        { "The last enemy defeated", { { 74, 1 } }, {}, {} },
+        { "The ending", { { 81, 1 }, { 99, 1 } }, {}, {} },
+    };
+    return s;
+}
+
+/* the flags' names (the scripts' EventFlag table) and the items' (item.Item's IL_ names), from the game's state */
+std::map<int, std::string> g_flag_names, g_item_names;
+/* the quests: the script functions that set flags of 100 and above, each with its flags (the scripts in memory) */
+std::vector<std::pair<std::string, std::vector<int>>> g_quests;
+bool g_names_made = false;
+
+const char kNamesLua[] = R"(local out = {}
+if type(EventFlag) == "table" then for k, v in pairs(EventFlag) do if type(v) == "number" then out[#out+1] = "F\t" .. v .. "\t" .. k end end end
+if type(item) == "table" and type(item.Item) == "table" then
+  for k, v in pairs(item.Item) do if type(k) == "string" and string.sub(k, 1, 3) == "IL_" and type(v) == "number" then out[#out+1] = "I\t" .. v .. "\t" .. string.sub(k, 4) end end
+end
+return table.concat(out, "\n"))";
+
+int make_names(const ppu_context* c, std::string& err)
+{
+    if (g_names_made) return 1;
+    std::string out;
+    if (run_lua(c, kNamesLua, out) != 1) { err = "the game's flag and item names: " + out; return 0; }
+    size_t a = 0;
+    while (a < out.size()) {
+        size_t e = out.find('\n', a);
+        if (e == std::string::npos) e = out.size();
+        const std::string ln = out.substr(a, e - a);
+        a = e + 1;
+        const size_t t1 = ln.find('\t'), t2 = t1 == std::string::npos ? t1 : ln.find('\t', t1 + 1);
+        if (t2 == std::string::npos) continue;
+        (ln[0] == 'F' ? g_flag_names : g_item_names)[atoi(ln.c_str() + t1 + 1)] = ln.substr(t2 + 1);
+    }
+    /* the quests: in the scripts the game runs (its own memory), which function sets which flag of 100 and above */
+    std::map<std::string, std::vector<int>> by_fn;
+    const char* text = (const char*)vm_base + kBundle;
+    std::string fn;
+    for (uint32_t i = 0; i + 16 < kBundleSize; i++) {
+        if ((i == 0 || text[i - 1] == '\n') && !strncmp(text + i, "function ", 9)) {
+            uint32_t j = i + 9;
+            while (j < kBundleSize && (isalnum((unsigned char)text[j]) || text[j] == '_' || text[j] == '.' || text[j] == ':')) j++;
+            fn.assign(text + i + 9, j - i - 9);
+        } else if (!strncmp(text + i, "SetEventFlag(", 13) && !fn.empty()) {
+            uint32_t j = i + 13;
+            while (j < kBundleSize && text[j] == ' ') j++;
+            if (j < kBundleSize && isdigit((unsigned char)text[j])) {
+                const int f = atoi(text + j);
+                if (f >= 100 && f < 1000) {
+                    auto& v = by_fn[fn];
+                    if (std::find(v.begin(), v.end(), f) == v.end()) v.push_back(f);
+                }
+            }
+        }
+    }
+    g_quests.assign(by_fn.begin(), by_fn.end());
+    for (auto& q : g_quests) std::sort(q.second.begin(), q.second.end());
+    g_names_made = true;
+    DLOG(DH_LOG_INFO, "dev", "names: %zu flags, %zu items; %zu quest functions", g_flag_names.size(), g_item_names.size(),
+         g_quests.size());
+    return 1;
+}
+
+/* the values of these flags (the game's GetEventFlag) */
+std::map<int, int> flag_values(const ppu_context* c, const std::vector<int>& ids)
+{
+    std::map<int, int> v;
+    std::string chunk = "local E=EventClass.Event; local t={}; for _, i in ipairs({", out;
+    for (size_t k = 0; k < ids.size(); k++) chunk += (k ? "," : "") + std::to_string(ids[k]);
+    chunk += "}) do t[#t+1]=i..'='..E:GetEventFlag(i) end; return table.concat(t,' ')";
+    if (run_lua(c, chunk, out) != 1) throw CallError{ "the game's flags could not be read" };
+    size_t a = 0;
+    while (a < out.size()) {
+        const size_t sp = out.find(' ', a), eq = out.find('=', a);
+        if (eq == std::string::npos) break;
+        v[atoi(out.c_str() + a)] = atoi(out.c_str() + eq + 1);
+        a = sp == std::string::npos ? out.size() : sp + 1;
+    }
+    return v;
+}
+
+std::string progress_json(const ppu_context* c)
+{
+    std::vector<int> ids;
+    for (const Step& s : story()) for (auto& f : s.flags) ids.push_back(f.first);
+    const std::map<int, int> v = flag_values(c, ids);
+    std::string o = "[";
+    int k = 0;
+    for (const Step& s : story()) {
+        bool done = true;
+        for (auto& f : s.flags) { auto it = v.find(f.first); done = done && it != v.end() && it->second >= f.second; }
+        o += std::string(k ? "," : "") + "{\"step\":" + std::to_string(k + 1) + ",\"label\":" + json_str(s.label) +
+             ",\"done\":" + (done ? "true" : "false") + "}";
+        k++;
+    }
+    return o + "]";
+}
+
+/* the item's object in the player's data (GetItem's way), or 0 */
+uint32_t item_object(const ppu_context* c, int id)
+{
+    const uint32_t pd = (uint32_t)call(c, fn_player_data, kEventToc, { g32(kEventToc + 0x3A84) });
+    return pd ? (uint32_t)call(c, fn_item_object, kEventToc, { pd, (uint64_t)id }) : 0;
+}
+
+std::string items_json(const ppu_context* c, bool all)
+{
+    std::string out;
+    if (run_lua(c, "local E=EventClass.Event; local t={}; for i=1,159 do t[#t+1]=E:GetItem(i) end; "
+                   "return table.concat(t,' ')", out) != 1)
+        throw CallError{ "the game's items could not be read" };
+    std::string o = "[";
+    size_t a = 0;
+    for (int id = 1; id <= 159 && a < out.size(); id++) {
+        const int n = atoi(out.c_str() + a);
+        const size_t sp = out.find(' ', a);
+        a = sp == std::string::npos ? out.size() : sp + 1;
+        auto nm = g_item_names.find(id);
+        if (n == 0 && (!all || nm == g_item_names.end())) continue;   /* `all`: every item the game names, and any held */
+        o += std::string(o.size() > 1 ? "," : "") + "{\"id\":" + std::to_string(id) + ",\"name\":" +
+             json_str(nm != g_item_names.end() ? nm->second : "") + ",\"count\":" + std::to_string(n) + "}";
+    }
+    return o + "]";
+}
+
+/* 1 answered (a change), 0 answered, -1 not one of these */
+int progression_command(const ppu_context* c, const Cmd& cmd, const std::string& w, std::string rest)
+{
+    long a = 0, b = 0;
+    std::string err, out;
+    const bool ours = w == "flag" || w == "flags" || w == "progress" || w == "quests" || w == "items" || w == "give" ||
+                      w == "count" || w == "remove";
+    if (!ours) return -1;
+    if (!make_names(c, err)) { answer(cmd, false, err); return 0; }
+    if (w == "flag") {
+        const std::string op = word(rest);
+        if (op == "get" && number_arg(rest, a, 0, 999)) {
+            const auto v = flag_values(c, { (int)a });
+            auto nm = g_flag_names.find((int)a);
+            answer(cmd, true, "{\"flag\":" + std::to_string(a) + ",\"name\":" + json_str(nm != g_flag_names.end() ? nm->second : "") +
+                              ",\"value\":" + std::to_string(v.count((int)a) ? v.at((int)a) : 0) + "}", true);
+            return 0;
+        }
+        if (op == "set" && number_arg(rest, a, 0, 999) && number_arg(rest, b, 0, 255)) {
+            if (run_lua(c, "local E=EventClass.Event; E:SetEventFlag(" + std::to_string(a) + "," + std::to_string(b) + ")", out) != 1) {
+                answer(cmd, false, "Event:SetEventFlag: " + out);
+                return 0;
+            }
+            answer(cmd, true, "{\"flag\":" + std::to_string(a) + ",\"value\":" + std::to_string(flag_values(c, { (int)a })[(int)a]) + "}", true);
+            return 1;
+        }
+        answer(cmd, false, "flag get N | flag set N VALUE");
+        return 0;
+    }
+    if (w == "flags") {   /* every flag of a range that is not 0 (`all`: and every named one), with its name */
+        std::string r2 = rest;
+        if (!number_arg(rest, a, 0, 999)) a = 0;
+        if (!number_arg(rest, b, 0, 999)) b = 330;
+        const bool named_too = r2.find("all") != std::string::npos;
+        std::vector<int> ids;
+        for (long i = a; i <= b; i++) ids.push_back((int)i);
+        const auto v = flag_values(c, ids);
+        std::string o = "[";
+        for (auto& kv : v) {
+            auto nm = g_flag_names.find(kv.first);
+            if (!kv.second && !(named_too && nm != g_flag_names.end())) continue;
+            o += std::string(o.size() > 1 ? "," : "") + "{\"flag\":" + std::to_string(kv.first) + ",\"name\":" +
+                 json_str(nm != g_flag_names.end() ? nm->second : "") + ",\"value\":" + std::to_string(kv.second) + "}";
+        }
+        answer(cmd, true, o + "]", true);
+        return 0;
+    }
+    if (w == "progress") {
+        const std::string op = word(rest);
+        if (op.empty()) { answer(cmd, true, progress_json(c), true); return 0; }
+        if (op != "set" || !number_arg(rest, a, 1, (long)story().size())) { answer(cmd, false, "progress | progress set STEP"); return 0; }
+        /* every step up to this one, as the scripts leave it: its flags, the world map's progress, its items (given
+         * through the game's own item-get only when not already held) */
+        std::string chunk = "local E=EventClass.Event; ";
+        for (long k = 0; k < a; k++) {
+            const Step& s = story()[k];
+            for (auto& f : s.flags) chunk += "E:SetEventFlag(" + std::to_string(f.first) + "," + std::to_string(f.second) + "); ";
+            for (int p : s.progress) chunk += "E:SetProgressFlag(" + std::to_string(p) + ",1); ";
+            for (int it : s.items) chunk += "if E:GetItem(" + std::to_string(it) + ")==0 then E:AddItem2(" + std::to_string(it) + ") end; ";
+        }
+        if (run_lua(c, chunk, out) != 1) { answer(cmd, false, "the story's flags: " + out); return 0; }
+        answer(cmd, true, progress_json(c), true);
+        return 1;
+    }
+    if (w == "quests") {
+        std::vector<int> ids;
+        for (auto& q : g_quests) for (int f : q.second) ids.push_back(f);
+        const auto v = flag_values(c, ids);
+        std::string o = "[";
+        for (auto& q : g_quests) {
+            o += std::string(o.size() > 1 ? "," : "") + "{\"function\":" + json_str(q.first) + ",\"flags\":[";
+            for (size_t k = 0; k < q.second.size(); k++)
+                o += std::string(k ? "," : "") + "{\"flag\":" + std::to_string(q.second[k]) + ",\"value\":" +
+                     std::to_string(v.count(q.second[k]) ? v.at(q.second[k]) : 0) + "}";
+            o += "]}";
+        }
+        answer(cmd, true, o + "]", true);
+        return 0;
+    }
+    if (w == "items") { answer(cmd, true, items_json(c, word(rest) == "all"), true); return 0; }
+    if (!number_arg(rest, a, 1, 159)) { answer(cmd, false, w + ": an item number 1-159"); return 0; }
+    if (w == "give") {
+        if (!number_arg(rest, b, 1, 99)) b = 1;
+        if (run_lua(c, "local E=EventClass.Event; for i=1," + std::to_string(b) + " do E:AddItem2(" + std::to_string(a) + ") end", out) != 1) {
+            answer(cmd, false, "Event:AddItem2: " + out);
+            return 0;
+        }
+    } else {   /* count / remove: the item object's own count (CItem::setNum) */
+        if (w == "count" && !number_arg(rest, b, 0, 9999)) { answer(cmd, false, "count ITEM N"); return 0; }
+        uint32_t obj = item_object(c, (int)a);
+        if (!obj && w == "count" && b > 0) {   /* never held: the game makes its object when it is first given */
+            run_lua(c, "local E=EventClass.Event; E:AddItem2(" + std::to_string(a) + ")", out);
+            obj = item_object(c, (int)a);
+        }
+        if (!obj && w == "remove") { answer(cmd, true, "{\"id\":" + std::to_string(a) + ",\"count\":0}", true); return 0; }
+        if (!obj) { answer(cmd, false, "the game has no object for that item (not in play?)"); return 0; }
+        w32(obj + kItemCount, w == "remove" ? 0u : (uint32_t)b);
+    }
+    const std::string all = items_json(c, true);
+    const std::string key = "{\"id\":" + std::to_string(a) + ",";
+    const size_t at = all.find(key);
+    answer(cmd, true, at == std::string::npos ? "{}" : all.substr(at, all.find('}', at) - at + 1), true);
+    return 1;
+}
+
 /* true when the command changed the game (the next one waits for the next frame) */
 bool execute(const ppu_context* c, const Cmd& cmd)
 {
@@ -619,6 +891,10 @@ bool execute(const ppu_context* c, const Cmd& cmd)
         if (w == "ping") { answer(cmd, true, "pong"); return false; }
         {
             const int r = player_command(c, cmd, w, rest);
+            if (r >= 0) return r == 1;
+        }
+        {
+            const int r = progression_command(c, cmd, w, rest);
             if (r >= 0) return r == 1;
         }
         if (w == "warp") return start_warp(c, cmd, rest) == 1;

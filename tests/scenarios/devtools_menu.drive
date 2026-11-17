@@ -2,13 +2,14 @@
 # input (DOTHEROES_OVERLAY_TEST: overlay.input) with every picture it composes dumped (DOTHEROES_OVERLAY_DUMP, the
 # run directory): Developer on the main page; Warp; the D_1 group; D_1_1_1's arrival points; its default chosen --
 # the menu closes and the game arrives there (the map's number 37). Then Status read on the held game, and Back out;
-# then Player, Money, 9999 (M11.0c): the game's own money set from the menu.
+# then Player, Money, 9999 (M11.0c): the game's own money set from the menu; then Story, Flags and Quests viewed and
+# Items, its first row the Boomerang (4), Give one (M11.0d): given through the game's own item-get.
 # Starts from: the kept checkpoint castle-front.
 #! saves build/checkpoints/castle-front
 #! env DOTHEROES_DEVELOPER_MODE=1 DOTHEROES_OVERLAY_TEST=1 DOTHEROES_OVERLAY_DUMP=.
 #! env DOTHEROES_NATIVE_CD=1 DOTHEROES_NATIVE_SOLVER=1,2,4,5,6 GCM_WRAP_LAP=1 DOTHEROES_PRESENT_ONCE=1
 #! env DOTHEROES_DEV_STATE=1 DOTHEROES_DEV_CANT_DIE=1 DIAG_FRAMES=frames.log PS3_VERBOSE=0 DUMP=0 SHOT_EVERY=0
-#! secs 400
+#! secs 500
 
 include common.drive
 
@@ -20,8 +21,11 @@ sleep 5
 write overlay.input open wait wait wait down down down down down wait a wait wait a wait wait wait wait wait down wait a wait wait a wait wait a
 devstate area==37 120
 sleep 5
-write overlay.input open wait wait wait down down down down down wait a wait wait down down wait a wait wait wait wait b wait b wait b wait b
+write overlay.input open wait wait wait down down down down down wait a wait wait down down down down down down wait a wait wait wait wait b wait b wait b wait b
 sleep 5
 devstate held==0,frames>+30 30
 write overlay.input open wait wait wait down down down down down wait a wait wait down wait a wait wait wait wait down down wait a wait wait down down down down down wait a wait wait wait b wait b wait b wait b
 devstate money==9999,held==0 60
+write overlay.input open wait wait wait down down down down down wait a wait wait down down wait a wait wait wait b wait down wait a wait wait wait b wait down wait a wait wait wait b wait down wait a wait wait wait a wait wait a wait wait wait b wait b wait b wait b
+devstate held==0,frames>+30 60
+dev items

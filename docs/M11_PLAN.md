@@ -13,13 +13,15 @@ read in the code or the data, [M] measured, [I] inferred, [H] a hypothesis still
   pages (Warp, Status) with scrolling lists, the map sweep through `warp` (166 maps arrive; Field_14 met 16
   pipelines no preparation had, kept for the coverage work). **M11.0c done** (section 8): life, magic and money
   through the game's own functions, invulnerability, no death (a lethal hit leaves half a heart), the Player page.
-  M11.0d (progression, quests, items, equipment) next.
+  **M11.0d done** (section 9): the event flags, the main story in 26 steps, quests, items (give, count, remove),
+  their pages. M11.0e (bosses, enemies, events, cinematics) next.
 - **Done**: the map sweep made a regression test (tests/map_sweep.py `check`; section 5): the full sweep passes, 166
   maps arrived in their own areas, 0 pipelines unprepared, 0 translations in play; the check found that M9.2g's sweep
   never reached fields 1-9 (named by their files, not the engine's names) -- fixed, swept, all their pipelines were
   already prepared; docs/M92_SHADER_PLAN.md corrected.
-- **Next**: M11.0d (section 4): the event flags (Event:GetEventFlag/SetEventFlag) and the main story's steps,
-  quests, items and equipment (Event:AddItem2, GetItem, the sword and shield natives), their pages.
+- **Next**: M11.0e (section 4): bosses (their arenas with their flags cleared; the boss natives), enemies (the map's
+  own spawns again; the actor manager's list), events and cinematics (StartEvent by name when none runs; PlayScene),
+  their pages.
 - **Outstanding decisions**: none blocking; the defaults "decided here" in section 3 can be changed at review.
 
 ## 1. The owner's request (2026-11-16)
@@ -440,3 +442,39 @@ allow); the launcher's Settings page with the new switch (the same code path as 
 - devtools_menu **PASS** with the Player page: Developer, Player, Money, 9999 chosen in the menu -- the game's money
   9999; the pictures reviewed (the Player page with its values, the money list).
 - devtools_basic, devtools_off, devtools_warp **PASS** on the new lift.
+
+## 9. M11.0d: progression, quests, items (2026-11-16) [C, M]
+
+**Built** (port/devtools/devtools.cpp, dev_menu.cpp):
+- **Flags**: `flag get N`, `flag set N V` (Event:GetEventFlag / SetEventFlag), `flags [A B] [all]` (every flag of a
+  range that is not 0, or every named one too) -- with the names the game's scripts give flags (their `EventFlag`
+  table, read through a chunk at run time).
+- **The main story in 26 steps** (`progress`, `progress set K`): our own labels ("Temple 1: its guardian defeated"),
+  each with the flags the game's scripts set at that point, the world map's progress flags (Event:SetProgressFlag)
+  and the items it gives -- reconstructed from the scripts the game runs (the research notes, build/m11/agents);
+  `progress set K` sets every step up to K and gives each step's items through the game's own item-get
+  (Event:AddItem2) unless already held. A step is "done" when its flags hold.
+- **Quests** (`quests`): the flags of 100 and above grouped by the script function that sets them -- read at run
+  time in the scripts the game runs, in its own memory (the bundle in the EBOOT at 0x00A7C908); 187 functions.
+- **Items**: `items [all]` (Event:GetItem for 1-159, with the game's own item identifiers: `item.Item.IL_*`), `give
+  ID [N]` (Event:AddItem2, N times), `count ID N` and `remove ID` -- the item's own object in the player's data, found
+  the way the game's GetItem finds it (0x00985C08 then 0x00985D88), its count set as CItem::setNum sets it (+0x54); an
+  item never held is first given once (the game makes its object then).
+- **Pages**: Story (the steps, Done marked; choosing one sets the story up to it), Flags (named flags and any set;
+  choosing one turns it on or off), Quests (each function with how many of its flags are set; its flags, each turned
+  on or off), Items (named or held items with their counts; Give one, Give ten, Set the count to 99, Remove).
+
+**Tested** (offscreen; build/m11/dev):
+- devtools_progress **PASS**: the flags with the scripts' names (flag 0 `scene_opening1` on the castle-front save);
+  flag 300 set, read back and set back; the Boomerang given (count 1), 30 arrows counted, the Boomerang removed;
+  187 quest functions; **temple 1's boss room entered: its event starts (the event state 8, a script waiting);
+  after `progress set 9` (the guardian defeated) and the room entered again: no event -- the game's own scripts
+  treat it as beaten** (flag 6 `scene_snake` 0, then 1).
+- devtools_menu **PASS** with the new pages: Story, Flags and Quests opened, Items' first row (the Boomerang) given
+  from the menu -- read back by the game; pictures reviewed.
+- The whole suite (basic, off, warp, menu, player, progress) **PASS**.
+
+**Not covered yet**: a set flag through the game's own save and load in the test saves (the flags shown to hold
+across map changes, the place the scripts read them); choosing which sword or shield is equipped -- the items are
+given through the game's own item-get and equipped in the game's own equipment screen; the sword natives
+(ChangeSword, HandOverSwordAbility: the latter waits like an event) are left for later study.

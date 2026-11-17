@@ -14,7 +14,8 @@
 
 namespace {
 
-enum Kind { V_ROOT, V_WARP, V_GROUP, V_ENTRIES, V_STATUS, V_PLAYER, V_CHOICE };
+enum Kind { V_ROOT, V_WARP, V_GROUP, V_ENTRIES, V_STATUS, V_PLAYER, V_CHOICE, V_STORY, V_FLAGS, V_QUESTS, V_QFLAGS,
+            V_ITEMS, V_ITEM };
 struct Level { Kind kind; std::string arg; int focus; };
 std::vector<Level> g_stack;
 std::string g_note;
@@ -117,6 +118,34 @@ long field(const std::string& json, const char* key)
     return strtol(v, nullptr, 10);
 }
 
+/* the top-level objects of a JSON array (a command's answer): each as text */
+std::vector<std::string> objects(const std::string& json)
+{
+    std::vector<std::string> v;
+    int depth = 0;
+    bool str = false;
+    size_t start = 0;
+    for (size_t i = 0; i < json.size(); i++) {
+        const char ch = json[i];
+        if (str) { if (ch == '\\') i++; else if (ch == '"') str = false; continue; }
+        if (ch == '"') str = true;
+        else if (ch == '{') { if (depth++ == 0) start = i; }
+        else if (ch == '}') { if (--depth == 0) v.push_back(json.substr(start, i - start + 1)); }
+    }
+    return v;
+}
+
+/* a string field of a JSON object (no escapes beyond what the tools write) */
+std::string sfield(const std::string& json, const char* key)
+{
+    const std::string k = std::string("\"") + key + "\":\"";
+    const size_t i = json.find(k);
+    if (i == std::string::npos) return std::string();
+    const size_t e = json.find('"', i + k.size());
+    return json.substr(i + k.size(), e == std::string::npos ? std::string::npos : e - i - k.size());
+}
+
+std::string g_list;     /* the last list answer a page shows (progress, flags, quests, items) */
 std::string g_player;   /* the last `player` answer */
 void read_player()
 {
@@ -163,6 +192,8 @@ DevView dev_menu_view()
     case V_ROOT:
         v.title = "DEVELOPER";
         v.rows = { { "Warp", "Any map, floor or entry" }, { "Player", "Life, magic, money, no death" },
+                   { "Story", "The main story's steps" }, { "Flags", "The game's event flags" },
+                   { "Quests", "Flags by the script that sets them" }, { "Items", "Give, count, remove" },
                    { "Status", "The game's state now" } };
         v.note = "Test saves only. Actions apply to the paused game.";
         break;
@@ -208,6 +239,50 @@ DevView dev_menu_view()
         for (auto& ch : choices(L.arg)) v.rows.push_back({ ch.first, "" });
         break;
     }
+    case V_STORY: {
+        v.title = "STORY";
+        int k = 1;
+        for (const std::string& o : objects(g_list))
+            v.rows.push_back({ std::to_string(k++) + ". " + sfield(o, "label"), field(o, "done") == 1 ? "Done" : "" });
+        v.note = "Choose a step: the story is set up to it (its flags, progress and items).";
+        break;
+    }
+    case V_FLAGS:
+        v.title = "FLAGS";
+        for (const std::string& o : objects(g_list))
+            v.rows.push_back({ std::to_string(field(o, "flag")) + "   " + sfield(o, "name"), std::to_string(field(o, "value")) });
+        v.note = "Choose a flag to turn it on or off.";
+        break;
+    case V_QUESTS:
+        v.title = "QUESTS";
+        for (const std::string& o : objects(g_list)) {
+            const auto fl = objects(o.substr(o.find('[') == std::string::npos ? 0 : o.find('[')));
+            int on = 0;
+            for (const std::string& f : fl) on += field(f, "value") != 0;
+            v.rows.push_back({ sfield(o, "function"), std::to_string(on) + " of " + std::to_string(fl.size()) + " set" });
+        }
+        break;
+    case V_QFLAGS: {
+        v.title = "QUEST";
+        for (const std::string& o : objects(g_list))
+            if (sfield(o, "function") == L.arg) {
+                const size_t b = o.find('[');
+                for (const std::string& f : objects(b == std::string::npos ? std::string() : o.substr(b)))
+                    v.rows.push_back({ "Flag " + std::to_string(field(f, "flag")), std::to_string(field(f, "value")) });
+            }
+        v.note = L.arg + ": choose a flag to turn it on or off.";
+        break;
+    }
+    case V_ITEMS:
+        v.title = "ITEMS";
+        for (const std::string& o : objects(g_list))
+            v.rows.push_back({ std::to_string(field(o, "id")) + "   " + sfield(o, "name"), std::to_string(field(o, "count")) });
+        break;
+    case V_ITEM:
+        v.title = "ITEM " + L.arg;
+        v.rows = { { "Give one", "The game's own item-get" }, { "Give ten", "" }, { "Set the count to 99", "" },
+                   { "Remove", "" } };
+        break;
     case V_STATUS:
         v.title = "STATUS";
         v.rows = status_rows();
@@ -228,8 +303,56 @@ int dev_menu_pick(int row)
     case V_ROOT:
         if (row == 0) g_stack.push_back({ V_WARP, "", 0 });
         if (row == 1) { g_player.clear(); g_stack.push_back({ V_PLAYER, "", 0 }); }
-        if (row == 2) g_stack.push_back({ V_STATUS, "", 0 });
+        {
+            static const Kind kinds[] = { V_WARP, V_PLAYER, V_STORY, V_FLAGS, V_QUESTS, V_ITEMS, V_STATUS };
+            static const char* lists[] = { nullptr, nullptr, "progress", "flags 0 330 all", "quests", "items all", nullptr };
+            if (row >= 2 && row < 7) {
+                if (lists[row] && !devtools::run_sync(lists[row], g_list, 5000)) { g_note = g_list; g_list.clear(); }
+                g_stack.push_back({ kinds[row], "", 0 });
+            }
+        }
         return 0;
+    case V_STORY: {
+        std::string out;
+        if (!devtools::run_sync("progress set " + std::to_string(row + 1), out, 5000)) g_note = out;
+        else { g_note = "The story is set up to step " + std::to_string(row + 1) + "."; g_list = out; }
+        return 0;
+    }
+    case V_FLAGS:
+    case V_QFLAGS: {
+        std::vector<std::string> fl;
+        if (L.kind == V_FLAGS) fl = objects(g_list);
+        else
+            for (const std::string& o : objects(g_list))
+                if (sfield(o, "function") == L.arg) { const size_t b = o.find('['); if (b != std::string::npos) fl = objects(o.substr(b)); }
+        if (row < 0 || row >= (int)fl.size()) return 0;
+        const long id = field(fl[row], "flag"), val = field(fl[row], "value");
+        std::string out;
+        if (!devtools::run_sync("flag set " + std::to_string(id) + " " + (val ? "0" : "1"), out)) g_note = out;
+        devtools::run_sync(L.kind == V_FLAGS ? "flags 0 330 all" : "quests", g_list, 5000);
+        return 0;
+    }
+    case V_QUESTS: {
+        const auto qs = objects(g_list);
+        if (row >= 0 && row < (int)qs.size()) g_stack.push_back({ V_QFLAGS, sfield(qs[row], "function"), 0 });
+        return 0;
+    }
+    case V_ITEMS: {
+        const auto its = objects(g_list);
+        if (row >= 0 && row < (int)its.size()) g_stack.push_back({ V_ITEM, std::to_string(field(its[row], "id")), 0 });
+        return 0;
+    }
+    case V_ITEM: {
+        static const char* cmds[] = { "give %s 1", "give %s 10", "count %s 99", "remove %s" };
+        if (row < 0 || row > 3) return 0;
+        char b[64];
+        snprintf(b, sizeof b, cmds[row], L.arg.c_str());
+        std::string out;
+        if (!devtools::run_sync(b, out)) g_note = out;
+        devtools::run_sync("items all", g_list, 5000);
+        g_stack.pop_back();
+        return 0;
+    }
     case V_PLAYER: {
         const bool in_play = field(g_player, "in_play") == 1;
         std::string out;
