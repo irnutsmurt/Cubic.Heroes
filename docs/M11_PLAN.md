@@ -11,15 +11,15 @@ read in the code or the data, [M] measured, [I] inferred, [H] a hypothesis still
   the command channel and the Lua runner in the game's own state, at the flip and in the in-game menu's hold.
   **M11.0b done** (section 7): the catalog made by the game, `warp` answered on arrival, the in-game menu's Developer
   pages (Warp, Status) with scrolling lists, the map sweep through `warp` (166 maps arrive; Field_14 met 16
-  pipelines no preparation had, kept for the coverage work). M11.0c (the player) next.
+  pipelines no preparation had, kept for the coverage work). **M11.0c done** (section 8): life, magic and money
+  through the game's own functions, invulnerability, no death (a lethal hit leaves half a heart), the Player page.
+  M11.0d (progression, quests, items, equipment) next.
 - **Done**: the map sweep made a regression test (tests/map_sweep.py `check`; section 5): the full sweep passes, 166
   maps arrived in their own areas, 0 pipelines unprepared, 0 translations in play; the check found that M9.2g's sweep
   never reached fields 1-9 (named by their files, not the engine's names) -- fixed, swept, all their pipelines were
   already prepared; docs/M92_SHADER_PLAN.md corrected.
-- **Next**: M11.0c (section 4): life, magic and money through the game's own functions (CPlayerActor setHP/setMP/
-  setMaxHP/setMaxMP on the player the actor manager returns; Event:SetMoney), invulnerability (the game's
-  setInvincibility) and no death (an entry observer on damageHP, 0x0011A94C, added to the lift's observers: a relift),
-  the Player page.
+- **Next**: M11.0d (section 4): the event flags (Event:GetEventFlag/SetEventFlag) and the main story's steps,
+  quests, items and equipment (Event:AddItem2, GetItem, the sword and shield natives), their pages.
 - **Outstanding decisions**: none blocking; the defaults "decided here" in section 3 can be changed at review.
 
 ## 1. The owner's request (2026-11-16)
@@ -401,3 +401,42 @@ allow); the launcher's Settings page with the new switch (the same code path as 
   check keeps failing such a run until the preparation has them.
 - The four scenarios again on the final build (the old sweep code removed): all **PASS**.
 - tests/test_map_sweep.py (9): the arrival records read from a made-up alignment file, the engine's names.
+
+## 8. M11.0c: the player (2026-11-16) [C, M]
+
+**Built** (port/devtools/devtools.cpp, dev_menu.cpp):
+- **The player object**: the game's own actor manager (`actor_manager.gActorManager`, the object its Lua getter
+  pushes: the TOC word at 0x01028658 + 0x196C) asked for its player (CActorManager::getPlayer, 0x000A2248), checked by
+  its class (vtable 0x00FE3D20). The player's state as the game keeps it [C]: life +0x5B8, magic +0x5BC, their
+  maximums +0x5C0 and +0x5C4, invincibility +0x54D.
+- **`life`, `magic`, `maxlife`, `maxmagic`, `heal`**: the game's own CPlayerActor::setHP (0x00101928), setMP
+  (0x00101940), setMaxHP (0x001020B0), setMaxMP (0x00101FFC) -- unregistered bindings of the EBOOT, their
+  implementations called on the player (the game clamps a value to its maximum, and a maximum to its own caps).
+  **`money`**: Event:SetMoney (0-9999). **`player`**: all of it read back, and the game's GetMoney.
+- **`invulnerable on|off`**: the game's own CPlayerActor::setInvincibility (0x00101F78). **The game clears that flag
+  itself** [M: a run took a hit after its blink ended] -- so it is set again on the first frame it is found off, and a
+  hit that still reaches the player's damage function does no damage while it is on (the game's knockback and blink
+  stay).
+- **`nodeath on|off`**: the owner's rule (2026-11-01) -- only a lethal hit is stopped: an entry observer on the
+  player's damage function, CPlayerActor::damageHP (0x0011A94C; every one of its ten call sites in the EBOOT goes
+  through it), lowers a hit that would end the hero's life so half a heart (one unit) remains; every other hit, the
+  knockback, the enemies and the full-life sword beam stay as the game makes them; each one held is logged and
+  counted. The observer is added to the lift's entry observers (config/r7_native_hooks.json: one function more; the
+  player's build lifts with that file): a lift made again (build/r8/gen19 differs from gen18 in that one function's
+  chunk). Developer mode off: the observer returns at once (devtools_entry is reached only while the tools are on).
+  The older DOTHEROES_DEV_CANT_DIE (it heals below four apples) stays for the benchmarks that use it.
+- **`damage N`** (tests): a hit through the game's own damage function.
+- **The Player page**: life, magic (each a short list: full, half, one heart, the lowest; a heart or a point of magic
+  more or fewer), money (0 to 9999), invulnerable and no death (on/off in place), heal fully.
+
+**Tested** (offscreen, silent; the development build of the new lift, build/m11/dev):
+- devtools_player **PASS**: life 4 read back by the game and on its HUD's own copy; the maximum raised to 12;
+  money 1234 read back by the game's GetMoney; heal to the maximum; **a lethal hit (999) through the game's own damage
+  function with no death on left half a heart**; then among the river's enemies: **invulnerable on, life stayed 10
+  for 25 s** while the game cleared its own flag once (set again: a hit and its blink came and went); **then at the
+  same spot, invulnerable off and no death on: life fell from 10 to half a heart and 12 lethal hits were held** --
+  their hits land, the hero never died. (A first version with an unprotected control let the river's enemies end the
+  hero in 25 s; the control now runs with no death on.)
+- devtools_menu **PASS** with the Player page: Developer, Player, Money, 9999 chosen in the menu -- the game's money
+  9999; the pictures reviewed (the Player page with its values, the money list).
+- devtools_basic, devtools_off, devtools_warp **PASS** on the new lift.

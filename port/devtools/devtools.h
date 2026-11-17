@@ -22,6 +22,10 @@ int devtools_on(void);
 struct ppu_context;
 extern void (*g_devtools_flip)(struct ppu_context* ctx);
 
+/* the lift's entry observers (r1_observe.cpp) for the functions the tools watch (the player's damage): developer
+ * mode only (r1_observe calls it only while devtools_on()) */
+void devtools_entry(uint32_t addr, struct ppu_context* ctx);
+
 /* a command from another front end (the in-game menu): queued; `done` is called with its answer on the game's thread,
  * or with an error when it is refused. Returns the command's number. */
 typedef void (*devtools_reply)(void* user, int ok, const char* out);

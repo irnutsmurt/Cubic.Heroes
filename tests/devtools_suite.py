@@ -11,6 +11,8 @@ Scenarios (tests/scenarios/<name>.drive):
   devtools_off     developer mode off: dev.cmd never read, no dev.out, no [dev] line in the log
   devtools_warp    the catalog; a warp to each kind of place, each arriving at its own map number; refusals
   devtools_menu    the in-game menu's Developer pages (pictures dumped): Warp to D_1_1_1 chosen and arrived; Status
+  devtools_player  life, magic, money through the game's functions; no death on a lethal hit; invulnerable among the
+                   river's enemies, a control without, no death at low life
   --installed: devtools_install (the game as a player starts it boots on its empty test saves), then the worker's
     `devsaves --action copy-player` and devtools_install_play (CONTINUE loads the copy and plays); the player's save
     tree (data/gamedata) byte for byte the same after each, the test tree (data/devmode/gamedata) made
@@ -128,8 +130,30 @@ def check_menu(rd):
     return bad
 
 
+def check_player(rd):
+    """the player scenario's answers, in its order"""
+    bad = []
+    a = [x for x in answers(rd) if x.get("ok") and isinstance(x.get("out"), dict) and "in_play" in x["out"]]
+    if len(a) < 17:   # player, life, maxlife, magic, money, heal, nodeath, damage, nodeath, heal, life, invulnerable,
+        return [f"{len(a)} player answers, 17 expected"]   # player, invulnerable, nodeath, life, player
+    life4, money, damage = a[1]["out"], a[4]["out"], a[7]["out"]
+    if life4.get("life") != 4:
+        bad.append(f"life 4 read back as {life4.get('life')}")
+    if money.get("money") != 1234:
+        bad.append(f"money 1234 read back as {money.get('money')}")
+    if damage.get("life") != 1 or damage.get("nodeath_saves", 0) < 1:
+        bad.append(f"a lethal hit with no death on left life {damage.get('life')} ({damage.get('nodeath_saves')} held)")
+    invuln, control = a[12]["out"], a[16]["out"]
+    if invuln.get("life") != 10:
+        bad.append(f"invulnerable among the enemies: life 10 became {invuln.get('life')}")
+    if not 1 <= control.get("life", 0) < 10:
+        bad.append(f"the control (invulnerable off, no death on): life {control.get('life')} -- wanted hits landing "
+                   f"(below 10) and no death (at least 1)")
+    return bad
+
+
 CHECKS = {"devtools_basic": check_basic, "devtools_off": check_off, "devtools_warp": check_warp,
-          "devtools_menu": check_menu}
+          "devtools_menu": check_menu, "devtools_player": check_player}
 
 
 def tree_digest(tree):

@@ -1,0 +1,56 @@
+# Scenario: the developer tools' player commands (M11.0c, docs/M11_PLAN.md): life, magic and money set through the
+# game's own functions and read back (the HUD's own copy of life, the game's GetMoney); a lethal hit through the
+# game's own damage function held to half a heart with no death on; then among the river's enemies: invulnerable on
+# (life unchanged while they attack), then the control at the same spot with it off and no death on (life falls:
+# their hits land; it never ends: lethal ones held). tests/devtools_suite.py checks the answers. Starts from: the kept checkpoint castle-front;
+# normal damage (no can't-die).
+#! saves build/checkpoints/castle-front
+#! env DOTHEROES_DEVELOPER_MODE=1 DOTHEROES_NATIVE_CD=1 DOTHEROES_NATIVE_SOLVER=1,2,4,5,6 GCM_WRAP_LAP=1
+#! env DOTHEROES_PRESENT_ONCE=1 DOTHEROES_DEV_STATE=1 DIAG_FRAMES=frames.log PS3_VERBOSE=0 DUMP=0 SHOT_EVERY=0
+#! secs 600
+
+include common.drive
+
+block route_to_river          # as river_fight.drive: from the castle front (area 17) east to the river (18)
+  hold RIGHT 4
+  hold DOWN 1.5
+  hold RIGHT 3
+  hold RIGHT 4
+  hold RIGHT 4
+  hold RIGHT 2.5
+  hold UP 1.5
+  hold RIGHT 2
+end
+
+log TitleMovie 120
+sleep 5
+call continue
+state life>0,area==17 90
+sleep 3
+dev player
+dev life 4
+devstate hud_life==4 10
+dev maxlife 12
+dev magic 0
+dev money 1234
+devstate money==1234 10
+dev heal
+dev nodeath on
+dev damage 999
+devstate hud_life==1 10
+state life>0 5
+dev nodeath off
+dev heal
+call route_to_river
+state area==18,life>0 30
+actors cFE4500>=1 10
+dev life 10
+dev invulnerable on
+sleep 25
+dev player
+dev invulnerable off
+dev nodeath on
+dev life 10
+sleep 40
+dev player
+state life>0 5

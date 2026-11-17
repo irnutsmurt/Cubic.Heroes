@@ -5,6 +5,7 @@
 #include "devtools_internal.h"
 
 #include <algorithm>
+#include <cstring>
 #include <cstdio>
 #include <cstdlib>
 #include <map>
@@ -13,7 +14,7 @@
 
 namespace {
 
-enum Kind { V_ROOT, V_WARP, V_GROUP, V_ENTRIES, V_STATUS };
+enum Kind { V_ROOT, V_WARP, V_GROUP, V_ENTRIES, V_STATUS, V_PLAYER, V_CHOICE };
 struct Level { Kind kind; std::string arg; int focus; };
 std::vector<Level> g_stack;
 std::string g_note;
@@ -104,6 +105,45 @@ std::vector<DevRow> status_rows()
     return rows;
 }
 
+/* a number from `player`'s JSON (-1: absent) */
+long field(const std::string& json, const char* key)
+{
+    const std::string k = std::string("\"") + key + "\":";
+    const size_t i = json.find(k);
+    if (i == std::string::npos) return -1;
+    const char* v = json.c_str() + i + k.size();
+    if (!strncmp(v, "true", 4)) return 1;
+    if (!strncmp(v, "false", 5)) return 0;
+    return strtol(v, nullptr, 10);
+}
+
+std::string g_player;   /* the last `player` answer */
+void read_player()
+{
+    if (!devtools::run_sync("player", g_player)) g_note = "The player could not be read: " + g_player;
+}
+
+/* a Player row's choices: (label, command) */
+std::vector<std::pair<std::string, std::string>> choices(const std::string& what)
+{
+    const long life = field(g_player, "life"), max_life = field(g_player, "max_life");
+    const long magic = field(g_player, "magic"), max_magic = field(g_player, "max_magic");
+    (void)life; (void)magic;
+    if (what == "life")
+        return { { "Full", "life " + std::to_string(max_life) }, { "Half", "life " + std::to_string(max_life / 2) },
+                 { "One heart", "life 2" }, { "The lowest (half a heart)", "life 1" },
+                 { "One more heart", "maxlife " + std::to_string(max_life + 2) },
+                 { "One heart fewer", "maxlife " + std::to_string(max_life > 2 ? max_life - 2 : 2) } };
+    if (what == "magic")
+        return { { "Full", "magic " + std::to_string(max_magic) }, { "Empty", "magic 0" },
+                 { "More magic (+1)", "maxmagic " + std::to_string(max_magic + 1) },
+                 { "Less magic (-1)", "maxmagic " + std::to_string(max_magic > 0 ? max_magic - 1 : 0) } };
+    if (what == "money")
+        return { { "0", "money 0" }, { "100", "money 100" }, { "500", "money 500" }, { "1000", "money 1000" },
+                 { "5000", "money 5000" }, { "9999 (the most)", "money 9999" } };
+    return {};
+}
+
 }  // namespace
 
 void dev_menu_reset()
@@ -122,7 +162,8 @@ DevView dev_menu_view()
     switch (L.kind) {
     case V_ROOT:
         v.title = "DEVELOPER";
-        v.rows = { { "Warp", "Any map, floor or entry" }, { "Status", "The game's state now" } };
+        v.rows = { { "Warp", "Any map, floor or entry" }, { "Player", "Life, magic, money, no death" },
+                   { "Status", "The game's state now" } };
         v.note = "Test saves only. Actions apply to the paused game.";
         break;
     case V_WARP:
@@ -147,6 +188,26 @@ DevView dev_menu_view()
             for (size_t i = 0; i < m->entries.size(); i++) v.rows.push_back({ m->entries[i], i ? "" : "Default" });
         break;
     }
+    case V_PLAYER: {
+        v.title = "PLAYER";
+        if (g_player.empty()) read_player();
+        const bool in_play = field(g_player, "in_play") == 1;
+        auto pair = [&](const char* a, const char* b) {
+            return in_play ? std::to_string(field(g_player, a)) + " / " + std::to_string(field(g_player, b)) : std::string("Not in play");
+        };
+        v.rows = { { "Life (half hearts)", pair("life", "max_life") }, { "Magic", pair("magic", "max_magic") },
+                   { "Money", field(g_player, "money") >= 0 ? std::to_string(field(g_player, "money")) : "?" },
+                   { "Invulnerable", field(g_player, "invulnerable") == 1 ? "On" : "Off" },
+                   { "No death (a lethal hit leaves half a heart)", field(g_player, "nodeath") == 1 ? "On" : "Off" },
+                   { "Heal fully", "" } };
+        v.note = "Through the game's own functions.";
+        break;
+    }
+    case V_CHOICE: {
+        v.title = L.arg == "life" ? "LIFE" : L.arg == "magic" ? "MAGIC" : "MONEY";
+        for (auto& ch : choices(L.arg)) v.rows.push_back({ ch.first, "" });
+        break;
+    }
     case V_STATUS:
         v.title = "STATUS";
         v.rows = status_rows();
@@ -166,8 +227,33 @@ int dev_menu_pick(int row)
     switch (L.kind) {
     case V_ROOT:
         if (row == 0) g_stack.push_back({ V_WARP, "", 0 });
-        if (row == 1) g_stack.push_back({ V_STATUS, "", 0 });
+        if (row == 1) { g_player.clear(); g_stack.push_back({ V_PLAYER, "", 0 }); }
+        if (row == 2) g_stack.push_back({ V_STATUS, "", 0 });
         return 0;
+    case V_PLAYER: {
+        const bool in_play = field(g_player, "in_play") == 1;
+        std::string out;
+        if (row == 0 || row == 1 || row == 2) {
+            if (row != 2 && !in_play) { g_note = "Only in play."; return 0; }
+            g_stack.push_back({ V_CHOICE, row == 0 ? "life" : row == 1 ? "magic" : "money", 0 });
+            return 0;
+        }
+        if (row == 3 && !devtools::run_sync(std::string("invulnerable ") + (field(g_player, "invulnerable") == 1 ? "off" : "on"), out))
+            g_note = out;
+        if (row == 4 && !devtools::run_sync(std::string("nodeath ") + (field(g_player, "nodeath") == 1 ? "off" : "on"), out))
+            g_note = out;
+        if (row == 5 && !devtools::run_sync("heal", out)) g_note = out;
+        read_player();
+        return 0;
+    }
+    case V_CHOICE: {
+        const auto ch = choices(L.arg);
+        std::string out;
+        if (row >= 0 && row < (int)ch.size() && !devtools::run_sync(ch[row].second, out)) g_note = out;
+        g_stack.pop_back();
+        read_player();
+        return 0;
+    }
     case V_WARP: {
         const std::vector<std::string> g = groups();
         if (row >= 0 && row < (int)g.size()) g_stack.push_back({ V_GROUP, g[row], 0 });

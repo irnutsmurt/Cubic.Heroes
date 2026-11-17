@@ -190,6 +190,7 @@ static void r1_log(uint32_t addr, ppu_context* ctx);
 extern "C" int ppu_entry_observe(uint32_t addr, ppu_context* ctx)
 {
     if (addr == 0x0069DD60u && g_devtools_flip) g_devtools_flip(ctx);   // the flip: the developer tools' commands
+    if (addr == 0x0011A94Cu && g_devtools_flip) devtools_entry(addr, ctx);   // the player's damage (M11.0c: no death)
     if (s_movie) {
         const int m = movie_trace_observe(addr, ctx);
         if (m >= 0) return m;

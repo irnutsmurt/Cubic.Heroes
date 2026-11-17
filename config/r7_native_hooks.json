@@ -649,6 +649,10 @@
   {
    "addr": "0x006AA3A0",
    "note": "cellGcmSetLineWidth, Unsafe: R7 state"
+  },
+  {
+   "addr": "0x0011A94C",
+   "note": "M11.0c: the player's damage (CPlayerActor::damageHP): developer mode's no death (port/devtools; docs/M11_PLAN.md)"
   }
  ]
 }

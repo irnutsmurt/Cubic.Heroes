@@ -493,6 +493,123 @@ void check_warp()
     else answer(g_warp.cmd, false, std::string("not arrived in 90 s: ") + b);
 }
 
+/* ---- the player (M11.0c): the game's own CPlayerActor functions on the player its actor manager returns [C] ---- */
+constexpr uint32_t kActorToc = 0x01028658;        /* actor_manager's module TOC */
+constexpr uint32_t kActorManagerSlot = kActorToc + 0x196C;   /* the TOC word holding gActorManager (its getter) */
+constexpr uint32_t fn_get_player = 0x000A2248;    /* CActorManager::getPlayer */
+constexpr uint32_t kPlayerToc = 0x01038050;       /* CPlayerActor's module TOC */
+constexpr uint32_t fn_set_hp = 0x00101928, fn_set_mp = 0x00101940, fn_set_max_hp = 0x001020B0,
+                   fn_set_max_mp = 0x00101FFC, fn_set_invincible = 0x00101F78, fn_damage_hp = 0x0011A94C;
+constexpr uint32_t kPlayerVtable = 0x00FE3D20;    /* dev_state.cpp: the player's class */
+constexpr uint32_t kHp = 0x5B8, kMp = 0x5BC, kMaxHp = 0x5C0, kMaxMp = 0x5C4, kInvincible = 0x54D;
+
+std::atomic<bool> g_nodeath{ false }, g_invulnerable{ false };
+std::atomic<uint32_t> g_nodeath_saves{ 0 }, g_invuln_reasserts{ 0 }, g_invuln_blocked{ 0 };
+
+/* the player object, or 0 (not in play) */
+uint32_t player(const ppu_context* c)
+{
+    const uint32_t mgr = g32(kActorManagerSlot);
+    if (!mgr) return 0;
+    const uint32_t p = (uint32_t)call(c, fn_get_player, kActorToc, { mgr });
+    return p && g32(p) == kPlayerVtable ? p : 0;
+}
+
+std::string player_json(const ppu_context* c)
+{
+    const uint32_t p = player(c);
+    std::string money = "null", out;
+    if (run_lua(c, "local Event=EventClass.Event; return Event:GetMoney()", out) == 1) money = out;
+    char b[512];
+    if (!p) {
+        snprintf(b, sizeof b, "{\"in_play\":false,\"money\":%s,\"invulnerable\":%s,\"nodeath\":%s}", money.c_str(),
+                 g_invulnerable ? "true" : "false", g_nodeath ? "true" : "false");
+        return b;
+    }
+    snprintf(b, sizeof b,
+             "{\"in_play\":true,\"life\":%d,\"max_life\":%d,\"magic\":%d,\"max_magic\":%d,\"money\":%s,"
+             "\"invincible_flag\":%u,\"invulnerable\":%s,\"nodeath\":%s,\"nodeath_saves\":%u,\"invulnerable_reasserts\":%u,"
+             "\"invulnerable_blocked\":%u}",
+             (int32_t)g32(p + kHp), (int32_t)g32(p + kMaxHp), (int32_t)g32(p + kMp), (int32_t)g32(p + kMaxMp),
+             money.c_str(), vm_base[p + kInvincible], g_invulnerable ? "true" : "false", g_nodeath ? "true" : "false",
+             g_nodeath_saves.load(), g_invuln_reasserts.load(), g_invuln_blocked.load());
+    return b;
+}
+
+bool number_arg(std::string& rest, long& v, long lo, long hi)
+{
+    const std::string s = word(rest);
+    char* e = nullptr;
+    v = s.empty() ? 0 : strtol(s.c_str(), &e, 10);
+    return !s.empty() && e && !*e && v >= lo && v <= hi;
+}
+
+bool on_off(std::string& rest, bool& v)
+{
+    const std::string s = word(rest);
+    if (s == "on" || s == "1") { v = true; return true; }
+    if (s == "off" || s == "0") { v = false; return true; }
+    return false;
+}
+
+/* 1 answered (a change), 0 answered (none), -1 not a player command */
+int player_command(const ppu_context* c, const Cmd& cmd, const std::string& w, std::string rest)
+{
+    long n = 0;
+    bool on = false;
+    if (w == "player") { answer(cmd, true, player_json(c), true); return 0; }
+    if (w == "money") {
+        if (!number_arg(rest, n, 0, 9999)) { answer(cmd, false, "money: a number 0-9999"); return 0; }
+        std::string out;
+        if (run_lua(c, "local Event=EventClass.Event; Event:SetMoney(" + std::to_string(n) + ")", out) != 1) {
+            answer(cmd, false, "Event:SetMoney: " + out);
+            return 0;
+        }
+        answer(cmd, true, player_json(c), true);
+        return 1;
+    }
+    if (w == "nodeath") {
+        if (!on_off(rest, on)) { answer(cmd, false, "nodeath on|off"); return 0; }
+        if (on && !lookup(fn_damage_hp)) { answer(cmd, false, "this build has no damage function"); return 0; }
+        g_nodeath = on;
+        answer(cmd, true, player_json(c), true);
+        return 0;
+    }
+    const bool needs_player = w == "life" || w == "maxlife" || w == "magic" || w == "maxmagic" || w == "heal" ||
+                              w == "invulnerable" || w == "damage";
+    if (!needs_player) return -1;
+    const uint32_t p = player(c);
+    if (!p) { answer(cmd, false, "not in play (no player)"); return 0; }
+    if (w == "heal") {
+        call(c, fn_set_hp, kPlayerToc, { p, g32(p + kMaxHp) });
+        call(c, fn_set_mp, kPlayerToc, { p, g32(p + kMaxMp) });
+    } else if (w == "invulnerable") {
+        if (!on_off(rest, on)) { answer(cmd, false, "invulnerable on|off"); return 0; }
+        g_invulnerable = on;
+        call(c, fn_set_invincible, kPlayerToc, { p, on ? 1u : 0u });
+    } else {
+        if (!number_arg(rest, n, w == "damage" ? 1 : 0, 1000)) { answer(cmd, false, w + ": a number"); return 0; }
+        const uint32_t f = w == "life" ? fn_set_hp : w == "magic" ? fn_set_mp : w == "maxlife" ? fn_set_max_hp
+                         : w == "maxmagic" ? fn_set_max_mp : fn_damage_hp;
+        call(c, f, kPlayerToc, { p, (uint64_t)n });
+    }
+    answer(cmd, true, player_json(c), true);
+    return 1;
+}
+
+/* each frame (the game's main thread): invulnerability held -- the game clears its own flag (a hit's blink ending,
+ * a map change), so it is set again whenever it is found off */
+void keep_invulnerable(const ppu_context* c)
+{
+    if (!g_invulnerable) return;
+    const uint32_t mgr = g32(kActorManagerSlot);
+    if (!mgr) return;
+    const uint32_t p = player(c);
+    if (!p || vm_base[p + kInvincible]) return;
+    call(c, fn_set_invincible, kPlayerToc, { p, 1 });
+    g_invuln_reasserts++;
+}
+
 /* true when the command changed the game (the next one waits for the next frame) */
 bool execute(const ppu_context* c, const Cmd& cmd)
 {
@@ -500,6 +617,10 @@ bool execute(const ppu_context* c, const Cmd& cmd)
     const std::string w = word(rest);
     try {
         if (w == "ping") { answer(cmd, true, "pong"); return false; }
+        {
+            const int r = player_command(c, cmd, w, rest);
+            if (r >= 0) return r == 1;
+        }
         if (w == "warp") return start_warp(c, cmd, rest) == 1;
         if (w == "maps" || w == "catalog") {
             std::string err;
@@ -564,6 +685,9 @@ void on_flip(ppu_context* c)
     g_flip_thread.store(this_thread_key(), std::memory_order_relaxed);
     g_flip_ctx.store(c, std::memory_order_release);
     check_warp();
+    if (g_invulnerable.load(std::memory_order_relaxed) && (g_region || ensure_region(c))) {
+        try { keep_invulnerable(c); } catch (const CallError&) {}
+    }
     bool any;
     { std::lock_guard<std::mutex> g(g_mu); any = !g_queue.empty(); }
     if (any) run_queue(c);
@@ -625,6 +749,30 @@ void file_loop()
 }  // namespace
 
 extern "C" int devtools_on(void) { return g_on ? 1 : 0; }
+
+/* the lift's entry observers (r1_observe.cpp), developer mode only: the player's damage (CPlayerActor::damageHP,
+ * 0x0011A94C: life at +0x5B8 less r4; at 0 or below, the player dies). No death: a hit that would end the hero's
+ * life takes all but one unit of it -- every other hit, the knockback and the enemies stay as the game makes them
+ * (the owner's 2026-11-01 requirement). */
+extern "C" void devtools_entry(uint32_t addr, ppu_context* ctx)
+{
+    if (addr != fn_damage_hp) return;
+    const bool invuln = g_invulnerable.load(std::memory_order_relaxed);
+    if (!invuln && !g_nodeath.load(std::memory_order_relaxed)) return;
+    const uint32_t p = (uint32_t)ctx->gpr[3];
+    if (!p || g32(p) != kPlayerVtable) return;
+    const int32_t life = (int32_t)g32(p + kHp), hit = (int32_t)ctx->gpr[4];
+    if (invuln && hit > 0) {   /* a hit past the game's own invincibility (its flag cleared as a blink ends): no damage */
+        ctx->gpr[4] = 0;
+        g_invuln_blocked++;
+        return;
+    }
+    if (hit <= 0 || life - hit >= 1) return;
+    const int32_t held = life > 1 ? life - 1 : 0;
+    ctx->gpr[4] = (uint64_t)(uint32_t)held;
+    g_nodeath_saves++;
+    DLOG(DH_LOG_INFO, "dev", "no death: a hit of %d with %d life left held to %d", hit, life, held);
+}
 
 namespace devtools {
 

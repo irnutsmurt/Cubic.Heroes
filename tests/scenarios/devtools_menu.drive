@@ -1,7 +1,8 @@
 # Scenario: the in-game menu's Developer pages (M11.0b, docs/M11_PLAN.md section 3.6), through the menu's own test
 # input (DOTHEROES_OVERLAY_TEST: overlay.input) with every picture it composes dumped (DOTHEROES_OVERLAY_DUMP, the
 # run directory): Developer on the main page; Warp; the D_1 group; D_1_1_1's arrival points; its default chosen --
-# the menu closes and the game arrives there (the map's number 37). Then Status read on the held game, and Back out.
+# the menu closes and the game arrives there (the map's number 37). Then Status read on the held game, and Back out;
+# then Player, Money, 9999 (M11.0c): the game's own money set from the menu.
 # Starts from: the kept checkpoint castle-front.
 #! saves build/checkpoints/castle-front
 #! env DOTHEROES_DEVELOPER_MODE=1 DOTHEROES_OVERLAY_TEST=1 DOTHEROES_OVERLAY_DUMP=.
@@ -19,6 +20,8 @@ sleep 5
 write overlay.input open wait wait wait down down down down down wait a wait wait a wait wait wait wait wait down wait a wait wait a wait wait a
 devstate area==37 120
 sleep 5
-write overlay.input open wait wait wait down down down down down wait a wait wait down wait a wait wait wait wait b wait b wait b wait b
+write overlay.input open wait wait wait down down down down down wait a wait wait down down wait a wait wait wait wait b wait b wait b wait b
 sleep 5
 devstate held==0,frames>+30 30
+write overlay.input open wait wait wait down down down down down wait a wait wait down wait a wait wait wait wait down down wait a wait wait down down down down down wait a wait wait wait b wait b wait b wait b
+devstate money==9999,held==0 60
