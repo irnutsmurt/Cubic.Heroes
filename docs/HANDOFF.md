@@ -86,6 +86,18 @@ log) and [FEASIBILITY.md](FEASIBILITY.md) (design and the explicit exceptions).
   the hero at a known spot) is not done. Since 2026-11-02: named scenarios start from kept checkpoints,
   check every stage and retry from the checkpoint a bounded number of times
   ("Current status", "How tests run now").
+  **Since M11.0 (2026-11-16) the developer tools** (docs/M11_PLAN.md): with
+  `DOTHEROES_DEVELOPER_MODE=1` (a setting, off by default; test saves of their
+  own) commands run in the game's own Lua state on its main thread -- from the
+  in-game menu's Developer pages or a test's `dev.cmd` (tests/devtools.py;
+  tests/drive.py `dev`, `devfail`, `devtry`, `devstate`): `warp` (any map or
+  arrival point, answered on arrival), `life`/`magic`/`money`, `invulnerable`,
+  `nodeath` (only a lethal hit stopped -- the requirement above, now through the
+  game's own damage function), `flag`/`progress`/`quests`/`items`/`give`,
+  `boss`/`respawn`/`enemies`/`event`/`scene`, `coverage`/`perf`/`runtime`/`mark`,
+  test `state`s, `lua`. A true in-game restart is now `respawn` (the map entered
+  again) or a kept test state. The regression suite: tests/devtools_suite.py;
+  the map sweep runs through `warp` (tests/map_sweep.py).
 - Commit identity for this repo is the owner's own git config; ps3recomp
   patches are committed as `dotheroes <dotheroes@localhost>` on the
   `dotheroes` branch of `build/ref/ps3recomp`.

@@ -6,25 +6,26 @@ read in the code or the data, [M] measured, [I] inferred, [H] a hypothesis still
 
 ## Checkpoint (kept current; the newest state first)
 
-- **Stage** (2026-11-16): M11.0 (developer debugging tools) -- the design and its stages written (sections 2-4);
-  **M11.0a, the foundation, done** (section 6): the developer-mode setting, the test saves and their worker command,
-  the command channel and the Lua runner in the game's own state, at the flip and in the in-game menu's hold.
-  **M11.0b done** (section 7): the catalog made by the game, `warp` answered on arrival, the in-game menu's Developer
-  pages (Warp, Status) with scrolling lists, the map sweep through `warp` (166 maps arrive; Field_14 met 16
-  pipelines no preparation had, kept for the coverage work). **M11.0c done** (section 8): life, magic and money
-  through the game's own functions, invulnerability, no death (a lethal hit leaves half a heart), the Player page.
-  **M11.0d done** (section 9): the event flags, the main story in 26 steps, quests, items (give, count, remove),
-  their pages. **M11.0e done** (section 10): bosses fought again the game's way, the actors near, a map's enemies
-  again, events started by name, scenes, the ending and its credits, their pages. **M11.0f done** (section 11):
-  pipeline coverage live and exported for the next preparation, frame times and memory, the native systems' reports
-  on demand, hitch marks, test states kept and restored in the game, their pages. M11.0g (integration) next.
-- **Done**: the map sweep made a regression test (tests/map_sweep.py `check`; section 5): the full sweep passes, 166
-  maps arrived in their own areas, 0 pipelines unprepared, 0 translations in play; the check found that M9.2g's sweep
-  never reached fields 1-9 (named by their files, not the engine's names) -- fixed, swept, all their pipelines were
-  already prepared; docs/M92_SHADER_PLAN.md corrected.
-- **Next**: M11.0g (section 4): the suites as one regression run (with the install checks), the documents
-  (HANDOFF's debugging tools, the README's developer note), the owner's review of M11.0.
-- **Outstanding decisions**: none blocking; the defaults "decided here" in section 3 can be changed at review.
+- **Stage** (2026-11-16): **M11.0, the developer debugging tools, complete** (sections 2-12) and **awaiting the
+  owner's review**. Every requirement is met through the game's own logic, behind a developer-mode setting off by
+  default, on test saves that never touch the player's; every stage validated offscreen and pushed (7738d7e, d58c85f,
+  f045f4a, 4f1fa45, 6282559, 4ad7f3b, 1eff51a and M11.0g's commit).
+- **What it does** (section 12 has the table): warp to any of 166 maps and their 395 arrival points; life, magic,
+  money, invulnerability, no death; flags, the story in 26 steps, quests, items; bosses fought again the game's way,
+  the actors, a map's enemies again, events and scenes by name, the ending; pipeline coverage live and exported,
+  frame times, memory, the native systems' reports, hitch marks; test states; a test channel and a regression suite
+  for all of it; the in-game menu's Developer pages for all of it.
+- **Tests**: tests/devtools_suite.py -- eight scenarios and the install checks -- all pass on the final build; the
+  map sweep through `warp` passes but for Field_14's 16 new pipelines (content that differs between runs, kept for the
+  coverage work); unit tests (test_dev_saves, test_map_sweep and the existing ones) pass.
+- **Known limits** (section 12): no arbitrary enemy or boss outside its arena (no script native; the game's own
+  arenas and spawns are used); which sword or shield is equipped is the game's own equipment screen; a flag through
+  the game's own save and load, the ending, and a boss fought to its end are not run in a test; the on-screen tag and
+  the launcher's switch not seen on screen (offscreen only, by the owner's rule).
+- **Outstanding decisions**: none blocking. Proposed ("decided here", can change at review): the developer-mode switch
+  on the launcher's Settings, Diagnostics; the 26 story steps' labels; the Developer pages' order.
+- **Next** (the owner's order, after the review): comprehensive Windows gameplay validation with these tools, bug
+  fixes, release preparation; collecting the pipelines M11's play meets (`coverage export`) into the preparation.
 
 ## 1. The owner's request (2026-11-16)
 
@@ -556,3 +557,36 @@ winning it is the game's).
 - devtools_menu **PASS** with the Coverage and Diagnostics pages viewed (pictures reviewed: 60.5 fps, mean 16.5 ms;
   the menu's own hold no longer counted as a frame -- a first version showed it as a 2 s "frame").
 - The whole suite (basic, off, warp, menu, player, progress, encounter, diag) **PASS**.
+
+## 12. M11.0g: integration (2026-11-16) [M]
+
+**The requirements, met** (the owner's list, section 1):
+
+| Requirement | Command(s) | Page | How, in the game's own terms | Tested by |
+|---|---|---|---|---|
+| Warp to any map, dungeon, floor or entry point | `warp`, `maps` | Warp | Event:SetMap; the maps and their arrival records read in the player's files | devtools_warp, devtools_menu, the map sweep |
+| Boss and enemy spawning | `boss`, `respawn`, `enemies` | Bosses, Enemies | the arena's own entry event after its defeat flags are cleared; the map entered again | devtools_encounter |
+| Progression and event state | `flag`, `flags`, `progress`, `status` | Story, Flags, Status | Event:Get/SetEventFlag, SetProgressFlag; the event object's state | devtools_progress |
+| Quests and inventory | `quests`, `items`, `give`, `count`, `remove` | Quests, Items | flags grouped by the scripts that set them; Event:AddItem2, GetItem, the item's own object | devtools_progress, devtools_menu |
+| Equipment and items | `give` (swords 95-118, shields 89-94) | Items | the game's own item-get; equipped in the game's own screen | devtools_progress |
+| Health, magic, currency | `life`, `maxlife`, `magic`, `maxmagic`, `heal`, `money` | Player | CPlayerActor setHP/setMP/setMaxHP/setMaxMP; Event:SetMoney | devtools_player |
+| Invulnerability and no death | `invulnerable`, `nodeath` | Player | setInvincibility, held; the damage function's entry observer | devtools_player |
+| Events and cinematics | `events`, `event`, `scene`, `ending` | Events | StartEvent; a scene inside an event of the tools' own; Event:Ending | devtools_encounter |
+| Shader and pipeline coverage | `coverage`, `coverage export` | Coverage | the renderer's own counters and each new pipeline as built | devtools_diag |
+| Performance and runtime diagnostics | `perf`, `runtime`, `mark` | Diagnostics | frame times at the flip, memory, the native systems' reports | devtools_diag |
+| Automated testing hooks | dev.cmd / dev.out, `lua` | -- | tests/devtools.py, drive.py `dev`/`devfail`/`devtry`/`devstate` | every scenario |
+| Developer mode off by default; saves protected | the setting; `devsaves`, `state`, `saves` | Test saves | test saves of their own; the player's only read | devtools_off, the install checks, test_dev_saves |
+
+**Integration tested** (the final build, build/m11/dev; offscreen and silent):
+- tests/devtools_suite.py, all eight scenarios **PASS** (basic, off, warp, menu, player, progress, encounter, diag).
+- The install checks **PASS** on the final build (a throwaway install, started as a player starts it): the game boots
+  on its empty test saves, then plays from a copy of the player's saves; **the player's 12 save files byte for byte
+  unchanged** after both.
+- **The same install with developer mode off**: the game plays on the player's own saves as before; a command left
+  for it is never read (no answer, no `dev.out`, no `[dev]` line); no `data/devmode` folder is made; the player's saves
+  unchanged.
+- The documents: README (developer mode, under Play), docs/HANDOFF.md (the debugging tools), this plan.
+
+**Not verified here** (offscreen only, by the owner's rule): the "DEVELOPER MODE - TEST SAVES" tag and the menu over
+a real frame (the pictures are composed and reviewed offscreen); the launcher's Settings showing the switch (the same
+code path as every other switch; the worker's `settings --set` checked).
