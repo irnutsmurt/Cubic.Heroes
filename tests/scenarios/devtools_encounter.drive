@@ -1,0 +1,67 @@
+# Scenario: the developer tools' bosses, enemies, events and cinematics (M11.0e, docs/M11_PLAN.md): the game's map
+# state followed across a raw map change (for `respawn`'s arrival); the bosses' list; temple 1's guardian started the
+# game's way (its defeat flags cleared, its arena entered: the game's own event starts the fight); the actors near;
+# a scene played inside an event of its own (its dialogue answered with CROSS: event state 2 waits for a button); a
+# sign's dialogue event started by name, answered with CROSS until it ends; the map entered again (`respawn`); refusals. tests/devtools_suite.py checks the answers. No death on (the
+# tools' own) so the guardian's hits never end the run. Starts from: the kept checkpoint castle-front.
+#! saves build/checkpoints/castle-front
+#! env DOTHEROES_DEVELOPER_MODE=1 DOTHEROES_NATIVE_CD=1 DOTHEROES_NATIVE_SOLVER=1,2,4,5,6 GCM_WRAP_LAP=1
+#! env DOTHEROES_PRESENT_ONCE=1 DOTHEROES_DEV_STATE=1 DIAG_FRAMES=frames.log PS3_VERBOSE=0 DUMP=0 SHOT_EVERY=0
+#! secs 900
+
+include common.drive
+
+log TitleMovie 120
+sleep 5
+call continue
+state life>0,area==17 90
+sleep 3
+dev nodeath on
+dev status
+dev lua local E=EventClass.Event; E:SetMap("Field_19","-gDebug")
+dev status
+sleep 0.3
+dev status
+sleep 0.3
+dev status
+sleep 0.5
+dev status
+sleep 1
+dev status
+sleep 2
+dev status
+dev bosses
+dev boss temple1 @150
+sleep 2
+dev status
+loop 40                     # through the intro: its lines wait for a button (event state 2)
+  press CROSS
+  sleep 1.5
+end
+devstate event_state==0 30
+sleep 3
+dev enemies
+dev scene 1
+sleep 1
+dev status
+loop 25
+  press CROSS
+  sleep 1.5
+end
+devstate event_state==0 30
+dev warp Field_1 @150
+sleep 3
+dev events Signboard
+dev event Signboard25
+sleep 1
+dev status
+loop 10
+  press CROSS
+  sleep 1.5
+end
+devstate event_state==0 30
+dev respawn @150
+dev status
+devfail event No_Such_Event
+devfail boss no_such_boss
+devstate frames>+30 30

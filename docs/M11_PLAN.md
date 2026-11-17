@@ -14,14 +14,15 @@ read in the code or the data, [M] measured, [I] inferred, [H] a hypothesis still
   pipelines no preparation had, kept for the coverage work). **M11.0c done** (section 8): life, magic and money
   through the game's own functions, invulnerability, no death (a lethal hit leaves half a heart), the Player page.
   **M11.0d done** (section 9): the event flags, the main story in 26 steps, quests, items (give, count, remove),
-  their pages. M11.0e (bosses, enemies, events, cinematics) next.
+  their pages. **M11.0e done** (section 10): bosses fought again the game's way, the actors near, a map's enemies
+  again, events started by name, scenes, the ending and its credits, their pages. M11.0f (pipeline coverage,
+  performance and runtime diagnostics) next.
 - **Done**: the map sweep made a regression test (tests/map_sweep.py `check`; section 5): the full sweep passes, 166
   maps arrived in their own areas, 0 pipelines unprepared, 0 translations in play; the check found that M9.2g's sweep
   never reached fields 1-9 (named by their files, not the engine's names) -- fixed, swept, all their pipelines were
   already prepared; docs/M92_SHADER_PLAN.md corrected.
-- **Next**: M11.0e (section 4): bosses (their arenas with their flags cleared; the boss natives), enemies (the map's
-  own spawns again; the actor manager's list), events and cinematics (StartEvent by name when none runs; PlayScene),
-  their pages.
+- **Next**: M11.0f (section 4): pipeline coverage (the renderer's own counters live; an export the manifest can
+  take), performance (frame times, threads, memory) and the native runtime's reports on demand, test-state pages.
 - **Outstanding decisions**: none blocking; the defaults "decided here" in section 3 can be changed at review.
 
 ## 1. The owner's request (2026-11-16)
@@ -478,3 +479,43 @@ allow); the launcher's Settings page with the new switch (the same code path as 
 across map changes, the place the scripts read them); choosing which sword or shield is equipped -- the items are
 given through the game's own item-get and equipped in the game's own equipment screen; the sword natives
 (ChangeSword, HandOverSwordAbility: the latter waits like an event) are left for later study.
+
+## 10. M11.0e: bosses, enemies, events, cinematics (2026-11-16) [C, M]
+
+**Built** (port/devtools/devtools.cpp, dev_menu.cpp):
+- **Bosses, the game's way** (`bosses`, `boss ID`): each boss's arena and the flags its defeat sets (our own table and
+  labels: the six temples' guardians, the battle at the castle, the tower's rematches and the last two); `boss`
+  clears its flags and warps into its arena -- the arena's own entry event (the map's header) starts the fight as the
+  game does. Answered on arrival. Creating a boss outside its arena (the scripts' Create* natives need the arena's
+  resources, loaded by its map) is not offered.
+- **Enemies**: `enemies` -- the game's actor manager's actors (getActor over its slots), each with its kind named by
+  the game's own constants (`actor_manager.AT_*`: PLAYER, ENEMY, NPC, DOOR, ...), position, state, visibility;
+  `respawn` -- the map entered again through the game's own map change (its own spawns again), answered once the map
+  has reloaded: the guest's frame counter stands still while a map loads [M], so a warp to the map it is already in
+  waits for that stall to end. An arbitrary enemy anywhere has no script native and is not offered (design 3.5).
+- **Events and cinematics**: `events [FILTER]` -- the event functions, read at run time in the scripts the game runs
+  (its own memory): every script function that yields (an event is a coroutine), 600-odd, "cinematic" where it plays
+  a scene or moves the camera; `event NAME` -- the game's own StartEvent (0x004D5BC0) on it, refused while an event
+  runs (the event state not 0) or for a name not in the list; `scene N` -- a scene of the map, as the game's events
+  play one: an event function of the tools' own (`__devtools_scene`: Event:PlayScene, Event:WaitScene, yield) started
+  the same way, so its waits run where they belong; `ending` -- the game's own Event:Ending (its ending and the credits
+  movie, as M8's credits switch calls it).
+- **Pages**: Bosses (Beaten marked; choosing one closes the menu and the fight starts), Enemies ("Enter this map
+  again"; the enemies and other characters with their places), Events (the ending and its credits -- chosen twice --
+  then the event functions by group, mainevent, mapevent, npcevent, ...; choosing one starts it).
+- `status` also gives the game's own map state (Event:GetMapState: it is the map's number -- no loading signal).
+
+**Tested** (offscreen; build/m11/dev):
+- devtools_encounter **PASS**: the bosses listed (15); **temple 1's guardian started the game's way** -- its arena
+  entered, its event running (a wait, 8), its lines answered with CROSS (state 2 waits for a button) until the event
+  ended and the fight was on, **seven enemy actors** in the arena; **scene 1 played** inside the tools' own event
+  (state 5, then done); **a sign's dialogue event started by name** (Signboard25) and answered until it ended; the
+  map entered again (`respawn`: the frame counter stood still about 2 s, then the answer); an unknown event and boss
+  refused. The raw map change followed: the map's number changes as the load begins and the frame counter stops
+  until it ends.
+- devtools_menu **PASS** with the Bosses page viewed; the whole suite (basic, off, warp, menu, player, progress,
+  encounter) **PASS**.
+
+**Not covered yet**: `ending` was not run in a test (it ends the session in the game's credits; M8's credits tests
+cover the game's own Ending); a boss fought to its end with the tools (the fight starts and its enemies are there;
+winning it is the game's).

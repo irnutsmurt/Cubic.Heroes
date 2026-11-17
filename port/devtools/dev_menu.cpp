@@ -15,7 +15,7 @@
 namespace {
 
 enum Kind { V_ROOT, V_WARP, V_GROUP, V_ENTRIES, V_STATUS, V_PLAYER, V_CHOICE, V_STORY, V_FLAGS, V_QUESTS, V_QFLAGS,
-            V_ITEMS, V_ITEM };
+            V_ITEMS, V_ITEM, V_BOSSES, V_ENEMIES, V_EVENTS, V_EVENTLIST };
 struct Level { Kind kind; std::string arg; int focus; };
 std::vector<Level> g_stack;
 std::string g_note;
@@ -146,6 +146,14 @@ std::string sfield(const std::string& json, const char* key)
 }
 
 std::string g_list;     /* the last list answer a page shows (progress, flags, quests, items) */
+bool g_ending_armed = false;   /* the ending chosen once: a second choice plays it */
+
+/* an event's group: its name up to the first '_' (mainevent, mapevent, npcevent ...), else "other" */
+std::string event_group(const std::string& name)
+{
+    const size_t u = name.find('_');
+    return u == std::string::npos || u == 0 ? std::string("other") : name.substr(0, u);
+}
 std::string g_player;   /* the last `player` answer */
 void read_player()
 {
@@ -194,7 +202,8 @@ DevView dev_menu_view()
         v.rows = { { "Warp", "Any map, floor or entry" }, { "Player", "Life, magic, money, no death" },
                    { "Story", "The main story's steps" }, { "Flags", "The game's event flags" },
                    { "Quests", "Flags by the script that sets them" }, { "Items", "Give, count, remove" },
-                   { "Status", "The game's state now" } };
+                   { "Bosses", "Fight one again, the game's way" }, { "Enemies", "This map's, again" },
+                   { "Events", "Start one by name; cinematics" }, { "Status", "The game's state now" } };
         v.note = "Test saves only. Actions apply to the paused game.";
         break;
     case V_WARP:
@@ -283,6 +292,37 @@ DevView dev_menu_view()
         v.rows = { { "Give one", "The game's own item-get" }, { "Give ten", "" }, { "Set the count to 99", "" },
                    { "Remove", "" } };
         break;
+    case V_BOSSES:
+        v.title = "BOSSES";
+        for (const std::string& o : objects(g_list))
+            v.rows.push_back({ sfield(o, "label") + "   " + sfield(o, "map"), field(o, "beaten") == 1 ? "Beaten" : "" });
+        v.note = "Choose one: its arena entered, the game starts its fight again.";
+        break;
+    case V_ENEMIES: {
+        v.title = "ENEMIES";
+        v.rows.push_back({ "Enter this map again", "Its own enemies again" });
+        for (const std::string& o : objects(g_list)) {
+            const std::string k = sfield(o, "kind");
+            if (k == "ENEMY" || k == "NPC" || k == "BOSS")
+                v.rows.push_back({ k + "   slot " + std::to_string(field(o, "slot")), std::to_string(field(o, "x")) + ", " + std::to_string(field(o, "z")) });
+        }
+        break;
+    }
+    case V_EVENTS: {
+        v.title = "EVENTS";
+        v.rows.push_back({ "The ending and its credits", g_ending_armed ? "Choose again to play it" : "" });
+        std::map<std::string, int> groups;
+        for (const std::string& o : objects(g_list)) groups[event_group(sfield(o, "name"))]++;
+        for (auto& kv : groups) v.rows.push_back({ kv.first, std::to_string(kv.second) + " events" });
+        v.note = "An event runs as the game runs it; its lines wait for a button.";
+        break;
+    }
+    case V_EVENTLIST:
+        v.title = "EVENTS: " + L.arg;
+        for (const std::string& o : objects(g_list))
+            if (event_group(sfield(o, "name")) == L.arg)
+                v.rows.push_back({ sfield(o, "name"), field(o, "cinematic") == 1 ? "Cinematic" : "" });
+        break;
     case V_STATUS:
         v.title = "STATUS";
         v.rows = status_rows();
@@ -304,9 +344,12 @@ int dev_menu_pick(int row)
         if (row == 0) g_stack.push_back({ V_WARP, "", 0 });
         if (row == 1) { g_player.clear(); g_stack.push_back({ V_PLAYER, "", 0 }); }
         {
-            static const Kind kinds[] = { V_WARP, V_PLAYER, V_STORY, V_FLAGS, V_QUESTS, V_ITEMS, V_STATUS };
-            static const char* lists[] = { nullptr, nullptr, "progress", "flags 0 330 all", "quests", "items all", nullptr };
-            if (row >= 2 && row < 7) {
+            static const Kind kinds[] = { V_WARP, V_PLAYER, V_STORY, V_FLAGS, V_QUESTS, V_ITEMS, V_BOSSES, V_ENEMIES,
+                                          V_EVENTS, V_STATUS };
+            static const char* lists[] = { nullptr, nullptr, "progress", "flags 0 330 all", "quests", "items all", "bosses",
+                                           "enemies", "events", nullptr };
+            if (row >= 2 && row < 10) {
+                g_ending_armed = false;
                 if (lists[row] && !devtools::run_sync(lists[row], g_list, 5000)) { g_note = g_list; g_list.clear(); }
                 g_stack.push_back({ kinds[row], "", 0 });
             }
@@ -336,6 +379,38 @@ int dev_menu_pick(int row)
         const auto qs = objects(g_list);
         if (row >= 0 && row < (int)qs.size()) g_stack.push_back({ V_QFLAGS, sfield(qs[row], "function"), 0 });
         return 0;
+    }
+    case V_BOSSES: {
+        const auto bs = objects(g_list);
+        if (row < 0 || row >= (int)bs.size()) return 0;
+        devtools_submit(("boss " + sfield(bs[row], "id")).c_str(), nullptr, nullptr);   /* answered on arrival */
+        return 1;
+    }
+    case V_ENEMIES:
+        if (row == 0) { devtools_submit("respawn", nullptr, nullptr); return 1; }
+        return 0;
+    case V_EVENTS: {
+        if (row == 0) {
+            if (!g_ending_armed) { g_ending_armed = true; return 0; }
+            g_ending_armed = false;
+            std::string out;
+            if (!devtools::run_sync("ending", out)) { g_note = out; return 0; }
+            return 1;
+        }
+        std::map<std::string, int> groups;
+        for (const std::string& o : objects(g_list)) groups[event_group(sfield(o, "name"))]++;
+        int k = 1;
+        for (auto& kv : groups) { if (k++ == row) { g_stack.push_back({ V_EVENTLIST, kv.first, 0 }); break; } }
+        return 0;
+    }
+    case V_EVENTLIST: {
+        std::vector<std::string> names;
+        for (const std::string& o : objects(g_list))
+            if (event_group(sfield(o, "name")) == L.arg) names.push_back(sfield(o, "name"));
+        if (row < 0 || row >= (int)names.size()) return 0;
+        std::string out;
+        if (!devtools::run_sync("event " + names[row], out)) { g_note = out; return 0; }
+        return 1;   /* the event runs once the menu lets the game go */
     }
     case V_ITEMS: {
         const auto its = objects(g_list);

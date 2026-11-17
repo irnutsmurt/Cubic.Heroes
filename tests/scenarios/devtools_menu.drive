@@ -21,11 +21,13 @@ sleep 5
 write overlay.input open wait wait wait down down down down down wait a wait wait a wait wait wait wait wait down wait a wait wait a wait wait a
 devstate area==37 120
 sleep 5
-write overlay.input open wait wait wait down down down down down wait a wait wait down down down down down down wait a wait wait wait wait b wait b wait b wait b
+write overlay.input open wait wait wait down down down down down wait a wait wait down down down down down down down down down wait a wait wait wait wait b wait b wait b wait b
 sleep 5
 devstate held==0,frames>+30 30
 write overlay.input open wait wait wait down down down down down wait a wait wait down wait a wait wait wait wait down down wait a wait wait down down down down down wait a wait wait wait b wait b wait b wait b
 devstate money==9999,held==0 60
 write overlay.input open wait wait wait down down down down down wait a wait wait down down wait a wait wait wait b wait down wait a wait wait wait b wait down wait a wait wait wait b wait down wait a wait wait wait a wait wait a wait wait wait b wait b wait b wait b
+devstate held==0,frames>+30 60
+write overlay.input open wait wait wait down down down down down wait a wait wait down down down down down down wait a wait wait wait b wait b wait b
 devstate held==0,frames>+30 60
 dev items

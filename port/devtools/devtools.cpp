@@ -256,12 +256,14 @@ std::string status_json(const ppu_context* c)
     std::string money = "null";
     std::string out;
     if (run_lua(c, "local Event=EventClass.Event; return Event:GetMoney()", out) == 1) money = out;
-    char b[512];
+    std::string map_state = "null";
+    if (run_lua(c, "local Event=EventClass.Event; return Event:GetMapState()", out) == 1) map_state = out;
+    char b[600];
     snprintf(b, sizeof b,
-             "{\"area\":%u,\"frames\":%u,\"hud_life\":%u,\"money\":%s,\"lua_state\":\"0x%08X\",\"lua_level\":%d,"
+             "{\"map_state\":%s,\"area\":%u,\"frames\":%u,\"hud_life\":%u,\"money\":%s,\"lua_state\":\"0x%08X\",\"lua_level\":%d,"
              "\"event_state\":%u,\"event_object\":\"0x%08X\",\"manager_event\":\"0x%08X\",\"event_same\":%d,"
              "\"held\":%d,\"hold_runs\":%d}",
-             g32(kArea), g32(kFrames), g32(kHudLife), money.c_str(), g32(kLuaStatePtr), (int32_t)g32(kBiLuaLevel),
+             map_state.c_str(), g32(kArea), g32(kFrames), g32(kHudLife), money.c_str(), g32(kLuaStatePtr), (int32_t)g32(kBiLuaLevel),
              ev ? g32(ev + 0x20) : 0u, event_object(), ev, event_object() && event_object() == ev ? 1 : 0,
              ps3_guest_paused(), g_hold_runs.load());
     return b;
@@ -428,8 +430,9 @@ struct Pending {
     Cmd cmd;
     std::string map, entry;
     int expected = -1;
-    uint32_t area0 = 0, frames0 = 0, last_area = 0;
-    std::chrono::steady_clock::time_point t0, changed;
+    uint32_t area0 = 0, frames0 = 0, last_area = 0, last_frames = 0;
+    bool loaded = false;         /* a load seen: the guest's frame counter stood still (it does while a map loads) */
+    std::chrono::steady_clock::time_point t0, changed, frames_moved;
 };
 Pending g_warp;
 
@@ -461,8 +464,9 @@ int start_warp(const ppu_context* c, const Cmd& cmd, std::string rest)
     g_warp.entry = entry;
     g_warp.expected = m->number;
     g_warp.area0 = g_warp.last_area = g32(kArea);
-    g_warp.frames0 = g32(kFrames);
-    g_warp.t0 = g_warp.changed = std::chrono::steady_clock::now();
+    g_warp.frames0 = g_warp.last_frames = g32(kFrames);
+    g_warp.loaded = false;
+    g_warp.t0 = g_warp.changed = g_warp.frames_moved = std::chrono::steady_clock::now();
     fprintf(stderr, "[warp] t=%.3f map %s %s (map %d, from area %u)\n", ft_clock(), m->name.c_str(), entry.c_str(),
             m->number, g_warp.area0);
     return 1;
@@ -477,9 +481,17 @@ void check_warp()
     const clk::time_point now = clk::now();
     const uint32_t area = g32(kArea), frames = g32(kFrames);
     if (area != g_warp.last_area) { g_warp.last_area = area; g_warp.changed = now; }
+    if (frames != g_warp.last_frames) {
+        if (std::chrono::duration<double>(now - g_warp.frames_moved).count() >= 0.25) g_warp.loaded = true;
+        g_warp.last_frames = frames;
+        g_warp.frames_moved = now;
+    }
     const double since = std::chrono::duration<double>(now - g_warp.t0).count();
     const double settled = std::chrono::duration<double>(now - g_warp.changed).count();
-    const bool there = (int)area == g_warp.expected && settled >= 1.0;
+    /* the map's own number reached and settled -- and, for the map it was already in (a respawn), a load seen first */
+    const bool there = (int)area == g_warp.expected && settled >= 1.0 &&
+                       ((int)g_warp.area0 != g_warp.expected || (g_warp.loaded && std::chrono::duration<double>(now - g_warp.frames_moved).count() < 0.2 &&
+                                                               std::chrono::duration<double>(now - g_warp.changed).count() >= 1.0));
     const bool elsewhere = area != g_warp.area0 && (int)area != g_warp.expected && settled >= 3.0 && since >= 5.0;
     if (!there && !elsewhere && since < 90.0) return;
     g_warp.on = false;
@@ -882,6 +894,179 @@ int progression_command(const ppu_context* c, const Cmd& cmd, const std::string&
     return 1;
 }
 
+/* ---- bosses, enemies, events, cinematics (M11.0e) ---- */
+constexpr uint32_t fn_start_event = 0x004D5BC0;   /* StartEvent(event, name): `Coroutine=coroutine.create(name)` */
+constexpr uint32_t kEventNameOff = 0xFC00;        /* an event's name, in the tools' region */
+
+/* the bosses, the game's way: each one's arena, and the flags its defeat sets -- cleared, the arena's own entry event
+ * starts the fight again (docs/M11_PLAN.md section 10; our own labels) */
+struct Boss { const char* id; const char* label; const char* map; std::vector<int> flags; };
+const std::vector<Boss>& bosses()
+{
+    static const std::vector<Boss> b = {
+        { "temple1", "Temple 1's guardian", "D_1_2", { 6, 8 } }, { "temple2", "Temple 2's guardian", "D_2_2", { 11, 14 } },
+        { "temple3", "Temple 3's guardian", "D_3_2", { 22, 25 } }, { "temple4", "Temple 4's guardian", "D_4_2", { 33, 37 } },
+        { "temple5", "Temple 5's guardian", "D_5_2", { 42, 91 } }, { "temple6", "Temple 6's guardian", "D_6_2", { 50, 52 } },
+        { "castle", "The battle at the castle", "D_8_2", { 64 } },
+        { "tower1", "The tower: rematch 1", "D_7_2_1", { 311 } }, { "tower2", "The tower: rematch 2", "D_7_2_2", { 313 } },
+        { "tower3", "The tower: rematch 3", "D_7_2_3", { 315 } }, { "tower4", "The tower: rematch 4", "D_7_2_4", { 317 } },
+        { "tower5", "The tower: rematch 5", "D_7_2_5", { 319 } }, { "tower6", "The tower: rematch 6", "D_7_2_6", { 321 } },
+        { "tower7", "The tower: before the last", "D_7_2_7", {} }, { "last", "The last enemy", "D_7_2_8", { 74 } },
+    };
+    return b;
+}
+
+/* the event functions: the script functions the game runs as events (each yields: a coroutine), read in the scripts
+ * the game runs (its own memory); a "cinematic" one moves the camera or plays a scene */
+struct EventFn { std::string name; bool cinematic; };
+std::vector<EventFn> g_events;
+bool g_events_made = false;
+
+void make_events()
+{
+    if (g_events_made) return;
+    const char* text = (const char*)vm_base + kBundle;
+    auto at_line = [&](uint32_t i) { return i == 0 || text[i - 1] == '\n'; };
+    uint32_t i = 0;
+    while (i + 9 < kBundleSize) {
+        if (!(at_line(i) && !strncmp(text + i, "function ", 9))) { i++; continue; }
+        uint32_t j = i + 9;
+        while (j < kBundleSize && (isalnum((unsigned char)text[j]) || text[j] == '_')) j++;
+        const std::string name(text + i + 9, j - i - 9);
+        uint32_t e = j;   /* the body: up to the next function at a line's start */
+        while (e + 9 < kBundleSize && !(at_line(e) && !strncmp(text + e, "function ", 9))) e++;
+        const std::string body(text + j, e - j);
+        if (!name.empty() && body.find("coroutine.yield") != std::string::npos)
+            g_events.push_back({ name, body.find("PlayScene") != std::string::npos || body.find("SetCamera") != std::string::npos ||
+                                       body.find("PlayCamera") != std::string::npos });
+        i = e;
+    }
+    std::sort(g_events.begin(), g_events.end(), [](const EventFn& a, const EventFn& b) { return a.name < b.name; });
+    g_events.erase(std::unique(g_events.begin(), g_events.end(), [](const EventFn& a, const EventFn& b) { return a.name == b.name; }),
+                   g_events.end());
+    g_events_made = true;
+    DLOG(DH_LOG_INFO, "dev", "the event functions: %zu", g_events.size());
+}
+
+/* the game's own StartEvent on `name` (a global script function), only while no event runs */
+bool start_event(const ppu_context* c, const std::string& name, std::string& why)
+{
+    const uint32_t ev = manager_event();
+    if (!ev) { why = "no event object (the scripts not loaded?)"; return false; }
+    if (g32(ev + 0x20) != 0) { why = "an event is running (its state " + std::to_string(g32(ev + 0x20)) + ")"; return false; }
+    if (name.size() > 120) { why = "the name is too long"; return false; }
+    memcpy(vm_base + g_region + kEventNameOff, name.c_str(), name.size() + 1);
+    call(c, fn_start_event, kEventToc, { ev, g_region + kEventNameOff });
+    return true;
+}
+
+const char kActorsLua[] = R"(local m = actor_manager.gActorManager
+local cat = {}
+for k, v in pairs(actor_manager) do if type(k) == "string" and string.sub(k, 1, 3) == "AT_" and type(v) == "number" then cat[v] = string.sub(k, 4) end end
+local t = {}
+for i = 0, 1023 do
+  local a = m:getActor(i)
+  if a then
+    local p = a:getPosition()
+    t[#t+1] = i .. "\t" .. (cat[a:getType()] or a:getType()) .. "\t" .. string.format("%.1f\t%.1f", p.x, p.z) .. "\t" .. a:getState() .. "\t" .. tostring(a:isVisible())
+  end
+end
+return table.concat(t, "\n"))";
+
+/* 1 answered (a change), 0 answered, -1 not one of these; 2 started an answer that comes later (a warp) */
+int encounter_command(const ppu_context* c, const Cmd& cmd, const std::string& w, std::string rest)
+{
+    std::string out, why;
+    if (w == "bosses") {
+        std::vector<int> ids;
+        for (const Boss& b : bosses()) for (int f : b.flags) ids.push_back(f);
+        const auto v = flag_values(c, ids);
+        std::string o = "[";
+        for (const Boss& b : bosses()) {
+            bool beaten = !b.flags.empty();
+            for (int f : b.flags) beaten = beaten && v.count(f) && v.at(f) != 0;
+            o += std::string(o.size() > 1 ? "," : "") + "{\"id\":" + json_str(b.id) + ",\"label\":" + json_str(b.label) +
+                 ",\"map\":" + json_str(b.map) + ",\"beaten\":" + (beaten ? "true" : "false") + "}";
+        }
+        answer(cmd, true, o + "]", true);
+        return 0;
+    }
+    if (w == "boss") {
+        const std::string id = word(rest);
+        const Boss* b = nullptr;
+        for (const Boss& x : bosses()) if (id == x.id) b = &x;
+        if (!b) { answer(cmd, false, "no boss " + id + " (`bosses` lists them)"); return 0; }
+        if (!b->flags.empty()) {
+            std::string chunk = "local E=EventClass.Event; ";
+            for (int f : b->flags) chunk += "E:SetEventFlag(" + std::to_string(f) + ",0); ";
+            if (run_lua(c, chunk, out) != 1) { answer(cmd, false, "the boss's flags: " + out); return 0; }
+        }
+        return start_warp(c, cmd, b->map) == 1 ? 2 : 0;
+    }
+    if (w == "respawn") {   /* the map entered again: its own spawns (answered on arrival: the warp's rule) */
+        std::string err;
+        if (!make_catalog(c, err)) { answer(cmd, false, err); return 0; }
+        const uint32_t area = g32(kArea);
+        for (const MapInfo& m : g_maps)
+            if (m.number == (int)area) return start_warp(c, cmd, m.name) == 1 ? 2 : 0;
+        answer(cmd, false, "the map now (" + std::to_string(area) + ") is not in the catalog");
+        return 0;
+    }
+    if (w == "enemies") {
+        if (run_lua(c, kActorsLua, out) != 1) { answer(cmd, false, "the actors: " + out); return 0; }
+        std::string o = "[";
+        size_t a = 0;
+        while (a < out.size()) {
+            size_t e = out.find('\n', a);
+            if (e == std::string::npos) e = out.size();
+            std::string ln = out.substr(a, e - a), f[6];
+            a = e + 1;
+            for (int k = 0; k < 6; k++) { const size_t t = ln.find('\t'); f[k] = ln.substr(0, t); ln = t == std::string::npos ? "" : ln.substr(t + 1); }
+            o += std::string(o.size() > 1 ? "," : "") + "{\"slot\":" + f[0] + ",\"kind\":" + json_str(f[1]) + ",\"x\":" + f[2] +
+                 ",\"z\":" + f[3] + ",\"state\":" + f[4] + ",\"visible\":" + (f[5] == "true" ? "true" : "false") + "}";
+        }
+        answer(cmd, true, o + "]", true);
+        return 0;
+    }
+    if (w == "events") {
+        make_events();
+        const std::string filter = word(rest);
+        std::string o = "[";
+        for (const EventFn& e : g_events)
+            if (filter.empty() || e.name.find(filter) != std::string::npos)
+                o += std::string(o.size() > 1 ? "," : "") + "{\"name\":" + json_str(e.name) + ",\"cinematic\":" +
+                     (e.cinematic ? "true" : "false") + "}";
+        answer(cmd, true, o + "]", true);
+        return 0;
+    }
+    if (w == "event") {
+        make_events();
+        const std::string name = word(rest);
+        bool known = false;
+        for (const EventFn& e : g_events) known = known || e.name == name;
+        if (!known) { answer(cmd, false, "no event function " + name + " (`events` lists them)"); return 0; }
+        if (!start_event(c, name, why)) { answer(cmd, false, why); return 0; }
+        answer(cmd, true, "{\"event\":" + json_str(name) + ",\"started\":true}", true);
+        return 1;
+    }
+    if (w == "scene") {   /* a scene of the map, as the game's events play one: inside an event of its own */
+        long n = 0;
+        if (!number_arg(rest, n, 0, 99)) { answer(cmd, false, "scene N"); return 0; }
+        const std::string def = "function __devtools_scene() local Event=EventClass.Event; Event:PlayScene(" +
+                                std::to_string(n) + "); Event:WaitScene(); coroutine.yield(); end";
+        if (run_lua(c, def, out) != 1) { answer(cmd, false, "the scene's event: " + out); return 0; }
+        if (!start_event(c, "__devtools_scene", why)) { answer(cmd, false, why); return 0; }
+        answer(cmd, true, "{\"scene\":" + std::to_string(n) + ",\"started\":true}", true);
+        return 1;
+    }
+    if (w == "ending") {   /* the game's own Ending: its ending and the credits movie (as M8's credits switch) */
+        if (run_lua(c, "local E=EventClass.Event; E:Ending()", out) != 1) { answer(cmd, false, "Event:Ending: " + out); return 0; }
+        answer(cmd, true, "{\"ending\":true}", true);
+        return 1;
+    }
+    return -1;
+}
+
 /* true when the command changed the game (the next one waits for the next frame) */
 bool execute(const ppu_context* c, const Cmd& cmd)
 {
@@ -896,6 +1081,10 @@ bool execute(const ppu_context* c, const Cmd& cmd)
         {
             const int r = progression_command(c, cmd, w, rest);
             if (r >= 0) return r == 1;
+        }
+        {
+            const int r = encounter_command(c, cmd, w, rest);
+            if (r >= 0) return r >= 1;
         }
         if (w == "warp") return start_warp(c, cmd, rest) == 1;
         if (w == "maps" || w == "catalog") {

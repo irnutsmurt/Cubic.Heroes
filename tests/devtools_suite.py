@@ -12,6 +12,7 @@ Scenarios (tests/scenarios/<name>.drive):
   devtools_warp    the catalog; a warp to each kind of place, each arriving at its own map number; refusals
   devtools_menu    the in-game menu's Developer pages (pictures dumped): Warp to D_1_1_1 chosen and arrived; Status
   devtools_progress  flags, the story's steps, quests, items; a boss room before and after `progress set`
+  devtools_encounter  a boss fought the game's way, the actors, a scene, an event by name, the map again
   devtools_player  life, magic, money through the game's functions; no death on a lethal hit; invulnerable among the
                    river's enemies, a control without, no death at low life
   --installed: devtools_install (the game as a player starts it boots on its empty test saves), then the worker's
@@ -182,8 +183,31 @@ def check_progress(rd):
     return bad
 
 
+def check_encounter(rd):
+    """the encounter scenario's answers"""
+    bad = []
+    a = [x["out"] for x in answers(rd) if x.get("ok")]
+    bosses = next((o for o in a if isinstance(o, list) and o and "label" in o[0]), [])
+    if len(bosses) < 15:
+        bad.append(f"{len(bosses)} bosses listed (15 expected)")
+    i = next((k for k, o in enumerate(a) if isinstance(o, dict) and o.get("map") == "D_1_2"), None)
+    if i is None or not isinstance(a[i + 1], dict) or not a[i + 1].get("event_state"):
+        bad.append("temple 1's guardian: no event started in its arena")
+    actors = next((o for o in a if isinstance(o, list) and o and "kind" in o[0]), [])
+    if not any(x["kind"] == "ENEMY" for x in actors):
+        bad.append("no enemy actor in the guardian's arena")
+    for what in ("scene", "event"):
+        if not any(isinstance(o, dict) and o.get(what) is not None and o.get("started") for o in a):
+            bad.append(f"no {what} started")
+    resp = [o for o in a if isinstance(o, dict) and o.get("map") == "Field_1"]
+    if len(resp) < 2 or resp[-1].get("area") != resp[-1].get("expected"):
+        bad.append(f"respawn: {resp[-1] if resp else None}")
+    return bad
+
+
 CHECKS = {"devtools_basic": check_basic, "devtools_off": check_off, "devtools_warp": check_warp,
-          "devtools_menu": check_menu, "devtools_player": check_player, "devtools_progress": check_progress}
+          "devtools_menu": check_menu, "devtools_player": check_player, "devtools_progress": check_progress,
+          "devtools_encounter": check_encounter}
 
 
 def tree_digest(tree):
