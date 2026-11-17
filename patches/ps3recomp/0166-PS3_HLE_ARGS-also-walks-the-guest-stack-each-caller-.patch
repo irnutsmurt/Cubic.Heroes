@@ -1,0 +1,48 @@
+From 8a598df75b98d50a10d9dd8ba90cdbcde47e053e Mon Sep 17 00:00:00 2001
+From: giteaguy <73799093+irnutsmurt@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 10:45:20 -0800
+Subject: [PATCH] PS3_HLE_ARGS also walks the guest stack: each caller of the
+ traced import
+
+ppu_hle.cpp: with PS3_HLE_ARGS=<nid>, after the registers the guest's back chain is followed from r1 and each
+frame's saved return address (16 bytes into the caller's frame, the 64-bit ABI's LR save word) is printed, up to
+16 frames -- who called the import, not only its stub (the stub's return address names a library function, such as
+exit(), whose callers are the question).
+---
+ runtime/ppu/ppu_hle.cpp | 15 ++++++++++++++-
+ 1 file changed, 14 insertions(+), 1 deletion(-)
+
+diff --git a/runtime/ppu/ppu_hle.cpp b/runtime/ppu/ppu_hle.cpp
+index be6117a..7bd7334 100644
+--- a/runtime/ppu/ppu_hle.cpp
++++ b/runtime/ppu/ppu_hle.cpp
+@@ -372,12 +372,25 @@ extern "C" void ps3_hle_call(uint32_t nid, ppu_context* ctx)
+                       s_ha = e ? (long)strtoul(e, 0, 16) : 0; }
+       if (s_ha && nid == (uint32_t)s_ha) {
+         static int _n = 0;
+-        if (PS3_LOG_FIRST(_n, 6))
++        if (PS3_LOG_FIRST(_n, 6)) {
+           fprintf(stderr, "[hle-args] nid=0x%08X r3=0x%08X r4=0x%08X r5=0x%08X r6=0x%08X "
+                           "r7=0x%08X r8=0x%08X r9=0x%08X r10=0x%08X lr=0x%08X\n",
+                   nid, (uint32_t)ctx->gpr[3], (uint32_t)ctx->gpr[4], (uint32_t)ctx->gpr[5],
+                   (uint32_t)ctx->gpr[6], (uint32_t)ctx->gpr[7], (uint32_t)ctx->gpr[8],
+                   (uint32_t)ctx->gpr[9], (uint32_t)ctx->gpr[10], (uint32_t)ctx->lr);
++          /* the guest's callers: its stack's back chain, each frame's saved return address (16 bytes into the
++           * caller's frame, the 64-bit ABI's LR save word) -- who called the import, not only the stub */
++          extern uint64_t vm_read64(uint64_t a);
++          uint64_t sp = ctx->gpr[1];
++          fprintf(stderr, "[hle-args]   callers:");
++          for (int i = 0; i < 16 && sp >= 0x10000u && sp < 0xE0000000u; i++) {
++              const uint64_t back = vm_read64(sp);
++              if (back <= sp || back >= 0xE0000000u) break;
++              fprintf(stderr, " %08X", (uint32_t)vm_read64(back + 16));
++              sp = back;
++          }
++          fprintf(stderr, "\n");
++        }
+       } }
+ 
+     /* sys_process_exit (abort path): dump the guest back-chain so we see WHO aborted.
+-- 
+2.56.0.windows.3
+

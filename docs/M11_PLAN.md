@@ -953,3 +953,57 @@ makes them again). Not slime-specific: every program that samples a cube map goe
 **Verified**: devtools_cubemap (new, tests/devtools_suite.py): the slime created beside the hero and the field's spawn
 points forced, under the validation layer: no error; the slime now a pale pink-white dome with yellow glints, as
 RPCS3 draws it (build/compare/b008-before-after-rpcs3.png, local).
+
+## 27. M11.1b: B-009 -- the game ending itself after the priest's game over (2026-11-17) [M]
+
+**The owner's statement of the original** (2026-11-17): refusing the priest's offer starts the fight; accepting it
+twice is an intentional game over; "Continue" treats it as a standard death -- the hero back outside the boss door or
+at the tower's entrance, by checkpoint, his save's progress intact. Here the game ended (exit code 0) after
+"Continue?", either answer; and on the tower's seventh floor the system menu's second entry did the same.
+
+**Narrowing it down** (build/m11's b009 and priest runs): no system request to quit was delivered (the runtime's quit
+path logs; none); neither of the engine's two flags that end main()'s loop (BiGlobal.isKeepRunning, isWantReboot:
+both setters wrapped and withheld from the tools' Lua -- the class's table is in the Lua registry) nor Lua's os.exit
+was the way. The runtime's PS3_HLE_ARGS now also walks the guest's stack (patches/ps3recomp/0166): exit(0) was called
+from the game's own update (main -> 0x2AA88 -> 0x566600 -> 0x5154A0 -> 0x50B410), the event class's check in
+GameClass.cpp at line 1762 -- "NextIndex:%d", then "NextIndex==MAP::MS_NON" and exit. NextIndex is a stored field
+(GameClass + 0x4FF8, +0x74), set only by Event:SetDungeonResurrectionPoint, which each dungeon's first floor calls
+from its own map event (D_7_1_1's header: mapevent_d07_01, MS_DUNGEON_7_1_1). The tools' warp had put the hero on the
+seventh floor and in the priest's room without passing the tower's first floor, so the tower's resurrection point was
+never set: the game, finding nowhere to bring him back to, ends itself -- as the original would in that state. A
+player cannot reach the tower's rooms without that floor. The standard death checked the same way elsewhere
+(field, temple 1, its boss room) brings him back as the console does.
+
+**Regression** (tests/devtools_priest.py; scenario devtools_priest): the tower entered at its first floor (its own map
+event), then the priest's room -- accept twice and continue (back at the tower's entrance; flags, items, money as
+before the room); accept twice and decline; refuse (the fight begins); bag-door (BAG=door): a sleeping bag tried
+outside his door first, then accept and continue.
+
+**Results** (dev build, offscreen): accept-continue PASS -- GAME OVER, "Continue?" YES, the hero back at the tower's
+entrance (area 63) with life 12/12, magic 5, money 45, the same 20 items and 73 story flags, the saves untouched, the
+game running on; refuse PASS -- the priest and his summons in the room (nine visible enemies), the game running on.
+The tower's save on its seventh floor, entered at its first floor (build/m11 tower_save2), saves, goes to the title
+and continues: the save's exit was the same cause. Accept and decline: "Continue?" NO, "Save your progress?" NO, the
+game's title (the hero no longer in play), the title's movie. The game then ended (its tiles unbound, its SPURS task
+sets shut down, sys_process_exit(0)) -- at the tools' own read of the items: the exit's callers (PS3_HLE_ARGS) are
+Event:GetItem's implementation (0x4CCE44, under the Lua VM), which with no player data ends the game. The tools'
+`items` (and `give`, `count`, `remove`, `progress set`, which go through GetItem and AddItem2) now refuse with no hero
+in play. That end found B-010: the process crashed while ending (below). On the new build, accept-decline PASS (the
+title, the game running on, the saves untouched); a field death declined the same way: the title, then its demo.
+
+**The checkpoint.** The tower has one resurrection point, its first floor (the scripts' only call for it,
+mapevent_d07_01; the other dungeon with several is D_60's: mapevent_d60_02, 14, 15, 22). A sleeping bag ("Restores
+LIFE and sets Revival Point") tried outside the priest's door is refused by the game ("It won't work here": bag-door
+PASS, the bag kept, the continue at the entrance); the game's own save beside the seventh floor's door resumes at the
+tower's entrance (tower_save2). A death in temple 1's boss arena returned to its entrance on RPCS3 as here (section
+25's comparison). No script or binding the game has brings the hero back outside the priest's door.
+
+**B-010** (found here; S1): the runtime's sys_process_exit called exit(), whose handlers and C++ destructors ran
+while the native renderer (the crash: its thread allocating in guest_texture_live as the heap was torn down), the
+movie's decoder and the game's other threads still ran -- an access violation in the heap, or the heap reported
+corrupted (0xC0000374, the first tower save's end): 2 of the 10 game-ended exits in M11.1b's runs. A test's stop never
+met it: it drains the renderer and ends the process without exit()'s handlers. Now every end the runtime makes goes
+through a host hook (patches/ps3recomp/0167: ps3_exit and g_ps3_exit_hook -- sys_process_exit, the host quit's
+fallback, the guest's entry returning), and the port's (main.cpp game_end) writes the window's place, the census and
+the game log's summary, then runs the test stop's own sequence (dev_state.cpp dotheroes_end: the renderer drained and
+stopped, the logs and reports) and ends the process with the game's status.

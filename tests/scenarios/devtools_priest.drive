@@ -1,0 +1,102 @@
+# Scenario: the priest's offer in the tower (M11.1b, B-009; docs/M11_PLAN.md section 27; tests/devtools_priest.py runs
+# its three cases). The story set up to the priest's second fight (step 24), the hero armed as the story arms him, the
+# tower entered at its first floor (D_7_1_1: its own map event sets the dungeon's resurrection point, as a player's
+# entry does -- without it the game has no map to bring him back to and ends itself, GameClass.cpp's
+# "NextIndex==MAP::MS_NON"), then the priest's room entered the game's way (`boss tower7`). Its introduction answered:
+#   PAGE empty  his offer accepted twice: the game's own game over; then K1-K5 (default CROSS each): CROSS brings up
+#               "Continue?", CROSS takes YES -- brought back as a death brings him, at the tower's entrance; or
+#               CROSS, DOWN, CROSS (NO), DOWN, CROSS -- "Save your progress?" NO: to the title, nothing saved;
+#   PAGE=no     refused (each question's second choice): the fight begins.
+# BAG=door: before the room, a sleeping bag ("Restores LIFE and sets Revival Point") tried from the menu outside the
+# priest's door (D_7_2_6): the game refuses it there ("It won't work here"), the tower's one resurrection point stays
+# its first floor, where a continue brings him back.
+# The flags, the player and the items read before and after; the suite's runner checks where each case ends.
+#! saves build/checkpoints/castle-front
+#! env DOTHEROES_DEVELOPER_MODE=1 DOTHEROES_NATIVE_CD=1 DOTHEROES_NATIVE_SOLVER=1,2,4,5,6 GCM_WRAP_LAP=1
+#! env DOTHEROES_PRESENT_ONCE=1 DOTHEROES_DEV_STATE=1 PS3_VERBOSE=0 SHOT_EVERY=0 DUMP=1
+#! secs 900
+
+include common.drive
+
+block bag_none
+  sleep 0
+end
+
+block bag_door                # the sleeping bag tried outside the priest's door: the menu opens on the equipment's
+  dev give 31                 # first row (the bomb); two rows down, the items' first: the sleeping bag; CROSS, YES
+  sleep 1
+  dev warp D_7_2_6 -gDebug @150
+  sleep 3
+  press TRIANGLE
+  sleep 1.5
+  press DOWN
+  sleep 0.6
+  press DOWN
+  sleep 0.6
+  shot bag-menu
+  press CROSS
+  sleep 1.5
+  shot bag-select
+  press CROSS
+  sleep 2
+  shot bag-used
+  press CIRCLE
+  sleep 1.5
+  shot bag-closed
+  dev status
+  dev player
+  dev items
+end
+
+log TitleMovie 120
+sleep 5
+call continue
+state life>0,area==17 90
+sleep 3
+dev nodeath on
+dev progress set 24
+loop 6
+  press CROSS
+  sleep 1
+end
+dev give 97
+loop 4
+  press CROSS
+  sleep 1
+end
+dev lua local E=EventClass.Event; E:SetSwordData(); E:HandOverSwordAbility(swordData.SwordData.SL_HERO_SWORD, swordData.SwordData.SL_ANTIQUITY_SWORD)
+dev warp D_7_1_1 -gDebug @150
+sleep 3
+dev status
+dev flags 0 330
+dev player
+dev items
+call bag_${BAG:-none}
+dev boss tower7 @150
+sleep 2
+devpage 420 soft ${PAGE:-}
+shot answered
+dev status
+press ${K1:-CROSS}
+sleep 4
+shot k1
+press ${K2:-CROSS}
+sleep 4
+shot k2
+press ${K3:-CROSS}
+sleep 4
+shot k3
+press ${K4:-CROSS}
+sleep 4
+shot k4
+press ${K5:-CROSS}
+sleep 6
+shot k5
+devpage 60 soft ifany
+sleep 4
+shot after
+devtry status
+devtry flags 0 330
+devtry player
+devtry items
+devtry enemies

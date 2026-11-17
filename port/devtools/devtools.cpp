@@ -769,6 +769,11 @@ std::string progress_json(const ppu_context* c)
     return o + "]";
 }
 
+/* M11.1b: the game's items are read and given through its own Event:GetItem and AddItem2 -- with no hero in play (its
+ * title, after a game over declined) GetItem finds no player data and the game ends itself (exit(0) in its
+ * implementation, 0x4CCE44): those commands are refused then */
+const char kNoItemsOutOfPlay[] = "not in play (no player): the game's own item read ends the game without one";
+
 /* the item's object in the player's data (GetItem's way), or 0 */
 uint32_t item_object(const ppu_context* c, int id)
 {
@@ -847,6 +852,7 @@ int progression_command(const ppu_context* c, const Cmd& cmd, const std::string&
         const std::string op = word(rest);
         if (op.empty()) { answer(cmd, true, progress_json(c), true); return 0; }
         if (op != "set" || !number_arg(rest, a, 1, (long)story().size())) { answer(cmd, false, "progress | progress set STEP"); return 0; }
+        if (!player(c)) { answer(cmd, false, kNoItemsOutOfPlay); return 0; }   /* its items: the game's GetItem */
         /* every step up to this one, as the scripts leave it: its flags, the world map's progress, its items (given
          * through the game's own item-get only when not already held) */
         std::string chunk = "local E=EventClass.Event; ";
@@ -873,6 +879,10 @@ int progression_command(const ppu_context* c, const Cmd& cmd, const std::string&
             o += "]}";
         }
         answer(cmd, true, o + "]", true);
+        return 0;
+    }
+    if ((w == "items" || w == "give" || w == "count" || w == "remove") && !player(c)) {
+        answer(cmd, false, kNoItemsOutOfPlay);
         return 0;
     }
     if (w == "items") { answer(cmd, true, items_json(c, word(rest) == "all"), true); return 0; }

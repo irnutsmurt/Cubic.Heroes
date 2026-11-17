@@ -305,6 +305,10 @@ extern "C" void dh_log(int level, const char* tag, const char* fmt, ...)
 
 extern "C" int dh_log_session_active(void) { return g_active.load(); }
 
+/* the session's summary line (its frames, the watch's cost): at exit's handlers, or at the game's own end
+ * (main.cpp's, which ends the process without them) */
+extern "C" void dh_log_session_summary(void) { spike_summary(); }
+
 extern "C" void dh_log_note_setting(const char* name, const char* value)
 {
     if (!name || !*name) return;

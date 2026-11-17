@@ -119,6 +119,8 @@ extern uint32_t g_ppu_main_stack_size;
  * entry function unwound instead. */
 extern int     g_sys_process_exit_called;
 extern int32_t g_sys_process_exit_code;
+extern void  (*g_ps3_exit_hook)(int code);   /* sysPrxForUser.c: the runtime's ends call it, then exit() */
+void           ps3_exit(int code);
 
 /* runtime/spu: the SPU interpreter's entry, or in a build without it
  * (PS3RECOMP_SPU_INTERPRETER=0) its stand-in that stops the program. */
@@ -1057,6 +1059,24 @@ static void save_window_state()
     }
 }
 
+/* M11.1b (B-010): the game's own end -- its sys_process_exit, the host quit's fallback, its entry returning (the
+ * runtime's g_ps3_exit_hook): what exit()'s handlers write here (the window's place, the census, the game log's
+ * summary), then dotheroes_end (native/dev_state.cpp): the native renderer drained and stopped, the logs and reports
+ * written, the process ended with the game's status without exit()'s handlers and destructors -- which ran while the
+ * renderer, the movie's decoder and the game's other threads still used what they tore down (the heap corrupted, or
+ * an access violation in it, at about one such exit in five). */
+extern "C" void dotheroes_end(int code);
+extern "C" void dh_log_session_summary(void);
+static void game_end(int code)
+{
+    fprintf(stderr, "[exit] the game's end (status %d): the window's place and the logs written, then the process "
+            "ended\n", code);
+    save_window_state();
+    ps3_census_report(stderr);
+    dh_log_session_summary();
+    dotheroes_end(code);
+}
+
 extern "C" void dotheroes_overlay_start(const char* settings_path, const char* install_root);   /* overlay.cpp */
 #include "devtools/devtools.h"   /* M11.0: the developer tools (docs/M11_PLAN.md) */
 
@@ -1432,6 +1452,7 @@ int main(int argc, char** argv)
     /* Install the guest-callback hook, then start the frame clock. It no-ops
      * until the title registers its vblank and flip handlers during init. */
     g_ps3_guest_caller = harness_guest_caller;
+    g_ps3_exit_hook = game_end;   /* the game's own end: in order, with no destructor beside a live thread */
     CreateThread(NULL, 4u * 1024 * 1024, frame_clock, NULL, 0, NULL);
 
     printf("\n[boot] dispatching entry OPD 0x%08X (stack top 0x%08X)\n\n",
@@ -1449,6 +1470,9 @@ int main(int argc, char** argv)
      * ends in the host exit(). Getting here means the entry function returned
      * instead, so hand back the status the guest published if it published
      * one. Returning a hardcoded 0 would report success for a run that never
-     * got anywhere. */
-    return g_sys_process_exit_called ? (int)g_sys_process_exit_code : 0;
+     * got anywhere. That status ends the process as the game's own end does
+     * (game_end), not through exit()'s handlers beside the threads still running. */
+    const int status = g_sys_process_exit_called ? (int)g_sys_process_exit_code : 0;
+    ps3_exit(status);
+    return status;
 }

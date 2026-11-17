@@ -575,9 +575,10 @@ void memsnap_loop()
 // set time or at exit) -- then the process ends with status 0 without running
 // exit handlers (other threads are mid-frame).
 // quit.trigger instead: the game asked to exit as closing the window asks it
-// (ps3_host_quit: REQUEST_EXITGAME to its sysutil callbacks, a grace period,
-// then exit 0 with the exit handlers) -- the game's own shutdown path, for the
-// tests of what runs there (the water's, the waver's teardown).
+// (ps3_host_quit: REQUEST_EXITGAME to its sysutil callbacks, a grace period)
+// -- the game's own shutdown path, for the tests of what runs there (the
+// water's, the waver's teardown), ending as the game's own end ends
+// (dotheroes_end, below).
 extern "C" void nsm_host_pause(int on);          // native/audio/sound_manager.cpp
 // M10.2 (docs/M10_PLAN.md): the game held (1) or released (0) by its host -- its in-game menu: the guest's clocks
 // stand still and its render thread waits at its next flip (ps3emu/guest_pause.h), and the sound output pauses
@@ -592,6 +593,41 @@ extern "C" void dotheroes_host_pause(int on)
             (double)ps3_guest_paused_ns() / 1e9);
 }
 extern "C" void ps3_host_quit(const char* why);   // cellSysutil.c
+
+// M11.1b (B-010): the process's end, for a test's stop and for the game's own end alike (main.cpp's
+// g_ps3_exit_hook: the game's sys_process_exit, the host quit's fallback): the logs the trace keeps, the shader
+// cache, the native renderer's drain (its thread stopped, its batches complete) and report, each native task's
+// counts, the flip's reports -- then the process ended with `code`, without exit()'s handlers and destructors: those
+// ran while the renderer, the movie's decoder and the game's other threads still used what they tore down (the heap
+// corrupted, or an access violation, at about one game-ended exit in five). Once: a second caller waits for the
+// first to end the process.
+extern "C" void dotheroes_end(int code)
+{
+    static std::atomic<int> once{0};
+    if (once.exchange(1))
+        for (;;) std::this_thread::sleep_for(std::chrono::seconds(1));
+    if (__atomic_load_n(&g_ps3_osd_log.on, __ATOMIC_ACQUIRE) == 1) ps3_osd_log_write();
+    if (__atomic_load_n(&g_ps3_ft.on, __ATOMIC_ACQUIRE) == 2) ps3_ft_dump();
+    rsx_vulkan_cache_save();   // the shader cache's pipelines (a no-op without one)
+    if (g_dotheroes_stop_hook) g_dotheroes_stop_hook();
+    phys_direct_report();      // phys_direct.cpp: its counts (atexit does not run past TerminateProcess)
+    inflate_direct_report();   // inflate_direct.cpp: the same for the map packs
+    water_task_report();       // water_task.cpp: the water's steps (with DOTHEROES_NATIVE_WATER)
+    ppu_promo_report();        // promo_check.cpp: a PPU_PROMO_CHECK build's count (else nothing)
+    dev_waver_report();        // phys_hooks.cpp: DOTHEROES_DEV_WAVER's starts and frame times
+    waver_game_report();       // waver_game.cpp: the waver's native frames or its check
+    cellGcm_flip_wake_report();      // ps3recomp cellGcmSys.c: the flip's completion to the next frame
+#ifdef _WIN32
+    sys_timer_flip_wait_report();    // ps3recomp sys_timer.c: how the flip waits slept
+#endif
+    fflush(NULL);
+#ifdef _WIN32
+    TerminateProcess(GetCurrentProcess(), (UINT)code);
+#else
+    _Exit(code);
+#endif
+}
+
 void stop_loop()
 {
     for (;;) {
@@ -617,27 +653,7 @@ void stop_loop()
         remove("stop.trigger");
         fprintf(stderr, "[dev-state] stop.trigger at %.3f s: writing the logs, then exiting\n",
                 (double)(int64_t)(ps3_ft_now() - g_ps3_ft.base) / 1e9);
-        if (__atomic_load_n(&g_ps3_osd_log.on, __ATOMIC_ACQUIRE) == 1) ps3_osd_log_write();
-        if (__atomic_load_n(&g_ps3_ft.on, __ATOMIC_ACQUIRE) == 2) ps3_ft_dump();
-        rsx_vulkan_cache_save();   // the shader cache's pipelines (a no-op without one)
-        if (g_dotheroes_stop_hook) g_dotheroes_stop_hook();
-        phys_direct_report();   // phys_direct.cpp: its counts (atexit does not run past TerminateProcess)
-        inflate_direct_report();   // inflate_direct.cpp: the same for the map packs
-        water_task_report();       // water_task.cpp: the water's steps (with DOTHEROES_NATIVE_WATER)
-        ppu_promo_report();        // promo_check.cpp: a PPU_PROMO_CHECK build's count (else nothing)
-        dev_waver_report();        // phys_hooks.cpp: DOTHEROES_DEV_WAVER's starts and frame times
-        waver_game_report();       // waver_game.cpp: the waver's native frames or its check
-        cellGcm_flip_wake_report();      // ps3recomp cellGcmSys.c: the flip's completion to the next frame
-#ifdef _WIN32
-        sys_timer_flip_wait_report();    // ps3recomp sys_timer.c: how the flip waits slept
-#endif
-        fflush(stdout);
-        fflush(stderr);
-#ifdef _WIN32
-        TerminateProcess(GetCurrentProcess(), 0);
-#else
-        _Exit(0);
-#endif
+        dotheroes_end(0);
     }
 }
 

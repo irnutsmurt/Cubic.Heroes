@@ -1,0 +1,95 @@
+From 05bd19abd35e53210a3ef27ce1bf8c890d95923d Mon Sep 17 00:00:00 2001
+From: giteaguy <73799093+irnutsmurt@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 11:16:19 -0800
+Subject: [PATCH] The runtime's ends through a host hook: ps3_exit,
+ g_ps3_exit_hook
+
+sys_process_exit and the host quit's fallback called exit() directly: its handlers and the C++ destructors then
+ran while a host's own threads (a renderer, a decoder) and the guest's other threads still used what they tore
+down. Both now call ps3_exit, which calls g_ps3_exit_hook with the status when the host program set one (it may
+end the process itself, in order), then exit() as before.
+---
+ libs/system/cellSysutil.c   |  6 ++++--
+ libs/system/sysPrxForUser.c | 10 +++++++++-
+ libs/system/sysPrxForUser.h |  8 ++++++++
+ 3 files changed, 21 insertions(+), 3 deletions(-)
+
+diff --git a/libs/system/cellSysutil.c b/libs/system/cellSysutil.c
+index add6456..aa57ac8 100644
+--- a/libs/system/cellSysutil.c
++++ b/libs/system/cellSysutil.c
+@@ -737,6 +737,8 @@ s32 cellSysutilIsMeetingApp(void)
+  * game. Runs on its own thread, so the caller (the main thread, the frame
+  * clock) returns at once; a second request is ignored.
+  * -----------------------------------------------------------------------*/
++void ps3_exit(int code);   /* sysPrxForUser.c: the host's end of the process, then exit() */
++
+ #ifdef _WIN32
+ static DWORD WINAPI host_quit_thread(LPVOID unused)
+ #else
+@@ -779,7 +781,7 @@ static void* host_quit_thread(void* unused)
+     printf("[quit] the game did not exit on its own; ending it (save in flight: %s, waited %d ms) -> exit 0\n",
+            ps3_savedata_busy() ? "yes, gave up" : "no", waited);
+     fflush(NULL);
+-    exit(0);
++    ps3_exit(0);   /* sysPrxForUser.h: the host's end */
+ #ifdef _WIN32
+     return 0;
+ #else
+@@ -804,5 +806,5 @@ void ps3_host_quit(const char* why)
+     if (pthread_create(&th, NULL, host_quit_thread, NULL) == 0) { pthread_detach(th); return; }
+ #endif
+     fflush(NULL);
+-    exit(0);
++    ps3_exit(0);
+ }
+diff --git a/libs/system/sysPrxForUser.c b/libs/system/sysPrxForUser.c
+index 88db3b2..2a06b2c 100644
+--- a/libs/system/sysPrxForUser.c
++++ b/libs/system/sysPrxForUser.c
+@@ -169,6 +169,14 @@ static u32 s_next_heap_id = 1;
+ int g_sys_process_exit_called = 0;
+ s32 g_sys_process_exit_code   = 0;
+ 
++void (*g_ps3_exit_hook)(int code) = NULL;
++
++void ps3_exit(int code)
++{
++    if (g_ps3_exit_hook) g_ps3_exit_hook(code);
++    exit(code);
++}
++
+ void sys_process_exit(s32 exitcode)
+ {
+     g_sys_process_exit_code   = exitcode;
+@@ -196,7 +204,7 @@ void sys_process_exit(s32 exitcode)
+ #endif
+         }
+     }
+-    exit(exitcode);
++    ps3_exit(exitcode);
+ }
+ 
+ /* ---------------------------------------------------------------------------
+diff --git a/libs/system/sysPrxForUser.h b/libs/system/sysPrxForUser.h
+index 30290c7..c4c2374 100644
+--- a/libs/system/sysPrxForUser.h
++++ b/libs/system/sysPrxForUser.h
+@@ -89,6 +89,14 @@ s32 sys_ppu_thread_yield(void);
+  * -----------------------------------------------------------------------*/
+ 
+ void sys_process_exit(s32 exitcode);
++
++/* The host's end of the process: the runtime's own ends (sys_process_exit, the host quit's fallback) call
++ * ps3_exit, which calls g_ps3_exit_hook with the status when the host program set it (before the guest runs),
++ * then exit(). A host with threads of its own beside the guest's (a renderer, a decoder) ends the process there
++ * itself: exit()'s handlers and the C++ destructors otherwise run while those threads -- and the guest's other
++ * threads -- still use what they tear down. NULL: exit() alone, as before. */
++extern void (*g_ps3_exit_hook)(int code);
++void ps3_exit(int code);
+ s32 sys_process_getpid(void);
+ s32 sys_process_get_number_of_object(u32 object_type, u32* count);
+ s32 sys_process_is_spu_lock_line_reservation_address(u32 addr, u64 flags);
+-- 
+2.56.0.windows.3
+
