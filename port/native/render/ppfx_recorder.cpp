@@ -4542,74 +4542,14 @@ int fn_trace(uint32_t addr, ppu_context* c)
     if (t.lines[addr] % 64 == 1) fflush(t.out);
     return extra ? 1 : 0;
 }
-// M9.2g (development only: DOTHEROES_MAP_SWEEP=LIST): every map of a list visited in turn through the game's own
-// map change -- its native Event:SetMap (0x004D5958(event, map, entry), which queues the change with the game
-// manager) called on the game's thread at a frame's flip, one map every LIST's seconds, from
-// DOTHEROES_MAP_SWEEP_START seconds on. A line of LIST: "MAP ENTRY SECONDS". Each change is written to stderr with
-// the compile log's clock, so what each map built can be told apart. Never in a play session.
-struct SweepFn { uint64_t addr; void (*func)(ppu_context*); const char* name; };   // the lift's func_entry
-extern "C" const SweepFn function_table[];
-extern "C" const uint64_t function_table_count;
-extern "C" __thread void (*g_trampoline_fn)(void*);   // the lift's (PPU_THREAD_LOCAL)
-double ps3_ftrace_clock() { return (double)(int64_t)(ps3_ft_now() - g_ps3_ft.base) / 1e9; }   // the compile log's
-struct SweepMap { std::string map, entry; double secs; };
-void map_sweep(ppu_context* c)
-{
-    static std::vector<SweepMap>* list = nullptr;
-    static size_t next = 0;
-    static double due = -1, t0 = 0;
-    static void (*setmap)(ppu_context*) = nullptr;
-    if (!list) {
-        list = new std::vector<SweepMap>;
-        if (FILE* f = fopen(getenv("DOTHEROES_MAP_SWEEP"), "r")) {
-            char m[128], e[128];
-            double s;
-            while (fscanf(f, "%127s %127s %lf", m, e, &s) == 3) list->push_back({ m, e, s });
-            fclose(f);
-        }
-        for (uint64_t i = 0; i < function_table_count; i++)
-            if (function_table[i].addr == 0x004D5958u) setmap = function_table[i].func;
-        const char* st = getenv("DOTHEROES_MAP_SWEEP_START");
-        t0 = ppfx::now_s();
-        due = t0 + (st ? atof(st) : 45.0);
-        fprintf(stderr, "[sweep] %zu maps, SetMap %s, the first at %.0f s\n", list->size(), setmap ? "found" : "MISSING",
-                due - t0);
-    }
-    if (!setmap || ppfx::now_s() < due) return;
-    // where the previous change arrived (tests/map_sweep.py check): the field area's number (dev_state.cpp kArea) and
-    // the guest's frame counter (kFrames) -- frames that advanced in the map, and an area that changed, mean it ran
-    if (next > 0 && next <= list->size()) {
-        fprintf(stderr, "[sweep] t=%.3f arrived %zu/%zu %s area %u frames %u\n", ps3_ftrace_clock(), next, list->size(),
-                (*list)[next - 1].map.c_str(), ppfx::g32(0x029A6488u), ppfx::g32(0x02CF3570u));
-        if (next == list->size()) { next++; fprintf(stderr, "[sweep] done\n"); }
-    }
-    if (next >= list->size()) return;
-    const SweepMap& m = (*list)[next++];
-    // the two names on the guest's stack, well below its frame; the call's own frame below them
-    const uint32_t sp = (uint32_t)c->gpr[1];
-    const uint32_t s_map = (sp - 0x4000u) & ~15u, s_entry = s_map + 0x100u, frame = (sp - 0x8000u) & ~15u;
-    if (!ppfx::ea_ok(frame, 0x8000)) return;
-    memset(vm_base + s_map, 0, 0x200);
-    memcpy(vm_base + s_map, m.map.c_str(), m.map.size() < 0xFF ? m.map.size() : 0xFF);
-    memcpy(vm_base + s_entry, m.entry.c_str(), m.entry.size() < 0xFF ? m.entry.size() : 0xFF);
-    memset(vm_base + frame, 0, 16);   // a null back chain
-    ppu_context g = *c;
-    g.gpr[1] = frame; g.gpr[2] = 0x01057910u;   // the function's module TOC (build/m92/func_toc.tsv)
-    g.gpr[3] = 0; g.gpr[4] = s_map; g.gpr[5] = s_entry; g.lr = 0;
-    fprintf(stderr, "[sweep] t=%.3f map %zu/%zu %s %s\n", ps3_ftrace_clock(), next, list->size(), m.map.c_str(),
-            m.entry.c_str());
-    setmap(&g);
-    while (g_trampoline_fn) { void (*tf)(void*) = g_trampoline_fn; g_trampoline_fn = nullptr; tf(&g); }
-    due = ppfx::now_s() + m.secs;
-}
+// M9.2g's map sweep (DOTHEROES_MAP_SWEEP) moved to the developer tools' `warp` in M11.0b (port/devtools,
+// tests/map_sweep.py): the same map change, Event:SetMap, through the game's own scripts, answered on arrival.
 }  // namespace
 
 extern "C" int ppfx_rec_observe(uint32_t addr, ppu_context* ctx)
 {
     static int started = 0;
     static const bool s_fnt = getenv("DOTHEROES_FN_TRACE_EXTRA") != nullptr;
-    static const bool s_sweep = getenv("DOTHEROES_MAP_SWEEP") != nullptr;
-    if (s_sweep && addr == 0x0069DD60u) map_sweep(ctx);
     if (s_fnt && fn_trace(addr, ctx)) return 0;
     if (!started) { started = 1; ppfx::start(); }
     if (ppfx::s_cc_on) {

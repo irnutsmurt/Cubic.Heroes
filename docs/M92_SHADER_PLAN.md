@@ -462,7 +462,8 @@ in the code that reaches it. The 62 records the M9.2f profiles left without pipe
 unlit, no special pass); the old group classes split records by material features (the key's byte 1), not passes.
 
 ### The map sweep: every map, headlessly, through the game's own map change
-DOTHEROES_MAP_SWEEP (development builds; tests/scenarios/map_sweep.drive; build/m92g/sweep*.py): after CONTINUE, the
+DOTHEROES_MAP_SWEEP (development builds; tests/scenarios/map_sweep.drive; build/m92g/sweep*.py -- since M11.0b the sweep
+runs through the developer tools' `warp` and this code is removed: docs/M11_PLAN.md section 7): after CONTINUE, the
 build calls the game's own native Event:SetMap (0x004D5958, which queues the change with the game manager) on the
 game's thread at a frame's flip, one map every 15 s, the entry point from the map's alignment file ("-gDebug" in 114
 of 167). **All 167 maps visited**, none failed. **Corrected 2026-11-16 (M11, docs/M11_PLAN.md section 5): 158, not

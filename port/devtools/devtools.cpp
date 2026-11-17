@@ -16,17 +16,22 @@
  * Off (DOTHEROES_DEVELOPER_MODE not 1): nothing is set up, no file is read, no hook is installed.
  */
 #include "devtools.h"
+#include "devtools_internal.h"
 
 #include "ppu_context.h"
 #include "ps3emu/guest_pause.h"
 #include "ps3emu/osd.h"
+#include "ps3emu/ps3_ftrace.h"   /* the compile log's clock: [warp] lines line up with [vk-compile] (map_sweep.py) */
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <filesystem>
 #include <initializer_list>
 #include <mutex>
 #include <string>
@@ -261,6 +266,233 @@ std::string status_json(const ppu_context* c)
     return b;
 }
 
+/* ---- the catalog (docs/M11_PLAN.md section 3.7): made by the game itself, from the player's own files ---- */
+std::string g_usrdir;        /* the game's USRDIR on the player's disc (the EBOOT's folder) */
+std::string g_install_root;
+
+double ft_clock() { return (double)(int64_t)(ps3_ft_now() - g_ps3_ft.base) / 1e9; }   /* the compile log's clock */
+
+using devtools::MapInfo;
+std::vector<MapInfo> g_maps;
+bool g_catalog = false;
+
+/* the engine's name for a map's files: the first nine fields' are Field_01..09, the engine says Field_1..9 */
+std::string engine_name(const std::string& stem)
+{
+    if (stem.size() == 8 && stem.compare(0, 7, "Field_0") == 0 && stem[7] >= '1' && stem[7] <= '9')
+        return "Field_" + stem.substr(7);
+    return stem;
+}
+/* the engine's name for a map-list constant: MS_FIELD_17 -> Field_17, MS_DUNGEON_1_1_1 -> D_1_1_1,
+ * MS_CAPTURE_0001 -> Capture0001; others (the editor, the sample field) have no map of their own */
+std::string ms_to_name(const std::string& ms)
+{
+    if (ms.rfind("MS_FIELD_", 0) == 0) return "Field_" + ms.substr(9);
+    if (ms.rfind("MS_DUNGEON_", 0) == 0) return "D_" + ms.substr(11);
+    if (ms.rfind("MS_CAPTURE_", 0) == 0) return "Capture" + ms.substr(11);
+    return std::string();
+}
+
+/* a map's arrival points: its alignment file's arrival records (u32 type 0x1005, u32 0, u32 name length, u32 kind
+ * length, the name -- what the map change takes: "-gDebug", "-gfrom_d_1", a door's "-g212;-o212;" -- then the kind:
+ * Exit, WarpDoor, PitFall, destructionWall, BlackHole, TombStone, WoodDoor; little-endian) [C: the records read in
+ * every map's file]. The default first: the developers' "-gDebug" where the map has one, else the first. */
+uint32_t le32(const std::string& d, size_t at)
+{
+    return (uint32_t)(uint8_t)d[at] | (uint32_t)(uint8_t)d[at + 1] << 8 | (uint32_t)(uint8_t)d[at + 2] << 16 |
+           (uint32_t)(uint8_t)d[at + 3] << 24;
+}
+std::vector<std::string> map_entries(const std::string& file)
+{
+    std::vector<std::string> v;
+    FILE* f = fopen((g_usrdir + "/data/map/map_alignment/" + file + ".dat").c_str(), "rb");
+    if (!f) return v;
+    std::string d;
+    char buf[65536];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof buf, f)) > 0) d.append(buf, n);
+    fclose(f);
+    for (size_t at = 0; at + 16 < d.size(); at++) {
+        if (le32(d, at) != 0x1005 || le32(d, at + 4) != 0) continue;
+        const uint32_t la = le32(d, at + 8), lb = le32(d, at + 12);
+        if (la < 3 || la > 64 || lb == 0 || lb > 32 || at + 16 + la + lb > d.size()) continue;
+        const std::string name = d.substr(at + 16, la);
+        if (name.compare(0, 2, "-g") != 0) continue;
+        bool printable = true;
+        for (char ch : name) printable = printable && ch > 0x20 && ch < 0x7F;
+        if (printable && std::find(v.begin(), v.end(), name) == v.end()) v.push_back(name);
+    }
+    auto dbg = std::find(v.begin(), v.end(), std::string("-gDebug"));
+    if (dbg != v.end()) { v.erase(dbg); v.insert(v.begin(), "-gDebug"); }
+    return v;
+}
+
+/* the group a map is listed under: the fields together, each D_<n>'s maps together */
+std::string map_group(const std::string& name)
+{
+    if (name.rfind("Field_", 0) == 0) return "Fields";
+    if (name.rfind("D_", 0) == 0) {
+        const size_t u = name.find('_', 2);
+        return "D_" + name.substr(2, u == std::string::npos ? std::string::npos : u - 2);
+    }
+    return "Other";
+}
+
+const char kCatalogLua[] = R"(local out = {}
+for k, v in pairs(map_manager) do
+  if type(k) == "string" and string.sub(k, 1, 3) == "MS_" and type(v) == "number" then out[#out+1] = "M\t" .. k .. "\t" .. v end
+end
+if type(MapParameter) == "table" then
+  for i = 1, (MapParameter.Size or #MapParameter) do
+    local p = MapParameter[i]
+    if type(p) == "table" and p.Identifier and p.Location then out[#out+1] = "L\t" .. p.Identifier .. "\t" .. p.Location end
+  end
+end
+return table.concat(out, "\n"))";
+
+/* the catalog made (once): 1, or 0 with why in `err` */
+int make_catalog(const ppu_context* c, std::string& err)
+{
+    if (g_catalog) return 1;
+    std::string out;
+    if (run_lua(c, kCatalogLua, out) != 1) { err = "the game's map list: " + out; return 0; }
+    std::unordered_map<std::string, int> number;     /* engine name -> map-list number */
+    std::unordered_map<int, std::string> location;
+    size_t a = 0;
+    while (a < out.size()) {
+        size_t e = out.find('\n', a);
+        if (e == std::string::npos) e = out.size();
+        const std::string ln = out.substr(a, e - a);
+        a = e + 1;
+        const size_t t1 = ln.find('\t'), t2 = t1 == std::string::npos ? t1 : ln.find('\t', t1 + 1);
+        if (t2 == std::string::npos) continue;
+        const std::string k = ln.substr(t1 + 1, t2 - t1 - 1), v = ln.substr(t2 + 1);
+        if (ln[0] == 'M') { const std::string nm = ms_to_name(k); if (!nm.empty()) number[nm] = atoi(v.c_str()); }
+        else if (ln[0] == 'L') location[atoi(k.c_str())] = v;
+    }
+    if (number.empty()) { err = "the game's map list is empty (its scripts not loaded yet?)"; return 0; }
+    std::vector<std::string> stems;
+    std::error_code ec;
+    for (const auto& de : std::filesystem::directory_iterator(g_usrdir + "/data/map/pac_data", ec)) {
+        const std::string fn = de.path().filename().string();
+        const std::string suffix = ".ps3.pac.gz";
+        if (fn.size() > suffix.size() && fn.compare(fn.size() - suffix.size(), suffix.size(), suffix) == 0)
+            stems.push_back(fn.substr(0, fn.size() - suffix.size()));
+    }
+    if (stems.empty()) { err = "no map files under " + g_usrdir + "/data/map/pac_data"; return 0; }
+    std::sort(stems.begin(), stems.end());
+    g_maps.clear();
+    for (const std::string& s : stems) {
+        MapInfo m;
+        m.file = s;
+        m.name = engine_name(s);
+        auto f = number.find(m.name);
+        if (f == number.end()) continue;   /* a file the game's map list lacks: the map change cannot reach it */
+        m.number = f->second;
+        m.group = map_group(m.name);
+        auto l = location.find(m.number);
+        if (l != location.end()) m.location = l->second;
+        m.entries = map_entries(s);
+        g_maps.push_back(std::move(m));
+    }
+    g_catalog = true;
+    DLOG(DH_LOG_INFO, "dev", "the catalog: %zu maps the game's map change can reach (of %zu map files)", g_maps.size(),
+         stems.size());
+    return 1;
+}
+
+const MapInfo* find_map(const std::string& name)
+{
+    for (const MapInfo& m : g_maps)
+        if (m.name == name || m.file == name) return &m;
+    return nullptr;
+}
+
+std::string maps_json()
+{
+    std::string o = "[";
+    for (const MapInfo& m : g_maps) {
+        if (o.size() > 1) o += ",";
+        o += "{\"name\":" + json_str(m.name) + ",\"number\":" + std::to_string(m.number) + ",\"group\":" +
+             json_str(m.group) + ",\"location\":" + json_str(m.location) + ",\"entries\":[";
+        for (size_t i = 0; i < m.entries.size(); i++) o += (i ? "," : "") + json_str(m.entries[i]);
+        o += "]}";
+    }
+    return o + "]";
+}
+
+/* ---- warp: the game's own map change (Event:SetMap), answered when the game arrives ---- */
+struct Pending {
+    bool on = false;
+    Cmd cmd;
+    std::string map, entry;
+    int expected = -1;
+    uint32_t area0 = 0, frames0 = 0, last_area = 0;
+    std::chrono::steady_clock::time_point t0, changed;
+};
+Pending g_warp;
+
+bool safe_text(const std::string& s)
+{
+    if (s.empty() || s.size() > 64) return false;
+    for (char ch : s)
+        if (!isalnum((unsigned char)ch) && ch != '_' && ch != '-' && ch != ';') return false;
+    return true;
+}
+
+/* 1 started (answered later), 0 refused (answered) */
+int start_warp(const ppu_context* c, const Cmd& cmd, std::string rest)
+{
+    if (g_warp.on) { answer(cmd, false, "a warp is in progress (to " + g_warp.map + ")"); return 0; }
+    std::string err;
+    if (!make_catalog(c, err)) { answer(cmd, false, err); return 0; }
+    const std::string name = word(rest), given = word(rest);
+    const MapInfo* m = find_map(name);
+    if (!m) { answer(cmd, false, "no map named " + name + " that the game's map change can reach (`maps` lists them)"); return 0; }
+    const std::string entry = !given.empty() ? given : !m->entries.empty() ? m->entries[0] : "-gDebug";
+    if (!safe_text(entry)) { answer(cmd, false, "not an arrival point: " + entry); return 0; }
+    std::string out;
+    const std::string chunk = "local Event=EventClass.Event; Event:SetMap(\"" + m->name + "\",\"" + entry + "\")";
+    if (run_lua(c, chunk, out) != 1) { answer(cmd, false, "the map change failed: " + out); return 0; }
+    g_warp.on = true;
+    g_warp.cmd = cmd;
+    g_warp.map = m->name;
+    g_warp.entry = entry;
+    g_warp.expected = m->number;
+    g_warp.area0 = g_warp.last_area = g32(kArea);
+    g_warp.frames0 = g32(kFrames);
+    g_warp.t0 = g_warp.changed = std::chrono::steady_clock::now();
+    fprintf(stderr, "[warp] t=%.3f map %s %s (map %d, from area %u)\n", ft_clock(), m->name.c_str(), entry.c_str(),
+            m->number, g_warp.area0);
+    return 1;
+}
+
+/* each frame: arrived (the map's own number, the game running there), or in another area that has settled (a map
+ * the game shows as another's: Field_80), or not at all within 90 s */
+void check_warp()
+{
+    if (!g_warp.on) return;
+    using clk = std::chrono::steady_clock;
+    const clk::time_point now = clk::now();
+    const uint32_t area = g32(kArea), frames = g32(kFrames);
+    if (area != g_warp.last_area) { g_warp.last_area = area; g_warp.changed = now; }
+    const double since = std::chrono::duration<double>(now - g_warp.t0).count();
+    const double settled = std::chrono::duration<double>(now - g_warp.changed).count();
+    const bool there = (int)area == g_warp.expected && settled >= 1.0;
+    const bool elsewhere = area != g_warp.area0 && (int)area != g_warp.expected && settled >= 3.0 && since >= 5.0;
+    if (!there && !elsewhere && since < 90.0) return;
+    g_warp.on = false;
+    char b[512];
+    snprintf(b, sizeof b,
+             "{\"map\":%s,\"entry\":%s,\"area\":%u,\"expected\":%d,\"frames\":%u,\"seconds\":%.1f%s}",
+             json_str(g_warp.map).c_str(), json_str(g_warp.entry).c_str(), area, g_warp.expected, frames - g_warp.frames0,
+             since, elsewhere ? ",\"note\":\"arrived in another area than its own number\"" : "");
+    fprintf(stderr, "[warp] t=%.3f %s %s area %u frames %u\n", ft_clock(), there || elsewhere ? "arrived" : "not-arrived",
+            g_warp.map.c_str(), area, frames);
+    if (there || elsewhere) answer(g_warp.cmd, true, b, true);
+    else answer(g_warp.cmd, false, std::string("not arrived in 90 s: ") + b);
+}
+
 /* true when the command changed the game (the next one waits for the next frame) */
 bool execute(const ppu_context* c, const Cmd& cmd)
 {
@@ -268,6 +500,13 @@ bool execute(const ppu_context* c, const Cmd& cmd)
     const std::string w = word(rest);
     try {
         if (w == "ping") { answer(cmd, true, "pong"); return false; }
+        if (w == "warp") return start_warp(c, cmd, rest) == 1;
+        if (w == "maps" || w == "catalog") {
+            std::string err;
+            if (!make_catalog(c, err)) { answer(cmd, false, err); return false; }
+            answer(cmd, true, maps_json(), true);
+            return false;
+        }
         if (w == "status") { answer(cmd, true, status_json(c), true); return false; }
         if (w == "lua") {
             std::string out;
@@ -324,6 +563,7 @@ void on_flip(ppu_context* c)
 {
     g_flip_thread.store(this_thread_key(), std::memory_order_relaxed);
     g_flip_ctx.store(c, std::memory_order_release);
+    check_warp();
     bool any;
     { std::lock_guard<std::mutex> g(g_mu); any = !g_queue.empty(); }
     if (any) run_queue(c);
@@ -386,6 +626,44 @@ void file_loop()
 
 extern "C" int devtools_on(void) { return g_on ? 1 : 0; }
 
+namespace devtools {
+
+const std::vector<MapInfo>& maps() { return g_maps; }
+bool catalog_made() { return g_catalog; }
+
+bool run_sync(const std::string& line, std::string& out, int ms)
+{
+    struct Wait {
+        std::mutex mu;
+        std::condition_variable cv;
+        bool done = false, ok = false;
+        std::string out;
+    };
+    auto* w = new Wait;   /* kept if the answer comes after the wait gives up (then it is the answer's to free) */
+    devtools_submit(line.c_str(), [](void* u, int ok, const char* o) {
+        Wait* w = (Wait*)u;
+        std::unique_lock<std::mutex> g(w->mu);
+        if (w->done) { g.unlock(); delete w; return; }   /* the waiter gave up: nobody reads it */
+        w->ok = ok != 0;
+        w->out = o ? o : "";
+        w->done = true;
+        w->cv.notify_all();
+    }, w);
+    std::unique_lock<std::mutex> g(w->mu);
+    if (!w->cv.wait_for(g, std::chrono::milliseconds(ms), [&] { return w->done; })) {
+        w->done = true;   /* the answer, when it comes, frees it */
+        out = "no answer from the game";
+        return false;
+    }
+    out = w->out;
+    const bool ok = w->ok;
+    g.unlock();
+    delete w;
+    return ok;
+}
+
+}  // namespace devtools
+
 extern "C" uint64_t devtools_submit(const char* line, devtools_reply done, void* user)
 {
     if (!g_on) { if (done) done(user, 0, "developer mode is off"); return 0; }
@@ -396,12 +674,13 @@ extern "C" uint64_t devtools_submit(const char* line, devtools_reply done, void*
     return n;
 }
 
-extern "C" void devtools_start(const char* install_root)
+extern "C" void devtools_start(const char* install_root, const char* elf)
 {
-    (void)install_root;
     const char* e = getenv("DOTHEROES_DEVELOPER_MODE");
     g_on = e && !strcmp(e, "1");
     if (!g_on) return;
+    g_install_root = install_root ? install_root : "";
+    g_usrdir = elf ? std::filesystem::path(elf).parent_path().generic_string() : std::string();
     g_devtools_flip = on_flip;
     g_ps3_guest_hold_work = on_hold;
     ps3_osd_set_tag("DEVELOPER MODE - TEST SAVES");

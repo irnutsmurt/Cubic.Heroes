@@ -10,8 +10,9 @@ extern "C" {
 #endif
 
 /* main.cpp, once, before the game runs: reads the setting; with developer mode on, sets up the channel (dev.cmd in the
- * working directory, answers in dev.out), the frame hook and the hold hook, and the on-screen tag */
-void devtools_start(const char* install_root);
+ * working directory, answers in dev.out), the frame hook and the hold hook, and the on-screen tag. `elf`: the game's
+ * EBOOT.elf on the player's disc (its folder holds the game's data: the maps' files the catalog reads). */
+void devtools_start(const char* install_root, const char* elf);
 
 /* 1 when developer mode is on (the tools are live) */
 int devtools_on(void);

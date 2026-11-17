@@ -18,6 +18,8 @@
  * for the next start.
  */
 #include "diag/game_log.h"
+#include "devtools/devtools.h"            /* M11.0b: the Developer pages (developer mode only) */
+#include "devtools/devtools_internal.h"
 #include "ps3emu/guest_pause.h"
 #include "ps3emu/osd.h"
 #include "ui_pixel_font.h"
@@ -81,6 +83,7 @@ struct Item {
     std::vector<Choice> choices;
     int live;             /* 1 applied at once, 0 at the next start, 2 at once when it can be */
     const char* dflt;
+    const char* right = nullptr;   /* M11.0b: a text at the row's right (a Developer page's value) */
 };
 
 std::vector<Choice> percent()
@@ -92,9 +95,10 @@ std::vector<Choice> percent()
     return c;
 }
 
-enum Page { P_MAIN, P_DISPLAY, P_AUDIO, P_CONTROLS, P_PERF, P_PAD, P_KEYS, P_COUNT };
+enum Page { P_MAIN, P_DISPLAY, P_AUDIO, P_CONTROLS, P_PERF, P_PAD, P_KEYS, P_DEV, P_COUNT };
 const char* kPageTitle[P_COUNT] = { "PAUSED", "DISPLAY & GRAPHICS", "AUDIO", "CONTROLS", "PERFORMANCE",
-                                    "CONTROLLER BUTTONS", "KEYBOARD KEYS" };
+                                    "CONTROLLER BUTTONS", "KEYBOARD KEYS", "DEVELOPER" };
+DevView g_dev_view;   /* M11.0b: the Developer page shown (port/devtools/dev_menu.cpp), its rows' text kept here */
 
 /* ---- bindings (M10.3): the game's sixteen buttons, by bit (cellPad.h CELL_PAD_CTRL_*) ---- */
 const char* kGameButton[16] = { "Select", "L3", "R3", "Start", "Up", "Right", "Down", "Left", "L2", "R2", "L1", "R1",
@@ -123,11 +127,20 @@ std::vector<Item> page_items(int p)
 {
     static const std::vector<Choice> onoff = { { "1", "On" }, { "0", "Off" } };
     switch (p) {
-    case P_MAIN:
-        return { { nullptr, "Resume Game", {}, 1, "" }, { nullptr, "Display & Graphics", {}, 1, "" },
-                 { nullptr, "Audio", {}, 1, "" }, { nullptr, "Controls", {}, 1, "" },
-                 { nullptr, "Performance", {}, 1, "" }, { nullptr, "Return to Launcher", {}, 1, "" },
-                 { nullptr, "Exit Game", {}, 1, "" } };
+    case P_MAIN: {
+        std::vector<Item> v = { { nullptr, "Resume Game", {}, 1, "" }, { nullptr, "Display & Graphics", {}, 1, "" },
+                                { nullptr, "Audio", {}, 1, "" }, { nullptr, "Controls", {}, 1, "" },
+                                { nullptr, "Performance", {}, 1, "" } };
+        if (devtools_on()) v.push_back({ nullptr, "Developer", {}, 1, "" });   /* M11.0: developer mode only */
+        v.push_back({ nullptr, "Return to Launcher", {}, 1, "" });
+        v.push_back({ nullptr, "Exit Game", {}, 1, "" });
+        return v;
+    }
+    case P_DEV: {
+        std::vector<Item> v;
+        for (const DevRow& r : g_dev_view.rows) v.push_back({ nullptr, r.label.c_str(), {}, 1, "", r.value.c_str() });
+        return v;
+    }
     case P_DISPLAY:
         return { { "DOTHEROES_DISPLAY_MODE", "Display mode",
                    { { "windowed", "Windowed" }, { "borderless", "Borderless fullscreen" }, { "exclusive", "Exclusive fullscreen" } },
@@ -332,6 +345,8 @@ struct State {
     int closing_ms = 0;
     int page = P_MAIN;
     int focus = 0;
+    int top = 0;                 /* the first row shown (a page longer than the panel scrolls) */
+    int vis = 9;                 /* the rows the panel shows (as last drawn) */
     int main_focus = 0;
     Dialog dlg;
     std::string note;            /* a line under the items: "applies when the game next starts" */
@@ -427,12 +442,25 @@ void compose()
     const float x0 = (S.W - pw) / 2, y0 = (S.H - ph) / 2, x1 = x0 + pw, y1 = y0 + ph;
     panel(&c, x0, y0, x1, y1, s);
     const float tk = 4 * s;   /* the pixel font's dot */
-    pix_text(&c, x0 + 36 * s, y0 + 30 * s, kPageTitle[S.page], tk, C_ACCENT);
+    pix_text(&c, x0 + 36 * s, y0 + 30 * s, S.page == P_DEV ? g_dev_view.title.c_str() : kPageTitle[S.page], tk, C_ACCENT);
     ps3_ui_fill(&c, (int)(x0 + 36 * s), (int)(y0 + 70 * s), (int)(x1 - 36 * s), (int)(y0 + 72 * s), C_FRAME, 90);
     const std::vector<Item> items = page_items(S.page);
-    const int px = (int)(24 * s), rowh = (int)(54 * s);
+    const int n = (int)items.size();
+    /* the rows fit the panel: shorter rows for a longer page, down to a floor; past that the page scrolls (M11.0b) */
+    const float avail = ph - 92 * s - 92 * s;
+    const int rowh = (int)std::max(44 * s, std::min(54 * s, n ? avail / n : 54 * s));
+    const int px = (int)std::min(24 * s, rowh * 0.45f);
+    S.vis = std::max(1, (int)(avail / rowh));
+    if (S.focus < S.top) S.top = S.focus;
+    if (S.focus >= S.top + S.vis) S.top = S.focus - S.vis + 1;
+    S.top = std::max(0, std::min(S.top, std::max(0, n - S.vis)));
     float y = y0 + 92 * s;
-    for (size_t i = 0; i < items.size(); i++) {
+    if (S.top > 0) {
+        char m[32];
+        snprintf(m, sizeof m, "%d more above", S.top);
+        ps3_ui_text(&c, x1 - 36 * s - ps3_ui_text_width(m, (int)(17 * s)), y0 + 84 * s, m, (int)(17 * s), C_DIM, 255, 0);
+    }
+    for (int i = S.top; i < n && i < S.top + S.vis; i++) {
         const Item& it = items[i];
         const float rx0 = x0 + 60 * s, rx1 = x1 - 36 * s;
         const bool f = (int)i == S.focus && !S.dlg.open;
@@ -455,8 +483,16 @@ void compose()
                           : (cellPad_key_binding_name ? cellPad_key_binding_name(g) : "");
             const float w = ps3_ui_text_width(t.c_str(), px);
             ps3_ui_text(&c, rx1 - 18 * s - w, base, t.c_str(), px, g_capture == g ? C_GOLD : f ? C_ACCENT : C_DIM, 255, 0);
+        } else if (it.right && *it.right) {   /* a Developer page's value */
+            const float w = ps3_ui_text_width(it.right, px);
+            ps3_ui_text(&c, rx1 - 18 * s - w, base, it.right, px, f ? C_ACCENT : C_DIM, 255, 0);
         }
         y += rowh;
+    }
+    if (S.top + S.vis < n) {
+        char m[32];
+        snprintf(m, sizeof m, "%d more below", n - S.top - S.vis);
+        ps3_ui_text(&c, x1 - 36 * s - ps3_ui_text_width(m, (int)(17 * s)), y + 4 * s, m, (int)(17 * s), C_DIM, 255, 0);
     }
     if (!S.note.empty()) ps3_ui_text(&c, x0 + 60 * s, y + 20 * s, S.note.c_str(), (int)(19 * s), C_GOLD, 255, pw - 96 * s);
     /* the prompts, along the panel's foot */
@@ -464,13 +500,15 @@ void compose()
     const float fy = y1 - 34 * s, bs = 30 * s, fpx = (int)(20 * s);
     float fx = x0 + 36 * s;
     fx += ps3_ui_button(&c, st, 0, fx, fy, bs) + 8 * s;
-    fx += ps3_ui_text(&c, fx, fy + fpx * 0.36f, S.page == P_MAIN ? "Select" : "Change", (int)fpx, C_TEXT, 255, 0) + 24 * s;
+    fx += ps3_ui_text(&c, fx, fy + fpx * 0.36f, S.page == P_MAIN || S.page == P_DEV ? "Select" : "Change", (int)fpx, C_TEXT,
+                      255, 0) + 24 * s;
     fx += ps3_ui_button(&c, st, 1, fx, fy, bs) + 8 * s;
-    ps3_ui_text(&c, fx, fy + fpx * 0.36f, S.page == P_MAIN ? "Resume" : "Back", (int)fpx, C_TEXT, 255, 0);
+    fx += ps3_ui_text(&c, fx, fy + fpx * 0.36f, S.page == P_MAIN ? "Resume" : "Back", (int)fpx, C_TEXT, 255, 0);
     char hint[64];
     snprintf(hint, sizeof hint, "%s or F1: resume", combo_name(g_combo.load()));
     const float hw = ps3_ui_text_width(hint, (int)(18 * s));
-    ps3_ui_text(&c, x1 - 36 * s - hw, fy + 18 * s * 0.36f, hint, (int)(18 * s), C_DIM, 255, 0);
+    if (fx + 24 * s < x1 - 36 * s - hw)   /* only where it fits beside the prompts (a narrow window: left out) */
+        ps3_ui_text(&c, x1 - 36 * s - hw, fy + 18 * s * 0.36f, hint, (int)(18 * s), C_DIM, 255, 0);
     if (S.dlg.open) {   /* the question, over the panel; Cancel focused */
         ps3_ui_fill(&c, 0, 0, (int)S.W, (int)S.H, C_INK, 120);
         const float dw = std::min((float)S.W - 60 * s, 640 * s), dh = 250 * s;
@@ -536,8 +574,9 @@ void post()
 bool resize()
 {
     const ps3_osd_menu_state* M = &g_ps3_osd_menu;
-    const uint32_t w = __atomic_load_n(&M->want_w, __ATOMIC_ACQUIRE), h = __atomic_load_n(&M->want_h, __ATOMIC_ACQUIRE);
+    uint32_t w = __atomic_load_n(&M->want_w, __ATOMIC_ACQUIRE), h = __atomic_load_n(&M->want_h, __ATOMIC_ACQUIRE);
     const int bgra = __atomic_load_n(&M->bgra, __ATOMIC_ACQUIRE);
+    if ((!w || !h) && getenv("DOTHEROES_OVERLAY_DUMP")) { w = 1280; h = 720; }   /* a test offscreen: composed anyway */
     if (!w || !h) return false;
     if (w == S.W && h == S.H && bgra == S.bgra && !S.px.empty()) return true;
     ps3_osd_menu_lock();   /* the renderer never copies a buffer being replaced */
@@ -583,7 +622,8 @@ void open_overlay(int kind)
     }
     S.open = true;
     S.page = P_MAIN;
-    S.focus = kind == 2 ? 6 : 0;
+    S.focus = kind == 2 ? (int)page_items(P_MAIN).size() - 1 : 0;
+    S.top = 0;
     S.note.clear();
     S.dlg = Dialog();
     if (kind == 2) S.dlg = { true, 2, 0 };
@@ -787,23 +827,47 @@ void activate()
         S.note = S.page == P_PAD ? "Press the controller button for it (5 s)." : "Press the key for it (5 s; Esc keeps it).";
         return;
     }
-    if (S.page != P_MAIN) { change(1); return; }
-    switch (S.focus) {
-    case 0: close_overlay(); return;
-    case 1: S.main_focus = 1; S.page = P_DISPLAY; S.focus = 0; return;
-    case 2: S.main_focus = 2; S.page = P_AUDIO; S.focus = 0; return;
-    case 3: S.main_focus = 3; S.page = P_CONTROLS; S.focus = 0; return;
-    case 4: S.main_focus = 4; S.page = P_PERF; S.focus = 0; return;
-    case 5: S.dlg = { true, 1, 0 }; return;
-    case 6: S.dlg = { true, 2, 0 }; return;
+    if (S.page == P_DEV) {   /* M11.0b: a Developer page's row */
+        if (dev_menu_pick(S.focus) == 1) { close_overlay(); return; }
+        g_dev_view = dev_menu_view();
+        S.focus = dev_menu_focus();
+        S.top = 0;
+        S.note = g_dev_view.note;
+        return;
     }
+    if (S.page != P_MAIN) { change(1); return; }
+    const std::vector<Item> items = page_items(P_MAIN);   /* by its label: Developer comes and goes with the mode */
+    if (S.focus < 0 || S.focus >= (int)items.size()) return;
+    const std::string l = items[S.focus].label;
+    S.main_focus = S.focus;
+    if (l == "Resume Game") { close_overlay(); return; }
+    if (l == "Display & Graphics") { S.page = P_DISPLAY; S.focus = 0; return; }
+    if (l == "Audio") { S.page = P_AUDIO; S.focus = 0; return; }
+    if (l == "Controls") { S.page = P_CONTROLS; S.focus = 0; return; }
+    if (l == "Performance") { S.page = P_PERF; S.focus = 0; return; }
+    if (l == "Developer") {
+        dev_menu_reset();
+        g_dev_view = dev_menu_view();
+        S.page = P_DEV; S.focus = 0; S.top = 0;
+        S.note = g_dev_view.note;
+        return;
+    }
+    if (l == "Return to Launcher") { S.dlg = { true, 1, 0 }; return; }
+    if (l == "Exit Game") { S.dlg = { true, 2, 0 }; return; }
 }
 
 void back()
 {
     if (S.dlg.open) { S.dlg.open = false; return; }
     if (S.page == P_PAD || S.page == P_KEYS) { S.focus = S.page == P_PAD ? 3 : 4; S.page = P_CONTROLS; S.note.clear(); return; }
-    if (S.page != P_MAIN) { S.page = P_MAIN; S.focus = S.main_focus; S.note.clear(); return; }
+    if (S.page == P_DEV && dev_menu_back()) {   /* M11.0b: up one Developer page */
+        g_dev_view = dev_menu_view();
+        S.focus = dev_menu_focus();
+        S.top = 0;
+        S.note = g_dev_view.note;
+        return;
+    }
+    if (S.page != P_MAIN) { S.page = P_MAIN; S.focus = S.main_focus; S.top = 0; S.note.clear(); return; }
     close_overlay();
 }
 
@@ -938,7 +1002,10 @@ void loop()
         } else {
             if (up) { f = (f + n - 1) % n; dirty = true; }
             if (down) { f = (f + 1) % n; dirty = true; }
-            if (S.page != P_MAIN && (left || right)) { change(left ? -1 : 1); dirty = true; }
+            if (S.page == P_DEV && (left || right)) {   /* a long list: a panel's worth at a time */
+                f = std::max(0, std::min(n - 1, f + (left ? -S.vis : S.vis)));
+                dirty = true;
+            } else if (S.page != P_MAIN && (left || right)) { change(left ? -1 : 1); dirty = true; }
         }
         /* the mouse: over a row focuses it, a click chooses it */
         if (mx >= 0 && !g_rows.empty()) {
@@ -946,7 +1013,7 @@ void loop()
             for (size_t i = 0; i < g_rows.size(); i++) {
                 const Row& r = g_rows[i];
                 if (mx >= r.x0 && mx < r.x1 && my >= r.y0 && my < r.y1) {
-                    const int want = S.dlg.open ? (int)i - (int)(g_rows.size() - 2) : (int)i;
+                    const int want = S.dlg.open ? (int)i - (int)(g_rows.size() - 2) : S.top + (int)i;
                     if (want >= 0 && want < n && (mx != lmx || my != lmy) && f != want) { f = want; dirty = true; }
                     if (emb && want == f) { activate(); dirty = true; }
                 }

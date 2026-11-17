@@ -387,7 +387,7 @@ add_library(dotheroes_native STATIC native/bullet_cd_task.cpp native/bullet_solv
     native/dev_state.cpp native/inflate.c native/edge_inflate.c native/inflate_direct.cpp native/water_task.cpp native/waver_task.cpp native/waver_game.cpp
     native/spu_native.cpp
     # M11.0's developer tools (docs/M11_PLAN.md): inert unless developer mode is on
-    devtools/devtools.cpp
+    devtools/devtools.cpp devtools/dev_menu.cpp
     # R1's boundary capture and R3's recorder and target watch: linked only
     # when a development lift's entry observers reference them
     # (tools/r1_dev_lift.sh)

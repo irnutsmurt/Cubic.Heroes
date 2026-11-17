@@ -108,6 +108,26 @@ class SweepCheck(unittest.TestCase):
         self.assertIn("M_B arrived in the area of the map before it (80): not reached", out)
         self.assertNotIn("M_C arrived in the area", out)
 
+    def test_arrival_records(self):
+        import struct
+        sys.path.insert(0, os.path.join(ROOT, "tests"))
+        import map_sweep
+
+        def rec(t, a, b):
+            return struct.pack("<IIII", t, 0, len(a), len(b)) + a + b
+        # an alignment file's records (made up): a warp out (0x1004), arrival points (0x1005) of several kinds,
+        # an object (0x13b8); the developers' -gDebug comes first whatever its place
+        data = (b"\x10\x00\x00\x00junk" + rec(0x1004, b"M_X;-gfrom_y;-right", b"Warp") + rec(0x1005, b"-gfrom_a", b"Exit")
+                + rec(0x13B8, b"", b"npc_010") + rec(0x1005, b"-g212;-o212;", b"WarpDoor")
+                + rec(0x1005, b"-gDebug", b"Exit") + rec(0x1005, b"-gfrom_a", b"Exit"))
+        p = os.path.join(self.tmp.name, "M_A.dat")
+        with open(p, "wb") as f:
+            f.write(data)
+        self.assertEqual(map_sweep.arrivals(p), ["-gDebug", "-gfrom_a", "-g212;-o212;"])
+        self.assertEqual(map_sweep.arrivals(os.path.join(self.tmp.name, "none.dat")), [])
+        self.assertEqual(map_sweep.engine_name("Field_01"), "Field_1")
+        self.assertEqual(map_sweep.engine_name("Field_10"), "Field_10")
+
     def test_no_evidence_fails(self):
         rc, out = check(self.ev)
         self.assertEqual(rc, 1)

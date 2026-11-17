@@ -1,0 +1,40 @@
+# Scenario: the developer tools' warp (M11.0b, docs/M11_PLAN.md): the catalog made by the game itself, then a warp
+# to each kind of place -- a temple floor (its -gDebug), a field by the engine's name, a village interior and a cave
+# (their door records), an arrival point given, a boss room, a minigame -- each answered only once the game arrived
+# (tests/devtools_suite.py checks every answer's area against the map's own number); refusals for an unknown map and
+# a malformed entry. Starts from: the kept checkpoint castle-front; can't-die keeps the hero up among enemies.
+#! saves build/checkpoints/castle-front
+#! env DOTHEROES_DEVELOPER_MODE=1 DOTHEROES_NATIVE_CD=1 DOTHEROES_NATIVE_SOLVER=1,2,4,5,6 GCM_WRAP_LAP=1
+#! env DOTHEROES_PRESENT_ONCE=1 DOTHEROES_DEV_STATE=1 DOTHEROES_DEV_CANT_DIE=1 DIAG_FRAMES=frames.log PS3_VERBOSE=0
+#! env DUMP=0 SHOT_EVERY=0
+#! secs 900
+
+include common.drive
+
+log TitleMovie 120
+sleep 5
+call continue
+state life>0 60
+sleep 5
+dev maps
+dev warp D_1_1_1 @150
+devstate area==37 10
+sleep 5
+dev warp Field_1 @150
+devstate area==0 10
+sleep 5
+dev warp D_21_2 @150
+sleep 5
+dev warp D_60_1 @150
+sleep 5
+dev warp D_7_1_1 -g711;-o711; @150
+sleep 5
+dev warp D_1_2 @150
+sleep 5
+dev warp D_80_1 @150
+sleep 5
+dev warp Field_17 @150
+devstate area==16 10
+devfail warp No_Such_Map
+devfail warp D_1_1_1 -g"bad"
+devstate frames>+30 30

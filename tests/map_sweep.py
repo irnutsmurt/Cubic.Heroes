@@ -1,30 +1,30 @@
 #!/usr/bin/env python3
-"""The map sweep (M9.2g, docs/M92_SHADER_PLAN.md section 2h): every map of the game visited headlessly through the
-game's own map change -- the build's DOTHEROES_MAP_SWEEP (port/native/render/ppfx_recorder.cpp: the game's native
-Event:SetMap called on its own thread at a frame's flip) on tests/scenarios/map_sweep.drive -- offscreen (the desktop
-guard: tests/boot_smoke.py), no sound device, the pipelines each map builds logged with the compile log's clock.
+"""The map sweep (M9.2g, docs/M92_SHADER_PLAN.md section 2h; since M11.0b through the developer tools, docs/M11_PLAN.md):
+every map of the game visited headlessly through the game's own map change -- in developer mode, each map a `warp`
+(port/devtools: Event:SetMap run in the game's own Lua state on its main thread, answered once the game has arrived)
+from a generated drive -- offscreen (the desktop guard: tests/boot_smoke.py), no sound device, the pipelines each map
+builds logged with the compile log's clock.
 
     tests/map_sweep.py run EVIDENCE [--bin EXE] [--shaders DIR] [--seconds 15] [--chunk 28] [--first N --last M]
                            [--only MAP,MAP...]
     tests/map_sweep.py report RUN_DIR [...]
-    tests/map_sweep.py check EVIDENCE [--baseline FILE] [--write-baseline FILE]
+    tests/map_sweep.py check EVIDENCE [--baseline FILE] [--write-baseline FILE] [--no-prepared]
 
 `check` (the regression test; the owner, 2026-11-16: the sweep is part of the permanent regression tests): passes
 only when every chunk's game ran to its planned end and exited cleanly; every map of every chunk was changed to and
-*arrived* -- the build logs, before the next change, the field area's number and the guest's frame counter it
-reached ("[sweep] ... arrived"): the guest's frames advanced in the map, and, against a baseline (a TSV "map area"
-from an accepted run: --write-baseline), the area is the one that map reached then, and not the area of the map
-before it (each map has its own number in the game's map list: the same number means the change did not happen);
-and, with a preparation given
-(--shaders), no shader translation was compiled in play. The pipelines met unprepared are reported (and against the
-baseline's figure), not failed: new content legitimately meets new state.
+*arrived* -- "[warp] ... arrived MAP area A frames F" (M9.2g's builds: "[sweep] ... arrived"): the guest's frames
+advanced in the map, and, against a baseline (a TSV "map area" from an accepted run: --write-baseline), the area is
+the one that map reached then, and not the area of the map before it (each map has its own number in the game's map
+list: the same number means the change did not happen); and, with a preparation given (--shaders), no shader
+translation was compiled in play. The pipelines met unprepared are reported, not failed: new content legitimately
+meets new state.
 
-`run`: the list of maps is made from the development data (data/map/pac_data, each map's entry point from its
-alignment file: "-gDebug" where the map has the debug entry, else its first named group) -- it stays local, under
-EVIDENCE; the maps are swept in chunks of --chunk, each its own game process (a fresh start: one map that ends the
-game ends only its chunk), over a copy of --shaders (a preparation's shader folder), the warm-up off so every
-pipeline met is built and logged prepared or unforeseen. `report`: per map, the pipelines first met there, how many
-were prepared, and the translations compiled in play.
+`run`: the list of maps is made from the development data (data/map/pac_data; each map's arrival point from its
+alignment file's arrival records, "-gDebug" where the map has one) -- it stays local, under EVIDENCE; the maps are
+swept in chunks of --chunk, each its own game process (a fresh start: one map that ends the game ends only its chunk),
+over a copy of --shaders (a preparation's shader folder), the warm-up off so every pipeline met is built and logged
+prepared or unforeseen. `report`: per map, the pipelines first met there, how many were prepared, and the
+translations compiled in play.
 """
 import argparse
 import collections
@@ -51,17 +51,34 @@ def map_list(secs, first=None, last=None):
                   and f[:-len(".ps3.pac.gz")] not in NOT_IN_MAP_LIST)[first:last]
     out = []
     for m in maps:
-        gs = []
-        p = os.path.join(ali, m + ".dat")
-        if os.path.exists(p):
-            with open(p, "rb") as f:
-                gs = list(dict.fromkeys(x.decode() for x in re.findall(rb"-g[A-Za-z0-9_]{1,30}", f.read())))
-        if "-gDebugExit" in gs:
-            e = "-gDebug"
-        else:
-            named = [g for g in gs if not g.endswith("Exit") and not g[2:].isdigit()]
-            e = named[0] if named else (gs[0] if gs else "-gDebug")
-        out.append(f"{engine_name(m)} {e} {secs:g}")
+        es = arrivals(os.path.join(ali, m + ".dat"))
+        out.append(f"{engine_name(m)} {es[0] if es else '-gDebug'} {secs:g}")
+    return out
+
+
+def arrivals(path):
+    """a map's arrival points, the default first (as port/devtools/devtools.cpp map_entries reads them): its alignment
+    file's arrival records -- u32 type 0x1005, u32 0, u32 name length, u32 kind length, the name (what the map change
+    takes: -gDebug, -gfrom_d_1, a door's -g212;-o212;), the kind (Exit, WarpDoor, ...), little-endian -- the
+    developers' -gDebug first where the map has one"""
+    import struct
+    try:
+        with open(path, "rb") as f:
+            d = f.read()
+    except OSError:
+        return []
+    out = []
+    at = d.find(b"\x05\x10\x00\x00\x00\x00\x00\x00")
+    while at >= 0 and at + 16 < len(d):
+        la, lb = struct.unpack_from("<II", d, at + 8)
+        if 3 <= la <= 64 and 0 < lb <= 32 and at + 16 + la + lb <= len(d):
+            name = d[at + 16:at + 16 + la]
+            if name.startswith(b"-g") and all(0x20 < c < 0x7F for c in name) and name.decode() not in out:
+                out.append(name.decode())
+        at = d.find(b"\x05\x10\x00\x00\x00\x00\x00\x00", at + 1)
+    if "-gDebug" in out:
+        out.remove("-gDebug")
+        out.insert(0, "-gDebug")
     return out
 
 
@@ -71,6 +88,22 @@ def engine_name(stem):
     reloads the current map (M11's arrival check found it: the M9.2g sweep never reached those nine)"""
     m = re.fullmatch(r"Field_0([1-9])", stem)
     return f"Field_{m.group(1)}" if m else stem
+
+
+# the sweep's drive (per chunk; the warps appended): CONTINUE from the kept checkpoint castle-front, then each map in
+# turn through `warp` -- `devtry`: a map that does not arrive is logged and the chunk goes on (the check fails it)
+SWEEP_DRIVE_HEAD = """# generated by tests/map_sweep.py (M11.0b): the map sweep through the developer tools' warp
+#! saves build/checkpoints/castle-front
+#! env DOTHEROES_DEVELOPER_MODE=1 DOTHEROES_NATIVE_CD=1 DOTHEROES_NATIVE_SOLVER=1,2,4,5,6 GCM_WRAP_LAP=1
+#! env DOTHEROES_PRESENT_ONCE=1 DOTHEROES_DEV_STATE=1 PS3_VERBOSE=0 DOTHEROES_DEV_CANT_DIE=1 SHOT_EVERY=0
+include {common}
+
+log TitleMovie 120
+sleep 5
+call continue
+state life>0 60
+sleep 20
+"""
 
 
 def run(a):
@@ -92,6 +125,14 @@ def run(a):
         if a.shaders:
             shutil.copytree(a.shaders, os.path.join(r, "shaders"))
         os.makedirs(os.path.join(r, "nv"))
+        # M11.0b: each map through the developer tools' `warp` (the game's own Event:SetMap, answered on arrival)
+        drive = os.path.join(r, "sweep.drive")
+        common = os.path.join(ROOT, "tests", "scenarios", "common.drive").replace(os.sep, "/")
+        with open(drive, "w", encoding="utf-8", newline="\n") as f:
+            f.write(SWEEP_DRIVE_HEAD.format(common=common))
+            for ln in part:
+                m, e, secs = ln.split()
+                f.write(f"devtry warp {m} {e} @150\nsleep {float(secs):g}\n")
         env = dict(os.environ)
         for k in ("PS3RECOMP_VK_WINDOW", "WINDOW", "VISIBLE", "TOPMOST", "INSTALLED"):
             env.pop(k, None)
@@ -99,11 +140,10 @@ def run(a):
         env.update({
             "BIN": a.bin, "PS3RECOMP_SPIRV_CACHE": os.path.join(r, "shaders"),
             "DOTHEROES_RECIPES": os.path.join(r, "recipes.bin"), "__GL_SHADER_DISK_CACHE_PATH": os.path.join(r, "nv"),
-            "DOTHEROES_MAP_SWEEP": lst, "DOTHEROES_MAP_SWEEP_START": "60", "DOTHEROES_WARM": "0",
-            "VK_COMPILE_LOG": "1", "DIAG_FRAMES": "frames.log", "ALSOFT_DRIVERS": "null", "SCENARIO": "map_sweep",
-            "DUMP": "0", "RUN_TAG": tag, "KEEP_RUNS": "80",
+            "DOTHEROES_WARM": "0", "VK_COMPILE_LOG": "1", "DIAG_FRAMES": "frames.log", "ALSOFT_DRIVERS": "null",
+            "DRIVE": drive, "DUMP": "0", "RUN_TAG": tag, "KEEP_RUNS": "80",
         })
-        secs = 70 + int(len(part) * a.seconds) + 20
+        secs = 120 + int(len(part) * (a.seconds + 15)) + 60
         t0 = time.monotonic()
         p = subprocess.run([sys.executable, os.path.join(ROOT, "tests", "boot_smoke.py"), str(secs)], cwd=ROOT, env=env,
                            capture_output=True, text=True, timeout=secs + 1200)
@@ -112,8 +152,11 @@ def run(a):
             shutil.move(os.path.join(ROOT, "build", "test", runs[-1]), os.path.join(r, "run"))
         shutil.rmtree(os.path.join(r, "shaders"), ignore_errors=True)
         shutil.rmtree(os.path.join(r, "nv"), ignore_errors=True)
-        open(os.path.join(r, "done"), "w").close()
         print(f"chunk {c // a.chunk} ({len(part)} maps): exit {p.returncode}, {time.monotonic() - t0:.0f} s", flush=True)
+        if not runs:   # the harness refused to start: its words, and the chunk left to run again
+            print((p.stdout + p.stderr)[-1500:], flush=True)
+            continue
+        open(os.path.join(r, "done"), "w").close()
     return 0
 
 
@@ -126,7 +169,7 @@ def report(dirs):
         cur = None
         per = collections.OrderedDict()
         for ln in open(log, encoding="utf-8", errors="replace"):
-            m = re.search(r"\[sweep\] t=[\d.]+ map \d+/\d+ (\S+)", ln)
+            m = re.search(r"\[(?:sweep|warp)\] t=[\d.]+ map (?:\d+/\d+ )?(\S+)", ln)
             if m:
                 cur = m.group(1)
                 per[cur] = collections.Counter()
@@ -187,19 +230,19 @@ def check(a):
             continue
         with open(res, encoding="utf-8") as f:
             result = json.load(f)
-        if result.get("exit") != 0 or not str(result.get("ended_by", "")).startswith("time"):
+        if result.get("exit") != 0 or not str(result.get("ended_by", "")).startswith(("time", "drive done")):
             fails.append(f"{name}: the game did not run to its planned end (ended by {result.get('ended_by')!r}, "
                          f"exit {result.get('exit')})")
         changed, arrived, swept = set(), {}, False
         with open(log, encoding="utf-8", errors="replace") as f:
             log_lines = f.readlines()
         for ln in log_lines:
-            m = re.search(r"\[sweep\] t=[\d.]+ map \d+/\d+ (\S+)", ln)
+            m = re.search(r"\[(?:sweep|warp)\] t=[\d.]+ map (?:\d+/\d+ )?(\S+)", ln)
             if m:
                 changed.add(m.group(1))
                 swept = True
                 continue
-            m = re.search(r"\[sweep\] t=[\d.]+ arrived \d+/\d+ (\S+) area (\d+) frames (\d+)", ln)
+            m = re.search(r"\[(?:sweep|warp)\] t=[\d.]+ arrived (?:\d+/\d+ )?(\S+) area (\d+) frames (\d+)", ln)
             if m:
                 arrived[m.group(1)] = (int(m.group(2)), int(m.group(3)))
                 continue

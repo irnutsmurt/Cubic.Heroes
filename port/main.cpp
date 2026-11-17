@@ -1316,7 +1316,7 @@ int main(int argc, char** argv)
                               : s_install_root + (s_slots ? "/config/dotheroes.cfg" : "/dotheroes.cfg");
         dotheroes_overlay_start(cfg.c_str(), s_install_root.c_str());
     }
-    devtools_start(s_install_root.c_str());   /* M11.0: inert unless DOTHEROES_DEVELOPER_MODE=1 */
+    devtools_start(s_install_root.c_str(), elf);   /* M11.0: inert unless DOTHEROES_DEVELOPER_MODE=1 */
     /* On this thread, which runs the guest's entry (the PPU main thread),
      * and before the others start, so they take the process's placement. */
     dotheroes_cpu_place();

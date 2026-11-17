@@ -292,7 +292,9 @@ def build_identity(env):
         "repo": git(ROOT), "ps3recomp": git(ps3),
         "patches": len(glob.glob(os.path.join(ROOT, "patches", "ps3recomp", "*.patch"))),
         "desktop_locked": desktop_locked(),
-        "secs": SECS, "drive": os.path.relpath(os.environ["DRIVE"], ROOT) if os.environ.get("DRIVE") else None,
+        "secs": SECS, "drive": (os.path.relpath(os.environ["DRIVE"], ROOT) if os.path.splitdrive(
+            os.path.abspath(os.environ["DRIVE"]))[0].lower() == os.path.splitdrive(ROOT)[0].lower()
+            else os.path.abspath(os.environ["DRIVE"])) if os.environ.get("DRIVE") else None,   # a generated drive elsewhere
         "switches": dict(sorted(sw.items())),
     }
 

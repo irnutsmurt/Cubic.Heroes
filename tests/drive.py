@@ -30,6 +30,8 @@ scenario header):
   dev <command ...> [@<timeout>]  a developer-tools command (M11.0, docs/M11_PLAN.md:
                               DOTHEROES_DEVELOPER_MODE=1; tests/devtools.py): its answer
                               logged; a refusal or no answer (30 s) fails the step
+  devtry <command ...> [@<timeout>]  as `dev`, but a refusal or no answer is logged and the script
+                              goes on (a sweep's map that does not arrive: tests/map_sweep.py's check fails it)
   devfail <command ...>       a developer-tools command that must be refused (an error path)
   write <file> <text ...>     <run>/<file> written with the text (whole, at once)
   devstate <cond>[,<cond>] [timeout]  as `state`, on the developer tools' `status`
@@ -963,6 +965,22 @@ def step(lineno, line, op, a):
             raise Fail(f"dev {rest}: {e}")
         out = ans["out"]
         say(f"dev {rest}: {out if isinstance(out, str) else json.dumps(out)}"[:600])
+    elif op == "devtry":   # as `dev`, but a refusal or no answer is logged and the script goes on (a sweep's map)
+        import devtools
+        rest = line.split(None, 1)[1] if len(line.split(None, 1)) > 1 else ""
+        tmo = 30.0
+        m = re.search(r"\s@(\d+(?:\.\d+)?)$", rest)
+        if m:
+            tmo, rest = float(m.group(1)), rest[:m.start()]
+        if dev_channel is None:
+            dev_channel = devtools.Channel(run)
+        try:
+            out = dev_channel.send(rest, tmo, alive)["out"]
+            say(f"devtry {rest}: {out if isinstance(out, str) else json.dumps(out)}"[:600])
+        except (devtools.Refused, TimeoutError) as e:
+            if not alive():
+                raise Fail(f"devtry {rest}: the game exited")
+            say(f"devtry {rest}: not done (going on): {e}"[:600])
     elif op == "devfail":   # a developer-tools command that must be refused (its error path)
         import devtools
         rest = line.split(None, 1)[1] if len(line.split(None, 1)) > 1 else ""

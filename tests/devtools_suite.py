@@ -9,6 +9,8 @@ run through tests/boot_smoke.py (the desktop guard keeps it off the screen), the
 Scenarios (tests/scenarios/<name>.drive):
   devtools_basic   the channel, the Lua runner and its error paths, the run-time open points, the hold
   devtools_off     developer mode off: dev.cmd never read, no dev.out, no [dev] line in the log
+  devtools_warp    the catalog; a warp to each kind of place, each arriving at its own map number; refusals
+  devtools_menu    the in-game menu's Developer pages (pictures dumped): Warp to D_1_1_1 chosen and arrived; Status
   --installed: devtools_install (the game as a player starts it boots on its empty test saves), then the worker's
     `devsaves --action copy-player` and devtools_install_play (CONTINUE loads the copy and plays); the player's save
     tree (data/gamedata) byte for byte the same after each, the test tree (data/devmode/gamedata) made
@@ -94,7 +96,40 @@ def check_basic(rd):
     return bad
 
 
-CHECKS = {"devtools_basic": check_basic, "devtools_off": check_off}
+def answers(rd):
+    try:
+        with open(os.path.join(rd, "dev.out"), encoding="utf-8") as f:
+            return [json.loads(ln) for ln in f if ln.strip()]
+    except OSError:
+        return []
+
+
+def check_warp(rd):
+    bad = []
+    warps = [a["out"] for a in answers(rd) if a.get("ok") and isinstance(a.get("out"), dict) and "expected" in a["out"]]
+    if len(warps) < 8:
+        bad.append(f"{len(warps)} warps answered, 8 expected")
+    for w in warps:
+        if w["area"] != w["expected"] and "note" not in w:
+            bad.append(f"warp {w['map']}: arrived in area {w['area']}, its number is {w['expected']}")
+    maps = [a["out"] for a in answers(rd) if a.get("ok") and isinstance(a.get("out"), list)]
+    if not maps or len(maps[0]) < 150:
+        bad.append(f"the catalog lists {len(maps[0]) if maps else 0} maps (150 or more expected)")
+    return bad
+
+
+def check_menu(rd):
+    bad = []
+    dumps = [f for f in os.listdir(rd) if f.startswith("overlay-") and f.endswith(".ppm")]
+    if len(dumps) < 6:
+        bad.append(f"{len(dumps)} menu pictures dumped (6 or more expected)")
+    if not any("[warp]" in ln and "arrived D_1_1_1" in ln for ln in log_lines(rd)):
+        bad.append("no warp to D_1_1_1 arrived from the menu")
+    return bad
+
+
+CHECKS = {"devtools_basic": check_basic, "devtools_off": check_off, "devtools_warp": check_warp,
+          "devtools_menu": check_menu}
 
 
 def tree_digest(tree):

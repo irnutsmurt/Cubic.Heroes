@@ -8,14 +8,18 @@ read in the code or the data, [M] measured, [I] inferred, [H] a hypothesis still
 
 - **Stage** (2026-11-16): M11.0 (developer debugging tools) -- the design and its stages written (sections 2-4);
   **M11.0a, the foundation, done** (section 6): the developer-mode setting, the test saves and their worker command,
-  the command channel and the Lua runner in the game's own state, at the flip and in the in-game menu's hold; M11.0b
-  (warp, the catalog, the Developer pages) next.
+  the command channel and the Lua runner in the game's own state, at the flip and in the in-game menu's hold.
+  **M11.0b done** (section 7): the catalog made by the game, `warp` answered on arrival, the in-game menu's Developer
+  pages (Warp, Status) with scrolling lists, the map sweep through `warp` (166 maps arrive; Field_14 met 16
+  pipelines no preparation had, kept for the coverage work). M11.0c (the player) next.
 - **Done**: the map sweep made a regression test (tests/map_sweep.py `check`; section 5): the full sweep passes, 166
   maps arrived in their own areas, 0 pipelines unprepared, 0 translations in play; the check found that M9.2g's sweep
   never reached fields 1-9 (named by their files, not the engine's names) -- fixed, swept, all their pipelines were
   already prepared; docs/M92_SHADER_PLAN.md corrected.
-- **Next**: M11.0b (section 4): `warp` and `maps` through Event:SetMap, the catalog made in the game, the overlay's
-  scrolling lists and the Warp page, the map sweep moved onto `warp`.
+- **Next**: M11.0c (section 4): life, magic and money through the game's own functions (CPlayerActor setHP/setMP/
+  setMaxHP/setMaxMP on the player the actor manager returns; Event:SetMoney), invulnerability (the game's
+  setInvincibility) and no death (an entry observer on damageHP, 0x0011A94C, added to the lift's observers: a relift),
+  the Player page.
 - **Outstanding decisions**: none blocking; the defaults "decided here" in section 3 can be changed at review.
 
 ## 1. The owner's request (2026-11-16)
@@ -120,8 +124,8 @@ Unchanged: M7 unauthorized; no public release; every licensing, privacy, distrib
 - **Producers**: the Developer pages (3.6); the test channel -- in developer mode (a test sets
   DOTHEROES_DEVELOPER_MODE=1 in its environment; its saves are its run directory's), `dev.cmd` in the game's working
   directory (written whole by the client once the game has taken the previous one; read and removed every 50 ms; a
-  line `@ID COMMAND` names its answer), answers appended to `dev.out` as JSON lines; and the map sweep
-  (DOTHEROES_MAP_SWEEP becomes a list of `warp` commands).
+  line `@ID COMMAND` names its answer), answers appended to `dev.out` as JSON lines; and the map sweep (since
+  M11.0b a list of `warp` commands: section 7).
 - **Guarded**: a command needing the game in play (not at the title, not mid-load, no menu of the game's own open) is
   refused with the reason, not queued forever; every command and its answer goes to the game's log (`[dev]`).
 
@@ -274,9 +278,10 @@ The owner made the sweep (M9.2g, docs/M92_SHADER_PLAN.md section 2h) part of the
   in a map (fewer than 10 guest frames a second: the game stalled there); when a map arrived in another field area
   than the accepted baseline's; and, with a preparation given, when any shader translation was compiled in play;
 - **reports** the pipelines met unprepared (new content legitimately meets new state; M11 collects them).
-- The arrival: the build logs, before each change and after the last map, `[sweep] ... arrived N/M MAP area A frames
-  F` (port/native/render/ppfx_recorder.cpp map_sweep: the field area's number and the guest's frame counter, the
-  addresses dev_state.cpp reads).
+- The arrival: since M11.0b each map is a `warp` (section 7), answered and logged once the game has arrived there:
+  `[warp] t=... arrived MAP area A frames F` (the map's number as the game keeps it and the guest's frame counter,
+  the addresses dev_state.cpp reads). M9.2g's own sweep code (DOTHEROES_MAP_SWEEP in ppfx_recorder.cpp, which logged
+  `[sweep] ... arrived` before each change) is removed; the check reads both.
 - The baseline is written from a reviewed run (`--write-baseline`); it holds map names and area numbers -- read from
   the player's own data, so it is kept locally (build/), not in the repository.
 - When to run it: after any change to the renderer, the lift, the runtime's file or memory handling, the map loading
@@ -294,7 +299,8 @@ first met, **all 15 prepared** by the shipped preparation, no translation in pla
 Field_99, a map file the game's map list lacks, cannot be reached by the map change at all (it too reloaded the map
 before it); the sweep leaves it out. The check also fails, with no baseline, a map that arrives in the area of the
 map before it -- that alone flags all ten of the first sweep's misses. Every other map: 157 arrived, each in its own
-area but Field_80 (in D_24_1's, 108, consistently); the baseline (build/m11/sweep_baseline.tsv) holds the 166.
+area but Field_80 (in D_24_1's, 108, consistently -- through the wrong arrival point: corrected in M11.0b, section 7);
+the baseline (build/m11/sweep_baseline.tsv) holds the 166.
 
 ## 6. M11.0a: the foundation (2026-11-16) [C, M]
 
@@ -345,3 +351,53 @@ area but Field_80 (in D_24_1's, 108, consistently); the baseline (build/m11/swee
 
 **Not verified here**: the tag on screen (drawn only in a window: an on-screen check is the owner's, or a run they
 allow); the launcher's Settings page with the new switch (the same code path as every other on/off setting).
+
+## 7. M11.0b: warp, the catalog, the Developer pages (2026-11-16) [C, M]
+
+**Built**:
+- **The catalog, made by the game** (port/devtools/devtools.cpp `catalog`/`maps`): one Lua chunk reads the game's own
+  map list (`map_manager.MS_*`: each map's number) and its map parameters (`MapParameter`: each map's place name);
+  the map files on the player's disc give the maps that exist and, from each map's alignment file, its **arrival
+  records** (u32 type 0x1005, u32 0, the name's and the kind's lengths, the name -- `-gDebug`, `-gfrom_d_1`, a
+  door's `-g212;-o212;` -- and its kind: Exit, WarpDoor, PitFall, destructionWall, BlackHole, TombStone, WoodDoor;
+  the developers' `-gDebug` first where a map has one). The engine's names for the first nine fields are kept apart
+  from their files'; a file the game's map list lacks (Field_99) is left out. 166 maps, every one with an arrival
+  point. Nothing of it is written to the repository; the place names are the player's own data, shown at run time.
+- **`warp MAP [ENTRY]`**: the game's own `Event:SetMap` in a chunk, then answered when the game has arrived -- the
+  map's own number reached and settled, or another number that settled (a map the game shows under another's,
+  Field_80), or refused after 90 s; `[warp]` lines on the compile log's clock for tests/map_sweep.py. A map or an
+  entry outside the catalog, or with characters other than letters, digits, `_`, `-` and `;`, is refused.
+- **The Developer pages** (port/devtools/dev_menu.cpp, port/overlay.cpp): "Developer" on the in-game menu's main
+  page in developer mode only; Developer (Warp, Status); Warp: the groups (the fields; each D_<n> with its place
+  name; the others), a group's maps with their place names and arrival points, a map's arrival points (the default
+  marked); choosing one warps and closes the menu; Status: the map by name and the game's state, read on the paused
+  game. The menu now scrolls a page longer than its panel ("N more above/below"; left and right jump a panel's
+  worth on a Developer page), sizes its rows to fit, and leaves out the resume hint where it would overlap the
+  prompts. With no window (a test offscreen, DOTHEROES_OVERLAY_DUMP set) the menu composes its pictures at 1280x720.
+- **The map sweep through `warp`** (tests/map_sweep.py: a generated drive per chunk, `devtry warp MAP ENTRY` -- a map
+  that does not arrive is logged and the chunk goes on; the check fails it). tests/drive.py `devtry`.
+  tests/boot_smoke.py records a drive on another disk.
+
+**Tested** (offscreen, silent; the development build of the play lift):
+- devtools_warp **PASS**: the catalog lists 166 maps; warps to a temple floor (D_1_1_1, its -gDebug), a field by the
+  engine's name (Field_1), a village interior and a cave by their door records (D_21_2 `-g212;-o212;`, D_60_1
+  `-g291;-o291;`), an arrival point given (D_7_1_1 `-g711;-o711;`), a boss room (D_1_2), a minigame (D_80_1
+  `-gtd80_1`) and a field (Field_17) -- **each arrived at its own map number** (37, 0, 92, 115, 63, 38, 149, 16),
+  about 2 s after the change; an unknown map and a malformed entry refused.
+- devtools_menu **PASS**: through the menu's own test input, Developer, Warp, the D_1 group, D_1_1_1's arrival
+  points, the default chosen -- the menu closes and the game arrives at D_1_1_1 (37); then Status read on the
+  paused game (the map by name, money, life) and Back out to the game, which runs on. 26 pictures composed and
+  reviewed (the main page with Developer, the Developer page, the groups with their place names and "10 more
+  below", a group's maps, the arrival points, Status).
+- **The full map sweep through `warp`** (evidence sweep-warp1, over the shipped preparation): **all 166 maps arrived**,
+  each at its own number; Field_80 now arrives at its own number (168) through its real arrival record (the old
+  sweep's string scan picked another point and arrived in D_24_1's area; baseline corrected). 218 pipelines first
+  met, 202 prepared; **the one failure: Field_14** (the first map of its chunk) **met 16 pipelines and 12 shader
+  translations no preparation had** (185 ms of building). Not the tools: the same first warp in four controlled
+  runs -- the old sweep path without developer mode, developer mode with its memory taken at the title, the catalog
+  chunk, a Lua warp with the memory taken in play -- met none, while two sweep runs met the same 16 (at Field_14,
+  and at Field_13 when it came first). Content that differs between runs [H: a rare random enemy of the fields'
+  spawn lists]; the 16 recipes are kept (evidence sweep-warp1/chunk5/recipes.bin) for M11's coverage work, and the
+  check keeps failing such a run until the preparation has them.
+- The four scenarios again on the final build (the old sweep code removed): all **PASS**.
+- tests/test_map_sweep.py (9): the arrival records read from a made-up alignment file, the engine's names.
