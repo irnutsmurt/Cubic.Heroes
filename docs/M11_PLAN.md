@@ -998,6 +998,13 @@ PASS, the bag kept, the continue at the entrance); the game's own save beside th
 tower's entrance (tower_save2). A death in temple 1's boss arena returned to its entrance on RPCS3 as here (section
 25's comparison). No script or binding the game has brings the hero back outside the priest's door.
 
+**The save in RPCS3** (the owner's request: a late-game developer save in the scratch RPCS3): the game's own save
+beside the seventh floor's door, made here after entering the tower at its first floor (tower_save2's slot), copied
+into the scratch install (its own saves kept aside and put back after) and continued there: RPCS3 lists it ("Dark
+Tower") and resumes it at the tower's entrance -- the same room, life, magic, money and circle-slot item as here.
+The original's continue and ours put the hero at the same checkpoint. (Its decline and the priest's own game over
+cannot be compared there: they need the tower's floors played to his room.)
+
 **B-010** (found here; S1): the runtime's sys_process_exit called exit(), whose handlers and C++ destructors ran
 while the native renderer (the crash: its thread allocating in guest_texture_live as the heap was torn down), the
 movie's decoder and the game's other threads still ran -- an access violation in the heap, or the heap reported
@@ -1007,3 +1014,62 @@ through a host hook (patches/ps3recomp/0167: ps3_exit and g_ps3_exit_hook -- sys
 fallback, the guest's entry returning), and the port's (main.cpp game_end) writes the window's place, the census and
 the game log's summary, then runs the test stop's own sequence (dev_state.cpp dotheroes_end: the renderer drained and
 stopped, the logs and reports) and ends the process with the game's status.
+
+## 29. M11.1b: the krakens by the game's mechanics (2026-11-17) [M]
+
+**The owner's criterion** (2026-11-17): both kraken fights won through normal play -- the walkthrough's upgraded sword
+with piercing, or the Wire Rod to the platforms near its head -- checking the head's damage, the arms cut and grown
+again, its movement and attacks, its defeat, rewards and what follows; a weakened kraken tests the defeat sequence
+only.
+
+**The arena** (temple 4, D_4_2; the tools' actor list and the kraken's script, B04Kraken.lua): the head is one actor
+(the boss's first, slot 39), four arms of eleven segments each, four more roots hidden for its later phases; twelve
+anchor piles (AT_ANCHOR_PILE: the posts the Wire Rod's anchor catches). Its script: life 660, six arms under 440,
+eight under 220; an arm's life 3, grown again 40 s after it is cut; the head surfaces for about 10-12 s and dives
+for about 6, between its ink volleys (3 shots) and its arms' swats and sweeps.
+
+**Found, by the game's own mechanics** (the hero invulnerable, no death; the story's sword):
+- the head takes the sword's hits: the six-arm phase (67 visible actors: its life under 440) within a minute while it
+  was in reach; after each wound it sinks and surfaces elsewhere -- five places seen, (12.8, -20.8), (23.2, -11.2),
+  (33.6, -24.0), (9.6, -16.0), (33.6, -8.0); unhurt it stays where it is;
+- an arm cut (eleven segments gone) grows back 40 s later, as its script's armRevivalTime says, again and again;
+- the Wire Rod (a shop's: given with the tools) fired at an anchor pile in line pulls the hero to it -- 4.8 and 6.4
+  units across water, not 11.2;
+- two of the head's places are out of reach on foot from where the hero arrives: the walkthrough's Wire Rod is the
+  way there.
+- What did not work, and why: the tools' first "piercing" sword (setBasePenetrateLevel in the swords' Init, then
+  SetSwordData and HandOverSwordAbility) changed nothing -- the swords' Init functions do not run again once the save
+  is loaded; a fixed spot and a fixed facing lose the head once it moves; walking one axis at a time does not cross
+  the water or pass the posts.
+
+**The fighter** (tests/drive.py): devfight's `aim` follows the boss's body (its first actor) -- within the sword's
+reach (`aim@9`) it swings toward it, in its line or sweeping its quarter; `wire` fires the Wire Rod (`select R2
+<icon>` puts it in the circle slot, its icon matched) at a pile whose platform is nearer; `map@` plans the fewest
+walks and pulls to a cell in reach over the arena's map, which `devexplore` builds by walking every cell and firing
+the rod at every pile in line from each. (The kraken's m_info.hp read through its Init object is its starting life,
+660 or the rematch's 1320, not the current one: the arms' phases are the life's evidence.) When the boss is gone and
+its flag not yet set, the fighter pages the after-event's words. A path goes only through cells from which the map
+leads back to where it was begun (an unfinished map has platforms whose ways out were never tried: the first
+rematch stranded the hero on one), and a step that fails -- an arm lying across the walkway -- is passed over for 20 s.
+
+**The arena's map** (devexplore, 25 min, the kraken in it): 115 cells, 149 walks, 21 pulls -- the start's platform
+and the bottom walkway, the far platforms reached only by the Wire Rod. The tower's rematch arena (D_7_2_4) has its
+twelve piles exactly where temple 4's are: the same arena, the same map. The map and the rod's icon (`select`'s
+reference) are taken from the game's own picture and layout: kept with the local drives (build/m11), not committed.
+
+**Temple 4: won by the game's mechanics** (build/m11 kraken_map: the story's sword, the Wire Rod, the map): the head
+followed across the arena -- 11 steps and 2 pulls to (33.6, -8.0), back on foot to (9.6, -16.0), and so on as it moved
+after each wound; six arms at 49 s (life under 440), eight at 75 s (under 220), the head gone at about 90 s (80
+swings); its after-event -- the fairy freed -- then flags 33 (scene_kraken) and 37 (scene_krakentomb); the hero's
+life 10 -> 12, its heart. (That run's after-event was paged by hand at the pad file: the fighter then waited for the
+flag without pressing; it pages now.)
+
+**The tower's rematch: won by the game's mechanics** (build/m11 kraken_map_tower: the same, temple 4's map): its
+stronger variant, as its script makes it once the tower's flag 316 is set -- life 1320 (six arms under 880, eight
+under 440), faster to surface and to sink (2 s after an attack), contact damage 4, faster arms; the head followed
+(17 steps and 2 pulls to (9.6, -16.0) and back), six arms at 34 s, eight at 116 s, defeated at 153 s (180 swings):
+flag 317 set, the hero still in the arena (area 73), no heart (none dropped). Its second mode ("From mode": life
+x1.5) is the same script's.
+
+Both krakens are therefore winnable by normal play, the walkthrough's Wire Rod and the story's sword: the head's
+damage, the arms cut and grown again, its moves and attacks, its defeat and what follows each as the game makes them.

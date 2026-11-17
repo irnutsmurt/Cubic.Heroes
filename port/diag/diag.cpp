@@ -352,6 +352,10 @@ extern "C" void diag_install_crash_handler(void)
     fprintf(stderr, "[diag] crash handler installed (reports in %s/)\n", report_dir());
 }
 
+#ifdef _WIN32
+namespace { void win_dump_threads(const char* reason); }   /* below, beside the profiler's stack walk */
+#endif
+
 extern "C" void diag_dump_all_threads(const char* reason)
 {
 #ifndef _WIN32
@@ -382,11 +386,7 @@ extern "C" void diag_dump_all_threads(const char* reason)
     close_report();
     pthread_mutex_unlock(&g_dump_lock);
 #else
-    /* No per-thread dumps here (they are signal-driven); the report
-     * still records the hang. A debugger or Nsight Systems shows stacks. */
-    open_report("hang");
-    rp("=== HANG: %s (per-thread dumps are POSIX-only)\n", reason);
-    close_report();
+    win_dump_threads(reason);
 #endif
 }
 
@@ -715,6 +715,73 @@ void prof_main_win(unsigned start, unsigned dur)
         }
     }
     for (int k = 0; k < nt; k++) CloseHandle(ths[k].h);
+}
+
+/* M11.1b: a hang's report on Windows (the POSIX one is signal-driven) -- every other thread suspended in turn, its
+ * stack walked (prof_walk: inside its own stack only) and the thread resumed before anything is written; then each
+ * written: its name, its frames -- a lifted function as its guest address, the game's own as offsets in its image
+ * (tools/symbolize.py), another module's by its name. */
+void win_dump_threads(const char* reason)
+{
+    struct T { DWORD tid; char name[64]; unsigned n; DWORD64 pc[k_prof_depth]; };
+    static T ts[256];
+    int nt = 0;
+    const DWORD self = GetCurrentThreadId(), pid = GetCurrentProcessId();
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snap != INVALID_HANDLE_VALUE) {
+        THREADENTRY32 te;
+        te.dwSize = sizeof te;
+        for (BOOL ok = Thread32First(snap, &te); ok && nt < 256; ok = Thread32Next(snap, &te)) {
+            if (te.th32OwnerProcessID != pid || te.th32ThreadID == self) continue;
+            HANDLE h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE,
+                                  te.th32ThreadID);
+            if (!h) continue;
+            T& t = ts[nt++];
+            t.tid = te.th32ThreadID;
+            t.name[0] = 0;
+            t.n = 0;
+            PWSTR nm = nullptr;
+            if (SUCCEEDED(GetThreadDescription(h, &nm)) && nm)
+                WideCharToMultiByte(CP_UTF8, 0, nm, -1, t.name, sizeof t.name, nullptr, nullptr);
+            if (nm) LocalFree(nm);
+            DWORD64 lo = 0, hi = 0;
+            prof_stack_bounds(h, &lo, &hi);
+            if (SuspendThread(h) != (DWORD)-1) {   /* nothing that allocates while it is held */
+                if (lo < hi) t.n = prof_walk(h, lo, hi, t.pc);
+                ResumeThread(h);
+            }
+            CloseHandle(h);
+        }
+        CloseHandle(snap);
+    }
+    HMODULE exe = GetModuleHandleA(NULL);
+    open_report("hang");
+    rp("=== HANG: %s -- %d other threads (the game's image at %p: tools/symbolize.py <exe> 0x<offset>)\n", reason, nt,
+       (void*)exe);
+    for (int i = 0; i < nt; i++) {
+        rp("--- thread %lu \"%s\":", (unsigned long)ts[i].tid, ts[i].name);
+        for (unsigned k = 0; k < ts[i].n; k++) {
+            const uintptr_t pc = (uintptr_t)ts[i].pc[k];
+            uint32_t g;
+            uintptr_t off;
+            HMODULE m = NULL;
+            if (host_to_guest(pc, &g, &off))
+                rp(" func_%08X+0x%lX", g, (unsigned long)off);
+            else if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                        (LPCSTR)pc, &m) && m) {
+                if (m == exe) rp(" 0x%llX", (unsigned long long)(pc - (uintptr_t)m));
+                else {
+                    char mn[MAX_PATH] = "?";
+                    GetModuleFileNameA(m, mn, sizeof mn);
+                    const char* b = strrchr(mn, '\\');
+                    rp(" %s+0x%llX", b ? b + 1 : mn, (unsigned long long)(pc - (uintptr_t)m));
+                }
+            } else rp(" %p", (void*)pc);
+        }
+        rp("\n");
+    }
+    rp("=== end of thread dump\n");
+    close_report();
 }
 } // namespace
 #endif

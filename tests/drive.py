@@ -42,10 +42,29 @@ scenario header):
                               question (event_state 6, Event:Select) answered with its second choice (DOWN, CROSS)
   devcollect [timeout]        walk over every visible ITEM the tools' `enemies` lists (dropped money, a life
                               vessel), nearest first; one not reached in 6 s passed over
-  devfight <timeout> [flagN] [soft] [hold@X,Z]  fight what the tools' `enemies` lists (the game's own actors: a boss's
-                              parts too): the nearest visible ENEMY, walked to and swung at, until none is
-                              left or the event flag N is set (a boss's defeat); a timeout fails (`soft`: logged);
-                              hold@X,Z: from that spot, only what comes within reach (a boss that comes to the hero)
+  devfight <timeout> [flagN] [soft] [hold@X,Z] [face@DIR] [aim[@REACH] [wire] [map@FILE]]  fight what the tools'
+                              `enemies` lists (the game's
+                              own actors: a boss's parts too): the nearest visible ENEMY, walked to and swung at, until
+                              none is left or the event flag N is set (a boss's defeat); a timeout fails (`soft`:
+                              logged); hold@X,Z: from that spot, only what comes within reach (a boss that comes to
+                              the hero); face@DIR (with hold: UP, DOWN, LEFT or RIGHT): every swing that way (a
+                              boss's body in line with the spot); aim: the boss's body -- the first visible ENEMY when
+                              the fight starts, its parts made after it -- followed: the hero steps toward its row or
+                              column (the other way when a step gets nowhere), turns to it and swings, the sword's
+                              reach along the line (a piercing sword through the parts between); aim@REACH: within
+                              REACH units of it, off its line, the swings sweep toward it from both ways; wire: out of
+                              reach, the Wire Rod (selected in the circle slot) fired at an anchor pile in line whose
+                              platform is nearer it (into the pile's line first); map@FILE (with aim@REACH): the
+                              arena's map (devexplore's) -- out of reach, the fewest walks and pulls to a cell in
+                              reach, followed; in hold and
+                              aim modes each change in the number of visible enemies is logged (a boss's parts cut,
+                              grown again, added)
+  select <BUTTON> <ref.png> [max]  BUTTON pressed (R2: the circle slot's next) until the HUD's circle slot shows the
+                              reference picture (beside the drive: a frame's slot, 640x360 at SLOT_BOX), at most max
+                              times (12); not shown: a failure
+  devexplore <out.json> [timeout]  the arena's ways, for devfight's map@: from the hero's cell each neighbour walked
+                              to once, and from each known cell in line with an anchor pile within the Wire Rod's
+                              reach the rod fired once (the circle slot holding it); <run>/<out.json>
   write <file> <text ...>     <run>/<file> written with the text (whole, at once)
   devstate <cond>[,<cond>] [timeout]  as `state`, on the developer tools' `status`
                               (area, frames, hud_life, money, event_state, ...); flagN is
@@ -686,18 +705,260 @@ def fight(cls, tmo, reach, radius=25.0, soft=False):
         wait(0.35)
 
 
-def devfight(chan, tmo, flag=None, reach=2.4, soft=False, hold=None):
+AIM_LINE = 2.0   # aim mode: as near its column or row as this, the body is in the sword's line (it is broad)
+SLOT_BOX = (418, 22, 456, 58)   # `select`: the HUD's circle slot icon, in a 640x360 picture of the frame
+WIRE_RANGE = 8.0   # aim mode with `wire`: the farthest anchor pile the Wire Rod is fired at (it caught at 6.4, not at 11.2)
+
+
+# ---- an arena's ways: its cells walked and the Wire Rod's pulls (devexplore; devfight's map@) ----
+CELL = 1.6
+NAV_DIRS = {"RIGHT": (1, 0), "LEFT": (-1, 0), "UP": (0, -1), "DOWN": (0, 1)}   # UP: z larger, the row before
+
+
+def cell_of(x, z):
+    return (int(round(x / CELL - 0.5)), int(round(-z / CELL - 0.5)))
+
+
+def cell_center(c):
+    return ((c[0] + 0.5) * CELL, -(c[1] + 0.5) * CELL)
+
+
+def hero_cell():
+    st = state()
+    return cell_of(st["hx"], st["hz"]) if st and "hx" in st and (st["hx"] or st["hz"]) else None
+
+
+def walk_to(c, tmo=3.0):
+    """onto cell c's centre (a neighbour: one way); True when there"""
+    x, z = cell_center(c)
+    try:
+        goto(x, z, 0.45, tmo)
+    except Fail:
+        return False
+    return hero_cell() == c
+
+
+def fire_wire(way):
+    """the Wire Rod (the circle slot's) fired one way; the cell the hero is in after"""
+    press(BTN[way], 3)
+    wait(0.05)
+    press(BTN["CIRCLE"])
+    wait(1.8)
+    return hero_cell()
+
+
+class Nav:
+    """the cells known walkable, the walks between them (both ways) and the Wire Rod's pulls (one way)"""
+
+    def __init__(self, data=None):
+        data = data or {}
+        self.start = tuple(data["start"]) if data.get("start") else None   # the cell the map was begun from
+        self.cells = {tuple(c) for c in data.get("cells", [])}
+        self.walks = {(tuple(a), tuple(b)) for a, b in data.get("walks", [])}
+        self.hooks = {(tuple(a), tuple(b)): w for a, w, _, b in data.get("hooks", [])}
+        self.hook_list = [(tuple(a), w, sl, tuple(b)) for a, w, sl, b in data.get("hooks", [])]
+        self.bad = {}   # a step that just failed (an arm across the way) -> until when the paths go round it
+
+    def add_walk(self, a, b):
+        self.cells |= {a, b}
+        self.walks |= {(a, b), (b, a)}
+
+    def add_hook(self, a, way, slot, b):
+        self.cells |= {a, b}
+        self.hooks[(a, b)] = way
+        self.hook_list.append((a, way, slot, b))
+
+    def returnable(self):
+        """the cells from which the map leads back to its start: a map left unfinished has platforms whose ways out
+        were never tried -- a path never goes onto one"""
+        from collections import deque
+        if self.start is None or self.start not in self.cells:
+            return set(self.cells)
+        back = {}
+        for a, b in list(self.walks) + list(self.hooks):
+            back.setdefault(b, []).append(a)
+        seen, q = {self.start}, deque([self.start])
+        while q:
+            c = q.popleft()
+            for n in back.get(c, []):
+                if n not in seen:
+                    seen.add(n)
+                    q.append(n)
+        return seen
+
+    def path(self, src, goal):
+        """the fewest steps (walks and pulls) from src to a cell goal(c) accepts, or None; only through cells that lead
+        back to the map's start"""
+        from collections import deque
+        if src is None:
+            return None
+        if src not in self.cells:   # off the map (knocked): the nearest known cell first
+            if not self.cells:
+                return None
+            near = min(self.cells, key=lambda c: abs(c[0] - src[0]) + abs(c[1] - src[1]))
+            if abs(near[0] - src[0]) + abs(near[1] - src[1]) > 2:
+                return None
+            rest = self.path(near, goal)
+            return [src] + rest if rest else None
+        nxt = {}
+        safe = self.returnable()
+        now = time.time()
+        for a, b in self.walks:
+            if b in safe and self.bad.get((a, b), 0) < now:
+                nxt.setdefault(a, []).append(b)
+        for a, b in self.hooks:
+            if b in safe and self.bad.get((a, b), 0) < now:
+                nxt.setdefault(a, []).append(b)
+        seen, q = {src: None}, deque([src])
+        while q:
+            c = q.popleft()
+            if goal(c):
+                out = [c]
+                while seen[out[-1]] is not None:
+                    out.append(seen[out[-1]])
+                return out[::-1]
+            for n in nxt.get(c, []):
+                if n not in seen:
+                    seen[n] = c
+                    q.append(n)
+        return None
+
+    def follow(self, p):
+        """the path walked and pulled along; False at the first step that does not land where it should"""
+        for a, b in zip(p, p[1:]):
+            if (a, b) in self.hooks:
+                if hero_cell() != a and not walk_to(a):
+                    return False
+                if fire_wire(self.hooks[(a, b)]) != b:
+                    self.bad[(a, b)] = time.time() + 20.0
+                    return False
+            elif not walk_to(b):
+                self.bad[(a, b)] = time.time() + 20.0
+                return False
+        return True
+
+    def dump(self, path, piles):
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"start": self.start, "cells": sorted(self.cells), "walks": sorted(self.walks),
+                       "hooks": [[a, w, sl, b] for a, w, sl, b in self.hook_list], "piles": piles}, f)
+
+
+def devexplore(chan, out_path, tmo):
+    """M11.1b: an arena's ways for devfight's map@ -- from the hero's cell, every neighbour tried by walking (one cell,
+    one way, once from each cell), and from every known cell in line with an anchor pile within the Wire Rod's reach
+    (WIRE_RANGE) the rod fired at it once (a pull: a way, one way); until nothing is left untried or `tmo` s"""
+    o = chan.send("enemies", timeout=10, alive=alive)["out"]
+    o = o if isinstance(o, list) else json.loads(o)
+    piles = [(a["slot"], a["x"], a["z"]) for a in o if a["kind"] == "ANCHOR_PILE"]
+    nav, t0 = Nav(), time.time()
+    tried_walk, tried_hook = {}, set()   # (cell, way) -> tries (a second once all else is done: an arm in the way)
+    lost = 0
+    start = hero_cell()
+    if start is None or not walk_to(start):
+        raise Fail("devexplore: the hero's cell is not known")
+    nav.cells.add(start)
+    nav.start = start
+    say(f"  devexplore: from cell {start}, {len(piles)} anchor piles")
+
+    def hook_ways(c):
+        cx, cz = cell_center(c)
+        for sl, px, pz in piles:
+            d = ((px - cx) ** 2 + (pz - cz) ** 2) ** 0.5
+            if d < 1.2 or d > WIRE_RANGE or (c, sl) in tried_hook:
+                continue
+            if abs(px - cx) < 0.2:
+                yield sl, ("UP" if pz > cz else "DOWN")
+            elif abs(pz - cz) < 0.2:
+                yield sl, ("RIGHT" if px > cx else "LEFT")
+
+    tries = 1
+    while time.time() - t0 < tmo:
+        cur = hero_cell()
+        if cur is None:   # a read without his place: not the end of the map
+            lost += 1
+            if lost > 50:
+                break
+            wait(0.3)
+            continue
+        lost = 0
+
+        def untried(c):   # first every way once; then the ways that failed (their neighbour still unknown), once more
+            return [w for w in NAV_DIRS if tried_walk.get((c, w), 0) == 0 or
+                    (tries == 2 and tried_walk.get((c, w), 0) < 2 and
+                     (c[0] + NAV_DIRS[w][0], c[1] + NAV_DIRS[w][1]) not in nav.cells)]
+        p = nav.path(cur, lambda c: bool(untried(c)))
+        if p is not None:
+            if not nav.follow(p):
+                continue
+            c = p[-1]
+            ways = untried(c)
+            if not ways:
+                continue
+            way = ways[0]
+            tried_walk[(c, way)] = tried_walk.get((c, way), 0) + 1
+            n = (c[0] + NAV_DIRS[way][0], c[1] + NAV_DIRS[way][1])
+            if n in nav.cells:   # known already: the walk only
+                if walk_to(n, 2.5):
+                    nav.add_walk(c, n)
+                else:
+                    walk_to(c)
+                continue
+            if walk_to(n, 2.5):
+                nav.add_walk(c, n)
+            else:
+                walk_to(c)
+            continue
+        p = nav.path(cur, lambda c: any(True for _ in hook_ways(c)))
+        if p is None:
+            if tries == 1:   # every way tried once: the walks that failed, once more
+                tries = 2
+                say(f"  devexplore: {len(nav.cells)} cells, {len(nav.hook_list)} pulls; the failed walks once more")
+                continue
+            break
+        if not nav.follow(p):
+            continue
+        c = p[-1]
+        sl, way = next(hook_ways(c))
+        tried_hook.add((c, sl))
+        n = fire_wire(way)
+        if n is not None and n != c:
+            nav.add_hook(c, way, sl, n)
+            say(f"  devexplore: the Wire Rod {way.lower()} from {c} to the pile {sl}: pulled to {n}")
+            walk_to(n)
+        else:
+            say(f"  devexplore: the Wire Rod {way.lower()} from {c} to the pile {sl}: not pulled ({n})")
+    nav.dump(os.path.join(run, out_path) if not os.path.isabs(out_path) else out_path, piles)
+    say(f"  devexplore: {len(nav.cells)} cells, {len(nav.walks) // 2} walks, {len(nav.hook_list)} pulls "
+        f"({time.time() - t0:.0f} s) -> {out_path}")
+    return nav
+
+
+def devfight(chan, tmo, flag=None, reach=2.4, soft=False, hold=None, face=None, aim=False, aim_reach=0.0, wire=False,
+             nav=None):
     """M11.1: fight what the developer tools' `enemies` lists -- the game's actor manager's visible ENEMY actors (a
     boss's parts among them, which the actor scan behind `fight` does not see): walk to the nearest, turn to it and
     swing, until none is left or, with `flag` (an event flag number), until the game sets that flag (a boss's
     defeat); fails after `tmo` s (`soft`: logged)."""
     t0, swings, said, seen = time.time(), 0, None, False
     near, aside = {}, {}   # slot -> [closest distance, when]; slot -> until when it is set aside (out of reach)
+    counted = None   # hold and aim modes: the number of visible enemies last logged
+    quiet_since = None   # none visible since (a boss's after-event: its words paged until its flag is set)
+    body = None      # aim mode: the slot of the boss's body
+    step_axis, stalls = None, 0   # aim mode: the way the last step went, the steps in a row that went nowhere
+    sweep = 0        # aim mode within reach: which of the two ways toward the body the next swing faces
+    wires = 0        # aim mode with `wire`: the Wire Rod's uses
+    no_pull = {}     # aim mode with `wire`: (the hero's cell, the pile's slot) -> until when that pile is passed over
+    life_at, life_was = 0.0, None   # aim mode: the boss's life (a drive's __dt_boss, its Init's object), read each 15 s
     if hold:   # hold mode: from this spot, strike only what comes within reach (a boss that comes to the hero)
         try:
             goto(hold[0], hold[1], 1.0, 30)
         except Fail as e:
             say(f"  devfight: hold spot not reached ({e})")
+        if face:   # the hero stands on a cell's centre: held where he settled (a spot on a cell's edge is not one)
+            s = state()
+            if s and "hx" in s and abs(s["hx"] - hold[0]) <= 1.0 and abs(s["hz"] - hold[1]) <= 1.0:
+                hold = [s["hx"], s["hz"]]
+            say(f"  devfight: held at ({hold[0]:.2f}, {hold[1]:.2f}), every swing {face.lower()}")
     while True:
         if flag is not None:
             o = chan.send(f"flag get {flag}", timeout=10, alive=alive)["out"]
@@ -723,21 +984,156 @@ def devfight(chan, tmo, flag=None, reach=2.4, soft=False, hold=None):
                 return
             raise Fail(why)
         if not es or not hero:
+            if not es and flag is not None and seen:   # the boss gone, its flag not yet: its after-event's words paged
+                if quiet_since is None:
+                    quiet_since = time.time()
+                elif time.time() - quiet_since > 4.0:
+                    press(BTN["CROSS"])
+                    wait(1.0)
+                    continue
             wait(0.5)
             continue
+        quiet_since = None
         now = time.time()
         dist_of = lambda a: ((a["x"] - hero["x"]) ** 2 + (a["z"] - hero["z"]) ** 2) ** 0.5  # noqa: E731
-        if hold:
-            close = [a for a in es if dist_of(a) <= reach * 2]
-            if ((hero["x"] - hold[0]) ** 2 + (hero["z"] - hold[1]) ** 2) ** 0.5 > 3.0:
+        if aim:
+            if time.time() - life_at > 15:   # the boss's own life, when the drive kept its object (__dt_boss)
+                life_at = time.time()
                 try:
-                    goto(hold[0], hold[1], 1.0, 10)   # knocked away: back to the spot
+                    lv = chan.send('lua return __dt_boss and __dt_boss.m_info and __dt_boss.m_info.hp or "none"',
+                                   timeout=10, alive=alive)["out"]
+                except Exception as e:   # noqa: BLE001 -- a refused chunk: no life to log
+                    lv = f"unread ({str(e)[:60]})"
+                if lv != life_was:
+                    say(f"  devfight: the boss's life {lv} ({time.time() - t0:.0f} s)")
+                    life_was = lv
+            if len(es) != counted:
+                say(f"  devfight: {len(es)} visible enemies ({time.time() - t0:.0f} s, {swings} swings)")
+                counted = len(es)
+            tgt = next((a for a in es if a["slot"] == body), None)
+            if tgt is None:   # the body: the first of the boss's actors (again if it went: a new body, a new phase)
+                tgt = min(es, key=lambda a: a["slot"])
+                say(f"  devfight: aiming at slot {tgt['slot']} at ({tgt['x']:.1f}, {tgt['z']:.1f})")
+                body = tgt["slot"]
+            dx, dz = tgt["x"] - hero["x"], tgt["z"] - hero["z"]
+            if aim_reach and (dx * dx + dz * dz) ** 0.5 <= aim_reach and min(abs(dx), abs(dz)) > AIM_LINE:
+                # within the blade's reach off its line: a swing sweeps an arc -- the two ways toward it in turn
+                sweep ^= 1
+                way = ((BTN["RIGHT"] if dx > 0 else BTN["LEFT"]) if sweep else (BTN["UP"] if dz > 0 else BTN["DOWN"]))
+                press(way, 3)
+                wait(0.05)
+                press(BTN["CROSS"])
+                swings += 1
+                wait(0.35)
+                continue
+            far = aim_reach and (dx * dx + dz * dz) ** 0.5 > aim_reach + 4.0   # in line, but past the blade
+            if nav is not None and aim_reach and (far or min(abs(dx), abs(dz)) > AIM_LINE):
+                # the arena's map (devexplore): the fewest walks and pulls to a cell from which it is in reach
+                def in_reach(c, tx=tgt["x"], tz=tgt["z"]):
+                    cx, cz = cell_center(c)
+                    ex, ez = tx - cx, tz - cz
+                    dd = (ex * ex + ez * ez) ** 0.5
+                    return dd <= aim_reach or (min(abs(ex), abs(ez)) <= AIM_LINE and dd <= aim_reach + 4.0)
+                way = nav.path(hero_cell(), in_reach)
+                if way and len(way) > 1:
+                    say(f"  devfight: to ({tgt['x']:.1f}, {tgt['z']:.1f}): {len(way) - 1} steps "
+                        f"({sum(1 for q in zip(way, way[1:]) if q in nav.hooks)} pulls) from {way[0]} to {way[-1]}")
+                    if not nav.follow(way):
+                        say(f"  devfight: the way broke at {hero_cell()}")
+                    continue
+            if wire and (far or (aim_reach and min(abs(dx), abs(dz)) > AIM_LINE)):
+                # the Wire Rod (the circle slot's): to an anchor pile (the posts its anchor catches) whose platform is
+                # nearer the body -- fired when the hero is in the pile's line, else first into that line
+                d_t = (dx * dx + dz * dz) ** 0.5
+                best = None
+                for pl in (q for q in o if q["kind"] == "ANCHOR_PILE"):
+                    px, pz = pl["x"] - hero["x"], pl["z"] - hero["z"]
+                    d_p = (px * px + pz * pz) ** 0.5
+                    gain = d_t - ((tgt["x"] - pl["x"]) ** 2 + (tgt["z"] - pl["z"]) ** 2) ** 0.5
+                    if d_p < 1.2 or d_p > WIRE_RANGE or gain < 2.0:
+                        continue
+                    if no_pull.get((round(hero["x"] / 1.6), round(hero["z"] / 1.6), pl["slot"]), 0) > time.time():
+                        continue   # it did not pull him from here a moment ago
+                    off = min(abs(px), abs(pz))
+                    score = gain - 3.0 * off   # nearer the body, the less walk to its line the better
+                    if best is None or score > best[0]:
+                        best = (score, pl, px, pz, off)
+                if best:
+                    _, pl, px, pz, off = best
+                    if off <= 0.4:
+                        way = (BTN["UP"] if pz > 0 else BTN["DOWN"]) if abs(px) <= abs(pz) else (BTN["RIGHT"] if px > 0 else BTN["LEFT"])
+                        press(way, 3)
+                        wait(0.05)
+                        press(BTN["CIRCLE"])
+                        wait(1.8)
+                        s_now = state()
+                        if not s_now or "hx" not in s_now or \
+                                abs(s_now["hx"] - hero["x"]) + abs(s_now["hz"] - hero["z"]) < 1.0:   # not pulled
+                            no_pull[(round(hero["x"] / 1.6), round(hero["z"] / 1.6), pl["slot"])] = time.time() + 30
+                        say(f"  devfight: the Wire Rod at the pile at ({pl['x']:.1f}, {pl['z']:.1f}) from ({hero['x']:.1f}, "
+                            f"{hero['z']:.1f}): now at ({s_now.get('hx', 0):.1f}, {s_now.get('hz', 0):.1f})" if s_now else
+                            f"  devfight: the Wire Rod at the pile at ({pl['x']:.1f}, {pl['z']:.1f})")
+                        wires += 1
+                        continue
+                    try:   # into the pile's line along the shorter way
+                        goto(pl["x"], hero["z"], 0.3, 4) if abs(px) <= abs(pz) else goto(hero["x"], pl["z"], 0.3, 4)
+                        continue
+                    except Fail:
+                        pass
+            if min(abs(dx), abs(dz)) <= AIM_LINE and not far:   # in its column or row (the body is broad): turn, swing
+                way = (BTN["UP"] if dz > 0 else BTN["DOWN"]) if abs(dx) <= abs(dz) else (BTN["RIGHT"] if dx > 0 else BTN["LEFT"])
+                press(way, 3)
+                wait(0.05)
+                press(BTN["CROSS"])
+                swings += 1
+                wait(0.35)
+                continue
+            # a short step toward its column or row (the nearer first; a step that gets nowhere -- a post, the
+            # water's edge -- turns to the other way next time; both nowhere: a swing at the nearest part)
+            if step_axis is None:
+                step_axis = "x" if abs(dx) <= abs(dz) else "z"
+            way = ((BTN["RIGHT"] if dx > 0 else BTN["LEFT"]) if step_axis == "x" else
+                   (BTN["UP"] if dz > 0 else BTN["DOWN"]))
+            before = (hero["x"], hero["z"])
+            press(way, 4)
+            wait(0.1)
+            s_now = state()
+            moved = s_now and "hx" in s_now and abs(s_now["hx"] - before[0]) + abs(s_now["hz"] - before[1]) > 0.2
+            if moved:
+                stalls = 0
+                continue
+            stalls += 1
+            step_axis = "z" if step_axis == "x" else "x"
+            if stalls >= 2:   # neither way: a swing at the nearest part meanwhile
+                stalls = 0
+                near_one = min(es, key=dist_of)
+                dxn, dzn = near_one["x"] - hero["x"], near_one["z"] - hero["z"]
+                press((BTN["RIGHT"] if dxn > 0 else BTN["LEFT"]) if abs(dxn) >= abs(dzn) else
+                      (BTN["UP"] if dzn > 0 else BTN["DOWN"]), 3)
+                wait(0.05)
+                press(BTN["CROSS"])
+                swings += 1
+                wait(0.35)
+            continue
+        if hold:
+            if len(es) != counted:
+                say(f"  devfight: {len(es)} visible enemies ({time.time() - t0:.0f} s, {swings} swings)")
+                counted = len(es)
+            close = [a for a in es if dist_of(a) <= reach * 2]
+            off = (abs(hero["x"] - hold[0]) + abs(hero["z"] - hold[1]) if face else
+                   ((hero["x"] - hold[0]) ** 2 + (hero["z"] - hold[1]) ** 2) ** 0.5)
+            if off > (0.6 if face else 3.0):
+                try:
+                    goto(hold[0], hold[1], 0.4 if face else 1.0, 10)   # knocked away: back to the spot
                 except Fail:
                     pass
                 continue
-            tgt = min(close or es, key=dist_of)   # the nearest anyway: at full life the sword's beam reaches it
-            dxh, dzh = tgt["x"] - hero["x"], tgt["z"] - hero["z"]
-            press((BTN["RIGHT"] if dxh > 0 else BTN["LEFT"]) if abs(dxh) >= abs(dzh) else (BTN["UP"] if dzh > 0 else BTN["DOWN"]), 1)
+            if face:   # held three reads: the hero turns over several frames, one read leaves him as he faced
+                press(BTN[face], 3)
+            else:
+                tgt = min(close or es, key=dist_of)   # the nearest anyway: at full life the sword's beam reaches it
+                dxh, dzh = tgt["x"] - hero["x"], tgt["z"] - hero["z"]
+                press((BTN["RIGHT"] if dxh > 0 else BTN["LEFT"]) if abs(dxh) >= abs(dzh) else (BTN["UP"] if dzh > 0 else BTN["DOWN"]), 1)
             wait(0.05)
             press(BTN["CROSS"])
             swings += 1
@@ -1164,7 +1560,26 @@ def step(lineno, line, op, a):
             dev_channel = devtools.Channel(run)
         flag = next((int(x[4:]) for x in a[1:] if re.fullmatch(r"flag\d+", x)), None)
         hold = next(([float(v) for v in x[5:].split(",")] for x in a[1:] if x.startswith("hold@")), None)
-        devfight(dev_channel, float(a[0]) if a else 120, flag, soft="soft" in a, hold=hold)
+        face = next((x[5:].upper() for x in a[1:] if x.startswith("face@")), None)
+        if face and (face not in ("UP", "DOWN", "LEFT", "RIGHT") or not hold):
+            raise Fail(f"devfight: face@{face} wants UP, DOWN, LEFT or RIGHT, with hold@X,Z")
+        aim_at = next((x for x in a[1:] if x == "aim" or x.startswith("aim@")), None)
+        map_at = next((x[4:] for x in a[1:] if x.startswith("map@")), None)
+        nav = None
+        if map_at:   # beside the drive, or in the run
+            mp = next((q for q in (os.path.join(os.path.dirname(os.path.abspath(script)), map_at), os.path.join(run, map_at))
+                       if os.path.exists(q)), None)
+            if not mp:
+                raise Fail(f"devfight: no map {map_at}")
+            nav = Nav(json.load(open(mp, encoding="utf-8")))
+            say(f"  devfight: the arena's map {map_at}: {len(nav.cells)} cells, {len(nav.hook_list)} pulls")
+        devfight(dev_channel, float(a[0]) if a else 120, flag, soft="soft" in a, hold=hold, face=face, aim=bool(aim_at),
+                 aim_reach=float(aim_at[4:]) if aim_at and aim_at.startswith("aim@") else 0.0, wire="wire" in a, nav=nav)
+    elif op == "devexplore":   # devexplore <out.json> [timeout]: the arena's walkable cells and the Wire Rod's pulls
+        import devtools
+        if dev_channel is None:
+            dev_channel = devtools.Channel(run)
+        devexplore(dev_channel, a[0], float(a[1]) if len(a) > 1 else 900)
     elif op == "devpage":   # devpage <timeout> [soft]: CROSS until the game runs no event (the tools' status)
         import devtools
         if dev_channel is None:
@@ -1278,6 +1693,21 @@ def step(lineno, line, op, a):
             f.write(f"{float(a[0])} {float(a[1])}\n")
         wait(0.5)
         say(f"hero placed at ({float(a[0])}, {float(a[1])})")
+    elif op == "select":   # select <BUTTON> <ref.png> [max]: the circle slot cycled to the item the reference shows
+        ref = Image.open(os.path.join(os.path.dirname(os.path.abspath(script)), a[1])).convert("RGB")   # beside the drive
+        tries = int(a[2]) if len(a) > 2 else 12
+        for k in range(tries + 1):
+            im = frame()
+            if im:
+                got = im.convert("RGB").resize((640, 360)).crop(SLOT_BOX)
+                off = sum(ImageStat.Stat(ImageChops.difference(got, ref.resize(got.size))).mean) / 3.0
+                if off < 14.0:
+                    say(f"  select: the circle slot shows it after {k} press(es) (difference {off:.1f})")
+                    break
+            if k == tries:
+                raise Fail(f"select: not in the circle slot after {tries} presses of {a[0]}")
+            press(mask_of(a[0]), 3)
+            wait(1.0)
     elif op == "shot":
         shot(a[0] if a else f"line{lineno}")
     elif op == "stop":
