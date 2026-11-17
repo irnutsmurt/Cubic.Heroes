@@ -1,0 +1,126 @@
+From 1ab420fe0f486d0730324db35570bb144d27dca2 Mon Sep 17 00:00:00 2001
+From: giteaguy <73799093+irnutsmurt@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 20:48:36 -0800
+Subject: [PATCH] A linear texture's mip levels at the pitch register's row
+ pitch, and its cube faces after them
+
+rsx_texture_layout.c: rsx_texture_mip_chain gave a linear (LN) image's levels below level 0 their own packed width;
+the RSX keeps the pitch register's row pitch on every level of a linear image (as RPCS3 lays out a texture that is
+not swizzled: padded rows), so those levels -- and, through rsx_texture_cube_face_stride, every cube face after the
+first -- were read from the wrong bytes. A 32x32 six-level linear ARGB cube map's faces are 8064 bytes apart, not
+5504: decoded before, each face after the first began inside the one before it. A swizzled image's levels stay
+packed at their own width. Both renderers use the shared layout.
+
+tests/test_rsx_texture_layout.c: a linear chain's level offsets and pitch, a linear and a swizzled cube's face
+stride, one pitched level.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ CMakeLists.txt                  |  4 ++++
+ libs/video/rsx_texture_layout.c | 12 ++++++++---
+ libs/video/rsx_texture_layout.h |  5 +++--
+ tests/test_rsx_texture_layout.c | 38 +++++++++++++++++++++++++++++++++
+ 4 files changed, 54 insertions(+), 5 deletions(-)
+ create mode 100644 tests/test_rsx_texture_layout.c
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index a449350..557f1bc 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -498,6 +498,10 @@ if(PS3RECOMP_BUILD_TESTS)
+     target_include_directories(test_rsx_present_policy PRIVATE
+         "${CMAKE_CURRENT_SOURCE_DIR}/libs/video")
+     add_test(NAME rsx_present_policy COMMAND test_rsx_present_policy)
++    add_executable(test_rsx_texture_layout tests/test_rsx_texture_layout.c libs/video/rsx_texture_layout.c)
++    target_include_directories(test_rsx_texture_layout PRIVATE
++        "${CMAKE_CURRENT_SOURCE_DIR}/libs/video" "${CMAKE_CURRENT_SOURCE_DIR}/include")
++    add_test(NAME rsx_texture_layout COMMAND test_rsx_texture_layout)
+ 
+ 
+     find_package(Python3 3.10 COMPONENTS Interpreter QUIET)
+diff --git a/libs/video/rsx_texture_layout.c b/libs/video/rsx_texture_layout.c
+index 51a30a2..e699377 100644
+--- a/libs/video/rsx_texture_layout.c
++++ b/libs/video/rsx_texture_layout.c
+@@ -135,9 +135,15 @@ u32 rsx_texture_mip_chain(u32 rsx_fmt, u32 w, u32 h, u32 levels, u32 pitch,
+     while (n < levels) {
+         rsx_tex_level* lv = &out[n];
+         lv->w = mw; lv->h = mh; lv->offset = off;
+-        /* Only level 0 has a pitch register; the rest are packed at their own
+-         * width, as the live draw engine's texture_source_span walks them. */
+-        rsx_texture_layout_pitched(rsx_fmt, mw, mh, n == 0 ? pitch : 0, &lv->tl);
++        /* A linear (LN) image keeps the pitch register's row pitch on every
++         * level: the levels below level 0 are padded to the same rows, not
++         * packed at their own width (as RPCS3 lays them out: its padded rows
++         * for a texture that is not swizzled). Packing them read a linear
++         * mipmapped image's lower levels -- and every cube face after the
++         * first -- from the wrong bytes: a 32x32 six-level ARGB cube map's
++         * faces are 8064 bytes apart, not 5504. A swizzled image ignores the
++         * pitch (rsx_texture_layout_pitched). */
++        rsx_texture_layout_pitched(rsx_fmt, mw, mh, (n == 0 || (rsx_fmt & 0x20u)) ? pitch : 0, &lv->tl);
+         off += lv->tl.face_bytes;
+         n++;
+         if (mw == 1 && mh == 1) break;   /* no level below 1x1 */
+diff --git a/libs/video/rsx_texture_layout.h b/libs/video/rsx_texture_layout.h
+index 1ac2845..e3b1253 100644
+--- a/libs/video/rsx_texture_layout.h
++++ b/libs/video/rsx_texture_layout.h
+@@ -120,8 +120,9 @@ typedef struct {
+  * A swizzled texture's levels are each Morton-ordered within themselves, which
+  * falls out of classifying every level separately: halving a power of two
+  * stays a power of two, so a swizzled level 0 has swizzled levels below it.
+- * `pitch` is SET_TEXTURE_CONTROL3's row pitch and applies to level 0 only --
+- * the levels below it are packed at their own width. */
++ * `pitch` is SET_TEXTURE_CONTROL3's row pitch. A linear (LN) image keeps it on
++ * every level -- the levels below level 0 are padded to the same row pitch;
++ * a swizzled image's levels are packed at their own width. */
+ u32 rsx_texture_mip_chain(u32 rsx_fmt, u32 w, u32 h, u32 levels, u32 pitch,
+                           rsx_tex_level* out);
+ 
+diff --git a/tests/test_rsx_texture_layout.c b/tests/test_rsx_texture_layout.c
+new file mode 100644
+index 0000000..b6f5593
+--- /dev/null
++++ b/tests/test_rsx_texture_layout.c
+@@ -0,0 +1,38 @@
++/* The texture layout's mip chains and cube faces (libs/video/rsx_texture_layout.c): a linear image keeps the pitch
++ * register's row pitch on every level; a swizzled one packs each level at its own width; a cube face is its whole
++ * mip chain, aligned to 128 bytes. */
++#include "rsx_texture_layout.h"
++
++#include <stdio.h>
++
++static int failures;
++
++static void check(int condition, const char* name)
++{
++    if (!condition) {
++        fprintf(stderr, "FAIL: %s\n", name);
++        failures++;
++    }
++}
++
++int main(void)
++{
++    rsx_tex_level lv[RSX_MAX_TEXTURE_LEVELS];
++    /* 32x32 A8R8G8B8, linear (0x85 | LN 0x20), six levels, a 128-byte pitch: every level 128 bytes a row */
++    unsigned n = rsx_texture_mip_chain(0xA5, 32, 32, 6, 128, lv);
++    check(n == 6, "a 32x32 image has six levels");
++    check(lv[1].offset == 32 * 128, "linear: level 1 after level 0's 32 rows of 128 bytes");
++    check(lv[2].offset == 32 * 128 + 16 * 128, "linear: level 2 after level 1's 16 rows of the same pitch");
++    check(lv[1].tl.row_bytes == 128 && lv[5].tl.row_bytes == 128, "linear: every level keeps the pitch");
++    check(rsx_texture_cube_face_stride(0xA5, 32, 32, 6, 128) == 8064,
++          "linear cube: a face is its padded mip chain (32+16+8+4+2+1 rows of 128 bytes)");
++    /* the same image swizzled (0x85): no pitch, each level packed at its own width */
++    n = rsx_texture_mip_chain(0x85, 32, 32, 6, 0, lv);
++    check(n == 6 && lv[1].offset == 4096 && lv[2].offset == 4096 + 1024, "swizzled: levels packed at their own width");
++    check(rsx_texture_cube_face_stride(0x85, 32, 32, 6, 0) == 5504,
++          "swizzled cube: a face is its packed chain (5460 bytes) aligned to 128");
++    /* one level, linear, its pitch wider than its row */
++    n = rsx_texture_mip_chain(0xA5, 100, 10, 1, 512, lv);
++    check(n == 1 && lv[0].tl.row_bytes == 512 && lv[0].tl.face_bytes == 5120, "one linear level: its pitch");
++    return failures ? 1 : 0;
++}
+-- 
+2.56.0.windows.3
+

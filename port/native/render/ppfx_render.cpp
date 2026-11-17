@@ -307,6 +307,7 @@ bool make_buffer(Buf& o, VkDeviceSize n, VkBufferUsageFlags usage, bool readback
 struct Img {
     VkImage img = VK_NULL_HANDLE; VkDeviceMemory mem = VK_NULL_HANDLE; VkImageView view = VK_NULL_HANDLE;
     VkFormat fmt = VK_FORMAT_UNDEFINED; uint32_t w = 0, h = 0, levels = 1, bpp = 0;
+    uint32_t layers = 1;                               // M11.1: 6 for a cube map (a cube-compatible image, a cube view)
     VkFramebuffer fb = VK_NULL_HANDLE;
     std::unordered_map<uint64_t, VkImageView> views;   // (remap, format byte) -> a view with that crossbar
     uint32_t written = 0;                              // records have written it (or a handoff filled it)
@@ -328,22 +329,24 @@ struct Img {
     uint32_t guest_pitch = 0;                          // R6: its pitch in guest memory
 };
 
-VkImageView make_view(VkImage img, VkFormat fmt, uint32_t levels, VkComponentMapping map)
+VkImageView make_view(VkImage img, VkFormat fmt, uint32_t levels, VkComponentMapping map, uint32_t layers = 1)
 {
     VkImageViewCreateInfo vi = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
-    vi.image = img; vi.viewType = VK_IMAGE_VIEW_TYPE_2D; vi.format = fmt; vi.components = map;
-    vi.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, levels, 0, 1 };
+    vi.image = img; vi.viewType = layers == 6 ? VK_IMAGE_VIEW_TYPE_CUBE : VK_IMAGE_VIEW_TYPE_2D; vi.format = fmt;
+    vi.components = map;
+    vi.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, levels, 0, layers };
     VkImageView v = VK_NULL_HANDLE;
     F.vkCreateImageView(D.device, &vi, nullptr, &v);
     return v;
 }
 
-Img* make_image(VkFormat fmt, uint32_t w, uint32_t h, uint32_t levels, uint32_t bpp, bool target)
+Img* make_image(VkFormat fmt, uint32_t w, uint32_t h, uint32_t levels, uint32_t bpp, bool target, uint32_t layers = 1)
 {
     Img* o = new Img;
     VkImageCreateInfo ci = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
     ci.imageType = VK_IMAGE_TYPE_2D; ci.format = fmt; ci.extent = { w, h, 1 }; ci.mipLevels = levels;
-    ci.arrayLayers = 1; ci.samples = VK_SAMPLE_COUNT_1_BIT; ci.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ci.arrayLayers = layers; ci.flags = layers == 6 ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0;
+    ci.samples = VK_SAMPLE_COUNT_1_BIT; ci.tiling = VK_IMAGE_TILING_OPTIMAL;
     ci.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
                (target ? VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT : 0);
     ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE; ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -358,9 +361,9 @@ Img* make_image(VkFormat fmt, uint32_t w, uint32_t h, uint32_t levels, uint32_t 
         F.vkDestroyImage(D.device, o->img, nullptr); delete o; return nullptr;
     }
     F.vkBindImageMemory(D.device, o->img, o->mem, 0);
-    o->fmt = fmt; o->w = w; o->h = h; o->levels = levels; o->bpp = bpp;
+    o->fmt = fmt; o->w = w; o->h = h; o->levels = levels; o->bpp = bpp; o->layers = layers;
     o->view = make_view(o->img, fmt, levels, { VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
-                                               VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY });
+                                               VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY }, layers);
     o->bytes = rq.size;
     stats().n_images++;
     stats().n_image_bytes += rq.size;
@@ -458,7 +461,7 @@ void access(VkCommandBuffer cb, Img* o, Use use)
             b.srcAccessMask = 0; b.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
             b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED; b.newLayout = VK_IMAGE_LAYOUT_GENERAL;
             b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            b.image = o->img; b.subresourceRange = { o->aspect, 0, o->levels, 0, 1 };
+            b.image = o->img; b.subresourceRange = { o->aspect, 0, o->levels, 0, o->layers };
             F.vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0,
                                    nullptr, 0, nullptr, 1, &b);
             o->layout = VK_IMAGE_LAYOUT_GENERAL;
@@ -499,7 +502,7 @@ void access(VkCommandBuffer cb, Img* o, Use use)
         b.srcAccessMask = srca; b.dstAccessMask = acc;
         b.oldLayout = o->layout; b.newLayout = want;
         b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        b.image = o->img; b.subresourceRange = { o->aspect, 0, o->levels, 0, 1 };
+        b.image = o->img; b.subresourceRange = { o->aspect, 0, o->levels, 0, o->layers };
         F.vkCmdPipelineBarrier(cb, src ? src : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, stage, 0, 0, nullptr, 0, nullptr, 1, &b);
         stats().n_barriers++;
     }
@@ -1463,6 +1466,10 @@ const Pipe* pipeline(const Rec* r, const rsx_vertex_layout_plan& layout, VkForma
     const uint32_t expand_units = rsx_fp_texture_expand_units(fp, fp_size, expand);
     for (uint32_t u = 0; u < 16; u++) if (!(expand_units >> u & 1)) expand[u] = 0;
     unnorm_mask &= sampled & ~shadow_mask;
+    // M11.1: a texture's kind matters only where the program samples it -- a cube map or volume left enabled on a
+    // unit it does not read made another pipeline and another translation of the same draw (docs/M11_PLAN.md 15)
+    cube &= sampled;
+    vol &= sampled;
     for (uint32_t u = 0; u < 16; u++) if (!(unnorm_mask >> u & 1)) unnorm[u][0] = unnorm[u][1] = unnorm[u][2] = 0;
     consts->count = 0;
     if (rsx_fp_collect_constants(fp, fp_size, consts) < 0) return nullptr;
@@ -1785,6 +1792,10 @@ const Pipe* pipeline_asp(const Rec* r, const rsx_vertex_layout_plan& layout, VkF
     for (uint32_t u = 0; u < 16; u++) if (!(gamma_units >> u & 1)) gamma[u] = 0;
     for (uint32_t u = 0; u < 16; u++) if (!(expand_units >> u & 1)) expand[u] = 0;
     unnorm_mask &= sampled & ~shadow_mask;
+    // M11.1: a texture's kind matters only where the program samples it -- a cube map or volume left enabled on a
+    // unit it does not read made another pipeline and another translation of the same draw (docs/M11_PLAN.md 15)
+    cube &= sampled;
+    vol &= sampled;
     for (uint32_t u = 0; u < 16; u++) if (!(unnorm_mask >> u & 1)) unnorm[u][0] = unnorm[u][1] = unnorm[u][2] = 0;
     consts->count = 0;
     if (fi.ok) { consts->count = fi.nconst; if (fi.nconst) memcpy(consts->values, fi.consts.data(), (size_t)fi.nconst * 16); }
@@ -1941,7 +1952,8 @@ VkResult make_pipeline(const PipeState& in, VkShaderModule vsm, VkShaderModule f
 // has grown, after a preparation pass, at exit and at a test's stop. Anything else: the cache starts empty and the
 // report says why.
 constexpr uint32_t kPcMagic = 0x4350564Eu;   // "NVPC"
-constexpr uint32_t kPcFormat = 1, kPipeVersion = 2;   // 2 (M9.2c): the ignored render state normalised
+constexpr uint32_t kPcFormat = 1, kPipeVersion = 3;   // 2 (M9.2c): the ignored render state normalised; 3 (M11.1):
+                                                      // texture kinds only of the units a program samples
 constexpr uint32_t kPcMaxBytes = 256u << 20;
 struct PcHeader {
     uint32_t magic, format, renderer, vendor, device, driver;
@@ -2128,6 +2140,11 @@ std::vector<Recipe> recipes_read(const std::string& path, long* good_end)
             (h.fp_len && fread(&r.fp[0], 1, h.fp_len, f) != h.fp_len) || fread(&sum, 4, 1, f) != 1 ||
             sum != recipe_sum(h, r.vp, r.fp))
             break;
+        // M11.1: texture kinds only of the units the fragment program samples, as the draws key them now (a recipe
+        // recorded before kept a cube map or volume left enabled on a unit the program never reads)
+        const uint32_t units = r.fp.empty() ? 0u : rsx_fp_texture_units((const uint8_t*)r.fp.data(), (uint32_t)r.fp.size());
+        r.f.cube_mask &= units;
+        r.f.vol_mask &= units;
         out.push_back(std::move(r));
         *good_end = ftell(f);
     }
@@ -3206,7 +3223,7 @@ uint64_t shape_key(VkFormat f, uint32_t w, uint32_t h, uint32_t lv)
 }
 void static_pool_put(Img* o)
 {
-    if (s_static_pool.size() >= 128) { destroy_image(o); s_static_pool_destroyed++; return; }
+    if (s_static_pool.size() >= 128 || o->layers != 1) { destroy_image(o); s_static_pool_destroyed++; return; }   // 2D only
     s_static_pool.emplace(shape_key(o->fmt, o->w, o->h, o->levels), o);
 }
 Img* static_pool_take(VkFormat f, uint32_t w, uint32_t h, uint32_t lv)
@@ -3277,7 +3294,7 @@ VkImageView view_of(Img* o, uint32_t crossbar, uint32_t fmt)
     const uint64_t k = (uint64_t)crossbar << 32 | fmt;
     auto it = o->views.find(k);
     if (it != o->views.end()) return it->second;
-    return o->views[k] = make_view(o->img, o->fmt, o->levels, remap(crossbar, fmt));
+    return o->views[k] = make_view(o->img, o->fmt, o->levels, remap(crossbar, fmt), o->layers);
 }
 
 int asp_native();
@@ -4016,14 +4033,19 @@ std::unordered_map<uint64_t, GuestTex> s_gtex;
 
 Img* guest_texture_live(Batch& b, const Rec* r, const Texture& t)
 {
-    if (t.cubemap || t.dimension == 3) return nullptr;
+    // M11.1: a cube map too -- six faces, each its own whole mip chain, 128-byte aligned (rsx_texture_layout.h);
+    // before, every draw sampling one was not rendered (docs/M11_PLAN.md section 15)
+    const bool cube = t.cubemap && t.width && t.width == t.height;
+    if ((t.cubemap && !cube) || t.dimension == 3) return nullptr;
     rsx_tex_level lv[RSX_MAX_TEXTURE_LEVELS];
     const uint32_t nlv = rsx_texture_mip_chain(t.format, t.width, t.height, t.mipmap, t.pitch, lv);
     if (!nlv) return nullptr;
-    const uint32_t bytes = lv[nlv - 1].offset + lv[nlv - 1].tl.face_bytes;
+    const uint32_t face = cube ? rsx_texture_cube_face_stride(t.format, t.width, t.height, t.mipmap, t.pitch) : 0;
+    const uint32_t layers = cube ? 6u : 1u;
+    const uint32_t bytes = cube ? face * 6u : lv[nlv - 1].offset + lv[nlv - 1].tl.face_bytes;
     const uint32_t ea = cellGcmResolveLocated(t.location == 0, t.offset);
     if (!ea || (uint64_t)ea + bytes > 0xE0000000ull || bytes > (64u << 20)) return nullptr;
-    const uint32_t key[] = { t.location, t.offset, t.format, t.width, t.height, nlv, t.pitch };
+    const uint32_t key[] = { t.location, t.offset, t.format, t.width, t.height, nlv, t.pitch, layers };
     const uint64_t k = fnv(key, sizeof key);
     GuestTex& g = s_gtex[k];
     if (g.img && g.frame == r->frame && !r7_on()) return g.img;   // R7: every use asks the range's hash (below)
@@ -4032,21 +4054,23 @@ Img* guest_texture_live(Batch& b, const Rec* r, const Texture& t)
     uint32_t bpp;
     const VkFormat vf = be_vkformat(texfmt_be(lv[0].tl.fmt), &bpp);
     if (vf == VK_FORMAT_UNDEFINED) return nullptr;
-    if (g.img && (g.img->fmt != vf || g.img->w != t.width || g.img->h != t.height || g.img->levels != nlv)) {
+    if (g.img && (g.img->fmt != vf || g.img->w != t.width || g.img->h != t.height || g.img->levels != nlv ||
+                  g.img->layers != layers)) {
         s_retired.push_back(g.img); g.img = nullptr;
     }
-    if (!g.img && !(g.img = make_image(vf, t.width, t.height, nlv, bpp, false))) return nullptr;
+    if (!g.img && !(g.img = make_image(vf, t.width, t.height, nlv, bpp, false, layers))) return nullptr;
     access(b.cb, g.img, kCopyDst);
     std::vector<uint8_t> dec;
+    for (uint32_t f = 0; f < layers; f++)
     for (uint32_t m = 0; m < nlv; m++) {
         const rsx_tex_layout* tl = &lv[m].tl;
         dec.assign((size_t)tl->dst_row_bytes * tl->rows, 0);
-        rsx_texture_decode(dec.data(), tl->dst_row_bytes, vm_base + ea + lv[m].offset, lv[m].w, lv[m].h, tl,
+        rsx_texture_decode(dec.data(), tl->dst_row_bytes, vm_base + ea + f * face + lv[m].offset, lv[m].w, lv[m].h, tl,
                            rsx_texture_argb_is_rgba());
         const VkDeviceSize at = upload(b, dec.data(), dec.size(), 16);
         if (at == ~(VkDeviceSize)0) { g.frame = ~0u; return nullptr; }   // the batch is full: again next time
         VkBufferImageCopy c = {};
-        c.bufferOffset = at; c.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, m, 0, 1 };
+        c.bufferOffset = at; c.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, m, f, 1 };
         c.imageExtent = { lv[m].w, lv[m].h, 1 };
         F.vkCmdCopyBufferToImage(b.cb, b.up.b, g.img->img, layout_of(g.img), 1, &c);
     }
