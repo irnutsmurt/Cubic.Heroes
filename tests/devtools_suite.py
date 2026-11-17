@@ -399,10 +399,44 @@ def check_boss(rd):
     return bad
 
 
+def check_forced(rd):
+    """devtools_forced: more of the game's enemies on field 13 with the rare and stronger outcomes forced than with
+    the ordinary ones"""
+    lists = [x["out"] for x in answers(rd) if x.get("ok") and isinstance(x.get("out"), list) and x["out"]
+             and "kind" in x["out"][0]]
+    if len(lists) < 4:
+        return [f"{len(lists)} actor lists (4 expected)"]
+    count = [sum(1 for a in o if a["kind"] == "ENEMY" and a.get("visible")) for o in lists]
+    if count[1] <= count[3]:
+        return [f"enemies forced {count[1]}, ordinary {count[3]} (more expected forced)"]
+    print(f"  enemies on field 13: forced {count[0]}/{count[1]}, ordinary {count[2]}/{count[3]}")
+    return []
+
+
+def check_cubemap(rd):
+    """devtools_cubemap (B-008): the cube-mapped material drawn under the Vulkan validation layer with no error; the
+    slime created and acted"""
+    bad = drive_failures(rd)
+    try:
+        with open(os.path.join(rd, "stderr.log"), encoding="utf-8", errors="replace") as f:
+            log = f.read()
+    except OSError:
+        return bad + ["no stderr.log"]
+    if "vkCreateInstance with the driver's messages failed" in log:
+        bad.append("the validation layer did not load (install the Vulkan SDK to run this check)")
+    errors = [ln for ln in log.splitlines() if ln.startswith("[vulkan] error")]
+    if errors:
+        bad.append(f"{len(errors)} Vulkan validation errors, the first: {errors[0][:200]}")
+    if "[vk-texture]" in log and " cube " not in log:
+        bad.append("no cube map drawn")
+    return bad
+
+
 CHECKS = {"devtools_basic": check_basic, "devtools_off": check_off, "devtools_warp": check_warp,
           "devtools_menu": check_menu, "devtools_player": check_player, "devtools_progress": check_progress,
           "devtools_encounter": check_encounter, "devtools_diag": check_diag, "devtools_persist": check_persist,
-          "devtools_ending": check_ending, "devtools_enemies": check_enemies, "devtools_boss": check_boss}
+          "devtools_ending": check_ending, "devtools_enemies": check_enemies, "devtools_boss": check_boss,
+          "devtools_forced": check_forced, "devtools_cubemap": check_cubemap}
 
 
 def persist_load(rd, exe):

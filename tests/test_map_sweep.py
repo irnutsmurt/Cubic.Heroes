@@ -128,6 +128,59 @@ class SweepCheck(unittest.TestCase):
         self.assertEqual(map_sweep.engine_name("Field_01"), "Field_1")
         self.assertEqual(map_sweep.engine_name("Field_10"), "Field_10")
 
+    def test_left_out_draws_known_listed_new_failed(self):
+        """M11.1b: the renderer's report -- a known left-out draw is listed with its bug, any other reason fails"""
+        chunk(self.ev, 0, ["M_A"])
+        with open(os.path.join(self.ev, "chunk0", "run", "ppfx_report.txt"), "w", newline="\n") as f:
+            f.write("not rendered: 7 asp: no clip\n"
+                    "not rendered: 1 unit 0 at 0:03190000 (format A5 1280x720 pitch 5120) has no native source\n")
+        rc, out = check(self.ev)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("known (B-007)", out)
+        with open(os.path.join(self.ev, "chunk0", "run", "ppfx_report.txt"), "a", newline="\n") as f:
+            f.write("not rendered: 3 asp: unit 3 (format A5 32x32 mips 6 dim 2 cube 1) has no source\n"
+                    "not rendered: 1 asp: the batch is full\n")
+        rc, out = check(self.ev)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("3 draws not rendered: asp: unit 3", out)
+        self.assertIn("1 draws not rendered: asp: the batch is full", out)   # B-006 is fixed: a failure again
+
+    def test_texture_kinds_reported_by_map(self):
+        """M11.1b: the cube-map and linear mipmapped textures each map first draws ([vk-texture])"""
+        chunk(self.ev, 0, ["M_A", "M_B"],
+              extra="[vk-texture] t=130.0 cube 32x32 levels 6 format A5 at 1:00207F00\n")
+        rc, out = check(self.ev)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("M_B: cube 32x32/6", out)
+
+    def test_audio_per_map(self):
+        """M11.1b: the music each map started and its mix's level, from the audio trace and the wave writer's mix"""
+        import array
+        import math
+        import struct
+        sys.path.insert(0, os.path.join(ROOT, "tests"))
+        import map_sweep
+        run = os.path.join(self.tmp.name, "run")
+        os.makedirs(run)
+        with open(os.path.join(run, "audio_trace.txt"), "w", newline="\n") as f:
+            f.write("# audio trace v1\n")
+            for k in range(0, 40):   # a line every half second, 30 guest frames apart
+                f.write(f"{k * 500000} {k * 30} 1 SM.update 0.016 -> 0\n")
+            f.write("10000000 600 1 SM.playBGM 12 0 0 -> 1\n")
+        n = 48000 * 20
+        a = array.array("f", [0.0] * (2 * n))
+        for i in range(48000 * 10, n):   # a tone from 10 s on: the second map's
+            a[2 * i] = a[2 * i + 1] = 0.25 * math.sin(i * 0.05)
+        data = a.tobytes()
+        with open(os.path.join(run, "mix.wav"), "wb") as f:
+            f.write(b"RIFF" + struct.pack("<I", 36 + len(data)) + b"WAVEfmt " + struct.pack("<IHHIIHH", 16, 3, 2, 48000,
+                    48000 * 8, 8, 32) + b"data" + struct.pack("<I", len(data)) + data)
+        got = map_sweep.audio_per_map(run, [("M_A", 0), ("M_B", 600)])
+        self.assertEqual(got["M_A"][0], [])
+        self.assertLess(got["M_A"][1], map_sweep.SILENT_DB)
+        self.assertEqual(got["M_B"][0], ["12"])
+        self.assertGreater(got["M_B"][1], -30.0)
+
     def test_no_evidence_fails(self):
         rc, out = check(self.ev)
         self.assertEqual(rc, 1)

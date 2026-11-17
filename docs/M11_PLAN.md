@@ -798,3 +798,158 @@ D_20_9; up to the epilogue 110 s, the throne room to the credits 79 s; **the cre
 opened after the save. The pictures reviewed (the throne room's crowd, the credits, the question, the cleared title).
 Two of the scenario's first versions stopped where the game waits for the player (the epilogue's walk, which paging
 alone never does): the scenario's, not the game's.
+
+## 21. M11.1b: the rest of the matrix -- the owner's requirements (2026-11-17)
+
+The owner accepted M11.1a and asked for the remaining matrix, prioritising gameplay correctness, crashes, softlocks,
+rendering and audio defects and performance regressions; no new player-facing features or unneeded architectural
+changes; the matrix and the bug list kept current; validated fixes committed and pushed as they come; tests
+offscreen; the owner's saves protected; M7 unauthorized, no public release. Specifically:
+- the rare metal slime and blue dragon **forced**, not left to chance; the **stronger variants** and the **second
+  mode's** content validated;
+- the slime against **RPCS3** if possible (an on-screen run: the owner's approval asked, 2026-11-17);
+- **mipmapped and cube-map textures** in the regression tests (the fixes of B-002 and B-004 can touch other content);
+- **every remaining boss, the final one fought for real**;
+- minigames, side quests, equipment, magic, character editing, death, respawn and post-game content;
+- **audio and movies** throughout;
+- **frame-rate independence** at 30, 60 and higher frame rates in representative scenes;
+- new shader and pipeline variants collected and prepared as they are met.
+
+**How** (each through the game's own logic, the tools only to reach a place or a state): the rare enemies and the
+stronger versions forced by the scripts' own `math.random` answering 1 for the moment of their set-up (the tools'
+`spawn`, or a map's own spawns when it loads); the bosses as devtools_boss, with the swords the hero would have by
+then equipped in the game's own equipment screen; the minigames entered by their own entries; every scenario over a
+preparation with `coverage export`, its new pipelines into the manifest.
+
+## 22. M11.1b: every boss fought to its defeat (2026-11-17) [M]
+
+**How** (tests/scenarios/devtools_bossfight.drive, tests/devtools_bosses.py; offscreen, over the M11.1a preparation):
+one scenario for every boss -- BOSS, STEP and FLAG from the environment: the story set up to the step before it (its
+flags, the world map, its items, as the scripts give them); the hero armed as the story arms him by then -- the Hero
+Sword (item 97) and the ancient sword's ability handed over with the game's own SetSwordData and HandOverSwordAbility
+(the castle guard's event); the equipped sword read from the player object (+0x5D0, CPlayerActor::getSwordType's
+field: 1 -> 3); the arena entered the game's way (`boss`); its introduction answered to its end (`devpage`: CROSS
+until the game runs no event); the fight (`devfight`) until the game sets the defeat's flag; the drops collected; the
+defeat's own event answered; the session's unprepared pipelines exported. No death (the tools'); the game's damage,
+knockback and attacks untouched. `devfight` sets aside a target it gets no nearer to in 5 s (across water, in the air)
+and holds its place swinging at whatever comes near.
+
+**Results** (offscreen; each fight to the game's own defeat flag):
+
+| Boss | Arena | Result | The fight |
+|---|---|---|---|
+| Temple 1's guardian (the snake) | D_1_2 | PASS | devtools_boss (section 18): the ancient sword, 28-60 swings |
+| Temple 2's guardian (the bee) | D_2_2 | PASS | 29 swings, 44 s |
+| Temple 3's guardian (the golem) | D_3_2 | PASS | |
+| Temple 4's guardian (the kraken) | D_4_2 | see below | its arms and body across the water: fought from the platform they reach |
+| Temple 5's guardian (the dragon) | D_5_2 | PASS | 79 swings, 86 s |
+| Temple 6's guardian (the dark knight) | D_6_2 | PASS | 491 swings, 11 min |
+| The castle battle | D_8_2 | PASS | scripted: the dark priest beats the hero down (WaitHpOrTime), the sages arrive, the game sets flag 64 and moves to the castle |
+| The tower's rematches 1, 2, 3, 5, 6 | D_7_2_1..6 | PASS | stronger (the tower's flag 310): the snake's in 119 s |
+| The tower's rematch 4 (the kraken) | D_7_2_4 | see below | |
+| **The last enemy** | D_7_2_8 | **PASS** | 62 swings, 73 s; its defeat ran the game's own after-event: the tower's last room, then the ending field (the ending: section 20). Its flag (74) is set at the defeat and set back to 0 by the ending itself |
+
+Two scenario faults were found and fixed on the way (not the game's): a fixed number of presses ran out where the
+castle battle first beats the hero down (now `devpage`); the last enemy's flag cleared by the ending (now the fight's
+own observation of it). **Pipelines**: the fights met two pipelines the preparation lacked -- one material group drawn
+with the stencil test off on an 8-bit target (prepared only with it on), in four arenas and the last enemy's; both
+added to the manifest (246 lines).
+
+## 23. M11.1b: frame-rate independence across the game (2026-11-17) [M]
+
+**What was known**: R8 measured the castle front (tests/fps_check.py: the hero's walk, the grass's debris, the static
+clocks, the hero's own object) and the river's enemies at 30, 60, about 120 and 144 fps; the first temple's guardian
+counted frames (head and segments: gated to 30 Hz steps, DOTHEROES_TICK30, docs/NATIVE_R8.md 9.6). The other bosses
+and the other enemy types were never measured.
+
+**How** (offscreen, silent, the dev build): the castle-front drive again at 30, 60, 144 and 240; and a new drive,
+tests/scripts/fps_actors.drive, at the same four rates -- every enemy type outside the minigames created in turn on
+field 14 (the tools' `spawn`: the game's own Event:CreateNpc; each type a segment of its own, 12 s), then the temples'
+guardians and the last enemy, each entered the game's way and left to act for 40 s against a hero who stands at the
+door and never swings (invulnerable; `devpage ... ifany` answers only a running event). The characters' positions
+every 4 ms (DOTHEROES_DEV_ACTOR_LOG), the segments' times (their marks), the frames (DIAG_FRAMES).
+tests/fps_actors.py compares each segment's characters with the 30 fps run: per class, the speed in 0.25 s windows
+(distance over the time its steps cover) and the rate at which new characters appear (an enemy's shots); every
+enemy is one class (0x00FE4500), so an enemy segment counts only the characters new in it -- the created type and what
+it throws. A quantity that follows time keeps its ratio near 1; one that follows frames, the frame rate's ratio.
+Its own unit test (tests/test_fps_actors.py) checks both on made-up runs.
+
+## 24. M11.1b: a draw's uploads that no longer fit its batch (B-006) (2026-11-17) [M]
+
+**Finding**: the sweep's stricter check (sweep-m111, chunk 5) found one draw left out on arriving at
+Field_50 (`asp: the batch is full`); a short run of seven maps did it again on its own. The native renderer records
+into batches with a 16 MB upload buffer each (textures, uploaded vertices and indices, constants) and submits one once
+a record leaves it past half (DOTHEROES_PPFX_SUBMIT_KB, a test switch, moves that point). A draw's uploads were
+therefore guaranteed only the other half; on a map's first frame every texture is new, and one draw's textures and
+vertices together did not fit -- it was left out for that frame.
+
+**Fix** (port/native/render/ppfx_render.cpp, draw_record): a draw whose uploads no longer fit is given up before
+anything of its own is recorded (the failure points come before its render pass, descriptor set and occlusion
+query), the batch is submitted and the draw recorded again in the next one. What its first attempt already recorded
+stays in the first batch and runs before the second: the clears before it (not recorded again), the textures and
+vertex ranges it uploaded (found again in the caches), its semaphore waits (taken once) and their release (pushed
+once). A draw that does not fit an empty batch still fails as before. The report counts them ("batches submitted
+early").
+
+**Verified** (build/m11's b006 runs, offscreen): the same seven maps with the usual batches and with batches carried
+nearly full (15.8 of 16 MB before a submission): 1 and 9 draws recorded again, none left out, the pictures the same
+(Field_50, Field_14, Field_91, D_8_2). The sweep's check no longer lists the reason as known: it fails if it comes
+back.
+
+**B-007** (S4, accepted): every case is the arrival at D_8_2, the castle battle's arena (the report's lines now carry their time on the compile log's clock: 0.2 s after the tools' `[warp]` arrival line). The arena's arrival runs an effect that alternates between two 1280x720 surfaces, 0:03190000 and 0:03550000 (not the display buffers, which are at 0x0 and 0x398000), each frame reading the one the frame before drew; the renderer draws them natively only for those ~60 frames. On the effect's first frame the surface it reads has never been drawn -- no native image (no transfer dropped one: the new `[xfer]` log is silent), and the recorder keeps only small textures' bytes -- so that one draw is left out. On the console it would read whatever that memory held. No change: the input is undefined on the console too, and it is one frame; the sweep's check keeps listing it.
+
+## 25. M11.1b: the metal slime against RPCS3 (2026-11-17) [M]
+
+The owner approved on-screen use (2026-11-17). The comparison ran in the scratch copy of RPCS3 (its own saves -- the
+castle-front checkpoint, the same bytes -- and its own configuration; nothing of the owner's RPCS3 touched), boot
+and grabs through tests/rpcs3_capture.py, the keys posted to its window, the desktop guard's approval for the session
+(granted, then revoked).
+
+**Getting a slime on screen in an unmodified game.** RPCS3 runs the game as it is: no tools. The slime's script
+shows it at a spawn point 5% of the time, from the scripts' `math.random`; Lua's math.random draws from the C library's
+`rand()`, linked into the executable (a lagged table generator: its constants 1664525 and 1013904223). A local RPCS3
+game patch (the scratch copy's patches/imported_patch.yml, enabled in its config/patch_config.yml) makes `rand()`
+answer 0 -- every `math.random(l, u)` then gives l, so every spawn point shows its slime (and every enemy with a
+stronger version takes it), as the tools force it in ours -- and makes the hero's damage function return at once (the
+strong enemies killed him in one contact). Where the slimes stand comes from the maps' alignment files: a 128x128
+grid whose object records sit in their cells (a record's cell is its offset less the strings before it, over 32
+bytes; x = (col + 0.5) * 1.6, z = -(row + 0.5) * 1.6), checked against the three slimes M11.1a's probes logged on
+Field_14 and the hero's debug arrival there. The castle front's eastern neighbour, Field_19, has 26 slime points.
+
+**What RPCS3 shows**: the hero walked from the castle front into Field_19 and to its slime points: the metal slime is a
+**pale, pink-white dome with yellow glints** (the reflection of the engine's default cube map, whose faces are
+coloured markers, over a dark body); its position confirmed by RPCS3's own memory (GDB: the camera target at
+(71.6, -135.5) in area 18, Field_19, beside the slime points (74.4, -138.4) and (79.2, -136.8)) and by Field_19's spawn
+lists (no other slime there). Ours draws the slime as a **flat dark-navy dome**, its vertex colour alone (M11.1a's
+spawn pictures): **the reflection is missing -- B-008 (S2)**, fixed (section 26).
+
+**Also seen there**: the blue dragon (the other rare enemy) shown by the same patch; a death on Field_19 and "Continue?
+YES" bringing the hero back at the castle front with his life full -- the reference for our death and respawn check.
+
+## 26. M11.1b: B-008 -- a cube-mapped program's textures unbound (2026-11-17) [M]
+
+**Ruled out, in order** (build/m11's b008 runs, a frame described with DOTHEROES_ASP_DESCRIBE_FRAME and dumped):
+- *the cube map's decoding*: a new diagnostic (DOTHEROES_CUBE_DUMP=<dir>: each face and level as uploaded) shows the
+  engine's default cube right -- six pastel faces (blue, green, cyan, pink, magenta, yellow), the same at every level;
+- *the reflection's strength*: the slime is drawn with the lit model program (its output: the lighting times the base
+  texture, plus the cube sample times a constant); that constant, as the game patched it for the draw, is (1, 1, 1, 0);
+- *the reflection vector*: a reflection of the view vector about the normal, rotated by three patched rows -- sound;
+- *the view*: the cube image is a cube-compatible image of six layers with a cube view.
+
+**The cause** (the Vulkan validation layer, PS3RECOMP_VK_VALIDATION=1): the runtime's translator declares a program's
+textures either as one array of sixteen 2D images (`rsx_tex[16]`, binding 16) or, when a unit the program samples is
+a cube map (or a volume), each unit on its own at binding 16 + u, so that unit can be a TextureCube. The native
+renderer's descriptor set layout had only the array: a per-unit program's units 1-15 matched no binding at all
+("descriptor set in layout must match the shader"; at the draw, "viewType must match the Dim operand") and read zero
+-- the slime's cube map, and its normal and shadow maps too; only unit 0, the base texture, reached it.
+
+**Fix** (port/native/render/ppfx_render.cpp): the layout holds both forms -- binding 16 the array of sixteen, bindings
+17-31 one image each -- and every draw writes both (write_set): the array with a 2D placeholder wherever a unit is a
+cube (an array program's units are all 2D; a per-unit program reads only the first element there), each unit at its
+own binding. The pipelines' version is raised to 4: pipelines kept from the old layout are not reused (a preparation
+makes them again). Not slime-specific: every program that samples a cube map goes through it -- the preparation's
+3,488 translations hold two such, both the slime's.
+
+**Verified**: devtools_cubemap (new, tests/devtools_suite.py): the slime created beside the hero and the field's spawn
+points forced, under the validation layer: no error; the slime now a pale pink-white dome with yellow glints, as
+RPCS3 draws it (build/compare/b008-before-after-rpcs3.png, local).

@@ -1,0 +1,38 @@
+# Scenario: the cube-mapped material under the Vulkan validation layer (M11.1b, B-008; docs/M11_PLAN.md section 26):
+# the metal slime -- the one material that samples a cube map (the engine's default cube, unit 3), a program whose
+# translation declares each texture unit on its own binding -- created beside the hero on field 14 (the tools' `spawn`,
+# the game's own set-up) and drawn; then the map entered again with the scripts' random forced so every slime spawn
+# point shows one. PS3RECOMP_VK_VALIDATION=1: tests/devtools_suite.py fails on any validation error (B-008 was a
+# descriptor layout without the per-unit bindings: "viewType must match the Dim operand", "descriptor set in layout
+# must match the shader"), and keeps the pictures. Needs the Khronos validation layer (the Vulkan SDK); without it the
+# check says so.
+#! saves build/checkpoints/castle-front
+#! env DOTHEROES_DEVELOPER_MODE=1 DOTHEROES_NATIVE_CD=1 DOTHEROES_NATIVE_SOLVER=1,2,4,5,6 GCM_WRAP_LAP=1
+#! env DOTHEROES_PRESENT_ONCE=1 DOTHEROES_DEV_STATE=1 PS3_VERBOSE=0 SHOT_EVERY=0 DUMP=1 PS3RECOMP_VK_VALIDATION=1
+#! secs 600
+
+include common.drive
+
+log TitleMovie 120
+sleep 5
+call continue
+state life>0,area==17 90
+sleep 3
+dev nodeath on
+dev invulnerable on
+dev warp Field_14 -gDebug @150
+sleep 3
+dev spawn HagureSlime 2.4 0
+sleep 0.5
+shot slime
+sleep 1
+shot slime-b
+dev enemies
+dev lua __devtools_random=math.random; math.random=function(a,b) if b then return a elseif a then return 1 else return 0 end end
+dev respawn @150
+sleep 2
+dev lua math.random=__devtools_random; __devtools_random=nil
+shot forced
+sleep 3
+shot forced-b
+dev coverage

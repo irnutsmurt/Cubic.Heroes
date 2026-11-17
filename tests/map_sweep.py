@@ -45,6 +45,68 @@ DATA = os.path.join(ROOT, "build", "disc", "PS3_GAME", "USRDIR", "data")
 # title's editor, not the map change (docs/M11_PLAN.md section 16)
 NOT_IN_MAP_LIST = {"Field_99"}
 
+# OpenAL Soft's wave writer in place of a device (`run --audio`): the whole mix into the run's folder, silent
+ALSOFT_WAVE = """[general]
+drivers = wave
+frequency = 48000
+sample-type = float32
+channels = stereo
+
+[wave]
+file = mix.wav
+"""
+SILENT_DB = -60.0   # a map whose mix stays below this after its first 2 s is silent
+
+
+def audio_per_map(run_dir, arrivals):
+    """M11.1b: for each arrival (map, guest frame), the music the game started in its stay (the sound manager's
+    playBGM ids, port/audio_hooks.cpp's trace) and the mix's level after its first 2 s (dBFS); {} with no trace"""
+    import array
+    import math
+    trace, mixf = os.path.join(run_dir, "audio_trace.txt"), os.path.join(run_dir, "mix.wav")
+    if not os.path.exists(trace) or not os.path.exists(mixf):
+        return {}
+    marks, bgm = [], []   # (frame, us) from every line; (frame, id) of each playBGM
+    with open(trace, encoding="utf-8", errors="replace") as f:
+        for ln in f:
+            p = ln.split()
+            if len(p) < 4 or not p[0].isdigit():
+                continue
+            us, fr = int(p[0]), int(p[1])
+            if not marks or fr != marks[-1][0]:
+                marks.append((fr, us))
+            if p[3] == "SM.playBGM" and len(p) > 4:
+                bgm.append((fr, p[4]))
+    with open(mixf, "rb") as f:
+        data = f.read()
+    at = data.find(b"data")
+    samples = array.array("f")
+    samples.frombytes(data[at + 8:at + 8 + (len(data) - at - 8) // 8 * 8] if at >= 0 else b"")
+
+    def us_at(frame):
+        for fr, us in marks:
+            if fr >= frame:
+                return us
+        return marks[-1][1] if marks else 0
+    out = {}
+    for i, (m, frame) in enumerate(arrivals):
+        end_frame = arrivals[i + 1][1] if i + 1 < len(arrivals) else None
+        ids = sorted({b for fr, b in bgm if fr >= frame and (end_frame is None or fr < end_frame)})
+        t0 = us_at(frame) / 1e6 + 2.0
+        t1 = (us_at(end_frame) / 1e6 - 3.0) if end_frame else t0 + 10.0   # before the next change's fade
+        i0, i1 = max(0, int(t0 * 48000) * 2), min(len(samples), int(t1 * 48000) * 2)
+        seg = samples[i0:i1] if i1 > i0 else array.array("f")
+        ms = sum(x * x for x in seg) / len(seg) if seg else 0.0
+        out[m] = (ids, 10 * math.log10(ms) if ms > 0 else -200.0)
+    return out
+
+# draws the renderer leaves out that are known and tracked (docs/M11_VALIDATION.md): listed, not failed; any other
+# reason fails the check
+KNOWN_LEFT_OUT = [
+    # (B-006, a draw whose uploads no longer fit its batch, is fixed: such a draw is recorded again in the next one)
+    (r"^unit 0 at 0:0[0-9A-F]{7} \(format A5 1280x720 pitch 5120\) has no native source$", "B-007"),
+]
+
 
 def map_list(secs, first=None, last=None):
     pac = os.path.join(DATA, "map", "pac_data")
@@ -145,6 +207,12 @@ def run(a):
             "DOTHEROES_WARM": "0", "VK_COMPILE_LOG": "1", "DIAG_FRAMES": "frames.log", "ALSOFT_DRIVERS": "null",
             "DRIVE": drive, "DUMP": "0", "RUN_TAG": tag, "KEEP_RUNS": "80",
         })
+        if a.audio:   # M11.1b: the game's audio calls traced and the mix written by OpenAL Soft's wave writer (silent)
+            ini = os.path.join(r, "alsoft_wave.ini")
+            with open(ini, "w", encoding="utf-8", newline="") as f:
+                f.write(ALSOFT_WAVE)
+            env.pop("ALSOFT_DRIVERS", None)
+            env.update({"ALSOFT_CONF": ini, "DOTHEROES_AUDIO_TRACE": "audio_trace.txt"})
         secs = 120 + int(len(part) * (a.seconds + 15)) + 60
         t0 = time.monotonic()
         p = subprocess.run([sys.executable, os.path.join(ROOT, "tests", "boot_smoke.py"), str(secs)], cwd=ROOT, env=env,
@@ -220,6 +288,8 @@ def check(a):
     if not chunks:
         fails.append(f"no chunk under {a.evidence}")
     unforeseen = translated = planned_total = 0
+    kinds = {}   # M11.1b: the texture kinds B-002/B-004 changed ([vk-texture]): map -> {kind}
+    audio = {}   # M11.1b (a sweep run with --audio): map -> (music ids started, the mix's level)
     for r in chunks:
         name = os.path.basename(r)
         with open(os.path.join(r, "maps.txt"), encoding="utf-8") as f:
@@ -236,9 +306,14 @@ def check(a):
             fails.append(f"{name}: the game did not run to its planned end (ended by {result.get('ended_by')!r}, "
                          f"exit {result.get('exit')})")
         changed, arrived, swept = set(), {}, False
+        current = None
         with open(log, encoding="utf-8", errors="replace") as f:
             log_lines = f.readlines()
         for ln in log_lines:
+            m = re.search(r"\[vk-texture\] t=[\d.]+ (\S+) (\d+x\d+) levels (\d+)", ln)
+            if m:
+                kinds.setdefault(current or "(start)", set()).add(f"{m.group(1)} {m.group(2)}/{m.group(3)}")
+                continue
             m = re.search(r"\[(?:sweep|warp)\] t=[\d.]+ map (?:\d+/\d+ )?(\S+)", ln)
             if m:
                 changed.add(m.group(1))
@@ -247,6 +322,7 @@ def check(a):
             m = re.search(r"\[(?:sweep|warp)\] t=[\d.]+ arrived (?:\d+/\d+ )?(\S+) area (\d+) frames (\d+)", ln)
             if m:
                 arrived[m.group(1)] = (int(m.group(2)), int(m.group(3)))
+                current = m.group(1)
                 continue
             if not swept:
                 continue
@@ -255,6 +331,21 @@ def check(a):
                 unforeseen += m.group(2) == "unforeseen"
             elif re.search(r"\[vk-compile\] t=[\d.]+ translate \S+ \d+ words [\d.]+ ms glslang", ln):
                 translated += 1
+        # M11.1b: draws the renderer left out (its report): none but the first frame's records without a clip
+        try:
+            with open(os.path.join(r, "run", "ppfx_report.txt"), encoding="utf-8", errors="replace") as f:
+                for ln in f:
+                    m = re.match(r"not rendered: (\d+) (.*)", ln)
+                    if not m or m.group(2).strip() == "asp: no clip":
+                        continue
+                    why = m.group(2).strip()
+                    bug = next((b for rx, b in KNOWN_LEFT_OUT if re.search(rx, why)), None)
+                    if bug:
+                        print(f"{name}: {m.group(1)} draw(s) not rendered, known ({bug}): {why}")
+                    else:
+                        fails.append(f"{name}: {m.group(1)} draws not rendered: {why}")
+        except OSError:
+            pass   # no report: nothing to read (a run that did not end cleanly fails above)
         # the frame counter at each arrival: the previous map's arrival (or the first change) to this one
         prev_frames = prev_area = None
         for i, (m, entry, secs) in enumerate(planned):
@@ -281,6 +372,11 @@ def check(a):
                 fails.append(f"{name}: {m} arrived in area {area}, the baseline's is {base[m][0]}")
                 note = "AREA"
             rows.append((m, entry, area, ran, note))
+        order = sorted(((m, arrived[m][1]) for m in arrived), key=lambda x: x[1])
+        for m, (ids, db) in audio_per_map(os.path.join(r, "run"), order).items():
+            audio[m] = (ids, db)
+            if db < SILENT_DB:
+                fails.append(f"{name}: {m}: the mix silent there ({db:.0f} dBFS)")
     if a.write_baseline:
         with open(a.write_baseline, "w", encoding="utf-8", newline="\n") as f:
             f.write("# map area (tests/map_sweep.py check --write-baseline): where each map arrived in an accepted sweep\n")
@@ -291,6 +387,14 @@ def check(a):
         fails.append(f"{translated} shader translation(s) compiled in play (a preparation was given)")
     print(f"{len(rows)} maps arrived of {planned_total} planned; {unforeseen} pipelines met unprepared; {translated} "
           f"translations compiled in play")
+    if audio:
+        print(f"audio on {len(audio)} maps (the music the game started there; the mix's level after 2 s):")
+        for m in sorted(audio):
+            print(f"  {m}: music {','.join(audio[m][0]) or '(kept)'}; {audio[m][1]:.1f} dBFS")
+    if kinds:   # where cube maps and linear mipmapped textures are drawn (the fixes' regression coverage)
+        print(f"cube-map and linear mipmapped textures, first met on {len(kinds)} maps:")
+        for m in sorted(kinds):
+            print(f"  {m}: {', '.join(sorted(kinds[m]))}")
     if fails:
         print(f"FAIL ({len(fails)}):")
         for x in fails:
@@ -312,6 +416,8 @@ def main():
     r.add_argument("--first", type=int)
     r.add_argument("--last", type=int)
     r.add_argument("--only", help="these maps only (names as the game's map change takes them, comma-separated)")
+    r.add_argument("--audio", action="store_true",
+                   help="M11.1b: trace the game's audio calls and write the mix (silent): `check` then checks each map's")
     p = sub.add_parser("report")
     p.add_argument("dirs", nargs="+")
     c = sub.add_parser("check")

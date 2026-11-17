@@ -521,6 +521,7 @@ constexpr uint32_t fn_set_hp = 0x00101928, fn_set_mp = 0x00101940, fn_set_max_hp
                    fn_set_max_mp = 0x00101FFC, fn_set_invincible = 0x00101F78, fn_damage_hp = 0x0011A94C;
 constexpr uint32_t kPlayerVtable = 0x00FE3D20;    /* dev_state.cpp: the player's class */
 constexpr uint32_t kHp = 0x5B8, kMp = 0x5BC, kMaxHp = 0x5C0, kMaxMp = 0x5C4, kInvincible = 0x54D;
+constexpr uint32_t kSwordType = 0x5D0;   /* M11.1: the equipped sword (CPlayerActor::getSwordType, 0x000FA024, reads it) */
 
 std::atomic<bool> g_nodeath{ false }, g_invulnerable{ false };
 std::atomic<uint32_t> g_nodeath_saves{ 0 }, g_invuln_reasserts{ 0 }, g_invuln_blocked{ 0 };
@@ -548,10 +549,10 @@ std::string player_json(const ppu_context* c)
     snprintf(b, sizeof b,
              "{\"in_play\":true,\"life\":%d,\"max_life\":%d,\"magic\":%d,\"max_magic\":%d,\"money\":%s,"
              "\"invincible_flag\":%u,\"invulnerable\":%s,\"nodeath\":%s,\"nodeath_saves\":%u,\"invulnerable_reasserts\":%u,"
-             "\"invulnerable_blocked\":%u}",
+             "\"invulnerable_blocked\":%u,\"sword\":%u}",
              (int32_t)g32(p + kHp), (int32_t)g32(p + kMaxHp), (int32_t)g32(p + kMp), (int32_t)g32(p + kMaxMp),
              money.c_str(), vm_base[p + kInvincible], g_invulnerable ? "true" : "false", g_nodeath ? "true" : "false",
-             g_nodeath_saves.load(), g_invuln_reasserts.load(), g_invuln_blocked.load());
+             g_nodeath_saves.load(), g_invuln_reasserts.load(), g_invuln_blocked.load(), g32(p + kSwordType));
     return b;
 }
 

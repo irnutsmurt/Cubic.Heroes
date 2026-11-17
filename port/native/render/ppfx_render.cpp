@@ -572,6 +572,15 @@ const VkDeviceSize kUpload = 16u << 20;
 const uint32_t kSets = 1024;
 Batch s_b[kBatches];
 int s_cur = 0;
+// M11.1b (B-006): a batch is submitted once a record leaves it past half its upload buffer, so one draw had the
+// other half for its uploads; a map's first frames, every texture new, could need more, and such a draw was left out
+// for that frame. Now the batch is submitted and the draw recorded again in the next one (draw_record):
+// s_bfull_retry while a first attempt may be redone; s_bfull_tex when a texture's upload did not fit (the unit being
+// looked up); s_bfull when the draw was given up for that reason; s_bfull_redo during the second attempt (what the
+// first already recorded -- the clears before it, its semaphores' release -- not again).
+bool s_bfull_retry = false, s_bfull_tex = false, s_bfull = false, s_bfull_redo = false;
+uint64_t s_bfull_redraws = 0;
+VkDeviceSize s_submit_at = kUpload / 2;   // DOTHEROES_PPFX_SUBMIT_KB=<n> (a test): submitted past n KB instead
 
 VkCommandPool s_pool;
 VkDescriptorSetLayout s_dsl;
@@ -1952,8 +1961,9 @@ VkResult make_pipeline(const PipeState& in, VkShaderModule vsm, VkShaderModule f
 // has grown, after a preparation pass, at exit and at a test's stop. Anything else: the cache starts empty and the
 // report says why.
 constexpr uint32_t kPcMagic = 0x4350564Eu;   // "NVPC"
-constexpr uint32_t kPcFormat = 1, kPipeVersion = 3;   // 2 (M9.2c): the ignored render state normalised; 3 (M11.1):
-                                                      // texture kinds only of the units a program samples
+constexpr uint32_t kPcFormat = 1, kPipeVersion = 4;   // 2 (M9.2c): the ignored render state normalised; 3 (M11.1):
+                                                      // texture kinds only of the units a program samples; 4 (M11.1b,
+                                                      // B-008): the layout's per-unit texture bindings 17-31
 constexpr uint32_t kPcMaxBytes = 256u << 20;
 struct PcHeader {
     uint32_t magic, format, renderer, vendor, device, driver;
@@ -3257,6 +3267,12 @@ Img* static_texture(Batch& b, const Rec* r, uint32_t unit, const Texture& t)
     Img* o = static_pool_take(vf, t.width, t.height, nlv);
     if (!o) o = make_image(vf, t.width, t.height, nlv, bpp, false);
     if (!o) return nullptr;
+    if (compile_log() && (t.format & 0x20u) && nlv > 1) {   // M11.1b: as guest_texture_live's, once a kind and place
+        static std::unordered_set<uint64_t> said;
+        if (said.insert((uint64_t)t.offset << 32 ^ (uint64_t)t.format << 24 ^ (uint64_t)t.width << 12 ^ t.height).second)
+            fprintf(stderr, "[vk-texture] t=%.3f linear-mipmapped %ux%u levels %u format %02X at %u:%08X (recorded)\n",
+                    compile_clock(), t.width, t.height, nlv, t.format, t.location, t.offset);
+    }
     access(b.cb, o, kCopyDst);
     std::vector<uint8_t> dec;
     for (uint32_t m = 0; m < nlv; m++) {
@@ -3265,7 +3281,7 @@ Img* static_texture(Batch& b, const Rec* r, uint32_t unit, const Texture& t)
         rsx_texture_decode(dec.data(), tl->dst_row_bytes, src + lv[m].offset, lv[m].w, lv[m].h, tl,
                            rsx_texture_argb_is_rgba());
         const VkDeviceSize at = upload(b, dec.data(), dec.size(), 16);
-        if (at == ~(VkDeviceSize)0) { destroy_image(o); return nullptr; }
+        if (at == ~(VkDeviceSize)0) { destroy_image(o); s_bfull_tex = true; return nullptr; }   // the batch is full (B-006)
         VkBufferImageCopy c = {};
         c.bufferOffset = at; c.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, m, 0, 1 };
         c.imageExtent = { lv[m].w, lv[m].h, 1 };
@@ -3609,9 +3625,9 @@ void unsupported(const Rec* r, const char* why)
     if (r->walk.ref >= 0) { stats().cmp_skip_not_drawn++; release_ref(r->walk.ref); }
     static int said = 0;
     if (said++ < 20) {
-        char line[200];
-        snprintf(line, sizeof line, "render: record %llu (frame %u) not rendered: %s", (unsigned long long)r->seq,
-                 r->frame, why);
+        char line[240];   // M11.1b: its time on the compile log's clock (the tools' [warp] lines use it too)
+        snprintf(line, sizeof line, "render: record %llu (frame %u, t=%.3f) not rendered: %s", (unsigned long long)r->seq,
+                 r->frame, compile_clock(), why);
         report_add(line);
     }
 }
@@ -3639,11 +3655,37 @@ long long s_waited = -1;   // the last engine signal a batch waits on
 // the batch of the first record that needs it.
 void wait_for(Batch& b, const Rec* r)
 {
-    for (int16_t k : r->walk.release_sem) if (k >= 0) b.release.push_back(k);
+    if (!s_bfull_redo)   // B-006: a draw recorded again -- its first batch releases them
+        for (int16_t k : r->walk.release_sem) if (k >= 0) b.release.push_back(k);
     if (r->walk.sem < 0 || r->walk.ordinal <= s_waited) return;
     b.sems.push_back(r->walk.sem);
     b.ords.push_back(r->walk.ordinal);
     s_waited = r->walk.ordinal;
+}
+
+// A draw's descriptor set: its constants (bindings 0, 1), its textures both as the array at binding 16 and one by one
+// at bindings 17-31 (unit 0 is the array's first: a per-unit translation declares it at binding 16 too), its samplers
+// (48). The array never holds a cube view past its first element: a per-unit program reads only that one there, and
+// an array program's units are all 2D (B-008).
+void write_set(VkDescriptorSet set, const VkDescriptorBufferInfo bi[2], const VkDescriptorImageInfo ii[16],
+               const VkDescriptorImageInfo si[16], Img* const srcs[16])
+{
+    VkDescriptorImageInfo arr[16];
+    for (uint32_t u = 0; u < 16; u++) {
+        arr[u] = ii[u];
+        if (u && srcs[u] && srcs[u]->layers != 1) arr[u] = { VK_NULL_HANDLE, s_dummy->view, sampled_layout() };
+    }
+    VkWriteDescriptorSet wr[4 + 15] = {};
+    for (int k = 0; k < 4 + 15; k++) { wr[k].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; wr[k].dstSet = set; }
+    wr[0].dstBinding = 0; wr[0].descriptorCount = 1; wr[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; wr[0].pBufferInfo = &bi[0];
+    wr[1].dstBinding = 1; wr[1].descriptorCount = 1; wr[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; wr[1].pBufferInfo = &bi[1];
+    wr[2].dstBinding = 16; wr[2].descriptorCount = 16; wr[2].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE; wr[2].pImageInfo = arr;
+    wr[3].dstBinding = 48; wr[3].descriptorCount = 16; wr[3].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER; wr[3].pImageInfo = si;
+    for (uint32_t u = 1; u < 16; u++) {
+        VkWriteDescriptorSet& w = wr[3 + u];
+        w.dstBinding = 16 + u; w.descriptorCount = 1; w.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE; w.pImageInfo = &ii[u];
+    }
+    F.vkUpdateDescriptorSets(D.device, 4 + 15, wr, 0, nullptr);
 }
 
 void asp_clears(Batch& b, const Rec* r);
@@ -3655,8 +3697,8 @@ void draw(const Rec* r)
 {
     Batch& b = batch(r->frame);
     wait_for(b, r);
-    asp_describe_line(r);   // the post-effects path's draws, in the same description (a "ppfx" line)
-    if (r->naclear) asp_clears(b, r);   // R6: the clears made before it (the game's, asp's)
+    if (!s_bfull_redo) asp_describe_line(r);   // the post-effects path's draws, in the same description (a "ppfx" line)
+    if (r->naclear && !s_bfull_redo) asp_clears(b, r);   // R6: the clears made before it (the game's, asp's)
     if (r->why) { unsupported(r, "no programs or vertex data"); return; }
     if (r->fp && skip_fp(r->fp->hash)) return;
     const State& st = r->st;
@@ -3762,7 +3804,9 @@ void draw(const Rec* r)
             src = snap;
             stats().n_feedback++;
         }
+        s_bfull_tex = false;
         if (!src) src = static_texture(b, r, u, tx);
+        if (!src && s_bfull_tex && s_bfull_retry) { s_bfull = true; return; }   // B-006: again in the next batch
         if (!src) {
             char why[200];
             snprintf(why, sizeof why, "unit %u at %u:%08X (format %02X %ux%u pitch %u) has no native source%s", u,
@@ -3787,7 +3831,8 @@ void draw(const Rec* r)
     const VkDeviceSize o_v = upload(b, verts.data(), verts.size(), 16), o_i = upload(b, idx.data(), idx.size() * 4, 16);
     if (o_vc == ~(VkDeviceSize)0 || o_pc == ~(VkDeviceSize)0 || o_v == ~(VkDeviceSize)0 || o_i == ~(VkDeviceSize)0 ||
         b.sets >= kSets) {
-        unsupported(r, "the batch is full");   // not expected: batches are submitted well before
+        if (s_bfull_retry) { s_bfull = true; return; }   // B-006: again in the next batch
+        unsupported(r, "the batch is full");
         return;
     }
     VkDescriptorSetAllocateInfo dai = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
@@ -3796,13 +3841,7 @@ void draw(const Rec* r)
     if (F.vkAllocateDescriptorSets(D.device, &dai, &set) != VK_SUCCESS) { unsupported(r, "descriptor set"); return; }
     b.sets++;
     VkDescriptorBufferInfo bi[2] = { { b.up.b, o_vc, sizeof vcb }, { b.up.b, o_pc, pcb.size() } };
-    VkWriteDescriptorSet wr[4] = {};
-    for (int k = 0; k < 4; k++) { wr[k].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; wr[k].dstSet = set; }
-    wr[0].dstBinding = 0; wr[0].descriptorCount = 1; wr[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; wr[0].pBufferInfo = &bi[0];
-    wr[1].dstBinding = 1; wr[1].descriptorCount = 1; wr[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; wr[1].pBufferInfo = &bi[1];
-    wr[2].dstBinding = 16; wr[2].descriptorCount = 16; wr[2].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE; wr[2].pImageInfo = ii;
-    wr[3].dstBinding = 48; wr[3].descriptorCount = 16; wr[3].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER; wr[3].pImageInfo = si;
-    F.vkUpdateDescriptorSets(D.device, 4, wr, 0, nullptr);
+    write_set(set, bi, ii, si, srcs);   // B-008: the array and the units one by one
     // the draw. DOTHEROES_PPFX_HAZARD_TEST=1 (the synchronisation check's
     // negative control): before one draw in 5000, the target is copied twice
     // into a scratch image with no barrier between the copies -- a write
@@ -4058,7 +4097,14 @@ Img* guest_texture_live(Batch& b, const Rec* r, const Texture& t)
                   g.img->layers != layers)) {
         s_retired.push_back(g.img); g.img = nullptr;
     }
-    if (!g.img && !(g.img = make_image(vf, t.width, t.height, nlv, bpp, false, layers))) return nullptr;
+    if (!g.img) {
+        if (!(g.img = make_image(vf, t.width, t.height, nlv, bpp, false, layers))) return nullptr;
+        // M11.1b: the texture kinds B-002 and B-004 changed, each new one logged for the map sweep's regression check
+        // (tests/map_sweep.py: which maps draw them) -- the tests' compile log only
+        if (compile_log() && (cube || ((t.format & 0x20u) && nlv > 1)))
+            fprintf(stderr, "[vk-texture] t=%.3f %s %ux%u levels %u format %02X at %u:%08X\n", compile_clock(),
+                    cube ? "cube" : "linear-mipmapped", t.width, t.height, nlv, t.format, t.location, t.offset);
+    }
     access(b.cb, g.img, kCopyDst);
     std::vector<uint8_t> dec;
     for (uint32_t f = 0; f < layers; f++)
@@ -4067,8 +4113,24 @@ Img* guest_texture_live(Batch& b, const Rec* r, const Texture& t)
         dec.assign((size_t)tl->dst_row_bytes * tl->rows, 0);
         rsx_texture_decode(dec.data(), tl->dst_row_bytes, vm_base + ea + f * face + lv[m].offset, lv[m].w, lv[m].h, tl,
                            rsx_texture_argb_is_rgba());
+        // DOTHEROES_CUBE_DUMP=<dir> (a diagnostic, M11.1b B-008): each cube face's levels as decoded, before upload --
+        // cube_<location>_<offset>_f<face>_l<level>_<w>x<h>.rgba (the upload's own bytes) -- once a cube and place
+        if (cube && bpp == 4) {
+            static const char* cd = getenv("DOTHEROES_CUBE_DUMP");
+            static std::unordered_set<uint64_t> said;
+            if (cd && *cd && said.insert(k ^ ((uint64_t)f << 56) ^ ((uint64_t)m << 48)).second) {
+                char path[600];
+                snprintf(path, sizeof path, "%s/cube_%u_%08X_f%u_l%u_%ux%u.rgba", cd, t.location, t.offset, f, m, lv[m].w,
+                         lv[m].h);
+                if (FILE* df = fopen(path, "wb")) { fwrite(dec.data(), 1, dec.size(), df); fclose(df); }
+                if (f == 0 && m == 0)
+                    fprintf(stderr, "[cube-dump] %u:%08X ea %08X face stride %u, %u levels, format %02X pitch %u, "
+                            "row bytes %u (vk format %d)\n", t.location, t.offset, ea, face, nlv, t.format, t.pitch,
+                            tl->dst_row_bytes, (int)vf);
+            }
+        }
         const VkDeviceSize at = upload(b, dec.data(), dec.size(), 16);
-        if (at == ~(VkDeviceSize)0) { g.frame = ~0u; return nullptr; }   // the batch is full: again next time
+        if (at == ~(VkDeviceSize)0) { g.frame = ~0u; s_bfull_tex = true; return nullptr; }   // the batch is full (B-006)
         VkBufferImageCopy c = {};
         c.bufferOffset = at; c.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, m, f, 1 };
         c.imageExtent = { lv[m].w, lv[m].h, 1 };
@@ -4636,8 +4698,10 @@ void asp_draw(const Rec* r)
     AspProf prof;
     Batch& b = batch(r->frame);
     wait_for(b, r);
-    asp_describe_line(r);
-    asp_clears(b, r);
+    if (!s_bfull_redo) {   // B-006: a draw recorded again -- its clears were in its first batch
+        asp_describe_line(r);
+        asp_clears(b, r);
+    }
     prof.mark(kApClears);
     if (r->fp && skip_fp(r->fp->hash)) return;
     if (r->why || !r->vp || !r->fp) { unsupported(r, "asp: no programs, or no draw object"); return; }
@@ -4922,6 +4986,7 @@ void asp_draw(const Rec* r)
         const Texture& tx = st.tex[u];
         const uint64_t key = akey(tx.location ? 1u : 0u, tx.offset);
         Img* src = nullptr;
+        s_bfull_tex = false;
         auto dt = s_depths.find(key);
         auto ct = s_targets.find(key);
         if (dt != s_depths.end() && dt->second && dt->second->written) { src = dt->second; views[u] = depth_sample_view(src); }
@@ -4932,6 +4997,7 @@ void asp_draw(const Rec* r)
             views[u] = view_of(src, tx.remap & 0xFFFFu, tx.format);
         } else if ((src = static_texture(b, r, u, tx)) || (src = guest_texture_live(b, r, tx)))
             views[u] = view_of(src, tx.remap & 0xFFFFu, tx.format);
+        if (!src && s_bfull_tex && s_bfull_retry) { s_bfull = true; return; }   // B-006: again in the next batch
         if (!src) {
             char why[200];
             snprintf(why, sizeof why, "asp: unit %u (format %02X %ux%u mips %u dim %u cube %u) has no source at %u:%08X", u,
@@ -4955,6 +5021,7 @@ void asp_draw(const Rec* r)
     const VkDeviceSize o_i = ibuf ? iofs : upload(b, idx.data(), idx.size() * 4, 16);
     if (o_vc == ~(VkDeviceSize)0 || o_pc == ~(VkDeviceSize)0 || o_v == ~(VkDeviceSize)0 || o_i == ~(VkDeviceSize)0 ||
         b.sets >= kSets) {
+        if (s_bfull_retry) { s_bfull = true; return; }   // B-006: again in the next batch
         unsupported(r, "asp: the batch is full");
         return;
     }
@@ -4966,13 +5033,7 @@ void asp_draw(const Rec* r)
     if (F.vkAllocateDescriptorSets(D.device, &dai, &set) != VK_SUCCESS) { unsupported(r, "asp: descriptor set"); return; }
     b.sets++;
     VkDescriptorBufferInfo bi[2] = { { b.up.b, o_vc, sizeof vcb }, { b.up.b, o_pc, pcb.size() } };
-    VkWriteDescriptorSet wr[4] = {};
-    for (int k = 0; k < 4; k++) { wr[k].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; wr[k].dstSet = set; }
-    wr[0].dstBinding = 0; wr[0].descriptorCount = 1; wr[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; wr[0].pBufferInfo = &bi[0];
-    wr[1].dstBinding = 1; wr[1].descriptorCount = 1; wr[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; wr[1].pBufferInfo = &bi[1];
-    wr[2].dstBinding = 16; wr[2].descriptorCount = 16; wr[2].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE; wr[2].pImageInfo = ii;
-    wr[3].dstBinding = 48; wr[3].descriptorCount = 16; wr[3].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER; wr[3].pImageInfo = si;
-    F.vkUpdateDescriptorSets(D.device, 4, wr, 0, nullptr);
+    write_set(set, bi, ii, si, srcs);   // B-008: the array and the units one by one
     prof.mark(kApDescriptors);
     VkRenderPassBeginInfo rbi = { VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
     rbi.renderPass = render_pass2(rt, df); rbi.framebuffer = framebuffer2(t, d);
@@ -5100,13 +5161,21 @@ bool init()
     pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT; pci.queueFamilyIndex = D.queue_family;
     if (F.vkCreateCommandPool(D.device, &pci, nullptr, &s_pool) != VK_SUCCESS) return false;
     const VkShaderStageFlags both = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-    VkDescriptorSetLayoutBinding lb[4] = {
+    // The textures: a program's translation declares them either as one array of sixteen 2D images at binding 16
+    // (rsx_tex[16]), or -- when a unit it samples is a cube map (or a volume) -- each unit on its own, unit u at
+    // binding 16 + u, so a cube unit can be a TextureCube (the runtime's rsx_fp_decompiler.c, its texture bank).
+    // The layout holds both: binding 16 an array of sixteen, bindings 17-31 one image each (M11.1b, B-008: with only
+    // the array, a per-unit program's units 1-15 -- the metal slime's cube map, its normal and shadow maps -- read
+    // nothing at all).
+    VkDescriptorSetLayoutBinding lb[4 + 15] = {
         { 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, both, nullptr },
         { 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, both, nullptr },
         { 16, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 16, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr },
         { 48, VK_DESCRIPTOR_TYPE_SAMPLER, 16, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr } };
+    for (uint32_t u = 1; u < 16; u++)
+        lb[3 + u] = { 16 + u, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr };
     VkDescriptorSetLayoutCreateInfo lci = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
-    lci.bindingCount = 4; lci.pBindings = lb;
+    lci.bindingCount = 4 + 15; lci.pBindings = lb;
     F.vkCreateDescriptorSetLayout(D.device, &lci, nullptr, &s_dsl);
     VkPipelineLayoutCreateInfo plci = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
     plci.setLayoutCount = 1; plci.pSetLayouts = &s_dsl;
@@ -5120,7 +5189,7 @@ bool init()
         VkFenceCreateInfo fi = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
         F.vkCreateFence(D.device, &fi, nullptr, &b.fence);
         VkDescriptorPoolSize ps[3] = { { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 2 * kSets },
-                                       { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 16 * kSets },
+                                       { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, (16 + 15) * kSets },
                                        { VK_DESCRIPTOR_TYPE_SAMPLER, 16 * kSets } };
         VkDescriptorPoolCreateInfo dpi = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
         dpi.maxSets = kSets; dpi.poolSizeCount = 3; dpi.pPoolSizes = ps;
@@ -5647,7 +5716,15 @@ void transfer_op(const Rec* r)
                 vm_base + sea + (uint64_t)(r->xs_y + y) * r->xs_pitch + r->xs_x * bpp, (size_t)w * bpp);
     if (bpp == 4) xfer_dump(r->seq, vm_base + dea + (uint64_t)r->xd_y * r->xd_pitch + r->xd_x * 4u, w, h, r->xd_pitch, true, false);
     auto dt = s_targets.find(akey(r->xd_loc, r->xd_off));
-    if (dt != s_targets.end() && dt->second) { s_retired.push_back(dt->second); stats().n_retired++; s_targets.erase(dt); }
+    if (dt != s_targets.end() && dt->second) {
+        // M11.1b (B-007): a native image dropped for the guest's bytes -- said (the first 40), with its time
+        static int said = 0;
+        if (said++ < 40)
+            fprintf(stderr, "[xfer] t=%.3f record %llu (frame %u): %ux%u from %u:%08X over the native image at %u:%08X "
+                    "(%ux%u): the image dropped, the guest's bytes kept\n", compile_clock(), (unsigned long long)r->seq,
+                    r->frame, w, h, r->xs_loc, r->xs_off, r->xd_loc, r->xd_off, dt->second->w, dt->second->h);
+        s_retired.push_back(dt->second); stats().n_retired++; s_targets.erase(dt);
+    }
 }
 
 // R6: the game's reads of a display buffer's memory (the snapshot's JPEG and
@@ -5916,6 +5993,30 @@ void rb_service(uint32_t frame)
     s_hb_cv.notify_all();
 }
 
+// A draw record (asp's or PPFX's). B-006: when its uploads no longer fit the open batch, it is given up before
+// anything of its own is drawn, the batch submitted and the draw recorded again in the next one; in a batch with
+// nothing uploaded yet it fails as before (said: "the batch is full").
+void draw_record(const Rec* r)
+{
+    static const bool once = [] {
+        const char* e = getenv("DOTHEROES_PPFX_SUBMIT_KB");   // a test: batches carried nearly full
+        if (e && atoi(e) > 0) s_submit_at = std::min<VkDeviceSize>((VkDeviceSize)atoi(e) << 10, kUpload - (64u << 10));
+        return true;
+    }();
+    (void)once;
+    s_bfull = false;
+    s_bfull_retry = s_b[s_cur].open && s_b[s_cur].used > 0;
+    if (r->kind == kAspDraw) asp_draw(r); else draw(r);
+    if (s_bfull) {
+        submit();
+        s_bfull_redraws++;
+        s_bfull = false; s_bfull_retry = false; s_bfull_redo = true;
+        if (r->kind == kAspDraw) asp_draw(r); else draw(r);
+        s_bfull_redo = false;
+    }
+    s_bfull = false; s_bfull_retry = false;
+}
+
 void run()
 {
 #ifdef _WIN32
@@ -6043,8 +6144,7 @@ void run()
         }
         if (r->fh) { capture_compare(r); r->fh = 0; }   // R7: written since the flush? (development)
         if (r->deferred) capture(r);            // R7: a PPFX draw's inputs, taken now
-        if (r->kind == kAspDraw) asp_draw(r);   // R5 (DOTHEROES_ASP_NATIVE=1)
-        else if (r->kind == kDraw) draw(r);
+        if (r->kind == kAspDraw || r->kind == kDraw) draw_record(r);   // asp's (R5), PPFX's
         else if (r->kind == kClear) clear(r);
         else if (r->kind == kFlip) present_native(r);   // R6 (DOTHEROES_R6_PRESENT=1)
         else if (r->kind == kReport) report_op(r);      // R6 (DOTHEROES_R6_OCCLUSION=1)
@@ -6053,7 +6153,7 @@ void run()
         else if (r->kind == kWait) wait_op(r);
         else if (r->kind == kTransfer) transfer_op(r);
         stats().cpu_record_ns += now_ns() - t0;
-        if (s_b[s_cur].open && (s_b[s_cur].used > kUpload / 2 || s_b[s_cur].sets > kSets / 2 ||
+        if (s_b[s_cur].open && (s_b[s_cur].used > s_submit_at || s_b[s_cur].sets > kSets / 2 ||
                                 s_b[s_cur].nq > kQueries - 64 || s_b[s_cur].nocc > kOcc - 64)) submit();
         next++;
         s_next = next;
@@ -6287,6 +6387,12 @@ void render_report(std::vector<std::string>& out)
         snprintf(line, sizeof line, "static textures: %zu live, %llu images reused from the pool (%zu pooled, %llu destroyed past it)",
                  s_static.size(), (unsigned long long)s_static_reused, s_static_pool.size(),
                  (unsigned long long)s_static_pool_destroyed);
+        out.push_back(line);
+    }
+    if (s_bfull_redraws) {   // B-006
+        char line[200];
+        snprintf(line, sizeof line, "batches submitted early: %llu draws whose uploads no longer fit, recorded again in "
+                 "the next batch", (unsigned long long)s_bfull_redraws);
         out.push_back(line);
     }
     if (s_aspc_n) {

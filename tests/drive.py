@@ -36,11 +36,16 @@ scenario header):
   devtry <command ...> [@<timeout>]  as `dev`, but a refusal or no answer is logged and the script
                               goes on (a sweep's map that does not arrive: tests/map_sweep.py's check fails it)
   devfail <command ...>       a developer-tools command that must be refused (an error path)
+  devpage <timeout> [soft] [ifany] [no]  CROSS every 1.2 s until the game runs no event (the tools' status
+                              event_state 0); a timeout fails (`soft`: logged); `ifany`: no press at all when no
+                              event runs (a hero standing in a fight: a press would swing the sword); `no`: a
+                              question (event_state 6, Event:Select) answered with its second choice (DOWN, CROSS)
   devcollect [timeout]        walk over every visible ITEM the tools' `enemies` lists (dropped money, a life
                               vessel), nearest first; one not reached in 6 s passed over
-  devfight <timeout> [flagN] [soft]  fight what the tools' `enemies` lists (the game's own actors: a boss's
+  devfight <timeout> [flagN] [soft] [hold@X,Z]  fight what the tools' `enemies` lists (the game's own actors: a boss's
                               parts too): the nearest visible ENEMY, walked to and swung at, until none is
-                              left or the event flag N is set (a boss's defeat); a timeout fails (`soft`: logged)
+                              left or the event flag N is set (a boss's defeat); a timeout fails (`soft`: logged);
+                              hold@X,Z: from that spot, only what comes within reach (a boss that comes to the hero)
   write <file> <text ...>     <run>/<file> written with the text (whole, at once)
   devstate <cond>[,<cond>] [timeout]  as `state`, on the developer tools' `status`
                               (area, frames, hud_life, money, event_state, ...); flagN is
@@ -681,12 +686,18 @@ def fight(cls, tmo, reach, radius=25.0, soft=False):
         wait(0.35)
 
 
-def devfight(chan, tmo, flag=None, reach=2.4, soft=False):
+def devfight(chan, tmo, flag=None, reach=2.4, soft=False, hold=None):
     """M11.1: fight what the developer tools' `enemies` lists -- the game's actor manager's visible ENEMY actors (a
     boss's parts among them, which the actor scan behind `fight` does not see): walk to the nearest, turn to it and
     swing, until none is left or, with `flag` (an event flag number), until the game sets that flag (a boss's
     defeat); fails after `tmo` s (`soft`: logged)."""
-    t0, swings, said = time.time(), 0, None
+    t0, swings, said, seen = time.time(), 0, None, False
+    near, aside = {}, {}   # slot -> [closest distance, when]; slot -> until when it is set aside (out of reach)
+    if hold:   # hold mode: from this spot, strike only what comes within reach (a boss that comes to the hero)
+        try:
+            goto(hold[0], hold[1], 1.0, 30)
+        except Fail as e:
+            say(f"  devfight: hold spot not reached ({e})")
     while True:
         if flag is not None:
             o = chan.send(f"flag get {flag}", timeout=10, alive=alive)["out"]
@@ -697,8 +708,13 @@ def devfight(chan, tmo, flag=None, reach=2.4, soft=False):
         o = o if isinstance(o, list) else json.loads(o)
         hero = next((x for x in o if x["kind"] == "PLAYER"), None)
         es = [x for x in o if x["kind"] == "ENEMY" and x.get("visible")]
+        seen = seen or bool(es)
         if not es and flag is None:
-            say(f"  devfight: none left ({swings} swings, {time.time() - t0:.0f} s)")
+            if not seen and time.time() - t0 < 15:   # none yet: a boss created as its event ends
+                wait(0.5)
+                continue
+            say(f"  devfight: none left ({swings} swings, {time.time() - t0:.0f} s)" if seen else
+                "  devfight: none appeared in 15 s")
             return
         if time.time() - t0 > tmo:
             why = f"devfight: {len(es)} enemies left after {tmo:g} s ({swings} swings)" + (f", flag {flag} not set" if flag is not None else "")
@@ -709,12 +725,48 @@ def devfight(chan, tmo, flag=None, reach=2.4, soft=False):
         if not es or not hero:
             wait(0.5)
             continue
-        tgt = min(es, key=lambda a: (a["x"] - hero["x"]) ** 2 + (a["z"] - hero["z"]) ** 2)
+        now = time.time()
+        dist_of = lambda a: ((a["x"] - hero["x"]) ** 2 + (a["z"] - hero["z"]) ** 2) ** 0.5  # noqa: E731
+        if hold:
+            close = [a for a in es if dist_of(a) <= reach * 2]
+            if ((hero["x"] - hold[0]) ** 2 + (hero["z"] - hold[1]) ** 2) ** 0.5 > 3.0:
+                try:
+                    goto(hold[0], hold[1], 1.0, 10)   # knocked away: back to the spot
+                except Fail:
+                    pass
+                continue
+            tgt = min(close or es, key=dist_of)   # the nearest anyway: at full life the sword's beam reaches it
+            dxh, dzh = tgt["x"] - hero["x"], tgt["z"] - hero["z"]
+            press((BTN["RIGHT"] if dxh > 0 else BTN["LEFT"]) if abs(dxh) >= abs(dzh) else (BTN["UP"] if dzh > 0 else BTN["DOWN"]), 1)
+            wait(0.05)
+            press(BTN["CROSS"])
+            swings += 1
+            wait(0.35)
+            continue
+        reach_now = [a for a in es if aside.get(a["slot"], 0) <= now or dist_of(a) <= reach]
+        if not reach_now:   # all out of reach (across water, up in the air): hold here, swing at what comes near
+            tgt = min(es, key=dist_of)
+            dxh, dzh = tgt["x"] - hero["x"], tgt["z"] - hero["z"]
+            face = (BTN["RIGHT"] if dxh > 0 else BTN["LEFT"]) if abs(dxh) >= abs(dzh) else (BTN["UP"] if dzh > 0 else BTN["DOWN"])
+            press(face, 1)
+            wait(0.05)
+            press(BTN["CROSS"])
+            swings += 1
+            wait(0.5)
+            continue
+        tgt = min(reach_now, key=dist_of)
         if said != len(es):
             say(f"  devfight: {len(es)} enemies, the nearest (slot {tgt['slot']}) at ({tgt['x']:.1f}, {tgt['z']:.1f})")
             said = len(es)
         dx, dz = tgt["x"] - hero["x"], tgt["z"] - hero["z"]
         dist = (dx * dx + dz * dz) ** 0.5
+        g = near.setdefault(tgt["slot"], [dist, now])
+        if dist < g[0] - 0.5:
+            g[0], g[1] = dist, now
+        elif dist > reach and now - g[1] > 5:   # no nearer in 5 s: set aside for 10 s
+            aside[tgt["slot"]] = now + 10
+            near.pop(tgt["slot"], None)
+            continue
         face = (BTN["RIGHT"] if dx > 0 else BTN["LEFT"]) if abs(dx) >= abs(dz) else (BTN["UP"] if dz > 0 else BTN["DOWN"])
         if dist > reach:
             mask = 0
@@ -1111,7 +1163,35 @@ def step(lineno, line, op, a):
         if dev_channel is None:
             dev_channel = devtools.Channel(run)
         flag = next((int(x[4:]) for x in a[1:] if re.fullmatch(r"flag\d+", x)), None)
-        devfight(dev_channel, float(a[0]) if a else 120, flag, soft="soft" in a)
+        hold = next(([float(v) for v in x[5:].split(",")] for x in a[1:] if x.startswith("hold@")), None)
+        devfight(dev_channel, float(a[0]) if a else 120, flag, soft="soft" in a, hold=hold)
+    elif op == "devpage":   # devpage <timeout> [soft]: CROSS until the game runs no event (the tools' status)
+        import devtools
+        if dev_channel is None:
+            dev_channel = devtools.Channel(run)
+        tmo, t0, presses = float(a[0]) if a else 60, time.time(), 0
+        while True:
+            try:
+                st = dev_channel.status(timeout=10, alive=alive)
+            except (devtools.Refused, TimeoutError):
+                st = {}
+            if st.get("event_state") == 0 and (presses or "ifany" in a):
+                if presses:
+                    say(f"  devpage: the event ended ({presses} presses, {time.time() - t0:.1f} s)")
+                break
+            if time.time() - t0 > tmo:
+                why = f"devpage: an event still running after {tmo:g} s (state {st.get('event_state')})"
+                if "soft" in a:
+                    say(f"  (soft) {why}")
+                    break
+                raise Fail(why)
+            if "no" in a and st.get("event_state") == 6:   # a question: its second choice
+                say("  devpage: a question, answered with its second choice")
+                press(BTN["DOWN"])
+                wait(0.4)
+            press(BTN["CROSS"])
+            presses += 1
+            wait(1.2)
     elif op == "devcollect":   # devcollect [timeout]
         import devtools
         if dev_channel is None:

@@ -1,0 +1,58 @@
+# Scenario: any boss fought to its defeat (M11.1b, docs/M11_PLAN.md section 22): BOSS (the tools' id: temple2 ..
+# last), STEP (the story set up to the step before it, its items given as the scripts give them) and FLAG (the event
+# flag its defeat sets) from the environment. The hero armed as the story arms him by then: the Hero Sword given
+# (item 97) and handed the ancient sword's ability the game's own way (Event:SetSwordData,
+# HandOverSwordAbility -- the castle guard's event). The arena entered the game's way (`boss`), its introduction
+# answered, the fight (`devfight`: the game's own ENEMY actors, the boss's parts) until the game sets FLAG, the drops
+# collected at once, whatever follows answered; the flags, the player and the session's unprepared pipelines
+# (`coverage export`) read. No death (the tools'): a lethal hit leaves one unit of life; everything else is the game's.
+# FLAG empty: a fight whose end sets no flag (the priest's second) -- fought until no enemy is left (its check: where
+# its after-event takes the hero). FIGHT_MODE (optional): hold@X,Z -- a boss that comes to the hero (the kraken) fought
+# from that spot; INVULNERABLE=on
+# (optional): the hero never hurt, so his life stays full and his sword's full-life beam reaches across water.
+#   BOSS=temple2 STEP=10 FLAG=11 SCENARIO=devtools_bossfight ... tests/boot_smoke.py   (tests/devtools_bosses.py)
+#! saves build/checkpoints/castle-front
+#! env DOTHEROES_DEVELOPER_MODE=1 DOTHEROES_NATIVE_CD=1 DOTHEROES_NATIVE_SOLVER=1,2,4,5,6 GCM_WRAP_LAP=1
+#! env DOTHEROES_PRESENT_ONCE=1 DOTHEROES_DEV_STATE=1 DIAG_FRAMES=frames.log PS3_VERBOSE=0 SHOT_EVERY=20
+#! secs 3300
+
+include common.drive
+
+log TitleMovie 120
+sleep 5
+call continue
+state life>0,area==17 90
+sleep 3
+dev nodeath on
+dev invulnerable ${INVULNERABLE:-off}
+dev progress set ${STEP}
+dev give 97
+loop 4                        # the item-get's message
+  press CROSS
+  sleep 1
+end
+dev lua local E=EventClass.Event; E:SetSwordData(); E:HandOverSwordAbility(swordData.SwordData.SL_HERO_SWORD, swordData.SwordData.SL_ANTIQUITY_SWORD)
+dev player
+dev flags 0 330
+dev boss ${BOSS} @150
+sleep 2
+shot arena
+devpage 420 ${PAGE:-}         # the introduction, answered to its end (at the castle the priest first beats the hero down)
+shot fight
+segment fight ${BOSS} to its defeat
+devfight 2700 flag${FLAG} ${FIGHT_MODE:-}
+endseg
+shot defeated
+devcollect 120
+loop 20                       # the defeat's own event
+  press CROSS
+  sleep 1.5
+end
+devcollect 30
+sleep 3
+shot after
+dev flags 0 330
+dev player
+dev status
+dev coverage
+dev coverage export boss-${BOSS}

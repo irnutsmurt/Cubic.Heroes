@@ -52,15 +52,16 @@ what follows). Method: T to enter (`boss ID`), S to fight (no death on; the driv
 | Encounter | Arena | M11.1 state | Notes |
 |---|---|---|---|
 | Temple 1's guardian | D_1_2 | pass | devtools_boss (PLAN 18): introduction, the fight to the defeat (flags 6, 8), its money, the life vessel (max life 10 -> 12), the sage's room (flag 7, the first spell); its look and sound against RPCS3: todo |
-| Temple 2's guardian | D_2_2 | todo | |
-| Temple 3's guardian | D_3_2 | todo | |
-| Temple 4's guardian | D_4_2 | todo | |
-| Temple 5's guardian | D_5_2 | todo | |
-| Temple 6's guardian | D_6_2 | todo | |
-| The castle battle | D_8_2 | todo | |
-| The tower's rematches 1-6 | D_7_2_1..6 | todo | the tower's flag 310 makes each stronger (life, damage, attacks) |
-| Before the last | D_7_2_7 | todo | |
-| The last enemy | D_7_2_8 | partial | introduction the game's way (devtools_ending); its defeat: todo; its after-event onward: pass (section 10) |
+| Temple 2's guardian | D_2_2 | pass | devtools_bosses (PLAN 22): the fight to its defeat flag (11), drops collected, its after-event answered |
+| Temple 3's guardian | D_3_2 | pass | devtools_bosses: defeat flag 22 |
+| Temple 4's guardian | D_4_2 | partial | the fight runs (45 min twice: arms cut and regrown, the body diving and surfacing, ink shots; no hang, no crash) but the automated fighter never wounds the body; its defeat path through a weakened kraken (its own Init's life table set to 3): pending (PLAN 22) |
+| Temple 5's guardian | D_5_2 | pass | devtools_bosses: defeat flag 42 |
+| Temple 6's guardian | D_6_2 | pass | devtools_bosses: defeat flag 50 (11 min) |
+| The castle battle | D_8_2 | pass | devtools_bosses: scripted -- the priest beats the hero down (WaitHpOrTime), the sages, flag 64, the move to the castle |
+| The tower's rematches 1, 2, 3, 5, 6 | D_7_2_1..6 | pass | devtools_bosses: flags 311, 313, 315, 319, 321; stronger (the tower's flag 310) |
+| The tower's rematch 4 (the kraken) | D_7_2_4 | partial | as temple 4: the weakened fight pending |
+| Before the last (the priest again) | D_7_2_7 | todo | devtools_bosses `tower7`: no flag; its after-event's move to D_7_2_8 is the check |
+| The last enemy | D_7_2_8 | pass | devtools_bosses: the actual fight to its defeat (flag 74, cleared again by the ending it starts); its after-event onward: section 10 |
 
 ## 3. Enemy types (41, and 21 minigame versions)
 
@@ -94,7 +95,7 @@ its maps (W/S); R where a material is in doubt.
 
 | Rows | Method | M11.1 state |
 |---|---|---|
-| Every sub-weapon used (bow, bombs, boomerang, anchor rod, fire rod, ...) and its effect and sound | T, S | todo |
+| Every sub-weapon used (bow, bombs, boomerang, anchor rod, fire rod, ...) and its effect and sound | T, S | partial (the menu: the sub-weapons and the six spells listed and marked for the item button; on the field L2/R2 cycle the item button, CIRCLE uses it: the casting probe pending) |
 | Swords (95-118) and shields (89-94): given, equipped in the game's own screen, swung; the sword's full-life beam | T, S, O | todo |
 | Magic: each spell cast, its effect, its cost | T, S | todo |
 | Consumables (potions, apples), keys, orbs, maps | T, S | todo |
@@ -103,14 +104,14 @@ its maps (W/S); R where a material is in doubt.
 
 | Rows | Method | M11.1 state |
 |---|---|---|
-| The editor opened from the title, a hero edited and saved, played with (its world: Field_99) | S | todo (R3 editor_r3, save_picker_edit/editor: older evidence) |
+| The editor opened from the title, a hero edited and saved, played with (its world: Field_99) | S | partial (build/m11 editor probe: EDITOR, NEW DATA, the standing pose's grid with blocks placed, SAVE -- the game's save data written: DATA.EDT and its icon in the run's own copy; back to the title (TRIANGLE) and a new game with that hero: pending) |
 | A preset hero chosen; "change characters?" on CONTINUE | S | todo |
 
 ## 8. Death, respawn and checkpoints
 
 | Rows | Method | M11.1 state |
 |---|---|---|
-| Death in a field, a dungeon and a boss arena; the game over and CONTINUE; where the hero comes back | S | todo (common.drive's continue_after_death: older evidence) |
+| Death in a field, a dungeon and a boss arena; the game over and CONTINUE; where the hero comes back | S, R | pass (build/m11 death probe: a field enemy's hit on Field_14 -> back at the castle front; the game's damage in the first temple and in its boss room -> back at the temple's entrance room (D_1_1_1); life full each time -- as RPCS3 does after a death on Field_19, PLAN 25). The priest's own game over: B-009 |
 | No death and invulnerability off again: the game's own damage | T | pass (devtools_player, M11.0c) |
 
 ## 9. Saving, loading and persistence
@@ -151,7 +152,7 @@ its maps (W/S); R where a material is in doubt.
 | Rows | Method | M11.1 state |
 |---|---|---|
 | Every map's first visit: no translation in play, pipelines met unprepared listed | W | pass (sweep-m111 over the M11.1a preparation: 166/166, none unprepared, no translation; PLAN 15) |
-| Bosses, enemies (the rare ones included), items, effects, events and the ending: `coverage export` from each stage's runs into the preparation | T, S | todo |
+| Bosses, enemies (the rare ones included), items, effects, events and the ending: `coverage export` from each stage's runs into the preparation | T, S | partial: the enemies (M11.1a: the slime's two pipelines added) and the boss fights (PLAN 22: two more, a material group with the stencil test off, added; 246 lines); the preparation made again with them and the full sweep over it: todo |
 
 ## Bugs
 
@@ -165,3 +166,7 @@ Severity: **S1** a crash, a hang, lost progress or damaged saves; **S2** wrong b
 | B-003 | S3 | Rendering (pipelines) | M11.1a, Field_14 | the same | the pipeline key and translation took texture kinds of units the program never reads: a cube left bound made 14 needless pipelines and translations, a 166-226 ms frame on arrival | texture kinds limited to the units read (PLAN 15) | the sweep on Field_13/14; the spawn scenario's coverage | fixed, verified |
 | B-004 | S2 | Rendering (textures) | M11.1a, the slime's cube map | a linear mipmapped texture (the engine's default cube map: the metal slime's reflection) | the runtime's layout packed a linear image's lower mip levels at their own width; the RSX keeps the row pitch on every level, so lower levels and every cube face after the first were read from the wrong bytes | each level of a linear image at the pitch register's row pitch (patches/ps3recomp/0165) | the runtime's test_rsx_texture_layout; the spawn scenario's cube faces | fixed, verified |
 | B-005 | S4 | Tests | M11.1a, the unit tests run in full | tests/test_player_pipeline.py | since M9.2g tools/r8_lift.sh names its observers file through a variable (OBS=${R8_OBSERVERS:-config/...}), which the test's pattern did not read: the test failed though the player's lift and the developers' agree | the test reads such a variable's default | the test itself (15 of 15 unit test files pass) | fixed, verified |
+| B-006 | S4 | Rendering | M11.1b, the sweep's stricter check (sweep-m111 chunk 5) | a map's first frames, every texture new (the sweep: arriving on Field_50; again in a short run of seven maps) | a batch is submitted once a record leaves it past half its 16 MB upload buffer, so a draw had only the other half for its textures, vertices and constants; on a map's first frame one draw's uploads did not fit and it was left out for that frame (`asp: the batch is full`) | the draw is given up before anything of its own is recorded, the batch submitted and the draw recorded again in the next one (PLAN 24) | build/m11's b006 runs: the same maps with batches carried nearly full (DOTHEROES_PPFX_SUBMIT_KB=15800): 9 draws recorded again, none left out, the pictures as with the usual batches (1 recorded again); the sweep's check now fails on it | fixed; the full sweep to run on the fix |
+| B-007 | S4 | Rendering | M11.1b, the sweep's stricter check (sweep-m111 chunk 4) | arriving at D_8_2 (the castle battle's arena), from any map (D_80_4_9, Field_91): one draw, 0.2 s after the arrival | the arena's arrival runs an effect that alternates between two 1280x720 surfaces (0:03190000 and 0:03550000 -- not the display buffers), each frame reading the other; drawn natively only for those ~60 frames. On its first frame the surface it reads has never been drawn: no native image, and the recorder keeps only small textures' bytes, so that one draw is left out (on the console it reads whatever the memory held). Not a transfer (none logged) | none: the input is undefined on the console as well; one frame | the sweep's check lists it by this number (any address); any new reason fails | root cause known; accepted (no change) |
+| B-008 | S2 | Rendering | M11.1b, the RPCS3 comparison (PLAN 25) | the rare metal slime anywhere (forced: the tools' `spawn`, or a field's own spawn points with the scripts' random forced) | ours drew it as a flat dark-navy shape, RPCS3 as a pale pink-white dome with yellow glints. Not the cube map (its six faces decoded right: pastel blue, green, cyan, pink, magenta, yellow at every level), not the reflection's strength (the program's constant patched to 1), not the view (a cube view). The translator declares a program's textures either as one array of sixteen 2D images at binding 16 or -- when a unit it samples is a cube map -- each unit on its own, unit u at binding 16 + u; the native renderer's descriptor layout had only the array, so such a program's units 1-15 (the slime's cube map, its normal and shadow maps) read nothing (the validation layer: "viewType must match the Dim operand", "descriptor set in layout must match the shader") | the layout holds both: binding 16 the array, bindings 17-31 one image each, written for every draw (a cube view never in the array); the pipelines' version raised to 4 (PLAN 26). Every program that samples a cube map is covered -- the slime's two are the only ones the preparation translates | devtools_cubemap (tests/devtools_suite.py): the slime drawn under the Vulkan validation layer, no error; its picture now as RPCS3's (build/compare b008-before-after-rpcs3) | fixed, verified |
+| B-009 | ? | Game flow | M11.1b, the priest's second fight (PLAN 22) | D_7_2_7 (the tower, the story at its last steps): the priest's offer accepted twice -- the game's own game over (Event:PlayGameOver) -- then "Continue?" answered | the game's main() returns and the runtime exits (sys_process_exit(0) called from the start code, no system exit request): the game closes | not known whether the original does the same (the joke ending of accepting the villain's offer); RPCS3 not yet run to that point; the owner asked | priest_probe A/B (local) | open: is it the game's design? |
