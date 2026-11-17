@@ -842,10 +842,23 @@ static const char* installed_defaults(void)
     }
     s_installed_elf = data + "/disc/PS3_GAME/USRDIR/EBOOT.elf";
     /* M11.0 (docs/M11_PLAN.md section 3.2): developer mode plays on test saves of its own -- the player's saves, system
-     * data and trophies (data/gamedata) are never opened while it is on. The roots set here are defaults: a test sets
-     * its own. */
+     * data and trophies (data/gamedata) are never opened while it is on. Otherwise the roots set here are defaults
+     * (a test may set its own). */
     const char* devmode = getenv("DOTHEROES_DEVELOPER_MODE");
     const std::string saves = devmode && !strcmp(devmode, "1") ? data + "/devmode/gamedata" : data + "/gamedata";
+    /* M11.1: in developer mode always its own roots -- a root inherited from the environment, which could be the
+     * player's, is replaced (developer mode never plays on the player's saves) */
+    if (devmode && !strcmp(devmode, "1") && getenv("PS3_GAMEDATA_ROOT")) {
+        fprintf(stderr, "[dev-switches] developer mode: the saves' roots are its own (%s), not the environment's\n",
+                saves.c_str());
+        for (const char* k : { "PS3_GAMEDATA_ROOT", "PS3_HDD0_ROOT", "PS3_HDD1_ROOT" }) {
+#ifdef _WIN32
+            _putenv_s(k, "");
+#else
+            unsetenv(k);
+#endif
+        }
+    }
     if (devmode && !strcmp(devmode, "1") && !getenv("PS3_GAMEDATA_ROOT")) {   /* a first developer session: empty */
         std::error_code ec;
         std::filesystem::create_directories(saves + "/dev_hdd0/home/00000001/savedata", ec);
@@ -1218,6 +1231,7 @@ int main(int argc, char** argv)
         return dotheroes_shader_inventory(argc, argv, usr.c_str());
     }
     const char* elf = argc >= 2 ? argv[1] : installed_defaults();
+    devtools_gate(argc < 2);   /* M11.1: an installed game's test switches that change the game need developer mode */
     if (argc < 2) {
         FILE* f = fopen(elf, "rb");
         if (!f) {

@@ -64,9 +64,11 @@ struct DevCreditsInit {
 }  // namespace
 
 // port/native/dev_state.cpp: F6 (through g_dev_credits_request)
+extern "C" int g_dev_changes_ok;   // port/devtools/devtools.cpp (M11.1): 0 in an installed game, developer mode off
+
 extern "C" void dev_credits_request(void)
 {
-    if (!g_dev_credits) return;
+    if (!g_dev_credits || !g_dev_changes_ok) return;
     s_request.store(1);
     fprintf(stderr, "[dev-credits] F6: the game's Ending at GameClass's next frame\n");
 }
@@ -75,7 +77,7 @@ extern "C" void dev_credits_request(void)
 extern "C" int dotheroes_dev_credits(ppu_context* ctx)
 {
     static int inner;
-    if (inner) return 0;
+    if (inner || !g_dev_changes_ok) return 0;
     const auto now = std::chrono::steady_clock::now();
     if (!s_t0_set) { s_t0_set = true; s_t0 = now; }
     const double t = std::chrono::duration<double>(now - s_t0).count();

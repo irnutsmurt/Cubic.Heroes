@@ -18,7 +18,10 @@ Scenarios (tests/scenarios/<name>.drive):
                    river's enemies, a control without, no death at low life
   --installed: devtools_install (the game as a player starts it boots on its empty test saves), then the worker's
     `devsaves --action copy-player` and devtools_install_play (CONTINUE loads the copy and plays); the player's save
-    tree (data/gamedata) byte for byte the same after each, the test tree (data/devmode/gamedata) made
+    tree (data/gamedata) byte for byte the same after each, the test tree (data/devmode/gamedata) made; then
+    devtools_install_off (M11.1: the install's setting at 0 for the run): a command, a life and a place left for it
+    and the older test switches that change the game set -- none acted on, the switches named as ignored, no
+    developer-mode folder, the player's saves unchanged
 A run passes when its drive ran to its end (result.json: "drive done", exit 0, no failure) and its checks hold.
 """
 import argparse
@@ -290,7 +293,56 @@ def installed_suite(inst, exe):
         for b in bad:
             print("  " + b)
         failed += bool(bad)
+    failed += installed_off(inst, exe, player, before)
     return 1 if failed else 0
+
+
+def check_install_off(rd):
+    """developer mode off in an install: the command, the life and the place left alone, the switches ignored"""
+    bad = check_off(rd)
+    for t in ("life.trigger", "pos.trigger"):
+        if not os.path.exists(os.path.join(rd, t)):
+            bad.append(f"{t} was taken with developer mode off")
+    lines = log_lines(rd)
+    for pat, why in ((r"\[dev-state\] life set", "a life was set"), (r"\[dev-state\] hero placed", "the hero was placed"),
+                     (r"\[cant-die\] on", "can't-die was on"), (r"\[dev-waver\]", "the waver switch was taken"),
+                     (r"\[dev-credits\] (?!the game's Ending (at|on))", "the credits switch acted")):
+        hit = [ln for ln in lines if re.search(pat, ln)]
+        if hit:
+            bad.append(f"{why}: {hit[0][:120]}")
+    ign = [ln for ln in lines if "[dev-switches] developer mode is off" in ln]
+    if not ign or not all(k in ign[0] for k in ("DOTHEROES_DEV_CANT_DIE", "DOTHEROES_DEV_CREDITS", "DOTHEROES_DEV_WAVER")):
+        bad.append("no [dev-switches] line naming the ignored switches")
+    if not os.path.exists(os.path.join(rd, "state.txt")):
+        bad.append("no state.txt: the read-only state a test follows should still work")
+    return bad
+
+
+def installed_off(inst, exe, player, before):
+    """devtools_install_off: the same install with developer mode off (its setting set to 0 for the run, then back)"""
+    import shutil
+    cfg = os.path.join(inst, "config", "dotheroes.cfg")
+    with open(cfg, encoding="utf-8") as f:
+        text = f.read()
+    devmode = os.path.join(inst, "data", "devmode")
+    shutil.rmtree(devmode, ignore_errors=True)
+    try:
+        with open(cfg, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text.replace("DOTHEROES_DEVELOPER_MODE=1", "DOTHEROES_DEVELOPER_MODE=0"))
+        rd, _ = run("devtools_install_off", exe, installed=inst)
+    finally:
+        with open(cfg, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+    bad = ["no run directory"] if not rd else drive_failures(rd) + check_install_off(rd)
+    after = tree_digest(player)
+    if after != before:
+        bad.append(f"the player's saves changed ({before[1]} files -> {after[1]})")
+    if os.path.exists(devmode):
+        bad.append("a developer-mode folder was made with developer mode off")
+    print(f"devtools_install_off: {'PASS' if not bad else 'FAIL'} ({rd}); player's saves unchanged: {after == before}")
+    for b in bad:
+        print("  " + b)
+    return 1 if bad else 0
 
 
 def main():

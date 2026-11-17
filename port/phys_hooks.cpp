@@ -150,10 +150,12 @@ constexpr uint32_t kCallerToc = 0x01038050u;
 constexpr uint32_t kWaverStateSlot = 0x01054804u;   // the waver's TOC slot r2-0x310C: its state block (+0 active)
 }  // namespace
 
+extern "C" int g_dev_changes_ok;   // port/devtools/devtools.cpp (M11.1): 0 in an installed game, developer mode off
+
 extern "C" void dev_waver_init(void)
 {
     const char* e = getenv("DOTHEROES_DEV_WAVER");
-    if (!e || !*e) return;
+    if (!e || !*e || !g_dev_changes_ok) return;
     g_dw = new DevWaver;
     for (const char* p = e; p && *p; ) {
         g_dw->at.push_back(atof(p));

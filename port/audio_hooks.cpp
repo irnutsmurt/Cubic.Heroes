@@ -392,6 +392,8 @@ int hook(ppu_context* ctx, int index)
 #undef AUDIO_HOOK
 
 /* Before the guest starts (main.cpp). */
+extern "C" int g_dev_changes_ok;   /* port/devtools/devtools.cpp (M11.1) */
+
 extern "C" void dotheroes_audio_hooks_init(void)
 {
     // The native sound manager is the game's audio (M5: FMOD is not in the lift; DOTHEROES_NATIVE_AUDIO, M3's
@@ -406,7 +408,7 @@ extern "C" void dotheroes_audio_hooks_init(void)
         fprintf(stderr, "[audio] test: %zu output losses scheduled (DOTHEROES_AUDIO_TEST_LOSS)\n", g_losses.size());
     }
     const char* lab = getenv("DOTHEROES_DEV_SOUND");
-    if (lab && *lab) {
+    if (lab && *lab && g_dev_changes_ok) {   /* M11.1: not in an installed game with developer mode off */
         lab_parse(lab);
         fprintf(stderr, "[sound-lab] %zu step(s) (DOTHEROES_DEV_SOUND)\n", g_lab.size());
     }

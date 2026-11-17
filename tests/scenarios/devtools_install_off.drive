@@ -1,0 +1,26 @@
+# Scenario: developer mode off in an install changes nothing (M11.1, docs/M11_PLAN.md section 14): the game started as
+# a player starts it (tests/devtools_suite.py --installed DIR sets the install's DOTHEROES_DEVELOPER_MODE to 0 for
+# this run, then back) with every older test switch that changes the game set -- can't-die, the credits at 25 s -- and
+# a command, a life and a place left for it: the command is never read, the life and the place never applied, the
+# switches ignored and named in the log ([dev-switches]), no developer-mode folder made, the player's saves unchanged.
+# The read-only state a test follows (DOTHEROES_DEV_STATE's state.txt) still works. No `#! saves`: the install's own.
+#! env DOTHEROES_DEV_STATE=1 DOTHEROES_DEV_CANT_DIE=1 DOTHEROES_DEV_CREDITS=25 DOTHEROES_DEV_WAVER=30
+#! env DIAG_FRAMES=frames.log DUMP=0 SHOT_EVERY=0
+#! secs 300
+
+include common.drive
+
+log TitleMovie 180
+write dev.cmd @off-1 status
+sleep 3
+press START                   # "PRESS START BUTTON"
+sleep 3
+press START                   # CONTINUE
+repeat 8 CROSS 4              # the install's own saves: the save chosen, its questions answered (as devtools_install_play)
+state life>0 90
+write life.trigger 1
+write pos.trigger 0 0
+sleep 5
+state frames>+60 30
+sleep 30
+state frames>+60 30

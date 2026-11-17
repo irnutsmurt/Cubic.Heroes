@@ -114,6 +114,9 @@ extern "C" void cellPad_dev_rumble_pulse(unsigned ms);   // ps3recomp cellPad.c:
 // F6: the credits on demand (port/movie_hooks.cpp sets it when DOTHEROES_DEV_CREDITS arms its hook; else null)
 extern "C" void (*g_dev_credits_request)(void);
 void (*g_dev_credits_request)(void) = nullptr;
+// port/devtools/devtools.cpp (M11.1): 0 in an installed game with developer mode off -- life.trigger, pos.trigger and
+// the can't-die switch, which change the game, are then left alone
+extern "C" int g_dev_changes_ok;
 extern "C" void cellGcm_flip_wake_report(void);     // ps3recomp cellGcmSys.c (the flip wait's wake-up)
 extern "C" void sys_timer_flip_wait_report(void);   // ps3recomp sys_timer.c (Windows: how flip waits slept)
 
@@ -787,7 +790,7 @@ void keys_loop()
             mark(n, 4);
         }
         const uint32_t p = g_player.load();
-        FILE* lt = p && rd32(p) == kPlayerVtable ? fopen("life.trigger", "rb") : nullptr;
+        FILE* lt = g_dev_changes_ok && p && rd32(p) == kPlayerVtable ? fopen("life.trigger", "rb") : nullptr;
         if (lt) {
             unsigned life = 0;
             if (fscanf(lt, "%u", &life) != 1 || !life) life = 1;
@@ -799,7 +802,7 @@ void keys_loop()
             fprintf(stderr, "[dev-state] life set to %u half apples at %.3f s\n", life,
                     (double)(int64_t)(ps3_ft_now() - g_ps3_ft.base) / 1e9);
         }
-        FILE* pt = p && rd32(p) == kPlayerVtable ? fopen("pos.trigger", "rb") : nullptr;
+        FILE* pt = g_dev_changes_ok && p && rd32(p) == kPlayerVtable ? fopen("pos.trigger", "rb") : nullptr;
         if (pt) {
             float x = 0.0f, z = 0.0f;
             const bool ok = fscanf(pt, "%f %f", &x, &z) == 2;
@@ -1049,7 +1052,7 @@ void dev_state_init()
         g_low_life = lo;
         g_top_up = up;
     }
-    g_cant_die = cd && (*cd == '1' || up > lo);
+    g_cant_die = g_dev_changes_ok && cd && (*cd == '1' || up > lo);
     const char* ll = getenv("DOTHEROES_DEV_LIFE_LOG");
     g_life_log = ll && *ll == '1';
     const char* pl = getenv("DOTHEROES_DEV_PLAYER_LOG");

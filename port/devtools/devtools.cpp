@@ -1473,6 +1473,29 @@ void file_loop()
 
 extern "C" int devtools_on(void) { return g_on ? 1 : 0; }
 
+extern "C" int g_dev_changes_ok = 1;
+
+extern "C" void devtools_gate(int installed)
+{
+    const char* e = getenv("DOTHEROES_DEVELOPER_MODE");
+    if (!installed || (e && !strcmp(e, "1"))) return;
+    g_dev_changes_ok = 0;
+    std::string ignored;
+    for (const char* k : { "DOTHEROES_DEV_CANT_DIE", "DOTHEROES_DEV_CREDITS", "DOTHEROES_DEV_WAVER", "DOTHEROES_DEV_SOUND" }) {
+        const char* v = getenv(k);
+        if (!v || !*v) continue;
+        ignored += ' ';
+        ignored += k;
+#ifdef _WIN32
+        _putenv_s(k, "");
+#else
+        unsetenv(k);
+#endif
+    }
+    if (!ignored.empty())
+        fprintf(stderr, "[dev-switches] developer mode is off: ignored in an installed game:%s\n", ignored.c_str());
+}
+
 /* the lift's entry observers (r1_observe.cpp), developer mode only: the player's damage (CPlayerActor::damageHP,
  * 0x0011A94C: life at +0x5B8 less r4; at 0 or below, the player dies). No death: a hit that would end the hero's
  * life takes all but one unit of it -- every other hit, the knockback and the enemies stay as the game makes them
