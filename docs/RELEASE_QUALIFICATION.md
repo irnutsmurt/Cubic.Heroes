@@ -151,3 +151,29 @@ an accent and Japanese, `--install` interrupted and resumed, status, shaders, `-
 `--check-update`, `--play`, no key text: 9 of 9; then the installed game's checks (developer mode on, a player's save
 continued and played, developer mode off): pass. **Published again as a pre-release on 2026-11-18**, with the owner's
 approval.
+
+## 9. The candidate 0.2.0-beta.2 (2026-11-18)
+
+The owner's two requirements before the beta is finalised -- M11.2f (the rendering resolution) and M11.2g (the button
+prompts throughout the game) -- done and pushed (904a16f, f94459f); the owner chose 0.2.0-beta.2 for the rebuilt
+package (beta.1 stays published; its players are offered beta.2 on the pre-release channel).
+
+- **The package**: `tools/make_bundle.py --prebuilt --platform windows` from 12788d6 -- the runtime library rebuilt
+  from clean (patches 0168, 0169 in it), the worker frozen, the launcher built:
+  `Cubic.Heroes-0.2.0-beta.2-windows-x86_64.zip`, 134,213,208 bytes, SHA-256
+  `2720d3d887db98c40cc619d797ee795ccb874dc766a88b423939cd5f5b50d606`. The private-information check (folder) and the
+  boundary check (folder and zip, 19,187 files): nothing found. The Kenney prompt images (163, CC0) are in the
+  game's own executable as it is built on the player's machine -- from the port's assets, no game data.
+- **Qualified from the package** (tests/release_qualification.py, offline, a folder named with an accent and
+  Japanese, F: drive): unpack, empty, install (interrupted after 240 s, resumed and installed in 226 s), status,
+  shaders, `--update` with nothing to do, `--check-update` (offline at once), `--play` (the game's own end, status 0),
+  the installed game's suite (developer mode on with its test saves, a player's save brought in and continued,
+  developer mode off: the tools inert, the player's saves byte for byte), a lifting tool changed (`--update` relifted
+  into a new build, 52 s), rollback (the first build again, played), no key text in the installation, the launcher
+  removed (the installation, saves and settings kept), the package unpacked over the folder again: **15 of 15 pass**.
+- **The manifest**: build/release/v0.2.0-beta.2 (local): the zip, SHA256SUMS.txt, release.json (version 0.2.0-beta.2,
+  prerelease, key 6b5e12ec2cc5791f, the notes) -- to be signed by the owner.
+- **The command line** (tests/cli_integration.py --with-game, the launcher of this version, the qualified
+  installation copied): 17 of 17 pass -- with M11.2f's cases: `--resolution` refuses sizes outside 320x180..7680x4320
+  and non-sizes (exit 2) and needs `--play`; a session's `--resolution 2560x1440` in effect (the game's log) and not
+  kept in the settings file.
