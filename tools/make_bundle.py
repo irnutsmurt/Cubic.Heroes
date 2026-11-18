@@ -128,7 +128,10 @@ def pyinstaller(platform, dist):
     from PIL import Image
     Image.open(os.path.join(ROOT, "assets", "icon.png")).save(paths["icon"], sizes=[(256, 256), (48, 48), (32, 32),
                                                                                    (16, 16)])
-    args = ["--noconfirm", "--onedir", "--windowed", "--name", APP, "--icon", None]
+    # Tk is the source checkout's window only (setup_app.py _load_tk): the packaged worker never opens one (M11.3:
+    # its runtime, its licence notices and 4 MB left out)
+    args = ["--noconfirm", "--onedir", "--windowed", "--name", APP, "--icon", None,
+            "--exclude-module", "tkinter", "--exclude-module", "_tkinter"]
     if platform == "windows" and os.name == "nt":   # on Windows itself: the checkout's own venv
         env = None
         cmd = [need(os.path.join(ROOT, "build", "venv", "Scripts", "pyinstaller.exe"),
@@ -206,6 +209,71 @@ def copy_tools(out):
     shutil.copy2(os.path.join(ROOT, "assets", "icon.png"), os.path.join(out, "assets"))
 
 
+def dist_files(sites, dist, name):
+    """a package's licence file in its dist-info (licenses/ or the folder itself)"""
+    return [f for d in sites for sub in (("licenses",), ()) for f in
+            glob.glob(os.path.join(d, dist + ".dist-info", *sub, name))]
+
+
+def python_runtime_licences(lic, platform):
+    """the worker's own runtime, as PyInstaller packs it: Python's licence (with the notices of what its build
+    carries: OpenSSL, libffi, zlib, bzip2, ...), pycryptodome's, and PyInstaller's (its bootloader's exception) --
+    from the Python the app is made with (M11.3's licence audit)"""
+    if platform == "windows" and os.name != "nt":   # made under Wine
+        base = os.path.join(ROOT, "build", "wine", "drive_c", "Python314")
+        sites = [os.path.join(base, "Lib", "site-packages")]
+    else:   # this checkout's venv (make_bundle runs from it)
+        base = sys.base_prefix
+        import sysconfig
+        sites = [sysconfig.get_paths()["purelib"]]
+    wanted = {
+        "Python.txt": [os.path.join(base, "LICENSE.txt"), os.path.join(base, "LICENSE"),
+                       f"/usr/share/doc/python3.{sys.version_info.minor}/copyright"],
+        "pycryptodome.txt": dist_files(sites, "pycryptodome*", "LICENSE*"),
+        "PyInstaller.txt": dist_files(sites, "pyinstaller-*", "COPYING*"),
+    }
+    for name, paths in wanted.items():
+        for path in paths:
+            if os.path.isfile(path):
+                shutil.copy2(path, os.path.join(lic, name))
+                break
+        else:
+            raise SystemExit(f"no licence file for {name} (looked at {paths}): the package would ship without it")
+
+
+def at3_source(lic):
+    """at3_standalone (LGPL-2.1, ps3recomp's third_party/at3_standalone, unmodified) is compiled into the runtime
+    library the package carries (lib/libps3recomp_runtime.a): its complete source goes with it, as OpenAL Soft's and
+    FFmpeg's do (M11.3's licence audit)"""
+    src = os.path.join(PS3RECOMP, "third_party", "at3_standalone")
+    if not os.path.isdir(src):
+        raise SystemExit(f"at3_standalone's source is missing ({src}): the package would ship its code without it")
+    os.makedirs(os.path.join(lic, "source"), exist_ok=True)
+    arc = os.path.join(lic, "source", "at3_standalone.tar.gz")
+
+    def norm(ti):   # the same archive from the same files: no owner, no time
+        ti.uid = ti.gid = 0
+        ti.uname = ti.gname = ""
+        ti.mtime = 0
+        return ti
+    with tarfile.open(arc, "w:gz") as t:
+        for d, dirs, files in os.walk(src):
+            dirs.sort()
+            for f in sorted(files):
+                full = os.path.join(d, f)
+                t.add(full, arcname="at3_standalone/" + os.path.relpath(full, src).replace(os.sep, "/"),
+                      recursive=False, filter=norm)
+    import re
+    rev = re.search(r'^PS3RECOMP_REV = "([0-9a-f]+)"', open(os.path.join(ROOT, "tools", "pipeline.py"),
+                    encoding="utf-8").read(), re.M).group(1)
+    with open(os.path.join(lic, "at3_standalone-NOTICE.txt"), "w", encoding="utf-8", newline="\n") as f:
+        f.write("at3_standalone -- the ATRAC3/ATRAC3plus decoder from PPSSPP (derived from FFmpeg), LGPL-2.1\n"
+                "(at3_standalone-LGPL-2.1.txt). It is part of ps3recomp (github.com/sp00nznet/ps3recomp, revision\n"
+                f"{rev}), third_party/at3_standalone, unmodified, and is compiled into the runtime\n"
+                "library worker/lib/libps3recomp_runtime.a, which the setup links into the game on your PC.\n"
+                "Its complete source: source/at3_standalone.tar.gz.\n")
+
+
 def licenses(out, zsrc, platform):
     lic = os.path.join(out, "licenses")
     os.makedirs(lic)
@@ -226,6 +294,7 @@ def licenses(out, zsrc, platform):
                 break
         else:
             print(f"  warning: no licence file for {name} ({path})")
+    python_runtime_licences(lic, platform)
     import build_deps
     build_deps.openal_licences(lic)
     arc, digest = build_deps.openal_source_archive(os.path.join(lic, "source"))
@@ -238,6 +307,7 @@ def licenses(out, zsrc, platform):
     for name in (build_ffmpeg.LICENCE[1], build_ffmpeg.NOTICE):
         shutil.copy2(os.path.join(deps_lib, name), lic)
     build_ffmpeg.source_files(os.path.join(lic, "source"), platform)
+    at3_source(lic)
 
 
 def launcher(out, platform):
@@ -305,6 +375,16 @@ def bundle(platform):
     import boundary_check
     if boundary_check.check_artifact(out, bundle=True):
         sys.exit(f"{out}: the boundary check failed; nothing archived")
+    # M11.3: nothing of the developer's own (a home path with the user name, the private literals of
+    # .git/push-guard.local) in what is shipped -- the prebuilt libraries once carried the build machine's
+    # user name through the compiler's cache path
+    print("private-information check (the folder)", flush=True)
+    guard = subprocess.run([sys.executable, os.path.join(ROOT, "tools", "push_guard.py"), "package", out])
+    if guard.returncode == 1:
+        sys.exit(f"{out}: private information found; nothing archived")
+    if guard.returncode != 0:
+        print("  warning: no private literals on this machine (.git/push-guard.local): only home paths with them "
+              "are looked for, so nothing was checked")
     print("archive", flush=True)
     if platform == "windows":
         arc = out + ".zip"

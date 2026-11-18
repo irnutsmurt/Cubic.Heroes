@@ -6,6 +6,9 @@ names, local home-directory paths.
   tools/push_guard.py range <rev-range>           (scan commits, e.g. origin/main..HEAD)
   tools/push_guard.py files                       (scan the tracked files of the working tree)
   tools/push_guard.py text <file>                 (scan a text, e.g. a PR body or release notes, before posting)
+  tools/push_guard.py package <dir>               (scan a package before it goes anywhere: every file, binaries as
+                                                  bytes -- home-directory paths and the private literals; email
+                                                  addresses are third parties' in licences and sources, not scanned)
 
 What is scanned: every outgoing commit's message, the lines its diff adds, and annotated tags' messages.
 Not scanned: the commit's author and committer headers (the project's commit identity lives there).
@@ -148,6 +151,36 @@ def main():
                 continue   # binary
             scan_text(data.decode("utf-8", "replace"), p, findings)
         return report(findings, "tracked files")
+    if mode == "package":
+        names = {"home-directory path"}
+        if not LITERALS:
+            print("[push-guard] package: no private literals (.git/push-guard.local): nothing to look for")
+            return 2
+        for d, dirs, files in os.walk(sys.argv[2]):
+            for f in files:
+                path = os.path.join(d, f)
+                try:
+                    data = open(path, "rb").read()
+                except OSError:
+                    continue
+                rel = os.path.relpath(path, sys.argv[2])
+                found = []
+                # as bytes (latin-1 keeps every byte), and as UTF-16 (Windows programs keep paths that way)
+                for text in (data.decode("latin-1"), data.decode("utf-16-le", "replace"),
+                             data[1:].decode("utf-16-le", "replace")):
+                    scan_text(text, rel, found)
+                # a package carries third parties' files (their documentation's example paths, their build machines'
+                # paths): what counts is ours -- a home path whose user is one of the private literals, and a private
+                # literal standing as a word (not inside a longer one, as random bytes of a program can spell it)
+                for where, name, hit in found:
+                    if name in names and any(re.search(r"(?:Users|home)[\\/]+" + re.escape(lit) + r"\b", hit, re.I)
+                                             for lit in LITERALS):
+                        findings.append((where, name, hit))
+                    elif name.startswith("a private literal") and any(
+                            re.search(r"(?<![A-Za-z])" + re.escape(lit) + r"(?![A-Za-z])", hit, re.I)
+                            for lit in LITERALS):
+                        findings.append((where, name, hit))
+        return report(findings, f"package {sys.argv[2]}")
     if mode == "text":
         scan_text(open(sys.argv[2], encoding="utf-8", errors="replace").read(), sys.argv[2], findings)
         return report(findings, sys.argv[2])

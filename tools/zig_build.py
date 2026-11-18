@@ -552,6 +552,15 @@ def build_prebuilt(platform, ps3recomp, gen_ppu, log=print, release=True):
     if not os.path.isdir(os.path.join(deps, "lib")):
         raise BuildError(f"run tools/build_deps.py --platform {platform} first")
     tc = cmake_toolchain(platform, cpu=PORTABLE_CPU)
+    # M11.3: the compiler's caches inside the build tree, never the developer's home folder -- an object records the
+    # path it was compiled to (zig compiles into its cache's tmp/ first), and these libraries are shipped: with the
+    # default cache they carried the build machine's user name. A cache moved since the last build: built again
+    # from clean, so no object of the old place stays in the library.
+    zig_cache = os.path.join(ROOT, "build", "zig-cache-prebuilt")
+    env = dict(os.environ, ZIG_GLOBAL_CACHE_DIR=os.path.join(zig_cache, "global"),
+               ZIG_LOCAL_CACHE_DIR=os.path.join(zig_cache, "local"))
+    marker = os.path.join(work, "zig-cache.txt")
+    clean = not os.path.exists(marker) or open(marker, encoding="utf-8").read().strip() != zig_cache
     subprocess.check_call(["cmake", "-S", os.path.join(ROOT, "port"), "-B", work, "-G", "Ninja",
                            f"-DCMAKE_TOOLCHAIN_FILE={tc}", "-DCMAKE_BUILD_TYPE=Release",
                            f"-DPS3RECOMP_DIR={ps3recomp}", f"-DRECOMP_DIR={gen_ppu}",
@@ -561,11 +570,15 @@ def build_prebuilt(platform, ps3recomp, gen_ppu, log=print, release=True):
                            "-DCMAKE_C_FLAGS=" + cmake_flags(SHIP_FLAGS), "-DCMAKE_CXX_FLAGS=" + cmake_flags(SHIP_FLAGS)]
                           # a configuration chosen once stays in CMake's cache: say it either way
                           + (release_cmake(platform) if release else ["-DDOTHEROES_NATIVE_RELEASE=OFF"]),
-                          stdout=subprocess.DEVNULL)
+                          stdout=subprocess.DEVNULL, env=env)
     defines = ninja_game_defines(os.path.join(work, "build.ninja"))
     nids = os.path.join(work, "ppu_hle_nids.cpp")
+    if clean:
+        subprocess.check_call(["cmake", "--build", work, "--target", "clean"], stdout=subprocess.DEVNULL, env=env)
     subprocess.check_call(["cmake", "--build", work, "--target", "ps3recomp_runtime", "dotheroes_native", nids,
-                           "--parallel", "6"], stdout=subprocess.DEVNULL)
+                           "--parallel", "6"], stdout=subprocess.DEVNULL, env=env)
+    with open(marker, "w", encoding="utf-8") as f:
+        f.write(zig_cache + "\n")
     os.makedirs(os.path.join(out, "src"), exist_ok=True)
     shutil.copy2(os.path.join(work, "ps3recomp_sdk", RUNTIME_LIB), out)
     shutil.copy2(os.path.join(work, NATIVE_LIB), out)
