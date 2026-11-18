@@ -632,6 +632,8 @@ M1 did with them (section 4.2):
   request for the old SHAs, as on 2026-11-10. The owner favours (b) but has not authorized it: the exact
   plan (paths, commits, verification, backups) is prepared once the source cleanup is complete and waits for
   a separate approval.
+  **Done 2026-11-18** (M7, docs/M7_HISTORY_PLAN.md): those file versions stripped from the history; the SHAs above
+  are the commits as they were before the rewrite.
 
 ## 6. Performance and synchronization
 

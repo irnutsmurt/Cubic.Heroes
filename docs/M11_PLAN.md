@@ -1243,7 +1243,7 @@ the settings schema), the session options `--fullscreen/--windowed/--borderless`
 `--vsync` (for that session only unless `--persist`), `--json` (one object, or events then a result), `--no-gui`;
 exit codes 0-7. Keys are named by path only, never read into a log or an argument.
 
-**The worker's side** (b52733d): the launcher's update replaces only the package's items in the folder (never the
+**The worker's side** (5d9cad9): the launcher's update replaces only the package's items in the folder (never the
 install's), `remove-launcher` keeps the installation whose root is its folder (`--everything`, separately confirmed,
 removes it), `migrate-root` and `find-legacy`, temporary files and the compiler's caches inside the root; 152 unit
 tests pass.

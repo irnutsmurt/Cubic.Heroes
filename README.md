@@ -76,6 +76,10 @@ content changed.
     <td><img src="docs/media/settings.jpg" alt="Graphics and performance settings"><br><sub>PC display, frame-rate and performance settings</sub></td>
     <td><img src="docs/media/quit.jpg" alt="Quit Game on the title menu"><br><sub>QUIT GAME on the title menu</sub></td>
   </tr>
+  <tr>
+    <td><img src="docs/media/overlay.jpg" alt="The in-game settings menu"><br><sub>The in-game settings menu (hold L3+R3, or F1)</sub></td>
+    <td><img src="docs/media/saves.jpg" alt="Loading a save"><br><sub>Loading a save</sub></td>
+  </tr>
 </table>
 
 <sub>Screenshots taken in game via Windows 11.</sub>

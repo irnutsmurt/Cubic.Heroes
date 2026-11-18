@@ -130,7 +130,7 @@ Other launchers: `CubicHeroes.exe --play`. The full command line: docs/CLI.md.
 | | |
 |---|---|
 | Version | 0.2.0-beta.1 (semantic versioning; a beta's launcher is offered later betas -- the pre-release channel -- by default) |
-| Tag | v0.2.0-beta.1, on c00feaa; marked as a pre-release |
+| Tag | v0.2.0-beta.1, on 5b395eb; marked as a pre-release |
 | Download | `Cubic.Heroes-0.2.0-beta.1-windows-x86_64.zip` (133,992,382 bytes, SHA-256 3d2081ddb5f31539395fa1846b16958ad4163c065c3e237dfedd80bed57d659b), unpacking to one `Cubic.Heroes` folder |
 | Signature | `release.json` (the version, the channel, the notes, the download's size and SHA-256) signed by the owner's key 6b5e12ec2cc5791f (`release.json.sig`); `SHA256SUMS.txt` |
 | Audits before upload | the boundary check (folder and zip), the private-information check (make_bundle now refuses on a finding), the licences and the sources the LGPL asks for (section 3) |
@@ -140,5 +140,5 @@ Other launchers: `CubicHeroes.exe --play`. The full command line: docs/CLI.md.
 Two defects found on the way, fixed before the upload: the launcher's incremental build kept a 0.1.0 launcher in the
 0.2.0-beta.1 package (a changed version define now rebuilds it: tools/build_launcher.py), and a moved installation's
 `game` link (an absolute junction) pointed at the old place, so preparing shaders after a move failed (the worker
-repairs it, and the preparation runs the build itself: c00feaa). The package was then made again, re-uploaded and
+repairs it, and the preparation runs the build itself: 5b395eb). The package was then made again, re-uploaded and
 verified again from the download as above.

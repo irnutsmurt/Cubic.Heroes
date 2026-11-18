@@ -9,7 +9,7 @@ measured, [H] a hypothesis still to check.
 
 - **Stage** (2026-11-16): M10 done -- M10.1-M10.5 implemented and tested without the owner; the owner's hands-on
   checks (below) remain, as M9's do.
-- **Done**: M9 (c2c251d). M10.0 the inventory. M10.1: display modes, the remembered window, VSync, the frame
+- **Done**: M9 (d2d9852). M10.0 the inventory. M10.1: display modes, the remembered window, VSync, the frame
   limits through a host limiter, the performance overlay, the picture's aspect. M10.2: the in-game overlay (the
   hold, the pages, the shortcut kept from the game, Return to Launcher and Exit Game with the launcher's side, the
   one-writer settings). M10.3: volumes, controller and keyboard bindings, the shared prompts. M10.4: the logo skip.
@@ -35,7 +35,7 @@ measured, [H] a hypothesis still to check.
     written, the performance overlay turned on and written, the exit question (Cancel focused) cancelled, resumed
     (the game released); Return to Launcher: `session-end` "launcher", the game's own exit path;
   - unit tests: the new settings (every frame-limit value, custom, VSync, display mode; invalid ones refused).
-- **Added after the first push (c07944a)**:
+- **Added after the first push (e6bf071)**:
   - the title menu without INSTALL (config/insn_patches.json, guard g_dotheroes_no_install_item;
     DOTHEROES_TITLE_INSTALL=1 shows it again for the install round-trip drives): the menu's item count -- the
     Title script's Menu.Size, or ClearMenu.Size after the game is cleared -- read at run time by the menu's drawing

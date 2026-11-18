@@ -1,15 +1,16 @@
 # M7: the repository's history -- the cleanup plan, prepared for the owner's approval
 
-**Status: prepared 2026-11-18; nothing done.** No history is rewritten and nothing is force-pushed without the owner's
-separate, explicit approval of this plan (CLAUDE.md; docs/OPENAL_MIGRATION_PLAN.md section 5). This file says exactly
-what would be done, how it is checked, and what the owner has to do themselves.
+**Status: done 2026-11-18** (the owner's approval of this plan, the AUDIO.md and SPU_NON_AUDIO.md versions included;
+the force push approved after the checks' report). Results in section 5. The SHAs this file names are the commits as
+they were before the rewrite.
 
 ## 1. The issue
 
 Between 2026-11-10 and 2026-11-11 the public history received code that does not belong in it:
 
 - **FMOD-derived code** (ports of the middleware's mixer, codec and reverb, with their generators and checks): commits
-  542794b, c2526e8, b5f5a14, e6f2912;
+  542794b, c2526e8, b5f5a14, e6f2912, and 3b7b168 and b3d71fc (the mixer's native glue file -- found by the checks of
+  2026-11-18: the first list named four commits);
 - **game-derived code** (hand transcriptions of the game's water and waver SPU tasks): commits
   9a71d05, 38a0c9b, a719cef, and the versions of those files touched by e932d0b.
 
@@ -25,9 +26,12 @@ tree and checked by the boundary and private-information checks).
 
 - **Removed**: the file versions (git blobs) of the paths below that exist only in the commits from 9a71d05 to the
   parent of 4fa1a04 -- each such version disappears from the commits that held it. Nothing else changes: every other
-  file, every commit message, author and date is kept, and **the final tree is byte for byte today's**.
+  file, every commit message, author and date is kept, and **the final tree is byte for byte today's**. (A stripped
+  version of a file that existed before is not replaced by nothing: the file keeps its previous version in that commit,
+  as git-filter-repo drops the change. And git-filter-repo points a commit message's references to rewritten commits
+  -- three messages name one, as "(3270978)" -- at their new SHAs, so they stay valid when the old ones are gone.)
   - FMOD-derived (all versions): `port/native/fmod_codec_native.cpp`, `fmod_codec_raw.cpp/.h`, `fmod_mixer.cpp/.h`,
-    `fmod_sfxreverb.cpp/.h`; `tests/native/fmod_codec_raw_check.cpp`, `fmod_mixer_check.cpp`,
+    `fmod_sfxreverb.cpp/.h`, `fmod_mixer_native.cpp`; `tests/native/fmod_codec_raw_check.cpp`, `fmod_mixer_check.cpp`,
     `fmod_sfxreverb_check.cpp`; `tools/fmod_mixer.cpp.in`, `fmod_mixer_batch.sh`, `fmod_mixer_check.sh`,
     `fmod_mixer_config.py`, `fmod_mixer_coverage.py`, `fmod_mixer_profile.py`, `fmod_sfxreverb.cpp.in`,
     `gen_sfxreverb.py`;
@@ -65,8 +69,11 @@ tree and checked by the boundary and private-information checks).
 5. **Publishing the rewrite** -- only on the owner's explicit go-ahead at this point: a force push of main (and, if it
    exists, the moved release tag), with `--force-with-lease` against the SHA checked in step 1.
 6. **GitHub**: the old commits stay reachable on GitHub by their SHAs (cached views, the network graph) until GitHub
-   Support removes them. **The owner files that request from their own account** (a "remove sensitive data" request,
-   as on 2026-11-10), listing the old SHAs; the list is prepared from the commit map.
+   removes them. **The owner's decision (2026-11-18): no GitHub Support request** -- the rewrite takes them out of every
+   branch and tag; whoever has an old SHA may still reach it on GitHub until GitHub collects it on its own schedule.
+   What keeps this from happening again is the checks that run before anything is pushed: tools/boundary_check.py in
+   the pre-push hook (game-derived content), tools/license_audit.py (fails if a removed path is tracked again) and
+   tools/push_guard.py (private information) -- none of which existed when the code was first pushed.
 7. **Afterwards**: every clone (this PC's checkout included) is replaced by a fresh clone or reset to the rewritten main;
    the docs' SHAs updated through the commit map (a normal commit).
 
@@ -75,7 +82,28 @@ tree and checked by the boundary and private-information checks).
 1. **Approve this plan** (or say what to change: the docs' versions in or out, when to run it) -- the rewrite and its
    checks are then run and reported, and **stop before the force push**.
 2. **Approve the force push** after reading the checks' report (and the moved release tag, if any).
-3. **File the GitHub Support request** with the old SHAs (prepared), from the owner's account.
+3. ~~File the GitHub Support request~~ -- not filed, the owner's decision of 2026-11-18 (step 6).
 
 Recommended: run it after 0.2.0-beta.1 is published (moving that one tag) or, if the owner prefers no moved tag, before
 the release is tagged. Either way the published package is unaffected.
+
+## 5. Results (2026-11-18)
+
+- **Backups** (kept): `F:\3d dot game heroes\m7\backup-2026-11-18.git` (a mirror of GitHub before the push) and
+  `backup-2026-11-18.bundle` (all refs; `git bundle verify`: okay).
+- **Stripped**: 57 file versions, computed by build/m7/blobs.py (the plan's paths, their versions in the window, less any
+  version also present outside it -- three kept so). The checks found one FMOD-derived file the first list missed,
+  `port/native/fmod_mixer_native.cpp` (commits 3b7b168, b3d71fc); every file added in the window and absent from the
+  final tree is now either stripped or confirmed independent.
+- **Rewritten**: 127 commits, 9a71d05 to the previous tip; git-filter-repo `--strip-blobs-with-ids`, refs main and
+  v0.2.0-beta.1 only. Three commit messages' references to other commits point at the rewritten commits.
+- **Checks** (build/m7/verify.py, against the backup): the final tree identical (5a84fd970eb0); 331 commits, their
+  messages, authors and dates the same; the three tags unmoved; the beta tag on its rewritten twin; none of the 57
+  versions reachable; no FMOD-derived path in any commit; each rewritten commit differs only at the plan's paths; the
+  boundary check on every rewritten tree; the private-information scan of the range -- all pass.
+- **Pushed** with `--force-with-lease` against the backed-up values, through the pre-push hook (boundary and private
+  information: nothing found): main 78a7df4 -> 8558bd2, v0.2.0-beta.1 c00feaa -> 5b395eb.
+- **The remote checked** from a new clone: the same refs (the three tags and rename-cubic-heroes untouched), the tree
+  identical, 331 commits, none of the 57 versions present, no FMOD-derived path.
+- The docs' commit references pointed at the rewritten commits (build/m7/docs_shas.py: 5 references); the working
+  checkout reset to the rewritten main.
