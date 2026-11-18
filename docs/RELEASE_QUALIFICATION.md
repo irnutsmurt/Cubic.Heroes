@@ -142,3 +142,12 @@ Two defects found on the way, fixed before the upload: the launcher's incrementa
 `game` link (an absolute junction) pointed at the old place, so preparing shaders after a move failed (the worker
 repairs it, and the preparation runs the build itself: 5b395eb). The package was then made again, re-uploaded and
 verified again from the download as above.
+
+**After M7** (docs/M7_HISTORY_PLAN.md; the owner wanted the history cleaned before the beta was public): the release
+was returned to a draft (it had been public for about an hour), the history rewritten and force-pushed (the tag moved
+to its rewritten twin 5b395eb, the same tree), and the release verified again from GitHub -- the download's checksum,
+the manifest's hash and the owner's signature; a fresh offline installation of that download in a folder named with
+an accent and Japanese, `--install` interrupted and resumed, status, shaders, `--update` with nothing to do,
+`--check-update`, `--play`, no key text: 9 of 9; then the installed game's checks (developer mode on, a player's save
+continued and played, developer mode off): pass. **Published again as a pre-release on 2026-11-18**, with the owner's
+approval.
