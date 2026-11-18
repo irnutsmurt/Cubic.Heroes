@@ -902,8 +902,10 @@ fps_bosses_m111b.txt):
   body chose its faster gait (3.2 for 1.6) at 60 only; the last enemy's pieces' fast moves ~37 % quicker at 60, 144
   and 240 alike than at 30 (no growth with the rate). **The dark knight (temple 6)**: two of his classes' fastest
   moves (14-18 u/s at 30 and 60, 24-30 at 144 and 240) and travel (+45 % at 144 and 240) higher at the higher rates,
-  levelling off rather than following the frame rate -- the shape of a per-frame approach to a target. One run of a
-  boss that acts at random: repeated (his arena alone, 60 s, 30 and 240 twice, 144, 60) before it is called a defect.
+  levelling off rather than following the frame rate -- the shape of a per-frame approach to a target. Repeated
+  (build/m11 fps_knight: his arena alone, 60 s; 30 and 240 twice, 144, 60): his main part 3.55 and 3.44 units a
+  second at 30, 4.60 at 60, 5.75 at 144, 5.87 and 5.79 at 240; his fastest steps 15-17 at 30, 28-29 at 144 and
+  240; his two other parts the same way. A defect: **B-012** (docs/M11_VALIDATION.md), his updates to be read.
 
 ## 24. M11.1b: a draw's uploads that no longer fit its batch (B-006) (2026-11-17) [M]
 
