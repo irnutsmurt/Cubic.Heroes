@@ -1,11 +1,8 @@
 # Cubic.Heroes 0.1.0 for Windows: release qualification (local)
 
-**Status: M11.3, 2026-11-17/18: the candidate qualified locally (sections 2-3); nothing published.** The owner's M11.3: a clean Windows release build, a fresh installation from
-its package, the whole conversion, compilation, shader and gameplay flow, offline use, update, rollback, uninstall and
-recovery, the dependency and licence audit, the boundary and private-information checks, and drafts of the release
-notes, the installation instructions, the known issues and this checklist. **A local release candidate only:
-nothing is published, and the release is not signed with the production key** (both the owner's decisions, not yet
-given). Results are filled in as the runs finish; nothing below is marked passed without its evidence.
+**Status: published 2026-11-18 as [v0.2.0-beta.1](https://github.com/irnutsmurt/Cubic.Heroes/releases/tag/v0.2.0-beta.1),
+a pre-release** (the owner's authorization of 2026-11-18). M11.3 qualified the candidate locally (sections 2-3); the
+release itself is recorded in section 8.
 
 ## 1. The candidate
 
@@ -127,3 +124,21 @@ Other launchers: `CubicHeroes.exe --play`. The full command line: docs/CLI.md.
 | 1 | **Publishing**: a GitHub release of the candidate (not authorized) | after this checklist passes and the owner's own play of the candidate |
 | 2 | **Signing**: the release manifest signed with the owner's key (docs/RELEASE_SIGNING.md; not authorized) | with the release |
 | 3 | The owner's hands-on checks still open (docs/M11_VALIDATION.md: QUIT GAME with a keyboard and a mouse, with the launcher; the earlier milestones' hands-on lists) | before publishing |
+
+## 8. The published release: 0.2.0-beta.1 (2026-11-18)
+
+| | |
+|---|---|
+| Version | 0.2.0-beta.1 (semantic versioning; a beta's launcher is offered later betas -- the pre-release channel -- by default) |
+| Tag | v0.2.0-beta.1, on c00feaa; marked as a pre-release |
+| Download | `Cubic.Heroes-0.2.0-beta.1-windows-x86_64.zip` (133,992,382 bytes, SHA-256 3d2081ddb5f31539395fa1846b16958ad4163c065c3e237dfedd80bed57d659b), unpacking to one `Cubic.Heroes` folder |
+| Signature | `release.json` (the version, the channel, the notes, the download's size and SHA-256) signed by the owner's key 6b5e12ec2cc5791f (`release.json.sig`); `SHA256SUMS.txt` |
+| Audits before upload | the boundary check (folder and zip), the private-information check (make_bundle now refuses on a finding), the licences and the sources the LGPL asks for (section 3) |
+| The actual download verified | downloaded back from the release: the checksum, the manifest's hash and its signature (the launcher's own check); then a fresh installation of that download, offline, in a folder named with an accent and Japanese -- unpack, nothing installed, `--install` interrupted and resumed, status, shaders, `--update` with nothing to do, `--check-update` offline, `--play`, no key text: 9 of 9 |
+| The update engine | against the live release: offered on the pre-release channel (signature verified), not on the stable one |
+
+Two defects found on the way, fixed before the upload: the launcher's incremental build kept a 0.1.0 launcher in the
+0.2.0-beta.1 package (a changed version define now rebuilds it: tools/build_launcher.py), and a moved installation's
+`game` link (an absolute junction) pointed at the old place, so preparing shaders after a move failed (the worker
+repairs it, and the preparation runs the build itself: c00feaa). The package was then made again, re-uploaded and
+verified again from the download as above.
