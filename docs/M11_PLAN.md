@@ -876,6 +876,35 @@ enemy is one class (0x00FE4500), so an enemy segment counts only the characters 
 it throws. A quantity that follows time keeps its ratio near 1; one that follows frames, the frame rate's ratio.
 Its own unit test (tests/test_fps_actors.py) checks both on made-up runs.
 
+**Results** (2026-11-17, the dev build, offscreen and silent; build/m11's fps_check_m111b2.txt, fps_actors_m111b.txt,
+fps_bosses_m111b.txt):
+
+- **The castle front** (fps_check at 30, 60 -- run twice, see below -- 144 and 240; each held its rate): the 1 s walk
+  down and back up 5.00-5.14 units at every rate (the walk's start and stop, within 3%); the grass's debris stepped 60
+  times a second at 60 and above (54.5 at 30) and settled the same; the words that follow frames are the frame
+  counters R8 accounted for. The first 60 fps run read as broken -- no walk back up, little movement at the grass --
+  but the game was not: mark.trigger was counted twice, 11 ms apart (a removal that failed while another process still
+  held the file left it for the next poll), so every later segment of the analysis was shifted by one. Fixed in
+  port/native/dev_state.cpp: a trigger file acts once a touch (mark, trace, pause -- a pause toggled twice --, memsnap,
+  actors, watch); tests/scenarios/devtools_triggers.drive touches mark.trigger four times, twice held open 0.3 s
+  (drive.py's `touchhold`): 59 marks before the fix, 4 after. Two reruns at 60: as the other rates.
+- **Every enemy type** (fps_actors, 41 types on field 14, one segment each): no speed follows the frame rate. Each
+  type moves at the same few speeds at every rate (the skeleton 1.00 at 30 and at 240, the spider 11.9-12.0, the
+  squid 11.9); the tool's 15 flags are which gait or state the enemy chose in that run -- the metal slime fled (16
+  u/s) at 60, 144 and 240 alike and walked (3) at 30; the cyclops charged (20) only at 60 -- and the rates of new
+  characters (shots) wander up and down, not with the frame rate.
+- **The bosses**: the first batch measured none -- the actor log's heap scan stepped 16 bytes and missed objects on
+  other alignments (only the kraken's arms were logged). The log now reads the game's own actor list (CActorManager
+  at 0x029B71A0: 1024 entries of 8 bytes, the actor at +4; CActorManager::getActor) -- every character, nothing
+  else; DOTHEROES_DEV_ACTOR_SCAN=1 keeps the scan. Run again (build/m11's fps_bosses: the six guardians and the last
+  enemy, 40 s each against a hero at the door): temple 1's guardian (its segments 4.22, its head 3.00 -- the 30 Hz
+  gating of R8), the bee and its stings, the kraken and the dragon the same at every rate within 1-5 %; the golem's
+  body chose its faster gait (3.2 for 1.6) at 60 only; the last enemy's pieces' fast moves ~37 % quicker at 60, 144
+  and 240 alike than at 30 (no growth with the rate). **The dark knight (temple 6)**: two of his classes' fastest
+  moves (14-18 u/s at 30 and 60, 24-30 at 144 and 240) and travel (+45 % at 144 and 240) higher at the higher rates,
+  levelling off rather than following the frame rate -- the shape of a per-frame approach to a target. One run of a
+  boss that acts at random: repeated (his arena alone, 60 s, 30 and 240 twice, 144, 60) before it is called a defect.
+
 ## 24. M11.1b: a draw's uploads that no longer fit its batch (B-006) (2026-11-17) [M]
 
 **Finding**: the sweep's stricter check (sweep-m111, chunk 5) found one draw left out on arriving at
@@ -1016,6 +1045,24 @@ through a host hook (patches/ps3recomp/0167: ps3_exit and g_ps3_exit_hook -- sys
 fallback, the guest's entry returning), and the port's (main.cpp game_end) writes the window's place, the census and
 the game log's summary, then runs the test stop's own sequence (dev_state.cpp dotheroes_end: the renderer drained and
 stopped, the logs and reports) and ends the process with the game's status.
+
+## 28. M11.1b: the rare and the stronger enemies on their own spawn points (2026-11-17) [M]
+
+**Why**: the tools' `spawn` (section 18) makes any enemy beside the hero, but the rare ones (the metal slime, 5%; the
+blue dragon, 1%) and the stronger versions a spawn point may pick appear in play only as a map's objects set
+themselves up, by the scripts' own `math.random`. That path -- a spawn point choosing, the chosen enemy placed where
+the map puts it -- had not run with a rare outcome.
+
+**How** (tests/scenarios/devtools_forced.drive, devtools_suite.py's check): field 13 entered with the scripts'
+`math.random` answering 1 while the map loads and its objects set themselves up (every rare spawn point shows its
+enemy, every enemy with a stronger version takes it), the random given back once the map has arrived; then the map
+entered again (`respawn`) with it answering its highest value (the ordinary versions; the rare ones hidden). Each
+time the game's own actor list (twice), pictures and the pipelines met.
+
+**Result** (devtools_forced PASS, offscreen, over M11.1b's preparation): forced, 9 enemies on the screen's spawn
+points -- a blue dragon among them, at the map's own place for it, and the stronger versions of the others -- and
+ordinary, 8 (no dragon, the ordinary versions); no pipeline met unprepared (43 built, all prepared), no translation in
+play. The check: more enemies forced than ordinary, both lists read twice.
 
 ## 29. M11.1b: the krakens by the game's mechanics (2026-11-17) [M]
 

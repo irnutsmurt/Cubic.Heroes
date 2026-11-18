@@ -131,6 +131,32 @@ uint32_t rd32(uint32_t ea)
     const volatile uint8_t* p = vm_base + ea;
     return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
 }
+// A drive's trigger file (mark.trigger, pause.trigger, ...), taken once a touch: seen, removed, acted on only when it
+// was not already seen. A removal that fails (another process still holding the file: the drive closing it, an
+// indexer or a scanner) leaves it for the next poll, which acted on it again -- two marks 11 ms apart (2026-11-17,
+// the 60 fps castle-front run: every later segment of tests/fps_check.py shifted by one); a pause toggled twice.
+struct Trigger { const char* name; bool lingering; };
+bool seen_trigger(Trigger& t)   // there and not yet acted on: act, then done_trigger
+{
+    FILE* f = fopen(t.name, "rb");
+    if (!f) { t.lingering = false; return false; }
+    fclose(f);
+    return !t.lingering;
+}
+void done_trigger(Trigger& t)   // removed; still there (the removal failed): not acted on again while it lingers
+{
+    t.lingering = remove(t.name) != 0;
+}
+bool take_trigger(Trigger& t)   // seen, removed, then acted on (true once a touch)
+{
+    FILE* f = fopen(t.name, "rb");
+    if (!f) { t.lingering = false; return false; }
+    fclose(f);
+    const bool fresh = !t.lingering;
+    done_trigger(t);
+    return fresh;
+}
+
 void wr32(uint32_t ea, uint32_t v)
 {
     volatile uint8_t* p = vm_base + ea;
@@ -259,6 +285,32 @@ int scan_near(uint32_t p, float radius, Near* out, int max, uint32_t vt_hi = 0x0
     return n;
 }
 
+// The game's own actors within `radius` of the hero (and 20 units in height): its actor manager's list -- every
+// character, the bosses and what they throw among them, nothing else (M11.1b; the heap scan above steps 16 bytes and
+// missed objects on other alignments -- the bosses among them: their fights logged nothing). gActorManager is a
+// static object at 0x029B71A0 (read through Lua's actor_manager.gActorManager, its userdata's payload: build/m11's
+// fps_bosses run, 2026-11-17); CActorManager holds 1024 entries of 8 bytes from its start, each an actor at +4
+// (CActorManager::getActor, 0x000A2200). The player's object left out.
+constexpr uint32_t kActorManager = 0x029B71A0u;
+
+int list_near(uint32_t p, float radius, Near* out, int max)
+{
+    const uint32_t mgr = kActorManager;
+    const float px = rdf(p + 0x428), py = rdf(p + 0x42C), pz = rdf(p + 0x430);
+    int n = 0;
+    for (uint32_t i = 0; i < 1024 && n < max; i++) {
+        const uint32_t a = rd32(mgr + 8 * i + 4);
+        if (a < 0x00010000u || a >= 0x30000000u || a == p) continue;
+        const uint32_t vt = rd32(a);
+        if (vt < 0x00F00000u || vt >= 0x01100000u) continue;
+        const float x = rdf(a + 0x428), y = rdf(a + 0x42C), z = rdf(a + 0x430);
+        if (!(fabsf(x - px) < radius && fabsf(z - pz) < radius && fabsf(y - py) < 20.0f)) continue;
+        if (x == 0.0f && z == 0.0f) continue;
+        out[n++] = { a, vt, x, y, z };
+    }
+    return n;
+}
+
 // actors.trigger (a drive's `actors` step): the characters within 40 units of
 // the hero counted now, into actors.txt -- "n=<all> c<vtable>=<count>
 // hp<vtable>=<summed +0x5B8> ...": the player's life field, which characters
@@ -333,10 +385,12 @@ void state_loop()
             remove("state.txt");
             rename("state.tmp", "state.txt");
         }
-        if (FILE* a = fopen("actors.trigger", "rb")) {
-            fclose(a);
+        static Trigger actors_trigger = { "actors.trigger", false };
+        if (seen_trigger(actors_trigger)) {   // removed after actors.txt is written: the drive's sign it is complete
             actors_now(p);
-            remove("actors.trigger");
+            done_trigger(actors_trigger);
+        } else if (actors_trigger.lingering) {
+            done_trigger(actors_trigger);
         }
     }
 }
@@ -385,18 +439,22 @@ void actor_log_loop()
     if (!f) return;
     static Near actors[kMaxActors];
     int n = 0;
-    // =1: rescan every second; =<ms> above 1: that often. Only the character
-    // classes (vtables below 0x01000000: 0x00FE....): near the world's origin
-    // -- the boss's room -- the heap's other small floats pass the position
-    // test and filled the list (2026-11-09).
+    // =1: rescan every second; =<ms> above 1: that often. The game's own actor
+    // list (list_near: the bosses too); DOTHEROES_DEV_ACTOR_SCAN=1 the earlier
+    // heap scan (only the classes below 0x01000000: near the world's origin --
+    // the boss's room -- the heap's other small floats passed the position
+    // test and filled the list, 2026-11-09).
     const char* e = getenv("DOTHEROES_DEV_ACTOR_LOG");
     const int ms = e ? atoi(e) : 1;
     const unsigned every = ms > 1 ? (unsigned)(ms / 4 > 0 ? ms / 4 : 1) : 250u;
+    const char* hs = getenv("DOTHEROES_DEV_ACTOR_SCAN");
+    const bool heap_scan = hs && atoi(hs) == 1;
     for (unsigned tick = 0;; tick++) {
         std::this_thread::sleep_for(std::chrono::milliseconds(4));
         const uint32_t p = g_player.load();
         if (!p || rd32(p) != kPlayerVtable) continue;
-        if (tick % every == 0) n = scan_near(p, 40.0f, actors, kMaxActors, 0x01000000u);   // rescan
+        if (tick % every == 0)   // rescan
+            n = heap_scan ? scan_near(p, 40.0f, actors, kMaxActors, 0x01000000u) : list_near(p, 40.0f, actors, kMaxActors);
         const uint64_t t = ps3_ft_now() - g_ps3_ft.base;
         for (int i = 0; i < n; i++) {
             Near& a = actors[i];
@@ -503,10 +561,8 @@ void watch_loop()
     for (;;) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
         const uint32_t p = g_player.load();
-        FILE* t = p ? fopen("watch.trigger", "rb") : nullptr;
-        if (!t) continue;
-        fclose(t);
-        remove("watch.trigger");
+        static Trigger watch_trigger = { "watch.trigger", false };
+        if (!p || !take_trigger(watch_trigger)) continue;
         g_barrier_sync_watch = p + g_watch_offset - 0x40;
         fprintf(stderr, "[dev-state] watching stores to the player's +0x%X..+0x%X (%08X) at %.3f s\n", g_watch_offset,
                 g_watch_offset + 0x80, p + g_watch_offset, (double)(int64_t)(ps3_ft_now() - g_ps3_ft.base) / 1e9);
@@ -550,9 +606,11 @@ void memsnap_loop()
 {
     for (unsigned n = 0;; ) {
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
-        FILE* t = fopen("memsnap.trigger", "rb");
-        if (!t) continue;
-        fclose(t);
+        static Trigger snap_trigger = { "memsnap.trigger", false };
+        if (!seen_trigger(snap_trigger)) {
+            if (snap_trigger.lingering) done_trigger(snap_trigger);
+            continue;
+        }
         char path[64];
         snprintf(path, sizeof path, "memsnap_%02u.bin", n++);
         uint64_t t0 = ps3_ft_now(), t1 = t0;
@@ -562,7 +620,7 @@ void memsnap_loop()
         spurs_snap_write_file(path);
         t1 = ps3_ft_now();
 #endif
-        remove("memsnap.trigger");
+        done_trigger(snap_trigger);
         fprintf(stderr, "[memsnap] %s at %.3f-%.3f s\n", path, (double)(int64_t)(t0 - g_ps3_ft.base) / 1e9,
                 (double)(int64_t)(t1 - g_ps3_ft.base) / 1e9);
     }
@@ -633,9 +691,8 @@ void stop_loop()
     for (;;) {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
         // pause.trigger (tests): the game held as the in-game menu holds it, or released (dotheroes_host_pause)
-        if (FILE* q = fopen("pause.trigger", "rb")) {
-            fclose(q);
-            remove("pause.trigger");
+        static Trigger pause_trigger = { "pause.trigger", false };
+        if (take_trigger(pause_trigger)) {
             dotheroes_host_pause(!ps3_guest_paused());
             continue;
         }
@@ -789,17 +846,12 @@ void keys_loop()
     unsigned n = 0;
     for (;;) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        if (FILE* t = fopen("mark.trigger", "rb")) {
-            fclose(t);
-            remove("mark.trigger");
-            mark(n, 3);
-        }
+        static Trigger mark_trigger = { "mark.trigger", false }, trace_trigger = { "trace.trigger", false };
+        if (take_trigger(mark_trigger)) mark(n, 3);
         // trace.trigger: the RSX frame trace starts at the next flip (with
         // RSX_FRAME_TRACE=arm:<frames>:<path>; ps3recomp 0110) -- a drive
         // script's way to trace the frames of a moment it reaches
-        if (FILE* t = fopen("trace.trigger", "rb")) {
-            fclose(t);
-            remove("trace.trigger");
+        if (take_trigger(trace_trigger)) {
 #ifndef DOTHEROES_NATIVE_RELEASE
             rsx_frame_trace_arm();   // the release has no frame trace (no walker)
 #endif

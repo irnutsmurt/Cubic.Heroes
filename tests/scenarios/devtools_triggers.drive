@@ -1,0 +1,23 @@
+# Scenario: the drive's trigger files act once a touch (M11.1b, docs/M11_PLAN.md section 23): mark.trigger touched
+# four times, twice kept open 0.3 s (`touchhold`: the game's removal fails while the drive holds it, as when another
+# process still has it open -- on 2026-11-17 a mark counted twice, 11 ms apart, and every later segment of the 60 fps
+# castle-front run shifted). tests/devtools_suite.py counts the marks the game logged: four.
+#! saves build/checkpoints/castle-front
+#! env DOTHEROES_DEVELOPER_MODE=1 DOTHEROES_DEV_STATE=1 DOTHEROES_DEV_KEYS=1 PS3_VERBOSE=0 SHOT_EVERY=0 DUMP=0
+#! secs 300
+include common.drive
+
+log TitleMovie 120
+sleep 5
+call continue
+state life>0 60
+sleep 2
+touch mark.trigger
+sleep 2
+touchhold mark.trigger 0.3
+sleep 2
+touch mark.trigger
+sleep 2
+touchhold mark.trigger 0.3
+sleep 2
+dev status

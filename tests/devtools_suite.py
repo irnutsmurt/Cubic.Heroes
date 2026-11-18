@@ -8,6 +8,7 @@ run through tests/boot_smoke.py (the desktop guard keeps it off the screen), the
 
 Scenarios (tests/scenarios/<name>.drive):
   devtools_basic   the channel, the Lua runner and its error paths, the run-time open points, the hold; `peek`
+  devtools_triggers a drive's trigger file acts once a touch, even while the drive still holds it open
   devtools_off     developer mode off: dev.cmd never read, no dev.out, no [dev] line in the log
   devtools_warp    the catalog; a warp to each kind of place, each arriving at its own map number; refusals
   devtools_menu    the in-game menu's Developer pages (pictures dumped): Warp to D_1_1_1 chosen and arrived; Status
@@ -440,11 +441,24 @@ def check_cubemap(rd):
     return bad
 
 
+def check_triggers(rd):
+    """devtools_triggers: four touches of mark.trigger (two held open a while) -- four marks, no more"""
+    bad = drive_failures(rd)
+    try:
+        with open(os.path.join(rd, "stderr.log"), encoding="utf-8", errors="replace") as f:
+            marks = [ln for ln in f if ln.startswith("[mark] ") and "mark.trigger" in ln]
+    except OSError:
+        return bad + ["no stderr.log"]
+    if len(marks) != 4:
+        bad.append(f"{len(marks)} marks from mark.trigger (4 touches): " + "; ".join(m.strip() for m in marks))
+    return bad
+
+
 CHECKS = {"devtools_basic": check_basic, "devtools_off": check_off, "devtools_warp": check_warp,
           "devtools_menu": check_menu, "devtools_player": check_player, "devtools_progress": check_progress,
           "devtools_encounter": check_encounter, "devtools_diag": check_diag, "devtools_persist": check_persist,
           "devtools_ending": check_ending, "devtools_enemies": check_enemies, "devtools_boss": check_boss,
-          "devtools_forced": check_forced, "devtools_cubemap": check_cubemap}
+          "devtools_forced": check_forced, "devtools_cubemap": check_cubemap, "devtools_triggers": check_triggers}
 
 
 def persist_load(rd, exe):

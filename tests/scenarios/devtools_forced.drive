@@ -1,0 +1,41 @@
+# Scenario: the rare and the stronger enemies forced on their own spawn points (M11.1b, docs/M11_PLAN.md section
+# 28): field 13 entered with the scripts' math.random answering 1 while the map loads and its objects set themselves
+# up -- every metal slime and blue dragon spawn point shows its enemy, every enemy with a stronger version takes it
+# -- then entered again (`respawn`) with it answering its highest value (the ordinary versions, the rare ones
+# hidden); the game's own actor list, pictures and the pipelines each time. The script's random given back once the map has arrived.
+# tests/devtools_suite.py checks more enemies the first time than the second and the coverage.
+#! saves build/checkpoints/castle-front
+#! env DOTHEROES_DEVELOPER_MODE=1 DOTHEROES_NATIVE_CD=1 DOTHEROES_NATIVE_SOLVER=1,2,4,5,6 GCM_WRAP_LAP=1
+#! env DOTHEROES_PRESENT_ONCE=1 DOTHEROES_DEV_STATE=1 DIAG_FRAMES=frames.log PS3_VERBOSE=0 SHOT_EVERY=0
+#! secs 900
+
+include common.drive
+
+log TitleMovie 120
+sleep 5
+call continue
+state life>0,area==17 90
+sleep 3
+dev nodeath on
+dev invulnerable on
+dev lua __devtools_random=math.random; math.random=function(a,b) return 1 end
+dev warp Field_13 -gDebug @150
+sleep 3
+dev lua math.random=__devtools_random; __devtools_random=nil
+shot forced-a
+dev enemies
+sleep 4
+shot forced-b
+dev enemies
+dev coverage
+dev lua __devtools_random=math.random; math.random=function(a,b) return b or a or 1 end
+dev respawn @150
+sleep 3
+dev lua math.random=__devtools_random; __devtools_random=nil
+shot ordinary-a
+dev enemies
+sleep 4
+shot ordinary-b
+dev enemies
+dev coverage
+dev coverage export forced

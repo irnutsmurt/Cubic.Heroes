@@ -1789,6 +1789,10 @@ def step(lineno, line, op, a):
     elif op == "touch":
         acted()
         open(os.path.join(run, a[0]), "w").close()
+    elif op == "touchhold":   # touchhold <file> <secs>: as touch, the file kept open SECS s (Python shares no delete:
+        acted()               # the game's removal fails meanwhile -- a trigger must still act once, devtools_triggers)
+        with open(os.path.join(run, a[0]), "w"):
+            wait(float(a[1]) if len(a) > 1 else 0.3)
     elif op == "write":   # write <file> <text ...>: the text as one line (the in-game menu's overlay.input, say)
         acted()
         parts = line.split(None, 2)
