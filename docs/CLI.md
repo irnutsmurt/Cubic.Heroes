@@ -129,6 +129,7 @@ player sees:
 | Key | Values |
 |---|---|
 | `DOTHEROES_DISPLAY_MODE` | `windowed`, `borderless`, `exclusive` |
+| `DOTHEROES_RENDER_RES` | `native`, `1280x720`, `1920x1080`, `2560x1440`, `3840x2160`, `custom` (then `DOTHEROES_RENDER_RES_CUSTOM`, WxH from 320x180 to 7680x4320) |
 | `DOTHEROES_VSYNC` | `1`, `0` |
 | `DOTHEROES_FPS` | `60`, `30`, `75`, `100`, `120`, `144`, `165`, `240`, `display`, `0` (uncapped), `custom` (then `DOTHEROES_FPS_CUSTOM`) |
 | `DOTHEROES_PERF_OVERLAY` | `off`, `fps`, `graph` |
@@ -138,7 +139,8 @@ player sees:
 | `DOTHEROES_OVERLAY_HINT`, `DOTHEROES_SKIP_LOGOS` | `1`, `0` |
 | `LAUNCHER_DISPLAY_MODE` | `windowed`, `borderless`, `exclusive` |
 | `LAUNCHER_CLOSE_ON_START`, `LAUNCHER_VSYNC` | `1`, `0` |
-| `LAUNCHER_PROMPTS` | `auto`, `xbox`, `playstation`, `nintendo`, `steam`, `generic` |
+| `LAUNCHER_PROMPTS` | `auto` (the device used last), `xbox`, `playstation` (the game's original pictures), `nintendo`, `steam`, `generic`, `keyboard` -- the launcher's and the whole game's button prompts |
+| `DOTHEROES_PAD_MAP`, `DOTHEROES_KEY_MAP` | the game's buttons on other pad buttons or keys: `Cross=Square,Square=Cross`, `Cross=Space` (the game's button = the pad's, by PlayStation names, or an SDL key name); the prompts show them |
 | `LAUNCHER_UPDATE_CHANNEL` | `stable`, `prerelease` |
 | `LAUNCHER_CHECK_UPDATES`, `LAUNCHER_SHADERS_AFTER_UPDATE`, `LAUNCHER_SHADERS_ON_DRIVER_CHANGE` | `1`, `0` |
 | `DOTHEROES_LOG_LEVEL` | `error`, `warning`, `info`, `debug`, `trace` |

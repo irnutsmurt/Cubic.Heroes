@@ -59,6 +59,7 @@ void rsx_vulkan_backend_request_display(int mode, int vsync) __attribute__((weak
 void nsm_set_volumes(float master, float music, float effects, int mute) __attribute__((weak));
 int dotheroes_set_frame_limit(const char* value);   /* main.cpp: 1 when applied at once */
 int dotheroes_set_render_resolution(const char* value, const char* custom);   /* main.cpp (M11.2f): live */
+void prompts_set_choice(const char* v);   /* prompts.cpp (M11.2g) */
 void cellPad_set_pad_binding(int game_bit, uint32_t pad_bits) __attribute__((weak));
 int cellPad_set_key_binding(int game_bit, const char* key_name) __attribute__((weak));
 const char* cellPad_key_binding_name(int game_bit) __attribute__((weak));
@@ -113,10 +114,16 @@ const char* pad_button_name(int bit, int style)
                                   "LT", "RT", "LB", "RB", "Y", "B", "A", "X" };
     static const char* ps[16] = { "Select", "L3", "R3", "Start", "D-pad up", "D-pad right", "D-pad down", "D-pad left",
                                   "L2", "R2", "L1", "R1", "Triangle", "Circle", "Cross", "Square" };
+    /* M11.2g: a Switch pad's face buttons by their labels (SDL's label mode: the one labelled A presses Cross) */
     static const char* sw[16] = { "Minus", "LS", "RS", "Plus", "D-pad up", "D-pad right", "D-pad down", "D-pad left",
-                                  "ZL", "ZR", "L", "R", "X", "A", "B", "Y" };
+                                  "ZL", "ZR", "L", "R", "Y", "B", "A", "X" };
+    static const char* st[16] = { "Back", "L3", "R3", "Start", "D-pad up", "D-pad right", "D-pad down", "D-pad left",
+                                  "LT", "RT", "LB", "RB", "Y", "B", "A", "X" };
+    static const char* gn[16] = { "Select", "L3", "R3", "Start", "D-pad up", "D-pad right", "D-pad down", "D-pad left",
+                                  "L2", "R2", "L1", "R1", "Top button", "Right button", "Bottom button", "Left button" };
     if (bit < 0 || bit > 15) return "?";
-    return style == PS3_UI_PROMPTS_PLAYSTATION ? ps[bit] : style == PS3_UI_PROMPTS_SWITCH ? sw[bit] : xb[bit];
+    return style == PS3_UI_PROMPTS_PLAYSTATION ? ps[bit] : style == PS3_UI_PROMPTS_SWITCH ? sw[bit]
+         : style == PS3_UI_PROMPTS_STEAM ? st[bit] : style == PS3_UI_PROMPTS_GENERIC ? gn[bit] : xb[bit];
 }
 int g_pad_bind[16];           /* for each game button, the pad's button (bit) that presses it */
 std::string g_key_bind[16];   /* for each game button, its key's name ("" the default) */
@@ -161,7 +168,8 @@ std::vector<Item> page_items(int p)
     case P_CONTROLS:
         return { { "LAUNCHER_PROMPTS", "Button prompts",
                    { { "auto", "Automatic" }, { "xbox", "Xbox" }, { "playstation", "PlayStation" },
-                     { "nintendo", "Nintendo Switch" }, { "steam", "Steam" }, { "generic", "Generic" } }, 1, "auto" },
+                     { "nintendo", "Nintendo Switch" }, { "steam", "Steam" }, { "generic", "Generic" },
+                     { "keyboard", "Keyboard and mouse" } }, 1, "auto" },
                  { "DOTHEROES_OVERLAY_COMBO", "Menu shortcut (held)",
                    { { "l3r3", "L3 + R3" }, { "selectstart", "Back/Select + Start" }, { "l1r1select", "L1 + R1 + Back/Select" } },
                    1, "l3r3" },
@@ -334,9 +342,9 @@ int apply(const Item& it, const std::string& v)
         return dotheroes_set_render_resolution(v.c_str(), c != g_vals.end() ? c->second.c_str() : "");
     }
     if (k.rfind("DOTHEROES_VOLUME_", 0) == 0 || k == "DOTHEROES_MUTE") { apply_volumes(); return nsm_set_volumes ? 1 : 0; }
-    if (k == "LAUNCHER_PROMPTS") {   /* the game's own screens (the save list) follow the same choice */
-        put_env("PS3_UI_PROMPTS", v == "xbox" || v == "steam" || v == "generic" ? "xbox" : v == "playstation" ? "playstation"
-                                  : v == "nintendo" ? "switch" : "");
+    if (k == "LAUNCHER_PROMPTS") {   /* the game's own prompts and screens (the save list) follow the same choice */
+        put_env("PS3_UI_PROMPTS", v == "nintendo" ? "switch" : v == "auto" ? "" : v.c_str());
+        prompts_set_choice(v.c_str());   /* M11.2g: the game's textures and text, at once */
         return 1;
     }
     if (k == "DOTHEROES_OVERLAY_COMBO") {
@@ -436,6 +444,8 @@ int prompt_style()
         if (!strcmp(e, "xbox")) return PS3_UI_PROMPTS_XBOX;
         if (!strcmp(e, "switch")) return PS3_UI_PROMPTS_SWITCH;
         if (!strcmp(e, "keyboard")) return PS3_UI_PROMPTS_KEYBOARD;
+        if (!strcmp(e, "steam")) return PS3_UI_PROMPTS_STEAM;       /* M11.2g */
+        if (!strcmp(e, "generic")) return PS3_UI_PROMPTS_GENERIC;
     }
     const int d = cellPad_ui_device();
     return d >= 0 && d < PS3_UI_PROMPTS_N ? d : PS3_UI_PROMPTS_KEYBOARD;
@@ -761,10 +771,16 @@ void parse_map(const std::string& v, void (*each)(int, const std::string&))
 void load_bindings()
 {
     for (int i = 0; i < 16; i++) { g_pad_bind[i] = i; g_key_bind[i].clear(); }
-    auto p = g_vals.find("DOTHEROES_PAD_MAP");
-    if (p != g_vals.end()) parse_map(p->second, [](int g, const std::string& v) { const int b = game_bit(v); if (b >= 0) g_pad_bind[g] = b; });
-    auto k = g_vals.find("DOTHEROES_KEY_MAP");
-    if (k != g_vals.end()) parse_map(k->second, [](int g, const std::string& v) { g_key_bind[g] = v; });
+    /* the settings file's, else the process's (a session's --set, a test): M11.2g */
+    auto value = [](const char* key) -> std::string {
+        auto f = g_vals.find(key);
+        if (f != g_vals.end()) return f->second;
+        const char* e = getenv(key);
+        return e ? e : "";
+    };
+    const std::string pm = value("DOTHEROES_PAD_MAP"), km = value("DOTHEROES_KEY_MAP");
+    if (!pm.empty()) parse_map(pm, [](int g, const std::string& v) { const int b = game_bit(v); if (b >= 0) g_pad_bind[g] = b; });
+    if (!km.empty()) parse_map(km, [](int g, const std::string& v) { g_key_bind[g] = v; });
     for (int i = 0; i < 16; i++) {
         if (cellPad_set_pad_binding) cellPad_set_pad_binding(i, 1u << g_pad_bind[i]);
         if (cellPad_set_key_binding) cellPad_set_key_binding(i, g_key_bind[i].c_str());

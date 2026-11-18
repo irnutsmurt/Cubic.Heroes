@@ -105,8 +105,11 @@ content changed.
 - **Windowed, borderless or exclusive fullscreen**, the window's size and place remembered.
 - **Rendering resolution** apart from the window: native (your display's), 720p (the original), 1080p, 1440p, 4K or
   custom -- above your display's for supersampling or below it for speed, the picture's shape always kept.
-- **Keyboard and controller customization**: your own buttons and keys, with the prompts of your controller
-  (Xbox, PlayStation, Nintendo).
+- **Keyboard and controller customization**: your own buttons and keys.
+- **Button prompts throughout the game** in the style of what you play with -- switching by itself to the controller
+  or keyboard you used last, or the one you choose: Xbox, PlayStation (the game's original pictures), Nintendo
+  Switch, Steam, a generic controller, keyboard and mouse. Every menu, the HUD, messages, tutorials, shops, the
+  character editor and the minigames show the button or key that does it, after your own remapping.
 - **An in-game settings menu** over the paused game: display, audio, controls and performance, changed while you play.
 - **QUIT GAME** on the title menu.
 
@@ -236,7 +239,7 @@ Settings are shared by the launcher and the in-game menu:
 | VSync | on / off, independent of the frame limit |
 | Frame limit | 30 (the original), 60 (default), 75, 100, 120, 144, 165, 240, your display's rate, custom, unlimited |
 | Volumes | master, music and effects, 0-100, and mute -- applied at once |
-| Controls | your own controller buttons and keyboard keys; the prompts' style; the in-game menu's shortcut |
+| Controls | your own controller buttons and keyboard keys; the button prompts (automatic, Xbox, PlayStation, Nintendo Switch, Steam, generic, keyboard and mouse); the in-game menu's shortcut |
 | Performance overlay | off, the frame rate, or the frame rate and frame times |
 
 ## Updating

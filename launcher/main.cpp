@@ -724,7 +724,8 @@ static void pad_symbol(ImDrawList* dl, ImVec2 c, float px, int sym, ImU32 col)
 // bumpers and menu buttons as steel blocks, or a parchment keycap
 static float glyph(ImDrawList* dl, ImVec2 p, Act a, float h)
 {
-    const bool pad = g_device == Device::Pad;
+    // M11.2g: a manual choice holds whatever was used last (as in the game); automatic follows the device
+    const bool pad = g_prompt_choice == "auto" ? g_device == Device::Pad : g_prompt_choice != "keyboard";
     const char* t = "";
     ImU32 fill = col::steel;
     bool round = false;
@@ -2144,7 +2145,8 @@ static void page_settings()
         { "DOTHEROES_LOG_LEVEL", { { "error", "Errors only" }, { "warning", "Errors and warnings" }, { "info", "Normal" },
                                    { "debug", "Detailed" }, { "trace", "Everything" } } },
         { "LAUNCHER_PROMPTS", { { "auto", "Automatic" }, { "xbox", "Xbox" }, { "playstation", "PlayStation" },
-                                { "nintendo", "Nintendo Switch" }, { "steam", "Steam" }, { "generic", "Generic" } } },
+                                { "nintendo", "Nintendo Switch" }, { "steam", "Steam" }, { "generic", "Generic" },
+                                { "keyboard", "Keyboard and mouse" } } },
         { "LAUNCHER_DISPLAY_MODE", { { "windowed", "Windowed" }, { "borderless", "Borderless fullscreen" },
                                      { "exclusive", "Exclusive fullscreen" } } },
     };

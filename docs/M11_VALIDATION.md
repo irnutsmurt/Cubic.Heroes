@@ -167,6 +167,7 @@ its maps (W/S); R where a material is in doubt.
 | The command line: --play's session options, its exit status, the game ended with CubicHeroes | S | pass (tests/cli_integration.py --with-game: 17 of 17, PLAN 32) |
 | Headless --install, --update, --prepare-shaders on a throwaway installation | S | todo |
 | M11.2f: the rendering resolution -- every preset and a custom size, live changes, the in-game menu's row, frame pacing, the shader cache, the memory fallback | S | pass offscreen (PLAN 34: the same pictures at 720p-2160p and 540p, 60 fps p99 under 20 ms at every preset, 371 MB at 2160p, no new pipelines, 7680x4320 lowered to fit a smaller heap); on a scaled display, exclusive fullscreen on a 1440p/4K display and the launcher's row: owner |
+| M11.2g: the button prompts throughout the game -- every style (automatic, Xbox, PlayStation, Nintendo Switch, Steam, generic, keyboard), remapping, automatic switching, the words, the attract demo, rendering resolutions | S, O | pass offscreen (PLAN 35: 6 styles on the title, HUD, menus and lessons; 135 cells of 40 textures by the self-test; switching through 7 devices with Cross/Square swapped; PlayStation pixel for pixel as before; the demo's HUD redrawn; no frame cost but at a texture's load); real controllers of each kind and hot-plugging: owner |
 
 ## Bugs
 

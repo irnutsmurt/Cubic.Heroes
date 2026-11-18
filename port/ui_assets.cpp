@@ -15,11 +15,16 @@ void ps3_ui_set_prompt_png(int style, int button, const void* png, size_t size);
 }
 
 namespace {
-// ps3emu/osd.h PS3_UI_PROMPTS_*: 0 keyboard, 1 PlayStation, 2 Xbox, 3 Switch; button 0 confirm, 1 back
+// ps3emu/osd.h PS3_UI_PROMPTS_*: 0 keyboard, 1 PlayStation, 2 Xbox, 3 Switch, 4 Steam, 5 generic; button 0 confirm,
+// 1 back
 struct Prompt { const char* file; int style, button; };
+// M11.2g: Cross confirms, Circle goes back -- on a Switch pad the buttons labelled A and B (SDL's label mode); Steam's
+// A and B; a generic pad's bottom and right buttons
 const Prompt kPrompts[] = {
-    { "prompt_xbox_confirm.png", 2, 0 },     { "prompt_xbox_back.png", 2, 1 },
-    { "prompt_switch_confirm.png", 3, 0 },   { "prompt_switch_back.png", 3, 1 },
+    { "prompt_xbox_confirm.png", 2, 0 },               { "prompt_xbox_back.png", 2, 1 },
+    { "prompts/switch_button_a.png", 3, 0 },           { "prompts/switch_button_b.png", 3, 1 },
+    { "prompts/steam_button_a.png", 4, 0 },            { "prompts/steam_button_b.png", 4, 1 },
+    { "prompts/switch_buttons_down.png", 5, 0 },       { "prompts/switch_buttons_right.png", 5, 1 },
 };
 }  // namespace
 

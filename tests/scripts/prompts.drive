@@ -1,0 +1,49 @@
+# M11.2g: the prompts in one style (LAUNCHER_PROMPTS from the caller) on representative screens: the title ("PRESS
+# START BUTTON"), the HUD's key guide, the equipment screen, the guard's lessons (R1 and Cross glyphs in text; the
+# second answer's "left stick" / "directional buttons"), the maid's (Triangle, L1, R1). Checked by tests/prompts_check.py.
+#! saves build/checkpoints/castle-front
+#! env DOTHEROES_DEVELOPER_MODE=1 DOTHEROES_DEV_STATE=1 PS3_VERBOSE=0 SHOT_EVERY=0 DUMP=1
+#! secs 420
+include C:/3d dot game heroes/tests/scenarios/common.drive
+
+log TitleMovie 120
+sleep 7
+shot title
+call continue
+state life>0 60
+sleep 4
+dev nodeath on
+shot hud
+press TRIANGLE
+sleep 2
+shot equip
+press CIRCLE
+sleep 2
+devtry event n11imperialguarda1_020
+sleep 3
+shot guard-r1
+devpage 20 soft
+sleep 1
+devtry event n11imperialguarda1_030
+sleep 3
+shot guard-cross
+press CROSS
+sleep 2
+press DOWN
+sleep 0.5
+press CROSS
+sleep 2.5
+shot guard-stick
+press CROSS
+sleep 2.5
+shot guard-dpad
+devpage 20 soft
+sleep 1
+devtry event n12ladysmaida1_080
+sleep 3
+shot maid-1
+press CROSS
+sleep 2.5
+shot maid-2
+devpage 20 soft
+sleep 1

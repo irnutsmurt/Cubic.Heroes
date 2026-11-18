@@ -51,6 +51,7 @@ enum { DH_LOG_ERROR = 0, DH_LOG_WARNING = 1, DH_LOG_INFO = 2 };
 
 extern "C" uint8_t* vm_base;
 extern "C" int dotheroes_set_render_resolution(const char* value, const char* custom);   /* main.cpp (M11.2f) */
+namespace prompts { std::string lua_chunk(); }   /* port/prompts.cpp (M11.2g): the words of the prompts */
 extern "C" void (*g_ppfx_unforeseen_hook)(uint64_t key, const char* kind, double ms);   /* ppfx_render.cpp (M11.0f) */
 extern "C" int64_t sys_memory_allocate(ppu_context* ctx);
 struct DevFnEntry { uint64_t addr; void (*func)(ppu_context*); const char* name; };   /* the lift's func_entry */
@@ -1569,11 +1570,36 @@ void title_tick(ppu_context* c)
             fprintf(stderr, "[title] QUIT GAME's label set (%s menu entr%s)\n", out.c_str(), out == "1" ? "y" : "ies");
     } catch (const CallError&) {}
 }
-void title_flip(ppu_context* c) { title_tick(c); }
+/* M11.2g: the game's prompts written as words (port/prompts.cpp lua_chunk: the title's line, the guard's lesson for the
+ * keyboard) -- the chunk installs its two hooks once (every 5 flips until both are in), then runs again only when the
+ * style or the direction keys change (checked every 30 flips). Developer mode off too, in the label's own page. */
+
+void prompt_text_tick(ppu_context* c)
+{
+    static unsigned flips = 0;
+    static int installed = 0;
+    static std::string last;
+    if (++flips % (installed == 3 ? 30u : 5u)) return;
+    const std::string ch = ::prompts::lua_chunk();
+    if (installed == 3 && ch == last) return;
+    if (!(g_region || ensure_region(c, !g_on))) return;
+    std::string out;
+    try {
+        if (run_lua(c, ch, out) == 1) {
+            const int now = atoi(out.c_str());
+            if (now != installed) fprintf(stderr, "[prompts] the game's words: hooks %s%s\n", now & 2 ? "title" : "",
+                                          now & 1 ? (now & 2 ? ", messages" : "messages") : "");
+            installed = now;
+            last = ch;
+        }
+    } catch (const CallError&) {}
+}
+void title_flip(ppu_context* c) { title_tick(c); prompt_text_tick(c); }
 
 void on_flip(ppu_context* c)
 {
     title_tick(c);
+    prompt_text_tick(c);   /* M11.2g */
     g_flip_thread.store(this_thread_key(), std::memory_order_relaxed);
     g_flip_ctx.store(c, std::memory_order_release);
     note_frame();
@@ -1748,8 +1774,8 @@ extern "C" void devtools_start(const char* install_root, const char* elf)
 {
     const char* e = getenv("DOTHEROES_DEVELOPER_MODE");
     g_on = e && !strcmp(e, "1");
-    if (!g_on) {   /* M11.2d: the flip still names QUIT GAME */
-        if (g_dotheroes_quit_item) g_devtools_flip = title_flip;
+    if (!g_on) {   /* M11.2d: the flip still names QUIT GAME; M11.2g: and writes the prompts' words */
+        g_devtools_flip = title_flip;
         return;
     }
     g_install_root = install_root ? install_root : "";

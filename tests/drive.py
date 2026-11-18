@@ -1561,6 +1561,13 @@ def step(lineno, line, op, a):
         if s0 and s1 and "hx" in s0:
             say(f"  moved {s1['hx'] - s0['hx']:+.2f} {s1['hz'] - s0['hz']:+.2f} to ({s1['hx']:.2f}, {s1['hz']:.2f})"
                 f" area {s1['area']:g}")
+    elif op == "device":   # device <keyboard|playstation|xbox|switch|steam|generic>: the last input's device (M11.2g)
+        kinds = ["keyboard", "playstation", "xbox", "switch", "steam", "generic"]
+        acted()
+        with open(os.path.join(run, "pad.txt"), "w") as f:
+            f.write(f"0x0000 1 0 dev={kinds.index(a[0])}\n")
+        wait(0.3)
+        say(f"device: {a[0]}")
     elif op == "guardface":   # guardface <secs>: guard (R1) turned to the nearest character with life, re-aimed every 0.5 s
         guard_face(float(a[0]))
     elif op == "fight":

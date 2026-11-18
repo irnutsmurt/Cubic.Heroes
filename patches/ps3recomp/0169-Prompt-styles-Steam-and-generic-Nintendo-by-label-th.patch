@@ -1,0 +1,156 @@
+From 41d2905901269e3d8cb9e9e263130ebbaa9b1788 Mon Sep 17 00:00:00 2001
+From: giteaguy <73799093+irnutsmurt@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 12:45:03 -0800
+Subject: [PATCH] Prompt styles: Steam and generic, Nintendo by label, the
+ bindings read back
+
+dotheroes M11.2g. A pad's family for the prompts: PlayStation, Switch, Xbox (by SDL's type), the Steam Controller
+and Steam Deck (by name), else generic (PS3_UI_PROMPTS_STEAM, PS3_UI_PROMPTS_GENERIC; an unknown pad no longer
+shows Xbox's letters). cellPad_connected_family: the first connected controller's family, for the prompts before
+any input. cellPad_pad_binding: the pad buttons that press one of the game's. SDL's label mode for Nintendo pads is
+set explicitly (its default): the button labelled A presses Cross, and the save screen now names A and B by label
+on a Switch pad too (it had them by position). PAD_FILE's "dev=N" (tests): the report's device.
+---
+ include/ps3emu/osd.h       |  2 +-
+ libs/input/cellPad.c       | 33 ++++++++++++++++++++++++++++++---
+ libs/system/cellSaveData.c |  2 ++
+ libs/video/osd_saves.c     | 12 +++++++-----
+ 4 files changed, 40 insertions(+), 9 deletions(-)
+
+diff --git a/include/ps3emu/osd.h b/include/ps3emu/osd.h
+index 46e25c8..5273420 100644
+--- a/include/ps3emu/osd.h
++++ b/include/ps3emu/osd.h
+@@ -311,7 +311,7 @@ typedef struct {
+ } ps3_osd_save_entry;
+ 
+ enum { PS3_UI_PROMPTS_KEYBOARD = 0, PS3_UI_PROMPTS_PLAYSTATION, PS3_UI_PROMPTS_XBOX, PS3_UI_PROMPTS_SWITCH,
+-       PS3_UI_PROMPTS_N };
++       PS3_UI_PROMPTS_STEAM, PS3_UI_PROMPTS_GENERIC, PS3_UI_PROMPTS_N };   /* dotheroes M11.2g: Steam, generic */
+ 
+ typedef struct {
+     uint32_t seq;                             /* odd while a post is being written */
+diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
+index 46adb57..090dc50 100644
+--- a/libs/input/cellPad.c
++++ b/libs/input/cellPad.c
+@@ -74,7 +74,7 @@ static double pad_clock(unsigned long long t0_ms)
+ #define PAD_MAX_HOST_PORTS  4  /* XInput supports max 4; SDL may support more */
+ 
+ /* The device the player last used, for a host dialog's prompts (ps3emu/osd.h
+- * PS3_UI_PROMPTS_*: 0 keyboard, 1 PlayStation, 2 Xbox, 3 Switch); -1 none yet. */
++ * PS3_UI_PROMPTS_*: 0 keyboard, 1 PlayStation, 2 Xbox, 3 Switch, 4 Steam, 5 generic); -1 none yet. */
+ static volatile int s_ui_device = -1;
+ 
+ typedef struct {
+@@ -609,9 +609,12 @@ static void pad_sdl_hotplug(int force)
+     pad_sdl_scan();
+ }
+ 
+-/* A pad's family for the prompts (s_ui_device): PlayStation, Switch, else Xbox's. */
++/* A pad's family for the prompts (s_ui_device): PlayStation, Switch, Xbox, Steam (its name: the Steam Controller,
++ * the Steam Deck), else generic (dotheroes M11.2g: an unknown pad no longer shows Xbox's letters). */
+ static int pad_sdl_family(SDL_GameController* gc)
+ {
++    const char* name = SDL_GameControllerName(gc);
++    if (name && (strstr(name, "Steam Controller") || strstr(name, "Steam Deck"))) return 4;
+     switch (SDL_GameControllerGetType(gc)) {
+     case SDL_CONTROLLER_TYPE_PS3:
+     case SDL_CONTROLLER_TYPE_PS4:
+@@ -622,11 +625,22 @@ static int pad_sdl_family(SDL_GameController* gc)
+     case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT:
+     case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_PAIR:
+         return 3;
+-    default:
++    case SDL_CONTROLLER_TYPE_XBOX360:
++    case SDL_CONTROLLER_TYPE_XBOXONE:
+         return 2;
++    default:
++        return 5;
+     }
+ }
+ 
++/* dotheroes M11.2g: the family of the first controller connected (the prompts before any input), -1 none */
++int cellPad_connected_family(void)
++{
++    for (int i = 0; i < PAD_MAX_HOST_PORTS; i++)
++        if (s_sdl_controllers[i]) return pad_sdl_family(s_sdl_controllers[i]);
++    return -1;
++}
++
+ /* One reading of SDL: its controller update, the device changes, then each port into out[] (and the rumble kept
+  * going). On the pad thread (on_thread), or -- PAD_SDL_THREAD=0 -- in the guest's own poll, into the state it reads. */
+ static void pad_sdl_read(PadHostState* out, int on_thread)
+@@ -831,6 +845,9 @@ static void pad_init_backend(void)
+              * whoever polls. SDL_JOYSTICK_THREAD=0 in the environment wins. */
+             SDL_SetHint(SDL_HINT_JOYSTICK_THREAD, "1");
+ #endif
++            /* dotheroes M11.2g: Nintendo's face buttons by their labels (SDL's default, stated): the button labelled
++             * A presses Cross -- the prompts name it A (the launcher sets the same) */
++            SDL_SetHint(SDL_HINT_GAMECONTROLLER_USE_BUTTON_LABELS, "1");
+             SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER);
+         }
+         s_sdl_inited = 1;
+@@ -1055,6 +1072,12 @@ static volatile u32 s_remap[16] = { 1u << 0, 1u << 1, 1u << 2, 1u << 3, 1u << 4,
+                                     1u << 8, 1u << 9, 1u << 10, 1u << 11, 1u << 12, 1u << 13, 1u << 14, 1u << 15 };
+ static volatile int s_remap_on = 0;
+ 
++/* dotheroes M11.2g: the pad's buttons (bits) that press one of the game's (the prompts show the first) */
++u32 cellPad_pad_binding(int game_bit)
++{
++    return game_bit < 0 || game_bit > 15 ? 0 : __atomic_load_n(&s_remap[game_bit], __ATOMIC_ACQUIRE);
++}
++
+ void cellPad_set_pad_binding(int game_bit, u32 pad_bits)
+ {
+     if (game_bit < 0 || game_bit > 15) return;
+@@ -1452,6 +1475,10 @@ skip_inject: ;
+               if (f) {
+                   char buf[64]; buf[0] = 0;
+                   if (fgets(buf, sizeof buf, f)) {
++                      /* dotheroes M11.2g (tests): "dev=N" -- the report comes from that kind of device (PS3_UI_PROMPTS_*:
++                       * 0 keyboard, 1 PlayStation, 2 Xbox, 3 Switch, 4 Steam, 5 generic), as a real one's sets it */
++                      const char* dv = strstr(buf, "dev=");
++                      if (dv) s_ui_device = atoi(dv + 4);
+                       char* rest;
+                       unsigned m = (unsigned)strtoul(buf, &rest, 0);
+                       int n = (int)strtol(rest, &rest, 0);
+diff --git a/libs/system/cellSaveData.c b/libs/system/cellSaveData.c
+index eca3cc3..d76c943 100644
+--- a/libs/system/cellSaveData.c
++++ b/libs/system/cellSaveData.c
+@@ -1316,6 +1316,8 @@ static int ui_prompt_style(void)
+         if (!strcmp(e, "playstation")) return PS3_UI_PROMPTS_PLAYSTATION;
+         if (!strcmp(e, "xbox")) return PS3_UI_PROMPTS_XBOX;
+         if (!strcmp(e, "switch")) return PS3_UI_PROMPTS_SWITCH;
++        if (!strcmp(e, "steam")) return PS3_UI_PROMPTS_STEAM;       /* dotheroes M11.2g */
++        if (!strcmp(e, "generic")) return PS3_UI_PROMPTS_GENERIC;
+     }
+     const int d = cellPad_ui_device();
+     return d >= 0 && d < PS3_UI_PROMPTS_N ? d : PS3_UI_PROMPTS_KEYBOARD;
+diff --git a/libs/video/osd_saves.c b/libs/video/osd_saves.c
+index 955a50e..a2a659e 100644
+--- a/libs/video/osd_saves.c
++++ b/libs/video/osd_saves.c
+@@ -429,11 +429,13 @@ static float draw_button(const Canvas* c, int style, int button, float x, float
+         }
+         return size;
+     case PS3_UI_PROMPTS_XBOX:
+-    case PS3_UI_PROMPTS_SWITCH: {
+-        /* the button that does it, by its label on that pad: Xbox A/B; on a
+-         * Switch pad the confirm (bottom) button is B and back (right) is A */
+-        const char* l = style == PS3_UI_PROMPTS_XBOX ? (button == 0 ? "A" : "B") : (button == 0 ? "B" : "A");
+-        const uint32_t col = style == PS3_UI_PROMPTS_SWITCH ? UI_RGB(60, 60, 66)
++    case PS3_UI_PROMPTS_SWITCH:
++    case PS3_UI_PROMPTS_STEAM:
++    case PS3_UI_PROMPTS_GENERIC: {
++        /* the button that does it, by its label on that pad: A confirms, B goes back -- on a Switch pad too (SDL
++         * reports its face buttons by label: the right one, labelled A, presses Cross; dotheroes M11.2g) */
++        const char* l = button == 0 ? "A" : "B";
++        const uint32_t col = style != PS3_UI_PROMPTS_XBOX ? UI_RGB(60, 60, 66)
+                              : button == 0 ? UI_RGB(46, 150, 68) : UI_RGB(200, 54, 46);
+         disc(c, cx, cy, r, col, 255);
+         const int px = (int)(size * 0.62f);
+-- 
+2.56.0.windows.3
+

@@ -3,8 +3,10 @@ pack (www.kenney.nl), unmodified:
 
   prompt_xbox_confirm.png      Xbox Series/Double/xbox_button_color_a.png
   prompt_xbox_back.png         Xbox Series/Double/xbox_button_color_b.png
-  prompt_switch_confirm.png    Nintendo Switch/Double/switch_button_b.png
-  prompt_switch_back.png       Nintendo Switch/Double/switch_button_a.png
+
+The images in prompts/ (M11.2g: the game's own button prompts in the player's style) are from the same pack,
+unmodified, under their names in it: the "Default" (64-pixel) images of its Xbox Series, Nintendo Switch, Steam
+Controller and Keyboard & Mouse sets.
 
 Licence: Creative Commons Zero, CC0 1.0 Universal
 (https://creativecommons.org/publicdomain/zero/1.0/). The assets may be used in

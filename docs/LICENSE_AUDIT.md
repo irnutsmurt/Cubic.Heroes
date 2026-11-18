@@ -221,8 +221,7 @@
 | `port/assets/ui/DejaVuSans.ttf` | THIRD | keep: licence file beside it; listed in the README |
 | `port/assets/ui/LICENSE-DejaVuSans.txt` | THIRD | keep: licence file beside it; listed in the README |
 | `port/assets/ui/LICENSE-Kenney.txt` | THIRD | keep: licence file beside it; listed in the README |
-| `port/assets/ui/prompt_switch_back.png` | THIRD | keep: licence file beside it; listed in the README |
-| `port/assets/ui/prompt_switch_confirm.png` | THIRD | keep: licence file beside it; listed in the README |
+| `port/assets/ui/prompts/*.png` (163 images, M11.2g) | THIRD | keep: Kenney's Input Prompts, CC0, unmodified; LICENSE-Kenney.txt beside them; listed in the README |
 | `port/assets/ui/prompt_xbox_back.png` | THIRD | keep: licence file beside it; listed in the README |
 | `port/assets/ui/prompt_xbox_confirm.png` | THIRD | keep: licence file beside it; listed in the README |
 | `port/audio_hook_table.inc` | INDEP | keep |

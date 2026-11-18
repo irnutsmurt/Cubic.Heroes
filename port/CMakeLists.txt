@@ -321,7 +321,12 @@ target_sources(${PROJECT_NAME} PRIVATE promo_check.cpp)
 # The save-data screen's font and prompt images (assets/ui, docs/SAVE_UI.md), embedded
 # in the executable so every copy of it (a release folder, an install) has them.
 set(UI_ASSET_FILES DejaVuSans.ttf
-    prompt_xbox_confirm.png prompt_xbox_back.png prompt_switch_confirm.png prompt_switch_back.png)
+    prompt_xbox_confirm.png prompt_xbox_back.png)
+# M11.2g: Kenney's input prompts (CC0) the game's own prompts are drawn with (port/prompts.cpp)
+file(GLOB _prompt_pngs RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}/assets/ui" CONFIGURE_DEPENDS
+     "${CMAKE_CURRENT_SOURCE_DIR}/assets/ui/prompts/*.png")
+list(SORT _prompt_pngs)
+list(APPEND UI_ASSET_FILES ${_prompt_pngs})
 set(_ui_assets_c "${CMAKE_CURRENT_BINARY_DIR}/ui_assets_data.c")
 set(_ui_asset_paths "")
 foreach(_f IN LISTS UI_ASSET_FILES)
@@ -396,7 +401,8 @@ add_library(dotheroes_native STATIC native/bullet_cd_task.cpp native/bullet_solv
     # M8.0's movie trace (DOTHEROES_MOVIE_TRACE; a lift with config/m8_movie_trace.json's observers)
     native/movie/movie_trace.cpp)
 # the save-data screen's font and prompt images (above), registered by main.cpp
-target_sources(dotheroes_native PRIVATE ui_assets.cpp "${_ui_assets_c}")
+target_sources(dotheroes_native PRIVATE ui_assets.cpp "${_ui_assets_c}"
+    prompts.cpp prompts_table.cpp)   # M11.2g: the game's button prompts in the player's style
 if(NOT DOTHEROES_NATIVE_RELEASE)
     # R4's bridge to the FIFO walker and the existing renderer (development)
     target_sources(dotheroes_native PRIVATE native/render/ppfx_bridge.cpp)

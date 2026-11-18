@@ -40,7 +40,7 @@ Xbox's). It is this screen's part of docs/PC_EXPERIENCE.md section 6 (the PROMPT
 - Keyboard: Enter (also Z) confirms; Esc (also Backspace, and X) goes back. Esc no longer quits the
   game while the screen is open.
 - PlayStation: Cross and Circle, drawn from shapes (no PlayStation images are shipped, by decision).
-- Xbox: A and B. Switch: the pad's own labels for the same buttons (confirm B, back A).
+- Xbox: A and B. Switch: by label (SDL reports its face buttons by label: the one labelled A presses Cross) -- confirm A, back B (M11.2g; it had them by position before). Steam: A and B; generic: the bottom and right buttons.
 
 ## How it is built
 

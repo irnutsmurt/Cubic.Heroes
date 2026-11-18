@@ -42,6 +42,7 @@ extern "C" void spu_coh_forbid(const char* why);   /* spu_coherency.c: M6, the r
 extern "C" void dev_waver_init(void);   /* phys_hooks.cpp */
 #include "native/waver_game.h"
 extern "C" void dotheroes_ui_assets_init(void); /* ui_assets.cpp */
+namespace prompts { void start(const char* elf); void set_choice(const char* v); }   /* prompts.cpp (M11.2g) */
 extern "C" void dotheroes_audio_hooks_init(void); /* audio_hooks.cpp */
 #include "native/memtest.h"
 #include "ps3emu/ps3_strict.h"
@@ -1236,13 +1237,14 @@ static void apply_pc_settings(void)
     if (const char* d = getenv("DOTHEROES_DISPLAY_MODE")) set_default_env("PS3RECOMP_VK_DISPLAY_MODE", d);
     if (const char* o = getenv("DOTHEROES_PERF_OVERLAY"))
         set_default_env("PS3_OSD_FPS", !strcmp(o, "graph") ? "2" : !strcmp(o, "fps") ? "1" : "0");
-    /* the prompt style the launcher and the in-game menu share (LAUNCHER_PROMPTS) for the game's own host screens
-     * (the save list); automatic: the controller in use. Steam and generic draw Xbox's shapes there. */
+    /* the prompt style the launcher and the in-game menu share (LAUNCHER_PROMPTS): the game's own prompts
+     * (prompts.cpp, M11.2g) and its host screens (the save list); automatic: the device used last */
     if (const char* pr = getenv("LAUNCHER_PROMPTS")) {
         const std::string p = pr;
-        const char* st = p == "xbox" || p == "steam" || p == "generic" ? "xbox" : p == "playstation" ? "playstation"
-                       : p == "nintendo" ? "switch" : nullptr;
+        const char* st = p == "xbox" ? "xbox" : p == "playstation" ? "playstation" : p == "nintendo" ? "switch"
+                       : p == "steam" ? "steam" : p == "generic" ? "generic" : p == "keyboard" ? "keyboard" : nullptr;
         if (st) set_default_env("PS3_UI_PROMPTS", st);
+        prompts::set_choice(pr);
     }
     /* the window's place and size from the last windowed session; M11.2c: DOTHEROES_WINDOW_SIZE=WxH (CubicHeroes
      * --width --height) is this session's size -- at the remembered place, else centred on the work area -- and
@@ -1417,6 +1419,7 @@ int main(int argc, char** argv)
         dotheroes_overlay_start(cfg.c_str(), s_install_root.c_str());
     }
     devtools_start(s_install_root.c_str(), elf);   /* M11.0: inert unless DOTHEROES_DEVELOPER_MODE=1 */
+    prompts::start(elf);   /* M11.2g: the game's prompt textures recognised from the player's files (before any frame) */
     /* On this thread, which runs the guest's entry (the PPU main thread),
      * and before the others start, so they take the process's placement. */
     dotheroes_cpu_place();

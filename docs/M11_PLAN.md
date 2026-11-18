@@ -1373,3 +1373,111 @@ mode never changed; no gameplay timing affected; a CLI `--resolution`; vendor-ne
   2560x1440 in effect and not kept) -- run with the release qualification.
 - Not tested here: a display scaled above 100% (the DPI awareness), exclusive fullscreen at native on a 1440p/4K
   display, and the owner's on-screen look; the launcher's row was compiled, not driven.
+
+## 35. M11.2g: the button prompts throughout the game (2026-11-18) [M]
+
+The owner's requirement (completing M10's prompts): every prompt the game shows in the player's style -- automatic
+(the device used last, the default), Xbox, PlayStation, Nintendo Switch, Steam, generic controller, keyboard and
+mouse -- with the player's own bindings, Nintendo's labels, hot-plugging, PlayStation keeping the game's own art,
+Kenney's prompts (the owner's assets, CC0) for the others, and no modified game texture distributed.
+
+**The audit** (build/m11 prompts, local: the player's files read, nothing kept in the repository). The English build
+shows its buttons four ways:
+
+1. **Glyphs of its fonts inside text** -- Font_eng (the menus) and Font_b/Font_c (the messages: FONT A and B), 512x2048
+   DXT3, 32x32 cells: Circle, Cross, Triangle, Square, small L1/R1/SELECT/START (cells 248-255) and wide R1, L1,
+   SELECT, START, R2, L2 (two cells each, 647-681). 18 strings use them (29 glyphs): the guards' and the maid's
+   lessons, the yellow orb, the minigames' tutorials and starts. Full-width X is never the Cross button in English.
+2. **Button art in 37 UI textures** (DXT1/3/5; the dungeons' map window the same picture in 7 packages): the HUD's key guide and windows, pause, options, the item, equipment
+   and orb menus, the action balloons (CHECK/TALK/OPEN), the title's character choice and difficulty, the character
+   editor, name entry, the albums, the shops and the blacksmith, the minigames, the maps, the camera.
+3. **Three prompts as words**: the title's "PRESS START BUTTON", "the left stick" and "the directional buttons" in the
+   castle guard's lesson.
+4. **The attract demo's video** (PlayDemoMovieUS.bik, the title's DEMO PLAY): a recording of play, the HUD's
+   buttons in its picture (the key guide in two layouts, the slots' Cross and Circle, the item cycle's L2/R2).
+
+The executable inserts no button text of its own; the shops, editor, title, options and save screens have no glyphs in
+text (their prompts are atlas art beside action words).
+
+**Design** (port/prompts.cpp, port/prompts_table.cpp; the renderer's guest_texture_live; runtime patch 0169):
+
+- **The textures, at upload.** port/prompts_table.cpp lists each atlas (its package and name) and each button's cell
+  (our annotations of the audit) and the fonts' glyph cells. At start the player's own files are read once (40
+  textures) and each one's fingerprint kept (its size and format, its first level's first 16 KB and last 4 KB). The
+  renderer asks for a DXT texture of a listed size whether it is one of them (only when its content changed); a match
+  is uploaded as RGBA with each cell drawn again: the old art cleared to what surrounds it (the bar's panel, a
+  balloon's grey, or transparency), the new glyph fitted to the old art's box (aspect kept, area-averaged). A font's
+  glyphs take the size its own Circle has (one cell) and its wide R1 (two characters: the icon in the first one's cell, centred in the room the text keeps, so no join shows; the
+  second cell left empty), so text keeps its layout. Mip levels are made from the redrawn first level. No game texture is
+  written anywhere: everything happens in memory on the player's machine.
+- **The style and the bindings.** The style is the player's choice (LAUNCHER_PROMPTS, shared with the launcher; now
+  also "keyboard") or, automatic, the device used last (cellPad's: a keyboard key, or a controller's family by SDL's
+  type -- PlayStation, Switch, Xbox, the Steam Controller or Deck by name, else generic -- before any input, the first
+  controller connected). Each of the game's buttons is drawn as the physical button bound to it: the pad's binding
+  (DOTHEROES_PAD_MAP) or the key (DOTHEROES_KEY_MAP). Changing the style or a binding never changes a binding. The
+  style and the bindings make one signature; a texture drawn for another is made again at its next use (no work in
+  a frame where nothing changed).
+- **Nintendo's layout.** SDL reports a Switch pad's face buttons by label (now stated in cellPad: the hint set
+  explicitly): the button labelled A presses Cross. Every prompt names them by label -- Cross A, Circle B, Square X,
+  Triangle Y -- including the in-game menu's binding names and the save screen, which had them by position (Cross
+  "B": wrong, fixed here).
+- **PlayStation** keeps the game's own pictures: with the default bindings no texture is touched; with a button
+  remapped, the game's own art of the physical button (taken from the player's files at start) is drawn into the cell.
+- **The other styles** draw Kenney's input prompts (the owner's set, CC0; 163 of its 64-pixel pictures embedded,
+  port/assets/ui/prompts) **as drawn, on a transparent background** -- the owner's direction after a first version
+  filled each icon's shape as a dark button: the icon alone, nothing behind it. Xbox's face buttons in its colours;
+  Nintendo's by label; Steam's; generic: the face buttons by their place (a diamond with one lit), neutral L1/R1,
+  START and SELECT icons, LS/RS; the sticks as lettered stick tops. Keyboard: the key's cap with its name (Kenney's,
+  else drawn with the UI font, its label clear); the direction pad and the left stick as the direction keys; the
+  right stick has no key and keeps a stick's picture.
+- **The attract demo's video**: where its HUD shows the buttons (our measurement of the recording: 11 places in
+  1280x720, build/m11 pr_demo_locate.py), each decoded frame is checked (3 px around each place) against the game's
+  own art of that button from the player's files (normalised correlation of the luma: the video's own scale and
+  offset), and where it is found the old button's own pixels are filled from what surrounds them and the icon drawn
+  over, in the frame's own planes (BT.601) -- nothing where the HUD is not shown (a cut, a fade).
+- **The words** are rewritten in the game's own Lua (port/prompts.cpp lua_chunk, run from the flip hook every 30
+  flips -- every 5 until installed -- with developer mode off too, as QUIT GAME's label): a hook on the Title table's
+  assignment (the title loads its script each time it opens) sets "PRESS START BUTTON" -- PlayStation: as written;
+  else "PRESS" and the START glyph, which the font then draws in the style -- and a wrapper on the engine's
+  Event:Print (its metatable's __index answers Print with it) changes, for the keyboard, "the left stick" and "the
+  directional buttons" to "the arrow keys" (or "the direction keys" when they are rebound).
+- **The host screens**: the in-game menu's button names per style (Steam and generic added, Switch by label, a
+  "Keyboard and mouse" choice), the save screen's confirm/back pictures for Steam and generic (Kenney's) and Switch
+  by label; the launcher's own pixel glyphs already covered every style and switched with the device -- it gains the
+  keyboard choice, and a manual choice now holds whatever is used.
+
+**Tested** (offscreen, the development build; tests/scripts/prompts.drive checked by tests/prompts_check.py; build/m11
+pr_switch.drive, pr_demo.drive, the self-test):
+
+- **Every style on representative screens** (the title, the HUD's key guide and slots, the equipment screen, the
+  guards' and the maid's lessons with button glyphs in text, the second answer's words): PlayStation, Xbox, Nintendo
+  Switch, Steam, generic, keyboard -- all pass: the 40 prompt textures recognised from the files, both word hooks in,
+  textures redrawn only in the style asked for. PlayStation: no texture touched, and the equipment bar and the HUD's
+  key guide pixel for pixel as before this change; "PRESS START BUTTON" and the lessons as written.
+- **Every cell without visiting its screen** (DOTHEROES_PROMPT_SELFTEST: the 40 textures redrawn from the files in
+  each style, 135 cells reviewed beside the originals): shops, blacksmith, editor, name entry, albums, minigames,
+  maps, balloons, camera, the three fonts -- each cell replaced, nothing of the old art left, neighbours untouched
+  (Font_c's "?" placeholders for the wide SELECT, START, L2 and R2 now carry the glyphs too).
+- **Automatic switching and remapping** (pr_switch.drive: the pad's Cross and Square swapped, Cross on Space; the
+  input's device reported as each kind in turn, as a real device's input sets it): keyboard (SPACE for SELECT), Xbox
+  (X for SELECT, A for EQUIP), PlayStation (the game's own Cross and Square pictures swapped), Switch, Steam, generic,
+  keyboard again -- each change on the open equipment screen at once. With no input yet the prompts follow the
+  connected controller (this PC's Xbox 360 controller: Xbox). The style changed never changed a binding.
+- **The words**: keyboard -- "use the arrow keys for a Spin Slash"; the title "PRESS" and the START glyph in every
+  non-PlayStation style (Menu, +, the Steam start icon, Enter).
+- **Text glyphs**: the wide R1 in "Hold R1 to guard" -- first cut where the text advances; the owner saw "RB" read
+  as "R3" (the cut at 22 columns, the real advance 20: measured, the game's own R1 39 pixels wide on screen); then a
+  hairline at 3840x2160 (the text draws each character's dark outline before it, one character after the other: the
+  second half's outline crossed the light icon) -- now the whole icon in the first character's cell, centred in the
+  room the text keeps: clean at 1280x720 and 3840x2160.
+- **The attract demo**: every HUD button in the sampled frames redrawn (key guide in both layouts, slots, L2/R2), no
+  box left around them (the old button's pixels filled from their surroundings; a few pixels of a slot frame's edge
+  can spread into a tab's fill).
+- **Rendering resolutions**: Xbox at 3840x2160 -- the icons scale with the frame like the game's own art.
+- **Cost**: a texture is redrawn once when the game loads it or the style changes -- a 512x2048 font 2.5-3 ms, an
+  atlas 0.2-0.6 ms; nothing in a frame otherwise. Frame pacing with the Xbox prompts drawn: 1920x1080 at the 60
+  limit 60.0 fps, p99 18.4 ms (one frame of 25.4 ms in 27 s; 23.4 ms at most without prompts in M11.2f's run);
+  unlimited 1280x720 245.8 fps, p99 5.6 ms. The demo's check: 11 places x 49 positions x ~60 samples a frame.
+- Not tested here (owner): real controllers of each kind plugged and unplugged (the families come from SDL's types;
+  this PC has an Xbox 360 controller), a display scaled above 100%, the launcher's own prompts (compiled; its glyphs
+  are its own, unchanged but for the keyboard choice).

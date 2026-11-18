@@ -4138,7 +4138,7 @@ Img* depth_image(uint32_t loc, uint32_t off, VkFormat fmt, uint32_t w, uint32_t 
 // A texture asp samples from guest memory (static, mostly: DXT and
 // swizzled ones), cached by its description and checked against the guest
 // bytes by a hash once a frame
-struct GuestTex { Img* img; uint64_t hash; uint32_t frame; };
+struct GuestTex { Img* img; uint64_t hash; uint32_t frame; uint64_t prompt = 0, psig = 0; };   // M11.2g: prompt, its style
 uint64_t range_hash(const uint8_t* p, uint32_t len, const Rec* r);
 std::unordered_map<uint64_t, GuestTex> s_gtex;
 
@@ -4161,10 +4161,25 @@ Img* guest_texture_live(Batch& b, const Rec* r, const Texture& t)
     GuestTex& g = s_gtex[k];
     if (g.img && g.frame == r->frame && !r7_on()) return g.img;   // R7: every use asks the range's hash (below)
     const uint64_t h = range_hash(vm_base + ea, bytes, r) ^ k;
-    if (g.img && g.hash == h) { g.frame = r->frame; return g.img; }
+    // M11.2g: one of the game's prompt textures is also made again when the prompts' style or bindings change
+    if (g.img && g.hash == h && (!g.prompt || g.psig == prompt_sig())) { g.frame = r->frame; return g.img; }
     uint32_t bpp;
-    const VkFormat vf = be_vkformat(texfmt_be(lv[0].tl.fmt), &bpp);
+    VkFormat vf = be_vkformat(texfmt_be(lv[0].tl.fmt), &bpp);
     if (vf == VK_FORMAT_UNDEFINED) return nullptr;
+    std::vector<std::vector<uint8_t>> plv;   // M11.2g: the prompt texture's levels as the player sees them (RGBA)
+    {
+        const uint32_t bc = vf == VK_FORMAT_BC1_RGBA_UNORM_BLOCK ? 1 : vf == VK_FORMAT_BC2_UNORM_BLOCK ? 2
+                          : vf == VK_FORMAT_BC3_UNORM_BLOCK ? 3 : 0;
+        if (g.hash != h) g.prompt = bc && !cube ? prompt_texture_id(bc, t.width, t.height, vm_base + ea + lv[0].offset,
+                                                                    lv[0].tl.face_bytes) : 0;
+        if (g.prompt) {
+            g.psig = prompt_sig();
+            if (prompt_texture_patch(g.prompt, bc, t.width, t.height, nlv, vm_base + ea + lv[0].offset, plv)) {
+                vf = VK_FORMAT_R8G8B8A8_UNORM;
+                bpp = 4;
+            }
+        }
+    }
     if (g.img && (g.img->fmt != vf || g.img->w != t.width || g.img->h != t.height || g.img->levels != nlv ||
                   g.img->layers != layers)) {
         s_retired.push_back(g.img); g.img = nullptr;
@@ -4182,9 +4197,12 @@ Img* guest_texture_live(Batch& b, const Rec* r, const Texture& t)
     for (uint32_t f = 0; f < layers; f++)
     for (uint32_t m = 0; m < nlv; m++) {
         const rsx_tex_layout* tl = &lv[m].tl;
+        if (!plv.empty()) dec.swap(plv[m]);   // M11.2g: the prompts drawn in (RGBA, the level's own size)
+        else {
         dec.assign((size_t)tl->dst_row_bytes * tl->rows, 0);
         rsx_texture_decode(dec.data(), tl->dst_row_bytes, vm_base + ea + f * face + lv[m].offset, lv[m].w, lv[m].h, tl,
                            rsx_texture_argb_is_rgba());
+        }
         // DOTHEROES_CUBE_DUMP=<dir> (a diagnostic, M11.1b B-008): each cube face's levels as decoded, before upload --
         // cube_<location>_<offset>_f<face>_l<level>_<w>x<h>.rgba (the upload's own bytes) -- once a cube and place
         if (cube && bpp == 4) {

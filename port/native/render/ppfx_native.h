@@ -395,6 +395,14 @@ int guest_read_native(uint32_t loc, uint32_t off, uint32_t pitch, uint32_t w, ui
 // within the device's limits and memory. _now: the frame's size drawn now, and why it is lower than asked
 // (0 not, 1 the device's image limits, 2 its memory).
 void render_resolution(uint32_t w, uint32_t h);
+// M11.2g: the game's button prompts in the player's style (port/prompts.cpp). A texture's prompt identity from its
+// first level (bc: 1-3 for BC1-BC3; 0: not one of the game's prompt textures), the style and bindings now as one number
+// (a texture drawn for another is made again), and its first level as the player sees it (RGBA, each further level
+// made from it; false: the texture as it is).
+uint64_t prompt_texture_id(uint32_t bc, uint32_t w, uint32_t h, const uint8_t* level0, size_t bytes);
+uint64_t prompt_sig();
+bool prompt_texture_patch(uint64_t id, uint32_t bc, uint32_t w, uint32_t h, uint32_t nlv, const uint8_t* level0,
+                          std::vector<std::vector<uint8_t>>& levels);
 void render_resolution_now(uint32_t* w, uint32_t* h, int* why);
 extern std::atomic<uint64_t> s_guest_reads, s_guest_read_fail;
 // R4's stream marker (ppfx_bridge.cpp, the producer's thread): written into

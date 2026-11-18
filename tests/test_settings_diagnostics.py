@@ -139,6 +139,15 @@ class Settings(unittest.TestCase):
             with self.assertRaises(settings.SettingsError):
                 settings.set_values(self.install, bad)
 
+    def test_m112g_prompts_choice(self):
+        eff = settings.effective(self.install)["settings"]
+        self.assertEqual(eff["LAUNCHER_PROMPTS"]["value"], "auto", "automatic by default")
+        for v in ("auto", "xbox", "playstation", "nintendo", "steam", "generic", "keyboard"):
+            settings.set_values(self.install, {"LAUNCHER_PROMPTS": v})
+        self.assertEqual(settings.effective(self.install)["settings"]["LAUNCHER_PROMPTS"]["value"], "keyboard")
+        with self.assertRaises(settings.SettingsError):
+            settings.set_values(self.install, {"LAUNCHER_PROMPTS": "switch"})
+
     def test_worker(self):
         w = [sys.executable, os.path.join(ROOT, "tools", "worker.py"), "settings", "--install", self.install]
         p = subprocess.run(w + ["--set", "DOTHEROES_FPS=30"], capture_output=True, text=True, timeout=60)

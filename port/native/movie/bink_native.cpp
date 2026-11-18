@@ -56,6 +56,8 @@ extern "C" int64_t sys_memory_allocate(ppu_context* ctx);
 al_stream::Streamer* nsm_movie_streamer();   // native/audio/sound_manager.cpp: the music's streamer (null: none)
 // native/movie/movie_trace.cpp: a decoded frame's planes hashed (DOTHEROES_MOVIE_PLANES; else nothing)
 extern "C" void movie_planes_record(const char* name, int frame, uint32_t fb);
+// port/prompts.cpp (M11.2g): the attract demo's HUD buttons in the player's style
+extern "C" void prompts_movie_frame(const char* name, uint8_t* y, uint32_t ypitch, uint8_t* cr, uint8_t* cb, uint32_t cpitch, int w, int h);
 
 extern "C" int g_native_movie = 1;   // the hooks' guard: always on (M8.4: Bink is not in the lift)
 
@@ -481,6 +483,11 @@ int bink_native_decode(ppu_context* ctx)
                 memcpy(vm_base + buf + (size_t)r * pitch, pl.src->data() + (size_t)r * pl.w, (size_t)pl.w);
         }
         if (ok) {
+            // M11.2g: the attract demo's recorded HUD buttons drawn again in the player's style (port/prompts.cpp)
+            const uint32_t yb = rd32(set + 0x04), yp = rd32(set + 0x08), crb = rd32(set + 0x0C + 4), crp = rd32(set + 0x0C + 8);
+            const uint32_t cbb = rd32(set + 0x18 + 4), cbp = rd32(set + 0x18 + 8);
+            if (crp == cbp)
+                prompts_movie_frame(m->name.c_str(), vm_base + yb, yp, vm_base + crb, vm_base + cbb, crp, f->width, f->height);
             wr32(fb + 0x14, set_i);
             movie_planes_record(m->name.c_str(), cur, fb);
         }
