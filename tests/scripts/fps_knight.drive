@@ -1,0 +1,29 @@
+# B-012's check (M11.1b, docs/M11_PLAN.md section 23): the sixth temple's guardian, the dark knight, alone in his arena
+# for 60 s against a hero standing at the door, his movement logged; run at 30 and at 240 (DOTHEROES_FPS) and compare
+# with tests/fps_actors.py -- his classes 0x00FE52C0 (body), 0x00FE5460 and 0x00FE5390 (parts) travel the same.
+#! saves build/checkpoints/castle-front
+#! env DOTHEROES_DEVELOPER_MODE=1 DOTHEROES_NATIVE_CD=1 DOTHEROES_NATIVE_SOLVER=1,2,4,5,6 GCM_WRAP_LAP=1
+#! env DOTHEROES_PRESENT_ONCE=1 DOTHEROES_DEV_STATE=1 DOTHEROES_DEV_KEYS=1 DOTHEROES_DEV_ACTOR_LOG=1
+#! env DIAG_FRAMES=frames.log PS3_VERBOSE=0 SHOT_EVERY=0 DUMP=0
+#! secs 900
+
+include ../scenarios/common.drive
+
+log TitleMovie 120
+sleep 5
+call continue
+state life>0,area==17 90
+sleep 3
+dev nodeath on
+dev invulnerable on
+dev progress set 18
+dev boss temple6 @150
+sleep 2
+devpage 420 soft
+segment fight boss-temple6
+loop 12
+  sleep 5
+  devpage 8 soft ifany
+end
+endseg
+dev status

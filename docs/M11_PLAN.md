@@ -907,6 +907,21 @@ fps_bosses_m111b.txt):
   second at 30, 4.60 at 60, 5.75 at 144, 5.87 and 5.79 at 240; his fastest steps 15-17 at 30, 28-29 at 144 and
   240; his two other parts the same way. A defect: **B-012** (docs/M11_VALIDATION.md), his updates to be read.
 
+**B-012, the fix.** His three classes' updates (slot 8 of vtables 0x00FE52C0, 0x00FE5460, 0x00FE5390; the functions
+read from the game's own memory through the tools' `peek`: 0x002C8300, 0x00264850, 0x0025EFD8): the two parts place
+themselves each update at an offset from the object they follow (+0x6A0), using no time at all; the body's update
+(0x002C8300) is the mover -- it scales its velocity by the frame's time, yet something in it (not traced further) still
+moves more per frame than per second at higher rates. The remedy R8 proved on the first temple's guardian: the body's
+update gated to 30 Hz (an entry hook in config/r8_hooks.json, `dotheroes_tick30_knight_body` in port/game_patches.cpp:
+the shared 30 Hz clock, the update run only when a 1/30 s step is due and told that step), the parts left to follow
+him every frame. A new lift (build/r8/gen20: gen19 and that hook; one chunk differs). Measured (build/m11
+fps_knight, his arena alone, 60 s; DOTHEROES_TICK30_LOG at 240: 150 steps in every 5 s, 29.98 a second): his main
+part 3.84 and 3.98 units a second at 30, 3.75 at 60, 3.72 and 3.53 at 240 (before: 3.5 at 30, 5.8 at 240); his
+fastest steps 15-16 at every rate (before 28-29 at 240). At 30 fps the gate is off (the original pacing); above it he
+moves in 30 Hz steps, as on the console, like the first guardian. tests/scripts/fps_knight.drive and fps_bosses.drive
+are the measurement (tests/fps_actors.py compares the runs). On the gated build his fight and his tower rematch
+are won as before, and the first guardian's too (tests/devtools_bosses.py temple6, tower6, temple1: PASS).
+
 ## 24. M11.1b: a draw's uploads that no longer fit its batch (B-006) (2026-11-17) [M]
 
 **Finding**: the sweep's stricter check (sweep-m111, chunk 5) found one draw left out on arriving at

@@ -30,6 +30,13 @@
    "note": "The update of the segmented boss's head (vtable 0x00FE4690 slot 8): it ignores the frame time and advances its object by a constant 1/30 s a call (the only update in the game that does), so above 30 fps it ran fast, and the body segments, which read positions from a trail the head fills, ran after it. The gate calls it at 30 Hz (port/game_patches.cpp)."
   },
   {
+   "addr": "0x002C8300",
+   "host": "dotheroes_tick30_knight_body",
+   "guard": "g_dotheroes_tick30",
+   "decline": true,
+   "note": "The update (this, &dt) of the sixth temple's guardian, the dark knight (vtable 0x00FE52C0 slot 8; its parts, 0x00FE5460 and 0x00FE5390, follow it each frame): measured at 30, 60, 144 and 240 fps he travelled 3.5, 4.6 and 5.8 units a second -- more frames, more movement (M11.1b, B-012). The gate calls it at 30 Hz with a step of 1/30 s, as the segmented boss's (port/game_patches.cpp)."
+  },
+  {
    "addr": "0x005CF5BC",
    "host": "dotheroes_inflate_direct",
    "guard": "g_dotheroes_inflate_direct",

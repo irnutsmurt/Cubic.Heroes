@@ -48,6 +48,11 @@
  *   30 fps the object moves at the 30 fps game's pace, in 30 Hz steps.
  *   DOTHEROES_TICK30=0 turns it off; at DOTHEROES_FPS=30 it is off (the
  *   original pacing).
+ *   M11.1b (B-012): the sixth temple's guardian, the dark knight, as well: his
+ *   body's update (0x002C8300, vtable 0x00FE52C0) scales its velocity by the
+ *   frame's time, yet he travelled 3.5 units a second at 30 fps, 4.6 at 60
+ *   and 5.8 at 144 and 240 (build/m11 fps_knight); his parts follow his body
+ *   each frame. Gated the same way.
  */
 extern "C" {
 int g_dotheroes_fps_nosleep = 0;
@@ -156,7 +161,7 @@ static struct {
 
 static void tick30_log_call(uint32_t obj, uint32_t frame, float dt, int due, void (*body)(ppu_context*))
 {
-    const char* what = body == func_001E47C4 ? "head" : "segment";
+    const char* what = body == func_001E47C4 ? "head" : body == func_002C8300 ? "knight" : "segment";
     int k = -1, free_k = -1;
     for (int i = 0; i < 16; i++) {
         if (g_t30.obj[i].obj == obj) { k = i; break; }
@@ -232,6 +237,7 @@ static int tick30_gate(ppu_context* ctx, void (*body)(ppu_context*))
 
 extern "C" int dotheroes_tick30_boss_segment(ppu_context* ctx) { return tick30_gate(ctx, func_001F2DC0); }
 extern "C" int dotheroes_tick30_boss_head(ppu_context* ctx) { return tick30_gate(ctx, func_001E47C4); }
+extern "C" int dotheroes_tick30_knight_body(ppu_context* ctx) { return tick30_gate(ctx, func_002C8300); }   /* B-012 */
 
 /* Before the guest starts. */
 extern "C" void dotheroes_configure_patches(void)

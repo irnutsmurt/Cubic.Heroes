@@ -1,0 +1,89 @@
+# Frame-rate independence of the bosses (M11.1b, docs/M11_PLAN.md section 23; tests/fps_actors.py): the boss part of
+# tests/scripts/fps_actors.drive alone -- the six temples' guardians and the last enemy, each entered the game's way,
+# 40 s against a hero standing at the door (invulnerable, no death, the sword never swung). Run at two or more rates
+# (DOTHEROES_FPS) and compare with tests/fps_actors.py; the actor log reads the game's own actor list.
+#! saves build/checkpoints/castle-front
+#! env DOTHEROES_DEVELOPER_MODE=1 DOTHEROES_NATIVE_CD=1 DOTHEROES_NATIVE_SOLVER=1,2,4,5,6 GCM_WRAP_LAP=1
+#! env DOTHEROES_PRESENT_ONCE=1 DOTHEROES_DEV_STATE=1 DOTHEROES_DEV_KEYS=1 DOTHEROES_DEV_ACTOR_LOG=1
+#! env DIAG_FRAMES=frames.log PS3_VERBOSE=0 SHOT_EVERY=0 DUMP=0
+#! secs 900
+
+include ../scenarios/common.drive
+
+log TitleMovie 120
+sleep 5
+call continue
+state life>0,area==17 90
+sleep 3
+dev nodeath on
+dev invulnerable on
+dev progress set 8
+dev boss temple1 @150
+sleep 2
+devpage 420 soft
+segment fight boss-temple1
+loop 8
+  sleep 5
+  devpage 8 soft ifany
+end
+endseg
+dev progress set 10
+dev boss temple2 @150
+sleep 2
+devpage 420 soft
+segment fight boss-temple2
+loop 8
+  sleep 5
+  devpage 8 soft ifany
+end
+endseg
+dev progress set 12
+dev boss temple3 @150
+sleep 2
+devpage 420 soft
+segment fight boss-temple3
+loop 8
+  sleep 5
+  devpage 8 soft ifany
+end
+endseg
+dev progress set 14
+dev boss temple4 @150
+sleep 2
+devpage 420 soft
+segment fight boss-temple4
+loop 8
+  sleep 5
+  devpage 8 soft ifany
+end
+endseg
+dev progress set 16
+dev boss temple5 @150
+sleep 2
+devpage 420 soft
+segment fight boss-temple5
+loop 8
+  sleep 5
+  devpage 8 soft ifany
+end
+endseg
+dev progress set 18
+dev boss temple6 @150
+sleep 2
+devpage 420 soft
+segment fight boss-temple6
+loop 8
+  sleep 5
+  devpage 8 soft ifany
+end
+endseg
+dev progress set 24
+dev boss last @150
+sleep 2
+devpage 420 soft
+segment fight boss-last
+loop 8
+  sleep 5
+  devpage 8 soft ifany
+end
+endseg
