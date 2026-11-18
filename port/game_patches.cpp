@@ -239,6 +239,52 @@ extern "C" int dotheroes_tick30_boss_segment(ppu_context* ctx) { return tick30_g
 extern "C" int dotheroes_tick30_boss_head(ppu_context* ctx) { return tick30_gate(ctx, func_001E47C4); }
 extern "C" int dotheroes_tick30_knight_body(ppu_context* ctx) { return tick30_gate(ctx, func_002C8300); }   /* B-012 */
 
+/* M11.2d: QUIT GAME, the title menu's last item. Its place is the PS3's INSTALL (hidden since M10.4: the menu ends
+ * at ALBUM): kept, its label renamed in the Title script's own tables (devtools.cpp title_tick: the normal menu's
+ * fifth entry and the cleared game's sixth), and its choice taken here. func_005CE018 is the menu's input (this, the
+ * title object): it moves the cursor (+0x230) and, on a choice, sets the title's step to 3 (+0x4, chosen; +0x8 its
+ * timer), writes the item's action to +0x0 and returns non-zero -- the action of the last item in both menus is 5
+ * (the jump tables at the TOC's +0x1AB0 and +0x1AAC). This hook runs the game's own input; when that chose the last
+ * item, the choice is withdrawn (the three fields put back, 0 returned: the menu stays, its sound played) and the in-game menu asks QUIT GAME?, Cancel focused (overlay.cpp). Its Quit ends the game
+ * in order (B-010: dotheroes_end). DOTHEROES_TITLE_INSTALL=1: INSTALL instead, as before. */
+extern "C" { int g_dotheroes_quit_item = 1; }
+/* the lifted code's cross-fragment trampoline (ppu_recomp_000.cpp's DRAIN_TRAMPOLINE): drained after the menu's input
+ * so its result (r3) is final before it is read */
+extern "C" PPU_THREAD_LOCAL void (*g_trampoline_fn)(void*);
+static void drain_trampoline(ppu_context* ctx)
+{
+    while (g_trampoline_fn) {
+        void (*f)(void*) = g_trampoline_fn;
+        g_trampoline_fn = nullptr;
+        f((void*)ctx);
+    }
+}
+extern "C" void dotheroes_overlay_quit_prompt(void);   /* overlay.cpp */
+static void guest_u32_set(uint32_t ea, uint32_t v)
+{
+    uint8_t* p = vm_base + ea;
+    p[0] = (uint8_t)(v >> 24); p[1] = (uint8_t)(v >> 16); p[2] = (uint8_t)(v >> 8); p[3] = (uint8_t)v;
+}
+extern "C" int dotheroes_title_menu_input(ppu_context* ctx)
+{
+    static thread_local int inner = 0;
+    if (inner) return 0;   /* the menu's own input, called below */
+    const uint32_t title = (uint32_t)ctx->gpr[3];
+    /* what a choice changes: the action (+0x0), the title's step (+0x4: 3, chosen) and its timer (+0x8) */
+    const uint32_t before[3] = { guest_u32(title + 0x0), guest_u32(title + 0x4), guest_u32(title + 0x8) };
+    inner = 1;
+    func_005CE018(ctx);
+    drain_trampoline(ctx);
+    inner = 0;
+    if ((uint32_t)ctx->gpr[3] != 0 && guest_u32(title + 0x0) == 5) {
+        for (int k = 0; k < 3; k++) guest_u32_set(title + 4 * k, before[k]);   /* the menu as it was: no choice */
+        ctx->gpr[3] = 0;
+        fprintf(stderr, "[title] QUIT GAME chosen: the question asked\n");
+        dotheroes_overlay_quit_prompt();
+    }
+    return 1;
+}
+
 /* Before the guest starts. */
 extern "C" void dotheroes_configure_patches(void)
 {
@@ -263,6 +309,9 @@ extern "C" void dotheroes_configure_patches(void)
      * DOTHEROES_TITLE_INSTALL=1 shows it again (tests of the install round trip). */
     const char* ti = getenv("DOTHEROES_TITLE_INSTALL");
     g_dotheroes_no_install_item = !(ti && *ti == '1');
+    /* M11.2d: the fifth item is QUIT GAME (shown: the INSTALL patches off) unless INSTALL was asked for */
+    g_dotheroes_quit_item = g_dotheroes_no_install_item;
+    if (g_dotheroes_quit_item) g_dotheroes_no_install_item = 0;
     const char* sc = getenv("DOTHEROES_STEP_CARRY");
     g_dotheroes_step_carry = !(sc && *sc == '0');
     fprintf(stderr, "[port] hero step rounding: %s\n",

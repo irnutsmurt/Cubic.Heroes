@@ -132,7 +132,9 @@ std::vector<Item> page_items(int p)
                                 { nullptr, "Audio", {}, 1, "" }, { nullptr, "Controls", {}, 1, "" },
                                 { nullptr, "Performance", {}, 1, "" } };
         if (devtools_on()) v.push_back({ nullptr, "Developer", {}, 1, "" });   /* M11.0: developer mode only */
-        v.push_back({ nullptr, "Return to Launcher", {}, 1, "" });
+        /* M11.2a: played directly (CubicHeroes --play, a third-party launcher): no launcher to return to */
+        const char* direct = getenv("CUBIC_DIRECT_PLAY");
+        if (!(direct && *direct == '1')) v.push_back({ nullptr, "Return to Launcher", {}, 1, "" });
         v.push_back({ nullptr, "Exit Game", {}, 1, "" });
         return v;
     }
@@ -357,8 +359,10 @@ struct State {
     uint32_t rev = 0;
 } S;
 
-std::atomic<int> g_request{ 0 };   /* from the window: 1 open, 2 the exit question */
+std::atomic<int> g_request{ 0 };   /* from the window: 1 open, 2 the exit question; 3 QUIT GAME's (M11.2d) */
 std::string g_root;                /* the install's folder */
+const char* quit_how();        /* M11.2d: QUIT GAME's end, and its question (below) */
+const char* quit_question();
 
 /* ---- drawing ---- */
 const uint32_t C_PANEL = 0x182254, C_PANEL2 = 0x22306C, C_FRAME = 0xEEEAD8, C_TEXT = 0xFAF6E8, C_DIM = 0xC6CEEA,
@@ -438,87 +442,93 @@ void compose()
     if (S.bg.size() == S.px.size()) memcpy(S.px.data(), S.bg.data(), S.px.size());
     else ps3_ui_fill(&c, 0, 0, (int)S.W, (int)S.H, 0x0E122C, 255);
     g_rows.clear();
-    const float pw = std::min((float)S.W - 40 * s, 760 * s), ph = std::min((float)S.H - 40 * s, 600 * s);
-    const float x0 = (S.W - pw) / 2, y0 = (S.H - ph) / 2, x1 = x0 + pw, y1 = y0 + ph;
-    panel(&c, x0, y0, x1, y1, s);
-    const float tk = 4 * s;   /* the pixel font's dot */
-    pix_text(&c, x0 + 36 * s, y0 + 30 * s, S.page == P_DEV ? g_dev_view.title.c_str() : kPageTitle[S.page], tk, C_ACCENT);
-    ps3_ui_fill(&c, (int)(x0 + 36 * s), (int)(y0 + 70 * s), (int)(x1 - 36 * s), (int)(y0 + 72 * s), C_FRAME, 90);
-    const std::vector<Item> items = page_items(S.page);
-    const int n = (int)items.size();
-    /* the rows fit the panel: shorter rows for a longer page, down to a floor; past that the page scrolls (M11.0b) */
-    const float avail = ph - 92 * s - 92 * s;
-    const int rowh = (int)std::max(44 * s, std::min(54 * s, n ? avail / n : 54 * s));
-    const int px = (int)std::min(24 * s, rowh * 0.45f);
-    S.vis = std::max(1, (int)(avail / rowh));
-    if (S.focus < S.top) S.top = S.focus;
-    if (S.focus >= S.top + S.vis) S.top = S.focus - S.vis + 1;
-    S.top = std::max(0, std::min(S.top, std::max(0, n - S.vis)));
-    float y = y0 + 92 * s;
-    if (S.top > 0) {
-        char m[32];
-        snprintf(m, sizeof m, "%d more above", S.top);
-        ps3_ui_text(&c, x1 - 36 * s - ps3_ui_text_width(m, (int)(17 * s)), y0 + 84 * s, m, (int)(17 * s), C_DIM, 255, 0);
-    }
-    for (int i = S.top; i < n && i < S.top + S.vis; i++) {
-        const Item& it = items[i];
-        const float rx0 = x0 + 60 * s, rx1 = x1 - 36 * s;
-        const bool f = (int)i == S.focus && !S.dlg.open;
-        if (f) focus_box(&c, rx0, y, rx1, y + rowh - 8 * s, s);
-        g_rows.push_back({ rx0, y, rx1, y + rowh - 8 * s });
-        const float base = y + (rowh - 8 * s) / 2 + px * 0.36f;
-        const bool danger = !it.key && (!strcmp(it.label, "Exit Game"));
-        ps3_ui_text(&c, rx0 + 18 * s, base, it.label, px, f ? C_TEXT : danger ? 0xFF8A80 : C_DIM, 255, 0);
-        if (it.key) {
-            const std::string v = val(it);
-            std::string shown = v;
-            for (const Choice& ch : it.choices) if (v == ch.v) shown = ch.label;
-            const std::string t = std::string("<  ") + shown + "  >";
-            const float w = ps3_ui_text_width(t.c_str(), px);
-            ps3_ui_text(&c, rx1 - 18 * s - w, base, t.c_str(), px, f ? C_ACCENT : C_DIM, 255, 0);
-        } else if ((S.page == P_PAD || S.page == P_KEYS) && i < 16) {   /* the button or key bound to it */
-            const int g = kBindOrder[i];
-            std::string t = g_capture == g ? (S.page == P_PAD ? "Press a button..." : "Press a key...")
-                          : S.page == P_PAD ? pad_button_name(g_pad_bind[g], prompt_style())
-                          : (cellPad_key_binding_name ? cellPad_key_binding_name(g) : "");
-            const float w = ps3_ui_text_width(t.c_str(), px);
-            ps3_ui_text(&c, rx1 - 18 * s - w, base, t.c_str(), px, g_capture == g ? C_GOLD : f ? C_ACCENT : C_DIM, 255, 0);
-        } else if (it.right && *it.right) {   /* a Developer page's value */
-            const float w = ps3_ui_text_width(it.right, px);
-            ps3_ui_text(&c, rx1 - 18 * s - w, base, it.right, px, f ? C_ACCENT : C_DIM, 255, 0);
+    /* M11.2d: QUIT GAME's question is asked from the title menu: over the title itself, without the paused
+     * menu's panel behind it (the window's exit question keeps the menu: M10.2) */
+    const bool title_q = S.dlg.open && S.dlg.kind == 3;
+    if (!title_q) {
+        const float pw = std::min((float)S.W - 40 * s, 760 * s), ph = std::min((float)S.H - 40 * s, 600 * s);
+        const float x0 = (S.W - pw) / 2, y0 = (S.H - ph) / 2, x1 = x0 + pw, y1 = y0 + ph;
+        panel(&c, x0, y0, x1, y1, s);
+        const float tk = 4 * s;   /* the pixel font's dot */
+        pix_text(&c, x0 + 36 * s, y0 + 30 * s, S.page == P_DEV ? g_dev_view.title.c_str() : kPageTitle[S.page], tk, C_ACCENT);
+        ps3_ui_fill(&c, (int)(x0 + 36 * s), (int)(y0 + 70 * s), (int)(x1 - 36 * s), (int)(y0 + 72 * s), C_FRAME, 90);
+        const std::vector<Item> items = page_items(S.page);
+        const int n = (int)items.size();
+        /* the rows fit the panel: shorter rows for a longer page, down to a floor; past that the page scrolls (M11.0b) */
+        const float avail = ph - 92 * s - 92 * s;
+        const int rowh = (int)std::max(44 * s, std::min(54 * s, n ? avail / n : 54 * s));
+        const int px = (int)std::min(24 * s, rowh * 0.45f);
+        S.vis = std::max(1, (int)(avail / rowh));
+        if (S.focus < S.top) S.top = S.focus;
+        if (S.focus >= S.top + S.vis) S.top = S.focus - S.vis + 1;
+        S.top = std::max(0, std::min(S.top, std::max(0, n - S.vis)));
+        float y = y0 + 92 * s;
+        if (S.top > 0) {
+            char m[32];
+            snprintf(m, sizeof m, "%d more above", S.top);
+            ps3_ui_text(&c, x1 - 36 * s - ps3_ui_text_width(m, (int)(17 * s)), y0 + 84 * s, m, (int)(17 * s), C_DIM, 255, 0);
         }
-        y += rowh;
+        for (int i = S.top; i < n && i < S.top + S.vis; i++) {
+            const Item& it = items[i];
+            const float rx0 = x0 + 60 * s, rx1 = x1 - 36 * s;
+            const bool f = (int)i == S.focus && !S.dlg.open;
+            if (f) focus_box(&c, rx0, y, rx1, y + rowh - 8 * s, s);
+            g_rows.push_back({ rx0, y, rx1, y + rowh - 8 * s });
+            const float base = y + (rowh - 8 * s) / 2 + px * 0.36f;
+            const bool danger = !it.key && (!strcmp(it.label, "Exit Game"));
+            ps3_ui_text(&c, rx0 + 18 * s, base, it.label, px, f ? C_TEXT : danger ? 0xFF8A80 : C_DIM, 255, 0);
+            if (it.key) {
+                const std::string v = val(it);
+                std::string shown = v;
+                for (const Choice& ch : it.choices) if (v == ch.v) shown = ch.label;
+                const std::string t = std::string("<  ") + shown + "  >";
+                const float w = ps3_ui_text_width(t.c_str(), px);
+                ps3_ui_text(&c, rx1 - 18 * s - w, base, t.c_str(), px, f ? C_ACCENT : C_DIM, 255, 0);
+            } else if ((S.page == P_PAD || S.page == P_KEYS) && i < 16) {   /* the button or key bound to it */
+                const int g = kBindOrder[i];
+                std::string t = g_capture == g ? (S.page == P_PAD ? "Press a button..." : "Press a key...")
+                              : S.page == P_PAD ? pad_button_name(g_pad_bind[g], prompt_style())
+                              : (cellPad_key_binding_name ? cellPad_key_binding_name(g) : "");
+                const float w = ps3_ui_text_width(t.c_str(), px);
+                ps3_ui_text(&c, rx1 - 18 * s - w, base, t.c_str(), px, g_capture == g ? C_GOLD : f ? C_ACCENT : C_DIM, 255, 0);
+            } else if (it.right && *it.right) {   /* a Developer page's value */
+                const float w = ps3_ui_text_width(it.right, px);
+                ps3_ui_text(&c, rx1 - 18 * s - w, base, it.right, px, f ? C_ACCENT : C_DIM, 255, 0);
+            }
+            y += rowh;
+        }
+        if (S.top + S.vis < n) {
+            char m[32];
+            snprintf(m, sizeof m, "%d more below", n - S.top - S.vis);
+            ps3_ui_text(&c, x1 - 36 * s - ps3_ui_text_width(m, (int)(17 * s)), y + 4 * s, m, (int)(17 * s), C_DIM, 255, 0);
+        }
+        if (!S.note.empty())   /* below the "more below" line when the list goes on */
+            ps3_ui_text(&c, x0 + 60 * s, y + (S.top + S.vis < n ? 40 : 20) * s, S.note.c_str(), (int)(19 * s), C_GOLD, 255, pw - 96 * s);
+        /* the prompts, along the panel's foot */
+        const int st = prompt_style();
+        const float fy = y1 - 34 * s, bs = 30 * s, fpx = (int)(20 * s);
+        float fx = x0 + 36 * s;
+        fx += ps3_ui_button(&c, st, 0, fx, fy, bs) + 8 * s;
+        fx += ps3_ui_text(&c, fx, fy + fpx * 0.36f, S.page == P_MAIN || S.page == P_DEV ? "Select" : "Change", (int)fpx, C_TEXT,
+                          255, 0) + 24 * s;
+        fx += ps3_ui_button(&c, st, 1, fx, fy, bs) + 8 * s;
+        fx += ps3_ui_text(&c, fx, fy + fpx * 0.36f, S.page == P_MAIN ? "Resume" : "Back", (int)fpx, C_TEXT, 255, 0);
+        char hint[64];
+        snprintf(hint, sizeof hint, "%s or F1: resume", combo_name(g_combo.load()));
+        const float hw = ps3_ui_text_width(hint, (int)(18 * s));
+        if (fx + 24 * s < x1 - 36 * s - hw)   /* only where it fits beside the prompts (a narrow window: left out) */
+            ps3_ui_text(&c, x1 - 36 * s - hw, fy + 18 * s * 0.36f, hint, (int)(18 * s), C_DIM, 255, 0);
     }
-    if (S.top + S.vis < n) {
-        char m[32];
-        snprintf(m, sizeof m, "%d more below", n - S.top - S.vis);
-        ps3_ui_text(&c, x1 - 36 * s - ps3_ui_text_width(m, (int)(17 * s)), y + 4 * s, m, (int)(17 * s), C_DIM, 255, 0);
-    }
-    if (!S.note.empty())   /* below the "more below" line when the list goes on */
-        ps3_ui_text(&c, x0 + 60 * s, y + (S.top + S.vis < n ? 40 : 20) * s, S.note.c_str(), (int)(19 * s), C_GOLD, 255, pw - 96 * s);
-    /* the prompts, along the panel's foot */
-    const int st = prompt_style();
-    const float fy = y1 - 34 * s, bs = 30 * s, fpx = (int)(20 * s);
-    float fx = x0 + 36 * s;
-    fx += ps3_ui_button(&c, st, 0, fx, fy, bs) + 8 * s;
-    fx += ps3_ui_text(&c, fx, fy + fpx * 0.36f, S.page == P_MAIN || S.page == P_DEV ? "Select" : "Change", (int)fpx, C_TEXT,
-                      255, 0) + 24 * s;
-    fx += ps3_ui_button(&c, st, 1, fx, fy, bs) + 8 * s;
-    fx += ps3_ui_text(&c, fx, fy + fpx * 0.36f, S.page == P_MAIN ? "Resume" : "Back", (int)fpx, C_TEXT, 255, 0);
-    char hint[64];
-    snprintf(hint, sizeof hint, "%s or F1: resume", combo_name(g_combo.load()));
-    const float hw = ps3_ui_text_width(hint, (int)(18 * s));
-    if (fx + 24 * s < x1 - 36 * s - hw)   /* only where it fits beside the prompts (a narrow window: left out) */
-        ps3_ui_text(&c, x1 - 36 * s - hw, fy + 18 * s * 0.36f, hint, (int)(18 * s), C_DIM, 255, 0);
     if (S.dlg.open) {   /* the question, over the panel; Cancel focused */
         ps3_ui_fill(&c, 0, 0, (int)S.W, (int)S.H, C_INK, 120);
         const float dw = std::min((float)S.W - 60 * s, 640 * s), dh = 250 * s;
         const float d0 = (S.W - dw) / 2, e0 = (S.H - dh) / 2;
         panel(&c, d0, e0, d0 + dw, e0 + dh, s);
-        const char* t = S.dlg.kind == 1 ? "RETURN TO THE LAUNCHER?" : "EXIT THE GAME?";
+        const char* t = S.dlg.kind == 1 ? "RETURN TO THE LAUNCHER?" : S.dlg.kind == 3 ? "QUIT GAME?" : "EXIT THE GAME?";
         pix_text(&c, d0 + 30 * s, e0 + 28 * s, t, 3.5f * s, C_ACCENT);
-        ps3_ui_text(&c, d0 + 30 * s, e0 + 100 * s, "Progress since your last save will be lost.", (int)(22 * s), C_TEXT, 255, dw - 60 * s);
-        const char* yes = S.dlg.kind == 1 ? "Return to Launcher" : "Exit Game";
+        ps3_ui_text(&c, d0 + 30 * s, e0 + 100 * s, S.dlg.kind == 3 ? quit_question() : "Progress since your last save will be lost.",
+                    (int)(22 * s), C_TEXT, 255, dw - 60 * s);
+        const char* yes = S.dlg.kind == 1 ? "Return to Launcher" : S.dlg.kind == 3 ? "Quit Game" : "Exit Game";
         const float bw = (dw - 90 * s) / 2, by = e0 + dh - 80 * s;
         for (int b = 0; b < 2; b++) {
             const float bx = d0 + 30 * s + b * (bw + 30 * s);
@@ -628,6 +638,7 @@ void open_overlay(int kind)
     S.note.clear();
     S.dlg = Dialog();
     if (kind == 2) S.dlg = { true, 2, 0 };
+    if (kind == 3) S.dlg = { true, 3, 0 };   /* M11.2d: QUIT GAME's question, Cancel focused */
     S.px.clear();   /* the background read again */
     __atomic_store_n(&g_ps3_osd_menu.open, 1, __ATOMIC_RELEASE);
     redraw();
@@ -651,6 +662,22 @@ void release_game()
     dotheroes_host_pause(0);
     cellPad_ui_intercept(0);
     dh_log(DH_LOG_INFO, "overlay", "closed");
+}
+
+/* M11.2d: the title's QUIT GAME -- asked over the title (the menu opened straight at its question, Cancel focused:
+ * No is the default) by the title menu's input hook (game_patches.cpp). Quit returns to the launcher when the launcher
+ * started the game (`launcher`: it comes back, reopened if it closed itself); played directly (CubicHeroes --play, a
+ * third-party launcher: CUBIC_DIRECT_PLAY=1, no CUBIC_LAUNCHER) the game just ends (`exit`). */
+const char* quit_how()
+{
+    const char* direct = getenv("CUBIC_DIRECT_PLAY");
+    const char* l = getenv("CUBIC_LAUNCHER");
+    return (direct && *direct == '1') || !(l && *l) ? "exit" : "launcher";
+}
+const char* quit_question()
+{
+    /* asked at the title: nothing unsaved to lose there */
+    return !strcmp(quit_how(), "launcher") ? "Quit and go back to the launcher?" : "Quit the game?";
 }
 
 /* the game ends: Return to Launcher (`launcher`) or Exit Game (`exit`) -- the launcher reads which
@@ -810,8 +837,13 @@ void change(int dir)
 void activate()
 {
     if (S.dlg.open) {
-        if (S.dlg.focus == 0) { S.dlg.open = false; return; }
-        end_session(S.dlg.kind == 1 ? "launcher" : "exit");
+        if (S.dlg.focus == 0) {   /* Cancel: QUIT GAME's question was the menu's only reason to be open */
+            const bool quit_q = S.dlg.kind == 3;
+            S.dlg.open = false;
+            if (quit_q) close_overlay();
+            return;
+        }
+        end_session(S.dlg.kind == 1 ? "launcher" : S.dlg.kind == 3 ? quit_how() : "exit");
         return;
     }
     if (S.page == P_CONTROLS && S.focus >= 3) {   /* the binding pages */
@@ -859,7 +891,12 @@ void activate()
 
 void back()
 {
-    if (S.dlg.open) { S.dlg.open = false; return; }
+    if (S.dlg.open) {
+        const bool quit_q = S.dlg.kind == 3;
+        S.dlg.open = false;
+        if (quit_q) close_overlay();   /* QUIT GAME's question cancelled: back to the title */
+        return;
+    }
     if (S.page == P_PAD || S.page == P_KEYS) { S.focus = S.page == P_PAD ? 3 : 4; S.page = P_CONTROLS; S.note.clear(); return; }
     if (S.page == P_DEV && dev_menu_back()) {   /* M11.0b: up one Developer page */
         g_dev_view = dev_menu_view();
@@ -952,7 +989,7 @@ void loop()
                 if (!(b & combo)) armed = true;   /* released: it can open again */
             }
             const int req = g_request.exchange(0);
-            if (req || (ek & K_F1)) { open_overlay(req == 2 ? 2 : 1); continue; }
+            if (req || (ek & K_F1)) { open_overlay(req == 2 || req == 3 ? req : 1); continue; }
             if (!hinted && clk::now() - t0 > std::chrono::seconds(4)) {
                 hinted = true;
                 auto f = g_vals.find("DOTHEROES_OVERLAY_HINT");
@@ -1049,6 +1086,12 @@ void loop()
 }  // namespace
 
 /* main.cpp: the overlay's thread, once the game runs (the settings file and the install's folder known) */
+/* M11.2d: the title's QUIT GAME chosen (game_patches.cpp's title menu hook): its question, over the title */
+extern "C" void dotheroes_overlay_quit_prompt(void)
+{
+    g_request = 3;
+}
+
 extern "C" void dotheroes_overlay_start(const char* settings_path, const char* install_root)
 {
     g_cfg = settings_path ? settings_path : "";

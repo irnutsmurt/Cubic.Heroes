@@ -1522,8 +1522,33 @@ void run_queue(ppu_context* c)
     g_in_run = false;
 }
 
+/* M11.2d: QUIT GAME's label -- the Title script's two menus' last entries (the PS3's INSTALL) renamed in the game's
+ * own Lua state, in the full-width letters the title's other items use; checked every 30 flips (the title loads its
+ * script again each time it opens; a chunk is refused while a game script runs: the next check). Our own words. */
+extern "C" int g_dotheroes_quit_item;
+const char kQuitLabelLua[] =
+    "local Q='\xEF\xBC\xB1\xEF\xBC\xB5\xEF\xBC\xA9\xEF\xBC\xB4\xE3\x80\x80\xEF\xBC\xA7\xEF\xBC\xA1\xEF\xBC\xAD\xEF\xBC\xA5' "
+    "local D='\xEF\xBC\xB1\xEF\xBD\x95\xEF\xBD\x89\xEF\xBD\x94\xE3\x80\x80\xEF\xBD\x94\xEF\xBD\x88\xEF\xBD\x85\xE3\x80\x80"
+    "\xEF\xBD\x87\xEF\xBD\x81\xEF\xBD\x8D\xEF\xBD\x85\xEF\xBC\x8E' "
+    "local t=Title local n=0 if type(t)=='table' then for _,m in ipairs({t.Menu,t.ClearMenu}) do "
+    "if type(m)=='table' and type(m.Size)=='number' then local e=m[m.Size] "
+    "if type(e)=='table' and e.MenuString~=Q then e.MenuString=Q e.DescriptionString=D n=n+1 end end end end return n";
+void title_tick(ppu_context* c)
+{
+    static unsigned flips = 0;
+    if (!g_dotheroes_quit_item || (++flips % 30) != 0) return;
+    if (!(g_region || ensure_region(c))) return;
+    std::string out;
+    try {
+        if (run_lua(c, kQuitLabelLua, out) == 1 && out != "0")
+            fprintf(stderr, "[title] QUIT GAME's label set (%s menu entr%s)\n", out.c_str(), out == "1" ? "y" : "ies");
+    } catch (const CallError&) {}
+}
+void title_flip(ppu_context* c) { title_tick(c); }
+
 void on_flip(ppu_context* c)
 {
+    title_tick(c);
     g_flip_thread.store(this_thread_key(), std::memory_order_relaxed);
     g_flip_ctx.store(c, std::memory_order_release);
     note_frame();
@@ -1698,7 +1723,10 @@ extern "C" void devtools_start(const char* install_root, const char* elf)
 {
     const char* e = getenv("DOTHEROES_DEVELOPER_MODE");
     g_on = e && !strcmp(e, "1");
-    if (!g_on) return;
+    if (!g_on) {   /* M11.2d: the flip still names QUIT GAME */
+        if (g_dotheroes_quit_item) g_devtools_flip = title_flip;
+        return;
+    }
     g_install_root = install_root ? install_root : "";
     g_usrdir = elf ? std::filesystem::path(elf).parent_path().generic_string() : std::string();
     g_devtools_flip = on_flip;

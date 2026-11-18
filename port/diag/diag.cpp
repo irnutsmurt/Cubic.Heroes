@@ -17,6 +17,7 @@
 #include "ppu_recomp.h"
 #include "ppu_tls.h"   /* PPU_THREAD_LOCAL */
 #include "ps3emu/ps3_ftrace.h"   /* ps3_ft_now, g_ps3_ft: DIAG_PROF sample times */
+#include "ps3emu/guest_pause.h"   /* ps3_guest_paused: a game held by its host is not hung */
 
 #include <atomic>
 #include <chrono>
@@ -441,6 +442,9 @@ void watchdog_main()
             }
         unsigned now = cellGcm_flip_request_count();
         if (now != last) { last = now; still = 0; reported = false; continue; }
+        /* M11.1: the game held by its host (the in-game menu, the exit question: M10.2) makes no flips and is not
+         * hung -- the watchdog counts from its release (a window closed at the question wrote two hang reports). */
+        if (ps3_guest_paused()) { still = 0; continue; }
         still++;
         unsigned limit = now ? hang_secs : boot_secs;
         if (still >= limit && !reported) {

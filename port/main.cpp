@@ -872,6 +872,13 @@ static const char* installed_defaults(void)
     set_default_env("PS3_DEV_FLASH", data + "/dev_flash");
     set_default_env("PS3RECOMP_VK_WINDOW", "1");
     set_default_env("PS3_TITLE", "Cubic.Heroes - 3D Dot Game Heroes Recomp");
+    /* M11.2b: crash and hang reports beside the logs, inside the install (port/diag: else ./diag of whatever folder
+     * the game was started from) */
+    if (s_slots) {
+        std::error_code ec;
+        std::filesystem::create_directories(root + "/logs/crash", ec);
+        set_default_env("DIAG_CRASH_DIR", root + "/logs/crash");
+    }
     // Translated shaders and built pipelines, kept between sessions ("off": none). With build slots, a folder per
     // translator and glslang (the build's DOTHEROES_SHADER_CACHE_ID): a build never removes another's files.
     if (s_slots) {
@@ -1042,8 +1049,11 @@ static std::string window_state_path()
     return s_install_root.empty() ? std::string() : s_install_root + (s_slots ? "/config/window.json" : "/window.json");
 }
 
+static bool s_window_session_size = false;   /* M11.2c: DOTHEROES_WINDOW_SIZE gave this session's size: not remembered */
+
 static void save_window_state()
 {
+    if (s_window_session_size) return;
     int r[5];
     const std::string path = window_state_path();
 #if defined(PS3RECOMP_RSX_VULKAN)
@@ -1212,18 +1222,41 @@ static void apply_pc_settings(void)
                        : p == "nintendo" ? "switch" : nullptr;
         if (st) set_default_env("PS3_UI_PROMPTS", st);
     }
-    /* the window's place and size from the last windowed session */
+    /* the window's place and size from the last windowed session; M11.2c: DOTHEROES_WINDOW_SIZE=WxH (CubicHeroes
+     * --width --height) is this session's size -- at the remembered place, else centred on the work area -- and
+     * this session's window is not remembered */
+    int sw = 0, sh = 0;
+    const char* ws = getenv("DOTHEROES_WINDOW_SIZE");
+    s_window_session_size = ws && sscanf(ws, "%dx%d", &sw, &sh) == 2 && sw >= 320 && sh >= 180;
     const std::string wpath = window_state_path();
+    bool placed = false;
     if (!wpath.empty())
         if (FILE* f = fopen(wpath.c_str(), "r")) {
             int x, y, w, h, m = 0;
             if (fscanf(f, " { \"x\": %d, \"y\": %d, \"w\": %d, \"h\": %d, \"maximized\": %d", &x, &y, &w, &h, &m) >= 4) {
                 char r[96];
-                snprintf(r, sizeof r, "%d,%d,%d,%d,%d", x, y, w, h, m);
+                if (s_window_session_size) snprintf(r, sizeof r, "%d,%d,%d,%d,0", x, y, sw, sh);
+                else snprintf(r, sizeof r, "%d,%d,%d,%d,%d", x, y, w, h, m);
                 set_default_env("PS3RECOMP_VK_WINDOW_RECT", r);
+                placed = true;
             }
             fclose(f);
         }
+    if (s_window_session_size && !placed) {
+        int x = 64, y = 64;
+#ifdef _WIN32
+        RECT wa;
+        if (SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0)) {
+            x = wa.left + ((wa.right - wa.left) - sw) / 2;
+            y = wa.top + ((wa.bottom - wa.top) - sh) / 2;
+            if (x < wa.left) x = wa.left;
+            if (y < wa.top) y = wa.top;
+        }
+#endif
+        char r[96];
+        snprintf(r, sizeof r, "%d,%d,%d,%d,0", x, y, sw, sh);
+        set_default_env("PS3RECOMP_VK_WINDOW_RECT", r);
+    }
     atexit(save_window_state);
     const char* mode = getenv("PS3RECOMP_VK_DISPLAY_MODE");
     dh_log(DH_LOG_INFO, "settings", "in effect: frame limit %s%s; VSync %s; display %s; performance overlay %s",

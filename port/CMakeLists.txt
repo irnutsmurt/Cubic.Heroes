@@ -568,6 +568,15 @@ if(WIN32)
         gdi32
         winmm
     )
+    # M11.2e: the manifest (port/win/dotheroes.manifest: file names in UTF-8, long paths) and the icon the players'
+    # build links (tools/zig_build.py windows_resources -> build/lib/windows/dotheroes.res, made with the prebuilt
+    # parts), linked into a developer's build too when it is there: without it, a developer's game started from a
+    # folder whose name the ANSI code page can't hold (Japanese, say) found none of its files
+    set(DOTHEROES_WIN_RES "${CMAKE_CURRENT_SOURCE_DIR}/../build/lib/windows/dotheroes.res" CACHE FILEPATH
+        "the game's Windows resources (the manifest and the icon), linked when the file is there")
+    if(EXISTS "${DOTHEROES_WIN_RES}")
+        target_link_libraries(${PROJECT_NAME} PRIVATE "${DOTHEROES_WIN_RES}")
+    endif()
 endif()
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,34 @@
+# M11.2d (docs/CLI.md, docs/M11_PLAN.md section 31): the title menu's QUIT GAME -- the last item (the PS3's INSTALL's
+# place, renamed). Down to it (QUIT=down presses: 3 from CONTINUE, on the normal title and on a cleared game's title,
+# whose cursor also starts on CONTINUE, the third of six), CROSS: the question opens over the title with Cancel focused; CROSS takes
+# Cancel (the default: No) and the title is back; CROSS on QUIT GAME again, RIGHT to Quit, CROSS: the game ends in
+# order (B-010), status 0. tests/title_quit.py runs it on both titles and reads the log. The question is the in-game
+# menu's: a test answers it through overlay.input (DOTHEROES_OVERLAY_TEST; a drive's presses reach the game's pad, the
+# menu reads the host's controller and keyboard).
+#! env DOTHEROES_OVERLAY_TEST=1
+log TitleMovie 120
+sleep 5
+press START                 # "PRESS START BUTTON" -> the menu, CONTINUE (a save is there)
+sleep 4
+shot menu
+loop ${QUIT:-3}
+  press DOWN
+  sleep 1
+end
+sleep 2
+shot menu-quit
+press CROSS                 # QUIT GAME: the question
+sleep 3
+shot question
+write overlay.input a       # Cancel (focused): back to the title
+sleep 3
+shot cancelled
+press CROSS                 # QUIT GAME again (the cursor stayed on it)
+sleep 3
+shot question-again
+write overlay.input right   # Quit
+sleep 1
+shot quit-focused
+write overlay.input a       # the game ends
+sleep 10
+shot after

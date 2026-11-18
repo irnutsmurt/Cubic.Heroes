@@ -30,6 +30,13 @@
    "note": "The update of the segmented boss's head (vtable 0x00FE4690 slot 8): it ignores the frame time and advances its object by a constant 1/30 s a call (the only update in the game that does), so above 30 fps it ran fast, and the body segments, which read positions from a trail the head fills, ran after it. The gate calls it at 30 Hz (port/game_patches.cpp)."
   },
   {
+   "addr": "0x005CE018",
+   "host": "dotheroes_title_menu_input",
+   "guard": "g_dotheroes_quit_item",
+   "decline": true,
+   "note": "M11.2d: the title menu's input (this, the title object): the game's own input run first; when it chose the last item (action 5 in both menus: the PS3's INSTALL, its label renamed QUIT GAME), the choice is withdrawn and the in-game menu asks QUIT GAME? (port/game_patches.cpp, port/overlay.cpp)"
+  },
+  {
    "addr": "0x002C8300",
    "host": "dotheroes_tick30_knight_body",
    "guard": "g_dotheroes_tick30",
