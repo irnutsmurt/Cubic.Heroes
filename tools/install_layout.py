@@ -363,6 +363,22 @@ class Layout:
             raise LayoutError(f"{self.game_link} is in the way (not a link)")
         make_link(self.game_link, target)
 
+    def active_exe(self):
+        """the active build's game program itself (never through game/: a moved folder's link points at the old place
+        until it is repaired)"""
+        return os.path.join(self.build_dir(self.read_active()["active"]), exe_name())
+
+    def repair_game_link(self):
+        """game/ pointed at the active build again when it doesn't (a junction is absolute: moving or copying the
+        folder leaves it pointing at the old place). True when it is right afterwards; never raises."""
+        try:
+            if self.kind() != "slots":
+                return False
+            self.point_game(self.read_active()["active"])
+            return True
+        except (OSError, LayoutError, KeyError, ValueError):
+            return False
+
     def prune(self):
         """everything no kept build uses: the other slots, lifts, objects and shader folders. Returns what was
         removed and how many bytes."""

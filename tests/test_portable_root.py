@@ -119,6 +119,37 @@ class Temp(unittest.TestCase):
         self.tmpd.cleanup()
 
 
+# ---- the folder moved: game/ (an absolute junction) repaired, the build run directly (M11.3) ----
+
+class MovedFolder(Temp):
+    def test_the_game_link_follows_the_folder(self):
+        lay, bid = slots_install(self.root)
+        moved = self.root + " moved"
+        os.replace(self.root, moved)
+        new = layout.Layout(moved)
+        self.assertEqual(new.active_exe(), os.path.join(moved, "builds", bid, EXE))
+        self.assertTrue(os.path.isfile(new.active_exe()))
+        # before the repair game/ still names the old place (gone): the build's own program is what runs
+        self.assertFalse(os.path.isfile(os.path.join(new.game_link, EXE)))
+        self.assertTrue(new.repair_game_link())
+        self.assertTrue(os.path.samefile(new.game_link, new.build_dir(bid)))
+        self.assertTrue(os.path.isfile(os.path.join(new.game_link, EXE)))
+        self.assertTrue(new.repair_game_link())   # right already: nothing to do, still true
+
+    def test_the_worker_repairs_it_when_it_opens_the_install(self):
+        lay, bid = slots_install(self.root)
+        moved = self.root + " moved"
+        os.replace(self.root, moved)
+        code, out = run("builds", "--install", moved)
+        self.assertEqual(code, 0, out)
+        self.assertTrue(os.path.samefile(os.path.join(moved, "game"), os.path.join(moved, "builds", bid)))
+
+    def test_no_install_no_link(self):
+        os.makedirs(self.root)
+        self.assertFalse(layout.Layout(self.root).repair_game_link())
+        self.assertFalse(os.path.lexists(os.path.join(self.root, "game")))
+
+
 # ---- 4: Zig's caches in the install ----
 
 class ZigCaches(Temp):

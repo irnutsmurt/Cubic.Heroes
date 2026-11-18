@@ -249,6 +249,7 @@ def installed_game(install):
     """the game a shortcut starts: game/ in an install with build slots, the setup app's beside its data"""
     lay = layout.Layout(install)
     if lay.kind() == "slots":
+        lay.repair_game_link()
         return os.path.join(lay.game_link, layout.exe_name())
     return os.path.join(lay.root, layout.exe_name())
 
@@ -872,7 +873,7 @@ class PrepareLock:
 def _run_prepare(lay, prog, extra, recipes, at):
     """one run of the active build's --prepare (recipes: a file of them, else the install's); at = (done before
     this run, the whole preparation's total) for the progress"""
-    exe = os.path.join(lay.game_link, layout.exe_name())
+    exe = lay.active_exe()   # the build itself, not game/ (a moved folder's link may still point at the old place)
     env = {k: v for k, v in os.environ.items() if not k.startswith(("DOTHEROES_", "PS3_", "PS3RECOMP_"))}
     if recipes:
         env["DOTHEROES_RECIPES"] = recipes
@@ -1073,6 +1074,7 @@ def _layout(a, kind="slots"):
     lay = layout.Layout(os.path.abspath(a.install))
     if kind and lay.kind() != kind:
         raise pipeline.SetupError("This folder has no install with build slots.", "no_install")
+    lay.repair_game_link()   # M11.3: a moved or copied folder's game/ points at the old place until repaired here
     return lay
 
 

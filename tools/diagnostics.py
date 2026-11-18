@@ -122,7 +122,7 @@ def about(install):
     if st and st["active"]:
         info = lay.build_info(st["active"]) or {}
         out["active_build"] = {k: info.get(k) for k in ("id", "version", "made", "lift", "shader_cache", "exe_size")}
-        exe = os.path.join(lay.game_link, layout.exe_name())
+        exe = lay.active_exe()   # the build itself: a moved folder's game/ may point at the old place
         out["game_info"] = _run_json([exe, "--info"])
         out["graphics"] = _run_json([exe, "--prepare", "--check"], timeout=120).get("result")
         # M9.2 (docs/M92_SHADER_PLAN.md): the last comprehensive preparation's figures -- shaders translated,
