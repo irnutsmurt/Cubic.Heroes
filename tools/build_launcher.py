@@ -41,7 +41,9 @@ def main():
     inc = ["-I", os.path.join(ROOT, "launcher"), "-I", imgui, "-I", os.path.join(imgui, "backends"),
            "-I", os.path.join(deps, "include", "SDL2"), "-I", os.path.join(deps, "include")]
     opt = ["-O0", "-g"] if a.debug else ["-O2"]
+    import version   # M11.2c: the release's version, for --version and --status
     flags = ["-std=c++17", "-DSDL_MAIN_HANDLED", "-DIMGUI_DISABLE_OBSOLETE_FUNCTIONS", "-DUNICODE", "-D_UNICODE",
+             f'-DCUBIC_VERSION="{version.VERSION}"',
              "-Wno-deprecated-declarations", *opt, *inc]
     jobs = [(os.path.join(ROOT, "launcher", s), os.path.join(obj, "launcher_" + os.path.splitext(s)[0] + ".o"))
             for s in LAUNCHER_SOURCES]
@@ -51,7 +53,7 @@ def main():
     def compile_one(job):
         src, out = job
         if os.path.exists(out) and os.path.getmtime(out) > max(os.path.getmtime(src), *(
-                os.path.getmtime(os.path.join(ROOT, "launcher", h)) for h in ("json.h", "worker_client.h"))):
+                os.path.getmtime(os.path.join(ROOT, "launcher", h)) for h in ("json.h", "worker_client.h", "cli.h"))):
             return src, 0, ""
         r = subprocess.run([zig, "c++", "-target", zig_build.TARGETS[platform], "-c", *flags, src, "-o", out],
                            capture_output=True, text=True, stdin=subprocess.DEVNULL)

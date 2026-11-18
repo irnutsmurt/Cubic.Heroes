@@ -1175,3 +1175,127 @@ and some clones warp; more clones as he weakens; about three lights for a player
    defect); the first lit attempts failed for the magic and were judged by his starting life.
 
 B-011: no hang in these runs (the hang was 13 minutes into an unlit fight; the winning fight lasted 6).
+
+## 31. M11.2d: QUIT GAME in the title menu (2026-11-17) [M]
+
+**What the owner asked**: a way to quit from the title menu, in the game's own style, on the normal title and on a
+cleared game's title; a Yes/No question defaulting to No, answered with a keyboard, a mouse or a controller; the
+game ended in order (B-010); "Return to Launcher" respected when the launcher started the game, a clean exit in direct
+play (docs/CLI.md); saves and settings untouched.
+
+**How.** The PS3's INSTALL item (a copy of the disc to the hard disk) was already gone from both menus (M10.4); its
+place, the menu's last item, becomes QUIT GAME:
+
+1. **The label** is the game's own menu text, set from the port: the title's Lua tables (`Title.Menu[n].MenuString`
+   and the cleared title's `ClearMenu[n]`, full-width text as the other items) get QUIT GAME and its line of help, the
+   way the game draws every other item (port/devtools/devtools.cpp `title_tick`, every 30 flips while a title is up;
+   it runs in every build, not only in developer mode).
+2. **The choice**: an entry hook on the title menu's input (0x005CE018, config/r8_hooks.json; port/game_patches.cpp
+   `dotheroes_title_menu_input`) runs the game's own input and, when it chose the last item (action 5 in both menus),
+   withdraws the choice -- the action, the title's step and its timer put back, 0 returned: the menu stays, its sound
+   played -- and asks the question. Without the step and the timer restored, a cancelled question left the title
+   counting toward its attract demo.
+3. **The question** is the in-game menu's (port/overlay.cpp, its third kind of question): QUIT GAME?, "Quit the game?"
+   (or "Quit and go back to the launcher?" when the launcher started the game), Cancel and Quit Game, **Cancel
+   focused**; drawn over the title itself (not over the paused menu's panel, which the window's own exit question
+   keeps). The PS3's message dialog is not drawn by this runtime (cellMsgDialog answers by itself), so the in-game
+   menu's question -- the same pixel font and colours -- is the one the PC build has. Its input is the menu's: the
+   controller (A/B, the stick and the pad), the keyboard (arrows, Enter, Escape) and the mouse.
+4. **Quit** ends the game through the in-game menu's own ending (`end_session`: B-010's orderly end, status 0): with
+   the launcher it says "launcher" (the launcher comes back, as the menu's Return to Launcher), in direct play
+   (`CubicHeroes --play`, or the game started without the launcher) "exit". Nothing is saved or changed: the title has
+   no unsaved progress.
+
+**Tests.** tests/title_quit.py (tests/scripts/title_quit.drive; offscreen): on the normal title (a save) and on a
+cleared game's title (six items): down to QUIT GAME, chosen -- the question, Cancel (the default) taken -- the title
+back, the cursor still on QUIT GAME; chosen again, Quit -- the game's own end, status 0, no crash report: **both
+PASS** (gen21). On screen (2026-11-17, the owner away, the guard's approval): the question over both titles as
+described, the focus on Cancel, then on Quit Game; the game ended with status 0.
+
+## 32. M11.2a-c, e: the portable installation and the public command line (2026-11-17) [M]
+
+**The owner's M11.2** (the Decomp Launcher's feedback): CubicHeroes.exe the one program a player or another launcher
+starts; everything the application manages inside one folder, portable by default; a command line other programs can
+drive, documented with exit codes; tested on throwaway installations. The interface is docs/CLI.md; the Linux side
+docs/LINUX_PACKAGING.md.
+
+**The root** (launcher/main.cpp `resolve_root`): `--install-dir`, then `CUBIC_INSTALL_DIR` (a relative path in either
+from the current folder), then `cubicheroes-root.txt` beside CubicHeroes (a relative path from its folder; written by
+`--remember` and the window's "Choose another install folder"), then CubicHeroes's own folder (an AppImage's: a
+`Cubic.Heroes` folder beside the `.AppImage`). The launcher's preferences (`config/launcher.json`), the jobs' logs
+(`logs/`), the game's crash and hang reports (`logs/crash`), the worker's temporary files (`data/tmp`), the compiler's
+caches (`data/cache/zig-*`) and the update's staging (`downloads/`) are all inside it. Outside it only: the
+shortcuts and the Steam entry the player asks for, the GPU driver's own caches, and the launcher's removal helper (it
+must run from outside the folder it removes). The earlier launcher's `%APPDATA%\CubicHeroes` is only read: its
+choices, and an offer to copy its installation in (find-legacy, migrate-root -- the earlier folder left exactly as it
+was). A root that can't be used is reported at once (the window; exit code 7), and `--status` of a folder that isn't
+there creates nothing.
+
+**The command line** (launcher/cli.h): `--play` (the game directly, the window never opened; CubicHeroes waits and
+exits with the game's status; the game is in a job that ends with CubicHeroes), `--install`, `--update`,
+`--check-update`, `--prepare-shaders`, `--rebuild-shaders`, `--status`, `--migrate-from`, `--set KEY=VALUE` (through
+the settings schema), the session options `--fullscreen/--windowed/--borderless`, `--width/--height`, `--fps`,
+`--vsync` (for that session only unless `--persist`), `--json` (one object, or events then a result), `--no-gui`;
+exit codes 0-7. Keys are named by path only, never read into a log or an argument.
+
+**The worker's side** (b52733d): the launcher's update replaces only the package's items in the folder (never the
+install's), `remove-launcher` keeps the installation whose root is its folder (`--everything`, separately confirmed,
+removes it), `migrate-root` and `find-legacy`, temporary files and the compiler's caches inside the root; 152 unit
+tests pass.
+
+**Tests** (tests/cli_integration.py: copies of a built launcher in work folders whose names hold spaces, an accent and
+Japanese; the development installation copied in as the disposable one):
+
+| Case | Result |
+|---|---|
+| --version, --help | PASS |
+| the default root (the launcher's folder) from another working folder | PASS |
+| CUBIC_INSTALL_DIR; a folder that isn't there is not created by --status | PASS |
+| cubicheroes-root.txt with a relative path | PASS |
+| a relative --install-dir (from the working folder) | PASS |
+| a root that can't be used: --set exits 7, --status reports it | PASS |
+| nothing installed: --play exits 3, --install without --disc 2 | PASS |
+| the installation in the launcher's folder (portable) | PASS |
+| --set kept in config/dotheroes.cfg; a value the schema refuses changes nothing | PASS |
+| the folder moved with its launcher: still installed, its game inside the new place | PASS |
+| --migrate-from into a second root: the copy installed, its 16 save files identical, the source unchanged file by file | PASS |
+| --migrate-from refused into a root that holds an installation (nothing changed) | PASS |
+| two installations side by side: a setting of one leaves the other | PASS |
+| --remember keeps a root; remembering the launcher's own folder removes the pointer | PASS |
+| --play (offscreen; the exit question answered through the in-game menu's test input): `--fps 120 --width 1024 --height 600 --windowed` in effect (the game log's frame limit), not kept (config/dotheroes.cfg and window.json unchanged); the started and ended events; the game's own end, status 0 | PASS |
+| --play passes on the game's exit status (the game ended from outside with 42: CubicHeroes exits 42) | PASS |
+| the game ends with CubicHeroes (CubicHeroes ended from outside while the game runs: the game gone at once -- its job) | PASS |
+
+**The earlier installation's offer** (the launcher's window, a folder holding no installation; the packaged launcher
+on this PC, whose earlier launcher's preferences name an installation on F:): EARLIER INSTALLATION FOUND, the folder
+named, Copy It Here focused, Not Now on B; Not Now kept in `config/launcher.json` and the offer not made again at the
+next start (the scripted controller test, `--nav-test` with `CUBIC_NAV_LEGACY_OFFER=1`; its pictures read back by
+the launcher). Copy It Here runs the worker's migrate-root, the command `--migrate-from` runs (tested above). Two
+small faults found on the way and fixed: `--version` wrote a worker log into the folder (now nothing; the version
+case checks it), and the scripted test put its pictures at the drive's root when its script was named by a relative
+path (now beside the script).
+
+The first run of the `--play` cases failed: the game ended at once with status 2, "No game data". Not the command
+line (it passed the game's status on, as it should), not a player's build: the test installation carried a
+developer's build of the game, which -- unlike the players' builds (tools/zig_build.py `windows_resources`) -- had no
+manifest, so it opened its files through the ANSI code page, which cannot hold the test folder's Japanese name. The
+developers' build now links the same resources when they are there (port/CMakeLists.txt `DOTHEROES_WIN_RES`); the
+cases then passed (17 of 17), and the job case now also requires the game to be running when CubicHeroes is ended
+(it had passed vacuously). The release qualification's folder holds Japanese too, for the players' build itself.
+
+## 33. M11.1: the window's place after B-010, and the hang watchdog during the exit question (2026-11-17) [M]
+
+The owner's item: the installed game's window place checked again after the shutdown changes (B-010).
+tests/window_place_check.py (on screen, the development installation): the game started windowed, its window moved
+and resized (Win32), closed as a player closes it, config/window.json read, the game started again.
+
+1. **First run: FAIL** -- the game did not end within 60 s of the window's close. Not a defect: closing the window
+   opens the in-game menu's exit question (M10.2), and a second close at the question ends the game; the test closed
+   once. The test now closes as a player does (twice).
+2. **A defect found by it (B-013)**: while the question was up, the game's hang watchdog wrote a hang report (one in each start)
+   ("no guest flip for 10 s"). The question holds the game (its clocks stopped: no flips), which the watchdog took
+   for a hang -- with DIAG_HANG_EXIT=1 (the tests) it would have ended the game. The watchdog now counts no time while
+   the host holds the game (port/diag/diag.cpp: `ps3_guest_paused`). The window test fails on any crash or hang
+   report written during it.
+3. **Again: PASS** -- the second close ended the game with status 0; window.json written; the second start's window
+   at the same place and size (180, 140, 1100x640); no hang report.

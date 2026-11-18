@@ -1,0 +1,649 @@
+// M11.2c: CubicHeroes's public command line (docs/CLI.md) -- the one program a player, Steam or a third-party launcher
+// needs: play directly, install, update, prepare the shaders, read the status, change settings. The worker and the
+// game's program stay internal: this file drives the worker exactly as the launcher's window does (worker_argv) and
+// starts the game exactly as Play does (game_exe). Included by main.cpp after its paths and helpers.
+//
+// Exit codes (stable, documented in docs/CLI.md):
+//   0 success (--play: the game's own exit status when it ran)
+//   1 the operation failed (the message says why; --json: `code`)
+//   2 the command line is wrong (unknown option, missing value, conflicting commands)
+//   3 not installed (play, update or prepare asked of a folder with no installation)
+//   4 a prerequisite is missing or wrong (the disc image, the keys, the game's program)
+//   5 busy (another operation holds this installation: a preparation, an update, the game running)
+//   6 cancelled (Ctrl+C, the console closed, the calling launcher ended us)
+//   7 the installation folder can't be used (read-only, protected, or not enough free space)
+#pragma once
+#include <cerrno>
+#include <chrono>
+#ifdef _WIN32
+#include <shellapi.h>
+#else
+#include <csignal>
+#endif
+
+namespace cli {
+
+enum Exit : int { kOk = 0, kFailed = 1, kUsage = 2, kNotInstalled = 3, kPrerequisite = 4, kBusy = 5, kCancelled = 6,
+                  kRoot = 7 };
+
+#ifndef CUBIC_VERSION
+#define CUBIC_VERSION "0.0.0-dev"
+#endif
+
+struct Args {
+    std::string command;                     // the one command (see usage()); empty: the launcher's window
+    std::string install_dir, disc, keys, from;
+    bool json = false, no_gui = false, persist = false, remember = false, repair = false;
+    std::vector<std::string> sets;           // --set KEY=VALUE, in order
+    std::string display, fps, vsync;         // --play's display for this session (DOTHEROES_* settings)
+    int width = 0, height = 0;
+    bool window_flags = false;               // --after-update, --show, --nav-test, --page: options of the window
+    std::string error;                       // a usage error
+};
+
+static const char* kUsageText =
+    "CubicHeroes " CUBIC_VERSION " -- 3D Dot Game Heroes, recompiled for this PC from your own disc.\n"
+    "\n"
+    "Usage: CubicHeroes [COMMAND] [OPTIONS]\n"
+    "\n"
+    "With no command the launcher's window opens.\n"
+    "\n"
+    "Commands (one at a time):\n"
+    "  --launcher             open the launcher's window (the default)\n"
+    "  --play                 start the game directly, without the launcher's window; waits for it and exits with\n"
+    "                         the game's exit status\n"
+    "  --install              install from --disc and --keys (headless); does nothing if already installed\n"
+    "                         (add --repair to rebuild from the disc anyway)\n"
+    "  --update               bring the game up to date with this version of Cubic.Heroes: rebuilt only if the\n"
+    "                         tools changed (your saves are backed up first)\n"
+    "  --check-update         look for a newer release of Cubic.Heroes (nothing downloaded)\n"
+    "  --prepare-shaders      prepare the shaders and pipelines the game will need (headless)\n"
+    "  --rebuild-shaders      prepare them again from scratch\n"
+    "  --status               the installation, its build, its settings and its shader cache\n"
+    "  --set KEY=VALUE        change a setting (repeatable; with --play: for that session only, unless --persist)\n"
+    "  --migrate-from PATH    copy an existing installation (from an earlier version's folder) into this one;\n"
+    "                         the original is left as it is\n"
+    "  --version              the versions of Cubic.Heroes and its parts\n"
+    "  --help                 this text\n"
+    "\n"
+    "Options:\n"
+    "  --install-dir PATH     the installation folder (default: the folder CubicHeroes is in); --remember keeps it\n"
+    "                         for the next start (cubicheroes-root.txt beside CubicHeroes)\n"
+    "  --disc PATH            the disc image (.iso) or disc folder, for --install\n"
+    "  --keys PATH            the keys file, for --install (read, never copied, never shown)\n"
+    "  --json                 machine-readable output: one JSON object (--status, --version, --set ...), or the\n"
+    "                         operation's events as JSON lines (--install, --update, --prepare-shaders ...)\n"
+    "  --no-gui               never open a window (errors are reported here instead)\n"
+    "  --persist              keep --play's display options and --set values as settings\n"
+    "\n"
+    "Display options for --play (this session only unless --persist):\n"
+    "  --fullscreen | --windowed | --borderless\n"
+    "  --width N --height N   the window's size (windowed)\n"
+    "  --fps N                30 (the original pacing), 60, 75, 100, 120, 144, 165, 240, any number, display, or 0\n"
+    "                         (uncapped)\n"
+    "  --vsync on|off\n"
+    "\n"
+    "Exit codes: 0 success (--play: the game's exit status), 1 failed, 2 wrong command line, 3 not installed,\n"
+    "4 a prerequisite missing or wrong, 5 busy, 6 cancelled, 7 the installation folder can't be used.\n"
+    "Full reference: docs/CLI.md.\n";
+
+// ---- the command line ----
+
+static std::vector<std::string> utf8_args(int argc, char** argv)
+{
+    std::vector<std::string> v;
+#ifdef _WIN32
+    (void)argc; (void)argv;
+    int n = 0;
+    if (LPWSTR* w = CommandLineToArgvW(GetCommandLineW(), &n)) {
+        for (int i = 1; i < n; i++) v.push_back(launcher::narrow(w[i]));
+        LocalFree(w);
+    }
+#else
+    for (int i = 1; i < argc; i++) v.push_back(argv[i]);
+#endif
+    return v;
+}
+
+static Args parse(const std::vector<std::string>& av)
+{
+    Args a;
+    auto set_command = [&](const std::string& c) {
+        if (!a.command.empty() && a.command != c && a.error.empty())
+            a.error = "--" + a.command + " and --" + c + " can't be used together";
+        a.command = c;
+    };
+    for (size_t i = 0; i < av.size(); i++) {
+        std::string o = av[i], val;
+        bool has_val = false;
+        const size_t eq = o.find('=');
+        if (o.rfind("--", 0) == 0 && eq != std::string::npos && o.rfind("--set", 0) != 0) {
+            val = o.substr(eq + 1);
+            o = o.substr(0, eq);
+            has_val = true;
+        }
+        auto value = [&](const char* what) -> std::string {
+            if (has_val) return val;
+            if (i + 1 < av.size()) return av[++i];
+            if (a.error.empty()) a.error = o + " needs " + what;
+            return std::string();
+        };
+        if (o == "--help" || o == "-h" || o == "/?" || o == "-?") set_command("help");
+        else if (o == "--version") set_command("version");
+        else if (o == "--launcher") set_command("launcher");
+        else if (o == "--play") set_command("play");
+        else if (o == "--install") set_command("install");
+        else if (o == "--update") set_command("update");
+        else if (o == "--check-update") set_command("check-update");
+        else if (o == "--prepare-shaders") set_command("prepare-shaders");
+        else if (o == "--rebuild-shaders") set_command("rebuild-shaders");
+        else if (o == "--status") set_command("status");
+        else if (o == "--migrate-from") { set_command("migrate-from"); a.from = value("a folder"); }
+        else if (o == "--set") a.sets.push_back(value("KEY=VALUE"));
+        else if (o.rfind("--set=", 0) == 0) a.sets.push_back(o.substr(6));
+        else if (o == "--install-dir") a.install_dir = value("a folder");
+        else if (o == "--disc") a.disc = value("a disc image or folder");
+        else if (o == "--keys") a.keys = value("a keys file");
+        else if (o == "--json") a.json = true;
+        else if (o == "--no-gui") a.no_gui = true;
+        else if (o == "--persist") a.persist = true;
+        else if (o == "--remember") a.remember = true;
+        else if (o == "--repair") a.repair = true;
+        else if (o == "--fullscreen") a.display = "exclusive";
+        else if (o == "--windowed") a.display = "windowed";
+        else if (o == "--borderless") a.display = "borderless";
+        else if (o == "--width" || o == "--height") {
+            const std::string v = value("a number of pixels");
+            char* end = nullptr;
+            const long n = strtol(v.c_str(), &end, 10);
+            if (v.empty() || (end && *end) || n < 320 || n > 16384) {
+                if (a.error.empty()) a.error = o + " takes a number of pixels from 320 to 16384";
+            } else {
+                (o == "--width" ? a.width : a.height) = (int)n;
+            }
+        }
+        else if (o == "--fps") a.fps = value("a frame rate");
+        else if (o == "--vsync") {
+            const std::string v = value("on or off");
+            if (v == "on" || v == "1" || v == "true") a.vsync = "1";
+            else if (v == "off" || v == "0" || v == "false") a.vsync = "0";
+            else if (a.error.empty()) a.error = "--vsync takes on or off";
+        }
+        // the launcher window's own options (reviews, the controller test, the update's restart)
+        else if (o == "--after-update" || o == "--update-failed" || o == "--after-game") a.window_flags = true;
+        else if (o == "--show" || o == "--nav-test" || o == "--page") { value("a value"); a.window_flags = true; }
+        else if (a.error.empty()) a.error = "unknown option " + av[i] + " (--help lists them)";
+    }
+    const bool display0 = !a.display.empty() || !a.fps.empty() || !a.vsync.empty() || a.width || a.height;
+    if (a.error.empty() && !a.sets.empty() && a.command.empty()) a.command = "set";
+    if (a.error.empty() && display0 && a.persist && a.command.empty()) a.command = "persist";   // display options kept
+    if (a.error.empty() && a.command == "set" && a.sets.empty()) a.error = "--set needs KEY=VALUE";
+    const bool display = !a.display.empty() || !a.fps.empty() || !a.vsync.empty() || a.width || a.height;
+    if (a.error.empty() && display && a.command != "play" && !a.persist)
+        a.error = "the display options apply to --play (or keep them with --persist)";
+    if (a.error.empty() && (a.width != 0) != (a.height != 0)) a.error = "--width and --height go together";
+    if (a.error.empty() && !a.fps.empty()) {
+        static const char* named[] = { "display", "0", "uncapped" };
+        bool ok = false;
+        for (const char* n : named) ok = ok || a.fps == n;
+        char* end = nullptr;
+        const long n = strtol(a.fps.c_str(), &end, 10);
+        if (!ok && end && !*end && n >= 30 && n <= 1000) ok = true;
+        if (!ok) a.error = "--fps takes 30 to 1000, display, or 0 (uncapped)";
+        if (a.fps == "uncapped") a.fps = "0";
+    }
+    if (a.error.empty() && a.command == "install" && !a.repair && (a.disc.empty() != a.keys.empty()))
+        a.error = "--install needs both --disc and --keys";
+    if (a.error.empty() && a.command == "install" && a.disc.empty() && a.repair)
+        a.error = "--install --repair needs --disc and --keys";
+    if (a.error.empty() && a.no_gui && (a.command.empty() || a.command == "launcher"))
+        a.error = "--no-gui with nothing to do: give a command (--play, --status ...)";
+    return a;
+}
+
+// whether this command line is the launcher's window (no command, --launcher, or the window's own options)
+static bool wants_window(const Args& a) { return a.error.empty() && (a.command.empty() || a.command == "launcher"); }
+
+// ---- output: the launcher is a windowed program (no console of its own); its output reaches the caller's pipe, or
+// the console it was started from ----
+
+static void attach_console()
+{
+#ifdef _WIN32
+    auto usable = [](DWORD which) {
+        const HANDLE h = GetStdHandle(which);
+        return h && h != INVALID_HANDLE_VALUE && GetFileType(h) != FILE_TYPE_UNKNOWN;
+    };
+    const bool out_ok = usable(STD_OUTPUT_HANDLE), err_ok = usable(STD_ERROR_HANDLE);
+    if (out_ok && err_ok) return;   // a pipe or a file from the caller: the C runtime already writes there
+    if (AttachConsole(ATTACH_PARENT_PROCESS)) {
+        if (!out_ok) freopen("CONOUT$", "w", stdout);
+        if (!err_ok) freopen("CONOUT$", "w", stderr);
+        SetConsoleOutputCP(CP_UTF8);
+    }
+#endif
+}
+
+static std::atomic<bool> g_cancel{ false };
+#ifdef _WIN32
+static BOOL WINAPI on_console_event(DWORD) { g_cancel = true; return TRUE; }
+#else
+static void on_signal(int) { g_cancel = true; }
+#endif
+
+static void say(const Args& a, const std::string& line) { if (!a.json) { fputs((line + "\n").c_str(), stdout); fflush(stdout); } }
+
+static int fail(const Args& a, int code, const std::string& kind, const std::string& message, const std::string& details = "")
+{
+    if (a.json) {
+        printf("{\"ok\":false,\"exit\":%d,\"code\":%s,\"message\":%s%s}\n", code, json::quote(kind).c_str(),
+               json::quote(message).c_str(), details.empty() ? "" : (",\"details\":" + json::quote(details)).c_str());
+        fflush(stdout);
+    } else {
+        fprintf(stderr, "CubicHeroes: %s\n", message.c_str());
+        if (!details.empty()) fprintf(stderr, "%s\n", details.c_str());
+    }
+    return code;
+}
+
+// the worker's failure codes as this command line's exit codes
+static int exit_for(const std::string& code)
+{
+    static const char* prerequisite[] = { "not_found", "not_a_disc", "unsupported_version", "damaged_disc", "keys_missing",
+                                          "keys_unreadable", "keys_empty", "wrong_key", "no_disc_copy", "no_crypto",
+                                          "no_trusted_keys" };
+    static const char* busy[] = { "already_preparing", "busy", "game_running" };
+    static const char* root[] = { "disk_space", "root_not_writable", "insufficient-space", "unsafe_path" };
+    if (code == "cancelled") return kCancelled;
+    if (code == "usage") return kUsage;
+    if (code == "no_install" || code == "needs_migration" || code == "not_setup_app") return kNotInstalled;
+    for (const char* c : prerequisite) if (code == c) return kPrerequisite;
+    for (const char* c : busy) if (code == c) return kBusy;
+    for (const char* c : root) if (code == c) return kRoot;
+    return kFailed;
+}
+
+// ---- the worker, run to its end: its events shown as progress (or passed on as JSON lines), its result returned ----
+
+struct Run { bool started = false; json::Value result; int exit = -1; };
+
+static Run worker(const Args& a, const std::string& cmd, const std::vector<std::string>& args, bool show)
+{
+    Run r;
+    launcher::Job job;
+    if (!job.start(worker_argv(cmd, args), cmd)) return r;
+    r.started = true;
+    int shown_pct = -10;
+    bool cancelled = false;
+    for (;;) {
+        const bool done = job.done();
+        for (const json::Value& e : job.take_events()) {
+            if (!show) continue;
+            if (a.json) { printf("%s\n", json::dump(e).c_str()); fflush(stdout); continue; }
+            const std::string ev = e["ev"].str();
+            if (ev == "stage" && e["state"].str() == "start" && !e["name"].str().empty()) {
+                say(a, e["name"].str() + "...");
+                shown_pct = -10;
+            } else if (ev == "progress" && e["overall"].type == json::Value::Number) {
+                const int pct = (int)(e["overall"].num() * 100.0 + 0.5);
+                if (pct >= shown_pct + 10 || (pct == 100 && shown_pct != 100)) {
+                    say(a, "  " + std::to_string(pct) + "%");
+                    shown_pct = pct;
+                }
+            } else if (ev == "log" && (e["level"].str() == "error" || e["level"].str() == "warning")) {
+                fprintf(stderr, "  %s\n", e["text"].str().c_str());
+            }
+        }
+        if (done) break;
+        if (g_cancel && !cancelled) { job.cancel(); cancelled = true; say(a, "Cancelling..."); }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    r.result = job.result();
+    r.exit = job.exit_code();
+    return r;
+}
+
+// a worker's failure reported (and its exit code); ok results return 0
+static int finish(const Args& a, const Run& r, const std::string& what)
+{
+    if (!r.started) return fail(a, kPrerequisite, "no_worker", "Cubic.Heroes's worker is missing beside CubicHeroes (" +
+                                                                   std::string("worker/") + "): reinstall Cubic.Heroes.");
+    if (r.result.is_null()) return fail(a, kFailed, "internal", what + " ended without a result (exit " +
+                                                                   std::to_string(r.exit) + ").");
+    if (r.result["ok"].truthy()) return kOk;
+    const std::string code = r.result["code"].str("internal");
+    return fail(a, exit_for(code), code, r.result["message"].str(what + " failed."), r.result["details"].str());
+}
+
+static std::vector<std::string> install_arg() { return { "--install", g_root }; }
+
+// ---- the commands ----
+
+static int cmd_version(const Args& a)
+{
+    const Run r = worker(a, "version", {}, false);
+    const json::Value& d = r.result["data"];
+    if (a.json) {
+        printf("{\"ok\":true,\"cubicheroes\":%s,\"worker\":%s,\"protocol\":%s,\"game\":%s,\"platform\":%s}\n",
+               json::quote(CUBIC_VERSION).c_str(), json::quote(d["worker"].str()).c_str(),
+               json::quote(d["protocol"].str()).c_str(), json::dump(d["game"]).c_str(), json::quote(d["platform"].str()).c_str());
+        return kOk;
+    }
+    say(a, std::string("CubicHeroes ") + CUBIC_VERSION);
+    if (r.started && r.result["ok"].truthy())
+        say(a, "worker " + d["worker"].str("?") + " (protocol " + d["protocol"].str("?") + ")" +
+                   (d["platform"].str().empty() ? "" : ", " + d["platform"].str()));
+    else say(a, "worker: not found beside CubicHeroes");
+    return kOk;
+}
+
+static bool installed(const json::Value& info) { return info["data"]["kind"].str() == "slots"; }
+
+static int cmd_status(const Args& a, bool with_update)
+{
+    std::string why;
+    const bool writable = root_writable(why, false);   // a look: nothing made
+    const Run info = worker(a, "info", install_arg(), false);
+    if (!info.started) return finish(a, info, "status");
+    const bool inst = installed(info.result);
+    Run builds, prep, settings, update;
+    if (inst) {
+        builds = worker(a, "builds", install_arg(), false);
+        prep = worker(a, "prepare", { "--install", g_root, "--check" }, false);
+        settings = worker(a, "settings", install_arg(), false);
+    }
+    if (with_update) update = worker(a, "check-update", {}, false);
+    const std::string exe = inst ? game_exe(g_root) : std::string();
+    if (a.json) {
+        std::string o = "{\"ok\":true,\"cubicheroes\":" + json::quote(CUBIC_VERSION) + ",\"install_dir\":" + json::quote(g_root) +
+                        ",\"install_dir_from\":" + json::quote(g_root_from) + ",\"writable\":" + (writable ? "true" : "false") +
+                        ",\"installed\":" + (inst ? "true" : "false") + ",\"game\":" + (exe.empty() ? "null" : json::quote(exe)) +
+                        ",\"install\":" + json::dump(info.result["data"]);
+        if (inst) {
+            o += ",\"builds\":" + json::dump(builds.result["data"]) + ",\"shaders\":" + json::dump(prep.result["ok"].truthy()
+                     ? prep.result["data"] : prep.result) + ",\"settings\":" + json::dump(settings.result["data"]);
+        }
+        if (with_update) o += ",\"update\":" + json::dump(update.result);
+        printf("%s}\n", o.c_str());
+        return kOk;
+    }
+    say(a, std::string("Cubic.Heroes ") + CUBIC_VERSION);
+    say(a, "Installation folder: " + g_root + "  (" + g_root_from + ")" + (writable ? "" : "  -- can't be written: " + why));
+    const std::string kind = info.result["data"]["kind"].str("?");
+    say(a, std::string("Installed: ") + (inst ? "yes" : kind == "none" ? "no" : kind == "partial" ? "no (an install was "
+            "interrupted: --install resumes it)" : kind == "setup-app" ? "an older setup app's install (open the launcher "
+            "to move it)" : kind));
+    if (inst) {
+        const json::Value& b = builds.result["data"];
+        std::string active = b["active"].str("-"), version = "-";
+        for (size_t i = 0; i < b["builds"].size(); i++)
+            if (b["builds"][i]["state"].str() == "active") version = b["builds"][i]["version"].str("-");
+        const size_t kept = b["previous"].size();
+        say(a, "Active build: " + active + (version == "-" ? "" : " (version " + version + ")") +
+                   (kept ? ", " + std::to_string(kept) + " earlier kept for rollback" : ""));
+        say(a, "Game program: " + exe);
+        if (prep.result["ok"].truthy()) {
+            const json::Value& p = prep.result["data"];
+            const std::string cache = p["cache"].str();   // "reused": valid for this GPU and driver; else why not
+            const bool all = p["comprehensive_done"].truthy();
+            say(a, cache == "reused" && all ? "Shaders: prepared (" + p["coverage"]["pipelines"].str("?") + " pipelines)"
+                   : cache == "reused" ? "Shaders: partly prepared (--prepare-shaders completes them)"
+                   : "Shaders: not prepared for this GPU and driver" + (cache.empty() ? "" : " (" + cache + ")") +
+                     " -- --prepare-shaders");
+        } else {
+            say(a, "Shaders: " + prep.result["message"].str("unknown"));
+        }
+    }
+    if (with_update) {
+        if (update.result["ok"].truthy()) {
+            const json::Value& d = update.result["data"];
+            say(a, d["version"].str().empty() ? "Update: none available" : "Update: version " + d["version"].str() +
+                                                                            " is available");
+        } else {
+            say(a, "Update: can't check -- " + update.result["message"].str("no answer"));
+        }
+    }
+    return kOk;
+}
+
+static int cmd_set(const Args& a)
+{
+    std::vector<std::string> args = install_arg();
+    for (const std::string& kv : a.sets) {
+        if (kv.find('=') == std::string::npos || kv.front() == '=')
+            return fail(a, kUsage, "usage", "--set takes KEY=VALUE, not " + kv);
+        args.push_back("--set");
+        args.push_back(kv);
+    }
+    const Run r = worker(a, "settings", args, false);
+    const int code = finish(a, r, "Changing the settings");
+    if (code != kOk) return code;
+    if (a.json) printf("{\"ok\":true,\"settings\":%s}\n", json::dump(r.result["data"]).c_str());
+    else for (const std::string& kv : a.sets) say(a, "Set " + kv);
+    return kOk;
+}
+
+static int cmd_install(const Args& a)
+{
+    const Run info = worker(a, "info", install_arg(), false);
+    if (!info.started) return finish(a, info, "install");
+    const std::string kind = info.result["data"]["kind"].str();
+    if (kind == "slots" && !a.repair) {
+        if (a.json) printf("{\"ok\":true,\"already_installed\":true,\"install_dir\":%s}\n", json::quote(g_root).c_str());
+        else say(a, "Already installed in " + g_root + " (nothing done; --repair rebuilds it from the disc).");
+        return kOk;
+    }
+    if (kind == "setup-app")
+        return fail(a, kNotInstalled, "needs_migration", "This folder holds an older setup app's install: open the "
+                                                          "launcher to move it into the current layout.");
+    if (a.disc.empty() || a.keys.empty())
+        return fail(a, kUsage, "usage", "--install needs --disc PATH and --keys PATH.");
+    std::vector<std::string> args = { "--disc", a.disc, "--keys", a.keys, "--install", g_root };
+    if (kind == "partial") args.push_back("--resume");
+    say(a, "Installing into " + g_root + " (this takes a while)...");
+    const Run r = worker(a, "install", args, true);
+    const int code = finish(a, r, "The install");
+    if (code == kOk && !a.json) say(a, "Installed. Play with: CubicHeroes --play");
+    return code;
+}
+
+static int cmd_update(const Args& a)
+{
+    const Run info = worker(a, "info", install_arg(), false);
+    if (!info.started) return finish(a, info, "update");
+    if (!installed(info.result)) return fail(a, kNotInstalled, "no_install", "Nothing is installed in " + g_root + ".");
+    say(a, "Bringing the game up to date with Cubic.Heroes " CUBIC_VERSION "...");
+    const Run r = worker(a, "update", install_arg(), true);
+    const int code = finish(a, r, "The update");
+    if (code == kOk && !a.json)
+        say(a, r.result["data"]["changed"].truthy() ? "Updated: build " + r.result["data"]["build"].str() + " is active."
+                                                    : "Already up to date: nothing rebuilt.");
+    return code;
+}
+
+static int cmd_check_update(const Args& a)
+{
+    const Run r = worker(a, "check-update", {}, false);
+    const int code = finish(a, r, "The update check");
+    if (code != kOk) return code;
+    const json::Value& d = r.result["data"];
+    if (a.json) printf("{\"ok\":true,\"update\":%s}\n", json::dump(d).c_str());
+    else say(a, d["version"].str().empty() ? "No newer release." : "Version " + d["version"].str() + " is available.");
+    return kOk;
+}
+
+static int cmd_prepare(const Args& a, bool rebuild)
+{
+    const Run info = worker(a, "info", install_arg(), false);
+    if (!info.started) return finish(a, info, "prepare");
+    if (!installed(info.result)) return fail(a, kNotInstalled, "no_install", "Nothing is installed in " + g_root + ".");
+    std::vector<std::string> args = install_arg();
+    if (rebuild) args.push_back("--rebuild");
+    say(a, rebuild ? "Preparing the shaders again from scratch..." : "Preparing the shaders...");
+    const Run r = worker(a, "prepare", args, true);
+    const int code = finish(a, r, "The shader preparation");
+    if (code == kOk && !a.json) say(a, "Shaders prepared.");
+    return code;
+}
+
+static int cmd_migrate(const Args& a)
+{
+    say(a, "Copying the installation in " + a.from + " into " + g_root + " (the original stays as it is)...");
+    const Run r = worker(a, "migrate-root", { "--from", a.from, "--install", g_root }, true);
+    const int code = finish(a, r, "The copy");
+    if (code == kOk && !a.json) say(a, "Copied. This folder is now a complete installation.");
+    return code;
+}
+
+// the settings a session's options change: the game reads its settings file, and a variable already set wins
+static std::vector<std::pair<std::string, std::string>> session_settings(const Args& a)
+{
+    std::vector<std::pair<std::string, std::string>> v;
+    if (!a.display.empty()) v.push_back({ "DOTHEROES_DISPLAY_MODE", a.display });
+    if (!a.vsync.empty()) v.push_back({ "DOTHEROES_VSYNC", a.vsync });
+    if (!a.fps.empty()) {
+        static const char* listed[] = { "30", "60", "75", "100", "120", "144", "165", "240", "display", "0" };
+        bool is_listed = false;
+        for (const char* l : listed) is_listed = is_listed || a.fps == l;
+        if (is_listed) v.push_back({ "DOTHEROES_FPS", a.fps });
+        else { v.push_back({ "DOTHEROES_FPS", "custom" }); v.push_back({ "DOTHEROES_FPS_CUSTOM", a.fps }); }
+    }
+    for (const std::string& kv : a.sets) {
+        const size_t eq = kv.find('=');
+        if (eq != std::string::npos && eq > 0) v.push_back({ kv.substr(0, eq), kv.substr(eq + 1) });
+    }
+    return v;
+}
+
+static int cmd_play(const Args& a)
+{
+    std::error_code ec;
+    if (!fs::exists(u8path(g_root) / "active.json", ec) && !fs::exists(u8path(g_root) / "game", ec))
+        return fail(a, kNotInstalled, "no_install", "Nothing is installed in " + g_root +
+                                                    ". Install with: CubicHeroes --install --disc PATH --keys PATH");
+    const std::string exe = game_exe(g_root);
+    if (!fs::is_regular_file(u8path(exe), ec))
+        return fail(a, kPrerequisite, "no_game", "The game's program is missing (" + exe + "). Repair the installation: "
+                                                 "CubicHeroes --update, or the launcher's Install page.");
+    const auto session = session_settings(a);
+    if (a.persist && (!session.empty())) {   // kept as settings first (checked against the schema by the worker)
+        std::vector<std::string> args = install_arg();
+        for (const auto& kv : session) { args.push_back("--set"); args.push_back(kv.first + "=" + kv.second); }
+        const int code = finish(a, worker(a, "settings", args, false), "Keeping the settings");
+        if (code != kOk) return code;
+    }
+    for (const auto& kv : session) {   // this session's values: a variable already set wins over the settings file
+#ifdef _WIN32
+        _wputenv_s(launcher::widen(kv.first).c_str(), launcher::widen(kv.second).c_str());
+#else
+        setenv(kv.first.c_str(), kv.second.c_str(), 1);
+#endif
+    }
+    if (a.width && a.height) {   // the window's size for this session (the game keeps its remembered place untouched)
+        const std::string sz = std::to_string(a.width) + "x" + std::to_string(a.height);
+#ifdef _WIN32
+        _putenv_s("DOTHEROES_WINDOW_SIZE", sz.c_str());
+#else
+        setenv("DOTHEROES_WINDOW_SIZE", sz.c_str(), 1);
+#endif
+    }
+    // direct play: no launcher to return to (the in-game menu offers Exit Game; QUIT GAME just quits)
+#ifdef _WIN32
+    _putenv_s("CUBIC_DIRECT_PLAY", "1");
+    _putenv_s("CUBIC_LAUNCHER", "");
+    _putenv_s("CUBIC_LAUNCHER_PID", "");
+    {
+        std::error_code e2;
+        fs::remove(u8path(g_root) / "logs" / "session-end", e2);
+    }
+    // the game in a job of ours: a calling launcher (Steam, a frontend) that ends CubicHeroes ends the game with it
+    HANDLE job = CreateJobObjectW(nullptr, nullptr);
+    if (job) {
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION li = {};
+        li.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        SetInformationJobObject(job, JobObjectExtendedLimitInformation, &li, sizeof li);
+    }
+    STARTUPINFOW si = { sizeof si };
+    PROCESS_INFORMATION pi = {};
+    std::wstring cmd = launcher::quote_arg(launcher::widen(exe));
+    if (!CreateProcessW(nullptr, &cmd[0], nullptr, nullptr, FALSE, CREATE_SUSPENDED, nullptr,
+                        launcher::widen(g_root).c_str(), &si, &pi)) {
+        if (job) CloseHandle(job);
+        return fail(a, kPrerequisite, "no_game", "The game couldn't be started (error " + std::to_string(GetLastError()) + ").");
+    }
+    if (job) AssignProcessToJobObject(job, pi.hProcess);
+    ResumeThread(pi.hThread);
+    CloseHandle(pi.hThread);
+    if (a.json) { printf("{\"ev\":\"started\",\"pid\":%lu,\"game\":%s}\n", (unsigned long)pi.dwProcessId, json::quote(exe).c_str()); fflush(stdout); }
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD status = 1;
+    GetExitCodeProcess(pi.hProcess, &status);
+    CloseHandle(pi.hProcess);
+    if (job) CloseHandle(job);
+    if (a.json) printf("{\"ev\":\"ended\",\"exit\":%lu}\n", (unsigned long)status);
+    return (int)status;
+#else
+    setenv("CUBIC_DIRECT_PLAY", "1", 1);
+    unsetenv("CUBIC_LAUNCHER");
+    unsetenv("CUBIC_LAUNCHER_PID");
+    const pid_t pid = fork();
+    if (pid == 0) {
+        if (chdir(g_root.c_str()) != 0) _exit(127);
+        execl(exe.c_str(), exe.c_str(), (char*)nullptr);
+        _exit(127);
+    }
+    if (pid < 0) return fail(a, kPrerequisite, "no_game", "The game couldn't be started.");
+    if (a.json) { printf("{\"ev\":\"started\",\"pid\":%d,\"game\":%s}\n", (int)pid, json::quote(exe).c_str()); fflush(stdout); }
+    int st = 0;
+    while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {
+        if (g_cancel) kill(pid, SIGTERM);
+    }
+    const int status = WIFEXITED(st) ? WEXITSTATUS(st) : 128 + (WIFSIGNALED(st) ? WTERMSIG(st) : 0);
+    if (a.json) printf("{\"ev\":\"ended\",\"exit\":%d}\n", status);
+    return status;
+#endif
+}
+
+// the command line's own run (not the window); its exit code
+static int run(const Args& a)
+{
+    attach_console();
+#ifdef _WIN32
+    SetConsoleCtrlHandler(on_console_event, TRUE);
+#else
+    signal(SIGINT, on_signal);
+    signal(SIGTERM, on_signal);
+#endif
+    if (!a.error.empty()) {
+        if (a.json) return fail(a, kUsage, "usage", a.error);
+        fprintf(stderr, "CubicHeroes: %s\n", a.error.c_str());
+        return kUsage;
+    }
+    if (a.command == "help") { fputs(kUsageText, stdout); return kOk; }
+    if (a.command == "version") return cmd_version(a);
+    if (a.remember && !a.install_dir.empty() && !remember_root(g_root))
+        return fail(a, kRoot, "root_not_writable", "The folder CubicHeroes is in can't be written, so --remember can't "
+                                                   "keep the installation folder (pass --install-dir each time).");
+    std::string why;
+    const bool reads_only = a.command == "status" || a.command == "check-update" || a.command == "play";
+    if (!reads_only && !root_writable(why))
+        return fail(a, kRoot, "root_not_writable", "The installation folder " + g_root + " can't be used: " + why +
+                                                   ". Choose another with --install-dir PATH.");
+    if (a.command == "status") return cmd_status(a, false);
+    if (a.command == "check-update") return cmd_check_update(a);
+    if (a.command == "set") return cmd_set(a);
+    if (a.command == "install") return cmd_install(a);
+    if (a.command == "update") return cmd_update(a);
+    if (a.command == "prepare-shaders") return cmd_prepare(a, false);
+    if (a.command == "rebuild-shaders") return cmd_prepare(a, true);
+    if (a.command == "migrate-from") return cmd_migrate(a);
+    if (a.command == "play") return cmd_play(a);
+    if (a.persist) {   // --persist alone with display options: kept as settings
+        std::vector<std::string> args = install_arg();
+        for (const auto& kv : session_settings(a)) { args.push_back("--set"); args.push_back(kv.first + "=" + kv.second); }
+        return finish(a, worker(a, "settings", args, false), "Keeping the settings");
+    }
+    return fail(a, kUsage, "usage", "nothing to do (--help lists the commands)");
+}
+
+}  // namespace cli

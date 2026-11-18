@@ -198,4 +198,35 @@ inline std::string quote(const std::string& s)
     return o + "\"";
 }
 
+// a value written back as compact JSON (M11.2: the command line's --json output passes the worker's events on)
+inline std::string dump(const Value& v)
+{
+    switch (v.type) {
+    case Value::Null: return "null";
+    case Value::Bool: return v.b ? "true" : "false";
+    case Value::Number: {
+        char b[64];
+        if (v.n == (double)(long long)v.n && v.n > -9e15 && v.n < 9e15) snprintf(b, sizeof b, "%lld", (long long)v.n);
+        else snprintf(b, sizeof b, "%.17g", v.n);
+        return b;
+    }
+    case Value::String: return quote(v.s);
+    case Value::Array: {
+        std::string o = "[";
+        for (size_t i = 0; i < v.a.size(); i++) o += (i ? "," : "") + dump(v.a[i]);
+        return o + "]";
+    }
+    case Value::Object: {
+        std::string o = "{";
+        bool first = true;
+        for (const auto& kv : v.o) {
+            o += (first ? "" : ",") + quote(kv.first) + ":" + dump(kv.second);
+            first = false;
+        }
+        return o + "}";
+    }
+    }
+    return "null";
+}
+
 }  // namespace json

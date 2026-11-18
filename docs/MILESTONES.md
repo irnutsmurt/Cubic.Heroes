@@ -569,8 +569,20 @@ Begun 2026-11-16 (plan and checkpoint: docs/M11_PLAN.md), in the owner's order:
   14's pipelines traced to a rare enemy and three rendering faults fixed, every
   enemy type spawnable, flags through the game's own save and load, a boss to
   its rewards, the ending to the credits, developer mode off meaning off;
+- **M11.2, portable distribution and launcher interoperability** (the owner's
+  overnight directive, 2026-11-17; the Decomp Launcher's feedback): CubicHeroes
+  the one program a player or another launcher starts; everything inside one
+  installation folder, portable by default (the earlier AppData install found
+  and offered, copied and checked); a public command line with exit codes
+  (docs/CLI.md: --play, headless --install/--update/--prepare-shaders, --status
+  --json, session settings); QUIT GAME on the title menu; tested on throwaway
+  installations (docs/M11_PLAN.md sections 31-32);
+- **M11.3, local Windows release qualification**: a release candidate built and
+  qualified from its package, nothing published or signed
+  (docs/RELEASE_QUALIFICATION.md);
 - Linux and AMD on the owner's laptop: the launcher as an AppImage that makes
-  the game's AppImage locally from the player's files;
+  the game's AppImage locally from the player's files (the packaging plan:
+  docs/LINUX_PACKAGING.md);
 - Steam Deck through community volunteers.
 The map sweep (tests/map_sweep.py) is a permanent regression test.
 

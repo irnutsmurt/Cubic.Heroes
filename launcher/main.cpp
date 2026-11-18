@@ -86,21 +86,20 @@ static std::string known_folder(int which)
 }
 enum { kAppData, kLocalAppData, kDocuments, kDownloads, kDesktop, kHome };
 
-static std::string data_dir()
+// Before M11.2 the launcher kept its own files in the user's profile and installed the game there by default: read
+// only now, to find an earlier installation to use or copy (nothing is written there any more)
+static std::string legacy_data_dir()
 {
-    fs::path p = u8path(known_folder(kAppData)) / (
+    return path_str(u8path(known_folder(kAppData)) / (
 #ifdef _WIN32
         "CubicHeroes"
 #else
         "cubic-heroes"
 #endif
-    );
-    std::error_code ec;
-    fs::create_directories(p, ec);
-    return path_str(p);
+    ));
 }
 
-static std::string default_install()
+static std::string legacy_default_install()
 {
 #ifdef _WIN32
     return path_str(u8path(known_folder(kLocalAppData)) / "Cubic.Heroes");
@@ -131,19 +130,161 @@ static bool write_text(const std::string& path, const std::string& text)
     return !ec;
 }
 
+// ============================================================================================================
+// M11.2b: the installation root -- every file the launcher, its worker and the game manage lives under it (docs/CLI.md):
+// the launcher's preferences (config/launcher.json), the game's settings (config/dotheroes.cfg), the builds, the
+// game data and the saves, the caches, the logs and crash reports, the downloads and the temporary files. By default
+// the launcher's own folder: the whole folder can be moved or copied. --install-dir PATH, CUBIC_INSTALL_DIR, or the
+// folder named in cubicheroes-root.txt beside the launcher (one line; a relative path is taken from the launcher's
+// folder) choose another, in that order.
+// ============================================================================================================
+static std::string g_root, g_root_from;
+
+static std::string env_u8(const char* name)
+{
+#ifdef _WIN32
+    const wchar_t* w = _wgetenv(launcher::widen(name).c_str());
+    return w ? launcher::narrow(w) : std::string();
+#else
+    const char* v = getenv(name);
+    return v ? v : "";
+#endif
+}
+
+// the folder the program was started from, as a player sees it: an AppImage's own file's folder (Linux: the program
+// itself runs from the image's read-only mount, $APPIMAGE names the file), else the program's folder
+static std::string home_dir_of_program()
+{
+#ifndef _WIN32
+    const std::string img = env_u8("APPIMAGE");
+    if (!img.empty()) return path_str(u8path(img).parent_path());
+#endif
+    return g_exe_dir;
+}
+static bool in_appimage()
+{
+#ifndef _WIN32
+    return !env_u8("APPIMAGE").empty();
+#else
+    return false;
+#endif
+}
+
+static std::string root_pointer_file() { return path_str(u8path(home_dir_of_program()) / "cubicheroes-root.txt"); }
+
+static std::string trimmed(std::string t)
+{
+    while (!t.empty() && (t.back() == '\n' || t.back() == '\r' || t.back() == ' ' || t.back() == '\t')) t.pop_back();
+    size_t a = 0;
+    while (a < t.size() && (t[a] == ' ' || t[a] == '\t' || (unsigned char)t[a] == 0xEF || (unsigned char)t[a] == 0xBB ||
+                            (unsigned char)t[a] == 0xBF)) a++;   // spaces, a UTF-8 byte-order mark
+    return t.substr(a);
+}
+
+static std::string resolve_root(const std::string& cli)
+{
+    std::string r = cli, from = "--install-dir";
+    if (r.empty()) { r = env_u8("CUBIC_INSTALL_DIR"); from = "CUBIC_INSTALL_DIR"; }
+    if (r.empty()) {
+        const std::string t = trimmed(read_text(root_pointer_file(), 8192));
+        const size_t nl = t.find_first_of("\r\n");
+        r = nl == std::string::npos ? t : trimmed(t.substr(0, nl));
+        from = "cubicheroes-root.txt";
+    }
+    if (r.empty()) {   // the default: the program's folder (an AppImage's: a Cubic.Heroes folder beside its file)
+        r = in_appimage() ? path_str(u8path(home_dir_of_program()) / "Cubic.Heroes") : g_exe_dir;
+        from = in_appimage() ? "beside the AppImage" : "the launcher's folder";
+    }
+    fs::path p = u8path(r);
+    // a relative pointer is taken from the program's folder (it moves with it); a relative --install-dir or
+    // CUBIC_INSTALL_DIR from the current folder, as any command line's paths
+    if (p.is_relative() && from == "cubicheroes-root.txt") p = u8path(home_dir_of_program()) / p;
+    std::error_code ec;
+    const fs::path a = fs::absolute(p, ec);
+    g_root_from = from;
+    std::string out = path_str((ec ? p : a).lexically_normal());
+    while (out.size() > 3 && (out.back() == '\\' || out.back() == '/')) out.pop_back();
+    return out;
+}
+
+static bool same_folder(const std::string& a, const std::string& b)
+{
+    std::error_code ec;
+    const bool eq = fs::equivalent(u8path(a), u8path(b), ec);
+    return ec ? u8path(a).lexically_normal() == u8path(b).lexically_normal() : eq;
+}
+
+// the root kept for the next start: no pointer for the launcher's own folder (the default), else its path
+static bool remember_root(const std::string& dir)
+{
+    std::error_code ec;
+    const fs::path ptr = u8path(root_pointer_file());
+    const std::string dflt = in_appimage() ? path_str(u8path(home_dir_of_program()) / "Cubic.Heroes") : g_exe_dir;
+    if (same_folder(dir, dflt)) { fs::remove(ptr, ec); return !fs::exists(ptr, ec); }
+    return write_text(root_pointer_file(), dir + "\n");
+}
+
+// a folder under the root, made when first needed
+static std::string root_sub(const char* sub)
+{
+    const fs::path p = u8path(g_root) / sub;
+    std::error_code ec;
+    fs::create_directories(p, ec);
+    return path_str(p);
+}
+static std::string data_dir() { return root_sub("config"); }   // the launcher's own preferences
+static std::string log_dir() { return root_sub("logs"); }
+
+// whether files can be made in the root (a read-only folder, a protected one, a full drive refuse); create: the root
+// made when it isn't there yet -- else (a look only: --status) the nearest folder above it that is there is tried
+static bool root_writable(std::string& why, bool create = true)
+{
+    std::error_code ec;
+    fs::path dir = u8path(g_root);
+    if (create) {
+        fs::create_directories(dir, ec);
+        if (ec) { why = ec.message(); return false; }
+    } else {
+        while (!fs::exists(dir, ec)) {
+            if (!dir.has_parent_path() || dir.parent_path() == dir) { why = "its drive isn't there"; return false; }
+            dir = dir.parent_path();
+        }
+        if (!fs::is_directory(dir, ec)) { why = "a file is in the way (" + path_str(dir) + ")"; return false; }
+    }
+    const fs::path probe = dir / (".write-test-" + std::to_string((unsigned long)
+#ifdef _WIN32
+        GetCurrentProcessId()
+#else
+        getpid()
+#endif
+    ));
+    bool ok;
+    {
+        std::ofstream f(probe, std::ios::binary);
+        ok = f && (f << "ok") && f.flush();
+    }
+    fs::remove(probe, ec);
+    if (!ok) why = "files can't be made in it (read-only, protected, or the drive is full)";
+    return ok;
+}
+
 struct Prefs {
-    std::string install, disc, keys;
+    std::string legacy_install, disc, keys;   // legacy_install: an earlier launcher's install folder (read, never written)
     int x = SDL_WINDOWPOS_CENTERED, y = SDL_WINDOWPOS_CENTERED, w = 1280, h = 800;
     bool maximized = false;
     bool prepared_once = false;   // shaders prepared at least once: a new build's empty cache is an update's
     bool steam_cleanup = false;   // an uninstall left the launcher's Steam entry (Steam ran): removed once it's closed
+    std::string legacy_answered;  // M11.2b: the earlier installation the player was offered (not offered again)
 
     std::string file() const { return path_str(u8path(data_dir()) / "launcher.json"); }
     void load()
     {
         json::Value v;
-        if (!json::parse(read_text(file()), v)) return;
-        install = v["install"].str();
+        const std::string legacy = path_str(u8path(legacy_data_dir()) / "launcher.json");
+        if (!json::parse(read_text(file()), v)) {   // none in the root yet: an earlier launcher's choices, if any
+            if (!json::parse(read_text(legacy), v)) return;
+            legacy_install = v["install"].str();
+        }
         disc = v["disc"].str();
         keys = v["keys"].str();
         if (v["window"]["w"].num() >= 640 && v["window"]["h"].num() >= 400) {
@@ -153,16 +294,18 @@ struct Prefs {
         maximized = v["window"]["maximized"].truthy();
         prepared_once = v["prepared_once"].truthy();
         steam_cleanup = v["steam_cleanup"].truthy();
+        legacy_answered = v["legacy_answered"].str();
     }
     void save() const
     {
         char win[200];
         snprintf(win, sizeof win, "{\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d,\"maximized\":%s}", x, y, w, h,
                  maximized ? "true" : "false");
-        write_text(file(), "{\n \"install\": " + json::quote(install) + ",\n \"disc\": " + json::quote(disc) +
+        write_text(file(), "{\n \"disc\": " + json::quote(disc) +
                                ",\n \"keys\": " + json::quote(keys) + ",\n \"window\": " + win +
                                ",\n \"prepared_once\": " + (prepared_once ? "true" : "false") +
-                               ",\n \"steam_cleanup\": " + (steam_cleanup ? "true" : "false") + "\n}\n");
+                               ",\n \"steam_cleanup\": " + (steam_cleanup ? "true" : "false") +
+                               ",\n \"legacy_answered\": " + json::quote(legacy_answered) + "\n}\n");
     }
 } g_prefs;
 
@@ -199,8 +342,14 @@ static std::vector<std::string> worker_argv(const std::string& cmd, const std::v
     av.push_back(cmd);
     for (const auto& a : args) av.push_back(a);
     av.push_back("--control");
-    av.push_back("--log");
-    av.push_back(path_str(u8path(data_dir()) / "logs" / ("worker-" + cmd + ".jsonl")));
+    // the job's log in the root's logs/ -- not for a root that doesn't exist yet, which only an install or a copy
+    // into it creates (a --status of a folder that isn't there leaves it not there)
+    std::error_code dec;
+    // (--version asks the worker its own version: nothing to keep)
+    if (cmd != "version" && (fs::is_directory(u8path(g_root), dec) || cmd == "install" || cmd == "migrate-root")) {
+        av.push_back("--log");
+        av.push_back(path_str(u8path(log_dir()) / ("worker-" + cmd + ".jsonl")));
+    }
     return av;
 }
 
@@ -1079,10 +1228,56 @@ static void set_settings(const json::Value& v)
     }
 }
 
-static std::string install_dir() { return g_prefs.install.empty() ? default_install() : g_prefs.install; }
+static std::string install_dir() { return g_root; }
 std::string install_dir_or_empty() { return install_dir(); }
 
 void auto_prepare_check_later();
+
+static void refresh_info();
+
+// M11.2b: an installation made before the portable root (the earlier launcher's folder in its preferences, or an
+// earlier default folder: the worker's find-legacy) offered once when this folder holds none -- copied in
+// (migrate-root: every file checked before anything is put in place; the earlier folder left exactly as it was).
+// Declined: not offered again (`CubicHeroes --migrate-from PATH` copies one later).
+static void offer_legacy()
+{
+    static bool asked = false;
+    // a scripted controller test (--nav-test) meets it only when it asks to (CUBIC_NAV_LEGACY_OFFER=1): its own pages
+    // stay as they were otherwise
+    if (asked || (g_nav_test && env_u8("CUBIC_NAV_LEGACY_OFFER") != "1")) return;
+    asked = true;
+    run("find-legacy", { "--install", install_dir() }, "", false, [](const json::Value& r) {
+        const json::Value& m = r["data"]["migratable"];
+        if (!r["ok"].truthy() || m.size() == 0) return;
+        const std::string from = m[(size_t)0].str();
+        if (from.empty() || same_folder(from, g_prefs.legacy_answered) || g_confirm.open || g_op) return;
+        g_confirm = Confirm();
+        g_confirm.open = true;
+        g_confirm.title = "EARLIER INSTALLATION FOUND";
+        g_confirm.text = "The game was installed before, in\n" + from + "\n\nCopy that installation into this folder? "
+                         "Its saves, settings and prepared game come along; the earlier folder is left as it is.";
+        g_confirm.yes = "Copy It Here";
+        g_confirm.no = "Not Now";
+        g_confirm.focus_yes = true;
+        g_confirm.on_yes = [from]() {
+            g_prefs.legacy_answered = from;
+            g_prefs.save();
+            run("migrate-root", { "--from", from, "--install", install_dir() }, "Copying the earlier installation", true,
+                [](const json::Value& c) {
+                    if (c["ok"].truthy())
+                        show_msg("Installation copied", "The earlier installation is now in this folder, checked file by "
+                                 "file. The earlier folder is unchanged: remove it yourself once you no longer need it.");
+                    else
+                        show_result_error(c, "The copy did not finish");
+                    refresh_info();
+                });
+        };
+        g_confirm.on_no = [from]() {
+            g_prefs.legacy_answered = from;
+            g_prefs.save();
+        };
+    });
+}
 
 static void refresh_info()
 {
@@ -1090,6 +1285,7 @@ static void refresh_info()
         g_st.info = r["data"];
         g_st.info_ok = r["ok"].truthy();
         const std::string kind = g_st.info["kind"].str();
+        if (kind == "none") offer_legacy();
         if (kind == "slots") {
             run("builds", { "--install", install_dir() }, "", false, [](const json::Value& b) { g_st.builds = b["data"]; });
             run("saves", { "--install", install_dir() }, "", false, [](const json::Value& s) { g_st.saves = s["data"]; });
@@ -1303,16 +1499,32 @@ static bool game_running()
 #endif
 }
 
+// the game's program in a root: the active build named in active.json (builds/<id>/dotheroes) -- M11.2b: not through
+// game/, a junction on Windows whose absolute target a moved or copied install no longer has; game/ only when
+// active.json names nothing usable (an install made before build slots)
+static std::string game_exe(const std::string& root)
+{
+#ifdef _WIN32
+    const char* name = "dotheroes.exe";
+#else
+    const char* name = "dotheroes";
+#endif
+    std::error_code ec;
+    json::Value a;
+    if (json::parse(read_text(path_str(u8path(root) / "active.json"), 1 << 16), a)) {
+        const std::string id = a["active"].str();
+        if (!id.empty() && id.find_first_of("/\\:") == std::string::npos && id != "." && id != "..") {
+            const fs::path p = u8path(root) / "builds" / u8path(id) / name;
+            if (fs::is_regular_file(p, ec)) return path_str(p);
+        }
+    }
+    return path_str(u8path(root) / "game" / name);
+}
+
 static void start_game_now()
 {
     if (g_nav_test) { g_nav_event = "  [the game would start: not during a scripted controller test]"; return; }
-    const std::string exe = path_str(u8path(install_dir()) / "game" /
-#ifdef _WIN32
-                                     "dotheroes.exe"
-#else
-                                     "dotheroes"
-#endif
-    );
+    const std::string exe = game_exe(install_dir());
 #ifdef _WIN32
     // the game's in-game menu: Return to Launcher reopens this launcher if it has closed itself, and says how the
     // session ended in <install>/logs/session-end (read when the game's process ends)
@@ -1688,7 +1900,10 @@ static void page_install()
     const bool resume = g_st.info["kind"].str() == "partial" && g_wiz.folder == install_dir();
     if (big_button(resume ? "Continue the install" : (kind == "slots" ? "Repair from the disc" : "Install"),
                    ImVec2(S(360), S(64)), Kind::Primary, ready)) {
-        g_prefs.install = g_wiz.folder;
+        if (!same_folder(g_wiz.folder, g_root)) {   // installed elsewhere: that folder is the root from now on
+            g_root = g_wiz.folder;
+            remember_root(g_root);
+        }
         g_prefs.save();
         std::vector<std::string> a = disc_args();
         if (std::find(a.begin(), a.end(), "--keys") == a.end()) { a.push_back("--keys"); a.push_back(g_wiz.keys); }
@@ -2034,7 +2249,10 @@ static void page_settings()
         });
     if (big_button("Choose another install folder", ImVec2(S(420), 0)))
         browse("Choose the install folder", true, {}, "folders", install_dir(), [](const std::string& p) {
-            g_prefs.install = p;
+            g_root = p;   // that folder is the root from now on (cubicheroes-root.txt beside the launcher)
+            if (!remember_root(p))
+                g_msg = { true, "Not remembered", "This folder is used now, but the launcher's own folder can't be written, so "
+                          "it isn't remembered for next time. Start the launcher with --install-dir to use it.", p, false, false };
             g_prefs.save();
             g_wiz.folder.clear();
             refresh_info();
@@ -2057,7 +2275,7 @@ static void page_diagnostics()
                        "shows you every file before anything is saved. Never in it: your saves, keys or the game's files; "
                        "your user name, folders and addresses are replaced. Nothing is ever uploaded.");
     if (big_button("Export Logs", ImVec2(S(300), 0), Kind::Primary)) {
-        g_diag.folder = path_str(u8path(data_dir()) / "report");
+        g_diag.folder = path_str(u8path(log_dir()) / "report");
         g_diag.viewing.clear();
         run("diagnostics", { "--install", install_dir(), "--out", g_diag.folder }, "Making the report", true,
             [](const json::Value& r) {
@@ -3035,7 +3253,11 @@ struct NavScript {
             }
             steps.push_back(st);
         }
-        dir = path_str(u8path(path).parent_path());
+        {   // a relative script's pictures beside it (its parent alone is empty: the drive's root)
+            std::error_code aec;
+            const fs::path ap = fs::absolute(u8path(path), aec);
+            dir = path_str((aec ? u8path(path) : ap).parent_path());
+        }
         log = fopen((std::string(path) + ".log").c_str(), "w");
     }
     static ImGuiKey key(const std::string& op)
@@ -3134,9 +3356,17 @@ struct NavScript {
     }
 } nav;
 
+#include "cli.h"   // M11.2c: the public command line
+
 int main(int argc, char** argv)
 {
     g_exe_dir = exe_dir_of(argv[0]);
+    // M11.2: the command line first -- a command (--play, --status, --install ...) runs here and never opens a window;
+    // no command (or --launcher) is the launcher's window. Either way the installation root is resolved first.
+    const cli::Args cli_args = cli::parse(cli::utf8_args(argc, argv));
+    g_root = resolve_root(cli_args.install_dir);
+    if (!cli::wants_window(cli_args)) return cli::run(cli_args);
+    if (cli_args.remember && !cli_args.install_dir.empty()) remember_root(g_root);
     bool after_update = false, update_failed = false;
     std::string show;
     for (int i = 1; i < argc; i++) {
@@ -3152,6 +3382,14 @@ int main(int argc, char** argv)
                 if (!SDL_strcasecmp(argv[i + 1], kPageNames[p])) g_page = p;
     }
     g_prefs.load();
+    {   // M11.2b: a root that can't be written (a read-only or protected folder, a full drive) said at once
+        std::string why;
+        if (!root_writable(why))
+            g_msg = { true, "This folder can't be used", "Cubic.Heroes keeps the game, its saves and settings in its own "
+                      "folder, and this one can't be written to: " + why + ". Move Cubic.Heroes to a folder you own (for "
+                      "example in Documents or on another drive), or choose another folder on the Settings page.",
+                      g_root, true, false };
+    }
     SDL_SetHint(SDL_HINT_GAMECONTROLLER_USE_BUTTON_LABELS, "1");
     SDL_SetHint("SDL_WINDOWS_DPI_AWARENESS", "permonitorv2");   // sharp text at any display scale
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER | SDL_INIT_EVENTS) != 0) {
