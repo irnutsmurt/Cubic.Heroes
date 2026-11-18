@@ -177,3 +177,10 @@ package (beta.1 stays published; its players are offered beta.2 on the pre-relea
   installation copied): 17 of 17 pass -- with M11.2f's cases: `--resolution` refuses sizes outside 320x180..7680x4320
   and non-sizes (exit 2) and needs `--play`; a session's `--resolution 2560x1440` in effect (the game's log) and not
   kept in the settings file.
+- **Signed and published** (2026-11-18): the owner signed the manifest with the release key (6b5e12ec2cc5791f);
+  verified here (`tools/release.py verify`), tagged v0.2.0-beta.2 at 12788d6 (the package's source) and published as a
+  **pre-release** with the zip, SHA256SUMS.txt, release.json and release.json.sig (the owner's standing approval to
+  publish beta updates through the signing process). **Verified from GitHub**: the download byte for byte the
+  qualified package, its checksum and the manifest's signature good; a fresh offline installation of the download
+  (an accent and Japanese in the folder's name; `--install` interrupted and resumed, status, shaders, `--update` with
+  nothing to do, `--check-update`, `--play`, no key text): 9 of 9 pass. 0.2.0-beta.1 stays published.

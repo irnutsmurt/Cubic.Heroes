@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/irnutsmurt/Cubic.Heroes/releases/tag/v0.2.0-beta.1"><b>Download the beta (0.2.0-beta.1, Windows)</b></a>
+  <a href="https://github.com/irnutsmurt/Cubic.Heroes/releases/tag/v0.2.0-beta.2"><b>Download the beta (0.2.0-beta.2, Windows)</b></a>
   &nbsp;·&nbsp; <a href="#installation">Installation</a>
   &nbsp;·&nbsp; <a href="docs/CLI.md">Command line</a>
   &nbsp;·&nbsp; <a href="#known-issues">Known issues</a>
@@ -25,7 +25,7 @@
 </p>
 
 > [!IMPORTANT]
-> **This is a beta.** 0.2.0-beta.1 is the first public test release: the whole game plays, but not every part of it
+> **This is a beta.** 0.2.0-beta.2 is the second public test release: the whole game plays, but not every part of it
 > has been tested yet. Expect bugs, keep backups of your saves (the launcher makes them), and please
 > [report what you find](https://github.com/irnutsmurt/Cubic.Heroes/issues/new/choose).
 > **No game code, data or keys are included** -- you need your own copy of the game.
@@ -182,8 +182,8 @@ recompiler and runtime are [ps3recomp](https://github.com/sp00nznet/ps3recomp), 
 
 ### Steps
 
-1. **Download** `Cubic.Heroes-0.2.0-beta.1-windows-x86_64.zip` from the
-   [release page](https://github.com/irnutsmurt/Cubic.Heroes/releases/tag/v0.2.0-beta.1) and check it against
+1. **Download** `Cubic.Heroes-0.2.0-beta.2-windows-x86_64.zip` from the
+   [release page](https://github.com/irnutsmurt/Cubic.Heroes/releases/tag/v0.2.0-beta.2) and check it against
    `SHA256SUMS.txt` if you like.
 2. **Extract** it where you want the game to live -- for example `D:\Games\`. It unpacks to a `Cubic.Heroes` folder;
    that folder *is* the installation.
@@ -298,7 +298,9 @@ tested**, and other GPUs (AMD, Intel), Windows 10 and handhelds have not been te
 - **B-007**: one effect frame is missing when arriving at the castle battle's arena (cosmetic).
 - The **minigames** run, but none has yet been played to its end in testing.
 - The **extra Block Defense stage** is drawn pink in play; not yet compared with the original.
-- The **purple spell** has not been cast in testing (it is crossed out where it was tried, as on the original).
+- The **purple spell** works only at its puzzle places, as on the original; two of its three places are still to be
+  tested.
+- The keyboard has no right stick: the camera's prompts keep a stick's picture there.
 - The editor's own world, New Game+'s carry-over, the side quests and the consumables are not yet fully tested.
 - **Linux is not available yet.**
 
