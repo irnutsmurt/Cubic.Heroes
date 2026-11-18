@@ -75,6 +75,10 @@ constexpr uint32_t fn_gettop = 0x007F02EC, fn_settop = 0x007F033C, fn_type = 0x0
 
 /* the tools' guest memory: a stack for their calls and a buffer for a chunk */
 constexpr uint32_t kRegionBytes = 0x60000;       /* six 64 KB pages */
+/* M11.2d: with developer mode off, QUIT GAME's label is the only call into the game's scripts: one 64 KB page of its
+ * own (a stack and the chunk's text), never the tools' region -- the tools stay off (PLAN 14) */
+constexpr uint32_t kLabelRegionBytes = 0x10000;
+constexpr uint32_t kLabelBufBytes = 0xE00;       /* the label chunk's text (its name just above), the stack above both */
 constexpr uint32_t kStackBytes = 0x40000;        /* at the region's top */
 constexpr uint32_t kBufBytes = 0xF000;           /* a chunk's text, at the region's base */
 constexpr uint32_t kNameOff = 0xF800;            /* the chunk's name */
@@ -98,6 +102,7 @@ std::string gstr(uint32_t ea, size_t max = 4096)
 
 bool g_on = false;
 uint32_t g_region = 0;                  /* the guest region (0: not yet) */
+uint32_t g_region_bytes = 0;            /* its size: the tools' (kRegionBytes) or the label's alone (kLabelRegionBytes) */
 bool g_region_failed = false;
 std::atomic<uint64_t> g_flip_thread{ 0 };   /* the thread seen at the flip (std::hash of its id) */
 std::atomic<ppu_context*> g_flip_ctx{ nullptr };
@@ -128,7 +133,7 @@ uint64_t call(const ppu_context* base, uint32_t addr, uint32_t toc, std::initial
     const Fn f = lookup(addr);
     if (!f) throw CallError{ "a game function is missing from this build" };
     ppu_context g = *base;
-    const uint32_t top = (g_region + kRegionBytes - 0x200) & ~15u;
+    const uint32_t top = (g_region + g_region_bytes - 0x200) & ~15u;
     memset(vm_base + top, 0, 0x40);   /* a null back chain */
     g.gpr[1] = top;
     g.gpr[2] = toc;
@@ -145,23 +150,33 @@ uint64_t call(const ppu_context* base, uint32_t addr, uint32_t toc, std::initial
 uint64_t sx(int64_t v) { return (uint64_t)v; }
 
 /* the region, from the runtime's user memory (its address through a word below the caller's stack pointer) */
-bool ensure_region(ppu_context* c)
+bool ensure_region(ppu_context* c, bool label_only = false)
 {
     if (g_region) return true;
     if (g_region_failed) return false;
+    const uint32_t bytes = label_only ? kLabelRegionBytes : kRegionBytes;
     ppu_context tmp{};
     const uint32_t out = (uint32_t)c->gpr[1] - 0x200;
-    tmp.gpr[3] = kRegionBytes;
+    tmp.gpr[3] = bytes;
     tmp.gpr[4] = 0x200;   /* SYS_MEMORY_PAGE_SIZE_64K */
     tmp.gpr[5] = out;
     w32(out, 0);
     if (sys_memory_allocate(&tmp) != 0 || !g32(out)) {
         g_region_failed = true;
-        DLOG(DH_LOG_ERROR, "dev", "no guest memory for the developer tools (%u KB): they stay off", kRegionBytes >> 10);
+        if (label_only)
+            DLOG(DH_LOG_ERROR, "title", "no guest memory for QUIT GAME's label (%u KB): the item keeps its old name",
+                 bytes >> 10);
+        else
+            DLOG(DH_LOG_ERROR, "dev", "no guest memory for the developer tools (%u KB): they stay off", bytes >> 10);
         return false;
     }
     g_region = g32(out);
-    DLOG(DH_LOG_INFO, "dev", "the tools' guest memory at 0x%08X (%u KB)", g_region, kRegionBytes >> 10);
+    g_region_bytes = bytes;
+    if (label_only)
+        DLOG(DH_LOG_INFO, "title", "QUIT GAME's label: %u KB of guest memory at 0x%08X for its call into the title's "
+             "script", bytes >> 10, g_region);
+    else
+        DLOG(DH_LOG_INFO, "dev", "the tools' guest memory at 0x%08X (%u KB)", g_region, bytes >> 10);
     return true;
 }
 
@@ -183,13 +198,15 @@ int run_lua(const ppu_context* c, const std::string& chunk, std::string& out)
     const uint32_t L = g32(kLuaStatePtr);
     if (!L) { out = "the game's scripts are not loaded yet"; return -1; }
     if ((int32_t)g32(kBiLuaLevel) != -1) { out = "a game script is running"; return -1; }
-    if (chunk.size() >= kBufBytes) { out = "the chunk is too long"; return -1; }
+    const bool small = g_region_bytes == kLabelRegionBytes;
+    if (chunk.size() >= (small ? kLabelBufBytes : kBufBytes)) { out = "the chunk is too long"; return -1; }
     memcpy(vm_base + g_region, chunk.data(), chunk.size());
     vm_base[g_region + chunk.size()] = 0;
     static const char kName[] = "=devtool";
-    memcpy(vm_base + g_region + kNameOff, kName, sizeof kName);
+    const uint32_t name_off = small ? kLabelBufBytes : kNameOff;
+    memcpy(vm_base + g_region + name_off, kName, sizeof kName);
     const int top = (int)(int32_t)call(c, fn_gettop, kLuaToc, { L });
-    int st = (int)(int32_t)call(c, fn_loadbuffer, kLuaToc, { L, g_region, chunk.size(), g_region + kNameOff });
+    int st = (int)(int32_t)call(c, fn_loadbuffer, kLuaToc, { L, g_region, chunk.size(), g_region + name_off });
     if (st == 0) st = (int)(int32_t)call(c, fn_pcall, kLuaToc, { L, 0, sx(-1), 0 });
     const int now = (int)(int32_t)call(c, fn_gettop, kLuaToc, { L });
     out.clear();
@@ -1537,7 +1554,7 @@ void title_tick(ppu_context* c)
 {
     static unsigned flips = 0;
     if (!g_dotheroes_quit_item || (++flips % 30) != 0) return;
-    if (!(g_region || ensure_region(c))) return;
+    if (!(g_region || ensure_region(c, !g_on))) return;   /* developer mode off: the label's own page only */
     std::string out;
     try {
         if (run_lua(c, kQuitLabelLua, out) == 1 && out != "0")

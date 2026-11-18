@@ -1201,7 +1201,12 @@ place, the menu's last item, becomes QUIT GAME:
    keeps). The PS3's message dialog is not drawn by this runtime (cellMsgDialog answers by itself), so the in-game
    menu's question -- the same pixel font and colours -- is the one the PC build has. Its input is the menu's: the
    controller (A/B, the stick and the pad), the keyboard (arrows, Enter, Escape) and the mouse.
-4. **Quit** ends the game through the in-game menu's own ending (`end_session`: B-010's orderly end, status 0): with
+4. **Its memory** (B-014, found by the release qualification): setting the label is one call into the game's Lua, which
+   needs a little guest memory (a stack and the chunk's text). It first used the developer tools' region (384 KB), so
+   with developer mode off the tools' memory was taken in every player's game -- the installed developer-mode-off
+   check failed on its "[dev]" line. With developer mode off the label now has one 64 KB page of its own, logged under
+   "title"; the tools' region is made only with developer mode on (port/devtools/devtools.cpp `ensure_region`).
+5. **Quit** ends the game through the in-game menu's own ending (`end_session`: B-010's orderly end, status 0): with
    the launcher it says "launcher" (the launcher comes back, as the menu's Return to Launcher), in direct play
    (`CubicHeroes --play`, or the game started without the launcher) "exit". Nothing is saved or changed: the title has
    no unsaved progress.

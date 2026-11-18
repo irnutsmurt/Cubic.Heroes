@@ -1,6 +1,6 @@
 # Cubic.Heroes 0.1.0 for Windows: release qualification (local)
 
-**Status: M11.3, 2026-11-17 (draft).** The owner's M11.3: a clean Windows release build, a fresh installation from
+**Status: M11.3, 2026-11-17/18: the candidate qualified locally (sections 2-3); nothing published.** The owner's M11.3: a clean Windows release build, a fresh installation from
 its package, the whole conversion, compilation, shader and gameplay flow, offline use, update, rollback, uninstall and
 recovery, the dependency and licence audit, the boundary and private-information checks, and drafts of the release
 notes, the installation instructions, the known issues and this checklist. **A local release candidate only:
@@ -14,26 +14,29 @@ given). Results are filled in as the runs finish; nothing below is marked passed
 | Package | `build/dist/DotHeroes-Setup-windows-x86_64.zip` (made by `tools/make_bundle.py --prebuilt --platform windows` on Windows 11; local, not committed) |
 | Contents | `CubicHeroes.exe` (the launcher and the command line), `SDL2.dll`, `licenses/`, `LICENSE.txt`, `README.txt`, `worker/` (the worker program with its Python runtime, the compiler (Zig), the prebuilt runtime and libraries, the lifting tools, `licenses/` with the sources the LGPL asks for) |
 | Version | 0.1.0 (tools/version.py) |
-| Built from | the commit that adds this file (the package is remade from it) |
+| Built from | the commit that adds B-014's fix (the package is remade from it; it is local and not committed) |
+| The candidate qualified | the package before B-014's fix (SHA-256 e099d8db...) installed fresh and taken through every step; the final candidate (c56af08d...: the same but for the prebuilt native library with B-014's fix) applied to that installation as an update in place, then the installed checks again |
 
 ## 2. The checklist
 
 | # | Item | How | Result |
 |---|---|---|---|
-| 1 | A clean release build | `tools/make_bundle.py --prebuilt --platform windows`: the runtime library rebuilt from clean, the worker frozen, the launcher built; the boundary check of the folder and of the zip | see 3 |
+| 1 | A clean release build | `tools/make_bundle.py --prebuilt --platform windows`: the runtime library rebuilt from clean, the worker frozen, the launcher built; the boundary check of the folder and of the zip | pass (rc 0; the runtime library rebuilt from clean with the build-tree compiler cache) |
 | 2 | Nothing game-derived in the package | `tools/boundary_check.py` on the folder and the archive (make_bundle) | pass |
 | 3 | Nothing private in the package | `tools/push_guard.py package` (now also run by make_bundle before archiving) | **found and fixed**: section 3.1 |
-| 4 | Licences of everything shipped | the package's binaries against `licenses/` | **found and fixed**: section 3.2 |
-| 5 | A fresh installation from the package, the command line only | `tests/release_qualification.py` (unpack, `--install`, interrupted once and resumed) | pending |
-| 6 | The shaders prepared | `--prepare-shaders` | pending |
-| 7 | Never rebuilt without a reason | `--update` with nothing changed: nothing rebuilt | pending |
-| 8 | Offline | every step with a dead proxy; `--check-update` answers "offline" at once (exit 0: a check never blocks play), nothing else needs a network | pending |
-| 9 | The game played from the installation | `--play` (ended in order through its exit question); `tests/devtools_suite.py --installed` (developer mode on, then off) | pending |
-| 10 | An update that rebuilds, and rollback | a lifting tool changed: `--update` makes a new build and keeps the first; the worker's `rollback` back to it; played again | pending |
-| 11 | The disc image and the keys file untouched; no key in any file | size and time, SHA-256, before and after; every installation file searched for the keys' lines | pending |
-| 12 | Uninstall | the launcher removed by its worker: the installation, saves and settings kept | pending |
+| 4 | Licences of everything shipped | the package's binaries against `licenses/` | **found and fixed**: section 3.3 |
+| 5 | A fresh installation from the package, the command line only | `tests/release_qualification.py` (unpack, `--install`, interrupted once and resumed) | pass: in a folder named with an accent and Japanese; `--install` interrupted after 240 s (CubicHeroes ended from outside: the install left `partial`), `--install` again resumed it and finished in 224 s; `--status`: installed, the game inside the folder |
+| 6 | The shaders prepared | `--prepare-shaders` | pass: 2458 pipelines, the cache valid for this GPU and driver (the install's own preparation; `--prepare-shaders` then had nothing to do: 1.4 s) |
+| 7 | Never rebuilt without a reason | `--update` with nothing changed: nothing rebuilt | pass: `--update` with nothing changed: nothing rebuilt (0.9 s) |
+| 8 | Offline | every step with a dead proxy; `--check-update` answers "offline" at once (exit 0: a check never blocks play), nothing else needs a network | pass (simulated: a dead proxy for every step, not a disconnected network): the install, the preparation, the updates and the game needed none; `--check-update` answered "offline" in 2.3 s |
+| 9 | The game played from the installation | `--play` (ended in order through its exit question); `tests/devtools_suite.py --installed` (developer mode on, then off) | pass after B-014's fix: `--play` -- the game's own end, status 0, no crash or hang report; the installed checks -- developer mode on (its own test saves), a player's save continued, developer mode off (nothing of the tools active, the player's saves byte for byte) |
+| 10 | An update that rebuilds, and rollback | a lifting tool changed: `--update` makes a new build and keeps the first; the worker's `rollback` back to it; played again | pass: a lifting tool changed -- `--update` relifted and rebuilt in 53 s into a second build, the first kept; the worker's `rollback` made the first active again, nothing rebuilt; `--play` again: the game's own end, status 0 |
+| 11 | The disc image and the keys file untouched; no key in any file | size and time, SHA-256, before and after; every installation file searched for the keys' lines | pass: the image's size and time and the keys' SHA-256 the same after the install; none of the keys file's 56 key strings in any file of the installation (the lift's and the compiler's output and the disc copy, derived and large, not searched) |
+| 12 | Uninstall | the launcher removed by its worker: the installation, saves and settings kept | pass: the launcher's worker removed CubicHeroes, its worker and libraries; the installation (builds, data, config, backups, logs, active.json) kept, its 12 save, backup and settings files byte for byte |
 | 13 | The portable root and the command line | `tests/cli_integration.py --with-game` (docs/M11_PLAN.md section 32) | pass: 17 of 17 |
 | 14 | The unit tests | `tests/test_*.py` | pass: 215 tests in 17 files |
+| 15 | The launcher put back over the folder | the package unpacked over the installation again (after 12) | pass: the installation found as it was, none of its files changed |
+| 16 | A new version's update in place | the new package over the folder, `--update` | pass: the changed prebuilt library noticed, the game relinked into a new build (the first kept), its shaders prepared (5 s) |
 
 ## 3. Found and fixed by the qualification
 
@@ -48,7 +51,21 @@ clean when the cache moves), and make_bundle refuses to archive a package in whi
 home path with a private name or a private literal. (A player's own build already used a cache inside the
 installation: the paths it records are the player's, on the player's machine.)
 
-### 3.2 Licences
+### 3.2 B-014: QUIT GAME's label took the developer tools' memory
+
+The installed developer-mode-off check failed on the candidate: its log had the developer tools' "[dev]" line. QUIT
+GAME's label (M11.2d) is set by one call into the game's Lua, which needs a little guest memory, and it used the
+tools' 384 KB region -- in every player's game, with developer mode off. Fixed: the label has one 64 KB page of its
+own with developer mode off; the tools' region only with it on (docs/M11_VALIDATION.md B-014). The fix is in the
+prebuilt native library, so the candidate was remade with `--prebuilt`, and the qualification's installation took it
+as a player would: the new package over the folder, `--update` (the changed library relinked into a new build).
+Then the installed checks passed.
+
+Two test faults found on the way, not the game's: the qualification first gave the keys file by a relative path from
+another working folder (the install, rightly, did not find it), and the installed checks need a player's save to
+continue (a new installation has none: one written by the game is brought in).
+
+### 3.3 Licences
 
 - The worker's Python runtime as PyInstaller packs it (Python 3.12, with OpenSSL, libffi, zlib, bzip2 and the rest of
   its Windows build), pycryptodome, and PyInstaller's bootloader shipped without their licence notices: now

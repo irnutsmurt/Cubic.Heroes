@@ -22,11 +22,15 @@ Steps (in order; --from STEP resumes, --only runs some):
   noop       --update: nothing rebuilt (the tools unchanged)
   checkup    --check-update: an answer (offline: "offline", exit 0, at once -- never a hang)
   play       --play: the game started directly, ended in order through its exit question, status 0
-  suite      tests/devtools_suite.py --installed: developer mode on (its test saves), then off
+  suite      tests/devtools_suite.py --installed: developer mode on (its test saves), then off -- a player's save
+             brought in first when the installation has none (--saves: a game-written save folder), as the suite
+             continues one
   rebuild    a lifting tool changed in the package: --update relifts and rebuilds into a new build, the old kept
   rollback   the worker's rollback: the first build active again (nothing rebuilt); --play again
   keys       no line of the keys file in any file of the installation
   remove     the launcher removed by its worker (remove-launcher): the installation, saves and settings kept
+  reunpack   the package unpacked over the folder again (a player putting the launcher back): the installation found
+             as it was, nothing of it replaced
 Results: <work>/qualification.json and a PASS/FAIL line per step.
 """
 import argparse
@@ -47,7 +51,7 @@ import desktop_guard  # noqa: E402
 import install_layout  # noqa: E402
 
 STEPS = ["unpack", "empty", "install", "status", "shaders", "noop", "checkup", "play", "suite", "rebuild",
-         "rollback", "keys", "remove"]
+         "rollback", "keys", "remove", "reunpack"]
 NAME = "Cubic H\u00e9roes RC \u00fc \u30c6\u30b9\u30c8"   # an accent and Japanese: the game must open its files by them
 
 
@@ -250,6 +254,14 @@ class Q:
     def suite(self):
         """the installed game's own checks (tests/devtools_suite.py --installed): developer mode set through the
         command line for them (they refuse an install without it), set back after"""
+        saves = os.path.join(self.root, "data", "gamedata", "dev_hdd0", "home", "00000001", "savedata")
+        brought = []
+        if not any(n.startswith("BLUS30490GAME") for n in (os.listdir(saves) if os.path.isdir(saves) else [])):
+            os.makedirs(saves, exist_ok=True)
+            for n in os.listdir(self.o.saves):
+                if os.path.isdir(os.path.join(self.o.saves, n)):
+                    shutil.copytree(os.path.join(self.o.saves, n), os.path.join(saves, n), dirs_exist_ok=True)
+                    brought.append(n)
         code, out, err, _ = self.cli("--set", "DOTHEROES_DEVELOPER_MODE=1", timeout=300)
         st = json.load(open(os.path.join(self.root, "active.json"), encoding="utf-8"))
         game = os.path.join(self.root, "builds", st["active"], "dotheroes.exe")
@@ -261,7 +273,7 @@ class Q:
         bad = [] if r.returncode == 0 else [f"exit {r.returncode}: {tail[-3:]}"]
         if code != 0 or code3 != 0:
             bad.append(f"--set developer mode: {code}/{code3} {out[-200:]}")
-        self.record("suite", bad, lines=tail)
+        self.record("suite", bad, lines=tail, saves_brought_in=brought)
 
     def rebuild(self):
         code, b0, _ = self.worker("builds", "--install", self.root)
@@ -340,6 +352,33 @@ class Q:
         self.record("remove", bad, left=left, saves_checked=len(saves0))
 
 
+    def reunpack(self):
+        """the package's items unpacked over the folder (as a player puts the launcher back): the installation's own
+        files untouched, the installation found again"""
+        keep = tree(self.root)
+        keep = {k: v for k, v in keep.items() if not k.split("/")[0] in install_layout.launcher_package()}
+        with zipfile.ZipFile(self.o.package) as z:
+            top = z.namelist()[0].split("/")[0]
+            for m in z.infolist():
+                rel = m.filename[len(top) + 1:]
+                if not rel:
+                    continue
+                dst = os.path.join(self.root, *rel.split("/"))
+                if m.is_dir():
+                    os.makedirs(dst, exist_ok=True)
+                    continue
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                with z.open(m) as src, open(dst, "wb") as out:
+                    shutil.copyfileobj(src, out)
+        after = tree(self.root)
+        changed = sorted(k for k in keep if after.get(k) != keep[k] and not k.startswith("logs/"))
+        code, st = self.status()
+        bad = [] if code == 0 and st.get("installed") is True else [f"status: {code} {st}"]
+        if changed:
+            bad.append(f"the installation's files changed: {changed[:5]}")
+        self.record("reunpack", bad, checked=len(keep))
+
+
 def tree(root):
     out = {}
     for d, dirs, files in os.walk(root):
@@ -362,7 +401,17 @@ def main():
     ap.add_argument("--from", dest="start", choices=STEPS)
     ap.add_argument("--only", nargs="*", choices=STEPS)
     ap.add_argument("--interrupt-after", type=float, default=240)
+    ap.add_argument("--saves", default=os.path.join(ROOT, "build", "checkpoints", "castle-front"),
+                    help="a game-written save folder brought in when the installation has none (the suite)")
     o = ap.parse_args()
+    # paths given relative to where this runs: CubicHeroes runs from the work folder (any relative path it is given
+    # is taken from there, as a command line's is)
+    o.package, o.disc, o.keys, o.saves = (os.path.abspath(x) for x in (o.package, o.disc, o.keys, o.saves))
+    for stream in (sys.stdout, sys.stderr):   # the folder's name is not in every console's code page
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
     q = Q(o)
     steps = o.only or STEPS[STEPS.index(o.start):] if (o.only or o.start) else STEPS
     fn = {"status": q.status_step}
