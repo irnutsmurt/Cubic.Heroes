@@ -41,6 +41,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "tools"))
 sys.path.insert(0, ROOT)
 import game_settings  # noqa: E402
+sys.path.insert(0, os.path.join(ROOT, "tests"))
+import desktop_guard  # noqa: E402
 import install_layout as layout  # noqa: E402
 import setup_pipeline as pipeline  # noqa: E402
 import worker  # noqa: E402
@@ -112,6 +114,7 @@ def active_exe():
 
 def game_info(exe):
     env = {k: v for k, v in os.environ.items() if not k.startswith(("DOTHEROES_", "PS3_", "PS3RECOMP_"))}
+    desktop_guard.no_display(env)
     r = subprocess.run([exe, "--info"], capture_output=True, text=True, timeout=120, env=env)
     try:
         return json.loads(r.stdout.strip().splitlines()[-1])
@@ -402,7 +405,7 @@ def stage_settings():
 
 def stage_game():
     exe = active_exe()
-    env = dict(os.environ, DOTHEROES_LOG_TO_CONSOLE="1")
+    env = desktop_guard.no_display(dict(os.environ, DOTHEROES_LOG_TO_CONSOLE="1"))
     r = subprocess.run([exe, "--memtest"], cwd=DIR, env=env, capture_output=True, text=True, timeout=300)
     tail = (r.stdout + r.stderr).strip().splitlines()[-3:]
     report["stages"]["game"] = {"memtest_exit": r.returncode, "memtest_tail": tail}

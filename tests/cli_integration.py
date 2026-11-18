@@ -47,6 +47,7 @@ def cli(exe, *args, cwd=None, env=None, timeout=600):
     for k in ("CUBIC_INSTALL_DIR", "CUBIC_DIRECT_PLAY", "CUBIC_LAUNCHER", "CUBIC_LAUNCHER_PID"):
         e.pop(k, None)
     e.update(env or {})
+    desktop_guard.no_display(e)   # the command line never opens a window; on Linux it cannot reach a display
     r = subprocess.run([exe, *args], cwd=cwd or os.path.dirname(exe), env=e, capture_output=True, timeout=timeout)
     out = r.stdout.decode("utf-8", "replace")
     return r.returncode, out, r.stderr.decode("utf-8", "replace")
@@ -278,6 +279,7 @@ def game_cases(exe, a):
             os.remove(log)
         p = subprocess.Popen([exe, "--play", "--json", *args], cwd=other, env=env, stdout=subprocess.PIPE,
                              stderr=subprocess.PIPE)
+        desktop_guard.Watch(p, label="CubicHeroes --play").start()   # the tree: the game it starts included
         first = p.stdout.readline().decode("utf-8", "replace")
         try:
             ev = json.loads(first)

@@ -267,11 +267,22 @@ class Diagnostics(unittest.TestCase):
             self.assertEqual(sorted(zf.namelist()), sorted(n for n in os.listdir(out)))
             self.assertNotIn("log-game.log", zf.namelist())
 
+    @unittest.skipUnless(os.name == "nt", "a Windows path")
     def test_sanitizer(self):
         s = diagnostics.Sanitizer("C:\\Games\\Cubic", extra=("Alexandra",))
         t = s.text("C:\\Games\\Cubic\\logs and c:/games/cubic/data, by Alexandra (" + "alexandra" + AT +
                    "x.org), not Alexandrite")
         self.assertEqual(t, "<install>\\logs and <install>/data, by <name> (<email>), not Alexandrite")
+
+
+    @unittest.skipIf(os.name == "nt", "a POSIX path")
+    def test_sanitizer_posix(self):
+        s = diagnostics.Sanitizer("/srv/Games/Cubic Heroes", extra=("Alexandra",))
+        t = s.text("/srv/Games/Cubic Heroes/logs and /srv/Games/Cubic Heroes/data, by Alexandra (" + "alexandra" +
+                   AT + "x.org), not Alexandrite")
+        self.assertEqual(t, "<install>/logs and <install>/data, by <name> (<email>), not Alexandrite")
+        home = os.path.expanduser("~")
+        self.assertEqual(s.text(home + "/.config/x"), "<home>/.config/x")
 
 
 if __name__ == "__main__":

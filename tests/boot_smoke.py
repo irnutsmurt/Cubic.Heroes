@@ -381,6 +381,8 @@ def main():
     window = SHOW_WINDOW
     for k in ("PS3RECOMP_VK_WINDOW", "PS3RECOMP_VK_WINDOW_HIDDEN") + (() if window else ("DISPLAY", "WAYLAND_DISPLAY")):
         env.pop(k, None)
+    if not window:
+        desktop_guard.no_display(env)   # Linux: unset, libwayland would still reach wayland-0
     env.update({
         "DOTHEROES_DEV_STOP": env.get("DOTHEROES_DEV_STOP", "1"),   # stop.trigger: logs written, then exit
         "PS3_STRICT": env.get("PS3_STRICT", "1"),

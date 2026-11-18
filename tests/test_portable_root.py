@@ -129,8 +129,13 @@ class MovedFolder(Temp):
         new = layout.Layout(moved)
         self.assertEqual(new.active_exe(), os.path.join(moved, "builds", bid, EXE))
         self.assertTrue(os.path.isfile(new.active_exe()))
-        # before the repair game/ still names the old place (gone): the build's own program is what runs
-        self.assertFalse(os.path.isfile(os.path.join(new.game_link, EXE)))
+        if os.name == "nt":
+            # before the repair game/ (an absolute junction) still names the old place (gone): the build's own
+            # program is what runs
+            self.assertFalse(os.path.isfile(os.path.join(new.game_link, EXE)))
+        else:
+            # a relative symlink: it moved with the folder and still names the build
+            self.assertTrue(os.path.isfile(os.path.join(new.game_link, EXE)))
         self.assertTrue(new.repair_game_link())
         self.assertTrue(os.path.samefile(new.game_link, new.build_dir(bid)))
         self.assertTrue(os.path.isfile(os.path.join(new.game_link, EXE)))

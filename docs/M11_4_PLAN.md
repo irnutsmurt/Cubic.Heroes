@@ -7,7 +7,9 @@ Evidence marks as in the other plans: [C] read in the code, [M] measured, [I] in
 
 ## Checkpoint (kept current; the newest state first)
 
-- **Stage** (2026-11-18): **P0 done** (onboarding, safeguards verified on Linux); this plan written; P1 next.
+- **Stage** (2026-11-18): **P1 done** -- the desktop guard enforced on Linux (section 9); the unit tests run on Linux
+  for the first time (section 10: one real Linux bug fixed, two Windows-only tests given their Linux case). P2 next.
+- P0 done (onboarding, safeguards verified on Linux); this plan written.
 - **Decisions**: D1-D4 approved by the owner on 2026-11-18 as recommended, with their additions (section 4); Windows
   and Linux CI approved. Correctness first, then AMD profiling and optimisation.
 
@@ -200,7 +202,7 @@ States: **VERIFIED** (implemented, evidence named), **UNVERIFIED** (implemented,
 | # | Criterion | State | Evidence |
 |---|---|---|---|
 | A1 | Privacy configuration and git safeguards active on Linux | VERIFIED | section 2 |
-| A2 | The desktop guard enforced on Linux (X11 and Wayland) | NOT DONE | P1 |
+| A2 | The desktop guard enforced on Linux (X11 and Wayland) | VERIFIED (mechanism); runners' Linux kill paths: P4 | section 9 |
 | A3 | Native Linux dev build boots and plays (offscreen) | NOT DONE | P2 |
 | A4 | Linux release configuration as Windows' (D1: no lifted SPU in the release) | NOT DONE | P3 |
 | A5 | Release crash record and hang report on Linux | NOT DONE | P3 |
@@ -225,3 +227,33 @@ States: **VERIFIED** (implemented, evidence named), **UNVERIFIED** (implemented,
 | A24 | 166 maps, bosses, gameplay, audio, saves on Linux | NOT DONE | P8 |
 | A25 | Release qualification from the Linux packages | NOT DONE | P9 |
 | A26 | Licences, boundary, privacy audits of the Linux packages; docs and README | NOT DONE | P9 |
+
+## 9. P1: the desktop guard on Linux (2026-11-18) [M]
+
+- **No display unless approved**: `desktop_guard.no_display` removes `DISPLAY` and `WAYLAND_SOCKET` and points
+  `WAYLAND_DISPLAY` at a socket name that is never created -- removing it is not enough, since libwayland then tries
+  `wayland-0`. `game_env` applies it whenever the window is not shown; `launcher_env` also selects SDL2's
+  `offscreen` video driver for the hidden launcher. `boot_smoke.py` (which only removed the variables),
+  `cli_integration.py`'s commands and `player_install_test.py`'s `--info`/`--memtest` now take it too.
+- **Checked, not assumed**: on Linux `Watch` looks for the process tree's connections to a display server. A Unix
+  socket's client end has no name; `ss -xan` gives its peer, whose row names the listener (`$XDG_RUNTIME_DIR/wayland-N`,
+  `/tmp/.X11-unix/XN` or its abstract twin). A connection comes before any window, and the check is the same on every
+  compositor (no KWin-specific scripting). `cli_integration.py`'s `--play` runs are now watched (the game included,
+  as a descendant).
+- Evidence on this machine (KDE Plasma 6, Wayland, XWayland): with the guard's environment `vkcube --wsi wayland`
+  "Cannot connect to wayland", `--wsi xcb` refused for want of `DISPLAY`; a real client of KWin's `wayland-0` seen
+  as `wayland`; a live `xprop -spy` seen as `x11: @/tmp/.X11-unix/X1` and ended within one poll.
+  tests/test_desktop_guard.py: 9 tests (3 new: the Linux environment; a grandchild connected to a listener named like
+  a Wayland socket seen and ended; another socket ignored). Windows: `visible_windows` and its use unchanged.
+
+## 10. The unit tests on Linux (2026-11-18) [M]
+
+First run on Linux (Python 3.14): 17 files, 224 tests. Results and actions:
+
+| File | First run | Cause | Action |
+|---|---|---|---|
+| test_worker | 1 failure | **a Linux bug**: a forced cancel (an operation blocked past the 5 s grace) called `hard_exit` from the grace thread, which called `signal.signal` -- allowed only on the main thread -- so it raised before `os._exit`: the worker said "cancelled" and kept running (with its compile or lift), on every launcher-started worker (they lead their own group) | `hard_exit` ends the other members of its group by `/proc` without touching handlers; measured: exit at 5.01 s with a child in its group ended (was 10.45 s, the child left) |
+| test_portable_root | 1 failure | the Windows junction is absolute, so a moved folder's `game/` breaks until repaired; Linux's link is relative and keeps working | the test expects each platform's behaviour |
+| test_settings_diagnostics | 1 failure | a Windows install path in a test run on Linux | Windows case kept; a POSIX case added (an install with a space, the home folder) |
+| test_install_layout (5), test_player_pipeline (3) | errors | need the ps3recomp checkout (`build/ref/ps3recomp`), made by the pipeline | rerun after P2 |
+| the other 12 | pass | | |

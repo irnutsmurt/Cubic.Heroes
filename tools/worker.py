@@ -202,12 +202,21 @@ def own_children():
 
 
 def hard_exit(code):
+    """End now with `code`, from any thread. Elsewhere than Windows, the processes of this worker's own group (its
+    tools: a compile, a lift) are ended first -- each but this one, so no signal handler is needed (one can be set
+    only on the main thread, and the forced cancel calls this from its grace thread)."""
     if os.name != "nt":
         import signal
         try:
-            if os.getpgid(0) == os.getpid():
-                signal.signal(signal.SIGTERM, signal.SIG_IGN)
-                os.killpg(0, signal.SIGTERM)
+            me = os.getpid()
+            if os.getpgid(0) == me:
+                for d in os.listdir("/proc"):
+                    if d.isdigit() and int(d) != me:
+                        try:
+                            if os.getpgid(int(d)) == me:
+                                os.kill(int(d), signal.SIGTERM)
+                        except OSError:
+                            pass
         except OSError:
             pass
     os._exit(code)   # Windows: the job's last handle closes with the process; its children end
