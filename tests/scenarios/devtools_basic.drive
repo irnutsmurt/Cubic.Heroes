@@ -26,6 +26,9 @@ devfail lua error("a deliberate error")
 devfail lua this is not lua
 devfail no-such-command
 dev lua return 2*21
+peekobj EventClass.Event 0 2
+devfail peek 3
+devfail peek 0x10001
 devstate frames>+60 30
 write overlay.input open
 devstate held==1,hold_runs>=1 30

@@ -7,11 +7,12 @@ run through tests/boot_smoke.py (the desktop guard keeps it off the screen), the
                                                          have DOTHEROES_DEVELOPER_MODE=1; never a player's own)
 
 Scenarios (tests/scenarios/<name>.drive):
-  devtools_basic   the channel, the Lua runner and its error paths, the run-time open points, the hold
+  devtools_basic   the channel, the Lua runner and its error paths, the run-time open points, the hold; `peek`
   devtools_off     developer mode off: dev.cmd never read, no dev.out, no [dev] line in the log
   devtools_warp    the catalog; a warp to each kind of place, each arriving at its own map number; refusals
   devtools_menu    the in-game menu's Developer pages (pictures dumped): Warp to D_1_1_1 chosen and arrived; Status
-  devtools_progress  flags, the story's steps, quests, items; a boss room before and after `progress set`
+  devtools_progress  flags, the story's steps, quests, items; a boss room before and after `progress set`; the
+                   first orb's three magic containers given once (`progress set 10` twice)
   devtools_encounter  a boss fought the game's way, the actors, a scene, an event by name, the map again
   devtools_diag    coverage before and after a warp, its export, frame times, the runtime's reports, test states
   devtools_player  life, magic, money through the game's functions; no death on a lethal hit; invulnerable among the
@@ -124,6 +125,10 @@ def check_basic(rd):
         bad.append("the scripts' Event object is not the game manager's (or no check answered)")
     if any(c.get("hold_other_thread") for c in checks):
         bad.append("the hold's hook ran on another thread than the flip's")
+    peeks = [a["out"] for a in answers if a.get("ok") and isinstance(a.get("out"), list) and a["out"] and
+             all(isinstance(x, int) for x in a["out"])]
+    if len(peeks) < 2 or not peeks[0][0]:   # the Event object's address behind its userdata, then two of its words
+        bad.append(f"`peek` (peekobj EventClass.Event): {peeks[:2]}")
     return bad
 
 
@@ -207,6 +212,9 @@ def check_progress(rd):
     snake = [o for o in a if isinstance(o, dict) and o.get("flag") == 6]
     if [s.get("value") for s in snake] != [0, 0, 1]:
         bad.append(f"flag 6 before, after the boss room, after `progress set 9`: {[s.get('value') for s in snake]}")
+    mm = [o["max_magic"] for o in a if isinstance(o, dict) and "max_magic" in o][-3:]
+    if len(mm) != 3 or mm[1] != mm[0] + 3 or mm[2] != mm[1]:   # the yellow orb's 3 magic containers, given once
+        bad.append(f"max magic before `progress set 10`, after it, after it again: {mm}")
     return bad
 
 

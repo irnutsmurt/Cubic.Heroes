@@ -56,7 +56,13 @@ scenario header):
                               reach, the Wire Rod (selected in the circle slot) fired at an anchor pile in line whose
                               platform is nearer it (into the pile's line first); map@FILE (with aim@REACH): the
                               arena's map (devexplore's) -- out of reach, the fewest walks and pulls to a cell in
-                              reach, followed; in hold and
+                              reach, followed; cast@ICON,SECS: the spell the icon shows (beside the drive) put in the
+                              circle slot and cast at once and every SECS s (CIRCLE); collect: an item dropped within
+                              6 units walked over; farm@COST (with cast@): the hero's magic read, the spell cast only
+                              with COST, below it and the light gone the boss's summons fought (the actors that came
+                              after the fight began: their drops), collect picking up; cycle@SECS: a body that took no
+                              wound for SECS s passed over for the boss's next actor (a wound: life@OFF, the body
+                              actor's own life at OFF -- the priest's +0x5BC -- lower than at its last read); in hold and
                               aim modes each change in the number of visible enemies is logged (a boss's parts cut,
                               grown again, added)
   select <BUTTON> <ref.png> [max]  BUTTON pressed (R2: the circle slot's next) until the HUD's circle slot shows the
@@ -710,6 +716,36 @@ SLOT_BOX = (418, 22, 456, 58)   # `select`: the HUD's circle slot icon, in a 640
 WIRE_RANGE = 8.0   # aim mode with `wire`: the farthest anchor pile the Wire Rod is fired at (it caught at 6.4, not at 11.2)
 
 
+def obj_words(chan, expr, off, n):
+    """N guest words at OFF in the native object behind a script object (EXPR: its userdata, whose payload the game's
+    binding fills with the object's address -- tostring gives the payload's own); `peek` (developer mode)"""
+    o = chan.send(f"lua return tostring({expr})", timeout=10, alive=alive)["out"]
+    m = re.match(r"userdata: (?:0x)?([0-9a-fA-F]+)$", str(o).strip())
+    if not m:
+        raise Fail(f"obj_words: {expr} is not a native object ({o})")
+    ptr = chan.send(f"peek 0x{int(m.group(1), 16):X}", timeout=10, alive=alive)["out"]
+    ptr = (ptr if isinstance(ptr, list) else json.loads(ptr))[0]
+    w = chan.send(f"peek 0x{ptr + off:X} {n}", timeout=10, alive=alive)["out"]
+    return ptr, (w if isinstance(w, list) else json.loads(w))
+
+
+def select_slot(button, ref_name, tries=12):
+    """`select`: BUTTON pressed until the HUD's circle slot shows the reference picture (beside the drive)"""
+    ref = Image.open(os.path.join(os.path.dirname(os.path.abspath(script)), ref_name)).convert("RGB")
+    for k in range(tries + 1):
+        im = frame()
+        if im:
+            got = im.convert("RGB").resize((640, 360)).crop(SLOT_BOX)
+            off = sum(ImageStat.Stat(ImageChops.difference(got, ref.resize(got.size))).mean) / 3.0
+            if off < 14.0:
+                say(f"  select: the circle slot shows it after {k} press(es) (difference {off:.1f})")
+                return k
+        if k == tries:
+            raise Fail(f"select: not in the circle slot after {tries} presses of {button}")
+        press(mask_of(button), 3)
+        wait(1.0)
+
+
 # ---- an arena's ways: its cells walked and the Wire Rod's pulls (devexplore; devfight's map@) ----
 CELL = 1.6
 NAV_DIRS = {"RIGHT": (1, 0), "LEFT": (-1, 0), "UP": (0, -1), "DOWN": (0, 1)}   # UP: z larger, the row before
@@ -934,7 +970,7 @@ def devexplore(chan, out_path, tmo):
 
 
 def devfight(chan, tmo, flag=None, reach=2.4, soft=False, hold=None, face=None, aim=False, aim_reach=0.0, wire=False,
-             nav=None):
+             nav=None, cast=None, collect=False, farm=None, cycle=None, life_off=None):
     """M11.1: fight what the developer tools' `enemies` lists -- the game's actor manager's visible ENEMY actors (a
     boss's parts among them, which the actor scan behind `fight` does not see): walk to the nearest, turn to it and
     swing, until none is left or, with `flag` (an event flag number), until the game sets that flag (a boss's
@@ -949,6 +985,13 @@ def devfight(chan, tmo, flag=None, reach=2.4, soft=False, hold=None, face=None, 
     wires = 0        # aim mode with `wire`: the Wire Rod's uses
     no_pull = {}     # aim mode with `wire`: (the hero's cell, the pile's slot) -> until when that pile is passed over
     life_at, life_was = 0.0, None   # aim mode: the boss's life (a drive's __dt_boss, its Init's object), read each 15 s
+    cast_at, casts = 0.0, 0   # cast@: when the circle slot's spell was last cast, how often
+    lit_until = 0.0   # cast@: until when the spell last cast lasts (its interval and 2 s)
+    magic, magic_at = None, 0.0   # farm@COST: the hero's magic, read each 5 s
+    bodies, farming = None, False   # farm@COST: the boss's actors when the fight began (the rest: his summons); now on them
+    body_since, body_aside = 0.0, {}   # cycle@SECS: since when the body hurt nothing; bodies passed over -> until when
+    if cast:   # cast@ICON,SECS: the spell the icon shows put in the circle slot, cast at once and every SECS s
+        select_slot("R2", cast[0], 14)
     if hold:   # hold mode: from this spot, strike only what comes within reach (a boss that comes to the hero)
         try:
             goto(hold[0], hold[1], 1.0, 30)
@@ -996,25 +1039,81 @@ def devfight(chan, tmo, flag=None, reach=2.4, soft=False, hold=None, face=None, 
         quiet_since = None
         now = time.time()
         dist_of = lambda a: ((a["x"] - hero["x"]) ** 2 + (a["z"] - hero["z"]) ** 2) ** 0.5  # noqa: E731
+        if farm and time.time() - magic_at > 5:
+            magic_at = time.time()
+            try:
+                pl = chan.send("player", timeout=10, alive=alive)["out"]
+                magic = (pl if isinstance(pl, dict) else json.loads(pl)).get("magic")
+            except Exception:   # noqa: BLE001 -- unread: as it was
+                pass
+        if cast and time.time() - cast_at >= cast[1] and (not farm or magic is None or magic >= farm):
+            press(BTN["CIRCLE"])
+            wait(1.2)
+            cast_at, casts = time.time(), casts + 1
+            lit_until = cast_at + cast[1] + 2.0
+            magic = None if farm else magic   # read again before the next
+            if casts == 1 or casts % 10 == 0:
+                say(f"  devfight: the circle slot's spell cast ({casts} times, {time.time() - t0:.0f} s)")
+        if collect and hero:   # collect: an item dropped near (an apple: the magic back) walked over
+            near_items = [q for q in o if q["kind"] == "ITEM" and q.get("visible") and
+                          ((q["x"] - hero["x"]) ** 2 + (q["z"] - hero["z"]) ** 2) ** 0.5 <= 6.0]
+            if near_items:
+                q = min(near_items, key=lambda q: (q["x"] - hero["x"]) ** 2 + (q["z"] - hero["z"]) ** 2)
+                try:
+                    goto(q["x"], q["z"], 0.5, 3)
+                except Fail:
+                    pass
+                continue
         if aim:
-            if time.time() - life_at > 15:   # the boss's own life, when the drive kept its object (__dt_boss)
+            lv_changed = False
+            if time.time() - life_at > (5 if life_off is not None else 15):
+                # life@OFF: the body's own life, its actor's word at OFF (the priest's: +0x5BC); else the life its
+                # Init was given (a drive's __dt_boss: m_info.hp -- the starting life, never lowered by a wound)
                 life_at = time.time()
                 try:
-                    lv = chan.send('lua return __dt_boss and __dt_boss.m_info and __dt_boss.m_info.hp or "none"',
-                                   timeout=10, alive=alive)["out"]
+                    if life_off is not None and body is not None:
+                        lv = (body, obj_words(chan, f"actor_manager.gActorManager:getActor({body})", life_off, 1)[1][0])
+                    else:
+                        lv = (None, chan.send('lua return __dt_boss and __dt_boss.m_info and __dt_boss.m_info.hp or "none"',
+                                              timeout=10, alive=alive)["out"])
                 except Exception as e:   # noqa: BLE001 -- a refused chunk: no life to log
-                    lv = f"unread ({str(e)[:60]})"
+                    lv = (body, f"unread ({str(e)[:60]})")
                 if lv != life_was:
-                    say(f"  devfight: the boss's life {lv} ({time.time() - t0:.0f} s)")
+                    say(f"  devfight: {'slot ' + str(lv[0]) + chr(39) + 's life' if lv[0] is not None else 'the boss' + chr(39) + 's starting life'}"
+                        f" {lv[1]} ({time.time() - t0:.0f} s)")
+                    lv_changed = (life_was is not None and life_was[0] == lv[0] and isinstance(lv[1], int) and
+                                  isinstance(life_was[1], int) and lv[1] < life_was[1])
                     life_was = lv
             if len(es) != counted:
                 say(f"  devfight: {len(es)} visible enemies ({time.time() - t0:.0f} s, {swings} swings)")
                 counted = len(es)
+            if bodies is None:
+                bodies = {a["slot"] for a in es}
+                if farm or cycle:
+                    say(f"  devfight: the boss's actors {sorted(bodies)}")
+            if cycle and lv_changed:   # a wound: this body is the boss's
+                body_since = time.time()
+            if cycle and body is not None and time.time() - body_since > cycle:   # it hurt nothing: the next one
+                say(f"  devfight: slot {body}: no wound in {cycle:g} s, the next")
+                body_aside[body] = time.time() + 3 * cycle
+                body = None
             tgt = next((a for a in es if a["slot"] == body), None)
             if tgt is None:   # the body: the first of the boss's actors (again if it went: a new body, a new phase)
-                tgt = min(es, key=lambda a: a["slot"])
+                pool = [a for a in es if body_aside.get(a["slot"], 0) <= time.time() and
+                        (not cycle or a["slot"] in bodies)] or es
+                tgt = min(pool, key=lambda a: a["slot"])
                 say(f"  devfight: aiming at slot {tgt['slot']} at ({tgt['x']:.1f}, {tgt['z']:.1f})")
-                body = tgt["slot"]
+                body, body_since = tgt["slot"], time.time()
+            if farm:   # the magic too low for the spell, its light gone: his summons fought for what they drop
+                low = magic is not None and magic < farm and time.time() > lit_until
+                prey = [a for a in es if a["slot"] not in bodies] if low else []
+                if bool(prey) != farming:
+                    farming = bool(prey)
+                    say(f"  devfight: {'on his summons (magic ' + str(magic) + ')' if farming else 'on the boss'} "
+                        f"({time.time() - t0:.0f} s)")
+                if prey:
+                    tgt = min(prey, key=dist_of)
+                    body_since = time.time()   # the body was not tried meanwhile
             dx, dz = tgt["x"] - hero["x"], tgt["z"] - hero["z"]
             if aim_reach and (dx * dx + dz * dz) ** 0.5 <= aim_reach and min(abs(dx), abs(dz)) > AIM_LINE:
                 # within the blade's reach off its line: a swing sweeps an arc -- the two ways toward it in turn
@@ -1526,6 +1625,15 @@ def step(lineno, line, op, a):
             raise Fail(f"dev {rest}: {e}")
         out = ans["out"]
         say(f"dev {rest}: {out if isinstance(out, str) else json.dumps(out)}"[:600])
+    elif op == "peekobj":   # peekobj <lua expr> <offset> [n]: words of the native object behind a script object (logged)
+        import devtools
+        import struct
+        if dev_channel is None:
+            dev_channel = devtools.Channel(run)
+        off = int(a[1], 0)
+        ptr, ws = obj_words(dev_channel, a[0], off, int(a[2]) if len(a) > 2 else 8)
+        say(f"  peekobj {a[0]} at 0x{ptr:08X}: " + " ".join(
+            f"+0x{off + 4 * k:X}={v}/{struct.unpack('>f', struct.pack('>I', v))[0]:.4g}" for k, v in enumerate(ws)))
     elif op == "devtry":   # as `dev`, but a refusal or no answer is logged and the script goes on (a sweep's map)
         import devtools
         rest = line.split(None, 1)[1] if len(line.split(None, 1)) > 1 else ""
@@ -1564,6 +1672,11 @@ def step(lineno, line, op, a):
         if face and (face not in ("UP", "DOWN", "LEFT", "RIGHT") or not hold):
             raise Fail(f"devfight: face@{face} wants UP, DOWN, LEFT or RIGHT, with hold@X,Z")
         aim_at = next((x for x in a[1:] if x == "aim" or x.startswith("aim@")), None)
+        cast_at = next((x[5:].split(",") for x in a[1:] if x.startswith("cast@")), None)
+        cast = (cast_at[0], float(cast_at[1]) if len(cast_at) > 1 else 30.0) if cast_at else None
+        farm_at = next((int(x[5:]) for x in a[1:] if x.startswith("farm@")), None)
+        cycle_at = next((float(x[6:]) for x in a[1:] if x.startswith("cycle@")), None)
+        life_at_off = next((int(x[5:], 0) for x in a[1:] if x.startswith("life@")), None)
         map_at = next((x[4:] for x in a[1:] if x.startswith("map@")), None)
         nav = None
         if map_at:   # beside the drive, or in the run
@@ -1574,7 +1687,8 @@ def step(lineno, line, op, a):
             nav = Nav(json.load(open(mp, encoding="utf-8")))
             say(f"  devfight: the arena's map {map_at}: {len(nav.cells)} cells, {len(nav.hook_list)} pulls")
         devfight(dev_channel, float(a[0]) if a else 120, flag, soft="soft" in a, hold=hold, face=face, aim=bool(aim_at),
-                 aim_reach=float(aim_at[4:]) if aim_at and aim_at.startswith("aim@") else 0.0, wire="wire" in a, nav=nav)
+                 aim_reach=float(aim_at[4:]) if aim_at and aim_at.startswith("aim@") else 0.0, wire="wire" in a, nav=nav,
+                 cast=cast, collect="collect" in a, farm=farm_at, cycle=cycle_at, life_off=life_at_off)
     elif op == "devexplore":   # devexplore <out.json> [timeout]: the arena's walkable cells and the Wire Rod's pulls
         import devtools
         if dev_channel is None:
@@ -1694,20 +1808,7 @@ def step(lineno, line, op, a):
         wait(0.5)
         say(f"hero placed at ({float(a[0])}, {float(a[1])})")
     elif op == "select":   # select <BUTTON> <ref.png> [max]: the circle slot cycled to the item the reference shows
-        ref = Image.open(os.path.join(os.path.dirname(os.path.abspath(script)), a[1])).convert("RGB")   # beside the drive
-        tries = int(a[2]) if len(a) > 2 else 12
-        for k in range(tries + 1):
-            im = frame()
-            if im:
-                got = im.convert("RGB").resize((640, 360)).crop(SLOT_BOX)
-                off = sum(ImageStat.Stat(ImageChops.difference(got, ref.resize(got.size))).mean) / 3.0
-                if off < 14.0:
-                    say(f"  select: the circle slot shows it after {k} press(es) (difference {off:.1f})")
-                    break
-            if k == tries:
-                raise Fail(f"select: not in the circle slot after {tries} presses of {a[0]}")
-            press(mask_of(a[0]), 3)
-            wait(1.0)
+        select_slot(a[0], a[1], int(a[2]) if len(a) > 2 else 12)
     elif op == "shot":
         shot(a[0] if a else f"line{lineno}")
     elif op == "stop":

@@ -449,7 +449,9 @@ allow); the launcher's Settings page with the new switch (the same code path as 
   each with the flags the game's scripts set at that point, the world map's progress flags (Event:SetProgressFlag)
   and the items it gives -- reconstructed from the scripts the game runs (the research notes, build/m11/agents);
   `progress set K` sets every step up to K and gives each step's items through the game's own item-get
-  (Event:AddItem2) unless already held. A step is "done" when its flags hold.
+  (Event:AddItem2) unless already held, and the magic containers its event adds (Event:AddMaxMP: the yellow orb's 3,
+  mainevent_007_yelloworb -- only when the step's first flag was not yet set; added 2026-11-17, section 30: without it
+  a hero set to the tower had 5 of the story's 8). A step is "done" when its flags hold.
 - **Quests** (`quests`): the flags of 100 and above grouped by the script function that sets them -- read at run
   time in the scripts the game runs, in its own memory (the bundle in the EBOOT at 0x00A7C908); 187 functions.
 - **Items**: `items [all]` (Event:GetItem for 1-159, with the game's own item identifiers: `item.Item.IL_*`), `give
@@ -1073,3 +1075,39 @@ x1.5) is the same script's.
 
 Both krakens are therefore winnable by normal play, the walkthrough's Wire Rod and the story's sword: the head's
 damage, the arms cut and grown again, its moves and attacks, its defeat and what follows each as the game makes them.
+
+## 30. M11.1b: the priest's second fight by the game's mechanics (2026-11-17) [M]
+
+**The fight as the game makes it.** His script (B07Priest.lua) weights his summons toward blue slimes because the
+point light is required; the walkthrough (GameFAQs, EgHeadFool, paraphrased): the Point Light spell lights the torch
+in the room's centre and he can be hurt only while it burns; the real priest casts a shadow, his clones none; hit, he
+and some clones warp; more clones as he weakens; about three lights for a player.
+
+**What the runs found** (build/m11 priest_probe2-6, priest_light; local drives, offscreen):
+
+1. **The hero's magic.** The tools' `progress set` gave a hero at the tower 5 magic containers; the story gives 8:
+   the yellow orb's event adds 3 (Event:AddMaxMP(3), mainevent_007_yelloworb) and each of five spell events one
+   (item 55). With 5 the spell (cost 3) was cast once and the room was dark for 30 s only. Fixed in the tools: a
+   step's own magic containers (port/devtools, `Step::max_magic`), added only while the step's first flag is unset
+   (section 9). devtools_progress checks `progress set 10` twice: +3, then nothing more.
+2. **His life.** `m_info.hp` read through his Init object is the life he is given at the start and is never lowered
+   (as the kraken's, section 29): the earlier "no wound" judgements came from it. His Init object is actor 29, a
+   hidden controller at (0, 0); the priests drawn are actors 25-28, of which 25 (the map's own, group ID 11) is the
+   real one: its own life, the u32 at its actor's +0x5BC, went 1200 -> 944 in one light while 26's and 29's stayed
+   1200. New: the tools' `peek ADDR [N]` (developer mode; guest words in 0x10000-0x2FFFFFFF) and drive.py's `peekobj`
+   (a script object's native address from its userdata's payload, then its words); devtools_basic checks it.
+3. **The fight** (priest_light: the tower entered at its first floor, his offer refused; the story's sword, the hero
+   invulnerable as for the krakens, magic 8): devfight `aim@9 cast@<the spell's icon>,28 collect farm@3 cycle@120
+   life@0x5BC` -- the spell cast every 28 s while the magic holds 3; below it, the light gone, his summons fought and
+   their apples picked up; the body's own life read every 5 s (`cycle`: a body without a wound for 120 s passed over
+   -- not needed, 25 stayed the real one). **Won in 361 s**, 369 swings: 64 a hit, five lights, his summons' apples
+   restoring the magic twice. His defeat ran the game's own after-event: the cutscene, mainevent_darktower3, the move
+   to D_7_2_8 (area 77) and the next cinematic.
+4. **Not verified:** the real priest's shadow against the original (outside the torch's light the floor is black in
+   our frames; an RPCS3 comparison needs the fight reached there). The priests lean as they glide (also unlit: the
+   game's motion, not the light). One frame of a probe that paused the enemies (priest_probe4, frozen shot 7 of 8)
+   showed the scene entirely black under the light; none of about 60 lit frames of two fights did -- watched.
+5. Earlier conclusions corrected: without the light he cannot be hurt (priest_aim's 25 minutes: the design, not a
+   defect); the first lit attempts failed for the magic and were judged by his starting life.
+
+B-011: no hang in these runs (the hang was 13 minutes into an unlit fight; the winning fight lasted 6).

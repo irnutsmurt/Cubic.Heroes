@@ -41,4 +41,9 @@ dev flag get 6
 dev warp D_1_2 @150
 sleep 10
 dev status
+dev player
+dev progress set 10
+dev player
+dev progress set 10
+dev player
 devstate frames>+30 30

@@ -638,8 +638,9 @@ constexpr uint32_t kItemCount = 0x54;             /* the item object's count (CI
 constexpr uint32_t kBundle = 0x00A7C908, kBundleSize = 0x39B7D5;   /* the scripts the game runs, in its EBOOT */
 
 /* the main story in steps (docs/M11_PLAN.md section 9): our own labels; the flags the game's scripts set at each
- * (flag, value), the world map's progress flags, the items the step gives -- read in the scripts the game runs */
-struct Step { const char* label; std::vector<std::pair<int, int>> flags; std::vector<int> progress, items; };
+ * (flag, value), the world map's progress flags, the items the step gives, the magic containers its event adds
+ * (Event:AddMaxMP: the yellow orb's 3, mainevent_007_yelloworb) -- read in the scripts the game runs */
+struct Step { const char* label; std::vector<std::pair<int, int>> flags; std::vector<int> progress, items; int max_magic = 0; };
 const std::vector<Step>& story()
 {
     static const std::vector<Step> s = {
@@ -652,7 +653,7 @@ const std::vector<Step>& story()
         { "The ancient sword", { { 1, 1 }, { 5, 1 } }, {}, { 95 } },
         { "Temple 1 entered", { { 4, 1 }, { 98, 1 } }, {}, {} },
         { "Temple 1: its guardian defeated", { { 6, 1 }, { 8, 1 } }, {}, {} },
-        { "Orb 1 and spell 1", { { 7, 1 }, { 82, 1 } }, { 3 }, { 70, 15 } },
+        { "Orb 1 and spell 1", { { 7, 1 }, { 82, 1 } }, { 3 }, { 70, 15 }, 3 },
         { "Temple 2: its guardian defeated, orb 2", { { 11, 1 }, { 14, 1 }, { 15, 1 }, { 12, 1 }, { 82, 2 } }, {}, { 6, 71 } },
         { "Spell 2", { { 13, 1 } }, { 4 }, { 19, 55 } },
         { "Temple 3: its guardian defeated, orb 3", { { 21, 1 }, { 22, 1 }, { 25, 1 }, { 23, 1 }, { 82, 3 } }, {}, { 72 } },
@@ -854,10 +855,14 @@ int progression_command(const ppu_context* c, const Cmd& cmd, const std::string&
         if (op != "set" || !number_arg(rest, a, 1, (long)story().size())) { answer(cmd, false, "progress | progress set STEP"); return 0; }
         if (!player(c)) { answer(cmd, false, kNoItemsOutOfPlay); return 0; }   /* its items: the game's GetItem */
         /* every step up to this one, as the scripts leave it: its flags, the world map's progress, its items (given
-         * through the game's own item-get only when not already held) */
+         * through the game's own item-get only when not already held), the magic containers its event adds (only when
+         * its first flag was not set yet: a step done once adds them once) */
         std::string chunk = "local E=EventClass.Event; ";
         for (long k = 0; k < a; k++) {
             const Step& s = story()[k];
+            if (s.max_magic && !s.flags.empty())
+                chunk += "if E:GetEventFlag(" + std::to_string(s.flags[0].first) + ")<" + std::to_string(s.flags[0].second) +
+                         " then E:AddMaxMP(" + std::to_string(s.max_magic) + ") end; ";
             for (auto& f : s.flags) chunk += "E:SetEventFlag(" + std::to_string(f.first) + "," + std::to_string(f.second) + "); ";
             for (int p : s.progress) chunk += "E:SetProgressFlag(" + std::to_string(p) + ",1); ";
             for (int it : s.items) chunk += "if E:GetItem(" + std::to_string(it) + ")==0 then E:AddItem2(" + std::to_string(it) + ") end; ";
@@ -1447,6 +1452,25 @@ bool execute(const ppu_context* c, const Cmd& cmd)
             return false;
         }
         if (w == "status") { answer(cmd, true, status_json(c), true); return false; }
+        if (w == "peek") {   /* M11.1b: guest words (a boss's own fields, behind a script object's userdata) */
+            long ea = 0, n = 1;
+            const std::string at = word(rest);
+            char* end = nullptr;
+            ea = at.empty() ? 0 : (long)strtoul(at.c_str(), &end, 0);
+            if (at.empty() || (end && *end) || ea < 0x10000 || ea >= 0x30000000 || (ea & 3) ||
+                (rest.find_first_not_of(" \t") != std::string::npos && !number_arg(rest, n, 1, 64))) {
+                answer(cmd, false, "peek ADDR [N]: N (1-64) words from a word-aligned guest address in 0x10000-0x2FFFFFFF");
+                return false;
+            }
+            std::string o = "[";
+            for (long k = 0; k < n; k++) {
+                char b[16];
+                snprintf(b, sizeof b, "%s%u", k ? "," : "", g32((uint32_t)(ea + 4 * k)));
+                o += b;
+            }
+            answer(cmd, true, o + "]", true);
+            return false;
+        }
         if (w == "lua") {
             std::string out;
             const size_t a = rest.find_first_not_of(" \t");
