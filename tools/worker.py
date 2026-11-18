@@ -11,6 +11,9 @@ Commands:
     info        --install DIR               what an install holds (install.json)
     install     --disc PATH --keys PATH --install DIR  the player's disc -> the native game
     update      --install DIR [--full]      redo what changed (an update of the tools or the configuration)
+    migrate-root --from OLD --install NEW [--dry-run]   an existing installation copied into a (portable) root
+    find-legacy [--install DIR]             the old launcher's pointers to an install and the old default folders
+    (the rest: docs/M9_WORKER_PROTOCOL.md section 1)
 
 Options for every command: --control (the launcher: "cancel" lines on stdin, and the end of stdin, cancel the
 operation), --log FILE (every event appended as it is sent, for the launcher's logs).
@@ -18,13 +21,20 @@ operation), --log FILE (every event appended as it is sent, for the launcher's l
 In a source checkout: `python tools/worker.py ...`; packaged, the setup's frozen executable runs it as
 `<app> --worker ...` (setup_app.py main). Keys: read only by the decryption step and the key probe, never
 written, logged or put into an event.
+
+The portable root: everything the worker writes for an install is inside it -- the install's own items, its
+downloads, Zig's caches (data/cache/zig-*), its temporary files and its children's (data/tmp/worker-<pid>: TMP, TEMP,
+TMPDIR), the launcher's update (downloads/launcher-*). The one exception: remove-launcher's helper, which must run
+from outside the folder it removes, copies itself into the operating system's temporary folder.
 """
 import argparse
+import errno
 import json
 import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -36,6 +46,7 @@ sys.path.insert(0, os.path.join(ROOT, "tools"))
 import game_settings  # noqa: E402
 import install_layout as layout  # noqa: E402
 import pipeline_manifest  # noqa: E402
+import root_migration  # noqa: E402
 import setup_pipeline as pipeline  # noqa: E402
 import updates  # noqa: E402
 
@@ -48,7 +59,8 @@ CANCEL_GRACE_S = 5.0
 # Each step's typical length on the reference PC (seconds; M9.0's measurement, docs/M9_WORKER_PROTOCOL.md
 # section 6): the weights of the overall progress, and the remaining time before a step's own rate is known
 STAGE_SECONDS = {"verify": 15.0, "extract": 25.0, "decrypt": 1.0, "recomp": 40.0, "spu": 12.0, "build": 275.0,
-                 "finish": 1.0, "validate": 5.0, "activate": 1.0, "prepare": 3.0}
+                 "finish": 1.0, "validate": 5.0, "activate": 1.0, "prepare": 3.0,
+                 "copy": 60.0, "check-copy": 20.0, "place": 1.0}   # migrate-root's (estimates, not measured)
 CPU_STAGES = {"recomp", "spu", "build"}   # bound by the processor (the others by the drive)
 # What an operation needs on the install's drive (bytes; measured, section 6)
 NEEDED = {"install": 6 << 30, "update": 3 << 29}
@@ -378,6 +390,137 @@ def free_bytes(path):
     return shutil.disk_usage(p).free, p
 
 
+# ---- the install's temporary folder (the portable root) ----
+#
+# Given --install, the commands that build, prepare, download or report (TEMP_COMMANDS) keep their temporary files,
+# and their children's (the lifting tools, the compiler, the game's checks), in <install>/data/tmp/worker-<pid>:
+# tempfile's folder and TMP, TEMP and TMPDIR. Its own folder per worker, so two workers on one install (a background
+# preparation beside an update check) never touch each other's files; it is removed as the worker ends, and one left
+# by a worker that is gone (ended by force, a crash) is removed by the next one -- only those, never anything else in
+# data/tmp. Made on demand: never for a folder that is not an install yet (but `install`'s own), never for the
+# commands that only look (space, info) or remove (uninstall, remove-launcher).
+TEMP_COMMANDS = ("install", "update", "migrate", "prepare", "download-update", "stage-launcher", "diagnostics",
+                 "selftest")
+TEMP_VARS = ("TMP", "TEMP", "TMPDIR")
+TEMP_PREFIX = "worker-"
+_temp = {"dir": None, "saved": None, "tempdir": None}
+
+
+def clean_install_temp(base):
+    """the folders of workers that are gone, in an install's data/tmp; returns their names"""
+    gone = []
+    try:
+        names = os.listdir(base)
+    except OSError:
+        return gone
+    for n in names:
+        pid = n[len(TEMP_PREFIX):]
+        if not (n.startswith(TEMP_PREFIX) and pid.isdigit()) or int(pid) == os.getpid() or updates._alive(int(pid)):
+            continue
+        p = os.path.join(base, n)
+        if os.path.isdir(p) and not layout.is_link(p):
+            try:
+                layout.rmtree(p)
+                gone.append(n)
+            except OSError:
+                pass
+    return gone
+
+
+def use_install_temp(install, create_root=False):
+    """this worker's temporary folder in the install (made on demand), for it and its children; None when the install
+    is not there (and not to be made) or can't be written -- then nothing changes, and the command's own checks say
+    why"""
+    root = os.path.abspath(install)
+    if not create_root and not os.path.isdir(root):
+        return None
+    base = layout.Layout(root).tmp
+    mine = os.path.join(base, f"{TEMP_PREFIX}{os.getpid()}")
+    try:
+        os.makedirs(base, exist_ok=True)
+        clean_install_temp(base)
+        os.makedirs(mine, exist_ok=True)
+    except OSError:
+        return None
+    if _temp["saved"] is None:
+        _temp["saved"] = {k: os.environ.get(k) for k in TEMP_VARS}
+        _temp["tempdir"] = tempfile.tempdir
+    _temp["dir"] = mine
+    tempfile.tempdir = mine
+    for k in TEMP_VARS:
+        os.environ[k] = mine
+    return mine
+
+
+def release_install_temp():
+    """the temporary folder removed (what is still held in it stays for the next worker), the environment as it was"""
+    mine = _temp["dir"]
+    if _temp["saved"] is not None:
+        for k, v in _temp["saved"].items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        tempfile.tempdir = _temp["tempdir"]
+    _temp.update(dir=None, saved=None, tempdir=None)
+    if mine and os.path.isdir(mine) and not layout.is_link(mine):
+        shutil.rmtree(mine, ignore_errors=True)
+
+
+def system_temp():
+    """the operating system's temporary folder, as this worker found it (remove-launcher's helper, the exception)"""
+    if _temp["saved"] is not None:
+        for k in ("TMPDIR", "TEMP", "TMP"):
+            v = _temp["saved"].get(k)
+            if v and os.path.isdir(v):
+                return os.path.abspath(v)
+    return os.path.abspath(tempfile.gettempdir())
+
+
+def check_writable(root, create=False):
+    """the install's root can be written (create: made first when it is not there yet), else a clear result:
+    root_not_writable (permissions, a read-only drive or folder, a drive that can't be reached) or disk_space (a
+    full drive) -- before anything is changed"""
+    root = os.path.abspath(root)
+
+    def refused(e=None, what="can't be written to"):
+        if e is not None and disk_full(e):
+            return pipeline.SetupError("The install's drive is full.", "disk_space", str(e))
+        why = f" ({e.strerror or e})" if e is not None else ""
+        return pipeline.SetupError(f"The install folder {what}{why}: choose another folder, or allow writing to "
+                                   "this one.", "root_not_writable", f"{root}: {e!r}" if e is not None else root)
+    if create:
+        try:
+            os.makedirs(root, exist_ok=True)
+        except OSError as e:
+            raise refused(e, "can't be made")
+    if not os.path.isdir(root):
+        raise pipeline.SetupError("There is no install folder there.", "no_install", root)
+    if not os.access(root, os.W_OK):
+        raise refused()
+    try:
+        _write_probe(root)
+    except OSError as e:
+        raise refused(e)
+
+
+def _write_probe(root):
+    """a file made, written and removed in root (what os.access can't tell on Windows: its permissions, a read-only
+    drive)"""
+    probe = os.path.join(root, f".write-test-{os.getpid()}")
+    try:
+        fd = os.open(probe, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        try:
+            os.write(fd, b"ok")
+        finally:
+            os.close(fd)
+    finally:
+        try:
+            os.remove(probe)
+        except OSError:
+            pass
+
+
 # ---------------- commands ----------------
 
 def cmd_version(a, ev, control):
@@ -416,8 +559,9 @@ def cmd_space(a, ev, control):
     return {"free": free, "needed": need, "enough": free >= need, "checked_at": at}
 
 
-def cmd_info(a, ev, control):
-    install = os.path.abspath(a.install)
+def install_report(install):
+    """what an install folder holds (info's data; find-legacy's for each folder it finds): only read"""
+    install = os.path.abspath(install)
     lay = layout.Layout(install)
     info = pipeline.install_info(install) or {}
     st = info.get("stamps", {})
@@ -430,8 +574,16 @@ def cmd_info(a, ev, control):
     return out
 
 
+def cmd_info(a, ev, control):
+    return install_report(a.install)
+
+
 def check_space(install, need):
-    free, _ = free_bytes(install)
+    try:
+        free, _ = free_bytes(install)
+    except OSError as e:   # the drive can't be reached (removed, a network drive gone): a result, not a trace
+        raise pipeline.SetupError(f"The free space on the install's drive can't be checked ({e.strerror or e}).",
+                                  "root_not_writable", repr(e))
     if free < need:
         raise pipeline.SetupError(f"Not enough free space on the install's drive: about {need / 2**30:.1f} GB "
                                   f"is needed, {free / 2**30:.1f} GB is free.", "disk_space",
@@ -447,7 +599,8 @@ VALIDATE_TIMEOUT_S = 120
 def validate_build(slot, log):
     exe = os.path.join(slot, layout.exe_name())
     env = {k: v for k, v in os.environ.items() if not k.startswith(("DOTHEROES_", "PS3_", "PS3RECOMP_"))}
-    kw = {"creationflags": 0x08000000} if os.name == "nt" else {}
+    # the game's report and messages in UTF-8 (a path in them may hold any character), whatever the code page
+    kw = dict({"creationflags": 0x08000000} if os.name == "nt" else {}, encoding="utf-8", errors="replace")
     try:
         r = subprocess.run([exe, "--info"], capture_output=True, text=True, timeout=VALIDATE_TIMEOUT_S, env=env,
                            stdin=subprocess.DEVNULL,
@@ -476,7 +629,8 @@ def validate_build(slot, log):
 # The steps of a build into a new slot, after the conversion's
 BUILD_TAIL = ["validate", "activate", "prepare"]
 STEP_NAMES_M9 = {"validate": "Checking the new build", "activate": "Making it the active build",
-                 "prepare": "Preparing shaders and pipelines"}
+                 "prepare": "Preparing shaders and pipelines", "copy": "Copying the installation",
+                 "check-copy": "Checking the copy", "place": "Putting it in place"}
 
 
 def build_slot(lay, prog, source=None, keys=None, elf=None, full=False, resume=False, validate=validate_build,
@@ -522,6 +676,7 @@ def op_install(install, source, keys, elf, prog, resume=False, validate=validate
     if lay.kind() == "setup-app":
         raise pipeline.SetupError("This folder holds an install made by the setup app: migrate it (no need to "
                                   "choose the disc again).", "needs_migration")
+    check_writable(install, create=True)
     check_space(install, NEEDED["install"])
     bid, info, _ = build_slot(lay, prog, source, keys, elf, resume=resume, validate=validate, disc_key=disc_key)
     game_settings.settle_after_conversion(install)
@@ -573,6 +728,8 @@ def op_prepare(install, prog, check=False, rebuild=False):
     lay = layout.Layout(install)
     if lay.kind() != "slots":
         raise pipeline.SetupError("This folder has no install with build slots.", "no_install")
+    if not check:   # it writes the recipes, the shader folder and its lock
+        check_writable(install)
     if check:
         out = _run_prepare(lay, prog, ["--check"], None, None)
         out.update(prepare_disk(lay))
@@ -781,6 +938,7 @@ def op_update(install, prog, full=False, validate=validate_build, prepare=True):
         raise pipeline.SetupError("This folder has no active build to update" + (": migrate it first." if lay.kind()
                                   == "setup-app" else "."), "needs_migration" if lay.kind() == "setup-app" else
                                   "no_install")
+    check_writable(install)
     check_space(install, NEEDED["update"])
     backup = lay.backup_saves("before-update") if os.path.isdir(lay.gamedata) and os.listdir(lay.gamedata) else None
     bid, info, changed = build_slot(lay, prog, full=full, validate=validate)
@@ -799,6 +957,7 @@ def op_migrate(install, prog, validate=validate_build, prepare=True):
     lay = layout.Layout(install)
     if lay.kind() != "setup-app":
         raise pipeline.SetupError("This folder isn't an install made by the setup app.", "not_setup_app")
+    check_writable(install)
     backup = lay.backup_saves("before-migration")
     info = pipeline.install_info(install) or {}
     st = info.get("stamps", {})
@@ -863,6 +1022,53 @@ def cmd_migrate(a, ev, control):
     return out
 
 
+# ---- the portable root: an existing installation copied into it; the old installations found ----
+
+MIGRATE_ROOT_STEPS = ["copy", "check-copy", "place"]
+
+
+def op_migrate_root(old, new, prog, dry_run=False):
+    """an existing installation (old) COPIED into the root new (tools/root_migration.py): refused when they overlap,
+    when new already holds an install, when old isn't one (or is the setup app's: migrate it first), while the game
+    runs from old or a preparation holds its lock, when new can't be written or lacks the space -- all before anything
+    is written. dry_run: what would be copied and whether there is room, nothing written. old is only ever read."""
+    import uninstall
+    try:
+        p = root_migration.plan(old, new)
+        if dry_run:
+            try:
+                free, at = free_bytes(new)
+            except OSError as e:
+                raise pipeline.SetupError(f"The free space on the new folder's drive can't be checked "
+                                          f"({e.strerror or e}).", "root_not_writable", repr(e))
+            p.update(free=free, enough=free >= p["needed"], checked_at=at)
+            return p
+        try:
+            uninstall._check_idle(layout.Layout(old))
+        except uninstall.UninstallError as e:
+            raise pipeline.SetupError(str(e), e.code)
+        check_writable(new, create=True)
+        check_space(new, p["needed"])
+        use_install_temp(new)
+        return root_migration.migrate(old, new, progress=prog.progress, log=prog.log)
+    except root_migration.MigrationError as e:
+        raise pipeline.SetupError(str(e), e.code, e.details)
+
+
+def cmd_migrate_root(a, ev, control):
+    """--from OLD_ROOT --install NEW_ROOT [--dry-run]: an existing installation copied into the (portable) root"""
+    prog = _progress(ev, control, [] if a.dry_run else MIGRATE_ROOT_STEPS)
+    out = op_migrate_root(os.path.abspath(a.from_root), os.path.abspath(a.install), prog, dry_run=a.dry_run)
+    out["seconds"], _ = prog.finish()
+    return out
+
+
+def cmd_find_legacy(a, ev, control):
+    """read only: the old launcher's preferences (and the setup app's settings), the install each names, the old
+    default install folders, and what each holds (info's report); --install: the root in use now (never offered)"""
+    return root_migration.find_legacy(install_report, current=a.install)
+
+
 def _layout(a, kind="slots"):
     lay = layout.Layout(os.path.abspath(a.install))
     if kind and lay.kind() != kind:
@@ -924,6 +1130,7 @@ def cmd_download_update(a, ev, control):
     previous attempt stopped, checked against the manifest (size, SHA-256) before it is kept"""
     import updates
     from version import VERSION
+    check_writable(a.dest or a.install, create=True)   # the download goes into the install (downloads/<version>)
     try:
         r = updates.check(a.channel, a.installed or VERSION, a.source, _keys(a))
     except updates.trust.ReleaseError as e:
@@ -952,22 +1159,38 @@ def cmd_download_update(a, ev, control):
 
 
 def cmd_stage_launcher(a, ev, control):
-    """a downloaded launcher package (checked by download-update) unpacked beside the launcher's folder"""
+    """a downloaded launcher package (checked by download-update) unpacked into the launcher's folder
+    (downloads/launcher-new: inside the folder, which is also the install's root), and -- packaged -- the worker's
+    copy the swap runs as (downloads/launcher-helper: the swap replaces worker/, so it can't run from there). The
+    launcher then starts `<helper> --worker swap-launcher ...` as it exits."""
     import updates
+    check_writable(a.launcher)
     try:
-        return {"staged": updates.stage_launcher(a.package, a.launcher)}
+        staged = updates.stage_launcher(a.package, a.launcher)
+        helper = updates.stage_helper(a.launcher, os.path.dirname(os.path.abspath(sys.executable))) \
+            if getattr(sys, "frozen", False) else None
     except updates.trust.ReleaseError as e:
         raise _update_error(e)
     except (OSError, ValueError) as e:
+        if isinstance(e, OSError) and disk_full(e):
+            raise pipeline.SetupError("The launcher's drive is full.", "disk_space", str(e))
         raise pipeline.SetupError(f"The launcher's package couldn't be unpacked ({e}).", "bad_download")
+    return {"staged": staged, "helper": helper, "items": sorted(os.listdir(staged))}
 
 
 def cmd_swap_launcher(a, ev, control):
-    """the helper the launcher starts as it exits to update itself: the staged launcher in its place, started; the
-    previous one put back if it does not come up"""
+    """the helper the launcher starts as it exits to update itself (from stage-launcher's helper copy): the staged
+    package's items in place of the launcher's, the new launcher started; the previous one put back if it does not
+    come up. The install's items in the folder are never moved."""
     import updates
-    out = updates.swap_launcher(a.launcher, a.start, a.wait_pid, log=lambda t: ev.emit("log", level="info", text=t),
-                                health_timeout=a.health_timeout)
+    try:
+        out = updates.swap_launcher(a.launcher, a.start, a.wait_pid,
+                                    log=lambda t: ev.emit("log", level="info", text=t),
+                                    health_timeout=a.health_timeout)
+    except ValueError as e:
+        raise pipeline.SetupError(str(e), "usage")
+    finally:
+        _remove_own_copy("swap", a.launcher)
     return {"result": out}
 
 
@@ -1015,32 +1238,36 @@ def cmd_uninstall(a, ev, control):
 
 def cmd_remove_launcher(a, ev, control):
     """the launcher itself removed (docs/M9_LAUNCHER_PLAN.md section 20): --dry-run what goes (nothing removed);
-    --confirm --wait-pid PID: this worker -- inside the folder being removed -- puts a copy of itself in a temporary
-    folder and starts it (--stage2), which waits for the launcher (PID) and this worker to exit, removes the
+    --confirm --wait-pid PID: this worker -- inside the folder being removed -- puts a copy of itself in the operating
+    system's temporary folder (the one exception to the portable root: the helper must run from outside the folder it
+    removes) and starts it (--stage2), which waits for the launcher (PID) and this worker to exit, removes the
     launcher's package, its data folder's items (--data-dir) and its shortcuts, then its own temporary folder. The
-    game's install (--install), its saves and settings are never touched."""
+    game's install (--install; portable by default, the launcher's own folder), its saves and settings are kept --
+    unless the player chose everything: --everything (with --dry-run: what everything is), confirmed separately
+    (--confirm --confirm-everything), removes the install whose root is the launcher's folder too, every part of it."""
     import uninstall
     folder = os.path.abspath(a.launcher)
     try:
         if a.dry_run:
-            return uninstall.launcher_plan(folder, a.data_dir, a.install)
-        if not a.confirm:
-            raise pipeline.SetupError("Removing the launcher needs the player's confirmation.", "needs_confirmation")
+            return uninstall.launcher_plan(folder, a.data_dir, a.install, everything=a.everything)
+        if not a.confirm or (a.everything and not a.confirm_everything):
+            raise pipeline.SetupError("Removing the launcher needs the player's confirmation" + (
+                " -- and removing the game and its saves with it, a confirmation of its own." if a.everything else "."),
+                "needs_confirmation")
         if a.stage2:
             for pid in a.also_wait or ():   # the worker that started this one (its files are in the folder too)
                 uninstall._wait_exit(pid, 30)
             try:
-                res = uninstall.remove_launcher(folder, a.data_dir, a.install, wait_pid=a.wait_pid)
+                res = uninstall.remove_launcher(folder, a.data_dir, a.install, wait_pid=a.wait_pid,
+                                                everything=a.everything)
             finally:
-                _remove_own_copy()
+                _remove_own_copy("remove")
             return res
-        uninstall.launcher_plan(folder, a.data_dir, a.install)   # refused now, while the launcher can say why
-        if not getattr(sys, "frozen", False):
+        uninstall.launcher_plan(folder, a.data_dir, a.install, everything=a.everything)   # refused now, while the
+        if not getattr(sys, "frozen", False):                                             # launcher can say why
             raise pipeline.SetupError("Only a downloaded launcher removes itself.", "not_packaged")
-        import shutil
-        import tempfile
         here = os.path.dirname(sys.executable)
-        tmp = tempfile.mkdtemp(prefix="CubicHeroes-remove-")
+        tmp = tempfile.mkdtemp(prefix="CubicHeroes-remove-", dir=system_temp())
         shutil.copy2(sys.executable, tmp)
         for d in ("_internal", "tools", "config"):
             if os.path.isdir(os.path.join(here, d)):
@@ -1052,31 +1279,46 @@ def cmd_remove_launcher(a, ev, control):
             cmd += ["--data-dir", os.path.abspath(a.data_dir)]
         if a.install:
             cmd += ["--install", os.path.abspath(a.install)]
+        if a.everything:
+            cmd += ["--everything", "--confirm-everything"]
         # detached, no window, out of this worker's job (which ends its processes with it)
         kw = ({"creationflags": 0x00000008 | 0x00000200 | 0x08000000 | 0x01000000} if os.name == "nt"
               else {"start_new_session": True})
         subprocess.Popen(cmd, cwd=tmp, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL, **kw)
-        return {"started": True, "helper": tmp}
+        return {"started": True, "helper": tmp, "everything": bool(a.everything)}
     except uninstall.UninstallError as e:
         raise pipeline.SetupError(str(e), e.code)
 
 
-def _remove_own_copy():
-    """the temporary copy this worker runs from (a CubicHeroes-remove-* folder in the temporary folder), removed a
-    moment after it exits -- never anything else"""
-    import tempfile
+def _remove_own_copy(kind, launcher=None):
+    """the copy this worker runs from, removed a moment after it exits -- never anything else: remove-launcher's (a
+    CubicHeroes-remove-* folder in the operating system's temporary folder) or the launcher update's (the
+    downloads/launcher-helper folder of the launcher it updated)"""
     here = os.path.dirname(os.path.abspath(sys.executable))
-    tmp = os.path.abspath(tempfile.gettempdir())
-    if not (getattr(sys, "frozen", False) and os.path.basename(here).startswith("CubicHeroes-remove-")
-            and os.path.normcase(os.path.dirname(here)) == os.path.normcase(tmp)):
+    if not getattr(sys, "frozen", False):
         return
-    if os.name == "nt":
-        subprocess.Popen(f'cmd /d /c ping -n 3 127.0.0.1 >nul & rmdir /s /q "{here}"', cwd=tmp,
-                         creationflags=0x00000008 | 0x00000200 | 0x08000000 | 0x01000000, stdin=subprocess.DEVNULL,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if kind == "remove":
+        parent = system_temp()
+        if not (os.path.basename(here).startswith("CubicHeroes-remove-")
+                and os.path.normcase(os.path.dirname(here)) == os.path.normcase(parent)):
+            return
+    elif kind == "swap":
+        if not launcher or os.path.normcase(here) != os.path.normcase(updates.update_dirs(launcher)["helper"]):
+            return
+        parent = os.path.dirname(here)
     else:
-        subprocess.Popen(["sh", "-c", 'sleep 2; rm -rf -- "$0"', here], cwd=tmp, start_new_session=True)
+        return
+    if os.name == "nt":   # the folder through the environment: a path with any character (a % above all) is safe
+        kw = dict(cwd=parent, env=dict(os.environ, DOTHEROES_REMOVE_DIR=here), stdin=subprocess.DEVNULL,
+                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        cmd = 'cmd /d /c ping -n 3 127.0.0.1 >nul & rmdir /s /q "%DOTHEROES_REMOVE_DIR%"'
+        try:
+            subprocess.Popen(cmd, creationflags=0x00000008 | 0x00000200 | 0x08000000 | 0x01000000, **kw)
+        except OSError:   # a job that refuses the breakaway
+            subprocess.Popen(cmd, creationflags=0x00000008 | 0x00000200 | 0x08000000, **kw)
+    else:
+        subprocess.Popen(["sh", "-c", 'sleep 2; rm -rf -- "$0"', here], cwd=parent, start_new_session=True)
 
 
 def cmd_diagnostics(a, ev, control):
@@ -1177,9 +1419,16 @@ def cmd_selftest(a, ev, control):
     prog.plan()
     if a.child:
         pipeline.run_tool(os.path.join(ROOT, "tools", "version.py"), [], prog.log)
-        r = pipeline.zig_build._run([sys.executable, "-c", "print('child ran')"], capture_output=True, text=True,
-                                    timeout=60)
-        prog.log(r.stdout.strip())
+        # what a compiler started as the build starts one sees: its temporary folder and Zig's caches (the portable
+        # root's, given --install), and a path in any characters printed back intact
+        r = pipeline.zig_build._run([sys.executable, "-c", "import os, sys; sys.stdout.reconfigure(encoding='utf-8'); "
+                                     "print('child ran'); print('child temp', os.environ.get('TEMP') or "
+                                     "os.environ.get('TMPDIR') or ''); print('child zig', "
+                                     "os.environ.get('ZIG_GLOBAL_CACHE_DIR', ''), '|', "
+                                     "os.environ.get('ZIG_LOCAL_CACHE_DIR', ''))"],
+                                    capture_output=True, text=True, timeout=60)
+        for ln in r.stdout.splitlines():
+            prog.log(ln.strip())
     n = max(1, int(a.seconds * 20))
     for s in steps:
         for i in range(n):
@@ -1198,7 +1447,8 @@ COMMANDS = {"version": cmd_version, "probe-disc": cmd_probe_disc, "probe-keys": 
             "check-update": cmd_check_update, "download-update": cmd_download_update,
             "stage-launcher": cmd_stage_launcher, "swap-launcher": cmd_swap_launcher, "settings": cmd_settings,
             "diagnostics": cmd_diagnostics, "shortcuts": cmd_shortcuts, "selftest": cmd_selftest,
-            "uninstall": cmd_uninstall, "remove-launcher": cmd_remove_launcher, "devsaves": cmd_devsaves}
+            "uninstall": cmd_uninstall, "remove-launcher": cmd_remove_launcher, "devsaves": cmd_devsaves,
+            "migrate-root": cmd_migrate_root, "find-legacy": cmd_find_legacy}
 
 
 def parser():
@@ -1228,7 +1478,13 @@ def parser():
     p.add_argument("--rebuild", action="store_true", help="prepare: the pipeline cache made again from scratch")
     p.add_argument("--disc-key", help="an encrypted disc image's key: a .dkey or IRD file, or a file of the 32 digits")
     p.add_argument("--parts", help="uninstall: the parts, comma-separated (builds,data,shaders,objects,settings,saves,shortcuts)")
-    p.add_argument("--dry-run", action="store_true", help="uninstall: what each part would free; nothing removed")
+    p.add_argument("--dry-run", action="store_true",
+                   help="uninstall, remove-launcher, migrate-root: what would be done; nothing removed or written")
+    p.add_argument("--from", dest="from_root", help="migrate-root: the existing installation's root (only read)")
+    p.add_argument("--everything", action="store_true",
+                   help="remove-launcher: the install in the launcher's folder too, saves and settings included")
+    p.add_argument("--confirm-everything", dest="confirm_everything", action="store_true",
+                   help="remove-launcher --everything: the player confirmed removing the game and its saves too")
     p.add_argument("--no-prepare", action="store_true",
                    help="install/update/migrate: no preparation at the end (the launcher prepares in the background)")
     p.add_argument("--set", action="append", help="settings: KEY=VALUE (repeatable)")
@@ -1266,12 +1522,13 @@ REQUIRED = {"probe-disc": ("disc",), "probe-keys": ("disc", "keys"), "space": ("
             "download-update": ("install",), "stage-launcher": ("package", "launcher"),
             "swap-launcher": ("launcher", "start"), "settings": ("install",), "diagnostics": ("install", "out"),
             "shortcuts": ("exe",), "remove-launcher": ("launcher",),
-            "devsaves": ("install",)}
+            "devsaves": ("install",), "migrate-root": ("from_root", "install")}
+OPTION_NAMES = {"from_root": "from", "keys_file": "trusted-keys", "data_dir": "data-dir", "wait_pid": "wait-pid"}
 
 
 def main(argv=None):
     a = parser().parse_args(argv)
-    missing = [f"--{x}" for x in REQUIRED.get(a.command, ()) if getattr(a, x) in (None, "")]
+    missing = [f"--{OPTION_NAMES.get(x, x)}" for x in REQUIRED.get(a.command, ()) if getattr(a, x) in (None, "")]
     out = sys.stdout
     try:   # UTF-8 and bare newlines whatever the console's code page (a path may hold any character)
         out.reconfigure(encoding="utf-8", errors="replace", newline="\n")
@@ -1288,6 +1545,9 @@ def main(argv=None):
         control.listen()
     ev.emit("hello", protocol=PROTOCOL, command=a.command, owned_children=owned)
     code = EXIT_OK
+    if a.install and a.command in TEMP_COMMANDS:   # the portable root: temporary files and Zig's caches inside it
+        if use_install_temp(a.install, create_root=a.command == "install"):
+            pipeline.zig_build.use_install(a.install)
     try:
         data = COMMANDS[a.command](a, ev, control)
         control.check()
@@ -1305,6 +1565,9 @@ def main(argv=None):
         if disk_full(e):
             result = {"ok": False, "code": "disk_space", "message": "The install's drive is full.",
                       "details": str(e)}
+        elif e.errno == errno.EROFS:
+            result = {"ok": False, "code": "root_not_writable", "message": "The install's drive is read-only.",
+                      "details": str(e)}
         else:
             result = {"ok": False, "code": "io_error", "message": f"A file couldn't be read or written "
                       f"({e.strerror or e}).", "details": traceback.format_exc()[-4000:]}
@@ -1313,6 +1576,8 @@ def main(argv=None):
         result, code = {"ok": False, "code": "internal", "message": "Something went wrong in the worker.",
                         "details": traceback.format_exc()[-4000:]}, EXIT_FAILED
     control.finished.set()
+    release_install_temp()
+    pipeline.zig_build.use_install(None)
     ev.emit("result", **result)
     ev.close()
     return code

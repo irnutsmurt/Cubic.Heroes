@@ -195,6 +195,31 @@ class Diagnostics(unittest.TestCase):
         self.assertIn("kept", t)
         self.assertIn("\"stage\"", t)
 
+    def test_worker_logs_and_crash_reports(self):
+        """the portable root keeps the worker's logs and the crash reports in the install: both in the report,
+        sanitized; a crash dump's content and anything like a key never"""
+        key = os.urandom(16).hex()
+        put(os.path.join(self.lay.logs, "worker-install.jsonl"),
+            json.dumps({"ev": "log", "text": f"compiled in {self.install}"}) + "\n")
+        put(os.path.join(self.lay.crash_logs, "crash-20261117-120000-42.txt"),
+            f"[crash] the game stopped in {self.install}\nAPP 0001 {os.urandom(32).hex()} {os.urandom(16).hex()}\n"
+            f"disc key {key}\n")
+        put(os.path.join(self.lay.crash_logs, "crash-20261117-120000-42.dmp"), b"\x00dump bytes 7f3a")
+        put(os.path.join(self.lay.crash_logs, "disc key.txt"), f"{key}\n")
+        out = os.path.join(self.tmp, "report")
+        names = [f["file"] for f in diagnostics.collect(self.install, out)]
+        self.assertIn("log-worker-install.jsonl", names)
+        self.assertIn("crash-crash-20261117-120000-42.txt", names)
+        self.assertIn("crash-files.txt", names)
+        everything = ""
+        for n in os.listdir(out):
+            with open(os.path.join(out, n), encoding="utf-8", errors="replace") as f:
+                everything += f.read()
+        for secret in (self.install, key, "dump bytes 7f3a", "APP 0001"):
+            self.assertNotIn(secret.lower(), everything.lower(), secret)
+        self.assertIn("crash-20261117-120000-42.dmp", everything)   # its name and size only
+        self.assertIn("[crash] the game stopped in <install>", everything)
+
     def test_pack_is_what_was_reviewed(self):
         out = os.path.join(self.tmp, "report")
         diagnostics.collect(self.install, out)

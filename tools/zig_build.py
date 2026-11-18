@@ -52,6 +52,40 @@ def find_zig():
     raise BuildError("no Zig toolchain found (build/toolchain/zig-*/ or PATH)")
 
 
+# Zig's own caches (its compiled libc, libc++ and compiler-rt; per-command artefacts): in the install the worker
+# builds for, data/cache/zig-global and data/cache/zig-local -- never %LOCALAPPDATA%\zig or ~/.cache/zig, which a
+# portable install must not write. The pipeline sets the install (use_install) before it runs Zig; a caller may name
+# one for a single command (_run's install=). No install known (a developer's own build): Zig's defaults.
+_cache_install = None
+
+
+def use_install(install):
+    """from now on, Zig's caches are in this install's data/cache (None: Zig's defaults again)"""
+    global _cache_install
+    _cache_install = os.path.abspath(install) if install else None
+
+
+def cache_dirs(install):
+    """(global, local): where Zig's caches are in an install"""
+    cache = os.path.join(os.path.abspath(install), "data", "cache")
+    return os.path.join(cache, "zig-global"), os.path.join(cache, "zig-local")
+
+
+def zig_env(install=None, env=None):
+    """env (default: this process's environment) with ZIG_GLOBAL_CACHE_DIR and ZIG_LOCAL_CACHE_DIR in the install's
+    data/cache (made when missing); the install: the one given, else the one use_install named. None when no install
+    is known: the caller passes no environment of its own and Zig keeps its defaults."""
+    install = install or _cache_install
+    if not install:
+        return None if env is None else dict(env)
+    out = dict(os.environ if env is None else env)
+    g, loc = cache_dirs(install)
+    os.makedirs(g, exist_ok=True)
+    os.makedirs(loc, exist_ok=True)
+    out["ZIG_GLOBAL_CACHE_DIR"], out["ZIG_LOCAL_CACHE_DIR"] = g, loc
+    return out
+
+
 def host_cpu(zig=None):
     """The CPU level this machine compiles its own code for, as zig names it:
     x86_64_v3 when the host has AVX2, FMA, BMI2 and the rest of v3, else
@@ -60,9 +94,8 @@ def host_cpu(zig=None):
     if os.environ.get("DOTHEROES_CPU"):
         return os.environ["DOTHEROES_CPU"]
     if _host_cpu is None:
-        import subprocess
-        r = subprocess.run([zig or find_zig(), "cc", "-mcpu=native", "-dM", "-E", "-x", "c", "-"],
-                           input="", capture_output=True, text=True)
+        r = _run([zig or find_zig(), "cc", "-mcpu=native", "-dM", "-E", "-x", "c", "-"],
+                 input="", capture_output=True, text=True)
         have = set(l.split()[1] for l in r.stdout.splitlines() if l.startswith("#define "))
         _host_cpu = ("x86_64_v3" if all(m in have for m in _V3 + _V2) else
                      "x86_64_v2" if all(m in have for m in _V2) else "x86_64")
@@ -265,7 +298,7 @@ def jobs_for_memory():
     return max(1, min(cores, int(gb // 3)))
 
 
-def _run(cmd, **kw):
+def _run(cmd, install=None, **kw):
     # no console window flashing up for every compile on Windows
     if os.name == "nt":
         kw.setdefault("creationflags", 0x08000000)  # CREATE_NO_WINDOW
@@ -273,6 +306,14 @@ def _run(cmd, **kw):
     # Windows a child started on a pipe with a read pending stops in its start-up until that read ends (M9.1)
     if "input" not in kw:
         kw.setdefault("stdin", subprocess.DEVNULL)
+    # Zig's caches in the install (zig_env); the compiler's messages read as UTF-8 whatever the console's code page
+    # (an install's path may hold any character: a message quoting it must never stop the build)
+    env = zig_env(install, kw.get("env"))
+    if env is not None:
+        kw["env"] = env
+    if kw.get("text") or kw.get("universal_newlines"):
+        kw.setdefault("encoding", "utf-8")
+        kw.setdefault("errors", "replace")
     return subprocess.run(cmd, **kw)
 
 
@@ -347,9 +388,10 @@ def game_jobs(src, gen_dir, obj_dir, zig, platform=HOST):
     return jobs
 
 
-def _compile_all(zig, jobs, platform, progress=None, log=None):
+def _compile_all(zig, jobs, platform, progress=None, log=None, install=None):
     """jobs: game_jobs(); the biggest first (a recompiled chunk takes minutes).
-    progress(done, total, fraction by size). Returns how many compiled."""
+    progress(done, total, fraction by size). Returns how many compiled. install: whose data/cache holds Zig's
+    caches (zig_env)."""
     todo = sorted((j for j in jobs if not os.path.exists(j[1])), key=lambda j: -os.path.getsize(j[0]))
     done, total, errors = 0, len(todo), []
     size_done, size_total = 0, sum(os.path.getsize(j[0]) for j in todo) or 1
@@ -359,7 +401,7 @@ def _compile_all(zig, jobs, platform, progress=None, log=None):
         s, obj, tool, flags = job
         tmp = obj + ".part"
         r = _run([zig, tool, "-target", TARGETS[platform], "-c", *flags, s, "-o", tmp],
-                 capture_output=True, text=True)
+                 install=install, capture_output=True, text=True)
         if r.returncode == 0:
             os.replace(tmp, obj)
         return s, r.returncode, r.stderr
@@ -401,14 +443,17 @@ def link_args(lib_dir, platform=HOST):
 
 
 def build_game(gen_dir, out_exe, cache_dir, zig=None, platform=HOST, progress=None, log=None, keep=(),
-               used_out=None):
+               used_out=None, install=None):
     """Compile what the player's disc became (gen_dir) with the port's sources and
     link it with the prebuilt runtime. progress(fraction, message) for the whole
     build. cache_dir keeps the objects (fingerprinted): an update recompiles only
     what changed, often nothing, and relinks. keep: object file names another
     build still needs (M9.1: the builds an install keeps for rollback), never
     removed with the ones this build no longer uses; used_out: a list given the
-    names of the objects this build linked."""
+    names of the objects this build linked. install: the install built for --
+    Zig's own caches go in its data/cache (zig_env), never the user's profile."""
+    if install:
+        use_install(install)
     zig = zig or find_zig()
     src = Sources(platform)
     lib = os.path.join(src.lib_dir, RUNTIME_LIB)
@@ -431,7 +476,8 @@ def build_game(gen_dir, out_exe, cache_dir, zig=None, platform=HOST, progress=No
             progress(min(max(frac, 0.0), 1.0), msg)
 
     t0 = time.monotonic()
-    compiled = _compile_all(zig, jobs, platform, lambda d, t, f: report(share * f, f"Compiling ({d} of {t})"), log)
+    compiled = _compile_all(zig, jobs, platform, lambda d, t, f: report(share * f, f"Compiling ({d} of {t})"), log,
+                            install=install)
     if compiled:
         timings["per_file"] = (time.monotonic() - t0) / compiled
     used = {os.path.basename(j[1]) for j in jobs}
@@ -446,8 +492,11 @@ def build_game(gen_dir, out_exe, cache_dir, zig=None, platform=HOST, progress=No
            *link_args(src.lib_dir, platform), "-s"]
     t1 = time.monotonic()
     kw = {"creationflags": 0x08000000} if os.name == "nt" else {}
+    env = zig_env(install)
+    if env is not None:
+        kw["env"] = env
     p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                         **kw)
+                         encoding="utf-8", errors="replace", **kw)
     while True:
         try:
             _, err = p.communicate(timeout=0.25)

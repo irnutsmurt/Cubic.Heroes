@@ -4,13 +4,17 @@
     collect(install, out_dir)   the report's files written into out_dir for the player to review (the launcher
                                 shows them; the player may remove any): about.json (the versions, the operating
                                 system, the processor and memory, the GPU and its driver, the install's state, the
-                                caches' sizes) and the logs, every text privacy-sanitized
+                                caches' sizes), the logs -- the game's, the worker's (logs/worker-*.jsonl: the
+                                portable root keeps them in the install) and the newest crash and hang reports
+                                (logs/crash/, text only) -- every text privacy-sanitized
     pack(out_dir, zip_path)     exactly what is in out_dir after the review, as one zip
 
-Never in a report: saves (they hold the player's hero's name), decryption keys (never read here), the disc's or
-the game's files, the recipes and shader caches (made from the player's game: only their sizes), the disc image's
-path. Sanitized in every text: the home folder and the install folder (placeholders), the user's and the
-computer's names, e-mail addresses. Nothing is sent anywhere: the player decides what to do with the zip.
+Never in a report: saves (they hold the player's hero's name), decryption keys (never read here; a keys file's
+line or a 32-digit disc key met in a text is blanked all the same, and a file named like a keys file is never
+read), the disc's or the game's files, a crash dump (the game's memory: only its name and size), the recipes and
+shader caches (made from the player's game: only their sizes), the disc image's path. Sanitized in every text: the
+home folder and the install folder (placeholders), the user's and the computer's names, e-mail addresses. Nothing
+is sent anywhere: the player decides what to do with the zip.
 """
 import datetime
 import getpass
@@ -30,6 +34,12 @@ import install_layout as layout  # noqa: E402
 
 LOG_TAIL = 400_000   # bytes of a log kept (its end: the part that says what happened last)
 EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+# Keys never reach a report: a keys file's line (NAME REVISION KEY [IV], hexadecimal) and a disc key (exactly 32
+# hexadecimal digits) are blanked wherever they appear; a file named like a keys file is never read
+KEY_LINE = re.compile(r"(?im)^[ \t]*[A-Z][A-Z0-9_]{1,15}[ \t]+[0-9A-F]{4}[ \t]+[0-9A-F]{32,}.*$")
+HEX32 = re.compile(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{32}(?![0-9A-Fa-f])")
+CRASH_REPORTS = 10           # the newest crash and hang reports in a report
+CRASH_TEXT = (".txt", ".log", ".json", ".jsonl")   # what a crash report is; anything else (a dump): its name only
 
 
 class Sanitizer:
@@ -59,6 +69,8 @@ class Sanitizer:
             return None
 
     def text(self, s):
+        s = KEY_LINE.sub("<key line>", s)
+        s = HEX32.sub("<hex32>", s)
         s = EMAIL.sub("<email>", s)   # first: an address may hold a name
         for a, b in self.pairs:
             if a:
@@ -73,7 +85,7 @@ def _run_json(cmd, timeout=60):
     env = {k: v for k, v in os.environ.items() if not k.startswith(("DOTHEROES_", "PS3_", "PS3RECOMP_"))}
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env, stdin=subprocess.DEVNULL,
-                           **kw)
+                           encoding="utf-8", errors="replace", **kw)
         lines = [ln for ln in r.stdout.splitlines() if ln.strip().startswith("{")]
         return json.loads(lines[-1]) if lines else {"exit": r.returncode}
     except (OSError, subprocess.TimeoutExpired, ValueError) as e:
@@ -161,6 +173,37 @@ def active_settings(install):
     return "\n".join(lines) + "\n"
 
 
+def keys_like(name):
+    """a file named like a keys file (a .keys file, a text whose name says key): never read into a report"""
+    n = name.lower()
+    return n.endswith(".keys") or ("key" in n and n.endswith(".txt"))
+
+
+def tail(path):
+    """a text file's end (LOG_TAIL bytes), as text"""
+    with open(path, "rb") as f:
+        f.seek(max(0, os.path.getsize(path) - LOG_TAIL))
+        return f.read().decode("utf-8", errors="replace")
+
+
+def crash_reports(lay):
+    """(the newest CRASH_REPORTS text reports in logs/crash, [(name, bytes)] of its other files): never a link"""
+    d = lay.crash_logs
+    if not os.path.isdir(d) or layout.is_link(d):
+        return [], []
+    texts, others = [], []
+    for n in os.listdir(d):
+        p = os.path.join(d, n)
+        if not os.path.isfile(p) or layout.is_link(p) or keys_like(n):
+            continue
+        if n.lower().endswith(CRASH_TEXT):
+            texts.append(p)
+        else:
+            others.append((n, os.path.getsize(p)))
+    texts.sort(key=lambda p: (os.path.getmtime(p), p), reverse=True)
+    return sorted(texts[:CRASH_REPORTS]), sorted(others)
+
+
 def collect(install, out_dir, launcher_logs=()):
     """the report's files into out_dir (made empty first): about.json and the logs, sanitized. Returns the list of
     {file, bytes, what}."""
@@ -184,19 +227,23 @@ def collect(install, out_dir, launcher_logs=()):
     lay = layout.Layout(install)
     put("settings.txt", active_settings(install), "the game's and the launcher's settings in use")
     logs = []
-    if os.path.isdir(lay.logs):
-        logs += [os.path.join(lay.logs, n) for n in sorted(os.listdir(lay.logs)) if n.endswith((".log", ".jsonl"))]
-    logs += [p for p in launcher_logs if os.path.isfile(p)]
+    if os.path.isdir(lay.logs):   # the game's and the worker's (worker-*.jsonl)
+        logs += [os.path.join(lay.logs, n) for n in sorted(os.listdir(lay.logs)) if n.endswith((".log", ".jsonl"))
+                 and os.path.isfile(os.path.join(lay.logs, n)) and not keys_like(n)]
+    logs += [p for p in launcher_logs if os.path.isfile(p) and not keys_like(os.path.basename(p))]
     for p in logs:
-        with open(p, "rb") as f:
-            f.seek(max(0, os.path.getsize(p) - LOG_TAIL))
-            text = f.read().decode("utf-8", errors="replace")
         name = "log-" + os.path.basename(p)
-        put(name, text, f"the end of {os.path.basename(p)}")
+        put(name, tail(p), f"the end of {os.path.basename(p)}")
+    crashes, dumps = crash_reports(lay)
+    for p in crashes:
+        put("crash-" + os.path.basename(p), tail(p), f"the crash or hang report {os.path.basename(p)}")
+    if dumps:
+        put("crash-files.txt", "# other files in logs/crash (never in a report: a dump holds the game's memory)\n" +
+            "".join(f"{n}  {b} bytes\n" for n, b in dumps), "the names and sizes of the crash dumps, not their content")
     with open(os.path.join(out_dir, "README.txt"), "w", encoding="utf-8", newline="\n") as f:
         f.write("A Cubic.Heroes diagnostics report. Review the files; remove any you do not want to share.\n"
                 "Paths are shown as <install> and <home>; user and computer names as <name>; e-mail addresses as\n"
-                "<email>. Never included: saves, keys, the disc's or the game's files, shader caches.\n")
+                "<email>. Never included: saves, keys, the disc's or the game's files, shader caches, crash dumps.\n")
     files.append({"file": "README.txt", "bytes": os.path.getsize(os.path.join(out_dir, "README.txt")), "what": "this"})
     return files
 

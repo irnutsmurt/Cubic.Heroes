@@ -14,8 +14,17 @@
       data/cache/shaders/<id>/  translated shaders and pipelines, per translator (shared by the builds with it)
       data/gamedata/            the saves: never in a build, never written by an update
       data/install.json         the conversion's record (each step's fingerprint)
+      data/cache/zig-global/    the compiler's own caches (ZIG_GLOBAL_CACHE_DIR, ZIG_LOCAL_CACHE_DIR: tools/zig_build.py),
+      data/cache/zig-local/     never the user's profile
+      data/tmp/worker-<pid>/    a worker's temporary files and its children's (TMP/TEMP/TMPDIR), removed as it ends;
+                                one left by a worker that is gone, by the next worker (tools/worker.py)
       backups/saves/<id>/       save backups, each with its backup.json
-      logs/                     the game's (game.log and five before it) and the worker's
+      downloads/                the update downloads; downloads/launcher-* the launcher's own update (tools/updates.py)
+      logs/                     the game's (game.log and five before it) and the worker's (worker-*.jsonl, crash/)
+
+Portable by default: the root is the launcher's own folder (the downloaded package: LAUNCHER_PACKAGE, beside the
+install's own items, INSTALL_ITEMS). Nothing here ever takes a package item for the install's (or the setup app's),
+and the launcher's own update replaces only the package's items (tools/updates.py).
 
 The build that is active, and the ones kept for rollback, own their slots, their lift, their objects and their
 shader folder: nothing any of them uses is removed (prune). Rollback rewrites active.json and re-points game/:
@@ -36,9 +45,48 @@ DEFAULT_RETENTION = 1      # previous builds kept for rollback (the owner's defa
 AUTO_BACKUPS_KEPT = 10     # automatic save backups kept (manual ones are only removed by the player)
 AUTO_REASONS = ("before-update", "before-restore", "before-migration", "before-rollback")
 
+# The launcher's download as tools/make_bundle.py lays it out (it checks its folder against this list before it is
+# archived): the items at its top, per platform. Portable by default, that folder is also the install's root.
+LAUNCHER_PACKAGE = {"windows": ("CubicHeroes.exe", "SDL2.dll", "licenses", "LICENSE.txt", "README.txt", "worker"),
+                    "linux": ("CubicHeroes", "lib", "licenses", "LICENSE.txt", "README.txt", "worker")}
+# The launcher's mark on its root (the launcher writes it): the root's, never a package item nor the install's data
+ROOT_MARKER = "cubicheroes-root.txt"
+# The install's own items at its root: never moved, renamed or removed by the launcher's update, never taken for a
+# package item by the launcher's removal
+INSTALL_ITEMS = ("active.json", "builds", "data", "config", "logs", "backups", "downloads", "game")
+# What the setup app (before the launcher) put beside the game, by name -- its finish step's files over its history
+# (tools/setup_pipeline.py finish): the game, its libraries (Linux: in lib/), their notices, the icon, the settings.
+# Nothing else is ever taken for the setup app's: an unknown file at the root stays where it is.
+LEGACY_FILES = ("SDL2.dll", "OpenAL32.dll", "OpenAL-Soft-NOTICE.txt", "avutil-61.dll", "avcodec-63.dll",
+                "avformat-63.dll", "FFmpeg-NOTICE.txt", "FFmpeg-LGPL-2.1.txt", "icon.png", "dotheroes.cfg")
+LEGACY_DIRS = ("lib",)
+
 
 def exe_name(name=GAME):
     return name + (".exe" if os.name == "nt" else "")
+
+
+def package_platform():
+    return "windows" if os.name == "nt" else "linux"
+
+
+def launcher_package(platform=None):
+    """the launcher package's items at its folder's top (this platform's by default)"""
+    return LAUNCHER_PACKAGE[platform or package_platform()]
+
+
+def launcher_owned():
+    """every name the launcher's package or its root marker may have at the root, on any platform (case as given)"""
+    return set(LAUNCHER_PACKAGE["windows"]) | set(LAUNCHER_PACKAGE["linux"]) | {ROOT_MARKER}
+
+
+def holds_launcher(root):
+    """the folder holds the launcher's package (its program, its worker) or the launcher's root marker: a portable
+    root"""
+    root = os.path.abspath(root)
+    return any(os.path.isfile(os.path.join(root, n)) for n in ("CubicHeroes.exe", "CubicHeroes", ROOT_MARKER)) or \
+        os.path.isfile(os.path.join(root, "worker", "DotHeroes-Setup.exe")) or \
+        os.path.isfile(os.path.join(root, "worker", "DotHeroes-Setup"))
 
 
 def now_id():
@@ -142,6 +190,9 @@ class Layout:
         self.cache = os.path.join(self.data, "cache")
         self.objects = os.path.join(self.cache, "objects")
         self.shaders = os.path.join(self.cache, "shaders")
+        self.zig_global = os.path.join(self.cache, "zig-global")
+        self.zig_local = os.path.join(self.cache, "zig-local")
+        self.tmp = os.path.join(self.data, "tmp")
         self.gamedata = os.path.join(self.data, "gamedata")
         self.install_json = os.path.join(self.data, "install.json")
         self.builds_dir = os.path.join(self.root, "builds")
@@ -150,7 +201,9 @@ class Layout:
         self.config = os.path.join(self.root, "config")
         self.cfg = os.path.join(self.config, "dotheroes.cfg")
         self.logs = os.path.join(self.root, "logs")
+        self.crash_logs = os.path.join(self.logs, "crash")
         self.backups_dir = os.path.join(self.root, "backups", "saves")
+        self.downloads = os.path.join(self.root, "downloads")
 
     # ---- what the folder holds ----
     def kind(self):
@@ -431,17 +484,23 @@ class Layout:
 
     # ---- the setup app's layout, moved into this one ----
     def legacy_parts(self):
-        """what the setup app put beside the game, by name: the game, its libraries, notices and icon, the
-        settings file"""
+        """what the setup app put beside the game, by name (LEGACY_FILES, LEGACY_DIRS and the game itself): the game,
+        its libraries, notices and icon, the settings file. Never the launcher's: in a portable root (the launcher's
+        package beside the install) its items -- SDL2.dll and lib/ among them, the names the setup app's game used
+        too -- are the launcher's, never selected; nor ever a link, an unknown file or any of the install's own
+        items."""
+        owned = {n.lower() for n in launcher_owned()} if holds_launcher(self.root) else set()
+        known = {n.lower() for n in LEGACY_FILES + (exe_name(),)}
         out = []
         for n in os.listdir(self.root):
             p = os.path.join(self.root, n)
-            if os.path.isfile(p) and (n == exe_name() or n.endswith((".dll", ".txt")) or n in ("icon.png",
-                                                                                                  "dotheroes.cfg")):
+            low = n.lower()
+            if low in owned or n in INSTALL_ITEMS or is_link(p):
+                continue
+            if os.path.isfile(p) and low in known:
                 out.append(n)
-        lib = os.path.join(self.root, "lib")
-        if os.path.isdir(lib):
-            out.append("lib")
+            elif os.path.isdir(p) and low in LEGACY_DIRS:
+                out.append(n)
         return sorted(out)
 
     def move_legacy_data(self, lift_id, shader_id):

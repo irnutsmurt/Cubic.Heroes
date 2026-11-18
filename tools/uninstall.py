@@ -10,7 +10,7 @@ The parts (DEFAULT_PARTS keeps the saves, their backups and the settings):
     data       the disc's files and the lift made from them (data/disc, data/gen, data/dev_flash, install.json), and
                developer mode's test saves and lists (data/devmode: test data only, never the player's saves)
     shaders    the shader and pipeline caches (data/cache/shaders) and the recipes
-    objects    the compilation cache (data/cache/objects)
+    objects    the compilation caches (data/cache/objects; the compiler's own, data/cache/zig-global and zig-local)
     settings   the settings (config/)
     saves      the saves (data/gamedata) and their backups (backups/)
     shortcuts  the Start-menu and desktop shortcuts and the Steam entries made for the launcher (`exe`)
@@ -47,7 +47,7 @@ def part_paths(lay):
                  os.path.join(lay.data, "devmode")],
         "shaders": [lay.shaders, os.path.join(lay.cache, "native-recipes.bin"), os.path.join(lay.cache, "prepare.lock"),
                     os.path.join(lay.cache, "prepare-part.bin")],
-        "objects": [lay.objects],
+        "objects": [lay.objects, lay.zig_global, lay.zig_local],
         "settings": [lay.config],
         "saves": [lay.gamedata, os.path.dirname(lay.backups_dir)],
         "shortcuts": [],
@@ -127,8 +127,12 @@ def _walk(path, root, delete, acc):
         try:
             os.remove(path)
         except PermissionError:
-            os.chmod(path, stat.S_IWRITE)
-            os.remove(path)
+            try:
+                os.chmod(path, stat.S_IWRITE)
+                os.remove(path)
+            except PermissionError:   # held open (in a portable root: the running worker's own log in logs/)
+                acc["left"].append(path)
+                return
     acc["bytes"] += size
     acc["files"] += 1
 
@@ -140,8 +144,20 @@ def _measure(lay, part, delete):
     return acc
 
 
+def _launcher_program(root, exe):
+    """a program of the launcher's package in root (the launcher, its worker, the update's helper copy): in a
+    portable root these run from the install's folder, and they are not the game"""
+    return any(_within(os.path.join(root, n), exe) for n in PACKAGE_ITEMS + UPDATE_LEFTOVERS)
+
+
 def running_from(root):
-    """the processes whose program lies in root (the game from this install), as their paths"""
+    """the processes whose program lies in root (the game from this install), as their paths -- never the
+    launcher's own programs (a portable root holds them too)"""
+    found = _running_from(root)
+    return [p for p in found if not _launcher_program(root, p)]
+
+
+def _running_from(root):
     root_n = os.path.normcase(os.path.abspath(root)) + os.sep
     found = []
     if os.name == "nt":
@@ -211,7 +227,7 @@ def remove(install, parts=DEFAULT_PARTS, exe=None, roots=None):
     for part in parts:
         if part not in PARTS:
             raise UninstallError(f"Unknown part: {part}", "bad_request")
-    removed, protected_seen = {}, []
+    removed, protected_seen, left = {}, [], []
     for part in parts:
         if part == "shortcuts":
             removed[part] = {"removed": remove_shortcuts(exe, roots) if exe else [],
@@ -222,6 +238,7 @@ def remove(install, parts=DEFAULT_PARTS, exe=None, roots=None):
         acc = _measure(lay, part, True)
         removed[part] = {"bytes": acc["bytes"], "files": acc["files"], "links": acc["links"]}
         protected_seen += acc["protected"]
+        left += [p for p in acc["left"] if os.path.isfile(p)]   # a file held open: left, said
     for d in (lay.cache, os.path.join(lay.root, "backups"), lay.data):   # folders left empty go too
         try:
             if os.path.isdir(d) and not layout.is_link(d) and not os.listdir(d):
@@ -229,7 +246,7 @@ def remove(install, parts=DEFAULT_PARTS, exe=None, roots=None):
         except OSError:
             pass
     return {"removed": removed, "kept": [p for p in PARTS if p not in parts], "protected": protected_seen,
-            "bytes": sum(v.get("bytes", 0) for v in removed.values())}
+            "left": left, "bytes": sum(v.get("bytes", 0) for v in removed.values())}
 
 
 def _steam_lists(roots=None):
@@ -300,23 +317,47 @@ def remove_shortcuts(exe, roots=None, steam_running=None, links=True):
     return done
 
 
-# ---- removing the launcher itself (M9: docs/M9_LAUNCHER_PLAN.md section 20) ----
+# ---- removing the launcher itself (M9: docs/M9_LAUNCHER_PLAN.md section 20; the portable root) ----
 #
 # Only a packaged download's folder (the launcher beside worker/, as tools/make_bundle.py lays it out; never a source
-# checkout) and only the package's own items in it: anything else the player keeps there stays, and the folder
-# goes only when nothing is left. Never an install inside it (the game, its saves and settings stay wherever the
-# install is). The launcher's own data folder (its preferences, its job logs, a report being reviewed) goes too:
-# only those items. The Start-menu and desktop shortcuts and the Steam entry made for the launcher go (Steam open:
-# its entry is left -- the dialog says to close Steam first). The launcher can't delete itself while it runs: it
-# starts a copy of the worker from a temporary folder (`remove-launcher --wait-pid`), which waits for it to exit.
+# checkout) and only the package's own items in it (install_layout.LAUNCHER_PACKAGE) and its update's leftovers
+# (downloads/launcher-*): anything else there stays, and the folder goes only when nothing is left. Portable by
+# default, the install lives in this very folder (its root): its builds, data, settings, saves, backups, logs and
+# downloads stay, as an install in any folder of the player's inside it or anywhere else does. Only when the player
+# chose everything (`everything`: a separate option, separately confirmed) does the install whose root is this folder
+# go too -- every part of it, the saves and settings included (never a disc image or keys file, never through a
+# link) -- and the root's marker with it; an install anywhere else still stays. The launcher's own data folder (its
+# preferences, its job logs, a report being reviewed) goes too, only those items -- unless it lies in the install
+# being kept. The Start-menu and desktop shortcuts and the Steam entry made for the launcher go (Steam open: its
+# entry is left -- the dialog says to close Steam first). The launcher can't delete itself while it runs: it starts a
+# copy of the worker (`remove-launcher --wait-pid`), which waits for it to exit. That copy runs from the operating
+# system's temporary folder -- the one place outside the install root the worker ever writes, since the helper has
+# to run from outside the folder it removes (tools/worker.py cmd_remove_launcher).
 
-PACKAGE_ITEMS = ("CubicHeroes.exe", "CubicHeroes", "LICENSE.txt", "README.txt", "SDL2.dll", "libSDL2-2.0.so.0",
-                 "licenses", "worker")
+PACKAGE_ITEMS = layout.launcher_package() + (("libSDL2-2.0.so.0", "CubicHeroes.exe") if os.name != "nt" else
+                                             ("CubicHeroes",))   # and the other platform's program name (as before)
+UPDATE_LEFTOVERS = tuple(os.path.join("downloads", n) for n in ("launcher-new", "launcher-new.part",
+                                                                 "launcher-previous", "launcher-failed",
+                                                                 "launcher-helper")) + (".started-ok",)   # its health
 DATA_ITEMS = ("launcher.json", "logs", "report", "imgui.ini")
 
 
 def _worker_exe(folder):
     return os.path.join(folder, "worker", "DotHeroes-Setup.exe" if os.name == "nt" else "DotHeroes-Setup")
+
+
+def _within(outer, inner):
+    """inner is outer or lies inside it (by its path: links are another check)"""
+    o, i = os.path.normcase(os.path.abspath(outer)), os.path.normcase(os.path.abspath(inner))
+    try:
+        return os.path.commonpath([o, i]) == o
+    except ValueError:
+        return False
+
+
+def _holds_install(path):
+    return any(os.path.exists(os.path.join(path, n)) for n in ("active.json", os.path.join("data", "install.json"))) \
+        or os.path.isdir(os.path.join(path, "builds"))
 
 
 def _check_launcher_folder(folder, install=None):
@@ -333,36 +374,72 @@ def _check_launcher_folder(folder, install=None):
         raise UninstallError("This launcher isn't a downloaded copy: there is nothing to remove here.", "not_packaged")
     if os.path.exists(os.path.join(folder, ".git")) or os.path.exists(os.path.join(folder, "tools", "worker.py")):
         raise UninstallError("This launcher runs from a source folder: it isn't removed this way.", "not_packaged")
-    # an install inside the launcher's folder: never removed with it
+    # The install in the launcher's folder (portable: the folder is its root; or a folder of the player's in it) is
+    # kept with everything that isn't the package's. One inside a package item would go with that item: refused.
     homes = [install] if install else []
-    with os.scandir(folder) as it:
-        for e in it:
-            if e.is_dir(follow_symlinks=False) and (os.path.exists(os.path.join(e.path, "active.json")) or
-                                                    os.path.exists(os.path.join(e.path, "data", "install.json"))):
-                homes.append(e.path)
+    for n in PACKAGE_ITEMS:
+        p = os.path.join(folder, n)
+        if os.path.isdir(p) and not layout.is_link(p):
+            with os.scandir(p) as it:
+                homes += [p] + [e.path for e in it if e.is_dir(follow_symlinks=False) and _holds_install(e.path)]
     for h in homes:
-        h = os.path.abspath(h)
-        if os.path.normcase(h) == os.path.normcase(folder) or _inside(folder, h):
-            raise UninstallError("The game is installed inside the launcher's folder. Uninstall the game first, or "
-                                 "keep the launcher.", "install_inside")
+        if h == install or _holds_install(h):
+            for n in PACKAGE_ITEMS:
+                if _within(os.path.join(folder, n), h):
+                    raise UninstallError("The game is installed inside the launcher's own files: uninstall the game "
+                                         "first, or keep the launcher.", "install_inside")
     return folder, exe
 
 
-def launcher_plan(folder, data_dir=None, install=None):
-    """what removing the launcher removes, nothing removed: {folder, bytes, files, items, kept_items, data_bytes}"""
+def _install_here(folder, install=None):
+    """the folder itself when it is the install's root (portable): given as --install, or holding one; else None"""
+    if install and os.path.normcase(os.path.abspath(install)) == os.path.normcase(folder):
+        return folder
+    return folder if _holds_install(folder) or os.path.lexists(os.path.join(folder, layout.ROOT_MARKER)) else None
+
+
+def _root_items(folder):
+    """the install's items at the root (and the root's marker): what `everything` removes besides the package"""
+    return [n for n in layout.INSTALL_ITEMS + (layout.ROOT_MARKER,) if os.path.lexists(os.path.join(folder, n))]
+
+
+def _data_items(data_dir, here, everything):
+    """the launcher's data folder's items that go: none when the folder lies in the install being kept (left with
+    it); in the root itself with everything, those that are not the install's (counted and removed with it)"""
+    if not data_dir or not os.path.isdir(data_dir) or layout.is_link(data_dir):
+        return []
+    if here and not everything and _within(here, data_dir):
+        return []
+    same = bool(here) and os.path.normcase(os.path.abspath(data_dir)) == os.path.normcase(here)
+    return [n for n in DATA_ITEMS if not (same and n in layout.INSTALL_ITEMS)]
+
+
+def launcher_plan(folder, data_dir=None, install=None, everything=False):
+    """what removing the launcher removes, nothing removed: {folder, bytes, files, items, kept_items, data_bytes,
+    portable, install_kept, everything, install_bytes}"""
     folder, exe = _check_launcher_folder(folder, install)
+    here = _install_here(folder, install)
     acc = {"bytes": 0, "files": 0, "links": 0, "protected": [], "left": []}
     items = [n for n in PACKAGE_ITEMS if os.path.lexists(os.path.join(folder, n))]
-    for n in items:
+    for n in items + [x for x in UPDATE_LEFTOVERS if os.path.lexists(os.path.join(folder, x))]:
         _walk(os.path.join(folder, n), folder, False, acc)
-    others = sorted(n for n in os.listdir(folder) if n not in PACKAGE_ITEMS)
+    iacc = {"bytes": 0, "files": 0, "links": 0, "protected": [], "left": []}
+    gone = set(PACKAGE_ITEMS)
+    if everything and here:
+        for n in _root_items(here):
+            _walk(os.path.join(here, n), here, False, iacc)
+        gone |= set(_root_items(here))
     dacc = {"bytes": 0, "files": 0, "links": 0, "protected": [], "left": []}
-    if data_dir and os.path.isdir(data_dir) and not layout.is_link(data_dir):
-        for n in DATA_ITEMS:
-            _walk(os.path.join(data_dir, n), data_dir, False, dacc)
+    for n in _data_items(data_dir, here, everything):
+        _walk(os.path.join(data_dir, n), data_dir, False, dacc)
+        if os.path.normcase(os.path.abspath(data_dir)) == os.path.normcase(folder):
+            gone.add(n)
+    others = sorted(n for n in os.listdir(folder) if n not in gone)
     import shortcuts
-    return {"folder": folder, "exe": exe, "bytes": acc["bytes"] + dacc["bytes"], "files": acc["files"] + dacc["files"],
-            "items": items, "kept_items": others, "data_bytes": dacc["bytes"],
+    return {"folder": folder, "exe": exe, "bytes": acc["bytes"] + dacc["bytes"] + iacc["bytes"],
+            "files": acc["files"] + dacc["files"] + iacc["files"], "items": items, "kept_items": others,
+            "data_bytes": dacc["bytes"], "portable": bool(here), "install_kept": bool(here) and not everything,
+            "everything": bool(everything), "install_bytes": iacc["bytes"],
             "steam_open": bool(steam_entry_left(exe)) and bool(shortcuts.steam_running())}
 
 
@@ -394,29 +471,47 @@ def _pid_alive(pid):
         return False
 
 
-def remove_launcher(folder, data_dir=None, install=None, wait_pid=None, timeout=120):
-    """the launcher's package items, its data folder's items and its shortcuts removed (after `wait_pid` exits)"""
+def remove_launcher(folder, data_dir=None, install=None, wait_pid=None, timeout=120, everything=False, roots=None):
+    """the launcher's package items (and its update's leftovers), its data folder's items and its shortcuts removed
+    (after `wait_pid` exits); the install whose root is the folder kept -- removed too, every part of it, only with
+    `everything`"""
     if wait_pid and not _wait_exit(wait_pid, timeout):
         raise UninstallError("The launcher is still running: nothing was removed.", "busy")
     folder, exe = _check_launcher_folder(folder, install)
-    out = {"folder": folder, "shortcuts": [], "bytes": 0, "files": 0, "left": []}
+    here = _install_here(folder, install)
+    if everything and here:   # nothing at all while the game runs from it or a preparation holds its lock
+        _check_idle(layout.Layout(here))
+    out = {"folder": folder, "shortcuts": [], "bytes": 0, "files": 0, "left": [], "portable": bool(here),
+           "install_kept": bool(here) and not everything, "everything": bool(everything)}
     try:
-        out["shortcuts"] = remove_shortcuts(exe)
+        out["shortcuts"] = remove_shortcuts(exe, roots)
     except Exception:   # noqa: BLE001 -- a shortcut that can't be removed never stops the rest
         pass
-    out["steam_left"] = bool(steam_entry_left(exe))
+    out["steam_left"] = bool(steam_entry_left(exe, roots))
     acc = {"bytes": 0, "files": 0, "links": 0, "protected": [], "left": []}
-    for n in PACKAGE_ITEMS:
+    for n in PACKAGE_ITEMS + UPDATE_LEFTOVERS:
         p = os.path.join(folder, n)
         if os.path.lexists(p):
             _walk(p, folder, True, acc)
-    if data_dir and os.path.isdir(data_dir) and not layout.is_link(data_dir):
-        for n in DATA_ITEMS:
-            _walk(os.path.join(data_dir, n), data_dir, True, acc)
+    dl = os.path.join(folder, "downloads")
+    try:
+        if os.path.isdir(dl) and not layout.is_link(dl) and not os.listdir(dl):
+            os.rmdir(dl)   # the update's folder, when it held only the launcher's update
+    except OSError:
+        pass
+    if everything and here:
+        for n in _root_items(here):
+            _walk(os.path.join(here, n), here, True, acc)
+        out["install_removed"] = True
+    gone_data = _data_items(data_dir, here, everything)
+    for n in gone_data:
+        _walk(os.path.join(data_dir, n), data_dir, True, acc)
+    if gone_data and os.path.normcase(os.path.abspath(data_dir)) != os.path.normcase(folder):
         try:
             os.rmdir(data_dir)   # only when nothing else is in it
         except OSError:
             pass
+    out["data_kept"] = bool(data_dir) and not gone_data
     try:
         os.rmdir(folder)   # only when the player kept nothing else there
         out["folder_removed"] = True

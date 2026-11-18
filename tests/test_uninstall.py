@@ -187,8 +187,18 @@ class RemoveLauncherTest(unittest.TestCase):
         self.assertTrue(out["folder_removed"])
         self.assertFalse(os.path.exists(self.pkg))
 
-    def test_refusals(self):
+    def test_install_in_a_players_folder_inside_is_kept(self):
         inner = os.path.join(self.pkg, "game install")
+        put(os.path.join(inner, "active.json"), 5)
+        put(os.path.join(inner, "data", "gamedata", "save.bin"), 9)
+        p = uninstall.launcher_plan(self.pkg, self.data)
+        self.assertIn("game install", p["kept_items"])
+        uninstall.remove_launcher(self.pkg, self.data, install=inner, roots=[])
+        self.assertEqual(sorted(os.listdir(self.pkg)), ["game install", "my notes.txt"])
+        self.assertTrue(os.path.exists(os.path.join(inner, "data", "gamedata", "save.bin")))
+
+    def test_refusals(self):
+        inner = os.path.join(self.pkg, "worker", "game install")   # inside a package item: it would go with it
         put(os.path.join(inner, "active.json"), 5)
         with self.assertRaises(uninstall.UninstallError) as e:
             uninstall.launcher_plan(self.pkg, self.data)
@@ -213,6 +223,136 @@ class RemoveLauncherTest(unittest.TestCase):
         with self.assertRaises(uninstall.UninstallError) as e:
             uninstall.launcher_plan(self.outside)
         self.assertEqual(e.exception.code, "not_packaged")
+
+
+def tree(root, names):
+    """the files under root's named items, as bytes (links as their target, never followed)"""
+    out = {}
+    for n in names:
+        p = os.path.join(root, n)
+        if layout.is_link(p):
+            out[n] = "link"
+        elif os.path.isfile(p):
+            with open(p, "rb") as f:
+                out[n] = f.read()
+        elif os.path.isdir(p):
+            for d, dirs, fs in os.walk(p):
+                dirs[:] = [x for x in dirs if not layout.is_link(os.path.join(d, x))]
+                for fn in fs:
+                    with open(os.path.join(d, fn), "rb") as f:
+                        out[os.path.relpath(os.path.join(d, fn), root)] = f.read()
+    return out
+
+
+class PortableRootTest(unittest.TestCase):
+    """the portable root: the launcher's folder is the install's root. Removing the launcher removes its package
+    only; the install (saves, settings, builds, logs, downloads) stays -- removed too only with everything"""
+
+    def setUp(self):
+        self.tmpd = tempfile.TemporaryDirectory()
+        self.root = os.path.join(self.tmpd.name, "Cubic Heroes ünïcode 測試")
+        r = self.root
+        exe = "CubicHeroes.exe" if os.name == "nt" else "CubicHeroes"
+        put(os.path.join(r, exe), 100)
+        put(os.path.join(r, "worker", "DotHeroes-Setup.exe" if os.name == "nt" else "DotHeroes-Setup"), 50)
+        put(os.path.join(r, "licenses", "SDL2.txt"), 5)
+        put(os.path.join(r, "README.txt"), 5)
+        put(os.path.join(r, "downloads", "launcher-previous", exe), 100)   # an update's leftover: the launcher's
+        put(os.path.join(r, "downloads", "0.2.0", "pkg.zip"), 30)
+        put(os.path.join(r, layout.ROOT_MARKER), 2)
+        put(os.path.join(r, "active.json"), 5)
+        put(os.path.join(r, "builds", "b1", "dotheroes.exe"), 70)
+        layout.make_link(os.path.join(r, "game"), os.path.join(r, "builds", "b1"))
+        put(os.path.join(r, "data", "gamedata", "save.bin"), 9)
+        put(os.path.join(r, "data", "disc", "player-copy.iso"), 9)   # a disc image: never removed
+        put(os.path.join(r, "data", "cache", "zig-global", "z"), 12)
+        put(os.path.join(r, "config", "dotheroes.cfg"), 4)
+        put(os.path.join(r, "logs", "worker-install.jsonl"), 6)
+        put(os.path.join(r, "backups", "saves", "x", "save.bin"), 9)
+        put(os.path.join(r, "launcher.json"), 8)                      # the launcher's preferences, in the root
+        put(os.path.join(r, "my notes.txt"), 7)
+        self.install_items = layout.INSTALL_ITEMS + (layout.ROOT_MARKER, "my notes.txt")
+
+    def tearDown(self):
+        if layout.is_link(os.path.join(self.root, "game")):
+            layout.remove_link(os.path.join(self.root, "game"))
+        self.tmpd.cleanup()
+
+    def test_plan_keeps_the_install(self):
+        p = uninstall.launcher_plan(self.root, self.root, self.root)
+        self.assertTrue(p["portable"] and p["install_kept"])
+        self.assertEqual(p["bytes"], 100 + 50 + 5 + 5 + 100)   # the package and the update's leftover: nothing else
+        for n in ("active.json", "builds", "data", "config", "logs", "backups", "downloads", "my notes.txt"):
+            self.assertIn(n, p["kept_items"])
+
+    def test_remove_keeps_the_install_byte_for_byte(self):
+        before = tree(self.root, self.install_items)
+        out = uninstall.remove_launcher(self.root, self.root, self.root, roots=[])
+        self.assertTrue(out["install_kept"])
+        self.assertFalse(out["folder_removed"])
+        after = tree(self.root, self.install_items)
+        before.pop(os.path.join("downloads", "launcher-previous", "CubicHeroes.exe" if os.name == "nt" else
+                                "CubicHeroes"))
+        self.assertEqual(after, before)
+        for n in layout.launcher_package():
+            self.assertFalse(os.path.lexists(os.path.join(self.root, n)), n)
+        self.assertTrue(os.path.exists(os.path.join(self.root, "launcher.json")), "the data folder in the install: kept")
+        self.assertTrue(layout.is_link(os.path.join(self.root, "game")))
+
+    def test_everything(self):
+        p = uninstall.launcher_plan(self.root, self.root, self.root, everything=True)
+        self.assertTrue(p["everything"] and not p["install_kept"])
+        self.assertGreater(p["install_bytes"], 0)
+        self.assertEqual(p["kept_items"], ["my notes.txt"])
+        out = uninstall.remove_launcher(self.root, self.root, self.root, everything=True, roots=[])
+        self.assertTrue(out["install_removed"])
+        left = []
+        for d, _, fs in os.walk(self.root):
+            left += [os.path.relpath(os.path.join(d, f), self.root) for f in fs]
+        self.assertEqual(sorted(left), sorted(["my notes.txt", os.path.join("data", "disc", "player-copy.iso")]))
+
+    def test_uninstall_in_the_root_leaves_the_launcher(self):
+        held = open(os.path.join(self.root, "logs", "worker-uninstall.jsonl"), "a")   # the worker's own --log, open
+        try:
+            out = uninstall.remove(self.root, roots=[])
+        finally:
+            held.close()
+        if os.name == "nt":   # Windows refuses to remove a file held open: left and said, the rest removed
+            self.assertEqual(out["left"], [os.path.join(self.root, "logs", "worker-uninstall.jsonl")])
+        self.assertFalse(os.path.exists(os.path.join(self.root, "builds")))
+        self.assertEqual(sorted(out["kept"]), ["saves", "settings"])
+        self.assertTrue(os.path.exists(os.path.join(self.root, "worker")))
+        self.assertTrue(os.path.exists(os.path.join(self.root, "README.txt")))
+        self.assertFalse(os.path.exists(os.path.join(self.root, "data", "cache", "zig-global")),
+                         "Zig's caches are the objects part")
+
+    def test_the_launchers_programs_are_not_the_game(self):
+        r = self.root
+        found = [os.path.join(r, "CubicHeroes.exe"), os.path.join(r, "worker", "DotHeroes-Setup.exe"),
+                 os.path.join(r, "downloads", "launcher-helper", "DotHeroes-Setup.exe"),
+                 os.path.join(r, "game", "dotheroes.exe")]
+        real = uninstall._running_from
+        uninstall._running_from = lambda root: found
+        try:
+            self.assertEqual(uninstall.running_from(r), [found[-1]])
+        finally:
+            uninstall._running_from = real
+
+    def test_worker_needs_a_separate_confirmation_for_everything(self):
+        import subprocess
+        import json
+        w = [sys.executable, os.path.join(ROOT, "tools", "worker.py"), "remove-launcher", "--launcher", self.root,
+             "--install", self.root]
+        p = subprocess.run(w + ["--confirm", "--everything"], capture_output=True, text=True, encoding="utf-8",
+                           timeout=60)
+        res = json.loads(p.stdout.splitlines()[-1])
+        self.assertEqual(res["code"], "needs_confirmation")
+        self.assertTrue(os.path.exists(os.path.join(self.root, "data", "gamedata", "save.bin")))
+        p = subprocess.run(w + ["--dry-run", "--everything"], capture_output=True, text=True, encoding="utf-8",
+                           timeout=60)
+        res = json.loads(p.stdout.splitlines()[-1])
+        self.assertTrue(res["ok"], res)
+        self.assertTrue(res["data"]["everything"])
 
 
 if __name__ == "__main__":

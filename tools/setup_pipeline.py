@@ -171,10 +171,14 @@ def run_tool(script, args, log, code="lift_failed"):
     checkout; in the packaged app, the app itself runs it (setup_app.py main)."""
     cmd = [sys.executable, script, *args]
     kw = {"creationflags": 0x08000000} if os.name == "nt" else {}
+    # The tool's output in UTF-8 both ways (its print of a path in an install whose name holds any character must
+    # neither fail in the tool nor here): PYTHONIOENCODING for a Python run from a checkout; the packaged app sets
+    # its own streams to UTF-8 before it runs a tool (setup_app.py run_script)
+    env = dict(os.environ, PYTHONIOENCODING="utf-8")
     # no stdin: the worker reads its own on a thread (the launcher's cancel); a child on a pipe with a read
     # pending would stop in its start-up on Windows until that read ends (M9.1: the resume test's hang)
     p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                         **kw)
+                         encoding="utf-8", errors="replace", env=env, **kw)
     tail = []
     try:
         for line in p.stdout:
@@ -608,6 +612,7 @@ def run(install, source=None, keys=None, elf=None, progress=None, log=None, skip
     game's path, its lift, its objects, its shader cache's id, the version that made it."""
     from version import VERSION
     paths = Paths(install, out_dir=out_dir)
+    zig_build.use_install(paths.install)   # Zig's own caches in this install's data/cache, from the first Zig run on
     progress = progress or (lambda s, f, m: None)
     log = log or (lambda m: None)
     skip = skip or (lambda s: None)
@@ -692,7 +697,7 @@ def run(install, source=None, keys=None, elf=None, progress=None, log=None, skip
     progress("build", 0.0, STEP_NAMES["build"])
     used = []
     zig_build.build_game(paths.gen, paths.exe, paths.cache, progress=lambda f, m: progress("build", f, m), log=log,
-                         keep=set(keep_objects), used_out=used)
+                         keep=set(keep_objects), used_out=used, install=paths.install)
     progress("finish", 0.0, STEP_NAMES["finish"])
     finish(paths, log)
     progress("finish", 1.0, "Done")

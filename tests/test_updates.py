@@ -6,7 +6,9 @@ Ed25519 against RFC 8032's vectors and OpenSSL's command line; a made-up release
 made in a temporary folder (never the owner's): the channels, an altered, unsigned or foreign-signed release
 refused, the next valid one taken; downloads checked, a damaged one refused, an interrupted one resumed (over a
 local HTTP server that drops the connection), too little space refused, offline reported; a launcher package with
-a path escaping it refused; the launcher's swap kept when the new one comes up, put back when it does not."""
+a path escaping it, or the install's own items, refused; the launcher's swap -- in its folder, which is also the
+install's root (a path with spaces and any characters) -- replacing only the package's items, the install's left
+byte for byte, kept when the new one comes up, put back when it does not or when the swap itself fails."""
 import base64
 import hashlib
 import http.server
@@ -19,9 +21,11 @@ import tempfile
 import threading
 import unittest
 import zipfile
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "tools"))
+import install_layout as layout  # noqa: E402
 import release_trust as trust  # noqa: E402
 import updates  # noqa: E402
 
@@ -288,33 +292,203 @@ class HttpResume(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+EXE = "CubicHeroes.exe" if os.name == "nt" else "CubicHeroes"
+WORKER_EXE = "DotHeroes-Setup.exe" if os.name == "nt" else "DotHeroes-Setup"
+
+
+def package(folder, version, start=None):
+    """a launcher package's items (install_layout.LAUNCHER_PACKAGE), each saying its version"""
+    for n in layout.launcher_package():
+        if n == EXE:
+            put(os.path.join(folder, n), f"launcher {version}")
+        elif n in ("worker",):
+            put(os.path.join(folder, n, WORKER_EXE), f"worker {version}")
+            put(os.path.join(folder, n, "_internal", "python.dll"), f"python {version}")
+        elif n in ("licenses", "lib"):
+            put(os.path.join(folder, n, "SDL2.txt"), f"licence {version}")
+        else:
+            put(os.path.join(folder, n), f"{n} {version}")
+    if start:
+        put(os.path.join(folder, "start.bat"), start)
+
+
+def portable_root(root):
+    """the launcher's folder as the install's root: the package, the install's items, the player's own file"""
+    package(root, "old")
+    put(os.path.join(root, "active.json"), '{"layout": 2, "active": "b1", "previous": [], "retention": 1}')
+    put(os.path.join(root, "builds", "b1", "dotheroes.exe"), b"the game")
+    put(os.path.join(root, "data", "gamedata", "dev_hdd0", "SAVE.BIN"), b"the player's save")
+    put(os.path.join(root, "data", "cache", "objects", "a.o"), b"object")
+    put(os.path.join(root, "config", "dotheroes.cfg"), "DOTHEROES_FPS=60\n")
+    put(os.path.join(root, "logs", "game.log"), "a log")
+    put(os.path.join(root, "backups", "saves", "x", "gamedata", "SAVE.BIN"), b"a backup")
+    put(os.path.join(root, "downloads", "0.2.0", "CubicHeroes-0.2.0.zip"), b"the download")
+    put(os.path.join(root, layout.ROOT_MARKER), "root")
+    put(os.path.join(root, "my notes.txt"), "the player's")
+    layout.make_link(os.path.join(root, "game"), os.path.join(root, "builds", "b1"))
+
+
+def snapshot(root, names=layout.INSTALL_ITEMS + (layout.ROOT_MARKER, "my notes.txt")):
+    """every file of the install's items (and the player's), as bytes, never through a link; links as their target
+    (the launcher update's own folders in downloads/ left out: they are the launcher's)"""
+    out = {}
+    for n in names:
+        p = os.path.join(root, n)
+        if layout.is_link(p):
+            out[n] = ("link", os.path.normcase(os.path.realpath(p)))
+        elif os.path.isfile(p):
+            out[n] = get(p)
+        elif os.path.isdir(p):
+            for d, dirs, fs in os.walk(p):
+                dirs[:] = [x for x in dirs if not layout.is_link(os.path.join(d, x)) and not (
+                    os.path.basename(d) == "downloads" and x.startswith("launcher-"))]
+                for f in fs:
+                    q = os.path.join(d, f)
+                    out[os.path.relpath(q, root)] = (get(q), os.path.getmtime(q))
+    return out
+
+
+class FakeLauncher:
+    """the new launcher, started: it writes the health file (or not) as a real one would"""
+
+    def __init__(self, folder, healthy):
+        self.healthy, self.folder, self.started = healthy, folder, []
+
+    def __call__(self, cmd, cwd):
+        self.started.append(cmd[1:])
+        if cmd[1] == "--after-update" and self.healthy:
+            put(os.path.join(self.folder, updates.HEALTH_FILE), "ok")
+        return mock.Mock(poll=lambda: 0 if not self.healthy else None)
+
+
+class PortableSwap(unittest.TestCase):
+    """the launcher's update in its folder, which is also the install's root: only the package's items replaced"""
+
+    def setUp(self):
+        self.tmpd = tempfile.TemporaryDirectory(prefix="swap-test-")
+        self.root = os.path.join(self.tmpd.name, "Cubic Heroes ünïcode 測試")   # spaces and any characters
+        portable_root(self.root)
+        self.before = snapshot(self.root)
+        self.dirs = updates.update_dirs(self.root)
+        package(self.dirs["staged"], "new")
+
+    def tearDown(self):
+        layout.remove_link(os.path.join(self.root, "game"))
+        self.tmpd.cleanup()
+
+    def swap(self, healthy):
+        fake = FakeLauncher(self.root, healthy)
+        with mock.patch.object(updates, "_start_detached", fake):
+            return updates.swap_launcher(self.root, EXE, log=lambda t: None, health_timeout=2), fake
+
+    def test_swap_replaces_only_the_package(self):
+        res, fake = self.swap(True)
+        self.assertEqual(res, "updated")
+        self.assertEqual(fake.started, [["--after-update"]])
+        self.assertEqual(get(os.path.join(self.root, EXE)), b"launcher new")
+        self.assertEqual(get(os.path.join(self.root, "worker", WORKER_EXE)), b"worker new")
+        self.assertEqual(snapshot(self.root), self.before, "the install's items untouched, byte for byte")
+        self.assertTrue(layout.is_link(os.path.join(self.root, "game")))
+        for gone in ("previous", "staged"):   # the previous items kept only until the new launcher is up
+            self.assertFalse(os.path.exists(self.dirs[gone]), gone)
+
+    def test_put_back_when_the_new_one_does_not_start(self):
+        res, fake = self.swap(False)
+        self.assertEqual(res, "restored")
+        self.assertEqual(fake.started, [["--after-update"], ["--update-failed"]])
+        self.assertEqual(get(os.path.join(self.root, EXE)), b"launcher old", "the old launcher back")
+        self.assertEqual(get(os.path.join(self.root, "worker", WORKER_EXE)), b"worker old")
+        self.assertEqual(get(os.path.join(self.dirs["failed"], EXE)), b"launcher new", "the new one kept aside")
+        self.assertEqual(snapshot(self.root), self.before)
+
+    def test_put_back_when_the_swap_itself_fails(self):
+        real = updates._replace
+
+        def locked(src, dst, tries=50):   # the new worker can't be moved in (a file held)
+            if os.path.normcase(src) == os.path.normcase(os.path.join(self.dirs["staged"], "worker")):
+                raise PermissionError(13, "in use")
+            return real(src, dst, tries)
+        with mock.patch.object(updates, "_replace", locked):
+            res, fake = self.swap(True)
+        self.assertEqual(res, "restored")
+        self.assertEqual(fake.started, [["--update-failed"]])
+        for n in layout.launcher_package():
+            self.assertTrue(os.path.lexists(os.path.join(self.root, n)), n)
+        self.assertEqual(get(os.path.join(self.root, EXE)), b"launcher old")
+        self.assertEqual(get(os.path.join(self.root, "worker", WORKER_EXE)), b"worker old")
+        self.assertEqual(snapshot(self.root), self.before)
+
+    def test_nothing_staged(self):
+        layout.rmtree(self.dirs["staged"])
+        res, fake = self.swap(True)
+        self.assertEqual((res, fake.started), ("restored", [["--update-failed"]]))
+        self.assertEqual(get(os.path.join(self.root, EXE)), b"launcher old")
+
+    def test_stage_into_the_root(self):
+        layout.rmtree(self.dirs["staged"])
+        z = os.path.join(self.tmpd.name, "pkg.zip")
+        src = os.path.join(self.tmpd.name, "pkgsrc", "Cubic.Heroes-0.3.0")
+        package(src, "0.3.0")
+        with zipfile.ZipFile(z, "w") as zf:
+            for d, _, fs in os.walk(src):
+                for f in fs:
+                    zf.write(os.path.join(d, f), os.path.relpath(os.path.join(d, f), os.path.dirname(src)))
+        staged = updates.stage_launcher(z, self.root)
+        self.assertEqual(os.path.normcase(staged), os.path.normcase(self.dirs["staged"]))
+        self.assertEqual(sorted(os.listdir(staged)), sorted(layout.launcher_package()))
+        self.assertEqual(get(os.path.join(staged, EXE)), b"launcher 0.3.0")
+        self.assertEqual(snapshot(self.root), self.before)
+
+    def test_stage_refuses_the_installs_items(self):
+        z = os.path.join(self.tmpd.name, "bad.zip")
+        with zipfile.ZipFile(z, "w") as zf:
+            zf.writestr(EXE, "x")
+            zf.writestr("data/gamedata/SAVE.BIN", "overwritten")
+        with self.assertRaises(trust.ReleaseError) as e:
+            updates.stage_launcher(z, self.root)
+        self.assertEqual(e.exception.code, "bad_download")
+        self.assertFalse(os.path.exists(self.dirs["staged"]))
+        self.assertEqual(snapshot(self.root), self.before)
+
+    def test_helper_copy_inside_the_root(self):
+        app = os.path.join(self.root, "worker")
+        put(os.path.join(app, "tools", "worker.py"), "tool")
+        helper = updates.stage_helper(self.root, app)
+        self.assertEqual(os.path.normcase(os.path.dirname(helper)), os.path.normcase(self.dirs["helper"]))
+        self.assertEqual(get(helper), b"worker old")
+        self.assertTrue(os.path.exists(os.path.join(self.dirs["helper"], "_internal", "python.dll")))
+
+
 @unittest.skipUnless(os.name == "nt", "the stand-in launchers are batch files")
 class LauncherSwap(unittest.TestCase):
+    """the swap with real processes: a stand-in launcher (a batch file) writes the health file, or fails"""
+
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="swap-test-")
         self.d = os.path.join(self.tmp, "launcher")
+        self.staged = updates.update_dirs(self.d)["staged"]
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def launcher(self, folder, version, healthy=True):
-        put(os.path.join(folder, "version.txt"), version)
-        put(os.path.join(folder, "start.bat"), "@echo off\r\n" + (f"echo %1 > {updates.HEALTH_FILE}\r\n" if healthy
-                                                                   else "exit /b 1\r\n"))
+        package(folder, version, "@echo off\r\n" + (f"echo %1 > {updates.HEALTH_FILE}\r\n" if healthy
+                                                    else "exit /b 1\r\n"))
 
     def test_kept_when_it_comes_up(self):
         self.launcher(self.d, "old")
-        self.launcher(self.d + ".new", "new")
+        put(os.path.join(self.d, "my notes.txt"), "kept")
+        self.launcher(self.staged, "new")
         self.assertEqual(updates.swap_launcher(self.d, "start.bat", log=lambda t: None, health_timeout=20), "updated")
-        self.assertEqual(get(os.path.join(self.d, "version.txt")), b"new")
-        self.assertEqual(get(os.path.join(self.d + ".old", "version.txt")), b"old", "the previous one kept")
+        self.assertEqual(get(os.path.join(self.d, EXE)), b"launcher new")
+        self.assertEqual(get(os.path.join(self.d, "my notes.txt")), b"kept", "anything else in the folder stays")
 
     def test_put_back_when_it_does_not(self):
         self.launcher(self.d, "old")
-        self.launcher(self.d + ".new", "new", healthy=False)
+        self.launcher(self.staged, "new", healthy=False)
         self.assertEqual(updates.swap_launcher(self.d, "start.bat", log=lambda t: None, health_timeout=5), "restored")
-        self.assertEqual(get(os.path.join(self.d, "version.txt")), b"old")
-        self.assertEqual(get(os.path.join(self.d + ".failed", "version.txt")), b"new")
+        self.assertEqual(get(os.path.join(self.d, EXE)), b"launcher old")
+        self.assertEqual(get(os.path.join(updates.update_dirs(self.d)["failed"], EXE)), b"launcher new")
 
 
 class Manifest(unittest.TestCase):

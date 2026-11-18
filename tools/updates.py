@@ -5,9 +5,19 @@
                                               manifest verified -- newer than the installed version or not
     download(manifest, platform, dest, ...)  its download for this platform, resumed where a previous attempt
                                               stopped, checked against the manifest (size, SHA-256)
-    stage_launcher(zip, launcher_dir)        a downloaded launcher unpacked beside the running one
-    swap_launcher(...)                       (a helper process, after the launcher exits) the new launcher in the
-                                              old one's place, started; put back if it does not start
+    stage_launcher(zip, launcher_dir)        a downloaded launcher unpacked into <launcher_dir>/downloads/launcher-new
+    stage_helper(launcher_dir, app_dir)      the worker's copy the swap runs from (<launcher_dir>/downloads/
+                                              launcher-helper): it must not run from the worker/ it replaces
+    swap_launcher(...)                       (a helper process, after the launcher exits) the new package's items in
+                                              place of the old ones', started; put back if it does not start
+
+The launcher's folder is, portable by default, also the install's root: an update replaces only the launcher
+package's own items in it (install_layout.LAUNCHER_PACKAGE, and the new package's top items) and never moves,
+renames or removes the install's (install_layout.INSTALL_ITEMS: builds/, data/, config/, logs/, backups/,
+downloads/, active.json, game/) nor anything else the folder holds. Everything it stages or keeps stays inside the
+folder: downloads/launcher-new (the package unpacked), downloads/launcher-previous (the replaced items, until the
+new launcher reports a good start), downloads/launcher-failed (a new launcher that did not start), and
+downloads/launcher-helper (the swap's own copy of the worker).
 
 Nothing is installed from a release whose manifest is unsigned, signed by a key the launcher doesn't trust, or
 altered, nor from a download that is not the one signed for. A check never blocks play: offline is a result
@@ -26,6 +36,7 @@ import urllib.request
 import zipfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import install_layout as layout  # noqa: E402
 import release_trust as trust  # noqa: E402
 
 REPO = "irnutsmurt/Cubic.Heroes"
@@ -202,32 +213,86 @@ def download(asset, url, dest_dir, progress=None, cancelled=None):
 
 
 # ---------------- the launcher's own update ----------------
+#
+# Before the portable root, the whole launcher folder was renamed (<dir>.new in its place, the old kept as <dir>.old).
+# That can't be done when the install lives in the folder (it would move the saves, the builds and the very
+# download being applied), and the item-wise swap below is as right for a launcher folder that holds no install --
+# anything the player keeps there now simply stays -- so it is the only one. No launcher ever started the old swap
+# (the commands were in place before the launcher's side), so nothing depends on <dir>.new.
+
+STAGED, PREVIOUS, FAILED, HELPER = "launcher-new", "launcher-previous", "launcher-failed", "launcher-helper"
+
+
+def update_dirs(launcher_dir):
+    """where the launcher's update stages and keeps things, all inside its folder (downloads/)"""
+    d = os.path.join(os.path.abspath(launcher_dir), "downloads")
+    return {"staged": os.path.join(d, STAGED), "previous": os.path.join(d, PREVIOUS),
+            "failed": os.path.join(d, FAILED), "helper": os.path.join(d, HELPER)}
+
+
+def _not_package(name):
+    """a name a launcher package may never put at the folder's top: the install's own items, the root's marker,
+    the folder the update itself uses"""
+    low = name.lower()
+    return low in {n.lower() for n in layout.INSTALL_ITEMS} or low == layout.ROOT_MARKER.lower() or \
+        low == HEALTH_FILE or name.startswith(".")
+
 
 def stage_launcher(package, launcher_dir):
-    """the launcher's package (a verified zip) unpacked beside launcher_dir, in <name>.new; every member's path
-    inside it (no member may escape). Returns the staged folder."""
-    parent = os.path.dirname(os.path.abspath(launcher_dir))
-    new = os.path.abspath(launcher_dir) + ".new"
-    if os.path.exists(new):
-        shutil.rmtree(new)
-    with zipfile.ZipFile(package) as z:
-        for n in z.namelist():
-            p = os.path.abspath(os.path.join(new, n))
-            if not p.startswith(new + os.sep) and p != new:
-                raise trust.ReleaseError(f"The launcher's package holds a path outside it ({n}).", "bad_download")
-        z.extractall(new)
-    entries = os.listdir(new)
-    if len(entries) == 1 and os.path.isdir(os.path.join(new, entries[0])):   # one top folder: its contents
-        top = os.path.join(new, entries[0])
-        tmp = os.path.join(parent, os.path.basename(new) + ".tmp")
-        os.replace(top, tmp)
-        shutil.rmtree(new)
-        os.replace(tmp, new)
+    """the launcher's package (a verified zip) unpacked into <launcher_dir>/downloads/launcher-new (one top folder in
+    the zip: its contents); every member's path inside it (no member may escape), and no top item that is the
+    install's (builds, data, config, ...: the package would replace them). Returns the staged folder."""
+    new = update_dirs(launcher_dir)["staged"]
+    part = new + ".part"
+    for p in (part, new):
+        if os.path.lexists(p):
+            layout.rmtree(p)
+    os.makedirs(part)
+    try:
+        with zipfile.ZipFile(package) as z:
+            for n in z.namelist():
+                p = os.path.abspath(os.path.join(part, n))
+                if not p.startswith(part + os.sep) and p != part:
+                    raise trust.ReleaseError(f"The launcher's package holds a path outside it ({n}).", "bad_download")
+            z.extractall(part)
+        entries = os.listdir(part)
+        if len(entries) == 1 and os.path.isdir(os.path.join(part, entries[0])):   # one top folder: its contents
+            os.replace(os.path.join(part, entries[0]), new)
+            os.rmdir(part)
+        else:
+            os.replace(part, new)
+        bad = sorted(n for n in os.listdir(new) if _not_package(n))
+        if bad:
+            raise trust.ReleaseError(f"The launcher's package holds the install's own items ({', '.join(bad)}).",
+                                     "bad_download")
+    except BaseException:
+        for p in (part, new):
+            if os.path.lexists(p):
+                layout.rmtree(p)
+        raise
     return new
+
+
+def stage_helper(launcher_dir, app_dir):
+    """the worker the swap runs as, copied from app_dir (the packaged worker: its program, its Python runtime,
+    tools/ and config/ -- not its compiler or libraries) into <launcher_dir>/downloads/launcher-helper; the swap
+    replaces worker/, which it therefore must not run from. Returns the copy's program."""
+    dst = update_dirs(launcher_dir)["helper"]
+    if os.path.lexists(dst):
+        layout.rmtree(dst)
+    os.makedirs(dst)
+    exe = "DotHeroes-Setup.exe" if os.name == "nt" else "DotHeroes-Setup"
+    shutil.copy2(os.path.join(app_dir, exe), dst)
+    for d in ("_internal", "tools", "config"):
+        if os.path.isdir(os.path.join(app_dir, d)):
+            shutil.copytree(os.path.join(app_dir, d), os.path.join(dst, d), symlinks=True)
+    return os.path.join(dst, exe)
 
 
 HEALTH_FILE = ".started-ok"   # the new launcher writes it once it is up: the swap is then kept
 HEALTH_TIMEOUT_S = 60
+DETACHED = 0x00000008 | 0x00000200   # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+BREAKAWAY = 0x01000000               # CREATE_BREAKAWAY_FROM_JOB: the worker's job ends its processes with it
 
 
 def _alive(pid):
@@ -247,44 +312,97 @@ def _alive(pid):
         return False
 
 
+def _start_detached(cmd, cwd):
+    """a process that outlives this one: detached, and (Windows) out of the worker's job when the job allows it"""
+    if os.name != "nt":
+        return subprocess.Popen(cmd, cwd=cwd, start_new_session=True)
+    try:
+        return subprocess.Popen(cmd, cwd=cwd, creationflags=DETACHED | BREAKAWAY)
+    except OSError:   # a job that refuses the breakaway (not the worker's own): started inside it
+        return subprocess.Popen(cmd, cwd=cwd, creationflags=DETACHED)
+
+
+def _replace(src, dst, tries=50):
+    """a rename that waits a moment for a file still held (the old launcher's, just after it exits)"""
+    for i in range(tries):
+        try:
+            os.replace(src, dst)
+            return
+        except OSError:
+            if i == tries - 1:
+                raise
+            time.sleep(0.2)
+
+
+def _move_back(names, frm, to, log):
+    """names moved from frm back into to (an undo: each one tried, whatever the others do)"""
+    for n in reversed(names):
+        try:
+            if os.path.lexists(os.path.join(to, n)):
+                layout.rmtree(os.path.join(to, n)) if os.path.isdir(os.path.join(to, n)) else \
+                    os.remove(os.path.join(to, n))
+            _replace(os.path.join(frm, n), os.path.join(to, n))
+        except OSError as e:
+            log(f"launcher update: {n} could not be put back ({e})")
+
+
 def swap_launcher(launcher_dir, start, wait_pid=None, log=print, health_timeout=HEALTH_TIMEOUT_S):
-    """run by a helper after the launcher has exited: <launcher_dir>.new takes its place (the old kept as
-    <launcher_dir>.old), the new launcher is started with --after-update and has health_timeout seconds to write
-    HEALTH_FILE in its folder; if the swap fails, or the new one does not come up, the old one is put back and
-    started with --update-failed. start: the launcher's executable name inside its folder. Returns "updated" or
-    "restored"."""
+    """run by a helper (stage_helper's copy, never the worker/ it replaces) after the launcher has exited: the
+    package staged in <launcher_dir>/downloads/launcher-new replaces the launcher's package items -- the old ones
+    (LAUNCHER_PACKAGE's, and any the new package also has) moved into downloads/launcher-previous, the new ones into
+    the folder; nothing else in the folder (the install's items above all) is moved, renamed or removed. The new
+    launcher is started with --after-update and has health_timeout seconds to write HEALTH_FILE in its folder: then
+    the previous items are removed. If the swap fails, or the new one does not come up, its items go to
+    downloads/launcher-failed, the previous ones are put back and started with --update-failed. start: the
+    launcher's executable name inside its folder. Returns "updated" or "restored"."""
     d = os.path.abspath(launcher_dir)
-    new, old = d + ".new", d + ".old"
+    dirs = update_dirs(d)
+    new, prev, failed = dirs["staged"], dirs["previous"], dirs["failed"]
+    if os.path.basename(start) != start or _not_package(start):
+        raise ValueError(f"not a launcher's name in its folder: {start}")
     deadline = time.monotonic() + 120
     while wait_pid and _alive(wait_pid) and time.monotonic() < deadline:
         time.sleep(0.2)
-    kw = {"creationflags": 0x00000008 | 0x00000200} if os.name == "nt" else {"start_new_session": True}
+
+    def launch(flag):
+        return _start_detached([os.path.join(d, start), flag], d)
+    if not os.path.isfile(os.path.join(new, start)):
+        log("launcher update: no new launcher is staged; the previous launcher kept")
+        launch("--update-failed")
+        return "restored"
+    incoming = sorted(n for n in os.listdir(new) if not _not_package(n))
+    outgoing = sorted({n for n in list(layout.launcher_package()) + incoming
+                       if not _not_package(n) and os.path.lexists(os.path.join(d, n))})
+    moved_out, moved_in = [], []
     try:
-        if os.path.exists(old):
-            shutil.rmtree(old)
-        for _ in range(50):   # the old launcher's files may stay locked a moment after it exits
-            try:
-                os.replace(d, old)
-                break
-            except OSError:
-                time.sleep(0.2)
-        else:
-            raise OSError("the launcher's folder stayed in use")
-        os.replace(new, d)
+        if os.path.lexists(prev):
+            layout.rmtree(prev)
+        os.makedirs(prev)
+        for n in outgoing:
+            _replace(os.path.join(d, n), os.path.join(prev, n))
+            moved_out.append(n)
+        for n in incoming:
+            _replace(os.path.join(new, n), os.path.join(d, n))
+            moved_in.append(n)
     except OSError as e:
         log(f"launcher update: the swap failed ({e}); the previous launcher kept")
-        if not os.path.exists(d) and os.path.exists(old):
-            os.replace(old, d)
-        subprocess.Popen([os.path.join(d, start), "--update-failed"], cwd=d, **kw)
+        _move_back(moved_in, d, new, log)
+        _move_back(moved_out, prev, d, log)
+        launch("--update-failed")
         return "restored"
     health = os.path.join(d, HEALTH_FILE)
     if os.path.exists(health):
         os.remove(health)
-    p = subprocess.Popen([os.path.join(d, start), "--after-update"], cwd=d, **kw)
+    p = launch("--after-update")
     t0 = time.monotonic()
     while time.monotonic() - t0 < health_timeout:
         if os.path.exists(health):
             log("launcher update: the new launcher is up")
+            for gone in (prev, new):   # the previous items, and the staging folder the new ones left empty
+                try:
+                    layout.rmtree(gone)
+                except OSError as e:
+                    log(f"launcher update: {os.path.basename(gone)} stays ({e}); the next update removes it")
             return "updated"
         if p.poll() is not None and not os.path.exists(health):
             break
@@ -293,15 +411,10 @@ def swap_launcher(launcher_dir, start, wait_pid=None, log=print, health_timeout=
     if p.poll() is None:
         p.kill()
         p.wait()
-    failed = d + ".failed"
-    if os.path.exists(failed):
-        shutil.rmtree(failed)
-    for _ in range(50):
-        try:
-            os.replace(d, failed)
-            break
-        except OSError:
-            time.sleep(0.2)
-    os.replace(old, d)
-    subprocess.Popen([os.path.join(d, start), "--update-failed"], cwd=d, **kw)
+    if os.path.lexists(failed):
+        layout.rmtree(failed)
+    os.makedirs(failed)
+    _move_back(moved_in, d, failed, log)   # the new items kept aside for a report, out of the folder's top
+    _move_back(moved_out, prev, d, log)
+    launch("--update-failed")
     return "restored"

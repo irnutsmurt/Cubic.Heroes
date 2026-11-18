@@ -6,6 +6,10 @@ native game, on your machine: pick the disc, your keys file (or an EBOOT.elf
 you decrypted) and an install folder, Convert, Play. Nothing from the game is
 shipped with this app; it reads your disc and builds from it locally
 (tools/setup_pipeline.py).
+
+Packaged, this program is the launcher's worker (worker/DotHeroes-Setup[.exe]: `--worker`, and the lifting tools
+it runs): started on its own it opens no window -- it says that CubicHeroes is the program to run and exits with
+code 2. The window below is a source checkout's only (`python setup_app.py`), for developers.
 """
 import json
 import os
@@ -14,8 +18,16 @@ import shutil
 import subprocess
 import sys
 import threading
-import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+
+# Tk: loaded only for the window (_load_tk), never by the worker or a tool run through this program
+tk = filedialog = messagebox = ttk = None
+
+
+def _load_tk():
+    global tk, filedialog, messagebox, ttk
+    import tkinter
+    from tkinter import filedialog as fd, messagebox as mb, ttk as t
+    tk, filedialog, messagebox, ttk = tkinter, fd, mb, t
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(ROOT, "tools"))
@@ -683,10 +695,43 @@ def run_script():
     if getattr(sys, "frozen", False) and sys.platform == "win32":
         import multiprocessing.spawn
         multiprocessing.spawn.WINEXE = False
+    # the tool's output in UTF-8, whatever the console's code page: its print of a path in an install whose name
+    # holds any character must not fail (setup_pipeline.run_tool reads it as UTF-8)
+    for s in (sys.stdout, sys.stderr):
+        try:
+            s.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
     script = sys.argv[1]
     sys.argv = sys.argv[1:]
     sys.path.insert(0, os.path.dirname(os.path.abspath(script)))
     runpy.run_path(script, run_name="__main__")
+
+
+NOT_THE_PROGRAM = ("This is the Cubic.Heroes launcher's worker, not a program to start on its own.\n"
+                   "Run CubicHeroes{exe} (in the folder above this one): it installs, updates and plays the game.\n")
+EXIT_NOT_THE_PROGRAM = 2
+
+
+def not_the_program():
+    """the packaged worker started with no command (or one that would open the setup app's old window): a notice,
+    exit code 2. A windowed program has no console of its own: the notice goes to the one it was started from, if any."""
+    text = NOT_THE_PROGRAM.format(exe=".exe" if os.name == "nt" else "")
+    out = sys.stdout
+    if out is None and os.name == "nt":
+        try:
+            import ctypes
+            if ctypes.windll.kernel32.AttachConsole(-1):   # ATTACH_PARENT_PROCESS
+                out = open("CONOUT$", "w", encoding="utf-8", errors="replace")
+        except (OSError, AttributeError):
+            out = None
+    if out is not None:
+        try:
+            out.write(text)
+            out.flush()
+        except (OSError, ValueError):
+            pass
+    sys.exit(EXIT_NOT_THE_PROGRAM)
 
 
 def main():
@@ -702,9 +747,12 @@ def main():
                                 os.path.abspath(sys.argv[3]))
     if len(sys.argv) in (3, 4) and sys.argv[1] == "--update":
         return convert_headless(None, os.path.abspath(sys.argv[2]), full=sys.argv[3:] == ["--full"])
+    if getattr(sys, "frozen", False):   # the launcher's worker, started on its own: no window
+        return not_the_program()
     after = None
     if len(sys.argv) == 4 and sys.argv[1] == "--after-update":  # started by the previous version
         after = {"old": sys.argv[2], "install": sys.argv[3]}
+    _load_tk()
     root = tk.Tk()
     App(root, after_update=after, update_failed=sys.argv[1:] == ["--update-failed"])
     root.mainloop()

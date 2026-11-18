@@ -65,7 +65,8 @@ OUR_TOOLS = ["fix_functions.py", "iso9660.py", "self_decrypt.py", "setup_pipelin
              "shortcuts.py", "self_update.py", "version.py", "gen_spu_native.py", "spu_native_task.cpp.in",
              "worker.py", "game_settings.py", "install_layout.py", "updates.py",
              "release_trust.py", "settings.py", "diagnostics.py",
-             "pipeline_manifest.py", "uninstall.py", "ps3_disc.py"]   # the launcher's worker (M9.0-M9.5)
+             "pipeline_manifest.py", "uninstall.py", "ps3_disc.py",
+             "root_migration.py"]   # the launcher's worker (M9.0-M9.5; root_migration: the portable root)
 
 
 def copy_tracked(rel, dst, skip=()):
@@ -143,7 +144,7 @@ def pyinstaller(platform, dist):
     args[args.index(None)] = paths["icon"]
     hidden = ["setup_pipeline", "zig_build", "iso9660", "self_decrypt", "shortcuts", "self_update", "version",
               "worker", "game_settings", "install_layout", "updates", "release_trust", "settings", "diagnostics",
-              "pipeline_manifest", "uninstall", "ps3_disc", "Crypto.Cipher.AES",
+              "pipeline_manifest", "uninstall", "ps3_disc", "root_migration", "Crypto.Cipher.AES",
               "Crypto.Util.Counter"]
     hidden += tool_imports()
     subprocess.check_call(cmd + args + [
@@ -293,6 +294,13 @@ def bundle(platform):
                 "worker/ holds what the launcher runs to convert and build the game.\n\n"
                 "Nothing from the game is included: the game is rebuilt from your disc on your machine.\n"
                 f"The game needs {needs}\n")
+    # the package's top items are exactly the ones the worker knows as the launcher's (install_layout.
+    # LAUNCHER_PACKAGE): the portable root keeps the install beside them, and the launcher's update and removal
+    # touch only these
+    import install_layout
+    top, want = sorted(os.listdir(out)), sorted(install_layout.launcher_package(platform))
+    if top != want:
+        sys.exit(f"{out}: the package's top items {top} are not install_layout.LAUNCHER_PACKAGE's {want}")
     print("boundary check (the folder)", flush=True)
     import boundary_check
     if boundary_check.check_artifact(out, bundle=True):

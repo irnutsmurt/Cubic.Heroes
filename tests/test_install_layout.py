@@ -330,6 +330,52 @@ class Migration(Base):
             worker.op_install(self.install, "disc.iso", "keys", None, self.cb, validate=checked)
         self.assertEqual(e.exception.code, "needs_migration")
 
+    def test_only_the_setup_apps_known_files(self):
+        """an unknown .dll or .txt beside the game is never taken for the setup app's"""
+        self.legacy()
+        put(os.path.join(self.install, "my notes.txt"), "the player's")
+        put(os.path.join(self.install, "other.dll"), b"someone else's")
+        self.assertEqual(self.lay.legacy_parts(), sorted([EXE, "SDL2.dll", "FFmpeg-NOTICE.txt", "dotheroes.cfg"]))
+
+
+class PortableRoot(Base):
+    """the install's root is the launcher's folder: the launcher's package is never the setup app's game"""
+
+    def package(self):
+        r = self.install
+        for n in layout.LAUNCHER_PACKAGE["windows"] + layout.LAUNCHER_PACKAGE["linux"]:
+            if n in ("licenses", "worker", "lib"):
+                put(os.path.join(r, n, "x.txt"), n)
+            else:
+                put(os.path.join(r, n), n)
+        put(os.path.join(r, "worker", "DotHeroes-Setup.exe"), b"worker")
+        put(os.path.join(r, layout.ROOT_MARKER), "root")
+
+    def test_nothing_of_the_launcher_selected(self):
+        self.package()
+        self.build(Fake(b"game 1"))
+        put(os.path.join(self.install, "my notes.txt"), "the player's")
+        self.assertTrue(layout.holds_launcher(self.install))
+        self.assertEqual(self.lay.legacy_parts(), [])
+        before = sorted(os.listdir(self.install))
+        self.assertEqual(self.lay.remove_legacy_game(), [])
+        self.assertEqual(sorted(os.listdir(self.install)), before)
+
+    def test_a_setup_app_game_beside_the_launcher(self):
+        """the setup app's game in the launcher's folder: its own files go, the launcher's SDL2.dll and lib/ stay"""
+        self.package()
+        put(os.path.join(self.install, EXE), b"old game")
+        put(os.path.join(self.install, "OpenAL32.dll"), b"lib")
+        put(os.path.join(self.install, "FFmpeg-LGPL-2.1.txt"), "licence")
+        put(os.path.join(self.install, "dotheroes.cfg"), "DOTHEROES_FPS=30\n")
+        self.assertEqual(self.lay.legacy_parts(), sorted([EXE, "OpenAL32.dll", "FFmpeg-LGPL-2.1.txt",
+                                                          "dotheroes.cfg"]))
+        self.lay.remove_legacy_game()
+        for kept in layout.LAUNCHER_PACKAGE["windows"] + layout.LAUNCHER_PACKAGE["linux"] + (layout.ROOT_MARKER,
+                                                                                             "dotheroes.cfg"):
+            self.assertTrue(os.path.exists(os.path.join(self.install, kept)), kept)
+        self.assertFalse(os.path.exists(os.path.join(self.install, "OpenAL32.dll")))
+
 
 class Commands(Base):
     def run_worker(self, *args):
