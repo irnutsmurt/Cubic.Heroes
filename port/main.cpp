@@ -1091,6 +1091,27 @@ extern "C" void dotheroes_overlay_start(const char* settings_path, const char* i
 #include "devtools/devtools.h"   /* M11.0: the developer tools (docs/M11_PLAN.md) */
 
 static int64_t limit_period_ns(const std::string& v);
+namespace ppfx { void render_resolution(uint32_t w, uint32_t h); }   /* native/render/ppfx_native.h */
+
+/* M11.2f: the rendering resolution (DOTHEROES_RENDER_RES): native -- the output's own size (the window's drawable, the
+ * display's in fullscreen) -- a preset WxH, or custom (DOTHEROES_RENDER_RES_CUSTOM, WxH): the game's 16:9 frame drawn
+ * at the largest size inside it, then scaled to the output with its aspect kept. Independent of the display mode and
+ * the window's size; the display's own mode is never changed. Taken between two frames (live); the renderer keeps it
+ * within the device's limits and memory. A value it cannot read: native, said in the log. 1: applied. */
+extern "C" int dotheroes_set_render_resolution(const char* v, const char* custom)
+{
+    std::string s = v && *v ? v : "native";
+    if (s == "custom") s = custom && *custom ? custom : "native";
+    unsigned w = 0, h = 0;
+    if (s != "native" && (sscanf(s.c_str(), "%ux%u", &w, &h) != 2 || w < 320 || h < 180 || w > 16384 || h > 16384)) {
+        dh_log(DH_LOG_WARNING, "settings", "rendering resolution '%s' not understood: native", s.c_str());
+        w = h = 0;
+        s = "native";
+    }
+    ppfx::render_resolution(w, h);
+    dh_log(DH_LOG_INFO, "settings", "rendering resolution %s", s.c_str());
+    return 1;
+}
 
 /* M10.2: a frame limit from the in-game menu: applied at once between any two limits but the original 30 (which
  * runs the game's own pacing: changed at the next start). 1 when applied. */
@@ -1187,6 +1208,7 @@ static void apply_pc_settings(void)
      * holds the frames to the limit with a host limiter at the flip (ps3emu/guest_pause.h ps3_frame_limit_wait):
      * a deadline on the high-resolution clock, so the limit holds evenly at any number -- through the game's
      * vblank pacing a frame a little over one tick of the clock waited for two (144 ran at 65 in play). */
+    dotheroes_set_render_resolution(getenv("DOTHEROES_RENDER_RES"), getenv("DOTHEROES_RENDER_RES_CUSTOM"));   /* M11.2f */
     std::string fps = getenv("DOTHEROES_FPS") ? getenv("DOTHEROES_FPS") : "60";
     if (fps == "custom") fps = getenv("DOTHEROES_FPS_CUSTOM") ? getenv("DOTHEROES_FPS_CUSTOM") : "60";
     const int64_t period = getenv("DOTHEROES_BENCH") && *getenv("DOTHEROES_BENCH") == '1' ? 0 : limit_period_ns(fps);
@@ -1376,8 +1398,19 @@ int main(int argc, char** argv)
      * to the crash record. Debug and Trace add the driver's information messages. */
     if (dh_log_level() >= DH_LOG_DEBUG) set_default_env("PS3RECOMP_VK_MESSAGES", "2");
     dh_log_session_start(s_log_path.c_str());
+#ifdef _WIN32
+    {   /* M11.2f: per-monitor DPI aware (the game's process alone; the launcher keeps its own way): on a display scaled
+         * above 100% Windows would otherwise give the window a smaller virtual screen and stretch it, so the native
+         * rendering resolution would not be the display's own pixels. Before the window opens. */
+        typedef BOOL(WINAPI * dpi_ctx_fn)(HANDLE);
+        if (HMODULE u = GetModuleHandleW(L"user32.dll"))
+            if (dpi_ctx_fn f = (dpi_ctx_fn)(void*)GetProcAddress(u, "SetProcessDpiAwarenessContext"))
+                if (!f((HANDLE)(intptr_t)-4))   /* DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 (Windows 10 1703+) */
+                    dh_log(DH_LOG_DEBUG, "display", "per-monitor DPI awareness not set (%lu)", (unsigned long)GetLastError());
+    }
+#endif
     apply_pc_settings();   /* M10.1: before the patches read DOTHEROES_FPS and the window opens */
-    logos_begin();         /* M10.4: after the frame limit is known (it is lifted while the logos pass) */
+    logos_begin();        /* M10.4: after the frame limit is known (it is lifted while the logos pass) */
     {   /* M10.2: the in-game settings menu (port/overlay.cpp) */
         const std::string cfg = s_install_root.empty() ? std::string()
                               : s_install_root + (s_slots ? "/config/dotheroes.cfg" : "/dotheroes.cfg");

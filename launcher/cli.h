@@ -36,6 +36,7 @@ struct Args {
     bool json = false, no_gui = false, persist = false, remember = false, repair = false;
     std::vector<std::string> sets;           // --set KEY=VALUE, in order
     std::string display, fps, vsync;         // --play's display for this session (DOTHEROES_* settings)
+    std::string resolution;                  // M11.2f: --resolution, the rendering resolution (native or WxH)
     int width = 0, height = 0;
     bool window_flags = false;               // --after-update, --show, --nav-test, --page: options of the window
     std::string error;                       // a usage error
@@ -79,6 +80,9 @@ static const char* kUsageText =
     "Display options for --play (this session only unless --persist):\n"
     "  --fullscreen | --windowed | --borderless\n"
     "  --width N --height N   the window's size (windowed)\n"
+    "  --resolution R         the rendering resolution: native (the display's), 1280x720, 1920x1080, 2560x1440,\n"
+    "                         3840x2160 or any WxH -- the size the game's picture is drawn at, apart from the\n"
+    "                         window's size\n"
     "  --fps N                30 (the original pacing), 60, 75, 100, 120, 144, 165, 240, any number, display, or 0\n"
     "                         (uncapped)\n"
     "  --vsync on|off\n"
@@ -163,6 +167,7 @@ static Args parse(const std::vector<std::string>& av)
             }
         }
         else if (o == "--fps") a.fps = value("a frame rate");
+        else if (o == "--resolution") a.resolution = value("a resolution (native or WxH)");
         else if (o == "--vsync") {
             const std::string v = value("on or off");
             if (v == "on" || v == "1" || v == "true") a.vsync = "1";
@@ -174,14 +179,21 @@ static Args parse(const std::vector<std::string>& av)
         else if (o == "--show" || o == "--nav-test" || o == "--page") { value("a value"); a.window_flags = true; }
         else if (a.error.empty()) a.error = "unknown option " + av[i] + " (--help lists them)";
     }
-    const bool display0 = !a.display.empty() || !a.fps.empty() || !a.vsync.empty() || a.width || a.height;
+    const bool display0 = !a.display.empty() || !a.fps.empty() || !a.vsync.empty() || a.width || a.height || !a.resolution.empty();
     if (a.error.empty() && !a.sets.empty() && a.command.empty()) a.command = "set";
     if (a.error.empty() && display0 && a.persist && a.command.empty()) a.command = "persist";   // display options kept
     if (a.error.empty() && a.command == "set" && a.sets.empty()) a.error = "--set needs KEY=VALUE";
-    const bool display = !a.display.empty() || !a.fps.empty() || !a.vsync.empty() || a.width || a.height;
+    const bool display = !a.display.empty() || !a.fps.empty() || !a.vsync.empty() || a.width || a.height || !a.resolution.empty();
     if (a.error.empty() && display && a.command != "play" && !a.persist)
         a.error = "the display options apply to --play (or keep them with --persist)";
     if (a.error.empty() && (a.width != 0) != (a.height != 0)) a.error = "--width and --height go together";
+    if (a.error.empty() && !a.resolution.empty() && a.resolution != "native") {   // M11.2f: WxH, as the settings take it
+        int w = 0, h = 0;
+        char tail = 0;
+        if (sscanf(a.resolution.c_str(), "%dx%d%c", &w, &h, &tail) != 2 || w < 320 || h < 180 || w > 7680 || h > 4320)
+            a.error = "--resolution takes native or a size from 320x180 to 7680x4320 (1920x1080, say)";
+        else a.resolution = std::to_string(w) + "x" + std::to_string(h);
+    }
     if (a.error.empty() && !a.fps.empty()) {
         static const char* named[] = { "display", "0", "uncapped" };
         bool ok = false;
@@ -501,6 +513,13 @@ static std::vector<std::pair<std::string, std::string>> session_settings(const A
     std::vector<std::pair<std::string, std::string>> v;
     if (!a.display.empty()) v.push_back({ "DOTHEROES_DISPLAY_MODE", a.display });
     if (!a.vsync.empty()) v.push_back({ "DOTHEROES_VSYNC", a.vsync });
+    if (!a.resolution.empty()) {   // M11.2f: a preset by its name, any other size as the custom one
+        static const char* presets[] = { "native", "1280x720", "1920x1080", "2560x1440", "3840x2160" };
+        bool is_preset = false;
+        for (const char* p : presets) is_preset = is_preset || a.resolution == p;
+        if (is_preset) v.push_back({ "DOTHEROES_RENDER_RES", a.resolution });
+        else { v.push_back({ "DOTHEROES_RENDER_RES", "custom" }); v.push_back({ "DOTHEROES_RENDER_RES_CUSTOM", a.resolution }); }
+    }
     if (!a.fps.empty()) {
         static const char* listed[] = { "30", "60", "75", "100", "120", "144", "165", "240", "display", "0" };
         bool is_listed = false;

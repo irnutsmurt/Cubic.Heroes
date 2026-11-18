@@ -115,6 +115,8 @@ def _write_locked(install, strict, values):
             f.write("#   config/settings_schema.json); editing by hand is fine\n")
             f.write("# DOTHEROES_FPS: 30 (the original), 60, 75 ... 240, display, custom (DOTHEROES_FPS_CUSTOM) or 0\n")
             f.write("#   (no limit); DOTHEROES_DISPLAY_MODE: windowed, borderless, exclusive\n")
+            f.write("# DOTHEROES_RENDER_RES: native, 1280x720 (the original), 1920x1080, 2560x1440, 3840x2160 or custom\n")
+            f.write("#   (DOTHEROES_RENDER_RES_CUSTOM, WxH): the size the picture is drawn at, apart from the window's\n")
             f.write("# DOTHEROES_NATIVE_CD, DOTHEROES_NATIVE_SOLVER, GCM_WRAP_LAP, DOTHEROES_PRESENT_ONCE: the\n")
             f.write("#   settings that hold 60 fps in fights (0 / empty: the original's way, slower)\n")
             for k, v in sorted(cur.items()):

@@ -1304,3 +1304,72 @@ and resized (Win32), closed as a player closes it, config/window.json read, the 
    report written during it.
 3. **Again: PASS** -- the second close ended the game with status 0; window.json written; the second start's window
    at the same place and size (180, 140, 1100x640); no hang report.
+
+## 34. M11.2f: the rendering resolution (2026-11-18) [M]
+
+The owner's requirement before the beta is finalised: a Rendering Resolution option in the launcher's settings and the
+in-game menu -- native (the default), 1280x720, 1920x1080, 2560x1440, 3840x2160 or custom -- independent of the display
+mode and the window's size, above or below the display's, scaled to the output with its aspect kept; the display's own
+mode never changed; no gameplay timing affected; a CLI `--resolution`; vendor-neutral, Linux- and ray-tracing-ready.
+
+**Design** (port/native/render/ppfx_render.cpp, "M11.2f"; the runtime's backend, patch 0168):
+
+- **What is scaled.** The game draws its frame at its display buffers' size (1280x720). The rendering resolution draws
+  it at a scale of that: every local-memory render target is made at the scale (its size in the guest's pixels kept
+  beside it), except the post-effects' reduced copies of the frame -- the targets smaller than the frame and of its
+  shape (640x360 down to 20x12): their taps sit at the game's texel offsets and their output is blurred, so they stay at
+  the game's size (DOTHEROES_RES_SCALE_CHAIN=1 scales them too, for comparison) -- and tiny ones. Main-memory targets
+  (the CPU reads them: the luminance probe) never scale. The shadow map and the water's reflection targets do (sharper
+  shadows and reflections). The HUD, menus and text are the game's own draws into the frame: they scale with it.
+- **The game's numbers stay in its units.** Its viewport transform and texel offsets are untouched; the renderer
+  scales what is in pixels: the Vulkan viewport, the scissor and clear rectangles (the guest's rectangle, then the
+  target's scale), the depth bias's slope factor (the depth's slope per pixel is 1/scale of the guest's), occlusion
+  counts (divided by the scale squared: the game compares them with its own thresholds), and WPOS (the fragment
+  translator divides the host position by the scale passed in fp_alpha.w -- only programs that read WPOS change text,
+  so every prepared pipeline and shader cache stays valid; none of the 87 fragment programs in the M9.2 recipe set read it).
+- **What goes back to the game is at its size.** A transfer's write-back into guest memory and the snapshot encoder's
+  read of a display buffer blit the scaled rectangle to a scratch image of the guest's size first.
+- **The present.** The presented frame (the backend's frame image) is made at the display buffer's scaled size, so the
+  frame is copied once (as before) and scaled to the window by the present's blit with its aspect kept (letterboxed).
+  The backend re-makes its frame image and readback buffer under the present's lock once the present in flight has
+  completed (rsx_vk_bridge_present_prepare_sized).
+- **Changes take effect between two frames** (rescale_check after each present): every scaled target made again, its
+  picture carried over (a linear blit), depth targets made again empty (the frame clears them); with native the
+  output's size is followed after it has settled for 250 ms (a window being resized). The check costs nothing in a
+  frame where nothing changed.
+- **Limits and memory.** The scale is kept within the device's maxImageDimension2D, framebuffer and viewport limits
+  for the largest scaled target, and the scaled targets within half the device-local heap; a target that cannot be
+  allocated at its scale is made at the game's size and the resolution falls back to it (said in the report and log).
+  Range 0.25x to 8x.
+- **Native** is the output's own size: the display's in fullscreen, the window's drawable in a window (1:1 pixels);
+  offscreen (no window) the game's size. The game is per-monitor DPI aware (port/main.cpp; the launcher keeps its own
+  way) so that on a display scaled above 100% native is the display's real pixels, not Windows' virtual screen.
+- **Settings**: DOTHEROES_RENDER_RES (native, the presets, custom; live) and DOTHEROES_RENDER_RES_CUSTOM (a new
+  schema type, `size`: WxH within 320x180..7680x4320); the launcher's Display settings (custom: a list of common sizes),
+  the in-game menu's Display & Graphics page, `--resolution` (session only unless `--persist`), and the developer
+  tools' `resolution` (the live path, for tests).
+
+**Tested** (offscreen, the development build, build/m11 res_*.drive; the owner's display: 1920x1080 at 100%):
+
+- **Pictures at each preset** (the title, the castle front, the equipment screen, a temple room; SHOT_FULL):
+  1280x720, 1920x1080, 2560x1440, 3840x2160 and a custom 960x540 -- the same composition at each: the HUD, menus
+  and text in the same places and sharper above 720p; the depth of field (the water and trees behind the hero
+  blurred), the hero's shadow, the water's highlights alike at every scale; 960x540 softer, nothing missing.
+- **Changed live** (`dev resolution`, the in-game menu's own path): 720p -> 1440p -> 540p -> 2160p -> 720p -> 1440p
+  on the castle front and into a temple: each change took effect between two frames (9 targets made again, their
+  pictures carried over), the game ran on without a stall or a stop. The in-game menu's row (overlay test input:
+  Display & Graphics, Rendering resolution, right twice): native -> 1280x720 -> 1920x1080, the frame followed.
+- **Frame pacing** (tests/frame_times.py over a 27 s window, the castle front standing and walking, no frame dumps):
+  at the 60 fps limit 1280x720, 1920x1080, 2560x1440 and 3840x2160 all 60.0 fps, p99 18.5-19.4 ms, none over 25 ms;
+  unlimited 180.6 fps at 1280x720 and 178.1 fps at 3840x2160 (p99 7.7 / 7.5 ms) -- the GPU's share is small, the game
+  is bound by its own work. Video memory for the images: 73.5 MB (720p), 122.5 (1080p), 191.4 (1440p), 371.1 (2160p).
+- **Shader cache**: 44 pipelines on the castle front at every resolution (54 with the temple), none made because of a
+  resolution; the 7 unsupported draws are the same at every resolution (from before this change).
+- **The safe fallback**: with a 600 MB device-local heap pretended (DOTHEROES_RES_TEST_HEAP_MB, tests only)
+  7680x4320 asked for live became 3789x2131 ("lowered to fit the video memory"), then 1920x1080 and native (offscreen:
+  the game's size) as asked.
+- **Settings and command line**: tests/test_settings_diagnostics.py (the presets, a custom size normalised to WxH,
+  sizes and words refused); tests/cli_integration.py gains `--resolution` (wrong sizes are exit 2; a session's
+  2560x1440 in effect and not kept) -- run with the release qualification.
+- Not tested here: a display scaled above 100% (the DPI awareness), exclusive fullscreen at native on a 1440p/4K
+  display, and the owner's on-screen look; the launcher's row was compiled, not driven.

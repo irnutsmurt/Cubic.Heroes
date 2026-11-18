@@ -81,10 +81,11 @@ One command at a time; options may follow in any order. `--opt=value` and `--opt
 | `--persist` | keep `--play`'s display options and `--set` values as settings |
 | `--fullscreen`, `--windowed`, `--borderless` | the display mode for `--play` (fullscreen: exclusive, at the display's current mode) |
 | `--width N --height N` | the window's size for `--play` (windowed; together); the window's remembered place and size are left as they were |
+| `--resolution R` | the rendering resolution for `--play`: `native` (the output's own size: the display's in fullscreen, the window's drawable in a window), `1280x720` (the original), `1920x1080`, `2560x1440`, `3840x2160`, or any size from `320x180` to `7680x4320` (kept as the custom one). The size the game's 16:9 picture is drawn at, then scaled to the window or display with its shape kept -- independent of `--width`/`--height` and the display mode; the display's own resolution is never changed. Example: `--play --windowed --width 1280 --height 720 --resolution 3840x2160` (supersampled into a small window) |
 | `--fps N` | the frame limit for `--play`: 30 (the original pacing), 60, any number from 30 to 1000, `display` (the display's refresh), or 0 (uncapped) |
 | `--vsync on\|off` | vertical sync for `--play` |
 
-Session options (`--fullscreen`, `--fps`, `--set` with `--play` ...) apply to that one session: the settings file is
+Session options (`--fullscreen`, `--fps`, `--resolution`, `--set` with `--play` ...) apply to that one session: the settings file is
 not changed unless `--persist` is given (then they are checked and kept first, and a wrong value stops before the
 game starts). Settings changed in the game's own menu during the session are kept, as always.
 

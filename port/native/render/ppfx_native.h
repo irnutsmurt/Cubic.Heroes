@@ -390,6 +390,12 @@ uint32_t surface_beformat(uint32_t color_format);
 // PNG encoders) served from the native image; installed with
 // cellGcm_set_guest_read_hook. 1 when done.
 int guest_read_native(uint32_t loc, uint32_t off, uint32_t pitch, uint32_t w, uint32_t h);
+// M11.2f: the rendering resolution asked for -- w x h (the game's 16:9 frame at the largest size inside it), 0 x 0
+// the output's own size (the window's drawable, the display's in fullscreen); it takes effect between two frames,
+// within the device's limits and memory. _now: the frame's size drawn now, and why it is lower than asked
+// (0 not, 1 the device's image limits, 2 its memory).
+void render_resolution(uint32_t w, uint32_t h);
+void render_resolution_now(uint32_t* w, uint32_t* h, int* why);
 extern std::atomic<uint64_t> s_guest_reads, s_guest_read_fail;
 // R4's stream marker (ppfx_bridge.cpp, the producer's thread): written into
 // the command buffer of the context at ctx_ea where a bypassed record's

@@ -162,7 +162,7 @@ or a mask (0x0009: SELECT and START together).
 Exit status 0 when every step completed, 1 on a failure not recovered (the
 step and the reason are in drive.log and failures.jsonl).
 """
-import json, os, re, sys, time
+import io, json, os, re, sys, time
 from PIL import Image, ImageChops, ImageFile, ImageStat
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
@@ -212,11 +212,16 @@ def alive():
 
 def frame():
     p = os.path.join(run, "frame.ppm")
-    for _ in range(20):
+    for _ in range(40):
         try:
             data = open(p, "rb").read()
-            if len(data) >= 1280 * 720 * 3:
-                im = Image.open(p); im.load(); return im.convert("RGB")
+            # the whole frame the header names (M11.2f: any rendering resolution; a dump still being written waits)
+            head = data[:64].split(None, 4)
+            if len(head) >= 4 and head[0] == b"P6":
+                w, h = int(head[1]), int(head[2])
+                if len(data) < w * h * 3 + len(b"P6\n%d %d\n255\n" % (w, h)):
+                    raise ValueError("a dump still being written")
+                im = Image.open(io.BytesIO(data)); im.load(); return im.convert("RGB")
         except Exception:
             pass
         time.sleep(0.05)
@@ -711,6 +716,34 @@ def fight(cls, tmo, reach, radius=25.0, soft=False):
         t[0] = t[0] + 1 if tgt[3] >= t[1] else 0   # its life fell: count again from here
         t[1] = tgt[3]
         wait(0.35)
+
+
+def guard_face(secs):
+    """Guard (R1) for `secs` s facing the nearest character with life: every
+    0.5 s its position re-read, the hero turned to it (one pad report of its
+    direction) and R1 held 0.45 s -- a teleporting caster is faced again. The
+    hero's life at the start and the end, and every fall, are logged."""
+    t0, falls, life0, life = time.time(), 0, None, None
+    while time.time() - t0 < secs:
+        if actors() is None:
+            raise Fail("guardface: no actors.txt (DOTHEROES_DEV_STATE=1?)")
+        s = state() or {}
+        if "life" in s:
+            if life is not None and s["life"] < life:
+                falls += 1
+                say(f"  guardface: life {life:g} -> {s['life']:g} at {time.time() - t0:.1f} s")
+            life = s["life"]
+            life0 = life if life0 is None else life0
+        left = [x for x in last_actor_list if x[3] > 0]
+        if left and "hx" in s:
+            tgt = min(left, key=lambda x: (x[1] - s["hx"]) ** 2 + (x[2] - s["hz"]) ** 2)
+            dx, dz = tgt[1] - s["hx"], tgt[2] - s["hz"]
+            face = (BTN["RIGHT"] if dx > 0 else BTN["LEFT"]) if abs(dx) >= abs(dz) else (BTN["UP"] if dz > 0 else BTN["DOWN"])
+            press(face, 1)
+            wait(0.05)
+        press(BTN["R1"], 1, 450)
+        wait(0.45)
+    say(f"  guardface: {secs:g} s, life {life0} -> {life}, {falls} falls")
 
 
 AIM_LINE = 2.0   # aim mode: as near its column or row as this, the body is in the sword's line (it is broad)
@@ -1528,6 +1561,8 @@ def step(lineno, line, op, a):
         if s0 and s1 and "hx" in s0:
             say(f"  moved {s1['hx'] - s0['hx']:+.2f} {s1['hz'] - s0['hz']:+.2f} to ({s1['hx']:.2f}, {s1['hz']:.2f})"
                 f" area {s1['area']:g}")
+    elif op == "guardface":   # guardface <secs>: guard (R1) turned to the nearest character with life, re-aimed every 0.5 s
+        guard_face(float(a[0]))
     elif op == "fight":
         soft = "soft" in a
         a = [x for x in a if x != "soft"]

@@ -57,6 +57,15 @@ def check(spec, value):
         if not spec.get("min", n) <= n <= spec.get("max", n):
             return False, f"not between {spec.get('min')} and {spec.get('max')}"
         return True, str(n)
+    if t == "size":   # WxH, each within the schema's min and max (M11.2f)
+        try:
+            w, h = (int(x) for x in v.lower().replace(" ", "").split("x"))
+        except ValueError:
+            return False, "not a size like 1920x1080"
+        (lw, lh), (hw, hh) = ((int(x) for x in spec.get(k, d).split("x")) for k, d in (("min", "1x1"), ("max", "65535x65535")))
+        if not (lw <= w <= hw and lh <= h <= hh):
+            return False, f"not between {spec.get('min')} and {spec.get('max')}"
+        return True, f"{w}x{h}"
     if t == "list":
         items = [x.strip() for x in v.split(",") if x.strip()] if v else []
         bad = [x for x in items if x not in spec["values"]]

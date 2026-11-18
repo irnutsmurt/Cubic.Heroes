@@ -127,6 +127,14 @@ def no_game_cases(pkg_src, install_src, work):
 
     code, out, err = cli(exe, "--version")
     bad = [] if code == 0 and out.startswith("CubicHeroes ") and "worker" in out else [f"--version: {code} {out!r}{err!r}"]
+    # M11.2f: --resolution -- a size outside 320x180..7680x4320 or not a size is a wrong command line (2)
+    for r in ("99x99", "1920", "8000x5000", "1920x1080x2"):
+        code, out, err = cli(exe, "--play", "--resolution", r, cwd=other)
+        if code != 2 or "--resolution takes" not in out + err:
+            bad.append(f"--resolution {r}: {code} {out!r}{err!r}")
+    code, out, err = cli(exe, "--resolution", "1920x1080", cwd=other)
+    if code != 2 or "apply to --play" not in out + err:
+        bad.append(f"--resolution without --play: {code} {out!r}{err!r}")
     if os.path.exists(os.path.join(a, "logs")):
         bad.append("--version wrote into the folder (logs/)")
     code, out, err = cli(exe, "--help")
@@ -261,6 +269,7 @@ def game_cases(exe, a):
         env.pop(k, None)
     log = os.path.join(a, "logs", "game.log")
     cfg0 = cfg_value(a, "DOTHEROES_FPS")
+    res0 = cfg_value(a, "DOTHEROES_RENDER_RES")
     wj = os.path.join(a, "config", "window.json")
     wj0 = open(wj, "rb").read() if os.path.exists(wj) else None
 
@@ -282,7 +291,7 @@ def game_cases(exe, a):
                 f.write("exit wait wait wait wait right wait wait a\n")
         return p, ev
 
-    p, ev = play("--fps", "120", "--width", "1024", "--height", "600", "--windowed")
+    p, ev = play("--fps", "120", "--width", "1024", "--height", "600", "--windowed", "--resolution", "2560x1440")
     try:
         rest, err = p.communicate(timeout=120)
         code = p.returncode
@@ -298,6 +307,10 @@ def game_cases(exe, a):
         bad.append(f"exit {code}")
     if "frame limit 120.00 fps" not in text:
         bad.append("the session's frame limit (120) not in effect")
+    if "rendering resolution 2560x1440" not in text:
+        bad.append("the session's rendering resolution (2560x1440) not in effect")
+    if cfg_value(a, "DOTHEROES_RENDER_RES") != res0:
+        bad.append(f"the session's rendering resolution was kept ({cfg_value(a, 'DOTHEROES_RENDER_RES')})")
     if "[exit] the game's end (status 0)" not in text:
         bad.append("the game did not end itself")
     if '"ev":"ended","exit":0' not in rest.decode("utf-8", "replace"):

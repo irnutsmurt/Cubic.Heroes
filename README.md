@@ -103,6 +103,8 @@ content changed.
 - **High frame rates** with the game's timing corrected where it counted frames (bosses, enemies): frame limits from
   30 (the original) to 240 fps, your display's rate, a custom value or unlimited; **VSync** on or off, independently.
 - **Windowed, borderless or exclusive fullscreen**, the window's size and place remembered.
+- **Rendering resolution** apart from the window: native (your display's), 720p (the original), 1080p, 1440p, 4K or
+  custom -- above your display's for supersampling or below it for speed, the picture's shape always kept.
 - **Keyboard and controller customization**: your own buttons and keys, with the prompts of your controller
   (Xbox, PlayStation, Nintendo).
 - **An in-game settings menu** over the paused game: display, audio, controls and performance, changed while you play.
@@ -230,6 +232,7 @@ Settings are shared by the launcher and the in-game menu:
 | Setting | Values |
 |---|---|
 | Display mode | windowed (resizable; its size and place remembered), borderless, exclusive fullscreen (your display's own mode) |
+| Rendering resolution | native (default: your display's in fullscreen, the window's in a window), 1280x720 (the original), 1920x1080, 2560x1440, 3840x2160, custom -- changed while you play; independent of the display mode and the window's size; your display's own resolution is never changed |
 | VSync | on / off, independent of the frame limit |
 | Frame limit | 30 (the original), 60 (default), 75, 100, 120, 144, 165, 240, your display's rate, custom, unlimited |
 | Volumes | master, music and effects, 0-100, and mute -- applied at once |
@@ -250,6 +253,7 @@ Settings > Updates). Every update is checked against the project's release signa
 ```bash
 CubicHeroes --play                                   # the game directly, no launcher window; exits with the game
 CubicHeroes --play --fps 144 --borderless            # this session only (add --persist to keep it)
+CubicHeroes --play --resolution 2560x1440            # the rendering resolution, apart from the window's size
 CubicHeroes --status --json                          # installed? which build? shaders prepared? (machine-readable)
 CubicHeroes --install --disc "D:\Dumps\BLUS30490.iso" --keys "D:\Keys\keys.txt"   # headless install
 CubicHeroes --update                                 # bring the game up to date (rebuilds only what changed)

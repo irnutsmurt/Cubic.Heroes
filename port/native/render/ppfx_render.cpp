@@ -62,6 +62,7 @@
 #include "shader_discovery.h"   // M9.2a: the inventory checks recorded recipes (recipe_views)
 
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <deque>
 #include <filesystem>
@@ -307,6 +308,8 @@ bool make_buffer(Buf& o, VkDeviceSize n, VkBufferUsageFlags usage, bool readback
 struct Img {
     VkImage img = VK_NULL_HANDLE; VkDeviceMemory mem = VK_NULL_HANDLE; VkImageView view = VK_NULL_HANDLE;
     VkFormat fmt = VK_FORMAT_UNDEFINED; uint32_t w = 0, h = 0, levels = 1, bpp = 0;
+    uint32_t gw = 0, gh = 0; float sc = 1.0f;          // M11.2f: a target's size in the guest's pixels, and the scale it
+                                                       // is drawn at (the rendering resolution: w = gw * sc)
     uint32_t layers = 1;                               // M11.1: 6 for a cube map (a cube-compatible image, a cube view)
     VkFramebuffer fb = VK_NULL_HANDLE;
     std::unordered_map<uint64_t, VkImageView> views;   // (remap, format byte) -> a view with that crossbar
@@ -361,7 +364,7 @@ Img* make_image(VkFormat fmt, uint32_t w, uint32_t h, uint32_t levels, uint32_t 
         F.vkDestroyImage(D.device, o->img, nullptr); delete o; return nullptr;
     }
     F.vkBindImageMemory(D.device, o->img, o->mem, 0);
-    o->fmt = fmt; o->w = w; o->h = h; o->levels = levels; o->bpp = bpp; o->layers = layers;
+    o->fmt = fmt; o->w = w; o->h = h; o->levels = levels; o->bpp = bpp; o->layers = layers; o->gw = w; o->gh = h;
     o->view = make_view(o->img, fmt, levels, { VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
                                                VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY }, layers);
     o->bytes = rq.size;
@@ -393,7 +396,7 @@ Img* make_depth_image(VkFormat fmt, uint32_t w, uint32_t h)
         F.vkDestroyImage(D.device, o->img, nullptr); delete o; return nullptr;
     }
     F.vkBindImageMemory(D.device, o->img, o->mem, 0);
-    o->fmt = fmt; o->w = w; o->h = h; o->levels = 1; o->bpp = 4;
+    o->fmt = fmt; o->w = w; o->h = h; o->levels = 1; o->bpp = 4; o->gw = w; o->gh = h;
     o->aspect = VK_IMAGE_ASPECT_DEPTH_BIT | (has_stencil(fmt) ? VK_IMAGE_ASPECT_STENCIL_BIT : 0);
     // the attachment's view: both aspects; a sampled view: depth alone (made on use)
     VkImageViewCreateInfo vi = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
@@ -563,6 +566,7 @@ struct Batch {
     VkQueryPool occ = VK_NULL_HANDLE;
     uint32_t nocc = 0;
     std::vector<uint64_t> occ_gid;
+    std::vector<float> occ_area;                 // M11.2f: each query's target scale squared (its counts / it)
     uint64_t seq = 0;
 };
 const int kBatches = 4;
@@ -609,9 +613,16 @@ void retire(Batch& b)
         std::vector<uint64_t> v(b.nocc);
         if (F.vkGetQueryPoolResults(D.device, b.occ, 0, b.nocc, v.size() * 8, v.data(), 8,
                                     VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT) == VK_SUCCESS)
-            for (uint32_t i = 0; i < b.nocc; i++) s_occ_val[b.occ_gid[i] & 0xFFFFu] = v[i];
+            for (uint32_t i = 0; i < b.nocc; i++) {
+                // M11.2f: a scaled target's samples counted as the guest's pixels (any at all: at least one)
+                const float a = i < b.occ_area.size() ? b.occ_area[i] : 1.0f;
+                uint64_t c = v[i];
+                if (a != 1.0f && c) { c = (uint64_t)((double)c / a + 0.5); if (!c) c = 1; }
+                s_occ_val[b.occ_gid[i] & 0xFFFFu] = c;
+            }
         b.nocc = 0;
         b.occ_gid.clear();
+        b.occ_area.clear();
     }
     if (b.qp && b.nq >= 2) {
         std::vector<uint64_t> ts(b.nq);
@@ -660,7 +671,7 @@ Batch& batch(uint32_t frame)
     F.vkBeginCommandBuffer(b.cb, &bi);
     F.vkCmdResetQueryPool(b.cb, b.qp, 0, kQueries);
     if (b.occ) F.vkCmdResetQueryPool(b.cb, b.occ, 0, kOcc);
-    b.nocc = 0; b.occ_gid.clear(); b.seq = ++s_batch_seq;
+    b.nocc = 0; b.occ_gid.clear(); b.occ_area.clear(); b.seq = ++s_batch_seq;
     b.nq = 0; b.sect.clear();
     F.vkCmdWriteTimestamp(b.cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, b.qp, b.nq++);
     b.used = 0; b.open = true; b.frame = frame; b.records = 0; b.sets = 0;
@@ -1076,14 +1087,66 @@ std::vector<Img*> s_retired;                      // destroyed once the batches 
 
 uint64_t akey(uint32_t loc, uint32_t off) { return (uint64_t)loc << 32 | off; }
 
+// ---- M11.2f: the rendering resolution ------------------------------------------------------------
+// The game draws its frame at its display buffers' size (1280x720); the player's rendering resolution draws it at a
+// scale of that. A local-memory target is made at the scale (w = gw * sc) unless it is one of the post-effects' reduced
+// copies of the frame (smaller than the frame and its shape: their taps sit at the game's texel offsets, their output
+// is blurred -- kept at the game's size) or tiny; a main-memory target (the CPU reads it) never is. The game's own
+// numbers (its viewport transform, texel offsets, scissors) stay in its pixels: the viewport, scissor and clear
+// rectangles, the depth bias's slope, occlusion counts and WPOS are scaled here, and whatever goes back into guest
+// memory (transfers, the snapshot's reads) is made at the game's size. A change takes effect between two frames
+// (rescale_targets): every scaled target made again, its picture carried over.
+float s_scale = 1.0f;                                   // the scale targets are made at now
+uint32_t s_frame_gw = 1280, s_frame_gh = 720;           // the game's frame (its flips' size)
+int s_chain_scaled = -1;                                // DOTHEROES_RES_SCALE_CHAIN=1: the reduced copies scaled too
+std::atomic<uint64_t> s_res_req{ (uint64_t)1280 << 32 | 720 };   // the resolution asked for: w << 32 | h, 0 = the output's
+std::atomic<uint32_t> s_res_now{ 0x3F800000u };         // the scale in use (a float's bits), for the menus' report
+std::atomic<uint32_t> s_res_why{ 0 };                   // 1: lowered to the device's image limits, 2: to its memory
+float s_res_pending = 0.0f; uint64_t s_res_since = 0;  // the output's size settling (a window being resized)
+
+uint32_t sdim(uint32_t g, float s) { const long v = lroundf((float)g * s); return v < 1 ? 1u : (uint32_t)v; }
+uint32_t spos(uint32_t g, float s) { return s == 1.0f ? g : (uint32_t)lroundf((float)g * s); }
+
+bool scalable(uint32_t loc, uint32_t w, uint32_t h)
+{
+    if (loc != 0 || w < 16 || h < 16) return false;
+    if (s_chain_scaled < 0) { const char* e = getenv("DOTHEROES_RES_SCALE_CHAIN"); s_chain_scaled = e && *e == '1'; }
+    if (!s_chain_scaled && w < s_frame_gw && h < s_frame_gh) {
+        const float a = (float)w / (float)h, fa = (float)s_frame_gw / (float)s_frame_gh;
+        if (fabsf(a - fa) <= 0.08f * fa) return false;
+    }
+    return true;
+}
+float target_scale(uint32_t loc, uint32_t w, uint32_t h) { return s_scale != 1.0f && scalable(loc, w, h) ? s_scale : 1.0f; }
+
+// A rectangle in the guest's pixels, in an image's own (scaled; clipped to nw x nh)
+void scale_rect(float s, const uint32_t in[4], uint32_t nw, uint32_t nh, uint32_t out[4])
+{
+    uint32_t x0 = spos(in[0], s), y0 = spos(in[1], s), x1 = spos(in[0] + in[2], s), y1 = spos(in[1] + in[3], s);
+    if (x1 > nw) x1 = nw;
+    if (y1 > nh) y1 = nh;
+    if (x0 > x1) x0 = x1;
+    if (y0 > y1) y0 = y1;
+    out[0] = x0; out[1] = y0; out[2] = x1 - x0; out[3] = y1 - y0;
+}
+
 Img* target_image(uint32_t loc, uint32_t off, VkFormat fmt, uint32_t bpp, uint32_t w, uint32_t h)
 {
     Img*& t = s_targets[akey(loc, off)];
-    if (t && t->fmt == fmt && t->w >= w && t->h >= h) return t;
+    if (t && t->fmt == fmt && t->gw >= w && t->gh >= h) return t;
     // new, or other than this record needs: a new image (resource reuse); the
     // old one goes once nothing in flight can use it
     if (t) { s_retired.push_back(t); stats().n_retired++; }
-    t = make_image(fmt, w, h, 1, bpp, true);
+    float sc = target_scale(loc, w, h);
+    t = make_image(fmt, sdim(w, sc), sdim(h, sc), 1, bpp, true);
+    if (!t && sc != 1.0f) {   // M11.2f: no memory for it at the scale: at the game's size, and the scale given up
+        sc = 1.0f;
+        t = make_image(fmt, w, h, 1, bpp, true);
+        s_res_why = 2;
+        s_res_req = (uint64_t)s_frame_gw << 32 | s_frame_gh;
+        report_add("render: the rendering resolution: a target could not be made at its scale -- back to the game's size");
+    }
+    if (t) { t->gw = w; t->gh = h; t->sc = sc; }
     return t;
 }
 
@@ -3689,7 +3752,7 @@ void write_set(VkDescriptorSet set, const VkDescriptorBufferInfo bi[2], const Vk
 }
 
 void asp_clears(Batch& b, const Rec* r);
-void occ_begin(Batch& b, const Rec* r);   // R6: a counted draw's occlusion query
+void occ_begin(Batch& b, const Rec* r, float scale = 1.0f);   // R6: a counted draw's occlusion query (M11.2f: its target's scale)
 void occ_end(Batch& b);
 void asp_describe_line(const Rec* r);
 static bool skip_fp(uint64_t hash);
@@ -3773,7 +3836,7 @@ void draw(const Rec* r)
         alpha[0] = 0.0f;
         alpha[1] = (float)(sf.height & 0xFFFu);
         alpha[2] = 0.0f;
-        alpha[3] = 0.0f;
+        alpha[3] = t->sc;   // M11.2f: WPOS's scale (the host position / sc = the guest's)
     }
     // textures
     VkDescriptorImageInfo ii[16], si[16];
@@ -3870,10 +3933,14 @@ void draw(const Rec* r)
     F.vkCmdBeginRenderPass(b.cb, &rbi, VK_SUBPASS_CONTENTS_INLINE);
     F.vkCmdBindPipeline(b.cb, VK_PIPELINE_BIND_POINT_GRAPHICS, P->p);
     if (P->dyn) gpl_dyn(b.cb, *P->ds);   // M9.2g: a linked pipeline's depth, stencil, cull and winding
-    VkViewport v = { 0.0f, 0.0f, Wf, Hf, 0.0f, 1.0f };
+    VkViewport v = { 0.0f, 0.0f, Wf * t->sc, Hf * t->sc, 0.0f, 1.0f };   // M11.2f: the guest's viewport at the target's scale
     F.vkCmdSetViewport(b.cb, 0, 1, &v);
     uint32_t sc[4];
-    scissor_rect(st.scissor, t->w, t->h, sc);
+    {
+        uint32_t g[4];
+        scissor_rect(st.scissor, t->gw, t->gh, g);
+        scale_rect(t->sc, g, t->w, t->h, sc);
+    }
     VkRect2D s = { { (int32_t)sc[0], (int32_t)sc[1] }, { sc[2], sc[3] } };
     F.vkCmdSetScissor(b.cb, 0, 1, &s);
     F.vkCmdSetStencilReference(b.cb, VK_STENCIL_FACE_FRONT_AND_BACK, 0);   // stencil off (checked above)
@@ -3883,7 +3950,7 @@ void draw(const Rec* r)
     F.vkCmdBindDescriptorSets(b.cb, VK_PIPELINE_BIND_POINT_GRAPHICS, s_pl, 0, 1, &set, 0, nullptr);
     F.vkCmdBindVertexBuffers(b.cb, 0, 1, &b.up.b, &o_v);
     F.vkCmdBindIndexBuffer(b.cb, b.up.b, o_i, VK_INDEX_TYPE_UINT32);
-    occ_begin(b, r);
+    occ_begin(b, r, t->sc);
     F.vkCmdDrawIndexed(b.cb, n_draw, 1, 0, 0, 0);
     occ_end(b);
     F.vkCmdEndRenderPass(b.cb);
@@ -4055,11 +4122,16 @@ bool nvidia_d24_bias_half()
     return half == 1;
 }
 
-Img* depth_image(uint32_t loc, uint32_t off, VkFormat fmt, uint32_t w, uint32_t h)
+// sc < 0: the policy's scale (target_scale); else the colour target's, which the depth must match
+Img* depth_image(uint32_t loc, uint32_t off, VkFormat fmt, uint32_t w, uint32_t h, float sc = -1.0f)
 {
     Img*& o = s_depths[akey(loc, off)];
-    if (o && (o->fmt != fmt || o->w < w || o->h < h)) { s_retired.push_back(o); stats().n_retired++; o = nullptr; }
-    if (!o) o = make_depth_image(fmt, w, h);
+    if (sc < 0.0f) sc = target_scale(loc, w, h);
+    if (o && (o->fmt != fmt || o->gw < w || o->gh < h || o->sc != sc)) { s_retired.push_back(o); stats().n_retired++; o = nullptr; }
+    if (!o) {
+        o = make_depth_image(fmt, sdim(w, sc), sdim(h, sc));
+        if (o) { o->gw = w; o->gh = h; o->sc = sc; }
+    }
     return o;
 }
 
@@ -4620,7 +4692,7 @@ void target_watch_note(Img* t, uint32_t loc, uint32_t off, uint32_t pitch)
 {
     if (!target_watch() || !vm_write_watch || loc != 0) return;   // local memory only (main-memory targets are written back)
     const uint32_t ea = cellGcmResolveLocated(1, off);
-    const uint32_t len = (pitch ? pitch : t->w * t->bpp) * t->h;
+    const uint32_t len = (pitch ? pitch : t->gw * t->bpp) * t->gh;   // the guest's rows (M11.2f: not the scaled image's)
     if (ea < 0x10000u || (uint64_t)ea + len > 0xE0000000ull) return;
     t->guest_ea = ea; t->guest_len = len;
     t->ww_epoch = s_ww_epoch + 1;   // a write stamped by the next poll may precede the draw: not counted
@@ -4723,7 +4795,7 @@ void asp_draw(const Rec* r)
     Img* d = nullptr; VkFormat df = VK_FORMAT_UNDEFINED;
     if (sf.depth_format && (ra.depth_test || ra.stencil_test)) {
         df = depth_vkformat(sf.depth_format);
-        d = depth_image(sf.depth_location ? 1u : 0u, sf.depth_offset, df, W, H);
+        d = depth_image(sf.depth_location ? 1u : 0u, sf.depth_offset, df, W, H, t ? t->sc : -1.0f);
         if (!d) { unsupported(r, "asp: depth image"); return; }
     }
     if (!t && !d) { unsupported(r, "asp: neither a colour nor a depth target"); return; }
@@ -4970,7 +5042,7 @@ void asp_draw(const Rec* r)
         float* alpha = (float*)(pcb.data() + nslots * 16);
         alpha[0] = ra.alpha_test ? ra.alpha_ref / 255.0f : 0.0f;
         alpha[1] = (float)(sf.height & 0xFFFu);
-        alpha[2] = 0.0f; alpha[3] = 0.0f;
+        alpha[2] = 0.0f; alpha[3] = t ? t->sc : d->sc;   // M11.2f: WPOS's scale
     }
     // textures: a native image of the address (a target asp or PPFX drew, a
     // depth surface), else guest memory
@@ -5054,10 +5126,17 @@ void asp_draw(const Rec* r)
     }
     F.vkCmdBindPipeline(b.cb, VK_PIPELINE_BIND_POINT_GRAPHICS, P->p);
     if (P->dyn) gpl_dyn(b.cb, *P->ds);   // M9.2g: a linked pipeline's depth, stencil, cull and winding
-    VkViewport v = { 0.0f, 0.0f, Wf, Hf, 0.0f, 1.0f };
+    const float tsc = t ? t->sc : d->sc;   // M11.2f: the targets' scale (a depth made to match its colour's)
+    VkViewport v = { 0.0f, 0.0f, Wf * tsc, Hf * tsc, 0.0f, 1.0f };
     F.vkCmdSetViewport(b.cb, 0, 1, &v);
     uint32_t sc[4];
-    scissor_rect(st.scissor, fw, fh, sc);
+    {
+        const uint32_t gfw = t && d ? (t->gw < d->gw ? t->gw : d->gw) : t ? t->gw : d->gw;
+        const uint32_t gfh = t && d ? (t->gh < d->gh ? t->gh : d->gh) : t ? t->gh : d->gh;
+        uint32_t g[4];
+        scissor_rect(st.scissor, gfw, gfh, g);
+        scale_rect(tsc, g, fw, fh, sc);
+    }
     VkRect2D s2 = { { (int32_t)sc[0], (int32_t)sc[1] }, { sc[2], sc[3] } };
     F.vkCmdSetScissor(b.cb, 0, 1, &s2);
     F.vkCmdSetStencilReference(b.cb, VK_STENCIL_FACE_FRONT_AND_BACK, ra.stencil_ref);
@@ -5068,14 +5147,15 @@ void asp_draw(const Rec* r)
     // until it was (2026-11-09). DOTHEROES_PPFX_BIAS_NV=0: not halved.
     float units = ra.poly_offset_units * (sf.depth_format == 1 ? 256.0f : 1.0f);
     if (df == VK_FORMAT_D24_UNORM_S8_UINT && nvidia_d24_bias_half()) units *= 0.5f;
-    if (ra.poly_offset_fill) F.vkCmdSetDepthBias(b.cb, units, 0.0f, ra.poly_offset_factor);
+    // M11.2f: the slope factor times the scale -- the depth's slope per pixel is 1/sc of the guest's
+    if (ra.poly_offset_fill) F.vkCmdSetDepthBias(b.cb, units, 0.0f, ra.poly_offset_factor * tsc);
     else F.vkCmdSetDepthBias(b.cb, 0.0f, 0.0f, 0.0f);
     const float bc[4] = { 0, 0, 0, 0 };   // the blend colour: not described yet (asp's constant-colour blends)
     F.vkCmdSetBlendConstants(b.cb, bc);
     F.vkCmdBindDescriptorSets(b.cb, VK_PIPELINE_BIND_POINT_GRAPHICS, s_pl, 0, 1, &set, 0, nullptr);
     F.vkCmdBindVertexBuffers(b.cb, 0, 1, &vbuf, &o_v);
     F.vkCmdBindIndexBuffer(b.cb, ibuf, o_i, VK_INDEX_TYPE_UINT32);
-    occ_begin(b, r);
+    occ_begin(b, r, tsc);
     F.vkCmdDrawIndexed(b.cb, n_draw, 1, 0, 0, 0);
     occ_end(b);
     if (!pass_merge()) F.vkCmdEndRenderPass(b.cb);   // else left open for the next draw
@@ -5104,12 +5184,13 @@ void clear(const Rec* r)
     VkClearColorValue cv;
     cv.float32[0] = (float)(c >> 16 & 0xFF) / 255.0f; cv.float32[1] = (float)(c >> 8 & 0xFF) / 255.0f;
     cv.float32[2] = (float)(c & 0xFF) / 255.0f; cv.float32[3] = (float)(c >> 24 & 0xFF) / 255.0f;
-    // the engine's eng_clear_rect
-    const uint32_t cw = sf.width < t->w ? sf.width : t->w, ch = sf.height < t->h ? sf.height : t->h;
-    uint32_t rc[4];
-    scissor_rect(r->st.scissor, cw, ch, rc);
-    if (!rc[2] || !rc[3]) return;
-    if (rc[0] == 0 && rc[1] == 0 && rc[2] >= cw && rc[3] >= ch) {
+    // the engine's eng_clear_rect, in the guest's pixels (M11.2f: then the target's)
+    const uint32_t cw = sf.width < t->gw ? sf.width : t->gw, ch = sf.height < t->gh ? sf.height : t->gh;
+    uint32_t gr[4], rc[4];
+    scissor_rect(r->st.scissor, cw, ch, gr);
+    if (!gr[2] || !gr[3]) return;
+    scale_rect(t->sc, gr, t->w, t->h, rc);
+    if (gr[0] == 0 && gr[1] == 0 && gr[2] >= cw && gr[3] >= ch) {
         access(b.cb, t, kCopyDst);
         VkImageSubresourceRange rg = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
         F.vkCmdClearColorImage(b.cb, t->img, layout_of(t), &cv, 1, &rg);
@@ -5128,6 +5209,32 @@ void clear(const Rec* r)
     mark(b, kSectDraw);
     t->written = 1;
     stats().n_clears++;
+}
+
+// M11.2f: a rectangle of an image in the guest's pixels, where a copy into a buffer can take it at the guest's size:
+// the image itself (not scaled), or a scratch image of that size the rectangle is blitted into (linear). x, y set to
+// the rectangle's place in what is returned. Recorded in b.
+std::map<std::tuple<VkFormat, uint32_t, uint32_t>, Img*> s_down;
+Img* guest_sized(Batch& b, Img* o, uint32_t& x, uint32_t& y, uint32_t w, uint32_t h)
+{
+    if (o->sc == 1.0f) return o;
+    Img*& tmp = s_down[std::make_tuple(o->fmt, w, h)];
+    if (!tmp) tmp = make_image(o->fmt, w, h, 1, o->bpp, false);
+    if (!tmp) return nullptr;
+    access(b.cb, o, kCopySrc);
+    access(b.cb, tmp, kCopyDst);
+    const uint32_t in[4] = { x, y, w, h };
+    uint32_t n[4];
+    scale_rect(o->sc, in, o->w, o->h, n);
+    VkImageBlit bl = {};
+    bl.srcSubresource = bl.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+    bl.srcOffsets[0] = { (int32_t)n[0], (int32_t)n[1], 0 };
+    bl.srcOffsets[1] = { (int32_t)(n[0] + n[2]), (int32_t)(n[1] + n[3]), 1 };
+    bl.dstOffsets[1] = { (int32_t)w, (int32_t)h, 1 };
+    F.vkCmdBlitImage(b.cb, o->img, layout_of(o), tmp->img, layout_of(tmp), 1, &bl, VK_FILTER_LINEAR);
+    mark(b, kSectCopy);
+    x = y = 0;
+    return tmp;
 }
 
 // ---- the thread ------------------------------------------------------------------------------
@@ -5278,12 +5385,13 @@ int occ_on()
     if (s_occ_on < 0) { const char* e = getenv("DOTHEROES_R6_OCCLUSION"); s_occ_on = e && *e == '1' && !occ_legacy(); }
     return s_occ_on;
 }
-void occ_begin(Batch& b, const Rec* r)
+void occ_begin(Batch& b, const Rec* r, float scale)
 {
     if (!r->st.raster.zpass_count || !occ_on() || !b.occ || b.nocc >= kOcc) { b.occ_gid.reserve(0); return; }
     F.vkCmdBeginQuery(b.cb, b.occ, b.nocc, VK_QUERY_CONTROL_PRECISE_BIT);
     const uint64_t gid = s_occ_gid++;
     b.occ_gid.push_back(gid);
+    b.occ_area.push_back(scale * scale);
     s_occ_set.push_back(gid);
     b.nocc++;
     s_occ_open = true;
@@ -5629,7 +5737,7 @@ void transfer_op(const Rec* r)
     auto it = s_targets.find(akey(r->xs_loc, r->xs_off));
     Img* s = it != s_targets.end() && it->second && it->second->written ? it->second : nullptr;
     if (s) {
-        if (s->bpp != bpp || r->xs_x + w > s->w || r->xs_y + h > s->h) {
+        if (s->bpp != bpp || r->xs_x + w > s->gw || r->xs_y + h > s->gh) {
             st.r7_xfer_unsupported++;
             char line[200];
             snprintf(line, sizeof line, "render: transfer from %u:%08X (a native %ux%u image, %u bytes a pixel) not done: %ux%u at %u,%u, "
@@ -5643,12 +5751,28 @@ void transfer_op(const Rec* r)
         if (!d || d == s) { st.r7_xfer_unsupported++; return; }
         access(b.cb, s, kCopySrc);
         access(b.cb, d, kCopyDst);
-        VkImageCopy c = {};
-        c.srcSubresource = c.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-        c.srcOffset = { (int32_t)r->xs_x, (int32_t)r->xs_y, 0 };
-        c.dstOffset = { (int32_t)r->xd_x, (int32_t)r->xd_y, 0 };
-        c.extent = { w, h, 1 };
-        F.vkCmdCopyImage(b.cb, s->img, layout_of(s), d->img, layout_of(d), 1, &c);
+        {   // M11.2f: each rectangle at its image's scale -- the same size copied, another blitted
+            const uint32_t si[4] = { r->xs_x, r->xs_y, w, h }, di[4] = { r->xd_x, r->xd_y, w, h };
+            uint32_t sn[4], dn[4];
+            scale_rect(s->sc, si, s->w, s->h, sn);
+            scale_rect(d->sc, di, d->w, d->h, dn);
+            if (sn[2] == dn[2] && sn[3] == dn[3]) {
+                VkImageCopy c = {};
+                c.srcSubresource = c.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+                c.srcOffset = { (int32_t)sn[0], (int32_t)sn[1], 0 };
+                c.dstOffset = { (int32_t)dn[0], (int32_t)dn[1], 0 };
+                c.extent = { sn[2], sn[3], 1 };
+                F.vkCmdCopyImage(b.cb, s->img, layout_of(s), d->img, layout_of(d), 1, &c);
+            } else {
+                VkImageBlit bl = {};
+                bl.srcSubresource = bl.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+                bl.srcOffsets[0] = { (int32_t)sn[0], (int32_t)sn[1], 0 };
+                bl.srcOffsets[1] = { (int32_t)(sn[0] + sn[2]), (int32_t)(sn[1] + sn[3]), 1 };
+                bl.dstOffsets[0] = { (int32_t)dn[0], (int32_t)dn[1], 0 };
+                bl.dstOffsets[1] = { (int32_t)(dn[0] + dn[2]), (int32_t)(dn[1] + dn[3]), 1 };
+                F.vkCmdBlitImage(b.cb, s->img, layout_of(s), d->img, layout_of(d), 1, &bl, VK_FILTER_LINEAR);
+            }
+        }
         mark(b, kSectCopy);
         d->written = 1;
         d->guest_pitch = r->xd_pitch;
@@ -5658,12 +5782,15 @@ void transfer_op(const Rec* r)
         if (bpp == 4 && dea >= 0x10000u && (uint64_t)dea + (uint64_t)r->xd_pitch * (r->xd_y + h) <= 0xE0000000ull &&
             (d->fmt == VK_FORMAT_R8G8B8A8_UNORM || d->fmt == VK_FORMAT_B8G8R8A8_UNORM) &&
             make_buffer(wb, (VkDeviceSize)w * h * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true)) {
-            access(b.cb, d, kCopySrc);
+            uint32_t gx = r->xd_x, gy = r->xd_y;
+            Img* g = guest_sized(b, d, gx, gy, w, h);   // M11.2f: the guest's memory at the guest's size
+            if (!g) g = d;
+            access(b.cb, g, kCopySrc);
             VkBufferImageCopy bc = {};
             bc.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-            bc.imageOffset = { (int32_t)r->xd_x, (int32_t)r->xd_y, 0 };
+            bc.imageOffset = { (int32_t)gx, (int32_t)gy, 0 };
             bc.imageExtent = { w, h, 1 };
-            F.vkCmdCopyImageToBuffer(b.cb, d->img, layout_of(d), wb.b, 1, &bc);
+            F.vkCmdCopyImageToBuffer(b.cb, g->img, layout_of(g), wb.b, 1, &bc);
             mark(b, kSectReadback);
             const bool bgra = d->fmt == VK_FORMAT_B8G8R8A8_UNORM;
             const uint32_t pitch = r->xd_pitch, x0 = r->xd_x, y0 = r->xd_y;
@@ -5686,12 +5813,15 @@ void transfer_op(const Rec* r)
                    (uint64_t)dea + (uint64_t)r->xd_pitch * (r->xd_y + h) <= 0xE0000000ull &&
                    make_buffer(wb, (VkDeviceSize)w * h * 2, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true)) {
             // a 565 surface's words, big-endian in the guest's memory
-            access(b.cb, d, kCopySrc);
+            uint32_t gx = r->xd_x, gy = r->xd_y;
+            Img* g = guest_sized(b, d, gx, gy, w, h);   // M11.2f
+            if (!g) g = d;
+            access(b.cb, g, kCopySrc);
             VkBufferImageCopy bc = {};
             bc.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-            bc.imageOffset = { (int32_t)r->xd_x, (int32_t)r->xd_y, 0 };
+            bc.imageOffset = { (int32_t)gx, (int32_t)gy, 0 };
             bc.imageExtent = { w, h, 1 };
-            F.vkCmdCopyImageToBuffer(b.cb, d->img, layout_of(d), wb.b, 1, &bc);
+            F.vkCmdCopyImageToBuffer(b.cb, g->img, layout_of(g), wb.b, 1, &bc);
             mark(b, kSectReadback);
             const uint32_t pitch = r->xd_pitch, x0 = r->xd_x, y0 = r->xd_y;
             b.done.push_back([wb, dea, pitch, x0, y0, w, h] {
@@ -5794,6 +5924,135 @@ namespace {
 // The previous present is complete first (rsx_vk_bridge_present_prepare: the
 // backend's queue is done reading the target). Then the flip counts as
 // presented: the game's flip status follows (the flip gate).
+// ---- M11.2f: the rendering resolution's changes ----------------------------------------------------------
+// The scale for a resolution: the game's frame (16:9) at the largest size inside it -- the output's own size for 0x0
+// (the window's client area, the display's in fullscreen; the game's size with no window). Within the device's image
+// and framebuffer limits and half its device-local memory for the scaled targets; why it was lowered kept (s_res_why).
+float scale_for(uint64_t req)
+{
+    uint32_t w = (uint32_t)(req >> 32), h = (uint32_t)req;
+    if (!w || !h) {
+        uint32_t ow = 0, oh = 0;
+        rsx_vk_bridge_output_size(&ow, &oh);
+        if (!ow || !oh) return 1.0f;
+        w = ow; h = oh;
+    }
+    float s = std::min((float)w / (float)s_frame_gw, (float)h / (float)s_frame_gh);
+    s = std::max(0.25f, std::min(s, 8.0f));
+    s = roundf(s * 1000.0f) / 1000.0f;
+    if (fabsf(s - 1.0f) < 0.002f) s = 1.0f;
+    uint32_t why = 0;
+    VkPhysicalDeviceProperties p;
+    F.GetPhysicalDeviceProperties(D.phys, &p);
+    uint32_t big = std::max(s_frame_gw, s_frame_gh);   // the largest scaled target (the frame, a shadow map)
+    VkDeviceSize at1 = 0, fixed = 0;                   // the scaled targets' memory at a scale of 1, the others'
+    auto count = [&](const std::unordered_map<uint64_t, Img*>& m) {
+        for (const auto& kv : m) {
+            const Img* o = kv.second;
+            if (!o) continue;
+            if (scalable((uint32_t)(kv.first >> 32), o->gw, o->gh)) {
+                big = std::max(big, std::max(o->gw, o->gh));
+                at1 += (VkDeviceSize)((double)o->bytes / ((double)o->sc * o->sc));
+            } else fixed += o->bytes;
+        }
+    };
+    count(s_targets);
+    count(s_depths);
+    if (!at1) at1 = (VkDeviceSize)s_frame_gw * s_frame_gh * 40;   // before the first frame: an estimate
+    const uint32_t lim = std::min({ p.limits.maxImageDimension2D, p.limits.maxFramebufferWidth, p.limits.maxFramebufferHeight,
+                                    p.limits.maxViewportDimensions[0], p.limits.maxViewportDimensions[1] });
+    if ((float)big * s > (float)lim) { s = floorf((float)lim / (float)big * 1000.0f) / 1000.0f; why = 1; }
+    VkDeviceSize heap = 0;
+    for (uint32_t i = 0; i < s_mem.memoryHeapCount; i++)
+        if (s_mem.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) heap = std::max(heap, s_mem.memoryHeaps[i].size);
+    // DOTHEROES_RES_TEST_HEAP_MB (tests only): a smaller device-local heap, to exercise the lowering
+    if (const char* e = getenv("DOTHEROES_RES_TEST_HEAP_MB")) if (atoll(e) > 0) heap = (VkDeviceSize)atoll(e) << 20;
+    if (heap) {
+        const double budget = (double)heap * 0.5 - (double)fixed;
+        if (budget <= 0) { s = 1.0f; why = 2; }
+        else if ((double)at1 * s * s > budget) { s = std::max(0.25f, floorf((float)sqrt(budget / (double)at1) * 100.0f) / 100.0f); why = 2; }
+    }
+    s_res_why = why;
+    return s;
+}
+
+// Every scaled target made again at the new scale, its picture carried over (a linear blit); depth targets made
+// again empty (the frame's own clears fill them); the snapshots and scratch images let go. Between two frames.
+void rescale_targets(float ns, uint32_t frame)
+{
+    if (s_b[s_cur].open) submit();
+    Batch& b = batch(frame);
+    s_scale = ns;
+    uint32_t remade = 0;
+    for (auto& kv : s_targets) {
+        Img* o = kv.second;
+        if (!o) continue;
+        const float want = target_scale((uint32_t)(kv.first >> 32), o->gw, o->gh);
+        if (want == o->sc) continue;
+        Img* n = make_image(o->fmt, sdim(o->gw, want), sdim(o->gh, want), 1, o->bpp, true);
+        if (!n) continue;   // kept at its old scale: its draws keep using it as it is
+        n->gw = o->gw; n->gh = o->gh; n->sc = want;
+        n->guest_pitch = o->guest_pitch; n->asp_frame = o->asp_frame;
+        if (o->written) {
+            access(b.cb, o, kCopySrc);
+            access(b.cb, n, kCopyDst);
+            VkImageBlit bl = {};
+            bl.srcSubresource = bl.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+            bl.srcOffsets[1] = { (int32_t)o->w, (int32_t)o->h, 1 };
+            bl.dstOffsets[1] = { (int32_t)n->w, (int32_t)n->h, 1 };
+            F.vkCmdBlitImage(b.cb, o->img, layout_of(o), n->img, layout_of(n), 1, &bl, VK_FILTER_LINEAR);
+            n->written = 1;
+        }
+        s_retired.push_back(o); stats().n_retired++;
+        kv.second = n;
+        remade++;
+    }
+    for (auto& kv : s_depths) {
+        Img* o = kv.second;
+        if (!o) continue;
+        const float want = target_scale((uint32_t)(kv.first >> 32), o->gw, o->gh);
+        if (want == o->sc) continue;
+        s_retired.push_back(o); stats().n_retired++;
+        kv.second = nullptr;   // made again at its next use (depth_image)
+        remade++;
+    }
+    for (auto& kv : s_snap) if (kv.second) { s_retired.push_back(kv.second); stats().n_retired++; }
+    s_snap.clear();
+    for (auto& kv : s_down) if (kv.second) { s_retired.push_back(kv.second); stats().n_retired++; }
+    s_down.clear();
+    mark(b, kSectCopy);
+    submit();
+    s_res_now = [](float f) { uint32_t u; memcpy(&u, &f, 4); return u; }(ns);
+    char line[200];
+    snprintf(line, sizeof line, "render: the rendering resolution: %ux%u (scale %.3f)%s, %u targets made again", sdim(s_frame_gw, ns),
+             sdim(s_frame_gh, ns), ns, s_res_why == 1 ? " -- lowered to the device's image limits"
+             : s_res_why == 2 ? " -- lowered to fit the video memory" : "", remade);
+    report_add(line);
+    fprintf(stderr, "[render] %s\n", line + 8);
+}
+
+// After each present: the scale asked for (the output's size settled for 250 ms when it follows the window)
+uint64_t s_res_key = ~0ull;   // what the scale was last worked out for: the request, the output's size, the frame's
+void rescale_check(const Rec* r)
+{
+    const uint64_t req = s_res_req.load(std::memory_order_acquire);
+    const bool follows = !(req >> 32) || !(uint32_t)req;   // the output's size: a window being resized settles first
+    uint32_t ow = 0, oh = 0;
+    if (follows) rsx_vk_bridge_output_size(&ow, &oh);
+    const uint64_t key = fnv(&req, 8, fnv(&ow, 4, fnv(&oh, 4, fnv(&s_frame_gw, 4, fnv(&s_frame_gh, 4)))));
+    if (key == s_res_key && s_res_pending == 0.0f) return;   // nothing changed: no work in a frame
+    const float want = scale_for(req);
+    if (want == s_scale) { s_res_pending = 0.0f; s_res_key = key; return; }
+    const uint64_t now = now_ns();
+    if (follows) {
+        if (want != s_res_pending) { s_res_pending = want; s_res_since = now; return; }
+        if (now - s_res_since < 250000000ull) return;
+    }
+    s_res_pending = 0.0f;
+    s_res_key = key;
+    rescale_targets(want, r->frame);
+}
+
 void present_native(const Rec* r)
 {
     frame_builds_end();   // M9.2d
@@ -5813,7 +6072,12 @@ void present_native(const Rec* r)
     // the frame's work first, without the present's lock (its submission may
     // wait for the engine's: nothing the engine does then may need the lock)
     if (s_b[s_cur].open) submit();
-    if (t && t->written && !rsx_vk_bridge_present_prepare(&target, &tw, &th)) {
+    if (r->flip_w >= 16 && r->flip_h >= 16) { s_frame_gw = r->flip_w; s_frame_gh = r->flip_h; }
+    // M11.2f: the presented frame at the display buffer's scale (made again at that size when it differs)
+    const uint32_t fgw = t ? (r->flip_w < t->gw ? r->flip_w : t->gw) : 0, fgh = t ? (r->flip_h < t->gh ? r->flip_h : t->gh) : 0;
+    const uint32_t fnw = t ? (spos(fgw, t->sc) < t->w ? spos(fgw, t->sc) : t->w) : 0;
+    const uint32_t fnh = t ? (spos(fgh, t->sc) < t->h ? spos(fgh, t->sc) : t->h) : 0;
+    if (t && t->written && !rsx_vk_bridge_present_prepare_sized(&target, fnw, fnh, &tw, &th)) {
         Batch& b = batch(r->frame);
         wait_for(b, r);
         access(b.cb, t, kCopySrc);
@@ -5825,7 +6089,7 @@ void present_native(const Rec* r)
         F.vkCmdPipelineBarrier(b.cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &ib);
         VkImageBlit bl = {};
         bl.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-        bl.srcOffsets[1] = { (int32_t)(r->flip_w < t->w ? r->flip_w : t->w), (int32_t)(r->flip_h < t->h ? r->flip_h : t->h), 1 };
+        bl.srcOffsets[1] = { (int32_t)fnw, (int32_t)fnh, 1 };
         bl.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
         bl.dstOffsets[1] = { (int32_t)tw, (int32_t)th, 1 };
         const bool same = bl.srcOffsets[1].x == (int32_t)tw && bl.srcOffsets[1].y == (int32_t)th;
@@ -5854,6 +6118,7 @@ void present_native(const Rec* r)
             report_add(line);
         }
     }
+    rescale_check(r);   // M11.2f: a new rendering resolution takes effect from the next frame
     queue().flips_presented.fetch_add(1, std::memory_order_release);
     if (r7_on()) { cellGcm_native_flip_executed(r->flip_id); stats().r7_flip_executed++; }   // R7: the flip's own completion
     else if (cellGcm_flip_immediate()) cellGcmTickFlip();   // benchmarks: the flip completes now
@@ -5963,7 +6228,7 @@ void rb_service(uint32_t frame)
     Img* t = it == s_targets.end() ? nullptr : it->second;
     if (!t || !t->written) rc = -1;
     else {
-        const VkDeviceSize bytes = (VkDeviceSize)t->w * t->h * t->bpp;
+        const VkDeviceSize bytes = (VkDeviceSize)t->gw * t->gh * t->bpp;   // M11.2f: the guest's size
         if (s_rb_buf.n < bytes) {
             // the old one: its readbacks' batches were waited for (below), nothing uses it
             if (s_rb_buf.b) { F.vkDestroyBuffer(D.device, s_rb_buf.b, nullptr); F.vkFreeMemory(D.device, s_rb_buf.m, nullptr); s_rb_buf = Buf(); }
@@ -5973,16 +6238,19 @@ void rb_service(uint32_t frame)
             if (s_b[s_cur].open) submit();
             const int bi = s_cur;
             Batch& b = batch(frame);
-            access(b.cb, t, kCopySrc);
+            uint32_t gx = 0, gy = 0;
+            Img* g = guest_sized(b, t, gx, gy, t->gw, t->gh);   // M11.2f: a scaled frame read at the game's size
+            if (!g) g = t;
+            access(b.cb, g, kCopySrc);
             VkBufferImageCopy c = {};
             c.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-            c.imageExtent = { t->w, t->h, 1 };
-            F.vkCmdCopyImageToBuffer(b.cb, t->img, layout_of(t), s_rb_buf.b, 1, &c);
+            c.imageExtent = { t->gw, t->gh, 1 };
+            F.vkCmdCopyImageToBuffer(b.cb, g->img, layout_of(g), s_rb_buf.b, 1, &c);
             mark(b, kSectReadback);
             submit();
             retire(s_b[bi]);   // its fence: the copy is in host memory
             q->rows->assign(s_rb_buf.p, s_rb_buf.p + bytes);
-            q->w = t->w; q->h = t->h; q->vkformat = (uint32_t)t->fmt; q->bpp = t->bpp;
+            q->w = t->gw; q->h = t->gh; q->vkformat = (uint32_t)t->fmt; q->bpp = t->bpp;
         }
     }
     {
@@ -6694,5 +6962,19 @@ std::vector<sd::RecipeView> recipe_views(const std::string& path)
         out.push_back({ r.s.kind, r.vp, r.fp, r.f.fp_ctrl, r.f.layout_mask, r.f.alpha_test, r.f.shadow_mask, r.s.rt,
                         r.s.df });
     return out;
+}
+}  // namespace ppfx
+
+// M11.2f: the rendering resolution (ppfx_native.h)
+namespace ppfx {
+void render_resolution(uint32_t w, uint32_t h) { s_res_req.store((uint64_t)w << 32 | h, std::memory_order_release); }
+void render_resolution_now(uint32_t* w, uint32_t* h, int* why)
+{
+    const uint32_t u = s_res_now.load(std::memory_order_relaxed);
+    float sc;
+    memcpy(&sc, &u, 4);
+    if (w) *w = sdim(s_frame_gw, sc);
+    if (h) *h = sdim(s_frame_gh, sc);
+    if (why) *why = (int)s_res_why.load(std::memory_order_relaxed);
 }
 }  // namespace ppfx

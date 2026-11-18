@@ -1,0 +1,166 @@
+From eaabb6cf2797bf64a6d3cb27b3f4d6c485a22eb6 Mon Sep 17 00:00:00 2001
+From: giteaguy <73799093+irnutsmurt@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 11:54:56 -0800
+Subject: [PATCH] The rendering resolution: a resizable frame, WPOS at a
+ target's scale
+
+dotheroes M11.2f. rsx_vk_bridge_present_prepare_sized makes the frame image and its readback buffer again at the
+size the native renderer presents (under the present mutex, once the present in flight has completed; not while
+the command path draws into it); the menu's background snapshot follows the frame's size.
+rsx_vk_bridge_output_size gives the window's drawable size (0 x 0 with no window). The fragment translator divides
+WPOS by a target's scale passed in fp_alpha.w (0 means 1): only programs that read WPOS change text.
+---
+ libs/video/rsx_fp_decompiler.c  | 11 ++++--
+ libs/video/rsx_vulkan_backend.c | 69 ++++++++++++++++++++++++++++++++-
+ libs/video/rsx_vulkan_bridge.h  |  5 +++
+ 3 files changed, 81 insertions(+), 4 deletions(-)
+
+diff --git a/libs/video/rsx_fp_decompiler.c b/libs/video/rsx_fp_decompiler.c
+index cbbe952..3a4cac4 100644
+--- a/libs/video/rsx_fp_decompiler.c
++++ b/libs/video/rsx_fp_decompiler.c
+@@ -1342,11 +1342,16 @@ static int rsx_fp_decompile_internal(
+      * uv = wpos * (1/W, -1/H) + (0, 1), mirrored its source when it read the host y.
+      * The draw engine passes the window height in fp_alpha.y when the origin is
+      * BOTTOM (0 otherwise) and a pixel-center bias in fp_alpha.z (-0.5 for INTEGER
+-     * centers, 0 for HALF). A backend that leaves both 0 gets the host position. */
++     * centers, 0 for HALF). A backend that leaves both 0 gets the host position.
++     * dotheroes M11.2f: a target drawn at a scale of the guest's size (the rendering
++     * resolution) passes the scale in fp_alpha.w -- the host position divided by it
++     * is the guest's; 0 (a backend that sets none) means 1. Only programs that read
++     * WPOS change: every other program's text is as before. */
+     if (strstr(o.p, "_rsx_wpos("))
+         out_puts(&p, buffered
+-            ? "#define _rsx_wpos(p) float4((p).x + fp_alpha.z, "
+-              "(fp_alpha.y != 0.0 ? fp_alpha.y - (p).y : (p).y) + fp_alpha.z, (p).z, (p).w)\n"
++            ? "#define _rsx_wpos_s (fp_alpha.w > 0.0 ? fp_alpha.w : 1.0)\n"
++              "#define _rsx_wpos(p) float4((p).x / _rsx_wpos_s + fp_alpha.z, "
++              "(fp_alpha.y != 0.0 ? fp_alpha.y - (p).y / _rsx_wpos_s : (p).y / _rsx_wpos_s) + fp_alpha.z, (p).z, (p).w)\n"
+             : "#define _rsx_wpos(p) (p)\n");
+     /* Texture bank. With no cube units (the default) emit the exact legacy
+      * array declaration so 2D-only programs are byte-identical. When any unit
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index 710fec6..78d9f9e 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -2793,6 +2793,8 @@ static int vk_osd_saves_draw(VkCommandBuffer cb, u32 idx)
+ static struct {
+     vk_buffer buf, snap;
+     uint8_t*  snap_cpu;
++    size_t    snap_cpu_n;    /* the CPU copy's size, and the device buffer's: the frame's size can change (dotheroes */
++    VkDeviceSize snap_n;     /* M11.2f, the rendering resolution) */
+     int       snap_pending, failed;
+ } s_omenu;
+ 
+@@ -2805,7 +2807,8 @@ static int vk_osd_menu_draw(VkCommandBuffer cb, u32 idx)
+     __atomic_store_n(&M->bgra, s_vk.sc_osd == 2, __ATOMIC_RELEASE);
+     if (s_omenu.snap_pending) {   /* the copy recorded in the last present: done */
+         const size_t n = (size_t)s_vk.width * s_vk.height * 4;
+-        if (!s_omenu.snap_cpu) s_omenu.snap_cpu = (uint8_t*)malloc(n);
++        if (s_omenu.snap_cpu && s_omenu.snap_cpu_n < n) { free(s_omenu.snap_cpu); s_omenu.snap_cpu = NULL; }
++        if (!s_omenu.snap_cpu) { s_omenu.snap_cpu = (uint8_t*)malloc(n); s_omenu.snap_cpu_n = s_omenu.snap_cpu ? n : 0; }
+         if (s_omenu.snap_cpu) {
+             memcpy(s_omenu.snap_cpu, s_omenu.snap.ptr, n);
+             M->snap = s_omenu.snap_cpu; M->snap_w = s_vk.width; M->snap_h = s_vk.height;
+@@ -2815,6 +2818,8 @@ static int vk_osd_menu_draw(VkCommandBuffer cb, u32 idx)
+     }
+     if (__atomic_load_n(&M->snap_want, __ATOMIC_ACQUIRE) && !s_omenu.failed) {
+         const VkDeviceSize n = (VkDeviceSize)s_vk.width * s_vk.height * 4;
++        if (s_omenu.snap.buf && s_omenu.snap_n != n) vk_destroy_present_buffer(&s_omenu.snap);   /* the frame resized */
++        s_omenu.snap_n = n;
+         if (!s_omenu.snap.buf && (vk_create_host_buffer(&s_omenu.snap, n, VK_BUFFER_USAGE_TRANSFER_DST_BIT) != 0 ||
+                                   !s_omenu.snap.coherent)) {
+             if (s_omenu.snap.buf) vk_destroy_present_buffer(&s_omenu.snap);
+@@ -6653,11 +6658,73 @@ void rsx_vulkan_backend_present_finish(void)
+  *   finishing  the window present: rsx_vulkan_backend_present_finish, on the
+  *              host's present thread (or at once, when `finish_now`).
+  * The engine's own present is not used for those frames. */
++int rsx_vk_bridge_present_prepare_sized(VkImage* target, u32 want_w, u32 want_h, u32* w, u32* h);
+ int rsx_vk_bridge_present_prepare(VkImage* target, u32* w, u32* h)
++{
++    return rsx_vk_bridge_present_prepare_sized(target, 0, 0, w, h);
++}
++
++/* dotheroes M11.2f (the rendering resolution): the frame made again at w x h -- present_mu held, the present in
++ * flight completed (vk_present_complete_locked: its copy, readback and window present done), so nothing reads the old
++ * one. Opaque black in GENERAL, as at start. The readback buffer follows. Not while the command path draws into the
++ * frame (it draws at the game's size). 0 when made; the old frame kept otherwise. */
++static int vk_frame_resize(u32 w, u32 h)
++{
++#if PS3RECOMP_RSX_COMMAND_PATH
++    if (rsx_draw_engine_enabled()) return -1;
++#endif
++    vk_image nc; vk_buffer nb;
++    memset(&nc, 0, sizeof nc); memset(&nb, 0, sizeof nb);
++    if (vk_create_image(&nc, VK_FORMAT_R8G8B8A8_UNORM, w, h,
++                        VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
++                        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_IMAGE_ASPECT_COLOR_BIT)) return -1;
++    if (vk_create_host_buffer(&nb, (VkDeviceSize)w * h * 4u, VK_BUFFER_USAGE_TRANSFER_DST_BIT)) {
++        vk_destroy_image(&nc);
++        return -1;
++    }
++    VkCommandBuffer cb = s_vk.present_cmd;
++    VkCommandBufferBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
++                                    .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
++    int ok = pvkResetCommandBuffer(cb, 0) == VK_SUCCESS && pvkBeginCommandBuffer(cb, &bi) == VK_SUCCESS;
++    if (ok) {
++        vk_barrier_image_on(cb, nc.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED);
++        VkClearColorValue black = { .float32 = { 0.0f, 0.0f, 0.0f, 1.0f } };
++        VkImageSubresourceRange cr = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
++        pvkCmdClearColorImage(cb, nc.img, VK_IMAGE_LAYOUT_GENERAL, &black, 1, &cr);
++        ok = pvkEndCommandBuffer(cb) == VK_SUCCESS;
++    }
++    if (ok) {
++        VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &cb };
++        pvkResetFences(s_vk.device, 1, &s_vk.present_fence);
++        ok = vk_queue_submit(&si, s_vk.present_fence) == VK_SUCCESS;
++        if (ok) pvkWaitForFences(s_vk.device, 1, &s_vk.present_fence, VK_TRUE, UINT64_MAX);
++        else { VkFenceCreateInfo fci = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, .flags = VK_FENCE_CREATE_SIGNALED_BIT };
++               pvkDestroyFence(s_vk.device, s_vk.present_fence, NULL);
++               pvkCreateFence(s_vk.device, &fci, NULL, &s_vk.present_fence); }
++    }
++    if (!ok) { vk_destroy_image(&nc); vk_destroy_buffer(&nb); return -1; }
++    vk_destroy_image(&s_vk.color);
++    vk_destroy_buffer(&s_vk.readback);
++    s_vk.color = nc; s_vk.readback = nb;
++    VK_LOG("the frame: %ux%u (was %ux%u)\n", w, h, s_vk.width, s_vk.height);
++    s_vk.width = w; s_vk.height = h;
++    return 0;
++}
++
++/* dotheroes M11.2f: the window's drawable size now (the swapchain's), 0 x 0 with no window */
++void rsx_vk_bridge_output_size(u32* w, u32* h)
++{
++    *w = s_vk.windowed && s_vk.swapchain ? s_vk.sc_extent.width : 0;
++    *h = s_vk.windowed && s_vk.swapchain ? s_vk.sc_extent.height : 0;
++}
++
++int rsx_vk_bridge_present_prepare_sized(VkImage* target, u32 want_w, u32 want_h, u32* w, u32* h)
+ {
+     if (!s_vk.device || !s_vk.color.img) return -1;
+     vk_mutex_lock(&s_vk.present_mu);
+     vk_present_complete_locked();
++    if (want_w && want_h && (want_w != s_vk.width || want_h != s_vk.height) && vk_frame_resize(want_w, want_h))
++        VK_LOG("the frame: %ux%u refused, kept at %ux%u\n", want_w, want_h, s_vk.width, s_vk.height);
+     *target = s_vk.color.img; *w = s_vk.width; *h = s_vk.height;
+     return 0;
+ }
+diff --git a/libs/video/rsx_vulkan_bridge.h b/libs/video/rsx_vulkan_bridge.h
+index 973c6f2..430c6bd 100644
+--- a/libs/video/rsx_vulkan_bridge.h
++++ b/libs/video/rsx_vulkan_bridge.h
+@@ -92,6 +92,11 @@ void rsx_vk_bridge_flush(void);
+  * rsx_vulkan_backend_present_finish (on the host's present thread) unless
+  * `finish_now`; _cancel gives the mutex back with nothing presented. */
+ int rsx_vk_bridge_present_prepare(VkImage* target, u32* w, u32* h);
++/* dotheroes M11.2f: as _prepare, the frame made again at want_w x want_h first when it is another size (0: kept);
++ * *w, *h the frame's size after (the old one when the new could not be made). */
++int rsx_vk_bridge_present_prepare_sized(VkImage* target, u32 want_w, u32 want_h, u32* w, u32* h);
++/* dotheroes M11.2f: the window's drawable size (the swapchain's), 0 x 0 with no window. */
++void rsx_vk_bridge_output_size(u32* w, u32* h);
+ void rsx_vk_bridge_present_submit(VkSemaphore wait, int finish_now);
+ void rsx_vk_bridge_present_cancel(void);
+ 
+-- 
+2.56.0.windows.3
+

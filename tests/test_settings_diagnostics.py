@@ -123,6 +123,22 @@ class Settings(unittest.TestCase):
             with self.assertRaises(settings.SettingsError):
                 settings.set_values(self.install, bad)
 
+    def test_m112f_rendering_resolution(self):
+        eff = settings.effective(self.install)["settings"]
+        self.assertEqual(eff["DOTHEROES_RENDER_RES"]["value"], "native", "native by default")
+        self.assertEqual(eff["DOTHEROES_RENDER_RES"]["applies"], "live")
+        for v in ("native", "1280x720", "1920x1080", "2560x1440", "3840x2160", "custom"):
+            settings.set_values(self.install, {"DOTHEROES_RENDER_RES": v})
+        settings.set_values(self.install, {"DOTHEROES_RENDER_RES_CUSTOM": " 3440X1440 "})
+        eff = settings.effective(self.install)["settings"]
+        self.assertEqual((eff["DOTHEROES_RENDER_RES"]["value"], eff["DOTHEROES_RENDER_RES_CUSTOM"]["value"]),
+                         ("custom", "3440x1440"), "a custom size kept, written as WxH")
+        for bad in ({"DOTHEROES_RENDER_RES": "1024x768"}, {"DOTHEROES_RENDER_RES_CUSTOM": "319x180"},
+                    {"DOTHEROES_RENDER_RES_CUSTOM": "7681x4320"}, {"DOTHEROES_RENDER_RES_CUSTOM": "1920"},
+                    {"DOTHEROES_RENDER_RES_CUSTOM": "wide"}):
+            with self.assertRaises(settings.SettingsError):
+                settings.set_values(self.install, bad)
+
     def test_worker(self):
         w = [sys.executable, os.path.join(ROOT, "tools", "worker.py"), "settings", "--install", self.install]
         p = subprocess.run(w + ["--set", "DOTHEROES_FPS=30"], capture_output=True, text=True, timeout=60)

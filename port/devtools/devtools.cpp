@@ -50,6 +50,7 @@ enum { DH_LOG_ERROR = 0, DH_LOG_WARNING = 1, DH_LOG_INFO = 2 };
 #define DLOG(...) do { if (dh_log) dh_log(__VA_ARGS__); } while (0)
 
 extern "C" uint8_t* vm_base;
+extern "C" int dotheroes_set_render_resolution(const char* value, const char* custom);   /* main.cpp (M11.2f) */
 extern "C" void (*g_ppfx_unforeseen_hook)(uint64_t key, const char* kind, double ms);   /* ppfx_render.cpp (M11.0f) */
 extern "C" int64_t sys_memory_allocate(ppu_context* ctx);
 struct DevFnEntry { uint64_t addr; void (*func)(ppu_context*); const char* name; };   /* the lift's func_entry */
@@ -1462,6 +1463,13 @@ bool execute(const ppu_context* c, const Cmd& cmd)
             if (r >= 0) return r == 1;
         }
         if (w == "warp") return start_warp(c, cmd, rest) == 1;
+        if (w == "resolution") {   /* M11.2f: the rendering resolution changed live, as the in-game menu changes it */
+            const std::string v = word(rest);
+            const bool preset = v == "native" || v == "1280x720" || v == "1920x1080" || v == "2560x1440" || v == "3840x2160";
+            dotheroes_set_render_resolution(preset ? v.c_str() : "custom", preset ? "" : v.c_str());
+            answer(cmd, true, "{\"resolution\":" + json_str(v) + "}", true);
+            return false;
+        }
         if (w == "maps" || w == "catalog") {
             std::string err;
             if (!make_catalog(c, err)) { answer(cmd, false, err); return false; }

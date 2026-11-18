@@ -2134,6 +2134,9 @@ static void page_settings()
                              { "display", "The display's rate" }, { "0", "Unlimited" }, { "custom", "Custom" } } },
         { "DOTHEROES_DISPLAY_MODE", { { "windowed", "Windowed" }, { "borderless", "Borderless fullscreen" },
                                       { "exclusive", "Exclusive fullscreen" } } },
+        { "DOTHEROES_RENDER_RES", { { "native", "Native (the display's)" }, { "1280x720", "1280 x 720 (the original)" },
+                                    { "1920x1080", "1920 x 1080" }, { "2560x1440", "2560 x 1440" }, { "3840x2160", "3840 x 2160" },
+                                    { "custom", "Custom" } } },
         { "DOTHEROES_PERF_OVERLAY", { { "off", "Off" }, { "fps", "Frame rate" }, { "graph", "Frame rate and times" } } },
         { "DOTHEROES_OVERLAY_COMBO", { { "l3r3", "L3 + R3" }, { "selectstart", "Back/Select + Start" },
                                        { "l1r1select", "L1 + R1 + Back/Select" } } },
@@ -2176,6 +2179,15 @@ static void page_settings()
             if (std::find(cycle.begin(), cycle.end(), val) == cycle.end()) cycle.insert(cycle.begin(), val);
             std::sort(cycle.begin(), cycle.end(), [](const std::string& a, const std::string& b) { return atoi(a.c_str()) < atoi(b.c_str()); });
             shown = val + " fps";
+        } else if (key == "DOTHEROES_RENDER_RES_CUSTOM") {   // M11.2f: only with a custom resolution chosen
+            if (setting("DOTHEROES_RENDER_RES", "native") != "custom") continue;
+            cycle = { "960x540", "1600x900", "1920x1200", "2048x1152", "2560x1080", "2560x1600", "2880x1620", "3200x1800",
+                      "3440x1440", "5120x2160", "5120x2880", "7680x4320" };
+            if (std::find(cycle.begin(), cycle.end(), val) == cycle.end()) cycle.push_back(val);
+            auto px = [](const std::string& s) { int w = 0, h = 0; sscanf(s.c_str(), "%dx%d", &w, &h); return (long)w * h; };
+            std::sort(cycle.begin(), cycle.end(), [&](const std::string& a, const std::string& b) { return px(a) < px(b); });
+            shown = val;
+            for (char& c : shown) if (c == 'x') { shown.replace(&c - &shown[0], 1, " x "); break; }
         } else if (key == "DOTHEROES_VOLUME_MASTER" || key == "DOTHEROES_VOLUME_MUSIC" || key == "DOTHEROES_VOLUME_SFX") {
             cycle = { "0", "10", "20", "30", "40", "50", "60", "70", "80", "90", "100" };
             shown = val + "%";

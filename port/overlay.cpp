@@ -58,6 +58,7 @@ void ps3_host_quit(const char* why);
 void rsx_vulkan_backend_request_display(int mode, int vsync) __attribute__((weak));
 void nsm_set_volumes(float master, float music, float effects, int mute) __attribute__((weak));
 int dotheroes_set_frame_limit(const char* value);   /* main.cpp: 1 when applied at once */
+int dotheroes_set_render_resolution(const char* value, const char* custom);   /* main.cpp (M11.2f): live */
 void cellPad_set_pad_binding(int game_bit, uint32_t pad_bits) __attribute__((weak));
 int cellPad_set_key_binding(int game_bit, const char* key_name) __attribute__((weak));
 const char* cellPad_key_binding_name(int game_bit) __attribute__((weak));
@@ -147,6 +148,10 @@ std::vector<Item> page_items(int p)
         return { { "DOTHEROES_DISPLAY_MODE", "Display mode",
                    { { "windowed", "Windowed" }, { "borderless", "Borderless fullscreen" }, { "exclusive", "Exclusive fullscreen" } },
                    1, "windowed" },
+                 /* M11.2f: live; "custom" takes the size set in the launcher (DOTHEROES_RENDER_RES_CUSTOM) */
+                 { "DOTHEROES_RENDER_RES", "Rendering resolution",
+                   { { "native", "Native (the display's)" }, { "1280x720", "1280 x 720" }, { "1920x1080", "1920 x 1080" },
+                     { "2560x1440", "2560 x 1440" }, { "3840x2160", "3840 x 2160" }, { "custom", "Custom" } }, 1, "native" },
                  { "DOTHEROES_VSYNC", "VSync", onoff, 1, "1" } };
     case P_AUDIO:
         return { { "DOTHEROES_VOLUME_MASTER", "Master volume", percent(), 1, "100" },
@@ -324,6 +329,10 @@ int apply(const Item& it, const std::string& v)
     }
     if (k == "DOTHEROES_PERF_OVERLAY") { ps3_osd_fps_set_mode(v == "graph" ? 2 : v == "fps" ? 1 : 0); return 1; }
     if (k == "DOTHEROES_FPS") return dotheroes_set_frame_limit(v.c_str());
+    if (k == "DOTHEROES_RENDER_RES") {
+        auto c = g_vals.find("DOTHEROES_RENDER_RES_CUSTOM");
+        return dotheroes_set_render_resolution(v.c_str(), c != g_vals.end() ? c->second.c_str() : "");
+    }
     if (k.rfind("DOTHEROES_VOLUME_", 0) == 0 || k == "DOTHEROES_MUTE") { apply_volumes(); return nsm_set_volumes ? 1 : 0; }
     if (k == "LAUNCHER_PROMPTS") {   /* the game's own screens (the save list) follow the same choice */
         put_env("PS3_UI_PROMPTS", v == "xbox" || v == "steam" || v == "generic" ? "xbox" : v == "playstation" ? "playstation"
