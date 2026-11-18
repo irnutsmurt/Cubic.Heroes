@@ -8,7 +8,8 @@ Evidence marks as in the other plans: [C] read in the code, [M] measured, [I] in
 ## Checkpoint (kept current; the newest state first)
 
 - **Stage** (2026-11-18): **P0 done** (onboarding, safeguards verified on Linux); this plan written; P1 next.
-- **Outstanding decisions** (asked of the owner 2026-11-18): section 4.
+- **Decisions**: D1-D4 approved by the owner on 2026-11-18 as recommended, with their additions (section 4); Windows
+  and Linux CI approved. Correctness first, then AMD profiling and optimisation.
 
 ## 1. The machine [M]
 
@@ -93,7 +94,21 @@ docs/FEASIBILITY.md), nor run since 2026-10-30.
   (tools/release_trust.py); the signing scheme (Ed25519 through OpenSSL) is unchanged by this milestone.
 - docs/LICENSE_AUDIT.md is stale (577 rows; 832 files tracked).
 
-## 4. Decisions asked of the owner (2026-11-18)
+## 4. The owner's decisions (asked and approved 2026-11-18)
+
+**Approved as recommended, with these additions (the owner's):**
+- D1: Linux uses the same native runtime architecture as Windows. Checked stores may remain a developer-only
+  diagnostic fallback; lifted SPU programs are never linked into the release.
+- D2: the thin game AppImage stays relocatable (relative paths wherever possible) and is regenerated automatically
+  when the active build changes by an update or a rollback.
+- D3: the owner provides the local keys file's path. Its contents never appear in logs, diagnostics, commits or
+  release artifacts.
+- D4: validated stages are pushed with every safeguard on; changes to shared runtime code are checked for Windows
+  regressions.
+- Windows and Linux CI approved. The glibc baseline is verified on actual supported distributions, not only Manjaro.
+  Correctness before performance: profiling and AMD optimisation once the game runs correctly here.
+
+The questions as asked:
 
 - **D1 -- the Linux release configuration.** Recommended: **the same as Windows** (mov stores, no lifted SPU
   programs linked, cellAudio retired), with Linux's own fault handling where the Windows path uses Windows
@@ -187,7 +202,7 @@ States: **VERIFIED** (implemented, evidence named), **UNVERIFIED** (implemented,
 | A1 | Privacy configuration and git safeguards active on Linux | VERIFIED | section 2 |
 | A2 | The desktop guard enforced on Linux (X11 and Wayland) | NOT DONE | P1 |
 | A3 | Native Linux dev build boots and plays (offscreen) | NOT DONE | P2 |
-| A4 | Linux release configuration as Windows' (D1) | BLOCKED (D1) | P3 |
+| A4 | Linux release configuration as Windows' (D1: no lifted SPU in the release) | NOT DONE | P3 |
 | A5 | Release crash record and hang report on Linux | NOT DONE | P3 |
 | A6 | Audio through OpenAL Soft with the system's server; device change recovered | NOT DONE | P3 |
 | A7 | Cinematics through FFmpeg | NOT DONE | P2/P8 |
@@ -200,8 +215,8 @@ States: **VERIFIED** (implemented, evidence named), **UNVERIFIED** (implemented,
 | A14 | Signed updates, repair and rollback; the right package per OS and architecture | NOT DONE | P4/P9 |
 | A15 | Portable root: spaces, Unicode, relocation, another drive, no FUSE (tarball) | NOT DONE | P4/P9 |
 | A16 | Launcher AppImage and tarball, equivalent | NOT DONE | P5 |
-| A17 | The locally generated game AppImage, never distributed | BLOCKED (D2) | P5 |
-| A18 | glibc 2.31 baseline; runs beyond Manjaro | NOT DONE | P5 |
+| A17 | The locally generated thin game AppImage: relocatable, regenerated on update and rollback, never distributed | NOT DONE | P5 |
+| A18 | glibc 2.31 baseline verified on actual supported distributions, not only Manjaro | NOT DONE | P5 |
 | A19 | Steam, Lutris and Heroic through the CLI | NOT DONE | P9 |
 | A20 | CI: Windows and Linux builds, tests, boundary and privacy checks | NOT DONE | P6 |
 | A21 | Windows build and behaviour unbroken | NOT DONE | P6 + section 7 |
