@@ -227,7 +227,9 @@ def shot(name):
     im = frame()
     nshot[0] += 1
     if im:
-        im.resize((640, 360)).save(os.path.join(out, f"{nshot[0]:02d}-{name}.png"))
+        # SHOT_FULL=1: the frame as the game drew it (documentation pictures); else a 640x360 picture
+        (im if os.environ.get("SHOT_FULL") == "1" else im.resize((640, 360))).save(
+            os.path.join(out, f"{nshot[0]:02d}-{name}.png"))
 
 
 def diff(a, b):

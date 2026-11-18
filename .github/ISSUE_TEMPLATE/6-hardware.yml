@@ -1,0 +1,74 @@
+name: Hardware compatibility report
+description: How Cubic.Heroes runs on your hardware -- working well or not. Reports from AMD and Intel GPUs, handhelds and Windows 10 are especially welcome.
+title: "[Hardware] "
+labels: ["hardware"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The beta has been validated mostly on one Windows 11 PC with an NVIDIA GPU, so reports from other hardware
+        help a lot -- good results too. **Never attach game files, keys, save files or personal information.**
+  - type: input
+    id: version
+    attributes:
+      label: Cubic.Heroes version
+      placeholder: "0.2.0-beta.1"
+    validations:
+      required: true
+  - type: dropdown
+    id: result
+    attributes:
+      label: Overall result
+      options:
+        - Plays well
+        - Plays with minor problems
+        - Plays with major problems
+        - Does not start or does not install
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: "Windows 10 22H2"
+    validations:
+      required: true
+  - type: input
+    id: cpu
+    attributes:
+      label: CPU and RAM
+    validations:
+      required: true
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU and driver version
+    validations:
+      required: true
+  - type: input
+    id: display
+    attributes:
+      label: Display, settings and frame rate
+      description: "Monitor resolution and refresh rate, display mode, frame limit, VSync, and the frame rate you get (performance overlay)."
+  - type: input
+    id: input
+    attributes:
+      label: Controllers used
+      placeholder: "Xbox Wireless Controller, DualSense, keyboard"
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Anything that did or did not work, where you played, how long.
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: For problems -- Launcher > Diagnostics > Export Logs, review, Save the zip, attach it here.
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Before submitting
+      options:
+        - label: I have not attached game files, keys, save files or personal information.
+          required: true

@@ -45,6 +45,16 @@ def main():
     flags = ["-std=c++17", "-DSDL_MAIN_HANDLED", "-DIMGUI_DISABLE_OBSOLETE_FUNCTIONS", "-DUNICODE", "-D_UNICODE",
              f'-DCUBIC_VERSION="{version.VERSION}"',
              "-Wno-deprecated-declarations", *opt, *inc]
+    # M11.3: the flags are part of what an object is made of (the version's define above all): objects of other flags
+    # -- a new version, --debug -- are made again (the times alone kept a 0.1.0 launcher in a 0.2.0-beta.1 package)
+    stamp = os.path.join(obj, "flags.txt")
+    stamp_text = zig_build._zig_version(zig) + "\n" + "\n".join(flags) + "\n"
+    if not os.path.exists(stamp) or open(stamp, encoding="utf-8").read() != stamp_text:
+        for f in os.listdir(obj):
+            if f.endswith(".o"):
+                os.remove(os.path.join(obj, f))
+        with open(stamp, "w", encoding="utf-8", newline="\n") as f:
+            f.write(stamp_text)
     jobs = [(os.path.join(ROOT, "launcher", s), os.path.join(obj, "launcher_" + os.path.splitext(s)[0] + ".o"))
             for s in LAUNCHER_SOURCES]
     jobs += [(os.path.join(imgui, s), os.path.join(obj, os.path.basename(os.path.splitext(s)[0]) + ".o"))

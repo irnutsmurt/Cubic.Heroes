@@ -5,7 +5,8 @@
     python3 tools/make_bundle.py --prebuilt     # + the runtime library (after runtime changes)
     python3 tools/make_bundle.py [--platform linux|windows|all]
 
-Makes build/dist/DotHeroes-Setup-<platform>-x86_64/ and a .tar.xz (Linux) / .zip (Windows) of it:
+Makes build/dist/DotHeroes-Setup-<platform>-x86_64/ and the download, build/dist/Cubic.Heroes-<version>-<platform>-x86_64
+.zip (Windows) / .tar.xz (Linux), whose one folder, Cubic.Heroes, is the portable installation root:
     CubicHeroes[.exe]       the launcher (M9.4; tools/build_launcher.py), SDL2's library beside it and
                             licenses/ (Dear ImGui's, SDL2's); it runs the worker below
     LICENSE.txt, README.txt
@@ -386,17 +387,21 @@ def bundle(platform):
         print("  warning: no private literals on this machine (.git/push-guard.local): only home paths with them "
               "are looked for, so nothing was checked")
     print("archive", flush=True)
+    # M11.3: what a player downloads is named for the game and its version, and unpacks to one Cubic.Heroes folder
+    # -- the portable installation root (docs/CLI.md); the launcher's updates go by the signed manifest's names
+    top = "Cubic.Heroes"
+    stem = os.path.join(DIST, f"Cubic.Heroes-{VERSION}-{platform}-x86_64")
     if platform == "windows":
-        arc = out + ".zip"
+        arc = stem + ".zip"
         with zipfile.ZipFile(arc, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
             for d, _, fs in os.walk(out):
                 for f in fs:
                     p = os.path.join(d, f)
-                    z.write(p, os.path.join(name, os.path.relpath(p, out)))
+                    z.write(p, os.path.join(top, os.path.relpath(p, out)))
     else:
-        arc = out + ".tar.xz"
+        arc = stem + ".tar.xz"
         with tarfile.open(arc, "w:xz", preset=6) as t:
-            t.add(out, arcname=name)
+            t.add(out, arcname=top)
     if boundary_check.check_artifact(arc, bundle=True):
         os.remove(arc)
         sys.exit(f"{arc}: the boundary check failed; the archive was removed")

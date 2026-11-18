@@ -30,7 +30,14 @@ class SettingsError(Exception):
 
 def schema():
     with open(SCHEMA_FILE, encoding="utf-8") as f:
-        return {s["key"]: s for s in json.load(f)["settings"]}
+        out = {s["key"]: s for s in json.load(f)["settings"]}
+    # a beta (a version with a pre-release suffix: 0.2.0-beta.1) is offered the next beta by default -- a tester who
+    # never opened Settings still gets the fixes; a stable version keeps stable releases (the player may choose either)
+    from version import VERSION
+    ch = out.get("LAUNCHER_UPDATE_CHANNEL")
+    if ch and "-" in VERSION and "prerelease" in ch.get("values", ()):
+        out["LAUNCHER_UPDATE_CHANNEL"] = dict(ch, default="prerelease")
+    return out
 
 
 def check(spec, value):

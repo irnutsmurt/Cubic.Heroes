@@ -1,0 +1,62 @@
+name: Performance issue
+description: Low frame rate, stutter, long loading, or the game running too fast or too slow.
+title: "[Performance] "
+labels: ["performance"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Settings > Display > Performance overlay (frame rate and frame times) shows the numbers we need. The first
+        visit to a place may stutter until its shaders are prepared -- the launcher's Shaders page prepares them all.
+        **Never attach game files, keys, save files or personal information.**
+  - type: input
+    id: version
+    attributes:
+      label: Cubic.Heroes version
+      placeholder: "0.2.0-beta.1"
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What do you see?
+      description: The frame rate or frame times from the performance overlay, where it happens, and whether it is constant or a stutter.
+    validations:
+      required: true
+  - type: input
+    id: settings
+    attributes:
+      label: Display settings
+      description: "Display mode, resolution, frame limit, VSync, and your monitor's refresh rate."
+    validations:
+      required: true
+  - type: dropdown
+    id: shaders
+    attributes:
+      label: Shaders prepared?
+      description: The launcher's Shaders page.
+      options:
+        - "Yes, fully prepared"
+        - "Partly prepared"
+        - "No / not sure"
+  - type: input
+    id: system
+    attributes:
+      label: System
+      description: Operating system, CPU, RAM, GPU and GPU driver version; laptop or desktop; power mode.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: Launcher > Diagnostics > Export Logs, review, Save the zip, attach it here.
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched the existing issues and the known issues list.
+          required: true
+        - label: I have not attached game files, keys, save files or personal information.
+          required: true

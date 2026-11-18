@@ -1,0 +1,59 @@
+name: Crash or hang
+description: The game or the launcher closed unexpectedly, froze, or stopped responding.
+title: "[Crash] "
+labels: ["bug", "crash"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        After a crash or hang the game writes a report into the installation's `logs/crash` folder. The launcher's
+        Diagnostics > Export Logs collects it with the logs (names, paths and e-mail addresses removed) -- please attach
+        that zip after reviewing it. **Never attach game files, keys, save files or personal information.**
+  - type: input
+    id: version
+    attributes:
+      label: Cubic.Heroes version
+      placeholder: "0.2.0-beta.1"
+    validations:
+      required: true
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What happened?
+      options:
+        - The game closed (crash)
+        - The game froze (hang, no response)
+        - The game froze but sound continued
+        - The launcher closed or froze
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: What were you doing?
+      description: Where you were in the game, what happened just before, how long you had been playing, and whether it happens again.
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: System
+      description: Operating system, CPU, RAM, GPU and GPU driver version.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics (required for crashes and hangs)
+      description: Launcher > Diagnostics > Export Logs, review, Save the zip, attach it here.
+    validations:
+      required: true
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched the existing issues and the known issues list.
+          required: true
+        - label: I have not attached game files, keys, save files or personal information.
+          required: true

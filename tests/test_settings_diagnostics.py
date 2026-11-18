@@ -46,8 +46,21 @@ class Settings(unittest.TestCase):
     def test_defaults_without_a_file(self):
         e = settings.effective(self.install)
         self.assertEqual(e["settings"]["DOTHEROES_FPS"]["value"], "60")
-        self.assertEqual(e["settings"]["LAUNCHER_UPDATE_CHANNEL"]["value"], "stable")
+        import version   # a beta is offered the next beta by default, a stable version stable releases
+        self.assertEqual(e["settings"]["LAUNCHER_UPDATE_CHANNEL"]["value"],
+                         "prerelease" if "-" in version.VERSION else "stable")
         self.assertEqual(e["problems"], [])
+
+    def test_update_channel_default_follows_the_version(self):
+        import version
+        kept = version.VERSION
+        try:
+            version.VERSION = "0.2.0-beta.1"
+            self.assertEqual(settings.schema()["LAUNCHER_UPDATE_CHANNEL"]["default"], "prerelease")
+            version.VERSION = "0.2.0"
+            self.assertEqual(settings.schema()["LAUNCHER_UPDATE_CHANNEL"]["default"], "stable")
+        finally:
+            version.VERSION = kept
 
     def test_invalid_values_and_lines(self):
         put(self.cfg, "# comment\nDOTHEROES_FPS=45\nPS3RECOMP_VK_FULLSCREEN=yes\nnot a setting\n"

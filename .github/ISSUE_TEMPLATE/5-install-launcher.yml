@@ -1,0 +1,68 @@
+name: Installation or launcher issue
+description: Converting your disc, recompiling, preparing shaders, updating, rolling back, the launcher or the command line.
+title: "[Install] "
+labels: ["installation"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The launcher shows the step that failed and its message; the Diagnostics page's Export Logs collects the job
+        logs. **Never attach your disc image, keys file, game files, save files or personal information** -- and do
+        not paste your keys file's contents anywhere.
+  - type: input
+    id: version
+    attributes:
+      label: Cubic.Heroes version
+      placeholder: "0.2.0-beta.1"
+    validations:
+      required: true
+  - type: dropdown
+    id: step
+    attributes:
+      label: What were you doing?
+      options:
+        - First installation (disc and keys)
+        - Recompiling / building the game
+        - Preparing shaders
+        - Updating Cubic.Heroes
+        - Rolling back
+        - Moving or copying the installation folder
+        - Using the command line (CubicHeroes --...)
+        - Starting from another launcher or Steam
+        - Uninstalling or removing the launcher
+        - Something else
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: The message shown (a screenshot is fine), or the command you ran and its output. Remove any personal paths.
+    validations:
+      required: true
+  - type: input
+    id: disc
+    attributes:
+      label: Your disc
+      description: "The disc image's format (ISO or folder) and its game ID as shown on the case or in the image (BLUS-30490 is the supported one)."
+  - type: input
+    id: system
+    attributes:
+      label: System
+      description: Operating system, CPU, free disk space, and the drive/folder type (internal, external, network) -- not the folder's name.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: Launcher > Diagnostics > Export Logs, review, Save the zip, attach it here.
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched the existing issues and the known issues list.
+          required: true
+        - label: I have not attached my disc image, keys, game files, save files or personal information.
+          required: true

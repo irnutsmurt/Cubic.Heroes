@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Installation and command-line documentation
+    url: https://github.com/irnutsmurt/Cubic.Heroes/blob/main/docs/CLI.md
+    about: How the portable installation, the launcher and the command line work.
+  - name: Known issues and validation status
+    url: https://github.com/irnutsmurt/Cubic.Heroes/blob/main/docs/M11_VALIDATION.md
+    about: What has been validated so far and the bugs already known -- please check before reporting.

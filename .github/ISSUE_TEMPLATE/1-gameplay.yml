@@ -1,0 +1,65 @@
+name: Gameplay bug
+description: Something in the game behaves differently from the original (a quest, an enemy, an item, a menu, timing).
+title: "[Gameplay] "
+labels: ["bug", "gameplay"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing the beta. **Never attach or paste game files, keys, save files, or personal information**
+        (your name, e-mail address, account names, or folder paths containing them). The launcher's diagnostics export
+        removes these for you; please review it before attaching.
+  - type: input
+    id: version
+    attributes:
+      label: Cubic.Heroes version
+      description: "The launcher's title bar, or `CubicHeroes --version`."
+      placeholder: "0.2.0-beta.1"
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+      description: If you know how the original PS3 game (or RPCS3) behaves here, say so.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Where you were in the game (area, dungeon, story point), what you did, and how often it happens.
+      placeholder: |
+        1. Continue a save in the first temple
+        2. ...
+    validations:
+      required: true
+  - type: input
+    id: settings
+    attributes:
+      label: Frame limit and display mode
+      description: "Settings > Display (for example: 60 fps, VSync on, windowed). Some bugs depend on the frame rate."
+  - type: input
+    id: system
+    attributes:
+      label: System
+      description: Operating system, CPU, GPU and GPU driver version.
+      placeholder: "Windows 11 24H2, Core i5-12400, GeForce RTX 3060, driver 566.36"
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: |
+        Launcher > Diagnostics > Export Logs, review the files, then Save the zip and attach it here. A screenshot or
+        short video of the problem helps too.
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched the existing issues and the known issues list.
+          required: true
+        - label: I have not attached game files, keys, save files or personal information.
+          required: true
