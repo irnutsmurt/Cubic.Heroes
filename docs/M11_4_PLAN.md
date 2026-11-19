@@ -215,11 +215,11 @@ States: **VERIFIED** (implemented, evidence named), **UNVERIFIED** (implemented,
 |---|---|---|---|
 | A1 | Privacy configuration and git safeguards active on Linux | VERIFIED | section 2 |
 | A2 | The desktop guard enforced on Linux (X11 and Wayland) | VERIFIED (mechanism); runners' Linux kill paths: P4 | section 9 |
-| A3 | Native Linux dev build boots and plays (offscreen) | PARTIAL: boots to the title and the attract demo, movies decoded; play from a save not yet | section 11 |
+| A3 | Native Linux dev build boots and plays (offscreen) | VERIFIED: plays from saves -- the 166-map sweep, the river fight, seven bosses, the ending (sections 25, 27, 30) | sections 11, 25, 27, 30 |
 | A4 | Linux release configuration as Windows' (D1: no lifted SPU in the release) | VERIFIED at boot (--memtest 601/601; the census all zero); longer play: P8 | section 12 |
 | A5 | Release crash record and hang report on Linux | VERIFIED: the release crash record, the developer crash report and thread dump (section 15); the graphics' start watched in every build -- a stalled window system ends the game with status 70 and a report (section 23) | sections 15, 23 |
 | A6 | Audio through OpenAL Soft with the system's server; device change recovered | VERIFIED: the audio suite 230/230; a real default-output change and back during play, followed both ways (section 23); the shipped OpenAL with PipeWire, PulseAudio and ALSA | section 23 |
-| A7 | Cinematics through FFmpeg | NOT DONE | P2/P8 |
+| A7 | Cinematics through FFmpeg | VERIFIED: the opening 4,620 of 4,620 frames, the credits 7,860 of 7,860 with all 11,554,189 sound frames, 0 late as a player runs it (section 30) | section 30 |
 | A8 | X11 and Wayland: windowed, borderless, fullscreen; the desktop's mode never changed | VERIFIED: all three modes on screen under native Wayland and X11 (XWayland, RADV presenting), the desktop at 1600x900@60.07 before and after every run; HiDPI at 150% (section 23) | sections 22, 23 |
 | A9 | Rendering resolution presets and custom; VSync; frame limits | NOT DONE | P8 |
 | A10 | Controllers: detection, prompts, hot-plug, remapping; keyboard remapping | PARTIAL: detection, prompts and hot-plug VERIFIED by the owner's hands with the packaged SDL2 (section 29); remapping: to do | section 29 |
@@ -787,3 +787,28 @@ after every reconnection (the owner's play and 45+ button and stick changes logg
 polled on its own thread; no "update took" report), the game closed normally (exit 0). The prompts follow the device
 used last, as designed: the Xbox glyphs after a press on the controller, the keyboard's after a key (the owner:
 working). Not tested: a second controller of another make at once, Bluetooth.
+
+## 30. The cinematics, and the credits' stalls traced to the test harness (2026-11-19) [M]
+
+**Decoded through FFmpeg** (n9.0.2, LGPL, the Bink decoder): the opening (tests/scenarios/m8_movie_trace.drive) 4,620
+of 4,620 frames, 2.27 ms a frame, none late (silent by design: its music is the sound manager's); the credits (the
+ending scenario) 7,860 of 7,860 frames, 44.1 kHz stereo, all 11,554,189 sound frames.
+
+**The credits' stalls**: in the developer-tools suite's ending the game's own frames stalled during the credits (4 to
+68 frames over 100 ms, up to 1.1 s; 70-754 movie frames late) -- Windows: 0 late. Traced with a recorder beside the
+run (build/tmp/bench, memrec.py: every second the system's available memory, swap in/out, major faults, memory and IO
+pressure, /tmp's tmpfs, the game's resident set, swap and faults; every 10 ms each game thread in uninterruptible
+sleep and its kernel wait point):
+- **not memory**: during the credits >= 8.9 GB available, 0 pages swapped out, 15 in, the game 0 major faults and
+  nothing in swap;
+- **disk writes**: the game's present thread blocked ~16 s of the credits in `rq_qos_wait` (the block layer's
+  writeback throttling) and on page writeback, the main thread ~7 s on file pages; system IO pressure (full) to 27%.
+  The writes: the test harness's live frame dump (PS3RECOMP_VK_DUMP: frame.ppm, 2.7 MB, rewritten every 15th
+  present on the present path, for the drives' `shot` steps) -- never on in a player's game;
+- **as a player runs it** (DUMP=0, the same ending without its `shot` steps, the same preparation): **0 frames
+  late, 0 waited for, no game frame over 100 ms** in the credits; IO pressure at most 3.8%.
+
+Timing runs already use DUMP=0 (tests/perf_run.py: sections 24 and 27). /tmp on this machine is a RAM-backed tmpfs
+(8.8 GB; 3.5 GB in use, most of it swapped out: other sessions' files and seven 108 MB `appimage_extracted_*`
+folders left by this milestone's extract-and-run tests, removed); large temporary files and benchmark captures go to
+the git-ignored build/tmp (TMPDIR) from now on.
