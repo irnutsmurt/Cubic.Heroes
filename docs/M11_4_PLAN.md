@@ -226,7 +226,7 @@ States: **VERIFIED** (implemented, evidence named), **UNVERIFIED** (implemented,
 | A11 | The in-game overlay, performance overlays, developer tools, diagnostics and log export | NOT DONE | P8 |
 | A12 | The public CLI and exit codes (docs/CLI.md), `SIGTERM` reaching the game | VERIFIED: tests/cli_integration.py --with-game 17/17 on Linux (Windows: 17/17, M11.2); the signals; every command from both packages (section 20) | section 21 |
 | A13 | Graphical launcher: install from the disc, local recompilation, shader preparation | PARTIAL: headless install verified (2458 pipelines, none failed); the window: to do | section 13 |
-| A14 | Signed updates, repair and rollback; the right package per OS and architecture | PARTIAL: tests/linux_update_check.py 10/10 from the package (signed release offered and swapped in; bad signature, untrusted key, Windows-only release, corrupted download and a zip refused; each install kind its own package); update and rollback from the packages; `--install --repair`: to do | section 23 |
+| A14 | Signed updates, repair and rollback; the right package per OS and architecture | PARTIAL: tests/linux_update_check.py 10/10 from the package (signed release offered and swapped in; bad signature, untrusted key, Windows-only release, corrupted download and a zip refused; each install kind its own package); update and rollback from the packages; `--install --repair` from the tarball's install, its game removed: rebuilt, saves byte-identical, plays (section 28) -- VERIFIED on the packages rebuilt with the rollback fix: to do | sections 23, 28 |
 | A15 | Portable root: spaces, Unicode, relocation, another drive, no FUSE (tarball) | VERIFIED except another drive: spaces, accents and Japanese, the whole root moved and played (both packages), no FUSE (containers). **Another physical drive: DEFERRED by the owner's decision (2026-11-18) -- not verified, not a release blocker** | sections 20, 23 |
 | A16 | Launcher AppImage and tarball, equivalent | VERIFIED: one folder; the AppImage = the folder file for file; each qualified 14/14 from the package, offline (section 20) | section 20 |
 | A17 | The locally generated thin game AppImage: relocatable, regenerated on update and rollback, never distributed | VERIFIED: made by the packaged installs, of the active build after the update and after the rollback; through FUSE and extract-and-run; before and after the root moved (section 20) | section 20 |
@@ -762,3 +762,18 @@ after its mark (the arena's entry done):
 GPU 41% busy on average (51% at most), the game 78% of a core on average; VRAM 367 MB over idle. The nine frames of
 100-447 ms in the whole run all fall between fights: the tools' `progress set` and the entry into the next temple
 (map loads), not play.
+
+## 28. `--install --repair` on Linux (2026-11-19) [M]
+
+From the packaged tarball's qualification install (the root with spaces, accents and Japanese, moved), the active
+build's game removed: `--play` refused it ("The game's program is missing ... Repair the installation"); `--status`
+reports the layout only (installed). `CubicHeroes --install --repair --disc <image> --keys <EBOOT.elf> --json`: exit 0
+in 21 s (the compiled objects reused: extract 8.2 s, decrypt 1.5, build 4.0, verify 4.2, the preparation 0.9); a new
+build active; the 11 save files byte-identical before and after; the repaired game played offscreen (the title movie,
+962 frames; SIGTERM forwarded, status 6).
+
+**Found and fixed**: the activation kept the build it replaced for rollback whatever its state -- after this repair,
+the damaged build was the rollback and the whole one before it was pruned (a rollback would then have been refused:
+"build_damaged"). tools/install_layout.py activate keeps only whole builds (check_build); tests/test_install_layout.py
+test_a_repair_keeps_the_whole_build_for_rollback (26/26). Windows shares the change (its install layout is the same
+code).

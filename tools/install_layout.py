@@ -314,11 +314,13 @@ class Layout:
         return info["id"]
 
     def activate(self, bid):
-        """bid becomes the active build; the one before it is kept for rollback, as many as the retention says"""
+        """bid becomes the active build; the one before it is kept for rollback, as many as the retention says --
+        whole ones only (M11.4: a repair of a damaged build kept the damaged one as the rollback and let the whole
+        one before it go)"""
         if self.check_build(bid):
             raise LayoutError(f"build {bid} can't be made active: {self.check_build(bid)}", "build_damaged")
         st = self.read_active()
-        prev = [b for b in [st["active"]] + st["previous"] if b and b != bid]
+        prev = [b for b in [st["active"]] + st["previous"] if b and b != bid and not self.check_build(b)]
         st["active"], st["previous"] = bid, prev[:max(0, st["retention"])]
         self.write_active(st)
         self.point_game(bid)

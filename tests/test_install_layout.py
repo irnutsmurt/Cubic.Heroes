@@ -139,6 +139,15 @@ class Slots(Base):
         self.assertEqual(e.exception.code, "build_damaged")
         self.assertEqual(get(os.path.join(self.lay.game_link, EXE)), b"game 2", "the active build untouched")
 
+    def test_a_repair_keeps_the_whole_build_for_rollback(self):
+        a, _, _ = self.build(Fake(b"game 1"))
+        b, _, _ = self.build(Fake(b"game 2"))
+        os.remove(os.path.join(self.lay.build_dir(b), EXE))   # the active build damaged, then repaired
+        c, _, _ = self.build(Fake(b"game 3"))
+        self.assertEqual(self.lay.read_active()["previous"], [a], "the whole build kept, not the damaged one")
+        self.assertIn(f"builds/{b}", self.lay.prune()["removed"])
+        self.assertEqual(self.lay.rollback()["active"], a)
+
     def test_rollback_without_previous(self):
         self.build(Fake())
         with self.assertRaises(layout.LayoutError) as e:
