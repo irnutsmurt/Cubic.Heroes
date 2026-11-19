@@ -10,12 +10,23 @@ Two packages of the same files, both x86-64, both under the project's signed rel
 (docs/RELEASE_SIGNING.md; each asset carries `platform` and `kind`):
 
 - **`Cubic.Heroes-<version>-x86_64.AppImage`**: one file, started by a double click or from a terminal; a read-only
-  image mounted while it runs (FUSE), or `--appimage-extract-and-run` where FUSE is not available.
+  image mounted while it runs (FUSE), or `--appimage-extract-and-run` where FUSE is not available (see "Without
+  FUSE" below: the tarball is recommended there).
 - **`Cubic.Heroes-<version>-linux-x86_64.tar.xz`**: the same files in one folder, `Cubic.Heroes`, which is a portable
   installation root exactly as on Windows (docs/CLI.md section 1) -- for systems without FUSE, for packagers, and for
   players who prefer a plain folder.
 
 The AppImage is made from the tarball's folder and checked to hold it file for file (bytes and executable bits).
+
+**Without FUSE, use the tarball.** The pinned AppImage runtime's `--appimage-extract-and-run` (and
+`APPIMAGE_EXTRACT_AND_RUN=1`) extracts the whole image to `$TMPDIR/appimage_extracted_<hash>` (`/tmp` when TMPDIR is
+not set) and **does not remove it** when the program exits: about 450 MB for the launcher's AppImage, about 110 MB for
+a game AppImage, one copy per AppImage file (the same file reuses its copy; each new version leaves another). On a
+system whose `/tmp` is in memory (tmpfs), that is memory, then swap, until the next reboot or until the folder is
+deleted. Normal FUSE runs and the tarball leave nothing behind. The cause is in the runtime, not in Cubic.Heroes
+(docs/M11_4_PLAN.md section 31): its cleanup calls `nftw()` with a descriptor limit of 0, which the musl C library it
+is built with treats as "nothing to do". Cubic.Heroes keeps the official runtime unmodified and adds no cleanup of its
+own; the runtime is reevaluated at each dependency update (section 7).
 
 | In the package | What |
 |---|---|
@@ -121,7 +132,7 @@ pieces), each pinned in `config/deps.sha256` or the Dockerfile:
 | SDL2 2.32 | the window, input | the desktop, controllers | `tools/build_deps.py` SOURCES and its pin |
 | OpenAL Soft 1.25 | audio | none (game data) | idem |
 | FFmpeg 9.0 (Bink only) | movies | the game's own movie files | idem |
-| AppImage runtime 20251108 (+libfuse, squashfuse, zstd, zlib, musl) | mounts the AppImages | the AppImage file itself | a newer release: pin, verify its signature (tools/fetch_appimage.py) |
+| AppImage runtime 20251108 (+libfuse, squashfuse, zstd, zlib, musl) | mounts the AppImages | the AppImage file itself | a newer release: pin, verify its signature (tools/fetch_appimage.py); check whether its extract-and-run removes its copy (the `nftw` descriptor limit: section 1, "Without FUSE") |
 | squashfs-tools 4.7 | mksquashfs | the player's own files | pin |
 
 A release is preceded by a check of each against its upstream advisories (and the OSV database); a fix in any of

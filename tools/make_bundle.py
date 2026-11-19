@@ -471,7 +471,11 @@ def bundle(platform):
                 "it. A controller does everything.\n"
                 "worker/ holds what the launcher runs to convert and build the game.\n\n"
                 "Nothing from the game is included: the game is rebuilt from your disc on your machine.\n"
-                f"The game needs {needs}\n")
+                f"The game needs {needs}\n"
+                + ("" if platform == "windows" else
+                   "\nWithout FUSE, use the tarball (Cubic.Heroes-<version>-linux-x86_64.tar.xz): an AppImage started\n"
+                   "with --appimage-extract-and-run leaves its extracted copy in $TMPDIR (normally /tmp) until it is\n"
+                   "deleted or the machine restarts (docs/LINUX_PACKAGING.md).\n"))
     # the package's top items are exactly the ones the worker knows as the launcher's (install_layout.
     # LAUNCHER_PACKAGE): the portable root keeps the install beside them, and the launcher's update and removal
     # touch only these

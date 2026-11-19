@@ -813,7 +813,7 @@ Timing runs already use DUMP=0 (tests/perf_run.py: sections 24 and 27). /tmp on 
 folders left by this milestone's extract-and-run tests, removed); large temporary files and benchmark captures go to
 the git-ignored build/tmp (TMPDIR) from now on.
 
-## 31. Extract-and-run leaves its copy behind (2026-11-19) [M; root cause found; the fix: the owner's decision]
+## 31. Extract-and-run leaves its copy behind (2026-11-19) [M; root cause found; documented, not a release blocker]
 
 The pinned AppImage runtime (type2-runtime 20251108, dd6cebed) in extract-and-run mode (`--appimage-extract-and-run`
 or APPIMAGE_EXTRACT_AND_RUN=1: the fallback where FUSE is missing) extracts to `$TMPDIR/appimage_extracted_<MD5 of
@@ -848,3 +848,9 @@ walked or removed, and "success" is returned, so no "Failed to clean up" message
 return early on 0, which would explain why upstream's cleanup appears to work in some builds.) Not our application:
 the minimal AppImage (AppRun = `echo`) behaves the same. Setting TMPDIR from the launcher could not help: the runtime
 extracts before any of our code runs.
+
+**The owner's decision (2026-11-19)**: documented, not worked around -- the official pinned runtime is kept unmodified;
+no upstream issue or pull request is filed on the owner's behalf; no cleanup of our own (no directory scanning);
+docs/LINUX_PACKAGING.md ("Without FUSE") and the packages' README.txt recommend the tarball where FUSE is missing and
+describe the leftover; the runtime is reevaluated at each dependency update (docs/LINUX_PACKAGING.md section 7's
+table). Not a blocker for the Linux beta.
