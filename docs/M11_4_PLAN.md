@@ -222,12 +222,12 @@ States: **VERIFIED** (implemented, evidence named), **UNVERIFIED** (implemented,
 | A9 | Rendering resolution presets and custom; VSync; frame limits | NOT DONE | P8 |
 | A10 | Controllers: detection, prompts, hot-plug, remapping; keyboard remapping | NOT DONE | P8 (hot-plug by hand) |
 | A11 | The in-game overlay, performance overlays, developer tools, diagnostics and log export | NOT DONE | P8 |
-| A12 | The public CLI and exit codes (docs/CLI.md), `SIGTERM` reaching the game | PARTIAL: exits 0/2/3/6/7 and the signals verified; tests/cli_integration.py on Linux: to do | section 13 |
+| A12 | The public CLI and exit codes (docs/CLI.md), `SIGTERM` reaching the game | PARTIAL: exits 0/2/3/6/7, the signals, and every command the qualification runs (--install, --status, --prepare-shaders, --update, --check-update offline, --play) from both packages; tests/cli_integration.py on Linux: to do | section 20 |
 | A13 | Graphical launcher: install from the disc, local recompilation, shader preparation | PARTIAL: headless install verified (2458 pipelines, none failed); the window: to do | section 13 |
-| A14 | Signed updates, repair and rollback; the right package per OS and architecture | PARTIAL: package kind, architecture, tar.xz staging (unit tests); from packages: P9 | section 13 |
-| A15 | Portable root: spaces, Unicode, relocation, another drive, no FUSE (tarball) | NOT DONE | P4/P9 |
-| A16 | Launcher AppImage and tarball, equivalent | PARTIAL: both built from one folder, the AppImage unpacked again identical (bytes and modes), boundary and privacy clean; the packaged qualification: running | section 18 |
-| A17 | The locally generated thin game AppImage: relocatable, regenerated on update and rollback, never distributed | UNVERIFIED: implemented; its start script's root rules unit-tested; from a packaged install: running | section 18 |
+| A14 | Signed updates, repair and rollback; the right package per OS and architecture | PARTIAL: an update that rebuilds and a rollback from the packages verified (the AppImage's by a new .AppImage file); a signed manifest download on Linux: unit tests only so far | section 20 |
+| A15 | Portable root: spaces, Unicode, relocation, another drive, no FUSE (tarball) | PARTIAL: spaces, accents and Japanese, the whole root moved and played, no FUSE (containers) verified; another drive: to do | section 20 |
+| A16 | Launcher AppImage and tarball, equivalent | VERIFIED: one folder; the AppImage = the folder file for file; each qualified 14/14 from the package, offline (section 20) | section 20 |
+| A17 | The locally generated thin game AppImage: relocatable, regenerated on update and rollback, never distributed | VERIFIED: made by the packaged installs, of the active build after the update and after the rollback; through FUSE and extract-and-run; before and after the root moved (section 20) | section 20 |
 | A18 | glibc 2.31 baseline verified on actual supported distributions, not only Manjaro | VERIFIED: 114 ELF files at GLIBC_2.30 at most; 8/8 checks on Debian 11, Ubuntu 20.04, Ubuntu 24.04, Fedora 41 (the game built here included) | section 19 |
 | A19 | Steam, Lutris and Heroic through the CLI | NOT DONE | P9 |
 | A20 | CI: Windows and Linux builds, tests, boundary and privacy checks | VERIFIED: run 44450410663 -- Linux 13m16s, Windows 22m46s, boundary and privacy, all pass | section 19 |
@@ -529,3 +529,28 @@ security-update plan (docs/LINUX_PACKAGING.md section 7); the glibc target uncha
   keep theirs. In the package: a tool child loads its bundled libraries, a system program sees no worker path.
   tests/test_hostenv.py.
 - docs/LINUX_PACKAGING.md rewritten to the packages as built (it was the M11.2 plan).
+
+## 20. The packaged qualification on Linux (2026-11-18) [M]
+
+tests/release_qualification.py from the final packages (`Cubic.Heroes-0.2.0-beta.2-linux-x86_64.tar.xz`, 101 MB;
+`Cubic.Heroes-0.2.0-beta.2-x86_64.AppImage`, 116 MB), each in a fresh folder named "Cubic Heroes RC" with an accent, a
+diaeresis and Japanese, `--offline` (a dead proxy for every step), the disc image and the decrypted EBOOT.elf (the
+keys file's run, and its `keys` step, wait for the owner's file: D3):
+
+| Step | Tarball | AppImage |
+|---|---|---|
+| unpack (top items; executable bits) | pass | pass (copied into the folder; the image's own items) |
+| empty (`--status`: nothing installed; the root: the folder / "beside the AppImage") | pass | pass |
+| install (interrupted after 240 s, then resumed) | pass, 591 s | pass, 613 s |
+| status, shaders, noop (`--update`: nothing rebuilt), checkup (offline: answered at once) | pass | pass |
+| play (`--play`, the game's own end through its exit question, status 0, no report) | pass | pass |
+| rebuild (a new version: a tool and the game's code changed -- the AppImage's: a new `.AppImage` file) | pass | pass |
+| rollback (the first build active again, nothing rebuilt; played) | pass | pass |
+| gameappimage (exports/, of the active build; FUSE and extract-and-run) | pass | pass |
+| relocate (the whole folder moved: found, played, its game AppImage) | pass | pass |
+| remove, reunpack | pass | not applicable (an AppImage is a file, never unpacked into the root) |
+
+**14 of 14 for each.** Found by these runs and fixed before this result: the frozen worker's library path in its
+children (section 19, and the first fix's regression of the lifting tools); the AppImage's update path (a new file);
+Linux's reproducible build making the old rebuild step's comment-only change a no-op. Not covered by this run:
+`suite` (the developer tools' installed checks: a save from the owner's checkpoints) and `keys` (the owner's keys file).

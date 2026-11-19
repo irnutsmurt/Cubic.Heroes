@@ -35,12 +35,19 @@ def fwd(p):
     return p.replace("\\", "/")
 
 
+# the processes that existed before a test began (OwnedRun.setUp): never part of a tree it starts. Windows reuses
+# process ids, and a long-running process whose parent exited long ago (csrss, winlogon, dwm: a session's) looked like
+# the test's own child when the old parent's id came back as the test's (a CI runner, M11.4)
+BEFORE = set()
+
+
 def tree(root):
-    """the pids below root (not root), from the process snapshot"""
+    """the pids below root (not root), from the process snapshot -- none that existed before the test began"""
     procs = owned_run.processes()
     kids = {}
     for pid, (pp, _) in procs.items():
-        kids.setdefault(pp, []).append(pid)
+        if pid not in BEFORE:
+            kids.setdefault(pp, []).append(pid)
     out, todo = [], list(kids.get(root, []))
     while todo:
         p = todo.pop()
@@ -88,6 +95,8 @@ def owned(name, *cmd, **kw):
 @unittest.skipUnless(os.name == "nt" and GIT, "Windows with Git's bash")
 class OwnedRun(unittest.TestCase):
     def setUp(self):
+        BEFORE.clear()
+        BEFORE.update(owned_run.processes())
         self.name = f"t{os.getpid()}-{self._testMethodName[5:]}"[:40]
         self.sh, self.bash = os.path.join(GIT, "sh.exe"), os.path.join(GIT, "bash.exe")
         # the long-running child: a native Python, not the shell's `sleep` -- whether MSYS's sleep shows as a process
