@@ -26,6 +26,7 @@ import socket
 import subprocess
 import sys
 import zipfile
+import hostenv  # noqa: E402 -- the system's programs without the frozen worker's library path
 
 ROOT = (os.path.dirname(sys.executable) if getattr(sys, "frozen", False)
         else os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -84,7 +85,8 @@ def _run_json(cmd, timeout=60):
     kw = {"creationflags": 0x08000000} if os.name == "nt" else {}
     env = {k: v for k, v in os.environ.items() if not k.startswith(("DOTHEROES_", "PS3_", "PS3RECOMP_"))}
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env, stdin=subprocess.DEVNULL,
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=hostenv.host_env(env),
+                           stdin=subprocess.DEVNULL,
                            encoding="utf-8", errors="replace", **kw)
         lines = [ln for ln in r.stdout.splitlines() if ln.strip().startswith("{")]
         return json.loads(lines[-1]) if lines else {"exit": r.returncode}

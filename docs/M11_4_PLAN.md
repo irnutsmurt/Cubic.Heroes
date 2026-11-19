@@ -228,9 +228,9 @@ States: **VERIFIED** (implemented, evidence named), **UNVERIFIED** (implemented,
 | A15 | Portable root: spaces, Unicode, relocation, another drive, no FUSE (tarball) | NOT DONE | P4/P9 |
 | A16 | Launcher AppImage and tarball, equivalent | PARTIAL: both built from one folder, the AppImage unpacked again identical (bytes and modes), boundary and privacy clean; the packaged qualification: running | section 18 |
 | A17 | The locally generated thin game AppImage: relocatable, regenerated on update and rollback, never distributed | UNVERIFIED: implemented; its start script's root rules unit-tested; from a packaged install: running | section 18 |
-| A18 | glibc 2.31 baseline verified on actual supported distributions, not only Manjaro | PARTIAL: every ELF of the package at GLIBC_2.30 at most (114 files); runs on other distributions: to do | section 18 |
+| A18 | glibc 2.31 baseline verified on actual supported distributions, not only Manjaro | VERIFIED: 114 ELF files at GLIBC_2.30 at most; 8/8 checks on Debian 11, Ubuntu 20.04, Ubuntu 24.04, Fedora 41 (the game built here included) | section 19 |
 | A19 | Steam, Lutris and Heroic through the CLI | NOT DONE | P9 |
-| A20 | CI: Windows and Linux builds, tests, boundary and privacy checks | UNVERIFIED: written, its Linux steps run locally; first GitHub run after the push | section 14 |
+| A20 | CI: Windows and Linux builds, tests, boundary and privacy checks | VERIFIED: run 44450410663 -- Linux 13m16s, Windows 22m46s, boundary and privacy, all pass | section 19 |
 | A21 | Windows build and behaviour unbroken | PARTIAL: Windows' game compiles and links from this tree (a Zig cross-build, Windows' release configuration); behaviour: the owner's Windows PC (section 7) | section 14 |
 | A22 | AMD rendering matches the Windows references; validation layers clean | NOT DONE | P7 |
 | A23 | Performance measured and reported (target 60 fps) | NOT DONE | P7 |
@@ -507,3 +507,25 @@ security-update plan (docs/LINUX_PACKAGING.md section 7); the glibc target uncha
   Windows' zip; new steps `gameappimage` and `relocate`; `remove`/`reunpack` recorded as not applicable to an AppImage
   (a file the player replaces, never unpacked into the root).
 - Windows: the game cross-built and the launcher compiled for Windows from this tree.
+
+## 19. P5/P6: CI green, the packages on other distributions, the worker's children (2026-11-18) [M]
+
+- **CI** (.github/workflows/ci.yml), after three fixes found by its runs -- CMake 4 for OpenAL Soft's configure (run
+  1), FFmpeg's Windows build without the runner's windres (run 2), owned_run's test with a native sleeper (run 3: MSYS's
+  sleep is not a process of its own in the runner's Windows tree) -- **run 44450410663: all three jobs pass**: Linux
+  (13 min 16 s), Windows (22 min 46 s: Zig, ps3recomp and its 173 patches, every library, the runtime against the stub
+  lift, the launcher, the command-line smoke test, every unit test), boundary and privacy.
+- **Other distributions** (tests/distro_check.py; clean containers, no network, no display, the image digests in the
+  run's JSON): Debian 11 (glibc 2.31), Ubuntu 20.04 (2.31), Ubuntu 24.04 (2.39), Fedora 41 (2.40) -- each **8 of 8**:
+  the launcher (`--version`, `--status --json` on a folder with a space and an accent, the usage exit code 2), the
+  frozen worker, the AppImage through `--appimage-extract-and-run` (no FUSE in a container), and the game the worker
+  built on this laptop (`--memtest` 601 checks 0 failed; `--info` with FFmpeg loaded).
+- **The frozen worker's children** (tools/hostenv.py): PyInstaller's `_internal/` first on `LD_LIBRARY_PATH` reached
+  every program the worker starts (shown in the package: a child of the worker inherited it). A first fix restored the
+  player's value for the whole worker -- and broke its own lifting tools, which are the frozen program again and reuse
+  their parent's set-up ("libffi.so.7: cannot open shared object file": the packaged qualification's install failed at
+  the lift; found there, not shipped). Now only the system's and the player's programs get the player's value (the
+  game's `--info`, `--memtest`, `--prepare`; diagnostics; xdg-user-dir, gio, pgrep, Steam); the worker's own helpers
+  keep theirs. In the package: a tool child loads its bundled libraries, a system program sees no worker path.
+  tests/test_hostenv.py.
+- docs/LINUX_PACKAGING.md rewritten to the packages as built (it was the M11.2 plan).

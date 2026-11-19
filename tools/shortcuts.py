@@ -18,6 +18,7 @@ import subprocess
 import sys
 import time
 import zlib
+import hostenv  # noqa: E402 -- the system's programs without the frozen worker's library path
 
 NAME = "Cubic.Heroes"
 COMMENT = "3D Dot Game Heroes Recomp: native PC port of the PS3 version (static recompilation)"
@@ -56,7 +57,7 @@ def _windows_shortcuts(exe, desktop):
 
 def _xdg_dir(kind, fallback):
     try:
-        p = subprocess.run(["xdg-user-dir", kind], capture_output=True, text=True).stdout.strip()
+        p = subprocess.run(["xdg-user-dir", kind], capture_output=True, text=True, env=hostenv.host_env()).stdout.strip()
         if p and p != os.path.expanduser("~"):
             return p
     except OSError:
@@ -118,7 +119,7 @@ def _linux_shortcuts(exe, icon, desktop, apps_dir=None, desktop_dir=None, icons_
         os.chmod(path, 0o755)
         if path != targets[0]:
             # GNOME only launches desktop files it has been told to trust
-            subprocess.run(["gio", "set", path, "metadata::trusted", "true"], capture_output=True)
+            subprocess.run(["gio", "set", path, "metadata::trusted", "true"], capture_output=True, env=hostenv.host_env())
         made.append(path)
     return made
 
@@ -191,7 +192,7 @@ def steam_running():
             out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq steam.exe", "/NH"], capture_output=True,
                                  text=True, creationflags=NO_WINDOW).stdout
             return "steam.exe" in out.lower()
-        return subprocess.run(["pgrep", "-x", "steam"], capture_output=True).returncode == 0
+        return subprocess.run(["pgrep", "-x", "steam"], capture_output=True, env=hostenv.host_env()).returncode == 0
     except OSError:
         return False
 
@@ -204,7 +205,7 @@ def close_steam(timeout=30):
         if exe:
             try:
                 subprocess.Popen([exe, "-shutdown"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                 creationflags=NO_WINDOW)
+                                 creationflags=NO_WINDOW, env=hostenv.host_env())
                 break
             except OSError:
                 continue

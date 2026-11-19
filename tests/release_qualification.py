@@ -167,7 +167,7 @@ class Q:
             subprocess.run([self.exe, "--appimage-extract"], cwd=ex, check=True, stdout=subprocess.DEVNULL)
             items = sorted(os.listdir(os.path.join(ex, "squashfs-root")))
             want = sorted(install_layout.launcher_package()) + ["AppRun", "cubicheroes.desktop", "cubicheroes.png"]
-            bad = [] if set(install_layout.launcher_package()) <= set(items) <= set(want) + {".DirIcon"} and \
+            bad = [] if set(install_layout.launcher_package()) <= set(items) <= set(want) | {".DirIcon"} and \
                 os.access(self.exe, os.X_OK) else [f"the image's top items {items}"]
             self.record("unpack", bad, items=items, files=sum(len(f) for _, _, f in os.walk(ex)))
             return

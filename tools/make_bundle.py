@@ -67,7 +67,7 @@ OUR_TOOLS = ["fix_functions.py", "iso9660.py", "self_decrypt.py", "setup_pipelin
              "worker.py", "game_settings.py", "install_layout.py", "updates.py",
              "release_trust.py", "settings.py", "diagnostics.py",
              "pipeline_manifest.py", "uninstall.py", "ps3_disc.py",
-             "root_migration.py", "appimage.py", "game_appimage.py"]   # the launcher's worker (M9.0-M9.5; root_migration: the portable
+             "root_migration.py", "appimage.py", "game_appimage.py", "hostenv.py"]   # the launcher's worker (M9.0-M9.5; root_migration: the portable
 # root; appimage: the player's game AppImage, M11.4)
 
 

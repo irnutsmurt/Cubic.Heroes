@@ -38,6 +38,7 @@ import tempfile
 import threading
 import time
 import traceback
+import hostenv  # noqa: E402 -- the system's programs without the frozen worker's library path
 
 ROOT = (os.path.dirname(sys.executable) if getattr(sys, "frozen", False)
         else os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -612,7 +613,7 @@ def validate_build(slot, log):
     # the game's report and messages in UTF-8 (a path in them may hold any character), whatever the code page
     kw = dict({"creationflags": 0x08000000} if os.name == "nt" else {}, encoding="utf-8", errors="replace")
     try:
-        r = subprocess.run([exe, "--info"], capture_output=True, text=True, timeout=VALIDATE_TIMEOUT_S, env=env,
+        r = subprocess.run([exe, "--info"], capture_output=True, text=True, timeout=VALIDATE_TIMEOUT_S, env=hostenv.host_env(env),
                            stdin=subprocess.DEVNULL,
                            cwd=slot, **kw)
         info = json.loads(r.stdout.strip().splitlines()[-1]) if r.stdout.strip() else {}
@@ -623,7 +624,7 @@ def validate_build(slot, log):
                                   info.get("ffmpeg", {}).get("ok") else "not the native release") + ".",
                                   "build_invalid", json.dumps(info))
     try:
-        m = subprocess.run([exe, "--memtest"], capture_output=True, text=True, timeout=VALIDATE_TIMEOUT_S, env=env,
+        m = subprocess.run([exe, "--memtest"], capture_output=True, text=True, timeout=VALIDATE_TIMEOUT_S, env=hostenv.host_env(env),
                            stdin=subprocess.DEVNULL,
                            cwd=slot, **kw)
     except (OSError, subprocess.TimeoutExpired) as e:
@@ -893,7 +894,8 @@ def _run_prepare(lay, prog, extra, recipes, at):
     with open(os.path.join(lay.logs, "prepare.log"), "a" if at and at[0] else "w", encoding="utf-8",
               errors="replace") as err:
         p = subprocess.Popen([exe, "--prepare"] + extra, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=err,
-                             text=True, encoding="utf-8", errors="replace", cwd=lay.root, env=env, **kw)
+                             text=True, encoding="utf-8", errors="replace", cwd=lay.root, env=hostenv.host_env(env),
+                             **kw)
         try:
             for ln in p.stdout:
                 try:
