@@ -443,11 +443,52 @@ def link_args(lib_dir, platform=HOST):
         return res + rt + glslang + [os.path.join(lib_dir, "libSDL2.dll.a"),
                                      "-lws2_32", "-lole32", "-lbcrypt", "-ldbghelp", "-luser32", "-lgdi32",
                                      "-lwinmm", "-lshell32", "-Wl,--subsystem,windows", "-Wl,--stack,8388608"]
-    # M11.4: DT_RPATH, not DT_RUNPATH (--disable-new-dtags): the bundled libraries in $ORIGIN/lib come before an
-    # LD_LIBRARY_PATH a launcher injects (Lutris put /usr/lib first, and the game ran on the system's SDL2); only
-    # lib/ is named, so the system's own libraries (glibc, the Vulkan loader and drivers) are found as before
+    # $ORIGIN/lib as DT_RPATH, not DT_RUNPATH (M11.4): Zig's linker writes DT_RUNPATH for an executable whatever the
+    # flags, so rpath_tag() turns the tag over after linking (build_game, tools/build_launcher.py)
     return rt + glslang + [os.path.join(lib_dir, "libSDL2-2.0.so.0"), "-lpthread", "-ldl", "-lm",
-                           "-Wl,-rpath,$ORIGIN/lib", "-Wl,--disable-new-dtags"]
+                           "-Wl,-rpath,$ORIGIN/lib"]
+
+
+def rpath_tag(path):
+    """A linked Linux program's DT_RUNPATH made DT_RPATH (M11.4): the same path string, the other tag -- the dynamic
+    loader then searches $ORIGIN/lib before an LD_LIBRARY_PATH a launcher injects (Lutris put /usr/lib first, and
+    the game ran on the system's SDL2), and the system's own libraries (glibc, the Vulkan loader and drivers), which
+    are not in lib/, are found as before. Done in place: no tool (patchelf) is needed on the player's machine.
+    Returns how many entries were changed; a file that is not a little-endian ELF64 is left alone."""
+    import struct
+    DT_NULL, DT_RPATH, DT_RUNPATH, PT_DYNAMIC = 0, 15, 29, 2
+    with open(path, "r+b") as f:
+        head = f.read(64)
+        if head[:4] != b"\x7fELF" or head[4] != 2 or head[5] != 1:
+            return 0
+        phoff, = struct.unpack_from("<Q", head, 32)
+        phentsize, phnum = struct.unpack_from("<HH", head, 54)
+        dyn = None
+        for i in range(phnum):
+            f.seek(phoff + i * phentsize)
+            ph = f.read(phentsize)
+            if struct.unpack_from("<I", ph, 0)[0] == PT_DYNAMIC:
+                dyn = struct.unpack_from("<QQ", ph, 8)   # p_offset, p_vaddr
+                size = struct.unpack_from("<Q", ph, 32)[0]   # p_filesz
+                break
+        if not dyn:
+            return 0
+        changed, has_rpath = [], False
+        for off in range(dyn[0], dyn[0] + size, 16):
+            f.seek(off)
+            tag, _ = struct.unpack("<qQ", f.read(16))
+            if tag == DT_NULL:
+                break
+            if tag == DT_RUNPATH:
+                changed.append(off)
+            elif tag == DT_RPATH:
+                has_rpath = True
+        if has_rpath and changed:
+            raise SystemExit(f"{path}: both DT_RPATH and DT_RUNPATH; not changed")
+        for off in changed:
+            f.seek(off)
+            f.write(struct.pack("<q", DT_RPATH))
+        return len(changed)
 
 
 def build_game(gen_dir, out_exe, cache_dir, zig=None, platform=HOST, progress=None, log=None, keep=(),
@@ -513,6 +554,8 @@ def build_game(gen_dir, out_exe, cache_dir, zig=None, platform=HOST, progress=No
             report(share + (1 - share) * min(0.97, (time.monotonic() - t1) / link_est), "Linking")
     if p.returncode:
         raise BuildError("linking failed:\n" + err[-3000:])
+    if platform == "linux":
+        rpath_tag(out_exe + ".part")   # $ORIGIN/lib before an injected LD_LIBRARY_PATH (M11.4)
     os.replace(out_exe + ".part", out_exe)
     timings["link"] = time.monotonic() - t1
     try:
