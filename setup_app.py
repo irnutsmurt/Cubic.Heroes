@@ -734,7 +734,23 @@ def not_the_program():
     sys.exit(EXIT_NOT_THE_PROGRAM)
 
 
+def restore_library_path():
+    """M11.4: the frozen worker on Linux. PyInstaller's bootloader puts the worker's own _internal/ first on
+    LD_LIBRARY_PATH; every program the worker starts inherited it -- the game (--info, --prepare: Mesa's Vulkan driver
+    then found the worker's copies of zlib, zstd, libffi before the system's), Steam, gio. The player's own value comes
+    back (PyInstaller keeps it as LD_LIBRARY_PATH_ORIG), or none. The worker itself is unaffected: the dynamic linker
+    read the variable when it started; its helper processes are this program again, which sets it up anew."""
+    if not getattr(sys, "frozen", False) or not sys.platform.startswith("linux"):
+        return
+    orig = os.environ.pop("LD_LIBRARY_PATH_ORIG", None)
+    if orig:
+        os.environ["LD_LIBRARY_PATH"] = orig
+    else:
+        os.environ.pop("LD_LIBRARY_PATH", None)
+
+
 def main():
+    restore_library_path()
     import multiprocessing
     multiprocessing.freeze_support()  # the lifter's worker processes, in the packaged app
     if len(sys.argv) >= 2 and sys.argv[1].endswith(".py") and os.path.isfile(sys.argv[1]):

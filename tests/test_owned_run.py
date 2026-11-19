@@ -90,7 +90,10 @@ class OwnedRun(unittest.TestCase):
     def setUp(self):
         self.name = f"t{os.getpid()}-{self._testMethodName[5:]}"[:40]
         self.sh, self.bash = os.path.join(GIT, "sh.exe"), os.path.join(GIT, "bash.exe")
-        self.batch_cmd = [self.sh, "-c", f"sleep 600 & '{fwd(PY)}' '{fwd(DUMMY)}' tree & wait"]
+        # the long-running child: a native Python, not the shell's `sleep` -- whether MSYS's sleep shows as a process
+        # of its own in the Windows tree depends on Git for Windows' version (a CI runner's did not: M11.4)
+        self.sleeper = f"'{fwd(PY)}' -c 'import time; time.sleep(600)'"
+        self.batch_cmd = [self.sh, "-c", f"{self.sleeper} & '{fwd(PY)}' '{fwd(DUMMY)}' tree & wait"]
         self.procs = []
 
     def tearDown(self):
@@ -142,7 +145,7 @@ class OwnedRun(unittest.TestCase):
     def test_shell_killed(self):
         """the launching shell is killed (what stopping a background task does): the tree ends"""
         cmd = f"'{fwd(PY)}' '{fwd(OWNED)}' --name {self.name} -- '{fwd(self.sh)}' -c " \
-              f"\"sleep 600 & '{fwd(PY)}' '{fwd(DUMMY)}' tree & wait\"; echo after"
+              f"\"{self.sleeper} & '{fwd(PY)}' '{fwd(DUMMY)}' tree & wait\"; echo after"
         shell = self.track(subprocess.Popen([self.bash, "-c", cmd], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
         hs = wait_tree(shell.pid, 6)
         self.assertGreaterEqual(len(hs), 6, [n for _, _, n in hs])
@@ -152,7 +155,7 @@ class OwnedRun(unittest.TestCase):
     def test_shell_killed_exec(self):
         """the same with the launcher as the shell's only command (bash runs it in place)"""
         cmd = f"'{fwd(PY)}' '{fwd(OWNED)}' --name {self.name} -- '{fwd(self.sh)}' -c " \
-              f"\"sleep 600 & '{fwd(PY)}' '{fwd(DUMMY)}' tree & wait\""
+              f"\"{self.sleeper} & '{fwd(PY)}' '{fwd(DUMMY)}' tree & wait\""
         shell = self.track(subprocess.Popen([self.bash, "-c", cmd], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
         hs = wait_tree(shell.pid, 5)
         self.assertGreaterEqual(len(hs), 5, [n for _, _, n in hs])

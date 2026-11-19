@@ -329,8 +329,26 @@ class Q:
         code, b0, _ = self.worker("builds", "--install", self.root)
         first = (b0 or {}).get("data", {}).get("active")
         tool = os.path.join(self.root, "worker", "tools", "fix_functions.py")
-        with open(tool, "a", encoding="utf-8", newline="\n") as f:
+        with open(tool if self.kind != "appimage" else os.devnull, "a", encoding="utf-8", newline="\n") as f:
             f.write("\n# M11.3 qualification: a lifting tool changed, as a new version's would be\n")
+        # and the game's own code (M11.4): Linux's build is reproducible -- a comment in a tool relifts to the same
+        # program, and the worker rightly keeps the identical build (Windows' PE differed every time) -- so the new
+        # version changes compiled code too, as a real one does
+        src = os.path.join(self.root, "worker", "src", "port", "stubs.cpp")
+        if self.kind == "appimage":
+            # an AppImage's new version is a new .AppImage file (the root beside it stays): the unpacked image
+            # changed, made into an AppImage again (tools/appimage.py) and put in the old one's place
+            unpacked = os.path.dirname(os.path.dirname(self.worker_exe))
+            src = os.path.join(unpacked, "worker", "src", "port", "stubs.cpp")
+            with open(os.path.join(unpacked, "worker", "tools", "fix_functions.py"), "a", encoding="utf-8",
+                      newline="\n") as f:
+                f.write("\n# M11.4 qualification: a lifting tool changed, as a new version's would be\n")
+        with open(src, "a", encoding="utf-8", newline="\n") as f:
+            f.write(f'\nextern "C" {{ int dotheroes_qualification_rebuild = {int(time.time())}; }}\n')
+        if self.kind == "appimage":
+            import appimage
+            appimage.build(unpacked, self.exe + ".new")
+            os.replace(self.exe + ".new", self.exe)
         code, out, err, secs = self.cli("--update", "--json", timeout=4 * 3600)
         r = self.last_result(out)
         data = r.get("data", {})
