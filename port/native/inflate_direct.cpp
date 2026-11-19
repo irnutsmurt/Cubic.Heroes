@@ -61,6 +61,7 @@
 // path logs the same line (edge_inflate.c), so two runs can be compared pack
 // by pack.
 #include "inflate_direct.h"
+#include "host_thread.h"
 
 #include "gz_walk.h"
 #include "inflate.h"
@@ -111,11 +112,7 @@ std::atomic<unsigned long long> g_n{ 0 }, g_small{ 0 }, g_in_place{ 0 }, g_in{ 0
 
 inline uint32_t host_tid()
 {
-#ifdef _WIN32
-    return (uint32_t)GetCurrentThreadId();
-#else
-    return 0;
-#endif
+    return dotheroes_host_tid();   // M11.4: the kernel's thread id elsewhere than Windows (was 0)
 }
 
 int decline(Why why, uint32_t gz, uint32_t size, uint32_t out, const char* detail)

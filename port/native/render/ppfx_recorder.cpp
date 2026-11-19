@@ -68,6 +68,7 @@
 // =alt:<n>: bypassed in alternate blocks of n frames (R3, R4, R3, ...).
 
 #include "ppu_context.h"
+#include "../host_thread.h"
 #include "ppfx_native.h"
 #include "rsx_dispatch.h"
 #include "rsx_texture_layout.h"
@@ -477,25 +478,17 @@ int s_ho_force;
 void rec_switches()
 {
     if (s_rec_locked >= 0) return;
-#ifdef _WIN32
+    // M11.4: every system has the host thread's id now (host_thread.h), so the R8 producer path is the same
+    // everywhere (it was the locked one off Windows, where every thread read 0)
     const char* e = getenv("DOTHEROES_RECORDER_LOCKED");
     const char* t = getenv("DOTHEROES_RECORDER_HANDOFF_TEST");
     s_ho_force = !(e && *e == '1') && t && *t == '1';
     s_rec_locked = e && *e == '1';
-#else
-    // without a thread id (every thread is 0 here), only the lock keeps the
-    // threads apart
-    s_rec_locked = 1;
-#endif
 }
 
 inline uint32_t this_tid()
 {
-#ifdef _WIN32
-    return GetCurrentThreadId();
-#else
-    return 0;
-#endif
+    return dotheroes_host_tid();
 }
 
 struct Pending {
@@ -4573,7 +4566,7 @@ extern "C" int ppfx_rec_observe(uint32_t addr, ppu_context* ctx)
                 shadow_cpu_write(dst - kLocalEa, vm_base + src, n);
                 stats().local_copies++;
 #ifdef _WIN32
-                if (S.tid && GetCurrentThreadId() != S.tid) stats().local_copies_other++;   // S.tid: set under this lock
+                if (S.tid && dotheroes_host_tid() != S.tid) stats().local_copies_other++;   // S.tid: set under this lock
 #endif
             } else copy_observed(dst - kLocalEa, src, n);   // R8: no s_lock (section 8.4, step 1)
         }
@@ -4606,12 +4599,7 @@ extern "C" int ppfx_rec_observe(uint32_t addr, ppu_context* ctx)
     const uint64_t t0 = timed ? now_ns() : 0;
     Stats& st = stats();
     bump(st.calls);
-    const uint32_t tid =
-#ifdef _WIN32
-        GetCurrentThreadId();
-#else
-        0;
-#endif
+    const uint32_t tid = dotheroes_host_tid();
     // R8 (section 8.4, step 1): the producer's calls take no lock. The first
     // call makes its thread the producer (producer_claim); another thread's
     // call leaves here, touching none of the producer's state; the producer
@@ -4949,9 +4937,7 @@ extern "C" void ppfx_rec_exit(uint32_t addr, ppu_context* ctx)
 extern "C" void ppfx_rec_store(uint64_t ea, uint32_t bytes)
 {
     if (!s_verifying) return;
-#ifdef _WIN32
-    if (GetCurrentThreadId() != S.tid) return;
-#endif
+    if (dotheroes_host_tid() != S.tid) return;
     if (s_stores.size() < 4096) s_stores.emplace_back(ea, bytes);
 }
 

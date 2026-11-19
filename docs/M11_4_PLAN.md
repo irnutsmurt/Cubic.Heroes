@@ -438,3 +438,21 @@ On-screen runs (the owner's standing approval; each recorded through `tests/desk
 - SDL2's default on a Wayland session is X11 (XWayland); both now work. The default stays SDL's (docs/LINUX_PACKAGING
   .md will say how to choose `SDL_VIDEODRIVER=wayland`).
 - The Windows game cross-built after 0172.
+
+## 17. P3: thread ids and the developer keys (2026-11-18) [M]
+
+- **Host thread ids** (port/native/host_thread.h): Windows' `GetCurrentThreadId`; elsewhere the kernel's id, one
+  `gettid` per thread, kept thread-local (the recorder asks on every record). Five places read 0 off Windows; the
+  recorder was therefore forced onto its locked path. Now the R8 lock-free producer is the path on Linux too:
+  `recorder_locked 0`, `other_threads 0`, the boot strict-clean (phys_direct, inflate_direct and the recorder's own
+  checks use the same helper).
+- **The developer keys** (`DOTHEROES_DEV_KEYS=1`; port/native/dev_state.cpp): the key loop -- F8 or L3+R3 a hitch
+  mark, F7 the frame-rate readout, F9 a rumble pulse, F6 the credits, and the drive scripts' mark, trace, life and
+  position triggers -- was compiled for Windows only, so drive scripts using `life.trigger`/`pos.trigger` could not
+  run on Linux. It now runs everywhere: Windows reads its keys as before; elsewhere the runtime's SDL state does
+  (ps3recomp **0173** `cellPad_host_fkeys`, focus-gated; `cellPad_host_buttons` for L3+R3). Verified offscreen: two
+  `mark.trigger`s logged 3 s apart. The keys themselves need hands on the keyboard (an owner check under P8). The
+  CPU-debug-register watch (`DEV_HWWATCH`) stays Windows' (a development tool).
+- **CI's second run**: the Linux job passed on GitHub (9 min 33 s: Zig, ps3recomp and its patches, the libraries,
+  the runtime against the stub lift, the launcher, the command line, the unit tests, the glibc check).
+- The Windows game cross-built after these changes.

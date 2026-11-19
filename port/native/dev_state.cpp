@@ -814,7 +814,14 @@ void record_loop()
     }
 }
 
-#ifdef _WIN32
+// the developer keys (DOTHEROES_DEV_KEYS) on every system (M11.4: Windows only before): Windows reads them as it did
+// (GetAsyncKeyState while the game's window is in front, XInput for L3+R3); elsewhere the runtime's SDL state does
+// (cellPad_host_fkeys, focus-gated; cellPad_host_buttons for any controller's L3+R3)
+#ifndef _WIN32
+extern "C" uint32_t cellPad_host_fkeys(void);
+extern "C" uint32_t cellPad_host_buttons(uint32_t* ly);
+#endif
+
 void mark(unsigned& n, uint32_t who)
 {
     n++;
@@ -828,20 +835,28 @@ void mark(unsigned& n, uint32_t who)
     ps3_osd_post(text, 1500);
 }
 
+#ifdef _WIN32
 bool our_window_focused()
 {
     DWORD pid = 0;
     const HWND w = GetForegroundWindow();
     return w && GetWindowThreadProcessId(w, &pid) && pid == GetCurrentProcessId();
 }
+#endif
 
 void keys_loop()
 {
+#ifdef _WIN32
     typedef DWORD(WINAPI * GetStateFn)(DWORD, XINPUT_STATE*);
     HMODULE xi = LoadLibraryA("xinput1_4.dll");
     if (!xi) xi = LoadLibraryA("xinput9_1_0.dll");
     const GetStateFn get_state = xi ? (GetStateFn)(void*)GetProcAddress(xi, "XInputGetState") : nullptr;
     const WORD sticks = XINPUT_GAMEPAD_LEFT_THUMB | XINPUT_GAMEPAD_RIGHT_THUMB;
+    auto fkey = [](int f) { return (GetAsyncKeyState(VK_F1 + f - 1) & 0x8000) != 0; };
+#else
+    uint32_t fk = 0;
+    auto fkey = [&fk](int f) { return (fk >> (f - 1) & 1u) != 0; };
+#endif
     bool f8 = false, f7 = false, pad = false, f9 = false, f6 = false;
     unsigned n = 0;
     for (;;) {
@@ -883,17 +898,23 @@ void keys_loop()
                         (double)(int64_t)(ps3_ft_now() - g_ps3_ft.base) / 1e9);
             }
         }
+#ifdef _WIN32
         if (!our_window_focused()) { f8 = f7 = pad = f9 = f6 = false; continue; }
-        const bool f8_now = (GetAsyncKeyState(VK_F8) & 0x8000) != 0, f7_now = (GetAsyncKeyState(VK_F7) & 0x8000) != 0;
         bool pad_now = false;
         for (DWORD u = 0; get_state && u < 4 && !pad_now; u++) {
             XINPUT_STATE s;
             pad_now = get_state(u, &s) == ERROR_SUCCESS && (s.Gamepad.wButtons & sticks) == sticks;
         }
+#else
+        fk = cellPad_host_fkeys();   // 0 while the game's window does not have the keyboard
+        const uint32_t l3r3 = (1u << 1) | (1u << 2);   // cellPad_host_buttons' L3 and R3
+        const bool pad_now = (cellPad_host_buttons(nullptr) & l3r3) == l3r3;
+#endif
+        const bool f8_now = fkey(8), f7_now = fkey(7);
         if (f8_now && !f8) mark(n, 1);
         if (pad_now && !pad) mark(n, 2);
         if (f7_now && !f7) ps3_osd_fps_set_mode((ps3_osd_fps_mode() + 1) % 3);
-        const bool f9_now = (GetAsyncKeyState(VK_F9) & 0x8000) != 0;
+        const bool f9_now = fkey(9);
         if (f9_now && !f9) {
             // the game's vibration setting: the byte its vibrate function (func_00035228) tests, at its pad
             // manager (the word at 0x01021CE4: TOC 0x01028658 - 0x6974) + 0x458; nonzero: on
@@ -903,12 +924,13 @@ void keys_loop()
                     on < 0 ? "not readable yet" : on ? "on" : "off", on);
             cellPad_dev_rumble_pulse(600);
         }
-        const bool f6_now = (GetAsyncKeyState(VK_F6) & 0x8000) != 0;
+        const bool f6_now = fkey(6);
         if (f6_now && !f6 && g_dev_credits_request) g_dev_credits_request();
         f8 = f8_now; f7 = f7_now; pad = pad_now; f9 = f9_now; f6 = f6_now;
     }
 }
 
+#ifdef _WIN32
 // DOTHEROES_DEV_HWWATCH=<ea>[:w][,<ea>[:w]...]@<start s>,<seconds> (R8): who reads and
 // writes up to four guest words. The CPU's debug registers watch each word (4
 // bytes, aligned; :w writes only, else reads and writes) on every thread of the
@@ -1179,13 +1201,13 @@ void dev_state_init()
     }
 #ifdef _WIN32
     if (const char* hw = getenv("DOTHEROES_DEV_HWWATCH"); hw && *hw) hww::start(hw);
+#endif
     const char* k = getenv("DOTHEROES_DEV_KEYS");
     if (k && *k == '1') {
         std::thread(keys_loop).detach();
         fprintf(stderr, "[dev-keys] F8 or L3+R3: mark a hitch; F7: frame-rate readout off / text / graph; F9: a rumble "
                 "test pulse\n");
     }
-#endif
 }
 #else
 void dev_state_init() {}

@@ -52,6 +52,7 @@
 // DOTHEROES_PHYS_DIRECT_WORKERS=<n> (default 2): pool threads besides the
 // waiting PPU thread.
 #include "phys_direct.h"
+#include "host_thread.h"
 
 #ifdef DOTHEROES_BULLET_CD
 #include "bullet_cd_task.h"
@@ -167,11 +168,7 @@ inline void cpu_relax()
 
 inline uint32_t host_tid()
 {
-#ifdef _WIN32
-    return (uint32_t)GetCurrentThreadId();
-#else
-    return 0;
-#endif
+    return dotheroes_host_tid();   // M11.4: the kernel's thread id elsewhere than Windows (was 0)
 }
 
 inline uint64_t now_ns()

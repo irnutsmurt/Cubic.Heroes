@@ -1,0 +1,43 @@
+From 4040f5c8b31ea010fb2b2071d2185ea88d7ab411 Mon Sep 17 00:00:00 2001
+From: giteaguy <73799093+irnutsmurt@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 17:52:19 -0800
+Subject: [PATCH] cellPad: the function keys F1-F12 for a port's developer keys
+
+dotheroes M11.4. cellPad_host_fkeys(): F1-F12 held, bit n-1 for Fn, from SDL's keyboard state while the game's window
+has the keyboard -- the developer keys (F6-F9) on every system; Windows had them through GetAsyncKeyState only.
+---
+ libs/input/cellPad.c | 18 ++++++++++++++++++
+ 1 file changed, 18 insertions(+)
+
+diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
+index 090dc50a..f16d5c63 100644
+--- a/libs/input/cellPad.c
++++ b/libs/input/cellPad.c
+@@ -1995,6 +1995,24 @@ s32 cellPadClearBuf(u32 port_no)
+     return CELL_OK;
+ }
+ 
++/* dotheroes M11.4: the function keys F1-F12 held, bit n-1 for Fn -- only while the game's window has the keyboard (a
++ * port's developer keys, on every system: Windows had them through GetAsyncKeyState alone) */
++u32 cellPad_host_fkeys(void)
++{
++#if PAD_BACKEND_SDL2
++    if (!SDL_WasInit(SDL_INIT_VIDEO) || !SDL_GetKeyboardFocus()) return 0;
++    int n = 0;
++    const Uint8* ks = SDL_GetKeyboardState(&n);
++    if (!ks) return 0;
++    u32 k = 0;
++    for (int i = 0; i < 12; i++)
++        if ((int)SDL_SCANCODE_F1 + i < n && ks[SDL_SCANCODE_F1 + i]) k |= 1u << i;
++    return k;
++#else
++    return 0;
++#endif
++}
++
+ /* M10.2: the keys and the mouse a port's own menu reads -- only while the game's window has the keyboard (else 0
+  * and the mouse at -1): bit 0 F1, 1 up, 2 down, 3 left, 4 right, 5 Enter (or the keypad's), 6 Esc, 7 Backspace,
+  * 8 space; the mouse in the window's pixels, its buttons (bit 0 the left) */
+-- 
+2.56.0
+
