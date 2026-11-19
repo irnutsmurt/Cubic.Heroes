@@ -222,7 +222,7 @@ States: **VERIFIED** (implemented, evidence named), **UNVERIFIED** (implemented,
 | A9 | Rendering resolution presets and custom; VSync; frame limits | NOT DONE | P8 |
 | A10 | Controllers: detection, prompts, hot-plug, remapping; keyboard remapping | NOT DONE | P8 (hot-plug by hand) |
 | A11 | The in-game overlay, performance overlays, developer tools, diagnostics and log export | NOT DONE | P8 |
-| A12 | The public CLI and exit codes (docs/CLI.md), `SIGTERM` reaching the game | PARTIAL: exits 0/2/3/6/7, the signals, and every command the qualification runs (--install, --status, --prepare-shaders, --update, --check-update offline, --play) from both packages; tests/cli_integration.py on Linux: to do | section 20 |
+| A12 | The public CLI and exit codes (docs/CLI.md), `SIGTERM` reaching the game | VERIFIED: tests/cli_integration.py --with-game 17/17 on Linux (Windows: 17/17, M11.2); the signals; every command from both packages (section 20) | section 21 |
 | A13 | Graphical launcher: install from the disc, local recompilation, shader preparation | PARTIAL: headless install verified (2458 pipelines, none failed); the window: to do | section 13 |
 | A14 | Signed updates, repair and rollback; the right package per OS and architecture | PARTIAL: an update that rebuilds and a rollback from the packages verified (the AppImage's by a new .AppImage file); a signed manifest download on Linux: unit tests only so far | section 20 |
 | A15 | Portable root: spaces, Unicode, relocation, another drive, no FUSE (tarball) | PARTIAL: spaces, accents and Japanese, the whole root moved and played, no FUSE (containers) verified; another drive: to do | section 20 |
@@ -554,3 +554,15 @@ keys file's run, and its `keys` step, wait for the owner's file: D3):
 children (section 19, and the first fix's regression of the lifting tools); the AppImage's update path (a new file);
 Linux's reproducible build making the old rebuild step's comment-only change a no-op. Not covered by this run:
 `suite` (the developer tools' installed checks: a save from the owner's checkpoints) and `keys` (the owner's keys file).
+
+## 21. The command line's integration tests on Linux (2026-11-18) [M]
+
+tests/cli_integration.py --with-game (the development launcher, a copy of the development install, offscreen): **17 of
+17** -- the version and help; the default root from another working folder; CUBIC_INSTALL_DIR; the root pointer
+(relative); a relative --install-dir; an unusable root (exit 7); nothing installed (--play 3, --install without a disc
+2); the installation in the launcher's folder; --set kept and a refused value; the folder moved; --migrate-from (9 save
+files checked, the source unchanged) and its refusal; two installations side by side; --remember; and with the game:
+session options in effect and not kept, the game's own end passed on (0); the game's exit status passed on -- on Linux
+the game killed with SIGKILL and CubicHeroes exiting 137 (128 + 9: a status cannot be set from outside as Windows' 42
+is); the game ending with CubicHeroes (PR_SET_PDEATHSIG). The runner's Windows-only parts (`tasklist`,
+`TerminateProcess`) now have Linux forms (/proc, a signal).

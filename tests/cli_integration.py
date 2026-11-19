@@ -324,7 +324,10 @@ def game_cases(exe, a):
         bad.append("the session's window size was kept in config/window.json")
     case("--play: session options in effect, not kept; the game's own end passed on (0)", bad)
 
+    # the game's status passed on: Windows sets 42 from outside (TerminateProcess); Linux cannot set a status from
+    # outside -- the game killed (SIGKILL) ends with the signal, which CubicHeroes passes on as 128 + 9 (M11.4)
     k32 = ctypes.windll.kernel32 if os.name == "nt" else None
+    want = 42 if os.name == "nt" else 128 + 9
     p, ev = play(answer=False)
     time.sleep(25)
     pid = ev.get("pid")
@@ -333,30 +336,40 @@ def game_cases(exe, a):
         h = k32.OpenProcess(0x0001, False, pid)   # PROCESS_TERMINATE
         k32.TerminateProcess(h, 42)
         k32.CloseHandle(h)
+    elif pid:
+        os.kill(pid, 9)
     try:
         p.wait(60)
     except subprocess.TimeoutExpired:
         p.kill()
         bad.append("CubicHeroes did not end with the game")
-    if p.returncode != 42:
-        bad.append(f"exit {p.returncode}, not the game's 42")
-    case("--play passes on the game's exit status (42)", bad)
+    if p.returncode != want:
+        bad.append(f"exit {p.returncode}, not the game's {want}")
+    case(f"--play passes on the game's exit status ({want})", bad)
+
+    def alive(pid):
+        if os.name == "nt":
+            return str(pid) in subprocess.run(["tasklist", "/fi", f"pid eq {pid}", "/nh"], capture_output=True,
+                                              text=True).stdout
+        try:   # a zombie (ended, not yet reaped) is not running
+            with open(f"/proc/{pid}/stat") as f:
+                return f.read().rsplit(")", 1)[1].split()[0] != "Z"
+        except OSError:
+            return False
 
     p, ev = play(answer=False)
     time.sleep(25)
     pid = ev.get("pid")
-    running = p.poll() is None and bool(pid) and str(pid) in subprocess.run(
-        ["tasklist", "/fi", f"pid eq {pid}", "/nh"], capture_output=True, text=True).stdout
+    running = p.poll() is None and bool(pid) and alive(pid)
     p.kill()   # CubicHeroes ended from outside (as a launcher's "stop")
     p.wait()
     gone = False
     for _ in range(40):
-        r = subprocess.run(["tasklist", "/fi", f"pid eq {pid}", "/nh"], capture_output=True, text=True).stdout
-        if str(pid) not in r:
+        if not alive(pid):
             gone = True
             break
         time.sleep(0.5)
-    case("the game ends with CubicHeroes (its job)",
+    case("the game ends with CubicHeroes (its job; Linux: PR_SET_PDEATHSIG)",
          ([] if running else [f"the game was not running when CubicHeroes was ended ({ev})"]) +
          ([] if gone else [f"game {pid} still running 20 s later"]))
 
