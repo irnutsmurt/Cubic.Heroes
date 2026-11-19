@@ -1,0 +1,34 @@
+From aecc03371e7a58147e97612268b0eb4cdbb89aa7 Mon Sep 17 00:00:00 2001
+From: giteaguy <73799093+irnutsmurt@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 15:35:51 -0800
+Subject: [PATCH] cellSaveData: the save list's time read through glibc's
+ timespec on Linux
+
+dotheroes M11.4. pick_describe (the save-data list, 0131/0139) read st.st_mtime, which this file undefines on
+glibc (the macro collides with CellSaveData*Stat's members): the Linux build stopped there. It reads st_mtim.tv_sec
+as the file's other POSIX branches do (st_mtimespec on Darwin); Windows unchanged.
+---
+ libs/system/cellSaveData.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/libs/system/cellSaveData.c b/libs/system/cellSaveData.c
+index d76c943d..fdd1f76e 100644
+--- a/libs/system/cellSaveData.c
++++ b/libs/system/cellSaveData.c
+@@ -1237,7 +1237,13 @@ static void pick_describe(SavePick* e)
+     char path[1024];
+     snprintf(path, sizeof path, "%s/%s/PARAM.SFO", s_save_root, e->dir);
+     struct stat st;
++#ifdef _WIN32
+     e->mtime = stat(path, &st) == 0 ? (long long)st.st_mtime : 0;
++#elif defined(__APPLE__)
++    e->mtime = stat(path, &st) == 0 ? (long long)st.st_mtimespec.tv_sec : 0;
++#else   /* glibc's st_mtime macro is undefined above: its timespec field */
++    e->mtime = stat(path, &st) == 0 ? (long long)st.st_mtim.tv_sec : 0;
++#endif
+     char when[32] = "";
+     if (e->mtime) {
+         time_t t = (time_t)e->mtime;
+-- 
+2.56.0
+

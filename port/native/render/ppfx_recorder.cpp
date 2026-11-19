@@ -4387,6 +4387,15 @@ using namespace ppfx;
 // switches; each can still be set by hand), with the host's front end in
 // cellGcmSys set before the title's first call. Called from
 // r1_observe.cpp's static initialiser, before anything reads them.
+static void set_env(const char* name, const char* value)
+{
+#ifdef _WIN32
+    _putenv_s(name, value);
+#else
+    setenv(name, value, 1);
+#endif
+}
+
 static void r7_defaults()
 {
 #ifndef DOTHEROES_NATIVE_RELEASE
@@ -4398,11 +4407,11 @@ static void r7_defaults()
         { "DOTHEROES_PPFX_XCHECK", "0" }, { "DOTHEROES_PPFX_HANDBACK_CHECK", "0" }, { "DOTHEROES_ASP_RECORD", "1" },
         { "DOTHEROES_ASP_NATIVE", "1" }, { "DOTHEROES_ASP_SHARE", "1" }, { "DOTHEROES_ASP_BYPASS", "1" },
         { "DOTHEROES_R6_PRODUCERS", "1" }, { "DOTHEROES_R6_PRESENT", "1" }, { "DOTHEROES_R6_SKIP", "all" } };
-    for (auto& p : kv) if (!getenv(p[0])) _putenv_s(p[0], p[1]);
+    for (auto& p : kv) if (!getenv(p[0])) set_env(p[0], p[1]);
     // the occlusion queries' calls are always records here (nothing else
     // would write their reports); DOTHEROES_R7_OCCLUSION=legacy writes them
     // as the previous port did (the render report says which)
-    _putenv_s("DOTHEROES_R6_OCCLUSION", "1");
+    set_env("DOTHEROES_R6_OCCLUSION", "1");
     cellGcm_set_native_frontend(1);
 }
 

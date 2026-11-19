@@ -1,0 +1,52 @@
+From ff874a42ef5b42262c09c49554323cec96f0ded4 Mon Sep 17 00:00:00 2001
+From: giteaguy <73799093+irnutsmurt@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 15:35:51 -0800
+Subject: [PATCH] Lifter: the call-site caches' image anchor on ELF
+ (__ehdr_start)
+
+dotheroes M11.4. A site's cache word holds the target's offset from the image base (R8, 0118), which was the PE
+linker's __ImageBase: the Linux link failed (18,036 references). Elsewhere than Windows the anchor is the program's
+own ELF header, __ehdr_start (lld and GNU ld define it; declared hidden, so it is reached PC-relative). The word,
+its atomic store and the 32-bit offset are unchanged; the Windows code is the same as before.
+---
+ tools/ppu_lifter.py | 12 ++++++++++--
+ 1 file changed, 10 insertions(+), 2 deletions(-)
+
+diff --git a/tools/ppu_lifter.py b/tools/ppu_lifter.py
+index 6c29022a..b434f05b 100644
+--- a/tools/ppu_lifter.py
++++ b/tools/ppu_lifter.py
+@@ -862,7 +862,15 @@ extern "C" PPU_THREAD_LOCAL ppu_context* g_active_ctx;
+ extern "C" PPU_THREAD_LOCAL int g_dispatch_depth;
+ extern "C" PPU_THREAD_LOCAL uint32_t g_vcall_stk[128];
+ extern "C" PPU_THREAD_LOCAL int g_vcall_sp;
++/* the anchor of a site's 32-bit function offsets: the image's own start -- the PE image base on Windows, the
++ * ELF header elsewhere (__ehdr_start, defined by lld and GNU ld; hidden, so it is reached PC-relative) */
++#ifdef _WIN32
+ extern "C" char __ImageBase;
++#define PPU_IMAGE_BASE (&__ImageBase)
++#else
++extern "C" __attribute__((visibility("hidden"))) const char __ehdr_start;
++#define PPU_IMAGE_BASE (&__ehdr_start)
++#endif
+ static inline void ppu_icall_site(ppu_context* ctx, uint64_t* ic)
+ {
+     const uint32_t a = (uint32_t)ctx->ctr;
+@@ -870,12 +878,12 @@ static inline void ppu_icall_site(ppu_context* ctx, uint64_t* ic)
+     if (__builtin_expect(e == 0 || (uint32_t)(e >> 32) != a || !g_icall_plain_on || g_dispatch_depth > 4000, 0)) {
+         if (g_icall_plain_on && a) {
+             const ppu_icall_fn_t f = ps3_icall_lookup(a);
+-            if (f) __atomic_store_n(ic, (uint64_t)a << 32 | (uint32_t)((const char*)f - &__ImageBase), __ATOMIC_RELAXED);
++            if (f) __atomic_store_n(ic, (uint64_t)a << 32 | (uint32_t)((const char*)f - PPU_IMAGE_BASE), __ATOMIC_RELAXED);
+         }
+         ps3_indirect_call(ctx);
+         return;
+     }
+-    const ppu_icall_fn_t fn = (ppu_icall_fn_t)(&__ImageBase + (uint32_t)e);
++    const ppu_icall_fn_t fn = (ppu_icall_fn_t)(PPU_IMAGE_BASE + (uint32_t)e);
+     g_active_ctx = ctx;
+     g_dispatch_depth++;
+     const int sp = g_vcall_sp;
+-- 
+2.56.0
+

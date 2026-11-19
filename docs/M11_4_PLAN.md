@@ -7,7 +7,12 @@ Evidence marks as in the other plans: [C] read in the code, [M] measured, [I] in
 
 ## Checkpoint (kept current; the newest state first)
 
-- **Stage** (2026-11-18): **P1 done** -- the desktop guard enforced on Linux (section 9); the unit tests run on Linux
+- **Stage** (2026-11-18): **P2 -- the first native Linux build boots and plays offscreen** (section 11): the title,
+  the attract demo with its movies, the overworld, the desert and a dungeon drawn by the native renderer on RADV;
+  `--memtest` 628/628 on Linux. Next: the release configuration (D1) on Linux.
+- **Blocked on the owner**: pushing runtime patches 0170+ -- `.git/push-guard.local` (written this session) lists the
+  commit identity's name, which every patch's `From:` header carries (asked 2026-11-18).
+- P1 done -- the desktop guard enforced on Linux (section 9); the unit tests run on Linux
   for the first time (section 10: one real Linux bug fixed, two Windows-only tests given their Linux case). P2 next.
 - P0 done (onboarding, safeguards verified on Linux); this plan written.
 - **Decisions**: D1-D4 approved by the owner on 2026-11-18 as recommended, with their additions (section 4); Windows
@@ -203,7 +208,7 @@ States: **VERIFIED** (implemented, evidence named), **UNVERIFIED** (implemented,
 |---|---|---|---|
 | A1 | Privacy configuration and git safeguards active on Linux | VERIFIED | section 2 |
 | A2 | The desktop guard enforced on Linux (X11 and Wayland) | VERIFIED (mechanism); runners' Linux kill paths: P4 | section 9 |
-| A3 | Native Linux dev build boots and plays (offscreen) | NOT DONE | P2 |
+| A3 | Native Linux dev build boots and plays (offscreen) | PARTIAL: boots to the title and the attract demo, movies decoded; play from a save not yet | section 11 |
 | A4 | Linux release configuration as Windows' (D1: no lifted SPU in the release) | NOT DONE | P3 |
 | A5 | Release crash record and hang report on Linux | NOT DONE | P3 |
 | A6 | Audio through OpenAL Soft with the system's server; device change recovered | NOT DONE | P3 |
@@ -257,3 +262,34 @@ First run on Linux (Python 3.14): 17 files, 224 tests. Results and actions:
 | test_settings_diagnostics | 1 failure | a Windows install path in a test run on Linux | Windows case kept; a POSIX case added (an install with a space, the home folder) |
 | test_install_layout (5), test_player_pipeline (3) | errors | need the ps3recomp checkout (`build/ref/ps3recomp`), made by the pipeline | rerun after P2 |
 | the other 12 | pass | | |
+
+## 11. P2: the first native Linux build (2026-11-18) [M]
+
+- **The pipeline** (`tools/pipeline.py --elf`): ps3recomp 4e8f3ca and all 169 patches applied on Linux, the image
+  verified, extracted, lifted: 76 s. `--elf` now also places the ELF at `build/EBOOT.elf`, where the production lift
+  (tools/r8_lift.sh) reads it, as the keys' path always did. The production lift: 36 s.
+- **The libraries** (`tools/build_deps.py --platform linux`, Zig for x86_64-linux-gnu.2.31): SDL2 2.32.10, OpenAL
+  Soft 1.25.2, FFmpeg n9.0.2, glslang, Bullet, imgui. Fixed: `build_ffmpeg.py` on Linux named a `zig_path()` that does
+  not exist and fell back to any `zig` on PATH; it uses `find_zig()` (the pinned Zig). The newest glibc symbol any of
+  the five shipped libraries needs: GLIBC_2.29 (the baseline is 2.31); their only non-glibc dependency is OpenAL ->
+  SDL2.
+- **The build** (`tools/r8_release_build.sh`, now choosing its platform by `uname`: on Linux the Zig Linux toolchain,
+  `build/deps/linux`, the libraries copied into `bld/lib/`): native release with the developer diagnostics, the
+  checked stores and loads (Linux's configuration until D1's change). Found and fixed on the way:
+  - `ppfx_render.cpp` called `GetWriteWatch` unguarded; `ppfx_recorder.cpp` `_putenv_s` (both compile errors);
+  - ps3recomp **0170**: the save list's file time read `st.st_mtime`, which `cellSaveData.c` undefines on glibc;
+  - ps3recomp **0171**: the lifter's call-site caches anchored their 32-bit function offsets at the PE linker's
+    `__ImageBase` (18,036 references, the link failed); elsewhere than Windows the anchor is the ELF header,
+    `__ehdr_start` (hidden: PC-relative), the cache word and its atomicity unchanged. The Windows code is the same.
+  The program: 857 MB with debug information; needs GLIBC_2.30 at most.
+- **`--memtest` on Linux**: at first 579 of 693 -- the two failing groups were Windows' commit state (VirtualQuery):
+  Linux has no commit step (one read-write `MAP_NORESERVE` mapping). They now test Linux's form: the reads across a
+  64 KB unit with either side untouched (the commit-state assertions are Windows'), and the space covered without a
+  gap by anonymous read-write mappings (`/proc/self/maps`; `dotheroes_guest_space_check`, which the runtime's own
+  start check for the bare loads uses too) with a zero guard past 4 GB. Result: **628 checks, 0 failed** -- the
+  bare-load reader included, so what the Windows release relies on holds here by test.
+- **The first boot** (tests/boot_smoke.py, 90 s, offscreen, strict, a fresh save root): exit 0, no strict
+  violation, 0 unresolved NIDs; the title movie and the attract demo decoded by FFmpeg (3.95 ms a frame, none late);
+  pictures of the title, the overworld (water, shadows), the desert (lava) and a dungeon (lights), the HUD and the
+  prompts, as on Windows by eye. Five pipelines built in play (no preparation yet); two long frames (765 ms, 110 ms)
+  -- to look at under P7, after correctness.

@@ -4617,6 +4617,9 @@ void ww_note(uint32_t ea, uint32_t len)
 bool ww_poll()
 {
     if (!vm_write_watch) return false;
+#ifndef _WIN32
+    return false;   // the write watch is Windows' (GetWriteWatch); elsewhere vm_write_watch stays 0 and pages are hashed
+#else
     if (s_pg_epoch.empty()) { s_pg_epoch.assign(1u << 20, 0); s_ww_buf.resize(1u << 20); }
     const uint64_t t0 = now_ns();
     // before the poll: the records whose bytes the game had finished before it
@@ -4647,6 +4650,7 @@ bool ww_poll()
     s_ww_last_ns = now_ns();
     s_ww_ns += s_ww_last_ns - t0;
     return true;
+#endif
 }
 
 // the record's writes seen by a poll: it is covered, or a poll is due

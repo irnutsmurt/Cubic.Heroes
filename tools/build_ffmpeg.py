@@ -79,7 +79,7 @@ def short(path):
 
 def zig():
     return os.path.join(ROOT, "build", "toolchain", "zig-x86_64-windows-0.17.0", "zig.exe") if os.name == "nt" \
-        else build_deps.zig_build.zig_path() if hasattr(build_deps.zig_build, "zig_path") else "zig"
+        else build_deps.zig_build.find_zig()   # the pinned build/toolchain/zig-*, as every other build here
 
 
 def tools(platform):

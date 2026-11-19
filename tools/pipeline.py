@@ -148,8 +148,10 @@ def main():
         sys.exit("[extract] EBOOT.BIN hash mismatch")
 
     # decrypt
-    if a.elf:
-        elf = os.path.abspath(a.elf)
+    if a.elf:   # placed where the keys' decryption puts it, so the later lifts (tools/r8_lift.sh) find it either way
+        if not fresh([elf], [a.elf]):
+            import shutil
+            shutil.copyfile(a.elf, elf)
     elif not fresh([elf], [eboot_bin]):
         run("decrypt", [PY, os.path.join(tools, "self_decrypt.py"), "--keys", a.keys, eboot_bin, elf])
     if sha256(elf) != VERSION["decrypted_elf"]["sha256"]:

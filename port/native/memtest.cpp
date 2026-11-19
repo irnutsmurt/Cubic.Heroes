@@ -101,7 +101,10 @@ bool committed(uint64_t off)
     return VirtualQuery(vm_base + off, &mi, sizeof mi) && mi.State == MEM_COMMIT;
 }
 #else
-bool committed(uint64_t) { return false; }
+/* Linux: no commit step -- the whole space is one read-write mapping from the start (main.cpp); the reads across
+ * a unit still test what the bare loads rely on, the commit-state assertions are Windows' */
+bool committed(uint64_t) { return true; }
+extern "C" const char* dotheroes_guest_space_check(const uint8_t* base, uint64_t size);
 #endif
 
 using reader = uint64_t (*)(int, uint64_t);
@@ -131,7 +134,9 @@ void t_null()
     group("null page");
     int n = 0;
     g_checks++; n++;
+#ifdef _WIN32
     if (committed(0)) fail("the null page is committed before the test touched it");
+#endif
     /* untouched: the first access commits it; both forms read 0 */
     n += check_read(mt_bare_read, 8, 0, "untouched null page");
     n += check_read(mt_checked_read, 8, 0, "untouched null page");
@@ -186,9 +191,11 @@ void t_commit()
                     const uint32_t x = base + 0x10000u;
                     if (st == 1) put_pattern(x - 8, 8, (unsigned)idx);
                     if (st == 2) put_pattern(x, 8, (unsigned)idx);
+#ifdef _WIN32
                     g_checks++; n++;
                     if (committed(base) != (st == 1) || committed(x) != (st == 2))
                         fail("commit state before the access is not %s (0x%08X)", states[st], base);
+#endif
                     char what[96];
                     snprintf(what, sizeof what, "across a commit unit, %s", states[st]);
                     n += check_read(r, s, x - k, what);
@@ -204,9 +211,11 @@ void t_4gb()
 {
     group("4 GB");
     int n = 0;
+#ifdef _WIN32
     g_checks++; n++;
     if (committed(0xFFFF0000ull) || committed(0x100000000ull))
         fail("the last unit or the guard is committed before the test touched it");
+#endif
     n += check_read(mt_bare_read, 8, 0xFFFFFFFCull, "across 4 GB, untouched");
     n += check_read(mt_checked_read, 8, 0xFFFFFFFAull, "across 4 GB, untouched");
     put_pattern(0xFFFFFFF0u, 16, 5);
@@ -353,7 +362,13 @@ void t_reservation()
     if (*(volatile const uint64_t*)(vm_base + g_vm_size - 8) != 0) fail("the guard's last bytes are not zero");
 #else
     g_checks++; n++;
-    fail("not established on this platform: the bare loads are a Windows build's");
+    if (const char* why = dotheroes_guest_space_check(vm_base, g_vm_size))
+        fail("the guest space and its guard are not one read-write mapping: %s", why);
+    g_checks++; n++;
+    if (g_vm_size < 0x100000000ull + 8)
+        fail("the mapping is 0x%llX bytes: no guard past 4 GB for an access's last 7 bytes", (unsigned long long)g_vm_size);
+    g_checks++; n++;
+    if (*(volatile const uint64_t*)(vm_base + g_vm_size - 8) != 0) fail("the guard's last bytes are not zero");
 #endif
     group_end("one reservation from the base through the guard", n);
 }

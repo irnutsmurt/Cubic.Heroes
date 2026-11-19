@@ -642,11 +642,42 @@ static bool alloc_guest_vm(void)
  * handler above), the guard past 4 GB included. The runtime checks its own
  * side when the guest starts (ppu_loader.cpp, ppu_mm_publish); `dotheroes
  * --memtest` tests the whole of it. */
+#ifndef _WIN32
+/* Linux (M11.4): the guest space as one mmap, read-write, untouched pages backed by the kernel's zero page on first
+ * read -- no commit handler. What the bare loads need of it: [base, base+size) covered without a gap by anonymous
+ * read-write mappings (vm_commit's mprotect may split the mapping into several; nothing else may sit inside).
+ * nullptr when it holds, else why not. */
+extern "C" const char* dotheroes_guest_space_check(const uint8_t* base, uint64_t size)
+{
+    FILE* f = fopen("/proc/self/maps", "r");
+    if (!f) return "/proc/self/maps could not be read";
+    const uintptr_t want = (uintptr_t)base + size;
+    uintptr_t covered = (uintptr_t)base;
+    const char* why = "the guest space is not mapped";
+    char line[512];
+    while (fgets(line, sizeof line, f)) {
+        unsigned long long lo = 0, hi = 0, off = 0, ino = 0;
+        char perms[8] = "", dev[16] = "";
+        if (sscanf(line, "%llx-%llx %7s %llx %15s %llu", &lo, &hi, perms, &off, dev, &ino) != 6) continue;
+        if (hi <= covered || covered >= want) continue;
+        if (lo > covered) { why = "a gap in the guest space"; break; }
+        if (perms[0] != 'r' || perms[1] != 'w') { why = "a part of the guest space is not read-write"; break; }
+        if (ino != 0) { why = "a file is mapped inside the guest space"; break; }
+        covered = (uintptr_t)hi;
+    }
+    fclose(f);
+    return covered >= want ? nullptr : why;
+}
+#endif
+
 static void bare_loads_gate(void)
 {
 #ifdef PPU_BARE_LOADS
 #  ifndef _WIN32
-#    error "PPU_BARE_LOADS: the guest space's reservation and commit handler are established on Windows only (docs/NATIVE_R8.md section 5.3)"
+    if (const char* why = dotheroes_guest_space_check(vm_base, VM_SIZE))
+        ps3_fatal("bare-loads", "the guest space and its guard are not one read-write mapping: %s", why);
+    if (*(volatile const uint64_t*)(vm_base + VM_SIZE - 8) != 0)
+        ps3_fatal("bare-loads", "the guard past 4 GB does not read as zero");
 #  else
     MEMORY_BASIC_INFORMATION a{}, b{};
     if (!VirtualQuery(vm_base, &a, sizeof a) || !VirtualQuery(vm_base + VM_SIZE - 1, &b, sizeof b) ||
