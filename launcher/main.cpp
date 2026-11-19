@@ -1709,7 +1709,9 @@ static void page_play()
         else if (u["data"]["available"].truthy() && u["data"]["newer"].truthy()) {
             text_col(col::warm, "Version %s is available.", u["data"]["version"].str().c_str());
             if (big_button("See what's new")) { g_page = kUpdates; g_focus_page = true; }
-        } else text_col(col::ok, "Up to date.");
+        } else if (u["data"]["no_package"].truthy())   // a release exists, but none of its downloads is for this PC
+            text_col(col::dim, "Version %s has no download for this computer yet.", u["data"]["version"].str().c_str());
+        else text_col(col::ok, "Up to date.");
         card_end();
         prompt(Act::Y, "Check for updates");
         play_landscape();
@@ -2002,6 +2004,10 @@ static void page_updates()
     } else if (u["data"]["offline"].truthy()) {
         title("Offline", 24);
         text_col(col::dim, "No connection to the update server. Nothing changes; try again later.");
+    } else if (u["data"]["no_package"].truthy()) {
+        // the review's W-1: a newer release whose downloads are all for another system or processor is not offered
+        title(("Version " + u["data"]["version"].str()).c_str(), 26);
+        text_col(col::dim, "This version has no download for this computer yet. The game keeps playing as it is.");
     } else if (!u["data"]["available"].truthy()) {
         title("No release found", 24);
     } else {

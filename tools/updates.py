@@ -47,11 +47,40 @@ TIMEOUT_S = 20
 CHUNK = 1 << 20
 
 
-def platform_name():
-    """this system and its processor, as the manifest names them (an x86-64 package is never taken elsewhere)"""
-    import platform
-    m = platform.machine().lower()
-    arch = {"amd64": "x86_64", "x64": "x86_64", "x86_64": "x86_64"}.get(m, m or "unknown")
+# the machine fields of a PE (IMAGE_FILE_HEADER.Machine) and an ELF (e_machine) header, as the manifest names them
+PE_MACHINES = {0x8664: "x86_64", 0xAA64: "arm64", 0x14C: "x86"}
+ELF_MACHINES = {62: "x86_64", 183: "arm64", 3: "x86"}
+
+
+def executable_arch(path):
+    """the processor a program was built for, from its own header (PE or ELF); None if it isn't one"""
+    import struct
+    try:
+        with open(path, "rb") as f:
+            head = f.read(4096)
+    except OSError:
+        return None
+    if head[:4] == b"\x7fELF" and len(head) >= 20:
+        return ELF_MACHINES.get(struct.unpack_from("<H" if head[5] == 1 else ">H", head, 18)[0], "unknown")
+    if head[:2] == b"MZ" and len(head) >= 0x40:
+        pe = struct.unpack_from("<I", head, 0x3C)[0]
+        if pe + 6 <= len(head) and head[pe:pe + 4] == b"PE\0\0":
+            return PE_MACHINES.get(struct.unpack_from("<H", head, pe + 4)[0], "unknown")
+    return None
+
+
+def platform_name(program=None):
+    """this installation's system and processor, as the manifest names them: the processor the installed program was
+    built for (the review's W-1) -- read from the running program's own header (the frozen worker, built with the
+    package), not the machine's: an x86-64 package on a Windows-on-ARM PC runs emulated and is updated with the
+    x86-64 package, never offered an ARM64 one that does not exist. Without a readable header (a development
+    checkout's interpreter is the program then) the interpreter's own build decides (sysconfig, not the CPU)."""
+    arch = executable_arch(program or sys.executable)
+    if not arch:
+        import sysconfig
+        p = sysconfig.get_platform().lower()   # win-amd64, win-arm64, win32, linux-x86_64, linux-aarch64
+        arch = "x86_64" if p.endswith(("amd64", "x86_64")) else "arm64" if p.endswith(("arm64", "aarch64")) \
+            else "x86" if p.endswith(("win32", "i686")) else "unknown"
     return ("windows-" if os.name == "nt" else "linux-") + arch
 
 
@@ -135,6 +164,7 @@ def check(channel="stable", installed=None, source=None, keys=None):
         raise trust.ReleaseError("This launcher has no release key to check updates with.", "no_trusted_keys")
     rels = releases(source)
     refused = []
+    nothing_here = None   # the newest verified release with no package this installation can take (W-1)
     for r in rels:
         if channel == "stable" and r["prerelease"]:
             continue
@@ -153,11 +183,21 @@ def check(channel="stable", installed=None, source=None, keys=None):
             refused.append({"tag": r["tag"], "code": "channel", "why": "a prerelease's manifest on a stable release"})
             continue
         newer = installed is None or (trust.parse_version(m["version"]) or ()) > (trust.parse_version(installed) or ())
+        mine = [a for a in m["assets"] if a["platform"] == platform_name()]
+        if not pick_asset(mine):
+            # the review's W-1: a release with nothing for this system and this kind of installation (another
+            # processor's, another package kind's) is never offered -- an older one that has it may be
+            nothing_here = nothing_here or {"version": m["version"], "tag": r["tag"]}
+            continue
         return {"available": True, "tag": r["tag"], "version": m["version"], "channel": m["channel"],
                 "notes": m.get("notes", ""), "min_launcher": m.get("min_launcher"), "newer": newer,
-                "assets": [a for a in m["assets"] if a["platform"] == platform_name()], "manifest": m,
+                "assets": mine, "manifest": m,
                 "manifest_url": r["assets"][MANIFEST], "urls": r["assets"], "refused": refused}
-    return {"available": False, "refused": refused}
+    out = {"available": False, "refused": refused}
+    if nothing_here:
+        out.update(no_package=True, version=nothing_here["version"], tag=nothing_here["tag"],
+                   platform=platform_name(), kind=installed_kind())
+    return out
 
 
 def download(asset, url, dest_dir, progress=None, cancelled=None):
@@ -273,11 +313,27 @@ def stage_launcher(package, launcher_dir):
         if os.path.lexists(p):
             layout.rmtree(p)
     low = package.lower()
-    if low.endswith(".appimage"):
+    kind = trust.name_kind(package)
+    if kind == "appimage":
         raise trust.ReleaseError("An AppImage is updated by downloading the new .AppImage file, not unpacked.",
                                  "bad_download")
-    if os.name != "nt" and low.endswith(".zip"):
-        raise trust.ReleaseError("A zip is Windows' package (it keeps no executable bits).", "bad_download")
+    # the review's W-6: only this system's own kind of launcher package is staged, by its name (the kind the manifest
+    # and release_trust.KINDS tie to a system) and by its bytes -- Windows took any name but .zip as a tarball
+    system = "windows" if os.name == "nt" else "linux"
+    want = next(k for k, s in trust.KINDS.items() if s == system and k != "appimage")
+    if kind != want:
+        raise trust.ReleaseError(
+            f"{os.path.basename(package)} is not this system's launcher package (a .{want}: "
+            + ("a zip keeps no executable bits" if kind == "zip" else "another system's or an unknown kind") + ").",
+            "bad_download")
+    try:
+        with open(package, "rb") as f:
+            head = f.read(6)
+    except OSError as e:
+        raise trust.ReleaseError(f"The launcher's package can't be read ({e}).", "bad_download")
+    if not head.startswith({"zip": (b"PK\x03\x04", b"PK\x05\x06"), "tar.xz": (b"\xfd7zXZ\x00",)}[want]):
+        raise trust.ReleaseError(f"{os.path.basename(package)} is not a {want} archive, whatever its name says.",
+                                 "bad_download")
     os.makedirs(part)
     try:
         if low.endswith((".tar.xz", ".txz")):

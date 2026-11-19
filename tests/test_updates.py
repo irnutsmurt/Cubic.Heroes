@@ -619,5 +619,114 @@ class Manifest(unittest.TestCase):
             shutil.rmtree(tmp)
 
 
+class PlatformAndKind(Releases):
+    """the review's W-1 and W-6: an installation is offered and stages only what it can run -- its own program's
+    processor (not the machine's: an x86-64 package runs emulated on Windows-on-ARM), its own system's package kind"""
+
+    OTHER_EXT = ".tar.xz" if os.name == "nt" else ".zip"
+    OTHER_PLAT = ("linux-" if os.name == "nt" else "windows-") + "x86_64"
+
+    def release_with(self, version, assets):
+        """a signed release whose downloads are `assets`: [(name, platform)], each a real package of its kind"""
+        d = os.path.join(self.mirror, version)
+        os.makedirs(d)
+        recs, links = [], []
+        for name, plat in assets:
+            p = archive(os.path.join(d, name), {"CubicHeroes/launcher.txt": version}) \
+                if name.endswith((".zip", ".tar.xz")) else os.path.join(d, name)
+            if not os.path.exists(p):
+                put(p, b"an AppImage stand-in")
+            data = get(p)
+            recs.append({"name": name, "platform": plat, "size": len(data), "sha256": hashlib.sha256(data).hexdigest()})
+            links.append({"name": name, "browser_download_url": p})
+        m = {"format": 1, "version": version, "channel": "stable", "min_launcher": None, "notes": "n",
+             "key_id": self.kid, "assets": recs}
+        mp = os.path.join(d, "release.json")
+        put(mp, json.dumps(m, indent=1))
+        self.sign(self.key, mp)
+        links += [{"name": "release.json", "browser_download_url": mp},
+                  {"name": "release.json.sig", "browser_download_url": mp + ".sig"}]
+        self.list.insert(0, {"tag_name": "v" + version, "prerelease": False, "draft": False, "assets": links})
+        put(os.path.join(self.mirror, "releases.json"), json.dumps(self.list))
+
+    def test_the_programs_own_processor(self):
+        def pe(machine):
+            h = bytearray(0x200)
+            h[:2] = b"MZ"
+            h[0x3C:0x40] = (0x80).to_bytes(4, "little")
+            h[0x80:0x84] = b"PE\0\0"
+            h[0x84:0x86] = machine.to_bytes(2, "little")
+            return bytes(h)
+
+        def elf(machine):
+            h = bytearray(64)
+            h[:6] = b"\x7fELF\x02\x01"
+            h[18:20] = machine.to_bytes(2, "little")
+            return bytes(h)
+        for data, arch in ((pe(0x8664), "x86_64"), (pe(0xAA64), "arm64"), (pe(0x14C), "x86"),
+                           (elf(62), "x86_64"), (elf(183), "arm64"), (b"not a program", None)):
+            p = os.path.join(self.tmp, "prog")
+            put(p, data)
+            self.assertEqual(updates.executable_arch(p), arch)
+        put(os.path.join(self.tmp, "x64"), pe(0x8664))
+        self.assertTrue(updates.platform_name(os.path.join(self.tmp, "x64")).endswith("-x86_64"))
+        # this test's own interpreter: an x86-64 program on these machines
+        self.assertEqual(updates.executable_arch(sys.executable), "x86_64")
+
+    def test_an_arm64_pc_running_the_x86_64_package_is_offered_it(self):
+        """W-1: Python 3.12 on Windows reports the processor (WMI), ARM64 on a Windows-on-ARM PC; the x86-64
+        package it runs (emulated) must still be offered the x86-64 update"""
+        self.release("0.2.0")
+        from unittest import mock
+        with mock.patch("platform.machine", return_value="ARM64"):
+            self.assertEqual(updates.platform_name(), PLAT)
+            r = updates.check("stable", "0.1.0", self.mirror, self.keys)
+        self.assertTrue(r["available"] and r["newer"])
+        self.assertEqual([a["platform"] for a in r["assets"]], [PLAT])
+
+    def test_no_package_for_this_installation_is_never_offered(self):
+        """W-1: a newer release with nothing this installation can take is not offered (no "Download it" that can only
+        fail); an older one that has its package is"""
+        self.release_with("0.3.0", [(f"C-0.3.0-{self.OTHER_PLAT}{self.OTHER_EXT}", self.OTHER_PLAT)])
+        r = updates.check("stable", "0.1.0", self.mirror, self.keys)
+        self.assertFalse(r["available"])
+        self.assertTrue(r["no_package"])
+        self.assertEqual((r["version"], r["platform"], r["kind"]), ("0.3.0", PLAT, updates.installed_kind()))
+        self.release("0.2.5")   # an older release (listed after the newest) that has this system's package
+        self.list.append(self.list.pop(0))
+        put(os.path.join(self.mirror, "releases.json"), json.dumps(self.list))
+        r = updates.check("stable", "0.1.0", self.mirror, self.keys)
+        self.assertTrue(r["available"])
+        self.assertEqual(r["version"], "0.2.5", "the newest release that has this installation's package")
+        from unittest import mock   # another processor's installation: the x86-64 packages are not its
+        with mock.patch.object(updates, "platform_name", return_value=PLAT.split("-")[0] + "-arm64"):
+            r = updates.check("stable", "0.1.0", self.mirror, self.keys)
+        self.assertFalse(r["available"])
+        self.assertTrue(r["no_package"])
+
+    def test_staging_takes_only_this_systems_package(self):
+        """W-6: Windows took any name but .zip as a tarball; now the name's kind must be this system's and the bytes
+        must be that kind's"""
+        own_ext = ".zip" if os.name == "nt" else ".tar.xz"
+        own = archive(os.path.join(self.tmp, "own" + own_ext), {"Cubic.Heroes/CubicHeroes.txt": "x"})
+        self.assertTrue(os.path.isdir(updates.stage_launcher(own, os.path.join(self.tmp, "ok"))))
+        other = archive(os.path.join(self.tmp, "other" + self.OTHER_EXT), {"Cubic.Heroes/CubicHeroes.txt": "x"})
+        put(os.path.join(self.tmp, "x.AppImage"), b"\x7fELF")
+        put(os.path.join(self.tmp, "x.txz"), get(other) if self.OTHER_EXT == ".tar.xz" else b"\xfd7zXZ\x00")
+        put(os.path.join(self.tmp, "x.7z"), b"7z\xbc\xaf\x27\x1c")
+        put(os.path.join(self.tmp, "disguised" + own_ext), get(other))   # this system's name, another kind's bytes
+        for bad in (other, "x.AppImage", "x.txz", "x.7z", "disguised" + own_ext):
+            p = bad if os.path.isabs(bad) else os.path.join(self.tmp, bad)
+            dest = os.path.join(self.tmp, "launcher-" + os.path.basename(p))
+            with self.assertRaises(trust.ReleaseError, msg=p) as e:
+                updates.stage_launcher(p, dest)
+            self.assertEqual(e.exception.code, "bad_download")
+            self.assertFalse(os.path.exists(os.path.join(dest, "downloads", "launcher-new")), "nothing staged")
+
+
+for _name in [n for n in vars(Releases) if n.startswith("test_")]:   # the mirror's helpers only, not its tests again
+    setattr(PlatformAndKind, _name, None)
+
+
 if __name__ == "__main__":
     unittest.main()
