@@ -218,7 +218,7 @@ States: **VERIFIED** (implemented, evidence named), **UNVERIFIED** (implemented,
 | A5 | Release crash record and hang report on Linux | PARTIAL: the release crash record and the developer crash report and thread dump verified; a real hang's detection (shared code): P8 | section 15 |
 | A6 | Audio through OpenAL Soft with the system's server; device change recovered | PARTIAL: PipeWire output with events and reopen; the audio suite (device losses included) 230/230; a real default-device change: P8 | section 15 |
 | A7 | Cinematics through FFmpeg | NOT DONE | P2/P8 |
-| A8 | X11 and Wayland: windowed, borderless, fullscreen; the desktop's mode never changed | NOT DONE | P8 |
+| A8 | X11 and Wayland: windowed, borderless, fullscreen; the desktop's mode never changed | PARTIAL: windowed on X11 (XWayland) and native Wayland (fixed: section 16); borderless, fullscreen, the mode: P8 | section 16 |
 | A9 | Rendering resolution presets and custom; VSync; frame limits | NOT DONE | P8 |
 | A10 | Controllers: detection, prompts, hot-plug, remapping; keyboard remapping | NOT DONE | P8 (hot-plug by hand) |
 | A11 | The in-game overlay, performance overlays, developer tools, diagnostics and log export | NOT DONE | P8 |
@@ -415,3 +415,26 @@ only**: Windows' behaviour is checked on the owner's Windows PC (section 7).
   off Node 20.
 - Both platforms rebuilt after these shared changes: the Windows game cross-built and linked; the Linux build booted
   strict-clean with the write watch on.
+
+## 16. P3: the display -- refresh, native Wayland, HiDPI (2026-11-18) [M]
+
+On-screen runs (the owner's standing approval; each recorded through `tests/desktop_guard.py allow` and revoked).
+- **The display's refresh off Windows** (for `DOTHEROES_FPS=display` and the display-paced vblank, which fell back
+  to 60 Hz): the Vulkan backend, which owns SDL, reads the primary display's current mode (ps3recomp 0172
+  `rsx_vk_display_refresh_hz`; Windows keeps DWM and EnumDisplaySettings), once, on the main thread before the
+  window opens, and only when a window will be shown (offscreen: no display is asked -- and the desktop guard would
+  count the connection). No setting added, nothing about the display changed. Measured: "eDP-1 17", 60 Hz" (KDE:
+  1600x900 @ 60.07 Hz), the limiter at 60.00 fps.
+- **Native Wayland** (SDL's `wayland` driver): the window opened but "vkGetPhysicalDeviceSurfaceFormatsKHR failed
+  (VkResult 5)" -- VK_INCOMPLETE: the backend read at most 64 formats, and RADV's Wayland surfaces list more (the
+  formats times the colour spaces of VK_EXT_swapchain_colorspace); the game went headless (docs/HANDOFF.md's "no
+  window on Wayland", 2026-10-30, was this). The list is now read in full (0172), and the format chosen in the sRGB
+  colour space first -- an HDR or extended colour space could otherwise have been the first B8G8R8A8 match. After:
+  "window swapchain 1280x720, 4 images, format 44, present mode fifo" under `wayland`.
+- **HiDPI**: `SDL_WINDOW_ALLOW_HIGHDPI` off Windows (0172): on a scaled Wayland display the surface at the display's
+  own pixels (the swapchain already takes the drawable size); X11 unaffected; Windows' DPI awareness is the program's
+  own, unchanged. A scaled display is not available on this laptop's 1600x900 panel at scale 1: verifying the scaled
+  case needs a scale changed (a system setting: asked of the owner when P8 reaches it).
+- SDL2's default on a Wayland session is X11 (XWayland); both now work. The default stays SDL's (docs/LINUX_PACKAGING
+  .md will say how to choose `SDL_VIDEODRIVER=wayland`).
+- The Windows game cross-built after 0172.

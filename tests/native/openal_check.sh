@@ -19,6 +19,10 @@ cd "$(dirname "$0")/../.."
 SND=${1:?usage: $0 <sound folder> [hour]}
 OUT=${OUT:-build/m2}
 mkdir -p "$OUT"
+# absolute, and every test run from inside $OUT: the tests write their files into the current folder (M11.4: run
+# from the checkout, they left their WAV files at its top)
+OUT=$(cd "$OUT" && pwd)
+SND=$(cd "$SND" && pwd)
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*) P=windows; Z=build/toolchain/zig-x86_64-windows-0.17.0/zig.exe; T=x86_64-windows-gnu
        X=.exe; NUL=NUL
@@ -41,7 +45,7 @@ set +e
 rc=0
 run() {   # <lines to show> <args...>: the full output in $OUT/<first arg>.out
   n=$1; shift
-  "$OUT/openal_check$X" "$@" > "$OUT/$1.out" 2>&1 || rc=1
+  (cd "$OUT" && "./openal_check$X" "$@") > "$OUT/$1.out" 2>&1 || rc=1
   tail -n "$n" "$OUT/$1.out"
 }
 run 3 synth
@@ -49,10 +53,10 @@ run 4 files "$SND"
 run 1 loops "$SND"
 run 5 device "$SND/bgm_cave.wav" 60 reopen
 [ "$2" = hour ] && run 5 device "$SND/bgm_field07.wav" 3600 reopen
-"$OUT/sound_manager_check$X" > "$OUT/sound_manager_check.out" 2>&1 || rc=1
+(cd "$OUT" && "./sound_manager_check$X") > "$OUT/sound_manager_check.out" 2>&1 || rc=1
 tail -n 1 "$OUT/sound_manager_check.out"
 for m in voices pause device realtime; do
-  "$OUT/sound_stress_check$X" $m > "$OUT/sound_stress_$m.out" 2>&1 || rc=1
+  (cd "$OUT" && "./sound_stress_check$X" $m) > "$OUT/sound_stress_$m.out" 2>&1 || rc=1
   tail -n 1 "$OUT/sound_stress_$m.out"
 done
 echo "openal_check: $([ $rc = 0 ] && echo passed || echo FAILED)"

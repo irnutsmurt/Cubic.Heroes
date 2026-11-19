@@ -345,10 +345,31 @@ static void present_guest_frame(void)
  * fps; 120: 2, 60; 60: 1; 165: 2, 82.5; 240: 3, 80), one fewer if that would
  * fall under 58 fps (100 Hz: 100). The game's logic steps by measured time,
  * so a rate other than 60 does not change its speed (game_patches.cpp). */
+#ifndef _WIN32
+/* Elsewhere than Windows (M11.4) the display's refresh comes from SDL, which owns the window: the primary display's
+ * current mode (as Windows' EnumDisplaySettings(NULL) and DWM give the primary's), read once on the main thread
+ * before the window opens (probe_display_refresh, from apply_pc_settings) -- SDL's video is the main thread's -- and
+ * only when the game will show a window: offscreen there is no display to ask (and a test may not reach one), so
+ * 60 Hz. SDL's refresh is whole hertz (59.94 reads 59 or 60), as Windows' display-mode fallback. Read only: the
+ * display's mode is never changed. */
+static double s_display_refresh_ms = 0.0;
+extern "C" int rsx_vk_display_refresh_hz(void);   /* the Vulkan backend's, which owns SDL (ps3recomp 0172) */
+
+static void probe_display_refresh(void)
+{
+    const char* w = getenv("PS3RECOMP_VK_WINDOW");
+    if (w && *w == '0') return;
+    const int hz = rsx_vk_display_refresh_hz();
+    if (hz > 1) s_display_refresh_ms = 1000.0 / hz;
+}
+#endif
+
 static double display_frame_ms(void)
 {
     double refresh_ms = 0.0;
-#ifdef _WIN32
+#ifndef _WIN32
+    refresh_ms = s_display_refresh_ms;
+#else
     /* The compositor's refresh period in QPC ticks: exact (143.98 Hz, not the
      * display mode's whole 143 or 144, which would slip a refresh every few
      * seconds against it). */
@@ -1261,6 +1282,8 @@ static double display_refresh_ms(void)
     DEVMODEW dm = {};
     dm.dmSize = sizeof dm;
     if (EnumDisplaySettingsW(NULL, ENUM_CURRENT_SETTINGS, &dm) && dm.dmDisplayFrequency > 1) return 1000.0 / dm.dmDisplayFrequency;
+#else
+    if (s_display_refresh_ms > 0.0) return s_display_refresh_ms;
 #endif
     return 0.0;
 }
@@ -1327,6 +1350,9 @@ static void apply_pc_settings(void)
      * holds the frames to the limit with a host limiter at the flip (ps3emu/guest_pause.h ps3_frame_limit_wait):
      * a deadline on the high-resolution clock, so the limit holds evenly at any number -- through the game's
      * vblank pacing a frame a little over one tick of the clock waited for two (144 ran at 65 in play). */
+#ifndef _WIN32
+    probe_display_refresh();   /* M11.4: before the limiter and the vblank clock read it */
+#endif
     dotheroes_set_render_resolution(getenv("DOTHEROES_RENDER_RES"), getenv("DOTHEROES_RENDER_RES_CUSTOM"));   /* M11.2f */
     std::string fps = getenv("DOTHEROES_FPS") ? getenv("DOTHEROES_FPS") : "60";
     if (fps == "custom") fps = getenv("DOTHEROES_FPS_CUSTOM") ? getenv("DOTHEROES_FPS_CUSTOM") : "60";

@@ -1,0 +1,114 @@
+From eb16a5019405b182f512ede977455702bcfefcfb Mon Sep 17 00:00:00 2001
+From: giteaguy <73799093+irnutsmurt@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 17:47:43 -0800
+Subject: [PATCH] Vulkan backend: native Wayland's surface formats, HiDPI off
+ Windows, the display's refresh
+
+dotheroes M11.4. The surface's formats read in full: a fixed 64 was too few on RADV's Wayland surfaces (the
+formats times the colour spaces VK_EXT_swapchain_colorspace adds), VK_INCOMPLETE was taken for a failure and the
+window went headless under SDL's wayland driver. The format is chosen in the sRGB colour space first (a surface
+lists a format once per colour space; Windows and X11 already got sRGB as their first match). SDL_WINDOW_ALLOW_HIGHDPI
+off Windows: a scaled Wayland display gets a surface at its own pixels (the swapchain takes the drawable size).
+rsx_vk_display_refresh_hz(): the primary display's refresh from SDL's current mode, for the display-paced frame
+limit off Windows.
+---
+ libs/video/rsx_vulkan_backend.c | 48 +++++++++++++++++++++++++++------
+ libs/video/rsx_vulkan_backend.h |  5 ++++
+ 2 files changed, 45 insertions(+), 8 deletions(-)
+
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index 78d9f9e1..7e8d80f7 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -2260,6 +2260,12 @@ static void vk_window_open(const char* title)
+     s_win.mode = dm && !strcmp(dm, "exclusive") ? 2 : dm && !strcmp(dm, "borderless") ? 1
+                : dm && !strcmp(dm, "windowed") ? 0 : vk_env_on("PS3RECOMP_VK_FULLSCREEN") ? 1 : 0;
+     Uint32 flags = SDL_WINDOW_VULKAN | (vk_env_on("PS3RECOMP_VK_WINDOW_HIDDEN") ? SDL_WINDOW_HIDDEN : SDL_WINDOW_SHOWN);
++#ifndef _WIN32
++    /* dotheroes M11.4: on a scaled Wayland display the surface at the display's own pixels, not a smaller buffer
++     * the compositor stretches (the swapchain already takes SDL_Vulkan_GetDrawableSize); no effect on X11. Windows'
++     * DPI awareness is the program's own (port/main.cpp), unchanged. */
++    flags |= SDL_WINDOW_ALLOW_HIGHDPI;
++#endif
+     int wx = SDL_WINDOWPOS_CENTERED, wy = SDL_WINDOWPOS_CENTERED, ww = (int)s_vk.width, wh = (int)s_vk.height, wmax = 0;
+     if (s_win.mode == 0) {
+         flags |= SDL_WINDOW_RESIZABLE;
+@@ -2336,21 +2342,36 @@ static int vk_create_swapchain(void)
+     VK_CHECK(pvkGetPhysicalDeviceSurfaceFormatsKHR(s_vk.phys, s_vk.surface, &nf, NULL),
+              "vkGetPhysicalDeviceSurfaceFormatsKHR");
+     if (nf == 0) { VK_LOG("surface reports no formats\n"); return -1; }
+-    if (nf > 64) nf = 64;
+-    VkSurfaceFormatKHR fmts[64];
+-    VK_CHECK(pvkGetPhysicalDeviceSurfaceFormatsKHR(s_vk.phys, s_vk.surface, &nf, fmts),
+-             "vkGetPhysicalDeviceSurfaceFormatsKHR");
+-    /* UNORM, not SRGB: the offscreen target holds the guest's values as-is. */
++    /* dotheroes M11.4: every format the surface lists. A fixed 64 was too few on RADV's Wayland surfaces (formats
++     * times the colour spaces VK_EXT_swapchain_colorspace adds): VK_INCOMPLETE, taken for a failure, left the game
++     * headless under Wayland. VK_INCOMPLETE is also accepted, should the list grow between the two calls. */
++    VkSurfaceFormatKHR* fmts = (VkSurfaceFormatKHR*)malloc((size_t)nf * sizeof *fmts);
++    if (!fmts) { VK_LOG("out of memory for %u surface formats\n", nf); return -1; }
++    {
++        const VkResult r_ = pvkGetPhysicalDeviceSurfaceFormatsKHR(s_vk.phys, s_vk.surface, &nf, fmts);
++        if (r_ != VK_SUCCESS && r_ != VK_INCOMPLETE) {
++            VK_LOG("vkGetPhysicalDeviceSurfaceFormatsKHR failed (VkResult %d)\n", (int)r_);
++            free(fmts);
++            return -1;
++        }
++    }
++    /* UNORM, not SRGB: the offscreen target holds the guest's values as-is. In the sRGB colour space (the game's
++     * picture): a surface lists a format once per colour space it offers, and an HDR or extended one is not it. */
+     VkSurfaceFormatKHR fmt = fmts[0];
+     if (nf == 1 && fmts[0].format == VK_FORMAT_UNDEFINED) {
+         fmt.format = VK_FORMAT_B8G8R8A8_UNORM;
+     } else {
+         static const VkFormat pref[] = { VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM };
+         int found = 0;
+-        for (size_t k = 0; k < 2 && !found; k++)
+-            for (u32 i = 0; i < nf; i++)
+-                if (fmts[i].format == pref[k]) { fmt = fmts[i]; found = 1; break; }
++        for (int srgb_only = 1; srgb_only >= 0 && !found; srgb_only--)
++            for (size_t k = 0; k < 2 && !found; k++)
++                for (u32 i = 0; i < nf; i++)
++                    if (fmts[i].format == pref[k] &&
++                        (!srgb_only || fmts[i].colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)) {
++                        fmt = fmts[i]; found = 1; break;
++                    }
+     }
++    free(fmts);
+     VkFormatProperties fp;
+     pvkGetPhysicalDeviceFormatProperties(s_vk.phys, fmt.format, &fp);
+     if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_DST_BIT)) {
+@@ -6964,3 +6985,14 @@ int rsx_vk_depth_clamp_ok(void) { return s_vk.depth_clamp_ok; }
+ 
+ /* Whether the device was created with samplerAnisotropy (a native renderer's samplers may ask for it). */
+ int rsx_vk_aniso_ok(void) { return s_vk.aniso_ok; }
++
++int rsx_vk_display_refresh_hz(void)
++{
++    if (SDL_InitSubSystem(SDL_INIT_VIDEO) != 0) return 0;
++    SDL_DisplayMode m;
++    int hz = SDL_GetDesktopDisplayMode(0, &m) == 0 && m.refresh_rate > 1 ? m.refresh_rate : 0;
++    VK_LOG("display: %s, %d Hz (SDL video driver %s)\n", SDL_GetDisplayName(0) ? SDL_GetDisplayName(0) : "?", hz,
++           SDL_GetCurrentVideoDriver() ? SDL_GetCurrentVideoDriver() : "?");
++    SDL_QuitSubSystem(SDL_INIT_VIDEO);
++    return hz;
++}
+diff --git a/libs/video/rsx_vulkan_backend.h b/libs/video/rsx_vulkan_backend.h
+index b2931a4f..d7715355 100644
+--- a/libs/video/rsx_vulkan_backend.h
++++ b/libs/video/rsx_vulkan_backend.h
+@@ -132,6 +132,11 @@ int  rsx_vulkan_backend_depth_bounds(void);
+  * backend. */
+ int  rsx_vulkan_backend_guest_programs(void);
+ 
++/* The primary display's refresh in hertz from SDL's current mode, 0 when unknown (no display, no video driver).
++ * Call on the main thread before the window opens; it takes and releases SDL's video subsystem. Reads only: the
++ * display's mode is not changed. */
++int rsx_vk_display_refresh_hz(void);
++
+ #ifdef __cplusplus
+ }
+ #endif
+-- 
+2.56.0
+
