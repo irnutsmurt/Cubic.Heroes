@@ -222,7 +222,7 @@ States: **VERIFIED** (implemented, evidence named), **UNVERIFIED** (implemented,
 | A7 | Cinematics through FFmpeg | NOT DONE | P2/P8 |
 | A8 | X11 and Wayland: windowed, borderless, fullscreen; the desktop's mode never changed | VERIFIED: all three modes on screen under native Wayland and X11 (XWayland, RADV presenting), the desktop at 1600x900@60.07 before and after every run; HiDPI at 150% (section 23) | sections 22, 23 |
 | A9 | Rendering resolution presets and custom; VSync; frame limits | NOT DONE | P8 |
-| A10 | Controllers: detection, prompts, hot-plug, remapping; keyboard remapping | NOT DONE | P8 (hot-plug by hand) |
+| A10 | Controllers: detection, prompts, hot-plug, remapping; keyboard remapping | PARTIAL: detection, prompts and hot-plug VERIFIED by the owner's hands with the packaged SDL2 (section 29); remapping: to do | section 29 |
 | A11 | The in-game overlay, performance overlays, developer tools, diagnostics and log export | NOT DONE | P8 |
 | A12 | The public CLI and exit codes (docs/CLI.md), `SIGTERM` reaching the game | VERIFIED: tests/cli_integration.py --with-game 17/17 on Linux (Windows: 17/17, M11.2); the signals; every command from both packages (section 20) | section 21 |
 | A13 | Graphical launcher: install from the disc, local recompilation, shader preparation | PARTIAL: headless install verified (2458 pipelines, none failed); the window: to do | section 13 |
@@ -777,3 +777,13 @@ the damaged build was the rollback and the whole one before it was pruned (a rol
 "build_damaged"). tools/install_layout.py activate keeps only whole builds (check_build); tests/test_install_layout.py
 test_a_repair_keeps_the_whole_build_for_rollback (26/26). Windows shares the change (its install layout is the same
 code).
+
+## 29. Controller hot-plug, by the owner's hands (2026-11-19) [O, M]
+
+The packaged tarball's install (the corrected SDL2: X11, Wayland and udev backends), on screen (the desktop guard's
+approval recorded for the run and withdrawn after), PAD_DEBUG=1. An Xbox Series X controller over USB: **6 connections
+and 5 disconnections, every one on port 0** ("SDL controller reconnected on port 0 ... instance 1-5"), input read
+after every reconnection (the owner's play and 45+ button and stick changes logged), no stall at a device change (SDL
+polled on its own thread; no "update took" report), the game closed normally (exit 0). The prompts follow the device
+used last, as designed: the Xbox glyphs after a press on the controller, the keyboard's after a key (the owner:
+working). Not tested: a second controller of another make at once, Bluetooth.
