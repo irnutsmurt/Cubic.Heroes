@@ -285,17 +285,23 @@ def python_runtime_licences(lic, platform):
         else:
             raise SystemExit(f"no licence file for {name} (looked at {paths}): the package would ship without it")
     if platform == "windows":
-        # the Windows review's W-7: the installer's LICENSE.txt carries the notices of the libraries the Windows build
-        # links (OpenSSL's Apache-2.0, libffi, bzip2), not those of the software CPython incorporates in its own
-        # modules -- expat in pyexpat.pyd, libmpdec in _decimal.pyd, the Mersenne Twister, SipHash, dtoa, ...
-        # (Doc/license.rst). The installer's own documentation holds them (Doc/html/license.html): shipped as text,
-        # the same file the Linux packages carry
-        page = os.path.join(base, "Doc", "html", "license.html")
-        if not os.path.isfile(page):
-            raise SystemExit(f"no {page} (the Python the worker is made with, installed with its documentation): the "
-                             "package would ship without the notices of the software CPython incorporates")
-        with open(os.path.join(lic, "Python-incorporated-software.txt"), "w", encoding="utf-8", newline="\n") as f:
-            f.write(html_text(open(page, encoding="utf-8").read()))
+        cpython_incorporated_software(lic, base)
+
+
+def cpython_incorporated_software(lic, base):
+    """the Windows review's W-7: the installer's LICENSE.txt carries the notices of the libraries the Windows build
+    links (OpenSSL's Apache-2.0, libffi, bzip2), not those of the software CPython incorporates in its own modules --
+    expat in pyexpat.pyd, libmpdec in _decimal.pyd, the Mersenne Twister, SipHash, dtoa, ... (Doc/license.rst). The
+    installer's own documentation holds them (base/Doc/html/license.html): shipped as text, the same file the Linux
+    packages carry"""
+    page = os.path.join(base, "Doc", "html", "license.html")
+    if not os.path.isfile(page):
+        raise SystemExit(f"no {page} (the Python the worker is made with, installed with its documentation): the "
+                         "package would ship without the notices of the software CPython incorporates")
+    with open(page, encoding="utf-8") as f:
+        text = html_text(f.read())
+    with open(os.path.join(lic, "Python-incorporated-software.txt"), "w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
 
 
 def html_text(page):

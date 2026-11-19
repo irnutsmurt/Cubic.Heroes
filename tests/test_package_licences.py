@@ -33,17 +33,37 @@ class HtmlText(unittest.TestCase):
 
     @unittest.skipUnless(os.name == "nt", "the python.org Windows build's own documentation")
     def test_the_windows_worker_carries_cpythons_incorporated_software(self):
+        # this Python's own pages (a Python installed without its documentation can't be checked here; make_bundle
+        # refuses to package with one)
         import make_bundle
+        if not os.path.isfile(os.path.join(sys.base_prefix, "Doc", "html", "license.html")):
+            self.skipTest("this Python was installed without its documentation")
+        tmp = tempfile.mkdtemp()
+        try:
+            make_bundle.cpython_incorporated_software(tmp, sys.base_prefix)
+            with open(os.path.join(tmp, "Python-incorporated-software.txt"), encoding="utf-8") as f:
+                text = f.read()
+            for w in ("expat", "libmpdec", "Mersenne Twister", "SipHash", "Clark Cooper"):
+                self.assertIn(w, text)
+        finally:
+            shutil.rmtree(tmp)
+
+    @unittest.skipUnless(os.name == "nt", "the Windows worker's runtime")
+    def test_the_windows_runtime_licences_together(self):
+        # the whole set, where the package is made: PyInstaller and pycryptodome installed beside this Python (CI's
+        # unit tests run without them)
+        import make_bundle
+        import sysconfig
+        sites = [sysconfig.get_paths()["purelib"]]
+        if not (make_bundle.dist_files(sites, "pyinstaller-*", "COPYING*")
+                and make_bundle.dist_files(sites, "pycryptodome*", "LICENSE*")):
+            self.skipTest("PyInstaller and pycryptodome not installed here (only the packaging needs them)")
         tmp = tempfile.mkdtemp()
         try:
             make_bundle.python_runtime_licences(tmp, "windows")
             names = set(os.listdir(tmp))
             self.assertTrue({"Python.txt", "Python-incorporated-software.txt", "pycryptodome.txt",
                              "PyInstaller.txt"} <= names, names)
-            with open(os.path.join(tmp, "Python-incorporated-software.txt"), encoding="utf-8") as f:
-                text = f.read()
-            for w in ("expat", "libmpdec", "Mersenne Twister", "SipHash", "Clark Cooper"):
-                self.assertIn(w, text)
             with open(os.path.join(tmp, "Python.txt"), encoding="utf-8") as f:
                 self.assertIn("Microsoft Distributable Code", f.read())
         finally:
