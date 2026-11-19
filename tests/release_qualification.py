@@ -423,7 +423,7 @@ class Q:
     def gameappimage(self):
         """Linux: the game's own AppImage in exports/, of the active build, started through FUSE and without it"""
         if WIN:
-            self.record("gameappimage", [], note="Windows: no AppImage")
+            self.record("gameappimage", [], na=True, note="not applicable: Windows has no AppImage")
             return
         img = os.path.join(self.root, "exports", "Cubic.Heroes-Game-x86_64.AppImage")
         bad = []
