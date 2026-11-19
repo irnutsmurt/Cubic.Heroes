@@ -74,3 +74,23 @@ The player-side recompilation boundary (README, "This repository contains no gam
 `tools/boundary_check.py`: the pre-push hook runs it on every pushed tree, `tools/make_bundle.py` on the setup's
 download; run `tools/boundary_check.py tree` before staging with `git add -A`. Never weaken a rule to make a
 finding go away: a finding means something game-derived is about to be published.
+
+## Development artifacts and disk space
+
+Cleaning up what development and testing generate is part of the work, never left to the owner (no reliance on a
+reboot or a manual clean-up).
+
+- Temporary artifacts go to disk-backed, git-ignored directories: `build/tmp` (with `TMPDIR` pointing there for
+  build and test processes), never the system's RAM-backed `/tmp`; the system's `/tmp` configuration is not changed.
+- Delete, once no longer needed: temporary screenshots, frame dumps, video captures, memory dumps, traces and
+  diagnostic recordings; temporary test scenarios, extracted AppImages, staging directories and obsolete test packages.
+- Keep only the logs, screenshots and benchmark results that document findings or reproduce unresolved bugs;
+  compress large diagnostic logs that are kept.
+- Check the free disk space before large compilations, packaging and long test runs.
+- Clean up after each completed test batch and each milestone; check for abandoned temporary artifacts at the start
+  of every session.
+- Performance benchmarks run without continuous screenshot captures (`DUMP=0`, no `shot` steps) unless capture itself
+  is what is tested.
+- Never delete: the owner's saves or settings; original game files; active builds or designated rollback builds;
+  valid shader and compilation caches; evidence needed for unresolved bugs; files of other projects or sessions.
+- Milestone summaries report significant disk use and what the clean-up removed.

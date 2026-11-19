@@ -812,3 +812,28 @@ Timing runs already use DUMP=0 (tests/perf_run.py: sections 24 and 27). /tmp on 
 (8.8 GB; 3.5 GB in use, most of it swapped out: other sessions' files and seven 108 MB `appimage_extracted_*`
 folders left by this milestone's extract-and-run tests, removed); large temporary files and benchmark captures go to
 the git-ignored build/tmp (TMPDIR) from now on.
+
+## 31. Extract-and-run leaves its copy behind (2026-11-19) [M, open: the owner's decision]
+
+The pinned AppImage runtime (type2-runtime 20251108, dd6cebed) in extract-and-run mode (`--appimage-extract-and-run`
+or APPIMAGE_EXTRACT_AND_RUN=1: the fallback where FUSE is missing) extracts to `$TMPDIR/appimage_extracted_<MD5 of
+the file>`, runs AppRun, and **leaves the folder** when the program exits -- also for a minimal AppImage whose AppRun
+only prints (built here with the same runtime and mksquashfs), with NO_CLEANUP unset; no "Failed to clean up"
+message. Upstream: the type-2 runtime leaves extractions in /tmp (cleanup only on request, since two instances share
+one folder by hash). The folder is per file: the same AppImage reuses it; **every new version leaves another full
+copy** (the launcher AppImage 449 MB, a game AppImage ~108 MB). On a /tmp that is a tmpfs, that is RAM and then swap
+until the next reboot. Seven such folders from this milestone's tests had accumulated on this laptop. FUSE runs
+(the normal case) are not affected; the tarball is not affected.
+
+## 32. Disk space and clean-up (2026-11-19) [M]
+
+Rules in CLAUDE.md ("Development artifacts and disk space"). First pass: build/ 28 GB -> 13 GB (the drive 351 -> 366 GB
+free); /tmp (tmpfs) 3.5 GB -> 0.2 GB. Removed: the old packages' qualification installs and the update test's work
+(10.4 GB; their qualification.json kept in build/evidence/qual), the first P2 build tree (build/linux/dev1, 2.0 GB,
+superseded by rel1), the superseded reference-scene runs (failed first attempts, the reverted bias experiment, the
+validation duplicate: ~1.3 GB; the latest run of each scene kept for A22), four copied shader folders and two
+obsolete preparations, 45 test runs whose results are recorded here (761 -> 18 MB: the 15 kept -- the prepared
+resolution matrix, validation, river, bosses, the opening, the two final ending runs -- without screenshots, their
+logs xz-compressed), the credits recordings packed into build/evidence/credits-stalls-2026-11-19.tar.xz (15 KB), seven
+extract-and-run folders in /tmp. Kept: the dev build rel1, the install `inst 1`, the current preparation prep-rel2,
+the disc copy, the checkpoints, the baselines, the dependency caches.
