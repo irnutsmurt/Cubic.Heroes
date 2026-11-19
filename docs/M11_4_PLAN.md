@@ -227,7 +227,7 @@ States: **VERIFIED** (implemented, evidence named), **UNVERIFIED** (implemented,
 | A12 | The public CLI and exit codes (docs/CLI.md), `SIGTERM` reaching the game | VERIFIED: tests/cli_integration.py --with-game 17/17 on Linux (Windows: 17/17, M11.2); the signals; every command from both packages (section 20) | section 21 |
 | A13 | Graphical launcher: install from the disc, local recompilation, shader preparation | PARTIAL: headless install verified (2458 pipelines, none failed); the window: to do | section 13 |
 | A14 | Signed updates, repair and rollback; the right package per OS and architecture | PARTIAL: tests/linux_update_check.py 10/10 from the package (signed release offered and swapped in; bad signature, untrusted key, Windows-only release, corrupted download and a zip refused; each install kind its own package); update and rollback from the packages; `--install --repair`: to do | section 23 |
-| A15 | Portable root: spaces, Unicode, relocation, another drive, no FUSE (tarball) | PARTIAL: spaces, accents and Japanese, the whole root moved and played, no FUSE (containers) verified; another drive: to do | section 20 |
+| A15 | Portable root: spaces, Unicode, relocation, another drive, no FUSE (tarball) | VERIFIED except another drive: spaces, accents and Japanese, the whole root moved and played (both packages), no FUSE (containers). **Another physical drive: DEFERRED by the owner's decision (2026-11-18) -- not verified, not a release blocker** | sections 20, 23 |
 | A16 | Launcher AppImage and tarball, equivalent | VERIFIED: one folder; the AppImage = the folder file for file; each qualified 14/14 from the package, offline (section 20) | section 20 |
 | A17 | The locally generated thin game AppImage: relocatable, regenerated on update and rollback, never distributed | VERIFIED: made by the packaged installs, of the active build after the update and after the rollback; through FUSE and extract-and-run; before and after the root moved (section 20) | section 20 |
 | A18 | glibc 2.31 baseline verified on actual supported distributions, not only Manjaro | VERIFIED: 114 ELF files at GLIBC_2.30 at most; 8/8 checks on Debian 11, Ubuntu 20.04, Ubuntu 24.04, Fedora 41 (the game built here included) | section 19 |
@@ -235,7 +235,7 @@ States: **VERIFIED** (implemented, evidence named), **UNVERIFIED** (implemented,
 | A20 | CI: Windows and Linux builds, tests, boundary and privacy checks | VERIFIED: run 44450410663 -- Linux 13m16s, Windows 22m46s, boundary and privacy, all pass | section 19 |
 | A21 | Windows build and behaviour unbroken | PARTIAL: Windows' game compiles and links from this tree (a Zig cross-build, Windows' release configuration); behaviour: the owner's Windows PC (section 7) | section 14 |
 | A22 | AMD rendering matches the Windows references; validation layers clean | NOT DONE | P7 |
-| A23 | Performance measured and reported (target 60 fps) | NOT DONE | P7 |
+| A23 | Performance measured and reported (target 60 fps) | PARTIAL: the castle-front route at 540p-1080p measured against Windows' baseline (section 24); river combat, dungeon and bosses: to do | section 24 |
 | A24 | 166 maps, bosses, gameplay, audio, saves on Linux | NOT DONE | P8 |
 | A25 | Release qualification from the Linux packages | NOT DONE | P9 |
 | A26 | Licences, boundary, privacy audits of the Linux packages; docs and README | NOT DONE | P9 |
@@ -623,3 +623,40 @@ EBOOT.elf is the qualification input).
 - **A real default-output change** (a temporary null sink made the default during play, then the original back, the
   module unloaded; the original default confirmed): "the default output changed: moving to it" / "device reopened:
   CubicTestSink" and back to "Ryzen HD Audio Controller Analog Stereo".
+
+## 24. P7: AMD gameplay performance, the castle-front route (2026-11-18) [M]
+
+**The route** (tests/scripts/res_perf.drive): Windows' M11.2f frame-pacing route, reconstructed line for line from
+its kept baselines' drive.log (build/baselines/2026-11-18-render-res-perf) and committed -- CONTINUE from the
+castle-front checkpoint, no death, a square walked in front of the castle; PS3_FTRACE 24:27 (27 s of gameplay),
+offscreen, DUMP=0, the development build in Windows' release configuration (build/linux/rel1). Measured with
+tests/perf_run.py: the frame times (the guest's flip requests, as tests/frame_times.py reads them), amdgpu's GPU busy
+percentage and VRAM/GTT growth, the game's CPU time (100% = one core); a run whose drive did not finish is marked
+INVALID.
+
+**Like for like with Windows' baseline (shader cache off, every pipeline built in play), 1080p, 60 limit**:
+Windows (RTX 3070): 60.0 fps, median 16.7, p95 18.7, p99 19.3, worst 20.8 ms, none over 25 ms. This laptop: 37.0
+fps -- median 16.7 and p95 18.5 as Windows, but 14 frames over 25 ms, the worst 4.2 s: pipelines built in play (one
+frame built 22 in 2.4 s) -- RADV's compiler on this APU is far slower than NVIDIA's. Players never run that way: the
+install prepares the pipelines (below).
+
+**As players run it -- the shaders prepared** (the development build given its own comprehensive preparation: 197
+recipes + 2265 package records, 0 failed; Mesa's disk cache warm). Each run's drive finished its route:
+
+| Rendering | 60 limit: fps / p95 / p99 / worst / 1% low / >25 ms | Unlimited: fps / median / p99 | GPU busy (60 / unl.) | Game CPU (unl.) | VRAM over idle |
+|---|---|---|---|---|---|
+| 960x540 | 59.3 / 17.9 / 19.6 / 212 / 25.5 / 2 | 96.9 / 10.1 / 14.0 | 45% / 70% | 199% | 275 MB |
+| 1280x720 | **60.0** / 17.8 / 18.7 / 24.3 / 49.8 / 0 | 88.2 / 11.1 / 15.4 | 52% / 84% | 209% | 290 MB |
+| 1600x900 (the panel) | **60.0** / 18.2 / 20.3 / 26.1 / 45.5 / 1 | 82.2 / 11.7 / 16.2 | 65% / 92% | 212% | 316 MB |
+| 1920x1080 | **60.0** / 18.4 / 20.9 / 28.0 / 43.4 / 2 | 72.9 / 13.4 / 18.9 | 77% / 95% | 212% | 341 MB |
+
+GTT growth stayed under 15 MB in every run. **Findings**: 60 fps held at every resolution to 1080p on the Renoir
+iGPU (p99 within 2 ms of the RTX 3070's at 1080p); unlimited, the frame rate falls with the resolution while the GPU
+is 84-95% busy -- **GPU-bound from 720p up**; at 540p the GPU is 70% busy and the game uses about two cores --
+**CPU/synchronisation-bound** there (~97 fps). The 540p/60 run's single 212 ms frame is unexplained so far (a repeat
+run to classify it; this machine runs with ~9 GB of swap in use). The four "not prepared" pipelines each run met (2-16
+ms in all) are in the preparation's records now.
+
+**Not valid, discarded**: a first matrix through the installed game (INSTALLED=) -- an installed game with developer
+mode off ignores the drive's state probe (B-001's rule), so the drive failed at the title and the trace timed the
+title screen (900 fps). tests/perf_run.py now refuses such runs.

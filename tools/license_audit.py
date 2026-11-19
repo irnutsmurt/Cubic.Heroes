@@ -34,12 +34,18 @@ RULES = [
      "keep: facts about the game's behaviour and the project's results"),
 ]
 
+# sets of files given one row: (prefix, suffix, what they are, "class | action")
+GROUPS = [
+    ("port/assets/ui/prompts/", ".png", "images, M11.2g", "THIRD | keep: Kenney's Input Prompts, CC0, unmodified; "
+     "LICENSE-Kenney.txt beside them; listed in the README"),
+]
+
 
 def main():
     out_path = sys.argv[1] if len(sys.argv) > 1 else None
     files = [f for f in subprocess.run(["git", "ls-files"], capture_output=True, text=True, cwd=ROOT).stdout.split("\n") if f]
     bad = [(f, c) for f in files for prefixes, c in FORBIDDEN if f.startswith(prefixes)]
-    rows, counts = [], {}
+    rows, counts, grouped = [], {}, {}
     for f in sorted(files):
         cls, act = "INDEP", "keep"
         for prefixes, c, a in RULES:
@@ -47,7 +53,16 @@ def main():
                 cls, act = c, a
                 break
         counts[cls] = counts.get(cls, 0) + 1
+        g = next((g for g in GROUPS if f.startswith(g[0]) and f.endswith(g[1])), None)
+        if g:   # one row for the set, where its first file sorts
+            if g not in grouped:
+                grouped[g] = len(rows)
+                rows.append(None)
+            continue
         rows.append("| `%s` | %s | %s |" % (f, cls, act))
+    for g, i in grouped.items():
+        n = sum(1 for f in files if f.startswith(g[0]) and f.endswith(g[1]))
+        rows[i] = "| `%s*%s` (%d %s) | %s |" % (g[0], g[1], n, g[2], g[3])
     summary = "%d files: %s" % (len(files), ", ".join("%s %d" % kv for kv in sorted(counts.items())))
     print(summary)
     if bad:

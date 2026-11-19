@@ -1,0 +1,21 @@
+# Frame pacing at a rendering resolution (M11.2f; Windows' baselines: build/baselines/2026-11-18-render-res-perf).
+# Reconstructed in M11.4 from those runs' drive.log (the same steps, line for line) and committed, so Windows and
+# Linux time the same route: CONTINUE from the castle-front save, no death, then a square walked in front of the castle.
+# Run with DOTHEROES_RENDER_RES=<WxH> and DOTHEROES_FPS=60 (or 0: unlimited), PS3_FTRACE=24:27:ftrace.txt, DUMP=0.
+#! saves build/checkpoints/castle-front
+#! env DOTHEROES_DEVELOPER_MODE=1 DOTHEROES_DEV_STATE=1 PS3_VERBOSE=0 SHOT_EVERY=0 DUMP=0 PS3RECOMP_SPIRV_CACHE=off
+include ../scenarios/common.drive
+log TitleMovie 120
+sleep 6
+call continue
+state life>0 60
+dev nodeath on
+sleep 4
+state life>0 5
+sleep 6
+hold DOWN 3
+hold RIGHT 3
+hold UP 3
+hold LEFT 3
+sleep 6
+state life>0 5

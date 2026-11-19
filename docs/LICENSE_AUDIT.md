@@ -1,6 +1,15 @@
 | File | Class | Action |
 |---|---|---|
+| `.claude/settings.json` | INDEP | keep |
 | `.gitattributes` | INDEP | keep |
+| `.github/ISSUE_TEMPLATE/1-gameplay.yml` | INDEP | keep |
+| `.github/ISSUE_TEMPLATE/2-rendering.yml` | INDEP | keep |
+| `.github/ISSUE_TEMPLATE/3-crash-hang.yml` | INDEP | keep |
+| `.github/ISSUE_TEMPLATE/4-performance.yml` | INDEP | keep |
+| `.github/ISSUE_TEMPLATE/5-install-launcher.yml` | INDEP | keep |
+| `.github/ISSUE_TEMPLATE/6-hardware.yml` | INDEP | keep |
+| `.github/ISSUE_TEMPLATE/config.yml` | INDEP | keep |
+| `.github/workflows/ci.yml` | INDEP | keep |
 | `.gitignore` | INDEP | keep |
 | `CLAUDE.md` | INDEP | keep |
 | `LICENSE` | INDEP | keep |
@@ -16,6 +25,7 @@
 | `config/m8_movie_trace.json` | INDEP | keep |
 | `config/m8_native_movie.json` | INDEP | keep |
 | `config/pipeline_manifest.txt` | INDEP | keep |
+| `config/pipeline_profiles.txt` | INDEP | keep |
 | `config/r6_native_observers.json` | INDEP | keep |
 | `config/r7_native_hooks.json` | INDEP | keep |
 | `config/r8_hooks.json` | INDEP | keep |
@@ -27,11 +37,18 @@
 | `config/spu_relocatable.json` | INDEP | keep |
 | `docs/AUDIO.md` | INDEP | keep |
 | `docs/BULLET_NATIVE.md` | DOC-GAME | keep: facts about the game's behaviour and the project's results |
+| `docs/CLI.md` | INDEP | keep |
 | `docs/FEASIBILITY.md` | INDEP | keep |
 | `docs/FFMPEG_MIGRATION_PLAN.md` | INDEP | keep |
 | `docs/HANDOFF.md` | INDEP | keep |
 | `docs/LICENSE_AUDIT.md` | INDEP | keep |
+| `docs/LINUX_PACKAGING.md` | INDEP | keep |
 | `docs/M10_PLAN.md` | INDEP | keep |
+| `docs/M11_4_PLAN.md` | INDEP | keep |
+| `docs/M11_PLAN.md` | INDEP | keep |
+| `docs/M11_VALIDATION.md` | INDEP | keep |
+| `docs/M7_HISTORY_PLAN.md` | INDEP | keep |
+| `docs/M92_SHADER_PLAN.md` | INDEP | keep |
 | `docs/M9_LAUNCHER_PLAN.md` | INDEP | keep |
 | `docs/M9_WORKER_PROTOCOL.md` | INDEP | keep |
 | `docs/MILESTONES.md` | INDEP | keep |
@@ -48,11 +65,24 @@
 | `docs/NATIVE_R8.md` | DOC-GAME | keep: facts about the game's behaviour and the project's results |
 | `docs/OPENAL_MIGRATION_PLAN.md` | INDEP | keep |
 | `docs/PC_EXPERIENCE.md` | INDEP | keep |
+| `docs/RELEASE_QUALIFICATION.md` | INDEP | keep |
 | `docs/RELEASE_SIGNING.md` | INDEP | keep |
 | `docs/SAVE_UI.md` | INDEP | keep |
 | `docs/SETUP.md` | INDEP | keep |
 | `docs/SHADER_PREPARATION.md` | INDEP | keep |
 | `docs/SPU_NON_AUDIO.md` | DOC-GAME | keep: facts about the game's behaviour and the project's results |
+| `docs/media/boss.jpg` | INDEP | keep |
+| `docs/media/dungeon.jpg` | INDEP | keep |
+| `docs/media/editor.jpg` | INDEP | keep |
+| `docs/media/hero.jpg` | INDEP | keep |
+| `docs/media/launcher.jpg` | INDEP | keep |
+| `docs/media/overlay.jpg` | INDEP | keep |
+| `docs/media/overworld.jpg` | INDEP | keep |
+| `docs/media/quit.jpg` | INDEP | keep |
+| `docs/media/saves.jpg` | INDEP | keep |
+| `docs/media/settings.jpg` | INDEP | keep |
+| `docs/media/shaders.jpg` | INDEP | keep |
+| `launcher/cli.h` | INDEP | keep |
 | `launcher/json.h` | INDEP | keep |
 | `launcher/main.cpp` | INDEP | keep |
 | `launcher/worker_client.h` | INDEP | keep |
@@ -216,18 +246,35 @@
 | `patches/ps3recomp/0158-Vulkan-the-driver-s-and-loader-s-messages-in-the-log.patch` | INDEP | keep |
 | `patches/ps3recomp/0159-M10-display-modes-a-host-frame-limiter-the-game-held.patch` | INDEP | keep |
 | `patches/ps3recomp/0160-cellPad-a-port-s-read-keeps-the-pads-own-buttons-wit.patch` | INDEP | keep |
+| `patches/ps3recomp/0161-SPIR-V-several-translations-at-a-time-glslang-set-up.patch` | INDEP | keep |
+| `patches/ps3recomp/0162-SPIR-V-cache-checked-on-its-own-thread-and-read-when.patch` | INDEP | keep |
+| `patches/ps3recomp/0163-Graphics-pipeline-libraries-for-a-port-capability-ga.patch` | INDEP | keep |
+| `patches/ps3recomp/0164-A-port-s-work-on-the-held-thread-g_ps3_guest_hold_wo.patch` | INDEP | keep |
+| `patches/ps3recomp/0165-A-linear-texture-s-mip-levels-at-the-pitch-register-.patch` | INDEP | keep |
+| `patches/ps3recomp/0166-PS3_HLE_ARGS-also-walks-the-guest-stack-each-caller-.patch` | INDEP | keep |
+| `patches/ps3recomp/0167-The-runtime-s-ends-through-a-host-hook-ps3_exit-g_ps.patch` | INDEP | keep |
+| `patches/ps3recomp/0168-The-rendering-resolution-a-resizable-frame-WPOS-at-a.patch` | INDEP | keep |
+| `patches/ps3recomp/0169-Prompt-styles-Steam-and-generic-Nintendo-by-label-th.patch` | INDEP | keep |
+| `patches/ps3recomp/0170-cellSaveData-the-save-list-s-time-read-through-glibc.patch` | INDEP | keep |
+| `patches/ps3recomp/0171-Lifter-the-call-site-caches-image-anchor-on-ELF-__eh.patch` | INDEP | keep |
+| `patches/ps3recomp/0172-Vulkan-backend-native-Wayland-s-surface-formats-HiDP.patch` | INDEP | keep |
+| `patches/ps3recomp/0173-cellPad-the-function-keys-F1-F12-for-a-port-s-develo.patch` | INDEP | keep |
 | `port/CMakeLists.txt` | INDEP | keep |
 | `port/LICENSE.ps3recomp` | THIRD | keep: licence file beside it; listed in the README |
 | `port/assets/ui/DejaVuSans.ttf` | THIRD | keep: licence file beside it; listed in the README |
 | `port/assets/ui/LICENSE-DejaVuSans.txt` | THIRD | keep: licence file beside it; listed in the README |
 | `port/assets/ui/LICENSE-Kenney.txt` | THIRD | keep: licence file beside it; listed in the README |
-| `port/assets/ui/prompts/*.png` (163 images, M11.2g) | THIRD | keep: Kenney's Input Prompts, CC0, unmodified; LICENSE-Kenney.txt beside them; listed in the README |
 | `port/assets/ui/prompt_xbox_back.png` | THIRD | keep: licence file beside it; listed in the README |
 | `port/assets/ui/prompt_xbox_confirm.png` | THIRD | keep: licence file beside it; listed in the README |
+| `port/assets/ui/prompts/*.png` (163 images, M11.2g) | THIRD | keep: Kenney's Input Prompts, CC0, unmodified; LICENSE-Kenney.txt beside them; listed in the README |
 | `port/audio_hook_table.inc` | INDEP | keep |
 | `port/audio_hooks.cpp` | INDEP | keep |
 | `port/cmake/embed_files.cmake` | INDEP | keep |
 | `port/cpu_place.cpp` | INDEP | keep |
+| `port/devtools/dev_menu.cpp` | INDEP | keep |
+| `port/devtools/devtools.cpp` | INDEP | keep |
+| `port/devtools/devtools.h` | INDEP | keep |
+| `port/devtools/devtools_internal.h` | INDEP | keep |
 | `port/diag/diag.cpp` | INDEP | keep |
 | `port/diag/diag.h` | INDEP | keep |
 | `port/diag/game_log.cpp` | INDEP | keep |
@@ -263,6 +310,7 @@
 | `port/native/dev_state.h` | INDEP | keep |
 | `port/native/edge_inflate.c` | INDEP | keep |
 | `port/native/gz_walk.h` | INDEP | keep |
+| `port/native/host_thread.h` | INDEP | keep |
 | `port/native/inflate.c` | INDEP | keep |
 | `port/native/inflate.h` | INDEP | keep |
 | `port/native/inflate_direct.cpp` | INDEP | keep |
@@ -289,6 +337,8 @@
 | `port/native/render/r1_json.h` | INDEP | keep |
 | `port/native/render/r1_observe.cpp` | INDEP | keep |
 | `port/native/render/r1_replay.c` | INDEP | keep |
+| `port/native/render/shader_discovery.cpp` | INDEP | keep |
+| `port/native/render/shader_discovery.h` | INDEP | keep |
 | `port/native/spu_native.cpp` | SPUGEN | keep: generates the water's and the waver's tasks from the player's lift; nothing of an image in it |
 | `port/native/spu_native.h` | SPUGEN | keep: generates the water's and the waver's tasks from the player's lift; nothing of an image in it |
 | `port/native/spu_native_absent.cpp` | SPUGEN | keep: generates the water's and the waver's tasks from the player's lift; nothing of an image in it |
@@ -302,6 +352,9 @@
 | `port/overlay.cpp` | INDEP | keep |
 | `port/phys_hooks.cpp` | INDEP | keep |
 | `port/promo_check.cpp` | INDEP | keep |
+| `port/prompts.cpp` | INDEP | keep |
+| `port/prompts_table.cpp` | INDEP | keep |
+| `port/prompts_table.h` | INDEP | keep |
 | `port/stubs.cpp` | INDEP | keep |
 | `port/ui_assets.cpp` | INDEP | keep |
 | `port/ui_pixel_font.h` | INDEP | keep |
@@ -312,18 +365,29 @@
 | `tests/boot_smoke.py` | INDEP | keep |
 | `tests/boot_smoke.sh` | INDEP | keep |
 | `tests/boss_timing.py` | INDEP | keep |
+| `tests/cli_integration.py` | INDEP | keep |
 | `tests/contact_sheet.py` | INDEP | keep |
+| `tests/desktop_guard.py` | INDEP | keep |
+| `tests/devtools.py` | INDEP | keep |
+| `tests/devtools_bosses.py` | INDEP | keep |
+| `tests/devtools_priest.py` | INDEP | keep |
+| `tests/devtools_suite.py` | INDEP | keep |
+| `tests/distro_check.py` | INDEP | keep |
 | `tests/drive.py` | INDEP | keep |
 | `tests/fight_bench.py` | INDEP | keep |
+| `tests/fps_actors.py` | INDEP | keep |
 | `tests/fps_check.py` | INDEP | keep |
 | `tests/fps_fields.py` | INDEP | keep |
 | `tests/frame_costs.py` | INDEP | keep |
 | `tests/frame_log.py` | INDEP | keep |
 | `tests/frame_times.py` | INDEP | keep |
+| `tests/fs_case_check.py` | INDEP | keep |
 | `tests/geom_newkeys.py` | INDEP | keep |
 | `tests/inflate_frames.py` | INDEP | keep |
 | `tests/keep_baseline.py` | INDEP | keep |
 | `tests/lap_ab.py` | INDEP | keep |
+| `tests/linux_update_check.py` | INDEP | keep |
+| `tests/map_sweep.py` | INDEP | keep |
 | `tests/native/bullet_cd_snapcheck.cpp` | INDEP | keep |
 | `tests/native/bullet_solver_snapcheck.cpp` | INDEP | keep |
 | `tests/native/ffmpeg_decode_check.cpp` | INDEP | keep |
@@ -353,6 +417,8 @@
 | `tests/phys_frames.py` | INDEP | keep |
 | `tests/player_install_test.py` | INDEP | keep |
 | `tests/prof_report.py` | INDEP | keep |
+| `tests/prompts_check.py` | INDEP | keep |
+| `tests/release_qualification.py` | INDEP | keep |
 | `tests/ring_wait.py` | INDEP | keep |
 | `tests/route_from_record.py` | INDEP | keep |
 | `tests/rpcs3_capture.py` | INDEP | keep |
@@ -363,6 +429,27 @@
 | `tests/scenarios/README.md` | INDEP | keep |
 | `tests/scenarios/attract.drive` | INDEP | keep |
 | `tests/scenarios/common.drive` | INDEP | keep |
+| `tests/scenarios/devtools_basic.drive` | INDEP | keep |
+| `tests/scenarios/devtools_boss.drive` | INDEP | keep |
+| `tests/scenarios/devtools_bossfight.drive` | INDEP | keep |
+| `tests/scenarios/devtools_cubemap.drive` | INDEP | keep |
+| `tests/scenarios/devtools_diag.drive` | INDEP | keep |
+| `tests/scenarios/devtools_encounter.drive` | INDEP | keep |
+| `tests/scenarios/devtools_ending.drive` | INDEP | keep |
+| `tests/scenarios/devtools_enemies.drive` | INDEP | keep |
+| `tests/scenarios/devtools_forced.drive` | INDEP | keep |
+| `tests/scenarios/devtools_install.drive` | INDEP | keep |
+| `tests/scenarios/devtools_install_off.drive` | INDEP | keep |
+| `tests/scenarios/devtools_install_play.drive` | INDEP | keep |
+| `tests/scenarios/devtools_menu.drive` | INDEP | keep |
+| `tests/scenarios/devtools_off.drive` | INDEP | keep |
+| `tests/scenarios/devtools_persist.drive` | INDEP | keep |
+| `tests/scenarios/devtools_persist_load.drive` | INDEP | keep |
+| `tests/scenarios/devtools_player.drive` | INDEP | keep |
+| `tests/scenarios/devtools_priest.drive` | INDEP | keep |
+| `tests/scenarios/devtools_progress.drive` | INDEP | keep |
+| `tests/scenarios/devtools_triggers.drive` | INDEP | keep |
+| `tests/scenarios/devtools_warp.drive` | INDEP | keep |
 | `tests/scenarios/dungeon1_approach.drive` | INDEP | keep |
 | `tests/scenarios/dungeon1_boss.drive` | INDEP | keep |
 | `tests/scenarios/dungeon1_deeper.drive` | INDEP | keep |
@@ -429,7 +516,10 @@
 | `tests/scripts/find_life.drive` | INDEP | keep |
 | `tests/scripts/find_menu.drive` | INDEP | keep |
 | `tests/scripts/find_position.drive` | INDEP | keep |
+| `tests/scripts/fps_actors.drive` | INDEP | keep |
+| `tests/scripts/fps_bosses.drive` | INDEP | keep |
 | `tests/scripts/fps_check.drive` | INDEP | keep |
+| `tests/scripts/fps_knight.drive` | INDEP | keep |
 | `tests/scripts/grass_cut.drive` | INDEP | keep |
 | `tests/scripts/install_data.drive` | INDEP | keep |
 | `tests/scripts/intro.drive` | INDEP | keep |
@@ -441,6 +531,7 @@
 | `tests/scripts/new_game.drive` | INDEP | keep |
 | `tests/scripts/pause_check.drive` | INDEP | keep |
 | `tests/scripts/perf_walk.drive` | INDEP | keep |
+| `tests/scripts/prompts.drive` | INDEP | keep |
 | `tests/scripts/roundtrip_1.drive` | INDEP | keep |
 | `tests/scripts/roundtrip_2.drive` | INDEP | keep |
 | `tests/scripts/roundtrip_3.drive` | INDEP | keep |
@@ -454,6 +545,7 @@
 | `tests/scripts/speed_save.drive` | INDEP | keep |
 | `tests/scripts/system_menu.drive` | INDEP | keep |
 | `tests/scripts/title_no_install.drive` | INDEP | keep |
+| `tests/scripts/title_quit.drive` | INDEP | keep |
 | `tests/scripts/walk_far.drive` | INDEP | keep |
 | `tests/scripts/watch_walk.drive` | INDEP | keep |
 | `tests/slow_frames.py` | INDEP | keep |
@@ -466,12 +558,21 @@
 | `tests/solver_iterate_layout.py` | INDEP | keep |
 | `tests/solver_layout.py` | INDEP | keep |
 | `tests/solver_setup_diff.py` | INDEP | keep |
+| `tests/startup_stall_check.py` | INDEP | keep |
 | `tests/stop_tests.py` | INDEP | keep |
 | `tests/test_boundary_check.py` | INDEP | keep |
+| `tests/test_desktop_guard.py` | INDEP | keep |
+| `tests/test_dev_saves.py` | INDEP | keep |
+| `tests/test_fps_actors.py` | INDEP | keep |
+| `tests/test_game_appimage.py` | INDEP | keep |
+| `tests/test_hostenv.py` | INDEP | keep |
 | `tests/test_install_layout.py` | INDEP | keep |
+| `tests/test_map_sweep.py` | INDEP | keep |
 | `tests/test_owned_run.py` | INDEP | keep |
 | `tests/test_pipeline_manifest.py` | INDEP | keep |
+| `tests/test_pipeline_profiles.py` | INDEP | keep |
 | `tests/test_player_pipeline.py` | INDEP | keep |
+| `tests/test_portable_root.py` | INDEP | keep |
 | `tests/test_ps3_disc.py` | INDEP | keep |
 | `tests/test_release_keys.py` | INDEP | keep |
 | `tests/test_settings_diagnostics.py` | INDEP | keep |
@@ -479,8 +580,11 @@
 | `tests/test_updates.py` | INDEP | keep |
 | `tests/test_worker.py` | INDEP | keep |
 | `tests/thread_cpu.sh` | INDEP | keep |
+| `tests/title_quit.py` | INDEP | keep |
 | `tests/walker_breakdown.py` | INDEP | keep |
+| `tests/window_place_check.py` | INDEP | keep |
 | `tests/workload_variation.py` | INDEP | keep |
+| `tools/appimage.py` | INDEP | keep |
 | `tools/audio_mix.py` | INDEP | keep |
 | `tools/audio_trace.py` | INDEP | keep |
 | `tools/audio_trace_compare.py` | INDEP | keep |
@@ -489,27 +593,39 @@
 | `tools/build_deps.py` | INDEP | keep |
 | `tools/build_ffmpeg.py` | INDEP | keep |
 | `tools/build_launcher.py` | INDEP | keep |
+| `tools/ci_build.py` | INDEP | keep |
+| `tools/ci_stub_lift.py` | INDEP | keep |
 | `tools/class_census_static.py` | INDEP | keep |
 | `tools/cmake/glslang_doc_O0.cmake` | INDEP | keep |
+| `tools/dev_saves.py` | INDEP | keep |
 | `tools/diagnostics.py` | INDEP | keep |
 | `tools/edit_import.py` | INDEP | keep |
+| `tools/fetch_appimage.py` | INDEP | keep |
+| `tools/fetch_zig.py` | INDEP | keep |
 | `tools/fix_functions.py` | INDEP | keep |
+| `tools/game_appimage.py` | INDEP | keep |
 | `tools/game_settings.py` | INDEP | keep |
 | `tools/gen_spu_native.py` | SPUGEN | keep: generates the water's and the waver's tasks from the player's lift; nothing of an image in it |
 | `tools/githooks/pre-push` | INDEP | keep |
+| `tools/glibc_check.py` | INDEP | keep |
 | `tools/grab_luma.py` | INDEP | keep |
+| `tools/hostenv.py` | INDEP | keep |
 | `tools/install_layout.py` | INDEP | keep |
 | `tools/iso9660.py` | INDEP | keep |
 | `tools/license_audit.py` | INDEP | keep |
+| `tools/linux_build_env/Dockerfile` | INDEP | keep |
+| `tools/linux_package.py` | INDEP | keep |
 | `tools/m8_frames_compare.py` | INDEP | keep |
 | `tools/m8_sound_compare.py` | INDEP | keep |
 | `tools/m8_trace_lift.sh` | INDEP | keep |
+| `tools/make_appimage.py` | INDEP | keep |
 | `tools/make_bundle.py` | INDEP | keep |
 | `tools/movie_inventory.py` | INDEP | keep |
 | `tools/owned_run.py` | INDEP | keep |
 | `tools/pan_check.py` | INDEP | keep |
 | `tools/pipeline.py` | INDEP | keep |
 | `tools/pipeline_manifest.py` | INDEP | keep |
+| `tools/pipeline_profiles.py` | INDEP | keep |
 | `tools/ps3_disc.py` | INDEP | keep |
 | `tools/push_guard.py` | INDEP | keep |
 | `tools/r1_boundary_check.py` | INDEP | keep |
@@ -556,6 +672,7 @@
 | `tools/release.py` | INDEP | keep |
 | `tools/release_trust.py` | INDEP | keep |
 | `tools/reverb_tail.py` | INDEP | keep |
+| `tools/root_migration.py` | INDEP | keep |
 | `tools/save_diff.py` | INDEP | keep |
 | `tools/save_ui_preview.c` | INDEP | keep |
 | `tools/sdl_device_poke.py` | INDEP | keep |
@@ -572,6 +689,7 @@
 | `tools/spu_trace.py` | INDEP | keep |
 | `tools/symbolize.py` | INDEP | keep |
 | `tools/thread_cpu.py` | INDEP | keep |
+| `tools/trace_observers.py` | INDEP | keep |
 | `tools/uninstall.py` | INDEP | keep |
 | `tools/updates.py` | INDEP | keep |
 | `tools/version.py` | INDEP | keep |
