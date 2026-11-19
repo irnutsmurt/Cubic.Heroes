@@ -328,8 +328,9 @@ For developers. A clone builds the tools and the runtime -- not the game, which 
 
 - Windows: Python 3.12 in `build/venv` (with `pycryptodome`, `pillow`, `pyinstaller`), CMake, Ninja, Zig 0.17 in
   `build/toolchain/`, the Vulkan SDK.
-- Linux: Python 3.10+ with `pycryptodome`, CMake, Ninja, clang, SDL2, Vulkan headers, glslang
-  ([docs/SETUP.md](docs/SETUP.md)).
+- Linux: Python 3.10+ with `pycryptodome`, CMake 4, Ninja, Zig 0.17 (`tools/fetch_zig.py`) and the system's X11,
+  Wayland, udev, PulseAudio and ALSA headers; the release packages are built in the pinned container of
+  `tools/linux_package.py` (glibc 2.31 baseline) ([docs/LINUX_PACKAGING.md](docs/LINUX_PACKAGING.md)).
 
 ```sh
 python3 tools/pipeline.py --iso "<your BLUS-30490>.iso" --keys <keys.txt>   # extract, decrypt, lift into build/gen

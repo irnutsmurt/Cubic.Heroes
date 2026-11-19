@@ -235,8 +235,8 @@ States: **VERIFIED** (implemented, evidence named), **UNVERIFIED** (implemented,
 | A20 | CI: Windows and Linux builds, tests, boundary and privacy checks | VERIFIED: run 44450410663 -- Linux 13m16s, Windows 22m46s, boundary and privacy, all pass | section 19 |
 | A21 | Windows build and behaviour unbroken | PARTIAL: Windows' game compiles and links from this tree (a Zig cross-build, Windows' release configuration); behaviour: the owner's Windows PC (section 7) | section 14 |
 | A22 | AMD rendering matches the Windows references; validation layers clean | PARTIAL: the five RPCS3 reference scenes run on Linux and look like RPCS3's; 1 of 5 within Windows' accepted figures -- the rest a stable, small difference (section 26) not yet separated into AMD's and the code's: a Windows run of the same build asked of the owner; validation layers: to do | section 26 |
-| A23 | Performance measured and reported (target 60 fps) | PARTIAL: the castle-front route at 540p-1080p measured against Windows' baseline (section 24); river combat, dungeon and bosses: to do | section 24 |
-| A24 | 166 maps, bosses, gameplay, audio, saves on Linux | PARTIAL: the 166-map sweep passed -- every map reached, 207 of 207 pipelines met in play prepared, 0 translations in play (section 25); bosses, gameplay, audio, saves: to do | section 25 |
+| A23 | Performance measured and reported (target 60 fps) | PARTIAL: 60 fps held -- the castle-front route 540p-1080p (section 24), the river fight and the seven boss fights with no frame over 25 ms (section 27); dungeon exploration and the 540p spike's repeat: to do | sections 24, 27 |
+| A24 | 166 maps, bosses, gameplay, audio, saves on Linux | PARTIAL: the 166-map sweep passed (207 of 207 pipelines prepared, section 25); the developer-tools suite 16/16 -- a guardian fought to its defeat, the ending to the credits, saves across processes (section 27); the seven boss fights; audio in play, the player's own saves: to do | sections 25, 27 |
 | A25 | Release qualification from the Linux packages | NOT DONE | P9 |
 | A26 | Licences, boundary, privacy audits of the Linux packages; docs and README | NOT DONE | P9 |
 
@@ -721,3 +721,44 @@ same instance requirement, for 0.19% of one scene's pixels: not made.
 and this machine differs in GPU (AMD: D32 depth, non-strict lines, its own filtering) as well as system. A Windows run
 of this commit, with D24 (the default) and with DOTHEROES_PPFX_DEPTH_D32=1, separates NVIDIA-with-D32 from AMD and
 from the code: asked of the owner.
+
+## 27. P7/P8: the developer-tools suite, the validation layer, the river fight (2026-11-19) [M]
+
+**The developer-tools suite on Linux: 16 of 16** (tests/devtools_suite.py, offscreen): the channel and Lua runner,
+warps, the in-game menu, player state, progress, encounters, diagnostics, persistence across a save and a new
+process, the ending to the credits, every enemy spawned, the first temple's guardian from its introduction to its
+defeat, forced encounters, cube maps, triggers.
+
+**The Vulkan validation layer** (PS3RECOMP_VK_VALIDATION=1, the Khronos layer 1.4.363; separate runs, not timed): the
+castle-front route, the king's close-up (bloom, the shadow map), the guardian's fight and every enemy: **0 errors**.
+One warning, the same in each (reported to the layer's limit of 10): a fragment program writes colour outputs in a
+pass with no colour target (the depth-only passes: the shadow map) -- unused writes, not a fault. CI on a05cda3: all
+three jobs green (run 44490173256).
+
+**The river fight** (tests/scripts/fight_river.drive, castle-front save, can't-die; the preparation of section 25
+copied as the shader folder, the warm-up on: as an install runs it -- 2,458 prepared pipelines made in 0.2 s, **0
+built in play**). The trace's first 1.4 s held the map load into the river's area (six frames 25-77 ms); the fight
+itself, 47-101 s:
+
+| Limit | fps | median / p95 / p99 / worst (ms) | 1% low | >25 ms | GPU busy | game CPU |
+|---|---|---|---|---|---|---|
+| 60 | **60.0** | 16.7 / 18.5 / 20.1 / 23.9 | 47.4 | 0 | 54% | 148% |
+| unlimited | 80.1 | 11.8 / 15.7 / 17.3 / 23.6 | 53.8 | 0 | 81% | 205% |
+
+Windows (R8, the RTX 3070 desktop): 60.0 in every arm capped, ~200 fps uncapped. Here capped play holds 60 with no
+frame over 25 ms; uncapped the GPU is 81-88% busy -- the iGPU is the limit, as on the castle front at 720p and up.
+Without a preparation (a first run, nothing prepared) the same fight built 55 pipelines in play (140 ms, 21 frames
+held, the longest 94 ms): the preparation is what keeps play smooth on RADV.
+
+**The bosses** (tests/scripts/fps_bosses.drive: the six temples' guardians and the last enemy, each entered the game's
+way, 40 s against an invulnerable hero; 60 limit; the same preparation, 0 pipelines built in play), each fight from 2 s
+after its mark (the arena's entry done):
+
+| Fight | fps | p99 / worst (ms) | >25 ms |
+|---|---|---|---|
+| temple 1-6, the last enemy | **60.0** each | 18.3-19.6 / 19.8-23.0 | 0 in each |
+| all seven (16,169 frames) | 60.0 | 19.0 / 23.0 (1% low 50.7) | 0 |
+
+GPU 41% busy on average (51% at most), the game 78% of a core on average; VRAM 367 MB over idle. The nine frames of
+100-447 ms in the whole run all fall between fights: the tools' `progress set` and the entry into the next temple
+(map loads), not play.
