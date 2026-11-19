@@ -158,10 +158,12 @@ def pyinstaller(platform, dist):
               "pipeline_manifest", "uninstall", "ps3_disc", "root_migration", "Crypto.Cipher.AES",
               "Crypto.Util.Counter"]
     hidden += tool_imports()
-    if platform != "windows":
-        # M11.4: Pillow is the Windows worker's only (the game's .ico, zig_build.windows_resources); frozen into the
-        # Linux worker it brought a dozen image libraries and a libstdc++ for nothing
-        args += ["--exclude-module", "PIL"]
+    # Pillow is the developer's only: the game's .ico and Windows resources are made with the prebuilt libraries
+    # (zig_build.build_prebuilt -> windows_resources) and shipped as worker/lib/dotheroes.res, never on a player's
+    # machine. Frozen into the Linux worker it brought a dozen image libraries and a libstdc++ for nothing (M11.4);
+    # into the Windows worker, five extension modules with their image libraries and no licence text for any of them
+    # (the Windows review's W-7). Left out of both.
+    args += ["--exclude-module", "PIL"]
     subprocess.check_call(cmd + args + [
         "--distpath", paths["dist"], "--workpath", paths["work"], "--specpath", paths["spec"],
         "--paths", paths["tools"], *[a for m in hidden for a in ("--hidden-import", m)], paths["app"]], env=env)
@@ -282,6 +284,82 @@ def python_runtime_licences(lic, platform):
                 break
         else:
             raise SystemExit(f"no licence file for {name} (looked at {paths}): the package would ship without it")
+    if platform == "windows":
+        # the Windows review's W-7: the installer's LICENSE.txt carries the notices of the libraries the Windows build
+        # links (OpenSSL's Apache-2.0, libffi, bzip2), not those of the software CPython incorporates in its own
+        # modules -- expat in pyexpat.pyd, libmpdec in _decimal.pyd, the Mersenne Twister, SipHash, dtoa, ...
+        # (Doc/license.rst). The installer's own documentation holds them (Doc/html/license.html): shipped as text,
+        # the same file the Linux packages carry
+        page = os.path.join(base, "Doc", "html", "license.html")
+        if not os.path.isfile(page):
+            raise SystemExit(f"no {page} (the Python the worker is made with, installed with its documentation): the "
+                             "package would ship without the notices of the software CPython incorporates")
+        with open(os.path.join(lic, "Python-incorporated-software.txt"), "w", encoding="utf-8", newline="\n") as f:
+            f.write(html_text(open(page, encoding="utf-8").read()))
+
+
+def html_text(page):
+    """the main text of a Sphinx page (Python's documentation) as plain text: its paragraphs, headings, lists and
+    preformatted blocks (the licence texts) kept as they read; navigation, scripts and styles left out"""
+    from html.parser import HTMLParser
+
+    class P(HTMLParser):
+        BLOCK = {"p", "div", "section", "h1", "h2", "h3", "h4", "h5", "h6", "li", "dt", "dd", "tr", "br", "pre",
+                 "blockquote", "table", "ul", "ol", "dl"}
+
+        def __init__(self):
+            super().__init__(convert_charrefs=True)
+            self.out, self.depth, self.skip, self.pre, self.skipping = [], 0, 0, 0, []
+
+        def handle_starttag(self, tag, attrs):
+            a = dict(attrs)
+            if self.depth:
+                self.depth += tag not in ("br", "img", "hr", "meta", "link", "input")
+            elif a.get("role") == "main":
+                self.depth = 1
+            # navigation, scripts, styles, and Sphinx's heading links (their pilcrow) left out
+            hide = tag in ("script", "style", "nav") or (tag == "a" and "headerlink" in (a.get("class") or ""))
+            if tag in ("script", "style", "nav", "a"):
+                self.skipping.append(hide)
+                self.skip += hide
+            if self.depth and tag in self.BLOCK:
+                self.out.append("\n\n" if tag in ("p", "pre", "h1", "h2", "h3", "h4", "section") else "\n")
+            if self.depth and tag in ("h1", "h2", "h3", "h4"):
+                self.out.append("#" * int(tag[1]) + " ")
+            if self.depth and tag == "li":
+                self.out.append("- ")
+            if tag == "pre":
+                self.pre += 1
+
+        def handle_endtag(self, tag):
+            if tag in ("script", "style", "nav", "a") and self.skipping:
+                self.skip -= self.skipping.pop()
+            if tag == "pre":
+                self.pre = max(0, self.pre - 1)
+            if self.depth:
+                if tag in self.BLOCK:
+                    self.out.append("\n")
+                self.depth -= 1
+
+        def handle_data(self, data):
+            if self.depth and not self.skip:
+                if self.pre:
+                    self.out.append(data)
+                elif data.strip():   # the words' own spacing kept at either end (inline code beside text)
+                    self.out.append((" " if data[:1].isspace() else "") + " ".join(data.split())
+                                    + (" " if data[-1:].isspace() else ""))
+                elif data:
+                    self.out.append(" ")
+
+    p = P()
+    p.feed(page)
+    lines = [ln.rstrip() for ln in "".join(p.out).splitlines()]
+    text, blank = [], 0
+    for ln in lines:
+        blank = blank + 1 if not ln.strip() else 0
+        if blank <= 1:
+            text.append(ln)
+    return "\n".join(text).strip() + "\n"
 
 
 def at3_source(lic):
@@ -511,6 +589,13 @@ def bundle(platform):
     if guard.returncode != 0:
         print("  warning: no private literals on this machine (.git/push-guard.local): only home paths with them "
               "are looked for, so nothing was checked")
+    if platform == "windows":
+        # the Windows review's W-7: every program, library and extension module shipped is matched to its component,
+        # and its licence texts, sources and notices must be there (tests/package_license_audit.py audit_windows)
+        print("licence audit (the folder)", flush=True)
+        audit = subprocess.run([sys.executable, os.path.join(ROOT, "tests", "package_license_audit.py"), out])
+        if audit.returncode != 0:
+            sys.exit(f"{out}: the licence audit found something shipped without its terms; nothing archived")
     print("archive", flush=True)
     # M11.3: what a player downloads is named for the game and its version, and unpacks to one Cubic.Heroes folder
     # -- the portable installation root (docs/CLI.md); the launcher's updates go by the signed manifest's names
