@@ -10,7 +10,8 @@ Evidence marks as in the other plans: [C] read in the code, [M] measured, [I] in
 - **Stage** (2026-11-18): **P2 -- the first native Linux build boots and plays offscreen** (section 11): the title,
   the attract demo with its movies, the overworld, the desert and a dungeon drawn by the native renderer on RADV;
   `--memtest` 628/628 on Linux. **D1 done** (section 12): the Linux build in Windows' release configuration boots
-  strict-clean with no PS3 SPU machinery used. **P4 begun** (section 13): the launcher and a
+  strict-clean with no PS3 SPU machinery used. **P6 (CI) written** and the Windows build checked from
+  this tree by a cross-build (section 14). **P4 begun** (section 13): the launcher and a
   full headless player install on Linux, the `--play` signal contract, the updater's Linux packages.
 - **Blocked on the owner**: pushing runtime patches 0170+ -- `.git/push-guard.local` (written this session) lists the
   commit identity's name, which every patch's `From:` header carries (asked 2026-11-18).
@@ -196,6 +197,8 @@ the owner's Windows PC (section 7).
 
 - Every commit that touches shared code: the Windows CI job (compile and unit tests), and the change reviewed for
   its Windows path.
+- **Compiled here** for every stage that changes shared code: the Windows game cross-built from the same tree
+  (section 14), and CI's Windows job once pushed.
 - **Needs the owner's Windows PC** (a list kept current here, asked for at each stage that changes shared runtime
   code): the Windows release build from the same commit, `tests/devtools_suite.py` basic set, `tests/cli_integration.py
   --with-game`, the map sweep, the RPCS3 reference scenes, and an update from the 0.2.0-beta.2 package to the next
@@ -227,8 +230,8 @@ States: **VERIFIED** (implemented, evidence named), **UNVERIFIED** (implemented,
 | A17 | The locally generated thin game AppImage: relocatable, regenerated on update and rollback, never distributed | NOT DONE | P5 |
 | A18 | glibc 2.31 baseline verified on actual supported distributions, not only Manjaro | NOT DONE | P5 |
 | A19 | Steam, Lutris and Heroic through the CLI | NOT DONE | P9 |
-| A20 | CI: Windows and Linux builds, tests, boundary and privacy checks | NOT DONE | P6 |
-| A21 | Windows build and behaviour unbroken | NOT DONE | P6 + section 7 |
+| A20 | CI: Windows and Linux builds, tests, boundary and privacy checks | UNVERIFIED: written, its Linux steps run locally; first GitHub run after the push | section 14 |
+| A21 | Windows build and behaviour unbroken | PARTIAL: Windows' game compiles and links from this tree (a Zig cross-build, Windows' release configuration); behaviour: the owner's Windows PC (section 7) | section 14 |
 | A22 | AMD rendering matches the Windows references; validation layers clean | NOT DONE | P7 |
 | A23 | Performance measured and reported (target 60 fps) | NOT DONE | P7 |
 | A24 | 166 maps, bosses, gameplay, audio, saves on Linux | NOT DONE | P8 |
@@ -344,3 +347,36 @@ spurs_task 0 native_decline 0 cell_audio 0`, no frame over 100 ms; pictures as t
   each platform's own format, and new tests for these (31 tests pass on Linux).
 - **Not yet**: `--update` in place and rollback from a package (a development checkout's worker has no package to
   compare with: P9); `tests/cli_integration.py` on Linux.
+
+## 14. P6: CI, and Windows checked from this tree (2026-11-18) [M]
+
+**CI** (`.github/workflows/ci.yml`, approved by the owner):
+- *Boundary and privacy* (Ubuntu): `boundary_check.py tracked`, `license_audit.py` (forbidden middleware paths),
+  `push_guard.py range` over the push's or pull request's commits.
+- *Build and test* on **windows-2022** and **ubuntu-24.04**, each native: `tools/ci_build.py` -- the pinned Zig
+  (`tools/fetch_zig.py`: 0.17.0 from ziglang.org, SHA-256 from its index, checked before unpacking), ps3recomp with the
+  patch series, the third-party libraries, the runtime library and the native code in the release configuration
+  against a **stub lift** (`tools/ci_stub_lift.py`: the lifter's own preamble, no function of any game -- the targets
+  `build_prebuilt` builds need nothing else), the launcher, and the command line's smoke test (`--version`, `--status
+  --json`, exit codes 2 and 3); then every `tests/test_*.py`; on Linux `tools/glibc_check.py` over the launcher and
+  the shipped libraries.
+- No game data, keys, generated game code or signing key. CI proves compilation and the unit and command-line tests,
+  not the game's behaviour.
+- Run locally on this machine: the stub-lift build of the runtime, the native code and the NID table (1275 handlers,
+  94 modules); `ci_build.py --steps zig,ps3recomp,launcher,smoke` (all 171 patches applied from a clean checkout); the
+  unit tests: **227 tests in 17 files, all pass on Linux**.
+
+**`tools/glibc_check.py`**: the newest GLIBC_ version each ELF needs (baseline 2.31), no GLIBCXX/CXXABI (Zig's libc++
+is static), and every DT_NEEDED glibc's or shipped. On this machine: the launcher 2.29, SDL2 2.29, avutil 2.29,
+OpenAL 2.28, avcodec 2.27, avformat 2.14, and **the game the worker built here 2.30** -- all within; a Manjaro system
+program (2.38, libcap) fails it, as it should.
+
+**Windows from this tree, cross-built here** (Zig targets Windows from Linux): the libraries
+(`build_deps.py --platform windows`) once two host dependencies of OpenAL Soft's Windows build were closed -- the
+POSIX audio backends are now off by name (a Linux host's PipeWire headers were being compiled into the Windows DLL)
+and its MSVC import library is not made (a Windows host never found the sed/dlltool it needs; Zig's linker has no
+`--output-def`); the result on a Windows host is the same as before. Then the game (`R8_PLATFORM=windows
+tools/r8_release_build.sh`, the R8 lift of section 11, the developer diagnostics on): configure "Lifted loads: bare",
+"Lifted stores: mov-nospu", "Lifted SPU: not linked" -- Windows' configuration unchanged -- and `dotheroes.exe` (PE32+
+x86-64, 87 MB) linked in 717 s, importing only Windows' own DLLs, the UCRT and SDL2.dll. **A compile and link check
+only**: Windows' behaviour is checked on the owner's Windows PC (section 7).

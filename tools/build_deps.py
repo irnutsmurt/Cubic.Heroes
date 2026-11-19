@@ -83,7 +83,13 @@ OPENAL_DROP = ["hrtf/Default HRTF.mhr"]
 
 def openal_options(platform):
     if platform == "windows":
-        return OPENAL_OPTIONS + ["-DALSOFT_REQUIRE_WASAPI=ON"]
+        # the POSIX backends off by name: on a Windows host none is found anyway, and built on a Linux host (CI, a
+        # cross-build) the host's PipeWire or PulseAudio would otherwise be compiled into the Windows DLL
+        # no MSVC import library (.def/.lib through sed and dlltool): nothing here links with MSVC, a Windows host
+        # never found those tools, and Zig's linker has no --output-def
+        return OPENAL_OPTIONS + ["-DALSOFT_REQUIRE_WASAPI=ON", "-DALSOFT_BUILD_IMPORT_LIB=OFF"] + [
+            f"-DALSOFT_BACKEND_{b}=OFF" for b in (
+            "PIPEWIRE", "PULSEAUDIO", "ALSA", "OSS", "JACK", "SNDIO", "PORTAUDIO", "SOLARIS", "SDL2", "SDL3")]
     return OPENAL_OPTIONS + ["-DALSOFT_BACKEND_SDL2=ON", "-DALSOFT_REQUIRE_SDL2=ON",
                              "-DSDL2_DIR=" + os.path.join(DEPS, platform, "lib", "cmake", "SDL2"),
                              "-DCMAKE_INSTALL_RPATH=$ORIGIN", "-DCMAKE_SHARED_LINKER_FLAGS=-s"]   # no debug info

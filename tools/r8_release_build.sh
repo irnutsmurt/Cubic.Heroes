@@ -10,13 +10,16 @@ set -e
 cd "$(dirname "$0")/.."
 R=$1; shift
 [ -n "$R" ] || { echo "usage: $0 <dir> [-DNAME=value ...]"; exit 2; }
-# the platform: Windows (the default, as before) or, on a Linux host, Linux (M11.4)
+# the platform: Windows (the default, as before) or, on a Linux host, Linux (M11.4); R8_PLATFORM=windows on a Linux
+# host cross-builds Windows' program (a compile check: it runs on Windows only)
 case "$(uname -s)" in Linux) PLAT=linux ;; *) PLAT=windows ;; esac
+HOST_PLAT=$PLAT
+PLAT=${R8_PLATFORM:-$PLAT}
 DEPS="$(pwd)/build/deps/$PLAT"
 PY=build/venv/Scripts/python.exe
 [ -x "$PY" ] || PY=python3
 TC="$(pwd)/build/toolchain/cmake-$PLAT/toolchain.cmake"
-[ "$PLAT" = windows ] || TC=$("$PY" -c "import sys; sys.path.insert(0, 'tools'); import zig_build; print(zig_build.cmake_toolchain('$PLAT'))")
+[ "$PLAT" = windows ] && [ "$HOST_PLAT" = windows ] || TC=$("$PY" -c "import sys; sys.path.insert(0, 'tools'); import zig_build; print(zig_build.cmake_toolchain('$PLAT'))")
 mkdir -p "$R"
 if [ -z "$BUILD_ONLY" ]; then
   cmake -S port -B "$R/bld" -G Ninja -DCMAKE_TOOLCHAIN_FILE="$TC" \
