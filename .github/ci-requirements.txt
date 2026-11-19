@@ -1,0 +1,7 @@
+# CI's Python packages (.github/workflows/ci.yml), pinned by version and by the SHA-256 of each wheel its runners
+# use -- manylinux x86_64 (ubuntu-24.04) and win_amd64 (windows-2022), CPython 3.12 -- (pip --require-hashes;
+# M11.4, the review's L-5). The same versions as tools/linux_build_env/requirements.txt.
+cmake==4.4.5 --hash=sha256:85625a9b6d5e88ff99c7eb79123d85570844e77ac076366cf75c609cc0b1b579 --hash=sha256:d5521b4a9e864505c550abae99ff593d501bd08225583e69b3a9a4ca7f36a03f
+ninja==1.13.2 --hash=sha256:65a24341b5ac09fcadcc37082660be40a94174e51a937fabf6e2cae26225fa2c --hash=sha256:1293f4078278b70d0ee4b6cc8f3a9e030656c9b2f59909970343c4fe76070118
+pillow==13.0.0 --hash=sha256:42d63be3af4f9b951b199b0a9d23365d37ab14687e6d77b74940432c8515c4ca --hash=sha256:ff3fe9eb621fbb9db4c4be33ab946f6bac5f98ab50ca8d3260503653656c961b
+pycryptodome==4.5.0 --hash=sha256:3afbe7ecd62357203a588d451c604a61af7d7c9d3f0aa0b792de0612cffb8f8d --hash=sha256:b05fed07d07d69c5205689293c3b71a21b8bb4c6f4bb964d1c2d24dfdf22433d

@@ -36,6 +36,17 @@ WIN = sys.platform == "win32"
 # A display server's listening socket: Wayland's $XDG_RUNTIME_DIR/wayland-N (or any name a compositor chose under
 # the runtime folder) and X11's /tmp/.X11-unix/XN (also as an abstract name, "@/tmp/.X11-unix/XN").
 DISPLAY_SOCKET = re.compile(r"(?:^|/)wayland-[^/]*$|/\.X11-unix/X\d+$")
+
+
+def session_display_sockets():
+    """the display sockets of the session the guard runs in, whatever they are named (M11.4, the review's L-5: a
+    compositor may name its Wayland socket anything, not only wayland-*): $WAYLAND_DISPLAY's, as a path or in
+    $XDG_RUNTIME_DIR"""
+    out = set()
+    w = os.environ.get("WAYLAND_DISPLAY")
+    if w and w != NO_WAYLAND:
+        out.add(w if os.path.isabs(w) else os.path.join(os.environ.get("XDG_RUNTIME_DIR", ""), w))
+    return out
 NO_WAYLAND = "desktop-guard-no-display"   # a Wayland socket name that is never created
 
 
@@ -138,6 +149,10 @@ def socket_inodes(pids):
 _ss_missing = False
 
 
+class DisplayUncheckable(Exception):
+    """the display connections cannot be checked here (no `ss`): an unapproved run is ended rather than unchecked"""
+
+
 def display_connections(pid):
     """Linux: the display-server sockets (X11, Wayland) the process or its descendants are connected to, as
     (kind, path). A Unix socket's client end has no name; `ss` gives its peer, whose row names the listening
@@ -149,11 +164,9 @@ def display_connections(pid):
     try:
         rows = subprocess.run(["ss", "-xan"], capture_output=True, text=True, timeout=5).stdout.splitlines()
     except (OSError, subprocess.SubprocessError):
-        if not _ss_missing:
-            _ss_missing = True
-            print("desktop guard: `ss` (iproute2) is not available: display connections are not checked; the run "
-                  "still has no display in its environment", flush=True)
-        return []
+        # the review's L-5: never silently unchecked -- the Watch ends an unapproved run it cannot check
+        _ss_missing = True
+        raise DisplayUncheckable("`ss` (iproute2) is not available: display connections can't be checked")
     path_of, peers = {}, set()
     for ln in rows:
         f = ln.split()
@@ -163,9 +176,10 @@ def display_connections(pid):
         if f[5] in mine:
             peers.add(f[7])
     out = []
+    session = session_display_sockets()
     for peer in peers:
         path = path_of.get(peer, "")
-        if DISPLAY_SOCKET.search(path):
+        if DISPLAY_SOCKET.search(path) or path.lstrip("@") in session:
             out.append(("x11" if ".X11-unix" in path else "wayland", path))
     return out
 
@@ -226,16 +240,29 @@ class Watch:
                 seen = visible_windows(self.proc.pid)
                 what = seen and f"showed a window ({seen[0][0]} {seen[0][2]}x{seen[0][3]})"
             else:
-                seen = display_connections(self.proc.pid)
-                what = seen and f"connected to a display server ({seen[0][0]}: {seen[0][1]})"
+                try:
+                    seen = display_connections(self.proc.pid)
+                    what = seen and f"connected to a display server ({seen[0][0]}: {seen[0][1]})"
+                except DisplayUncheckable as e:
+                    seen, what = True, f"could not be checked ({e})"
             if seen:
                 self.violation = f"{self.label} {what} with no on-screen run approved: ended"
                 print("desktop guard: " + self.violation, flush=True)
-                try:
-                    self.proc.kill()
-                except OSError:
-                    pass
+                self.end()
                 return
+
+    def end(self):
+        """the process and, elsewhere than Windows, every descendant (the review's L-5: a child may own the window);
+        Windows: the process (its job ends the rest)"""
+        pids = [self.proc.pid] if WIN else list(reversed(process_tree(self.proc.pid)))
+        for pid in pids:
+            try:
+                if pid == self.proc.pid:
+                    self.proc.kill()
+                else:
+                    os.kill(pid, 9)
+            except OSError:
+                pass
 
 
 def main(argv):

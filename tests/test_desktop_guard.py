@@ -151,6 +151,60 @@ class DesktopGuardTest(unittest.TestCase):
         self.assertEqual(g.display_connections(proc.pid), [])
         self.assertIsNone(proc.poll())
 
+    # the review's L-5
+    @unittest.skipIf(g.WIN or not __import__("shutil").which("ss"), "Linux with ss")
+    def test_linux_ends_the_whole_tree(self):
+        proc = self._client(self._listener("wayland-guardtree"))
+        deadline = time.time() + 10
+        while len(g.process_tree(proc.pid)) < 2 and time.time() < deadline:
+            time.sleep(0.1)
+        child = [p for p in g.process_tree(proc.pid) if p != proc.pid]
+        self.assertTrue(child)
+        while not g.display_connections(proc.pid) and time.time() < deadline:
+            time.sleep(0.1)
+        w = g.Watch(proc, every=0.05)
+        w._run()
+        proc.wait(timeout=10)
+        time.sleep(0.3)
+        for c in child:
+            self.assertFalse(os.path.exists(f"/proc/{c}") and open(f"/proc/{c}/stat").read().rsplit(")", 1)[1].split()[0]
+                             != "Z", f"the child {c} that held the display still runs")
+
+    @unittest.skipIf(g.WIN or not __import__("shutil").which("ss"), "Linux with ss")
+    def test_linux_session_socket_of_any_name(self):
+        path = self._listener("compositor-socket-guardtest")
+        saved = {k: os.environ.get(k) for k in ("WAYLAND_DISPLAY", "XDG_RUNTIME_DIR")}
+        os.environ["WAYLAND_DISPLAY"], os.environ["XDG_RUNTIME_DIR"] = os.path.basename(path), os.path.dirname(path)
+        try:
+            proc = self._client(path)
+            deadline = time.time() + 10
+            while not g.display_connections(proc.pid) and time.time() < deadline:
+                time.sleep(0.1)
+            self.assertEqual([k for k, _ in g.display_connections(proc.pid)], ["wayland"])
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+    @unittest.skipIf(g.WIN, "Linux")
+    def test_linux_unchecked_run_is_ended(self):
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        self.addCleanup(lambda: proc.poll() is None and proc.kill())
+        real = g.display_connections
+
+        def no_ss(pid):
+            raise g.DisplayUncheckable("`ss` (iproute2) is not available")
+        g.display_connections = no_ss
+        try:
+            w = g.Watch(proc, every=0.05)
+            w._run()
+        finally:
+            g.display_connections = real
+        self.assertIn("could not be checked", w.violation)
+        self.assertIsNotNone(proc.wait(timeout=10))
+
 
 if __name__ == "__main__":
     unittest.main()

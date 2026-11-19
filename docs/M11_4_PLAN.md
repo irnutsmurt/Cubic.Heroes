@@ -1,8 +1,8 @@
 # M11.4: the native Linux port and the first AMD validation -- plan and checkpoint
 
-Begun 2026-11-18 on the owner's Linux laptop. Windows 0.2.0-beta.2 is the functional baseline: this is a platform
-port of the existing implementation, not a rewrite. Linux support is additive -- the same repository, source tree
-and `main` branch build and package both systems, and nothing here may break, replace or slow the Windows build.
+Begun 2026-11-18 on the Linux test machine (section 1). Windows 0.2.0-beta.2 is the functional baseline: this is a
+platform port of the existing implementation, not a rewrite. Linux support is additive -- the same repository, source
+tree and `main` branch build and package both systems, and nothing here may break, replace or slow the Windows build.
 Evidence marks as in the other plans: [C] read in the code, [M] measured, [I] inferred, [H] a hypothesis to check.
 
 ## Checkpoint (kept current; the newest state first)
@@ -13,13 +13,13 @@ Evidence marks as in the other plans: [C] read in the code, [M] measured, [I] in
   strict-clean with no PS3 SPU machinery used. **P6 (CI) written** and the Windows build checked from
   this tree by a cross-build (section 14). **P4 begun** (section 13): the launcher and a
   full headless player install on Linux, the `--play` signal contract, the updater's Linux packages.
-- **Blocked on the owner**: pushing runtime patches 0170+ -- `.git/push-guard.local` (written this session) lists the
-  commit identity's name, which every patch's `From:` header carries (asked 2026-11-18).
+- **Blocked** (2026-11-18, resolved the same day): pushing runtime patches 0170+ -- the local push-guard list
+  (`.git/push-guard.local`) blocked the commit identity's name, which every patch's `From:` header carries.
 - P1 done -- the desktop guard enforced on Linux (section 9); the unit tests run on Linux
   for the first time (section 10: one real Linux bug fixed, two Windows-only tests given their Linux case). P2 next.
 - P0 done (onboarding, safeguards verified on Linux); this plan written.
-- **Decisions**: D1-D4 approved by the owner on 2026-11-18 as recommended, with their additions (section 4); Windows
-  and Linux CI approved. Correctness first, then AMD profiling and optimisation.
+- **Decisions**: D1-D4 decided on 2026-11-18 as recommended, with the additions in section 4; Windows and Linux CI
+  approved. Correctness first, then AMD profiling and optimisation.
 
 ## 1. The machine [M]
 
@@ -104,37 +104,37 @@ docs/FEASIBILITY.md), nor run since 2026-10-30.
   (tools/release_trust.py); the signing scheme (Ed25519 through OpenSSL) is unchanged by this milestone.
 - docs/LICENSE_AUDIT.md is stale (577 rows; 832 files tracked).
 
-## 4. The owner's decisions (asked and approved 2026-11-18)
+## 4. Decisions (2026-11-18)
 
-**Approved as recommended, with these additions (the owner's):**
+**Decided as recommended, with these additions:**
 - D1: Linux uses the same native runtime architecture as Windows. Checked stores may remain a developer-only
   diagnostic fallback; lifted SPU programs are never linked into the release.
 - D2: the thin game AppImage stays relocatable (relative paths wherever possible) and is regenerated automatically
   when the active build changes by an update or a rollback.
-- D3: the owner provides the local keys file's path. Its contents never appear in logs, diagnostics, commits or
+- D3: the keys file is supplied by its local path only. Its contents never appear in logs, diagnostics, commits or
   release artifacts.
-- D3 (revised by the owner, 2026-11-18, evening): the already decrypted EBOOT.elf is the installation and
-  qualification input; the separate keys file blocks nothing (the qualification's `keys` step is not applicable to it).
+- D3 (revised 2026-11-18, evening): the already decrypted EBOOT.elf is the installation and qualification input;
+  the separate keys file blocks nothing (the qualification's `keys` step is not applicable to it).
 - D4: validated stages are pushed with every safeguard on; changes to shared runtime code are checked for Windows
   regressions.
 - Windows and Linux CI approved. The glibc baseline is verified on actual supported distributions, not only Manjaro.
   Correctness before performance: profiling and AMD optimisation once the game runs correctly here.
 
-The questions as asked:
+The decisions and their reasons:
 
-- **D1 -- the Linux release configuration.** Recommended: **the same as Windows** (mov stores, no lifted SPU
+- **D1 -- the Linux release configuration.** Decided: **the same as Windows** (mov stores, no lifted SPU
   programs linked, cellAudio retired), with Linux's own fault handling where the Windows path uses Windows
   facilities; checked stores kept only as a development fallback. Reason: the architecture requirement ("no
   unnecessary PS3 machinery") and parity with the validated configuration.
-- **D2 -- the generated game AppImage.** Recommended: **a thin AppImage** made by the worker from the active build:
+- **D2 -- the generated game AppImage.** Decided: **a thin AppImage** made by the worker from the active build:
   the game's program and its `lib/` (tens of MB), whose AppRun finds its installation root (a pointer written beside
   it, as `cubicheroes-root.txt` is for the launcher) and plays through it -- the converted data, saves, settings and
   caches stay in the root, never copied. Remade when the active build changes; never distributed. The alternative
   (a self-contained AppImage holding the converted game data, several GB) duplicates the root.
-- **D3 -- the keys file.** The disc image here matches `config/game_version.json` and a decrypted `EBOOT.elf` is
-  present; the qualification's keys checks (docs/RELEASE_QUALIFICATION.md item 11) need the keys file. Is it on this
-  machine?
-- **D4 -- pushing.** Recommended: push each validated stage to `main` as M11.0-M11.3 did (hooks on, every message
+- **D3 -- the decryption input.** The test machine's disc image matches `config/game_version.json`; a decrypted
+  `EBOOT.elf` serves as the installation and qualification input in place of a keys file (the qualification's keys
+  checks, docs/RELEASE_QUALIFICATION.md item 11, are then not applicable).
+- **D4 -- pushing.** Decided: push each validated stage to `main` as M11.0-M11.3 did (hooks on, every message
   read first), never a release.
 
 ## 5. Design
@@ -149,7 +149,7 @@ it. Shared changes (a renderer fix found on AMD) are made once for both and vali
 - `Cubic.Heroes-<version>-linux-x86_64.tar.xz` and `Cubic.Heroes-<version>-x86_64.AppImage`: the same files.
   docs/LINUX_PACKAGING.md's `.tar.gz` becomes `.tar.xz` (what make_bundle and the signed manifest already use).
 - The root: the tarball's folder; the AppImage's `Cubic.Heroes` folder beside the `.AppImage` (already in
-  `resolve_root`). Nothing in `~/.config` or `~/.local/share` unless asked (shortcuts).
+  `resolve_root`). Nothing in `~/.config` or `~/.local/share` unless the player makes shortcuts.
 - The manifest gains an explicit `platform` and package `kind` (`zip`, `tar.xz`, `appimage`) per asset; the updater
   picks by OS, `platform.machine()` and the kind it was installed from, and refuses an asset of another platform. An
   AppImage installation is told to download the new `.AppImage` (the image is never written); the tarball updates in
@@ -178,7 +178,7 @@ schema checks; the launcher built; the runtime library built with Zig from the p
 project's patches (no game data: the lift is not run); the dependency builds against `config/deps.sha256`; the
 boundary check and the push guard over the tree; a packaging dry run per platform. No game data, keys, generated
 code or signing key in CI. **CI proves compilation, not behaviour**: the Windows game's behaviour is proved only on
-the owner's Windows PC (section 7).
+a Windows test machine (section 7).
 
 ## 6. The stages
 
@@ -193,7 +193,7 @@ the owner's Windows PC (section 7).
 | **P6** | CI for Windows and Linux (5.4) | both jobs green on `main` |
 | **P7** | AMD validation and performance: shader preparation, validation layers, the RPCS3 reference scenes and Windows reference pictures, water/shadows/lighting/reflections/cube maps/post-processing, resolution scaling, GPU memory, frame pacing, load times, CPU/GPU limits | measured tables (fps, p99, spikes, VRAM, load times) per preset; any rendering fix validated on both systems |
 | **P8** | the regression suite on Linux: the map sweep (166 maps), the bosses, the devtools suite, audio and movies, saves, controllers and remapping, settings, X11 and Wayland, window modes, clean exit, crash and hang reports | the matrix in section 8 |
-| **P9** | release qualification from the packaged AppImage and tarball (the M11.3 checklist, Linux edition); the cross-platform report; README and docs | the owner's review and signature; nothing published before |
+| **P9** | release qualification from the packaged AppImage and tarball (the M11.3 checklist, Linux edition); the cross-platform report; README and docs | the release review and the manifest's signature; nothing published before |
 
 ## 7. Windows: kept working throughout
 
@@ -201,10 +201,10 @@ the owner's Windows PC (section 7).
   its Windows path.
 - **Compiled here** for every stage that changes shared code: the Windows game cross-built from the same tree
   (section 14), and CI's Windows job once pushed.
-- **Needs the owner's Windows PC** (a list kept current here, asked for at each stage that changes shared runtime
-  code): the Windows release build from the same commit, `tests/devtools_suite.py` basic set, `tests/cli_integration.py
-  --with-game`, the map sweep, the RPCS3 reference scenes, and an update from the 0.2.0-beta.2 package to the next
-  (the manifest's new fields read by an older launcher).
+- **Needs a Windows test machine** (RTX 3070; a list kept current here, run at each stage that changes shared runtime
+  code): the Windows release build from the same commit, `tests/devtools_suite.py` basic set,
+  `tests/cli_integration.py --with-game`, the map sweep, the RPCS3 reference scenes, and an update from the
+  0.2.0-beta.2 package to the next (the manifest's new fields read by an older launcher).
 
 ## 8. Acceptance checklist
 
@@ -222,19 +222,19 @@ States: **VERIFIED** (implemented, evidence named), **UNVERIFIED** (implemented,
 | A7 | Cinematics through FFmpeg | VERIFIED: the opening 4,620 of 4,620 frames, the credits 7,860 of 7,860 with all 11,554,189 sound frames, 0 late as a player runs it (section 30) | section 30 |
 | A8 | X11 and Wayland: windowed, borderless, fullscreen; the desktop's mode never changed | VERIFIED: all three modes on screen under native Wayland and X11 (XWayland, RADV presenting), the desktop at 1600x900@60.07 before and after every run; HiDPI at 150% (section 23) | sections 22, 23 |
 | A9 | Rendering resolution presets and custom; VSync; frame limits | NOT DONE | P8 |
-| A10 | Controllers: detection, prompts, hot-plug, remapping; keyboard remapping | PARTIAL: detection, prompts and hot-plug VERIFIED by the owner's hands with the packaged SDL2 (section 29); remapping: to do | section 29 |
+| A10 | Controllers: detection, prompts, hot-plug, remapping; keyboard remapping | PARTIAL: detection, prompts and hot-plug VERIFIED by a manual test with the packaged SDL2 (section 29); remapping: to do | section 29 |
 | A11 | The in-game overlay, performance overlays, developer tools, diagnostics and log export | NOT DONE | P8 |
 | A12 | The public CLI and exit codes (docs/CLI.md), `SIGTERM` reaching the game | VERIFIED: tests/cli_integration.py --with-game 17/17 on Linux (Windows: 17/17, M11.2); the signals; every command from both packages (section 20) | section 21 |
 | A13 | Graphical launcher: install from the disc, local recompilation, shader preparation | PARTIAL: headless install verified (2458 pipelines, none failed); the window: to do | section 13 |
 | A14 | Signed updates, repair and rollback; the right package per OS and architecture | PARTIAL: tests/linux_update_check.py 10/10 from the package (signed release offered and swapped in; bad signature, untrusted key, Windows-only release, corrupted download and a zip refused; each install kind its own package); update and rollback from the packages; `--install --repair` from the tarball's install, its game removed: rebuilt, saves byte-identical, plays (section 28) -- VERIFIED on the packages rebuilt with the rollback fix: to do | sections 23, 28 |
-| A15 | Portable root: spaces, Unicode, relocation, another drive, no FUSE (tarball) | VERIFIED except another drive: spaces, accents and Japanese, the whole root moved and played (both packages), no FUSE (containers). **Another physical drive: DEFERRED by the owner's decision (2026-11-18) -- not verified, not a release blocker** | sections 20, 23 |
+| A15 | Portable root: spaces, Unicode, relocation, another drive, no FUSE (tarball) | VERIFIED except another drive: spaces, accents and Japanese, the whole root moved and played (both packages), no FUSE (containers). **Another physical drive: DEFERRED by decision (2026-11-18) -- not verified, not a release blocker** | sections 20, 23 |
 | A16 | Launcher AppImage and tarball, equivalent | VERIFIED: one folder; the AppImage = the folder file for file; each qualified 14/14 from the package, offline (section 20) | section 20 |
 | A17 | The locally generated thin game AppImage: relocatable, regenerated on update and rollback, never distributed | VERIFIED: made by the packaged installs, of the active build after the update and after the rollback; through FUSE and extract-and-run; before and after the root moved (section 20) | section 20 |
 | A18 | glibc 2.31 baseline verified on actual supported distributions, not only Manjaro | VERIFIED: 114 ELF files at GLIBC_2.30 at most; 8/8 checks on Debian 11, Ubuntu 20.04, Ubuntu 24.04, Fedora 41 (the game built here included) | section 19 |
 | A19 | Steam, Lutris and Heroic through the CLI | NOT DONE | P9 |
 | A20 | CI: Windows and Linux builds, tests, boundary and privacy checks | VERIFIED: run 44450410663 -- Linux 13m16s, Windows 22m46s, boundary and privacy, all pass | section 19 |
-| A21 | Windows build and behaviour unbroken | PARTIAL: Windows' game compiles and links from this tree (a Zig cross-build, Windows' release configuration); behaviour: the owner's Windows PC (section 7) | section 14 |
-| A22 | AMD rendering matches the Windows references; validation layers clean | PARTIAL: validation layers clean (0 errors, section 27); the five scenes look like RPCS3's, 1 of 5 within Windows' accepted figures; the rest separated (section 33): the shadow map's last steps D32's, the reflections, the corridor's spread brightening and the editor's lines AMD/RADV's; no change before beta.3 recommended -- the owner's decision | sections 26, 27, 33 |
+| A21 | Windows build and behaviour unbroken | PARTIAL: Windows' game compiles and links from this tree (a Zig cross-build, Windows' release configuration); behaviour: a Windows test machine (section 7) | section 14 |
+| A22 | AMD rendering matches the Windows references; validation layers clean | PARTIAL: validation layers clean (0 errors, section 27); the five scenes look like RPCS3's, 1 of 5 within Windows' accepted figures; the rest separated (section 33): the shadow map's last steps D32's, the reflections, the corridor's spread brightening and the editor's lines AMD/RADV's; no change before beta.3 recommended -- pending the release decision | sections 26, 27, 33 |
 | A23 | Performance measured and reported (target 60 fps) | PARTIAL: 60 fps held -- the castle-front route 540p-1080p (section 24), the river fight and the seven boss fights with no frame over 25 ms (section 27); dungeon exploration and the 540p spike's repeat: to do | sections 24, 27 |
 | A24 | 166 maps, bosses, gameplay, audio, saves on Linux | PARTIAL: the 166-map sweep passed (207 of 207 pipelines prepared, section 25); the developer-tools suite 16/16 -- a guardian fought to its defeat, the ending to the credits, saves across processes (section 27); the seven boss fights; audio in play, the player's own saves: to do | sections 25, 27 |
 | A25 | Release qualification from the Linux packages | NOT DONE | P9 |
@@ -312,7 +312,7 @@ What kept Linux on the checked stores and loads was not a Windows facility but w
 - port/main.cpp `bare_loads_gate`: the `#error` off Windows replaced by the Linux check at every start
   (`dotheroes_guest_space_check`, a zero guard), fatal if it fails.
 - tools/zig_build.py `release_cmake`: one configuration for both -- `mov-nospu`, `DOTHEROES_LIFTED_SPU=OFF`,
-  cellAudio off. `checked` remains a developer's diagnostic build (the owner's D1). tests/player_install_test.py's
+  cellAudio off. `checked` remains a developer's diagnostic build (D1). tests/player_install_test.py's
   check of the prebuilt's configuration now applies on both systems.
 
 Evidence: build/linux/rel1 (configure: "Lifted loads: bare", "Lifted stores: mov-nospu", "Lifted SPU: not linked",
@@ -352,7 +352,7 @@ spurs_task 0 native_decline 0 cell_audio 0`, no frame over 100 ms; pictures as t
 
 ## 14. P6: CI, and Windows checked from this tree (2026-11-18) [M]
 
-**CI** (`.github/workflows/ci.yml`, approved by the owner):
+**CI** (`.github/workflows/ci.yml`, approved under section 4):
 - *Boundary and privacy* (Ubuntu): `boundary_check.py tracked`, `license_audit.py` (forbidden middleware paths),
   `push_guard.py range` over the push's or pull request's commits.
 - *Build and test* on **windows-2022** and **ubuntu-24.04**, each native: `tools/ci_build.py` -- the pinned Zig
@@ -381,7 +381,7 @@ and its MSVC import library is not made (a Windows host never found the sed/dllt
 tools/r8_release_build.sh`, the R8 lift of section 11, the developer diagnostics on): configure "Lifted loads: bare",
 "Lifted stores: mov-nospu", "Lifted SPU: not linked" -- Windows' configuration unchanged -- and `dotheroes.exe` (PE32+
 x86-64, 87 MB) linked in 717 s, importing only Windows' own DLLs, the UCRT and SDL2.dll. **A compile and link check
-only**: Windows' behaviour is checked on the owner's Windows PC (section 7).
+only**: Windows' behaviour is checked on a Windows test machine (section 7).
 
 ## 15. P3: runtime parity, first part (2026-11-18) [M]
 
@@ -412,7 +412,7 @@ only**: Windows' behaviour is checked on the owner's Windows PC (section 7).
   failed** -- synthetic cases, all 326 files, the 42 loops, a stream through a device loss and reopen, the manager
   (32), voices (32), pause (19), device losses (16), the real-time path with failing and slow reopens (9).
 - **CI's first run**: the boundary and privacy job passed; both builds failed in OpenAL Soft's configure -- the
-  runners' CMake 3 refuses its `add_dependencies` with the empty list our dropped HRTF data leaves (CMake 4 accepts
+  runners' CMake 3 refuses its `add_dependencies` with the empty list the dropped HRTF data leaves (CMake 4 accepts
   it). CI now installs CMake 4 and Ninja from PyPI on both runners (the library stays unmodified); the actions moved
   off Node 20.
 - Both platforms rebuilt after these shared changes: the Windows game cross-built and linked; the Linux build booted
@@ -420,7 +420,7 @@ only**: Windows' behaviour is checked on the owner's Windows PC (section 7).
 
 ## 16. P3: the display -- refresh, native Wayland, HiDPI (2026-11-18) [M]
 
-On-screen runs (the owner's standing approval; each recorded through `tests/desktop_guard.py allow` and revoked).
+On-screen runs are approved and recorded through `tests/desktop_guard.py` (`allow`, then `revoke`).
 - **The display's refresh off Windows** (for `DOTHEROES_FPS=display` and the display-paced vblank, which fell back
   to 60 Hz): the Vulkan backend, which owns SDL, reads the primary display's current mode (ps3recomp 0172
   `rsx_vk_display_refresh_hz`; Windows keeps DWM and EnumDisplaySettings), once, on the main thread before the
@@ -435,8 +435,8 @@ On-screen runs (the owner's standing approval; each recorded through `tests/desk
   "window swapchain 1280x720, 4 images, format 44, present mode fifo" under `wayland`.
 - **HiDPI**: `SDL_WINDOW_ALLOW_HIGHDPI` off Windows (0172): on a scaled Wayland display the surface at the display's
   own pixels (the swapchain already takes the drawable size); X11 unaffected; Windows' DPI awareness is the program's
-  own, unchanged. A scaled display is not available on this laptop's 1600x900 panel at scale 1: verifying the scaled
-  case needs a scale changed (a system setting: asked of the owner when P8 reaches it).
+  own, unchanged. A scaled display is not available on the test machine's 1600x900 panel at scale 1: verifying the
+  scaled case needs the desktop scale changed (a system setting; done in section 23).
 - SDL2's default on a Wayland session is X11 (XWayland); both now work. The default stays SDL's (docs/LINUX_PACKAGING
   .md will say how to choose `SDL_VIDEODRIVER=wayland`).
 - The Windows game cross-built after 0172.
@@ -453,7 +453,7 @@ On-screen runs (the owner's standing approval; each recorded through `tests/desk
   position triggers -- was compiled for Windows only, so drive scripts using `life.trigger`/`pos.trigger` could not
   run on Linux. It now runs everywhere: Windows reads its keys as before; elsewhere the runtime's SDL state does
   (ps3recomp **0173** `cellPad_host_fkeys`, focus-gated; `cellPad_host_buttons` for L3+R3). Verified offscreen: two
-  `mark.trigger`s logged 3 s apart. The keys themselves need hands on the keyboard (an owner check under P8). The
+  `mark.trigger`s logged 3 s apart. The keys themselves need hands on the keyboard (a manual check under P8). The
   CPU-debug-register watch (`DEV_HWWATCH`) stays Windows' (a development tool).
 - **CI's second run**: the Linux job passed on GitHub (9 min 33 s: Zig, ps3recomp and its patches, the libraries,
   the runtime against the stub lift, the launcher, the command line, the unit tests, the glibc check).
@@ -461,7 +461,7 @@ On-screen runs (the owner's standing approval; each recorded through `tests/desk
 
 ## 18. P5: the Linux packages (2026-11-18) [M]
 
-**The owner's decisions (2026-11-18)**: the official AppImage type-2 runtime, prebuilt, pinned (release `20251108`,
+**Decisions (2026-11-18)**: the official AppImage type-2 runtime, prebuilt, pinned (release `20251108`,
 never "continuous"), its GPG signature verified before use, recorded in config/deps.sha256, its corresponding source
 and the LGPL relinking materials shipped; mksquashfs bundled for the player's game AppImage with its complete source;
 both AppImages made offline with nothing for the player to install; Debian 11's end of life documented with a
@@ -503,7 +503,7 @@ security-update plan (docs/LINUX_PACKAGING.md section 7); the glibc target uncha
   spaces and Japanese in every path. A failure to make it never fails the install.
 - **Shortcuts on Linux** (tools/shortcuts.py, uninstall.py, launcher/main.cpp `self_program`): Steam and the menu name
   the `.AppImage` file in an AppImage (else `CubicHeroes`; `CubicHeroes.exe` was passed on every system); the project's
-  icon installed in the user's theme as `cubicheroes` when shortcuts are asked for; the entry written UTF-8; uninstall
+  icon installed in the user's theme as `cubicheroes` when shortcuts are made; the entry written UTF-8; uninstall
   removes the entries whose Exec is this launcher (another copy's are left) and then the icon (test_uninstall: 17).
 - **Release qualification on Linux** (tests/release_qualification.py): a `.tar.xz` or an `.AppImage` as well as
   Windows' zip; new steps `gameappimage` and `relocate`; `remove`/`reunpack` recorded as not applicable to an AppImage
@@ -521,7 +521,7 @@ security-update plan (docs/LINUX_PACKAGING.md section 7); the glibc target uncha
   run's JSON): Debian 11 (glibc 2.31), Ubuntu 20.04 (2.31), Ubuntu 24.04 (2.39), Fedora 41 (2.40) -- each **8 of 8**:
   the launcher (`--version`, `--status --json` on a folder with a space and an accent, the usage exit code 2), the
   frozen worker, the AppImage through `--appimage-extract-and-run` (no FUSE in a container), and the game the worker
-  built on this laptop (`--memtest` 601 checks 0 failed; `--info` with FFmpeg loaded).
+  built on the test machine (`--memtest` 601 checks 0 failed; `--info` with FFmpeg loaded).
 - **The frozen worker's children** (tools/hostenv.py): PyInstaller's `_internal/` first on `LD_LIBRARY_PATH` reached
   every program the worker starts (shown in the package: a child of the worker inherited it). A first fix restored the
   player's value for the whole worker -- and broke its own lifting tools, which are the frozen program again and reuse
@@ -536,8 +536,8 @@ security-update plan (docs/LINUX_PACKAGING.md section 7); the glibc target uncha
 
 tests/release_qualification.py from the final packages (`Cubic.Heroes-0.2.0-beta.2-linux-x86_64.tar.xz`, 101 MB;
 `Cubic.Heroes-0.2.0-beta.2-x86_64.AppImage`, 116 MB), each in a fresh folder named "Cubic Heroes RC" with an accent, a
-diaeresis and Japanese, `--offline` (a dead proxy for every step), the disc image and the decrypted EBOOT.elf (the
-keys file's run, and its `keys` step, wait for the owner's file: D3):
+diaeresis and Japanese, `--offline` (a dead proxy for every step), the disc image and the decrypted EBOOT.elf (a keys
+file's run and its `keys` step: not applicable, D3):
 
 | Step | Tarball | AppImage |
 |---|---|---|
@@ -555,7 +555,7 @@ keys file's run, and its `keys` step, wait for the owner's file: D3):
 **14 of 14 for each.** Found by these runs and fixed before this result: the frozen worker's library path in its
 children (section 19, and the first fix's regression of the lifting tools); the AppImage's update path (a new file);
 Linux's reproducible build making the old rebuild step's comment-only change a no-op. Not covered by this run:
-`suite` (the developer tools' installed checks: a save from the owner's checkpoints) and `keys` (the owner's keys file).
+`suite` (the developer tools' installed checks: a save from the test checkpoints) and `keys` (a keys file's).
 
 ## 21. The command line's integration tests on Linux (2026-11-18) [M]
 
@@ -587,14 +587,14 @@ is); the game ending with CubicHeroes (PR_SET_PDEATHSIG). The runner's Windows-o
   window's map (the game's own thread dump). Manjaro's own system SDL2 hangs the same way, and both open X11 windows on
   a private Xvfb display: the desktop session's XWayland stopped mapping new windows (the morning's X11 run worked).
   On Xvfb the three modes are created through SDL's X11 driver (windowed 1280x720; borderless and exclusive 1600x900 at
-  0,0); presenting needs a GPU path Xvfb lacks, so headless there, as expected. The owner is asked to restart the
-  session (log out and in) for the X11 desktop runs.
+  0,0); presenting needs a GPU path Xvfb lacks, so headless there, as expected. The X11 desktop runs need the desktop
+  session restarted (log out and in): section 23.
 
 ## 23. Closing checks, first part (2026-11-18, evening) [M]
 
-The owner restarted the KDE session (the stalled XWayland), copied the Windows checkpoints, RPCS3 references and
-baselines into `build/` (local, git-ignored), approved the audio and scaling changes, and revised D3 (the decrypted
-EBOOT.elf is the qualification input).
+Preconditions: the KDE session restarted (clearing the stalled XWayland); the Windows checkpoints, RPCS3 references
+and baselines placed in `build/` (local, git-ignored); the temporary audio and scaling changes below approved; D3
+revised (the decrypted EBOOT.elf is the qualification input).
 
 - **The packages re-qualified after the backend fix** (section 22): tarball and AppImage **14 of 14 each** again, from
   the rebuilt packages (SHA-256 49a463c4... and f44ea0f6...); the distribution check 8/8 on all four images again.
@@ -634,8 +634,8 @@ tests/perf_run.py: the frame times (the guest's flip requests, as tests/frame_ti
 percentage and VRAM/GTT growth, the game's CPU time (100% = one core); a run whose drive did not finish is marked
 INVALID.
 
-**Like for like with Windows' baseline (shader cache off, every pipeline built in play), 1080p, 60 limit**:
-Windows (RTX 3070): 60.0 fps, median 16.7, p95 18.7, p99 19.3, worst 20.8 ms, none over 25 ms. This laptop: 37.0
+**Like for like with Windows' baseline (shader cache off, every pipeline built in play), 1080p, 60 limit**: Windows
+(RTX 3070): 60.0 fps, median 16.7, p95 18.7, p99 19.3, worst 20.8 ms, none over 25 ms. The Linux test machine: 37.0
 fps -- median 16.7 and p95 18.5 as Windows, but 14 frames over 25 ms, the worst 4.2 s: pipelines built in play (one
 frame built 22 in 2.4 s) -- RADV's compiler on this APU is far slower than NVIDIA's. Players never run that way: the
 install prepares the pipelines (below).
@@ -707,8 +707,8 @@ that the HUD's prompts are the reference's -- without a controller the game draw
 | editor | over: final blue mean 1.1 (0.018), 0.19% of pixels | the 1-pixel grid lines only: RADV's lines are not strict (strictLines false), NVIDIA's are; the triangles identical |
 
 Pictures side by side: the same scenes, the same lighting, the pillars shaded; the differences are faint and spread
-over the surfaces, not missing or wrong objects. Our runs agree with one another (the corridor's two runs identical,
-the entry hall's three within 1% of pixels), so the difference is stable, not the hero's placement.
+over the surfaces, not missing or wrong objects. The Linux runs agree with one another (the corridor's two runs
+identical, the entry hall's three within 1% of pixels), so the difference is stable, not the hero's placement.
 
 **Ruled out or measured**: reduced precision (no SPIR-V module carries RelaxedPrecision); the float depth bias -- an
 experiment with VK_EXT_depth_bias_control (the exact 2^-24 step on the float surface; RADV has it) brought the shadow
@@ -720,7 +720,7 @@ same instance requirement, for 0.19% of one scene's pixels: not made. Both kept 
 **Not yet separated**: Windows' build passed 5 of 5 on 2026-11-16 (docs/M11_PLAN.md); the renderer has changed since,
 and this machine differs in GPU (AMD: D32 depth, non-strict lines, its own filtering) as well as system. A Windows run
 of this commit, with D24 (the default) and with DOTHEROES_PPFX_DEPTH_D32=1, separates NVIDIA-with-D32 from AMD and
-from the code: asked of the owner.
+from the code: done (section 33).
 
 ## 27. P7/P8: the developer-tools suite, the validation layer, the river fight (2026-11-19) [M]
 
@@ -778,15 +778,15 @@ the damaged build was the rollback and the whole one before it was pruned (a rol
 test_a_repair_keeps_the_whole_build_for_rollback (26/26). Windows shares the change (its install layout is the same
 code).
 
-## 29. Controller hot-plug, by the owner's hands (2026-11-19) [O, M]
+## 29. Controller hot-plug, a manual test (2026-11-19) [M]
 
 The packaged tarball's install (the corrected SDL2: X11, Wayland and udev backends), on screen (the desktop guard's
 approval recorded for the run and withdrawn after), PAD_DEBUG=1. An Xbox Series X controller over USB: **6 connections
 and 5 disconnections, every one on port 0** ("SDL controller reconnected on port 0 ... instance 1-5"), input read
-after every reconnection (the owner's play and 45+ button and stick changes logged), no stall at a device change (SDL
-polled on its own thread; no "update took" report), the game closed normally (exit 0). The prompts follow the device
-used last, as designed: the Xbox glyphs after a press on the controller, the keyboard's after a key (the owner:
-working). Not tested: a second controller of another make at once, Bluetooth.
+after every reconnection (play and 45+ button and stick changes logged), no stall at a device change (SDL polled on
+its own thread; no "update took" report), the game closed normally (exit 0). The prompts follow the device used last,
+as designed: the Xbox glyphs after a press on the controller, the keyboard's after a key. Not tested: a second
+controller of another make at once, Bluetooth.
 
 ## 30. The cinematics, and the credits' stalls traced to the test harness (2026-11-19) [M]
 
@@ -822,7 +822,7 @@ only prints (built here with the same runtime and mksquashfs), with NO_CLEANUP u
 message. Upstream: the type-2 runtime leaves extractions in /tmp (cleanup only on request, since two instances share
 one folder by hash). The folder is per file: the same AppImage reuses it; **every new version leaves another full
 copy** (the launcher AppImage 449 MB, a game AppImage ~108 MB). On a /tmp that is a tmpfs, that is RAM and then swap
-until the next reboot. Seven such folders from this milestone's tests had accumulated on this laptop. FUSE runs
+until the next reboot. Seven such folders from this milestone's tests had accumulated on the test machine. FUSE runs
 (the normal case) are not affected; the tarball is not affected.
 
 ## 32. Disk space and clean-up (2026-11-19) [M]
@@ -845,12 +845,12 @@ pinned source's runtime.c 1661-1667): `getenv("NO_CLEANUP")` returns NULL, `rm_r
 `nftw(prefix, rm_recursive_callback, 0, FTW_DEPTH | FTW_MOUNT | FTW_PHYS)` -- **fd_limit 0** -- and nftw returns 0 at
 once. The runtime is statically linked with **musl**, whose nftw begins `if (fd_limit <= 0) return 0;`: nothing is
 walked or removed, and "success" is returned, so no "Failed to clean up" message either. (glibc's nftw does not
-return early on 0, which would explain why upstream's cleanup appears to work in some builds.) Not our application:
+return early on 0, which would explain why upstream's cleanup appears to work in some builds.) Not Cubic.Heroes:
 the minimal AppImage (AppRun = `echo`) behaves the same. Setting TMPDIR from the launcher could not help: the runtime
-extracts before any of our code runs.
+extracts before any Cubic.Heroes code runs.
 
-**The owner's decision (2026-11-19)**: documented, not worked around -- the official pinned runtime is kept unmodified;
-no upstream issue or pull request is filed on the owner's behalf; no cleanup of our own (no directory scanning);
+**Decision (2026-11-19)**: documented, not worked around -- the official pinned runtime is kept unmodified;
+no upstream issue or pull request is filed; no cleanup by Cubic.Heroes (no directory scanning);
 docs/LINUX_PACKAGING.md ("Without FUSE") and the packages' README.txt recommend the tarball where FUSE is missing and
 describe the leftover; the runtime is reevaluated at each dependency update (docs/LINUX_PACKAGING.md section 7's
 table). Not a blocker for the Linux beta.
