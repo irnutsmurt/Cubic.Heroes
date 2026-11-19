@@ -236,7 +236,7 @@ States: **VERIFIED** (implemented, evidence named), **UNVERIFIED** (implemented,
 | A21 | Windows build and behaviour unbroken | PARTIAL: Windows' game compiles and links from this tree (a Zig cross-build, Windows' release configuration); behaviour: the owner's Windows PC (section 7) | section 14 |
 | A22 | AMD rendering matches the Windows references; validation layers clean | NOT DONE | P7 |
 | A23 | Performance measured and reported (target 60 fps) | PARTIAL: the castle-front route at 540p-1080p measured against Windows' baseline (section 24); river combat, dungeon and bosses: to do | section 24 |
-| A24 | 166 maps, bosses, gameplay, audio, saves on Linux | NOT DONE | P8 |
+| A24 | 166 maps, bosses, gameplay, audio, saves on Linux | PARTIAL: the 166-map sweep passed -- every map reached, 207 of 207 pipelines met in play prepared, 0 translations in play (section 25); bosses, gameplay, audio, saves: to do | section 25 |
 | A25 | Release qualification from the Linux packages | NOT DONE | P9 |
 | A26 | Licences, boundary, privacy audits of the Linux packages; docs and README | NOT DONE | P9 |
 
@@ -660,3 +660,27 @@ ms in all) are in the preparation's records now.
 **Not valid, discarded**: a first matrix through the installed game (INSTALLED=) -- an installed game with developer
 mode off ignores the drive's state probe (B-001's rule), so the drive failed at the title and the trace timed the
 title screen (900 fps). tests/perf_run.py now refuses such runs.
+
+## 25. P8: the 166-map sweep, and the preparation's depth format (2026-11-18/19) [M]
+
+**The sweep** (tests/map_sweep.py run, six chunks, offscreen, the development build in Windows' release
+configuration, over its own comprehensive preparation): every one of the 166 maps reached, none failed, the known
+B-007 draw in chunk 4 only. **First run: 167 of 209 pipelines met unprepared** (Windows' sweep: 26 of 190) -- 84
+distinct keys, all asp's (the engine's); PPFX's all prepared.
+
+**The cause**: a recipe keeps the depth format it was recorded with. The manifest's and the profiles' were recorded
+on Windows (NVIDIA: D24_UNORM_S8); the Renoir has no D24, so every depth surface is D32_SFLOAT_S8 (depth_vkformat) --
+and the depth format is part of an asp pipeline's key, so nothing prepared from those recipes was the pipeline a
+draw looked up. **Fixed** (port/native/render/ppfx_render.cpp, recipe_host_depth): a recipe's depth target is read as
+this device's one depth format, for the recorded recipes, the warm-up's and the profiles'. A device with D24 reads
+them unchanged (Windows as before). The preparation then held 193 recipes, not 197: those this machine had recorded
+with D32 are now the same pipelines as their D24 twins.
+
+**Second run, over the preparation made by the fixed build**: 166 of 166 maps; **207 pipelines first met after the
+start, 207 prepared, 0 unforeseen; 0 translations compiled in play**; PASS (51 min). The castle-front figures of
+section 24 were measured over the first preparation: each run met 4 pipelines unprepared (2-16 ms in all, Mesa's
+disk cache warm), within the figures given there.
+
+**To check (A22)**: D24 was chosen because a float depth surface's bias lost the castle hall pillars' shadows
+(2026-11-09). This device has only D32_SFLOAT_S8: the RPCS3 reference scenes (the entry hall's shadow map) decide
+whether that comes back here.

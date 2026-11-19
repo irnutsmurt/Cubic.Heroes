@@ -2160,6 +2160,15 @@ constexpr uint32_t kRecipeFormat = 2;
 constexpr uint64_t kRecipeMaxBytes = 128ull << 20;
 struct RecipeHead { uint32_t magic, format; uint64_t key; PipeState s; ProgFixed f; uint32_t vp_len, fp_len; };
 struct Recipe { uint64_t key; PipeState s; ProgFixed f; std::string vp, fp; };
+VkFormat depth_vkformat(uint32_t depth_format);
+
+// M11.4: a recipe's depth target in this device's one depth format (depth_vkformat), as its draws have it -- a
+// recipe recorded where the device has D24 (D24_UNORM_S8: the manifest's, the profiles') read where it has not
+// (AMD: D32_SFLOAT_S8), or back; else no pipeline prepared from it is the one a draw looks up
+void recipe_host_depth(PipeState& s)
+{
+    if (s.kind == kPipeAsp && s.df != VK_FORMAT_UNDEFINED) s.df = (uint32_t)depth_vkformat(0);
+}
 
 // M9.2c: the key a draw would look this recipe's pipeline up by (key_ppfx / key_asp, as the draws make it): a
 // recipe's stored key is not trusted -- one recorded before the normalisation, or made before play from the
@@ -2218,6 +2227,7 @@ std::vector<Recipe> recipes_read(const std::string& path, long* good_end)
         const uint32_t units = r.fp.empty() ? 0u : rsx_fp_texture_units((const uint8_t*)r.fp.data(), (uint32_t)r.fp.size());
         r.f.cube_mask &= units;
         r.f.vol_mask &= units;
+        recipe_host_depth(r.s);
         out.push_back(std::move(r));
         *good_end = ftell(f);
     }
@@ -2372,6 +2382,7 @@ std::vector<Recipe> static_recipes(const sd::Inventory& inv, const Profiles& pf,
             Recipe r = {};
             r.s = p.s;
             r.s.kind = kPipeAsp; r.s.stride = layout.stride; r.s.count = layout.count; r.s.nconst = fp.consts;
+            recipe_host_depth(r.s);
             r.f.fp_ctrl = fp.fp_ctrl; r.f.layout_mask = layout.mask;
             r.f.alpha_test = p.alpha_test; r.f.alpha_func = p.alpha_func;
             for (uint32_t u = 0; u < 16; u++)
