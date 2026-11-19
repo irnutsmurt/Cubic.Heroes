@@ -1150,7 +1150,10 @@ def cmd_download_update(a, ev, control):
         raise pipeline.SetupError("No release for this platform to download.", "no_release")
     if a.version and r["version"] != a.version:
         raise pipeline.SetupError(f"The release to download is {r['version']}, not {a.version}.", "no_release")
-    asset = r["assets"][0]
+    asset = updates.pick_asset(r["assets"])
+    if not asset:
+        raise pipeline.SetupError(f"The release has no {updates.installed_kind()} package for this platform.",
+                                  "no_release")
     dest = a.dest or os.path.join(os.path.abspath(a.install), "downloads", r["version"])
     prog = _progress(ev, control, ["download"])
     try:

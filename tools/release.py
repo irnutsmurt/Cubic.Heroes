@@ -119,7 +119,11 @@ def cmd_manifest(a):
         with open(p, "rb") as f:
             for c in iter(lambda: f.read(8 << 20), b""):
                 h.update(c)
-        assets.append({"name": os.path.basename(p), "platform": platform_of(os.path.basename(p)),
+        name = os.path.basename(p)
+        kind = trust.asset_kind({"name": name})
+        if not kind:
+            sys.exit(f"{name}: not a package this project ships (.zip, .tar.xz, .AppImage)")
+        assets.append({"name": name, "platform": platform_of(name), "kind": kind,
                        "size": os.path.getsize(p), "sha256": h.hexdigest()})
     notes = open(a.notes, encoding="utf-8").read() if a.notes else ""
     m = {"format": trust.MANIFEST_FORMAT, "version": a.version, "channel": a.channel, "min_launcher": a.min_launcher,

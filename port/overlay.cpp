@@ -45,6 +45,7 @@
 #else
 #include <signal.h>
 #include <unistd.h>
+#include <sys/wait.h>
 #endif
 
 extern "C" {
@@ -732,6 +733,19 @@ void end_session(const char* how)
             CloseHandle(pi.hThread);
             CloseHandle(pi.hProcess);
         }
+    }
+#else
+    const char* l = getenv("CUBIC_LAUNCHER");
+    const char* pid = getenv("CUBIC_LAUNCHER_PID");
+    const bool running = pid && *pid && kill((pid_t)strtol(pid, nullptr, 10), 0) == 0;
+    if (!strcmp(how, "launcher") && l && *l && !running) {   /* the launcher closed itself when the game started */
+        const pid_t c = fork();   /* detached: a session of its own, not this game's child once the game ends */
+        if (c == 0) {
+            setsid();
+            if (fork() == 0) { execl(l, l, "--after-game", (char*)nullptr); _exit(127); }
+            _exit(0);
+        }
+        if (c > 0) waitpid(c, nullptr, 0);
     }
 #endif
     fflush(stdout);

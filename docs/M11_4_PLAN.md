@@ -10,7 +10,8 @@ Evidence marks as in the other plans: [C] read in the code, [M] measured, [I] in
 - **Stage** (2026-11-18): **P2 -- the first native Linux build boots and plays offscreen** (section 11): the title,
   the attract demo with its movies, the overworld, the desert and a dungeon drawn by the native renderer on RADV;
   `--memtest` 628/628 on Linux. **D1 done** (section 12): the Linux build in Windows' release configuration boots
-  strict-clean with no PS3 SPU machinery used. Next: the prebuilt library, the launcher.
+  strict-clean with no PS3 SPU machinery used. **P4 begun** (section 13): the launcher and a
+  full headless player install on Linux, the `--play` signal contract, the updater's Linux packages.
 - **Blocked on the owner**: pushing runtime patches 0170+ -- `.git/push-guard.local` (written this session) lists the
   commit identity's name, which every patch's `From:` header carries (asked 2026-11-18).
 - P1 done -- the desktop guard enforced on Linux (section 9); the unit tests run on Linux
@@ -218,9 +219,9 @@ States: **VERIFIED** (implemented, evidence named), **UNVERIFIED** (implemented,
 | A9 | Rendering resolution presets and custom; VSync; frame limits | NOT DONE | P8 |
 | A10 | Controllers: detection, prompts, hot-plug, remapping; keyboard remapping | NOT DONE | P8 (hot-plug by hand) |
 | A11 | The in-game overlay, performance overlays, developer tools, diagnostics and log export | NOT DONE | P8 |
-| A12 | The public CLI and exit codes (docs/CLI.md), `SIGTERM` reaching the game | NOT DONE | P4 |
-| A13 | Graphical launcher: install from the disc, local recompilation, shader preparation | NOT DONE | P4/P9 |
-| A14 | Signed updates, repair and rollback; the right package per OS and architecture | NOT DONE | P4/P9 |
+| A12 | The public CLI and exit codes (docs/CLI.md), `SIGTERM` reaching the game | PARTIAL: exits 0/2/3/6/7 and the signals verified; tests/cli_integration.py on Linux: to do | section 13 |
+| A13 | Graphical launcher: install from the disc, local recompilation, shader preparation | PARTIAL: headless install verified (2458 pipelines, none failed); the window: to do | section 13 |
+| A14 | Signed updates, repair and rollback; the right package per OS and architecture | PARTIAL: package kind, architecture, tar.xz staging (unit tests); from packages: P9 | section 13 |
 | A15 | Portable root: spaces, Unicode, relocation, another drive, no FUSE (tarball) | NOT DONE | P4/P9 |
 | A16 | Launcher AppImage and tarball, equivalent | NOT DONE | P5 |
 | A17 | The locally generated thin game AppImage: relocatable, regenerated on update and rollback, never distributed | NOT DONE | P5 |
@@ -314,3 +315,32 @@ Evidence: build/linux/rel1 (configure: "Lifted loads: bare", "Lifted stores: mov
 boot (90 s offscreen, strict): exit 0, no strict violation, 0 unresolved NIDs, the title movie 961 frames none late,
 `[census] spu_atomic 0 spu_watch 0 ppu_coh_store 0 spu_dma 0 spu_mailbox 0 spu_group 0 spu_overlay 0 spurs_instance 0
 spurs_task 0 native_decline 0 cell_audio 0`, no frame over 100 ms; pictures as the checked build's.
+
+## 13. P4: the launcher, the command line and the updater on Linux (2026-11-18) [M]
+
+- **The launcher** (`tools/build_launcher.py` on Linux): builds once Dear ImGui's SDL2 backend is given the system's
+  X11 headers after Zig's (that file only; headers, nothing linked). `CubicHeroes`: RUNPATH `$ORIGIN/lib`, GLIBC_2.29 at
+  most. The prebuilt runtime library (`build_prebuilt('linux')`) records the D1 configuration (`PPU_BARE_LOADS`,
+  `PPU_STORE_MOV`, `PPU_STORES_NO_SPU_COH`, `DOTHEROES_NO_LIFTED_SPU`, no SPU interpreter).
+- **The command line, headless** (the guard's environment): `--version`; `--status --json` on a root named with a
+  space, an accent and Japanese; exit 2 (an unknown option), 3 (`--play` with nothing installed), 7 (a read-only
+  root).
+- **A full player install, headless** (`--install --disc <image> --keys <EBOOT.elf> --json` into `build/linux/inst 1`):
+  verify 6 s, extract 17 s, lift 46 s, SPU 16 s, the compile and link 731 s (78 files, 5 at a time), activate, and the
+  shader preparation 8 s -- **2458 pipelines, 0 failed** (2265 from the package's records, 193 made), on "AMD Radeon
+  Graphics (RADV RENOIR)", driver 26.2.4. 824 s in all, exit 0.
+- **`--play` on Linux** (launcher/cli.h), measured on that install: `SIGTERM` to `CubicHeroes` -- before, never passed
+  on (`signal()` restarts `waitpid`); now the game ends in 0.1 s and `CubicHeroes` exits 6 (cancelled, docs/CLI.md).
+  `SIGKILL` to `CubicHeroes` -- before, the game was left running; now `PR_SET_PDEATHSIG` ends it at once (Windows'
+  job object's counterpart). The stale `logs/session-end` removed on both systems.
+- **Return to Launcher on Linux**: the launcher sets `CUBIC_LAUNCHER` (in an AppImage the `.AppImage` file) and
+  `CUBIC_LAUNCHER_PID`, and honours "close when the game starts"; the game reopens a launcher that closed itself
+  (detached: a double fork, `setsid`). Compiled; to run under P8.
+- **The updater** (tools/updates.py, release_trust.py, release.py, worker.py): an optional per-download `kind`
+  (`zip`, `tar.xz`, `appimage`; inferred from the name when absent, so beta.2 launchers read new manifests as before),
+  each kind of one system; `platform_name()` from the processor; `pick_asset` takes the installed package's kind; a
+  `.tar.xz` staged with tarfile's `data` filter (executable bits kept; absolute paths, escaping members and links
+  out refused); an AppImage never unpacked; a zip refused on Linux. tests/test_updates.py: the package helpers make
+  each platform's own format, and new tests for these (31 tests pass on Linux).
+- **Not yet**: `--update` in place and rollback from a package (a development checkout's worker has no package to
+  compare with: P9); `tests/cli_integration.py` on Linux.

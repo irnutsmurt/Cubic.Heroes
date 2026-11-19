@@ -48,7 +48,29 @@ CHUNK = 1 << 20
 
 
 def platform_name():
-    return "windows-x86_64" if os.name == "nt" else "linux-x86_64"
+    """this system and its processor, as the manifest names them (an x86-64 package is never taken elsewhere)"""
+    import platform
+    m = platform.machine().lower()
+    arch = {"amd64": "x86_64", "x64": "x86_64", "x86_64": "x86_64"}.get(m, m or "unknown")
+    return ("windows-" if os.name == "nt" else "linux-") + arch
+
+
+def installed_kind():
+    """the package kind this launcher came in: the .zip on Windows; on Linux the AppImage (it runs from its image,
+    $APPIMAGE naming the file) or the tarball's folder"""
+    if os.name == "nt":
+        return "zip"
+    return "appimage" if os.environ.get("APPIMAGE") else "tar.xz"
+
+
+def pick_asset(assets, kind=None):
+    """the download for this installation among the platform's: the same kind as the one installed (an AppImage is
+    replaced by an AppImage, a tarball's folder by a tarball); None if the release has none of that kind"""
+    kind = kind or installed_kind()
+    for a in assets:
+        if trust.asset_kind(a) == kind:
+            return a
+    return None
 
 
 def _open(url, headers=None, timeout=TIMEOUT_S):
@@ -239,22 +261,45 @@ def _not_package(name):
 
 
 def stage_launcher(package, launcher_dir):
-    """the launcher's package (a verified zip) unpacked into <launcher_dir>/downloads/launcher-new (one top folder in
-    the zip: its contents); every member's path inside it (no member may escape), and no top item that is the
-    install's (builds, data, config, ...: the package would replace them). Returns the staged folder."""
+    """the launcher's package (a verified zip on Windows, tar.xz on Linux) unpacked into
+    <launcher_dir>/downloads/launcher-new (one top folder in the archive: its contents); every member's path inside it
+    (no member may escape), and no top item that is the install's (builds, data, config, ...: the package would
+    replace them). A tarball keeps its programs' executable bits; tarfile's `data` filter refuses absolute paths,
+    members or links leading outside and device files. An AppImage is never staged: it is replaced as a file (the
+    image it runs from is read-only). Returns the staged folder."""
     new = update_dirs(launcher_dir)["staged"]
     part = new + ".part"
     for p in (part, new):
         if os.path.lexists(p):
             layout.rmtree(p)
+    low = package.lower()
+    if low.endswith(".appimage"):
+        raise trust.ReleaseError("An AppImage is updated by downloading the new .AppImage file, not unpacked.",
+                                 "bad_download")
+    if os.name != "nt" and low.endswith(".zip"):
+        raise trust.ReleaseError("A zip is Windows' package (it keeps no executable bits).", "bad_download")
     os.makedirs(part)
     try:
-        with zipfile.ZipFile(package) as z:
-            for n in z.namelist():
-                p = os.path.abspath(os.path.join(part, n))
-                if not p.startswith(part + os.sep) and p != part:
-                    raise trust.ReleaseError(f"The launcher's package holds a path outside it ({n}).", "bad_download")
-            z.extractall(part)
+        if low.endswith((".tar.xz", ".txz")):
+            import tarfile
+            with tarfile.open(package, "r:xz") as t:
+                for m in t.getmembers():
+                    p = os.path.abspath(os.path.join(part, m.name))
+                    if not p.startswith(part + os.sep) and p != part:
+                        raise trust.ReleaseError(f"The launcher's package holds a path outside it ({m.name}).",
+                                                 "bad_download")
+                try:
+                    t.extractall(part, filter="data")
+                except tarfile.FilterError as e:
+                    raise trust.ReleaseError(f"The launcher's package holds a member it may not ({e}).",
+                                             "bad_download")
+        else:
+            with zipfile.ZipFile(package) as z:
+                for n in z.namelist():
+                    p = os.path.abspath(os.path.join(part, n))
+                    if not p.startswith(part + os.sep) and p != part:
+                        raise trust.ReleaseError(f"The launcher's package holds a path outside it ({n}).", "bad_download")
+                z.extractall(part)
         entries = os.listdir(part)
         if len(entries) == 1 and os.path.isdir(os.path.join(part, entries[0])):   # one top folder: its contents
             os.replace(os.path.join(part, entries[0]), new)

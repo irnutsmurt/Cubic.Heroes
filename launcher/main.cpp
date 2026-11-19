@@ -1549,10 +1549,26 @@ static void start_game_now()
                   exe, true, false };
     }
 #else
+    // as on Windows: Return to Launcher reopens this launcher if it has closed itself (in an AppImage the .AppImage
+    // file, $APPIMAGE -- the mounted program is gone once this process ends); the session's end in logs/session-end
+    {
+        std::error_code ec;
+        fs::remove(u8path(install_dir()) / "logs" / "session-end", ec);
+        const char* appimage = getenv("APPIMAGE");
+        const std::string self = appimage && *appimage ? std::string(appimage) : path_str(u8path(g_exe_dir) / "CubicHeroes");
+        setenv("CUBIC_LAUNCHER", self.c_str(), 1);
+        setenv("CUBIC_LAUNCHER_PID", std::to_string((long)getpid()).c_str(), 1);
+    }
     const pid_t pid = fork();
     if (pid == 0) { setsid(); execl(exe.c_str(), exe.c_str(), (char*)nullptr); _exit(127); }
+    if (pid < 0) {
+        g_msg = { true, "The game didn't start", "Its program couldn't be started. Try Repair on the Install page.",
+                  exe, true, false };
+        return;
+    }
     g_game_pid = pid;
     g_st.playing = "The game is running.";
+    if (setting("LAUNCHER_CLOSE_ON_START", "0") == "1") g_quit = true;   // the game reopens it (Return to Launcher)
 #endif
 }
 

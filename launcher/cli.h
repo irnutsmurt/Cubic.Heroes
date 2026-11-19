@@ -19,6 +19,9 @@
 #include <shellapi.h>
 #else
 #include <csignal>
+#include <sys/prctl.h>
+#include <sys/wait.h>
+#include <unistd.h>
 #endif
 
 namespace cli {
@@ -567,14 +570,14 @@ static int cmd_play(const Args& a)
 #endif
     }
     // direct play: no launcher to return to (the in-game menu offers Exit Game; QUIT GAME just quits)
-#ifdef _WIN32
-    _putenv_s("CUBIC_DIRECT_PLAY", "1");
-    _putenv_s("CUBIC_LAUNCHER", "");
-    _putenv_s("CUBIC_LAUNCHER_PID", "");
     {
         std::error_code e2;
         fs::remove(u8path(g_root) / "logs" / "session-end", e2);
     }
+#ifdef _WIN32
+    _putenv_s("CUBIC_DIRECT_PLAY", "1");
+    _putenv_s("CUBIC_LAUNCHER", "");
+    _putenv_s("CUBIC_LAUNCHER_PID", "");
     // the game in a job of ours: a calling launcher (Steam, a frontend) that ends CubicHeroes ends the game with it
     HANDLE job = CreateJobObjectW(nullptr, nullptr);
     if (job) {
@@ -605,19 +608,32 @@ static int cmd_play(const Args& a)
     setenv("CUBIC_DIRECT_PLAY", "1", 1);
     unsetenv("CUBIC_LAUNCHER");
     unsetenv("CUBIC_LAUNCHER_PID");
+    const pid_t parent = getpid();
     const pid_t pid = fork();
     if (pid == 0) {
+        // the game ends with CubicHeroes, as the job object makes it on Windows: a calling launcher (Steam, a
+        // frontend) that kills CubicHeroes outright ends the game too (and if it is already gone, at once)
+        prctl(PR_SET_PDEATHSIG, SIGTERM);
+        if (getppid() != parent) _exit(kCancelled);
         if (chdir(g_root.c_str()) != 0) _exit(127);
         execl(exe.c_str(), exe.c_str(), (char*)nullptr);
         _exit(127);
     }
     if (pid < 0) return fail(a, kPrerequisite, "no_game", "The game couldn't be started.");
     if (a.json) { printf("{\"ev\":\"started\",\"pid\":%d,\"game\":%s}\n", (int)pid, json::quote(exe).c_str()); fflush(stdout); }
+    // SIGTERM or SIGINT to CubicHeroes (a launcher's stop, Ctrl+C) passed on to the game once; then the game's own
+    // orderly end is waited for. Polled: the handlers are signal()'s (SA_RESTART), so a blocking waitpid would
+    // never see them (M11.4)
     int st = 0;
-    while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {
-        if (g_cancel) kill(pid, SIGTERM);
+    bool forwarded = false;
+    for (;;) {
+        const pid_t r = waitpid(pid, &st, WNOHANG);
+        if (r == pid || (r < 0 && errno != EINTR)) break;
+        if (g_cancel && !forwarded) { kill(pid, SIGTERM); forwarded = true; }
+        usleep(50 * 1000);
     }
-    const int status = WIFEXITED(st) ? WEXITSTATUS(st) : 128 + (WIFSIGNALED(st) ? WTERMSIG(st) : 0);
+    const int status = forwarded ? kCancelled
+                                 : WIFEXITED(st) ? WEXITSTATUS(st) : 128 + (WIFSIGNALED(st) ? WTERMSIG(st) : 0);
     if (a.json) printf("{\"ev\":\"ended\",\"exit\":%d}\n", status);
     return status;
 #endif

@@ -44,6 +44,37 @@ def get(path):
         return f.read()
 
 
+PKG_EXT = ".zip" if os.name == "nt" else ".tar.xz"   # each platform's own launcher package (M11.4)
+
+
+def archive(path, members, folder=None):
+    """a launcher package at `path` (zip or tar.xz by its name): `members` {name: text}, or the files under `folder`
+    by their paths relative to its parent"""
+    files = dict(members or {})
+    if folder:
+        for d, _, fs in os.walk(folder):
+            for f in fs:
+                full = os.path.join(d, f)
+                files[os.path.relpath(full, os.path.dirname(folder)).replace(os.sep, "/")] = full
+    if path.endswith(".zip"):
+        with zipfile.ZipFile(path, "w") as zf:
+            for n, v in files.items():
+                zf.write(v, n) if folder and v.startswith(folder) else zf.writestr(n, v)
+    else:
+        import io
+        import tarfile
+        with tarfile.open(path, "w:xz") as t:
+            for n, v in files.items():
+                if folder and v.startswith(folder):
+                    t.add(v, n)
+                else:
+                    data = v.encode() if isinstance(v, str) else v
+                    ti = tarfile.TarInfo(n)
+                    ti.size, ti.mode = len(data), 0o644
+                    t.addfile(ti, io.BytesIO(data))
+    return path
+
+
 class Ed25519(unittest.TestCase):
     VECTORS = [   # RFC 8032 section 7.1, tests 1 and 2
         ("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a", "",
@@ -96,10 +127,8 @@ class Releases(unittest.TestCase):
                 sign=True, tamper=False):
         d = os.path.join(self.mirror, version)
         os.makedirs(d)
-        name = f"CubicHeroes-{PLAT}-{version}.zip"
-        z = os.path.join(d, name)
-        with zipfile.ZipFile(z, "w") as zf:
-            zf.writestr("CubicHeroes/launcher.txt", payload.decode() + version)
+        name = f"CubicHeroes-{PLAT}-{version}{PKG_EXT}"
+        z = archive(os.path.join(d, name), {"CubicHeroes/launcher.txt": payload.decode() + version})
         data = get(z)
         m = {"format": 1, "version": version, "channel": channel, "min_launcher": None, "notes": f"notes {version}",
              "key_id": kid or self.kid, "assets": [{"name": name, "platform": PLAT, "size": len(data),
@@ -234,12 +263,45 @@ class Releases(unittest.TestCase):
         self.assertEqual((p.returncode, res["ok"], res["data"]["offline"]), (0, True, True))
 
     def test_stage_refuses_an_escaping_member(self):
-        bad = os.path.join(self.tmp, "bad.zip")
-        with zipfile.ZipFile(bad, "w") as zf:
-            zf.writestr("../escaped.txt", "x")
+        bad = archive(os.path.join(self.tmp, "bad" + PKG_EXT), {"../escaped.txt": "x"})
         with self.assertRaises(trust.ReleaseError):
             updates.stage_launcher(bad, os.path.join(self.tmp, "launcher"))
         self.assertFalse(os.path.exists(os.path.join(self.tmp, "escaped.txt")))
+
+    @unittest.skipIf(os.name == "nt", "Linux's package")
+    def test_linux_tarball_keeps_exec_bits_and_refuses_links_out(self):
+        import io
+        import tarfile
+        pkg = os.path.join(self.tmp, "pkg.tar.xz")
+        with tarfile.open(pkg, "w:xz") as t:
+            for n, mode in (("Cubic.Heroes/CubicHeroes", 0o755), ("Cubic.Heroes/README.txt", 0o644)):
+                ti = tarfile.TarInfo(n)
+                ti.size, ti.mode = 2, mode
+                t.addfile(ti, io.BytesIO(b"x\n"))
+        new = updates.stage_launcher(pkg, os.path.join(self.tmp, "launcher"))
+        self.assertTrue(os.access(os.path.join(new, "CubicHeroes"), os.X_OK))
+        self.assertFalse(os.access(os.path.join(new, "README.txt"), os.X_OK))
+        evil = os.path.join(self.tmp, "evil.tar.xz")
+        with tarfile.open(evil, "w:xz") as t:
+            ti = tarfile.TarInfo("Cubic.Heroes/lib")
+            ti.type, ti.linkname = tarfile.SYMTYPE, "/etc"
+            t.addfile(ti)
+        with self.assertRaises(trust.ReleaseError):
+            updates.stage_launcher(evil, os.path.join(self.tmp, "launcher2"))
+        for wrong in ("x.zip", "x.AppImage"):   # not Linux's tarball: refused, nothing unpacked
+            put(os.path.join(self.tmp, wrong), b"PK")
+            with self.assertRaises(trust.ReleaseError):
+                updates.stage_launcher(os.path.join(self.tmp, wrong), os.path.join(self.tmp, "launcher3"))
+
+    def test_pick_asset_by_kind_and_platform(self):
+        assets = [{"name": "Cubic.Heroes-1.0.0-x86_64.AppImage", "platform": "linux-x86_64"},
+                  {"name": "Cubic.Heroes-1.0.0-linux-x86_64.tar.xz", "platform": "linux-x86_64"}]
+        self.assertEqual(updates.pick_asset(assets, "tar.xz")["name"], assets[1]["name"])
+        self.assertEqual(updates.pick_asset(assets, "appimage")["name"], assets[0]["name"])
+        self.assertIsNone(updates.pick_asset(assets, "zip"))
+        self.assertIn(updates.platform_name(), ("windows-x86_64", "linux-x86_64"))   # this test's machines
+        self.assertEqual(updates.installed_kind(), "zip" if os.name == "nt" else
+                         ("appimage" if os.environ.get("APPIMAGE") else "tar.xz"))
 
     def test_stage_one_top_folder(self):
         z, _ = self.release("0.2.0")
@@ -426,13 +488,9 @@ class PortableSwap(unittest.TestCase):
 
     def test_stage_into_the_root(self):
         layout.rmtree(self.dirs["staged"])
-        z = os.path.join(self.tmpd.name, "pkg.zip")
         src = os.path.join(self.tmpd.name, "pkgsrc", "Cubic.Heroes-0.3.0")
         package(src, "0.3.0")
-        with zipfile.ZipFile(z, "w") as zf:
-            for d, _, fs in os.walk(src):
-                for f in fs:
-                    zf.write(os.path.join(d, f), os.path.relpath(os.path.join(d, f), os.path.dirname(src)))
+        z = archive(os.path.join(self.tmpd.name, "pkg" + PKG_EXT), None, folder=src)
         staged = updates.stage_launcher(z, self.root)
         self.assertEqual(os.path.normcase(staged), os.path.normcase(self.dirs["staged"]))
         self.assertEqual(sorted(os.listdir(staged)), sorted(layout.launcher_package()))
@@ -440,10 +498,7 @@ class PortableSwap(unittest.TestCase):
         self.assertEqual(snapshot(self.root), self.before)
 
     def test_stage_refuses_the_installs_items(self):
-        z = os.path.join(self.tmpd.name, "bad.zip")
-        with zipfile.ZipFile(z, "w") as zf:
-            zf.writestr(EXE, "x")
-            zf.writestr("data/gamedata/SAVE.BIN", "overwritten")
+        z = archive(os.path.join(self.tmpd.name, "bad" + PKG_EXT), {EXE: "x", "data/gamedata/SAVE.BIN": "overwritten"})
         with self.assertRaises(trust.ReleaseError) as e:
             updates.stage_launcher(z, self.root)
         self.assertEqual(e.exception.code, "bad_download")
@@ -499,9 +554,21 @@ class Manifest(unittest.TestCase):
         for bad in ({"format": 2}, {"version": "two"}, {"channel": "nightly"}, {"assets": []},
                     {"assets": [{"name": "../a.zip", "platform": PLAT, "size": 1, "sha256": "0" * 64}]},
                     {"assets": [{"name": "a.zip", "platform": "mac", "size": 1, "sha256": "0" * 64}]},
-                    {"assets": [{"name": "a.zip", "platform": PLAT, "size": 1, "sha256": "z"}]}):
+                    {"assets": [{"name": "a.zip", "platform": PLAT, "size": 1, "sha256": "z"}]},
+                    # M11.4: a kind that is no kind, or of the other system
+                    {"assets": [{"name": "a.tar.xz", "platform": "linux-x86_64", "kind": "deb", "size": 1,
+                                 "sha256": "0" * 64}]},
+                    {"assets": [{"name": "a.zip", "platform": "linux-x86_64", "kind": "zip", "size": 1,
+                                 "sha256": "0" * 64}]},
+                    {"assets": [{"name": "a.AppImage", "platform": "windows-x86_64", "kind": "appimage", "size": 1,
+                                 "sha256": "0" * 64}]}):
             with self.assertRaises(trust.ReleaseError):
                 trust.check_manifest(dict(good, **bad))
+        both = dict(good, assets=[   # one version, both systems, each its own kinds
+            {"name": "w.zip", "platform": "windows-x86_64", "kind": "zip", "size": 1, "sha256": "0" * 64},
+            {"name": "l.tar.xz", "platform": "linux-x86_64", "kind": "tar.xz", "size": 1, "sha256": "0" * 64},
+            {"name": "l.AppImage", "platform": "linux-x86_64", "kind": "appimage", "size": 1, "sha256": "0" * 64}])
+        trust.check_manifest(both)
 
     def test_versions(self):
         v = trust.parse_version

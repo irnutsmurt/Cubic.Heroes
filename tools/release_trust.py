@@ -29,6 +29,19 @@ EVP_PKEY_ED25519 = 1087   # OpenSSL's NID_ED25519
 # a DER SubjectPublicKeyInfo of an Ed25519 key: this prefix, then the 32 bytes of the key
 ED25519_DER_PREFIX = bytes.fromhex("302a300506032b6570032100")
 PLATFORMS = ("windows-x86_64", "linux-x86_64")
+# M11.4: a download's package kind -- optional in the manifest (inferred from its name when absent, so a manifest
+# without it reads as before); a kind belongs to one system
+KINDS = {"zip": "windows", "tar.xz": "linux", "appimage": "linux"}
+
+
+def asset_kind(a):
+    """a manifest download's package kind: its own `kind`, else its name's"""
+    k = a.get("kind")
+    if k:
+        return k
+    n = a.get("name", "").lower()
+    return "zip" if n.endswith(".zip") else "tar.xz" if n.endswith(".tar.xz") else \
+        "appimage" if n.endswith(".appimage") else None
 
 
 class ReleaseError(Exception):
@@ -175,6 +188,8 @@ def check_manifest(m):
                 or a.get("platform") not in PLATFORMS or not isinstance(a.get("size"), int) or a["size"] <= 0 \
                 or not re.fullmatch(r"[0-9a-f]{64}", str(a.get("sha256", ""))):
             bad(f"a download's record ({a.get('name') if isinstance(a, dict) else a!r})")
+        if "kind" in a and (a["kind"] not in KINDS or not a["platform"].startswith(KINDS[a["kind"]] + "-")):
+            bad(f"a download's kind ({a['name']}: {a['kind']} for {a['platform']})")
     if not isinstance(m.get("notes", ""), str):
         bad("its notes")
     return m
