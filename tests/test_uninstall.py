@@ -355,5 +355,34 @@ class PortableRootTest(unittest.TestCase):
         self.assertTrue(res["data"]["everything"])
 
 
+@unittest.skipIf(os.name == "nt", "Linux's desktop entries")
+class LinuxShortcutsTest(unittest.TestCase):
+    """M11.4: the menu and desktop entries, their icon, and their removal -- in temporary folders, never the user's"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        t = self.tmp.name
+        self.dirs = {"apps_dir": os.path.join(t, "applications"), "desktop_dir": os.path.join(t, "Desktop"),
+                     "icons_dir": os.path.join(t, "icons")}
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_made_and_removed_for_this_launcher_only(self):
+        exe = os.path.join(self.tmp.name, "Games dir", "Cubic 日本", "Cubic.Heroes-1.0.0-x86_64.AppImage")
+        made = shortcuts.create_shortcuts(exe, "", desktop=True, **self.dirs)
+        self.assertEqual(len(made), 2)
+        text = open(made[0], encoding="utf-8").read()
+        self.assertIn("Icon=cubicheroes", text)
+        self.assertIn('Exec="' + exe + '"', text)
+        icon = os.path.join(self.dirs["icons_dir"], "hicolor", "256x256", "apps", "cubicheroes.png")
+        self.assertTrue(os.path.isfile(icon))
+        # another copy's entry is not this launcher's: left as it is
+        self.assertEqual(shortcuts.remove_linux_shortcuts(exe + "-other", **self.dirs), [])
+        removed = shortcuts.remove_linux_shortcuts(exe, **self.dirs)
+        self.assertEqual(sorted(removed), sorted(made + [icon]))
+        self.assertFalse(any(os.path.exists(p) for p in made + [icon]))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -73,17 +73,47 @@ def _desktop_entry(exe, icon):
             "Terminal=false\nCategories=Game;ArcadeGame;\n")
 
 
-def _linux_shortcuts(exe, icon, desktop, apps_dir=None, desktop_dir=None):
-    entry = _desktop_entry(exe, icon)
-    apps_dir = apps_dir or os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"),
-                                        "applications")
-    targets = [os.path.join(apps_dir, "dotheroes-native.desktop")]
-    if desktop:
-        targets.append(os.path.join(desktop_dir or _xdg_dir("DESKTOP", "~/Desktop"), "dotheroes-native.desktop"))
+DESKTOP_FILE = "dotheroes-native.desktop"
+ICON_NAME = "cubicheroes"   # in the user's icon theme (M11.4): a name, not a path -- an AppImage's mount is gone once
+                            # it ends, and a portable folder moves
+
+
+def _data_home():
+    return os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+
+
+def _icon_source():
+    """the project's own icon (assets/icon.png: not the game's), beside the tools in a checkout or the worker"""
+    for base in (os.path.dirname(os.path.dirname(os.path.abspath(__file__))), os.path.dirname(sys.executable)):
+        p = os.path.join(base, "assets", "icon.png")
+        if os.path.isfile(p):
+            return p
+    return None
+
+
+def _install_icon(icons_dir=None):
+    """the icon into the user's theme (hicolor, 256x256: its size) once shortcuts are asked for; its name, or ''"""
+    src = _icon_source()
+    if not src:
+        return ""
+    d = os.path.join(icons_dir or os.path.join(_data_home(), "icons"), "hicolor", "256x256", "apps")
+    os.makedirs(d, exist_ok=True)
+    shutil.copy2(src, os.path.join(d, ICON_NAME + ".png"))
+    return ICON_NAME
+
+
+def _linux_targets(apps_dir=None, desktop_dir=None):
+    return [os.path.join(apps_dir or os.path.join(_data_home(), "applications"), DESKTOP_FILE),
+            os.path.join(desktop_dir or _xdg_dir("DESKTOP", "~/Desktop"), DESKTOP_FILE)]
+
+
+def _linux_shortcuts(exe, icon, desktop, apps_dir=None, desktop_dir=None, icons_dir=None):
+    entry = _desktop_entry(exe, icon or _install_icon(icons_dir))
+    targets = _linux_targets(apps_dir, desktop_dir)[:2 if desktop else 1]
     made = []
     for path in targets:
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:   # the desktop entry spec's encoding (a Unicode folder's path)
             f.write(entry)
         os.chmod(path, 0o755)
         if path != targets[0]:
@@ -91,6 +121,29 @@ def _linux_shortcuts(exe, icon, desktop, apps_dir=None, desktop_dir=None):
             subprocess.run(["gio", "set", path, "metadata::trusted", "true"], capture_output=True)
         made.append(path)
     return made
+
+
+def remove_linux_shortcuts(exe, apps_dir=None, desktop_dir=None, icons_dir=None):
+    """the menu and desktop entries Cubic.Heroes made for the launcher `exe` (those whose Exec is exactly it: another
+    copy's are left), and the icon once no entry of ours is left. Returns the paths removed."""
+    want = "Exec=" + re.search(r"^Exec=(.*)$", _desktop_entry(exe, ""), re.M).group(1)
+    removed = []
+    for path in _linux_targets(apps_dir, desktop_dir):
+        try:
+            with open(path, encoding="utf-8") as f:
+                ours = want in f.read().splitlines()
+        except OSError:
+            continue
+        if ours:
+            os.remove(path)
+            removed.append(path)
+    if removed and not any(os.path.exists(p) for p in _linux_targets(apps_dir, desktop_dir)):
+        icon = os.path.join(icons_dir or os.path.join(_data_home(), "icons"), "hicolor", "256x256", "apps",
+                            ICON_NAME + ".png")
+        if os.path.exists(icon):
+            os.remove(icon)
+            removed.append(icon)
+    return removed
 
 
 def create_shortcuts(exe, icon, desktop=True, **dirs):

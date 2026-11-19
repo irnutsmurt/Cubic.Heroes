@@ -72,6 +72,13 @@ def libcrypto():
         cands += [os.path.join(base, n) for n in os.listdir(base) if n.lower().startswith("libcrypto")]
     cands += [n for n in (ctypes.util.find_library("crypto"), "libcrypto.so.3", "libcrypto-3-x64.dll",
                           "libcrypto-3.dll") if n]
+    # the newest OpenSSL first (M11.4: a frozen Linux worker carried 1.1 beside 3, and "libcrypto.so.1.1" sorts before
+    # "libcrypto.so.3": the release checks ran on the old one); find_library's and the plain names stay last
+    def soversion(c):
+        m = re.search(r"libcrypto(?:\.so\.|-)(\d+)(?:\.(\d+))?", os.path.basename(c))
+        return (int(m.group(1)), int(m.group(2) or 0)) if m else (-1, 0)
+    head = sorted([c for c in cands if os.path.isabs(c)], key=soversion, reverse=True)
+    cands = head + [c for c in cands if not os.path.isabs(c)]
     for c in cands:
         try:
             lib = ctypes.CDLL(c)

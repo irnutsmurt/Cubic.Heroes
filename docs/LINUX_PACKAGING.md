@@ -87,3 +87,52 @@ The regression suite is Python and already platform-aware in most places:
 - FUSE-less systems: the tarball, or `--appimage-extract-and-run`;
 - shortcuts: `tools/shortcuts.py` already writes XDG `.desktop` files and Steam's `shortcuts.vdf`; for the AppImage
   they must name the `.AppImage` file (`$APPIMAGE`), not the mounted program.
+
+## 7. The glibc baseline, the build environment and security updates (M11.4, 2026-11-18)
+
+**Where the baseline comes from.** Everything this project compiles for Linux -- the game (on the player's machine),
+the launcher, the runtime library, SDL2, OpenAL Soft and FFmpeg -- is compiled by Zig for `x86_64-linux-gnu.2.31`
+(tools/zig_build.py `TARGETS`): Zig carries glibc 2.31's symbol versions itself, so what it builds needs glibc 2.31
+whatever machine built it. `tools/glibc_check.py` checks every shipped ELF file (GLIBC_2.31 at most, no GLIBCXX, only
+glibc's or shipped libraries needed) in CI and in packaging.
+
+**What the build environment (tools/linux_build_env, Debian 11) is still for**, and so what Debian 11's end of life
+(2026) does and does not affect:
+- *the frozen worker's Python*: CPython 3.12 and OpenSSL 3.5 (LTS) are built **from pinned upstream sources** in the
+  image (the Dockerfile's `PYTHON_VERSION`/`OPENSSL_VERSION` and their SHA-256), not taken from Debian -- their
+  security updates are ours to take, by raising those pins and rebuilding, whatever Debian does. What the image
+  contributes is glibc 2.31 to build them against (so the frozen worker runs on 2.31).
+- *headers only* for the run-time backends SDL2 and OpenAL Soft load with `dlopen` (X11, Wayland, PipeWire 0.3.65 from
+  bullseye-backports, PulseAudio, ALSA): no code of them is shipped; the player's own system libraries are used.
+- *mksquashfs*, linked statically with Debian 11's zlib and zstd: a tool that only writes the player's game AppImage
+  from the player's own files (no untrusted input). To be independent of Debian's copies, zlib and zstd can be built
+  from pinned sources as Python is (a follow-up).
+- The Debian packages themselves are pinned to one day (snapshot.debian.org, 2026-08-01; backports from Debian's
+  archive): the image is the same whenever it is rebuilt, but no further Debian update reaches it.
+
+**Security updates of what is shipped** (the Linux packages; the Windows package's list is the same less the AppImage
+pieces), each pinned in `config/deps.sha256` or the Dockerfile:
+
+| Component | Shipped as | Exposure | Update path |
+|---|---|---|---|
+| CPython 3.12 | the worker's runtime | reads the player's disc and keys; HTTPS to GitHub for updates | raise `PYTHON_VERSION` (3.12 receives security fixes until 2028-10; then 3.13+) |
+| OpenSSL 3.5 LTS | the worker's TLS and signature checks | HTTPS; Ed25519 verification of release manifests | raise `OPENSSL_VERSION` (3.5 LTS supported until 2030-04) |
+| PyInstaller bootloader 6.x | starts the worker | none beyond startup | pin in the Dockerfile |
+| pycryptodome | AES for the player's disc | local files only | pin in the Dockerfile |
+| SDL2 2.32 | the window, input | the desktop, controllers | `tools/build_deps.py` SOURCES and its pin |
+| OpenAL Soft 1.25 | audio | none (game data) | idem |
+| FFmpeg 9.0 (Bink only) | movies | the game's own movie files | idem |
+| AppImage runtime 20251108 (+libfuse, squashfuse, zstd, zlib, musl) | mounts the AppImages | the AppImage file itself | a newer release: pin, verify its signature (tools/fetch_appimage.py) |
+| squashfs-tools 4.7 | mksquashfs | the player's own files | pin |
+
+A release is preceded by a check of each against its upstream advisories (and the OSV database); a fix in any of
+them is a new package version through the signed-update channel. A CI job that compares the pins with upstream
+releases and OSV each week is proposed as a follow-up.
+
+**Longer term: a maintained build environment with the same baseline (a proposal for the owner, not adopted).**
+PyPA's `manylinux_2_28` image (AlmaLinux 8, security support until 2029; the Python packaging ecosystem's standard
+environment for portable Linux binaries) would replace Debian 11 for the frozen worker and the headers. Building there
+makes the worker need glibc **2.28** or newer -- lower than the 2.31 floor, so every system supported now stays
+supported -- while everything Zig compiles keeps targeting 2.31 exactly as now. Nothing about the shipped baseline
+changes; it is recorded here for the owner's decision (the owner, 2026-11-18: the glibc target is not changed without
+discussion).

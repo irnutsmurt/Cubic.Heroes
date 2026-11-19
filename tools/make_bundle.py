@@ -67,7 +67,8 @@ OUR_TOOLS = ["fix_functions.py", "iso9660.py", "self_decrypt.py", "setup_pipelin
              "worker.py", "game_settings.py", "install_layout.py", "updates.py",
              "release_trust.py", "settings.py", "diagnostics.py",
              "pipeline_manifest.py", "uninstall.py", "ps3_disc.py",
-             "root_migration.py"]   # the launcher's worker (M9.0-M9.5; root_migration: the portable root)
+             "root_migration.py", "appimage.py", "game_appimage.py"]   # the launcher's worker (M9.0-M9.5; root_migration: the portable
+# root; appimage: the player's game AppImage, M11.4)
 
 
 def copy_tracked(rel, dst, skip=()):
@@ -143,17 +144,43 @@ def pyinstaller(platform, dist):
         cmd = ["wine", "C:\\Python314\\python.exe", "-m", "PyInstaller"]
     else:
         env = None
-        cmd = [need(os.path.join(ROOT, "build", "venv", "bin", "pyinstaller"),
-                    "python3 -m venv build/venv && build/venv/bin/pip install pyinstaller pycryptodome pillow")]
+        venv = os.path.join(ROOT, "build", "venv", "bin", "pyinstaller")
+        import importlib.util
+        if not os.path.exists(venv) and importlib.util.find_spec("PyInstaller"):
+            # M11.4: the pinned build environment's own Python (tools/linux_build_env): what the worker is frozen
+            # with is what it ships, so it is the glibc 2.31 baseline's, never the developer's machine's
+            cmd = [sys.executable, "-m", "PyInstaller"]
+        else:
+            cmd = [need(venv, "python3 -m venv build/venv && build/venv/bin/pip install pyinstaller pycryptodome pillow")]
     args[args.index(None)] = paths["icon"]
     hidden = ["setup_pipeline", "zig_build", "iso9660", "self_decrypt", "shortcuts", "self_update", "version",
               "worker", "game_settings", "install_layout", "updates", "release_trust", "settings", "diagnostics",
               "pipeline_manifest", "uninstall", "ps3_disc", "root_migration", "Crypto.Cipher.AES",
               "Crypto.Util.Counter"]
     hidden += tool_imports()
+    if platform != "windows":
+        # M11.4: Pillow is the Windows worker's only (the game's .ico, zig_build.windows_resources); frozen into the
+        # Linux worker it brought a dozen image libraries and a libstdc++ for nothing
+        args += ["--exclude-module", "PIL"]
     subprocess.check_call(cmd + args + [
         "--distpath", paths["dist"], "--workpath", paths["work"], "--specpath", paths["spec"],
         "--paths", paths["tools"], *[a for m in hidden for a in ("--hidden-import", m)], paths["app"]], env=env)
+
+
+def drop_stray_openssl(work):
+    """M11.4: only the OpenSSL the worker's Python is built with (3.x, tools/linux_build_env). PyInstaller also took
+    the build machine's libcrypto/libssl 1.1, which release_trust's ctypes search names (find_library), and the frozen
+    worker's release checks could load it: removed, once _ssl is seen to link the 3.x it ships."""
+    internal = os.path.join(work, "_internal")
+    ssl_so = glob.glob(os.path.join(internal, "python3.*", "lib-dynload", "_ssl*.so")) + \
+        glob.glob(os.path.join(internal, "lib-dynload", "_ssl*.so"))
+    needed = subprocess.run(["readelf", "-d", ssl_so[0]], capture_output=True, text=True).stdout if ssl_so else ""
+    if "libcrypto.so.3" not in needed or "libssl.so.3" not in needed:
+        sys.exit(f"the worker's _ssl does not link OpenSSL 3 ({ssl_so[:1]}): {needed[-300:]}")
+    for f in os.listdir(internal):
+        if f.startswith(("libcrypto.so.1", "libssl.so.1")):
+            os.remove(os.path.join(internal, f))
+            print(f"  removed {f} (not the OpenSSL the worker's Python is built with)")
 
 
 def copy_zig(platform, out):
@@ -229,6 +256,8 @@ def python_runtime_licences(lic, platform):
         sites = [sysconfig.get_paths()["purelib"]]
     wanted = {
         "Python.txt": [os.path.join(base, "LICENSE.txt"), os.path.join(base, "LICENSE"),
+                       # a Python built from source (tools/linux_build_env): `make install` puts it with the library
+                       os.path.join(base, "lib", f"python3.{sys.version_info.minor}", "LICENSE.txt"),
                        f"/usr/share/doc/python3.{sys.version_info.minor}/copyright"],
         "pycryptodome.txt": dist_files(sites, "pycryptodome*", "LICENSE*"),
         "PyInstaller.txt": dist_files(sites, "pyinstaller-*", "COPYING*"),
@@ -309,6 +338,76 @@ def licenses(out, zsrc, platform):
         shutil.copy2(os.path.join(deps_lib, name), lic)
     build_ffmpeg.source_files(os.path.join(lic, "source"), platform)
     at3_source(lic)
+    if platform == "linux":
+        appimage_licences(lic)
+
+
+# M11.4 (the owner's approval, 2026-11-18): the AppImage type-2 runtime and mksquashfs the worker uses to make the
+# player's game AppImage offline -- their licences and their complete corresponding sources (tools/fetch_appimage.py
+# fetched and verified every file against config/deps.sha256; the runtime's signature against its pinned key)
+APPIMAGE_NOTICE = """The AppImage pieces -- worker/toolchain/appimage/ (and the start of Cubic.Heroes's own AppImage)
+
+runtime-x86_64 is the official AppImage type-2 runtime, release 20251108 of https://github.com/AppImage/type2-runtime
+(commit dd6cebedcbddde9c82f89b011e8e1d40b6e43868), unmodified: its SHA-256 is pinned in this project's
+config/deps.sha256 and its GPG signature verified with the release's key (fingerprint
+570C77ACEA40C0F1B758902CBF96CCA56490F695) before it was used or shipped. It is MIT-licensed
+(AppImage-type2-runtime-MIT.txt) and is linked statically with:
+  - libfuse 3.15.0, with the runtime's patch patches/libfuse/mount.c.diff -- GNU LGPL 2.1 (libfuse-LGPL-2.1.txt);
+  - squashfuse 0.5.2 -- BSD 2-Clause (squashfuse-BSD-2-Clause.txt);
+  - zstd 1.5.6 -- BSD (zstd-BSD.txt); zlib 1.3.1 -- zlib licence (zlib.txt);
+  - mimalloc 2.1.7 -- MIT (mimalloc-MIT.txt); musl libc 1.2.5 -- MIT (musl-MIT.txt);
+as the runtime's own build makes it (Alpine Linux 3.21).
+
+The corresponding source, in licenses/source/:
+  type2-runtime-dd6cebed.tar.gz   the runtime's complete source at that commit, with its build scripts
+                                  (scripts/docker/, scripts/common/install-dependencies.sh) and the libfuse patch
+  fuse-3.15.0.tar.xz              libfuse, as the runtime's build fetches it (sha256 70589cfd...)
+  squashfuse-0.5.2.tar.gz         squashfuse, as the runtime's build fetches it (sha256 db0238c5...)
+To rebuild the runtime -- for example against a modified libfuse, as the LGPL allows: unpack type2-runtime, change
+scripts/common/install-dependencies.sh to use your libfuse (or replace fuse-3.15.0.tar.xz), and run
+`env ARCH=x86_64 scripts/docker/build-with-docker.sh` (BUILD.md in that source). Put the resulting runtime-x86_64 in
+worker/toolchain/appimage/: the worker makes the game's AppImage with whatever runtime is there. Cubic.Heroes's own
+AppImage is this runtime followed by a squashfs image of the package's files; `--appimage-extract` unpacks those,
+and the same steps make it again with another runtime (tools/appimage.py in this project's source).
+
+mksquashfs is squashfs-tools 4.7.5 (https://github.com/plougher/squashfs-tools), GNU GPL 2 (squashfs-tools-GPL-2.0.txt),
+unmodified, built by this project's tools/linux_package.py (gzip and zstd compression only, statically linked against
+glibc 2.31, zstd and zlib of Debian 11): a separate program the worker runs, not linked with anything of this
+project's. Its complete source: licenses/source/squashfs-tools-4.7.5.tar.gz; the build: `make mksquashfs
+GZIP_SUPPORT=1 ZSTD_SUPPORT=1 XZ_SUPPORT=0 LZO_SUPPORT=0 LZ4_SUPPORT=0 LZMA_XZ_SUPPORT=0 XATTR_SUPPORT=0
+EXTRA_LDFLAGS=-static` in its squashfs-tools/ folder.
+"""
+
+
+def appimage_licences(lic):
+    import tarfile
+    src = os.path.join(ROOT, "build", "deps", "src", "appimage")
+    out_src = os.path.join(lic, "source")
+    os.makedirs(out_src, exist_ok=True)
+    for f in ("type2-runtime-dd6cebed.tar.gz", "fuse-3.15.0.tar.xz", "squashfuse-0.5.2.tar.gz",
+              "squashfs-tools-4.7.5.tar.gz"):
+        shutil.copy2(need(os.path.join(src, f), "tools/fetch_appimage.py"), out_src)
+
+    def member(archive, suffix):
+        with tarfile.open(os.path.join(src, archive)) as t:
+            for m in t.getmembers():
+                if m.isfile() and m.name.endswith(suffix):
+                    return t.extractfile(m).read()
+        sys.exit(f"{archive}: no {suffix}")
+    texts = {
+        "AppImage-type2-runtime-MIT.txt": member("type2-runtime-dd6cebed.tar.gz", "/LICENSE"),
+        "libfuse-LGPL-2.1.txt": member("fuse-3.15.0.tar.xz", "/LGPL2.txt"),
+        "squashfuse-BSD-2-Clause.txt": member("squashfuse-0.5.2.tar.gz", "/LICENSE"),
+        "squashfs-tools-GPL-2.0.txt": member("squashfs-tools-4.7.5.tar.gz", "/COPYING"),
+    }
+    for name, data in texts.items():
+        with open(os.path.join(lic, name), "wb") as f:
+            f.write(data)
+    for name, fname in (("zstd-BSD.txt", "zstd-LICENSE-1.5.6.txt"), ("zlib.txt", "zlib-LICENSE-1.3.1.txt"),
+                        ("mimalloc-MIT.txt", "mimalloc-LICENSE-2.1.7.txt"), ("musl-MIT.txt", "musl-COPYRIGHT-1.2.5.txt")):
+        shutil.copy2(need(os.path.join(src, fname), "tools/fetch_appimage.py"), os.path.join(lic, name))
+    with open(os.path.join(lic, "AppImage-NOTICE.txt"), "w", encoding="utf-8", newline="\n") as f:
+        f.write(APPIMAGE_NOTICE)
 
 
 def launcher(out, platform):
@@ -343,8 +442,16 @@ def bundle(platform):
     pyinstaller(platform, tmp)
     os.rename(os.path.join(tmp, APP), work)
     shutil.rmtree(tmp)
+    if platform == "linux":
+        drop_stray_openssl(work)
     print("toolchain (Zig, trimmed)", flush=True)
     zsrc = copy_zig(platform, work)
+    if platform == "linux":   # M11.4: the runtime and mksquashfs, for the player's game AppImage (offline)
+        ai = os.path.join(work, "toolchain", "appimage")
+        os.makedirs(ai)
+        for f in ("runtime-x86_64", "mksquashfs"):
+            shutil.copy2(need(os.path.join(ROOT, "build", "deps", "linux", "appimage", f),
+                              "tools/linux_package.py --steps appimage-pieces,mksquashfs"), ai)
     print("libraries, sources, tools, licences", flush=True)
     shutil.copytree(lib_dir, os.path.join(work, "lib"), ignore=shutil.ignore_patterns("src"))
     copy_sources(work, lib_dir)

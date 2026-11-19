@@ -104,7 +104,10 @@ def configure_args(platform):
     """configure's arguments: no paths in them (see tools())."""
     return ["--target-os=" + TARGET[platform][1], "--arch=x86_64", "--enable-cross-compile",
             "--cc=zcc-" + platform, "--host-cc=zcc-host", "--ar=zar", "--ranlib=zranlib", "--nm=true",
-            "--strip=true"] + CONFIGURE
+            "--strip=true"] + CONFIGURE + (
+        # no Windows version resources (avutilres.o and the rest), on any host: configure takes a windres it finds
+        # (a CI runner's MinGW one; the developer PC had none), and this build's driver compiles no .rc (M11.4)
+        ["--windres=false"] if platform == "windows" else [])
 
 
 def configure(platform, src, work):

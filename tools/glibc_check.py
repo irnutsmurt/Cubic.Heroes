@@ -15,7 +15,8 @@ import subprocess
 import sys
 
 GLIBC_BASELINE = (2, 31)   # Debian 11, Ubuntu 20.04 and newer; Zig's target x86_64-linux-gnu.2.31
-GLIBC_LIBS = {"libc.so.6", "libm.so.6", "libpthread.so.0", "libdl.so.2", "librt.so.1", "ld-linux-x86-64.so.2"}
+GLIBC_LIBS = {"libc.so.6", "libm.so.6", "libpthread.so.0", "libdl.so.2", "librt.so.1", "libutil.so.1",
+              "ld-linux-x86-64.so.2"}
 SHIPPED = {"libSDL2-2.0.so.0", "libopenal.so.1", "libavutil.so.61", "libavcodec.so.63", "libavformat.so.63"}
 NEEDED_OK = GLIBC_LIBS | SHIPPED
 
@@ -40,8 +41,9 @@ def files(args):
             yield a
 
 
-def check(path):
-    """[] when it holds, else what does not"""
+def check(path, shipped=frozenset()):
+    """[] when it holds, else what does not. shipped: the library names the package itself carries (a frozen
+    Python's own libraries beside it, for example)"""
     out = subprocess.run(["readelf", "-W", "--dynamic", "--version-info", path], capture_output=True,
                          text=True).stdout
     bad = []
@@ -52,7 +54,7 @@ def check(path):
     if "GLIBCXX_" in out or "CXXABI_" in out:
         bad.append("needs the system's libstdc++ (GLIBCXX/CXXABI): Zig's libc++ is linked statically")
     for lib in re.findall(r"\(NEEDED\)\s+Shared library: \[([^\]]+)\]", out):
-        if lib not in NEEDED_OK:
+        if lib not in NEEDED_OK and lib not in shipped:
             bad.append(f"needs {lib}, which is neither glibc's nor shipped")
     return bad, newest
 
@@ -62,9 +64,11 @@ def main(argv):
         print(__doc__)
         return 2
     failed = n = 0
-    for p in files(argv[1:]):
+    found = list(files(argv[1:]))
+    shipped = frozenset(os.path.basename(p) for p in found)   # a library the package carries is no system need
+    for p in found:
         n += 1
-        bad, newest = check(p)
+        bad, newest = check(p, shipped)
         print(f"[glibc] {p}: {'GLIBC_' + '.'.join(map(str, newest)) if newest else 'no glibc versions'}"
               + ("" if not bad else " -- " + "; ".join(bad)))
         failed += bool(bad)

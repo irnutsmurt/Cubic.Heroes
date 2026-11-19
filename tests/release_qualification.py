@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""M11.3: a local Windows release candidate qualified from its package, as a player gets it.
+"""M11.3: a local release candidate qualified from its package, as a player gets it -- Windows (M11.3) and, since
+M11.4, Linux: its tarball and its AppImage.
 
-    tests/release_qualification.py --package ZIP --disc ISO --keys KEYS [--work DIR] [--offline] [--from STEP]
-                                   [--only STEP ...] [--interrupt-after SECONDS]
+    tests/release_qualification.py --package ZIP|TAR.XZ|APPIMAGE --disc ISO --keys KEYS [--work DIR] [--offline]
+                                   [--from STEP] [--only STEP ...] [--interrupt-after SECONDS]
 
-The package (tools/make_bundle.py's zip) is unpacked into a fresh folder whose name holds spaces and non-ASCII
-letters; everything then goes through CubicHeroes's command line, as a player's launcher or script would (docs/CLI.md),
+The package (tools/make_bundle.py's zip or tar.xz, or tools/make_appimage.py's AppImage) is unpacked into a fresh
+folder whose name holds spaces and non-ASCII letters (an AppImage: copied into such a folder, its installation root
+the Cubic.Heroes folder beside it, as a player's); everything then goes through CubicHeroes's command line, as a player's launcher or script would (docs/CLI.md),
 and the worker program in the package (never this checkout's). --offline: every run with a dead proxy
 (HTTP(S)_PROXY=127.0.0.1:9 -- the update check fails as without a network; nothing else may need one). The disc image
 and the keys file are only read: their size and time (the image) and SHA-256 (the keys) checked before and after,
@@ -27,10 +29,15 @@ Steps (in order; --from STEP resumes, --only runs some):
              continues one
   rebuild    a lifting tool changed in the package: --update relifts and rebuilds into a new build, the old kept
   rollback   the worker's rollback: the first build active again (nothing rebuilt); --play again
+  gameappimage  (Linux) the player's game AppImage, made by the install, update and rollback (exports/): it starts
+             the active build, through FUSE and with --appimage-extract-and-run
+  relocate   the whole installation (the AppImage with its folder) moved to another folder: found there, the game
+             played, its game AppImage still finding it
   keys       no line of the keys file in any file of the installation
   remove     the launcher removed by its worker (remove-launcher): the installation, saves and settings kept
+             (an AppImage: not applicable -- it is a file the player deletes, never unpacked into the folder)
   reunpack   the package unpacked over the folder again (a player putting the launcher back): the installation found
-             as it was, nothing of it replaced
+             as it was, nothing of it replaced (an AppImage: not applicable, as remove)
 Results: <work>/qualification.json and a PASS/FAIL line per step.
 """
 import argparse
@@ -40,6 +47,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tarfile
 import time
 import zipfile
 
@@ -51,7 +59,9 @@ import desktop_guard  # noqa: E402
 import install_layout  # noqa: E402
 
 STEPS = ["unpack", "empty", "install", "status", "shaders", "noop", "checkup", "play", "suite", "rebuild",
-         "rollback", "keys", "remove", "reunpack"]
+         "rollback", "gameappimage", "relocate", "keys", "remove", "reunpack"]
+WIN = os.name == "nt"
+EXE = ".exe" if WIN else ""
 NAME = "Cubic H\u00e9roes RC \u00fc \u30c6\u30b9\u30c8"   # an accent and Japanese: the game must open its files by them
 
 
@@ -59,8 +69,10 @@ class Q:
     def __init__(self, o):
         self.o = o
         self.work = os.path.abspath(o.work)
-        self.root = os.path.join(self.work, NAME)
-        self.exe = os.path.join(self.root, "CubicHeroes.exe")
+        low = o.package.lower()
+        self.kind = "appimage" if low.endswith(".appimage") else "tar.xz" if low.endswith((".tar.xz", ".txz")) \
+            else "zip"
+        self.set_place(os.path.join(self.work, NAME))
         self.res_path = os.path.join(self.work, "qualification.json")
         self.res = json.load(open(self.res_path, encoding="utf-8")) if os.path.exists(self.res_path) else {}
         self.env = dict(os.environ)
@@ -72,6 +84,19 @@ class Q:
             for k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
                 self.env[k] = "http://127.0.0.1:9"
             self.env["NO_PROXY"] = self.env["no_proxy"] = ""
+
+    def set_place(self, folder):
+        """where the package is: the folder it was unpacked to (the root itself), or for an AppImage the folder holding
+        the .AppImage file and, beside it, its root"""
+        self.folder = folder
+        if self.kind == "appimage":
+            self.exe = os.path.join(folder, os.path.basename(self.o.package))
+            self.root = os.path.join(folder, "Cubic.Heroes")
+            self.worker_exe = os.path.join(self.work, "extracted", "squashfs-root", "worker", "DotHeroes-Setup")
+        else:
+            self.root = folder
+            self.exe = os.path.join(folder, "CubicHeroes" + EXE)
+            self.worker_exe = os.path.join(folder, "worker", "DotHeroes-Setup" + EXE)
 
     def save(self):
         with open(self.res_path, "w", encoding="utf-8", newline="\n") as f:
@@ -98,8 +123,7 @@ class Q:
             return code, {"_raw": (out + err)[-500:]}
 
     def worker(self, *args, timeout=3600):
-        w = os.path.join(self.root, "worker", "DotHeroes-Setup.exe")
-        r = subprocess.run([w, "--worker", *args], cwd=self.work, env=self.env, capture_output=True, timeout=timeout)
+        r = subprocess.run([self.worker_exe, "--worker", *args], cwd=self.work, env=self.env, capture_output=True, timeout=timeout)
         out = r.stdout.decode("utf-8", "replace")
         result = None
         for line in out.splitlines():
@@ -133,25 +157,51 @@ class Q:
             shutil.rmtree(self.work)
         os.makedirs(self.work)
         self.res = {}
-        with zipfile.ZipFile(self.o.package) as z:
-            names = z.namelist()
-            top = names[0].split("/")[0]
-            for n in names:
-                if not n.startswith(top + "/"):
-                    raise SystemExit(f"the package has more than one top folder ({n})")
-            z.extractall(self.work)
+        if self.kind == "appimage":
+            # the player's way: the .AppImage file in a folder of theirs; its root appears beside it (Cubic.Heroes).
+            # The worker steps (builds, rollback) run the image's own worker, unpacked once for them
+            os.makedirs(self.folder)
+            shutil.copy2(self.o.package, self.exe)
+            ex = os.path.join(self.work, "extracted")
+            os.makedirs(ex)
+            subprocess.run([self.exe, "--appimage-extract"], cwd=ex, check=True, stdout=subprocess.DEVNULL)
+            items = sorted(os.listdir(os.path.join(ex, "squashfs-root")))
+            want = sorted(install_layout.launcher_package()) + ["AppRun", "cubicheroes.desktop", "cubicheroes.png"]
+            bad = [] if set(install_layout.launcher_package()) <= set(items) <= set(want) + {".DirIcon"} and \
+                os.access(self.exe, os.X_OK) else [f"the image's top items {items}"]
+            self.record("unpack", bad, items=items, files=sum(len(f) for _, _, f in os.walk(ex)))
+            return
+        if self.kind == "zip":
+            with zipfile.ZipFile(self.o.package) as z:
+                names = z.namelist()
+                top = names[0].split("/")[0]
+                for n in names:
+                    if not n.startswith(top + "/"):
+                        raise SystemExit(f"the package has more than one top folder ({n})")
+                z.extractall(self.work)
+        else:
+            with tarfile.open(self.o.package) as t:
+                names = t.getnames()
+                top = names[0].split("/")[0]
+                for n in names:
+                    if n != top and not n.startswith(top + "/"):
+                        raise SystemExit(f"the package has more than one top folder ({n})")
+                t.extractall(self.work, filter="data")
         os.replace(os.path.join(self.work, top), self.root)
         items = sorted(os.listdir(self.root))
         want = sorted(install_layout.launcher_package())
-        bad = [] if set(items) <= set(want) and "CubicHeroes.exe" in items and "worker" in items else \
+        bad = [] if set(items) <= set(want) and "CubicHeroes" + EXE in items and "worker" in items else \
             [f"top items {items}, the package's {want}"]
+        if not WIN and not os.access(self.exe, os.X_OK):
+            bad.append("CubicHeroes is not executable (the archive lost its mode)")
         self.record("unpack", bad, items=items, files=len(names))
 
     def empty(self):
         code, st = self.status()
         bad = [] if code == 0 and st.get("installed") is False and \
             os.path.normcase(st.get("install_dir", "")) == os.path.normcase(self.root) and \
-            st.get("install_dir_from") == "the launcher's folder" else [f"{code}: {st}"]
+            st.get("install_dir_from") == ("beside the AppImage" if self.kind == "appimage" else "the launcher's folder") \
+            else [f"{code}: {st}"]
         self.record("empty", bad)
 
     def install(self):
@@ -264,7 +314,7 @@ class Q:
                     brought.append(n)
         code, out, err, _ = self.cli("--set", "DOTHEROES_DEVELOPER_MODE=1", timeout=300)
         st = json.load(open(os.path.join(self.root, "active.json"), encoding="utf-8"))
-        game = os.path.join(self.root, "builds", st["active"], "dotheroes.exe")
+        game = os.path.join(self.root, "builds", st["active"], "dotheroes" + EXE)
         r = subprocess.run([sys.executable, os.path.join(HERE, "devtools_suite.py"), "--installed", self.root,
                             "--bin", game], cwd=ROOT, env=self.env, capture_output=True, timeout=3 * 3600)
         out2 = r.stdout.decode("utf-8", "replace") + r.stderr.decode("utf-8", "replace")
@@ -326,7 +376,54 @@ class Q:
         self.record("keys", [f"key text in {found[:5]}"] if found else [], tokens=len(tokens),
                     note="the lift's and the compiler's output and the disc copy not searched (derived, large)")
 
+    def gameappimage(self):
+        """Linux: the game's own AppImage in exports/, of the active build, started through FUSE and without it"""
+        if WIN:
+            self.record("gameappimage", [], note="Windows: no AppImage")
+            return
+        img = os.path.join(self.root, "exports", "Cubic.Heroes-Game-x86_64.AppImage")
+        bad = []
+        if not os.access(img, os.X_OK):
+            self.record("gameappimage", [f"no game AppImage at {img}"])
+            return
+        code, st = self.status()
+        for how, args in (("FUSE", ["--info"]), ("extract-and-run", ["--appimage-extract-and-run", "--info"])):
+            r = subprocess.run([img, *args], cwd=self.work, env=self.env, capture_output=True, timeout=300)
+            out = r.stdout.decode("utf-8", "replace")
+            try:
+                info = json.loads([ln for ln in out.splitlines() if ln.startswith("{")][-1])
+            except (ValueError, IndexError):
+                info = {}
+            if r.returncode != 0 or info.get("build_id") != st.get("install", {}).get("active") or \
+                    info.get("layout") != "slots":
+                bad.append(f"{how}: exit {r.returncode}, {info or out[-300:]}")
+        self.record("gameappimage", bad, size_mb=round(os.path.getsize(img) / 2**20))
+
+    def relocate(self):
+        """the installation moved whole (for an AppImage, its folder with the .AppImage file and the root) to another
+        folder: found and played there; the game AppImage still finds it"""
+        old = self.folder
+        new = os.path.join(self.work, NAME + " moved \u79fb\u52d5")
+        os.replace(old, new)
+        self.set_place(new)
+        bad = []
+        code, st = self.status()
+        if code != 0 or not st.get("installed") or os.path.normcase(st.get("install_dir", "")) != os.path.normcase(self.root):
+            bad.append(f"status after the move: {code} {st}")
+        self.play("relocate-play")
+        if not self.res.get("relocate-play", {}).get("ok"):
+            bad.append("--play after the move failed")
+        if not WIN:
+            self.gameappimage()
+            if not self.res.get("gameappimage", {}).get("ok"):
+                bad.append("the game AppImage after the move failed")
+        self.record("relocate", bad, moved_to=os.path.basename(new))
+
     def remove(self):
+        if self.kind == "appimage":
+            self.record("remove", [], note="not applicable: an AppImage is a file the player deletes; nothing of it is "
+                                           "unpacked into the installation folder")
+            return
         saves0 = {k: v for k, v in tree(self.root).items() if k.startswith(("data/gamedata", "backups", "config"))}
         code, r, out = self.worker("remove-launcher", "--launcher", self.root, "--install", self.root, "--dry-run")
         plan = (r or {}).get("data", {})
@@ -355,21 +452,34 @@ class Q:
     def reunpack(self):
         """the package's items unpacked over the folder (as a player puts the launcher back): the installation's own
         files untouched, the installation found again"""
+        if self.kind == "appimage":
+            self.record("reunpack", [], note="not applicable: an AppImage is never unpacked over the installation")
+            return
         keep = tree(self.root)
         keep = {k: v for k, v in keep.items() if not k.split("/")[0] in install_layout.launcher_package()}
-        with zipfile.ZipFile(self.o.package) as z:
-            top = z.namelist()[0].split("/")[0]
-            for m in z.infolist():
-                rel = m.filename[len(top) + 1:]
-                if not rel:
-                    continue
-                dst = os.path.join(self.root, *rel.split("/"))
-                if m.is_dir():
-                    os.makedirs(dst, exist_ok=True)
-                    continue
-                os.makedirs(os.path.dirname(dst), exist_ok=True)
-                with z.open(m) as src, open(dst, "wb") as out:
-                    shutil.copyfileobj(src, out)
+        if self.kind == "tar.xz":
+            with tarfile.open(self.o.package) as t:
+                top = t.getnames()[0].split("/")[0]
+                for m in t.getmembers():
+                    rel = m.name[len(top) + 1:]
+                    if not rel:
+                        continue
+                    m.name = rel
+                    t.extract(m, self.root, filter="data")
+        else:
+            with zipfile.ZipFile(self.o.package) as z:
+                top = z.namelist()[0].split("/")[0]
+                for m in z.infolist():
+                    rel = m.filename[len(top) + 1:]
+                    if not rel:
+                        continue
+                    dst = os.path.join(self.root, *rel.split("/"))
+                    if m.is_dir():
+                        os.makedirs(dst, exist_ok=True)
+                        continue
+                    os.makedirs(os.path.dirname(dst), exist_ok=True)
+                    with z.open(m) as src, open(dst, "wb") as out:
+                        shutil.copyfileobj(src, out)
         after = tree(self.root)
         changed = sorted(k for k in keep if after.get(k) != keep[k] and not k.startswith("logs/"))
         code, st = self.status()
@@ -396,7 +506,8 @@ def main():
     ap.add_argument("--package", required=True)
     ap.add_argument("--disc", required=True)
     ap.add_argument("--keys", required=True)
-    ap.add_argument("--work", default="F:/3d dot game heroes/m113/rc")
+    ap.add_argument("--work", default=os.path.join(ROOT, "build", "qual", "rc"),
+                    help="a fresh folder for the run (default build/qual/rc; Windows' M11.3 run used F:)")
     ap.add_argument("--offline", action="store_true")
     ap.add_argument("--from", dest="start", choices=STEPS)
     ap.add_argument("--only", nargs="*", choices=STEPS)

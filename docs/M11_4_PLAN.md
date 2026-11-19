@@ -226,9 +226,9 @@ States: **VERIFIED** (implemented, evidence named), **UNVERIFIED** (implemented,
 | A13 | Graphical launcher: install from the disc, local recompilation, shader preparation | PARTIAL: headless install verified (2458 pipelines, none failed); the window: to do | section 13 |
 | A14 | Signed updates, repair and rollback; the right package per OS and architecture | PARTIAL: package kind, architecture, tar.xz staging (unit tests); from packages: P9 | section 13 |
 | A15 | Portable root: spaces, Unicode, relocation, another drive, no FUSE (tarball) | NOT DONE | P4/P9 |
-| A16 | Launcher AppImage and tarball, equivalent | NOT DONE | P5 |
-| A17 | The locally generated thin game AppImage: relocatable, regenerated on update and rollback, never distributed | NOT DONE | P5 |
-| A18 | glibc 2.31 baseline verified on actual supported distributions, not only Manjaro | NOT DONE | P5 |
+| A16 | Launcher AppImage and tarball, equivalent | PARTIAL: both built from one folder, the AppImage unpacked again identical (bytes and modes), boundary and privacy clean; the packaged qualification: running | section 18 |
+| A17 | The locally generated thin game AppImage: relocatable, regenerated on update and rollback, never distributed | UNVERIFIED: implemented; its start script's root rules unit-tested; from a packaged install: running | section 18 |
+| A18 | glibc 2.31 baseline verified on actual supported distributions, not only Manjaro | PARTIAL: every ELF of the package at GLIBC_2.30 at most (114 files); runs on other distributions: to do | section 18 |
 | A19 | Steam, Lutris and Heroic through the CLI | NOT DONE | P9 |
 | A20 | CI: Windows and Linux builds, tests, boundary and privacy checks | UNVERIFIED: written, its Linux steps run locally; first GitHub run after the push | section 14 |
 | A21 | Windows build and behaviour unbroken | PARTIAL: Windows' game compiles and links from this tree (a Zig cross-build, Windows' release configuration); behaviour: the owner's Windows PC (section 7) | section 14 |
@@ -456,3 +456,54 @@ On-screen runs (the owner's standing approval; each recorded through `tests/desk
 - **CI's second run**: the Linux job passed on GitHub (9 min 33 s: Zig, ps3recomp and its patches, the libraries,
   the runtime against the stub lift, the launcher, the command line, the unit tests, the glibc check).
 - The Windows game cross-built after these changes.
+
+## 18. P5: the Linux packages (2026-11-18) [M]
+
+**The owner's decisions (2026-11-18)**: the official AppImage type-2 runtime, prebuilt, pinned (release `20251108`,
+never "continuous"), its GPG signature verified before use, recorded in config/deps.sha256, its corresponding source
+and the LGPL relinking materials shipped; mksquashfs bundled for the player's game AppImage with its complete source;
+both AppImages made offline with nothing for the player to install; Debian 11's end of life documented with a
+security-update plan (docs/LINUX_PACKAGING.md section 7); the glibc target unchanged without discussion.
+
+- **The build environment** (tools/linux_build_env/Dockerfile): Debian 11 by digest; its packages pinned to
+  snapshot.debian.org 2026-08-01 (backports from Debian's archive -- the live mirrors had started dropping Debian 11's
+  files); OpenSSL 3.5.9 (LTS) and Python 3.12.16 built from pinned sources (Debian 11's are 1.1.1 and 3.9); PyInstaller
+  6.22.3, CMake 4.4.5, Ninja pinned. tools/linux_package.py runs the steps in it with the checkout at `/src` (a
+  neutral path: nothing built records the developer's folders) as the developer's user, from clean.
+- **The AppImage runtime** (tools/fetch_appimage.py): every file must already be pinned in config/deps.sha256 (no
+  pinning on first use); the signature verified in a throwaway keyring against the pinned fingerprint
+  570C77ACEA40C0F1B758902CBF96CCA56490F695, the key itself cross-checked against the repository at the release's
+  commit; a runtime with one byte appended was refused. What it links statically (its own build scripts at that commit):
+  libfuse 3.15.0 (LGPL-2.1, patched), squashfuse 0.5.2, zstd, zlib, mimalloc, musl -- their licences, the runtime's and
+  libfuse's and squashfuse's complete sources and the rebuild instructions in `worker/licenses/` (AppImage-NOTICE.txt).
+- **mksquashfs**: squashfs-tools 4.7.5 from its pinned source, gzip and zstd only (what the runtime reads), fully
+  static: `worker/toolchain/appimage/` with the runtime; GPL-2.0, its source shipped.
+- **tools/appimage.py**: runtime + squashfs image; tested with a path holding a space and Japanese: started through
+  FUSE and with `--appimage-extract-and-run`, the arguments and `$APPIMAGE` as given.
+- **The packages** (`python3 tools/linux_package.py`): `Cubic.Heroes-0.2.0-beta.2-linux-x86_64.tar.xz` (106 MB) and
+  `Cubic.Heroes-0.2.0-beta.2-x86_64.AppImage` (116 MB), from the same folder; the AppImage unpacked again is that folder
+  file for file (bytes and executable bits); both through the boundary check and the privacy scan.
+- **Found and fixed on the way**: the frozen worker carried **Debian 11's OpenSSL 1.1** beside its own 3.5 (PyInstaller
+  followed release_trust's `find_library("crypto")`), and its candidate order ("libcrypto.so.1.1" sorts before
+  "libcrypto.so.3") would have checked release signatures with the old one -- the newest is now tried first and the
+  Linux bundle drops 1.1 once `_ssl` is seen to link 3; **Pillow** (the Windows worker's, for the game's .ico) was
+  frozen into the Linux worker with a dozen image libraries and a libstdc++ -- excluded on Linux; Python's licence file
+  is found where a source build installs it; the Windows FFmpeg build no longer takes a CI runner's windres
+  (`--windres=false`: the developer PC had none, so the DLLs are as before).
+- **glibc**: tools/glibc_check.py over the whole package (the frozen worker's Python, OpenSSL and libraries included,
+  a library the package itself carries counting as shipped): **114 ELF files, GLIBC_2.30 at most, none outside**.
+- **The player's game AppImage** (D2; tools/game_appimage.py, tools/worker.py `refresh_game_appimage`): made after
+  every activation (install, update) and rollback, and on demand (`worker game-appimage`); the active build's program,
+  build.cfg and lib/ only; its start script finds the root by `CUBIC_INSTALL_DIR`, a `cubicheroes-root.txt` beside it,
+  the folder above `exports/` (relative: a moved root keeps working), or the root it was made in, and starts the game
+  as `--play` does; the game takes the root from `DOTHEROES_INSTALL_ROOT` only when that folder holds an installation
+  (port/main.cpp). tests/test_game_appimage.py: the four rules, a moved root, a refusal with no installation -- with
+  spaces and Japanese in every path. A failure to make it never fails the install.
+- **Shortcuts on Linux** (tools/shortcuts.py, uninstall.py, launcher/main.cpp `self_program`): Steam and the menu name
+  the `.AppImage` file in an AppImage (else `CubicHeroes`; `CubicHeroes.exe` was passed on every system); the project's
+  icon installed in the user's theme as `cubicheroes` when shortcuts are asked for; the entry written UTF-8; uninstall
+  removes the entries whose Exec is this launcher (another copy's are left) and then the icon (test_uninstall: 17).
+- **Release qualification on Linux** (tests/release_qualification.py): a `.tar.xz` or an `.AppImage` as well as
+  Windows' zip; new steps `gameappimage` and `relocate`; `remove`/`reunpack` recorded as not applicable to an AppImage
+  (a file the player replaces, never unpacked into the root).
+- Windows: the game cross-built and the launcher compiled for Windows from this tree.

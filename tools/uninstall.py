@@ -298,6 +298,11 @@ def remove_shortcuts(exe, roots=None, steam_running=None, links=True):
                 done.append(folder)
             except Exception:   # noqa: BLE001 -- a shortcut that can't be read is left as it is
                 pass
+    if links and os.name != "nt":   # M11.4: the menu and desktop entries (and the icon) made for this launcher
+        try:
+            done += shortcuts.remove_linux_shortcuts(exe)
+        except OSError:   # an entry that can't be removed is left as it is
+            pass
     targets = _steam_lists(roots)
     running = shortcuts.steam_running() if steam_running is None else steam_running
     if not targets or running:

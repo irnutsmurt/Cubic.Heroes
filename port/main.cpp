@@ -936,6 +936,12 @@ static bool file_exists(const std::string& p)
 
 static std::string install_root(const std::string& dir, bool* slots)
 {
+    /* M11.4: the player's game AppImage runs the program from its read-only image, with nothing of the installation
+     * above it: its start script names the root (tools/game_appimage.py) -- taken only when it holds an installation */
+    if (const char* r = getenv("DOTHEROES_INSTALL_ROOT"); r && *r && file_exists(std::string(r) + "/active.json")) {
+        *slots = true;
+        return std::filesystem::path(r).lexically_normal().generic_string();
+    }
     for (const char* up : { "/..", "/../.." }) {
         const std::string r = std::filesystem::path(dir + up).lexically_normal().generic_string();
         if (file_exists(r + "/active.json")) { *slots = true; return r; }

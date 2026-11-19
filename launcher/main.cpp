@@ -1522,6 +1522,18 @@ static std::string game_exe(const std::string& root)
     return path_str(u8path(root) / "game" / name);
 }
 
+// the program shortcuts, Steam and Return to Launcher name (M11.4): CubicHeroes.exe on Windows; on Linux the .AppImage
+// file when it runs from one ($APPIMAGE -- the mounted program is gone once it ends), else CubicHeroes
+static std::string self_program()
+{
+#ifdef _WIN32
+    return path_str(u8path(g_exe_dir) / "CubicHeroes.exe");
+#else
+    const char* appimage = getenv("APPIMAGE");
+    return appimage && *appimage ? std::string(appimage) : path_str(u8path(g_exe_dir) / "CubicHeroes");
+#endif
+}
+
 static void start_game_now()
 {
     if (g_nav_test) { g_nav_event = "  [the game would start: not during a scripted controller test]"; return; }
@@ -1554,9 +1566,7 @@ static void start_game_now()
     {
         std::error_code ec;
         fs::remove(u8path(install_dir()) / "logs" / "session-end", ec);
-        const char* appimage = getenv("APPIMAGE");
-        const std::string self = appimage && *appimage ? std::string(appimage) : path_str(u8path(g_exe_dir) / "CubicHeroes");
-        setenv("CUBIC_LAUNCHER", self.c_str(), 1);
+        setenv("CUBIC_LAUNCHER", self_program().c_str(), 1);
         setenv("CUBIC_LAUNCHER_PID", std::to_string((long)getpid()).c_str(), 1);
     }
     const pid_t pid = fork();
@@ -2265,7 +2275,7 @@ static void page_settings()
     if (big_button("Add to Steam", ImVec2(S(260), 0)))
         ask("Add the launcher to Steam?", "It appears in your Steam library (as a non-Steam game) and opens this launcher. "
             "Close Steam first: it rewrites its library when it exits.", "Add it", false, [] {
-            run("shortcuts", { "--exe", path_str(u8path(g_exe_dir) / "CubicHeroes.exe"), "--steam" }, "", false,
+            run("shortcuts", { "--exe", self_program(), "--steam" }, "", false,
                 [](const json::Value& r) {
                     if (r["ok"].truthy()) g_msg = { true, "Added to Steam", "Start Steam to see it in your library.", "", false, false };
                     else show_result_error(r, "It wasn't added to Steam");
@@ -2273,7 +2283,7 @@ static void page_settings()
         });
     same_line_fits(S(300));
     if (big_button("Start-menu shortcut", ImVec2(S(300), 0)))
-        run("shortcuts", { "--exe", path_str(u8path(g_exe_dir) / "CubicHeroes.exe") }, "", false, [](const json::Value& r) {
+        run("shortcuts", { "--exe", self_program() }, "", false, [](const json::Value& r) {
             if (r["ok"].truthy()) g_msg = { true, "Shortcut made", "The launcher is in your Start menu.", "", false, false };
             else show_result_error(r, "The shortcut wasn't made");
         });
@@ -2695,7 +2705,7 @@ static void overlay_uninstall()
             ImGui::CloseCurrentPopup();
             if (!parts.empty())
                 run("uninstall", { "--install", install_dir(), "--confirm", "--parts", parts, "--exe",
-                                   path_str(u8path(g_exe_dir) / "CubicHeroes.exe") },
+                                   self_program() },
                     "Uninstalling", true, [](const json::Value& r) {
                         if (r["data"]["removed"]["shortcuts"]["steam_later"].truthy()) {   // Steam ran: once it's closed
                             g_prefs.steam_cleanup = true;
@@ -2969,7 +2979,7 @@ static void frame()
         if (!asking && now >= next) {
             asking = true;
             next = now + 20;
-            run("shortcuts", { "--exe", path_str(u8path(g_exe_dir) / "CubicHeroes.exe"), "--remove-steam" }, "", false,
+            run("shortcuts", { "--exe", self_program(), "--remove-steam" }, "", false,
                 [](const json::Value& r) {
                     asking = false;
                     if (!r["data"]["later"].truthy()) {   // removed, or nothing left to remove (an error isn't retried)

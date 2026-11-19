@@ -671,6 +671,7 @@ def build_slot(lay, prog, source=None, keys=None, elf=None, full=False, resume=F
         before = lay.read_active()["active"] if os.path.exists(lay.active_json) else None
         bid = lay.promote(staging, info)
         lay.activate(bid)
+        refresh_game_appimage(lay, prog.log)   # M11.4: the player's game AppImage follows the active build
         prog.progress("activate", 1.0, STEP_NAMES_M9["activate"])
         return bid, lay.build_info(bid), bid != before
     except BaseException:
@@ -1096,10 +1097,35 @@ def cmd_builds(a, ev, control):
                        for bid, info in sorted(lay.builds().items())]}
 
 
+def refresh_game_appimage(lay, log=print):
+    """M11.4 (the owner's D2): the player's game AppImage (<root>/exports/) made again from the active build -- after
+    an install, an update or a rollback. Linux only. Never fails the operation that changed the build: the game is
+    installed either way; a failure is logged and returned."""
+    if os.name == "nt":
+        return {"made": False, "why": "Windows"}
+    try:
+        import game_appimage
+        return {"made": True, "path": game_appimage.make(lay, log)}
+    except Exception as e:   # noqa: BLE001 -- the build changed all the same
+        log(f"the game's AppImage was not made again: {e}")
+        return {"made": False, "why": str(e)}
+
+
 def cmd_rollback(a, ev, control):
     lay = _layout(a)
     st = lay.rollback(a.to)
-    return {"active": st["active"], "previous": st["previous"]}
+    ai = refresh_game_appimage(lay)
+    return {"active": st["active"], "previous": st["previous"], "game_appimage": ai}
+
+
+def cmd_game_appimage(a, ev, control):
+    """the player's game AppImage made again from the active build (Linux; normally done by install, update and
+    rollback themselves)"""
+    lay = _layout(a)
+    if os.name == "nt":
+        raise pipeline.SetupError("The game's AppImage is Linux's.", "unsupported")
+    import game_appimage
+    return {"path": game_appimage.make(lay)}
 
 
 def cmd_retention(a, ev, control):
@@ -1456,7 +1482,7 @@ def cmd_selftest(a, ev, control):
 
 COMMANDS = {"version": cmd_version, "probe-disc": cmd_probe_disc, "probe-keys": cmd_probe_keys,
             "space": cmd_space, "info": cmd_info, "install": cmd_install, "update": cmd_update,
-            "migrate": cmd_migrate, "builds": cmd_builds, "rollback": cmd_rollback, "retention": cmd_retention,
+            "migrate": cmd_migrate, "builds": cmd_builds, "rollback": cmd_rollback, "game-appimage": cmd_game_appimage, "retention": cmd_retention,
             "repair-link": cmd_repair_link, "saves": cmd_saves, "prepare": cmd_prepare,
             "check-update": cmd_check_update, "download-update": cmd_download_update,
             "stage-launcher": cmd_stage_launcher, "swap-launcher": cmd_swap_launcher, "settings": cmd_settings,
@@ -1531,7 +1557,7 @@ def parser():
 
 REQUIRED = {"probe-disc": ("disc",), "probe-keys": ("disc", "keys"), "space": ("install",), "info": ("install",),
             "install": ("disc", "keys", "install"), "update": ("install",), "migrate": ("install",),
-            "builds": ("install",), "rollback": ("install",), "retention": ("install", "keep"),
+            "builds": ("install",), "rollback": ("install",), "game-appimage": ("install",), "retention": ("install", "keep"),
             "repair-link": ("install",), "saves": ("install",), "prepare": ("install",), "uninstall": ("install",),
             "download-update": ("install",), "stage-launcher": ("package", "launcher"),
             "swap-launcher": ("launcher", "start"), "settings": ("install",), "diagnostics": ("install", "out"),
