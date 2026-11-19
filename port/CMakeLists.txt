@@ -501,15 +501,23 @@ if(DOTHEROES_NATIVE_RELEASE)
     # Bare only where their assumptions are established (section 5.3): the
     # whole guest space and a guard reserved, pages committed zero-filled on
     # first touch (port/main.cpp's commit handler), x86-64's scalar loads.
-    # Elsewhere -- Linux's mapping is another mechanism, not yet tested --
-    # the loads stay checked.
+    # Linux x86-64 (M11.4, docs/M11_4_PLAN.md section 12): one read-write
+    # MAP_NORESERVE mapping, untouched pages read zero; --memtest established it
+    # there and the runtime checks the mapping at every start. Elsewhere the
+    # loads stay checked.
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|x86_64|X86_64|amd64)$" AND
+       (WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux"))
+        set(_dotheroes_x64_space ON)
+    else()
+        set(_dotheroes_x64_space OFF)
+    endif()
     if(DOTHEROES_PPU_CHECKED_LOADS)
         message(STATUS "Lifted loads:    checked (DOTHEROES_PPU_CHECKED_LOADS)")
-    elseif(WIN32 AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|x86_64|X86_64|amd64)$")
+    elseif(_dotheroes_x64_space)
         target_compile_definitions(${PROJECT_NAME} PRIVATE PPU_BARE_LOADS=1)
         message(STATUS "Lifted loads:    bare (PPU_BARE_LOADS; dotheroes --memtest tests what they rely on)")
     else()
-        message(STATUS "Lifted loads:    checked (the bare loads are established on Windows x86-64 only)")
+        message(STATUS "Lifted loads:    checked (the bare loads are established on Windows and Linux x86-64 only)")
     endif()
     # The guest stores (docs/NATIVE_R8.md section 5.4). checked: as R7 (the
     # range and SPU reservation tests, then an aligned atomic store or a
@@ -522,7 +530,7 @@ if(DOTHEROES_NATIVE_RELEASE)
     # the runtime makes one fatal (spu_coh_forbid at start). The check modes
     # that run lifted SPU code beside the native (DOTHEROES_NATIVE_WATER=check
     # ...) need a comparison build: -DDOTHEROES_PPU_STORES=mov.
-    if(WIN32 AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|x86_64|X86_64|amd64)$")
+    if(_dotheroes_x64_space)
         if(DOTHEROES_NATIVE_RELEASE)
             set(_stores_default mov-nospu)
         else()
@@ -534,9 +542,8 @@ if(DOTHEROES_NATIVE_RELEASE)
     set(DOTHEROES_PPU_STORES "${_stores_default}" CACHE STRING
         "The lifted code's guest stores: checked, mov, mov-nospu, nocoh-measure, bare-measure")
     set_property(CACHE DOTHEROES_PPU_STORES PROPERTY STRINGS checked mov mov-nospu nocoh-measure bare-measure)
-    if(NOT DOTHEROES_PPU_STORES STREQUAL "checked" AND
-       NOT (WIN32 AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|x86_64|X86_64|amd64)$"))
-        message(FATAL_ERROR "DOTHEROES_PPU_STORES=${DOTHEROES_PPU_STORES} is established on Windows x86-64 only")
+    if(NOT DOTHEROES_PPU_STORES STREQUAL "checked" AND NOT _dotheroes_x64_space)
+        message(FATAL_ERROR "DOTHEROES_PPU_STORES=${DOTHEROES_PPU_STORES} is established on Windows and Linux x86-64 only")
     endif()
     if(DOTHEROES_PPU_STORES STREQUAL "mov")
         target_compile_definitions(${PROJECT_NAME} PRIVATE PPU_STORE_MOV=1)

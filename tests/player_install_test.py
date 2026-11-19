@@ -138,9 +138,9 @@ def stage_fresh():
     gb = zig_build.game_defines(lib)
     check("fresh", gb and any(d.startswith("-DDOTHEROES_NATIVE_RELEASE") for d in gb),
           f"the prebuilt parts are the native release ({os.path.join(lib, zig_build.GAME_BUILD)})")
-    if os.name == "nt":   # M6's release on Windows (zig_build.release_cmake): what rel48 and later were tested as
-        check("fresh", gb and "-DPPU_STORES_NO_SPU_COH=1" in gb and "-DDOTHEROES_NO_LIFTED_SPU=1" in gb,
-              "the prebuilt parts are M6's release: the stores without the SPU reservation test, no lifted SPU program")
+    # M6's release (zig_build.release_cmake), what rel48 and later were tested as -- Linux's too since M11.4 (D1)
+    check("fresh", gb and "-DPPU_STORES_NO_SPU_COH=1" in gb and "-DDOTHEROES_NO_LIFTED_SPU=1" in gb,
+          "the prebuilt parts are M6's release: the stores without the SPU reservation test, no lifted SPU program")
     if failed:
         return
     if os.path.isdir(DIR):

@@ -198,13 +198,11 @@ RELEASE_CMAKE = ["-DDOTHEROES_NATIVE_RELEASE=ON"]
 def release_cmake(platform):
     """The native release's configuration for build_prebuilt, every choice said explicitly -- CMake keeps what a build
     folder was configured with, so a default changed since (M6's) never reaches a folder configured before it:
-    Windows x86-64, M6's stores without the SPU reservation test and no lifted SPU program (rel48 on); Linux, the
-    checked stores with the lifted SPU programs (M6 measured Windows; Linux's run-time validation is M11's);
-    everywhere, cellAudio retired (M8.4: no host audio output)."""
-    common = RELEASE_CMAKE + ["-DDOTHEROES_CELL_AUDIO_OUTPUT=OFF"]
-    if platform == "windows":
-        return common + ["-DDOTHEROES_PPU_STORES=mov-nospu", "-DDOTHEROES_LIFTED_SPU=OFF"]
-    return common + ["-DDOTHEROES_PPU_STORES=checked", "-DDOTHEROES_LIFTED_SPU=ON"]
+    the same on Windows and Linux x86-64 (the owner's D1, M11.4: one native runtime architecture): M6's stores without
+    the SPU reservation test, no lifted SPU program linked (rel48 on), cellAudio retired (M8.4: no host audio
+    output). The checked stores stay a developer's diagnostic build (DOTHEROES_PPU_STORES=checked), never a release."""
+    return RELEASE_CMAKE + ["-DDOTHEROES_CELL_AUDIO_OUTPUT=OFF", "-DDOTHEROES_PPU_STORES=mov-nospu",
+                            "-DDOTHEROES_LIFTED_SPU=OFF"]
 # CMake's per-file definitions of the game's sources that are not the build's:
 # main.cpp's development diagnostics (set only when they are on)
 _NOT_GAME_WIDE = ("DOTHEROES_DEV_DIAGNOSTICS",)

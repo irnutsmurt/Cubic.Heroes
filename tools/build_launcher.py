@@ -65,7 +65,11 @@ def main():
         if os.path.exists(out) and os.path.getmtime(out) > max(os.path.getmtime(src), *(
                 os.path.getmtime(os.path.join(ROOT, "launcher", h)) for h in ("json.h", "worker_client.h", "cli.h"))):
             return src, 0, ""
-        r = subprocess.run([zig, "c++", "-target", zig_build.TARGETS[platform], "-c", *flags, src, "-o", out],
+        # Linux: ImGui's SDL2 backend includes SDL_syswm.h, which includes X11's headers (SDL2 is built with its X11
+        # backend); the system's headers after Zig's own, as tools/build_deps.py builds SDL2 (headers only, nothing
+        # of them linked)
+        host = ["-idirafter", "/usr/include"] if platform == "linux" and src.endswith("imgui_impl_sdl2.cpp") else []
+        r = subprocess.run([zig, "c++", "-target", zig_build.TARGETS[platform], "-c", *flags, *host, src, "-o", out],
                            capture_output=True, text=True, stdin=subprocess.DEVNULL)
         return src, r.returncode, r.stderr
 

@@ -9,7 +9,8 @@ Evidence marks as in the other plans: [C] read in the code, [M] measured, [I] in
 
 - **Stage** (2026-11-18): **P2 -- the first native Linux build boots and plays offscreen** (section 11): the title,
   the attract demo with its movies, the overworld, the desert and a dungeon drawn by the native renderer on RADV;
-  `--memtest` 628/628 on Linux. Next: the release configuration (D1) on Linux.
+  `--memtest` 628/628 on Linux. **D1 done** (section 12): the Linux build in Windows' release configuration boots
+  strict-clean with no PS3 SPU machinery used. Next: the prebuilt library, the launcher.
 - **Blocked on the owner**: pushing runtime patches 0170+ -- `.git/push-guard.local` (written this session) lists the
   commit identity's name, which every patch's `From:` header carries (asked 2026-11-18).
 - P1 done -- the desktop guard enforced on Linux (section 9); the unit tests run on Linux
@@ -209,7 +210,7 @@ States: **VERIFIED** (implemented, evidence named), **UNVERIFIED** (implemented,
 | A1 | Privacy configuration and git safeguards active on Linux | VERIFIED | section 2 |
 | A2 | The desktop guard enforced on Linux (X11 and Wayland) | VERIFIED (mechanism); runners' Linux kill paths: P4 | section 9 |
 | A3 | Native Linux dev build boots and plays (offscreen) | PARTIAL: boots to the title and the attract demo, movies decoded; play from a save not yet | section 11 |
-| A4 | Linux release configuration as Windows' (D1: no lifted SPU in the release) | NOT DONE | P3 |
+| A4 | Linux release configuration as Windows' (D1: no lifted SPU in the release) | VERIFIED at boot (--memtest 601/601; the census all zero); longer play: P8 | section 12 |
 | A5 | Release crash record and hang report on Linux | NOT DONE | P3 |
 | A6 | Audio through OpenAL Soft with the system's server; device change recovered | NOT DONE | P3 |
 | A7 | Cinematics through FFmpeg | NOT DONE | P2/P8 |
@@ -293,3 +294,23 @@ First run on Linux (Python 3.14): 17 files, 224 tests. Results and actions:
   pictures of the title, the overworld (water, shadows), the desert (lava) and a dungeon (lights), the HUD and the
   prompts, as on Windows by eye. Five pipelines built in play (no preparation yet); two long frames (765 ms, 110 ms)
   -- to look at under P7, after correctness.
+
+## 12. D1: Linux in Windows' release configuration (2026-11-18) [M]
+
+What kept Linux on the checked stores and loads was not a Windows facility but where the R8 assumptions had been
+**tested** (docs/NATIVE_R8.md section 5.3: "Linux's mapping is another mechanism, not yet tested"). With
+`--memtest` passing on Linux (section 11), the gate is opened to Linux x86-64:
+- port/CMakeLists.txt: `_dotheroes_x64_space` = x86-64 and (Windows or Linux); the bare loads, the stores' default
+  (`mov-nospu` in a native release) and the refusal of non-`checked` stores elsewhere follow it. Windows' result is
+  the same as before.
+- port/main.cpp `bare_loads_gate`: the `#error` off Windows replaced by the Linux check at every start
+  (`dotheroes_guest_space_check`, a zero guard), fatal if it fails.
+- tools/zig_build.py `release_cmake`: one configuration for both -- `mov-nospu`, `DOTHEROES_LIFTED_SPU=OFF`,
+  cellAudio off. `checked` remains a developer's diagnostic build (the owner's D1). tests/player_install_test.py's
+  check of the prebuilt's configuration now applies on both systems.
+
+Evidence: build/linux/rel1 (configure: "Lifted loads: bare", "Lifted stores: mov-nospu", "Lifted SPU: not linked",
+"SPU interpreter: none", the water and waver tasks native): built in 799 s; `--memtest` 601 checks, 0 failed; the
+boot (90 s offscreen, strict): exit 0, no strict violation, 0 unresolved NIDs, the title movie 961 frames none late,
+`[census] spu_atomic 0 spu_watch 0 ppu_coh_store 0 spu_dma 0 spu_mailbox 0 spu_group 0 spu_overlay 0 spurs_instance 0
+spurs_task 0 native_decline 0 cell_audio 0`, no frame over 100 ms; pictures as the checked build's.
