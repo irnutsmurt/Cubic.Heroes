@@ -244,9 +244,9 @@ def dist_files(sites, dist, name):
 
 
 def python_runtime_licences(lic, platform):
-    """the worker's own runtime, as PyInstaller packs it: Python's licence (with the notices of what its build
-    carries: OpenSSL, libffi, zlib, bzip2, ...), pycryptodome's, and PyInstaller's (its bootloader's exception) --
-    from the Python the app is made with (M11.3's licence audit)"""
+    """the worker's own runtime, as PyInstaller packs it: Python's licence (on Windows with the notices of what its
+    build carries: OpenSSL, libffi, zlib, bzip2, ...; elsewhere those notices separately, below), pycryptodome's, and
+    PyInstaller's (its bootloader's exception) -- from the Python the app is made with (M11.3's licence audit)"""
     if platform == "windows" and os.name != "nt":   # made under Wine
         base = os.path.join(ROOT, "build", "wine", "drive_c", "Python314")
         sites = [os.path.join(base, "Lib", "site-packages")]
@@ -262,6 +262,19 @@ def python_runtime_licences(lic, platform):
         "pycryptodome.txt": dist_files(sites, "pycryptodome*", "LICENSE*"),
         "PyInstaller.txt": dist_files(sites, "pyinstaller-*", "COPYING*"),
     }
+    if platform != "windows":
+        # M11.4: a Python built from source (tools/linux_build_env) installs only Python's own licence -- not, as the
+        # Windows installer's LICENSE.txt does, the notices of what it carries. The worker ships OpenSSL (built here,
+        # Apache-2.0), the software CPython incorporates (expat, libmpdec, HACL*...: Doc/license.rst), and Debian 11's
+        # libffi, bzip2 and xz libraries, which PyInstaller packs beside it (their copyright files)
+        kept = os.path.join(base, "licenses")
+        wanted.update({
+            "OpenSSL-Apache-2.0.txt": [os.path.join(kept, "OpenSSL-LICENSE.txt")],
+            "Python-incorporated-software.txt": [os.path.join(kept, "Python-license.rst")],
+            "libffi-MIT.txt": sorted(glob.glob("/usr/share/doc/libffi*/copyright")),
+            "bzip2.txt": ["/usr/share/doc/libbz2-1.0/copyright"],
+            "xz-liblzma.txt": ["/usr/share/doc/liblzma5/copyright"],
+        })
     for name, paths in wanted.items():
         for path in paths:
             if os.path.isfile(path):

@@ -234,7 +234,7 @@ States: **VERIFIED** (implemented, evidence named), **UNVERIFIED** (implemented,
 | A19 | Steam, Lutris and Heroic through the CLI | NOT DONE | P9 |
 | A20 | CI: Windows and Linux builds, tests, boundary and privacy checks | VERIFIED: run 44450410663 -- Linux 13m16s, Windows 22m46s, boundary and privacy, all pass | section 19 |
 | A21 | Windows build and behaviour unbroken | PARTIAL: Windows' game compiles and links from this tree (a Zig cross-build, Windows' release configuration); behaviour: the owner's Windows PC (section 7) | section 14 |
-| A22 | AMD rendering matches the Windows references; validation layers clean | PARTIAL: the five RPCS3 reference scenes run on Linux and look like RPCS3's; 1 of 5 within Windows' accepted figures -- the rest a stable, small difference (section 26) not yet separated into AMD's and the code's: a Windows run of the same build asked of the owner; validation layers: to do | section 26 |
+| A22 | AMD rendering matches the Windows references; validation layers clean | PARTIAL: validation layers clean (0 errors, section 27); the five scenes look like RPCS3's, 1 of 5 within Windows' accepted figures; the rest separated (section 33): the shadow map's last steps D32's, the reflections, the corridor's spread brightening and the editor's lines AMD/RADV's; no change before beta.3 recommended -- the owner's decision | sections 26, 27, 33 |
 | A23 | Performance measured and reported (target 60 fps) | PARTIAL: 60 fps held -- the castle-front route 540p-1080p (section 24), the river fight and the seven boss fights with no frame over 25 ms (section 27); dungeon exploration and the 540p spike's repeat: to do | sections 24, 27 |
 | A24 | 166 maps, bosses, gameplay, audio, saves on Linux | PARTIAL: the 166-map sweep passed (207 of 207 pipelines prepared, section 25); the developer-tools suite 16/16 -- a guardian fought to its defeat, the ending to the credits, saves across processes (section 27); the seven boss fights; audio in play, the player's own saves: to do | sections 25, 27 |
 | A25 | Release qualification from the Linux packages | NOT DONE | P9 |
@@ -854,3 +854,59 @@ no upstream issue or pull request is filed on the owner's behalf; no cleanup of 
 docs/LINUX_PACKAGING.md ("Without FUSE") and the packages' README.txt recommend the tarball where FUSE is missing and
 describe the leftover; the runtime is reevaluated at each dependency update (docs/LINUX_PACKAGING.md section 7's
 table). Not a blocker for the Linux beta.
+
+## 33. AMD against NVIDIA D24 and D32: the reference scenes separated (2026-11-19) [M, I]
+
+Windows' runs of a05cda3 (RTX 3070, driver 616.92; tests/rpcs3_reference.py as committed, thresholds unchanged; each
+scene D24, forced D32 -- DOTHEROES_PPFX_DEPTH_D32=1 --, D24 again, and the beta.2-era build): every scene within the
+accepted figures with D24; the beta.2-era build the same. Their report and pictures stay local (build/evidence/
+windows-ref: game output, never committed). Set against this machine's (sections 26, 30):
+
+| Difference on AMD | NVIDIA D24 | NVIDIA D32 | Attributed to |
+|---|---|---|---|
+| king: the shadow map 59% within two 2^-24 steps (mean 2.8e-6) | 100% | 58.6%, **mean 0.1009**: 37.7% of texels > 0.01 farther, the nearest depth 0.578 against 0.474 | **D32**, at two magnitudes: NVIDIA's float bias pushes casters far back; RADV's stays bias-sized |
+| corridor: the lit scene ~0.005 brighter, spread over the walls and pillars on both sides (scene far 28%) | within | one large connected region unshadowed (the right-hand wall, top right to bottom right), scene mean 0.023, far 17.9% | **not the same defect** [M: the pictures]: NVIDIA's D32 loses a whole caster; AMD's difference has no such region. AMD's: **AMD/RADV**, with the reflection below [I] |
+| corridor: the reflection 2.0/1.0/2.8 | within | within (0.08) | **AMD/RADV** |
+| entry hall: the reflection 1.4/0.7/1.8, combined far 17% | within | within | **AMD/RADV** |
+| editor: the grid lines (blue mean 1.1, 0.19% of pixels) | within | within | **AMD/RADV**: non-strict lines (strictLines false) |
+
+**Ruled out on AMD** (sections 26, 30): reduced precision (no RelaxedPrecision in any module), the shadow comparison's
+reference (the translator compares in the shader with `saturate(coordinate.z)`: the same for unorm and float
+formats), the bias (patches/experiments/m11_4-depth-bias-control: the shadow map's mean 2.8e-6 -> 6.7e-7, the corridor
+and entry hall unchanged), the code between beta.2 and a05cda3 (NVIDIA: no rendering change).
+
+**The depth-bias experiment's relevance**: it is the mechanism for NVIDIA's large D32 error (Vulkan's float bias
+r = 2^(e-23), e of the primitive's largest depth, which passes 1 under the game's depth clamp; the exact 2^-24
+representation replaces it) -- but D32 is used on NVIDIA only when forced, so no NVIDIA player meets it. On AMD (every
+AMD GPU lacks D24_UNORM_S8 in Vulkan: desktop Radeon and the Steam Deck) it reduces a small error; it does not touch
+what is visibly different there. Untested on NVIDIA with D32: the one run that would show whether it closes NVIDIA's
+large error (the patch, `PS3RECOMP_VK_GPL=1 DOTHEROES_GPL=0`, DOTHEROES_PPFX_DEPTH_D32=1).
+
+**For parity**:
+1. A device using D32 (AMD) is safe from NVIDIA's large error, by RADV's bias; parity of the shadow map's last steps
+   would need the exact representation (VK_EXT_depth_bias_control) -- a Vulkan 1.1 instance on every system: a shared
+   change.
+2. The editor's lines on non-strict devices: rectangular lines (VK_EXT_line_rasterization) -- the same instance
+   requirement.
+3. The AMD/RADV reflection and the corridor's spread brightening: cause not found yet -- the r565 floor reflection's
+   pass (its sampling and filtering, the reflected scene's depth clamp on RADV) to be compared on AMD alone, pass by
+   pass, with the corridor's lit scene; no fix proposed until a cause is shown.
+
+**Before beta.3**: not recommended. The visible result on AMD matches RPCS3 to the eye in all five scenes (faint,
+spread differences; nothing missing or misplaced), NVIDIA's default (D24) is within every accepted figure, and items
+1-2 change every system's Vulkan start (the instance version), which needs the Windows regression review first.
+Proposed for after the beta: the Windows run of the bias patch with D32 (no change made: evidence only), then items
+1-2 as one shared change behind that review, and item 3's investigation on AMD. The thresholds stay as they are: the
+AMD scenes stay "over" in the record until the causes are fixed or understood.
+
+## 34. The packages' licence audit (2026-11-19) [M]
+
+tests/package_license_audit.py (new): every shared library, program and static library in a Linux package matched to
+its component, each component to the licence texts and (LGPL/GPL) corresponding sources it must carry; anything
+unaccounted for fails. On the packages built before: **5 findings** -- the worker's Python carries OpenSSL 3.5
+(Apache-2.0), libffi (MIT), bzip2, xz's liblzma, and in CPython itself expat, libmpdec and HACL*, whose notices were
+missing (make_bundle took Python's licence to carry them, which the Windows installer's does and a Python built from
+source does not). Fixed: tools/linux_build_env keeps OpenSSL's LICENSE.txt and CPython's Doc/license.rst; make_bundle
+ships them with Debian 11's copyright files of libffi, bzip2 and xz, and refuses to package without them. The final
+packages: folder, tar.xz and AppImage each **121 binaries in 16 components, 0 findings**; boundary and privacy checks
+pass on all three (tar.xz ac686c74..., AppImage 7c557d65...).

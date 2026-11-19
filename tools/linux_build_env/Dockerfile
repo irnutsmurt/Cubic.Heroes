@@ -40,7 +40,8 @@ RUN printf '%s\n' \
  && apt-get -o Acquire::Retries=5 install -y --no-install-recommends -t bullseye-backports libpipewire-0.3-dev libspa-0.2-dev \
  && rm -rf /var/lib/apt/lists/*
 
-# OpenSSL 3.5 (LTS; Apache-2.0), shared, into /opt/python (beside the Python that uses it)
+# OpenSSL 3.5 (LTS; Apache-2.0), shared, into /opt/python (beside the Python that uses it); its licence kept for the
+# packages (M11.4: tools/make_bundle.py python_runtime_licences), as Python's notices of the software it incorporates
 RUN curl -fsSL -o /tmp/openssl.tar.gz \
       "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz" \
  && echo "${OPENSSL_SHA256}  /tmp/openssl.tar.gz" | sha256sum -c - \
@@ -49,6 +50,7 @@ RUN curl -fsSL -o /tmp/openssl.tar.gz \
  && ./Configure --prefix=/opt/python --libdir=lib --openssldir=/opt/python/ssl shared no-tests \
       '-Wl,-rpath,$$ORIGIN' \
  && make -j"$(nproc)" && make install_sw install_ssldirs \
+ && mkdir -p /opt/python/licenses && cp LICENSE.txt /opt/python/licenses/OpenSSL-LICENSE.txt \
  && cd / && rm -rf /tmp/openssl*
 
 # Python, shared (PyInstaller packs libpython), linked against that OpenSSL
@@ -59,6 +61,7 @@ RUN curl -fsSL -o /tmp/python.tar.xz "https://www.python.org/ftp/python/${PYTHON
  && ./configure --prefix=/opt/python --enable-shared --with-openssl=/opt/python --with-openssl-rpath=auto \
       --without-ensurepip LDFLAGS='-Wl,-rpath,/opt/python/lib' \
  && make -j"$(nproc)" && make install \
+ && cp Doc/license.rst /opt/python/licenses/Python-license.rst \
  && cd / && rm -rf /tmp/Python* \
  && /opt/python/bin/python3 -c "import ssl, ctypes, lzma, bz2, zlib, sqlite3; print(ssl.OPENSSL_VERSION)"
 
