@@ -215,8 +215,8 @@ States: **VERIFIED** (implemented, evidence named), **UNVERIFIED** (implemented,
 | A2 | The desktop guard enforced on Linux (X11 and Wayland) | VERIFIED (mechanism); runners' Linux kill paths: P4 | section 9 |
 | A3 | Native Linux dev build boots and plays (offscreen) | PARTIAL: boots to the title and the attract demo, movies decoded; play from a save not yet | section 11 |
 | A4 | Linux release configuration as Windows' (D1: no lifted SPU in the release) | VERIFIED at boot (--memtest 601/601; the census all zero); longer play: P8 | section 12 |
-| A5 | Release crash record and hang report on Linux | NOT DONE | P3 |
-| A6 | Audio through OpenAL Soft with the system's server; device change recovered | NOT DONE | P3 |
+| A5 | Release crash record and hang report on Linux | PARTIAL: the release crash record and the developer crash report and thread dump verified; a real hang's detection (shared code): P8 | section 15 |
+| A6 | Audio through OpenAL Soft with the system's server; device change recovered | PARTIAL: PipeWire output with events and reopen; the audio suite (device losses included) 230/230; a real default-device change: P8 | section 15 |
 | A7 | Cinematics through FFmpeg | NOT DONE | P2/P8 |
 | A8 | X11 and Wayland: windowed, borderless, fullscreen; the desktop's mode never changed | NOT DONE | P8 |
 | A9 | Rendering resolution presets and custom; VSync; frame limits | NOT DONE | P8 |
@@ -380,3 +380,38 @@ tools/r8_release_build.sh`, the R8 lift of section 11, the developer diagnostics
 "Lifted stores: mov-nospu", "Lifted SPU: not linked" -- Windows' configuration unchanged -- and `dotheroes.exe` (PE32+
 x86-64, 87 MB) linked in 717 s, importing only Windows' own DLLs, the UCRT and SDL2.dll. **A compile and link check
 only**: Windows' behaviour is checked on the owner's Windows PC (section 7).
+
+## 15. P3: runtime parity, first part (2026-11-18) [M]
+
+- **The write watch on Linux** (R5's optimisation; Windows: `MEM_WRITE_WATCH` + `GetWriteWatch(RESET)`). The guest
+  space is registered with userfaultfd for asynchronous write protection (`UFFD_FEATURE_WP_ASYNC`, user-mode only:
+  no system setting) and `PAGEMAP_SCAN` (`PM_SCAN_WP_MATCHING | PM_SCAN_CHECK_WPASYNC`) reports a run's written pages
+  and protects them again in one call -- Wine's way to the same Windows call. port/main.cpp (`linux_write_watch_init`,
+  `dotheroes_ww_scan`; the kernel interface kept beside the arena), port/native/render/ppfx_render.cpp `ww_poll` (its
+  Linux branch stamps the same per-page epochs; everything downstream shared). Linux 6.7+; otherwise the pages are
+  hashed as before. **`--memtest`'s new group** (Linux): user writes to pages 3, 10, 11 reported exactly, a kernel
+  write through `read()` reported, reads never, the range protected again -- 606/606. **Effect** (the same 90 s
+  offscreen boot): **17,258 MB hashed -> 2,514 MB** (-85%); 14,690 MB skipped as unwritten; 6,105 polls, 386 ms in all.
+- **The crash record on Linux** (port/diag/game_log.cpp, as `on_crash` on Windows): `[crash]` lines in the game's
+  log -- the signal, the module and offset (`dladdr`), the fault address and whether it was read or written (the
+  x86-64 error code), the thread -- on an alternate stack, then the previous handler (a developer build's report) or
+  the default action, so the process ends by the signal. `DOTHEROES_CRASH_TEST=25`: "access violation (SIGSEGV) at
+  dotheroes+0x6037FF", "writing address 0000000000000008", exit -11; the developer build's report written to diag/
+  with its backtrace (addr2line resolves it offline to game_log.cpp:429, the deliberate fault; in-report names: a
+  follow-up). **The thread dump** (the hang report's mechanism; `DIAG_DUMP_AT=20`): 17 threads with their stacks and
+  last HLE call, lifted functions named.
+- **Audio** (tests/native/openal_check.sh on Linux): the Linux OpenAL Soft has the PipeWire, PulseAudio, ALSA, JACK
+  and SDL2 backends (loaded at run time, none linked); the game opens "Ryzen HD Audio Controller Analog Stereo"
+  through PipeWire with system events and reopen. Found and fixed: the manager and stress tests named their data
+  folder after `TEMP`/`TMPDIR`, which Linux does not set -- "./sound_manager_check", the test's own program (now the
+  system's temporary folder); and **an exit-time crash**: unloading OpenAL Soft unloaded its PipeWire/PulseAudio
+  libraries, one of which had registered an exit handler -- OpenAL is now opened `RTLD_NODELETE` (port/native/audio/
+  al_api.cpp; the game's own end skips exit handlers, so only other paths were exposed). Result: **230 checks, 0
+  failed** -- synthetic cases, all 326 files, the 42 loops, a stream through a device loss and reopen, the manager
+  (32), voices (32), pause (19), device losses (16), the real-time path with failing and slow reopens (9).
+- **CI's first run**: the boundary and privacy job passed; both builds failed in OpenAL Soft's configure -- the
+  runners' CMake 3 refuses its `add_dependencies` with the empty list our dropped HRTF data leaves (CMake 4 accepts
+  it). CI now installs CMake 4 and Ninja from PyPI on both runners (the library stays unmodified); the actions moved
+  off Node 20.
+- Both platforms rebuilt after these shared changes: the Windows game cross-built and linked; the Linux build booted
+  strict-clean with the write watch on.

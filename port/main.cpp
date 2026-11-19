@@ -72,6 +72,14 @@ extern "C" void dotheroes_audio_hooks_init(void); /* audio_hooks.cpp */
 #include <signal.h>
 #include <unistd.h>
 #endif
+#ifdef __linux__   /* the write watch (linux_write_watch_init) */
+#include <errno.h>
+#include <fcntl.h>
+#include <linux/fs.h>
+#include <linux/userfaultfd.h>
+#include <sys/ioctl.h>
+#include <sys/syscall.h>
+#endif
 
 #if defined(__APPLE__)
 #include <CoreFoundation/CoreFoundation.h>   /* the main thread's run loop, see run_guest */
@@ -590,6 +598,75 @@ static LONG WINAPI vm_commit_veh(EXCEPTION_POINTERS* ep)
 }
 #endif
 
+#ifdef __linux__
+/* The write watch on Linux (M11.4): Windows' MEM_WRITE_WATCH + GetWriteWatch(WRITE_WATCH_FLAG_RESET), as Wine does
+ * it -- the guest space registered with userfaultfd for write protection in its asynchronous mode (a write to a
+ * protected page is resolved in the kernel, which only notes it: no signal, no handler, a kernel write through a
+ * system call included), and PAGEMAP_SCAN reporting a range's written pages and protecting them again in one call.
+ * Linux 6.7 or later; UFFD_USER_MODE_ONLY needs no system setting (vm.unprivileged_userfaultfd). Unavailable: the
+ * pages are hashed, as before. A page never protected reads as written, so nothing is ever missed. */
+static int s_ww_uffd = -1, s_ww_pagemap = -1;
+
+static int linux_write_watch_init(uint8_t* base, uint64_t size)
+{
+    const int uffd = (int)syscall(SYS_userfaultfd, O_CLOEXEC | O_NONBLOCK | UFFD_USER_MODE_ONLY);
+    if (uffd < 0) {
+        fprintf(stderr, "[write-watch] off: userfaultfd unavailable (%s); pages are hashed\n", strerror(errno));
+        return 0;
+    }
+    struct uffdio_api api = {};
+    api.api = UFFD_API;
+    api.features = UFFD_FEATURE_WP_ASYNC | UFFD_FEATURE_WP_UNPOPULATED;
+    struct uffdio_register reg = {};
+    reg.range.start = (uint64_t)(uintptr_t)base;
+    reg.range.len = size;
+    reg.mode = UFFDIO_REGISTER_MODE_WP;
+    const int pm = ioctl(uffd, UFFDIO_API, &api) == 0 && ioctl(uffd, UFFDIO_REGISTER, &reg) == 0
+                       ? open("/proc/self/pagemap", O_RDONLY | O_CLOEXEC) : -1;
+    if (pm < 0) {
+        fprintf(stderr, "[write-watch] off: asynchronous write protection unavailable (%s; Linux 6.7 or later); "
+                        "pages are hashed\n", strerror(errno));
+        close(uffd);
+        return 0;
+    }
+    s_ww_uffd = uffd;   /* kept open: closing it would end the registration */
+    s_ww_pagemap = pm;
+    return 1;
+}
+
+/* the written pages among guest pages [first, end), each run of them given to on_written(first, end, u), the range
+ * protected again (GetWriteWatch's RESET); the pages found, or -1 if the scan failed */
+extern "C" long dotheroes_ww_scan(uint32_t first, uint32_t end, void (*on_written)(uint32_t, uint32_t, void*), void* u)
+{
+    static thread_local struct page_region regs[512];
+    const uint64_t base = (uint64_t)(uintptr_t)vm_base;
+    uint64_t at = base + ((uint64_t)first << 12);
+    const uint64_t stop = base + ((uint64_t)end << 12);
+    long pages = 0;
+    while (at < stop) {
+        struct pm_scan_arg a = {};
+        a.size = sizeof a;
+        a.flags = PM_SCAN_WP_MATCHING | PM_SCAN_CHECK_WPASYNC;
+        a.start = at;
+        a.end = stop;
+        a.vec = (uint64_t)(uintptr_t)regs;
+        a.vec_len = sizeof regs / sizeof regs[0];
+        a.category_mask = PAGE_IS_WRITTEN;
+        a.return_mask = PAGE_IS_WRITTEN;
+        const long n = ioctl(s_ww_pagemap, PAGEMAP_SCAN, &a);
+        if (n < 0) return -1;
+        for (long i = 0; i < n; i++) {
+            const uint32_t p0 = (uint32_t)((regs[i].start - base) >> 12), p1 = (uint32_t)((regs[i].end - base) >> 12);
+            on_written(p0, p1, u);
+            pages += p1 - p0;
+        }
+        if (a.walk_end <= at || a.walk_end >= stop) break;
+        at = a.walk_end;
+    }
+    return pages;
+}
+#endif
+
 static bool alloc_guest_vm(void)
 {
 #ifdef _WIN32
@@ -631,6 +708,16 @@ static bool alloc_guest_vm(void)
                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
     vm_base = (p == MAP_FAILED) ? nullptr : (uint8_t*)p;
     ppu_vm_size = 0;              /* the whole space is backed; no OOB guard needed */
+#  ifdef __linux__
+    /* R5's write watch on Linux (M11.4), as MEM_WRITE_WATCH above: with asp drawn natively the native renderer
+     * learns which guest pages were written since it last looked. DOTHEROES_ASP_WWATCH=0 turns it off. */
+    {
+        const char* an = getenv("DOTHEROES_ASP_NATIVE");
+        const char* ww = getenv("DOTHEROES_ASP_WWATCH");
+        if (vm_base && an && *an == '1' && !(ww && *ww == '0'))
+            vm_write_watch = linux_write_watch_init(vm_base, VM_SIZE);
+    }
+#  endif
 #endif
     return vm_base != nullptr;
 }

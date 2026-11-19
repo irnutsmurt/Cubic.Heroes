@@ -17,6 +17,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -92,9 +93,9 @@ float se_gain(float vol, int level = 3) { return (float)level * (vol * 0.11f); }
 
 void make_folder()
 {
-    const char* tmp = getenv("TEMP");
-    if (!tmp) tmp = getenv("TMPDIR");
-    g_dir = std::string(tmp ? tmp : ".") + "/sound_stress_check";
+    // the system's temporary folder (TEMP on Windows; TMPDIR, else /tmp, elsewhere -- Linux sets neither variable
+    // by default, and "./sound_stress_check" was the test's own program, so nothing could be written: M11.4)
+    g_dir = (std::filesystem::temp_directory_path() / "sound_stress_check.data").string();
 #ifdef _WIN32
     system(("mkdir \"" + g_dir + "\" 2>NUL").c_str());
 #else

@@ -4614,11 +4614,40 @@ void ww_note(uint32_t ea, uint32_t len)
     s_ww_runs[a] = b;
 }
 
+#ifdef __linux__
+// Linux (M11.4): the scan through userfaultfd and PAGEMAP_SCAN, port/main.cpp
+extern "C" long dotheroes_ww_scan(uint32_t first, uint32_t end, void (*on_written)(uint32_t, uint32_t, void*), void* u);
+static void ww_stamp(uint32_t p0, uint32_t p1, void*)
+{
+    for (uint32_t pg = p0; pg < p1 && pg < s_pg_epoch.size(); pg++) s_pg_epoch[pg] = s_ww_epoch;
+}
+#endif
+
 bool ww_poll()
 {
     if (!vm_write_watch) return false;
-#ifndef _WIN32
-    return false;   // the write watch is Windows' (GetWriteWatch); elsewhere vm_write_watch stays 0 and pages are hashed
+#if defined(__linux__)
+    if (s_pg_epoch.empty()) s_pg_epoch.assign(1u << 20, 0);
+    const uint64_t t0 = now_ns();
+    const uint64_t cover = (r7_on() ? queue().flushed : queue().put).load(std::memory_order_acquire);
+    s_ww_epoch++;
+    for (const auto& run : s_ww_runs) {
+        s_ww_scanned += run.second - run.first;
+        const long n = dotheroes_ww_scan(run.first, run.second, ww_stamp, nullptr);
+        if (n < 0) {
+            vm_write_watch = 0;   // the write watch failed: everything hashed from now on
+            s_ww_failed++;
+            return false;
+        }
+        s_ww_pages += (uint64_t)n;
+    }
+    s_ww_cover = cover;
+    s_ww_polls++;
+    s_ww_last_ns = now_ns();
+    s_ww_ns += s_ww_last_ns - t0;
+    return true;
+#elif !defined(_WIN32)
+    return false;   // the write watch is Windows' and Linux's; elsewhere vm_write_watch stays 0 and pages are hashed
 #else
     if (s_pg_epoch.empty()) { s_pg_epoch.assign(1u << 20, 0); s_ww_buf.resize(1u << 20); }
     const uint64_t t0 = now_ns();

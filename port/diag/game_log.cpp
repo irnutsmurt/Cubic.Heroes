@@ -26,6 +26,11 @@
 #include <sys/utsname.h>
 #include <unistd.h>
 #include <cpuid.h>
+#include <dlfcn.h>
+#ifdef __linux__
+#include <sys/syscall.h>
+#include <ucontext.h>
+#endif
 #endif
 
 extern "C" unsigned cellGcm_flip_request_count(void);   /* the runtime: the guest's flips so far */
@@ -192,6 +197,84 @@ LONG WINAPI on_crash(EXCEPTION_POINTERS* ep)
 }
 #endif
 
+#ifndef _WIN32
+/* The crash record elsewhere (M11.4), as on_crash above: the signal, where (the module and the offset in it), the
+ * address of a memory fault and whether it was read or written, the thread -- into the game's log, then the handler
+ * there was before (a developer build's crash report, port/diag/diag.cpp) or the signal's own default action, so the
+ * process ends by that signal and CubicHeroes passes its status on. On its own stack: a stack overflow is recorded
+ * too. */
+struct sigaction g_prev_act[32];
+
+const char* signal_name(int sig)
+{
+    switch (sig) {
+    case SIGSEGV: return "access violation (SIGSEGV)";
+    case SIGBUS: return "bus error (SIGBUS)";
+    case SIGILL: return "illegal instruction (SIGILL)";
+    case SIGFPE: return "arithmetic exception (SIGFPE)";
+    default: return "signal";
+    }
+}
+
+void on_crash_signal(int sig, siginfo_t* si, void* uc)
+{
+    static std::atomic<int> once{0};
+    if (!once.exchange(1)) {
+        void* at = nullptr;
+#if defined(__linux__) && defined(__x86_64__)
+        if (uc) at = (void*)((ucontext_t*)uc)->uc_mcontext.gregs[REG_RIP];
+#endif
+        Dl_info di = {};
+        const char* mod = "?";
+        uintptr_t off = (uintptr_t)at;
+        if (at && dladdr(at, &di) && di.dli_fname) {
+            mod = strrchr(di.dli_fname, '/') ? strrchr(di.dli_fname, '/') + 1 : di.dli_fname;
+            off -= (uintptr_t)di.dli_fbase;
+        }
+        long tid = 0;
+#ifdef __linux__
+        tid = (long)syscall(SYS_gettid);
+#endif
+        fprintf(stderr, "[crash] the game stopped: %s at %s+0x%llX, thread %ld\n", signal_name(sig), mod,
+                (unsigned long long)off, tid);
+        if ((sig == SIGSEGV || sig == SIGBUS) && si) {
+            const char* how = "accessing";
+#if defined(__linux__) && defined(__x86_64__)
+            if (uc) how = (((ucontext_t*)uc)->uc_mcontext.gregs[REG_ERR] & 2) ? "writing" : "reading";
+#endif
+            fprintf(stderr, "[crash] %s address %016llX\n", how, (unsigned long long)(uintptr_t)si->si_addr);
+        }
+        flush_both();
+    }
+    const struct sigaction& prev = g_prev_act[sig];
+    if ((prev.sa_flags & SA_SIGINFO) && prev.sa_sigaction) {
+        prev.sa_sigaction(sig, si, uc);
+        return;
+    }
+    if (prev.sa_handler != SIG_DFL && prev.sa_handler != SIG_IGN && prev.sa_handler) {
+        prev.sa_handler(sig);
+        return;
+    }
+    signal(sig, SIG_DFL);   /* returning re-runs the faulting instruction: the default action ends the process */
+}
+
+void install_crash_signals()
+{
+    static char stack[64 * 1024];
+    stack_t ss = {};
+    ss.ss_sp = stack;
+    ss.ss_size = sizeof stack;
+    sigaltstack(&ss, nullptr);   /* this thread's; the others' overflows still record through their own if set */
+    for (int sig : { SIGSEGV, SIGBUS, SIGILL, SIGFPE }) {
+        struct sigaction sa = {};
+        sa.sa_sigaction = on_crash_signal;
+        sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+        sigemptyset(&sa.sa_mask);
+        sigaction(sig, &sa, &g_prev_act[sig]);
+    }
+}
+#endif
+
 /* ---- the watch: frame-time spikes, the size cap ---- */
 
 struct Spikes {
@@ -329,6 +412,8 @@ extern "C" void dh_log_session_start(const char* log_path)
     g_prev_terminate = std::set_terminate(on_terminate);
 #ifdef _WIN32
     g_prev_filter = SetUnhandledExceptionFilter(on_crash);
+#else
+    install_crash_signals();
 #endif
     const char* e = getenv("DOTHEROES_LOG_CAP_MB");
     const double mb = e && *e ? atof(e) : 64.0;

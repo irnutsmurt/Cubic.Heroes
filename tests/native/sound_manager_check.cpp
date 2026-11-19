@@ -4,6 +4,7 @@
 //   sound_manager_check            (the library: OpenAL32.dll beside this program, or OPENAL_LIB)
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -57,9 +58,9 @@ void write_wav(const std::string& name, unsigned ch, double seconds, double hz, 
 // 43 a 3D effect (min 2, max 30); 44 a looping 2D ambience; 45 a 1.03 s 2D effect
 void make_folder()
 {
-    const char* tmp = getenv("TEMP");
-    if (!tmp) tmp = getenv("TMPDIR");
-    g_dir = std::string(tmp ? tmp : ".") + "/sound_manager_check";
+    // the system's temporary folder (TEMP on Windows; TMPDIR, else /tmp, elsewhere -- Linux sets neither variable
+    // by default, and "./sound_manager_check" was the test's own program, so nothing could be written: M11.4)
+    g_dir = (std::filesystem::temp_directory_path() / "sound_manager_check.data").string();
 #ifdef _WIN32
     system(("mkdir \"" + g_dir + "\" 2>NUL").c_str());
 #else

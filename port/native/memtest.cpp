@@ -38,6 +38,10 @@
 #include <chrono>
 #include <thread>
 #include <vector>
+#ifdef __linux__
+#include <errno.h>
+#include <unistd.h>
+#endif
 
 extern "C" uint8_t* vm_base;
 extern "C" uint32_t ppu_hle_inject_base;
@@ -513,6 +517,60 @@ void t_store_lines()
 
 } // namespace
 
+#ifdef __linux__
+/* ---- the write watch (M11.4): userfaultfd's asynchronous write protection and PAGEMAP_SCAN (port/main.cpp), what
+ * the native renderer's ww_poll relies on -- every write reported, user and kernel alike, nothing else, and the
+ * range protected again by the scan */
+extern "C" int vm_write_watch;
+extern "C" long dotheroes_ww_scan(uint32_t first, uint32_t end, void (*on_written)(uint32_t, uint32_t, void*), void* u);
+static void ww_collect(uint32_t p0, uint32_t p1, void* u)
+{
+    for (uint32_t p = p0; p < p1; p++) static_cast<std::vector<uint32_t>*>(u)->push_back(p);
+}
+static std::vector<uint32_t> ww_scan(uint32_t first, uint32_t end)
+{
+    std::vector<uint32_t> out;
+    if (dotheroes_ww_scan(first, end, ww_collect, &out) < 0) fail("the write watch's scan failed (%s)", strerror(errno));
+    return out;
+}
+void t_write_watch()
+{
+    group("write watch");
+    int n = 0;
+    if (!vm_write_watch) {
+        printf("[memtest] note: the write watch is off in this run (DOTHEROES_ASP_NATIVE=1 turns it on, Linux 6.7+)\n");
+        return;
+    }
+    const uint32_t first = 0x31000000u >> 12, end = first + 64;
+    ww_scan(first, end);                             /* the range's first scan: its pages protected from here */
+    g_checks++; n++;
+    if (!ww_scan(first, end).empty()) fail("pages reported written with nothing written since the last scan");
+    volatile uint8_t sink = 0;
+    for (uint32_t p : { 30u, 31u, 40u }) sink += vm_base[(uint64_t)(first + p) << 12];   /* reads only */
+    (void)sink;
+    for (uint32_t p : { 3u, 10u, 11u }) vm_base[((uint64_t)(first + p) << 12) + 100] = (uint8_t)(p + 1);
+    g_checks++; n++;
+    std::vector<uint32_t> got = ww_scan(first, end), want = { first + 3, first + 10, first + 11 };
+    if (got != want) fail("user writes to pages 3, 10, 11: %zu page(s) reported", got.size());
+    int fds[2];
+    if (pipe(fds) == 0) {   /* the kernel's own write into guest memory (a file read into a guest buffer) */
+        const char msg[] = "kernel write";
+        if (write(fds[1], msg, sizeof msg) != (ssize_t)sizeof msg) fail("the pipe");
+        g_checks++; n++;
+        if (read(fds[0], vm_base + ((uint64_t)(first + 20) << 12), sizeof msg) != (ssize_t)sizeof msg)
+            fail("a read() into a protected guest page failed (%s)", strerror(errno));
+        close(fds[0]);
+        close(fds[1]);
+        got = ww_scan(first, end);
+        g_checks++; n++;
+        if (got != std::vector<uint32_t>{ first + 20 }) fail("the kernel's write to page 20: %zu page(s) reported", got.size());
+    }
+    g_checks++; n++;
+    if (!ww_scan(first, end).empty()) fail("the scan did not protect the range again");
+    group_end("the write watch: user and kernel writes reported, reads not, the range protected again", n);
+}
+#endif
+
 extern "C" int dotheroes_memtest(uint64_t vm_size)
 {
     g_vm_size = vm_size;
@@ -536,6 +594,9 @@ extern "C" int dotheroes_memtest(uint64_t vm_size)
     t_spin();
     t_torn();
     t_reservation();
+#ifdef __linux__
+    t_write_watch();
+#endif
     t_store_pages();
     t_store_lines();   /* last: it marks two lines in the reservation bitmap for good */
     g_done.store(1);

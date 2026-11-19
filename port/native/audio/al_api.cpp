@@ -22,7 +22,10 @@ void* open_module(const std::string& path)
     if (n > 0) MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, &w[0], n);
     return (void*)LoadLibraryExW(w.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
 #else
-    return dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
+    // RTLD_NODELETE (M11.4): mapped until the process ends. OpenAL Soft loads the system's PipeWire, PulseAudio or
+    // ALSA libraries itself, and one of them registers an exit-time handler: once a dlclose had unloaded them, exit()
+    // called into unmapped code (tests/native/sound_manager_check, at its end)
+    return dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL | RTLD_NODELETE);
 #endif
 }
 
