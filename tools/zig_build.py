@@ -135,6 +135,13 @@ def cmake_toolchain(platform, zig=None, extra_include_after=(), cpu=None):
             f.write(f'set(CMAKE_RC_COMPILER "{tools["rc"]}")\n')
         else:
             f.write("set(CMAKE_SYSTEM_NAME Linux)\nset(CMAKE_SYSTEM_PROCESSOR x86_64)\n")
+            if extra_include_after and os.path.isdir("/usr/lib/x86_64-linux-gnu"):
+                # M11.4: a multiarch host (Debian, Ubuntu: the Linux build environment) keeps its libraries in
+                # lib/x86_64-linux-gnu, which a cross toolchain's find_library does not search -- SDL2 found no libX11
+                # or libudev and OpenAL Soft no PulseAudio or ALSA, and built without those backends. The library path
+                # only: CMAKE_LIBRARY_ARCHITECTURE also put the host's include/x86_64-linux-gnu (its glibc's bits/)
+                # ahead of Zig's own glibc headers
+                f.write("list(APPEND CMAKE_LIBRARY_PATH /usr/lib/x86_64-linux-gnu)\n")
         f.write(f'set(CMAKE_C_COMPILER "{tools["cc"]}")\n'
                 f'set(CMAKE_CXX_COMPILER "{tools["cxx"]}")\n'
                 f'set(CMAKE_AR "{tools["ar"]}")\n'

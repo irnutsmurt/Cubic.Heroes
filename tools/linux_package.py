@@ -45,6 +45,29 @@ def s_appimage_pieces():
     subprocess.check_call([sys.executable, os.path.join(ROOT, "tools", "fetch_appimage.py")])
 
 
+# the run-time backends each shipped library must have (M11.4: built in the container without them once, which no
+# offscreen test can see -- the game had no window under X11): (library, names it must carry for dlopen)
+BACKENDS = {
+    "libSDL2-2.0.so.0": ("libX11.so.6", "libXext.so.6", "libXcursor.so.1", "libXi.so.6", "libXrandr.so.2",
+                         "libXss.so.1", "libwayland-client.so.0", "libwayland-egl.so.1", "libxkbcommon.so.0",
+                         "libudev.so.1"),
+    "libopenal.so.1": ("libpipewire-0.3.so.0", "libpulse.so.0", "libasound.so.2"),
+}
+
+
+def check_backends(lib_dir):
+    """every backend's library name in the built libraries (they dlopen them by name); exit on any missing"""
+    missing = []
+    for lib, names in BACKENDS.items():
+        with open(os.path.join(lib_dir, lib), "rb") as f:
+            blob = f.read()
+        missing += [f"{lib}: {n}" for n in names if n.encode() + b"\0" not in blob]
+    if missing:
+        sys.exit("[deps] run-time backends missing (the game would lack a window system or an audio server):\n  "
+                 + "\n  ".join(missing))
+    print(f"[deps] run-time backends present: SDL2 (X11, Wayland, udev), OpenAL Soft (PipeWire, PulseAudio, ALSA)")
+
+
 def s_deps():
     """from clean: a package's libraries are never built over the host's work folders (other paths, other headers)"""
     import build_deps
@@ -55,6 +78,7 @@ def s_deps():
             p = os.path.join(out, name)
             shutil.rmtree(p) if os.path.isdir(p) and not os.path.islink(p) else os.remove(p)
     build_deps.build("linux")
+    check_backends(os.path.join(build_deps.DEPS, "linux", "lib"))
 
 
 def s_mksquashfs():

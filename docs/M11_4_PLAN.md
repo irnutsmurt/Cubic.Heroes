@@ -218,7 +218,7 @@ States: **VERIFIED** (implemented, evidence named), **UNVERIFIED** (implemented,
 | A5 | Release crash record and hang report on Linux | PARTIAL: the release crash record and the developer crash report and thread dump verified; a real hang's detection (shared code): P8 | section 15 |
 | A6 | Audio through OpenAL Soft with the system's server; device change recovered | PARTIAL: PipeWire output with events and reopen; the audio suite (device losses included) 230/230; a real default-device change: P8 | section 15 |
 | A7 | Cinematics through FFmpeg | NOT DONE | P2/P8 |
-| A8 | X11 and Wayland: windowed, borderless, fullscreen; the desktop's mode never changed | PARTIAL: windowed on X11 (XWayland) and native Wayland (fixed: section 16); borderless, fullscreen, the mode: P8 | section 16 |
+| A8 | X11 and Wayland: windowed, borderless, fullscreen; the desktop's mode never changed | PARTIAL: Wayland -- the three modes on screen, the desktop at 1600x900@60.07 throughout; X11 -- the three modes created through SDL's X11 driver (a private Xvfb) and X11 presentation on screen earlier; the X11 modes on the desktop again: after the session's XWayland is restarted (section 22) | section 22 |
 | A9 | Rendering resolution presets and custom; VSync; frame limits | NOT DONE | P8 |
 | A10 | Controllers: detection, prompts, hot-plug, remapping; keyboard remapping | NOT DONE | P8 (hot-plug by hand) |
 | A11 | The in-game overlay, performance overlays, developer tools, diagnostics and log export | NOT DONE | P8 |
@@ -566,3 +566,24 @@ session options in effect and not kept, the game's own end passed on (0); the ga
 the game killed with SIGKILL and CubicHeroes exiting 137 (128 + 9: a status cannot be set from outside as Windows' 42
 is); the game ending with CubicHeroes (PR_SET_PDEATHSIG). The runner's Windows-only parts (`tasklist`,
 `TerminateProcess`) now have Linux forms (/proc, a signal).
+
+## 22. Window modes, and the shipped SDL2's lost X11 backend (2026-11-18) [M]
+
+- **Wayland, on screen** (approved runs, each recorded through the guard): windowed 1280x720; borderless 1600x900 at
+  0,0; exclusive "at the display's mode 1600x900 60 Hz". **The desktop's mode, read before and after each run with
+  kscreen-doctor, stayed 1600x900@60.07 throughout** (exclusive fullscreen takes the display's current mode).
+- **Found: the container-built SDL2 had no X11 backend** -- "SDL video init failed: x11 not available", the game
+  headless on any X11 session (and on SDL's default XWayland path). The libraries built in the pinned environment had
+  lost every backend found through `find_library`: SDL2's X11 (libX11, Xext, Xcursor, Xi, Xrandr, Xss, ...) and libudev
+  (controller hot-plug), OpenAL Soft's PulseAudio and ALSA (only PipeWire left). Debian keeps libraries in
+  lib/x86_64-linux-gnu, which a cross toolchain's find_library does not search. Fixed in zig_build's toolchain file
+  (`CMAKE_LIBRARY_PATH` += that folder on a multiarch host; `CMAKE_LIBRARY_ARCHITECTURE` was tried first and also put
+  the host's glibc internals ahead of Zig's headers). **tools/linux_package.py now refuses a build whose SDL2 lacks X11,
+  Wayland or udev, or whose OpenAL Soft lacks PipeWire, PulseAudio or ALSA** -- no offscreen test can see a missing
+  window system, which is how this reached the packages (it was caught before any release, by the window-mode runs).
+- **X11**: with the fixed SDL2, the game's windows did not appear on the desktop -- SDL waiting in `XIfEvent` for the
+  window's map (the game's own thread dump). Manjaro's own system SDL2 hangs the same way, and both open X11 windows on
+  a private Xvfb display: the desktop session's XWayland stopped mapping new windows (the morning's X11 run worked).
+  On Xvfb the three modes are created through SDL's X11 driver (windowed 1280x720; borderless and exclusive 1600x900 at
+  0,0); presenting needs a GPU path Xvfb lacks, so headless there, as expected. The owner is asked to restart the
+  session (log out and in) for the X11 desktop runs.
