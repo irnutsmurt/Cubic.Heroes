@@ -234,7 +234,7 @@ States: **VERIFIED** (implemented, evidence named), **UNVERIFIED** (implemented,
 | A19 | Steam, Lutris and Heroic through the CLI | NOT DONE | P9 |
 | A20 | CI: Windows and Linux builds, tests, boundary and privacy checks | VERIFIED: run 44450410663 -- Linux 13m16s, Windows 22m46s, boundary and privacy, all pass | section 19 |
 | A21 | Windows build and behaviour unbroken | PARTIAL: Windows' game compiles and links from this tree (a Zig cross-build, Windows' release configuration); behaviour: the owner's Windows PC (section 7) | section 14 |
-| A22 | AMD rendering matches the Windows references; validation layers clean | NOT DONE | P7 |
+| A22 | AMD rendering matches the Windows references; validation layers clean | PARTIAL: the five RPCS3 reference scenes run on Linux and look like RPCS3's; 1 of 5 within Windows' accepted figures -- the rest a stable, small difference (section 26) not yet separated into AMD's and the code's: a Windows run of the same build asked of the owner; validation layers: to do | section 26 |
 | A23 | Performance measured and reported (target 60 fps) | PARTIAL: the castle-front route at 540p-1080p measured against Windows' baseline (section 24); river combat, dungeon and bosses: to do | section 24 |
 | A24 | 166 maps, bosses, gameplay, audio, saves on Linux | PARTIAL: the 166-map sweep passed -- every map reached, 207 of 207 pipelines met in play prepared, 0 translations in play (section 25); bosses, gameplay, audio, saves: to do | section 25 |
 | A25 | Release qualification from the Linux packages | NOT DONE | P9 |
@@ -684,3 +684,40 @@ disk cache warm), within the figures given there.
 **To check (A22)**: D24 was chosen because a float depth surface's bias lost the castle hall pillars' shadows
 (2026-11-09). This device has only D32_SFLOAT_S8: the RPCS3 reference scenes (the entry hall's shadow map) decide
 whether that comes back here.
+
+## 26. P8: the RPCS3 reference scenes on AMD (2026-11-19) [M]
+
+**The drives could not walk the hero on Linux**: the developer tools found the player's object (and the objects
+near it, and the fields' classes) by scanning the committed guest heap with VirtualQuery -- Windows only; on Linux the
+hero's position read 0, so every drive's `goto` and `cross` failed (the reference scenes, and every route that walks:
+the developer-tools suite, the bosses). The map sweep was not affected (it warps). **Fixed** (port/native/dev_state.cpp,
+guest_runs): Windows walks its committed regions as before; Linux reads the pages the game has touched from
+/proc/self/pagemap (present or swapped). The developer tools' memory figures on Linux from /proc/self/status (they
+read 0 before). Each scene's camera now lands exactly on RPCS3's.
+
+**The five scenes** (tests/rpcs3_reference.py run, offscreen, the development build; LAUNCHER_PROMPTS=playstation so
+that the HUD's prompts are the reference's -- without a controller the game draws keyboard keys):
+
+| Scene | Result | Notes |
+|---|---|---|
+| dungeon_door | within the accepted figures | |
+| entry_hall | over: refl mean 1.4/0.7/1.8 (accepted 0.18/0.16/0.33), combined far 17% (1.4%) | the floor reflection whole, its stair walls drawn: the depth clamp right on D32 |
+| corridor | over: scene far 28% (2.5%), refl mean 2.0/1.0/2.8 (0.14) | the lit scene slightly brighter on the walls and pillars (221k pixels brighter, 17k darker, ~0.005 linear); the carpet the same |
+| king | combined, bloom, glare, reflection within; the shadow map 59% of texels within two 2^-24 steps (accepted 100%) | the depth surfaces are D32_SFLOAT_S8 here (no D24 on this GPU) |
+| editor | over: final blue mean 1.1 (0.018), 0.19% of pixels | the 1-pixel grid lines only: RADV's lines are not strict (strictLines false), NVIDIA's are; the triangles identical |
+
+Pictures side by side: the same scenes, the same lighting, the pillars shaded; the differences are faint and spread
+over the surfaces, not missing or wrong objects. Our runs agree with one another (the corridor's two runs identical,
+the entry hall's three within 1% of pixels), so the difference is stable, not the hero's placement.
+
+**Ruled out or measured**: reduced precision (no SPIR-V module carries RelaxedPrecision); the float depth bias -- an
+experiment with VK_EXT_depth_bias_control (the exact 2^-24 step on the float surface; RADV has it) brought the shadow
+map's mean difference from 2.8e-6 to 6.7e-7 but its within-two-steps share only from 59% to 63%, and changed neither
+the corridor nor the entry hall: not the cause, and not kept (it needs a Vulkan 1.1 instance, a change to every
+system's start; the instance stays 1.0). Rectangular lines (VK_EXT_line_rasterization) for the editor's grid: the
+same instance requirement, for 0.19% of one scene's pixels: not made.
+
+**Not yet separated**: Windows' build passed 5 of 5 on 2026-11-16 (docs/M11_PLAN.md); the renderer has changed since,
+and this machine differs in GPU (AMD: D32 depth, non-strict lines, its own filtering) as well as system. A Windows run
+of this commit, with D24 (the default) and with DOTHEROES_PPFX_DEPTH_D32=1, separates NVIDIA-with-D32 from AMD and
+from the code: asked of the owner.

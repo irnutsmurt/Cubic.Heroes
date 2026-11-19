@@ -1258,6 +1258,16 @@ std::string perf_json()
     if (K32GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS*)&pm, sizeof pm)) {
         ws = pm.WorkingSetSize / 1048576.0; pb = pm.PrivateUsage / 1048576.0;
     }
+#else   /* M11.4: the resident set, and its private part (anonymous memory) */
+    if (FILE* f = fopen("/proc/self/status", "r")) {
+        char ln[128];
+        double kb;
+        while (fgets(ln, sizeof ln, f)) {
+            if (sscanf(ln, "VmRSS: %lf", &kb) == 1) ws = kb / 1024.0;
+            else if (sscanf(ln, "RssAnon: %lf", &kb) == 1) pb = kb / 1024.0;
+        }
+        fclose(f);
+    }
 #endif
     const char* fps = getenv("DOTHEROES_FPS");
     const char* vs = getenv("DOTHEROES_VSYNC");

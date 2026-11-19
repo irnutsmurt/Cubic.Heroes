@@ -90,6 +90,10 @@
 #include <dbghelp.h>
 #include <algorithm>
 #include <string>
+#else
+#include <algorithm>
+#include <fcntl.h>
+#include <unistd.h>
 #endif
 
 #include "ps3emu/osd.h"
@@ -187,23 +191,59 @@ bool g_cant_die, g_life_log;   // DOTHEROES_DEV_CANT_DIE, DOTHEROES_DEV_LIFE_LOG
 constexpr uint32_t kPlayerVtable = 0x00FE3D20, kPlayerLife = 0x5B8;
 std::atomic<uint32_t> g_player{ 0 };
 
-uint32_t find_player(uint32_t hud_life)
+// The guest space's runs in [lo, hi) a scan can read and find something in, each as fn(ea, len) (false: stop):
+// Windows' committed, accessible regions; on Linux (M11.4) the pages the game has touched -- present or swapped out,
+// from /proc/self/pagemap (the reservation is readable throughout, an untouched page all zeros)
+template <class Fn> void guest_runs(uint64_t lo, uint64_t hi, Fn fn)
 {
 #ifdef _WIN32
-    const uint8_t want[4] = { 0x00, 0xFE, 0x3D, 0x20 };
-    for (uint64_t ea = 0x10000000u; ea < 0x20000000u; ) {
+    for (uint64_t ea = lo; ea < hi; ) {
         MEMORY_BASIC_INFORMATION mbi;
         if (!VirtualQuery(vm_base + ea, &mbi, sizeof mbi)) break;
-        const uint64_t len = (uint64_t)((uintptr_t)mbi.BaseAddress + mbi.RegionSize - (uintptr_t)(vm_base + ea));
-        if (mbi.State == MEM_COMMIT && !(mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) && len > kPlayerLife + 4)
-            for (uint64_t o = 0; o + kPlayerLife + 4 <= len; o += 4)
-                if (!memcmp(vm_base + ea + o, want, 4) && rd32((uint32_t)(ea + o + kPlayerLife)) == hud_life)
-                    return (uint32_t)(ea + o);
+        uint64_t len = (uint64_t)((uintptr_t)mbi.BaseAddress + mbi.RegionSize - (uintptr_t)(vm_base + ea));
+        if (len > hi - ea) len = hi - ea;
+        if (mbi.State == MEM_COMMIT && !(mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) && !fn(ea, len)) return;
         ea += len;
     }
+#else
+    const int fd = open("/proc/self/pagemap", O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return;
+    const uint64_t pg = (uint64_t)sysconf(_SC_PAGESIZE);
+    std::vector<uint64_t> e(4096);
+    uint64_t run = 0, run_len = 0;
+    for (uint64_t ea = lo & ~(pg - 1); ea < hi; ) {
+        const uint64_t n = std::min<uint64_t>(e.size(), (hi - ea + pg - 1) / pg);
+        const off_t at = (off_t)(((uintptr_t)(vm_base + ea) / pg) * 8);
+        if (pread(fd, e.data(), n * 8, at) != (ssize_t)(n * 8)) break;
+        for (uint64_t i = 0; i < n; i++, ea += pg) {
+            if (e[i] >> 62 & 3) {   // present (63) or swapped (62)
+                if (!run_len) run = ea;
+                run_len += pg;
+            } else if (run_len) {
+                if (!fn(run, run_len)) { close(fd); return; }
+                run_len = 0;
+            }
+        }
+    }
+    if (run_len) fn(run, std::min(run_len, hi - run));
+    close(fd);
 #endif
-    (void)hud_life;
-    return 0;
+}
+
+uint32_t find_player(uint32_t hud_life)
+{
+    const uint8_t want[4] = { 0x00, 0xFE, 0x3D, 0x20 };
+    uint32_t found = 0;
+    guest_runs(0x10000000u, 0x20000000u, [&](uint64_t ea, uint64_t len) {
+        if (len > kPlayerLife + 4)
+            for (uint64_t o = 0; o + kPlayerLife + 4 <= len; o += 4)
+                if (!memcmp(vm_base + ea + o, want, 4) && rd32((uint32_t)(ea + o + kPlayerLife)) == hud_life) {
+                    found = (uint32_t)(ea + o);
+                    return false;
+                }
+        return true;
+    });
+    return found;
 }
 
 // The player's object for the port's other dev switches (phys_hooks.cpp's waver trigger): 0 until found.
@@ -262,13 +302,9 @@ struct Near { uint32_t ea, vt; float x, y, z; };
 int scan_near(uint32_t p, float radius, Near* out, int max, uint32_t vt_hi = 0x01100000u)
 {
     int n = 0;
-#ifdef _WIN32
     const float px = rdf(p + 0x428), py = rdf(p + 0x42C), pz = rdf(p + 0x430);
-    for (uint64_t ea = 0x10000000u; ea < 0x20000000u && n < max; ) {
-        MEMORY_BASIC_INFORMATION mbi;
-        if (!VirtualQuery(vm_base + ea, &mbi, sizeof mbi)) break;
-        const uint64_t len = (uint64_t)((uintptr_t)mbi.BaseAddress + mbi.RegionSize - (uintptr_t)(vm_base + ea));
-        if (mbi.State == MEM_COMMIT && !(mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) && len > 0x440)
+    guest_runs(0x10000000u, 0x20000000u, [&](uint64_t ea, uint64_t len) {
+        if (len > 0x440)
             for (uint64_t o = 0; o + 0x440 <= len && n < max; o += 16) {
                 const uint32_t a = (uint32_t)(ea + o), vt = rd32(a);
                 if (vt < 0x00F00000u || vt >= vt_hi || a == p) continue;
@@ -277,11 +313,8 @@ int scan_near(uint32_t p, float radius, Near* out, int max, uint32_t vt_hi = 0x0
                 if (x == 0.0f && z == 0.0f) continue;
                 out[n++] = { a, vt, x, y, z };
             }
-        ea += len;
-    }
-#else
-    (void)p; (void)radius; (void)out; (void)max;
-#endif
+        return n < max;
+    });
     return n;
 }
 
@@ -485,22 +518,15 @@ int g_field_nvt, g_field_n;
 int scan_classes(uint32_t* out, int max)
 {
     int n = 0;
-#ifdef _WIN32
-    for (uint64_t ea = 0x10000000u; ea < 0x20000000u && n < max; ) {
-        MEMORY_BASIC_INFORMATION mbi;
-        if (!VirtualQuery(vm_base + ea, &mbi, sizeof mbi)) break;
-        const uint64_t len = (uint64_t)((uintptr_t)mbi.BaseAddress + mbi.RegionSize - (uintptr_t)(vm_base + ea));
-        if (mbi.State == MEM_COMMIT && !(mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) && len > 0x1000)
+    guest_runs(0x10000000u, 0x20000000u, [&](uint64_t ea, uint64_t len) {
+        if (len > 0x1000)
             for (uint64_t o = 0; o + 0x1000 <= len && n < max; o += 16) {
                 const uint32_t a = (uint32_t)(ea + o), vt = rd32(a);
                 for (int i = 0; i < g_field_nvt; i++)
                     if (vt == g_field_vt[i]) { out[n++] = a; break; }
             }
-        ea += len;
-    }
-#else
-    (void)out; (void)max;
-#endif
+        return n < max;
+    });
     return n;
 }
 
