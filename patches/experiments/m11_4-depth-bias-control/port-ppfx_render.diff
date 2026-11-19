@@ -1,0 +1,32 @@
+diff --git a/port/native/render/ppfx_render.cpp b/port/native/render/ppfx_render.cpp
+index cf0feff..54a57d6 100644
+--- a/port/native/render/ppfx_render.cpp
++++ b/port/native/render/ppfx_render.cpp
+@@ -1480,6 +1480,7 @@ VkColorComponentFlags write_mask(uint32_t m)
+ //   DOTHEROES_PPFX_DEPTH_CLAMP=0: clipped as before; =2: every draw clamped.
+ // Needs the device's depthClamp (rsx_vk_depth_clamp_ok), else clipped, said.
+ extern "C" int rsx_vk_depth_clamp_ok(void);
++extern "C" int rsx_vk_bias_unorm(void);   // the backend (ps3recomp 0174): depth bias in 2^-24 steps
+ static VkBool32 depth_clamp(uint32_t zminmax)
+ {
+     static int on = -1;
+@@ -5210,7 +5211,18 @@ void asp_draw(const Rec* r)
+     float units = ra.poly_offset_units * (sf.depth_format == 1 ? 256.0f : 1.0f);
+     if (df == VK_FORMAT_D24_UNORM_S8_UINT && nvidia_d24_bias_half()) units *= 0.5f;
+     // M11.2f: the slope factor times the scale -- the depth's slope per pixel is 1/sc of the guest's
+-    if (ra.poly_offset_fill) F.vkCmdSetDepthBias(b.cb, units, 0.0f, ra.poly_offset_factor * tsc);
++    // M11.4: a float depth surface (a device without D24) with the backend's 2^-24 representation (ps3recomp 0174,
++    // rsx_vk_bias_unorm): the RSX's steps, as on D24, not the float format's step of the primitive's largest depth
++    static const PFN_vkCmdSetDepthBias2EXT bias2 = rsx_vk_bias_unorm() ?
++        (PFN_vkCmdSetDepthBias2EXT)D.get_device_proc(D.device, "vkCmdSetDepthBias2EXT") : nullptr;
++    if (bias2 && df == VK_FORMAT_D32_SFLOAT_S8_UINT) {
++        VkDepthBiasRepresentationInfoEXT rep = { VK_STRUCTURE_TYPE_DEPTH_BIAS_REPRESENTATION_INFO_EXT };
++        rep.depthBiasRepresentation = VK_DEPTH_BIAS_REPRESENTATION_LEAST_REPRESENTABLE_VALUE_FORCE_UNORM_EXT;
++        rep.depthBiasExact = VK_TRUE;
++        VkDepthBiasInfoEXT bi = { VK_STRUCTURE_TYPE_DEPTH_BIAS_INFO_EXT, &rep };
++        if (ra.poly_offset_fill) { bi.depthBiasConstantFactor = units; bi.depthBiasSlopeFactor = ra.poly_offset_factor * tsc; }
++        bias2(b.cb, &bi);
++    } else if (ra.poly_offset_fill) F.vkCmdSetDepthBias(b.cb, units, 0.0f, ra.poly_offset_factor * tsc);
+     else F.vkCmdSetDepthBias(b.cb, 0.0f, 0.0f, 0.0f);
+     const float bc[4] = { 0, 0, 0, 0 };   // the blend colour: not described yet (asp's constant-colour blends)
+     F.vkCmdSetBlendConstants(b.cb, bc);

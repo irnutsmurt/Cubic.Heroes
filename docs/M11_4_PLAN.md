@@ -715,7 +715,7 @@ experiment with VK_EXT_depth_bias_control (the exact 2^-24 step on the float sur
 map's mean difference from 2.8e-6 to 6.7e-7 but its within-two-steps share only from 59% to 63%, and changed neither
 the corridor nor the entry hall: not the cause, and not kept (it needs a Vulkan 1.1 instance, a change to every
 system's start; the instance stays 1.0). Rectangular lines (VK_EXT_line_rasterization) for the editor's grid: the
-same instance requirement, for 0.19% of one scene's pixels: not made.
+same instance requirement, for 0.19% of one scene's pixels: not made. Both kept as patches: patches/experiments/.
 
 **Not yet separated**: Windows' build passed 5 of 5 on 2026-11-16 (docs/M11_PLAN.md); the renderer has changed since,
 and this machine differs in GPU (AMD: D32 depth, non-strict lines, its own filtering) as well as system. A Windows run
@@ -813,7 +813,7 @@ Timing runs already use DUMP=0 (tests/perf_run.py: sections 24 and 27). /tmp on 
 folders left by this milestone's extract-and-run tests, removed); large temporary files and benchmark captures go to
 the git-ignored build/tmp (TMPDIR) from now on.
 
-## 31. Extract-and-run leaves its copy behind (2026-11-19) [M, open: the owner's decision]
+## 31. Extract-and-run leaves its copy behind (2026-11-19) [M; root cause found; the fix: the owner's decision]
 
 The pinned AppImage runtime (type2-runtime 20251108, dd6cebed) in extract-and-run mode (`--appimage-extract-and-run`
 or APPIMAGE_EXTRACT_AND_RUN=1: the fallback where FUSE is missing) extracts to `$TMPDIR/appimage_extracted_<MD5 of
@@ -837,3 +837,14 @@ resolution matrix, validation, river, bosses, the opening, the two final ending 
 logs xz-compressed), the credits recordings packed into build/evidence/credits-stalls-2026-11-19.tar.xz (15 KB), seven
 extract-and-run folders in /tmp. Kept: the dev build rel1, the install `inst 1`, the current preparation prep-rel2,
 the disc copy, the checkpoints, the baselines, the dependency caches.
+
+**Root cause** (2026-11-19, the minimal AppImage, gdb as the tracer -- strace is not installed and no package was
+added): after its child exits, the runtime's parent makes **no file system call** before exit_group(0). Stopped at
+the cleanup branch of the prebuilt binary (disassembly: getenv at 0x2e526, nftw at 0x79201 called from 0x2e545, the
+pinned source's runtime.c 1661-1667): `getenv("NO_CLEANUP")` returns NULL, `rm_recursive()` calls
+`nftw(prefix, rm_recursive_callback, 0, FTW_DEPTH | FTW_MOUNT | FTW_PHYS)` -- **fd_limit 0** -- and nftw returns 0 at
+once. The runtime is statically linked with **musl**, whose nftw begins `if (fd_limit <= 0) return 0;`: nothing is
+walked or removed, and "success" is returned, so no "Failed to clean up" message either. (glibc's nftw does not
+return early on 0, which would explain why upstream's cleanup appears to work in some builds.) Not our application:
+the minimal AppImage (AppRun = `echo`) behaves the same. Setting TMPDIR from the launcher could not help: the runtime
+extracts before any of our code runs.

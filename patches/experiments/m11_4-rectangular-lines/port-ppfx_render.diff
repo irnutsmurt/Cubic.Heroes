@@ -1,0 +1,24 @@
+diff --git a/port/native/render/ppfx_render.cpp b/port/native/render/ppfx_render.cpp
+index cf0feff..f3e02cd 100644
+--- a/port/native/render/ppfx_render.cpp
++++ b/port/native/render/ppfx_render.cpp
+@@ -1480,6 +1480,7 @@ VkColorComponentFlags write_mask(uint32_t m)
+ //   DOTHEROES_PPFX_DEPTH_CLAMP=0: clipped as before; =2: every draw clamped.
+ // Needs the device's depthClamp (rsx_vk_depth_clamp_ok), else clipped, said.
+ extern "C" int rsx_vk_depth_clamp_ok(void);
++extern "C" int rsx_vk_rect_lines(void);   // the backend (ps3recomp 0174): rectangular lines asked for
+ static VkBool32 depth_clamp(uint32_t zminmax)
+ {
+     static int on = -1;
+@@ -1981,6 +1982,11 @@ VkResult make_pipeline(const PipeState& in, VkShaderModule vsm, VkShaderModule f
+         if (flip) ras.frontFace = ras.frontFace == VK_FRONT_FACE_CLOCKWISE ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE;
+     }
+     ras.depthBiasEnable = VK_TRUE; ras.lineWidth = 1.0f;
++    // M11.4: asp's lines as rectangles where the device's own lines are not strict (RADV's: parallelograms; the
++    // editor's grid, drawn as NVIDIA's strict lines and RPCS3's, a pixel off on the diagonals): rsx_vk_rect_lines
++    VkPipelineRasterizationLineStateCreateInfoEXT line = { VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_LINE_STATE_CREATE_INFO_EXT };
++    line.lineRasterizationMode = VK_LINE_RASTERIZATION_MODE_RECTANGULAR_EXT;
++    if (asp && s.lines && rsx_vk_rect_lines()) ras.pNext = &line;
+     VkPipelineMultisampleStateCreateInfo ms = { VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
+     ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+     VkStencilOpState face = {};

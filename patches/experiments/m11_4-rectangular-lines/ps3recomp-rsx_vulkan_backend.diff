@@ -1,0 +1,59 @@
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index 7e8d80f7..16d6362b 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -269,6 +269,7 @@ typedef struct vk_state {
+     int              bc_ok;           /* textureCompressionBC enabled       */
+     int              depth_bounds_ok; /* depthBounds enabled                */
+     int              depth_clamp_ok;  /* depthClamp enabled                 */
++    int              rect_lines;      /* rectangular lines asked of pipelines */
+     int              gpl_ok;          /* graphics pipeline libraries, fast linking and extended dynamic state
+                                          enabled (PS3RECOMP_VK_GPL=1, when the device has all of them) */
+     int              gpl_core_eds;    /* the dynamic state is Vulkan 1.3's core commands (no extension) */
+@@ -6400,6 +6401,38 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+                    core_eds ? "Vulkan 1.3" : "extension");
+         }
+     }
++    /* Lines as the RSX draws them: a device whose lines are not strict (strictLines false: RADV's) draws them as
++     * parallelograms by default; with VK_EXT_line_rasterization's rectangularLines a native renderer asks for
++     * rectangles, as a strict device draws them (rsx_vk_rect_lines). A strict device is left as it was. Needs
++     * vkGetPhysicalDeviceFeatures2: a Vulkan 1.1 instance. */
++    const char* line_exts[8];
++    VkPhysicalDeviceLineRasterizationFeaturesEXT lrf = {
++        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_LINE_RASTERIZATION_FEATURES_EXT };
++    if (s_vk.api >= VK_API_VERSION_1_1 && vk_has_device_extension(s_vk.phys, VK_EXT_LINE_RASTERIZATION_EXTENSION_NAME)) {
++        VkPhysicalDeviceProperties lp;
++        pvkGetPhysicalDeviceProperties(s_vk.phys, &lp);
++        PFN_vkGetPhysicalDeviceFeatures2 lf2 =
++            (PFN_vkGetPhysicalDeviceFeatures2)pvkGetInstanceProcAddr(s_vk.instance, "vkGetPhysicalDeviceFeatures2");
++        if (!lp.limits.strictLines && lp.apiVersion >= VK_API_VERSION_1_1 && lf2) {
++            VkPhysicalDeviceFeatures2 f2 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &lrf };
++            lf2(s_vk.phys, &f2);
++            if (lrf.rectangularLines) {
++                uint32_t n = 0;
++                for (uint32_t i = 0; i < dci.enabledExtensionCount && n < 7; i++)
++                    line_exts[n++] = dci.ppEnabledExtensionNames[i];
++                line_exts[n++] = VK_EXT_LINE_RASTERIZATION_EXTENSION_NAME;
++                memset(&lrf, 0, sizeof lrf);
++                lrf.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_LINE_RASTERIZATION_FEATURES_EXT;
++                lrf.rectangularLines = VK_TRUE;
++                lrf.pNext = (void*)dci.pNext;
++                dci.pNext = &lrf;
++                dci.enabledExtensionCount = n;
++                dci.ppEnabledExtensionNames = line_exts;
++                s_vk.rect_lines = 1;
++                VK_LOG("lines: rectangular (the device's are not strict)\n");
++            }
++        }
++    }
+     VK_CHECK(pvkCreateDevice(s_vk.phys, &dci, NULL, &s_vk.device), "vkCreateDevice");
+     if (vk_load_device_functions()) return -1;
+     vk_pcache_open();
+@@ -6982,6 +7015,7 @@ int rsx_vk_gpl_core_eds(void) { return s_vk.gpl_core_eds; }
+ 
+ /* Whether the device was created with depthClamp (a native renderer's pipelines may ask for it). */
+ int rsx_vk_depth_clamp_ok(void) { return s_vk.depth_clamp_ok; }
++int rsx_vk_rect_lines(void) { return s_vk.rect_lines; }
+ 
+ /* Whether the device was created with samplerAnisotropy (a native renderer's samplers may ask for it). */
+ int rsx_vk_aniso_ok(void) { return s_vk.aniso_ok; }
