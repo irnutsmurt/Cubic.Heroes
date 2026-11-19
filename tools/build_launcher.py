@@ -88,7 +88,9 @@ def main():
         libs = ([res] if os.path.exists(res) else []) + [os.path.join(lib, "libSDL2.dll.a"), "-lole32", "-lshell32",
                                                           "-luuid", "-luser32", "-Wl,--subsystem,windows"]
     else:
-        libs = [os.path.join(lib, "libSDL2-2.0.so.0"), "-lpthread", "-ldl", "-Wl,-rpath,$ORIGIN/lib"]
+        # DT_RPATH (M11.4): the bundled SDL2 before an LD_LIBRARY_PATH a launcher injects (zig_build.link_args)
+        libs = [os.path.join(lib, "libSDL2-2.0.so.0"), "-lpthread", "-ldl", "-Wl,-rpath,$ORIGIN/lib",
+                "-Wl,--disable-new-dtags"]
     r = subprocess.run([zig, "c++", "-target", zig_build.TARGETS[platform], "-o", exe, *[o for _, o in jobs], *libs] +
                        ([] if a.debug else ["-s"]), capture_output=True, text=True, stdin=subprocess.DEVNULL)
     if r.returncode:

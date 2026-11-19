@@ -384,11 +384,12 @@ AppImage is this runtime followed by a squashfs image of the package's files; `-
 and the same steps make it again with another runtime (tools/appimage.py in this project's source).
 
 mksquashfs is squashfs-tools 4.7.5 (https://github.com/plougher/squashfs-tools), GNU GPL 2 (squashfs-tools-GPL-2.0.txt),
-unmodified, built by this project's tools/linux_package.py (gzip and zstd compression only, statically linked against
-glibc 2.31, zstd and zlib of Debian 11): a separate program the worker runs, not linked with anything of this
-project's. Its complete source: licenses/source/squashfs-tools-4.7.5.tar.gz; the build: `make mksquashfs
-GZIP_SUPPORT=1 ZSTD_SUPPORT=1 XZ_SUPPORT=0 LZO_SUPPORT=0 LZ4_SUPPORT=0 LZMA_XZ_SUPPORT=0 XATTR_SUPPORT=0
-EXTRA_LDFLAGS=-static` in its squashfs-tools/ folder.
+unmodified, built by this project's tools/linux_package.py (gzip and zstd compression only; Debian 11's zstd 1.4.8
+(BSD: zstd-BSD.txt) and zlib 1.2.11 (zlib licence: zlib.txt) linked in statically; the system's glibc used as a
+shared library, as every other program here, not part of it): a separate program the worker runs, not linked with
+anything of this project's. Its complete source: licenses/source/squashfs-tools-4.7.5.tar.gz; the build: `make
+mksquashfs GZIP_SUPPORT=1 ZSTD_SUPPORT=1 XZ_SUPPORT=0 LZO_SUPPORT=0 LZ4_SUPPORT=0 LZMA_XZ_SUPPORT=0 XATTR_SUPPORT=0
+LIBS="-lpthread -lm -Wl,-Bstatic -lz -lzstd -Wl,-Bdynamic"` in its squashfs-tools/ folder.
 """
 
 

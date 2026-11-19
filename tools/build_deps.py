@@ -92,7 +92,8 @@ def openal_options(platform):
             "PIPEWIRE", "PULSEAUDIO", "ALSA", "OSS", "JACK", "SNDIO", "PORTAUDIO", "SOLARIS", "SDL2", "SDL3")]
     return OPENAL_OPTIONS + ["-DALSOFT_BACKEND_SDL2=ON", "-DALSOFT_REQUIRE_SDL2=ON",
                              "-DSDL2_DIR=" + os.path.join(DEPS, platform, "lib", "cmake", "SDL2"),
-                             "-DCMAKE_INSTALL_RPATH=$ORIGIN", "-DCMAKE_SHARED_LINKER_FLAGS=-s"]   # no debug info
+                             "-DCMAKE_INSTALL_RPATH=$ORIGIN",   # its SDL2 beside it, as DT_RPATH (M11.4: before
+                             "-DCMAKE_SHARED_LINKER_FLAGS=-s -Wl,--disable-new-dtags"]   # an injected LD_LIBRARY_PATH)
 
 
 # what the game loads at run time (port/audio/al_api.cpp), per platform: (where build_deps installs it, its name)

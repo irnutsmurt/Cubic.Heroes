@@ -102,10 +102,13 @@ class Q:
         with open(self.res_path, "w", encoding="utf-8", newline="\n") as f:
             json.dump(self.res, f, indent=1)
 
-    def record(self, step, bad, **info):
-        self.res[step] = {"ok": not bad, "problems": bad, "at": time.strftime("%Y-%m-%d %H:%M:%S"), **info}
+    def record(self, step, bad, na=False, **info):
+        """a step's result; na: the step does not apply to this package (counted apart, never as a pass: the
+        review's T-4)"""
+        self.res[step] = {"ok": not bad, "na": bool(na and not bad), "problems": bad,
+                          "at": time.strftime("%Y-%m-%d %H:%M:%S"), **info}
         self.save()
-        print(f"{'PASS' if not bad else 'FAIL'}: {step}" + (f" -- {'; '.join(bad)}" if bad else "") +
+        print(f"{'FAIL' if bad else 'N/A' if na else 'PASS'}: {step}" + (f" -- {'; '.join(bad)}" if bad else "") +
               (f" ({info.get('note')})" if info.get("note") else ""), flush=True)
 
     def cli(self, *args, timeout=3600, env=None):
@@ -359,8 +362,19 @@ class Q:
             bad.append(f"--update: exit {code} {json.dumps(r)[:300]}")
         if not b1.get("active") or b1.get("active") == first or first not in (b1.get("previous") or []):
             bad.append(f"builds after: {b1}")
+        # the review's T-1: the changed lifting tool must have relifted (a new lift), not only the changed source
+        # recompiled -- each build records the lift it was made from
+        lifts = []
+        for bid in (first, b1.get("active")):
+            try:
+                with open(os.path.join(self.root, "builds", bid or "", "build.json"), encoding="utf-8") as f:
+                    lifts.append(json.load(f).get("lift"))
+            except (OSError, ValueError):
+                lifts.append(None)
+        if not all(lifts) or lifts[0] == lifts[1]:
+            bad.append(f"no relift: the lift before {lifts[0]}, after {lifts[1]}")
         self.res["_first_build"] = first
-        self.record("rebuild", bad, seconds=secs, first=first, second=b1.get("active"))
+        self.record("rebuild", bad, seconds=secs, first=first, second=b1.get("active"), lifts=lifts)
 
     def rollback(self):
         first = self.res.get("_first_build")
@@ -374,7 +388,7 @@ class Q:
     def keys(self):
         with open(self.o.keys, "rb") as f:
             if f.read(4) == b"\x7fELF":   # the owner's D3 (M11.4): a decrypted EBOOT.elf in place of a keys file
-                self.record("keys", [], note="not applicable: a decrypted EBOOT.elf was given, no key material exists "
+                self.record("keys", [], na=True, note="not applicable: a decrypted EBOOT.elf was given, no key material exists "
                                              "to leak; the install step checks the given file unchanged")
                 return
         lines = [ln.strip() for ln in open(self.o.keys, encoding="utf-8", errors="replace") if len(ln.strip()) >= 16]
@@ -383,7 +397,10 @@ class Q:
             for tok in ln.replace("=", " ").replace(":", " ").split():
                 if len(tok) >= 16:
                     tokens.add(tok.lower())
-        found = []
+        found, scanned = [], 0
+        if not os.path.isdir(self.root):   # the review's T-3: a stale root (resumed after relocate) scans nothing
+            self.record("keys", [f"the installation is not at {self.root}"])
+            return
         for d, dirs, files in os.walk(self.root):
             dirs[:] = [x for x in dirs if x not in ("gen", "objects", "zig-global", "zig-local", "disc")]
             for f in files:
@@ -394,9 +411,13 @@ class Q:
                     blob = open(p, "rb").read().decode("latin-1").lower()
                 except OSError:
                     continue
+                scanned += 1
                 if any(t in blob for t in tokens):
                     found.append(os.path.relpath(p, self.root))
-        self.record("keys", [f"key text in {found[:5]}"] if found else [], tokens=len(tokens),
+        bad = [f"key text in {found[:5]}"] if found else []
+        if not scanned or not tokens:
+            bad.append(f"nothing checked ({scanned} files, {len(tokens)} key tokens)")
+        self.record("keys", bad, tokens=len(tokens), files=scanned,
                     note="the lift's and the compiler's output and the disc copy not searched (derived, large)")
 
     def gameappimage(self):
@@ -444,7 +465,7 @@ class Q:
 
     def remove(self):
         if self.kind == "appimage":
-            self.record("remove", [], note="not applicable: an AppImage is a file the player deletes; nothing of it is "
+            self.record("remove", [], na=True, note="not applicable: an AppImage is a file the player deletes; nothing of it is "
                                            "unpacked into the installation folder")
             return
         saves0 = {k: v for k, v in tree(self.root).items() if k.startswith(("data/gamedata", "backups", "config"))}
@@ -476,7 +497,7 @@ class Q:
         """the package's items unpacked over the folder (as a player puts the launcher back): the installation's own
         files untouched, the installation found again"""
         if self.kind == "appimage":
-            self.record("reunpack", [], note="not applicable: an AppImage is never unpacked over the installation")
+            self.record("reunpack", [], na=True, note="not applicable: an AppImage is never unpacked over the installation")
             return
         keep = tree(self.root)
         keep = {k: v for k, v in keep.items() if not k.split("/")[0] in install_layout.launcher_package()}
@@ -555,8 +576,9 @@ def main():
         except Exception as e:   # a step that broke: recorded, the rest still run where they can
             q.record(s, [f"{type(e).__name__}: {e}"])
     failed = [s for s in steps if not q.res.get(s, {}).get("ok")]
-    print(f"{len(steps) - len(failed)} of {len(steps)} steps passed" +
-          (f"; failed: {', '.join(failed)}" if failed else ""))
+    na = [s for s in steps if q.res.get(s, {}).get("na")]
+    print(f"{len(steps) - len(failed) - len(na)} of {len(steps) - len(na)} applicable steps passed" +
+          (f"; not applicable: {', '.join(na)}" if na else "") + (f"; failed: {', '.join(failed)}" if failed else ""))
     sys.exit(1 if failed else 0)
 
 

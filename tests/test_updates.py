@@ -96,6 +96,34 @@ class Ed25519(unittest.TestCase):
 
 
 @unittest.skipUnless(OPENSSL, "OpenSSL's command line")
+class ManifestKinds(unittest.TestCase):
+    """the review's W-5: a download's kind is a known string that its platform and its file name agree with"""
+
+    def manifest(self, name, kind, platform):
+        a = {"name": name, "platform": platform, "size": 1, "sha256": "0" * 64}
+        if kind is not ...:
+            a["kind"] = kind
+        return {"format": 1, "version": "9.9.9", "channel": "prerelease", "min_launcher": None, "notes": "",
+                "key_id": "x", "assets": [a]}
+
+    def test_good_kinds(self):
+        for name, kind, plat in (("C-1-windows-x86_64.zip", "zip", "windows-x86_64"),
+                                 ("C-1-linux-x86_64.tar.xz", "tar.xz", "linux-x86_64"),
+                                 ("C-1-x86_64.AppImage", "appimage", "linux-x86_64"),
+                                 ("C-1-linux-x86_64.tar.xz", ..., "linux-x86_64")):
+            trust.check_manifest(self.manifest(name, kind, plat))
+
+    def test_bad_kinds_refused(self):
+        for name, kind, plat in (("C-1-linux-x86_64.tar.xz", "zip", "linux-x86_64"),      # name and kind disagree
+                                 ("C-1-x86_64.AppImage", "tar.xz", "linux-x86_64"),
+                                 ("C-1-windows-x86_64.zip", ["zip"], "windows-x86_64"),   # not a string
+                                 ("C-1-windows-x86_64.zip", 3, "windows-x86_64"),
+                                 ("C-1-linux-x86_64.tar.xz", "tar.xz", "windows-x86_64")):  # another system's kind
+            with self.assertRaises(trust.ReleaseError, msg=(name, kind, plat)) as e:
+                trust.check_manifest(self.manifest(name, kind, plat))
+            self.assertEqual(e.exception.code, "bad_manifest")
+
+
 class Releases(unittest.TestCase):
     """a mirror: releases.json (GitHub's API's shape) and each release's files in its own folder"""
 

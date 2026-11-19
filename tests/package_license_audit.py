@@ -60,6 +60,17 @@ def is_elf(path):
         return False
 
 
+def glibc_static(path):
+    """M11.4 (the review's L-1): a program with no dynamic section that carries glibc's own strings has glibc linked
+    into it; the AppImage runtime (static with musl) has none of them"""
+    info = subprocess.run(["readelf", "-d", path], capture_output=True, text=True).stdout
+    if "(NEEDED)" in info or "Shared library" in info:
+        return False
+    with open(path, "rb") as f:
+        data = f.read()
+    return b"glibc detected" in data or b"GNU C Library" in data or b"GLIBC_PRIVATE" in data
+
+
 def unpack(arg, tmp):
     if os.path.isdir(arg):
         return arg
@@ -95,6 +106,8 @@ def main():
                     continue
                 if not (is_elf(p) or n.endswith(".a")):
                     continue
+                if is_elf(p) and glibc_static(p):
+                    bad.append(f"{rel}: statically linked with glibc (LGPL code inside the program; link glibc dynamically)")
                 comp = next((c for c, (pats, _, _) in COMPONENTS.items() if any(fnmatch.fnmatch(n, q) for q in pats)),
                             None)
                 if not comp:

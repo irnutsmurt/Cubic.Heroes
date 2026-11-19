@@ -20,3 +20,8 @@ dev_hdd0/
 dev_flash/
 dev_bdvd/
 PS3_GAME/
+
+# AppImages are build output (M11.4, the review's L-3): the launcher's and the player's game AppImage; an
+# installation's exports/ holds the latter
+*.AppImage
+exports/

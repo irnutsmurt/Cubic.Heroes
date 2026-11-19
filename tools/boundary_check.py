@@ -25,7 +25,8 @@ What is refused (each file by its name and its bytes, not by where it sits):
                  PUP (firmware), NPD (EDAT/SDAT)
   LIFTED-CODE    the lifter's output (its header, or lifted function definitions in bulk); an object or library
                  that DEFINES lifted functions (a reference -- a native patch calling a lifted function by name --
-                 is allowed); a built game executable
+                 is allowed); a built game executable; an AppImage with its image (never in the repository; in a
+                 release only the launcher's, by its name -- its files are checked as a folder when it is made)
   GENERATED      code made by tools/gen_spu_native.py from the player's lift, source or compiled
   KEYS           decryption keys (the keys file's APP lines, erk/riv/klic values)
   MIDDLEWARE     the FMOD-derived files removed in M1 (tools/license_audit.py's FORBIDDEN)
@@ -128,8 +129,24 @@ def is_template(data):
     return b"@TITLE@" in data[:4096]
 
 
-def check_bytes(path, data, findings, linked_ok=()):
-    """Every finding for one file (its path as it would be published, its bytes)."""
+# the launcher's AppImage as tools/make_appimage.py names it (its files checked as a folder when it is made)
+LAUNCHER_APPIMAGE = re.compile(r"Cubic\.Heroes-[0-9][^/]*-x86_64\.AppImage")
+
+
+def appimage_image(data):
+    """an AppImage that carries its image: a little-endian ELF with the type-2 magic (AI 2 at offset 8) and a squashfs
+    image where the ELF ends -- not the bare runtime, which has the magic and no image (M11.4, the review's L-3: the
+    image is compressed, so nothing inside it can be read here)"""
+    if len(data) < 64 or data[:4] != b"\x7fELF" or data[4] != 2 or data[5] != 1 or data[8:11] != b"AI\x02":
+        return False
+    end = int.from_bytes(data[40:48], "little") + int.from_bytes(data[58:60], "little") * \
+        int.from_bytes(data[60:62], "little")
+    return data[end:end + 4] == b"hsqs"
+
+
+def check_bytes(path, data, findings, linked_ok=(), repository=False):
+    """Every finding for one file (its path as it would be published, its bytes). repository: a file of the
+    repository's tree (no AppImage at all belongs there)."""
     name = path.replace("\\", "/")
     base = name.rsplit("/", 1)[-1]
     ext = os.path.splitext(base)[1].lower()
@@ -188,6 +205,9 @@ def check_bytes(path, data, findings, linked_ok=()):
         # the game's name (tools/setup_pipeline.py GAME, port/CMakeLists.txt): not the setup app, DotHeroes-Setup
         if base.lower() in ("dotheroes", "dotheroes.exe"):
             add("LIFTED-CODE", "a built game executable")
+        if appimage_image(data) and (repository or not LAUNCHER_APPIMAGE.fullmatch(base)):
+            add("LIFTED-CODE", "an AppImage (build output; the player's game AppImage carries a built game, and its "
+                               "compressed image can't be checked here)")
 
 
 def git(*a):
@@ -201,7 +221,7 @@ def tracked(rev=None, findings=None):
         entries = [(e.split(b"\t", 1)[1].decode("utf-8", "replace"), e.split()[2].decode()) for e in listing if b"\t" in e
                    and e.split()[1] == b"blob"]
         for path, sha in entries:
-            check_bytes(path, git("cat-file", "blob", sha), findings)
+            check_bytes(path, git("cat-file", "blob", sha), findings, repository=True)
         return findings, len(entries)
     files = [f for f in git("ls-files", "-z").decode("utf-8", "replace").split("\0") if f]
     for f in files:
@@ -209,7 +229,7 @@ def tracked(rev=None, findings=None):
             data = open(os.path.join(ROOT, f), "rb").read()
         except OSError:
             continue
-        check_bytes(f, data, findings)
+        check_bytes(f, data, findings, repository=True)
     return findings, len(files)
 
 
@@ -222,7 +242,9 @@ GENERATED_PATHS = ["build/gen/recompiled/ppu_recomp_000.cpp", "build/gen/spu/ima
                    "gamespy_3ddot_link/PS3/SAVEDATA/BLJM60180T0000/ICON0.PNG",
                    "gamedata/dev_hdd0/home/00000001/savedata/BLUS30490SYSTEM/PARAM.SFO",
                    "x/PS3/SAVEDATA/BLUS30490X/ICON0.PNG", "x/dev_hdd0/home/00000001/savedata/BLUS30490X/DATA.EDT",
-                   "x/dev_flash/vsh/module/x.sprx", "x/PS3_GAME/USRDIR/data/x.bin"]
+                   "x/dev_flash/vsh/module/x.sprx", "x/PS3_GAME/USRDIR/data/x.bin",
+                   # M11.4 (the review's L-3): AppImages and an installation's exports (the player's game AppImage)
+                   "Cubic.Heroes-Game-x86_64.AppImage", "x/Cubic.Heroes-0.2.0-x86_64.AppImage", "exports/x.AppImage"]
 
 
 def tree(findings=None):
@@ -237,7 +259,7 @@ def tree(findings=None):
                 data = h.read(64 << 20)
         except OSError:
             continue
-        check_bytes(f, data, findings)
+        check_bytes(f, data, findings, repository=True)
     return findings, len(files)
 
 

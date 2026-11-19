@@ -26,6 +26,20 @@ class DesktopGuardTest(unittest.TestCase):
         with open(g.APPROVAL, "w", encoding="utf-8") as f:
             json.dump({"until": time.time() + minutes * 60, "what": "test"}, f)
 
+    def test_startup_stall_check_needs_an_approval(self):   # the review's T-2
+        import startup_stall_check as ssc
+        made = []
+        saved_argv, saved_fake = sys.argv, ssc.fake_x_server
+        ssc.fake_x_server = lambda: made.append(1) or (_ for _ in ()).throw(AssertionError("a display was made"))
+        sys.argv = ["startup_stall_check.py", "--bin", "/nonexistent/dotheroes"]
+        try:
+            with self.assertRaises(SystemExit) as e:
+                ssc.main()
+            self.assertEqual(e.exception.code, 3)
+            self.assertEqual(made, [], "nothing started without an approval")
+        finally:
+            sys.argv, ssc.fake_x_server = saved_argv, saved_fake
+
     def test_off_by_default(self):
         self.assertFalse(g.onscreen_allowed())
         env = {"WINDOW": "1", "VISIBLE": "1", "TOPMOST": "1", "GRAB_EVERY": "1", "PS3RECOMP_VK_WINDOW_HIDDEN": "1"}

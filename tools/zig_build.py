@@ -443,8 +443,11 @@ def link_args(lib_dir, platform=HOST):
         return res + rt + glslang + [os.path.join(lib_dir, "libSDL2.dll.a"),
                                      "-lws2_32", "-lole32", "-lbcrypt", "-ldbghelp", "-luser32", "-lgdi32",
                                      "-lwinmm", "-lshell32", "-Wl,--subsystem,windows", "-Wl,--stack,8388608"]
+    # M11.4: DT_RPATH, not DT_RUNPATH (--disable-new-dtags): the bundled libraries in $ORIGIN/lib come before an
+    # LD_LIBRARY_PATH a launcher injects (Lutris put /usr/lib first, and the game ran on the system's SDL2); only
+    # lib/ is named, so the system's own libraries (glibc, the Vulkan loader and drivers) are found as before
     return rt + glslang + [os.path.join(lib_dir, "libSDL2-2.0.so.0"), "-lpthread", "-ldl", "-lm",
-                           "-Wl,-rpath,$ORIGIN/lib"]
+                           "-Wl,-rpath,$ORIGIN/lib", "-Wl,--disable-new-dtags"]
 
 
 def build_game(gen_dir, out_exe, cache_dir, zig=None, platform=HOST, progress=None, log=None, keep=(),

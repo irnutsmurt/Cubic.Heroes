@@ -2167,6 +2167,8 @@ VkFormat depth_vkformat(uint32_t depth_format);
 // (AMD: D32_SFLOAT_S8), or back; else no pipeline prepared from it is the one a draw looks up
 void recipe_host_depth(PipeState& s)
 {
+    // no device yet (`--shader-inventory --recipes`, before ppfx::init: the review's W-3): the recipe as recorded
+    if (!D.phys || !F.GetPhysicalDeviceFormatProperties) return;
     if (s.kind == kPipeAsp && s.df != VK_FORMAT_UNDEFINED) s.df = (uint32_t)depth_vkformat(0);
 }
 

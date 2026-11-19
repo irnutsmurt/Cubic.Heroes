@@ -13,7 +13,7 @@ into the shipped libraries), and as the developer's user, so build/ never holds 
   appimage-pieces  the AppImage runtime and the sources it and mksquashfs come from, verified (tools/fetch_appimage.py;
                    run on the host before the container, where gpg is)
   deps             SDL2, OpenAL Soft, FFmpeg, glslang... against this baseline's headers (tools/build_deps.py)
-  mksquashfs       squashfs-tools 4.7.5's mksquashfs, gzip and zstd only, fully static: the player's machine makes its
+  mksquashfs       squashfs-tools 4.7.5's mksquashfs, gzip and zstd only (zstd, zlib static; glibc dynamic): the player's machine makes its
                    game AppImage with it, with nothing installed
   prebuilt         the runtime library in the release configuration (tools/zig_build.py build_prebuilt)
   bundle           the worker frozen with this environment's Python, the launcher, the tarball (tools/make_bundle.py)
@@ -83,7 +83,9 @@ def s_deps():
 
 def s_mksquashfs():
     """mksquashfs from the pinned source (fetch_appimage.py checked it): gzip and zstd only -- what the AppImage
-    runtime reads -- linked fully static against this baseline, so it needs nothing on the player's machine"""
+    runtime reads. zstd and zlib linked in statically (BSD, zlib licence: their notices ship), glibc dynamically
+    against this baseline (M11.4, the owner's decision on the review's L-1: a static glibc is LGPL code inside the
+    program; the system's own glibc is not), so it needs nothing on the player's machine beyond glibc 2.31"""
     import tarfile
     src_tar = os.path.join(ROOT, "build", "deps", "src", "appimage", SQUASHFS_TOOLS + ".tar.gz")
     work = os.path.join(ROOT, "build", "deps", "work", "linux", SQUASHFS_TOOLS)
@@ -94,15 +96,18 @@ def s_mksquashfs():
     d = os.path.join(work, SQUASHFS_TOOLS, "squashfs-tools")
     subprocess.check_call(["make", "-C", d, f"-j{os.cpu_count() or 4}", "mksquashfs", "GZIP_SUPPORT=1",
                            "ZSTD_SUPPORT=1", "XZ_SUPPORT=0", "LZO_SUPPORT=0", "LZ4_SUPPORT=0", "LZMA_XZ_SUPPORT=0",
-                           "XATTR_SUPPORT=0", "EXTRA_LDFLAGS=-static"])
+                           "XATTR_SUPPORT=0", "LIBS=-lpthread -lm -Wl,-Bstatic -lz -lzstd -Wl,-Bdynamic"])
     os.makedirs(APPIMAGE_OUT, exist_ok=True)
     out = os.path.join(APPIMAGE_OUT, "mksquashfs")
     shutil.copy2(os.path.join(d, "mksquashfs"), out)
     subprocess.check_call(["strip", out])
     info = subprocess.run(["file", out], capture_output=True, text=True).stdout.strip()
-    if "statically linked" not in info:
-        sys.exit(f"[mksquashfs] not static: {info}")
-    print(f"[mksquashfs] {out}: {info.split(': ', 1)[1][:90]}")
+    needed = [l.split("[", 1)[1].rstrip("]") for l in subprocess.run(["readelf", "-d", out], capture_output=True,
+              text=True).stdout.splitlines() if "(NEEDED)" in l]
+    bad = [n for n in needed if not n.startswith(("libc.so", "libm.so", "libpthread.so", "ld-linux"))]
+    if "dynamically linked" not in info or not any(n.startswith("libc.so") for n in needed) or bad:
+        sys.exit(f"[mksquashfs] glibc not dynamic, or a library beyond glibc's needed: {info}; NEEDED {needed}")
+    print(f"[mksquashfs] {out}: glibc dynamic ({', '.join(needed)}), zstd and zlib static")
 
 
 def s_prebuilt():
@@ -115,6 +120,11 @@ def s_prebuilt():
 def s_bundle():
     import make_bundle
     make_bundle.bundle("linux")
+    # the glibc baseline checked on what is shipped, as packaging's own step (M11.4, the review's L-5): every ELF file
+    # of the folder at GLIBC_2.31 at most, needing only glibc's libraries and the ones shipped beside it
+    folder = os.path.join(ROOT, "build", "dist", "DotHeroes-Setup-linux-x86_64")
+    if subprocess.call([sys.executable, os.path.join(ROOT, "tools", "glibc_check.py"), folder]):
+        sys.exit("[bundle] the package's ELF files are not all within the glibc baseline (tools/glibc_check.py)")
 
 
 def s_appimage():

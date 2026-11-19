@@ -33,18 +33,31 @@ def main(argv):
         print(__doc__)
         return 2
     disc = os.path.abspath(argv[1])
+    # the review's L-5: nothing to check is a failure, not a pass -- a missing disc folder or no log with any line
+    if not os.path.isdir(disc):
+        print(f"[case] no disc folder at {disc}")
+        return 1
+    found = list(logs(argv[2:]))
+    if not found:
+        print(f"[case] no run log among {argv[2:]}")
+        return 1
     by_lower = {}
     for d, _, fs in os.walk(disc):
         for f in fs:
             p = os.path.join(d, f)
             by_lower[p.lower()] = p
     failed = set()
-    for log in logs(argv[2:]):
+    lines = 0
+    for log in found:
         with open(log, encoding="utf-8", errors="replace") as f:
             for line in f:
+                lines += 1
                 m = FAIL.search(line)
                 if m:
                     failed.add(m.group(1))
+    if not by_lower or not lines:
+        print(f"[case] nothing checked: {len(by_lower)} disc files, {lines} log lines")
+        return 1
     mismatched = []
     for p in sorted(failed):
         real = by_lower.get(os.path.abspath(p).lower())

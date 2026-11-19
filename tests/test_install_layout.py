@@ -148,6 +148,17 @@ class Slots(Base):
         self.assertIn(f"builds/{b}", self.lay.prune()["removed"])
         self.assertEqual(self.lay.rollback()["active"], a)
 
+    def test_rollback_and_retention_keep_only_whole_builds(self):   # the review's W-4
+        a, _, _ = self.build(Fake(b"game 1"))
+        self.lay.set_retention(2)
+        b, _, _ = self.build(Fake(b"game 2"))
+        c, _, _ = self.build(Fake(b"game 3"))
+        self.assertEqual(self.lay.read_active()["previous"], [b, a])
+        os.remove(os.path.join(self.lay.build_dir(c), EXE))   # the active build damaged
+        self.assertEqual(self.lay.rollback()["previous"], [a], "the damaged build is not kept for rollback")
+        os.remove(os.path.join(self.lay.build_dir(a), EXE))   # a kept build damaged
+        self.assertEqual(self.lay.set_retention(1)["previous"], [], "a damaged build is not kept by the retention")
+
     def test_rollback_without_previous(self):
         self.build(Fake())
         with self.assertRaises(layout.LayoutError) as e:

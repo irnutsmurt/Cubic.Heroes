@@ -338,7 +338,9 @@ class Layout:
         why = self.check_build(target, full=True)
         if why:
             raise LayoutError(f"build {target} can't be used: {why}", "build_damaged")
-        st["previous"] = [b for b in [st["active"]] + st["previous"] if b and b != target][:max(1, st["retention"])]
+        # whole builds only, as activate keeps them (the review's W-4): a damaged build is not kept for a later rollback
+        st["previous"] = [b for b in [st["active"]] + st["previous"]
+                          if b and b != target and not self.check_build(b)][:max(1, st["retention"])]
         st["active"] = target
         self.write_active(st)
         self.point_game(target)
@@ -347,7 +349,7 @@ class Layout:
     def set_retention(self, n):
         st = self.read_active()
         st["retention"] = max(0, int(n))
-        st["previous"] = st["previous"][:st["retention"]]
+        st["previous"] = [b for b in st["previous"] if not self.check_build(b)][:st["retention"]]   # whole ones (W-4)
         self.write_active(st)
         return st
 

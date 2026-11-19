@@ -21,6 +21,8 @@ import threading
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "tests"))
+import desktop_guard  # noqa: E402
 
 
 def fake_x_server():
@@ -57,6 +59,9 @@ def main():
     ap.add_argument("--bin", required=True)
     ap.add_argument("--timeout", type=int, default=10)
     a = ap.parse_args()
+    # the game asks for a window (of the fake server): through the desktop guard like every on-screen run, whatever
+    # display answers it (the review's T-2)
+    desktop_guard.require_onscreen("the stalled-window-system check (the game asks for a window)")
     n, close = fake_x_server()
     run = tempfile.mkdtemp(prefix="stall-check-")
     try:

@@ -68,12 +68,17 @@ RUN curl -fsSL -o /tmp/python.tar.xz "https://www.python.org/ftp/python/${PYTHON
 ENV PATH=/opt/python/bin:$PATH
 # the pinned Python packages: the worker's (pycryptodome), the icon's (Pillow), the freezer (PyInstaller), the build
 # tools (CMake 4 and Ninja: the same as CI's)
-RUN curl -fsSL -o /tmp/get-pip.py https://bootstrap.pypa.io/get-pip.py && python3 /tmp/get-pip.py --no-cache-dir \
- && rm /tmp/get-pip.py \
- && python3 -m pip install --no-cache-dir pyinstaller==6.22.3 pycryptodome==4.5.0 pillow==13.0.0 cmake==4.4.5 \
-      ninja==1.13.2
+# (M11.4, the review's L-4): pip from its own wheel, checked by SHA-256 (no get-pip.py); every package from
+# requirements.txt, each pinned by version and by its wheel's SHA-256 (--require-hashes)
+COPY requirements.txt /tmp/requirements.txt
+RUN curl -fsSL -o /tmp/pip-26.3-py3-none-any.whl https://files.pythonhosted.org/packages/py3/p/pip/pip-26.3-py3-none-any.whl \
+ && echo "f3b60b20ffaadd4415ed7957212a38ac63fa4c5fa375bd0f4a797777940fad13  /tmp/pip-26.3-py3-none-any.whl" | sha256sum -c - \
+ && python3 /tmp/pip-26.3-py3-none-any.whl/pip install --no-cache-dir --no-index /tmp/pip-26.3-py3-none-any.whl \
+ && python3 -m pip install --no-cache-dir --require-hashes --only-binary=:all: -r /tmp/requirements.txt \
+ && rm /tmp/pip-26.3-py3-none-any.whl /tmp/requirements.txt
 
-# mksquashfs's static libraries (tools/linux_package.py builds squashfs-tools 4.7.5 with gzip and zstd only, static)
+# mksquashfs's zstd (tools/linux_package.py builds squashfs-tools 4.7.5 with gzip and zstd only: zstd and zlib
+# linked in statically, glibc dynamically)
 RUN apt-get -o Acquire::Retries=5 update && apt-get -o Acquire::Retries=5 install -y --no-install-recommends libzstd-dev \
  && rm -rf /var/lib/apt/lists/*
 

@@ -34,14 +34,19 @@ PLATFORMS = ("windows-x86_64", "linux-x86_64")
 KINDS = {"zip": "windows", "tar.xz": "linux", "appimage": "linux"}
 
 
+def name_kind(name):
+    """the package kind a download's file name says"""
+    n = name.lower() if isinstance(name, str) else ""
+    return "zip" if n.endswith(".zip") else "tar.xz" if n.endswith(".tar.xz") else \
+        "appimage" if n.endswith(".appimage") else None
+
+
 def asset_kind(a):
     """a manifest download's package kind: its own `kind`, else its name's"""
     k = a.get("kind")
     if k:
         return k
-    n = a.get("name", "").lower()
-    return "zip" if n.endswith(".zip") else "tar.xz" if n.endswith(".tar.xz") else \
-        "appimage" if n.endswith(".appimage") else None
+    return name_kind(a.get("name", ""))
 
 
 class ReleaseError(Exception):
@@ -195,8 +200,11 @@ def check_manifest(m):
                 or a.get("platform") not in PLATFORMS or not isinstance(a.get("size"), int) or a["size"] <= 0 \
                 or not re.fullmatch(r"[0-9a-f]{64}", str(a.get("sha256", ""))):
             bad(f"a download's record ({a.get('name') if isinstance(a, dict) else a!r})")
-        if "kind" in a and (a["kind"] not in KINDS or not a["platform"].startswith(KINDS[a["kind"]] + "-")):
-            bad(f"a download's kind ({a['name']}: {a['kind']} for {a['platform']})")
+        # the review's W-5: a kind that is not one of ours (a non-string included) or that its file name contradicts
+        if "kind" in a and (not isinstance(a["kind"], str) or a["kind"] not in KINDS
+                            or not a["platform"].startswith(KINDS[a["kind"]] + "-")
+                            or name_kind(a["name"]) != a["kind"]):
+            bad(f"a download's kind ({a['name']}: {a['kind']!r} for {a['platform']})")
     if not isinstance(m.get("notes", ""), str):
         bad("its notes")
     return m

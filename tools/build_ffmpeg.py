@@ -341,7 +341,8 @@ def link(platform, src, work, v, per_lib):
             # objects carry configure's -g)
             args = ["-shared", "-o", out, "-Wl,-soname," + name, "-Wl,--version-script," + ver, "-Wl,-Bsymbolic",
                     "-Wl,-z,noexecstack", "-Wl,--as-needed", "-Wl,--strip-all",
-                    "-Wl,-rpath,$ORIGIN"]   # each finds the others beside it (as libopenal.so.1 does)
+                    "-Wl,-rpath,$ORIGIN",   # each finds the others beside it (as libopenal.so.1 does) --
+                    "-Wl,--disable-new-dtags"]   # as DT_RPATH, before an injected LD_LIBRARY_PATH (M11.4)
             args += [os.path.join(work, "lib" + d, "lib%s.so.%s" % (d, major[d])) for d in deps]
         r = subprocess.run(cc + args + per_lib[lib] + [e for e in extra if e != "-latomic"],
                            cwd=work, capture_output=True, text=True)
