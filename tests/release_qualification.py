@@ -372,6 +372,11 @@ class Q:
         self.play("rollback-play")
 
     def keys(self):
+        with open(self.o.keys, "rb") as f:
+            if f.read(4) == b"\x7fELF":   # the owner's D3 (M11.4): a decrypted EBOOT.elf in place of a keys file
+                self.record("keys", [], note="not applicable: a decrypted EBOOT.elf was given, no key material exists "
+                                             "to leak; the install step checks the given file unchanged")
+                return
         lines = [ln.strip() for ln in open(self.o.keys, encoding="utf-8", errors="replace") if len(ln.strip()) >= 16]
         tokens = set()
         for ln in lines:

@@ -113,6 +113,8 @@ docs/FEASIBILITY.md), nor run since 2026-10-30.
   when the active build changes by an update or a rollback.
 - D3: the owner provides the local keys file's path. Its contents never appear in logs, diagnostics, commits or
   release artifacts.
+- D3 (revised by the owner, 2026-11-18, evening): the already decrypted EBOOT.elf is the installation and
+  qualification input; the separate keys file blocks nothing (the qualification's `keys` step is not applicable to it).
 - D4: validated stages are pushed with every safeguard on; changes to shared runtime code are checked for Windows
   regressions.
 - Windows and Linux CI approved. The glibc baseline is verified on actual supported distributions, not only Manjaro.
@@ -215,16 +217,16 @@ States: **VERIFIED** (implemented, evidence named), **UNVERIFIED** (implemented,
 | A2 | The desktop guard enforced on Linux (X11 and Wayland) | VERIFIED (mechanism); runners' Linux kill paths: P4 | section 9 |
 | A3 | Native Linux dev build boots and plays (offscreen) | PARTIAL: boots to the title and the attract demo, movies decoded; play from a save not yet | section 11 |
 | A4 | Linux release configuration as Windows' (D1: no lifted SPU in the release) | VERIFIED at boot (--memtest 601/601; the census all zero); longer play: P8 | section 12 |
-| A5 | Release crash record and hang report on Linux | PARTIAL: the release crash record and the developer crash report and thread dump verified; a real hang's detection (shared code): P8 | section 15 |
-| A6 | Audio through OpenAL Soft with the system's server; device change recovered | PARTIAL: PipeWire output with events and reopen; the audio suite (device losses included) 230/230; a real default-device change: P8 | section 15 |
+| A5 | Release crash record and hang report on Linux | VERIFIED: the release crash record, the developer crash report and thread dump (section 15); the graphics' start watched in every build -- a stalled window system ends the game with status 70 and a report (section 23) | sections 15, 23 |
+| A6 | Audio through OpenAL Soft with the system's server; device change recovered | VERIFIED: the audio suite 230/230; a real default-output change and back during play, followed both ways (section 23); the shipped OpenAL with PipeWire, PulseAudio and ALSA | section 23 |
 | A7 | Cinematics through FFmpeg | NOT DONE | P2/P8 |
-| A8 | X11 and Wayland: windowed, borderless, fullscreen; the desktop's mode never changed | PARTIAL: Wayland -- the three modes on screen, the desktop at 1600x900@60.07 throughout; X11 -- the three modes created through SDL's X11 driver (a private Xvfb) and X11 presentation on screen earlier; the X11 modes on the desktop again: after the session's XWayland is restarted (section 22) | section 22 |
+| A8 | X11 and Wayland: windowed, borderless, fullscreen; the desktop's mode never changed | VERIFIED: all three modes on screen under native Wayland and X11 (XWayland, RADV presenting), the desktop at 1600x900@60.07 before and after every run; HiDPI at 150% (section 23) | sections 22, 23 |
 | A9 | Rendering resolution presets and custom; VSync; frame limits | NOT DONE | P8 |
 | A10 | Controllers: detection, prompts, hot-plug, remapping; keyboard remapping | NOT DONE | P8 (hot-plug by hand) |
 | A11 | The in-game overlay, performance overlays, developer tools, diagnostics and log export | NOT DONE | P8 |
 | A12 | The public CLI and exit codes (docs/CLI.md), `SIGTERM` reaching the game | VERIFIED: tests/cli_integration.py --with-game 17/17 on Linux (Windows: 17/17, M11.2); the signals; every command from both packages (section 20) | section 21 |
 | A13 | Graphical launcher: install from the disc, local recompilation, shader preparation | PARTIAL: headless install verified (2458 pipelines, none failed); the window: to do | section 13 |
-| A14 | Signed updates, repair and rollback; the right package per OS and architecture | PARTIAL: an update that rebuilds and a rollback from the packages verified (the AppImage's by a new .AppImage file); a signed manifest download on Linux: unit tests only so far | section 20 |
+| A14 | Signed updates, repair and rollback; the right package per OS and architecture | PARTIAL: tests/linux_update_check.py 10/10 from the package (signed release offered and swapped in; bad signature, untrusted key, Windows-only release, corrupted download and a zip refused; each install kind its own package); update and rollback from the packages; `--install --repair`: to do | section 23 |
 | A15 | Portable root: spaces, Unicode, relocation, another drive, no FUSE (tarball) | PARTIAL: spaces, accents and Japanese, the whole root moved and played, no FUSE (containers) verified; another drive: to do | section 20 |
 | A16 | Launcher AppImage and tarball, equivalent | VERIFIED: one folder; the AppImage = the folder file for file; each qualified 14/14 from the package, offline (section 20) | section 20 |
 | A17 | The locally generated thin game AppImage: relocatable, regenerated on update and rollback, never distributed | VERIFIED: made by the packaged installs, of the active build after the update and after the rollback; through FUSE and extract-and-run; before and after the root moved (section 20) | section 20 |
@@ -587,3 +589,37 @@ is); the game ending with CubicHeroes (PR_SET_PDEATHSIG). The runner's Windows-o
   On Xvfb the three modes are created through SDL's X11 driver (windowed 1280x720; borderless and exclusive 1600x900 at
   0,0); presenting needs a GPU path Xvfb lacks, so headless there, as expected. The owner is asked to restart the
   session (log out and in) for the X11 desktop runs.
+
+## 23. Closing checks, first part (2026-11-18, evening) [M]
+
+The owner restarted the KDE session (the stalled XWayland), copied the Windows checkpoints, RPCS3 references and
+baselines into `build/` (local, git-ignored), approved the audio and scaling changes, and revised D3 (the decrypted
+EBOOT.elf is the qualification input).
+
+- **The packages re-qualified after the backend fix** (section 22): tarball and AppImage **14 of 14 each** again, from
+  the rebuilt packages (SHA-256 49a463c4... and f44ea0f6...); the distribution check 8/8 on all four images again.
+- **Signed updates on Linux** (tests/linux_update_check.py, the package's own frozen worker, a throwaway Ed25519 key,
+  a local mirror): **10 of 10** -- a signed newer release offered; the tarball install downloads the tar.xz, an AppImage
+  install the AppImage, each checked; the tar.xz staged with CubicHeroes executable; the swap: the new launcher started
+  offscreen, healthy, kept, the player's save untouched; refused: a manifest whose signature does not match, one signed
+  by an untrusted key, a release with only a Windows package (nothing for Linux), a download not the manifest's
+  (nothing kept), a zip handed to Linux's staging.
+- **Why the start-up watchdog said nothing about the X11 stall**: the developer build's watchdog allows 120 s before
+  the first frame (the runs were 25-40 s), and **release builds had no watchdog at all** (diag is the developer
+  build's) -- a player would have had a game hanging with no window and no word, on either system. Now (port/main.cpp
+  `startup_watch`, every build, both systems): the graphics' start -- the display's refresh read on the main thread,
+  then the window, device and swapchain -- is watched; after `DOTHEROES_STARTUP_TIMEOUT_S` (30 s) the game logs why
+  (naming the video driver), writes `logs/crash/startup-<time>.txt` (a developer build also dumps every thread) and
+  ends with **status 70**, which `CubicHeroes --play` passes on. **tests/startup_stall_check.py**: a fake X server that
+  accepts and never answers -- the game ended in 10.0 s (timeout 10) with status 70, its log naming the stall, the
+  report written. The Windows game cross-built with it.
+- **X11 with hardware presentation, on the desktop** (after the session restart): windowed 1280x720, borderless (a
+  1280x720 swapchain made again at 1600x900 once X11's fullscreen size arrived), exclusive at the display's mode --
+  each "window swapchain ... format 44, present mode fifo" through XWayland on RADV; the desktop 1600x900@60.07 before
+  and after each.
+- **HiDPI at 150%** (KDE's scale set with kscreen-doctor, then restored to 1, confirmed): under native Wayland a
+  1059x536 window (fitted to the 1067x600 desktop units) with a **1589x804 swapchain** -- the display's own pixels, not
+  a stretched buffer.
+- **A real default-output change** (a temporary null sink made the default during play, then the original back, the
+  module unloaded; the original default confirmed): "the default output changed: moving to it" / "device reopened:
+  CubicTestSink" and back to "Ryzen HD Audio Controller Analog Stereo".

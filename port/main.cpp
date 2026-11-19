@@ -32,6 +32,7 @@
 /* The lifter's generated header, which declares ppu_context and the function
  * table. It comes first: everything below is written against that struct. */
 #include "diag/diag.h"
+#include <ctime>   /* the start-up watch's report name */
 #include "diag/game_log.h"
 #include "ps3emu/guest_pause.h"
 #include "ps3emu/osd.h"   /* M10.4: the save-data screen ends the logos' speed-up */   /* M10.1: the host frame limiter */   /* M9: the log's levels, session record, tagged events, size cap */
@@ -352,6 +353,7 @@ static void present_guest_frame(void)
  * only when the game will show a window: offscreen there is no display to ask (and a test may not reach one), so
  * 60 Hz. SDL's refresh is whole hertz (59.94 reads 59 or 60), as Windows' display-mode fallback. Read only: the
  * display's mode is never changed. */
+static void startup_watch_begin(void);   /* the graphics' start watched: below, with the frame clock */
 static double s_display_refresh_ms = 0.0;
 extern "C" int rsx_vk_display_refresh_hz(void);   /* the Vulkan backend's, which owns SDL (ps3recomp 0172) */
 
@@ -359,6 +361,7 @@ static void probe_display_refresh(void)
 {
     const char* w = getenv("PS3RECOMP_VK_WINDOW");
     if (w && *w == '0') return;
+    startup_watch_begin();   /* the window system can stall here first (SDL's video, opened on the main thread) */
     const int hz = rsx_vk_display_refresh_hz();
     if (hz > 1) s_display_refresh_ms = 1000.0 / hz;
 }
@@ -475,6 +478,53 @@ static inline void ft_walker(uint32_t what, uint64_t t0)
     if (t0) ps3_ft_span(PS3_FT_WALKER, what, ft_cpu(), 0, t0, ps3_ft_now());
 }
 
+/* M11.4: the graphics' start watched. Opening the window and the Vulkan device takes a second or two; when the window
+ * system or the GPU driver never answers (a stalled XWayland did: SDL waited in XIfEvent for its window's map), the
+ * thread starting them can't be interrupted -- so after DOTHEROES_STARTUP_TIMEOUT_S (30 s; 0: no watch) the game says
+ * why in its log and in logs/crash/startup-<time>.txt (a developer build also dumps every thread), and ends with
+ * status 70, which CubicHeroes --play passes on, instead of hanging with no window and no word. Release builds too:
+ * their diag watchdog is the developer build's only. */
+#define DOTHEROES_EXIT_STARTUP 70
+static std::atomic<int> s_graphics_started{ 0 };
+static void startup_watch(void);
+/* the watch starts once, before the first thing that asks the window system (the display's refresh, on the main
+ * thread; else the backend's own start) */
+static void startup_watch_begin(void)
+{
+    static std::once_flag once;
+    std::call_once(once, [] { std::thread(startup_watch).detach(); });
+}
+
+static void startup_watch(void)
+{
+    const char* e = getenv("DOTHEROES_STARTUP_TIMEOUT_S");
+    const int secs = e && *e ? atoi(e) : 30;
+    if (secs <= 0) return;
+    for (int i = 0; i < secs * 10; i++) {
+        if (s_graphics_started.load()) return;
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    if (s_graphics_started.load()) return;
+    const char* drv = getenv("SDL_VIDEODRIVER");
+    char why[400];
+    snprintf(why, sizeof why, "the graphics did not finish starting in %d s: the window system or the GPU driver did "
+             "not answer (SDL video driver: %s; the [RSX vulkan] lines above say how far it got). Ending with status %d "
+             "instead of waiting with no window.", secs, drv && *drv ? drv : "SDL's choice", DOTHEROES_EXIT_STARTUP);
+    dh_log(DH_LOG_ERROR, "startup", "%s", why);
+    diag_dump_all_threads("startup: the graphics' start did not finish");   /* a developer build's report */
+    if (const char* dir = getenv("DIAG_CRASH_DIR"); dir && *dir) {
+        char path[1024];
+        snprintf(path, sizeof path, "%s/startup-%lld.txt", dir, (long long)time(nullptr));
+        if (FILE* f = fopen(path, "w")) {
+            fprintf(f, "Cubic.Heroes: %s\n", why);
+            fclose(f);
+        }
+    }
+    fflush(stdout);
+    fflush(stderr);
+    _exit(DOTHEROES_EXIT_STARTUP);   /* the stuck thread can't be joined: nothing else can be waited for either */
+}
+
 static DWORD WINAPI frame_clock(LPVOID)
 {
     /* The RSX side: the FIFO walker and the present. The vblank ticks on its
@@ -483,7 +533,9 @@ static DWORD WINAPI frame_clock(LPVOID)
     const char* title = getenv("PS3_TITLE");
     if (!title || !*title) title = "ps3recomp";
 
+    startup_watch_begin();
     int rsx_ok = (rsx_backend_init(WINDOW_WIDTH, WINDOW_HEIGHT, title) == 0);
+    s_graphics_started.store(1);
     fprintf(stderr, "[rsx] %s backend init %s\n", RSX_BACKEND_NAME,
             rsx_ok ? "OK -- window open" : "FAILED");
     std::thread(vblank_clock).detach();
