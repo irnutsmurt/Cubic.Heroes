@@ -110,7 +110,8 @@ With `--json`:
 - `--install`, `--update`, `--prepare-shaders`, `--rebuild-shaders`, `--migrate-from`: the operation's **events as
   JSON lines**, as the worker sends them (docs/M9_WORKER_PROTOCOL.md section 2: `hello`, `plan`, `stage`,
   `progress` with `overall` 0-1 and `eta`, `log`, and last `result`), then, if it failed, the failure object above.
-- `--play`: `{"ev":"started","pid":N,"game":PATH}` once the game runs, `{"ev":"ended","exit":N}` when it ends.
+- `--play`: `{"ev":"started","pid":N,"game":PATH}` once the game runs, `{"ev":"ended","exit":N}` when it ends (with
+  `"why"` for a status section 5 explains, such as 70).
 
 `--status --json` holds: `cubicheroes` (the version), `install_dir`, `install_dir_from` (which of section 1's rules
 chose it), `writable`, `installed`, `game` (the game's program, when installed), `install` (what the folder holds:
@@ -162,7 +163,16 @@ own rules: it plays on its own test saves (`data/devmode/gamedata`), never yours
 | 7 | the installation folder can't be used (read-only, protected, or not enough free space) |
 
 `--play` passes the game's status on; a game that crashed exits with the system's code for it (on Windows, an
-NTSTATUS such as `0xC0000005`).
+NTSTATUS such as `0xC0000005`). One status of the game's own:
+
+| Game status | Means |
+|---|---|
+| 70 | **the graphics didn't start in time**: the window or the graphics driver never finished starting, and the game ended itself instead of waiting with no window. Its log (`logs/game.log`) names the step that stalled ("stalled at the graphics backend: the Vulkan device (the GPU driver)", ...) and `logs/crash/startup-<time>.txt` keeps the message. `--play` prints an explanation on stderr (with `--json`: the `ended` event's `why`); the launcher's window shows it when a game it started ends so. Usually a graphics driver or window-system problem: update the driver, close overlay or recording tools, restart the computer |
+
+The time allowed: 120 seconds on Windows (and no limit while a debugger is attached to the game), 30 seconds on Linux;
+`DOTHEROES_STARTUP_TIMEOUT_S` (an environment variable, seconds; 0: no limit) changes it. It covers the window's and
+the graphics device's start only: shader preparation (`--prepare-shaders`) and the game's own loading after the
+graphics have started are never cut short by it.
 
 The `code` names in JSON are the worker's (docs/M9_WORKER_PROTOCOL.md section 4) plus `usage`, `no_install`,
 `no_game`, `no_worker`, `root_not_writable`.

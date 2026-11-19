@@ -177,6 +177,7 @@ extern "C" void rsx_vulkan_backend_present_begin(void);
 extern "C" void rsx_vulkan_backend_present_finish(void);
 extern "C" int  rsx_vulkan_backend_pump_messages(void);
 extern "C" int  rsx_vulkan_backend_window_rect(int out[5]);   /* M10.1: the window's place, kept for next time */
+extern "C" const char* rsx_vk_init_stage(void);   /* M11.4 (W-2): where the backend's start is, for the start-up watch */
 #  define rsx_backend_init    rsx_vulkan_backend_init
 #  define rsx_backend_present rsx_vulkan_backend_present
 #  define rsx_backend_pump    rsx_vulkan_backend_pump_messages
@@ -480,36 +481,94 @@ static inline void ft_walker(uint32_t what, uint64_t t0)
 
 /* M11.4: the graphics' start watched. Opening the window and the Vulkan device takes a second or two; when the window
  * system or the GPU driver never answers (a stalled XWayland did: SDL waited in XIfEvent for its window's map), the
- * thread starting them can't be interrupted -- so after DOTHEROES_STARTUP_TIMEOUT_S (30 s; 0: no watch) the game says
- * why in its log and in logs/crash/startup-<time>.txt (a developer build also dumps every thread), and ends with
- * status 70, which CubicHeroes --play passes on, instead of hanging with no window and no word. Release builds too:
- * their diag watchdog is the developer build's only. */
+ * thread starting them can't be interrupted -- so after DOTHEROES_STARTUP_TIMEOUT_S the game says why and where in
+ * its log and in logs/crash/startup-<time>.txt (a developer build also dumps every thread), and ends with status 70,
+ * which CubicHeroes --play passes on and the launcher explains, instead of hanging with no window and no word.
+ * Release builds too: their diag watchdog is the developer build's only.
+ * The owner's decision (the Windows review's W-2): Linux 30 s; Windows 120 s -- a healthy start can be slow there (the
+ * first device after a driver update, an antivirus scanning the pipeline cache, a capture tool's layers) and the
+ * stalled window system the watch is for doesn't exist -- and on Windows never while a debugger is attached (a start
+ * stopped in a debugger is no hang). 0 turns it off. It covers the window and the backend's start only: it stops at
+ * the graphics' success, before the renderer's shader warm-up, and `--prepare` never arms it. */
 #define DOTHEROES_EXIT_STARTUP 70
+#ifdef _WIN32
+#  define DOTHEROES_STARTUP_DEFAULT_S 120
+#else
+#  define DOTHEROES_STARTUP_DEFAULT_S 30
+#endif
 static std::atomic<int> s_graphics_started{ 0 };
+static std::atomic<const char*> s_startup_stage{ "the window system (SDL's video, opened on the main thread)" };
+static std::chrono::steady_clock::time_point s_startup_t0;
 static void startup_watch(void);
 /* the watch starts once, before the first thing that asks the window system (the display's refresh, on the main
  * thread; else the backend's own start) */
 static void startup_watch_begin(void)
 {
     static std::once_flag once;
-    std::call_once(once, [] { std::thread(startup_watch).detach(); });
+    std::call_once(once, [] {
+        s_startup_t0 = std::chrono::steady_clock::now();
+        std::thread(startup_watch).detach();
+    });
+}
+
+static int startup_timeout_s(void)
+{
+    const char* e = getenv("DOTHEROES_STARTUP_TIMEOUT_S");
+    return e && *e ? atoi(e) : DOTHEROES_STARTUP_DEFAULT_S;
+}
+
+/* where the start is: the host's own step, or inside the backend's start its own stage (rsx_vk_init_stage) */
+static void startup_stage(char* out, size_t n)
+{
+    const char* host = s_startup_stage.load();
+#if defined(PS3RECOMP_RSX_VULKAN)
+    if (!strcmp(host, "the graphics backend")) {
+        snprintf(out, n, "the graphics backend: %s", rsx_vk_init_stage());
+        return;
+    }
+#endif
+    snprintf(out, n, "%s", host);
 }
 
 static void startup_watch(void)
 {
-    const char* e = getenv("DOTHEROES_STARTUP_TIMEOUT_S");
-    const int secs = e && *e ? atoi(e) : 30;
-    if (secs <= 0) return;
-    for (int i = 0; i < secs * 10; i++) {
+    const int secs = startup_timeout_s();
+    if (secs <= 0) {
+        dh_log(DH_LOG_INFO, "startup", "the start-up watch is off (DOTHEROES_STARTUP_TIMEOUT_S=0)");
+        return;
+    }
+#ifdef _WIN32
+    bool told = false;
+#endif
+    for (;;) {
         if (s_graphics_started.load()) return;
+        const double el = std::chrono::duration<double>(std::chrono::steady_clock::now() - s_startup_t0).count();
+        if (el >= secs) {
+#ifdef _WIN32
+            if (IsDebuggerPresent()) {   /* stopped in a debugger: wait for as long as the start takes */
+                if (!told) {
+                    char stage[200];
+                    startup_stage(stage, sizeof stage);
+                    dh_log(DH_LOG_INFO, "startup", "a debugger is attached: the graphics' start (at %s) is not ended "
+                           "after %d s", stage, secs);
+                    told = true;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                continue;
+            }
+#endif
+            break;
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
     if (s_graphics_started.load()) return;
     const char* drv = getenv("SDL_VIDEODRIVER");
-    char why[400];
-    snprintf(why, sizeof why, "the graphics did not finish starting in %d s: the window system or the GPU driver did "
-             "not answer (SDL video driver: %s; the [RSX vulkan] lines above say how far it got). Ending with status %d "
-             "instead of waiting with no window.", secs, drv && *drv ? drv : "SDL's choice", DOTHEROES_EXIT_STARTUP);
+    char stage[200];
+    startup_stage(stage, sizeof stage);
+    char why[600];
+    snprintf(why, sizeof why, "the graphics did not finish starting in %d s, stalled at %s: the window system or the "
+             "GPU driver did not answer (SDL video driver: %s). Ending with status %d instead of waiting with no window.",
+             secs, stage, drv && *drv ? drv : "SDL's choice", DOTHEROES_EXIT_STARTUP);
     dh_log(DH_LOG_ERROR, "startup", "%s", why);
     diag_dump_all_threads("startup: the graphics' start did not finish");   /* a developer build's report */
     if (const char* dir = getenv("DIAG_CRASH_DIR"); dir && *dir) {
@@ -534,10 +593,19 @@ static DWORD WINAPI frame_clock(LPVOID)
     if (!title || !*title) title = "ps3recomp";
 
     startup_watch_begin();
+    /* DOTHEROES_STARTUP_TEST_STALL_S: a test's stall inside the watched start (tests/startup_watch_check.py) */
+    if (const char* st = getenv("DOTHEROES_STARTUP_TEST_STALL_S"); st && atoi(st) > 0) {
+        s_startup_stage.store("a test's stall (DOTHEROES_STARTUP_TEST_STALL_S)");
+        std::this_thread::sleep_for(std::chrono::seconds(atoi(st)));
+    }
+    s_startup_stage.store("the graphics backend");
     int rsx_ok = (rsx_backend_init(WINDOW_WIDTH, WINDOW_HEIGHT, title) == 0);
     s_graphics_started.store(1);
+    s_startup_stage.store("started");
     fprintf(stderr, "[rsx] %s backend init %s\n", RSX_BACKEND_NAME,
             rsx_ok ? "OK -- window open" : "FAILED");
+    dh_log(DH_LOG_INFO, "startup", "the graphics started in %.2f s (the start-up watch: %d s)",
+           std::chrono::duration<double>(std::chrono::steady_clock::now() - s_startup_t0).count(), startup_timeout_s());
     std::thread(vblank_clock).detach();
 
     unsigned  last_flip = 0;

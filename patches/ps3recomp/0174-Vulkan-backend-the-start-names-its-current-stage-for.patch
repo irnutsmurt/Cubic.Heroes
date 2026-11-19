@@ -1,0 +1,143 @@
+From 01fa716d8e70e322e5f715a0bd4ce640eff7cf94 Mon Sep 17 00:00:00 2001
+From: giteaguy <73799093+irnutsmurt@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 13:25:26 -0800
+Subject: [PATCH] Vulkan backend: the start names its current stage for a
+ host's watch
+
+dotheroes M11.4 (the Windows review's W-2). vk_init_all records the stage it is in -- the window, the Vulkan loader,
+the instance, the window's surface, choosing the GPU, the device, the pipeline cache, the command buffers, the render
+targets, the built-in pipelines, the shader translator, the first submission, the swapchain, then "started" -- and
+rsx_vk_init_stage() returns it (a constant string, read from another thread). A host's start-up watch can then say
+where a start that never finished stalled, instead of only that it did. Nothing else changes.
+---
+ libs/video/rsx_vulkan_backend.c | 20 ++++++++++++++++++++
+ libs/video/rsx_vulkan_backend.h |  4 ++++
+ 2 files changed, 24 insertions(+)
+
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index 7e8d80f..18265c0 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -6179,6 +6179,12 @@ static void vk_pcache_open(void)
+ /* ---------------------------------------------------------------------------
+  * Public entry points
+  * -------------------------------------------------------------------------*/
++/* The start's current stage, for a host's start-up watch to say where a start that never finished stalled
++ * (rsx_vk_init_stage, rsx_vulkan_backend.h). A pointer to a constant string, written as the start goes on. */
++static const char* volatile s_vk_init_stage = "not started";
++#define VK_STAGE(s) (s_vk_init_stage = (s))
++const char* rsx_vk_init_stage(void) { return s_vk_init_stage; }
++
+ static int vk_init_all(u32 width, u32 height, const char* title)
+ {
+     vk_mutex_init(&s_vk.queue_mu);
+@@ -6192,7 +6198,9 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+     { const char* e = getenv("PS3RECOMP_VK_DUMP_EVERY");
+       s_vk.dump_every = (e && atoi(e) > 0) ? (u32)atoi(e) : 1; }
+ 
++    VK_STAGE("the window (SDL's video driver)");
+     vk_window_open(title);           /* no-op unless PS3RECOMP_VK_WINDOW is set */
++    VK_STAGE("the Vulkan loader");
+     if (vk_load_library()) return -1;
+ 
+     /* PS3RECOMP_VK_GPL=1 (or the M9.2d probe's PS3RECOMP_VK_GPL_PROBE=1): graphics pipeline libraries with fast
+@@ -6250,6 +6258,7 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+             ci.ppEnabledLayerNames = layers;
+         }
+     }
++    VK_STAGE("the Vulkan instance");
+     VkResult ir = pvkCreateInstance(&ci, NULL, &s_vk.instance);
+     if (ir != VK_SUCCESS && (dbg || ci.enabledLayerCount)) {   /* without the messages and the layer */
+         VK_LOG("vkCreateInstance with the driver's messages failed (VkResult %d): without them\n", (int)ir);
+@@ -6269,6 +6278,7 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+     }
+     if (ir != VK_SUCCESS) { VK_LOG("vkCreateInstance failed (VkResult %d)\n", (int)ir); return -1; }
+     if (vk_load_instance_functions()) return -1;
++    VK_STAGE("the window's surface (the window system)");
+     if (s_vk.windowed) {
+         if (vk_load_wsi_instance_functions()) {
+             vk_window_drop("the driver has no surface functions");
+@@ -6278,6 +6288,7 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+             vk_window_drop(why);
+         }
+     }
++    VK_STAGE("choosing the GPU");
+     if (vk_pick_device()) {
+         if (!s_vk.windowed) return -1;
+         vk_window_drop("no device can present to the window");
+@@ -6400,8 +6411,10 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+                    core_eds ? "Vulkan 1.3" : "extension");
+         }
+     }
++    VK_STAGE("the Vulkan device (the GPU driver)");
+     VK_CHECK(pvkCreateDevice(s_vk.phys, &dci, NULL, &s_vk.device), "vkCreateDevice");
+     if (vk_load_device_functions()) return -1;
++    VK_STAGE("the pipeline cache (read from disk)");
+     vk_pcache_open();
+     if (s_vk.windowed && vk_load_wsi_device_functions())
+         vk_window_drop("the driver has no swapchain functions");
+@@ -6415,6 +6428,7 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+     VkCommandPoolCreateInfo pci = { .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+                                     .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+                                     .queueFamilyIndex = s_vk.queue_family };
++    VK_STAGE("the command buffers");
+     VK_CHECK(pvkCreateCommandPool(s_vk.device, &pci, NULL, &s_vk.pool), "vkCreateCommandPool");
+     VkCommandBufferAllocateInfo cai = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+                                         .commandPool = s_vk.pool,
+@@ -6431,6 +6445,7 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+     VK_CHECK(pvkCreateFence(s_vk.device, &fci, NULL, &s_vk.window_fence), "vkCreateFence");
+ 
+ #if PS3RECOMP_RSX_COMMAND_PATH
++    VK_STAGE("the render targets");
+     if (vk_pick_depth_format()) return -1;
+ #endif
+     if (vk_create_image(&s_vk.color, VK_FORMAT_R8G8B8A8_UNORM, s_vk.width, s_vk.height,
+@@ -6445,7 +6460,9 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+                               VK_BUFFER_USAGE_TRANSFER_DST_BIT)) return -1;
+ #if PS3RECOMP_RSX_COMMAND_PATH
+     if (vk_create_render_pass()) return -1;
++    VK_STAGE("the built-in pipelines");
+     if (vk_create_pipeline_objects()) return -1;
++    VK_STAGE("the shader translator");
+     if (vk_guest_init()) {
+         VK_LOG("guest programs: setup failed, fixed-function path only\n");
+         vk_guest_shutdown();
+@@ -6465,6 +6482,7 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+     VkImageSubresourceRange dr = { s_vk.depth_aspect, 0, 1, 0, 1 };
+     pvkCmdClearColorImage(s_vk.cmd, s_vk.color.img, VK_IMAGE_LAYOUT_GENERAL, &black, 1, &cr);
+     pvkCmdClearDepthStencilImage(s_vk.cmd, s_vk.depth.img, VK_IMAGE_LAYOUT_GENERAL, &far_plane, 1, &dr);
++    VK_STAGE("the first GPU submission");
+     if (vk_submit_and_wait()) return -1;
+ #else
+     {   /* the target opaque black, in GENERAL, on the present's own command buffer */
+@@ -6485,10 +6503,12 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+ #endif
+     if (s_vk.windowed) {
+         VkSemaphoreCreateInfo semi = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
++        VK_STAGE("the swapchain (the window system)");
+         if (pvkCreateSemaphore(s_vk.device, &semi, NULL, &s_vk.sem_acquire) != VK_SUCCESS ||
+             vk_create_swapchain())
+             vk_window_drop("the swapchain could not be created");
+     }
++    VK_STAGE("started");
+     return 0;
+ }
+ 
+diff --git a/libs/video/rsx_vulkan_backend.h b/libs/video/rsx_vulkan_backend.h
+index d771535..fb268f7 100644
+--- a/libs/video/rsx_vulkan_backend.h
++++ b/libs/video/rsx_vulkan_backend.h
+@@ -137,6 +137,10 @@ int  rsx_vulkan_backend_guest_programs(void);
+  * display's mode is not changed. */
+ int rsx_vk_display_refresh_hz(void);
+ 
++/* The backend start's current stage ("the Vulkan device (the GPU driver)", ...; "not started", "started"): a
++ * constant string a host's start-up watch can read from another thread to say where a start stalled. */
++const char* rsx_vk_init_stage(void);
++
+ #ifdef __cplusplus
+ }
+ #endif
+-- 
+2.56.0.windows.3
+

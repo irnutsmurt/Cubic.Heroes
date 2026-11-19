@@ -34,6 +34,7 @@
 
 #include "json.h"
 #include "worker_client.h"
+#include "game_exit.h"   // the game's exit statuses explained (M11.4, the review's W-2)
 
 #ifdef _WIN32
 #include <shellapi.h>
@@ -1484,18 +1485,32 @@ static HANDLE g_game_proc = nullptr;   // the game the launcher started, while i
 #else
 static pid_t g_game_pid = 0;
 #endif
+// the game the launcher started has ended: a status that means something to the player is explained (M11.4, the
+// review's W-2: 70, the graphics' start never finished)
+static void game_ended(int status)
+{
+    if (const launcher::GameExitNote* n = launcher::game_exit_note(status))
+        g_msg = { true, n->title, n->text, path_str(u8path(install_dir()) / "logs" / "game.log"), true, false };
+}
+
 static bool game_running()
 {
 #ifdef _WIN32
     if (!g_game_proc) return false;
     if (WaitForSingleObject(g_game_proc, 0) == WAIT_TIMEOUT) return true;
+    DWORD status = 0;
+    const bool known = GetExitCodeProcess(g_game_proc, &status) != 0;
     CloseHandle(g_game_proc);
     g_game_proc = nullptr;
+    if (known) game_ended((int)status);
     return false;
 #else
     if (g_game_pid <= 0) return false;
-    if (waitpid(g_game_pid, nullptr, WNOHANG) == 0) return true;
+    int st = 0;
+    const pid_t r = waitpid(g_game_pid, &st, WNOHANG);
+    if (r == 0) return true;
     g_game_pid = 0;
+    if (r > 0 && WIFEXITED(st)) game_ended(WEXITSTATUS(st));
     return false;
 #endif
 }

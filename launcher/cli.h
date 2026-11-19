@@ -13,6 +13,7 @@
 //   6 cancelled (Ctrl+C, the console closed, the calling launcher ended us)
 //   7 the installation folder can't be used (read-only, protected, or not enough free space)
 #pragma once
+#include "game_exit.h"   // the game's exit statuses explained (M11.4, the review's W-2)
 #include <cerrno>
 #include <chrono>
 #ifdef _WIN32
@@ -537,6 +538,20 @@ static std::vector<std::pair<std::string, std::string>> session_settings(const A
     return v;
 }
 
+// --play's end: the game's status (passed on as CubicHeroes's own); a status that means something to a player
+// (game_exit.h: 70, the graphics' start never finished) explained on stderr, and in the JSON event's "why"
+static void play_ended(const Args& a, int status)
+{
+    const launcher::GameExitNote* n = launcher::game_exit_note(status);
+    if (n) {
+        fprintf(stderr, "CubicHeroes: %s (status %d). %s\n", n->title, status, n->text);
+        fflush(stderr);
+    }
+    if (a.json)
+        printf("{\"ev\":\"ended\",\"exit\":%d%s}\n", status,
+               n ? (std::string(",\"why\":") + json::quote(std::string(n->title) + ": " + n->text)).c_str() : "");
+}
+
 static int cmd_play(const Args& a)
 {
     std::error_code ec;
@@ -602,7 +617,7 @@ static int cmd_play(const Args& a)
     GetExitCodeProcess(pi.hProcess, &status);
     CloseHandle(pi.hProcess);
     if (job) CloseHandle(job);
-    if (a.json) printf("{\"ev\":\"ended\",\"exit\":%lu}\n", (unsigned long)status);
+    play_ended(a, (int)status);
     return (int)status;
 #else
     setenv("CUBIC_DIRECT_PLAY", "1", 1);
@@ -634,7 +649,7 @@ static int cmd_play(const Args& a)
     }
     const int status = forwarded ? kCancelled
                                  : WIFEXITED(st) ? WEXITSTATUS(st) : 128 + (WIFSIGNALED(st) ? WTERMSIG(st) : 0);
-    if (a.json) printf("{\"ev\":\"ended\",\"exit\":%d}\n", status);
+    play_ended(a, status);
     return status;
 #endif
 }
