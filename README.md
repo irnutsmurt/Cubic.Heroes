@@ -279,7 +279,47 @@ examples -- is in **[docs/CLI.md](docs/CLI.md)**.
 | The game is too fast or slow | Report it with your frame limit and display rate; set the frame limit to 60 meanwhile |
 | A black screen or the game won't start | Update your GPU driver (Vulkan); Diagnostics > Export Logs, and report it |
 | The folder can't be written | Extract to a folder you own (not `Program Files`); the launcher says if it can't write |
+| An update, a repair or going back to an earlier build fails with "...game is in the way (not a link)" | The installation folder was copied in a way that turned its `game` link into a plain folder: see [The installation was copied](#the-installation-was-copied-game-is-in-the-way) |
 | Something else | Diagnostics > Export Logs, review, save the zip -- and [open an issue](https://github.com/irnutsmurt/Cubic.Heroes/issues/new/choose) |
+
+### The installation was copied: "game is in the way"
+
+Inside the installation folder, `game` is a link to the build in use (a junction on Windows, a symbolic link on
+Linux), not a folder of its own. Some ways of copying the installation copy the build's files into a plain `game`
+folder instead: Windows Explorer copying it to another drive, for example, or on Linux `cp -r` without `-a` or a
+file manager that follows links. The game still plays,
+but updating, repairing and going back to an earlier build stop at their last step with "...game is in the way (not
+a link)". This is a known limitation of 0.2.0-beta.3; a fix is planned.
+
+**To check**, open a command prompt in the installation folder and run `dir`:
+- a healthy installation lists `<JUNCTION>  game [...\builds\...]`;
+- a copied one lists `<DIR>  game`.
+
+In PowerShell, `(Get-Item game).LinkType` says `Junction`, or nothing for a copied folder. On Linux, `ls -l` shows
+`game -> builds/...` for the link, and a plain `game` directory for a copied one.
+
+**To recover safely** (nothing is deleted before it is checked):
+1. Close the game and the launcher.
+2. Find the build in use. `CubicHeroes --status --json` names it (`builds`, then `active`), and so does the `active`
+   line of `active.json` in the installation folder.
+3. Compare the `game` folder with that build's own folder, `builds\<the build in use>`. It should hold the same files
+   and nothing else:
+   - the game's program (`dotheroes.exe`; `dotheroes` on Linux);
+   - its libraries (`.dll` files on Windows; the `lib` folder on Linux);
+   - `build.json`, `build.cfg`, `icon.png`;
+   - on Windows, the libraries' licence notices (on Linux they're inside `lib`).
+
+   Your saves and settings are never in `game`: they are in `data` and `config`.
+4. Move the `game` folder out of the installation folder (to your desktop, for example). Don't delete it yet.
+5. Open the launcher and run the update (or Repair) again: it makes `game` a link again. Then play to check.
+6. Delete the folder you moved, but only if step 3 found nothing in it except those files. If it held anything else,
+   keep it and report it with Diagnostics > Export Logs.
+
+**To avoid it**:
+- Move the installation folder on the same drive (cut and paste): a move keeps the link.
+- To copy it elsewhere, use a copy that keeps links or leaves them out:
+  - `robocopy` with `/XJ` leaves the link out, and the launcher makes it again on the next update;
+  - on Linux, `cp -a` or `rsync -a` keep the link.
 
 ## Testing status
 
@@ -302,6 +342,9 @@ tested**, and other GPUs (AMD, Intel), Windows 10 and handhelds have not been te
   tested.
 - The keyboard has no right stick: the camera's prompts keep a stick's picture there.
 - The editor's own world, New Game+'s carry-over, the side quests and the consumables are not yet fully tested.
+- **A copied installation folder** can stop updates, repairs and going back to an earlier build ("game is in the
+  way"). It happens when the folder is copied in a way that turns its `game` link into a plain folder. See
+  [The installation was copied](#the-installation-was-copied-game-is-in-the-way) for how to check and recover safely.
 - **Linux is not available yet.**
 
 ### Reporting bugs
