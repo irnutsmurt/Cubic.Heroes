@@ -11,13 +11,13 @@
 <p align="center">
   <a href="https://github.com/irnutsmurt/Cubic.Heroes/releases"><img alt="Latest release (beta)" src="https://img.shields.io/github/v/release/irnutsmurt/Cubic.Heroes?include_prereleases&label=release&color=orange"></a>
   <a href="LICENSE"><img alt="License: GPL-3.0" src="https://img.shields.io/github/license/irnutsmurt/Cubic.Heroes?color=blue"></a>
-  <img alt="Platform: Windows x86-64" src="https://img.shields.io/badge/platform-Windows%2010%2F11%20x86--64-0078D6">
-  <img alt="Linux: planned" src="https://img.shields.io/badge/Linux-planned-lightgrey">
+  <img alt="Windows 10/11 x86-64: available" src="https://img.shields.io/badge/Windows%2010%2F11%20x86--64-available-0078D6">
+  <img alt="Linux x86-64: available" src="https://img.shields.io/badge/Linux%20x86--64-available-FCC624">
   <img alt="Graphics: Vulkan" src="https://img.shields.io/badge/graphics-Vulkan-AC162C">
 </p>
 
 <p align="center">
-  <a href="https://github.com/irnutsmurt/Cubic.Heroes/releases/tag/v0.2.0-beta.2"><b>Download the beta (0.2.0-beta.2, Windows)</b></a>
+  <a href="https://github.com/irnutsmurt/Cubic.Heroes/releases/tag/v0.2.0-beta.3"><b>Download the beta (0.2.0-beta.3, a pre-release: Windows and Linux)</b></a>
   &nbsp;·&nbsp; <a href="#installation">Installation</a>
   &nbsp;·&nbsp; <a href="docs/CLI.md">Command line</a>
   &nbsp;·&nbsp; <a href="#known-issues">Known issues</a>
@@ -25,20 +25,25 @@
 </p>
 
 > [!IMPORTANT]
-> **This is a beta.** 0.2.0-beta.2 is the second public test release: the whole game plays, but not every part of it
-> has been tested yet. Expect bugs, keep backups of your saves (the launcher makes them), and please
+> **This is a beta, a pre-release -- not a stable release.** 0.2.0-beta.3 is the third public test release and the
+> first for Linux: the whole game plays, but not every part of it has been tested yet. Expect bugs, keep backups of
+> your saves (the launcher makes them), and please
 > [report what you find](https://github.com/irnutsmurt/Cubic.Heroes/issues/new/choose).
 > **No game code, data or keys are included** -- you need your own copy of the game.
+>
+> **Updates in 0.2.0-beta.3**: the launcher downloads and verifies a new version but doesn't install it, and on
+> Linux it can't reach the update server at all. Install new versions by hand ([Updating](#updating)).
 
 <p align="center">
   <img src="docs/media/hero.jpg" width="900" alt="The hero on the overworld, as the game draws it">
 </p>
 
 **Cubic.Heroes** turns your own copy of the US PlayStation 3 release of **3D Dot Game Heroes** (Silicon Studio /
-FromSoftware, 2009) into a native Windows game. The game's own program is **statically recompiled** -- its PowerPC
-machine code translated ahead of time into C++ and compiled for x86-64 on your PC -- and runs on a native engine
-reconstruction: a Vulkan renderer in place of the PS3's graphics chip, native code in place of its SPU co-processor
-tasks, OpenAL Soft for audio and FFmpeg for the movies. Nothing is emulated or interpreted while you play.
+FromSoftware, 2009) into a native Windows or Linux game. The game's own program is **statically recompiled** -- its
+PowerPC machine code translated ahead of time into C++ and compiled for x86-64 on your PC -- and runs on a native
+engine reconstruction: a Vulkan renderer in place of the PS3's graphics chip, native code in place of its SPU
+co-processor tasks, OpenAL Soft for audio and FFmpeg for the movies. Nothing is emulated or interpreted while you
+play, and on Linux it is a native Linux program: no Wine, Proton or RPCS3.
 
 It is a preservation project: the game's own logic, exactly as shipped, kept playable on today's PCs -- with the
 improvements a PC version should have (high frame rates, any display mode, your own controls) and none of the game's
@@ -114,15 +119,17 @@ content changed.
 - **QUIT GAME** on the title menu.
 
 **Launcher and installation**
-- **A controller-friendly launcher** (`CubicHeroes.exe`): install from your disc, prepare shaders, play, update, roll
-  back, back up and restore saves, export diagnostics -- with a controller, or a keyboard and mouse.
+- **A controller-friendly launcher** (`CubicHeroes.exe` on Windows, `CubicHeroes` or the AppImage on Linux): install
+  from your disc, prepare shaders, play, check for updates, roll back, back up and restore saves, export
+  diagnostics -- with a controller, or a keyboard and mouse.
 - **Portable installation**: everything stays in one folder -- the recompiled game, saves and backups, settings, shader
   caches, logs. Move it and it keeps working.
 - **Direct play from the command line**, and **third-party launcher integration**: `CubicHeroes --play` starts the
   game without the launcher's window and exits with it; `--status --json` and a headless `--install` for scripts;
-  "Add to Steam" and Start-menu shortcuts.
-- **Signed updates and rollback**: updates are offered only if signed with the project's release key; the game is
-  rebuilt only when something it is made of changed; the previous build is kept to go back to.
+  "Add to Steam" and Start-menu shortcuts (on Linux, Heroic and Lutris too: [Other launchers](#other-launchers)).
+- **Signed updates and rollback**: updates are offered only if signed with the project's release key, and every
+  download is checked against that signature; the game is rebuilt only when something it is made of changed; the
+  previous build is kept to go back to. (In 0.2.0-beta.3 a new version is installed by hand: [Updating](#updating).)
 - **Save backups and restoration**: automatic before every update, and on demand.
 - **Diagnostics and crash reporting**: crash and hang reports, logs, and a diagnostics export that removes your name,
   paths and e-mail addresses and never includes saves, keys or game files.
@@ -158,9 +165,16 @@ recompiler and runtime are [ps3recomp](https://github.com/sp00nznet/ps3recomp), 
 
 ### What you need
 
-- **Windows 10 or 11, 64-bit**, an x86-64 CPU with SSE4.2 (Intel since 2008, AMD since 2011), a GPU with a
-  **Vulkan** driver (any recent AMD, NVIDIA or Intel driver), and about **6 GB** of free disk space.
-  These are the minimum; recommended requirements will follow once more hardware, and Linux, have been tested.
+- **Windows 10 or 11, 64-bit**, or **Linux on x86-64 with glibc 2.31 or newer** (Debian 11, Ubuntu 20.04 and
+  Fedora 32 have that glibc; see [Testing status](#testing-status) for what has actually been tested).
+- An **x86-64 CPU with SSE4.2** (x86-64-v2: Intel since 2008, AMD since 2011).
+- A GPU with a **Vulkan** driver: any recent AMD, NVIDIA or Intel driver on Windows; on Linux, Mesa's (RADV for AMD,
+  ANV for Intel) or NVIDIA's.
+- About **6 GB** of free disk space.
+- Nothing else to install: the launcher carries its own runtime (on Linux too: no Python or SDL from the system).
+  The AppImage needs FUSE; the tarball doesn't.
+
+  These are the minimum; recommended requirements will follow once more hardware has been tested.
 - **Your own copy of the game** -- only this release is supported:
 
 | | |
@@ -180,22 +194,63 @@ recompiler and runtime are [ps3recomp](https://github.com/sp00nznet/ps3recomp), 
   `0001`), or an `EBOOT.elf` you decrypted yourself (for example with RPCS3's *Utilities > Decrypt PS3 Binaries*
   using your own console's firmware). The keys are only read: never copied, logged or uploaded.
 
-### Steps
+Every download is on the [0.2.0-beta.3 release page](https://github.com/irnutsmurt/Cubic.Heroes/releases/tag/v0.2.0-beta.3),
+with `SHA256SUMS.txt` and the signed manifest (`release.json`, `release.json.sig`) to check them against.
 
-1. **Download** `Cubic.Heroes-0.2.0-beta.2-windows-x86_64.zip` from the
-   [release page](https://github.com/irnutsmurt/Cubic.Heroes/releases/tag/v0.2.0-beta.2) and check it against
-   `SHA256SUMS.txt` if you like.
+On every system the launcher does the same: you choose your disc and your keys file, and it checks the disc, decrypts
+the game's program and **recompiles it on your PC** (10-30 minutes, depending on your CPU), then prepares the shaders
+(a few seconds to a few minutes). Nothing of the game is downloaded: it is built from your own files.
+
+### Windows
+
+1. **Download** `Cubic.Heroes-0.2.0-beta.3-windows-x86_64.zip`.
 2. **Extract** it where you want the game to live -- for example `D:\Games\`. It unpacks to a `Cubic.Heroes` folder;
    that folder *is* the installation.
-3. **Run `Cubic.Heroes\CubicHeroes.exe`**, choose your disc and your keys file, and **Install**. The launcher checks
-   the disc, decrypts the program, recompiles it and builds the game on your PC: **10-30 minutes**, depending on your
-   CPU.
-4. **Shaders** are prepared right after the install (a few seconds to a few minutes); the launcher's Shaders page
-   shows their state and can prepare them again after a GPU driver change.
+3. **Run `Cubic.Heroes\CubicHeroes.exe`**, choose your disc and your keys file, and **Install**.
+4. **Shaders** are prepared right after the install; the launcher's Shaders page shows their state and can prepare
+   them again after a GPU driver change.
 5. **Play.**
 
 An installation from an earlier version in `%LOCALAPPDATA%` is found on the first start and offered: copied into the
 new folder and checked file by file, the earlier folder left as it was.
+
+### Linux: the AppImage
+
+1. **Download** `Cubic.Heroes-0.2.0-beta.3-x86_64.AppImage` into the folder you want the game in (for example
+   `~/Games/`).
+2. **Make it executable** -- `chmod +x Cubic.Heroes-0.2.0-beta.3-x86_64.AppImage`, or the file's Properties >
+   Permissions -- and **start it**.
+3. Choose your disc and your keys file, and **Install**, as on Windows.
+
+The AppImage is one read-only file: its installation is a **`Cubic.Heroes` folder created beside it** (in the example,
+`~/Games/Cubic.Heroes/`), holding everything listed under [The portable folder](#the-portable-folder). **Move the
+AppImage and that folder together**, keeping them side by side.
+
+**FUSE**: an AppImage is mounted with FUSE while it runs; most desktop distributions have it (on some it is the
+`fuse2` or `libfuse2` package). Without FUSE, use **the tarball** below. `--appimage-extract-and-run` works too, but
+leaves an extracted copy (about 450 MB) in `$TMPDIR` (normally `/tmp`) until it is deleted or the machine restarts
+([docs/LINUX_PACKAGING.md](docs/LINUX_PACKAGING.md)).
+
+### Linux: the tarball
+
+1. **Download** `Cubic.Heroes-0.2.0-beta.3-linux-x86_64.tar.xz` and **extract** it where you want the game to live:
+   `tar -xJf Cubic.Heroes-0.2.0-beta.3-linux-x86_64.tar.xz -C ~/Games`. It extracts to a `Cubic.Heroes` folder; that
+   folder *is* the installation, exactly as on Windows.
+2. **Run `Cubic.Heroes/CubicHeroes`**, choose your disc and your keys file, and **Install**.
+
+The tarball needs no FUSE and leaves nothing outside its folder: use it on systems without FUSE, or if you prefer a
+plain folder. The launcher (`CubicHeroes`), its runtime (`worker/`) and its libraries (`lib/`) sit beside the
+installation's own folders.
+
+### Other launchers
+
+- **Steam** (Windows and Linux): the launcher's **Add to Steam** (Settings) adds the game as a non-Steam game, started
+  with `--play`. Close Steam first.
+- **Heroic or Lutris** (Linux): add the tarball's `Cubic.Heroes/CubicHeroes` as a **native** game (not Wine or
+  Proton) with the argument `--play`. Heroic's Flatpak can read only some folders (your Documents, the desktop, and
+  others it already allows); for an installation elsewhere, allow it once with
+  `flatpak override --user --filesystem=<the installation folder> com.heroicgameslauncher.hgl`.
+- **Playnite, LaunchBox and others** (Windows): point them at `CubicHeroes.exe --play` ([docs/CLI.md](docs/CLI.md)).
 
 ### The portable folder
 
@@ -210,7 +265,8 @@ Everything the game and the launcher make stays inside the `Cubic.Heroes` folder
 | `data/cache/` | shader, pipeline and compiler caches |
 | `logs/` | logs; `logs/crash/` crash and hang reports |
 
-Move or copy the whole folder and it keeps working. Nothing is written to `AppData` by default; the only things
+Move the whole folder and it keeps working (to copy it, see
+[The installation was copied](#the-installation-was-copied-game-is-in-the-way)). Nothing is written to `AppData` by default; the only things
 outside it are the shortcuts and Steam entry you ask for and your GPU driver's own caches. Another folder can be used
 for the data (`--install-dir`, or Settings). To remove everything, use the launcher's uninstall, or delete the folder.
 
@@ -244,14 +300,39 @@ Settings are shared by the launcher and the in-game menu:
 
 ## Updating
 
-The launcher checks for new versions and updates itself and the game **in place**: your saves are backed up first, the
-game is rebuilt only if something it is made of changed (no disc needed), and the previous build is kept --
-**Updates > Rollback Last Update** goes back to it. Betas are offered on the pre-release channel (a beta's default;
-Settings > Updates). Every update is checked against the project's release signature before anything is installed.
+**What 0.2.0-beta.3 does**: the launcher checks for new versions (betas on the pre-release channel, a beta's default;
+Settings > Updates), and its **Download it** button downloads a new version and checks it against the project's
+release signature -- but **it doesn't install it**, although its message says it is applied when the launcher
+restarts. On Linux the check itself doesn't reach the update server yet (see [Known issues](#known-issues)).
+Installation by the launcher itself is planned for 0.2.0-beta.4, but a beta.3 (or beta.2) installation can't do it:
+install new versions, 0.2.0-beta.4 included, by hand:
+
+1. **Back up your saves** (the launcher's Saves > Back up now), then **close the launcher and the game**.
+2. **Put the new version in place of the old one**. Only the launcher's own files are replaced; your installation's
+   folders are not touched:
+   - **Windows**: extract the new zip into the folder that *holds* your `Cubic.Heroes` folder (for
+     `D:\Games\Cubic.Heroes`, into `D:\Games`), so that it merges with yours, and replace the files when asked. In
+     Windows Explorer: right-click the zip > Extract All..., set that folder as the destination, then *Replace the
+     files in the destination*. In PowerShell: `Expand-Archive -Force <the new zip> -DestinationPath D:\Games`.
+   - **Linux, the tarball**: extract it into the folder that holds `Cubic.Heroes`, the same way:
+     `tar -xJf <the new tarball> -C ~/Games`.
+   - **Linux, the AppImage**: put the new `.AppImage` beside the old one (beside the `Cubic.Heroes` folder) and make
+     it executable; it uses the same installation. Then remove the old file, or keep it to go back to. If Steam,
+     Heroic or Lutris start the old file, point them at the new one.
+3. **Bring the game up to date once**, from a terminal in that folder: `.\CubicHeroes.exe --update` (Windows, in
+   `Cubic.Heroes`), `./Cubic.Heroes/CubicHeroes --update` (the tarball) or `./<the new AppImage> --update`. It
+   rebuilds the game from your disc's conversion only if the new version needs it (about 6 minutes on a recent desktop
+   CPU; no disc needed), backs up your saves first, and keeps the previous build: the launcher's **Install >
+   Rollback Last Update** goes back to it.
+
+Your saves, settings, shader caches, logs and builds stay where they are, and nothing is deleted. On Windows this is
+how 0.2.0-beta.3 was tested from beta.2: a beta.2 installation, the beta.3 package unpacked over it, `--update` --
+the saves and settings byte for byte the same, the game played, and rolled back to beta.2's build.
 
 ## Command line
 
-`CubicHeroes.exe` is also a command-line program -- for other launchers, Steam and scripts:
+The launcher is also a command-line program (`CubicHeroes.exe` on Windows; `CubicHeroes`, or the AppImage itself,
+on Linux) -- for other launchers, Steam and scripts:
 
 ```bash
 CubicHeroes --play                                   # the game directly, no launcher window; exits with the game
@@ -279,6 +360,10 @@ examples -- is in **[docs/CLI.md](docs/CLI.md)**.
 | The game is too fast or slow | Report it with your frame limit and display rate; set the frame limit to 60 meanwhile |
 | A black screen or the game won't start | Update your GPU driver (Vulkan); Diagnostics > Export Logs, and report it |
 | The folder can't be written | Extract to a folder you own (not `Program Files`); the launcher says if it can't write |
+| Linux: the update check says "Offline" though you're online | A known issue of 0.2.0-beta.3: put `SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt` (Debian, Ubuntu, Arch and their derivatives) or `SSL_CERT_FILE=/etc/pki/tls/certs/ca-bundle.crt` (Fedora) in front of the command that starts the launcher, or download new versions from the releases page |
+| Linux: the AppImage doesn't start | Make it executable (`chmod +x`); without FUSE, use the tarball ([Linux: the AppImage](#linux-the-appimage)) |
+| Linux: Heroic can't start the game or doesn't see its folder | Add `CubicHeroes` as a native game with `--play`, and allow the folder for Heroic's Flatpak ([Other launchers](#other-launchers)) |
+| Linux on Wayland: exclusive fullscreen looks like borderless | Expected: on Wayland the compositor owns the display mode, so exclusive fullscreen behaves as borderless |
 | An update, a repair or going back to an earlier build fails with "...game is in the way (not a link)" | The installation folder was copied in a way that turned its `game` link into a plain folder: see [The installation was copied](#the-installation-was-copied-game-is-in-the-way) |
 | Something else | Diagnostics > Export Logs, review, save the zip -- and [open an issue](https://github.com/irnutsmurt/Cubic.Heroes/issues/new/choose) |
 
@@ -323,13 +408,23 @@ In PowerShell, `(Get-Item game).LinkType` says `Junction`, or nothing for a copi
 
 ## Testing status
 
-The beta has been validated area by area on Windows 11 with an NVIDIA GPU: every reachable map visited (166 of 167), every boss fought to
-its defeat (and won by the game's own mechanics where they need one), the ending and credits, saving and loading,
-frame-rate independence of movement at 30, 60, 144 and 240 fps for every enemy type and the bosses, the movies, every
-event the game places, the installation, updates and rollback -- with automated scenarios, the developer tools and comparisons against RPCS3. The
-full matrix, with what is still `partial` or `todo`, is [docs/M11_VALIDATION.md](docs/M11_VALIDATION.md); the release
-checks are [docs/RELEASE_QUALIFICATION.md](docs/RELEASE_QUALIFICATION.md). **Not every part of the game has been
-tested**, and other GPUs (AMD, Intel), Windows 10 and handhelds have not been tested at all -- reports are very welcome.
+**Windows**: the beta has been validated area by area on Windows 11 with an NVIDIA GPU: every reachable map visited
+(166 of 167), every boss fought to its defeat (and won by the game's own mechanics where they need one), the ending
+and credits, saving and loading, frame-rate independence of movement at 30, 60, 144 and 240 fps for every enemy type
+and the bosses, the movies, every event the game places, the installation, updating by hand from the previous beta,
+and rollback -- with automated scenarios, the developer tools and comparisons against RPCS3.
+
+**Linux**: played and qualified on one machine, a Ryzen 5 5500U laptop with Radeon graphics (Mesa RADV), under KDE
+Plasma on Wayland and on X11 -- the installation from the disc, the shaders, play, saves, both packages (the AppImage
+and the tarball), and the game started through Steam (as a non-Steam game, with the Steam overlay and a controller)
+and through Heroic's Flatpak; Lutris on an earlier package of the same day. On Debian 11, Ubuntu 20.04, Ubuntu 24.04
+and Fedora 41 the packages have only been started in clean containers (the launcher, its command line, the worker and
+the game's own start-up checks): the game hasn't been played there.
+
+The full matrix, with what is still `partial` or `todo`, is [docs/M11_VALIDATION.md](docs/M11_VALIDATION.md); the
+release checks are [docs/RELEASE_QUALIFICATION.md](docs/RELEASE_QUALIFICATION.md). **Not every part of the game has
+been tested**, and Windows 10, AMD and Intel GPUs on Windows, NVIDIA and Intel GPUs on Linux, other distributions and
+handhelds (the Steam Deck among them) have not been tested at all -- reports are very welcome.
 
 ### Known issues
 
@@ -345,7 +440,21 @@ tested**, and other GPUs (AMD, Intel), Windows 10 and handhelds have not been te
 - **A copied installation folder** can stop updates, repairs and going back to an earlier build ("game is in the
   way"). It happens when the folder is copied in a way that turns its `game` link into a plain folder. See
   [The installation was copied](#the-installation-was-copied-game-is-in-the-way) for how to check and recover safely.
-- **Linux is not available yet.**
+- **The launcher doesn't install updates** (0.2.0-beta.3, Windows and Linux): it downloads and verifies a new
+  version, but doesn't install it. Install it by hand ([Updating](#updating)). Installation by the launcher is
+  planned for 0.2.0-beta.4; installations of beta.2 and beta.3 still need the manual step to reach it.
+- **Linux: the update check can't reach the update server** (0.2.0-beta.3): the launcher can't find the system's
+  trusted HTTPS certificates, so it can't check for or download updates and reports that it is offline. Installing
+  and playing are not affected. **Linux users of beta.3 will need to download and install 0.2.0-beta.4 by hand**
+  ([Updating](#updating)). The workaround -- the launcher started with `SSL_CERT_FILE` set to the system's CA bundle
+  ([Troubleshooting](#troubleshooting)) -- lets it check for and download new versions, but like every beta.3
+  launcher it still doesn't install them. A fix is planned for 0.2.0-beta.4.
+- **Linux**:
+  - without FUSE, use the tarball: an AppImage started with `--appimage-extract-and-run` leaves its extracted copy in
+    `$TMPDIR` (normally `/tmp`) until it is deleted or the machine restarts;
+  - on Wayland, exclusive fullscreen behaves as borderless fullscreen (the compositor owns the display mode);
+  - on AMD graphics a few shadows and floor reflections differ slightly from the reference captures (faint; nothing
+    missing or misplaced); being investigated.
 
 ### Reporting bugs
 
@@ -356,11 +465,19 @@ information.**
 
 ## Roadmap
 
+Done:
+
+- **The first native Linux release** -- an **AppImage** and a **tarball** for x86-64, in 0.2.0-beta.3
+  ([docs/LINUX_PACKAGING.md](docs/LINUX_PACKAGING.md)).
+
 Planned, not yet available:
 
+- **0.2.0-beta.4**: updates installed by the launcher itself on Windows and Linux, with rollback of the launcher
+  too, and Linux's update check fixed.
 - **Completing the gameplay validation** -- the rows still open in the matrix, and what testers report.
-- **A native Linux release** -- an **AppImage** and a **tarball** for x86-64 ([docs/LINUX_PACKAGING.md](docs/LINUX_PACKAGING.md)).
-- **Steam Deck** compatibility.
+- **Steam Deck** testing and compatibility.
+- **Further Linux compatibility** -- NVIDIA and Intel GPUs, more distributions and desktops, and the AMD rendering
+  differences above.
 - **Optional hardware-accelerated ray tracing** (RTX and other GPUs with ray tracing).
 - **HDR** output (being considered).
 - **Character import, export and community sharing** -- the editor's heroes as files, and a shared library.
