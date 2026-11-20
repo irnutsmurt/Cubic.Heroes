@@ -360,7 +360,7 @@ examples -- is in **[docs/CLI.md](docs/CLI.md)**.
 | The game is too fast or slow | Report it with your frame limit and display rate; set the frame limit to 60 meanwhile |
 | A black screen or the game won't start | Update your GPU driver (Vulkan); Diagnostics > Export Logs, and report it |
 | The folder can't be written | Extract to a folder you own (not `Program Files`); the launcher says if it can't write |
-| Linux: the update check says "Offline" though you're online | A known issue of 0.2.0-beta.3: put `SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt` (Debian, Ubuntu, Arch and their derivatives) or `SSL_CERT_FILE=/etc/pki/tls/certs/ca-bundle.crt` (Fedora) in front of the command that starts the launcher, or download new versions from the releases page |
+| Linux: the update check says "Offline" though you're online | A known issue of 0.2.0-beta.3. Start the launcher from a terminal with the variable in front: `SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt ./Cubic.Heroes/CubicHeroes` on Debian, Ubuntu, Arch and their derivatives, `SSL_CERT_FILE=/etc/pki/tls/certs/ca-bundle.crt ./Cubic.Heroes/CubicHeroes` on Fedora (for the AppImage, the AppImage's name in place of `./Cubic.Heroes/CubicHeroes`). If Steam or Heroic starts the launcher, add the variable to its launch options or environment there. Or download new versions from the releases page |
 | Linux: the AppImage doesn't start | Make it executable (`chmod +x`); without FUSE, use the tarball ([Linux: the AppImage](#linux-the-appimage)) |
 | Linux: Heroic can't start the game or doesn't see its folder | Add `CubicHeroes` as a native game with `--play`, and allow the folder for Heroic's Flatpak ([Other launchers](#other-launchers)) |
 | Linux on Wayland: exclusive fullscreen looks like borderless | Expected: on Wayland the compositor owns the display mode, so exclusive fullscreen behaves as borderless |
@@ -414,8 +414,8 @@ and credits, saving and loading, frame-rate independence of movement at 30, 60, 
 and the bosses, the movies, every event the game places, the installation, updating by hand from the previous beta,
 and rollback -- with automated scenarios, the developer tools and comparisons against RPCS3.
 
-**Linux**: played and qualified on one machine, a Ryzen 5 5500U laptop with Radeon graphics (Mesa RADV), under KDE
-Plasma on Wayland and on X11 -- the installation from the disc, the shaders, play, saves, both packages (the AppImage
+**Linux**: played and qualified on one machine, a Ryzen 5 5500U laptop with Radeon graphics (Manjaro Linux, kernel
+6.18, Mesa 26.2 RADV), under KDE Plasma on Wayland and on X11 -- the installation from the disc, the shaders, play, saves, both packages (the AppImage
 and the tarball), and the game started through Steam (as a non-Steam game, with the Steam overlay and a controller)
 and through Heroic's Flatpak; Lutris on an earlier package of the same day. On Debian 11, Ubuntu 20.04, Ubuntu 24.04
 and Fedora 41 the packages have only been started in clean containers (the launcher, its command line, the worker and
