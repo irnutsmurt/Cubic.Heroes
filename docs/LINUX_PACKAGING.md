@@ -146,3 +146,47 @@ makes the worker need glibc **2.28** or newer -- lower than the 2.31 floor, so e
 supported -- while everything Zig compiles keeps targeting 2.31 exactly as now. Nothing about the shipped baseline
 changes; it is recorded here for the owner's decision (the owner, 2026-11-18: the glibc target is not changed without
 discussion).
+
+## 8. Updates on Linux: certificates and installation (0.2.0-beta.4)
+
+**The certificates HTTPS is verified with.** The packaged OpenSSL's compiled-in folder (/opt/python/ssl, the build
+environment's) is never used: in 0.2.0-beta.3 it made every update check fail as "offline". The worker
+(tools/updates.py `ca_store`) uses, in this order:
+
+1. `SSL_CERT_FILE` and/or `SSL_CERT_DIR` when set: exactly those, nothing else. A setting that can't be read is an
+   error that says so; there is no fallback past it.
+2. The distribution's CA bundle: /etc/ssl/certs/ca-certificates.crt (Debian, Ubuntu, Arch, Manjaro, SteamOS),
+   /etc/pki/tls/certs/ca-bundle.crt and /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem (Fedora, RHEL),
+   /etc/ssl/ca-bundle.pem (openSUSE), /etc/ssl/cert.pem, /etc/pki/tls/cacert.pem: the first that holds certificates.
+3. A folder of OpenSSL hash links: /etc/ssl/certs, /etc/pki/tls/certs.
+4. None of these: the check fails with "No trusted certificate store was found on this system", never offline and
+   never unverified.
+
+Verification and host-name checks are always on (tests/test_update_tls.py checks that nothing turns them off). No CA
+bundle is shipped: each distribution keeps its own up to date. `CubicHeroes --check-update --json` and the worker's
+answer name the store used (`tls_store`).
+
+**Troubleshooting**:
+- "No trusted certificate store was found": install the distribution's `ca-certificates` package (minimal containers
+  lack it), or set `SSL_CERT_FILE` to a CA bundle.
+- "...certificate could not be verified": something between this PC and GitHub presents another certificate (a
+  captive portal, an intercepting proxy). Nothing was downloaded. Try again on another network, or download the
+  release from its page.
+- 0.2.0-beta.3 installations: their launcher can't find the certificates (the defect above) and can't install
+  updates. Install 0.2.0-beta.4 by hand (README, "Updating"). With `SSL_CERT_FILE` set, beta.3 can check and
+  download, but still not install.
+
+**Installing an update** (0.2.0-beta.4; docs/CLI.md section 3; tools/updates.py):
+- **The tarball**: the new tarball is unpacked into `Cubic.Heroes/downloads/launcher-new`, then its items take the
+  places of `CubicHeroes`, `lib/`, `worker/`, `licenses/`, `LICENSE.txt` and `README.txt`, one by one and journalled,
+  `CubicHeroes` last. The executable bits are kept (tarfile's data filter). The replaced items are kept in
+  `downloads/launcher-rollback`.
+- **The AppImage**: the new AppImage is copied beside the running one as `.<its name>.new` (the same folder, so the
+  same file system), checked again (its SHA-256, an ELF x86-64 with the AppImage type 2 mark), and put in place of
+  the AppImage file in one rename. Its path and name stay, so Steam, Heroic and Lutris entries and the `Cubic.Heroes`
+  folder beside it keep working; `--version` tells the version. The image the running launcher is mounted from is
+  never written to. The previous AppImage is kept (a hard link, or a copy) as
+  `Cubic.Heroes/downloads/launcher-rollback/previous.AppImage`.
+- The swap runs from a copy of the worker in `Cubic.Heroes/downloads/launcher-helper` (copied out of the image for an
+  AppImage), after the launcher, the game and anything else running from the installation (or from the AppImage
+  file) have ended. Nothing needs root.

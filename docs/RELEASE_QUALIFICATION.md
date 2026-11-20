@@ -184,3 +184,44 @@ package (beta.1 stays published; its players are offered beta.2 on the pre-relea
   qualified package, its checksum and the manifest's signature good; a fresh offline installation of the download
   (an accent and Japanese in the folder's name; `--install` interrupted and resumed, status, shaders, `--update` with
   nothing to do, `--check-update`, `--play`, no key text): 9 of 9 pass. 0.2.0-beta.1 stays published.
+
+## 10. Acceptance criteria for every release, from 0.2.0-beta.4
+
+Two defects reached players in 0.2.0-beta.3 although every test then in place passed:
+
+- **The Linux launcher couldn't reach the update server.** Its packaged OpenSSL looked for the trusted certificate
+  authorities in the build environment's folder, which no player has, so every check read as "offline". Every update
+  test before then used a local mirror (a folder, or HTTP) or a dead proxy, never real HTTPS through the package's
+  own OpenSSL.
+- **No launcher ever installed a downloaded update** (Windows and Linux, since M9). The launcher downloaded and
+  verified a release and said it would be applied on restart, but nothing started the swap. The tests drove the
+  worker's swap themselves, never the installed launcher from download to restart, so a download was taken for an
+  installation.
+
+So each release candidate -- **the packages themselves, never a development checkout** -- must pass all of the
+following before the owner is asked to approve it. **A result that can't be decided is never a pass**: the step is
+run again until it passes or fails.
+
+| # | Criterion | How | Packages |
+|---|---|---|---|
+| A1 | **Live HTTPS to GitHub**, with the package's own launcher and frozen worker and nothing helping them: SSL_CERT_FILE, SSL_CERT_DIR and the proxy variables removed | tests/live_update_check.py (release_qualification's mandatory `online` step) | the Windows zip, the Linux tarball, the Linux AppImage |
+| A2 | The certificate store the packaged worker verified with: the system's (Linux: a distribution's bundle or certificate folder, the answer's `tls_store`; Windows: the Windows store); never the build environment's | the same, and tests/distro_check.py --live (Debian 11, Ubuntu 20.04 and 24.04, Fedora 41: a store found and used, or with none, "tls" -- never offline, never unverified) | Linux |
+| A3 | **Discovery through the launcher**: `CubicHeroes --check-update --json` answers from the server (not offline, not an error) | A1's `cli` step | all three |
+| A4 | The manifest's **Ed25519 signature** verified with the package's registered key (config/release_keys.json); nothing refused | A1's `newer` step | all three |
+| A5 | **This system's package of this installation's kind** offered (the zip on Windows; a tarball installation the tar.xz; an AppImage the AppImage), never another system's or kind | A1; tests/test_launcher_update.py; tests/launcher_update_e2e.py's refusals | all three |
+| A6 | **The download verified**: the real package downloaded over HTTPS and its size and SHA-256 checked against the signed manifest | A1's `download` step | all three |
+| A7 | **An installed launcher installs a newer version and restarts into it**: a package of the candidate installed (with the game, in a folder named with spaces and non-ASCII characters), a newer package served over HTTPS; the update downloaded, verified, staged and swapped by the launcher's own commands; `--version` says the new version (the launcher and its worker); its files the new package's byte for byte; the installation's saves, settings, builds and shader caches untouched; the game brought up to date and played to its own end; the launcher's rollback, and the window's restart path | tests/launcher_update_e2e.py | the Windows zip, the Linux tarball, the Linux AppImage (`--key`) |
+| A8 | **Refusals**: an altered manifest, an untrusted key, an altered package, another system's package, an untrusted HTTPS certificate, no server, the game running, nothing newer -- each refused (or nothing offered), the launcher and the installation unchanged byte for byte | tests/launcher_update_e2e.py; tests/test_launcher_update.py (also the version inside a package, another processor, too little disk space, a crash at every step of the swap and its recovery, one update at a time) | all three; the unit tests on CI (Windows and Linux) |
+| A9 | Timeouts, interrupted downloads, TLS failures (untrusted CA, another host's certificate, an expired one) | tests/test_update_tls.py, tests/linux_update_check.py --https | CI; Linux |
+| A10 | Windows' existing installations still offered the release: the published Windows beta.2 and beta.3 workers against GitHub | tests/live_update_check.py on those packages, after publication | Windows |
+| A11 | **The owner-signed manifest itself**: the A7 run again with the release's own manifest and signature (`--manifest`, `--signature`): a package of the candidate's code labelled with an older version, trusting only the project's key, installs the signed candidate and restarts into it | tests/launcher_update_e2e.py | the Windows zip; the Linux tarball and AppImage |
+
+The local-mirror tests stay (tests/test_updates.py, tests/test_launcher_update.py, tests/linux_update_check.py): they
+cover what a live server can't be made to do -- altered files, cut connections, refused keys -- deterministically.
+
+**Verdicts for A1-A3, A10**: PASS only on the expected answers. FAIL on a "tls" error, a refused manifest, the wrong
+package, or an "offline" answer while the machine itself can reach GitHub's API (an independent request with the
+system's own trust). INCONCLUSIVE (exit 2) when the machine can't reach GitHub either, or GitHub answers 5xx or a
+rate limit: an outage says nothing about the package, so the step is run again, and the release waits.
+
+**After publication**: A1 against the published files of all three packages, and A10.
