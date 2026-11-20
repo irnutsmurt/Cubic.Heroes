@@ -27,13 +27,21 @@
 #include <string>
 #include <vector>
 
+#include <cerrno>
+
 #ifndef _WIN32
+#include <fcntl.h>
+#include <signal.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #endif
 
 #include "json.h"
 #include "worker_client.h"
+
+#ifndef CUBIC_VERSION   // tools/build_launcher.py passes the release's (tools/version.py); cli.h says the same
+#define CUBIC_VERSION "0.0.0-dev"
+#endif
 #include "game_exit.h"   // the game's exit statuses explained (M11.4, the review's W-2)
 
 #ifdef _WIN32
@@ -353,6 +361,127 @@ static std::vector<std::string> worker_argv(const std::string& cmd, const std::v
     }
     return av;
 }
+
+// ============================================================================================================
+// beta.4: the launcher's own update, installed on restart (tools/updates.py). The worker verifies and stages it
+// (apply-update) and starts its helper, which swaps the launcher's files once this launcher has exited; an AppImage
+// installation's AppImage file is replaced instead (its image is read-only). Everything stays inside the folder.
+// ============================================================================================================
+
+// where the launcher's update keeps its files: the launcher's folder (portable: the installation's root too); an
+// AppImage's, its installation's root (the launcher itself runs from the image's read-only mount)
+static std::string launcher_update_dir() { return in_appimage() ? g_root : g_exe_dir; }
+
+static std::string appimage_file()
+{
+#ifndef _WIN32
+    return env_u8("APPIMAGE");
+#else
+    return std::string();
+#endif
+}
+
+// the arguments every launcher-update command of the worker takes
+static std::vector<std::string> launcher_update_args()
+{
+    std::vector<std::string> a = { "--install", g_root, "--launcher", launcher_update_dir() };
+    const std::string img = appimage_file();
+    if (!img.empty()) { a.push_back("--appimage"); a.push_back(img); }
+    return a;
+}
+
+static unsigned long this_pid()
+{
+#ifdef _WIN32
+    return (unsigned long)GetCurrentProcessId();
+#else
+    return (unsigned long)getpid();
+#endif
+}
+
+static bool process_alive(unsigned long pid)
+{
+    if (!pid) return false;
+#ifdef _WIN32
+    HANDLE h = OpenProcess(SYNCHRONIZE, FALSE, (DWORD)pid);
+    if (!h) return false;
+    const bool alive = WaitForSingleObject(h, 0) == WAIT_TIMEOUT;
+    CloseHandle(h);
+    return alive;
+#else
+    return kill((pid_t)pid, 0) == 0 || errno == EPERM;
+#endif
+}
+
+// a program that outlives the launcher (the update's helper): detached, outside any job of the launcher's
+static bool start_detached(const std::vector<std::string>& argv, const std::string& cwd)
+{
+#ifdef _WIN32
+    std::wstring cmd;
+    for (const std::string& a : argv) cmd += (cmd.empty() ? L"" : L" ") + launcher::quote_arg(launcher::widen(a));
+    STARTUPINFOW si = { sizeof si };
+    PROCESS_INFORMATION pi = {};
+    const DWORD base = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP;
+    BOOL ok = CreateProcessW(nullptr, &cmd[0], nullptr, nullptr, FALSE, base | CREATE_BREAKAWAY_FROM_JOB, nullptr,
+                             launcher::widen(cwd).c_str(), &si, &pi);
+    if (!ok) ok = CreateProcessW(nullptr, &cmd[0], nullptr, nullptr, FALSE, base, nullptr, launcher::widen(cwd).c_str(),
+                                 &si, &pi);   // a job that refuses the breakaway
+    if (!ok) return false;
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return true;
+#else
+    const pid_t child = fork();
+    if (child < 0) return false;
+    if (child == 0) {   // a grandchild runs it, so nothing is left for this process to wait for
+        setsid();
+        if (fork() != 0) _exit(0);
+        if (chdir(cwd.c_str()) != 0) _exit(127);
+        const int null = open("/dev/null", O_RDWR);
+        if (null >= 0) { dup2(null, 0); dup2(null, 1); dup2(null, 2); }
+        std::vector<char*> av;
+        for (const std::string& a : argv) av.push_back(const_cast<char*>(a.c_str()));
+        av.push_back(nullptr);
+        execv(av[0], av.data());
+        _exit(127);
+    }
+    int st = 0;
+    waitpid(child, &st, 0);
+    return true;
+#endif
+}
+
+// the worker that recovers an interrupted update: the helper's copy when there is one (worker/ itself may be the
+// part the interruption left half-replaced), else worker/ (or this checkout's)
+static std::vector<std::string> recovery_argv()
+{
+#ifdef _WIN32
+    const char* name = "DotHeroes-Setup.exe";
+#else
+    const char* name = "DotHeroes-Setup";
+#endif
+    std::error_code ec;
+    const fs::path helper = u8path(launcher_update_dir()) / "downloads" / "launcher-helper" / name;
+    std::vector<std::string> av;
+    if (fs::exists(helper, ec)) av = { path_str(helper), "--worker", "recover-launcher" };
+    else {
+        av = worker_argv("recover-launcher", {});
+        while (!av.empty() && av.back() != "recover-launcher") av.pop_back();   // without --control and --log
+    }
+    return av;
+}
+
+// the file that says how the last launcher update ended (tools/updates.py: downloads/launcher-update-last.json)
+static json::Value last_launcher_update()
+{
+    json::Value v;
+    json::parse(read_text(path_str(u8path(launcher_update_dir()) / "downloads" / "launcher-update-last.json"), 1u << 16), v);
+    return v;
+}
+
+// the game brought up to date with this launcher's version once, after an update of the launcher (by itself, or
+// by hand: a newer package unpacked over the folder): the version it was last brought up to date with
+static std::string game_update_marker() { return path_str(u8path(g_root) / "downloads" / "game-up-to-date-with.txt"); }
 
 // ============================================================================================================
 // look (docs/M9_LAUNCHER_PLAN.md section 16): the game's own world as the reference -- a toy-block fantasy in
@@ -1210,6 +1339,7 @@ static void type_text(const std::string& t, const std::string& init, std::functi
 
 struct Status {
     json::Value info, builds, saves, settings, check, update;
+    json::Value launcher;  // beta.4: the launcher's own update (the worker's launcher-state): ready, rollback, last
     bool info_ok = false, checking_update = false, checked_once = false;
     std::string check_error;
     std::string playing;   // a running game's note
@@ -1236,6 +1366,7 @@ std::string install_dir_or_empty() { return install_dir(); }
 void auto_prepare_check_later();
 
 static void refresh_info();
+static void maybe_update_game();
 
 // M11.2b: an installation made before the portable root (the earlier launcher's folder in its preferences, or an
 // earlier default folder: the worker's find-legacy) offered once when this folder holds none -- copied in
@@ -1289,6 +1420,7 @@ static void refresh_info()
         const std::string kind = g_st.info["kind"].str();
         if (kind == "none") offer_legacy();
         if (kind == "slots") {
+            maybe_update_game();
             run("builds", { "--install", install_dir() }, "", false, [](const json::Value& b) { g_st.builds = b["data"]; });
             run("saves", { "--install", install_dir() }, "", false, [](const json::Value& s) { g_st.saves = s["data"]; });
             run("prepare", { "--install", install_dir(), "--check" }, "", false, [](const json::Value& c) {
@@ -1312,6 +1444,30 @@ static std::string setting(const char* key, const char* dflt)
 {
     const json::Value& v = g_st.settings["settings"][key]["value"];
     return v.is_null() ? dflt : v.str();
+}
+
+static void refresh_launcher_state()
+{
+    run("launcher-state", launcher_update_args(), "", false, [](const json::Value& r) {
+        if (r["ok"].truthy()) g_st.launcher = r["data"];
+    });
+}
+
+// beta.4: the game brought up to date with this launcher's version, once -- after the launcher updated itself, or
+// after a newer package was unpacked over the folder by hand. The worker's update rebuilds only what changed (a
+// second when nothing did), backs up the saves first and keeps the previous build for rollback.
+static void maybe_update_game()
+{
+    static bool done = false;
+    if (done || g_nav_test) return;
+    done = true;
+    if (trimmed(read_text(game_update_marker(), 256)) == CUBIC_VERSION) return;
+    run("update", { "--install", install_dir(), "--no-prepare" }, "Bringing the game up to date with version " CUBIC_VERSION,
+        true, [](const json::Value& r) {
+            if (r["ok"].truthy()) write_text(game_update_marker(), CUBIC_VERSION "\n");
+            else if (r["code"].str() != "cancelled") show_result_error(r, "The game couldn't be brought up to date");
+            refresh_info();
+        });
 }
 
 static void check_updates()
@@ -1720,6 +1876,10 @@ static void page_play()
         if (g_st.checking_update) text_col(col::dim, "Checking...");
         else if (!g_st.checked_once) text_col(col::dim, "Not checked yet.");
         else if (!u["ok"].truthy()) text_col(col::dim, "%s", u["message"].str("Couldn't check.").c_str());
+        else if (!g_st.launcher["ready"].is_null()) {
+            text_col(col::warm, "Version %s is downloaded and ready to install.", g_st.launcher["ready"]["version"].str().c_str());
+            if (big_button("Install it")) { g_page = kUpdates; g_focus_page = true; }
+        }
         else if (u["data"]["offline"].truthy()) text_col(col::dim, "Offline: the game plays as it is.");
         else if (u["data"]["available"].truthy() && u["data"]["newer"].truthy()) {
             text_col(col::warm, "Version %s is available.", u["data"]["version"].str().c_str());
@@ -1963,6 +2123,7 @@ static void page_install()
             }
             if (!r["ok"].truthy() && r["code"].str() != "cancelled") show_result_error(r, "The install didn't finish");
             else if (r["ok"].truthy()) {
+                write_text(game_update_marker(), CUBIC_VERSION "\n");
                 g_page = kPlay;
                 g_focus_page = true;
                 after_install_shaders();
@@ -1997,6 +2158,62 @@ static void page_install()
 }
 
 // --- updates ---
+// beta.4: installing a downloaded update, and going back to the launcher the last one replaced. The worker checks
+// the download again (signature, version, this system's package, size, SHA-256), stages it and starts its helper;
+// this launcher then closes, and the helper puts the new one in place and starts it.
+static void restart_into(const std::string& cmd, const std::string& version, const std::string& title)
+{
+    std::vector<std::string> a = launcher_update_args();
+    if (cmd == "apply-update") { a.push_back("--version"); a.push_back(version); }
+    a.push_back("--wait-pid");
+    a.push_back(std::to_string(this_pid()));
+    run(cmd, a, title, true, [](const json::Value& r) {
+        if (r["ok"].truthy()) g_quit = true;   // the helper waits for this launcher to close
+        else {
+            show_result_error(r, "The update can't be installed");
+            refresh_launcher_state();
+        }
+    });
+}
+
+static void launcher_update_card()
+{
+    const json::Value& L = g_st.launcher;
+    const bool ready = !L["ready"].is_null(), back = !L["rollback"].is_null();
+    const std::string last = L["last"]["result"].str();
+    if (!ready && !back && last != "restored" && last != "busy") return;
+    card_begin("##launcher_update");
+    const bool idle = !game_running() && !g_bg && !g_op;
+    if (ready) {
+        const std::string v = L["ready"]["version"].str();
+        title(("Version " + v + " is ready to install").c_str(), 24);
+        text_col(col::dim, "Downloaded and checked against the release's signature. The launcher closes, installs it and opens "
+                           "again. Your saves, settings, shader caches and builds stay as they are, and this version is kept "
+                           "to go back to.");
+        if (big_button("Restart and update", ImVec2(S(320), 0), Kind::Primary, idle))
+            ask("Install version " + v + " now?", "The launcher closes for a few seconds while it is installed, then opens "
+                "again. The game is brought up to date after that if the new version needs it.", "Restart and update", false,
+                [v] { restart_into("apply-update", v, "Installing version " + v); });
+        if (game_running()) text_col(col::warm, "Close the game first.");
+        else if (g_bg || g_op) text_col(col::dim, "When the current task has finished.");
+    }
+    if (back) {
+        const std::string v = L["rollback"]["version"].str();
+        ImGui::Dummy(ImVec2(0, S(6)));
+        text_col(col::dim, "The launcher before the last update, version %s, is kept.", v.c_str());
+        if (big_button(("Go back to version " + v).c_str(), ImVec2(S(360), 0), Kind::Normal, idle))
+            ask("Go back to launcher version " + v + "?", "The launcher closes, puts version " + v + " back and opens again. "
+                "This version is kept in turn, so you can come back to it. Your saves, settings and builds stay as they are.",
+                "Go back", false, [v] { restart_into("rollback-launcher", v, "Going back to version " + v); });
+    }
+    if (last == "restored" || last == "busy") {
+        ImGui::Dummy(ImVec2(0, S(6)));
+        text_col(col::warm, "The last update wasn't installed: %s. Nothing was changed.",
+                 L["last"]["why"].str("it didn't finish").c_str());
+    }
+    card_end();
+}
+
 static void page_updates()
 {
     title("Updates");
@@ -2025,6 +2242,8 @@ static void page_updates()
         text_col(col::dim, "This version has no download for this computer yet. The game keeps playing as it is.");
     } else if (!u["data"]["available"].truthy()) {
         title("No release found", 24);
+        if (u["data"]["refused"].size() > 0)   // a release whose signature doesn't verify: never offered, said why
+            text_col(col::warm, "A release was refused, so it isn't offered: %s", u["data"]["refused"][(size_t)0]["why"].str().c_str());
     } else {
         const json::Value& d = u["data"];
         title(("Version " + d["version"].str()).c_str(), 26);
@@ -2038,11 +2257,13 @@ static void page_updates()
                 "Downloading version " + d["version"].str(), true, [](const json::Value& r) {
                     if (!r["ok"].truthy() && r["code"].str() != "cancelled") show_result_error(r, "The download didn't finish");
                     else if (r["ok"].truthy())
-                        g_msg = { true, "Downloaded", "Checked against the release's signature. It is applied when the launcher "
-                                                      "restarts.", r["data"]["path"].str(), false, false };
+                        g_msg = { true, "Downloaded", "Checked against the release's signature. Install it with Restart and "
+                                                      "update, on this page.", r["data"]["path"].str(), false, false };
+                    refresh_launcher_state();
                 });
     }
     card_end();
+    launcher_update_card();
 }
 
 // --- saves ---
@@ -3419,6 +3640,42 @@ struct NavScript {
 
 #include "cli.h"   // M11.2c: the public command line
 
+// beta.4: a launcher update a crash or a power cut left unfinished (its journal, downloads/launcher-update.json, with
+// its helper gone) is put right before anything uses the installation: the recovery's helper starts, waits for this
+// process to exit, puts the previous launcher back (or keeps a swap that had finished and answers as expected) and,
+// for the window, starts the launcher again. An update still being installed is left to finish. Returns the exit
+// code when this process must exit now, else -1.
+static int unfinished_launcher_update(const cli::Args& a, int argc, char** argv)
+{
+    for (int i = 1; i < argc; i++)   // the update's own starts never wait for it
+        if (!strcmp(argv[i], "--after-update") || !strcmp(argv[i], "--update-failed")) return -1;
+    if (a.command == "version" || a.command == "help") return -1;   // the helper's own check of the new launcher
+    const std::string jpath = path_str(u8path(launcher_update_dir()) / "downloads" / "launcher-update.json");
+    std::error_code ec;
+    if (!fs::exists(u8path(jpath), ec)) return -1;
+    json::Value j;
+    json::parse(read_text(jpath, 1u << 20), j);
+    const bool window = cli::wants_window(a);
+    const unsigned long helper = (unsigned long)j["helper_pid"].num(0);
+    const bool installing = helper && helper != this_pid() && process_alive(helper);
+    if (!installing) {
+        std::vector<std::string> av = recovery_argv();
+        for (const std::string& x : launcher_update_args()) av.push_back(x);
+        av.push_back("--wait-pid");
+        av.push_back(std::to_string(this_pid()));
+        if (!window) av.push_back("--no-restart");
+        start_detached(av, launcher_update_dir());
+    }
+    if (window) return 0;   // the helper starts the launcher again once it is done
+    const std::string msg = installing ? "An update of the launcher is being installed; run the command again in a "
+                                         "moment."
+                                       : "An update of the launcher was interrupted; it is being put right now. Run the "
+                                         "command again in a moment.";
+    if (a.json) printf("{\"ok\":false,\"code\":\"busy\",\"message\":%s}\n", json::quote(msg).c_str());
+    else fprintf(stderr, "CubicHeroes: %s\n", msg.c_str());
+    return cli::kBusy;
+}
+
 int main(int argc, char** argv)
 {
     g_exe_dir = exe_dir_of(argv[0]);
@@ -3426,6 +3683,10 @@ int main(int argc, char** argv)
     // no command (or --launcher) is the launcher's window. Either way the installation root is resolved first.
     const cli::Args cli_args = cli::parse(cli::utf8_args(argc, argv));
     g_root = resolve_root(cli_args.install_dir);
+    {
+        const int u = unfinished_launcher_update(cli_args, argc, argv);
+        if (u >= 0) return u;
+    }
     if (!cli::wants_window(cli_args)) return cli::run(cli_args);
     if (cli_args.remember && !cli_args.install_dir.empty()) remember_root(g_root);
     bool after_update = false, update_failed = false;
@@ -3460,8 +3721,10 @@ int main(int argc, char** argv)
     // --nav-test: the scripted test's window is never shown (it reads its pictures back itself) unless
     // CUBIC_NAV_HIDDEN=0 asks for it -- which the test harness's desktop guard (tests/desktop_guard.py) sets only
     // while the owner has approved an on-screen run
+    // (beta.4: CUBIC_NAV_HIDDEN=1 hides any start's window, such as the one an update's helper starts during the
+    // update tests -- the desktop guard sets it the same way)
     const char* hid = getenv("CUBIC_NAV_HIDDEN");
-    const Uint32 hidden = g_nav_test && !(hid && *hid == '0') ? SDL_WINDOW_HIDDEN : 0;
+    const Uint32 hidden = (g_nav_test && !(hid && *hid == '0')) || (hid && *hid == '1') ? SDL_WINDOW_HIDDEN : 0;
     SDL_Window* win = SDL_CreateWindow("Cubic.Heroes", g_prefs.x, g_prefs.y, g_prefs.w, g_prefs.h,
                                        SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI | hidden |
                                        (g_prefs.maximized && !hidden ? SDL_WINDOW_MAXIMIZED : 0));
@@ -3499,6 +3762,7 @@ int main(int argc, char** argv)
     if (!g_font) g_font = io.Fonts->AddFontDefault();
     ImGui::GetStyle().FontSizeBase = S(kBody);
     refresh_info();
+    refresh_launcher_state();
     // --show: each dialog as a player meets it, opened once the page has settled; nothing done by it (closing it is
     // all it does)
     auto open_show = [&show] {
@@ -3517,9 +3781,19 @@ int main(int argc, char** argv)
         show.clear();
     };
     int frames = 0;
-    if (update_failed)
-        g_msg = { true, "The update didn't start", "The new launcher didn't come up, so this one was put back. Nothing else "
-                                                   "changed.", "", true, false };
+    if (update_failed) {   // the helper put this launcher back (or never replaced it): why, from its record
+        const json::Value last = last_launcher_update();
+        const std::string why = last["why"].str("the new launcher didn't come up");
+        g_msg = { true, "The update wasn't installed", last["result"].str() == "busy"
+                  ? "Something was still running from the installation (" + why + "), so nothing was changed. Close the "
+                    "game, then install the update again from the Updates page."
+                  : "Version " + last["version"].str("?") + " couldn't be put in place (" + why + "), so this launcher was "
+                    "kept. Nothing else changed.", "", true, false };
+    }
+    if (after_update)
+        g_msg = { true, "Updated to version " CUBIC_VERSION, "The launcher was updated, and the one before it is kept on the "
+                  "Updates page. Your saves, settings and builds are as they were; the game is brought up to date next if "
+                  "this version needs it.", "", false, false };
     bool wrote_health = false, quit = false;
     bool checked_updates = false;
     while (!quit && !g_quit) {
@@ -3639,7 +3913,8 @@ int main(int argc, char** argv)
         if (nav.active()) nav.after_render(ren);
         SDL_RenderPresent(ren);
         if (after_update && !wrote_health) {   // the new launcher is up: the update is kept (tools/updates.py)
-            write_text(path_str(u8path(g_exe_dir) / ".started-ok"), "ok\n");
+            const std::string health = env_u8("CUBIC_UPDATE_HEALTH");   // the helper's file, waiting for this version
+            if (!health.empty()) write_text(health, CUBIC_VERSION "\n");
             wrote_health = true;
         }
     }

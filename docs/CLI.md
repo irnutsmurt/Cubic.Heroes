@@ -22,7 +22,7 @@ Everything Cubic.Heroes manages lives in one folder, the **installation root**:
 | `backups/saves/` | save backups (made before every update, or by you) |
 | `data/cache/` | shader and pipeline caches, the compiler's object cache, its Zig caches |
 | `logs/` | the game's log, the worker's logs, crash and hang reports (`logs/crash/`) |
-| `downloads/` | downloaded updates |
+| `downloads/` | downloaded updates (`<version>/`: the package with its signed `release.json` and `release.json.sig`), and the launcher update's own: `launcher-new/` (staged), `launcher-rollback/` (the launcher the last update replaced), `launcher-helper/` (the program that swaps them), `launcher-update.json` (an update under way), `launcher-update-last.json` (how the last one ended) |
 | `data/tmp/` | temporary files of the conversion and of updates |
 
 **By default the root is the folder `CubicHeroes` is in.** The whole folder can be moved or copied to another place
@@ -63,7 +63,9 @@ One command at a time; options may follow in any order. `--opt=value` and `--opt
 | `--play` | start the game directly, with no launcher window; `CubicHeroes` waits for it and exits with the game's own exit status. The game runs in a job of `CubicHeroes`'s: a caller that ends `CubicHeroes` ends the game too |
 | `--install --disc PATH --keys PATH` | install from your disc image (or disc folder) and keys file, headless; resumes an interrupted install. **Does nothing if the game is already installed** (`--repair` rebuilds it from the disc anyway) |
 | `--update` | bring the game up to date with this version of Cubic.Heroes (after you put a newer `CubicHeroes` in the folder): your saves backed up, then rebuilt **only if the tools changed** ("Already up to date: nothing rebuilt" otherwise) |
-| `--check-update` | look for a newer release (nothing downloaded) |
+| `--check-update` | look for a newer release on the installation's update channel (the setting `LAUNCHER_UPDATE_CHANNEL`: a beta's default includes test releases); nothing downloaded |
+| `--apply-update` | **install the newer release** (0.2.0-beta.4): download it if it isn't already, check it again against the release's signature (the trusted key, a newer version, this system's package of this installation's kind, its size and SHA-256), stage it inside the folder, then **exit**: a helper replaces the launcher's own files a few seconds later, checks the new launcher (`--version`: the launcher and its worker are the new version) and keeps it -- or puts this one back if anything fails. Refused while the game runs (exit 5). Then `--update` brings the game up to date. `--status` says how it ended |
+| `--rollback-launcher` | put back the launcher the last update replaced (kept in `downloads/launcher-rollback/`), the same way; the newer one is kept there in turn |
 | `--prepare-shaders` | prepare the shaders and pipelines the game needs before play, headless (resumes where a stopped one left off) |
 | `--rebuild-shaders` | prepare them again from scratch |
 | `--status` | the installation, its build, its settings and its shader cache |
@@ -113,12 +115,28 @@ With `--json`:
 - `--play`: `{"ev":"started","pid":N,"game":PATH}` once the game runs, `{"ev":"ended","exit":N}` when it ends (with
   `"why"` for a status section 5 explains, such as 70).
 
+**Installing an update** (0.2.0-beta.4; the window's **Restart and update** does the same):
+- Nothing of the working installation changes while an update downloads or is checked: the download goes into
+  `downloads/<version>/`, and the new package is unpacked into `downloads/launcher-new/` (an AppImage: copied beside
+  the AppImage as `.<its name>.new`) only after every check.
+- The swap replaces only the launcher's own items (section 1's first row): never `builds/`, `data/`, `config/`,
+  `backups/`, `logs/` or anything else in the folder. Each step is recorded; the launcher's program is replaced last,
+  in one step, so a launcher is always there to start. An AppImage installation's AppImage file is replaced in one
+  step and keeps its name and place (shortcuts keep working).
+- A crash or a power cut part-way is put right at the next start of `CubicHeroes` (the window or a command): the
+  previous launcher put back, or a finished update kept. A command started meanwhile exits with status 5 and says
+  so: run it again a moment later.
+- No administrator or root rights: everything is inside the folder.
+
 `--status --json` holds: `cubicheroes` (the version), `install_dir`, `install_dir_from` (which of section 1's rules
 chose it), `writable`, `installed`, `game` (the game's program, when installed), `install` (what the folder holds:
 `kind` none / partial / slots / setup-app, ...), and when installed `builds` (`active`, `previous`, `retention`,
 `builds`), `shaders` (the cache's state for this GPU and driver: `cache` is `"reused"` when valid, else why not;
 `comprehensive_done`; `coverage.pipelines` ...) and `settings` (each setting's value, the file's `path`,
-`problems`).
+`problems`); and `launcher_update`: `version`, `kind` (zip, tar.xz or appimage), `ready` (a downloaded newer
+version that `--apply-update` would install), `rollback` (the launcher `--rollback-launcher` would put back),
+`last` (how the last update of the launcher ended: `result` updated / restored / busy, `version`, `why`) and
+`interrupted` (an update a crash left: the next start puts it right).
 
 ## 4. Settings
 

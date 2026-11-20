@@ -1159,7 +1159,8 @@ def cmd_check_update(a, ev, control):
         if e.code == "offline":
             return {"available": False, "offline": True, "why": str(e)}
         raise _update_error(e)
-    r.pop("manifest", None)
+    for k in ("manifest", "manifest_bytes", "signature_bytes"):
+        r.pop(k, None)
     r["installed"] = a.installed or VERSION
     return r
 
@@ -1170,6 +1171,11 @@ def cmd_download_update(a, ev, control):
     import updates
     from version import VERSION
     check_writable(a.dest or a.install, create=True)   # the download goes into the install (downloads/<version>)
+    if updates.installed_kind() == "appimage" and os.environ.get("APPIMAGE"):
+        try:   # the new AppImage can only be put beside the running one: nothing downloaded for nothing
+            updates.check_appimage_folder(os.environ["APPIMAGE"])
+        except updates.trust.ReleaseError as e:
+            raise _update_error(e)
     try:
         r = updates.check(a.channel, a.installed or VERSION, a.source, _keys(a))
     except updates.trust.ReleaseError as e:
@@ -1193,8 +1199,12 @@ def cmd_download_update(a, ev, control):
         if e.code == "cancelled":
             raise pipeline.Cancelled()
         raise _update_error(e)
-    with open(os.path.join(dest, "release.json"), "w", encoding="utf-8") as f:   # the verified manifest, kept
-        json.dump(updates.check(a.channel, a.installed or VERSION, a.source, _keys(a))["manifest"], f, indent=1)
+    # the release's manifest and signature kept as fetched: apply-update verifies the download again from them
+    # before anything is installed (beta.4)
+    for name, data in ((updates.MANIFEST, r["manifest_bytes"]), (updates.SIGNATURE, r["signature_bytes"])):
+        with open(os.path.join(dest, name + ".part"), "wb") as f:
+            f.write(data)
+        os.replace(os.path.join(dest, name + ".part"), os.path.join(dest, name))
     out = {"version": r["version"], "path": path, "size": asset["size"], "notes": r.get("notes", "")}
     out["seconds"], _ = prog.finish()
     return out
@@ -1221,19 +1231,153 @@ def cmd_stage_launcher(a, ev, control):
 
 
 def cmd_swap_launcher(a, ev, control):
-    """the helper the launcher starts as it exits to update itself (from stage-launcher's helper copy): the staged
-    package's items in place of the launcher's, the new launcher started; the previous one put back if it does not
-    come up. The install's items in the folder are never moved."""
+    """the helper apply-update and rollback-launcher start (their copy of this worker, in downloads/launcher-helper):
+    once the launcher has exited, the staged package (or the kept one: --source rollback) in place of the launcher's
+    items -- an AppImage installation's: the AppImage file (--appimage) -- journalled, checked, the previous one put
+    back if anything fails (updates.swap_launcher). The install's items are never moved."""
     import updates
+
+    def log(t):
+        ev.emit("log", level="info", text=t)
     try:
-        out = updates.swap_launcher(a.launcher, a.start, a.wait_pid,
-                                    log=lambda t: ev.emit("log", level="info", text=t),
-                                    health_timeout=a.health_timeout)
+        if a.appimage:
+            out = updates.swap_appimage(a.appimage, a.launcher, a.wait_pid, log, a.health_timeout, a.expect_version,
+                                        a.swap_from, not a.no_restart, extracted=a.appimage_extracted,
+                                        old_appdir=a.old_appdir)
+        else:
+            if not a.start:
+                raise ValueError("swap-launcher needs --start (or --appimage)")
+            out = updates.swap_launcher(a.launcher, a.start, a.wait_pid, log, a.health_timeout, a.expect_version,
+                                        a.swap_from, not a.no_restart)
     except ValueError as e:
         raise pipeline.SetupError(str(e), "usage")
+    except updates.trust.ReleaseError as e:
+        raise _update_error(e)
     finally:
         _remove_own_copy("swap", a.launcher)
     return {"result": out}
+
+
+def _helper_command(a, args):
+    """the swap's helper: packaged, a copy of this worker in <launcher>/downloads/launcher-helper (the swap replaces
+    worker/, and an AppImage's worker is inside its image); from a checkout, this Python and this file"""
+    import updates
+    if getattr(sys, "frozen", False):
+        helper = updates.stage_helper(a.launcher, os.path.dirname(os.path.abspath(sys.executable)))
+        return [helper, "--worker"] + args
+    return [sys.executable, os.path.abspath(__file__)] + args
+
+
+def _not_while_playing(install):
+    import uninstall
+    playing = uninstall.running_from(install)
+    if playing:
+        raise pipeline.SetupError("The game is running: close it first, then install the update.", "game_running",
+                                  ", ".join(playing))
+
+
+def _start_swap(a, version, source, ev):
+    """the helper started, detached; the caller hands it the update's lock, then this worker and the launcher exit"""
+    import updates
+    args = ["swap-launcher", "--launcher", os.path.abspath(a.launcher), "--expect-version", version,
+            "--swap-from", source]
+    args += ["--appimage", os.path.realpath(a.appimage)] if a.appimage else ["--start", updates.launcher_names()[0]]
+    if a.appimage and os.environ.get("APPDIR"):   # the old image's mount or extracted copy: the helper waits for it
+        args += ["--old-appdir", os.environ["APPDIR"]]
+    if a.appimage and updates.appimage_extracted():   # started without FUSE: the new one is started the same way
+        args.append("--appimage-extracted")
+    if a.wait_pid:
+        args += ["--wait-pid", str(a.wait_pid)]
+    if a.no_restart:
+        args.append("--no-restart")
+    if a.install:
+        logs = os.path.join(os.path.abspath(a.install), "logs")
+        os.makedirs(logs, exist_ok=True)
+        args += ["--log", os.path.join(logs, "launcher-update.jsonl")]
+    p = updates._start_detached(_helper_command(a, args), os.path.abspath(a.launcher))
+    ev.emit("log", level="info", text=f"launcher update: the helper started ({p.pid}); the launcher exits now")
+    return p.pid
+
+
+def cmd_apply_update(a, ev, control):
+    """(the player said yes) a downloaded update (download-update's, in <install>/downloads/<version>) verified
+    again from the manifest and signature kept with it -- the trusted key, a version newer than this one, this
+    system's and this kind's package, its size and SHA-256 -- and staged (updates.prepare_update); the swap's helper
+    is then started: it waits for the launcher (--wait-pid) to exit, swaps, checks the new launcher and starts it
+    (--no-restart: not). Refused while the game runs or another update is under way. Nothing of the working
+    installation is changed here."""
+    import updates
+    check_writable(a.launcher)
+    if a.appimage and not os.path.isfile(a.appimage):
+        raise pipeline.SetupError("--appimage names no file.", "usage")
+    lock = updates.UpdateLock(a.launcher, "apply")
+    try:
+        lock.acquire()
+        j = updates.read_journal(a.launcher)
+        if j and j.get("state") != "staged":
+            raise pipeline.SetupError("An earlier update of the launcher didn't finish; restart the launcher first.",
+                                      "busy")
+        _not_while_playing(a.install)
+        j = updates.prepare_update(a.install, a.launcher, a.version, _keys(a), a.appimage, a.installed)
+        pid = _start_swap(a, a.version, "staged", ev)
+        lock.hand_over(pid)
+        # the journal names the helper from now on: a launcher started meanwhile sees an update under way, not an
+        # interrupted one
+        updates._write_json(updates.update_dirs(a.launcher)["journal"], dict(j, helper_pid=pid))
+    except updates.trust.ReleaseError as e:
+        raise _update_error(e)
+    finally:
+        lock.release()
+    return {"version": j["version"], "from": j["from"], "kind": j["kind"], "helper_pid": pid}
+
+
+def cmd_rollback_launcher(a, ev, control):
+    """the launcher put back to the version the last update replaced (kept in downloads/launcher-rollback), by the
+    same journalled swap; the newer one is kept there in turn"""
+    import updates
+    check_writable(a.launcher)
+    v = updates.rollback_version(a.launcher)
+    item = os.path.join(updates.update_dirs(a.launcher)["rollback"],
+                        updates.APPIMAGE_KEPT if a.appimage else updates.launcher_names()[0])
+    if not v or not os.path.isfile(item):
+        raise pipeline.SetupError("No earlier launcher is kept to go back to.", "no_rollback")
+    lock = updates.UpdateLock(a.launcher, "rollback")
+    try:
+        lock.acquire()
+        if updates.read_journal(a.launcher):
+            raise pipeline.SetupError("An earlier update of the launcher didn't finish; restart the launcher first.",
+                                      "busy")
+        _not_while_playing(a.install or a.launcher)
+        pid = _start_swap(a, v, "rollback", ev)
+        lock.hand_over(pid)
+    except updates.trust.ReleaseError as e:
+        raise _update_error(e)
+    finally:
+        lock.release()
+    return {"version": v, "helper_pid": pid}
+
+
+def cmd_recover_launcher(a, ev, control):
+    """an update of the launcher a crash or a power cut interrupted: undone (the previous launcher put back from
+    what is on disk), or kept when the swap had finished and the new launcher answers as expected
+    (updates.recover_launcher). The launcher starts it at its next start, and exits; --no-restart: no launcher is
+    started afterwards."""
+    import updates
+    try:
+        out = updates.recover_launcher(a.launcher, a.start, lambda t: ev.emit("log", level="info", text=t),
+                                       a.wait_pid, restart=not a.no_restart)
+    except updates.trust.ReleaseError as e:
+        raise _update_error(e)
+    finally:
+        _remove_own_copy("swap", a.launcher)
+    return {"result": out}
+
+
+def cmd_launcher_state(a, ev, control):
+    """for the launcher's Updates page: this version, a downloaded newer one ready to install, the launcher kept for
+    rollback, the last update's result, an unfinished update"""
+    import updates
+    return updates.launcher_state(a.install, a.launcher, a.appimage, a.installed, _keys(a))
 
 
 # ---- M9.4's back end: the settings, the diagnostics (docs/M9_LAUNCHER_PLAN.md section 13) ----
@@ -1488,6 +1632,8 @@ COMMANDS = {"version": cmd_version, "probe-disc": cmd_probe_disc, "probe-keys": 
             "repair-link": cmd_repair_link, "saves": cmd_saves, "prepare": cmd_prepare,
             "check-update": cmd_check_update, "download-update": cmd_download_update,
             "stage-launcher": cmd_stage_launcher, "swap-launcher": cmd_swap_launcher, "settings": cmd_settings,
+            "apply-update": cmd_apply_update, "rollback-launcher": cmd_rollback_launcher,
+            "recover-launcher": cmd_recover_launcher, "launcher-state": cmd_launcher_state,
             "diagnostics": cmd_diagnostics, "shortcuts": cmd_shortcuts, "selftest": cmd_selftest,
             "uninstall": cmd_uninstall, "remove-launcher": cmd_remove_launcher, "devsaves": cmd_devsaves,
             "migrate-root": cmd_migrate_root, "find-legacy": cmd_find_legacy}
@@ -1535,16 +1681,30 @@ def parser():
     p.add_argument("--out", help="diagnostics: the folder the report's files are written into")
     p.add_argument("--pack", help="diagnostics: the zip to make from --out as it is now")
     p.add_argument("--channel", choices=("stable", "prerelease"), default="stable", help="updates: the channel")
-    p.add_argument("--source", help="updates: a release list other than GitHub's (a mirror, for tests)")
+    # a release list other than GitHub's (a mirror, for tests): --source, or CUBIC_UPDATE_SOURCE for the commands the
+    # launcher runs itself. It changes only where releases are looked for: whatever it lists must still be signed by
+    # a key in config/release_keys.json, so it can't get anything installed that GitHub's list couldn't
+    p.add_argument("--source", default=os.environ.get("CUBIC_UPDATE_SOURCE") or None,
+                   help="updates: a release list other than GitHub's (a mirror, for tests; or CUBIC_UPDATE_SOURCE)")
     p.add_argument("--trusted-keys", dest="keys_file",
                    help="updates: a trusted-keys file other than config/release_keys.json")
     p.add_argument("--installed", help="updates: the installed version (default: this worker's)")
-    p.add_argument("--version", dest="version", help="download-update: the version expected")
+    p.add_argument("--version", dest="version", help="download-update, apply-update: the version expected")
     p.add_argument("--dest", help="download-update: the folder (default <install>/downloads/<version>)")
     p.add_argument("--package", help="stage-launcher: the downloaded launcher package")
-    p.add_argument("--launcher", help="stage-launcher, swap-launcher: the launcher's folder")
-    p.add_argument("--start", help="swap-launcher: the launcher's executable in its folder")
-    p.add_argument("--wait-pid", dest="wait_pid", type=int, help="swap-launcher: the launcher's process to wait for")
+    p.add_argument("--launcher", help="the launcher update's commands: the launcher's folder (an AppImage's: the "
+                                      "installation's root)")
+    p.add_argument("--start", help="swap-launcher, recover-launcher: the launcher's executable in its folder")
+    p.add_argument("--wait-pid", dest="wait_pid", type=int,
+                   help="the launcher update's commands: the launcher's process, to wait for")
+    p.add_argument("--appimage", help="the launcher update's commands: an AppImage installation's AppImage file")
+    p.add_argument("--expect-version", dest="expect_version", help="swap-launcher: the version being put in place")
+    p.add_argument("--swap-from", dest="swap_from", choices=("staged", "rollback"), default="staged",
+                   help="swap-launcher: the staged update, or the launcher kept by the last one")
+    p.add_argument("--appimage-extracted", dest="appimage_extracted", action="store_true", help=argparse.SUPPRESS)
+    p.add_argument("--old-appdir", dest="old_appdir", help=argparse.SUPPRESS)
+    p.add_argument("--no-restart", dest="no_restart", action="store_true",
+                   help="the launcher update's commands: no launcher started afterwards (the command line's)")
     p.add_argument("--health-timeout", dest="health_timeout", type=float, default=60.0, help=argparse.SUPPRESS)
     p.add_argument("--seconds", type=float, default=3.0, help=argparse.SUPPRESS)   # selftest
     p.add_argument("--block", action="store_true", help=argparse.SUPPRESS)        # selftest
@@ -1562,10 +1722,13 @@ REQUIRED = {"probe-disc": ("disc",), "probe-keys": ("disc", "keys"), "space": ("
             "builds": ("install",), "rollback": ("install",), "game-appimage": ("install",), "retention": ("install", "keep"),
             "repair-link": ("install",), "saves": ("install",), "prepare": ("install",), "uninstall": ("install",),
             "download-update": ("install",), "stage-launcher": ("package", "launcher"),
-            "swap-launcher": ("launcher", "start"), "settings": ("install",), "diagnostics": ("install", "out"),
+            "swap-launcher": ("launcher",), "settings": ("install",), "diagnostics": ("install", "out"),
+            "apply-update": ("install", "launcher", "version"), "rollback-launcher": ("launcher",),
+            "recover-launcher": ("launcher",), "launcher-state": ("install", "launcher"),
             "shortcuts": ("exe",), "remove-launcher": ("launcher",),
             "devsaves": ("install",), "migrate-root": ("from_root", "install")}
-OPTION_NAMES = {"from_root": "from", "keys_file": "trusted-keys", "data_dir": "data-dir", "wait_pid": "wait-pid"}
+OPTION_NAMES = {"from_root": "from", "keys_file": "trusted-keys", "data_dir": "data-dir", "wait_pid": "wait-pid",
+                "expect_version": "expect-version", "no_restart": "no-restart"}
 
 
 def main(argv=None):

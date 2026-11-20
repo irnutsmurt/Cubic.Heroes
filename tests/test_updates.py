@@ -432,6 +432,8 @@ def snapshot(root, names=layout.INSTALL_ITEMS + (layout.ROOT_MARKER, "my notes.t
             for d, dirs, fs in os.walk(p):
                 dirs[:] = [x for x in dirs if not layout.is_link(os.path.join(d, x)) and not (
                     os.path.basename(d) == "downloads" and x.startswith("launcher-"))]
+                if os.path.basename(d) == "downloads":   # the launcher update's own records (beta.4)
+                    fs = [f for f in fs if not f.startswith("launcher-")]
                 for f in fs:
                     q = os.path.join(d, f)
                     out[os.path.relpath(q, root)] = (get(q), os.path.getmtime(q))
@@ -439,16 +441,17 @@ def snapshot(root, names=layout.INSTALL_ITEMS + (layout.ROOT_MARKER, "my notes.t
 
 
 class FakeLauncher:
-    """the new launcher, started: it writes the health file (or not) as a real one would"""
+    """the new launcher, started: its window writes its version into the health file it is given (or not), as a
+    real one does (beta.4: the file named by CUBIC_UPDATE_HEALTH)"""
 
-    def __init__(self, folder, healthy):
-        self.healthy, self.folder, self.started = healthy, folder, []
+    def __init__(self, folder, healthy, version="new"):
+        self.healthy, self.folder, self.version, self.started = healthy, folder, version, []
 
-    def __call__(self, cmd, cwd):
+    def __call__(self, cmd, cwd, env=None):
         self.started.append(cmd[1:])
         if cmd[1] == "--after-update" and self.healthy:
-            put(os.path.join(self.folder, updates.HEALTH_FILE), "ok")
-        return mock.Mock(poll=lambda: 0 if not self.healthy else None)
+            put(env[updates.HEALTH_ENV], self.version)
+        return mock.Mock(poll=lambda: 0 if not self.healthy else None, returncode=1)
 
 
 class PortableSwap(unittest.TestCase):
@@ -479,8 +482,12 @@ class PortableSwap(unittest.TestCase):
         self.assertEqual(get(os.path.join(self.root, "worker", WORKER_EXE)), b"worker new")
         self.assertEqual(snapshot(self.root), self.before, "the install's items untouched, byte for byte")
         self.assertTrue(layout.is_link(os.path.join(self.root, "game")))
-        for gone in ("previous", "staged"):   # the previous items kept only until the new launcher is up
+        for gone in ("previous", "staged", "journal"):
             self.assertFalse(os.path.exists(self.dirs[gone]), gone)
+        # beta.4: the replaced launcher kept for the launcher's own rollback
+        self.assertEqual(get(os.path.join(self.dirs["rollback"], EXE)), b"launcher old")
+        self.assertEqual(get(os.path.join(self.dirs["rollback"], "worker", WORKER_EXE)), b"worker old")
+        self.assertEqual(updates.rollback_version(self.root), updates._this_version())
 
     def test_put_back_when_the_new_one_does_not_start(self):
         res, fake = self.swap(False)
@@ -555,7 +562,7 @@ class LauncherSwap(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def launcher(self, folder, version, healthy=True):
-        package(folder, version, "@echo off\r\n" + (f"echo %1 > {updates.HEALTH_FILE}\r\n" if healthy
+        package(folder, version, "@echo off\r\n" + (f'echo {version}> "%{updates.HEALTH_ENV}%"\r\n' if healthy
                                                     else "exit /b 1\r\n"))
 
     def test_kept_when_it_comes_up(self):

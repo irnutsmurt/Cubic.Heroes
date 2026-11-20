@@ -61,7 +61,13 @@ static const char* kUsageText =
     "                         (add --repair to rebuild from the disc anyway)\n"
     "  --update               bring the game up to date with this version of Cubic.Heroes: rebuilt only if the\n"
     "                         tools changed (your saves are backed up first)\n"
-    "  --check-update         look for a newer release of Cubic.Heroes (nothing downloaded)\n"
+    "  --check-update         look for a newer release of Cubic.Heroes on the installation's update channel\n"
+    "                         (nothing downloaded)\n"
+    "  --apply-update         download the newer release (if it isn't already), check it against the release's\n"
+    "                         signature and install it: CubicHeroes exits, and the update finishes a few seconds\n"
+    "                         later; --status says how it ended. Then --update brings the game up to date\n"
+    "  --rollback-launcher    put back the launcher the last update replaced (kept by it); the newer one is kept\n"
+    "                         in turn\n"
     "  --prepare-shaders      prepare the shaders and pipelines the game will need (headless)\n"
     "  --rebuild-shaders      prepare them again from scratch\n"
     "  --status               the installation, its build, its settings and its shader cache\n"
@@ -143,6 +149,8 @@ static Args parse(const std::vector<std::string>& av)
         else if (o == "--install") set_command("install");
         else if (o == "--update") set_command("update");
         else if (o == "--check-update") set_command("check-update");
+        else if (o == "--apply-update") set_command("apply-update");
+        else if (o == "--rollback-launcher") set_command("rollback-launcher");
         else if (o == "--prepare-shaders") set_command("prepare-shaders");
         else if (o == "--rebuild-shaders") set_command("rebuild-shaders");
         else if (o == "--status") set_command("status");
@@ -332,6 +340,7 @@ static int finish(const Args& a, const Run& r, const std::string& what)
 }
 
 static std::vector<std::string> install_arg() { return { "--install", g_root }; }
+static std::string update_channel(const Args& a);
 
 // ---- the commands ----
 
@@ -368,7 +377,9 @@ static int cmd_status(const Args& a, bool with_update)
         prep = worker(a, "prepare", { "--install", g_root, "--check" }, false);
         settings = worker(a, "settings", install_arg(), false);
     }
-    if (with_update) update = worker(a, "check-update", {}, false);
+    if (with_update) update = worker(a, "check-update", { "--channel", update_channel(a) }, false);
+    const Run lstate = worker(a, "launcher-state", launcher_update_args(), false);   // beta.4
+    const json::Value& L = lstate.result["data"];
     const std::string exe = inst ? game_exe(g_root) : std::string();
     if (a.json) {
         std::string o = "{\"ok\":true,\"cubicheroes\":" + json::quote(CUBIC_VERSION) + ",\"install_dir\":" + json::quote(g_root) +
@@ -380,6 +391,7 @@ static int cmd_status(const Args& a, bool with_update)
                      ? prep.result["data"] : prep.result) + ",\"settings\":" + json::dump(settings.result["data"]);
         }
         if (with_update) o += ",\"update\":" + json::dump(update.result);
+        o += ",\"launcher_update\":" + json::dump(L);
         printf("%s}\n", o.c_str());
         return kOk;
     }
@@ -410,6 +422,15 @@ static int cmd_status(const Args& a, bool with_update)
             say(a, "Shaders: " + prep.result["message"].str("unknown"));
         }
     }
+    if (!L["ready"].is_null())
+        say(a, "Launcher update: version " + L["ready"]["version"].str() + " is downloaded and ready (--apply-update)");
+    if (!L["rollback"].is_null())
+        say(a, "Kept for the launcher's rollback: version " + L["rollback"]["version"].str() + " (--rollback-launcher)");
+    if (!L["last"].is_null())
+        say(a, "Last launcher update: " + L["last"]["result"].str() + (L["last"]["version"].str().empty() ? "" :
+            " (version " + L["last"]["version"].str() + ")") + (L["last"]["why"].str().empty() ? "" : " -- " +
+            L["last"]["why"].str()));
+    if (L["interrupted"].truthy()) say(a, "Launcher update: interrupted; the next start puts it right");
     if (with_update) {
         if (update.result["ok"].truthy()) {
             const json::Value& d = update.result["data"];
@@ -471,20 +492,91 @@ static int cmd_update(const Args& a)
     say(a, "Bringing the game up to date with Cubic.Heroes " CUBIC_VERSION "...");
     const Run r = worker(a, "update", install_arg(), true);
     const int code = finish(a, r, "The update");
+    if (code == kOk) write_text(game_update_marker(), CUBIC_VERSION "\n");   // the window won't do it again
     if (code == kOk && !a.json)
         say(a, r.result["data"]["changed"].truthy() ? "Updated: build " + r.result["data"]["build"].str() + " is active."
                                                     : "Already up to date: nothing rebuilt.");
     return code;
 }
 
+// the installation's update channel (its setting; a beta's default: test releases too), as the window uses it
+static std::string update_channel(const Args& a)
+{
+    const Run s = worker(a, "settings", install_arg(), false);
+    const std::string c = s.result["data"]["settings"]["LAUNCHER_UPDATE_CHANNEL"]["value"].str();
+    return c == "prerelease" ? c : std::string("stable");
+}
+
 static int cmd_check_update(const Args& a)
 {
-    const Run r = worker(a, "check-update", {}, false);
+    const Run r = worker(a, "check-update", { "--channel", update_channel(a) }, false);
     const int code = finish(a, r, "The update check");
     if (code != kOk) return code;
     const json::Value& d = r.result["data"];
     if (a.json) printf("{\"ok\":true,\"update\":%s}\n", json::dump(d).c_str());
-    else say(a, d["version"].str().empty() ? "No newer release." : "Version " + d["version"].str() + " is available.");
+    else {
+        say(a, d["version"].str().empty() ? "No newer release." : "Version " + d["version"].str() + " is available.");
+        for (size_t i = 0; i < d["refused"].size(); i++)
+            say(a, "Refused: " + d["refused"][i]["tag"].str("?") + " -- " + d["refused"][i]["why"].str());
+    }
+    return kOk;
+}
+
+// beta.4: the launcher's own update, from the command line -- the same worker commands as the window's. This
+// process exits at once; the helper then swaps the launcher's files, checks the new one (its --version) and keeps
+// it or puts this one back. Nothing is started afterwards (no window).
+static int cmd_apply_update(const Args& a)
+{
+    const std::string channel = update_channel(a);
+    const Run c = worker(a, "check-update", { "--channel", channel }, false);
+    int code = finish(a, c, "The update check");
+    if (code != kOk) return code;
+    const json::Value& d = c.result["data"];
+    if (d["offline"].truthy()) return fail(a, kFailed, "offline", d["why"].str("No connection to the update server."));
+    if (!d["available"].truthy() && d["refused"].size() > 0) {   // a release that doesn't verify: never installed
+        const json::Value& r0 = d["refused"][(size_t)0];
+        return fail(a, kFailed, r0["code"].str("refused"), "The newest release (" + r0["tag"].str("?") + ") was refused: " +
+                    r0["why"].str("its signature isn't valid") + ". Nothing was installed.");
+    }
+    if (!d["available"].truthy() || !d["newer"].truthy()) {
+        if (a.json) printf("{\"ok\":true,\"installing\":false,\"version\":%s}\n", json::quote(CUBIC_VERSION).c_str());
+        else say(a, std::string("Up to date: version ") + CUBIC_VERSION + ".");
+        return kOk;
+    }
+    const std::string v = d["version"].str();
+    say(a, "Downloading version " + v + "...");
+    code = finish(a, worker(a, "download-update", { "--install", g_root, "--channel", channel, "--version", v }, true),
+                  "The download");
+    if (code != kOk) return code;
+    std::vector<std::string> args = launcher_update_args();
+    for (const char* x : { "--version", v.c_str() }) args.push_back(x);
+    args.push_back("--wait-pid");
+    args.push_back(std::to_string(this_pid()));
+    args.push_back("--no-restart");
+    const Run r = worker(a, "apply-update", args, true);
+    code = finish(a, r, "Installing the update");
+    if (code != kOk) return code;
+    if (a.json)
+        printf("{\"ok\":true,\"installing\":true,\"version\":%s,\"from\":%s}\n", json::quote(v).c_str(),
+               json::quote(CUBIC_VERSION).c_str());
+    else
+        say(a, "Installing version " + v + ": CubicHeroes exits now and the update finishes in a few seconds. Then "
+               "--version shows it, --status says how it ended, and --update brings the game up to date.");
+    return kOk;
+}
+
+static int cmd_rollback_launcher(const Args& a)
+{
+    std::vector<std::string> args = launcher_update_args();
+    args.push_back("--wait-pid");
+    args.push_back(std::to_string(this_pid()));
+    args.push_back("--no-restart");
+    const Run r = worker(a, "rollback-launcher", args, true);
+    const int code = finish(a, r, "Going back to the previous launcher");
+    if (code != kOk) return code;
+    const std::string v = r.result["data"]["version"].str();
+    if (a.json) printf("{\"ok\":true,\"installing\":true,\"version\":%s}\n", json::quote(v).c_str());
+    else say(a, "Putting back version " + v + ": CubicHeroes exits now and it is back in a few seconds.");
     return kOk;
 }
 
@@ -681,6 +773,8 @@ static int run(const Args& a)
                                                    ". Choose another with --install-dir PATH.");
     if (a.command == "status") return cmd_status(a, false);
     if (a.command == "check-update") return cmd_check_update(a);
+    if (a.command == "apply-update") return cmd_apply_update(a);
+    if (a.command == "rollback-launcher") return cmd_rollback_launcher(a);
     if (a.command == "set") return cmd_set(a);
     if (a.command == "install") return cmd_install(a);
     if (a.command == "update") return cmd_update(a);
