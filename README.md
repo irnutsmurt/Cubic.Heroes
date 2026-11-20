@@ -319,6 +319,8 @@ install new versions, 0.2.0-beta.4 included, by hand:
    - **Linux, the AppImage**: put the new `.AppImage` beside the old one (beside the `Cubic.Heroes` folder) and make
      it executable; it uses the same installation. Then remove the old file, or keep it to go back to. If Steam,
      Heroic or Lutris start the old file, point them at the new one.
+   - If you renamed the `Cubic.Heroes` folder, extract the zip or tarball somewhere else instead, and copy the
+     contents of its `Cubic.Heroes` folder into yours, replacing the files.
 3. **Bring the game up to date once**, from a terminal in that folder: `.\CubicHeroes.exe --update` (Windows, in
    `Cubic.Heroes`), `./Cubic.Heroes/CubicHeroes --update` (the tarball) or `./<the new AppImage> --update`. It
    rebuilds the game from your disc's conversion only if the new version needs it (about 6 minutes on a recent desktop
@@ -327,7 +329,9 @@ install new versions, 0.2.0-beta.4 included, by hand:
 
 Your saves, settings, shader caches, logs and builds stay where they are, and nothing is deleted. On Windows this is
 how 0.2.0-beta.3 was tested from beta.2: a beta.2 installation, the beta.3 package unpacked over it, `--update` --
-the saves and settings byte for byte the same, the game played, and rolled back to beta.2's build.
+the saves and settings byte for byte the same, the game played, and rolled back to beta.2's build. On Linux the
+tarball and the AppImage were tested the same way, from the published beta.3 to a build of the next version: the
+saves, settings and builds byte for byte the same, and the game played.
 
 ## Command line
 
