@@ -8,8 +8,12 @@ Pass: exit 0, an "inventory" JSON with the disc's programs and the recipes count
 """
 import argparse
 import json
+import os
 import subprocess
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import desktop_guard  # noqa: E402
 
 
 def main():
@@ -18,8 +22,23 @@ def main():
     ap.add_argument("--disc", required=True)
     ap.add_argument("--recipes", required=True)
     a = ap.parse_args()
-    r = subprocess.run([a.bin, "--shader-inventory", "--disc", a.disc, "--recipes", a.recipes], capture_output=True,
-                       text=True, timeout=600)
+    # through the desktop guard like every game the tests start: the inventory opens no window, and if a change ever
+    # made it, the game would render offscreen and the Watch would end it
+    env = dict(os.environ)
+    desktop_guard.game_env(env, False, quiet=True)
+    p = subprocess.Popen([a.bin, "--shader-inventory", "--disc", a.disc, "--recipes", a.recipes], env=env,
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    watch = desktop_guard.Watch(p, "the game").start()
+    try:
+        out, err = p.communicate(timeout=600)
+    except subprocess.TimeoutExpired:
+        p.kill()
+        out, err = p.communicate()
+    watch.stop()
+    r = subprocess.CompletedProcess(p.args, p.returncode, out, err)
+    if watch.violation:
+        print("FAIL: " + watch.violation)
+        return 1
     inv, rec = None, None
     for ln in r.stdout.splitlines():
         if ln.startswith("{"):
