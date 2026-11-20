@@ -27,7 +27,9 @@ user agent and nothing of the player's.
 """
 import json
 import os
+import re
 import shutil
+import ssl
 import subprocess
 import sys
 import time
@@ -102,10 +104,87 @@ def pick_asset(assets, kind=None):
     return None
 
 
-def _open(url, headers=None, timeout=TIMEOUT_S):
+# Linux: the system's trusted certificate authorities (beta.4). The worker's OpenSSL is built in the pinned build
+# environment (tools/linux_build_env), so its compiled-in defaults name that environment's folder (/opt/python/ssl),
+# which no player's system has: with them every HTTPS request failed verification and read as offline (beta.3).
+# The compiled-in defaults are therefore never used on Linux: SSL_CERT_FILE / SSL_CERT_DIR when the player set
+# them (as OpenSSL itself honours them), otherwise the first of the distributions' own bundles that holds
+# certificates, otherwise a hashed certificate folder. Verification and the host name check stay on whatever is
+# found (ssl.create_default_context); nothing found is an error, never an unverified connection. Windows: urllib's
+# default, unchanged (Python reads the Windows certificate store).
+CA_FILES = (
+    "/etc/ssl/certs/ca-certificates.crt",                  # Debian, Ubuntu, Arch, Manjaro, SteamOS, Gentoo, NixOS
+    "/etc/pki/tls/certs/ca-bundle.crt",                    # Fedora, RHEL, CentOS
+    "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",   # Fedora, RHEL 7+ (what the previous one links to)
+    "/etc/ssl/ca-bundle.pem",                              # openSUSE
+    "/etc/ssl/cert.pem",                                   # Alpine, Arch, Void
+    "/etc/pki/tls/cacert.pem",                             # OpenELEC
+)
+CA_DIRS = ("/etc/ssl/certs", "/etc/pki/tls/certs")
+_HASHED = re.compile(r"[0-9a-f]{8}\.\d+")   # OpenSSL's subject-hash names (c_rehash, openssl rehash)
+
+
+def ca_store(environ=None, files=CA_FILES, dirs=CA_DIRS):
+    """(context, where) for HTTPS on Linux: the certificate authorities the player's system trusts, verification and
+    host name checks on. Raises ReleaseError "tls" when no store can be read: never a connection without one."""
+    env = os.environ if environ is None else environ
+    cafile, capath = env.get("SSL_CERT_FILE") or None, env.get("SSL_CERT_DIR") or None
+    if cafile or capath:   # set by the player (or their distribution's environment): used as given, nothing else
+        try:
+            return ssl.create_default_context(cafile=cafile, capath=capath), "SSL_CERT_FILE/SSL_CERT_DIR"
+        except (ssl.SSLError, OSError, ValueError) as e:
+            raise trust.ReleaseError(f"The certificates SSL_CERT_FILE/SSL_CERT_DIR name could not be read ({e}).",
+                                     "tls") from e
+    for f in files:
+        if not os.path.isfile(f):
+            continue
+        try:
+            ctx = ssl.create_default_context(cafile=f)
+        except (ssl.SSLError, OSError, ValueError):
+            continue
+        if ctx.cert_store_stats().get("x509_ca"):
+            return ctx, f
+    for d in dirs:
+        try:
+            if any(_HASHED.fullmatch(n) for n in os.listdir(d)):
+                return ssl.create_default_context(capath=d), d
+        except (ssl.SSLError, OSError, ValueError):
+            continue
+    raise trust.ReleaseError("No trusted certificate store was found on this system; set SSL_CERT_FILE to your "
+                             "CA bundle.", "tls")
+
+
+def tls_context():
+    """None on Windows (urllib's default: the Windows certificate store); on Linux the system's store (ca_store)"""
+    return None if os.name == "nt" else ca_store()[0]
+
+
+def tls_store():
+    """which store HTTPS is verified with, for the answer (the qualification records it)"""
+    if os.name == "nt":
+        return "the Windows certificate store"
+    try:
+        return ca_store()[1]
+    except trust.ReleaseError:
+        return None
+
+
+def _tls_failure(e):
+    """a URLError whose cause is the TLS handshake (a certificate that does not verify: untrusted, expired, another
+    host's): told apart from no connection -- it is not offline, and must never read as offline (beta.3's Linux
+    workers did)"""
+    r = getattr(e, "reason", e)
+    if isinstance(r, ssl.SSLCertVerificationError):
+        return trust.ReleaseError("The update server's certificate could not be verified "
+                                  f"({r.verify_message or r}); nothing was downloaded.", "tls")
+    return None
+
+
+def _open(url, headers=None, timeout=None):
     h = {"User-Agent": USER_AGENT, "Accept": "application/octet-stream"}
     h.update(headers or {})
-    return urllib.request.urlopen(urllib.request.Request(url, headers=h), timeout=timeout)
+    ctx = tls_context() if url.lower().startswith("https:") else None
+    return urllib.request.urlopen(urllib.request.Request(url, headers=h), timeout=timeout or TIMEOUT_S, context=ctx)
 
 
 def _get(url, limit=1 << 20):
@@ -116,7 +195,7 @@ def _get(url, limit=1 << 20):
     except urllib.error.HTTPError as e:
         raise trust.ReleaseError(f"The update server answered {e.code} for {url.rsplit('/', 1)[-1]}.", "server")
     except (urllib.error.URLError, OSError, TimeoutError) as e:
-        raise trust.ReleaseError("No connection to the update server (offline?).", "offline") from e
+        raise (_tls_failure(e) or trust.ReleaseError("No connection to the update server (offline?).", "offline")) from e
     if len(data) > limit:
         raise trust.ReleaseError("An update document is larger than expected.", "server")
     return data
@@ -192,8 +271,9 @@ def check(channel="stable", installed=None, source=None, keys=None):
         return {"available": True, "tag": r["tag"], "version": m["version"], "channel": m["channel"],
                 "notes": m.get("notes", ""), "min_launcher": m.get("min_launcher"), "newer": newer,
                 "assets": mine, "manifest": m,
-                "manifest_url": r["assets"][MANIFEST], "urls": r["assets"], "refused": refused}
-    out = {"available": False, "refused": refused}
+                "manifest_url": r["assets"][MANIFEST], "urls": r["assets"], "refused": refused,
+                "tls_store": tls_store()}
+    out = {"available": False, "refused": refused, "tls_store": tls_store()}
     if nothing_here:
         out.update(no_package=True, version=nothing_here["version"], tag=nothing_here["tag"],
                    platform=platform_name(), kind=installed_kind())
@@ -240,7 +320,8 @@ def download(asset, url, dest_dir, progress=None, cancelled=None):
             else:
                 raise trust.ReleaseError(f"The download server answered {e.code}.", "server")
         except (urllib.error.URLError, OSError, TimeoutError) as e:
-            raise trust.ReleaseError("No connection to the download server (offline?).", "offline") from e
+            raise (_tls_failure(e) or
+                   trust.ReleaseError("No connection to the download server (offline?).", "offline")) from e
         if r is not None:
             with r:
                 if have and r.status != 206:   # the server ignored the range: from the start
