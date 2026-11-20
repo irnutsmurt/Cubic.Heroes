@@ -1254,7 +1254,8 @@ def cmd_swap_launcher(a, ev, control):
     except updates.trust.ReleaseError as e:
         raise _update_error(e)
     finally:
-        _remove_own_copy("swap", a.launcher)
+        if not updates.read_journal(a.launcher):   # an unfinished update: its recovery runs from this copy
+            _remove_own_copy("swap", a.launcher)
     return {"result": out}
 
 
@@ -1276,6 +1277,9 @@ def _not_while_playing(install):
                                   ", ".join(playing))
 
 
+_last_helper = [None]   # the program the last helper was started as (its journal and lock record it)
+
+
 def _start_swap(a, version, source, ev):
     """the helper started, detached; the caller hands it the update's lock, then this worker and the launcher exit"""
     import updates
@@ -1294,7 +1298,9 @@ def _start_swap(a, version, source, ev):
         logs = os.path.join(os.path.abspath(a.install), "logs")
         os.makedirs(logs, exist_ok=True)
         args += ["--log", os.path.join(logs, "launcher-update.jsonl")]
-    p = updates._start_detached(_helper_command(a, args), os.path.abspath(a.launcher))
+    cmd = _helper_command(a, args)
+    _last_helper[0] = cmd[0]
+    p = updates._start_detached(cmd, os.path.abspath(a.launcher))
     ev.emit("log", level="info", text=f"launcher update: the helper started ({p.pid}); the launcher exits now")
     return p.pid
 
@@ -1320,10 +1326,11 @@ def cmd_apply_update(a, ev, control):
         _not_while_playing(a.install)
         j = updates.prepare_update(a.install, a.launcher, a.version, _keys(a), a.appimage, a.installed)
         pid = _start_swap(a, a.version, "staged", ev)
-        lock.hand_over(pid)
+        lock.hand_over(pid, _last_helper[0])
         # the journal names the helper from now on: a launcher started meanwhile sees an update under way, not an
         # interrupted one
-        updates._write_json(updates.update_dirs(a.launcher)["journal"], dict(j, helper_pid=pid))
+        updates._write_json(updates.update_dirs(a.launcher)["journal"],
+                            dict(j, helper_pid=pid, helper_exe=_last_helper[0], helper_since=time.time()))
     except updates.trust.ReleaseError as e:
         raise _update_error(e)
     finally:
@@ -1349,7 +1356,7 @@ def cmd_rollback_launcher(a, ev, control):
                                       "busy")
         _not_while_playing(a.install or a.launcher)
         pid = _start_swap(a, v, "rollback", ev)
-        lock.hand_over(pid)
+        lock.hand_over(pid, _last_helper[0])
     except updates.trust.ReleaseError as e:
         raise _update_error(e)
     finally:
@@ -1363,13 +1370,31 @@ def cmd_recover_launcher(a, ev, control):
     (updates.recover_launcher). The launcher starts it at its next start, and exits; --no-restart: no launcher is
     started afterwards."""
     import updates
+    here = os.path.dirname(os.path.abspath(sys.executable))
+    appdir = os.environ.get("APPDIR") or ""
+    if getattr(sys, "frozen", False) and appdir and \
+            os.path.normcase(here + os.sep).startswith(os.path.normcase(os.path.abspath(appdir) + os.sep)):
+        # started from an AppImage's image (no copy was there): its runtime would stay alive for as long as this
+        # runs, and the recovery waits for the AppImage to end -- so it runs from a copy out of the image instead
+        helper = updates.stage_helper(a.launcher, here)
+        args = ["recover-launcher", "--launcher", os.path.abspath(a.launcher), "--old-appdir", appdir]
+        for flag, v in (("--appimage", a.appimage), ("--start", a.start),
+                        ("--wait-pid", str(a.wait_pid) if a.wait_pid else None)):
+            if v:
+                args += [flag, v]
+        if a.no_restart:
+            args.append("--no-restart")
+        p = updates._start_detached([helper, "--worker"] + args, os.path.abspath(a.launcher))
+        return {"result": "relaunched", "helper_pid": p.pid}
     try:
         out = updates.recover_launcher(a.launcher, a.start, lambda t: ev.emit("log", level="info", text=t),
-                                       a.wait_pid, restart=not a.no_restart)
+                                       a.wait_pid, restart=not a.no_restart,
+                                       prefixes=(a.old_appdir,) if a.old_appdir else ())
     except updates.trust.ReleaseError as e:
         raise _update_error(e)
     finally:
-        _remove_own_copy("swap", a.launcher)
+        if not updates.read_journal(a.launcher):   # still unfinished: the next recovery runs from this copy
+            _remove_own_copy("swap", a.launcher)
     return {"result": out}
 
 

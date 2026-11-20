@@ -30,6 +30,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -494,6 +495,74 @@ class Swap(Base):
             p.kill()
             p.wait()
         updates.UpdateLock(self.root, "apply").acquire().release()   # its process gone: taken over
+        self.assertFalse(os.path.exists(self.dirs["lock"]))
+
+    def test_a_recorded_process_is_only_the_process_recorded(self):
+        p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        try:
+            time.sleep(0.5)
+            now = time.time()
+            self.assertTrue(updates.is_process(p.pid, sys.executable, now), "itself, recorded after it started")
+            self.assertFalse(updates.is_process(p.pid, sys.executable, now - 3600),
+                             "a pid recorded before this process started is another's (reused after a reboot)")
+            self.assertFalse(updates.is_process(p.pid, os.path.join(self.tmp, "other.exe"), now),
+                             "another program under that pid")
+        finally:
+            p.kill()
+            p.wait()
+        self.assertFalse(updates.is_process(p.pid, sys.executable, now), "ended")
+
+    @unittest.skipIf(WIN, "zombies are a POSIX thing")
+    def test_a_zombie_is_not_running(self):
+        p = subprocess.Popen(["sleep", "30"])
+        os.kill(p.pid, 9)
+        time.sleep(0.5)   # killed, not reaped
+        self.assertFalse(updates.is_process(p.pid))
+        p.wait()
+
+    def test_a_stale_helper_record_doesnt_block_recovery(self):
+        self.download()
+        self.prepare()
+        with self.assertRaises(Crash):
+            updates.swap_launcher(self.root, EXE, log=lambda t: None, expect_version=NEW, restart=False,
+                                  check=mock.Mock(side_effect=Crash()), idle_timeout=1)
+        p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        try:   # after a reboot the recorded pid belongs to some other process, started later
+            j = updates.read_journal(self.root)
+            j.update(helper_pid=p.pid, helper_exe=sys.executable, helper_since=time.time() - 3600)
+            updates._write_json(self.dirs["journal"], j)
+            self.assertEqual(updates.recover_launcher(self.root, log=lambda t: None, idle_timeout=1,
+                                                      check=lambda cmd, v, **kw: (False, "")), "restored")
+        finally:
+            p.kill()
+            p.wait()
+        self.assertOld()
+
+    def test_a_recovery_that_cant_finish_says_so(self):
+        self.download()
+        self.prepare()
+        with self.assertRaises(Crash):
+            updates.swap_launcher(self.root, EXE, log=lambda t: None, expect_version=NEW, restart=False,
+                                  check=mock.Mock(side_effect=Crash()), idle_timeout=1)
+        game = os.path.join(self.root, "builds", "b1", layout.exe_name())
+        started = []
+        with mock.patch.object(updates, "_processes", lambda: [(4242, game)]),                 mock.patch.object(updates, "_start_detached", lambda cmd, cwd, env=None: started.append(cmd[1])):
+            self.assertEqual(updates.recover_launcher(self.root, log=lambda t: None, idle_timeout=1, restart=True),
+                             "busy")
+        last = json.load(open(self.dirs["last"]))
+        self.assertEqual(last["result"], "busy")
+        self.assertIn(layout.exe_name(), last["why"])
+        self.assertEqual(started, ["--update-failed"], "the window opens and says why")
+        self.assertTrue(os.path.exists(self.dirs["journal"]), "still to be put right next time")
+
+    def test_a_lock_of_a_reused_pid_is_taken_over(self):
+        p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        try:
+            put(self.dirs["lock"], json.dumps({"pid": p.pid, "exe": sys.executable, "since": time.time() - 3600}))
+            updates.UpdateLock(self.root, "apply").acquire().release()
+        finally:
+            p.kill()
+            p.wait()
         self.assertFalse(os.path.exists(self.dirs["lock"]))
 
     def test_the_game_still_running_stops_the_swap(self):

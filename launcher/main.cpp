@@ -399,20 +399,6 @@ static unsigned long this_pid()
 #endif
 }
 
-static bool process_alive(unsigned long pid)
-{
-    if (!pid) return false;
-#ifdef _WIN32
-    HANDLE h = OpenProcess(SYNCHRONIZE, FALSE, (DWORD)pid);
-    if (!h) return false;
-    const bool alive = WaitForSingleObject(h, 0) == WAIT_TIMEOUT;
-    CloseHandle(h);
-    return alive;
-#else
-    return kill((pid_t)pid, 0) == 0 || errno == EPERM;
-#endif
-}
-
 // a program that outlives the launcher (the update's helper): detached, outside any job of the launcher's
 static bool start_detached(const std::vector<std::string>& argv, const std::string& cwd)
 {
@@ -3653,24 +3639,20 @@ static int unfinished_launcher_update(const cli::Args& a, int argc, char** argv)
     const std::string jpath = path_str(u8path(launcher_update_dir()) / "downloads" / "launcher-update.json");
     std::error_code ec;
     if (!fs::exists(u8path(jpath), ec)) return -1;
-    json::Value j;
-    json::parse(read_text(jpath, 1u << 20), j);
+    // The recovery decides (tools/updates.py recover_launcher): an update still being installed by its helper is
+    // left to finish -- that helper starts the launcher when it is done -- and anything else is put right, then (for
+    // the window) the launcher is started again with how it went. Whether the recorded helper still runs isn't
+    // judged here: a process id alone can't tell (one reused after a reboot, one ended but not yet reaped).
+    std::vector<std::string> av = recovery_argv();
+    for (const std::string& x : launcher_update_args()) av.push_back(x);
+    av.push_back("--wait-pid");
+    av.push_back(std::to_string(this_pid()));
     const bool window = cli::wants_window(a);
-    const unsigned long helper = (unsigned long)j["helper_pid"].num(0);
-    const bool installing = helper && helper != this_pid() && process_alive(helper);
-    if (!installing) {
-        std::vector<std::string> av = recovery_argv();
-        for (const std::string& x : launcher_update_args()) av.push_back(x);
-        av.push_back("--wait-pid");
-        av.push_back(std::to_string(this_pid()));
-        if (!window) av.push_back("--no-restart");
-        start_detached(av, launcher_update_dir());
-    }
-    if (window) return 0;   // the helper starts the launcher again once it is done
-    const std::string msg = installing ? "An update of the launcher is being installed; run the command again in a "
-                                         "moment."
-                                       : "An update of the launcher was interrupted; it is being put right now. Run the "
-                                         "command again in a moment.";
+    if (!window) av.push_back("--no-restart");
+    start_detached(av, launcher_update_dir());
+    if (window) return 0;   // the launcher opens again once the update is finished or put right
+    const std::string msg = "An update of the launcher is being installed, or an interrupted one put right; run the "
+                            "command again in a moment.";
     if (a.json) printf("{\"ok\":false,\"code\":\"busy\",\"message\":%s}\n", json::quote(msg).c_str());
     else fprintf(stderr, "CubicHeroes: %s\n", msg.c_str());
     return cli::kBusy;

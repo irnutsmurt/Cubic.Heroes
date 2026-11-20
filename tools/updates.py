@@ -537,6 +537,74 @@ def _alive(pid):
         return False
 
 
+def _proc_info(pid):
+    """(program path, start time in seconds since the epoch, a zombie) of a process; None if there is none"""
+    if os.name == "nt":
+        import ctypes
+        import ctypes.wintypes as w
+        k = ctypes.WinDLL("kernel32")
+        k.OpenProcess.restype = w.HANDLE
+        h = k.OpenProcess(0x1000 | 0x00100000, False, pid)   # PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE
+        if not h:
+            return None
+        try:
+            if k.WaitForSingleObject(h, 0) != 0x102:   # not WAIT_TIMEOUT: it has ended
+                return None
+            buf = ctypes.create_unicode_buffer(32768)
+            n = w.DWORD(len(buf))
+            path = buf.value if k.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(n)) else ""
+            ft = [w.FILETIME() for _ in range(4)]
+            start = None
+            if k.GetProcessTimes(h, *[ctypes.byref(f) for f in ft]):
+                ticks = (ft[0].dwHighDateTime << 32) | ft[0].dwLowDateTime
+                start = (ticks - 116444736000000000) / 1e7
+            return path, start, False
+        finally:
+            k.CloseHandle(h)
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8", errors="replace") as f:
+            rest = f.read().rsplit(")", 1)[1].split()
+    except (OSError, IndexError):
+        try:   # no /proc: whether it exists at all
+            os.kill(pid, 0)
+            return "", None, False
+        except PermissionError:
+            return "", None, False
+        except OSError:
+            return None
+    start = None
+    try:
+        with open("/proc/stat", encoding="utf-8") as f:
+            btime = next(int(ln.split()[1]) for ln in f if ln.startswith("btime "))
+        start = btime + int(rest[19]) / os.sysconf("SC_CLK_TCK")   # field 22: the start, in ticks since boot
+    except (OSError, StopIteration, ValueError, IndexError):
+        pass
+    try:
+        path = os.readlink(f"/proc/{pid}/exe").replace(" (deleted)", "")
+    except OSError:
+        path = ""
+    return path, start, rest[0] == "Z"
+
+
+def is_process(pid, exe=None, since=None):
+    """pid is still the process recorded with it: running (a zombie, killed but not yet reaped, is not), started no
+    later than `since` (when it was recorded -- a pid given to another process after a reboot or a crash starts
+    later), and running `exe` when that was recorded"""
+    if not pid or pid == -1:
+        return bool(pid)
+    info = _proc_info(pid)
+    if not info:
+        return False
+    path, start, zombie = info
+    if zombie:
+        return False
+    if since is not None and start is not None and start > since + 2:
+        return False
+    if exe and path and os.path.normcase(os.path.realpath(path)) != os.path.normcase(os.path.realpath(exe)):
+        return False
+    return True
+
+
 def _clean_env(env=None):
     """the environment a launcher is started in by the update: without the old AppImage's own variables (its
     mount is gone once it exits; a new AppImage's runtime sets its own)"""
@@ -600,6 +668,12 @@ def _read_json(path):
         return None
 
 
+def helper_running(j):
+    """the journal's helper is still at work (not this process; the same process it recorded)"""
+    pid = (j or {}).get("helper_pid")
+    return bool(pid) and pid != os.getpid() and is_process(pid, j.get("helper_exe"), j.get("helper_since"))
+
+
 def read_journal(launcher_dir):
     """the swap in progress, or left by one that never finished (a crash, a power cut); None"""
     return _read_json(update_dirs(launcher_dir)["journal"])
@@ -622,7 +696,7 @@ class UpdateLock:
     def owner(self):
         d = _read_json(self.path)
         if isinstance(d, dict):
-            return d.get("pid")
+            return d
         try:   # being written this moment, or damaged: someone's until it is old
             return -1 if time.time() - os.path.getmtime(self.path) < 10 else None
         except OSError:
@@ -635,11 +709,13 @@ class UpdateLock:
             try:
                 fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             except FileExistsError:
-                pid = self.owner()
+                d = self.owner()
+                pid = d.get("pid") if isinstance(d, dict) else d
                 if pid == os.getpid():   # handed over to this process
                     self.held = True
                     return self
-                if pid != -1 and not _alive(pid):   # its process is gone
+                if pid != -1 and not (isinstance(d, dict) and is_process(pid, d.get("exe"), d.get("since"))):
+                    # its process is gone (or the pid is another process's now)
                     try:
                         os.remove(self.path)
                     except OSError:
@@ -651,17 +727,18 @@ class UpdateLock:
                 time.sleep(0.25)
                 continue
             with os.fdopen(fd, "w") as f:
-                json.dump({"pid": os.getpid(), "op": self.op, "since": time.time()}, f)
+                json.dump({"pid": os.getpid(), "exe": sys.executable, "op": self.op, "since": time.time()}, f)
             self.held = True
             return self
 
-    def hand_over(self, pid):
+    def hand_over(self, pid, exe=None):
         """the lock given to another process (the helper apply-update starts), released here"""
-        _write_json(self.path, {"pid": pid, "op": "swap", "since": time.time()})
+        _write_json(self.path, {"pid": pid, "exe": exe, "op": "swap", "since": time.time()})
         self.held = False
 
     def release(self):
-        if self.held and self.owner() == os.getpid():
+        d = self.owner()
+        if self.held and isinstance(d, dict) and d.get("pid") == os.getpid():
             try:
                 os.remove(self.path)
             except OSError:
@@ -1092,7 +1169,7 @@ def swap_launcher(launcher_dir, start, wait_pid=None, log=print, health_timeout=
         os.makedirs(prev)
         j = {"state": "swapping", "kind": "folder", "source": source, "version": expect_version, "from": from_v,
              "start": start, "names": names, "outgoing": outgoing, "incoming": incoming, "done": [],
-             "helper_pid": os.getpid(),
+             "helper_pid": os.getpid(), "helper_exe": sys.executable, "helper_since": time.time(),
              "since": time.time()}
         _write_json(dirs["journal"], j)
         aside = dirs["failed"] if source == "staged" else src
@@ -1215,6 +1292,7 @@ def swap_appimage(appimage, root, wait_pid=None, log=print, health_timeout=HEALT
         os.makedirs(prev)
         j = {"state": "swapping", "kind": "appimage", "source": source, "version": expect_version, "from": from_v,
              "appimage": target, "new": new, "extracted": bool(extracted), "helper_pid": os.getpid(),
+             "helper_exe": sys.executable, "helper_since": time.time(),
              "since": time.time()}
         _write_json(dirs["journal"], j)
         try:
@@ -1281,7 +1359,7 @@ def _undo_appimage(dirs, j, why, log, launch):
 # ---- after a crash: recovery ----
 
 def recover_launcher(launcher_dir, start=None, log=print, wait_pid=None, restart=False, check=None,
-                     idle_timeout=IDLE_TIMEOUT_S):
+                     idle_timeout=IDLE_TIMEOUT_S, prefixes=()):
     """a launcher update left unfinished (its journal, its helper gone: a crash, a power cut, the helper ended): a
     swap found complete and healthy (the new launcher answering as the version expected) is kept; anything else is
     undone -- the previous launcher put back from what is on disk. A journal that never got past "staged" changed
@@ -1291,7 +1369,7 @@ def recover_launcher(launcher_dir, start=None, log=print, wait_pid=None, restart
     j = read_journal(d)
     if not j:
         return "nothing"
-    if j.get("helper_pid") not in (None, os.getpid()) and _alive(j["helper_pid"]):
+    if helper_running(j):
         return "in_progress"
     check = check or launcher_check
 
@@ -1313,9 +1391,14 @@ def recover_launcher(launcher_dir, start=None, log=print, wait_pid=None, restart
             launch("--update-failed")
             return "nothing"
         files = (j["appimage"],) if j.get("kind") == "appimage" else ()
-        busy = wait_idle(d, files=files, ignore=(dirs["helper"],), timeout=idle_timeout, log=log)
-        if busy:
-            return "in_progress"
+        busy = wait_idle(d, files=files, ignore=(dirs["helper"],), timeout=idle_timeout, log=log, prefixes=prefixes)
+        if busy:   # it can't be put right while something runs from the installation: said, never silent
+            why = "an interrupted update couldn't be put right while something was running from the installation (" + \
+                ", ".join(os.path.basename(p) for _, p in busy) + "); close it and start the launcher again"
+            log("launcher update: " + why)
+            _last(dirs, "busy", version=j.get("version"), why=why)
+            launch("--update-failed")
+            return "busy"
         if state == "swapped" and j.get("version"):
             cmd = [j["appimage"]] if j.get("kind") == "appimage" else [os.path.join(d, j["start"])]
             env = dict(os.environ, APPIMAGE_EXTRACT_AND_RUN="1") if j.get("extracted") else None
@@ -1349,7 +1432,7 @@ def launcher_state(install, launcher_dir, appimage=None, installed=None, keys=No
     out = {"version": installed, "kind": "appimage" if appimage else installed_kind()}
     j = read_journal(launcher_dir)
     if j:
-        alive = j.get("helper_pid") not in (None, os.getpid()) and _alive(j["helper_pid"])
+        alive = helper_running(j)
         out["journal"] = {"state": j.get("state"), "version": j.get("version"), "helper_running": alive}
         out["interrupted"] = not alive and j.get("state") in ("swapping", "swapped", "restoring")
     rb = rollback_version(launcher_dir)
