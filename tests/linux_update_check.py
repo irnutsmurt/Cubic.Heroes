@@ -175,8 +175,14 @@ def main():
 
     # 3. the swap, as the launcher starts it when it exits: the new launcher comes up offscreen (no display)
     swap_env = dict(env, SDL_VIDEODRIVER="offscreen")
-    p = subprocess.run([helper, "--worker", "swap-launcher", "--launcher", root, "--start", "CubicHeroes",
-                        "--health-timeout", "60"], capture_output=True, text=True, env=swap_env, timeout=300)
+    # the helper's output to a file, not a pipe: the launcher it starts inherits the descriptor and stays up
+    swap_out = os.path.join(work, "swap.out")
+    with open(swap_out, "w") as so:
+        subprocess.run([helper, "--worker", "swap-launcher", "--launcher", root, "--start", "CubicHeroes",
+                        "--health-timeout", "60"], stdout=so, stderr=subprocess.STDOUT, text=True, env=swap_env,
+                       timeout=300)
+    out_text = open(swap_out, encoding="utf-8", errors="replace").read()
+    p = type("P", (), {"stdout": out_text})()
     res = [json.loads(ln) for ln in p.stdout.splitlines() if ln.startswith("{")]
     out = (res[-1].get("data") or {}).get("result") if res else None
     readme = open(os.path.join(root, "README.txt")).read()
