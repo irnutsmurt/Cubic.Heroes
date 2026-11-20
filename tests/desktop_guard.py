@@ -265,6 +265,85 @@ class Watch:
                 pass
 
 
+def visible_windows_under(folders):
+    """Windows: the visible top-level windows of every process whose program lies in one of `folders`, whoever started
+    it -- [(pid, program, class, title, w, h)]. A detached process (a launcher update's helper, the launcher it
+    starts) is no child of the test's own process tree, so Watch can't see it; this can. [] elsewhere."""
+    if not WIN:
+        return []
+    import ctypes
+    import ctypes.wintypes as wt
+    u, k = ctypes.WinDLL("user32"), ctypes.WinDLL("kernel32")
+    k.OpenProcess.restype = wt.HANDLE
+    roots = [os.path.normcase(os.path.abspath(f)) + os.sep for f in folders]
+    out, programs = [], {}
+
+    def program(pid):
+        if pid not in programs:
+            h = k.OpenProcess(0x1000, False, pid)   # PROCESS_QUERY_LIMITED_INFORMATION
+            path = ""
+            if h:
+                buf = ctypes.create_unicode_buffer(32768)
+                n = wt.DWORD(len(buf))
+                if k.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(n)):
+                    path = buf.value
+                k.CloseHandle(h)
+            programs[pid] = path
+        return programs[pid]
+
+    @ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
+    def cb(h, _):
+        if u.IsWindowVisible(h):
+            p = wt.DWORD()
+            u.GetWindowThreadProcessId(h, ctypes.byref(p))
+            exe = program(p.value)
+            if exe and any(os.path.normcase(exe).startswith(r) for r in roots):
+                r = wt.RECT()
+                u.GetWindowRect(h, ctypes.byref(r))
+                w, hh = r.right - r.left, r.bottom - r.top
+                if w > 0 and hh > 0:
+                    cls = ctypes.create_unicode_buffer(64)
+                    u.GetClassNameW(h, cls, 64)
+                    title = ctypes.create_unicode_buffer(128)
+                    u.GetWindowTextW(h, title, 128)
+                    out.append((p.value, exe, cls.value, title.value, w, hh))
+        return True
+    u.EnumWindows(cb, 0)
+    return out
+
+
+class FolderWatch:
+    """Ends any process running from one of `folders` that shows a window while no on-screen run is approved
+    (Windows; Linux runs are kept from every display by the environment instead). `violations` lists what was
+    seen. For tests whose programs start others detached (the launcher's own update)."""
+
+    def __init__(self, folders, every=0.25):
+        self.folders, self.every, self.violations = list(folders), every, []
+        self._stop = threading.Event()
+        self._t = threading.Thread(target=self._run, daemon=True)
+
+    def start(self):
+        if WIN:
+            self._t.start()
+        return self
+
+    def stop(self):
+        self._stop.set()
+        if self._t.is_alive():
+            self._t.join(2)
+
+    def _run(self):
+        while not self._stop.wait(self.every):
+            if onscreen_allowed():
+                continue
+            for pid, exe, cls, title, w, h in visible_windows_under(self.folders):
+                what = f"{os.path.basename(exe)} (pid {pid}) showed a window ({cls} '{title}' {w}x{h}) with no " \
+                       "on-screen run approved: ended"
+                self.violations.append(what)
+                print("desktop guard: " + what, flush=True)
+                subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True)
+
+
 def main(argv):
     cmd = argv[1] if len(argv) > 1 else "status"
     if cmd == "status":

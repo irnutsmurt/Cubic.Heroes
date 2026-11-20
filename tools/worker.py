@@ -1759,6 +1759,9 @@ OPTION_NAMES = {"from_root": "from", "keys_file": "trusted-keys", "data_dir": "d
 def main(argv=None):
     a = parser().parse_args(argv)
     missing = [f"--{OPTION_NAMES.get(x, x)}" for x in REQUIRED.get(a.command, ()) if getattr(a, x) in (None, "")]
+    for name in ("stdout", "stderr"):   # a windowed worker started without standard handles (beta.4): never an
+        if getattr(sys, name) is None:  # error dialog for having nowhere to write -- the null device instead
+            setattr(sys, name, open(os.devnull, "w", encoding="utf-8"))
     out = sys.stdout
     try:   # UTF-8 and bare newlines whatever the console's code page (a path may hold any character)
         out.reconfigure(encoding="utf-8", errors="replace", newline="\n")

@@ -417,7 +417,7 @@ class Run:
                 j = {}
             if j.get("state") in ("swapping", "swapped") and j.get("helper_pid"):
                 try:
-                    os.kill(j["helper_pid"], signal.SIGKILL)
+                    os.kill(j["helper_pid"], getattr(signal, "SIGKILL", signal.SIGTERM))   # Windows: TerminateProcess
                     killed = j["state"]
                 except OSError:
                     pass
@@ -475,12 +475,18 @@ class Run:
 
     def main(self):
         print(f"A {self.a_version} -> B {self.b_version} ({self.kind}) in {self.root}", flush=True)
+        # Windows: any program of this test's installation showing a window, whoever started it (the helper and the
+        # launchers it starts are detached from this run), is ended at once and fails the run
+        folder_watch = desktop_guard.FolderWatch([self.work]).start() if hasattr(desktop_guard, "FolderWatch") else None
         try:
             for c in self.a.only or ("update", "back", "failed", "crash"):
                 getattr(self, c)()
         finally:
             self.end_launchers()
             self.tls.close()
+            if folder_watch:
+                folder_watch.stop()
+                step("no window shown by any program of the installation", list(folder_watch.violations))
         with open(os.path.join(self.work, "gui-report.json"), "w", encoding="utf-8") as f:
             json.dump({"from": self.a_version, "to": self.b_version, "kind": self.kind, "results": results}, f,
                       indent=1)

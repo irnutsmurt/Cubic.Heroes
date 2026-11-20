@@ -405,13 +405,24 @@ static bool start_detached(const std::vector<std::string>& argv, const std::stri
 #ifdef _WIN32
     std::wstring cmd;
     for (const std::string& a : argv) cmd += (cmd.empty() ? L"" : L" ") + launcher::quote_arg(launcher::widen(a));
+    // Its standard handles given explicitly (the null device): the worker is a windowed program, and without them its
+    // first output raised an error that PyInstaller shows as a dialog -- a recovery that never ran, and a window
     STARTUPINFOW si = { sizeof si };
     PROCESS_INFORMATION pi = {};
+    SECURITY_ATTRIBUTES sa = { sizeof sa, nullptr, TRUE };
+    HANDLE nul = CreateFileW(L"NUL", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING,
+                             0, nullptr);
+    const BOOL inherit = nul != INVALID_HANDLE_VALUE;
+    if (inherit) {
+        si.dwFlags = STARTF_USESTDHANDLES;
+        si.hStdInput = si.hStdOutput = si.hStdError = nul;
+    }
     const DWORD base = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP;
-    BOOL ok = CreateProcessW(nullptr, &cmd[0], nullptr, nullptr, FALSE, base | CREATE_BREAKAWAY_FROM_JOB, nullptr,
+    BOOL ok = CreateProcessW(nullptr, &cmd[0], nullptr, nullptr, inherit, base | CREATE_BREAKAWAY_FROM_JOB, nullptr,
                              launcher::widen(cwd).c_str(), &si, &pi);
-    if (!ok) ok = CreateProcessW(nullptr, &cmd[0], nullptr, nullptr, FALSE, base, nullptr, launcher::widen(cwd).c_str(),
+    if (!ok) ok = CreateProcessW(nullptr, &cmd[0], nullptr, nullptr, inherit, base, nullptr, launcher::widen(cwd).c_str(),
                                  &si, &pi);   // a job that refuses the breakaway
+    if (inherit) CloseHandle(nul);
     if (!ok) return false;
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);

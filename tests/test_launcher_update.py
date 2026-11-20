@@ -685,6 +685,18 @@ class AppImage(Base):
 class WorkerCommands(Base):
     """the worker's commands, from this checkout"""
 
+    def test_started_without_standard_handles(self):
+        # a windowed worker started detached with no stdout or stderr (the launcher's recovery start, before beta.4's
+        # fix): it must run -- never fail on its first output (PyInstaller shows that as an error dialog)
+        import worker
+        saved = sys.stdout, sys.stderr
+        try:
+            sys.stdout = sys.stderr = None
+            code = worker.main(["version"])
+        finally:
+            sys.stdout, sys.stderr = saved
+        self.assertEqual(code, 0)
+
     def worker(self, *args):
         kf = os.path.join(self.tmp, "keys.json")
         put(kf, json.dumps({"keys": [{"id": self.kid, "ed25519": base64.b64encode(self.keys[0][1]).decode()}]}))

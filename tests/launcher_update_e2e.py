@@ -452,6 +452,15 @@ class E2E:
         return shown
 
     def main(self):
+        # every program of this test's installation, whoever started it (the update's helper and the launchers it
+        # starts are detached): a window shown is ended at once and fails the run
+        self.folder_watch = desktop_guard.FolderWatch([self.work]).start()
+        try:
+            return self._main()
+        finally:
+            self.folder_watch.stop()
+
+    def _main(self):
         self.a_version = self.version()[0]
         self.b_version = self.b_version_of()
         print(f"A {self.a_version} ({self.kind}) in {self.root}; B {self.b_version}", flush=True)
@@ -465,6 +474,7 @@ class E2E:
         self.rollback()
         self.window()
         self.tls.close()
+        step("no window shown by any program of the installation", list(self.folder_watch.violations))
         with open(os.path.join(self.work, "e2e-report.json"), "w", encoding="utf-8") as f:
             json.dump({"from": self.a_version, "to": self.b_version, "kind": self.kind, "results": results}, f, indent=1)
         failed = [r for r in results if not r["ok"]]
