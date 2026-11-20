@@ -22,7 +22,13 @@ Steps (in order; --from STEP resumes, --only runs some):
   status     --status: installed, the game inside the root
   shaders    --prepare-shaders; --status: prepared
   noop       --update: nothing rebuilt (the tools unchanged)
-  checkup    --check-update: an answer (offline: "offline", exit 0, at once -- never a hang)
+  checkup    --check-update: an answer (offline: "offline", exit 0, at once -- never a hang; online: the server's
+             answer -- "offline" or a certificate refused fails it)
+  online     the real update server (GitHub, HTTPS) through the package's own launcher and worker, always -- --offline
+             or not, with no SSL_CERT_FILE, SSL_CERT_DIR or proxy: a check, a newer release offered to an old version,
+             its download for this package's kind checked against the signed manifest (tests/live_update_check.py).
+             A package whose updater can't reach the server never qualifies (beta.3's Linux packages passed every
+             local mirror while their worker reached nothing)
   play       --play: the game started directly, ended in order through its exit question, status 0
   suite      tests/devtools_suite.py --installed: developer mode on (its test saves), then off -- a player's save
              brought in first when the installation has none (--saves: a game-written save folder), as the suite
@@ -58,7 +64,7 @@ sys.path.insert(0, os.path.join(ROOT, "tools"))
 import desktop_guard  # noqa: E402
 import install_layout  # noqa: E402
 
-STEPS = ["unpack", "empty", "install", "status", "shaders", "noop", "checkup", "play", "suite", "rebuild",
+STEPS = ["unpack", "empty", "install", "status", "shaders", "noop", "checkup", "online", "play", "suite", "rebuild",
          "rollback", "gameappimage", "relocate", "keys", "remove", "reunpack"]
 WIN = os.name == "nt"
 EXE = ".exe" if WIN else ""
@@ -267,9 +273,29 @@ class Q:
             up = r.get("update") or {}
             bad = [] if code == 0 and up.get("offline") is True and not up.get("available") and secs < 120 else \
                 [f"offline: exit {code} in {secs} s: {r}"]
-        else:
-            bad = [] if code == 0 else [f"exit {code}: {r}"]
+        else:   # an answer from the server: "offline" here is an updater that reached nothing (beta.3's Linux worker)
+            up = r.get("update") or {}
+            bad = [] if code == 0 and r.get("ok") and "available" in up and not up.get("offline") else \
+                [f"exit {code}: {r}"]
         self.record("checkup", bad, seconds=secs, answer=r.get("message") or r.get("update"))
+
+    def online(self):
+        import live_update_check as live
+        cli, worker = [self.exe], self.worker_exe
+        appimage = self.exe if self.kind == "appimage" else None
+        if not os.path.exists(worker):   # an AppImage whose extracted image is gone: extracted for this step
+            cli, worker, appimage = live.package_programs(self.exe, self.work)
+        lines = []
+        try:
+            res = live.run_checks(cli, worker, self.work, appimage, report=lambda ln: (print("  " + ln, flush=True),
+                                                                                     lines.append(ln)))
+        finally:
+            shutil.rmtree(os.path.join(self.work, "live-extracted"), ignore_errors=True)
+        v = live.verdict(res, report=lambda ln: (print("  " + ln, flush=True), lines.append(ln)))
+        bad = [f"{n}: {'; '.join(b)}" for n, b in res if b]
+        if v == "INCONCLUSIVE":   # the machine's network, not the package: still never a pass -- run it again
+            bad.insert(0, "INCONCLUSIVE (GitHub unreachable from this machine itself)")
+        self.record("online", bad, verdict=v, steps=lines)
 
     def play(self, step="play"):
         log = os.path.join(self.root, "logs", "game.log")
