@@ -210,7 +210,11 @@ def package_programs(package, work):
         subprocess.run([package, "--appimage-extract"], cwd=ext, capture_output=True, check=True,
                        env=clean_env())
         return [package], os.path.join(ext, "squashfs-root", "worker", "DotHeroes-Setup"), package
-    return [os.path.join(package, "CubicHeroes" + exe)], os.path.join(package, "worker", "DotHeroes-Setup" + exe), None
+    # a copy, as a player's: the launcher's folder is its installation's root, and its checks write logs/ there
+    copy = os.path.join(work, "live-package")
+    shutil.rmtree(copy, ignore_errors=True)
+    shutil.copytree(package, copy, symlinks=True)
+    return [os.path.join(copy, "CubicHeroes" + exe)], os.path.join(copy, "worker", "DotHeroes-Setup" + exe), None
 
 
 def main():
@@ -226,6 +230,7 @@ def main():
         res = run_checks(cli, worker, work, appimage, download=not a.no_download)
     finally:
         shutil.rmtree(os.path.join(work, "live-extracted"), ignore_errors=True)
+        shutil.rmtree(os.path.join(work, "live-package"), ignore_errors=True)
     failed = [n for n, b in res if b]
     v = verdict(res)
     print(f"{v}: {len(res) - len(failed)} of {len(res)} live steps passed" +

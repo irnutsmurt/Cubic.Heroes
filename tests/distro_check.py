@@ -40,8 +40,12 @@ def sh(image, mounts, script, network=False):
 
 
 LIVE = "/pkg/worker/DotHeroes-Setup --worker check-update --installed 0.0.1 --channel prerelease"
-CA_INSTALL = ("if command -v apt-get >/dev/null; then apt-get update -qq >/dev/null && "
-              "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ca-certificates >/dev/null; "
+# Debian's security mirror has answered 404 for packages its index still lists (seen for bullseye): then the
+# distribution's own archive alone (the main suite's ca-certificates) -- the test needs a CA bundle, not the newest one
+CA_INSTALL = ("if command -v apt-get >/dev/null; then export DEBIAN_FRONTEND=noninteractive; "
+              "{ apt-get update -qq >/dev/null && apt-get install -y -qq ca-certificates >/dev/null; } || "
+              "{ sed -i '/security/d' /etc/apt/sources.list 2>/dev/null; rm -f /etc/apt/sources.list.d/*security*; "
+              "apt-get update -qq >/dev/null && apt-get install -y -qq ca-certificates >/dev/null; }; "
               "elif command -v dnf >/dev/null; then dnf -y -q install ca-certificates >/dev/null; fi")
 
 
