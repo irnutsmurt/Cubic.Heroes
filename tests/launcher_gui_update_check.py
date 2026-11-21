@@ -20,6 +20,8 @@ mirror (a throwaway CA trusted through SSL_CERT_FILE; CUBIC_UPDATE_SOURCE points
   startup   the window's own update check at its start, --runs times, B published (whole) before the first start:
             each one must find B -- a miss is reported with everything the check went by (its answer's `seen`: the
             channel asked, the releases listed, this installation's platform and kind), never passed over
+  early     Check for updates pressed at once, --runs times: every check the window makes asks the installation's own
+            update channel (a beta's: prereleases) -- never the stable channel for want of the settings yet
   crash     the helper killed in the middle of its swap: the next start of the launcher finishes or undoes it
             (recover-launcher) -- a launcher that answers --version afterwards, A or B whole, never a mixture
 Every window is hidden (the desktop guard: offscreen on Linux); each run ends with no launcher of this test left.
@@ -128,6 +130,17 @@ until 400000 OK
 wait 30
 quit
 """
+# Check for updates pressed as soon as the window can be driven: before (or while) the installation's settings
+# arrive -- its update channel among them
+EARLY_SCRIPT = """\
+rb
+rb
+until 2000 Check for updates
+expect Check for updates
+a
+until 2000000 no-such-label
+"""
+
 LOOK_SCRIPT = """\
 until 200000 PLAY
 wait 30
@@ -446,6 +459,41 @@ class Run:
         step(f"the window's start-up check found B {self.a.runs - len(misses)} of {self.a.runs} times", bad,
              misses=misses, seen=[f.get("seen") if isinstance(f, dict) else None for f in firsts[:3]])
 
+    def early(self):
+        # Check for updates pressed before the settings may have arrived: no check of the stable channel
+        self.publish(self.a.to)
+        wrong, total = [], 0
+        for i in range(self.a.runs):
+            n0 = self.log_lines()
+            path = os.path.join(self.work, f"early-{i}.nav")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(EARLY_SCRIPT)
+            p = subprocess.Popen(self.cli + ["--nav-test", path], cwd=self.work, env=self.env,
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            watch = desktop_guard.Watch(p, "the launcher").start()
+            got, deadline = [], time.time() + 180
+            while time.time() < deadline and len(got) < 2:   # the pressed check and the start-up one
+                time.sleep(0.5)
+                got = self.check_results_since(n0)
+            time.sleep(2)
+            got = self.check_results_since(n0)
+            watch.stop()
+            p.kill()
+            p.wait()
+            self.end_launchers()
+            for g in got:
+                total += 1
+                seen = g.get("seen") if isinstance(g, dict) else None
+                if not isinstance(g, dict) or g.get("available") is not True or \
+                        (seen or {}).get("channel") != "prerelease":
+                    wrong.append({"run": i, "check": g})
+                    print(f"  early {i}: {json.dumps(g)[:600]}", flush=True)
+        bad = [f"{len(wrong)} of {total} checks didn't ask the installation's channel (or missed B)"] if wrong else []
+        if not total:
+            bad.append("no check seen at all")
+        step(f"Check for updates pressed at once: {total - len(wrong)} of {total} checks on the installation's "
+             "channel", bad, wrong=wrong)
+
     def back(self):
         log, viol = self.drive("back", BACK_SCRIPT)
         time.sleep(5)
@@ -597,7 +645,7 @@ class Run:
         # launchers it starts are detached from this run), is ended at once and fails the run
         folder_watch = desktop_guard.FolderWatch([self.work]).start() if hasattr(desktop_guard, "FolderWatch") else None
         try:
-            for c in self.a.only or ("update", "back", "failed", "crash", "startup"):
+            for c in self.a.only or ("update", "back", "failed", "crash", "startup", "early"):
                 getattr(self, c)()
         finally:
             self.end_launchers()
@@ -620,7 +668,7 @@ def main():
     ap.add_argument("--key", required=True)
     ap.add_argument("--install", required=True, help="an installation with the game (copied, never changed)")
     ap.add_argument("--work", default=os.path.join(ROOT, "build", "qual", "launcher-gui-update"))
-    ap.add_argument("--only", nargs="*", choices=("update", "back", "failed", "crash", "startup"))
+    ap.add_argument("--only", nargs="*", choices=("update", "back", "failed", "crash", "startup", "early"))
     ap.add_argument("--runs", type=int, default=10, help="startup: how many window starts")
     a = ap.parse_args()
     a.frm, a.to = os.path.abspath(a.frm), os.path.abspath(a.to)
