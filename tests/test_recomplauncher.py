@@ -195,6 +195,11 @@ class ManifestTests(unittest.TestCase):
         self.assertIn(layout.RECOMP_MARK, layout.INSTALL_ITEMS)
         self.assertTrue(updates._not_package(layout.RECOMP_MARK), "the mark is never a package item")
         self.assertFalse(updates._not_package("recomplauncher.json"))
+        # RecompLauncher unpacks a new version over the folder: no package item may carry the name of one of the
+        # installation's own items (the game's builds, the saves, settings, caches, logs, downloads/, the marks)
+        own = set(layout.INSTALL_ITEMS) | {layout.ROOT_MARKER}
+        for platform in ("windows", "linux"):
+            self.assertFalse(own & set(layout.launcher_package(platform)), platform)
 
 
 class WorkerRuleTests(unittest.TestCase):

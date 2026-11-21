@@ -9,6 +9,7 @@
 | `.github/ISSUE_TEMPLATE/5-install-launcher.yml` | INDEP | keep |
 | `.github/ISSUE_TEMPLATE/6-hardware.yml` | INDEP | keep |
 | `.github/ISSUE_TEMPLATE/config.yml` | INDEP | keep |
+| `.github/ci-requirements.txt` | INDEP | keep |
 | `.github/workflows/ci.yml` | INDEP | keep |
 | `.gitignore` | INDEP | keep |
 | `CLAUDE.md` | INDEP | keep |
@@ -65,6 +66,7 @@
 | `docs/NATIVE_R8.md` | DOC-GAME | keep: facts about the game's behaviour and the project's results |
 | `docs/OPENAL_MIGRATION_PLAN.md` | INDEP | keep |
 | `docs/PC_EXPERIENCE.md` | INDEP | keep |
+| `docs/RECOMPLAUNCHER.md` | INDEP | keep |
 | `docs/RELEASE_QUALIFICATION.md` | INDEP | keep |
 | `docs/RELEASE_SIGNING.md` | INDEP | keep |
 | `docs/SAVE_UI.md` | INDEP | keep |
@@ -83,9 +85,16 @@
 | `docs/media/settings.jpg` | INDEP | keep |
 | `docs/media/shaders.jpg` | INDEP | keep |
 | `launcher/cli.h` | INDEP | keep |
+| `launcher/game_exit.h` | INDEP | keep |
 | `launcher/json.h` | INDEP | keep |
 | `launcher/main.cpp` | INDEP | keep |
+| `launcher/recomplauncher.json` | INDEP | keep |
 | `launcher/worker_client.h` | INDEP | keep |
+| `patches/experiments/README.md` | INDEP | keep |
+| `patches/experiments/m11_4-depth-bias-control/port-ppfx_render.diff` | INDEP | keep |
+| `patches/experiments/m11_4-depth-bias-control/ps3recomp-rsx_vulkan_backend.diff` | INDEP | keep |
+| `patches/experiments/m11_4-rectangular-lines/port-ppfx_render.diff` | INDEP | keep |
+| `patches/experiments/m11_4-rectangular-lines/ps3recomp-rsx_vulkan_backend.diff` | INDEP | keep |
 | `patches/ps3recomp/0001-Add-strict-mode-PS3_STRICT-make-silent-fallbacks-fat.patch` | INDEP | keep |
 | `patches/ps3recomp/0002-ppu_hle-store-the-caller-TOC-slot-on-the-fast-path-a.patch` | INDEP | keep |
 | `patches/ps3recomp/0003-ps3_stdio-chain-SIGABRT-with-sigaction-on-POSIX.patch` | INDEP | keep |
@@ -259,6 +268,7 @@
 | `patches/ps3recomp/0171-Lifter-the-call-site-caches-image-anchor-on-ELF-__eh.patch` | INDEP | keep |
 | `patches/ps3recomp/0172-Vulkan-backend-native-Wayland-s-surface-formats-HiDP.patch` | INDEP | keep |
 | `patches/ps3recomp/0173-cellPad-the-function-keys-F1-F12-for-a-port-s-develo.patch` | INDEP | keep |
+| `patches/ps3recomp/0174-Vulkan-backend-the-start-names-its-current-stage-for.patch` | INDEP | keep |
 | `port/CMakeLists.txt` | INDEP | keep |
 | `port/LICENSE.ps3recomp` | THIRD | keep: licence file beside it; listed in the README |
 | `port/assets/ui/DejaVuSans.ttf` | THIRD | keep: licence file beside it; listed in the README |
@@ -375,6 +385,8 @@
 | `tests/distro_check.py` | INDEP | keep |
 | `tests/drive.py` | INDEP | keep |
 | `tests/fight_bench.py` | INDEP | keep |
+| `tests/fixtures/recomplauncher.schema.LICENSE.txt` | INDEP | keep |
+| `tests/fixtures/recomplauncher.schema.json` | INDEP | keep |
 | `tests/fps_actors.py` | INDEP | keep |
 | `tests/fps_check.py` | INDEP | keep |
 | `tests/fps_fields.py` | INDEP | keep |
@@ -383,10 +395,15 @@
 | `tests/frame_times.py` | INDEP | keep |
 | `tests/fs_case_check.py` | INDEP | keep |
 | `tests/geom_newkeys.py` | INDEP | keep |
+| `tests/hand_upgrade_check.py` | INDEP | keep |
 | `tests/inflate_frames.py` | INDEP | keep |
 | `tests/keep_baseline.py` | INDEP | keep |
 | `tests/lap_ab.py` | INDEP | keep |
+| `tests/launcher_gui_update_check.py` | INDEP | keep |
+| `tests/launcher_update_e2e.py` | INDEP | keep |
+| `tests/linux_rpath_check.py` | INDEP | keep |
 | `tests/linux_update_check.py` | INDEP | keep |
+| `tests/live_update_check.py` | INDEP | keep |
 | `tests/map_sweep.py` | INDEP | keep |
 | `tests/native/bullet_cd_snapcheck.cpp` | INDEP | keep |
 | `tests/native/bullet_solver_snapcheck.cpp` | INDEP | keep |
@@ -412,7 +429,9 @@
 | `tests/native/waver_task_check.cpp` | INDEP | keep |
 | `tests/nsys_capture.py` | INDEP | keep |
 | `tests/owned_dummy.py` | INDEP | keep |
+| `tests/package_license_audit.py` | INDEP | keep |
 | `tests/peek.py` | INDEP | keep |
+| `tests/perf_run.py` | INDEP | keep |
 | `tests/phys_breakdown.py` | INDEP | keep |
 | `tests/phys_frames.py` | INDEP | keep |
 | `tests/player_install_test.py` | INDEP | keep |
@@ -532,6 +551,7 @@
 | `tests/scripts/pause_check.drive` | INDEP | keep |
 | `tests/scripts/perf_walk.drive` | INDEP | keep |
 | `tests/scripts/prompts.drive` | INDEP | keep |
+| `tests/scripts/res_perf.drive` | INDEP | keep |
 | `tests/scripts/roundtrip_1.drive` | INDEP | keep |
 | `tests/scripts/roundtrip_2.drive` | INDEP | keep |
 | `tests/scripts/roundtrip_3.drive` | INDEP | keep |
@@ -548,6 +568,7 @@
 | `tests/scripts/title_quit.drive` | INDEP | keep |
 | `tests/scripts/walk_far.drive` | INDEP | keep |
 | `tests/scripts/watch_walk.drive` | INDEP | keep |
+| `tests/shader_inventory_check.py` | INDEP | keep |
 | `tests/slow_frames.py` | INDEP | keep |
 | `tests/snap_read.py` | INDEP | keep |
 | `tests/snap_regions.py` | INDEP | keep |
@@ -559,24 +580,32 @@
 | `tests/solver_layout.py` | INDEP | keep |
 | `tests/solver_setup_diff.py` | INDEP | keep |
 | `tests/startup_stall_check.py` | INDEP | keep |
+| `tests/startup_watch_check.py` | INDEP | keep |
 | `tests/stop_tests.py` | INDEP | keep |
 | `tests/test_boundary_check.py` | INDEP | keep |
+| `tests/test_build_env_pins.py` | INDEP | keep |
 | `tests/test_desktop_guard.py` | INDEP | keep |
 | `tests/test_dev_saves.py` | INDEP | keep |
 | `tests/test_fps_actors.py` | INDEP | keep |
+| `tests/test_fs_case_check.py` | INDEP | keep |
 | `tests/test_game_appimage.py` | INDEP | keep |
 | `tests/test_hostenv.py` | INDEP | keep |
 | `tests/test_install_layout.py` | INDEP | keep |
+| `tests/test_launcher_update.py` | INDEP | keep |
 | `tests/test_map_sweep.py` | INDEP | keep |
 | `tests/test_owned_run.py` | INDEP | keep |
+| `tests/test_package_licences.py` | INDEP | keep |
 | `tests/test_pipeline_manifest.py` | INDEP | keep |
 | `tests/test_pipeline_profiles.py` | INDEP | keep |
 | `tests/test_player_pipeline.py` | INDEP | keep |
 | `tests/test_portable_root.py` | INDEP | keep |
 | `tests/test_ps3_disc.py` | INDEP | keep |
+| `tests/test_recomplauncher.py` | INDEP | keep |
 | `tests/test_release_keys.py` | INDEP | keep |
+| `tests/test_rpath_tag.py` | INDEP | keep |
 | `tests/test_settings_diagnostics.py` | INDEP | keep |
 | `tests/test_uninstall.py` | INDEP | keep |
+| `tests/test_update_tls.py` | INDEP | keep |
 | `tests/test_updates.py` | INDEP | keep |
 | `tests/test_worker.py` | INDEP | keep |
 | `tests/thread_cpu.sh` | INDEP | keep |
@@ -614,6 +643,7 @@
 | `tools/iso9660.py` | INDEP | keep |
 | `tools/license_audit.py` | INDEP | keep |
 | `tools/linux_build_env/Dockerfile` | INDEP | keep |
+| `tools/linux_build_env/requirements.txt` | INDEP | keep |
 | `tools/linux_package.py` | INDEP | keep |
 | `tools/m8_frames_compare.py` | INDEP | keep |
 | `tools/m8_sound_compare.py` | INDEP | keep |
