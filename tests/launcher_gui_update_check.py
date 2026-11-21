@@ -63,7 +63,8 @@ results = []
 # install; only a refusal's message (OK) keeps it, and the script then ends it. The check runs beside the window (no
 # operation on screen), so its end is waited for as the button's label going to Checking... and back. Each until is
 # followed by a short wait: a button the window has just drawn can only take the focus from the next frames. The
-# ready card (Restart and update) comes with the launcher's state, read again after the download: a longer wait
+# ready card (Restart and update) comes with the launcher's state, read again after the download, at a time no focus
+# shows: `seek N DIR TEXT` presses DIR until the focus is on it (1fb1ab0)
 UPDATE_SCRIPT = """\
 until 200000 PLAY
 wait 30
@@ -89,8 +90,8 @@ expect OK
 a
 wait 60
 until 100000 Download it
-wait 20000
-down
+wait 30
+seek 400000 down Restart and update
 expect Restart and update
 a
 until 20000 Cancel
@@ -117,8 +118,7 @@ until 3000 Checking
 wait 30
 until 400000 Check for updates
 wait 30
-down
-down
+seek 400000 down Go back to version
 expect Go back to version
 a
 until 20000 Cancel
