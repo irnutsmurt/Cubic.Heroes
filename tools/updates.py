@@ -242,6 +242,11 @@ def check(channel="stable", installed=None, source=None, keys=None):
     if not keys:   # nothing could be verified: no request is made at all
         raise trust.ReleaseError("This launcher has no release key to check updates with.", "no_trusted_keys")
     rels = releases(source)
+    # what the check went by, for its answer (beta.4: a check that finds nothing says why -- the channel asked, how
+    # many releases the server listed, this installation's platform and kind)
+    seen = {"channel": channel, "releases": len(rels), "prereleases": sum(1 for r in rels if r["prerelease"]),
+            "with_manifest": sum(1 for r in rels if MANIFEST in r["assets"]), "platform": platform_name(),
+            "kind": installed_kind()}
     refused = []
     nothing_here = None   # the newest verified release with no package this installation can take (W-1)
     for r in rels:
@@ -273,8 +278,8 @@ def check(channel="stable", installed=None, source=None, keys=None):
                 "assets": mine, "manifest": m,
                 "manifest_url": r["assets"][MANIFEST], "urls": r["assets"], "refused": refused,
                 "manifest_bytes": mbytes, "signature_bytes": sig,
-                "tls_store": tls_store()}
-    out = {"available": False, "refused": refused, "tls_store": tls_store()}
+                "tls_store": tls_store(), "seen": seen}
+    out = {"available": False, "refused": refused, "tls_store": tls_store(), "seen": seen}
     if nothing_here:
         out.update(no_package=True, version=nothing_here["version"], tag=nothing_here["tag"],
                    platform=platform_name(), kind=installed_kind())

@@ -17,6 +17,9 @@ mirror (a throwaway CA trusted through SSL_CERT_FILE; CUBIC_UPDATE_SOURCE points
   back      through B's window: Go back to version A -- A's window up, A's files byte for byte
   failed    B whose window never comes up (its program replaced by one that exits): the update undone, A's files
             byte for byte, A started again (--update-failed), its Updates page saying the update wasn't installed
+  startup   the window's own update check at its start, --runs times, B published (whole) before the first start:
+            each one must find B -- a miss is reported with everything the check went by (its answer's `seen`: the
+            channel asked, the releases listed, this installation's platform and kind), never passed over
   crash     the helper killed in the middle of its swap: the next start of the launcher finishes or undoes it
             (recover-launcher) -- a launcher that answers --version afterwards, A or B whole, never a mixture
 Every window is hidden (the desktop guard: offscreen on Linux); each run ends with no launcher of this test left.
@@ -335,6 +338,24 @@ class Run:
 
     # ---- the cases ----
 
+    def check_results_since(self, n0):
+        """the launcher's update checks after its log's first n0 lines, whole: [the result's data, or the result]"""
+        out = []
+        try:
+            with open(os.path.join(self.root, "logs", "worker-check-update.jsonl"), encoding="utf-8",
+                      errors="replace") as f:
+                lines = f.read().splitlines()[n0:]
+        except OSError:
+            return out
+        for ln in lines:
+            if '"result"' in ln:
+                try:
+                    r = json.loads(ln)
+                except ValueError:
+                    continue
+                out.append(r.get("data") if r.get("ok") else r)
+        return out
+
     def checks_since(self, n0):
         """the launcher's update checks (its worker's log) after its first n0 lines: [(available, refused)]"""
         out = []
@@ -386,6 +407,43 @@ class Run:
             bad.append("the script never reached Restart and update: " + log[-600:])
         step(f"update through the window: {self.a_version} -> {self.b_version}, B's window up", bad,
              log=log[-2000:])
+
+    def startup(self):
+        """the window's start-up check, again and again, over a mirror that holds B whole before the first start"""
+        self.publish(self.a.to)
+        listing = open(os.path.join(self.mirror.dir, "releases.json"), encoding="utf-8").read()
+        misses, firsts, viol = [], [], None
+        for i in range(self.a.runs):
+            n0 = self.log_lines()
+            path = os.path.join(self.work, f"startup-{i}.nav")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("until 2000000 no-such-label\nquit\n")   # a window left to start, ended from here
+            p = subprocess.Popen(self.cli + ["--nav-test", path], cwd=self.work, env=self.env,
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            watch = desktop_guard.Watch(p, "the launcher").start()
+            got, deadline = [], time.time() + 180
+            while time.time() < deadline and not got:   # its start-up check's answer, in its worker's log
+                time.sleep(0.5)
+                got = self.check_results_since(n0)
+            watch.stop()
+            viol = viol or watch.violation
+            p.kill()
+            p.wait()
+            self.end_launchers()
+            first = got[0] if got else None
+            firsts.append(first)
+            if not first or first.get("available") is not True:
+                misses.append({"run": i, "check": first})
+                print(f"  start-up check {i}: MISSED -- {json.dumps(first)[:1500]}", flush=True)
+            time.sleep(1)
+        if open(os.path.join(self.mirror.dir, "releases.json"), encoding="utf-8").read() != listing:
+            misses.append({"mirror": "the release list changed during the runs"})
+        bad = [f"{len(misses)} of {self.a.runs} start-up checks missed B (details above and in the report)"] \
+            if misses else []
+        if viol:
+            bad.append(viol)
+        step(f"the window's start-up check found B {self.a.runs - len(misses)} of {self.a.runs} times", bad,
+             misses=misses, seen=[f.get("seen") if isinstance(f, dict) else None for f in firsts[:3]])
 
     def back(self):
         log, viol = self.drive("back", BACK_SCRIPT)
@@ -538,7 +596,7 @@ class Run:
         # launchers it starts are detached from this run), is ended at once and fails the run
         folder_watch = desktop_guard.FolderWatch([self.work]).start() if hasattr(desktop_guard, "FolderWatch") else None
         try:
-            for c in self.a.only or ("update", "back", "failed", "crash"):
+            for c in self.a.only or ("update", "back", "failed", "crash", "startup"):
                 getattr(self, c)()
         finally:
             self.end_launchers()
@@ -561,7 +619,8 @@ def main():
     ap.add_argument("--key", required=True)
     ap.add_argument("--install", required=True, help="an installation with the game (copied, never changed)")
     ap.add_argument("--work", default=os.path.join(ROOT, "build", "qual", "launcher-gui-update"))
-    ap.add_argument("--only", nargs="*", choices=("update", "back", "failed", "crash"))
+    ap.add_argument("--only", nargs="*", choices=("update", "back", "failed", "crash", "startup"))
+    ap.add_argument("--runs", type=int, default=10, help="startup: how many window starts")
     a = ap.parse_args()
     a.frm, a.to = os.path.abspath(a.frm), os.path.abspath(a.to)
     return Run(a).main()
