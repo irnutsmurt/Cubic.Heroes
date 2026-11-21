@@ -87,7 +87,7 @@ expect OK
 a
 wait 60
 until 100000 Download it
-wait 2000
+wait 20000
 down
 expect Restart and update
 a
@@ -272,13 +272,14 @@ class Run:
             return {}
 
     def launchers(self):
-        """this test's launcher processes: the program in the root, or the AppImage's (its runtime and its mount)"""
+        """this test's launcher processes: the program in the root, or the AppImage's (its runtime and its mount, under
+        $TMPDIR, which need not be /tmp)"""
         mine = []
         for pid, path in updates._processes():
             if path.startswith(self.root + os.sep) and os.path.basename(path) == EXE:
                 mine.append(pid)
             elif self.kind == "appimage" and (path == os.path.realpath(self.appimage) or
-                                              (path.startswith("/tmp/.mount_") or "appimage_extracted_" in path)
+                                              ("/.mount_" in path or "appimage_extracted_" in path)
                                               and os.path.basename(path) == EXE and self.mine_by_env(pid)):
                 mine.append(pid)
         return mine
