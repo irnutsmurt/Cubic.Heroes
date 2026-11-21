@@ -585,6 +585,11 @@ class AppImage(Base):
 
     def setUp(self):
         super().setUp()
+        # the helper is a copy of the running (old) launcher's worker: its own version is OLD -- whatever version this
+        # checkout says (an AppImage swap with no journal records the helper's own version as the one replaced)
+        helper_version = mock.patch.object(updates, "_this_version", lambda: OLD)
+        helper_version.start()
+        self.addCleanup(helper_version.stop)
         self.app = os.path.join(self.tmp, "Cubic.Heroes-0.2.0-beta.3-x86_64.AppImage")
         put(self.app, self.image(OLD))
         self.staged = os.path.join(self.tmp, ".Cubic.Heroes-0.2.0-beta.3-x86_64.AppImage.new")
@@ -605,7 +610,7 @@ class AppImage(Base):
         self.assertIn(b"launcher " + NEW.encode(), get(self.app))
         self.assertFalse(os.path.exists(self.staged))
         self.assertIn(b"launcher " + OLD.encode(), get(os.path.join(self.dirs["rollback"], updates.APPIMAGE_KEPT)))
-        self.assertEqual(updates.rollback_version(self.root), updates._this_version())
+        self.assertEqual(updates.rollback_version(self.root), OLD)
         self.assertUntouched()
         self.assertEqual(self.swap(answers(OLD), source="rollback"), "updated")
         self.assertIn(b"launcher " + OLD.encode(), get(self.app))
