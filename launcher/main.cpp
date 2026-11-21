@@ -1350,6 +1350,8 @@ struct Status {
     std::string check_error;
     std::string playing;   // a running game's note
 } g_st;
+// refresh_info's answers so far (whether the installation's settings are still to come: settings_pending)
+static bool g_info_answered = false, g_settings_answered = false, g_check_when_settings = false;
 
 // the settings as the worker reported them; the log's detail handed on to the jobs the launcher starts (their
 // environment: tools/worker.py) -- the game reads the same setting from the file itself
@@ -1423,6 +1425,7 @@ static void refresh_info()
     run("info", { "--install", install_dir() }, "", false, [](const json::Value& r) {
         g_st.info = r["data"];
         g_st.info_ok = r["ok"].truthy();
+        g_info_answered = true;
         const std::string kind = g_st.info["kind"].str();
         if (kind == "none") offer_legacy();
         if (kind == "slots") {
@@ -1438,6 +1441,7 @@ static void refresh_info()
         if (kind == "slots" || kind == "setup-app")
             run("settings", { "--install", install_dir() }, "", false, [](const json::Value& s) {
                 set_settings(s["data"]);
+                g_settings_answered = true;   // (an error too: the build's default channel then)
                 auto_prepare_check_later();
             });
     });
@@ -1450,6 +1454,22 @@ static std::string setting(const char* key, const char* dflt)
 {
     const json::Value& v = g_st.settings["settings"][key]["value"];
     return v.is_null() ? dflt : v.str();
+}
+
+// The update channel. Before the installation's settings are known, the build's own default -- as the worker's schema
+// has it (tools/settings.py: a beta's is test releases too) -- never "stable" for want of them: a beta's check made
+// then asked the stable channel and found no beta (the Linux side's intermittent start-up miss, 2026-11-20).
+static const char* default_update_channel() { return strchr(CUBIC_VERSION, '-') ? "prerelease" : "stable"; }
+static std::string update_channel() { return setting("LAUNCHER_UPDATE_CHANNEL", default_update_channel()); }
+
+// whether the installation's settings are still on their way (refresh_info: info, then for an installation its
+// settings): a check asked for meanwhile waits for them, so it asks the channel the player chose
+static bool settings_pending()
+{
+    if (g_settings_answered) return false;
+    if (!g_info_answered) return true;
+    const std::string kind = g_st.info["kind"].str();
+    return kind == "slots" || kind == "setup-app";
 }
 
 static void refresh_launcher_state()
@@ -1479,7 +1499,9 @@ static void maybe_update_game()
 static void check_updates()
 {
     g_st.checking_update = true;
-    run("check-update", { "--channel", setting("LAUNCHER_UPDATE_CHANNEL", "stable") }, "", false, [](const json::Value& r) {
+    if (settings_pending()) { g_check_when_settings = true; return; }   // after the settings (the main loop)
+    g_check_when_settings = false;
+    run("check-update", { "--channel", update_channel() }, "", false, [](const json::Value& r) {
         g_st.update = r;
         g_st.checking_update = false;
         g_st.checked_once = true;
@@ -2223,7 +2245,7 @@ static void launcher_update_card()
 static void page_updates()
 {
     title("Updates");
-    const std::string ch = setting("LAUNCHER_UPDATE_CHANNEL", "stable");
+    const std::string ch = update_channel();
     text_col(col::dim, "Channel: %s. Updates are offered, never forced; the game plays offline.",
              ch == "stable" ? "stable releases" : "test releases too");
     if (big_button(g_st.checking_update ? "Checking..." : "Check for updates", ImVec2(S(320), 0), Kind::Normal,
@@ -3919,6 +3941,7 @@ int main(int argc, char** argv)
             checked_updates = true;
             if (setting("LAUNCHER_CHECK_UPDATES", "1") == "1") check_updates();
         }
+        if (g_check_when_settings && !settings_pending()) check_updates();   // one asked for before they came
         frame();
         if (++frames == 20 && !show.empty()) open_show();
         ImGui::Render();

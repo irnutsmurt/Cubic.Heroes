@@ -504,6 +504,7 @@ static std::string update_channel(const Args& a)
 {
     const Run s = worker(a, "settings", install_arg(), false);
     const std::string c = s.result["data"]["settings"]["LAUNCHER_UPDATE_CHANNEL"]["value"].str();
+    if (c.empty()) return default_update_channel();   // no settings to read: the build's own default, as the window
     return c == "prerelease" ? c : std::string("stable");
 }
 
