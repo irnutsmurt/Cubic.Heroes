@@ -55,57 +55,83 @@ results = []
 # question's safe choice is focused first: left to its Restart and update). `until N TEXT` waits (at most N frames)
 # for the focus on TEXT with no operation on screen: a hidden window's frame rate differs between systems (about
 # 2000 frames a second offscreen on Linux, 33 on Windows). After the confirmation the launcher quits by itself to
-# install; only a refusal's message (OK) keeps it, and the script then ends it
+# install; only a refusal's message (OK) keeps it, and the script then ends it. The check runs beside the window (no
+# operation on screen), so its end is waited for as the button's label going to Checking... and back. Each until is
+# followed by a short wait: a button the window has just drawn can only take the focus from the next frames. The
+# ready card (Restart and update) comes with the launcher's state, read again after the download: a longer wait
 UPDATE_SCRIPT = """\
 until 200000 PLAY
+wait 30
 rb
 rb
+until 3000 Checking
+wait 30
 until 200000 Check for updates
+wait 30
 expect Check for updates
 a
-wait 60
+until 3000 Checking
+wait 30
 until 400000 Check for updates
+wait 30
 down
 expect Download it
 a
 wait 60
 until 800000 OK
+wait 30
 expect OK
 a
 wait 60
 until 100000 Download it
+wait 2000
 down
 expect Restart and update
 a
 until 20000 Cancel
+wait 30
 left
 expect Restart and update
 a
 until 400000 OK
+wait 30
 quit
 """
 BACK_SCRIPT = """\
 until 200000 PLAY
+wait 30
 rb
 rb
+until 3000 Checking
+wait 30
 until 400000 Check for updates
+wait 30
 expect Check for updates
+a
+until 3000 Checking
+wait 30
+until 400000 Check for updates
+wait 30
 down
 down
 expect Go back to version
 a
 until 20000 Cancel
+wait 30
 left
 expect Go back
 a
 until 400000 OK
+wait 30
 quit
 """
 LOOK_SCRIPT = """\
 until 200000 PLAY
+wait 30
 rb
 rb
 until 400000 Check for updates
+wait 30
 shot updates
 quit
 """
@@ -309,9 +335,36 @@ class Run:
 
     # ---- the cases ----
 
+    def checks_since(self, n0):
+        """the launcher's update checks (its worker's log) after its first n0 lines: [(available, refused)]"""
+        out = []
+        try:
+            with open(os.path.join(self.root, "logs", "worker-check-update.jsonl"), encoding="utf-8",
+                      errors="replace") as f:
+                lines = f.read().splitlines()[n0:]
+        except OSError:
+            return out
+        for ln in lines:
+            if '"result"' in ln:
+                d = json.loads(ln).get("data") or {}
+                out.append((d.get("available"), len(d.get("refused") or [])))
+        return out
+
+    def log_lines(self):
+        try:
+            with open(os.path.join(self.root, "logs", "worker-check-update.jsonl"), encoding="utf-8",
+                      errors="replace") as f:
+                return len(f.read().splitlines())
+        except OSError:
+            return 0
+
     def update(self):
         self.publish(self.a.to)
+        n0 = self.log_lines()
         log, viol = self.drive("update", UPDATE_SCRIPT)
+        checks = self.checks_since(n0)
+        if any(av is False for av, _ in checks):   # a check that missed the published release: worth knowing
+            print(f"  (the window's update checks: {checks} -- available, refused)", flush=True)
         time.sleep(5)
         bad = [viol] if viol else []
         last = self.last()
