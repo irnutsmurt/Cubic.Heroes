@@ -16,7 +16,7 @@ cubicheroes-root.txt (relative: from the launcher's folder); a relative --instal
 installation in the launcher's folder (portable); settings through --set (kept) and a value the schema refuses; the
 folder moved; --migrate-from into a second root (the source unchanged, file by file) and refused into a root that
 holds one; two installations side by side. With the game: --play's session options (not kept), its exit status passed
-on, and the game ended with CubicHeroes (its job).
+on, the game ended with CubicHeroes (its job), and --update's up-to-date marker on an installation with no downloads/.
 """
 import argparse
 import ctypes
@@ -31,7 +31,9 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
+sys.path.insert(0, os.path.join(ROOT, "tools"))
 import desktop_guard  # noqa: E402
+import install_layout  # noqa: E402
 
 NAME = "Cubic Héroes ü テスト"   # spaces, an accent, Japanese
 RESULTS = []
@@ -92,11 +94,15 @@ def _is_junction(p):
 
 
 def copy_install(src, dst):
-    """the installation's items copied (game/, a link, left out: the worker's repair-link remakes it)"""
+    """the installation's items copied (game/, a link, left out: the worker's repair-link remakes it). Never the
+    launcher's own package (its program, its worker) nor its root mark: the copy is the installation, and the
+    launcher under test stays the one given (before beta.4's qualification a packaged installation's own launcher
+    replaced it here, so the game cases ran that one)"""
     os.makedirs(dst, exist_ok=True)
+    own = {n.lower() for n in install_layout.launcher_owned()}
     for n in os.listdir(src):
         s = os.path.join(src, n)
-        if n == "game" or os.path.islink(s) or _is_junction(s):
+        if n == "game" or n.lower() in own or os.path.islink(s) or _is_junction(s):
             continue
         if os.path.isdir(s):
             shutil.copytree(s, os.path.join(dst, n), symlinks=True, dirs_exist_ok=True)
@@ -372,6 +378,25 @@ def game_cases(exe, a):
     case("the game ends with CubicHeroes (its job; Linux: PR_SET_PDEATHSIG)",
          ([] if running else [f"the game was not running when CubicHeroes was ended ({ev})"]) +
          ([] if gone else [f"game {pid} still running 20 s later"]))
+
+    # beta.4: --update on an installation with no downloads/ (a beta.2 or beta.3 one upgraded by hand, which never
+    # downloaded an update) records the game as up to date -- downloads/game-up-to-date-with.txt, which the window
+    # reads at its start. Before the fix the marker's folder was never made: every start updated the game again
+    dl = os.path.join(a, "downloads")
+    if os.path.isdir(dl):
+        shutil.rmtree(dl)
+    code, out, err = cli(exe, "--version", "--json")
+    try:
+        version = json.loads(out.strip().splitlines()[-1])["cubicheroes"]
+    except (ValueError, IndexError, KeyError):
+        version = None
+    off = {"HTTP_PROXY": "http://127.0.0.1:9", "HTTPS_PROXY": "http://127.0.0.1:9", "NO_PROXY": ""}
+    code, out, err = cli(exe, "--update", "--json", cwd=other, env=off, timeout=3600)
+    marker = os.path.join(dl, "game-up-to-date-with.txt")
+    got = open(marker, encoding="utf-8").read().strip() if os.path.exists(marker) else None
+    bad = [] if version and code == 0 and got == version else \
+        [f"--update: exit {code}; the marker {got!r}, not {version!r}; {(out + err)[-300:]!r}"]
+    case("--update without downloads/: the game's up-to-date marker written (the window won't update it again)", bad)
 
 
 def main():

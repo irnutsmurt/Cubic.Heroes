@@ -127,15 +127,21 @@ static std::string read_text(const std::string& path, size_t limit = 4u << 20)
     return s;
 }
 
+// The file's folder is made first: an installation need not have it yet (a beta.2 or beta.3 installation upgraded by
+// hand has no downloads/, where the game's up-to-date marker goes -- without it the marker was never written, and
+// every start brought the game up to date again, undoing a rollback of the game; found in beta.4's qualification).
 static bool write_text(const std::string& path, const std::string& text)
 {
     const fs::path p = u8path(path), tmp = u8path(path + ".part");
+    std::error_code ec;
+    if (p.has_parent_path()) fs::create_directories(p.parent_path(), ec);
     {
         std::ofstream f(tmp, std::ios::binary);
         if (!f) return false;
         f << text;
+        f.close();
+        if (!f) { fs::remove(tmp, ec); return false; }
     }
-    std::error_code ec;
     fs::rename(tmp, p, ec);
     return !ec;
 }
