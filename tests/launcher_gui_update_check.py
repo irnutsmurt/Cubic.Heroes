@@ -52,54 +52,60 @@ INSTALL_ITEMS = ("data/gamedata", "config", "builds")
 results = []
 
 # the player's way through the window: Updates (two pages right of Play), check, download, install, confirm (the
-# question's safe choice is focused first: left to its Restart and update). Waits
-# are frames: a hidden window draws a frame in about half a millisecond, so they are long in frames, short in time
+# question's safe choice is focused first: left to its Restart and update). `until N TEXT` waits (at most N frames)
+# for the focus on TEXT with no operation on screen: a hidden window's frame rate differs between systems (about
+# 2000 frames a second offscreen on Linux, 33 on Windows). After the confirmation the launcher quits by itself to
+# install; only a refusal's message (OK) keeps it, and the script then ends it
 UPDATE_SCRIPT = """\
-wait 6000
+until 200000 PLAY
 rb
 rb
-wait 20000
+until 200000 Check for updates
 expect Check for updates
 a
-wait 20000
+wait 60
+until 400000 Check for updates
 down
 expect Download it
 a
-wait 120000
+wait 60
+until 800000 OK
+expect OK
 a
-wait 6000
+wait 60
+until 100000 Download it
 down
 expect Restart and update
 a
-wait 3000
+until 20000 Cancel
 left
 expect Restart and update
 a
-wait 60000
+until 400000 OK
 quit
 """
 BACK_SCRIPT = """\
-wait 6000
+until 200000 PLAY
 rb
 rb
-wait 20000
+until 400000 Check for updates
 expect Check for updates
 down
 down
 expect Go back to version
 a
-wait 3000
+until 20000 Cancel
 left
 expect Go back
 a
-wait 60000
+until 400000 OK
 quit
 """
 LOOK_SCRIPT = """\
-wait 6000
+until 200000 PLAY
 rb
 rb
-wait 20000
+until 400000 Check for updates
 shot updates
 quit
 """
