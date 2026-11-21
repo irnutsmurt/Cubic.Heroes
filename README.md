@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/irnutsmurt/Cubic.Heroes/releases/tag/v0.2.0-beta.3"><b>Download the beta (0.2.0-beta.3, a pre-release: Windows and Linux)</b></a>
+  <a href="https://github.com/irnutsmurt/Cubic.Heroes/releases/tag/v0.2.0-beta.4"><b>Download the beta (0.2.0-beta.4, a pre-release: Windows and Linux)</b></a>
   &nbsp;·&nbsp; <a href="#installation">Installation</a>
   &nbsp;·&nbsp; <a href="docs/CLI.md">Command line</a>
   &nbsp;·&nbsp; <a href="#known-issues">Known issues</a>
@@ -25,14 +25,14 @@
 </p>
 
 > [!IMPORTANT]
-> **This is a beta, a pre-release -- not a stable release.** 0.2.0-beta.3 is the third public test release and the
-> first for Linux: the whole game plays, but not every part of it has been tested yet. Expect bugs, keep backups of
+> **This is a beta, a pre-release -- not a stable release.** 0.2.0-beta.4 is the fourth public test release, for
+> Windows and Linux: the whole game plays, but not every part of it has been tested yet. Expect bugs, keep backups of
 > your saves (the launcher makes them), and please
 > [report what you find](https://github.com/irnutsmurt/Cubic.Heroes/issues/new/choose).
 > **No game code, data or keys are included** -- you need your own copy of the game.
 >
-> **Updates in 0.2.0-beta.3**: the launcher downloads and verifies a new version but doesn't install it, and on
-> Linux it can't reach the update server at all. Install new versions by hand ([Updating](#updating)).
+> **New in 0.2.0-beta.4: updates install themselves**, on Windows and Linux. Coming from beta.2 or beta.3? Install
+> beta.4 once by hand ([Updating](#updating)); from then on the launcher does it.
 
 <p align="center">
   <img src="docs/media/hero.jpg" width="900" alt="The hero on the overworld, as the game draws it">
@@ -129,7 +129,8 @@ content changed.
   "Add to Steam" and Start-menu shortcuts (on Linux, Heroic and Lutris too: [Other launchers](#other-launchers)).
 - **Signed updates and rollback**: updates are offered only if signed with the project's release key, and every
   download is checked against that signature; the game is rebuilt only when something it is made of changed; the
-  previous build is kept to go back to. (In 0.2.0-beta.3 a new version is installed by hand: [Updating](#updating).)
+  previous build is kept to go back to. Since 0.2.0-beta.4 the launcher installs its own updates when it restarts,
+  and keeps the launcher it replaced to go back to ([Updating](#updating)).
 - **Save backups and restoration**: automatic before every update, and on demand.
 - **Diagnostics and crash reporting**: crash and hang reports, logs, and a diagnostics export that removes your name,
   paths and e-mail addresses and never includes saves, keys or game files.
@@ -194,7 +195,7 @@ recompiler and runtime are [ps3recomp](https://github.com/sp00nznet/ps3recomp), 
   `0001`), or an `EBOOT.elf` you decrypted yourself (for example with RPCS3's *Utilities > Decrypt PS3 Binaries*
   using your own console's firmware). The keys are only read: never copied, logged or uploaded.
 
-Every download is on the [0.2.0-beta.3 release page](https://github.com/irnutsmurt/Cubic.Heroes/releases/tag/v0.2.0-beta.3),
+Every download is on the [0.2.0-beta.4 release page](https://github.com/irnutsmurt/Cubic.Heroes/releases/tag/v0.2.0-beta.4),
 with `SHA256SUMS.txt` and the signed manifest (`release.json`, `release.json.sig`) to check them against.
 
 On every system the launcher does the same: you choose your disc and your keys file, and it checks the disc, decrypts
@@ -203,7 +204,7 @@ the game's program and **recompiles it on your PC** (10-30 minutes, depending on
 
 ### Windows
 
-1. **Download** `Cubic.Heroes-0.2.0-beta.3-windows-x86_64.zip`.
+1. **Download** `Cubic.Heroes-0.2.0-beta.4-windows-x86_64.zip`.
 2. **Extract** it where you want the game to live -- for example `D:\Games\`. It unpacks to a `Cubic.Heroes` folder;
    that folder *is* the installation.
 3. **Run `Cubic.Heroes\CubicHeroes.exe`**, choose your disc and your keys file, and **Install**.
@@ -216,9 +217,9 @@ new folder and checked file by file, the earlier folder left as it was.
 
 ### Linux: the AppImage
 
-1. **Download** `Cubic.Heroes-0.2.0-beta.3-x86_64.AppImage` into the folder you want the game in (for example
+1. **Download** `Cubic.Heroes-0.2.0-beta.4-x86_64.AppImage` into the folder you want the game in (for example
    `~/Games/`).
-2. **Make it executable** -- `chmod +x Cubic.Heroes-0.2.0-beta.3-x86_64.AppImage`, or the file's Properties >
+2. **Make it executable** -- `chmod +x Cubic.Heroes-0.2.0-beta.4-x86_64.AppImage`, or the file's Properties >
    Permissions -- and **start it**.
 3. Choose your disc and your keys file, and **Install**, as on Windows.
 
@@ -233,8 +234,8 @@ leaves an extracted copy (about 450 MB) in `$TMPDIR` (normally `/tmp`) until it 
 
 ### Linux: the tarball
 
-1. **Download** `Cubic.Heroes-0.2.0-beta.3-linux-x86_64.tar.xz` and **extract** it where you want the game to live:
-   `tar -xJf Cubic.Heroes-0.2.0-beta.3-linux-x86_64.tar.xz -C ~/Games`. It extracts to a `Cubic.Heroes` folder; that
+1. **Download** `Cubic.Heroes-0.2.0-beta.4-linux-x86_64.tar.xz` and **extract** it where you want the game to live:
+   `tar -xJf Cubic.Heroes-0.2.0-beta.4-linux-x86_64.tar.xz -C ~/Games`. It extracts to a `Cubic.Heroes` folder; that
    folder *is* the installation, exactly as on Windows.
 2. **Run `Cubic.Heroes/CubicHeroes`**, choose your disc and your keys file, and **Install**.
 
@@ -300,38 +301,48 @@ Settings are shared by the launcher and the in-game menu:
 
 ## Updating
 
-**What 0.2.0-beta.3 does**: the launcher checks for new versions (betas on the pre-release channel, a beta's default;
-Settings > Updates), and its **Download it** button downloads a new version and checks it against the project's
-release signature -- but **it doesn't install it**, although its message says it is applied when the launcher
-restarts. On Linux the check itself doesn't reach the update server yet (see [Known issues](#known-issues)).
-Installation by the launcher itself is planned for 0.2.0-beta.4, but a beta.3 (or beta.2) installation can't do it:
-install new versions, 0.2.0-beta.4 included, by hand:
+**Since 0.2.0-beta.4 the launcher installs updates itself.** It checks for new versions (betas on the pre-release
+channel, a beta's default; Settings > Updates). **Download it** downloads a new version and checks it against the
+project's release signature; **Restart and update** then:
+- checks the download again (the signature, and that it is this system's package of your kind of installation);
+- closes the launcher, puts the new version's files in place of its own, and opens the new version;
+- brings the game up to date if the new version needs it (your saves are backed up first; the previous build is kept:
+  Install > **Rollback Last Update** goes back to it).
+
+Your saves, settings, shader caches, logs and builds stay as they are. The launcher it replaced is kept: **Go back to
+version ...** on the Updates page (or `CubicHeroes --rollback-launcher`). If an update is stopped part-way -- the
+launcher or the computer stopping in the middle -- the previous launcher is put back at the next start. On Linux the
+AppImage is replaced in place, keeping its name and its shortcuts. No administrator or root rights are needed. Close
+the game first: an update isn't installed while it runs. From a terminal: `CubicHeroes --check-update`, then
+`CubicHeroes --apply-update`, then `CubicHeroes --update` for the game ([docs/CLI.md](docs/CLI.md)).
+
+### From beta.2 or beta.3: once by hand
+
+Their launchers can't install updates (and beta.3's can't reach the update server on Linux), so install beta.4 by
+hand once; from then on updates install themselves.
 
 1. **Back up your saves** (the launcher's Saves > Back up now), then **close the launcher and the game**.
-2. **Put the new version in place of the old one**. Only the launcher's own files are replaced; your installation's
-   folders are not touched:
-   - **Windows**: extract the new zip into the folder that *holds* your `Cubic.Heroes` folder (for
+2. **Put beta.4 in place of your version**. Only the launcher's own files are replaced; your installation's folders
+   are not touched:
+   - **Windows**: extract the beta.4 zip into the folder that *holds* your `Cubic.Heroes` folder (for
      `D:\Games\Cubic.Heroes`, into `D:\Games`), so that it merges with yours, and replace the files when asked. In
      Windows Explorer: right-click the zip > Extract All..., set that folder as the destination, then *Replace the
-     files in the destination*. In PowerShell: `Expand-Archive -Force <the new zip> -DestinationPath D:\Games`.
+     files in the destination*. In PowerShell: `Expand-Archive -Force <the zip> -DestinationPath D:\Games`.
    - **Linux, the tarball**: extract it into the folder that holds `Cubic.Heroes`, the same way:
-     `tar -xJf <the new tarball> -C ~/Games`.
-   - **Linux, the AppImage**: put the new `.AppImage` beside the old one (beside the `Cubic.Heroes` folder) and make
-     it executable; it uses the same installation. Then remove the old file, or keep it to go back to. If Steam,
-     Heroic or Lutris start the old file, point them at the new one.
+     `tar -xJf <the tarball> -C ~/Games`.
+   - **Linux, the AppImage**: put the beta.4 `.AppImage` beside the old one (beside the `Cubic.Heroes` folder) and
+     make it executable; it uses the same installation. Then remove the old file, or keep it. If Steam, Heroic or
+     Lutris start the old file, point them at the new one.
    - If you renamed the `Cubic.Heroes` folder, extract the zip or tarball somewhere else instead, and copy the
      contents of its `Cubic.Heroes` folder into yours, replacing the files.
-3. **Bring the game up to date once**, from a terminal in that folder: `.\CubicHeroes.exe --update` (Windows, in
-   `Cubic.Heroes`), `./Cubic.Heroes/CubicHeroes --update` (the tarball) or `./<the new AppImage> --update`. It
-   rebuilds the game from your disc's conversion only if the new version needs it (about 6 minutes on a recent desktop
-   CPU; no disc needed), backs up your saves first, and keeps the previous build: the launcher's **Install >
-   Rollback Last Update** goes back to it.
+3. **Start the launcher**. It brings the game up to date with beta.4 by itself: from beta.3 in a few seconds (the game
+   itself hasn't changed); from beta.2 by rebuilding it from your disc's conversion (about 6 minutes on a recent
+   desktop CPU; no disc needed), your saves backed up first and beta.2's build kept (Install > **Rollback Last
+   Update**). From a terminal instead: `CubicHeroes --update` in the installation's folder.
 
-Your saves, settings, shader caches, logs and builds stay where they are, and nothing is deleted. On Windows this is
-how 0.2.0-beta.3 was tested from beta.2: a beta.2 installation, the beta.3 package unpacked over it, `--update` --
-the saves and settings byte for byte the same, the game played, and rolled back to beta.2's build. On Linux the
-tarball and the AppImage were tested the same way, from the published beta.3 to a build of the next version: the
-saves, settings and builds byte for byte the same, and the game played.
+These steps were tested before release from the published packages: beta.2 and beta.3 on Windows, beta.3 with the
+Linux tarball and with the AppImage -- the saves and settings byte for byte the same, the game played afterwards, and
+from beta.2 the rollback to beta.2's build still in place after the launcher was started again.
 
 ## Command line
 
@@ -364,7 +375,9 @@ examples -- is in **[docs/CLI.md](docs/CLI.md)**.
 | The game is too fast or slow | Report it with your frame limit and display rate; set the frame limit to 60 meanwhile |
 | A black screen or the game won't start | Update your GPU driver (Vulkan); Diagnostics > Export Logs, and report it |
 | The folder can't be written | Extract to a folder you own (not `Program Files`); the launcher says if it can't write |
-| Linux: the update check says "Offline" though you're online | A known issue of 0.2.0-beta.3. Start the launcher from a terminal with the variable in front: `SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt ./Cubic.Heroes/CubicHeroes` on Debian, Ubuntu, Arch and their derivatives, `SSL_CERT_FILE=/etc/pki/tls/certs/ca-bundle.crt ./Cubic.Heroes/CubicHeroes` on Fedora (for the AppImage, the AppImage's name in place of `./Cubic.Heroes/CubicHeroes`). If Steam or Heroic starts the launcher, add the variable to its launch options or environment there. Or download new versions from the releases page |
+| Linux, beta.3: the update check says "Offline" though you're online | A known issue of 0.2.0-beta.3, fixed in beta.4: install beta.4 by hand once ([From beta.2 or beta.3](#from-beta2-or-beta3-once-by-hand)) |
+| Linux: "couldn't verify the update server's certificate" | The system has no trusted certificate store the launcher can use: install your distribution's `ca-certificates` package, or start the launcher with `SSL_CERT_FILE` set to a CA bundle (for example `SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt ./Cubic.Heroes/CubicHeroes`) |
+| Linux: "The AppImage's folder can't be written" | The AppImage is in a folder you can't write to (`/opt`, for example), so it can't update itself: download the new AppImage from the releases page, or keep the AppImage in a folder of yours |
 | Linux: the AppImage doesn't start | Make it executable (`chmod +x`); without FUSE, use the tarball ([Linux: the AppImage](#linux-the-appimage)) |
 | Linux: Heroic can't start the game or doesn't see its folder | Add `CubicHeroes` as a native game with `--play`, and allow the folder for Heroic's Flatpak ([Other launchers](#other-launchers)) |
 | Linux on Wayland: exclusive fullscreen looks like borderless | Expected: on Wayland the compositor owns the display mode, so exclusive fullscreen behaves as borderless |
@@ -378,7 +391,7 @@ Linux), not a folder of its own. Some ways of copying the installation copy the 
 folder instead: Windows Explorer copying it to another drive, for example, or on Linux `cp -r` without `-a` or a
 file manager that follows links. The game still plays,
 but updating, repairing and going back to an earlier build stop at their last step with "...game is in the way (not
-a link)". This is a known limitation of 0.2.0-beta.3; a fix is planned.
+a link)". This is a known limitation of 0.2.0-beta.4 (and earlier); a fix is planned.
 
 **To check**, open a command prompt in the installation folder and run `dir`:
 - a healthy installation lists `<JUNCTION>  game [...\builds\...]`;
@@ -444,15 +457,14 @@ handhelds (the Steam Deck among them) have not been tested at all -- reports are
 - **A copied installation folder** can stop updates, repairs and going back to an earlier build ("game is in the
   way"). It happens when the folder is copied in a way that turns its `game` link into a plain folder. See
   [The installation was copied](#the-installation-was-copied-game-is-in-the-way) for how to check and recover safely.
-- **The launcher doesn't install updates** (0.2.0-beta.3, Windows and Linux): it downloads and verifies a new
-  version, but doesn't install it. Install it by hand ([Updating](#updating)). Installation by the launcher is
-  planned for 0.2.0-beta.4; installations of beta.2 and beta.3 still need the manual step to reach it.
-- **Linux: the update check can't reach the update server** (0.2.0-beta.3): the launcher can't find the system's
-  trusted HTTPS certificates, so it can't check for or download updates and reports that it is offline. Installing
-  and playing are not affected. **Linux users of beta.3 will need to download and install 0.2.0-beta.4 by hand**
-  ([Updating](#updating)). The workaround -- the launcher started with `SSL_CERT_FILE` set to the system's CA bundle
-  ([Troubleshooting](#troubleshooting)) -- lets it check for and download new versions, but like every beta.3
-  launcher it still doesn't install them. A fix is planned for 0.2.0-beta.4.
+- **Coming from beta.2 or beta.3 takes one manual step**: their launchers can't install updates (and beta.3's can't
+  reach the update server on Linux), so beta.4 is installed by hand once ([From beta.2 or
+  beta.3](#from-beta2-or-beta3-once-by-hand)); updates install themselves after that.
+- **An update waits for the game to close**: the launcher doesn't install one while the game is running.
+- **Windows: a console window flashes for about two seconds** after the launcher installs an update or removes itself:
+  its helper waiting a moment, then deleting its own temporary copy. Nothing to do; a fix is planned.
+- **An AppImage in a folder you can't write to** (`/opt`, for example) can't update itself: the launcher says so
+  before downloading anything; download the new AppImage from the releases page instead.
 - **Linux**:
   - without FUSE, use the tarball: an AppImage started with `--appimage-extract-and-run` leaves its extracted copy in
     `$TMPDIR` (normally `/tmp`) until it is deleted or the machine restarts;
@@ -473,11 +485,15 @@ Done:
 
 - **The first native Linux release** -- an **AppImage** and a **tarball** for x86-64, in 0.2.0-beta.3
   ([docs/LINUX_PACKAGING.md](docs/LINUX_PACKAGING.md)).
+- **Updates installed by the launcher itself** on Windows and Linux, with rollback of the launcher and recovery of an
+  interrupted update, and Linux's update check fixed -- in 0.2.0-beta.4.
 
 Planned, not yet available:
 
-- **0.2.0-beta.4**: updates installed by the launcher itself on Windows and Linux, with rollback of the launcher
-  too, and Linux's update check fixed.
+- **0.2.0-beta.5**: the slowdown when cutting grass and other debris-heavy scenes
+  ([#2](https://github.com/irnutsmurt/Cubic.Heroes/issues/2)), measured on Windows and Linux before any change; a
+  stronger release-signing design (an offline root key with delegated release keys); optional RecompLauncher
+  support (launching and settings), alongside the standalone launcher.
 - **Completing the gameplay validation** -- the rows still open in the matrix, and what testers report.
 - **Steam Deck** testing and compatibility.
 - **Further Linux compatibility** -- NVIDIA and Intel GPUs, more distributions and desktops, and the AMD rendering
