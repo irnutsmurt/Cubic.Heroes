@@ -32,6 +32,7 @@
 #ifndef _WIN32
 #include <fcntl.h>
 #include <signal.h>
+#include <sys/resource.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #endif
@@ -436,6 +437,14 @@ static bool start_detached(const std::vector<std::string>& argv, const std::stri
         if (chdir(cwd.c_str()) != 0) _exit(127);
         const int null = open("/dev/null", O_RDWR);
         if (null >= 0) { dup2(null, 0); dup2(null, 1); dup2(null, 2); }
+        // and nothing else this process holds (beta.4, the Linux side's D5): an AppImage's runtime keeps its mount
+        // alive through a descriptor every program it starts inherits (fd 1023, not close-on-exec). A recovery that
+        // kept it would keep the old image mounted -- the runtime could never end, and the recovery, waiting for it,
+        // never finish. Plain close() calls (async-signal-safe: the launcher has threads), up to the open-file limit
+        struct rlimit rl;
+        const long top = getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY && rl.rlim_cur < (1u << 20)
+                             ? (long)rl.rlim_cur : (1l << 20);
+        for (long fd = 3; fd < top; fd++) close((int)fd);
         std::vector<char*> av;
         for (const std::string& a : argv) av.push_back(const_cast<char*>(a.c_str()));
         av.push_back(nullptr);
@@ -3510,7 +3519,8 @@ struct NavScript {
     struct Step { std::string op; int n = 1; std::string arg; };
     std::vector<Step> steps;
     size_t at = 0;
-    int wait = 30, phase = 0, done_n = 0, rs = 0, idle = 0;
+    int wait = 30, phase = 0, done_n = 0, rs = 0, idle = 0, until = 0;
+    std::string until_text;
     std::string dir, shot;
     FILE* log = nullptr;
     bool active() const { return !steps.empty(); }
@@ -3524,6 +3534,10 @@ struct NavScript {
             if (!(ls >> st.op) || st.op[0] == '#') continue;
             std::string rest;   // a count, or a name (a shot's name is a name, even "01-play")
             if (st.op == "expect") {   // "expect TEXT": the rest of the line
+                std::getline(ls, rest);
+                st.arg = rest.substr(std::min(rest.size(), rest.find_first_not_of(' ')));
+            } else if (st.op == "until") {   // "until N TEXT": at most N frames, then the rest of the line
+                ls >> st.n;
                 std::getline(ls, rest);
                 st.arg = rest.substr(std::min(rest.size(), rest.find_first_not_of(' ')));
             } else if (ls >> rest) {
@@ -3580,6 +3594,11 @@ struct NavScript {
             if (g_bg && --idle > 0) return;
             idle = 0;
         }
+        if (until > 0) {   // "until N TEXT": until the focus is on TEXT (part of its label) and no operation is on
+            // screen, N frames at most -- then the script goes on (an expect after it says whether it got there)
+            if ((g_focus_label.find(until_text) == std::string::npos || g_op) && --until > 0) return;
+            until = 0;
+        }
         if (at >= steps.size()) return;
         Step& st = steps[at];
         const ImGuiKey k = key(st.op);
@@ -3596,6 +3615,9 @@ struct NavScript {
             rs = st.n + 1;
         } else if (st.op == "idle") {
             idle = st.n;
+        } else if (st.op == "until") {
+            until = st.n;
+            until_text = st.arg;
         } else if (st.op == "expect") {   // the focus must be on this (part of its label), or the test stops at once:
             // a script out of step must never press A on something it didn't mean to
             if (g_focus_label.find(st.arg) == std::string::npos) {
