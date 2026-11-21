@@ -3541,8 +3541,9 @@ struct NavScript {
     struct Step { std::string op; int n = 1; std::string arg; };
     std::vector<Step> steps;
     size_t at = 0;
-    int wait = 30, phase = 0, done_n = 0, rs = 0, idle = 0, until = 0;
-    std::string until_text;
+    int wait = 30, phase = 0, done_n = 0, rs = 0, idle = 0, until = 0, seek = 0, seek_t = 0;
+    std::string until_text, seek_text;
+    ImGuiKey seek_key = ImGuiKey_None;
     std::string dir, shot;
     FILE* log = nullptr;
     bool active() const { return !steps.empty(); }
@@ -3558,8 +3559,8 @@ struct NavScript {
             if (st.op == "expect") {   // "expect TEXT": the rest of the line
                 std::getline(ls, rest);
                 st.arg = rest.substr(std::min(rest.size(), rest.find_first_not_of(' ')));
-            } else if (st.op == "until") {   // "until N TEXT": at most N frames, then the rest of the line
-                ls >> st.n;
+            } else if (st.op == "until" || st.op == "seek") {   // "until N TEXT", "seek N DIR TEXT": at most N
+                ls >> st.n;                                         // frames, then the rest of the line
                 std::getline(ls, rest);
                 st.arg = rest.substr(std::min(rest.size(), rest.find_first_not_of(' ')));
             } else if (ls >> rest) {
@@ -3616,6 +3617,16 @@ struct NavScript {
             if (g_bg && --idle > 0) return;
             idle = 0;
         }
+        if (seek > 0) {   // "seek N DIR TEXT": DIR pressed now and then until the focus is on TEXT, N frames at most
+            if (g_focus_label.find(seek_text) != std::string::npos && !g_op) seek = 0;
+            else {
+                --seek;
+                const int at_t = seek_t++ % 20;   // down for 2 frames, up, then the frames a move takes
+                if (at_t == 0) io.AddKeyAnalogEvent(seek_key, true, 1.0f);
+                else if (at_t == 2) io.AddKeyAnalogEvent(seek_key, false, 0.0f);
+                if (seek > 0) return;
+            }
+        }
         if (until > 0) {   // "until N TEXT": until the focus is on TEXT (part of its label) and no operation is on
             // screen, N frames at most -- then the script goes on (an expect after it says whether it got there)
             if ((g_focus_label.find(until_text) == std::string::npos || g_op) && --until > 0) return;
@@ -3640,6 +3651,12 @@ struct NavScript {
         } else if (st.op == "until") {
             until = st.n;
             until_text = st.arg;
+        } else if (st.op == "seek") {
+            const size_t sp = st.arg.find(' ');
+            seek_key = key(st.arg.substr(0, sp));
+            seek_text = sp == std::string::npos ? std::string() : st.arg.substr(sp + 1);
+            seek = seek_key == ImGuiKey_None ? 0 : st.n;
+            seek_t = 0;
         } else if (st.op == "expect") {   // the focus must be on this (part of its label), or the test stops at once:
             // a script out of step must never press A on something it didn't mean to
             if (g_focus_label.find(st.arg) == std::string::npos) {
