@@ -28,7 +28,8 @@
 namespace cli {
 
 enum Exit : int { kOk = 0, kFailed = 1, kUsage = 2, kNotInstalled = 3, kPrerequisite = 4, kBusy = 5, kCancelled = 6,
-                  kRoot = 7 };
+                  kRoot = 7, kManaged = 8,
+                  kOpenLauncher = -1 };   // internal: --play --or-launcher hands over to the window (never an exit status)
 
 #ifndef CUBIC_VERSION
 #define CUBIC_VERSION "0.0.0-dev"
@@ -38,6 +39,7 @@ struct Args {
     std::string command;                     // the one command (see usage()); empty: the launcher's window
     std::string install_dir, disc, keys, from;
     bool json = false, no_gui = false, persist = false, remember = false, repair = false;
+    bool or_launcher = false;                // --play --or-launcher: the window instead, when the game isn't ready
     std::vector<std::string> sets;           // --set KEY=VALUE, in order
     std::string display, fps, vsync;         // --play's display for this session (DOTHEROES_* settings)
     std::string resolution;                  // M11.2f: --resolution, the rendering resolution (native or WxH)
@@ -86,6 +88,8 @@ static const char* kUsageText =
     "                         operation's events as JSON lines (--install, --update, --prepare-shaders ...)\n"
     "  --no-gui               never open a window (errors are reported here instead)\n"
     "  --persist              keep --play's display options and --set values as settings\n"
+    "  --or-launcher          with --play: open the launcher's window instead when the game isn't installed yet (its\n"
+    "                         setup) or isn't yet brought up to date with this version -- for other launchers\n"
     "\n"
     "Display options for --play (this session only unless --persist):\n"
     "  --fullscreen | --windowed | --borderless\n"
@@ -163,6 +167,7 @@ static Args parse(const std::vector<std::string>& av)
         else if (o == "--json") a.json = true;
         else if (o == "--no-gui") a.no_gui = true;
         else if (o == "--persist") a.persist = true;
+        else if (o == "--or-launcher") a.or_launcher = true;
         else if (o == "--remember") a.remember = true;
         else if (o == "--repair") a.repair = true;
         else if (o == "--fullscreen") a.display = "exclusive";
@@ -199,6 +204,7 @@ static Args parse(const std::vector<std::string>& av)
     if (a.error.empty() && display && a.command != "play" && !a.persist)
         a.error = "the display options apply to --play (or keep them with --persist)";
     if (a.error.empty() && (a.width != 0) != (a.height != 0)) a.error = "--width and --height go together";
+    if (a.error.empty() && a.or_launcher && a.command != "play") a.error = "--or-launcher goes with --play";
     if (a.error.empty() && !a.resolution.empty() && a.resolution != "native") {   // M11.2f: WxH, as the settings take it
         int w = 0, h = 0;
         char tail = 0;
@@ -277,6 +283,7 @@ static int exit_for(const std::string& code)
                                           "keys_unreadable", "keys_empty", "wrong_key", "no_disc_copy", "no_crypto",
                                           "no_trusted_keys" };
     static const char* busy[] = { "already_preparing", "busy", "game_running" };
+    if (code == "managed_elsewhere") return kManaged;
     static const char* root[] = { "disk_space", "root_not_writable", "insufficient-space", "unsafe_path" };
     if (code == "cancelled") return kCancelled;
     if (code == "usage") return kUsage;
@@ -508,8 +515,20 @@ static std::string update_channel(const Args& a)
     return c == "prerelease" ? c : std::string("stable");
 }
 
+
+// 0.2.0-beta.5: an installation RecompLauncher manages (updates_managed_elsewhere(), main.cpp) gets its updates from
+// RecompLauncher; this launcher's own updater refuses, so the two never change the same folder (exit 8)
+static int refuse_managed(const Args& a)
+{
+    return fail(a, kManaged, "managed_elsewhere", "RecompLauncher installs this installation's updates, so this "
+                "launcher's own updater is off (the two must never change the same folder). Update it from "
+                "RecompLauncher; or, to manage it here instead, delete " + std::string(kRecompMark) +
+                " from the installation folder (outside RecompLauncher).");
+}
+
 static int cmd_check_update(const Args& a)
 {
+    if (updates_managed_elsewhere()) return refuse_managed(a);
     const Run r = worker(a, "check-update", { "--channel", update_channel(a) }, false);
     const int code = finish(a, r, "The update check");
     if (code != kOk) return code;
@@ -528,6 +547,7 @@ static int cmd_check_update(const Args& a)
 // it or puts this one back. Nothing is started afterwards (no window).
 static int cmd_apply_update(const Args& a)
 {
+    if (updates_managed_elsewhere()) return refuse_managed(a);
     const std::string channel = update_channel(a);
     const Run c = worker(a, "check-update", { "--channel", channel }, false);
     int code = finish(a, c, "The update check");
@@ -568,6 +588,7 @@ static int cmd_apply_update(const Args& a)
 
 static int cmd_rollback_launcher(const Args& a)
 {
+    if (updates_managed_elsewhere()) return refuse_managed(a);
     std::vector<std::string> args = launcher_update_args();
     args.push_back("--wait-pid");
     args.push_back(std::to_string(this_pid()));
@@ -648,7 +669,13 @@ static void play_ended(const Args& a, int status)
 static int cmd_play(const Args& a)
 {
     std::error_code ec;
-    if (!fs::exists(u8path(g_root) / "active.json", ec) && !fs::exists(u8path(g_root) / "game", ec))
+    const bool installed_here = fs::exists(u8path(g_root) / "active.json", ec) || fs::exists(u8path(g_root) / "game", ec);
+    // --or-launcher (other launchers; RecompLauncher's start): the window instead, when the game isn't installed yet
+    // (our setup: the disc and the keys, which no other launcher can pass) or isn't yet brought up to date with this
+    // version (the window does it at its start, with its progress, then the player plays from it)
+    if (a.or_launcher && (!installed_here || trimmed(read_text(game_update_marker(), 256)) != CUBIC_VERSION))
+        return kOpenLauncher;
+    if (!installed_here)
         return fail(a, kNotInstalled, "no_install", "Nothing is installed in " + g_root +
                                                     ". Install with: CubicHeroes --install --disc PATH --keys PATH");
     const std::string exe = game_exe(g_root);

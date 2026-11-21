@@ -524,6 +524,10 @@ def launcher(out, platform):
     shutil.copy2(os.path.join(built, "licenses", "Dear-ImGui-LICENSE.txt"), os.path.join(lic, "Dear-ImGui.txt"))
     shutil.copy2(os.path.join(built, "licenses", "SDL2-LICENSE.txt"), os.path.join(lic, "SDL2.txt"))
     shutil.copy2(os.path.join(ROOT, "LICENSE"), os.path.join(out, "LICENSE.txt"))   # this project: GPL-3.0
+    # 0.2.0-beta.5: the RecompLauncher SDK's manifest at the download's top, beside the launcher (the AppImage's root
+    # too, as the folder is its AppDir): RecompLauncher reads it to start the game and show its settings
+    # (docs/RECOMPLAUNCHER.md). Only read by RecompLauncher; the launcher itself never needs it.
+    shutil.copy2(os.path.join(ROOT, "launcher", "recomplauncher.json"), os.path.join(out, "recomplauncher.json"))
 
 
 def bundle(platform):
