@@ -113,8 +113,8 @@ last lines, a trace), shown only on request.
 | `not_found` | the disc image is not where it was chosen | choose it again |
 | `not_a_disc` | not an ISO 9660 image, or no PS3_GAME | choose a decrypted ISO or the disc's top folder |
 | `unsupported_version` | another game, region or version (the message names it and the supported one) | choose the supported disc |
-| `damaged_disc` | the right title and version, but EBOOT.BIN, the size or the image's SHA-256 does not match: encrypted, incomplete or modified | dump the disc again |
-| `keys_missing`, `keys_unreadable`, `keys_empty` | no keys file chosen, unreadable, or no APP keys in it | choose the keys file again |
+| `damaged_disc` | the right title and version, but EBOOT.BIN, the whole-disc image's SHA-256 or (an image rebuilt from the disc's folder, of another size, or a folder) an extracted file the version record lists does not match: encrypted, incomplete or modified | dump the disc again |
+| `keys_missing`, `keys_unreadable`, `keys_empty` | no keys file chosen, unreadable (or a disc key chosen in its place: the message says so), or no APP keys in it | choose the keys file again |
 | `wrong_key` | the keys do not decrypt this disc's program to the supported one | choose the matching keys |
 | `disk_space` | too little free space before starting, or the drive filled during the operation | free space, or another folder |
 | `root_not_writable` | the install's root (or `migrate-root`'s new root) can't be made or written to: permissions, a read-only folder or drive, a path through a file, a drive that can't be reached -- checked before anything is changed | another folder, or allow writing to it |

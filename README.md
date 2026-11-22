@@ -198,10 +198,13 @@ recompiler and runtime are [ps3recomp](https://github.com/sp00nznet/ps3recomp), 
   - a **decrypted ISO** (3,332,812,800 bytes), as made by a PS3 running homebrew backup software in decrypted mode;
   - an **encrypted ISO** (a raw Blu-ray rip) with its **disc key** (a `.dkey` file, the 32-character key, or an IRD
     file) -- decrypted as it is read; the ISO itself is never changed;
-  - the disc's **folder** (the one holding `PS3_GAME/`).
+  - the disc's **folder** (the one holding `PS3_GAME/`);
+  - an ISO **rebuilt from that folder** (PS3 ISO Tools, makeps3iso and similar; of another size): checked as the folder
+    is, its files as they are extracted.
 - **Your keys file** to decrypt the game's program (`APP <revision> <erk> <riv>` lines; this game needs revision
   `0001`), or an `EBOOT.elf` you decrypted yourself (for example with RPCS3's *Utilities > Decrypt PS3 Binaries*
-  using your own console's firmware). The keys are only read: never copied, logged or uploaded.
+  using your own console's firmware). The keys are only read: never copied, logged or uploaded. A disc key (`.key`,
+  `.dkey`) is not the keys file: it is only for an encrypted ISO.
 
 Every download is on the [0.2.0-beta.4 release page](https://github.com/irnutsmurt/Cubic.Heroes/releases/tag/v0.2.0-beta.4),
 with `SHA256SUMS.txt` and the signed manifest (`release.json`, `release.json.sig`) to check them against.
@@ -376,8 +379,8 @@ examples -- is in **[docs/CLI.md](docs/CLI.md)**.
 
 | Problem | What to do |
 |---|---|
-| The disc is refused | Only BLUS-30490 version 01.00 is supported; check the dump (size 3,332,812,800 bytes for an ISO) |
-| The keys file is refused | It needs an `APP` line for revision `0001`; or decrypt `EBOOT.BIN` yourself and give the `EBOOT.elf` |
+| The disc is refused | Only BLUS-30490 version 01.00 is supported; check the dump (a whole-disc ISO is 3,332,812,800 bytes; an ISO rebuilt from the disc's folder is checked file by file), or choose the disc's folder |
+| The keys file is refused | It needs an `APP` line for revision `0001` (a disc key -- `.key`, `.dkey` -- is not the keys file); or decrypt `EBOOT.BIN` yourself and give the `EBOOT.elf` |
 | The install stopped part-way | Run Install again: it resumes where it stopped |
 | Stutter the first time somewhere | Shaders page: prepare them (again after a GPU driver update) |
 | The game is too fast or slow | Report it with your frame limit and display rate; set the frame limit to 60 meanwhile |

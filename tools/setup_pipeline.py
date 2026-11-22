@@ -27,6 +27,7 @@ player's disc and stays in their install folder.
 import hashlib
 import json
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -254,12 +255,16 @@ def verify(source, progress, disc_key=None):
             raise SetupError("This isn't 3D Dot Game Heroes BLUS-30490 v01.00 (US): EBOOT.BIN doesn't match.",
                              "unsupported_version")
         return "folder"
-    if os.path.getsize(source) != want["disc_image"]["size"]:
-        raise SetupError("This disc image isn't the supported one: 3D Dot Game Heroes BLUS-30490 v01.00 (US), "
-                         "an ISO of the whole disc (the size doesn't match).", "unsupported_version")
     img, encrypted = _open_disc(source, disc_key)
     img.close()
     if encrypted:   # its bytes are not the decrypted dump's: its files are checked as they are extracted
+        progress(1.0)
+        return "iso"
+    if os.path.getsize(source) != want["disc_image"]["size"]:
+        # not the whole-disc dump: an ISO rebuilt from the disc's folder (PS3 ISO Tools, makeps3iso, ...) holds the
+        # same files in another layout. Checked as a folder is: the title, version and program now, the files the
+        # recompilation reads as they are extracted.
+        probe_disc(source, disc_key)
         progress(1.0)
         return "iso"
     if sha256_file(source, progress) != want["disc_image"]["sha256"]:
@@ -282,6 +287,7 @@ def extract(source, kind, paths, progress, log, disc_key=None):
             shutil.copyfile(f, dst)
             done += os.path.getsize(f)
             progress(done / total)
+        _check_extracted(paths)
         return
     import iso9660
     img, _ = _open_disc(source, disc_key)
@@ -301,10 +307,31 @@ def extract(source, kind, paths, progress, log, disc_key=None):
                         n -= len(chunk)
                         done += len(chunk)
                         progress(done / total)
-    want = version_info()["files"]["PS3_GAME/USRDIR/EBOOT.BIN"]
-    if sha256_file(paths.eboot_bin) != want:
-        raise SetupError("The extracted EBOOT.BIN doesn't match: the disc image may be damaged.", "damaged_disc")
+    _check_extracted(paths)
     log(f"extracted {len(ents)} files")
+
+
+def _check_extracted(paths):
+    """the disc's files the version record lists (its program, PARAM.SFO, the shader package, the scripts) against
+    their SHA-256: what an image that isn't the exact dump, or a folder, is checked by"""
+    for rel, want in version_info()["files"].items():
+        p = os.path.join(paths.disc, *rel.split("/"))
+        if not os.path.isfile(p) or sha256_file(p) != want:
+            raise SetupError(f"The extracted {rel.rsplit('/', 1)[-1]} doesn't match: the disc image may be damaged.",
+                             "damaged_disc")
+
+
+def _is_disc_key(path):
+    """whether the file chosen as the keys file is a disc key instead: 16 raw bytes (.key) or 32 hex digits (.dkey)"""
+    try:
+        if os.path.getsize(path) == 16:
+            return True
+        if os.path.getsize(path) > 64:
+            return False
+        with open(path, "rb") as f:
+            return re.fullmatch(rb"\s*[0-9A-Fa-f]{32}\s*", f.read()) is not None
+    except OSError:
+        return False
 
 
 def decrypt_eboot(eboot_bytes, keys=None, elf=None):
@@ -319,6 +346,10 @@ def decrypt_eboot(eboot_bytes, keys=None, elf=None):
             raise SetupError(f"Can't read that EBOOT.elf ({e.strerror}).", "keys_unreadable")
     else:
         import self_decrypt
+        if _is_disc_key(keys):
+            raise SetupError("That is a disc key (for an encrypted ISO), not the keys file. The keys file is a text "
+                             "file of APP <revision> <erk> <riv> lines; or choose an EBOOT.elf you decrypted.",
+                             "keys_unreadable")
         try:
             k = self_decrypt.load_keys(keys)
         except (OSError, UnicodeDecodeError) as e:
@@ -423,9 +454,8 @@ def probe_disc(source, disc_key=None):
         if eboot is None or hashlib.sha256(eboot).hexdigest() != want["files"]["PS3_GAME/USRDIR/EBOOT.BIN"]:
             raise SetupError("The disc's game program (EBOOT.BIN) isn't the expected one: the image may be "
                              "encrypted, damaged or modified.", "damaged_disc", json.dumps(info))
-        if files is not None and info["size"] != want["disc_image"]["size"]:
-            raise SetupError("The disc image's size isn't the supported dump's: it may be incomplete or "
-                             "modified.", "damaged_disc", json.dumps(info))
+        # an image of another size (rebuilt from the disc's folder) is accepted as a folder is: its files are
+        # checked as they are extracted
         return info
     finally:
         if f:
