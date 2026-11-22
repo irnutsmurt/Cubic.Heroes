@@ -1,3 +1,11 @@
+## Join the Cubic Heroes Discord!
+
+**[Join us on Discord!](https://discord.gg/ZcafYCYb7A)**
+
+Come hang out with the Cubic Heroes community! Keep up with the latest game updates, get help installing or troubleshooting, share your experiences, or just stop by to hype up the game and chat with fellow players.
+
+Everyone is welcome, whether you're playing on Windows or Linux!
+
 <p align="center">
   <img src="assets/icon.png" width="128" alt="Cubic.Heroes icon">
 </p>
