@@ -242,8 +242,8 @@ Settings are shared by the launcher and the in-game menu:
 
 ### Other launchers
 
-- **Steam** (Windows and Linux): the launcher's **Add to Steam** (Install / Manage) adds the game as a non-Steam game, started
-  with `--play`. Close Steam first. It also downloads the library artwork onto your computer -- the poster by Fami-Kon
+- **Steam** (Windows and Linux): the launcher's **Add to Steam** (Install / Manage) adds the launcher as a non-Steam game:
+  Steam opens the launcher, and its Play starts the game. Close Steam first. It also downloads the library artwork onto your computer -- the poster by Fami-Kon
   and the hero image by Jib, hosted on SteamGridDB -- without replacing artwork you put there yourself; if that fails,
   the same page lets you choose the image files yourself. The library logo is Cubic.Heroes's own
   ([assets/steam-logo.png](assets/steam-logo.png)), placed from the launcher's files -- use it in other launchers too.
@@ -400,7 +400,7 @@ information.**
   from your disc, prepare shaders, play, check for updates, roll back, back up and restore saves, export
   diagnostics -- with a controller, or a keyboard and mouse.
 - **A portable installation**, **signed updates with rollback**, **save backups**, **crash reports and a private
-  diagnostics export**, and **other launchers** (Steam, Heroic, Lutris, Playnite) through `--play`
+  diagnostics export**, and **other launchers** (Steam by Add to Steam; Heroic, Lutris, Playnite through `--play`)
   ([all of it](docs/HOW_IT_WORKS.md#features-in-detail)).
 
 ## More documentation
