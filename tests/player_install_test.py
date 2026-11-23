@@ -19,6 +19,11 @@ Stages, in order (default: all but game):
     migrate    a copy of a setup app's install (MIGRATE_FROM) moved into this layout: the disc not needed again,
                the saves, settings and translated shaders kept
     settings   a player's own values kept by an update's settings pass, missing performance switches added back
+    reinstall  (0.2.0-beta.5) a reinstall over the install from another source kind (INSTALL_TEST_DISC2, its disc
+               key INSTALL_TEST_DISC2_KEY when it is encrypted; the program's keys file INSTALL_TEST_KEYS, else the
+               EBOOT.elf): the disc's copy replaced by the same files, the active build, saves and settings
+               untouched; then (INSTALL_TEST_DAMAGED) a damaged source refused with everything as it was. Not in
+               the default list
     game       (only with --run-game: it starts the game) the game a shortcut starts (game/) runs its memory test,
                then a river fight as a player starts the install (tests/boot_smoke.py INSTALLED=)
     prepare    (with --run-game, after game) the recipes the run recorded; the launcher's check; a driver change
@@ -52,8 +57,9 @@ DIR = os.path.abspath(os.environ.get("INSTALL_TEST_DIR", "F:/3d dot game heroes/
 DIR2 = DIR + "-resume"
 MIGRATE_FROM = os.environ.get("MIGRATE_FROM", "F:/3d dot game heroes/m9/install-w")   # a setup app's install
 MIGRATED = DIR + "-migrated"
-ISO = os.path.join(ROOT, "3D DOT GAME HEROES [BLUS-30490].iso")
-ELF = os.path.join(ROOT, "build", "EBOOT.elf")
+# the disc the fresh install is made from (beta.5: any source kind -- a rebuilt ISO, the folder), the decrypted program
+ISO = os.environ.get("INSTALL_TEST_DISC", os.path.join(ROOT, "3D DOT GAME HEROES [BLUS-30490].iso"))
+ELF = os.environ.get("INSTALL_TEST_ELF", os.path.join(ROOT, "build", "EBOOT.elf"))
 # the developers' release lift to compare with (R8_GEN=build/r8/gen18 tools/r8_lift.sh: made again whenever the
 # lift's configuration changes -- gen18 has M10.5's title-menu patches)
 DEV_LIFT = os.environ.get("DEV_LIFT", os.path.join(ROOT, "build", "r8", "gen18"))
@@ -485,15 +491,83 @@ def stage_prepare():
           f"{last.get('comprehensive_done')}, {last.get('coverage')})")
 
 
+def disc_digest(top):
+    """the installed disc copy: (files, one SHA-256 over every file's path and SHA-256)"""
+    rows = []
+    for d, _, fs in os.walk(top):
+        for n in fs:
+            q = os.path.join(d, n)
+            rows.append((os.path.relpath(q, top).replace(os.sep, "/"), sha(q)))
+    rows.sort()
+    return len(rows), hashlib.sha256("".join(f"{a}\0{b}\n" for a, b in rows).encode()).hexdigest()
+
+
+def stage_reinstall():
+    import disc_source
+    import ps3_disc
+    src = os.environ.get("INSTALL_TEST_DISC2")
+    check("reinstall", bool(src) and os.path.exists(src), f"the second source ({src})")
+    if failed:
+        return
+    key = ps3_disc.load_key(os.environ["INSTALL_TEST_DISC2_KEY"]) if os.environ.get("INSTALL_TEST_DISC2_KEY") else None
+    keys = os.environ.get("INSTALL_TEST_KEYS")
+    elf = None if keys else ELF
+    put_save()
+    saves, settings = saves_hash(lay().gamedata), saves_hash(os.path.join(DIR, "config"))
+    active = lay().read_active()["active"]
+    m = disc_source.manifest()
+    want = sorted((e["path"], e["sha256"]) for e in m["files"])
+    want = (len(want), hashlib.sha256("".join(f"{a}\0{b}\n" for a, b in want).encode()).hexdigest())
+    r = Run("reinstall")
+    out = r.done(worker.op_install(DIR, src, keys, elf, r.cb, disc_key=key))
+    report["stages"]["reinstall"]["source"] = os.path.basename(src)
+    report["stages"]["reinstall"]["program"] = "keys file" if keys else "EBOOT.elf"
+    copy = os.path.join(DIR, "data", "disc")
+    check("reinstall", os.path.exists(os.path.join(copy, "PS3_GAME", "USRDIR", "EBOOT.elf")),
+          "the decrypted program in the disc copy")
+    rows = []
+    for d, _, fs in os.walk(os.path.join(copy, "PS3_GAME")):
+        for n in fs:
+            q = os.path.join(d, n)
+            rel = "PS3_GAME/" + os.path.relpath(q, os.path.join(copy, "PS3_GAME")).replace(os.sep, "/")
+            if rel != "PS3_GAME/USRDIR/EBOOT.elf":
+                rows.append((rel, sha(q)))
+    rows.sort()
+    got = (len(rows), hashlib.sha256("".join(f"{a}\0{b}\n" for a, b in rows).encode()).hexdigest())
+    check("reinstall", got == want, f"the disc copy is the manifest's files exactly ({got[0]} files)")
+    check("reinstall", out["build"] == active, f"the active build kept (nothing to rebuild: {out['build']})")
+    check("reinstall", saves_hash(lay().gamedata) == saves, "the saves untouched")
+    check("reinstall", saves_hash(os.path.join(DIR, "config")) == settings, "the settings untouched")
+    check("reinstall", not any(os.path.exists(copy + x) for x in (".staging", ".old")), "no staging copy left")
+    damaged = os.environ.get("INSTALL_TEST_DAMAGED")
+    if not damaged:
+        return
+    before = disc_digest(copy)
+    try:
+        worker.op_install(DIR, damaged, keys, elf, Run("reinstall-damaged").cb)
+        refused = None
+    except pipeline.SetupError as e:
+        refused = f"{e.code}: {e}"
+    report["stages"]["reinstall"]["damaged"] = refused
+    check("reinstall", bool(refused) and refused.startswith("damaged_disc"),
+          f"a damaged source refused ({refused})")
+    check("reinstall", disc_digest(copy) == before, "after it, the disc copy as it was")
+    check("reinstall", lay().read_active()["active"] == active and os.path.exists(active_exe()),
+          "after it, the active build as it was")
+    check("reinstall", saves_hash(lay().gamedata) == saves and saves_hash(os.path.join(DIR, "config")) == settings,
+          "after it, the saves and settings untouched")
+
+
 STAGES = {"fresh": stage_fresh, "check": stage_check, "update": stage_update, "relink": stage_relink,
           "rollback": stage_rollback, "failed": stage_failed, "relift": stage_relift, "resume": stage_resume,
-          "migrate": stage_migrate, "settings": stage_settings, "game": stage_game, "prepare": stage_prepare}
+          "migrate": stage_migrate, "settings": stage_settings, "game": stage_game, "prepare": stage_prepare,
+          "reinstall": stage_reinstall}
 
 
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     run_game = "--run-game" in sys.argv
-    stages = args or [s for s in STAGES if s not in ("game", "prepare") or run_game]
+    stages = args or [s for s in STAGES if s not in ("game", "prepare", "reinstall") or run_game and s != "reinstall"]
     if "game" in stages and not run_game:
         sys.exit("the game stage starts the game: add --run-game")
     for s in stages:

@@ -37,6 +37,7 @@ enum Exit : int { kOk = 0, kFailed = 1, kUsage = 2, kNotInstalled = 3, kPrerequi
 struct Args {
     std::string command;                     // the one command (see usage()); empty: the launcher's window
     std::string install_dir, disc, keys, from;
+    std::string disc_key;                    // 0.2.0-beta.5: an encrypted ISO's disc key, a FILE (.dkey, .key, IRD)
     bool json = false, no_gui = false, persist = false, remember = false, repair = false;
     std::vector<std::string> sets;           // --set KEY=VALUE, in order
     std::string display, fps, vsync;         // --play's display for this session (DOTHEROES_* settings)
@@ -82,6 +83,8 @@ static const char* kUsageText =
     "                         for the next start (cubicheroes-root.txt beside CubicHeroes)\n"
     "  --disc PATH            the disc image (.iso) or disc folder, for --install\n"
     "  --keys PATH            the keys file, for --install (read, never copied, never shown)\n"
+    "  --disc-key PATH        an encrypted ISO's disc key, for --install: a .dkey, .key or IRD file (never the key\n"
+    "                         itself on a command line; read, never copied, never shown)\n"
     "  --json                 machine-readable output: one JSON object (--status, --version, --set ...), or the\n"
     "                         operation's events as JSON lines (--install, --update, --prepare-shaders ...)\n"
     "  --no-gui               never open a window (errors are reported here instead)\n"
@@ -160,6 +163,7 @@ static Args parse(const std::vector<std::string>& av)
         else if (o == "--install-dir") a.install_dir = value("a folder");
         else if (o == "--disc") a.disc = value("a disc image or folder");
         else if (o == "--keys") a.keys = value("a keys file");
+        else if (o == "--disc-key") a.disc_key = value("a disc key file");
         else if (o == "--json") a.json = true;
         else if (o == "--no-gui") a.no_gui = true;
         else if (o == "--persist") a.persist = true;
@@ -476,6 +480,7 @@ static int cmd_install(const Args& a)
     if (a.disc.empty() || a.keys.empty())
         return fail(a, kUsage, "usage", "--install needs --disc PATH and --keys PATH.");
     std::vector<std::string> args = { "--disc", a.disc, "--keys", a.keys, "--install", g_root };
+    if (!a.disc_key.empty()) { args.push_back("--disc-key"); args.push_back(a.disc_key); }   // an encrypted ISO
     if (kind == "partial") args.push_back("--resume");
     say(a, "Installing into " + g_root + " (this takes a while)...");
     const Run r = worker(a, "install", args, true);
