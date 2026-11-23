@@ -13,7 +13,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "tools"))
@@ -230,6 +232,61 @@ class Slots(Base):
         put(os.path.join(self.lay.objects, "x.o"), "x")
         self.lay.prune()
         self.assertTrue(os.path.exists(os.path.join(self.lay.objects, "x.o")))
+
+
+class HeldBuildFile(Base):
+    """GitHub issue #5 (beta.4, Windows 11): the new build compiled, linked and checked, then its folder's rename into
+    place refused -- "Access is denied" -- because another program (an antivirus scanning the game the check had just
+    run, an indexer, a network drive's server) still held a file in it. Windows can't rename a folder with a file
+    open in it; the rename now waits a while for it, and a longer hold is a plain message, the active build kept."""
+
+    def hold(self, release_after=None):
+        """the check holds the new game open (as a scanner would), let go after release_after seconds (None: never,
+        until the test ends)"""
+        held = []
+
+        def validate(slot, log):
+            f = open(os.path.join(slot, EXE), "rb")
+            held.append(f)
+            if release_after is not None:
+                threading.Timer(release_after, f.close).start()
+            return checked(slot, log)
+
+        self.addCleanup(lambda: [f.close() for f in held])
+        return validate
+
+    def test_held_a_moment_then_put_in_place(self):
+        pipeline.run = Fake(b"game 1")
+        bid, _, _ = worker.build_slot(self.lay, self.cb, validate=self.hold(release_after=0.6))
+        self.assertEqual(self.lay.read_active()["active"], bid)
+        self.assertEqual(get(os.path.join(self.lay.game_link, EXE)), b"game 1")
+        self.assertEqual([n for n in os.listdir(self.lay.builds_dir) if n.startswith(".")], [], "no staging left")
+
+    @unittest.skipUnless(os.name == "nt", "Windows: a held file stops a folder's rename")
+    def test_held_too_long_a_plain_refusal_the_active_build_kept(self):
+        a, _, _ = self.build(Fake(b"game 1"))
+        pipeline.run = Fake(b"game 2", "lift-b")
+        with mock.patch.object(layout, "REPLACE_WAIT_S", 0.5):
+            with self.assertRaises(layout.LayoutError) as e:
+                worker.build_slot(self.lay, self.cb, validate=self.hold())
+        self.assertEqual(e.exception.code, "io_error")
+        self.assertIn("another program", str(e.exception))
+        self.assertEqual(self.lay.read_active()["active"], a)
+        self.assertEqual(get(os.path.join(self.lay.game_link, EXE)), b"game 1")
+        self.assertEqual(self.lay.builds(), {a: self.lay.build_info(a)})
+
+    def test_waits_with_backoff_then_gives_up_windows_only(self):
+        calls = []
+        with mock.patch.object(layout.os, "replace", side_effect=[PermissionError(13, "held"), PermissionError(13, "held"),
+                                                                   None]) as rep:
+            if os.name == "nt":
+                layout.replace_when_free("a", "b", wait=5, sleep=calls.append)
+                self.assertEqual(rep.call_count, 3)
+                self.assertEqual(calls, [0.1, 0.2])
+            else:   # elsewhere a PermissionError is a real one: no waiting
+                with self.assertRaises(PermissionError):
+                    layout.replace_when_free("a", "b", wait=5, sleep=calls.append)
+                self.assertEqual((rep.call_count, calls), (1, []))
 
 
 class Saves(Base):

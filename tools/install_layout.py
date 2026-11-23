@@ -103,6 +103,29 @@ def write_json(path, obj):
     os.replace(tmp, path)
 
 
+REPLACE_WAIT_S = 60.0   # how long a rename waits for a file another program holds (Windows)
+
+
+def replace_when_free(src, dst, wait=None, sleep=time.sleep):
+    """os.replace that, on Windows, waits while another program holds a file inside src: a folder can't be renamed
+    while any file in it is open there (ERROR_ACCESS_DENIED / ERROR_SHARING_VIOLATION) -- an antivirus scanning a
+    newly written or just-run program, the search indexer, a network drive's server. Up to REPLACE_WAIT_S, then the
+    PermissionError. Elsewhere a PermissionError is a real one: raised at once. (0.2.0-beta.5, GitHub issue #5: a
+    build folder's rename refused right after its check ran the new game.)"""
+    wait = REPLACE_WAIT_S if wait is None else wait
+    deadline = time.monotonic() + wait
+    delay = 0.1
+    while True:
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if os.name != "nt" or time.monotonic() >= deadline:
+                raise
+            sleep(delay)
+            delay = min(delay * 2, 2.0)
+
+
 def read_json(path, default=None):
     try:
         with open(path, encoding="utf-8") as f:
@@ -310,7 +333,12 @@ class Layout:
         dst = self.build_dir(info["id"])
         if os.path.exists(dst):
             raise LayoutError(f"a build slot named {info['id']} is already there")
-        os.replace(staging, dst)
+        try:
+            replace_when_free(staging, dst)
+        except PermissionError as e:
+            raise LayoutError("Windows didn't let the new build be put in place: another program kept one of its files "
+                              "open (often an antivirus scanning the newly built game). Run Install again: it reuses "
+                              f"the work already done. ({e.strerror})", "io_error") from None
         return info["id"]
 
     def activate(self, bid):
