@@ -58,6 +58,11 @@ Environment
                      folders (BLUS30490*, and its edit data BLJM60180*)
                      found in <dir>, e.g. an emulator's
                      dev_hdd0/home/00000001/savedata. <dir> is only read.
+                     With the save list dialog off (the default here), only
+                     one game save is copied, so every system loads the same
+                     one (tests/save_select.py): SAVE=<dir> (or a drive's
+                     `#! save <dir>`), else checkpoint.json's "save", else the
+                     first by name. PS3_SAVEDATA_PICKER=1: all of them.
   GAMEDATA=<dir>     use <dir> as the game's data root (dev_hdd0, saves,
                      trophies) in place, read and written, instead of a fresh
                      per-run root: for play sessions whose saves must last, e.g.
@@ -119,6 +124,8 @@ def scenario_header():
         what, *rest = line[2:].split("#", 1)[0].split()
         if what == "saves" and not os.environ.get("SAVES") and not os.environ.get("GAMEDATA"):
             os.environ["SAVES"] = os.path.join(root, rest[0])
+        elif what == "save":   # the game save the run loads (tests/save_select.py)
+            os.environ.setdefault("SAVE", rest[0])
         elif what == "env":
             for kv in rest:
                 k, _, v = kv.partition("=")
@@ -366,15 +373,19 @@ def main():
     # the game's saves, and its edit data (characters made in the editor): the
     # game names those with the Japanese release's ID, BLJM60180, in every
     # region, so edits are shared between them
-    SAVE_PREFIXES = ("BLUS30490", "BLJM60180")
+    # 0.2.0-beta.5: with the save list dialog off, one game save only -- the one the run names, the same on every
+    # system (the runtime lists the folder in the file system's own order: tests/save_select.py)
     if os.environ.get("SAVES"):
+        import save_select
         dst = os.path.join(gamedata, "dev_hdd0", "home", "00000001", "savedata")
-        for name in sorted(os.listdir(os.environ["SAVES"])):
+        names, loaded = save_select.choose(os.environ["SAVES"], os.environ.get("SAVE"),
+                                           os.environ.get("PS3_SAVEDATA_PICKER", "0") == "1")
+        print(f"saves: {', '.join(names)}" + (f" (the game save loaded: {loaded})" if loaded else ""), flush=True)
+        for name in names:
             src = os.path.join(os.environ["SAVES"], name)
-            if name.startswith(SAVE_PREFIXES) and os.path.isdir(src):
-                if INSTALLED:   # the test install's own save root: the checkpoint replaces what a run left
-                    shutil.rmtree(os.path.join(dst, name), ignore_errors=True)
-                shutil.copytree(src, os.path.join(dst, name))
+            if INSTALLED:   # the test install's own save root: the checkpoint replaces what a run left
+                shutil.rmtree(os.path.join(dst, name), ignore_errors=True)
+            shutil.copytree(src, os.path.join(dst, name))
     drive = os.path.abspath(os.environ["DRIVE"]) if os.environ.get("DRIVE") else None
 
     env = dict(os.environ)

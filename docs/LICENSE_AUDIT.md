@@ -450,6 +450,7 @@
 | `tests/rpcs3_reference.json` | INDEP | keep |
 | `tests/rpcs3_reference.py` | INDEP | keep |
 | `tests/run_batch.py` | INDEP | keep |
+| `tests/save_select.py` | INDEP | keep |
 | `tests/scenarios/OWNER_PLAY.md` | INDEP | keep |
 | `tests/scenarios/README.md` | INDEP | keep |
 | `tests/scenarios/attract.drive` | INDEP | keep |
@@ -609,6 +610,7 @@
 | `tests/test_recomplauncher.py` | INDEP | keep |
 | `tests/test_release_keys.py` | INDEP | keep |
 | `tests/test_rpath_tag.py` | INDEP | keep |
+| `tests/test_save_select.py` | INDEP | keep |
 | `tests/test_settings_diagnostics.py` | INDEP | keep |
 | `tests/test_uninstall.py` | INDEP | keep |
 | `tests/test_update_tls.py` | INDEP | keep |
