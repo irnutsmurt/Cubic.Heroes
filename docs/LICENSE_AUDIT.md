@@ -36,11 +36,13 @@
 | `config/spu_entry_hooks.json` | INDEP | keep |
 | `config/spu_relocatable.json` | INDEP | keep |
 | `docs/AUDIO.md` | INDEP | keep |
+| `docs/BUILDING.md` | INDEP | keep |
 | `docs/BULLET_NATIVE.md` | DOC-GAME | keep: facts about the game's behaviour and the project's results |
 | `docs/CLI.md` | INDEP | keep |
 | `docs/FEASIBILITY.md` | INDEP | keep |
 | `docs/FFMPEG_MIGRATION_PLAN.md` | INDEP | keep |
 | `docs/HANDOFF.md` | INDEP | keep |
+| `docs/HOW_IT_WORKS.md` | INDEP | keep |
 | `docs/LICENSE_AUDIT.md` | INDEP | keep |
 | `docs/LINUX_PACKAGING.md` | INDEP | keep |
 | `docs/M10_PLAN.md` | INDEP | keep |
@@ -67,10 +69,14 @@
 | `docs/PC_EXPERIENCE.md` | INDEP | keep |
 | `docs/RELEASE_QUALIFICATION.md` | INDEP | keep |
 | `docs/RELEASE_SIGNING.md` | INDEP | keep |
+| `docs/ROADMAP.md` | INDEP | keep |
 | `docs/SAVE_UI.md` | INDEP | keep |
 | `docs/SETUP.md` | INDEP | keep |
 | `docs/SHADER_PREPARATION.md` | INDEP | keep |
 | `docs/SPU_NON_AUDIO.md` | DOC-GAME | keep: facts about the game's behaviour and the project's results |
+| `docs/TESTING_STATUS.md` | INDEP | keep |
+| `docs/TROUBLESHOOTING.md` | INDEP | keep |
+| `docs/UPDATING.md` | INDEP | keep |
 | `docs/media/boss.jpg` | INDEP | keep |
 | `docs/media/dungeon.jpg` | INDEP | keep |
 | `docs/media/editor.jpg` | INDEP | keep |
