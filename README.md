@@ -243,8 +243,9 @@ Settings are shared by the launcher and the in-game menu:
 ### Other launchers
 
 - **Steam** (Windows and Linux): the launcher's **Add to Steam** (Install / Manage) adds the game as a non-Steam game, started
-  with `--play`. Close Steam first. Library artwork is optional: the same page opens the artists' images on SteamGridDB,
-  which you download yourself, and places the files you choose (it never downloads anything itself).
+  with `--play`. Close Steam first. It also downloads the library artwork onto your computer -- the poster by Fami-Kon
+  and the hero image by Jib, hosted on SteamGridDB -- without replacing artwork you put there yourself; if that fails,
+  the same page lets you choose the image files yourself.
 - **Heroic or Lutris** (Linux): add the tarball's `Cubic.Heroes/CubicHeroes` as a **native** game (not Wine or
   Proton) with the argument `--play`. Heroic's Flatpak can read only some folders (your Documents, the desktop, and
   others it already allows); for an installation elsewhere, allow it once with
