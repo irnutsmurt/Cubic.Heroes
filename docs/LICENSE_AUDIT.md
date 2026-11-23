@@ -19,6 +19,7 @@
 | `config/audio_hooks.json` | INDEP | keep |
 | `config/deps.sha256` | INDEP | keep |
 | `config/dev_capture_observers.json` | INDEP | keep |
+| `config/disc_manifest.json` | INDEP | keep |
 | `config/excluded_code.json` | INDEP | keep |
 | `config/game_version.json` | INDEP | keep |
 | `config/insn_patches.json` | INDEP | keep |
@@ -403,6 +404,7 @@
 | `tests/geom_newkeys.py` | INDEP | keep |
 | `tests/hand_upgrade_check.py` | INDEP | keep |
 | `tests/inflate_frames.py` | INDEP | keep |
+| `tests/iso_build.py` | INDEP | keep |
 | `tests/keep_baseline.py` | INDEP | keep |
 | `tests/lap_ab.py` | INDEP | keep |
 | `tests/launcher_gui_update_check.py` | INDEP | keep |
@@ -593,11 +595,13 @@
 | `tests/test_build_env_pins.py` | INDEP | keep |
 | `tests/test_desktop_guard.py` | INDEP | keep |
 | `tests/test_dev_saves.py` | INDEP | keep |
+| `tests/test_disc_source.py` | INDEP | keep |
 | `tests/test_fps_actors.py` | INDEP | keep |
 | `tests/test_fs_case_check.py` | INDEP | keep |
 | `tests/test_game_appimage.py` | INDEP | keep |
 | `tests/test_hostenv.py` | INDEP | keep |
 | `tests/test_install_layout.py` | INDEP | keep |
+| `tests/test_iso_hostile.py` | INDEP | keep |
 | `tests/test_launcher_update.py` | INDEP | keep |
 | `tests/test_map_sweep.py` | INDEP | keep |
 | `tests/test_owned_run.py` | INDEP | keep |
@@ -607,6 +611,7 @@
 | `tests/test_player_pipeline.py` | INDEP | keep |
 | `tests/test_portable_root.py` | INDEP | keep |
 | `tests/test_ps3_disc.py` | INDEP | keep |
+| `tests/test_rebuilt_disc.py` | INDEP | keep |
 | `tests/test_recomplauncher.py` | INDEP | keep |
 | `tests/test_release_keys.py` | INDEP | keep |
 | `tests/test_rpath_tag.py` | INDEP | keep |
@@ -636,6 +641,8 @@
 | `tools/cmake/glslang_doc_O0.cmake` | INDEP | keep |
 | `tools/dev_saves.py` | INDEP | keep |
 | `tools/diagnostics.py` | INDEP | keep |
+| `tools/disc_manifest.py` | INDEP | keep |
+| `tools/disc_source.py` | INDEP | keep |
 | `tools/edit_import.py` | INDEP | keep |
 | `tools/fetch_appimage.py` | INDEP | keep |
 | `tools/fetch_zig.py` | INDEP | keep |
