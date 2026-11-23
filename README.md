@@ -87,11 +87,12 @@ with `SHA256SUMS.txt` and the signed manifest (`release.json`, `release.json.sig
 | Your system | Download | |
 |---|---|---|
 | **Windows 10 or 11** (64-bit) | `Cubic.Heroes-0.2.0-beta.5-windows-x86_64.zip` | extract it where the game should live |
-| **Linux** (x86-64), most desktops | `Cubic.Heroes-0.2.0-beta.5-x86_64.AppImage` | one file; needs FUSE, which most desktop distributions have |
+| **Linux** (x86-64), most desktops | `Cubic.Heroes-0.2.0-beta.5-x86_64.AppImage` | one file; needs FUSE (`fusermount`), which most desktop distributions have |
 | **Linux** without FUSE, or if you prefer a plain folder | `Cubic.Heroes-0.2.0-beta.5-linux-x86_64.tar.xz` | extract it where the game should live |
 
-**Handhelds** (the Steam Deck among them) haven't been tested yet: reports are very welcome
-([Testing status](docs/TESTING_STATUS.md)).
+**Handhelds** (the Steam Deck among them) haven't been tested by us yet; on SteamOS the Linux packages are the ones to
+use (in Desktop Mode; **Add to Steam** in the launcher's Settings then puts the game in Game Mode). Reports are very
+welcome ([Testing status](docs/TESTING_STATUS.md)).
 
 ## What you need
 
@@ -100,9 +101,11 @@ with `SHA256SUMS.txt` and the signed manifest (`release.json`, `release.json.sig
   Fedora 32 have that glibc; see [Testing status](docs/TESTING_STATUS.md) for what has actually been tested).
 - An **x86-64 CPU with SSE4.2** (x86-64-v2: Intel since 2008, AMD since 2011).
 - A GPU with a **Vulkan** driver: any recent AMD, NVIDIA or Intel driver on Windows; on Linux, Mesa's (RADV for AMD,
-  ANV for Intel) or NVIDIA's.
+  ANV for Intel) or NVIDIA's, with the Vulkan loader (`libvulkan1` or `vulkan-icd-loader`; installed with the driver
+  on most distributions).
 - About **6 GB** of free disk space.
-- Nothing else to install: the launcher carries its own runtime (on Linux too: no Python or SDL from the system).
+- Nothing else to install: the launcher carries its own runtime (on Linux too: no Python or SDL from the system;
+  the graphics driver and its Vulkan loader are the system's).
 
 These are the minimum; recommended requirements will follow once more hardware has been tested.
 
@@ -174,8 +177,9 @@ The AppImage is one read-only file: its installation is a **`Cubic.Heroes` folde
 `~/Games/Cubic.Heroes/`), holding everything listed under [The portable folder](#the-portable-folder). **Move the
 AppImage and that folder together**, keeping them side by side.
 
-**FUSE**: an AppImage is mounted with FUSE while it runs; most desktop distributions have it (on some it is the
-`fuse2` or `libfuse2` package). Without FUSE, use **the tarball** below. `--appimage-extract-and-run` works too, but
+**FUSE**: an AppImage is mounted with FUSE while it runs. This one carries its own FUSE library, so it only needs the
+`fusermount` program and `/dev/fuse`, which most desktop distributions have (the `fuse3` or `fuse` package; `libfuse2`
+isn't needed). Without FUSE (some containers and sandboxes), use **the tarball** below. `--appimage-extract-and-run` works too, but
 leaves an extracted copy (about 450 MB) in `$TMPDIR` (normally `/tmp`) until it is deleted or the machine restarts
 ([docs/LINUX_PACKAGING.md](docs/LINUX_PACKAGING.md)).
 
