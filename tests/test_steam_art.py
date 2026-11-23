@@ -169,7 +169,7 @@ class SteamArtDownload(Fixture):
     def add(self, net):
         report = {}
         written = shortcuts.add_to_steam(self.exe, "", roots=[self.root], report=report,
-                                         fetch=lambda: shortcuts.fetch_steam_art(urlopen=net),
+                                         fetch=lambda causes: shortcuts.fetch_steam_art(urlopen=net, causes=causes),
                                          logo=self.image("logo.png", LOGO))
         vdfs = [p for p in written if os.path.basename(p) == "shortcuts.vdf"]
         self.assertEqual(len(vdfs), 2, "the game is in both accounts' libraries whatever the artwork did")
@@ -192,18 +192,32 @@ class SteamArtDownload(Fixture):
         r = self.add(fake_net({POSTER_URL: b"<!DOCTYPE html><html>Not found</html>", HERO_URL: JPG}))
         self.assertEqual([os.path.basename(p) for p in r["placed"]], [f"{self.appid}_logo.png"] * 2)   # only the logo
         self.assertEqual(sorted(r["failed"]), ["hero", "poster"])
-        self.assertIn("not a PNG", r["failed"]["poster"])
+        self.assertIn("not a PNG", r["causes"]["poster"])   # the cause kept; the player reads plain words
+        self.assertEqual(r["failed"]["poster"], "the download wasn't a usable image")
         self.assertFalse(os.path.exists(os.path.join(self.accounts[0], "grid", f"{self.appid}p.png")))
 
     def test_oversize_refused_while_reading(self):
         r = self.add(fake_net(PNG + b"\0" * shortcuts.ART_MAX_BYTES))
         self.assertEqual(sorted(r["failed"]), ["hero", "poster"])
-        self.assertIn("larger than", r["failed"]["poster"])
+        self.assertIn("larger than", r["causes"]["poster"])
+        self.assertEqual(r["failed"]["poster"], "the download wasn't a usable image")
 
     def test_a_timeout_handled(self):
         import socket
         r = self.add(fake_net(socket.timeout("timed out")))
         self.assertEqual(sorted(r["failed"]), ["hero", "poster"])
+        self.assertEqual(r["failed"]["poster"], "it couldn't be downloaded -- check the internet connection")
+
+    def test_failures_in_plain_words(self):
+        """what the launcher shows: never a raw urlopen error (the owner's Steam test, beta.5)"""
+        import urllib.error
+        for err, words in ((ConnectionRefusedError(10061, "refused"), "check the internet connection"),
+                           (urllib.error.URLError(ConnectionRefusedError(10061, "refused")), "check the internet connection"),
+                           (urllib.error.HTTPError(POSTER_URL, 404, "Not Found", {}, None), "answered with an error (404)")):
+            r = self.add(fake_net(err))
+            self.assertIn(words, r["failed"]["poster"], err)
+            self.assertNotIn("urlopen", r["failed"]["poster"])
+            self.assertTrue(r["causes"]["poster"], err)
 
     def test_add_to_steam_succeeds_with_every_artwork_failure(self):
         import urllib.error
@@ -212,7 +226,7 @@ class SteamArtDownload(Fixture):
             r = self.add(fake_net(err))
             self.assertEqual((len(r["placed"]), sorted(r["failed"])), (2, ["hero", "poster"]), err)   # the logos
         report = {}   # even a fetch that raises
-        shortcuts.add_to_steam(self.exe, "", roots=[self.root], report=report, fetch=lambda: 1 / 0)
+        shortcuts.add_to_steam(self.exe, "", roots=[self.root], report=report, fetch=lambda **_: 1 / 0)
         self.assertEqual(list(report["failed"]), ["artwork"])
 
     def test_the_players_own_kept(self):
@@ -235,11 +249,11 @@ class SteamArtDownload(Fixture):
             self.assertEqual(f.read(), PNG + b"newer")
 
     def test_artwork_false_never_fetches(self):
-        def no_fetch():
+        def no_fetch(**_):
             raise AssertionError("fetched")
         report = {}
         shortcuts.add_to_steam(self.exe, "", roots=[self.root], artwork=False, report=report, fetch=no_fetch)
-        self.assertEqual(report, {"placed": [], "kept": [], "failed": {}})
+        self.assertEqual(report, {"placed": [], "kept": [], "failed": {}, "causes": {}})
 
     def test_download_steam_art_never_over_the_players_own(self):
         g = os.path.join(self.tmp, "grid")
@@ -259,7 +273,7 @@ class SteamLogo(Fixture):
 
     def add(self, **kw):
         report = {}
-        shortcuts.add_to_steam(self.exe, "", roots=[self.root], report=report, fetch=lambda: ({}, {}), **kw)
+        shortcuts.add_to_steam(self.exe, "", roots=[self.root], report=report, fetch=lambda **_: ({}, {}), **kw)
         return report
 
     def test_the_shipped_logo_placed(self):

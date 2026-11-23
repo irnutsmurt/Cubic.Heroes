@@ -346,9 +346,22 @@ def _urlopen(req, timeout):
     return urllib.request.urlopen(req, timeout=timeout, context=ctx)
 
 
-def fetch_steam_art(art=STEAM_ART, timeout=ART_TIMEOUT_S, urlopen=None):
+def _why_not_downloaded(e):
+    """a failed download in the player's words (the technical cause goes to the report's causes)"""
+    import urllib.error
+    if isinstance(e, urllib.error.HTTPError):
+        return f"the image server answered with an error ({e.code})"
+    if isinstance(e, (urllib.error.URLError, OSError)):   # offline, refused, a timeout, a certificate
+        return "it couldn't be downloaded -- check the internet connection"
+    if isinstance(e, ValueError):   # the download came, but not as an image it can use
+        return "the download wasn't a usable image"
+    return "it couldn't be downloaded"
+
+
+def fetch_steam_art(art=STEAM_ART, timeout=ART_TIMEOUT_S, urlopen=None, causes=None):
     """Each image downloaded once: ({kind: (suffix, PNG bytes)} for those that came whole as a PNG of at most
-    ART_MAX_BYTES -- the cap enforced while reading -- , {kind: why} for the rest). Never raises."""
+    ART_MAX_BYTES -- the cap enforced while reading -- , {kind: why, in the player's words} for the rest; causes
+    (a dict) gets each failure's technical cause). Never raises."""
     import urllib.request
     urlopen = urlopen or _urlopen
     got, failed = {}, {}
@@ -368,7 +381,9 @@ def fetch_steam_art(art=STEAM_ART, timeout=ART_TIMEOUT_S, urlopen=None):
                 raise ValueError("not a PNG image")
             got[kind] = (suffix, bytes(buf))
         except Exception as e:   # noqa: BLE001 -- offline, an error page, a timeout...: that image isn't added
-            failed[kind] = str(e) or type(e).__name__
+            failed[kind] = _why_not_downloaded(e)
+            if causes is not None:
+                causes[kind] = str(e) or type(e).__name__
     return got, failed
 
 
@@ -516,18 +531,21 @@ def add_to_steam(exe, icon, roots=None, artwork=True, report=None, fetch=None, l
     its library artwork (STEAM_ART, each image downloaded once, and the project's own logo,
     assets/steam-logo.png -- logo: another file, for tests) unless artwork=False. Steam
     must not be running. Returns the files written; report (a dict) gets the artwork's
-    outcome: placed, kept (the player's own, left), failed ({kind: why}). The artwork never
+    outcome: placed, kept (the player's own, left), failed ({kind: why, in the player's words}),
+    causes ({kind: the technical cause}). The artwork never
     stops the game being added."""
-    images, art_failed, placed, kept = {}, {}, [], []
+    images, art_failed, placed, kept, causes = {}, {}, [], [], {}
     if artwork:
         try:
-            images, art_failed = (fetch or fetch_steam_art)()
+            images, art_failed = (fetch or fetch_steam_art)(causes=causes)
         except Exception as e:   # noqa: BLE001 -- never a reason not to add the game
-            images, art_failed = {}, {"artwork": str(e) or type(e).__name__}
+            images, art_failed = {}, {"artwork": "it couldn't be downloaded"}
+            causes["artwork"] = str(e) or type(e).__name__
         try:   # the project's own logo: shipped with Cubic.Heroes, nothing downloaded
             images["logo"] = steam_logo(logo)
         except (ArtError, OSError) as e:
-            art_failed["logo"] = str(e)
+            art_failed["logo"] = "the Cubic.Heroes logo is missing from the launcher's files"
+            causes["logo"] = str(e)
     exe_field = f'"{exe}"'
     appid = steam_app_id(exe_field, NAME)
     entry = {
@@ -571,14 +589,15 @@ def add_to_steam(exe, icon, roots=None, artwork=True, report=None, fetch=None, l
                 try:
                     p, theirs = _place_art(os.path.join(config, "grid"), appid, suffix, data, ".png")
                 except OSError as e:   # a grid folder that can't be written: that image isn't added there
-                    art_failed[kind] = e.strerror or str(e)
+                    art_failed[kind] = "Steam's artwork folder couldn't be written"
+                    causes[kind] = e.strerror or str(e)
                     continue
                 if p:
                     written.append(p)
                     placed.append(p)
                 kept += theirs
     if report is not None:
-        report.update(placed=placed, kept=kept, failed=art_failed)
+        report.update(placed=placed, kept=kept, failed=art_failed, causes=causes)
     return written
 
 

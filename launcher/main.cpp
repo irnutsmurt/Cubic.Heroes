@@ -2591,8 +2591,9 @@ static void steam_section()
                     const json::Value& art = r["data"]["artwork"];
                     std::string text = "Start Steam to see it in your library.";
                     if (art["failed"].size() > 0)   // the game is added all the same: the artwork is the player's to add
-                        text += " The artwork wasn't added (" + art["failed"].o.begin()->second.str() + "): you can "
-                                "choose the images yourself under Steam artwork.";
+                        text += std::string(art["placed"].size() > 0 ? " Some of its artwork" : " The artwork") +
+                                " wasn't added: " + art["failed"].o.begin()->second.str() + ". You can choose the "
+                                "images yourself under Steam artwork.";
                     else if (art["kept"].size() > 0)
                         text += " Artwork you had put there yourself was kept.";
                     else if (art["placed"].size() > 0)
