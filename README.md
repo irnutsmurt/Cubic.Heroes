@@ -267,6 +267,10 @@ installation's own folders.
   others it already allows); for an installation elsewhere, allow it once with
   `flatpak override --user --filesystem=<the installation folder> com.heroicgameslauncher.hgl`.
 - **Playnite, LaunchBox and others** (Windows): point them at `CubicHeroes.exe --play` ([docs/CLI.md](docs/CLI.md)).
+- **RecompLauncher** (Windows and Linux, from 0.2.0-beta.5): every package carries its manifest, so it can start the
+  game and offer the display and prompt settings. The setup from your disc and keys stays in Cubic.Heroes's own
+  launcher, which it opens at the first start; in that installation RecompLauncher then installs the updates, and
+  Cubic.Heroes's own updater is off ([docs/RECOMPLAUNCHER.md](docs/RECOMPLAUNCHER.md)).
 
 ### The portable folder
 

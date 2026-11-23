@@ -1153,11 +1153,29 @@ def _keys(a):
     return release_trust.trusted_keys(a.keys_file) if a.keys_file else None
 
 
+def _managed_elsewhere(*folders):
+    """0.2.0-beta.5: RecompLauncher manages this installation (it started us: RECOMPLAUNCHER=1; or its mark is at the
+    root, install_layout.RECOMP_MARK): its updates are RecompLauncher's, so this launcher's own updater stays off --
+    the two must never change the same folder (the SDK's rule). The launcher says so first; this is the worker's own
+    check of the same rule."""
+    import install_layout as layout
+    return os.environ.get("RECOMPLAUNCHER") == "1" or any(
+        f and os.path.isfile(os.path.join(f, layout.RECOMP_MARK)) for f in folders)
+
+
+def _refuse_managed(*folders):
+    if _managed_elsewhere(*folders):
+        raise pipeline.SetupError("RecompLauncher installs this installation's updates, so this launcher's own updater "
+                                  "is off.", "managed_elsewhere")
+
+
 def cmd_check_update(a, ev, control):
     """the newest release of the channel, its manifest verified; never an error for being offline (the result says
     offline, play goes on)"""
     import updates
     from version import VERSION
+    if _managed_elsewhere(a.install, a.launcher):
+        return {"available": False, "managed": "RecompLauncher", "installed": a.installed or VERSION}
     try:
         r = updates.check(a.channel, a.installed or VERSION, a.source, _keys(a))
     except updates.trust.ReleaseError as e:
@@ -1175,6 +1193,7 @@ def cmd_download_update(a, ev, control):
     previous attempt stopped, checked against the manifest (size, SHA-256) before it is kept"""
     import updates
     from version import VERSION
+    _refuse_managed(a.install, a.launcher)
     check_writable(a.dest or a.install, create=True)   # the download goes into the install (downloads/<version>)
     if updates.installed_kind() == "appimage" and os.environ.get("APPIMAGE"):
         try:   # the new AppImage can only be put beside the running one: nothing downloaded for nothing
@@ -1221,6 +1240,7 @@ def cmd_stage_launcher(a, ev, control):
     copy the swap runs as (downloads/launcher-helper: the swap replaces worker/, so it can't run from there). The
     launcher then starts `<helper> --worker swap-launcher ...` as it exits."""
     import updates
+    _refuse_managed(a.install, a.launcher)
     check_writable(a.launcher)
     try:
         staged = updates.stage_launcher(a.package, a.launcher)
@@ -1318,6 +1338,7 @@ def cmd_apply_update(a, ev, control):
     (--no-restart: not). Refused while the game runs or another update is under way. Nothing of the working
     installation is changed here."""
     import updates
+    _refuse_managed(a.install, a.launcher)
     check_writable(a.launcher)
     if a.appimage and not os.path.isfile(a.appimage):
         raise pipeline.SetupError("--appimage names no file.", "usage")
@@ -1347,6 +1368,7 @@ def cmd_rollback_launcher(a, ev, control):
     """the launcher put back to the version the last update replaced (kept in downloads/launcher-rollback), by the
     same journalled swap; the newer one is kept there in turn"""
     import updates
+    _refuse_managed(a.install, a.launcher)
     check_writable(a.launcher)
     v = updates.rollback_version(a.launcher)
     item = os.path.join(updates.update_dirs(a.launcher)["rollback"],

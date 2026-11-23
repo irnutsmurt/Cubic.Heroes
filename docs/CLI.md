@@ -81,6 +81,7 @@ One command at a time; options may follow in any order. `--opt=value` and `--opt
 | `--disc-key PATH` | for `--install` from an **encrypted** ISO (a raw rip): its disc key, as a file -- a `.dkey` (32 hexadecimal digits), a `.key` (16 bytes) or an IRD file (which needs a `D1` line in the keys file). Never the key itself on the command line. Not needed for a decrypted ISO, an ISO rebuilt from the disc's folder, or the folder |
 | `--json` | machine-readable output (section 3) |
 | `--no-gui` | never open a window: with no command it is an error (exit 2) instead of the launcher |
+| `--or-launcher` | with `--play`, for other launchers (RecompLauncher's start): open the launcher's window instead when the game isn't installed in the folder yet (its setup: your disc and keys) or isn't yet brought up to date with this version (the window does it, then you play from it); otherwise `--play` as without it. Without `--play`: exit 2 |
 | `--persist` | keep `--play`'s display options and `--set` values as settings |
 | `--fullscreen`, `--windowed`, `--borderless` | the display mode for `--play` (fullscreen: exclusive, at the display's current mode) |
 | `--width N --height N` | the window's size for `--play` (windowed; together); the window's remembered place and size are left as they were |
@@ -180,6 +181,7 @@ own rules: it plays on its own test saves (`data/devmode/gamedata`), never yours
 | 5 | busy (another operation holds this installation: a preparation, an update, the game running) |
 | 6 | cancelled (Ctrl+C, the console closed, the calling launcher ended `CubicHeroes`) |
 | 7 | the installation folder can't be used (read-only, protected, or not enough free space) |
+| 8 | RecompLauncher manages this installation's updates (`managed_elsewhere`): `--check-update`, `--apply-update` and `--rollback-launcher` are off (docs/RECOMPLAUNCHER.md section 4) |
 
 `--play` passes the game's status on; a game that crashed exits with the system's code for it (on Windows, an
 NTSTATUS such as `0xC0000005`). One status of the game's own:
@@ -194,7 +196,7 @@ the graphics device's start only: shader preparation (`--prepare-shaders`) and t
 graphics have started are never cut short by it.
 
 The `code` names in JSON are the worker's (docs/M9_WORKER_PROTOCOL.md section 4) plus `usage`, `no_install`,
-`no_game`, `no_worker`, `root_not_writable`.
+`no_game`, `no_worker`, `root_not_writable`, `managed_elsewhere`.
 
 ## 6. Integrating with a launcher or frontend
 
@@ -234,6 +236,10 @@ A frontend that keeps several installations, or keeps them outside the program's
 ```
 "<folder>\CubicHeroes.exe" --install-dir "E:\Cubic.Heroes copies\speedrun" --play --fps 30
 ```
+
+**RecompLauncher**: every package carries a `recomplauncher.json`, which starts the game with `--play --or-launcher`
+and passes its settings as session options; its own updates replace this launcher's in the installations it
+manages (exit code 8 above). See docs/RECOMPLAUNCHER.md.
 
 **Linux** (same commands, `CubicHeroes` instead of `CubicHeroes.exe`): see docs/LINUX_PACKAGING.md for the AppImage,
 whose installation root is a writable folder outside the image.

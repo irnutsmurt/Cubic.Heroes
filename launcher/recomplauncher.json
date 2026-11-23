@@ -1,0 +1,100 @@
+{
+ "$schema": "https://recomplauncher.com/schema/recomplauncher.json",
+ "format": 1,
+ "name": "Cubic.Heroes",
+ "start": {
+  "program": ["CubicHeroes.exe", "CubicHeroes"],
+  "args": ["--play", "--or-launcher"]
+ },
+ "settings": [
+  {
+   "id": "display_mode",
+   "label": "Display mode",
+   "group": "Display",
+   "in": "args",
+   "help": "For each start from RecompLauncher. \"As set in Cubic.Heroes\" uses the game's own setting.",
+   "choices": [
+    {"label": "As set in Cubic.Heroes", "args": []},
+    {"label": "Fullscreen", "args": ["--fullscreen"]},
+    {"label": "Borderless", "args": ["--borderless"]},
+    {"label": "Windowed", "args": ["--windowed"]}
+   ]
+  },
+  {
+   "id": "resolution",
+   "label": "Rendering resolution",
+   "group": "Display",
+   "in": "args",
+   "help": "The size the game's picture is drawn at, then scaled to the window or display; the display's own resolution is never changed.",
+   "choices": [
+    {"label": "As set in Cubic.Heroes", "args": []},
+    {"label": "Native", "args": ["--resolution", "native"]},
+    {"label": "1280x720 (the original)", "args": ["--resolution", "1280x720"]},
+    {"label": "1920x1080", "args": ["--resolution", "1920x1080"]},
+    {"label": "2560x1440", "args": ["--resolution", "2560x1440"]},
+    {"label": "3840x2160", "args": ["--resolution", "3840x2160"]}
+   ]
+  },
+  {
+   "id": "vsync",
+   "label": "VSync",
+   "group": "Display",
+   "in": "args",
+   "choices": [
+    {"label": "As set in Cubic.Heroes", "args": []},
+    {"label": "On", "args": ["--vsync", "on"]},
+    {"label": "Off", "args": ["--vsync", "off"]}
+   ]
+  },
+  {
+   "id": "frame_limit",
+   "label": "Frame limit",
+   "group": "Display",
+   "in": "args",
+   "help": "The game's speed doesn't change with its frame rate.",
+   "choices": [
+    {"label": "As set in Cubic.Heroes", "args": []},
+    {"label": "30 (the original)", "args": ["--fps", "30"]},
+    {"label": "60", "args": ["--fps", "60"]},
+    {"label": "120", "args": ["--fps", "120"]},
+    {"label": "144", "args": ["--fps", "144"]},
+    {"label": "240", "args": ["--fps", "240"]},
+    {"label": "The display's refresh rate", "args": ["--fps", "display"]},
+    {"label": "Unlimited", "args": ["--fps", "0"]}
+   ]
+  },
+  {
+   "id": "prompts",
+   "label": "Button prompts",
+   "group": "Controls",
+   "in": "args",
+   "choices": [
+    {"label": "As set in Cubic.Heroes", "args": []},
+    {"label": "Automatic (the device used last)", "args": ["--set", "LAUNCHER_PROMPTS=auto"]},
+    {"label": "Xbox", "args": ["--set", "LAUNCHER_PROMPTS=xbox"]},
+    {"label": "PlayStation", "args": ["--set", "LAUNCHER_PROMPTS=playstation"]},
+    {"label": "Nintendo Switch", "args": ["--set", "LAUNCHER_PROMPTS=nintendo"]},
+    {"label": "Steam", "args": ["--set", "LAUNCHER_PROMPTS=steam"]},
+    {"label": "Generic", "args": ["--set", "LAUNCHER_PROMPTS=generic"]},
+    {"label": "Keyboard", "args": ["--set", "LAUNCHER_PROMPTS=keyboard"]}
+   ]
+  }
+ ],
+ "saves": ["{install}/data/gamedata/dev_hdd0/home/00000001/savedata"],
+ "folders": {
+  "logs": [{"path": "{install}/logs"}]
+ },
+ "exit_codes": {
+  "0": "ok",
+  "3": "Cubic.Heroes isn't set up in this folder yet: start it again to open its launcher, then set it up from your own disc and keys.",
+  "4": "A file the game needs is missing or wrong: open Cubic.Heroes's launcher (its Install page) to repair the installation.",
+  "5": "Cubic.Heroes is busy with this installation (preparing shaders, updating, or the game is already running).",
+  "7": "The installation folder can't be used: it is read-only or there isn't enough free space.",
+  "70": "The graphics didn't start in time: update your GPU driver, close overlay or recording tools, then try again. The game's log (logs/game.log) names the step that stalled."
+ },
+ "system": {
+  "windows": {"version": "10", "graphics": {"vulkan": "1.1"}},
+  "linux": {"glibc": "2.31", "graphics": {"vulkan": "1.1"}}
+ },
+ "requires": ["start", "start.linux", "exit_codes", "settings.args", "settings.choices", "settings.groups"]
+}

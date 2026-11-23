@@ -495,6 +495,26 @@ static json::Value last_launcher_update()
 // by hand: a newer package unpacked over the folder): the version it was last brought up to date with
 static std::string game_update_marker() { return path_str(u8path(g_root) / "downloads" / "game-up-to-date-with.txt"); }
 
+// RecompLauncher (0.2.0-beta.5, docs/RECOMPLAUNCHER.md): a launcher that installs a game's updates itself. Started by it
+// (RECOMPLAUNCHER=1 on every start it makes), or in a folder it has started us in before (its mark at the root, written
+// at that first start), this launcher's own updater stays off: the two must never both change the same folder (the
+// SDK's rule). The game's own update (--update; the window's at its start) stays: it changes the installation's
+// builds, never the files RecompLauncher manages. A standalone installation is untouched by any of this.
+static const char* const kRecompMark = "recomplauncher-managed.txt";
+static bool started_by_recomplauncher() { return env_u8("RECOMPLAUNCHER") == "1"; }
+static std::string recomp_mark() { return path_str(u8path(g_root) / kRecompMark); }
+static bool updates_managed_elsewhere()
+{
+    std::error_code ec;
+    return started_by_recomplauncher() || fs::exists(u8path(recomp_mark()), ec);
+}
+static void note_recomplauncher()
+{
+    std::error_code ec;
+    if (started_by_recomplauncher() && !fs::exists(u8path(recomp_mark()), ec))
+        write_text(recomp_mark(), "RecompLauncher " + env_u8("RECOMPLAUNCHER_VERSION") + "\n");
+}
+
 // ============================================================================================================
 // look (docs/M9_LAUNCHER_PLAN.md section 16): the game's own world as the reference -- a toy-block fantasy in
 // chunky pixels: a night-blue sky, voxel grass and earth, retro windows with light borders and stepped corners,
@@ -1504,6 +1524,7 @@ static void maybe_update_game()
 
 static void check_updates()
 {
+    if (updates_managed_elsewhere()) { g_st.checking_update = false; return; }   // RecompLauncher's to do
     g_st.checking_update = true;
     if (settings_pending()) { g_check_when_settings = true; return; }   // after the settings (the main loop)
     g_check_when_settings = false;
@@ -1907,7 +1928,8 @@ static void page_play()
         card_begin("##update_card", ImVec2(0, S(214)));
         title("Updates", 24);
         const json::Value& u = g_st.update;
-        if (g_st.checking_update) text_col(col::dim, "Checking...");
+        if (updates_managed_elsewhere()) text_col(col::dim, "RecompLauncher installs this game's updates.");
+        else if (g_st.checking_update) text_col(col::dim, "Checking...");
         else if (!g_st.checked_once) text_col(col::dim, "Not checked yet.");
         else if (!u["ok"].truthy()) text_col(col::dim, "%s", u["message"].str("Couldn't check.").c_str());
         else if (!g_st.launcher["ready"].is_null()) {
@@ -1922,9 +1944,9 @@ static void page_play()
             text_col(col::dim, "Version %s has no download for this computer yet.", u["data"]["version"].str().c_str());
         else text_col(col::ok, "Up to date.");
         card_end();
-        prompt(Act::Y, "Check for updates");
+        if (!updates_managed_elsewhere()) prompt(Act::Y, "Check for updates");
         play_landscape();
-        if (pressed(Act::Y)) check_updates();
+        if (pressed(Act::Y) && !updates_managed_elsewhere()) check_updates();
     } else if (kind == "setup-app") {
         title("An install made by the setup app was found", 26);
         text_col(col::dim, "Move it into the launcher's layout: your disc isn't needed again, your saves and settings stay.");
@@ -2251,6 +2273,22 @@ static void launcher_update_card()
 static void page_updates()
 {
     title("Updates");
+    if (updates_managed_elsewhere()) {   // RecompLauncher's (0.2.0-beta.5): our own updater off, said why
+        text_col(col::dim, "RecompLauncher installs this installation's updates, so this launcher's own updater is off: "
+                           "the two never change the same folder. Update the game from RecompLauncher.");
+        if (!started_by_recomplauncher()) {   // started outside it: the player may take the updates back
+            if (big_button("Update it with this launcher instead", ImVec2(S(420), 0), Kind::Normal, !g_op && !g_bg))
+                ask("Update this installation with this launcher?", "Then this launcher checks for and installs its "
+                    "updates. Starting the game from RecompLauncher again hands them back to RecompLauncher, so use one "
+                    "or the other. Your saves, settings and builds stay as they are.", "Update it here", false, [] {
+                        std::error_code ec;
+                        fs::remove(u8path(recomp_mark()), ec);
+                        check_updates();
+                    });
+            focus_first();
+        }
+        return;
+    }
     const std::string ch = update_channel();
     text_col(col::dim, "Channel: %s. Updates are offered, never forced; the game plays offline.",
              ch == "stable" ? "stable releases" : "test releases too");
@@ -3743,11 +3781,15 @@ int main(int argc, char** argv)
     // no command (or --launcher) is the launcher's window. Either way the installation root is resolved first.
     const cli::Args cli_args = cli::parse(cli::utf8_args(argc, argv));
     g_root = resolve_root(cli_args.install_dir);
+    note_recomplauncher();   // 0.2.0-beta.5: started by RecompLauncher -- its mark, so later starts keep our updater off
     {
         const int u = unfinished_launcher_update(cli_args, argc, argv);
         if (u >= 0) return u;
     }
-    if (!cli::wants_window(cli_args)) return cli::run(cli_args);
+    if (!cli::wants_window(cli_args)) {
+        const int rc = cli::run(cli_args);
+        if (rc != cli::kOpenLauncher) return rc;   // --play --or-launcher: the game not ready -- the window instead
+    }
     if (cli_args.remember && !cli_args.install_dir.empty()) remember_root(g_root);
     bool after_update = false, update_failed = false;
     std::string show;

@@ -15,8 +15,11 @@ cubicheroes-root.txt (relative: from the launcher's folder); a relative --instal
 --remember; a root that can't be used (exit code 7); nothing installed (--play: 3; --install without a disc: 2); the
 installation in the launcher's folder (portable); settings through --set (kept) and a value the schema refuses; the
 folder moved; --migrate-from into a second root (the source unchanged, file by file) and refused into a root that
-holds one; two installations side by side. With the game: --play's session options (not kept), its exit status passed
-on, the game ended with CubicHeroes (its job), and --update's up-to-date marker on an installation with no downloads/.
+holds one; two installations side by side; beta.5's RecompLauncher rules (--or-launcher alone refused, and with
+nothing installed the launcher instead -- hidden; the updater's exit 8 under RECOMPLAUNCHER=1 and with its mark). With
+the game: --play's session options (not kept), its exit status passed on, the game ended with CubicHeroes (its job),
+--update's up-to-date marker on an installation with no downloads/, and --play --or-launcher (plays when up to date;
+after a new version the launcher, hidden, which brings the game up to date).
 """
 import argparse
 import ctypes
@@ -120,6 +123,49 @@ def cfg_value(root, key):
     return None
 
 
+def window_instead(exe, cwd, secs=8):
+    """beta.5: `--play --or-launcher` where the game isn't ready opens the launcher's window instead of exiting or
+    starting the game -- hidden (CUBIC_NAV_HIDDEN=1) and watched by the desktop guard; its update check kept offline.
+    Still running after `secs` with no game under it: the window. Then ended."""
+    e = dict(os.environ)
+    for k in ("CUBIC_INSTALL_DIR", "CUBIC_DIRECT_PLAY", "CUBIC_LAUNCHER", "CUBIC_LAUNCHER_PID", "RECOMPLAUNCHER"):
+        e.pop(k, None)
+    e.update({"CUBIC_NAV_HIDDEN": "1", "HTTP_PROXY": "http://127.0.0.1:9", "HTTPS_PROXY": "http://127.0.0.1:9",
+              "NO_PROXY": ""})
+    desktop_guard.launcher_env(e)
+    p = subprocess.Popen([exe, "--play", "--or-launcher", "--json"], cwd=cwd, env=e, stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE)
+    w = desktop_guard.Watch(p, label="CubicHeroes --play --or-launcher").start()
+    time.sleep(secs)
+    bad = []
+    if p.poll() is not None:
+        out, err = p.communicate()
+        bad.append(f"ended with {p.returncode} instead of opening the launcher: {(out + err)[-300:]!r}")
+    else:
+        game = "dotheroes.exe" if os.name == "nt" else "dotheroes"
+        if os.name == "nt":   # the launcher's children (wmic is gone from current Windows 11)
+            q = subprocess.run(["powershell", "-NoProfile", "-Command",
+                                f"(Get-CimInstance Win32_Process -Filter 'ParentProcessId={p.pid}').Name"],
+                               capture_output=True, text=True).stdout
+        else:   # its direct children only (a shader preparation's game process runs under the worker)
+            q = ""
+            for d in filter(str.isdigit, os.listdir("/proc")):
+                try:
+                    st = open(f"/proc/{d}/stat", encoding="utf-8", errors="replace").read()
+                except OSError:
+                    continue
+                if int(st.rsplit(")", 1)[1].split()[1]) == p.pid:
+                    q += st.split("(", 1)[1].rsplit(")", 1)[0] + " "
+        if game in q.lower().split():
+            bad.append("the game was started")
+        w.end()
+        p.communicate()
+    w.stop()
+    if w.violation:
+        bad.append(w.violation)
+    return bad
+
+
 def no_game_cases(pkg_src, install_src, work):
     exe_name = "CubicHeroes.exe" if os.name == "nt" else "CubicHeroes"
     a = os.path.join(work, NAME)
@@ -194,6 +240,23 @@ def no_game_cases(pkg_src, install_src, work):
         bad.append(f"--install without --disc: {code} {out!r}")
     case("nothing installed: --play 3, --install without a disc 2", bad)
 
+    # beta.5, RecompLauncher's start (docs/RECOMPLAUNCHER.md): --or-launcher goes with --play; with nothing installed,
+    # the launcher's window (its setup) opens instead of exit 3 -- hidden (CUBIC_NAV_HIDDEN=1), watched by the guard,
+    # in a folder of its own so its files leave the other cases' alone
+    code, out, err = cli(exe, "--or-launcher", cwd=other)
+    bad = [] if code == 2 and "--or-launcher goes with --play" in out + err else [f"--or-launcher alone: {code} {out!r}{err!r}"]
+    r = os.path.join(work, "or-launcher " + NAME)
+    os.makedirs(r)
+    shutil.copy2(exe, r)
+    for n in ("SDL2.dll", "lib"):
+        p = os.path.join(a, n)
+        if os.path.isdir(p):
+            shutil.copytree(p, os.path.join(r, n))
+        elif os.path.exists(p):
+            shutil.copy2(p, r)
+    bad += window_instead(os.path.join(r, exe_name), other)
+    case("--or-launcher: alone a wrong command line (2); --play --or-launcher with nothing installed opens the launcher", bad)
+
     # the portable installation: the launcher's folder is the install's root
     copy_install(install_src, a)
     code, st = status(exe, cwd=other)
@@ -209,6 +272,27 @@ def no_game_cases(pkg_src, install_src, work):
         bad.append(f"a refused value: {code} {out!r}")
     code, out, err = cli(exe, "--set", "DOTHEROES_FPS=" + (before or "60"), cwd=other)
     case("--set keeps a setting; a value the schema refuses changes nothing", bad)
+
+    # beta.5: an installation RecompLauncher manages -- started with RECOMPLAUNCHER=1 once, its mark kept at the root;
+    # this launcher's updater then refuses (exit 8, managed_elsewhere) also without the variable, until the mark goes
+    off = {"HTTP_PROXY": "http://127.0.0.1:9", "HTTPS_PROXY": "http://127.0.0.1:9", "NO_PROXY": ""}
+    mark = os.path.join(a, "recomplauncher-managed.txt")
+    bad = []
+    code, out, err = cli(exe, "--check-update", "--json", cwd=other, env={**off, "RECOMPLAUNCHER": "1",
+                                                                          "RECOMPLAUNCHER_VERSION": "0.90.0-test"})
+    if code != 8 or '"managed_elsewhere"' not in out:
+        bad.append(f"--check-update under RECOMPLAUNCHER=1: {code} {out!r}{err!r}")
+    if not os.path.isfile(mark) or "RecompLauncher 0.90.0-test" not in open(mark, encoding="utf-8").read():
+        bad.append("the mark not written")
+    for args in (("--check-update",), ("--apply-update",), ("--rollback-launcher",)):
+        code, out, err = cli(exe, *args, "--json", cwd=other, env=off)
+        if code != 8 or '"managed_elsewhere"' not in out:
+            bad.append(f"{args[0]} with the mark: {code} {out!r}{err!r}")
+    os.remove(mark)
+    code, out, err = cli(exe, "--check-update", "--json", cwd=other, env=off)
+    if code == 8 or os.path.exists(mark):
+        bad.append(f"--check-update after the mark was removed: {code} {out!r}")
+    case("RecompLauncher manages the updates: exit 8 under RECOMPLAUNCHER=1 and with its mark; its own again without", bad)
 
     # moved: the launcher and the installation together
     moved = a + " moved"
@@ -397,6 +481,29 @@ def game_cases(exe, a):
     bad = [] if version and code == 0 and got == version else \
         [f"--update: exit {code}; the marker {got!r}, not {version!r}; {(out + err)[-300:]!r}"]
     case("--update without downloads/: the game's up-to-date marker written (the window won't update it again)", bad)
+
+    # beta.5, RecompLauncher's start: with the game up to date (the marker just written), --play --or-launcher plays;
+    # after a new version (a marker of another version: RecompLauncher unpacked an update over the folder) it opens
+    # the launcher instead, which brings the game up to date at its start (nothing rebuilt: a second) and writes the
+    # marker -- so the next start plays
+    p, ev = play("--or-launcher")
+    try:
+        rest, err = p.communicate(timeout=120)
+        code = p.returncode
+    except subprocess.TimeoutExpired:
+        p.kill()
+        rest, err = p.communicate()
+        code = None
+    bad = [] if ev.get("ev") == "started" and code == 0 else [f"up to date: {ev} exit {code}"]
+    os.makedirs(os.path.dirname(marker), exist_ok=True)
+    with open(marker, "w", encoding="utf-8") as f:
+        f.write("0.0.0-older\n")
+    bad += window_instead(exe, other, secs=20)
+    got = open(marker, encoding="utf-8").read().strip() if os.path.exists(marker) else None
+    if got != version:
+        bad.append(f"the launcher didn't bring the game up to date: the marker {got!r}, not {version!r}")
+    case("--play --or-launcher: plays when the game is up to date; after a new version, the launcher updates it first",
+         bad)
 
 
 def main():

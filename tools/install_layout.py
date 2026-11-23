@@ -47,13 +47,20 @@ AUTO_REASONS = ("before-update", "before-restore", "before-migration", "before-r
 
 # The launcher's download as tools/make_bundle.py lays it out (it checks its folder against this list before it is
 # archived): the items at its top, per platform. Portable by default, that folder is also the install's root.
-LAUNCHER_PACKAGE = {"windows": ("CubicHeroes.exe", "SDL2.dll", "licenses", "LICENSE.txt", "README.txt", "worker"),
-                    "linux": ("CubicHeroes", "lib", "licenses", "LICENSE.txt", "README.txt", "worker")}
+LAUNCHER_PACKAGE = {"windows": ("CubicHeroes.exe", "SDL2.dll", "licenses", "LICENSE.txt", "README.txt", "worker",
+                                "recomplauncher.json"),
+                    "linux": ("CubicHeroes", "lib", "licenses", "LICENSE.txt", "README.txt", "worker",
+                              "recomplauncher.json")}
+# 0.2.0-beta.5: recomplauncher.json, the RecompLauncher SDK's manifest (launcher/recomplauncher.json, docs/RECOMPLAUNCHER.md),
+# is a package item: replaced with the launcher, never the installation's own
 # The launcher's mark on its root (the launcher writes it): the root's, never a package item nor the install's data
 ROOT_MARKER = "cubicheroes-root.txt"
 # The install's own items at its root: never moved, renamed or removed by the launcher's update, never taken for a
 # package item by the launcher's removal
-INSTALL_ITEMS = ("active.json", "builds", "data", "config", "logs", "backups", "downloads", "game")
+# RecompLauncher's mark (0.2.0-beta.5): written by the launcher when RecompLauncher starts it, so later starts keep the
+# launcher's own updater off (launcher/main.cpp, updates_managed_elsewhere); the installation's, kept by every update
+RECOMP_MARK = "recomplauncher-managed.txt"
+INSTALL_ITEMS = ("active.json", "builds", "data", "config", "logs", "backups", "downloads", "game", RECOMP_MARK)
 # What the setup app (before the launcher) put beside the game, by name -- its finish step's files over its history
 # (tools/setup_pipeline.py finish): the game, its libraries (Linux: in lib/), their notices, the icon, the settings.
 # Nothing else is ever taken for the setup app's: an unknown file at the root stays where it is.
