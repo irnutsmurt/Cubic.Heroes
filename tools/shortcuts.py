@@ -83,13 +83,30 @@ def _data_home():
     return os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
 
 
-def _icon_source():
-    """the project's own icon (assets/icon.png: not the game's), beside the tools in a checkout or the worker"""
+def _icon_source(name="icon.png"):
+    """one of the project's own images (assets/: not the game's) -- the icon, or the Steam library logo
+    (steam-logo.png) -- beside the tools in a checkout or the worker"""
     for base in (os.path.dirname(os.path.dirname(os.path.abspath(__file__))), os.path.dirname(sys.executable)):
-        p = os.path.join(base, "assets", "icon.png")
+        p = os.path.join(base, "assets", name)
         if os.path.isfile(p):
             return p
     return None
+
+
+STEAM_LOGO = ("_logo", "steam-logo.png")   # Steam's grid name <appid>_logo.png: the project's own logo, shipped with it
+
+
+def steam_logo(source=None):
+    """the project's own Steam library logo (assets/steam-logo.png, shipped with Cubic.Heroes): (suffix, PNG bytes), or
+    raises ArtError (missing, not a PNG, too large)"""
+    p = source or _icon_source(STEAM_LOGO[1])
+    if not p or not os.path.isfile(p):
+        raise ArtError("The launcher's Steam logo is missing.", "logo_missing")
+    with open(p, "rb") as f:
+        data = f.read(ART_MAX_BYTES + 1)
+    if len(data) > ART_MAX_BYTES or image_ext(data) != ".png":
+        raise ArtError("The launcher's Steam logo isn't a PNG image it can use.", "logo_invalid")
+    return STEAM_LOGO[0], data
 
 
 def _install_icon(icons_dir=None):
@@ -494,9 +511,10 @@ def steam_app_id(exe_field, name):
     return (zlib.crc32((exe_field + name).encode()) & 0xFFFFFFFF) | 0x80000000
 
 
-def add_to_steam(exe, icon, roots=None, artwork=True, report=None, fetch=None):
+def add_to_steam(exe, icon, roots=None, artwork=True, report=None, fetch=None, logo=None):
     """Add (or update) the game in every Steam account's library on this machine, with
-    its library artwork (STEAM_ART, each image downloaded once) unless artwork=False. Steam
+    its library artwork (STEAM_ART, each image downloaded once, and the project's own logo,
+    assets/steam-logo.png -- logo: another file, for tests) unless artwork=False. Steam
     must not be running. Returns the files written; report (a dict) gets the artwork's
     outcome: placed, kept (the player's own, left), failed ({kind: why}). The artwork never
     stops the game being added."""
@@ -506,6 +524,10 @@ def add_to_steam(exe, icon, roots=None, artwork=True, report=None, fetch=None):
             images, art_failed = (fetch or fetch_steam_art)()
         except Exception as e:   # noqa: BLE001 -- never a reason not to add the game
             images, art_failed = {}, {"artwork": str(e) or type(e).__name__}
+        try:   # the project's own logo: shipped with Cubic.Heroes, nothing downloaded
+            images["logo"] = steam_logo(logo)
+        except (ArtError, OSError) as e:
+            art_failed["logo"] = str(e)
     exe_field = f'"{exe}"'
     appid = steam_app_id(exe_field, NAME)
     entry = {

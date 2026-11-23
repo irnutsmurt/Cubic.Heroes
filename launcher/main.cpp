@@ -2583,7 +2583,8 @@ static void steam_section()
     if (big_button("Add to Steam", ImVec2(S(260), 0)))
         ask("Add the launcher to Steam?", "It appears in your Steam library (as a non-Steam game) and opens this launcher, "
             "with its library artwork -- the poster by Fami-Kon and the hero image by Jib, downloaded from SteamGridDB onto "
-            "this computer. Close Steam first: it rewrites its library when it exits.", "Add it", false, [] {
+            "this computer, and the Cubic.Heroes logo. Close Steam first: it rewrites its library when it exits.", "Add it",
+            false, [] {
             run("shortcuts", { "--exe", self_program(), "--steam" }, "Adding it to Steam", true,
                 [](const json::Value& r) {
                     if (!r["ok"].truthy()) { show_result_error(r, "It wasn't added to Steam"); return; }
@@ -2595,7 +2596,8 @@ static void steam_section()
                     else if (art["kept"].size() > 0)
                         text += " Artwork you had put there yourself was kept.";
                     else if (art["placed"].size() > 0)
-                        text += " Its library artwork is the poster by Fami-Kon and the hero image by Jib (SteamGridDB).";
+                        text += " Its library artwork is the poster by Fami-Kon and the hero image by Jib (SteamGridDB), "
+                                "with the Cubic.Heroes logo.";
                     g_msg = { true, "Added to Steam", text, "", false, false };
                 });
         });
@@ -2630,7 +2632,8 @@ static void steam_section()
     ImGui::Dummy(ImVec2(0, S(6)));
     title("Steam artwork (optional)", 22);
     text_col(col::dim, "Add to Steam downloads the library artwork onto this computer: the poster by Fami-Kon and the hero "
-                       "image by Jib, made by their artists and hosted on SteamGridDB (never part of Cubic.Heroes itself). "
+                       "image by Jib, made by their artists and hosted on SteamGridDB (never part of Cubic.Heroes itself), "
+                       "and the Cubic.Heroes logo, which comes with the launcher. "
                        "If that didn't work, or for other images, download them yourself and choose the files here. Artwork "
                        "you put there yourself stays unless you choose to replace it.");
     if (big_button("Open the artwork pages", ImVec2(S(340), 0))) { open_link(kArtPoster); open_link(kArtHero); }

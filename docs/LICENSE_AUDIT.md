@@ -16,6 +16,7 @@
 | `LICENSE` | INDEP | keep |
 | `README.md` | INDEP | keep |
 | `assets/icon.png` | INDEP | keep |
+| `assets/steam-logo.png` | INDEP | keep |
 | `config/audio_hooks.json` | INDEP | keep |
 | `config/deps.sha256` | INDEP | keep |
 | `config/dev_capture_observers.json` | INDEP | keep |

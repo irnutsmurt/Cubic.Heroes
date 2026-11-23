@@ -237,6 +237,8 @@ def copy_tools(out):
     copy_tracked("config", os.path.join(out, "config"), skip=("deps.sha256",))
     os.makedirs(os.path.join(out, "assets"))
     shutil.copy2(os.path.join(ROOT, "assets", "icon.png"), os.path.join(out, "assets"))
+    # the project's own Steam library logo (0.2.0-beta.5): Add to Steam places it (tools/shortcuts.py steam_logo)
+    shutil.copy2(os.path.join(ROOT, "assets", "steam-logo.png"), os.path.join(out, "assets"))
 
 
 def dist_files(sites, dist, name):

@@ -17,6 +17,7 @@ import shortcuts  # noqa: E402
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"\0\0\0\rIHDR" + b"made-up poster" * 10
 JPG = b"\xff\xd8\xff\xe0" + b"made-up hero" * 10
+LOGO = PNG + b"made-up logo"
 
 
 class Fixture(unittest.TestCase):
@@ -168,7 +169,8 @@ class SteamArtDownload(Fixture):
     def add(self, net):
         report = {}
         written = shortcuts.add_to_steam(self.exe, "", roots=[self.root], report=report,
-                                         fetch=lambda: shortcuts.fetch_steam_art(urlopen=net))
+                                         fetch=lambda: shortcuts.fetch_steam_art(urlopen=net),
+                                         logo=self.image("logo.png", LOGO))
         vdfs = [p for p in written if os.path.basename(p) == "shortcuts.vdf"]
         self.assertEqual(len(vdfs), 2, "the game is in both accounts' libraries whatever the artwork did")
         return report
@@ -176,7 +178,7 @@ class SteamArtDownload(Fixture):
     def test_png_downloaded_once_each_and_placed(self):
         net = fake_net({POSTER_URL: PNG, HERO_URL: PNG + b"hero"})
         r = self.add(net)
-        self.assertEqual((len(r["placed"]), r["kept"], r["failed"]), (4, [], {}))
+        self.assertEqual((len(r["placed"]), r["kept"], r["failed"]), (6, [], {}))   # poster, hero, logo x 2 accounts
         self.assertEqual(sorted(u for u, _, _ in net.calls), sorted([POSTER_URL, HERO_URL]))   # once each, not per account
         self.assertTrue(all(ua.startswith("Cubic.Heroes launcher ") and t == shortcuts.ART_TIMEOUT_S
                             for _, ua, t in net.calls))
@@ -188,7 +190,7 @@ class SteamArtDownload(Fixture):
 
     def test_an_error_page_or_a_jpeg_refused(self):
         r = self.add(fake_net({POSTER_URL: b"<!DOCTYPE html><html>Not found</html>", HERO_URL: JPG}))
-        self.assertEqual(r["placed"], [])
+        self.assertEqual([os.path.basename(p) for p in r["placed"]], [f"{self.appid}_logo.png"] * 2)   # only the logo
         self.assertEqual(sorted(r["failed"]), ["hero", "poster"])
         self.assertIn("not a PNG", r["failed"]["poster"])
         self.assertFalse(os.path.exists(os.path.join(self.accounts[0], "grid", f"{self.appid}p.png")))
@@ -208,7 +210,7 @@ class SteamArtDownload(Fixture):
         for err in (urllib.error.URLError("no route"), urllib.error.HTTPError(POSTER_URL, 503, "busy", {}, None),
                     ConnectionResetError("reset"), ValueError("bad"), RuntimeError("anything else")):
             r = self.add(fake_net(err))
-            self.assertEqual((r["placed"], sorted(r["failed"])), ([], ["hero", "poster"]), err)
+            self.assertEqual((len(r["placed"]), sorted(r["failed"])), (2, ["hero", "poster"]), err)   # the logos
         report = {}   # even a fetch that raises
         shortcuts.add_to_steam(self.exe, "", roots=[self.root], report=report, fetch=lambda: 1 / 0)
         self.assertEqual(list(report["failed"]), ["artwork"])
@@ -228,7 +230,7 @@ class SteamArtDownload(Fixture):
     def test_our_own_replaced(self):
         self.add(fake_net(PNG))
         r = self.add(fake_net(PNG + b"newer"))
-        self.assertEqual((len(r["placed"]), r["kept"]), (4, []))
+        self.assertEqual((len(r["placed"]), r["kept"]), (6, []))
         with open(self.grid(0, f"{self.appid}p.png"), "rb") as f:
             self.assertEqual(f.read(), PNG + b"newer")
 
@@ -249,6 +251,43 @@ class SteamArtDownload(Fixture):
         self.assertEqual((p, kept), (None, [own]))
         with open(own, "rb") as f:
             self.assertEqual(f.read(), PNG + b"own")
+
+
+class SteamLogo(Fixture):
+    """the project's own logo (assets/steam-logo.png, shipped with Cubic.Heroes; nothing downloaded) placed by Add to
+    Steam as <appid>_logo.png, by the same rules as the other artwork"""
+
+    def add(self, **kw):
+        report = {}
+        shortcuts.add_to_steam(self.exe, "", roots=[self.root], report=report, fetch=lambda: ({}, {}), **kw)
+        return report
+
+    def test_the_shipped_logo_placed(self):
+        r = self.add()
+        self.assertEqual(r["failed"], {})
+        with open(os.path.join(ROOT, "assets", "steam-logo.png"), "rb") as f:
+            shipped = f.read()
+        self.assertTrue(shipped.startswith(b"\x89PNG\r\n\x1a\n") and len(shipped) <= shortcuts.ART_MAX_BYTES)
+        for a in (0, 1):
+            with open(self.grid(a, f"{self.appid}_logo.png"), "rb") as f:
+                self.assertEqual(f.read(), shipped)
+
+    def test_the_players_own_logo_kept(self):
+        own = self.grid(1, f"{self.appid}_logo.png")
+        os.makedirs(os.path.dirname(own))
+        with open(own, "wb") as f:
+            f.write(PNG + b"mine")
+        r = self.add()
+        self.assertEqual(r["kept"], [own])
+        with open(own, "rb") as f:
+            self.assertEqual(f.read(), PNG + b"mine")
+
+    def test_a_missing_or_bad_logo_never_stops_the_game(self):
+        for logo in (os.path.join(self.tmp, "nowhere.png"), self.image("bad.png", JPG)):
+            r = self.add(logo=logo)
+            self.assertEqual(list(r["failed"]), ["logo"])
+            for c in self.accounts:
+                self.assertEqual(len(shortcuts.read_shortcuts(os.path.join(c, "shortcuts.vdf"))), 1)
 
 
 @unittest.skipIf(os.name == "nt", "Linux's Steam folders")
