@@ -295,7 +295,7 @@ def recover(disc):
     """finish or undo a swap that was interrupted: <disc>.old put back when <disc> is gone, removed when both are
     there; a leftover <disc>.staging removed"""
     old, staging = disc + ".old", disc + ".staging"
-    for p in (disc, old, staging):
+    for p in (old, staging):   # what this removes or moves is never a link (<disc> itself: refused by install())
         _refuse_link(p)
     if os.path.isdir(old):
         if not os.path.exists(disc):
@@ -311,6 +311,7 @@ def install(source, kind, disc, progress=None, log=None, f=None, keep_elf_sha256
     EBOOT.elf already in <disc> with this SHA-256 (the supported decrypted program) is carried across."""
     m = m or manifest()
     log = log or (lambda s: None)
+    _refuse_link(disc)   # the copy is swapped by renaming: never a link to elsewhere
     recover(disc)
     staging = disc + ".staging"
     pairs, extras = match(m, sources_of(source, kind, f))

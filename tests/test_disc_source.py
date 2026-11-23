@@ -218,6 +218,13 @@ class Refusals(Base):
         self.link(elsewhere, self.disc)
         self.refused(self.folder(), "folder", "root_not_writable")
         self.assertEqual(os.listdir(elsewhere), [])
+        ds.recover(self.disc)   # an update (no disc chosen) of such an install is not stopped by it
+        for leftover in (".old", ".staging"):   # but what recovery would move or remove is never a link
+            self.link(elsewhere, self.disc + leftover)
+            with self.assertRaises(ds.Refused):
+                ds.recover(self.disc)
+            os.rmdir(self.disc + leftover) if os.name == "nt" else os.unlink(self.disc + leftover)
+        self.assertEqual(os.listdir(elsewhere), [])
 
     def test_damaged_manifest_refused(self):
         bad = [
