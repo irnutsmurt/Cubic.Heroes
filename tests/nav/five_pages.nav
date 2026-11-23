@@ -1,0 +1,113 @@
+# the five pages by controller (0.2.0-beta.5): each page's controls reachable (Check for updates keeps the focus),
+# LB/RB through all five both ways, the side menu (the launcher's own rollback button needs a kept launcher:
+# tests/launcher_gui_update_check.py presses it)
+until 200000 PLAY
+wait 30
+expect PLAY
+seek 6000 down Check for updates
+expect Check for updates
+# pressed: the focus stays on it while it checks (offline here) and after -- never back to PLAY
+a
+until 3000 Checking
+expect Checking
+wait 120
+until 6000 Check for updates
+expect Check for updates
+shot 1-play
+rb
+wait 60
+until 20000 Choose
+expect Choose
+shot 2-manage
+seek 20000 down Change the installation folder
+expect Change the installation folder
+# the shaders' row: Precompile now only while something is left to prepare (a prepared installation: Rebuild alone)
+seek 20000 down shader cache
+expect Rebuild shader cache
+seek 20000 down Steam
+expect Steam
+seek 2000 right Remove from Steam
+expect Remove from Steam
+left
+wait 20
+expect Add to Steam
+down
+wait 30
+expect -menu shortcut
+right
+wait 20
+expect Desktop shortcut
+left
+wait 20
+down
+wait 30
+expect Open the artwork pages
+right
+wait 20
+expect Choose the poster image
+seek 20000 down Choose the hero image
+expect Choose the hero image
+shot 3-manage-art
+seek 20000 down previous game build
+expect previous game build
+seek 20000 down Uninstall the game
+expect Uninstall the game
+seek 20000 down Remove the launcher
+expect Remove the launcher
+shot 4-manage-bottom
+rb
+wait 60
+until 20000 Back up now
+expect Back up now
+rb
+wait 60
+until 20000 Graphics
+expect Graphics
+shot 5-settings
+seek 20000 down Restore the defaults
+expect Restore the defaults
+rb
+wait 60
+until 20000 Export Logs
+expect Export Logs
+rb
+wait 60
+until 20000 PLAY
+expect PLAY
+lb
+wait 60
+until 20000 Export Logs
+expect Export Logs
+lb
+wait 60
+lb
+wait 60
+until 20000 Back up now
+expect Back up now
+lb
+wait 60
+until 20000 Choose
+expect Choose
+lb
+wait 60
+until 20000 PLAY
+expect PLAY
+left
+wait 30
+expect menu: Play
+down
+wait 20
+expect menu: Install / Manage
+down
+wait 20
+expect menu: Saves
+down
+wait 20
+expect menu: Settings
+down
+wait 20
+expect menu: Diagnostics
+down
+wait 20
+expect menu: Exit
+quit

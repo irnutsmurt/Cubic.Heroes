@@ -1,0 +1,94 @@
+# the Settings tabs by controller (0.2.0-beta.5): focus starts on the chosen tab; each tab chosen with A shows its own
+# controls (a value only that tab has), reaches Restore the defaults; switching tabs starts the list from its top
+until 200000 PLAY
+wait 30
+rb
+wait 60
+rb
+wait 60
+rb
+wait 60
+until 20000 Graphics
+expect Graphics
+down
+wait 20
+seek 8000 down Windowed
+expect Windowed
+seek 8000 down Restore the defaults
+expect Restore the defaults
+shot s1-graphics
+seek 8000 up Graphics
+expect Graphics
+right
+wait 10
+expect Performance
+a
+wait 30
+down
+wait 20
+seek 8000 down 60 fps
+expect 60 fps
+seek 8000 down Restore the defaults
+expect Restore the defaults
+shot s2-performance
+seek 8000 up Performance
+right
+wait 10
+expect Audio
+a
+wait 30
+down
+wait 20
+seek 8000 down 100%
+expect 100%
+seek 8000 down Restore the defaults
+expect Restore the defaults
+shot s3-audio
+seek 8000 up Audio
+right
+wait 10
+expect Controller
+a
+wait 30
+down
+wait 20
+seek 8000 down L3 + R3
+expect L3 + R3
+seek 8000 down Restore the defaults
+expect Restore the defaults
+shot s4-controller
+seek 8000 up Controller
+right
+wait 10
+expect Launcher
+a
+wait 30
+down
+wait 20
+seek 8000 down Automatic
+expect Automatic
+seek 8000 down Restore the defaults
+expect Restore the defaults
+shot s5-launcher-bottom
+seek 8000 up Launcher
+left
+wait 10
+left
+wait 10
+left
+wait 10
+left
+wait 10
+expect Graphics
+a
+wait 30
+shot s6-graphics-from-top
+rb
+wait 60
+until 20000 Export Logs
+expect Export Logs
+lb
+wait 60
+until 20000 Graphics
+expect Graphics
+quit
