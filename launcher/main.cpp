@@ -2356,8 +2356,10 @@ static void updates_section()
     const std::string ch = update_channel();
     text_col(col::dim, "Channel: %s. Updates are offered, never forced; the game plays offline.",
              ch == "stable" ? "stable releases" : "test releases too");
-    if (big_button(g_st.checking_update ? "Checking..." : "Check for updates", ImVec2(S(320), 0), Kind::Normal,
-                   !g_st.checking_update))
+    // one id whatever its label: the controller's focus stays on it while it checks (a new id lost the focus, which
+    // went to the page's first item -- on Play, PLAY: a second A started the game)
+    if (big_button(g_st.checking_update ? "Checking...###check_updates" : "Check for updates###check_updates",
+                   ImVec2(S(320), 0), Kind::Normal, !g_st.checking_update))
         check_updates();
     scroll_to_top_on_focus();
     focus_updates_here();
