@@ -2651,12 +2651,52 @@ static void same_line_fits(float next_w)
     if (ImGui::GetItemRectMax().x + ImGui::GetStyle().ItemSpacing.x + next_w <= limit) ImGui::SameLine();
 }
 
+// 0.2.0-beta.5: the Settings page in tabs -- only the chosen tab's settings drawn (each setting saved the moment it
+// changes, as before: nothing is held back when the tab changes)
+static int g_settings_tab = 0;
+static const char* kSettingsTabs[] = { "Graphics", "Performance", "Audio", "Controller", "Launcher" };
+
+static int settings_tab_of(const std::string& key, const std::string& cat)
+{
+    if (key == "DOTHEROES_FPS" || key == "DOTHEROES_FPS_CUSTOM" || key == "DOTHEROES_PERF_OVERLAY" || cat == "Shaders" ||
+        cat == "Performance") return 1;
+    if (cat == "Display" || cat == "Game") return 0;
+    if (cat == "Audio") return 2;
+    if (cat == "Controls") return 3;
+    return 4;   // Launcher, Updates, Saves, Diagnostics -- and any category added later: never hidden
+}
+
+static std::string settings_section_of(const std::string& key, const std::string& cat)
+{
+    if (key == "DOTHEROES_FPS" || key == "DOTHEROES_FPS_CUSTOM" || key == "DOTHEROES_PERF_OVERLAY") return "Frame rate";
+    if (cat == "Game") return "Game start";
+    return cat;
+}
+
 static void page_settings()
 {
     title("Settings");
     text_col(col::dim, "Shared with the game's own menus. A setting marked * takes effect when the game next starts.");
     const json::Value& s = g_st.settings["settings"];
     if (s.size() == 0) { text_col(col::dim, "Install the game first."); return; }
+    static int shown_tab = -1;
+    ImGui::Dummy(ImVec2(0, S(2)));
+    const int ntabs = (int)(sizeof kSettingsTabs / sizeof *kSettingsTabs);
+    const float gap = S(12);   // one row whatever the window's width (tabs closer together than the page's buttons): the controller's left
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(gap, ImGui::GetStyle().ItemSpacing.y));
+    float need = 0;   // the widest label with the buttons' padding, never clipped while the row has room
+    for (const char* t : kSettingsTabs) need = std::max(need, ImGui::CalcTextSize(t).x + S(40));
+    const float share = (ImGui::GetContentRegionAvail().x - gap * (ntabs - 1) - S(24)) / ntabs;
+    const float tw = floorf(std::min(share, std::max(S(210), need)));
+    for (int i = 0; i < ntabs; i++) {                     // and right go along it, down goes into the settings
+        if (i) ImGui::SameLine();
+        char lab[64];
+        snprintf(lab, sizeof lab, "%s###settings_tab%d", kSettingsTabs[i], i);
+        if (big_button(lab, ImVec2(tw, 0), g_settings_tab == i ? Kind::Primary : Kind::Normal)) g_settings_tab = i;
+        if (g_settings_tab == i) focus_first();   // the page's first focus: the chosen tab
+        if (ImGui::IsItemFocused()) prompt(Act::A, "Show");
+    }
+    ImGui::PopStyleVar();
     for (size_t i = 0; i < g_st.settings["problems"].size(); i++)
         text_col(col::warm, "%s", g_st.settings["problems"][i].str().c_str());
     static const std::map<std::string, std::vector<std::pair<std::string, std::string>>> choices = {
@@ -2681,11 +2721,11 @@ static void page_settings()
                                      { "exclusive", "Exclusive fullscreen" } } },
     };
     std::string last_cat;
-    bool first = true;
     ImGui::BeginChild("##settings", ImVec2(0, 0), ImGuiChildFlags_NavFlattened, ImGuiWindowFlags_NoBackground);
+    if (shown_tab != g_settings_tab) { ImGui::SetScrollY(0); shown_tab = g_settings_tab; }   // another tab: from its top
     // the categories in a fixed order, each setting in the schema's order within it
     std::vector<std::pair<std::string, const json::Value*>> ordered;
-    static const char* cats[] = { "Game", "Display", "Audio", "Controls", "Launcher", "Shaders", "Updates", "Saves", "Diagnostics" };
+    static const char* cats[] = { "Display", "Game", "Audio", "Controls", "Launcher", "Shaders", "Updates", "Saves", "Diagnostics" };
     for (const char* c : cats)
         for (const auto& kv : s.o)
             if (kv.second["category"].str() == c) ordered.push_back({ kv.first, &kv.second });
@@ -2694,10 +2734,12 @@ static void page_settings()
         const json::Value& x = kv.second;
         const std::string cat = x["category"].str();
         if (x["advanced"].truthy()) continue;   // developers' switches: the worker's command line, not this page
-        if (cat != last_cat) {
+        if (settings_tab_of(kv.first, cat) != g_settings_tab) continue;   // another tab's
+        const std::string section = settings_section_of(kv.first, cat);
+        if (section != last_cat) {
             ImGui::Dummy(ImVec2(0, S(6)));
-            title(cat.c_str(), 24);
-            last_cat = cat;
+            title(section.c_str(), 24);
+            last_cat = section;
         }
         const std::string key = kv.first, val = x["value"].str();
         std::string shown = val;
@@ -2747,7 +2789,6 @@ static void page_settings()
         ImGui::SameLine(bx);
         int dir = 0;
         if (big_button(btn, ImVec2(bw, S(50)))) dir = 1;
-        if (first) { focus_first(); first = false; }
         if (ImGui::IsItemFocused()) {
             const ImGuiID id = ImGui::GetItemID();   // left and right are this row's: they change its value
             g_focus_owns_lr = true;
