@@ -677,7 +677,10 @@ def build_slot(lay, prog, source=None, keys=None, elf=None, full=False, resume=F
         return bid, lay.build_info(bid), bid != before
     except BaseException:
         if os.path.isdir(staging):
-            layout.rmtree(staging)
+            try:
+                layout.rmtree(staging)
+            except OSError:   # a file in it still held (GitHub #5): clean_staging removes it at the next start, and
+                pass          # the failure the player sees stays the one that stopped the build
         raise
 
 
