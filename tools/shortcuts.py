@@ -157,7 +157,7 @@ def create_shortcuts(exe, icon, desktop=True, **dirs):
 # ---------------- Steam ----------------
 
 def steam_roots():
-    """Steam's installation folders on this machine (native and Flatpak on Linux)."""
+    """Steam's installation folders on this machine (native, Flatpak and Snap on Linux)."""
     roots = []
     if os.name == "nt":
         try:
@@ -169,7 +169,8 @@ def steam_roots():
         roots.append(os.path.join(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"), "Steam"))
     else:
         roots += [os.path.expanduser(p) for p in (
-            "~/.steam/steam", "~/.local/share/Steam", "~/.var/app/com.valvesoftware.Steam/data/Steam")]
+            "~/.steam/steam", "~/.local/share/Steam", "~/.var/app/com.valvesoftware.Steam/data/Steam",
+            "~/snap/steam/common/.local/share/Steam")]   # Ubuntu's Snap package of Steam
     seen, out = set(), []
     for r in roots:
         r = os.path.realpath(os.path.normpath(r))

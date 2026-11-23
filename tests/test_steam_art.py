@@ -9,6 +9,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "tools"))
@@ -248,6 +249,22 @@ class SteamArtDownload(Fixture):
         self.assertEqual((p, kept), (None, [own]))
         with open(own, "rb") as f:
             self.assertEqual(f.read(), PNG + b"own")
+
+
+@unittest.skipIf(os.name == "nt", "Linux's Steam folders")
+class LinuxSteamRoots(unittest.TestCase):
+    """every Linux Steam found by its userdata folder: native (the Steam Deck's too), Flatpak and Ubuntu's Snap"""
+
+    def test_native_flatpak_and_snap(self):
+        home = tempfile.mkdtemp(prefix="steam-home-", dir=os.environ.get("TMPDIR"))
+        self.addCleanup(shutil.rmtree, home, True)
+        kinds = [".local/share/Steam", ".var/app/com.valvesoftware.Steam/data/Steam",
+                 "snap/steam/common/.local/share/Steam"]
+        for k in kinds:
+            os.makedirs(os.path.join(home, k, "userdata"))
+        with mock.patch.dict(os.environ, {"HOME": home}):
+            roots = shortcuts.steam_roots()
+        self.assertEqual(sorted(roots), sorted(os.path.realpath(os.path.join(home, k)) for k in kinds))
 
 
 if __name__ == "__main__":
