@@ -102,7 +102,12 @@ class RebuiltDisc(unittest.TestCase):
         p = mock.patch.object(pipeline, "version_info", lambda: WANT)
         p.start()
         self.addCleanup(p.stop)
-        self.tmp = tempfile.TemporaryDirectory()
+        # the game's file list (config/disc_manifest.json), made up the same way: the made-up files' sizes and SHA-256
+        m = {"format": 1, "files": [{"path": k, "size": len(b), "sha256": sha(b)} for k, b in sorted(FILES.items())]}
+        p = mock.patch.object(pipeline.disc_source, "manifest", lambda path=None: m)
+        p.start()
+        self.addCleanup(p.stop)
+        self.tmp = tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR") or None)
         self.addCleanup(self.tmp.cleanup)
         self.d = self.tmp.name
 

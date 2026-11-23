@@ -12,7 +12,9 @@ limit (and, on POSIX, a memory limit), into a fresh installation folder inside a
   - nothing is written outside the installation's disc folder (the work folder's other contents are checked);
   - an existing disc copy is left as it was when the new extraction fails (no damage before verification).
 These are the acceptance cases for the hardened extractor; written against the code as it was (2026-11-23), several
-fail -- each failure is a defect listed in the Linux review (linux/reports on the coordination share)."""
+failed -- each failure a defect listed in the Linux review. The extraction now checks each file against the game's
+file list (tools/disc_source.py): the child uses a made-up list of this file's made-up files (MANIFEST_FILES, or a
+case's own), and the cases after "added with the hardening" came with it."""
 import multiprocessing
 import os
 import struct
@@ -98,6 +100,8 @@ class Image:
 
 
 EBOOT = b"SCE\x00" + b"made-up program " * 64
+SFO = b"\0PSF made-up"
+MANIFEST_FILES = {"PS3_GAME/PARAM.SFO": SFO, "PS3_GAME/USRDIR/EBOOT.BIN": EBOOT}
 
 
 def game(extra_usrdir=(), eboot=EBOOT, usrdir_override=None, game_extra=()):
@@ -114,20 +118,29 @@ def game(extra_usrdir=(), eboot=EBOOT, usrdir_override=None, game_extra=()):
     return im
 
 
-def _child(iso, install, q):
+def made_up_manifest(files):
+    import hashlib
+    return {"format": 1, "files": [{"path": p, "size": len(b), "sha256": hashlib.sha256(b).hexdigest()}
+                                   for p, b in sorted(files.items())]}
+
+
+def _child(iso, install, q, files=None):
     """the real extraction, in its own process (a hang or a memory blow-up stays here)"""
     try:
         if os.name == "posix":
             import resource
             resource.setrlimit(resource.RLIMIT_AS, (MEMORY_LIMIT, MEMORY_LIMIT))
         import hashlib
+        import disc_source
         import setup_pipeline as pipeline
         want = {"files": {"PS3_GAME/USRDIR/EBOOT.BIN": hashlib.sha256(EBOOT).hexdigest()},
                 "disc_image": {"size": 0, "sha256": "0" * 64}, "title_id": "BLUS30490", "app_ver": "01.00",
                 "title": "made-up"}
         disc = os.path.join(install, "data", "disc")
         paths = types.SimpleNamespace(disc=disc, eboot_bin=os.path.join(disc, "PS3_GAME", "USRDIR", "EBOOT.BIN"))
-        with mock.patch.object(pipeline, "version_info", lambda: want):
+        m = made_up_manifest(files or MANIFEST_FILES)
+        with mock.patch.object(pipeline, "version_info", lambda: want), \
+                mock.patch.object(disc_source, "manifest", lambda path=None: m):
             pipeline.extract(iso, "iso", paths, lambda f: None, lambda m: None)
         q.put(("ok", None))
     except MemoryError:
@@ -138,9 +151,9 @@ def _child(iso, install, q):
         q.put((type(e).__name__, getattr(e, "code", None)))
 
 
-def run_extract(iso, install, timeout=TIME_LIMIT):
+def run_extract(iso, install, timeout=TIME_LIMIT, files=None):
     q = multiprocessing.Queue()
-    p = multiprocessing.Process(target=_child, args=(iso, install, q))
+    p = multiprocessing.Process(target=_child, args=(iso, install, q, files))
     p.start()
     p.join(timeout)
     if p.is_alive():
@@ -172,10 +185,11 @@ class Hostile(unittest.TestCase):
             f.write("must stay as it is")
         self.iso = os.path.join(self.work, "hostile.iso")
 
-    def check_refused(self, im, total=None):
-        im.write(self.iso, total)
+    def check_refused(self, im, total=None, files=None, written=False, **kw):
+        if not written:
+            im.write(self.iso, total, **kw)
         before = listing(self.work) - {"hostile.iso"}
-        kind, code = run_extract(self.iso, self.install)
+        kind, code = run_extract(self.iso, self.install, files=files)
         after = listing(self.work) - {"hostile.iso"}
         escaped = sorted(p for p in after - before if not p.startswith(os.path.join("install", "data", "disc")))
         self.assertEqual(escaped, [], "files written outside the installation's disc folder")
@@ -271,7 +285,8 @@ class Hostile(unittest.TestCase):
         l2, n2 = im.file(part2)
         self.usrdir(im, (b"SPLIT.DAT;1", l1, n1, 0x80), (b"SPLIT.DAT;1", l2, n2, 0))
         im.write(self.iso)
-        kind, code = run_extract(self.iso, self.install)
+        kind, code = run_extract(self.iso, self.install,
+                                 files=dict(MANIFEST_FILES, **{"PS3_GAME/USRDIR/SPLIT.DAT": part1 + part2}))
         self.assertIn(kind, ("ok", "SetupError"), f"{kind} {code}")
         if kind == "ok":
             with open(os.path.join(self.install, "data", "disc", "PS3_GAME", "USRDIR", "SPLIT.DAT"), "rb") as f:
@@ -319,6 +334,101 @@ class Hostile(unittest.TestCase):
         im.write(self.iso, terminator=False)
         kind, code = run_extract(self.iso, self.install)
         self.assertEqual(kind, "SetupError", f"an image without its descriptor set terminator: {kind} {code}")
+
+    # ---- added with the hardening (2026-11-23): names, records, descriptors, extents, depth
+    def test_colon_name(self):
+        self.check_refused(self.with_file(b"C:ESCAPED.TXT;1"))
+
+    def test_nul_and_control_names(self):
+        for name in (b"A\0B.TXT;1", b"A\x01B.TXT;1"):
+            with self.subTest(name=name):
+                self.check_refused(self.with_file(name))
+
+    def test_bad_version(self):
+        self.check_refused(self.with_file(b"X.TXT;1x"))
+
+    def test_record_name_past_its_record(self):
+        im = game()
+        usr = [k for k, v in im.sectors.items() if b"EBOOT.BIN" in v][0]
+        body = bytearray(im.sectors[usr])
+        body[body.index(b"EBOOT.BIN") - 1] = 200   # the name's length runs past the record
+        im.sectors[usr] = bytes(body)
+        self.check_refused(im)
+
+    def test_descriptors_without_end(self):
+        im = game()
+        im.write(self.iso, total=im.next + 60)
+        with open(self.iso, "r+b") as f:
+            f.seek(16 * SECTOR)
+            pvd = f.read(SECTOR)
+            for i in range(17, 17 + 50):   # far more descriptors than any disc has, none a terminator
+                f.seek(i * SECTOR)
+                f.write(pvd)
+        self.check_refused(im, written=True)
+
+    def test_multi_extent_interrupted(self):
+        im = game()
+        a_lba, _ = im.file(bytes(2 * SECTOR))
+        b_lba, b_n = im.file(b"other")
+        self.check_refused(self.usrdir(im, (b"BIG.DAT;1", a_lba, 2 * SECTOR, 0x80), (b"C.DAT;1", b_lba, b_n, 0)))
+
+    def test_multi_extent_part_not_whole_sectors(self):
+        im = game()
+        a_lba, _ = im.file(bytes(100))
+        b_lba, b_n = im.file(b"rest")
+        self.check_refused(self.usrdir(im, (b"BIG.DAT;1", a_lba, 100, 0x80), (b"BIG.DAT;1", b_lba, b_n, 0)))
+
+    def test_listed_file_inside_another(self):
+        """a listed file whose extent lies in another file's bytes"""
+        im = game()
+        usr = [k for k, v in im.sectors.items() if b"EBOOT.BIN" in v][0]
+        eb_lba, eb_n = im.file(EBOOT)
+        im.directory(usr, usr - 1, [(b"EBOOT.BIN;1", eb_lba, eb_n, 0), (b"A.DAT;1", eb_lba, 10, 0)])
+        files = dict(MANIFEST_FILES, **{"PS3_GAME/USRDIR/A.DAT": EBOOT[:10]})
+        self.check_refused(im, files=files)
+
+    def test_file_over_the_descriptors(self):
+        self.check_refused(self.usrdir(game(), (b"VD.DAT;1", 16, SECTOR, 0)))
+
+    def test_directory_overlapping_another(self):
+        im = game()
+        usr = [k for k, v in im.sectors.items() if b"EBOOT.BIN" in v][0]
+        self.check_refused(self.usrdir(im, (b"OVER", usr - 1, 2 * SECTOR, 2)))
+
+    def test_too_deep(self):
+        im = game()
+        chain = [im.alloc() for _ in range(40)]   # 40 directories, each the only entry of the one before
+        for i, lba in enumerate(chain):
+            im.directory(lba, chain[i - 1] if i else lba, [(b"D", chain[i + 1], SECTOR, 2)] if i < 39 else [])
+        self.check_refused(self.usrdir(im, (b"DEEP", chain[0], SECTOR, 2)))
+
+    def joliet(self, extra_name):
+        """the usual tree, again as a Joliet tree (UTF-16 names) with one more USRDIR record named extra_name"""
+        im = game()
+        sfo = [k for k, v in im.sectors.items() if v.startswith(b"\0PSF")][0]
+        eb = [k for k, v in im.sectors.items() if v.startswith(b"SCE")][0]
+        u = lambda t: t.encode("utf-16-be")   # noqa: E731
+        x_lba, x_n = im.file(b"extra")
+        jroot, jg, jusr = im.alloc(), im.alloc(), im.alloc()
+        im.directory(jroot, jroot, [(u("PS3_GAME"), jg, SECTOR, 2)])
+        im.directory(jg, jroot, [(u("PARAM.SFO;1"), sfo, len(SFO), 0), (u("USRDIR"), jusr, SECTOR, 2)])
+        im.directory(jusr, jg, [(u("EBOOT.BIN;1"), eb, len(EBOOT), 0), (extra_name, x_lba, x_n, 0)])
+        return im, jroot
+
+    def test_joliet_valid(self):
+        im, jroot = self.joliet("extra.dat;1".encode("utf-16-be"))
+        im.write(self.iso, joliet_root=jroot)
+        self.assertEqual(run_extract(self.iso, self.install), ("ok", None))
+
+    def test_joliet_odd_length_name(self):
+        im, jroot = self.joliet(b"\x00A\x00")
+        self.check_refused(im, joliet_root=jroot)
+
+    def test_joliet_traversal(self):
+        for name in ("..\\..\\ESCAPED.TXT;1", "../ESCAPED.TXT;1", "..;1"):
+            with self.subTest(name=name):
+                im, jroot = self.joliet(name.encode("utf-16-be"))
+                self.check_refused(im, joliet_root=jroot)
 
     # ---- links and an existing copy
     @unittest.skipUnless(os.name == "posix", "symbolic links as a non-administrator: POSIX")
