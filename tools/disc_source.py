@@ -181,7 +181,10 @@ def folder_sources(top):
 
 def _open_regular(path, ident):
     """a folder's file opened for reading, never through a link: it must still be the regular file that was listed"""
-    fd = os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0))
+    except OSError as e:   # gone, unreadable, or (POSIX, O_NOFOLLOW) made a link since it was listed
+        raise Refused(f"Can't read the disc's {os.path.basename(path)} ({e.strerror}).", "damaged_disc") from None
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode) or (st.st_dev, st.st_ino) != ident:

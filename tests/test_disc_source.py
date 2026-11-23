@@ -9,11 +9,9 @@ an installed copy kept when a new one fails, an interrupted swap finished or und
 any image but the verified dump, and its output is the same bytes every time. The real config/disc_manifest.json is
 checked against config/game_version.json."""
 import hashlib
-import io
 import json
 import os
 import shutil
-import struct
 import sys
 import tempfile
 import unittest
