@@ -69,7 +69,9 @@ class Image:
         assert len(body) <= SECTOR, "one sector per directory in these fixtures"
         self.sectors[lba] = body
 
-    def write(self, path, total=None):
+    def write(self, path, total=None, terminator=True, joliet_root=None):
+        """joliet_root: the LBA of a Joliet root directory (a supplementary descriptor with the UCS-2 escape, which
+        the extractor prefers); terminator: the descriptor set's terminator at its end"""
         total = total or self.next
         img = bytearray(total * SECTOR)
         pvd = bytearray(SECTOR)
@@ -77,7 +79,17 @@ class Image:
         pvd[80:88] = both("I", total)
         pvd[156:156 + 34] = record(b"\0", self.root, SECTOR, 2)
         img[16 * SECTOR:17 * SECTOR] = pvd
-        img[17 * SECTOR:17 * SECTOR + 7] = b"\xffCD001\x01"
+        at = 17
+        if joliet_root is not None:
+            svd = bytearray(SECTOR)
+            svd[0:7] = b"\x02CD001\x01"
+            svd[80:88] = both("I", total)
+            svd[88:91] = b"%/E"
+            svd[156:156 + 34] = record(b"\0", joliet_root, SECTOR, 2)
+            img[at * SECTOR:(at + 1) * SECTOR] = svd
+            at += 1
+        if terminator:
+            img[at * SECTOR:at * SECTOR + 7] = b"\xffCD001\x01"
         for lba, b in self.sectors.items():
             if lba < total:
                 img[lba * SECTOR:lba * SECTOR + len(b)] = b
@@ -249,6 +261,64 @@ class Hostile(unittest.TestCase):
         a_lba, a_n = im.file(b"upper")
         b_lba, b_n = im.file(b"lower")
         self.check_refused(self.usrdir(im, (b"DATA.BIN;1", a_lba, a_n, 0), (b"data.bin;1", b_lba, b_n, 0)))
+
+    # ---- multi-extent files, overlaps, names, the descriptor set
+    def test_multi_extent_file(self):
+        """a file in two extents (the first record flagged 0x80): extracted whole, or refused -- never cut short"""
+        im = game()
+        part1, part2 = b"A" * SECTOR, b"B" * 100
+        l1, n1 = im.file(part1)
+        l2, n2 = im.file(part2)
+        self.usrdir(im, (b"SPLIT.DAT;1", l1, n1, 0x80), (b"SPLIT.DAT;1", l2, n2, 0))
+        im.write(self.iso)
+        kind, code = run_extract(self.iso, self.install)
+        self.assertIn(kind, ("ok", "SetupError"), f"{kind} {code}")
+        if kind == "ok":
+            with open(os.path.join(self.install, "data", "disc", "PS3_GAME", "USRDIR", "SPLIT.DAT"), "rb") as f:
+                self.assertEqual(f.read(), part1 + part2)
+
+    def test_multi_extent_missing_last_part(self):
+        im = game()
+        l1, n1 = im.file(b"A" * SECTOR)
+        self.check_refused(self.usrdir(im, (b"SPLIT.DAT;1", l1, n1, 0x80)))   # "more follows", nothing follows
+
+    def test_overlapping_files(self):
+        im = game()
+        lba, n = im.file(b"shared bytes" * 100)
+        self.check_refused(self.usrdir(im, (b"ONE.DAT;1", lba, n, 0), (b"TWO.DAT;1", lba, n, 0)))
+
+    def test_file_over_a_directory(self):
+        im = game()
+        usr = [k for k, v in im.sectors.items() if b"EBOOT.BIN" in v][0]
+        self.check_refused(self.usrdir(im, (b"DIR.DAT;1", usr, SECTOR, 0)))   # a file's extent is USRDIR's own sector
+
+    def test_invalid_utf16_name(self):
+        """a Joliet name with a lone surrogate (not valid UTF-16): refused, never decoded to a replacement character"""
+        im = Image()
+        root, g, usr, jroot, jg, jusr = (im.alloc() for _ in range(6))
+        im.root = root
+        sfo_lba, sfo_n = im.file(b"\0PSF made-up")
+        eb_lba, eb_n = im.file(EBOOT)
+        x_lba, x_n = im.file(b"odd name")
+        im.directory(root, root, [(b"PS3_GAME", g, SECTOR, 2)])
+        im.directory(g, root, [(b"PARAM.SFO;1", sfo_lba, sfo_n, 0), (b"USRDIR", usr, SECTOR, 2)])
+        im.directory(usr, g, [(b"EBOOT.BIN;1", eb_lba, eb_n, 0)])
+        u = lambda t: t.encode("utf-16-be")
+        im.directory(jroot, jroot, [(u("PS3_GAME"), jg, SECTOR, 2)])
+        im.directory(jg, jroot, [(u("PARAM.SFO;1"), sfo_lba, sfo_n, 0), (u("USRDIR"), jusr, SECTOR, 2)])
+        im.directory(jusr, jg, [(u("EBOOT.BIN;1"), eb_lba, eb_n, 0), (b"\xd8\x00" + u("X.DAT;1"), x_lba, x_n, 0)])
+        im.write(self.iso, joliet_root=jroot)
+        before = listing(self.work) - {"hostile.iso"}
+        kind, code = run_extract(self.iso, self.install)
+        self.assertEqual(kind, "SetupError", f"not refused: {kind} {code}")
+        made = listing(self.work) - before
+        self.assertFalse([p for p in made if "\ufffd" in p], "a name decoded with a replacement character was written")
+
+    def test_no_terminator(self):
+        im = game()
+        im.write(self.iso, terminator=False)
+        kind, code = run_extract(self.iso, self.install)
+        self.assertEqual(kind, "SetupError", f"an image without its descriptor set terminator: {kind} {code}")
 
     # ---- links and an existing copy
     @unittest.skipUnless(os.name == "posix", "symbolic links as a non-administrator: POSIX")
