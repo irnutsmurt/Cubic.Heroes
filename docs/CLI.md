@@ -78,6 +78,7 @@ One command at a time; options may follow in any order. `--opt=value` and `--opt
 |---|---|
 | `--install-dir PATH` | the installation root (section 1); `--remember` keeps it |
 | `--disc PATH`, `--keys PATH` | for `--install`. The keys file is read by the decryption step only; its contents never appear in output, logs or arguments passed on |
+| `--disc-key PATH` | for `--install` from an **encrypted** ISO (a raw rip): its disc key, as a file -- a `.dkey` (32 hexadecimal digits), a `.key` (16 bytes) or an IRD file (which needs a `D1` line in the keys file). Never the key itself on the command line. Not needed for a decrypted ISO, an ISO rebuilt from the disc's folder, or the folder |
 | `--json` | machine-readable output (section 3) |
 | `--no-gui` | never open a window: with no command it is an error (exit 2) instead of the launcher |
 | `--persist` | keep `--play`'s display options and `--set` values as settings |

@@ -546,6 +546,8 @@ def disc_key(a):
     if not getattr(a, "disc_key", None):
         return None
     import ps3_disc
+    if not os.path.isfile(a.disc_key):   # --disc-key is always a file (the window writes a typed key to one): a path
+        raise pipeline.SetupError("The disc key file wasn't found.", "bad_key_file")   # isn't read as typed digits
     try:
         return ps3_disc.load_key(os.path.abspath(a.disc_key), os.path.abspath(a.keys) if a.keys else None)
     except ps3_disc.DiscKeyError as e:
