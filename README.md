@@ -91,7 +91,7 @@ with `SHA256SUMS.txt` and the signed manifest (`release.json`, `release.json.sig
 | **Linux** without FUSE, or if you prefer a plain folder | `Cubic.Heroes-0.2.0-beta.5-linux-x86_64.tar.xz` | extract it where the game should live |
 
 **Handhelds** (the Steam Deck among them) haven't been tested by us yet; on SteamOS the Linux packages are the ones to
-use (in Desktop Mode; **Add to Steam** in the launcher's Settings then puts the game in Game Mode). Reports are very
+use (in Desktop Mode; **Add to Steam** on the launcher's Install / Manage page then puts the game in Game Mode). Reports are very
 welcome ([Testing status](docs/TESTING_STATUS.md)).
 
 ## What you need
@@ -158,7 +158,7 @@ built from your own files.
 2. **Extract** it where you want the game to live -- for example `D:\Games\`. It unpacks to a `Cubic.Heroes` folder;
    that folder *is* the installation.
 3. **Run `Cubic.Heroes\CubicHeroes.exe`**, choose your disc and your keys file, and **Install**.
-4. **Shaders** are prepared right after the install; the launcher's Shaders page shows their state and can prepare
+4. **Shaders** are prepared right after the install; the launcher's Install / Manage page shows their state and can prepare
    them again after a GPU driver change.
 5. **Play.**
 
@@ -242,8 +242,9 @@ Settings are shared by the launcher and the in-game menu:
 
 ### Other launchers
 
-- **Steam** (Windows and Linux): the launcher's **Add to Steam** (Settings) adds the game as a non-Steam game, started
-  with `--play`. Close Steam first.
+- **Steam** (Windows and Linux): the launcher's **Add to Steam** (Install / Manage) adds the game as a non-Steam game, started
+  with `--play`. Close Steam first. Library artwork is optional: the same page opens the artists' images on SteamGridDB,
+  which you download yourself, and places the files you choose (it never downloads anything itself).
 - **Heroic or Lutris** (Linux): add the tarball's `Cubic.Heroes/CubicHeroes` as a **native** game (not Wine or
   Proton) with the argument `--play`. Heroic's Flatpak can read only some folders (your Documents, the desktop, and
   others it already allows); for an installation elsewhere, allow it once with
@@ -285,7 +286,7 @@ the launcher's uninstall, or delete the folder.
 
 ## Updating
 
-**The launcher installs updates itself** (since 0.2.0-beta.4): the Updates page downloads a new version, checks it
+**The launcher installs updates itself** (since 0.2.0-beta.4): Play's Updates section downloads a new version, checks it
 against the project's release signature, and **Restart and update** puts it in place -- your saves (backed up first),
 settings, caches and builds kept, and the previous launcher and build kept to go back to. Close the game first: an
 update isn't installed while it runs.
@@ -300,7 +301,7 @@ Everything about updates, rollback and the command line: [docs/UPDATING.md](docs
 | Problem | What to do |
 |---|---|
 | The installation fails | [If the installation fails](#if-the-installation-fails) |
-| Stutter the first time somewhere | Shaders page: prepare them (again after a GPU driver update) |
+| Stutter the first time somewhere | Install / Manage: prepare the shaders (again after a GPU driver update) |
 | The game is too fast or slow | Report it with your frame limit and display rate; set the frame limit to 60 meanwhile |
 | A black screen or the game won't start | Update your GPU driver (Vulkan); Diagnostics > Export Logs, and report it |
 | Linux: the AppImage doesn't start | Make it executable (`chmod +x`); without FUSE, use the tarball |

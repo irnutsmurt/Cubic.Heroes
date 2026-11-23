@@ -1572,7 +1572,8 @@ def cmd_diagnostics(a, ev, control):
 def cmd_shortcuts(a, ev, control):
     """the launcher in the Start menu (and on the desktop with --desktop), or in Steam's library (--steam: Steam
     must be closed, it rewrites its shortcuts when it exits); the shortcut starts the launcher, the single entry
-    point. No artwork is downloaded (the network is the updates' alone)."""
+    point. --steam also downloads the game's library artwork once (shortcuts.STEAM_ART, 0.2.0-beta.5) onto this
+    computer: any failure leaves the game added without it (`artwork`: placed, kept, failed)."""
     import shortcuts
     exe = os.path.abspath(a.exe)
     icon = a.icon or ""
@@ -1588,8 +1589,24 @@ def cmd_shortcuts(a, ev, control):
         if shortcuts.steam_running():
             raise pipeline.SetupError("Close Steam first: it rewrites its library's shortcuts when it exits.",
                                       "steam_running")
-        return {"steam": len(shortcuts.add_to_steam(exe, icon, artwork=False))}
+        report = {}
+        written = shortcuts.add_to_steam(exe, icon, report=report)
+        return {"steam": sum(1 for p in written if os.path.basename(p) == "shortcuts.vdf"), "artwork": report}
     return {"made": len(shortcuts.create_shortcuts(exe, icon, desktop=a.desktop))}
+
+
+def cmd_steam_art(a, ev, control):
+    """the player's own image (--image: a PNG or JPEG they downloaded themselves) as the game's Steam library artwork
+    (--kind poster | hero) in every Steam account whose library has the launcher (shortcuts.import_steam_art); their own
+    artwork already there is kept unless --replace (they confirmed). Nothing is downloaded. Steam may be running: it
+    shows new artwork when it next starts."""
+    import shortcuts
+    if not (a.exe and a.kind and a.image):
+        raise pipeline.SetupError("steam-art needs --exe, --kind and --image.", "usage")
+    try:
+        return shortcuts.import_steam_art(os.path.abspath(a.exe), a.kind, os.path.abspath(a.image), replace=a.replace)
+    except shortcuts.ArtError as e:
+        raise pipeline.SetupError(str(e), e.code) from None
 
 
 def cmd_prepare(a, ev, control):
@@ -1686,7 +1703,8 @@ COMMANDS = {"version": cmd_version, "probe-disc": cmd_probe_disc, "probe-keys": 
             "stage-launcher": cmd_stage_launcher, "swap-launcher": cmd_swap_launcher, "settings": cmd_settings,
             "apply-update": cmd_apply_update, "rollback-launcher": cmd_rollback_launcher,
             "recover-launcher": cmd_recover_launcher, "launcher-state": cmd_launcher_state,
-            "diagnostics": cmd_diagnostics, "shortcuts": cmd_shortcuts, "selftest": cmd_selftest,
+            "diagnostics": cmd_diagnostics, "shortcuts": cmd_shortcuts, "steam-art": cmd_steam_art,
+            "selftest": cmd_selftest,
             "uninstall": cmd_uninstall, "remove-launcher": cmd_remove_launcher, "devsaves": cmd_devsaves,
             "migrate-root": cmd_migrate_root, "find-legacy": cmd_find_legacy}
 
@@ -1716,6 +1734,9 @@ def parser():
     p.add_argument("--remove-steam", action="store_true",
                    help="shortcuts: the launcher's own Steam entry removed (later: true while Steam runs)")
     p.add_argument("--rebuild", action="store_true", help="prepare: the pipeline cache made again from scratch")
+    p.add_argument("--kind", choices=("poster", "hero"), help="steam-art: which artwork")
+    p.add_argument("--image", help="steam-art: the player's own image file (PNG or JPEG)")
+    p.add_argument("--replace", action="store_true", help="steam-art: replace the player's own artwork (they confirmed)")
     p.add_argument("--disc-key", help="an encrypted disc image's key: a .dkey or IRD file, or a file of the 32 digits")
     p.add_argument("--parts", help="uninstall: the parts, comma-separated (builds,data,shaders,objects,settings,saves,shortcuts)")
     p.add_argument("--dry-run", action="store_true",

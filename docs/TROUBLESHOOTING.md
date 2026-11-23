@@ -13,7 +13,7 @@ longer fixes.
 | The keys file is refused | It needs an `APP` line for revision `0001`; or decrypt `EBOOT.BIN` yourself and give the `EBOOT.elf` |
 | The install stopped part-way | Run Install again: it resumes where it stopped. A stopped or failed install never touches the game you already have installed, your saves or your settings |
 | Not enough space | About 6 GB free is needed in the installation's folder; the launcher checks before it starts |
-| Stutter the first time somewhere | Shaders page: prepare them (again after a GPU driver update) |
+| Stutter the first time somewhere | Install / Manage: prepare the shaders (again after a GPU driver update) |
 | The game is too fast or slow | Report it with your frame limit and display rate; set the frame limit to 60 meanwhile |
 | A black screen or the game won't start | Update your GPU driver (Vulkan); Diagnostics > Export Logs, and report it |
 | The folder can't be written | Extract to a folder you own (not `Program Files`); the launcher says if it can't write |

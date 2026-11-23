@@ -63,15 +63,15 @@ apply to that session; the launcher's own do.
 
 The SDK's rule is that a game started by RecompLauncher must not update itself: RecompLauncher installs the
 developer's releases. So in an installation RecompLauncher manages, Cubic.Heroes's own updater -- the update check,
-**Download it**, **Restart and update**, and **Go back to version ...** -- is off:
+**Download it**, **Restart and update**, and **Go back to the previous launcher version (...)** -- is off:
 
 - RecompLauncher sets `RECOMPLAUNCHER=1` on every start it makes. The first such start also writes
   `recomplauncher-managed.txt` at the installation's root, so the updater stays off when the launcher is opened some
   other way (a shortcut, the file manager).
-- The launcher's home page and its Updates page say **RecompLauncher installs this game's updates**. The command line's
+- The launcher's home page and its updates (on Play) say **RecompLauncher installs this game's updates**. The command line's
   `--check-update`, `--apply-update` and `--rollback-launcher` refuse with exit code **8** (`managed_elsewhere`), and so
   does the worker.
-- **Update it with this launcher instead** (the Updates page, when the launcher was not started by RecompLauncher)
+- **Update it with this launcher instead** (Play's updates, when the launcher was not started by RecompLauncher)
   hands the updates back: it removes the mark, and the launcher checks for updates as usual. Starting the game from
   RecompLauncher again hands them back to RecompLauncher -- use one or the other.
 - The game's own update (`--update`, and the launcher's at its start after a new version) stays on: it rebuilds the

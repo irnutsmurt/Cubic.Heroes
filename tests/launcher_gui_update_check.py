@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """The launcher's own update as a player does it, through the launcher's window (0.2.0-beta.4): the scripted
-controller (--nav-test) opens Updates, checks, downloads, presses Restart and update and confirms; the launcher
+controller (--nav-test) goes to Play's updates, checks, downloads, presses Restart and update and confirms; the launcher
 closes, its helper installs the new version and starts it; the new version's window comes up. Linux (the tarball and
 the AppImage) and Windows (the zip).
 
@@ -14,9 +14,9 @@ mirror (a throwaway CA trusted through SSL_CERT_FILE; CUBIC_UPDATE_SOURCE points
   update    through the window: B downloaded, checked, installed on restart; B's window up (its health record);
             --version says B; the launcher's files are B's byte for byte; the installation's saves, settings and
             builds untouched; A kept for rollback
-  back      through B's window: Go back to version A -- A's window up, A's files byte for byte
+  back      through B's window: Go back to the previous launcher version (A) -- A's window up, A's files byte for byte
   failed    B whose window never comes up (its program replaced by one that exits): the update undone, A's files
-            byte for byte, A started again (--update-failed), its Updates page saying the update wasn't installed
+            byte for byte, A started again (--update-failed), its Play page saying the update wasn't installed
   startup   the window's own update check at its start, --runs times, B published (whole) before the first start:
             each one must find B -- a miss is reported with everything the check went by (its answer's `seen`: the
             channel asked, the releases listed, this installation's platform and kind), never passed over
@@ -56,7 +56,7 @@ HELPERS = ("SSL_CERT_FILE", "SSL_CERT_DIR", "CUBIC_UPDATE_SOURCE", "http_proxy",
 INSTALL_ITEMS = ("data/gamedata", "config", "builds")
 results = []
 
-# the player's way through the window: Updates (two pages right of Play), check, download, install, confirm (the
+# the player's way through the window: the updates on Play (down from PLAY), check, download, install, confirm (the
 # question's safe choice is focused first: left to its Restart and update). `until N TEXT` waits (at most N frames)
 # for the focus on TEXT with no operation on screen: a hidden window's frame rate differs between systems (about
 # 2000 frames a second offscreen on Linux, 33 on Windows). After the confirmation the launcher quits by itself to
@@ -68,9 +68,7 @@ results = []
 UPDATE_SCRIPT = """\
 until 200000 PLAY
 wait 30
-rb
-rb
-until 3000 Checking
+seek 400000 down Check for updates
 wait 30
 until 200000 Check for updates
 wait 30
@@ -106,9 +104,7 @@ quit
 BACK_SCRIPT = """\
 until 200000 PLAY
 wait 30
-rb
-rb
-until 3000 Checking
+seek 400000 down Check for updates
 wait 30
 until 400000 Check for updates
 wait 30
@@ -118,8 +114,8 @@ until 3000 Checking
 wait 30
 until 400000 Check for updates
 wait 30
-seek 400000 down Go back to version
-expect Go back to version
+seek 400000 down previous launcher version
+expect previous launcher version
 a
 until 20000 Cancel
 wait 30
@@ -133,9 +129,7 @@ quit
 # Check for updates pressed as soon as the window can be driven: before (or while) the installation's settings
 # arrive -- its update channel among them
 EARLY_SCRIPT = """\
-rb
-rb
-until 2000 Check for updates
+seek 2000 down Check for updates
 expect Check for updates
 a
 until 2000000 no-such-label
@@ -144,8 +138,7 @@ until 2000000 no-such-label
 LOOK_SCRIPT = """\
 until 200000 PLAY
 wait 30
-rb
-rb
+seek 400000 down Check for updates
 until 400000 Check for updates
 wait 30
 shot updates
@@ -508,7 +501,7 @@ class Run:
             bad.append("A's files aren't back byte for byte")
         if self.version() != (self.a_version, self.a_version):
             bad.append(f"--version {self.version()}")
-        if "Go back to version" not in log:
+        if "previous launcher version" not in log:
             bad.append("the script never reached Go back: " + log[-600:])
         step(f"back through the window: {self.a_version} again", bad, log=log[-2000:])
 

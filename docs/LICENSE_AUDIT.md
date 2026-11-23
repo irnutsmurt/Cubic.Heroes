@@ -617,6 +617,7 @@
 | `tests/test_rpath_tag.py` | INDEP | keep |
 | `tests/test_save_select.py` | INDEP | keep |
 | `tests/test_settings_diagnostics.py` | INDEP | keep |
+| `tests/test_steam_art.py` | INDEP | keep |
 | `tests/test_uninstall.py` | INDEP | keep |
 | `tests/test_update_tls.py` | INDEP | keep |
 | `tests/test_updates.py` | INDEP | keep |

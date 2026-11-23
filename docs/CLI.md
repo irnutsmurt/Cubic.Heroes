@@ -40,7 +40,7 @@ came from).
 2. the environment variable `CUBIC_INSTALL_DIR`
    (a relative path in either is taken from the current folder);
 3. `cubicheroes-root.txt` beside `CubicHeroes`: one line, a folder (a relative path is taken from `CubicHeroes`'s
-   folder) -- what the launcher's "Choose another install folder" and `--remember` write;
+   folder) -- what the launcher's "Change the installation folder" (Install / Manage) and `--remember` write;
 4. the folder `CubicHeroes` is in.
 
 Paths may contain spaces and any Unicode characters. A root that can't be written (a read-only or protected folder,
@@ -48,7 +48,7 @@ a full drive) is reported at once -- the window says so; the command line exits 
 
 **An earlier installation** (Cubic.Heroes before M11.2 kept its install in `%LOCALAPPDATA%\Cubic.Heroes`, or
 `~/Games/Cubic.Heroes`, and its preferences in `%APPDATA%\CubicHeroes`): nothing is moved or deleted. Either use it
-where it is (`--install-dir` that folder, with `--remember`, or the launcher's "Choose another install folder"), or
+where it is (`--install-dir` that folder, with `--remember`, or the launcher's "Change the installation folder"), or
 copy it into the new folder with `--migrate-from PATH` -- your saves, settings, builds and caches copied and checked,
 the original left exactly as it was (delete it yourself once you are happy). The launcher offers both when it finds
 one.

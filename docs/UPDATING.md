@@ -6,10 +6,10 @@ project's release signature; **Restart and update** then:
 - checks the download again (the signature, and that it is this system's package of your kind of installation);
 - closes the launcher, puts the new version's files in place of its own, and opens the new version;
 - brings the game up to date if the new version needs it (your saves are backed up first; the previous build is kept:
-  Install > **Rollback Last Update** goes back to it).
+  Install / Manage > **Go back to the previous game build** goes back to it).
 
 Your saves, settings, shader caches, logs and builds stay as they are. The launcher it replaced is kept: **Go back to
-version ...** on the Updates page (or `CubicHeroes --rollback-launcher`). If an update is stopped part-way -- the
+the previous launcher version (...)** on the launcher's Play page, under Updates (or `CubicHeroes --rollback-launcher`). If an update is stopped part-way -- the
 launcher or the computer stopping in the middle -- the previous launcher is put back at the next start. On Linux the
 AppImage is replaced in place, keeping its name and its shortcuts. No administrator or root rights are needed. Close
 the game first: an update isn't installed while it runs. From a terminal: `CubicHeroes --check-update`, then

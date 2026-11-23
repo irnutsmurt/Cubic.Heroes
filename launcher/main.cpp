@@ -1676,10 +1676,23 @@ static void auto_prepare_check()
 // pages
 // ============================================================================================================
 
-enum Page { kPlay, kInstall, kUpdates, kSaves, kShaders, kSettings, kDiagnostics, kPages };
-static const char* kPageNames[kPages] = { "Play", "Install", "Updates", "Saves", "Shaders", "Settings", "Diagnostics" };
-static const int kPageIcon[kPages] = { 0, 1, 2, 4, 5, 6, 7 };   // kIcons: the sword, chest, arrow, book, gem, gear, glass
+// 0.2.0-beta.5: five pages (from seven) -- the updates are on Play, the install, the shaders, Steam and the shortcuts
+// on Install / Manage; Settings holds settings only
+enum Page { kPlay, kManage, kSaves, kSettings, kDiagnostics, kPages };
+static const char* kPageNames[kPages] = { "Play", "Install / Manage", "Saves", "Settings", "Diagnostics" };
+static const int kPageIcon[kPages] = { 0, 1, 4, 6, 7 };   // kIcons: the sword, chest, book, gear, glass
 static int g_page = kPlay;
+static bool g_focus_updates = false;   // Play's update controls take the focus (and scroll into view) when next drawn
+
+// --page NAME: a page by its name, or an older name (Install, Updates, Shaders) by the page that holds it now
+static int page_from_name(const char* n)
+{
+    for (int p = 0; p < kPages; p++)
+        if (!SDL_strcasecmp(n, kPageNames[p])) return p;
+    if (!SDL_strcasecmp(n, "install") || !SDL_strcasecmp(n, "manage") || !SDL_strcasecmp(n, "shaders")) return kManage;
+    if (!SDL_strcasecmp(n, "updates")) return kPlay;
+    return -1;
+}
 static bool g_focus_page = true;   // give the new page's first item the focus
 static bool g_focus_menu = false;  // B on a page: the menu's row for it takes the focus
 
@@ -1783,7 +1796,7 @@ static void start_game_now()
         g_st.playing = "The game is running.";
         if (setting("LAUNCHER_CLOSE_ON_START", "0") == "1") g_quit = true;   // the game reopens it (Return to Launcher)
     } else {
-        g_msg = { true, "The game didn't start", "Its program couldn't be started. Try Repair on the Install page.",
+        g_msg = { true, "The game didn't start", "Its program couldn't be started. Try Repair on the Install / Manage page.",
                   exe, true, false };
     }
 #else
@@ -1798,7 +1811,7 @@ static void start_game_now()
     const pid_t pid = fork();
     if (pid == 0) { setsid(); execl(exe.c_str(), exe.c_str(), (char*)nullptr); _exit(127); }
     if (pid < 0) {
-        g_msg = { true, "The game didn't start", "Its program couldn't be started. Try Repair on the Install page.",
+        g_msg = { true, "The game didn't start", "Its program couldn't be started. Try Repair on the Install / Manage page.",
                   exe, true, false };
         return;
     }
@@ -1875,6 +1888,8 @@ static void play_landscape()
     ImGui::Dummy(ImVec2(w, h - S(4)));
 }
 
+static void updates_section();
+
 static void page_play()
 {
     const std::string kind = g_st.info["kind"].str();
@@ -1932,19 +1947,19 @@ static void page_play()
         else if (g_st.checking_update) text_col(col::dim, "Checking...");
         else if (!g_st.checked_once) text_col(col::dim, "Not checked yet.");
         else if (!u["ok"].truthy()) text_col(col::dim, "%s", u["message"].str("Couldn't check.").c_str());
-        else if (!g_st.launcher["ready"].is_null()) {
-            text_col(col::warm, "Version %s is downloaded and ready to install.", g_st.launcher["ready"]["version"].str().c_str());
-            if (big_button("Install it")) { g_page = kUpdates; g_focus_page = true; }
-        }
+        else if (!g_st.launcher["ready"].is_null())
+            text_col(col::warm, "Version %s is downloaded and ready to install (below).",
+                     g_st.launcher["ready"]["version"].str().c_str());
         else if (u["data"]["offline"].truthy()) text_col(col::dim, "Offline: the game plays as it is.");
-        else if (u["data"]["available"].truthy() && u["data"]["newer"].truthy()) {
-            text_col(col::warm, "Version %s is available.", u["data"]["version"].str().c_str());
-            if (big_button("See what's new")) { g_page = kUpdates; g_focus_page = true; }
-        } else if (u["data"]["no_package"].truthy())   // a release exists, but none of its downloads is for this PC
+        else if (u["data"]["available"].truthy() && u["data"]["newer"].truthy())
+            text_col(col::warm, "Version %s is available (below).", u["data"]["version"].str().c_str());
+        else if (u["data"]["no_package"].truthy())   // a release exists, but none of its downloads is for this PC
             text_col(col::dim, "Version %s has no download for this computer yet.", u["data"]["version"].str().c_str());
         else text_col(col::ok, "Up to date.");
         card_end();
         if (!updates_managed_elsewhere()) prompt(Act::Y, "Check for updates");
+        ImGui::Dummy(ImVec2(0, S(8)));
+        updates_section();   // 0.2.0-beta.5: the updates' own controls, here on Play (no page of their own)
         play_landscape();
         if (pressed(Act::Y) && !updates_managed_elsewhere()) check_updates();
     } else if (kind == "setup-app") {
@@ -1957,15 +1972,19 @@ static void page_play()
                 refresh_info();
             });
         focus_first();
+        ImGui::Dummy(ImVec2(0, S(14)));
+        updates_section();   // the launcher's own updates, whatever the game's state (their own page before)
     } else {
         title(kind == "partial" ? "An install was interrupted" : "The game isn't installed yet", 26);
-        text_col(col::dim, kind == "partial" ? "Continue it on the Install page: what was done is kept."
+        text_col(col::dim, kind == "partial" ? "Continue it on the Install / Manage page: what was done is kept."
                                              : "You'll need your own disc (an ISO or its folder) and its keys file.");
         if (big_button(kind == "partial" ? "Continue the install" : "Install the game", ImVec2(S(360), 0), Kind::Primary)) {
-            g_page = kInstall;
+            g_page = kManage;
             g_focus_page = true;
         }
         focus_first();
+        ImGui::Dummy(ImVec2(0, S(14)));
+        updates_section();   // the launcher's own updates, whatever the game's state (their own page before)
     }
 }
 
@@ -2073,9 +2092,16 @@ static void uninstall_open();
 static void remove_launcher_open();
 static void same_line_fits(float next_w);
 
-static void page_install()
+static void shaders_section();
+static void steam_section();
+static void location_section();
+
+// Install / Manage (0.2.0-beta.5: the Install and Shaders pages, and Settings' Steam, shortcut and folder actions, in one
+// page): install or repair from the disc; then, installed, its folder, the shaders, Steam and shortcuts, and the
+// maintenance -- the game's previous build, uninstalling, removing the launcher
+static void page_manage()
 {
-    title("Install");
+    title("Install / Manage");
     const std::string kind = g_st.info["kind"].str();
     if (g_wiz.folder.empty()) { g_wiz.folder = install_dir(); check_space(); }
     if (g_wiz.disc.empty() && !g_prefs.disc.empty()) { g_wiz.disc = g_prefs.disc; probe_disc(); }
@@ -2189,26 +2215,31 @@ static void page_install()
     }
     if (!ready) text_col(col::dim, "Each step above must be checked first.");
     if (kind == "slots") {
-        ImGui::Dummy(ImVec2(0, S(10)));
-        title("Maintenance", 24);
-        bool previous = false;   // the one earlier version kept after an update
+        location_section();
+        shaders_section();
+        steam_section();
+    }
+    ImGui::Dummy(ImVec2(0, S(10)));
+    title("Maintenance", 24);
+    if (kind == "slots") {
+        bool previous = false;   // the one earlier game build kept after an update
         for (size_t i = 0; i < g_st.builds["builds"].size(); i++)
             if (g_st.builds["builds"][i]["state"].str() != "active") previous = true;
-        if (big_button("Rollback Last Update", ImVec2(S(360), 0), Kind::Normal, previous))
-            ask("Roll back the last update?", "The game goes back to the version you had before the last update. Your saves "
-                "and settings stay as they are.", "Roll back", false, [] {
-                run("rollback", { "--install", install_dir() }, "Rolling back", true, [](const json::Value& r) {
-                    if (!r["ok"].truthy()) show_result_error(r, "The rollback didn't work");
-                    else g_msg = { true, "Rolled back", "The previous version is the one you play now.", "", false, false };
+        // the GAME's previous build (the launcher's own previous version is on Play, with the updates)
+        if (big_button("Go back to the previous game build", ImVec2(S(460), 0), Kind::Normal, previous))
+            ask("Go back to the previous game build?", "The game goes back to the build you had before the last update. "
+                "The launcher itself stays as it is. Your saves and settings stay as they are.", "Go back", false, [] {
+                run("rollback", { "--install", install_dir() }, "Going back to the previous game build", true,
+                    [](const json::Value& r) {
+                    if (!r["ok"].truthy()) show_result_error(r, "The game build wasn't changed");
+                    else g_msg = { true, "Previous game build", "The game build you had before is the one you play now.",
+                                   "", false, false };
                     refresh_info();
                 });
             });
         same_line_fits(S(360));
         if (big_button("Uninstall the game...", ImVec2(S(360), 0), Kind::Danger)) uninstall_open();
-        if (!previous) text_col(col::dim, "Rollback becomes available after an update.");
-    } else {
-        ImGui::Dummy(ImVec2(0, S(10)));
-        title("Maintenance", 24);
+        if (!previous) text_col(col::dim, "Going back to the previous game build becomes possible after an update.");
     }
     if (big_button("Remove the launcher...", ImVec2(S(360), 0), Kind::Danger)) remove_launcher_open();
 }
@@ -2256,8 +2287,10 @@ static void launcher_update_card()
     if (back) {
         const std::string v = L["rollback"]["version"].str();
         ImGui::Dummy(ImVec2(0, S(6)));
-        text_col(col::dim, "The launcher before the last update, version %s, is kept.", v.c_str());
-        if (big_button(("Go back to version " + v).c_str(), ImVec2(S(360), 0), Kind::Normal, idle))
+        text_col(col::dim, "The launcher before the last update, version %s, is kept. (This is the launcher itself; the "
+                           "game's own previous build is on Install / Manage.)", v.c_str());
+        if (big_button(("Go back to the previous launcher version (" + v + ")").c_str(), ImVec2(S(560), 0), Kind::Normal,
+                       idle))
             ask("Go back to launcher version " + v + "?", "The launcher closes, puts version " + v + " back and opens again. "
                 "This version is kept in turn, so you can come back to it. Your saves, settings and builds stay as they are.",
                 "Go back", false, [v] { restart_into("rollback-launcher", v, "Going back to version " + v); });
@@ -2270,9 +2303,40 @@ static void launcher_update_card()
     card_end();
 }
 
-static void page_updates()
+// a button the controller or keyboard has just reached is brought near the top of the page: the cards below it are
+// child windows, whose buttons the navigation can't reach while the card lies wholly outside the page's view
+// (0.2.0-beta.5: the updates' cards sit low on Play)
+static void scroll_to_top_on_focus()
 {
-    title("Updates");
+    static ImGuiID last = 0;
+    const ImGuiID id = ImGui::GetItemID();
+    if (ImGui::IsItemFocused() && ImGui::GetIO().NavVisible) {
+        if (last != id) {
+            last = id;
+            ImGuiWindow* w = ImGui::GetCurrentWindow();   // the page that scrolls, not a card around the button
+            while (w && w->ScrollMax.y <= 0.0f && w->ParentWindow) w = w->ParentWindow;
+            if (w) ImGui::SetScrollY(w, std::max(0.0f, w->Scroll.y + ImGui::GetItemRectMin().y - w->Pos.y - S(40)));
+        }
+    } else if (last == id) {
+        last = 0;
+    }
+}
+
+// the update controls take the focus (and scroll into view) when asked to (--page updates)
+static void focus_updates_here()
+{
+    if (g_focus_updates && g_page_input) {
+        ImGui::SetKeyboardFocusHere(-1);   // the item just drawn
+        ImGui::SetScrollHereY(0.3f);
+        g_focus_updates = false;
+    }
+}
+
+// the updates, on Play (0.2.0-beta.5; their own page before): checked in the background when the launcher starts (never
+// holding up Play), shown here with the download, the install on restart and the way back to the previous launcher
+static void updates_section()
+{
+    title("Updates", 26);
     if (updates_managed_elsewhere()) {   // RecompLauncher's (0.2.0-beta.5): our own updater off, said why
         text_col(col::dim, "RecompLauncher installs this installation's updates, so this launcher's own updater is off: "
                            "the two never change the same folder. Update the game from RecompLauncher.");
@@ -2285,7 +2349,7 @@ static void page_updates()
                         fs::remove(u8path(recomp_mark()), ec);
                         check_updates();
                     });
-            focus_first();
+            focus_updates_here();
         }
         return;
     }
@@ -2295,7 +2359,8 @@ static void page_updates()
     if (big_button(g_st.checking_update ? "Checking..." : "Check for updates", ImVec2(S(320), 0), Kind::Normal,
                    !g_st.checking_update))
         check_updates();
-    focus_first();
+    scroll_to_top_on_focus();
+    focus_updates_here();
     const json::Value& u = g_st.update;
     if (!g_st.checked_once) return;
     card_begin("##upd");
@@ -2333,6 +2398,7 @@ static void page_updates()
                                                       "update, on this page.", r["data"]["path"].str(), false, false };
                     refresh_launcher_state();
                 });
+        if (d["newer"].truthy()) scroll_to_top_on_focus();
     }
     card_end();
     launcher_update_card();
@@ -2418,9 +2484,11 @@ static void shader_actions(bool focus = true)
     if (ready && focus) focus_first();
 }
 
-static void page_shaders()
+// Install / Manage's shaders (0.2.0-beta.5; their own page before)
+static void shaders_section()
 {
-    title("Shaders and pipelines");
+    ImGui::Dummy(ImVec2(0, S(10)));
+    title("Shaders and pipelines", 24);
     text_col(col::dim, "Prepared before you play so effects don't stutter the first time: after an install, an update, or a "
                        "driver or GPU change.");
     const json::Value& c = g_st.check;
@@ -2450,7 +2518,126 @@ static void page_shaders()
             text_col(col::dim, "On disk: %s.", human_bytes(c["disk_mb"].num() * 1048576).c_str());
     }
     card_end();
-    shader_actions();
+    shader_actions(false);   // the page opens on its install step, not here
+}
+
+// Install / Manage's installation folder (0.2.0-beta.5: from Settings)
+static void location_section()
+{
+    ImGui::Dummy(ImVec2(0, S(10)));
+    title("Installation", 24);
+    text_col(col::text, "Installed in %s", install_dir().c_str());
+    text_col(col::dim, "Another folder: the launcher uses the installation there, or installs into it. Nothing is moved.");
+    if (big_button("Change the installation folder", ImVec2(S(460), 0)))
+        browse("Choose the install folder", true, {}, "folders", install_dir(), [](const std::string& p) {
+            g_root = p;   // that folder is the root from now on (cubicheroes-root.txt beside the launcher)
+            if (!remember_root(p))
+                g_msg = { true, "Not remembered", "This folder is used now, but the launcher's own folder can't be written, so "
+                          "it isn't remembered for next time. Start the launcher with --install-dir to use it.", p, false, false };
+            g_prefs.save();
+            g_wiz.folder.clear();
+            refresh_info();
+        });
+}
+
+// --- Steam and shortcuts (Install / Manage; 0.2.0-beta.5: from Settings) ---
+// The library artwork is the player's own choice: they download the images themselves from the artists' pages on
+// SteamGridDB (nothing is downloaded by Cubic.Heroes: the site's terms rule out automated use), and the launcher only
+// places the files they choose (the worker's steam-art: PNG or JPEG, never over artwork of their own unless they say)
+static const char* kArtPoster = "https://www.steamgriddb.com/grid/54932";
+static const char* kArtHero = "https://www.steamgriddb.com/hero/14114";
+
+static void open_link(const char* url)
+{
+    if (g_nav_test) { g_nav_event = std::string("  [would open ") + url + ": not during a scripted controller test]"; return; }
+    if (SDL_OpenURL(url) != 0)
+        g_msg = { true, "The browser didn't open", "Open this page yourself:", url, false, false };
+}
+
+static void steam_art_place(const std::string& kind, const std::string& path, bool replace)
+{
+    std::vector<std::string> a = { "--exe", self_program(), "--kind", kind, "--image", path };
+    if (replace) a.push_back("--replace");
+    run("steam-art", a, "", false, [kind, path, replace](const json::Value& r) {
+        if (!r["ok"].truthy()) { show_result_error(r, "The artwork wasn't placed"); return; }
+        if (r["data"]["kept"].size() > 0 && !replace)
+            ask("Replace your own artwork?", "Steam already has a " + std::string(kind == "hero" ? "hero" : "poster") +
+                " image for Cubic.Heroes that the launcher didn't put there. Replace it with the one you chose?",
+                "Replace", true, [kind, path] { steam_art_place(kind, path, true); });
+        else
+            g_msg = { true, "Artwork placed", "Steam shows it the next time it starts.", "", false, false };
+    });
+}
+
+static void steam_art_choose(const char* kind)
+{
+    const bool hero = !strcmp(kind, "hero");
+    browse(hero ? "Choose the hero image" : "Choose the poster image", false, { ".png", ".jpg", ".jpeg" },
+           "images (.png, .jpg)", "", [kind](const std::string& p) { steam_art_place(kind, p, false); });
+}
+
+static void steam_section()
+{
+    ImGui::Dummy(ImVec2(0, S(10)));
+    title("Steam and shortcuts", 24);
+    if (big_button("Add to Steam", ImVec2(S(260), 0)))
+        ask("Add the launcher to Steam?", "It appears in your Steam library (as a non-Steam game) and opens this launcher, "
+            "with its library artwork -- the poster by Fami-Kon and the hero image by Jib, downloaded from SteamGridDB onto "
+            "this computer. Close Steam first: it rewrites its library when it exits.", "Add it", false, [] {
+            run("shortcuts", { "--exe", self_program(), "--steam" }, "Adding it to Steam", true,
+                [](const json::Value& r) {
+                    if (!r["ok"].truthy()) { show_result_error(r, "It wasn't added to Steam"); return; }
+                    const json::Value& art = r["data"]["artwork"];
+                    std::string text = "Start Steam to see it in your library.";
+                    if (art["failed"].size() > 0)   // the game is added all the same: the artwork is the player's to add
+                        text += " The artwork wasn't added (" + art["failed"].o.begin()->second.str() + "): you can "
+                                "choose the images yourself under Steam artwork.";
+                    else if (art["kept"].size() > 0)
+                        text += " Artwork you had put there yourself was kept.";
+                    else if (art["placed"].size() > 0)
+                        text += " Its library artwork is the poster by Fami-Kon and the hero image by Jib (SteamGridDB).";
+                    g_msg = { true, "Added to Steam", text, "", false, false };
+                });
+        });
+    same_line_fits(S(300));
+    if (big_button("Remove from Steam", ImVec2(S(300), 0)))
+        ask("Remove the launcher from Steam?", "Its entry leaves your Steam library; nothing else changes. Close Steam first: "
+            "it rewrites its library when it exits.", "Remove", false, [] {
+            run("shortcuts", { "--exe", self_program(), "--remove-steam" }, "", false, [](const json::Value& r) {
+                if (!r["ok"].truthy()) show_result_error(r, "It wasn't removed from Steam");
+                else if (r["data"]["later"].truthy()) g_msg = { true, "Close Steam first", "Steam is running: close it, then "
+                                                               "remove the entry again.", "", false, false };
+                else g_msg = { true, "Removed from Steam", "The launcher's entry is gone from your Steam library.", "", false, false };
+            });
+        });
+#ifdef _WIN32
+    const char* menu = "Start-menu shortcut", *menu_done = "The launcher is in your Start menu.";
+#else
+    const char* menu = "App-menu shortcut", *menu_done = "The launcher is in your applications menu.";
+#endif
+    if (big_button(menu, ImVec2(S(300), 0)))
+        run("shortcuts", { "--exe", self_program() }, "", false, [menu_done](const json::Value& r) {
+            if (r["ok"].truthy()) g_msg = { true, "Shortcut made", menu_done, "", false, false };
+            else show_result_error(r, "The shortcut wasn't made");
+        });
+    same_line_fits(S(300));
+    if (big_button("Desktop shortcut", ImVec2(S(300), 0)))
+        run("shortcuts", { "--exe", self_program(), "--desktop" }, "", false, [](const json::Value& r) {
+            if (r["ok"].truthy()) g_msg = { true, "Shortcuts made", "The launcher is on your desktop and in your menu.", "", false, false };
+            else show_result_error(r, "The shortcut wasn't made");
+        });
+    // (no card around it: a card's buttons can't be reached by the controller while it lies below the page's view)
+    ImGui::Dummy(ImVec2(0, S(6)));
+    title("Steam artwork (optional)", 22);
+    text_col(col::dim, "Add to Steam downloads the library artwork onto this computer: the poster by Fami-Kon and the hero "
+                       "image by Jib, made by their artists and hosted on SteamGridDB (never part of Cubic.Heroes itself). "
+                       "If that didn't work, or for other images, download them yourself and choose the files here. Artwork "
+                       "you put there yourself stays unless you choose to replace it.");
+    if (big_button("Open the artwork pages", ImVec2(S(340), 0))) { open_link(kArtPoster); open_link(kArtHero); }
+    same_line_fits(S(340));
+    if (big_button("Choose the poster image...", ImVec2(S(340), 0))) steam_art_choose("poster");
+    same_line_fits(S(340));
+    if (big_button("Choose the hero image...", ImVec2(S(340), 0))) steam_art_choose("hero");
 }
 
 // --- settings ---
@@ -2585,32 +2772,7 @@ static void page_settings()
                 if (r["ok"].truthy()) set_settings(r["data"]);
             });
         });
-    same_line_fits(S(260));
-    if (big_button("Add to Steam", ImVec2(S(260), 0)))
-        ask("Add the launcher to Steam?", "It appears in your Steam library (as a non-Steam game) and opens this launcher. "
-            "Close Steam first: it rewrites its library when it exits.", "Add it", false, [] {
-            run("shortcuts", { "--exe", self_program(), "--steam" }, "", false,
-                [](const json::Value& r) {
-                    if (r["ok"].truthy()) g_msg = { true, "Added to Steam", "Start Steam to see it in your library.", "", false, false };
-                    else show_result_error(r, "It wasn't added to Steam");
-                });
-        });
-    same_line_fits(S(300));
-    if (big_button("Start-menu shortcut", ImVec2(S(300), 0)))
-        run("shortcuts", { "--exe", self_program() }, "", false, [](const json::Value& r) {
-            if (r["ok"].truthy()) g_msg = { true, "Shortcut made", "The launcher is in your Start menu.", "", false, false };
-            else show_result_error(r, "The shortcut wasn't made");
-        });
-    if (big_button("Choose another install folder", ImVec2(S(420), 0)))
-        browse("Choose the install folder", true, {}, "folders", install_dir(), [](const std::string& p) {
-            g_root = p;   // that folder is the root from now on (cubicheroes-root.txt beside the launcher)
-            if (!remember_root(p))
-                g_msg = { true, "Not remembered", "This folder is used now, but the launcher's own folder can't be written, so "
-                          "it isn't remembered for next time. Start the launcher with --install-dir to use it.", p, false, false };
-            g_prefs.save();
-            g_wiz.folder.clear();
-            refresh_info();
-        });
+    // (0.2.0-beta.5: Add to Steam, the shortcuts and the install folder are on Install / Manage)
     ImGui::EndChild();
 }
 
@@ -3028,7 +3190,7 @@ static void overlay_uninstall()
                         if (!r["ok"].truthy()) show_result_error(r, "Uninstalling didn't finish");
                         else g_msg = { true, "Uninstalled", "About " + human_bytes(r["data"]["bytes"].num()) +
                                        " freed. Install again whenever you like: what you kept is used again.", "", false, false };
-                        g_page = kInstall;
+                        g_page = kManage;
                         g_focus_page = true;
                         refresh_info();
                     });
@@ -3395,8 +3557,13 @@ static void frame()
         } else {
             pix_icon(sdl, ImVec2(ra.x + S(22), cy - ip * 5), kIcons[kPageIcon[i]], ip);
         }
-        pix_text(sdl, ImVec2(ra.x + S(22) + ip * 10 + S(22), cy - np * 3.5f), exit_row ? "EXIT" : kPageNames[i], np,
-                 on ? col::accent : hov ? col::text : col::dim);
+        {   // the row's name; a long one (Install / Manage) a size smaller when the menu is too narrow for it
+            const char* label = exit_row ? "EXIT" : kPageNames[i];
+            const float tx = ra.x + S(22) + ip * 10 + S(22), room = rb.x - tx - S(8);
+            float lp = np;
+            while (lp > 2.0f && pix_w(label, lp) > room) lp -= 1.0f;
+            pix_text(sdl, ImVec2(tx, cy - lp * 3.5f), label, lp, on ? col::accent : hov ? col::text : col::dim);
+        }
         if (ImGui::IsItemFocused()) {
             g_focus_label = std::string("menu: ") + (exit_row ? "Exit" : kPageNames[i]);
             // the menu's own keys: left and right (right goes to the page's first item, below), up on its first row and
@@ -3447,10 +3614,8 @@ static void frame()
     ImGui::PushFont(nullptr, S(kBody));
     switch (g_page) {
     case kPlay: page_play(); break;
-    case kInstall: page_install(); break;
-    case kUpdates: page_updates(); break;
+    case kManage: page_manage(); break;
     case kSaves: page_saves(); break;
-    case kShaders: page_shaders(); break;
     case kSettings: page_settings(); break;
     case kDiagnostics: page_diagnostics(); break;
     }
@@ -3801,9 +3966,11 @@ int main(int argc, char** argv)
             nav.load(argv[i + 1]);
             g_nav_test = true;
         }
-        if (!strcmp(argv[i], "--page") && i + 1 < argc)   // a page to open on (a shortcut's choice; the review's)
-            for (int p = 0; p < kPages; p++)
-                if (!SDL_strcasecmp(argv[i + 1], kPageNames[p])) g_page = p;
+        if (!strcmp(argv[i], "--page") && i + 1 < argc) {   // a page to open on (a shortcut's choice; the review's)
+            const int p = page_from_name(argv[i + 1]);
+            if (p >= 0) g_page = p;
+            if (!SDL_strcasecmp(argv[i + 1], "updates")) g_focus_updates = true;   // the updates, now on Play
+        }
     }
     g_prefs.load();
     {   // M11.2b: a root that can't be written (a read-only or protected folder, a full drive) said at once
@@ -3811,7 +3978,7 @@ int main(int argc, char** argv)
         if (!root_writable(why))
             g_msg = { true, "This folder can't be used", "Cubic.Heroes keeps the game, its saves and settings in its own "
                       "folder, and this one can't be written to: " + why + ". Move Cubic.Heroes to a folder you own (for "
-                      "example in Documents or on another drive), or choose another folder on the Settings page.",
+                      "example in Documents or on another drive), or choose another folder on the Install / Manage page.",
                       g_root, true, false };
     }
     SDL_SetHint(SDL_HINT_GAMECONTROLLER_USE_BUTTON_LABELS, "1");
@@ -3888,13 +4055,13 @@ int main(int argc, char** argv)
         const std::string why = last["why"].str("the new launcher didn't come up");
         g_msg = { true, "The update wasn't installed", last["result"].str() == "busy"
                   ? "Something was still running from the installation (" + why + "), so nothing was changed. Close the "
-                    "game, then install the update again from the Updates page."
+                    "game, then install the update again from the Play page."
                   : "Version " + last["version"].str("?") + " couldn't be put in place (" + why + "), so this launcher was "
                     "kept. Nothing else changed.", "", true, false };
     }
     if (after_update)
         g_msg = { true, "Updated to version " CUBIC_VERSION, "The launcher was updated, and the one before it is kept on the "
-                  "Updates page. Your saves, settings and builds are as they were; the game is brought up to date next if "
+                  "Play page (the updates). Your saves, settings and builds are as they were; the game is brought up to date next if "
                   "this version needs it.", "", false, false };
     bool wrote_health = false, quit = false;
     bool checked_updates = false;
@@ -3944,7 +4111,7 @@ int main(int argc, char** argv)
                 SDL_free(e.drop.file);
                 std::string ext = path_str(u8path(p).extension());
                 std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-                g_page = kInstall;
+                g_page = kManage;
                 std::error_code dec;
                 if (ext == ".iso" || fs::is_directory(u8path(p), dec)) { g_wiz.disc = p; g_prefs.disc = p; probe_disc(); }
                 else { g_wiz.keys = p; g_prefs.keys = p; probe_keys(); }
