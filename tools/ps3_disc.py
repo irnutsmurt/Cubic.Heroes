@@ -231,9 +231,15 @@ def load_key(source, keys_path=None):
             data = fh.read(4096)
         if size == 16:
             return data
-        k = _hex_key(data.decode("ascii", errors="replace"))
+        text = data.decode("ascii", errors="replace")
+        k = _hex_key(text)
         if k:
             return k
+        if re.search(r"(?im)^\s*APP\s+[0-9a-f]{4}\s", text):
+            # the program's keys file chosen here: disc encryption and the program's (EBOOT.BIN) are two things
+            raise DiscKeyError("That is the keys file (APP lines: the game program's keys), not the disc key. The "
+                               "disc key is this disc's own: a .dkey file (32 hexadecimal digits) or an IRD file, or "
+                               "its 32 characters typed.", "bad_key_file")
         raise DiscKeyError("This file isn't a disc key (.dkey: 32 hexadecimal digits) or an IRD file.", "bad_key_file")
     k = _hex_key(source or "")
     if k:
