@@ -38,6 +38,7 @@ import urllib.request
 import zipfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import hostenv  # noqa: E402
 import install_layout as layout  # noqa: E402
 import release_trust as trust  # noqa: E402
 
@@ -611,9 +612,11 @@ def is_process(pid, exe=None, since=None):
 
 
 def _clean_env(env=None):
-    """the environment a launcher is started in by the update: without the old AppImage's own variables (its
-    mount is gone once it exits; a new AppImage's runtime sets its own)"""
-    env = dict(os.environ if env is None else env)
+    """the environment a launcher is started in by the update: the player's own library path back when the worker is
+    frozen (tools/hostenv.py: not the worker's _internal, which PyInstaller put first -- 0.2.0-beta.5: an AppImage's
+    `#!/bin/sh` AppRun failed under the system's bash with a library from it), and without the old AppImage's own
+    variables (its mount is gone once it exits; a new AppImage's runtime sets its own)"""
+    env = hostenv.host_env(env)
     appdir = env.get("APPDIR") or ""
     for k in ("APPIMAGE", "APPDIR", "ARGV0", "OWD"):
         env.pop(k, None)

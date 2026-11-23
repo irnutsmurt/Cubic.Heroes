@@ -687,6 +687,61 @@ class AppImage(Base):
         self.assertEqual(e.exception.code, "platform")
 
 
+class FrozenChildEnv(unittest.TestCase):
+    """what the frozen worker starts outside itself (a new launcher, the game) gets the library path the worker was
+    started with, not the one PyInstaller gave the worker (0.2.0-beta.5: an AppImage's `#!/bin/sh` AppRun under the
+    system's bash loaded the worker's bundled readline and failed)"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="childenv-", dir=os.environ.get("TMPDIR"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.internal = os.path.join(self.tmp, "worker", "_internal")
+        self.system = os.path.join(self.tmp, "usr", "lib")
+        os.makedirs(self.internal)
+        os.makedirs(self.system)
+        # the frozen Linux worker (tools/hostenv.py): PyInstaller's _internal first, the player's value in _ORIG
+        for name, value in (("frozen", True), ("_MEIPASS", self.internal), ("platform", "linux")):
+            p = mock.patch.object(updates.hostenv.sys, name, value, create=True)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_the_original_put_back(self):
+        env = updates._clean_env({"LD_LIBRARY_PATH": self.internal + os.pathsep + self.system,
+                                  "LD_LIBRARY_PATH_ORIG": self.system, "HOME": self.tmp})
+        self.assertEqual(env["LD_LIBRARY_PATH"], self.system)
+        self.assertNotIn("LD_LIBRARY_PATH_ORIG", env)
+        self.assertEqual(env["HOME"], self.tmp)
+
+    def test_no_original_none(self):
+        env = updates._clean_env({"LD_LIBRARY_PATH": self.internal})
+        self.assertNotIn("LD_LIBRARY_PATH", env)
+
+    def test_not_frozen_left_as_it_is(self):
+        with mock.patch.object(updates.hostenv.sys, "frozen", False):
+            env = updates._clean_env({"LD_LIBRARY_PATH": self.internal, "LD_LIBRARY_PATH_ORIG": self.system})
+        self.assertEqual((env["LD_LIBRARY_PATH"], env["LD_LIBRARY_PATH_ORIG"]), (self.internal, self.system))
+
+    def test_with_an_appimage_too(self):
+        appdir = os.path.join(self.tmp, "mnt")
+        env = updates._clean_env({"APPDIR": appdir, "APPIMAGE": appdir + ".AppImage",
+                                  "LD_LIBRARY_PATH": os.pathsep.join([self.internal, os.path.join(appdir, "lib")]),
+                                  "PATH": os.pathsep.join([os.path.join(appdir, "bin"), self.system])})
+        self.assertNotIn("LD_LIBRARY_PATH", env)
+        self.assertEqual(env["PATH"], self.system)
+        self.assertNotIn("APPDIR", env)
+
+    @unittest.skipIf(os.name == "nt", "a #!/bin/sh AppRun: POSIX")
+    def test_a_shell_apprun_doesnt_see_the_workers_libraries(self):
+        run = os.path.join(self.tmp, "AppRun")
+        with open(run, "w") as f:
+            f.write('#!/bin/sh\nprintf "%s" "${LD_LIBRARY_PATH-unset}"\n')
+        os.chmod(run, 0o755)
+        base = {k: v for k, v in os.environ.items() if k != "LD_LIBRARY_PATH_ORIG"}
+        env = updates._clean_env(dict(base, LD_LIBRARY_PATH=self.internal))
+        out = subprocess.run([run], env=env, capture_output=True, text=True, timeout=30).stdout
+        self.assertNotIn(self.internal, out)
+
+
 class WorkerCommands(Base):
     """the worker's commands, from this checkout"""
 
