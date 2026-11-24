@@ -2355,6 +2355,14 @@ static void keep_focus_in_view()
     ImGuiContext& g = *GImGui;
     static ImGuiID last = 0;
     static int frames = 0;
+    static float last_y = 0.0f;
+    // the page's content above the focused button changed height (a line of text arriving, a card's result): Dear
+    // ImGui's remembered height for left and right moves no longer lies on its row -- from a row's top 20 % a button
+    // beside it scores as "below" and left or right finds nothing (0.2.0-beta.5, Linux at 1280x720: the artwork row,
+    // where left then fell through to the side menu). Forgotten, the next move starts from the button's own middle
+    if (g.NavId && g.NavWindow && g.NavId == last && fabsf(g.NavWindow->NavRectRel[ImGuiNavLayer_Main].Min.y - last_y) >= 1.0f)
+        ImGui::NavClearPreferredPosForAxis(ImGuiAxis_Y);
+    if (g.NavWindow) last_y = g.NavWindow->NavRectRel[ImGuiNavLayer_Main].Min.y;
     if (g.NavId != last) { last = g.NavId; frames = 3; }
     if (frames <= 0) return;
     frames--;
