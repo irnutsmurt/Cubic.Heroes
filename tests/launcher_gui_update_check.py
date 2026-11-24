@@ -107,6 +107,8 @@ until 400000 OK
 wait 30
 quit
 """
+# B's own check refuses the test release (B trusts only the project's keys, not the throwaway one): its result is
+# "No release found", with the refusal said
 BACK_SCRIPT = """\
 until 200000 PLAY
 wait 30
@@ -120,7 +122,7 @@ until 3000 Checking
 wait 30
 until 400000 Check for updates
 wait 30
-see Version
+see No release found
 seek 400000 down previous launcher version
 expect previous launcher version
 a

@@ -14,6 +14,9 @@ runner checks that no file of the installation changed, its logs aside. Every wi
 Every script runs at each of --sizes, the test window's size (--nav-size): by default 1280x800 (the Steam Deck's) and
 1280x720 -- the sizes at which a result card first fell below the D-pad's reach (0.2.0-beta.5).
 
+The installation needs a previous game build (one update made, the earlier build kept): five_pages reaches
+Install / Manage's "Go back to the previous game build", which is disabled -- out of the D-pad's reach -- without one.
+
   py -3 tests/launcher_nav_pages.py --install <installation> [--launcher <the launcher to test>] [--only settings_tabs]
       [--sizes 1280x800,1280x720]
 
