@@ -212,10 +212,18 @@ def sign(repo, key, keys_file=None, log=print):
     return kid
 
 
-def check(repo, keys_file=None, log=print):
-    """[problems] -- empty when the launcher would accept the catalog and every listed character"""
+def check(repo, keys_file=None, log=print, unsigned=False):
+    """[problems] -- empty when the launcher would accept the catalog and every listed character (unsigned: all of it
+    but the signature, before the owner signs)"""
     with open(_path(repo), "rb") as f:
-        cat, problems = S.parse_catalog(f.read(), S.trusted_keys(S.DEFAULT_BASE, {}, keys_file=keys_file or S.KEYS_FILE))
+        data = f.read()
+    if unsigned:
+        doc = json.loads(data.decode("utf-8"))
+        if doc.get("format") != S.CATALOG_FORMAT or doc.get("schema_version") != S.SCHEMA_VERSION:
+            raise S.StoreError("not a Cubic.Heroes character catalog of this schema")
+        cat, problems = S.parse_entries(doc["catalog"], doc["schema_version"], "(not signed yet)")
+    else:
+        cat, problems = S.parse_catalog(data, S.trusted_keys(S.DEFAULT_BASE, {}, keys_file=keys_file or S.KEYS_FILE))
     for e in cat["characters"]:
         try:
             for kind in ("file", "thumb"):
@@ -288,6 +296,7 @@ def main(argv=None):
     c = sub.add_parser("check")
     c.add_argument("--repo", required=True)
     c.add_argument("--keys")
+    c.add_argument("--unsigned", action="store_true", help="everything but the signature (before signing)")
     k = sub.add_parser("keygen")
     k.add_argument("--out", required=True)
     k.add_argument("--note", default="the character catalog key")
@@ -310,7 +319,7 @@ def main(argv=None):
         sign(a.repo, a.key, a.keys)
         return 0
     if a.cmd == "check":
-        return 1 if check(a.repo, a.keys) else 0
+        return 1 if check(a.repo, a.keys, unsigned=a.unsigned) else 0
     import release as R
     if a.cmd == "keygen":
         os.makedirs(a.out, exist_ok=True)

@@ -275,6 +275,12 @@ def parse_catalog(data, keys):
     if not isinstance(signed, dict):
         raise StoreError("the catalog has no signed part")
     key_id = verify(signed, doc.get("signatures"), keys)
+    return parse_entries(signed, sv, key_id)
+
+
+def parse_entries(signed, sv=SCHEMA_VERSION, key_id=""):
+    """(catalog, [problems]) of a catalog's signed part, every entry checked -- parse_catalog's second half, after the
+    signature (char_catalog.py check --unsigned uses it alone, before the owner signs)"""
     cv = signed.get("catalog_version")
     if not isinstance(cv, int) or isinstance(cv, bool) or cv < 1:
         raise StoreError("the catalog has no version")
@@ -457,6 +463,8 @@ class Store:
         if r.status != 200:
             self.state.update(checked=now, status="error")
             self._save_state()
+            if r.status == 404 and have is None:   # the repository is there, its catalog not yet
+                return self._status("error", "The Character Store has no catalog yet: nothing to show.")
             return self._status("error", f"GitHub answered {r.status} for the catalog" +
                                 (": the saved catalog is shown" if have is not None else "."))
         try:
