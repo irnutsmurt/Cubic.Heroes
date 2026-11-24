@@ -1868,13 +1868,13 @@ def cmd_characters(a, ev, control):
             cat, _ = st.entries(savedata)
             todo = [e for e in (cat or {}).get("characters", []) if not e["thumb_path"]]
             made, failed = 0, 0
-            for i in range(0, len(todo), 8):
+            for i in range(0, len(todo), 24):
                 if control.cancel.is_set():
                     break
                 progress(i, len(todo), "")
-                m, f = st.fetch_thumbs(todo[i:i + 8], budget=8, deadline_s=60)
+                m, f = st.fetch_thumbs(todo[i:i + 24], budget=24, deadline_s=60)
                 made, failed = made + m, failed + f
-                if m + f < len(todo[i:i + 8]):
+                if m + f < len(todo[i:i + 24]):
                     break   # offline or rate limited: the rest stay placeholders
             return {"made": made, "failed": failed, "total": len(todo)}
         status = st.refresh(force=(act == "store-refresh"))

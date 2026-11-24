@@ -1174,9 +1174,14 @@ static bool g_prepare_after_game = false;   // a preparation asked for while the
 static SDL_Window* g_window = nullptr;
 static void show_msg(const std::string& t, const std::string& text);
 
+static double g_nav_spawn_max = 0, g_nav_page_max = 0, g_nav_view_max = 0;   // the test log's split of a step's worst frame (ms)
 static Op* run(const std::string& cmd, const std::vector<std::string>& args, const std::string& title, bool long_op,
                std::function<void(const json::Value&)> then)
 {
+    const Uint64 spawn_t0 = SDL_GetPerformanceCounter();
+    struct SpawnTime { Uint64 t0; ~SpawnTime() {
+        g_nav_spawn_max = std::max(g_nav_spawn_max, (double)(SDL_GetPerformanceCounter() - t0) * 1000.0 / SDL_GetPerformanceFrequency()); } }
+        spawn_time{ spawn_t0 };
     // what changes the active build or its shaders waits for the background preparation (one job on the cache)
     static const std::set<std::string> exclusive = { "install", "update", "migrate", "rollback", "prepare" };
     if (long_op && g_bg && exclusive.count(cmd)) {
@@ -2580,24 +2585,33 @@ struct PreviewTex { SDL_Texture* tex = nullptr; int w = 0, h = 0; long long stam
 static std::map<std::string, PreviewTex> g_previews;
 static SDL_Renderer* g_ren = nullptr;
 static int g_preview_frame = 0, g_preview_budget = 0;
+static Uint64 g_preview_t0 = 0, g_preview_spent = 0;   // this frame's decoding: when it began; 0 none yet, else the limit
 static const size_t kPreviewCacheMax = 160;
 
 static bool rle_decode(const std::string& path, int& w, int& h, std::vector<unsigned char>& px)
 {
-    std::ifstream f(u8path(path), std::ios::binary);
-    std::vector<unsigned char> b((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    std::ifstream f(u8path(path), std::ios::binary | std::ios::ate);   // read whole (not a byte at a time)
+    if (!f) return false;
+    const std::streamoff size = f.tellg();
+    if (size < 12 || size > (64 << 20)) return false;
+    std::vector<unsigned char> b((size_t)size);
+    f.seekg(0);
+    if (!f.read((char*)b.data(), size)) return false;
     if (b.size() < 12 || memcmp(b.data(), "RLE1", 4) != 0) return false;
     uint32_t uw, uh;
     memcpy(&uw, &b[4], 4);
     memcpy(&uh, &b[8], 4);
     if (uw == 0 || uh == 0 || uw > 4096 || uh > 4096) return false;
     const size_t total = (size_t)uw * uh;
-    px.assign(total * 3, 0);
+    px.resize(total * 4);   // RGBA: the renderer's own layout, uploaded without a conversion
     size_t at = 0;
     for (size_t o = 12; o + 5 <= b.size(); o += 5) {
         const size_t n = (size_t)b[o] | (size_t)b[o + 1] << 8;
         if (n == 0 || at + n > total) return false;
-        for (size_t k = 0; k < n; k++, at++) { px[at * 3] = b[o + 2]; px[at * 3 + 1] = b[o + 3]; px[at * 3 + 2] = b[o + 4]; }
+        const uint32_t c = (uint32_t)b[o + 2] | (uint32_t)b[o + 3] << 8 | (uint32_t)b[o + 4] << 16 | 0xff000000u;
+        uint32_t* d = (uint32_t*)(px.data() + at * 4);
+        for (size_t k = 0; k < n; k++) d[k] = c;
+        at += n;
     }
     if (at != total) return false;
     w = (int)uw; h = (int)uh;
@@ -2611,14 +2625,18 @@ static const PreviewTex* preview_tex(const std::string& path, bool* bad = nullpt
     PreviewTex& e = g_previews[path];
     e.used = g_preview_frame;
     if (e.tex || e.bad) { if (bad) *bad = e.bad; return e.tex ? &e : nullptr; }
-    if (g_preview_budget <= 0) return nullptr;   // the rest next frame: scrolling stays smooth
+    // the rest next frame: at most a few decodes and ~3 ms a frame (one at least), so a page full of new pictures
+    // never holds a frame up
+    if (g_preview_budget <= 0 || (g_preview_spent > 0 && SDL_GetPerformanceCounter() - g_preview_t0 > g_preview_spent))
+        return nullptr;
     g_preview_budget--;
     int w = 0, h = 0;
     std::vector<unsigned char> px;
     if (!rle_decode(path, w, h, px)) { e.bad = true; if (bad) *bad = true; return nullptr; }
-    e.tex = SDL_CreateTexture(g_ren, SDL_PIXELFORMAT_RGB24, SDL_TEXTUREACCESS_STATIC, w, h);
+    e.tex = SDL_CreateTexture(g_ren, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STATIC, w, h);   // bytes R,G,B,A (x86-64)
     if (!e.tex) { e.bad = true; return nullptr; }
-    SDL_UpdateTexture(e.tex, nullptr, px.data(), w * 3);
+    SDL_UpdateTexture(e.tex, nullptr, px.data(), w * 4);
+    if (!g_preview_spent) g_preview_spent = SDL_GetPerformanceFrequency() * 3 / 1000;   // one done: ~3 ms a frame from now on
     e.w = w; e.h = h;
     return &e;
 }
@@ -3343,7 +3361,9 @@ static void store_status_line(float avail)
 static void page_characters()
 {
     g_preview_frame++;
-    g_preview_budget = 6;
+    g_preview_budget = 8;
+    g_preview_t0 = SDL_GetPerformanceCounter();
+    g_preview_spent = 0;
     if (!g_chars.asked) chars_refresh();
     if (!store_tab_enabled() && g_chars.tab == kTabStore) g_chars.tab = kTabLibrary;
     if (!g_char_drops.empty()) { chars_import(g_char_drops, {}); g_char_drops.clear(); g_chars.tab = kTabLibrary; }
@@ -3352,7 +3372,11 @@ static void page_characters()
         g_chars.open_id.clear();
     }
     title("Characters");
-    chars_view();
+    {
+        const Uint64 t0 = SDL_GetPerformanceCounter();
+        chars_view();
+        g_nav_view_max = std::max(g_nav_view_max, (double)(SDL_GetPerformanceCounter() - t0) * 1000.0 / SDL_GetPerformanceFrequency());
+    }
     chars_tabs();
     const bool store_tab = g_chars.tab == kTabStore;
     if (store_tab) {   // shown (again): the catalog checked -- the worker asks GitHub only when it's due
@@ -5036,7 +5060,12 @@ static void frame()
     case kPlay: page_play(); break;
     case kManage: page_manage(); break;
     case kSaves: page_saves(); break;
-    case kCharacters: page_characters(); break;
+    case kCharacters: {
+        const Uint64 t0 = SDL_GetPerformanceCounter();
+        page_characters();
+        g_nav_page_max = std::max(g_nav_page_max, (double)(SDL_GetPerformanceCounter() - t0) * 1000.0 / SDL_GetPerformanceFrequency());
+        break;
+    }
     case kSettings: page_settings(); break;
     case kDiagnostics: page_diagnostics(); break;
     }
@@ -5173,7 +5202,8 @@ static std::string font_path()
 
 // --nav-test FILE: a controller driven by a script, inside the launcher only (no input reaches any other window): one
 // step a line -- up, down, left, right (the D-pad), a, b, x, y, lb, rb, menu, view [times]; rs FRAMES (the right
-// stick down); wait FRAMES; shot NAME (the launcher saves its own frame, NAME.bmp beside the script); quit. Each step
+// stick down); wait FRAMES; type TEXT (as a keyboard types it); shot NAME (the launcher saves its own frame, NAME.bmp
+// beside the script); quit. Each step
 // is logged with the page, any dialog and the focused item after it settles (FILE.log). expect TEXT[|TEXT2...] stops
 // the test unless the focus is on one of them (until and seek take alternatives the same way); see TEXT[|TEXT2...]
 // unless a title with one of them is wholly in view. --nav-size WxH:
@@ -5216,7 +5246,7 @@ struct NavScript {
             Step st;
             if (!(ls >> st.op) || st.op[0] == '#') continue;
             std::string rest;   // a count, or a name (a shot's name is a name, even "01-play")
-            if (st.op == "expect" || st.op == "see") {   // "expect TEXT", "see TEXT": the rest of the line
+            if (st.op == "expect" || st.op == "see" || st.op == "type") {   // "expect TEXT", "see TEXT", "type TEXT": the rest
                 std::getline(ls, rest);
                 st.arg = rest.substr(std::min(rest.size(), rest.find_first_not_of(' ')));
             } else if (st.op == "until" || st.op == "seek") {   // "until N TEXT", "seek N DIR TEXT": at most N
@@ -5260,13 +5290,14 @@ struct NavScript {
         const char* dlg = g_confirm.open ? g_confirm.title.c_str() : g_msg.open ? g_msg.title.c_str()
                         : g_browser.open ? "file browser" : g_osk.open ? "keyboard" : g_uninst.open ? "uninstall"
                         : g_op ? "operation" : "";
-        char work[64] = "";
+        char work[128] = "";
         if (g_nav_work_n)
-            snprintf(work, sizeof work, "  work=%.2f/%.2fms", g_nav_work_sum / g_nav_work_n, g_nav_work_max);
+            snprintf(work, sizeof work, "  work=%.2f/%.2fms page<=%.2f spawn<=%.2f view<=%.2f", g_nav_work_sum / g_nav_work_n,
+                     g_nav_work_max, g_nav_page_max, g_nav_spawn_max, g_nav_view_max);
         fprintf(log, "%-6s %-14s page=%-12s dialog=%-28s focus=%s%s%s%s\n", st.op.c_str(), st.arg.c_str(), kPageNames[g_page],
                 dlg, g_focus_label.c_str(), g_bg ? "  [preparing]" : "", g_nav_event.c_str(), work);
         g_nav_event.clear();
-        g_nav_work_sum = g_nav_work_max = 0;
+        g_nav_work_sum = g_nav_work_max = g_nav_page_max = g_nav_spawn_max = g_nav_view_max = 0;
         g_nav_work_n = 0;
         fflush(log);
     }
@@ -5317,6 +5348,9 @@ struct NavScript {
             wait = st.n;
         } else if (st.op == "rs") {
             rs = st.n + 1;
+        } else if (st.op == "type") {   // "type TEXT": typed as a keyboard would (into the field or keyboard on screen)
+            io.AddInputCharactersUTF8(st.arg.c_str());
+            wait = 6;
         } else if (st.op == "idle") {
             idle = st.n;
         } else if (st.op == "until") {

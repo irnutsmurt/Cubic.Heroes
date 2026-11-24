@@ -68,6 +68,7 @@ ENTRIES_MAX = 5000
 CHCHAR_MAX = 4 * 1024 * 1024
 THUMB_MAX = 512 * 1024
 THUMB_DIM_MAX = 1024
+THUMB_WORKERS = 6                     # thumbnails fetched at once (raw files; a rate limit stops them all)
 AUTO_CHECK_S = 10 * 60
 RATE_LIMIT_DEFAULT_S = 15 * 60
 TIMEOUT_S = 20
@@ -543,33 +544,46 @@ class Store:
     def thumb_path(self, entry):
         return os.path.join(self.dir, "thumbs", entry["thumb"]["sha256"][:32] + ".rle")
 
-    def fetch_thumbs(self, entries, budget=200, deadline_s=60):
+    def fetch_thumbs(self, entries, budget=200, deadline_s=60, workers=THUMB_WORKERS):
         """the thumbnails not cached yet, each checked (size, SHA-256, the renderer's PNG form) and kept as the
-        launcher's picture; stops at the budget, the deadline, a rate limit or no connection. -> (made, failed)"""
-        made, failed, t0 = 0, 0, self.clock()
-        for e in entries:
-            p = self.thumb_path(e)
-            if os.path.isfile(p):
-                continue
-            if made + failed >= budget or self.clock() - t0 > deadline_s or (self.state.get("retry_after") or 0) > self.clock():
-                break
+        launcher's picture, a few at a time (workers); stops at the budget, the deadline, a rate limit or no
+        connection. -> (made, failed)"""
+        import concurrent.futures
+        import threading
+        t0 = self.clock()
+        todo = [e for e in entries if not os.path.isfile(self.thumb_path(e))][:budget]
+        stop = threading.Event()
+        counts = {"made": 0, "failed": 0}
+        lock = threading.Lock()
+
+        def one(e):
+            if stop.is_set() or self.clock() - t0 > deadline_s or (self.state.get("retry_after") or 0) > self.clock():
+                stop.set()
+                return
             try:
                 r = self.get(resolve(self.base, e["thumb"]["path"]), None, THUMB_MAX)
                 ra = _retry_after(r, self.clock())
                 if ra:
-                    self.state.update(retry_after=ra)
-                    self._save_state()
-                    break
+                    with lock:
+                        self.state.update(retry_after=ra)
+                        self._save_state()
+                    stop.set()
+                    return
                 if r.status != 200 or len(r.body) != e["thumb"]["size"] or _sha(r.body) != e["thumb"]["sha256"]:
                     raise StoreError("the thumbnail does not match the catalog")
-                _write_atomic(p, thumb_rle(r.body))
-                made += 1
+                _write_atomic(self.thumb_path(e), thumb_rle(r.body))
+                with lock:
+                    counts["made"] += 1
             except (OSError, TimeoutError):
-                break   # offline: the rest stay as placeholders
+                stop.set()   # offline: the rest stay as placeholders
             except StoreError as err:
-                failed += 1
+                with lock:
+                    counts["failed"] += 1
                 self.log("warning", f"store: thumbnail of {e['id']}: {err}")
-        return made, failed
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+            list(pool.map(one, todo))
+        return counts["made"], counts["failed"]
 
     def entries(self, savedata):
         """the cached catalog's characters, each with where it is: in_library (its library id), installed (its folder
