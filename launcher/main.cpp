@@ -3879,8 +3879,9 @@ static std::string font_path()
 // step a line -- up, down, left, right (the D-pad), a, b, x, y, lb, rb, menu, view [times]; rs FRAMES (the right
 // stick down); wait FRAMES; shot NAME (the launcher saves its own frame, NAME.bmp beside the script); quit. Each step
 // is logged with the page, any dialog and the focused item after it settles (FILE.log). expect TEXT stops the test
-// unless the focus is on TEXT; see TEXT unless a title with TEXT is wholly in view. --nav-size WxH: the test window's
-// size (0.2.0-beta.5: the Steam Deck's 1280x800 and 1280x720 tested); a test's window placement is never remembered
+// unless the focus is on TEXT; see TEXT[|TEXT2...] unless a title with one of them is wholly in view. --nav-size WxH:
+// the test window's size (0.2.0-beta.5: the Steam Deck's 1280x800 and 1280x720 tested); a test's window placement is
+// never remembered
 struct NavScript {
     struct Step { std::string op; int n = 1; std::string arg; };
     std::vector<Step> steps;
@@ -4017,8 +4018,14 @@ struct NavScript {
             }
         } else if (st.op == "see") {   // a title with this text wholly in view (the last frame), or the test stops: a
             // result the controller's player can't see, or a card the D-pad can't reach, is caught by its title
-            bool seen = false;
-            for (const std::string& t : g_nav_titles) seen = seen || t.find(st.arg) != std::string::npos;
+            bool seen = false;   // "see A|B": either of them
+            for (size_t from = 0; from <= st.arg.size() && !seen;) {
+                size_t bar = st.arg.find('|', from);
+                if (bar == std::string::npos) bar = st.arg.size();
+                const std::string want = st.arg.substr(from, bar - from);
+                for (const std::string& t : g_nav_titles) seen = seen || (!want.empty() && t.find(want) != std::string::npos);
+                from = bar + 1;
+            }
             if (!seen) {
                 if (log) fprintf(log, "FAILED: expected \"%s\" in view, the focus on \"%s\": the test stops here\n",
                                  st.arg.c_str(), g_focus_label.c_str());
