@@ -11,7 +11,11 @@ reached its quit. The scripts press nothing that changes a setting or the instal
 runner checks that no file of the installation changed, its logs aside. Every window stays hidden
 (tests/desktop_guard.py); the update check runs offline.
 
+Every script runs at each of --sizes, the test window's size (--nav-size): by default 1280x800 (the Steam Deck's) and
+1280x720 -- the sizes at which a result card first fell below the D-pad's reach (0.2.0-beta.5).
+
   py -3 tests/launcher_nav_pages.py --install <installation> [--launcher <the launcher to test>] [--only settings_tabs]
+      [--sizes 1280x800,1280x720]
 
 The launcher tested is the installation's own unless --launcher names another (a build). The scripts' logs and their
 pictures (shot steps, BMP) go to --work.
@@ -58,9 +62,9 @@ def snapshot(root):
     return out
 
 
-def run(script, launcher, install, work, timeout):
-    name = os.path.splitext(os.path.basename(script))[0]
-    d = os.path.join(work, name)
+def run(script, launcher, install, work, timeout, size):
+    name = os.path.splitext(os.path.basename(script))[0] + " at " + size
+    d = os.path.join(work, size, os.path.splitext(os.path.basename(script))[0])
     shutil.rmtree(d, ignore_errors=True)
     os.makedirs(d)
     path = os.path.join(d, os.path.basename(script))
@@ -69,7 +73,7 @@ def run(script, launcher, install, work, timeout):
     desktop_guard.launcher_env(env)   # hidden (offscreen on Linux)
     env["HTTP_PROXY"] = env["HTTPS_PROXY"] = "http://127.0.0.1:9"   # offline: the update check fails as without a network
     env.pop("NO_PROXY", None)
-    p = subprocess.Popen([launcher, "--install-dir", install, "--nav-test", path], cwd=d, env=env,
+    p = subprocess.Popen([launcher, "--install-dir", install, "--nav-test", path, "--nav-size", size], cwd=d, env=env,
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     watch = desktop_guard.Watch(p, "the launcher (nav-test)").start() if hasattr(desktop_guard, "Watch") else None
     try:
@@ -96,7 +100,7 @@ def run(script, launcher, install, work, timeout):
     problems += [ln for ln in lines if " page=" not in ln and ln.strip()]   # FAILED: ..., a picture not taken
     if not problems and (ran != steps or rc not in (0, None)):
         problems.append(f"{len(ran)} of {len(steps)} steps ran, exit {rc}")
-    expects = sum(1 for s in steps if s == "expect")
+    expects = sum(1 for s in steps if s in ("expect", "see"))
     for ln in (problems or [f"{expects} expectations met, {len(steps)} steps, exit {rc}"]):
         print(("FAIL" if problems else "PASS") + f": {name}: {ln}", flush=True)
     return not problems
@@ -109,7 +113,13 @@ def main():
     ap.add_argument("--work", default=os.path.join(ROOT, "build", "qual", "launcher-nav"))
     ap.add_argument("--only", nargs="*", help="script names (without .nav)")
     ap.add_argument("--timeout", type=int, default=600)
+    ap.add_argument("--sizes", default="1280x800,1280x720", help="the test window's sizes, each WxH (960x600 at least)")
     a = ap.parse_args()
+    sizes = [s.strip() for s in a.sizes.split(",") if s.strip()]
+    for s in sizes:
+        w, _, h = s.partition("x")
+        if not (w.isdigit() and h.isdigit() and int(w) >= 960 and int(h) >= 600):
+            sys.exit(f"--sizes: {s!r} is not WxH of 960x600 or more")
     install = os.path.abspath(a.install)
     launcher = os.path.abspath(a.launcher or os.path.join(install, EXE))
     if not os.path.isfile(launcher):
@@ -122,7 +132,7 @@ def main():
     work = os.path.abspath(a.work)
     os.makedirs(work, exist_ok=True)
     before = snapshot(install)
-    ok = all([run(s, launcher, install, work, a.timeout) for s in scripts])
+    ok = all([run(s, launcher, install, work, a.timeout, size) for size in sizes for s in scripts])
     after = snapshot(install)
     changed = sorted(k for k in set(before) | set(after) if before.get(k) != after.get(k))
     if changed:

@@ -774,6 +774,7 @@ static bool g_focus_owns_lr = false;  // the focused item uses left and right it
 static bool g_quit = false;   // the launcher closes after this frame
 static bool g_nav_test = false;   // a scripted controller test (--nav-test) drives the launcher: the game never starts
 static std::string g_nav_event;   // what the test's log notes beside the next step
+static std::vector<std::string> g_nav_titles;   // the test's "see": the titles drawn wholly in view in the last frame
 static float g_nav_rstick = 0;    // the test's right stick (beside a real controller's own, which the backend reports)
 
 static bool pressed(Act a)
@@ -1062,11 +1063,16 @@ static void title(const char* t, float size = kTitle)
         else line = next;
     }
     if (!line.empty() || lines.empty()) lines.push_back(line);
+    ImRect drawn;
     for (size_t i = 0; i < lines.size(); i++) {
         const ImVec2 at = ImGui::GetCursorScreenPos();
         pix_text(dl, ImVec2(at.x, at.y + p), lines[i].c_str(), p, c);
         ImGui::Dummy(ImVec2(pix_w(lines[i].c_str(), p), p * 9));
+        if (i == 0) drawn = ImRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax());
+        else drawn.Add(ImRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax()));
     }
+    // a scripted controller test's "see": this title wholly in the visible part of its page (a card's clip is the page's)
+    if (g_nav_test && ImGui::GetCurrentWindow()->ClipRect.Contains(drawn)) g_nav_titles.push_back(t);
 }
 
 // a card: a sunken retro window inside the page
@@ -3839,12 +3845,15 @@ static std::string font_path()
 // --nav-test FILE: a controller driven by a script, inside the launcher only (no input reaches any other window): one
 // step a line -- up, down, left, right (the D-pad), a, b, x, y, lb, rb, menu, view [times]; rs FRAMES (the right
 // stick down); wait FRAMES; shot NAME (the launcher saves its own frame, NAME.bmp beside the script); quit. Each step
-// is logged with the page, any dialog and the focused item after it settles (FILE.log)
+// is logged with the page, any dialog and the focused item after it settles (FILE.log). expect TEXT stops the test
+// unless the focus is on TEXT; see TEXT unless a title with TEXT is wholly in view. --nav-size WxH: the test window's
+// size (0.2.0-beta.5: the Steam Deck's 1280x800 and 1280x720 tested); a test's window placement is never remembered
 struct NavScript {
     struct Step { std::string op; int n = 1; std::string arg; };
     std::vector<Step> steps;
     size_t at = 0;
     int wait = 30, phase = 0, done_n = 0, rs = 0, idle = 0, until = 0, seek = 0, seek_t = 0;
+    bool seek_held = false;   // the seek's key is down (pressed, its release not yet sent)
     std::string until_text, seek_text;
     ImGuiKey seek_key = ImGuiKey_None;
     std::string dir, shot;
@@ -3859,7 +3868,7 @@ struct NavScript {
             Step st;
             if (!(ls >> st.op) || st.op[0] == '#') continue;
             std::string rest;   // a count, or a name (a shot's name is a name, even "01-play")
-            if (st.op == "expect") {   // "expect TEXT": the rest of the line
+            if (st.op == "expect" || st.op == "see") {   // "expect TEXT", "see TEXT": the rest of the line
                 std::getline(ls, rest);
                 st.arg = rest.substr(std::min(rest.size(), rest.find_first_not_of(' ')));
             } else if (st.op == "until" || st.op == "seek") {   // "until N TEXT", "seek N DIR TEXT": at most N
@@ -3925,10 +3934,14 @@ struct NavScript {
             else {
                 --seek;
                 const int at_t = seek_t++ % 20;   // down for 2 frames, up, then the frames a move takes
-                if (at_t == 0) io.AddKeyAnalogEvent(seek_key, true, 1.0f);
-                else if (at_t == 2) io.AddKeyAnalogEvent(seek_key, false, 0.0f);
+                if (at_t == 0) { io.AddKeyAnalogEvent(seek_key, true, 1.0f); seek_held = true; }
+                else if (at_t == 2) { io.AddKeyAnalogEvent(seek_key, false, 0.0f); seek_held = false; }
                 if (seek > 0) return;
             }
+            // the key let go however the seek ended: one left held (its target reached before its release) went on
+            // repeating with no controller connected to report it up, and moved the focus by itself (0.2.0-beta.5,
+            // Linux: onto a Settings value, which the script's next left or right then changed)
+            if (seek_held) { io.AddKeyAnalogEvent(seek_key, false, 0.0f); seek_held = false; }
         }
         if (until > 0) {   // "until N TEXT": until the focus is on TEXT (part of its label) and no operation is on
             // screen, N frames at most -- then the script goes on (an expect after it says whether it got there)
@@ -3964,6 +3977,17 @@ struct NavScript {
             // a script out of step must never press A on something it didn't mean to
             if (g_focus_label.find(st.arg) == std::string::npos) {
                 if (log) fprintf(log, "FAILED: expected the focus on \"%s\", it is on \"%s\": the test stops here\n",
+                                 st.arg.c_str(), g_focus_label.c_str());
+                at = steps.size();
+                g_quit = true;
+                return;
+            }
+        } else if (st.op == "see") {   // a title with this text wholly in view (the last frame), or the test stops: a
+            // result the controller's player can't see, or a card the D-pad can't reach, is caught by its title
+            bool seen = false;
+            for (const std::string& t : g_nav_titles) seen = seen || t.find(st.arg) != std::string::npos;
+            if (!seen) {
+                if (log) fprintf(log, "FAILED: expected \"%s\" in view, the focus on \"%s\": the test stops here\n",
                                  st.arg.c_str(), g_focus_label.c_str());
                 at = steps.size();
                 g_quit = true;
@@ -4052,7 +4076,10 @@ int main(int argc, char** argv)
     if (cli_args.remember && !cli_args.install_dir.empty()) remember_root(g_root);
     bool after_update = false, update_failed = false;
     std::string show;
+    int nav_w = 0, nav_h = 0;   // --nav-size WxH: a scripted test's window size
     for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--nav-size") && i + 1 < argc && sscanf(argv[i + 1], "%dx%d", &nav_w, &nav_h) != 2)
+            nav_w = nav_h = 0;
         if (!strcmp(argv[i], "--after-update")) after_update = true;
         if (!strcmp(argv[i], "--update-failed")) update_failed = true;
         if (!strcmp(argv[i], "--show") && i + 1 < argc) show = argv[i + 1];   // a dialog opened at start (the review's)
@@ -4067,6 +4094,11 @@ int main(int argc, char** argv)
         }
     }
     g_prefs.load();
+    if (g_nav_test && nav_w >= 960 && nav_h >= 600) {   // the test's size (the window's smallest is 960x600)
+        g_prefs.w = nav_w;
+        g_prefs.h = nav_h;
+        g_prefs.maximized = false;
+    }
     {   // M11.2b: a root that can't be written (a read-only or protected folder, a full drive) said at once
         std::string why;
         if (!root_writable(why))
@@ -4262,6 +4294,7 @@ int main(int argc, char** argv)
         g_prompt_choice = setting("LAUNCHER_PROMPTS", "auto");
         stick_nav(io);
         if (nav.active()) nav.inject(io);   // the scripted controller (--nav-test)
+        g_nav_titles.clear();   // its "see" has read the last frame's; this frame's are gathered as they're drawn
         ImGui::NewFrame();
         scroll_when_stuck();
         if (!checked_updates && !g_st.settings.is_null()) {
@@ -4283,14 +4316,16 @@ int main(int argc, char** argv)
             wrote_health = true;
         }
     }
-    // the window's placement for next time
-    const Uint32 fl = SDL_GetWindowFlags(win);
-    g_prefs.maximized = (fl & SDL_WINDOW_MAXIMIZED) != 0;
-    if (!g_prefs.maximized && !(fl & (SDL_WINDOW_MINIMIZED | SDL_WINDOW_FULLSCREEN | SDL_WINDOW_FULLSCREEN_DESKTOP))) {
-        SDL_GetWindowPosition(win, &g_prefs.x, &g_prefs.y);
-        SDL_GetWindowSize(win, &g_prefs.w, &g_prefs.h);
+    // the window's placement for next time (not a scripted test's hidden window, whose size the test may have chosen)
+    if (!g_nav_test) {
+        const Uint32 fl = SDL_GetWindowFlags(win);
+        g_prefs.maximized = (fl & SDL_WINDOW_MAXIMIZED) != 0;
+        if (!g_prefs.maximized && !(fl & (SDL_WINDOW_MINIMIZED | SDL_WINDOW_FULLSCREEN | SDL_WINDOW_FULLSCREEN_DESKTOP))) {
+            SDL_GetWindowPosition(win, &g_prefs.x, &g_prefs.y);
+            SDL_GetWindowSize(win, &g_prefs.w, &g_prefs.h);
+        }
+        g_prefs.save();
     }
-    g_prefs.save();
     g_queries.clear();
     g_op.reset();
     ImGui_ImplSDLRenderer2_Shutdown();

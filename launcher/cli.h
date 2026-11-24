@@ -45,7 +45,7 @@ struct Args {
     std::string display, fps, vsync;         // --play's display for this session (DOTHEROES_* settings)
     std::string resolution;                  // M11.2f: --resolution, the rendering resolution (native or WxH)
     int width = 0, height = 0;
-    bool window_flags = false;               // --after-update, --show, --nav-test, --page: options of the window
+    bool window_flags = false;               // --after-update, --show, --nav-test, --nav-size, --page: the window's
     std::string error;                       // a usage error
 };
 
@@ -197,7 +197,10 @@ static Args parse(const std::vector<std::string>& av)
         }
         // the launcher window's own options (reviews, the controller test, the update's restart)
         else if (o == "--after-update" || o == "--update-failed" || o == "--after-game") a.window_flags = true;
-        else if (o == "--show" || o == "--nav-test" || o == "--page") { value("a value"); a.window_flags = true; }
+        else if (o == "--show" || o == "--nav-test" || o == "--nav-size" || o == "--page") {
+            value("a value");
+            a.window_flags = true;
+        }
         else if (a.error.empty()) a.error = "unknown option " + av[i] + " (--help lists them)";
     }
     const bool display0 = !a.display.empty() || !a.fps.empty() || !a.vsync.empty() || a.width || a.height || !a.resolution.empty();

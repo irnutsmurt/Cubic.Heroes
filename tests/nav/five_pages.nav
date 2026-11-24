@@ -13,6 +13,10 @@ expect Checking
 wait 120
 until 6000 Check for updates
 expect Check for updates
+# the check's result brought into view under the button that keeps the focus (at 1280x800 and below it was left
+# out of view, and a card below the view is out of the D-pad's reach)
+wait 20
+see Offline
 shot 1-play
 rb
 wait 60
@@ -31,8 +35,8 @@ expect Remove from Steam
 left
 wait 20
 expect Add to Steam
-down
-wait 30
+# the shortcuts' card may lie below the view: a press that reaches nothing scrolls the page, the next reaches it
+seek 2000 down -menu shortcut
 expect -menu shortcut
 right
 wait 20
@@ -45,11 +49,18 @@ expect Open the artwork pages
 right
 wait 20
 expect Choose the poster image
+# back to the left column (the D-pad keeps the column it last moved to)
+left
+wait 20
+expect Open the artwork pages
 seek 20000 down Choose the hero image
 expect Choose the hero image
 shot 3-manage-art
 seek 20000 down previous game build
 expect previous game build
+# Uninstall beside it (1280x720) or under it (1280x800): right reaches it beside, does nothing otherwise
+right
+wait 20
 seek 20000 down Uninstall the game
 expect Uninstall the game
 seek 20000 down Remove the launcher

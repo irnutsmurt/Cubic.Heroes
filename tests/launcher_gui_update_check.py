@@ -24,6 +24,11 @@ mirror (a throwaway CA trusted through SSL_CERT_FILE; CUBIC_UPDATE_SOURCE points
             update channel (a beta's: prereleases) -- never the stable channel for want of the settings yet
   crash     the helper killed in the middle of its swap: the next start of the launcher finishes or undoes it
             (recover-launcher) -- a launcher that answers --version afterwards, A or B whole, never a mixture
+update and back run at each of --sizes, the window's size (--nav-size): by default 1280x800 (the Steam Deck's) and
+1280x720. For them the copy's own check at start is off (LAUNCHER_CHECK_UPDATES=0, a player's setting), so the result
+of Check for updates always arrives under the button that has the focus -- the order in which Download it fell out of
+the D-pad's reach at those sizes (0.2.0-beta.5); the scripts then see the result's title in view and reach Download
+it, Restart and update and Go back with the D-pad. startup and early turn it on again.
 Every window is hidden (the desktop guard: offscreen on Linux); each run ends with no launcher of this test left.
 Exit 1 if any case fails. The scripts' logs (FILE.log, the launcher's own) are kept in WORK for the record.
 """
@@ -78,6 +83,7 @@ until 3000 Checking
 wait 30
 until 400000 Check for updates
 wait 30
+see Version
 down
 expect Download it
 a
@@ -114,6 +120,7 @@ until 3000 Checking
 wait 30
 until 400000 Check for updates
 wait 30
+see Version
 seek 400000 down previous launcher version
 expect previous launcher version
 a
@@ -232,6 +239,20 @@ class Run:
         desktop_guard.launcher_env(env)   # every launcher window of this test hidden (offscreen on Linux)
         env.update(SSL_CERT_FILE=self.tls.ca, CUBIC_UPDATE_SOURCE=self.mirror.source, PYTHONIOENCODING="utf-8")
         self.env = env
+        self.size = a.sizes[0]
+        self.check_at_start("0")
+
+    def check_at_start(self, value):
+        """the copy's LAUNCHER_CHECK_UPDATES (the window's own check when it starts), set through its command line;
+        the comparison of the installation's settings before and after a case takes it in"""
+        r = subprocess.run(self.cli + ["--set", f"LAUNCHER_CHECK_UPDATES={value}"], cwd=self.work, env=self.env,
+                           capture_output=True, text=True, timeout=300, stdin=subprocess.DEVNULL)
+        if r.returncode != 0:
+            raise SystemExit(f"--set LAUNCHER_CHECK_UPDATES={value}: exit {r.returncode}: {r.stderr.strip()[-300:]}")
+        now = tree(self.root, ("config",))
+        self.install_before = {k: v for k, v in self.install_before.items()
+                               if not k.startswith("config" + os.sep) and k != "config"}
+        self.install_before.update(now)
 
     def unpack_over(self, pkg, dest):
         tmp = dest + ".unpack"
@@ -316,7 +337,7 @@ class Run:
         with open(path, "w", encoding="utf-8") as f:
             f.write(script)
         t0 = time.time()
-        p = subprocess.Popen(self.cli + ["--nav-test", path, *args], cwd=self.work, env=self.env,
+        p = subprocess.Popen(self.cli + ["--nav-test", path, "--nav-size", self.size, *args], cwd=self.work, env=self.env,
                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         watch = desktop_guard.Watch(p, "the launcher").start() if hasattr(desktop_guard, "Watch") else None
         try:
@@ -412,11 +433,12 @@ class Run:
             bad.append(f"the installation changed: {ch[:5]}")
         if "Restart and update" not in log:
             bad.append("the script never reached Restart and update: " + log[-600:])
-        step(f"update through the window: {self.a_version} -> {self.b_version}, B's window up", bad,
+        step(f"update through the window at {self.size}: {self.a_version} -> {self.b_version}, B's window up", bad,
              log=log[-2000:])
 
     def startup(self):
         """the window's start-up check, again and again, over a mirror that holds B whole before the first start"""
+        self.check_at_start("1")
         self.publish(self.a.to)
         listing = open(os.path.join(self.mirror.dir, "releases.json"), encoding="utf-8").read()
         misses, firsts, viol = [], [], None
@@ -454,6 +476,7 @@ class Run:
 
     def early(self):
         # Check for updates pressed before the settings may have arrived: no check of the stable channel
+        self.check_at_start("1")
         self.publish(self.a.to)
         wrong, total = [], 0
         for i in range(self.a.runs):
@@ -503,7 +526,7 @@ class Run:
             bad.append(f"--version {self.version()}")
         if "previous launcher version" not in log:
             bad.append("the script never reached Go back: " + log[-600:])
-        step(f"back through the window: {self.a_version} again", bad, log=log[-2000:])
+        step(f"back through the window at {self.size}: {self.a_version} again", bad, log=log[-2000:])
 
     def broken_b(self):
         """B whose window never comes up: its program exits at once (its --version still answers B: the swap's own
@@ -638,8 +661,16 @@ class Run:
         # launchers it starts are detached from this run), is ended at once and fails the run
         folder_watch = desktop_guard.FolderWatch([self.work]).start() if hasattr(desktop_guard, "FolderWatch") else None
         try:
-            for c in self.a.only or ("update", "back", "failed", "crash", "startup", "early"):
-                getattr(self, c)()
+            cases = self.a.only or ("update", "back", "failed", "crash", "startup", "early")
+            for size in self.a.sizes:   # the D-pad's reach depends on the window's size
+                self.size = size
+                for c in cases:
+                    if c in ("update", "back"):
+                        getattr(self, c)()
+            self.size = self.a.sizes[0]
+            for c in cases:
+                if c not in ("update", "back"):
+                    getattr(self, c)()
         finally:
             self.end_launchers()
             self.tls.close()
@@ -663,7 +694,14 @@ def main():
     ap.add_argument("--work", default=os.path.join(ROOT, "build", "qual", "launcher-gui-update"))
     ap.add_argument("--only", nargs="*", choices=("update", "back", "failed", "crash", "startup", "early"))
     ap.add_argument("--runs", type=int, default=10, help="startup: how many window starts")
+    ap.add_argument("--sizes", default="1280x800,1280x720",
+                    help="update and back: the window's sizes, each WxH (960x600 at least)")
     a = ap.parse_args()
+    a.sizes = [x.strip() for x in a.sizes.split(",") if x.strip()]
+    for x in a.sizes:
+        w, _, h = x.partition("x")
+        if not (w.isdigit() and h.isdigit() and int(w) >= 960 and int(h) >= 600):
+            sys.exit(f"--sizes: {x!r} is not WxH of 960x600 or more")
     a.frm, a.to = os.path.abspath(a.frm), os.path.abspath(a.to)
     return Run(a).main()
 
