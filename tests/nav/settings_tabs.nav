@@ -8,6 +8,8 @@ rb
 wait 60
 rb
 wait 60
+rb
+wait 60
 until 20000 Graphics
 expect Graphics
 down

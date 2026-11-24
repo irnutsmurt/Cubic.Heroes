@@ -628,6 +628,9 @@ static const PixIcon kIcons[] = {
     { { "...####...", ".##++####.", ".#++#####.", "##+#######", "####..####", "####..####", "#########*", ".#######*.",
         "..##****..", "...####..." },   // a disc (a file in the browser)
       { IM_COL32(196, 204, 224, 255), IM_COL32(250, 250, 255, 255), IM_COL32(130, 140, 170, 255), 0 } },
+    { { "..######..", ".########.", ".#++++++#.", ".#+*++*+#.", "..++++++..", "...gggg...", "..gggggg..", ".+gggggg+.",
+        "..gggggg..", "..**..**.." },   // a hero: Characters
+      { IM_COL32(60, 150, 80, 255), IM_COL32(248, 200, 170, 255), IM_COL32(70, 44, 30, 255), IM_COL32(96, 178, 100, 255) } },
 };
 enum { kIconFolder = 8, kIconDisc = 9 };
 static void pix_icon(ImDrawList* dl, ImVec2 pos, const PixIcon& ic, float p)
@@ -1148,6 +1151,7 @@ struct Op {
     std::deque<std::string> log;
     json::Value result;
     std::function<void(const json::Value&)> then;
+    std::string pending_key;   // M12: sent once when the worker asks for it ("needs": key), then wiped
     std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
 };
 
@@ -1214,6 +1218,10 @@ static void pump(Op& op)
             if (op.log.size() > 200) op.log.pop_front();
         } else if (ev == "result") {
             op.result = e;
+        } else if (ev == "needs" && e["what"].str() == "key") {
+            op.job->send_line(op.pending_key.empty() ? "nokey" : "key " + op.pending_key);
+            std::fill(op.pending_key.begin(), op.pending_key.end(), '\0');
+            op.pending_key.clear();
         }
     }
     if (!op.finished && op.job->done()) {
@@ -1362,13 +1370,20 @@ static void browse(const std::string& t, bool folders, std::vector<std::string> 
 // --- the on-screen keyboard: letters, digits and a few signs; A types, X deletes, Y a space, MENU done ---
 struct Osk {
     bool open = false, shift = false;
+    bool secret = false;   // M12: shown as dots (the PS3 save key)
     std::string title, text;
     std::function<void(const std::string&)> on_done;
 } g_osk;
 
-static void type_text(const std::string& t, const std::string& init, std::function<void(const std::string&)> f)
+static void type_text(const std::string& t, const std::string& init, std::function<void(const std::string&)> f,
+                      bool secret = false)
 {
-    g_osk = { true, false, t, init, std::move(f) };
+    g_osk = Osk();
+    g_osk.open = true;
+    g_osk.secret = secret;
+    g_osk.title = t;
+    g_osk.text = init;
+    g_osk.on_done = std::move(f);
 }
 
 // ============================================================================================================
@@ -1684,9 +1699,9 @@ static void auto_prepare_check()
 
 // 0.2.0-beta.5: five pages (from seven) -- the updates are on Play, the install, the shaders, Steam and the shortcuts
 // on Install / Manage; Settings holds settings only
-enum Page { kPlay, kManage, kSaves, kSettings, kDiagnostics, kPages };
-static const char* kPageNames[kPages] = { "Play", "Install / Manage", "Saves", "Settings", "Diagnostics" };
-static const int kPageIcon[kPages] = { 0, 1, 4, 6, 7 };   // kIcons: the sword, chest, book, gear, glass
+enum Page { kPlay, kManage, kSaves, kCharacters, kSettings, kDiagnostics, kPages };
+static const char* kPageNames[kPages] = { "Play", "Install / Manage", "Saves", "Characters", "Settings", "Diagnostics" };
+static const int kPageIcon[kPages] = { 0, 1, 4, 10, 6, 7 };   // kIcons: the sword, chest, book, hero, gear, glass
 static int g_page = kPlay;
 static bool g_focus_updates = false;   // Play's update controls take the focus (and scroll into view) when next drawn
 
@@ -2545,6 +2560,305 @@ static void page_saves()
     ImGui::EndChild();
 }
 
+// --- characters (M12): the local character library (tools/worker.py characters, docs/CHARACTERS.md) ---
+// the previews the worker leaves as preview/*.rgb ("RGB1", u32 width, u32 height, the pixels): no PNG decoder here
+struct PreviewTex { SDL_Texture* tex = nullptr; int w = 0, h = 0; long long stamp = -1; };
+static std::map<std::string, PreviewTex> g_previews;
+static SDL_Renderer* g_ren = nullptr;
+
+static const PreviewTex* preview_tex(const std::string& path)
+{
+    if (path.empty() || !g_ren) return nullptr;
+    std::error_code ec;
+    const fs::path p = u8path(path);
+    const auto t = fs::last_write_time(p, ec);
+    if (ec) return nullptr;
+    const long long stamp = (long long)t.time_since_epoch().count();
+    PreviewTex& e = g_previews[path];
+    if (e.tex && e.stamp == stamp) return &e;
+    if (e.tex) { SDL_DestroyTexture(e.tex); e.tex = nullptr; }
+    e.stamp = stamp;
+    std::ifstream f(p, std::ios::binary);
+    char head[12];
+    if (!f.read(head, 12) || memcmp(head, "RGB1", 4) != 0) return nullptr;
+    uint32_t w, h;
+    memcpy(&w, head + 4, 4);
+    memcpy(&h, head + 8, 4);
+    if (w == 0 || h == 0 || w > 4096 || h > 4096) return nullptr;
+    std::vector<unsigned char> px((size_t)w * h * 3);
+    if (!f.read((char*)px.data(), (std::streamsize)px.size())) return nullptr;
+    e.tex = SDL_CreateTexture(g_ren, SDL_PIXELFORMAT_RGB24, SDL_TEXTUREACCESS_STATIC, (int)w, (int)h);
+    if (!e.tex) return nullptr;
+    SDL_UpdateTexture(e.tex, nullptr, px.data(), (int)w * 3);
+    e.w = (int)w; e.h = (int)h;
+    return &e;
+}
+
+static void preview_image(const std::string& path, float height)
+{
+    const PreviewTex* t = preview_tex(path);
+    const ImVec2 size(t ? height * t->w / t->h : height, height);
+    const ImVec2 a = ImGui::GetCursorScreenPos();
+    if (t) ImGui::Image((ImTextureID)(intptr_t)t->tex, size);
+    else {
+        ImGui::Dummy(size);
+        ImGui::GetWindowDrawList()->AddRectFilled(a, ImVec2(a.x + size.x, a.y + size.y), IM_COL32(59, 63, 70, 255));
+    }
+}
+
+struct Chars {
+    json::Value list;            // the worker's characters --char-action list
+    bool asked = false, loading = false;
+    std::string search;          // the list's filter (name, class, creator, tags)
+    std::string open_id;         // the character shown in detail, if any
+} g_chars;
+
+static void chars_refresh()
+{
+    if (g_root.empty() || g_chars.loading) return;
+    g_chars.loading = true;
+    g_chars.asked = true;
+    run("characters", { "--install", install_dir(), "--char-action", "list" }, "", false, [](const json::Value& r) {
+        g_chars.loading = false;
+        if (r["ok"].truthy()) g_chars.list = r["data"];
+    });
+}
+
+static const json::Value* chars_find(const std::string& id)
+{
+    const json::Value& cs = g_chars.list["characters"];
+    for (size_t i = 0; i < cs.size(); i++)
+        if (cs[i]["id"].str() == id) return &cs[i];
+    return nullptr;
+}
+
+static void chars_import(const std::vector<std::string>& paths, const std::string& key = "", bool keep = false);
+
+// a key typed by the player: asked for, then whether to keep it; sent to the worker over its control channel only
+static void chars_ask_key(const std::vector<std::string>& paths, int n)
+{
+    const json::Value& k = g_chars.list["key"];
+    const std::string store = k["store"].is_null() ? "" : k["store"].str();
+    ask(n == 1 ? "A character saved on a PS3" : std::to_string(n) + " characters saved on a PS3",
+        "Characters copied from a PS3 are still encrypted by the console's save system; the game shows them blank. "
+        "Importing them needs your PS3 save key (the console's save-data key, 32 hexadecimal digits). Cubic.Heroes "
+        "doesn't include it. The key is only used on this computer, and is checked on your character before anything "
+        "is imported.", "Enter the key", false, [paths, store] {
+            type_text("Your PS3 save key (32 hexadecimal digits)", "", [paths, store](const std::string& key) {
+                if (key.empty()) return;
+                if (store.empty()) { chars_import(paths, key, false); return; }
+                g_confirm = Confirm();
+                g_confirm.open = true;
+                g_confirm.title = "Keep the key on this computer?";
+                g_confirm.text = "Kept by " + store + ", protected by your system, so you don't type it again. "
+                                 "It is only kept if it decrypts your character. You can forget it on this page.";
+                g_confirm.yes = "Keep it";
+                g_confirm.no = "Just this once";
+                g_confirm.focus_yes = true;
+                g_confirm.on_yes = [paths, key] { chars_import(paths, key, true); };
+                g_confirm.on_no = [paths, key] { chars_import(paths, key, false); };
+            }, true);
+        });
+}
+
+static void chars_import(const std::vector<std::string>& paths, const std::string& key, bool keep)
+{
+    std::vector<std::string> a = { "--install", install_dir(), "--char-action", "import" };
+    for (const std::string& p : paths) { a.push_back("--paths"); a.push_back(p); }
+    if (!key.empty()) { a.push_back("--with-key"); if (keep) a.push_back("--keep-key"); }
+    const bool with_key = !key.empty();
+    Op* op = run("characters", a, "Importing characters", true, [paths, with_key](const json::Value& r) {
+        chars_refresh();
+        if (!r["ok"].truthy()) { show_result_error(r, "Importing didn't finish"); return; }
+        const json::Value& rs = r["data"]["results"];
+        int imported = 0, dup = 0, similar = 0, needs = 0, wrong = 0, bad = 0;
+        std::string lines;
+        for (size_t i = 0; i < rs.size(); i++) {
+            const std::string s = rs[i]["status"].str();
+            if (s == "imported") imported++;
+            else if (s == "duplicate") dup++;
+            else if (s == "similar") similar++;
+            else if (s == "needs-key") needs++;
+            else if (s == "wrong-key") wrong++;
+            else { bad++; lines += rs[i]["label"].str() + ": " + rs[i]["message"].str() + "\n"; }
+        }
+        const json::Value& errs = r["data"]["errors"];
+        for (size_t i = 0; i < errs.size(); i++) { bad++; lines += errs[i].str() + "\n"; }
+        if (needs && !with_key) { chars_ask_key(paths, needs); return; }
+        std::string text;
+        if (imported + similar) text += std::to_string(imported + similar) + " imported. ";
+        if (dup) text += std::to_string(dup) + " already in your library. ";
+        if (similar) text += std::to_string(similar) + " of them the same model as one you have (another name or settings). ";
+        if (wrong) text += std::to_string(wrong) + " not imported: the PS3 save key didn't decrypt them (a wrong key; "
+                           "nothing was changed or kept). ";
+        if (needs) text += std::to_string(needs) + " still need your PS3 save key. ";
+        if (bad) text += std::to_string(bad) + " couldn't be imported.";
+        if (!r["data"]["key_kept"].is_null() && r["data"]["key_kept"].str() != "this session")
+            text += " Your key is kept by " + r["data"]["key_kept"].str() + ".";
+        g_msg = { true, (imported + similar) ? "Characters imported" : "Nothing imported", text, lines,
+                  bad + wrong > 0 && imported + similar == 0, false };
+    });
+    if (op && !key.empty()) op->pending_key = key;
+}
+
+static void chars_install(const std::string& id)
+{
+    run("characters", { "--install", install_dir(), "--char-action", "install", "--id", id }, "Installing the character",
+        false, [](const json::Value& r) {
+            if (!r["ok"].truthy()) show_result_error(r, "Installing didn't finish");
+            else show_msg("Installed", "In the game: CONTINUE, \"Change characters?\" YES, then EDIT DATA -- or EDITOR, "
+                          "LOAD. Your saves were not changed.");
+            chars_refresh();
+        });
+}
+
+static void chars_detail(const json::Value& c)
+{
+    const std::string id = c["id"].str();
+    if (big_button("Back to the list", ImVec2(S(300), 0))) { g_chars.open_id.clear(); return; }
+    focus_first();
+    ImGui::Spacing();
+    title(c["label"].str("Character").c_str());
+    preview_image(c["views"].str(), floorf(std::min(S(300), ImGui::GetContentRegionAvail().x * 0.33f)));
+    text_col(col::dim, "Class: %s   --   %s", c["class"].str().c_str(),
+             c["installed"].is_null() ? "not installed in the game" : "installed in the game");
+    if (!c["creator"].is_null() && !c["creator"].str().empty()) text_col(col::dim, "Made by %s", c["creator"].str().c_str());
+    const json::Value& src = c["source"];
+    std::string from = src["kind"].str();
+    if (from == "hall-of-heroes") from = "the original Hall of Heroes";
+    else if (from == "community") from = "the Cubic.Heroes community store";
+    else if (src["decrypted_from_ps3_save"].truthy()) from = "a PS3 save (decrypted when imported)";
+    else if (from == "chchar") from = "a Cubic.Heroes character file";
+    else from = "your files";
+    text_col(col::dim, "From %s", from.c_str());
+    if (!c["description"].is_null() && !c["description"].str().empty()) text_col(col::text, "%s", c["description"].str().c_str());
+    int vox = 0;
+    for (size_t i = 0; i < c["voxels"].size(); i++) vox += (int)c["voxels"][i].num();
+    text_col(col::dim, "%d blocks in 6 poses; for 3D Dot Game Heroes (US)%s", vox,
+             c["preview_ok"].truthy() ? "" : "  --  no preview could be drawn");
+    ImGui::Spacing();
+    if (c["installed"].is_null()) {
+        if (big_button("Install in the game", ImVec2(S(300), 0), Kind::Primary)) chars_install(id);
+        ImGui::SameLine();
+    }
+    if (big_button("Export...", ImVec2(S(200), 0)))
+        browse("Export to which folder?", true, {}, "", "", [id](const std::string& dir) {
+            run("characters", { "--install", install_dir(), "--char-action", "export", "--id", id, "--out", dir },
+                "Exporting", false, [](const json::Value& r) {
+                    if (!r["ok"].truthy()) show_result_error(r, "Exporting didn't finish");
+                    else show_msg("Exported", "Saved as " + r["data"]["written"][(size_t)0].str() + ". It holds the character "
+                                  "and its previews only -- no PS3 save information.");
+                });
+        });
+    ImGui::SameLine();
+    if (big_button("Rename...", ImVec2(S(200), 0)))
+        type_text("A name for it in your library", c["label"].str(), [id](const std::string& name) {
+            if (name.empty()) return;
+            run("characters", { "--install", install_dir(), "--char-action", "rename", "--id", id, "--label", name },
+                "", false, [](const json::Value&) { chars_refresh(); });
+        });
+    ImGui::SameLine();
+    if (big_button("Remove", ImVec2(S(200), 0), Kind::Danger))
+        ask("Remove it from your library?", "\"" + c["label"].str() + "\" is removed from your library" +
+            (c["installed"].is_null() ? std::string(".") : std::string("; the copy installed in the game stays.")),
+            "Remove", true, [id] {
+                run("characters", { "--install", install_dir(), "--char-action", "delete", "--id", id, "--confirm" },
+                    "", false, [](const json::Value&) { g_chars.open_id.clear(); chars_refresh(); });
+            });
+}
+
+static void page_characters()
+{
+    if (!g_chars.asked) chars_refresh();
+    if (!g_chars.open_id.empty()) {
+        if (const json::Value* c = chars_find(g_chars.open_id)) { chars_detail(*c); return; }
+        g_chars.open_id.clear();
+    }
+    title("Characters");
+    text_col(col::dim, "Characters made in the game's editor: yours, imported ones, and ones saved on a PS3. Install one "
+                       "to choose it in the game.");
+    const std::vector<std::string> exts = { ".chchar", ".zip", ".edt" };
+    const float third = floorf((ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x * 2) / 3);
+    if (big_button("Import a file...", ImVec2(third, 0), Kind::Primary))
+        browse("Import characters", false, exts, "Characters (.chchar, .zip, DATA.EDT)", "",
+               [](const std::string& f) { chars_import({ f }); });
+    focus_first();
+    ImGui::SameLine();
+    if (big_button("Import a folder...", ImVec2(third, 0)))
+        browse("Import the characters in a folder (a PS3's SAVEDATA, for example)", true, {}, "", "",
+               [](const std::string& d) { chars_import({ d }); });
+    ImGui::SameLine();
+    if (big_button(g_chars.search.empty() ? "Search..." : "Clear the search", ImVec2(third, 0))) {
+        if (g_chars.search.empty()) type_text("Search: a name, class, creator or tag", "", [](const std::string& s) { g_chars.search = s; });
+        else g_chars.search.clear();
+    }
+    // the game's own edit-data folders it cannot use: copied from a PS3 by hand (issue #8)
+    const json::Value& un = g_chars.list["unusable_in_game"];
+    if (un.size() > 0) {
+        card_begin("##chars_unusable");
+        title("Characters the game can't use", 22);
+        if (un.size() == 1)
+            text_col(col::dim, "A character in your saves was copied from a PS3 and is still encrypted: the game shows it "
+                     "blank. Import it here to make it usable.");
+        else
+            text_col(col::dim, "%d characters in your saves were copied from a PS3 and are still encrypted: the game "
+                     "shows them blank. Import them here to make them usable.", (int)un.size());
+        if (big_button(un.size() == 1 ? "Import it" : "Import them", ImVec2(S(300), 0))) {
+            std::vector<std::string> ps;
+            const std::string sav = install_dir() + "/data/gamedata/dev_hdd0/home/00000001/savedata/";
+            for (size_t i = 0; i < un.size(); i++) ps.push_back(sav + un[i]["folder"].str());
+            chars_import(ps);
+        }
+        card_end();
+    }
+    const json::Value& key = g_chars.list["key"];
+    if (key["stored"].truthy()) {
+        text_col(col::dim, "Your PS3 save key is kept by %s.", key["store"].str().c_str());
+        ImGui::SameLine();
+        if (big_button("Forget it", ImVec2(S(200), 0)))
+            ask("Forget the PS3 save key?", "It is removed from " + key["store"].str() + ". Characters already imported "
+                "stay usable.", "Forget it", true, [] {
+                    run("characters", { "--install", install_dir(), "--char-action", "key-forget" }, "", false,
+                        [](const json::Value&) { chars_refresh(); });
+                });
+    }
+    if (!g_chars.search.empty()) text_col(col::dim, "Showing the characters matching \"%s\".", g_chars.search.c_str());
+    ImGui::BeginChild("##chars", ImVec2(0, 0), ImGuiChildFlags_NavFlattened, ImGuiWindowFlags_NoBackground);
+    const json::Value& cs = g_chars.list["characters"];
+    std::string low = g_chars.search;
+    std::transform(low.begin(), low.end(), low.begin(), [](unsigned char ch) { return (char)tolower(ch); });
+    int shown = 0;
+    for (size_t i = 0; i < cs.size(); i++) {
+        const json::Value& c = cs[i];
+        std::string hay = c["label"].str() + " " + c["name"].str() + " " + c["class"].str() + " " + c["creator"].str();
+        for (size_t t = 0; t < c["tags"].size(); t++) hay += " " + c["tags"][t].str();
+        std::transform(hay.begin(), hay.end(), hay.begin(), [](unsigned char ch) { return (char)tolower(ch); });
+        if (!low.empty() && hay.find(low) == std::string::npos) continue;
+        shown++;
+        const std::string id = c["id"].str();
+        card_begin(("##c" + id).c_str());
+        preview_image(c["thumb"].str(), S(112));
+        ImGui::SameLine(0, S(20));
+        ImGui::BeginGroup();
+        title(c["label"].str("Character").c_str(), 22);
+        text_col(col::dim, "%s%s%s", c["class"].str().c_str(),
+                 c["creator"].str().empty() ? "" : "  --  made by ", c["creator"].str().c_str());
+        text_col(c["installed"].is_null() ? col::dim : col::ok, "%s",
+                 c["installed"].is_null() ? "Not installed" : "Installed in the game");
+        if (big_button(("Details##" + id).c_str(), ImVec2(S(200), 0))) g_chars.open_id = id;
+        if (c["installed"].is_null()) {
+            ImGui::SameLine();
+            if (big_button(("Install##" + id).c_str(), ImVec2(S(200), 0))) chars_install(id);
+        }
+        ImGui::EndGroup();
+        card_end();
+    }
+    if (shown == 0)
+        text_col(col::dim, g_chars.loading ? "Reading your library..." : cs.size() ? "No character matches the search."
+                 : "No characters yet. Import a character file, a ZIP, or a folder of characters saved on a PS3.");
+    ImGui::EndChild();
+}
+
 // --- shaders ---
 // the shaders' actions: precompile now, rebuild the cache, or stop the preparation running (one at a time)
 static void shader_actions(bool focus = true)
@@ -3350,7 +3664,9 @@ static void overlay_osk()
         char buf[256];
         snprintf(buf, sizeof buf, "%s", g_osk.text.c_str());
         ImGui::SetNextItemWidth(-1);
-        if (ImGui::InputText("##osktext", buf, sizeof buf)) g_osk.text = buf;
+        if (ImGui::InputText("##osktext", buf, sizeof buf, g_osk.secret ? ImGuiInputTextFlags_Password : 0))
+            g_osk.text = buf;
+        if (g_osk.secret) memset(buf, 0, sizeof buf);
         static const char* rows[2][4] = { { "1234567890", "qwertyuiop", "asdfghjkl'", "zxcvbnm,.-" },
                                           { "!@#$%^&*()", "QWERTYUIOP", "ASDFGHJKL\"", "ZXCVBNM;:_" } };
         const float key = S(76);
@@ -3387,6 +3703,8 @@ static void overlay_osk()
         if (done || cancel) {
             auto f = g_osk.on_done;
             std::string t = g_osk.text;
+            std::fill(g_osk.text.begin(), g_osk.text.end(), '\0');
+            g_osk.text.clear();
             g_osk.open = false;
             ImGui::CloseCurrentPopup();
             if (done && f) f(t);
@@ -3749,6 +4067,7 @@ static void frame()
     case kPlay: page_play(); break;
     case kManage: page_manage(); break;
     case kSaves: page_saves(); break;
+    case kCharacters: page_characters(); break;
     case kSettings: page_settings(); break;
     case kDiagnostics: page_diagnostics(); break;
     }
@@ -4173,6 +4492,7 @@ int main(int argc, char** argv)
     SDL_Renderer* ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_PRESENTVSYNC | SDL_RENDERER_ACCELERATED);
     if (!ren) ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_SOFTWARE);   // no GPU acceleration: still a launcher
     if (!ren) return 1;
+    g_ren = ren;   // M12: the character previews' textures
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();

@@ -1,6 +1,6 @@
 """The launcher's pages by controller (--nav-test), hidden: the scripts in tests/nav against an installation with the game.
 
-  five_pages.nav     Play, Install / Manage, Saves, Settings, Diagnostics: each page's controls reached by the D-pad,
+  five_pages.nav     Play, Install / Manage, Saves, Characters, Settings, Diagnostics: each page's controls reached by the D-pad,
                      LB/RB through all five both ways, the side menu's entries
   settings_tabs.nav  the Settings tabs (Graphics, Performance, Audio, Controller, Launcher): focus starts on the chosen
                      tab, each tab chosen with A shows its own controls down to Restore the defaults, the next tab's

@@ -178,6 +178,20 @@ public:
         cancel_sent = true;
     }
 
+    // M12: one line to the worker's control channel (the PS3 save key the player typed: never on its command line)
+    void send_line(const std::string& line)
+    {
+        const std::string l = line + "\n";
+#ifdef _WIN32
+        if (in_) {
+            DWORD n;
+            WriteFile(in_, l.data(), (DWORD)l.size(), &n, nullptr);
+        }
+#else
+        if (infd_ >= 0) { ssize_t r = write(infd_, l.data(), l.size()); (void)r; }
+#endif
+    }
+
     bool done() const { return done_; }
     int exit_code() const { return exit_code_; }
     const json::Value& result() const { return result_; }
