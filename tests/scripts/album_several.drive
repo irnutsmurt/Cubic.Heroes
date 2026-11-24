@@ -1,8 +1,9 @@
 # Issue #10's regression: SNAPSHOT three times, then ALBUM: the photo picker lists the three, newest first; each is
 # viewed in turn (CROSS) and left (CIRCLE, back to the picker), the picker is left (CIRCLE: the title's RET_CANCEL),
 # the system menu closed and the hero walks. In play at the castle; the system menu: RESUME, SAVE, LOAD, OPTIONS,
-# SNAPSHOT, ALBUM, BESTIARY, LOADING ART, TITLE. With no window (a test run) the picker backs out after 4 s, as
-# no player could pick: each choice here comes within about 2 s of the picker opening.
+# SNAPSHOT, ALBUM, BESTIARY, LOADING ART, TITLE. A screenshot never shows the picker (frame dumps are the game's own
+# picture, before host screens are drawn), so none is taken while it is open. With no window, the picker backs
+# out on its own after 4 s, 30 s while a test drives the input (PAD_FILE).
 #! saves build/checkpoints/castle-front-2553
 #! env DOTHEROES_DEV_STATE=1
 #! secs 420
@@ -44,7 +45,6 @@ sleep 1
 press CROSS                 # ALBUM: the picker
 log picker:\s3\spicture 20
 sleep 1
-shot picker
 press CROSS                 # view Snapshot 3 (the newest)
 log Import\(.*Capture_2 10
 sleep 5
@@ -54,7 +54,6 @@ log picker:\s3\spicture.*Capture_2 20
 sleep 1
 press DOWN
 sleep 1
-shot picker-2
 press CROSS                 # view Snapshot 2
 log Import\(.*Capture_1 10
 sleep 5

@@ -1,4 +1,4 @@
-From 76b96b0dce4697b6548420b98fc89cee3e143c0c Mon Sep 17 00:00:00 2001
+From d0568889615949ab49fd3d13ee69620aae42199b Mon Sep 17 00:00:00 2001
 From: giteaguy <73799093+irnutsmurt@users.noreply.github.com>
 Date: Tue, 24 Nov 2026 08:31:18 -0800
 Subject: [PATCH] cellPhotoImport: the photo picker -- the player picks a
@@ -16,18 +16,19 @@ dimensions; heading "Album", prompts "View" and "Back" in the player's prompt st
 Cross/Start (Enter, Z) picks, Circle (Esc, Backspace, X) backs out; the picker comes back to the picture picked
 last. It blocks the calling thread like the save list, reads the pad itself (the title may not poll meanwhile),
 intercepts the title's input while open and presents its own picture when the title presents nothing. Nothing to
-pick: RET_CANCEL at once, as before. No window (a headless run): RET_CANCEL after 4 s, never a loop.
+pick: RET_CANCEL at once, as before. No window (a headless run): RET_CANCEL after 4 s of real time -- 30 s
+while a test drives the input (PAD_FILE) -- never a loop.
 PS3_PHOTO_IMPORT=<file> still picks that file without the screen. More than 64 pictures: the screen shows a window
 of 64 rows around the selection.
 ---
- libs/misc/cellPhotoImport.c | 321 +++++++++++++++++++++++++++++++++---
- 1 file changed, 301 insertions(+), 20 deletions(-)
+ libs/misc/cellPhotoImport.c | 337 +++++++++++++++++++++++++++++++++---
+ 1 file changed, 317 insertions(+), 20 deletions(-)
 
 diff --git a/libs/misc/cellPhotoImport.c b/libs/misc/cellPhotoImport.c
-index 8b8f027..567e806 100644
+index 8b8f027..d794c25 100644
 --- a/libs/misc/cellPhotoImport.c
 +++ b/libs/misc/cellPhotoImport.c
-@@ -1,20 +1,39 @@
+@@ -1,20 +1,40 @@
  /*
   * ps3recomp - cellPhotoImport HLE (cellPhotoImportUtil)
   *
@@ -56,7 +57,8 @@ index 8b8f027..567e806 100644
 + *
 + * With nothing to pick the answer is RET_CANCEL at once. With no window (a
 + * headless run: nothing can draw the screen, no player to pick) it is
-+ * RET_CANCEL after 4 s. PS3_PHOTO_IMPORT=<host file> (tests) picks that file
++ * RET_CANCEL after 4 s of real time -- 30 s when a test drives the input
++ * (PAD_FILE): the test is the player then, and its steps may take longer. PS3_PHOTO_IMPORT=<host file> (tests) picks that file
 + * without the screen. Either way the title's finish callback is queued: the
 + * title waits on it, and with the import unregistered it waited on a black
 + * screen for good.
@@ -75,7 +77,7 @@ index 8b8f027..567e806 100644
  
  #ifdef _WIN32
  #  include <windows.h>
-@@ -36,12 +55,48 @@ static int is_picture(const char* name)
+@@ -36,12 +56,48 @@ static int is_picture(const char* name)
      return !strcmp(ext, "jpg") || !strcmp(ext, "jpeg") || !strcmp(ext, "png");
  }
  
@@ -127,7 +129,7 @@ index 8b8f027..567e806 100644
  #ifdef _WIN32
      char pat[1100];
      snprintf(pat, sizeof pat, "%s/*", dir);
-@@ -50,8 +105,12 @@ static int newest_photo(char* out, size_t cap)
+@@ -50,8 +106,12 @@ static int newest_photo(char* out, size_t cap)
      if (h == INVALID_HANDLE_VALUE) return 0;
      do {
          if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || !is_picture(fd.cFileName)) continue;
@@ -142,7 +144,7 @@ index 8b8f027..567e806 100644
      } while (FindNextFileA(h, &fd));
      FindClose(h);
  #else
-@@ -62,14 +121,223 @@ static int newest_photo(char* out, size_t cap)
+@@ -62,14 +122,238 @@ static int newest_photo(char* out, size_t cap)
          char p[1400];
          struct stat st;
          snprintf(p, sizeof p, "%s/%s", dir, e->d_name);
@@ -295,6 +297,19 @@ index 8b8f027..567e806 100644
 +    ps3_osd_saves_post(S);
 +}
 +
++/* a monotonic clock in milliseconds: the no-window rule counts real time (a 15 ms sleep lasts 15.0 ms on Linux,
++ * 15.6 ms or more on Windows -- counting the sleeps made the rule's length differ between them) */
++static unsigned long long photo_now_ms(void)
++{
++#ifdef _WIN32
++    return (unsigned long long)GetTickCount64();
++#else
++    struct timespec ts;
++    clock_gettime(CLOCK_MONOTONIC, &ts);
++    return (unsigned long long)ts.tv_sec * 1000ull + (unsigned long long)(ts.tv_nsec / 1000000);
++#endif
++}
++
 +static void photo_sleep_ms(int ms)
 +{
 +#ifdef _WIN32
@@ -321,11 +336,13 @@ index 8b8f027..567e806 100644
 +    printf("[cellPhotoImport] picker: %d picture(s), focus %d (%s)\n", n, *cur, list[*cur].name);
 +    fflush(stdout);
 +    u32 last = 0xFFFFFFFFu;   /* a button held as the picker opens (the one that left the picture) is released first */
-+    unsigned waited = 0, held_ms = 0, still_ms = 0;
++    unsigned held_ms = 0, still_ms = 0;
++    const unsigned long long opened = photo_now_ms();
++    const char* pad_file = getenv("PAD_FILE");
++    const unsigned long long headless_ms = pad_file && *pad_file ? 30000ull : 4000ull;
 +    uint32_t seen_presents = __atomic_load_n(&g_ps3_osd_presents, __ATOMIC_ACQUIRE);
 +    for (;;) {
 +        photo_sleep_ms(15);
-+        waited += 15;
 +        /* the title presenting nothing meanwhile, the picker presents its picture itself (cellSaveData.c) */
 +        const uint32_t pc = __atomic_load_n(&g_ps3_osd_presents, __ATOMIC_ACQUIRE);
 +        if (pc != seen_presents) { seen_presents = pc; still_ms = 0; }
@@ -335,7 +352,7 @@ index 8b8f027..567e806 100644
 +            still_ms = 0;
 +        }
 +        /* headless: nothing can draw the picker and no player can pick -- back out, never a loop */
-+        if (!g_ps3_osd_present_again && waited >= 4000 &&
++        if (!g_ps3_osd_present_again && photo_now_ms() - opened >= headless_ms &&
 +            __atomic_load_n(&g_ps3_osd_list.drawn, __ATOMIC_ACQUIRE) < first_rev &&
 +            __atomic_load_n(&g_ps3_osd_saves.drawn, __ATOMIC_ACQUIRE) < first_screen) { result = -1; break; }
 +        cellPadGetData(0, (CellPadData*)(uintptr_t)PHOTO_IMPORT_PAD_EA);   /* feeds cellPad_ui_state */
@@ -371,7 +388,7 @@ index 8b8f027..567e806 100644
  }
  
  s32 cellPhotoImport(u32 version, u32 dstHddPath, u32 param, u32 container, u32 funcFinish, u32 userdata)
-@@ -84,8 +352,21 @@ s32 cellPhotoImport(u32 version, u32 dstHddPath, u32 param, u32 container, u32 f
+@@ -84,8 +368,21 @@ s32 cellPhotoImport(u32 version, u32 dstHddPath, u32 param, u32 container, u32 f
      char dst_dir[1024], host_dir[1400], pick[1400] = "";
      photo_guest_str(dst_dir, sizeof dst_dir, dstHddPath);
      const char* forced = getenv("PS3_PHOTO_IMPORT");
