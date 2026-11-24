@@ -3334,7 +3334,7 @@ Img* static_texture(Batch& b, const Rec* r, uint32_t unit, const Texture& t)
     uint32_t bpp;
     const VkFormat vf = be_vkformat(texfmt_be(lv[0].tl.fmt), &bpp);
     if (vf == VK_FORMAT_UNDEFINED) return nullptr;
-    const uint8_t* src = &r->tdata[snap->at];
+    const uint8_t* src = tex_bytes(r, *snap);
     uint64_t h = fast_hash(src, snap->bytes, 0x57A7ull);
     const uint32_t key[] = { t.format, t.width, t.height, nlv, t.pitch };
     h = fnv(key, sizeof key, h);

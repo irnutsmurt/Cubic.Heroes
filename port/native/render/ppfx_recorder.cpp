@@ -1611,6 +1611,7 @@ Rec* acquire()
     // is being reused and no one else holds it.
     trim_buf(r->vdata);
     trim_buf(r->tdata);
+    r->tshared.clear();
     trim_buf(r->cdelta);
     trim_buf(r->fhash);
     r->game_arrays = 0;
@@ -2157,9 +2158,14 @@ void r7_plan_take(Rec* r)
     }
     r->tex_at_flush = 1;
 }
-// at the game's flush: the listed textures' bytes into their records, in the records' order
+// at the game's flush: the listed textures' bytes into their records, in the records' order -- one copy per texture
+// and flush, shared by the records that take the same bytes (most of a frame's copies were of the same few textures:
+// nothing runs the game's code during the flush, so the bytes are the ones each record would have copied)
 void r7_take_at_flush()
 {
+    struct Taken { uint32_t ea, bytes; std::shared_ptr<const std::vector<uint8_t>> copy; };
+    static std::vector<Taken> taken;
+    taken.clear();
     for (const FlushTake& f : s_flush_take) {
         Rec* r = f.r;
         const uint32_t ea = cellGcmResolveLocated(f.location == 0, f.offset);
@@ -2167,12 +2173,20 @@ void r7_take_at_flush()
         VtxRange* tr = nullptr;
         for (uint32_t j = 0; j < r->ntex; j++) if (r->tex[j].location == f.unit) tr = &r->tex[j];
         if (!tr) { if (r->ntex >= 16) continue; tr = &r->tex[r->ntex++]; }
-        tr->location = f.unit; tr->offset = f.offset; tr->bytes = f.bytes; tr->at = (uint32_t)r->tdata.size();
-        r->tdata.insert(r->tdata.end(), vm_base + ea, vm_base + ea + f.bytes);
+        std::shared_ptr<const std::vector<uint8_t>> copy;
+        for (const Taken& t : taken) if (t.ea == ea && t.bytes == f.bytes) { copy = t.copy; break; }
+        if (!copy) {
+            copy = std::make_shared<const std::vector<uint8_t>>(vm_base + ea, vm_base + ea + f.bytes);
+            taken.push_back({ ea, f.bytes, copy });
+            stats().r7_flush_tex_bytes += f.bytes;
+        }
+        tr->location = f.unit; tr->offset = f.offset; tr->bytes = f.bytes;
+        tr->at = kTexShared | (uint32_t)r->tshared.size();
+        r->tshared.push_back(std::move(copy));
         stats().r7_flush_tex++;
-        stats().r7_flush_tex_bytes += f.bytes;
     }
     s_flush_take.clear();
+    taken.clear();
 }
 namespace {
 

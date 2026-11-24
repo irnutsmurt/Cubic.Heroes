@@ -272,6 +272,9 @@ struct Rec {
     VtxRange tex[16];
     uint32_t ntex;
     std::vector<uint8_t> tdata;
+    // R7 (issue #2): the textures taken at the game's flush, each copied once per flush and shared by every record of
+    // that flush that takes the same bytes (tex[k].at is then kTexShared | an index here); tex_bytes() reads either
+    std::vector<std::shared_ptr<const std::vector<uint8_t>>> tshared;
     uint8_t bypassed;              // R4: its call's body did not run; the walker meets it at its marker
     uint8_t game_arrays;           // R6: the game's cellGcmSetDrawArrays (Bink's frames): every guest texture taken at the walker (reset in acquire)
     // kFlip (R6): the flip id and the display buffer it names (local memory)
@@ -301,6 +304,13 @@ struct Rec {
     uint8_t tex_at_flush;
     Walk walk;
 };
+
+enum : uint32_t { kTexShared = 0x80000000u };
+// a texture snapshot's bytes in its record (tdata) or in a copy shared at the flush (tshared)
+inline const uint8_t* tex_bytes(const Rec* r, const VtxRange& t)
+{
+    return (t.at & kTexShared) ? r->tshared[t.at & ~kTexShared]->data() : r->tdata.data() + t.at;
+}
 
 enum Why : uint32_t {
     kWhyNone = 0,
