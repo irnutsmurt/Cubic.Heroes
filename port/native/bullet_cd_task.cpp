@@ -426,6 +426,7 @@ void bullet_cd_direct_run(const uint32_t entry[4])
         for (const auto& o : r.manifolds) count_down(o.bytes, o.types, 1);
     }
     if (g_stats) record_census(desc);
+    bullet_phys_log_note(9, (uint32_t)r.active, (uint32_t)r.pairs);
     g_native++;
     count_task();
 }

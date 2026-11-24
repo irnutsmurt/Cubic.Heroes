@@ -13,3 +13,7 @@ void bullet_solver_init(bool phys_stats);
 // command's work for the slot, on any thread, as a native task does it.
 bool bullet_solver_direct_accept(const uint32_t entry[4], uint32_t* cmd);
 void bullet_solver_direct_run(uint32_t slot, uint32_t desc, uint32_t cmd);
+
+// DOTHEROES_PHYS_LOG (bullet_solver_task.cpp): a line on the frame trace's
+// clock, any thread; nothing when the log is off.
+void bullet_phys_log_note(uint32_t kind, uint32_t a, uint32_t b);

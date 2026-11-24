@@ -108,6 +108,8 @@ extern "C" uint8_t* vm_base;
 // (no exit handlers run then): the native PPFX recorder's last report, after
 // its renderer has finished what it was given (ppfx_recorder.cpp).
 extern "C" { void (*g_dotheroes_stop_hook)(void) = nullptr; }
+// DOTHEROES_PHYS_LOG's writer (bullet_solver_task.cpp), set when the log is on: written at a test's stop too
+extern "C" { void (*g_dotheroes_phys_log_write)(void) = nullptr; }
 extern "C" void phys_direct_report(void);
 extern "C" void inflate_direct_report(void);
 extern "C" void water_task_report(void);
@@ -694,6 +696,7 @@ extern "C" void dotheroes_end(int code)
     if (__atomic_load_n(&g_ps3_ft.on, __ATOMIC_ACQUIRE) == 2) ps3_ft_dump();
     rsx_vulkan_cache_save();   // the shader cache's pipelines (a no-op without one)
     if (g_dotheroes_stop_hook) g_dotheroes_stop_hook();
+    if (g_dotheroes_phys_log_write) g_dotheroes_phys_log_write();
     phys_direct_report();      // phys_direct.cpp: its counts (atexit does not run past TerminateProcess)
     inflate_direct_report();   // inflate_direct.cpp: the same for the map packs
     water_task_report();       // water_task.cpp: the water's steps (with DOTHEROES_NATIVE_WATER)
