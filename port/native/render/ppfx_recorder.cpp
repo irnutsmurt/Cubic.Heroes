@@ -2199,6 +2199,7 @@ void r7_publish(bool forced)
     // the small uncompressed textures, now (section 2); then, in development,
     // every input as it is at the flush
     r7_take_at_flush();
+    q.tex_taken.store(p, std::memory_order_release);   // before `flushed`: the native renderer reads both
     if (r7_capture_check())
         for (uint64_t i = q.flushed.load(std::memory_order_relaxed); i < p; i++) {
             Rec* r = q.at(i);

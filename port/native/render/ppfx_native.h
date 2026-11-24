@@ -326,6 +326,9 @@ struct Queue {
     // R7: the records whose commands the game has flushed -- the native
     // renderer consumes [0, flushed) (no walker, no `walked`)
     std::atomic<uint64_t> flushed{0};
+    // R7: the records [0, tex_taken) had their small textures taken at a flush (r7_publish); a record published
+    // later and marked flushed another way -- the exit drain -- had not, whatever its tex_at_flush says
+    std::atomic<uint64_t> tex_taken{0};
     // R6's native present: flips recorded (kFlip published) and presented by
     // the native renderer; a flip completes for the game only once both agree
     std::atomic<uint64_t> flips_recorded{0}, flips_presented{0};
@@ -336,6 +339,12 @@ struct Queue {
     Rec* at(uint64_t i) { return slot[i % kCap]; }
 };
 Queue& queue();
+// a record's small textures were taken at the game's flush (in its tdata/tshared): planned at publish and the flush
+// done for it
+inline bool tex_taken_at_flush(const Rec* r, const Queue& q)
+{
+    return r->tex_at_flush && r->seq < q.tex_taken.load(std::memory_order_acquire);
+}
 
 // Which parts run (DOTHEROES_PPFX_NATIVE): 0 off; 1 records, the walker's
 // match and cross-check (no native rendering: "check"); 2 everything.
