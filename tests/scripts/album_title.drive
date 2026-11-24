@@ -1,0 +1,36 @@
+# Issue #10 at the title screen: the main menu's ALBUM with three snapshots saved (GAMEDATA= a data root holding a
+# save and the photo column's Capture.jpg, Capture_1.jpg, Capture_2.jpg): the picker, the newest viewed and left,
+# the picker left (the title's RET_CANCEL): the title screen again, whose CONTINUE then loads the game.
+# Main menu with a save: NEW GAME, CONTINUE (the cursor), EDITOR, ALBUM, QUIT GAME.
+#! env DOTHEROES_DEV_STATE=1
+#! secs 300
+log TitleMovie 120
+sleep 5
+press START                 # "PRESS START BUTTON": the main menu, on CONTINUE
+sleep 3
+press DOWN
+sleep 1
+press DOWN
+sleep 1
+press CROSS                 # ALBUM: the picker
+log picker:\s3\spicture 20
+sleep 2
+press CROSS                 # view Snapshot 3 (the newest)
+log Import\(.*Capture_2 10
+sleep 5
+shot view
+press CIRCLE                # leave it: the picker again
+log picker:\s3\spicture.*Capture_2 20
+sleep 2
+press CIRCLE                # leave the picker: the game goes back to its title screen (as with no snapshots)
+log picker:\sbacked\sout 10
+sleep 5
+shot title
+press START                 # "PRESS START BUTTON": the main menu, on CONTINUE
+sleep 3
+press START                 # CONTINUE
+change
+sleep 3
+press CROSS                 # "Change characters?" NO (the default)
+state life>0,menu==3 60
+shot ingame

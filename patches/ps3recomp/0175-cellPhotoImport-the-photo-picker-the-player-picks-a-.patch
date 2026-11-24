@@ -1,0 +1,400 @@
+From 76b96b0dce4697b6548420b98fc89cee3e143c0c Mon Sep 17 00:00:00 2001
+From: giteaguy <73799093+irnutsmurt@users.noreply.github.com>
+Date: Tue, 24 Nov 2026 08:31:18 -0800
+Subject: [PATCH] cellPhotoImport: the photo picker -- the player picks a
+ picture or backs out
+
+dotheroes beta.6, Cubic.Heroes issue #10. The console's photo import is a system screen over the title: the player
+picks a picture from the XMB's photo column, or backs out (RET_CANCEL). The stand-in answered every call with the
+newest picture; 3D Dot Game Heroes' ALBUM calls the import again as soon as the player leaves a picture and ends
+only on RET_CANCEL, so it showed the same picture again for good (the fade to black, then the snapshot back).
+
+Now the call opens a picker on the save-data screen's picture (ps3emu/osd.h, libs/video/osd_saves.c), as the save
+list does: the photo column's pictures newest first, each row a thumbnail (a PNG made once in
+<PS3_HDD1_ROOT>/photo_thumbnails, the screen reading PNG only), "Snapshot N", the date, the size and the
+dimensions; heading "Album", prompts "View" and "Back" in the player's prompt style. Up/Down choose (held: repeat),
+Cross/Start (Enter, Z) picks, Circle (Esc, Backspace, X) backs out; the picker comes back to the picture picked
+last. It blocks the calling thread like the save list, reads the pad itself (the title may not poll meanwhile),
+intercepts the title's input while open and presents its own picture when the title presents nothing. Nothing to
+pick: RET_CANCEL at once, as before. No window (a headless run): RET_CANCEL after 4 s, never a loop.
+PS3_PHOTO_IMPORT=<file> still picks that file without the screen. More than 64 pictures: the screen shows a window
+of 64 rows around the selection.
+---
+ libs/misc/cellPhotoImport.c | 321 +++++++++++++++++++++++++++++++++---
+ 1 file changed, 301 insertions(+), 20 deletions(-)
+
+diff --git a/libs/misc/cellPhotoImport.c b/libs/misc/cellPhotoImport.c
+index 8b8f027..567e806 100644
+--- a/libs/misc/cellPhotoImport.c
++++ b/libs/misc/cellPhotoImport.c
+@@ -1,20 +1,39 @@
+ /*
+  * ps3recomp - cellPhotoImport HLE (cellPhotoImportUtil)
+  *
+- * There is no XMB to pick from, so the pick is the newest JPEG or PNG in the
+- * photo column's folder (<PS3_HDD0_ROOT>/photo, where cellPhotoExport puts a
+- * title's snapshots), or PS3_PHOTO_IMPORT=<host file> -- copied into the
+- * title's directory as the console would. With nothing to pick the answer is
+- * RET_CANCEL, the player backing out of the picker. Either way the title's
+- * finish callback is queued: 3D Dot Game Heroes' ALBUM waits on it, and with
+- * the import unregistered it waited on a black screen for good.
++ * The console's photo import is a system screen over the title: the player
++ * picks a picture from the XMB's photo column, or backs out of it, and the
++ * title's finish callback says which (RET_OK with the picture copied into the
++ * title's directory, or RET_CANCEL). Here the photo column is a folder on the
++ * host (<PS3_HDD0_ROOT>/photo, where cellPhotoExport puts a title's
++ * snapshots) and the screen is the save-data screen's picture (ps3emu/osd.h,
++ * libs/video/osd_saves.c): the pictures as rows, newest first, each with a
++ * thumbnail, its date, size and dimensions; Up/Down choose, Cross (Enter, Z)
++ * picks, Circle (Esc, Backspace, X) backs out. The picker returns to the
++ * picture picked last.
++ *
++ * A title may call it again as soon as the player leaves a picture: 3D Dot
++ * Game Heroes' ALBUM does, and leaves only on RET_CANCEL. The earlier stand-in
++ * answered every call with the newest picture, so the album showed that
++ * picture again for good (Cubic.Heroes issue #10).
++ *
++ * With nothing to pick the answer is RET_CANCEL at once. With no window (a
++ * headless run: nothing can draw the screen, no player to pick) it is
++ * RET_CANCEL after 4 s. PS3_PHOTO_IMPORT=<host file> (tests) picks that file
++ * without the screen. Either way the title's finish callback is queued: the
++ * title waits on it, and with the import unregistered it waited on a black
++ * screen for good.
+  */
+ 
+ #include "cellPhotoImport.h"
+ #include "../system/cellSysutil.h"
+ #include "../../runtime/memory/vm.h"   /* VM_HLE_INJECT_BASE */
+ #include "photo_util.h"
+-#include "../codec/stb_image.h"        /* stbi_info; compiled in cellPngDec.c */
++#include "ps3emu/osd.h"
++#include "../input/cellPad.h"
++#include "../codec/stb_image.h"        /* stbi_info, stbi_load; compiled in cellPngDec.c */
++#include "../codec/stb_image_write.h"  /* stbi_write_png; compiled in cellPngEnc.c */
++#include <time.h>
+ 
+ #ifdef _WIN32
+ #  include <windows.h>
+@@ -36,12 +55,48 @@ static int is_picture(const char* name)
+     return !strcmp(ext, "jpg") || !strcmp(ext, "jpeg") || !strcmp(ext, "png");
+ }
+ 
+-/* The newest picture in the photo column's folder, as a host path. */
+-static int newest_photo(char* out, size_t cap)
++/* The photo column's pictures. */
++typedef struct {
++    char      name[256];     /* the file's name */
++    char      path[1400];    /* host path */
++    long long mtime;         /* seconds */
++    long long size;          /* bytes */
++    int       w, h;          /* 0 when the header cannot be read */
++} PhotoItem;
++
++#define PHOTO_LIST_MAX 4096
++
++static void photo_add(PhotoItem* list, int* n, const char* dir, const char* name, long long mtime, long long size)
++{
++    if (*n >= PHOTO_LIST_MAX) return;
++    PhotoItem* it = &list[*n];
++    memset(it, 0, sizeof *it);
++    snprintf(it->name, sizeof it->name, "%s", name);
++    snprintf(it->path, sizeof it->path, "%s/%s", dir, name);
++    it->mtime = mtime;
++    it->size = size;
++    int comp = 0;
++    if (!stbi_info(it->path, &it->w, &it->h, &comp)) it->w = it->h = 0;
++    (*n)++;
++}
++
++/* Newest first; at the same second the longer, then the higher name first (Capture_10 before Capture_9). */
++static int photo_cmp(const void* a, const void* b)
++{
++    const PhotoItem* x = (const PhotoItem*)a;
++    const PhotoItem* y = (const PhotoItem*)b;
++    if (x->mtime != y->mtime) return x->mtime > y->mtime ? -1 : 1;
++    const size_t lx = strlen(x->name), ly = strlen(y->name);
++    if (lx != ly) return lx > ly ? -1 : 1;
++    return -strcmp(x->name, y->name);
++}
++
++/* Every picture in the photo column's folder, newest first; the count (0: none, or no folder). */
++static int list_photos(PhotoItem* list)
+ {
+     char dir[1024];
+     if (!photo_library_dir(dir, sizeof dir)) return 0;
+-    long long best = -1;
++    int n = 0;
+ #ifdef _WIN32
+     char pat[1100];
+     snprintf(pat, sizeof pat, "%s/*", dir);
+@@ -50,8 +105,12 @@ static int newest_photo(char* out, size_t cap)
+     if (h == INVALID_HANDLE_VALUE) return 0;
+     do {
+         if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || !is_picture(fd.cFileName)) continue;
+-        const long long t = (long long)fd.ftLastWriteTime.dwHighDateTime << 32 | fd.ftLastWriteTime.dwLowDateTime;
+-        if (t > best) { best = t; snprintf(out, cap, "%s/%s", dir, fd.cFileName); }
++        /* FILETIME (100 ns since 1601) to seconds since 1970 */
++        const unsigned long long ft = (unsigned long long)fd.ftLastWriteTime.dwHighDateTime << 32 |
++                                      fd.ftLastWriteTime.dwLowDateTime;
++        const long long t = (long long)(ft / 10000000ULL) - 11644473600LL;
++        const long long sz = (long long)fd.nFileSizeHigh << 32 | fd.nFileSizeLow;
++        photo_add(list, &n, dir, fd.cFileName, t, sz);
+     } while (FindNextFileA(h, &fd));
+     FindClose(h);
+ #else
+@@ -62,14 +121,223 @@ static int newest_photo(char* out, size_t cap)
+         char p[1400];
+         struct stat st;
+         snprintf(p, sizeof p, "%s/%s", dir, e->d_name);
+-        if (stat(p, &st) == 0 && S_ISREG(st.st_mode) && (long long)st.st_mtime > best) {
+-            best = (long long)st.st_mtime;
+-            snprintf(out, cap, "%s", p);
+-        }
++        if (stat(p, &st) == 0 && S_ISREG(st.st_mode))
++            photo_add(list, &n, dir, e->d_name, (long long)st.st_mtime, (long long)st.st_size);
+     }
+     closedir(d);
+ #endif
+-    return best >= 0;
++    qsort(list, (size_t)n, sizeof *list, photo_cmp);
++    return n;
++}
++
++/* A picture's thumbnail for the picker's row, as a PNG the screen can read (osd_saves.c reads PNG only):
++ * <PS3_HDD1_ROOT>/photo_thumbnails/<name>.png (the system's cache), made again when the picture is newer.
++ * 0 when there is none: the row shows a neutral tile. */
++#define THUMB_W 480
++#define THUMB_H 270
++static int photo_thumbnail(const PhotoItem* it, char* out, size_t cap)
++{
++    const char* root = getenv("PS3_HDD1_ROOT");
++    if (!root || !*root) return 0;
++    char dir[1100];
++    snprintf(dir, sizeof dir, "%s/photo_thumbnails", root);
++    for (char* c = dir; *c; c++) if (*c == '\\') *c = '/';
++    snprintf(out, cap, "%s/%s.png", dir, it->name);
++    struct stat st;
++    if (stat(out, &st) == 0 && (long long)st.st_mtime >= it->mtime) return 1;
++    int w = 0, h = 0, comp = 0;
++    unsigned char* px = stbi_load(it->path, &w, &h, &comp, 3);
++    if (!px || w < 1 || h < 1) { if (px) stbi_image_free(px); return 0; }
++    /* fitted inside THUMB_W x THUMB_H, its aspect kept; each pixel the mean of the pixels it covers */
++    int tw = w, th = h;
++    if (tw > THUMB_W || th > THUMB_H) {
++        if ((long long)w * THUMB_H > (long long)h * THUMB_W) { tw = THUMB_W; th = (int)((long long)h * THUMB_W / w); }
++        else { th = THUMB_H; tw = (int)((long long)w * THUMB_H / h); }
++        if (tw < 1) tw = 1;
++        if (th < 1) th = 1;
++    }
++    unsigned char* t = (unsigned char*)malloc((size_t)tw * th * 3);
++    if (!t) { stbi_image_free(px); return 0; }
++    for (int y = 0; y < th; y++) {
++        const int y0 = (int)((long long)y * h / th), y1 = (int)((long long)(y + 1) * h / th);
++        for (int x = 0; x < tw; x++) {
++            const int x0 = (int)((long long)x * w / tw), x1 = (int)((long long)(x + 1) * w / tw);
++            unsigned long sum[3] = { 0, 0, 0 }, cnt = 0;
++            for (int sy = y0; sy < (y1 > y0 ? y1 : y0 + 1); sy++)
++                for (int sx = x0; sx < (x1 > x0 ? x1 : x0 + 1); sx++) {
++                    const unsigned char* s = px + ((size_t)sy * w + sx) * 3;
++                    sum[0] += s[0]; sum[1] += s[1]; sum[2] += s[2]; cnt++;
++                }
++            unsigned char* d = t + ((size_t)y * tw + x) * 3;
++            for (int c = 0; c < 3; c++) d[c] = (unsigned char)((sum[c] + cnt / 2) / cnt);
++        }
++    }
++    stbi_image_free(px);
++    photo_mkdirs(dir);
++    const int ok = stbi_write_png(out, tw, th, 3, t, tw * 3) != 0;
++    free(t);
++    return ok;
++}
++
++/* ---- the picker ---------------------------------------------------------- */
++
++extern void cellPad_ui_intercept(int on);
++extern u32  cellPad_ui_state(u32* ly);
++extern u32  cellPad_ui_keys(void);
++extern int  cellPad_ui_device(void);
++extern s32  cellPadGetData(u32 port_no, CellPadData* data_guest);
++
++/* guest memory for the picker's own pad reads (the title may not be polling while it waits): the runtime's window,
++ * after the import's file data */
++#define PHOTO_IMPORT_PAD_EA (VM_HLE_INJECT_BASE + 0x00F00000u + 0xA00u)
++
++static char s_last_pick[256];   /* the picture picked last: the picker comes back to it */
++
++static int photo_prompt_style(void)
++{
++    const char* e = getenv("PS3_UI_PROMPTS");
++    if (e && *e) {
++        if (!strcmp(e, "keyboard")) return PS3_UI_PROMPTS_KEYBOARD;
++        if (!strcmp(e, "playstation")) return PS3_UI_PROMPTS_PLAYSTATION;
++        if (!strcmp(e, "xbox")) return PS3_UI_PROMPTS_XBOX;
++        if (!strcmp(e, "switch")) return PS3_UI_PROMPTS_SWITCH;
++        if (!strcmp(e, "steam")) return PS3_UI_PROMPTS_STEAM;
++        if (!strcmp(e, "generic")) return PS3_UI_PROMPTS_GENERIC;
++    }
++    const int d = cellPad_ui_device();
++    return d >= 0 && d < PS3_UI_PROMPTS_N ? d : PS3_UI_PROMPTS_KEYBOARD;
++}
++
++static void photo_row(const PhotoItem* it, int number, ps3_osd_save_entry* r)
++{
++    memset(r, 0, sizeof *r);
++    snprintf(r->title, sizeof r->title, "Snapshot %d", number);
++    const time_t t = (time_t)it->mtime;
++    struct tm* lt = localtime(&t);
++    if (lt) strftime(r->date, sizeof r->date, "%a %b %d %H:%M:%S %Y", lt);
++    snprintf(r->size, sizeof r->size, "%llu KB", ((unsigned long long)it->size + 999) / 1000);
++    if (it->w && it->h) snprintf(r->lines[0], sizeof r->lines[0], "%d x %d", it->w, it->h);
++    char thumb[1200];
++    if (photo_thumbnail(it, thumb, sizeof thumb)) snprintf(r->icon, sizeof r->icon, "%s", thumb);
++}
++
++/* The screen at `cur`: the full-screen picture (a window of up to PS3_OSD_SAVES_MAX rows around `cur`) and the
++ * text panel beside it, drawn when the picture cannot be (no font). */
++static ps3_osd_saves_state s_screen;
++static ps3_osd_save_entry* s_rows;   /* the rows, made once each time the picker opens */
++
++static void photo_show(int n, int cur, int* top)
++{
++    /* the text panel */
++    const int page = PS3_OSD_LIST_ROWS / 3;
++    if (cur < *top) *top = cur;
++    if (cur >= *top + page) *top = cur - page + 1;
++    char rows[PS3_OSD_LIST_ROWS][PS3_OSD_LIST_COLS];
++    uint32_t r = 0;
++    int sel0 = 0;
++    for (int i = *top; i < n && i < *top + page; i++) {
++        if (i == cur) sel0 = (int)r;
++        snprintf(rows[r++], PS3_OSD_LIST_COLS, "%c %s", i == cur ? '>' : ' ', s_rows[i].title);
++        snprintf(rows[r++], PS3_OSD_LIST_COLS, "  %s", s_rows[i].date);
++        rows[r++][0] = 0;
++    }
++    char title[PS3_OSD_LIST_COLS];
++    snprintf(title, sizeof title, "ALBUM   (%d/%d)", cur + 1, n);
++    ps3_osd_list_post(title, "UP/DOWN: CHOOSE   CROSS (Z, ENTER): VIEW   CIRCLE (X): BACK", rows, r,
++                      (uint32_t)sel0, (uint32_t)sel0 + 1);
++    /* the picture */
++    ps3_osd_saves_state* S = &s_screen;
++    memset(S, 0, sizeof *S);
++    snprintf(S->heading, sizeof S->heading, "Album");
++    snprintf(S->empty, sizeof S->empty, "There are no snapshots.");
++    snprintf(S->ok_label, sizeof S->ok_label, "View");
++    snprintf(S->back_label, sizeof S->back_label, "Back");
++    S->prompts = (uint32_t)photo_prompt_style();
++    int first = 0;
++    if (n > PS3_OSD_SAVES_MAX) {
++        first = cur - PS3_OSD_SAVES_MAX / 2;
++        if (first < 0) first = 0;
++        if (first > n - PS3_OSD_SAVES_MAX) first = n - PS3_OSD_SAVES_MAX;
++    }
++    S->n = (uint32_t)(n - first < PS3_OSD_SAVES_MAX ? n - first : PS3_OSD_SAVES_MAX);
++    S->cur = (uint32_t)(cur - first);
++    for (uint32_t i = 0; i < S->n; i++) S->e[i] = s_rows[first + (int)i];
++    ps3_osd_saves_post(S);
++}
++
++static void photo_sleep_ms(int ms)
++{
++#ifdef _WIN32
++    Sleep((DWORD)ms);
++#else
++    struct timespec ts = { 0, (long)ms * 1000000L };
++    nanosleep(&ts, NULL);
++#endif
++}
++
++/* 1: picked (*cur); 0: backed out; -1: not shown (no window draws it). Blocks the calling thread, as the
++ * save list does; the picker presents its own picture while the title presents nothing. */
++static int photo_pick(const PhotoItem* list, int n, int* cur)
++{
++    s_rows = (ps3_osd_save_entry*)calloc((size_t)n, sizeof *s_rows);
++    if (!s_rows) return -1;
++    for (int i = 0; i < n; i++) photo_row(&list[i], n - i, &s_rows[i]);   /* the oldest is Snapshot 1 */
++    int top = 0, result = -2;
++    ps3_osd_saves_reset();
++    photo_show(n, *cur, &top);
++    const uint32_t first_rev = __atomic_load_n(&g_ps3_osd_list.rev, __ATOMIC_ACQUIRE);
++    const uint32_t first_screen = __atomic_load_n(&g_ps3_osd_saves.rev, __ATOMIC_ACQUIRE);
++    cellPad_ui_intercept(1);
++    printf("[cellPhotoImport] picker: %d picture(s), focus %d (%s)\n", n, *cur, list[*cur].name);
++    fflush(stdout);
++    u32 last = 0xFFFFFFFFu;   /* a button held as the picker opens (the one that left the picture) is released first */
++    unsigned waited = 0, held_ms = 0, still_ms = 0;
++    uint32_t seen_presents = __atomic_load_n(&g_ps3_osd_presents, __ATOMIC_ACQUIRE);
++    for (;;) {
++        photo_sleep_ms(15);
++        waited += 15;
++        /* the title presenting nothing meanwhile, the picker presents its picture itself (cellSaveData.c) */
++        const uint32_t pc = __atomic_load_n(&g_ps3_osd_presents, __ATOMIC_ACQUIRE);
++        if (pc != seen_presents) { seen_presents = pc; still_ms = 0; }
++        else if ((still_ms += 15) >= 45 && g_ps3_osd_present_again) {
++            g_ps3_osd_present_again();
++            seen_presents = __atomic_load_n(&g_ps3_osd_presents, __ATOMIC_ACQUIRE);
++            still_ms = 0;
++        }
++        /* headless: nothing can draw the picker and no player can pick -- back out, never a loop */
++        if (!g_ps3_osd_present_again && waited >= 4000 &&
++            __atomic_load_n(&g_ps3_osd_list.drawn, __ATOMIC_ACQUIRE) < first_rev &&
++            __atomic_load_n(&g_ps3_osd_saves.drawn, __ATOMIC_ACQUIRE) < first_screen) { result = -1; break; }
++        cellPadGetData(0, (CellPadData*)(uintptr_t)PHOTO_IMPORT_PAD_EA);   /* feeds cellPad_ui_state */
++        u32 ly = 128;
++        u32 b = cellPad_ui_state(&ly) | cellPad_ui_keys();   /* the keyboard's Esc and Backspace: back */
++        if (ly < 64) b |= CELL_PAD_CTRL_UP;
++        if (ly > 192) b |= CELL_PAD_CTRL_DOWN;
++        if (last == 0xFFFFFFFFu) { if (b == 0) last = 0; continue; }
++        const u32 edge = b & ~last;
++        const u32 dir = b & (CELL_PAD_CTRL_UP | CELL_PAD_CTRL_DOWN);
++        if (dir && dir == (last & (CELL_PAD_CTRL_UP | CELL_PAD_CTRL_DOWN))) held_ms += 15; else held_ms = 0;
++        int step = 0;
++        if (edge & CELL_PAD_CTRL_UP) step = -1;
++        else if (edge & CELL_PAD_CTRL_DOWN) step = 1;
++        else if (held_ms >= 400 && (held_ms - 400) % 120 < 15) step = (b & CELL_PAD_CTRL_UP) ? -1 : 1;
++        last = b;
++        if (step) {
++            *cur = (*cur + step + n) % n;
++            photo_show(n, *cur, &top);
++        }
++        if (edge & (CELL_PAD_CTRL_CROSS | CELL_PAD_CTRL_START)) { result = 1; break; }
++        if (edge & CELL_PAD_CTRL_CIRCLE) { result = 0; break; }
++    }
++    ps3_osd_saves_close();
++    ps3_osd_list_close();
++    cellPad_ui_intercept(0);
++    free(s_rows);
++    s_rows = NULL;
++    printf("[cellPhotoImport] picker: %s\n", result == 1 ? list[*cur].name : result == 0 ? "backed out (cancel)"
++                                                        : "not shown (nothing draws it): cancel");
++    fflush(stdout);
++    return result;
+ }
+ 
+ s32 cellPhotoImport(u32 version, u32 dstHddPath, u32 param, u32 container, u32 funcFinish, u32 userdata)
+@@ -84,8 +352,21 @@ s32 cellPhotoImport(u32 version, u32 dstHddPath, u32 param, u32 container, u32 f
+     char dst_dir[1024], host_dir[1400], pick[1400] = "";
+     photo_guest_str(dst_dir, sizeof dst_dir, dstHddPath);
+     const char* forced = getenv("PS3_PHOTO_IMPORT");
+-    if (forced && *forced) snprintf(pick, sizeof pick, "%s", forced);
+-    else newest_photo(pick, sizeof pick);
++    if (forced && *forced) {
++        snprintf(pick, sizeof pick, "%s", forced);
++    } else {
++        PhotoItem* list = (PhotoItem*)calloc(PHOTO_LIST_MAX, sizeof(PhotoItem));
++        const int n = list ? list_photos(list) : 0;
++        if (n > 0) {
++            int cur = 0;
++            for (int i = 0; i < n; i++) if (s_last_pick[0] && !strcmp(list[i].name, s_last_pick)) cur = i;
++            if (photo_pick(list, n, &cur) == 1) {
++                snprintf(pick, sizeof pick, "%s", list[cur].path);
++                snprintf(s_last_pick, sizeof s_last_pick, "%s", list[cur].name);
++            }
++        }
++        free(list);
++    }
+ 
+     s32 result = CELL_PHOTO_IMPORT_RET_CANCEL;
+     if (pick[0]) {
+-- 
+2.56.0.windows.3
+
