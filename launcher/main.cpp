@@ -2346,6 +2346,31 @@ static bool in_page(ImGuiWindow* w)
         if (w == g_page_window) return true;
     return false;
 }
+// a button the D-pad or keys have just reached is kept wholly inside the page's view, with a margin, for the few frames
+// the move's own scroll and the layout take to settle: Dear ImGui keeps it only just inside, where the page's frame can
+// cut it off and its gamepad moves start from outside the view (0.2.0-beta.5, Linux at 1280x720: the artwork row on
+// the page's bottom edge, after which neither right nor left worked from it). The player's own scrolling is left alone
+static void keep_focus_in_view()
+{
+    ImGuiContext& g = *GImGui;
+    static ImGuiID last = 0;
+    static int frames = 0;
+    if (g.NavId != last) { last = g.NavId; frames = 3; }
+    if (frames <= 0) return;
+    frames--;
+    if (!g.NavId || !ImGui::GetIO().NavVisible || !in_page(g.NavWindow)) return;
+    const ImRect item = ImGui::WindowRectRelToAbs(g.NavWindow, g.NavWindow->NavRectRel[ImGuiNavLayer_Main]);
+    for (ImGuiWindow* w = g.NavWindow; w; w = w == g_page_window ? nullptr : w->ParentWindow) {
+        if (w->ScrollMax.y < 1.0f) continue;   // a card: the page around it scrolls
+        const float m = S(16);
+        float d = 0.0f;
+        if (item.Max.y > w->InnerRect.Max.y - m) d = item.Max.y - (w->InnerRect.Max.y - m);
+        if (item.Min.y - d < w->InnerRect.Min.y + m) d = item.Min.y - (w->InnerRect.Min.y + m);   // its top first
+        if (fabsf(d) >= 1.0f) ImGui::SetScrollY(w, ImClamp(floorf(w->Scroll.y + d), 0.0f, floorf(w->ScrollMax.y)));
+        break;
+    }
+}
+
 static void scroll_when_stuck()
 {
     ImGuiContext& g = *GImGui;
@@ -4296,6 +4321,7 @@ int main(int argc, char** argv)
         if (nav.active()) nav.inject(io);   // the scripted controller (--nav-test)
         g_nav_titles.clear();   // its "see" has read the last frame's; this frame's are gathered as they're drawn
         ImGui::NewFrame();
+        keep_focus_in_view();
         scroll_when_stuck();
         if (!checked_updates && !g_st.settings.is_null()) {
             checked_updates = true;
