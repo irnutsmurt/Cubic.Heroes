@@ -2305,20 +2305,66 @@ static void launcher_update_card()
 
 // a button the controller or keyboard has just reached is brought near the top of the page: the cards below it are
 // child windows, whose buttons the navigation can't reach while the card lies wholly outside the page's view
-// (0.2.0-beta.5: the updates' cards sit low on Play)
+// (0.2.0-beta.5: the updates' cards sit low on Play). It is brought there again, keeping the focus, whenever the page
+// grows below it: a check's result, or the downloaded update's card, arrives under the button just pressed -- when the
+// focus came, the page couldn't scroll that far yet (at 1280x800 and below, Download it and Restart and update were
+// then out of the D-pad's reach)
 static void scroll_to_top_on_focus()
 {
     static ImGuiID last = 0;
+    static ImGuiWindow* last_w = nullptr;
+    static float last_max = 0.0f;
     const ImGuiID id = ImGui::GetItemID();
     if (ImGui::IsItemFocused() && ImGui::GetIO().NavVisible) {
-        if (last != id) {
-            last = id;
-            ImGuiWindow* w = ImGui::GetCurrentWindow();   // the page that scrolls, not a card around the button
-            while (w && w->ScrollMax.y <= 0.0f && w->ParentWindow) w = w->ParentWindow;
-            if (w) ImGui::SetScrollY(w, std::max(0.0f, w->Scroll.y + ImGui::GetItemRectMin().y - w->Pos.y - S(40)));
-        }
+        ImGuiWindow* w = ImGui::GetCurrentWindow();   // the page that scrolls, not a card around the button
+        while (w && w->ScrollMax.y <= 0.0f && w->ParentWindow) w = w->ParentWindow;
+        if (w && (last != id || w != last_w || w->ScrollMax.y > last_max + 0.5f))
+            ImGui::SetScrollY(w, std::max(0.0f, w->Scroll.y + ImGui::GetItemRectMin().y - w->Pos.y - S(40)));
+        last = id;
+        last_w = w;
+        last_max = w ? w->ScrollMax.y : 0.0f;
     } else if (last == id) {
         last = 0;
+    }
+}
+
+// a D-pad move up or down that found nothing, on a page that can still scroll that way, scrolls the page a step (the
+// focused button kept wholly in view: Dear ImGui drops the focus of a gamepad move that starts outside it); the next
+// press then reaches what came into view. Dear ImGui's navigation can't reach a card's buttons while the card lies
+// wholly outside the page's view (0.2.0-beta.5: at 1280x800 and below, the shortcuts under Add to Steam on Install /
+// Manage). Called after NewFrame, which has applied the last frame's move (or found nothing)
+static ImGuiWindow* g_page_window = nullptr;   // the page's own window (##page), as drawn in the last frame
+static bool in_page(ImGuiWindow* w)
+{
+    for (; w; w = w->ParentWindow)
+        if (w == g_page_window) return true;
+    return false;
+}
+static void scroll_when_stuck()
+{
+    ImGuiContext& g = *GImGui;
+    static ImGuiID from = 0;
+    static ImGuiDir dir = ImGuiDir_None;
+    if (dir != ImGuiDir_None && g.NavId == from && in_page(g.NavWindow)) {
+        const ImRect item = ImGui::WindowRectRelToAbs(g.NavWindow, g.NavWindow->NavRectRel[ImGuiNavLayer_Main]);
+        // the nearest window around the focus that can still scroll that way (in whole pixels: scrolling is rounded),
+        // by a third of its view at most and never so far that the focused button leaves it
+        for (ImGuiWindow* w = g.NavWindow; w; w = w == g_page_window ? nullptr : w->ParentWindow) {
+            const float top = floorf(w->ScrollMax.y);
+            if (dir == ImGuiDir_Down ? w->Scroll.y + 1.0f > top : w->Scroll.y < 1.0f) continue;
+            const float room = dir == ImGuiDir_Down ? item.Min.y - w->InnerRect.Min.y : w->InnerRect.Max.y - item.Max.y;
+            const float step = std::min(floorf(w->InnerRect.GetHeight() / 3), floorf(room - S(8)));
+            if (step >= 1.0f)
+                ImGui::SetScrollY(w, dir == ImGuiDir_Down ? std::min(w->Scroll.y + step, top) : std::max(w->Scroll.y - step, 0.0f));
+            break;
+        }
+    }
+    dir = ImGuiDir_None;
+    if (g.NavMoveSubmitted && !g.NavMoveForwardToNextFrame && (g.NavMoveDir == ImGuiDir_Up || g.NavMoveDir == ImGuiDir_Down) &&
+        !(g.NavMoveFlags & (ImGuiNavMoveFlags_IsTabbing | ImGuiNavMoveFlags_IsPageMove)) && g.NavId != 0 &&
+        in_page(g.NavWindow)) {
+        from = g.NavId;
+        dir = g.NavMoveDir;
     }
 }
 
@@ -3658,6 +3704,7 @@ static void frame()
     g_page_input = !overlay_open();
     ImGui::BeginChild("##page", ImVec2(cb.x - ca.x - in_x - S(34), cb.y - ca.y - in_y - S(26)), ImGuiChildFlags_NavFlattened,
                       ImGuiWindowFlags_NoBackground);
+    g_page_window = ImGui::GetCurrentWindow();
     ImGui::PushFont(nullptr, S(kBody));
     switch (g_page) {
     case kPlay: page_play(); break;
@@ -4216,6 +4263,7 @@ int main(int argc, char** argv)
         stick_nav(io);
         if (nav.active()) nav.inject(io);   // the scripted controller (--nav-test)
         ImGui::NewFrame();
+        scroll_when_stuck();
         if (!checked_updates && !g_st.settings.is_null()) {
             checked_updates = true;
             if (setting("LAUNCHER_CHECK_UPDATES", "1") == "1") check_updates();
