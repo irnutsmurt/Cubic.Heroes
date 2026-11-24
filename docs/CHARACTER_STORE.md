@@ -98,6 +98,36 @@ python tools/char_catalog.py check --repo DIR                         # what the
 - The tool writes only into `DIR` and never uses the network. Publishing a copy, as a commit to the public
   repository, is a separate step that the owner reviews.
 
+## Two categories: community and historical
+
+Each entry has a `category`. The two kinds are kept apart in the catalog, in the tool and in the launcher:
+
+- **`community`:** submitted to the store with the creator's explicit agreement to CC BY 4.0. `license` is
+  `CC-BY-4.0`, and `creator` and `attribution` are required (`char_catalog.py build`, from a submission record with
+  the consent).
+- **`historical`:** recovered from an earlier community site that no longer exists, such as the Hall of Heroes
+  (2010).
+  - **No licence is claimed.** `license` is absent; an entry that names one is refused, and `char_catalog.py
+    historical` refuses records that carry one.
+  - **Rights statement.** The launcher shows that all rights remain with the creator.
+  - **Provenance.** The entry keeps the original name and the creator as recorded. Its `source` holds the
+    collection, the original date, the original address and the Wayback Machine capture it was recovered from.
+  - **After download.** A character downloaded into a library records `source.kind = "historical"` with the same
+    provenance and rights statement, and keeps them in any `.chchar` it is exported to.
+- **Removal requests.** The signed catalog's `removal_url` points to the repository's `REMOVAL.md`: a GitHub issue
+  (removal-request template), no proof asked beyond naming the character and stating the requester's relation to
+  it, removal usually within 7 days.
+  - `char_catalog.py remove --repo DIR --id ID` takes out the entry and its files and raises the catalog version.
+    The catalog is then signed and published again. Nothing about who asked is written into the repository.
+  - Launchers stop offering the character at their next catalog check. Copies players already downloaded stay
+    in their libraries.
+
+```
+python tools/char_catalog.py historical --repo DIR RECORDS.json   # [{character, original_name, creator, collection,
+                                                                   #   original_date, original_url, archived_url}]
+python tools/char_catalog.py remove --repo DIR --id ID
+```
+
 ## The catalog key
 
 The catalog has its **own** Ed25519 key, never the release key (docs/RELEASE_SIGNING.md):

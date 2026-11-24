@@ -51,6 +51,14 @@ KEYS_FILE = os.path.join(ROOT, "config", "catalog_keys.json")
 KEYS_ENV = "CUBICHEROES_STORE_KEYS"   # development: another keys file -- honoured only with a copy on this computer
 # the licences a store character may carry: original community characters whose creator agreed to CC BY 4.0
 LICENSES = {"CC-BY-4.0": ("CC BY 4.0", "https://creativecommons.org/licenses/by/4.0/")}
+# the store's two kinds of character, kept apart:
+#   community   submitted to the Character Store with the creator's explicit CC BY 4.0 agreement
+#   historical  recovered from an earlier community site (the 2010 Hall of Heroes, say) and preserved with its
+#               creator's name and its archival source: no licence is claimed for it -- its creator keeps every
+#               right -- and the catalog says how to ask for its removal
+CATEGORIES = ("community", "historical")
+HISTORICAL_RIGHTS = ("Recovered community creation, preserved for players. No licence is claimed: all rights remain "
+                     "with its creator.")
 DEFAULT_BASE = "https://raw.githubusercontent.com/irnutsmurt/Cubic.Heroes-Characters/main/"
 CATALOG_PATH = "catalog/v1/catalog.json"
 BASE_ENV = "CUBICHEROES_STORE_URL"   # development: another copy of the repository (https, or http on this computer)
@@ -303,22 +311,43 @@ def parse_entries(signed, sv=SCHEMA_VERSION, key_id=""):
             edt = e.get("edt_sha256")
             if not isinstance(edt, str) or not _HEX64.match(edt):
                 raise ValueError("no SHA-256 of its data")
+            kind = e.get("category") or "community"
+            if kind not in CATEGORIES:
+                raise ValueError(f"unknown category {str(kind)[:20]!r}")
             lic = e.get("license")
-            if lic not in LICENSES:
-                raise ValueError(f"its licence ({str(lic)[:20]!r}) is not one the store accepts")
-            creator = _text(e.get("creator"), 64, True)
+            label = _text(e.get("label"), 64, True)
+            src = {}
+            if kind == "community":
+                if lic not in LICENSES:
+                    raise ValueError(f"its licence ({str(lic)[:20]!r}) is not one the store accepts")
+                creator = _text(e.get("creator"), 64, True)
+                attribution = _text(e.get("attribution"), 200) or f"\"{label}\" by {creator}, {LICENSES[lic][0]}"
+            else:   # historical: never a licence; its original source on record
+                if lic not in (None, ""):
+                    raise ValueError("a historical character carries no licence")
+                lic = ""
+                creator = _text(e.get("creator"), 64) or "unknown"
+                s0 = e.get("source")
+                if not isinstance(s0, dict) or not _text(s0.get("collection"), 80):
+                    raise ValueError("a historical character names its original collection")
+                src = {"collection": _text(s0.get("collection"), 80), "original_name": _text(s0.get("original_name"), 64),
+                       "original_date": _text(s0.get("original_date"), 32)}
+                for k in ("archived_url", "original_url"):
+                    u = _text(s0.get(k), 300)
+                    src[k] = u if u.startswith(("https://", "http://")) else ""
+                attribution = (_text(e.get("attribution"), 200) or
+                               f"\"{src['original_name'] or label}\" by {creator}, shared on {src['collection']}")
             url = _text(e.get("creator_url"), 200)
             if url and not url.startswith("https://"):
                 url = ""
             tags = e.get("tags") or []
             if not isinstance(tags, list):
                 raise ValueError("tags are not a list")
-            label = _text(e.get("label"), 64, True)
             out.append({
+                "category": kind, "rights": HISTORICAL_RIGHTS if kind == "historical" else "", "source": src,
                 "id": cid, "version": ver, "edt_sha256": edt, "previous_sha256": _hexes(e.get("previous_sha256"), 50),
                 "label": label, "name": _text(e.get("name"), 32), "class": _text(e.get("class"), 32),
-                "creator": creator, "creator_url": url, "license": lic,
-                "attribution": _text(e.get("attribution"), 200) or f"\"{label}\" by {creator}, {LICENSES[lic][0]}",
+                "creator": creator, "creator_url": url, "license": lic, "attribution": attribution,
                 "description": _text(e.get("description"), 600), "added": _text(e.get("added"), 32),
                 "updated": _text(e.get("updated"), 32),
                 "tags": [_text(t, 32) for t in tags[:12] if isinstance(t, str) and t.strip()],
@@ -329,8 +358,9 @@ def parse_entries(signed, sv=SCHEMA_VERSION, key_id=""):
             problems.append(f"catalog entry {i + 1}: {err}; left out")
     if len(chars) > ENTRIES_MAX:
         problems.append(f"the catalog lists more than {ENTRIES_MAX} characters; the rest are left out")
+    removal = _text(signed.get("removal_url"), 300)
     cat = {"schema_version": sv, "catalog_version": cv, "updated": _text(signed.get("updated"), 32), "key_id": key_id,
-           "characters": out}
+           "removal_url": removal if removal.startswith("https://") else "", "characters": out}
     return cat, problems
 
 
@@ -566,7 +596,8 @@ class Store:
             e["thumb_path"] = p if os.path.isfile(p) else ""
             out.append(e)
         return {"schema_version": cat["schema_version"], "catalog_version": cat["catalog_version"],
-                "updated": cat["updated"], "key_id": cat["key_id"], "characters": out}, problems
+                "updated": cat["updated"], "key_id": cat["key_id"], "removal_url": cat.get("removal_url", ""),
+                "characters": out}, problems
 
     def download(self, cid, savedata=None, install=False):
         """one character from the catalog into the library (and into the game when install): never twice. ->
@@ -606,9 +637,13 @@ class Store:
             c.meta = dict(c.meta or {})
             c.meta.update(label=e["label"], creator=e["creator"],
                           description=e["description"] or c.meta.get("description"), tags=e["tags"],
-                          source={"kind": "store", "catalog_id": e["id"], "version": e["version"],
-                                  "license": e["license"], "attribution": e["attribution"],
-                                  "creator_url": e["creator_url"], "imported_from": "Character Store"})
+                          source=dict({"kind": "store" if e["category"] == "community" else "historical",
+                                       "catalog_id": e["id"], "version": e["version"], "license": e["license"],
+                                       "attribution": e["attribution"], "creator_url": e["creator_url"],
+                                       "imported_from": "Character Store"},
+                                      **({"collection": e["source"].get("collection", ""),
+                                          "url": e["source"].get("archived_url", ""), "rights": e["rights"]}
+                                         if e["category"] == "historical" else {})))
             rs = self.lib.import_candidates([c])
             r0 = rs[0] if rs else {"status": "failed", "message": "nothing was imported"}
             if r0["status"] not in ("imported", "similar", "duplicate"):

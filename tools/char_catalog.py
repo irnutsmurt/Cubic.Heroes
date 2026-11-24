@@ -8,6 +8,13 @@ repository) is a separate step the owner reviews.
         (the library's export: the character and its description only -- no PS3 save files, no account data),
         characters/<id>/thumb.png (the previews' renderer) and its catalog entry; the catalog's version goes up by
         one and its signatures are dropped (sign it again)
+    char_catalog.py historical --repo DIR [--updated YYYY-MM-DD] RECORDS.json
+        adds recovered community characters (category "historical"), each with its original name, its creator as
+        recorded, its collection and its archival source -- and no licence: none is claimed, the creator keeps every
+        right. RECORDS.json: [{"character": FILE, "original_name", "creator", "collection", "original_date",
+        "original_url", "archived_url", "tags"?}]
+    char_catalog.py remove --repo DIR --id ID [--updated YYYY-MM-DD]
+        a removal request granted: the entry and its files go, the catalog's version goes up (sign it again)
     char_catalog.py sign --repo DIR --key PRIVATE.pem [--keys KEYS.json]
         signs the catalog's "catalog" member (canonical JSON) with an Ed25519 key through OpenSSL (an encrypted key:
         OpenSSL asks for its passphrase itself) and checks the result as the launcher will
@@ -148,7 +155,7 @@ def build(repo, submissions, updated=None, log=print):
                 f.write(thumb)
             lic = sub["license"]
             entry = {
-                "id": cid, "version": old["version"] + 1 if old else 1, "edt_sha256": m["sha256"],
+                "id": cid, "version": old["version"] + 1 if old else 1, "category": "community", "edt_sha256": m["sha256"],
                 "previous_sha256": (old.get("previous_sha256", []) + [old["edt_sha256"]]) if old else [],
                 "label": m["label"], "name": m.get("name") or "", "class": m.get("class") or "",
                 "creator": sub["creator"], "creator_url": sub.get("creator_url") or "", "license": lic,
@@ -178,6 +185,111 @@ def build(repo, submissions, updated=None, log=print):
     log(f"{len(added)} added, {len(cat['characters'])} in the catalog (version {cat['catalog_version']})" +
         ("; not signed yet: run sign" if added else ""))
     return added, problems
+
+
+def historical(repo, records_file, updated=None, log=print):
+    """recovered characters added as category "historical": the original name and creator, the archival source, no
+    licence (none is claimed); each through the library's import, exported as the library exports any character"""
+    doc = _load(repo)
+    cat = doc["catalog"]
+    listed_sha = {e["edt_sha256"] for e in cat["characters"]}
+    ids = {e["id"] for e in cat["characters"]}
+    today = updated or datetime.date.today().isoformat()
+    with open(records_file, encoding="utf-8") as f:
+        records = json.load(f)
+    tmp = tempfile.mkdtemp(prefix="catalog-hist-")
+    added, problems = [], []
+    try:
+        lib = L.Library(os.path.join(tmp, "lib"))
+        for n, rec in enumerate(records):
+            tag = f"record {n + 1} ({rec.get('original_name') or rec.get('character')})"
+            if rec.get("license"):
+                problems.append(f"{tag}: a historical character is given no licence; not added")
+                continue
+            if not str(rec.get("collection") or "").strip():
+                problems.append(f"{tag}: no collection named; not added")
+                continue
+            cands, errs = L.find([rec["character"]])
+            problems += [f"{tag}: {x}" for x in errs]
+            rs = [r for r in lib.import_candidates(cands) if r["status"] in ("imported", "similar", "duplicate")]
+            if len(rs) != 1:
+                problems.append(f"{tag}: not exactly one character in it; not added")
+                continue
+            lid = rs[0]["id"]
+            m = lib.meta(lid)
+            if m["sha256"] in listed_sha:
+                problems.append(f"{tag}: already in the catalog; not added again")
+                continue
+            cid = m["sha256"][:16]
+            if cid in ids:
+                problems.append(f"{tag}: id {cid} is taken; not added")
+                continue
+            name = (rec.get("original_name") or m["label"])[:64]
+            creator = (rec.get("creator") or "").strip()[:64] or "unknown"
+            coll = rec["collection"][:80]
+            m["label"], m["creator"] = name, creator
+            m["description"] = (f"Recovered community creation, first shared on {coll}" +
+                                (f" ({rec['original_date']})" if rec.get("original_date") else "") +
+                                ". No licence is claimed: all rights remain with its creator.")
+            m["tags"] = [t for t in rec.get("tags") or [] if isinstance(t, str)][:12]
+            m["source"] = {"kind": "historical", "collection": coll, "original_name": name,
+                           "original_date": rec.get("original_date") or "", "url": rec.get("archived_url") or "",
+                           "rights": S.HISTORICAL_RIGHTS}
+            lib._write_meta(lid, m)
+            chchar = lib.export(lid)
+            with open(lib.preview_path(lid, "thumb.png"), "rb") as f:
+                thumb = f.read()
+            fpath, tpath = f"characters/{cid}/{cid}.chchar", f"characters/{cid}/thumb.png"
+            os.makedirs(os.path.join(repo, "characters", cid), exist_ok=True)
+            with open(os.path.join(repo, *fpath.split("/")), "wb") as f:
+                f.write(chchar)
+            with open(os.path.join(repo, *tpath.split("/")), "wb") as f:
+                f.write(thumb)
+            cat["characters"].append({
+                "id": cid, "version": 1, "category": "historical", "edt_sha256": m["sha256"], "previous_sha256": [],
+                "label": name, "name": m.get("name") or "", "class": m.get("class") or "", "creator": creator,
+                "attribution": f"\"{name}\" by {creator}, shared on {coll}",
+                "source": {"collection": coll, "original_name": name, "original_date": rec.get("original_date") or "",
+                           "original_url": rec.get("original_url") or "", "archived_url": rec.get("archived_url") or ""},
+                "tags": m["tags"], "description": m["description"], "added": today, "updated": today,
+                "file": {"path": fpath, "sha256": _sha(chchar), "size": len(chchar)},
+                "thumb": {"path": tpath, "sha256": _sha(thumb), "size": len(thumb)},
+            })
+            listed_sha.add(m["sha256"])
+            ids.add(cid)
+            added.append(name)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    if added:
+        cat["characters"].sort(key=lambda e: e["id"])
+        cat["catalog_version"] = int(cat.get("catalog_version") or 0) + 1
+        cat["updated"] = today
+        doc["format"], doc["schema_version"] = S.CATALOG_FORMAT, S.SCHEMA_VERSION
+        doc["signatures"] = []
+        _save(repo, doc)
+    for x in problems:
+        log("problem: " + x)
+    log(f"{len(added)} historical characters added, {len(cat['characters'])} in the catalog (version "
+        f"{cat['catalog_version']})" + ("; not signed yet: run sign" if added else ""))
+    return added, problems
+
+
+def remove(repo, cid, updated=None, log=print):
+    """a removal request granted: the entry and its files removed, the catalog's version up, the signatures dropped
+    (nothing of the request -- who asked, why -- is written into the repository)"""
+    doc = _load(repo)
+    cat = doc["catalog"]
+    e = next((x for x in cat["characters"] if x["id"] == cid), None)
+    if e is None:
+        sys.exit(f"no character {cid} in the catalog")
+    cat["characters"] = [x for x in cat["characters"] if x["id"] != cid]
+    shutil.rmtree(os.path.join(repo, "characters", cid), ignore_errors=True)
+    cat["catalog_version"] = int(cat.get("catalog_version") or 0) + 1
+    cat["updated"] = updated or datetime.date.today().isoformat()
+    doc["signatures"] = []
+    _save(repo, doc)
+    log(f"removed {cid} ({e['label']}); catalog version {cat['catalog_version']}: sign it again, then publish")
+    return e
 
 
 def sign(repo, key, keys_file=None, log=print):
@@ -289,6 +401,14 @@ def main(argv=None):
     b.add_argument("--repo", required=True)
     b.add_argument("--updated", help="the date recorded (default: today)")
     b.add_argument("submissions", nargs="+")
+    h = sub.add_parser("historical")
+    h.add_argument("--repo", required=True)
+    h.add_argument("--updated")
+    h.add_argument("records")
+    rm = sub.add_parser("remove")
+    rm.add_argument("--repo", required=True)
+    rm.add_argument("--id", required=True)
+    rm.add_argument("--updated")
     s = sub.add_parser("sign")
     s.add_argument("--repo", required=True)
     s.add_argument("--key", required=True)
@@ -315,6 +435,12 @@ def main(argv=None):
     if a.cmd == "build":
         _, problems = build(a.repo, a.submissions, a.updated)
         return 1 if problems else 0
+    if a.cmd == "historical":
+        _, problems = historical(a.repo, a.records, a.updated)
+        return 1 if problems else 0
+    if a.cmd == "remove":
+        remove(a.repo, a.id, a.updated)
+        return 0
     if a.cmd == "sign":
         sign(a.repo, a.key, a.keys)
         return 0

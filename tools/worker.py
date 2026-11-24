@@ -1884,7 +1884,11 @@ def cmd_characters(a, ev, control):
         items = [{"id": "store:" + e["id"], "catalog_id": e["id"], "version": e["version"], "label": e["label"],
                   "name": e["name"], "class": e["class"], "creator": e["creator"], "creator_url": e["creator_url"],
                   "license": e["license"], "attribution": e["attribution"], "tags": e["tags"],
-                  "description": e["description"], "source": "store", "imported": e["updated"] or e["added"],
+                  "description": e["description"], "imported": e["updated"] or e["added"],
+                  "source": "store" if e["category"] == "community" else "historical", "category": e["category"],
+                  "rights": e["rights"], "collection": e["source"].get("collection", ""),
+                  "original_date": e["source"].get("original_date", ""),
+                  "archived_url": e["source"].get("archived_url", ""),
                   "added": e["added"], "size": e["file"]["size"], "library_id": e["in_library"],
                   "older_in_library": e["older_in_library"], "installed": e["installed"] or None,
                   "thumb": e["thumb_path"],
@@ -1893,6 +1897,8 @@ def cmd_characters(a, ev, control):
                  for e in (cat or {}).get("characters", [])]
         return {"status": status, "updated": (cat or {}).get("updated", ""), "have_catalog": cat is not None,
                 "catalog_version": (cat or {}).get("catalog_version", 0), "key_id": (cat or {}).get("key_id", ""),
+                "removal_url": (cat or {}).get("removal_url", ""),
+                "historical": sum(1 for e in (cat or {}).get("characters", []) if e["category"] == "historical"),
                 "items": items, "problems": problems[:20], "missing_thumbs": missing,
                 "official": st.base == char_store.DEFAULT_BASE}
     if act == "export":

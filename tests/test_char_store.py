@@ -421,6 +421,76 @@ class Keys(StoreBase):
             self.assertNotIn("test", (k.get("note") or "").lower(), k.get("id"))
 
 
+class Historical(StoreBase):
+    """recovered community characters: their own category, no licence claimed, the source kept, removable"""
+
+    def records(self, **over):
+        recs = []
+        for n, c in (("OLDONE", (0.6, 0.2, 0.2)), ("OLDTWO", (0.2, 0.6, 0.2))):
+            edt = os.path.join(self.src, n.lower() + "-hist.edt")
+            with open(edt, "wb") as f:
+                f.write(E.serialize(make_character(name=n, colour=c)))
+            recs.append(dict({"character": edt, "original_name": n.title() + " (2010)", "creator": "Someone Then",
+                              "collection": "Hall of Heroes (2010)", "original_date": "2010-05-10",
+                              "original_url": "http://example.invalid/download/x.zip",
+                              "archived_url": "https://web.archive.org/web/2010/http://example.invalid/download/x.zip"},
+                             **over))
+        p = os.path.join(self.tmp, "records.json")
+        json.dump(recs, open(p, "w", encoding="utf-8"))
+        return p
+
+    def test_added_apart_with_no_licence(self):
+        added, problems = C.historical(self.repo, self.records(), "2026-11-24", log=QUIET)
+        self.assertEqual((len(added), problems), (2, []))
+        self.resign()
+        doc = self.doc()
+        hist = [e for e in doc["catalog"]["characters"] if e.get("category") == "historical"]
+        comm = [e for e in doc["catalog"]["characters"] if e.get("category") == "community"]
+        self.assertEqual((len(hist), len(comm), doc["catalog"]["catalog_version"]), (2, 3, 2))
+        for e in hist:
+            self.assertNotIn("license", e)
+            self.assertEqual((e["creator"], e["source"]["collection"]), ("Someone Then", "Hall of Heroes (2010)"))
+            self.assertTrue(e["source"]["archived_url"].startswith("https://web.archive.org/"))
+        st = self.store()
+        st.refresh()
+        got = {e["id"]: e for e in st.entries(self.savedata)[0]["characters"]}
+        h = got[hist[0]["id"]]
+        self.assertEqual((h["category"], h["license"], h["rights"]), ("historical", "", S.HISTORICAL_RIGHTS))
+        self.assertIn("shared on Hall of Heroes (2010)", h["attribution"])
+        r = st.download(h["id"])
+        m = self.lib.meta(r["id"])
+        self.assertEqual((m["source"]["kind"], m["source"]["license"], m["source"]["rights"]),
+                         ("historical", "", S.HISTORICAL_RIGHTS))
+        z = zipfile.ZipFile(io.BytesIO(self.lib.export(r["id"])))   # an export keeps where it came from, and its rights
+        meta = json.loads(z.read("character.json"))
+        self.assertEqual((meta["source"]["kind"], meta["source"]["rights"]), ("historical", S.HISTORICAL_RIGHTS))
+
+    def test_never_a_licence_for_a_historical_character(self):
+        added, problems = C.historical(self.repo, self.records(license="CC-BY-4.0"), log=QUIET)
+        self.assertEqual((added, len(problems)), ([], 2))
+        doc = self.doc()   # and the launcher leaves out a historical entry that claims one
+        doc["catalog"]["characters"].append(dict(doc["catalog"]["characters"][0], id="0" * 16, category="historical",
+                                                 source={"collection": "X"}))
+        doc["catalog"]["characters"].append(dict(doc["catalog"]["characters"][0], id="1" * 16, category="historical",
+                                                 license=None, source={}))
+        self.server.override[S.CATALOG_PATH] = json.dumps(self.key.sign_doc(doc)).encode()
+        st = self.store()
+        st.refresh()
+        got, problems = st.entries(self.savedata)
+        self.assertEqual((len(got["characters"]), len(problems)), (3, 2))
+
+    def test_a_removal_request(self):
+        C.historical(self.repo, self.records(), "2026-11-24", log=QUIET)
+        doc = self.doc()
+        e = next(x for x in doc["catalog"]["characters"] if x.get("category") == "historical")
+        C.remove(self.repo, e["id"], "2026-11-25", log=QUIET)
+        doc2 = self.doc()
+        self.assertNotIn(e["id"], [x["id"] for x in doc2["catalog"]["characters"]])
+        self.assertFalse(os.path.exists(os.path.join(self.repo, "characters", e["id"])))
+        self.assertEqual((doc2["catalog"]["catalog_version"], doc2["signatures"]),
+                         (doc["catalog"]["catalog_version"] + 1, []))
+
+
 class Thumbnails(StoreBase):
     def test_fetched_checked_and_cached(self):
         st = self.store()

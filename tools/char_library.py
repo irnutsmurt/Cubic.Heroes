@@ -291,7 +291,7 @@ def source_kind(src):
     k = (src or {}).get("kind") or "files"
     if (src or {}).get("decrypted_from_ps3_save"):
         return "ps3"
-    return k if k in ("chchar", "hall-of-heroes", "community") else "files"
+    return k if k in ("chchar", "hall-of-heroes", "community", "store", "historical") else "files"
 
 
 def sfo_detail_name(sfo):
@@ -617,7 +617,8 @@ class Library:
         out = {k: m.get(k) for k in keep}
         src = m.get("source") or {}
         out["source"] = {k: v for k, v in src.items() if k in ("kind", "collection", "url", "captured", "creator_url",
-                                                               "license", "permission")}
+                                                               "license", "permission", "rights", "attribution",
+                                                               "original_name", "original_date", "removal_url")}
         out["exported"] = _now()
         out["preview"] = {"renderer": char_preview.RENDERER}
         buf = io.BytesIO()

@@ -2681,6 +2681,7 @@ static const char* source_name(const std::string& k)
     if (k == "community") return "The community";
     if (k == "game") return "Made in the game";
     if (k == "store") return "The Character Store";
+    if (k == "historical") return "Recovered (historical)";
     return "Your files";
 }
 
@@ -3059,6 +3060,8 @@ static void chars_detail(const json::Value& c)
     if (store) {   // the store: download it (and install it), or it's already here
         const std::string lib_id = c["library_id"].str();
         text_col(col::dim, "%s", fit_text(c["attribution"].str(), avail).c_str());
+        const bool hist = c["category"].str() == "historical";
+        if (hist) text_col(col::dim, "%s", fit_text(c["rights"].str(), avail).c_str());
         if (g_chars.downloading.count(c["catalog_id"].str())) {
             text_col(col::accent, "Downloading... (you can keep browsing)");
         } else if (lib_id.empty()) {
@@ -3082,8 +3085,19 @@ static void chars_detail(const json::Value& c)
             if (!c["creator"].str().empty()) text_col(col::dim, "Made by %s%s%s", c["creator"].str().c_str(),
                                                       c["creator_url"].str().empty() ? "" : " -- ",
                                                       c["creator_url"].str().c_str());
-            text_col(col::dim, "Licence: %s (https://creativecommons.org/licenses/by/4.0/)",
-                     c["license"].str() == "CC-BY-4.0" ? "CC BY 4.0" : c["license"].str("not stated").c_str());
+            if (hist) {   // a recovered character: where it was first shared, where it was found, how to ask for removal
+                text_col(col::dim, "First shared on %s%s%s", c["collection"].str().c_str(),
+                         c["original_date"].str().empty() ? "" : ", ", c["original_date"].str().c_str());
+                if (!c["archived_url"].str().empty())
+                    ImGui::TextWrapped("Archived source: %s", c["archived_url"].str().c_str());
+                text_col(col::dim, "Licence: none claimed -- all rights remain with its creator.");
+                if (!g_chars.store["removal_url"].str().empty())
+                    ImGui::TextWrapped("Is this your character, or yours to decide? Ask for its removal: %s",
+                                       g_chars.store["removal_url"].str().c_str());
+            } else {
+                text_col(col::dim, "Licence: %s (https://creativecommons.org/licenses/by/4.0/)",
+                         c["license"].str() == "CC-BY-4.0" ? "CC BY 4.0" : c["license"].str("not stated").c_str());
+            }
             text_col(col::dim, "Version %d; added %s, updated %s; file %d bytes; catalog id %s", (int)c["version"].num(),
                      c["added"].str().substr(0, 10).c_str(), c["imported"].str().substr(0, 10).c_str(),
                      (int)c["size"].num(), c["catalog_id"].str().c_str());
@@ -3310,7 +3324,9 @@ static void store_status_line(float avail)
         text = "Downloading " + std::to_string(g_chars.downloading.size()) + " character" +
                (g_chars.downloading.size() == 1 ? "" : "s") + "...";
     if (text.empty()) {
-        text = "Community characters, checked and approved";
+        const int nh = (int)g_chars.store["historical"].num(), nall = (int)g_chars.store["items"].size();
+        text = nh == 0 ? "Community characters, checked and approved"
+             : std::to_string(nall - nh) + " community and " + std::to_string(nh) + " recovered historical characters";
         if (!g_chars.store["updated"].str().empty()) text += " -- catalog of " + g_chars.store["updated"].str();
         if (g_chars.thumbs_running) text += " (fetching pictures)";
     }
