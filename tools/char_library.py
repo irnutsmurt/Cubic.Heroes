@@ -280,7 +280,7 @@ def make_sfo(directory, name):
 
 # ---- the library -----------------------------------------------------------------------------------------------
 
-INDEX_VERSION = 1
+INDEX_VERSION = 2   # 2: every encrypted original a character was decrypted from (original_sha256s)
 PREVIEW_FILES = ("thumb.png", "views.png", "thumb.rle", "views.rle")
 INSTALL_FILES = {"DATA.EDT", "PARAM.SFO", "ICON0.PNG", "PARAM.PFD"}
 
@@ -375,6 +375,8 @@ class Library:
                 "sha256": m.get("sha256", ""), "size": m.get("size", 0), "preview_ok": bool(pv.get("ok")),
                 "preview_current": pv.get("renderer") == char_preview.RENDERER and pv.get("sha256") == m.get("sha256"),
                 "installed_folder": m.get("installed_folder"), "original_sha256": m.get("original_edt_sha256"),
+                "original_sha256s": [x for x in [m.get("original_edt_sha256")] + list(m.get("also_original_edt_sha256") or [])
+                                     if x],
                 "description": m.get("description") or "", "shape": m.get("shape_sha256", "")}
 
     def index(self):
@@ -524,6 +526,14 @@ class Library:
         cid = sha[:16]
         final = os.path.join(self.entries, cid)
         if os.path.exists(os.path.join(final, "character.json")):
+            # another encrypted copy of a character already here (another PS3's save, say): recorded, so the game's
+            # saves no longer count it as an encrypted character waiting to be imported
+            if decrypted and getattr(cand, "original_sha", None):
+                m = self.meta(cid)
+                also = list(m.get("also_original_edt_sha256") or [])
+                if cand.original_sha != m.get("original_edt_sha256") and cand.original_sha not in also:
+                    m["also_original_edt_sha256"] = (also + [cand.original_sha])[-20:]
+                    self._write_meta(cid, m)
             return {"label": cand.label, "status": "duplicate", "id": cid,
                     "message": f"already in the library as \"{self.index().get(cid, {}).get('label', cid)}\" (the same character)"}
         shape = edt_format.shape_hash(ch)
@@ -656,7 +666,8 @@ class Library:
         if not os.path.isdir(savedata):
             return out
         have = {e["sha256"] for e in self.index().values()}
-        imported_originals = {e.get("original_sha256") for e in self.index().values() if e.get("original_sha256")}
+        imported_originals = {x for e in self.index().values() for x in (e.get("original_sha256s") or
+                                                                          [e.get("original_sha256")]) if x}
         for d in sorted(os.listdir(savedata)):
             if not d.startswith(EDIT_PREFIX):
                 continue

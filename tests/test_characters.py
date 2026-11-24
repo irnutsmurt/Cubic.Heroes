@@ -362,6 +362,18 @@ class LibraryUpkeep(unittest.TestCase):
         rs = self.lib.import_candidates(L.find([d])[0], TEST_KEY, fake_program(TEST_SID))
         self.assertEqual(rs[0]["status"], "imported")
         self.assertNotIn("BLJM60180T0000000000000000000D", {f["folder"] for f in self.lib.scan_saves(self.sav)})
+        # another PS3's encrypted copy of the same character (another file key: other bytes): a duplicate, and once
+        # decrypted it no longer counts as waiting either
+        enc2, pfd2 = P._encrypt_for_tests(TEST_KEY, TEST_SID, E.serialize(make_character(name="ＰＳ３")), file_key=b"\x22" * 16)
+        self.assertNotEqual(enc2, enc)
+        d2 = os.path.join(self.sav, "BLJM60180T0000000000000000000F")
+        os.makedirs(d2)
+        open(os.path.join(d2, "DATA.EDT"), "wb").write(enc2)
+        open(os.path.join(d2, "PARAM.PFD"), "wb").write(pfd2)
+        self.assertIn("BLJM60180T0000000000000000000F", {f["folder"] for f in self.lib.scan_saves(self.sav)})
+        rs = self.lib.import_candidates(L.find([d2])[0], TEST_KEY, fake_program(TEST_SID))
+        self.assertEqual(rs[0]["status"], "duplicate")
+        self.assertNotIn("BLJM60180T0000000000000000000F", {f["folder"] for f in self.lib.scan_saves(self.sav)})
 
 
 class WorkerCommand(unittest.TestCase):

@@ -1791,8 +1791,12 @@ def cmd_characters(a, ev, control):
         for r in results:
             counts[r["status"]] = counts.get(r["status"], 0) + 1
         counts["errors"] = len(errors)
-        log("info", "characters: import " + ", ".join(f"{k} {v}" for k, v in sorted(counts.items()) if v))
-        return {"results": results, "errors": errors, "counts": counts, "key_kept": kept,
+        stopped = control.cancel.is_set()
+        if stopped:   # stopped between characters: those added stay, and the answer says how many (not a bare "cancelled")
+            control.cancel.clear()
+        log("info", "characters: import " + ", ".join(f"{k} {v}" for k, v in sorted(counts.items()) if v) +
+            (" (stopped by the player)" if stopped else ""))
+        return {"results": results, "errors": errors, "counts": counts, "key_kept": kept, "stopped": stopped,
                 "key_wrong": any(r["status"] == "wrong-key" for r in results)}
 
     if act == "list":

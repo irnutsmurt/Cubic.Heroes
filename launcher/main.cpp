@@ -2979,7 +2979,7 @@ static void chars_import(const std::vector<std::string>& paths, const std::vecto
         for (size_t i = 0; i < errs.size(); i++) lines += errs[i].str() + "\n";
         g_results = ImportResults();
         g_results.open = true;
-        g_results.title = imported ? "Import finished" : "Nothing new imported";
+        g_results.title = d["stopped"].truthy() ? "Import stopped" : imported ? "Import finished" : "Nothing new imported";
         g_results.summary = s.empty() ? "No character was found in what you chose." : s;
         g_results.lines = lines;
         g_results.error = imported == 0 && bad > 0;
@@ -4268,6 +4268,8 @@ static void overlay_uninstall()
     }
 }
 
+static bool IsKeyPressedNoNav(ImGuiKey k) { return ImGui::IsKeyPressed(k, true); }
+
 static void overlay_osk()
 {
     static OpenFocus kf;
@@ -4280,13 +4282,37 @@ static void overlay_osk()
     if (ImGui::BeginPopupModal("##osk", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize)) {
         frame_window();
         title(g_osk.title.c_str(), 26);
-        // the text as typed (a keyboard types into it directly too)
+        // the text as typed (a keyboard types into it directly too): opened from a keyboard or mouse, the field
+        // has the focus; from a controller, the keys do -- and a physical keyboard's first keys still reach the text
+        // (the next ones go into the field directly)
+        static bool field_next = false, caret_end = false;
+        ImGuiIO& io = ImGui::GetIO();
+        if ((kf.left > 0 && g_device == Device::Keys) || field_next) {
+            ImGui::SetKeyboardFocusHere();
+            caret_end = field_next;   // caught-up typing goes on after what was typed (not over it: no select-all)
+            field_next = false;
+        }
         char buf[256];
         snprintf(buf, sizeof buf, "%s", g_osk.text.c_str());
         ImGui::SetNextItemWidth(-1);
-        if (ImGui::InputText("##osktext", buf, sizeof buf, g_osk.secret ? ImGuiInputTextFlags_Password : 0))
+        if (ImGui::InputText("##osktext", buf, sizeof buf,
+                             (g_osk.secret ? ImGuiInputTextFlags_Password : 0) | ImGuiInputTextFlags_CallbackAlways,
+                             [](ImGuiInputTextCallbackData* d) {
+                                 if (caret_end) {
+                                     d->CursorPos = d->SelectionStart = d->SelectionEnd = d->BufTextLen;
+                                     caret_end = false;
+                                 }
+                                 return 0;
+                             }))
             g_osk.text = buf;
         if (g_osk.secret) memset(buf, 0, sizeof buf);
+        bool typed = false;   // (this frame: the on-screen keys don't also act on the same key -- Space, say)
+        if (!ImGui::IsItemActive() && kf.left == 0) {
+            for (ImWchar c : io.InputQueueCharacters)
+                if (c >= 32 && c < 127 && g_osk.text.size() < 200) { g_osk.text += (char)c; typed = true; }
+            if (IsKeyPressedNoNav(ImGuiKey_Backspace) && !g_osk.text.empty()) { g_osk.text.pop_back(); typed = true; }
+            if (typed) { io.InputQueueCharacters.resize(0); field_next = true; }
+        }
         static const char* rows[2][4] = { { "1234567890", "qwertyuiop", "asdfghjkl'", "zxcvbnm,.-" },
                                           { "!@#$%^&*()", "QWERTYUIOP", "ASDFGHJKL\"", "ZXCVBNM;:_" } };
         const float key = S(76);
@@ -4298,15 +4324,15 @@ static void overlay_osk()
                 char k[8] = { row[i], 0 };
                 char id[24];
                 snprintf(id, sizeof id, "%s##k%d_%d", k, r, i);
-                if (big_button(id, ImVec2(key, key))) g_osk.text += row[i];
-                if (first) { want_focus(kf); focus_tick(kf); }
+                if (big_button(id, ImVec2(key, key)) && !typed) g_osk.text += row[i];
+                if (first) { if (g_device != Device::Keys) want_focus(kf); focus_tick(kf); }
                 first = false;
                 if (row[i + 1]) ImGui::SameLine(0, S(8));
             }
         }
         if (big_button("Shift", ImVec2(key * 2, key))) g_osk.shift = !g_osk.shift;
         ImGui::SameLine(0, S(8));
-        if (big_button("Space", ImVec2(key * 4, key))) g_osk.text += ' ';
+        if (big_button("Space", ImVec2(key * 4, key)) && !typed) g_osk.text += ' ';
         ImGui::SameLine(0, S(8));
         if (big_button("Delete", ImVec2(key * 2, key)) && !g_osk.text.empty()) g_osk.text.pop_back();
         ImGui::SameLine(0, S(8));
