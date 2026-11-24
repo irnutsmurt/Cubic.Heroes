@@ -1,0 +1,27 @@
+# Issue #8: one character's edit data (SAVES= a seed with the castle's save and one BLJM60180T... folder) loaded in
+# the character editor (EDITOR -> LOAD): the picture the editor shows and its Stand pose's block grid. A PS3 copy
+# whose DATA.EDT is still encrypted comes up blank; decrypted, the character loads.
+#! env PS3_SAVEDATA_PICKER=1 DOTHEROES_DEV_STATE=1
+#! secs 200
+log TitleMovie 120
+sleep 5
+press START
+sleep 3
+press DOWN
+sleep 1
+press CROSS                 # EDITOR -> LOAD / NEW DATA, on LOAD
+sleep 4
+press CROSS                 # LOAD: the save list
+log list.dialog:.1.entries 25
+sleep 2
+press CROSS
+log chose.0 6
+sleep 6
+shot loaded
+press CROSS                 # EDIT -> EDIT POSE
+sleep 3
+press CROSS                 # EDIT POSE -> select a pose, on Stand
+sleep 3
+press CROSS                 # Stand -> the block grid
+sleep 3
+shot grid

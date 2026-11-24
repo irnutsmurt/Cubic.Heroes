@@ -41,6 +41,7 @@
 | `docs/AUDIO.md` | INDEP | keep |
 | `docs/BUILDING.md` | INDEP | keep |
 | `docs/BULLET_NATIVE.md` | DOC-GAME | keep: facts about the game's behaviour and the project's results |
+| `docs/CHARACTERS.md` | INDEP | keep |
 | `docs/CLI.md` | INDEP | keep |
 | `docs/FEASIBILITY.md` | INDEP | keep |
 | `docs/FFMPEG_MIGRATION_PLAN.md` | INDEP | keep |
@@ -409,6 +410,7 @@
 | `tests/keep_baseline.py` | INDEP | keep |
 | `tests/lap_ab.py` | INDEP | keep |
 | `tests/launcher_gui_update_check.py` | INDEP | keep |
+| `tests/launcher_nav_pages.py` | INDEP | keep |
 | `tests/launcher_update_e2e.py` | INDEP | keep |
 | `tests/linux_rpath_check.py` | INDEP | keep |
 | `tests/linux_update_check.py` | INDEP | keep |
@@ -436,6 +438,8 @@
 | `tests/native/trace_reader.h` | INDEP | keep |
 | `tests/native/water_task_check.cpp` | INDEP | keep |
 | `tests/native/waver_task_check.cpp` | INDEP | keep |
+| `tests/nav/five_pages.nav` | INDEP | keep |
+| `tests/nav/settings_tabs.nav` | INDEP | keep |
 | `tests/nsys_capture.py` | INDEP | keep |
 | `tests/owned_dummy.py` | INDEP | keep |
 | `tests/package_license_audit.py` | INDEP | keep |
@@ -534,6 +538,8 @@
 | `tests/scenarios/sound_pan.drive` | INDEP | keep |
 | `tests/scripts/capture_field.drive` | INDEP | keep |
 | `tests/scripts/continue_where.drive` | INDEP | keep |
+| `tests/scripts/edit_load_editor.drive` | INDEP | keep |
+| `tests/scripts/edit_load_select.drive` | INDEP | keep |
 | `tests/scripts/editor_roundtrip_1.drive` | INDEP | keep |
 | `tests/scripts/editor_roundtrip_2.drive` | INDEP | keep |
 | `tests/scripts/editor_save.drive` | INDEP | keep |
@@ -594,6 +600,7 @@
 | `tests/stop_tests.py` | INDEP | keep |
 | `tests/test_boundary_check.py` | INDEP | keep |
 | `tests/test_build_env_pins.py` | INDEP | keep |
+| `tests/test_characters.py` | INDEP | keep |
 | `tests/test_desktop_guard.py` | INDEP | keep |
 | `tests/test_dev_saves.py` | INDEP | keep |
 | `tests/test_disc_source.py` | INDEP | keep |
@@ -637,6 +644,8 @@
 | `tools/build_deps.py` | INDEP | keep |
 | `tools/build_ffmpeg.py` | INDEP | keep |
 | `tools/build_launcher.py` | INDEP | keep |
+| `tools/char_library.py` | INDEP | keep |
+| `tools/char_preview.py` | INDEP | keep |
 | `tools/ci_build.py` | INDEP | keep |
 | `tools/ci_stub_lift.py` | INDEP | keep |
 | `tools/class_census_static.py` | INDEP | keep |
@@ -646,6 +655,7 @@
 | `tools/disc_manifest.py` | INDEP | keep |
 | `tools/disc_source.py` | INDEP | keep |
 | `tools/edit_import.py` | INDEP | keep |
+| `tools/edt_format.py` | INDEP | keep |
 | `tools/fetch_appimage.py` | INDEP | keep |
 | `tools/fetch_zig.py` | INDEP | keep |
 | `tools/fix_functions.py` | INDEP | keep |
@@ -674,6 +684,7 @@
 | `tools/pipeline_manifest.py` | INDEP | keep |
 | `tools/pipeline_profiles.py` | INDEP | keep |
 | `tools/ps3_disc.py` | INDEP | keep |
+| `tools/ps3_save.py` | INDEP | keep |
 | `tools/push_guard.py` | INDEP | keep |
 | `tools/r1_boundary_check.py` | INDEP | keep |
 | `tools/r1_capture.sh` | INDEP | keep |
@@ -723,6 +734,7 @@
 | `tools/save_diff.py` | INDEP | keep |
 | `tools/save_ui_preview.c` | INDEP | keep |
 | `tools/sdl_device_poke.py` | INDEP | keep |
+| `tools/secret_store.py` | INDEP | keep |
 | `tools/self_decrypt.py` | INDEP | keep |
 | `tools/self_update.py` | INDEP | keep |
 | `tools/settings.py` | INDEP | keep |

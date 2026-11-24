@@ -1,0 +1,41 @@
+# Issue #8 as reported: the character select's EDIT DATA (CONTINUE, "Change characters?" YES, the grid's EDIT DATA
+# button) with one character's edit data (SAVES= the castle's save and one BLJM60180T... folder): the character the
+# game shows before "Is this okay?".
+#! env PS3_SAVEDATA_PICKER=1 DOTHEROES_DEV_STATE=1
+#! secs 200
+log TitleMovie 120
+sleep 5
+press START
+sleep 3
+press START                 # CONTINUE
+log list.dialog:.1.entries 25
+sleep 2
+press CROSS
+log chose.0 6
+log LOAD.dir= 10
+sleep 6
+press UP                    # "Change characters?" YES
+sleep 1
+press CROSS
+sleep 4
+press DOWN                  # the character grid, from its first entry: to the last row
+sleep 1
+press DOWN
+sleep 1
+press RIGHT                 # its last character, and past it the EDIT DATA button
+sleep 1
+press RIGHT
+sleep 1
+press RIGHT
+sleep 1
+press RIGHT
+sleep 1
+shot on_edit_button
+press CROSS
+log list.dialog:.1.entries 25
+sleep 3
+press CROSS
+log chose.0 6
+log LOAD.dir= 10
+sleep 8
+shot after_edit
