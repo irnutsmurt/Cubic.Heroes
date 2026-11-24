@@ -1694,6 +1694,7 @@ void fill_common(Rec* r, uint32_t kind, ppu_context* c)
 
 void publish(Rec* r)
 {
+    r7_plan_take(r);   // R7: which of its small textures the flush takes, decided now
     Queue& q = queue();
     if (r->seq < 4) {   // the first records' positions, for the bridge's first match
         char line[200];
@@ -2127,11 +2128,21 @@ Rec* r7_rec(uint32_t kind)
 }  // namespace
 // M9.2c: a program's identity as blob_of interns it (Blob::hash), for a pipeline's key made from a recipe
 uint64_t program_hash(const uint8_t* p, size_t n) { return blob_hash(p, n) ^ (uint64_t)n; }
-bool r7_take_at_flush(Rec* r)
+// Which of a record's small textures the flush takes is decided when the record is published, while it is still in
+// the cache, and kept in a short list; the flush then copies the bytes (at the same moment as before) for the listed
+// units only. Deciding at the flush read every record published since back from memory -- hundreds a frame, about a
+// thousand with debris -- to find the ten or twenty textures that qualify (issue #2).
+struct FlushTake { Rec* r; uint8_t unit; uint8_t location; uint32_t offset, bytes; };
+std::vector<FlushTake> s_flush_take;
+bool r7_tex_at_flush_on()
 {
     static int on = -1;
     if (on < 0) { const char* e = getenv("DOTHEROES_R7_TEX_AT_FLUSH"); on = !(e && *e == '0'); }
-    if (!on || r->tex_at_flush || (r->kind != kAspDraw && r->kind != kDraw)) return false;
+    return on && r7();
+}
+void r7_plan_take(Rec* r)
+{
+    if (!r7_tex_at_flush_on() || r->tex_at_flush || (r->kind != kAspDraw && r->kind != kDraw)) return;
     for (uint32_t k = 0; k < r->nneed; k++) {
         const Need& n = r->need[k];
         if (n.unit >= 16 || n.drawn) continue;
@@ -2141,18 +2152,27 @@ bool r7_take_at_flush(Rec* r)
         rsx_tex_level lv[RSX_MAX_TEXTURE_LEVELS];
         const uint32_t nlv = rsx_texture_mip_chain(t.format, t.width, t.height, t.mipmap, t.pitch, lv);
         const uint32_t bytes = nlv ? lv[nlv - 1].offset + lv[nlv - 1].tl.face_bytes : 0;
-        const uint32_t ea = cellGcmResolveLocated(t.location == 0, t.offset);
-        if (!bytes || bytes > (256u << 10) || !ea_ok(ea, bytes)) continue;
-        VtxRange* tr = nullptr;
-        for (uint32_t j = 0; j < r->ntex; j++) if (r->tex[j].location == n.unit) tr = &r->tex[j];
-        if (!tr) { if (r->ntex >= 16) continue; tr = &r->tex[r->ntex++]; }
-        tr->location = n.unit; tr->offset = t.offset; tr->bytes = bytes; tr->at = (uint32_t)r->tdata.size();
-        r->tdata.insert(r->tdata.end(), vm_base + ea, vm_base + ea + bytes);
-        stats().r7_flush_tex++;
-        stats().r7_flush_tex_bytes += bytes;
+        if (!bytes || bytes > (256u << 10)) continue;
+        s_flush_take.push_back({ r, n.unit, t.location, t.offset, bytes });
     }
     r->tex_at_flush = 1;
-    return true;
+}
+// at the game's flush: the listed textures' bytes into their records, in the records' order
+void r7_take_at_flush()
+{
+    for (const FlushTake& f : s_flush_take) {
+        Rec* r = f.r;
+        const uint32_t ea = cellGcmResolveLocated(f.location == 0, f.offset);
+        if (!ea_ok(ea, f.bytes)) continue;
+        VtxRange* tr = nullptr;
+        for (uint32_t j = 0; j < r->ntex; j++) if (r->tex[j].location == f.unit) tr = &r->tex[j];
+        if (!tr) { if (r->ntex >= 16) continue; tr = &r->tex[r->ntex++]; }
+        tr->location = f.unit; tr->offset = f.offset; tr->bytes = f.bytes; tr->at = (uint32_t)r->tdata.size();
+        r->tdata.insert(r->tdata.end(), vm_base + ea, vm_base + ea + f.bytes);
+        stats().r7_flush_tex++;
+        stats().r7_flush_tex_bytes += f.bytes;
+    }
+    s_flush_take.clear();
 }
 namespace {
 
@@ -2164,11 +2184,13 @@ void r7_publish(bool forced)
     const uint64_t p = q.put.load(std::memory_order_acquire);
     // the small uncompressed textures, now (section 2); then, in development,
     // every input as it is at the flush
-    for (uint64_t i = q.flushed.load(std::memory_order_relaxed); i < p; i++) {
-        Rec* r = q.at(i);
-        r7_take_at_flush(r);
-        if (r7_capture_check()) { r7_input_hashes(r, r->fhash, nullptr); r->fh = 1; }
-    }
+    r7_take_at_flush();
+    if (r7_capture_check())
+        for (uint64_t i = q.flushed.load(std::memory_order_relaxed); i < p; i++) {
+            Rec* r = q.at(i);
+            r7_input_hashes(r, r->fhash, nullptr);
+            r->fh = 1;
+        }
     if (q.flushed.load(std::memory_order_relaxed) != p) {
         { std::lock_guard<std::mutex> g(q.m); q.flushed.store(p, std::memory_order_release); }
         q.cv.notify_all();

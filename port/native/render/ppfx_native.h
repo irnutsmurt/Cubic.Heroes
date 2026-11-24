@@ -558,7 +558,8 @@ int r7_capture_check();
 void r7_input_hashes(const Rec* r, std::vector<uint64_t>& out, std::vector<std::string>* what,
                      std::vector<uint8_t>* taken_at_flush = nullptr);
 // R7: a record's small uncompressed guest textures taken into it at the
-// flush (the game's thread); false when the switch turned it off
-bool r7_take_at_flush(Rec* r);
+// flush (the game's thread): chosen at publish, copied at the flush
+void r7_plan_take(Rec* r);   // at publish: which of its small textures the flush takes (issue #2)
+void r7_take_at_flush();     // at the game's flush: those textures' bytes into their records
 
 }  // namespace ppfx
