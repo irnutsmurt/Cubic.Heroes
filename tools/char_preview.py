@@ -232,6 +232,24 @@ def placeholder(w, h):
     return c
 
 
+def png_to_rgb(png):
+    """(w, h, RGB bytes) of a PNG this module wrote (8-bit RGB, one IDAT, filter 0 on every row)."""
+    w, h, depth, colour = struct.unpack(">IIBB", png[16:26])
+    if png[:8] != b"\x89PNG\r\n\x1a\n" or depth != 8 or colour != 2:
+        raise ValueError("not a preview this module wrote")
+    o, idat = 8, b""
+    while o < len(png):
+        n, t = struct.unpack(">I4s", png[o:o + 8])
+        if t == b"IDAT":
+            idat += png[o + 8:o + 8 + n]
+        o += 12 + n
+    raw = zlib.decompress(idat)
+    stride = 1 + 3 * w
+    if len(raw) != stride * h or any(raw[y * stride] for y in range(h)):
+        raise ValueError("not a preview this module wrote")
+    return w, h, b"".join(raw[y * stride + 1:(y + 1) * stride] for y in range(h))
+
+
 def make(edt_bytes):
     """(thumb.png bytes, views.png bytes, ok): placeholders and ok False when the data is not a character."""
     try:

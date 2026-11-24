@@ -136,14 +136,26 @@ class Control:
         self.events = events
         self.cancel = threading.Event()
         self.finished = threading.Event()
+        # M12: a PS3 save key the player typed, sent as a "key <32 hex digits>" line -- never on the command line,
+        # never echoed, logged or written by the worker (characters --action import uses it)
+        self.key_text = None
+        self.key_ready = threading.Event()
 
     def listen(self):
         threading.Thread(target=self._read, daemon=True).start()
 
     def _read(self):
         for line in sys.stdin:
+            if line.startswith("key "):
+                self.key_text = line[4:].strip()
+                self.key_ready.set()
+                continue
+            if line.strip() == "nokey":
+                self.key_ready.set()
+                continue
             if line.strip() == "cancel":
                 return self.request("the player")
+        self.key_ready.set()
         self.request("the launcher closed")
 
     def request(self, by):
@@ -1695,7 +1707,124 @@ def cmd_selftest(a, ev, control):
     return {"seconds": took, "skipped": skipped}
 
 
-COMMANDS = {"version": cmd_version, "probe-disc": cmd_probe_disc, "probe-keys": cmd_probe_keys,
+CHAR_SAVEDATA = ("dev_hdd0", "home", "00000001", "savedata")
+
+
+def cmd_characters(a, ev, control):
+    """M12, the local character library (tools/char_library.py, docs/CHARACTERS.md), in <install>/data/characters:
+    --action list (default) | import --paths P [--paths P ...] [--with-key] [--keep-key] | export --id I [--id ...] --out
+    PATH | install --id I | rename --id I --label L | delete --id I --confirm | key-forget.
+    import --with-key (with --control): the player's PS3 save key is read from the control channel ("key <hex>") --
+    never from the command line; it is used, validated on the character, kept only with --keep-key and only after it
+    decrypted a character, and never written to the events or the log."""
+    import char_library
+    import ps3_save
+    import secret_store
+    lay = _layout(a, kind=None)
+    lib = char_library.Library(os.path.join(lay.data, "characters"))
+    savedata = os.path.join(lay.gamedata, *CHAR_SAVEDATA)
+    act = a.action_chars or "list"
+    ids = a.char_id or []
+
+    def entry(cid):
+        m = lib.meta(cid)
+        return {"id": cid, "label": m.get("label"), "name": m.get("name"), "class": m.get("class"),
+                "creator": m.get("creator"), "description": m.get("description"), "tags": m.get("tags", []),
+                "source": m.get("source"), "voxels": m.get("voxels"), "preview_ok": m.get("preview", {}).get("ok"),
+                "thumb": lib.raw_preview(cid, "thumb"), "views": lib.raw_preview(cid, "views"),
+                "sha256": m.get("sha256")}
+
+    if act == "list":
+        have, unusable = lib.installed(savedata)
+        out = []
+        for cid, _m in lib.search(a.label or ""):
+            e = entry(cid)
+            e["installed"] = have.get(e["sha256"])
+            out.append(e)
+        ok, where = secret_store.available()
+        return {"characters": out, "unusable_in_game": [{"folder": f, "reason": r} for f, r in unusable],
+                "key": {"stored": secret_store.load() is not None, "store": where if ok else None,
+                        "store_message": None if ok else where}}
+    if act == "import":
+        if not a.char_paths:
+            raise pipeline.SetupError("import needs --paths.", "usage")
+        cands, errors = char_library.find(a.char_paths)
+        key, typed = None, False
+        if a.with_key:
+            if not a.control:
+                raise pipeline.SetupError("--with-key needs --control (the key comes over the control channel).", "usage")
+            ev.emit("needs", what="key")
+            control.key_ready.wait(600)
+            if control.key_text:
+                try:
+                    key, typed = ps3_save.parse_key_text(control.key_text), True
+                except ps3_save.SaveError as e:
+                    raise pipeline.SetupError(str(e), "bad_key")
+                finally:
+                    control.key_text = None
+        if key is None:
+            key = secret_store.load()
+        program = None
+        elf = os.path.join(lay.data, "disc", "PS3_GAME", "USRDIR", "EBOOT.elf")
+        if os.path.isfile(elf):
+            program = open(elf, "rb").read()
+        results = lib.import_candidates(cands, key, program)
+        stored = None
+        decrypted_ok = any(r["status"] in ("imported", "similar", "duplicate") and
+                           (lib.meta(r["id"]).get("source") or {}).get("decrypted_from_ps3_save")
+                           for r in results if r.get("id"))
+        if typed and a.keep_key and decrypted_ok:
+            try:
+                stored = secret_store.save(key, keep=True)
+            except secret_store.StoreUnavailable as e:
+                stored = f"not kept: {e}"
+        elif typed and decrypted_ok:
+            secret_store.save(key, keep=False)
+            stored = "this session"
+        return {"results": results, "errors": errors, "key_kept": stored,
+                "characters": [entry(r["id"]) for r in results if r.get("id")]}
+    if act == "export":
+        if not ids or not a.out:
+            raise pipeline.SetupError("export needs --id and --out.", "usage")
+        written = []
+        for cid in ids:
+            b = lib.export(cid)
+            if len(ids) == 1 and a.out.lower().endswith(".chchar"):
+                path = a.out
+            else:
+                label = "".join(ch if ch.isalnum() or ch in " -_" else "_" for ch in lib.meta(cid)["label"]).strip()
+                path = os.path.join(a.out, f"{label or 'character'}-{cid[:8]}.chchar")
+            os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+            if os.path.exists(path):
+                raise pipeline.SetupError(f"{path} already exists; not replaced.", "exists")
+            with open(path, "wb") as f:
+                f.write(b)
+            written.append(path)
+        return {"written": written}
+    if act == "install":
+        done = []
+        for cid in ids:
+            folder, new = lib.install(cid, savedata)
+            done.append({"id": cid, "folder": folder, "new": new})
+        return {"installed": done}
+    if act == "rename":
+        if len(ids) != 1 or not a.label:
+            raise pipeline.SetupError("rename needs one --id and --label.", "usage")
+        lib.rename(ids[0], a.label)
+        return entry(ids[0])
+    if act == "delete":
+        if not a.confirm:
+            raise pipeline.SetupError("delete needs --confirm.", "needs_confirmation")
+        for cid in ids:
+            lib.delete(cid)
+        return {"deleted": ids}
+    if act == "key-forget":
+        secret_store.forget()
+        return {"key": {"stored": False}}
+    raise pipeline.SetupError(f"unknown action {act}", "usage")
+
+
+COMMANDS = {"characters": cmd_characters, "version": cmd_version, "probe-disc": cmd_probe_disc, "probe-keys": cmd_probe_keys,
             "space": cmd_space, "info": cmd_info, "install": cmd_install, "update": cmd_update,
             "migrate": cmd_migrate, "builds": cmd_builds, "rollback": cmd_rollback, "game-appimage": cmd_game_appimage, "retention": cmd_retention,
             "repair-link": cmd_repair_link, "saves": cmd_saves, "prepare": cmd_prepare,
@@ -1737,6 +1866,14 @@ def parser():
     p.add_argument("--kind", choices=("poster", "hero"), help="steam-art: which artwork")
     p.add_argument("--image", help="steam-art: the player's own image file (PNG or JPEG)")
     p.add_argument("--replace", action="store_true", help="steam-art: replace the player's own artwork (they confirmed)")
+    p.add_argument("--char-action", dest="action_chars",
+                   choices=("list", "import", "export", "install", "rename", "delete", "key-forget"),
+                   help="characters: what to do (default list)")
+    p.add_argument("--paths", dest="char_paths", action="append", help="characters import: a file or folder (repeat)")
+    p.add_argument("--id", dest="char_id", action="append", help="characters: a library entry (repeat)")
+    p.add_argument("--label", help="characters: rename's new label; list's search text")
+    p.add_argument("--with-key", action="store_true", help="characters import: the PS3 save key comes over --control")
+    p.add_argument("--keep-key", action="store_true", help="characters import: keep the validated key (OS-protected)")
     p.add_argument("--disc-key", help="an encrypted disc image's key: a .dkey or IRD file, or a file of the 32 digits")
     p.add_argument("--parts", help="uninstall: the parts, comma-separated (builds,data,shaders,objects,settings,saves,shortcuts)")
     p.add_argument("--dry-run", action="store_true",
@@ -1751,7 +1888,7 @@ def parser():
     p.add_argument("--set", action="append", help="settings: KEY=VALUE (repeatable)")
     p.add_argument("--reset", action="append", help="settings: a key to its default (repeatable; all: every one)")
     p.add_argument("--repair", action="store_true", help="settings: write a damaged settings file again")
-    p.add_argument("--out", help="diagnostics: the folder the report's files are written into")
+    p.add_argument("--out", help="diagnostics: the folder the report's files are written into; characters export: a .chchar file, or a folder for several")
     p.add_argument("--pack", help="diagnostics: the zip to make from --out as it is now")
     p.add_argument("--channel", choices=("stable", "prerelease"), default="stable", help="updates: the channel")
     # a release list other than GitHub's (a mirror, for tests): --source, or CUBIC_UPDATE_SOURCE for the commands the

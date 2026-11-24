@@ -254,6 +254,56 @@ class Library(unittest.TestCase):
         self.assertIn("still encrypted", L.Library.installed(sav)[1][0][1])
 
 
+class WorkerCommand(unittest.TestCase):
+    """tools/worker.py characters: the key over the control channel only, never in its output or log."""
+
+    def test_import_with_a_key_over_control(self):
+        import subprocess
+        tmp = tempfile.mkdtemp(prefix="charworker-")
+        try:
+            inst = os.path.join(tmp, "inst")
+            usr = os.path.join(inst, "data", "disc", "PS3_GAME", "USRDIR")
+            os.makedirs(usr)
+            os.makedirs(os.path.join(inst, "data", "gamedata"))
+            open(os.path.join(usr, "EBOOT.elf"), "wb").write(fake_program(TEST_SID))
+            plain = E.serialize(make_character())
+            enc, pfd = P._encrypt_for_tests(TEST_KEY, TEST_SID, plain)
+            save = os.path.join(tmp, "usb", "BLJM60180T0000000000000000000C")
+            os.makedirs(save)
+            open(os.path.join(save, "DATA.EDT"), "wb").write(enc)
+            open(os.path.join(save, "PARAM.PFD"), "wb").write(pfd)
+            log = os.path.join(tmp, "worker.jsonl")
+            cmd = [sys.executable, os.path.join(ROOT, "tools", "worker.py"), "characters", "--install", inst,
+                   "--log", log, "--char-action", "import", "--paths", os.path.join(tmp, "usb"), "--with-key",
+                   "--control"]
+            out = []
+            for typed in ("00" * 16, TEST_KEY.hex()):
+                p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                     text=True, encoding="utf-8")
+                res = None
+                for line in p.stdout:
+                    out.append(line)
+                    e = json.loads(line)
+                    if e["ev"] == "needs":
+                        p.stdin.write("key " + typed + "\n")
+                        p.stdin.flush()
+                    if e["ev"] == "result":
+                        res = e
+                        break
+                p.stdin.close()
+                out.append(p.stderr.read())
+                p.wait(60)
+                self.assertTrue(res["ok"], res)
+                want = "wrong-key" if typed.startswith("00") else "imported"
+                self.assertEqual([r["status"] for r in res["data"]["results"]], [want])
+            self.assertEqual(res["data"]["key_kept"], "this session")     # no --keep-key: not in the OS store
+            text = "".join(out) + open(log, encoding="utf-8").read()
+            self.assertNotIn(TEST_KEY.hex(), text.lower())
+            self.assertEqual(open(os.path.join(save, "DATA.EDT"), "rb").read(), enc)    # the original untouched
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 class KeyStore(unittest.TestCase):
     def test_session_only(self):
         secret_store._session.clear()

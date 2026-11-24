@@ -310,6 +310,23 @@ class Library:
                 out.append((cid, m))
         return out
 
+    def raw_preview(self, cid, which):
+        """preview/<which>.rgb for the launcher (no PNG decoder there): "RGB1", u32 width, u32 height, then the pixels;
+        made from the PNG once. The path, or None."""
+        png = os.path.join(self.entries, cid, "preview", which + ".png")
+        raw = os.path.join(self.entries, cid, "preview", which + ".rgb")
+        if not os.path.isfile(png):
+            return None
+        if not os.path.isfile(raw) or os.path.getmtime(raw) < os.path.getmtime(png):
+            try:
+                w, h, px = char_preview.png_to_rgb(open(png, "rb").read())
+            except ValueError:
+                return None
+            with open(raw + ".tmp", "wb") as f:
+                f.write(b"RGB1" + struct.pack("<II", w, h) + px)
+            os.replace(raw + ".tmp", raw)
+        return raw
+
     # -- importing
     def import_candidates(self, cands, key=None, program=None):
         """[{label, status, id?, message}] -- status: imported, duplicate, similar (imported; another entry has the

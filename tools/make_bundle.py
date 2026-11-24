@@ -156,7 +156,8 @@ def pyinstaller(platform, dist):
     hidden = ["setup_pipeline", "zig_build", "iso9660", "self_decrypt", "shortcuts", "self_update", "version",
               "worker", "game_settings", "install_layout", "updates", "release_trust", "settings", "diagnostics",
               "pipeline_manifest", "uninstall", "ps3_disc", "disc_source", "root_migration", "Crypto.Cipher.AES",
-              "Crypto.Util.Counter"]
+              "Crypto.Util.Counter",
+              "edt_format", "ps3_save", "secret_store", "char_preview", "char_library"]   # M12: the character library
     hidden += tool_imports()
     # Pillow is the developer's only: the game's .ico and Windows resources are made with the prebuilt libraries
     # (zig_build.build_prebuilt -> windows_resources) and shipped as worker/lib/dotheroes.res, never on a player's
