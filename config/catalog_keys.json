@@ -1,0 +1,4 @@
+{
+ "about": "The Ed25519 public keys the launcher trusts for the Character Store's catalog (docs/CHARACTER_STORE.md): the same form as config/release_keys.json. Each: id (the first 16 hex digits of the key's SHA-256), ed25519 (the 32-byte key, base64), added, note; a revoked key is kept with \"revoked\": true. Empty until the owner makes the catalog key (tools/char_catalog.py keygen): until then the store refuses every catalog.",
+ "keys": []
+}

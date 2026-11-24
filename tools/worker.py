@@ -1714,7 +1714,8 @@ def cmd_characters(a, ev, control):
     """M12, the local character library (tools/char_library.py, docs/CHARACTERS.md), in <install>/data/characters:
     --char-action list (default) | import --paths P [--paths P ...] [--with-key] [--keep-key] | import-saves [--id FOLDER
     ...] [--with-key] [--keep-key] | export --id I [--id ...] --out PATH | install --id I | uninstall --id I --confirm |
-    rename --id I --label L | delete --id I --confirm | previews [--id I ...] [--full] | key-forget.
+    rename --id I --label L | delete --id I --confirm | previews [--id I ...] [--full] | key-forget |
+    store | store-refresh | store-thumbs | store-download --id I [--and-install] (the read-only Character Store).
     import --with-key (with --control): the player's PS3 key is read from the control channel ("key <hex>") -- never
     from the command line; it is validated on the first encrypted character before any is decrypted, kept only with
     --keep-key and only once it decrypted a character, and never written to the events or the log. Long actions
@@ -1843,6 +1844,53 @@ def cmd_characters(a, ev, control):
                 failed += 1
                 log("warning", f"characters: entry {cid}: previews not made ({type(e).__name__})")
         return {"made": made, "failed": failed, "total": len(todo)}
+    if act in ("store", "store-refresh", "store-thumbs", "store-download"):
+        # the Character Store, read-only (tools/char_store.py, docs/CHARACTER_STORE.md): the catalog checked when the
+        # store is shown (store), on the player's refresh (store-refresh); thumbnails fetched apart (store-thumbs);
+        # one character downloaded into the library, and installed with --and-install (store-download)
+        import char_store
+        try:
+            st = char_store.Store(lib, log=log)
+        except char_store.StoreError as e:
+            raise pipeline.SetupError(str(e), "store_address")
+        if act == "store-download":
+            if len(ids) != 1:
+                raise pipeline.SetupError("store-download needs one --id.", "usage")
+            try:
+                return st.download(ids[0], savedata, install=a.and_install)
+            except (char_store.StoreError, char_library.LibraryError) as e:
+                raise pipeline.SetupError(str(e), "store_download")
+        if act == "store-thumbs":
+            cat, _ = st.entries(savedata)
+            todo = [e for e in (cat or {}).get("characters", []) if not e["thumb_path"]]
+            made, failed = 0, 0
+            for i in range(0, len(todo), 8):
+                if control.cancel.is_set():
+                    break
+                progress(i, len(todo), "")
+                m, f = st.fetch_thumbs(todo[i:i + 8], budget=8, deadline_s=60)
+                made, failed = made + m, failed + f
+                if m + f < len(todo[i:i + 8]):
+                    break   # offline or rate limited: the rest stay placeholders
+            return {"made": made, "failed": failed, "total": len(todo)}
+        status = st.refresh(force=(act == "store-refresh"))
+        cat, problems = st.entries(savedata)
+        missing = sum(1 for e in (cat or {}).get("characters", []) if not e["thumb_path"])
+        # the launcher's items: shaped like the library's (its cards, search, filters and order serve both)
+        items = [{"id": "store:" + e["id"], "catalog_id": e["id"], "version": e["version"], "label": e["label"],
+                  "name": e["name"], "class": e["class"], "creator": e["creator"], "creator_url": e["creator_url"],
+                  "license": e["license"], "attribution": e["attribution"], "tags": e["tags"],
+                  "description": e["description"], "source": "store", "imported": e["updated"] or e["added"],
+                  "added": e["added"], "size": e["file"]["size"], "library_id": e["in_library"],
+                  "older_in_library": e["older_in_library"], "installed": e["installed"] or None,
+                  "thumb": e["thumb_path"],
+                  "views": lib.preview_path(e["in_library"], "views.rle") if e["in_library"] else "",
+                  "preview_ok": True, "voxels": -1}
+                 for e in (cat or {}).get("characters", [])]
+        return {"status": status, "updated": (cat or {}).get("updated", ""), "have_catalog": cat is not None,
+                "catalog_version": (cat or {}).get("catalog_version", 0), "key_id": (cat or {}).get("key_id", ""),
+                "items": items, "problems": problems[:20], "missing_thumbs": missing,
+                "official": st.base == char_store.DEFAULT_BASE}
     if act == "export":
         if not ids or not a.out:
             raise pipeline.SetupError("export needs --id and --out.", "usage")
@@ -1939,13 +1987,14 @@ def parser():
     p.add_argument("--replace", action="store_true", help="steam-art: replace the player's own artwork (they confirmed)")
     p.add_argument("--char-action", dest="action_chars",
                    choices=("list", "import", "import-saves", "export", "install", "uninstall", "rename", "delete",
-                            "previews", "key-forget"),
+                            "previews", "key-forget", "store", "store-refresh", "store-thumbs", "store-download"),
                    help="characters: what to do (default list)")
     p.add_argument("--paths", dest="char_paths", action="append", help="characters import: a file or folder (repeat)")
     p.add_argument("--id", dest="char_id", action="append", help="characters: a library entry (repeat)")
     p.add_argument("--label", help="characters: rename's new label; list's search text")
     p.add_argument("--with-key", action="store_true", help="characters import: the PS3 save key comes over --control")
     p.add_argument("--keep-key", action="store_true", help="characters import: keep the validated key (OS-protected)")
+    p.add_argument("--and-install", action="store_true", help="characters store-download: install it in the game too")
     p.add_argument("--disc-key", help="an encrypted disc image's key: a .dkey or IRD file, or a file of the 32 digits")
     p.add_argument("--parts", help="uninstall: the parts, comma-separated (builds,data,shaders,objects,settings,saves,shortcuts)")
     p.add_argument("--dry-run", action="store_true",

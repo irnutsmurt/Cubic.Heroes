@@ -160,7 +160,7 @@ public:
     std::vector<json::Value> take_events()
     {
         std::lock_guard<std::mutex> lk(mu_);
-        std::vector<json::Value> out(events_.begin(), events_.end());
+        std::vector<json::Value> out(std::make_move_iterator(events_.begin()), std::make_move_iterator(events_.end()));
         events_.clear();
         return out;
     }

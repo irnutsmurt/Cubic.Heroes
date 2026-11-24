@@ -1226,7 +1226,7 @@ static void pump(Op& op)
             op.log.push_back(e["text"].str());
             if (op.log.size() > 200) op.log.pop_front();
         } else if (ev == "result") {
-            op.result = e;
+            op.result = std::move(e);   // a large answer (1,000 characters) is moved, never copied on this thread
         } else if (ev == "needs" && e["what"].str() == "key") {
             op.job->send_line(op.pending_key.empty() ? "nokey" : "key " + op.pending_key);
             std::fill(op.pending_key.begin(), op.pending_key.end(), '\0');
@@ -1235,7 +1235,7 @@ static void pump(Op& op)
     }
     if (!op.finished && op.job->done()) {
         for (json::Value& e : op.job->take_events())
-            if (e["ev"].str() == "result") op.result = e;
+            if (e["ev"].str() == "result") op.result = std::move(e);
         op.finished = true;
         if (op.result.is_null())
             json::parse("{\"ev\":\"result\",\"ok\":false,\"code\":\"internal\",\"message\":\"The worker ended without a "
@@ -2680,6 +2680,7 @@ static const char* source_name(const std::string& k)
     if (k == "hall-of-heroes") return "The Hall of Heroes";
     if (k == "community") return "The community";
     if (k == "game") return "Made in the game";
+    if (k == "store") return "The Character Store";
     return "Your files";
 }
 
@@ -2699,14 +2700,23 @@ struct CharTab {
 struct Chars {
     json::Value list;                 // the worker's characters --char-action list
     bool asked = false, loading = false, loaded = false, previews_asked = false;
+    json::Value store;                // the worker's characters --char-action store: the catalog's items and its state
+    bool store_loading = false, store_loaded = false, thumbs_running = false;
+    std::set<std::string> downloading;   // catalog ids being downloaded (in the background: the page stays usable)
+    std::map<std::string, int> downloaded;   // done, until a list asked for after it shows them in the library
+    int store_gen = 0;                   // the store lists asked for so far
+    bool store_again = false;            // one more list when the one running ends (it was asked for too early)
+    std::string notice;                  // the last download's outcome, under the store's toolbar for a while
+    double notice_t = -1e9;
+    int store_seen = -10;             // the page frame the store tab was last drawn (shown again: checked again)
     CharTab tabs[kCharTabs];
     int tab = kTabLibrary;
     std::string open_id;              // the character shown in detail
     bool info_open = false;
 } g_chars;
 static CharTab& ct() { return g_chars.tabs[g_chars.tab]; }
-// the community store's tab: prepared, not shown until the store exists and its security is settled (a developer's
-// CUBICHEROES_CHARACTER_STORE=1 shows its placeholder; nothing of it touches the network)
+// the Character Store's tab (read-only: the community characters repository's catalog, docs/CHARACTER_STORE.md):
+// not shown until the owner enables it -- a developer's CUBICHEROES_CHARACTER_STORE=1 shows it
 static bool store_tab_enabled()
 {
     static int on = -1;
@@ -2716,12 +2726,21 @@ static bool store_tab_enabled()
 // the current tab's items: the library, or the characters the game can use now
 static const json::Value& chars_items()
 {
+    if (g_chars.tab == kTabStore) return g_chars.store["items"];
     return g_chars.list[g_chars.tab == kTabInstalled ? "in_game" : "characters"];
 }
 
 static bool g_page_owns_back = false;           // a page's own Back (the details, a sub-view): not the menu's
 static std::string g_page_back_label;
 static std::vector<std::string> g_char_drops;   // files dropped on the window while this page is shown
+
+// a worker answer's "data", moved out of it: the answer is the callback's own copy, dropped after the callback
+static json::Value take_data(const json::Value& r)
+{
+    auto& m = const_cast<json::Value&>(r).o;
+    auto it = m.find("data");
+    return it == m.end() ? json::Value() : std::move(it->second);
+}
 
 static void chars_refresh()
 {
@@ -2731,7 +2750,7 @@ static void chars_refresh()
     run("characters", { "--install", install_dir(), "--char-action", "list" }, "", false, [](const json::Value& r) {
         g_chars.loading = false;
         if (r["ok"].truthy()) {
-            g_chars.list = r["data"];
+            g_chars.list = take_data(r);
             g_chars.loaded = true;
             for (CharTab& t : g_chars.tabs) t.view_key.clear();
         }
@@ -2745,8 +2764,72 @@ static void chars_refresh()
     });
 }
 
+// the store: its catalog checked with the repository when the tab is shown (the worker asks GitHub at most every
+// 10 minutes, conditionally) or on Refresh; its thumbnails fetched in the background; a download on request
+static void store_refresh(bool force)
+{
+    if (g_chars.store_loading) { g_chars.store_again = true; return; }
+    g_chars.store_loading = true;
+    const int gen = ++g_chars.store_gen;
+    run("characters", { "--install", install_dir(), "--char-action", force ? "store-refresh" : "store" },
+        "", false, [gen](const json::Value& r) {
+            g_chars.store_loading = false;
+            // a download that ended before this list was asked for is in it: its card stops saying DOWNLOADING
+            for (auto it = g_chars.downloaded.begin(); it != g_chars.downloaded.end();) {
+                if (it->second < gen) { g_chars.downloading.erase(it->first); it = g_chars.downloaded.erase(it); }
+                else ++it;
+            }
+            if (g_chars.store_again) { g_chars.store_again = false; store_refresh(false); }
+            if (!r["ok"].truthy()) { show_result_error(r, "The Character Store couldn't be read"); return; }
+            g_chars.store = take_data(r);
+            g_chars.store_loaded = true;
+            g_chars.tabs[kTabStore].view_key.clear();
+            if (g_chars.store["missing_thumbs"].num() > 0 && !g_chars.thumbs_running &&
+                g_chars.store["status"]["status"].str() != "limited" && g_chars.store["status"]["status"].str() != "offline") {
+                g_chars.thumbs_running = true;
+                run("characters", { "--install", install_dir(), "--char-action", "store-thumbs" }, "", false,
+                    [](const json::Value&) {
+                        g_chars.thumbs_running = false;
+                        previews_release();
+                        store_refresh(false);
+                    });
+            }
+        });
+}
+
+static void store_download(const json::Value& c, bool install)
+{
+    std::vector<std::string> args = { "--install", install_dir(), "--char-action", "store-download", "--id",
+                                      c["catalog_id"].str() };
+    if (install) args.push_back("--and-install");
+    const std::string label = c["label"].str(), cid = c["catalog_id"].str();
+    if (g_chars.downloading.count(cid)) return;
+    g_chars.downloading.insert(cid);
+    run("characters", args, "", false, [label, install, cid](const json::Value& r) {
+        if (!r["ok"].truthy()) g_chars.downloading.erase(cid);
+        else g_chars.downloaded[cid] = g_chars.store_gen;   // DOWNLOADING until a list asked for from now on shows it
+        if (!r["ok"].truthy()) show_result_error(r, "\"" + label + "\" wasn't downloaded");
+        else {
+            const json::Value& d = r["data"];
+            const bool dup = d["status"].str() == "duplicate";
+            g_chars.notice = dup ? "\"" + label + "\" was already in My Library: nothing was downloaded."
+                                 : "\"" + label + "\" is in My Library now.";
+            if (install && !d["folder"].is_null()) g_chars.notice += " It's in the game too.";
+            g_chars.notice_t = ImGui::GetTime();
+        }
+        chars_refresh();
+        store_refresh(false);
+    });
+}
+
 static const json::Value* chars_find(const std::string& id)
 {
+    if (id.rfind("store:", 0) == 0) {
+        const json::Value& cs = g_chars.store["items"];
+        for (size_t i = 0; i < cs.size(); i++)
+            if (cs[i]["id"].str() == id) return &cs[i];
+        return nullptr;
+    }
     for (const char* k : { g_chars.tab == kTabInstalled ? "in_game" : "characters", "characters", "in_game" }) {
         const json::Value& cs = g_chars.list[k];
         for (size_t i = 0; i < cs.size(); i++)
@@ -2793,13 +2876,18 @@ static void chars_view()
         }
         ct().view.push_back(i);
     }
-    auto name = [&](size_t i) { return lower(cs[i]["label"].str()); };
+    std::vector<std::string> names(cs.size()), classes;
+    for (size_t i : ct().view) names[i] = lower(cs[i]["label"].str());
+    if (ct().sort == 3) {
+        classes.resize(cs.size());
+        for (size_t i : ct().view) classes[i] = lower(cs[i]["class"].str());
+    }
+    auto name = [&](size_t i) -> const std::string& { return names[i]; };
     std::stable_sort(ct().view.begin(), ct().view.end(), [&](size_t a, size_t b) {
         switch (ct().sort) {
         case 1: return name(a) > name(b);
         case 2: return cs[a]["imported"].str() > cs[b]["imported"].str();
-        case 3: { const std::string ca = lower(cs[a]["class"].str()), cb = lower(cs[b]["class"].str());
-                  return ca != cb ? ca < cb : name(a) < name(b); }
+        case 3: return classes[a] != classes[b] ? classes[a] < classes[b] : name(a) < name(b);
         default: return name(a) < name(b);
         }
     });
@@ -2916,8 +3004,9 @@ static void chars_detail(const json::Value& c)
     const std::string id = c["id"].str();
     g_page_owns_back = true;
     g_page_back_label = "Back";
-    const bool back = big_button(g_chars.tab == kTabInstalled ? "< Back to Installed" : "< Back to My Library",
-                                 ImVec2(S(320), S(44)));
+    const bool store = g_chars.tab == kTabStore;
+    const bool back = big_button(g_chars.tab == kTabInstalled ? "< Back to Installed" : store ? "< Back to the Store"
+                                 : "< Back to My Library", ImVec2(S(320), S(44)));
     focus_first();
     if (back || (g_page_input && pressed(Act::B))) { g_chars.open_id.clear(); ct().restore = true; return; }
     const float avail = ImGui::GetContentRegionAvail().x;
@@ -2928,32 +3017,84 @@ static void chars_detail(const json::Value& c)
     const bool inst = !c["installed"].is_null();
     text_col(col::dim, "%s", c["class"].str().c_str());
     ImGui::SameLine(0, S(24));
-    text_col(inst ? col::ok : col::dim, "%s", inst ? "Installed in the game" : "Not installed in the game");
+    if (store && !inst)
+        text_col(c["library_id"].truthy() ? col::ok : col::dim, "%s", c["library_id"].truthy() ? "In My Library"
+                 : "Not downloaded");
+    else
+        text_col(inst ? col::ok : col::dim, "%s", inst ? "Installed in the game" : "Not installed in the game");
     ImGui::SameLine(0, S(24));
     text_col(col::dim, "From: %s", source_name(c["source"].str()));
     if (!c["creator"].str().empty()) { ImGui::SameLine(0, S(24)); text_col(col::dim, "Made by %s", c["creator"].str().c_str()); }
     // the views, the page's main picture: as large as the page allows, labelled
-    const float label_h = S(26), max_h = std::max(S(220), ImGui::GetContentRegionAvail().y - S(150));
+    // (room kept under them for two rows of actions, and a notice line when there is one: every action in view
+    // without scrolling, on 16:9 screens too)
+    const bool note = (int)c["voxels"].num() == 0 || !c["preview_ok"].truthy();
+    // a store character not downloaded yet has its catalog thumbnail only: shown large instead of the three views
+    const bool thumb_only = store && c["views"].str().empty();
+    const float reserve = S(176) + (note ? S(kBody) + S(8) : 0.0f);
+    const float label_h = S(26), max_h = std::max(S(220), ImGui::GetContentRegionAvail().y - reserve);
     float vw = avail, vh = vw * 400.0f / 972.0f;
     if (vh > max_h) { vh = max_h; vw = vh * 972.0f / 400.0f; }
+    if (thumb_only) vw = vh;
     const ImVec2 at = ImGui::GetCursorScreenPos();
     const float x0 = at.x + floorf((avail - vw) / 2);
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const char* names[3] = { "FRONT", "SIDE", "BACK" };
     const float px = std::max(2.0f, floorf(S(3)));
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < (thumb_only ? 0 : 3); i++) {
         const float cx = x0 + vw * (i * 2 + 1) / 6.0f;
         pix_text(dl, ImVec2(floorf(cx - pix_w(names[i], px) / 2), at.y), names[i], px, col::accent);
     }
     bool bad = false;
-    preview_draw(dl, c["views"].str(), ImVec2(x0, at.y + label_h), ImVec2(x0 + vw, at.y + label_h + vh), &bad);
+    preview_draw(dl, thumb_only ? c["thumb"].str() : c["views"].str(), ImVec2(x0, at.y + label_h),
+                 ImVec2(x0 + vw, at.y + label_h + vh), &bad);
     retro_frame(dl, ImVec2(x0 - S(3), at.y + label_h - S(3)), ImVec2(x0 + vw + S(3), at.y + label_h + vh + S(3)), col::frame,
                 std::max(2.0f, floorf(S(3))));
     ImGui::Dummy(ImVec2(avail, label_h + vh + S(10)));
-    if ((int)c["voxels"].num() == 0) text_col(col::dim, "This character has no blocks yet (made in the editor and saved empty).");
+    if (thumb_only && c["thumb"].str().empty()) text_col(col::dim, "Its picture hasn't been downloaded yet.");
+    else if ((int)c["voxels"].num() == 0) text_col(col::dim, "This character has no blocks yet (made in the editor and saved empty).");
     else if (bad || !c["preview_ok"].truthy()) text_col(col::warm, "No preview could be drawn for this character.");
     // the actions that apply now, on as many rows as the page needs
     const float bh = S(48);
+    if (store) {   // the store: download it (and install it), or it's already here
+        const std::string lib_id = c["library_id"].str();
+        text_col(col::dim, "%s", fit_text(c["attribution"].str(), avail).c_str());
+        if (g_chars.downloading.count(c["catalog_id"].str())) {
+            text_col(col::accent, "Downloading... (you can keep browsing)");
+        } else if (lib_id.empty()) {
+            const bool upd = c["older_in_library"].truthy();
+            if (big_button(upd ? "Download the new version" : "Download", ImVec2(S(upd ? 360 : 240), bh), Kind::Primary))
+                store_download(c, false);
+            ImGui::SameLine(0, S(16));
+            if (big_button("Download and install", ImVec2(S(320), bh))) store_download(c, true);
+            if (upd) text_col(col::dim, "An earlier version is in My Library; the new one is added beside it.");
+        } else if (!inst) {
+            if (big_button("Install in the game", ImVec2(S(280), bh), Kind::Primary)) chars_install(lib_id);
+            ImGui::SameLine(0, S(16));
+            text_col(col::dim, "Already in My Library.");
+        } else {
+            text_col(col::ok, "In My Library and in the game.");
+        }
+        if (big_button(g_chars.info_open ? "Less information" : "More information", ImVec2(S(300), bh)))
+            g_chars.info_open = !g_chars.info_open;
+        if (g_chars.info_open) {
+            ImGui::PushFont(nullptr, S(kSmall));
+            if (!c["creator"].str().empty()) text_col(col::dim, "Made by %s%s%s", c["creator"].str().c_str(),
+                                                      c["creator_url"].str().empty() ? "" : " -- ",
+                                                      c["creator_url"].str().c_str());
+            text_col(col::dim, "Licence: %s (https://creativecommons.org/licenses/by/4.0/)",
+                     c["license"].str() == "CC-BY-4.0" ? "CC BY 4.0" : c["license"].str("not stated").c_str());
+            text_col(col::dim, "Version %d; added %s, updated %s; file %d bytes; catalog id %s", (int)c["version"].num(),
+                     c["added"].str().substr(0, 10).c_str(), c["imported"].str().substr(0, 10).c_str(),
+                     (int)c["size"].num(), c["catalog_id"].str().c_str());
+            if (!c["description"].str().empty()) ImGui::TextWrapped("%s", c["description"].str().c_str());
+            text_col(col::dim, "From the community characters repository%s: its signed catalog (version %d), and this "
+                     "file checked against the SHA-256 the catalog gives.", g_chars.store["official"].truthy() ? ""
+                     : " (a development copy)", (int)g_chars.store["catalog_version"].num());
+            ImGui::PopFont();
+        }
+        return;
+    }
     if (!c["in_library"].truthy()) {   // made in the game: it can be added to the library (then exported, renamed)
         if (big_button("Add to my library", ImVec2(S(300), bh), Kind::Primary)) {
             chars_import({}, { c["folder"].str() });
@@ -3055,13 +3196,19 @@ static void chars_card(const json::Value& c, ImVec2 size, bool focus_me)
     const float pad = floorf(S(10)), thumb = size.x - 2 * pad;
     bool bad = false;
     preview_draw(dl, c["thumb"].str(), ImVec2(a.x + pad, a.y + pad), ImVec2(a.x + pad + thumb, a.y + pad + thumb), &bad);
-    const bool game_only = !c["in_library"].truthy();
-    if ((g_chars.tab == kTabLibrary && !c["installed"].is_null()) || game_only) {   // a small badge on the picture
-        const char* t = game_only ? "GAME ONLY" : "IN GAME";
+    const bool store = g_chars.tab == kTabStore;
+    const bool game_only = !store && !c["in_library"].truthy();
+    const bool busy = store && g_chars.downloading.count(c["catalog_id"].str());
+    const bool update = store && !c["library_id"].truthy() && c["older_in_library"].truthy();
+    const bool store_have = store && (!c["installed"].is_null() || c["library_id"].truthy() || busy || update);
+    if ((g_chars.tab == kTabLibrary && !c["installed"].is_null()) || game_only || store_have) {   // a badge on the picture
+        const char* t = game_only ? "GAME ONLY" : busy ? "DOWNLOADING" : update ? "UPDATE"
+                        : store && c["installed"].is_null() ? "IN LIBRARY" : "IN GAME";
         const float p = std::max(2.0f, floorf(S(2)));
         const float tw = pix_w(t, p);
         const ImVec2 ba(a.x + pad + thumb - tw - p * 6, a.y + pad + p * 2), bb(a.x + pad + thumb - p * 2, a.y + pad + p * 13);
-        dl->AddRectFilled(ba, bb, game_only ? IM_COL32(40, 70, 150, 235) : IM_COL32(40, 110, 40, 235));
+        dl->AddRectFilled(ba, bb, game_only || (store && c["installed"].is_null()) ? IM_COL32(40, 70, 150, 235)
+                                                                                    : IM_COL32(40, 110, 40, 235));
         pix_text(dl, ImVec2(ba.x + p * 2, ba.y + p * 2), t, p, IM_COL32_WHITE);
     }
     ImGui::PushFont(nullptr, S(kBody));
@@ -3078,7 +3225,10 @@ static void chars_card(const json::Value& c, ImVec2 size, bool focus_me)
     ImGui::PopID();
 }
 
-static void chars_empty(const char* head, const char* text, bool clear_button)
+// an empty tab or view: its picture, what it means, and the one thing to do next (which takes the focus)
+enum class EmptyAction { None, Import, ClearFilters, ShowLibrary, Retry };
+static void store_refresh(bool force);
+static void chars_empty(const char* head, const char* text, EmptyAction act)
 {
     ImGui::Dummy(ImVec2(0, S(30)));
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -3090,9 +3240,20 @@ static void chars_empty(const char* head, const char* text, bool clear_button)
     title(head, 26);
     ImGui::TextWrapped("%s", text);
     ImGui::Spacing();
-    if (clear_button) {
+    if (act == EmptyAction::ClearFilters) {
         if (big_button("Clear the search and filters", ImVec2(S(360), S(48)))) chars_clear_filters();
-    } else if (big_button("Import characters...", ImVec2(S(320), S(48)), Kind::Primary)) g_pick.import_menu = true;
+    } else if (act == EmptyAction::Import) {
+        if (big_button("Import characters...", ImVec2(S(320), S(48)), Kind::Primary)) g_pick.import_menu = true;
+    } else if (act == EmptyAction::Retry) {
+        if (big_button("Refresh", ImVec2(S(240), S(48)), Kind::Primary) && !g_chars.store_loading) store_refresh(true);
+    } else if (act == EmptyAction::ShowLibrary) {
+        if (big_button("Show My Library", ImVec2(S(320), S(48)), Kind::Primary)) {
+            g_chars.tab = kTabLibrary;
+            ct().restore = true;
+            g_focus_page = true;
+        }
+    }
+    if (act != EmptyAction::None && g_chars.loaded) focus_first();
 }
 
 // the tabs under the heading: compact, the count beside each; LT/RT (or [ ]) switch them, LB/RB stay the pages'
@@ -3109,7 +3270,7 @@ static void chars_tabs()
         const bool on = g_chars.tab == tabs[i].first;
         const float w = ImGui::CalcTextSize(tabs[i].second.c_str()).x + S(44);
         if (big_button((tabs[i].second + "##tab" + std::to_string(i)).c_str(), ImVec2(w, h), on ? Kind::Primary : Kind::Normal)
-            && !on) { g_chars.tab = tabs[i].first; ct().restore = true; }
+            && !on) { g_chars.tab = tabs[i].first; ct().restore = true; g_focus_page = true; }
         if (on) {   // the chosen tab: a gold bar under it, joined to the page
             const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
             dl->AddRectFilled(ImVec2(a.x, b.y + S(3)), ImVec2(b.x, b.y + S(6)), col::accent);
@@ -3118,8 +3279,8 @@ static void chars_tabs()
     if (g_page_input && !tabs.empty()) {
         int at = 0;
         for (size_t i = 0; i < tabs.size(); i++) if (tabs[i].first == g_chars.tab) at = (int)i;
-        if (pressed(Act::LT)) { g_chars.tab = tabs[(at + tabs.size() - 1) % tabs.size()].first; ct().restore = true; }
-        if (pressed(Act::RT)) { g_chars.tab = tabs[(at + 1) % tabs.size()].first; ct().restore = true; }
+        if (pressed(Act::LT)) { g_chars.tab = tabs[(at + tabs.size() - 1) % tabs.size()].first; ct().restore = true; g_focus_page = true; }
+        if (pressed(Act::RT)) { g_chars.tab = tabs[(at + 1) % tabs.size()].first; ct().restore = true; g_focus_page = true; }
         if (tabs.size() > 1) { prompt(Act::LT, ""); prompt(Act::RT, "Tabs"); }
     }
     // how many the tab shows, on the tabs' row (the header stays short)
@@ -3137,11 +3298,30 @@ static void chars_tabs()
     ImGui::Dummy(ImVec2(0, S(4)));
 }
 
-static void chars_store_tab()
+// the store's state under its toolbar: when the catalog was checked, or why the saved one is shown
+static void store_status_line(float avail)
 {
-    // prepared only: no catalogue, no network, nothing to install (the store's security is still being designed)
-    chars_empty("The Character Store isn't open yet", "Community characters will be browsed and installed here once the "
-                "store exists. Your library works without it, offline.", false);
+    const json::Value& st = g_chars.store["status"];
+    const std::string s = st["status"].str(), msg = st["message"].str();
+    const bool warn = s == "offline" || s == "limited" || s == "error";
+    std::string text = msg;
+    if (!g_chars.notice.empty() && ImGui::GetTime() - g_chars.notice_t < 8.0) text = g_chars.notice;
+    else if (!g_chars.downloading.empty() && text.empty())
+        text = "Downloading " + std::to_string(g_chars.downloading.size()) + " character" +
+               (g_chars.downloading.size() == 1 ? "" : "s") + "...";
+    if (text.empty()) {
+        text = "Community characters, checked and approved";
+        if (!g_chars.store["updated"].str().empty()) text += " -- catalog of " + g_chars.store["updated"].str();
+        if (g_chars.thumbs_running) text += " (fetching pictures)";
+    }
+    const ImVec2 a = ImGui::GetCursorScreenPos();
+    const float h = S(40);
+    ImGui::GetWindowDrawList()->AddRectFilled(a, ImVec2(a.x + avail, a.y + h), warn ? IM_COL32(120, 70, 20, 200)
+                                                                                    : IM_COL32(30, 44, 100, 200));
+    ImGui::SetCursorScreenPos(ImVec2(a.x + S(14), a.y + floorf((h - ImGui::GetFontSize()) / 2)));
+    text_col(col::text, "%s", fit_text(text, avail - S(28)).c_str());
+    ImGui::SetCursorScreenPos(ImVec2(a.x, a.y + h + S(8)));
+    ImGui::Dummy(ImVec2(1, 1));
 }
 
 static void page_characters()
@@ -3158,17 +3338,21 @@ static void page_characters()
     title("Characters");
     chars_view();
     chars_tabs();
-    if (g_chars.tab == kTabStore) { chars_store_tab(); return; }
+    const bool store_tab = g_chars.tab == kTabStore;
+    if (store_tab) {   // shown (again): the catalog checked -- the worker asks GitHub only when it's due
+        if (g_chars.store_seen + 1 != g_preview_frame) store_refresh(false);
+        g_chars.store_seen = g_preview_frame;
+    }
     const json::Value& cs = chars_items();
     const bool lib_tab = g_chars.tab == kTabLibrary;
     // the toolbar: the search, the filters, the order -- and the tab's own action
     int addable = 0;
-    if (!lib_tab) for (size_t i = 0; i < cs.size(); i++) addable += cs[i]["in_library"].truthy() ? 0 : 1;
-    const bool action = lib_tab || addable > 0;
+    if (g_chars.tab == kTabInstalled) for (size_t i = 0; i < cs.size(); i++) addable += cs[i]["in_library"].truthy() ? 0 : 1;
+    const bool action = lib_tab || store_tab || addable > 0;
     const float avail = ImGui::GetContentRegionAvail().x, gap = S(12), bh = S(48);
     const std::string add_label = "Add " + std::to_string(addable) + " to library";
     const float bw = floorf(avail * 0.17f);
-    const float aw = !action ? 0.0f : lib_tab ? bw : std::max(bw, ImGui::CalcTextSize(add_label.c_str()).x + S(48));
+    const float aw = !action ? 0.0f : lib_tab || store_tab ? bw : std::max(bw, ImGui::CalcTextSize(add_label.c_str()).x + S(48));
     ImGui::SetNextItemWidth(avail - 2 * (bw + gap) - (action ? aw + gap : 0.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(S(12), floorf((bh - ImGui::GetFontSize()) / 2)));
     if (ImGui::InputTextWithHint("##search", "Search: name, class, creator", ct().search, sizeof ct().search))
@@ -3190,6 +3374,10 @@ static void page_characters()
     if (lib_tab) {
         ImGui::SameLine(0, gap);
         if (big_button("Import...", ImVec2(aw, bh), Kind::Primary)) g_pick.import_menu = true;
+    } else if (store_tab) {
+        ImGui::SameLine(0, gap);
+        if (big_button(g_chars.store_loading ? "Checking..." : "Refresh", ImVec2(aw, bh)) && !g_chars.store_loading)
+            store_refresh(true);
     } else if (addable > 0) {
         ImGui::SameLine(0, gap);
         if (big_button(add_label.c_str(), ImVec2(aw, bh), Kind::Primary)) {
@@ -3198,15 +3386,15 @@ static void page_characters()
             chars_import({}, fs);
         }
     }
-    if (g_chars.loaded && cs.size() == 0) focus_first();   // an empty tab: its first control; else the first card
     if (chars_filtered()) {
         if (ImGui::SmallButton("Clear the search and filters")) chars_clear_filters();
     }
-    // a compact notice: encrypted characters in the game's saves
+    // a compact notice: encrypted characters in the game's saves (the store's tab: the catalog's state)
+    if (store_tab && g_chars.store_loaded) store_status_line(avail);
     int enc = 0;
     const json::Value& sv = g_chars.list["in_saves"];
     for (size_t i = 0; i < sv.size(); i++) enc += sv[i]["kind"].str() == "encrypted" ? 1 : 0;
-    if (enc > 0) {
+    if (enc > 0 && !store_tab) {
         const ImVec2 a = ImGui::GetCursorScreenPos();
         const float h = S(50);
         ImGui::GetWindowDrawList()->AddRectFilled(a, ImVec2(a.x + avail, a.y + h), IM_COL32(120, 70, 20, 200));
@@ -3223,23 +3411,33 @@ static void page_characters()
     }
     // the grid
     const size_t total = cs.size(), shown = ct().view.size();
-    if (total == 0) {
-        if (!g_chars.loaded) chars_empty("Reading your library...", "", false);
-        else if (lib_tab)
-            chars_empty("Your character library is empty", "Import the characters you made in the game, character files, "
-                        "or characters saved on a PS3. You can also drop files on this window.", false);
+    if (total == 0 && store_tab) {
+        if (!g_chars.store_loaded) chars_empty("Reading the catalog...", "", EmptyAction::None);
+        else if (!g_chars.store["have_catalog"].truthy())
+            chars_empty("The Character Store couldn't be reached", "No catalog has been saved on this computer yet. "
+                        "Check the connection, then refresh.", EmptyAction::Retry);
         else
-            chars_empty("No characters in the game yet", "Install characters from My Library, or make one in the game's "
-                        "editor.", false);
+            chars_empty("No characters in the store yet", "Approved community characters will appear here.",
+                        EmptyAction::Retry);
         return;
     }
-    if (shown == 0) { chars_empty("No characters match", "Nothing here matches the search and filters.", true); return; }
+    if (total == 0) {
+        if (!g_chars.loaded) chars_empty("Reading your library...", "", EmptyAction::None);
+        else if (lib_tab)
+            chars_empty("Your character library is empty", "Import the characters you made in the game, character files, "
+                        "or characters saved on a PS3. You can also drop files on this window.", EmptyAction::Import);
+        else
+            chars_empty("No characters in the game yet", "Install characters from My Library, or make one in the game's "
+                        "editor.", EmptyAction::ShowLibrary);
+        return;
+    }
+    if (shown == 0) { chars_empty("No characters match", "Nothing here matches the search and filters.", EmptyAction::ClearFilters); return; }
     const float card_min = S(180), cgap = S(16);
     const float gw = ImGui::GetContentRegionAvail().x - S(14);   // room for the scroll bar
     const int cols = std::max(2, std::min(6, (int)((gw + cgap) / (card_min + cgap))));
     const float cw = floorf((gw - cgap * (cols - 1)) / cols), ch = cw + S(kBody) + S(kSmall) + S(14);
     const int rows = (int)((shown + cols - 1) / cols);
-    ImGui::BeginChild(g_chars.tab == kTabLibrary ? "##grid_library" : "##grid_installed", ImVec2(0, 0),
+    ImGui::BeginChild(g_chars.tab == kTabLibrary ? "##grid_library" : store_tab ? "##grid_store" : "##grid_installed", ImVec2(0, 0),
                       ImGuiChildFlags_NavFlattened, ImGuiWindowFlags_NoBackground);
     int focus_row = -1;
     if (ct().restore) {
@@ -3749,8 +3947,8 @@ static void overlay_op()
     pump(*g_op);
     Op& op = *g_op;
     if (op.finished) {
-        auto then = op.then;
-        json::Value r = op.result;
+        auto then = std::move(op.then);
+        json::Value r = std::move(op.result);
         g_op.reset();
         if (then) then(r);
         return;
@@ -4581,8 +4779,8 @@ static void frame()
     if (g_bg) {   // the background preparation
         pump(*g_bg);
         if (g_bg->finished) {
-            auto then = g_bg->then;
-            json::Value r = g_bg->result;
+            auto then = std::move(g_bg->then);
+            json::Value r = std::move(g_bg->result);
             g_bg.reset();
             if (then) then(r);
             if (g_play_after_bg) {   // paused for the game: what was made is kept
@@ -4646,8 +4844,8 @@ static void frame()
     for (size_t i = 0; i < g_queries.size();) {   // the quick queries: their callbacks run here, on this thread
         pump(*g_queries[i]);
         if (g_queries[i]->finished) {
-            auto then = g_queries[i]->then;
-            json::Value r = g_queries[i]->result;
+            auto then = std::move(g_queries[i]->then);
+            json::Value r = std::move(g_queries[i]->result);
             g_queries.erase(g_queries.begin() + i);
             if (then) then(r);
         } else {
@@ -4940,7 +5138,7 @@ static std::string font_path()
 // the test window's size (0.2.0-beta.5: the Steam Deck's 1280x800 and 1280x720 tested); a test's window placement is
 // never remembered
 // the focused item's label holds one of "A|B|...": a page whose first item depends on its content (the Characters
-// page: a card, or Import... when the library is empty)
+// page: a card, or the empty library's Import characters...)
 static bool focus_has(const std::string& alts)
 {
     for (size_t from = 0; from <= alts.size();) {

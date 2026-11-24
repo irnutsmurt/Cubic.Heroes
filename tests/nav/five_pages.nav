@@ -72,8 +72,8 @@ until 20000 Back up now
 expect Back up now
 rb
 wait 60
-until 20000 card:|Import...
-expect card:|Import...
+until 20000 card:|Import
+expect card:|Import
 shot 4b-characters
 rb
 wait 60
@@ -98,8 +98,8 @@ lb
 wait 60
 lb
 wait 60
-until 20000 card:|Import...
-expect card:|Import...
+until 20000 card:|Import
+expect card:|Import
 lb
 wait 60
 until 20000 Back up now
