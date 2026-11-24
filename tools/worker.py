@@ -1803,14 +1803,21 @@ def cmd_characters(a, ev, control):
             folder = have.get(e["sha256"])
             e["installed"] = folder
             e["installed_by_library"] = bool(folder) and folder == e.get("installed_folder")
+            e["in_library"] = True
+            e["thumb"], e["views"] = lib.preview_path(cid, "thumb.rle"), lib.preview_path(cid, "views.rle")
             for k in ("shape", "original_sha256"):
                 e.pop(k, None)
             classes[e["class"]] = classes.get(e["class"], 0) + 1
             sources[e["source"]] = sources.get(e["source"], 0) + 1
             stale += 0 if e["preview_current"] else 1
             out.append(e)
+        in_game = lib.in_game(savedata)
+        for g in in_game:
+            g["installed"] = g["folder"]
+            for k in ("shape", "original_sha256"):
+                g.pop(k, None)
         return {"root": root, "characters": out, "total": len(out), "classes": classes, "sources": sources,
-                "stale_previews": stale, "in_saves": lib.scan_saves(savedata), "key": key_status()}
+                "stale_previews": stale, "in_saves": lib.scan_saves(savedata), "in_game": in_game, "key": key_status()}
     if act == "import":
         if not a.char_paths:
             raise pipeline.SetupError("import needs --paths.", "usage")

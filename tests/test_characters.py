@@ -324,6 +324,26 @@ class LibraryUpkeep(unittest.TestCase):
         self.assertFalse([d for d in os.listdir(self.lib.entries) if d.startswith(".")])
         self.assertEqual(len(self.lib.ids()), 5)
 
+    def test_a_library_only_looked_at_leaves_nothing(self):
+        root = os.path.join(self.tmp, "untouched")
+        lib = L.Library(root)
+        self.assertEqual(lib.index(), {})
+        self.assertEqual(lib.in_game(os.path.join(self.tmp, "no-saves")), [])
+        self.assertFalse(os.path.exists(root))
+
+    def test_one_bad_file_never_stops_a_folder(self):
+        d = os.path.join(self.tmp, "mixed")
+        os.makedirs(d)
+        open(os.path.join(d, "a-junk.zip"), "wb").write(b"PK\x03\x04 not a zip")
+        open(os.path.join(d, "b-bad.chchar"), "wb").write(b"PK\x03\x04 nor this")
+        open(os.path.join(d, "c-damaged.edt"), "wb").write(b"EDTFILE1.9" + bytes(5) + b"\xff garbage")
+        for i in range(2):
+            open(os.path.join(d, f"z-good{i}.edt"), "wb").write(E.serialize(make_character(name="ＯＫ" + str(i), colour=(0.3 * i, 0.4, 0.5))))
+        cands, errs = L.find([d])
+        self.assertEqual(len(errs), 2)                                   # the junk ZIP and the bad .chchar, named
+        rs = self.lib.import_candidates(cands)
+        self.assertEqual(sorted(r["status"] for r in rs), ["damaged", "imported", "imported"])
+
     def test_the_game_saves_scanned(self):
         enc, pfd = P._encrypt_for_tests(TEST_KEY, TEST_SID, E.serialize(make_character(name="ＰＳ３")))
         d = os.path.join(self.sav, "BLJM60180T0000000000000000000D")

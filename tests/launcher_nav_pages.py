@@ -43,6 +43,16 @@ SKIP_DIRS = {"logs"}   # what the launcher writes for itself on every start
 SMALL = 1 << 20   # compared by contents up to this size (settings, records)
 
 
+def derived(rel):
+    """the character library's derived files: its index and previews, made when the Characters page is first shown
+    (from the library's entries and the game's saves; never the characters themselves)"""
+    parts = rel.replace(os.sep, "/").split("/")
+    if parts[:2] != ["data", "characters"]:
+        return False
+    return parts[2:] == ["index.json"] or parts[2:3] == ["cache"] or (len(parts) > 4 and parts[2] == "entries"
+                                                                       and parts[4] == "preview")
+
+
 def snapshot(root):
     """every file of the installation: a small file's contents (a hash), a large one's size and time (the game's
     data included: a few thousand entries)"""
@@ -53,6 +63,8 @@ def snapshot(root):
             dirs[:] = [x for x in dirs if x not in SKIP_DIRS]
         for n in files:
             p = os.path.join(d, n)
+            if derived(os.path.relpath(p, root)):
+                continue
             try:
                 st = os.lstat(p)
             except OSError:

@@ -84,11 +84,27 @@ The key never appears in a log, a message, the diagnostics report, a package or 
 
 - `entries/<id>/`: `character.edt` (plain), `character.json`, `preview/`.
 - `originals/<id>/`: the imported files exactly as they were. These stay local and are never exported.
+- `index.json`: every entry's summary, so the page lists 1,000 characters without reading 1,000 files; it is made
+  again from the entries whenever it does not match them.
+- `cache/<sha16>/`: previews of the characters made in the game that are not in the library (the Installed tab).
+
+The folders are made by the first import: showing the Characters page with nothing imported writes nothing. An
+import never stops at one bad file: each unreadable archive or file is reported by name and the others are
+imported; each character is added whole or not at all, and a cancelled import keeps the characters already added.
 
 The `<id>` is the first 16 hex digits of the character data's SHA-256. Importing the same data again is a
 *duplicate* and is never imported twice. The same model under another name or with other settings is imported and
 flagged *similar*. Installing writes a new edit-data folder into the game's saves and never replaces one; the
-game's saves (`BLUS30490*`) are never touched.
+game's saves (`BLUS30490*`) are never touched. Uninstalling removes only the folder the library itself installed,
+and only while it still holds exactly what was installed (`DATA.EDT`, `PARAM.SFO`, `ICON0.PNG`, `PARAM.PFD`); a
+character made in the game, or one the player changed since, is never removed. The library entry stays.
+
+**The launcher's Characters page** has two tabs, each with its own search, filters, order, scroll position and
+selected card: *My Library* (the entries; a card shows IN GAME when the character is in the game's saves) and
+*Installed* (every character the game can use now: the library's, and those made in the game, which can be added
+to the library). LT/RT (or `[` `]`) switch the tabs; LB/RB stay the launcher's pages. A third tab, *Character
+Store*, is prepared but hidden: it shows nothing and touches no network until the store exists and its security
+requirements are met.
 
 **`.chchar`** is a ZIP of `character.json`, `character.edt`, `preview/thumb.png` and `preview/views.png`. It holds the
 character and what describes it: name, class, label, creator, description, tags, source and provenance, hashes,
@@ -100,11 +116,14 @@ within limits: no absolute or `..` paths, a cap on members, sizes and expansion 
 The same renderer serves the library, imports, exports, the Hall of Heroes recovery and the store's workflow. It
 draws from the character's own voxels and colours, with no game art and no retouching:
 
-- `thumb.png` (256 x 256): the Stand pose, slightly from the front-left and above (22.6 degrees), framed tightly.
-- `views.png` (front | side | back, 3 x 300 x 380): one fixed zoom for every character (the editor's 16-voxel
+- `thumb.png` (288 x 288): the Stand pose, slightly from the front-left and above (16.3 degrees), framed tightly.
+- `views.png` (front | side | back, 3 x 320 x 400): one fixed zoom for every character (the editor's 16-voxel
   grid always fits), so characters compare at their real sizes.
+- `thumb.rle`, `views.rle`: the same pictures run-length coded for the launcher ("RLE1", width and height, then runs
+  of a count and a colour), which draws them without an image library.
 
-The views are orthographic, with fixed lighting and a neutral background; each voxel is drawn as a cube with a
-darker edge. They are deterministic: the camera angles have exact rational sines and cosines, the drawing order is
+The views are orthographic, with fixed lighting and the launcher's blue background; each voxel is drawn as a cube
+with a darker edge, at twice the size and then reduced (edges smoothed, voxels still crisp). The renderer's version
+is recorded with each preview: previews made by an older version, or of other data, are made again. They are deterministic: the camera angles have exact rational sines and cosines, the drawing order is
 total and the code is pure Python, so the same character always gives the same pixels. A character that cannot be
 drawn gets a placeholder, and its entry says so.

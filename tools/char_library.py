@@ -130,9 +130,9 @@ class Candidate:
         return b""
 
 
-def _group_tree(files, label, kind):
+def _group_tree(files, label, kind, errors=None):
     """Characters in a set of paths (a folder's or an archive's): each folder holding a DATA.EDT, each .chchar, each
-    loose .edt file."""
+    loose .edt file. A .chchar that can't be read goes to `errors` (when given) and the rest go on."""
     out = []
     folders = {}
     for path, b in files.items():
@@ -146,7 +146,12 @@ def _group_tree(files, label, kind):
             out.append(Candidate(f"{label}: {d or '.'}", group, {"kind": kind, "name": f"{label}:{d}"}))
         for k in sorted(entries):
             if k.lower().endswith(".chchar"):
-                out += from_chchar(entries[k], f"{label}: {posixpath.join(d, k)}")
+                try:
+                    out += from_chchar(entries[k], f"{label}: {posixpath.join(d, k)}")
+                except LibraryError as e:
+                    if errors is None:
+                        raise
+                    errors.append(str(e))
             elif k.lower().endswith(".edt") and k.upper() != "DATA.EDT":
                 out.append(Candidate(f"{label}: {posixpath.join(d, k)}", {k: entries[k]}, {"kind": kind, "name": k}))
     return out
@@ -196,10 +201,15 @@ def find(paths):
                                 continue
                             rel = os.path.relpath(fp, p).replace(os.sep, "/")
                             if n.lower().endswith(".zip"):
-                                found += _group_tree(read_zip(open(fp, "rb").read(), f"{label}/{rel}"), f"{label}/{rel}", "zip")
+                                try:   # one unreadable archive is reported; the folder's other files go on
+                                    with open(fp, "rb") as f:
+                                        zfiles = read_zip(f.read(), f"{label}/{rel}")
+                                    found += _group_tree(zfiles, f"{label}/{rel}", "zip", errors)
+                                except LibraryError as e:
+                                    errors.append(str(e))
                             else:
                                 files[rel] = open(fp, "rb").read()
-                found += _group_tree(files, label, "folder")
+                found += _group_tree(files, label, "folder", errors)
             elif os.path.isfile(p):
                 if os.path.getsize(p) > FILE_MAX * 16:
                     raise LibraryError(f"{label}: too large")
@@ -208,7 +218,7 @@ def find(paths):
                 if low.endswith(".chchar"):
                     found += from_chchar(data, label)
                 elif data[:2] == b"PK":
-                    found += _group_tree(read_zip(data, label), label, "zip")
+                    found += _group_tree(read_zip(data, label), label, "zip", errors)
                 else:
                     d = os.path.dirname(p)
                     files = {os.path.basename(p): data}
@@ -302,6 +312,7 @@ def sfo_detail_name(sfo):
 
 
 def _write_atomic(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + ".tmp"
     with open(tmp, "wb") as f:
         f.write(data)
@@ -313,9 +324,8 @@ class Library:
         self.root = root
         self.log = log or (lambda level, text: None)   # diagnostics: never a key, a payload or private save data
         self.entries = os.path.join(root, "entries")
-        self.originals = os.path.join(root, "originals")
-        os.makedirs(self.entries, exist_ok=True)
-        os.makedirs(self.originals, exist_ok=True)
+        self.originals = os.path.join(root, "originals")   # both made by the first import: a library only looked at
+        # (the Characters page shown, nothing imported) leaves nothing behind
         self.state_path = os.path.join(root, "library.json")
         self.index_path = os.path.join(root, "index.json")
         try:
@@ -324,7 +334,7 @@ class Library:
             self.state = {"version": 1}
         self._index = None
         # an import or install interrupted before its final rename leaves only a hidden temporary folder: removed
-        for d in os.listdir(self.entries):
+        for d in (os.listdir(self.entries) if os.path.isdir(self.entries) else []):
             if d.startswith(".import-"):
                 shutil.rmtree(os.path.join(self.entries, d), ignore_errors=True)
                 self.log("warning", f"characters: removed an interrupted import's leftovers ({d})")
@@ -334,6 +344,8 @@ class Library:
 
     # -- reading
     def ids(self):
+        if not os.path.isdir(self.entries):
+            return []
         return sorted(d for d in os.listdir(self.entries)
                       if not d.startswith(".") and os.path.isfile(os.path.join(self.entries, d, "character.json")))
 
@@ -385,7 +397,8 @@ class Library:
                 self.log("warning", f"characters: entry {cid}: its description is unreadable ({type(e).__name__}); "
                                     "left out of the list")
         self._index = entries
-        self._save_index()
+        if entries or os.path.exists(self.index_path):   # an empty library that was never used: nothing written
+            self._save_index()
         return entries
 
     def _save_index(self):
@@ -533,6 +546,7 @@ class Library:
             m["original_edt_sha256"] = cand.original_sha
         files, ok = char_preview.make_all(edt)
         m["preview"] = {"renderer": char_preview.RENDERER, "sha256": sha, "ok": ok}
+        os.makedirs(self.entries, exist_ok=True)
         tmp = tempfile.mkdtemp(prefix=".import-", dir=self.entries)
         try:
             os.makedirs(os.path.join(tmp, "preview"))
@@ -659,6 +673,50 @@ class Library:
                 out.append({"folder": d, "name": name, "kind": "encrypted"})
             elif kind == "plain" and sha not in have:
                 out.append({"folder": d, "name": name, "kind": "plain"})
+        return out
+
+    def in_game(self, savedata):
+        """Every character the game can use now: the usable edit-data folders in its saves -- the library's
+        (installed by it or not) and those made in the game. [{folder, sha256, id (library id or ""), label, name,
+        class, voxels, poses, thumb, views, preview_ok, installed_by_library}]. A character not in the library gets
+        its previews from a cache (cache/<sha16>/), made once."""
+        out = []
+        if not os.path.isdir(savedata):
+            return out
+        by_sha = {e["sha256"]: (cid, e) for cid, e in self.index().items()}
+        cache = os.path.join(self.root, "cache")
+        for d in sorted(os.listdir(savedata)):
+            if not d.startswith(EDIT_PREFIX):
+                continue
+            try:
+                edt, pfd = ps3_save.scan_folder(os.path.join(savedata, d))
+            except OSError:
+                continue
+            kind, ch = ps3_save.classify(edt, pfd)
+            if kind != "plain":
+                continue
+            sha = _sha(edt)
+            if sha in by_sha:
+                cid, e = by_sha[sha]
+                out.append(dict(e, folder=d, id=cid, in_library=True,
+                                installed_by_library=e.get("installed_folder") == d,
+                                thumb=self.preview_path(cid, "thumb.rle"), views=self.preview_path(cid, "views.rle")))
+                continue
+            pd = os.path.join(cache, sha[:16])
+            try:
+                if not all(os.path.isfile(os.path.join(pd, f)) for f in ("thumb.rle", "views.rle")):
+                    files, _ok = char_preview.make_all(edt)
+                    os.makedirs(pd, exist_ok=True)
+                    for name in ("thumb.rle", "views.rle"):
+                        _write_atomic(os.path.join(pd, name), files[name])
+            except OSError as e:
+                self.log("warning", f"characters: no preview cache for {d} ({type(e).__name__})")
+            info = edt_format.describe(ch)
+            out.append({"folder": d, "sha256": sha, "id": "save:" + d, "in_library": False, "installed_by_library": False,
+                        "label": info["name"] or "Character", "name": info["name"], "class": info["class"],
+                        "creator": "", "tags": [], "source": "game", "imported": "", "description": "",
+                        "voxels": sum(info["voxels"]), "poses": len(info["voxels"]), "size": len(edt),
+                        "preview_ok": True, "thumb": os.path.join(pd, "thumb.rle"), "views": os.path.join(pd, "views.rle")})
         return out
 
     def install(self, cid, savedata):
