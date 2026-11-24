@@ -254,6 +254,96 @@ class Library(unittest.TestCase):
         self.assertIn("still encrypted", L.Library.installed(sav)[1][0][1])
 
 
+class LibraryUpkeep(unittest.TestCase):
+    """The library's index, preview cache, uninstall, cancellation and the game's saves (beta.6's page)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="charkeep-")
+        self.lib = L.Library(os.path.join(self.tmp, "lib"))
+        self.sav = os.path.join(self.tmp, "savedata")
+        self.ids = []
+        for i, colour in enumerate(((0.9, 0.1, 0.1), (0.1, 0.9, 0.1), (0.1, 0.1, 0.9))):
+            p = os.path.join(self.tmp, f"c{i}.edt")
+            open(p, "wb").write(E.serialize(make_character(name="ＣＨＡＲ" + str(i), colour=colour)))
+            self.ids.append(self.lib.import_candidates(L.find([p])[0])[0]["id"])
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def test_a_damaged_entry_never_hides_the_rest(self):
+        open(os.path.join(self.lib.entries, self.ids[0], "character.json"), "w").write("{ not json")
+        os.remove(self.lib.index_path)
+        fresh = L.Library(self.lib.root)
+        self.assertEqual(sorted(fresh.index()), sorted(self.ids[1:]))
+
+    def test_previews_made_again_only_when_stale(self):
+        self.assertEqual(self.lib.ensure_previews(self.ids[0]), (True, False))      # current: left alone
+        m = self.lib.meta(self.ids[0])
+        m["preview"]["renderer"] = "char_preview 0"
+        self.lib._write_meta(self.ids[0], m)
+        self.assertEqual(self.lib.ensure_previews(self.ids[0]), (True, True))       # another renderer: made again
+        open(self.lib.preview_path(self.ids[1], "thumb.rle"), "wb").write(b"RLE1 cut")   # a corrupted cache
+        self.assertEqual(self.lib.ensure_previews(self.ids[1], force=True), (True, True))
+        rle = open(self.lib.preview_path(self.ids[1], "thumb.rle"), "rb").read()
+        w, h = struct.unpack("<II", rle[4:12])
+        runs = sum(struct.unpack("<H", rle[o:o + 2])[0] for o in range(12, len(rle), 5))
+        self.assertEqual(runs, w * h)
+
+    def test_uninstall_removes_only_what_the_library_installed(self):
+        game_save = os.path.join(self.sav, "BLUS30490GAME-DATA00000000")
+        os.makedirs(game_save)
+        open(os.path.join(game_save, "DATA"), "wb").write(b"a game save")
+        folder, _ = self.lib.install(self.ids[0], self.sav)
+        other, _ = self.lib.install(self.ids[1], self.sav)
+        self.assertEqual(self.lib.uninstall(self.ids[0], self.sav), folder)
+        self.assertFalse(os.path.exists(os.path.join(self.sav, folder)))
+        self.assertTrue(os.path.isdir(os.path.join(self.sav, other)))
+        self.assertTrue(os.path.isfile(os.path.join(game_save, "DATA")))
+        self.assertIn(self.ids[0], self.lib.ids())                       # still in the library
+        # a copy changed in the game since (edited there) is left alone
+        open(os.path.join(self.sav, other, "DATA.EDT"), "ab").write(b"\0")
+        with self.assertRaises(L.LibraryError):
+            self.lib.uninstall(self.ids[1], self.sav)
+        self.assertTrue(os.path.isdir(os.path.join(self.sav, other)))
+        # a character the game itself holds (not installed by the library) cannot be uninstalled from here
+        with self.assertRaises(L.LibraryError):
+            self.lib.uninstall(self.ids[2], self.sav)
+
+    def test_a_cancelled_import_leaves_whole_entries_only(self):
+        paths = []
+        for i in range(5):
+            p = os.path.join(self.tmp, f"n{i}.edt")
+            open(p, "wb").write(E.serialize(make_character(name="ＮＥＷ" + str(i), colour=(0.2 * i, 0.5, 0.5))))
+            paths.append(p)
+        calls = []
+        rs = self.lib.import_candidates(L.find(paths)[0], cancelled=lambda: len(calls) >= 2,
+                                        progress=lambda i, n, label: calls.append(i))
+        self.assertEqual([r["status"] for r in rs].count("cancelled"), 3)
+        for cid in self.lib.ids():
+            self.assertTrue(os.path.isfile(os.path.join(self.lib.entries, cid, "character.edt")))
+        self.assertFalse([d for d in os.listdir(self.lib.entries) if d.startswith(".")])
+        self.assertEqual(len(self.lib.ids()), 5)
+
+    def test_the_game_saves_scanned(self):
+        enc, pfd = P._encrypt_for_tests(TEST_KEY, TEST_SID, E.serialize(make_character(name="ＰＳ３")))
+        d = os.path.join(self.sav, "BLJM60180T0000000000000000000D")
+        os.makedirs(d)
+        open(os.path.join(d, "DATA.EDT"), "wb").write(enc)
+        open(os.path.join(d, "PARAM.PFD"), "wb").write(pfd)
+        open(os.path.join(d, "PARAM.SFO"), "wb").write(L.make_sfo("BLJM60180T0000000000000000000D", "ＰＳ３ Ｈｅｒｏ"))
+        made_in_game = os.path.join(self.sav, "BLJM60180T0000000000000000000E")
+        os.makedirs(made_in_game)
+        open(os.path.join(made_in_game, "DATA.EDT"), "wb").write(E.serialize(make_character(name="ＧＡＭＥ")))
+        found = {f["folder"]: f for f in self.lib.scan_saves(self.sav)}
+        self.assertEqual(found["BLJM60180T0000000000000000000D"]["kind"], "encrypted")
+        self.assertEqual(found["BLJM60180T0000000000000000000D"]["name"], "PS3 Hero")
+        self.assertEqual(found["BLJM60180T0000000000000000000E"]["kind"], "plain")
+        # once imported with the key, the encrypted one no longer needs attention
+        rs = self.lib.import_candidates(L.find([d])[0], TEST_KEY, fake_program(TEST_SID))
+        self.assertEqual(rs[0]["status"], "imported")
+        self.assertNotIn("BLJM60180T0000000000000000000D", {f["folder"] for f in self.lib.scan_saves(self.sav)})
+
+
 class WorkerCommand(unittest.TestCase):
     """tools/worker.py characters: the key over the control channel only, never in its output or log."""
 

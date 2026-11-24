@@ -1712,81 +1712,134 @@ CHAR_SAVEDATA = ("dev_hdd0", "home", "00000001", "savedata")
 
 def cmd_characters(a, ev, control):
     """M12, the local character library (tools/char_library.py, docs/CHARACTERS.md), in <install>/data/characters:
-    --action list (default) | import --paths P [--paths P ...] [--with-key] [--keep-key] | export --id I [--id ...] --out
-    PATH | install --id I | rename --id I --label L | delete --id I --confirm | key-forget.
-    import --with-key (with --control): the player's PS3 save key is read from the control channel ("key <hex>") --
-    never from the command line; it is used, validated on the character, kept only with --keep-key and only after it
-    decrypted a character, and never written to the events or the log."""
+    --char-action list (default) | import --paths P [--paths P ...] [--with-key] [--keep-key] | import-saves [--id FOLDER
+    ...] [--with-key] [--keep-key] | export --id I [--id ...] --out PATH | install --id I | uninstall --id I --confirm |
+    rename --id I --label L | delete --id I --confirm | previews [--id I ...] [--full] | key-forget.
+    import --with-key (with --control): the player's PS3 key is read from the control channel ("key <hex>") -- never
+    from the command line; it is validated on the first encrypted character before any is decrypted, kept only with
+    --keep-key and only once it decrypted a character, and never written to the events or the log. Long actions
+    report progress and stop between characters on "cancel": each character is added whole or not at all."""
     import char_library
     import ps3_save
     import secret_store
     lay = _layout(a, kind=None)
-    lib = char_library.Library(os.path.join(lay.data, "characters"))
+    root = os.path.join(lay.data, "characters")
+
+    def log(level, text):
+        ev.emit("log", level=level, text=text)
+
+    try:
+        lib = char_library.Library(root, log)
+    except OSError as e:
+        raise pipeline.SetupError(f"The character library's folder can't be used ({e.strerror or e}).", "io_error",
+                                  details=root)
     savedata = os.path.join(lay.gamedata, *CHAR_SAVEDATA)
     act = a.action_chars or "list"
     ids = a.char_id or []
 
-    def entry(cid):
-        m = lib.meta(cid)
-        return {"id": cid, "label": m.get("label"), "name": m.get("name"), "class": m.get("class"),
-                "creator": m.get("creator"), "description": m.get("description"), "tags": m.get("tags", []),
-                "source": m.get("source"), "voxels": m.get("voxels"), "preview_ok": m.get("preview", {}).get("ok"),
-                "thumb": lib.raw_preview(cid, "thumb"), "views": lib.raw_preview(cid, "views"),
-                "sha256": m.get("sha256")}
+    def progress(i, n, label):
+        ev.emit("progress", stage="characters", fraction=(i / n) if n else 1.0, overall=(i / n) if n else 1.0,
+                detail=f"{i} of {n}" + (f": {label}" if label else ""))
 
-    if act == "list":
-        have, unusable = lib.installed(savedata)
-        out = []
-        for cid, _m in lib.search(a.label or ""):
-            e = entry(cid)
-            e["installed"] = have.get(e["sha256"])
-            out.append(e)
+    def key_status():
         ok, where = secret_store.available()
-        return {"characters": out, "unusable_in_game": [{"folder": f, "reason": r} for f, r in unusable],
-                "key": {"stored": secret_store.load() is not None, "store": where if ok else None,
-                        "store_message": None if ok else where}}
-    if act == "import":
-        if not a.char_paths:
-            raise pipeline.SetupError("import needs --paths.", "usage")
-        cands, errors = char_library.find(a.char_paths)
-        key, typed = None, False
+        return {"stored": secret_store.load() is not None, "store": where if ok else None,
+                "store_message": None if ok else where}
+
+    def read_key():
+        """(key bytes or None, typed): a key typed now (over the control channel), else the kept one"""
         if a.with_key:
             if not a.control:
                 raise pipeline.SetupError("--with-key needs --control (the key comes over the control channel).", "usage")
             ev.emit("needs", what="key")
             control.key_ready.wait(600)
-            if control.key_text:
+            text, control.key_text = control.key_text, None
+            if text:
                 try:
-                    key, typed = ps3_save.parse_key_text(control.key_text), True
+                    return ps3_save.parse_key_text(text), True
                 except ps3_save.SaveError as e:
                     raise pipeline.SetupError(str(e), "bad_key")
-                finally:
-                    control.key_text = None
-        if key is None:
-            key = secret_store.load()
+        return secret_store.load(), False
+
+    def do_import(cands, errors):
+        key, typed = None, False
+        if any(ps3_save.classify(c.edt, c.pfd)[0] == "encrypted" for c in cands):
+            key, typed = read_key()
+        elif a.with_key:
+            read_key()   # asked for nothing: the launcher's key is read and dropped
         program = None
         elf = os.path.join(lay.data, "disc", "PS3_GAME", "USRDIR", "EBOOT.elf")
-        if os.path.isfile(elf):
-            program = open(elf, "rb").read()
-        results = lib.import_candidates(cands, key, program)
-        stored = None
-        decrypted_ok = any(r["status"] in ("imported", "similar", "duplicate") and
-                           (lib.meta(r["id"]).get("source") or {}).get("decrypted_from_ps3_save")
-                           for r in results if r.get("id"))
-        if typed and a.keep_key and decrypted_ok:
+        if key is not None and os.path.isfile(elf):
+            with open(elf, "rb") as f:
+                program = f.read()
+        results = lib.import_candidates(cands, key, program, progress, control.cancel.is_set)
+        kept = None
+        decrypted = any(r.get("id") and r["status"] in ("imported", "similar", "duplicate") and
+                        (lib.meta(r["id"]).get("source") or {}).get("decrypted_from_ps3_save") for r in results)
+        if typed and decrypted:
+            if a.keep_key:
+                try:
+                    kept = secret_store.save(key, keep=True)
+                except secret_store.StoreUnavailable as e:
+                    secret_store.save(key, keep=False)
+                    kept = f"this session only ({e})"
+            else:
+                secret_store.save(key, keep=False)
+                kept = "this session"
+        counts = {}
+        for r in results:
+            counts[r["status"]] = counts.get(r["status"], 0) + 1
+        counts["errors"] = len(errors)
+        log("info", "characters: import " + ", ".join(f"{k} {v}" for k, v in sorted(counts.items()) if v))
+        return {"results": results, "errors": errors, "counts": counts, "key_kept": kept,
+                "key_wrong": any(r["status"] == "wrong-key" for r in results)}
+
+    if act == "list":
+        idx = lib.index()
+        have, _unusable = lib.installed(savedata)
+        out, classes, sources, stale = [], {}, {}, 0
+        for cid, e in sorted(idx.items()):
+            e = dict(e)
+            folder = have.get(e["sha256"])
+            e["installed"] = folder
+            e["installed_by_library"] = bool(folder) and folder == e.get("installed_folder")
+            for k in ("shape", "original_sha256"):
+                e.pop(k, None)
+            classes[e["class"]] = classes.get(e["class"], 0) + 1
+            sources[e["source"]] = sources.get(e["source"], 0) + 1
+            stale += 0 if e["preview_current"] else 1
+            out.append(e)
+        return {"root": root, "characters": out, "total": len(out), "classes": classes, "sources": sources,
+                "stale_previews": stale, "in_saves": lib.scan_saves(savedata), "key": key_status()}
+    if act == "import":
+        if not a.char_paths:
+            raise pipeline.SetupError("import needs --paths.", "usage")
+        cands, errors = char_library.find(a.char_paths)
+        return do_import(cands, errors)
+    if act == "import-saves":
+        found = lib.scan_saves(savedata)
+        folders = [f["folder"] for f in found if not ids or f["folder"] in ids]
+        cands, errors = char_library.find([os.path.join(savedata, f) for f in folders]) if folders else ([], [])
+        return do_import(cands, errors)
+    if act == "previews":
+        todo = ids or [cid for cid, e in lib.index().items() if not e["preview_current"]]
+        made = failed = 0
+        for i, cid in enumerate(todo):
+            if control.cancel.is_set():
+                break
+            progress(i, len(todo), "")
             try:
-                stored = secret_store.save(key, keep=True)
-            except secret_store.StoreUnavailable as e:
-                stored = f"not kept: {e}"
-        elif typed and decrypted_ok:
-            secret_store.save(key, keep=False)
-            stored = "this session"
-        return {"results": results, "errors": errors, "key_kept": stored,
-                "characters": [entry(r["id"]) for r in results if r.get("id")]}
+                ok, new = lib.ensure_previews(cid, force=bool(ids) and a.full)
+                made += 1 if new else 0
+                failed += 0 if ok else 1
+            except (OSError, ValueError) as e:
+                failed += 1
+                log("warning", f"characters: entry {cid}: previews not made ({type(e).__name__})")
+        return {"made": made, "failed": failed, "total": len(todo)}
     if act == "export":
         if not ids or not a.out:
             raise pipeline.SetupError("export needs --id and --out.", "usage")
-        written = []
+        written, skipped = [], []
         for cid in ids:
             b = lib.export(cid)
             if len(ids) == 1 and a.out.lower().endswith(".chchar"):
@@ -1794,24 +1847,35 @@ def cmd_characters(a, ev, control):
             else:
                 label = "".join(ch if ch.isalnum() or ch in " -_" else "_" for ch in lib.meta(cid)["label"]).strip()
                 path = os.path.join(a.out, f"{label or 'character'}-{cid[:8]}.chchar")
-            os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
             if os.path.exists(path):
-                raise pipeline.SetupError(f"{path} already exists; not replaced.", "exists")
-            with open(path, "wb") as f:
+                skipped.append({"id": cid, "path": path, "reason": "a file of that name already exists"})
+                continue
+            os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+            tmp = path + ".part"
+            with open(tmp, "wb") as f:
                 f.write(b)
+            os.replace(tmp, path)
             written.append(path)
-        return {"written": written}
+        return {"written": written, "skipped": skipped, "folder": os.path.dirname(os.path.abspath(written[0]))
+                if written else os.path.abspath(a.out)}
     if act == "install":
         done = []
         for cid in ids:
             folder, new = lib.install(cid, savedata)
             done.append({"id": cid, "folder": folder, "new": new})
         return {"installed": done}
+    if act == "uninstall":
+        if not a.confirm:
+            raise pipeline.SetupError("uninstall needs --confirm.", "needs_confirmation")
+        try:
+            return {"uninstalled": [{"id": cid, "folder": lib.uninstall(cid, savedata)} for cid in ids]}
+        except char_library.LibraryError as e:
+            raise pipeline.SetupError(str(e), "not_uninstalled")
     if act == "rename":
         if len(ids) != 1 or not a.label:
             raise pipeline.SetupError("rename needs one --id and --label.", "usage")
         lib.rename(ids[0], a.label)
-        return entry(ids[0])
+        return {"id": ids[0], "label": lib.meta(ids[0])["label"]}
     if act == "delete":
         if not a.confirm:
             raise pipeline.SetupError("delete needs --confirm.", "needs_confirmation")
@@ -1820,7 +1884,7 @@ def cmd_characters(a, ev, control):
         return {"deleted": ids}
     if act == "key-forget":
         secret_store.forget()
-        return {"key": {"stored": False}}
+        return {"key": key_status()}
     raise pipeline.SetupError(f"unknown action {act}", "usage")
 
 
@@ -1867,7 +1931,8 @@ def parser():
     p.add_argument("--image", help="steam-art: the player's own image file (PNG or JPEG)")
     p.add_argument("--replace", action="store_true", help="steam-art: replace the player's own artwork (they confirmed)")
     p.add_argument("--char-action", dest="action_chars",
-                   choices=("list", "import", "export", "install", "rename", "delete", "key-forget"),
+                   choices=("list", "import", "import-saves", "export", "install", "uninstall", "rename", "delete",
+                            "previews", "key-forget"),
                    help="characters: what to do (default list)")
     p.add_argument("--paths", dest="char_paths", action="append", help="characters import: a file or folder (repeat)")
     p.add_argument("--id", dest="char_id", action="append", help="characters: a library entry (repeat)")

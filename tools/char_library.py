@@ -270,105 +270,239 @@ def make_sfo(directory, name):
 
 # ---- the library -----------------------------------------------------------------------------------------------
 
+INDEX_VERSION = 1
+PREVIEW_FILES = ("thumb.png", "views.png", "thumb.rle", "views.rle")
+INSTALL_FILES = {"DATA.EDT", "PARAM.SFO", "ICON0.PNG", "PARAM.PFD"}
+
+
+def source_kind(src):
+    """a character's source, for filtering: ps3 (decrypted from a PS3 save), chchar (a Cubic.Heroes character
+    file), hall-of-heroes, community, or files (anything else the player imported)"""
+    k = (src or {}).get("kind") or "files"
+    if (src or {}).get("decrypted_from_ps3_save"):
+        return "ps3"
+    return k if k in ("chchar", "hall-of-heroes", "community") else "files"
+
+
+def sfo_detail_name(sfo):
+    """the character's name from an edit save's PARAM.SFO (its DETAIL "NAME:..."), in ordinary letters; "" if none"""
+    try:
+        if sfo[:4] != b"\0PSF":
+            return ""
+        kt, dt, n = struct.unpack("<III", sfo[8:20])
+        for i in range(min(n, 64)):
+            ko, _fmt, ln, _mx, do = struct.unpack("<HHIII", sfo[20 + 16 * i:36 + 16 * i])
+            key = sfo[kt + ko:sfo.index(b"\0", kt + ko)]
+            if key == b"DETAIL":
+                v = sfo[dt + do:dt + do + ln].split(b"\0")[0].decode("utf-8", "replace")
+                return edt_format.display_name(v[5:] if v.startswith("NAME:") else v)[:64]
+    except (struct.error, ValueError, IndexError):
+        pass
+    return ""
+
+
+def _write_atomic(path, data):
+    tmp = path + ".tmp"
+    with open(tmp, "wb") as f:
+        f.write(data)
+    os.replace(tmp, path)
+
+
 class Library:
-    def __init__(self, root):
+    def __init__(self, root, log=None):
         self.root = root
+        self.log = log or (lambda level, text: None)   # diagnostics: never a key, a payload or private save data
         self.entries = os.path.join(root, "entries")
         self.originals = os.path.join(root, "originals")
         os.makedirs(self.entries, exist_ok=True)
         os.makedirs(self.originals, exist_ok=True)
         self.state_path = os.path.join(root, "library.json")
+        self.index_path = os.path.join(root, "index.json")
         try:
             self.state = json.load(open(self.state_path, encoding="utf-8"))
         except (OSError, ValueError):
             self.state = {"version": 1}
+        self._index = None
+        # an import or install interrupted before its final rename leaves only a hidden temporary folder: removed
+        for d in os.listdir(self.entries):
+            if d.startswith(".import-"):
+                shutil.rmtree(os.path.join(self.entries, d), ignore_errors=True)
+                self.log("warning", f"characters: removed an interrupted import's leftovers ({d})")
 
     def _save_state(self):
-        tmp = self.state_path + ".tmp"
-        with open(tmp, "w", encoding="utf-8", newline="\n") as f:
-            json.dump(self.state, f, indent=1)
-        os.replace(tmp, self.state_path)
+        _write_atomic(self.state_path, json.dumps(self.state, indent=1).encode("utf-8"))
 
     # -- reading
     def ids(self):
-        return sorted(d for d in os.listdir(self.entries) if os.path.isfile(os.path.join(self.entries, d, "character.json")))
+        return sorted(d for d in os.listdir(self.entries)
+                      if not d.startswith(".") and os.path.isfile(os.path.join(self.entries, d, "character.json")))
 
     def meta(self, cid):
-        return json.load(open(os.path.join(self.entries, cid, "character.json"), encoding="utf-8"))
+        with open(os.path.join(self.entries, cid, "character.json"), encoding="utf-8") as f:
+            return json.load(f)
+
+    def _write_meta(self, cid, m):
+        _write_atomic(os.path.join(self.entries, cid, "character.json"),
+                      json.dumps(m, indent=1, ensure_ascii=False).encode("utf-8"))
+        self._index_put(cid, m)
 
     def edt(self, cid):
-        return open(os.path.join(self.entries, cid, "character.edt"), "rb").read()
+        with open(os.path.join(self.entries, cid, "character.edt"), "rb") as f:
+            return f.read()
+
+    # -- the index: one small file the list reads instead of every entry's description
+    @staticmethod
+    def _summary(cid, m):
+        src = m.get("source") or {}
+        vox = m.get("voxels") or []
+        pv = m.get("preview") or {}
+        return {"id": cid, "label": m.get("label") or m.get("name") or "Character", "name": m.get("name", ""),
+                "class": m.get("class", ""), "gender": m.get("gender", 0), "creator": m.get("creator") or "",
+                "tags": m.get("tags") or [], "source": source_kind(src), "imported": m.get("imported", ""),
+                "voxels": sum(vox) if isinstance(vox, list) else 0, "poses": len(vox) if isinstance(vox, list) else 0,
+                "sha256": m.get("sha256", ""), "size": m.get("size", 0), "preview_ok": bool(pv.get("ok")),
+                "preview_current": pv.get("renderer") == char_preview.RENDERER and pv.get("sha256") == m.get("sha256"),
+                "installed_folder": m.get("installed_folder"), "original_sha256": m.get("original_edt_sha256"),
+                "description": m.get("description") or "", "shape": m.get("shape_sha256", "")}
+
+    def index(self):
+        if self._index is not None:
+            return self._index
+        ids = set(self.ids())
+        try:
+            with open(self.index_path, encoding="utf-8") as f:
+                idx = json.load(f)
+            if idx.get("version") == INDEX_VERSION and set(idx.get("entries", {})) == ids:
+                self._index = idx["entries"]
+                return self._index
+        except (OSError, ValueError, AttributeError):
+            pass
+        entries = {}
+        for cid in sorted(ids):   # rebuilt from the entries: one unreadable description never hides the rest
+            try:
+                entries[cid] = self._summary(cid, self.meta(cid))
+            except (OSError, ValueError) as e:
+                self.log("warning", f"characters: entry {cid}: its description is unreadable ({type(e).__name__}); "
+                                    "left out of the list")
+        self._index = entries
+        self._save_index()
+        return entries
+
+    def _save_index(self):
+        try:
+            _write_atomic(self.index_path, json.dumps({"version": INDEX_VERSION, "entries": self._index},
+                                                      ensure_ascii=False).encode("utf-8"))
+        except OSError as e:
+            self.log("warning", f"characters: the library's index could not be written ({e.strerror}); read again next time")
+
+    def _index_put(self, cid, m):
+        self.index()[cid] = self._summary(cid, m)
+        self._save_index()
+
+    def _index_drop(self, cid):
+        if self.index().pop(cid, None) is not None:
+            self._save_index()
 
     def search(self, text=""):
         t = text.casefold()
         out = []
-        for cid in self.ids():
-            m = self.meta(cid)
-            hay = " ".join([m.get("label", ""), m.get("name", ""), m.get("class", ""), m.get("creator", "") or "",
-                            " ".join(m.get("tags", []))]).casefold()
+        for cid, e in sorted(self.index().items()):
+            hay = " ".join([e["label"], e["name"], e["class"], e["creator"], " ".join(e["tags"])]).casefold()
             if t in hay:
-                out.append((cid, m))
+                out.append((cid, e))
         return out
 
-    def raw_preview(self, cid, which):
-        """preview/<which>.rgb for the launcher (no PNG decoder there): "RGB1", u32 width, u32 height, then the pixels;
-        made from the PNG once. The path, or None."""
-        png = os.path.join(self.entries, cid, "preview", which + ".png")
-        raw = os.path.join(self.entries, cid, "preview", which + ".rgb")
-        if not os.path.isfile(png):
-            return None
-        if not os.path.isfile(raw) or os.path.getmtime(raw) < os.path.getmtime(png):
-            try:
-                w, h, px = char_preview.png_to_rgb(open(png, "rb").read())
-            except ValueError:
-                return None
-            with open(raw + ".tmp", "wb") as f:
-                f.write(b"RGB1" + struct.pack("<II", w, h) + px)
-            os.replace(raw + ".tmp", raw)
-        return raw
+    # -- previews: made again only when missing, from other data, or by another version of the renderer
+    def preview_path(self, cid, which):
+        return os.path.join(self.entries, cid, "preview", which)
+
+    def ensure_previews(self, cid, force=False):
+        """(ok, made): the entry's previews current; made again when needed (or forced: a corrupted cache)."""
+        m = self.meta(cid)
+        pv = m.get("preview") or {}
+        missing = any(not os.path.isfile(self.preview_path(cid, f)) for f in PREVIEW_FILES)
+        if not force and not missing and pv.get("renderer") == char_preview.RENDERER and pv.get("sha256") == m.get("sha256"):
+            return bool(pv.get("ok")), False
+        edt = self.edt(cid)
+        if _sha(edt) != m.get("sha256"):
+            self.log("warning", f"characters: entry {cid}: its character data changed on disk; previews show a placeholder")
+            edt = b""
+        files, ok = char_preview.make_all(edt)
+        os.makedirs(os.path.join(self.entries, cid, "preview"), exist_ok=True)
+        for name, b in files.items():
+            _write_atomic(self.preview_path(cid, name), b)
+        m["preview"] = {"renderer": char_preview.RENDERER, "sha256": m.get("sha256"), "ok": ok}
+        self._write_meta(cid, m)
+        return ok, True
 
     # -- importing
-    def import_candidates(self, cands, key=None, program=None):
+    def import_candidates(self, cands, key=None, program=None, progress=None, cancelled=None):
         """[{label, status, id?, message}] -- status: imported, duplicate, similar (imported; another entry has the
-        same model), needs-key, wrong-key, damaged, unsupported. Nothing of the sources is ever changed."""
+        same model), needs-key, wrong-key, damaged, unsupported, failed (a file error), cancelled. Each character is
+        added whole or not at all; nothing of the sources is ever changed."""
         results = []
         shapes = {}
-        for cid in self.ids():
-            shapes.setdefault(self.meta(cid).get("shape_sha256"), []).append(cid)
-        for c in cands:
-            edt = c.edt
-            kind, info = ps3_save.classify(edt, c.pfd)
-            if kind == "damaged":
-                results.append({"label": c.label, "status": "damaged", "message": info})
-                continue
-            decrypted = False
-            if kind == "encrypted":
-                if key is None:
-                    results.append({"label": c.label, "status": "needs-key",
-                                    "message": "saved on a PS3 and still encrypted: importing it needs your PS3 save "
-                                               "key (Cubic.Heroes does not include it)"})
+        for cid, e in self.index().items():
+            shapes.setdefault(e.get("shape"), []).append(cid)
+        sid_cache = bytes.fromhex(self.state["secure_file_id"]) if self.state.get("secure_file_id") else None
+        key_ok = None   # the key checked once, on the first encrypted character, before any is decrypted
+        n = len(cands)
+        for i, c in enumerate(cands):
+            if cancelled and cancelled():
+                results += [{"label": x.label, "status": "cancelled", "message": "not imported: the import was stopped"}
+                            for x in cands[i:]]
+                break
+            if progress:
+                progress(i, n, c.label)
+            try:
+                edt = c.edt
+                kind, info = ps3_save.classify(edt, c.pfd)
+                if kind == "damaged":
+                    results.append({"label": c.label, "status": "damaged", "message": info})
                     continue
-                if program is None:
-                    results.append({"label": c.label, "status": "needs-key",
-                                    "message": "decrypting needs the installed game's program (EBOOT.elf)"})
-                    continue
-                cached = bytes.fromhex(self.state["secure_file_id"]) if self.state.get("secure_file_id") else None
-                sid = ps3_save.find_secure_id(program, edt, info, cached)
-                if sid is None:
-                    results.append({"label": c.label, "status": "unsupported",
-                                    "message": "this encrypted save is not 3D Dot Game Heroes' (US) character data"})
-                    continue
-                if sid != cached:
-                    self.state["secure_file_id"] = sid.hex()
-                    self._save_state()
-                try:
-                    edt = ps3_save.decrypt_character(key, sid, edt, info)
-                except ps3_save.SaveError as e:
-                    results.append({"label": c.label, "status": "wrong-key", "message": str(e)})
-                    continue
-                decrypted = True
-            r = self._add(c, edt, decrypted, shapes)
-            results.append(r)
+                decrypted = False
+                if kind == "encrypted":
+                    if key is None:
+                        results.append({"label": c.label, "status": "needs-key",
+                                        "message": "saved on a PS3 and still encrypted: importing it needs your PS3 "
+                                                   "syscon manager key"})
+                        continue
+                    if program is None:
+                        results.append({"label": c.label, "status": "failed",
+                                        "message": "decrypting needs the installed game's program (EBOOT.elf): "
+                                                   "install the game first"})
+                        continue
+                    sid = ps3_save.find_secure_id(program, edt, info, sid_cache)
+                    if sid is None:
+                        results.append({"label": c.label, "status": "unsupported",
+                                        "message": "this encrypted save is not 3D Dot Game Heroes' (US) character data"})
+                        continue
+                    if sid != sid_cache:
+                        sid_cache = sid
+                        self.state["secure_file_id"] = sid.hex()
+                        self._save_state()
+                    if key_ok is None:
+                        key_ok = ps3_save.check_console_key(key, sid, edt, info)
+                    if not key_ok:
+                        results.append({"label": c.label, "status": "wrong-key",
+                                        "message": "the PS3 key does not decrypt this character (a wrong key)"})
+                        continue
+                    try:
+                        original = edt
+                        edt = ps3_save.decrypt_character(key, sid, edt, info)
+                    except ps3_save.SaveError as e:
+                        results.append({"label": c.label, "status": "damaged", "message": str(e)})
+                        continue
+                    decrypted = True
+                    c.original_sha = _sha(original)
+                results.append(self._add(c, edt, decrypted, shapes))
+            except OSError as e:
+                full = getattr(e, "errno", None) == 28
+                results.append({"label": c.label, "status": "failed",
+                                "message": "the drive is full" if full else f"a file couldn't be written ({e.strerror or e})"})
+                self.log("warning", f"characters: importing {c.label} failed: {type(e).__name__} {getattr(e, 'errno', '')}")
+        if progress:
+            progress(n, n, "")
         return results
 
     def _add(self, cand, edt, decrypted, shapes):
@@ -378,7 +512,7 @@ class Library:
         final = os.path.join(self.entries, cid)
         if os.path.exists(os.path.join(final, "character.json")):
             return {"label": cand.label, "status": "duplicate", "id": cid,
-                    "message": f"already in the library as \"{self.meta(cid).get('label')}\" (the same file)"}
+                    "message": f"already in the library as \"{self.index().get(cid, {}).get('label', cid)}\" (the same character)"}
         shape = edt_format.shape_hash(ch)
         info = edt_format.describe(ch)
         src_meta = cand.meta or {}
@@ -387,22 +521,25 @@ class Library:
             "id": cid, "sha256": sha, "shape_sha256": shape, "size": len(edt),
             "name": info["name"], "name_stored": ch.name, "class": info["class"], "gender": ch.gender,
             "voxels": info["voxels"],
-            "label": src_meta.get("label") or info["name"] or "Character",
+            "label": (src_meta.get("label") or info["name"] or "Character")[:64],
             "creator": src_meta.get("creator"), "description": src_meta.get("description"),
             "tags": [t for t in src_meta.get("tags", []) if isinstance(t, str)][:20],
             "source": src_meta.get("source") or {"kind": cand.source["kind"], "imported_from": cand.label,
                                                   "decrypted_from_ps3_save": decrypted},
             "imported": _now(), "importer": IMPORTER,
-            "preview": {"renderer": char_preview.RENDERER},
             "compatibility": {"game": "3D Dot Game Heroes (BLUS-30490)", "edit_data": "EDTFILE1.9"},
         }
-        thumb, views, ok = char_preview.make(edt)
-        m["preview"]["ok"] = ok
+        if decrypted and getattr(cand, "original_sha", None):
+            m["original_edt_sha256"] = cand.original_sha
+        files, ok = char_preview.make_all(edt)
+        m["preview"] = {"renderer": char_preview.RENDERER, "sha256": sha, "ok": ok}
         tmp = tempfile.mkdtemp(prefix=".import-", dir=self.entries)
         try:
             os.makedirs(os.path.join(tmp, "preview"))
-            for name, b in (("character.edt", edt), ("preview/thumb.png", thumb), ("preview/views.png", views)):
-                with open(os.path.join(tmp, name), "wb") as f:
+            with open(os.path.join(tmp, "character.edt"), "wb") as f:
+                f.write(edt)
+            for name, b in files.items():
+                with open(os.path.join(tmp, "preview", name), "wb") as f:
                     f.write(b)
             with open(os.path.join(tmp, "character.json"), "w", encoding="utf-8", newline="\n") as f:
                 json.dump(m, f, indent=1, ensure_ascii=False)
@@ -410,6 +547,7 @@ class Library:
         except Exception:
             shutil.rmtree(tmp, ignore_errors=True)
             raise
+        self._index_put(cid, m)
         # the originals, exactly as they were (local only)
         od = os.path.join(self.originals, cid)
         if not os.path.exists(od):
@@ -424,24 +562,23 @@ class Library:
         shapes.setdefault(shape, []).append(cid)
         if others:
             return {"label": cand.label, "status": "similar", "id": cid,
-                    "message": f"imported; the same model as \"{self.meta(others[0]).get('label')}\" (another name "
-                               "or settings)"}
+                    "message": f"imported; the same model as \"{self.index().get(others[0], {}).get('label', others[0])}\" "
+                               "(another name or settings)"}
         return {"label": cand.label, "status": "imported", "id": cid, "message": f"imported \"{m['label']}\""}
 
     # -- managing
     def rename(self, cid, label):
         m = self.meta(cid)
-        m["label"] = label.strip()[:64] or m["label"]
-        p = os.path.join(self.entries, cid, "character.json")
-        with open(p + ".tmp", "w", encoding="utf-8", newline="\n") as f:
-            json.dump(m, f, indent=1, ensure_ascii=False)
-        os.replace(p + ".tmp", p)
+        m["label"] = " ".join(label.split())[:64] or m["label"]
+        self._write_meta(cid, m)
 
     def delete(self, cid):
-        """Remove the entry (and its originals) from the library; characters installed in the game stay."""
+        """Remove the entry (and its originals) from the library. The game's saves are not touched: a copy installed
+        in the game stays there."""
         for d in (os.path.join(self.entries, cid), os.path.join(self.originals, cid)):
             if os.path.isdir(d):
                 shutil.rmtree(d)
+        self._index_drop(cid)
 
     # -- exporting
     def export(self, cid):
@@ -450,6 +587,7 @@ class Library:
         edt = self.edt(cid)
         if _sha(edt) != m["sha256"]:
             raise LibraryError(f"{m.get('label')}: its character data changed on disk; not exported")
+        self.ensure_previews(cid)
         keep = ("format", "format_version", "sha256", "shape_sha256", "size", "name", "name_stored", "class",
                 "gender", "voxels", "label", "creator", "description", "tags", "compatibility")
         out = {k: m.get(k) for k in keep}
@@ -460,10 +598,14 @@ class Library:
         out["preview"] = {"renderer": char_preview.RENDERER}
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-            for name, b in (("character.json", json.dumps(out, indent=1, ensure_ascii=False).encode("utf-8")),
-                            ("character.edt", edt),
-                            ("preview/thumb.png", open(os.path.join(self.entries, cid, "preview", "thumb.png"), "rb").read()),
-                            ("preview/views.png", open(os.path.join(self.entries, cid, "preview", "views.png"), "rb").read())):
+            for name in ("character.json", "character.edt", "preview/thumb.png", "preview/views.png"):
+                if name == "character.json":
+                    b = json.dumps(out, indent=1, ensure_ascii=False).encode("utf-8")
+                elif name == "character.edt":
+                    b = edt
+                else:
+                    with open(self.preview_path(cid, name.split("/")[1]), "rb") as f:
+                        b = f.read()
                 zi = zipfile.ZipInfo(name, date_time=(2010, 1, 1, 0, 0, 0))   # fixed: the same entry exports the same bytes
                 zi.compress_type = zipfile.ZIP_DEFLATED
                 z.writestr(zi, b)
@@ -480,7 +622,11 @@ class Library:
         for d in sorted(os.listdir(savedata)):
             if not d.startswith(EDIT_PREFIX):
                 continue
-            edt, pfd = ps3_save.scan_folder(os.path.join(savedata, d))
+            try:
+                edt, pfd = ps3_save.scan_folder(os.path.join(savedata, d))
+            except OSError:
+                unusable.append((d, "unreadable"))
+                continue
             kind, info = ps3_save.classify(edt, pfd)
             if kind == "plain":
                 found[_sha(edt)] = d
@@ -489,13 +635,40 @@ class Library:
                                  if kind == "encrypted" else info))
         return found, unusable
 
+    def scan_saves(self, savedata):
+        """The game's edit-data folders the library could take in: [{folder, name, kind}] -- kind "encrypted" (copied
+        from a PS3, not imported yet) or "plain" (made in the game, not in the library yet)."""
+        out = []
+        if not os.path.isdir(savedata):
+            return out
+        have = {e["sha256"] for e in self.index().values()}
+        imported_originals = {e.get("original_sha256") for e in self.index().values() if e.get("original_sha256")}
+        for d in sorted(os.listdir(savedata)):
+            if not d.startswith(EDIT_PREFIX):
+                continue
+            p = os.path.join(savedata, d)
+            try:
+                edt, pfd = ps3_save.scan_folder(p)
+                sfo_p = os.path.join(p, "PARAM.SFO")
+                name = sfo_detail_name(open(sfo_p, "rb").read()) if os.path.isfile(sfo_p) else ""
+            except OSError:
+                continue
+            kind, _info = ps3_save.classify(edt, pfd)
+            sha = _sha(edt)
+            if kind == "encrypted" and sha not in imported_originals:
+                out.append({"folder": d, "name": name, "kind": "encrypted"})
+            elif kind == "plain" and sha not in have:
+                out.append({"folder": d, "name": name, "kind": "plain"})
+        return out
+
     def install(self, cid, savedata):
-        """Put the entry into the game's saves as a new edit-data folder; never replaces one. Returns the folder."""
+        """Put the entry into the game's saves as a new edit-data folder; never replaces one. (folder, new)."""
         m = self.meta(cid)
         edt = self.edt(cid)
         have, _ = self.installed(savedata)
         if m["sha256"] in have:
             return have[m["sha256"]], False
+        self.ensure_previews(cid)
         folder = EDIT_PREFIX + m["sha256"][:20].upper()
         dst = os.path.join(savedata, folder)
         if os.path.exists(dst):
@@ -503,8 +676,10 @@ class Library:
         os.makedirs(savedata, exist_ok=True)
         tmp = tempfile.mkdtemp(prefix=".install-", dir=savedata)
         try:
+            with open(self.preview_path(cid, "thumb.png"), "rb") as f:
+                icon = f.read()
             for name, b in (("DATA.EDT", edt), ("PARAM.SFO", make_sfo(folder, m["name_stored"])),
-                            ("ICON0.PNG", open(os.path.join(self.entries, cid, "preview", "thumb.png"), "rb").read()),
+                            ("ICON0.PNG", icon),
                             ("PARAM.PFD", b"DATA.EDT\n")):   # Cubic.Heroes' own list of the protected files
                 with open(os.path.join(tmp, name), "wb") as f:
                     f.write(b)
@@ -512,7 +687,37 @@ class Library:
         except Exception:
             shutil.rmtree(tmp, ignore_errors=True)
             raise
+        m["installed_folder"] = folder
+        m["installed_at"] = _now()
+        self._write_meta(cid, m)
         return folder, True
+
+    def uninstall(self, cid, savedata):
+        """Remove from the game's saves the folder the library installed for this entry -- only that folder, only
+        when it still holds exactly what was installed. The library entry stays. Returns the folder removed."""
+        m = self.meta(cid)
+        folder = m.get("installed_folder")
+        if not folder:
+            raise LibraryError("this character was not installed by the library; its copy in the game's saves is the "
+                               "game's own and is left as it is")
+        p = os.path.join(savedata, folder)
+        if not os.path.isdir(p):
+            m.pop("installed_folder", None)
+            self._write_meta(cid, m)
+            return None
+        names = set(os.listdir(p))
+        with open(os.path.join(p, "DATA.EDT"), "rb") as f:
+            same = _sha(f.read()) == m["sha256"]
+        if not folder.startswith(EDIT_PREFIX) or not names <= INSTALL_FILES or not same:
+            raise LibraryError("the copy in the game's saves changed since it was installed (edited in the game?): it is "
+                               "left as it is -- import it first to keep the changes")
+        gone = os.path.join(savedata, ".uninstall-" + folder)
+        os.replace(p, gone)   # out of the game's sight at once, then removed
+        shutil.rmtree(gone, ignore_errors=True)
+        m.pop("installed_folder", None)
+        m.pop("installed_at", None)
+        self._write_meta(cid, m)
+        return folder
 
 
 def main():
@@ -523,7 +728,7 @@ def main():
     cmd, rest = a[1], a[2:]
     if cmd == "list":
         for cid, m in lib.search(""):
-            print(f"{cid}  {m['label']}  ({m['class']}, {sum(m['voxels'])} voxels)  {m.get('creator') or ''}")
+            print(f"{cid}  {m['label']}  ({m['class']}, {m['voxels']} voxels)  {m.get('creator') or ''}")
         return 0
     if cmd == "import":
         key = None

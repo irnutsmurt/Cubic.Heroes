@@ -25,8 +25,11 @@ import zlib
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import edt_format  # noqa: E402
 
-RENDERER = "char_preview 1"          # recorded with every preview; bump when the pictures change
-BACKGROUND = (59, 63, 70)            # neutral slate
+RENDERER = "char_preview 2"          # recorded with every preview; bump when the pictures change
+# the background: the launcher's own blues, a gentle vertical gradient -- light enough behind black voxels, dark
+# enough behind white ones
+BG_TOP, BG_BOTTOM = (60, 80, 156), (30, 42, 98)
+BACKGROUND = BG_BOTTOM
 EDGE = 0.70                          # an edge's brightness relative to its face
 INSET = 0.12                         # the edge's width, a fraction of the face
 
@@ -76,10 +79,17 @@ def _shade(rgb, n_cam):
 
 
 class Canvas:
-    def __init__(self, w, h, bg=BACKGROUND):
+    def __init__(self, w, h, bg=None):
         self.w, self.h = w, h
-        row = bytes(bg) * w
-        self.rows = [bytearray(row) for _ in range(h)]
+        if bg is not None:
+            row = bytes(bg) * w
+            self.rows = [bytearray(row) for _ in range(h)]
+            return
+        self.rows = []
+        for y in range(h):   # the gradient, top to bottom (integer steps: the same bytes everywhere)
+            t = y * 1024 // max(1, h - 1)
+            c = bytes((a * (1024 - t) + b * t + 512) // 1024 for a, b in zip(BG_TOP, BG_BOTTOM))
+            self.rows.append(bytearray(c * w))
 
     def polygon(self, pts, rgb):
         """Fill a convex polygon (pixel coordinates); a pixel is in when its centre is."""
@@ -176,10 +186,10 @@ def _bounds(faces):
     return min(xs), max(xs), min(ys), max(ys)
 
 
-SS = 3   # supersampling
+SS = 2   # supersampling: edges just smoothed, voxels still crisp
 
 
-def thumbnail(c, size=256, pose=0):
+def thumbnail(c, size=288, pose=0):
     """The list picture: size x size, the model framed tightly (8% margin)."""
     faces = _faces(c.poses[pose].voxels, YAW_THUMB) if c.poses and c.poses[pose].voxels else []
     if not faces:
@@ -194,14 +204,14 @@ def thumbnail(c, size=256, pose=0):
     return canvas.downsample(SS)
 
 
-def views(c, panel_w=300, panel_h=380, pose=0, gap=4):
+def views(c, panel_w=320, panel_h=400, pose=0, gap=6):
     """Front | side | back at one fixed zoom: the editor's 16-voxel grid fits any panel's height, so every character
     is shown at the same scale; each view centred on the model."""
     vox = c.poses[pose].voxels if c.poses else []
     big_w, big_h = panel_w * SS, panel_h * SS
     # the tallest a 16-voxel model can be on screen at this pitch: 16 cos + 16 sin
     scale = big_h * 0.92 / (16 * (PITCH_COS + PITCH_SIN))
-    out = Canvas(panel_w * 3 + gap * 2, panel_h, bg=(44, 47, 53))
+    out = Canvas(panel_w * 3 + gap * 2, panel_h, bg=(14, 20, 54))   # the launcher's inset ink between the views
     for i, yaw in enumerate((YAW_FRONT, YAW_SIDE, YAW_BACK)):
         faces = _faces(vox, yaw)
         if not faces:
@@ -250,12 +260,50 @@ def png_to_rgb(png):
     return w, h, b"".join(raw[y * stride + 1:(y + 1) * stride] for y in range(h))
 
 
+def rle(canvas):
+    """the launcher's picture: "RLE1", u32 width, u32 height (little-endian), then runs of (u16 count, r, g, b) along
+    the rows, left to right, top to bottom (a run never longer than 65535)."""
+    out = [b"RLE1", struct.pack("<II", canvas.w, canvas.h)]
+    prev, n = None, 0
+    for row in canvas.rows:
+        for x in range(0, len(row), 3):
+            px = bytes(row[x:x + 3])
+            if px == prev and n < 65535:
+                n += 1
+            else:
+                if prev is not None:
+                    out.append(struct.pack("<H", n) + prev)
+                prev, n = px, 1
+    if prev is not None:
+        out.append(struct.pack("<H", n) + prev)
+    return b"".join(out)
+
+
+def rle_from_png(png):
+    w, h, px = png_to_rgb(png)
+    c = Canvas(w, h, bg=(0, 0, 0))
+    for y in range(h):
+        c.rows[y][:] = px[y * w * 3:(y + 1) * w * 3]
+    return rle(c)
+
+
+def make_all(edt_bytes):
+    """({"thumb.png", "views.png", "thumb.rle", "views.rle": bytes}, ok): every preview of a character in one pass --
+    placeholders, and ok False, when the data is not a character."""
+    try:
+        c = edt_format.parse(edt_bytes)
+        t, v, ok = thumbnail(c), views(c), True
+    except edt_format.EdtError:
+        t, v, ok = placeholder(288, 288), placeholder(320 * 3 + 12, 400), False
+    return {"thumb.png": t.png(), "views.png": v.png(), "thumb.rle": rle(t), "views.rle": rle(v)}, ok
+
+
 def make(edt_bytes):
     """(thumb.png bytes, views.png bytes, ok): placeholders and ok False when the data is not a character."""
     try:
         c = edt_format.parse(edt_bytes)
     except edt_format.EdtError:
-        return placeholder(256, 256).png(), placeholder(300 * 3 + 8, 380).png(), False
+        return placeholder(288, 288).png(), placeholder(320 * 3 + 12, 400).png(), False
     return thumbnail(c).png(), views(c).png(), True
 
 
