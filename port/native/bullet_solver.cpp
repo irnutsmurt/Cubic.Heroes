@@ -287,12 +287,20 @@ constexpr uint32_t kAngularFactor = 0x20;
 constexpr uint32_t kTempStorage = 0x25800, kContactBytes = 3 * kConstraintBytes;
 constexpr uint32_t kSign = 0x80000000u;
 
-// The SPU's single-precision operations, on the float's bits.
-inline uint32_t sp_fa(uint32_t x, uint32_t y) { return spu__fa_any(x, y); }
-inline uint32_t sp_fs(uint32_t x, uint32_t y) { return spu__fa_any(x, y ^ kSign); }
-inline uint32_t sp_fm(uint32_t x, uint32_t y) { return spu__fm_any(x, y); }
-inline uint32_t sp_fma(uint32_t x, uint32_t y, uint32_t z) { return spu__fma_any(x, y, z, 0, 0); }        // x*y + z
-inline uint32_t sp_fnms(uint32_t x, uint32_t y, uint32_t z) { return spu__fma_any(x, y, z, kSign, 0); }   // z - x*y
+// The SPU's single-precision operations, on the float's bits: spu_helpers.h's fast path inline, its exact form
+// (spu__*_any) out of line for what the fast path declines -- the same result as spu__*_any. Left to the compiler,
+// spu__fma_any was a call per operation (a fifth of the native physics' time, issue #2).
+#define SP_INLINE inline __attribute__((always_inline))
+SP_INLINE uint32_t sp_fa(uint32_t x, uint32_t y) { const uint32_t f = spu__fa_fast(x, y); return f ? f : spu__fa_any(x, y); }
+SP_INLINE uint32_t sp_fs(uint32_t x, uint32_t y) { return sp_fa(x, y ^ kSign); }
+SP_INLINE uint32_t sp_fm(uint32_t x, uint32_t y) { const uint32_t f = spu__fm_fast(x, y); return f ? f : spu__fm_any(x, y); }
+SP_INLINE uint32_t sp_fma_np(uint32_t x, uint32_t y, uint32_t z, uint32_t np, uint32_t nc)
+{
+    const uint32_t f = spu__fma_fast(x, y, z, np, nc);
+    return f ? f : spu__fma_any(x, y, z, np, nc);
+}
+SP_INLINE uint32_t sp_fma(uint32_t x, uint32_t y, uint32_t z) { return sp_fma_np(x, y, z, 0, 0); }        // x*y + z
+SP_INLINE uint32_t sp_fnms(uint32_t x, uint32_t y, uint32_t z) { return sp_fma_np(x, y, z, kSign, 0); }   // z - x*y
 inline bool sp_fcgt(uint32_t x, uint32_t y) { return spu__sf_key(x) > spu__sf_key(y); }
 inline bool sp_zero(uint32_t x) { return spu__sf_key(x) == 0; }   // fceq(x, 0)
 
@@ -540,7 +548,7 @@ constexpr uint32_t kOne = 0x3F800000u, kOneUp = 0x3F800001u, kHalf = 0x3F000000u
 constexpr uint32_t kEpsilon = 0x34000000u, kSqrt12 = 0x3F3504F3u;
 constexpr uint32_t kRowWords = kConstraintBytes / 4;
 
-inline uint32_t sp_fms(uint32_t x, uint32_t y, uint32_t z) { return spu__fma_any(x, y, z, 0, kSign); }   // x*y - z
+SP_INLINE uint32_t sp_fms(uint32_t x, uint32_t y, uint32_t z) { return sp_fma_np(x, y, z, 0, kSign); }   // x*y - z
 inline uint32_t lane0(u128 v) { return v._u32[0]; }
 inline u128 quad(uint32_t x) { u128 v; v._u32[0] = x; return v; }
 // a / b as the task divides: y = fi(b, frest(b)), q = a*y, q + (a - q*b)*y
