@@ -15,8 +15,11 @@ repository) is a separate step the owner reviews.
         checks the copy as the launcher will: the signature, then every entry, every file's size and SHA-256, the
         character files' members and data, the thumbnails' form
     char_catalog.py keygen --out FOLDER  |  pubkey --key PRIVATE.pem
-        the catalog key (once, by the owner; the same steps as the release key, docs/RELEASE_SIGNING.md): its public
-        key's entry goes into config/catalog_keys.json
+        the catalog key (by the owner; the same steps as the release key, docs/RELEASE_SIGNING.md, but a key of its
+        own: a release key is refused) -- its public key's entry goes into config/catalog_keys.json
+    char_catalog.py keys --add ENTRY.json | --revoke KEY_ID  [--file config/catalog_keys.json]
+        a rotation's new key beside the old, or a key withdrawn (kept, marked revoked: no launcher that has this
+        file trusts it again); docs/CHARACTER_STORE.md, "The catalog key"
 
 A submission record (JSON) holds the creator's explicit agreement; nothing is ever given a licence by default (the
 historical Hall of Heroes characters are never added this way):
@@ -190,10 +193,14 @@ def sign(repo, key, keys_file=None, log=print):
         subprocess.check_call([R.openssl(), "pkeyutl", "-sign", "-inkey", key, "-rawin", "-in", m, "-out", sig])
         with open(sig, "rb") as f:
             s = f.read()
-        pub = subprocess.run([R.openssl(), "pkey", "-in", key, "-pubout", "-outform", "DER"], capture_output=True)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-    keys = T.trusted_keys(keys_file or S.KEYS_FILE)
+    # a release key (any in config/release_keys.json, revoked or not) never signs the catalog
+    with open(T.KEYS_FILE, encoding="utf-8") as f:
+        rel = [T.public_key_from(k["ed25519"]) for k in json.load(f).get("keys", []) if k.get("ed25519")]
+    if any(T.ed25519_verify(pk, msg, s) for pk in rel):
+        sys.exit("that is a release key: the catalog is signed with its own key, never the release key")
+    keys = S.trusted_keys(S.DEFAULT_BASE, {}, keys_file=keys_file or S.KEYS_FILE)
     kid = next((k for k, pk in keys if T.ed25519_verify(pk, msg, s)), None)
     if kid is None:
         sys.exit("signed, but by no key in " + (keys_file or S.KEYS_FILE) + ": the catalog was not changed")
@@ -208,7 +215,7 @@ def sign(repo, key, keys_file=None, log=print):
 def check(repo, keys_file=None, log=print):
     """[problems] -- empty when the launcher would accept the catalog and every listed character"""
     with open(_path(repo), "rb") as f:
-        cat, problems = S.parse_catalog(f.read(), T.trusted_keys(keys_file or S.KEYS_FILE))
+        cat, problems = S.parse_catalog(f.read(), S.trusted_keys(S.DEFAULT_BASE, {}, keys_file=keys_file or S.KEYS_FILE))
     for e in cat["characters"]:
         try:
             for kind in ("file", "thumb"):
@@ -236,6 +243,37 @@ def check(repo, keys_file=None, log=print):
     return problems
 
 
+def keys_cmd(path, add=None, revoke=None, log=print):
+    """config/catalog_keys.json changed: a key added (a rotation: beside the others) or revoked (kept, marked)"""
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    keys = data.setdefault("keys", [])
+    if add:
+        with open(add, encoding="utf-8") as f:
+            entry = json.load(f)
+        pk = T.public_key_from(entry["ed25519"])
+        kid = T.key_id(pk)
+        if entry.get("id") and entry["id"] != kid:
+            sys.exit("the entry's id does not match its key")
+        if kid in S.release_key_ids():
+            sys.exit("that is a release key: the catalog is signed with its own key, never the release key")
+        if any(k.get("id") == kid for k in keys):
+            sys.exit(f"{kid} is already in {path}")
+        keys.append({"id": kid, "ed25519": entry["ed25519"], "added": entry.get("added") or datetime.date.today().isoformat(),
+                     "note": entry.get("note") or "a character catalog key"})
+        log(f"added {kid}")
+    if revoke:
+        k = next((k for k in keys if k.get("id") == revoke), None)
+        if k is None:
+            sys.exit(f"no key {revoke} in {path}")
+        k["revoked"] = True
+        k["revoked_on"] = datetime.date.today().isoformat()
+        log(f"revoked {revoke}: launchers with this file no longer trust it, nor the catalogs it signed")
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        json.dump(data, f, indent=1)
+        f.write("\n")
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -256,7 +294,15 @@ def main(argv=None):
     pk = sub.add_parser("pubkey")
     pk.add_argument("--key", required=True)
     pk.add_argument("--note", default="the character catalog key")
+    ks = sub.add_parser("keys")
+    ks.add_argument("--file", default=S.KEYS_FILE)
+    g = ks.add_mutually_exclusive_group(required=True)
+    g.add_argument("--add", help="a public key's entry (keygen/pubkey wrote it)")
+    g.add_argument("--revoke", help="a key's id")
     a = ap.parse_args(argv)
+    if a.cmd == "keys":
+        keys_cmd(a.file, a.add, a.revoke)
+        return 0
     if a.cmd == "build":
         _, problems = build(a.repo, a.submissions, a.updated)
         return 1 if problems else 0
@@ -276,7 +322,12 @@ def main(argv=None):
         entry = R.key_entry(R.extract_public(key), a.note)
     else:
         entry = R.key_entry(R.extract_public(os.path.abspath(a.key)), a.note)
-    print("add to config/catalog_keys.json's keys (in a commit of its own):")
+    if entry["id"] in S.release_key_ids():
+        sys.exit("that is a release key: the catalog needs a key of its own (keygen makes one)")
+    out = os.path.join(os.path.dirname(os.path.abspath(a.key if a.cmd == "pubkey" else key)), "catalog-signing-key.pub.json")
+    with open(out, "w") as f:
+        json.dump(entry, f, indent=1)
+    print(f"the public key's entry ({out}); add it with: py -3 tools/char_catalog.py keys --add \"{out}\"")
     print(json.dumps(entry, indent=1))
     return 0
 

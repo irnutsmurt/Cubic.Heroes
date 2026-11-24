@@ -56,8 +56,8 @@ everywhere.
   sorted, no spaces, UTF-8.
   - It is checked with OpenSSL, through the same code as the release check (tools/release_trust.py), against the
     keys in `config/catalog_keys.json`.
-  - The private key is the owner's, kept offline. It is made and used like the release key (docs/RELEASE_SIGNING.md):
-    `tools/char_catalog.py keygen` / `pubkey` / `sign`.
+  - The private key is the owner's, kept offline, and is a key of its own, never the release key (see "The catalog
+    key" below).
   - Until a key is in `config/catalog_keys.json`, every catalog is refused.
   - Because the signature sits in the same file as what it signs, one request (one ETag) always brings the two
     together. The files the catalog lists are then checked against its SHA-256s and sizes, so each download is as
@@ -97,6 +97,76 @@ python tools/char_catalog.py check --repo DIR                         # what the
   entry, then drops the old signatures, so the catalog must be signed again.
 - The tool writes only into `DIR` and never uses the network. Publishing a copy, as a commit to the public
   repository, is a separate step that the owner reviews.
+
+## The catalog key
+
+The catalog has its **own** Ed25519 key, never the release key (docs/RELEASE_SIGNING.md):
+
+- **Separate trust.** A launcher trusts `config/catalog_keys.json` for the catalog and `config/release_keys.json`
+  for software. A key that appears in `release_keys.json`, revoked or not, is never trusted for the catalog, even
+  if it is listed there. `char_catalog.py` refuses to sign with a release key or to add one to the catalog keys.
+- **Nothing executable.** The update check reads only `release_keys.json`. The catalog lists data only: character
+  files that are imported and never run. So a stolen catalog key can at worst sign a bad catalog. Its downloads
+  are still checked, and its entries can't be anything but characters. It can never authorise an update.
+- **Private keys stay offline.** They live with the owner, encrypted with a passphrase, and are never in the
+  repository, a build machine, CI, a release or the NAS. The repository holds public keys only.
+  `tests/test_char_store.py` fails if a tracked file contains a private key, or if the shipped
+  `config/catalog_keys.json` lists a test key.
+- **Test keys.** The tests make throwaway keys in memory. A local copy of the repository for development is signed
+  with a throwaway key under `build/tmp` (never tracked), and that key is deleted when the tests end, before any
+  release.
+
+### Making the key (once, by the owner)
+
+```
+py -3 tools/char_catalog.py keygen --out <a folder outside the repository>
+py -3 tools/char_catalog.py keys --add <that folder>/catalog-signing-key.pub.json
+```
+
+The first command writes `catalog-signing-key.pem`, encrypted with a passphrase that OpenSSL asks for, and its
+public entry. The second adds the public entry to `config/catalog_keys.json`; commit it on its own. Keep the
+private key offline with a second copy somewhere else, and keep the passphrase apart from both. A **backup key**,
+made the same way and added beside the first, lets the catalog survive the loss of one.
+
+### Rotation (planned)
+
+1. Make the new key and add it beside the old one (`keys --add`). Ship that keys file in a launcher release; the
+   release key signs it, as every update.
+2. Sign each catalog with **both** keys (`sign --key old.pem`, then `sign --key new.pem`). Launchers that trust
+   either key accept it.
+3. Once players have the launcher that trusts the new key, revoke the old one (`keys --revoke <id>`, in another
+   launcher release) and stop signing with it. Its entry stays in the file, marked `revoked`.
+
+### A lost key
+
+Nothing is exposed, but no new catalog can be signed with that key.
+- With a backup key, sign with the backup.
+- Without one, make a new key and add it to `config/catalog_keys.json` in a launcher release.
+- Meanwhile, launchers keep showing the last catalog they saved. The lost key need not be revoked, though
+  revoking it does no harm.
+
+### A compromised key
+
+Someone else could sign catalogs with it.
+1. **Revoke it** (`keys --revoke <id>`) and add a new or backup key, in a **launcher release** signed with the
+   release key. A launcher learns of a revocation only through an update; the catalog can't revoke its own keys.
+2. Sign the real catalog with the new key, and publish it with a `catalog_version` above every version published
+   before.
+3. **What a launcher does after the update.** It no longer trusts catalogs signed by the revoked key, including the
+   one it saved: that catalog is dropped. It also ignores the rollback floor (below) that the revoked key's catalogs
+   set. A version the attacker inflated, say 2,000,000, therefore can't lock players out of the next real catalog.
+4. **Before the update.** A launcher could have shown or downloaded characters from a catalog the attacker signed.
+   Those are still checked as characters, so nothing in them can run, and the update and its keys are untouched.
+   Players can remove any such character from My Library. The library records which catalog id and version each
+   character came from.
+
+### Rollback protection
+
+A launcher refuses a catalog whose `catalog_version` is lower than the highest one it accepted before, and a
+catalog that changed without a new `catalog_version`. That highest version is kept with the key that signed it in
+`<library>/store/state.json`. It holds across launcher restarts, and even when the saved catalog is deleted, for as
+long as that key is trusted. Tested in `Keys.test_rollback_protection_survives_restarts` and
+`Keys.test_a_revoked_key_is_no_longer_trusted`.
 
 ## The launcher's side (`tools/char_store.py`, worker `characters --char-action store...`)
 
@@ -160,6 +230,10 @@ tampered files, plus one run through a real local HTTP server. The checks:
 - a bad entry, including one with another licence, is left out alone;
 - a newer schema or a foreign catalog keeps the saved one;
 - addresses are checked, and the development keys file is honoured only for a copy on this computer;
+- keys: rollback protection holds across restarts and without the saved catalog; rotation works (a catalog signed
+  by two keys is accepted by launchers that trust either); a revoked key is no longer trusted and its floor is
+  ignored; a release key is never trusted for the catalog, and a catalog key can't sign a release; adding and
+  revoking keys works; no private key in the repository and no test key shipped;
 - thumbnails are checked;
 - a download happens once, can install too, and a tampered file or one with more than a character is refused;
 - a redirect to another host is refused.

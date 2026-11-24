@@ -322,6 +322,105 @@ class Catalog(StoreBase):
         self.assertNotIn((self.key.id, self.key.public), S.trusted_keys(S.DEFAULT_BASE, {S.KEYS_ENV: keys}))
 
 
+class Keys(StoreBase):
+    """the catalog key: rotation, revocation, kept apart from the release key; the rollback floor across restarts"""
+
+    def keyfile(self, entries):
+        p = os.path.join(self.tmp, "keys-%d.json" % len(os.listdir(self.tmp)))
+        with open(p, "w") as f:
+            json.dump({"keys": entries}, f)
+        return p
+
+    def entry(self, k, **more):
+        return dict({"id": k.id, "ed25519": base64.b64encode(k.public).decode()}, **more)
+
+    def test_rollback_protection_survives_restarts(self):
+        st = self.store()
+        st.refresh()
+        newer = self.doc()
+        newer["catalog"]["catalog_version"] = 9
+        self.server.override[S.CATALOG_PATH] = json.dumps(self.key.sign_doc(newer)).encode()
+        st.refresh(force=True)
+        older = json.dumps(self.key.sign_doc(self.doc())).encode()   # version 1, validly signed
+        self.server.override[S.CATALOG_PATH] = older
+        restarted = self.store()   # a new launcher run: the same library, a new Store
+        self.assertEqual(restarted.refresh(force=True)["status"], "error")
+        os.remove(restarted.catalog_path)   # even without the saved catalog: the floor in state.json holds
+        again = self.store()
+        r = again.refresh(force=True)
+        self.assertEqual(r["status"], "error")
+        self.assertIn("older", r["message"])
+        self.assertIsNone(again.entries(self.savedata)[0])
+
+    def test_rotation_both_keys_sign(self):
+        new = TestKey()
+        doc = self.doc()
+        msg = S.canonical(doc["catalog"])
+        doc["signatures"] = [{"key_id": k.id, "ed25519": base64.b64encode(k.sign(msg)).decode()} for k in (self.key, new)]
+        self.server.override[S.CATALOG_PATH] = json.dumps(doc).encode()
+        for keys in (self.key.keys(), new.keys(), self.key.keys() + new.keys()):   # old launchers, new ones, both
+            lib = L.Library(os.path.join(self.tmp, "lib-rot-%d" % len(keys) + keys[0][0]))
+            st = S.Store(lib, base=BASE, get=self.server, clock=self.clock, keys=keys)
+            self.assertEqual(st.refresh()["status"], "updated")
+
+    def test_a_revoked_key_is_no_longer_trusted(self):
+        new = TestKey()
+        f = self.keyfile([self.entry(self.key, revoked=True), self.entry(new)])
+        keys = S.trusted_keys(BASE, {}, keys_file=f, release_file=os.path.join(self.tmp, "none.json"))
+        self.assertEqual(keys, new.keys())
+        st = self.store()   # trusted the old key: saved a catalog signed with it, at version 9
+        big = self.doc()
+        big["catalog"]["catalog_version"] = 9
+        self.server.override[S.CATALOG_PATH] = json.dumps(self.key.sign_doc(big)).encode()
+        st.refresh()
+        # the launcher's update ships the revocation: the old key's catalogs are refused, its floor ignored
+        after = S.Store(self.lib, base=BASE, get=self.server, clock=self.clock, keys=keys)
+        self.assertIsNone(after.entries(self.savedata)[0])
+        self.assertEqual(after.floor(), 0)
+        self.assertEqual(after.refresh(force=True)["status"], "error")   # still signed by the revoked key
+        self.server.override[S.CATALOG_PATH] = json.dumps(new.sign_doc(self.doc())).encode()   # version 1, new key
+        self.assertEqual(after.refresh(force=True)["status"], "updated")
+        self.assertEqual(after.floor(), 1)
+
+    def test_the_release_key_and_the_catalog_key_stay_apart(self):
+        rel = self.keyfile([self.entry(self.key)])
+        cat = self.keyfile([self.entry(self.key)])
+        # a key that is a release key is never trusted for the catalog, even when listed there
+        self.assertEqual(S.trusted_keys(BASE, {}, keys_file=cat, release_file=rel), [])
+        # and the catalog's key can't sign a release: the update check trusts config/release_keys.json only
+        manifest = json.dumps({"format": 1, "version": "9.9.9"}).encode()
+        with self.assertRaises(T.ReleaseError):
+            T.verify_release(manifest, self.key.sign(manifest), T.trusted_keys())
+        self.assertNotEqual(os.path.abspath(S.KEYS_FILE), os.path.abspath(T.KEYS_FILE))
+
+    def test_keys_command(self):
+        f = self.keyfile([])
+        new = TestKey()
+        e = os.path.join(self.tmp, "entry.json")
+        with open(e, "w") as fh:
+            json.dump(self.entry(new, note="a rotation"), fh)
+        C.keys_cmd(f, add=e, log=QUIET)
+        C.keys_cmd(f, revoke=new.id, log=QUIET)
+        data = json.load(open(f))
+        self.assertEqual((data["keys"][0]["id"], data["keys"][0]["revoked"]), (new.id, True))
+        self.assertEqual(S.trusted_keys(BASE, {}, keys_file=f, release_file=os.path.join(self.tmp, "none.json")), [])
+
+    def test_no_private_key_in_the_repository(self):
+        import subprocess
+        files = subprocess.run(["git", "ls-files", "-z"], cwd=ROOT, capture_output=True).stdout.decode().split("\0")
+        for rel in files:
+            if not rel or rel.startswith(("patches/", "tests/data/")) or rel.endswith((".png", ".ico", ".zip")):
+                continue
+            try:
+                with open(os.path.join(ROOT, rel), "rb") as fh:
+                    data = fh.read(4 << 20)
+            except OSError:
+                continue
+            self.assertNotIn(b"PRIVATE" + b" KEY-----", data, rel)   # (spelt apart: this file is scanned too)
+        for k in json.load(open(S.KEYS_FILE, encoding="utf-8"))["keys"]:   # the shipped keys: none a test key
+            self.assertNotIn("test", (k.get("note") or "").lower(), k.get("id"))
+
+
 class Thumbnails(StoreBase):
     def test_fetched_checked_and_cached(self):
         st = self.store()

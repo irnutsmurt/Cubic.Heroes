@@ -96,15 +96,36 @@ def is_local(base):
     return urllib.parse.urlsplit(base).hostname in ("127.0.0.1", "localhost", "::1")
 
 
-def trusted_keys(base, env=None):
+def release_key_ids(path=None):
+    """the ids of every key in config/release_keys.json, revoked or not: never trusted for the catalog"""
+    import release_trust
+    try:
+        with open(path or release_trust.KEYS_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return set()
+    out = set()
+    for k in data.get("keys", []):
+        try:
+            out.add(release_trust.key_id(release_trust.public_key_from(k["ed25519"])))
+        except (KeyError, ValueError, TypeError, release_trust.ReleaseError):
+            pass
+    return out
+
+
+def trusted_keys(base, env=None, keys_file=None, release_file=None):
     """[(key id, 32-byte Ed25519 public key)] the catalog may be signed with: config/catalog_keys.json (the same form
-    as config/release_keys.json); a development copy on this computer may name another file (CUBICHEROES_STORE_KEYS)"""
+    as config/release_keys.json: several keys for a rotation; a revoked key is kept with "revoked": true and no
+    longer trusted). A key that is also a release key is never trusted here: the catalog and the software are signed
+    apart, so a catalog key can't sign an update and the release key can't sign a catalog. A development copy on
+    this computer may name another keys file (CUBICHEROES_STORE_KEYS)."""
     import release_trust
     env = os.environ if env is None else env
-    path = KEYS_FILE
-    if env.get(KEYS_ENV) and is_local(base):
+    path = keys_file or KEYS_FILE
+    if not keys_file and env.get(KEYS_ENV) and is_local(base):
         path = env[KEYS_ENV]
-    return release_trust.trusted_keys(path)
+    rel = release_key_ids(release_file)
+    return [(kid, pk) for kid, pk in release_trust.trusted_keys(path) if kid not in rel]
 
 
 def canonical(obj):
@@ -440,9 +461,12 @@ class Store:
                                 (": the saved catalog is shown" if have is not None else "."))
         try:
             cat, problems = parse_catalog(r.body, self.keys)
-            if have is not None and cat["catalog_version"] < have["catalog_version"]:
-                raise StoreError(f"it is older than the saved catalog (version {cat['catalog_version']} after "
-                                 f"{have['catalog_version']})")
+            floor = self.floor()
+            if have is not None:
+                floor = max(floor, have["catalog_version"])
+            if cat["catalog_version"] < floor:
+                raise StoreError(f"it is older than the catalog already seen (version {cat['catalog_version']} after "
+                                 f"{floor})")
             if have is not None and cat["catalog_version"] == have["catalog_version"]:
                 with open(self.catalog_path, "rb") as f:
                     if f.read() != r.body and canonical_doc(r.body) != canonical_doc_file(self.catalog_path):
@@ -454,6 +478,8 @@ class Store:
             return self._status("error", f"The new catalog was refused ({e})" +
                                 ("; the saved catalog is shown" if have is not None else "."))
         _write_atomic(self.catalog_path, r.body)
+        if cat["catalog_version"] >= self.floor():
+            self.state["floor"] = {"catalog_version": cat["catalog_version"], "key_id": cat["key_id"]}
         hd = {k.lower(): v for k, v in r.headers.items()}
         self.state.update(checked=now, fetched=now, status="updated", retry_after=0, etag=hd.get("etag", ""),
                           last_modified=hd.get("last-modified", ""), problems=problems[:50])
@@ -461,6 +487,16 @@ class Store:
         for p in problems[:10]:
             self.log("warning", f"store: {p}")
         return self._status("updated", "")
+
+    def floor(self):
+        """the highest catalog version accepted before (kept in state.json, so it holds across restarts and without
+        the cached catalog) -- while the key that signed it is still trusted: once that key is revoked, its catalogs
+        set no floor (a compromised key's inflated version can't lock the store out of the next real catalog)"""
+        f = self.state.get("floor") or {}
+        v = f.get("catalog_version")
+        if not isinstance(v, int) or f.get("key_id") not in {k for k, _ in self.keys}:
+            return 0
+        return v
 
     def _status(self, status, message):
         return {"status": status, "message": message, "checked": self.state.get("checked") or 0,
