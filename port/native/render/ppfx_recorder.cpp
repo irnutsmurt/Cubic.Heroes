@@ -223,6 +223,10 @@ uint64_t now_ns()
     return (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
 }
+// the recorder's own time (the report's recorder_ms) is sampled on one call in kTimedEvery and scaled: a clock read
+// costs ~1.2 us where the system clock is HPET, and one call in 16 (two reads each) cost the game thread 1.2-1.7 ms a
+// frame there (issue #2); one in 1,024 keeps the estimate over the millions of calls a run makes
+constexpr uint32_t kTimedEvery = 1024;
 
 // ---- the program shadow -----------------------------------------------------
 // Local memory's bytes as the calls made them: per word, the bytes and the
@@ -4455,7 +4459,7 @@ int other_thread_call(uint32_t addr, ppu_context* ctx, uint32_t tid, bool timed,
     }
     if (attribute(ctx)) second_producer(addr, tid);
     st.other_thread_calls++;
-    if (timed) st.rec_ns += 16 * (now_ns() - t0);
+    if (timed) st.rec_ns += kTimedEvery * (now_ns() - t0);
     return 0;
 }
 } }
@@ -4592,10 +4596,10 @@ extern "C" int ppfx_rec_observe(uint32_t addr, ppu_context* ctx)
         }
         return 0;
     }
-    // R6: the recorder's own time sampled (one call in 16, scaled) and the hot
+    // R6: the recorder's own time sampled (one call in kTimedEvery, scaled) and the hot
     // counters bumped without a locked add (the producer is their one writer)
     static uint32_t tick = 0;
-    const bool timed = (++tick & 15) == 0;
+    const bool timed = (++tick & (kTimedEvery - 1)) == 0;
     const uint64_t t0 = timed ? now_ns() : 0;
     Stats& st = stats();
     bump(st.calls);
@@ -4663,7 +4667,7 @@ extern "C" int ppfx_rec_observe(uint32_t addr, ppu_context* ctx)
     if (tid != S.tid) {
         if (attribute(ctx)) second_producer(addr, tid);
         st.other_thread_calls++;
-        if (timed) bump(st.rec_ns, 16 * (now_ns() - t0));
+        if (timed) bump(st.rec_ns, kTimedEvery * (now_ns() - t0));
         return 0;
     }
     // R6: the title's context from its first call on, not from PPFX's first
@@ -4679,7 +4683,7 @@ extern "C" int ppfx_rec_observe(uint32_t addr, ppu_context* ctx)
     // R7: the remaining command writers, the flush, labels, reference, waits
     if (r7() && S.ring_ctx && (uint32_t)ctx->gpr[3] == S.ring_ctx) {
         const int a7 = r7_call(addr, ctx);
-        if (a7 >= 0) { if (timed) bump(st.rec_ns, 16 * (now_ns() - t0)); return a7; }
+        if (a7 >= 0) { if (timed) bump(st.rec_ns, kTimedEvery * (now_ns() - t0)); return a7; }
     }
     // Other code's calls on the producer's thread set state too, at the same
     // entry points: PPFX's first frames after a load draw with some of it
@@ -4690,7 +4694,7 @@ extern "C" int ppfx_rec_observe(uint32_t addr, ppu_context* ctx)
     asp_resolve();
     if (asp_fn(addr)) {
         const int a = mode() || s_pw ? asp_call(addr, ctx) : 0;
-        if (timed) bump(st.rec_ns, 16 * (now_ns() - t0));
+        if (timed) bump(st.rec_ns, kTimedEvery * (now_ns() - t0));
         return a;
     }
     const int who = attribute(ctx);   // R7: computed here, past the calls that do not need it
@@ -4898,7 +4902,7 @@ extern "C" int ppfx_rec_observe(uint32_t addr, ppu_context* ctx)
     }
     }
     S.skipping = false;
-    if (timed) bump(st.rec_ns, 16 * (now_ns() - t0));
+    if (timed) bump(st.rec_ns, kTimedEvery * (now_ns() - t0));
     return act;
 }
 
@@ -4919,10 +4923,10 @@ extern "C" void ppfx_rec_exit(uint32_t addr, ppu_context* ctx)
     if (v.kind == 2 && v.addr == 0x006C6F88u) skv_exit(ctx);   // R6's verify: before the take-back
     if (v.kind == 2) {   // R6: the record built at a draw's return, timed (sampled) apart from the entries
         static uint32_t tick = 0;
-        const bool timed = (++tick & 15) == 0;
+        const bool timed = (++tick & (kTimedEvery - 1)) == 0;
         const uint64_t t0 = timed ? now_ns() : 0;
         asp_draw_exit(v);
-        if (timed) bump(stats().rec_exit_ns, 16 * (now_ns() - t0));
+        if (timed) bump(stats().rec_exit_ns, kTimedEvery * (now_ns() - t0));
         return;
     }
     if (v.kind == 3) { asp_probe_exit(v); return; }
