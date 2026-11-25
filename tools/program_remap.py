@@ -683,8 +683,12 @@ def main(argv=None):
                                       for x, (lo, hi, d) in sorted(mp.bracketed.items())}}
         with open(a.report, "w") as f:
             json.dump(rep, f, indent=1)
+    try:   # the checkout's own path when it can be one; another drive (Windows: C: and D:) has none
+        shown = os.path.relpath(out, ROOT)
+    except ValueError:
+        shown = os.path.abspath(out)
     print(f"[remap] wrote {len(written)} config files, port_aliases.h ({len(alias) - 1} names), port_addrs.inc "
-          f"({len(pairs) - 1} addresses) to {os.path.relpath(out, ROOT)}")
+          f"({len(pairs) - 1} addresses) to {shown}")
     if mp.unresolved:
         print(f"[remap] {len(mp.unresolved)} addresses unresolved -- review them by hand ({man_path}):")
         for x, w in sorted(mp.unresolved.items()):
