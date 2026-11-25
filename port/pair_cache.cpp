@@ -453,6 +453,58 @@ struct Init {
 
 using namespace paircache;
 
+/* For port/axis_sweep.cpp's check mode: one of the cache's operations done natively without calling game code (a freed
+ * algorithm is its field cleared): op 0 addOverlappingPair(a, b), 1 removeOverlappingPair(a, b, dispatcher), 2
+ * removeOverlappingPairsContainingProxy(a, dispatcher) -- the cache's virtuals checked to be the hashed cache's. 1 done
+ * (*ret what the function returns), 0 not possible that way: nothing written, or (op 2) what it wrote is the caller's
+ * to put back. ctx->gpr[3..6] are used. */
+extern "C" int dotheroes_paircache_simulate(ppu_context* ctx, int op, uint32_t self, uint32_t a, uint32_t b, uint32_t dispatcher,
+                                            uint32_t* ret)
+{
+    const uint32_t vt = r32(self);
+    if (op == 0 && code_of(vt, 0x08) != 0x00A4CD24u) return 0;
+    if (op >= 1 && code_of(vt, kVRemove) != kFnRemove) return 0;
+    if (op == 2 && (code_of(vt, 0x10) != 0x0091555Cu || r32(self + kGhost) || code_of(vt, kVClean) != kFnClean)) return 0;
+    t_simulate = true;
+    int r;
+    if (op == 2) {
+        r = remove_containing(ctx, self, a, dispatcher, r32((uint32_t)ctx->gpr[2] + kTocCounters)) > 0;
+        ctx->gpr[3] = 0;
+    } else {
+        ctx->gpr[3] = self; ctx->gpr[4] = a; ctx->gpr[5] = b; ctx->gpr[6] = dispatcher;
+        r = (op == 0 ? add_native : remove_native)(ctx) > 0;
+    }
+    t_simulate = false;
+    if (r && ret) *ret = (uint32_t)ctx->gpr[3];
+    return r;
+}
+
+/* For port/axis_sweep.cpp's check mode: 1 when the operation (op 0 addOverlappingPair(a, b), 1 removeOverlappingPair(a,
+ * b), 2 removeOverlappingPairsContainingProxy(a)) would write nothing beyond the cache, its arrays and the counters --
+ * the cache's virtuals Bullet's, no overlap filter or ghost callback, no growth, no algorithm to free -- so the check
+ * can run it the way the game does, through the cache's own virtual. */
+extern "C" int dotheroes_paircache_pure(ppu_context* ctx, int op, uint32_t self, uint32_t a, uint32_t b)
+{
+    (void)ctx;
+    const uint32_t vt = r32(self);
+    if (r32(self + kGhost)) return 0;
+    if (op == 0 && (code_of(vt, 0x08) != 0x00A4CD24u || r32(self + kFilter))) return 0;
+    if (op >= 1 && (code_of(vt, kVRemove) != kFnRemove || code_of(vt, kVClean) != kFnClean)) return 0;
+    if (op == 2) {
+        if (code_of(vt, 0x10) != 0x0091555Cu) return 0;
+        for (uint32_t i = 0; i < r32(self + kSize); i++) {
+            const uint32_t e = r32(self + kData) + kPairBytes * i;
+            if ((r32(e + kPairP0) == a || r32(e + kPairP1) == a) && r32(e + kPairAlg)) return 0;
+        }
+        return 1;
+    }
+    Pair p;
+    if (!ordered(a, b, p)) return 0;
+    const int32_t i = find(self, p.p0, p.p1, bt_hash(uid(p.p0), uid(p.p1)) & (r32(self + kCap) - 1));
+    if (op == 0) return i != kNull || r32(self + kSize) < r32(self + kCap);
+    return i == kNull || !r32(r32(self + kData) + kPairBytes * (uint32_t)i + kPairAlg);
+}
+
 /* The entry hooks (config/r8_hooks.json): btHashedOverlappingPairCache::addOverlappingPair (0x00A4CD24),
  * removeOverlappingPair (0x009144C8) and processAllOverlappingPairs (0x00914054); 0 declines (the lifted body runs). */
 extern "C" int dotheroes_paircache_add(ppu_context* ctx) { return run_op(0, ctx, add_native, func_00A4CD24); }

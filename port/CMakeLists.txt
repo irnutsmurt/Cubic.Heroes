@@ -312,6 +312,8 @@ target_sources(${PROJECT_NAME} PRIVATE phys_hooks.cpp)
 # Issue #2's experiment: Bullet's hashed pair cache natively, behind DOTHEROES_NATIVE_PAIRCACHE (config/r8_hooks.json's
 # hooks on its add, remove and scan; the lifted functions stay the default)
 target_sources(${PROJECT_NAME} PRIVATE pair_cache.cpp)
+# ... and its sweep and prune broadphase, behind DOTHEROES_NATIVE_SWEEP (hooks on addHandle, removeHandle, updateHandle)
+target_sources(${PROJECT_NAME} PRIVATE axis_sweep.cpp)
 # M8's credits on demand (config/m8_dev_credits.json, DOTHEROES_DEV_CREDITS): defines its hook and guard; a lift
 # without the hook references neither
 target_sources(${PROJECT_NAME} PRIVATE movie_hooks.cpp)
