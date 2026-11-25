@@ -53,6 +53,7 @@
 // waiting PPU thread.
 #include "phys_direct.h"
 #include "host_thread.h"
+#include "../program_addrs.h"   /* PA_RT(): v1.00's addresses of the game, for the program this build is of */
 
 #ifdef DOTHEROES_BULLET_CD
 #include "bullet_cd_task.h"
@@ -90,7 +91,8 @@ extern "C" int g_phys_direct = 0;
 
 namespace {
 
-constexpr uint32_t kElfCollision = 0xF63600, kElfSolver = 0xF8EC80;
+// the physics tasks' SPU programs, where the game's executable holds them (v1.01's: +0xD00): PA_RT, the program's own
+const uint32_t kElfCollision = PA_RT(0x00F63600u), kElfSolver = PA_RT(0x00F8EC80u);
 constexpr int kImageCollision = 4, kImageSolver = 5;   // the runtime's image ids, for the frame trace
 constexpr int kJobChunk = 64;     // the pool grows by this many jobs when every job is in use
 constexpr int kIdleManagers = 8;  // the table reuses idle entries once it holds this many
