@@ -106,7 +106,11 @@ class Formats(Base):
         self.assertEqual(player_keys.kind_of(self.put("EBOOT.elf", self.elf)), "elf")
         self.assertEqual(player_keys.kind_of(self.put("rpcs3.exe", b"MZ\x90\0")), "rpcs3")
         self.assertEqual(player_keys.kind_of(self.put("rpcs3-v0.0.43.AppImage", b"\x7fELF\2\1")), "rpcs3")
-        self.assertEqual(player_keys.kind_of(self.put("other.exe", b"MZ")), None)
+        self.assertEqual(player_keys.kind_of(self.put("other.exe", b"MZ")), "binary")
+        self.assertEqual(player_keys.kind_of(self.put("EBOOT.BIN", b"SCE\0" + rnd(400))), "self")
+        self.assertEqual(player_keys.kind_of(self.put("update.pkg", b"\x7fPKG" + rnd(400))), "pkg")
+        self.assertEqual(player_keys.kind_of(self.put("ps3keys/app-key-315", rnd(32))), "keyfile")
+        self.assertEqual(player_keys.kind_of(self.put("big.dat", rnd(player_keys.MAX_FILE + 1))), "binary")
         self.assertEqual(player_keys.kind_of(self.put("k.zip", b"PK\x03\x04")), "zip")
         self.assertEqual(player_keys.kind_of(self.dir), "folder")
         self.assertEqual(player_keys.kind_of(self.put("keys.txt", "APP 1 00 00\n")), "text")
@@ -195,6 +199,79 @@ class Matching(Base):
         missing = key_sources.Sources(rpcs3=os.path.join(self.dir, "no-rpcs3.exe"))
         with self.assertRaises(key_sources.NoProgram):
             key_sources.open_program(self.app, self.want, missing, work_dir=self.dir)
+
+
+class Issue13(Base):
+    """issue #13 (SteamOS, 0.2.0-beta.5): the keys file chosen was refused as "isn't a text file" and Install stayed
+    greyed out. What a player may choose as "the keys", each either used or named with what to choose instead --
+    through setup_pipeline.open_eboot, the launcher's probe and the install's decryption."""
+
+    def open(self, chosen, **kw):
+        import setup_pipeline
+        src = key_sources.Sources(chosen=chosen, **kw)
+        return setup_pipeline.open_eboot(self.app, src, want=self.want)
+
+    def refused(self, chosen, code, *words, **kw):
+        import setup_pipeline
+        with self.assertRaises(setup_pipeline.SetupError) as c:
+            self.open(chosen, **kw)
+        self.assertEqual(c.exception.code, code, str(c.exception))
+        for w in words:
+            self.assertIn(w, str(c.exception))
+        self.assertIn("Choose a keys file, a folder or ZIP of key files", str(c.exception))   # always what to do
+        self.assertNoKey(str(c.exception) + str(c.exception.details))
+        return str(c.exception)
+
+    def test_what_works(self):
+        z = os.path.join(self.dir, "ps3keys-master.zip")
+        with zipfile.ZipFile(z, "w") as f:
+            for name, data in self.ps3tools_files("ps3keys-master/").items():
+                f.writestr(name, data)
+        self.assertEqual(self.open(z)[1]["kind"], "zip")                      # a ZIP: beta.5's "isn't a text file"
+        for name, data in self.ps3tools_files().items():
+            self.put("ps3keys/" + name, data)
+        self.put("ps3keys/notes.txt", "APP 1 " + rnd(32).hex() + " " + rnd(16).hex() + "\n")
+        elf, how = self.open(os.path.join(self.dir, "ps3keys", "app-key-315"))   # one key file: its set beside it
+        self.assertEqual((elf, how["kind"]), (self.elf, "keyfile"))
+        text = f"APP 1 {self.erk.hex()} {self.riv.hex()}\n"
+        self.assertEqual(self.open(self.put("keys-utf16.txt", text.encode("utf-16")))[0], self.elf)   # "Unicode" text
+        self.assertEqual(self.open(self.put("keys-utf16be.txt", b"\xfe\xff" + text.encode("utf-16-be")))[0], self.elf)
+
+    def test_what_is_named(self):
+        msg = self.refused(self.put("EBOOT.BIN", make_self(make_elf([rnd(500)]), rnd(32), rnd(16))),
+                           "keys_unreadable", "EBOOT.BIN is the game's own program, still encrypted")
+        self.assertNotIn("isn't a text file", msg)
+        self.refused(self.put("eid_root_key", rnd(48)), "keys_unreadable", "eid_root_key isn't a keys file")
+        self.refused(self.put("UP0005.pkg", b"\x7fPKG" + rnd(400)), "keys_unreadable", "is a PS3 package")
+        self.refused(self.put("empty.txt", "# nothing\n"), "keys_empty", "empty.txt has no APP key", "APP 0x0001")
+        self.refused(self.keys_file("wrong.txt", {1: (rnd(32), rnd(16))}), "wrong_key",
+                     "The keys in wrong.txt don't open this game's program", "APP 0x0001")
+        self.refused(self.put("bad.txt", "APP 0001 zz 00\n"), "keys_unreadable", "Line 1 of bad.txt isn't a key")
+        # remembered (chosen before) or beside the disc: named with where it came from
+        disc = self.put("games/game.iso", b"iso")
+        self.put("games/keys.txt", "# nothing\n")
+        import setup_pipeline
+        with self.assertRaises(setup_pipeline.SetupError) as c:
+            setup_pipeline.open_eboot(self.app, key_sources.Sources(disc=disc), want=self.want)
+        self.assertIn("keys.txt (beside your disc) has no APP key", str(c.exception))
+        eb = self.put("old/EBOOT.BIN", b"SCE\0" + rnd(400))
+        with self.assertRaises(setup_pipeline.SetupError) as c:
+            setup_pipeline.open_eboot(self.app, key_sources.Sources(remembered=[eb]), want=self.want)
+        self.assertIn("EBOOT.BIN (where you chose your keys before) is the game's own program", str(c.exception))
+
+    def test_steamos_and_linux_paths(self):
+        """SteamOS: an ISO on the SD card, names with spaces, accents and capitals; EmuDeck's RPCS3 AppImage"""
+        disc = self.put("run/media/mmcblk0p1/Emulation/roms/ps3/3D Dot Game Héroes [BLUS-30490].iso", b"iso")
+        z = os.path.join(os.path.dirname(disc), "PS3Keys-Master.ZIP")
+        with zipfile.ZipFile(z, "w") as f:
+            for name, data in self.ps3tools_files().items():
+                f.writestr(name, data)
+        self.put("run/media/mmcblk0p1/Emulation/roms/ps3/KEYS/app-key-315", self.erk)
+        self.assertEqual(sorted(os.path.basename(p) for p in key_sources.beside(disc)), ["KEYS", "PS3Keys-Master.ZIP"])
+        elf, how = key_sources.open_program(self.app, self.want, key_sources.Sources(disc=disc))
+        self.assertEqual((elf, how["how"]), (self.elf, "beside the disc"))
+        for n in ("rpcs3.AppImage", "RPCS3-v0.0.43-20511-x86_64.AppImage", "rpcs3"):
+            self.assertEqual(player_keys.kind_of(self.put("Applications/" + n, b"\x7fELF\2\1\1" + rnd(60))), "rpcs3")
 
 
 if __name__ == "__main__":

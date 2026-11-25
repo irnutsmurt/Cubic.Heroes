@@ -2164,6 +2164,42 @@ static void step_row(int n, const char* name, bool ok, const std::string& value,
     card_end();
 }
 
+// issue #13 (0.2.0-beta.6): what keeps Install from starting, each with what to do -- the disc, its disc key, the
+// program's keys, the space -- right above the button, so a greyed-out Install is never left unexplained
+static void install_blockers(bool disc_ok, bool keys_ok, bool space_ok)
+{
+    title("Install can't start yet", 22);
+    auto why = [](ImU32 c, const std::string& s) { text_col(c, "- %s", s.c_str()); };
+    if (!disc_ok) {
+        if (g_wiz.probing_disc) why(col::dim, "Your disc is being checked...");
+        else if (g_wiz.disc.empty()) why(col::danger, "Your disc: choose an ISO of the US release (BLUS-30490), or the "
+                                                      "disc's folder (Your disc, Choose...).");
+        else if (g_wiz.needs_key && g_wiz.disc_key.empty())
+            why(col::danger, "This disc image is encrypted: choose its disc key -- a .dkey or IRD file -- or type it "
+                             "(Its disc key).");
+        else why(col::danger, (g_wiz.disc_err.empty() ? std::string("Your disc couldn't be checked.") : g_wiz.disc_err) +
+                              " (Your disc)");
+    }
+    if (disc_ok && !keys_ok) {
+        if (g_wiz.probing_keys) why(col::dim, "Looking for the keys to the game's program...");
+        else if (g_wiz.keys_code == "keys_missing" || g_wiz.keys_err.empty())
+            why(col::danger, "The game's program needs its keys, and none were found beside your disc or where you "
+                             "chose them before. Put your keys beside the disc, or choose them: a keys file, a folder or "
+                             "ZIP of key files, an EBOOT.elf you decrypted, or your RPCS3 (Its keys).");
+        else why(col::danger, g_wiz.keys_err + " (Its keys)");
+    } else if (!disc_ok) {
+        why(col::dim, "The keys are looked for once the disc is checked.");
+    }
+    if (!space_ok) {
+        if (!g_wiz.space_err.empty()) why(col::danger, g_wiz.space_err + " (Where to install it)");
+        else if (g_wiz.space.is_null()) why(col::dim, "The free space is being checked...");
+        else why(col::danger, "Not enough free space in " + g_wiz.folder + ": " + human_bytes(g_wiz.space["needed"].num()) +
+                              " needed, " + human_bytes(g_wiz.space["free"].num()) + " free. Choose another folder, or "
+                              "free some space (Where to install it).");
+    }
+    ImGui::Dummy(ImVec2(0, S(4)));
+}
+
 static void uninstall_open();
 static void remove_launcher_open();
 static void same_line_fits(float next_w);
@@ -2293,6 +2329,7 @@ static void page_manage()
     });
     ImGui::Dummy(ImVec2(0, S(6)));
     const bool ready = disc_ok && keys_ok && space_ok;
+    if (!ready) install_blockers(disc_ok, keys_ok, space_ok);   // issue #13: never a greyed button alone
     const bool resume = g_st.info["kind"].str() == "partial" && g_wiz.folder == install_dir();
     if (big_button(resume ? "Continue the install" : (kind == "slots" ? "Repair from the disc" : "Install"),
                    ImVec2(S(360), S(64)), Kind::Primary, ready)) {
@@ -2329,7 +2366,6 @@ static void page_manage()
             refresh_info();
         });
     }
-    if (!ready) text_col(col::dim, "Each step above must be checked first.");
     if (kind == "slots") {
         location_section();
         shaders_section();

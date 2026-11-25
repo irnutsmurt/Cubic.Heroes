@@ -327,15 +327,37 @@ def open_eboot(eboot_bytes, keys=None, elf=None, want=None, work_dir=None):
         if e.code == "keys_missing":
             raise SetupError("No keys for the game's program were found. Choose " + KEYS_CHOICES + ".",
                              "keys_missing", need.strip() or None)
-        mine = e.tried[0] if e.tried and e.tried[0]["how"] == "chosen" and len(e.tried) == 1 else None
-        if mine and mine.get("status") == "unreadable":
-            raise SetupError("Can't read the keys file you chose.", "keys_unreadable", tried)
-        if mine and mine.get("status") == "malformed":
-            raise SetupError(f"The keys file has a line that isn't a key (line {mine.get('line') or '?'}).",
-                             "keys_unreadable", tried)
-        if mine and mine.get("status") in ("empty", "not_source"):
-            raise SetupError("The keys file you chose has no keys for the game's program.", "keys_empty", tried)
-        raise SetupError("The keys don't open this game's program." + need, "wrong_key", tried)
+        # issue #13: the first source tried -- the one chosen, else the one remembered, else the first beside the disc
+        # -- is named: which file, where it came from, what it is, and what to choose instead
+        mine = next((t for t in e.tried if t["how"] != "RPCS3"), None)
+        rp = next((t for t in e.tried if t["how"] == "RPCS3"), None)
+        if rp and (mine is None or mine.get("status") == "rpcs3"):
+            mine = rp   # RPCS3 was the source (chosen, or the only one): its own failure is what to say
+        status = mine.get("status") if mine else None
+        name = os.path.basename(mine["source"]) if mine else ""
+        where = {"remembered": " (where you chose your keys before)", "beside the disc": " (beside your disc)"}.get(
+            mine["how"] if mine else "", "")
+        it = name + where
+        choose = " Choose " + KEYS_CHOICES + "."
+        needs = " It needs " + ", ".join(e.need) + "." if e.need else ""
+        reason = mine["result"].split("(")[-1].rstrip(")") if mine else ""
+        said = {
+            "unreadable": (f"Can't read {it} ({reason}).", "keys_unreadable"),
+            "malformed": (f"Line {mine.get('line') or '?'} of {it} isn't a key." if mine else "", "keys_unreadable"),
+            "not_text": (f"{it} isn't a keys file: it isn't text, a ZIP, a folder of key files or an EBOOT.elf.",
+                         "keys_unreadable"),
+            "encrypted_program": (f"{it} is the game's own program, still encrypted: the keys are what opens it, not "
+                                  "the program itself.", "keys_unreadable"),
+            "package": (f"{it} is a PS3 package (.pkg), not keys.", "keys_unreadable"),
+            "not_source": (f"{it} isn't a keys file.", "keys_unreadable"),
+            "empty": (f"{it} has no APP key for the game's program." + needs, "keys_empty"),
+            "no_match": (f"The keys in {it} don't open this game's program." + needs, "wrong_key"),
+            "rpcs3_failed": (f"Your RPCS3 couldn't decrypt the game's program ({mine['result'] if mine else ''}).",
+                             "wrong_key"),
+        }
+        if status in said:
+            raise SetupError(said[status][0] + choose, said[status][1], tried)
+        raise SetupError("The keys found don't open this game's program." + needs + choose, "wrong_key", tried)
 
 
 def decrypt_eboot(eboot_bytes, keys=None, elf=None, want=None, work_dir=None):

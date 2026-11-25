@@ -151,7 +151,7 @@ def from_files(files):
 
 def _text_or_none(data):
     try:
-        return data.decode("utf-8-sig")
+        return data.decode("utf-16") if data[:2] in (b"\xff\xfe", b"\xfe\xff") else data.decode("utf-8-sig")
     except UnicodeDecodeError:
         return None
 
@@ -182,6 +182,19 @@ def load_folder(path):
     return k
 
 
+def load_key_set(path):
+    """one file of a folder of binary key files, chosen: the key files beside it (only files named as key files, in
+    that folder alone -- nothing else of the folder is read)"""
+    d = os.path.dirname(os.path.abspath(path))
+    files = {}
+    for n in os.listdir(d):
+        p = os.path.join(d, n)
+        if KEY_FILE.match(n) and os.path.isfile(p) and os.path.getsize(p) <= MAX_FILE:
+            with open(p, "rb") as f:
+                files[n] = f.read()
+    return from_files(files)
+
+
 def load_zip(path):
     """a ZIP archive of key files or a keys file, read in memory; members over the size limits are skipped"""
     k = Keyring()
@@ -208,8 +221,18 @@ def load_zip(path):
 
 # ---------------- any source ----------------
 
+KEY_FILE = re.compile(r"(?i)^[a-z0-9]+[-_](key|iv|pub|priv|ctype)[-_].+$|^gpkg[-_]key$")
+
+
+def is_key_file(path):
+    """a single file of a folder of binary key files (app-key-315, app-iv-315, ...): its folder is the source"""
+    return KEY_FILE.match(os.path.basename(path)) is not None
+
+
 def kind_of(path):
-    """'elf' (a decrypted program), 'zip', 'folder', 'rpcs3' (an RPCS3 program), 'text', or None"""
+    """what a path the player chose is: 'elf' (a decrypted program), 'zip', 'folder', 'rpcs3' (an RPCS3 program),
+    'text' (text or a small file that may be one), 'keyfile' (one file of a folder of binary key files), 'self' (a
+    program still encrypted -- the disc's EBOOT.BIN), 'pkg' (a PS3 package), 'binary' (anything else), or None"""
     if os.path.isdir(path):
         return "folder"
     if not os.path.isfile(path):
@@ -222,20 +245,38 @@ def kind_of(path):
     if head == b"\x7fELF":
         return "elf"
     if head[:2] == b"MZ":
-        return "rpcs3" if "rpcs3" in base else None
+        return "rpcs3" if "rpcs3" in base else "binary"
     if head == b"PK\x03\x04":
         return "zip"
+    if head == b"SCE\0":
+        return "self"
+    if head == b"\x7fPKG":
+        return "pkg"
+    if is_key_file(path) and os.path.getsize(path) <= MAX_FILE:
+        return "keyfile"
     if os.path.getsize(path) <= MAX_FILE:
         return "text"
-    return None
+    return "binary"
+
+
+def read_text(path):
+    """a text keys file's text: UTF-8 (with or without a BOM), or UTF-16 with its BOM (as some editors save "Unicode"
+    text). UnicodeDecodeError for anything else."""
+    with open(path, "rb") as f:
+        data = f.read(MAX_FILE + 1)
+    if data[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        return data.decode("utf-16")
+    return data.decode("utf-8-sig")
 
 
 def load(path):
-    """the keys of a text keys file, a key folder or a ZIP -> Keyring (OSError, UnicodeDecodeError or KeysError)"""
+    """the keys of a text keys file, a key folder (or one of its files) or a ZIP -> Keyring (OSError,
+    UnicodeDecodeError or KeysError)"""
     kind = kind_of(path)
     if kind == "folder":
         return load_folder(path)
+    if kind == "keyfile":
+        return load_key_set(path)
     if kind == "zip":
         return load_zip(path)
-    with open(path, encoding="utf-8-sig") as f:
-        return parse(f.read())
+    return parse(read_text(path))

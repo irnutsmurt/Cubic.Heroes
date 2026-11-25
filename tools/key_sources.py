@@ -133,13 +133,18 @@ def open_program(eboot, want, sources, work_dir=None):
                     if hashlib.sha256(data).hexdigest() == want:
                         return data, rec
                 rec["result"], rec["status"] = "not this game's program", "no_match"
-            elif kind in ("text", "folder", "zip"):
-                ring = player_keys.load(path)
+            elif kind in ("text", "folder", "zip", "keyfile"):
+                ring = player_keys.load(path)      # reading errors: the source's (below)
                 if not ring:
                     rec["result"], rec["status"] = "no keys in it", "empty"
                 else:
                     merged.merge(ring)
-                    elf = _try_ring(eboot, ring, want)
+                    try:
+                        elf = _try_ring(eboot, ring, want)
+                    except self_decrypt.MissingKeys:
+                        raise
+                    except ValueError:             # the program's own problem, not the keys file's
+                        elf = None
                     if elf is not None:
                         return elf, rec
                     rec["result"], rec["status"] = "its keys don't open this program", "no_match"
@@ -147,13 +152,19 @@ def open_program(eboot, want, sources, work_dir=None):
                 sources.rpcs3 = path           # RPCS3 chosen as the source: tried last, below
                 rec["result"], rec["status"] = "RPCS3 (tried last)", "rpcs3"
             else:
-                rec["result"], rec["status"] = "not a key source", "not_source"
+                rec["result"], rec["status"] = {
+                    "self": ("the game's program itself, still encrypted -- not its keys", "encrypted_program"),
+                    "pkg": ("a PS3 package, not keys", "package"),
+                }.get(kind, ("not a keys file (not text, a ZIP, a folder of key files or an EBOOT.elf)", "not_text"))
         except self_decrypt.MissingKeys as e:
             need = e.need
             rec["result"], rec["status"] = "its keys don't open this program (no " + ", ".join(e.need) + ")", "no_match"
         except player_keys.KeysError as e:
             rec["result"], rec["status"], rec["line"] = f"can't be read: {e}", "malformed", e.line
-        except (OSError, UnicodeDecodeError, ValueError) as e:
+        except UnicodeDecodeError:
+            rec["result"], rec["status"] = "not a keys file (not text, a ZIP, a folder of key files or an EBOOT.elf)", \
+                "not_text"
+        except (OSError, ValueError) as e:
             rec["result"], rec["status"] = f"can't be read ({type(e).__name__})", "unreadable"
         tried.append(rec)
     if merged and sum(1 for t in tried if t["kind"] in ("text", "folder", "zip")) > 1:
