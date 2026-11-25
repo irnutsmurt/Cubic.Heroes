@@ -134,6 +134,13 @@ class Paths:
         self.eboot_bin = os.path.join(self.disc, "PS3_GAME", "USRDIR", "EBOOT.BIN")
         self.elf = os.path.join(self.disc, "PS3_GAME", "USRDIR", "EBOOT.elf")
         self.extracted = os.path.join(self.disc, ".extracted")   # the extraction finished
+        self.official = os.path.join(self.data, "official")      # official content: <id>/ each, as Sony lays it out
+
+    def program_elf(self, program=None):
+        """the decrypted program a build is made from: the disc's, or an official update's (its USRDIR/EBOOT.elf)"""
+        if is_base(program):
+            return os.path.join(self.disc, "PS3_GAME", "USRDIR", "EBOOT.elf")
+        return os.path.join(self.official, program, "USRDIR", "EBOOT.elf")
 
 
 # What a lift is made from (M9.1): ps3recomp's tools, the configuration they read, and this project's lifting
@@ -144,11 +151,16 @@ NOT_LIFT_CONFIG = {"release_keys.json", "settings_schema.json",   # the launcher
                    "disc_manifest.json"}   # the disc's file list (beta.5): what is extracted, not how it is lifted
 
 
-def tool_fingerprint(*names):
-    """the code of the tools a step runs, and the configuration they read"""
+def tool_fingerprint(*names, program=None):
+    """the code of the tools a step runs, and the configuration they read (a program's own folder too, when it has
+    one: the disc's program without config/programs/<base>/ has exactly the fingerprint it had before programs)"""
     h = hashlib.sha1()
     files = []
-    for d, exts in ((ps3_tools(), (".py",)), (config_dir(), (".json",))):
+    dirs = [(ps3_tools(), (".py",)), (config_dir(), (".json",))]
+    own = os.path.join(programs_dir(), program or BASE_PROGRAM)
+    if os.path.isdir(own):
+        dirs.append((own, (".json",)))
+    for d, exts in dirs:
         files += [os.path.join(d, n) for n in sorted(os.listdir(d)) if n.endswith(exts) and n not in NOT_LIFT_CONFIG]
     files += [os.path.join(ROOT, "tools", n) for n in LIFT_TOOLS]
     sn = os.path.join(ROOT, "tools", "spu_native")
@@ -161,12 +173,78 @@ def tool_fingerprint(*names):
                 h.update(fh.read())
     for n in names:
         h.update(n.encode())
+    if not is_base(program):
+        h.update(b"\0program\0" + program.encode())
     return h.hexdigest()
 
 
-def lift_id(elf_sha):
+def lift_id(elf_sha, program=None):
     """the lift's folder name: its two steps' fingerprints (the same tools and program: the same lift)"""
-    return hashlib.sha1((tool_fingerprint("recomp", elf_sha) + tool_fingerprint("spu", elf_sha)).encode()).hexdigest()[:16]
+    return hashlib.sha1((tool_fingerprint("recomp", elf_sha, program=program) +
+                         tool_fingerprint("spu", elf_sha, program=program)).encode()).hexdigest()[:16]
+
+
+# ---------------- the game's programs (beta.6: the disc's v1.00 and the official v1.01 update's) ----------------
+# A program's address-tied configuration (the lift's hooks, observers, traps and patches; the SPU images' relocation,
+# entry hooks and exclusions) is config/programs/<id>/; the disc's program keeps config/ itself (each file in
+# config/programs/<base>/ first when it is there). Another program needs every one of its files in its own folder:
+# nothing of v1.00's is ever used for it. Its program.json may give the port's compile defines ("defines") -- the
+# port's guest addresses for that program (port/program_addrs.h).
+BASE_PROGRAM = "BLUS30490-01.00"
+PROGRAM_FILES = ("sjlj.json", "insn_patches.json", "r8_hooks.json", "audio_hooks.json", "m8_native_movie.json",
+                 "r7_native_hooks.json", "excluded_code.json", "spu_relocatable.json", "spu_entry_hooks.json")
+
+
+def programs_dir():
+    return os.path.join(config_dir(), "programs")
+
+
+def is_base(program):
+    return program in (None, BASE_PROGRAM)
+
+
+def program_file(name, program=None):
+    """the path of one of a program's configuration files"""
+    own = os.path.join(programs_dir(), program or BASE_PROGRAM, name)
+    if os.path.isfile(own) or not is_base(program):
+        return own
+    return os.path.join(config_dir(), name)
+
+
+def program_info(program=None):
+    """a program's program.json ({} for the disc's when it has none); another program without its folder or a file
+    of its configuration: SetupError(program_unsupported)"""
+    d = os.path.join(programs_dir(), program or BASE_PROGRAM)
+    if not is_base(program):
+        missing = [n for n in PROGRAM_FILES if not os.path.isfile(os.path.join(d, n))]
+        if not os.path.isdir(d) or missing:
+            raise SetupError(f"This version of Cubic.Heroes can't build the game's {program} program yet.",
+                             "program_unsupported", "missing: " + ", ".join(missing or [d]))
+    try:
+        with open(os.path.join(d, "program.json"), encoding="utf-8") as f:
+            info = json.load(f)
+    except FileNotFoundError:
+        info = {}
+    except (OSError, ValueError) as e:
+        raise SetupError(f"The configuration of the game's {program or BASE_PROGRAM} program is damaged.",
+                         "program_unsupported", repr(e)) from None
+    if not isinstance(info, dict) or not all(isinstance(x, str) and x.startswith("-D")
+                                             for x in info.get("defines", [])) or \
+            not isinstance(info.get("spu_native", {}), dict):
+        raise SetupError(f"The configuration of the game's {program or BASE_PROGRAM} program is damaged.",
+                         "program_unsupported", "program.json: defines must be -D flags")
+    return info
+
+
+def program_pin(program):
+    """the SHA-256 of a program's decrypted ELF, as config/game_version.json records it"""
+    v = version_info()
+    if is_base(program):
+        return (v.get("decrypted_elf") or {}).get("sha256")
+    up = v.get("update") or {}
+    if program == f"{v.get('title_id')}-{up.get('app_ver')}":
+        return (up.get("decrypted_elf") or {}).get("sha256")
+    return None
 
 
 def run_tool(script, args, log, code="lift_failed"):
@@ -497,7 +575,7 @@ def decrypt(paths, keys=None, elf=None):
     os.replace(tmp, paths.elf)
 
 
-def recomp(paths, log):
+def recomp(paths, log, program=None):
     t = ps3_tools()
     out = os.path.join(paths.gen, "out") + os.sep
     rec = os.path.join(paths.gen, "recompiled") + os.sep
@@ -510,7 +588,7 @@ def recomp(paths, log):
              [paths.elf, os.path.join(out, "EBOOT.functions.json"), fixed], log)
     run_tool(os.path.join(t, "ppu_lifter.py"),
              [paths.elf, "--functions", fixed, "--hle-stubs", os.path.join(out, "EBOOT.imports.json"),
-              *lift_options(), "-o", rec], log)
+              *lift_options(program), "-o", rec], log)
 
 
 # The release lift, as tools/r8_lift.sh makes it (docs/NATIVE_R8.md): the
@@ -526,35 +604,35 @@ LIFT_CONFIG = [("--sjlj", "sjlj.json"), ("--insn-patches", "insn_patches.json"),
 LIFT_FLAGS = ["--chunks", PPU_CHUNKS, "--promote-leaf"]
 
 
-def excluded_spu_images():
+def excluded_spu_images(program=None):
     """the SPU images config/excluded_code.json names: code the game never runs here (FMOD's), not lifted"""
-    with open(os.path.join(config_dir(), "excluded_code.json")) as f:
+    with open(program_file("excluded_code.json", program)) as f:
         return list(json.load(f).get("spu_images", []))
 
 
-def lift_options():
-    c = config_dir()
-    return [a for opt, f in LIFT_CONFIG for a in (opt, os.path.join(c, f))] + LIFT_FLAGS
+def lift_options(program=None):
+    """the lift's configuration: the program's own files (tools/r8_lift.sh's for the disc's program)"""
+    return [a for opt, f in LIFT_CONFIG for a in (opt, program_file(f, program))] + LIFT_FLAGS
 
 
-def spu(paths, log):
+def spu(paths, log, program=None):
     t = ps3_tools()
     spu_dir = os.path.join(paths.gen, "spu")
     if os.path.isdir(spu_dir):
         shutil.rmtree(spu_dir)
     images = os.path.join(spu_dir, "images")
     run_tool(os.path.join(t, "extract_spu_images.py"), [paths.elf, "--output", images], log)
-    excluded = excluded_spu_images()   # FMOD's SPU programs (M5): not lifted
+    excluded = excluded_spu_images(program)   # FMOD's SPU programs (M5): not lifted
     reloc = []
-    with open(os.path.join(config_dir(), "spu_relocatable.json")) as f:
+    with open(program_file("spu_relocatable.json", program)) as f:
         for img in json.load(f)["images"]:
             if img not in excluded:
                 reloc += ["--relocatable", f"{img}=0x{spu_text_ea(paths.elf, os.path.join(images, img + '.elf')):08X}"]
     run_tool(os.path.join(t, "build_spu_workloads.py"),
              ["--images", images, "--lifted", spu_dir, "--out", os.path.join(spu_dir, "spu_workloads.c"),
-              "--constructor", "--relift", "--entry-hooks", os.path.join(config_dir(), "spu_entry_hooks.json"),
+              "--constructor", "--relift", "--entry-hooks", program_file("spu_entry_hooks.json", program),
               *reloc, *[a for img in excluded for a in ("--exclude", img)]], log)   # entry hooks: native code for hot SPU routines (the map packs' inflate)
-    spu_native(paths, log)
+    spu_native(paths, log, program)
 
 
 # The SPU tasks that run as native code generated from the player's own lift (port/native/spu_native.h):
@@ -567,17 +645,23 @@ FFMPEG_FILES = (["avutil-61.dll", "avcodec-63.dll", "avformat-63.dll"] if os.nam
                                                                                  "FFmpeg-LGPL-2.1.txt"]
 
 
-def spu_native(paths, log):
+def spu_native(paths, log, program=None):
     """gen/spu_native/<task>_gen.cpp from gen/spu: tools/gen_spu_native.py on each task's lift and image. An
     image that is not the one its configuration describes (another executable) is skipped with a note: the
-    build then compiles the stub and the lifted tasks run."""
+    build then compiles the stub and the lifted tasks run. An official update's program (beta.6, the owner's
+    one-native-architecture rule) must have every native task: without them its build is refused, never made
+    with the stub."""
     t = os.path.join(ROOT, "tools")
     out = os.path.join(paths.gen, zig_build.SPU_NATIVE_DIR)
     if os.path.isdir(out):
         shutil.rmtree(out)
     os.makedirs(out)
     made = []
-    for name, image in SPU_NATIVE:
+    # an official update's program names its own images (program.json "spu_native": {task: image}): its tasks may
+    # sit elsewhere in its program
+    images = dict(SPU_NATIVE)
+    images.update({k: v for k, v in (program_info(program).get("spu_native") or {}).items() if k in images})
+    for name, image in images.items():
         spu_dir = os.path.join(paths.gen, "spu")
         args = [os.path.join(t, "spu_native", name + ".py"), os.path.join(spu_dir, image, "spu_recomp.c"),
                 os.path.join(spu_dir, "images", image + ".elf"), os.path.join(t, "spu_native_task.cpp.in"),
@@ -590,6 +674,9 @@ def spu_native(paths, log):
                 log(f"spu_native: {name} not generated ({e}); its lifted task runs")
     if len(made) != len(SPU_NATIVE):   # all or none: the build compiles both or the stub
         shutil.rmtree(out)
+        if not is_base(program):
+            raise SetupError(f"The game's {program} program can't be built with its native SPU tasks.",
+                             "program_unsupported", "native SPU tasks made: " + (", ".join(made) or "none"))
 
 
 def finish(paths, log):
@@ -620,11 +707,11 @@ def source_stamp(source):
 
 # ---------------- the whole thing ----------------
 
-def build_inputs(gen, cache, lid):
+def build_inputs(gen, cache, lid, defines=()):
     """what a build is made of, as one fingerprint: the lift, the objects (each named by its own fingerprint:
     source, flags, headers, compiler) and the libraries and linker -- equal inputs, an equal game"""
     zig = zig_build.find_zig()
-    jobs = zig_build.game_jobs(zig_build.Sources(), gen, cache, zig)
+    jobs = zig_build.game_jobs(zig_build.Sources(), gen, cache, zig, defines=defines)
     h = hashlib.sha1(lid.encode())
     for name in sorted(os.path.basename(j[1]) for j in jobs):
         h.update(name.encode() + b"\n")
@@ -633,14 +720,18 @@ def build_inputs(gen, cache, lid):
 
 
 def run(install, source=None, keys=None, elf=None, progress=None, log=None, skip=None, full=False, out_dir=None,
-        keep_objects=(), resume=False, unchanged_inputs=None, disc_key=None):
+        keep_objects=(), resume=False, unchanged_inputs=None, disc_key=None, program=None):
     """Convert (source given) or rebuild (source None: the install's own copy of the disc) the game into out_dir,
     a staged build slot of `install` (tools/install_layout.py; the worker records, checks and activates it).
     keys / elf: how EBOOT.BIN is decrypted. resume: the disc's steps a previous run of the same disc finished
     are not done again (an interrupted install taken up again). full: everything again, the lift and every
-    object. keep_objects: the objects the install's kept builds link. Returns what the build is made of: the
-    game's path, its lift, its objects, its shader cache's id, the version that made it."""
+    object. keep_objects: the objects the install's kept builds link. program: the game's program the build is
+    made from -- None, the disc's; an official update's id, its decrypted program in data/official/<id>/ (the
+    installer's: tools/worker.py op_game_update), checked against its pin, with its own configuration. Returns what
+    the build is made of: the game's path, its lift, its objects, its shader cache's id, the version that made it,
+    the program."""
     from version import VERSION
+    pinfo = program_info(program)   # another program without its configuration: refused before anything is done
     paths = Paths(install, out_dir=out_dir)
     zig_build.use_install(paths.install)   # Zig's own caches in this install's data/cache, from the first Zig run on
     progress = progress or (lambda s, f, m: None)
@@ -701,8 +792,21 @@ def run(install, source=None, keys=None, elf=None, progress=None, log=None, skip
         for s in ("verify", "extract", "decrypt"):
             skip(s)
 
-    elf_sha = stamps.get("decrypt") or info.get("elf_sha256") or sha256_file(paths.elf)
-    lid = lift_id(elf_sha)
+    if is_base(program):
+        elf_sha = stamps.get("decrypt") or info.get("elf_sha256") or sha256_file(paths.elf)
+    else:   # an official update's program: the disc's copy stays the game's files; the update's program is lifted
+        if not os.path.exists(paths.extracted):
+            raise SetupError("This install has no copy of the disc: choose your disc image to set it up again.",
+                             "no_disc_copy")
+        paths.elf = paths.program_elf(program)
+        if not os.path.isfile(paths.elf):
+            raise SetupError(f"The game's {program} program isn't prepared in this install.", "update_missing",
+                             paths.elf)
+        elf_sha = sha256_file(paths.elf)
+        if elf_sha != program_pin(program):
+            raise SetupError(f"The game's {program} program in this install isn't the one expected: it may be "
+                             "damaged. Install the update again.", "update_damaged", f"SHA-256 {elf_sha}")
+    lid = lift_id(elf_sha, program)
     paths.gen = os.path.join(paths.gen_root, lid)
     done = os.path.join(paths.gen, "done.json")
     if os.path.exists(done) and not full:
@@ -714,12 +818,21 @@ def run(install, source=None, keys=None, elf=None, progress=None, log=None, skip
         os.makedirs(paths.gen)
         for step, fn in (("recomp", recomp), ("spu", spu)):
             progress(step, 0.0, STEP_NAMES[step])
-            fn(paths, log)
+            fn(paths, log, program)
         with open(done, "w") as f:
-            json.dump({"lift": lid, "elf_sha256": elf_sha, "version": VERSION}, f)
-    save(elf_sha256=elf_sha, lift=lid)
+            json.dump(dict({"lift": lid, "elf_sha256": elf_sha, "version": VERSION},
+                           **({} if is_base(program) else {"program": program})), f)
+    if is_base(program):
+        save(elf_sha256=elf_sha, lift=lid)
+    else:   # the disc's program stays the install's own record (a repair, the v1.00 build); the update's beside it
+        progs = dict(info.get("programs") or {})
+        progs[program] = {"elf_sha256": elf_sha, "lift": lid}
+        save(programs=progs)
 
-    inputs = build_inputs(paths.gen, paths.cache, lid)
+    # the program's own defines; an official update's binary is told which program it is (port/main.cpp refuses a
+    # build.cfg naming another one; the disc's program is the port's default)
+    defines = tuple(pinfo.get("defines", ())) + (() if is_base(program) else (f'-DDOTHEROES_PROGRAM_ID="{program}"',))
+    inputs = build_inputs(paths.gen, paths.cache, lid, defines)
     if unchanged_inputs and inputs == unchanged_inputs and not full:
         skip("build")
         skip("finish")
@@ -731,9 +844,9 @@ def run(install, source=None, keys=None, elf=None, progress=None, log=None, skip
     progress("build", 0.0, STEP_NAMES["build"])
     used = []
     zig_build.build_game(paths.gen, paths.exe, paths.cache, progress=lambda f, m: progress("build", f, m), log=log,
-                         keep=set(keep_objects), used_out=used, install=paths.install)
+                         keep=set(keep_objects), used_out=used, install=paths.install, defines=defines)
     progress("finish", 0.0, STEP_NAMES["finish"])
     finish(paths, log)
     progress("finish", 1.0, "Done")
     return {"exe": paths.exe, "lift": lid, "objects": used, "shader_cache": zig_build.link_fingerprint()[:16],
-            "version": VERSION, "inputs": inputs}
+            "version": VERSION, "inputs": inputs, "program": program or BASE_PROGRAM}

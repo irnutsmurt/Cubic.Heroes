@@ -352,19 +352,22 @@ def headers_fingerprint(src, gen_ppu):
     return h.digest()
 
 
-def game_jobs(src, gen_dir, obj_dir, zig, platform=HOST):
+def game_jobs(src, gen_dir, obj_dir, zig, platform=HOST, defines=()):
     """(source, object, compiler, flags) for everything the player compiles. Objects are
-    named by a fingerprint of source + flags + compiler + headers: existing means current."""
+    named by a fingerprint of source + flags + compiler + headers: existing means current.
+    defines: the game's program's own -D flags for the port's sources (an official update's program:
+    tools/setup_pipeline.py program_info) -- in their flags, so in their objects' names; none for the disc's."""
     gen_ppu, gen_spu = os.path.join(gen_dir, "recompiled"), os.path.join(gen_dir, "spu")
     inc = src.includes(gen_ppu)
+    port_flags = PORT_FLAGS + list(defines)   # the port's flags, with the program's
     # the prebuilt's configuration (game_defines), after the fixed flags; in the
     # fingerprint, so a change of configuration recompiles everything
     cpu = ["-mcpu=" + host_cpu(zig)] + [d for d in game_defines(src.lib_dir) if d not in COMMON]
     common = _zig_version(zig).encode() + TARGETS[platform].encode() + headers_fingerprint(src, gen_ppu)
     groups = []
-    groups += [(os.path.join(src.port, f), "c++", PORT_FLAGS) for f in PORT_SOURCES]
-    groups += [(os.path.join(src.ps3, f), "c++", PORT_FLAGS) for f in SCAFFOLD]
-    groups.append((src.nids, "c++", PORT_FLAGS))
+    groups += [(os.path.join(src.port, f), "c++", port_flags) for f in PORT_SOURCES]
+    groups += [(os.path.join(src.ps3, f), "c++", port_flags) for f in SCAFFOLD]
+    groups.append((src.nids, "c++", port_flags))
     groups += [(os.path.join(gen_ppu, f), "c++", PPU_FLAGS) for f in sorted(os.listdir(gen_ppu))
                if f.endswith(".cpp")]
     spu = sorted(os.path.join(gen_spu, d, "spu_recomp.c") for d in os.listdir(gen_spu)
@@ -381,7 +384,7 @@ def game_jobs(src, gen_dir, obj_dir, zig, platform=HOST):
     if len(gen_native) == 2:
         groups += [(s, "c++", SPU_NATIVE_FLAGS + ["-I" + os.path.join(src.port, "native")]) for s in gen_native]
     else:
-        groups.append((os.path.join(src.port, "native", "spu_native_absent.cpp"), "c++", PORT_FLAGS))
+        groups.append((os.path.join(src.port, "native", "spu_native_absent.cpp"), "c++", port_flags))
     jobs = []
     for s, tool, flags in groups:
         flags = flags + cpu
@@ -493,7 +496,7 @@ def rpath_tag(path):
 
 
 def build_game(gen_dir, out_exe, cache_dir, zig=None, platform=HOST, progress=None, log=None, keep=(),
-               used_out=None, install=None):
+               used_out=None, install=None, defines=()):
     """Compile what the player's disc became (gen_dir) with the port's sources and
     link it with the prebuilt runtime. progress(fraction, message) for the whole
     build. cache_dir keeps the objects (fingerprinted): an update recompiles only
@@ -510,7 +513,7 @@ def build_game(gen_dir, out_exe, cache_dir, zig=None, platform=HOST, progress=No
     if not os.path.exists(lib):
         raise BuildError(f"the runtime library is missing: {lib}")
     os.makedirs(cache_dir, exist_ok=True)
-    jobs = game_jobs(src, gen_dir, cache_dir, zig, platform)
+    jobs = game_jobs(src, gen_dir, cache_dir, zig, platform, defines)
     timings_path = os.path.join(cache_dir, "timings.json")
     try:
         timings = json.load(open(timings_path))

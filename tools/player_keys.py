@@ -25,7 +25,8 @@ import os
 import re
 import zipfile
 
-MAX_FILE = 64 << 10          # a keys file or a key file (keys are a few dozen bytes; a big file isn't one)
+MAX_FILE = 1 << 20           # a keys file or a key file (a full scetool-format keys file, every loader's keys of
+                             # every revision, is ~115 KB; a bigger file isn't one)
 MAX_ZIP = 16 << 20           # a ZIP's total size read
 MAX_MEMBERS = 4096
 TEXT_NAMES = re.compile(r"(?i)(^|[._-])keys?([._-]|$)|\.keys$|\.txt$|\.ini$|\.cfg$|^keys$")
@@ -153,8 +154,11 @@ def _section(k, name, f):
     kind = (f.get("self_type") or f.get("type") or "").upper()
     erk, riv = f.get("erk"), f.get("riv")
     if _hexok(erk, 32) and _hexok(riv, 16):
-        which = ("app" if (kind == "APP" or label.startswith("app")) else
-                 "npdrm" if (kind == "NPDRM" or label.startswith("npdrm")) else None)
+        # the key set's own type first: scetool's keys file names every application loader's set [appldr], an
+        # NPDRM one with self_type=NPDRM; the section's name only when no type says
+        which = ("app" if kind == "APP" else "npdrm" if kind == "NPDRM" else
+                 "app" if label.startswith("app") and kind in ("", "SELF") else
+                 "npdrm" if label.startswith("npdrm") and kind in ("", "SELF") else None)
         if not which:
             return
         pair = (bytes.fromhex(erk), bytes.fromhex(riv))

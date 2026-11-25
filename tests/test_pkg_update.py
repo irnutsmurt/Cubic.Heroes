@@ -328,6 +328,36 @@ class TestProgram(Base):
         ring = player_keys.parse(keys_text({"npdrm": {0x0A: (self.erk, self.riv)}, "KLIC_FREE": kf, "KLIC_KEY": kk}))
         self.assertEqual(self_decrypt.decrypt_self(s, {}, ring), self.elf)
 
+    def test_scetool_keys_file_app_and_npdrm_sets(self):
+        """scetool's keys file, as the public ones are laid out (beta.6): every application loader's set is an
+        [appldr] section, an NPDRM one with self_type=NPDRM; NP_klic_free / NP_klic_key / NP_gpkg_key as single
+        keys; ~115 KB, so its sets past the first 64 KB must be read too"""
+        kf, kk, pk = rnd(16), rnd(16), rnd(16)
+        app = (rnd(32), rnd(16))
+        filler = "".join(f"[lv2ldr]\ntype=SELF\nrevision={r:04X}\nself_type=LV2\nerk={rnd(32).hex().upper()}\n"
+                         f"riv={rnd(16).hex().upper()}\npub={rnd(40).hex().upper()}\npriv={rnd(21).hex().upper()}\n"
+                         "ctype=10\n\n" for r in range(500))
+        decoy = (rnd(32), rnd(16))   # an APP set of the same revision before the NPDRM one: never taken for it
+        text = (f"[NP_klic_free]\ntype=OTHER\nkey={kf.hex().upper()}\n\n[NP_klic_key]\ntype=OTHER\nkey={kk.hex()}\n\n"
+                f"[NP_gpkg_key]\ntype=OTHER\nkey={pk.hex()}\n\n" + filler +
+                f"[appldr]\ntype=SELF\nrevision=0001\nversion=0003005500000000\nself_type=APP\n"
+                f"erk={decoy[0].hex().upper()}\nriv={decoy[1].hex().upper()}\n\n"
+                f"[appldr]\ntype=SELF\nrevision=0001\nself_type=NPDRM\nerk={self.erk.hex().upper()}\n"
+                f"riv={self.riv.hex().upper()}\npub={rnd(40).hex()}\npriv={rnd(21).hex()}\nctype=21\n\n"
+                f"[appldr]\ntype=SELF\nrevision=0004\nself_type=APP\nerk={app[0].hex()}\nriv={app[1].hex()}\n")
+        self.assertGreater(len(text), 64 << 10)
+        path = self.write("keys", text.encode("ascii"))
+        self.assertEqual(player_keys.kind_of(path), "text")
+        ring = player_keys.load(path)
+        self.assertEqual(ring.npdrm, {1: (self.erk, self.riv)})
+        self.assertEqual(ring.app, {1: decoy, 4: app})
+        self.assertEqual((ring.klic_free, ring.klic_key, ring.pkg), (kf, kk, pk))
+        s = make_self(self.elf, self.erk, self.riv, keyrev=1, npdrm=(kf, kk))
+        self.assertEqual(self_decrypt.decrypt_self(s, ring), self.elf)
+        plain = make_self(self.elf, *app, keyrev=4)
+        self.assertEqual(self_decrypt.decrypt_self(plain, ring), self.elf)
+        self.assertNoKey(repr(ring), kf, kk, pk, self.erk, app[0])
+
     def test_npdrm_refusals_never_show_a_key(self):
         kf, kk = rnd(16), rnd(16)
         s = make_self(self.elf, self.erk, self.riv, keyrev=0x0A, npdrm=(kf, kk))
