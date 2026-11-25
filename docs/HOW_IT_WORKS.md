@@ -57,3 +57,20 @@ recompiler and runtime are [ps3recomp](https://github.com/sp00nznet/ps3recomp), 
   paths and e-mail addresses and never includes saves, keys or game files.
 - **Optional developer mode** for testers: warp anywhere, set the story's progress, spawn enemies and bosses -- on test
   saves of its own, never yours, and fully off unless switched on.
+
+## What is and isn't in this repository
+
+This project distributes the **tools that rebuild the game from your own disc**, not the game. The repository and
+the download hold the recompilation tools, this project's independently written runtime code, the open-source
+libraries it builds on, configuration, tests and documentation. They never hold the game's code (extracted, lifted or
+translated), a built game or anything compiled from it, the game's assets, sounds, music, textures or movies,
+proprietary middleware, decryption keys or firmware, or anyone's saves. Everything derived from the game is made on
+your own machine and must not be redistributed. `tools/boundary_check.py` checks this on every push and on the download
+before and after it is packed.
+
+The game files' manifest (`config/disc_manifest.json`) lists each file's name, size and SHA-256 only -- enough to
+check your dump, nothing of the files themselves.
+
+The **screenshots** in `docs/media/` are pictures of the game running, captured from a player's own installation to
+illustrate this documentation. They are not game assets and nothing playable can be made from them; they are kept
+apart from the download, which never contains them.
