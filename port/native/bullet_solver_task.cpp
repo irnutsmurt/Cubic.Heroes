@@ -85,6 +85,7 @@
 // itself is freed by the step's end). A snapshot is ~170 MB of game memory:
 // keep it out of git.
 #include "bullet_solver_task.h"
+#include "../program_addrs.h"   /* PA_RT(): v1.00's addresses of the game, for the program this build is of */
 
 #ifdef DOTHEROES_BULLET_CD
 #include <algorithm>
@@ -122,7 +123,8 @@ extern "C" void ppu_resv_break_line(uint32_t ea);   // ppu_loader.cpp: a store b
 namespace {
 
 constexpr int kImageBulletSolver = 5;
-constexpr uint32_t kEntryCollision = 0xF63600, kEntrySolver = 0xF8EC80;
+// the physics tasks' SPU programs, where the game's executable holds them (v1.01's: +0xD00): PA_RT, the program's own
+const uint32_t kEntryCollision = PA_RT(0x00F63600u), kEntrySolver = PA_RT(0x00F8EC80u);
 constexpr uint32_t kDescBytes = 0x90;   // the slots' descriptors are this far apart
 
 uint32_t be32(const uint8_t* p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
