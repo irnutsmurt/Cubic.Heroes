@@ -112,8 +112,10 @@ if os.environ.get("SCENARIO") and not os.environ.get("DRIVE"):
 
 
 def scenario_header():
-    """A drive's `#!` lines: saves, env, secs -- applied where the environment
-    does not already say. Returns the run's length from `#! secs`, or None."""
+    """A drive's `#!` lines: saves, env, secs, fights -- applied where the environment
+    does not already say. Returns the run's length from `#! secs`, or None. `#! fights`: the run is
+    meant to fight (DRIVE_FIGHTS=1): its native gate then requires the physics to have run, natively
+    (tests/native_gate.py)."""
     secs = None
     if not os.environ.get("DRIVE"):
         return None
@@ -132,6 +134,8 @@ def scenario_header():
                 os.environ.setdefault(k, v)
         elif what == "secs":
             secs = float(rest[0])
+        elif what == "fights":
+            os.environ.setdefault("DRIVE_FIGHTS", "1")
     return secs
 
 
@@ -785,6 +789,12 @@ def main():
         except (OSError, ValueError):
             result[name] = []
     result["census"] = census(rd(os.path.join(RUN, "stderr.log")))
+    # beta.6 (the owner's acceptance #7): whether the run stayed on the native architecture -- nothing through
+    # SPURS, no native replacement declining, no SPU program lifted, and for a fighting run the physics run natively
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from native_gate import native_gate
+    result["fights"] = os.environ.get("DRIVE_FIGHTS") == "1"
+    result["native_gate"] = native_gate(result["census"], result["fights"])
     with open(os.path.join(RUN, "result.json"), "w") as f:
         json.dump(result, f, indent=1)
 
