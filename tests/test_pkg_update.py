@@ -316,8 +316,10 @@ class TestProgram(Base):
         s = make_self(self.elf, self.erk, self.riv, keyrev=1)
         self.assertEqual(self_decrypt.self_info(s), (4, 1, None))
         self.assertEqual(self_decrypt.decrypt_self(s, {1: (self.erk, self.riv)}), self.elf)
+        # a key need not be labelled with its revision (beta.6): every one of the kind is tried
+        self.assertEqual(self_decrypt.decrypt_self(s, {2: (self.erk, self.riv)}), self.elf)
         with self.assertRaises(ValueError):
-            self_decrypt.decrypt_self(s, {2: (self.erk, self.riv)})
+            self_decrypt.decrypt_self(s, {1: (rnd(32), self.riv)})
 
     def test_npdrm_free_licence(self):
         kf, kk = rnd(16), rnd(16)
@@ -331,7 +333,7 @@ class TestProgram(Base):
         s = make_self(self.elf, self.erk, self.riv, keyrev=0x0A, npdrm=(kf, kk))
         cases = [
             ({"npdrm": {0x0A: (self.erk, self.riv)}}, "KLIC_FREE"),                        # no licence keys
-            ({"npdrm": {0x0B: (self.erk, self.riv)}, "KLIC_FREE": kf, "KLIC_KEY": kk}, "revision 0xa"),
+            ({"KLIC_FREE": kf, "KLIC_KEY": kk}, "NPDRM 0x000a"),                          # no NPDRM key
             ({"npdrm": {0x0A: (self.erk, self.riv)}, "KLIC_FREE": rnd(16), "KLIC_KEY": kk}, "did not decrypt"),
             ({"npdrm": {0x0A: (rnd(32), self.riv)}, "KLIC_FREE": kf, "KLIC_KEY": kk}, "did not decrypt"),
         ]

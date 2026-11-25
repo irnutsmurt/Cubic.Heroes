@@ -86,7 +86,7 @@ class Formats(Base):
         ring = player_keys.parse(text)
         self.assertEqual(ring.app, {1: (self.erk, self.riv)})                   # only the APP set taken
         self.assertEqual(self_decrypt.decrypt_self(self.app, ring), self.elf)
-        mixed = player_keys.parse(f"APP 1 {self.erk.hex()} {self.riv.hex()}\nNPDRM 1 00 00\n[x]\nfoo=bar\n")
+        mixed = player_keys.parse(f"APP 1 {self.erk.hex()} {self.riv.hex()}\nOTHER 1 00 00\n[x]\nfoo=bar\n")
         self.assertEqual(mixed.app[1], (self.erk, self.riv))
 
     def test_any_label_and_wrong_pairs(self):
@@ -95,10 +95,10 @@ class Formats(Base):
             self_decrypt.decrypt_self(self.app, {1: (rnd(32), self.riv), 2: (self.erk, rnd(16))})
         self.assertEqual((c.exception.kind, c.exception.revision, c.exception.need), ("app", 1, ["APP 0x0001"]))
         self.assertNoKey(str(c.exception))
-        npdrm = make_self(self.elf, self.erk, self.riv, self_type=8)            # a downloaded program: not handled
-        with self.assertRaises(ValueError) as c:
+        npdrm = make_self(self.elf, self.erk, self.riv, self_type=8)            # a downloaded program without a free
+        with self.assertRaises(ValueError) as c:                                # licence: not handled
             self_decrypt.decrypt_self(npdrm, {1: (self.erk, self.riv)})
-        self.assertIn("NPDRM unsupported", str(c.exception))
+        self.assertIn("unsupported", str(c.exception))
         with self.assertRaises(ValueError):
             self_decrypt.decrypt_self(b"SCE\0" + rnd(20), {1: (self.erk, self.riv)})   # too short to be one
 
