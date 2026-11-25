@@ -291,7 +291,9 @@ class Probes(unittest.TestCase):
     def test_matching_keys(self):
         rc, ev, err = run("probe-keys", "--disc", ISO, "--keys", KEYS)
         self.assertEqual(rc, worker.EXIT_OK, ev[-1])
-        self.assertEqual(ev[-1]["data"], {"match": True, "via": "keys"})
+        d = ev[-1]["data"]
+        self.assertEqual((d["match"], d["via"], d["found"]), (True, "keys", "chosen"))   # beta.6: and which source
+        self.assertEqual(os.path.normcase(d["source"]), os.path.normcase(os.path.abspath(KEYS)))
         # nothing of the keys file in anything the worker said
         with open(KEYS) as f:
             secret = [ln.split()[2] for ln in f if ln.split()[:1] == ["APP"]]
