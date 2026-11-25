@@ -1727,10 +1727,11 @@ extern "C" void devtools_gate(int installed)
 /* the lift's entry observers (r1_observe.cpp), developer mode only: the player's damage (CPlayerActor::damageHP,
  * 0x0011A94C: life at +0x5B8 less r4; at 0 or below, the player dies). No death: a hit that would end the hero's
  * life takes all but one unit of it -- every other hit, the knockback and the enemies stay as the game makes them
- * (the owner's 2026-11-01 requirement). */
+ * (the owner's 2026-11-01 requirement). `addr` is the observer's id: v1.00's address in every program (ps3recomp's
+ * lifter), never PA_RT()'s -- in v1.01 the function itself is at 0x0011A954. */
 extern "C" void devtools_entry(uint32_t addr, ppu_context* ctx)
 {
-    if (addr != fn_damage_hp) return;
+    if (addr != 0x0011A94Cu) return;
     const bool invuln = g_invulnerable.load(std::memory_order_relaxed);
     if (!invuln && !g_nodeath.load(std::memory_order_relaxed)) return;
     const uint32_t p = (uint32_t)ctx->gpr[3];
