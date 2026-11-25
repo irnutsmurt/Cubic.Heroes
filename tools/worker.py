@@ -6,7 +6,9 @@
 Commands:
     version                                 the worker's version and protocol
     probe-disc  --disc PATH                 what the disc image (or disc folder) is; supported or why not
-    probe-keys  --disc PATH --keys PATH     whether the keys file (or an EBOOT.elf) decrypts this disc's program
+    probe-keys  --disc PATH [--keys PATH] [--key-source PATH...] [--rpcs3 PATH]
+                                            whether the keys (chosen, remembered, beside the disc, or the player's
+                                            RPCS3) decrypt this disc's program to the supported one
     space       --install DIR [--for install|update]   free space against what the operation needs
     info        --install DIR               what an install holds (install.json)
     install     --disc PATH --keys PATH --install DIR  the player's disc -> the native game
@@ -572,10 +574,17 @@ def cmd_probe_disc(a, ev, control):
     return out
 
 
+def key_sources_of(a):
+    """the key sources of a probe or an install: --keys, then --key-source, then the places beside the disc, then
+    --rpcs3 (tools/key_sources.py). Only paths: no key is read here."""
+    import key_sources
+    return key_sources.Sources(chosen=os.path.abspath(a.keys) if a.keys else None,
+                               remembered=[os.path.abspath(p) for p in a.key_source], disc=os.path.abspath(a.disc),
+                               rpcs3=os.path.abspath(a.rpcs3) if a.rpcs3 else None)
+
+
 def cmd_probe_keys(a, ev, control):
-    k = os.path.abspath(a.keys)
-    elf = pipeline.is_elf(k)
-    return pipeline.probe_keys(os.path.abspath(a.disc), None if elf else k, k if elf else None, disc_key(a))
+    return pipeline.probe_keys(os.path.abspath(a.disc), key_sources_of(a), None, disc_key(a))
 
 
 def cmd_space(a, ev, control):
@@ -1027,10 +1036,8 @@ def _progress(ev, control, steps):
 
 
 def cmd_install(a, ev, control):
-    k = os.path.abspath(a.keys)
-    elf = pipeline.is_elf(k)
     prog = _progress(ev, control, pipeline.STEPS + BUILD_TAIL)
-    out = op_install(os.path.abspath(a.install), os.path.abspath(a.disc), None if elf else k, k if elf else None,
+    out = op_install(os.path.abspath(a.install), os.path.abspath(a.disc), key_sources_of(a), None,
                      prog, resume=a.resume, prepare=not a.no_prepare, disc_key=disc_key(a))
     out["seconds"], out["skipped"] = prog.finish()
     return out
@@ -1954,6 +1961,7 @@ def cmd_characters(a, ev, control):
 
 
 COMMANDS = {"characters": cmd_characters, "version": cmd_version, "probe-disc": cmd_probe_disc, "probe-keys": cmd_probe_keys,
+
             "space": cmd_space, "info": cmd_info, "install": cmd_install, "update": cmd_update,
             "migrate": cmd_migrate, "builds": cmd_builds, "rollback": cmd_rollback, "game-appimage": cmd_game_appimage, "retention": cmd_retention,
             "repair-link": cmd_repair_link, "saves": cmd_saves, "prepare": cmd_prepare,
@@ -1971,7 +1979,11 @@ def parser():
     p = argparse.ArgumentParser(prog="worker", description="the launcher's pipeline worker")
     p.add_argument("command", choices=sorted(COMMANDS))
     p.add_argument("--disc")
-    p.add_argument("--keys")
+    p.add_argument("--keys", help="the game program's keys: a keys file, a folder or ZIP of key files, an EBOOT.elf "
+                   "decrypted by the player, or an RPCS3 program of theirs")
+    p.add_argument("--key-source", action="append", default=[], help="a key source the player chose before "
+                   "(repeatable; tried after --keys, before the places beside the disc)")
+    p.add_argument("--rpcs3", help="the player's own RPCS3 program, to decrypt with (optional; never required)")
     p.add_argument("--install")
     p.add_argument("--for", dest="op", choices=sorted(NEEDED), default="install")
     p.add_argument("--full", action="store_true")
@@ -2058,8 +2070,8 @@ def parser():
     return p
 
 
-REQUIRED = {"probe-disc": ("disc",), "probe-keys": ("disc", "keys"), "space": ("install",), "info": ("install",),
-            "install": ("disc", "keys", "install"), "update": ("install",), "migrate": ("install",),
+REQUIRED = {"probe-disc": ("disc",), "probe-keys": ("disc",), "space": ("install",), "info": ("install",),
+            "install": ("disc", "install"), "update": ("install",), "migrate": ("install",),
             "builds": ("install",), "rollback": ("install",), "game-appimage": ("install",), "retention": ("install", "keep"),
             "repair-link": ("install",), "saves": ("install",), "prepare": ("install",), "uninstall": ("install",),
             "download-update": ("install",), "stage-launcher": ("package", "launcher"),
@@ -2068,7 +2080,8 @@ REQUIRED = {"probe-disc": ("disc",), "probe-keys": ("disc", "keys"), "space": ("
             "recover-launcher": ("launcher",), "launcher-state": ("install", "launcher"),
             "shortcuts": ("exe",), "remove-launcher": ("launcher",),
             "devsaves": ("install",), "migrate-root": ("from_root", "install")}
-OPTION_NAMES = {"from_root": "from", "keys_file": "trusted-keys", "data_dir": "data-dir", "wait_pid": "wait-pid",
+OPTION_NAMES = {"from_root": "from", "keys_file": "trusted-keys",
+                "key_source": "key-source", "data_dir": "data-dir", "wait_pid": "wait-pid",
                 "expect_version": "expect-version", "no_restart": "no-restart"}
 
 

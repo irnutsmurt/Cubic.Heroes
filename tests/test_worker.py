@@ -7,6 +7,7 @@ used when they are present locally, and never printed). Nothing here converts a 
 import io
 import json
 import os
+import shutil
 import struct
 import subprocess
 import sys
@@ -242,6 +243,34 @@ class Probes(unittest.TestCase):
             bad = os.path.join(d, "bad.txt")
             put(bad, "APP 0001 zz 00\n")
             self.assertEqual(self.code("probe-keys", "--disc", disc, "--keys", bad)[0], "keys_unreadable")
+
+    def test_keys_found_beside_the_disc(self):
+        """beta.6: no keys chosen -- the worker looks beside the disc (and nowhere else) and names what it tried"""
+        with tempfile.TemporaryDirectory() as d:
+            disc = self.disc_folder(os.path.join(d, "dumps", "BLUS30490"))
+            code, res = self.code("probe-keys", "--disc", disc)
+            self.assertEqual(code, "keys_missing")
+            put(os.path.join(d, "dumps", "keys.txt"), f"APP 0001 {os.urandom(32).hex()} {os.urandom(16).hex()}\n")
+            os.makedirs(os.path.join(d, "elsewhere"))
+            put(os.path.join(d, "elsewhere", "keys.txt"), "not looked at\n")
+            code, res = self.code("probe-keys", "--disc", disc)
+            self.assertEqual(code, "wrong_key")
+            self.assertIn("keys.txt (beside the disc)", res["details"])
+            self.assertNotIn("elsewhere", res["details"])
+            code, res = self.code("probe-keys", "--disc", disc, "--key-source", os.path.join(d, "elsewhere", "keys.txt"))
+            self.assertIn("keys.txt (remembered)", res["details"])
+
+    @unittest.skipUnless(os.path.exists(ISO) and os.path.exists(KEYS), "the disc image and keys are local only")
+    def test_real_disc_keys_beside_and_remembered(self):
+        with tempfile.TemporaryDirectory(dir=os.path.dirname(ISO)) as d:
+            iso = os.path.join(d, "game.iso")
+            os.link(ISO, iso)                          # a second name for the same file: nothing copied
+            code, res = self.code("probe-keys", "--disc", iso)
+            self.assertEqual(code, "keys_missing")
+            shutil.copyfile(KEYS, os.path.join(d, "keys.txt"))
+            code, res = self.code("probe-keys", "--disc", iso)
+            self.assertIsNone(code, res)
+            self.assertEqual((res["data"]["via"], res["data"]["found"]), ("keys", "beside the disc"))
 
     @unittest.skipUnless(os.path.exists(ISO), "the disc image is local only")
     def test_real_disc(self):

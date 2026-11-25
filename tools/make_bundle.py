@@ -67,7 +67,8 @@ OUR_TOOLS = ["fix_functions.py", "iso9660.py", "self_decrypt.py", "setup_pipelin
              "worker.py", "game_settings.py", "install_layout.py", "updates.py",
              "release_trust.py", "settings.py", "diagnostics.py",
              "pipeline_manifest.py", "uninstall.py", "ps3_disc.py", "disc_source.py",
-             "root_migration.py", "appimage.py", "game_appimage.py", "hostenv.py"]   # the launcher's worker (M9.0-M9.5; root_migration: the portable
+             "root_migration.py", "appimage.py", "game_appimage.py", "hostenv.py",
+             "player_keys.py", "key_sources.py"]   # the launcher's worker (M9.0-M9.5; root_migration: the portable
 # root; appimage: the player's game AppImage, M11.4)
 
 
@@ -158,7 +159,8 @@ def pyinstaller(platform, dist):
               "pipeline_manifest", "uninstall", "ps3_disc", "disc_source", "root_migration", "Crypto.Cipher.AES",
               "Crypto.Util.Counter",
               "edt_format", "ps3_save", "secret_store", "char_preview", "char_library",
-              "char_store"]   # M12: the character library and the read-only store
+              "char_store",   # M12: the character library and the read-only store
+              "player_keys", "key_sources"]   # beta.6: the program's keys found by themselves
     hidden += tool_imports()
     # Pillow is the developer's only: the game's .ico and Windows resources are made with the prebuilt libraries
     # (zig_build.build_prebuilt -> windows_resources) and shipped as worker/lib/dotheroes.res, never on a player's

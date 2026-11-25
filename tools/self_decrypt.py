@@ -5,13 +5,14 @@ The keys are NOT part of this repository. Pass a keys file whose lines are
 
     APP <revision> <erk-hex-64> <riv-hex-32>
 
-(see docs/SETUP.md). Only non-NPDRM disc applications are handled, which is
-all BLUS-30490 needs.
+(see docs/SETUP.md; tools/player_keys.py reads the other forms of keys). Only non-NPDRM disc applications are
+handled, which is all BLUS-30490 needs.
 
 Usage: self_decrypt.py --keys <keys.txt> EBOOT.BIN EBOOT.elf
 """
 import argparse
 import hashlib
+import os
 import struct
 import sys
 import zlib
@@ -34,30 +35,72 @@ def ctr(key, iv, data):
     return AES.new(key, AES.MODE_CTR, counter=c).decrypt(data)
 
 
+SELF_APP = 4
+
+
+class MissingKeys(ValueError):
+    """the keys given have nothing that opens this program: kind is 'app', need what is missing"""
+
+    def __init__(self, message, kind, revision, need):
+        super().__init__(message)
+        self.kind, self.revision, self.need = kind, revision, need
+
+
+def _ring(keys):
+    """keys: a player_keys.Keyring, or {revision: (erk, riv)} APP keys"""
+    import player_keys
+    if isinstance(keys, player_keys.Keyring):
+        return keys
+    ring = player_keys.Keyring()
+    ring.app.update(keys or {})
+    return ring
+
+
 def decrypt_self(d, keys):
+    """the program's ELF. keys: a player_keys.Keyring, or {revision: (erk, riv)} APP keys. Every APP key is tried,
+    the one labelled with the program's revision first: a wrong one fails the metadata check at once. Raises
+    MissingKeys when none opens it, ValueError for anything else (an NPDRM program among them: not handled)."""
+    if len(d) < 0x100:
+        raise ValueError("not a SELF")
+    try:
+        return _decrypt_self(d, keys)
+    except struct.error as e:
+        raise ValueError(f"not a valid SELF ({e})") from None
+
+
+def _decrypt_self(d, keys):
     magic, hver, keyrev, se_type, meta_off, hsize, esize = struct.unpack_from(">4sIHHIQQ", d, 0)
     if magic != b"SCE\0" or se_type != 1:
         raise ValueError("not a SELF")
     (ehdr_type, appinfo_off, elf_off, phdr_off, shdr_off, sinfo_off,
      sceversion_off, ctrl_off, ctrl_size) = struct.unpack_from(">9Q", d, 0x20)
     _, _, self_type, _ = struct.unpack_from(">QIIQ", d, appinfo_off)
-    if self_type != 4:
-        raise ValueError(f"SELF type {self_type} is not a plain application (NPDRM unsupported)")
-    if keyrev not in keys:
-        raise ValueError(f"no APP key for revision {keyrev:#x} in keys file")
-    erk, riv = keys[keyrev]
-
-    # Metadata info: AES-256-CBC with the application loader key.
+    ring = _ring(keys)
     mi_off = 0x20 + meta_off
-    mi = AES.new(erk, AES.MODE_CBC, riv).decrypt(d[mi_off:mi_off + 0x40])
-    if mi[0x10:0x20] != bytes(16) or mi[0x30:0x40] != bytes(16):
-        raise ValueError("metadata info did not decrypt (wrong key?)")
-    mkey, miv = mi[0:16], mi[0x20:0x30]
+    raw = d[mi_off:mi_off + 0x40]
+    if self_type != SELF_APP:
+        raise ValueError(f"SELF type {self_type} is not a plain application (NPDRM unsupported)")
+    kind = "app"
+    cands = ring.candidates(kind, keyrev)
+    if not cands:
+        raise MissingKeys(f"no {kind.upper()} key in the keys given", kind, keyrev, [f"{kind.upper()} {keyrev:#06x}"])
 
-    # Metadata header + section headers + section keys: AES-128-CTR.
+    # Metadata info: AES-256-CBC with the application loader key; the right key leaves its padding zero. (A right
+    # erk with a wrong riv does too -- CBC's IV only touches the first block -- so the metadata header it opens must
+    # also make sense: its section and key counts fit the header.) Then the metadata header + section headers +
+    # section keys: AES-128-CTR with the key and IV the metadata info holds.
     mh_off = mi_off + 0x40
-    rest = ctr(mkey, miv, d[mh_off:hsize])
-    _, _, sec_count, key_count, _ = struct.unpack_from(">QIIII", rest, 0)
+    for erk, riv in cands:
+        mi = AES.new(erk, AES.MODE_CBC, riv).decrypt(raw)
+        if mi[0x10:0x20] != bytes(16) or mi[0x30:0x40] != bytes(16):
+            continue
+        rest = ctr(mi[0:16], mi[0x20:0x30], d[mh_off:hsize])
+        _, _, sec_count, key_count, _ = struct.unpack_from(">QIIII", rest, 0)
+        if 0 < sec_count <= 256 and key_count <= 4096 and 0x20 + 0x30 * sec_count + 16 * key_count <= len(rest):
+            break
+    else:
+        raise MissingKeys(f"metadata info did not decrypt with any of the {len(cands)} {kind.upper()} key(s) given "
+                          f"(wrong key?)", kind, keyrev, [f"{kind.upper()} {keyrev:#06x}"])
     secs = [struct.unpack_from(">QQIIIIIIII", rest, 0x20 + 0x30 * i) for i in range(sec_count)]
     kbase = 0x20 + 0x30 * sec_count
     skeys = [rest[kbase + 16 * i:kbase + 16 * i + 16] for i in range(key_count)]
@@ -103,7 +146,10 @@ def main():
     ap.add_argument("input")
     ap.add_argument("output")
     a = ap.parse_args()
-    elf = decrypt_self(open(a.input, "rb").read(), load_keys(a.keys))
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import player_keys
+    ring = player_keys.load(a.keys)
+    elf = decrypt_self(open(a.input, "rb").read(), ring)
     open(a.output, "wb").write(elf)
     print(f"{a.output}: {len(elf)} bytes sha256={hashlib.sha256(elf).hexdigest()}")
 

@@ -301,41 +301,46 @@ def _is_disc_key(path):
         return False
 
 
-def decrypt_eboot(eboot_bytes, keys=None, elf=None):
-    """EBOOT.BIN's bytes -> the decrypted program's, checked against the supported version's SHA-256.
-    keys: the player's keys file; elf: an EBOOT.elf they decrypted themselves. The keys are read here and
-    nowhere else, and never written, logged or put in an error's text."""
-    want = version_info()["decrypted_elf"]["sha256"]
-    if elf:
-        try:
-            data = open(elf, "rb").read()
-        except OSError as e:
-            raise SetupError(f"Can't read that EBOOT.elf ({e.strerror}).", "keys_unreadable")
-    else:
-        import self_decrypt
-        if _is_disc_key(keys):
-            raise SetupError("That is a disc key (for an encrypted ISO), not the keys file. The keys file is a text "
-                             "file of APP <revision> <erk> <riv> lines; or choose an EBOOT.elf you decrypted.",
-                             "keys_unreadable")
-        try:
-            k = self_decrypt.load_keys(keys)
-        except (OSError, UnicodeDecodeError) as e:
-            raise SetupError("Can't read the keys file" + (f" ({e.strerror})." if isinstance(e, OSError) else
-                                                          ": it isn't a text file."), "keys_unreadable")
-        except ValueError:
-            raise SetupError("The keys file has a line that isn't a key (APP <revision> <erk> <riv>, in hex).",
-                             "keys_unreadable")
-        if not k:
-            raise SetupError("The keys file has no APP keys (lines: APP <revision> <erk> <riv>).", "keys_empty")
-        try:
-            data = self_decrypt.decrypt_self(eboot_bytes, k)
-        except Exception as e:  # noqa: BLE001 -- the reason only: never the keys
-            raise SetupError("Decrypting the game program failed: the keys file needs the APP key revision "
-                             "0x0001.", "wrong_key", type(e).__name__)
-    if hashlib.sha256(data).hexdigest() != want:
-        raise SetupError("The keys don't match this game: the decrypted program isn't the expected one.",
-                         "wrong_key")
-    return data
+KEYS_CHOICES = ("a keys file, a folder or ZIP of key files, or an EBOOT.elf you decrypted -- or RPCS3, "
+                "if you have it")
+
+
+def open_eboot(eboot_bytes, keys=None, elf=None, want=None, work_dir=None):
+    """EBOOT.BIN's bytes -> (the decrypted program's bytes, how: {source, kind, how}), checked against the pinned
+    SHA-256 (want; the supported version's by default). keys: a key_sources.Sources (what was chosen, remembered,
+    beside the disc, RPCS3), or the path of a keys file, key folder or ZIP; elf: an EBOOT.elf the player decrypted.
+    The keys are read here and nowhere else, and never written, logged or put in an error's text."""
+    import key_sources
+    want = want or version_info()["decrypted_elf"]["sha256"]
+    src = keys if isinstance(keys, key_sources.Sources) else key_sources.Sources(chosen=keys or elf)
+    if src.chosen:
+        if not os.path.exists(src.chosen):
+            raise SetupError("The keys file wasn't found.", "keys_unreadable")
+        if _is_disc_key(src.chosen):
+            raise SetupError("That is a disc key (for an encrypted ISO), not the game program's keys: choose "
+                             + KEYS_CHOICES + ".", "keys_unreadable")
+    try:
+        return key_sources.open_program(eboot_bytes, want, src, work_dir)
+    except key_sources.NoProgram as e:
+        tried = "; ".join(f"{os.path.basename(t['source'])} ({t['how']}): {t['result']}" for t in e.tried)
+        need = (" It needs " + ", ".join(e.need) + ".") if e.need else ""
+        if e.code == "keys_missing":
+            raise SetupError("No keys for the game's program were found. Choose " + KEYS_CHOICES + ".",
+                             "keys_missing", need.strip() or None)
+        mine = e.tried[0] if e.tried and e.tried[0]["how"] == "chosen" and len(e.tried) == 1 else None
+        if mine and mine.get("status") == "unreadable":
+            raise SetupError("Can't read the keys file you chose.", "keys_unreadable", tried)
+        if mine and mine.get("status") == "malformed":
+            raise SetupError(f"The keys file has a line that isn't a key (line {mine.get('line') or '?'}).",
+                             "keys_unreadable", tried)
+        if mine and mine.get("status") in ("empty", "not_source"):
+            raise SetupError("The keys file you chose has no keys for the game's program.", "keys_empty", tried)
+        raise SetupError("The keys don't open this game's program." + need, "wrong_key", tried)
+
+
+def decrypt_eboot(eboot_bytes, keys=None, elf=None, want=None, work_dir=None):
+    """the decrypted program's bytes (open_eboot without how)"""
+    return open_eboot(eboot_bytes, keys, elf, want, work_dir)[0]
 
 
 # ---------------- probes: what the player chose, checked before anything is written ----------------
@@ -437,8 +442,8 @@ def probe_keys(source, keys=None, elf=None, disc_key=None):
     """Whether the keys file (or EBOOT.elf) decrypts this disc's program to the supported one, in memory:
     nothing is written. Raises SetupError (keys_missing, keys_unreadable, keys_empty, wrong_key)."""
     if not (keys or elf):
-        raise SetupError("Choose your keys file, or an EBOOT.elf you decrypted.", "keys_missing")
-    if not os.path.isfile(keys or elf):
+        raise SetupError("Choose " + KEYS_CHOICES + ".", "keys_missing")
+    if isinstance(keys or elf, str) and not os.path.exists(keys or elf):
         raise SetupError("The keys file wasn't found.", "keys_unreadable")
     if os.path.isdir(source):
         eboot = _disc_file(source, "PS3_GAME/USRDIR/EBOOT.BIN")
@@ -448,8 +453,9 @@ def probe_keys(source, keys=None, elf=None, disc_key=None):
             eboot = _disc_file(source, "PS3_GAME/USRDIR/EBOOT.BIN", _iso_files(f) or {}, f)
     if eboot is None:
         raise SetupError("The disc's game program (EBOOT.BIN) wasn't found.", "not_a_disc")
-    decrypt_eboot(eboot, keys, elf)
-    return {"match": True, "via": "elf" if elf else "keys"}
+    _, how = open_eboot(eboot, keys, elf)
+    return {"match": True, "via": how["kind"] if how["kind"] in ("elf", "rpcs3") else "keys", "source": how["source"],
+            "found": how["how"]}
 
 
 def is_elf(path):
@@ -462,7 +468,7 @@ def is_elf(path):
 
 
 def decrypt(paths, keys=None, elf=None):
-    data = decrypt_eboot(open(paths.eboot_bin, "rb").read(), keys, elf)
+    data = decrypt_eboot(open(paths.eboot_bin, "rb").read(), keys, elf, work_dir=paths.data)
     tmp = paths.elf + ".part"
     with open(tmp, "wb") as f:
         f.write(data)
@@ -662,7 +668,7 @@ def run(install, source=None, keys=None, elf=None, progress=None, log=None, skip
         else:
             progress("decrypt", 0.0, STEP_NAMES["decrypt"])
             if not (keys or elf):
-                raise SetupError("Choose your keys file, or an EBOOT.elf you decrypted.", "keys_missing")
+                raise SetupError("Choose " + KEYS_CHOICES + ".", "keys_missing")
             decrypt(paths, keys, elf)
             stamps["decrypt"] = sha256_file(paths.elf)
             save()
