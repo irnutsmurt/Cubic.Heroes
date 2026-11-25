@@ -72,6 +72,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include "../program_addrs.h"   /* PA_RT(): v1.00's addresses of the game, for the program this build is of */
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -91,12 +92,14 @@ extern "C" int g_dotheroes_inflate_direct = 0;
 namespace {
 
 constexpr int kImageEdgeZlib = 3;          // the runtime's image id of Edge zlib's task, for the frame trace
-constexpr uint32_t kBlockAt = 0x1AF8;      // r2 + this: the static block B (func_005CF5BC, func_005CF228)
+// the TOC slot holding the static block B (func_005CF5BC, func_005CF228): its module's TOC (0x01066590 in v1.00)
+// + 0x1AF8, written as its own address (PA_RT): v1.01's is at + 0x1AF4 (an entry before it was removed)
+const uint32_t kBlockSlot = PA_RT(0x01068088u);
 constexpr uint32_t kCounter = 0x1980;      // B + this: the request's work-to-do counter
 constexpr uint32_t kSmall = 0x10000;       // the shell's local-store path: output and input both at most this
 
 enum Why : int {
-    kWhyBlock,    // r2+0x1AF8 is not the 128-aligned block the game's function uses
+    kWhyBlock,    // the TOC slot (kBlockSlot) holds no 128-aligned block the game's function uses
     kWhyGz,       // the image not in usable guest memory
     kWhyStack,    // an address in the stack area (Edge's sys_process_is_stack check prints one)
     kWhyMemory,   // a range outside usable guest memory
@@ -227,7 +230,8 @@ extern "C" int inflate_direct_call(uint32_t gz, uint32_t gz_size, uint32_t out, 
 
     // The block func_005CF228 keeps the counter in (and the taskset, the event
     // flag and the instance, which are not made here).
-    const uint32_t block = vm_read32((uint64_t)toc + kBlockAt);
+    (void)toc;
+    const uint32_t block = vm_read32(kBlockSlot);
     if (!block || (block & 0x7Fu)) return decline(kWhyBlock, gz, gz_size, out, nullptr);
 
     if (!usable(gz, gz_size ? gz_size : 1, false)) return decline(kWhyGz, gz, gz_size, out, "not guest memory");

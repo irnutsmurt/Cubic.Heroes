@@ -628,11 +628,14 @@ def main(argv=None):
         a_imgs, b_imgs = spu_images(A), spu_images(B)
         smap = {oa: ob for (oa, ha), (ob, hb) in zip(a_imgs, b_imgs) if ha == hb} if len(a_imgs) == len(b_imgs) else {}
         names = {}
+        a_offs = {o for o, _h in a_imgs}
         for task, image in setup_pipeline.SPU_NATIVE:
             m = _SPU_IMAGE.fullmatch(image)
-            t = smap.get(int(m.group(2), 16)) if m else None
+            if not m or int(m.group(2), 16) not in a_offs:
+                continue   # not an image of this v1.00 program (a made-up one in a test)
+            t = smap.get(int(m.group(2), 16))
             if t is None:
-                mp.unresolved[int(m.group(2), 16) if m else 0].add(f"program.json spu_native {task} ({image})")
+                mp.unresolved[int(m.group(2), 16)].add(f"program.json spu_native {task} ({image})")
             else:
                 names[task] = f"spu_{m.group(1)}_at_{t:08X}"
         if names:

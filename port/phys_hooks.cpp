@@ -60,6 +60,10 @@ inline void guest_call(ppu_context* ctx, void (*fn)(ppu_context*), uint32_t ret)
 }
 }  // namespace
 
+// The water's module (TOC 0x01057910 in v1.00): its globals' pointer at TOC - 0x3774 and the damping at TOC - 0x3768,
+// written as their own addresses (PA): another program's TOC may sit elsewhere (v1.01's: +4, the slots in place)
+constexpr uint32_t kWaterGlobalsSlot = PA(0x0105419Cu), kWaterDampingSlot = PA(0x010541A8u);
+
 /* func_003C7BA8(r3 the water), the water's set-up (water_task.h). Native
  * scheduling: the game's own stores and its two texture calls, in its frame
  * (stdu r1,-0xA0: func_003A4740's r4 points into it), and the markers in
@@ -73,7 +77,7 @@ extern "C" int dotheroes_water_setup(ppu_context* ctx)
     }
     const uint64_t sp = ctx->gpr[1], lr = ctx->lr;
     const uint32_t toc = (uint32_t)ctx->gpr[2], water = (uint32_t)ctx->gpr[3];
-    const uint32_t G = g_rd32(toc - 0x3774), tex = (water + 0x1D0) & 0xFFFFFFFFu;
+    const uint32_t G = g_rd32(kWaterGlobalsSlot), tex = (water + 0x1D0) & 0xFFFFFFFFu;
     const uint32_t frame = (uint32_t)sp - 0xA0;
     g_wr64(frame, sp);                        // stdu r1,-0xA0(r1)
     g_wr64(frame + 0xB0, lr);                 // std r0,0xB0(r1) (mflr r0)
@@ -81,7 +85,7 @@ extern "C" int dotheroes_water_setup(ppu_context* ctx)
     g_wr64(frame + 0x80, ctx->gpr[28]);
     ctx->gpr[1] = frame;
     g_wr32(G + 0x88, 0x80);                   // the width
-    g_wr32(G + 0x90, g_rd32(toc - 0x3768));   // the damping (lfs, stfs: the same bits)
+    g_wr32(G + 0x90, g_rd32(kWaterDampingSlot));   // the damping (lfs, stfs: the same bits)
     g_wr32(G + 0x8C, g_rd32(water + 0x1EC));  // the layer index
     g_wr32(G + 0x80, g_rd32(water + 0x1E8));  // the heights
     ctx->gpr[3] = tex;
@@ -106,7 +110,7 @@ extern "C" int dotheroes_water_setup(ppu_context* ctx)
  * path: quit bit, exit code, taskset and instance torn down). */
 extern "C" int dotheroes_water_shutdown(ppu_context* ctx)
 {
-    const uint32_t G = g_rd32((uint32_t)ctx->gpr[2] - 0x3774);
+    const uint32_t G = g_rd32(kWaterGlobalsSlot);
     const uint32_t taskset = g_rd32(G + 0x4), inst = g_rd32(G + 0x9C);
     const bool ours = taskset == water_task::kNativeTaskset || inst == water_task::kNativeInstance;
     if (!ours) {
@@ -250,7 +254,7 @@ extern "C" int dotheroes_waver_setup(ppu_context* ctx)
     for (int r = 27; r <= 31; r++) g_wr64(frame + 0x88 + 8 * (r - 27), ctx->gpr[r]);
     ctx->gpr[1] = frame;
     guest_call(ctx, func_003B64A8, PA(0x003CEB70));   // the other screen effects stopped (r3 = pos, unused)
-    const uint32_t W = g_rd32(toc - 0x310C);
+    const uint32_t W = g_rd32(kWaverStateSlot);
     if (vm_base[W]) {   // running already: the game's does nothing more
         ctx->gpr[1] = sp; ctx->lr = lr; ctx->gpr[3] = (W + 0x28) & 0xFFFFFFFFu;
         return 1;
