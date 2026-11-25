@@ -16,8 +16,9 @@
  *   DOTHEROES_DEBRIS_INTERP_LOG=<file>  each step's moving bodies, "S us world lr step" then "B obj r0 r1 r2 o" (the
  *                                       basis rows and origin), written at a test's stop and at exit (analysis)
  *
- * A body new since the last step, one that moved more than 2 units or turned more than 90 degrees in a step (a reused
- * piece, a teleport) is drawn at its current pose (no blend across the jump); a body gone is never matched.
+ * A body new since the last step, or one that moved more than 2 units in a step (a reused piece, a teleport), is drawn
+ * at its current pose (no blend across the jump); one that turned more than 90 degrees keeps its blended position with
+ * its current rotation; a body gone is never matched.
  *
  * Layouts (Bullet 2.74 for the PPU, 32-bit; checked against the lifted updateAabbs and stepSimulation):
  * btCollisionWorld -- the collision objects' array size +0x08, data +0x10; btDiscreteDynamicsWorld -- m_localTime
@@ -139,7 +140,7 @@ M4 of_quat(const Q& q, const double o[3])
 }
 
 // ---- the bodies after the last step ----------------------------------------------------------------------------
-struct Body { uint32_t obj; Pose prev, cur; bool blend, snapped; M4 wcur; };
+struct Body { uint32_t obj; Pose prev, cur; bool blend, snapped, turned; M4 wcur; };
 std::vector<Body> g_bodies;
 std::vector<std::pair<double, uint32_t>> g_by_x;   // the bodies' x, sorted, for finding a pose by its origin
 uint32_t g_world;
@@ -151,7 +152,7 @@ uint32_t g_ring_i, g_ring_sum;
 
 // counts
 std::atomic<unsigned long long> g_draws{0}, g_matched{0}, g_blended{0}, g_unmatched{0}, g_anchors{0}, g_anchor_fail{0},
-    g_snaps{0}, g_frames{0}, g_frames_on{0};
+    g_snaps{0}, g_turned{0}, g_frames{0}, g_frames_on{0};
 
 // a body whose current pose is `w` to within `tol` (rotation 5e-3, origin 5e-3 units): its index, or -1
 int find_body(const M4& w)
@@ -177,9 +178,10 @@ std::unordered_map<uint32_t, Pose>* g_last;
 void report()
 {
     fprintf(stderr, "[debris-interp] %llu piece draws: %llu matched to a body (%llu drawn between steps), %llu not matched; "
-            "%llu passes anchored, %llu anchors failed; %llu draws of a piece that moved or turned too far in a step (drawn at its pose); frames %llu, %llu with "
-            "interpolation on\n", g_draws.load(), g_matched.load(), g_blended.load(), g_unmatched.load(), g_anchors.load(),
-            g_anchor_fail.load(), g_snaps.load(), g_frames.load(), g_frames_on.load());
+            "%llu passes anchored, %llu anchors failed; %llu draws of a piece that moved over 2 units in a step (drawn at its pose), "
+            "%llu of one that turned over 90 degrees (its rotation the current one); frames %llu, %llu with interpolation on\n",
+            g_draws.load(), g_matched.load(), g_blended.load(), g_unmatched.load(), g_anchors.load(), g_anchor_fail.load(),
+            g_snaps.load(), g_turned.load(), g_frames.load(), g_frames_on.load());
 }
 void log_write()
 {
@@ -214,7 +216,7 @@ void after_step(uint32_t world, uint32_t lr, float fixed)
         now.reserve(n);
         for (uint32_t i = 0; i < n; i++) {
             const uint32_t obj = r32(data + 4 * i);
-            Body b{ obj, {}, pose_of(obj), false, false, {} };
+            Body b{ obj, {}, pose_of(obj), false, false, false, {} };
             size_t k = i;   // the same place in the array as at the last step, mostly
             if (k >= g_bodies.size() || g_bodies[k].obj != obj) {
                 if (old.empty()) { old.reserve(g_bodies.size() * 2); for (size_t j = 0; j < g_bodies.size(); j++) old[g_bodies[j].obj] = j; }
@@ -229,8 +231,11 @@ void after_step(uint32_t world, uint32_t lr, float fixed)
                 double tr = 0;
                 for (int r = 0; r < 3; r++) for (int k = 0; k < 3; k++) tr += p[3 * r + k] * c[3 * r + k];
                 const bool moved = memcmp(&b.prev, &b.cur, sizeof(Pose)) != 0;
-                if (moved && (dx * dx + dy * dy + dz * dz > 4.0 || tr < 1.0)) b.snapped = true;
-                else b.blend = moved;
+                // moved more than 2 units in a step: a teleport (a reused piece) -- drawn at its pose; turned more than 90
+                // degrees: the rotation can't be told from the two poses (the short arc may be the wrong way) -- the
+                // position still blends, the rotation is the current one (a twitch of the whole piece is what shows)
+                if (moved && dx * dx + dy * dy + dz * dz > 4.0) b.snapped = true;
+                else { b.blend = moved; b.turned = moved && tr < 1.0; }
             }
             b.wcur = of_pose(b.cur);
             now.push_back(b);
@@ -343,7 +348,8 @@ extern "C" int dotheroes_interp_apply(const float* m, float* out)
     // frame's first records come before its physics), so read where the draw is, not at the frame's first record
     const double t = std::min(1.0, std::max(0.0, (double)rf(g_world + kLocalTime) / g_fixed)), o[3] = { b.prev.m[9] + t * (b.cur.m[9] - b.prev.m[9]), b.prev.m[10] + t * (b.cur.m[10] - b.prev.m[10]),
                                        b.prev.m[11] + t * (b.cur.m[11] - b.prev.m[11]) };
-    const M4 w = of_quat(slerp(quat_of(b.prev), quat_of(b.cur), t), o);
+    if (b.turned) g_turned++;
+    const M4 w = of_quat(b.turned ? quat_of(b.cur) : slerp(quat_of(b.prev), quat_of(b.cur), t), o);
     const M4 r = mul(mul(mm, rigid_inverse(b.wcur)), w);
     for (int k = 0; k < 4; k++) for (int j = 0; j < 4; j++) out[4 * k + j] = (float)r.a[k][j];
     g_blended++;
