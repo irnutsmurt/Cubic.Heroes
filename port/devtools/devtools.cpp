@@ -43,6 +43,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include "../program_addrs.h"   /* PA_RT(): v1.00's addresses of the game, for the program this build is of */
 
 // port/diag/game_log.h, in the game's executable (weak here, as ppfx_render.cpp declares it)
 extern "C" void dh_log(int level, const char* tag, const char* fmt, ...) __attribute__((weak, format(printf, 3, 4)));
@@ -64,16 +65,16 @@ void (*g_devtools_flip)(struct ppu_context* ctx) = nullptr;
 namespace {
 
 /* ---- the game (BLUS-30490), docs/M11_PLAN.md section 3.4 [C] ---- */
-constexpr uint32_t kLuaToc = 0x010764C4;        /* the Lua library's module TOC */
-constexpr uint32_t kLuaStatePtr = 0x0159C08C;   /* biLua (0x0159BE98) + 0x1F4: the lua_State */
-constexpr uint32_t kBiLuaLevel = 0x0159BFE8;    /* biLua + 0x150: its call level, -1 when idle */
-constexpr uint32_t kEventVar = 0x02AE1568;      /* EventClass.Event, the scripts' `Event` */
-constexpr uint32_t kGameManager = 0x02AE8704;   /* the game manager; its EventClass at +0x8F0 */
-constexpr uint32_t kArea = 0x029A6488;          /* the map's number (dev_state.cpp; the map's MS_ order) */
-constexpr uint32_t kFrames = 0x02CF3570;        /* the guest's frame counter (dev_state.cpp) */
-constexpr uint32_t kHudLife = 0x02B38E0C;       /* the HUD's copy of the hero's life (dev_state.cpp) */
-constexpr uint32_t fn_gettop = 0x007F02EC, fn_settop = 0x007F033C, fn_type = 0x007F09DC, fn_toboolean = 0x007F1250,
-                   fn_tolstring = 0x007F130C, fn_pcall = 0x007F3450, fn_loadbuffer = 0x0081B060;
+const uint32_t kLuaToc = PA_RT(0x010764C4);        /* the Lua library's module TOC */
+const uint32_t kLuaStatePtr = PA_RT(0x0159C08C);   /* biLua (0x0159BE98) + 0x1F4: the lua_State */
+const uint32_t kBiLuaLevel = PA_RT(0x0159BFE8);    /* biLua + 0x150: its call level, -1 when idle */
+const uint32_t kEventVar = PA_RT(0x02AE1568);      /* EventClass.Event, the scripts' `Event` */
+const uint32_t kGameManager = PA_RT(0x02AE8704);   /* the game manager; its EventClass at +0x8F0 */
+const uint32_t kArea = PA_RT(0x029A6488);          /* the map's number (dev_state.cpp; the map's MS_ order) */
+const uint32_t kFrames = PA_RT(0x02CF3570);        /* the guest's frame counter (dev_state.cpp) */
+const uint32_t kHudLife = PA_RT(0x02B38E0C);       /* the HUD's copy of the hero's life (dev_state.cpp) */
+const uint32_t fn_gettop = PA_RT(0x007F02EC), fn_settop = PA_RT(0x007F033C), fn_type = PA_RT(0x007F09DC), fn_toboolean = PA_RT(0x007F1250),
+                   fn_tolstring = PA_RT(0x007F130C), fn_pcall = PA_RT(0x007F3450), fn_loadbuffer = PA_RT(0x0081B060);
 
 /* the tools' guest memory: a stack for their calls and a buffer for a chunk */
 constexpr uint32_t kRegionBytes = 0x60000;       /* six 64 KB pages */
@@ -532,13 +533,13 @@ void check_warp()
 }
 
 /* ---- the player (M11.0c): the game's own CPlayerActor functions on the player its actor manager returns [C] ---- */
-constexpr uint32_t kActorToc = 0x01028658;        /* actor_manager's module TOC */
-constexpr uint32_t kActorManagerSlot = kActorToc + 0x196C;   /* the TOC word holding gActorManager (its getter) */
-constexpr uint32_t fn_get_player = 0x000A2248;    /* CActorManager::getPlayer */
-constexpr uint32_t kPlayerToc = 0x01038050;       /* CPlayerActor's module TOC */
-constexpr uint32_t fn_set_hp = 0x00101928, fn_set_mp = 0x00101940, fn_set_max_hp = 0x001020B0,
-                   fn_set_max_mp = 0x00101FFC, fn_set_invincible = 0x00101F78, fn_damage_hp = 0x0011A94C;
-constexpr uint32_t kPlayerVtable = 0x00FE3D20;    /* dev_state.cpp: the player's class */
+const uint32_t kActorToc = PA_RT(0x01028658);        /* actor_manager's module TOC */
+const uint32_t kActorManagerSlot = PA_RT(0x01029FC4);   /* the TOC word holding gActorManager (its getter): v1.00's kActorToc + 0x196C */
+const uint32_t fn_get_player = PA_RT(0x000A2248);    /* CActorManager::getPlayer */
+const uint32_t kPlayerToc = PA_RT(0x01038050);       /* CPlayerActor's module TOC */
+const uint32_t fn_set_hp = PA_RT(0x00101928), fn_set_mp = PA_RT(0x00101940), fn_set_max_hp = PA_RT(0x001020B0),
+                   fn_set_max_mp = PA_RT(0x00101FFC), fn_set_invincible = PA_RT(0x00101F78), fn_damage_hp = PA_RT(0x0011A94C);
+const uint32_t kPlayerVtable = PA_RT(0x00FE3D20);    /* dev_state.cpp: the player's class */
 constexpr uint32_t kHp = 0x5B8, kMp = 0x5BC, kMaxHp = 0x5C0, kMaxMp = 0x5C4, kInvincible = 0x54D;
 constexpr uint32_t kSwordType = 0x5D0;   /* M11.1: the equipped sword (CPlayerActor::getSwordType, 0x000FA024, reads it) */
 
@@ -650,11 +651,26 @@ void keep_invulnerable(const ppu_context* c)
 }
 
 /* ---- progression, quests, items (M11.0d) ---- */
-constexpr uint32_t kEventToc = 0x01057910;        /* EventClass's module TOC */
-constexpr uint32_t fn_player_data = 0x00985C08;   /* GetItem's first call: the player's data, by the name in its TOC */
-constexpr uint32_t fn_item_object = 0x00985D88;   /* GetItem's second: (player data, id) -> the item's object */
+const uint32_t kEventToc = PA_RT(0x01057910);        /* EventClass's module TOC */
+const uint32_t fn_player_data = PA_RT(0x00985C08);   /* GetItem's first call: the player's data, by the name in its TOC */
+const uint32_t fn_item_object = PA_RT(0x00985D88);   /* GetItem's second: (player data, id) -> the item's object */
 constexpr uint32_t kItemCount = 0x54;             /* the item object's count (CItem::setNum/getNum) */
-constexpr uint32_t kBundle = 0x00A7C908, kBundleSize = 0x39B7D5;   /* the scripts the game runs, in its EBOOT */
+const uint32_t kBundle = PA_RT(0x00A7C908);   /* the scripts the game runs, in its EBOOT */
+/* the bundle's length: its text runs to the first byte that is not text -- 0x39B7D5 in v1.00, 0x39B886 in v1.01 (the
+ * update changed scripts), measured once rather than written down, so one prebuilt library reads either program */
+uint32_t bundle_size()
+{
+    static const uint32_t n = [] {
+        const uint8_t* p = vm_base + kBundle;
+        uint32_t i = 0;
+        for (; i < 0x800000u; i++) {
+            const uint8_t c = p[i];
+            if (!(c == 9 || c == 10 || c == 13 || (c >= 32 && c < 127) || c >= 0x80)) break;
+        }
+        return i;
+    }();
+    return n;
+}
 
 /* the main story in steps (docs/M11_PLAN.md section 9): our own labels; the flags the game's scripts set at each
  * (flag, value), the world map's progress flags, the items the step gives, the magic containers its event adds
@@ -729,15 +745,15 @@ int make_names(const ppu_context* c, std::string& err)
     std::map<std::string, std::vector<int>> by_fn;
     const char* text = (const char*)vm_base + kBundle;
     std::string fn;
-    for (uint32_t i = 0; i + 16 < kBundleSize; i++) {
+    for (uint32_t i = 0; i + 16 < bundle_size(); i++) {
         if ((i == 0 || text[i - 1] == '\n') && !strncmp(text + i, "function ", 9)) {
             uint32_t j = i + 9;
-            while (j < kBundleSize && (isalnum((unsigned char)text[j]) || text[j] == '_' || text[j] == '.' || text[j] == ':')) j++;
+            while (j < bundle_size() && (isalnum((unsigned char)text[j]) || text[j] == '_' || text[j] == '.' || text[j] == ':')) j++;
             fn.assign(text + i + 9, j - i - 9);
         } else if (!strncmp(text + i, "SetEventFlag(", 13) && !fn.empty()) {
             uint32_t j = i + 13;
-            while (j < kBundleSize && text[j] == ' ') j++;
-            if (j < kBundleSize && isdigit((unsigned char)text[j])) {
+            while (j < bundle_size() && text[j] == ' ') j++;
+            if (j < bundle_size() && isdigit((unsigned char)text[j])) {
                 const int f = atoi(text + j);
                 if (f >= 100 && f < 1000) {
                     auto& v = by_fn[fn];
@@ -936,7 +952,7 @@ int progression_command(const ppu_context* c, const Cmd& cmd, const std::string&
 }
 
 /* ---- bosses, enemies, events, cinematics (M11.0e) ---- */
-constexpr uint32_t fn_start_event = 0x004D5BC0;   /* StartEvent(event, name): `Coroutine=coroutine.create(name)` */
+const uint32_t fn_start_event = PA_RT(0x004D5BC0);   /* StartEvent(event, name): `Coroutine=coroutine.create(name)` */
 constexpr uint32_t kEventNameOff = 0xFC00;        /* an event's name, in the tools' region */
 
 /* the bosses, the game's way: each one's arena, and the flags its defeat sets -- cleared, the arena's own entry event
@@ -969,13 +985,13 @@ void make_events()
     const char* text = (const char*)vm_base + kBundle;
     auto at_line = [&](uint32_t i) { return i == 0 || text[i - 1] == '\n'; };
     uint32_t i = 0;
-    while (i + 9 < kBundleSize) {
+    while (i + 9 < bundle_size()) {
         if (!(at_line(i) && !strncmp(text + i, "function ", 9))) { i++; continue; }
         uint32_t j = i + 9;
-        while (j < kBundleSize && (isalnum((unsigned char)text[j]) || text[j] == '_')) j++;
+        while (j < bundle_size() && (isalnum((unsigned char)text[j]) || text[j] == '_')) j++;
         const std::string name(text + i + 9, j - i - 9);
         uint32_t e = j;   /* the body: up to the next function at a line's start */
-        while (e + 9 < kBundleSize && !(at_line(e) && !strncmp(text + e, "function ", 9))) e++;
+        while (e + 9 < bundle_size() && !(at_line(e) && !strncmp(text + e, "function ", 9))) e++;
         const std::string body(text + j, e - j);
         if (!name.empty() && body.find("coroutine.yield") != std::string::npos)
             g_events.push_back({ name, body.find("PlayScene") != std::string::npos || body.find("SetCamera") != std::string::npos ||
@@ -1015,13 +1031,13 @@ void make_spawnables()
         return false;
     };
     uint32_t i = 0;
-    while (i + 9 < kBundleSize) {
+    while (i + 9 < bundle_size()) {
         if (!(at_line(i) && !strncmp(text + i, "function ", 9))) { i++; continue; }
         uint32_t j = i + 9;
-        while (j < kBundleSize && (isalnum((unsigned char)text[j]) || text[j] == '_')) j++;
+        while (j < bundle_size() && (isalnum((unsigned char)text[j]) || text[j] == '_')) j++;
         const std::string name(text + i + 9, j - i - 9);
         uint32_t e = j;
-        while (e + 9 < kBundleSize && !(at_line(e) && !strncmp(text + e, "function ", 9))) e++;
+        while (e + 9 < bundle_size() && !(at_line(e) && !strncmp(text + e, "function ", 9))) e++;
         const size_t n = name.size();
         if (n > 10 && name.compare(n - 10, 10, "Initialize") == 0) {
             const std::string body(text + j, e - j);

@@ -36,6 +36,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <vector>
+#include "program_addrs.h"   /* PA(): v1.00's addresses of the game, for the program this build is of */
 
 extern "C" PPU_THREAD_LOCAL void (*g_trampoline_fn)(void*);
 extern "C" void ps3_indirect_call_to(ppu_context* ctx, uint32_t target);
@@ -54,7 +55,7 @@ enum : uint32_t {
     kHandleBytes = 64, kHOwner = 0x00, kHGroup = 0x04, kHMask = 0x06, kHMultiSap = 0x08, kHUid = 0x0C,
     kHMinEdges = 0x30, kHMaxEdges = 0x36,
     kVAdd = 0x08, kVRemove = 0x0C, kVRemoveContaining = 0x10, kVDeferred = 0x38,
-    kFnAdd = 0x00A4CD24u, kFnRemove = 0x009144C8u,
+    kFnAdd = PA(0x00A4CD24u), kFnRemove = PA(0x009144C8u),
     // the pair cache, for check mode's snapshot (port/pair_cache.cpp)
     kPcSize = 0x08, kPcCap = 0x0C, kPcData = 0x10, kPcHashCap = 0x28, kPcHashData = 0x2C, kPcNextCap = 0x3C,
     kPcNextData = 0x40, kPcBytes = 0x4C, kTocCounters = 0x29B4,

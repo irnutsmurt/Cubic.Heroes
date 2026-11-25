@@ -1,0 +1,203 @@
+{
+ "_program": "BLUS30490-01.01",
+ "_from": "config/audio_hooks.json, by tools/program_remap.py",
+ "_comment": "The game's audio boundary (docs/OPENAL_MIGRATION_PLAN.md section 1): entry hooks on its sound manager's methods, each answered by the native sound manager on OpenAL Soft (port/audio_hooks.cpp). Lifted beside config/r8_hooks.json (tools/r8_lift.sh, tools/setup_pipeline.py). FMOD's API hooks, M0's baseline, went with FMOD itself (M5: config/excluded_code.json).",
+ "entry_hooks": [
+  {
+   "addr": "0x0046E384",
+   "host": "dotheroes_audio_0046E0EC",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "the game's sound manager: SM.playSE. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x00465D58",
+   "host": "dotheroes_audio_00465AC0",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "the game's sound manager: SM.isPlaying. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x00466624",
+   "host": "dotheroes_audio_0046638C",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "the game's sound manager: SM.fadeOutBGM. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x0046F754",
+   "host": "dotheroes_audio_0046F4BC",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "the game's sound manager: SM.playBGM. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x0046C688",
+   "host": "dotheroes_audio_0046C3F0",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "the game's sound manager: SM.applyVolumeOptions. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x004665BC",
+   "host": "dotheroes_audio_00466324",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "the game's sound manager: SM.fadeOutLoopSEs. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x00466540",
+   "host": "dotheroes_audio_004662A8",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "the game's sound manager: SM.isBGMActive. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x00465FF8",
+   "host": "dotheroes_audio_00465D60",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "the game's sound manager: SM.setReverb. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x0046E004",
+   "host": "dotheroes_audio_0046DD6C",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "the game's sound manager: SM.playSEFadeIn. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x00465EC0",
+   "host": "dotheroes_audio_00465C28",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "the game's sound manager: SM.stopChannel. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x00466034",
+   "host": "dotheroes_audio_00465D9C",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "the game's sound manager: SM.setListener. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x004664E4",
+   "host": "dotheroes_audio_0046624C",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "the game's sound manager: SM.duckBGM. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x0046648C",
+   "host": "dotheroes_audio_004661F4",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "the game's sound manager: SM.unduckBGM. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x0046641C",
+   "host": "dotheroes_audio_00466184",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "the game's sound manager: SM.duckSE. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x004663C0",
+   "host": "dotheroes_audio_00466128",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "the game's sound manager: SM.unduckSE. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x00466994",
+   "host": "dotheroes_audio_004666FC",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "the game's sound manager: SM.fadeOutSE. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x00466CB4",
+   "host": "dotheroes_audio_00466A1C",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "the game's sound manager: SM.stopSE. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x004666B0",
+   "host": "dotheroes_audio_00466418",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "the game's sound manager: SM.pauseById. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x00466344",
+   "host": "dotheroes_audio_004660AC",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "the game's sound manager: SM.currentBGMId. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x0046C444",
+   "host": "dotheroes_audio_0046C1AC",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "the game's sound manager: SM.setBGMMaster. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x0046C5FC",
+   "host": "dotheroes_audio_0046C364",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "the game's sound manager: SM.setSoundVolume. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x00466778",
+   "host": "dotheroes_audio_004664E0",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "the game's sound manager: SM.isLoaded. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x004660C8",
+   "host": "dotheroes_audio_00465E30",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "the game's sound manager: SM.init. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x0047189C",
+   "host": "dotheroes_audio_00471604",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "the game's sound manager: SM.loadSounds. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x00472CAC",
+   "host": "dotheroes_audio_00472A14",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "the game's sound manager: SM.preload. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x0046DDD8",
+   "host": "dotheroes_audio_0046DB40",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "the game's sound manager: SM.update. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x0046E96C",
+   "host": "dotheroes_audio_0046E6D4",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "the game's sound manager: SM.shutdown. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  },
+  {
+   "addr": "0x00470B4C",
+   "host": "dotheroes_audio_004708B4",
+   "guard": "g_audio_hooks",
+   "decline": true,
+   "note": "the game's sound manager: SM.openCallback. Declines unless the audio hooks handle it (port/audio_hooks.cpp)"
+  }
+ ]
+}

@@ -733,3 +733,45 @@ if(glslang_FOUND AND TARGET glslang::glslang AND TARGET glslang::SPIRV AND PS3RE
         target_link_libraries(r1_replay PRIVATE glslang::glslang-default-resource-limits)
     endif()
 endif()
+
+# beta.6: a build of another program of the game (the official v1.01 update's): -DDOTHEROES_PROGRAM=<id> takes its
+# address-tied configuration from its folder under config/programs/ (tools/program_remap.py) -- the program's id for main.cpp,
+# port/'s PA() table (port/program_addrs.h) and, for port/'s own sources only, the names of the lifted functions
+# port/ calls (port_aliases.h: v1.00's name -> this program's; never the lift's own sources, where a v1.00 address
+# may name another function). The lift itself takes the same folder's hooks and observers (tools/r8_lift.sh,
+# tools/setup_pipeline.py). Empty: v1.00, as before.
+set(DOTHEROES_PROGRAM "" CACHE STRING "The game's program this build is of (its id, named by a config/programs/*/program.json); empty: v1.00")
+if(DOTHEROES_PROGRAM)
+    # its folder: the one under config/programs whose program.json names it (config/programs/us-01.01: a folder
+    # named for a PS3 title ID is kept out of the repository, tools/boundary_check.py)
+    file(GLOB _dh_metas "${CMAKE_CURRENT_SOURCE_DIR}/../config/programs/*/program.json")
+    set(_dh_prog "")
+    foreach(_m ${_dh_metas})
+        file(READ "${_m}" _dh_txt)
+        if(_dh_txt MATCHES "\"id\"[ \t\r\n]*:[ \t\r\n]*\"${DOTHEROES_PROGRAM}\"")
+            get_filename_component(_dh_prog "${_m}" DIRECTORY)
+        endif()
+    endforeach()
+    if(NOT _dh_prog)
+        message(FATAL_ERROR "DOTHEROES_PROGRAM=${DOTHEROES_PROGRAM}: no config/programs/*/program.json names it")
+    endif()
+    get_filename_component(_dh_prog "${_dh_prog}" ABSOLUTE)
+    foreach(_f port_addrs.inc port_aliases.h)
+        if(NOT EXISTS "${_dh_prog}/${_f}")
+            message(FATAL_ERROR "DOTHEROES_PROGRAM=${DOTHEROES_PROGRAM}: no ${_dh_prog}/${_f} (tools/program_remap.py)")
+        endif()
+    endforeach()
+    target_compile_definitions(${PROJECT_NAME} PRIVATE "DOTHEROES_PROGRAM_ID=\"${DOTHEROES_PROGRAM}\""
+                               "DOTHEROES_PROGRAM_ADDRS=\"${_dh_prog}/port_addrs.inc\"")
+    get_target_property(_dh_srcs ${PROJECT_NAME} SOURCES)
+    set(_dh_n 0)
+    foreach(_s ${_dh_srcs})
+        get_filename_component(_abs "${_s}" ABSOLUTE BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+        string(FIND "${_abs}" "${CMAKE_CURRENT_SOURCE_DIR}/" _at)
+        if(_at EQUAL 0 AND _abs MATCHES "\\.(c|cc|cpp)$")
+            set_property(SOURCE "${_s}" APPEND PROPERTY COMPILE_OPTIONS "-include" "${_dh_prog}/port_aliases.h")
+            math(EXPR _dh_n "${_dh_n} + 1")
+        endif()
+    endforeach()
+    message(STATUS "Program:         ${DOTHEROES_PROGRAM} (${_dh_prog}; port/'s ${_dh_n} sources take its aliases)")
+endif()

@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include "program_addrs.h"   /* PA(): v1.00's addresses of the game, for the program this build is of */
 
 extern "C" PPU_THREAD_LOCAL void (*g_trampoline_fn)(void*);   // the lift's tail calls (as phys_hooks.cpp)
 
@@ -25,7 +26,7 @@ extern "C" void dev_credits_request(void);
 
 namespace {
 
-constexpr uint32_t kToc = 0x01057910u;          // GameClass's group's TOC (its frame function and Ending run with it)
+constexpr uint32_t kToc = PA(0x01057910u);          // GameClass's group's TOC (its frame function and Ending run with it)
 constexpr uint32_t kGameSlot = kToc + 0x3A80u;  // the global holding the game's GameClass pointer (func_004CDF70)
 
 std::atomic<int> s_request{0};
@@ -116,7 +117,7 @@ extern "C" int dotheroes_dev_credits(ppu_context* ctx)
     wr64(frame, sp);
     ctx->gpr[1] = frame;
     ctx->gpr[2] = kToc;
-    ctx->lr = 0x00514F8Cu;
+    ctx->lr = PA(0x00514F8Cu);
     inner = 1;
     func_004CDF70(ctx);
     while (g_trampoline_fn) { void (*fn)(void*) = g_trampoline_fn; g_trampoline_fn = nullptr; fn(ctx); }

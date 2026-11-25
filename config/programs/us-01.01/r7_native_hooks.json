@@ -1,0 +1,823 @@
+{
+ "_program": "BLUS30490-01.01",
+ "_from": "config/r7_native_hooks.json, by tools/program_remap.py",
+ "_comment": "R7's native lift (tools/r7_native_lift.sh, docs/NATIVE_R7.md): R6's entry hooks (config/r6_native_observers.json) and the entry points that still wrote command words or were never seen -- the remaining libgcm writers, labels, the reference and jump commands, the 2D transfers -- without store probes. Addresses only: the lifted bodies run unchanged unless the recorder replaces them.",
+ "store_probes": false,
+ "observers": [
+  {
+   "addr": "0x0069D05C",
+   "note": "no command seen in the river trace (PPFX calls it)",
+   "id": "0x0069CAC4"
+  },
+  {
+   "addr": "0x0069D088",
+   "note": "no command seen in the river trace (PPFX calls it)",
+   "id": "0x0069CAF0"
+  },
+  {
+   "addr": "0x0069D144",
+   "note": "no command seen in the river trace (PPFX calls it)",
+   "id": "0x0069CBAC"
+  },
+  {
+   "addr": "0x0069D174",
+   "note": "no command seen in the river trace (PPFX calls it)",
+   "id": "0x0069CBDC"
+  },
+  {
+   "addr": "0x0069D1C0",
+   "note": "no command seen in the river trace (PPFX calls it)",
+   "id": "0x0069CC28"
+  },
+  {
+   "addr": "0x0069D204",
+   "note": "no command seen in the river trace (PPFX calls it)",
+   "id": "0x0069CC6C"
+  },
+  {
+   "addr": "0x0069D20C",
+   "note": "no command seen in the river trace (PPFX calls it)",
+   "id": "0x0069CC74"
+  },
+  {
+   "addr": "0x0069D214",
+   "note": "no command seen in the river trace (PPFX calls it)",
+   "id": "0x0069CC7C"
+  },
+  {
+   "addr": "0x0069D238",
+   "note": "no command seen in the river trace (PPFX calls it)",
+   "id": "0x0069CCA0"
+  },
+  {
+   "addr": "0x0069D278",
+   "note": "no command seen in the river trace (PPFX calls it)",
+   "id": "0x0069CCE0"
+  },
+  {
+   "addr": "0x0069D280",
+   "note": "no command seen in the river trace (PPFX calls it)",
+   "id": "0x0069CCE8"
+  },
+  {
+   "addr": "0x0069D298",
+   "note": "no command seen in the river trace (PPFX calls it)",
+   "id": "0x0069CD00"
+  },
+  {
+   "addr": "0x0069D2A4",
+   "note": "no command seen in the river trace (PPFX calls it)",
+   "id": "0x0069CD0C"
+  },
+  {
+   "addr": "0x0069D2F0",
+   "note": "no command seen in the river trace (PPFX calls it)",
+   "id": "0x0069CD58"
+  },
+  {
+   "addr": "0x0069D2F8",
+   "note": "no command seen in the river trace (PPFX calls it)",
+   "id": "0x0069CD60"
+  },
+  {
+   "addr": "0x0069D35C",
+   "note": "no command seen in the river trace (PPFX calls it)",
+   "id": "0x0069CDC4"
+  },
+  {
+   "addr": "0x0069D3E8",
+   "note": "no command seen in the river trace (PPFX calls it)",
+   "id": "0x0069CE50"
+  },
+  {
+   "addr": "0x0069D44C",
+   "note": "no command seen in the river trace (PPFX calls it)",
+   "id": "0x0069CEB4"
+  },
+  {
+   "addr": "0x0069D49C",
+   "note": "no command seen in the river trace (PPFX calls it)",
+   "id": "0x0069CF04"
+  },
+  {
+   "addr": "0x0069D4CC",
+   "note": "no command seen in the river trace (PPFX calls it)",
+   "id": "0x0069CF34"
+  },
+  {
+   "addr": "0x0069D7D8",
+   "note": "no command seen in the river trace (PPFX calls it)",
+   "id": "0x0069D240"
+  },
+  {
+   "addr": "0x0069E2F8",
+   "note": "cellGcmSetFlip (the frame loop's flip) (flip)",
+   "id": "0x0069DD60"
+  },
+  {
+   "addr": "0x0069EA0C",
+   "note": "no command seen in the river trace (libgcm calls it for PPFX)",
+   "id": "0x0069E474"
+  },
+  {
+   "addr": "0x0069EC78",
+   "note": "method 0x1D60 (libgcm calls it for PPFX)",
+   "id": "0x0069E6E0"
+  },
+  {
+   "addr": "0x0069ED84",
+   "note": "viewport (PPFX calls it)",
+   "id": "0x0069E7EC"
+  },
+  {
+   "addr": "0x0069EF34",
+   "note": "fragment program (libgcm calls it for PPFX)",
+   "id": "0x0069E99C"
+  },
+  {
+   "addr": "0x0069F734",
+   "note": "vertex data array (PPFX calls it)",
+   "id": "0x0069F19C"
+  },
+  {
+   "addr": "0x0069F850",
+   "note": "texture (libgcm calls it for PPFX)",
+   "id": "0x0069F2B8"
+  },
+  {
+   "addr": "0x0069F9EC",
+   "note": "no command seen in the river trace (PPFX calls it)",
+   "id": "0x0069F454"
+  },
+  {
+   "addr": "0x0069FDAC",
+   "note": "no command seen in the river trace (PPFX calls it)",
+   "id": "0x0069F814"
+  },
+  {
+   "addr": "0x0069FEDC",
+   "note": "surface (libgcm calls it for PPFX)",
+   "id": "0x0069F944"
+  },
+  {
+   "addr": "0x006A01C4",
+   "note": "no command seen in the river trace (PPFX calls it)",
+   "id": "0x0069FC2C"
+  },
+  {
+   "addr": "0x006A01D0",
+   "note": "inline transfer (the fragment program's constant patch) (libgcm calls it for PPFX)",
+   "id": "0x0069FC38"
+  },
+  {
+   "addr": "0x006A22B4",
+   "note": "no command seen in the river trace (PPFX calls it)",
+   "id": "0x006A1D1C"
+  },
+  {
+   "addr": "0x006A23C0",
+   "note": "draw arrays (PPFX calls it)",
+   "id": "0x006A1E28"
+  },
+  {
+   "addr": "0x006A3904",
+   "note": "no command seen in the river trace (PPFX calls it)",
+   "id": "0x006A336C"
+  },
+  {
+   "addr": "0x006A3F84",
+   "note": "vertex program constants (PPFX calls it)",
+   "id": "0x006A39EC"
+  },
+  {
+   "addr": "0x006A4AFC",
+   "note": "no command seen in the river trace (PPFX calls it)",
+   "id": "0x006A4564"
+  },
+  {
+   "addr": "0x006A53E8",
+   "note": "vertex program (PPFX calls it)",
+   "id": "0x006A4E50"
+  },
+  {
+   "addr": "0x006A5C54",
+   "note": "method 0x1D7C (PPFX calls it)",
+   "id": "0x006A56BC"
+  },
+  {
+   "addr": "0x006A5FD8",
+   "note": "no command seen in the river trace (PPFX calls it)",
+   "id": "0x006A5A40"
+  },
+  {
+   "addr": "0x006A6074",
+   "note": "no command seen in the river trace (PPFX calls it)",
+   "id": "0x006A5ADC"
+  },
+  {
+   "addr": "0x006A61C8",
+   "note": "writes 0314 (PPFX calls it)",
+   "id": "0x006A5C30"
+  },
+  {
+   "addr": "0x006A628C",
+   "note": "writes 0100 1D94 (PPFX calls it)",
+   "id": "0x006A5CF4"
+  },
+  {
+   "addr": "0x006A6338",
+   "note": "writes 1D90 (PPFX calls it)",
+   "id": "0x006A5DA0"
+  },
+  {
+   "addr": "0x006A63C8",
+   "note": "writes 1D8C (PPFX calls it)",
+   "id": "0x006A5E30"
+  },
+  {
+   "addr": "0x006A6458",
+   "note": "colour mask (PPFX calls it)",
+   "id": "0x006A5EC0"
+  },
+  {
+   "addr": "0x006A6578",
+   "note": "writes 1830 (PPFX calls it)",
+   "id": "0x006A5FE0"
+  },
+  {
+   "addr": "0x006A6608",
+   "note": "writes 0A6C (PPFX calls it)",
+   "id": "0x006A6070"
+  },
+  {
+   "addr": "0x006A6698",
+   "note": "writes 0A70 (PPFX calls it)",
+   "id": "0x006A6100"
+  },
+  {
+   "addr": "0x006A684C",
+   "note": "writes 03BC (PPFX calls it)",
+   "id": "0x006A62B4"
+  },
+  {
+   "addr": "0x006A68DC",
+   "note": "writes 1DB4 (PPFX calls it)",
+   "id": "0x006A6344"
+  },
+  {
+   "addr": "0x006A6AA4",
+   "note": "polygon smooth (PPFX calls it)",
+   "id": "0x006A650C"
+  },
+  {
+   "addr": "0x006A6B34",
+   "note": "writes 147C (PPFX calls it)",
+   "id": "0x006A659C"
+  },
+  {
+   "addr": "0x006A6BC4",
+   "note": "writes 1828 (PPFX calls it)",
+   "id": "0x006A662C"
+  },
+  {
+   "addr": "0x006A6C54",
+   "note": "back polygon mode (PPFX calls it)",
+   "id": "0x006A66BC"
+  },
+  {
+   "addr": "0x006A6CE4",
+   "note": "scissor (PPFX calls it)",
+   "id": "0x006A674C"
+  },
+  {
+   "addr": "0x006A6DA8",
+   "note": "writes 0368 (PPFX calls it)",
+   "id": "0x006A6810"
+  },
+  {
+   "addr": "0x006A6E38",
+   "note": "writes 142C (PPFX calls it)",
+   "id": "0x006A68A0"
+  },
+  {
+   "addr": "0x006A7338",
+   "note": "alpha test enable (PPFX calls it)",
+   "id": "0x006A6DA0"
+  },
+  {
+   "addr": "0x006A73C8",
+   "note": "blend enable (PPFX calls it)",
+   "id": "0x006A6E30"
+  },
+  {
+   "addr": "0x006A750C",
+   "note": "writes 0374 (PPFX calls it)",
+   "id": "0x006A6F74"
+  },
+  {
+   "addr": "0x006A759C",
+   "note": "cull face enable (PPFX calls it)",
+   "id": "0x006A7004"
+  },
+  {
+   "addr": "0x006A76BC",
+   "note": "depth test enable (PPFX calls it)",
+   "id": "0x006A7124"
+  },
+  {
+   "addr": "0x006A774C",
+   "note": "method 0x0300 (PPFX calls it)",
+   "id": "0x006A71B4"
+  },
+  {
+   "addr": "0x006A77DC",
+   "note": "stencil test enable (PPFX calls it)",
+   "id": "0x006A7244"
+  },
+  {
+   "addr": "0x006A78FC",
+   "note": "writes 0A68 (PPFX calls it)",
+   "id": "0x006A7364"
+  },
+  {
+   "addr": "0x006A7B70",
+   "note": "writes 1A1C 1A3C 1A5C 1A7C 1A9C 1ABC ... (PPFX calls it)",
+   "id": "0x006A75D8"
+  },
+  {
+   "addr": "0x006A7C0C",
+   "note": "texture filter (PPFX calls it)",
+   "id": "0x006A7674"
+  },
+  {
+   "addr": "0x006A7CDC",
+   "note": "texture address (PPFX calls it)",
+   "id": "0x006A7744"
+  },
+  {
+   "addr": "0x006A7DCC",
+   "note": "texture control 0 (PPFX calls it)",
+   "id": "0x006A7834"
+  },
+  {
+   "addr": "0x006A813C",
+   "note": "vertex cache invalidate (PPFX calls it)",
+   "id": "0x006A7BA4"
+  },
+  {
+   "addr": "0x006A8290",
+   "note": "frequency divider (PPFX calls it)",
+   "id": "0x006A7CF8"
+  },
+  {
+   "addr": "0x006A8448",
+   "note": "method 0x1FEC (PPFX calls it)",
+   "id": "0x006A7EB0"
+  },
+  {
+   "addr": "0x006A85B8",
+   "note": "writes 1E98 (PPFX calls it)",
+   "id": "0x006A8020"
+  },
+  {
+   "addr": "0x006A8714",
+   "note": "writes 17CC (PPFX calls it)",
+   "id": "0x006A817C"
+  },
+  {
+   "addr": "0x006A87A4",
+   "note": "writes 17C8 (PPFX calls it)",
+   "id": "0x006A820C"
+  },
+  {
+   "addr": "0x006A8834",
+   "note": "writes 1800 (PPFX calls it)",
+   "id": "0x006A829C"
+  },
+  {
+   "addr": "0x006A9684",
+   "note": "writes 1738 (PPFX calls it)",
+   "id": "0x006A90EC"
+  },
+  {
+   "addr": "0x006A9C80",
+   "note": "polygon offset fill enable (PPFX calls it)",
+   "id": "0x006A96E8"
+  },
+  {
+   "addr": "0x006A9D90",
+   "note": "no command seen in the river trace (PPFX calls it)",
+   "id": "0x006A97F8"
+  },
+  {
+   "addr": "0x006AA470",
+   "note": "no command seen in the river trace (PPFX calls it)",
+   "id": "0x006A9ED8"
+  },
+  {
+   "addr": "0x00964454",
+   "note": "the game's memcpy: R3's recorder takes copies into RSX local memory (the fragment programs' uploads) into its program shadow, and asp's re-emissions of its state store into the command buffer",
+   "id": "0x00963EBC"
+  },
+  {
+   "addr": "0x006C0880",
+   "note": "asp's colour write mask setter (device, const u8 rgba[4]): the colour mask PPFX's draws inherit",
+   "id": "0x006C02E8"
+  },
+  {
+   "addr": "0x006C3D38",
+   "note": "asp's sampler bind (device, unit, enable): a unit's sampler state from asp's per-unit sampler table; PPFX inherits unit 0's address mode from it",
+   "id": "0x006C37A0"
+  },
+  {
+   "addr": "0x006D1178",
+   "note": "asp's append of a prebuilt block (context, source, words): the copy of its state store, by the game's memcpy",
+   "id": "0x006D0BE0"
+  },
+  {
+   "addr": "0x006D1CFC",
+   "note": "asp's pass apply: colour mask, depth test and depth mask for a pass",
+   "id": "0x006D1764"
+  },
+  {
+   "addr": "0x006CD5AC",
+   "note": "asp's state block compiler (context, ...): asp's whole render state into a block",
+   "id": "0x006CD014"
+  },
+  {
+   "addr": "0x006D1130",
+   "note": "asp's rebuild of its global state block (through 0x006CD014)",
+   "id": "0x006D0B98"
+  },
+  {
+   "addr": "0x006C075C",
+   "note": "asp's depth write mask setter (device, enable)",
+   "id": "0x006C01C4"
+  },
+  {
+   "addr": "0x006C4BC0",
+   "note": "asp's polygon offset setter (device, factor, units)",
+   "id": "0x006C4628"
+  },
+  {
+   "addr": "0x006C4F54",
+   "note": "asp's depth test and function setter (device, func)",
+   "id": "0x006C49BC"
+  },
+  {
+   "addr": "0x006C52B4",
+   "note": "asp's cull setter (device, mode)",
+   "id": "0x006C4D1C"
+  },
+  {
+   "addr": "0x006C5830",
+   "note": "asp's blend setter (device, ...)",
+   "id": "0x006C5298"
+  },
+  {
+   "addr": "0x006C1008",
+   "note": "asp's stencil function and operations setter",
+   "id": "0x006C0A70"
+  },
+  {
+   "addr": "0x006C13D0",
+   "note": "asp's stencil write mask setter",
+   "id": "0x006C0E38"
+  },
+  {
+   "addr": "0x006C1F3C",
+   "note": "asp's line width setter",
+   "id": "0x006C19A4"
+  },
+  {
+   "addr": "0x006C7520",
+   "note": "asp's draw (the draw context's method): R5's asp records, built at its return (docs/NATIVE_R4.md section 10)",
+   "id": "0x006C6F88"
+  },
+  {
+   "addr": "0x006CB608",
+   "note": "asp's texture apply (this, {unit, ..}, CellGcmTexture*): a unit's texture",
+   "id": "0x006CB070"
+  },
+  {
+   "addr": "0x006D3728",
+   "note": "asp's vertex stream bind (stream object, {index, ..}): a vertex input's size, type, stride, location, frequency, offset",
+   "id": "0x006D3190"
+  },
+  {
+   "addr": "0x006D3868",
+   "note": "asp's vertex stream rebind (stream object holding its index)",
+   "id": "0x006D32D0"
+  },
+  {
+   "addr": "0x006CA20C",
+   "note": "asp's vertex constant upload (this, {start, ..}, const float*, count)",
+   "id": "0x006C9C74"
+  },
+  {
+   "addr": "0x006CA968",
+   "note": "asp's vertex program upload and bind (shader object): R5's probe of asp's shader container",
+   "id": "0x006CA3D0"
+  },
+  {
+   "addr": "0x006C9F48",
+   "note": "asp's fragment program bind (shader object): R5's probe",
+   "id": "0x006C99B0"
+  },
+  {
+   "addr": "0x006C0A24",
+   "note": "asp's blend enable setter (method 0x0310): R5's encoders and setter probe (docs/NATIVE_R5.md)",
+   "id": "0x006C048C"
+  },
+  {
+   "addr": "0x006C0B44",
+   "note": "asp's alpha test enable setter (0x0304)",
+   "id": "0x006C05AC"
+  },
+  {
+   "addr": "0x006C0C64",
+   "note": "asp's polygon mode setter (front and back, 0x1828/0x182C)",
+   "id": "0x006C06CC"
+  },
+  {
+   "addr": "0x006C0E88",
+   "note": "asp's scissor setter (0x08C0/0x08C4)",
+   "id": "0x006C08F0"
+  },
+  {
+   "addr": "0x006C5708",
+   "note": "asp's scissor setter, a second form (0x08C0/0x08C4)",
+   "id": "0x006C5170"
+  },
+  {
+   "addr": "0x006D1754",
+   "note": "asp's scissor setter, a third form (0x08C0/0x08C4)",
+   "id": "0x006D11BC"
+  },
+  {
+   "addr": "0x006C14F8",
+   "note": "asp's viewport setter (clip range 0x0394/0x0398, viewport 0x0A00/0x0A04, scale and offset 0x0A20-0x0A3C)",
+   "id": "0x006C0F60"
+  },
+  {
+   "addr": "0x006C32D4",
+   "note": "asp's clear (clear values 0x1D8C/0x1D90, the clear 0x1D94)",
+   "id": "0x006C2D3C"
+  },
+  {
+   "addr": "0x006C481C",
+   "note": "asp's alpha function setter (enable, function, reference: 0x0304-0x030C)",
+   "id": "0x006C4284"
+  },
+  {
+   "addr": "0x006C4AA0",
+   "note": "asp's stencil test enable setter (0x0328)",
+   "id": "0x006C4508"
+  },
+  {
+   "addr": "0x006C8FCC",
+   "note": "asp's render target set (the surface: 0x018C-0x02B8, 0x1D88)",
+   "id": "0x006C8A34"
+  },
+  {
+   "addr": "0x006CB37C",
+   "note": "asp's fragment program upload (an inline transfer into local memory)",
+   "id": "0x006CADE4"
+  },
+  {
+   "addr": "0x006C9BBC",
+   "note": "asp's fragment program constant patch (an inline transfer into a program in local memory)",
+   "id": "0x006C9624"
+  },
+  {
+   "addr": "0x006D141C",
+   "note": "asp's texture apply for unit 4 (0x1A80-0x1A98, control 3 0x1850): the shadow map",
+   "id": "0x006D0E84"
+  },
+  {
+   "addr": "0x006A26FC",
+   "note": "cellGcmSetDrawIndexArray (the game's own draws, not PPFX's): R5 records those inside asp's scene -- the reflection's stencil mask, the water, scene parts (docs/NATIVE_R5.md)",
+   "id": "0x006A2164"
+  },
+  {
+   "addr": "0x0069E518",
+   "note": "performance-marker push (NOP 0x0100 with a string): R7 skips it",
+   "id": "0x0069DF80"
+  },
+  {
+   "addr": "0x0069E678",
+   "note": "performance-marker pop: R7 skips it",
+   "id": "0x0069E0E0"
+  },
+  {
+   "addr": "0x0069EB24",
+   "note": "cellGcmSetWaitLabel (NV406E offset + acquire; the wait-flip acquire among its calls): R7's kWait record",
+   "id": "0x0069E58C"
+  },
+  {
+   "addr": "0x006A5BBC",
+   "note": "a report request (NV4097_GET_REPORT, type 1, index r4: the profiling meter's): R7's kReport record",
+   "id": "0x006A5624"
+  },
+  {
+   "addr": "0x006A98F0",
+   "note": "cellGcmSetReportLocation (NV4097_SET_CONTEXT_DMA_REPORT from libgcm's table): R7 keeps the location as state",
+   "id": "0x006A9358"
+  },
+  {
+   "addr": "0x006A6124",
+   "note": "blend equation (0x0320, the frame start's reset): R7 state",
+   "id": "0x006A5B8C"
+  },
+  {
+   "addr": "0x006A64E8",
+   "note": "colour mask of the extra targets (0x0370, the reset): R7 state",
+   "id": "0x006A5F50"
+  },
+  {
+   "addr": "0x006A6728",
+   "note": "front face (0x1834, the reset and Bink's set-up): R7 state",
+   "id": "0x006A6190"
+  },
+  {
+   "addr": "0x006A7288",
+   "note": "z min/max control (0x1D78, the reset): R7 state",
+   "id": "0x006A6CF0"
+  },
+  {
+   "addr": "0x006A7458",
+   "note": "blend enable of the extra targets (0x036C, the reset): R7 state",
+   "id": "0x006A6EC0"
+  },
+  {
+   "addr": "0x006A762C",
+   "note": "depth bounds test enable (0x0380, the reset): R7 state",
+   "id": "0x006A7094"
+  },
+  {
+   "addr": "0x006A786C",
+   "note": "two-sided stencil enable (0x0348, the reset): R7 state",
+   "id": "0x006A72D4"
+  },
+  {
+   "addr": "0x006A7A1C",
+   "note": "point sprite control (0x1EE4/0x1EE8, the reset): R7 state",
+   "id": "0x006A7484"
+  },
+  {
+   "addr": "0x006A5D14",
+   "note": "cellGcmSetWriteCommandLabel (NV406E release): R7's kLabel, written when consumed",
+   "id": "0x006A577C"
+  },
+  {
+   "addr": "0x006A5DC8",
+   "note": "cellGcmSetWriteBackEndLabel (0x1D6C/0x1D70; Bink's fence): R7's kLabel, written when the work before it completes",
+   "id": "0x006A5830"
+  },
+  {
+   "addr": "0x006A5E98",
+   "note": "cellGcmSetWriteTextureLabel (0x1D6C/0x1D74): R7's kLabel, written when the work before it completes",
+   "id": "0x006A5900"
+  },
+  {
+   "addr": "0x0069EA9C",
+   "note": "cellGcmSetJumpCommand: R7 skips it (no ring to steer)",
+   "id": "0x0069E504"
+  },
+  {
+   "addr": "0x006A0368",
+   "note": "a 2D transfer (NV3062/NV3089): watched by R7 (its inventory)",
+   "id": "0x0069FDD0"
+  },
+  {
+   "addr": "0x006A12F8",
+   "note": "a 2D transfer (NV3062/NV3089): watched by R7",
+   "id": "0x006A0D60"
+  },
+  {
+   "addr": "0x006A19DC",
+   "note": "an inline image transfer (NV308A): watched by R7",
+   "id": "0x006A1444"
+  },
+  {
+   "addr": "0x006A1D5C",
+   "note": "a 2D transfer: watched by R7",
+   "id": "0x006A17C4"
+  },
+  {
+   "addr": "0x006A1F0C",
+   "note": "a 2D transfer: watched by R7",
+   "id": "0x006A1974"
+  },
+  {
+   "addr": "0x006A20E0",
+   "note": "a 2D transfer: watched by R7",
+   "id": "0x006A1B48"
+  },
+  {
+   "addr": "0x006AC3FC",
+   "note": "a 2D transfer (Unsafe): watched by R7",
+   "id": "0x006ABE64"
+  },
+  {
+   "addr": "0x006AC554",
+   "note": "a 2D transfer (Unsafe): watched by R7",
+   "id": "0x006ABFBC"
+  },
+  {
+   "addr": "0x006AD240",
+   "note": "a 2D transfer (Unsafe): watched by R7",
+   "id": "0x006ACCA8"
+  },
+  {
+   "addr": "0x006AD7FC",
+   "note": "a 2D transfer (Unsafe): watched by R7",
+   "id": "0x006AD264"
+  },
+  {
+   "addr": "0x006AD980",
+   "note": "a 2D transfer (Unsafe): watched by R7",
+   "id": "0x006AD3E8"
+  },
+  {
+   "addr": "0x006ADA88",
+   "note": "a 2D transfer (Unsafe): watched by R7",
+   "id": "0x006AD4F0"
+  },
+  {
+   "addr": "0x006ADBF4",
+   "note": "a 2D transfer (Unsafe): watched by R7",
+   "id": "0x006AD65C"
+  },
+  {
+   "addr": "0x0069F348",
+   "note": "a back-end label helper (0x1D6C/0x1D70/0x0110): watched by R7",
+   "id": "0x0069EDB0"
+  },
+  {
+   "addr": "0x0069F43C",
+   "note": "a texture label helper (0x1D6C/0x1D74/0x0110): watched by R7",
+   "id": "0x0069EEA4"
+  },
+  {
+   "addr": "0x006AA5CC",
+   "note": "wait label, Unsafe: watched by R7",
+   "id": "0x006AA034"
+  },
+  {
+   "addr": "0x006AA60C",
+   "note": "command label, Unsafe: watched by R7",
+   "id": "0x006AA074"
+  },
+  {
+   "addr": "0x006AA64C",
+   "note": "back-end label, Unsafe: watched by R7",
+   "id": "0x006AA0B4"
+  },
+  {
+   "addr": "0x006AA6A8",
+   "note": "texture label, Unsafe: watched by R7",
+   "id": "0x006AA110"
+  },
+  {
+   "addr": "0x006ABBA4",
+   "note": "back-end label + 0x0110, Unsafe: watched by R7",
+   "id": "0x006AB60C"
+  },
+  {
+   "addr": "0x006ABC24",
+   "note": "texture label + 0x0110, Unsafe: watched by R7",
+   "id": "0x006AB68C"
+  },
+  {
+   "addr": "0x006A3870",
+   "note": "a FIFO reset (jump to 0x1000, put = 0x1000, waits for get): watched by R7",
+   "id": "0x006A32D8"
+  },
+  {
+   "addr": "0x006A7AE0",
+   "note": "cellGcmSetInvalidateTextureCache (NV4097 0x1FD8; Bink's, each movie frame): R7 skips it -- no texture cache to invalidate",
+   "id": "0x006A7548"
+  },
+  {
+   "addr": "0x006AAE40",
+   "note": "texture cache invalidate, Unsafe: watched by R7",
+   "id": "0x006AA8A8"
+  },
+  {
+   "addr": "0x006A67B8",
+   "note": "cellGcmSetLineWidth (0x03B8; the editor's grid): R7 state",
+   "id": "0x006A6220"
+  },
+  {
+   "addr": "0x006AA938",
+   "note": "cellGcmSetLineWidth, Unsafe: R7 state",
+   "id": "0x006AA3A0"
+  },
+  {
+   "addr": "0x0011A954",
+   "note": "M11.0c: the player's damage (CPlayerActor::damageHP): developer mode's no death (port/devtools; docs/M11_PLAN.md)",
+   "id": "0x0011A94C"
+  }
+ ]
+}

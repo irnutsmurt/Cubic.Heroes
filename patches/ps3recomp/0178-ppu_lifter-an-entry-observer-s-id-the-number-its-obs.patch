@@ -1,0 +1,144 @@
+From 8eb021000b67a25157d46d63324e33ce28a8cdc1 Mon Sep 17 00:00:00 2001
+From: giteaguy <73799093+irnutsmurt@users.noreply.github.com>
+Date: Wed, 25 Nov 2026 10:04:07 -0800
+Subject: [PATCH] ppu_lifter: an entry observer's id -- the number its observer
+ is given
+
+An --entry-observers entry may name an "id" (default: its addr): the observed function hands the observer that id,
+at entry and at exit, in place of its own address. Another program of the same game, whose functions moved, keeps
+the first program's addresses as ids, so the port's observer dispatches on the same numbers for both programs. Two
+observers with one id, or a misaligned id, stop the lift.
+
+tools/test_ppu_lifter_observer_id.py: no id (its address, as before), an id at entry and exit, a duplicate and a
+misaligned id refused.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ tools/ppu_lifter.py                  | 22 ++++++-----
+ tools/test_ppu_lifter_observer_id.py | 57 ++++++++++++++++++++++++++++
+ 2 files changed, 70 insertions(+), 9 deletions(-)
+ create mode 100644 tools/test_ppu_lifter_observer_id.py
+
+diff --git a/tools/ppu_lifter.py b/tools/ppu_lifter.py
+index b434f05b..a6cbc33e 100644
+--- a/tools/ppu_lifter.py
++++ b/tools/ppu_lifter.py
+@@ -1509,18 +1509,21 @@ def _obs_stores(line: str) -> str:
+     return "".join(out)
+ 
+ 
+-def load_entry_observers(path: str) -> set[int]:
++def load_entry_observers(path: str) -> dict[int, int]:
+     """Read an --entry-observers file:
+ 
+         {"observers": [{"addr": "0x0069F944", "note": "..."}, ...]}
+ 
+-    -> {addr}. An observed function is a wrapper around its lifted body
++    -> {addr: id}. An entry's "id" (default: its addr) is the number the
++    observer is given for it: another program of the same game, whose
++    functions moved, keeps the first program's addresses as ids, so the
++    port's observer sees the same numbers in both. An observed function is a wrapper around its lifted body
+     (emitted unchanged as `static void <name>__body`):
+ 
+         if (g_ppu_entry_observe) {
+-            int a = ppu_entry_observe(addr, ctx);
++            int a = ppu_entry_observe(id, ctx);
+             if (a == 1) return;                       // the observer did the call's work
+-            if (a == 2) { body; ppu_exit_observe(addr, ctx); return; }
++            if (a == 2) { body; ppu_exit_observe(id, ctx); return; }
+         }
+         body;
+ 
+@@ -1532,12 +1535,13 @@ def load_entry_observers(path: str) -> set[int]:
+     development lift only; the production lift takes no such file."""
+     with open(path) as f:
+         spec = json.load(f)
+-    out: set[int] = set()
++    out: dict[int, int] = {}
+     for e in spec.get("observers", []):
+         addr = int(str(e["addr"]), 0)
+-        if addr & 3 or addr in out:
+-            sys.exit(f"[ppu_lifter] {path}: bad or duplicate observer 0x{addr:08X}")
+-        out.add(addr)
++        oid = int(str(e.get("id", e["addr"])), 0)
++        if addr & 3 or addr in out or oid & 3 or oid in out.values():
++            sys.exit(f"[ppu_lifter] {path}: bad or duplicate observer 0x{addr:08X} (id 0x{oid:08X})")
++        out[addr] = oid
+     # "store_probes": false -- a lean lift (the port's native play): the
+     # observed bodies' stores are not routed through PPU_OBS_ST
+     global ENTRY_OBSERVER_STORE_PROBES
+@@ -4966,7 +4970,7 @@ class PPULifter:
+         if uses_sjlj:
+             lines.append('#include "ppu_sjlj.h"   /* --sjlj: guest setjmp/longjmp */')
+         if observed:
+-            a = f"0x{func.start_addr:08X}u"
++            a = f"0x{self.entry_observers[func.start_addr]:08X}u"   # its id: its address, or the first program's
+             lines += [f"void {weak}{func.name}(ppu_context* ctx) {{",
+                       "    if (g_ppu_entry_observe) {  /* entry observer */",
+                       f"        const int _ob = ppu_entry_observe({a}, ctx);",
+diff --git a/tools/test_ppu_lifter_observer_id.py b/tools/test_ppu_lifter_observer_id.py
+new file mode 100644
+index 00000000..81267b1c
+--- /dev/null
++++ b/tools/test_ppu_lifter_observer_id.py
+@@ -0,0 +1,57 @@
++#!/usr/bin/env python3
++"""--entry-observers: an observer's id.
++
++1. Without "id" an observed function hands the observer its own address, as before.
++2. With "id" (another program of the same game: the first program's address of the function, which moved) the
++   observer is handed the id, at entry and exit, so the port's dispatch sees the same numbers for both programs.
++3. Two observers with one id, or a misaligned id, stop the lift.
++
++Run: python tools/test_ppu_lifter_observer_id.py
++"""
++import json
++from pathlib import Path
++import subprocess
++import sys
++import tempfile
++
++CODE = bytes.fromhex(
++    "38600001"   # 0x10000 li  r3, 1
++    "4e800020"   # 0x10004 blr
++    "38600002"   # 0x10008 li  r3, 2
++    "4e800020")  # 0x1000C blr
++
++
++def lift(root, observers):
++    (root / "obs.json").write_text(json.dumps({"store_probes": False, "observers": observers}))
++    out = root / "out"
++    cmd = [sys.executable, str(Path(__file__).with_name("ppu_lifter.py")),
++           str(root / "code.bin"), "--raw", "--base", "0x10000",
++           "--functions", str(root / "functions.json"), "--jobs", "1",
++           "--entry-observers", str(root / "obs.json"), "--output", str(out)]
++    r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=120)
++    text = "".join(p.read_text() for p in sorted(out.glob("ppu_recomp_*.cpp"))) if r.returncode == 0 else ""
++    return r, text
++
++
++def main():
++    with tempfile.TemporaryDirectory() as tmp:
++        root = Path(tmp)
++        (root / "code.bin").write_bytes(CODE)
++        (root / "functions.json").write_text(json.dumps([{"start": "0x10000", "end": "0x10008"},
++                                                         {"start": "0x10008", "end": "0x10010"}]))
++        r, text = lift(root, [{"addr": "0x10000"}, {"addr": "0x10008", "id": "0x0069DD60"}])
++        assert r.returncode == 0, r.stderr
++        assert "ppu_entry_observe(0x00010000u, ctx)" in text, text                # no id: its address
++        assert "ppu_entry_observe(0x0069DD60u, ctx)" in text, text                # the id
++        assert "ppu_exit_observe(0x0069DD60u, ctx)" in text, text
++        assert "ppu_entry_observe(0x00010008u" not in text, text
++
++        r, _ = lift(root, [{"addr": "0x10000", "id": "0x0069DD60"}, {"addr": "0x10008", "id": "0x0069DD60"}])
++        assert r.returncode != 0 and "duplicate observer" in r.stderr, r.stderr
++        r, _ = lift(root, [{"addr": "0x10000", "id": "0x0069DD62"}])
++        assert r.returncode != 0 and "bad or duplicate observer" in r.stderr, r.stderr
++    print("entry observers: the id given to the observer (its address by default)")
++
++
++if __name__ == "__main__":
++    main()
+-- 
+2.56.1
+

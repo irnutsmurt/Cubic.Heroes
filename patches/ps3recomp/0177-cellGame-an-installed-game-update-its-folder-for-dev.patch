@@ -1,0 +1,360 @@
+From 15c72e8211654d396cf4975a191d13b22e716c5d Mon Sep 17 00:00:00 2001
+From: giteaguy <73799093+irnutsmurt@users.noreply.github.com>
+Date: Wed, 25 Nov 2026 09:52:42 -0800
+Subject: [PATCH] cellGame: an installed game update -- its folder for
+ /dev_hdd0/game/<title>/, and a patch boot
+
+PS3_GAME_UPDATE_DIR names a host folder holding a disc title's installed update as Sony's package lays it out
+(PARAM.SFO, USRDIR/...). Its PARAM.SFO's TITLE_ID says whose update it is: the guest's /dev_hdd0/game/<that title>/
+then maps to the folder -- in ppu_fs.cpp's host_path, sys_fs.c's path translation and cellGame's own paths -- while
+every other /dev_hdd0 path stays on PS3_HDD0_ROOT (the saves, other titles). With the update's CATEGORY "GD" the boot
+is a patch boot, as on a PS3 with the update installed: cellGameBootCheck still reports the disc game,
+cellGamePatchCheck answers CELL_OK and opens the update's session (ContentPermit names /dev_hdd0/game/<title> and its
+USRDIR, nothing is created for it in the saves area), DataCheck finds the title's folder there, and APP_VER and
+VERSION are the update's. Without the variable, or with a folder that has no readable PARAM.SFO (said once),
+nothing changes: PatchCheck answers NOTPATCH as before.
+
+libs/system/tests/test_game_update.c: the mapping (that title only, not a longer id, the saves or the bare device),
+the patch boot and its version, an update for another title, a folder with no PARAM.SFO.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libs/system/cellGame.c               |  91 ++++++++++++++++-
+ libs/system/cellGame.h               |   6 ++
+ libs/system/tests/test_game_update.c | 140 +++++++++++++++++++++++++++
+ runtime/ppu/ppu_fs.cpp               |   3 +
+ runtime/syscalls/sys_fs.c            |   3 +
+ 5 files changed, 241 insertions(+), 2 deletions(-)
+ create mode 100644 libs/system/tests/test_game_update.c
+
+diff --git a/libs/system/cellGame.c b/libs/system/cellGame.c
+index e1fc3cc4..0936b430 100644
+--- a/libs/system/cellGame.c
++++ b/libs/system/cellGame.c
+@@ -286,6 +286,65 @@ static int sfo_read_string(const char* sfo_path, const char* key,
+     return ret;
+ }
+ 
++/* ---------------------------------------------------------------------------
++ * The installed game update (a disc title patched, e.g. 3D Dot Game Heroes to v1.01): PS3_GAME_UPDATE_DIR names the
++ * host folder holding it as Sony's package lays it out (PARAM.SFO, USRDIR/...). Its PARAM.SFO's TITLE_ID says whose
++ * update it is: the guest's /dev_hdd0/game/<that title>/ then maps to the folder (ppu_fs.cpp host_path, sys_fs.c,
++ * the paths here), every other /dev_hdd0 path staying on PS3_HDD0_ROOT. With its CATEGORY "GD" the boot is a patch
++ * boot, as on a PS3 that has the update installed: cellGamePatchCheck opens a session for it and APP_VER/VERSION are
++ * the update's. A folder with no readable PARAM.SFO is ignored (said once): the game boots as it does without one.
++ * -----------------------------------------------------------------------*/
++static int  s_upd_init = 0;
++static char s_upd_dir[GAME_HOST_PATH_MAX] = "";
++static char s_upd_title[16] = "";
++static int  s_upd_patch = 0;   /* its CATEGORY is "GD": a patch */
++
++static void update_init(void)
++{
++    if (s_upd_init) return;
++    s_upd_init = 1;
++    const char* d = getenv("PS3_GAME_UPDATE_DIR");
++    if (!d || !*d) return;
++    char sfo[GAME_HOST_PATH_MAX], t[64];
++    snprintf(sfo, sizeof sfo, "%s/PARAM.SFO", d);
++    if (sfo_read_string(sfo, "TITLE_ID", t, sizeof t) != 0 || !t[0] || strlen(t) >= sizeof s_upd_title) {
++        printf("[cellGame] game update '%s': no readable PARAM.SFO there -- ignored\n", d);
++        return;
++    }
++    snprintf(s_upd_dir, sizeof s_upd_dir, "%s", d);
++    for (char* q = s_upd_dir; *q; q++) if (*q == 0x5C) *q = 0x2F;
++    for (size_t n = strlen(s_upd_dir); n > 1 && s_upd_dir[n - 1] == '/'; n--) s_upd_dir[n - 1] = '\0';
++    strcpy(s_upd_title, t);
++    s_upd_patch = sfo_read_string(sfo, "CATEGORY", t, sizeof t) == 0 && strcmp(t, "GD") == 0;
++    printf("[cellGame] game update for %s in '%s'%s\n", s_upd_title, s_upd_dir,
++           s_upd_patch ? " (a patch: the boot is a patch boot)" : " (not CATEGORY GD: its files only)");
++}
++
++const char* ps3_game_update_dir(void)
++{
++    update_init();
++    return s_upd_dir[0] ? s_upd_dir : NULL;
++}
++
++int ps3_game_update_path(const char* guest, char* out, size_t cap)
++{
++    update_init();
++    if (!s_upd_dir[0] || !guest || strncmp(guest, "/dev_hdd0/game/", 15) != 0) return 0;
++    const char* rest = guest + 15;
++    const size_t n = strlen(s_upd_title);
++    if (strncmp(rest, s_upd_title, n) != 0 || (rest[n] != '/' && rest[n] != '\0')) return 0;
++    snprintf(out, cap, "%s%s", s_upd_dir, rest + n);
++    for (char* p = out; *p; p++) if (*p == 0x5C) *p = 0x2F;
++    return 1;
++}
++
++/* the update's folder when `dir` (a content check's directory name) is the title it updates, else NULL */
++static const char* update_for(const char* dir)
++{
++    update_init();
++    return s_upd_dir[0] && dir && strcmp(dir, s_upd_title) == 0 ? s_upd_dir : NULL;
++}
++
+ /* Read title/version fields from the game's PARAM.SFO at boot. Call once
+  * from main.cpp before the guest runs. Falls back to the defaults if the SFO
+  * can't be read (keeps the game working without it). */
+@@ -322,6 +381,19 @@ void cellGame_init_from_paramsfo(const char* sfo_path)
+     if (sfo_read_string(sfo_path, "APP_VER", tmp, sizeof(tmp)) == 0 && tmp[0]) {
+         strncpy(s_app_ver, tmp, sizeof(s_app_ver) - 1); s_app_ver[sizeof(s_app_ver) - 1] = '\0';
+     }
++    /* a patch boot: the version is the update's (a PS3 reads it from the installed patch) */
++    update_init();
++    if (s_upd_patch && strcmp(s_upd_title, s_title_id) == 0) {
++        char usfo[GAME_HOST_PATH_MAX];
++        snprintf(usfo, sizeof usfo, "%s/PARAM.SFO", s_upd_dir);
++        if (sfo_read_string(usfo, "APP_VER", tmp, sizeof(tmp)) == 0 && tmp[0]) {
++            strncpy(s_app_ver, tmp, sizeof(s_app_ver) - 1); s_app_ver[sizeof(s_app_ver) - 1] = '\0';
++        }
++        if (sfo_read_string(usfo, "VERSION", tmp, sizeof(tmp)) == 0 && tmp[0]) {
++            strncpy(s_version, tmp, sizeof(s_version) - 1); s_version[sizeof(s_version) - 1] = '\0';
++        }
++        printf("[cellGame] the update's version: APP_VER '%s', VERSION '%s'\n", s_app_ver, s_version);
++    }
+ }
+ 
+ /* Central title-id accessor so other modules (cellSysutil etc.) don't hardcode it. */
+@@ -397,6 +469,18 @@ s32 cellGamePatchCheck(CellGameContentSize* size, void* reserved)
+     uint32_t size_ea = (uint32_t)(uintptr_t)size;
+     (void)reserved;
+     if (!size_ea) return CELL_GAME_ERROR_PARAM;
++    update_init();
++    if (s_upd_patch && strcmp(s_upd_title, s_title_id) == 0) {
++        /* a patch boot: the session is the update's (/dev_hdd0/game/<title>, mapped to its folder) */
++        vm_write32(size_ea + 0, (u32)content_free_kb());
++        vm_write32(size_ea + 4, (uint32_t)CELL_GAME_SIZEKB_NOTCALC);
++        vm_write32(size_ea + 8, 0);
++        s_check_is_disc = 0;
++        strncpy(s_check_dir, s_upd_title, sizeof(s_check_dir) - 1);
++        s_check_dir[sizeof(s_check_dir) - 1] = '\0';
++        printf("[cellGame] PatchCheck: a patch boot -- the update in '%s' (APP_VER %s)\n", s_upd_dir, s_app_ver);
++        return CELL_OK;
++    }
+     printf("[cellGame] PatchCheck: not a patch boot (type=%u)\n", s_game_type);
+     return CELL_GAME_ERROR_NOTPATCH;
+ }
+@@ -406,7 +490,9 @@ s32 cellGameContentPermit(char* contentInfoPath, char* usrdirPath)
+     printf("[cellGame] ContentPermit() -> %s\n",
+            s_check_is_disc ? "/dev_bdvd/PS3_GAME" : "game-data dir");
+ 
+-    if (!s_check_is_disc) {
++    if (!s_check_is_disc && update_for(s_check_dir)) {
++        printf("[cellGame] ContentPermit: the installed update's folder '%s'\n", s_upd_dir);
++    } else if (!s_check_is_disc) {
+         /* Ensure directories exist. IMPORTANT: also create them at the SAME host
+          * location the VFS (ppu_fs.cpp host_path) maps /dev_hdd0/game/<title>/ to,
+          * i.e. $ppu_vfs_root/game/<title>/. cellGame historically only created
+@@ -462,7 +548,8 @@ s32 cellGameDataCheck(u32 type, const char* dirName, CellGameContentSize* size)
+     s_check_dir[sizeof(s_check_dir) - 1] = '\0';
+ 
+     char path[GAME_HOST_PATH_MAX];
+-    snprintf(path, sizeof(path), "%s/%s", content_root(), check_dir);
++    if (update_for(check_dir)) snprintf(path, sizeof(path), "%s", s_upd_dir);   /* the installed update */
++    else snprintf(path, sizeof(path), "%s/%s", content_root(), check_dir);
+ 
+     uint32_t size_ea = (uint32_t)(uintptr_t)size;
+     if (size_ea) {
+diff --git a/libs/system/cellGame.h b/libs/system/cellGame.h
+index d0b99dfe..59743b9b 100644
+--- a/libs/system/cellGame.h
++++ b/libs/system/cellGame.h
+@@ -132,6 +132,12 @@ void cellGame_init_from_paramsfo(const char* sfo_path);
+ 
+ /* Central title-id accessor (so other modules don't hardcode placeholders). */
+ const char* cellGame_get_title_id(void);
++
++/* The installed game update (PS3_GAME_UPDATE_DIR: its folder as Sony's package lays it out): the folder, or NULL; and
++ * a guest path under /dev_hdd0/game/<its title>/ mapped into it (1), else 0 -- ppu_fs.cpp and sys_fs.c map the rest
++ * of /dev_hdd0 as before */
++const char* ps3_game_update_dir(void);
++int ps3_game_update_path(const char* guest, char* out, size_t cap);
+ const char* cellGame_get_hdd_title_id(void);
+ const char* cellGame_get_title(void);
+ 
+diff --git a/libs/system/tests/test_game_update.c b/libs/system/tests/test_game_update.c
+new file mode 100644
+index 00000000..686079f2
+--- /dev/null
++++ b/libs/system/tests/test_game_update.c
+@@ -0,0 +1,140 @@
++/* The installed game update (PS3_GAME_UPDATE_DIR): its PARAM.SFO's TITLE_ID says whose update it is, the guest's
++ * /dev_hdd0/game/<that title>/ maps to its folder and nothing else of /dev_hdd0 does; with CATEGORY "GD" the boot is a
++ * patch boot -- cellGamePatchCheck opens the update's session, ContentPermit names /dev_hdd0/game/<title>, APP_VER
++ * and VERSION are the update's. Without the variable, or with a folder that has no PARAM.SFO, nothing changes.
++ *
++ * clang -std=gnu17 -I include libs/system/tests/test_game_update.c -o $TMPDIR/test_game_update && $TMPDIR/test_game_update */
++#include "../cellGame.c"
++#include <assert.h>
++#include <unistd.h>
++uint8_t* vm_base;
++uint32_t ppu_vm_size;
++int g_resv_store_active;
++uint32_t g_ww_lo, g_ww_hi;
++void ppu_resv_break_store(uint64_t ea) { (void)ea; }
++void ps3_ww_report_inline(uint32_t a, uint64_t v, int w) { (void)a; (void)v; (void)w; }
++int spu_coh_is_reserved(uint32_t a) { (void)a; return 0; }
++void spu_coh_notify_write(uint32_t a) { (void)a; }
++void spu_lockline_lock(void) {}
++void spu_lockline_unlock(void) {}
++
++ps3_guest_caller_fn g_ps3_guest_caller;
++const char* ppu_vfs_root;
++
++static void put16(unsigned char* p, unsigned v) { p[0] = (unsigned char)v; p[1] = (unsigned char)(v >> 8); }
++static void put32(unsigned char* p, unsigned v) { put16(p, v & 0xFFFF); put16(p + 2, v >> 16); }
++
++/* A PARAM.SFO of the given string entries (key, value), in the layout sfo_read_string reads. */
++static void write_sfo(const char* path, const char* const (*kv)[2], int n)
++{
++    unsigned char hdr[0x14 + 8 * 0x10] = { 0 };
++    unsigned char keys[256], data[256];
++    unsigned ko = 0, dof = 0;
++    memcpy(hdr, "\0PSF", 4);
++    put32(hdr + 4, 0x101);
++    put32(hdr + 0x10, (unsigned)n);
++    for (int i = 0; i < n; i++) {
++        unsigned kl = (unsigned)strlen(kv[i][0]) + 1, vl = (unsigned)strlen(kv[i][1]) + 1;
++        unsigned char* e = hdr + 0x14 + i * 0x10;
++        put16(e + 0, ko); put16(e + 2, 0x0204); put32(e + 4, vl); put32(e + 8, vl); put32(e + 12, dof);
++        memcpy(keys + ko, kv[i][0], kl); ko += kl;
++        memcpy(data + dof, kv[i][1], vl); dof += vl;
++    }
++    const unsigned key_tab = 0x14 + (unsigned)n * 0x10;
++    put32(hdr + 8, key_tab);
++    put32(hdr + 0xC, key_tab + ko);
++    FILE* f = fopen(path, "wb");
++    assert(f);
++    fwrite(hdr, 1, key_tab, f); fwrite(keys, 1, ko, f); fwrite(data, 1, dof, f);
++    fclose(f);
++}
++
++/* a fresh start: the module's boot state and the update's, as at a new process */
++static void reset(void)
++{
++    s_upd_init = 0; s_upd_dir[0] = '\0'; s_upd_title[0] = '\0'; s_upd_patch = 0;
++    s_app_ver[0] = '\0'; s_version[0] = '\0';
++    s_check_is_disc = 1; s_check_dir[0] = '\0';
++}
++
++int main(void)
++{
++    const char* t = getenv("TMPDIR");
++    char root[512];
++    snprintf(root, sizeof root, "%s/ps3recomp-game-update-XXXXXX", t && *t ? t : "/tmp");
++    assert(mkdtemp(root));
++    char disc[600], upd[600], usr[700], sfo[700], usfo[700], out[1024], other[600];
++    snprintf(disc, sizeof disc, "%s/PARAM.SFO", root);
++    snprintf(upd, sizeof upd, "%s/official/BLUS30490-01.01", root);
++    snprintf(other, sizeof other, "%s/empty", root);
++    snprintf(usr, sizeof usr, "%s/USRDIR", upd);
++    snprintf(usfo, sizeof usfo, "%s/PARAM.SFO", upd);
++    snprintf(sfo, sizeof sfo, "%s/official", root);
++    assert(mkdir(sfo, 0755) == 0 && mkdir(upd, 0755) == 0 && mkdir(usr, 0755) == 0 && mkdir(other, 0755) == 0);
++    const char* const dkv[3][2] = { { "TITLE_ID", "BLUS30490" }, { "CATEGORY", "DG" }, { "APP_VER", "01.00" } };
++    write_sfo(disc, dkv, 3);
++    const char* const ukv[4][2] = { { "TITLE_ID", "BLUS30490" }, { "CATEGORY", "GD" }, { "APP_VER", "01.01" },
++                                    { "VERSION", "01.01" } };
++    write_sfo(usfo, ukv, 4);
++    vm_base = calloc(1, 65536); assert(vm_base);
++    cellGame_set_content_path(root);
++
++    /* no update: today's behaviour */
++    unsetenv("PS3_GAME_UPDATE_DIR");
++    reset();
++    cellGame_init_from_paramsfo(disc);
++    assert(strcmp(s_app_ver, "01.00") == 0);
++    assert(ps3_game_update_dir() == NULL);
++    assert(!ps3_game_update_path("/dev_hdd0/game/BLUS30490/USRDIR/a.dat", out, sizeof out));
++    assert(cellGamePatchCheck((CellGameContentSize*)0x200, NULL) == CELL_GAME_ERROR_NOTPATCH);
++
++    /* the update installed (a trailing separator is accepted) */
++    char upd_slash[700];
++    snprintf(upd_slash, sizeof upd_slash, "%s/", upd);
++    setenv("PS3_GAME_UPDATE_DIR", upd_slash, 1);
++    reset();
++    cellGame_init_from_paramsfo(disc);
++    assert(strcmp(s_app_ver, "01.01") == 0 && strcmp(s_version, "01.01") == 0);   /* the patch's version */
++    assert(ps3_game_update_dir() && strcmp(ps3_game_update_dir(), upd) == 0);
++    char want[1024];
++    snprintf(want, sizeof want, "%s/USRDIR/a.dat", upd);
++    assert(ps3_game_update_path("/dev_hdd0/game/BLUS30490/USRDIR/a.dat", out, sizeof out) && strcmp(out, want) == 0);
++    assert(ps3_game_update_path("/dev_hdd0/game/BLUS30490", out, sizeof out) && strcmp(out, upd) == 0);
++    /* only that title's folder: another title, a longer id, the saves, the bare device are not the update's */
++    assert(!ps3_game_update_path("/dev_hdd0/game/BLUS30491/USRDIR/a.dat", out, sizeof out));
++    assert(!ps3_game_update_path("/dev_hdd0/game/BLUS30490X/a.dat", out, sizeof out));
++    assert(!ps3_game_update_path("/dev_hdd0/home/00000001/savedata/x", out, sizeof out));
++    assert(!ps3_game_update_path("/dev_hdd0/game", out, sizeof out));
++    assert(!ps3_game_update_path("/dev_bdvd/PS3_GAME/USRDIR/a.dat", out, sizeof out));
++    /* the boot: still a disc game, and a patch boot whose content is the update's */
++    assert(cellGameBootCheck((u32*)0x100, (u32*)0x104, (CellGameContentSize*)0x200, (char*)0x300) == CELL_OK);
++    assert(vm_read32(0x100) == CELL_GAME_GAMETYPE_DISC);
++    assert(cellGamePatchCheck((CellGameContentSize*)0x200, NULL) == CELL_OK);
++    assert(cellGameContentPermit((char*)0x400, (char*)0x500) == CELL_OK);
++    assert(strcmp((char*)vm_base + 0x400, "/dev_hdd0/game/BLUS30490") == 0);
++    assert(strcmp((char*)vm_base + 0x500, "/dev_hdd0/game/BLUS30490/USRDIR") == 0);
++    snprintf(want, sizeof want, "%s/game/BLUS30490", root);   /* nothing made in the saves area for it */
++    assert(access(want, F_OK) != 0);
++    assert(cellGameDataCheck(CELL_GAME_GAMETYPE_HDD, (char*)0x300, (CellGameContentSize*)0x200) == CELL_OK);
++
++    /* an update for another title: its files only, no patch boot of this one */
++    const char* const okv[2][2] = { { "TITLE_ID", "BLUS99999" }, { "CATEGORY", "GD" } };
++    write_sfo(usfo, okv, 2);
++    reset();
++    cellGame_init_from_paramsfo(disc);
++    assert(strcmp(s_app_ver, "01.00") == 0);
++    assert(cellGamePatchCheck((CellGameContentSize*)0x200, NULL) == CELL_GAME_ERROR_NOTPATCH);
++    assert(!ps3_game_update_path("/dev_hdd0/game/BLUS30490/USRDIR/a.dat", out, sizeof out));
++
++    /* a folder with no PARAM.SFO: ignored */
++    setenv("PS3_GAME_UPDATE_DIR", other, 1);
++    reset();
++    cellGame_init_from_paramsfo(disc);
++    assert(ps3_game_update_dir() == NULL);
++    assert(cellGamePatchCheck((CellGameContentSize*)0x200, NULL) == CELL_GAME_ERROR_NOTPATCH);
++
++    assert(unlink(usfo) == 0 && rmdir(usr) == 0 && rmdir(upd) == 0 && rmdir(sfo) == 0 && rmdir(other) == 0);
++    assert(unlink(disc) == 0 && rmdir(root) == 0);
++    free(vm_base);
++    puts("the installed game update: /dev_hdd0/game/<title>/ mapped to its folder, a patch boot with its version");
++}
+diff --git a/runtime/ppu/ppu_fs.cpp b/runtime/ppu/ppu_fs.cpp
+index 69d209c3..3ab37dc0 100644
+--- a/runtime/ppu/ppu_fs.cpp
++++ b/runtime/ppu/ppu_fs.cpp
+@@ -128,6 +128,7 @@ static void guest_strcpy(char* dst, uint32_t gaddr, size_t cap)
+ /* Defined in runtime/syscalls/sys_fs.c -- shared by all three path
+  * translators. (extern "C" is ill-formed at block scope.) */
+ extern "C" void ps3_vfs_ps3game_fallback(char* path, size_t cap);
++extern "C" int ps3_game_update_path(const char* guest, char* out, size_t cap);   /* libs/system/cellGame.c */
+ 
+ /* Translate a guest path to a host path under ppu_vfs_root. Known PS3 mount
+  * prefixes are stripped; the rest is appended to the root. */
+@@ -139,6 +140,8 @@ static void host_path(char* out, size_t cap, const char* guest)
+      * /dev_hdd0/game/<title>/), mirroring the PS3/RPCS3 layout: base data on
+      * /dev_bdvd (disc), update data on /dev_hdd0. Set PS3_HDD0_ROOT to the host
+      * dir that /dev_hdd0 maps into (the one containing game/<title>/). */
++    /* the installed game update's /dev_hdd0/game/<title>/ (PS3_GAME_UPDATE_DIR, libs/system/cellGame.c) first */
++    if (ps3_game_update_path(guest, out, cap)) return;
+     static const char* hdd0_root = nullptr; static int hdd0_init = 0;
+     if (!hdd0_init) { hdd0_root = getenv("PS3_HDD0_ROOT"); hdd0_init = 1; }
+     if (hdd0_root && strncmp(guest, "/dev_hdd0/", 10) == 0) {
+diff --git a/runtime/syscalls/sys_fs.c b/runtime/syscalls/sys_fs.c
+index 60b9c2a2..95f75c42 100644
+--- a/runtime/syscalls/sys_fs.c
++++ b/runtime/syscalls/sys_fs.c
+@@ -171,6 +171,9 @@ void sys_fs_translate_path(const char* ps3_path, char* host_path, int host_path_
+      * for a disc title patched to e.g. v1.30) -- mirror ppu_fs.cpp host_path.
+      * PS3_HDD0_ROOT = host dir that /dev_hdd0 maps into (contains game/<title>/). */
+     {
++        /* the installed game update's /dev_hdd0/game/<title>/ (PS3_GAME_UPDATE_DIR, libs/system/cellGame.c) first */
++        extern int ps3_game_update_path(const char* guest, char* out, size_t cap);
++        if (ps3_game_update_path(ps3_path, host_path, (size_t)host_path_size)) return;
+         static const char* hdd0_root = NULL; static int hdd0_init = 0;
+         if (!hdd0_init) { hdd0_root = getenv("PS3_HDD0_ROOT"); hdd0_init = 1; }
+         if (hdd0_root && strncmp(ps3_path, "/dev_hdd0/", 10) == 0) {
+-- 
+2.56.1
+

@@ -1,0 +1,97 @@
+{
+ "_program": "BLUS30490-01.01",
+ "_from": "config/m8_movie_trace.json, by tools/program_remap.py",
+ "_comment": "M8.0's trace of the movies (docs/FFMPEG_MIGRATION_PLAN.md section 2): development lifts only (tools/m8_trace_lift.sh merges these with config/r7_native_hooks.json's observers). The game's movie class (the seven methods the scenes call), (Bink's eleven functions behind the call stubs 0x009873A8-0x00987458 were observed until M8.4 excluded Bink from the lift; the native player answers at the stubs), the movie textures' creation (gcmtextures), the four functions that build a movie's path, the asp engine's movie schedule manager and the Lua binding named Ending. port/native/movie/movie_trace.cpp logs each call's arguments and results (DOTHEROES_MOVIE_TRACE=<file>). Addresses only: the lifted bodies run unchanged.",
+ "observers": [
+  {
+   "addr": "0x0045D070",
+   "note": "class: called by the openers and a stub",
+   "id": "0x0045CDD8"
+  },
+  {
+   "addr": "0x0045D0FC",
+   "note": "class",
+   "id": "0x0045CE64"
+  },
+  {
+   "addr": "0x0045D178",
+   "note": "class: 11 callers in the scenes' movie code",
+   "id": "0x0045CEE0"
+  },
+  {
+   "addr": "0x0045D1D4",
+   "note": "class: calls Bink's open",
+   "id": "0x0045CF3C"
+  },
+  {
+   "addr": "0x0045D290",
+   "note": "class: 13 callers",
+   "id": "0x0045CFF8"
+  },
+  {
+   "addr": "0x0045D320",
+   "note": "class",
+   "id": "0x0045D088"
+  },
+  {
+   "addr": "0x0045D590",
+   "note": "class: calls seven of Bink's functions",
+   "id": "0x0045D2F8"
+  },
+  {
+   "addr": "0x0045B0AC",
+   "note": "gcmtextures: the movie textures",
+   "id": "0x0045AE14"
+  },
+  {
+   "addr": "0x0045B7F4",
+   "note": "gcmtextures: the movie textures",
+   "id": "0x0045B55C"
+  },
+  {
+   "addr": "0x0048C71C",
+   "note": "builds a movie's path",
+   "id": "0x0048C424"
+  },
+  {
+   "addr": "0x004A9B0C",
+   "note": "builds a movie's path",
+   "id": "0x004A9814"
+  },
+  {
+   "addr": "0x00586178",
+   "note": "builds a movie's path",
+   "id": "0x00585BF0"
+  },
+  {
+   "addr": "0x005CD90C",
+   "note": "builds a movie's path",
+   "id": "0x005CD374"
+  },
+  {
+   "addr": "0x006E61E8",
+   "note": "aspMovieScheduleManager",
+   "id": "0x006E5C50"
+  },
+  {
+   "addr": "0x006E69F0",
+   "note": "aspMovieScheduleManager",
+   "id": "0x006E6458"
+  },
+  {
+   "addr": "0x006E6D44",
+   "note": "aspMovieScheduleManager",
+   "id": "0x006E67AC"
+  },
+  {
+   "addr": "0x006E6E60",
+   "note": "aspMovieScheduleManager",
+   "id": "0x006E68C8"
+  },
+  {
+   "addr": "0x004F1204",
+   "note": "the Lua binding named Ending",
+   "id": "0x004F0EB4"
+  }
+ ]
+}

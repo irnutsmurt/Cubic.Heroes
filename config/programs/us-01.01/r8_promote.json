@@ -1,0 +1,29 @@
+{
+ "_program": "BLUS30490-01.01",
+ "_from": "config/r8_promote.json, by tools/program_remap.py",
+ "note": "--promote-calls (docs/NATIVE_R8.md section 9.0): the ten hottest non-leaf lifted functions of rel13's main-thread profiles (build/r8/prof13_run.sh: the fields and the river fight, uncapped, DIAG_PROF; self time, fields + river %), registers kept in locals across their calls with liveness. A trial: adopted only if faster than rel13 beyond the runs' spread.",
+ "functions": [
+  "0x000A7C80",
+  "0x000A8B64",
+  "0x0073EB94",
+  "0x0073ACA4",
+  "0x000A7080",
+  "0x0072EA00",
+  "0x0073F108",
+  "0x0070B994",
+  "0x0073A720",
+  "0x0072A51C"
+ ],
+ "profile_share": {
+  "0x000A7C78": "9.3 + 3.3",
+  "0x000A8B5C": "2.6 + 2.8",
+  "0x0073E5FC": "3.2 + 1.2",
+  "0x0073A70C": "1.4 + 1.8",
+  "0x000A7078": "2.3 + 0.7",
+  "0x0072E468": "1.5 + 1.2",
+  "0x0073EB70": "1.9 + <0.7",
+  "0x0070B3FC": "0.7 + 0.9",
+  "0x0073A188": "1.4 + <0.7",
+  "0x00729F84": "<0.7 + 1.1"
+ }
+}
