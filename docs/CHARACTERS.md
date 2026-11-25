@@ -99,12 +99,14 @@ game's saves (`BLUS30490*`) are never touched. Uninstalling removes only the fol
 and only while it still holds exactly what was installed (`DATA.EDT`, `PARAM.SFO`, `ICON0.PNG`, `PARAM.PFD`); a
 character made in the game, or one the player changed since, is never removed. The library entry stays.
 
-**The launcher's Characters page** has two tabs, each with its own search, filters, order, scroll position and
-selected card: *My Library* (the entries; a card shows IN GAME when the character is in the game's saves) and
-*Installed* (every character the game can use now: the library's, and those made in the game, which can be added
-to the library). LT/RT (or `[` `]`) switch the tabs; LB/RB stay the launcher's pages. A third tab, *Character
-Store*, is prepared but hidden: it shows nothing and touches no network until the store exists and its security
-requirements are met.
+**The launcher's Characters page** has three tabs, each with its own search, filters, order, scroll position and
+selected card:
+- *My Library*: the entries; a card shows IN GAME when the character is in the game's saves.
+- *Installed*: every character the game can use now, the library's and those made in the game, which can be added
+  to the library.
+- *Character Store*: the community characters of the official characters repository, to download into My Library
+  and install. It is read-only, and its catalog is signed (docs/CHARACTER_STORE.md).
+LT/RT (or `[` `]`) switch the tabs; LB/RB stay the launcher's pages.
 
 **`.chchar`** is a ZIP of `character.json`, `character.edt`, `preview/thumb.png` and `preview/views.png`. It holds the
 character and what describes it: name, class, label, creator, description, tags, source and provenance, hashes,

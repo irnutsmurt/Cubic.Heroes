@@ -2734,14 +2734,6 @@ struct Chars {
     bool info_open = false;
 } g_chars;
 static CharTab& ct() { return g_chars.tabs[g_chars.tab]; }
-// the Character Store's tab (read-only: the community characters repository's catalog, docs/CHARACTER_STORE.md):
-// not shown until the owner enables it -- a developer's CUBICHEROES_CHARACTER_STORE=1 shows it
-static bool store_tab_enabled()
-{
-    static int on = -1;
-    if (on < 0) { const char* e = getenv("CUBICHEROES_CHARACTER_STORE"); on = e && *e == '1'; }
-    return on == 1;
-}
 // the current tab's items: the library, or the characters the game can use now
 static const json::Value& chars_items()
 {
@@ -3294,7 +3286,7 @@ static void chars_tabs()
     const int nlib = (int)g_chars.list["characters"].size(), ngame = (int)g_chars.list["in_game"].size();
     std::vector<std::pair<int, std::string>> tabs = { { kTabLibrary, "My Library (" + std::to_string(nlib) + ")" },
                                                       { kTabInstalled, "Installed (" + std::to_string(ngame) + ")" } };
-    if (store_tab_enabled()) tabs.push_back({ kTabStore, "Character Store" });
+    tabs.push_back({ kTabStore, "Character Store" });   // the read-only store: the characters repository's catalog
     const float h = S(40), gap = S(10);
     ImDrawList* dl = ImGui::GetWindowDrawList();
     for (size_t i = 0; i < tabs.size(); i++) {
@@ -3365,7 +3357,6 @@ static void page_characters()
     g_preview_t0 = SDL_GetPerformanceCounter();
     g_preview_spent = 0;
     if (!g_chars.asked) chars_refresh();
-    if (!store_tab_enabled() && g_chars.tab == kTabStore) g_chars.tab = kTabLibrary;
     if (!g_char_drops.empty()) { chars_import(g_char_drops, {}); g_char_drops.clear(); g_chars.tab = kTabLibrary; }
     if (!g_chars.open_id.empty()) {
         if (const json::Value* c = chars_find(g_chars.open_id)) { chars_detail(*c); previews_trim(); return; }

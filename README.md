@@ -399,6 +399,13 @@ information.**
 - **A controller-friendly launcher** (`CubicHeroes.exe` on Windows, `CubicHeroes` or the AppImage on Linux): install
   from your disc, prepare shaders, play, check for updates, roll back, back up and restore saves, export
   diagnostics -- with a controller, or a keyboard and mouse.
+- **Characters** (0.2.0-beta.6): a character library in the launcher. It takes:
+  - the heroes you build in the game's editor;
+  - character files and ZIP archives;
+  - characters saved on a PS3, which needs your own PS3 key.
+  You can export and share characters, and install them in the game. The **Character Store** offers community
+  characters to browse, download and install, among them 352 recovered from the 2010 Hall of Heroes. See
+  [CHARACTERS.md](docs/CHARACTERS.md) and [CHARACTER_STORE.md](docs/CHARACTER_STORE.md).
 - **A portable installation**, **signed updates with rollback**, **save backups**, **crash reports and a private
   diagnostics export**, and **other launchers** (Steam by Add to Steam; Heroic, Lutris, Playnite through `--play`)
   ([all of it](docs/HOW_IT_WORKS.md#features-in-detail)).
@@ -412,6 +419,8 @@ information.**
 | [docs/UPDATING.md](docs/UPDATING.md) | updates, rollback, coming from beta.2 or beta.3 |
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | every known problem and its fix |
 | [docs/CLI.md](docs/CLI.md) | the command line: every option, JSON output, exit codes |
+| [docs/CHARACTERS.md](docs/CHARACTERS.md) | the character library: formats, PS3 characters and your key, import, export, install |
+| [docs/CHARACTER_STORE.md](docs/CHARACTER_STORE.md) | the Character Store: the signed catalog, community and recovered historical characters, removal requests |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | what is done and what is planned |
 | [docs/BUILDING.md](docs/BUILDING.md) | building from source (for developers) |
 | [docs/LINUX_PACKAGING.md](docs/LINUX_PACKAGING.md) | the Linux packages in detail |

@@ -6,8 +6,9 @@ the approved community characters from the public characters repository
 filters and order as the library, and downloads one into *My Library* (and, if asked, into the game) when they
 choose it. Adding approved characters to the repository needs no new Cubic.Heroes release.
 
-The store is **read-only**: publishing and submissions are separate and are not part of the launcher. The tab is
-hidden until the owner enables it (`CUBICHEROES_CHARACTER_STORE=1` shows it for development).
+The store is **read-only**: publishing and submissions are separate and are not part of the launcher. It is
+available to every player from 0.2.0-beta.6. The first published catalog holds the 352 characters recovered from
+the 2010 Hall of Heroes and a 2010 GameSpy article, all in the historical category (see below).
 
 ## The repository
 
