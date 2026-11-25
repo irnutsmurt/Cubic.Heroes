@@ -284,12 +284,18 @@ void SpuContactResult::flush()
         m_RequiresWriteBack = true;
     }
     if (mf && m_RequiresWriteBack && t_ctx) {
-        bullet_cd::ManifoldOut o;
-        o.ea = mf->ea;
-        o.types = t_ctx->types;
-        mf->store(o.bytes);
-        if (t_ctx->write) memcpy(t_ctx->m->base + mf->ea, o.bytes, bullet_cd::kManifoldBytes);
-        t_ctx->out->manifolds.push_back(o);
+        if (t_ctx->out->keep) {
+            bullet_cd::ManifoldOut o;
+            o.ea = mf->ea;
+            o.types = t_ctx->types;
+            mf->store(o.bytes);
+            if (t_ctx->write) memcpy(t_ctx->m->base + mf->ea, o.bytes, bullet_cd::kManifoldBytes);
+            t_ctx->out->manifolds.push_back(o);
+        } else if (t_ctx->write) {
+            uint8_t bytes[bullet_cd::kManifoldBytes];
+            mf->store(bytes);
+            memcpy(t_ctx->m->base + mf->ea, bytes, bullet_cd::kManifoldBytes);
+        }
     }
     m_spuManifold = 0;
     m_RequiresWriteBack = false;

@@ -50,6 +50,7 @@ constexpr int kImageBulletCD = 4;
 constexpr uint32_t kCmdGatherAndProcess = 1;
 
 int g_mode;
+bool g_stats;      // DOTHEROES_PHYS_STATS=1 (record_census, below)
 std::atomic<unsigned long long> g_tasks{ 0 }, g_native{ 0 }, g_lifted{ 0 };
 std::mutex g_mu;   // guards what follows
 std::unordered_map<std::string, unsigned long long> g_unsupported;
@@ -119,8 +120,9 @@ void count_task()
     for (const auto& u : g_unsupported) uns += " [" + u.first + "] " + std::to_string(u.second);
     fprintf(stderr, "[native-cd] %llu tasks: %llu native, %llu lifted; unsupported:%s\n", n,
             g_native.load(), g_lifted.load(), uns.empty() ? " none" : uns.c_str());
-    fprintf(stderr, "[native-cd] mesh/box points pushing the box down: lifted %llu of %llu, native %llu of %llu\n",
-            g_down[0], g_mesh_points[0], g_down[1], g_mesh_points[1]);
+    if (g_stats || g_mode >= 2)   // counted from the manifolds a run keeps, with statistics or a comparison
+        fprintf(stderr, "[native-cd] mesh/box points pushing the box down: lifted %llu of %llu, native %llu of %llu\n",
+                g_down[0], g_mesh_points[0], g_down[1], g_mesh_points[1]);
     if (g_mode < 2) return;
     fprintf(stderr, "[native-cd] %s%s, %llu tasks:\n", g_mode == 3 ? "self-check, nearest against toward zero" : "check",
             g_mode == 2 && g_rz ? " (native rounding toward zero)" : "", g_checked);
@@ -160,6 +162,14 @@ bool peek_command(uint32_t inq, uint8_t entry[16])
     }
 }
 
+// Native's manifolds of a task into the down-pushing count (statistics only:
+// with DOTHEROES_PHYS_STATS off a run keeps no copies, and nothing is counted)
+void count_downs(const bullet_cd::Result& r)
+{
+    std::lock_guard<std::mutex> lk(g_mu);
+    for (const auto& o : r.manifolds) count_down(o.bytes, o.types, 1);
+}
+
 // The native run, under the SPU's rounding if asked: truncation, denormals as zero
 void native_run(const bullet_cd::Mem& m, uint32_t desc, bullet_cd::Result& r, bool write, bool rz)
 {
@@ -181,8 +191,7 @@ thread_local Pending* t_pending;
 // (bullet_cd::census, after the task's work) as a frame-trace instant
 // (PS3_FT_PHYS_LOAD: who = bodies, a = pairs processed, b = contact points)
 // and a [phys-stats] line every 250 tasks. Lifted tasks are counted after
-// they return, so they run exactly as without it.
-bool g_stats;
+// they return, so they run exactly as without it. (g_stats, above.)
 struct StatSum { unsigned long long tasks = 0, pairs = 0, active = 0, mesh = 0, boxbox = 0, cylinder = 0, bodies = 0, points = 0; } g_stat;
 
 void record_census(uint32_t desc)
@@ -244,12 +253,12 @@ int cd_run(uint32_t, uint32_t, const uint32_t arg[4])
     }
     if (!spurs_queue_spu_pop(inq, entry)) { lifted("command gone"); count_task(); return 0; }
     bullet_cd::Result r;
+    r.keep = g_stats;
     native_run(m, desc, r, true, g_rz);
-    {
-        std::lock_guard<std::mutex> lk(g_mu);
-        for (const auto& o : r.manifolds) count_down(o.bytes, o.types, 1);
+    if (g_stats) {
+        count_downs(r);
+        record_census(desc);
     }
-    if (g_stats) record_census(desc);
     while (!spurs_queue_spu_push(outq, entry)) std::this_thread::yield();
     g_native++;
     count_task();
@@ -420,12 +429,12 @@ void bullet_cd_direct_run(const uint32_t entry[4])
     g_steps.fetch_add(1, std::memory_order_relaxed);
     const uint32_t desc = entry[2];
     bullet_cd::Result r;
+    r.keep = g_stats;
     native_run(bullet_cd::Mem{ vm_base }, desc, r, true, g_rz);
-    {
-        std::lock_guard<std::mutex> lk(g_mu);
-        for (const auto& o : r.manifolds) count_down(o.bytes, o.types, 1);
+    if (g_stats) {
+        count_downs(r);
+        record_census(desc);
     }
-    if (g_stats) record_census(desc);
     bullet_phys_log_note(9, (uint32_t)r.active, (uint32_t)r.pairs);
     g_native++;
     count_task();
