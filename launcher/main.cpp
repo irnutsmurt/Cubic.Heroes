@@ -2995,8 +2995,10 @@ static void chars_view()
         const json::Value& c = cs[i];
         if (!ct().f_class.empty() && c["class"].str() != ct().f_class) continue;
         if (!ct().f_source.empty() && c["source"].str() != ct().f_source) continue;
-        if (ct().f_installed == 1 && c["installed"].is_null()) continue;
-        if (ct().f_installed == 2 && !c["installed"].is_null()) continue;
+        // installed: in the game's saves, or (the store) included with the installation's official game content
+        const bool in_game = !c["installed"].is_null() || !c["included_label"].str().empty();
+        if (ct().f_installed == 1 && !in_game) continue;
+        if (ct().f_installed == 2 && in_game) continue;
         if (!q.empty()) {
             std::string hay = c["label"].str() + " " + c["name"].str() + " " + c["class"].str() + " " + c["creator"].str();
             for (size_t t = 0; t < c["tags"].size(); t++) hay += " " + c["tags"][t].str();
@@ -3189,7 +3191,11 @@ static void chars_detail(const json::Value& c)
         text_col(col::dim, "%s", fit_text(c["attribution"].str(), avail).c_str());
         const bool hist = c["category"].str() == "historical";
         if (hist) text_col(col::dim, "%s", fit_text(c["rights"].str(), avail).c_str());
-        if (g_chars.downloading.count(c["catalog_id"].str())) {
+        const std::string included = c["included_label"].str();   // e.g. "Included with the official v1.01 update"
+        if (!included.empty()) {   // the game has it from official content: nothing to download, nothing duplicated
+            text_col(col::ok, "Installed -- %s.", included.c_str());
+            text_col(col::dim, "The game reads it from its own files; it isn't downloaded or copied.");
+        } else if (g_chars.downloading.count(c["catalog_id"].str())) {
             text_col(col::accent, "Downloading... (you can keep browsing)");
         } else if (lib_id.empty()) {
             const bool upd = c["older_in_library"].truthy();
@@ -3341,15 +3347,17 @@ static void chars_card(const json::Value& c, ImVec2 size, bool focus_me)
     const bool game_only = !store && !c["in_library"].truthy();
     const bool busy = store && g_chars.downloading.count(c["catalog_id"].str());
     const bool update = store && !c["library_id"].truthy() && c["older_in_library"].truthy();
-    const bool store_have = store && (!c["installed"].is_null() || c["library_id"].truthy() || busy || update);
+    // the store: included with the installation's official content (installed from the game's own files)
+    const bool official = store && !c["included_label"].str().empty();
+    const bool store_have = store && (official || !c["installed"].is_null() || c["library_id"].truthy() || busy || update);
     if ((g_chars.tab == kTabLibrary && !c["installed"].is_null()) || game_only || store_have) {   // a badge on the picture
-        const char* t = game_only ? "GAME ONLY" : busy ? "DOWNLOADING" : update ? "UPDATE"
+        const char* t = game_only ? "GAME ONLY" : official ? "INSTALLED" : busy ? "DOWNLOADING" : update ? "UPDATE"
                         : store && c["installed"].is_null() ? "IN LIBRARY" : "IN GAME";
         const float p = std::max(2.0f, floorf(S(2)));
         const float tw = pix_w(t, p);
         const ImVec2 ba(a.x + pad + thumb - tw - p * 6, a.y + pad + p * 2), bb(a.x + pad + thumb - p * 2, a.y + pad + p * 13);
-        dl->AddRectFilled(ba, bb, game_only || (store && c["installed"].is_null()) ? IM_COL32(40, 70, 150, 235)
-                                                                                    : IM_COL32(40, 110, 40, 235));
+        dl->AddRectFilled(ba, bb, !official && (game_only || (store && c["installed"].is_null())) ? IM_COL32(40, 70, 150, 235)
+                                                                                                   : IM_COL32(40, 110, 40, 235));
         pix_text(dl, ImVec2(ba.x + p * 2, ba.y + p * 2), t, p, IM_COL32_WHITE);
     }
     ImGui::PushFont(nullptr, S(kBody));

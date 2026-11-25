@@ -38,6 +38,7 @@ everywhere.
     "creator": "...", "creator_url": "https://...", "license": "CC-BY-4.0",
     "attribution": "\"Rook\" by ..., CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/)",
     "tags": ["knight"], "description": "...", "added": "2026-11-24", "updated": "2026-11-24",
+    "shape_sha256": "... (optional: the model's hash, for 'the same model in your library')",
     "file":  {"path": "characters/49b26d42bf3f49b7/49b26d42bf3f49b7.chchar", "sha256": "...", "size": 4219},
     "thumb": {"path": "characters/49b26d42bf3f49b7/thumb.png", "sha256": "...", "size": 6150}
    }
@@ -128,6 +129,43 @@ python tools/char_catalog.py historical --repo DIR RECORDS.json   # [{character,
                                                                    #   original_date, original_url, archived_url}]
 python tools/char_catalog.py remove --repo DIR --id ID
 ```
+
+## Official content: characters a player already has from the game
+
+Some catalog entries are characters that also come with official game content. The US v1.01 update (BLUS30490-01.01)
+brings 51 characters; 45 of them are recovered Hall of Heroes characters the historical category also preserves.
+The two are separate sources. The catalog keeps every historical record as it is -- downloadable, with its
+attribution, provenance and removal requests unchanged -- and only an installation's state changes.
+
+- **The mapping.** `config/official_characters.json` is explicit and versioned.
+  - Per official content package (the game itself, an update), it lists the characters by slot. Each one names the
+    catalog entry it is (or none) and how that was established: `identical` (the same character file) or
+    `same-model` (every voxel, colour, setting and pose box the same; `differs` says what isn't, e.g. the in-game
+    name).
+  - Characters with no catalog entry are listed with none. No entry is made for them automatically; one can be
+    added through the normal catalog process like any other character.
+  - It holds no data, hashes or fingerprints of the official files; the verification against a player's own files
+    is the maintainers' and stays private.
+  - Japanese and European releases add their packages to the same file.
+- **What an installation has.** `tools/official_content.py` reads it from the installation's own record, never from
+  the game's character files:
+  - `data/install.json`'s `official_content` list, written by whatever installs, removes or replaces a package;
+  - otherwise the installation's recorded program, which identifies the game itself.
+  - It is worked out at every look, so an update installed, removed or replaced changes the store's state the next
+    time it is shown.
+- **In the store.** An entry that an installed package includes is shown as **INSTALLED**, with its source ("Included
+  with the official v1.01 update"). It is never downloaded, copied into the library or installed into the saves: the
+  game reads it from its own files. Without the package (v1.00), it is offered like any other entry.
+- **One entry, sources kept apart.** Each entry carries `sources`:
+  - official package;
+  - library: `origin` `store` (downloaded from this store) or `import` (the player's own file), and `same_model`
+    when the library copy is the same model under another name or file -- when the catalog gives the entry's
+    `shape_sha256`;
+  - the game's saves.
+
+  A character in several places is one entry, never labelled a store download when it came with an update.
+- **The player's own files stay theirs.** The library has no official-content rule: a player may import any
+  character file, official ones included. Nothing here publishes, uploads or redistributes official content.
 
 ## The catalog key
 
@@ -267,4 +305,22 @@ tampered files, plus one run through a real local HTTP server. The checks:
   revoking keys works; no private key in the repository and no test key shipped;
 - thumbnails are checked;
 - a download happens once, can install too, and a tampered file or one with more than a character is refused;
-- a redirect to another host is refused.
+- a redirect to another host is refused;
+
+`tests/test_official_content.py` covers official content, with made-up characters and a test mapping:
+- the shipped mapping: US v1.01's 51 characters -- 39 identical, 6 same model (the name only), 6 with no catalog
+  entry -- versioned, refused when malformed, and free of the official files' hashes or data;
+- what an installation has: v1.00 from its program; v1.01 installed, removed and replaced; another release's package
+  through the same mechanism; never a read of the game's character files;
+- the store:
+  - v1.00 shows nothing included and downloads as before;
+  - with v1.01, the mapped entries are installed, never downloaded or written, and no entry is made for an
+    official-only character;
+  - the update removed, they are offered again;
+  - a character the player already downloaded or imported is one entry with its sources apart, and the library is
+    untouched;
+  - the same model under another name is recognised;
+  - computing the state writes nothing;
+  - nothing publishes or uploads.
+- two local-only checks (skipped without the maintainers' files): all 352 historical records kept, with the 45
+  mapped entries among them; the mapping agrees with its private verification.

@@ -356,6 +356,18 @@ def check(repo, keys_file=None, log=print, unsigned=False):
                     L.edt_format.parse(c.files["character.edt"])
         except (OSError, S.StoreError, L.LibraryError, L.edt_format.EdtError) as err:
             problems.append(f"{e['id']} ({e['label']}): {err}")
+    # the official content mapping (config/official_characters.json): which of its catalog ids are in this catalog
+    # (a report: the catalog's own entries are never changed by it)
+    try:
+        import official_content as O
+        ids = {e["id"] for e in cat["characters"]}
+        for pid, p in O.load().items():
+            mapped = [c for c in p["characters"] if c["catalog_id"]]
+            gone = [c["slot"] for c in mapped if c["catalog_id"] not in ids]
+            log(f"official content {pid}: {len(mapped)} of its {len(p['characters'])} characters are catalog entries"
+                + (f"; {len(gone)} not in this catalog ({', '.join(gone[:5])})" if gone else ""))
+    except Exception as err:   # noqa: BLE001 -- a report, never a reason to refuse the catalog
+        log(f"official content mapping not checked ({err})")
     for x in problems:
         log("problem: " + x)
     log(f"catalog version {cat['catalog_version']}, signed by {cat['key_id']}: {len(cat['characters'])} characters "

@@ -344,6 +344,9 @@ def parse_entries(signed, sv=SCHEMA_VERSION, key_id=""):
             tags = e.get("tags") or []
             if not isinstance(tags, list):
                 raise ValueError("tags are not a list")
+            shape = e.get("shape_sha256")
+            if shape is not None and (not isinstance(shape, str) or not _HEX64.match(shape)):
+                raise ValueError("its shape's SHA-256 is not one")
             out.append({
                 "category": kind, "rights": HISTORICAL_RIGHTS if kind == "historical" else "", "source": src,
                 "id": cid, "version": ver, "edt_sha256": edt, "previous_sha256": _hexes(e.get("previous_sha256"), 50),
@@ -352,6 +355,7 @@ def parse_entries(signed, sv=SCHEMA_VERSION, key_id=""):
                 "description": _text(e.get("description"), 600), "added": _text(e.get("added"), 32),
                 "updated": _text(e.get("updated"), 32),
                 "tags": [_text(t, 32) for t in tags[:12] if isinstance(t, str) and t.strip()],
+                "shape_sha256": shape or "",   # optional: the model's hash, for "the same model in your library"
                 "file": _file(e.get("file"), CHCHAR_MAX), "thumb": _file(e.get("thumb"), THUMB_MAX),
             })
             seen.add(cid)
@@ -585,14 +589,25 @@ class Store:
             list(pool.map(one, todo))
         return counts["made"], counts["failed"]
 
-    def entries(self, savedata):
+    def entries(self, savedata, included=None):
         """the cached catalog's characters, each with where it is: in_library (its library id), installed (its folder
-        in the game's saves), thumb (the cached picture, or "")"""
+        in the game's saves), thumb (the cached picture, or ""); included_with ([{id, label}]: the installed official
+        content packages that bring it -- `included`, tools/official_content.py's {catalog id: [...]}, worked out by
+        the caller from the installation's record, never from the game's files); same_model_in_library (a library
+        entry with the same model under another name or file, when the catalog gives the model's hash); sources (where
+        the player has it: official / library, with whether the library's copy came from this store or was imported
+        by the player / game, its folder in the saves) -- one entry per character, its sources kept apart. Reads only:
+        nothing is written, imported or downloaded here."""
         cat, problems = self.cached()
         if cat is None:
             return None, []
+        included = included or {}
         idx = self.lib.index()
         by_sha = {e["sha256"]: cid for cid, e in idx.items()}
+        by_shape = {}
+        for cid, e in idx.items():
+            if e.get("shape"):
+                by_shape.setdefault(e["shape"], cid)
         in_game = {}
         try:
             found, _ = char_library.Library.installed(savedata)
@@ -606,6 +621,19 @@ class Store:
             e["installed"] = in_game.get(e["edt_sha256"], "")
             e["older_in_library"] = "" if e["in_library"] else next(
                 (by_sha[x] for x in e["previous_sha256"] if x in by_sha), "")
+            e["same_model_in_library"] = ("" if e["in_library"] or not e.get("shape_sha256")
+                                          else by_shape.get(e["shape_sha256"], ""))
+            e["included_with"] = [dict(x) for x in included.get(e["id"], [])]
+            src = [{"kind": "official", "package": x["id"], "label": x["label"]} for x in e["included_with"]]
+            lib_id = e["in_library"] or e["same_model_in_library"]
+            if lib_id:
+                k = (idx.get(lib_id) or {}).get("source", "files")
+                src.append({"kind": "library", "library_id": lib_id,
+                            "origin": "store" if k in ("store", "historical") else "import", "library_source": k,
+                            "same_model": not e["in_library"]})
+            if e["installed"]:
+                src.append({"kind": "game_saves", "folder": e["installed"]})
+            e["sources"] = src
             p = self.thumb_path(e)
             e["thumb_path"] = p if os.path.isfile(p) else ""
             out.append(e)
@@ -613,13 +641,19 @@ class Store:
                 "updated": cat["updated"], "key_id": cat["key_id"], "removal_url": cat.get("removal_url", ""),
                 "characters": out}, problems
 
-    def download(self, cid, savedata=None, install=False):
-        """one character from the catalog into the library (and into the game when install): never twice. ->
-        {status: imported|duplicate|installed|..., id, message, folder?}"""
+    def download(self, cid, savedata=None, install=False, included=None):
+        """one character from the catalog into the library (and into the game when install): never twice, never one
+        the installation's official content already brings (`included`, as for entries: then nothing is downloaded,
+        copied or imported -- the game reads it from its own files). ->
+        {status: imported|duplicate|installed|official|..., id, message, folder?}"""
         cat, _ = self.cached()
         e = next((x for x in (cat or {}).get("characters", []) if x["id"] == cid), None)
         if e is None:
             raise StoreError("this character is not in the catalog (refresh the store)")
+        by = (included or {}).get(cid) or []
+        if by:
+            return {"id": None, "status": "official", "included_with": [dict(x) for x in by],
+                    "message": f"\"{e['label']}\" is already in the game: {by[0]['label'].lower()}; nothing to download"}
         have = {v["sha256"]: k for k, v in self.lib.index().items()}
         lib_id = have.get(e["edt_sha256"])
         res = {"id": lib_id, "status": "duplicate", "message": f"\"{e['label']}\" is already in your library"}

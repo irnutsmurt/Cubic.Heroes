@@ -1860,15 +1860,25 @@ def cmd_characters(a, ev, control):
         # store is shown (store), on the player's refresh (store-refresh); thumbnails fetched apart (store-thumbs);
         # one character downloaded into the library, and installed with --and-install (store-download)
         import char_store
+        import official_content
         try:
             st = char_store.Store(lib, log=log)
         except char_store.StoreError as e:
             raise pipeline.SetupError(str(e), "store_address")
+        # the characters this installation already has from official game content (config/official_characters.json,
+        # the installation's own record -- never its game files): shown as installed, never downloaded or imported
+        try:
+            mapping = official_content.load()
+            packages = official_content.installed(lay.root, mapping)
+            included = official_content.included(packages, mapping)
+        except official_content.MappingError as e:
+            log("warning", f"store: official content not recognised ({e})")
+            packages, included = [], {}
         if act == "store-download":
             if len(ids) != 1:
                 raise pipeline.SetupError("store-download needs one --id.", "usage")
             try:
-                return st.download(ids[0], savedata, install=a.and_install)
+                return st.download(ids[0], savedata, install=a.and_install, included=included)
             except (char_store.StoreError, char_library.LibraryError) as e:
                 raise pipeline.SetupError(str(e), "store_download")
         if act == "store-thumbs":
@@ -1885,7 +1895,7 @@ def cmd_characters(a, ev, control):
                     break   # offline or rate limited: the rest stay placeholders
             return {"made": made, "failed": failed, "total": len(todo)}
         status = st.refresh(force=(act == "store-refresh"))
-        cat, problems = st.entries(savedata)
+        cat, problems = st.entries(savedata, included=included)
         missing = sum(1 for e in (cat or {}).get("characters", []) if not e["thumb_path"])
         # the launcher's items: shaped like the library's (its cards, search, filters and order serve both)
         items = [{"id": "store:" + e["id"], "catalog_id": e["id"], "version": e["version"], "label": e["label"],
@@ -1898,6 +1908,13 @@ def cmd_characters(a, ev, control):
                   "archived_url": e["source"].get("archived_url", ""),
                   "added": e["added"], "size": e["file"]["size"], "library_id": e["in_library"],
                   "older_in_library": e["older_in_library"], "installed": e["installed"] or None,
+                  # official content (docs/CHARACTER_STORE.md): one entry per character, where the player has it
+                  # kept apart -- included with an official package, in the library (downloaded from this store, or
+                  # imported by the player), in the game's saves
+                  "downloadable": not e["included_with"],
+                  "included_with": e["included_with"],
+                  "included_label": e["included_with"][0]["label"] if e["included_with"] else "",
+                  "same_model_in_library": e["same_model_in_library"], "sources": e["sources"],
                   "thumb": e["thumb_path"],
                   "views": lib.preview_path(e["in_library"], "views.rle") if e["in_library"] else "",
                   "preview_ok": True, "voxels": -1}
@@ -1907,7 +1924,9 @@ def cmd_characters(a, ev, control):
                 "removal_url": (cat or {}).get("removal_url", ""),
                 "historical": sum(1 for e in (cat or {}).get("characters", []) if e["category"] == "historical"),
                 "items": items, "problems": problems[:20], "missing_thumbs": missing,
-                "official": st.base == char_store.DEFAULT_BASE}
+                "official": st.base == char_store.DEFAULT_BASE,   # the store's own repository (not official content)
+                "official_content": packages,
+                "included": sum(1 for e in (cat or {}).get("characters", []) if e["included_with"])}
     if act == "export":
         if not ids or not a.out:
             raise pipeline.SetupError("export needs --id and --out.", "usage")
