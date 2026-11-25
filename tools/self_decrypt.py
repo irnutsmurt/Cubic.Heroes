@@ -5,8 +5,9 @@ The keys are NOT part of this repository. Pass a keys file whose lines are
 
     APP <revision> <erk-hex-64> <riv-hex-32>
 
-(see docs/SETUP.md; tools/player_keys.py reads the other forms of keys). Only non-NPDRM disc applications are
-handled, which is all BLUS-30490 needs.
+(see docs/SETUP.md). The disc's program is a plain application. A downloaded one -- the official update's
+EBOOT.BIN -- is an NPDRM application under a free licence: it needs the file's NPDRM key of its revision and the
+KLIC_FREE / KLIC_KEY pair instead (tools/player_keys.py). Programs under a paid licence (a RAP) aren't handled.
 
 Usage: self_decrypt.py --keys <keys.txt> EBOOT.BIN EBOOT.elf
 """
@@ -35,52 +36,94 @@ def ctr(key, iv, data):
     return AES.new(key, AES.MODE_CTR, counter=c).decrypt(data)
 
 
-SELF_APP = 4
+SELF_APP, SELF_NPDRM = 4, 8
+LICENSE_FREE = 3
+
+
+def self_info(d):
+    """(self_type, key revision, NPD licence or None) of a SELF, read without any key"""
+    if len(d) < 0x100:
+        raise ValueError("not a SELF")
+    magic, _, keyrev, se_type = struct.unpack_from(">4sIHH", d, 0)
+    if magic != b"SCE\0" or se_type != 1:
+        raise ValueError("not a SELF")
+    appinfo_off = struct.unpack_from(">Q", d, 0x28)[0]
+    ctrl_off, ctrl_size = struct.unpack_from(">QQ", d, 0x58)
+    self_type = struct.unpack_from(">I", d, appinfo_off + 0x0C)[0]
+    return self_type, keyrev, _npd(d, ctrl_off, ctrl_size)
+
+
+def _npd(d, ctrl_off, ctrl_size):
+    """the NPDRM control block's licence type (1 network, 2 local, 3 free), or None without one"""
+    off, end = ctrl_off, min(ctrl_off + ctrl_size, len(d))
+    while off + 0x10 <= end:
+        typ, size = struct.unpack_from(">II", d, off)
+        if typ == 3 and d[off + 0x10:off + 0x14] == b"NPD\0":
+            return struct.unpack_from(">I", d, off + 0x18)[0]
+        if size < 0x10:
+            break
+        off += size
+    return None
 
 
 class MissingKeys(ValueError):
-    """the keys given have nothing that opens this program: kind is 'app', need what is missing"""
+    """the keys given have nothing that opens this program: kind is 'app' or 'npdrm', need what is missing"""
 
     def __init__(self, message, kind, revision, need):
         super().__init__(message)
         self.kind, self.revision, self.need = kind, revision, need
 
 
-def _ring(keys):
-    """keys: a player_keys.Keyring, or {revision: (erk, riv)} APP keys"""
+def _ring(keys, npdrm):
+    """keys: a player_keys.Keyring, or {revision: (erk, riv)} APP keys (with npdrm a Keyring, or None)"""
     import player_keys
     if isinstance(keys, player_keys.Keyring):
         return keys
     ring = player_keys.Keyring()
     ring.app.update(keys or {})
+    if npdrm is not None:
+        ring.merge(npdrm)
     return ring
 
 
-def decrypt_self(d, keys):
-    """the program's ELF. keys: a player_keys.Keyring, or {revision: (erk, riv)} APP keys. Every APP key is tried,
-    the one labelled with the program's revision first: a wrong one fails the metadata check at once. Raises
-    MissingKeys when none opens it, ValueError for anything else (an NPDRM program among them: not handled)."""
+def decrypt_self(d, keys, npdrm=None):
+    """the program's ELF. keys: a player_keys.Keyring (or {revision: (erk, riv)} APP keys; npdrm then a Keyring for
+    an NPDRM program). Every key of the program's kind is tried, the one labelled with its revision first: a wrong
+    one fails the metadata check at once. Raises MissingKeys when none opens it, ValueError for anything else."""
     if len(d) < 0x100:
         raise ValueError("not a SELF")
     try:
-        return _decrypt_self(d, keys)
+        return _decrypt_self(d, keys, npdrm)
     except struct.error as e:
         raise ValueError(f"not a valid SELF ({e})") from None
 
 
-def _decrypt_self(d, keys):
+def _decrypt_self(d, keys, npdrm):
     magic, hver, keyrev, se_type, meta_off, hsize, esize = struct.unpack_from(">4sIHHIQQ", d, 0)
     if magic != b"SCE\0" or se_type != 1:
         raise ValueError("not a SELF")
     (ehdr_type, appinfo_off, elf_off, phdr_off, shdr_off, sinfo_off,
      sceversion_off, ctrl_off, ctrl_size) = struct.unpack_from(">9Q", d, 0x20)
     _, _, self_type, _ = struct.unpack_from(">QIIQ", d, appinfo_off)
-    ring = _ring(keys)
+    ring = _ring(keys, npdrm)
     mi_off = 0x20 + meta_off
     raw = d[mi_off:mi_off + 0x40]
-    if self_type != SELF_APP:
-        raise ValueError(f"SELF type {self_type} is not a plain application (NPDRM unsupported)")
-    kind = "app"
+    if self_type == SELF_NPDRM:
+        if _npd(d, ctrl_off, ctrl_size) != LICENSE_FREE:
+            raise ValueError("an NPDRM program under a paid licence (unsupported)")
+        need = [n for n, v in (("KLIC_FREE", ring.klic_free), ("KLIC_KEY", ring.klic_key)) if not v]
+        if not ring.candidates("npdrm", keyrev):
+            need.append(f"NPDRM {keyrev:#06x}")
+        if need:
+            raise MissingKeys(f"an NPDRM program: the keys have no {', '.join(need)}", "npdrm", keyrev, need)
+        # The free licence's key, unwrapped, first opens the metadata info (AES-128-CBC, a zero IV).
+        klic = AES.new(ring.klic_key, AES.MODE_ECB).decrypt(ring.klic_free)
+        raw = AES.new(klic, AES.MODE_CBC, bytes(16)).decrypt(raw)
+        kind = "npdrm"
+    elif self_type == SELF_APP:
+        kind = "app"
+    else:
+        raise ValueError(f"SELF type {self_type} is neither a plain nor an NPDRM application")
     cands = ring.candidates(kind, keyrev)
     if not cands:
         raise MissingKeys(f"no {kind.upper()} key in the keys given", kind, keyrev, [f"{kind.upper()} {keyrev:#06x}"])
@@ -100,7 +143,8 @@ def _decrypt_self(d, keys):
             break
     else:
         raise MissingKeys(f"metadata info did not decrypt with any of the {len(cands)} {kind.upper()} key(s) given "
-                          f"(wrong key?)", kind, keyrev, [f"{kind.upper()} {keyrev:#06x}"])
+                          f"(wrong key?)", kind, keyrev, [f"{kind.upper()} {keyrev:#06x}"] +
+                          (["KLIC_FREE", "KLIC_KEY"] if kind == "npdrm" else []))
     secs = [struct.unpack_from(">QQIIIIIIII", rest, 0x20 + 0x30 * i) for i in range(sec_count)]
     kbase = 0x20 + 0x30 * sec_count
     skeys = [rest[kbase + 16 * i:kbase + 16 * i + 16] for i in range(key_count)]
