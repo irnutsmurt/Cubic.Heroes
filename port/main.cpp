@@ -1027,6 +1027,24 @@ static std::string s_installed_elf;
 #endif
 static std::string s_program_mismatch;   /* the build.cfg's DOTHEROES_PROGRAM, when it is not this build's */
 
+/* port/program_addrs.h's PA_RT: v1.00's address of the game -> the program this build is of, for port/'s prebuilt
+ * library (its table is this file's, compiled with the program's config/programs/<id>/port_addrs.inc) */
+#include "program_addrs.h"
+extern "C" uint32_t dotheroes_program_addr(uint32_t v100)
+{
+#ifdef DOTHEROES_PROGRAM_ADDRS
+    for (const program_addrs::Pair& p : program_addrs::kTable)
+        if (p.v100 == v100 && v100) return p.here;
+    fprintf(stderr, "ERROR: the game's address 0x%08X (v1.00) has no counterpart in the program %s: this build's "
+            "native library and its program table do not belong together. Reinstall the game from the setup app.\n",
+            v100, DOTHEROES_PROGRAM_ID);
+    fflush(stderr);
+    _Exit(3);
+#else
+    return v100;
+#endif
+}
+
 /* <install>/dotheroes.cfg: the player's settings, written by the setup app, as
  * NAME=value lines (# comments). They are environment defaults: a variable
  * already set wins (DOTHEROES_FPS=30, PS3RECOMP_VK_FULLSCREEN=1, ...). */

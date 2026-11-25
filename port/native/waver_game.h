@@ -24,11 +24,11 @@
 // with what the SPU task wrote once the game has waited for it.
 #pragma once
 #include <cstdint>
-#include "../program_addrs.h"   /* PA(): v1.00's addresses of the game, for the program this build is of */
+#include "../program_addrs.h"   /* PA_RT(): v1.00's addresses of the game, for the program this build is of */
 
 namespace waver_task {
 constexpr uint32_t kNativeBlock = 0xFFFFF011u, kNativeTaskset = 0xFFFFF012u, kNativeInstance = 0xFFFFF013u;
-constexpr uint32_t kStateSlot = PA(0x01054804u);   // the TOC slot holding W (r2 - 0x310C, TOC 0x01057910)
+const uint32_t kStateSlot = PA_RT(0x01054804u);   // the TOC slot holding W (r2 - 0x310C, TOC 0x01057910)
 }
 
 extern "C" int g_waver_hook;                       // the hooks' guard: native or check

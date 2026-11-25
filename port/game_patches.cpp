@@ -319,3 +319,9 @@ extern "C" void dotheroes_configure_patches(void)
             g_dotheroes_step_carry ? "remainder carried (DOTHEROES_STEP_CARRY=0: truncated, as the game does)"
                                    : "truncated, as the game does");
 }
+
+/* The lifted functions port/'s prebuilt library (dotheroes_native) calls: through these pointers, set here -- this
+ * file is compiled with the program (a build of another program renames them through its port_aliases.h), the
+ * library once for every program, so it never names a lifted function itself (port/program_addrs.h) */
+void func_006CAD4C(ppu_context* ctx);   // the lift (C++ linkage): asp's fragment heap set-up
+extern "C" { void (*g_dotheroes_lifted_asp_heap)(ppu_context*) = func_006CAD4C; }   // ppfx_recorder.cpp's R7

@@ -139,7 +139,7 @@ class ProgramRemap(unittest.TestCase):
         self.assertEqual(self.run_tool("--report", rep), 1)
         r = load(rep)
         self.assertEqual(list(r["unresolved"]), ["0x00010034"])
-        self.assertEqual(r["unresolved"]["0x00010034"]["status"], "changed")
+        self.assertEqual(r["unresolved"]["0x00010034"]["status"], "in a changed function")
         self.assertEqual(r["functions"]["identical"], 1)
 
     def test_manual_decides(self):

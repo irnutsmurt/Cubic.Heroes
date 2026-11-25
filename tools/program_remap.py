@@ -11,8 +11,10 @@ functions unchanged but moved, a few relocated (the same code, other data addres
    among equal candidates the nearest; then, for each one left, the function where the shift of the nearest matched
    function before it puts it, when it has the same length and differs only in address immediates (addis, addi, ori,
    and the loads and stores' 16-bit offsets): relocated;
-2. maps an address: inside a matched (or relocated) function, the same offset in its counterpart; in the data
-   segment, the same address when the two programs' data agree around it (16 bytes); anything else unresolved;
+2. maps an address: inside a matched (or relocated) function, the same offset in its counterpart; in the code
+   segment between functions, the shift of the nearest matched function before it when the bytes agree; in the data
+   segment, the same address when the two programs' data agree there (32 bytes, a code pointer counting as agreeing
+   when it points at its counterpart); anything else unresolved;
 3. writes config/programs/<id>/: each address-tied file of config/ with its addresses mapped -- observers keep their
    v1.00 address as their "id" (the lifter passes it to the port, so the port's dispatch stays as it is) -- and, for
    port/'s own code, port_aliases.h (the lifted functions port/ names, v1.00's name to this program's) and
@@ -46,7 +48,7 @@ OBSERVER_FILES = {"r6_native_observers.json", "r7_native_hooks.json", "dev_captu
                   "m8_movie_trace.json"}
 _HEX = re.compile(r"^0x[0-9A-Fa-f]{1,8}$")
 PORT_FUNC = re.compile(r"\bfunc_([0-9A-F]{8})\b")
-PORT_ADDR = re.compile(r"\bPA\((0x[0-9A-Fa-f]{1,8})u?\)")
+PORT_ADDR = re.compile(r"\bPA(?:_RT)?\((0x[0-9A-Fa-f]{1,8})u?\)")
 
 
 class Program:
@@ -183,6 +185,31 @@ class Mapper:
         self.manual = {int(k, 16): v for k, v in (manual or {}).items() if not k.startswith("_")}
         self.unresolved = collections.defaultdict(set)   # address -> the places that use it
 
+    def code_map(self, a):
+        """a code address's counterpart: in a matched function the same offset; between functions (constants or
+        tables in the code segment), the shift of the nearest matched function before it, when the bytes agree"""
+        f = self.A.func_of(a)
+        if f is not None:
+            return self.m[f][0] + (a - f) if f in self.m else None
+        ms = self._ms if hasattr(self, "_ms") else setattr(self, "_ms", sorted(self.m)) or self._ms
+        k = bisect.bisect_right(ms, a) - 1
+        if k < 0:
+            return None
+        t = a + (self.m[ms[k]][0] - ms[k])
+        ra, rb = self.A.read(a, 32), self.B.read(t, 32)
+        return t if ra is not None and ra == rb else None
+
+    def words_agree(self, a, n=32):
+        """v1.00's data at a and the other's agree: each word the same, or a code address mapped to its counterpart
+        (a vtable's or a function descriptor's entry: the code moved, the data did not)"""
+        ra, rb = self.A.read(a, n), self.B.read(a, n)
+        if ra is None or rb is None:
+            return False
+        for (wa,), (wb,) in zip(struct.iter_unpack(">I", ra), struct.iter_unpack(">I", rb)):
+            if wa != wb and not (self.A.in_code(wa) and self.code_map(wa) == wb):
+                return False
+        return True
+
     def map(self, a, where):
         """the other program's address for v1.00's `a` (an int), or None (recorded as unresolved)"""
         if a in self.manual:
@@ -190,21 +217,22 @@ class Mapper:
             t = v.get("to") if isinstance(v, dict) else v
             return int(t, 16) if isinstance(t, str) else None
         if self.A.in_code(a):
-            f = self.A.func_of(a)
-            if f is not None and f in self.m:
-                return self.m[f][0] + (a - f)
+            t = self.code_map(a)
+            if t is not None:
+                return t
         elif self.A.in_data(a):
-            ra, rb = self.A.read(a & ~15, 16), self.B.read(a & ~15, 16)
-            if ra is not None and ra == rb:
+            if self.words_agree(a & ~15):
                 return a
-            if ra is None and rb is None and self.B.in_data(a):   # .bss: no bytes in either, same layout assumed
-                return a
+            if self.A.read(a & ~15, 16) is None and self.B.read(a & ~15, 16) is None and self.B.in_data(a):
+                return a   # .bss: no bytes in either, the same layout taken
         self.unresolved[a].add(where)
         return None
 
     def status(self, a):
         f = self.A.func_of(a)
-        return self.m[f][1] if f is not None and f in self.m else ("data" if self.A.in_data(a) else "changed")
+        if f is not None:
+            return self.m[f][1] if f in self.m else "in a changed function"
+        return "data" if self.A.in_data(a) else "code outside a function"
 
 
 def walk(x, f, path=""):

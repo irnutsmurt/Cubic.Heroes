@@ -75,7 +75,7 @@
 #include "ps3emu/ps3_ftrace.h"   // M9.2g: the compile log's clock (the map sweep)
 #include "ps3emu/osd.h"          // ps3_osd_post: an unimplemented graphics call, on screen (R8)
 #include "ps3emu/ps3_strict.h"   // ps3_strict_fail: the same, fatal under PS3_STRICT=1
-#include "../../program_addrs.h"   // PA(): v1.00's addresses of the game, for the program this build is of
+#include "../../program_addrs.h"   // PA_RT(): v1.00's addresses of the game, for the program this build is of
 #include <atomic>
 
 #include <chrono>
@@ -109,7 +109,10 @@ extern "C" void rsx_frame_trace_arm(void);   // cellGcmSys.c: RSX_FRAME_TRACE=ar
 extern "C" void ppfx_watch_add_ea(uint32_t ea, uint32_t n);   // ppfx_watch.cpp
 extern "C" int g_ppu_obs_store;                                // r1_observe.cpp (ps3recomp 0112)
 extern "C" void cellGcm_set_native_frontend(int on);           // cellGcmSys.c (R7): no walker, the host's front end
-void func_006CAD4C(ppu_context* ctx);                          // the lift (C++ linkage): asp's fragment heap set-up (R7 calls it)
+// the lift's asp fragment heap set-up (func_006CAD4C in v1.00), which R7 calls: through a pointer that
+// game_patches.cpp sets -- this file is in the prebuilt library, which never names a lifted function (their names
+// follow the program a build is of; port/program_addrs.h)
+extern "C" void (*g_dotheroes_lifted_asp_heap)(ppu_context* ctx);
 extern "C" PPU_THREAD_LOCAL void (*g_trampoline_fn)(void*);    // the lift's tail calls
 extern "C" void cellGcm_set_guest_read_hook(int (*hook)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t));
 extern "C" uint32_t cellGcm_native_fe_recycles(void);
@@ -191,8 +194,8 @@ namespace {
 inline void bump(std::atomic<uint64_t>& a, uint64_t d = 1) { a.store(a.load(std::memory_order_relaxed) + d, std::memory_order_relaxed); }
 
 const uint32_t kLocalEa = 0xC0000000u;
-const uint32_t kPpfxLo = PA(0x007497E0u), kPpfxHi = PA(0x007D3E38u);   // PPFX's code
-const uint32_t kGcmLo = PA(0x0069C000u), kGcmHi = PA(0x006B0000u);     // libgcm's
+const uint32_t kPpfxLo = PA_RT(0x007497E0u), kPpfxHi = PA_RT(0x007D3E38u);   // PPFX's code
+const uint32_t kGcmLo = PA_RT(0x0069C000u), kGcmHi = PA_RT(0x006B0000u);     // libgcm's
 
 uint32_t be32(const uint8_t* p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
 uint32_t g32(uint32_t ea) { return be32(vm_base + ea); }
@@ -2590,7 +2593,7 @@ void r7_heap_setup(ppu_context* c)
     memcpy(g, c->gpr, sizeof g);
     const uint64_t lr = c->lr, ctr = c->ctr;
     const uint32_t cr = c->cr;
-    func_006CAD4C(c);
+    g_dotheroes_lifted_asp_heap(c);
     while (g_trampoline_fn) { void (*f)(void*) = g_trampoline_fn; g_trampoline_fn = nullptr; f(c); }
     memcpy(c->gpr, g, sizeof g);
     c->lr = lr; c->ctr = ctr; c->cr = cr;
@@ -2796,8 +2799,8 @@ bool r6_keep(uint32_t addr)
     for (int i = 0; i < n; i++) if (keep[i] == addr) return true;
     return false;
 }
-const uint32_t kCurCtx = PA(0x02C11BACu), kStreamCache = PA(0x02C12E10u), kCurPair = PA(0x02C12CE0u), kSent = PA(0x02C12AF0u);
-const uint32_t kCounterP = PA(0x02C12B1Cu), kStreamSetVt = PA(0x00FEABF0u);
+const uint32_t kCurCtx = PA_RT(0x02C11BACu), kStreamCache = PA_RT(0x02C12E10u), kCurPair = PA_RT(0x02C12CE0u), kSent = PA_RT(0x02C12AF0u);
+const uint32_t kCounterP = PA_RT(0x02C12B1Cu), kStreamSetVt = PA_RT(0x00FEABF0u);
 
 // The binds asp's draw would make (0x006D3930 -> 0x006D3428 -> 0x006D3190),
 // in its order: (stream object, table entry). false: none to decide here
@@ -3477,7 +3480,7 @@ uint32_t fp_patch_record(uint32_t self, uint32_t par, uint32_t cnt, uint32_t val
 // build/r6): what each records, and -- skipped -- the object fields its body
 // stores besides the ring words, and its r3. =verify: the body runs and the
 // replacement's predictions are checked at its return (VEntry kind 5).
-const uint32_t kFpHeap = PA(0x02C124F0u);   // the fragment heap: +0x10 set up, +0x1C the program slot
+const uint32_t kFpHeap = PA_RT(0x02C124F0u);   // the fragment heap: +0x10 set up, +0x1C the program slot
 int asp_prog_r6(uint32_t addr, ppu_context* c)
 {
     const bool verify = r6_skip() == 2;
@@ -4909,7 +4912,8 @@ extern "C" int ppfx_rec_observe(uint32_t addr, ppu_context* ctx)
         else if (act == 2 && vp_verify()) vp_verify_enter(ctx);
         break;
     case 0x006A39EC:
-        if (vp_verify() && (uint32_t)ctx->lr == PA(0x006A529Cu)) vp_verify_nested(ctx);
+        static const uint32_t kVpNestedLr = PA_RT(0x006A529Cu);   // read once (port/program_addrs.h)
+        if (vp_verify() && (uint32_t)ctx->lr == kVpNestedLr) vp_verify_nested(ctx);
         enc_vp_const(ctx);
         break;
     case 0x0069F19C: enc_vertex_array(ctx); break;
@@ -4954,7 +4958,8 @@ extern "C" int ppfx_rec_observe(uint32_t addr, ppu_context* ctx)
             // Who reads the buffer and the report: the watch says (it has to
             // run: DOTHEROES_PPFX_TARGET_WATCH or DOTHEROES_PPFX_EA_WATCH).
             const uint32_t obj = (uint32_t)ctx->gpr[31];
-            const uint32_t buf = (uint32_t)ctx->lr == PA(0x007C2F94u) && ea_ok(obj + 0x4C) ? g32(obj + 0x4C) : 0;
+            static const uint32_t kBufLr = PA_RT(0x007C2F94u);   // read once (port/program_addrs.h)
+            const uint32_t buf = (uint32_t)ctx->lr == kBufLr && ea_ok(obj + 0x4C) ? g32(obj + 0x4C) : 0;
             const uint32_t idx = (uint32_t)ctx->gpr[5];
             if (ea_ok(buf, 16)) ppfx_watch_add_ea(buf, 16);
             static int said = 0;

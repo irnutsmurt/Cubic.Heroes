@@ -43,7 +43,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
-#include "../program_addrs.h"   /* PA(): v1.00's addresses of the game, for the program this build is of */
+#include "../program_addrs.h"   /* PA_RT(): v1.00's addresses of the game, for the program this build is of */
 
 // port/diag/game_log.h, in the game's executable (weak here, as ppfx_render.cpp declares it)
 extern "C" void dh_log(int level, const char* tag, const char* fmt, ...) __attribute__((weak, format(printf, 3, 4)));
@@ -65,16 +65,16 @@ void (*g_devtools_flip)(struct ppu_context* ctx) = nullptr;
 namespace {
 
 /* ---- the game (BLUS-30490), docs/M11_PLAN.md section 3.4 [C] ---- */
-constexpr uint32_t kLuaToc = PA(0x010764C4);        /* the Lua library's module TOC */
-constexpr uint32_t kLuaStatePtr = PA(0x0159C08C);   /* biLua (0x0159BE98) + 0x1F4: the lua_State */
-constexpr uint32_t kBiLuaLevel = PA(0x0159BFE8);    /* biLua + 0x150: its call level, -1 when idle */
-constexpr uint32_t kEventVar = PA(0x02AE1568);      /* EventClass.Event, the scripts' `Event` */
-constexpr uint32_t kGameManager = PA(0x02AE8704);   /* the game manager; its EventClass at +0x8F0 */
-constexpr uint32_t kArea = PA(0x029A6488);          /* the map's number (dev_state.cpp; the map's MS_ order) */
-constexpr uint32_t kFrames = PA(0x02CF3570);        /* the guest's frame counter (dev_state.cpp) */
-constexpr uint32_t kHudLife = PA(0x02B38E0C);       /* the HUD's copy of the hero's life (dev_state.cpp) */
-constexpr uint32_t fn_gettop = PA(0x007F02EC), fn_settop = PA(0x007F033C), fn_type = PA(0x007F09DC), fn_toboolean = PA(0x007F1250),
-                   fn_tolstring = PA(0x007F130C), fn_pcall = PA(0x007F3450), fn_loadbuffer = PA(0x0081B060);
+const uint32_t kLuaToc = PA_RT(0x010764C4);        /* the Lua library's module TOC */
+const uint32_t kLuaStatePtr = PA_RT(0x0159C08C);   /* biLua (0x0159BE98) + 0x1F4: the lua_State */
+const uint32_t kBiLuaLevel = PA_RT(0x0159BFE8);    /* biLua + 0x150: its call level, -1 when idle */
+const uint32_t kEventVar = PA_RT(0x02AE1568);      /* EventClass.Event, the scripts' `Event` */
+const uint32_t kGameManager = PA_RT(0x02AE8704);   /* the game manager; its EventClass at +0x8F0 */
+const uint32_t kArea = PA_RT(0x029A6488);          /* the map's number (dev_state.cpp; the map's MS_ order) */
+const uint32_t kFrames = PA_RT(0x02CF3570);        /* the guest's frame counter (dev_state.cpp) */
+const uint32_t kHudLife = PA_RT(0x02B38E0C);       /* the HUD's copy of the hero's life (dev_state.cpp) */
+const uint32_t fn_gettop = PA_RT(0x007F02EC), fn_settop = PA_RT(0x007F033C), fn_type = PA_RT(0x007F09DC), fn_toboolean = PA_RT(0x007F1250),
+                   fn_tolstring = PA_RT(0x007F130C), fn_pcall = PA_RT(0x007F3450), fn_loadbuffer = PA_RT(0x0081B060);
 
 /* the tools' guest memory: a stack for their calls and a buffer for a chunk */
 constexpr uint32_t kRegionBytes = 0x60000;       /* six 64 KB pages */
@@ -533,13 +533,13 @@ void check_warp()
 }
 
 /* ---- the player (M11.0c): the game's own CPlayerActor functions on the player its actor manager returns [C] ---- */
-constexpr uint32_t kActorToc = PA(0x01028658);        /* actor_manager's module TOC */
-constexpr uint32_t kActorManagerSlot = kActorToc + 0x196C;   /* the TOC word holding gActorManager (its getter) */
-constexpr uint32_t fn_get_player = PA(0x000A2248);    /* CActorManager::getPlayer */
-constexpr uint32_t kPlayerToc = PA(0x01038050);       /* CPlayerActor's module TOC */
-constexpr uint32_t fn_set_hp = PA(0x00101928), fn_set_mp = PA(0x00101940), fn_set_max_hp = PA(0x001020B0),
-                   fn_set_max_mp = PA(0x00101FFC), fn_set_invincible = PA(0x00101F78), fn_damage_hp = PA(0x0011A94C);
-constexpr uint32_t kPlayerVtable = PA(0x00FE3D20);    /* dev_state.cpp: the player's class */
+const uint32_t kActorToc = PA_RT(0x01028658);        /* actor_manager's module TOC */
+const uint32_t kActorManagerSlot = PA_RT(0x01029FC4);   /* the TOC word holding gActorManager (its getter): v1.00's kActorToc + 0x196C */
+const uint32_t fn_get_player = PA_RT(0x000A2248);    /* CActorManager::getPlayer */
+const uint32_t kPlayerToc = PA_RT(0x01038050);       /* CPlayerActor's module TOC */
+const uint32_t fn_set_hp = PA_RT(0x00101928), fn_set_mp = PA_RT(0x00101940), fn_set_max_hp = PA_RT(0x001020B0),
+                   fn_set_max_mp = PA_RT(0x00101FFC), fn_set_invincible = PA_RT(0x00101F78), fn_damage_hp = PA_RT(0x0011A94C);
+const uint32_t kPlayerVtable = PA_RT(0x00FE3D20);    /* dev_state.cpp: the player's class */
 constexpr uint32_t kHp = 0x5B8, kMp = 0x5BC, kMaxHp = 0x5C0, kMaxMp = 0x5C4, kInvincible = 0x54D;
 constexpr uint32_t kSwordType = 0x5D0;   /* M11.1: the equipped sword (CPlayerActor::getSwordType, 0x000FA024, reads it) */
 
@@ -651,11 +651,11 @@ void keep_invulnerable(const ppu_context* c)
 }
 
 /* ---- progression, quests, items (M11.0d) ---- */
-constexpr uint32_t kEventToc = PA(0x01057910);        /* EventClass's module TOC */
-constexpr uint32_t fn_player_data = PA(0x00985C08);   /* GetItem's first call: the player's data, by the name in its TOC */
-constexpr uint32_t fn_item_object = PA(0x00985D88);   /* GetItem's second: (player data, id) -> the item's object */
+const uint32_t kEventToc = PA_RT(0x01057910);        /* EventClass's module TOC */
+const uint32_t fn_player_data = PA_RT(0x00985C08);   /* GetItem's first call: the player's data, by the name in its TOC */
+const uint32_t fn_item_object = PA_RT(0x00985D88);   /* GetItem's second: (player data, id) -> the item's object */
 constexpr uint32_t kItemCount = 0x54;             /* the item object's count (CItem::setNum/getNum) */
-constexpr uint32_t kBundle = PA(0x00A7C908), kBundleSize = 0x39B7D5;   /* the scripts the game runs, in its EBOOT */
+const uint32_t kBundle = PA_RT(0x00A7C908), kBundleSize = 0x39B7D5;   /* the scripts the game runs, in its EBOOT */
 
 /* the main story in steps (docs/M11_PLAN.md section 9): our own labels; the flags the game's scripts set at each
  * (flag, value), the world map's progress flags, the items the step gives, the magic containers its event adds
@@ -937,7 +937,7 @@ int progression_command(const ppu_context* c, const Cmd& cmd, const std::string&
 }
 
 /* ---- bosses, enemies, events, cinematics (M11.0e) ---- */
-constexpr uint32_t fn_start_event = PA(0x004D5BC0);   /* StartEvent(event, name): `Coroutine=coroutine.create(name)` */
+const uint32_t fn_start_event = PA_RT(0x004D5BC0);   /* StartEvent(event, name): `Coroutine=coroutine.create(name)` */
 constexpr uint32_t kEventNameOff = 0xFC00;        /* an event's name, in the tools' region */
 
 /* the bosses, the game's way: each one's arena, and the flags its defeat sets -- cleared, the arena's own entry event
