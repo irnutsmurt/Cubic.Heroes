@@ -1,0 +1,69 @@
+From 243570e60c45b31956dfe5682767af65418e8df7 Mon Sep 17 00:00:00 2001
+From: giteaguy <73799093+irnutsmurt@users.noreply.github.com>
+Date: Tue, 24 Nov 2026 09:53:39 -0800
+Subject: [PATCH] cellPad: a host dialog reads the keyboard's keys whether or
+ not a controller is connected
+
+dotheroes beta.6 (Cubic.Heroes issue #10, found in the on-screen test of the photo picker). The game's keyboard
+is a fallback: with a controller connected only the controller drives the game. A host dialog (the save list, the
+photo picker) read only Esc and Backspace from the keyboard beside the pad, so with a controller connected its
+keyboard prompts ("Enter", "Esc") half worked: Up, Down and Enter did nothing. cellPad_ui_keys now gives a dialog
+Up and Down (the arrows), Cross (Enter, keypad Enter, Z) and Circle (Esc, Backspace, X) from the keyboard
+whenever this process's window has the keyboard focus, and the prompts follow the keyboard when it is used.
+---
+ libs/input/cellPad.c | 30 +++++++++++++++++++-----------
+ 1 file changed, 19 insertions(+), 11 deletions(-)
+
+diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
+index f16d5c6..a471df7 100644
+--- a/libs/input/cellPad.c
++++ b/libs/input/cellPad.c
+@@ -1251,26 +1251,34 @@ int cellPad_ui_device(void)
+     return s_ui_device;
+ }
+ 
+-/* Keys a host dialog reads beside the pad: Esc and Backspace go back (Circle).
+- * The window does not quit on Esc while a dialog is open (rsx_vulkan_backend.c). */
++/* Keys a host dialog (the save list, the photo picker) reads beside the pad, whether or not a controller is
++ * connected -- the game's keyboard fallback stands aside for a controller, a dialog's keyboard prompts never should:
++ * Up and Down move, Enter and Z confirm (Cross), Esc, Backspace and X go back (Circle). Only while this process's
++ * window has the keyboard focus. The window does not quit on Esc while a dialog is open (rsx_vulkan_backend.c). */
+ u32 cellPad_ui_keys(void)
+ {
++    u32 b = 0;
+ #if PAD_BACKEND_SDL2
+     if (!SDL_WasInit(SDL_INIT_VIDEO) || !SDL_GetKeyboardFocus()) return 0;
+     int n = 0;
+     const Uint8* ks = SDL_GetKeyboardState(&n);
+-    if (ks && ((SDL_SCANCODE_ESCAPE < n && ks[SDL_SCANCODE_ESCAPE]) || (SDL_SCANCODE_BACKSPACE < n && ks[SDL_SCANCODE_BACKSPACE]))) {
+-        s_ui_device = 0;
+-        return CELL_PAD_CTRL_CIRCLE;
+-    }
++#define UI_KEY(sc) (ks && (sc) < n && ks[(sc)])
++    if (UI_KEY(SDL_SCANCODE_ESCAPE) || UI_KEY(SDL_SCANCODE_BACKSPACE) || UI_KEY(SDL_SCANCODE_X)) b |= CELL_PAD_CTRL_CIRCLE;
++    if (UI_KEY(SDL_SCANCODE_RETURN) || UI_KEY(SDL_SCANCODE_KP_ENTER) || UI_KEY(SDL_SCANCODE_Z)) b |= CELL_PAD_CTRL_CROSS;
++    if (UI_KEY(SDL_SCANCODE_UP)) b |= CELL_PAD_CTRL_UP;
++    if (UI_KEY(SDL_SCANCODE_DOWN)) b |= CELL_PAD_CTRL_DOWN;
++#undef UI_KEY
+ #elif defined(_WIN32)
+     if (!pad_host_window_focused()) return 0;
+-    if ((GetAsyncKeyState(VK_ESCAPE) & 0x8000) || (GetAsyncKeyState(VK_BACK) & 0x8000)) {
+-        s_ui_device = 0;
+-        return CELL_PAD_CTRL_CIRCLE;
+-    }
++#define UI_KEY(vk) ((GetAsyncKeyState(vk) & 0x8000) != 0)
++    if (UI_KEY(VK_ESCAPE) || UI_KEY(VK_BACK) || UI_KEY('X')) b |= CELL_PAD_CTRL_CIRCLE;
++    if (UI_KEY(VK_RETURN) || UI_KEY('Z')) b |= CELL_PAD_CTRL_CROSS;
++    if (UI_KEY(VK_UP)) b |= CELL_PAD_CTRL_UP;
++    if (UI_KEY(VK_DOWN)) b |= CELL_PAD_CTRL_DOWN;
++#undef UI_KEY
+ #endif
+-    return 0;
++    if (b) s_ui_device = 0;   /* the prompts follow the keyboard */
++    return b;
+ }
+ 
+ s32 cellPadGetData(u32 port_no, CellPadData* data_guest)
+-- 
+2.56.0.windows.3
+

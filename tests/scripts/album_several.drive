@@ -1,0 +1,83 @@
+# Issue #10's regression: SNAPSHOT three times, then ALBUM: the photo picker lists the three, newest first; each is
+# viewed in turn (CROSS) and left (CIRCLE, back to the picker), the picker is left (CIRCLE: the title's RET_CANCEL),
+# the system menu closed and the hero walks. In play at the castle; the system menu: RESUME, SAVE, LOAD, OPTIONS,
+# SNAPSHOT, ALBUM, BESTIARY, LOADING ART, TITLE. A screenshot never shows the picker (frame dumps are the game's own
+# picture, before host screens are drawn), so none is taken while it is open. With no window, the picker backs
+# out on its own after 4 s, 30 s while a test drives the input (PAD_FILE).
+#! saves build/checkpoints/castle-front-2553
+#! env DOTHEROES_DEV_STATE=1
+#! secs 420
+log TitleMovie 120
+sleep 5
+press START
+sleep 3
+press START
+sleep 5
+press CROSS
+state life>0,area==17 60
+sleep 3
+press START                 # system menu, RESUME
+state menu==1 10
+sleep 2
+press DOWN
+sleep 1
+press DOWN
+sleep 1
+press DOWN
+sleep 1
+press DOWN
+sleep 1
+press CROSS                 # SNAPSHOT: the camera
+sleep 3
+press CROSS                 # shutter 1
+log cellPhotoExport\]\sFromFile 20
+sleep 4
+press CROSS                 # shutter 2
+log cellPhotoExport\]\sFromFile 20
+sleep 4
+press CROSS                 # shutter 3
+log cellPhotoExport\]\sFromFile 20
+sleep 4
+press CIRCLE                # leave the camera: back in the system menu, on SNAPSHOT
+sleep 3
+press DOWN
+sleep 1
+press CROSS                 # ALBUM: the picker
+log picker:\s3\spicture 20
+sleep 1
+press CROSS                 # view Snapshot 3 (the newest)
+log Import\(.*Capture_2 10
+sleep 5
+shot view-3
+press CIRCLE                # leave it: the picker again, on Snapshot 3
+log picker:\s3\spicture.*Capture_2 20
+sleep 1
+press DOWN
+sleep 1
+press CROSS                 # view Snapshot 2
+log Import\(.*Capture_1 10
+sleep 5
+shot view-2
+press CIRCLE
+log picker:\s3\spicture.*Capture_1 20
+sleep 1
+press DOWN
+sleep 1
+press CROSS                 # view Snapshot 1
+log Import\(.*Capture\.jpg 10
+sleep 5
+shot view-1
+press CIRCLE
+log picker:\s3\spicture 20
+sleep 1
+press CIRCLE                # leave the picker: the album ends
+log picker:\sbacked\sout 10
+sleep 4
+shot menu-after
+state menu==1 10
+press CIRCLE                # close the system menu: play
+state menu==3 15
+sleep 2
+hold RIGHT 1.5               # walk
+state hx>85 5
+shot walked
