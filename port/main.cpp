@@ -121,6 +121,7 @@ void     ps3_load_prx_modules(void);
 
 extern const char* ppu_vfs_root;              /* host dir the PS3 mount points map into */
 void     ps3_host_quit(const char* why);      /* cellSysutil.c: REQUEST_EXITGAME, then exit 0 */
+void     cellGame_init_from_paramsfo(const char* sfo_path);   /* cellGame.c: title id, category, version */
 
 /* sys_ppu_thread.c: the main thread's stack, as sys_ppu_thread_get_stack_information
  * reports it. Left at 0 it names VM_STACK_BASE, the first created thread's stack. */
@@ -1020,6 +1021,11 @@ static void set_default_env(const char* name, const std::string& value)
 }
 
 static std::string s_installed_elf;
+/* the program a build was lifted from (config/programs/<id>/; the pipeline defines it for another program) */
+#ifndef DOTHEROES_PROGRAM_ID
+#define DOTHEROES_PROGRAM_ID "BLUS30490-01.00"
+#endif
+static std::string s_program_mismatch;   /* the build.cfg's DOTHEROES_PROGRAM, when it is not this build's */
 
 /* <install>/dotheroes.cfg: the player's settings, written by the setup app, as
  * NAME=value lines (# comments). They are environment defaults: a variable
@@ -1112,6 +1118,21 @@ static const char* installed_defaults(void)
         s_log_path = log;
     }
     s_installed_elf = data + "/disc/PS3_GAME/USRDIR/EBOOT.elf";
+    /* beta.6: a build of the official update's program (its build.cfg: DOTHEROES_PROGRAM, and DOTHEROES_UPDATE_DIR
+     * relative to the install): the update's decrypted program -- its USRDIR/EBOOT.elf, beside the package's EBOOT.BIN
+     * as the disc's is beside its own -- is the one loaded; the disc stays the game's /dev_bdvd; the update's folder is
+     * its /dev_hdd0/game/<title>/ with a patch boot (ps3recomp 0177, cellGame.c). None: the disc's program, as
+     * before. A build.cfg naming another program than the one this build was made from stops the start (main). */
+    if (const char* want = getenv("DOTHEROES_PROGRAM"); want && *want && strcmp(want, DOTHEROES_PROGRAM_ID) != 0)
+        s_program_mismatch = want;
+    if (const char* u = getenv("DOTHEROES_UPDATE_DIR"); u && *u && s_program_mismatch.empty()) {
+        std::filesystem::path p(u);
+        if (p.is_relative()) p = std::filesystem::path(root) / p;
+        const std::string upd = p.lexically_normal().generic_string();
+        set_default_env("PS3_GAME_UPDATE_DIR", upd);
+        set_default_env("PS3_VFS_ROOT", data + "/disc");
+        s_installed_elf = upd + "/USRDIR/EBOOT.elf";
+    }
     /* M11.0 (docs/M11_PLAN.md section 3.2): developer mode plays on test saves of its own -- the player's saves, system
      * data and trophies (data/gamedata) are never opened while it is on. Otherwise the roots set here are defaults
      * (a test may set its own). */
@@ -1582,6 +1603,11 @@ int main(int argc, char** argv)
     }
     const char* elf = argc >= 2 ? argv[1] : installed_defaults();
     devtools_gate(argc < 2);   /* M11.1: an installed game's test switches that change the game need developer mode */
+    if (!s_program_mismatch.empty()) {
+        fprintf(stderr, "This build is of the game's program %s, but its settings name %s.\nReinstall the game from "
+                "the setup app.\n", DOTHEROES_PROGRAM_ID, s_program_mismatch.c_str());
+        return 2;
+    }
     if (argc < 2) {
         FILE* f = fopen(elf, "rb");
         if (!f) {
@@ -1790,6 +1816,11 @@ int main(int argc, char** argv)
 
     derive_vfs_root(elf);
     printf("[boot] VFS root: %s\n", ppu_vfs_root);
+    /* an installed update (PS3_GAME_UPDATE_DIR): the disc's PARAM.SFO read, so the patch boot finds its title */
+    if (const char* u = getenv("PS3_GAME_UPDATE_DIR"); u && *u) {
+        cellGame_init_from_paramsfo((std::string(ppu_vfs_root) + "/PS3_GAME/PARAM.SFO").c_str());
+        printf("[boot] program %s with the update in %s\n", DOTHEROES_PROGRAM_ID, u);
+    }
 
     ppu_recomp_register();   /* lifted function table -> address map */
     ps3_load_prx_modules();  /* this game's lifted system PRX, if it has any */
