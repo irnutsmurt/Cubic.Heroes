@@ -148,7 +148,10 @@ class Paths:
 # lift reads: the SPU tasks' generator, its template and its per-task configurations (tools/spu_native/) too.
 LIFT_TOOLS = ["fix_functions.py", "setup_pipeline.py", "gen_spu_native.py", "spu_native_task.cpp.in"]
 NOT_LIFT_CONFIG = {"release_keys.json", "settings_schema.json",   # the launcher's, not the lift's (M9.3-M9.4)
-                   "disc_manifest.json"}   # the disc's file list (beta.5): what is extracted, not how it is lifted
+                   "disc_manifest.json",   # the disc's file list (beta.5): what is extracted, not how it is lifted
+                   # beta.6, the launcher's too: the store's catalog keys and official-content mapping, the official
+                   # update's file list, the key sources -- none is read by a lift, so changing one never re-lifts
+                   "catalog_keys.json", "official_characters.json", "update_manifest.json", "key_downloads.json"}
 
 
 def tool_fingerprint(*names, program=None):
@@ -432,7 +435,16 @@ def open_eboot(eboot_bytes, keys=None, elf=None, want=None, work_dir=None):
             "no_match": (f"The keys in {it} don't open this game's program." + needs, "wrong_key"),
             "rpcs3_failed": (f"Your RPCS3 couldn't decrypt the game's program ({mine['result'] if mine else ''}).",
                              "wrong_key"),
+            # beta.6: the keys are downloaded when none is on the computer -- offline, or the source unreachable
+            "download_failed": ((mine["result"] if mine else "") + " Connect to the internet and try again (the keys "
+                                "are downloaded automatically), or choose " + KEYS_CHOICES + ".", "keys_download"),
         }
+        if status == "download_failed":
+            raise SetupError(said[status][0], said[status][1], tried)
+        dl = next((t for t in e.tried if t.get("status") == "download_failed"), None)
+        if dl and status in said:   # the player's own source failed, and so did the download
+            raise SetupError(said[status][0] + f" The keys couldn't be downloaded either ({dl['result']})" + choose,
+                             said[status][1], tried)
         if status in said:
             raise SetupError(said[status][0] + choose, said[status][1], tried)
         raise SetupError("The keys found don't open this game's program." + needs + choose, "wrong_key", tried)
@@ -539,8 +551,9 @@ def probe_disc(source, disc_key=None):
 
 
 def probe_keys(source, keys=None, elf=None, disc_key=None):
-    """Whether the keys file (or EBOOT.elf) decrypts this disc's program to the supported one, in memory:
-    nothing is written. Raises SetupError (keys_missing, keys_unreadable, keys_empty, wrong_key)."""
+    """Whether the keys file (or EBOOT.elf) decrypts this disc's program to the supported one, in memory: nothing
+    is written but, when the sources allow it (beta.6), the keys downloaded into the install's data/keys. Raises
+    SetupError (keys_missing, keys_unreadable, keys_empty, wrong_key, keys_download)."""
     if not (keys or elf):
         raise SetupError("Choose " + KEYS_CHOICES + ".", "keys_missing")
     if isinstance(keys or elf, str) and not os.path.exists(keys or elf):
@@ -555,6 +568,7 @@ def probe_keys(source, keys=None, elf=None, disc_key=None):
         raise SetupError("The disc's game program (EBOOT.BIN) wasn't found.", "not_a_disc")
     _, how = open_eboot(eboot, keys, elf)
     return {"match": True, "via": how["kind"] if how["kind"] in ("elf", "rpcs3") else "keys", "source": how["source"],
+            "downloaded": how["kind"] == "downloaded",
             "found": how["how"]}
 
 

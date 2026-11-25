@@ -578,11 +578,16 @@ def cmd_probe_disc(a, ev, control):
 
 def key_sources_of(a):
     """the key sources of a probe or an install: --keys, then --key-source, then the places beside the disc, then
-    --rpcs3 (tools/key_sources.py). Only paths: no key is read here."""
+    the keys the install downloaded before and -- unless --no-key-download -- the keys downloaded now from the pinned
+    public sources (beta.6: tools/key_download.py, into --install's data/keys; a few small files), then --rpcs3
+    (tools/key_sources.py). Only paths: no key is read here."""
     import key_sources
+    install = os.path.abspath(a.install) if getattr(a, "install", None) else None
     return key_sources.Sources(chosen=os.path.abspath(a.keys) if a.keys else None,
-                               remembered=[os.path.abspath(p) for p in a.key_source], disc=os.path.abspath(a.disc),
-                               rpcs3=os.path.abspath(a.rpcs3) if a.rpcs3 else None)
+                               remembered=[os.path.abspath(p) for p in a.key_source],
+                               disc=os.path.abspath(a.disc) if getattr(a, "disc", None) else None,
+                               rpcs3=os.path.abspath(a.rpcs3) if a.rpcs3 else None, install=install,
+                               download=bool(install) and not getattr(a, "no_key_download", False))
 
 
 def cmd_probe_keys(a, ev, control):
@@ -592,12 +597,13 @@ def cmd_probe_keys(a, ev, control):
 def cmd_game_update_check(a, ev, control):
     """the official v1.01 update's checks for an install (tools/update_preflight.py): its state (v1.00 / v1.01 / not
     installed), each check with the player's message, its remedies and its details, whether Install can start, and
-    how. Reads only: nothing is downloaded, changed or kept; keys are never put into an event."""
+    how. Nothing of the game is changed; the keys that open the update are downloaded into data/keys when the
+    computer has none (pinned sources; --no-key-download: not). Keys are never put into an event."""
     import update_preflight
     keys = a.keys or (a.key_source[0] if a.key_source else None)
     return update_preflight.preflight(os.path.abspath(a.install), disc=a.disc, pkg=a.update_pkg,
                                       folder=a.update_folder, elf=a.update_elf, keys=keys, rpcs3=a.rpcs3,
-                                      online=not a.offline,
+                                      online=not a.offline, key_download_allowed=not a.no_key_download,
                                       work_dir=os.path.join(os.path.abspath(a.install), "data", "tmp"))
 
 
@@ -2022,6 +2028,8 @@ def parser():
     p.add_argument("--update-folder", help="game-update-check: an installed or extracted v1.01 update the player chose")
     p.add_argument("--update-elf", help="game-update-check: the update's decrypted program the player chose")
     p.add_argument("--offline", action="store_true", help="game-update-check: don't ask Sony's server")
+    p.add_argument("--no-key-download", action="store_true", help="probe-keys, install, game-update-check: don't "
+                   "download keys (only those on this computer, and those the install downloaded before)")
     p.add_argument("--install")
     p.add_argument("--for", dest="op", choices=sorted(NEEDED), default="install")
     p.add_argument("--full", action="store_true")

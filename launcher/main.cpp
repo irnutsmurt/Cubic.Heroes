@@ -2094,6 +2094,8 @@ static void probe_keys()
     g_wiz.probing_keys = true;
     std::vector<std::string> a = disc_args();
     add_key_args(a);
+    // beta.6: no keys on this computer -- the worker downloads them (pinned, checked) into the install's data/keys
+    if (!g_wiz.folder.empty()) { a.push_back("--install"); a.push_back(g_wiz.folder); }
     run("probe-keys", a, "", false, [](const json::Value& r) {
         g_wiz.probing_keys = false;
         if (r["ok"].truthy()) {
@@ -2119,6 +2121,8 @@ static std::string keys_found_text()
     const std::string name = path_str(u8path(k["source"].str()).filename());
     if (via == "rpcs3") return "Your RPCS3 decrypts the game's program (" + k["source"].str() + ").";
     if (found == "together") return "Keys from several places together open the game's program.";
+    if (k["downloaded"].truthy())   // beta.6: fetched from the public source config/key_downloads.json pins, checked
+        return "Keys downloaded automatically\nThey open this disc's program.";
     const std::string where = found == "beside the disc" ? "found beside your disc" : found == "remembered" ?
                               "found where you chose them before" : "chosen";
     return name + " (" + where + ")\n" + (via == "elf" ? "Your decrypted program matches this disc."

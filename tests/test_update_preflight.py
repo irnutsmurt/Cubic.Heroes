@@ -17,6 +17,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "tools"))
 sys.path.insert(0, os.path.join(ROOT, "tests"))
 import game_update  # noqa: E402
+import key_download  # noqa: E402
 import update_preflight as U  # noqa: E402
 from test_pkg_update import keys_text, make_elf, make_pkg, make_self, rnd  # noqa: E402
 
@@ -51,10 +52,24 @@ class Preflight(unittest.TestCase):
                 hashlib.sha256(self.v101_elf).hexdigest())
         self.programs = os.path.join(self.d, "programs")
         os.makedirs(os.path.join(self.programs, U.UPDATE_ID))
+        # beta.6: the keys downloaded when the computer has none -- never from the internet here: a made-up source,
+        # pinned to a made-up keys file, served from a folder of this test (empty unless a test fills it)
+        self.mirror = os.path.join(self.d, "mirror")
+        os.makedirs(self.mirror)
+        self.key_sources = []
+
+        def fetch(install, kind, sources=None, progress=None, cancelled=None, base=None):
+            if not self.key_sources:
+                raise key_download.KeyDownloadError("No connection to the internet to download the keys (offline?).",
+                                                    "offline")
+            return real_fetch(install, kind, self.key_sources, progress, cancelled, base=self.mirror)
+        real_fetch = key_download.fetch
         for p in (mock.patch.object(game_update, "record", lambda *a, **k: self.rec),
                   mock.patch.object(game_update, "load_manifest", lambda *a, **k: self.manifest),
                   mock.patch.object(U, "_pins", lambda: pins), mock.patch.object(U, "PROGRAMS", self.programs),
-                  mock.patch.object(U, "downloads_folder", lambda: None)):
+                  mock.patch.object(U, "downloads_folder", lambda: None),
+                  mock.patch.object(key_download, "fetch", fetch),
+                  mock.patch.object(key_download, "load", lambda *a, **k: self.key_sources)):
             p.start()
             self.addCleanup(p.stop)
         self.install = self.make_install(pins[1])
@@ -226,6 +241,65 @@ class Preflight(unittest.TestCase):
         c = self.check(r, "keys")
         self.assertEqual((r["ready"], c["status"]), (False, "missing"))
         self.assertIn("locate_rpcs3", c["remedies"])
+        self.assertIn("retry", c["remedies"])                     # offline: trying again online is a remedy
+        self.assertIn("couldn't be downloaded", c["message"])
+        self.plain(r)
+
+    # ---- beta.6: the keys downloaded automatically (pinned) ----
+
+    def serve_keys(self, data=None, pin=None):
+        """a made-up public source: one scetool-format keys file holding the made-up update's keys"""
+        text = (f"[NP_klic_free]\ntype=OTHER\nkey={self.kf.hex().upper()}\n\n[NP_klic_key]\ntype=OTHER\n"
+                f"key={self.kk.hex().upper()}\n\n[NP_gpkg_key]\ntype=OTHER\nkey={self.pk.hex().upper()}\n\n"
+                f"[appldr]\ntype=SELF\nrevision=0001\nself_type=NPDRM\nerk={self.erk.hex().upper()}\n"
+                f"riv={self.riv.hex().upper()}\n").encode()
+        good = hashlib.sha256(text).hexdigest()
+        os.makedirs(os.path.join(self.mirror, "test-keys", "data"), exist_ok=True)
+        with open(os.path.join(self.mirror, "test-keys", "data", "keys"), "wb") as f:
+            f.write(text if data is None else data)
+        self.key_sources[:] = [{"id": "test-keys", "name": "a test source", "commit": "0" * 40,
+                                "url": "https://example.invalid/{commit}/{path}", "opens": ["app", "pkg", "npdrm"],
+                                "files": [{"path": "data/keys", "size": len(text), "sha256": pin or good}]}]
+        return os.path.join(self.install, "data", "keys", "test-keys", "keys")
+
+    def test_keys_downloaded_when_the_computer_has_none(self):
+        """no keys at all: the update's keys are downloaded (pinned), the program opened with them -- ready"""
+        kept = self.serve_keys()
+        r = U.preflight(self.install, disc=self.disc, pkg=self.put_pkg(self.d), online=False)
+        self.assertFalse(r["ready"])                              # offline: nothing downloaded
+        self.assertFalse(os.path.exists(kept))
+        r = U.preflight(self.install, disc=self.disc, pkg=self.put_pkg(self.d), head=lambda url: None)
+        self.assertTrue(r["ready"], r["blockers"])
+        self.assertEqual(r["plan"]["decrypt"], "downloaded")
+        self.assertIn("downloaded automatically", self.check(r, "keys")["message"])
+        self.assertTrue(os.path.isfile(kept))
+        self.plain(r)
+        # downloaded before: used offline too
+        r = U.preflight(self.install, disc=self.disc, pkg=self.put_pkg(self.d), online=False)
+        self.assertTrue(r["ready"], r["blockers"])
+        self.assertEqual(r["plan"]["decrypt"], "downloaded")
+
+    def test_the_players_own_keys_first(self):
+        self.serve_keys()
+        r = U.preflight(self.install, pkg=self.put_pkg(self.d), keys=self.all_keys(), head=lambda url: None)
+        self.assertTrue(r["ready"], r["blockers"])
+        self.assertEqual(r["plan"]["decrypt"], "keys")
+        self.assertFalse(os.path.exists(os.path.join(self.install, "data", "keys")))   # nothing downloaded
+
+    def test_a_download_that_isnt_the_pinned_file_is_refused(self):
+        kept = self.serve_keys(data=b"[NP_klic_free]\ntype=OTHER\nkey=" + b"0" * 32 + b"\n")
+        r = U.preflight(self.install, pkg=self.put_pkg(self.d), head=lambda url: None)
+        self.assertFalse(r["ready"])
+        c = self.check(r, "keys")
+        self.assertIn(c["status"], ("missing", "failed"))
+        self.assertFalse(os.path.exists(kept))                    # removed, never used
+        self.plain(r)
+
+    def test_no_key_download_when_not_allowed(self):
+        kept = self.serve_keys()
+        r = U.preflight(self.install, pkg=self.put_pkg(self.d), head=lambda url: None, key_download_allowed=False)
+        self.assertFalse(r["ready"])
+        self.assertFalse(os.path.exists(kept))
 
     # ---- space, permission ----
 

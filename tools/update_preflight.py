@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """The official v1.01 update: what an installation has, and whether the update can be installed -- the launcher's
-checks before it offers Install (docs/OFFICIAL_UPDATE.md). Reads only: nothing is changed, downloaded or kept.
+checks before it offers Install (docs/OFFICIAL_UPDATE.md). Nothing of the game is changed or kept; the only thing
+written is, when the computer has none, the keys that open the update (a few small files, downloaded from the pinned
+public sources into the installation's data/keys: tools/key_download.py).
 
 v1.00 is complete and fully supported; the update is optional. preflight() answers, for one installation:
   state       "not_installed" | "v100" | "v101" | "unsupported" (another game or version)
@@ -11,13 +13,15 @@ v1.00 is complete and fully supported; the update is optional. preflight() answe
                          free_space, continue_v100), details the technical part (shown under "Show details")
   ready       every mandatory check passed (the update can be installed now, or after its download, which is
               itself checked before anything changes)
-  plan        how it would be installed: {source: pkg | folder | download, path, decrypt: keys | rpcs3 | elf | after_download}
+  plan        how it would be installed: {source: pkg | folder | download, path,
+                                         decrypt: keys | downloaded | rpcs3 | elf | after_download}
   blockers    the messages of the checks that stop it (what a disabled Install says)
 
 The update's inputs are looked for where a player keeps them, never by searching their computer: the package or
 folder they chose, the one chosen before, the official package's own name beside their disc and in their Downloads
 folder, the installation's own download folder, and an RPCS3 they set up (its installed copy of the update). The keys:
-as for the game itself (tools/key_sources.py) -- chosen, remembered, beside the disc, or their RPCS3.
+as for the game itself (tools/key_sources.py) -- chosen, remembered, beside the disc; else downloaded automatically
+(pinned, checked); an RPCS3 they set up is an optional fallback, never required.
 
     update_preflight.py check INSTALL_DIR [--pkg P] [--folder D] [--elf E] [--keys K] [--rpcs3 R] [--offline]
 """
@@ -30,6 +34,7 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import game_update  # noqa: E402
+import key_download  # noqa: E402
 import key_sources  # noqa: E402
 import official_content  # noqa: E402
 import player_keys  # noqa: E402
@@ -198,10 +203,11 @@ def _eboot_from_package(pkg, key):
 # ---------------- the checks ----------------
 
 def preflight(install, disc=None, pkg=None, folder=None, elf=None, keys=None, rpcs3=None, online=True, head=None,
-              work_dir=None):
+              work_dir=None, key_download_allowed=True):
     """the update's checks for the installation at `install` (see the module's description). pkg / folder / elf /
     keys / rpcs3: what the player chose now (else what the launcher remembers); online False: the official download
-    is not looked at; head: a function url -> size or None (tests)"""
+    is not looked at and no key is downloaded; key_download_allowed False: no key is downloaded (tests, or the
+    player's choice); head: a function url -> size or None (tests)"""
     install = os.path.abspath(install)
     prefs = launcher_prefs(install)
     up = prefs.get("update") or {}
@@ -290,9 +296,12 @@ def preflight(install, disc=None, pkg=None, folder=None, elf=None, keys=None, rp
     plan.update(src or {})
 
     # 4. opening the update: the package key (for a package), and the program's NPDRM key with the free licence's
-    #    pair -- or a decrypted program the player has, or their RPCS3
+    #    pair -- the player's own keys, else (beta.6, the owner's decision of 2026-11-25) keys downloaded
+    #    automatically from the pinned public sources (tools/key_download.py: a few small files into data/keys,
+    #    fetched here, during the checks, so that "ready" is said only once the update's program has been opened);
+    #    or a decrypted program the player has; or their RPCS3 (optional, never required)
     sources = key_sources.Sources(keys or prefs.get("keys"), [x for x in (prefs.get("keys_remembered") or []) if x],
-                                  disc, rpcs3)
+                                  disc, rpcs3, install=install)
     ring = _key_ring(sources)
     elf_path = elf or up.get("elf")
     if elf_path and os.path.isfile(elf_path):
@@ -305,11 +314,30 @@ def preflight(install, disc=None, pkg=None, folder=None, elf=None, keys=None, rp
         else:
             checks.append(_check("program", "warning", "The update's program", "The decrypted program you chose isn't "
                                  "the v1.01 update's, so it isn't used.", ["choose_elf"], details=elf_path))
-    if src and src["source"] == "pkg" and not ring.pkg:
+    dl_error, auto = None, False
+    if src and plan.get("decrypt") != "elf" and not (ring.has_update_keys() and (ring.npdrm or ring.npdrm_any)):
+        try:
+            got = key_download.downloaded(install, "npdrm") or (
+                key_download.fetch(install, "npdrm") if online and key_download_allowed else [])
+        except key_download.KeyDownloadError as e:
+            got, dl_error = [], e
+        for path, _ in got:
+            try:
+                ring.merge(player_keys.load(path))
+                auto = True
+            except (OSError, ValueError):
+                pass
+    dl_note = f"; the keys couldn't be downloaded: {dl_error}" if dl_error else (
+        "" if online and key_download_allowed else "; keys not downloaded (offline)")
+    no_keys = ["choose_elf", "choose_keys", "locate_rpcs3", "continue_v100"]
+    if dl_error and dl_error.code in ("offline", "server", "interrupted", "tls"):
+        no_keys = ["retry"] + no_keys
+    if src and src["source"] == "pkg" and not ring.pkg and plan.get("decrypt") != "elf":
         checks.append(_check("keys", "missing", "Opening the update", "The update package can't be opened: the "
-                             "package key isn't among your keys. Select keys that include it.",
-                             ["choose_keys", "choose_folder", "continue_v100"],
-                             details="needed: the PS3 package key (PKG / gpkg-key)"))
+                             "package key isn't among your keys, and it couldn't be downloaded. Connect to the "
+                             "internet and try again, or select keys that include it.",
+                             ["retry", "choose_keys", "choose_folder", "continue_v100"],
+                             details="needed: the PS3 package key (PKG / gpkg-key)" + dl_note))
     elif src and plan.get("decrypt") != "elf":
         eboot = None
         try:
@@ -320,39 +348,42 @@ def preflight(install, disc=None, pkg=None, folder=None, elf=None, keys=None, rp
                     eboot = f.read()
         except (OSError, ValueError) as e:
             checks.append(_check("keys", "failed", "Opening the update", "The update package couldn't be opened with "
-                                 "your keys. Select keys that include the PS3 package key.", ["choose_keys",
-                                                                                              "continue_v100"],
-                                 details=f"{type(e).__name__}: {e}"))
+                                 "the keys available. Select keys that include the PS3 package key.",
+                                 ["choose_keys", "continue_v100"], details=f"{type(e).__name__}: {e}"))
             eboot = False
         if eboot:
             try:
                 _, how = key_sources.open_program(eboot, v101, sources, work_dir)
-                plan["decrypt"] = "rpcs3" if how.get("kind") == "rpcs3" else "keys"
-                checks.append(_check("keys", "ok", "Opening the update", "The update's program opens with " +
-                                     ("your RPCS3." if plan["decrypt"] == "rpcs3" else "your keys."),
-                                     details=f"{how.get('how')}: {how.get('source')}"))
+                plan["decrypt"] = {"rpcs3": "rpcs3", "downloaded": "downloaded"}.get(how.get("kind"), "keys")
+                checks.append(_check("keys", "ok", "Opening the update", "The update's program opens with " + {
+                    "rpcs3": "your RPCS3.", "downloaded": "the keys downloaded automatically."}.get(
+                    plan["decrypt"], "your keys."), details=f"{how.get('how')}: {how.get('source')}"))
             except key_sources.NoProgram as e:
                 checks.append(_check("keys", "failed", "Opening the update", "The update executable could not be "
                                      "decrypted using the available resources. Select an existing decrypted update "
                                      "executable, provide compatible keys, or configure an available supported RPCS3 "
-                                     "installation.", ["choose_elf", "choose_keys", "locate_rpcs3", "continue_v100"],
+                                     "installation." + (" The keys could also be downloaded automatically when you "
+                                                        "are online." if dl_error else ""), no_keys,
                                      details="needed: " + ", ".join(e.need or ["NPDRM key, KLIC_FREE, KLIC_KEY"]) +
-                                     "; tried: " + "; ".join(f"{t.get('how')}: {t.get('result')}" for t in e.tried)))
+                                     "; tried: " + "; ".join(f"{t.get('how')}: {t.get('result')}" for t in e.tried)
+                                     + dl_note))
         elif eboot is None and src["source"] == "download":
             if ring.has_update_keys() or sources.rpcs3:
                 plan["decrypt"] = "after_download"
-                checks.append(_check("keys", "ok", "Opening the update", "Your keys" +
-                                     (" or your RPCS3" if sources.rpcs3 else "") + " will open the update; they're "
-                                     "checked right after the download, before anything is changed.",
+                checks.append(_check("keys", "ok", "Opening the update", ("The keys downloaded automatically" if auto
+                                                                          else "Your keys") +
+                                     (" or your RPCS3" if sources.rpcs3 and not ring.has_update_keys() else "") +
+                                     " will open the update; they're checked right after the download, before "
+                                     "anything is changed.",
                                      details=f"package key {'yes' if ring.pkg else 'no'}, free licence "
                                      f"{'yes' if ring.klic_free and ring.klic_key else 'no'}, NPDRM keys "
-                                     f"{len(ring.npdrm) + len(ring.npdrm_any)}, RPCS3 {'yes' if sources.rpcs3 else 'no'}"))
+                                     f"{len(ring.npdrm) + len(ring.npdrm_any)}, RPCS3 {'yes' if sources.rpcs3 else 'no'}"
+                                     + (", downloaded automatically" if auto else "")))
             else:
-                checks.append(_check("keys", "missing", "Opening the update", "The update needs keys to open it: the "
-                                     "PS3 package key and the free licence's keys, or a supported RPCS3 installation. "
-                                     "Select your keys or locate RPCS3.", ["choose_keys", "locate_rpcs3",
-                                                                          "continue_v100"],
-                                     details="needed: PKG, NPDRM key, KLIC_FREE, KLIC_KEY (or RPCS3)"))
+                checks.append(_check("keys", "missing", "Opening the update", "The keys that open the update couldn't "
+                                     "be downloaded automatically. Connect to the internet and try again, or select "
+                                     "your keys, a decrypted update program or an RPCS3 installation.", no_keys,
+                                     details="needed: PKG, NPDRM key, KLIC_FREE, KLIC_KEY (or RPCS3)" + dl_note))
     elif plan.get("decrypt") == "elf":
         checks.append(_check("keys", "ok", "Opening the update", "The decrypted v1.01 program you have is used.",
                              details=plan["elf"]))

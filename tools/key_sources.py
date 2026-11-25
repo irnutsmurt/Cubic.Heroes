@@ -8,7 +8,10 @@ Cubic.Heroes ships no key: the program on the player's disc is opened with what 
 3. the explicitly relevant places beside the disc they chose: the folder holding the disc image (for a disc folder,
    that folder and the one holding it), not searched any deeper than its own entries -- files whose names say they
    hold keys (keys, *.keys, *keys*.txt, *keys*.zip, ...) or a decrypted EBOOT.elf, and folders whose names say so;
-4. an RPCS3 the player has and pointed the launcher at (optional; never required): its own `--decrypt`, run on a
+4. the keys this installation downloaded before (its data/keys), then -- online -- the keys downloaded now from the
+   public sources config/key_downloads.json pins (beta.6, the owner's decision of 2026-11-25; tools/key_download.py),
+   for the kind of program it is (the disc's APP program, the official update's NPDRM one);
+5. an RPCS3 the player has and pointed the launcher at (optional; never required): its own `--decrypt`, run on a
    private copy of the program, without a window. Nothing of RPCS3 is part of Cubic.Heroes.
 
 Whatever opens the program, the result is accepted only when it is exactly the pinned program (its SHA-256), so a
@@ -68,13 +71,16 @@ def beside(disc):
 
 class Sources:
     """the key sources of one install or check: chosen (a path or None), remembered ([path]), the disc's (for the
-    places beside it), rpcs3 (a path or None)"""
+    places beside it), rpcs3 (a path or None); install: the installation whose data/keys holds downloaded keys (None:
+    none), download: whether keys may be downloaded now (online), progress(done, total) for that download"""
 
-    def __init__(self, chosen=None, remembered=(), disc=None, rpcs3=None):
+    def __init__(self, chosen=None, remembered=(), disc=None, rpcs3=None, install=None, download=False,
+                 progress=None):
         self.chosen, self.remembered, self.disc, self.rpcs3 = chosen, list(remembered or ()), disc, rpcs3
+        self.install, self.download, self.progress = install, download, progress
 
     def __bool__(self):
-        return bool(self.chosen or self.remembered or self.disc or self.rpcs3)
+        return bool(self.chosen or self.remembered or self.disc or self.rpcs3 or self.install)
 
     def ordered(self):
         """[(path, how)] -- each path once, the chosen first"""
@@ -115,6 +121,47 @@ def rpcs3_decrypt(rpcs3, eboot, work_dir=None, timeout=RPCS3_TIMEOUT_S):
             return f.read()
     finally:
         shutil.rmtree(d, ignore_errors=True)
+
+
+def program_kind(eboot):
+    """which keys a program needs: 'npdrm' (a downloaded program, the official update's) or 'app' (the disc's)"""
+    try:
+        return "npdrm" if self_decrypt.self_info(eboot)[0] == self_decrypt.SELF_NPDRM else "app"
+    except ValueError:
+        return "app"
+
+
+def _downloaded_keys(eboot, want, sources, tried):
+    """the program opened with the keys the installation downloaded before, else (download) with keys downloaded
+    now: (elf, rec) or None, the attempts added to tried"""
+    import key_download
+    kind = program_kind(eboot)
+    try:
+        here = key_download.downloaded(sources.install, kind)
+    except key_download.KeyDownloadError as e:
+        tried.append({"source": "the list of key sources", "kind": "download", "how": "automatic download",
+                      "result": str(e), "status": "download_failed", "code": e.code})
+        return None
+    attempts = list(here)
+    if sources.download and not here:
+        try:
+            attempts += [x for x in key_download.fetch(sources.install, kind, progress=sources.progress)
+                         if x not in here]
+        except key_download.KeyDownloadError as e:
+            tried.append({"source": "automatic download", "kind": "download", "how": "automatic download",
+                          "result": str(e), "status": "download_failed", "code": e.code})
+    for path, how in attempts:
+        rec = {"source": path, "kind": "downloaded", "how": how}
+        try:
+            elf = _try_ring(eboot, player_keys.load(path), want)
+        except (self_decrypt.MissingKeys, player_keys.KeysError, OSError, ValueError) as e:
+            elf = None
+            rec["error"] = type(e).__name__
+        if elf is not None:
+            return elf, rec
+        rec["result"], rec["status"] = "the downloaded keys don't open this program", "no_match"
+        tried.append(rec)
+    return None
 
 
 def open_program(eboot, want, sources, work_dir=None):
@@ -177,6 +224,10 @@ def open_program(eboot, want, sources, work_dir=None):
             need = e.need
         except ValueError:
             pass
+    if sources.install:
+        got = _downloaded_keys(eboot, want, sources, tried)
+        if got:
+            return got
     if sources.rpcs3:
         elf = rpcs3_decrypt(sources.rpcs3, eboot, work_dir)
         rec = {"source": os.path.abspath(sources.rpcs3), "kind": "rpcs3", "how": "RPCS3"}
