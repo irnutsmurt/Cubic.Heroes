@@ -242,6 +242,34 @@ def preflight(install, disc=None, pkg=None, folder=None, elf=None, keys=None, rp
                              details=f"no {os.path.join('config', 'programs', UPDATE_ID)}"))
         return _result(gs, checks, plan, ready=False)
 
+    # 2b. already in this installation: a v1.01 build kept (the player switched back to v1.00) -- made active again
+    #     at once; or the update's files and program verified by an earlier attempt -- only the build is left
+    import install_layout
+    import official_update
+    lay = install_layout.Layout(install)
+    if os.path.exists(lay.active_json) and lay.newest_of(UPDATE_ID) and official_update.prepared(install, full=False):
+        checks.append(_check("package", "ok", "The update", "v1.01 is already built in this installation: switching "
+                             "to it takes a moment.", details=lay.newest_of(UPDATE_ID)))
+        plan.update(source="kept", build=lay.newest_of(UPDATE_ID), decrypt="done")
+        return _result(gs, checks, plan, ready=True)
+    if official_update.prepared(install):
+        checks.append(_check("package", "ok", "The update package", "The official v1.01 update's files are already in "
+                             "this installation and verified.", details=official_update.folder(install)))
+        checks.append(_check("keys", "ok", "Opening the update", "The update's program was decrypted before and "
+                             "matches the official one."))
+        plan.update(source="prepared", path=official_update.folder(install), decrypt="done")
+        need = _need(install, plan)
+        try:
+            free = shutil.disk_usage(install).free
+        except OSError:
+            free = None
+        ok = free is None or free >= need
+        checks.append(_check("space", "ok" if ok else "failed", "Disk space", f"{_gb(free or 0)} free; the update "
+                             f"needs about {_gb(need)}." if ok else f"Not enough free disk space. The update requires "
+                             f"{_gb(need)}, but only {_gb(free)} is available.", [] if ok else
+                             ["free_space", "retry", "continue_v100"], need=need, free=free))
+        return _result(gs, checks, plan, ready=ok)
+
     # 3. the update's files: an already-updated folder, a package on this computer, or the official download
     src = None
     for path, how in folder_candidates(folder or up.get("folder"), rpcs3):
@@ -436,7 +464,8 @@ def _need(install, plan):
     build = _dir_size(os.path.join(install, "builds", lay["active"])) if lay.get("active") else 0
     lift = (_read_json(os.path.join(install, "data", "install.json")) or {}).get("lift")
     gen = _dir_size(os.path.join(install, "data", "gen", lift)) if lift else 0
-    return ((rec["size"] if plan.get("source") == "download" else 0) + man["total_size"] +
+    return ((rec["size"] if plan.get("source") == "download" else 0) +
+            (0 if plan.get("source") == "prepared" else man["total_size"]) +   # already in place: nothing more
             max(build + gen, BUILD_WORK) + MARGIN)
 
 

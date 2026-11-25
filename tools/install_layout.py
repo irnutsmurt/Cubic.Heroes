@@ -284,6 +284,29 @@ class Layout:
         st = st or self.read_active()
         return [b for b in [st["active"]] + st["previous"] if b]
 
+    def program_of(self, bid):
+        """the game's program a build was made from ('' for the disc's: builds before beta.6 have no record)"""
+        return (self.build_info(bid) or {}).get("program") or ""
+
+    def newest_of(self, program, whole=True):
+        """the newest build of a program (its id), whole ones only by default; None without one"""
+        cands = [(info.get("made") or "", bid) for bid, info in self.builds().items()
+                 if (info.get("program") or "") == program and not (whole and self.check_build(bid))]
+        return max(cands)[1] if cands else None
+
+    def kept(self, st=None):
+        """the builds nothing removes: the retained ones (the active one and its rollbacks), and -- beta.6 -- the
+        newest whole build of each other game version, so switching back to v1.00 (or to v1.01 again) needs no
+        rebuild. An install with one version keeps exactly what it kept before."""
+        st = st or self.read_active()
+        keep = self.retained(st)
+        here = {self.program_of(b) for b in keep}
+        for p in sorted({(i.get("program") or "") for i in self.builds().values()} - here):
+            bid = self.newest_of(p)
+            if bid:
+                keep.append(bid)
+        return keep
+
     def check_build(self, bid, full=False):
         """None when the slot is whole (its game there, its size -- or with full its SHA-256 -- as recorded), or why
         not"""
@@ -329,6 +352,11 @@ class Layout:
             f.write("# this build's place in its install (the pipeline worker writes it)\n")
             f.write(f"DOTHEROES_BUILD_ID={info['id']}\n")
             f.write(f"DOTHEROES_SHADER_CACHE_ID={info.get('shader_cache') or 'default'}\n")
+            if info.get("update_dir"):   # beta.6: a build of an official update's program -- which program, and
+                # where the update's files are (relative to the root; the runtime shows them to the game at the PS3's
+                # own place). The disc's program's build has neither: exactly as before.
+                f.write(f"DOTHEROES_PROGRAM={info['program']}\n")
+                f.write(f"DOTHEROES_UPDATE_DIR={info['update_dir']}\n")
         return info
 
     def promote(self, staging, info):
@@ -422,7 +450,7 @@ class Layout:
         """everything no kept build uses: the other slots, lifts, objects and shader folders. Returns what was
         removed and how many bytes."""
         st = self.read_active()
-        keep = set(self.retained(st))
+        keep = set(self.kept(st))
         removed, freed = [], 0
         builds = self.builds()
         for bid in list(builds):
@@ -461,7 +489,7 @@ class Layout:
     def kept_objects(self):
         """object names the kept builds link (never removed by a new build's own clean-up)"""
         out = set()
-        for bid in self.retained():
+        for bid in self.kept():
             out |= set((self.build_info(bid) or {}).get("objects") or ())
         return out
 

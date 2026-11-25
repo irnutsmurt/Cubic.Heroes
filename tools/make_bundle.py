@@ -163,6 +163,7 @@ def pyinstaller(platform, dist):
               "official_content",   # beta.6: characters that come with official game content (the store's state)
               "update_preflight", "game_update", "pkg_extract",   # beta.6: the official v1.01 update
               "key_download",   # beta.6: the keys downloaded when the computer has none (pinned sources)
+              "official_update",   # beta.6: the official update's files in an installation
               "player_keys", "key_sources"]   # beta.6: the program's keys found by themselves
     hidden += tool_imports()
     # Pillow is the developer's only: the game's .ico and Windows resources are made with the prebuilt libraries
