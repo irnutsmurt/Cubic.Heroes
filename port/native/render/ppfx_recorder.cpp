@@ -1572,10 +1572,14 @@ template <class V> inline void trim_buf(V& v)
     if (v.capacity() * sizeof(typename V::value_type) > (64u << 10)) V().swap(v);
 }
 
+// DOTHEROES_DEBRIS_INTERP (publish, below): 1 while a record is held unpublished -- the next one takes the slot and
+// the sequence number after it
+uint64_t s_iheld_n = 0;
+
 Rec* acquire()
 {
     Queue& q = queue();
-    const uint64_t p = q.put.load(std::memory_order_relaxed);
+    const uint64_t p = q.put.load(std::memory_order_relaxed) + s_iheld_n;
     // R6: DOTHEROES_R6_QUEUE_CAP=<n> (the backpressure test): the queue full at n records
     static uint64_t cap = 0;
     if (!cap) { const char* e = getenv("DOTHEROES_R6_QUEUE_CAP"); cap = e && atoi(e) > 0 && atoi(e) <= Queue::kCap ? (uint64_t)atoi(e) : Queue::kCap; }
@@ -1669,7 +1673,7 @@ void fill_common(Rec* r, uint32_t kind, ppu_context* c)
 {
     r->vc_full = 0; r->cdelta.clear();   // a record without constants (a clear) carries none
     Queue& q = queue();
-    r->seq = q.put.load(std::memory_order_relaxed);
+    r->seq = q.put.load(std::memory_order_relaxed) + s_iheld_n;
     r->kind = kind;
     r->frame = S.frame;
     r->why = kWhyNone;
@@ -1693,7 +1697,7 @@ void fill_common(Rec* r, uint32_t kind, ppu_context* c)
     r->io_alt = ea_ok(ctx, 16) ? cellGcm_ea2io_pub(g32(ctx + 0)) : 0;
 }
 
-void publish(Rec* r)
+void publish_now(Rec* r)
 {
     r7_plan_take(r);   // R7: which of its small textures the flush takes, decided now
     Queue& q = queue();
@@ -1707,6 +1711,98 @@ void publish(Rec* r)
     // the walker, a handback or a readback; the walker polls): each one was a
     // kernel wake on the game's thread when the native thread slept
     q.put.store(r->seq + 1, std::memory_order_release);
+}
+
+// Issue #2's prototype, DOTHEROES_DEBRIS_INTERP=1 (port/debris_interp.cpp): a debris piece's draw drawn between its
+// body's last two physics poses above 60 fps. A piece's draw is told by its mesh (one vertex range of 1,132 bytes, 36
+// vertices: the game's debris cube) and carries its matrix in c256..c259 (rows). A pass's first piece draw is held,
+// unpublished, until the next record: two piece draws find the pass's view-projection. A record after an
+// interpolated one puts the game's c256..c259 back in the renderer's copy, so every other draw sees the game's.
+extern "C" int g_debris_interp_render;
+extern "C" void dotheroes_interp_frame(uint32_t frame);
+extern "C" int dotheroes_interp_on(void);
+extern "C" int dotheroes_interp_anchored(void);
+extern "C" int dotheroes_interp_anchor(const float* a, const float* b);
+extern "C" int dotheroes_interp_apply(const float* m, float* out);
+namespace {
+Rec* s_iheld;
+bool s_idirty;               // the renderer's c256..c259 hold an interpolated matrix
+uint32_t s_iframe = ~0u;
+bool is_piece(const Rec* r) { return r->nvr && r->vr[0].bytes == 1132 && r->vcount == 36; }
+// the four rows c256..c259 in the record's delta, or false
+bool rows_of(Rec* r, uint32_t* row[4])
+{
+    if (r->vc_full) return false;
+    for (int k = 0; k < 4; k++) row[k] = nullptr;
+    uint32_t* p = r->cdelta.data();
+    uint32_t* e = p + r->cdelta.size();
+    while (p < e) {
+        const uint32_t start = *p >> 16, count = *p & 0xFFFFu;
+        p++;
+        for (uint32_t c = 0; c < count && p + 4 * c + 4 <= e; c++)
+            if (start + c >= 256 && start + c < 260) row[start + c - 256] = p + 4 * c;
+        p += 4 * count;
+    }
+    return row[0] && row[1] && row[2] && row[3];
+}
+void get_m(uint32_t* const row[4], float m[16]) { for (int k = 0; k < 4; k++) memcpy(m + 4 * k, row[k], 16); }
+void set_m(uint32_t* const row[4], const float m[16]) { for (int k = 0; k < 4; k++) memcpy(row[k], m + 4 * k, 16); }
+void interp_emit(Rec* r, bool modified)
+{
+    uint32_t* row[4];
+    if (s_idirty && !modified && !r->vc_full && !rows_of(r, row)) {   // the game's own c256..c259 back
+        r->cdelta.push_back(256u << 16 | 4u);
+        r->cdelta.insert(r->cdelta.end(), &S.vconst[256][0], &S.vconst[256][0] + 16);
+    }
+    s_idirty = modified;
+    publish_now(r);
+}
+// a piece draw with the pass's view-projection: -1 no body (the pass is over), 0 its body's own pose (unchanged),
+// 1 interpolated
+int interp_apply(uint32_t* const row[4])
+{
+    float m[16], o[16];
+    get_m(row, m);
+    if (!dotheroes_interp_apply(m, o)) return -1;
+    if (!memcmp(o, m, sizeof o)) return 0;
+    set_m(row, o);
+    return 1;
+}
+}  // namespace
+
+void publish(Rec* r)
+{
+    if (!g_debris_interp_render) { publish_now(r); return; }
+    if (r->frame != s_iframe) {
+        if (s_iheld) { Rec* h = s_iheld; s_iheld = nullptr; s_iheld_n = 0; interp_emit(h, false); }
+        s_iframe = r->frame;
+        dotheroes_interp_frame(r->frame);
+    }
+    uint32_t* row[4];
+    const bool piece = dotheroes_interp_on() && is_piece(r) && rows_of(r, row);
+    if (s_iheld) {   // the pass's first piece draw, waiting for this record
+        Rec* h = s_iheld; s_iheld = nullptr; s_iheld_n = 0;
+        uint32_t* hrow[4];
+        bool hmod = false, anchored = false;
+        if (piece && rows_of(h, hrow)) {
+            float a[16], b[16];
+            get_m(hrow, a); get_m(row, b);
+            if (dotheroes_interp_anchor(a, b)) { anchored = true; hmod = interp_apply(hrow) > 0; }
+        }
+        interp_emit(h, hmod);
+        if (piece && !anchored) { s_iheld = r; s_iheld_n = 1; return; }   // h as the game drew it; r tries the next
+        interp_emit(r, piece && interp_apply(row) > 0);
+        return;
+    }
+    if (piece) {
+        if (dotheroes_interp_anchored()) {
+            const int k = interp_apply(row);
+            if (k >= 0) { interp_emit(r, k > 0); return; }
+        }
+        s_iheld = r; s_iheld_n = 1;   // a pass's first piece draw (or the first after one): held
+        return;
+    }
+    interp_emit(r, false);
 }
 
 // The vertex program from its start slot through its last instruction, as
@@ -1984,7 +2080,7 @@ void build_report(ppu_context* c, uint32_t op)
     const uint32_t ctx = (uint32_t)c->gpr[3];
     Rec* r = acquire();
     Queue& q = queue();
-    r->seq = q.put.load(std::memory_order_relaxed);
+    r->seq = q.put.load(std::memory_order_relaxed) + s_iheld_n;
     r->kind = kReport;
     r->frame = S.frame;
     r->why = kWhyNone;
@@ -2023,7 +2119,7 @@ void build_flip(ppu_context* c)
     if (!cellGcm_display_buffer_pub(id, &off, &pitch, &w, &h) || !ea_ok(ctx, 16)) return;
     Rec* r = acquire();
     Queue& q = queue();
-    r->seq = q.put.load(std::memory_order_relaxed);
+    r->seq = q.put.load(std::memory_order_relaxed) + s_iheld_n;
     r->kind = kFlip;
     r->frame = S.frame ? S.frame - 1 : 0;   // the frame it ends (the count moved on at this call)
     r->why = kWhyNone;
@@ -2104,7 +2200,7 @@ Rec* r7_rec(uint32_t kind)
 {
     Rec* r = acquire();
     Queue& q = queue();
-    r->seq = q.put.load(std::memory_order_relaxed);
+    r->seq = q.put.load(std::memory_order_relaxed) + s_iheld_n;
     r->kind = kind;
     r->frame = S.frame;
     r->why = kWhyNone;
@@ -2864,7 +2960,7 @@ Rec* asp_record_begin()
 {
     Rec* r = acquire();
     Queue& q = queue();
-    r->seq = q.put.load(std::memory_order_relaxed);
+    r->seq = q.put.load(std::memory_order_relaxed) + s_iheld_n;
     r->kind = kAspDraw;
     r->frame = S.frame;
     r->why = kWhyNone;
@@ -2938,7 +3034,7 @@ void game_arrays_record(ppu_context* c, bool skip)
 {
     Rec* r = acquire();
     Queue& q = queue();
-    r->seq = q.put.load(std::memory_order_relaxed);
+    r->seq = q.put.load(std::memory_order_relaxed) + s_iheld_n;
     r->kind = kAspDraw;
     r->frame = S.frame;
     r->why = kWhyNone;
@@ -3264,7 +3360,7 @@ void asp_draw_exit(const VEntry& v)
     if (s_rec_locked) { g.lock(); s_held = &g; held.on = true; }
     Rec* r = acquire();
     Queue& q = queue();
-    r->seq = q.put.load(std::memory_order_relaxed);
+    r->seq = q.put.load(std::memory_order_relaxed) + s_iheld_n;
     r->kind = kAspDraw;
     r->frame = S.frame;
     r->why = kWhyNone;

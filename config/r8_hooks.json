@@ -161,6 +161,13 @@
    "guard": "g_native_sweep",
    "decline": true,
    "note": "Issue #2's experiment: btAxisSweep3Internal<unsigned short>::removeHandle (r3 the broadphase, r4 the handle, r5 the dispatcher) natively; a user pair callback declined."
+  },
+  {
+   "addr": "0x0093DFCC",
+   "host": "dotheroes_interp_step",
+   "guard": "g_debris_interp",
+   "decline": true,
+   "note": "Issue #2's prototype (DOTHEROES_DEBRIS_INTERP): btDiscreteDynamicsWorld::internalSingleStepSimulation (r3 the world, f1 the step) -- the lifted step run from the hook, then the moving bodies' poses read for render-only interpolation (port/debris_interp.cpp); nothing in the game's state written."
   }
  ]
 }

@@ -314,6 +314,8 @@ target_sources(${PROJECT_NAME} PRIVATE phys_hooks.cpp)
 target_sources(${PROJECT_NAME} PRIVATE pair_cache.cpp)
 # ... and its sweep and prune broadphase, behind DOTHEROES_NATIVE_SWEEP (hooks on addHandle, removeHandle, updateHandle)
 target_sources(${PROJECT_NAME} PRIVATE axis_sweep.cpp)
+# ... and the debris's poses after each physics step, for render-only interpolation (DOTHEROES_DEBRIS_INTERP)
+target_sources(${PROJECT_NAME} PRIVATE debris_interp.cpp)
 # M8's credits on demand (config/m8_dev_credits.json, DOTHEROES_DEV_CREDITS): defines its hook and guard; a lift
 # without the hook references neither
 target_sources(${PROJECT_NAME} PRIVATE movie_hooks.cpp)
