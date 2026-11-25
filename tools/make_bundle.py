@@ -161,6 +161,7 @@ def pyinstaller(platform, dist):
               "edt_format", "ps3_save", "secret_store", "char_preview", "char_library",
               "char_store",   # M12: the character library and the read-only store
               "official_content",   # beta.6: characters that come with official game content (the store's state)
+              "update_preflight", "game_update", "pkg_extract",   # beta.6: the official v1.01 update
               "player_keys", "key_sources"]   # beta.6: the program's keys found by themselves
     hidden += tool_imports()
     # Pillow is the developer's only: the game's .ico and Windows resources are made with the prebuilt libraries

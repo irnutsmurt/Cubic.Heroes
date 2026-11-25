@@ -15,6 +15,8 @@ Commands:
     update      --install DIR [--full]      redo what changed (an update of the tools or the configuration)
     migrate-root --from OLD --install NEW [--dry-run]   an existing installation copied into a (portable) root
     find-legacy [--install DIR]             the old launcher's pointers to an install and the old default folders
+    game-update-check --install DIR [--update-pkg P] [--update-folder D] [--update-elf E] [--keys K] [--rpcs3 R]
+                [--offline]                 the official v1.01 update's checks: can it be installed, and if not why
     (the rest: docs/M9_WORKER_PROTOCOL.md section 1)
 
 Options for every command: --control (the launcher: "cancel" lines on stdin, and the end of stdin, cancel the
@@ -585,6 +587,18 @@ def key_sources_of(a):
 
 def cmd_probe_keys(a, ev, control):
     return pipeline.probe_keys(os.path.abspath(a.disc), key_sources_of(a), None, disc_key(a))
+
+
+def cmd_game_update_check(a, ev, control):
+    """the official v1.01 update's checks for an install (tools/update_preflight.py): its state (v1.00 / v1.01 / not
+    installed), each check with the player's message, its remedies and its details, whether Install can start, and
+    how. Reads only: nothing is downloaded, changed or kept; keys are never put into an event."""
+    import update_preflight
+    keys = a.keys or (a.key_source[0] if a.key_source else None)
+    return update_preflight.preflight(os.path.abspath(a.install), disc=a.disc, pkg=a.update_pkg,
+                                      folder=a.update_folder, elf=a.update_elf, keys=keys, rpcs3=a.rpcs3,
+                                      online=not a.offline,
+                                      work_dir=os.path.join(os.path.abspath(a.install), "data", "tmp"))
 
 
 def cmd_space(a, ev, control):
@@ -1991,7 +2005,8 @@ COMMANDS = {"characters": cmd_characters, "version": cmd_version, "probe-disc": 
             "diagnostics": cmd_diagnostics, "shortcuts": cmd_shortcuts, "steam-art": cmd_steam_art,
             "selftest": cmd_selftest,
             "uninstall": cmd_uninstall, "remove-launcher": cmd_remove_launcher, "devsaves": cmd_devsaves,
-            "migrate-root": cmd_migrate_root, "find-legacy": cmd_find_legacy}
+            "migrate-root": cmd_migrate_root, "find-legacy": cmd_find_legacy,
+            "game-update-check": cmd_game_update_check}
 
 
 def parser():
@@ -2003,6 +2018,10 @@ def parser():
     p.add_argument("--key-source", action="append", default=[], help="a key source the player chose before "
                    "(repeatable; tried after --keys, before the places beside the disc)")
     p.add_argument("--rpcs3", help="the player's own RPCS3 program, to decrypt with (optional; never required)")
+    p.add_argument("--update-pkg", help="game-update-check: the official v1.01 update package the player chose")
+    p.add_argument("--update-folder", help="game-update-check: an installed or extracted v1.01 update the player chose")
+    p.add_argument("--update-elf", help="game-update-check: the update's decrypted program the player chose")
+    p.add_argument("--offline", action="store_true", help="game-update-check: don't ask Sony's server")
     p.add_argument("--install")
     p.add_argument("--for", dest="op", choices=sorted(NEEDED), default="install")
     p.add_argument("--full", action="store_true")
@@ -2090,6 +2109,7 @@ def parser():
 
 
 REQUIRED = {"probe-disc": ("disc",), "probe-keys": ("disc",), "space": ("install",), "info": ("install",),
+            "game-update-check": ("install",),
             "install": ("disc", "install"), "update": ("install",), "migrate": ("install",),
             "builds": ("install",), "rollback": ("install",), "game-appimage": ("install",), "retention": ("install", "keep"),
             "repair-link": ("install",), "saves": ("install",), "prepare": ("install",), "uninstall": ("install",),

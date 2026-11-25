@@ -30,6 +30,12 @@
     "size": 185807824,
     "sha256": "1167370afd46aea9d86d235acfdb04cd7355d4d96d61e24725c79e6c36a96875",
     "sha1": "6a85376e15685be1b4097b04623dd2e8a768603c",
-    "note": "The official update as Sony serves it (plain HTTP): accepted only on an exact SHA-256 match. Its SHA-1 matches the package's own digest and the Internet Archive's captures of this address (2013-2024)."
+    "note": "The official update as Sony serves it (plain HTTP): accepted only on an exact SHA-256 match. Its SHA-1 matches the package's own digest and the Internet Archive's captures of this address (2013-2024).",
+    "decrypted_elf": {
+      "sha256": "758b3900218b8cf8bae50959db5f5adcebe690d751cdc7edc57edae250a95332",
+      "size": 22598776,
+      "self": "NPDRM, free licence, key revision 0x0001",
+      "note": "First decrypted 2026-11-25 by an installed RPCS3 (its own --decrypt), an implementation independent of this project's; its ELF and program headers equal the plaintext copies the update's EBOOT.BIN carries."
+    }
   }
 }
