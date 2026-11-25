@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <vector>
+#include "program_addrs.h"   /* PA(): v1.00's addresses of the game, for the program this build is of */
 
 extern "C" PPU_THREAD_LOCAL void (*g_trampoline_fn)(void*);   // the lift's tail calls (as ppfx_recorder.cpp)
 
@@ -85,10 +86,10 @@ extern "C" int dotheroes_water_setup(ppu_context* ctx)
     g_wr32(G + 0x80, g_rd32(water + 0x1E8));  // the heights
     ctx->gpr[3] = tex;
     ctx->gpr[4] = (uint64_t)frame + 0x70;
-    guest_call(ctx, func_003A4740, 0x003C7BF4);
+    guest_call(ctx, func_003A4740, PA(0x003C7BF4));
     g_wr32(G + 0x84, (uint32_t)ctx->gpr[3]);  // the normal map's texture
     ctx->gpr[3] = tex;
-    guest_call(ctx, func_003A46E8, 0x003C7C04);
+    guest_call(ctx, func_003A46E8, PA(0x003C7C04));
     g_wr32(G + 0x9C, water_task::kNativeInstance);
     g_wr32(G + 0x4, water_task::kNativeTaskset);
     g_wr32(G + 0x98, water_task::kNativeBlock);
@@ -146,8 +147,8 @@ DevWaver* g_dw;
 // The TOC the set-up's stub (func_009842F8: addis/addi +0x1F8C0, to the waver's 0x01057910) expects in its
 // caller, func_0018B708's module. The frame function runs under another (its own stubs add 0x2F2B8), so the
 // call is made under this one and the frame function's r2 given back after.
-constexpr uint32_t kCallerToc = 0x01038050u;
-constexpr uint32_t kWaverStateSlot = 0x01054804u;   // the waver's TOC slot r2-0x310C: its state block (+0 active)
+constexpr uint32_t kCallerToc = PA(0x01038050u);
+constexpr uint32_t kWaverStateSlot = PA(0x01054804u);   // the waver's TOC slot r2-0x310C: its state block (+0 active)
 }  // namespace
 
 extern "C" int g_dev_changes_ok;   // port/devtools/devtools.cpp (M11.1): 0 in an installed game, developer mode off
@@ -205,7 +206,7 @@ extern "C" int dotheroes_dev_waver(ppu_context* ctx)
             ctx->gpr[1] = frame;
             ctx->gpr[2] = kCallerToc;
             ctx->gpr[3] = frame + 0x70;
-            guest_call(ctx, func_009842F8, 0x0018B774);
+            guest_call(ctx, func_009842F8, PA(0x0018B774));
             memcpy(ctx->gpr, g, sizeof g); memcpy(ctx->fpr, f, sizeof f);
             ctx->lr = lr; ctx->ctr = ctr; ctx->cr = cr; ctx->xer = xer;
             d.starts++;
@@ -248,7 +249,7 @@ extern "C" int dotheroes_waver_setup(ppu_context* ctx)
     g_wr64(frame + 0xC0, lr);
     for (int r = 27; r <= 31; r++) g_wr64(frame + 0x88 + 8 * (r - 27), ctx->gpr[r]);
     ctx->gpr[1] = frame;
-    guest_call(ctx, func_003B64A8, 0x003CEB70);   // the other screen effects stopped (r3 = pos, unused)
+    guest_call(ctx, func_003B64A8, PA(0x003CEB70));   // the other screen effects stopped (r3 = pos, unused)
     const uint32_t W = g_rd32(toc - 0x310C);
     if (vm_base[W]) {   // running already: the game's does nothing more
         ctx->gpr[1] = sp; ctx->lr = lr; ctx->gpr[3] = (W + 0x28) & 0xFFFFFFFFu;
@@ -262,15 +263,15 @@ extern "C" int dotheroes_waver_setup(ppu_context* ctx)
     g_wr32(W + 0x74, 0);                 // the time so far
     g_wr32(W + 0x4, 0);                  // frames
     ctx->gpr[3] = W + 0x28; ctx->gpr[4] = (uint64_t)frame + 0x70;
-    guest_call(ctx, func_003A4740, 0x003CEBD4);
+    guest_call(ctx, func_003A4740, PA(0x003CEBD4));
     g_wr32(W + 0x84, (uint32_t)ctx->gpr[3]);   // the first texture
     ctx->gpr[3] = W + 0x40; ctx->gpr[4] = (uint64_t)frame + 0x70;
-    guest_call(ctx, func_003A4740, 0x003CEBE8);
+    guest_call(ctx, func_003A4740, PA(0x003CEBE8));
     g_wr32(W + 0x88, (uint32_t)ctx->gpr[3]);   // the second
     ctx->gpr[3] = W + 0x28;
-    guest_call(ctx, func_003A46E8, 0x003CEBF8);
+    guest_call(ctx, func_003A46E8, PA(0x003CEBF8));
     ctx->gpr[3] = W + 0x40;
-    guest_call(ctx, func_003A46E8, 0x003CEC04);
+    guest_call(ctx, func_003A46E8, PA(0x003CEC04));
     g_wr32(W + 0x8C, 0);
     g_wr32(W + 0x80, g_rd32(W + 0x102A4));     // the height field
     g_wr32(W + 0x60, waver_task::kNativeInstance);

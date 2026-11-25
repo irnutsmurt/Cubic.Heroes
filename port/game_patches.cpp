@@ -69,6 +69,7 @@ int g_dotheroes_no_install_item = 1;   /* M10.4: the title menu without INSTALL 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "program_addrs.h"   /* PA(): v1.00's addresses of the game, for the program this build is of */
 
 /* func_000A2C14 for an entry hook: see g_dotheroes_step_carry. The rounding
  * is the lifted function's, operation for operation: a fused multiply-add
@@ -91,7 +92,7 @@ extern "C" void dotheroes_step_round(ppu_context* ctx)
      * x (+0x768), then z (+0x770); the player object is in r30. */
     static struct { uint32_t obj; float carry; } s_axis[2];
     const uint32_t lr = (uint32_t)ctx->lr;
-    const int axis = lr == 0x00106FB8u ? 0 : lr == 0x00106FCCu ? 1 : -1;
+    const int axis = lr == PA(0x00106FB8u) ? 0 : lr == PA(0x00106FCCu) ? 1 : -1;
     const double v = ctx->fpr[1];
     if (axis < 0) {
         ctx->fpr[1] = step_snap(v);
@@ -148,7 +149,7 @@ static void guest_float_set(uint32_t ea, float f)
     p[0] = (uint8_t)(u >> 24); p[1] = (uint8_t)(u >> 16); p[2] = (uint8_t)(u >> 8); p[3] = (uint8_t)u;
 }
 
-static const uint32_t kGameFrame = 0x02CF3570;   /* the game's frame count (docs/NATIVE_R8.md section 3) */
+static const uint32_t kGameFrame = PA(0x02CF3570);   /* the game's frame count (docs/NATIVE_R8.md section 3) */
 static struct {
     uint32_t frame;        /* the game frame the clock last advanced in */
     int      due;          /* steps due in that frame */

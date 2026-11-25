@@ -99,6 +99,7 @@
 #include "ps3emu/osd.h"
 #include "ps3emu/ps3_ftrace.h"
 #include "ps3emu/guest_pause.h"   /* M10.2: the game held by its host */
+#include "../program_addrs.h"   /* PA(): v1.00's addresses of the game, for the program this build is of */
 extern "C" void rsx_vulkan_cache_save(void);   // libs/video/rsx_vulkan_backend.h
 
 extern "C" void spurs_snap_write_file(const char* path);
@@ -134,8 +135,8 @@ extern "C" void sys_timer_flip_wait_report(void);   // ps3recomp sys_timer.c (Wi
 
 namespace {
 
-constexpr uint32_t kLife = 0x02B38E0C, kLifeShown = 0x02B38E10, kCameraX = 0x029B0E18, kCameraZ = 0x029B0E20;
-constexpr uint32_t kArea = 0x029A6488;   // the field area's number: 17 the castle's, 18 the river's east of it
+constexpr uint32_t kLife = PA(0x02B38E0C), kLifeShown = PA(0x02B38E10), kCameraX = PA(0x029B0E18), kCameraZ = PA(0x029B0E20);
+constexpr uint32_t kArea = PA(0x029A6488);   // the field area's number: 17 the castle's, 18 the river's east of it
 uint32_t g_low_life = 8, g_top_up = 9;   // DOTHEROES_DEV_CANT_DIE=1, or =<floor>,<refill> (half apples)
 
 uint32_t rd32(uint32_t ea)
@@ -196,7 +197,7 @@ bool g_cant_die, g_life_log;   // DOTHEROES_DEV_CANT_DIE, DOTHEROES_DEV_LIFE_LOG
 // found with PPU_WWATCH), so a value written only there does not last. Found by
 // its class (vtable 0x00FE3D20) with +0x5B8 equal to the HUD's life, in the heap
 // (0x10000000-0x20000000); looked for again if it stops being of that class.
-constexpr uint32_t kPlayerVtable = 0x00FE3D20, kPlayerLife = 0x5B8;
+constexpr uint32_t kPlayerVtable = PA(0x00FE3D20), kPlayerLife = 0x5B8;
 std::atomic<uint32_t> g_player{ 0 };
 
 // The guest space's runs in [lo, hi) a scan can read and find something in, each as fn(ea, len) (false: stop):
@@ -332,7 +333,7 @@ int scan_near(uint32_t p, float radius, Near* out, int max, uint32_t vt_hi = 0x0
 // static object at 0x029B71A0 (read through Lua's actor_manager.gActorManager, its userdata's payload: build/m11's
 // fps_bosses run, 2026-11-17); CActorManager holds 1024 entries of 8 bytes from its start, each an actor at +4
 // (CActorManager::getActor, 0x000A2200). The player's object left out.
-constexpr uint32_t kActorManager = 0x029B71A0u;
+constexpr uint32_t kActorManager = PA(0x029B71A0u);
 
 int list_near(uint32_t p, float radius, Near* out, int max)
 {
@@ -393,13 +394,13 @@ void actors_now(uint32_t p)
 
 // The guest's frame counter (one of the words that count a frame each,
 // tests/fps_check.py): how far the game itself got, whatever the host did.
-constexpr uint32_t kFrames = 0x02CF3570;
+constexpr uint32_t kFrames = PA(0x02CF3570);
 // Two words that change when the system menu opens (find_state differ on
 // tests/scripts/find_menu.drive's snapshots: the same in four snapshots in
 // play, the same in two with the menu open): 3 in play, 1 in the menu; 11 in
 // play, 3 in the menu. Reported raw ("menu", "scene") until the other screens'
 // values are known (docs/HANDOFF.md, "Debugging tools").
-constexpr uint32_t kMenuWord = 0x02B399C0, kSceneWord = 0x02B399A4;
+constexpr uint32_t kMenuWord = PA(0x02B399C0), kSceneWord = PA(0x02B399A4);
 
 void state_loop()
 {
@@ -956,7 +957,7 @@ void keys_loop()
         if (f9_now && !f9) {
             // the game's vibration setting: the byte its vibrate function (func_00035228) tests, at its pad
             // manager (the word at 0x01021CE4: TOC 0x01028658 - 0x6974) + 0x458; nonzero: on
-            const uint32_t mgr = rd32(0x01021CE4u);
+            const uint32_t mgr = rd32(PA(0x01021CE4u));
             const int on = mgr ? (int)vm_base[mgr + 0x458u] : -1;
             fprintf(stderr, "[dev-keys] F9: rumble test pulse; the game's vibration setting %s (byte %d)\n",
                     on < 0 ? "not readable yet" : on ? "on" : "off", on);

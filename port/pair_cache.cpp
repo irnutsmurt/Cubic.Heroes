@@ -46,6 +46,7 @@
 #include <cstring>
 #include <algorithm>
 #include <vector>
+#include "program_addrs.h"   /* PA(): v1.00's addresses of the game, for the program this build is of */
 #ifdef _MSC_VER
 #include <intrin.h>
 #else
@@ -68,7 +69,7 @@ enum : uint32_t {
     kRemovePairs = 0, kOverlappingPairs = 4, kAddedPairs = 0x0C,
     kTocCounters = 0x29B4, kTocRemoveCb = 0x29CC, kTocCleanCb = 0x29D0,
     kVRemove = 0x0C, kVClean = 0x20, kVProcessOverlap = 0x08,
-    kFnRemove = 0x009144C8u, kFnClean = 0x00913D88u, kFnRemoveCb = 0x00913EA8u, kFnCleanCb = 0x00913E28u,
+    kFnRemove = PA(0x009144C8u), kFnClean = PA(0x00913D88u), kFnRemoveCb = PA(0x00913EA8u), kFnCleanCb = PA(0x00913E28u),
 };
 constexpr int32_t kNull = -1;   // BT_NULL_PAIR
 
@@ -464,9 +465,9 @@ extern "C" int dotheroes_paircache_simulate(ppu_context* ctx, int op, uint32_t s
                                             uint32_t* ret)
 {
     const uint32_t vt = r32(self);
-    if (op == 0 && code_of(vt, 0x08) != 0x00A4CD24u) return 0;
+    if (op == 0 && code_of(vt, 0x08) != PA(0x00A4CD24u)) return 0;
     if (op >= 1 && code_of(vt, kVRemove) != kFnRemove) return 0;
-    if (op == 2 && (code_of(vt, 0x10) != 0x0091555Cu || r32(self + kGhost) || code_of(vt, kVClean) != kFnClean)) return 0;
+    if (op == 2 && (code_of(vt, 0x10) != PA(0x0091555Cu) || r32(self + kGhost) || code_of(vt, kVClean) != kFnClean)) return 0;
     t_simulate = true;
     int r;
     if (op == 2) {
@@ -490,10 +491,10 @@ extern "C" int dotheroes_paircache_pure(ppu_context* ctx, int op, uint32_t self,
     (void)ctx;
     const uint32_t vt = r32(self);
     if (r32(self + kGhost)) return 0;
-    if (op == 0 && (code_of(vt, 0x08) != 0x00A4CD24u || r32(self + kFilter))) return 0;
+    if (op == 0 && (code_of(vt, 0x08) != PA(0x00A4CD24u) || r32(self + kFilter))) return 0;
     if (op >= 1 && (code_of(vt, kVRemove) != kFnRemove || code_of(vt, kVClean) != kFnClean)) return 0;
     if (op == 2) {
-        if (code_of(vt, 0x10) != 0x0091555Cu) return 0;
+        if (code_of(vt, 0x10) != PA(0x0091555Cu)) return 0;
         for (uint32_t i = 0; i < r32(self + kSize); i++) {
             const uint32_t e = r32(self + kData) + kPairBytes * i;
             if ((r32(e + kPairP0) == a || r32(e + kPairP1) == a) && r32(e + kPairAlg)) return 0;
