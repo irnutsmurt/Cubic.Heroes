@@ -2277,9 +2277,9 @@ static void gv_install()
             g_prefs.update_offer = "accepted";
             g_prefs.save();
             g_msg = { true, kept ? "Switched to v1.01" : "v1.01 is installed",
-                      "You now play the official v1.01 update, with its 51 characters in character selection. Your saves "
-                      "and settings are as they were. Install / Manage > Game version switches back to v1.00 at any "
-                      "time.", "", false, false };
+                      "You now play Official Game Update v1.01, with its 51 additional characters and gameplay "
+                      "improvements. Your saves and settings are as they were. Install / Manage > Game Version switches "
+                      "back to v1.00 at any time.", "", false, false };
             if (!kept && !r["data"]["switched"].truthy()) after_install_shaders();
         } else if (r["code"].str() != "cancelled") {
             g_msg = { true, "The update wasn't installed",
@@ -2353,10 +2353,25 @@ static void gv_remedy(const std::string& id, std::set<std::string>& shown)
     same_line_fits(S(420));
 }
 
+// What the official update adds, as players see it (the owner's wording, 2026-11-25): gameplay and content only, never
+// how it is installed. Its characters are told apart from the Character Store's historical collection.
+static void update_whats_included()
+{
+    text_col(col::text, "What's included:");
+    text_col(col::text, "- 51 additional characters: 50 original Hall of Heroes creations, plus Sackboy from LittleBigPlanet.");
+    text_col(col::text, "- Improved New Game+: Certain swords purchased from King Block now carry over into future "
+                        "playthroughs.");
+    text_col(col::text, "- Easier Dash Circuit challenges: More forgiving completion times.");
+    text_col(col::text, "- Loading Art Gallery improvements: Previously missing loading-screen artwork can now appear and be "
+                        "collected.");
+    text_col(col::dim, "These characters come with the official update. The Character Store is separate: its 352 historical "
+                       "Hall of Heroes characters stay available whether or not you install v1.01.");
+}
+
 static void game_version_section()
 {
     ImGui::Dummy(ImVec2(0, S(10)));
-    title("Game version", 24);
+    title("Game Version", 24);
     card_begin("##game_version");
     const json::Value& c = g_gv.check;
     const std::string st = c["state"].str();
@@ -2369,7 +2384,8 @@ static void game_version_section()
         return;
     }
     if (st == "v101") {
-        text_col(col::ok, "You play v1.01, the official update: its 51 characters are in character selection.");
+        text_col(col::ok, "You play v1.01, the official game update, with its 51 additional characters and gameplay "
+                          "improvements.");
         text_col(col::dim, "v1.00 is kept in this installation: switching back takes a moment, and so does coming back.");
         if (big_button("Switch to v1.00", ImVec2(S(360), 0), Kind::Normal, idle)) gv_switch_to_v100();
         if (game_running()) text_col(col::warm, "Close the game first.");
@@ -2383,8 +2399,10 @@ static void game_version_section()
         return;
     }
     const bool kept = c["plan"]["source"].str() == "kept";
-    text_col(col::text, "You play v1.00, complete and fully supported. The official v1.01 update adds 51 characters for "
-                        "character selection; it is optional, and v1.00 stays in this installation if you install it.");
+    text_col(col::text, "You play v1.00, complete and fully supported. Official Game Update v1.01 is optional: it adds new "
+                        "characters and several gameplay improvements, and v1.00 stays in this installation if you install "
+                        "it.");
+    update_whats_included();
     if (!kept && !g_gv.full) {
         if (big_button(g_gv.checking ? "Checking..." : "See what v1.01 needs", ImVec2(S(420), 0), Kind::Primary,
                        !g_gv.checking))
@@ -2411,10 +2429,10 @@ static void game_version_section()
         if (kept) gv_install();
         else
             ask("Install the official v1.01 update?", "Your saves are backed up first. The update is " +
-                std::string(c["plan"]["source"].str() == "download" ? "downloaded from Sony, " : "") +
-                "checked, decrypted and recompiled on this PC (about as long as the first install), then its shaders "
-                "are prepared. Until it is all done, and if anything fails, your v1.00 game stays as it is and ready "
-                "to play.", "Install v1.01", false, [] { gv_install(); });
+                std::string(c["plan"]["source"].str() == "download" ? "downloaded and " : "") +
+                "prepared on this PC: it takes about as long as the first install. Until it is done, and if anything "
+                "goes wrong, your v1.00 game stays as it is and ready to play.", "Install v1.01", false,
+                [] { gv_install(); });
     }
     if (!ready) {   // never a greyed button alone: why, and what to do
         text_col(col::warm, "Install isn't possible yet:");
@@ -2441,10 +2459,12 @@ static void update_offer_card()
         g_gv.check["plan"]["source"].str() == "kept")
         return;
     card_begin("##update_offer");
-    title("The official v1.01 update", 24);
-    text_col(col::text, "3D Dot Game Heroes had one official update, v1.01. It adds 51 characters for character "
-                        "selection. It is optional: v1.00 is complete, and stays in this installation.");
-    if (big_button("Install v1.01...", ImVec2(S(320), 0), Kind::Primary)) {
+    title("Official Game Update v1.01", 24);
+    text_col(col::text, "This optional update adds new characters and several gameplay improvements!");
+    ImGui::Dummy(ImVec2(0, S(4)));
+    update_whats_included();
+    ImGui::Dummy(ImVec2(0, S(6)));
+    if (big_button("Install v1.01", ImVec2(S(320), 0), Kind::Primary)) {
         g_prefs.update_offer = "accepted";
         g_prefs.save();
         g_page = kManage;
@@ -2452,11 +2472,11 @@ static void update_offer_card()
         gv_check(true);
     }
     ImGui::SameLine();
-    if (big_button("Continue with v1.00", ImVec2(S(320), 0))) {
+    if (big_button("Not Now", ImVec2(S(320), 0))) {
         g_prefs.update_offer = "declined";
         g_prefs.save();
     }
-    text_col(col::dim, "Either way, Install / Manage > Game version installs it later or switches between the two.");
+    text_col(col::dim, "You can install it later from Install / Manage > Game Version.");
     card_end();
     ImGui::Dummy(ImVec2(0, S(8)));
 }

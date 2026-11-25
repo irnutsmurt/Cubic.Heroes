@@ -1,14 +1,27 @@
 # The official v1.01 update
 
-3D Dot Game Heroes (US, BLUS-30490) had one official update, **version 1.01**. Among its changes are **51 more
-characters** for character selection. Cubic.Heroes plays **v1.00** fully. v1.01 is **optional** and is never
-installed without your choice.
+3D Dot Game Heroes (US, BLUS-30490) had one official update, **version 1.01**. Cubic.Heroes plays **v1.00** fully;
+v1.01 is **optional** and is never installed without your choice.
+
+## Official Game Update v1.01
+
+This optional update adds new characters and several gameplay improvements!
+
+What's included:
+
+- **51 additional characters:** 50 original Hall of Heroes creations, plus Sackboy from LittleBigPlanet.
+- **Improved New Game+:** Certain swords purchased from King Block now carry over into future playthroughs.
+- **Easier Dash Circuit challenges:** More forgiving completion times.
+- **Loading Art Gallery improvements:** Previously missing loading-screen artwork can now appear and be collected.
+
+These characters come with the official update. The [Character Store](CHARACTER_STORE.md) is separate: its 352
+historical Hall of Heroes characters stay available whether or not you install v1.01.
 
 ## For players
 
-- **After v1.00 is installed**, the launcher offers the update once: **Install v1.01** or **Continue with v1.00**.
-  Declining is remembered, and you aren't asked again. **Manage > Game version** installs it later, or switches
-  between the two versions.
+- **After v1.00 is installed**, the launcher offers the update once, with the summary above: **Install v1.01** or
+  **Not Now**. Not Now is remembered, so you aren't asked again. **Install / Manage > Game Version** installs it
+  later, or switches between the two versions.
 - **What the launcher needs, and finds by itself:**
   - **The update package.** Sony's official package, downloaded from Sony (186 MB). Or one you already have: its
     official file name beside your disc, in your Downloads folder, or chosen. Or the update an RPCS3 you set up has

@@ -31,14 +31,20 @@ import launcher_nav_pages as nav  # noqa: E402
 import update_preflight  # noqa: E402
 
 SUPPORTED = bool(update_preflight.program_dir(update_preflight.UPDATE_ID))
-OFFER = ("until 200000 PLAY\nexpect PLAY\nwait 240\nsee The official v1.01 update\nshot 1-offer\n"
+OFFER = ("until 200000 PLAY\nexpect PLAY\nwait 240\nsee Official Game Update v1.01\nshot 1-offer\n"
          "seek 6000 down Install v1.01\nexpect Install v1.01\na\nwait 60\n")
 SCRIPTS = {
-    "no-support": OFFER + "seek 60000 down Continue with v1.00\nexpect Continue with v1.00\nsee Game version\n"
+    "no-support": OFFER + "seek 60000 down Continue with v1.00\nexpect Continue with v1.00\nsee Game Version\n"
                           "shot 2-explained\nquit\n",
     "no-package": OFFER + "seek 60000 down Choose the update package\nexpect Choose the update package\n"
-                          "see Game version\nshot 2-explained\nquit\n",
-    "ready": OFFER + "seek 60000 down Install v1.01\nexpect Install v1.01\nsee Game version\nshot 2-ready\nquit\n",
+                          "see Game Version\nshot 2-explained\nquit\n",
+    "ready": OFFER + "seek 60000 down Install v1.01\nexpect Install v1.01\nsee Game Version\nshot 2-ready\nquit\n",
+    # declined: Not Now takes the offer away (remembered: launcher.json update_offer "declined"), and Manage > Game
+    # Version still offers the update -- its full check, then Install v1.01
+    "not-now": ("until 200000 PLAY\nexpect PLAY\nwait 240\nsee Official Game Update v1.01\n"
+                "seek 6000 down Not Now\nexpect Not Now\na\nwait 60\nshot 1-declined\nrb\nwait 60\n"
+                "seek 60000 down See what v1.01 needs\nexpect See what v1.01 needs\nsee Game Version\na\nwait 120\n"
+                "seek 60000 down Install v1.01\nexpect Install v1.01\nshot 2-later\nquit\n"),
 }
 
 
@@ -90,7 +96,7 @@ def main():
     for name, script in SCRIPTS.items():
         if a.only and name not in a.only:
             continue
-        if name == "ready" and not have_inputs:
+        if name in ("ready", "not-now") and not have_inputs:
             print("SKIP: ready needs the official package and downloaded keys (local only: --pkg, --keys-dir)")
             continue
         if (name == "no-support") == SUPPORTED:
@@ -101,11 +107,19 @@ def main():
             d = os.path.join(work, name, size)
             shutil.rmtree(d, ignore_errors=True)
             root = os.path.join(d, "Cubic.Heroes")
-            make_install(root, a.pkg if name == "ready" else None, a.keys_dir if name == "ready" else None)
+            full = name in ("ready", "not-now")
+            make_install(root, a.pkg if full else None, a.keys_dir if full else None)
             sp = os.path.join(d, f"{name}.nav")
             with open(sp, "w", encoding="utf-8", newline="\n") as f:
                 f.write(f"# {name} (tests/launcher_game_version.py)\n" + script)
-            ok = nav.run(sp, launcher, root, os.path.join(d, "work"), a.timeout, size) and ok
+            ran = nav.run(sp, launcher, root, os.path.join(d, "work"), a.timeout, size)
+            if ran and name == "not-now":   # the answer remembered: no offer again
+                import json as _json
+                with open(os.path.join(root, "config", "launcher.json"), encoding="utf-8") as f:
+                    answer = _json.load(f).get("update_offer")
+                ran = answer == "declined"
+                print(("PASS" if ran else "FAIL") + f": not-now: the offer's answer remembered ({answer!r})", flush=True)
+            ok = ran and ok
             upd = os.path.join(root, "data", "updates")
             if os.path.isdir(upd):
                 shutil.rmtree(upd)          # the link only: the package itself untouched
