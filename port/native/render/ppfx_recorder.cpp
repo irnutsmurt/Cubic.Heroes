@@ -223,6 +223,10 @@ uint64_t now_ns()
     return (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
 }
+// the recorder's own time (the report's recorder_ms) is sampled on one call in kTimedEvery and scaled: a clock read
+// costs ~1.2 us where the system clock is HPET, and one call in 16 (two reads each) cost the game thread 1.2-1.7 ms a
+// frame there (issue #2); one in 1,024 keeps the estimate over the millions of calls a run makes
+constexpr uint32_t kTimedEvery = 1024;
 
 // ---- the program shadow -----------------------------------------------------
 // Local memory's bytes as the calls made them: per word, the bytes and the
@@ -1568,10 +1572,14 @@ template <class V> inline void trim_buf(V& v)
     if (v.capacity() * sizeof(typename V::value_type) > (64u << 10)) V().swap(v);
 }
 
+// DOTHEROES_DEBRIS_INTERP (publish, below): 1 while a record is held unpublished -- the next one takes the slot and
+// the sequence number after it
+uint64_t s_iheld_n = 0;
+
 Rec* acquire()
 {
     Queue& q = queue();
-    const uint64_t p = q.put.load(std::memory_order_relaxed);
+    const uint64_t p = q.put.load(std::memory_order_relaxed) + s_iheld_n;
     // R6: DOTHEROES_R6_QUEUE_CAP=<n> (the backpressure test): the queue full at n records
     static uint64_t cap = 0;
     if (!cap) { const char* e = getenv("DOTHEROES_R6_QUEUE_CAP"); cap = e && atoi(e) > 0 && atoi(e) <= Queue::kCap ? (uint64_t)atoi(e) : Queue::kCap; }
@@ -1607,6 +1615,7 @@ Rec* acquire()
     // is being reused and no one else holds it.
     trim_buf(r->vdata);
     trim_buf(r->tdata);
+    r->tshared.clear();
     trim_buf(r->cdelta);
     trim_buf(r->fhash);
     r->game_arrays = 0;
@@ -1664,7 +1673,7 @@ void fill_common(Rec* r, uint32_t kind, ppu_context* c)
 {
     r->vc_full = 0; r->cdelta.clear();   // a record without constants (a clear) carries none
     Queue& q = queue();
-    r->seq = q.put.load(std::memory_order_relaxed);
+    r->seq = q.put.load(std::memory_order_relaxed) + s_iheld_n;
     r->kind = kind;
     r->frame = S.frame;
     r->why = kWhyNone;
@@ -1688,8 +1697,9 @@ void fill_common(Rec* r, uint32_t kind, ppu_context* c)
     r->io_alt = ea_ok(ctx, 16) ? cellGcm_ea2io_pub(g32(ctx + 0)) : 0;
 }
 
-void publish(Rec* r)
+void publish_now(Rec* r)
 {
+    r7_plan_take(r);   // R7: which of its small textures the flush takes, decided now
     Queue& q = queue();
     if (r->seq < 4) {   // the first records' positions, for the bridge's first match
         char line[200];
@@ -1701,6 +1711,98 @@ void publish(Rec* r)
     // the walker, a handback or a readback; the walker polls): each one was a
     // kernel wake on the game's thread when the native thread slept
     q.put.store(r->seq + 1, std::memory_order_release);
+}
+
+// Issue #2's prototype, DOTHEROES_DEBRIS_INTERP=1 (port/debris_interp.cpp): a debris piece's draw drawn between its
+// body's last two physics poses above 60 fps. A piece's draw is told by its mesh (one vertex range of 1,132 bytes, 36
+// vertices: the game's debris cube) and carries its matrix in c256..c259 (rows). A pass's first piece draw is held,
+// unpublished, until the next record: two piece draws find the pass's view-projection. A record after an
+// interpolated one puts the game's c256..c259 back in the renderer's copy, so every other draw sees the game's.
+extern "C" int g_debris_interp_render;
+extern "C" void dotheroes_interp_frame(uint32_t frame);
+extern "C" int dotheroes_interp_on(void);
+extern "C" int dotheroes_interp_anchored(void);
+extern "C" int dotheroes_interp_anchor(const float* a, const float* b);
+extern "C" int dotheroes_interp_apply(const float* m, float* out);
+namespace {
+Rec* s_iheld;
+bool s_idirty;               // the renderer's c256..c259 hold an interpolated matrix
+uint32_t s_iframe = ~0u;
+bool is_piece(const Rec* r) { return r->nvr && r->vr[0].bytes == 1132 && r->vcount == 36; }
+// the four rows c256..c259 in the record's delta, or false
+bool rows_of(Rec* r, uint32_t* row[4])
+{
+    if (r->vc_full) return false;
+    for (int k = 0; k < 4; k++) row[k] = nullptr;
+    uint32_t* p = r->cdelta.data();
+    uint32_t* e = p + r->cdelta.size();
+    while (p < e) {
+        const uint32_t start = *p >> 16, count = *p & 0xFFFFu;
+        p++;
+        for (uint32_t c = 0; c < count && p + 4 * c + 4 <= e; c++)
+            if (start + c >= 256 && start + c < 260) row[start + c - 256] = p + 4 * c;
+        p += 4 * count;
+    }
+    return row[0] && row[1] && row[2] && row[3];
+}
+void get_m(uint32_t* const row[4], float m[16]) { for (int k = 0; k < 4; k++) memcpy(m + 4 * k, row[k], 16); }
+void set_m(uint32_t* const row[4], const float m[16]) { for (int k = 0; k < 4; k++) memcpy(row[k], m + 4 * k, 16); }
+void interp_emit(Rec* r, bool modified)
+{
+    uint32_t* row[4];
+    if (s_idirty && !modified && !r->vc_full && !rows_of(r, row)) {   // the game's own c256..c259 back
+        r->cdelta.push_back(256u << 16 | 4u);
+        r->cdelta.insert(r->cdelta.end(), &S.vconst[256][0], &S.vconst[256][0] + 16);
+    }
+    s_idirty = modified;
+    publish_now(r);
+}
+// a piece draw with the pass's view-projection: -1 no body (the pass is over), 0 its body's own pose (unchanged),
+// 1 interpolated
+int interp_apply(uint32_t* const row[4])
+{
+    float m[16], o[16];
+    get_m(row, m);
+    if (!dotheroes_interp_apply(m, o)) return -1;
+    if (!memcmp(o, m, sizeof o)) return 0;
+    set_m(row, o);
+    return 1;
+}
+}  // namespace
+
+void publish(Rec* r)
+{
+    if (!g_debris_interp_render) { publish_now(r); return; }
+    if (r->frame != s_iframe) {
+        if (s_iheld) { Rec* h = s_iheld; s_iheld = nullptr; s_iheld_n = 0; interp_emit(h, false); }
+        s_iframe = r->frame;
+        dotheroes_interp_frame(r->frame);
+    }
+    uint32_t* row[4];
+    const bool piece = dotheroes_interp_on() && is_piece(r) && rows_of(r, row);
+    if (s_iheld) {   // the pass's first piece draw, waiting for this record
+        Rec* h = s_iheld; s_iheld = nullptr; s_iheld_n = 0;
+        uint32_t* hrow[4];
+        bool hmod = false, anchored = false;
+        if (piece && rows_of(h, hrow)) {
+            float a[16], b[16];
+            get_m(hrow, a); get_m(row, b);
+            if (dotheroes_interp_anchor(a, b)) { anchored = true; hmod = interp_apply(hrow) > 0; }
+        }
+        interp_emit(h, hmod);
+        if (piece && !anchored) { s_iheld = r; s_iheld_n = 1; return; }   // h as the game drew it; r tries the next
+        interp_emit(r, piece && interp_apply(row) > 0);
+        return;
+    }
+    if (piece) {
+        if (dotheroes_interp_anchored()) {
+            const int k = interp_apply(row);
+            if (k >= 0) { interp_emit(r, k > 0); return; }
+        }
+        s_iheld = r; s_iheld_n = 1;   // a pass's first piece draw (or the first after one): held
+        return;
+    }
+    interp_emit(r, false);
 }
 
 // The vertex program from its start slot through its last instruction, as
@@ -1978,7 +2080,7 @@ void build_report(ppu_context* c, uint32_t op)
     const uint32_t ctx = (uint32_t)c->gpr[3];
     Rec* r = acquire();
     Queue& q = queue();
-    r->seq = q.put.load(std::memory_order_relaxed);
+    r->seq = q.put.load(std::memory_order_relaxed) + s_iheld_n;
     r->kind = kReport;
     r->frame = S.frame;
     r->why = kWhyNone;
@@ -2017,7 +2119,7 @@ void build_flip(ppu_context* c)
     if (!cellGcm_display_buffer_pub(id, &off, &pitch, &w, &h) || !ea_ok(ctx, 16)) return;
     Rec* r = acquire();
     Queue& q = queue();
-    r->seq = q.put.load(std::memory_order_relaxed);
+    r->seq = q.put.load(std::memory_order_relaxed) + s_iheld_n;
     r->kind = kFlip;
     r->frame = S.frame ? S.frame - 1 : 0;   // the frame it ends (the count moved on at this call)
     r->why = kWhyNone;
@@ -2098,7 +2200,7 @@ Rec* r7_rec(uint32_t kind)
 {
     Rec* r = acquire();
     Queue& q = queue();
-    r->seq = q.put.load(std::memory_order_relaxed);
+    r->seq = q.put.load(std::memory_order_relaxed) + s_iheld_n;
     r->kind = kind;
     r->frame = S.frame;
     r->why = kWhyNone;
@@ -2123,11 +2225,21 @@ Rec* r7_rec(uint32_t kind)
 }  // namespace
 // M9.2c: a program's identity as blob_of interns it (Blob::hash), for a pipeline's key made from a recipe
 uint64_t program_hash(const uint8_t* p, size_t n) { return blob_hash(p, n) ^ (uint64_t)n; }
-bool r7_take_at_flush(Rec* r)
+// Which of a record's small textures the flush takes is decided when the record is published, while it is still in
+// the cache, and kept in a short list; the flush then copies the bytes (at the same moment as before) for the listed
+// units only. Deciding at the flush read every record published since back from memory -- hundreds a frame, about a
+// thousand with debris -- to find the ten or twenty textures that qualify (issue #2).
+struct FlushTake { Rec* r; uint8_t unit; uint8_t location; uint32_t offset, bytes; };
+std::vector<FlushTake> s_flush_take;
+bool r7_tex_at_flush_on()
 {
     static int on = -1;
     if (on < 0) { const char* e = getenv("DOTHEROES_R7_TEX_AT_FLUSH"); on = !(e && *e == '0'); }
-    if (!on || r->tex_at_flush || (r->kind != kAspDraw && r->kind != kDraw)) return false;
+    return on && r7();
+}
+void r7_plan_take(Rec* r)
+{
+    if (!r7_tex_at_flush_on() || r->tex_at_flush || (r->kind != kAspDraw && r->kind != kDraw)) return;
     for (uint32_t k = 0; k < r->nneed; k++) {
         const Need& n = r->need[k];
         if (n.unit >= 16 || n.drawn) continue;
@@ -2137,18 +2249,40 @@ bool r7_take_at_flush(Rec* r)
         rsx_tex_level lv[RSX_MAX_TEXTURE_LEVELS];
         const uint32_t nlv = rsx_texture_mip_chain(t.format, t.width, t.height, t.mipmap, t.pitch, lv);
         const uint32_t bytes = nlv ? lv[nlv - 1].offset + lv[nlv - 1].tl.face_bytes : 0;
-        const uint32_t ea = cellGcmResolveLocated(t.location == 0, t.offset);
-        if (!bytes || bytes > (256u << 10) || !ea_ok(ea, bytes)) continue;
-        VtxRange* tr = nullptr;
-        for (uint32_t j = 0; j < r->ntex; j++) if (r->tex[j].location == n.unit) tr = &r->tex[j];
-        if (!tr) { if (r->ntex >= 16) continue; tr = &r->tex[r->ntex++]; }
-        tr->location = n.unit; tr->offset = t.offset; tr->bytes = bytes; tr->at = (uint32_t)r->tdata.size();
-        r->tdata.insert(r->tdata.end(), vm_base + ea, vm_base + ea + bytes);
-        stats().r7_flush_tex++;
-        stats().r7_flush_tex_bytes += bytes;
+        if (!bytes || bytes > (256u << 10)) continue;
+        s_flush_take.push_back({ r, n.unit, t.location, t.offset, bytes });
     }
     r->tex_at_flush = 1;
-    return true;
+}
+// at the game's flush: the listed textures' bytes into their records, in the records' order -- one copy per texture
+// and flush, shared by the records that take the same bytes (most of a frame's copies were of the same few textures:
+// nothing runs the game's code during the flush, so the bytes are the ones each record would have copied)
+void r7_take_at_flush()
+{
+    struct Taken { uint32_t ea, bytes; std::shared_ptr<const std::vector<uint8_t>> copy; };
+    static std::vector<Taken> taken;
+    taken.clear();
+    for (const FlushTake& f : s_flush_take) {
+        Rec* r = f.r;
+        const uint32_t ea = cellGcmResolveLocated(f.location == 0, f.offset);
+        if (!ea_ok(ea, f.bytes)) continue;
+        VtxRange* tr = nullptr;
+        for (uint32_t j = 0; j < r->ntex; j++) if (r->tex[j].location == f.unit) tr = &r->tex[j];
+        if (!tr) { if (r->ntex >= 16) continue; tr = &r->tex[r->ntex++]; }
+        std::shared_ptr<const std::vector<uint8_t>> copy;
+        for (const Taken& t : taken) if (t.ea == ea && t.bytes == f.bytes) { copy = t.copy; break; }
+        if (!copy) {
+            copy = std::make_shared<const std::vector<uint8_t>>(vm_base + ea, vm_base + ea + f.bytes);
+            taken.push_back({ ea, f.bytes, copy });
+            stats().r7_flush_tex_bytes += f.bytes;
+        }
+        tr->location = f.unit; tr->offset = f.offset; tr->bytes = f.bytes;
+        tr->at = kTexShared | (uint32_t)r->tshared.size();
+        r->tshared.push_back(std::move(copy));
+        stats().r7_flush_tex++;
+    }
+    s_flush_take.clear();
+    taken.clear();
 }
 namespace {
 
@@ -2160,11 +2294,14 @@ void r7_publish(bool forced)
     const uint64_t p = q.put.load(std::memory_order_acquire);
     // the small uncompressed textures, now (section 2); then, in development,
     // every input as it is at the flush
-    for (uint64_t i = q.flushed.load(std::memory_order_relaxed); i < p; i++) {
-        Rec* r = q.at(i);
-        r7_take_at_flush(r);
-        if (r7_capture_check()) { r7_input_hashes(r, r->fhash, nullptr); r->fh = 1; }
-    }
+    r7_take_at_flush();
+    q.tex_taken.store(p, std::memory_order_release);   // before `flushed`: the native renderer reads both
+    if (r7_capture_check())
+        for (uint64_t i = q.flushed.load(std::memory_order_relaxed); i < p; i++) {
+            Rec* r = q.at(i);
+            r7_input_hashes(r, r->fhash, nullptr);
+            r->fh = 1;
+        }
     if (q.flushed.load(std::memory_order_relaxed) != p) {
         { std::lock_guard<std::mutex> g(q.m); q.flushed.store(p, std::memory_order_release); }
         q.cv.notify_all();
@@ -2823,7 +2960,7 @@ Rec* asp_record_begin()
 {
     Rec* r = acquire();
     Queue& q = queue();
-    r->seq = q.put.load(std::memory_order_relaxed);
+    r->seq = q.put.load(std::memory_order_relaxed) + s_iheld_n;
     r->kind = kAspDraw;
     r->frame = S.frame;
     r->why = kWhyNone;
@@ -2897,7 +3034,7 @@ void game_arrays_record(ppu_context* c, bool skip)
 {
     Rec* r = acquire();
     Queue& q = queue();
-    r->seq = q.put.load(std::memory_order_relaxed);
+    r->seq = q.put.load(std::memory_order_relaxed) + s_iheld_n;
     r->kind = kAspDraw;
     r->frame = S.frame;
     r->why = kWhyNone;
@@ -3223,7 +3360,7 @@ void asp_draw_exit(const VEntry& v)
     if (s_rec_locked) { g.lock(); s_held = &g; held.on = true; }
     Rec* r = acquire();
     Queue& q = queue();
-    r->seq = q.put.load(std::memory_order_relaxed);
+    r->seq = q.put.load(std::memory_order_relaxed) + s_iheld_n;
     r->kind = kAspDraw;
     r->frame = S.frame;
     r->why = kWhyNone;
@@ -4455,7 +4592,7 @@ int other_thread_call(uint32_t addr, ppu_context* ctx, uint32_t tid, bool timed,
     }
     if (attribute(ctx)) second_producer(addr, tid);
     st.other_thread_calls++;
-    if (timed) st.rec_ns += 16 * (now_ns() - t0);
+    if (timed) st.rec_ns += kTimedEvery * (now_ns() - t0);
     return 0;
 }
 } }
@@ -4592,10 +4729,10 @@ extern "C" int ppfx_rec_observe(uint32_t addr, ppu_context* ctx)
         }
         return 0;
     }
-    // R6: the recorder's own time sampled (one call in 16, scaled) and the hot
+    // R6: the recorder's own time sampled (one call in kTimedEvery, scaled) and the hot
     // counters bumped without a locked add (the producer is their one writer)
     static uint32_t tick = 0;
-    const bool timed = (++tick & 15) == 0;
+    const bool timed = (++tick & (kTimedEvery - 1)) == 0;
     const uint64_t t0 = timed ? now_ns() : 0;
     Stats& st = stats();
     bump(st.calls);
@@ -4663,7 +4800,7 @@ extern "C" int ppfx_rec_observe(uint32_t addr, ppu_context* ctx)
     if (tid != S.tid) {
         if (attribute(ctx)) second_producer(addr, tid);
         st.other_thread_calls++;
-        if (timed) bump(st.rec_ns, 16 * (now_ns() - t0));
+        if (timed) bump(st.rec_ns, kTimedEvery * (now_ns() - t0));
         return 0;
     }
     // R6: the title's context from its first call on, not from PPFX's first
@@ -4679,7 +4816,7 @@ extern "C" int ppfx_rec_observe(uint32_t addr, ppu_context* ctx)
     // R7: the remaining command writers, the flush, labels, reference, waits
     if (r7() && S.ring_ctx && (uint32_t)ctx->gpr[3] == S.ring_ctx) {
         const int a7 = r7_call(addr, ctx);
-        if (a7 >= 0) { if (timed) bump(st.rec_ns, 16 * (now_ns() - t0)); return a7; }
+        if (a7 >= 0) { if (timed) bump(st.rec_ns, kTimedEvery * (now_ns() - t0)); return a7; }
     }
     // Other code's calls on the producer's thread set state too, at the same
     // entry points: PPFX's first frames after a load draw with some of it
@@ -4690,7 +4827,7 @@ extern "C" int ppfx_rec_observe(uint32_t addr, ppu_context* ctx)
     asp_resolve();
     if (asp_fn(addr)) {
         const int a = mode() || s_pw ? asp_call(addr, ctx) : 0;
-        if (timed) bump(st.rec_ns, 16 * (now_ns() - t0));
+        if (timed) bump(st.rec_ns, kTimedEvery * (now_ns() - t0));
         return a;
     }
     const int who = attribute(ctx);   // R7: computed here, past the calls that do not need it
@@ -4898,7 +5035,7 @@ extern "C" int ppfx_rec_observe(uint32_t addr, ppu_context* ctx)
     }
     }
     S.skipping = false;
-    if (timed) bump(st.rec_ns, 16 * (now_ns() - t0));
+    if (timed) bump(st.rec_ns, kTimedEvery * (now_ns() - t0));
     return act;
 }
 
@@ -4919,10 +5056,10 @@ extern "C" void ppfx_rec_exit(uint32_t addr, ppu_context* ctx)
     if (v.kind == 2 && v.addr == 0x006C6F88u) skv_exit(ctx);   // R6's verify: before the take-back
     if (v.kind == 2) {   // R6: the record built at a draw's return, timed (sampled) apart from the entries
         static uint32_t tick = 0;
-        const bool timed = (++tick & 15) == 0;
+        const bool timed = (++tick & (kTimedEvery - 1)) == 0;
         const uint64_t t0 = timed ? now_ns() : 0;
         asp_draw_exit(v);
-        if (timed) bump(stats().rec_exit_ns, 16 * (now_ns() - t0));
+        if (timed) bump(stats().rec_exit_ns, kTimedEvery * (now_ns() - t0));
         return;
     }
     if (v.kind == 3) { asp_probe_exit(v); return; }

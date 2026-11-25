@@ -272,6 +272,9 @@ struct Rec {
     VtxRange tex[16];
     uint32_t ntex;
     std::vector<uint8_t> tdata;
+    // R7 (issue #2): the textures taken at the game's flush, each copied once per flush and shared by every record of
+    // that flush that takes the same bytes (tex[k].at is then kTexShared | an index here); tex_bytes() reads either
+    std::vector<std::shared_ptr<const std::vector<uint8_t>>> tshared;
     uint8_t bypassed;              // R4: its call's body did not run; the walker meets it at its marker
     uint8_t game_arrays;           // R6: the game's cellGcmSetDrawArrays (Bink's frames): every guest texture taken at the walker (reset in acquire)
     // kFlip (R6): the flip id and the display buffer it names (local memory)
@@ -302,6 +305,13 @@ struct Rec {
     Walk walk;
 };
 
+enum : uint32_t { kTexShared = 0x80000000u };
+// a texture snapshot's bytes in its record (tdata) or in a copy shared at the flush (tshared)
+inline const uint8_t* tex_bytes(const Rec* r, const VtxRange& t)
+{
+    return (t.at & kTexShared) ? r->tshared[t.at & ~kTexShared]->data() : r->tdata.data() + t.at;
+}
+
 enum Why : uint32_t {
     kWhyNone = 0,
     kWhyNoVp = 1, kWhyNoFp = 2, kWhyVertex = 3, kWhyUnsupported = 4,
@@ -316,6 +326,9 @@ struct Queue {
     // R7: the records whose commands the game has flushed -- the native
     // renderer consumes [0, flushed) (no walker, no `walked`)
     std::atomic<uint64_t> flushed{0};
+    // R7: the records [0, tex_taken) had their small textures taken at a flush (r7_publish); a record published
+    // later and marked flushed another way -- the exit drain -- had not, whatever its tex_at_flush says
+    std::atomic<uint64_t> tex_taken{0};
     // R6's native present: flips recorded (kFlip published) and presented by
     // the native renderer; a flip completes for the game only once both agree
     std::atomic<uint64_t> flips_recorded{0}, flips_presented{0};
@@ -326,6 +339,12 @@ struct Queue {
     Rec* at(uint64_t i) { return slot[i % kCap]; }
 };
 Queue& queue();
+// a record's small textures were taken at the game's flush (in its tdata/tshared): planned at publish and the flush
+// done for it
+inline bool tex_taken_at_flush(const Rec* r, const Queue& q)
+{
+    return r->tex_at_flush && r->seq < q.tex_taken.load(std::memory_order_acquire);
+}
 
 // Which parts run (DOTHEROES_PPFX_NATIVE): 0 off; 1 records, the walker's
 // match and cross-check (no native rendering: "check"); 2 everything.
@@ -558,7 +577,8 @@ int r7_capture_check();
 void r7_input_hashes(const Rec* r, std::vector<uint64_t>& out, std::vector<std::string>* what,
                      std::vector<uint8_t>* taken_at_flush = nullptr);
 // R7: a record's small uncompressed guest textures taken into it at the
-// flush (the game's thread); false when the switch turned it off
-bool r7_take_at_flush(Rec* r);
+// flush (the game's thread): chosen at publish, copied at the flush
+void r7_plan_take(Rec* r);   // at publish: which of its small textures the flush takes (issue #2)
+void r7_take_at_flush();     // at the game's flush: those textures' bytes into their records
 
 }  // namespace ppfx

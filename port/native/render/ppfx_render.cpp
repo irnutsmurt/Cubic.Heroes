@@ -3334,7 +3334,10 @@ Img* static_texture(Batch& b, const Rec* r, uint32_t unit, const Texture& t)
     uint32_t bpp;
     const VkFormat vf = be_vkformat(texfmt_be(lv[0].tl.fmt), &bpp);
     if (vf == VK_FORMAT_UNDEFINED) return nullptr;
-    const uint8_t* src = &r->tdata[snap->at];
+    // a snapshot that holds nothing (a record the flush never took, at the exit drain): no static texture
+    if (!(snap->at & kTexShared) && (uint64_t)snap->at + snap->bytes > r->tdata.size()) return nullptr;
+    if ((snap->at & kTexShared) && (snap->at & ~kTexShared) >= r->tshared.size()) return nullptr;
+    const uint8_t* src = tex_bytes(r, *snap);
     uint64_t h = fast_hash(src, snap->bytes, 0x57A7ull);
     const uint32_t key[] = { t.format, t.width, t.height, nlv, t.pitch };
     h = fnv(key, sizeof key, h);
@@ -5649,8 +5652,9 @@ void capture(Rec* r)
         else r->vdata.resize(r->vdata.size() + v.bytes);
         bytes += v.bytes;
     }
-    if (!r->tex_at_flush) r->tdata.clear();
-    for (uint32_t k = 0; k < r->ntex && !r->tex_at_flush; k++) {
+    const bool at_flush = tex_taken_at_flush(r, queue());
+    if (!at_flush) r->tdata.clear();
+    for (uint32_t k = 0; k < r->ntex && !at_flush; k++) {
         VtxRange& t = r->tex[k];
         const Texture& tx = r->st.tex[t.location & 15u];
         const uint32_t ea = cellGcmResolveLocated(tx.location == 0, t.offset);
@@ -5718,7 +5722,7 @@ void r7_input_hashes(const Rec* r, std::vector<uint64_t>& out, std::vector<std::
         add(cellGcmResolveLocated(t.location == 0, t.offset), bytes, w);
         if (taken_at_flush) {
             bool snap = false;
-            for (uint32_t j = 0; j < r->ntex && r->tex_at_flush; j++) snap |= r->tex[j].location == n.unit;
+            for (uint32_t j = 0; j < r->ntex && tex_taken_at_flush(r, queue()); j++) snap |= r->tex[j].location == n.unit;
             taken_at_flush->resize(out.size(), 0);
             taken_at_flush->back() = snap ? 1 : 0;
         }

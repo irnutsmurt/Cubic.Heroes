@@ -31,6 +31,7 @@ Written by: Marten Svanfeldt
 #include <xmmintrin.h>
 
 #include "spu_helpers.h"   // the runtime's exact SPU single-precision arithmetic (iterate)
+#include "spu_native_float.h"   // the same arithmetic four lanes at a time in the SPU's float mode (iterate)
 
 namespace bullet_solver {
 namespace {
@@ -287,12 +288,20 @@ constexpr uint32_t kAngularFactor = 0x20;
 constexpr uint32_t kTempStorage = 0x25800, kContactBytes = 3 * kConstraintBytes;
 constexpr uint32_t kSign = 0x80000000u;
 
-// The SPU's single-precision operations, on the float's bits.
-inline uint32_t sp_fa(uint32_t x, uint32_t y) { return spu__fa_any(x, y); }
-inline uint32_t sp_fs(uint32_t x, uint32_t y) { return spu__fa_any(x, y ^ kSign); }
-inline uint32_t sp_fm(uint32_t x, uint32_t y) { return spu__fm_any(x, y); }
-inline uint32_t sp_fma(uint32_t x, uint32_t y, uint32_t z) { return spu__fma_any(x, y, z, 0, 0); }        // x*y + z
-inline uint32_t sp_fnms(uint32_t x, uint32_t y, uint32_t z) { return spu__fma_any(x, y, z, kSign, 0); }   // z - x*y
+// The SPU's single-precision operations, on the float's bits: spu_helpers.h's fast path inline, its exact form
+// (spu__*_any) out of line for what the fast path declines -- the same result as spu__*_any. Left to the compiler,
+// spu__fma_any was a call per operation (a fifth of the native physics' time, issue #2).
+#define SP_INLINE inline __attribute__((always_inline))
+SP_INLINE uint32_t sp_fa(uint32_t x, uint32_t y) { const uint32_t f = spu__fa_fast(x, y); return f ? f : spu__fa_any(x, y); }
+SP_INLINE uint32_t sp_fs(uint32_t x, uint32_t y) { return sp_fa(x, y ^ kSign); }
+SP_INLINE uint32_t sp_fm(uint32_t x, uint32_t y) { const uint32_t f = spu__fm_fast(x, y); return f ? f : spu__fm_any(x, y); }
+SP_INLINE uint32_t sp_fma_np(uint32_t x, uint32_t y, uint32_t z, uint32_t np, uint32_t nc)
+{
+    const uint32_t f = spu__fma_fast(x, y, z, np, nc);
+    return f ? f : spu__fma_any(x, y, z, np, nc);
+}
+SP_INLINE uint32_t sp_fma(uint32_t x, uint32_t y, uint32_t z) { return sp_fma_np(x, y, z, 0, 0); }        // x*y + z
+SP_INLINE uint32_t sp_fnms(uint32_t x, uint32_t y, uint32_t z) { return sp_fma_np(x, y, z, kSign, 0); }   // z - x*y
 inline bool sp_fcgt(uint32_t x, uint32_t y) { return spu__sf_key(x) > spu__sf_key(y); }
 inline bool sp_zero(uint32_t x) { return spu__sf_key(x) == 0; }   // fceq(x, 0)
 
@@ -340,6 +349,75 @@ inline void resolve_row(uint32_t* r, uint32_t* b1, uint32_t* b2)
     apply_impulse(b2, n, r + kRowAngularB / 4, impulse ^ kSign);
 }
 
+#if SPU_NATIVE_FLOAT_RZ_AVAILABLE
+// The row solve four lanes at a time, in the SPU's own float mode (SpuRounding: round toward zero, denormals as
+// zero): spu_native_float.h's forms are the SPU's operations bit for bit (tests/native/spu_float_rz_check.cpp), the
+// same operations in the same order as resolve_row and apply_impulse above -- the four dot products of a row as
+// the four lanes of one, each step rounded as the task rounds it. Only these forms may run in that mode: the
+// scalar sp_* helpers compute in the host's own (round to nearest). DOTHEROES_SOLVER_RZ=0: the scalar forms.
+inline u128 q4(uint32_t a, uint32_t b, uint32_t c, uint32_t d)
+{
+    u128 v;
+    v._u32[0] = a; v._u32[1] = b; v._u32[2] = c; v._u32[3] = d;
+    return v;
+}
+inline u128 q1(uint32_t a) { return q4(a, 0, 0, 0); }
+inline u128 splat(uint32_t a) { return q4(a, a, a, a); }
+
+inline void apply_impulse_rz(uint32_t* b, const uint32_t* normal, const uint32_t* angular, uint32_t impulse)
+{
+    const uint32_t inv_mass = b[kInvMass / 4];
+    if (sp_zero(inv_mass)) return;
+    const uint32_t t = rz_fm(q1(impulse), q1(b[kAngularFactor / 4]))._u32[0];
+    uint32_t* l = b + kDeltaLinear / 4;
+    uint32_t* a = b + kDeltaAngular / 4;
+    const u128 lin = rz_fa(q4(l[0], l[1], l[2], 0),
+                           rz_fm(splat(impulse), rz_fm(splat(inv_mass), q4(normal[0], normal[1], normal[2], 0))));
+    const u128 ang = rz_fa(q4(a[0], a[1], a[2], 0), rz_fm(splat(t), q4(angular[0], angular[1], angular[2], 0)));
+    for (int k = 0; k < 3; k++) { l[k] = lin._u32[k]; a[k] = ang._u32[k]; }   // w kept
+}
+
+inline void resolve_row_rz(uint32_t* r, uint32_t* b1, uint32_t* b2)
+{
+    const uint32_t* n = r + kRowNormal / 4;
+    const uint32_t *p1 = r + kRowRelpos1 / 4, *p2 = r + kRowRelpos2 / 4;
+    const uint32_t *l1 = b1 + kDeltaLinear / 4, *a1 = b1 + kDeltaAngular / 4;
+    const uint32_t *l2 = b2 + kDeltaLinear / 4, *a2 = b2 + kDeltaAngular / 4;
+    // lanes: n.l1, p1.a1, n.l2, p2.a2 -- dot3's order: y*y, then + x*x, then + z*z
+    u128 d = rz_fm(q4(n[1], p1[1], n[1], p2[1]), q4(l1[1], a1[1], l2[1], a2[1]));
+    d = rz_fma(q4(n[0], p1[0], n[0], p2[0]), q4(l1[0], a1[0], l2[0], a2[0]), d);
+    d = rz_fma(q4(n[2], p1[2], n[2], p2[2]), q4(l1[2], a1[2], l2[2], a2[2]), d);
+    const u128 dv = rz_fa(q4(d._u32[0], d._u32[2], 0, 0), q4(d._u32[1], d._u32[3], 0, 0));   // dv1, dv2
+    const uint32_t applied = r[kAppliedImpulse / 4], jac = r[kRowJacDiagInv / 4];
+    u128 imp = rz_fnms(q1(applied), q1(r[kRowCfm / 4]), q1(r[kRowRhs / 4]));
+    imp = rz_fnms(q1(dv._u32[0]), q1(jac), imp);
+    imp = rz_fma(q1(dv._u32[1]), q1(jac), imp);
+    uint32_t impulse = imp._u32[0];
+    const uint32_t sum = rz_fa(q1(applied), imp)._u32[0], lower = r[kRowLower / 4], upper = r[kRowUpper / 4];
+    if (sp_fcgt(lower, sum)) {
+        impulse = rz_fs(q1(lower), q1(applied))._u32[0];
+        r[kAppliedImpulse / 4] = lower;
+    } else if (sp_fcgt(sum, upper)) {
+        impulse = rz_fs(q1(upper), q1(applied))._u32[0];
+        r[kAppliedImpulse / 4] = upper;
+    } else {
+        r[kAppliedImpulse / 4] = sum;
+    }
+    apply_impulse_rz(b1, n, r + kRowAngularA / 4, impulse);
+    apply_impulse_rz(b2, n, r + kRowAngularB / 4, impulse ^ kSign);
+}
+#endif
+bool solver_rz()
+{
+#if SPU_NATIVE_FLOAT_RZ_AVAILABLE
+    static int on = -1;
+    if (on < 0) { const char* e = getenv("DOTHEROES_SOLVER_RZ"); on = !(e && *e == '0'); }
+    return on;
+#else
+    return false;
+#endif
+}
+
 inline void load_words(const uint8_t* base, uint32_t ea, uint32_t* w, unsigned n)
 {
     for (unsigned k = 0; k < n; k++) w[k] = rd32(base, ea + 4 * k);
@@ -358,6 +436,16 @@ void iterate_task(uint8_t* base, uint32_t desc, const Sync& sync, Stats& st)
     const uint32_t bodies = rd32(base, desc + kDescBodies), offsets = rd32(base, desc + kDescBodyOffsets);
     std::vector<uint32_t> index;
     std::vector<LocalBody> local;
+    const bool rz = solver_rz();
+#if SPU_NATIVE_FLOAT_RZ_AVAILABLE
+    // the SPU's float mode for the whole loop: every float operation in it is then one of the rz forms
+    struct RzMode {
+        unsigned csr = 0; bool on;
+        explicit RzMode(bool o) : on(o) { if (on) { csr = _mm_getcsr(); _mm_setcsr(csr | 0x6000u | 0x8040u); } __asm__ __volatile__("" ::: "memory"); }
+        ~RzMode() { __asm__ __volatile__("" ::: "memory"); if (on) _mm_setcsr(csr); }
+    } rz_mode(rz);
+#endif
+    (void)rz;
     for (;;) {
         const uint32_t cell = next_free_cell(base, hash, task, lock, sync, st);
         if (cell >= kCells) break;
@@ -389,6 +477,10 @@ void iterate_task(uint8_t* base, uint32_t desc, const Sync& sync, Stats& st)
                     load_words(base, ea, row, 36);
                     const uint32_t a = row[kRowBodyA / 4], b = row[kRowBodyB / 4];
                     if (a >= nb || b >= nb) { st.bad++; continue; }
+#if SPU_NATIVE_FLOAT_RZ_AVAILABLE
+                    if (rz) resolve_row_rz(row, local[a].w, local[b].w);
+                    else
+#endif
                     resolve_row(row, local[a].w, local[b].w);
                     wr32(base, ea + kAppliedImpulse, row[kAppliedImpulse / 4]);
                     st.contacts++;
@@ -401,9 +493,19 @@ void iterate_task(uint8_t* base, uint32_t desc, const Sync& sync, Stats& st)
                         const uint32_t fea = ea + k * kConstraintBytes;
                         const uint32_t imp = rd32(base, ea + kAppliedImpulse);
                         load_words(base, fea, fr, 36);
-                        fr[kRowLower / 4] = sp_fm(fr[kRowFriction / 4], imp ^ kSign);
-                        fr[kRowUpper / 4] = sp_fm(fr[kRowFriction / 4], imp);
-                        resolve_row(fr, local[a].w, local[b].w);
+#if SPU_NATIVE_FLOAT_RZ_AVAILABLE
+                        if (rz) {
+                            const u128 lu = rz_fm(splat(fr[kRowFriction / 4]), q4(imp ^ kSign, imp, 0, 0));
+                            fr[kRowLower / 4] = lu._u32[0];
+                            fr[kRowUpper / 4] = lu._u32[1];
+                            resolve_row_rz(fr, local[a].w, local[b].w);
+                        } else
+#endif
+                        {
+                            fr[kRowLower / 4] = sp_fm(fr[kRowFriction / 4], imp ^ kSign);
+                            fr[kRowUpper / 4] = sp_fm(fr[kRowFriction / 4], imp);
+                            resolve_row(fr, local[a].w, local[b].w);
+                        }
                         wr32(base, fea + kAppliedImpulse, fr[kAppliedImpulse / 4]);
                         wr32(base, fea + kRowLower, fr[kRowLower / 4]);
                         wr32(base, fea + kRowUpper, fr[kRowUpper / 4]);
@@ -540,7 +642,7 @@ constexpr uint32_t kOne = 0x3F800000u, kOneUp = 0x3F800001u, kHalf = 0x3F000000u
 constexpr uint32_t kEpsilon = 0x34000000u, kSqrt12 = 0x3F3504F3u;
 constexpr uint32_t kRowWords = kConstraintBytes / 4;
 
-inline uint32_t sp_fms(uint32_t x, uint32_t y, uint32_t z) { return spu__fma_any(x, y, z, 0, kSign); }   // x*y - z
+SP_INLINE uint32_t sp_fms(uint32_t x, uint32_t y, uint32_t z) { return sp_fma_np(x, y, z, 0, kSign); }   // x*y - z
 inline uint32_t lane0(u128 v) { return v._u32[0]; }
 inline u128 quad(uint32_t x) { u128 v; v._u32[0] = x; return v; }
 // a / b as the task divides: y = fi(b, frest(b)), q = a*y, q + (a - q*b)*y

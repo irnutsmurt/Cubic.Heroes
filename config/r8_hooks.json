@@ -119,6 +119,55 @@
    "guard": "g_waver_hook",
    "decline": true,
    "note": "The game's finalize-the-instance wrapper (r3 instance): nothing for the waver's marker; everything else declined."
+  },
+  {
+   "addr": "0x00A4CD24",
+   "host": "dotheroes_paircache_add",
+   "guard": "g_native_paircache",
+   "decline": true,
+   "note": "Issue #2's experiment (DOTHEROES_NATIVE_PAIRCACHE): Bullet's btHashedOverlappingPairCache::addOverlappingPair (r3 the cache, r4 and r5 the proxies) natively on the game's pair cache (port/pair_cache.cpp); an overlap filter, a ghost callback or the array's growth declined."
+  },
+  {
+   "addr": "0x009144C8",
+   "host": "dotheroes_paircache_remove",
+   "guard": "g_native_paircache",
+   "decline": true,
+   "note": "Issue #2's experiment: btHashedOverlappingPairCache::removeOverlappingPair (r3 the cache, r4 and r5 the proxies, r6 the dispatcher) natively; a ghost callback or a pair with a collision algorithm declined."
+  },
+  {
+   "addr": "0x00914054",
+   "host": "dotheroes_paircache_process",
+   "guard": "g_native_paircache",
+   "decline": true,
+   "note": "Issue #2's experiment: btHashedOverlappingPairCache::processAllOverlappingPairs (r3 the cache, r4 the callback, r5 the dispatcher) natively for Bullet's remove and clean callbacks (removeOverlappingPairsContainingProxy, cleanProxyFromPairs); any other callback declined."
+  },
+  {
+   "addr": "0x00A46DD8",
+   "host": "dotheroes_sweep_update",
+   "guard": "g_native_sweep",
+   "decline": true,
+   "note": "Issue #2's experiment (DOTHEROES_NATIVE_SWEEP): Bullet's btAxisSweep3Internal<unsigned short>::updateHandle (r3 the broadphase, r4 the handle, r5 and r6 the new box, r7 the dispatcher) natively on the game's broadphase (port/axis_sweep.cpp); a user pair callback declined."
+  },
+  {
+   "addr": "0x00A47588",
+   "host": "dotheroes_sweep_add",
+   "guard": "g_native_sweep",
+   "decline": true,
+   "note": "Issue #2's experiment: btAxisSweep3Internal<unsigned short>::addHandle (r3 the broadphase, r4 and r5 the box, r6 the owner, r7 and r8 the filter group and mask, r9 the dispatcher, r10 the multi-SAP proxy; the handle returned) natively; a user pair callback or no free handle declined."
+  },
+  {
+   "addr": "0x00A456B0",
+   "host": "dotheroes_sweep_remove",
+   "guard": "g_native_sweep",
+   "decline": true,
+   "note": "Issue #2's experiment: btAxisSweep3Internal<unsigned short>::removeHandle (r3 the broadphase, r4 the handle, r5 the dispatcher) natively; a user pair callback declined."
+  },
+  {
+   "addr": "0x0093DFCC",
+   "host": "dotheroes_interp_step",
+   "guard": "g_debris_interp",
+   "decline": true,
+   "note": "Issue #2's prototype (DOTHEROES_DEBRIS_INTERP): btDiscreteDynamicsWorld::internalSingleStepSimulation (r3 the world, f1 the step) -- the lifted step run from the hook, then the moving bodies' poses read for render-only interpolation (port/debris_interp.cpp); nothing in the game's state written."
   }
  ]
 }
