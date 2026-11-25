@@ -92,6 +92,49 @@ class OfficialUpdate(unittest.TestCase):
         self.assertEqual(c.exception.code, "not_official")
         self.assertEqual(os.listdir(os.path.join(self.dir, "dl")), [])
 
+    def test_manifest_from_the_official_package_only_and_the_folder_check(self):
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from test_pkg_update import keys_text, make_pkg
+        key = os.urandom(16)
+        files = [("PARAM.SFO", os.urandom(432)), ("USRDIR/EBOOT.BIN", os.urandom(9000)),
+                 ("USRDIR/data/edt/addition/a.EDT", os.urandom(5000))]
+        pkg = self.put("u.pkg", make_pkg(key, files, ["USRDIR", "USRDIR/data"]))
+        with open(pkg, "rb") as f:
+            data = f.read()
+        rec = {"app_ver": "01.01", "content_id": "UP0005-BLUS30490_00-TESTPATCH0000001", "size": len(data),
+               "sha256": hashlib.sha256(data).hexdigest()}
+        keys = os.path.join(self.dir, "keys.txt")
+        with open(keys, "w", newline="\n") as f:
+            f.write(keys_text({"PKG": key}))
+        m = game_update.make_manifest(pkg, keys, rec)
+        self.assertEqual((m["title_id"], m["count"]), ("BLUS30490", 3))
+        self.assertEqual({f["path"]: f["sha256"] for f in m["files"]},
+                         {n: hashlib.sha256(b).hexdigest() for n, b in files})
+        with self.assertRaises(game_update.UpdateError):                       # another package: refused
+            game_update.make_manifest(self.put("other.pkg", make_pkg(key, files)), keys, rec)
+        folder = os.path.join(self.dir, "BLUS30490")
+        for n, b in files + [("USRDIR/extra.bin", b"left alone")]:   # an installed update: other files are fine
+            os.makedirs(os.path.dirname(os.path.join(folder, *n.split("/"))), exist_ok=True)
+            self.put(os.path.join("BLUS30490", *n.split("/")), b)
+        self.assertTrue(game_update.check_folder(folder, m))
+        p = os.path.join(folder, "USRDIR", "data", "edt", "addition", "a.EDT")
+        with open(p, "r+b") as f:
+            f.write(b"\0")
+        with self.assertRaises(game_update.UpdateError) as c:
+            game_update.check_folder(folder, m)
+        self.assertIn("a.EDT", str(c.exception))
+        os.remove(p)
+        with self.assertRaises(game_update.UpdateError) as c:
+            game_update.check_folder(folder, m)
+        self.assertIn("missing", str(c.exception))
+
+    def test_the_committed_manifest_matches_the_record(self):
+        m = game_update.load_manifest()
+        r = game_update.record()
+        self.assertEqual(m["made_from"], {"sha256": r["sha256"], "size": r["size"]})
+        self.assertEqual((m["app_ver"], m["count"], len(m["files"])), (r["app_ver"], len(m["files"]), m["count"]))
+        self.assertIn("USRDIR/EBOOT.BIN", {f["path"] for f in m["files"]})
+
     def test_offline(self):
         with self.assertRaises(game_update.UpdateError) as c:
             game_update.download(os.path.join(self.dir, "dl"), self.rec)
