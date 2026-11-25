@@ -5,7 +5,8 @@
  * and .h do them, run on the game's own pair cache in guest memory: the same pair array, hash and next tables, the
  * same order and the same counters, byte for byte. Entry hooks (config/r8_hooks.json) guarded by g_native_paircache:
  *
- *   DOTHEROES_NATIVE_PAIRCACHE=1      the three operations natively (default: off, the lifted ones)
+ *   DOTHEROES_NATIVE_PAIRCACHE=1      the three operations natively -- the default (port/main.cpp, and the setup's
+ *                                     settings); =0 the lifted ones, for comparison
  *   DOTHEROES_NATIVE_PAIRCACHE=check  each call the native code would handle runs natively, its result is kept,
  *                                     the inputs are put back and the lifted function runs; the two results are
  *                                     compared (the pair array, the hash and next tables, the cache's fields, the
@@ -426,8 +427,9 @@ int run_op(int op, ppu_context* ctx, int (*native)(ppu_context*), void (*lifted)
     return 1;   // the lifted function's result stands
 }
 
-struct Init {
-    Init()
+/* DOTHEROES_NATIVE_PAIRCACHE, read once dotheroes.cfg is applied (port/main.cpp: default 1) */
+void init()
+{
     {
         const char* e = getenv("DOTHEROES_NATIVE_PAIRCACHE");
         g_mode = !e ? 0 : !strcmp(e, "check") ? 2 : !strcmp(e, "lifted") ? 3 : atoi(e) == 1 ? 1 : 0;
@@ -447,7 +449,7 @@ struct Init {
                 g_mode == 2 ? "native checked against the lifted functions, call by call" : g_mode == 3 ? "the lifted functions" : "native",
                 g_tbuf ? ", each call timed" : "");
     }
-} g_init;
+}
 
 }  // namespace paircache
 
@@ -507,6 +509,7 @@ extern "C" int dotheroes_paircache_pure(ppu_context* ctx, int op, uint32_t self,
 
 /* The entry hooks (config/r8_hooks.json): btHashedOverlappingPairCache::addOverlappingPair (0x00A4CD24),
  * removeOverlappingPair (0x009144C8) and processAllOverlappingPairs (0x00914054); 0 declines (the lifted body runs). */
+extern "C" void dotheroes_paircache_init(void) { paircache::init(); }   // port/main.cpp, after the settings
 extern "C" int dotheroes_paircache_add(ppu_context* ctx) { return run_op(0, ctx, add_native, func_00A4CD24); }
 extern "C" int dotheroes_paircache_remove(ppu_context* ctx) { return run_op(1, ctx, remove_native, func_009144C8); }
 extern "C" int dotheroes_paircache_process(ppu_context* ctx) { return run_op(2, ctx, process_native, func_00914054); }

@@ -5,7 +5,8 @@
  * clamping), run on the game's own broadphase in guest memory: the same handles and edge arrays, the same calls into
  * its pair cache in the same order. Entry hooks (config/r8_hooks.json) guarded by g_native_sweep:
  *
- *   DOTHEROES_NATIVE_SWEEP=1      the three functions natively (default: off, the lifted ones)
+ *   DOTHEROES_NATIVE_SWEEP=1      the three functions natively -- the default (port/main.cpp, and the setup's
+ *                                 settings); =0 the lifted ones, for comparison
  *   DOTHEROES_NATIVE_SWEEP=check  each call runs natively, its pair cache calls the game's way where they write only
  *                                 the cache (its virtuals), otherwise simulated without calling game code
  *                                 (port/pair_cache.cpp); the input is put back and the lifted function
@@ -437,8 +438,9 @@ int run_op(int op, ppu_context* ctx, int (*native)(ppu_context*), void (*lifted)
     return 1;   // the lifted function's result stands
 }
 
-struct Init {
-    Init()
+/* DOTHEROES_NATIVE_SWEEP, read once dotheroes.cfg is applied (port/main.cpp: default 1) */
+void init()
+{
     {
         const char* e = getenv("DOTHEROES_NATIVE_SWEEP");
         g_mode = !e ? 0 : !strcmp(e, "check") ? 2 : atoi(e) == 1 ? 1 : 0;
@@ -449,13 +451,14 @@ struct Init {
         fprintf(stderr, "[sweep] Bullet's btAxisSweep3: %s (DOTHEROES_NATIVE_SWEEP)\n",
                 g_mode == 2 ? "native checked against the lifted functions, call by call" : "native");
     }
-} g_init;
+}
 
 }  // namespace sweep
 
 /* The entry hooks (config/r8_hooks.json): btAxisSweep3Internal<unsigned short>::updateHandle (0x00A46DD8), addHandle
  * (0x00A47588) and removeHandle (0x00A456B0); 0 declines (the lifted body runs). */
 using namespace sweep;
+extern "C" void dotheroes_sweep_init(void) { sweep::init(); }   // port/main.cpp, after the settings
 extern "C" int dotheroes_sweep_update(ppu_context* ctx) { return run_op(0, ctx, update_native, func_00A46DD8); }
 extern "C" int dotheroes_sweep_add(ppu_context* ctx) { return run_op(1, ctx, add_native, func_00A47588); }
 extern "C" int dotheroes_sweep_remove(ppu_context* ctx) { return run_op(2, ctx, remove_native, func_00A456B0); }

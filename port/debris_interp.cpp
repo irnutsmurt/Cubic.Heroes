@@ -356,9 +356,10 @@ extern "C" int dotheroes_interp_apply(const float* m, float* out)
     return 1;
 }
 
-namespace {
-struct Init {
-    Init()
+/* DOTHEROES_DEBRIS_INTERP and _LOG, read once dotheroes.cfg is applied (port/main.cpp), so a line in it switches
+ * the interpolation on */
+extern "C" void dotheroes_interp_init(void)
+{
     {
         const char* r = getenv("DOTHEROES_DEBRIS_INTERP");
         g_debris_interp_render = r && *r == '1';
@@ -374,5 +375,4 @@ struct Init {
         if (g_debris_interp) { atexit(log_write); g_dotheroes_interp_write = log_write; }
         if (g_debris_interp_render) fprintf(stderr, "[debris-interp] debris drawn between physics steps above 60 fps (DOTHEROES_DEBRIS_INTERP)\n");
     }
-} g_init;
-}  // namespace
+}
