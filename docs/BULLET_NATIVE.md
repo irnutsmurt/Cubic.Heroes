@@ -751,6 +751,90 @@ than native.
 lock-line emulation: helps every SPU task, but those are a quarter to a half
 of the solver's run time.
 
+## The PPU side: the world, the broadphase and the pair cache (2026-11-25)
+
+Issue #2 (debris after a kill or a grass cut) put the PPU half of Bullet on the critical path: the frame a burst of
+debris spawns. The routines below were identified by the `BT_PROFILE` scope names the game's build keeps (read from
+its TOC) and by their structure against Bullet 2.74's source. Everything here runs lifted unless a switch says
+otherwise.
+
+| Bullet routine (2.74 name) | game function | status |
+|---|---|---|
+| btDiscreteDynamicsWorld::stepSimulation (m_localTime +0xD0) -> internalSingleStepSimulation | `func_0093D448` -> `func_0093DFCC` | lifted (an observing hook behind `DOTHEROES_DEBRIS_INTERP`) |
+| predictUnconstraintMotion / integrateTransforms / synchronizeMotionStates | `func_0093C8C4` / `func_0093D8BC` / `func_0093C9CC` | lifted |
+| btCollisionWorld::performDiscreteCollisionDetection | `func_0095A73C` | lifted |
+| btCollisionWorld::updateAabbs | `func_0095A1A0` | lifted |
+| btAxisSweep3::setAabb -> updateHandle (the sorts) | `func_00A474A0` -> `func_00A46DD8` | updateHandle native behind `DOTHEROES_NATIVE_SWEEP` |
+| btDbvtBroadphase::setAabb (the sweep's raycast accelerator) | `func_0090FBEC` | lifted |
+| SpuGatheringCollisionDispatcher::dispatchAllCollisionPairs | `func_0094FD28` | lifted; its collision task native (`DOTHEROES_NATIVE_CD`) |
+| solveConstraints -> parallel_solveGroup -> allSolved | `func_00941668` -> `func_009519D0` -> `func_00952298` | lifted PPU; three of five solver commands native (`DOTHEROES_NATIVE_SOLVER`) |
+| buildAndProcessIslands | `func_00960ED8` | lifted |
+| addRigidBody -> addCollisionObject -> btAxisSweep3::createProxy -> addHandle | `func_0093C130` -> `func_0095AAA8` -> `func_00A47DC0` -> `func_00A47588` | addHandle native behind `DOTHEROES_NATIVE_SWEEP` |
+| removeRigidBody -> removeCollisionObject -> destroyProxy -> removeHandle | `func_0093BA14` -> `func_0095A5A4` -> `func_00A45988` -> `func_00A456B0` | removeHandle native behind `DOTHEROES_NATIVE_SWEEP` |
+| btHashedOverlappingPairCache: addOverlappingPair, removeOverlappingPair, processAllOverlappingPairs (remove/clean callbacks) | `func_00A4CD24`, `func_009144C8`, `func_00914054` | native behind `DOTHEROES_NATIVE_PAIRCACHE` |
+
+**The spawn.** The game adds a burst's bodies (64 for a river enemy, 54 for a grass tuft) to the world before it sets
+their transforms, so each enters the sweep at the world origin with a 0.14-unit box: all of a burst's boxes overlap
+there, and insertion i adds i pairs (64 bodies: 2,016). The step's updateAabbs then moves each box to its place and
+removes those pairs again. None reaches the dispatcher (no collision algorithm is ever made for one), and no callback
+sees one (the game installs no overlap filter and no user pair callback): their effects stay inside Bullet -- the pair
+array's order, its growth, the hash tables, Bullet's pair counters, the raycast tree's shape. A grass tuft's first cut
+also removes and re-adds 27 bodies; each removal scans the whole (inflated) pair array twice
+(removeOverlappingPairsContainingProxy, cleanProxyFromPairs). Later cuts reuse bodies, which are not inserted at the
+origin. Skipping the transient pairs would change those internal effects; it is a separate decision, not taken.
+
+**The native pair cache.** port/pair_cache.cpp does the three pair-cache operations as Bullet 2.74's source does them,
+on the game's own cache in guest memory -- the pair array, the hash and next tables, Bullet's counters (gAddedPairs,
+gRemovePairs, gOverlappingPairs), the same order. It reaches no further than the cache: a pair's collision algorithm is
+freed by the lifted cleanOverlappingPair (the game's dispatcher and allocator); the array's growth, an overlap filter,
+a ghost callback and any other scan callback (the dispatcher's own, which makes the algorithms) stay lifted. The game's
+build orders a pair's proxies by address where Bullet compares unique ids; the two agree for the sweep's handles, and a
+call where they would not is declined. `DOTHEROES_NATIVE_PAIRCACHE=check` runs each call natively, puts the input back,
+runs the lifted function and compares the two byte for byte (the cache's fields, the pair array, both tables, the
+counters, the return value), the lifted result kept; in that mode the native run calls no game code (a freed algorithm
+is what the cache sees of it: the pair's algorithm field cleared). Four check runs (the river fight, the grass cuts):
+13,167 adds, 10,519 removes (1,717 freeing an algorithm) and 1,108 scans compared, none differs.
+
+| pair cache time in the spawn frame (ms, medians; timed call by call, `DOTHEROES_PAIRCACHE_TIME`) | lifted | native |
+|---|---|---|
+| river, first kill of a session (n=4) | 0.60 | 0.37 |
+| river, later kill (n=3 lifted) | 0.58 | |
+| grass, first cut (n=3): adds / removes / scans | 0.23 / 0.06 / 0.97 = 1.25 | 0.14 / 0.02 / 0.18 = 0.34 |
+| grass, later cut (n=3) | 0.20 | 0.08 |
+
+The adds and removes are hash-chain walks over a few thousand entries, mostly memory-bound, so native code saves less
+there (river) than in the removal scans, where the lifted loop makes an indirect call per pair (grass's first cut).
+The scans with the dispatcher's own callback (algorithm creation, ~0.1 ms a step) stay lifted.
+
+**The native sweep.** port/axis_sweep.cpp does btAxisSweep3Internal<unsigned short>'s addHandle, removeHandle and
+updateHandle with quantize and the four sorts as Bullet 2.74's source does them (`USE_OVERLAP_TEST_ON_REMOVES`), on
+the game's handles and edge arrays, reaching the pair cache through its virtuals as Bullet does. Its `check` mode
+compares the broadphase, the handles and edges in use and the pair cache byte for byte against the lifted functions;
+a pair cache call that only writes the cache goes the game's way, any other is simulated without game code. Four check
+runs: 310,295 updates, 611 adds and 618 removes compared, none differs (also on Windows).
+
+| spawn frame (perf 20 kHz, ms, medians of 3; off -> pair cache + sweep) | river first kill | grass first cut | grass later cut |
+|---|---|---|---|
+| the sweep's own work | 0.70 -> 0.40 | 0.80 -> 0.40 | 0.70 -> 0.35 |
+| the pair cache | 0.60 -> 0.45 | 1.40 -> 0.35 | 0.15 -> 0.15 |
+| the game thread's CPU | 14.8 -> 13.2 | 14.5 -> 13.2 | 12.7 -> 11.8 |
+
+At a 60 fps cap the spawn frame's interval is the period plus its extra work minus the previous frame's, so savings
+of ~1 ms hide in that noise at a few runs; (I_k - I_k+1)/2 cancels the period: the spawn frame's extra work over its
+neighbours fell from 4.3 to 3.2 ms (grass first cut) and 2.6 to 2.2 ms (later cuts); river first kills stayed within
+noise. Windows at 120-360 fps: no frame-level difference measurable against its run-to-run spread, no regression.
+
+**What is left, by cost at a spawn** (the same profiles, both switches on): the step's other Bullet work (solver
+issuing and the islands, ~1.2-1.7 ms; the solver's PPU side is above), the raycast accelerator's btDbvt updates in
+createProxy and setAabb (0.15-0.25 ms, lifted), the dispatcher's scan that makes the new pairs' collision algorithms
+(0.15-0.45 ms, lifted: the game's allocator and constructors), and the pair array's growth at a session's first large
+burst (growTables, lifted). The game's own spawn code (~0.5 ms) is game logic, not Bullet. None of these is a large
+single win; the btDbvt updates are the next contained candidate (Bullet 2.74's btDbvt, the same check method).
+
+**Debris above 60 fps.** A piece's draw matrix (vertex constants c256-c259) is the view-projection times its body's
+pose exactly, so `DOTHEROES_DEBRIS_INTERP` (port/debris_interp.cpp) draws it between the body's last two step poses
+at Bullet's m_localTime over the step, render only (docs/HANDOFF.md has the switch).
+
 ## Method
 
 `SPURS_SNAP=F63600:F8EC80:<n>:<prefix>` writes guest memory (committed pages
