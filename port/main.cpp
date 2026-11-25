@@ -1021,14 +1021,14 @@ static void set_default_env(const char* name, const std::string& value)
 }
 
 static std::string s_installed_elf;
-/* the program a build was lifted from (config/programs/<id>/; the pipeline defines it for another program) */
+/* the program a build was lifted from (config/programs/<region>-<version>/, its program.json; the pipeline defines it for another program) */
 #ifndef DOTHEROES_PROGRAM_ID
 #define DOTHEROES_PROGRAM_ID "BLUS30490-01.00"
 #endif
 static std::string s_program_mismatch;   /* the build.cfg's DOTHEROES_PROGRAM, when it is not this build's */
 
 /* port/program_addrs.h's PA_RT: v1.00's address of the game -> the program this build is of, for port/'s prebuilt
- * library (its table is this file's, compiled with the program's config/programs/<id>/port_addrs.inc) */
+ * library (its table is this file's, compiled with the program's config/programs/<program>/port_addrs.inc) */
 #include "program_addrs.h"
 extern "C" uint32_t dotheroes_program_addr(uint32_t v100)
 {

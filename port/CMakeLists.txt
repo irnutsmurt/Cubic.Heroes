@@ -735,14 +735,27 @@ if(glslang_FOUND AND TARGET glslang::glslang AND TARGET glslang::SPIRV AND PS3RE
 endif()
 
 # beta.6: a build of another program of the game (the official v1.01 update's): -DDOTHEROES_PROGRAM=<id> takes its
-# address-tied configuration from config/programs/<id>/ (tools/program_remap.py) -- the program's id for main.cpp,
+# address-tied configuration from its folder under config/programs/ (tools/program_remap.py) -- the program's id for main.cpp,
 # port/'s PA() table (port/program_addrs.h) and, for port/'s own sources only, the names of the lifted functions
 # port/ calls (port_aliases.h: v1.00's name -> this program's; never the lift's own sources, where a v1.00 address
 # may name another function). The lift itself takes the same folder's hooks and observers (tools/r8_lift.sh,
 # tools/setup_pipeline.py). Empty: v1.00, as before.
-set(DOTHEROES_PROGRAM "" CACHE STRING "The game's program this build is of (config/programs/<id>); empty: v1.00")
+set(DOTHEROES_PROGRAM "" CACHE STRING "The game's program this build is of (its id, named by a config/programs/*/program.json); empty: v1.00")
 if(DOTHEROES_PROGRAM)
-    get_filename_component(_dh_prog "${CMAKE_CURRENT_SOURCE_DIR}/../config/programs/${DOTHEROES_PROGRAM}" ABSOLUTE)
+    # its folder: the one under config/programs whose program.json names it (config/programs/us-01.01: a folder
+    # named for a PS3 title ID is kept out of the repository, tools/boundary_check.py)
+    file(GLOB _dh_metas "${CMAKE_CURRENT_SOURCE_DIR}/../config/programs/*/program.json")
+    set(_dh_prog "")
+    foreach(_m ${_dh_metas})
+        file(READ "${_m}" _dh_txt)
+        if(_dh_txt MATCHES "\"id\"[ \t\r\n]*:[ \t\r\n]*\"${DOTHEROES_PROGRAM}\"")
+            get_filename_component(_dh_prog "${_m}" DIRECTORY)
+        endif()
+    endforeach()
+    if(NOT _dh_prog)
+        message(FATAL_ERROR "DOTHEROES_PROGRAM=${DOTHEROES_PROGRAM}: no config/programs/*/program.json names it")
+    endif()
+    get_filename_component(_dh_prog "${_dh_prog}" ABSOLUTE)
     foreach(_f port_addrs.inc port_aliases.h)
         if(NOT EXISTS "${_dh_prog}/${_f}")
             message(FATAL_ERROR "DOTHEROES_PROGRAM=${DOTHEROES_PROGRAM}: no ${_dh_prog}/${_f} (tools/program_remap.py)")

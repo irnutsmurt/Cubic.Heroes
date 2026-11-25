@@ -655,7 +655,22 @@ const uint32_t kEventToc = PA_RT(0x01057910);        /* EventClass's module TOC 
 const uint32_t fn_player_data = PA_RT(0x00985C08);   /* GetItem's first call: the player's data, by the name in its TOC */
 const uint32_t fn_item_object = PA_RT(0x00985D88);   /* GetItem's second: (player data, id) -> the item's object */
 constexpr uint32_t kItemCount = 0x54;             /* the item object's count (CItem::setNum/getNum) */
-const uint32_t kBundle = PA_RT(0x00A7C908), kBundleSize = 0x39B7D5;   /* the scripts the game runs, in its EBOOT */
+const uint32_t kBundle = PA_RT(0x00A7C908);   /* the scripts the game runs, in its EBOOT */
+/* the bundle's length: its text runs to the first byte that is not text -- 0x39B7D5 in v1.00, 0x39B886 in v1.01 (the
+ * update changed scripts), measured once rather than written down, so one prebuilt library reads either program */
+uint32_t bundle_size()
+{
+    static const uint32_t n = [] {
+        const uint8_t* p = vm_base + kBundle;
+        uint32_t i = 0;
+        for (; i < 0x800000u; i++) {
+            const uint8_t c = p[i];
+            if (!(c == 9 || c == 10 || c == 13 || (c >= 32 && c < 127) || c >= 0x80)) break;
+        }
+        return i;
+    }();
+    return n;
+}
 
 /* the main story in steps (docs/M11_PLAN.md section 9): our own labels; the flags the game's scripts set at each
  * (flag, value), the world map's progress flags, the items the step gives, the magic containers its event adds
@@ -730,15 +745,15 @@ int make_names(const ppu_context* c, std::string& err)
     std::map<std::string, std::vector<int>> by_fn;
     const char* text = (const char*)vm_base + kBundle;
     std::string fn;
-    for (uint32_t i = 0; i + 16 < kBundleSize; i++) {
+    for (uint32_t i = 0; i + 16 < bundle_size(); i++) {
         if ((i == 0 || text[i - 1] == '\n') && !strncmp(text + i, "function ", 9)) {
             uint32_t j = i + 9;
-            while (j < kBundleSize && (isalnum((unsigned char)text[j]) || text[j] == '_' || text[j] == '.' || text[j] == ':')) j++;
+            while (j < bundle_size() && (isalnum((unsigned char)text[j]) || text[j] == '_' || text[j] == '.' || text[j] == ':')) j++;
             fn.assign(text + i + 9, j - i - 9);
         } else if (!strncmp(text + i, "SetEventFlag(", 13) && !fn.empty()) {
             uint32_t j = i + 13;
-            while (j < kBundleSize && text[j] == ' ') j++;
-            if (j < kBundleSize && isdigit((unsigned char)text[j])) {
+            while (j < bundle_size() && text[j] == ' ') j++;
+            if (j < bundle_size() && isdigit((unsigned char)text[j])) {
                 const int f = atoi(text + j);
                 if (f >= 100 && f < 1000) {
                     auto& v = by_fn[fn];
@@ -970,13 +985,13 @@ void make_events()
     const char* text = (const char*)vm_base + kBundle;
     auto at_line = [&](uint32_t i) { return i == 0 || text[i - 1] == '\n'; };
     uint32_t i = 0;
-    while (i + 9 < kBundleSize) {
+    while (i + 9 < bundle_size()) {
         if (!(at_line(i) && !strncmp(text + i, "function ", 9))) { i++; continue; }
         uint32_t j = i + 9;
-        while (j < kBundleSize && (isalnum((unsigned char)text[j]) || text[j] == '_')) j++;
+        while (j < bundle_size() && (isalnum((unsigned char)text[j]) || text[j] == '_')) j++;
         const std::string name(text + i + 9, j - i - 9);
         uint32_t e = j;   /* the body: up to the next function at a line's start */
-        while (e + 9 < kBundleSize && !(at_line(e) && !strncmp(text + e, "function ", 9))) e++;
+        while (e + 9 < bundle_size() && !(at_line(e) && !strncmp(text + e, "function ", 9))) e++;
         const std::string body(text + j, e - j);
         if (!name.empty() && body.find("coroutine.yield") != std::string::npos)
             g_events.push_back({ name, body.find("PlayScene") != std::string::npos || body.find("SetCamera") != std::string::npos ||
@@ -1016,13 +1031,13 @@ void make_spawnables()
         return false;
     };
     uint32_t i = 0;
-    while (i + 9 < kBundleSize) {
+    while (i + 9 < bundle_size()) {
         if (!(at_line(i) && !strncmp(text + i, "function ", 9))) { i++; continue; }
         uint32_t j = i + 9;
-        while (j < kBundleSize && (isalnum((unsigned char)text[j]) || text[j] == '_')) j++;
+        while (j < bundle_size() && (isalnum((unsigned char)text[j]) || text[j] == '_')) j++;
         const std::string name(text + i + 9, j - i - 9);
         uint32_t e = j;
-        while (e + 9 < kBundleSize && !(at_line(e) && !strncmp(text + e, "function ", 9))) e++;
+        while (e + 9 < bundle_size() && !(at_line(e) && !strncmp(text + e, "function ", 9))) e++;
         const size_t n = name.size();
         if (n > 10 && name.compare(n - 10, 10, "Initialize") == 0) {
             const std::string body(text + j, e - j);
