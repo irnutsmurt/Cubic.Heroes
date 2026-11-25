@@ -37,12 +37,13 @@ SCRIPTS = {
     "no-support": OFFER + "seek 60000 down Continue with v1.00\nexpect Continue with v1.00\nsee Game Version\n"
                           "shot 2-explained\nquit\n",
     "no-package": OFFER + "seek 60000 down Choose the update package\nexpect Choose the update package\n"
-                          "see Game Version\nshot 2-explained\nquit\n",
+                          "shot 2-explained\nquit\n",
     "ready": OFFER + "seek 60000 down Install v1.01\nexpect Install v1.01\nsee Game Version\nshot 2-ready\nquit\n",
     # declined: Not Now takes the offer away (remembered: launcher.json update_offer "declined"), and Manage > Game
     # Version still offers the update -- its full check, then Install v1.01
     "not-now": ("until 200000 PLAY\nexpect PLAY\nwait 240\nsee Official Game Update v1.01\n"
-                "seek 6000 down Not Now\nexpect Not Now\na\nwait 60\nshot 1-declined\nrb\nwait 60\n"
+                "seek 6000 down Install v1.01\nexpect Install v1.01\nright\nwait 20\nexpect Not Now\na\nwait 60\n"
+                "shot 1-declined\nrb\nwait 60\n"
                 "seek 60000 down See what v1.01 needs\nexpect See what v1.01 needs\nsee Game Version\na\nwait 120\n"
                 "seek 60000 down Install v1.01\nexpect Install v1.01\nshot 2-later\nquit\n"),
 }

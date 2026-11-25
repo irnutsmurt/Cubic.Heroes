@@ -2402,13 +2402,14 @@ static void game_version_section()
     text_col(col::text, "You play v1.00, complete and fully supported. Official Game Update v1.01 is optional: it adds new "
                         "characters and several gameplay improvements, and v1.00 stays in this installation if you install "
                         "it.");
-    update_whats_included();
     if (!kept && !g_gv.full) {
         if (big_button(g_gv.checking ? "Checking..." : "See what v1.01 needs", ImVec2(S(420), 0), Kind::Primary,
                        !g_gv.checking))
             gv_check(true);
         text_col(col::dim, "Checks your game, the update package (yours, or Sony's official download), what opens it "
                            "(your keys, or keys downloaded automatically), disk space and permission. Nothing is changed.");
+        ImGui::Dummy(ImVec2(0, S(6)));
+        update_whats_included();
         card_end();
         return;
     }
@@ -2449,6 +2450,8 @@ static void game_version_section()
         ImGui::SameLine();
         gv_remedy("continue_v100", shown);
     }
+    ImGui::NewLine();
+    update_whats_included();   // after the actions: they stay within the D-pad's reach
     card_end();
 }
 
@@ -2461,9 +2464,9 @@ static void update_offer_card()
     card_begin("##update_offer");
     title("Official Game Update v1.01", 24);
     text_col(col::text, "This optional update adds new characters and several gameplay improvements!");
-    ImGui::Dummy(ImVec2(0, S(4)));
-    update_whats_included();
     ImGui::Dummy(ImVec2(0, S(6)));
+    // the choice first, under the summary: on a 1280x800 screen the list below would leave buttons after it out of
+    // the view, where the D-pad can't reach them (the launcher's rule since 0.2.0-beta.5)
     if (big_button("Install v1.01", ImVec2(S(320), 0), Kind::Primary)) {
         g_prefs.update_offer = "accepted";
         g_prefs.save();
@@ -2477,6 +2480,8 @@ static void update_offer_card()
         g_prefs.save();
     }
     text_col(col::dim, "You can install it later from Install / Manage > Game Version.");
+    ImGui::Dummy(ImVec2(0, S(6)));
+    update_whats_included();
     card_end();
     ImGui::Dummy(ImVec2(0, S(8)));
 }
