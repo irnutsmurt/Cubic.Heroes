@@ -119,6 +119,27 @@
    "guard": "g_waver_hook",
    "decline": true,
    "note": "The game's finalize-the-instance wrapper (r3 instance): nothing for the waver's marker; everything else declined."
+  },
+  {
+   "addr": "0x00A4CD24",
+   "host": "dotheroes_paircache_add",
+   "guard": "g_native_paircache",
+   "decline": true,
+   "note": "Issue #2's experiment (DOTHEROES_NATIVE_PAIRCACHE): Bullet's btHashedOverlappingPairCache::addOverlappingPair (r3 the cache, r4 and r5 the proxies) natively on the game's pair cache (port/pair_cache.cpp); an overlap filter, a ghost callback or the array's growth declined."
+  },
+  {
+   "addr": "0x009144C8",
+   "host": "dotheroes_paircache_remove",
+   "guard": "g_native_paircache",
+   "decline": true,
+   "note": "Issue #2's experiment: btHashedOverlappingPairCache::removeOverlappingPair (r3 the cache, r4 and r5 the proxies, r6 the dispatcher) natively; a ghost callback or a pair with a collision algorithm declined."
+  },
+  {
+   "addr": "0x00914054",
+   "host": "dotheroes_paircache_process",
+   "guard": "g_native_paircache",
+   "decline": true,
+   "note": "Issue #2's experiment: btHashedOverlappingPairCache::processAllOverlappingPairs (r3 the cache, r4 the callback, r5 the dispatcher) natively for Bullet's remove and clean callbacks (removeOverlappingPairsContainingProxy, cleanProxyFromPairs); any other callback declined."
   }
  ]
 }
