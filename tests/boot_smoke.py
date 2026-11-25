@@ -202,6 +202,30 @@ def game_window(pid):
     return min(found)[1] if found else None
 
 
+def census(text):
+    """the exit's census of the SPU machinery (beta.6, the owner's v1.01 acceptance: no legacy path at work): the last
+    "[census]" line's counts (ps3emu/census.h, port/native/phys_direct.cpp's report -- spurs_task, native_decline, ...),
+    the SPU programs started lifted ("[spu-census] first lifted start of image ..."), the physics tasks native and
+    lifted ("[phys-direct] N native tasks ..., M lifted through SPURS"). A gameplay run on the native architecture
+    has spurs_task 0, native_decline 0 and no lifted SPU start; {} when the game wrote no census (it did not end in
+    order)"""
+    out = {}
+    lines = re.findall(r"^\[census\] (.*)$", text, re.M)
+    if lines:
+        toks = lines[-1].split()
+        for k, v in zip(toks[0::2], toks[1::2]):
+            if v.isdigit():
+                out[k] = int(v)
+    lifted = re.findall(r"^\[spu-census\] first lifted start of image (\d+) \(([^)]*)\)", text, re.M)
+    if lines or lifted:
+        out["lifted_spu_start"] = len(lifted)
+        out["lifted_spu_images"] = sorted({name for _n, name in lifted})
+    phys = re.findall(r"^\[phys-direct\] (\d+) native tasks issued directly .*?(\d+) lifted through SPURS", text, re.M)
+    if phys:
+        out["phys_native"], out["phys_lifted"] = int(phys[-1][0]), int(phys[-1][1])
+    return out
+
+
 def rd(path):
     try:
         with open(path, encoding="utf-8", errors="replace") as f:
@@ -760,6 +784,7 @@ def main():
             result[name] = [json.loads(l) for l in open(os.path.join(RUN, f"{name}.jsonl"))]
         except (OSError, ValueError):
             result[name] = []
+    result["census"] = census(rd(os.path.join(RUN, "stderr.log")))
     with open(os.path.join(RUN, "result.json"), "w") as f:
         json.dump(result, f, indent=1)
 

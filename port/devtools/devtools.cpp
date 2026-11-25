@@ -296,7 +296,7 @@ std::string status_json(const ppu_context* c)
 }
 
 /* ---- the catalog (docs/M11_PLAN.md section 3.7): made by the game itself, from the player's own files ---- */
-std::string g_usrdir;        /* the game's USRDIR on the player's disc (the EBOOT's folder) */
+std::string g_usrdir;        /* the game's USRDIR on the player's disc (the EBOOT's folder, or PS3_VFS_ROOT's) */
 std::string g_install_root;
 
 double ft_clock() { return (double)(int64_t)(ps3_ft_now() - g_ps3_ft.base) / 1e9; }   /* the compile log's clock */
@@ -1806,6 +1806,10 @@ extern "C" void devtools_start(const char* install_root, const char* elf)
     }
     g_install_root = install_root ? install_root : "";
     g_usrdir = elf ? std::filesystem::path(elf).parent_path().generic_string() : std::string();
+    /* another program of the game (the official update's: its program is in the update's folder) -- the disc is
+     * the game's /dev_bdvd (PS3_VFS_ROOT, main.cpp / tests/boot_smoke.py), and its maps are there */
+    if (const char* vr = getenv("PS3_VFS_ROOT"); vr && *vr)
+        g_usrdir = (std::filesystem::path(vr) / "PS3_GAME" / "USRDIR").generic_string();
     g_devtools_flip = on_flip;
     g_ps3_guest_hold_work = on_hold;
     g_ppfx_unforeseen_hook = on_unforeseen;
