@@ -142,7 +142,11 @@ if SECS_ARG:
 # the game runs with its run directory as the working directory.
 BIN = os.path.join(ROOT, os.environ.get("BIN") or os.path.join("build", *(("port-win", "dotheroes.exe") if WIN
                                                                           else ("port", "dotheroes"))))
-ELF = os.path.join(ROOT, "build", "disc", "PS3_GAME", "USRDIR", "EBOOT.elf")
+# BOOT_ELF: another program of the game (the official v1.01 update's decrypted program, beside its update's files:
+# PS3_GAME_UPDATE_DIR) -- the disc stays the game's /dev_bdvd (PS3_VFS_ROOT set to it when not given)
+ELF = os.environ.get("BOOT_ELF") or os.path.join(ROOT, "build", "disc", "PS3_GAME", "USRDIR", "EBOOT.elf")
+if os.environ.get("BOOT_ELF"):
+    os.environ.setdefault("PS3_VFS_ROOT", os.path.join(ROOT, "build", "disc"))
 INSTALLED = os.path.abspath(os.environ["INSTALLED"]) if os.environ.get("INSTALLED") else ""
 # Settings a test of an install asked for itself (the scenario's or the caller's), kept.
 INSTALLED_KEEP = set(os.environ.get("INSTALLED_KEEP", "").split(","))

@@ -620,11 +620,31 @@ def main(argv=None):
     if os.path.exists(pj):
         with open(pj, encoding="utf-8") as f:
             meta = json.load(f)
-    if meta.get("id") != a.program_id:
-        meta = {"id": a.program_id, **{k: v for k, v in meta.items() if k != "id"}}
-        with open(pj, "w", encoding="utf-8", newline="\n") as f:
-            json.dump(meta, f, indent=1)
-            f.write("\n")
+    meta = {"id": a.program_id, **{k: v for k, v in meta.items() if k != "id"}}
+    # the native SPU tasks' images (tools/setup_pipeline.py SPU_NATIVE): this program's names for them
+    try:
+        sys.path.insert(0, os.path.join(ROOT, "tools"))
+        import setup_pipeline
+        a_imgs, b_imgs = spu_images(A), spu_images(B)
+        smap = {oa: ob for (oa, ha), (ob, hb) in zip(a_imgs, b_imgs) if ha == hb} if len(a_imgs) == len(b_imgs) else {}
+        names = {}
+        a_offs = {o for o, _h in a_imgs}
+        for task, image in setup_pipeline.SPU_NATIVE:
+            m = _SPU_IMAGE.fullmatch(image)
+            if not m or int(m.group(2), 16) not in a_offs:
+                continue   # not an image of this v1.00 program (a made-up one in a test)
+            t = smap.get(int(m.group(2), 16))
+            if t is None:
+                mp.unresolved[int(m.group(2), 16)].add(f"program.json spu_native {task} ({image})")
+            else:
+                names[task] = f"spu_{m.group(1)}_at_{t:08X}"
+        if names:
+            meta["spu_native"] = names
+    except ImportError:
+        pass
+    with open(pj, "w", encoding="utf-8", newline="\n") as f:
+        json.dump(meta, f, indent=1)
+        f.write("\n")
     written = []
     for name in CONFIG_FILES:
         src = os.path.join(a.config, name)

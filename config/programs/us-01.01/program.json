@@ -1,3 +1,7 @@
 {
- "id": "BLUS30490-01.01"
+ "id": "BLUS30490-01.01",
+ "spu_native": {
+  "water": "spu_0000_at_00F48080",
+  "waver": "spu_0001_at_00F49C80"
+ }
 }

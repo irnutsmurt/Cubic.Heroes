@@ -1036,7 +1036,7 @@ extern "C" uint32_t dotheroes_program_addr(uint32_t v100)
     for (const program_addrs::Pair& p : program_addrs::kTable)
         if (p.v100 == v100 && v100) return p.here;
     fprintf(stderr, "ERROR: the game's address 0x%08X (v1.00) has no counterpart in the program %s: this build's "
-            "native library and its program table do not belong together. Reinstall the game from the setup app.\n",
+            "native library and its program table do not belong together. Repair the game in the launcher (Install / Manage).\n",
             v100, DOTHEROES_PROGRAM_ID);
     fflush(stderr);
     _Exit(3);
@@ -1622,8 +1622,8 @@ int main(int argc, char** argv)
     const char* elf = argc >= 2 ? argv[1] : installed_defaults();
     devtools_gate(argc < 2);   /* M11.1: an installed game's test switches that change the game need developer mode */
     if (!s_program_mismatch.empty()) {
-        fprintf(stderr, "This build is of the game's program %s, but its settings name %s.\nReinstall the game from "
-                "the setup app.\n", DOTHEROES_PROGRAM_ID, s_program_mismatch.c_str());
+        fprintf(stderr, "This build is of the game's program %s, but its settings name %s.\nRepair the game in the "
+                "launcher (Install / Manage).\n", DOTHEROES_PROGRAM_ID, s_program_mismatch.c_str());
         return 2;
     }
     if (argc < 2) {
