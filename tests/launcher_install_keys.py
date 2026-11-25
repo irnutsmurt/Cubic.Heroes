@@ -10,17 +10,22 @@ of the game copied):
   binary-chosen    any other binary file chosen: blocked, explained
   keys-beside      a keys file beside the disc: found by itself; Install available (the focus reaches it)
   keys-utf16       the same keys file saved as UTF-16 text: found and read; Install available
+  zip-beside       that keys file inside a ZIP (keys.zip) beside the disc: found, read in memory; Install available
+  archive-beside   (with --key-zip) your own key archive -- e.g. a ZIP of a folder of binary key files -- beside the
+                   disc under its own name: found and read; Install available
 
 Needs the disc image and a keys file of your own (local only, never in the repository): --iso and --keys, by default
 the repository's "3D DOT GAME HEROES [BLUS-30490].iso" and build/keys/self_keys.txt; skipped (exit 0) without them.
 
-  py -3 tests/launcher_install_keys.py --launcher <the launcher to test> [--iso ISO] [--keys KEYS] [--only NAME ...]
-      [--sizes 1280x800,1280x720]
+  py -3 tests/launcher_install_keys.py --launcher <the launcher to test> [--iso ISO] [--keys KEYS] [--key-zip ZIP]
+      [--only NAME ...] [--sizes 1280x800,1280x720]
 """
 import argparse
+import io
 import os
 import shutil
 import sys
+import zipfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "tests"))
@@ -33,15 +38,23 @@ READY = ("until 20000 Install the game\nexpect Install the game\na\nwait 900\n"
          "seek 3000 down Install\nexpect Install\nshot install\nquit\n")
 
 
-def scenarios(keys):
+def scenarios(keys, key_zip=None):
     text = open(keys, encoding="utf-8").read()
-    return {
+    z = io.BytesIO()
+    with zipfile.ZipFile(z, "w", zipfile.ZIP_DEFLATED) as f:
+        f.writestr("keys.txt", text)
+    out = {
         "nothing-beside": ({}, None, BLOCKED),
         "eboot-chosen": ({}, ("EBOOT.BIN", b"SCE\0" + os.urandom(4092)), BLOCKED),
         "binary-chosen": ({}, ("eid_root_key", os.urandom(48)), BLOCKED),
         "keys-beside": ({"keys.txt": text.encode("utf-8")}, None, READY),
         "keys-utf16": ({"keys.txt": text.encode("utf-16")}, None, READY),
+        "zip-beside": ({"keys.zip": z.getvalue()}, None, READY),
     }
+    if key_zip:
+        with open(key_zip, "rb") as f:
+            out["archive-beside"] = ({os.path.basename(key_zip): f.read()}, None, READY)
+    return out
 
 
 def main():
@@ -49,6 +62,7 @@ def main():
     ap.add_argument("--launcher", required=True, help="the launcher to test (a build)")
     ap.add_argument("--iso", default=os.path.join(ROOT, "3D DOT GAME HEROES [BLUS-30490].iso"))
     ap.add_argument("--keys", default=os.path.join(ROOT, "build", "keys", "self_keys.txt"))
+    ap.add_argument("--key-zip", help="a key archive of your own (local only) for archive-beside")
     ap.add_argument("--work", default=os.path.join(ROOT, "build", "qual", "launcher-install-keys"))
     ap.add_argument("--only", nargs="*")
     ap.add_argument("--timeout", type=int, default=300)
@@ -60,7 +74,7 @@ def main():
     launcher = os.path.abspath(a.launcher)
     work = os.path.abspath(a.work)
     ok = True
-    for name, (beside, chosen, script) in scenarios(a.keys).items():
+    for name, (beside, chosen, script) in scenarios(a.keys, a.key_zip).items():
         if a.only and name not in a.only:
             continue
         for size in [s.strip() for s in a.sizes.split(",") if s.strip()]:
