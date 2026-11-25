@@ -307,7 +307,7 @@ def build_identity(env):
 
 
 def main():
-    if not os.path.isfile(BIN):
+    if not INSTALLED and not os.path.isfile(BIN):   # an installed game runs its own program: no development build needed
         print(f"no {BIN} (build port/ first)")
         return 2
     if VISIBLE and desktop_locked():
