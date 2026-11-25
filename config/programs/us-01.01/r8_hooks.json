@@ -1,0 +1,175 @@
+{
+ "_program": "BLUS30490-01.01",
+ "_from": "config/r8_hooks.json, by tools/program_remap.py",
+ "_comment": "R8's entry hooks (docs/NATIVE_R8.md section 6.1), lifted beside config/insn_patches.json (tools/r8_lift.sh passes both). Each may decline: the lifted body then runs as before.",
+ "entry_hooks": [
+  {
+   "addr": "0x00956288",
+   "host": "dotheroes_phys_issue",
+   "guard": "g_phys_direct",
+   "decline": true,
+   "note": "the issue of one Bullet task (collision or solver): cellSpursCreateTask, then cellSpursQueuePushBody of its entry. A task whose work is native becomes a native job (port/native/phys_direct.cpp); any other is declined"
+  },
+  {
+   "addr": "0x0095616C",
+   "host": "dotheroes_phys_poll",
+   "guard": "g_phys_direct",
+   "decline": true,
+   "note": "the wait for one task of a manager: non-blocking cellSpursQueuePopBody round the slots. Done natively while the hooks are on (native completions, and the SPURS queues of lifted tasks)"
+  },
+  {
+   "addr": "0x001F2DC8",
+   "host": "dotheroes_tick30_boss_segment",
+   "guard": "g_dotheroes_tick30",
+   "decline": true,
+   "note": "The update (this, &dt) of the segmented boss's body segments (vtable 0x00FE4760 slot 8): its movement, turns and attack timing count frames (+0x75C, +0x770: one step a frame), so it ran 2 to 4.8 times too fast above the game's 30 fps. The gate calls it at 30 Hz with a step of 1/30 s (port/game_patches.cpp)."
+  },
+  {
+   "addr": "0x001E47CC",
+   "host": "dotheroes_tick30_boss_head",
+   "guard": "g_dotheroes_tick30",
+   "decline": true,
+   "note": "The update of the segmented boss's head (vtable 0x00FE4690 slot 8): it ignores the frame time and advances its object by a constant 1/30 s a call (the only update in the game that does), so above 30 fps it ran fast, and the body segments, which read positions from a trail the head fills, ran after it. The gate calls it at 30 Hz (port/game_patches.cpp)."
+  },
+  {
+   "addr": "0x005CE5B0",
+   "host": "dotheroes_title_menu_input",
+   "guard": "g_dotheroes_quit_item",
+   "decline": true,
+   "note": "M11.2d: the title menu's input (this, the title object): the game's own input run first; when it chose the last item (action 5 in both menus: the PS3's INSTALL, its label renamed QUIT GAME), the choice is withdrawn and the in-game menu asks QUIT GAME? (port/game_patches.cpp, port/overlay.cpp)"
+  },
+  {
+   "addr": "0x002C8308",
+   "host": "dotheroes_tick30_knight_body",
+   "guard": "g_dotheroes_tick30",
+   "decline": true,
+   "note": "The update (this, &dt) of the sixth temple's guardian, the dark knight (vtable 0x00FE52C0 slot 8; its parts, 0x00FE5460 and 0x00FE5390, follow it each frame): measured at 30, 60, 144 and 240 fps he travelled 3.5, 4.6 and 5.8 units a second -- more frames, more movement (M11.1b, B-012). The gate calls it at 30 Hz with a step of 1/30 s, as the segmented boss's (port/game_patches.cpp)."
+  },
+  {
+   "addr": "0x005CFB54",
+   "host": "dotheroes_inflate_direct",
+   "guard": "g_dotheroes_inflate_direct",
+   "decline": true,
+   "note": "The game's inflate of one map pack (.gz image r3, size r4, output r5), each through a SPURS instance, taskset, event flag, Edge LF queue and task of its own (func_005CF228). Done in the calling thread by port/native/inflate_direct.cpp; anything it does not recognise is declined to the lifted SPURS path."
+  },
+  {
+   "addr": "0x00473900",
+   "host": "dotheroes_water_signal",
+   "guard": "g_water_hook",
+   "decline": true,
+   "note": "The water's signal to its SPU task, cellSpursEventFlagSet(r3 + 0x3D400, r4): bit 0 once a simulation step (func_003C7460), bit 1 at shutdown (func_003C7AF4). With DOTHEROES_NATIVE_WATER=1 or sync the step is done natively (port/native/water_task.cpp); the quit and any other block are declined. Off by default; =check compares the lifted task's result with the native one."
+  },
+  {
+   "addr": "0x003C7E40",
+   "host": "dotheroes_water_setup",
+   "guard": "g_water_hook",
+   "decline": true,
+   "note": "The water's set-up (r3 the water): a SPURS instance 'Water', its taskset, a 0x3D600-byte block, an event flag and the SPU task. With native scheduling (DOTHEROES_NATIVE_WATER=1 or sync, the default) the port does the game's own stores and texture calls and no SPURS (port/phys_hooks.cpp, port/native/water_task.h); declined otherwise."
+  },
+  {
+   "addr": "0x003C7D8C",
+   "host": "dotheroes_water_shutdown",
+   "guard": "g_water_hook",
+   "decline": true,
+   "note": "The water's shutdown: quit bit, the task's exit code, the taskset and instance torn down. Native when the set-up was (its markers in the globals): the worker's step finished, the globals cleared; declined for a real taskset."
+  },
+  {
+   "addr": "0x00081100",
+   "host": "dotheroes_dev_waver",
+   "guard": "g_dev_waver",
+   "decline": true,
+   "note": "The frame function that runs the waver (SPU image 2) while it is active. A test switch only: DOTHEROES_DEV_WAVER=<s>[,...] starts the waver at the hero's position at those times and times this function with it running and without (port/phys_hooks.cpp); the guard is 0 otherwise."
+  },
+  {
+   "addr": "0x003CEDE0",
+   "host": "dotheroes_waver_setup",
+   "guard": "g_waver_hook",
+   "decline": true,
+   "note": "The waver's set-up (r3 = &{x, y, z}): a SPURS instance, taskset, block and event flag. Native by default (DOTHEROES_NATIVE_WAVER): the game's own stores and texture calls, markers in place of the SPURS objects (port/phys_hooks.cpp, port/native/waver_game.h); declined with =0 or =check."
+  },
+  {
+   "addr": "0x00473978",
+   "host": "dotheroes_spurs_create_task",
+   "guard": "g_waver_hook",
+   "decline": true,
+   "note": "The game's create-a-SPURS-task wrapper (r3 taskset, r4 block, r5 image), shared by the water and the waver: the waver's marker taskset runs a native frame on its worker; check mode notes the lifted waver's creations; everything else declined."
+  },
+  {
+   "addr": "0x00473874",
+   "host": "dotheroes_spurs_wait_task",
+   "guard": "g_waver_hook",
+   "decline": true,
+   "note": "The game's wait-for-the-task wrapper (r3 block): the waver's marker block waits for the native frame; everything else declined."
+  },
+  {
+   "addr": "0x004737A8",
+   "host": "dotheroes_spurs_free_block",
+   "guard": "g_waver_hook",
+   "decline": true,
+   "note": "The game's free-the-block wrapper (r3 block): nothing for the waver's marker; check mode compares the last lifted frame; everything else declined."
+  },
+  {
+   "addr": "0x004737D4",
+   "host": "dotheroes_spurs_destroy_taskset",
+   "guard": "g_waver_hook",
+   "decline": true,
+   "note": "The game's destroy-the-taskset wrapper (r3 taskset): the waver's marker waits for the native frame and counts the teardown; everything else declined."
+  },
+  {
+   "addr": "0x00473738",
+   "host": "dotheroes_spurs_finalize",
+   "guard": "g_waver_hook",
+   "decline": true,
+   "note": "The game's finalize-the-instance wrapper (r3 instance): nothing for the waver's marker; everything else declined."
+  },
+  {
+   "addr": "0x00A4D744",
+   "host": "dotheroes_paircache_add",
+   "guard": "g_native_paircache",
+   "decline": true,
+   "note": "Issue #2's experiment (DOTHEROES_NATIVE_PAIRCACHE): Bullet's btHashedOverlappingPairCache::addOverlappingPair (r3 the cache, r4 and r5 the proxies) natively on the game's pair cache (port/pair_cache.cpp); an overlap filter, a ghost callback or the array's growth declined."
+  },
+  {
+   "addr": "0x00914A60",
+   "host": "dotheroes_paircache_remove",
+   "guard": "g_native_paircache",
+   "decline": true,
+   "note": "Issue #2's experiment: btHashedOverlappingPairCache::removeOverlappingPair (r3 the cache, r4 and r5 the proxies, r6 the dispatcher) natively; a ghost callback or a pair with a collision algorithm declined."
+  },
+  {
+   "addr": "0x009145EC",
+   "host": "dotheroes_paircache_process",
+   "guard": "g_native_paircache",
+   "decline": true,
+   "note": "Issue #2's experiment: btHashedOverlappingPairCache::processAllOverlappingPairs (r3 the cache, r4 the callback, r5 the dispatcher) natively for Bullet's remove and clean callbacks (removeOverlappingPairsContainingProxy, cleanProxyFromPairs); any other callback declined."
+  },
+  {
+   "addr": "0x00A477F8",
+   "host": "dotheroes_sweep_update",
+   "guard": "g_native_sweep",
+   "decline": true,
+   "note": "Issue #2's experiment (DOTHEROES_NATIVE_SWEEP): Bullet's btAxisSweep3Internal<unsigned short>::updateHandle (r3 the broadphase, r4 the handle, r5 and r6 the new box, r7 the dispatcher) natively on the game's broadphase (port/axis_sweep.cpp); a user pair callback declined."
+  },
+  {
+   "addr": "0x00A47FA8",
+   "host": "dotheroes_sweep_add",
+   "guard": "g_native_sweep",
+   "decline": true,
+   "note": "Issue #2's experiment: btAxisSweep3Internal<unsigned short>::addHandle (r3 the broadphase, r4 and r5 the box, r6 the owner, r7 and r8 the filter group and mask, r9 the dispatcher, r10 the multi-SAP proxy; the handle returned) natively; a user pair callback or no free handle declined."
+  },
+  {
+   "addr": "0x00A460D0",
+   "host": "dotheroes_sweep_remove",
+   "guard": "g_native_sweep",
+   "decline": true,
+   "note": "Issue #2's experiment: btAxisSweep3Internal<unsigned short>::removeHandle (r3 the broadphase, r4 the handle, r5 the dispatcher) natively; a user pair callback declined."
+  },
+  {
+   "addr": "0x0093E564",
+   "host": "dotheroes_interp_step",
+   "guard": "g_debris_interp",
+   "decline": true,
+   "note": "Issue #2's prototype (DOTHEROES_DEBRIS_INTERP): btDiscreteDynamicsWorld::internalSingleStepSimulation (r3 the world, f1 the step) -- the lifted step run from the hook, then the moving bodies' poses read for render-only interpolation (port/debris_interp.cpp); nothing in the game's state written."
+  }
+ ]
+}

@@ -1,0 +1,4 @@
+{
+ "_comment": "Addresses of v1.00 reviewed by hand for the official v1.01 update's program (tools/program_remap.py reads this before deciding an address unresolved). Each: its counterpart, or null when it no longer applies, with why.",
+ "0x00585BF0": {"to": "0x00586178", "note": "a development movie-trace observer (m8_movie_trace.json): v1.01 changed the function (76 -> 81 words, new code after its first four instructions, which are the same); its entry is the same function's, so the observer sees the same call"}
+}
