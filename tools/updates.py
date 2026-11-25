@@ -326,9 +326,9 @@ def download(asset, url, dest_dir, progress=None, cancelled=None):
                 r = None
             else:
                 raise trust.ReleaseError(f"The download server answered {e.code}.", "server")
-        except (urllib.error.URLError, OSError, TimeoutError) as e:
-            raise (_tls_failure(e) or
-                   trust.ReleaseError("No connection to the download server (offline?).", "offline")) from e
+        except (urllib.error.URLError, OSError, TimeoutError, ValueError) as e:   # ValueError: a place urllib can't
+            raise (_tls_failure(e) or                                            # open (a test mirror that is gone,
+                   trust.ReleaseError("No connection to the download server (offline?).", "offline")) from e   # POSIX)
         if r is not None:
             with r:
                 if have and r.status != 206:   # the server ignored the range: from the start

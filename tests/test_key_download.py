@@ -121,6 +121,14 @@ class Fetch(Base):
             KD.fetch(self.install, "npdrm", [src], base=self.mirror)
         self.assertEqual(c.exception.code, "no_source")
 
+    def test_a_place_urllib_cannot_open_is_offline(self):
+        """a mirror path urllib can't take for a URL (a POSIX path: ValueError, found by Linux): offline, as on
+        Windows, never a trace"""
+        src = self.source("s1", self.app_files())
+        with self.assertRaises(KD.KeyDownloadError) as c:
+            KD.fetch(self.install, "app", [src], base="no-such-mirror-here")   # relative: no URL scheme
+        self.assertEqual(c.exception.code, "offline")
+
     def test_cancel(self):
         src = self.source("s1", {"k": rnd(1000)})
         with self.assertRaises(KD.KeyDownloadError) as c:

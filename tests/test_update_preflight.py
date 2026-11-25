@@ -25,6 +25,18 @@ TMP = os.path.join(ROOT, "build", "tmp")
 REMEDIES = {"retry", "download", "choose_pkg", "choose_folder", "choose_elf", "choose_keys", "locate_rpcs3",
             "free_space", "continue_v100"}
 
+def make_program(programs, pid, folder="us-01.01"):
+    """a made-up program configuration folder, found by its program.json's id (named by region and version, as
+    config/programs/us-01.01: never by the title ID)"""
+    d = os.path.join(programs, folder)
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, "program.json"), "w") as f:
+        json.dump({"id": pid}, f)
+    for n in U.PROGRAM_NEEDS:
+        open(os.path.join(d, n), "w").close()
+    return d
+
+
 
 class Preflight(unittest.TestCase):
     def setUp(self):
@@ -51,7 +63,7 @@ class Preflight(unittest.TestCase):
         pins = ({"title_id": "BLUS30490", "region": "US"}, hashlib.sha256(self.v100_elf).hexdigest(),
                 hashlib.sha256(self.v101_elf).hexdigest())
         self.programs = os.path.join(self.d, "programs")
-        os.makedirs(os.path.join(self.programs, U.UPDATE_ID))
+        self.program_dir = make_program(self.programs, U.UPDATE_ID)
         # beta.6: the keys downloaded when the computer has none -- never from the internet here: a made-up source,
         # pinned to a made-up keys file, served from a folder of this test (empty unless a test fills it)
         self.mirror = os.path.join(self.d, "mirror")
@@ -135,7 +147,13 @@ class Preflight(unittest.TestCase):
         self.assertIn("already installed", self.check(r, "already")["message"])
 
     def test_this_version_without_update_support(self):
-        shutil.rmtree(os.path.join(self.programs, U.UPDATE_ID))
+        os.remove(os.path.join(self.program_dir, "port_aliases.h"))   # a folder that isn't whole: not support
+        r = U.preflight(self.install, pkg=self.put_pkg(self.d), keys=self.all_keys(), online=False)
+        c = self.check(r, "support")
+        self.assertEqual((r["ready"], c["status"], c["remedies"]), (False, "failed", ["continue_v100"]))
+        self.assertIn("port_aliases.h", c["details"])
+        shutil.rmtree(self.program_dir)
+        make_program(self.programs, "BLUS30490-09.99", "us-09.99")   # another program's folder only
         r = U.preflight(self.install, pkg=self.put_pkg(self.d), keys=self.all_keys(), online=False)
         c = self.check(r, "support")
         self.assertEqual((r["ready"], c["status"], c["remedies"]), (False, "failed", ["continue_v100"]))

@@ -44,7 +44,25 @@ ROOT = (os.path.dirname(sys.executable) if getattr(sys, "frozen", False)
 CONFIG = os.path.join(ROOT, "config")
 BASE_ID = "BLUS30490-01.00"
 UPDATE_ID = "BLUS30490-01.01"
-PROGRAMS = os.path.join(CONFIG, "programs")   # per-program configuration (the v1.01 program's: programs/<UPDATE_ID>/)
+PROGRAMS = os.path.join(CONFIG, "programs")   # per-program configuration: the folder whose program.json names it
+# what a program's folder must hold for its build (tools/setup_pipeline.py PROGRAM_FILES and PORT_FILES)
+PROGRAM_NEEDS = ("sjlj.json", "insn_patches.json", "r8_hooks.json", "audio_hooks.json", "m8_native_movie.json",
+                 "r7_native_hooks.json", "excluded_code.json", "spu_relocatable.json", "spu_entry_hooks.json",
+                 "port_addrs.inc", "port_aliases.h")
+
+
+def program_dir(pid):
+    """the folder under config/programs whose program.json names the program (us-01.01 for BLUS30490-01.01: folders
+    are named by region and version), or None"""
+    try:
+        names = sorted(os.listdir(PROGRAMS))
+    except OSError:
+        return None
+    for n in names:
+        rec = _read_json(os.path.join(PROGRAMS, n, "program.json"))
+        if isinstance(rec, dict) and rec.get("id") == pid:
+            return os.path.join(PROGRAMS, n)
+    return None
 MARGIN = 512 << 20                            # free space kept beyond the estimate
 GB = 1 << 30
 
@@ -236,10 +254,13 @@ def preflight(install, disc=None, pkg=None, folder=None, elf=None, keys=None, rp
         return _result(gs, checks, plan, ready=False)
 
     # 2. this version of Cubic.Heroes can make the v1.01 program
-    if not os.path.isdir(os.path.join(PROGRAMS, UPDATE_ID)):
+    pdir = program_dir(UPDATE_ID)
+    missing = [n for n in PROGRAM_NEEDS if not pdir or not os.path.isfile(os.path.join(pdir, n))]
+    if not pdir or missing:
         checks.append(_check("support", "failed", "Update support", "This version of Cubic.Heroes can't install the "
                              "v1.01 update yet. Your v1.00 game is complete and keeps working.", ["continue_v100"],
-                             details=f"no {os.path.join('config', 'programs', UPDATE_ID)}"))
+                             details=f"no config/programs/*/program.json names {UPDATE_ID}" if not pdir else
+                             "missing in " + os.path.basename(pdir) + ": " + ", ".join(missing)))
         return _result(gs, checks, plan, ready=False)
 
     # 2b. already in this installation: a v1.01 build kept (the player switched back to v1.00) -- made active again

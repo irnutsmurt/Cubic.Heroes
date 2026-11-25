@@ -32,6 +32,7 @@ import update_preflight as U  # noqa: E402
 import worker  # noqa: E402
 from test_install_layout import EXE, Fake, checked, get, put  # noqa: E402
 from test_pkg_update import keys_text, make_elf, make_pkg, make_self, rnd  # noqa: E402
+from test_update_preflight import make_program  # noqa: E402
 
 TMP = os.path.join(ROOT, "build", "tmp")
 UP = U.UPDATE_ID
@@ -78,7 +79,7 @@ class Base(unittest.TestCase):
         self.v100_pin = hashlib.sha256(self.v100_elf).hexdigest()
         pins = ({"title_id": "BLUS30490", "region": "US"}, self.v100_pin, self.rec["decrypted_elf"]["sha256"])
         programs = os.path.join(self.d, "programs")
-        os.makedirs(os.path.join(programs, UP))
+        make_program(programs, UP)
         self.fake = ProgramFake()
         for p in (mock.patch.object(game_update, "record", lambda *a, **k: self.rec),
                   mock.patch.object(game_update, "load_manifest", lambda *a, **k: self.manifest),

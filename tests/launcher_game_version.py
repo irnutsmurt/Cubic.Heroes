@@ -4,14 +4,14 @@ enabled once every check passes. Hidden (--nav-test), offline (tests/launcher_na
 (a v1.00 record and a stand-in build: nothing is built or played; nothing is installed -- the scripts stop at the
 button). Scenarios:
 
-  no-support   this checkout has no v1.01 program configuration yet (config/programs/BLUS30490-01.01): offered,
-               then explained ("can't install the v1.01 update yet"); Continue with v1.00 offered
+  no-support   a checkout without the v1.01 program's configuration (no config/programs/*/program.json naming
+               BLUS30490-01.01): offered, then explained ("can't install the v1.01 update yet"); Continue with v1.00
+               offered -- skipped where the configuration is there
   no-package   offline, no update package anywhere: explained; Choose the update package... and the others offered
   ready        the official package where a download is kept (data/updates) and the keys downloaded before
                (data/keys): every check passes, Install v1.01 reachable
 
-no-package and ready need the program configuration's folder: when this checkout has none, an empty one is made for
-them and removed after. ready needs the official package and the downloaded keys (local only, never in the
+no-package and ready need the program's configuration (skipped without it). ready needs the official package and the downloaded keys (local only, never in the
 repository): --pkg (default build/v101/pkg/<its official name>) and --keys-dir (a data/keys folder the launcher
 downloaded, default build/keys/downloaded); without them ready is skipped.
 
@@ -28,8 +28,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "tests"))
 sys.path.insert(0, os.path.join(ROOT, "tools"))
 import launcher_nav_pages as nav  # noqa: E402
+import update_preflight  # noqa: E402
 
-PROGRAMS = os.path.join(ROOT, "config", "programs", "BLUS30490-01.01")
+SUPPORTED = bool(update_preflight.program_dir(update_preflight.UPDATE_ID))
 OFFER = ("until 200000 PLAY\nexpect PLAY\nwait 240\nsee The official v1.01 update\nshot 1-offer\n"
          "seek 6000 down Install v1.01\nexpect Install v1.01\na\nwait 60\n")
 SCRIPTS = {
@@ -92,31 +93,22 @@ def main():
         if name == "ready" and not have_inputs:
             print("SKIP: ready needs the official package and downloaded keys (local only: --pkg, --keys-dir)")
             continue
-        made = False
-        if name != "no-support" and not os.path.isdir(PROGRAMS):
-            os.makedirs(PROGRAMS)
-            made = True
-        elif name == "no-support" and os.path.isdir(PROGRAMS):
-            print("SKIP: no-support -- this checkout has the v1.01 program configuration")
+        if (name == "no-support") == SUPPORTED:
+            print(f"SKIP: {name} -- this checkout " + ("has" if SUPPORTED else "hasn't") + " the v1.01 program's "
+                  "configuration")
             continue
-        try:
-            for size in [s.strip() for s in a.sizes.split(",") if s.strip()]:
-                d = os.path.join(work, name, size)
-                shutil.rmtree(d, ignore_errors=True)
-                root = os.path.join(d, "Cubic.Heroes")
-                make_install(root, a.pkg if name == "ready" else None, a.keys_dir if name == "ready" else None)
-                sp = os.path.join(d, f"{name}.nav")
-                with open(sp, "w", encoding="utf-8", newline="\n") as f:
-                    f.write(f"# {name} (tests/launcher_game_version.py)\n" + script)
-                ok = nav.run(sp, launcher, root, os.path.join(d, "work"), a.timeout, size) and ok
-                upd = os.path.join(root, "data", "updates")
-                if os.path.isdir(upd):
-                    shutil.rmtree(upd)          # the link only: the package itself untouched
-        finally:
-            if made:
-                os.rmdir(PROGRAMS)
-                if not os.listdir(os.path.dirname(PROGRAMS)):
-                    os.rmdir(os.path.dirname(PROGRAMS))
+        for size in [s.strip() for s in a.sizes.split(",") if s.strip()]:
+            d = os.path.join(work, name, size)
+            shutil.rmtree(d, ignore_errors=True)
+            root = os.path.join(d, "Cubic.Heroes")
+            make_install(root, a.pkg if name == "ready" else None, a.keys_dir if name == "ready" else None)
+            sp = os.path.join(d, f"{name}.nav")
+            with open(sp, "w", encoding="utf-8", newline="\n") as f:
+                f.write(f"# {name} (tests/launcher_game_version.py)\n" + script)
+            ok = nav.run(sp, launcher, root, os.path.join(d, "work"), a.timeout, size) and ok
+            upd = os.path.join(root, "data", "updates")
+            if os.path.isdir(upd):
+                shutil.rmtree(upd)          # the link only: the package itself untouched
     print("launcher game version:", "PASS" if ok else "FAIL", flush=True)
     return 0 if ok else 1
 
