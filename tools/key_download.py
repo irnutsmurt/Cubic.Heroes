@@ -121,7 +121,7 @@ def fetch(install, kind, sources=None, progress=None, cancelled=None, base=None)
     total = sum(f["size"] for f in cands[0]["files"]) or 1
     for s in cands:
         d = source_dir(install, s)
-        os.makedirs(d, exist_ok=True)
+        existed = os.path.isdir(d)
         done = 0
         try:
             for f in s["files"]:
@@ -145,6 +145,14 @@ def fetch(install, kind, sources=None, progress=None, cancelled=None, base=None)
                 raise last from None
         except OSError as e:
             last = KeyDownloadError(f"The keys couldn't be saved ({e.strerror or e}).", "io", s["id"])
+        if not existed:   # nothing left behind by a download that didn't finish (a .part is kept to resume)
+            try:
+                if os.path.isdir(d) and not os.listdir(d):
+                    os.rmdir(d)
+                if os.path.isdir(folder(install)) and not os.listdir(folder(install)):
+                    os.rmdir(folder(install))
+            except OSError:
+                pass
     raise last
 
 

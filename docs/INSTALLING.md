@@ -52,7 +52,8 @@ Only this release is supported:
 | Version | 01.00 |
 
 Other regions and releases are rejected (the recompilation is tied to this exact build's code). This project does not
-include the game or its keys and does not tell you where to get them.
+include the game. It includes no keys either: when your computer has none, the launcher downloads them from public
+sources ([Your keys](#your-keys)). The official v1.01 update is optional ([OFFICIAL_UPDATE.md](OFFICIAL_UPDATE.md)).
 
 ### Your disc's dump
 
@@ -75,9 +76,10 @@ Two different things, for two different locks:
 - **The disc key** -- *only for an encrypted ISO*. It unlocks the disc image itself. A `.dkey` file (the 32-character
   key), a `.key` file (16 bytes), the 32 characters typed, or an IRD file (which needs one more line, `D1`, in your
   keys file). A decrypted ISO, a rebuilt ISO or a folder doesn't need one, and the launcher doesn't ask for it.
-- **The keys for the game's program** -- *always*. The program (`PS3_GAME/USRDIR/EBOOT.BIN`) is encrypted on every
-  dump, even a decrypted ISO, and Cubic.Heroes includes no keys: it needs the APP key of revision `0001`, in any of
-  these forms:
+- **The keys for the game's program** -- *always*, and **found or downloaded by the launcher itself**. The program
+  (`PS3_GAME/USRDIR/EBOOT.BIN`) is encrypted on every dump, even a decrypted ISO. It needs the APP key of revision
+  `0001`. Cubic.Heroes includes no keys: if your computer has none, the launcher downloads them (below). You can also
+  give your own, in any of these forms:
   - a **text keys file**: this project's `APP <revision> <erk> <riv>` lines, or the `[section]` / `name=value` keys
     files other PS3 tools use;
   - a **folder of key files**, one key per file, as PS3 tools keep them (`app-key-...` with `app-iv-...`);
@@ -88,13 +90,22 @@ Two different things, for two different locks:
 
 If you choose one in the other's place, the launcher says so. Keys are only read: never copied, logged or uploaded.
 
-**Where the launcher looks for the keys** -- before asking you, and nowhere else:
+**Where the launcher looks for the keys** -- in this order, and nowhere else:
 1. the keys you choose;
 2. where keys were found or chosen before (only that place is remembered, never the keys);
 3. **beside your disc**: in the folder that holds your ISO (or your disc folder), the files and folders whose names
    say they hold keys -- `keys.txt`, `*.keys`, `ps3keys.zip`, a `keys` folder and the like -- and an `EBOOT.elf`. No
    other folder is searched;
-4. your RPCS3, if you pointed the launcher at it.
+4. **the keys it downloaded before** for this installation (its `data/keys` folder), and otherwise **a download now**
+   (a few small files, a few seconds) from these public sources, in this order:
+   - [codyps/ps3keys](https://github.com/codyps/ps3keys) (the disc's v1.00 program);
+   - the `data/keys` file of [aldostools/webMAN-MOD](https://github.com/aldostools/webMAN-MOD) (v1.00 too, and the
+     official v1.01 update's program and package).
+
+   Each is pinned to one commit, and every file to its size and SHA-256 (`config/key_downloads.json`). A file that
+   differs is refused and removed. The files are only read as keys, never run. They stay in your installation's
+   `data/keys` folder, never in a backup, a log or a diagnostics export, so a later repair works offline;
+5. your RPCS3, if you pointed the launcher at it (optional: never required).
 
 Whatever is found is used only if it turns the program into exactly the supported one (its SHA-256), so a wrong or
 damaged key file can never produce a broken game.
@@ -103,7 +114,8 @@ damaged key file can never produce a broken game.
 
 | You have | Install |
 |---|---|
-| the ISO (or disc folder) only | not possible: the program's key isn't on the disc, and Cubic.Heroes ships none -- the launcher asks for your keys |
+| the ISO (or disc folder) only, online | choose the ISO, press **Install**: the keys are downloaded and checked by themselves |
+| the ISO (or disc folder) only, offline | the launcher says the keys couldn't be downloaded: connect and press **Check again**, or choose your keys |
 | the ISO, with your keys beside it (a keys file, or a folder or ZIP of key files) | choose the ISO, press **Install**: the keys are found by themselves |
 | the ISO, and keys you used before | the same: the place you chose them is remembered |
 | the ISO, and your RPCS3 | choose the ISO and your RPCS3 once, press **Install**: no keys needed |
@@ -169,6 +181,7 @@ The launcher says what went wrong and what to do; the most common cases:
 | the disc image is encrypted | It is a raw rip: choose its disc key too ([Your keys](#your-keys)) |
 | the disc key doesn't open this disc image | The key is for another disc: check it matches this dump |
 | that is a disc key, not the program's keys | Choose your keys (a keys file, a key folder or ZIP) or an `EBOOT.elf` there; the disc key goes in the disc key's own step |
+| the keys couldn't be downloaded | Connect to the internet and check again (the keys are downloaded by themselves), or choose your keys, an `EBOOT.elf`, or your RPCS3 ([Your keys](#your-keys)) |
 | no keys were found beside your disc | Put your keys beside the ISO and check again, or choose them, an `EBOOT.elf`, or your RPCS3 ([Your keys](#your-keys)) |
 | the keys don't open this game's program | They need the APP key of revision `0001`; or give an `EBOOT.elf` you decrypted, or use your RPCS3 |
 | not enough space, or the folder can't be written | About 6 GB free is needed; extract to a folder you own (not `Program Files`) |

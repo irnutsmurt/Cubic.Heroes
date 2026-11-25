@@ -116,6 +116,7 @@ class Fetch(Base):
             with self.assertRaises(KD.KeyDownloadError) as c:
                 KD.fetch(self.install, "app", [dict(src, url="https://127.0.0.1:9/{commit}/{path}")])
         self.assertIn(c.exception.code, ("offline", "server", "tls"))
+        self.assertFalse(os.path.exists(os.path.join(self.install, "data", "keys")))   # nothing left behind
         with self.assertRaises(KD.KeyDownloadError) as c:
             KD.fetch(self.install, "npdrm", [src], base=self.mirror)
         self.assertEqual(c.exception.code, "no_source")
