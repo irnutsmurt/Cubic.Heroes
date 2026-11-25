@@ -286,6 +286,7 @@ static bool root_writable(std::string& why, bool create = true)
 
 struct Prefs {
     std::string legacy_install, disc, keys;   // legacy_install: an earlier launcher's install folder (read, never written)
+    std::string rpcs3;            // beta.6: the player's own RPCS3, chosen to decrypt with (optional; never required)
     int x = SDL_WINDOWPOS_CENTERED, y = SDL_WINDOWPOS_CENTERED, w = 1280, h = 800;
     bool maximized = false;
     bool prepared_once = false;   // shaders prepared at least once: a new build's empty cache is an update's
@@ -303,6 +304,7 @@ struct Prefs {
         }
         disc = v["disc"].str();
         keys = v["keys"].str();
+        rpcs3 = v["rpcs3"].str();
         if (v["window"]["w"].num() >= 640 && v["window"]["h"].num() >= 400) {
             x = (int)v["window"]["x"].num(x); y = (int)v["window"]["y"].num(y);
             w = (int)v["window"]["w"].num(); h = (int)v["window"]["h"].num();
@@ -318,7 +320,8 @@ struct Prefs {
         snprintf(win, sizeof win, "{\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d,\"maximized\":%s}", x, y, w, h,
                  maximized ? "true" : "false");
         write_text(file(), "{\n \"disc\": " + json::quote(disc) +
-                               ",\n \"keys\": " + json::quote(keys) + ",\n \"window\": " + win +
+                               ",\n \"keys\": " + json::quote(keys) + ",\n \"rpcs3\": " + json::quote(rpcs3) +
+                               ",\n \"window\": " + win +
                                ",\n \"prepared_once\": " + (prepared_once ? "true" : "false") +
                                ",\n \"steam_cleanup\": " + (steam_cleanup ? "true" : "false") +
                                ",\n \"legacy_answered\": " + json::quote(legacy_answered) + "\n}\n");
@@ -2030,6 +2033,7 @@ struct Wizard {
     bool needs_key = false;        // the disc check found the image encrypted
     json::Value disc_info, keys_info, space;
     std::string disc_err, keys_err, space_err;
+    std::string keys_code;         // beta.6: the keys check's failure kind (keys_missing: nothing found -- not an error)
     bool probing_disc = false, probing_keys = false;
 } g_wiz;
 
@@ -2065,23 +2069,60 @@ static void probe_disc()
         const std::string code = r["code"].str();
         if (code == "needs_disc_key" || code == "wrong_disc_key" || r["data"]["encrypted"].truthy()) g_wiz.needs_key = true;
         if (code == "needs_disc_key") g_wiz.disc_err.clear();   // said by the key's own step instead
-        if (!g_wiz.keys.empty()) { g_wiz.keys_info = json::Value(); }
+        g_wiz.keys_info = json::Value();   // beta.6: the keys are looked for again for this disc (beside it too)
+        g_wiz.keys_err.clear();
+        g_wiz.keys_code.clear();
     });
+}
+
+// beta.6: the game program's key sources, for the worker -- the one the player chose (--keys), the one they chose
+// or that was found before (--key-source: only its path is remembered, never a key), and their RPCS3 if they pointed
+// at one (--rpcs3). The worker also looks beside the disc (tools/key_sources.py), and nowhere else.
+static void add_key_args(std::vector<std::string>& a)
+{
+    if (!g_wiz.keys.empty() && std::find(a.begin(), a.end(), "--keys") == a.end()) { a.push_back("--keys"); a.push_back(g_wiz.keys); }
+    if (!g_prefs.keys.empty() && g_prefs.keys != g_wiz.keys) { a.push_back("--key-source"); a.push_back(g_prefs.keys); }
+    if (!g_prefs.rpcs3.empty()) { a.push_back("--rpcs3"); a.push_back(g_prefs.rpcs3); }
 }
 
 static void probe_keys()
 {
     g_wiz.keys_info = json::Value();
     g_wiz.keys_err.clear();
+    g_wiz.keys_code.clear();
     if (g_wiz.disc.empty()) return;
     g_wiz.probing_keys = true;
     std::vector<std::string> a = disc_args();
-    if (std::find(a.begin(), a.end(), "--keys") == a.end()) { a.push_back("--keys"); a.push_back(g_wiz.keys); }
+    add_key_args(a);
     run("probe-keys", a, "", false, [](const json::Value& r) {
         g_wiz.probing_keys = false;
-        if (r["ok"].truthy()) g_wiz.keys_info = r["data"];
-        else g_wiz.keys_err = r["message"].str();
+        if (r["ok"].truthy()) {
+            g_wiz.keys_info = r["data"];
+            // where the keys that worked are is remembered (the path only), so the next install or check finds them
+            const std::string via = r["data"]["via"].str(), src = r["data"]["source"].str();
+            if (via != "rpcs3" && r["data"]["found"].str() != "together" && !src.empty() && src != g_prefs.keys) {
+                g_prefs.keys = src;
+                g_prefs.save();
+            }
+        } else {
+            g_wiz.keys_err = r["message"].str();
+            g_wiz.keys_code = r["code"].str();
+        }
     });
+}
+
+// the keys step's text: what opened the program, and how it was found
+static std::string keys_found_text()
+{
+    const json::Value& k = g_wiz.keys_info;
+    const std::string via = k["via"].str(), found = k["found"].str();
+    const std::string name = path_str(u8path(k["source"].str()).filename());
+    if (via == "rpcs3") return "Your RPCS3 decrypts the game's program (" + k["source"].str() + ").";
+    if (found == "together") return "Keys from several places together open the game's program.";
+    const std::string where = found == "beside the disc" ? "found beside your disc" : found == "remembered" ?
+                              "found where you chose them before" : "chosen";
+    return name + " (" + where + ")\n" + (via == "elf" ? "Your decrypted program matches this disc."
+                                                      : "The keys open this disc's program.");
 }
 
 static void check_space()
@@ -2140,7 +2181,6 @@ static void page_manage()
     const std::string kind = g_st.info["kind"].str();
     if (g_wiz.folder.empty()) { g_wiz.folder = install_dir(); check_space(); }
     if (g_wiz.disc.empty() && !g_prefs.disc.empty()) { g_wiz.disc = g_prefs.disc; probe_disc(); }
-    if (g_wiz.keys.empty() && !g_prefs.keys.empty()) g_wiz.keys = g_prefs.keys;
     text_col(col::dim, kind == "slots" ? "Repair or reinstall from your disc: your saves and settings stay."
                                        : "Your own disc and keys, checked before anything is written. You can also drop the "
                                          "files onto this window.");
@@ -2152,10 +2192,11 @@ static void page_manage()
         text_col(col::text, "Your disc: an ISO of the US release (BLUS-30490), or the disc's files in a folder. An "
                             "encrypted ISO (a raw dump) also needs its disc key -- a .dkey or IRD file, or the key typed "
                             "in -- and the check below asks for it only then.");
-        text_col(col::text, "Its keys: a text file with the game's program keys -- lines \"APP <revision> <erk> <riv>\" "
-                            "in hexadecimal -- or an EBOOT.elf you decrypted yourself. The installer decrypts the game's "
-                            "program (EBOOT.BIN) with them on its own and checks the result; the keys are never copied "
-                            "or written to any log.");
+        text_col(col::text, "Its keys: the game's program (EBOOT.BIN) is encrypted on every dump, and Cubic.Heroes ships "
+                            "no keys. Keep yours beside the disc -- a keys file, or a folder or ZIP of key files -- and "
+                            "they are found by themselves; or choose them, an EBOOT.elf you decrypted, or your own RPCS3 "
+                            "if you have one. Only what opens the program exactly as the supported one is used; keys are "
+                            "never copied or written to any log.");
         card_end();
     }
     std::string dv = g_wiz.disc.empty() ? "Choose your disc image (an ISO) or the disc's folder."
@@ -2192,17 +2233,51 @@ static void page_manage()
             });
     }
     const bool keys_ok = !g_wiz.keys_info.is_null();
-    if (disc_ok && !g_wiz.keys.empty() && g_wiz.keys_info.is_null() && g_wiz.keys_err.empty() && !g_wiz.probing_keys) probe_keys();
-    std::string kv = g_wiz.keys.empty() ? "Choose the keys file for your disc (or an EBOOT.elf you decrypted)."
-                                        : g_wiz.keys + (keys_ok ? "\nThe keys match this disc." : "");
-    step_row(g_wiz.needs_key ? 3 : 2, "Its keys", keys_ok, kv, g_wiz.keys_err, g_wiz.probing_keys, "Choose...", [] {
-        browse("Choose the keys file", false, { ".txt", ".keys", ".elf", ".bin" }, "keys files", g_wiz.keys, [](const std::string& p) {
+    // beta.6: looked for as soon as the disc is checked -- beside it, where they were before, the player's RPCS3
+    if (disc_ok && g_wiz.keys_info.is_null() && g_wiz.keys_err.empty() && !g_wiz.probing_keys) probe_keys();
+    const bool none_found = g_wiz.keys_code == "keys_missing";
+    std::string kv = keys_ok ? keys_found_text()
+                   : none_found || g_wiz.keys_err.empty()
+                         ? (disc_ok ? "No keys were found beside your disc. Choose a keys file, a folder or ZIP of key "
+                                      "files, or an EBOOT.elf you decrypted -- or your RPCS3, if you have it."
+                                    : "Found beside your disc by themselves, or chosen here.")
+                         : "";
+    step_row(g_wiz.needs_key ? 3 : 2, "Its keys", keys_ok, kv, none_found ? "" : g_wiz.keys_err, g_wiz.probing_keys,
+             "Choose...", [] {
+        browse("Choose your keys", false, { ".txt", ".keys", ".zip", ".elf", ".bin", ".ini", ".cfg", "" },
+               "keys files, ZIPs, EBOOT.elf", g_wiz.keys, [](const std::string& p) {
             g_wiz.keys = p;
             g_prefs.keys = p;
             g_prefs.save();
             probe_keys();
         });
     });
+    if (!keys_ok && disc_ok) {   // the other ways: a folder of key files, the player's RPCS3
+        if (big_button("A folder of keys...", ImVec2(S(320), 0)))
+            browse("Choose the folder of key files", true, {}, "folders", g_wiz.keys, [](const std::string& p) {
+                g_wiz.keys = p;
+                g_prefs.keys = p;
+                g_prefs.save();
+                probe_keys();
+            });
+        ImGui::SameLine();
+#ifdef _WIN32
+        const std::vector<std::string> rp_ext = { ".exe" };
+#else
+        const std::vector<std::string> rp_ext = { ".appimage", "" };
+#endif
+        if (big_button("Use my RPCS3...", ImVec2(S(320), 0)))
+            browse("Choose your RPCS3 program", false, rp_ext, "RPCS3", g_prefs.rpcs3, [](const std::string& p) {
+                g_prefs.rpcs3 = p;
+                g_prefs.save();
+                probe_keys();
+            });
+        if (!g_prefs.rpcs3.empty()) {
+            text_col(col::dim, "Your RPCS3: %s", g_prefs.rpcs3.c_str());
+            ImGui::SameLine();
+            if (big_button("Stop using it", ImVec2(S(240), 0))) { g_prefs.rpcs3.clear(); g_prefs.save(); probe_keys(); }
+        }
+    }
     std::string fv = g_wiz.folder;
     const bool space_ok = g_wiz.space["enough"].truthy();
     if (!g_wiz.space.is_null())
@@ -2227,7 +2302,13 @@ static void page_manage()
         }
         g_prefs.save();
         std::vector<std::string> a = disc_args();
-        if (std::find(a.begin(), a.end(), "--keys") == a.end()) { a.push_back("--keys"); a.push_back(g_wiz.keys); }
+        {   // the source the check found (the worker checks it again), else every source as the check had them
+            const std::string via = g_wiz.keys_info["via"].str(), src = g_wiz.keys_info["source"].str();
+            if (via == "rpcs3") { a.push_back("--rpcs3"); a.push_back(src); }
+            else if (g_wiz.keys_info["found"].str() != "together" && !src.empty() &&
+                     std::find(a.begin(), a.end(), "--keys") == a.end()) { a.push_back("--keys"); a.push_back(src); }
+            else add_key_args(a);
+        }
         a.push_back("--install");
         a.push_back(g_wiz.folder);
         if (resume) a.push_back("--resume");
@@ -5627,8 +5708,8 @@ int main(int argc, char** argv)
                 std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
                 g_page = kManage;
                 std::error_code dec;
-                if (ext == ".iso" || fs::is_directory(u8path(p), dec)) { g_wiz.disc = p; g_prefs.disc = p; probe_disc(); }
-                else { g_wiz.keys = p; g_prefs.keys = p; probe_keys(); }
+                if (ext == ".iso" || fs::is_directory(u8path(p) / "PS3_GAME", dec)) { g_wiz.disc = p; g_prefs.disc = p; probe_disc(); }
+                else { g_wiz.keys = p; g_prefs.keys = p; probe_keys(); }   // a keys file, a key folder or ZIP, an EBOOT.elf
                 g_prefs.save();
                 break;
             }

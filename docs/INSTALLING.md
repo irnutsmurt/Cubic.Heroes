@@ -75,12 +75,40 @@ Two different things, for two different locks:
 - **The disc key** -- *only for an encrypted ISO*. It unlocks the disc image itself. A `.dkey` file (the 32-character
   key), a `.key` file (16 bytes), the 32 characters typed, or an IRD file (which needs one more line, `D1`, in your
   keys file). A decrypted ISO, a rebuilt ISO or a folder doesn't need one, and the launcher doesn't ask for it.
-- **The keys file for the game's program** -- *always*. The program (`PS3_GAME/USRDIR/EBOOT.BIN`) is encrypted on every
-  dump, even a decrypted ISO. The keys file is a text file of `APP <revision> <erk> <riv>` lines (this game needs
-  revision `0001`). Or, instead of a keys file, an `EBOOT.elf` you decrypted yourself (for example with RPCS3's
-  *Utilities > Decrypt PS3 Binaries* using your own console's firmware).
+- **The keys for the game's program** -- *always*. The program (`PS3_GAME/USRDIR/EBOOT.BIN`) is encrypted on every
+  dump, even a decrypted ISO, and Cubic.Heroes includes no keys: it needs the APP key of revision `0001`, in any of
+  these forms:
+  - a **text keys file**: this project's `APP <revision> <erk> <riv>` lines, or the `[section]` / `name=value` keys
+    files other PS3 tools use;
+  - a **folder of key files**, one key per file, as PS3 tools keep them (`app-key-...` with `app-iv-...`);
+  - a **ZIP archive** of either -- read as it is, never unpacked;
+  - an **`EBOOT.elf` you decrypted yourself**;
+  - or **your own RPCS3**, if you have it: the launcher asks it to decrypt the program, in the background, and uses
+    the result. RPCS3 is never required, and nothing of it is part of Cubic.Heroes.
 
 If you choose one in the other's place, the launcher says so. Keys are only read: never copied, logged or uploaded.
+
+**Where the launcher looks for the keys** -- before asking you, and nowhere else:
+1. the keys you choose;
+2. where keys were found or chosen before (only that place is remembered, never the keys);
+3. **beside your disc**: in the folder that holds your ISO (or your disc folder), the files and folders whose names
+   say they hold keys -- `keys.txt`, `*.keys`, `ps3keys.zip`, a `keys` folder and the like -- and an `EBOOT.elf`. No
+   other folder is searched;
+4. your RPCS3, if you pointed the launcher at it.
+
+Whatever is found is used only if it turns the program into exactly the supported one (its SHA-256), so a wrong or
+damaged key file can never produce a broken game.
+
+**What that means in practice** (BLUS-30490 v01.00):
+
+| You have | Install |
+|---|---|
+| the ISO (or disc folder) only | not possible: the program's key isn't on the disc, and Cubic.Heroes ships none -- the launcher asks for your keys |
+| the ISO, with your keys beside it (a keys file, or a folder or ZIP of key files) | choose the ISO, press **Install**: the keys are found by themselves |
+| the ISO, and keys you used before | the same: the place you chose them is remembered |
+| the ISO, and your RPCS3 | choose the ISO and your RPCS3 once, press **Install**: no keys needed |
+| the ISO, keys elsewhere | choose them once (a keys file, a key folder or ZIP, or an EBOOT.elf) |
+| an encrypted ISO | as above, plus its disc key (asked for only then) |
 
 ## Installing
 
@@ -140,8 +168,9 @@ The launcher says what went wrong and what to do; the most common cases:
 | the disc is damaged, or a file "doesn't match" | One of the game's files is missing, changed or incomplete in your dump: dump the disc again (or copy its folder again). An ISO of another size is fine as long as its files are right |
 | the disc image is encrypted | It is a raw rip: choose its disc key too ([Your keys](#your-keys)) |
 | the disc key doesn't open this disc image | The key is for another disc: check it matches this dump |
-| that is a disc key, not the keys file | Choose your keys file (the `APP` lines) or an `EBOOT.elf` there; the disc key goes in the disc key's own step |
-| the keys file is refused, or the keys don't match | It needs an `APP` line for revision `0001`; or decrypt `EBOOT.BIN` yourself and give the `EBOOT.elf` |
+| that is a disc key, not the program's keys | Choose your keys (a keys file, a key folder or ZIP) or an `EBOOT.elf` there; the disc key goes in the disc key's own step |
+| no keys were found beside your disc | Put your keys beside the ISO and check again, or choose them, an `EBOOT.elf`, or your RPCS3 ([Your keys](#your-keys)) |
+| the keys don't open this game's program | They need the APP key of revision `0001`; or give an `EBOOT.elf` you decrypted, or use your RPCS3 |
 | not enough space, or the folder can't be written | About 6 GB free is needed; extract to a folder you own (not `Program Files`) |
 | the install stopped part-way | Run **Install** again: it resumes where it stopped. A failed or stopped install leaves the game you already have, your saves and your settings as they were |
 

@@ -39,6 +39,7 @@ struct Args {
     std::string command;                     // the one command (see usage()); empty: the launcher's window
     std::string install_dir, disc, keys, from;
     std::string disc_key;                    // 0.2.0-beta.5: an encrypted ISO's disc key, a FILE (.dkey, .key, IRD)
+    std::string rpcs3;                       // beta.6: the player's own RPCS3, to decrypt the game's program with
     bool json = false, no_gui = false, persist = false, remember = false, repair = false;
     bool or_launcher = false;                // --play --or-launcher: the window instead, when the game isn't ready
     std::vector<std::string> sets;           // --set KEY=VALUE, in order
@@ -60,7 +61,7 @@ static const char* kUsageText =
     "  --launcher             open the launcher's window (the default)\n"
     "  --play                 start the game directly, without the launcher's window; waits for it and exits with\n"
     "                         the game's exit status\n"
-    "  --install              install from --disc and --keys (headless); does nothing if already installed\n"
+    "  --install              install from --disc (headless); does nothing if already installed\n"
     "                         (add --repair to rebuild from the disc anyway)\n"
     "  --update               bring the game up to date with this version of Cubic.Heroes: rebuilt only if the\n"
     "                         tools changed (your saves are backed up first)\n"
@@ -84,7 +85,10 @@ static const char* kUsageText =
     "  --install-dir PATH     the installation folder (default: the folder CubicHeroes is in); --remember keeps it\n"
     "                         for the next start (cubicheroes-root.txt beside CubicHeroes)\n"
     "  --disc PATH            the disc image (.iso) or disc folder, for --install\n"
-    "  --keys PATH            the keys file, for --install (read, never copied, never shown)\n"
+    "  --keys PATH            the game program's keys, for --install: a keys file, a folder or ZIP of key files,\n"
+    "                         or an EBOOT.elf you decrypted (read, never copied, never shown). Without it, the keys\n"
+    "                         are looked for beside the disc and where they were found before\n"
+    "  --rpcs3 PATH           your own RPCS3, to decrypt the game's program with (optional; never required)\n"
     "  --disc-key PATH        an encrypted ISO's disc key, for --install: a .dkey, .key or IRD file (never the key\n"
     "                         itself on a command line; read, never copied, never shown)\n"
     "  --json                 machine-readable output: one JSON object (--status, --version, --set ...), or the\n"
@@ -166,7 +170,8 @@ static Args parse(const std::vector<std::string>& av)
         else if (o.rfind("--set=", 0) == 0) a.sets.push_back(o.substr(6));
         else if (o == "--install-dir") a.install_dir = value("a folder");
         else if (o == "--disc") a.disc = value("a disc image or folder");
-        else if (o == "--keys") a.keys = value("a keys file");
+        else if (o == "--keys") a.keys = value("a keys file, a folder or ZIP of key files, or an EBOOT.elf");
+        else if (o == "--rpcs3") a.rpcs3 = value("an RPCS3 program");
         else if (o == "--disc-key") a.disc_key = value("a disc key file");
         else if (o == "--json") a.json = true;
         else if (o == "--no-gui") a.no_gui = true;
@@ -229,10 +234,10 @@ static Args parse(const std::vector<std::string>& av)
         if (!ok) a.error = "--fps takes 30 to 1000, display, or 0 (uncapped)";
         if (a.fps == "uncapped") a.fps = "0";
     }
-    if (a.error.empty() && a.command == "install" && !a.repair && (a.disc.empty() != a.keys.empty()))
-        a.error = "--install needs both --disc and --keys";
+    if (a.error.empty() && a.command == "install" && !a.repair && a.disc.empty() && (!a.keys.empty() || !a.rpcs3.empty()))
+        a.error = "--install needs --disc (the keys are found beside it, or given with --keys)";
     if (a.error.empty() && a.command == "install" && a.disc.empty() && a.repair)
-        a.error = "--install --repair needs --disc and --keys";
+        a.error = "--install --repair needs --disc";
     if (a.error.empty() && a.no_gui && (a.command.empty() || a.command == "launcher"))
         a.error = "--no-gui with nothing to do: give a command (--play, --status ...)";
     return a;
@@ -487,9 +492,15 @@ static int cmd_install(const Args& a)
     if (kind == "setup-app")
         return fail(a, kNotInstalled, "needs_migration", "This folder holds an older setup app's install: open the "
                                                           "launcher to move it into the current layout.");
-    if (a.disc.empty() || a.keys.empty())
-        return fail(a, kUsage, "usage", "--install needs --disc PATH and --keys PATH.");
-    std::vector<std::string> args = { "--disc", a.disc, "--keys", a.keys, "--install", g_root };
+    if (a.disc.empty())
+        return fail(a, kUsage, "usage", "--install needs --disc PATH (and --keys PATH, unless the keys are beside the "
+                                        "disc or were found before).");
+    std::vector<std::string> args = { "--disc", a.disc, "--install", g_root };
+    g_prefs.load();   // the window's remembered key source and RPCS3 (only their paths), read here
+    if (!a.keys.empty()) { args.push_back("--keys"); args.push_back(a.keys); }   // beta.6: else found beside the disc
+    if (!g_prefs.keys.empty() && g_prefs.keys != a.keys) { args.push_back("--key-source"); args.push_back(g_prefs.keys); }
+    const std::string rp = !a.rpcs3.empty() ? a.rpcs3 : g_prefs.rpcs3;
+    if (!rp.empty()) { args.push_back("--rpcs3"); args.push_back(rp); }
     if (!a.disc_key.empty()) { args.push_back("--disc-key"); args.push_back(a.disc_key); }   // an encrypted ISO
     if (kind == "partial") args.push_back("--resume");
     say(a, "Installing into " + g_root + " (this takes a while)...");
@@ -685,7 +696,7 @@ static int cmd_play(const Args& a)
         return kOpenLauncher;
     if (!installed_here)
         return fail(a, kNotInstalled, "no_install", "Nothing is installed in " + g_root +
-                                                    ". Install with: CubicHeroes --install --disc PATH --keys PATH");
+                                                    ". Install with: CubicHeroes --install --disc PATH [--keys PATH]");
     const std::string exe = game_exe(g_root);
     if (!fs::is_regular_file(u8path(exe), ec))
         return fail(a, kPrerequisite, "no_game", "The game's program is missing (" + exe + "). Repair the installation: "

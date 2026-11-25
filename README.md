@@ -46,8 +46,9 @@ high frame rates, any display mode, your own controls -- and changes none of the
   ([full requirements](docs/INSTALLING.md#the-pc)).
 - **Your own disc of 3D Dot Game Heroes**: US, **BLUS-30490**, version 01.00. As a dump: an ISO (decrypted, rebuilt
   from the disc's folder, or encrypted with its disc key) or the disc's folder ([every form](docs/INSTALLING.md#your-discs-dump)).
-- **Your keys file** for the game's program (`APP` lines; this game needs revision `0001`), or an `EBOOT.elf` you
-  decrypted yourself ([what the keys are](docs/INSTALLING.md#your-keys)).
+- **Your keys** for the game's program (the APP key of revision `0001`). Keep them beside your ISO -- a keys file,
+  or a folder or ZIP of key files -- and the launcher finds them by itself. Or choose them, an `EBOOT.elf` you
+  decrypted, or your own RPCS3 if you have it ([what the keys are](docs/INSTALLING.md#your-keys)).
 
 This project doesn't include the game or its keys, and doesn't say where to get them.
 
@@ -65,8 +66,9 @@ This project doesn't include the game or its keys, and doesn't say where to get 
 2. **Put it where the game should live.** Extract the zip or the tarball: it unpacks to a `Cubic.Heroes` folder, and
    that folder *is* the installation. The AppImage: put it in a folder of yours and make it executable
    (`chmod +x`); its installation is a `Cubic.Heroes` folder beside it.
-3. **Start the launcher** (`CubicHeroes.exe`, `CubicHeroes` or the AppImage), choose your disc and your keys file, and
-   press **Install**. It checks every file of your disc, then rebuilds the game on your PC: 10-30 minutes, once.
+3. **Start the launcher** (`CubicHeroes.exe`, `CubicHeroes` or the AppImage), choose your disc -- the keys beside it
+   are found by themselves -- and press **Install**. It checks every file of your disc, then rebuilds the game on
+   your PC: 10-30 minutes, once.
 4. **Play.**
 
 <p align="center">
@@ -84,7 +86,7 @@ The launcher says what went wrong and what to do. The most common cases:
 | it is another game, region or version | Only BLUS-30490 version 01.00 (US) is supported |
 | a file "doesn't match", or the disc is damaged | Your dump is missing or changed a file: dump the disc (or copy its folder) again |
 | the disc image is encrypted | Choose its disc key too |
-| the keys file is refused, or the keys don't match | It needs an `APP` line for revision `0001`; or give an `EBOOT.elf` you decrypted |
+| no keys were found, or they don't match | Put your keys beside the ISO, or choose them, an `EBOOT.elf` you decrypted, or your RPCS3 |
 | the install stopped part-way | Press **Install** again: it resumes. Your game, saves and settings are left as they were |
 
 Every message and its fix: [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md). Still stuck? Use the launcher's

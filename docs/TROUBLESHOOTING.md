@@ -9,8 +9,9 @@ longer fixes.
 | The disc is refused as damaged, or a file "doesn't match" | One of the game's files is missing, changed or incomplete in your dump: dump the disc again (or extract its folder again). Every format is checked file by file, so an ISO of another size is fine as long as its files are right |
 | "This disc image is encrypted" | It is a raw (encrypted) rip: choose its disc key too -- a `.dkey` or `.key` file, an IRD file, or the 32-character key typed |
 | "That disc key doesn't open this disc image" | The key is for another disc: check it matches this dump |
-| "That is a disc key, not the keys file" | The keys file is a different thing: a text file of `APP <revision> <erk> <riv>` lines (this game needs revision `0001`), or choose an `EBOOT.elf` you decrypted yourself |
-| The keys file is refused | It needs an `APP` line for revision `0001`; or decrypt `EBOOT.BIN` yourself and give the `EBOOT.elf` |
+| "That is a disc key, not the game program's keys" | The program's keys are a different thing: a keys file, a folder or ZIP of key files with the APP key of revision `0001`, or an `EBOOT.elf` you decrypted yourself |
+| "No keys for the game's program were found" | Nothing beside your disc holds them: put your keys (a keys file, a key folder or ZIP) in the ISO's folder and check again, or choose them, an `EBOOT.elf`, or your RPCS3 ([Your keys](INSTALLING.md#your-keys)) |
+| "The keys don't open this game's program" | The keys found have no APP key of revision `0001` (the message names what is missing); or give an `EBOOT.elf` you decrypted, or use your RPCS3 |
 | The install stopped part-way | Run Install again: it resumes where it stopped. A stopped or failed install never touches the game you already have installed, your saves or your settings |
 | Not enough space | About 6 GB free is needed in the installation's folder; the launcher checks before it starts |
 | Stutter the first time somewhere | Install / Manage: prepare the shaders (again after a GPU driver update) |
