@@ -1,0 +1,63 @@
+From 64df778ada9f8bf96656f478383e6a5d06038779 Mon Sep 17 00:00:00 2001
+From: giteaguy <73799093+irnutsmurt@users.noreply.github.com>
+Date: Wed, 25 Nov 2026 11:38:42 -0800
+Subject: [PATCH] cellGame: a patch boot's BootCheck attributes say PATCH
+
+A PS3 reports CELL_GAME_ATTRIBUTE_PATCH in cellGameBootCheck's attributes when a disc game was started through its
+installed patch. A title reads its patched files only then: 3D Dot Game Heroes v1.01 sets the root of its update's
+data (its "/dev_hdd0/game/<title>/USRDIR/data" first, the disc's after) from it -- with 0 there it never looked at its
+update (the 51 characters in data/edt/addition, its character-select files, fonts and opening movie stayed the
+disc's). With the installed update (PS3_GAME_UPDATE_DIR, CATEGORY "GD", this title) the attributes are PATCH; without
+it 0, as before.
+
+libs/system/tests/test_game_update.c: the attribute with the update, 0 without.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libs/system/cellGame.c               | 7 ++++++-
+ libs/system/tests/test_game_update.c | 4 ++++
+ 2 files changed, 10 insertions(+), 1 deletion(-)
+
+diff --git a/libs/system/cellGame.c b/libs/system/cellGame.c
+index 0936b430..8094fdaf 100644
+--- a/libs/system/cellGame.c
++++ b/libs/system/cellGame.c
+@@ -434,7 +434,12 @@ s32 cellGameBootCheck(u32* type, u32* attributes, CellGameContentSize* size,
+     uint32_t dir_ea  = (uint32_t)(uintptr_t)dirName;
+ 
+     if (type_ea) vm_write32(type_ea, (uint32_t)s_game_type);
+-    if (attr_ea) vm_write32(attr_ea, 0);
++    /* a patch boot (the installed update, CATEGORY "GD", for this title): the attributes say so, as a PS3's do for
++     * a disc game started through its installed patch -- the title reads its patched files only then (3D Dot Game
++     * Heroes v1.01 sets the root of its update's data from it) */
++    update_init();
++    const int patched = s_upd_patch && strcmp(s_upd_title, s_title_id) == 0;
++    if (attr_ea) vm_write32(attr_ea, patched ? CELL_GAME_ATTRIBUTE_PATCH : 0);
+ 
+     if (size_ea) {
+         vm_write32(size_ea + 0, (u32)content_free_kb());
+diff --git a/libs/system/tests/test_game_update.c b/libs/system/tests/test_game_update.c
+index 686079f2..63277dd2 100644
+--- a/libs/system/tests/test_game_update.c
++++ b/libs/system/tests/test_game_update.c
+@@ -84,6 +84,9 @@ int main(void)
+     reset();
+     cellGame_init_from_paramsfo(disc);
+     assert(strcmp(s_app_ver, "01.00") == 0);
++    vm_write32(0x104, 0xFFFFFFFFu);
++    assert(cellGameBootCheck((u32*)0x100, (u32*)0x104, (CellGameContentSize*)0x200, (char*)0x300) == CELL_OK);
++    assert(vm_read32(0x104) == 0);   /* no attribute */
+     assert(ps3_game_update_dir() == NULL);
+     assert(!ps3_game_update_path("/dev_hdd0/game/BLUS30490/USRDIR/a.dat", out, sizeof out));
+     assert(cellGamePatchCheck((CellGameContentSize*)0x200, NULL) == CELL_GAME_ERROR_NOTPATCH);
+@@ -109,6 +112,7 @@ int main(void)
+     /* the boot: still a disc game, and a patch boot whose content is the update's */
+     assert(cellGameBootCheck((u32*)0x100, (u32*)0x104, (CellGameContentSize*)0x200, (char*)0x300) == CELL_OK);
+     assert(vm_read32(0x100) == CELL_GAME_GAMETYPE_DISC);
++    assert(vm_read32(0x104) == CELL_GAME_ATTRIBUTE_PATCH);   /* booted through the patch */
+     assert(cellGamePatchCheck((CellGameContentSize*)0x200, NULL) == CELL_OK);
+     assert(cellGameContentPermit((char*)0x400, (char*)0x500) == CELL_OK);
+     assert(strcmp((char*)vm_base + 0x400, "/dev_hdd0/game/BLUS30490") == 0);
+-- 
+2.56.1
+
