@@ -46,6 +46,13 @@
    "note": "The update (this, &dt) of the sixth temple's guardian, the dark knight (vtable 0x00FE52C0 slot 8; its parts, 0x00FE5460 and 0x00FE5390, follow it each frame): measured at 30, 60, 144 and 240 fps he travelled 3.5, 4.6 and 5.8 units a second -- more frames, more movement (M11.1b, B-012). The gate calls it at 30 Hz with a step of 1/30 s, as the segmented boss's (port/game_patches.cpp)."
   },
   {
+   "addr": "0x00319AE8",
+   "host": "dotheroes_fallpoint_contact",
+   "guard": "g_dotheroes_fallpoint30",
+   "decline": true,
+   "note": "Issue #15: a ledge's drop point (this, an AT_FALL_POINT object) in contact with the hero (r4): its timer runs while the hero's step this frame (+0x768, +0x770) points over the drop, read in tenths -- written for the game's 30 fps, so above it a southward drop's step (0.15 at 60 fps) falls short and the timer keeps restarting. The hook runs the check with the hero's step at its 30 fps size and puts it back (port/game_patches.cpp)."
+  },
+  {
    "addr": "0x005CFB54",
    "host": "dotheroes_inflate_direct",
    "guard": "g_dotheroes_inflate_direct",

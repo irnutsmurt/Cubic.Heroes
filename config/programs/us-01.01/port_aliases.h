@@ -9,6 +9,7 @@
 #define func_001E47C4 func_001E47CC
 #define func_001F2DC0 func_001F2DC8
 #define func_002C8300 func_002C8308
+#define func_00319AE0 func_00319AE8
 #define func_003A46E8 func_003A4980
 #define func_003A4740 func_003A49D8
 #define func_003B64A8 func_003B6740
