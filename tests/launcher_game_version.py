@@ -31,6 +31,16 @@ import launcher_nav_pages as nav  # noqa: E402
 import update_preflight  # noqa: E402
 
 SUPPORTED = bool(update_preflight.program_dir(update_preflight.UPDATE_ID))
+# A script's `wait N` counts the launcher's frames, and a hidden launcher's frame rate is the system's: on Windows a
+# frame takes a few milliseconds, on Linux offscreen ~0.5 ms -- there `wait 240` ended before the worker's check
+# answered (found by the Linux instance on the 0.2.0-beta.6 candidate: every scenario passed with the waits x50).
+# The waits are scaled per system (NAV_WAIT_SCALE overrides); until/seek bounds are maxima and stay as written.
+WAIT_SCALE = int(os.environ.get("NAV_WAIT_SCALE") or (1 if os.name == "nt" else 50))
+
+
+def scaled(script):
+    return "\n".join(f"wait {int(ln.split()[1]) * WAIT_SCALE}" if ln.startswith("wait ") else ln
+                     for ln in script.split("\n"))
 OFFER = ("until 200000 PLAY\nexpect PLAY\nwait 240\nsee Official Game Update v1.01\nshot 1-offer\n"
          "seek 6000 down Install v1.01\nexpect Install v1.01\na\nwait 60\n")
 SCRIPTS = {
@@ -112,7 +122,7 @@ def main():
             make_install(root, a.pkg if full else None, a.keys_dir if full else None)
             sp = os.path.join(d, f"{name}.nav")
             with open(sp, "w", encoding="utf-8", newline="\n") as f:
-                f.write(f"# {name} (tests/launcher_game_version.py)\n" + script)
+                f.write(f"# {name} (tests/launcher_game_version.py; waits x{WAIT_SCALE})\n" + scaled(script))
             ran = nav.run(sp, launcher, root, os.path.join(d, "work"), a.timeout, size)
             if ran and name == "not-now":   # the answer remembered: no offer again
                 import json as _json
