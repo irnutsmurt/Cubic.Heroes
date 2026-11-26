@@ -41,7 +41,11 @@ WAIT_SCALE = int(os.environ.get("NAV_WAIT_SCALE") or (1 if os.name == "nt" else 
 def scaled(script):
     return "\n".join(f"wait {int(ln.split()[1]) * WAIT_SCALE}" if ln.startswith("wait ") else ln
                      for ln in script.split("\n"))
-OFFER = ("until 200000 PLAY\nexpect PLAY\nwait 240\nsee Official Game Update v1.01\nshot 1-offer\n"
+# A `shot` reads the frame back and writes its picture on the launcher's main thread, so the next frame is slow (Linux,
+# hidden: 190-236 ms). A key held across it repeats: a seek's two-frame press moved the focus one past its target, and
+# the next A pressed "Check for updates" (found by the Linux instance on the 0.2.0-beta.6 candidate). No input follows
+# a shot until the frames have settled (`wait 20`). A player's launcher takes no screenshots.
+OFFER = ("until 200000 PLAY\nexpect PLAY\nwait 240\nsee Official Game Update v1.01\nshot 1-offer\nwait 20\n"
          "seek 6000 down Install v1.01\nexpect Install v1.01\na\nwait 60\n")
 SCRIPTS = {
     "no-support": OFFER + "seek 60000 down Continue with v1.00\nexpect Continue with v1.00\nsee Game Version\n"
@@ -53,7 +57,7 @@ SCRIPTS = {
     # Version still offers the update -- its full check, then Install v1.01
     "not-now": ("until 200000 PLAY\nexpect PLAY\nwait 240\nsee Official Game Update v1.01\n"
                 "seek 6000 down Install v1.01\nexpect Install v1.01\nright\nwait 20\nexpect Not Now\na\nwait 60\n"
-                "shot 1-declined\nrb\nwait 60\n"
+                "shot 1-declined\nwait 20\nrb\nwait 60\n"
                 "seek 60000 down See what v1.01 needs\nexpect See what v1.01 needs\nsee Game Version\na\nwait 120\n"
                 "seek 60000 down Install v1.01\nexpect Install v1.01\nshot 2-later\nquit\n"),
 }
