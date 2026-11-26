@@ -1,0 +1,104 @@
+# Scenario: issue #15's ledge (SCENARIO=issue15_ledge) -- the volcano's drop above cave D_60_29's terrace, on the
+# way to the fifth temple, at the frame limit the run sets (DOTHEROES_FPS: 30, 60, 144 ...).
+#
+# Starts from: build/checkpoints/m111-cleared (CONTINUE: the castle front). The developer tools' warp puts the hero
+#   at the volcano's entrance (Field_7's gate f6t7_1, where walking in from Field_6 arrives); from there everything
+#   is ordinary movement: east along the bottom, three staircases north, the long staircase
+#   north to the top plateau (height 28.8), south along it and east along the ledge to the column of its drop point
+#   at (84.0, -159.2), just left of the pink rocks.
+# A drop is a map object (AT_FALL_POINT): the hero gets down only after pushing toward it for 0.5 s without a break
+#   (port/game_patches.cpp, g_dotheroes_fallpoint30). The checks read the hero's height from the game:
+#   - on the ledge, 28.8, before anything is pressed;
+#   - a brief tap of DOWN at the edge: still 28.8;
+#   - DOWN held 0.4 s and released, twice (each under 0.5 s, together over it): still 28.8 -- the hold restarts;
+#   - sideways along the edge, LEFT, RIGHT, then DOWN+LEFT pressed into it: still 28.8;
+#   - DOWN held: on the terrace below, 22.4 -- the drop (the bug: at 60 fps the hero stayed at 28.8);
+#   - then on, by ordinary movement: west along the terrace and UP into the cave's mouth -- the cave (area 139),
+#     so the drop left no softlock.
+# Fails at the first check not met (the run's drive status); positions logged throughout ("POS x,y,z").
+#! secs 1100
+#! saves build/checkpoints/m111-cleared
+#! env DOTHEROES_DEVELOPER_MODE=1 DOTHEROES_DEV_STATE=1 DOTHEROES_DEV_CANT_DIE=1 PS3_VERBOSE=0 SHOT_EVERY=0
+include common.drive
+block pos
+  dev lua local p = actor_manager.gActorManager:getActor(0):getPosition(); return string.format("POS %.2f,%.2f,%.2f", p.x, p.y, p.z)
+end
+log TitleMovie 120
+sleep 5
+call continue
+sleep 8
+press CROSS                 # "Change characters?" NO, when a slow first start missed the first
+state life>0 120
+sleep 3
+devtry warp Field_7 -gf6t7_1 @150
+sleep 4
+call pos
+state area==6,hy<0.5 5
+# the bottom, then the first staircase
+goto 63.6 -194.4 0.4 30
+goto 63.6 -198.4 0.4 30
+goto 81.2 -198.4 0.4 30
+goto 81.2 -192.4 0.4 30
+goto 78.8 -193.0 0.4 30
+goto 66.8 -193.0 0.4 30
+# the second staircase, then west
+goto 66.8 -184.4 0.4 30
+goto 64.4 -184.4 0.4 20
+goto 64.4 -185.2 0.4 20
+goto 62.8 -185.2 0.4 20
+goto 62.8 -186.0 0.4 20
+goto 59.6 -186.0 0.4 20
+# the third staircase, then the long staircase to the top plateau
+goto 59.6 -170.8 0.4 30
+goto 66.8 -170.8 0.4 30
+goto 66.8 -156.4 0.4 30
+goto 67.6 -142.8 0.4 30
+call pos
+state hy>28.7 5
+# south along the plateau, east along the ledge
+goto 71.6 -142.8 0.4 20
+goto 71.6 -146.8 0.4 20
+goto 72.8 -150.4 0.4 20
+goto 74.0 -154.8 0.4 20
+goto 75.6 -157.2 0.4 20
+goto 84.0 -157.6 0.3 20
+goto 84.0 -158.9 0.3 10
+call pos
+state hy>28.7,hx>83.6,hx<84.4 3
+shot ledge-before
+# a brief tap
+press DOWN 6
+sleep 1.5
+call pos
+state hy>28.7 2
+# early releases: the hold restarts
+write pad.txt 0x0040 1 400
+sleep 1.2
+write pad.txt 0x0040 1 400
+sleep 1.2
+call pos
+state hy>28.7 2
+# sideways along the edge, and pressed into it while moving along it
+hold LEFT 1.0
+hold RIGHT 1.0
+goto 84.0 -158.9 0.3 10
+hold 0x00C0 1.0
+call pos
+state hy>28.7 2
+shot ledge-sideways
+# the drop
+goto 84.0 -157.6 0.3 15
+goto 84.0 -158.9 0.3 10
+hold DOWN 1.6
+sleep 1.5
+call pos
+state hy<22.5,hy>22.3 5
+shot terrace-after
+# on: the cave's mouth in the terrace's north wall
+goto 76.0 -164.4 0.3 15
+cross UP 139 10
+sleep 2
+call pos
+state area==139 5
+shot cave
+dev perf
