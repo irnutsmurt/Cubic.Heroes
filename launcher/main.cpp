@@ -3147,7 +3147,15 @@ static void preview_draw(ImDrawList* dl, const std::string& path, ImVec2 a, ImVe
     dl->AddRectFilled(a, b, IM_COL32(30, 42, 98, 255));
     if (!t) return;
     const float bw = b.x - a.x, bh = b.y - a.y, s = std::min(bw / t->w, bh / t->h);
-    SDL_SetTextureScaleMode(t->tex, s >= 1.0f ? SDL_ScaleModeNearest : SDL_ScaleModeLinear);
+    // set only when it changes, and SDL's own state put right after: OpenGL (and GLES2) set it by binding the texture
+    // behind the renderer's back, whose next draws then skipped their own bind and sampled this picture -- the page's
+    // text and frames drawn before the first picture came out garbled (Linux, SDL 2.32)
+    const SDL_ScaleMode mode = s >= 1.0f ? SDL_ScaleModeNearest : SDL_ScaleModeLinear;
+    SDL_ScaleMode now = mode;
+    if (SDL_GetTextureScaleMode(t->tex, &now) != 0 || now != mode) {
+        SDL_SetTextureScaleMode(t->tex, mode);
+        SDL_GL_UnbindTexture(t->tex);   // the renderer's record of the bound texture cleared (other renderers: nothing)
+    }
     const float w = floorf(t->w * s), h = floorf(t->h * s);
     const ImVec2 p(floorf(a.x + (bw - w) / 2), floorf(a.y + (bh - h) / 2));
     dl->AddImage((ImTextureID)(intptr_t)t->tex, p, ImVec2(p.x + w, p.y + h));
