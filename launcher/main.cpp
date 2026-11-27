@@ -2153,20 +2153,56 @@ static void probe_keys()
     });
 }
 
-// the keys step's text: what opened the program, and how it was found
+// the program keys' status, a line under the disc (the owner, 2026-11-27: the keys are no step of their own -- found
+// or downloaded by themselves, as the check above does; chosen by hand only in Advanced): what opened the program,
+// and how it was found
 static std::string keys_found_text()
 {
     const json::Value& k = g_wiz.keys_info;
     const std::string via = k["via"].str(), found = k["found"].str();
     const std::string name = path_str(u8path(k["source"].str()).filename());
     if (via == "rpcs3") return "Your RPCS3 decrypts the game's program (" + k["source"].str() + ").";
-    if (found == "together") return "Keys from several places together open the game's program.";
     if (k["downloaded"].truthy())   // beta.6: fetched from the public source config/key_downloads.json pins, checked
-        return "Keys downloaded automatically\nThey open this disc's program.";
+        return "Program keys downloaded automatically and checked.";
+    if (found == "together") return "Program keys found automatically.";
     const std::string where = found == "beside the disc" ? "found beside your disc" : found == "remembered" ?
-                              "found where you chose them before" : "chosen";
-    return name + " (" + where + ")\n" + (via == "elf" ? "Your decrypted program matches this disc."
-                                                      : "The keys open this disc's program.");
+                              "found where they were before" : "chosen in Advanced";
+    return (via == "elf" ? "Your decrypted program (" + name + ", " + where + ") matches this disc."
+                         : found == "beside the disc" || found == "remembered"
+                               ? "Program keys found automatically (" + name + ", " + where + ")."
+                               : "Program keys: " + name + " (" + where + ").");
+}
+
+// the disc found by the check: its game, region, version and form ("3D DOT GAME HEROES -- BLUS30490, US, v01.00, the
+// disc's folder"); the check accepts only the supported one, so the region is the title ID's
+static std::string disc_details()
+{
+    const json::Value& d = g_wiz.disc_info;
+    const std::string id = d["title_id"].str(), p = id.substr(0, std::min<size_t>(4, id.size()));
+    const std::string region = p == "BLUS" || p == "BCUS" ? "US" : p == "BLES" || p == "BCES" ? "Europe"
+                             : p == "BLJM" || p == "BLJS" || p == "BCJS" || p == "BCJM" ? "Japan"
+                             : p == "BLAS" || p == "BCAS" ? "Asia" : "";
+    const std::string form = d["kind"].str() == "folder" ? "the disc's folder"
+                           : g_wiz.needs_key ? "an encrypted disc image" : "a disc image";
+    return d["title"].str() + " -- " + id + (region.empty() ? "" : ", " + region) + ", v" + d["app_ver"].str() + ", " +
+           form;
+}
+
+static const char* const kKeysNotFound = "Program keys could not be found automatically. You can select your own keys "
+                                         "file or decrypted EBOOT.elf to continue (Advanced, below).";
+static const char* const kKeysLooking = "Looking for the game's program keys -- downloaded automatically if this "
+                                        "computer has none...";
+
+// what the keys check said when it found nothing that opens the program: the player's own choice's error as it is;
+// otherwise that the automatic search failed, with the check's reason (offline, a file beside the disc that isn't
+// keys, ...) under it
+static void keys_failed_lines(bool short_form)
+{
+    const bool mine = !g_wiz.keys.empty() && !g_wiz.keys_err.empty();
+    if (mine) { text_col(col::danger, "%s%s", short_form ? "- " : "", (g_wiz.keys_err + " (Advanced, below)").c_str()); return; }
+    text_col(col::danger, "%s%s", short_form ? "- " : "", kKeysNotFound);
+    if (!short_form && g_wiz.keys_code != "keys_missing" && !g_wiz.keys_err.empty())
+        text_col(col::dim, "%s", g_wiz.keys_err.c_str());
 }
 
 static void check_space()
@@ -2180,7 +2216,7 @@ static void check_space()
 }
 
 static void step_row(int n, const char* name, bool ok, const std::string& value, const std::string& err, bool busy,
-                     const char* button, std::function<void()> on_press)
+                     const char* button, std::function<void()> on_press, std::function<void()> extra = nullptr)
 {
     card_begin((std::string("##step") + std::to_string(n)).c_str());
     {   // the step's number on a block: green once it is checked
@@ -2200,6 +2236,7 @@ static void step_row(int n, const char* name, bool ok, const std::string& value,
     if (busy) text_col(col::dim, "Checking...");
     else if (!err.empty()) text_col(col::danger, "%s", err.c_str());
     else if (!value.empty()) text_col(ok ? col::text : col::dim, "%s", value.c_str());
+    if (extra && !busy) extra();   // a line of the step's own under its value (the disc: its program keys' status)
     ImGui::PopTextWrapPos();
     ImGui::EndGroup();
     ImGui::SameLine(ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX() - S(230));
@@ -2225,12 +2262,8 @@ static void install_blockers(bool disc_ok, bool keys_ok, bool space_ok)
                               " (Your disc)");
     }
     if (disc_ok && !keys_ok) {
-        if (g_wiz.probing_keys) why(col::dim, "Looking for the keys to the game's program...");
-        else if (g_wiz.keys_code == "keys_missing" || g_wiz.keys_err.empty())
-            why(col::danger, "The game's program needs its keys, and none were found beside your disc or where you "
-                             "chose them before. Put your keys beside the disc, or choose them: a keys file, a folder or "
-                             "ZIP of key files, an EBOOT.elf you decrypted, or your RPCS3 (Its keys).");
-        else why(col::danger, g_wiz.keys_err + " (Its keys)");
+        if (g_wiz.probing_keys) why(col::dim, kKeysLooking);
+        else keys_failed_lines(true);
     } else if (!disc_ok) {
         why(col::dim, "The keys are looked for once the disc is checked.");
     }
@@ -2520,6 +2553,60 @@ static void update_offer_card()
 
 static void gv_refresh() { gv_check(g_gv.full); }
 
+// the game's program keys chosen by hand (the owner, 2026-11-27): out of the numbered steps, under Advanced -- a keys
+// file, a folder or ZIP of key files, an EBOOT.elf the player decrypted, or their RPCS3. Open by itself when the keys
+// couldn't be found or downloaded, or when the player chose their own (what they chose, shown); otherwise one button
+static void keys_advanced(bool keys_failed)
+{
+    static bool shown = false;
+    const bool forced = keys_failed || !g_wiz.keys.empty() || !g_prefs.rpcs3.empty();
+    ImGui::Dummy(ImVec2(0, S(8)));
+    if (!forced && big_button(shown ? "Hide the advanced options###keysadv" : "Advanced: your own program keys...###keysadv",
+                              ImVec2(S(480), 0)))
+        shown = !shown;
+    if (!(shown || forced)) return;
+    // on the page itself, as Maintenance is (not a card): the D-pad goes down from the button above into it
+    ImGui::Dummy(ImVec2(0, S(4)));
+    title("Advanced: your own program keys", 22);
+    text_col(col::dim, "Not needed for a normal install: the program keys are found beside your disc, or downloaded and "
+                       "checked when this computer has none. Choose your own to use them instead, or to install without "
+                       "an internet connection. Only what opens the supported program exactly is used; keys are never "
+                       "written to any log.");
+    if (!g_wiz.keys.empty()) text_col(col::text, "Yours: %s", g_wiz.keys.c_str());
+    const float gap = ImGui::GetStyle().ItemSpacing.x;
+    const float half = std::min(S(440), (ImGui::GetContentRegionAvail().x - gap) / 2);   // two a row, within the page
+    // the search again (once online, or after putting keys beside the disc): as the check above does it
+    if (keys_failed && big_button("Look for the keys again", ImVec2(half, 0))) probe_keys();
+    auto chosen = [](const std::string& p) {
+        g_wiz.keys = p;
+        g_prefs.keys = p;
+        g_prefs.save();
+        probe_keys();
+    };
+    if (big_button("A keys file, ZIP or EBOOT.elf...", ImVec2(half, 0)))
+        browse("Choose your keys", false, { ".txt", ".keys", ".zip", ".elf", ".bin", ".ini", ".cfg", "" },
+               "keys files, ZIPs, EBOOT.elf", g_wiz.keys, chosen);
+    ImGui::SameLine();
+    if (big_button("A folder of keys...", ImVec2(half, 0)))
+        browse("Choose the folder of key files", true, {}, "folders", g_wiz.keys, chosen);
+#ifdef _WIN32
+    const std::vector<std::string> rp_ext = { ".exe" };
+#else
+    const std::vector<std::string> rp_ext = { ".appimage", "" };
+#endif
+    if (big_button("Use my RPCS3...", ImVec2(half, 0)))
+        browse("Choose your RPCS3 program", false, rp_ext, "RPCS3", g_prefs.rpcs3, [](const std::string& p) {
+            g_prefs.rpcs3 = p;
+            g_prefs.save();
+            probe_keys();
+        });
+    if (!g_prefs.rpcs3.empty()) {
+        ImGui::SameLine();
+        if (big_button("Stop using my RPCS3", ImVec2(half, 0))) { g_prefs.rpcs3.clear(); g_prefs.save(); probe_keys(); }
+        text_col(col::dim, "Your RPCS3: %s", g_prefs.rpcs3.c_str());
+    }
+}
+
 static void page_manage()
 {
     title("Install / Manage");
@@ -2527,29 +2614,29 @@ static void page_manage()
     if (g_wiz.folder.empty()) { g_wiz.folder = install_dir(); check_space(); }
     if (g_wiz.disc.empty() && !g_prefs.disc.empty()) { g_wiz.disc = g_prefs.disc; probe_disc(); }
     text_col(col::dim, kind == "slots" ? "Repair or reinstall from your disc: your saves and settings stay."
-                                       : "Your own disc and keys, checked before anything is written. You can also drop the "
-                                         "files onto this window.");
+                                       : "Your own disc, checked before anything is written. You can also drop it onto "
+                                         "this window.");
     ImGui::Dummy(ImVec2(0, S(4)));
     const bool disc_ok = !g_wiz.disc_info.is_null();
     if (kind != "slots") {
         card_begin("##need");
         title("What you need", 24);
-        text_col(col::text, "Your disc: an ISO of the US release (BLUS-30490), or the disc's files in a folder. An "
-                            "encrypted ISO (a raw dump) also needs its disc key -- a .dkey or IRD file, or the key typed "
-                            "in -- and the check below asks for it only then.");
-        text_col(col::text, "Its keys: the game's program (EBOOT.BIN) is encrypted on every dump. Cubic.Heroes finds "
-                            "them by itself: yours beside the disc (a keys file, or a folder or ZIP of key files), or -- "
-                            "when this computer has none -- downloaded automatically from public sources and checked. You "
-                            "can also choose them, an EBOOT.elf you decrypted, or your own RPCS3 (never required). Only "
-                            "what opens the program exactly as the supported one is used; keys are never written to any "
-                            "log.");
+        text_col(col::text, "Your disc: an ISO of the US release (BLUS-30490), or the disc's folder (the one holding "
+                            "PS3_GAME). An encrypted ISO (a raw dump) also needs its disc key -- a .dkey or IRD file, or "
+                            "the key typed in -- and it is asked for only then.");
+        text_col(col::text, "Nothing else: the game's program keys are found beside your disc, or downloaded "
+                            "automatically and checked when this computer has none. Your own keys can be chosen under "
+                            "Advanced, below Install.");
         card_end();
     }
-    std::string dv = g_wiz.disc.empty() ? "Choose your disc image (an ISO) or the disc's folder."
-                                        : g_wiz.disc + (disc_ok ? "\n" + g_wiz.disc_info["title"].str() + " -- " +
-                                                                      g_wiz.disc_info["title_id"].str() + " v" +
-                                                                      g_wiz.disc_info["app_ver"].str() + ": supported"
-                                                                : "");
+    const bool keys_ok = !g_wiz.keys_info.is_null();
+    // beta.6: looked for as soon as the disc is checked -- what the player chose (Advanced), where they were before,
+    // beside the disc, the player's RPCS3, else downloaded (pinned, checked); a status under the disc, no step
+    if (disc_ok && g_wiz.keys_info.is_null() && g_wiz.keys_err.empty() && !g_wiz.probing_keys) probe_keys();
+    const bool keys_failed = disc_ok && !keys_ok && !g_wiz.probing_keys;
+    std::string dv = g_wiz.disc.empty() ? "Choose your disc image (an ISO) or the disc's folder (the one holding "
+                                          "PS3_GAME)."
+                                        : g_wiz.disc + (disc_ok ? "\n" + disc_details() + ": supported" : "");
     step_row(1, "Your disc", disc_ok, dv, g_wiz.disc_err, g_wiz.probing_disc, "Choose...", [] {
         browse_disc([](const std::string& p) {
             g_wiz.disc = p;
@@ -2557,6 +2644,11 @@ static void page_manage()
             g_prefs.save();
             probe_disc();
         });
+    }, [disc_ok, keys_ok, keys_failed] {   // the program keys' status
+        if (!disc_ok) return;
+        if (keys_ok) text_col(col::ok, "%s", keys_found_text().c_str());
+        else if (g_wiz.probing_keys) text_col(col::dim, "%s", kKeysLooking);
+        else if (keys_failed) keys_failed_lines(false);
     });
     if (g_wiz.needs_key) {   // an encrypted image: its key, by file or typed
         const bool key_ok = disc_ok;
@@ -2578,58 +2670,12 @@ static void page_manage()
                 probe_disc();
             });
     }
-    const bool keys_ok = !g_wiz.keys_info.is_null();
-    // beta.6: looked for as soon as the disc is checked -- beside it, where they were before, the player's RPCS3
-    if (disc_ok && g_wiz.keys_info.is_null() && g_wiz.keys_err.empty() && !g_wiz.probing_keys) probe_keys();
-    const bool none_found = g_wiz.keys_code == "keys_missing";
-    std::string kv = keys_ok ? keys_found_text()
-                   : none_found || g_wiz.keys_err.empty()
-                         ? (disc_ok ? "No keys were found on this computer. Choose a keys file, a folder or ZIP of key "
-                                      "files, or an EBOOT.elf you decrypted -- or your RPCS3, if you have it."
-                                    : "Found or downloaded by themselves, or chosen here.")
-                         : "";
-    step_row(g_wiz.needs_key ? 3 : 2, "Its keys", keys_ok, kv, none_found ? "" : g_wiz.keys_err, g_wiz.probing_keys,
-             "Choose...", [] {
-        browse("Choose your keys", false, { ".txt", ".keys", ".zip", ".elf", ".bin", ".ini", ".cfg", "" },
-               "keys files, ZIPs, EBOOT.elf", g_wiz.keys, [](const std::string& p) {
-            g_wiz.keys = p;
-            g_prefs.keys = p;
-            g_prefs.save();
-            probe_keys();
-        });
-    });
-    if (!keys_ok && disc_ok) {   // the other ways: a folder of key files, the player's RPCS3
-        if (big_button("A folder of keys...", ImVec2(S(320), 0)))
-            browse("Choose the folder of key files", true, {}, "folders", g_wiz.keys, [](const std::string& p) {
-                g_wiz.keys = p;
-                g_prefs.keys = p;
-                g_prefs.save();
-                probe_keys();
-            });
-        ImGui::SameLine();
-#ifdef _WIN32
-        const std::vector<std::string> rp_ext = { ".exe" };
-#else
-        const std::vector<std::string> rp_ext = { ".appimage", "" };
-#endif
-        if (big_button("Use my RPCS3...", ImVec2(S(320), 0)))
-            browse("Choose your RPCS3 program", false, rp_ext, "RPCS3", g_prefs.rpcs3, [](const std::string& p) {
-                g_prefs.rpcs3 = p;
-                g_prefs.save();
-                probe_keys();
-            });
-        if (!g_prefs.rpcs3.empty()) {
-            text_col(col::dim, "Your RPCS3: %s", g_prefs.rpcs3.c_str());
-            ImGui::SameLine();
-            if (big_button("Stop using it", ImVec2(S(240), 0))) { g_prefs.rpcs3.clear(); g_prefs.save(); probe_keys(); }
-        }
-    }
     std::string fv = g_wiz.folder;
     const bool space_ok = g_wiz.space["enough"].truthy();
     if (!g_wiz.space.is_null())
         fv += "\n" + human_bytes(g_wiz.space["free"].num()) + " free, " + human_bytes(g_wiz.space["needed"].num()) + " needed" +
               (space_ok ? "" : ": not enough");
-    step_row(g_wiz.needs_key ? 4 : 3, "Where to install it", space_ok, fv, g_wiz.space_err, false, "Choose...", [] {
+    step_row(g_wiz.needs_key ? 3 : 2, "Where to install", space_ok, fv, g_wiz.space_err, false, "Choose...", [] {
         browse("Choose where to install", true, {}, "folders", g_wiz.folder, [](const std::string& p) {
             std::string f = path_str(u8path(p) / "Cubic.Heroes");
             if (fs::exists(u8path(p) / "active.json") || fs::exists(u8path(p) / "data" / "install.json")) f = p;
@@ -2676,6 +2722,7 @@ static void page_manage()
             refresh_info();
         });
     }
+    keys_advanced(keys_failed);
     if (kind == "slots") {
         game_version_section();
         location_section();
@@ -5645,7 +5692,8 @@ static std::string font_path()
 
 // --nav-test FILE: a controller driven by a script, inside the launcher only (no input reaches any other window): one
 // step a line -- up, down, left, right (the D-pad), a, b, x, y, lb, rb, menu, view [times]; rs FRAMES (the right
-// stick down); wait FRAMES; type TEXT (as a keyboard types it); shot NAME (the launcher saves its own frame, NAME.bmp
+// stick down); wait FRAMES; settle FRAMES (until the worker's checks are over); type TEXT (as a keyboard types it);
+// shot NAME (the launcher saves its own frame, NAME.bmp
 // beside the script); quit. Each step
 // is logged with the page, any dialog and the focused item after it settles (FILE.log). expect TEXT[|TEXT2...] stops
 // the test unless the focus is on one of them (until and seek take alternatives the same way); see TEXT[|TEXT2...]
@@ -5673,7 +5721,7 @@ struct NavScript {
     struct Step { std::string op; int n = 1; std::string arg; };
     std::vector<Step> steps;
     size_t at = 0;
-    int wait = 30, phase = 0, done_n = 0, rs = 0, idle = 0, until = 0, seek = 0, seek_t = 0;
+    int wait = 30, phase = 0, done_n = 0, rs = 0, idle = 0, until = 0, seek = 0, seek_t = 0, settle = 0, quiet = 0;
     bool seek_held = false;   // the seek's key is down (pressed, its release not yet sent)
     std::string until_text, seek_text;
     ImGuiKey seek_key = ImGuiKey_None;
@@ -5758,6 +5806,13 @@ struct NavScript {
             if (g_bg && --idle > 0) return;
             idle = 0;
         }
+        if (settle > 0) {   // "settle N": until no check of the worker's runs (the disc's, the keys' -- a download
+            // too) and none follows: 10 quiet frames in a row, as one's result starts the next; N frames at most.
+            // A wait for what the page waits for, however fast the frames come (Linux's offscreen ones: ~1 ms)
+            quiet = g_queries.empty() && !g_op ? quiet + 1 : 0;
+            if (quiet < 10 && --settle > 0) return;
+            settle = 0;
+        }
         if (seek > 0) {   // "seek N DIR TEXT": DIR pressed now and then until the focus is on TEXT, N frames at most
             if (focus_has(seek_text) && !g_op) seek = 0;
             else {
@@ -5796,6 +5851,9 @@ struct NavScript {
             wait = 6;
         } else if (st.op == "idle") {
             idle = st.n;
+        } else if (st.op == "settle") {
+            settle = st.n;
+            quiet = 0;
         } else if (st.op == "until") {
             until = st.n;
             until_text = st.arg;

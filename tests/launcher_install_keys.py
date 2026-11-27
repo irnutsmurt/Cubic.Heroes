@@ -5,7 +5,7 @@ A greyed-out Install must never stand unexplained: whenever it can't start, "Ins
 with each reason and what to do. Scenarios (each in a fresh folder under --work, the disc image a hard link -- nothing
 of the game copied):
 
-  nothing-beside   the disc alone: Install blocked, explained (no keys found; what to choose)
+  nothing-beside   the disc alone, offline: Install blocked, explained (no keys found; your own under Advanced)
   eboot-chosen     the disc's encrypted program chosen as "the keys" (issue #13's likeliest case): blocked, explained
   binary-chosen    any other binary file chosen: blocked, explained
   keys-beside      a keys file beside the disc: found by itself; Install available (the focus reaches it)
@@ -31,10 +31,13 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "tests"))
 import launcher_nav_pages as nav  # noqa: E402
 
-BLOCKED = ("until 20000 Install the game\nexpect Install the game\na\nwait 900\n"
-           "down\nwait 20\ndown\nwait 20\ndown\nwait 20\ndown\nwait 20\ndown\nwait 40\n"
-           "shot install\nsee Install can't start yet\nquit\n")
-READY = ("until 20000 Install the game\nexpect Install the game\na\nwait 900\n"
+# (0.2.0-beta.6) the checks waited for as they end (settle), not a count of frames: Linux's hidden launcher draws one
+# in ~1 ms. Blocked: the explanation above the greyed Install, and Advanced -- open by itself under it, with "Look for
+# the keys again" -- where the player's own keys are chosen
+BLOCKED = ("until 200000 Install the game\nexpect Install the game\na\nsettle 50000000\n"
+           "seek 600 down Look for the keys again\nexpect Look for the keys again\n"
+           "shot install\nsee Install can't start yet\nsee Advanced: your own program keys\nquit\n")
+READY = ("until 200000 Install the game\nexpect Install the game\na\nsettle 50000000\n"
          "seek 3000 down Install\nexpect Install\nshot install\nquit\n")
 
 

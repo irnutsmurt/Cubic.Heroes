@@ -46,9 +46,10 @@ high frame rates, any display mode, your own controls -- and changes none of the
   ([full requirements](docs/INSTALLING.md#the-pc)).
 - **Your own disc of 3D Dot Game Heroes**: US, **BLUS-30490**, version 01.00. As a dump: an ISO (decrypted, rebuilt
   from the disc's folder, or encrypted with its disc key) or the disc's folder ([every form](docs/INSTALLING.md#your-discs-dump)).
-- **Your keys** for the game's program (the APP key of revision `0001`). Keep them beside your ISO -- a keys file,
-  or a folder or ZIP of key files -- and the launcher finds them by itself. Or choose them, an `EBOOT.elf` you
-  decrypted, or your own RPCS3 if you have it ([what the keys are](docs/INSTALLING.md#your-keys)).
+- **Your keys** for the game's program (the APP key of revision `0001`): found by the launcher itself -- beside your
+  ISO (a keys file, or a folder or ZIP of key files), or downloaded automatically and checked when the computer has
+  none. Your own keys file, an `EBOOT.elf` you decrypted or your own RPCS3 can be chosen under **Advanced** on the
+  install page ([what the keys are](docs/INSTALLING.md#your-keys)).
 
 This project doesn't include the game or its keys, and doesn't say where to get them.
 
@@ -86,7 +87,7 @@ The launcher says what went wrong and what to do. The most common cases:
 | it is another game, region or version | Only BLUS-30490 version 01.00 (US) is supported |
 | a file "doesn't match", or the disc is damaged | Your dump is missing or changed a file: dump the disc (or copy its folder) again |
 | the disc image is encrypted | Choose its disc key too |
-| no keys were found, or they don't match | Put your keys beside the ISO, or choose them, an `EBOOT.elf` you decrypted, or your RPCS3 |
+| no keys were found, or they don't match | Put your keys beside the ISO, or choose them under **Advanced**: a keys file, an `EBOOT.elf` you decrypted, or your RPCS3 |
 | the install stopped part-way | Press **Install** again: it resumes. Your game, saves and settings are left as they were |
 
 Every message and its fix: [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md). Still stuck? Use the launcher's

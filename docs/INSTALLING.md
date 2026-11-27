@@ -118,11 +118,11 @@ damaged key file can never produce a broken game.
 | You have | Install |
 |---|---|
 | the ISO (or disc folder) only, online | choose the ISO, press **Install**: the keys are downloaded and checked by themselves |
-| the ISO (or disc folder) only, offline | the launcher says the keys couldn't be downloaded: connect and press **Check again**, or choose your keys |
+| the ISO (or disc folder) only, offline | the launcher says the keys couldn't be found automatically: connect and press **Look for the keys again** (under **Advanced**), or choose your keys there |
 | the ISO, with your keys beside it (a keys file, or a folder or ZIP of key files) | choose the ISO, press **Install**: the keys are found by themselves |
 | the ISO, and keys you used before | the same: the place you chose them is remembered |
-| the ISO, and your RPCS3 | choose the ISO and your RPCS3 once, press **Install**: no keys needed |
-| the ISO, keys elsewhere | choose them once (a keys file, a key folder or ZIP, or an EBOOT.elf) |
+| the ISO, and your RPCS3 | choose the ISO, and your RPCS3 once under **Advanced**, press **Install**: no keys needed |
+| the ISO, keys elsewhere | choose them once under **Advanced** (a keys file, a key folder or ZIP, or an EBOOT.elf) |
 | an encrypted ISO | as above, plus its disc key (asked for only then) |
 
 ## Installing
@@ -183,9 +183,9 @@ The launcher says what went wrong and what to do; the most common cases:
 | the disc is damaged, or a file "doesn't match" | One of the game's files is missing, changed or incomplete in your dump: dump the disc again (or copy its folder again). An ISO of another size is fine as long as its files are right |
 | the disc image is encrypted | It is a raw rip: choose its disc key too ([Your keys](#your-keys)) |
 | the disc key doesn't open this disc image | The key is for another disc: check it matches this dump |
-| that is a disc key, not the program's keys | Choose your keys (a keys file, a key folder or ZIP) or an `EBOOT.elf` there; the disc key goes in the disc key's own step |
-| the keys couldn't be downloaded | Connect to the internet and check again (the keys are downloaded by themselves), or choose your keys, an `EBOOT.elf`, or your RPCS3 ([Your keys](#your-keys)) |
-| no keys were found beside your disc | Put your keys beside the ISO and check again, or choose them, an `EBOOT.elf`, or your RPCS3 ([Your keys](#your-keys)) |
+| that is a disc key, not the program's keys | Choose your keys (a keys file, a key folder or ZIP) or an `EBOOT.elf` under **Advanced**; the disc key goes in the disc key's own step |
+| the keys couldn't be downloaded | Connect to the internet and press **Look for the keys again** (under **Advanced**), or choose your keys, an `EBOOT.elf`, or your RPCS3 there ([Your keys](#your-keys)) |
+| no keys were found beside your disc | Put your keys beside the ISO and press **Look for the keys again**, or choose them, an `EBOOT.elf`, or your RPCS3 under **Advanced** ([Your keys](#your-keys)) |
 | the keys don't open this game's program | They need the APP key of revision `0001`; or give an `EBOOT.elf` you decrypted, or use your RPCS3 |
 | not enough space, or the folder can't be written | About 6 GB free is needed; extract to a folder you own (not `Program Files`) |
 | the install stopped part-way | Run **Install** again: it resumes where it stopped. A failed or stopped install leaves the game you already have, your saves and your settings as they were |
