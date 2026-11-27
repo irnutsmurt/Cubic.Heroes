@@ -641,5 +641,70 @@ class RealHttp(StoreBase):
             srv.server_close()
 
 
+class WorkerThumbs(StoreBase):
+    """the worker's store actions as the launcher runs them (tools/worker.py characters, a local server): the list
+    gives each missing picture's future path; store-thumbs --id fetches only those asked for, and says which are
+    still missing and whether it stopped (no connection) or they were refused"""
+
+    def test_store_thumbs_by_id(self):
+        import functools
+        import http.server
+        import subprocess
+        import threading
+        asked = []
+
+        class H(http.server.SimpleHTTPRequestHandler):
+            def do_GET(self):
+                asked.append(self.path)
+                super().do_GET()
+
+            def log_message(self, *a):
+                pass
+
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(H, directory=self.repo))
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        keys = os.path.join(self.tmp, "keys.json")
+        with open(keys, "w") as f:
+            json.dump({"keys": [{"id": self.key.id, "ed25519": base64.b64encode(self.key.public).decode()}]}, f)
+        env = {k: v for k, v in os.environ.items() if k.lower() not in ("http_proxy", "https_proxy", "all_proxy")}
+        env.update({S.BASE_ENV: "http://127.0.0.1:%d/" % srv.server_port, S.KEYS_ENV: keys})
+        inst = os.path.join(self.tmp, "inst")
+
+        def worker(*args):
+            r = subprocess.run([sys.executable, os.path.join(ROOT, "tools", "worker.py"), "characters",
+                                "--install", inst, "--char-action", *args], capture_output=True, text=True,
+                               encoding="utf-8", env=env, timeout=120)
+            res = [json.loads(ln) for ln in r.stdout.splitlines() if ln.startswith("{")]
+            res = [e for e in res if e["ev"] == "result"]
+            self.assertTrue(res and res[-1]["ok"], r.stdout[-2000:] + r.stderr[-2000:])
+            return res[-1]["data"]
+
+        try:
+            items = {i["label"]: i for i in worker("store")["items"]}
+            self.assertEqual(sorted(items), ["Alpha", "Beta", "Gamma"])
+            for i in items.values():
+                self.assertEqual(i["thumb"], "")
+                self.assertTrue(i["thumb_pending"].endswith(".rle") and not os.path.exists(i["thumb_pending"]))
+            del asked[:]
+            r = worker("store-thumbs", "--id", items["Gamma"]["catalog_id"], "--id", items["Alpha"]["catalog_id"])
+            self.assertEqual((r["made"], r["failed"], r["stopped"], r["missing"]), (2, 0, False, []))
+            self.assertEqual(len(asked), 2)   # only those asked for
+            self.assertTrue(os.path.isfile(items["Gamma"]["thumb_pending"]))
+            self.assertFalse(os.path.exists(items["Beta"]["thumb_pending"]))
+            beta = items["Beta"]["catalog_id"]
+            os.remove(os.path.join(self.repo, *[e for e in self.doc()["catalog"]["characters"]
+                                                if e["id"] == beta][0]["thumb"]["path"].split("/")))
+            r = worker("store-thumbs", "--id", beta)   # refused (a 404): missing, not stopped
+            self.assertEqual((r["made"], r["failed"], r["stopped"], r["missing"]), (0, 1, False, [beta]))
+            items = {i["label"]: i for i in worker("store")["items"]}
+            self.assertTrue(items["Alpha"]["thumb"] and not items["Alpha"]["thumb_pending"])
+            self.assertEqual(items["Beta"]["thumb"], "")
+        finally:
+            srv.shutdown()
+            srv.server_close()
+        r = worker("store-thumbs", "--id", beta)   # no connection: stopped, the picture not tried
+        self.assertEqual((r["made"], r["failed"], r["stopped"], r["missing"]), (0, 0, True, [beta]))
+
+
 if __name__ == "__main__":
     unittest.main()

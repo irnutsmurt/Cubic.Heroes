@@ -3060,8 +3060,10 @@ static void page_saves()
 
 // the previews the worker leaves beside each PNG: preview/*.rle ("RLE1", u32 width, u32 height, then runs of u16
 // count + r, g, b): no PNG decoder in the launcher. Decoded only when a card is on screen, a few a frame, kept in a
-// small cache (least recently used out), all freed when the page is left.
-struct PreviewTex { SDL_Texture* tex = nullptr; int w = 0, h = 0; long long stamp = -1; int used = 0; bool bad = false; };
+// small cache (least recently used out), all freed when the page is left. `since`: when it was first asked for (the
+// store's loading blocks show only on a picture that has waited a while: a cached one appears without them).
+struct PreviewTex { SDL_Texture* tex = nullptr; int w = 0, h = 0; long long stamp = -1; int used = 0; bool bad = false;
+                    double since = -1; };
 static std::map<std::string, PreviewTex> g_previews;
 static SDL_Renderer* g_ren = nullptr;
 static int g_preview_frame = 0, g_preview_budget = 0;
@@ -3104,6 +3106,7 @@ static const PreviewTex* preview_tex(const std::string& path, bool* bad = nullpt
     if (path.empty() || !g_ren) return nullptr;
     PreviewTex& e = g_previews[path];
     e.used = g_preview_frame;
+    if (e.since < 0) e.since = ImGui::GetTime();
     if (e.tex || e.bad) { if (bad) *bad = e.bad; return e.tex ? &e : nullptr; }
     // the rest next frame: at most a few decodes and ~3 ms a frame (one at least), so a page full of new pictures
     // never holds a frame up
@@ -3140,12 +3143,13 @@ static void previews_release()   // the page left: nothing of it stays in memory
     g_previews.clear();
 }
 
-// a preview drawn into a box, its aspect kept, centred; a sharp upscale, a smooth downscale
-static void preview_draw(ImDrawList* dl, const std::string& path, ImVec2 a, ImVec2 b, bool* bad = nullptr)
+// a preview drawn into a box, its aspect kept, centred; a sharp upscale, a smooth downscale. False: not drawn (not
+// decoded yet, or unreadable: then `bad`), the box empty.
+static bool preview_draw(ImDrawList* dl, const std::string& path, ImVec2 a, ImVec2 b, bool* bad = nullptr)
 {
     const PreviewTex* t = preview_tex(path, bad);
     dl->AddRectFilled(a, b, IM_COL32(30, 42, 98, 255));
-    if (!t) return;
+    if (!t) return false;
     const float bw = b.x - a.x, bh = b.y - a.y, s = std::min(bw / t->w, bh / t->h);
     // set only when it changes, and SDL's own state put right after: OpenGL (and GLES2) set it by binding the texture
     // behind the renderer's back, whose next draws then skipped their own bind and sampled this picture -- the page's
@@ -3159,6 +3163,61 @@ static void preview_draw(ImDrawList* dl, const std::string& path, ImVec2 a, ImVe
     const float w = floorf(t->w * s), h = floorf(t->h * s);
     const ImVec2 p(floorf(a.x + (bw - w) / 2), floorf(a.y + (bh - h) / 2));
     dl->AddImage((ImTextureID)(intptr_t)t->tex, p, ImVec2(p.x + w, p.y + h));
+    return true;
+}
+
+// --- the store's pictures: the loading blocks while one is fetched or decoded, a placeholder when it can't be had ---
+// A catalog thumbnail not cached yet comes with the path the worker will write it to (thumb_pending: written whole,
+// renamed into place once checked). Its card looks for it there a few times a second while it is on screen, and shows
+// it as soon as it is there: the pictures appear one by one as they arrive, never all at the end.
+struct ThumbLook { bool there = false; double next = 0; };
+static std::map<std::string, ThumbLook> g_thumb_looks;   // a pending picture's path -> whether it's there yet
+static bool thumb_arrived(const std::string& path)
+{
+    ThumbLook& l = g_thumb_looks[path];
+    if (l.there) return true;
+    const double now = ImGui::GetTime();
+    if (now < l.next) return false;
+    l.next = now + 0.2;
+    std::error_code ec;
+    l.there = fs::is_regular_file(u8path(path), ec);
+    return l.there;
+}
+
+static const double kPicWait = 0.2;   // a picture decoded within this shows without the loading blocks
+static int g_spin_fetch = 0, g_spin_decode = 0;   // the loading blocks drawn this frame (the test's log)
+
+// a picture still to come: eight blocks round a square, one lit block stepping round it with a fading trail -- the
+// launcher's green blocks (pix_bar's), stepped like a sprite: ten steps a second from the clock, so no frame, scroll
+// or request restarts it. Small, centred on c.
+static void pix_spinner(ImDrawList* dl, ImVec2 c, float p)
+{
+    static const int ring[8][2] = { { 0, 0 }, { 1, 0 }, { 2, 0 }, { 2, 1 }, { 2, 2 }, { 1, 2 }, { 0, 2 }, { 0, 1 } };
+    p = std::max(2.0f, floorf(p));
+    const int head = (int)fmod(ImGui::GetTime() * 10.0, 8.0);
+    const ImVec2 o(snap(c.x - 4 * p), snap(c.y - 4 * p));   // three blocks of 2p with gaps of p: 8p square
+    for (int k = 0; k < 8; k++) {
+        const int age = (head - k + 8) % 8;
+        const ImU32 fill = age == 0 ? col::grass_hi : age == 1 ? col::grass : age == 2 ? shade(col::grass, 0.62f) : col::steel;
+        const ImVec2 a(o.x + ring[k][0] * 3 * p, o.y + ring[k][1] * 3 * p);
+        dl->AddRectFilled(a, ImVec2(a.x + 2 * p, a.y + 2 * p), A(fill));
+    }
+}
+
+// a picture that can't be had (refused, or no connection to fetch it; or its file unreadable): a dim picture and NO
+// PICTURE under it, centred in the box -- never a blank box, never the loading blocks left turning
+static const PixIcon kNoPicture = {
+    { "##########", "#++++++++#", "#+**+++++#", "#+**+++++#", "#++++++g+#", "#+++++ggg#", "#+g++gggg#", "#gggggggg#",
+      "#gggggggg#", "##########" },
+    { IM_COL32(112, 124, 168, 255), IM_COL32(48, 62, 124, 255), IM_COL32(150, 144, 104, 255), IM_COL32(64, 98, 92, 255) } };
+static void pic_unavailable(ImDrawList* dl, ImVec2 a, ImVec2 b)
+{
+    const float ip = std::max(2.0f, floorf(S(4))), tp = std::max(1.0f, floorf(S(2)));
+    const char* t = "NO PICTURE";
+    const float tw = pix_w(t, tp), gap = floorf(S(10)), h = 10 * ip + gap + 7 * tp;
+    const float cx = (a.x + b.x) / 2, y = floorf((a.y + b.y - h) / 2);
+    pix_icon(dl, ImVec2(floorf(cx - 5 * ip), y), kNoPicture, ip);
+    pix_text(dl, ImVec2(floorf(cx - tw / 2), y + 10 * ip + gap), t, tp, shade(col::dim, 0.8f));
 }
 
 // text cut to a width with an ellipsis (long names never break a card)
@@ -3209,6 +3268,13 @@ struct Chars {
     bool asked = false, loading = false, loaded = false, previews_asked = false;
     json::Value store;                // the worker's characters --char-action store: the catalog's items and its state
     bool store_loading = false, store_loaded = false, thumbs_running = false;
+    // the store's pictures being fetched (a few at a time, the cards on screen first): those refused (a placeholder
+    // until the player refreshes), whether a fetch stopped (no connection, a rate limit: the rest placeholders until
+    // the store is shown again), and the cards on screen waiting for theirs (the grid, as last drawn)
+    std::set<std::string> thumbs_failed;
+    bool thumbs_stalled = false;
+    std::vector<std::string> thumbs_seen;
+    int thumbs_due = 0;               // a new list: the next fetch once the grid has shown its cards (by this frame)
     std::set<std::string> downloading;   // catalog ids being downloaded (in the background: the page stays usable)
     std::map<std::string, int> downloaded;   // done, until a list asked for after it shows them in the library
     int store_gen = 0;                   // the store lists asked for so far
@@ -3263,10 +3329,77 @@ static void chars_refresh()
     });
 }
 
+// the store's pictures can be fetched now: the catalog's check found no rate limit or lost connection, and no fetch
+// has stopped for one since the store was last shown
+static bool thumbs_can_fetch()
+{
+    const std::string s = g_chars.store["status"]["status"].str();
+    return !g_chars.thumbs_stalled && s != "limited" && s != "offline";
+}
+
+// the next few pictures fetched in the background (store-thumbs --id): the cards on screen first, then the store's
+// order as shown, then the rest; a new choice after each few, so a scroll is followed within a second or two (more at
+// once when none on screen waits: fewer worker starts). Each picture is asked for until it's there or refused --
+// never again after that (until Refresh): nothing goes round.
+static const size_t kThumbsOnScreen = 24, kThumbsBehind = 48;
+static void thumbs_next()
+{
+    g_chars.thumbs_due = 0;
+    if (g_chars.thumbs_running || !g_chars.store_loaded || !thumbs_can_fetch()) return;
+    const json::Value& items = g_chars.store["items"];
+    std::map<std::string, size_t> by_id;
+    for (size_t i = 0; i < items.size(); i++) by_id[items[i]["catalog_id"].str()] = i;
+    std::vector<std::string> ids;
+    std::set<std::string> in;
+    size_t most = kThumbsOnScreen;
+    auto want = [&](size_t i) {
+        if (i >= items.size() || ids.size() >= most) return;
+        const json::Value& c = items[i];
+        const std::string cid = c["catalog_id"].str(), next = c["thumb_pending"].str();
+        if (next.empty() || !c["thumb"].str().empty() || g_chars.thumbs_failed.count(cid) || in.count(cid)) return;
+        const auto l = g_thumb_looks.find(next);
+        if (l != g_thumb_looks.end() && l->second.there) return;
+        in.insert(cid);
+        ids.push_back(cid);
+    };
+    for (const std::string& cid : g_chars.thumbs_seen) { const auto f = by_id.find(cid); if (f != by_id.end()) want(f->second); }
+    if (ids.empty()) most = kThumbsBehind;
+    for (size_t vi : g_chars.tabs[kTabStore].view) want(vi);
+    for (size_t i = 0; i < items.size() && ids.size() < most; i++) want(i);
+    if (ids.empty()) return;
+    std::vector<std::string> args = { "--install", install_dir(), "--char-action", "store-thumbs" };
+    for (const std::string& cid : ids) { args.push_back("--id"); args.push_back(cid); }
+    g_chars.thumbs_running = true;
+    run("characters", args, "", false, [ids](const json::Value& r) {
+        g_chars.thumbs_running = false;
+        // each picture asked for: there now; else not tried (no connection, a rate limit: it and the rest wait until
+        // the store is shown again) or refused (a placeholder until Refresh)
+        const bool stopped = !r["ok"].truthy() || r["data"]["stopped"].truthy();
+        const json::Value& items = g_chars.store["items"];
+        for (const std::string& cid : ids) {
+            for (size_t i = 0; i < items.size(); i++) {
+                if (items[i]["catalog_id"].str() != cid) continue;
+                const std::string next = items[i]["thumb_pending"].str();
+                if (next.empty()) break;   // a list since has it cached
+                ThumbLook& l = g_thumb_looks[next];
+                std::error_code ec;
+                l.there = l.there || fs::is_regular_file(u8path(next), ec);
+                if (!l.there && !stopped) g_chars.thumbs_failed.insert(cid);
+                break;
+            }
+        }
+        if (stopped) g_chars.thumbs_stalled = true;
+        thumbs_next();
+    });
+}
+
 // the store: its catalog checked with the repository when the tab is shown (the worker asks GitHub at most every
-// 10 minutes, conditionally) or on Refresh; its thumbnails fetched in the background; a download on request
+// 10 minutes, conditionally) or on Refresh; its thumbnails fetched in the background (thumbs_next); a download on
+// request
 static void store_refresh(bool force)
 {
+    g_chars.thumbs_stalled = false;   // shown again, refreshed: the pictures not fetched yet are tried again
+    if (force) g_chars.thumbs_failed.clear();
     if (g_chars.store_loading) { g_chars.store_again = true; return; }
     g_chars.store_loading = true;
     const int gen = ++g_chars.store_gen;
@@ -3283,17 +3416,37 @@ static void store_refresh(bool force)
             g_chars.store = take_data(r);
             g_chars.store_loaded = true;
             g_chars.tabs[kTabStore].view_key.clear();
-            if (g_chars.store["missing_thumbs"].num() > 0 && !g_chars.thumbs_running &&
-                g_chars.store["status"]["status"].str() != "limited" && g_chars.store["status"]["status"].str() != "offline") {
-                g_chars.thumbs_running = true;
-                run("characters", { "--install", install_dir(), "--char-action", "store-thumbs" }, "", false,
-                    [](const json::Value&) {
-                        g_chars.thumbs_running = false;
-                        previews_release();
-                        store_refresh(false);
-                    });
-            }
+            g_thumb_looks.clear();   // the list says which pictures are cached now
+            g_chars.thumbs_due = g_preview_frame + 2;   // fetched once the grid shows which cards are on screen
         });
+}
+
+// a store character's picture in its box: shown (its cached thumbnail, or one just fetched); loading (being fetched,
+// or decoded -- the blocks only once it has waited: a cached picture appears without them); or unavailable
+enum class Pic { Shown, Loading, Unavailable };
+static Pic store_picture(ImDrawList* dl, const json::Value& c, ImVec2 a, ImVec2 b)
+{
+    std::string path = c["thumb"].str();
+    const std::string next = c["thumb_pending"].str();
+    bool fetching = false;
+    if (path.empty() && !next.empty() && !g_chars.thumbs_failed.count(c["catalog_id"].str())) {
+        if (thumb_arrived(next)) path = next;
+        else fetching = thumbs_can_fetch();
+    }
+    const ImVec2 mid((a.x + b.x) / 2, (a.y + b.y) / 2);
+    const float sp = S(4);
+    if (path.empty()) {
+        dl->AddRectFilled(a, b, IM_COL32(30, 42, 98, 255));
+        if (fetching) { pix_spinner(dl, mid, sp); g_spin_fetch++; return Pic::Loading; }
+        pic_unavailable(dl, a, b);
+        return Pic::Unavailable;
+    }
+    bool bad = false;
+    if (preview_draw(dl, path, a, b, &bad)) return Pic::Shown;
+    if (bad) { pic_unavailable(dl, a, b); return Pic::Unavailable; }
+    const auto e = g_previews.find(path);
+    if (e != g_previews.end() && ImGui::GetTime() - e->second.since >= kPicWait) { pix_spinner(dl, mid, sp); g_spin_decode++; }
+    return Pic::Loading;
 }
 
 static void store_download(const json::Value& c, bool install)
@@ -3547,12 +3700,18 @@ static void chars_detail(const json::Value& c)
         pix_text(dl, ImVec2(floorf(cx - pix_w(names[i], px) / 2), at.y), names[i], px, col::accent);
     }
     bool bad = false;
-    preview_draw(dl, thumb_only ? c["thumb"].str() : c["views"].str(), ImVec2(x0, at.y + label_h),
-                 ImVec2(x0 + vw, at.y + label_h + vh), &bad);
+    Pic pic = Pic::Shown;
+    if (thumb_only) pic = store_picture(dl, c, ImVec2(x0, at.y + label_h), ImVec2(x0 + vw, at.y + label_h + vh));
+    else preview_draw(dl, c["views"].str(), ImVec2(x0, at.y + label_h), ImVec2(x0 + vw, at.y + label_h + vh), &bad);
+    if (pic == Pic::Loading && c["thumb"].str().empty()) {   // the picture on screen (no grid behind): fetched next
+        g_chars.thumbs_seen.assign(1, c["catalog_id"].str());
+        thumbs_next();
+    }
     retro_frame(dl, ImVec2(x0 - S(3), at.y + label_h - S(3)), ImVec2(x0 + vw + S(3), at.y + label_h + vh + S(3)), col::frame,
                 std::max(2.0f, floorf(S(3))));
     ImGui::Dummy(ImVec2(avail, label_h + vh + S(10)));
-    if (thumb_only && c["thumb"].str().empty()) text_col(col::dim, "Its picture hasn't been downloaded yet.");
+    if (thumb_only && pic == Pic::Unavailable) text_col(col::dim, "Its picture couldn't be downloaded.");
+    else if (thumb_only && pic == Pic::Loading && c["thumb"].str().empty()) text_col(col::dim, "Its picture is being downloaded...");
     else if ((int)c["voxels"].num() == 0) text_col(col::dim, "This character has no blocks yet (made in the editor and saved empty).");
     else if (bad || !c["preview_ok"].truthy()) text_col(col::warm, "No preview could be drawn for this character.");
     // the actions that apply now, on as many rows as the page needs
@@ -3698,7 +3857,7 @@ static void chars_detail(const json::Value& c)
 }
 
 // ---- the library: the toolbar, the notice, the grid ---------------------------------------------------------------
-static void chars_card(const json::Value& c, ImVec2 size, bool focus_me)
+static Pic chars_card(const json::Value& c, ImVec2 size, bool focus_me)
 {
     const std::string id = c["id"].str();
     ImGui::PushID(id.c_str());
@@ -3712,9 +3871,11 @@ static void chars_card(const json::Value& c, ImVec2 size, bool focus_me)
     dl->AddRectFilled(a, b, face);
     bevel_edges(dl, a, b, face, std::max(2.0f, floorf(S(3))));
     const float pad = floorf(S(10)), thumb = size.x - 2 * pad;
-    bool bad = false;
-    preview_draw(dl, c["thumb"].str(), ImVec2(a.x + pad, a.y + pad), ImVec2(a.x + pad + thumb, a.y + pad + thumb), &bad);
     const bool store = g_chars.tab == kTabStore;
+    const ImVec2 pa(a.x + pad, a.y + pad), pb(a.x + pad + thumb, a.y + pad + thumb);
+    Pic pic = Pic::Shown;
+    if (store) pic = store_picture(dl, c, pa, pb);
+    else preview_draw(dl, c["thumb"].str(), pa, pb);
     const bool game_only = !store && !c["in_library"].truthy();
     const bool busy = store && g_chars.downloading.count(c["catalog_id"].str());
     const bool update = store && !c["library_id"].truthy() && c["older_in_library"].truthy();
@@ -3743,6 +3904,7 @@ static void chars_card(const json::Value& c, ImVec2 size, bool focus_me)
     focus_ring();
     if (hit) { g_chars.open_id = id; g_chars.info_open = false; ct().focus_id = id; }
     ImGui::PopID();
+    return pic;
 }
 
 // an empty tab or view: its picture, what it means, and the one thing to do next (which takes the focus)
@@ -3849,10 +4011,13 @@ static void store_status_line(float avail)
 static void page_characters()
 {
     g_preview_frame++;
+    g_spin_fetch = g_spin_decode = 0;
     g_preview_budget = 8;
     g_preview_t0 = SDL_GetPerformanceCounter();
     g_preview_spent = 0;
     if (!g_chars.asked) chars_refresh();
+    // a new store list's pictures: fetched now if no grid took them (a character's details shown, say)
+    if (g_chars.thumbs_due && g_preview_frame >= g_chars.thumbs_due) thumbs_next();
     if (!g_char_drops.empty()) { chars_import(g_char_drops, {}); g_char_drops.clear(); g_chars.tab = kTabLibrary; }
     if (!g_chars.open_id.empty()) {
         if (const json::Value* c = chars_find(g_chars.open_id)) { chars_detail(*c); previews_trim(); return; }
@@ -3975,6 +4140,8 @@ static void page_characters()
     clip.Begin(rows, ch + cgap);
     if (focus_row >= 0) clip.IncludeItemByIndex(focus_row);
     const ImVec2 o = ImGui::GetCursorPos();
+    std::vector<std::string> waiting;   // the store's cards on screen whose picture is still to be fetched
+    int npic[3] = { 0, 0, 0 };          // the store's cards drawn, by their picture's state (Pic)
     while (clip.Step()) {
         for (int r = clip.DisplayStart; r < clip.DisplayEnd; r++) {
             for (int k = 0; k < cols; k++) {
@@ -3982,12 +4149,34 @@ static void page_characters()
                 if (vi >= shown) break;
                 ImGui::SetCursorPos(ImVec2(o.x + k * (cw + cgap), o.y + r * (ch + cgap)));
                 const json::Value& c = cs[ct().view[vi]];
-                chars_card(c, ImVec2(cw, ch), ct().restore && c["id"].str() == ct().focus_id);
+                const Pic pic = chars_card(c, ImVec2(cw, ch), ct().restore && c["id"].str() == ct().focus_id);
                 if (vi == 0 && g_chars.loaded) focus_first();
+                if (!store_tab) continue;
+                npic[(int)pic]++;
+                if (pic == Pic::Loading && c["thumb"].str().empty() && !g_thumb_looks[c["thumb_pending"].str()].there)
+                    waiting.push_back(c["catalog_id"].str());
             }
         }
     }
     clip.End();
+    if (store_tab) {   // the cards on screen go first in the next fetch (one starts if none is running)
+        g_chars.thumbs_seen.swap(waiting);
+        if (!g_chars.thumbs_seen.empty() || g_chars.thumbs_due) thumbs_next();
+        // the test's log (--nav-test): the pictures on screen by state, the loading blocks drawn (this frame; the most
+        // in one frame since the last step, fetched/decoded)
+        static std::string last;
+        static int spun_f = 0, spun_d = 0;
+        if (g_nav_test && (g_nav_event.empty() || g_nav_event == last)) {
+            if (g_nav_event != last) spun_f = spun_d = 0;   // the step before logged it
+            spun_f = std::max(spun_f, g_spin_fetch);
+            spun_d = std::max(spun_d, g_spin_decode);
+            char ev[200];
+            snprintf(ev, sizeof ev, "  [store pictures t=%.2f shown=%d loading=%d unavailable=%d spin=%d spun=%d/%d fetching=%d "
+                     "failed=%zu%s]", ImGui::GetTime(), npic[0], npic[1], npic[2], g_spin_fetch + g_spin_decode, spun_f, spun_d,
+                     g_chars.thumbs_running ? 1 : 0, g_chars.thumbs_failed.size(), g_chars.thumbs_stalled ? " stalled" : "");
+            g_nav_event = last = ev;
+        }
+    }
     ImGui::SetCursorPos(ImVec2(o.x, o.y + rows * (ch + cgap)));
     ImGui::Dummy(ImVec2(1, 1));   // the grid's extent, as an item
     if (!ct().restore) ct().scroll = ImGui::GetScrollY();
