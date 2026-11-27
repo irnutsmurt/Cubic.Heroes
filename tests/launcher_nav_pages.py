@@ -77,7 +77,8 @@ def snapshot(root):
     return out
 
 
-def run(script, launcher, install, work, timeout, size):
+def run(script, launcher, install, work, timeout, size, online=False):
+    """online: the network as it is (a test that downloads the program's keys); otherwise offline"""
     name = os.path.splitext(os.path.basename(script))[0] + " at " + size
     d = os.path.join(work, size, os.path.splitext(os.path.basename(script))[0])
     shutil.rmtree(d, ignore_errors=True)
@@ -86,8 +87,9 @@ def run(script, launcher, install, work, timeout, size):
     shutil.copyfile(script, path)
     env = {k: v for k, v in os.environ.items() if k not in HELPERS}
     desktop_guard.launcher_env(env)   # hidden (offscreen on Linux)
-    env["HTTP_PROXY"] = env["HTTPS_PROXY"] = "http://127.0.0.1:9"   # offline: the update check fails as without a network
-    env.pop("NO_PROXY", None)
+    if not online:
+        env["HTTP_PROXY"] = env["HTTPS_PROXY"] = "http://127.0.0.1:9"   # offline: the update check fails as without a network
+        env.pop("NO_PROXY", None)
     p = subprocess.Popen([launcher, "--install-dir", install, "--nav-test", path, "--nav-size", size], cwd=d, env=env,
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     watch = desktop_guard.Watch(p, "the launcher (nav-test)").start() if hasattr(desktop_guard, "Watch") else None

@@ -1297,11 +1297,31 @@ static std::string& browse_last()   // the folder last browsed this session
     return last;
 }
 
+// issue #6 (0.2.0-beta.6): a disc's folder -- the folder holding PS3_GAME (its name in any case, as the worker matches
+// it: tools/disc_source.py), or PS3_GAME itself, whose parent is then the disc's folder; "" for any other folder
+static std::string disc_folder_of(const std::string& p)
+{
+    std::error_code ec;
+    const fs::path d = u8path(p);
+    if (p.empty() || !fs::is_directory(d, ec)) return "";
+    auto is_game = [](const fs::path& n) { return SDL_strcasecmp(path_str(n).c_str(), "PS3_GAME") == 0; };
+    if (is_game(d.filename()) && d.has_parent_path() && d.parent_path() != d) return path_str(d.parent_path());
+    for (fs::directory_iterator it(d, fs::directory_options::skip_permission_denied, ec), end; !ec && it != end;
+         it.increment(ec)) {
+        std::error_code e2;
+        if (is_game(it->path().filename()) && it->is_directory(e2)) return p;
+    }
+    return "";
+}
+
 struct Browser {
     bool open = false, folders = false;   // folders: a folder is what is chosen
     std::string title, dir, filter_desc;
     std::vector<std::string> exts;        // lower-case, with the dot; empty: any file
     std::function<void(const std::string&)> on_pick;
+    // issue #6: files are chosen, and also a folder this says is one (the folder to use, or ""): the disc's folder
+    std::function<std::string(const std::string&)> pick_dir;
+    std::string pick, pick_hint;          // the folder shown's choice (pick_dir's answer); what to open instead
     struct Entry { std::string name, path; bool dir; uintmax_t size; };
     std::vector<Entry> entries;
     std::string error;
@@ -1311,6 +1331,7 @@ struct Browser {
     {
         entries.clear();
         error.clear();
+        pick = dir.empty() || !pick_dir ? "" : pick_dir(dir);
         std::error_code ec;
         if (dir.empty()) {   // the top: drives and known places
 #ifdef _WIN32
@@ -1370,7 +1391,8 @@ struct Browser {
 } g_browser;
 
 static void browse(const std::string& t, bool folders, std::vector<std::string> exts, const std::string& desc,
-                   const std::string& start, std::function<void(const std::string&)> f)
+                   const std::string& start, std::function<void(const std::string&)> f,
+                   std::function<std::string(const std::string&)> pick_dir = nullptr, const std::string& pick_hint = "")
 {
     g_browser.open = true;
     g_browser.title = t;
@@ -1378,6 +1400,8 @@ static void browse(const std::string& t, bool folders, std::vector<std::string> 
     g_browser.exts = std::move(exts);
     g_browser.filter_desc = desc;
     g_browser.on_pick = std::move(f);
+    g_browser.pick_dir = std::move(pick_dir);
+    g_browser.pick_hint = pick_hint;
     // where it opens: the folder last browsed this session; else the install's folder; else the launcher's own
     (void)start;
     std::error_code ec;
@@ -1386,6 +1410,14 @@ static void browse(const std::string& t, bool folders, std::vector<std::string> 
     if (d.empty() || !fs::is_directory(u8path(d), ec)) d = install_dir_or_empty();
     if (d.empty() || !fs::is_directory(u8path(d), ec)) d = g_exe_dir;
     g_browser.go(d);
+}
+
+// the disc: an ISO (a file), or the disc's folder (issue #6: "Use this folder" once the browser shows it)
+static void browse_disc(std::function<void(const std::string&)> f)
+{
+    browse("Choose your disc image or the disc's folder", false, { ".iso" }, "disc images (.iso), or the disc's folder",
+           "", std::move(f), disc_folder_of,
+           "The disc's folder: open the folder holding PS3_GAME (or PS3_GAME itself), then Use this folder.");
 }
 
 // --- the on-screen keyboard: letters, digits and a few signs; A types, X deletes, Y a space, MENU done ---
@@ -2519,7 +2551,7 @@ static void page_manage()
                                                                       g_wiz.disc_info["app_ver"].str() + ": supported"
                                                                 : "");
     step_row(1, "Your disc", disc_ok, dv, g_wiz.disc_err, g_wiz.probing_disc, "Choose...", [] {
-        browse("Choose your disc image", false, { ".iso" }, "disc images (.iso)", g_wiz.disc, [](const std::string& p) {
+        browse_disc([](const std::string& p) {
             g_wiz.disc = p;
             g_prefs.disc = p;
             g_prefs.save();
@@ -4521,6 +4553,22 @@ static void overlay_browser()
                 ImGui::CloseCurrentPopup();
                 if (f) f(d);
             }
+        } else if (b.pick_dir && !b.dir.empty()) {   // issue #6: a disc's folder chosen where the disc image is
+            if (!b.pick.empty()) {
+                if (big_button("Use this folder", ImVec2(S(300), S(50)), Kind::Primary)) {
+                    auto f = b.on_pick;
+                    std::string d = b.pick;
+                    b.open = false;
+                    ImGui::CloseCurrentPopup();
+                    if (f) f(d);
+                }
+                if (!same_folder(b.pick, b.dir)) {   // PS3_GAME itself: the folder holding it is the one used
+                    ImGui::SameLine(0, S(16));
+                    text_col(col::dim, "The disc's folder: %s", b.pick.c_str());
+                }
+            } else if (!b.pick_hint.empty()) {
+                text_col(col::dim, "%s", b.pick_hint.c_str());
+            }
         }
         ImGui::BeginChild("##entries", ImVec2(0, -S(10)), ImGuiChildFlags_NavFlattened);
         if (!b.error.empty()) text_col(col::danger, "%s", b.error.c_str());
@@ -5952,7 +6000,7 @@ int main(int argc, char** argv)
     // --show: each dialog as a player meets it, opened once the page has settled; nothing done by it (closing it is
     // all it does)
     auto open_show = [&show] {
-        if (show == "browser") browse("Choose your disc image", false, { ".iso" }, "disc images (.iso)", "", [](const std::string&) {});
+        if (show == "browser") browse_disc([](const std::string&) {});
         if (show == "keyboard") type_text("A note for this backup", "before the boss", [](const std::string&) {});
         if (show == "confirm")
             ask("Go back to this build?", "The game starts from it next time. The build you have now is kept, so you can "
@@ -6030,8 +6078,9 @@ int main(int argc, char** argv)
                 std::string ext = path_str(u8path(p).extension());
                 std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
                 g_page = kManage;
-                std::error_code dec;
-                if (ext == ".iso" || fs::is_directory(u8path(p) / "PS3_GAME", dec)) { g_wiz.disc = p; g_prefs.disc = p; probe_disc(); }
+                const std::string disc_dir = disc_folder_of(p);   // the disc's folder, or PS3_GAME itself (issue #6)
+                if (!disc_dir.empty()) p = disc_dir;
+                if (ext == ".iso" || !disc_dir.empty()) { g_wiz.disc = p; g_prefs.disc = p; probe_disc(); }
                 else { g_wiz.keys = p; g_prefs.keys = p; probe_keys(); }   // a keys file, a key folder or ZIP, an EBOOT.elf
                 g_prefs.save();
                 break;

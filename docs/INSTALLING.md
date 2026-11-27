@@ -66,6 +66,9 @@ Any of these forms -- the launcher tells which one you chose and asks only for w
 | an **encrypted ISO** (a raw Blu-ray rip) | its **disc key** | decrypted as it is read; the ISO itself is never changed |
 | the disc's **folder** (the one holding `PS3_GAME/`) | -- | |
 
+To choose the folder: Install / Manage, **Your disc**, Choose..., open the disc's folder (the one holding `PS3_GAME/`,
+or `PS3_GAME/` itself), then **Use this folder**. You can also drop the folder onto the launcher's window.
+
 Whatever the form, **every one of the game's files is checked** against its size and SHA-256 in the verified game's
 manifest before anything is installed; a missing, changed or doubled file is refused, with its name.
 
