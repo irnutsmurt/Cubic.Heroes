@@ -2722,12 +2722,17 @@ static void page_manage()
             refresh_info();
         });
     }
-    keys_advanced(keys_failed);
+    // Advanced: under Install for a new install; on an installed page after its sections, just above Maintenance --
+    // Repair stays right above Game Version's card. A press down from a page button doesn't reach a card wholly below
+    // the view (its child window is clipped, its buttons not submitted): with Advanced in between, the D-pad went from
+    // Advanced past Game Version's buttons (found by the Linux instance, tests/launcher_game_version.py)
+    if (kind != "slots") keys_advanced(keys_failed);
     if (kind == "slots") {
         game_version_section();
         location_section();
         shaders_section();
         steam_section();
+        keys_advanced(keys_failed);
     }
     ImGui::Dummy(ImVec2(0, S(10)));
     title("Maintenance", 24);
