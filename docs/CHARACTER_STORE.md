@@ -355,5 +355,5 @@ step: by state, the loading blocks drawn, and whether a fetch runs or stopped. I
   are drawn;
 - **drop** (the connection lost after a few thumbnails): those show and the rest get the placeholder. A fetch that
   stopped is not repeated until the store is shown again, and then only once;
-- **scroll** (a slow server, the D-pad held to the end at once): the last screen's pictures are asked for before
-  the ones scrolled past.
+- **scroll** (slow thumbnails, the D-pad down to the last row): the last screen's pictures are asked for together,
+  ahead of pictures before them in the store's order, however long the scroll takes.

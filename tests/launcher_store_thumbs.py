@@ -20,8 +20,9 @@ fetch runs, how many were refused, whether a fetch stopped.
            no blocks, nothing left turning
   drop     an empty cache, the connection lost after a few thumbnails: those shown, the rest the placeholder (no
            retry loop), tried again once when the store is shown again
-  scroll   an empty cache, a slow server, the D-pad held down to the end of the catalog at once: the last screen's
-           pictures asked for before the ones scrolled past; everything there in the end
+  scroll   an empty cache, slow thumbnails, the D-pad down to the catalog's last row: the last screen's pictures asked
+           for together, ahead of pictures before them in the store's order (however long the scroll takes: the
+           hidden launcher's frames come fast on Linux, at the display's rate on Windows); everything there in the end
 
 Each runs at each of --sizes (1280x800 and 1280x720 by default). The launcher is a build or a package's (--launcher);
 every test installation is made under --work and nothing else is written.
@@ -311,8 +312,10 @@ quit
     order = [ids.index(cid) for _, cid, _ in reqs]
     c.that(all(i in order[:drawn + 6] for i in range(drawn)),
            f"the first asked for: {order[:drawn + 6]} (the first screen's {drawn} expected first)")
-    c.notes.append(f"{drawn} cards on screen, first picture {seen[0]['t']:.2f}s..{end['t']:.2f}s, "
-                   f"{len(reqs)} thumbnails each once")
+    shown_at = next((st["t"] for st in seen if st["shown"] > 0), None)
+    c.notes.append(f"{drawn} cards on screen; the first picture {shown_at - seen[0]['t']:.2f} s after the store "
+                   f"showed its cards, all fetched by {end['t'] - seen[0]['t']:.2f} s; {len(reqs)} thumbnails, each "
+                   f"once" if shown_at is not None else f"{drawn} cards on screen; {len(reqs)} thumbnails, each once")
     return c.report()
 
 
@@ -443,27 +446,36 @@ quit
 
 def scenario_scroll(a, size, work, server, keys, ids, inst):
     c = Check(f"scroll at {size}")
-    server.delay = 0.4
+    # the thumbnails slow (the catalog not): the store's order alone can't reach the end while the D-pad goes down,
+    # however long that takes (a hidden launcher's frames come fast on Linux, at the display's rate on Windows: 40
+    # presses took 12 s there)
+    server.thumb_delay = 2.0
     since = len(server.log)
     script = TO_STORE + """expect card: Hero 000
-down 40
+seek 40000 down card: Hero 09
+expect card: Hero 09
 wait 30
 settle 400000
 wait 120
 quit
 """
     lines, rc = run(a.launcher, inst, work, "scroll", script, size, server, keys, a.timeout)
-    server.delay = 0.0
+    server.thumb_delay = 0.0
     common(c, lines, rc)
     seen = [st for _, _, st in steps(lines) if st]
     reqs = server.thumb_requests(since)
     order = [ids.index(cid) for _, cid, _ in reqs]
+    pos = {i: order.index(i) for i in set(order)}
     last = list(range(N_CHARS - 8, N_CHARS))   # the last two rows: on screen once the D-pad reaches the end
-    where = [order.index(i) for i in last if i in order]
+    where = sorted(pos[i] for i in last if i in pos)
     c.that(len(where) == len(last), f"the last screen's pictures not all asked for ({len(where)} of {len(last)})")
-    c.that(where and max(where) < N_CHARS // 2,
-           f"the last screen's pictures asked for at {sorted(where)} of {len(order)} (before the ones scrolled past "
-           f"expected: within the first {N_CHARS // 2})")
+    behind = [i for i in range(N_CHARS - len(last)) if pos.get(i, -1) > (where[-1] if where else len(order))]
+    if where:
+        # asked for together (a fetch's few), and ahead of pictures before them in the store's order: a fill in the
+        # store's order alone asks for them last, and one in the catalog's order spreads them over the whole fetch
+        c.that(where[-1] - where[0] < 24, f"the last screen's pictures asked for at {where}: together expected")
+        c.that(behind, f"the last screen's pictures asked for at {where} of {len(order)}, after every picture before "
+                       f"them in the store's order: the cards on screen weren't fetched first")
     if c.that(seen, "no step logged the store's pictures"):
         end = seen[-1]
         c.that(end["loading"] == 0 and not end["fetching"], f"in the end: {end['loading']} loading")
@@ -471,7 +483,8 @@ quit
     for i in order:
         per[i] = per.get(i, 0) + 1
     c.that(all(n == 1 for n in per.values()), "a thumbnail was asked for twice")
-    c.notes.append(f"the last screen asked for at positions {sorted(where)} of {len(order)}")
+    c.notes.append(f"the last screen asked for at positions {where} of {len(order)}, ahead of {len(behind)} "
+                   f"pictures before it")
     return c.report()
 
 
@@ -506,7 +519,7 @@ def main():
             for name in only:
                 inst = full if name in ("first", "return", "reopen", "offline") else os.path.join(d, "inst-" + name)
                 os.makedirs(inst, exist_ok=True)
-                server.delay, server.drop_after = 0.0, None
+                server.delay, server.thumb_delay, server.drop_after = 0.0, 0.0, None
                 ok = fns[name](a, size, os.path.join(d, name), server, keys, ids, inst) and ok
     finally:
         server.down()
