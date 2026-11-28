@@ -1,0 +1,28 @@
+# beta.6 (the owner's playtest): the prompts of a new game's first screens in one style (LAUNCHER_PROMPTS from the
+# caller) -- the character select (Cross, Circle, L1, R1, Triangle), then the hero's naming screen (L1 / R1 to switch,
+# Cross to select, Circle to erase), where v1.01 showed the PlayStation buttons whatever the style. Checked by
+# tests/prompts_check.py (a run tagged pr-naming-<style>: the two screens' textures redrawn in that style, or none in
+# PlayStation's). The flow is tests/scripts/intro.drive's; nothing is saved.
+#! env PS3_VERBOSE=0 SHOT_EVERY=0 DUMP=1
+#! secs 240
+log TitleMovie 120          # the title's background movie is open
+sleep 5
+press START                 # "PRESS START BUTTON"
+sleep 3
+press START                 # -> main menu
+change
+sleep 3
+press CROSS                 # NEW GAME
+change
+sleep 4
+shot characters
+press CROSS                 # the first character
+change
+sleep 2
+press CROSS                 # "Is this okay?" YES
+change
+sleep 3
+shot naming
+press R1                    # the next page of letters: the screen's own switch, as its prompt says
+sleep 1.5
+shot naming-r1
