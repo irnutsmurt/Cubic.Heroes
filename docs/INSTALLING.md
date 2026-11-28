@@ -127,19 +127,30 @@ damaged key file can never produce a broken game.
 
 ## Installing
 
-On every system the launcher does the same: you choose your disc (and its disc key if it is encrypted) and your keys
-file, and it checks the disc, decrypts the game's program and **recompiles it on your PC** (10-30 minutes, depending
-on your CPU), then prepares the shaders (a few seconds to a few minutes). Nothing of the game is downloaded: it is
-built from your own files.
+On every system the launcher does the same: you choose your disc (and its disc key if it is encrypted), and it checks
+the disc, finds or downloads the program's keys, decrypts the game's program and **recompiles it on your PC** (5-30
+minutes, depending on your CPU), then prepares the shaders (a few seconds to a few minutes). Nothing of the game is
+downloaded: it is built from your own files.
+
+Before you press **Install**, **Before installing** holds two choices:
+- **Game version:** **v1.01 (recommended)**, the official update installed with your disc in the same run (it is
+  downloaded from Sony and checked; see [OFFICIAL_UPDATE.md](OFFICIAL_UPDATE.md)), or **v1.00**, the disc's version.
+  With v1.01 only v1.01 is built; v1.00 can be added later without the disc.
+- **Shaders:** **Prepare them (recommended)**, right after the game is built, so effects don't stutter the first time
+  they appear; or **Not now**, and the game prepares them as you play. Install / Manage > Shaders prepares or
+  rebuilds them at any time.
+
+Install then asks you to confirm what it will do, and does all of it in one go.
 
 ### Windows
 
 1. **Download** `Cubic.Heroes-<version>-windows-x86_64.zip`.
 2. **Extract** it where you want the game to live -- for example `D:\Games\`. It unpacks to a `Cubic.Heroes` folder;
    that folder *is* the installation.
-3. **Run `Cubic.Heroes\CubicHeroes.exe`**, choose your disc and your keys file, and **Install**.
-4. **Shaders** are prepared right after the install; the launcher's Install / Manage page shows their state and can
-   prepare them again after a GPU driver change.
+3. **Run `Cubic.Heroes\CubicHeroes.exe`**, choose your disc, check the choices under **Before installing**, and
+   **Install**.
+4. **Shaders** are prepared at the end of the install when you chose them; the launcher's Install / Manage page shows
+   their state and can prepare them again after a GPU driver change.
 5. **Play.**
 
 An installation from an earlier version in `%LOCALAPPDATA%` is found on the first start and offered: copied into the
@@ -151,7 +162,7 @@ new folder and checked file by file, the earlier folder left as it was.
    `~/Games/`).
 2. **Make it executable** -- `chmod +x Cubic.Heroes-<version>-x86_64.AppImage`, or the file's Properties >
    Permissions -- and **start it**.
-3. Choose your disc and your keys file, and **Install**, as on Windows.
+3. Choose your disc, check the choices under **Before installing**, and **Install**, as on Windows.
 
 The AppImage is one read-only file: its installation is a **`Cubic.Heroes` folder created beside it** (in the example,
 `~/Games/Cubic.Heroes/`), holding everything listed under [The portable folder](#the-portable-folder). **Move the
@@ -168,7 +179,8 @@ machine restarts ([LINUX_PACKAGING.md](LINUX_PACKAGING.md)).
 1. **Download** `Cubic.Heroes-<version>-linux-x86_64.tar.xz` and **extract** it where you want the game to live:
    `tar -xJf Cubic.Heroes-<version>-linux-x86_64.tar.xz -C ~/Games`. It extracts to a `Cubic.Heroes` folder; that
    folder *is* the installation, exactly as on Windows.
-2. **Run `Cubic.Heroes/CubicHeroes`**, choose your disc and your keys file, and **Install**.
+2. **Run `Cubic.Heroes/CubicHeroes`**, choose your disc, check the choices under **Before installing**, and
+   **Install**.
 
 The tarball needs no FUSE and leaves nothing outside its folder. The launcher (`CubicHeroes`), its runtime (`worker/`)
 and its libraries (`lib/`) sit beside the installation's own folders.

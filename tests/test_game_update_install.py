@@ -39,13 +39,29 @@ UP = U.UPDATE_ID
 
 
 class ProgramFake(Fake):
-    """the stand-in pipeline, aware of the program it builds: a different game for v1.01"""
+    """the stand-in pipeline, aware of the program it builds: a different game for v1.01. disc_only (beta.6): the
+    disc's steps alone -- the disc's program recorded as the install's own (its pin), nothing built"""
+    v100_pin = None
 
     def __call__(self, install, out_dir=None, unchanged_inputs=None, progress=None, program=None, **kw):
+        if kw.get("disc_only"):
+            self.calls.append(dict(kw, out_dir=None, program=None))
+            lay = layout.Layout(install)
+            os.makedirs(lay.data, exist_ok=True)
+            rec = pipeline.install_info(install) or {}
+            rec["elf_sha256"] = self.v100_pin
+            with open(lay.install_json, "w") as f:
+                json.dump(rec, f)
+            return {"disc_only": True, "elf_sha256": self.v100_pin}
         if program:
             self.game, self.lift, self.inputs = b"game v1.01", "lift-v101", "inputs-v101"
         else:
             self.game, self.lift, self.inputs = b"game v1.00", "lift-v100", "inputs-v100"
+            lay = layout.Layout(install)
+            if self.v100_pin and not os.path.exists(lay.install_json):   # the disc's program recorded, as the
+                os.makedirs(lay.data, exist_ok=True)                      # pipeline records it
+                with open(lay.install_json, "w") as f:
+                    json.dump({"elf_sha256": self.v100_pin, "lift": "lift-v100"}, f)
         out = super().__call__(install, out_dir=out_dir, unchanged_inputs=unchanged_inputs, progress=progress,
                                program=program, **kw)
         out["program"] = program or pipeline.BASE_PROGRAM
@@ -81,6 +97,7 @@ class Base(unittest.TestCase):
         programs = os.path.join(self.d, "programs")
         make_program(programs, UP)
         self.fake = ProgramFake()
+        self.fake.v100_pin = self.v100_pin
         for p in (mock.patch.object(game_update, "record", lambda *a, **k: self.rec),
                   mock.patch.object(game_update, "load_manifest", lambda *a, **k: self.manifest),
                   mock.patch.object(U, "_pins", lambda: pins), mock.patch.object(U, "PROGRAMS", programs),
@@ -309,6 +326,125 @@ class Versions(Base):
                 layout.rmtree(self.lay.build_dir(b))
             worker.op_game_version(self.install, self.cb, "v101", validate=checked)
         self.assertEqual(c.exception.code, "update_missing")
+
+
+class FirstInstall(Base):
+    """beta.6 (the owner, 2026-11-27): v1.01 chosen on the install page -- the disc's steps, the update's, then ONE
+    build, v1.01's; v1.00 built later from the installation alone; both versions when the player asks for both"""
+
+    def setUp(self):
+        super().setUp()
+        self.new = os.path.join(self.d, "fresh")
+        self.nlay = layout.Layout(self.new)
+        self.addCleanup(lambda: os.path.isdir(self.new) and layout.is_link(self.nlay.game_link) and
+                        layout.remove_link(self.nlay.game_link))
+
+    def first_install(self, **kw):
+        update = {"sources": key_sources.Sources(chosen=self.keys()), "online": False}
+        update.update(kw.pop("update", {}))
+        if "pkg" not in update:
+            update["pkg"] = self.put_pkg()
+        return worker.op_install(self.new, os.path.join(self.d, "disc.iso"), update["sources"], None, self.cb,
+                                 validate=checked, game_version="v101", update=update, **kw)
+
+    def builds_of(self, lay):
+        return sorted(lay.program_of(b) for b in lay.builds())
+
+    def test_v101_chosen_builds_v101_only(self):
+        n = len(self.fake.calls)
+        out = self.first_install()
+        calls = self.fake.calls[n:]
+        self.assertTrue(calls[0].get("disc_only"))                      # the disc's steps alone
+        self.assertEqual([c.get("program") for c in calls[1:]], [UP])   # one build: v1.01's
+        self.assertEqual(self.builds_of(self.nlay), [UP])               # no v1.00 build made
+        self.assertEqual(self.nlay.program_of(self.nlay.read_active()["active"]), UP)
+        self.assertEqual(get(os.path.join(self.nlay.game_link, EXE)), b"game v1.01")
+        self.assertEqual((out["game_version"], out["program"], out["v100_build"]), ("v101", UP, None))
+        self.assertEqual(out["official_content"], [pipeline.BASE_PROGRAM, UP])
+        self.assertEqual(U.game_state(self.new)["state"], "v101")
+        # the disc's program is still the installation's own: v1.00 can be built without the disc
+        self.assertEqual(pipeline.install_info(self.new)["elf_sha256"], self.v100_pin)
+        self.assertEqual(pipeline.install_info(self.new)["game_update"]["program"], UP)
+
+    def test_v100_built_later_from_the_installation(self):
+        self.first_install()
+        n = len(self.fake.calls)
+        out = worker.op_game_version(self.new, self.cb, "v100", validate=checked)
+        self.assertTrue(out["rebuilt"])
+        self.assertIsNone(self.fake.calls[n].get("source"))             # no disc asked for: the installation's copy
+        self.assertIsNone(self.fake.calls[n].get("program"))
+        self.assertEqual(get(os.path.join(self.nlay.game_link, EXE)), b"game v1.00")
+        self.assertEqual(self.builds_of(self.nlay), ["", UP])           # both kept now: switching is instant
+        out = worker.op_game_version(self.new, self.cb, "v101", validate=checked)
+        self.assertFalse(out["rebuilt"])
+
+    def test_both_versions(self):
+        n = len(self.fake.calls)
+        out = self.first_install(also_v100=True)
+        self.assertEqual([c.get("program") for c in self.fake.calls[n:]], [None, UP])   # v1.00 first, then v1.01
+        self.assertEqual(self.builds_of(self.nlay), ["", UP])
+        self.assertEqual(self.nlay.program_of(self.nlay.read_active()["active"]), UP)
+        self.assertEqual(out["v100_build"], self.nlay.newest_of(""))
+        n = len(self.fake.calls)
+        self.assertFalse(worker.op_game_version(self.new, self.cb, "v100", validate=checked)["rebuilt"])
+        self.assertEqual(len(self.fake.calls), n)
+
+    def test_update_not_available_keeps_the_discs_steps(self):
+        """no package and no connection: refused after the disc's steps, with an update_* code; nothing built; an
+        install of v1.00 then needs no disc step again (resume) -- the launcher's "Install v1.00 instead" """
+        n = len(self.fake.calls)
+        beside = os.path.join(self.d, self.rec["file"])   # none beside the disc either
+        if os.path.exists(beside):
+            os.remove(beside)
+        with self.assertRaises(pipeline.SetupError) as c:
+            self.first_install(update={"pkg": None})
+        self.assertEqual(c.exception.code, "update_not_ready")
+        self.assertEqual(len(self.fake.calls), n + 1)                   # the disc's steps only
+        self.assertEqual(self.nlay.builds(), {})
+        self.assertEqual(pipeline.install_info(self.new)["elf_sha256"], self.v100_pin)
+        worker.op_install(self.new, os.path.join(self.d, "disc.iso"), None, None, self.cb, validate=checked,
+                          game_version="v100", resume=True)
+        self.assertTrue(self.fake.calls[-1].get("resume"))
+        self.assertEqual(self.builds_of(self.nlay), [""])
+
+    def test_v100_chosen(self):
+        out = worker.op_install(self.new, os.path.join(self.d, "disc.iso"), None, None, self.cb, validate=checked,
+                                game_version="v100")
+        self.assertEqual(out["game_version"], "v100")
+        self.assertEqual(self.builds_of(self.nlay), [""])
+        self.assertFalse(any(c.get("disc_only") for c in self.fake.calls))
+
+    def test_the_planned_check_before_anything_is_installed(self):
+        info = {"kind": "iso", "title_id": "BLUS30490", "app_ver": "01.00", "title": "3D DOT GAME HEROES"}
+        with mock.patch.object(pipeline, "probe_disc", lambda *a: info):
+            r = U.preflight(self.new, disc=os.path.join(self.d, "disc.iso"), pkg=self.put_pkg(), keys=self.keys(),
+                            online=False, planned=True)
+        self.assertTrue(r["ready"], r["blockers"])
+        self.assertEqual(r["state"], "v100")
+        self.assertTrue(r["plan"]["planned"])
+        self.assertIn("can be installed with it", self.check_msg(r, "game"))
+        self.assertFalse(os.path.exists(self.new))                      # nothing written for a check
+        # another disc: refused, with the reason
+        with mock.patch.object(pipeline, "probe_disc", side_effect=pipeline.SetupError("This is another game.",
+                                                                                         "unsupported_version")):
+            r = U.preflight(self.new, disc=os.path.join(self.d, "disc.iso"), online=False, planned=True)
+        self.assertFalse(r["ready"])
+        self.assertIn("another game", next(c for c in r["checks"] if c["id"] == "game")["details"])
+        # without planned, nothing installed is still "install the game first"
+        r = U.preflight(self.new, online=False)
+        self.assertEqual(r["state"], "not_installed")
+
+    def test_the_steps_of_each_install(self):
+        self.assertEqual(worker.install_steps(), pipeline.STEPS + worker.BUILD_TAIL)
+        v101 = worker.install_steps("v101")
+        self.assertEqual(v101[:6], ["verify", "extract", "decrypt", "update-download", "update-extract",
+                                    "update-decrypt"])
+        self.assertEqual(v101.count("build"), 1)
+        both = worker.install_steps("v101", True)
+        self.assertIn("build:v100", both)
+        self.assertLess(both.index("activate:v100"), both.index("update-download"))
+        self.assertEqual(len(both), len(set(both)))                     # each step once
+        self.assertEqual(worker.step_name("build:v100"), worker.step_name("build") + " (v1.00)")
 
 
 if __name__ == "__main__":

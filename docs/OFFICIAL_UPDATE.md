@@ -19,9 +19,21 @@ historical Hall of Heroes characters stay available whether or not you install v
 
 ## For players
 
-- **After v1.00 is installed**, the launcher offers the update once, with the summary above: **Install v1.01** or
-  **Not Now**. Not Now is remembered, so you aren't asked again. **Install / Manage > Game Version** installs it
-  later, or switches between the two versions.
+- **At the first install**, when your disc is the US release v1.00, Install / Manage offers the update as part of the
+  install, under **Before installing**: **Game version**, **v1.01 (recommended)** or **v1.00**. The update's checks
+  run as soon as your disc is checked, and v1.01 is chosen for you when they pass (otherwise v1.00, saying why).
+  - With v1.01 chosen, the install does everything in one go: your disc's files, then the update, then **one build:
+    v1.01's**. v1.00 isn't built first. Its files stay in the installation, so **Install / Manage > Game Version >
+    Install v1.00** builds it later without your disc.
+  - **Also build v1.00** builds both versions in the same run (about twice as long), so switching is instant.
+  - If the update fails once the install has started (a lost connection, say), the launcher says why and offers to
+    install v1.00 at once, without reading the disc again. Choosing v1.01 again later tries the update again.
+- **An installation of v1.00** (from an earlier version, or v1.00 chosen) is offered the update once on Play, with the
+  summary above: **Install v1.01** checks it, asks you to confirm and installs it right there; **Not Now** is
+  remembered, so you aren't asked again. If it can't be installed yet, the launcher says why and offers to open
+  **Install / Manage > Game Version**, where the remedies are.
+- **Install / Manage > Game Version** installs the update later, or switches between the two versions (building
+  v1.00 the first time if it was never built).
 - **What the launcher needs, and finds by itself:**
   - **The update package.** Sony's official package, downloaded from Sony (186 MB). Or one you already have: its
     official file name beside your disc, in your Downloads folder, or chosen. Or the update an RPCS3 you set up has
@@ -55,8 +67,9 @@ historical Hall of Heroes characters stay available whether or not you install v
 | The game sees them | at the PS3's own place for an installed update (`/dev_hdd0/game/BLUS30490/`), through the native runtime: the v1.01 build's `build.cfg` names the folder (`DOTHEROES_UPDATE_DIR`) and the program (`DOTHEROES_PROGRAM`); the v1.00 build's has neither |
 | The v1.01 build | its own build slot, made from the v1.01 program with its own configuration (`config/programs/BLUS30490-01.01/`): the same native renderer, audio, movies, physics and SPU replacements as v1.00, no emulated path |
 | The Character Store | follows `install.json`'s `official_content`, written from the **active** build at every activation (install, update, repair, rollback, switch) |
-| Checks | `worker game-update-check` (`tools/update_preflight.py`) |
-| Install | `worker game-update-install` (`tools/worker.py` `op_game_update`, `tools/official_update.py`) |
+| Checks | `worker game-update-check` (`tools/update_preflight.py`); before the first install, `--planned` with the disc it will be installed from |
+| Install with the disc | `worker install --game-version v101 [--also-v100]` (`tools/worker.py` `op_install_v101`): the disc's steps, the update's, then v1.01's build alone (with `--also-v100`, v1.00's first); `--game-version v100`, the disc's version only |
+| Install over v1.00 | `worker game-update-install` (`tools/worker.py` `op_game_update`, `tools/official_update.py`) |
 | Switch | `worker game-version --game-version v100\|v101` |
 | Keys | `tools/key_sources.py`, `tools/key_download.py`, `config/key_downloads.json` |
 

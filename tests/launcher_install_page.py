@@ -7,8 +7,9 @@ Issue #6 (0.2.0-beta.6): the disc's folder is chosen in the disc browser with "U
 PS3_GAME, or PS3_GAME itself (its parent is then the disc's folder); an ISO is still chosen as a file in the same
 browser. The owner, 2026-11-27: the program keys out of the numbered steps (Advanced).
 
-"Two steps" below: from the disc's Choose..., one press down reaches Where to install's Choose..., the next Install --
-no key control between them, and Install enabled. Scenarios (each in a fresh folder under --work: the disc folder's
+"Two steps" below: from the disc's Choose..., one press down reaches Where to install's Choose..., the next the choices
+made before installing (beta.6, the owner's playtest: the game version and the shaders), then Install -- no key control
+between them, and Install enabled. Scenarios (each in a fresh folder under --work: the disc folder's
 files hard links of --folder's, an image a hard link -- nothing of the game copied, all checked unchanged at the end):
 
   folder        the folder holding PS3_GAME browsed to and chosen; its keys beside it found by themselves: two steps
@@ -26,9 +27,17 @@ files hard links of --folder's, an image a hard link -- nothing of the game copi
   encrypted     (--encrypted and --disc-key) an encrypted image: its disc key's step, the .dkey chosen in its own
                 browser; then Where to install and Install
   download      (--online) no keys beside the disc: downloaded by themselves; two steps
+  choices       (beta.6) offline: the official update can't be checked, so v1.00 is chosen and why is said; v1.01
+                chosen by the D-pad blocks Install with the reason; v1.00 again, the shaders "Not now"; Install asks to
+                confirm v1.00, Cancel; every enabled button reached by the D-pad (reach)
+  choices-online (--online) the update ready: v1.01 chosen by itself, "Also build v1.00" offered; Install asks to
+                confirm v1.01, Cancel; reach
 With --install (a real install each, a few minutes and ~4 GB, removed after unless --keep):
-  install       the folder scenario, then Install: the game installed from the disc's folder (with --online and no
-                keys beside the disc, the program's keys downloaded, as on a computer without any)
+  install       the folder scenario, then Install and its confirmation: the game installed from the disc's folder in
+                one run -- with --online, v1.01 (the update downloaded, ONE build: v1.01's) and its shaders prepared,
+                no question after it; offline, v1.00. With --online and no keys beside the disc, the program's keys
+                are downloaded, as on a computer without any
+  install-v100  (--online) v1.00 chosen and the shaders "Not now": v1.00 installed, nothing prepared, no question
   incomplete    the disc's folder with one of the game's files missing: chosen, then Install refused at its check
 
 The launcher before issue #6's fix fails the folder scenarios at "Use this folder"; the one before the keys left the
@@ -78,7 +87,8 @@ def pick(name):   # a file in the browser shown
     return f"seek 600 down browse: {name}\nexpect browse: {name}\nshot browser\na\nwait 20\nsettle {LONG}\n"
 
 
-TWO = ("expect Choose...\nsee Your disc\ndown\nwait 20\nexpect Choose...\nsee Where to install\ndown\nwait 20\n"
+TWO = ("expect Choose...\nsee Your disc\ndown\nwait 20\nexpect Choose...\nsee Where to install\n"
+       f"settle {50000000}\ndown\nwait 20\nexpect v1.00|v1.01\nsee Before installing\nseek 600 down Install\n"
        "expect Install\nshot install\n")
 BLOCKED = ("seek 600 down Advanced: your own program keys\nexpect Advanced: your own program keys\nshot install\n"
            "see Install can't start yet\nquit\n")
@@ -102,11 +112,29 @@ ENC_KEY = ("expect Choose...\nshot needs-key\ndown\nwait 20\nexpect Choose...\ns
            "see Choose the disc key\n" + pick(DKEY)
            # the key opens the image (the focus is back on one of the steps' buttons, by the window's size): from
            # Install up, its three steps -- where, the disc key, the disc
-           + "shot key-chosen\nseek 600 down Install\nexpect Install\nshot install\nup\nwait 20\nexpect Choose...\n"
+           + "shot key-chosen\nseek 600 down Install\nexpect Install\nshot install\nseek 600 up Choose...\nexpect Choose...\n"
              "see Where to install\nup\nwait 20\nexpect Choose...\nsee Its disc key\nup\nwait 20\nexpect Choose...\n"
              "see Your disc\nquit\n")
-INSTALL = f"a\nwait 120\nuntil {LONG} Precompile Now\nsee The game is installed\nshot installed\nquit\n"
-REFUSED = f"a\nwait 120\nuntil {LONG} OK\nsee The install didn't finish\nshot refused\nquit\n"
+# Install, its confirmation (the plan: from where, into where, what is built), then the install in one go, and the
+# end said once -- no question about the shaders after it (chosen before)
+INSTALL = (f"a\nwait 60\nsee Install 3D Dot Game Heroes\nexpect Install\nshot confirm\nwait 20\na\nwait 120\n"
+           f"until {LONG} OK\nsee installed and ready to play\nshot installed\nquit\n")
+REFUSED = (f"a\nwait 60\nsee Install 3D Dot Game Heroes\nexpect Install\na\nwait 120\nuntil {LONG} OK\n"
+           "see The install didn't finish\nshot refused\nquit\n")
+# the choices offline: v1.00 by itself (the update can't be checked), v1.01 chosen blocks Install with the reason
+CHOICES = ("seek 600 down v1.00\nexpect v1.00\nshot choices\nsee Game version\nleft\nwait 20\nexpect v1.01\na\nwait 20\n"
+           "seek 600 down Advanced: your own program keys\nsee Install can't start yet\nshot v101-blocked\nwait 20\n"
+           "seek 600 up v1.00|v1.01\nseek 100 right v1.00\nexpect v1.00\na\nwait 20\n"
+           "seek 600 down Not now|Prepare\nseek 100 right Not now\nexpect Not now\na\nwait 20\nseek 600 down Install\n"
+           "expect Install\na\nwait 60\nsee Install 3D Dot Game Heroes v1.00?\nshot confirm\nwait 20\nb\nwait 60\n"
+           f"settle {LONG}\nreach 60000\nquit\n")
+CHOICES_ONLINE = (f"settle {LONG}\nwait 60\nseek 600 down v1.00|v1.01\nseek 100 left v1.01\nexpect v1.01\nshot choices\n"
+                  "wait 20\nseek 600 down Also build v1.00\nexpect Also build v1.00\nseek 600 down Install\nexpect Install\n"
+                  "a\nwait 60\nsee Install 3D Dot Game Heroes v1.01?\nshot confirm\nwait 20\nb\nwait 60\n"
+                  f"settle {LONG}\nreach 60000\nquit\n")
+# v1.00 and no shaders chosen by the D-pad, then the install
+PICK_V100 = ("seek 600 down v1.00\nexpect v1.00\na\nwait 20\nseek 600 down Not now|Prepare\nseek 100 right Not now\n"
+             "expect Not now\na\nwait 20\nseek 600 down Install\nexpect Install\n")
 PICK_FOLDER = HEAD + OPEN + INTO_DISC + USE
 
 
@@ -131,11 +159,16 @@ def scenarios(a):
                                keys="folder")
     if a.encrypted and a.disc_key:
         s["encrypted"] = dict(layout="encrypted", script=HEAD + OPEN + pick(ENC) + ENC_KEY, disc="encrypted")
+    s["choices"] = dict(prefill="folder", script=HEAD + CHOICES)
     if a.online:
         s["download"] = dict(beside=False, online=True, script=PICK_FOLDER + TWO + "quit\n", downloaded=True)
+        s["choices-online"] = dict(prefill="folder", online=True, script=HEAD + CHOICES_ONLINE)
     if a.install:
         s["install"] = dict(beside=not a.online, online=a.online, real=True, downloaded=a.online,
-                            script=PICK_FOLDER + TWO + INSTALL)
+                            version="v101" if a.online else "v100", shaders=True, script=PICK_FOLDER + TWO + INSTALL)
+        if a.online:
+            s["install-v100"] = dict(online=True, real=True, version="v100", shaders=False,
+                                     script=PICK_FOLDER + TWO + PICK_V100 + INSTALL)
         s["incomplete"] = dict(layout="incomplete", script=PICK_FOLDER + TWO + REFUSED, slow=True)
     return s
 
@@ -185,6 +218,42 @@ def prefs(root):
 
 def same(a, b):
     return bool(a) and bool(b) and os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+
+
+def installed_as(name, size, root, sc):
+    """a real install's result (beta.6): the version chosen -- v1.01 in ONE build, v1.00's files kept but not built --
+    the shaders prepared only when chosen, the choices remembered (no offer of v1.01 on Play again, the setting)"""
+    ok = True
+
+    def bad(msg):
+        nonlocal ok
+        ok = False
+        print(f"FAIL: {name} at {size}: {msg}", flush=True)
+    with open(os.path.join(root, "active.json"), encoding="utf-8") as f:
+        active = json.load(f)["active"]
+    builds = {}
+    for b in os.listdir(os.path.join(root, "builds")):
+        p = os.path.join(root, "builds", b, "build.json")
+        if os.path.isfile(p):
+            with open(p, encoding="utf-8") as f:
+                builds[b] = json.load(f)
+    program = builds.get(active, {}).get("program")
+    if sc.get("version") == "v101":
+        if program != "BLUS30490-01.01":
+            bad(f"the active build's program is {program!r}, not v1.01's")
+        if len(builds) != 1:
+            bad(f"{len(builds)} builds, not one (v1.00 built too?)")
+    elif sc.get("version") == "v100" and program:
+        bad(f"the active build's program is {program!r}, not the disc's")
+    shaders = os.path.join(root, "data", "cache", "shaders", builds.get(active, {}).get("shader_cache") or "default",
+                           "prepare-result.json")
+    if sc.get("shaders") is not None and os.path.isfile(shaders) != sc["shaders"]:
+        bad("the shaders were " + ("not " if sc["shaders"] else "") + "prepared")
+    got = prefs(root)
+    want_offer = "accepted" if sc.get("version") == "v101" else "declined"
+    if got.get("update_offer") != want_offer:
+        bad(f"launcher.json's update_offer is {got.get('update_offer')!r}, not {want_offer!r}")
+    return ok
 
 
 def main():
@@ -298,7 +367,8 @@ def main():
                     print(f"FAIL: {name} at {size}: no installed game (data/install.json, game/)", flush=True)
                     r = False
                 else:
-                    print(f"PASS: {name} at {size}: installed from the disc's folder (source "
+                    r = installed_as(name, size, root, sc) and r
+                    print(f"{'PASS' if r else 'FAIL'}: {name} at {size}: installed from the disc's folder (source "
                           f"{info.get('source', '?')!r}" + (", the keys downloaded" if sc.get("downloaded") else "")
                           + ")", flush=True)
             ok = r and ok

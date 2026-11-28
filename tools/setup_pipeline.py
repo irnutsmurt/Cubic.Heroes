@@ -771,14 +771,15 @@ def build_inputs(gen, cache, lid, defines=(), program_dir=None):
 
 
 def run(install, source=None, keys=None, elf=None, progress=None, log=None, skip=None, full=False, out_dir=None,
-        keep_objects=(), resume=False, unchanged_inputs=None, disc_key=None, program=None):
+        keep_objects=(), resume=False, unchanged_inputs=None, disc_key=None, program=None, disc_only=False):
     """Convert (source given) or rebuild (source None: the install's own copy of the disc) the game into out_dir,
     a staged build slot of `install` (tools/install_layout.py; the worker records, checks and activates it).
     keys / elf: how EBOOT.BIN is decrypted. resume: the disc's steps a previous run of the same disc finished
     are not done again (an interrupted install taken up again). full: everything again, the lift and every
     object. keep_objects: the objects the install's kept builds link. program: the game's program the build is
     made from -- None, the disc's; an official update's id, its decrypted program in data/official/<id>/ (the
-    installer's: tools/worker.py op_game_update), checked against its pin, with its own configuration. Returns what
+    installer's: tools/worker.py op_game_update), checked against its pin, with its own configuration. disc_only: the
+    disc's steps alone (nothing lifted or built: the official update's program is built next). Returns what
     the build is made of: the game's path, its lift, its objects, its shader cache's id, the version that made it,
     the program."""
     from version import VERSION
@@ -842,6 +843,13 @@ def run(install, source=None, keys=None, elf=None, progress=None, log=None, skip
                              "no_disc_copy")
         for s in ("verify", "extract", "decrypt"):
             skip(s)
+
+    if disc_only:   # beta.6: the disc's steps alone, then the official update's program is built (the worker's
+        # install with v1.01 chosen): the disc's program is decrypted, checked and kept in data/disc as the install's
+        # own -- v1.00 can be built later from the installation alone -- but it is neither lifted nor built now
+        elf_sha = stamps.get("decrypt") or info.get("elf_sha256") or sha256_file(paths.elf)
+        save(elf_sha256=elf_sha)
+        return {"disc_only": True, "elf_sha256": elf_sha}
 
     if is_base(program):
         elf_sha = stamps.get("decrypt") or info.get("elf_sha256") or sha256_file(paths.elf)

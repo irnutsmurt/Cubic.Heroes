@@ -2140,6 +2140,14 @@ struct Wizard {
     std::string disc_err, keys_err, space_err;
     std::string keys_code;         // beta.6: the keys check's failure kind (keys_missing: nothing found -- not an error)
     bool probing_disc = false, probing_keys = false;
+    // beta.6 (the owner's playtest, 2026-11-27): the choices made before the install -- the game version (the official
+    // v1.01 update installed with the disc in one run, or v1.00) and the shaders prepared at its end
+    json::Value upd;               // the update's checks for this disc and folder (game-update-check --planned)
+    std::string upd_err, upd_for;  // the check's own failure; the disc and folder it was made for
+    bool upd_checking = false;
+    int version = -1;              // 1: v1.01, 0: v1.00; -1 not chosen (v1.01 once its checks pass, else v1.00)
+    bool also_v100 = false;        // both versions built (switching is then instant)
+    int shaders = -1;              // 1: prepared at the install's end, 0: not now; -1 not chosen (prepared)
 } g_wiz;
 
 // the worker's arguments for the disc (its key, when the image is encrypted; the keys file too: an IRD's key needs it)
@@ -2312,7 +2320,7 @@ static void step_row(int n, const char* name, bool ok, const std::string& value,
 
 // issue #13 (0.2.0-beta.6): what keeps Install from starting, each with what to do -- the disc, its disc key, the
 // program's keys, the space -- right above the button, so a greyed-out Install is never left unexplained
-static void install_blockers(bool disc_ok, bool keys_ok, bool space_ok)
+static void install_blockers(bool disc_ok, bool keys_ok, bool space_ok, const std::string& version_why = "")
 {
     title("Install can't start yet", 22);
     auto why = [](ImU32 c, const std::string& s) { text_col(c, "- %s", s.c_str()); };
@@ -2339,6 +2347,7 @@ static void install_blockers(bool disc_ok, bool keys_ok, bool space_ok)
                               " needed, " + human_bytes(g_wiz.space["free"].num()) + " free. Choose another folder, or "
                               "free some space (Where to install it).");
     }
+    if (!version_why.empty()) text_col(col::danger, "- %s", version_why.c_str());
     ImGui::Dummy(ImVec2(0, S(4)));
 }
 
@@ -2366,6 +2375,10 @@ struct GameVersion {
     bool checking = false;
     bool full = false;            // the last check looked online (Sony's download, keys downloaded if needed)
     bool details = false;         // "Show details"
+    bool offer = false;           // Play's offer was accepted: its check's answer starts the install (or explains)
+    bool scroll_to = false;       // Install / Manage opens on Game Version (its first button focused)
+    int focus_next = 0;           // the section's next button takes the focus (frames left to ask: a dialog's close
+                                  // gives the focus back to the page meanwhile)
     std::string pkg, folder, elf; // what the player chose for the update
 } g_gv;
 
@@ -2381,6 +2394,9 @@ static std::vector<std::string> gv_args()
     return a;
 }
 
+static void gv_offer_confirm();
+static void gv_install();
+
 // full: online -- Sony's download looked at, the keys that open the update downloaded when this computer has none;
 // else only what is here (the state, a kept v1.01 build): no network
 static void gv_check(bool full)
@@ -2393,6 +2409,25 @@ static void gv_check(bool full)
         g_gv.checking = false;
         if (r["ok"].truthy()) { g_gv.check = r["data"]; g_gv.error.clear(); g_gv.full = full; }
         else g_gv.error = r["message"].str("The update couldn't be checked.");
+        if (g_gv.offer && full) {   // Play's offer: install now, or say why not and where to fix it
+            g_gv.offer = false;
+            if (r["ok"].truthy() && g_gv.check["ready"].truthy()) gv_offer_confirm();
+            else {
+                std::string why = g_gv.error;
+                for (size_t i = 0; i < g_gv.check["blockers"].size(); i++)
+                    why += (why.empty() ? "" : "\n") + ("- " + g_gv.check["blockers"][i].str());
+                ask("The official update can't be installed yet", (why.empty() ? std::string("It isn't ready.") : why) +
+                    "\n\nYour v1.00 game is unchanged and ready to play. Install / Manage > Game Version has what "
+                    "can be done: choose an update package you have, select keys, or check again.",
+                    "Open Game Version", false, [] {
+                    g_page = kManage;
+                    g_focus_page = false;   // Game Version's first button takes it, not the page's first
+                    g_gv.scroll_to = true;
+                });
+                g_confirm.no = "Not Now";
+                g_confirm.focus_yes = true;   // where it can be fixed
+            }
+        }
     });
 }
 
@@ -2410,7 +2445,7 @@ static void gv_install()
                       "You now play Official Game Update v1.01, with its 51 additional characters and gameplay "
                       "improvements. Your saves and settings are as they were. Install / Manage > Game Version switches "
                       "back to v1.00 at any time.", "", false, false };
-            if (!kept && !r["data"]["switched"].truthy()) after_install_shaders();
+            if (!kept && !r["data"]["switched"].truthy()) after_install_shaders();   // the setting's answer, or asked once
         } else if (r["code"].str() != "cancelled") {
             g_msg = { true, "The update wasn't installed",
                       r["message"].str("Something went wrong.") + "\n\nYour v1.00 game is unchanged and ready to play.",
@@ -2422,14 +2457,41 @@ static void gv_install()
     });
 }
 
+// the update's confirmation (Play's offer, and Game Version's Install v1.01)
+static void gv_offer_confirm()
+{
+    const json::Value& c = g_gv.check;
+    ask("Install the official v1.01 update?", "Your saves are backed up first. The update is " +
+        std::string(c["plan"]["source"].str() == "download" ? "downloaded from Sony and " : "") +
+        "checked, then the game is built as v1.01 on this PC: it takes a few minutes, about as long as the first "
+        "install. Until it is done, and if anything goes wrong, your v1.00 game stays as it is and ready to play.",
+        "Install v1.01", false, [] { gv_install(); });
+    g_confirm.focus_yes = true;
+}
+
+// a whole v1.00 build kept in the installation (v1.01 installed with the disc in one run has none until asked for)
+static bool v100_built()
+{
+    for (size_t i = 0; i < g_st.builds["builds"].size(); i++) {
+        const json::Value& b = g_st.builds["builds"][i];
+        if (b["program"].str().empty() && !b["damaged"].truthy()) return true;
+    }
+    return false;
+}
+
 static void gv_switch_to_v100()
 {
-    ask("Switch back to v1.00?", "The v1.00 build is kept, so this takes a moment. Your saves and settings stay as they are, "
-        "and you can switch to v1.01 again at any time. In the Character Store, the 45 characters that came with the "
-        "update become downloadable again; any you imported or downloaded yourself stay yours.", "Switch to v1.00", false,
+    const bool built = v100_built();
+    ask(built ? "Switch back to v1.00?" : "Install v1.00?",
+        std::string(built ? "The v1.00 build is kept, so this takes a moment." :
+                    "v1.00 is built from your disc's files kept in this installation (your disc isn't needed): it takes "
+                    "a few minutes, and v1.01 stays installed.") +
+        " Your saves and settings stay as they are, and you can switch to v1.01 again at any time. In the Character "
+        "Store, the 45 characters that came with the update become downloadable again; any you imported or downloaded "
+        "yourself stay yours.", built ? "Switch to v1.00" : "Install v1.00", false,
         [] {
         run("game-version", { "--install", install_dir(), "--game-version", "v100", "--no-prepare" },
-            "Switching to v1.00", true, [](const json::Value& r) {
+            v100_built() ? "Switching to v1.00" : "Installing v1.00", true, [](const json::Value& r) {
             if (!r["ok"].truthy()) show_result_error(r, "The game version wasn't changed");
             else if (r["data"]["rebuilt"].truthy()) after_install_shaders();
             g_gv.check = json::Value();
@@ -2440,29 +2502,30 @@ static void gv_switch_to_v100()
 }
 
 // a remedy the check offers, as a button (each at most once on the section)
-static void gv_remedy(const std::string& id, std::set<std::string>& shown)
+static void gv_take_focus();
+static void gv_remedy(const std::string& id, std::set<std::string>& shown,
+                      std::function<void()> recheck = [] { gv_check(true); })
 {
     if (!shown.insert(id).second) return;
-    auto recheck = [] { gv_check(true); };
     const ImVec2 sz(S(420), 0);
     if (id == "retry" || id == "download") {
         if (big_button(id == "retry" ? "Check again" : "Try the official download again", sz)) recheck();
     } else if (id == "choose_pkg") {
         if (big_button("Choose the update package...", sz))
             browse("Choose the official v1.01 update package", false, { ".pkg" }, "PS3 packages (.pkg)", g_gv.pkg,
-                   [](const std::string& p) { g_gv.pkg = p; gv_check(true); });
+                   [recheck](const std::string& p) { g_gv.pkg = p; recheck(); });
     } else if (id == "choose_folder") {
         if (big_button("Choose an update folder...", sz))
             browse("Choose the installed or extracted v1.01 update (the folder holding PARAM.SFO)", true, {}, "folders",
-                   g_gv.folder, [](const std::string& p) { g_gv.folder = p; gv_check(true); });
+                   g_gv.folder, [recheck](const std::string& p) { g_gv.folder = p; recheck(); });
     } else if (id == "choose_elf") {
         if (big_button("Choose a decrypted update program...", sz))
             browse("Choose the update's decrypted program (EBOOT.elf)", false, { ".elf" }, "EBOOT.elf", g_gv.elf,
-                   [](const std::string& p) { g_gv.elf = p; gv_check(true); });
+                   [recheck](const std::string& p) { g_gv.elf = p; recheck(); });
     } else if (id == "choose_keys") {
         if (big_button("Select keys...", sz))
             browse("Choose your keys", false, { ".txt", ".keys", ".zip", ".ini", ".cfg", "" }, "keys files, ZIPs",
-                   g_prefs.keys, [](const std::string& p) { g_prefs.keys = p; g_prefs.save(); gv_check(true); });
+                   g_prefs.keys, [recheck](const std::string& p) { g_prefs.keys = p; g_prefs.save(); recheck(); });
     } else if (id == "locate_rpcs3") {
 #ifdef _WIN32
         const std::vector<std::string> rp_ext = { ".exe" };
@@ -2471,7 +2534,7 @@ static void gv_remedy(const std::string& id, std::set<std::string>& shown)
 #endif
         if (big_button("Locate RPCS3 (optional)...", sz))
             browse("Choose your RPCS3 program", false, rp_ext, "RPCS3", g_prefs.rpcs3,
-                   [](const std::string& p) { g_prefs.rpcs3 = p; g_prefs.save(); gv_check(true); });
+                   [recheck](const std::string& p) { g_prefs.rpcs3 = p; g_prefs.save(); recheck(); });
     } else if (id == "continue_v100") {
         if (big_button("Continue with v1.00", sz)) {
             g_prefs.update_offer = "declined";
@@ -2480,6 +2543,7 @@ static void gv_remedy(const std::string& id, std::set<std::string>& shown)
             g_gv.details = false;
         }
     }
+    gv_take_focus();   // opened from Play's explanation: the first remedy has the focus
     same_line_fits(S(420));
 }
 
@@ -2498,10 +2562,21 @@ static void update_whats_included()
                        "Hall of Heroes characters stay available whether or not you install v1.01.");
 }
 
+// Game Version opened from Play's explanation: the section's first button takes the focus (the page scrolls to it)
+static void gv_take_focus()
+{
+    static int asked = -1;   // the first such button of the frame only
+    if (g_gv.focus_next <= 0 || !g_page_input || asked == ImGui::GetFrameCount()) return;
+    asked = ImGui::GetFrameCount();
+    if (ImGui::IsItemFocused()) g_gv.focus_next = 0;   // it holds
+    else { ImGui::SetKeyboardFocusHere(-1); g_gv.focus_next--; }
+}
+
 static void game_version_section()
 {
     ImGui::Dummy(ImVec2(0, S(10)));
     title("Game Version", 24);
+    if (g_gv.scroll_to) { ImGui::SetScrollHereY(0.0f); g_gv.scroll_to = false; g_gv.focus_next = 30; }
     card_begin("##game_version");
     const json::Value& c = g_gv.check;
     const std::string st = c["state"].str();
@@ -2516,8 +2591,14 @@ static void game_version_section()
     if (st == "v101") {
         text_col(col::ok, "You play v1.01, the official game update, with its 51 additional characters and gameplay "
                           "improvements.");
-        text_col(col::dim, "v1.00 is kept in this installation: switching back takes a moment, and so does coming back.");
-        if (big_button("Switch to v1.00", ImVec2(S(360), 0), Kind::Normal, idle)) gv_switch_to_v100();
+        if (v100_built())
+            text_col(col::dim, "v1.00 is kept in this installation: switching back takes a moment, and so does coming back.");
+        else
+            text_col(col::dim, "v1.00 isn't built in this installation: its files are kept, so it is built from them -- "
+                               "your disc isn't needed. That takes a few minutes; then switching either way takes a moment.");
+        if (big_button(v100_built() ? "Switch to v1.00" : "Install v1.00", ImVec2(S(360), 0), Kind::Normal, idle))
+            gv_switch_to_v100();
+        gv_take_focus();
         if (game_running()) text_col(col::warm, "Close the game first.");
         card_end();
         return;
@@ -2533,9 +2614,10 @@ static void game_version_section()
                         "characters and several gameplay improvements, and v1.00 stays in this installation if you install "
                         "it.");
     if (!kept && !g_gv.full) {
-        if (big_button(g_gv.checking ? "Checking..." : "See what v1.01 needs", ImVec2(S(420), 0), Kind::Primary,
-                       !g_gv.checking))
+        if (big_button(g_gv.checking ? "Checking...###see101" : "See what v1.01 needs###see101", ImVec2(S(420), 0),
+                       Kind::Primary, !g_gv.checking))
             gv_check(true);
+        gv_take_focus();
         text_col(col::dim, "Checks your game, the update package (yours, or Sony's official download), what opens it "
                            "(your keys, or keys downloaded automatically), disk space and permission. Nothing is changed.");
         ImGui::Dummy(ImVec2(0, S(6)));
@@ -2559,12 +2641,9 @@ static void game_version_section()
     if (big_button(kept ? "Switch to v1.01" : "Install v1.01", ImVec2(S(360), S(64)), Kind::Primary, ready && idle)) {
         if (kept) gv_install();
         else
-            ask("Install the official v1.01 update?", "Your saves are backed up first. The update is " +
-                std::string(c["plan"]["source"].str() == "download" ? "downloaded and " : "") +
-                "prepared on this PC: it takes about as long as the first install. Until it is done, and if anything "
-                "goes wrong, your v1.00 game stays as it is and ready to play.", "Install v1.01", false,
-                [] { gv_install(); });
+            gv_offer_confirm();
     }
+    if (ready && idle) gv_take_focus();
     if (!ready) {   // never a greyed button alone: why, and what to do
         text_col(col::warm, "Install isn't possible yet:");
         for (size_t i = 0; i < c["blockers"].size(); i++) text_col(col::text, "- %s", c["blockers"][i].str().c_str());
@@ -2597,11 +2676,11 @@ static void update_offer_card()
     ImGui::Dummy(ImVec2(0, S(6)));
     // the choice first, under the summary: on a 1280x800 screen the list below would leave buttons after it out of
     // the view, where the D-pad can't reach them (the launcher's rule since 0.2.0-beta.5)
-    if (big_button("Install v1.01", ImVec2(S(320), 0), Kind::Primary)) {
-        g_prefs.update_offer = "accepted";
-        g_prefs.save();
-        g_page = kManage;
-        g_focus_page = true;
+    // beta.6 (the owner's playtest): Install v1.01 starts the update here -- its checks, the confirmation, then the
+    // install -- instead of only opening Install / Manage; what stops it is explained, with where to fix it
+    if (big_button(g_gv.checking && g_gv.offer ? "Checking...###offer101" : "Install v1.01###offer101",
+                   ImVec2(S(320), 0), Kind::Primary, !g_gv.checking && !g_op)) {
+        g_gv.offer = true;
         gv_check(true);
     }
     ImGui::SameLine();
@@ -2617,6 +2696,237 @@ static void update_offer_card()
 }
 
 static void gv_refresh() { gv_check(g_gv.full); }
+
+// ============================================================================================================
+// beta.6 (the owner's playtest, 2026-11-27): the choices made before a first install -- the game version and the
+// shaders -- then one continuous install. A US v1.00 disc offers the official v1.01 update as part of the install: the
+// disc's steps, the update's, then ONE build, v1.01's (v1.00 isn't built first: its files are kept, so Game Version
+// builds it later without the disc; "Also build v1.00" builds both). The shaders are prepared at the install's end
+// when chosen, and nothing is asked again after it.
+// ============================================================================================================
+static void upd_args(std::vector<std::string>& a)   // what the player chose for the update (Game Version's remedies)
+{
+    if (!g_gv.pkg.empty()) { a.push_back("--update-pkg"); a.push_back(g_gv.pkg); }
+    if (!g_gv.folder.empty()) { a.push_back("--update-folder"); a.push_back(g_gv.folder); }
+    if (!g_gv.elf.empty()) { a.push_back("--update-elf"); a.push_back(g_gv.elf); }
+}
+
+// the update's checks for this disc and folder before anything is installed (online: Sony's download looked at, the
+// keys that open the update downloaded when this computer has none -- what the install would do first)
+static void upd_check()
+{
+    if (g_wiz.upd_checking || g_wiz.disc.empty()) return;
+    g_wiz.upd_checking = true;
+    g_wiz.upd = json::Value();
+    g_wiz.upd_err.clear();
+    g_wiz.upd_for = g_wiz.disc + "|" + g_wiz.folder;
+    std::vector<std::string> a = disc_args();
+    add_key_args(a);
+    upd_args(a);
+    a.push_back("--install");
+    a.push_back(g_wiz.folder);
+    a.push_back("--planned");
+    run("game-update-check", a, "", false, [](const json::Value& r) {
+        g_wiz.upd_checking = false;
+        if (r["ok"].truthy()) g_wiz.upd = r["data"];
+        else g_wiz.upd_err = r["message"].str("The official update couldn't be checked.");
+    });
+}
+
+static int chosen_version()   // 1 v1.01, 0 v1.00: the player's choice, else v1.01 unless its checks say it can't be
+{
+    if (g_wiz.version >= 0) return g_wiz.version;
+    if (!g_wiz.upd_err.empty() || (!g_wiz.upd.is_null() && !g_wiz.upd["ready"].truthy())) return 0;
+    return 1;
+}
+
+static bool chosen_shaders() { return g_wiz.shaders != 0; }
+
+// why v1.01, chosen, can't be installed yet ("" when it can)
+static std::string version_blocker()
+{
+    if (chosen_version() != 1) return "";
+    if (g_wiz.upd_checking || (g_wiz.upd.is_null() && g_wiz.upd_err.empty()))
+        return "The official update is being checked...";
+    if (!g_wiz.upd_err.empty()) return g_wiz.upd_err + " (Game version)";
+    if (!g_wiz.upd["ready"].truthy())
+        return (g_wiz.upd["blockers"].size() ? g_wiz.upd["blockers"][(size_t)0].str() : std::string("v1.01 can't be installed now.")) +
+               " Choose v1.00 to install the disc's version now (Game version).";
+    return "";
+}
+
+// two buttons, one choice: the chosen one gold, both reachable by left and right
+static bool choice_pair(const char* a, const char* b, bool a_on, int& out)
+{
+    const float gap = ImGui::GetStyle().ItemSpacing.x;
+    const float half = std::min(S(440), (ImGui::GetContentRegionAvail().x - gap) / 2);
+    bool changed = false;
+    if (big_button(a, ImVec2(half, 0), a_on ? Kind::Primary : Kind::Normal)) { out = 1; changed = true; }
+    ImGui::SameLine();
+    if (big_button(b, ImVec2(half, 0), a_on ? Kind::Normal : Kind::Primary)) { out = 0; changed = true; }
+    return changed;
+}
+
+static void install_choices()
+{
+    ImGui::Dummy(ImVec2(0, S(6)));
+    title("Before installing", 24);
+    card_begin("##choices");
+    // the game version
+    title("Game version", 22);
+    const int v = chosen_version();
+    choice_pair("v1.01 (recommended)###ver101", "v1.00###ver100", v == 1, g_wiz.version);
+    const json::Value& u = g_wiz.upd;
+    if (v == 1) {
+        text_col(col::text, "The official update: 51 more characters, an improved New Game+, easier Dash Circuit times and "
+                            "the missing loading-screen art.");
+        if (g_wiz.upd_checking || (u.is_null() && g_wiz.upd_err.empty()))
+            text_col(col::dim, "Checking the official update -- on this computer, or Sony's download...");
+        else if (!g_wiz.upd_err.empty()) {
+            text_col(col::danger, "%s", g_wiz.upd_err.c_str());
+            if (big_button("Check again###updagain", ImVec2(S(420), 0))) upd_check();
+        } else if (u["ready"].truthy()) {
+            const std::string src = u["plan"]["source"].str();
+            std::string how = src == "download" ? "It is downloaded from Sony and checked" :
+                              "The update package found " + u["plan"]["how"].str() + " is used";
+            text_col(col::ok, "%s, then the game is built as v1.01 directly: one build, not v1.00 first.", how.c_str());
+            if (!g_wiz.also_v100)
+                text_col(col::dim, "v1.00 isn't built, but its files are kept: Install / Manage > Game Version can add it "
+                                   "later without your disc.");
+            if (big_button(g_wiz.also_v100 ? "Also build v1.00: Yes###alsov100" : "Also build v1.00: No###alsov100",
+                           ImVec2(S(420), 0)))
+                g_wiz.also_v100 = !g_wiz.also_v100;
+            if (g_wiz.also_v100)
+                text_col(col::dim, "Both versions are built (about twice as long): switching between them is then instant.");
+        } else {
+            text_col(col::warm, "v1.01 can't be installed now:");
+            for (size_t i = 0; i < u["blockers"].size(); i++) text_col(col::text, "- %s", u["blockers"][i].str().c_str());
+            std::set<std::string> shown = { "continue_v100" };   // v1.00 is the button above
+            for (size_t i = 0; i < u["checks"].size(); i++) {
+                const json::Value& k = u["checks"][i];
+                if (k["status"].str() != "ok")
+                    for (size_t j = 0; j < k["remedies"].size(); j++) gv_remedy(k["remedies"][j].str(), shown, [] { upd_check(); });
+            }
+            ImGui::NewLine();
+            text_col(col::dim, "Or choose v1.00: the disc's version is installed now, and v1.01 can be added later from "
+                               "Install / Manage > Game Version.");
+        }
+    } else {
+        text_col(col::text, "The disc's version, complete and fully supported. The official update can be added later "
+                            "from Install / Manage > Game Version.");
+        if (!u.is_null() && !u["ready"].truthy() && g_wiz.version < 0)   // chosen for the player: say why
+            text_col(col::dim, "v1.01 can't be installed now: %s",
+                     u["blockers"].size() ? u["blockers"][(size_t)0].str().c_str() : "its checks didn't pass.");
+    }
+    // the shaders
+    ImGui::Dummy(ImVec2(0, S(8)));
+    title("Shaders", 22);
+    int sh = chosen_shaders() ? 1 : 0;
+    if (choice_pair("Prepare them (recommended)###sh1", "Not now###sh0", sh == 1, sh)) g_wiz.shaders = sh;
+    text_col(col::dim, chosen_shaders() ? "Prepared right after the game is built, before you play: it avoids stutters "
+                                          "the first time each effect appears."
+                                        : "They're prepared as you play instead, which can stutter the first time each "
+                                          "effect appears. Shaders, on this page, prepares or rebuilds them at any time.");
+    card_end();
+}
+
+// the install itself: one worker run for the version chosen, the shaders at its end when chosen
+static void start_install(int version, bool also_v100, bool shaders, bool resume)
+{
+    if (!same_folder(g_wiz.folder, g_root)) {   // installed elsewhere: that folder is the root from now on
+        g_root = g_wiz.folder;
+        remember_root(g_root);
+    }
+    g_prefs.save();
+    std::vector<std::string> a = disc_args();
+    {   // the source the check found (the worker checks it again), else every source as the check had them
+        const std::string via = g_wiz.keys_info["via"].str(), src = g_wiz.keys_info["source"].str();
+        if (via == "rpcs3") { a.push_back("--rpcs3"); a.push_back(src); }
+        else if (g_wiz.keys_info["found"].str() != "together" && !src.empty() &&
+                 std::find(a.begin(), a.end(), "--keys") == a.end()) { a.push_back("--keys"); a.push_back(src); }
+        else add_key_args(a);
+    }
+    a.push_back("--install");
+    a.push_back(g_wiz.folder);
+    if (resume) a.push_back("--resume");
+    a.push_back("--game-version");
+    a.push_back(version == 1 ? "v101" : "v100");
+    if (version == 1) {
+        if (also_v100) a.push_back("--also-v100");
+        upd_args(a);
+    }
+    if (!shaders) a.push_back("--no-prepare");   // chosen: the worker prepares them as the install's last step
+    const std::string what = version == 1 ? "Installing 3D Dot Game Heroes v1.01" : "Installing 3D Dot Game Heroes";
+    run("install", a, what, true, [version, also_v100, shaders](const json::Value& r) {
+        {   // a typed disc key's file: gone once the install is over (keys are never kept)
+            std::error_code ec;
+            const fs::path typed = u8path(data_dir()) / "disc-key.txt";
+            if (u8path(g_wiz.disc_key) == typed) { fs::remove(typed, ec); g_wiz.disc_key.clear(); }
+        }
+        const std::string code = r["code"].str();
+        if (r["ok"].truthy()) {
+            write_text(game_update_marker(), CUBIC_VERSION "\n");
+            g_prefs.update_offer = version == 1 ? "accepted" : "declined";   // answered here: Play doesn't offer it again
+            const bool prepared = shaders && r["data"]["prepared"].size() > 0 && r["data"]["prepared"]["error"].is_null();
+            if (prepared) g_prefs.prepared_once = true;
+            g_prefs.save();
+            // the answer kept (Settings shows it): after updates and repairs, the shaders as the player chose here
+            run("settings", { "--install", install_dir(), "--set", std::string("LAUNCHER_SHADERS_AFTER_UPDATE=") +
+                              (shaders ? "1" : "0"), "--set", std::string("LAUNCHER_SHADERS_ON_DRIVER_CHANGE=") +
+                              (shaders ? "1" : "0") },
+                "", false, [](const json::Value& s) { if (s["ok"].truthy()) set_settings(s["data"]); });
+            g_page = kPlay;
+            g_focus_page = true;
+            g_msg = { true, version == 1 ? "v1.01 is installed and ready to play" : "The game is installed and ready to play",
+                      std::string(version == 1 ? "3D Dot Game Heroes with the official v1.01 update" : "3D Dot Game Heroes v1.00") +
+                      " is installed." + (version == 1 && also_v100 ? " v1.00 is built too: Install / Manage > Game "
+                                                                       "Version switches between them in a moment." : "") +
+                      (prepared ? " Its shaders are prepared for this PC." : shaders ? " Its shaders couldn't be prepared "
+                       "now: the game prepares them as you play (Shaders, on Install / Manage, tries again)." : ""),
+                      "", false, false };
+        } else if (version == 1 && code.rfind("update_", 0) == 0) {
+            // the update failed after the disc's steps: v1.00 now without the disc again, or v1.01 again from the page
+            refresh_info();
+            if (also_v100) {
+                g_msg = { true, "v1.00 is installed; v1.01 wasn't added", r["message"].str("The official update couldn't "
+                          "be installed.") + "\n\nYour v1.00 game is installed and ready to play. Install / Manage > Game "
+                          "Version adds v1.01 when it can be installed.", r["details"].str(), true, false };
+            } else {
+                ask("The official update couldn't be installed", r["message"].str("Something went wrong.") +
+                    "\n\nYour disc's files are checked and kept in the installation. Install v1.00 now -- the disc isn't "
+                    "read again -- and add v1.01 later from Install / Manage > Game Version; or choose v1.01 again on "
+                    "this page once the update can be installed.", "Install v1.00 now", false, [shaders] {
+                    g_wiz.version = 0;
+                    start_install(0, false, shaders, true);
+                });
+                g_confirm.no = "Not Now";
+                g_confirm.focus_yes = true;
+            }
+        } else if (code != "cancelled") show_result_error(r, "The install didn't finish");
+        refresh_info();
+        g_wiz.upd = json::Value();   // looked at again for what is there now
+        g_wiz.upd_for.clear();
+    });
+}
+
+// the confirmation: what is installed, from where, into where, and what follows
+static void confirm_install(bool resume)
+{
+    const int v = chosen_version();
+    const bool also = v == 1 && g_wiz.also_v100, sh = chosen_shaders();
+    const std::string plan = v == 1 ? std::string(g_wiz.upd["plan"]["source"].str() == "download"
+                                                      ? "The official v1.01 update is downloaded from Sony and checked, then "
+                                                      : "The official v1.01 update you have is checked, then ") +
+                                          (also ? "both versions are built: v1.00, then v1.01." :
+                                                  "the game is built as v1.01 (v1.00's files are kept, not built).")
+                                    : std::string("The game is built as v1.00, the disc's version.");
+    ask(v == 1 ? "Install 3D Dot Game Heroes v1.01?" : "Install 3D Dot Game Heroes v1.00?",
+        "From: " + g_wiz.disc + "\nInto: " + g_wiz.folder + "\n\n" + plan +
+        (sh ? " Then the shaders are prepared for this PC." : " The shaders aren't prepared now.") +
+        "\n\nIt takes a few minutes, in one go: your disc is only read. When it's done, the game is ready to play.",
+        resume ? "Continue the install" : "Install", false, [v, also, sh, resume] { start_install(v, also, sh, resume); });
+    g_confirm.focus_yes = true;
+}
 
 // the game's program keys chosen by hand (the owner, 2026-11-27): out of the numbered steps, under Advanced -- a keys
 // file, a folder or ZIP of key files, an EBOOT.elf the player decrypted, or their RPCS3. Open by itself when the keys
@@ -2674,6 +2984,7 @@ static void keys_advanced(bool keys_failed)
 
 static void page_manage()
 {
+    if (g_gv.scroll_to || g_gv.focus_next > 0) g_focus_page = false;   // Game Version's button takes the focus, not the first
     title("Install / Manage");
     const std::string kind = g_st.info["kind"].str();
     if (g_wiz.folder.empty()) { g_wiz.folder = install_dir(); check_space(); }
@@ -2748,12 +3059,22 @@ static void page_manage()
             check_space();
         });
     });
+    // beta.6: a first install's choices (a repair keeps the version installed): the game version -- the official update
+    // is checked for this disc and folder as soon as the disc is -- and the shaders
+    std::string version_why;
+    if (kind != "slots" && disc_ok) {
+        if (g_wiz.upd_for != g_wiz.disc + "|" + g_wiz.folder && !g_wiz.upd_checking) upd_check();
+        install_choices();
+        version_why = version_blocker();
+    }
     ImGui::Dummy(ImVec2(0, S(6)));
-    const bool ready = disc_ok && keys_ok && space_ok;
-    if (!ready) install_blockers(disc_ok, keys_ok, space_ok);   // issue #13: never a greyed button alone
+    const bool ready = disc_ok && keys_ok && space_ok && version_why.empty();
+    if (!ready) install_blockers(disc_ok, keys_ok, space_ok, version_why);   // issue #13: never a greyed button alone
     const bool resume = g_st.info["kind"].str() == "partial" && g_wiz.folder == install_dir();
-    if (big_button(resume ? "Continue the install" : (kind == "slots" ? "Repair from the disc" : "Install"),
-                   ImVec2(S(360), S(64)), Kind::Primary, ready)) {
+    if (kind != "slots") {
+        if (big_button(resume ? "Continue the install" : "Install", ImVec2(S(360), S(64)), Kind::Primary, ready))
+            confirm_install(resume);
+    } else if (big_button("Repair from the disc", ImVec2(S(360), S(64)), Kind::Primary, ready)) {
         if (!same_folder(g_wiz.folder, g_root)) {   // installed elsewhere: that folder is the root from now on
             g_root = g_wiz.folder;
             remember_root(g_root);

@@ -241,7 +241,34 @@ def hard_exit(code):
 
 
 def step_name(s):
-    return pipeline.STEP_NAMES.get(s) or STEP_NAMES_M9.get(s, s)
+    base, _, version = s.partition(":")   # beta.6: "build:v100" -- v1.00's build in an install of both versions
+    name = pipeline.STEP_NAMES.get(base) or STEP_NAMES_M9.get(base, base)
+    return f"{name} (v1.00)" if version == "v100" else name
+
+
+def step_base(s):
+    return s.partition(":")[0]
+
+
+class VersionSteps:
+    """one game version's build steps under their own ids (beta.6, an install of both versions: v1.00's build, then
+    v1.01's): "recomp" reported as "recomp:v100", and so on; the disc's steps, shared, keep theirs"""
+    RENAMED = ("recomp", "spu", "build", "finish", "validate", "activate", "prepare")
+
+    def __init__(self, prog, version):
+        self.prog, self.control, self.suffix = prog, prog.control, ":" + version
+
+    def _id(self, step):
+        return step + self.suffix if step in self.RENAMED else step
+
+    def progress(self, step, frac, message):
+        self.prog.progress(self._id(step), frac, message)
+
+    def log(self, text):
+        self.prog.log(text)
+
+    def skip(self, step):
+        self.prog.skip(self._id(step))
 
 
 class Callbacks:
@@ -290,7 +317,7 @@ class Progress:
         self.ev, self.control = events, control
         self.now = clock
         self.stages = list(stages)
-        self.weight = {s: STAGE_SECONDS.get(s, 10.0) for s in self.stages}
+        self.weight = {s: STAGE_SECONDS.get(step_base(s), 10.0) for s in self.stages}
         self.state = {s: "pending" for s in self.stages}
         self.took = {}
         self.cur = None
@@ -326,7 +353,8 @@ class Progress:
     def speed(self):
         """this PC against the reference, from the compute-bound steps finished here (the disc's steps are
         bound by the drive, not the processor: they say nothing of the build's pace); None until one is done"""
-        done = [s for s in self.stages if s in CPU_STAGES and self.state[s] == "done" and self.took.get(s, 0) > 1]
+        done = [s for s in self.stages if step_base(s) in CPU_STAGES and self.state[s] == "done" and
+                self.took.get(s, 0) > 1]
         ref = sum(self.weight[s] for s in done)
         return min(4.0, max(0.25, sum(self.took[s] for s in done) / ref)) if ref else None
 
@@ -339,7 +367,7 @@ class Progress:
         if not self.cur or self.state.get(self.cur) != "running":
             return None, None
         sp = self.speed()
-        scale = (lambda s: (sp if s in CPU_STAGES else 1.0)) if sp else (lambda s: 1.0)
+        scale = (lambda s: (sp if step_base(s) in CPU_STAGES else 1.0)) if sp else (lambda s: 1.0)
         el = self.now() - self.cur_t0
         left_by_weight = self.weight[self.cur] * scale(self.cur) - el
         if self.frac is not None and self.frac >= 0.15 and el >= 1.0:
@@ -602,10 +630,12 @@ def cmd_game_update_check(a, ev, control):
     computer has none (pinned sources; --no-key-download: not). Keys are never put into an event."""
     import update_preflight
     keys = a.keys or (a.key_source[0] if a.key_source else None)
+    work = os.path.join(os.path.abspath(a.install), "data", "tmp")
     return update_preflight.preflight(os.path.abspath(a.install), disc=a.disc, pkg=a.update_pkg,
                                       folder=a.update_folder, elf=a.update_elf, keys=keys, rpcs3=a.rpcs3,
                                       online=not a.offline, key_download_allowed=not a.no_key_download,
-                                      work_dir=os.path.join(os.path.abspath(a.install), "data", "tmp"))
+                                      work_dir=work if os.path.isdir(work) else None, planned=a.planned,
+                                      disc_key=disc_key(a) if a.planned else None)
 
 
 def cmd_space(a, ev, control):
@@ -774,22 +804,74 @@ def build_slot(lay, prog, source=None, keys=None, elf=None, full=False, resume=F
         raise
 
 
-def op_install(install, source, keys, elf, prog, resume=False, validate=validate_build, prepare=True, disc_key=None):
+def op_install(install, source, keys, elf, prog, resume=False, validate=validate_build, prepare=True, disc_key=None,
+               game_version=None, also_v100=False, update=None):
     """a first install, a reinstall or a repair from the disc: the disc's steps, then a new build (the saves, the
-    settings and the kept builds untouched)"""
+    settings and the kept builds untouched). game_version (beta.6): None, the version the install plays now (a
+    repair keeps it; v1.00 for a first install); "v100", the disc's; "v101", the official update installed with the
+    disc in one run (op_install_v101). update: v1.01's inputs (pkg, folder, elf, sources, online,
+    key_download_allowed)."""
     lay = layout.Layout(install)
     if lay.kind() == "setup-app":
         raise pipeline.SetupError("This folder holds an install made by the setup app: migrate it (no need to "
                                   "choose the disc again).", "needs_migration")
     check_writable(install, create=True)
-    check_space(install, NEEDED["install"])
+    check_space(install, NEEDED["install"] + (NEEDED["update"] if game_version == "v101" and also_v100 else 0))
+    if game_version == "v101":
+        return op_install_v101(lay, source, keys, elf, prog, resume, validate, prepare, disc_key, also_v100,
+                               update or {})
     bid, info, _ = build_slot(lay, prog, source, keys, elf, resume=resume, validate=validate, disc_key=disc_key,
-                              program=kept_program(lay))
+                              program=None if game_version == "v100" else kept_program(lay))
     game_settings.settle_after_conversion(install)
     pruned = lay.prune()
     prepared = prepare_after(lay, prog, validate, prepare)
     return {"build": bid, "exe": os.path.join(lay.game_link, layout.exe_name()), "pruned": pruned["removed"],
-            "prepared": prepared}
+            "prepared": prepared, "game_version": "v101" if active_program(lay) else "v100"}
+
+
+def op_install_v101(lay, source, keys, elf, prog, resume, validate, prepare, disc_key, also_v100, update):
+    """beta.6 (the owner, 2026-11-27): the game installed as v1.01 in one run. The disc's steps (checked, extracted,
+    its program decrypted and kept), then the official update's (its files downloaded or the player's, checked, its
+    program decrypted and checked against its pin), then ONE build: v1.01's. v1.00 isn't built: its program is kept
+    in the installation, so Game Version builds it later without the disc. also_v100: both versions -- v1.00 built
+    first (made active, so a failure of the update leaves a playable v1.00), then v1.01; the disc's copy, the keys,
+    Zig's caches and the shader cache are shared. A failure after the disc's steps raises an update_* error (the
+    disc's steps are kept: `install --resume`, with v1.00 or v1.01 again, doesn't redo them)."""
+    import update_preflight
+    install, pid = lay.root, update_preflight.UPDATE_ID
+    built_v100 = None
+    if also_v100:
+        built_v100, _, _ = build_slot(lay, VersionSteps(prog, "v100"), source, keys, elf, resume=resume,
+                                      validate=validate, disc_key=disc_key, program=None)
+        game_settings.settle_after_conversion(install)
+    else:
+        pipeline.run(install, source=source, keys=keys, elf=elf, progress=prog.progress, log=prog.log, skip=prog.skip,
+                     resume=resume, disc_key=disc_key, disc_only=True)
+        prog.control.check()
+    sources = update.get("sources")
+    online = update.get("online", True)
+    allowed = update.get("key_download_allowed", True)
+    work = os.path.join(lay.data, "tmp")
+    os.makedirs(work, exist_ok=True)
+    pf = update_preflight.preflight(install, disc=source, pkg=update.get("pkg"), folder=update.get("folder"),
+                                    elf=update.get("elf"), keys=sources.chosen if sources else None,
+                                    rpcs3=sources.rpcs3 if sources else None, online=online, work_dir=work,
+                                    key_download_allowed=allowed)
+    if not pf["ready"]:
+        raise pipeline.SetupError(pf["blockers"][0] if pf["blockers"] else "The update can't be installed now.",
+                                  "update_not_ready", json.dumps({"checks": pf["checks"]}))
+    plan = pf["plan"]
+    backup = None
+    if not built_v100 and active_program(lay) != pid and os.path.isdir(lay.gamedata) and os.listdir(lay.gamedata):
+        backup = lay.backup_saves("before-update")   # a reinstall over saves: backed up, as an update does
+    downloaded_pkg = _stage_update(install, prog, plan, sources, online, allowed)
+    bid, info, _ = build_slot(lay, prog, validate=validate, program=pid)
+    game_settings.settle_after_conversion(install)
+    _update_recorded(lay, plan, downloaded_pkg)
+    prepared = prepare_after(lay, prog, validate, prepare)
+    return {"build": bid, "exe": os.path.join(lay.game_link, layout.exe_name()), "program": pid, "game_version": "v101",
+            "v100_build": built_v100, "saves_backup": backup and backup["id"], "prepared": prepared, "plan": plan,
+            "official_content": sync_official_content(lay)}
 
 
 # M9.2: the shaders and pipelines made before play (the game's `--prepare`: its recipes, recorded as the game
@@ -1060,52 +1142,18 @@ def op_update(install, prog, full=False, validate=validate_build, prepare=True):
 UPDATE_STEPS = ["update-download", "update-extract", "update-decrypt"]
 
 
-def op_game_update(install, prog, pkg=None, folder=None, elf=None, sources=None, disc=None, online=True,
-                   key_download_allowed=True, validate=validate_build, prepare=True):
-    """the official v1.01 update installed (beta.6, the owner's requirement of 2026-11-25): the checks first (an
-    update that can't be installed changes nothing and says why), the saves backed up, the update's files staged
-    and checked (downloaded from Sony, or from the player's package or update folder), its program decrypted (the
-    player's keys, else the keys downloaded automatically, else their RPCS3 or a decrypted program they chose) and
-    checked against its pin, the folder put in place (data/official/<id>, apart from the saves), then the v1.01
-    program built into a new slot, checked and made active -- the v1.00 build kept for the switch back. Any failure
-    leaves v1.00 active and playable; the staging is removed, and what was verified is kept for the next attempt.
-    A kept v1.01 build (the player switched back) is made active again at once."""
+def _stage_update(install, prog, plan, sources, online, key_download_allowed):
+    """the official update's files staged and checked, its program decrypted (the player's keys, else the keys
+    downloaded automatically, else their RPCS3 or a decrypted program they chose) and checked against its pin, then
+    put in place (data/official/<id>); nothing done again that an earlier attempt finished. Returns the package
+    downloaded now (removed by the caller once the build is made), or None."""
     import game_update
     import key_sources
     import official_update
     import update_preflight
-    lay = layout.Layout(install)
-    if lay.kind() != "slots":
-        raise pipeline.SetupError("Install the game first: the update is added to an installed v1.00 game.",
-                                  "no_install")
-    check_writable(install)
     pid = update_preflight.UPDATE_ID
-    state = update_preflight.game_state(install)["state"]
-    if state == "v101":
-        return {"already": True, "build": lay.read_active()["active"], "official_content": sync_official_content(lay)}
-    if state != "v100":
-        raise pipeline.SetupError("This installation isn't the US release of 3D Dot Game Heroes (BLUS-30490) v1.00, "
-                                  "which the official update is for.", "update_unsupported")
-    kept = lay.newest_of(pid)
-    if kept and official_update.prepared(install, pid):   # built before: the switch, nothing rebuilt
-        for s in UPDATE_STEPS + pipeline.STEPS + ["validate", "prepare"]:
-            prog.skip(s)
-        prog.progress("activate", 0.0, STEP_NAMES_M9["activate"])
-        lay.activate(kept)
-        content = sync_official_content(lay)
-        refresh_game_appimage(lay, prog.log)
-        prog.progress("activate", 1.0, STEP_NAMES_M9["activate"])
-        return {"build": kept, "switched": True, "official_content": content}
-    work = os.path.join(lay.data, "tmp")
+    work = os.path.join(install, "data", "tmp")
     os.makedirs(work, exist_ok=True)
-    pf = update_preflight.preflight(install, disc=disc, pkg=pkg, folder=folder, elf=elf,
-                                    keys=sources.chosen if sources else None, rpcs3=sources.rpcs3 if sources else None,
-                                    online=online, work_dir=work, key_download_allowed=key_download_allowed)
-    if not pf["ready"]:
-        raise pipeline.SetupError(pf["blockers"][0] if pf["blockers"] else "The update can't be installed now.",
-                                  "update_not_ready", json.dumps({"checks": pf["checks"]}))
-    plan = pf["plan"]
-    backup = lay.backup_saves("before-update") if os.path.isdir(lay.gamedata) and os.listdir(lay.gamedata) else None
     official_update.clean_staging(install)
     downloaded_pkg = None
     if official_update.prepared(install, pid):   # an earlier attempt finished these steps
@@ -1159,15 +1207,72 @@ def op_game_update(install, prog, pkg=None, folder=None, elf=None, sources=None,
         finally:
             if os.path.isdir(staging):
                 layout.rmtree(staging)
-    bid, info, changed = build_slot(lay, prog, validate=validate, program=pid)
+    return downloaded_pkg
+
+
+def _update_recorded(lay, plan, downloaded_pkg):
+    """after the update's build became active: what no build uses removed, the downloaded package too (its files are
+    in place: the 186 MB package isn't needed), and the update recorded in install.json"""
+    import update_preflight
     lay.prune()
     lay.prune_backups()
-    if downloaded_pkg and os.path.isfile(downloaded_pkg):   # its files are in place: the 186 MB package isn't needed
+    if downloaded_pkg and os.path.isfile(downloaded_pkg):
         os.remove(downloaded_pkg)
-    rec = pipeline.install_info(install) or {}
-    rec["game_update"] = {"program": pid, "installed": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                          "source": plan.get("source"), "decrypt": plan.get("decrypt")}
+    rec = pipeline.install_info(lay.root) or {}
+    rec["game_update"] = {"program": update_preflight.UPDATE_ID, "source": plan.get("source"),
+                          "installed": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "decrypt": plan.get("decrypt")}
     layout.write_json(lay.install_json, rec)
+
+
+def op_game_update(install, prog, pkg=None, folder=None, elf=None, sources=None, disc=None, online=True,
+                   key_download_allowed=True, validate=validate_build, prepare=True):
+    """the official v1.01 update installed (beta.6, the owner's requirement of 2026-11-25): the checks first (an
+    update that can't be installed changes nothing and says why), the saves backed up, the update's files staged
+    and checked (downloaded from Sony, or from the player's package or update folder), its program decrypted (the
+    player's keys, else the keys downloaded automatically, else their RPCS3 or a decrypted program they chose) and
+    checked against its pin, the folder put in place (data/official/<id>, apart from the saves), then the v1.01
+    program built into a new slot, checked and made active -- the v1.00 build kept for the switch back. Any failure
+    leaves v1.00 active and playable; the staging is removed, and what was verified is kept for the next attempt.
+    A kept v1.01 build (the player switched back) is made active again at once."""
+    import game_update
+    import key_sources
+    import official_update
+    import update_preflight
+    lay = layout.Layout(install)
+    if lay.kind() != "slots":
+        raise pipeline.SetupError("Install the game first: the update is added to an installed v1.00 game.",
+                                  "no_install")
+    check_writable(install)
+    pid = update_preflight.UPDATE_ID
+    state = update_preflight.game_state(install)["state"]
+    if state == "v101":
+        return {"already": True, "build": lay.read_active()["active"], "official_content": sync_official_content(lay)}
+    if state != "v100":
+        raise pipeline.SetupError("This installation isn't the US release of 3D Dot Game Heroes (BLUS-30490) v1.00, "
+                                  "which the official update is for.", "update_unsupported")
+    kept = lay.newest_of(pid)
+    if kept and official_update.prepared(install, pid):   # built before: the switch, nothing rebuilt
+        for s in UPDATE_STEPS + pipeline.STEPS + ["validate", "prepare"]:
+            prog.skip(s)
+        prog.progress("activate", 0.0, STEP_NAMES_M9["activate"])
+        lay.activate(kept)
+        content = sync_official_content(lay)
+        refresh_game_appimage(lay, prog.log)
+        prog.progress("activate", 1.0, STEP_NAMES_M9["activate"])
+        return {"build": kept, "switched": True, "official_content": content}
+    work = os.path.join(lay.data, "tmp")
+    os.makedirs(work, exist_ok=True)
+    pf = update_preflight.preflight(install, disc=disc, pkg=pkg, folder=folder, elf=elf,
+                                    keys=sources.chosen if sources else None, rpcs3=sources.rpcs3 if sources else None,
+                                    online=online, work_dir=work, key_download_allowed=key_download_allowed)
+    if not pf["ready"]:
+        raise pipeline.SetupError(pf["blockers"][0] if pf["blockers"] else "The update can't be installed now.",
+                                  "update_not_ready", json.dumps({"checks": pf["checks"]}))
+    plan = pf["plan"]
+    backup = lay.backup_saves("before-update") if os.path.isdir(lay.gamedata) and os.listdir(lay.gamedata) else None
+    downloaded_pkg = _stage_update(install, prog, plan, sources, online, key_download_allowed)
+    bid, info, changed = build_slot(lay, prog, validate=validate, program=pid)
+    _update_recorded(lay, plan, downloaded_pkg)
     prepared = prepare_after(lay, prog, validate, prepare)
     return {"build": bid, "program": pid, "saves_backup": backup and backup["id"], "prepared": prepared,
             "official_content": sync_official_content(lay), "plan": plan}
@@ -1275,10 +1380,30 @@ def _progress(ev, control, steps):
     return prog
 
 
+DISC_STEPS = ["verify", "extract", "decrypt"]
+LIFT_STEPS = ["recomp", "spu", "build", "finish"]
+
+
+def install_steps(game_version=None, also_v100=False):
+    """an install's steps, in order: the disc's, then a build (v1.00, or the version kept); with v1.01, the disc's,
+    the update's, then v1.01's build -- and with also_v100, v1.00's build (its own step ids) before the update's"""
+    if game_version != "v101":
+        return pipeline.STEPS + BUILD_TAIL
+    first = [s + ":v100" for s in LIFT_STEPS + ["validate", "activate"]] if also_v100 else []
+    return DISC_STEPS + first + UPDATE_STEPS + LIFT_STEPS + BUILD_TAIL
+
+
 def cmd_install(a, ev, control):
-    prog = _progress(ev, control, pipeline.STEPS + BUILD_TAIL)
-    out = op_install(os.path.abspath(a.install), os.path.abspath(a.disc), key_sources_of(a), None,
-                     prog, resume=a.resume, prepare=not a.no_prepare, disc_key=disc_key(a))
+    """install --game-version v101 (beta.6): v1.01 in one run; --also-v100: both versions; v100: the disc's only;
+    none given: the version the installation plays (a repair keeps it), v1.00 for a first install"""
+    also = bool(getattr(a, "also_v100", False))
+    prog = _progress(ev, control, install_steps(a.game_version, also))
+    sources = key_sources_of(a)
+    update = {"pkg": a.update_pkg, "folder": a.update_folder, "elf": a.update_elf, "sources": sources,
+              "online": not a.offline, "key_download_allowed": not a.no_key_download}
+    out = op_install(os.path.abspath(a.install), os.path.abspath(a.disc), sources, None,
+                     prog, resume=a.resume, prepare=not a.no_prepare, disc_key=disc_key(a),
+                     game_version=a.game_version, also_v100=also, update=update)
     out["seconds"], out["skipped"] = prog.finish()
     return out
 
@@ -2272,7 +2397,13 @@ def parser():
     p.add_argument("--update-folder", help="game-update-check: an installed or extracted v1.01 update the player chose")
     p.add_argument("--update-elf", help="game-update-check: the update's decrypted program the player chose")
     p.add_argument("--offline", action="store_true", help="game-update-check: don't ask Sony's server")
-    p.add_argument("--game-version", choices=("v100", "v101"), help="game-version: the version to make active")
+    p.add_argument("--game-version", choices=("v100", "v101"), help="game-version: the version to make active; "
+                   "install: the version to install (v101: the official update installed with the disc in one run, "
+                   "v1.00 not built)")
+    p.add_argument("--also-v100", action="store_true", help="install --game-version v101: v1.00 built too (both "
+                   "versions kept: switching is instant)")
+    p.add_argument("--planned", action="store_true", help="game-update-check: before the game is installed -- "
+                   "--disc is the disc it will be installed from (the launcher's install page offers v1.01)")
     p.add_argument("--no-key-download", action="store_true", help="probe-keys, install, game-update-check: don't "
                    "download keys (only those on this computer, and those the install downloaded before)")
     p.add_argument("--install")

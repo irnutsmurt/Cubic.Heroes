@@ -220,12 +220,30 @@ def _eboot_from_package(pkg, key):
 
 # ---------------- the checks ----------------
 
+def planned_state(disc, disc_key=None):
+    """beta.6: the game state of an installation not made yet, from the disc it will be installed from (the launcher's
+    install page offers v1.01 with the first install): "v100" when the disc is the supported US release v1.00 (its
+    title, version and program, as the install's check reads them), else "unsupported" with the reason"""
+    import setup_pipeline
+    gv, _, _ = _pins()
+    try:
+        info = setup_pipeline.probe_disc(os.path.abspath(disc), disc_key) if disc else None
+    except setup_pipeline.SetupError as e:
+        return {"state": "unsupported", "packages": [], "record": {}, "planned": True, "reason": str(e)}
+    if not info:
+        return {"state": "unsupported", "packages": [], "record": {}, "planned": True, "reason": "No disc chosen."}
+    return {"state": "v100", "packages": [], "title_id": gv.get("title_id", ""), "region": gv.get("region", ""),
+            "version": "01.00", "record": {}, "planned": True}
+
+
 def preflight(install, disc=None, pkg=None, folder=None, elf=None, keys=None, rpcs3=None, online=True, head=None,
-              work_dir=None, key_download_allowed=True):
+              work_dir=None, key_download_allowed=True, planned=False, disc_key=None):
     """the update's checks for the installation at `install` (see the module's description). pkg / folder / elf /
     keys / rpcs3: what the player chose now (else what the launcher remembers); online False: the official download
     is not looked at and no key is downloaded; key_download_allowed False: no key is downloaded (tests, or the
-    player's choice); head: a function url -> size or None (tests)"""
+    player's choice); head: a function url -> size or None (tests). planned (beta.6): before the game is installed,
+    with the disc it will be installed from (and an encrypted image's disc_key) -- the install page's offer of v1.01;
+    an installation that has the game is checked as it is."""
     install = os.path.abspath(install)
     prefs = launcher_prefs(install)
     up = prefs.get("update") or {}
@@ -235,9 +253,19 @@ def preflight(install, disc=None, pkg=None, folder=None, elf=None, keys=None, rp
     _, v100, v101 = _pins()
     checks, plan = [], {}
     gs = game_state(install)
+    if planned and gs["state"] == "not_installed":
+        gs = planned_state(disc, disc_key)
 
     # 1. the game
-    if gs["state"] == "not_installed":
+    if gs.get("planned"):
+        if gs["state"] == "v100":
+            checks.append(_check("game", "ok", "The game", "Your disc is 3D Dot Game Heroes (US, BLUS-30490) v1.00: the "
+                                 "official v1.01 update can be installed with it.", version="01.00"))
+        else:
+            checks.append(_check("game", "failed", "The game", "The official update can be installed only with the "
+                                 "US release of 3D Dot Game Heroes (BLUS-30490) v1.00.", ["continue_v100"],
+                                 details=gs.get("reason", "")))
+    elif gs["state"] == "not_installed":
         checks.append(_check("game", "missing", "The game", "Install the game first: the update is added to an "
                              "installed v1.00 game.", ["continue_v100"]))
     elif gs["state"] == "unsupported":
@@ -437,10 +465,15 @@ def preflight(install, disc=None, pkg=None, folder=None, elf=None, keys=None, rp
         checks.append(_check("keys", "ok", "Opening the update", "The decrypted v1.01 program you have is used.",
                              details=plan["elf"]))
 
-    # 5. disk space and permission, in the installation's folder
+    # 5. disk space and permission, in the installation's folder (planned: the nearest folder that exists)
+    if gs.get("planned"):
+        plan["planned"] = True
+    at = install
+    while not os.path.isdir(at) and os.path.dirname(at) != at:
+        at = os.path.dirname(at)
     need = _need(install, plan)
     try:
-        free = shutil.disk_usage(install).free
+        free = shutil.disk_usage(at).free
     except OSError:
         free = None
     if free is not None and free < need:
@@ -453,7 +486,7 @@ def preflight(install, disc=None, pkg=None, folder=None, elf=None, keys=None, rp
                              need=need, free=free))
     try:
         d = os.path.join(install, "data")
-        fd, t = tempfile.mkstemp(prefix=".update-check-", dir=d if os.path.isdir(d) else install)
+        fd, t = tempfile.mkstemp(prefix=".update-check-", dir=d if os.path.isdir(d) else at)
         os.close(fd)
         os.remove(t)
         checks.append(_check("write", "ok", "Permission", "The installation's folder can be written."))
@@ -481,6 +514,8 @@ def _need(install, plan):
     its recompiled program and the compilation's working space (at least BUILD_WORK), and a margin"""
     rec = game_update.record()
     man = game_update.load_manifest()
+    if plan.get("planned"):   # before the install: the update's download and files (the build is the install's own)
+        return (rec["size"] if plan.get("source") == "download" else 0) + man["total_size"] + MARGIN
     lay = _read_json(os.path.join(install, "active.json")) or {}
     build = _dir_size(os.path.join(install, "builds", lay["active"])) if lay.get("active") else 0
     lift = (_read_json(os.path.join(install, "data", "install.json")) or {}).get("lift")
