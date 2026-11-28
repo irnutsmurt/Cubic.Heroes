@@ -2278,11 +2278,15 @@ static void keys_failed_lines(bool short_form)
         text_col(col::dim, "%s", g_wiz.keys_err.c_str());
 }
 
+static int chosen_version();
 static void check_space()
 {
     g_wiz.space = json::Value();
     g_wiz.space_err.clear();
-    run("space", { "--install", g_wiz.folder }, "", false, [](const json::Value& r) {
+    // beta.6: v1.01 with v1.00 built too needs room for both builds (the worker checks the same figure)
+    const bool both = g_wiz.also_v100 && chosen_version() == 1 && g_st.info["kind"].str() != "slots";
+    run("space", { "--install", g_wiz.folder, "--for", both ? "install-both" : "install" }, "", false,
+        [](const json::Value& r) {
         if (r["ok"].truthy()) g_wiz.space = r["data"];
         else g_wiz.space_err = r["message"].str();
     });
@@ -2775,7 +2779,8 @@ static void install_choices()
     // the game version
     title("Game version", 22);
     const int v = chosen_version();
-    choice_pair("v1.01 (recommended)###ver101", "v1.00###ver100", v == 1, g_wiz.version);
+    if (choice_pair("v1.01 (recommended)###ver101", "v1.00###ver100", v == 1, g_wiz.version) && g_wiz.also_v100)
+        check_space();
     const json::Value& u = g_wiz.upd;
     if (v == 1) {
         text_col(col::text, "The official update: 51 more characters, an improved New Game+, easier Dash Circuit times and "
@@ -2794,8 +2799,10 @@ static void install_choices()
                 text_col(col::dim, "v1.00 isn't built, but its files are kept: Install / Manage > Game Version can add it "
                                    "later without your disc.");
             if (big_button(g_wiz.also_v100 ? "Also build v1.00: Yes###alsov100" : "Also build v1.00: No###alsov100",
-                           ImVec2(S(420), 0)))
+                           ImVec2(S(420), 0))) {
                 g_wiz.also_v100 = !g_wiz.also_v100;
+                check_space();   // both builds need more room
+            }
             if (g_wiz.also_v100)
                 text_col(col::dim, "Both versions are built (about twice as long): switching between them is then instant.");
         } else {
@@ -2864,17 +2871,21 @@ static void start_install(int version, bool also_v100, bool shaders, bool resume
             if (u8path(g_wiz.disc_key) == typed) { fs::remove(typed, ec); g_wiz.disc_key.clear(); }
         }
         const std::string code = r["code"].str();
-        if (r["ok"].truthy()) {
+        // what an installed game keeps of this install: the marker, and the shaders' answer (Settings shows it: after
+        // updates and repairs, the shaders as the player chose here)
+        auto keep_answers = [shaders] {
             write_text(game_update_marker(), CUBIC_VERSION "\n");
-            g_prefs.update_offer = version == 1 ? "accepted" : "declined";   // answered here: Play doesn't offer it again
-            const bool prepared = shaders && r["data"]["prepared"].size() > 0 && r["data"]["prepared"]["error"].is_null();
-            if (prepared) g_prefs.prepared_once = true;
-            g_prefs.save();
-            // the answer kept (Settings shows it): after updates and repairs, the shaders as the player chose here
             run("settings", { "--install", install_dir(), "--set", std::string("LAUNCHER_SHADERS_AFTER_UPDATE=") +
                               (shaders ? "1" : "0"), "--set", std::string("LAUNCHER_SHADERS_ON_DRIVER_CHANGE=") +
                               (shaders ? "1" : "0") },
                 "", false, [](const json::Value& s) { if (s["ok"].truthy()) set_settings(s["data"]); });
+        };
+        if (r["ok"].truthy()) {
+            g_prefs.update_offer = version == 1 ? "accepted" : "declined";   // answered here: Play doesn't offer it again
+            const bool prepared = shaders && r["data"]["prepared"].size() > 0 && r["data"]["prepared"]["error"].is_null();
+            if (prepared) g_prefs.prepared_once = true;
+            g_prefs.save();
+            keep_answers();
             g_page = kPlay;
             g_focus_page = true;
             g_msg = { true, version == 1 ? "v1.01 is installed and ready to play" : "The game is installed and ready to play",
@@ -2887,7 +2898,10 @@ static void start_install(int version, bool also_v100, bool shaders, bool resume
         } else if (version == 1 && code.rfind("update_", 0) == 0) {
             // the update failed after the disc's steps: v1.00 now without the disc again, or v1.01 again from the page
             refresh_info();
-            if (also_v100) {
+            if (also_v100) {   // v1.00 built first is installed, completed by the worker (its shaders as chosen)
+                keep_answers();   // Play offers v1.01 again (not answered)
+                g_page = kPlay;
+                g_focus_page = true;
                 g_msg = { true, "v1.00 is installed; v1.01 wasn't added", r["message"].str("The official update couldn't "
                           "be installed.") + "\n\nYour v1.00 game is installed and ready to play. Install / Manage > Game "
                           "Version adds v1.01 when it can be installed.", r["details"].str(), true, false };
@@ -3063,7 +3077,9 @@ static void page_manage()
     // is checked for this disc and folder as soon as the disc is -- and the shaders
     std::string version_why;
     if (kind != "slots" && disc_ok) {
-        if (g_wiz.upd_for != g_wiz.disc + "|" + g_wiz.folder && !g_wiz.upd_checking) upd_check();
+        if (g_wiz.upd_for != g_wiz.disc + "|" + g_wiz.folder && !g_wiz.upd_checking && !g_wiz.probing_keys &&
+            (keys_ok || keys_failed))
+            upd_check();
         install_choices();
         version_why = version_blocker();
     }

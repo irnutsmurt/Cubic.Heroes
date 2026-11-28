@@ -53,6 +53,8 @@ class ProgramFake(Fake):
             with open(lay.install_json, "w") as f:
                 json.dump(rec, f)
             return {"disc_only": True, "elf_sha256": self.v100_pin}
+        if program and getattr(self, "fail_program", None) == program:
+            raise pipeline.SetupError("Recompiling the game failed.", "lift_failed")
         if program:
             self.game, self.lift, self.inputs = b"game v1.01", "lift-v101", "inputs-v101"
         else:
@@ -407,6 +409,15 @@ class FirstInstall(Base):
         self.assertTrue(self.fake.calls[-1].get("resume"))
         self.assertEqual(self.builds_of(self.nlay), [""])
 
+    def test_v101_build_failing_is_the_updates(self):
+        """v1.01's build failing after the disc's steps: an update_* error (the launcher offers v1.00), nothing built"""
+        self.fake.fail_program = UP
+        with self.assertRaises(pipeline.SetupError) as c:
+            self.first_install()
+        self.assertEqual(c.exception.code, "update_lift_failed")
+        self.assertEqual(self.nlay.builds(), {})
+        self.assertEqual(pipeline.install_info(self.new)["elf_sha256"], self.v100_pin)
+
     def test_v100_chosen(self):
         out = worker.op_install(self.new, os.path.join(self.d, "disc.iso"), None, None, self.cb, validate=checked,
                                 game_version="v100")
@@ -433,6 +444,61 @@ class FirstInstall(Base):
         # without planned, nothing installed is still "install the game first"
         r = U.preflight(self.new, online=False)
         self.assertEqual(r["state"], "not_installed")
+
+    def test_both_versions_the_update_failing_leaves_v100_installed(self):
+        """the update refused once v1.00 is built: v1.00 active and playable, the failure the update's (update_*)"""
+        with self.assertRaises(pipeline.SetupError) as c:
+            self.first_install(also_v100=True, update={"pkg": self.put_pkg(b"not the package")})
+        self.assertTrue(c.exception.code.startswith("update_"), c.exception.code)
+        self.assertEqual(self.builds_of(self.nlay), [""])
+        self.assertEqual(get(os.path.join(self.nlay.game_link, EXE)), b"game v1.00")
+        self.assertEqual(U.game_state(self.new)["state"], "v100")
+        # a build failure of v1.01 is the update's too
+        self.fake.fail_program = UP
+        with self.assertRaises(pipeline.SetupError) as c:
+            self.first_install(also_v100=True)
+        self.assertEqual(c.exception.code, "update_lift_failed")
+        self.assertEqual(self.nlay.program_of(self.nlay.read_active()["active"]), "")
+
+    def test_the_disc_steps_stay_done_in_the_progress(self):
+        """Linux's review of 972077c: v1.01's build "skips" the disc's steps the install has done -- they stay done,
+        and the bar never goes back"""
+        events = []
+
+        class Ev:
+            def emit(self, ev, **kw):
+                events.append(dict(kw, ev=ev))
+        prog = worker.Progress(Ev(), worker.Callbacks(), worker.install_steps("v101"))
+        for st in ("verify", "extract", "decrypt"):
+            prog.progress(st, 0.0, "x")
+            prog.progress(st, 1.0, "x")
+        prog.progress("update-download", 0.5, "x")
+        before = prog.overall()
+        for st in ("verify", "extract", "decrypt"):
+            prog.skip(st)
+        self.assertGreaterEqual(prog.overall(), before)
+        self.assertFalse([e for e in events if e["ev"] == "stage" and e.get("state") == "skipped"])
+        prog.skip("update-extract")   # a step not done yet is still skipped
+        self.assertEqual(prog.state["update-extract"], "skipped")
+
+    def test_a_cancel_while_preparing_keeps_the_install(self):
+        """stopped during the shaders at an install's end: the build stays made and active, the operation done"""
+        os.makedirs(self.lay.cache, exist_ok=True)
+        open(os.path.join(self.lay.cache, "native-recipes.bin"), "wb").close()
+
+        def stopped(*a, **k):
+            raise pipeline.Cancelled()
+        with mock.patch.object(worker, "op_prepare", stopped), \
+                mock.patch.object(worker, "first_session_recipes", lambda *a: None):
+            out = worker.prepare_after(self.lay, self.cb, worker.validate_build, True)
+        self.assertTrue(out["cancelled"])
+
+    def test_the_space_for_both_versions(self):
+        needs = []
+        with mock.patch.object(worker, "check_space", lambda install, need: needs.append(need)):
+            self.first_install(also_v100=True)
+        self.assertEqual(needs, [worker.NEEDED["install-both"]])
+        self.assertEqual(worker.NEEDED["install-both"], worker.NEEDED["install"] + worker.NEEDED["update"])
 
     def test_the_steps_of_each_install(self):
         self.assertEqual(worker.install_steps(), pipeline.STEPS + worker.BUILD_TAIL)

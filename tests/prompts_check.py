@@ -22,7 +22,9 @@ import sys
 STYLES = ("keyboard", "playstation", "xbox", "nintendo", "steam", "generic")
 
 
-NAMING = ("CharSelect/SelectCharacter", "NameEntry/NameEntry")   # the screens of tests/scripts/prompts_naming.drive
+# the screens of tests/scripts/prompts_naming.drive, as "[prompts] redrawn:" names them: the texture's own name in
+# port/prompts_table.cpp (its package is CharSelect/SelectCharacter, NameEntry/NameEntry)
+NAMING = ("selectcharacter", "nameentry")
 
 
 def check(run, style, naming=False):

@@ -70,6 +70,7 @@ STAGE_SECONDS = {"verify": 15.0, "extract": 25.0, "decrypt": 1.0, "recomp": 40.0
 CPU_STAGES = {"recomp", "spu", "build"}   # bound by the processor (the others by the drive)
 # What an operation needs on the install's drive (bytes; measured, section 6)
 NEEDED = {"install": 6 << 30, "update": 3 << 29}
+NEEDED["install-both"] = NEEDED["install"] + NEEDED["update"]   # beta.6: v1.01 with v1.00 built too
 DISK_FULL_ERRNO = {28}          # ENOSPC
 DISK_FULL_WINERROR = {39, 112}  # ERROR_HANDLE_DISK_FULL, ERROR_DISK_FULL
 
@@ -403,7 +404,9 @@ class Progress:
 
     def skip(self, step):
         self.control.check()
-        if step == self.cur or step not in self.state:
+        # a step done stays done: an install of v1.01 runs the disc's steps, then v1.01's build "skips" them (it has
+        # no disc to read) -- marked skipped, they left the bar's total and it went back (Linux's review of 972077c)
+        if step == self.cur or step not in self.state or self.state[step] == "done":
             return
         self.state[step] = "skipped"
         self.ev.emit("stage", id=step, state="skipped")
@@ -816,7 +819,7 @@ def op_install(install, source, keys, elf, prog, resume=False, validate=validate
         raise pipeline.SetupError("This folder holds an install made by the setup app: migrate it (no need to "
                                   "choose the disc again).", "needs_migration")
     check_writable(install, create=True)
-    check_space(install, NEEDED["install"] + (NEEDED["update"] if game_version == "v101" and also_v100 else 0))
+    check_space(install, NEEDED["install-both" if game_version == "v101" and also_v100 else "install"])
     if game_version == "v101":
         return op_install_v101(lay, source, keys, elf, prog, resume, validate, prepare, disc_key, also_v100,
                                update or {})
@@ -836,9 +839,10 @@ def op_install_v101(lay, source, keys, elf, prog, resume, validate, prepare, dis
     in the installation, so Game Version builds it later without the disc. also_v100: both versions -- v1.00 built
     first (made active, so a failure of the update leaves a playable v1.00), then v1.01; the disc's copy, the keys,
     Zig's caches and the shader cache are shared. A failure after the disc's steps raises an update_* error (the
-    disc's steps are kept: `install --resume`, with v1.00 or v1.01 again, doesn't redo them)."""
-    import update_preflight
-    install, pid = lay.root, update_preflight.UPDATE_ID
+    disc's steps are kept: `install --resume`, with v1.00 or v1.01 again, doesn't redo them). With both versions, a
+    failure of the update leaves v1.00 installed and completed (its shaders prepared when chosen), and is an
+    update_* error."""
+    install = lay.root
     built_v100 = None
     if also_v100:
         built_v100, _, _ = build_slot(lay, VersionSteps(prog, "v100"), source, keys, elf, resume=resume,
@@ -848,6 +852,23 @@ def op_install_v101(lay, source, keys, elf, prog, resume, validate, prepare, dis
         pipeline.run(install, source=source, keys=keys, elf=elf, progress=prog.progress, log=prog.log, skip=prog.skip,
                      resume=resume, disc_key=disc_key, disc_only=True)
         prog.control.check()
+    try:
+        return _install_v101_update(lay, source, prog, validate, prepare, update, built_v100)
+    except pipeline.SetupError as e:
+        # past the disc's steps every failure is the update's (update_*: v1.01's build failing included), so the
+        # launcher offers v1.00 from the disc's steps kept; with both versions, v1.00 built and active is completed
+        # as an install of it would be (its shaders prepared when chosen), and the launcher says it is installed
+        if built_v100:
+            prepare_after(lay, prog, validate, prepare)
+        code = e.code if (e.code or "").startswith("update_") else "update_" + (e.code or "failed")
+        raise pipeline.SetupError(str(e), code, e.details) from None
+
+
+def _install_v101_update(lay, source, prog, validate, prepare, update, built_v100):
+    """op_install_v101 once the disc's steps (and with both versions, v1.00's build) are done: the update's checks,
+    its files and program, v1.01's build"""
+    import update_preflight
+    install, pid = lay.root, update_preflight.UPDATE_ID
     sources = update.get("sources")
     online = update.get("online", True)
     allowed = update.get("key_download_allowed", True)
@@ -1117,6 +1138,8 @@ def prepare_after(lay, prog, validate, enabled=True):
     except pipeline.SetupError as e:
         prog.log(f"preparation: {e} ({e.details or ''})"[:2000])
         return {"error": str(e)}
+    except pipeline.Cancelled:   # stopped while preparing: the build is made and active -- the operation isn't undone,
+        return {"error": "stopped", "cancelled": True}   # what was prepared is kept; the game prepares the rest
 
 
 def op_update(install, prog, full=False, validate=validate_build, prepare=True):
