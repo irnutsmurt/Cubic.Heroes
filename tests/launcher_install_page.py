@@ -87,9 +87,10 @@ def pick(name):   # a file in the browser shown
     return f"seek 600 down browse: {name}\nexpect browse: {name}\nshot browser\na\nwait 20\nsettle {LONG}\n"
 
 
-TWO = ("expect Choose...\nsee Your disc\ndown\nwait 20\nexpect Choose...\nsee Where to install\n"
-       f"settle {50000000}\ndown\nwait 20\nexpect v1.00|v1.01\nsee Before installing\nseek 600 down Install\n"
-       "expect Install\nshot install\n")
+# the two steps, down to the choices made before installing (the focus on the version's row), then Install
+TO_CHOICES = ("expect Choose...\nsee Your disc\ndown\nwait 20\nexpect Choose...\nsee Where to install\n"
+              f"settle {50000000}\ndown\nwait 20\nexpect v1.00|v1.01\nsee Before installing\n")
+TWO = TO_CHOICES + "seek 600 down Install\nexpect Install\nshot install\n"
 BLOCKED = ("seek 600 down Advanced: your own program keys\nexpect Advanced: your own program keys\nshot install\n"
            "see Install can't start yet\nquit\n")
 FAILED = ("shot status\nseek 600 down Look for the keys again\nexpect Look for the keys again\nshot failed\n"
@@ -132,9 +133,10 @@ CHOICES_ONLINE = (f"settle {LONG}\nwait 60\nseek 600 down v1.00|v1.01\nseek 100 
                   "wait 20\nseek 600 down Also build v1.00\nexpect Also build v1.00\nseek 600 down Install\nexpect Install\n"
                   "a\nwait 60\nsee Install 3D Dot Game Heroes v1.01?\nshot confirm\nwait 20\nb\nwait 60\n"
                   f"settle {LONG}\nreach 60000\nquit\n")
-# v1.00 and no shaders chosen by the D-pad, then the install
-PICK_V100 = ("seek 600 down v1.00\nexpect v1.00\na\nwait 20\nseek 600 down Not now|Prepare\nseek 100 right Not now\n"
-             "expect Not now\na\nwait 20\nseek 600 down Install\nexpect Install\n")
+# v1.00 and no shaders chosen by the D-pad on the way down (TO_CHOICES leaves the focus on the version's row,
+# v1.00 by the right-hand step above it), then Install
+PICK_V100 = ("seek 100 right v1.00\nexpect v1.00\na\nwait 20\nseek 600 down Not now|Prepare\nseek 100 right Not now\n"
+             "expect Not now\na\nwait 20\nseek 600 down Install\nexpect Install\nshot install\n")
 PICK_FOLDER = HEAD + OPEN + INTO_DISC + USE
 
 
@@ -168,7 +170,7 @@ def scenarios(a):
                             version="v101" if a.online else "v100", shaders=True, script=PICK_FOLDER + TWO + INSTALL)
         if a.online:
             s["install-v100"] = dict(online=True, real=True, version="v100", shaders=False,
-                                     script=PICK_FOLDER + TWO + PICK_V100 + INSTALL)
+                                     script=PICK_FOLDER + TO_CHOICES + PICK_V100 + INSTALL)
         s["incomplete"] = dict(layout="incomplete", script=PICK_FOLDER + TWO + REFUSED, slow=True)
     return s
 
