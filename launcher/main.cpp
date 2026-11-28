@@ -784,6 +784,10 @@ static bool g_quit = false;   // the launcher closes after this frame
 static bool g_nav_test = false;   // a scripted controller test (--nav-test) drives the launcher: the game never starts
 static std::string g_nav_event;   // what the test's log notes beside the next step
 static std::vector<std::string> g_nav_titles;   // the test's "see": the titles drawn wholly in view in the last frame
+// the test's "reach" (beta.6): every enabled button the page drew in the last frame, by its id -- whether in view or not
+static std::map<ImGuiID, std::string> g_nav_buttons;
+static bool g_nav_reaching = false;   // a "reach" walk: left stays on the page (no jump to the menu)
+static ImGuiWindow* g_page_window = nullptr;   // the page's own window (##page), as drawn in the last frame
 static float g_nav_rstick = 0;    // the test's right stick (beside a real controller's own, which the backend reports)
 
 static bool pressed(Act a)
@@ -1037,6 +1041,13 @@ static bool big_button(const char* label, ImVec2 size = ImVec2(0, 0), Kind k = K
         const char* e = strstr(label, "##");
         g_focus_label = e ? std::string(label, e) : std::string(label);
     }
+    if (g_nav_test && enabled && g_page_window) {   // the nav test's "reach": a button of the page's (its cards' too)
+        ImGuiWindow* w = ImGui::GetCurrentWindow();
+        if (w == g_page_window || ImGui::IsWindowChildOf(w, g_page_window, false)) {
+            const char* e = strstr(label, "##");
+            g_nav_buttons[ImGui::GetItemID()] = e ? std::string(label, e) : std::string(label);
+        }
+    }
     const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
     const bool down = ImGui::IsItemActive(), hov = ImGui::IsItemHovered();
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -1093,9 +1104,42 @@ static void title(const char* t, float size = kTitle)
     if (g_nav_test && ImGui::GetCurrentWindow()->ClipRect.Contains(drawn)) g_nav_titles.push_back(t);
 }
 
-// a card: a sunken retro window inside the page
+// a card: a sunken retro window inside the page.
+// beta.6 (the owner's playtest, Game Version by controller): a card as tall as its content is drawn on the page itself,
+// not as a child window. ImGui scores a D-pad move from the page into a flattened child only when the child's clip
+// rectangle overlaps the view (imgui.cpp NavScoreItem, "When entering through a NavFlattened border"), so a press down
+// from the last button above a card wholly below the view skipped every button in it: with the disc remembered,
+// "Repair from the disc" went past Game Version's to the folder's. On the page, its buttons are the page's own and
+// the page scrolls to them as to any other. A card of a given size (Play's two side by side) stays a child window.
+struct CardFrame {
+    bool panel = false;
+    ImVec2 a;
+    float right = 0, work_max = 0, content_max = 0;
+    std::unique_ptr<ImDrawListSplitter> split;
+};
+static std::vector<CardFrame> g_cards;
 static bool card_begin(const char* id, ImVec2 size = ImVec2(0, 0))
 {
+    if (size.x == 0 && size.y == 0) {
+        ImGuiWindow* w = ImGui::GetCurrentWindow();
+        CardFrame c;
+        c.panel = true;
+        c.a = ImGui::GetCursorScreenPos();
+        c.right = c.a.x + ImGui::GetContentRegionAvail().x;
+        c.work_max = w->WorkRect.Max.x;
+        c.content_max = w->ContentRegionRect.Max.x;
+        c.split = std::make_unique<ImDrawListSplitter>();
+        c.split->Split(w->DrawList, 2);        // the frame goes under what the card holds (drawn at its end)
+        c.split->SetCurrentChannel(w->DrawList, 1);
+        ImGui::PushID(id);
+        w->WorkRect.Max.x = w->ContentRegionRect.Max.x = c.right - S(28);   // text and widths within its padding
+        // indented, not a group: a SameLine position stays the window's (a group's would add its own offset)
+        ImGui::Indent(S(28));
+        ImGui::SetCursorScreenPos(ImVec2(c.a.x + S(28), c.a.y + S(24)));
+        g_cards.push_back(std::move(c));
+        return true;
+    }
+    g_cards.push_back(CardFrame());
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(S(28), S(24)));
     // flattened: a card's buttons are reached directly, as the page's own (not the card first, then its buttons)
     const bool open = ImGui::BeginChild(id, size, ImGuiChildFlags_AlwaysUseWindowPadding | ImGuiChildFlags_NavFlattened |
@@ -1104,7 +1148,28 @@ static bool card_begin(const char* id, ImVec2 size = ImVec2(0, 0))
     frame_window(IM_COL32(150, 166, 220, 255), std::max(2.0f, floorf(S(3))));
     return open;
 }
-static void card_end() { ImGui::EndChild(); }
+static void card_end()
+{
+    CardFrame c = g_cards.empty() ? CardFrame() : std::move(g_cards.back());
+    if (!g_cards.empty()) g_cards.pop_back();
+    if (!c.panel) { ImGui::EndChild(); return; }
+    ImGuiWindow* w = ImGui::GetCurrentWindow();
+    const float bottom = std::max(ImGui::GetItemRectMax().y, w->DC.CursorPosPrevLine.y + w->DC.PrevLineSize.y) + S(24);
+    ImGui::Unindent(S(28));
+    w->WorkRect.Max.x = c.work_max;
+    w->ContentRegionRect.Max.x = c.content_max;
+    ImGui::PopID();
+    ImDrawList* dl = w->DrawList;
+    c.split->SetCurrentChannel(dl, 0);
+    const ImVec2 b(c.right, bottom);
+    dl->AddRectFilled(c.a, b, ImGui::GetColorU32(ImGuiCol_ChildBg));   // as a child window's background
+    const float o = std::max(2.0f, floorf(S(2)));
+    retro_frame(dl, ImVec2(c.a.x + o, c.a.y + o), ImVec2(b.x - o, b.y - o), IM_COL32(150, 166, 220, 255),
+                std::max(2.0f, floorf(S(3))));
+    c.split->Merge(dl);
+    ImGui::SetCursorScreenPos(ImVec2(c.a.x, bottom));
+    ImGui::Dummy(ImVec2(c.right - c.a.x, 0));   // the page's layout goes on below it
+}
 
 // a progress bar of blocks: green segments filling a sunken trough; `frac` < 0: working, its share unknown
 static void pix_bar(float frac, float h)
@@ -2848,7 +2913,6 @@ static void scroll_to_top_on_focus()
 // press then reaches what came into view. Dear ImGui's navigation can't reach a card's buttons while the card lies
 // wholly outside the page's view (0.2.0-beta.5: at 1280x800 and below, the shortcuts under Add to Steam on Install /
 // Manage). Called after NewFrame, which has applied the last frame's move (or found nothing)
-static ImGuiWindow* g_page_window = nullptr;   // the page's own window (##page), as drawn in the last frame
 static bool in_page(ImGuiWindow* w)
 {
     for (; w; w = w->ParentWindow)
@@ -5601,7 +5665,7 @@ static void frame()
             return !owned_lr && !g_focus_owns_lr && !(typing && k == ImGuiKey_LeftArrow) && ImGui::IsKeyPressed(k, false);
         };
         if (in_menu && (free_press(ImGuiKey_GamepadDpadRight) || free_press(ImGuiKey_RightArrow))) g_focus_page = true;
-        if (!in_menu && (free_press(ImGuiKey_GamepadDpadLeft) || free_press(ImGuiKey_LeftArrow))) {
+        if (!in_menu && !g_nav_reaching && (free_press(ImGuiKey_GamepadDpadLeft) || free_press(ImGuiKey_LeftArrow))) {
             left_from = g_focus_label;
             left_wait = 2;
         } else if (left_wait > 0 && --left_wait == 0 && g_focus_label == left_from) {
@@ -5698,7 +5762,8 @@ static std::string font_path()
 // --nav-test FILE: a controller driven by a script, inside the launcher only (no input reaches any other window): one
 // step a line -- up, down, left, right (the D-pad), a, b, x, y, lb, rb, menu, view [times]; rs FRAMES (the right
 // stick down); wait FRAMES; settle FRAMES (until the worker's checks are over); type TEXT (as a keyboard types it);
-// shot NAME (the launcher saves its own frame, NAME.bmp
+// reach FRAMES (beta.6: the page walked by the D-pad alone; the test stops unless every enabled button it drew had
+// the focus -- a control only a mouse reaches); shot NAME (the launcher saves its own frame, NAME.bmp
 // beside the script); quit. Each step
 // is logged with the page, any dialog and the focused item after it settles (FILE.log). expect TEXT[|TEXT2...] stops
 // the test unless the focus is on one of them (until and seek take alternatives the same way); see TEXT[|TEXT2...]
@@ -5727,6 +5792,12 @@ struct NavScript {
     std::vector<Step> steps;
     size_t at = 0;
     int wait = 30, phase = 0, done_n = 0, rs = 0, idle = 0, until = 0, seek = 0, seek_t = 0, settle = 0, quiet = 0;
+    // "reach N" (beta.6): the page walked by the D-pad alone; every enabled button it draws must take the focus
+    int reach = 0, reach_t = 0, reach_stuck = 0, reach_pass = 0;
+    char reach_dir = 0;
+    ImGuiKey reach_key = ImGuiKey_None;
+    ImGuiID reach_from = 0;
+    std::map<ImGuiID, std::string> reach_seen;
     bool seek_held = false;   // the seek's key is down (pressed, its release not yet sent)
     std::string until_text, seek_text;
     ImGuiKey seek_key = ImGuiKey_None;
@@ -5832,6 +5903,61 @@ struct NavScript {
             // Linux: onto a Settings value, which the script's next left or right then changed)
             if (seek_held) { io.AddKeyAnalogEvent(seek_key, false, 0.0f); seek_held = false; }
         }
+        if (reach > 0) {   // "reach N": a walk of the page by the D-pad alone -- down, and along each row the focus
+            // stops on, right then left -- to the bottom, then up again from there; every enabled button the page drew
+            // (in view or not, its cards' too) must have had the focus at some point, or the test stops: a control
+            // only a mouse can reach (the owner's playtest: Game Version's card skipped). N frames at most.
+            ImGuiContext& gc = *ImGui::GetCurrentContext();
+            auto press = [&](ImGuiKey k) {
+                reach_from = gc.NavId;
+                reach_key = k;
+                io.AddKeyAnalogEvent(k, true, 1.0f);
+                reach_t = 14;   // held 2 frames, then 12 for the move and the page's scroll
+            };
+            if (--reach <= 0) reach_dir = 'e';
+            else if (reach_t > 0) {
+                if (--reach_t == 12) io.AddKeyAnalogEvent(reach_key, false, 0.0f);
+                return;
+            }
+            if (reach_dir != 'e') {
+                if (gc.NavId) reach_seen[gc.NavId] = g_focus_label;
+                const bool moved = gc.NavId != reach_from;
+                const ImGuiKey vert = reach_pass == 0 ? ImGuiKey_GamepadDpadDown : ImGuiKey_GamepadDpadUp;
+                switch (reach_dir) {
+                case 0: g_nav_reaching = true; reach_dir = 'r'; press(ImGuiKey_GamepadDpadRight); break;
+                case 'r': if (moved) press(ImGuiKey_GamepadDpadRight); else { reach_dir = 'l'; press(ImGuiKey_GamepadDpadLeft); } break;
+                case 'l': if (moved) press(ImGuiKey_GamepadDpadLeft); else { reach_dir = 'v'; reach_stuck = 0; press(vert); } break;
+                case 'v':
+                    if (moved) { reach_dir = 'r'; press(ImGuiKey_GamepadDpadRight); }
+                    else if (++reach_stuck < 2) press(vert);
+                    else if (reach_pass == 0) { reach_pass = 1; reach_stuck = 0; press(ImGuiKey_GamepadDpadUp); }
+                    else reach_dir = 'e';
+                    break;
+                }
+                if (reach_dir != 'e') return;
+            }
+            // the end: what the page drew against what had the focus
+            g_nav_reaching = false;
+            reach = 0;
+            std::string missed;
+            int n = 0, got = 0;
+            for (const auto& b : g_nav_buttons) {
+                n++;
+                if (reach_seen.count(b.first)) got++;
+                else missed += (missed.empty() ? "" : ", ") + ("\"" + b.second + "\"");
+            }
+            {   // said on the next step's line, as the harness's other notes are
+                char said[160];
+                snprintf(said, sizeof said, "  [reach: %d of %d of the page's buttons had the focus]", got, n);
+                g_nav_event += said;
+            }
+            if (!missed.empty()) {
+                if (log) fprintf(log, "FAILED: buttons the D-pad never reached: %s: the test stops here\n", missed.c_str());
+                at = steps.size();
+                g_quit = true;
+                return;
+            }
+        }
         if (until > 0) {   // "until N TEXT": until the focus is on TEXT (part of its label) and no operation is on
             // screen, N frames at most -- then the script goes on (an expect after it says whether it got there)
             if ((!focus_has(until_text) || g_op) && --until > 0) return;
@@ -5859,6 +5985,11 @@ struct NavScript {
         } else if (st.op == "settle") {
             settle = st.n;
             quiet = 0;
+        } else if (st.op == "reach") {
+            reach = st.n;
+            reach_t = reach_stuck = reach_pass = 0;
+            reach_dir = 0;
+            reach_seen.clear();
         } else if (st.op == "until") {
             until = st.n;
             until_text = st.arg;
@@ -6200,6 +6331,7 @@ int main(int argc, char** argv)
         stick_nav(io);
         if (nav.active()) nav.inject(io);   // the scripted controller (--nav-test)
         g_nav_titles.clear();   // its "see" has read the last frame's; this frame's are gathered as they're drawn
+        g_nav_buttons.clear();  // its "reach" too
         ImGui::NewFrame();
         keep_focus_in_view();
         scroll_when_stuck();
