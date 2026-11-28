@@ -568,10 +568,22 @@ static uint32_t hash32(uint32_t x)
 
 // --- the pixel font: the project's own 5x7 capitals, digits and signs (port/ui_pixel_font.h, shared with the game) ---
 #include "../port/ui_pixel_font.h"
+// beta.6: the signs the launcher's keycaps need that the shared font lacks -- the keyboard's "[" and "]", the Character
+// Store's tab keys, were drawn as "?". The launcher's own (the game's overlay, which shares the font, is unchanged).
+static const PixGlyph kLauncherGlyphs[] = {
+    { '[', { "###", "#..", "#..", "#..", "#..", "#..", "###" } },
+    { ']', { "###", "..#", "..#", "..#", "..#", "..#", "###" } },
+};
+static const PixGlyph* lpix_glyph(char c)
+{
+    for (const PixGlyph& g : kLauncherGlyphs)
+        if (g.c == c) return &g;
+    return pix_glyph(c);
+}
 static float pix_w(const char* t, float p)
 {
     int cols = 0, n = 0;
-    for (const char* s = t; *s; s++, n++) cols += (int)strlen(pix_glyph(*s)->rows[0]);
+    for (const char* s = t; *s; s++, n++) cols += (int)strlen(lpix_glyph(*s)->rows[0]);
     return n ? (float)(cols + n - 1) * p : 0.0f;
 }
 // a line of pixel text at pos (its top left), each row's runs drawn as one block; a shadow below and right
@@ -584,7 +596,7 @@ static void pix_text(ImDrawList* dl, ImVec2 pos, const char* t, float p, ImU32 c
         const float y = snap(pos.y) + (pass ? 0 : so);
         const ImU32 cc = A(pass ? c : shadow);
         for (const char* s = t; *s; s++) {
-            const PixGlyph* g = pix_glyph(*s);
+            const PixGlyph* g = lpix_glyph(*s);
             const int w = (int)strlen(g->rows[0]);
             for (int r = 0; r < 7; r++)
                 for (int i = 0; i < w; i++) {
@@ -787,6 +799,11 @@ static std::vector<std::string> g_nav_titles;   // the test's "see": the titles 
 // the test's "reach" (beta.6): every enabled button the page drew in the last frame, by its id -- whether in view or not
 static std::map<ImGuiID, std::string> g_nav_buttons;
 static bool g_nav_reaching = false;   // a "reach" walk: left stays on the page (no jump to the menu)
+// the test's "devlabel" and "footer" (beta.6): a device label of its choosing; the label as drawn, where it ends, and
+// where the prompts begin, in the last frame
+static std::string g_nav_dev_label;
+struct NavFooter { std::string label; float label_right = 0, prompts_left = 0; };
+static NavFooter g_nav_footer;
 static ImGuiWindow* g_page_window = nullptr;   // the page's own window (##page), as drawn in the last frame
 static float g_nav_rstick = 0;    // the test's right stick (beside a real controller's own, which the backend reports)
 
@@ -2120,7 +2137,9 @@ static void page_play()
     } else {
         title(kind == "partial" ? "An install was interrupted" : "The game isn't installed yet", 26);
         text_col(col::dim, kind == "partial" ? "Continue it on the Install / Manage page: what was done is kept."
-                                             : "You'll need your own disc (an ISO or its folder) and its keys file.");
+                                             : "You'll need your own disc (an ISO or its folder). The game's program keys "
+                                               "are found or downloaded automatically; if they can't be, you can choose "
+                                               "your own keys file or decrypted EBOOT.elf under Advanced, on Install / Manage.");
         if (big_button(kind == "partial" ? "Continue the install" : "Install the game", ImVec2(S(360), 0), Kind::Primary)) {
             g_page = kManage;
             g_focus_page = true;
@@ -6234,16 +6253,43 @@ static void frame()
         fg->AddText(g_font, S(21), ImVec2(at.x + 2, at.y + 2), col::ink, s);
         fg->AddText(g_font, S(21), at, c, s);
     };
-    {
-        const ImVec2 ds = g_font->CalcTextSizeA(S(21), FLT_MAX, 0, dev);
-        shadow_text(ImVec2(o.x + S(28), gy + (gh2 - ds.y) / 2), col::text, dev);
-    }
     float px = o.x + sz.x - S(28);
     std::set<int> seen;   // the first prompt given for a button wins
     std::vector<Prompt> listed;
     for (const Prompt& p : g_prompts)
         if (seen.insert((int)p.act).second) listed.push_back(p);
     const float gsz = floorf(S(34));
+    {   // beta.6: the device label in the room the prompts leave -- it ran into the Character Store's row (the long
+        // "Keyboard and mouse (a controller is connected)" beside its eight prompts). The prompts are measured first;
+        // the label is the longest wording that fits, else its short form cut with "..."; none when nothing fits.
+        float left = px;
+        for (auto it = listed.rbegin(); it != listed.rend(); ++it) {
+            const bool pair_next = std::next(it) != listed.rend() && std::next(it)->label.empty();
+            left -= g_font->CalcTextSizeA(S(21), FLT_MAX, 0, it->label.c_str()).x;
+            if (!it->label.empty()) left -= S(10);
+            left -= glyph(nullptr, ImVec2(0, 0), it->act, gsz);
+            left -= pair_next ? S(6) : S(30);
+        }
+        const float x0 = o.x + S(28), room = left + S(30) - S(24) - x0;   // the last gap kept clear, and S(24) more
+        std::vector<std::string> ways = { g_nav_dev_label.empty() ? std::string(dev) : g_nav_dev_label };
+        if (g_nav_dev_label.empty() && g_device != Device::Pad && g_pad_connected) ways.push_back("Keyboard and mouse");
+        std::string shown;
+        for (const std::string& w : ways)
+            if (g_font->CalcTextSizeA(S(21), FLT_MAX, 0, w.c_str()).x <= room) { shown = w; break; }
+        if (shown.empty()) {   // the short form cut to the room, "..." at its end
+            std::string w = ways.back();
+            while (!w.empty() && g_font->CalcTextSizeA(S(21), FLT_MAX, 0, (w + "...").c_str()).x > room) w.pop_back();
+            while (!w.empty() && w.back() == ' ') w.pop_back();
+            shown = w.empty() ? std::string() : w + "...";
+        }
+        float right = x0;
+        if (!shown.empty()) {
+            const ImVec2 ds = g_font->CalcTextSizeA(S(21), FLT_MAX, 0, shown.c_str());
+            shadow_text(ImVec2(x0, gy + (gh2 - ds.y) / 2), col::text, shown.c_str());
+            right = x0 + ds.x;
+        }
+        g_nav_footer = { shown, right, left + S(30) };   // the nav test's "footer" reads it
+    }
     for (auto it = listed.rbegin(); it != listed.rend(); ++it) {   // right to left: each glyph measured, then drawn
         const bool pair_next = std::next(it) != listed.rend() && std::next(it)->label.empty();   // LB, then RB "Pages"
         const ImVec2 ts = g_font->CalcTextSizeA(S(21), FLT_MAX, 0, it->label.c_str());
@@ -6297,7 +6343,8 @@ static std::string font_path()
 // step a line -- up, down, left, right (the D-pad), a, b, x, y, lb, rb, menu, view [times]; rs FRAMES (the right
 // stick down); wait FRAMES; settle FRAMES (until the worker's checks are over); type TEXT (as a keyboard types it);
 // reach FRAMES (beta.6: the page walked by the D-pad alone; the test stops unless every enabled button it drew had
-// the focus -- a control only a mouse reaches); shot NAME (the launcher saves its own frame, NAME.bmp
+// the focus -- a control only a mouse reaches); devlabel TEXT (the footer's device label made TEXT); footer (the test
+// stops if the device label runs into the prompts); shot NAME (the launcher saves its own frame, NAME.bmp
 // beside the script); quit. Each step
 // is logged with the page, any dialog and the focused item after it settles (FILE.log). expect TEXT[|TEXT2...] stops
 // the test unless the focus is on one of them (until and seek take alternatives the same way); see TEXT[|TEXT2...]
@@ -6347,7 +6394,7 @@ struct NavScript {
             Step st;
             if (!(ls >> st.op) || st.op[0] == '#') continue;
             std::string rest;   // a count, or a name (a shot's name is a name, even "01-play")
-            if (st.op == "expect" || st.op == "see" || st.op == "type") {   // "expect TEXT", "see TEXT", "type TEXT": the rest
+            if (st.op == "expect" || st.op == "see" || st.op == "type" || st.op == "devlabel") {   // the rest of the line
                 std::getline(ls, rest);
                 st.arg = rest.substr(std::min(rest.size(), rest.find_first_not_of(' ')));
             } else if (st.op == "until" || st.op == "seek") {   // "until N TEXT", "seek N DIR TEXT": at most N
@@ -6519,6 +6566,19 @@ struct NavScript {
         } else if (st.op == "settle") {
             settle = st.n;
             quiet = 0;
+        } else if (st.op == "devlabel") {   // "devlabel TEXT": the device label the footer is given (a long one)
+            g_nav_dev_label = st.arg;
+        } else if (st.op == "footer") {   // the footer's label clear of the prompts, or the test stops
+            char said[200];
+            snprintf(said, sizeof said, "  [footer: \"%s\" ends at %.0f, the prompts begin at %.0f]",
+                     g_nav_footer.label.c_str(), g_nav_footer.label_right, g_nav_footer.prompts_left);
+            g_nav_event += said;
+            if (g_nav_footer.label_right > g_nav_footer.prompts_left) {
+                if (log) fprintf(log, "FAILED: the device label runs into the prompts:%s: the test stops here\n", said);
+                at = steps.size();
+                g_quit = true;
+                return;
+            }
         } else if (st.op == "reach") {
             reach = st.n;
             reach_t = reach_stuck = reach_pass = 0;
