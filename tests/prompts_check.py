@@ -9,7 +9,11 @@ Each run is checked from its log (stderr.log) and pictures (drive/*.png):
   - the words' hooks installed (the title's, the messages');
   - PlayStation: no texture redrawn (the game's own art); any other style: textures redrawn, in that style only;
   - the drive finished (no STOPPED or FAILED).
-The style is taken from the run's tag (pr-<style>) unless given. Exit 0 when every run passes.
+The style is taken from the run's tag (pr-<style>, or pr-naming-<style>) unless given. Exit 0 when every run passes.
+
+beta.6 (the owner's playtest): a run of tests/scripts/prompts_naming.drive (tagged pr-naming-<style>) also needs the
+character select's and the naming screen's textures redrawn in that style (none in PlayStation's), and a run under the
+official v1.01 update reads the same 40 (it read 2: the update's folder alone).
 """
 import os
 import re
@@ -18,7 +22,12 @@ import sys
 STYLES = ("keyboard", "playstation", "xbox", "nintendo", "steam", "generic")
 
 
-def check(run, style):
+# the screens of tests/scripts/prompts_naming.drive, as "[prompts] redrawn:" names them: the texture's own name in
+# port/prompts_table.cpp (its package is CharSelect/SelectCharacter, NameEntry/NameEntry)
+NAMING = ("selectcharacter", "nameentry")
+
+
+def check(run, style, naming=False):
     bad = []
     err = open(os.path.join(run, "stderr.log"), encoding="utf-8", errors="replace").read()
     drive = open(os.path.join(run, "drive.log"), encoding="utf-8", errors="replace").read()
@@ -39,10 +48,14 @@ def check(run, style):
         other = {s for _, s in redrawn if s != style}
         if other:
             bad.append(f"redrawn in other styles: {sorted(other)}")
+        if naming:
+            missing = [t for t in NAMING if t not in {n for n, _ in redrawn}]
+            if missing:
+                bad.append(f"not redrawn: {', '.join(missing)}")
     if "[drive] STOPPED" in drive or "FAILED" in drive:
         bad.append("the drive did not finish")
     shots = [f for f in os.listdir(os.path.join(run, "drive")) if f.endswith(".png")] if os.path.isdir(os.path.join(run, "drive")) else []
-    if len(shots) < 8:
+    if len(shots) < (3 if naming else 8):
         bad.append(f"{len(shots)} pictures")
     return bad, len(redrawn)
 
@@ -54,14 +67,15 @@ def main(argv):
     failed = 0
     for a in argv[1:]:
         run, _, style = a.partition("=")
+        naming = "pr-naming-" in run.replace("\\", "/")
         if not style:
-            m = re.search(r"pr-(\w+)$", run.rstrip("/\\"))
+            m = re.search(r"pr-(?:naming-)?(\w+)$", run.rstrip("/\\"))
             style = m.group(1) if m else ""
         if style not in STYLES:
             print(f"{run}: no style (give <run>=<style>)")
             failed += 1
             continue
-        bad, n = check(run, style)
+        bad, n = check(run, style, naming)
         print(f"{'PASS' if not bad else 'FAIL'} {style:12s} {os.path.basename(run.rstrip('/\\'))}: {n} textures redrawn"
               + ("" if not bad else " -- " + "; ".join(bad)))
         failed += bool(bad)

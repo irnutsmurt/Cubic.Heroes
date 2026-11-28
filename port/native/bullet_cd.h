@@ -35,7 +35,8 @@ struct Result {
     int active = 0;         // ... with an active object (processed)
     int triangles = 0;      // mesh triangles tested
     int contacts = 0;       // contact points reported by the narrowphase
-    std::vector<ManifoldOut> manifolds;   // every manifold written
+    bool keep = true;       // copy each manifold written into `manifolds` (comparisons, statistics)
+    std::vector<ManifoldOut> manifolds;   // every manifold written, with `keep`
 };
 
 // 1 when every pair of the descriptor's work units is one this code handles
@@ -44,8 +45,8 @@ struct Result {
 int supported(const Mem& m, uint32_t desc_ea, char* why, size_t why_len);
 
 // Do the task's work for descriptor `desc_ea`. With `write`, the manifolds are
-// written to guest memory as the SPU task writes them; either way each is
-// returned in `out.manifolds`.
+// written to guest memory as the SPU task writes them; with `out.keep` (the
+// default), each is also returned in `out.manifolds`.
 void run(const Mem& m, uint32_t desc_ea, Result& out, bool write);
 
 // The manifold of every SPU pair of the descriptor's work units as it stands

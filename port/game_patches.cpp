@@ -53,6 +53,26 @@
  *   frame's time, yet he travelled 3.5 units a second at 30 fps, 4.6 at 60
  *   and 5.8 at 144 and 240 (build/m11 fps_knight); his parts follow his body
  *   each frame. Gated the same way.
+ *
+ * g_dotheroes_fallpoint30 (an entry hook: dotheroes_fallpoint_contact)
+ *   Issue #15. A ledge the hero can get down from is a map object of its own
+ *   (AT_FALL_POINT, settings in the Lua table FallPoint: detection_range 0.4,
+ *   fall_time 0.5). func_00319AE0 is its contact with the hero: with the hero
+ *   in its column, it adds the frame's time to its timer (+0x520) while the
+ *   hero pushes toward the drop, restarts it otherwise, and past fall_time
+ *   drops him. "Pushes" is read from the hero's step this frame (+0x768 x,
+ *   +0x770 z: g_dotheroes_step_carry above) in tenths, (int)((step + 0.05) *
+ *   10): the step across the drop must be 0 and the step along it not -- for
+ *   a drop toward -z (facing 0, the south edges), a step of at least 0.15.
+ *   The hero walks 9 units a second: 0.30 a frame at 30 fps, 0.15 or 0.14 at
+ *   60, less above. So above 30 fps the timer of a southward drop restarts
+ *   every few frames and the hero stands at the edge (Field_7's ledge above
+ *   cave 1's terrace, the way to the fifth temple); northward drops pass up to
+ *   ~180 fps. The hook runs the check with the hero's step at its 30 fps size
+ *   (times 1/30 s over the frame's time) and puts the step back after. Only
+ *   when the object in contact (r4) is the hero and the frame is shorter than
+ *   1/30 s; DOTHEROES_FALLPOINT30=0 turns it off, and at DOTHEROES_FPS=30 it is
+ *   off (the original pacing). DOTHEROES_FALLPOINT30_LOG=1: the first contacts.
  */
 extern "C" {
 int g_dotheroes_fps_nosleep = 0;
@@ -69,6 +89,7 @@ int g_dotheroes_no_install_item = 1;   /* M10.4: the title menu without INSTALL 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "program_addrs.h"   /* PA(): v1.00's addresses of the game, for the program this build is of */
 
 /* func_000A2C14 for an entry hook: see g_dotheroes_step_carry. The rounding
  * is the lifted function's, operation for operation: a fused multiply-add
@@ -91,7 +112,7 @@ extern "C" void dotheroes_step_round(ppu_context* ctx)
      * x (+0x768), then z (+0x770); the player object is in r30. */
     static struct { uint32_t obj; float carry; } s_axis[2];
     const uint32_t lr = (uint32_t)ctx->lr;
-    const int axis = lr == 0x00106FB8u ? 0 : lr == 0x00106FCCu ? 1 : -1;
+    const int axis = lr == PA(0x00106FB8u) ? 0 : lr == PA(0x00106FCCu) ? 1 : -1;
     const double v = ctx->fpr[1];
     if (axis < 0) {
         ctx->fpr[1] = step_snap(v);
@@ -148,7 +169,7 @@ static void guest_float_set(uint32_t ea, float f)
     p[0] = (uint8_t)(u >> 24); p[1] = (uint8_t)(u >> 16); p[2] = (uint8_t)(u >> 8); p[3] = (uint8_t)u;
 }
 
-static const uint32_t kGameFrame = 0x02CF3570;   /* the game's frame count (docs/NATIVE_R8.md section 3) */
+static const uint32_t kGameFrame = PA(0x02CF3570);   /* the game's frame count (docs/NATIVE_R8.md section 3) */
 static struct {
     uint32_t frame;        /* the game frame the clock last advanced in */
     int      due;          /* steps due in that frame */
@@ -239,6 +260,42 @@ extern "C" int dotheroes_tick30_boss_segment(ppu_context* ctx) { return tick30_g
 extern "C" int dotheroes_tick30_boss_head(ppu_context* ctx) { return tick30_gate(ctx, func_001E47C4); }
 extern "C" int dotheroes_tick30_knight_body(ppu_context* ctx) { return tick30_gate(ctx, func_002C8300); }   /* B-012 */
 
+/* Issue #15: see g_dotheroes_fallpoint30. func_00319AE0 (this, the FallPoint; r4, the object in contact). */
+extern "C" { int g_dotheroes_fallpoint30 = 1; }
+static int g_fallpoint30_log = 0;
+static const uint32_t kGameState = PA(0x0159AB58);   /* the game's state; +0x758 the frame's time (s) */
+static const uint32_t kHeroVtable = PA(0x00FE3D20);  /* the player's class */
+extern "C" PPU_THREAD_LOCAL void (*g_trampoline_fn)(void*);
+static void drain_trampoline(ppu_context* ctx);
+extern "C" int dotheroes_fallpoint_contact(ppu_context* ctx)
+{
+    static thread_local int inner = 0;
+    if (inner) return 0;   /* the check itself, called below */
+    const uint32_t hero = (uint32_t)ctx->gpr[4];
+    const float dt = guest_float(kGameState + 0x758);
+    if (!hero || guest_u32(hero) != kHeroVtable || !(dt > 0.0f) || dt >= 1.0f / 30.0f)
+        return 0;   /* declined: the check runs as it is */
+    const float k = (1.0f / 30.0f) / dt;
+    const float sx = guest_float(hero + 0x768), sz = guest_float(hero + 0x770);
+    guest_float_set(hero + 0x768, sx * k);
+    guest_float_set(hero + 0x770, sz * k);
+    const uint32_t fp = (uint32_t)ctx->gpr[3];
+    const float t0 = g_fallpoint30_log ? guest_float(fp + 0x520) : 0.0f;
+    inner = 1;
+    func_00319AE0(ctx);
+    drain_trampoline(ctx);
+    inner = 0;
+    guest_float_set(hero + 0x768, sx);
+    guest_float_set(hero + 0x770, sz);
+    if (g_fallpoint30_log) {
+        static int said = 0;
+        if (said++ < 40)
+            fprintf(stderr, "[fallpoint] %08X: hero step %.3f %.3f (dt %.4f, as %.3f %.3f), timer %.3f -> %.3f, r3 %d\n", fp, sx,
+                    sz, dt, sx * k, sz * k, t0, guest_float(fp + 0x520), (int)(int32_t)ctx->gpr[3]);
+    }
+    return 1;
+}
+
 /* M11.2d: QUIT GAME, the title menu's last item. Its place is the PS3's INSTALL (hidden since M10.4: the menu ends
  * at ALBUM): kept, its label renamed in the Title script's own tables (devtools.cpp title_tick: the normal menu's
  * fifth entry and the cleared game's sixth), and its choice taken here. func_005CE018 is the menu's input (this, the
@@ -299,6 +356,14 @@ extern "C" void dotheroes_configure_patches(void)
         g_tick30_log = t30log && *t30log == '1';
         fprintf(stderr, "[port] frame-counted boss updates: %s\n", g_dotheroes_tick30 ? "gated to 30 Hz" : "every frame");
     }
+    {   /* issue #15: the ledges' drop test with the hero's step at its 30 fps size */
+        const char* f30 = getenv("DOTHEROES_FALLPOINT30");
+        g_dotheroes_fallpoint30 = fps != 30 && !(f30 && *f30 == '0');
+        const char* f30log = getenv("DOTHEROES_FALLPOINT30_LOG");
+        g_fallpoint30_log = f30log && *f30log == '1';
+        fprintf(stderr, "[port] ledge drops: %s\n", g_dotheroes_fallpoint30 ? "the hero's step read at 30 fps size"
+                                                                           : "the hero's step as it is");
+    }
     g_dotheroes_fps_nosleep  = fps != 30;
     g_dotheroes_fps_vblank1  = fps == 60;
     g_dotheroes_fps_novblank = fps != 30 && fps != 60;
@@ -318,3 +383,9 @@ extern "C" void dotheroes_configure_patches(void)
             g_dotheroes_step_carry ? "remainder carried (DOTHEROES_STEP_CARRY=0: truncated, as the game does)"
                                    : "truncated, as the game does");
 }
+
+/* The lifted functions port/'s prebuilt library (dotheroes_native) calls: through these pointers, set here -- this
+ * file is compiled with the program (a build of another program renames them through its port_aliases.h), the
+ * library once for every program, so it never names a lifted function itself (port/program_addrs.h) */
+void func_006CAD4C(ppu_context* ctx);   // the lift (C++ linkage): asp's fragment heap set-up
+extern "C" { void (*g_dotheroes_lifted_asp_heap)(ppu_context*) = func_006CAD4C; }   // ppfx_recorder.cpp's R7

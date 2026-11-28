@@ -183,7 +183,8 @@ SCAFFOLD = ["runtime/ppu/ppu_loader.cpp", "runtime/ppu/ppu_hle.cpp", "runtime/pp
 # The executable's own sources (port/CMakeLists.txt's add_executable and
 # target_sources, less the lift and the runtime): main.cpp calls into each.
 PORT_SOURCES = ["main.cpp", "stubs.cpp", "game_patches.cpp", "cpu_place.cpp", "phys_hooks.cpp", "audio_hooks.cpp",
-                "movie_hooks.cpp", "promo_check.cpp",
+                "movie_hooks.cpp", "promo_check.cpp", "pair_cache.cpp", "axis_sweep.cpp",
+                "debris_interp.cpp",
                 "diag/diag.cpp", "diag/game_log.cpp", "overlay.cpp",
                 "native/memtest.cpp", "native/memtest_checked.cpp", "native/memtest_bare.cpp", "native/memtest_stores.cpp"]
 RUNTIME_LIB = "libps3recomp_runtime.a"
@@ -351,19 +352,35 @@ def headers_fingerprint(src, gen_ppu):
     return h.digest()
 
 
-def game_jobs(src, gen_dir, obj_dir, zig, platform=HOST):
+def game_jobs(src, gen_dir, obj_dir, zig, platform=HOST, defines=(), program_dir=None):
     """(source, object, compiler, flags) for everything the player compiles. Objects are
-    named by a fingerprint of source + flags + compiler + headers: existing means current."""
+    named by a fingerprint of source + flags + compiler + headers: existing means current.
+    defines: the game's program's own -D flags for the game's own sources (the port's, the scaffold, the NID
+    table); program_dir: another program's configuration folder (tools/setup_pipeline.py program_dir), as
+    port/CMakeLists.txt's DOTHEROES_PROGRAM does: DOTHEROES_PROGRAM_ADDRS (its port_addrs.inc, port/program_addrs.h's
+    PA() table) for those, and `-include port_aliases.h` (the lifted functions' names the port calls) for the
+    port's own sources only -- never the lift's. Both files are in the objects' names by their contents, not their
+    place: a launcher moved elsewhere reuses every object. None of it for the disc's program."""
     gen_ppu, gen_spu = os.path.join(gen_dir, "recompiled"), os.path.join(gen_dir, "spu")
     inc = src.includes(gen_ppu)
+    port_flags = PORT_FLAGS + list(defines)   # the port's flags, with the program's
+    alias, token = [], None
+    if program_dir:
+        pd = os.path.abspath(program_dir).replace("\\", "/")   # a C string and a path alike, on every system
+        port_flags.append(f'-DDOTHEROES_PROGRAM_ADDRS="{pd}/port_addrs.inc"')
+        alias = ["-include", f"{pd}/port_aliases.h"]
+        h = hashlib.sha1()
+        for n in ("port_addrs.inc", "port_aliases.h"):
+            _file_hash(h, os.path.join(program_dir, n))
+        token = (pd, f"<program {h.hexdigest()[:16]}>")
     # the prebuilt's configuration (game_defines), after the fixed flags; in the
     # fingerprint, so a change of configuration recompiles everything
     cpu = ["-mcpu=" + host_cpu(zig)] + [d for d in game_defines(src.lib_dir) if d not in COMMON]
     common = _zig_version(zig).encode() + TARGETS[platform].encode() + headers_fingerprint(src, gen_ppu)
     groups = []
-    groups += [(os.path.join(src.port, f), "c++", PORT_FLAGS) for f in PORT_SOURCES]
-    groups += [(os.path.join(src.ps3, f), "c++", PORT_FLAGS) for f in SCAFFOLD]
-    groups.append((src.nids, "c++", PORT_FLAGS))
+    groups += [(os.path.join(src.port, f), "c++", port_flags + alias) for f in PORT_SOURCES]
+    groups += [(os.path.join(src.ps3, f), "c++", port_flags) for f in SCAFFOLD]
+    groups.append((src.nids, "c++", port_flags))
     groups += [(os.path.join(gen_ppu, f), "c++", PPU_FLAGS) for f in sorted(os.listdir(gen_ppu))
                if f.endswith(".cpp")]
     spu = sorted(os.path.join(gen_spu, d, "spu_recomp.c") for d in os.listdir(gen_spu)
@@ -380,11 +397,14 @@ def game_jobs(src, gen_dir, obj_dir, zig, platform=HOST):
     if len(gen_native) == 2:
         groups += [(s, "c++", SPU_NATIVE_FLAGS + ["-I" + os.path.join(src.port, "native")]) for s in gen_native]
     else:
-        groups.append((os.path.join(src.port, "native", "spu_native_absent.cpp"), "c++", PORT_FLAGS))
+        groups.append((os.path.join(src.port, "native", "spu_native_absent.cpp"), "c++", port_flags + alias))
     jobs = []
     for s, tool, flags in groups:
         flags = flags + cpu
-        h = hashlib.sha1(common + tool.encode() + " ".join(flags).encode())
+        named = " ".join(flags)
+        if token:   # the program's folder by its files' contents, never its place
+            named = named.replace(token[0], token[1])
+        h = hashlib.sha1(common + tool.encode() + named.encode())
         _file_hash(h, s)
         rel = os.path.relpath(s, gen_dir) if s.startswith(gen_dir) else os.path.basename(s)
         stem = rel.replace(os.sep, "_").rsplit(".", 1)[0]
@@ -492,7 +512,7 @@ def rpath_tag(path):
 
 
 def build_game(gen_dir, out_exe, cache_dir, zig=None, platform=HOST, progress=None, log=None, keep=(),
-               used_out=None, install=None):
+               used_out=None, install=None, defines=(), program_dir=None):
     """Compile what the player's disc became (gen_dir) with the port's sources and
     link it with the prebuilt runtime. progress(fraction, message) for the whole
     build. cache_dir keeps the objects (fingerprinted): an update recompiles only
@@ -509,7 +529,7 @@ def build_game(gen_dir, out_exe, cache_dir, zig=None, platform=HOST, progress=No
     if not os.path.exists(lib):
         raise BuildError(f"the runtime library is missing: {lib}")
     os.makedirs(cache_dir, exist_ok=True)
-    jobs = game_jobs(src, gen_dir, cache_dir, zig, platform)
+    jobs = game_jobs(src, gen_dir, cache_dir, zig, platform, defines, program_dir)
     timings_path = os.path.join(cache_dir, "timings.json")
     try:
         timings = json.load(open(timings_path))

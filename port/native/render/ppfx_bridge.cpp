@@ -525,7 +525,7 @@ void crosscheck(Rec* r)
         const Need* n = nullptr;
         for (uint32_t j = 0; j < r->nneed; j++) if (r->need[j].unit == t.location) n = &r->need[j];
         const uint32_t ea = n ? cellGcmResolveLocated(n->location == 0, n->offset) : 0;
-        if (!ea || memcmp(vm_base + ea, &r->tdata[t.at], t.bytes)) { st.xc_tex++; break; }
+        if (!ea || memcmp(vm_base + ea, tex_bytes(r, t), t.bytes)) { st.xc_tex++; break; }
     }
 }
 

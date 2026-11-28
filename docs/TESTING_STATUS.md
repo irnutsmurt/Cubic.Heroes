@@ -1,6 +1,6 @@
 # Testing status
 
-What has been tested, and on what. The [README](../README.md#known-issues) lists the known issues.
+What has been tested, and on what. The known issues: [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
 
 **Windows**: the beta has been validated area by area on Windows 11 with an NVIDIA GPU: every reachable map visited
 (166 of 167), every boss fought to its defeat (and won by the game's own mechanics where they need one), the ending

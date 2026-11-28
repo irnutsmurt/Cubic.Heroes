@@ -160,7 +160,7 @@ public:
     std::vector<json::Value> take_events()
     {
         std::lock_guard<std::mutex> lk(mu_);
-        std::vector<json::Value> out(events_.begin(), events_.end());
+        std::vector<json::Value> out(std::make_move_iterator(events_.begin()), std::make_move_iterator(events_.end()));
         events_.clear();
         return out;
     }
@@ -176,6 +176,20 @@ public:
         if (infd_ >= 0) { ssize_t r = write(infd_, "cancel\n", 7); (void)r; }
 #endif
         cancel_sent = true;
+    }
+
+    // M12: one line to the worker's control channel (the PS3 save key the player typed: never on its command line)
+    void send_line(const std::string& line)
+    {
+        const std::string l = line + "\n";
+#ifdef _WIN32
+        if (in_) {
+            DWORD n;
+            WriteFile(in_, l.data(), (DWORD)l.size(), &n, nullptr);
+        }
+#else
+        if (infd_ >= 0) { ssize_t r = write(infd_, l.data(), l.size()); (void)r; }
+#endif
     }
 
     bool done() const { return done_; }

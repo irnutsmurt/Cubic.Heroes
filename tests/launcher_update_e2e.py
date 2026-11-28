@@ -112,6 +112,29 @@ def files_of(folder, names):
     return out
 
 
+def settings_of(path):
+    """the game's settings file as {name: value} (comments and blank lines aside), {} without one"""
+    out = {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            for ln in f:
+                ln = ln.strip()
+                if ln and not ln.startswith("#") and "=" in ln:
+                    k, _, v = ln.partition("=")
+                    out[k.strip()] = v.strip()
+    except OSError:
+        pass
+    return out
+
+
+def b_performance_settings():
+    """B's performance switches and their earlier defaults (tools/game_settings.py: B is built from this checkout;
+    its worker is frozen, so its own copy can't be read)"""
+    sys.path.insert(0, os.path.join(ROOT, "tools"))
+    import game_settings
+    return dict(game_settings.PERFORMANCE), dict(game_settings.PREVIOUS_DEFAULTS)
+
+
 PACKAGE_ITEMS = ("CubicHeroes.exe", "CubicHeroes", "SDL2.dll", "lib", "licenses", "LICENSE.txt", "README.txt", "worker")
 INSTALL_ITEMS = ("active.json", "builds", "data", "config", "backups")
 
@@ -352,6 +375,8 @@ class E2E:
             step("game steps (skipped: no --disc)", [])
             return
         saves = files_of(self.root, ("data/gamedata", "config"))
+        cfg_path = os.path.join(self.root, "config", "dotheroes.cfg")
+        cfg_before = settings_of(cfg_path)
         code, d, r = self.run("--update", "--json", timeout=3600)
         bad = [] if code == 0 else [f"--update exit {code}: {r.stderr[-300:]}"]
         log = os.path.join(self.root, "logs", "game.log")
@@ -374,6 +399,24 @@ class E2E:
             bad.append(f"--play: exit {p.returncode}, the game's own end {'seen' if 'status 0' in text else 'not seen'}")
         now = files_of(self.root, ("data/gamedata", "config"))
         changed = [k for k in saves if saves[k] != now.get(k) and not k.startswith(("config" + os.sep + "launcher",))]
+        # the settings: every one of the player's values exactly as it was; the only change an update may make is
+        # B's performance switches the settings lacked, added with their documented values (tools/game_settings.py
+        # ensure_performance_settings: "a player's own value is never replaced"; beta.6 added the pair cache and
+        # sweep), or an old default brought to the current one
+        cfg_key = os.path.join("config", "dotheroes.cfg")
+        if cfg_key in changed:
+            after = settings_of(cfg_path)
+            added = {k: v for k, v in after.items() if k not in cfg_before}
+            replaced = {k: (cfg_before[k], after.get(k)) for k in cfg_before if after.get(k) != cfg_before[k]}
+            perf, olds = b_performance_settings()
+            wrong = {k: v for k, v in added.items() if perf.get(k) != v}
+            wrong.update({k: ab for k, ab in replaced.items() if not (ab[0] in olds.get(k, ()) and perf.get(k) == ab[1])})
+            if wrong:
+                bad.append(f"settings changed beyond B's new performance defaults: {wrong}")
+            else:
+                changed.remove(cfg_key)
+                if added:
+                    print(f"  settings: B's new performance defaults added: {sorted(added)}", flush=True)
         if changed:
             bad.append(f"saves or settings changed: {changed[:5]}")
         step("the game brought up to date with B, played to its own end", bad)

@@ -4,7 +4,7 @@
 #! saves build/checkpoints/castle-front
 #! env DOTHEROES_DEVELOPER_MODE=1 DOTHEROES_DEV_STATE=1 PS3_VERBOSE=0 SHOT_EVERY=0 DUMP=1
 #! secs 420
-include C:/3d dot game heroes/tests/scenarios/common.drive
+include ../scenarios/common.drive
 
 log TitleMovie 120
 sleep 7

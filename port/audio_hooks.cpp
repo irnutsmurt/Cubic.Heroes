@@ -32,13 +32,14 @@
 #include <mutex>
 #include <string>
 #include <vector>
+#include "program_addrs.h"   /* PA(): v1.00's addresses of the game, for the program this build is of */
 
 extern "C" PPU_THREAD_LOCAL void (*g_trampoline_fn)(void*);   // the lift's tail calls (as phys_hooks.cpp)
 extern "C" { int g_audio_hooks = 0; }
 
 namespace {
 
-constexpr uint32_t kGameFrame = 0x02CF3570;   // the game's frame count (game_patches.cpp)
+constexpr uint32_t kGameFrame = PA(0x02CF3570);   // the game's frame count (game_patches.cpp)
 constexpr uint32_t kUpdate = 0x0046DB40;      // the sound manager's update(dt), every frame on the game thread
 
 FILE* g_trace = nullptr;
@@ -251,10 +252,10 @@ extern "C" const char* ppu_vfs_root;   // the host folder the game's /dev_bdvd m
 // The game's own state the sound manager reads (rel27's class reads the same): the options' music and effect
 // levels, the system menu's pause byte, the exit-request byte (cleared when the system asks the game to quit),
 // and the byte that makes the class's shutdown return at once.
-constexpr uint32_t kGame = 0x0159AB58;
+constexpr uint32_t kGame = PA(0x0159AB58);
 constexpr uint32_t kBgmLevel = kGame + 0x948, kSeLevel = kGame + 0x94C;
 constexpr uint32_t kMenuPause = kGame + 0x764, kNotExiting = kGame + 0x761;
-constexpr uint32_t kNoShutdown = 0x0159B558;
+constexpr uint32_t kNoShutdown = PA(0x0159B558);
 
 void native_log(const char* line) { fprintf(stderr, "[audio] %s\n", line); }
 

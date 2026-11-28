@@ -61,7 +61,7 @@ One command at a time; options may follow in any order. `--opt=value` and `--opt
 |---|---|
 | *(none)*, `--launcher` | open the launcher's window |
 | `--play` | start the game directly, with no launcher window; `CubicHeroes` waits for it and exits with the game's own exit status. The game runs in a job of `CubicHeroes`'s: a caller that ends `CubicHeroes` ends the game too |
-| `--install --disc PATH --keys PATH` | install from your disc image (or disc folder) and keys file, headless; resumes an interrupted install. **Does nothing if the game is already installed** (`--repair` rebuilds it from the disc anyway) |
+| `--install --disc PATH [--keys PATH] [--rpcs3 PATH]` | install from your disc image (or disc folder), headless; the program's keys are found beside the disc or where they were found before, unless given; resumes an interrupted install. **Does nothing if the game is already installed** (`--repair` rebuilds it from the disc anyway) |
 | `--update` | bring the game up to date with this version of Cubic.Heroes (after you put a newer `CubicHeroes` in the folder): your saves backed up, then rebuilt **only if the tools changed** ("Already up to date: nothing rebuilt" otherwise) |
 | `--check-update` | look for a newer release on the installation's update channel (the setting `LAUNCHER_UPDATE_CHANNEL`: a beta's default includes test releases); nothing downloaded |
 | `--apply-update` | **install the newer release** (0.2.0-beta.4): download it if it isn't already, check it again against the release's signature (the trusted key, a newer version, this system's package of this installation's kind, its size and SHA-256), stage it inside the folder, then **exit**: a helper replaces the launcher's own files a few seconds later, checks the new launcher (`--version`: the launcher and its worker are the new version) and keeps it -- or puts this one back if anything fails. Refused while the game runs (exit 5). Then `--update` brings the game up to date. `--status` says how it ended |
@@ -77,7 +77,7 @@ One command at a time; options may follow in any order. `--opt=value` and `--opt
 | Option | |
 |---|---|
 | `--install-dir PATH` | the installation root (section 1); `--remember` keeps it |
-| `--disc PATH`, `--keys PATH` | for `--install`. The keys file is read by the decryption step only; its contents never appear in output, logs or arguments passed on |
+| `--disc PATH`, `--keys PATH`, `--rpcs3 PATH` | for `--install`. `--keys`: a keys file, a folder or ZIP of key files, or an EBOOT.elf; read by the decryption step only, its contents never appear in output, logs or arguments passed on. `--rpcs3`: your own RPCS3, asked to decrypt the program (optional) |
 | `--disc-key PATH` | for `--install` from an **encrypted** ISO (a raw rip): its disc key, as a file -- a `.dkey` (32 hexadecimal digits), a `.key` (16 bytes) or an IRD file (which needs a `D1` line in the keys file). Never the key itself on the command line. Not needed for a decrypted ISO, an ISO rebuilt from the disc's folder, or the folder |
 | `--json` | machine-readable output (section 3) |
 | `--no-gui` | never open a window: with no command it is an error (exit 2) instead of the launcher |

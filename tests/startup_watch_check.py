@@ -264,9 +264,14 @@ def c_debugger(exe, run):
 
 def c_play70(launcher, install):
     """CubicHeroes --play on a start that never finishes: status 70 passed on, explained on stderr and in the JSON
-    event's "why" (launcher/game_exit.h)"""
+    event's "why" (launcher/game_exit.h), and its startup-*.txt report in the installation's logs/crash. The reports
+    the case caused are removed after it: they are the test's, and a later check of the same installation (the
+    release qualification's play, which fails on any crash report it has not seen) took one for the game's
+    (0.2.0-beta.6 qualification)."""
     exe = os.path.join(launcher, "CubicHeroes.exe" if WIN else "CubicHeroes")
     run = tempfile.mkdtemp(prefix="startup-play70-")
+    crash = os.path.join(install, "logs", "crash")
+    before = set(os.listdir(crash)) if os.path.isdir(crash) else set()
     try:
         env = game_env(run, DOTHEROES_STARTUP_TIMEOUT_S=3, DOTHEROES_STARTUP_TEST_STALL_S=30)
         for k in ("PS3_GAMEDATA_ROOT", "DIAG_CRASH_DIR"):   # the installation's own (logs/crash), as a player's
@@ -283,9 +288,17 @@ def c_play70(launcher, install):
             bad.append("no explanation on stderr")
         if not ended or ended[-1].get("exit") != 70 or "graphics didn't start" not in ended[-1].get("why", ""):
             bad.append(f"the JSON ended event: {ended}")
+        mine = sorted(set(os.listdir(crash)) - before) if os.path.isdir(crash) else []
+        if not any(r.startswith("startup-") for r in mine):
+            bad.append(f"no startup-*.txt report in the installation's logs/crash (new there: {mine})")
         case("play70", bad, f"--play ended with {p.returncode} after {secs:.1f} s")
     finally:
         shutil.rmtree(run, ignore_errors=True)
+        for r in (set(os.listdir(crash)) - before) if os.path.isdir(crash) else ():
+            try:
+                os.remove(os.path.join(crash, r))
+            except OSError:
+                pass
 
 
 def c_prepare(install):

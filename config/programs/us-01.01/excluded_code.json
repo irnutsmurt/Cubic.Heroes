@@ -1,0 +1,227 @@
+{
+ "_program": "BLUS30490-01.01",
+ "_from": "config/excluded_code.json, by tools/program_remap.py",
+ "_comment": [
+  "Code of the game's executable that is not lifted (ps3recomp ppu_lifter.py --traps; docs/OPENAL_MIGRATION_PLAN.md",
+  "section 9): each function starting in a range is lifted as a call of ppu_trap -- reaching it reports the address",
+  "and ends the game -- and the runtime treats any other address in a range the same way. The ranges follow the",
+  "lift's function boundaries (the lifter refuses one that cuts a function). Addresses only: no code.",
+  "FMOD Ex (M5, 2026-11-12): its PPU library and the out-of-line methods of its classes (the virtual functions its",
+  "vtables hold, placed apart from the library). The game's audio is the native sound manager on OpenAL Soft;",
+  "the sound manager's methods are answered natively, so nothing calls FMOD's API. The 28 call stubs the sound",
+  "manager's class used to call FMOD's API (0x00987478-0x00987658, TOC-switching glue, no FMOD code) stay lifted:",
+  "a call through one lands in a trap.",
+  "Bink (M8.4, 2026-11-13; docs/FFMPEG_MIGRATION_PLAN.md sections 2.2 and 6.4): its PPU library, closed as tools/movie_inventory.py checks it -- nothing outside it but its eleven call stubs (0x009873A8-0x00987458, TOC-switching glue, no Bink code; they stay lifted) reaches it, its pointer-reached functions held only by its own tables, no constructor. The game's movie class's calls through those stubs are answered natively (config/m8_native_movie.json: FFmpeg).",
+  "spu_images: FMOD's SPU programs (the mixer, its NeuralTHX variant, its 19 relocatable plugins), not lifted.",
+  "inert: FMOD's static constructors (39, in the C runtime's constructor table, 0x00FE0000-0x00FE0718) and destructors (2, its destructor table after it), which the start-up and the exit call for every file: lifted as a plain return -- they set up and tear down only FMOD's own globals."
+ ],
+ "traps": [
+  {
+   "lo": "0x0082FBE8",
+   "hi": "0x00908B1C",
+   "what": "FMOD",
+   "note": "FMOD Ex's PPU library: 2,792 functions in the function list"
+  },
+  {
+   "lo": "0x00A434C0",
+   "hi": "0x00A44B00",
+   "what": "FMOD",
+   "note": "FMOD's classes' out-of-line methods: 60 functions, each held only by FMOD's vtables"
+  },
+  {
+   "lo": "0x00A557F0",
+   "hi": "0x00A76C28",
+   "what": "Bink",
+   "note": "Bink's PPU library: 151 functions and 49 alignment pads in the function list, reached only through its eleven call stubs"
+  }
+ ],
+ "spu_images": [
+  "spu_0005_at_00F87780",
+  "spu_0006_at_00F99300",
+  "spu_0007_at_00FA3980",
+  "spu_0008_at_00FAA880",
+  "spu_0009_at_00FADF00",
+  "spu_0010_at_00FB0E80",
+  "spu_0011_at_00FB1B80",
+  "spu_0012_at_00FB5A00",
+  "spu_0013_at_00FB6600",
+  "spu_0014_at_00FB7E80",
+  "spu_0015_at_00FB8B00",
+  "spu_0016_at_00FBA880",
+  "spu_0017_at_00FBBC80",
+  "spu_0018_at_00FBD480",
+  "spu_0019_at_00FC0100",
+  "spu_0020_at_00FC1700",
+  "spu_0021_at_00FC2100",
+  "spu_0022_at_00FC2D00",
+  "spu_0023_at_00FC4580",
+  "spu_0024_at_00FC7E80",
+  "spu_0025_at_00FCB200"
+ ],
+ "inert": [
+  {
+   "addr": "0x00849AF0",
+   "note": "FMOD static constructor"
+  },
+  {
+   "addr": "0x0086A5B4",
+   "note": "FMOD static constructor"
+  },
+  {
+   "addr": "0x0086B444",
+   "note": "FMOD static constructor"
+  },
+  {
+   "addr": "0x0086DCF4",
+   "note": "FMOD static constructor"
+  },
+  {
+   "addr": "0x00873C78",
+   "note": "FMOD static constructor"
+  },
+  {
+   "addr": "0x0087C8E0",
+   "note": "FMOD static constructor"
+  },
+  {
+   "addr": "0x00881150",
+   "note": "FMOD static constructor"
+  },
+  {
+   "addr": "0x00884544",
+   "note": "FMOD static constructor"
+  },
+  {
+   "addr": "0x008864B8",
+   "note": "FMOD static constructor"
+  },
+  {
+   "addr": "0x008874F8",
+   "note": "FMOD static constructor"
+  },
+  {
+   "addr": "0x00888010",
+   "note": "FMOD static constructor"
+  },
+  {
+   "addr": "0x0088BFD8",
+   "note": "FMOD static constructor"
+  },
+  {
+   "addr": "0x0088C6C0",
+   "note": "FMOD static constructor"
+  },
+  {
+   "addr": "0x0088DB14",
+   "note": "FMOD static constructor"
+  },
+  {
+   "addr": "0x0088E020",
+   "note": "FMOD static constructor"
+  },
+  {
+   "addr": "0x008933BC",
+   "note": "FMOD static constructor"
+  },
+  {
+   "addr": "0x00897DBC",
+   "note": "FMOD static constructor"
+  },
+  {
+   "addr": "0x0089A0E4",
+   "note": "FMOD static constructor"
+  },
+  {
+   "addr": "0x0089D744",
+   "note": "FMOD static constructor"
+  },
+  {
+   "addr": "0x008A03B8",
+   "note": "FMOD static constructor"
+  },
+  {
+   "addr": "0x008A0CF0",
+   "note": "FMOD static constructor"
+  },
+  {
+   "addr": "0x008A4174",
+   "note": "FMOD static constructor"
+  },
+  {
+   "addr": "0x008A554C",
+   "note": "FMOD static constructor"
+  },
+  {
+   "addr": "0x008A5E34",
+   "note": "FMOD static constructor"
+  },
+  {
+   "addr": "0x008A6C74",
+   "note": "FMOD static constructor"
+  },
+  {
+   "addr": "0x008A8CC8",
+   "note": "FMOD static constructor"
+  },
+  {
+   "addr": "0x008A9D0C",
+   "note": "FMOD static constructor"
+  },
+  {
+   "addr": "0x008AA9FC",
+   "note": "FMOD static constructor"
+  },
+  {
+   "addr": "0x008AB054",
+   "note": "FMOD static constructor"
+  },
+  {
+   "addr": "0x008AB738",
+   "note": "FMOD static constructor"
+  },
+  {
+   "addr": "0x008ACAEC",
+   "note": "FMOD static constructor"
+  },
+  {
+   "addr": "0x008B3CCC",
+   "note": "FMOD static constructor"
+  },
+  {
+   "addr": "0x008B6A78",
+   "note": "FMOD static constructor"
+  },
+  {
+   "addr": "0x008CC8B4",
+   "note": "FMOD static constructor"
+  },
+  {
+   "addr": "0x008CCD70",
+   "note": "FMOD static constructor"
+  },
+  {
+   "addr": "0x008CF9F8",
+   "note": "FMOD static constructor"
+  },
+  {
+   "addr": "0x008DF98C",
+   "note": "FMOD static constructor"
+  },
+  {
+   "addr": "0x008EB01C",
+   "note": "FMOD static constructor"
+  },
+  {
+   "addr": "0x008F4D04",
+   "note": "FMOD static constructor"
+  },
+  {
+   "addr": "0x00849AE0",
+   "note": "FMOD static destructor"
+  },
+  {
+   "addr": "0x008CF9E8",
+   "note": "FMOD static destructor"
+  }
+ ]
+}

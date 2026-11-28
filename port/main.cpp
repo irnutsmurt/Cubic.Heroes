@@ -45,6 +45,9 @@ extern "C" void dev_waver_init(void);   /* phys_hooks.cpp */
 extern "C" void dotheroes_ui_assets_init(void); /* ui_assets.cpp */
 namespace prompts { void start(const char* elf); void set_choice(const char* v); }   /* prompts.cpp (M11.2g) */
 extern "C" void dotheroes_audio_hooks_init(void); /* audio_hooks.cpp */
+extern "C" void dotheroes_paircache_init(void);   /* pair_cache.cpp: DOTHEROES_NATIVE_PAIRCACHE */
+extern "C" void dotheroes_sweep_init(void);       /* axis_sweep.cpp: DOTHEROES_NATIVE_SWEEP */
+extern "C" void dotheroes_interp_init(void);      /* debris_interp.cpp: DOTHEROES_DEBRIS_INTERP */
 #include "native/memtest.h"
 #include "ps3emu/ps3_strict.h"
 #include "ps3emu/ps3_ftrace.h"
@@ -118,6 +121,7 @@ void     ps3_load_prx_modules(void);
 
 extern const char* ppu_vfs_root;              /* host dir the PS3 mount points map into */
 void     ps3_host_quit(const char* why);      /* cellSysutil.c: REQUEST_EXITGAME, then exit 0 */
+void     cellGame_init_from_paramsfo(const char* sfo_path);   /* cellGame.c: title id, category, version */
 
 /* sys_ppu_thread.c: the main thread's stack, as sys_ppu_thread_get_stack_information
  * reports it. Left at 0 it names VM_STACK_BASE, the first created thread's stack. */
@@ -1017,6 +1021,29 @@ static void set_default_env(const char* name, const std::string& value)
 }
 
 static std::string s_installed_elf;
+/* the program a build was lifted from (config/programs/<region>-<version>/, its program.json; the pipeline defines it for another program) */
+#ifndef DOTHEROES_PROGRAM_ID
+#define DOTHEROES_PROGRAM_ID "BLUS30490-01.00"
+#endif
+static std::string s_program_mismatch;   /* the build.cfg's DOTHEROES_PROGRAM, when it is not this build's */
+
+/* port/program_addrs.h's PA_RT: v1.00's address of the game -> the program this build is of, for port/'s prebuilt
+ * library (its table is this file's, compiled with the program's config/programs/<program>/port_addrs.inc) */
+#include "program_addrs.h"
+extern "C" uint32_t dotheroes_program_addr(uint32_t v100)
+{
+#ifdef DOTHEROES_PROGRAM_ADDRS
+    for (const program_addrs::Pair& p : program_addrs::kTable)
+        if (p.v100 == v100 && v100) return p.here;
+    fprintf(stderr, "ERROR: the game's address 0x%08X (v1.00) has no counterpart in the program %s: this build's "
+            "native library and its program table do not belong together. Repair the game in the launcher (Install / Manage).\n",
+            v100, DOTHEROES_PROGRAM_ID);
+    fflush(stderr);
+    _Exit(3);
+#else
+    return v100;
+#endif
+}
 
 /* <install>/dotheroes.cfg: the player's settings, written by the setup app, as
  * NAME=value lines (# comments). They are environment defaults: a variable
@@ -1109,6 +1136,21 @@ static const char* installed_defaults(void)
         s_log_path = log;
     }
     s_installed_elf = data + "/disc/PS3_GAME/USRDIR/EBOOT.elf";
+    /* beta.6: a build of the official update's program (its build.cfg: DOTHEROES_PROGRAM, and DOTHEROES_UPDATE_DIR
+     * relative to the install): the update's decrypted program -- its USRDIR/EBOOT.elf, beside the package's EBOOT.BIN
+     * as the disc's is beside its own -- is the one loaded; the disc stays the game's /dev_bdvd; the update's folder is
+     * its /dev_hdd0/game/<title>/ with a patch boot (ps3recomp 0177, cellGame.c). None: the disc's program, as
+     * before. A build.cfg naming another program than the one this build was made from stops the start (main). */
+    if (const char* want = getenv("DOTHEROES_PROGRAM"); want && *want && strcmp(want, DOTHEROES_PROGRAM_ID) != 0)
+        s_program_mismatch = want;
+    if (const char* u = getenv("DOTHEROES_UPDATE_DIR"); u && *u && s_program_mismatch.empty()) {
+        std::filesystem::path p(u);
+        if (p.is_relative()) p = std::filesystem::path(root) / p;
+        const std::string upd = p.lexically_normal().generic_string();
+        set_default_env("PS3_GAME_UPDATE_DIR", upd);
+        set_default_env("PS3_VFS_ROOT", data + "/disc");
+        s_installed_elf = upd + "/USRDIR/EBOOT.elf";
+    }
     /* M11.0 (docs/M11_PLAN.md section 3.2): developer mode plays on test saves of its own -- the player's saves, system
      * data and trophies (data/gamedata) are never opened while it is on. Otherwise the roots set here are defaults
      * (a test may set its own). */
@@ -1579,6 +1621,11 @@ int main(int argc, char** argv)
     }
     const char* elf = argc >= 2 ? argv[1] : installed_defaults();
     devtools_gate(argc < 2);   /* M11.1: an installed game's test switches that change the game need developer mode */
+    if (!s_program_mismatch.empty()) {
+        fprintf(stderr, "This build is of the game's program %s, but its settings name %s.\nRepair the game in the "
+                "launcher (Install / Manage).\n", DOTHEROES_PROGRAM_ID, s_program_mismatch.c_str());
+        return 2;
+    }
     if (argc < 2) {
         FILE* f = fopen(elf, "rb");
         if (!f) {
@@ -1617,6 +1664,10 @@ int main(int argc, char** argv)
      * default in their own init. */
     set_default_env("DOTHEROES_NATIVE_CD", "1");
     set_default_env("DOTHEROES_NATIVE_SOLVER", "1,2,4,5,6");
+    /* Issue #2: Bullet's pair cache and sweep and prune natively (byte-exact with the lifted functions), as the setup's
+     * settings write them; =0 in the environment or dotheroes.cfg runs either lifted, for comparison */
+    set_default_env("DOTHEROES_NATIVE_PAIRCACHE", "1");
+    set_default_env("DOTHEROES_NATIVE_SWEEP", "1");
 #if defined(DOTHEROES_NO_LIFTED_SPU)
     /* M6 (docs/OPENAL_MIGRATION_PLAN.md section 10.6): this release links no lifted SPU program, so a switch that
      * asks for one is set back to the native path, with a line saying so (the comparison build,
@@ -1709,6 +1760,9 @@ int main(int argc, char** argv)
     waver_game_init();               /* native/waver_game.cpp: DOTHEROES_NATIVE_WAVER */
     dotheroes_ui_assets_init();      /* ui_assets.cpp: the save-data screen's font and prompt images */
     dotheroes_audio_hooks_init();    /* audio_hooks.cpp: DOTHEROES_AUDIO_TRACE */
+    dotheroes_paircache_init();      /* pair_cache.cpp: DOTHEROES_NATIVE_PAIRCACHE (default 1, above) */
+    dotheroes_sweep_init();          /* axis_sweep.cpp: DOTHEROES_NATIVE_SWEEP (default 1, above) */
+    dotheroes_interp_init();         /* debris_interp.cpp: DOTHEROES_DEBRIS_INTERP (off unless set) */
 #if defined(PS3RECOMP_SPU_INTERPRETER) && !PS3RECOMP_SPU_INTERPRETER
     /* DOTHEROES_R8_INTERP_TEST=1 (R8, docs/NATIVE_R8.md): ask for the SPU
      * interpreter this build does not have, as SPU code with no lift would --
@@ -1780,6 +1834,11 @@ int main(int argc, char** argv)
 
     derive_vfs_root(elf);
     printf("[boot] VFS root: %s\n", ppu_vfs_root);
+    /* an installed update (PS3_GAME_UPDATE_DIR): the disc's PARAM.SFO read, so the patch boot finds its title */
+    if (const char* u = getenv("PS3_GAME_UPDATE_DIR"); u && *u) {
+        cellGame_init_from_paramsfo((std::string(ppu_vfs_root) + "/PS3_GAME/PARAM.SFO").c_str());
+        printf("[boot] program %s with the update in %s\n", DOTHEROES_PROGRAM_ID, u);
+    }
 
     ppu_recomp_register();   /* lifted function table -> address map */
     ps3_load_prx_modules();  /* this game's lifted system PRX, if it has any */

@@ -20,4 +20,14 @@ Planned, not yet available:
   differences in the known issues.
 - **Optional hardware-accelerated ray tracing** (RTX and other GPUs with ray tracing).
 - **HDR** output (being considered).
-- **Character import, export and community sharing** -- the editor's heroes as files, and a shared library.
+- **0.2.0-beta.6**: the character library and the **Character Store**. The library imports the editor's heroes,
+  character files and PS3 characters (with the player's own key), exports them, and installs them in the game. The
+  store offers community characters from the official characters repository, among them the recovered 2010 Hall of
+  Heroes collection. Also the album fix ([#10](https://github.com/irnutsmurt/Cubic.Heroes/issues/10)), the debris
+  slowdown work ([#2](https://github.com/irnutsmurt/Cubic.Heroes/issues/2)), and a **simpler installation from the
+  ISO** (v1.00): the game program's keys found by themselves -- beside the ISO, in any common form (a keys file, or a
+  folder or ZIP of key files), or where they were found before -- or the program decrypted by the player's own RPCS3,
+  if they have it. Cubic.Heroes still includes no keys.
+- **0.2.0-beta.7**: the **official v1.01 update** (Atlus, 2010), optional: downloaded from Sony or taken from the
+  player's own copy, checked byte for byte; the updated program supported alongside v1.00; games already updated on a
+  PS3 or in an emulator recognised. v1.00 stays supported.

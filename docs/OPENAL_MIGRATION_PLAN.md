@@ -663,8 +663,8 @@ M1 did with them (section 4.2):
 | M9 | Launcher, shader and Vulkan pipeline precompilation, cache management, GitHub Release updates and rollback (docs/MILESTONES.md, "Roadmap: M9-M14"; the plan for review: docs/M9_LAUNCHER_PLAN.md) | the owner's review of the plan first |
 | M10 | Native PC settings, controls and interface improvements (docs/PC_EXPERIENCE.md sections 1-7b) | after M9 |
 | M11 | Release readiness, full-game and platform validation | after M10 |
-| M12 | Optional RTX and graphics enhancements | after M11 |
-| M13 | Character import/export and the GitHub community library | after M12 |
+| M12 | Characters: import/export, the local library, previews, the GitHub community store and the Hall of Heroes recovery (docs/MILESTONES.md; the owner's revision of 2026-11-24, first release in beta.6) | after M11 |
+| M13 | Optional visual enhancements: ray tracing, an HDR investigation (was M12) | after M12 |
 | M14 | Optional native controller vibration from gameplay events | after M13 |
 
 ## 8. Architecture requirements (to be written into docs/NATIVE_PORT.md and CLAUDE.md at M1)

@@ -1,6 +1,6 @@
 """The launcher's pages by controller (--nav-test), hidden: the scripts in tests/nav against an installation with the game.
 
-  five_pages.nav     Play, Install / Manage, Saves, Settings, Diagnostics: each page's controls reached by the D-pad,
+  five_pages.nav     Play, Install / Manage, Saves, Characters, Settings, Diagnostics: each page's controls reached by the D-pad,
                      LB/RB through all five both ways, the side menu's entries
   settings_tabs.nav  the Settings tabs (Graphics, Performance, Audio, Controller, Launcher): focus starts on the chosen
                      tab, each tab chosen with A shows its own controls down to Restore the defaults, the next tab's
@@ -43,6 +43,16 @@ SKIP_DIRS = {"logs"}   # what the launcher writes for itself on every start
 SMALL = 1 << 20   # compared by contents up to this size (settings, records)
 
 
+def derived(rel):
+    """the character library's derived files: its index and previews, made when the Characters page is first shown
+    (from the library's entries and the game's saves; never the characters themselves)"""
+    parts = rel.replace(os.sep, "/").split("/")
+    if parts[:2] != ["data", "characters"]:
+        return False
+    return parts[2:] == ["index.json"] or parts[2:3] == ["cache"] or (len(parts) > 4 and parts[2] == "entries"
+                                                                       and parts[4] == "preview")
+
+
 def snapshot(root):
     """every file of the installation: a small file's contents (a hash), a large one's size and time (the game's
     data included: a few thousand entries)"""
@@ -53,6 +63,8 @@ def snapshot(root):
             dirs[:] = [x for x in dirs if x not in SKIP_DIRS]
         for n in files:
             p = os.path.join(d, n)
+            if derived(os.path.relpath(p, root)):
+                continue
             try:
                 st = os.lstat(p)
             except OSError:
@@ -65,7 +77,8 @@ def snapshot(root):
     return out
 
 
-def run(script, launcher, install, work, timeout, size):
+def run(script, launcher, install, work, timeout, size, online=False):
+    """online: the network as it is (a test that downloads the program's keys); otherwise offline"""
     name = os.path.splitext(os.path.basename(script))[0] + " at " + size
     d = os.path.join(work, size, os.path.splitext(os.path.basename(script))[0])
     shutil.rmtree(d, ignore_errors=True)
@@ -74,8 +87,9 @@ def run(script, launcher, install, work, timeout, size):
     shutil.copyfile(script, path)
     env = {k: v for k, v in os.environ.items() if k not in HELPERS}
     desktop_guard.launcher_env(env)   # hidden (offscreen on Linux)
-    env["HTTP_PROXY"] = env["HTTPS_PROXY"] = "http://127.0.0.1:9"   # offline: the update check fails as without a network
-    env.pop("NO_PROXY", None)
+    if not online:
+        env["HTTP_PROXY"] = env["HTTPS_PROXY"] = "http://127.0.0.1:9"   # offline: the update check fails as without a network
+        env.pop("NO_PROXY", None)
     p = subprocess.Popen([launcher, "--install-dir", install, "--nav-test", path, "--nav-size", size], cwd=d, env=env,
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     watch = desktop_guard.Watch(p, "the launcher (nav-test)").start() if hasattr(desktop_guard, "Watch") else None

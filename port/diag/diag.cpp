@@ -18,6 +18,7 @@
 #include "ppu_tls.h"   /* PPU_THREAD_LOCAL */
 #include "ps3emu/ps3_ftrace.h"   /* ps3_ft_now, g_ps3_ft: DIAG_PROF sample times */
 #include "ps3emu/guest_pause.h"   /* ps3_guest_paused: a game held by its host is not hung */
+#include "ps3emu/osd.h"           /* a host dialog open (the save list, the photo picker): not hung */
 
 #include <atomic>
 #include <chrono>
@@ -445,6 +446,10 @@ void watchdog_main()
         /* M11.1: the game held by its host (the in-game menu, the exit question: M10.2) makes no flips and is not
          * hung -- the watchdog counts from its release (a window closed at the question wrote two hang reports). */
         if (ps3_guest_paused()) { still = 0; continue; }
+        /* beta.6: a host dialog waits for the player with the game's thread inside it (the photo picker, the
+         * save list): no flips, and not hung either */
+        if (__atomic_load_n(&g_ps3_osd_saves.open, __ATOMIC_ACQUIRE) ||
+            __atomic_load_n(&g_ps3_osd_list.open, __ATOMIC_ACQUIRE)) { still = 0; continue; }
         still++;
         unsigned limit = now ? hang_secs : boot_secs;
         if (still >= limit && !reported) {

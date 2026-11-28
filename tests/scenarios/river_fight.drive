@@ -27,6 +27,7 @@
 #! env DOTHEROES_DEV_STATE=1 DOTHEROES_DEV_KEYS=1 DIAG_FRAMES=frames.log PS3_VERBOSE=0
 #! env WINDOW=1 VISIBLE=1 TOPMOST=1 GRAB_EVERY=60 PS3_OSD_FPS=2 DUMP=0 SHOT_EVERY=0
 #! secs 900
+#! fights
 
 block to_castle_after_death
   state life==0 30

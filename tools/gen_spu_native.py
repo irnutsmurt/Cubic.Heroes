@@ -641,8 +641,15 @@ def main():
         i = args.index('--report')
         report = args[i + 1]
         del args[i:i + 2]
+    image_name = None   # beta.6: another program of the game holds the same image elsewhere (v1.01: +0xD00), so its
+    if '--image-name' in args:   # lift names its functions after that place; the image itself is checked as before
+        i = args.index('--image-name')
+        image_name = args[i + 1]
+        del args[i:i + 2]
     cfgpath, lift, elf, template, output = args
     cfg = load_config(cfgpath)
+    if image_name:
+        cfg.PREFIX = image_name + '_spu_func_'
     want = getattr(cfg, 'IMAGE_SHA256', None)
     if want:
         got = hashlib.sha256(open(elf, 'rb').read()).hexdigest()

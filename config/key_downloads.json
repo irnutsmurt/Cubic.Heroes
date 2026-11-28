@@ -1,0 +1,41 @@
+{
+ "format": "cubic.heroes.key-downloads",
+ "version": 1,
+ "note": "The public sources the launcher downloads the game programs' decryption keys from when the player's computer has none (the owner's decision, 2026-11-25: automatic, pinned and verified; RPCS3 never required). Each source is pinned to one commit and each file to its size and SHA-256 -- pins only: no key is part of this repository. A downloaded file is data read in memory (never run), kept in the installation's data/keys/<id>/, and whatever it opens is accepted only as the exact pinned program (config/game_version.json).",
+ "sources": [
+  {
+   "id": "codyps-ps3keys",
+   "name": "codyps/ps3keys",
+   "home": "https://github.com/codyps/ps3keys",
+   "licence": "none stated in the repository",
+   "commit": "03b53a99e907a5ea9cfad06892ef2dbecbb9679f",
+   "url": "https://raw.githubusercontent.com/codyps/ps3keys/{commit}/{path}",
+   "opens": ["app", "pkg"],
+   "files": [
+    {"path": "app-key-315", "size": 32, "sha256": "762080f01b918a21243842049326192b9e7dd4f39e633a0f5843ac6f4e14d76f"},
+    {"path": "app-iv-315", "size": 16, "sha256": "24b660668c506966684a9d2bd256350eed0a47d2c9b1fc9d9621515b4aa2ba75"},
+    {"path": "app-key-341", "size": 32, "sha256": "e9d27114ce11f16624f55f4af05a0d42c87c1e33d0c68dbc9a46fc493f9f61a6"},
+    {"path": "app-iv-341", "size": 16, "sha256": "f276703c8299e4f206c21d015b7e4584dbf17114b03854cedf55fa33e7c631b0"},
+    {"path": "app-key-350", "size": 32, "sha256": "8b5e1b55f7ef775a1150f58d44657256930615dbdf3844f31bc71303da430711"},
+    {"path": "app-iv-350", "size": 16, "sha256": "9e7266e1b1a532c0c76808de3838b4ca89ffcaedaf1d6488c40971b8eea6354c"},
+    {"path": "app-key-355", "size": 32, "sha256": "89f5ede34e5ba232f5f9e41f8eef1257d09fd5f6c620927ece9ab51e07b8135a"},
+    {"path": "app-iv-355", "size": 16, "sha256": "98a9694cf0a28a8d919011f4cbd48603033495bb86e430e55c79988fd8270bfd"},
+    {"path": "app-key-356", "size": 32, "sha256": "d1efeab4bcf1a74d34ca45bcd01d61a3446537cdb9e32920333589d75383bd3c"},
+    {"path": "app-iv-356", "size": 16, "sha256": "c125001ce4d506c0f715f48e71f716acecd466cc23a3e581591692cee888c772"},
+    {"path": "gpkg-key", "size": 16, "sha256": "9f59799419060804ae46982ba023f56c897206b951daeb507b8dcb384e597b5f"}
+   ]
+  },
+  {
+   "id": "webman-mod-keys",
+   "name": "aldostools/webMAN-MOD (data/keys, scetool format)",
+   "home": "https://github.com/aldostools/webMAN-MOD",
+   "licence": "GPL-3.0 (the project)",
+   "commit": "45025987231248e4939a9f00ef851aa4aa0a5345",
+   "url": "https://raw.githubusercontent.com/aldostools/webMAN-MOD/{commit}/{path}",
+   "opens": ["app", "pkg", "npdrm"],
+   "files": [
+    {"path": "data/keys", "size": 114838, "sha256": "c1afb45ff9ca87a40014e1706362692f36bba47d1f932d9f40629668d16095b4"}
+   ]
+  }
+ ]
+}

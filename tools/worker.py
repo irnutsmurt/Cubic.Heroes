@@ -6,13 +6,17 @@
 Commands:
     version                                 the worker's version and protocol
     probe-disc  --disc PATH                 what the disc image (or disc folder) is; supported or why not
-    probe-keys  --disc PATH --keys PATH     whether the keys file (or an EBOOT.elf) decrypts this disc's program
+    probe-keys  --disc PATH [--keys PATH] [--key-source PATH...] [--rpcs3 PATH]
+                                            whether the keys (chosen, remembered, beside the disc, or the player's
+                                            RPCS3) decrypt this disc's program to the supported one
     space       --install DIR [--for install|update]   free space against what the operation needs
     info        --install DIR               what an install holds (install.json)
     install     --disc PATH --keys PATH --install DIR  the player's disc -> the native game
     update      --install DIR [--full]      redo what changed (an update of the tools or the configuration)
     migrate-root --from OLD --install NEW [--dry-run]   an existing installation copied into a (portable) root
     find-legacy [--install DIR]             the old launcher's pointers to an install and the old default folders
+    game-update-check --install DIR [--update-pkg P] [--update-folder D] [--update-elf E] [--keys K] [--rpcs3 R]
+                [--offline]                 the official v1.01 update's checks: can it be installed, and if not why
     (the rest: docs/M9_WORKER_PROTOCOL.md section 1)
 
 Options for every command: --control (the launcher: "cancel" lines on stdin, and the end of stdin, cancel the
@@ -61,10 +65,12 @@ CANCEL_GRACE_S = 5.0
 # section 6): the weights of the overall progress, and the remaining time before a step's own rate is known
 STAGE_SECONDS = {"verify": 15.0, "extract": 25.0, "decrypt": 1.0, "recomp": 40.0, "spu": 12.0, "build": 275.0,
                  "finish": 1.0, "validate": 5.0, "activate": 1.0, "prepare": 3.0,
-                 "copy": 60.0, "check-copy": 20.0, "place": 1.0}   # migrate-root's (estimates, not measured)
+                 "copy": 60.0, "check-copy": 20.0, "place": 1.0,   # migrate-root's (estimates, not measured)
+                 "update-download": 30.0, "update-extract": 4.0, "update-decrypt": 1.0}   # beta.6 (186 MB; measured: 2 s, 0.1 s)
 CPU_STAGES = {"recomp", "spu", "build"}   # bound by the processor (the others by the drive)
 # What an operation needs on the install's drive (bytes; measured, section 6)
 NEEDED = {"install": 6 << 30, "update": 3 << 29}
+NEEDED["install-both"] = NEEDED["install"] + NEEDED["update"]   # beta.6: v1.01 with v1.00 built too
 DISK_FULL_ERRNO = {28}          # ENOSPC
 DISK_FULL_WINERROR = {39, 112}  # ERROR_HANDLE_DISK_FULL, ERROR_DISK_FULL
 
@@ -136,14 +142,26 @@ class Control:
         self.events = events
         self.cancel = threading.Event()
         self.finished = threading.Event()
+        # M12: a PS3 save key the player typed, sent as a "key <32 hex digits>" line -- never on the command line,
+        # never echoed, logged or written by the worker (characters --action import uses it)
+        self.key_text = None
+        self.key_ready = threading.Event()
 
     def listen(self):
         threading.Thread(target=self._read, daemon=True).start()
 
     def _read(self):
         for line in sys.stdin:
+            if line.startswith("key "):
+                self.key_text = line[4:].strip()
+                self.key_ready.set()
+                continue
+            if line.strip() == "nokey":
+                self.key_ready.set()
+                continue
             if line.strip() == "cancel":
                 return self.request("the player")
+        self.key_ready.set()
         self.request("the launcher closed")
 
     def request(self, by):
@@ -224,7 +242,34 @@ def hard_exit(code):
 
 
 def step_name(s):
-    return pipeline.STEP_NAMES.get(s) or STEP_NAMES_M9.get(s, s)
+    base, _, version = s.partition(":")   # beta.6: "build:v100" -- v1.00's build in an install of both versions
+    name = pipeline.STEP_NAMES.get(base) or STEP_NAMES_M9.get(base, base)
+    return f"{name} (v1.00)" if version == "v100" else name
+
+
+def step_base(s):
+    return s.partition(":")[0]
+
+
+class VersionSteps:
+    """one game version's build steps under their own ids (beta.6, an install of both versions: v1.00's build, then
+    v1.01's): "recomp" reported as "recomp:v100", and so on; the disc's steps, shared, keep theirs"""
+    RENAMED = ("recomp", "spu", "build", "finish", "validate", "activate", "prepare")
+
+    def __init__(self, prog, version):
+        self.prog, self.control, self.suffix = prog, prog.control, ":" + version
+
+    def _id(self, step):
+        return step + self.suffix if step in self.RENAMED else step
+
+    def progress(self, step, frac, message):
+        self.prog.progress(self._id(step), frac, message)
+
+    def log(self, text):
+        self.prog.log(text)
+
+    def skip(self, step):
+        self.prog.skip(self._id(step))
 
 
 class Callbacks:
@@ -273,7 +318,7 @@ class Progress:
         self.ev, self.control = events, control
         self.now = clock
         self.stages = list(stages)
-        self.weight = {s: STAGE_SECONDS.get(s, 10.0) for s in self.stages}
+        self.weight = {s: STAGE_SECONDS.get(step_base(s), 10.0) for s in self.stages}
         self.state = {s: "pending" for s in self.stages}
         self.took = {}
         self.cur = None
@@ -309,7 +354,8 @@ class Progress:
     def speed(self):
         """this PC against the reference, from the compute-bound steps finished here (the disc's steps are
         bound by the drive, not the processor: they say nothing of the build's pace); None until one is done"""
-        done = [s for s in self.stages if s in CPU_STAGES and self.state[s] == "done" and self.took.get(s, 0) > 1]
+        done = [s for s in self.stages if step_base(s) in CPU_STAGES and self.state[s] == "done" and
+                self.took.get(s, 0) > 1]
         ref = sum(self.weight[s] for s in done)
         return min(4.0, max(0.25, sum(self.took[s] for s in done) / ref)) if ref else None
 
@@ -322,7 +368,7 @@ class Progress:
         if not self.cur or self.state.get(self.cur) != "running":
             return None, None
         sp = self.speed()
-        scale = (lambda s: (sp if s in CPU_STAGES else 1.0)) if sp else (lambda s: 1.0)
+        scale = (lambda s: (sp if step_base(s) in CPU_STAGES else 1.0)) if sp else (lambda s: 1.0)
         el = self.now() - self.cur_t0
         left_by_weight = self.weight[self.cur] * scale(self.cur) - el
         if self.frac is not None and self.frac >= 0.15 and el >= 1.0:
@@ -358,7 +404,9 @@ class Progress:
 
     def skip(self, step):
         self.control.check()
-        if step == self.cur or step not in self.state:
+        # a step done stays done: an install of v1.01 runs the disc's steps, then v1.01's build "skips" them (it has
+        # no disc to read) -- marked skipped, they left the bar's total and it went back (Linux's review of 972077c)
+        if step == self.cur or step not in self.state or self.state[step] == "done":
             return
         self.state[step] = "skipped"
         self.ev.emit("stage", id=step, state="skipped")
@@ -411,7 +459,7 @@ def free_bytes(path):
 # data/tmp. Made on demand: never for a folder that is not an install yet (but `install`'s own), never for the
 # commands that only look (space, info) or remove (uninstall, remove-launcher).
 TEMP_COMMANDS = ("install", "update", "migrate", "prepare", "download-update", "stage-launcher", "diagnostics",
-                 "selftest")
+                 "selftest", "game-update-install", "game-version")
 TEMP_VARS = ("TMP", "TEMP", "TMPDIR")
 TEMP_PREFIX = "worker-"
 _temp = {"dir": None, "saved": None, "tempdir": None}
@@ -560,10 +608,37 @@ def cmd_probe_disc(a, ev, control):
     return out
 
 
+def key_sources_of(a):
+    """the key sources of a probe or an install: --keys, then --key-source, then the places beside the disc, then
+    the keys the install downloaded before and -- unless --no-key-download -- the keys downloaded now from the pinned
+    public sources (beta.6: tools/key_download.py, into --install's data/keys; a few small files), then --rpcs3
+    (tools/key_sources.py). Only paths: no key is read here."""
+    import key_sources
+    install = os.path.abspath(a.install) if getattr(a, "install", None) else None
+    return key_sources.Sources(chosen=os.path.abspath(a.keys) if a.keys else None,
+                               remembered=[os.path.abspath(p) for p in a.key_source],
+                               disc=os.path.abspath(a.disc) if getattr(a, "disc", None) else None,
+                               rpcs3=os.path.abspath(a.rpcs3) if a.rpcs3 else None, install=install,
+                               download=bool(install) and not getattr(a, "no_key_download", False))
+
+
 def cmd_probe_keys(a, ev, control):
-    k = os.path.abspath(a.keys)
-    elf = pipeline.is_elf(k)
-    return pipeline.probe_keys(os.path.abspath(a.disc), None if elf else k, k if elf else None, disc_key(a))
+    return pipeline.probe_keys(os.path.abspath(a.disc), key_sources_of(a), None, disc_key(a))
+
+
+def cmd_game_update_check(a, ev, control):
+    """the official v1.01 update's checks for an install (tools/update_preflight.py): its state (v1.00 / v1.01 / not
+    installed), each check with the player's message, its remedies and its details, whether Install can start, and
+    how. Nothing of the game is changed; the keys that open the update are downloaded into data/keys when the
+    computer has none (pinned sources; --no-key-download: not). Keys are never put into an event."""
+    import update_preflight
+    keys = a.keys or (a.key_source[0] if a.key_source else None)
+    work = os.path.join(os.path.abspath(a.install), "data", "tmp")
+    return update_preflight.preflight(os.path.abspath(a.install), disc=a.disc, pkg=a.update_pkg,
+                                      folder=a.update_folder, elf=a.update_elf, keys=keys, rpcs3=a.rpcs3,
+                                      online=not a.offline, key_download_allowed=not a.no_key_download,
+                                      work_dir=work if os.path.isdir(work) else None, planned=a.planned,
+                                      disc_key=disc_key(a) if a.planned else None)
 
 
 def cmd_space(a, ev, control):
@@ -643,22 +718,63 @@ def validate_build(slot, log):
 BUILD_TAIL = ["validate", "activate", "prepare"]
 STEP_NAMES_M9 = {"validate": "Checking the new build", "activate": "Making it the active build",
                  "prepare": "Preparing shaders and pipelines", "copy": "Copying the installation",
-                 "check-copy": "Checking the copy", "place": "Putting it in place"}
+                 "check-copy": "Checking the copy", "place": "Putting it in place",
+                 # beta.6: the official v1.01 update (op_game_update)
+                 "update-download": "Downloading the official update", "update-extract": "Unpacking the update",
+                 "update-decrypt": "Decrypting the update's program"}
+
+
+def active_program(lay):
+    """the game's program the active build was made from: None for the disc's (v1.00), else the official update's id"""
+    if not os.path.exists(lay.active_json):
+        return None
+    st = lay.read_active()
+    return (lay.program_of(st["active"]) or None) if st["active"] else None
+
+
+def kept_program(lay):
+    """the program a repair or a rebuild makes: the active build's (v1.01 stays v1.01 through a launcher update or a
+    repair) while its update's files are whole in the installation; else the disc's"""
+    program = active_program(lay)
+    if program:
+        import official_update
+        if not official_update.prepared(lay.root, program, full=False):
+            return None
+    return program
+
+
+def sync_official_content(lay):
+    """install.json's official_content from the ACTIVE build's program (the owner, 2026-11-25: the Character Store
+    follows the version being played, not the files on disk) -- at every activation: install, update, repair,
+    rollback, a switch of version. Returns the list."""
+    program = active_program(lay)
+    content = [pipeline.BASE_PROGRAM] + ([program] if program else [])
+    rec = pipeline.install_info(lay.root) or {}
+    if rec.get("official_content") != content:
+        rec["official_content"] = content
+        tmp = lay.install_json + ".part"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(rec, f, indent=1)
+        os.replace(tmp, lay.install_json)
+    return content
 
 
 def build_slot(lay, prog, source=None, keys=None, elf=None, full=False, resume=False, validate=validate_build,
-               disc_key=None):
+               disc_key=None, program=None):
     """the conversion (or a rebuild) into a staged slot, checked, recorded, promoted and made active; any failure
-    leaves the active build as it was (the staged slot removed). Returns (build id, info, changed)."""
+    leaves the active build as it was (the staged slot removed). program: the game's program it is made of (None:
+    the disc's; beta.6: the official update's id, its files and program prepared in data/official/<id>/ first).
+    Returns (build id, info, changed)."""
     lay.ensure_dirs()
     lay.clean_staging()
     active = lay.read_active()["active"] if os.path.exists(lay.active_json) else None
-    same_as = None if full or not active or lay.check_build(active) else (lay.build_info(active) or {}).get("inputs")
+    same_as = None if full or not active or lay.check_build(active) or lay.program_of(active) != (program or "") \
+        else (lay.build_info(active) or {}).get("inputs")
     staging = lay.stage()
     try:
         made = pipeline.run(lay.root, source=source, keys=keys, elf=elf, progress=prog.progress, log=prog.log,
                             skip=prog.skip, full=full, out_dir=staging, keep_objects=lay.kept_objects(), resume=resume,
-                            unchanged_inputs=same_as, disc_key=disc_key)
+                            unchanged_inputs=same_as, disc_key=disc_key, program=program)
         prog.control.check()
         if made.get("unchanged"):   # the active build is made of exactly this: nothing to build or switch
             layout.rmtree(staging)
@@ -668,12 +784,17 @@ def build_slot(lay, prog, source=None, keys=None, elf=None, full=False, resume=F
         checked = validate(staging, prog.log)
         prog.control.check()
         prog.progress("activate", 0.0, STEP_NAMES_M9["activate"])
-        info = lay.record(staging, {k: made[k] for k in ("lift", "objects", "shader_cache", "version", "inputs")})
+        rec = {k: made[k] for k in ("lift", "objects", "shader_cache", "version", "inputs")}
+        if not pipeline.is_base(program):   # the disc's program's builds stay recorded exactly as before
+            import official_update
+            rec.update(program=program, update_dir=official_update.relative(program))
+        info = lay.record(staging, rec)
         info["checked"] = checked
         layout.write_json(os.path.join(staging, "build.json"), info)
         before = lay.read_active()["active"] if os.path.exists(lay.active_json) else None
         bid = lay.promote(staging, info)
         lay.activate(bid)
+        sync_official_content(lay)
         refresh_game_appimage(lay, prog.log)   # M11.4: the player's game AppImage follows the active build
         prog.progress("activate", 1.0, STEP_NAMES_M9["activate"])
         return bid, lay.build_info(bid), bid != before
@@ -686,21 +807,92 @@ def build_slot(lay, prog, source=None, keys=None, elf=None, full=False, resume=F
         raise
 
 
-def op_install(install, source, keys, elf, prog, resume=False, validate=validate_build, prepare=True, disc_key=None):
+def op_install(install, source, keys, elf, prog, resume=False, validate=validate_build, prepare=True, disc_key=None,
+               game_version=None, also_v100=False, update=None):
     """a first install, a reinstall or a repair from the disc: the disc's steps, then a new build (the saves, the
-    settings and the kept builds untouched)"""
+    settings and the kept builds untouched). game_version (beta.6): None, the version the install plays now (a
+    repair keeps it; v1.00 for a first install); "v100", the disc's; "v101", the official update installed with the
+    disc in one run (op_install_v101). update: v1.01's inputs (pkg, folder, elf, sources, online,
+    key_download_allowed)."""
     lay = layout.Layout(install)
     if lay.kind() == "setup-app":
         raise pipeline.SetupError("This folder holds an install made by the setup app: migrate it (no need to "
                                   "choose the disc again).", "needs_migration")
     check_writable(install, create=True)
-    check_space(install, NEEDED["install"])
-    bid, info, _ = build_slot(lay, prog, source, keys, elf, resume=resume, validate=validate, disc_key=disc_key)
+    check_space(install, NEEDED["install-both" if game_version == "v101" and also_v100 else "install"])
+    if game_version == "v101":
+        return op_install_v101(lay, source, keys, elf, prog, resume, validate, prepare, disc_key, also_v100,
+                               update or {})
+    bid, info, _ = build_slot(lay, prog, source, keys, elf, resume=resume, validate=validate, disc_key=disc_key,
+                              program=None if game_version == "v100" else kept_program(lay))
     game_settings.settle_after_conversion(install)
     pruned = lay.prune()
     prepared = prepare_after(lay, prog, validate, prepare)
     return {"build": bid, "exe": os.path.join(lay.game_link, layout.exe_name()), "pruned": pruned["removed"],
-            "prepared": prepared}
+            "prepared": prepared, "game_version": "v101" if active_program(lay) else "v100"}
+
+
+def op_install_v101(lay, source, keys, elf, prog, resume, validate, prepare, disc_key, also_v100, update):
+    """beta.6 (the owner, 2026-11-27): the game installed as v1.01 in one run. The disc's steps (checked, extracted,
+    its program decrypted and kept), then the official update's (its files downloaded or the player's, checked, its
+    program decrypted and checked against its pin), then ONE build: v1.01's. v1.00 isn't built: its program is kept
+    in the installation, so Game Version builds it later without the disc. also_v100: both versions -- v1.00 built
+    first (made active, so a failure of the update leaves a playable v1.00), then v1.01; the disc's copy, the keys,
+    Zig's caches and the shader cache are shared. A failure after the disc's steps raises an update_* error (the
+    disc's steps are kept: `install --resume`, with v1.00 or v1.01 again, doesn't redo them). With both versions, a
+    failure of the update leaves v1.00 installed and completed (its shaders prepared when chosen), and is an
+    update_* error."""
+    install = lay.root
+    built_v100 = None
+    if also_v100:
+        built_v100, _, _ = build_slot(lay, VersionSteps(prog, "v100"), source, keys, elf, resume=resume,
+                                      validate=validate, disc_key=disc_key, program=None)
+        game_settings.settle_after_conversion(install)
+    else:
+        pipeline.run(install, source=source, keys=keys, elf=elf, progress=prog.progress, log=prog.log, skip=prog.skip,
+                     resume=resume, disc_key=disc_key, disc_only=True)
+        prog.control.check()
+    try:
+        return _install_v101_update(lay, source, prog, validate, prepare, update, built_v100)
+    except pipeline.SetupError as e:
+        # past the disc's steps every failure is the update's (update_*: v1.01's build failing included), so the
+        # launcher offers v1.00 from the disc's steps kept; with both versions, v1.00 built and active is completed
+        # as an install of it would be (its shaders prepared when chosen), and the launcher says it is installed
+        if built_v100:
+            prepare_after(lay, prog, validate, prepare)
+        code = e.code if (e.code or "").startswith("update_") else "update_" + (e.code or "failed")
+        raise pipeline.SetupError(str(e), code, e.details) from None
+
+
+def _install_v101_update(lay, source, prog, validate, prepare, update, built_v100):
+    """op_install_v101 once the disc's steps (and with both versions, v1.00's build) are done: the update's checks,
+    its files and program, v1.01's build"""
+    import update_preflight
+    install, pid = lay.root, update_preflight.UPDATE_ID
+    sources = update.get("sources")
+    online = update.get("online", True)
+    allowed = update.get("key_download_allowed", True)
+    work = os.path.join(lay.data, "tmp")
+    os.makedirs(work, exist_ok=True)
+    pf = update_preflight.preflight(install, disc=source, pkg=update.get("pkg"), folder=update.get("folder"),
+                                    elf=update.get("elf"), keys=sources.chosen if sources else None,
+                                    rpcs3=sources.rpcs3 if sources else None, online=online, work_dir=work,
+                                    key_download_allowed=allowed)
+    if not pf["ready"]:
+        raise pipeline.SetupError(pf["blockers"][0] if pf["blockers"] else "The update can't be installed now.",
+                                  "update_not_ready", json.dumps({"checks": pf["checks"]}))
+    plan = pf["plan"]
+    backup = None
+    if not built_v100 and active_program(lay) != pid and os.path.isdir(lay.gamedata) and os.listdir(lay.gamedata):
+        backup = lay.backup_saves("before-update")   # a reinstall over saves: backed up, as an update does
+    downloaded_pkg = _stage_update(install, prog, plan, sources, online, allowed)
+    bid, info, _ = build_slot(lay, prog, validate=validate, program=pid)
+    game_settings.settle_after_conversion(install)
+    _update_recorded(lay, plan, downloaded_pkg)
+    prepared = prepare_after(lay, prog, validate, prepare)
+    return {"build": bid, "exe": os.path.join(lay.game_link, layout.exe_name()), "program": pid, "game_version": "v101",
+            "v100_build": built_v100, "saves_backup": backup and backup["id"], "prepared": prepared, "plan": plan,
+            "official_content": sync_official_content(lay)}
 
 
 # M9.2: the shaders and pipelines made before play (the game's `--prepare`: its recipes, recorded as the game
@@ -946,6 +1138,8 @@ def prepare_after(lay, prog, validate, enabled=True):
     except pipeline.SetupError as e:
         prog.log(f"preparation: {e} ({e.details or ''})"[:2000])
         return {"error": str(e)}
+    except pipeline.Cancelled:   # stopped while preparing: the build is made and active -- the operation isn't undone,
+        return {"error": "stopped", "cancelled": True}   # what was prepared is kept; the game prepares the rest
 
 
 def op_update(install, prog, full=False, validate=validate_build, prepare=True):
@@ -959,13 +1153,208 @@ def op_update(install, prog, full=False, validate=validate_build, prepare=True):
     check_writable(install)
     check_space(install, NEEDED["update"])
     backup = lay.backup_saves("before-update") if os.path.isdir(lay.gamedata) and os.listdir(lay.gamedata) else None
-    bid, info, changed = build_slot(lay, prog, full=full, validate=validate)
+    bid, info, changed = build_slot(lay, prog, full=full, validate=validate, program=kept_program(lay))
     game_settings.settle_after_conversion(install)
     pruned = lay.prune()
     lay.prune_backups()
     prepared = prepare_after(lay, prog, validate, prepare) if changed else prog.skip("prepare")
     return {"build": bid, "changed": changed, "saves_backup": backup and backup["id"], "pruned": pruned["removed"],
             "prepared": prepared}
+
+
+UPDATE_STEPS = ["update-download", "update-extract", "update-decrypt"]
+
+
+def _stage_update(install, prog, plan, sources, online, key_download_allowed):
+    """the official update's files staged and checked, its program decrypted (the player's keys, else the keys
+    downloaded automatically, else their RPCS3 or a decrypted program they chose) and checked against its pin, then
+    put in place (data/official/<id>); nothing done again that an earlier attempt finished. Returns the package
+    downloaded now (removed by the caller once the build is made), or None."""
+    import game_update
+    import key_sources
+    import official_update
+    import update_preflight
+    pid = update_preflight.UPDATE_ID
+    work = os.path.join(install, "data", "tmp")
+    os.makedirs(work, exist_ok=True)
+    official_update.clean_staging(install)
+    downloaded_pkg = None
+    if official_update.prepared(install, pid):   # an earlier attempt finished these steps
+        for s in UPDATE_STEPS:
+            prog.skip(s)
+    else:
+        staging = official_update.new_staging(install)
+        try:
+            src, how = plan.get("source"), plan.get("path")
+            if src == "download":
+                prog.progress("update-download", 0.0, step_name("update-download"))
+                how = downloaded_pkg = game_update.download(
+                    update_preflight.update_folder(install), progress=lambda d, t: prog.progress(
+                        "update-download", d / max(1, t), f"{d >> 20} of {t >> 20} MB"),
+                    cancelled=lambda: prog.control.cancel.is_set())
+                src = "pkg"
+            else:
+                prog.skip("update-download")
+            prog.progress("update-extract", 0.0, step_name("update-extract"))
+            ring = _update_keyring(install, sources, online and key_download_allowed)
+            extract_progress = lambda d, t: prog.progress("update-extract", d / max(1, t), step_name("update-extract"))  # noqa: E731
+            if src == "pkg":
+                official_update.stage_package(how, ring.pkg, staging, extract_progress, prog.control.check)
+            else:
+                official_update.stage_folder(how, staging, extract_progress, prog.control.check)
+            prog.progress("update-decrypt", 0.0, step_name("update-decrypt"))
+            pin = game_update.record()["decrypted_elf"]["sha256"]
+            if plan.get("decrypt") == "elf":
+                with open(plan["elf"], "rb") as f:
+                    elf_bytes = f.read(64 << 20)
+            else:
+                ks = sources or key_sources.Sources()
+                ks.install, ks.download = install, online and key_download_allowed
+                elf_bytes, _ = key_sources.open_program(official_update.eboot(staging), pin, ks, work)
+            official_update.place_program(staging, elf_bytes)
+            prog.progress("update-decrypt", 1.0, step_name("update-decrypt"))
+            prog.control.check()
+            official_update.promote(install, staging, pid)
+        except official_update.StageError as e:
+            raise pipeline.SetupError(str(e) + {"not_official": " Choose the official v1.01 package, or download it "
+                                                                "again.",
+                                                "keys": " Select keys that include the PS3 package key."}.get(
+                e.code, ""), "update_" + e.code, e.details) from None
+        except key_sources.NoProgram as e:
+            raise pipeline.SetupError("The update executable could not be decrypted using the available resources. "
+                                      "Select an existing decrypted update executable, provide compatible keys, or "
+                                      "configure an available supported RPCS3 installation.", "update_keys",
+                                      "; ".join(f"{t.get('how')}: {t.get('result')}" for t in e.tried)) from None
+        except game_update.UpdateError as e:
+            raise pipeline.SetupError(str(e), "update_" + e.code) from None
+        finally:
+            if os.path.isdir(staging):
+                layout.rmtree(staging)
+    return downloaded_pkg
+
+
+def _update_recorded(lay, plan, downloaded_pkg):
+    """after the update's build became active: what no build uses removed, the downloaded package too (its files are
+    in place: the 186 MB package isn't needed), and the update recorded in install.json"""
+    import update_preflight
+    lay.prune()
+    lay.prune_backups()
+    if downloaded_pkg and os.path.isfile(downloaded_pkg):
+        os.remove(downloaded_pkg)
+    rec = pipeline.install_info(lay.root) or {}
+    rec["game_update"] = {"program": update_preflight.UPDATE_ID, "source": plan.get("source"),
+                          "installed": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "decrypt": plan.get("decrypt")}
+    layout.write_json(lay.install_json, rec)
+
+
+def op_game_update(install, prog, pkg=None, folder=None, elf=None, sources=None, disc=None, online=True,
+                   key_download_allowed=True, validate=validate_build, prepare=True):
+    """the official v1.01 update installed (beta.6, the owner's requirement of 2026-11-25): the checks first (an
+    update that can't be installed changes nothing and says why), the saves backed up, the update's files staged
+    and checked (downloaded from Sony, or from the player's package or update folder), its program decrypted (the
+    player's keys, else the keys downloaded automatically, else their RPCS3 or a decrypted program they chose) and
+    checked against its pin, the folder put in place (data/official/<id>, apart from the saves), then the v1.01
+    program built into a new slot, checked and made active -- the v1.00 build kept for the switch back. Any failure
+    leaves v1.00 active and playable; the staging is removed, and what was verified is kept for the next attempt.
+    A kept v1.01 build (the player switched back) is made active again at once."""
+    import game_update
+    import key_sources
+    import official_update
+    import update_preflight
+    lay = layout.Layout(install)
+    if lay.kind() != "slots":
+        raise pipeline.SetupError("Install the game first: the update is added to an installed v1.00 game.",
+                                  "no_install")
+    check_writable(install)
+    pid = update_preflight.UPDATE_ID
+    state = update_preflight.game_state(install)["state"]
+    if state == "v101":
+        return {"already": True, "build": lay.read_active()["active"], "official_content": sync_official_content(lay)}
+    if state != "v100":
+        raise pipeline.SetupError("This installation isn't the US release of 3D Dot Game Heroes (BLUS-30490) v1.00, "
+                                  "which the official update is for.", "update_unsupported")
+    kept = lay.newest_of(pid)
+    if kept and official_update.prepared(install, pid):   # built before: the switch, nothing rebuilt
+        for s in UPDATE_STEPS + pipeline.STEPS + ["validate", "prepare"]:
+            prog.skip(s)
+        prog.progress("activate", 0.0, STEP_NAMES_M9["activate"])
+        lay.activate(kept)
+        content = sync_official_content(lay)
+        refresh_game_appimage(lay, prog.log)
+        prog.progress("activate", 1.0, STEP_NAMES_M9["activate"])
+        return {"build": kept, "switched": True, "official_content": content}
+    work = os.path.join(lay.data, "tmp")
+    os.makedirs(work, exist_ok=True)
+    pf = update_preflight.preflight(install, disc=disc, pkg=pkg, folder=folder, elf=elf,
+                                    keys=sources.chosen if sources else None, rpcs3=sources.rpcs3 if sources else None,
+                                    online=online, work_dir=work, key_download_allowed=key_download_allowed)
+    if not pf["ready"]:
+        raise pipeline.SetupError(pf["blockers"][0] if pf["blockers"] else "The update can't be installed now.",
+                                  "update_not_ready", json.dumps({"checks": pf["checks"]}))
+    plan = pf["plan"]
+    backup = lay.backup_saves("before-update") if os.path.isdir(lay.gamedata) and os.listdir(lay.gamedata) else None
+    downloaded_pkg = _stage_update(install, prog, plan, sources, online, key_download_allowed)
+    bid, info, changed = build_slot(lay, prog, validate=validate, program=pid)
+    _update_recorded(lay, plan, downloaded_pkg)
+    prepared = prepare_after(lay, prog, validate, prepare)
+    return {"build": bid, "program": pid, "saves_backup": backup and backup["id"], "prepared": prepared,
+            "official_content": sync_official_content(lay), "plan": plan}
+
+
+def _update_keyring(install, sources, download):
+    """the package key and the update program's keys: the player's sources, the keys the installation downloaded
+    before, and -- download -- the keys downloaded now (tools/key_download.py). In memory only."""
+    import key_download
+    import player_keys
+    import update_preflight
+    ring = update_preflight._key_ring(sources) if sources else player_keys.Keyring()
+    if not ring.has_update_keys():
+        try:
+            got = key_download.downloaded(install, "npdrm") or (key_download.fetch(install, "npdrm") if download
+                                                                  else [])
+        except key_download.KeyDownloadError:
+            got = []
+        for path, _ in got:
+            try:
+                ring.merge(player_keys.load(path))
+            except (OSError, ValueError):
+                pass
+    return ring
+
+
+def op_game_version(install, prog, version, validate=validate_build, prepare=True):
+    """the game version switched (beta.6): "v100" or "v101" made active -- the newest whole build of it kept in the
+    installation at once, else built (v1.00 from the installation's own copy of the disc; v1.01 only when its files
+    are in the installation: else it is installed with game-update-install). The Character Store follows."""
+    import official_update
+    import update_preflight
+    lay = layout.Layout(install)
+    if lay.kind() != "slots":
+        raise pipeline.SetupError("This folder has no installed game.", "no_install")
+    program = None if version == "v100" else update_preflight.UPDATE_ID
+    if active_program(lay) == program:
+        return {"build": lay.read_active()["active"], "version": version, "changed": False,
+                "official_content": sync_official_content(lay)}
+    check_writable(install)
+    kept = lay.newest_of(program or "")
+    if kept and (not program or official_update.prepared(install, program, full=False)):
+        for s in pipeline.STEPS + ["validate", "prepare"]:
+            prog.skip(s)
+        prog.progress("activate", 0.0, STEP_NAMES_M9["activate"])
+        lay.activate(kept)
+        content = sync_official_content(lay)
+        refresh_game_appimage(lay, prog.log)
+        prog.progress("activate", 1.0, STEP_NAMES_M9["activate"])
+        return {"build": kept, "version": version, "changed": True, "rebuilt": False, "official_content": content}
+    if program and not official_update.prepared(install, program):
+        raise pipeline.SetupError("The v1.01 update isn't installed in this installation: install it first.",
+                                  "update_missing")
+    check_space(install, NEEDED["update"])
+    bid, info, _ = build_slot(lay, prog, validate=validate, program=program)
+    lay.prune()
+    prepared = prepare_after(lay, prog, validate, prepare)
+    return {"build": bid, "version": version, "changed": True, "rebuilt": True, "prepared": prepared,
+            "official_content": sync_official_content(lay)}
 
 
 def op_migrate(install, prog, validate=validate_build, prepare=True):
@@ -1014,12 +1403,52 @@ def _progress(ev, control, steps):
     return prog
 
 
+DISC_STEPS = ["verify", "extract", "decrypt"]
+LIFT_STEPS = ["recomp", "spu", "build", "finish"]
+
+
+def install_steps(game_version=None, also_v100=False):
+    """an install's steps, in order: the disc's, then a build (v1.00, or the version kept); with v1.01, the disc's,
+    the update's, then v1.01's build -- and with also_v100, v1.00's build (its own step ids) before the update's"""
+    if game_version != "v101":
+        return pipeline.STEPS + BUILD_TAIL
+    first = [s + ":v100" for s in LIFT_STEPS + ["validate", "activate"]] if also_v100 else []
+    return DISC_STEPS + first + UPDATE_STEPS + LIFT_STEPS + BUILD_TAIL
+
+
 def cmd_install(a, ev, control):
-    k = os.path.abspath(a.keys)
-    elf = pipeline.is_elf(k)
-    prog = _progress(ev, control, pipeline.STEPS + BUILD_TAIL)
-    out = op_install(os.path.abspath(a.install), os.path.abspath(a.disc), None if elf else k, k if elf else None,
-                     prog, resume=a.resume, prepare=not a.no_prepare, disc_key=disc_key(a))
+    """install --game-version v101 (beta.6): v1.01 in one run; --also-v100: both versions; v100: the disc's only;
+    none given: the version the installation plays (a repair keeps it), v1.00 for a first install"""
+    also = bool(getattr(a, "also_v100", False))
+    prog = _progress(ev, control, install_steps(a.game_version, also))
+    sources = key_sources_of(a)
+    update = {"pkg": a.update_pkg, "folder": a.update_folder, "elf": a.update_elf, "sources": sources,
+              "online": not a.offline, "key_download_allowed": not a.no_key_download}
+    out = op_install(os.path.abspath(a.install), os.path.abspath(a.disc), sources, None,
+                     prog, resume=a.resume, prepare=not a.no_prepare, disc_key=disc_key(a),
+                     game_version=a.game_version, also_v100=also, update=update)
+    out["seconds"], out["skipped"] = prog.finish()
+    return out
+
+
+def cmd_game_update_install(a, ev, control):
+    """the official v1.01 update installed (op_game_update), with the same inputs as game-update-check"""
+    prog = _progress(ev, control, UPDATE_STEPS + [s for s in pipeline.STEPS if s not in ("verify", "extract",
+                                                                                           "decrypt")] + BUILD_TAIL)
+    a.disc = a.disc or None
+    sources = key_sources_of(a)
+    out = op_game_update(os.path.abspath(a.install), prog, pkg=a.update_pkg, folder=a.update_folder,
+                         elf=a.update_elf, sources=sources, disc=a.disc, online=not a.offline,
+                         key_download_allowed=not a.no_key_download, prepare=not a.no_prepare)
+    out["seconds"], out["skipped"] = prog.finish()
+    return out
+
+
+def cmd_game_version(a, ev, control):
+    """the game version made active: v100 or v101 (op_game_version)"""
+    prog = _progress(ev, control, [s for s in pipeline.STEPS if s not in ("verify", "extract", "decrypt")] +
+                     BUILD_TAIL)
+    out = op_game_version(os.path.abspath(a.install), prog, a.game_version, prepare=not a.no_prepare)
     out["seconds"], out["skipped"] = prog.finish()
     return out
 
@@ -1121,8 +1550,9 @@ def refresh_game_appimage(lay, log=print):
 def cmd_rollback(a, ev, control):
     lay = _layout(a)
     st = lay.rollback(a.to)
+    content = sync_official_content(lay)   # beta.6: the store follows the version rolled back to
     ai = refresh_game_appimage(lay)
-    return {"active": st["active"], "previous": st["previous"], "game_appimage": ai}
+    return {"active": st["active"], "previous": st["previous"], "game_appimage": ai, "official_content": content}
 
 
 def cmd_game_appimage(a, ev, control):
@@ -1695,7 +2125,284 @@ def cmd_selftest(a, ev, control):
     return {"seconds": took, "skipped": skipped}
 
 
-COMMANDS = {"version": cmd_version, "probe-disc": cmd_probe_disc, "probe-keys": cmd_probe_keys,
+CHAR_SAVEDATA = ("dev_hdd0", "home", "00000001", "savedata")
+
+
+def cmd_characters(a, ev, control):
+    """M12, the local character library (tools/char_library.py, docs/CHARACTERS.md), in <install>/data/characters:
+    --char-action list (default) | import --paths P [--paths P ...] [--with-key] [--keep-key] | import-saves [--id FOLDER
+    ...] [--with-key] [--keep-key] | export --id I [--id ...] --out PATH | install --id I | uninstall --id I --confirm |
+    rename --id I --label L | delete --id I --confirm | previews [--id I ...] [--full] | key-forget |
+    store | store-refresh | store-thumbs [--id I ...] | store-download --id I [--and-install] (the read-only Character
+    Store; store-thumbs --id: only those pictures, in that order).
+    import --with-key (with --control): the player's PS3 key is read from the control channel ("key <hex>") -- never
+    from the command line; it is validated on the first encrypted character before any is decrypted, kept only with
+    --keep-key and only once it decrypted a character, and never written to the events or the log. Long actions
+    report progress and stop between characters on "cancel": each character is added whole or not at all."""
+    import char_library
+    import ps3_save
+    import secret_store
+    lay = _layout(a, kind=None)
+    root = os.path.join(lay.data, "characters")
+
+    def log(level, text):
+        ev.emit("log", level=level, text=text)
+
+    try:
+        lib = char_library.Library(root, log)
+    except OSError as e:
+        raise pipeline.SetupError(f"The character library's folder can't be used ({e.strerror or e}).", "io_error",
+                                  details=root)
+    savedata = os.path.join(lay.gamedata, *CHAR_SAVEDATA)
+    act = a.action_chars or "list"
+    ids = a.char_id or []
+
+    def progress(i, n, label):
+        ev.emit("progress", stage="characters", fraction=(i / n) if n else 1.0, overall=(i / n) if n else 1.0,
+                detail=f"{i} of {n}" + (f": {label}" if label else ""))
+
+    def key_status():
+        ok, where = secret_store.available()
+        return {"stored": secret_store.load() is not None, "store": where if ok else None,
+                "store_message": None if ok else where}
+
+    def read_key():
+        """(key bytes or None, typed): a key typed now (over the control channel), else the kept one"""
+        if a.with_key:
+            if not a.control:
+                raise pipeline.SetupError("--with-key needs --control (the key comes over the control channel).", "usage")
+            ev.emit("needs", what="key")
+            control.key_ready.wait(600)
+            text, control.key_text = control.key_text, None
+            if text:
+                try:
+                    return ps3_save.parse_key_text(text), True
+                except ps3_save.SaveError as e:
+                    raise pipeline.SetupError(str(e), "bad_key")
+        return secret_store.load(), False
+
+    def do_import(cands, errors):
+        key, typed = None, False
+        if any(ps3_save.classify(c.edt, c.pfd)[0] == "encrypted" for c in cands):
+            key, typed = read_key()
+        elif a.with_key:
+            read_key()   # asked for nothing: the launcher's key is read and dropped
+        program = None
+        elf = os.path.join(lay.data, "disc", "PS3_GAME", "USRDIR", "EBOOT.elf")
+        if key is not None and os.path.isfile(elf):
+            with open(elf, "rb") as f:
+                program = f.read()
+        results = lib.import_candidates(cands, key, program, progress, control.cancel.is_set)
+        kept = None
+        decrypted = any(r.get("id") and r["status"] in ("imported", "similar", "duplicate") and
+                        (lib.meta(r["id"]).get("source") or {}).get("decrypted_from_ps3_save") for r in results)
+        if typed and decrypted:
+            if a.keep_key:
+                try:
+                    kept = secret_store.save(key, keep=True)
+                except secret_store.StoreUnavailable as e:
+                    secret_store.save(key, keep=False)
+                    kept = f"this session only ({e})"
+            else:
+                secret_store.save(key, keep=False)
+                kept = "this session"
+        counts = {}
+        for r in results:
+            counts[r["status"]] = counts.get(r["status"], 0) + 1
+        counts["errors"] = len(errors)
+        stopped = control.cancel.is_set()
+        if stopped:   # stopped between characters: those added stay, and the answer says how many (not a bare "cancelled")
+            control.cancel.clear()
+        log("info", "characters: import " + ", ".join(f"{k} {v}" for k, v in sorted(counts.items()) if v) +
+            (" (stopped by the player)" if stopped else ""))
+        return {"results": results, "errors": errors, "counts": counts, "key_kept": kept, "stopped": stopped,
+                "key_wrong": any(r["status"] == "wrong-key" for r in results)}
+
+    if act == "list":
+        idx = lib.index()
+        have, _unusable = lib.installed(savedata)
+        out, classes, sources, stale = [], {}, {}, 0
+        for cid, e in sorted(idx.items()):
+            e = dict(e)
+            folder = have.get(e["sha256"])
+            e["installed"] = folder
+            e["installed_by_library"] = bool(folder) and folder == e.get("installed_folder")
+            e["in_library"] = True
+            e["thumb"], e["views"] = lib.preview_path(cid, "thumb.rle"), lib.preview_path(cid, "views.rle")
+            for k in ("shape", "original_sha256"):
+                e.pop(k, None)
+            classes[e["class"]] = classes.get(e["class"], 0) + 1
+            sources[e["source"]] = sources.get(e["source"], 0) + 1
+            stale += 0 if e["preview_current"] else 1
+            out.append(e)
+        in_game = lib.in_game(savedata)
+        for g in in_game:
+            g["installed"] = g["folder"]
+            for k in ("shape", "original_sha256"):
+                g.pop(k, None)
+        return {"root": root, "characters": out, "total": len(out), "classes": classes, "sources": sources,
+                "stale_previews": stale, "in_saves": lib.scan_saves(savedata), "in_game": in_game, "key": key_status()}
+    if act == "import":
+        if not a.char_paths:
+            raise pipeline.SetupError("import needs --paths.", "usage")
+        cands, errors = char_library.find(a.char_paths)
+        return do_import(cands, errors)
+    if act == "import-saves":
+        found = lib.scan_saves(savedata)
+        folders = [f["folder"] for f in found if not ids or f["folder"] in ids]
+        cands, errors = char_library.find([os.path.join(savedata, f) for f in folders]) if folders else ([], [])
+        return do_import(cands, errors)
+    if act == "previews":
+        todo = ids or [cid for cid, e in lib.index().items() if not e["preview_current"]]
+        made = failed = 0
+        for i, cid in enumerate(todo):
+            if control.cancel.is_set():
+                break
+            progress(i, len(todo), "")
+            try:
+                ok, new = lib.ensure_previews(cid, force=bool(ids) and a.full)
+                made += 1 if new else 0
+                failed += 0 if ok else 1
+            except (OSError, ValueError) as e:
+                failed += 1
+                log("warning", f"characters: entry {cid}: previews not made ({type(e).__name__})")
+        return {"made": made, "failed": failed, "total": len(todo)}
+    if act in ("store", "store-refresh", "store-thumbs", "store-download"):
+        # the Character Store, read-only (tools/char_store.py, docs/CHARACTER_STORE.md): the catalog checked when the
+        # store is shown (store), on the player's refresh (store-refresh); thumbnails fetched apart (store-thumbs);
+        # one character downloaded into the library, and installed with --and-install (store-download)
+        import char_store
+        import official_content
+        try:
+            st = char_store.Store(lib, log=log)
+        except char_store.StoreError as e:
+            raise pipeline.SetupError(str(e), "store_address")
+        # the characters this installation already has from official game content (config/official_characters.json,
+        # the installation's own record -- never its game files): shown as installed, never downloaded or imported
+        try:
+            mapping = official_content.load()
+            packages = official_content.installed(lay.root, mapping)
+            included = official_content.included(packages, mapping)
+        except official_content.MappingError as e:
+            log("warning", f"store: official content not recognised ({e})")
+            packages, included = [], {}
+        if act == "store-download":
+            if len(ids) != 1:
+                raise pipeline.SetupError("store-download needs one --id.", "usage")
+            try:
+                return st.download(ids[0], savedata, install=a.and_install, included=included)
+            except (char_store.StoreError, char_library.LibraryError) as e:
+                raise pipeline.SetupError(str(e), "store_download")
+        if act == "store-thumbs":
+            cat, _ = st.entries(savedata)
+            todo = [e for e in (cat or {}).get("characters", []) if not e["thumb_path"]]
+            if ids:   # the launcher's few, in its order (the cards on screen first): only those
+                rank = {cid: i for i, cid in enumerate(ids)}
+                todo = sorted((e for e in todo if e["id"] in rank), key=lambda e: rank[e["id"]])
+            made, failed, stopped = 0, 0, False
+            for i in range(0, len(todo), 24):
+                if control.cancel.is_set():
+                    stopped = True
+                    break
+                progress(i, len(todo), "")
+                m, f = st.fetch_thumbs(todo[i:i + 24], budget=24, deadline_s=60)
+                made, failed = made + m, failed + f
+                if m + f < len(todo[i:i + 24]):
+                    stopped = True
+                    break   # offline or rate limited: the rest stay placeholders
+            # stopped: no connection, a rate limit or the deadline (the missing ones may not have been tried); else
+            # each missing one was refused (it doesn't match the catalog, or the repository doesn't have it)
+            return {"made": made, "failed": failed, "total": len(todo), "stopped": stopped,
+                    "missing": [e["id"] for e in todo if not os.path.isfile(st.thumb_path(e))]}
+        status = st.refresh(force=(act == "store-refresh"))
+        cat, problems = st.entries(savedata, included=included)
+        missing = sum(1 for e in (cat or {}).get("characters", []) if not e["thumb_path"])
+        # the launcher's items: shaped like the library's (its cards, search, filters and order serve both)
+        items = [{"id": "store:" + e["id"], "catalog_id": e["id"], "version": e["version"], "label": e["label"],
+                  "name": e["name"], "class": e["class"], "creator": e["creator"], "creator_url": e["creator_url"],
+                  "license": e["license"], "attribution": e["attribution"], "tags": e["tags"],
+                  "description": e["description"], "imported": e["updated"] or e["added"],
+                  "source": "store" if e["category"] == "community" else "historical", "category": e["category"],
+                  "rights": e["rights"], "collection": e["source"].get("collection", ""),
+                  "original_date": e["source"].get("original_date", ""),
+                  "archived_url": e["source"].get("archived_url", ""),
+                  "added": e["added"], "size": e["file"]["size"], "library_id": e["in_library"],
+                  "older_in_library": e["older_in_library"], "installed": e["installed"] or None,
+                  # official content (docs/CHARACTER_STORE.md): one entry per character, where the player has it
+                  # kept apart -- included with an official package, in the library (downloaded from this store, or
+                  # imported by the player), in the game's saves
+                  "downloadable": not e["included_with"],
+                  "included_with": e["included_with"],
+                  "included_label": e["included_with"][0]["label"] if e["included_with"] else "",
+                  "same_model_in_library": e["same_model_in_library"], "sources": e["sources"],
+                  "thumb": e["thumb_path"],
+                  # where its picture will be once fetched (store-thumbs): the launcher looks for it there
+                  "thumb_pending": "" if e["thumb_path"] else st.thumb_path(e),
+                  "views": lib.preview_path(e["in_library"], "views.rle") if e["in_library"] else "",
+                  "preview_ok": True, "voxels": -1}
+                 for e in (cat or {}).get("characters", [])]
+        return {"status": status, "updated": (cat or {}).get("updated", ""), "have_catalog": cat is not None,
+                "catalog_version": (cat or {}).get("catalog_version", 0), "key_id": (cat or {}).get("key_id", ""),
+                "removal_url": (cat or {}).get("removal_url", ""),
+                "historical": sum(1 for e in (cat or {}).get("characters", []) if e["category"] == "historical"),
+                "items": items, "problems": problems[:20], "missing_thumbs": missing,
+                "official": st.base == char_store.DEFAULT_BASE,   # the store's own repository (not official content)
+                "official_content": packages,
+                "included": sum(1 for e in (cat or {}).get("characters", []) if e["included_with"])}
+    if act == "export":
+        if not ids or not a.out:
+            raise pipeline.SetupError("export needs --id and --out.", "usage")
+        written, skipped = [], []
+        for cid in ids:
+            b = lib.export(cid)
+            if len(ids) == 1 and a.out.lower().endswith(".chchar"):
+                path = a.out
+            else:
+                label = "".join(ch if ch.isalnum() or ch in " -_" else "_" for ch in lib.meta(cid)["label"]).strip()
+                path = os.path.join(a.out, f"{label or 'character'}-{cid[:8]}.chchar")
+            if os.path.exists(path):
+                skipped.append({"id": cid, "path": path, "reason": "a file of that name already exists"})
+                continue
+            os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+            tmp = path + ".part"
+            with open(tmp, "wb") as f:
+                f.write(b)
+            os.replace(tmp, path)
+            written.append(path)
+        return {"written": written, "skipped": skipped, "folder": os.path.dirname(os.path.abspath(written[0]))
+                if written else os.path.abspath(a.out)}
+    if act == "install":
+        done = []
+        for cid in ids:
+            folder, new = lib.install(cid, savedata)
+            done.append({"id": cid, "folder": folder, "new": new})
+        return {"installed": done}
+    if act == "uninstall":
+        if not a.confirm:
+            raise pipeline.SetupError("uninstall needs --confirm.", "needs_confirmation")
+        try:
+            return {"uninstalled": [{"id": cid, "folder": lib.uninstall(cid, savedata)} for cid in ids]}
+        except char_library.LibraryError as e:
+            raise pipeline.SetupError(str(e), "not_uninstalled")
+    if act == "rename":
+        if len(ids) != 1 or not a.label:
+            raise pipeline.SetupError("rename needs one --id and --label.", "usage")
+        lib.rename(ids[0], a.label)
+        return {"id": ids[0], "label": lib.meta(ids[0])["label"]}
+    if act == "delete":
+        if not a.confirm:
+            raise pipeline.SetupError("delete needs --confirm.", "needs_confirmation")
+        for cid in ids:
+            lib.delete(cid)
+        return {"deleted": ids}
+    if act == "key-forget":
+        secret_store.forget()
+        return {"key": key_status()}
+    raise pipeline.SetupError(f"unknown action {act}", "usage")
+
+
+COMMANDS = {"characters": cmd_characters, "version": cmd_version, "probe-disc": cmd_probe_disc, "probe-keys": cmd_probe_keys,
+
             "space": cmd_space, "info": cmd_info, "install": cmd_install, "update": cmd_update,
             "migrate": cmd_migrate, "builds": cmd_builds, "rollback": cmd_rollback, "game-appimage": cmd_game_appimage, "retention": cmd_retention,
             "repair-link": cmd_repair_link, "saves": cmd_saves, "prepare": cmd_prepare,
@@ -1706,14 +2413,33 @@ COMMANDS = {"version": cmd_version, "probe-disc": cmd_probe_disc, "probe-keys": 
             "diagnostics": cmd_diagnostics, "shortcuts": cmd_shortcuts, "steam-art": cmd_steam_art,
             "selftest": cmd_selftest,
             "uninstall": cmd_uninstall, "remove-launcher": cmd_remove_launcher, "devsaves": cmd_devsaves,
-            "migrate-root": cmd_migrate_root, "find-legacy": cmd_find_legacy}
+            "migrate-root": cmd_migrate_root, "find-legacy": cmd_find_legacy,
+            "game-update-check": cmd_game_update_check, "game-update-install": cmd_game_update_install,
+            "game-version": cmd_game_version}
 
 
 def parser():
     p = argparse.ArgumentParser(prog="worker", description="the launcher's pipeline worker")
     p.add_argument("command", choices=sorted(COMMANDS))
     p.add_argument("--disc")
-    p.add_argument("--keys")
+    p.add_argument("--keys", help="the game program's keys: a keys file, a folder or ZIP of key files, an EBOOT.elf "
+                   "decrypted by the player, or an RPCS3 program of theirs")
+    p.add_argument("--key-source", action="append", default=[], help="a key source the player chose before "
+                   "(repeatable; tried after --keys, before the places beside the disc)")
+    p.add_argument("--rpcs3", help="the player's own RPCS3 program, to decrypt with (optional; never required)")
+    p.add_argument("--update-pkg", help="game-update-check: the official v1.01 update package the player chose")
+    p.add_argument("--update-folder", help="game-update-check: an installed or extracted v1.01 update the player chose")
+    p.add_argument("--update-elf", help="game-update-check: the update's decrypted program the player chose")
+    p.add_argument("--offline", action="store_true", help="game-update-check: don't ask Sony's server")
+    p.add_argument("--game-version", choices=("v100", "v101"), help="game-version: the version to make active; "
+                   "install: the version to install (v101: the official update installed with the disc in one run, "
+                   "v1.00 not built)")
+    p.add_argument("--also-v100", action="store_true", help="install --game-version v101: v1.00 built too (both "
+                   "versions kept: switching is instant)")
+    p.add_argument("--planned", action="store_true", help="game-update-check: before the game is installed -- "
+                   "--disc is the disc it will be installed from (the launcher's install page offers v1.01)")
+    p.add_argument("--no-key-download", action="store_true", help="probe-keys, install, game-update-check: don't "
+                   "download keys (only those on this computer, and those the install downloaded before)")
     p.add_argument("--install")
     p.add_argument("--for", dest="op", choices=sorted(NEEDED), default="install")
     p.add_argument("--full", action="store_true")
@@ -1737,6 +2463,16 @@ def parser():
     p.add_argument("--kind", choices=("poster", "hero"), help="steam-art: which artwork")
     p.add_argument("--image", help="steam-art: the player's own image file (PNG or JPEG)")
     p.add_argument("--replace", action="store_true", help="steam-art: replace the player's own artwork (they confirmed)")
+    p.add_argument("--char-action", dest="action_chars",
+                   choices=("list", "import", "import-saves", "export", "install", "uninstall", "rename", "delete",
+                            "previews", "key-forget", "store", "store-refresh", "store-thumbs", "store-download"),
+                   help="characters: what to do (default list)")
+    p.add_argument("--paths", dest="char_paths", action="append", help="characters import: a file or folder (repeat)")
+    p.add_argument("--id", dest="char_id", action="append", help="characters: a library entry (repeat)")
+    p.add_argument("--label", help="characters: rename's new label; list's search text")
+    p.add_argument("--with-key", action="store_true", help="characters import: the PS3 save key comes over --control")
+    p.add_argument("--keep-key", action="store_true", help="characters import: keep the validated key (OS-protected)")
+    p.add_argument("--and-install", action="store_true", help="characters store-download: install it in the game too")
     p.add_argument("--disc-key", help="an encrypted disc image's key: a .dkey or IRD file, or a file of the 32 digits")
     p.add_argument("--parts", help="uninstall: the parts, comma-separated (builds,data,shaders,objects,settings,saves,shortcuts)")
     p.add_argument("--dry-run", action="store_true",
@@ -1751,7 +2487,7 @@ def parser():
     p.add_argument("--set", action="append", help="settings: KEY=VALUE (repeatable)")
     p.add_argument("--reset", action="append", help="settings: a key to its default (repeatable; all: every one)")
     p.add_argument("--repair", action="store_true", help="settings: write a damaged settings file again")
-    p.add_argument("--out", help="diagnostics: the folder the report's files are written into")
+    p.add_argument("--out", help="diagnostics: the folder the report's files are written into; characters export: a .chchar file, or a folder for several")
     p.add_argument("--pack", help="diagnostics: the zip to make from --out as it is now")
     p.add_argument("--channel", choices=("stable", "prerelease"), default="stable", help="updates: the channel")
     # a release list other than GitHub's (a mirror, for tests): --source, or CUBIC_UPDATE_SOURCE for the commands the
@@ -1790,8 +2526,10 @@ def parser():
     return p
 
 
-REQUIRED = {"probe-disc": ("disc",), "probe-keys": ("disc", "keys"), "space": ("install",), "info": ("install",),
-            "install": ("disc", "keys", "install"), "update": ("install",), "migrate": ("install",),
+REQUIRED = {"probe-disc": ("disc",), "probe-keys": ("disc",), "space": ("install",), "info": ("install",),
+            "game-update-check": ("install",), "game-update-install": ("install",),
+            "game-version": ("install", "game_version"),
+            "install": ("disc", "install"), "update": ("install",), "migrate": ("install",),
             "builds": ("install",), "rollback": ("install",), "game-appimage": ("install",), "retention": ("install", "keep"),
             "repair-link": ("install",), "saves": ("install",), "prepare": ("install",), "uninstall": ("install",),
             "download-update": ("install",), "stage-launcher": ("package", "launcher"),
@@ -1800,7 +2538,8 @@ REQUIRED = {"probe-disc": ("disc",), "probe-keys": ("disc", "keys"), "space": ("
             "recover-launcher": ("launcher",), "launcher-state": ("install", "launcher"),
             "shortcuts": ("exe",), "remove-launcher": ("launcher",),
             "devsaves": ("install",), "migrate-root": ("from_root", "install")}
-OPTION_NAMES = {"from_root": "from", "keys_file": "trusted-keys", "data_dir": "data-dir", "wait_pid": "wait-pid",
+OPTION_NAMES = {"from_root": "from", "keys_file": "trusted-keys",
+                "key_source": "key-source", "data_dir": "data-dir", "wait_pid": "wait-pid",
                 "expect_version": "expect-version", "no_restart": "no-restart"}
 
 

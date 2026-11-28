@@ -1316,20 +1316,45 @@ def devfight(chan, tmo, flag=None, reach=2.4, soft=False, hold=None, face=None, 
 def devcollect(chan, tmo):
     """M11.1: walk over every visible ITEM the tools' `enemies` lists (the game's actor manager: dropped money, a
     life vessel), nearest first, until none is left; one the hero gets no nearer to in 6 s is passed over. Fails
-    after `tmo` s with how many are left."""
+    after `tmo` s with how many are left.
+    An item's message (the life vessel's "get") holds the hero still until its button. When the hero has not moved
+    for 2 s while the drive walks him, CROSS is pressed: it pages a message, and outside one it is only a swing.
+    When the game runs an event then (the tools' status), the items' reach is also measured afresh: the time he was
+    held is not counted against them. A hero held by a wall, with no event, is passed over as before (0.2.0-beta.6
+    qualification, temple 3: the vessel taken first, its message up for the rest of the step, every coin passed
+    over as out of reach)."""
+    import devtools
     t0, skipped, near = time.time(), set(), {}
+    still, pages = [None, time.time()], 0   # the hero's last position and since when; CROSS presses
     while True:
         o = chan.send("enemies", timeout=10, alive=alive)["out"]
         o = o if isinstance(o, list) else json.loads(o)
         hero = next((x for x in o if x["kind"] == "PLAYER"), None)
         items = [x for x in o if x["kind"] == "ITEM" and x.get("visible") and x["slot"] not in skipped]
         if not items:
-            say(f"  devcollect: none left ({len(skipped)} passed over, {time.time() - t0:.0f} s)")
+            say(f"  devcollect: none left ({len(skipped)} passed over, {pages} held-still presses, "
+                f"{time.time() - t0:.0f} s)")
             return
         if time.time() - t0 > tmo:
-            raise Fail(f"devcollect: {len(items)} items left after {tmo:g} s")
+            raise Fail(f"devcollect: {len(items)} items left after {tmo:g} s ({pages} held-still presses)")
         if not hero:
             wait(0.5)
+            continue
+        pos = (round(hero["x"], 1), round(hero["z"], 1))
+        if pos != still[0]:
+            still[0], still[1] = pos, time.time()
+        elif time.time() - still[1] > 2:
+            still[1] = time.time()
+            try:
+                ev = chan.status(timeout=10, alive=alive).get("event_state")
+            except (devtools.Refused, TimeoutError):
+                ev = None
+            press(BTN["CROSS"])
+            wait(0.8)
+            pages += 1
+            if ev:
+                near.clear()
+            say(f"  devcollect: the hero held still 2 s (event state {ev}): CROSS")
             continue
         tgt = min(items, key=lambda a: (a["x"] - hero["x"]) ** 2 + (a["z"] - hero["z"]) ** 2)
         dx, dz = tgt["x"] - hero["x"], tgt["z"] - hero["z"]

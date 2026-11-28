@@ -286,11 +286,13 @@ static bool root_writable(std::string& why, bool create = true)
 
 struct Prefs {
     std::string legacy_install, disc, keys;   // legacy_install: an earlier launcher's install folder (read, never written)
+    std::string rpcs3;            // beta.6: the player's own RPCS3, chosen to decrypt with (optional; never required)
     int x = SDL_WINDOWPOS_CENTERED, y = SDL_WINDOWPOS_CENTERED, w = 1280, h = 800;
     bool maximized = false;
     bool prepared_once = false;   // shaders prepared at least once: a new build's empty cache is an update's
     bool steam_cleanup = false;   // an uninstall left the launcher's Steam entry (Steam ran): removed once it's closed
     std::string legacy_answered;  // M11.2b: the earlier installation the player was offered (not offered again)
+    std::string update_offer;     // beta.6: the official v1.01 update offered once: "accepted" or "declined" (no nagging)
 
     std::string file() const { return path_str(u8path(data_dir()) / "launcher.json"); }
     void load()
@@ -303,6 +305,7 @@ struct Prefs {
         }
         disc = v["disc"].str();
         keys = v["keys"].str();
+        rpcs3 = v["rpcs3"].str();
         if (v["window"]["w"].num() >= 640 && v["window"]["h"].num() >= 400) {
             x = (int)v["window"]["x"].num(x); y = (int)v["window"]["y"].num(y);
             w = (int)v["window"]["w"].num(); h = (int)v["window"]["h"].num();
@@ -311,6 +314,7 @@ struct Prefs {
         prepared_once = v["prepared_once"].truthy();
         steam_cleanup = v["steam_cleanup"].truthy();
         legacy_answered = v["legacy_answered"].str();
+        update_offer = v["update_offer"].str();
     }
     void save() const
     {
@@ -318,10 +322,12 @@ struct Prefs {
         snprintf(win, sizeof win, "{\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d,\"maximized\":%s}", x, y, w, h,
                  maximized ? "true" : "false");
         write_text(file(), "{\n \"disc\": " + json::quote(disc) +
-                               ",\n \"keys\": " + json::quote(keys) + ",\n \"window\": " + win +
+                               ",\n \"keys\": " + json::quote(keys) + ",\n \"rpcs3\": " + json::quote(rpcs3) +
+                               ",\n \"window\": " + win +
                                ",\n \"prepared_once\": " + (prepared_once ? "true" : "false") +
                                ",\n \"steam_cleanup\": " + (steam_cleanup ? "true" : "false") +
-                               ",\n \"legacy_answered\": " + json::quote(legacy_answered) + "\n}\n");
+                               ",\n \"legacy_answered\": " + json::quote(legacy_answered) +
+                               ",\n \"update_offer\": " + json::quote(update_offer) + "\n}\n");
     }
 } g_prefs;
 
@@ -562,10 +568,22 @@ static uint32_t hash32(uint32_t x)
 
 // --- the pixel font: the project's own 5x7 capitals, digits and signs (port/ui_pixel_font.h, shared with the game) ---
 #include "../port/ui_pixel_font.h"
+// beta.6: the signs the launcher's keycaps need that the shared font lacks -- the keyboard's "[" and "]", the Character
+// Store's tab keys, were drawn as "?". The launcher's own (the game's overlay, which shares the font, is unchanged).
+static const PixGlyph kLauncherGlyphs[] = {
+    { '[', { "###", "#..", "#..", "#..", "#..", "#..", "###" } },
+    { ']', { "###", "..#", "..#", "..#", "..#", "..#", "###" } },
+};
+static const PixGlyph* lpix_glyph(char c)
+{
+    for (const PixGlyph& g : kLauncherGlyphs)
+        if (g.c == c) return &g;
+    return pix_glyph(c);
+}
 static float pix_w(const char* t, float p)
 {
     int cols = 0, n = 0;
-    for (const char* s = t; *s; s++, n++) cols += (int)strlen(pix_glyph(*s)->rows[0]);
+    for (const char* s = t; *s; s++, n++) cols += (int)strlen(lpix_glyph(*s)->rows[0]);
     return n ? (float)(cols + n - 1) * p : 0.0f;
 }
 // a line of pixel text at pos (its top left), each row's runs drawn as one block; a shadow below and right
@@ -578,7 +596,7 @@ static void pix_text(ImDrawList* dl, ImVec2 pos, const char* t, float p, ImU32 c
         const float y = snap(pos.y) + (pass ? 0 : so);
         const ImU32 cc = A(pass ? c : shadow);
         for (const char* s = t; *s; s++) {
-            const PixGlyph* g = pix_glyph(*s);
+            const PixGlyph* g = lpix_glyph(*s);
             const int w = (int)strlen(g->rows[0]);
             for (int r = 0; r < 7; r++)
                 for (int i = 0; i < w; i++) {
@@ -628,6 +646,9 @@ static const PixIcon kIcons[] = {
     { { "...####...", ".##++####.", ".#++#####.", "##+#######", "####..####", "####..####", "#########*", ".#######*.",
         "..##****..", "...####..." },   // a disc (a file in the browser)
       { IM_COL32(196, 204, 224, 255), IM_COL32(250, 250, 255, 255), IM_COL32(130, 140, 170, 255), 0 } },
+    { { "..######..", ".########.", ".#++++++#.", ".#+*++*+#.", "..++++++..", "...gggg...", "..gggggg..", ".+gggggg+.",
+        "..gggggg..", "..**..**.." },   // a hero: Characters
+      { IM_COL32(60, 150, 80, 255), IM_COL32(248, 200, 170, 255), IM_COL32(70, 44, 30, 255), IM_COL32(96, 178, 100, 255) } },
 };
 enum { kIconFolder = 8, kIconDisc = 9 };
 static void pix_icon(ImDrawList* dl, ImVec2 pos, const PixIcon& ic, float p)
@@ -765,7 +786,7 @@ static Device g_device = Device::Keys;
 static bool g_saw_input = false;   // the first input decides the prompts; before it, a connected controller does
 static bool g_pad_connected = false;
 
-enum class Act { A, B, X, Y, LB, RB, Start, Back };
+enum class Act { A, B, X, Y, LB, RB, LT, RT, Start, Back };
 
 // false while the page is drawn under a dialog: the page's own buttons and prompts belong to the dialog then
 static bool g_page_input = true;
@@ -775,23 +796,37 @@ static bool g_quit = false;   // the launcher closes after this frame
 static bool g_nav_test = false;   // a scripted controller test (--nav-test) drives the launcher: the game never starts
 static std::string g_nav_event;   // what the test's log notes beside the next step
 static std::vector<std::string> g_nav_titles;   // the test's "see": the titles drawn wholly in view in the last frame
+// the test's "reach" (beta.6): every enabled button the page drew in the last frame, by its id -- whether in view or not
+static std::map<ImGuiID, std::string> g_nav_buttons;
+static bool g_nav_reaching = false;   // a "reach" walk: left stays on the page (no jump to the menu)
+// the test's "devlabel" and "footer" (beta.6): a device label of its choosing; the label as drawn, where it ends, and
+// where the prompts begin, in the last frame
+static std::string g_nav_dev_label;
+struct NavFooter { std::string label; float label_right = 0, prompts_left = 0; };
+static NavFooter g_nav_footer;
+static ImGuiWindow* g_page_window = nullptr;   // the page's own window (##page), as drawn in the last frame
 static float g_nav_rstick = 0;    // the test's right stick (beside a real controller's own, which the backend reports)
 
 static bool pressed(Act a)
 {
     using namespace ImGui;
     if (!g_page_input) return false;
+    // a text field being typed in (the Characters page's search) keeps the keyboard: its letters, Escape and the
+    // page keys are text there, not shortcuts (a controller's buttons still act)
+    const bool kb = !GetIO().WantTextInput;
     switch (a) {
     case Act::A: return IsKeyPressed(ImGuiKey_GamepadFaceDown, false);
-    case Act::B: return IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || IsKeyPressed(ImGuiKey_Escape, false);
-    case Act::X: return IsKeyPressed(ImGuiKey_GamepadFaceLeft, false) || IsKeyPressed(ImGuiKey_X, false);
-    case Act::Y: return IsKeyPressed(ImGuiKey_GamepadFaceUp, false) || IsKeyPressed(ImGuiKey_Y, false);
-    case Act::LB: return IsKeyPressed(ImGuiKey_GamepadL1, false) || IsKeyPressed(ImGuiKey_Q, false) ||
-                         IsKeyPressed(ImGuiKey_PageUp, false);
-    case Act::RB: return IsKeyPressed(ImGuiKey_GamepadR1, false) || IsKeyPressed(ImGuiKey_E, false) ||
-                         IsKeyPressed(ImGuiKey_PageDown, false);
-    case Act::Start: return IsKeyPressed(ImGuiKey_GamepadStart, false) || IsKeyPressed(ImGuiKey_F10, false);
-    case Act::Back: return IsKeyPressed(ImGuiKey_GamepadBack, false) || IsKeyPressed(ImGuiKey_F1, false);
+    case Act::B: return IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || (kb && IsKeyPressed(ImGuiKey_Escape, false));
+    case Act::X: return IsKeyPressed(ImGuiKey_GamepadFaceLeft, false) || (kb && IsKeyPressed(ImGuiKey_X, false));
+    case Act::Y: return IsKeyPressed(ImGuiKey_GamepadFaceUp, false) || (kb && IsKeyPressed(ImGuiKey_Y, false));
+    case Act::LB: return IsKeyPressed(ImGuiKey_GamepadL1, false) || (kb && (IsKeyPressed(ImGuiKey_Q, false) ||
+                                                                            IsKeyPressed(ImGuiKey_PageUp, false)));
+    case Act::RB: return IsKeyPressed(ImGuiKey_GamepadR1, false) || (kb && (IsKeyPressed(ImGuiKey_E, false) ||
+                                                                            IsKeyPressed(ImGuiKey_PageDown, false)));
+    case Act::LT: return IsKeyPressed(ImGuiKey_GamepadL2, false) || (kb && IsKeyPressed(ImGuiKey_LeftBracket, false));
+    case Act::RT: return IsKeyPressed(ImGuiKey_GamepadR2, false) || (kb && IsKeyPressed(ImGuiKey_RightBracket, false));
+    case Act::Start: return IsKeyPressed(ImGuiKey_GamepadStart, false) || (kb && IsKeyPressed(ImGuiKey_F10, false));
+    case Act::Back: return IsKeyPressed(ImGuiKey_GamepadBack, false) || (kb && IsKeyPressed(ImGuiKey_F1, false));
     }
     return false;
 }
@@ -918,6 +953,8 @@ static float glyph(ImDrawList* dl, ImVec2 p, Act a, float h)
             switch (a) {
             case Act::LB: t = sony || steam ? "L1" : nin ? "L" : "LB"; break;
             case Act::RB: t = sony || steam ? "R1" : nin ? "R" : "RB"; break;
+            case Act::LT: t = sony || steam || gen ? "L2" : nin ? "ZL" : "LT"; break;
+            case Act::RT: t = sony || steam || gen ? "R2" : nin ? "ZR" : "RT"; break;
             case Act::Start: t = sony ? "OPTIONS" : nin ? "+" : gen ? "START" : "MENU"; break;
             case Act::Back: t = sony ? "CREATE" : nin ? "-" : gen ? "SELECT" : "VIEW"; break;
             default: break;
@@ -931,6 +968,8 @@ static float glyph(ImDrawList* dl, ImVec2 p, Act a, float h)
         case Act::Y: t = "Y"; break;
         case Act::LB: t = "Q"; break;
         case Act::RB: t = "E"; break;
+        case Act::LT: t = "["; break;
+        case Act::RT: t = "]"; break;
         case Act::Start: t = "F10"; break;
         case Act::Back: t = "F1"; break;
         }
@@ -1019,6 +1058,13 @@ static bool big_button(const char* label, ImVec2 size = ImVec2(0, 0), Kind k = K
         const char* e = strstr(label, "##");
         g_focus_label = e ? std::string(label, e) : std::string(label);
     }
+    if (g_nav_test && enabled && g_page_window) {   // the nav test's "reach": a button of the page's (its cards' too)
+        ImGuiWindow* w = ImGui::GetCurrentWindow();
+        if (w == g_page_window || ImGui::IsWindowChildOf(w, g_page_window, false)) {
+            const char* e = strstr(label, "##");
+            g_nav_buttons[ImGui::GetItemID()] = e ? std::string(label, e) : std::string(label);
+        }
+    }
     const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
     const bool down = ImGui::IsItemActive(), hov = ImGui::IsItemHovered();
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -1075,9 +1121,42 @@ static void title(const char* t, float size = kTitle)
     if (g_nav_test && ImGui::GetCurrentWindow()->ClipRect.Contains(drawn)) g_nav_titles.push_back(t);
 }
 
-// a card: a sunken retro window inside the page
+// a card: a sunken retro window inside the page.
+// beta.6 (the owner's playtest, Game Version by controller): a card as tall as its content is drawn on the page itself,
+// not as a child window. ImGui scores a D-pad move from the page into a flattened child only when the child's clip
+// rectangle overlaps the view (imgui.cpp NavScoreItem, "When entering through a NavFlattened border"), so a press down
+// from the last button above a card wholly below the view skipped every button in it: with the disc remembered,
+// "Repair from the disc" went past Game Version's to the folder's. On the page, its buttons are the page's own and
+// the page scrolls to them as to any other. A card of a given size (Play's two side by side) stays a child window.
+struct CardFrame {
+    bool panel = false;
+    ImVec2 a;
+    float right = 0, work_max = 0, content_max = 0;
+    std::unique_ptr<ImDrawListSplitter> split;
+};
+static std::vector<CardFrame> g_cards;
 static bool card_begin(const char* id, ImVec2 size = ImVec2(0, 0))
 {
+    if (size.x == 0 && size.y == 0) {
+        ImGuiWindow* w = ImGui::GetCurrentWindow();
+        CardFrame c;
+        c.panel = true;
+        c.a = ImGui::GetCursorScreenPos();
+        c.right = c.a.x + ImGui::GetContentRegionAvail().x;
+        c.work_max = w->WorkRect.Max.x;
+        c.content_max = w->ContentRegionRect.Max.x;
+        c.split = std::make_unique<ImDrawListSplitter>();
+        c.split->Split(w->DrawList, 2);        // the frame goes under what the card holds (drawn at its end)
+        c.split->SetCurrentChannel(w->DrawList, 1);
+        ImGui::PushID(id);
+        w->WorkRect.Max.x = w->ContentRegionRect.Max.x = c.right - S(28);   // text and widths within its padding
+        // indented, not a group: a SameLine position stays the window's (a group's would add its own offset)
+        ImGui::Indent(S(28));
+        ImGui::SetCursorScreenPos(ImVec2(c.a.x + S(28), c.a.y + S(24)));
+        g_cards.push_back(std::move(c));
+        return true;
+    }
+    g_cards.push_back(CardFrame());
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(S(28), S(24)));
     // flattened: a card's buttons are reached directly, as the page's own (not the card first, then its buttons)
     const bool open = ImGui::BeginChild(id, size, ImGuiChildFlags_AlwaysUseWindowPadding | ImGuiChildFlags_NavFlattened |
@@ -1086,7 +1165,28 @@ static bool card_begin(const char* id, ImVec2 size = ImVec2(0, 0))
     frame_window(IM_COL32(150, 166, 220, 255), std::max(2.0f, floorf(S(3))));
     return open;
 }
-static void card_end() { ImGui::EndChild(); }
+static void card_end()
+{
+    CardFrame c = g_cards.empty() ? CardFrame() : std::move(g_cards.back());
+    if (!g_cards.empty()) g_cards.pop_back();
+    if (!c.panel) { ImGui::EndChild(); return; }
+    ImGuiWindow* w = ImGui::GetCurrentWindow();
+    const float bottom = std::max(ImGui::GetItemRectMax().y, w->DC.CursorPosPrevLine.y + w->DC.PrevLineSize.y) + S(24);
+    ImGui::Unindent(S(28));
+    w->WorkRect.Max.x = c.work_max;
+    w->ContentRegionRect.Max.x = c.content_max;
+    ImGui::PopID();
+    ImDrawList* dl = w->DrawList;
+    c.split->SetCurrentChannel(dl, 0);
+    const ImVec2 b(c.right, bottom);
+    dl->AddRectFilled(c.a, b, ImGui::GetColorU32(ImGuiCol_ChildBg));   // as a child window's background
+    const float o = std::max(2.0f, floorf(S(2)));
+    retro_frame(dl, ImVec2(c.a.x + o, c.a.y + o), ImVec2(b.x - o, b.y - o), IM_COL32(150, 166, 220, 255),
+                std::max(2.0f, floorf(S(3))));
+    c.split->Merge(dl);
+    ImGui::SetCursorScreenPos(ImVec2(c.a.x, bottom));
+    ImGui::Dummy(ImVec2(c.right - c.a.x, 0));   // the page's layout goes on below it
+}
 
 // a progress bar of blocks: green segments filling a sunken trough; `frac` < 0: working, its share unknown
 static void pix_bar(float frac, float h)
@@ -1148,6 +1248,7 @@ struct Op {
     std::deque<std::string> log;
     json::Value result;
     std::function<void(const json::Value&)> then;
+    std::string pending_key;   // M12: sent once when the worker asks for it ("needs": key), then wiped
     std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
 };
 
@@ -1161,11 +1262,17 @@ static bool g_prepare_after_game = false;   // a preparation asked for while the
 static SDL_Window* g_window = nullptr;
 static void show_msg(const std::string& t, const std::string& text);
 
+static double g_nav_spawn_max = 0, g_nav_page_max = 0, g_nav_view_max = 0;   // the test log's split of a step's worst frame (ms)
 static Op* run(const std::string& cmd, const std::vector<std::string>& args, const std::string& title, bool long_op,
                std::function<void(const json::Value&)> then)
 {
+    const Uint64 spawn_t0 = SDL_GetPerformanceCounter();
+    struct SpawnTime { Uint64 t0; ~SpawnTime() {
+        g_nav_spawn_max = std::max(g_nav_spawn_max, (double)(SDL_GetPerformanceCounter() - t0) * 1000.0 / SDL_GetPerformanceFrequency()); } }
+        spawn_time{ spawn_t0 };
     // what changes the active build or its shaders waits for the background preparation (one job on the cache)
-    static const std::set<std::string> exclusive = { "install", "update", "migrate", "rollback", "prepare" };
+    static const std::set<std::string> exclusive = { "install", "update", "migrate", "rollback", "prepare",
+                                                     "game-update-install", "game-version" };
     if (long_op && g_bg && exclusive.count(cmd)) {
         show_msg("Shaders are being prepared", "Wait for the preparation at the bottom to finish, or stop it first "
                  "(the VIEW button, or F1): what it made is kept.");
@@ -1213,12 +1320,16 @@ static void pump(Op& op)
             op.log.push_back(e["text"].str());
             if (op.log.size() > 200) op.log.pop_front();
         } else if (ev == "result") {
-            op.result = e;
+            op.result = std::move(e);   // a large answer (1,000 characters) is moved, never copied on this thread
+        } else if (ev == "needs" && e["what"].str() == "key") {
+            op.job->send_line(op.pending_key.empty() ? "nokey" : "key " + op.pending_key);
+            std::fill(op.pending_key.begin(), op.pending_key.end(), '\0');
+            op.pending_key.clear();
         }
     }
     if (!op.finished && op.job->done()) {
         for (json::Value& e : op.job->take_events())
-            if (e["ev"].str() == "result") op.result = e;
+            if (e["ev"].str() == "result") op.result = std::move(e);
         op.finished = true;
         if (op.result.is_null())
             json::parse("{\"ev\":\"result\",\"ok\":false,\"code\":\"internal\",\"message\":\"The worker ended without a "
@@ -1268,11 +1379,31 @@ static std::string& browse_last()   // the folder last browsed this session
     return last;
 }
 
+// issue #6 (0.2.0-beta.6): a disc's folder -- the folder holding PS3_GAME (its name in any case, as the worker matches
+// it: tools/disc_source.py), or PS3_GAME itself, whose parent is then the disc's folder; "" for any other folder
+static std::string disc_folder_of(const std::string& p)
+{
+    std::error_code ec;
+    const fs::path d = u8path(p);
+    if (p.empty() || !fs::is_directory(d, ec)) return "";
+    auto is_game = [](const fs::path& n) { return SDL_strcasecmp(path_str(n).c_str(), "PS3_GAME") == 0; };
+    if (is_game(d.filename()) && d.has_parent_path() && d.parent_path() != d) return path_str(d.parent_path());
+    for (fs::directory_iterator it(d, fs::directory_options::skip_permission_denied, ec), end; !ec && it != end;
+         it.increment(ec)) {
+        std::error_code e2;
+        if (is_game(it->path().filename()) && it->is_directory(e2)) return p;
+    }
+    return "";
+}
+
 struct Browser {
     bool open = false, folders = false;   // folders: a folder is what is chosen
     std::string title, dir, filter_desc;
     std::vector<std::string> exts;        // lower-case, with the dot; empty: any file
     std::function<void(const std::string&)> on_pick;
+    // issue #6: files are chosen, and also a folder this says is one (the folder to use, or ""): the disc's folder
+    std::function<std::string(const std::string&)> pick_dir;
+    std::string pick, pick_hint;          // the folder shown's choice (pick_dir's answer); what to open instead
     struct Entry { std::string name, path; bool dir; uintmax_t size; };
     std::vector<Entry> entries;
     std::string error;
@@ -1282,6 +1413,7 @@ struct Browser {
     {
         entries.clear();
         error.clear();
+        pick = dir.empty() || !pick_dir ? "" : pick_dir(dir);
         std::error_code ec;
         if (dir.empty()) {   // the top: drives and known places
 #ifdef _WIN32
@@ -1341,7 +1473,8 @@ struct Browser {
 } g_browser;
 
 static void browse(const std::string& t, bool folders, std::vector<std::string> exts, const std::string& desc,
-                   const std::string& start, std::function<void(const std::string&)> f)
+                   const std::string& start, std::function<void(const std::string&)> f,
+                   std::function<std::string(const std::string&)> pick_dir = nullptr, const std::string& pick_hint = "")
 {
     g_browser.open = true;
     g_browser.title = t;
@@ -1349,6 +1482,8 @@ static void browse(const std::string& t, bool folders, std::vector<std::string> 
     g_browser.exts = std::move(exts);
     g_browser.filter_desc = desc;
     g_browser.on_pick = std::move(f);
+    g_browser.pick_dir = std::move(pick_dir);
+    g_browser.pick_hint = pick_hint;
     // where it opens: the folder last browsed this session; else the install's folder; else the launcher's own
     (void)start;
     std::error_code ec;
@@ -1359,16 +1494,31 @@ static void browse(const std::string& t, bool folders, std::vector<std::string> 
     g_browser.go(d);
 }
 
+// the disc: an ISO (a file), or the disc's folder (issue #6: "Use this folder" once the browser shows it)
+static void browse_disc(std::function<void(const std::string&)> f)
+{
+    browse("Choose your disc image or the disc's folder", false, { ".iso" }, "disc images (.iso), or the disc's folder",
+           "", std::move(f), disc_folder_of,
+           "The disc's folder: open the folder holding PS3_GAME (or PS3_GAME itself), then Use this folder.");
+}
+
 // --- the on-screen keyboard: letters, digits and a few signs; A types, X deletes, Y a space, MENU done ---
 struct Osk {
     bool open = false, shift = false;
+    bool secret = false;   // M12: shown as dots (the PS3 save key)
     std::string title, text;
     std::function<void(const std::string&)> on_done;
 } g_osk;
 
-static void type_text(const std::string& t, const std::string& init, std::function<void(const std::string&)> f)
+static void type_text(const std::string& t, const std::string& init, std::function<void(const std::string&)> f,
+                      bool secret = false)
 {
-    g_osk = { true, false, t, init, std::move(f) };
+    g_osk = Osk();
+    g_osk.open = true;
+    g_osk.secret = secret;
+    g_osk.title = t;
+    g_osk.text = init;
+    g_osk.on_done = std::move(f);
 }
 
 // ============================================================================================================
@@ -1406,6 +1556,7 @@ std::string install_dir_or_empty() { return install_dir(); }
 void auto_prepare_check_later();
 
 static void refresh_info();
+static void gv_refresh();   // beta.6: the game version's check (below)
 static void maybe_update_game();
 
 // M11.2b: an installation made before the portable root (the earlier launcher's folder in its preferences, or an
@@ -1463,6 +1614,7 @@ static void refresh_info()
         if (kind == "slots") {
             maybe_update_game();
             run("builds", { "--install", install_dir() }, "", false, [](const json::Value& b) { g_st.builds = b["data"]; });
+            gv_refresh();   // beta.6: v1.00 or v1.01 (offline unless the player asked for the full check)
             run("saves", { "--install", install_dir() }, "", false, [](const json::Value& s) { g_st.saves = s["data"]; });
             run("prepare", { "--install", install_dir(), "--check" }, "", false, [](const json::Value& c) {
                 g_st.check = c["data"];
@@ -1684,9 +1836,9 @@ static void auto_prepare_check()
 
 // 0.2.0-beta.5: five pages (from seven) -- the updates are on Play, the install, the shaders, Steam and the shortcuts
 // on Install / Manage; Settings holds settings only
-enum Page { kPlay, kManage, kSaves, kSettings, kDiagnostics, kPages };
-static const char* kPageNames[kPages] = { "Play", "Install / Manage", "Saves", "Settings", "Diagnostics" };
-static const int kPageIcon[kPages] = { 0, 1, 4, 6, 7 };   // kIcons: the sword, chest, book, gear, glass
+enum Page { kPlay, kManage, kSaves, kCharacters, kSettings, kDiagnostics, kPages };
+static const char* kPageNames[kPages] = { "Play", "Install / Manage", "Saves", "Characters", "Settings", "Diagnostics" };
+static const int kPageIcon[kPages] = { 0, 1, 4, 10, 6, 7 };   // kIcons: the sword, chest, book, hero, gear, glass
 static int g_page = kPlay;
 static bool g_focus_updates = false;   // Play's update controls take the focus (and scroll into view) when next drawn
 
@@ -1895,6 +2047,7 @@ static void play_landscape()
 }
 
 static void updates_section();
+static void update_offer_card();
 
 static void page_play()
 {
@@ -1924,6 +2077,7 @@ static void page_play()
         else text_col(col::dim, "Installed and ready.");
         ImGui::EndGroup();
         ImGui::Dummy(ImVec2(0, S(8)));
+        update_offer_card();   // beta.6: the official v1.01 update, offered once
         // shaders
         card_begin("##shaders_card", ImVec2(ImGui::GetContentRegionAvail().x * 0.5f - S(8), S(214)));
         title("Shaders and pipelines", 24);
@@ -1983,7 +2137,9 @@ static void page_play()
     } else {
         title(kind == "partial" ? "An install was interrupted" : "The game isn't installed yet", 26);
         text_col(col::dim, kind == "partial" ? "Continue it on the Install / Manage page: what was done is kept."
-                                             : "You'll need your own disc (an ISO or its folder) and its keys file.");
+                                             : "You'll need your own disc (an ISO or its folder). The game's program keys "
+                                               "are found or downloaded automatically; if they can't be, you can choose "
+                                               "your own keys file or decrypted EBOOT.elf under Advanced, on Install / Manage.");
         if (big_button(kind == "partial" ? "Continue the install" : "Install the game", ImVec2(S(360), 0), Kind::Primary)) {
             g_page = kManage;
             g_focus_page = true;
@@ -2001,7 +2157,16 @@ struct Wizard {
     bool needs_key = false;        // the disc check found the image encrypted
     json::Value disc_info, keys_info, space;
     std::string disc_err, keys_err, space_err;
+    std::string keys_code;         // beta.6: the keys check's failure kind (keys_missing: nothing found -- not an error)
     bool probing_disc = false, probing_keys = false;
+    // beta.6 (the owner's playtest, 2026-11-27): the choices made before the install -- the game version (the official
+    // v1.01 update installed with the disc in one run, or v1.00) and the shaders prepared at its end
+    json::Value upd;               // the update's checks for this disc and folder (game-update-check --planned)
+    std::string upd_err, upd_for;  // the check's own failure; the disc and folder it was made for
+    bool upd_checking = false;
+    int version = -1;              // 1: v1.01, 0: v1.00; -1 not chosen (v1.01 once its checks pass, else v1.00)
+    bool also_v100 = false;        // both versions built (switching is then instant)
+    int shaders = -1;              // 1: prepared at the install's end, 0: not now; -1 not chosen (prepared)
 } g_wiz;
 
 // the worker's arguments for the disc (its key, when the image is encrypted; the keys file too: an IRD's key needs it)
@@ -2036,37 +2201,118 @@ static void probe_disc()
         const std::string code = r["code"].str();
         if (code == "needs_disc_key" || code == "wrong_disc_key" || r["data"]["encrypted"].truthy()) g_wiz.needs_key = true;
         if (code == "needs_disc_key") g_wiz.disc_err.clear();   // said by the key's own step instead
-        if (!g_wiz.keys.empty()) { g_wiz.keys_info = json::Value(); }
+        g_wiz.keys_info = json::Value();   // beta.6: the keys are looked for again for this disc (beside it too)
+        g_wiz.keys_err.clear();
+        g_wiz.keys_code.clear();
     });
+}
+
+// beta.6: the game program's key sources, for the worker -- the one the player chose (--keys), the one they chose
+// or that was found before (--key-source: only its path is remembered, never a key), and their RPCS3 if they pointed
+// at one (--rpcs3). The worker also looks beside the disc (tools/key_sources.py), and nowhere else.
+static void add_key_args(std::vector<std::string>& a)
+{
+    if (!g_wiz.keys.empty() && std::find(a.begin(), a.end(), "--keys") == a.end()) { a.push_back("--keys"); a.push_back(g_wiz.keys); }
+    if (!g_prefs.keys.empty() && g_prefs.keys != g_wiz.keys) { a.push_back("--key-source"); a.push_back(g_prefs.keys); }
+    if (!g_prefs.rpcs3.empty()) { a.push_back("--rpcs3"); a.push_back(g_prefs.rpcs3); }
 }
 
 static void probe_keys()
 {
     g_wiz.keys_info = json::Value();
     g_wiz.keys_err.clear();
+    g_wiz.keys_code.clear();
     if (g_wiz.disc.empty()) return;
     g_wiz.probing_keys = true;
     std::vector<std::string> a = disc_args();
-    if (std::find(a.begin(), a.end(), "--keys") == a.end()) { a.push_back("--keys"); a.push_back(g_wiz.keys); }
+    add_key_args(a);
+    // beta.6: no keys on this computer -- the worker downloads them (pinned, checked) into the install's data/keys
+    if (!g_wiz.folder.empty()) { a.push_back("--install"); a.push_back(g_wiz.folder); }
     run("probe-keys", a, "", false, [](const json::Value& r) {
         g_wiz.probing_keys = false;
-        if (r["ok"].truthy()) g_wiz.keys_info = r["data"];
-        else g_wiz.keys_err = r["message"].str();
+        if (r["ok"].truthy()) {
+            g_wiz.keys_info = r["data"];
+            // where the keys that worked are is remembered (the path only), so the next install or check finds them
+            const std::string via = r["data"]["via"].str(), src = r["data"]["source"].str();
+            if (via != "rpcs3" && r["data"]["found"].str() != "together" && !src.empty() && src != g_prefs.keys) {
+                g_prefs.keys = src;
+                g_prefs.save();
+            }
+        } else {
+            g_wiz.keys_err = r["message"].str();
+            g_wiz.keys_code = r["code"].str();
+        }
     });
 }
 
+// the program keys' status, a line under the disc (the owner, 2026-11-27: the keys are no step of their own -- found
+// or downloaded by themselves, as the check above does; chosen by hand only in Advanced): what opened the program,
+// and how it was found
+static std::string keys_found_text()
+{
+    const json::Value& k = g_wiz.keys_info;
+    const std::string via = k["via"].str(), found = k["found"].str();
+    const std::string name = path_str(u8path(k["source"].str()).filename());
+    if (via == "rpcs3") return "Your RPCS3 decrypts the game's program (" + k["source"].str() + ").";
+    if (k["downloaded"].truthy())   // beta.6: fetched from the public source config/key_downloads.json pins, checked
+        return "Program keys downloaded automatically and checked.";
+    if (found == "together") return "Program keys found automatically.";
+    const std::string where = found == "beside the disc" ? "found beside your disc" : found == "remembered" ?
+                              "found where they were before" : "chosen in Advanced";
+    return (via == "elf" ? "Your decrypted program (" + name + ", " + where + ") matches this disc."
+                         : found == "beside the disc" || found == "remembered"
+                               ? "Program keys found automatically (" + name + ", " + where + ")."
+                               : "Program keys: " + name + " (" + where + ").");
+}
+
+// the disc found by the check: its game, region, version and form ("3D DOT GAME HEROES -- BLUS30490, US, v01.00, the
+// disc's folder"); the check accepts only the supported one, so the region is the title ID's
+static std::string disc_details()
+{
+    const json::Value& d = g_wiz.disc_info;
+    const std::string id = d["title_id"].str(), p = id.substr(0, std::min<size_t>(4, id.size()));
+    const std::string region = p == "BLUS" || p == "BCUS" ? "US" : p == "BLES" || p == "BCES" ? "Europe"
+                             : p == "BLJM" || p == "BLJS" || p == "BCJS" || p == "BCJM" ? "Japan"
+                             : p == "BLAS" || p == "BCAS" ? "Asia" : "";
+    const std::string form = d["kind"].str() == "folder" ? "the disc's folder"
+                           : g_wiz.needs_key ? "an encrypted disc image" : "a disc image";
+    return d["title"].str() + " -- " + id + (region.empty() ? "" : ", " + region) + ", v" + d["app_ver"].str() + ", " +
+           form;
+}
+
+static const char* const kKeysNotFound = "Program keys could not be found automatically. You can select your own keys "
+                                         "file or decrypted EBOOT.elf to continue (Advanced, below).";
+static const char* const kKeysLooking = "Looking for the game's program keys -- downloaded automatically if this "
+                                        "computer has none...";
+
+// what the keys check said when it found nothing that opens the program: the player's own choice's error as it is;
+// otherwise that the automatic search failed, with the check's reason (offline, a file beside the disc that isn't
+// keys, ...) under it
+static void keys_failed_lines(bool short_form)
+{
+    const bool mine = !g_wiz.keys.empty() && !g_wiz.keys_err.empty();
+    if (mine) { text_col(col::danger, "%s%s", short_form ? "- " : "", (g_wiz.keys_err + " (Advanced, below)").c_str()); return; }
+    text_col(col::danger, "%s%s", short_form ? "- " : "", kKeysNotFound);
+    if (!short_form && g_wiz.keys_code != "keys_missing" && !g_wiz.keys_err.empty())
+        text_col(col::dim, "%s", g_wiz.keys_err.c_str());
+}
+
+static int chosen_version();
 static void check_space()
 {
     g_wiz.space = json::Value();
     g_wiz.space_err.clear();
-    run("space", { "--install", g_wiz.folder }, "", false, [](const json::Value& r) {
+    // beta.6: v1.01 with v1.00 built too needs room for both builds (the worker checks the same figure)
+    const bool both = g_wiz.also_v100 && chosen_version() == 1 && g_st.info["kind"].str() != "slots";
+    run("space", { "--install", g_wiz.folder, "--for", both ? "install-both" : "install" }, "", false,
+        [](const json::Value& r) {
         if (r["ok"].truthy()) g_wiz.space = r["data"];
         else g_wiz.space_err = r["message"].str();
     });
 }
 
 static void step_row(int n, const char* name, bool ok, const std::string& value, const std::string& err, bool busy,
-                     const char* button, std::function<void()> on_press)
+                     const char* button, std::function<void()> on_press, std::function<void()> extra = nullptr)
 {
     card_begin((std::string("##step") + std::to_string(n)).c_str());
     {   // the step's number on a block: green once it is checked
@@ -2086,12 +2332,46 @@ static void step_row(int n, const char* name, bool ok, const std::string& value,
     if (busy) text_col(col::dim, "Checking...");
     else if (!err.empty()) text_col(col::danger, "%s", err.c_str());
     else if (!value.empty()) text_col(ok ? col::text : col::dim, "%s", value.c_str());
+    if (extra && !busy) extra();   // a line of the step's own under its value (the disc: its program keys' status)
     ImGui::PopTextWrapPos();
     ImGui::EndGroup();
     ImGui::SameLine(ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX() - S(230));
     if (big_button(button, ImVec2(S(220), 0))) on_press();
     if (n == 1) focus_first();   // the page opens on the first step's button (the cards are flattened into the page)
     card_end();
+}
+
+// issue #13 (0.2.0-beta.6): what keeps Install from starting, each with what to do -- the disc, its disc key, the
+// program's keys, the space -- right above the button, so a greyed-out Install is never left unexplained
+static void install_blockers(bool disc_ok, bool keys_ok, bool space_ok, const std::string& version_why = "")
+{
+    title("Install can't start yet", 22);
+    auto why = [](ImU32 c, const std::string& s) { text_col(c, "- %s", s.c_str()); };
+    if (!disc_ok) {
+        if (g_wiz.probing_disc) why(col::dim, "Your disc is being checked...");
+        else if (g_wiz.disc.empty()) why(col::danger, "Your disc: choose an ISO of the US release (BLUS-30490), or the "
+                                                      "disc's folder (Your disc, Choose...).");
+        else if (g_wiz.needs_key && g_wiz.disc_key.empty())
+            why(col::danger, "This disc image is encrypted: choose its disc key -- a .dkey or IRD file -- or type it "
+                             "(Its disc key).");
+        else why(col::danger, (g_wiz.disc_err.empty() ? std::string("Your disc couldn't be checked.") : g_wiz.disc_err) +
+                              " (Your disc)");
+    }
+    if (disc_ok && !keys_ok) {
+        if (g_wiz.probing_keys) why(col::dim, kKeysLooking);
+        else keys_failed_lines(true);
+    } else if (!disc_ok) {
+        why(col::dim, "The keys are looked for once the disc is checked.");
+    }
+    if (!space_ok) {
+        if (!g_wiz.space_err.empty()) why(col::danger, g_wiz.space_err + " (Where to install it)");
+        else if (g_wiz.space.is_null()) why(col::dim, "The free space is being checked...");
+        else why(col::danger, "Not enough free space in " + g_wiz.folder + ": " + human_bytes(g_wiz.space["needed"].num()) +
+                              " needed, " + human_bytes(g_wiz.space["free"].num()) + " free. Choose another folder, or "
+                              "free some space (Where to install it).");
+    }
+    if (!version_why.empty()) text_col(col::danger, "- %s", version_why.c_str());
+    ImGui::Dummy(ImVec2(0, S(4)));
 }
 
 static void uninstall_open();
@@ -2105,42 +2385,679 @@ static void location_section();
 // Install / Manage (0.2.0-beta.5: the Install and Shaders pages, and Settings' Steam, shortcut and folder actions, in one
 // page): install or repair from the disc; then, installed, its folder, the shaders, Steam and shortcuts, and the
 // maintenance -- the game's previous build, uninstalling, removing the launcher
+// ============================================================================================================
+// beta.6: the game's version -- v1.00, complete and fully supported, or the official v1.01 update (optional; the
+// owner's requirement of 2026-11-25, docs/OFFICIAL_UPDATE.md). The worker checks everything first
+// (game-update-check: each check in plain words, with the remedies the launcher offers here), installs
+// (game-update-install: v1.00 stays playable on any failure) and switches (game-version). The update is offered
+// once on Play after v1.00 is installed; a decline is remembered; this section always offers it.
+// ============================================================================================================
+struct GameVersion {
+    json::Value check;            // the last check's result (its data)
+    std::string error;            // the last check's own failure (it couldn't run)
+    bool checking = false;
+    bool full = false;            // the last check looked online (Sony's download, keys downloaded if needed)
+    bool details = false;         // "Show details"
+    bool offer = false;           // Play's offer was accepted: its check's answer starts the install (or explains)
+    bool scroll_to = false;       // Install / Manage opens on Game Version (its first button focused)
+    int focus_next = 0;           // the section's next button takes the focus (frames left to ask: a dialog's close
+                                  // gives the focus back to the page meanwhile)
+    std::string pkg, folder, elf; // what the player chose for the update
+} g_gv;
+
+static std::vector<std::string> gv_args()
+{
+    std::vector<std::string> a = { "--install", install_dir() };
+    if (!g_prefs.disc.empty()) { a.push_back("--disc"); a.push_back(g_prefs.disc); }
+    if (!g_prefs.keys.empty()) { a.push_back("--keys"); a.push_back(g_prefs.keys); }
+    if (!g_prefs.rpcs3.empty()) { a.push_back("--rpcs3"); a.push_back(g_prefs.rpcs3); }
+    if (!g_gv.pkg.empty()) { a.push_back("--update-pkg"); a.push_back(g_gv.pkg); }
+    if (!g_gv.folder.empty()) { a.push_back("--update-folder"); a.push_back(g_gv.folder); }
+    if (!g_gv.elf.empty()) { a.push_back("--update-elf"); a.push_back(g_gv.elf); }
+    return a;
+}
+
+static void gv_offer_confirm();
+static void gv_install();
+
+// full: online -- Sony's download looked at, the keys that open the update downloaded when this computer has none;
+// else only what is here (the state, a kept v1.01 build): no network
+static void gv_check(bool full)
+{
+    if (g_gv.checking) return;
+    g_gv.checking = true;
+    std::vector<std::string> a = gv_args();
+    if (!full) a.push_back("--offline");
+    run("game-update-check", a, "", false, [full](const json::Value& r) {
+        g_gv.checking = false;
+        if (r["ok"].truthy()) { g_gv.check = r["data"]; g_gv.error.clear(); g_gv.full = full; }
+        else g_gv.error = r["message"].str("The update couldn't be checked.");
+        if (g_gv.offer && full) {   // Play's offer: install now, or say why not and where to fix it
+            g_gv.offer = false;
+            if (r["ok"].truthy() && g_gv.check["ready"].truthy()) gv_offer_confirm();
+            else {
+                std::string why = g_gv.error;
+                for (size_t i = 0; i < g_gv.check["blockers"].size(); i++)
+                    why += (why.empty() ? "" : "\n") + ("- " + g_gv.check["blockers"][i].str());
+                ask("The official update can't be installed yet", (why.empty() ? std::string("It isn't ready.") : why) +
+                    "\n\nYour v1.00 game is unchanged and ready to play. Install / Manage > Game Version has what "
+                    "can be done: choose an update package you have, select keys, or check again.",
+                    "Open Game Version", false, [] {
+                    g_page = kManage;
+                    g_focus_page = false;   // Game Version's first button takes it, not the page's first
+                    g_gv.scroll_to = true;
+                });
+                g_confirm.no = "Not Now";
+                g_confirm.focus_yes = true;   // where it can be fixed
+            }
+        }
+    });
+}
+
+static void gv_install()
+{
+    const bool kept = g_gv.check["plan"]["source"].str() == "kept";
+    std::vector<std::string> a = gv_args();
+    a.push_back("--no-prepare");   // the launcher prepares in the background, as after an install
+    run("game-update-install", a, kept ? "Switching to v1.01" : "Installing the official v1.01 update", true,
+        [kept](const json::Value& r) {
+        if (r["ok"].truthy()) {
+            g_prefs.update_offer = "accepted";
+            g_prefs.save();
+            g_msg = { true, kept ? "Switched to v1.01" : "v1.01 is installed",
+                      "You now play Official Game Update v1.01, with its 51 additional characters and gameplay "
+                      "improvements. Your saves and settings are as they were. Install / Manage > Game Version switches "
+                      "back to v1.00 at any time.", "", false, false };
+            if (!kept && !r["data"]["switched"].truthy()) after_install_shaders();   // the setting's answer, or asked once
+        } else if (r["code"].str() != "cancelled") {
+            g_msg = { true, "The update wasn't installed",
+                      r["message"].str("Something went wrong.") + "\n\nYour v1.00 game is unchanged and ready to play.",
+                      r["details"].str(), true, false };
+        }
+        g_gv.check = json::Value();
+        refresh_info();
+        gv_check(true);
+    });
+}
+
+// the update's confirmation (Play's offer, and Game Version's Install v1.01)
+static void gv_offer_confirm()
+{
+    const json::Value& c = g_gv.check;
+    ask("Install the official v1.01 update?", "Your saves are backed up first. The update is " +
+        std::string(c["plan"]["source"].str() == "download" ? "downloaded from Sony and " : "") +
+        "checked, then the game is built as v1.01 on this PC: it takes a few minutes, about as long as the first "
+        "install. Until it is done, and if anything goes wrong, your v1.00 game stays as it is and ready to play.",
+        "Install v1.01", false, [] { gv_install(); });
+    g_confirm.focus_yes = true;
+}
+
+// a whole v1.00 build kept in the installation (v1.01 installed with the disc in one run has none until asked for)
+static bool v100_built()
+{
+    for (size_t i = 0; i < g_st.builds["builds"].size(); i++) {
+        const json::Value& b = g_st.builds["builds"][i];
+        if (b["program"].str().empty() && !b["damaged"].truthy()) return true;
+    }
+    return false;
+}
+
+static void gv_switch_to_v100()
+{
+    const bool built = v100_built();
+    ask(built ? "Switch back to v1.00?" : "Install v1.00?",
+        std::string(built ? "The v1.00 build is kept, so this takes a moment." :
+                    "v1.00 is built from your disc's files kept in this installation (your disc isn't needed): it takes "
+                    "a few minutes, and v1.01 stays installed.") +
+        " Your saves and settings stay as they are, and you can switch to v1.01 again at any time. In the Character "
+        "Store, the 45 characters that came with the update become downloadable again; any you imported or downloaded "
+        "yourself stay yours.", built ? "Switch to v1.00" : "Install v1.00", false,
+        [] {
+        run("game-version", { "--install", install_dir(), "--game-version", "v100", "--no-prepare" },
+            v100_built() ? "Switching to v1.00" : "Installing v1.00", true, [](const json::Value& r) {
+            if (!r["ok"].truthy()) show_result_error(r, "The game version wasn't changed");
+            else if (r["data"]["rebuilt"].truthy()) after_install_shaders();
+            g_gv.check = json::Value();
+            refresh_info();
+            gv_check(false);
+        });
+    });
+}
+
+// a remedy the check offers, as a button (each at most once on the section)
+static void gv_take_focus();
+static void gv_remedy(const std::string& id, std::set<std::string>& shown,
+                      std::function<void()> recheck = [] { gv_check(true); })
+{
+    if (!shown.insert(id).second) return;
+    const ImVec2 sz(S(420), 0);
+    if (id == "retry" || id == "download") {
+        if (big_button(id == "retry" ? "Check again" : "Try the official download again", sz)) recheck();
+    } else if (id == "choose_pkg") {
+        if (big_button("Choose the update package...", sz))
+            browse("Choose the official v1.01 update package", false, { ".pkg" }, "PS3 packages (.pkg)", g_gv.pkg,
+                   [recheck](const std::string& p) { g_gv.pkg = p; recheck(); });
+    } else if (id == "choose_folder") {
+        if (big_button("Choose an update folder...", sz))
+            browse("Choose the installed or extracted v1.01 update (the folder holding PARAM.SFO)", true, {}, "folders",
+                   g_gv.folder, [recheck](const std::string& p) { g_gv.folder = p; recheck(); });
+    } else if (id == "choose_elf") {
+        if (big_button("Choose a decrypted update program...", sz))
+            browse("Choose the update's decrypted program (EBOOT.elf)", false, { ".elf" }, "EBOOT.elf", g_gv.elf,
+                   [recheck](const std::string& p) { g_gv.elf = p; recheck(); });
+    } else if (id == "choose_keys") {
+        if (big_button("Select keys...", sz))
+            browse("Choose your keys", false, { ".txt", ".keys", ".zip", ".ini", ".cfg", "" }, "keys files, ZIPs",
+                   g_prefs.keys, [recheck](const std::string& p) { g_prefs.keys = p; g_prefs.save(); recheck(); });
+    } else if (id == "locate_rpcs3") {
+#ifdef _WIN32
+        const std::vector<std::string> rp_ext = { ".exe" };
+#else
+        const std::vector<std::string> rp_ext = { ".appimage", "" };
+#endif
+        if (big_button("Locate RPCS3 (optional)...", sz))
+            browse("Choose your RPCS3 program", false, rp_ext, "RPCS3", g_prefs.rpcs3,
+                   [recheck](const std::string& p) { g_prefs.rpcs3 = p; g_prefs.save(); recheck(); });
+    } else if (id == "continue_v100") {
+        if (big_button("Continue with v1.00", sz)) {
+            g_prefs.update_offer = "declined";
+            g_prefs.save();
+            g_gv.full = false;
+            g_gv.details = false;
+        }
+    }
+    gv_take_focus();   // opened from Play's explanation: the first remedy has the focus
+    same_line_fits(S(420));
+}
+
+// What the official update adds, as players see it (the owner's wording, 2026-11-25): gameplay and content only, never
+// how it is installed. Its characters are told apart from the Character Store's historical collection.
+static void update_whats_included()
+{
+    text_col(col::text, "What's included:");
+    text_col(col::text, "- 51 additional characters: 50 original Hall of Heroes creations, plus Sackboy from LittleBigPlanet.");
+    text_col(col::text, "- Improved New Game+: Certain swords purchased from King Block now carry over into future "
+                        "playthroughs.");
+    text_col(col::text, "- Easier Dash Circuit challenges: More forgiving completion times.");
+    text_col(col::text, "- Loading Art Gallery improvements: Previously missing loading-screen artwork can now appear and be "
+                        "collected.");
+    text_col(col::dim, "These characters come with the official update. The Character Store is separate: its 352 historical "
+                       "Hall of Heroes characters stay available whether or not you install v1.01.");
+}
+
+// Game Version opened from Play's explanation: the section's first button takes the focus (the page scrolls to it)
+static void gv_take_focus()
+{
+    static int asked = -1;   // the first such button of the frame only
+    if (g_gv.focus_next <= 0 || !g_page_input || asked == ImGui::GetFrameCount()) return;
+    asked = ImGui::GetFrameCount();
+    if (ImGui::IsItemFocused()) g_gv.focus_next = 0;   // it holds
+    else { ImGui::SetKeyboardFocusHere(-1); g_gv.focus_next--; }
+}
+
+static void game_version_section()
+{
+    ImGui::Dummy(ImVec2(0, S(10)));
+    title("Game Version", 24);
+    if (g_gv.scroll_to) { ImGui::SetScrollHereY(0.0f); g_gv.scroll_to = false; g_gv.focus_next = 30; }
+    card_begin("##game_version");
+    const json::Value& c = g_gv.check;
+    const std::string st = c["state"].str();
+    const bool idle = !game_running() && !g_bg && !g_op;
+    if (c.is_null()) {
+        text_col(col::dim, "%s", !g_gv.error.empty() ? g_gv.error.c_str() : "Checking the game's version...");
+        if (!g_gv.checking && g_gv.error.empty()) gv_check(false);
+        if (!g_gv.error.empty() && big_button("Check again", ImVec2(S(320), 0))) { g_gv.error.clear(); gv_check(false); }
+        card_end();
+        return;
+    }
+    if (st == "v101") {
+        text_col(col::ok, "You play v1.01, the official game update, with its 51 additional characters and gameplay "
+                          "improvements.");
+        if (v100_built())
+            text_col(col::dim, "v1.00 is kept in this installation: switching back takes a moment, and so does coming back.");
+        else
+            text_col(col::dim, "v1.00 isn't built in this installation: its files are kept, so it is built from them -- "
+                               "your disc isn't needed. That takes a few minutes; then switching either way takes a moment.");
+        if (big_button(v100_built() ? "Switch to v1.00" : "Install v1.00", ImVec2(S(360), 0), Kind::Normal, idle))
+            gv_switch_to_v100();
+        gv_take_focus();
+        if (game_running()) text_col(col::warm, "Close the game first.");
+        card_end();
+        return;
+    }
+    if (st != "v100") {
+        text_col(col::dim, "%s", c["checks"].size() ? c["checks"][(size_t)0]["message"].str().c_str()
+                                                    : "The game isn't installed.");
+        card_end();
+        return;
+    }
+    const bool kept = c["plan"]["source"].str() == "kept";
+    text_col(col::text, "You play v1.00, complete and fully supported. Official Game Update v1.01 is optional: it adds new "
+                        "characters and several gameplay improvements, and v1.00 stays in this installation if you install "
+                        "it.");
+    if (!kept && !g_gv.full) {
+        if (big_button(g_gv.checking ? "Checking...###see101" : "See what v1.01 needs###see101", ImVec2(S(420), 0),
+                       Kind::Primary, !g_gv.checking))
+            gv_check(true);
+        gv_take_focus();
+        text_col(col::dim, "Checks your game, the update package (yours, or Sony's official download), what opens it "
+                           "(your keys, or keys downloaded automatically), disk space and permission. Nothing is changed.");
+        ImGui::Dummy(ImVec2(0, S(6)));
+        update_whats_included();
+        card_end();
+        return;
+    }
+    // the checks, in plain words
+    ImGui::Dummy(ImVec2(0, S(4)));
+    std::set<std::string> shown;
+    for (size_t i = 0; i < c["checks"].size(); i++) {
+        const json::Value& k = c["checks"][i];
+        const std::string s = k["status"].str();
+        const ImU32 colr = s == "ok" ? col::ok : s == "warning" ? col::warm : s == "skipped" ? col::dim : col::danger;
+        const char* mark = s == "ok" ? "OK" : s == "warning" ? "Note" : s == "skipped" ? "-" : "Needed";
+        text_col(colr, "%s  %s: %s", mark, k["title"].str().c_str(), k["message"].str().c_str());
+        if (g_gv.details && !k["details"].str().empty()) text_col(col::dim, "      %s", k["details"].str().c_str());
+    }
+    ImGui::Dummy(ImVec2(0, S(6)));
+    const bool ready = c["ready"].truthy();
+    if (big_button(kept ? "Switch to v1.01" : "Install v1.01", ImVec2(S(360), S(64)), Kind::Primary, ready && idle)) {
+        if (kept) gv_install();
+        else
+            gv_offer_confirm();
+    }
+    if (ready && idle) gv_take_focus();
+    if (!ready) {   // never a greyed button alone: why, and what to do
+        text_col(col::warm, "Install isn't possible yet:");
+        for (size_t i = 0; i < c["blockers"].size(); i++) text_col(col::text, "- %s", c["blockers"][i].str().c_str());
+        for (size_t i = 0; i < c["checks"].size(); i++) {
+            const json::Value& k = c["checks"][i];
+            if (k["status"].str() != "ok")
+                for (size_t j = 0; j < k["remedies"].size(); j++) gv_remedy(k["remedies"][j].str(), shown);
+        }
+        ImGui::NewLine();
+    } else if (game_running()) text_col(col::warm, "Close the game first.");
+    if (big_button(g_gv.details ? "Hide details" : "Show details", ImVec2(S(260), 0))) g_gv.details = !g_gv.details;
+    if (ready && !kept) {
+        ImGui::SameLine();
+        gv_remedy("continue_v100", shown);
+    }
+    ImGui::NewLine();
+    update_whats_included();   // after the actions: they stay within the D-pad's reach
+    card_end();
+}
+
+// the one offer (Play): after v1.00 is installed and ready, until the player answers it either way
+static void update_offer_card()
+{
+    if (!g_prefs.update_offer.empty() || g_gv.check["state"].str() != "v100" ||
+        g_gv.check["plan"]["source"].str() == "kept")
+        return;
+    card_begin("##update_offer");
+    title("Official Game Update v1.01", 24);
+    text_col(col::text, "This optional update adds new characters and several gameplay improvements!");
+    ImGui::Dummy(ImVec2(0, S(6)));
+    // the choice first, under the summary: on a 1280x800 screen the list below would leave buttons after it out of
+    // the view, where the D-pad can't reach them (the launcher's rule since 0.2.0-beta.5)
+    // beta.6 (the owner's playtest): Install v1.01 starts the update here -- its checks, the confirmation, then the
+    // install -- instead of only opening Install / Manage; what stops it is explained, with where to fix it
+    if (big_button(g_gv.checking && g_gv.offer ? "Checking...###offer101" : "Install v1.01###offer101",
+                   ImVec2(S(320), 0), Kind::Primary, !g_gv.checking && !g_op)) {
+        g_gv.offer = true;
+        gv_check(true);
+    }
+    ImGui::SameLine();
+    if (big_button("Not Now", ImVec2(S(320), 0))) {
+        g_prefs.update_offer = "declined";
+        g_prefs.save();
+    }
+    text_col(col::dim, "You can install it later from Install / Manage > Game Version.");
+    ImGui::Dummy(ImVec2(0, S(6)));
+    update_whats_included();
+    card_end();
+    ImGui::Dummy(ImVec2(0, S(8)));
+}
+
+static void gv_refresh() { gv_check(g_gv.full); }
+
+// ============================================================================================================
+// beta.6 (the owner's playtest, 2026-11-27): the choices made before a first install -- the game version and the
+// shaders -- then one continuous install. A US v1.00 disc offers the official v1.01 update as part of the install: the
+// disc's steps, the update's, then ONE build, v1.01's (v1.00 isn't built first: its files are kept, so Game Version
+// builds it later without the disc; "Also build v1.00" builds both). The shaders are prepared at the install's end
+// when chosen, and nothing is asked again after it.
+// ============================================================================================================
+static void upd_args(std::vector<std::string>& a)   // what the player chose for the update (Game Version's remedies)
+{
+    if (!g_gv.pkg.empty()) { a.push_back("--update-pkg"); a.push_back(g_gv.pkg); }
+    if (!g_gv.folder.empty()) { a.push_back("--update-folder"); a.push_back(g_gv.folder); }
+    if (!g_gv.elf.empty()) { a.push_back("--update-elf"); a.push_back(g_gv.elf); }
+}
+
+// the update's checks for this disc and folder before anything is installed (online: Sony's download looked at, the
+// keys that open the update downloaded when this computer has none -- what the install would do first)
+static void upd_check()
+{
+    if (g_wiz.upd_checking || g_wiz.disc.empty()) return;
+    g_wiz.upd_checking = true;
+    g_wiz.upd = json::Value();
+    g_wiz.upd_err.clear();
+    g_wiz.upd_for = g_wiz.disc + "|" + g_wiz.folder;
+    std::vector<std::string> a = disc_args();
+    add_key_args(a);
+    upd_args(a);
+    a.push_back("--install");
+    a.push_back(g_wiz.folder);
+    a.push_back("--planned");
+    run("game-update-check", a, "", false, [](const json::Value& r) {
+        g_wiz.upd_checking = false;
+        if (r["ok"].truthy()) g_wiz.upd = r["data"];
+        else g_wiz.upd_err = r["message"].str("The official update couldn't be checked.");
+    });
+}
+
+static int chosen_version()   // 1 v1.01, 0 v1.00: the player's choice, else v1.01 unless its checks say it can't be
+{
+    if (g_wiz.version >= 0) return g_wiz.version;
+    if (!g_wiz.upd_err.empty() || (!g_wiz.upd.is_null() && !g_wiz.upd["ready"].truthy())) return 0;
+    return 1;
+}
+
+static bool chosen_shaders() { return g_wiz.shaders != 0; }
+
+// why v1.01, chosen, can't be installed yet ("" when it can)
+static std::string version_blocker()
+{
+    if (chosen_version() != 1) return "";
+    if (g_wiz.upd_checking || (g_wiz.upd.is_null() && g_wiz.upd_err.empty()))
+        return "The official update is being checked...";
+    if (!g_wiz.upd_err.empty()) return g_wiz.upd_err + " (Game version)";
+    if (!g_wiz.upd["ready"].truthy())
+        return (g_wiz.upd["blockers"].size() ? g_wiz.upd["blockers"][(size_t)0].str() : std::string("v1.01 can't be installed now.")) +
+               " Choose v1.00 to install the disc's version now (Game version).";
+    return "";
+}
+
+// two buttons, one choice: the chosen one gold, both reachable by left and right
+static bool choice_pair(const char* a, const char* b, bool a_on, int& out)
+{
+    const float gap = ImGui::GetStyle().ItemSpacing.x;
+    const float half = std::min(S(440), (ImGui::GetContentRegionAvail().x - gap) / 2);
+    bool changed = false;
+    if (big_button(a, ImVec2(half, 0), a_on ? Kind::Primary : Kind::Normal)) { out = 1; changed = true; }
+    ImGui::SameLine();
+    if (big_button(b, ImVec2(half, 0), a_on ? Kind::Normal : Kind::Primary)) { out = 0; changed = true; }
+    return changed;
+}
+
+static void install_choices()
+{
+    ImGui::Dummy(ImVec2(0, S(6)));
+    title("Before installing", 24);
+    card_begin("##choices");
+    // the game version
+    title("Game version", 22);
+    const int v = chosen_version();
+    if (choice_pair("v1.01 (recommended)###ver101", "v1.00###ver100", v == 1, g_wiz.version) && g_wiz.also_v100)
+        check_space();
+    const json::Value& u = g_wiz.upd;
+    if (v == 1) {
+        text_col(col::text, "The official update: 51 more characters, an improved New Game+, easier Dash Circuit times and "
+                            "the missing loading-screen art.");
+        if (g_wiz.upd_checking || (u.is_null() && g_wiz.upd_err.empty()))
+            text_col(col::dim, "Checking the official update -- on this computer, or Sony's download...");
+        else if (!g_wiz.upd_err.empty()) {
+            text_col(col::danger, "%s", g_wiz.upd_err.c_str());
+            if (big_button("Check again###updagain", ImVec2(S(420), 0))) upd_check();
+        } else if (u["ready"].truthy()) {
+            const std::string src = u["plan"]["source"].str();
+            std::string how = src == "download" ? "It is downloaded from Sony and checked" :
+                              "The update package found " + u["plan"]["how"].str() + " is used";
+            text_col(col::ok, "%s, then the game is built as v1.01 directly: one build, not v1.00 first.", how.c_str());
+            if (!g_wiz.also_v100)
+                text_col(col::dim, "v1.00 isn't built, but its files are kept: Install / Manage > Game Version can add it "
+                                   "later without your disc.");
+            if (big_button(g_wiz.also_v100 ? "Also build v1.00: Yes###alsov100" : "Also build v1.00: No###alsov100",
+                           ImVec2(S(420), 0))) {
+                g_wiz.also_v100 = !g_wiz.also_v100;
+                check_space();   // both builds need more room
+            }
+            if (g_wiz.also_v100)
+                text_col(col::dim, "Both versions are built (about twice as long): switching between them is then instant.");
+        } else {
+            text_col(col::warm, "v1.01 can't be installed now:");
+            for (size_t i = 0; i < u["blockers"].size(); i++) text_col(col::text, "- %s", u["blockers"][i].str().c_str());
+            std::set<std::string> shown = { "continue_v100" };   // v1.00 is the button above
+            for (size_t i = 0; i < u["checks"].size(); i++) {
+                const json::Value& k = u["checks"][i];
+                if (k["status"].str() != "ok")
+                    for (size_t j = 0; j < k["remedies"].size(); j++) gv_remedy(k["remedies"][j].str(), shown, [] { upd_check(); });
+            }
+            ImGui::NewLine();
+            text_col(col::dim, "Or choose v1.00: the disc's version is installed now, and v1.01 can be added later from "
+                               "Install / Manage > Game Version.");
+        }
+    } else {
+        text_col(col::text, "The disc's version, complete and fully supported. The official update can be added later "
+                            "from Install / Manage > Game Version.");
+        if (!u.is_null() && !u["ready"].truthy() && g_wiz.version < 0)   // chosen for the player: say why
+            text_col(col::dim, "v1.01 can't be installed now: %s",
+                     u["blockers"].size() ? u["blockers"][(size_t)0].str().c_str() : "its checks didn't pass.");
+    }
+    // the shaders
+    ImGui::Dummy(ImVec2(0, S(8)));
+    title("Shaders", 22);
+    int sh = chosen_shaders() ? 1 : 0;
+    if (choice_pair("Prepare them (recommended)###sh1", "Not now###sh0", sh == 1, sh)) g_wiz.shaders = sh;
+    text_col(col::dim, chosen_shaders() ? "Prepared right after the game is built, before you play: it avoids stutters "
+                                          "the first time each effect appears."
+                                        : "They're prepared as you play instead, which can stutter the first time each "
+                                          "effect appears. Shaders, on this page, prepares or rebuilds them at any time.");
+    card_end();
+}
+
+// the install itself: one worker run for the version chosen, the shaders at its end when chosen
+static void start_install(int version, bool also_v100, bool shaders, bool resume)
+{
+    if (!same_folder(g_wiz.folder, g_root)) {   // installed elsewhere: that folder is the root from now on
+        g_root = g_wiz.folder;
+        remember_root(g_root);
+    }
+    g_prefs.save();
+    std::vector<std::string> a = disc_args();
+    {   // the source the check found (the worker checks it again), else every source as the check had them
+        const std::string via = g_wiz.keys_info["via"].str(), src = g_wiz.keys_info["source"].str();
+        if (via == "rpcs3") { a.push_back("--rpcs3"); a.push_back(src); }
+        else if (g_wiz.keys_info["found"].str() != "together" && !src.empty() &&
+                 std::find(a.begin(), a.end(), "--keys") == a.end()) { a.push_back("--keys"); a.push_back(src); }
+        else add_key_args(a);
+    }
+    a.push_back("--install");
+    a.push_back(g_wiz.folder);
+    if (resume) a.push_back("--resume");
+    a.push_back("--game-version");
+    a.push_back(version == 1 ? "v101" : "v100");
+    if (version == 1) {
+        if (also_v100) a.push_back("--also-v100");
+        upd_args(a);
+    }
+    if (!shaders) a.push_back("--no-prepare");   // chosen: the worker prepares them as the install's last step
+    const std::string what = version == 1 ? "Installing 3D Dot Game Heroes v1.01" : "Installing 3D Dot Game Heroes";
+    run("install", a, what, true, [version, also_v100, shaders](const json::Value& r) {
+        {   // a typed disc key's file: gone once the install is over (keys are never kept)
+            std::error_code ec;
+            const fs::path typed = u8path(data_dir()) / "disc-key.txt";
+            if (u8path(g_wiz.disc_key) == typed) { fs::remove(typed, ec); g_wiz.disc_key.clear(); }
+        }
+        const std::string code = r["code"].str();
+        // what an installed game keeps of this install: the marker, and the shaders' answer (Settings shows it: after
+        // updates and repairs, the shaders as the player chose here)
+        auto keep_answers = [shaders] {
+            write_text(game_update_marker(), CUBIC_VERSION "\n");
+            run("settings", { "--install", install_dir(), "--set", std::string("LAUNCHER_SHADERS_AFTER_UPDATE=") +
+                              (shaders ? "1" : "0"), "--set", std::string("LAUNCHER_SHADERS_ON_DRIVER_CHANGE=") +
+                              (shaders ? "1" : "0") },
+                "", false, [](const json::Value& s) { if (s["ok"].truthy()) set_settings(s["data"]); });
+        };
+        if (r["ok"].truthy()) {
+            g_prefs.update_offer = version == 1 ? "accepted" : "declined";   // answered here: Play doesn't offer it again
+            const bool prepared = shaders && r["data"]["prepared"].size() > 0 && r["data"]["prepared"]["error"].is_null();
+            if (prepared) g_prefs.prepared_once = true;
+            g_prefs.save();
+            keep_answers();
+            g_page = kPlay;
+            g_focus_page = true;
+            g_msg = { true, version == 1 ? "v1.01 is installed and ready to play" : "The game is installed and ready to play",
+                      std::string(version == 1 ? "3D Dot Game Heroes with the official v1.01 update" : "3D Dot Game Heroes v1.00") +
+                      " is installed." + (version == 1 && also_v100 ? " v1.00 is built too: Install / Manage > Game "
+                                                                       "Version switches between them in a moment." : "") +
+                      (prepared ? " Its shaders are prepared for this PC." : shaders ? " Its shaders couldn't be prepared "
+                       "now: the game prepares them as you play (Shaders, on Install / Manage, tries again)." : ""),
+                      "", false, false };
+        } else if (version == 1 && code.rfind("update_", 0) == 0) {
+            // the update failed after the disc's steps: v1.00 now without the disc again, or v1.01 again from the page
+            refresh_info();
+            if (also_v100) {   // v1.00 built first is installed, completed by the worker (its shaders as chosen)
+                keep_answers();   // Play offers v1.01 again (not answered)
+                g_page = kPlay;
+                g_focus_page = true;
+                g_msg = { true, "v1.00 is installed; v1.01 wasn't added", r["message"].str("The official update couldn't "
+                          "be installed.") + "\n\nYour v1.00 game is installed and ready to play. Install / Manage > Game "
+                          "Version adds v1.01 when it can be installed.", r["details"].str(), true, false };
+            } else {
+                ask("The official update couldn't be installed", r["message"].str("Something went wrong.") +
+                    "\n\nYour disc's files are checked and kept in the installation. Install v1.00 now -- the disc isn't "
+                    "read again -- and add v1.01 later from Install / Manage > Game Version; or choose v1.01 again on "
+                    "this page once the update can be installed.", "Install v1.00 now", false, [shaders] {
+                    g_wiz.version = 0;
+                    start_install(0, false, shaders, true);
+                });
+                g_confirm.no = "Not Now";
+                g_confirm.focus_yes = true;
+            }
+        } else if (code != "cancelled") show_result_error(r, "The install didn't finish");
+        refresh_info();
+        g_wiz.upd = json::Value();   // looked at again for what is there now
+        g_wiz.upd_for.clear();
+    });
+}
+
+// the confirmation: what is installed, from where, into where, and what follows
+static void confirm_install(bool resume)
+{
+    const int v = chosen_version();
+    const bool also = v == 1 && g_wiz.also_v100, sh = chosen_shaders();
+    const std::string plan = v == 1 ? std::string(g_wiz.upd["plan"]["source"].str() == "download"
+                                                      ? "The official v1.01 update is downloaded from Sony and checked, then "
+                                                      : "The official v1.01 update you have is checked, then ") +
+                                          (also ? "both versions are built: v1.00, then v1.01." :
+                                                  "the game is built as v1.01 (v1.00's files are kept, not built).")
+                                    : std::string("The game is built as v1.00, the disc's version.");
+    ask(v == 1 ? "Install 3D Dot Game Heroes v1.01?" : "Install 3D Dot Game Heroes v1.00?",
+        "From: " + g_wiz.disc + "\nInto: " + g_wiz.folder + "\n\n" + plan +
+        (sh ? " Then the shaders are prepared for this PC." : " The shaders aren't prepared now.") +
+        "\n\nIt takes a few minutes, in one go: your disc is only read. When it's done, the game is ready to play.",
+        resume ? "Continue the install" : "Install", false, [v, also, sh, resume] { start_install(v, also, sh, resume); });
+    g_confirm.focus_yes = true;
+}
+
+// the game's program keys chosen by hand (the owner, 2026-11-27): out of the numbered steps, under Advanced -- a keys
+// file, a folder or ZIP of key files, an EBOOT.elf the player decrypted, or their RPCS3. Open by itself when the keys
+// couldn't be found or downloaded, or when the player chose their own (what they chose, shown); otherwise one button
+static void keys_advanced(bool keys_failed)
+{
+    static bool shown = false;
+    const bool forced = keys_failed || !g_wiz.keys.empty() || !g_prefs.rpcs3.empty();
+    ImGui::Dummy(ImVec2(0, S(8)));
+    if (!forced && big_button(shown ? "Hide the advanced options###keysadv" : "Advanced: your own program keys...###keysadv",
+                              ImVec2(S(480), 0)))
+        shown = !shown;
+    if (!(shown || forced)) return;
+    // on the page itself, as Maintenance is (not a card): the D-pad goes down from the button above into it
+    ImGui::Dummy(ImVec2(0, S(4)));
+    title("Advanced: your own program keys", 22);
+    text_col(col::dim, "Not needed for a normal install: the program keys are found beside your disc, or downloaded and "
+                       "checked when this computer has none. Choose your own to use them instead, or to install without "
+                       "an internet connection. Only what opens the supported program exactly is used; keys are never "
+                       "written to any log.");
+    if (!g_wiz.keys.empty()) text_col(col::text, "Yours: %s", g_wiz.keys.c_str());
+    const float gap = ImGui::GetStyle().ItemSpacing.x;
+    const float half = std::min(S(440), (ImGui::GetContentRegionAvail().x - gap) / 2);   // two a row, within the page
+    // the search again (once online, or after putting keys beside the disc): as the check above does it
+    if (keys_failed && big_button("Look for the keys again", ImVec2(half, 0))) probe_keys();
+    auto chosen = [](const std::string& p) {
+        g_wiz.keys = p;
+        g_prefs.keys = p;
+        g_prefs.save();
+        probe_keys();
+    };
+    if (big_button("A keys file, ZIP or EBOOT.elf...", ImVec2(half, 0)))
+        browse("Choose your keys", false, { ".txt", ".keys", ".zip", ".elf", ".bin", ".ini", ".cfg", "" },
+               "keys files, ZIPs, EBOOT.elf", g_wiz.keys, chosen);
+    ImGui::SameLine();
+    if (big_button("A folder of keys...", ImVec2(half, 0)))
+        browse("Choose the folder of key files", true, {}, "folders", g_wiz.keys, chosen);
+#ifdef _WIN32
+    const std::vector<std::string> rp_ext = { ".exe" };
+#else
+    const std::vector<std::string> rp_ext = { ".appimage", "" };
+#endif
+    if (big_button("Use my RPCS3...", ImVec2(half, 0)))
+        browse("Choose your RPCS3 program", false, rp_ext, "RPCS3", g_prefs.rpcs3, [](const std::string& p) {
+            g_prefs.rpcs3 = p;
+            g_prefs.save();
+            probe_keys();
+        });
+    if (!g_prefs.rpcs3.empty()) {
+        ImGui::SameLine();
+        if (big_button("Stop using my RPCS3", ImVec2(half, 0))) { g_prefs.rpcs3.clear(); g_prefs.save(); probe_keys(); }
+        text_col(col::dim, "Your RPCS3: %s", g_prefs.rpcs3.c_str());
+    }
+}
+
 static void page_manage()
 {
+    if (g_gv.scroll_to || g_gv.focus_next > 0) g_focus_page = false;   // Game Version's button takes the focus, not the first
     title("Install / Manage");
     const std::string kind = g_st.info["kind"].str();
     if (g_wiz.folder.empty()) { g_wiz.folder = install_dir(); check_space(); }
     if (g_wiz.disc.empty() && !g_prefs.disc.empty()) { g_wiz.disc = g_prefs.disc; probe_disc(); }
-    if (g_wiz.keys.empty() && !g_prefs.keys.empty()) g_wiz.keys = g_prefs.keys;
     text_col(col::dim, kind == "slots" ? "Repair or reinstall from your disc: your saves and settings stay."
-                                       : "Your own disc and keys, checked before anything is written. You can also drop the "
-                                         "files onto this window.");
+                                       : "Your own disc, checked before anything is written. You can also drop it onto "
+                                         "this window.");
     ImGui::Dummy(ImVec2(0, S(4)));
     const bool disc_ok = !g_wiz.disc_info.is_null();
     if (kind != "slots") {
         card_begin("##need");
         title("What you need", 24);
-        text_col(col::text, "Your disc: an ISO of the US release (BLUS-30490), or the disc's files in a folder. An "
-                            "encrypted ISO (a raw dump) also needs its disc key -- a .dkey or IRD file, or the key typed "
-                            "in -- and the check below asks for it only then.");
-        text_col(col::text, "Its keys: a text file with the game's program keys -- lines \"APP <revision> <erk> <riv>\" "
-                            "in hexadecimal -- or an EBOOT.elf you decrypted yourself. The installer decrypts the game's "
-                            "program (EBOOT.BIN) with them on its own and checks the result; the keys are never copied "
-                            "or written to any log.");
+        text_col(col::text, "Your disc: an ISO of the US release (BLUS-30490), or the disc's folder (the one holding "
+                            "PS3_GAME). An encrypted ISO (a raw dump) also needs its disc key -- a .dkey or IRD file, or "
+                            "the key typed in -- and it is asked for only then.");
+        text_col(col::text, "Nothing else: the game's program keys are found beside your disc, or downloaded "
+                            "automatically and checked when this computer has none. Your own keys can be chosen under "
+                            "Advanced, below Install.");
         card_end();
     }
-    std::string dv = g_wiz.disc.empty() ? "Choose your disc image (an ISO) or the disc's folder."
-                                        : g_wiz.disc + (disc_ok ? "\n" + g_wiz.disc_info["title"].str() + " -- " +
-                                                                      g_wiz.disc_info["title_id"].str() + " v" +
-                                                                      g_wiz.disc_info["app_ver"].str() + ": supported"
-                                                                : "");
+    const bool keys_ok = !g_wiz.keys_info.is_null();
+    // beta.6: looked for as soon as the disc is checked -- what the player chose (Advanced), where they were before,
+    // beside the disc, the player's RPCS3, else downloaded (pinned, checked); a status under the disc, no step
+    if (disc_ok && g_wiz.keys_info.is_null() && g_wiz.keys_err.empty() && !g_wiz.probing_keys) probe_keys();
+    const bool keys_failed = disc_ok && !keys_ok && !g_wiz.probing_keys;
+    std::string dv = g_wiz.disc.empty() ? "Choose your disc image (an ISO) or the disc's folder (the one holding "
+                                          "PS3_GAME)."
+                                        : g_wiz.disc + (disc_ok ? "\n" + disc_details() + ": supported" : "");
     step_row(1, "Your disc", disc_ok, dv, g_wiz.disc_err, g_wiz.probing_disc, "Choose...", [] {
-        browse("Choose your disc image", false, { ".iso" }, "disc images (.iso)", g_wiz.disc, [](const std::string& p) {
+        browse_disc([](const std::string& p) {
             g_wiz.disc = p;
             g_prefs.disc = p;
             g_prefs.save();
             probe_disc();
         });
+    }, [disc_ok, keys_ok, keys_failed] {   // the program keys' status
+        if (!disc_ok) return;
+        if (keys_ok) text_col(col::ok, "%s", keys_found_text().c_str());
+        else if (g_wiz.probing_keys) text_col(col::dim, "%s", kKeysLooking);
+        else if (keys_failed) keys_failed_lines(false);
     });
     if (g_wiz.needs_key) {   // an encrypted image: its key, by file or typed
         const bool key_ok = disc_ok;
@@ -2162,24 +3079,12 @@ static void page_manage()
                 probe_disc();
             });
     }
-    const bool keys_ok = !g_wiz.keys_info.is_null();
-    if (disc_ok && !g_wiz.keys.empty() && g_wiz.keys_info.is_null() && g_wiz.keys_err.empty() && !g_wiz.probing_keys) probe_keys();
-    std::string kv = g_wiz.keys.empty() ? "Choose the keys file for your disc (or an EBOOT.elf you decrypted)."
-                                        : g_wiz.keys + (keys_ok ? "\nThe keys match this disc." : "");
-    step_row(g_wiz.needs_key ? 3 : 2, "Its keys", keys_ok, kv, g_wiz.keys_err, g_wiz.probing_keys, "Choose...", [] {
-        browse("Choose the keys file", false, { ".txt", ".keys", ".elf", ".bin" }, "keys files", g_wiz.keys, [](const std::string& p) {
-            g_wiz.keys = p;
-            g_prefs.keys = p;
-            g_prefs.save();
-            probe_keys();
-        });
-    });
     std::string fv = g_wiz.folder;
     const bool space_ok = g_wiz.space["enough"].truthy();
     if (!g_wiz.space.is_null())
         fv += "\n" + human_bytes(g_wiz.space["free"].num()) + " free, " + human_bytes(g_wiz.space["needed"].num()) + " needed" +
               (space_ok ? "" : ": not enough");
-    step_row(g_wiz.needs_key ? 4 : 3, "Where to install it", space_ok, fv, g_wiz.space_err, false, "Choose...", [] {
+    step_row(g_wiz.needs_key ? 3 : 2, "Where to install", space_ok, fv, g_wiz.space_err, false, "Choose...", [] {
         browse("Choose where to install", true, {}, "folders", g_wiz.folder, [](const std::string& p) {
             std::string f = path_str(u8path(p) / "Cubic.Heroes");
             if (fs::exists(u8path(p) / "active.json") || fs::exists(u8path(p) / "data" / "install.json")) f = p;
@@ -2187,18 +3092,37 @@ static void page_manage()
             check_space();
         });
     });
+    // beta.6: a first install's choices (a repair keeps the version installed): the game version -- the official update
+    // is checked for this disc and folder as soon as the disc is -- and the shaders
+    std::string version_why;
+    if (kind != "slots" && disc_ok) {
+        if (g_wiz.upd_for != g_wiz.disc + "|" + g_wiz.folder && !g_wiz.upd_checking && !g_wiz.probing_keys &&
+            (keys_ok || keys_failed))
+            upd_check();
+        install_choices();
+        version_why = version_blocker();
+    }
     ImGui::Dummy(ImVec2(0, S(6)));
-    const bool ready = disc_ok && keys_ok && space_ok;
+    const bool ready = disc_ok && keys_ok && space_ok && version_why.empty();
+    if (!ready) install_blockers(disc_ok, keys_ok, space_ok, version_why);   // issue #13: never a greyed button alone
     const bool resume = g_st.info["kind"].str() == "partial" && g_wiz.folder == install_dir();
-    if (big_button(resume ? "Continue the install" : (kind == "slots" ? "Repair from the disc" : "Install"),
-                   ImVec2(S(360), S(64)), Kind::Primary, ready)) {
+    if (kind != "slots") {
+        if (big_button(resume ? "Continue the install" : "Install", ImVec2(S(360), S(64)), Kind::Primary, ready))
+            confirm_install(resume);
+    } else if (big_button("Repair from the disc", ImVec2(S(360), S(64)), Kind::Primary, ready)) {
         if (!same_folder(g_wiz.folder, g_root)) {   // installed elsewhere: that folder is the root from now on
             g_root = g_wiz.folder;
             remember_root(g_root);
         }
         g_prefs.save();
         std::vector<std::string> a = disc_args();
-        if (std::find(a.begin(), a.end(), "--keys") == a.end()) { a.push_back("--keys"); a.push_back(g_wiz.keys); }
+        {   // the source the check found (the worker checks it again), else every source as the check had them
+            const std::string via = g_wiz.keys_info["via"].str(), src = g_wiz.keys_info["source"].str();
+            if (via == "rpcs3") { a.push_back("--rpcs3"); a.push_back(src); }
+            else if (g_wiz.keys_info["found"].str() != "together" && !src.empty() &&
+                     std::find(a.begin(), a.end(), "--keys") == a.end()) { a.push_back("--keys"); a.push_back(src); }
+            else add_key_args(a);
+        }
         a.push_back("--install");
         a.push_back(g_wiz.folder);
         if (resume) a.push_back("--resume");
@@ -2219,11 +3143,17 @@ static void page_manage()
             refresh_info();
         });
     }
-    if (!ready) text_col(col::dim, "Each step above must be checked first.");
+    // Advanced: under Install for a new install; on an installed page after its sections, just above Maintenance --
+    // Repair stays right above Game Version's card. A press down from a page button doesn't reach a card wholly below
+    // the view (its child window is clipped, its buttons not submitted): with Advanced in between, the D-pad went from
+    // Advanced past Game Version's buttons (found by the Linux instance, tests/launcher_game_version.py)
+    if (kind != "slots") keys_advanced(keys_failed);
     if (kind == "slots") {
+        game_version_section();
         location_section();
         shaders_section();
         steam_section();
+        keys_advanced(keys_failed);
     }
     ImGui::Dummy(ImVec2(0, S(10)));
     title("Maintenance", 24);
@@ -2339,7 +3269,6 @@ static void scroll_to_top_on_focus()
 // press then reaches what came into view. Dear ImGui's navigation can't reach a card's buttons while the card lies
 // wholly outside the page's view (0.2.0-beta.5: at 1280x800 and below, the shortcuts under Add to Steam on Install /
 // Manage). Called after NewFrame, which has applied the last frame's move (or found nothing)
-static ImGuiWindow* g_page_window = nullptr;   // the page's own window (##page), as drawn in the last frame
 static bool in_page(ImGuiWindow* w)
 {
     for (; w; w = w->ParentWindow)
@@ -2543,6 +3472,1147 @@ static void page_saves()
     }
     if (bs.size() == 0) text_col(col::dim, "No backups yet.");
     ImGui::EndChild();
+}
+
+// --- characters (M12): the local character library (tools/worker.py characters, docs/CHARACTERS.md) ---------------
+// The page's parts -- the preview textures, the card, the filters, the details -- are kept apart from the library's
+// own calls so that a later section (a community catalogue) can reuse them over another list.
+
+// the previews the worker leaves beside each PNG: preview/*.rle ("RLE1", u32 width, u32 height, then runs of u16
+// count + r, g, b): no PNG decoder in the launcher. Decoded only when a card is on screen, a few a frame, kept in a
+// small cache (least recently used out), all freed when the page is left. `since`: when it was first asked for (the
+// store's loading blocks show only on a picture that has waited a while: a cached one appears without them).
+struct PreviewTex { SDL_Texture* tex = nullptr; int w = 0, h = 0; long long stamp = -1; int used = 0; bool bad = false;
+                    double since = -1; };
+static std::map<std::string, PreviewTex> g_previews;
+static SDL_Renderer* g_ren = nullptr;
+static int g_preview_frame = 0, g_preview_budget = 0;
+static Uint64 g_preview_t0 = 0, g_preview_spent = 0;   // this frame's decoding: when it began; 0 none yet, else the limit
+static const size_t kPreviewCacheMax = 160;
+
+static bool rle_decode(const std::string& path, int& w, int& h, std::vector<unsigned char>& px)
+{
+    std::ifstream f(u8path(path), std::ios::binary | std::ios::ate);   // read whole (not a byte at a time)
+    if (!f) return false;
+    const std::streamoff size = f.tellg();
+    if (size < 12 || size > (64 << 20)) return false;
+    std::vector<unsigned char> b((size_t)size);
+    f.seekg(0);
+    if (!f.read((char*)b.data(), size)) return false;
+    if (b.size() < 12 || memcmp(b.data(), "RLE1", 4) != 0) return false;
+    uint32_t uw, uh;
+    memcpy(&uw, &b[4], 4);
+    memcpy(&uh, &b[8], 4);
+    if (uw == 0 || uh == 0 || uw > 4096 || uh > 4096) return false;
+    const size_t total = (size_t)uw * uh;
+    px.resize(total * 4);   // RGBA: the renderer's own layout, uploaded without a conversion
+    size_t at = 0;
+    for (size_t o = 12; o + 5 <= b.size(); o += 5) {
+        const size_t n = (size_t)b[o] | (size_t)b[o + 1] << 8;
+        if (n == 0 || at + n > total) return false;
+        const uint32_t c = (uint32_t)b[o + 2] | (uint32_t)b[o + 3] << 8 | (uint32_t)b[o + 4] << 16 | 0xff000000u;
+        uint32_t* d = (uint32_t*)(px.data() + at * 4);
+        for (size_t k = 0; k < n; k++) d[k] = c;
+        at += n;
+    }
+    if (at != total) return false;
+    w = (int)uw; h = (int)uh;
+    return true;
+}
+
+// a preview's texture, or null (not loaded yet this frame, or unreadable: then `bad`)
+static const PreviewTex* preview_tex(const std::string& path, bool* bad = nullptr)
+{
+    if (path.empty() || !g_ren) return nullptr;
+    PreviewTex& e = g_previews[path];
+    e.used = g_preview_frame;
+    if (e.since < 0) e.since = ImGui::GetTime();
+    if (e.tex || e.bad) { if (bad) *bad = e.bad; return e.tex ? &e : nullptr; }
+    // the rest next frame: at most a few decodes and ~3 ms a frame (one at least), so a page full of new pictures
+    // never holds a frame up
+    if (g_preview_budget <= 0 || (g_preview_spent > 0 && SDL_GetPerformanceCounter() - g_preview_t0 > g_preview_spent))
+        return nullptr;
+    g_preview_budget--;
+    int w = 0, h = 0;
+    std::vector<unsigned char> px;
+    if (!rle_decode(path, w, h, px)) { e.bad = true; if (bad) *bad = true; return nullptr; }
+    e.tex = SDL_CreateTexture(g_ren, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STATIC, w, h);   // bytes R,G,B,A (x86-64)
+    if (!e.tex) { e.bad = true; return nullptr; }
+    SDL_UpdateTexture(e.tex, nullptr, px.data(), w * 4);
+    if (!g_preview_spent) g_preview_spent = SDL_GetPerformanceFrequency() * 3 / 1000;   // one done: ~3 ms a frame from now on
+    e.w = w; e.h = h;
+    return &e;
+}
+
+static void previews_trim()
+{
+    if (g_previews.size() <= kPreviewCacheMax) return;
+    std::vector<std::pair<int, std::string>> age;
+    for (auto& kv : g_previews) age.push_back({ kv.second.used, kv.first });
+    std::sort(age.begin(), age.end());
+    for (size_t i = 0; i + kPreviewCacheMax < age.size(); i++) {
+        PreviewTex& e = g_previews[age[i].second];
+        if (e.tex) SDL_DestroyTexture(e.tex);
+        g_previews.erase(age[i].second);
+    }
+}
+
+static void previews_release()   // the page left: nothing of it stays in memory
+{
+    for (auto& kv : g_previews) if (kv.second.tex) SDL_DestroyTexture(kv.second.tex);
+    g_previews.clear();
+}
+
+// a preview drawn into a box, its aspect kept, centred; a sharp upscale, a smooth downscale. False: not drawn (not
+// decoded yet, or unreadable: then `bad`), the box empty.
+static bool preview_draw(ImDrawList* dl, const std::string& path, ImVec2 a, ImVec2 b, bool* bad = nullptr)
+{
+    const PreviewTex* t = preview_tex(path, bad);
+    dl->AddRectFilled(a, b, IM_COL32(30, 42, 98, 255));
+    if (!t) return false;
+    const float bw = b.x - a.x, bh = b.y - a.y, s = std::min(bw / t->w, bh / t->h);
+    // set only when it changes, and SDL's own state put right after: OpenGL (and GLES2) set it by binding the texture
+    // behind the renderer's back, whose next draws then skipped their own bind and sampled this picture -- the page's
+    // text and frames drawn before the first picture came out garbled (Linux, SDL 2.32)
+    const SDL_ScaleMode mode = s >= 1.0f ? SDL_ScaleModeNearest : SDL_ScaleModeLinear;
+    SDL_ScaleMode now = mode;
+    if (SDL_GetTextureScaleMode(t->tex, &now) != 0 || now != mode) {
+        SDL_SetTextureScaleMode(t->tex, mode);
+        SDL_GL_UnbindTexture(t->tex);   // the renderer's record of the bound texture cleared (other renderers: nothing)
+    }
+    const float w = floorf(t->w * s), h = floorf(t->h * s);
+    const ImVec2 p(floorf(a.x + (bw - w) / 2), floorf(a.y + (bh - h) / 2));
+    dl->AddImage((ImTextureID)(intptr_t)t->tex, p, ImVec2(p.x + w, p.y + h));
+    return true;
+}
+
+// --- the store's pictures: the loading blocks while one is fetched or decoded, a placeholder when it can't be had ---
+// A catalog thumbnail not cached yet comes with the path the worker will write it to (thumb_pending: written whole,
+// renamed into place once checked). Its card looks for it there a few times a second while it is on screen, and shows
+// it as soon as it is there: the pictures appear one by one as they arrive, never all at the end.
+struct ThumbLook { bool there = false; double next = 0; };
+static std::map<std::string, ThumbLook> g_thumb_looks;   // a pending picture's path -> whether it's there yet
+static bool thumb_arrived(const std::string& path)
+{
+    ThumbLook& l = g_thumb_looks[path];
+    if (l.there) return true;
+    const double now = ImGui::GetTime();
+    if (now < l.next) return false;
+    l.next = now + 0.2;
+    std::error_code ec;
+    l.there = fs::is_regular_file(u8path(path), ec);
+    return l.there;
+}
+
+static const double kPicWait = 0.2;   // a picture decoded within this shows without the loading blocks
+static int g_spin_fetch = 0, g_spin_decode = 0;   // the loading blocks drawn this frame (the test's log)
+
+// a picture still to come: eight blocks round a square, one lit block stepping round it with a fading trail -- the
+// launcher's green blocks (pix_bar's), stepped like a sprite: ten steps a second from the clock, so no frame, scroll
+// or request restarts it. Small, centred on c.
+static void pix_spinner(ImDrawList* dl, ImVec2 c, float p)
+{
+    static const int ring[8][2] = { { 0, 0 }, { 1, 0 }, { 2, 0 }, { 2, 1 }, { 2, 2 }, { 1, 2 }, { 0, 2 }, { 0, 1 } };
+    p = std::max(2.0f, floorf(p));
+    const int head = (int)fmod(ImGui::GetTime() * 10.0, 8.0);
+    const ImVec2 o(snap(c.x - 4 * p), snap(c.y - 4 * p));   // three blocks of 2p with gaps of p: 8p square
+    for (int k = 0; k < 8; k++) {
+        const int age = (head - k + 8) % 8;
+        const ImU32 fill = age == 0 ? col::grass_hi : age == 1 ? col::grass : age == 2 ? shade(col::grass, 0.62f) : col::steel;
+        const ImVec2 a(o.x + ring[k][0] * 3 * p, o.y + ring[k][1] * 3 * p);
+        dl->AddRectFilled(a, ImVec2(a.x + 2 * p, a.y + 2 * p), A(fill));
+    }
+}
+
+// a picture that can't be had (refused, or no connection to fetch it; or its file unreadable): a dim picture and NO
+// PICTURE under it, centred in the box -- never a blank box, never the loading blocks left turning
+static const PixIcon kNoPicture = {
+    { "##########", "#++++++++#", "#+**+++++#", "#+**+++++#", "#++++++g+#", "#+++++ggg#", "#+g++gggg#", "#gggggggg#",
+      "#gggggggg#", "##########" },
+    { IM_COL32(112, 124, 168, 255), IM_COL32(48, 62, 124, 255), IM_COL32(150, 144, 104, 255), IM_COL32(64, 98, 92, 255) } };
+static void pic_unavailable(ImDrawList* dl, ImVec2 a, ImVec2 b)
+{
+    const float ip = std::max(2.0f, floorf(S(4))), tp = std::max(1.0f, floorf(S(2)));
+    const char* t = "NO PICTURE";
+    const float tw = pix_w(t, tp), gap = floorf(S(10)), h = 10 * ip + gap + 7 * tp;
+    const float cx = (a.x + b.x) / 2, y = floorf((a.y + b.y - h) / 2);
+    pix_icon(dl, ImVec2(floorf(cx - 5 * ip), y), kNoPicture, ip);
+    pix_text(dl, ImVec2(floorf(cx - tw / 2), y + 10 * ip + gap), t, tp, shade(col::dim, 0.8f));
+}
+
+// text cut to a width with an ellipsis (long names never break a card)
+static std::string fit_text(const std::string& s, float w)
+{
+    if (ImGui::CalcTextSize(s.c_str()).x <= w) return s;
+    std::string t = s;
+    while (!t.empty() && ImGui::CalcTextSize((t + "...").c_str()).x > w) {
+        t.pop_back();
+        while (!t.empty() && ((unsigned char)t.back() & 0xC0) == 0x80) t.pop_back();   // whole UTF-8 characters
+    }
+    return t + "...";
+}
+
+static std::string lower(std::string s)
+{
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return (char)tolower(c); });
+    return s;
+}
+
+static const char* source_name(const std::string& k)
+{
+    if (k == "ps3") return "A PS3 save";
+    if (k == "chchar") return "A character file";
+    if (k == "hall-of-heroes") return "The Hall of Heroes";
+    if (k == "community") return "The community";
+    if (k == "game") return "Made in the game";
+    if (k == "store") return "The Character Store";
+    if (k == "historical") return "Recovered (historical)";
+    return "Your files";
+}
+
+// the page's tabs: what each shows, with its own search, filters, order, scroll and selected card
+enum { kTabLibrary, kTabInstalled, kTabStore, kCharTabs };
+struct CharTab {
+    char search[128] = "";
+    std::string f_class, f_source;    // "" any
+    int f_installed = 0;              // 0 any, 1 in the game, 2 not
+    int sort = 0;                     // 0 name A-Z, 1 name Z-A, 2 newest added, 3 class
+    std::vector<size_t> view;         // the tab's items after the filters, in order
+    std::string view_key;             // what the view was made from
+    std::string focus_id;             // the card to focus (back from the details, back to the tab)
+    float scroll = 0;                 // the grid's scroll
+    bool restore = false;
+};
+struct Chars {
+    json::Value list;                 // the worker's characters --char-action list
+    bool asked = false, loading = false, loaded = false, previews_asked = false;
+    json::Value store;                // the worker's characters --char-action store: the catalog's items and its state
+    bool store_loading = false, store_loaded = false, thumbs_running = false;
+    // the store's pictures being fetched (a few at a time, the cards on screen first): those refused (a placeholder
+    // until the player refreshes), whether a fetch stopped (no connection, a rate limit: the rest placeholders until
+    // the store is shown again), and the cards on screen waiting for theirs (the grid, as last drawn)
+    std::set<std::string> thumbs_failed;
+    bool thumbs_stalled = false;
+    std::vector<std::string> thumbs_seen;
+    int thumbs_due = 0;               // a new list: the next fetch once the grid has shown its cards (by this frame)
+    std::set<std::string> downloading;   // catalog ids being downloaded (in the background: the page stays usable)
+    std::map<std::string, int> downloaded;   // done, until a list asked for after it shows them in the library
+    int store_gen = 0;                   // the store lists asked for so far
+    bool store_again = false;            // one more list when the one running ends (it was asked for too early)
+    std::string notice;                  // the last download's outcome, under the store's toolbar for a while
+    double notice_t = -1e9;
+    int store_seen = -10;             // the page frame the store tab was last drawn (shown again: checked again)
+    CharTab tabs[kCharTabs];
+    int tab = kTabLibrary;
+    std::string open_id;              // the character shown in detail
+    bool info_open = false;
+} g_chars;
+static CharTab& ct() { return g_chars.tabs[g_chars.tab]; }
+// the current tab's items: the library, or the characters the game can use now
+static const json::Value& chars_items()
+{
+    if (g_chars.tab == kTabStore) return g_chars.store["items"];
+    return g_chars.list[g_chars.tab == kTabInstalled ? "in_game" : "characters"];
+}
+
+static bool g_page_owns_back = false;           // a page's own Back (the details, a sub-view): not the menu's
+static std::string g_page_back_label;
+static std::vector<std::string> g_char_drops;   // files dropped on the window while this page is shown
+
+// a worker answer's "data", moved out of it: the answer is the callback's own copy, dropped after the callback
+static json::Value take_data(const json::Value& r)
+{
+    auto& m = const_cast<json::Value&>(r).o;
+    auto it = m.find("data");
+    return it == m.end() ? json::Value() : std::move(it->second);
+}
+
+static void chars_refresh()
+{
+    if (g_root.empty() || g_chars.loading) return;
+    g_chars.loading = true;
+    g_chars.asked = true;
+    run("characters", { "--install", install_dir(), "--char-action", "list" }, "", false, [](const json::Value& r) {
+        g_chars.loading = false;
+        if (r["ok"].truthy()) {
+            g_chars.list = take_data(r);
+            g_chars.loaded = true;
+            for (CharTab& t : g_chars.tabs) t.view_key.clear();
+        }
+        else show_result_error(r, "The character library couldn't be read");
+        // previews from an earlier renderer (or missing): made again in the background, once
+        if (!g_chars.previews_asked && g_chars.list["stale_previews"].num() > 0) {
+            g_chars.previews_asked = true;
+            run("characters", { "--install", install_dir(), "--char-action", "previews" }, "Updating character previews",
+                true, [](const json::Value&) { previews_release(); chars_refresh(); });
+        }
+    });
+}
+
+// the store's pictures can be fetched now: the catalog's check found no rate limit or lost connection, and no fetch
+// has stopped for one since the store was last shown
+static bool thumbs_can_fetch()
+{
+    const std::string s = g_chars.store["status"]["status"].str();
+    return !g_chars.thumbs_stalled && s != "limited" && s != "offline";
+}
+
+// the next few pictures fetched in the background (store-thumbs --id): the cards on screen first, then the store's
+// order as shown, then the rest; a new choice after each few, so a scroll is followed within a second or two (more at
+// once when none on screen waits: fewer worker starts). Each picture is asked for until it's there or refused --
+// never again after that (until Refresh): nothing goes round.
+static const size_t kThumbsOnScreen = 24, kThumbsBehind = 48;
+static void thumbs_next()
+{
+    g_chars.thumbs_due = 0;
+    if (g_chars.thumbs_running || !g_chars.store_loaded || !thumbs_can_fetch()) return;
+    const json::Value& items = g_chars.store["items"];
+    std::map<std::string, size_t> by_id;
+    for (size_t i = 0; i < items.size(); i++) by_id[items[i]["catalog_id"].str()] = i;
+    std::vector<std::string> ids;
+    std::set<std::string> in;
+    size_t most = kThumbsOnScreen;
+    auto want = [&](size_t i) {
+        if (i >= items.size() || ids.size() >= most) return;
+        const json::Value& c = items[i];
+        const std::string cid = c["catalog_id"].str(), next = c["thumb_pending"].str();
+        if (next.empty() || !c["thumb"].str().empty() || g_chars.thumbs_failed.count(cid) || in.count(cid)) return;
+        const auto l = g_thumb_looks.find(next);
+        if (l != g_thumb_looks.end() && l->second.there) return;
+        in.insert(cid);
+        ids.push_back(cid);
+    };
+    for (const std::string& cid : g_chars.thumbs_seen) { const auto f = by_id.find(cid); if (f != by_id.end()) want(f->second); }
+    if (ids.empty()) most = kThumbsBehind;
+    for (size_t vi : g_chars.tabs[kTabStore].view) want(vi);
+    for (size_t i = 0; i < items.size() && ids.size() < most; i++) want(i);
+    if (ids.empty()) return;
+    std::vector<std::string> args = { "--install", install_dir(), "--char-action", "store-thumbs" };
+    for (const std::string& cid : ids) { args.push_back("--id"); args.push_back(cid); }
+    g_chars.thumbs_running = true;
+    run("characters", args, "", false, [ids](const json::Value& r) {
+        g_chars.thumbs_running = false;
+        // each picture asked for: there now; else not tried (no connection, a rate limit: it and the rest wait until
+        // the store is shown again) or refused (a placeholder until Refresh)
+        const bool stopped = !r["ok"].truthy() || r["data"]["stopped"].truthy();
+        const json::Value& items = g_chars.store["items"];
+        for (const std::string& cid : ids) {
+            for (size_t i = 0; i < items.size(); i++) {
+                if (items[i]["catalog_id"].str() != cid) continue;
+                const std::string next = items[i]["thumb_pending"].str();
+                if (next.empty()) break;   // a list since has it cached
+                ThumbLook& l = g_thumb_looks[next];
+                std::error_code ec;
+                l.there = l.there || fs::is_regular_file(u8path(next), ec);
+                if (!l.there && !stopped) g_chars.thumbs_failed.insert(cid);
+                break;
+            }
+        }
+        if (stopped) g_chars.thumbs_stalled = true;
+        thumbs_next();
+    });
+}
+
+// the store: its catalog checked with the repository when the tab is shown (the worker asks GitHub at most every
+// 10 minutes, conditionally) or on Refresh; its thumbnails fetched in the background (thumbs_next); a download on
+// request
+static void store_refresh(bool force)
+{
+    g_chars.thumbs_stalled = false;   // shown again, refreshed: the pictures not fetched yet are tried again
+    if (force) g_chars.thumbs_failed.clear();
+    if (g_chars.store_loading) { g_chars.store_again = true; return; }
+    g_chars.store_loading = true;
+    const int gen = ++g_chars.store_gen;
+    run("characters", { "--install", install_dir(), "--char-action", force ? "store-refresh" : "store" },
+        "", false, [gen](const json::Value& r) {
+            g_chars.store_loading = false;
+            // a download that ended before this list was asked for is in it: its card stops saying DOWNLOADING
+            for (auto it = g_chars.downloaded.begin(); it != g_chars.downloaded.end();) {
+                if (it->second < gen) { g_chars.downloading.erase(it->first); it = g_chars.downloaded.erase(it); }
+                else ++it;
+            }
+            if (g_chars.store_again) { g_chars.store_again = false; store_refresh(false); }
+            if (!r["ok"].truthy()) { show_result_error(r, "The Character Store couldn't be read"); return; }
+            g_chars.store = take_data(r);
+            g_chars.store_loaded = true;
+            g_chars.tabs[kTabStore].view_key.clear();
+            g_thumb_looks.clear();   // the list says which pictures are cached now
+            g_chars.thumbs_due = g_preview_frame + 2;   // fetched once the grid shows which cards are on screen
+        });
+}
+
+// a store character's picture in its box: shown (its cached thumbnail, or one just fetched); loading (being fetched,
+// or decoded -- the blocks only once it has waited: a cached picture appears without them); or unavailable
+enum class Pic { Shown, Loading, Unavailable };
+static Pic store_picture(ImDrawList* dl, const json::Value& c, ImVec2 a, ImVec2 b)
+{
+    std::string path = c["thumb"].str();
+    const std::string next = c["thumb_pending"].str();
+    bool fetching = false;
+    if (path.empty() && !next.empty() && !g_chars.thumbs_failed.count(c["catalog_id"].str())) {
+        if (thumb_arrived(next)) path = next;
+        else fetching = thumbs_can_fetch();
+    }
+    const ImVec2 mid((a.x + b.x) / 2, (a.y + b.y) / 2);
+    const float sp = S(4);
+    if (path.empty()) {
+        dl->AddRectFilled(a, b, IM_COL32(30, 42, 98, 255));
+        if (fetching) { pix_spinner(dl, mid, sp); g_spin_fetch++; return Pic::Loading; }
+        pic_unavailable(dl, a, b);
+        return Pic::Unavailable;
+    }
+    bool bad = false;
+    if (preview_draw(dl, path, a, b, &bad)) return Pic::Shown;
+    if (bad) { pic_unavailable(dl, a, b); return Pic::Unavailable; }
+    const auto e = g_previews.find(path);
+    if (e != g_previews.end() && ImGui::GetTime() - e->second.since >= kPicWait) { pix_spinner(dl, mid, sp); g_spin_decode++; }
+    return Pic::Loading;
+}
+
+static void store_download(const json::Value& c, bool install)
+{
+    std::vector<std::string> args = { "--install", install_dir(), "--char-action", "store-download", "--id",
+                                      c["catalog_id"].str() };
+    if (install) args.push_back("--and-install");
+    const std::string label = c["label"].str(), cid = c["catalog_id"].str();
+    if (g_chars.downloading.count(cid)) return;
+    g_chars.downloading.insert(cid);
+    run("characters", args, "", false, [label, install, cid](const json::Value& r) {
+        if (!r["ok"].truthy()) g_chars.downloading.erase(cid);
+        else g_chars.downloaded[cid] = g_chars.store_gen;   // DOWNLOADING until a list asked for from now on shows it
+        if (!r["ok"].truthy()) show_result_error(r, "\"" + label + "\" wasn't downloaded");
+        else {
+            const json::Value& d = r["data"];
+            const bool dup = d["status"].str() == "duplicate";
+            g_chars.notice = dup ? "\"" + label + "\" was already in My Library: nothing was downloaded."
+                                 : "\"" + label + "\" is in My Library now.";
+            if (install && !d["folder"].is_null()) g_chars.notice += " It's in the game too.";
+            g_chars.notice_t = ImGui::GetTime();
+        }
+        chars_refresh();
+        store_refresh(false);
+    });
+}
+
+static const json::Value* chars_find(const std::string& id)
+{
+    if (id.rfind("store:", 0) == 0) {
+        const json::Value& cs = g_chars.store["items"];
+        for (size_t i = 0; i < cs.size(); i++)
+            if (cs[i]["id"].str() == id) return &cs[i];
+        return nullptr;
+    }
+    for (const char* k : { g_chars.tab == kTabInstalled ? "in_game" : "characters", "characters", "in_game" }) {
+        const json::Value& cs = g_chars.list[k];
+        for (size_t i = 0; i < cs.size(); i++)
+            if (cs[i]["id"].str() == id) return &cs[i];
+    }
+    return nullptr;
+}
+
+static std::string chars_preview_path(const std::string& id, const char* which)
+{
+    return g_chars.list["root"].str() + "/entries/" + id + "/preview/" + which;
+}
+
+static bool chars_filtered() { return ct().search[0] || !ct().f_class.empty() || !ct().f_source.empty() || ct().f_installed; }
+
+static void chars_clear_filters()
+{
+    ct().search[0] = 0;
+    ct().f_class.clear();
+    ct().f_source.clear();
+    ct().f_installed = 0;
+}
+
+// the filtered, sorted view: made again only when the list, the search, a filter or the order changed
+static void chars_view()
+{
+    const json::Value& cs = chars_items();
+    const std::string key = std::to_string(g_chars.tab) + "|" + std::to_string(cs.size()) + "|" + ct().search + "|" + ct().f_class + "|" + ct().f_source +
+                            "|" + std::to_string(ct().f_installed) + "|" + std::to_string(ct().sort);
+    if (key == ct().view_key) return;
+    ct().view_key = key;
+    ct().view.clear();
+    const std::string q = lower(ct().search);
+    for (size_t i = 0; i < cs.size(); i++) {
+        const json::Value& c = cs[i];
+        if (!ct().f_class.empty() && c["class"].str() != ct().f_class) continue;
+        if (!ct().f_source.empty() && c["source"].str() != ct().f_source) continue;
+        // installed: in the game's saves, or (the store) included with the installation's official game content
+        const bool in_game = !c["installed"].is_null() || !c["included_label"].str().empty();
+        if (ct().f_installed == 1 && !in_game) continue;
+        if (ct().f_installed == 2 && in_game) continue;
+        if (!q.empty()) {
+            std::string hay = c["label"].str() + " " + c["name"].str() + " " + c["class"].str() + " " + c["creator"].str();
+            for (size_t t = 0; t < c["tags"].size(); t++) hay += " " + c["tags"][t].str();
+            if (lower(hay).find(q) == std::string::npos) continue;
+        }
+        ct().view.push_back(i);
+    }
+    std::vector<std::string> names(cs.size()), classes;
+    for (size_t i : ct().view) names[i] = lower(cs[i]["label"].str());
+    if (ct().sort == 3) {
+        classes.resize(cs.size());
+        for (size_t i : ct().view) classes[i] = lower(cs[i]["class"].str());
+    }
+    auto name = [&](size_t i) -> const std::string& { return names[i]; };
+    std::stable_sort(ct().view.begin(), ct().view.end(), [&](size_t a, size_t b) {
+        switch (ct().sort) {
+        case 1: return name(a) > name(b);
+        case 2: return cs[a]["imported"].str() > cs[b]["imported"].str();
+        case 3: return classes[a] != classes[b] ? classes[a] < classes[b] : name(a) < name(b);
+        default: return name(a) < name(b);
+        }
+    });
+}
+
+// ---- importing: the key, the results ------------------------------------------------------------------------------
+struct KeyDialog {
+    bool open = false, show = false, keep = true;
+    std::vector<std::string> paths, folders;   // what is being imported: files and folders, or the game's saves
+    int count = 0;                             // the encrypted characters waiting
+    std::string error;                         // a wrong key's message
+    char buf[80] = "";
+} g_key;
+
+struct ImportResults {
+    bool open = false, details = false;
+    std::string title, summary, lines;
+    bool error = false;
+} g_results;
+
+struct Pick {   // the page's small choosers: the import menu, the filters, the order, the encrypted characters
+    bool import_menu = false, filters = false, sort = false, review = false;
+} g_pick;
+
+static void chars_import(const std::vector<std::string>& paths, const std::vector<std::string>& folders,
+                         const std::string& key = "", bool keep = false);
+
+static void key_dialog_open(const std::vector<std::string>& paths, const std::vector<std::string>& folders, int n,
+                            const std::string& error)
+{
+    g_key.open = true;
+    g_key.show = false;
+    g_key.paths = paths;
+    g_key.folders = folders;
+    g_key.count = n;
+    g_key.error = error;
+    memset(g_key.buf, 0, sizeof g_key.buf);
+}
+
+static void chars_import(const std::vector<std::string>& paths, const std::vector<std::string>& folders,
+                         const std::string& key, bool keep)
+{
+    std::vector<std::string> a = { "--install", install_dir(), "--char-action", folders.empty() ? "import" : "import-saves" };
+    for (const std::string& p : paths) { a.push_back("--paths"); a.push_back(p); }
+    for (const std::string& f : folders) { a.push_back("--id"); a.push_back(f); }
+    if (!key.empty()) { a.push_back("--with-key"); if (keep) a.push_back("--keep-key"); }
+    const bool with_key = !key.empty();
+    Op* op = run("characters", a, "Importing characters", true, [paths, folders, with_key](const json::Value& r) {
+        chars_refresh();
+        if (!r["ok"].truthy()) {
+            if (r["code"].str() == "cancelled") { show_msg("Import stopped", "Nothing was left half-imported: each character "
+                                                           "is added whole or not at all."); return; }
+            show_result_error(r, "Importing didn't finish");
+            return;
+        }
+        const json::Value& d = r["data"];
+        const json::Value& n = d["counts"];
+        const int imported = (int)n["imported"].num() + (int)n["similar"].num(), dup = (int)n["duplicate"].num(),
+                  needs = (int)n["needs-key"].num(), wrong = (int)n["wrong-key"].num(), cancelled = (int)n["cancelled"].num();
+        const int bad = (int)n["damaged"].num() + (int)n["unsupported"].num() + (int)n["failed"].num() + (int)n["errors"].num();
+        // the key: asked for when it is needed (and not kept), asked again when it was wrong
+        if (needs > 0 && !with_key && imported + dup + bad == 0) {
+            key_dialog_open(paths, folders, needs, ""); return;
+        }
+        if (wrong > 0 && imported + dup + bad == 0) {
+            key_dialog_open(paths, folders, wrong, with_key ? "That key didn't decrypt the character. Check the 32 digits "
+                            "and try again." : "The PS3 key kept on this computer didn't decrypt this character.");
+            return;
+        }
+        std::string s;
+        auto line = [&s](int k, const char* what) { if (k) s += std::to_string(k) + " " + what + "\n"; };
+        line(imported, imported == 1 ? "character imported" : "characters imported");
+        line((int)n["similar"].num(), "of them the same model as one you have (another name or settings)");
+        line(dup, dup == 1 ? "already in your library (not imported twice)" : "already in your library (not imported twice)");
+        line(needs, "still encrypted: they need your PS3 key");
+        line(wrong, "not decrypted: a wrong PS3 key (nothing was changed or kept)");
+        line(bad, bad == 1 ? "couldn't be imported (see the details)" : "couldn't be imported (see the details)");
+        line(cancelled, "not imported: the import was stopped");
+        if (!d["key_kept"].is_null() && d["key_kept"].str().rfind("this session", 0) != 0)
+            s += "Your PS3 key is kept by " + d["key_kept"].str() + ".\n";
+        std::string lines;
+        const json::Value& rs = d["results"];
+        for (size_t i = 0; i < rs.size(); i++) {
+            const std::string st = rs[i]["status"].str();
+            if (st != "imported" && st != "similar")
+                lines += rs[i]["label"].str() + ": " + rs[i]["message"].str() + "\n";
+        }
+        const json::Value& errs = d["errors"];
+        for (size_t i = 0; i < errs.size(); i++) lines += errs[i].str() + "\n";
+        g_results = ImportResults();
+        g_results.open = true;
+        g_results.title = d["stopped"].truthy() ? "Import stopped" : imported ? "Import finished" : "Nothing new imported";
+        g_results.summary = s.empty() ? "No character was found in what you chose." : s;
+        g_results.lines = lines;
+        g_results.error = imported == 0 && bad > 0;
+    });
+    if (op && !key.empty()) op->pending_key = key;
+}
+
+static void chars_install(const std::string& id)
+{
+    run("characters", { "--install", install_dir(), "--char-action", "install", "--id", id }, "Installing the character",
+        false, [](const json::Value& r) {
+            if (!r["ok"].truthy()) show_result_error(r, "Installing didn't finish");
+            else show_msg("Installed in the game", "Choose it in the game: CONTINUE, \"Change characters?\" YES, then EDIT "
+                          "DATA -- or EDITOR, LOAD. Nothing else in your saves changed.");
+            chars_refresh();
+        });
+}
+
+// ---- the details ----------------------------------------------------------------------------------------------------
+static void chars_detail(const json::Value& c)
+{
+    const std::string id = c["id"].str();
+    g_page_owns_back = true;
+    g_page_back_label = "Back";
+    const bool store = g_chars.tab == kTabStore;
+    const bool back = big_button(g_chars.tab == kTabInstalled ? "< Back to Installed" : store ? "< Back to the Store"
+                                 : "< Back to My Library", ImVec2(S(320), S(44)));
+    focus_first();
+    if (back || (g_page_input && pressed(Act::B))) { g_chars.open_id.clear(); ct().restore = true; return; }
+    const float avail = ImGui::GetContentRegionAvail().x;
+    ImGui::PushFont(nullptr, S(kBody));
+    title(fit_text(c["label"].str("Character"), avail).c_str(), 30);
+    ImGui::PopFont();
+    // class, where it is, where it came from
+    const bool inst = !c["installed"].is_null();
+    text_col(col::dim, "%s", c["class"].str().c_str());
+    ImGui::SameLine(0, S(24));
+    if (store && !inst)
+        text_col(c["library_id"].truthy() ? col::ok : col::dim, "%s", c["library_id"].truthy() ? "In My Library"
+                 : "Not downloaded");
+    else
+        text_col(inst ? col::ok : col::dim, "%s", inst ? "Installed in the game" : "Not installed in the game");
+    ImGui::SameLine(0, S(24));
+    text_col(col::dim, "From: %s", source_name(c["source"].str()));
+    if (!c["creator"].str().empty()) { ImGui::SameLine(0, S(24)); text_col(col::dim, "Made by %s", c["creator"].str().c_str()); }
+    // the views, the page's main picture: as large as the page allows, labelled
+    // (room kept under them for two rows of actions, and a notice line when there is one: every action in view
+    // without scrolling, on 16:9 screens too)
+    const bool note = (int)c["voxels"].num() == 0 || !c["preview_ok"].truthy();
+    // a store character not downloaded yet has its catalog thumbnail only: shown large instead of the three views
+    const bool thumb_only = store && c["views"].str().empty();
+    const float reserve = S(176) + (note ? S(kBody) + S(8) : 0.0f);
+    const float label_h = S(26), max_h = std::max(S(220), ImGui::GetContentRegionAvail().y - reserve);
+    float vw = avail, vh = vw * 400.0f / 972.0f;
+    if (vh > max_h) { vh = max_h; vw = vh * 972.0f / 400.0f; }
+    if (thumb_only) vw = vh;
+    const ImVec2 at = ImGui::GetCursorScreenPos();
+    const float x0 = at.x + floorf((avail - vw) / 2);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const char* names[3] = { "FRONT", "SIDE", "BACK" };
+    const float px = std::max(2.0f, floorf(S(3)));
+    for (int i = 0; i < (thumb_only ? 0 : 3); i++) {
+        const float cx = x0 + vw * (i * 2 + 1) / 6.0f;
+        pix_text(dl, ImVec2(floorf(cx - pix_w(names[i], px) / 2), at.y), names[i], px, col::accent);
+    }
+    bool bad = false;
+    Pic pic = Pic::Shown;
+    if (thumb_only) pic = store_picture(dl, c, ImVec2(x0, at.y + label_h), ImVec2(x0 + vw, at.y + label_h + vh));
+    else preview_draw(dl, c["views"].str(), ImVec2(x0, at.y + label_h), ImVec2(x0 + vw, at.y + label_h + vh), &bad);
+    if (pic == Pic::Loading && c["thumb"].str().empty()) {   // the picture on screen (no grid behind): fetched next
+        g_chars.thumbs_seen.assign(1, c["catalog_id"].str());
+        thumbs_next();
+    }
+    retro_frame(dl, ImVec2(x0 - S(3), at.y + label_h - S(3)), ImVec2(x0 + vw + S(3), at.y + label_h + vh + S(3)), col::frame,
+                std::max(2.0f, floorf(S(3))));
+    ImGui::Dummy(ImVec2(avail, label_h + vh + S(10)));
+    if (thumb_only && pic == Pic::Unavailable) text_col(col::dim, "Its picture couldn't be downloaded.");
+    else if (thumb_only && pic == Pic::Loading && c["thumb"].str().empty()) text_col(col::dim, "Its picture is being downloaded...");
+    else if ((int)c["voxels"].num() == 0) text_col(col::dim, "This character has no blocks yet (made in the editor and saved empty).");
+    else if (bad || !c["preview_ok"].truthy()) text_col(col::warm, "No preview could be drawn for this character.");
+    // the actions that apply now, on as many rows as the page needs
+    const float bh = S(48);
+    if (store) {   // the store: download it (and install it), or it's already here
+        const std::string lib_id = c["library_id"].str();
+        text_col(col::dim, "%s", fit_text(c["attribution"].str(), avail).c_str());
+        const bool hist = c["category"].str() == "historical";
+        if (hist) text_col(col::dim, "%s", fit_text(c["rights"].str(), avail).c_str());
+        const std::string included = c["included_label"].str();   // e.g. "Included with the official v1.01 update"
+        if (!included.empty()) {   // the game has it from official content: nothing to download, nothing duplicated
+            text_col(col::ok, "Installed -- %s.", included.c_str());
+            text_col(col::dim, "The game reads it from its own files; it isn't downloaded or copied.");
+        } else if (g_chars.downloading.count(c["catalog_id"].str())) {
+            text_col(col::accent, "Downloading... (you can keep browsing)");
+        } else if (lib_id.empty()) {
+            const bool upd = c["older_in_library"].truthy();
+            if (big_button(upd ? "Download the new version" : "Download", ImVec2(S(upd ? 360 : 240), bh), Kind::Primary))
+                store_download(c, false);
+            ImGui::SameLine(0, S(16));
+            if (big_button("Download and install", ImVec2(S(320), bh))) store_download(c, true);
+            if (upd) text_col(col::dim, "An earlier version is in My Library; the new one is added beside it.");
+        } else if (!inst) {
+            if (big_button("Install in the game", ImVec2(S(280), bh), Kind::Primary)) chars_install(lib_id);
+            ImGui::SameLine(0, S(16));
+            text_col(col::dim, "Already in My Library.");
+        } else {
+            text_col(col::ok, "In My Library and in the game.");
+        }
+        if (big_button(g_chars.info_open ? "Less information" : "More information", ImVec2(S(300), bh)))
+            g_chars.info_open = !g_chars.info_open;
+        if (g_chars.info_open) {
+            ImGui::PushFont(nullptr, S(kSmall));
+            if (!c["creator"].str().empty()) text_col(col::dim, "Made by %s%s%s", c["creator"].str().c_str(),
+                                                      c["creator_url"].str().empty() ? "" : " -- ",
+                                                      c["creator_url"].str().c_str());
+            if (hist) {   // a recovered character: where it was first shared, where it was found, how to ask for removal
+                text_col(col::dim, "First shared on %s%s%s", c["collection"].str().c_str(),
+                         c["original_date"].str().empty() ? "" : ", ", c["original_date"].str().c_str());
+                if (!c["archived_url"].str().empty())
+                    ImGui::TextWrapped("Archived source: %s", c["archived_url"].str().c_str());
+                text_col(col::dim, "Licence: none claimed -- all rights remain with its creator.");
+                if (!g_chars.store["removal_url"].str().empty())
+                    ImGui::TextWrapped("Is this your character, or yours to decide? Ask for its removal: %s",
+                                       g_chars.store["removal_url"].str().c_str());
+            } else {
+                text_col(col::dim, "Licence: %s (https://creativecommons.org/licenses/by/4.0/)",
+                         c["license"].str() == "CC-BY-4.0" ? "CC BY 4.0" : c["license"].str("not stated").c_str());
+            }
+            text_col(col::dim, "Version %d; added %s, updated %s; file %d bytes; catalog id %s", (int)c["version"].num(),
+                     c["added"].str().substr(0, 10).c_str(), c["imported"].str().substr(0, 10).c_str(),
+                     (int)c["size"].num(), c["catalog_id"].str().c_str());
+            if (!c["description"].str().empty()) ImGui::TextWrapped("%s", c["description"].str().c_str());
+            text_col(col::dim, "From the community characters repository%s: its signed catalog (version %d), and this "
+                     "file checked against the SHA-256 the catalog gives.", g_chars.store["official"].truthy() ? ""
+                     : " (a development copy)", (int)g_chars.store["catalog_version"].num());
+            ImGui::PopFont();
+        }
+        return;
+    }
+    if (!c["in_library"].truthy()) {   // made in the game: it can be added to the library (then exported, renamed)
+        if (big_button("Add to my library", ImVec2(S(300), bh), Kind::Primary)) {
+            chars_import({}, { c["folder"].str() });
+            g_chars.open_id.clear();
+            ct().restore = true;
+        }
+        text_col(col::dim, "Made in the game. Add it to your library to keep a copy, export or rename it.");
+        return;
+    }
+    const float right_edge = ImGui::GetCurrentWindow()->WorkRect.Max.x;
+    auto flow = [right_edge](float w) {   // the next button beside the last when it fits, else below it
+        if (ImGui::GetItemRectMax().x + S(16) + w <= right_edge) ImGui::SameLine(0, S(16));
+    };
+    if (!inst) {
+        if (big_button("Install in the game", ImVec2(S(280), bh), Kind::Primary)) chars_install(id);
+    } else if (c["installed_by_library"].truthy()) {
+        if (big_button("Uninstall from the game", ImVec2(S(300), bh)))
+            ask("Uninstall from the game?", "\"" + c["label"].str() + "\" is taken out of the game's characters (its folder "
+                "in the game's saves, which the library made). It stays in your library: you can install it again. "
+                "Nothing else in your saves changes.", "Uninstall", true, [id] {
+                    run("characters", { "--install", install_dir(), "--char-action", "uninstall", "--id", id, "--confirm" },
+                        "Uninstalling", false, [](const json::Value& r) {
+                            if (!r["ok"].truthy()) show_result_error(r, "Not uninstalled");
+                            chars_refresh();
+                        });
+                });
+    } else {
+        text_col(col::dim, "In the game's saves (made there, so the game manages it).");
+    }
+    flow(S(200));
+    if (big_button("Export...", ImVec2(S(200), bh)))
+        browse("Export to which folder?", true, {}, "", "", [id](const std::string& dir) {
+            run("characters", { "--install", install_dir(), "--char-action", "export", "--id", id, "--out", dir },
+                "Exporting", false, [](const json::Value& r) {
+                    if (!r["ok"].truthy()) { show_result_error(r, "Exporting didn't finish"); return; }
+                    const json::Value& d = r["data"];
+                    if (d["written"].size() > 0)
+                        g_msg = { true, "Exported", "Saved as " + d["written"][(size_t)0].str() + "\n\nIt holds the character "
+                                  "and its previews -- nothing of the PS3 save.", "", false, false };
+                    else
+                        g_msg = { true, "Not exported", d["skipped"][(size_t)0]["path"].str() + " already exists: nothing was "
+                                  "replaced. Choose another folder, or rename or move that file.", "", true, false };
+                });
+        });
+    flow(S(200));
+    if (big_button("Rename...", ImVec2(S(200), bh)))
+        type_text("A name for it in your library", c["label"].str(), [id](const std::string& name) {
+            if (name.empty()) return;
+            run("characters", { "--install", install_dir(), "--char-action", "rename", "--id", id, "--label", name },
+                "", false, [](const json::Value& r) {
+                    if (!r["ok"].truthy()) show_result_error(r, "Not renamed");
+                    chars_refresh();
+                });
+        });
+    flow(S(280));
+    if (big_button("Remove from library", ImVec2(S(280), bh), Kind::Danger))
+        ask("Remove it from your library?", "\"" + c["label"].str() + "\" is removed from your library on this computer, with "
+            "the copy of the files it was imported from." + std::string(inst ? " The copy installed in the game stays: "
+            "uninstall it first to take it out of the game too." : "") + " You can import it again from its file.",
+            "Remove", true, [id] {
+                run("characters", { "--install", install_dir(), "--char-action", "delete", "--id", id, "--confirm" },
+                    "", false, [](const json::Value& r) {
+                        if (!r["ok"].truthy()) show_result_error(r, "Not removed");
+                        g_chars.open_id.clear();
+                        chars_refresh();
+                    });
+            });
+    // the rest, on request
+    flow(S(300));
+    if (big_button(g_chars.info_open ? "Less information" : "More information", ImVec2(S(300), bh)))
+        g_chars.info_open = !g_chars.info_open;
+    if (g_chars.info_open) {
+        ImGui::PushFont(nullptr, S(kSmall));
+        text_col(col::dim, "%d blocks in %d poses (Stand, Walk 1, Walk 2, Hurray, Attack 1, Attack 2)", (int)c["voxels"].num(),
+                 (int)c["poses"].num());
+        text_col(col::dim, "Game: 3D Dot Game Heroes (US, BLUS-30490) -- the character editor's data (EDTFILE1.9)");
+        text_col(col::dim, "%d bytes; added %s; id %s", (int)c["size"].num(), c["imported"].str().substr(0, 10).c_str(),
+                 id.c_str());
+        if (!c["description"].str().empty()) ImGui::TextWrapped("%s", c["description"].str().c_str());
+        if (inst) text_col(col::dim, "Its folder in the game's saves: %s", c["installed"].str().c_str());
+        ImGui::PopFont();
+    }
+}
+
+// ---- the library: the toolbar, the notice, the grid ---------------------------------------------------------------
+static Pic chars_card(const json::Value& c, ImVec2 size, bool focus_me)
+{
+    const std::string id = c["id"].str();
+    ImGui::PushID(id.c_str());
+    if (focus_me) ImGui::SetKeyboardFocusHere();
+    const bool hit = ImGui::InvisibleButton("##card", size, ImGuiButtonFlags_EnableNav);   // reached by the D-pad
+    const bool focused = ImGui::IsItemFocused(), hovered = ImGui::IsItemHovered();
+    if (focused) { g_focus_label = "card: " + c["label"].str(); ct().focus_id = id; }
+    const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImU32 face = hovered || focused ? shade(col::panel2, 1.25f) : col::panel2;
+    dl->AddRectFilled(a, b, face);
+    bevel_edges(dl, a, b, face, std::max(2.0f, floorf(S(3))));
+    const float pad = floorf(S(10)), thumb = size.x - 2 * pad;
+    const bool store = g_chars.tab == kTabStore;
+    const ImVec2 pa(a.x + pad, a.y + pad), pb(a.x + pad + thumb, a.y + pad + thumb);
+    Pic pic = Pic::Shown;
+    if (store) pic = store_picture(dl, c, pa, pb);
+    else preview_draw(dl, c["thumb"].str(), pa, pb);
+    const bool game_only = !store && !c["in_library"].truthy();
+    const bool busy = store && g_chars.downloading.count(c["catalog_id"].str());
+    const bool update = store && !c["library_id"].truthy() && c["older_in_library"].truthy();
+    // the store: included with the installation's official content (installed from the game's own files)
+    const bool official = store && !c["included_label"].str().empty();
+    const bool store_have = store && (official || !c["installed"].is_null() || c["library_id"].truthy() || busy || update);
+    if ((g_chars.tab == kTabLibrary && !c["installed"].is_null()) || game_only || store_have) {   // a badge on the picture
+        const char* t = game_only ? "GAME ONLY" : official ? "INSTALLED" : busy ? "DOWNLOADING" : update ? "UPDATE"
+                        : store && c["installed"].is_null() ? "IN LIBRARY" : "IN GAME";
+        const float p = std::max(2.0f, floorf(S(2)));
+        const float tw = pix_w(t, p);
+        const ImVec2 ba(a.x + pad + thumb - tw - p * 6, a.y + pad + p * 2), bb(a.x + pad + thumb - p * 2, a.y + pad + p * 13);
+        dl->AddRectFilled(ba, bb, !official && (game_only || (store && c["installed"].is_null())) ? IM_COL32(40, 70, 150, 235)
+                                                                                                   : IM_COL32(40, 110, 40, 235));
+        pix_text(dl, ImVec2(ba.x + p * 2, ba.y + p * 2), t, p, IM_COL32_WHITE);
+    }
+    ImGui::PushFont(nullptr, S(kBody));
+    const std::string name = fit_text(c["label"].str("Character"), size.x - 2 * pad);
+    dl->AddText(ImVec2(a.x + pad, a.y + pad + thumb + S(6)), col::text, name.c_str());
+    ImGui::PopFont();
+    ImGui::PushFont(nullptr, S(kSmall));
+    const std::string cls = fit_text(c["class"].str(), size.x - 2 * pad);
+    dl->AddText(ImVec2(a.x + pad, a.y + pad + thumb + S(6) + S(kBody) + S(2)), col::dim, cls.c_str());
+    ImGui::PopFont();
+    if (hovered && !focused) retro_frame(dl, a, b, shade(col::frame, 0.9f), std::max(2.0f, floorf(S(2))));
+    focus_ring();
+    if (hit) { g_chars.open_id = id; g_chars.info_open = false; ct().focus_id = id; }
+    ImGui::PopID();
+    return pic;
+}
+
+// an empty tab or view: its picture, what it means, and the one thing to do next (which takes the focus)
+enum class EmptyAction { None, Import, ClearFilters, ShowLibrary, Retry };
+static void store_refresh(bool force);
+static void chars_empty(const char* head, const char* text, EmptyAction act)
+{
+    ImGui::Dummy(ImVec2(0, S(30)));
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float p = std::max(4.0f, floorf(S(9)));
+    const ImVec2 at = ImGui::GetCursorScreenPos();
+    const float w = ImGui::GetContentRegionAvail().x;
+    pix_icon(dl, ImVec2(floorf(at.x + (w - p * 10) / 2), at.y), kIcons[10], p);
+    ImGui::Dummy(ImVec2(w, p * 11));
+    title(head, 26);
+    ImGui::TextWrapped("%s", text);
+    ImGui::Spacing();
+    if (act == EmptyAction::ClearFilters) {
+        if (big_button("Clear the search and filters", ImVec2(S(360), S(48)))) chars_clear_filters();
+    } else if (act == EmptyAction::Import) {
+        if (big_button("Import characters...", ImVec2(S(320), S(48)), Kind::Primary)) g_pick.import_menu = true;
+    } else if (act == EmptyAction::Retry) {
+        if (big_button("Refresh", ImVec2(S(240), S(48)), Kind::Primary) && !g_chars.store_loading) store_refresh(true);
+    } else if (act == EmptyAction::ShowLibrary) {
+        if (big_button("Show My Library", ImVec2(S(320), S(48)), Kind::Primary)) {
+            g_chars.tab = kTabLibrary;
+            ct().restore = true;
+            g_focus_page = true;
+        }
+    }
+    if (act != EmptyAction::None && g_chars.loaded) focus_first();
+}
+
+// the tabs under the heading: compact, the count beside each; LT/RT (or [ ]) switch them, LB/RB stay the pages'
+static void chars_tabs()
+{
+    const int nlib = (int)g_chars.list["characters"].size(), ngame = (int)g_chars.list["in_game"].size();
+    std::vector<std::pair<int, std::string>> tabs = { { kTabLibrary, "My Library (" + std::to_string(nlib) + ")" },
+                                                      { kTabInstalled, "Installed (" + std::to_string(ngame) + ")" } };
+    tabs.push_back({ kTabStore, "Character Store" });   // the read-only store: the characters repository's catalog
+    const float h = S(40), gap = S(10);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    for (size_t i = 0; i < tabs.size(); i++) {
+        if (i) ImGui::SameLine(0, gap);
+        const bool on = g_chars.tab == tabs[i].first;
+        const float w = ImGui::CalcTextSize(tabs[i].second.c_str()).x + S(44);
+        if (big_button((tabs[i].second + "##tab" + std::to_string(i)).c_str(), ImVec2(w, h), on ? Kind::Primary : Kind::Normal)
+            && !on) { g_chars.tab = tabs[i].first; ct().restore = true; g_focus_page = true; }
+        if (on) {   // the chosen tab: a gold bar under it, joined to the page
+            const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+            dl->AddRectFilled(ImVec2(a.x, b.y + S(3)), ImVec2(b.x, b.y + S(6)), col::accent);
+        }
+    }
+    if (g_page_input && !tabs.empty()) {
+        int at = 0;
+        for (size_t i = 0; i < tabs.size(); i++) if (tabs[i].first == g_chars.tab) at = (int)i;
+        if (pressed(Act::LT)) { g_chars.tab = tabs[(at + tabs.size() - 1) % tabs.size()].first; ct().restore = true; g_focus_page = true; }
+        if (pressed(Act::RT)) { g_chars.tab = tabs[(at + 1) % tabs.size()].first; ct().restore = true; g_focus_page = true; }
+        if (tabs.size() > 1) { prompt(Act::LT, ""); prompt(Act::RT, "Tabs"); }
+    }
+    // how many the tab shows, on the tabs' row (the header stays short)
+    const size_t total = chars_items().size(), shown = ct().view.size();
+    char count[96];
+    if (g_chars.tab == kTabStore) count[0] = 0;
+    else if (chars_filtered()) snprintf(count, sizeof count, "%zu of %zu shown", shown, total);
+    else snprintf(count, sizeof count, total == 1 ? "%zu character" : "%zu characters", total);
+    const float cw = ImGui::CalcTextSize(count).x;
+    ImGui::SameLine();
+    const ImVec2 cur = ImGui::GetCursorScreenPos();
+    ImGui::SetCursorScreenPos(ImVec2(std::max(cur.x + S(16), ImGui::GetCurrentWindow()->WorkRect.Max.x - cw),
+                                     cur.y + floorf((h - ImGui::GetFontSize()) / 2)));
+    text_col(col::dim, "%s", count);
+    ImGui::Dummy(ImVec2(0, S(4)));
+}
+
+// the store's state under its toolbar: when the catalog was checked, or why the saved one is shown
+static void store_status_line(float avail)
+{
+    const json::Value& st = g_chars.store["status"];
+    const std::string s = st["status"].str(), msg = st["message"].str();
+    const bool warn = s == "offline" || s == "limited" || s == "error";
+    std::string text = msg;
+    if (!g_chars.notice.empty() && ImGui::GetTime() - g_chars.notice_t < 8.0) text = g_chars.notice;
+    else if (!g_chars.downloading.empty() && text.empty())
+        text = "Downloading " + std::to_string(g_chars.downloading.size()) + " character" +
+               (g_chars.downloading.size() == 1 ? "" : "s") + "...";
+    if (text.empty()) {
+        const int nh = (int)g_chars.store["historical"].num(), nall = (int)g_chars.store["items"].size();
+        text = nh == 0 ? "Community characters, checked and approved"
+             : std::to_string(nall - nh) + " community and " + std::to_string(nh) + " recovered historical characters";
+        if (!g_chars.store["updated"].str().empty()) text += " -- catalog of " + g_chars.store["updated"].str();
+        if (g_chars.thumbs_running) text += " (fetching pictures)";
+    }
+    const ImVec2 a = ImGui::GetCursorScreenPos();
+    const float h = S(40);
+    ImGui::GetWindowDrawList()->AddRectFilled(a, ImVec2(a.x + avail, a.y + h), warn ? IM_COL32(120, 70, 20, 200)
+                                                                                    : IM_COL32(30, 44, 100, 200));
+    ImGui::SetCursorScreenPos(ImVec2(a.x + S(14), a.y + floorf((h - ImGui::GetFontSize()) / 2)));
+    text_col(col::text, "%s", fit_text(text, avail - S(28)).c_str());
+    ImGui::SetCursorScreenPos(ImVec2(a.x, a.y + h + S(8)));
+    ImGui::Dummy(ImVec2(1, 1));
+}
+
+static void page_characters()
+{
+    g_preview_frame++;
+    g_spin_fetch = g_spin_decode = 0;
+    g_preview_budget = 8;
+    g_preview_t0 = SDL_GetPerformanceCounter();
+    g_preview_spent = 0;
+    if (!g_chars.asked) chars_refresh();
+    // a new store list's pictures: fetched now if no grid took them (a character's details shown, say)
+    if (g_chars.thumbs_due && g_preview_frame >= g_chars.thumbs_due) thumbs_next();
+    if (!g_char_drops.empty()) { chars_import(g_char_drops, {}); g_char_drops.clear(); g_chars.tab = kTabLibrary; }
+    if (!g_chars.open_id.empty()) {
+        if (const json::Value* c = chars_find(g_chars.open_id)) { chars_detail(*c); previews_trim(); return; }
+        g_chars.open_id.clear();
+    }
+    title("Characters");
+    {
+        const Uint64 t0 = SDL_GetPerformanceCounter();
+        chars_view();
+        g_nav_view_max = std::max(g_nav_view_max, (double)(SDL_GetPerformanceCounter() - t0) * 1000.0 / SDL_GetPerformanceFrequency());
+    }
+    chars_tabs();
+    const bool store_tab = g_chars.tab == kTabStore;
+    if (store_tab) {   // shown (again): the catalog checked -- the worker asks GitHub only when it's due
+        if (g_chars.store_seen + 1 != g_preview_frame) store_refresh(false);
+        g_chars.store_seen = g_preview_frame;
+    }
+    const json::Value& cs = chars_items();
+    const bool lib_tab = g_chars.tab == kTabLibrary;
+    // the toolbar: the search, the filters, the order -- and the tab's own action
+    int addable = 0;
+    if (g_chars.tab == kTabInstalled) for (size_t i = 0; i < cs.size(); i++) addable += cs[i]["in_library"].truthy() ? 0 : 1;
+    const bool action = lib_tab || store_tab || addable > 0;
+    const float avail = ImGui::GetContentRegionAvail().x, gap = S(12), bh = S(48);
+    const std::string add_label = "Add " + std::to_string(addable) + " to library";
+    const float bw = floorf(avail * 0.17f);
+    const float aw = !action ? 0.0f : lib_tab || store_tab ? bw : std::max(bw, ImGui::CalcTextSize(add_label.c_str()).x + S(48));
+    ImGui::SetNextItemWidth(avail - 2 * (bw + gap) - (action ? aw + gap : 0.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(S(12), floorf((bh - ImGui::GetFontSize()) / 2)));
+    if (ImGui::InputTextWithHint("##search", "Search: name, class, creator", ct().search, sizeof ct().search))
+        ct().view_key.clear();
+    ImGui::PopStyleVar();
+    if (ImGui::IsItemFocused()) g_focus_label = "search";
+    if (ImGui::IsItemFocused() && g_device == Device::Pad && pressed(Act::A))   // a controller: the on-screen keyboard
+        type_text("Search: a name, class, creator or tag", ct().search, [](const std::string& s) {
+            snprintf(ct().search, sizeof ct().search, "%s", s.c_str());
+            ct().view_key.clear();
+        });
+    ImGui::SameLine(0, gap);
+    const int nfilt = (!ct().f_class.empty()) + (!ct().f_source.empty()) + (ct().f_installed != 0);
+    const std::string fl = nfilt ? "Filters (" + std::to_string(nfilt) + ")" : std::string("Filters");
+    if (big_button(fl.c_str(), ImVec2(bw, bh), nfilt ? Kind::Primary : Kind::Normal)) g_pick.filters = true;
+    ImGui::SameLine(0, gap);
+    const char* sorts[] = { "Order: A-Z", "Order: Z-A", "Order: Newest", "Order: Class" };
+    if (big_button(sorts[ct().sort], ImVec2(bw, bh))) g_pick.sort = true;
+    if (lib_tab) {
+        ImGui::SameLine(0, gap);
+        if (big_button("Import...", ImVec2(aw, bh), Kind::Primary)) g_pick.import_menu = true;
+    } else if (store_tab) {
+        ImGui::SameLine(0, gap);
+        if (big_button(g_chars.store_loading ? "Checking..." : "Refresh", ImVec2(aw, bh)) && !g_chars.store_loading)
+            store_refresh(true);
+    } else if (addable > 0) {
+        ImGui::SameLine(0, gap);
+        if (big_button(add_label.c_str(), ImVec2(aw, bh), Kind::Primary)) {
+            std::vector<std::string> fs;
+            for (size_t i = 0; i < cs.size(); i++) if (!cs[i]["in_library"].truthy()) fs.push_back(cs[i]["folder"].str());
+            chars_import({}, fs);
+        }
+    }
+    if (chars_filtered()) {
+        if (ImGui::SmallButton("Clear the search and filters")) chars_clear_filters();
+    }
+    // a compact notice: encrypted characters in the game's saves (the store's tab: the catalog's state)
+    if (store_tab && g_chars.store_loaded) store_status_line(avail);
+    int enc = 0;
+    const json::Value& sv = g_chars.list["in_saves"];
+    for (size_t i = 0; i < sv.size(); i++) enc += sv[i]["kind"].str() == "encrypted" ? 1 : 0;
+    if (enc > 0 && !store_tab) {
+        const ImVec2 a = ImGui::GetCursorScreenPos();
+        const float h = S(50);
+        ImGui::GetWindowDrawList()->AddRectFilled(a, ImVec2(a.x + avail, a.y + h), IM_COL32(120, 70, 20, 200));
+        ImGui::SetCursorScreenPos(ImVec2(a.x + S(14), a.y + floorf((h - ImGui::GetFontSize()) / 2)));
+        text_col(col::text, enc == 1 ? "1 encrypted PS3 character detected in the game's saves."
+                                     : "%d encrypted PS3 characters detected in the game's saves.", enc);
+        ImGui::SetCursorScreenPos(ImVec2(a.x + avail - S(300), a.y + S(4)));
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(S(8), S(4)));
+        const bool review = big_button("Review and import", ImVec2(S(292), h - S(8)));
+        ImGui::PopStyleVar();
+        if (review) g_pick.review = true;
+        ImGui::SetCursorScreenPos(ImVec2(a.x, a.y + h + S(8)));
+        ImGui::Dummy(ImVec2(1, 1));
+    }
+    // the grid
+    const size_t total = cs.size(), shown = ct().view.size();
+    if (total == 0 && store_tab) {
+        if (!g_chars.store_loaded) chars_empty("Reading the catalog...", "", EmptyAction::None);
+        else if (!g_chars.store["have_catalog"].truthy())
+            chars_empty("The Character Store couldn't be reached", "No catalog has been saved on this computer yet. "
+                        "Check the connection, then refresh.", EmptyAction::Retry);
+        else
+            chars_empty("No characters in the store yet", "Approved community characters will appear here.",
+                        EmptyAction::Retry);
+        return;
+    }
+    if (total == 0) {
+        if (!g_chars.loaded) chars_empty("Reading your library...", "", EmptyAction::None);
+        else if (lib_tab)
+            chars_empty("Your character library is empty", "Import the characters you made in the game, character files, "
+                        "or characters saved on a PS3. You can also drop files on this window.", EmptyAction::Import);
+        else
+            chars_empty("No characters in the game yet", "Install characters from My Library, or make one in the game's "
+                        "editor.", EmptyAction::ShowLibrary);
+        return;
+    }
+    if (shown == 0) { chars_empty("No characters match", "Nothing here matches the search and filters.", EmptyAction::ClearFilters); return; }
+    const float card_min = S(180), cgap = S(16);
+    const float gw = ImGui::GetContentRegionAvail().x - S(14);   // room for the scroll bar
+    const int cols = std::max(2, std::min(6, (int)((gw + cgap) / (card_min + cgap))));
+    const float cw = floorf((gw - cgap * (cols - 1)) / cols), ch = cw + S(kBody) + S(kSmall) + S(14);
+    const int rows = (int)((shown + cols - 1) / cols);
+    ImGui::BeginChild(g_chars.tab == kTabLibrary ? "##grid_library" : store_tab ? "##grid_store" : "##grid_installed", ImVec2(0, 0),
+                      ImGuiChildFlags_NavFlattened, ImGuiWindowFlags_NoBackground);
+    int focus_row = -1;
+    if (ct().restore) {
+        for (size_t k = 0; k < shown; k++) if (cs[ct().view[k]]["id"].str() == ct().focus_id) focus_row = (int)(k / cols);
+        ImGui::SetScrollY(ct().scroll);
+    }
+    ImGuiListClipper clip;
+    clip.Begin(rows, ch + cgap);
+    if (focus_row >= 0) clip.IncludeItemByIndex(focus_row);
+    const ImVec2 o = ImGui::GetCursorPos();
+    std::vector<std::string> waiting;   // the store's cards on screen whose picture is still to be fetched
+    int npic[3] = { 0, 0, 0 };          // the store's cards drawn, by their picture's state (Pic)
+    while (clip.Step()) {
+        for (int r = clip.DisplayStart; r < clip.DisplayEnd; r++) {
+            for (int k = 0; k < cols; k++) {
+                const size_t vi = (size_t)r * cols + k;
+                if (vi >= shown) break;
+                ImGui::SetCursorPos(ImVec2(o.x + k * (cw + cgap), o.y + r * (ch + cgap)));
+                const json::Value& c = cs[ct().view[vi]];
+                const Pic pic = chars_card(c, ImVec2(cw, ch), ct().restore && c["id"].str() == ct().focus_id);
+                if (vi == 0 && g_chars.loaded) focus_first();
+                if (!store_tab) continue;
+                npic[(int)pic]++;
+                if (pic == Pic::Loading && c["thumb"].str().empty() && !g_thumb_looks[c["thumb_pending"].str()].there)
+                    waiting.push_back(c["catalog_id"].str());
+            }
+        }
+    }
+    clip.End();
+    if (store_tab) {   // the cards on screen go first in the next fetch (one starts if none is running)
+        g_chars.thumbs_seen.swap(waiting);
+        if (!g_chars.thumbs_seen.empty() || g_chars.thumbs_due) thumbs_next();
+        // the test's log (--nav-test): the pictures on screen by state, the loading blocks drawn (this frame; the most
+        // in one frame since the last step, fetched/decoded)
+        static std::string last;
+        static int spun_f = 0, spun_d = 0;
+        if (g_nav_test && (g_nav_event.empty() || g_nav_event == last)) {
+            if (g_nav_event != last) spun_f = spun_d = 0;   // the step before logged it
+            spun_f = std::max(spun_f, g_spin_fetch);
+            spun_d = std::max(spun_d, g_spin_decode);
+            char ev[200];
+            snprintf(ev, sizeof ev, "  [store pictures t=%.2f shown=%d loading=%d unavailable=%d spin=%d spun=%d/%d fetching=%d "
+                     "failed=%zu%s]", ImGui::GetTime(), npic[0], npic[1], npic[2], g_spin_fetch + g_spin_decode, spun_f, spun_d,
+                     g_chars.thumbs_running ? 1 : 0, g_chars.thumbs_failed.size(), g_chars.thumbs_stalled ? " stalled" : "");
+            g_nav_event = last = ev;
+        }
+    }
+    ImGui::SetCursorPos(ImVec2(o.x, o.y + rows * (ch + cgap)));
+    ImGui::Dummy(ImVec2(1, 1));   // the grid's extent, as an item
+    if (!ct().restore) ct().scroll = ImGui::GetScrollY();
+    ct().restore = false;
+    ImGui::EndChild();
+    previews_trim();
+    if (g_page_input) {
+        prompt(Act::X, "Filters");
+        prompt(Act::Y, "Search");
+        if (pressed(Act::X)) g_pick.filters = true;
+        if (pressed(Act::Y))
+            type_text("Search: a name, class, creator or tag", ct().search, [](const std::string& s) {
+                snprintf(ct().search, sizeof ct().search, "%s", s.c_str());
+                ct().view_key.clear();
+            });
+    }
 }
 
 // --- shaders ---
@@ -3013,8 +5083,8 @@ static void overlay_op()
     pump(*g_op);
     Op& op = *g_op;
     if (op.finished) {
-        auto then = op.then;
-        json::Value r = op.result;
+        auto then = std::move(op.then);
+        json::Value r = std::move(op.result);
         g_op.reset();
         if (then) then(r);
         return;
@@ -3151,6 +5221,22 @@ static void overlay_browser()
                 b.open = false;
                 ImGui::CloseCurrentPopup();
                 if (f) f(d);
+            }
+        } else if (b.pick_dir && !b.dir.empty()) {   // issue #6: a disc's folder chosen where the disc image is
+            if (!b.pick.empty()) {
+                if (big_button("Use this folder", ImVec2(S(300), S(50)), Kind::Primary)) {
+                    auto f = b.on_pick;
+                    std::string d = b.pick;
+                    b.open = false;
+                    ImGui::CloseCurrentPopup();
+                    if (f) f(d);
+                }
+                if (!same_folder(b.pick, b.dir)) {   // PS3_GAME itself: the folder holding it is the one used
+                    ImGui::SameLine(0, S(16));
+                    text_col(col::dim, "The disc's folder: %s", b.pick.c_str());
+                }
+            } else if (!b.pick_hint.empty()) {
+                text_col(col::dim, "%s", b.pick_hint.c_str());
             }
         }
         ImGui::BeginChild("##entries", ImVec2(0, -S(10)), ImGuiChildFlags_NavFlattened);
@@ -3334,6 +5420,8 @@ static void overlay_uninstall()
     }
 }
 
+static bool IsKeyPressedNoNav(ImGuiKey k) { return ImGui::IsKeyPressed(k, true); }
+
 static void overlay_osk()
 {
     static OpenFocus kf;
@@ -3346,11 +5434,37 @@ static void overlay_osk()
     if (ImGui::BeginPopupModal("##osk", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize)) {
         frame_window();
         title(g_osk.title.c_str(), 26);
-        // the text as typed (a keyboard types into it directly too)
+        // the text as typed (a keyboard types into it directly too): opened from a keyboard or mouse, the field
+        // has the focus; from a controller, the keys do -- and a physical keyboard's first keys still reach the text
+        // (the next ones go into the field directly)
+        static bool field_next = false, caret_end = false;
+        ImGuiIO& io = ImGui::GetIO();
+        if ((kf.left > 0 && g_device == Device::Keys) || field_next) {
+            ImGui::SetKeyboardFocusHere();
+            caret_end = field_next;   // caught-up typing goes on after what was typed (not over it: no select-all)
+            field_next = false;
+        }
         char buf[256];
         snprintf(buf, sizeof buf, "%s", g_osk.text.c_str());
         ImGui::SetNextItemWidth(-1);
-        if (ImGui::InputText("##osktext", buf, sizeof buf)) g_osk.text = buf;
+        if (ImGui::InputText("##osktext", buf, sizeof buf,
+                             (g_osk.secret ? ImGuiInputTextFlags_Password : 0) | ImGuiInputTextFlags_CallbackAlways,
+                             [](ImGuiInputTextCallbackData* d) {
+                                 if (caret_end) {
+                                     d->CursorPos = d->SelectionStart = d->SelectionEnd = d->BufTextLen;
+                                     caret_end = false;
+                                 }
+                                 return 0;
+                             }))
+            g_osk.text = buf;
+        if (g_osk.secret) memset(buf, 0, sizeof buf);
+        bool typed = false;   // (this frame: the on-screen keys don't also act on the same key -- Space, say)
+        if (!ImGui::IsItemActive() && kf.left == 0) {
+            for (ImWchar c : io.InputQueueCharacters)
+                if (c >= 32 && c < 127 && g_osk.text.size() < 200) { g_osk.text += (char)c; typed = true; }
+            if (IsKeyPressedNoNav(ImGuiKey_Backspace) && !g_osk.text.empty()) { g_osk.text.pop_back(); typed = true; }
+            if (typed) { io.InputQueueCharacters.resize(0); field_next = true; }
+        }
         static const char* rows[2][4] = { { "1234567890", "qwertyuiop", "asdfghjkl'", "zxcvbnm,.-" },
                                           { "!@#$%^&*()", "QWERTYUIOP", "ASDFGHJKL\"", "ZXCVBNM;:_" } };
         const float key = S(76);
@@ -3362,15 +5476,15 @@ static void overlay_osk()
                 char k[8] = { row[i], 0 };
                 char id[24];
                 snprintf(id, sizeof id, "%s##k%d_%d", k, r, i);
-                if (big_button(id, ImVec2(key, key))) g_osk.text += row[i];
-                if (first) { want_focus(kf); focus_tick(kf); }
+                if (big_button(id, ImVec2(key, key)) && !typed) g_osk.text += row[i];
+                if (first) { if (g_device != Device::Keys) want_focus(kf); focus_tick(kf); }
                 first = false;
                 if (row[i + 1]) ImGui::SameLine(0, S(8));
             }
         }
         if (big_button("Shift", ImVec2(key * 2, key))) g_osk.shift = !g_osk.shift;
         ImGui::SameLine(0, S(8));
-        if (big_button("Space", ImVec2(key * 4, key))) g_osk.text += ' ';
+        if (big_button("Space", ImVec2(key * 4, key)) && !typed) g_osk.text += ' ';
         ImGui::SameLine(0, S(8));
         if (big_button("Delete", ImVec2(key * 2, key)) && !g_osk.text.empty()) g_osk.text.pop_back();
         ImGui::SameLine(0, S(8));
@@ -3387,6 +5501,8 @@ static void overlay_osk()
         if (done || cancel) {
             auto f = g_osk.on_done;
             std::string t = g_osk.text;
+            std::fill(g_osk.text.begin(), g_osk.text.end(), '\0');
+            g_osk.text.clear();
             g_osk.open = false;
             ImGui::CloseCurrentPopup();
             if (done && f) f(t);
@@ -3399,7 +5515,313 @@ static void overlay_osk()
 // the frame: the header (the pages, LB/RB), the page, the prompts
 // ============================================================================================================
 
-static bool overlay_open() { return g_op || g_confirm.open || g_msg.open || g_browser.open || g_osk.open || g_uninst.open; }
+// ---- the overlays: the key, the results, the choosers ------------------------------------------------------------
+static bool chars_overlay_open()
+{
+    return g_key.open || g_results.open || g_pick.import_menu || g_pick.filters || g_pick.sort || g_pick.review;
+}
+
+static void small_label(const char* t, ImU32 c = col::dim)
+{
+    ImGui::PushStyleColor(ImGuiCol_Text, v4(c));
+    ImGui::PushFont(nullptr, S(kSmall));
+    ImGui::TextWrapped("%s", t);
+    ImGui::PopFont();
+    ImGui::PopStyleColor();
+}
+
+static bool modal_begin(const char* id, float width)
+{
+    ImGui::OpenPopup(id);
+    ImGuiViewport* vp = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(std::min(vp->Size.x - S(80), S(width)), 0));
+    ImGui::SetNextWindowSizeConstraints(ImVec2(0, 0), ImVec2(FLT_MAX, vp->Size.y - S(60)));
+    if (!ImGui::BeginPopupModal(id, nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize))
+        return false;
+    frame_window();
+    return true;
+}
+
+static void overlay_key()
+{
+    static OpenFocus kf;
+    open_focus(kf, g_key.open);
+    if (!g_key.open) return;
+    if (!modal_begin("##ps3key", 900)) return;
+    title(g_key.count > 1 ? (std::to_string(g_key.count) + " encrypted PS3 characters").c_str() : "Encrypted PS3 character", 28);
+    ImGui::TextWrapped("%s", g_key.count > 1
+        ? "These characters are encrypted and need your PS3 key before they can be imported. Your key is used on this "
+          "computer only: never uploaded or shared."
+        : "This character is encrypted and needs your PS3 key before it can be imported. Your key is used on this "
+          "computer only: never uploaded or shared.");
+    ImGui::Spacing();
+    small_label("The key: the PS3's \"syscon manager key\" -- the console's key for protected save data. 32 hexadecimal "
+                "digits (0-9, A-F), 16 bytes. Cubic.Heroes doesn't include it.");
+    ImGui::Spacing();
+    // the field (the whole width), then paste, show or hide, the on-screen keyboard
+    ImGui::SetNextItemWidth(-1);
+    const ImGuiInputTextFlags fl = ImGuiInputTextFlags_CharsHexadecimal | ImGuiInputTextFlags_CharsUppercase |
+                                   (g_key.show ? 0 : ImGuiInputTextFlags_Password);
+    ImGui::InputTextWithHint("##key", "32 hexadecimal digits", g_key.buf, 33, fl);
+    want_focus(kf);
+    if (ImGui::IsItemFocused()) g_focus_label = "the key";
+    const bool type_pad = ImGui::IsItemFocused() && g_device == Device::Pad && ImGui::IsKeyPressed(ImGuiKey_GamepadFaceDown, false);
+    if (big_button("Paste", ImVec2(S(150), S(44)))) {
+        if (char* clip = SDL_GetClipboardText()) {
+            std::string hex;
+            for (const char* c = clip; *c && hex.size() < 32; c++)
+                if (isxdigit((unsigned char)*c)) hex += (char)toupper((unsigned char)*c);
+            SDL_free(clip);
+            memset(g_key.buf, 0, sizeof g_key.buf);
+            memcpy(g_key.buf, hex.data(), hex.size());
+        }
+    }
+    ImGui::SameLine(0, S(12));
+    if (big_button(g_key.show ? "Hide" : "Show", ImVec2(S(150), S(44)))) g_key.show = !g_key.show;
+    ImGui::SameLine(0, S(12));
+    if (big_button("Type on the on-screen keyboard", ImVec2(S(380), S(44))) || type_pad)
+        type_text("Your PS3 key (32 hexadecimal digits)", g_key.buf, [](const std::string& t) {
+            std::string hex;
+            for (char c : t) if (isxdigit((unsigned char)c) && hex.size() < 32) hex += (char)toupper((unsigned char)c);
+            memset(g_key.buf, 0, sizeof g_key.buf);
+            memcpy(g_key.buf, hex.data(), hex.size());
+        }, true);
+    // the format, checked as it is typed
+    const size_t n = strlen(g_key.buf);
+    const bool valid = n == 32;
+    char msg[96];
+    snprintf(msg, sizeof msg, valid ? "32 of 32 digits: the format is right" : "%zu of 32 digits", n);
+    small_label(msg, valid ? col::ok : col::dim);
+    if (!g_key.error.empty()) small_label(g_key.error.c_str(), col::danger);
+    // keeping it: only in the system's protected store, else for this import only
+    const json::Value& ks = g_chars.list["key"];
+    if (!ks["store"].is_null()) {
+        std::string lbl = "Keep it on this computer (" + ks["store"].str() + ")";
+        ImGui::Checkbox(lbl.c_str(), &g_key.keep);
+    } else {
+        g_key.keep = false;
+        small_label("No protected key store on this system: the key is used for this import only, never written to a file.");
+    }
+    if (ks["stored"].truthy()) {
+        if (big_button("Forget the kept key", ImVec2(S(320), S(44)), Kind::Danger)) {
+            run("characters", { "--install", install_dir(), "--char-action", "key-forget" }, "", false,
+                [](const json::Value&) { chars_refresh(); });
+            g_key.error = "The kept key was forgotten. Enter the key to import.";
+        }
+    }
+    ImGui::Spacing();
+    const bool go = big_button("Import", ImVec2(S(260), S(52)), Kind::Primary, valid);
+    ImGui::SameLine();
+    const bool cancel = big_button("Cancel", ImVec2(S(260), S(52)));
+    focus_tick(kf);
+    prompt(Act::A, "Choose");
+    prompt(Act::B, "Cancel");
+    const bool b = pressed(Act::B) && !ImGui::IsItemActive();
+    if ((go && valid) || cancel || b) {
+        std::string key(g_key.buf, strlen(g_key.buf));
+        memset(g_key.buf, 0, sizeof g_key.buf);
+        const auto paths = g_key.paths;
+        const auto folders = g_key.folders;
+        const bool keep = g_key.keep;
+        g_key.open = false;
+        ImGui::CloseCurrentPopup();
+        if (go && valid) chars_import(paths, folders, key, keep);
+        std::fill(key.begin(), key.end(), '\0');
+    }
+    ImGui::EndPopup();
+}
+
+static void overlay_results()
+{
+    static OpenFocus rf;
+    open_focus(rf, g_results.open);
+    if (!g_results.open) return;
+    if (!modal_begin("##importresults", 820)) return;
+    ImGui::PushStyleColor(ImGuiCol_Text, v4(g_results.error ? col::danger : col::ok));
+    title(g_results.title.c_str(), 28);
+    ImGui::PopStyleColor();
+    ImGui::TextWrapped("%s", g_results.summary.c_str());
+    if (!g_results.lines.empty()) {
+        if (big_button(g_results.details ? "Hide the details" : "Show the details", ImVec2(S(300), S(44))))
+            g_results.details = !g_results.details;
+        if (g_results.details) {
+            ImGui::BeginChild("##resultlines", ImVec2(0, S(220)), ImGuiChildFlags_Borders);
+            ImGui::PushFont(nullptr, S(kSmall));
+            ImGui::TextWrapped("%s", g_results.lines.c_str());
+            ImGui::PopFont();
+            ImGui::EndChild();
+        }
+    }
+    const bool ok = big_button("OK", ImVec2(S(220), S(52)), Kind::Primary);
+    want_focus(rf);
+    focus_tick(rf);
+    prompt(Act::A, "Choose");
+    prompt(Act::B, "Close");
+    if (ok || pressed(Act::B)) { g_results.open = false; ImGui::CloseCurrentPopup(); }
+    ImGui::EndPopup();
+}
+
+// a chip: a small toggle in a chooser, gold when chosen (the focus ring shows where the cursor is)
+static bool chip(const std::string& label, bool on, float w = 0)
+{
+    const float tw = ImGui::CalcTextSize(label.c_str()).x + S(40);
+    return big_button(label.c_str(), ImVec2(std::max(w, tw), S(44)), on ? Kind::Primary : Kind::Normal);
+}
+
+static void chips_wrap(float w)
+{
+    // the next chip on this row when it fits, else on the next
+    const float right = ImGui::GetCurrentWindow()->WorkRect.Max.x;
+    if (ImGui::GetItemRectMax().x + S(12) + w < right) ImGui::SameLine(0, S(12));
+}
+
+static void overlay_pickers()
+{
+    static OpenFocus im, fi, so, rv;
+    open_focus(im, g_pick.import_menu);
+    open_focus(fi, g_pick.filters);
+    open_focus(so, g_pick.sort);
+    open_focus(rv, g_pick.review);
+    if (g_pick.import_menu && modal_begin("##importmenu", 720)) {
+        title("Import characters", 28);
+        small_label("Character files (.chchar), ZIP archives, DATA.EDT files, and folders of characters saved on a PS3. "
+                    "You can also drop them on this window.");
+        ImGui::Spacing();
+        const float w = ImGui::GetContentRegionAvail().x;
+        bool close = false;
+        if (big_button("Character files...", ImVec2(w, S(52)), Kind::Primary)) {
+            close = true;
+            browse("Import characters", false, { ".chchar", ".zip", ".edt" }, "Characters (.chchar, .zip, DATA.EDT)", "",
+                   [](const std::string& f) { chars_import({ f }, {}); });
+        }
+        want_focus(im);
+        if (big_button("A folder of characters...", ImVec2(w, S(52)))) {
+            close = true;
+            browse("Import the characters in a folder (a PS3's SAVEDATA, for example)", true, {}, "", "",
+                   [](const std::string& d) { chars_import({ d }, {}); });
+        }
+        int plain = 0;
+        const json::Value& sv = g_chars.list["in_saves"];
+        for (size_t i = 0; i < sv.size(); i++) plain += sv[i]["kind"].str() == "plain" ? 1 : 0;
+        if (plain > 0 && big_button(("Characters made in the game (" + std::to_string(plain) + " not in the library)").c_str(),
+                                    ImVec2(w, S(52)))) {
+            close = true;
+            std::vector<std::string> fs;
+            for (size_t i = 0; i < sv.size(); i++) if (sv[i]["kind"].str() == "plain") fs.push_back(sv[i]["folder"].str());
+            chars_import({}, fs);
+        }
+        if (g_chars.list["key"]["stored"].truthy() && big_button("Forget my kept PS3 key", ImVec2(w, S(52)), Kind::Danger)) {
+            close = true;
+            ask("Forget your PS3 key?", "It is removed from " + g_chars.list["key"]["store"].str() + ". Characters already "
+                "imported stay as they are; importing another encrypted character asks for the key again.", "Forget it",
+                true, [] { run("characters", { "--install", install_dir(), "--char-action", "key-forget" }, "", false,
+                               [](const json::Value&) { chars_refresh(); }); });
+        }
+        if (big_button("Cancel", ImVec2(w, S(52))) || pressed(Act::B)) close = true;
+        focus_tick(im);
+        prompt(Act::A, "Choose");
+        prompt(Act::B, "Cancel");
+        if (close) { g_pick.import_menu = false; ImGui::CloseCurrentPopup(); }
+        ImGui::EndPopup();
+    }
+    if (g_pick.filters && modal_begin("##filters", 860)) {
+        title("Filters", 28);
+        std::map<std::string, int> cl_n, so_n;
+        const json::Value& items = chars_items();
+        for (size_t i = 0; i < items.size(); i++) { cl_n[items[i]["class"].str()]++; so_n[items[i]["source"].str()]++; }
+        small_label("Class");
+        bool first = true;
+        if (chip("Any class", ct().f_class.empty())) ct().f_class.clear();
+        if (first) { want_focus(fi); first = false; }
+        for (const auto& kv : cl_n) {
+            const std::string& k = kv.first;
+            const std::string lbl = k + " (" + std::to_string(kv.second) + ")";
+            chips_wrap(ImGui::CalcTextSize(lbl.c_str()).x + S(40));
+            if (chip(lbl, ct().f_class == k)) ct().f_class = k;
+        }
+        if (g_chars.tab == kTabLibrary) {
+            small_label("In the game");
+            const char* inst[] = { "Any", "Installed", "Not installed" };
+            for (int i = 0; i < 3; i++) {
+                if (i) ImGui::SameLine(0, S(12));
+                if (chip(inst[i], ct().f_installed == i)) ct().f_installed = i;
+            }
+        }
+        small_label("Source");
+
+        if (chip("Any source", ct().f_source.empty())) ct().f_source.clear();
+        for (const auto& kv : so_n) {
+            const std::string& k = kv.first;
+            const std::string lbl = std::string(source_name(k)) + " (" + std::to_string(kv.second) + ")";
+            chips_wrap(ImGui::CalcTextSize(lbl.c_str()).x + S(40));
+            if (chip(lbl, ct().f_source == k)) ct().f_source = k;
+        }
+        ImGui::Spacing();
+        bool close = false;
+        if (big_button("Clear the filters", ImVec2(S(300), S(52)))) { ct().f_class.clear(); ct().f_source.clear(); ct().f_installed = 0; }
+        ImGui::SameLine();
+        if (big_button("Done", ImVec2(S(220), S(52)), Kind::Primary) || pressed(Act::B)) close = true;
+        focus_tick(fi);
+        prompt(Act::A, "Choose");
+        prompt(Act::B, "Done");
+        if (close) { g_pick.filters = false; ImGui::CloseCurrentPopup(); }
+        ImGui::EndPopup();
+    }
+    if (g_pick.sort && modal_begin("##sort", 560)) {
+        title("Order", 28);
+        const char* names[] = { "Name, A to Z", "Name, Z to A", "Newest added first", "Class" };
+        bool close = false;
+        const float w = ImGui::GetContentRegionAvail().x;
+        for (int i = 0; i < 4; i++) {
+            if (chip(names[i], ct().sort == i, w)) { ct().sort = i; close = true; }
+            if (i == ct().sort) want_focus(so);
+        }
+        small_label("(Recently used isn't offered: the game doesn't record which character was played.)");
+        if (pressed(Act::B)) close = true;
+        focus_tick(so);
+        prompt(Act::A, "Choose");
+        prompt(Act::B, "Cancel");
+        if (close) { g_pick.sort = false; ImGui::CloseCurrentPopup(); }
+        ImGui::EndPopup();
+    }
+    if (g_pick.review && modal_begin("##review", 820)) {
+        const json::Value& sv = g_chars.list["in_saves"];
+        std::vector<std::string> fs;
+        for (size_t i = 0; i < sv.size(); i++) if (sv[i]["kind"].str() == "encrypted") fs.push_back(sv[i]["folder"].str());
+        title(fs.size() == 1 ? "An encrypted PS3 character" : (std::to_string(fs.size()) + " encrypted PS3 characters").c_str(), 28);
+        small_label("In the game's saves, copied from a PS3 and still encrypted: the game shows them blank. Importing them "
+                    "decrypts a copy into your library (the originals are not changed); then install them from here.");
+        ImGui::BeginChild("##reviewlist", ImVec2(0, std::min(S(260), S(34) * (float)fs.size() + S(16))), ImGuiChildFlags_Borders);
+        for (size_t i = 0; i < sv.size(); i++)
+            if (sv[i]["kind"].str() == "encrypted")
+                ImGui::TextUnformatted((sv[i]["name"].str().empty() ? std::string("(no name)") : sv[i]["name"].str()).c_str());
+        ImGui::EndChild();
+        bool close = false;
+        if (big_button(fs.size() == 1 ? "Import it" : "Import all", ImVec2(S(260), S(52)), Kind::Primary)) {
+            close = true;
+            chars_import({}, fs);
+        }
+        want_focus(rv);
+        ImGui::SameLine();
+        if (big_button("Not now", ImVec2(S(220), S(52))) || pressed(Act::B)) close = true;
+        focus_tick(rv);
+        prompt(Act::A, "Choose");
+        prompt(Act::B, "Not now");
+        if (close) { g_pick.review = false; ImGui::CloseCurrentPopup(); }
+        ImGui::EndPopup();
+    }
+}
+
+static void overlay_chars()
+{
+    overlay_pickers();
+    overlay_key();
+    overlay_results();
+}
+
+
+static bool overlay_open() { return g_op || g_confirm.open || g_msg.open || g_browser.open || g_osk.open || g_uninst.open || chars_overlay_open(); }
 
 static void voxel_bar(ImDrawList* dl, ImVec2 a, ImVec2 b, float frac, float t)
 {
@@ -3535,8 +5957,8 @@ static void frame()
     if (g_bg) {   // the background preparation
         pump(*g_bg);
         if (g_bg->finished) {
-            auto then = g_bg->then;
-            json::Value r = g_bg->result;
+            auto then = std::move(g_bg->then);
+            json::Value r = std::move(g_bg->result);
             g_bg.reset();
             if (then) then(r);
             if (g_play_after_bg) {   // paused for the game: what was made is kept
@@ -3600,8 +6022,8 @@ static void frame()
     for (size_t i = 0; i < g_queries.size();) {   // the quick queries: their callbacks run here, on this thread
         pump(*g_queries[i]);
         if (g_queries[i]->finished) {
-            auto then = g_queries[i]->then;
-            json::Value r = g_queries[i]->result;
+            auto then = std::move(g_queries[i]->then);
+            json::Value r = std::move(g_queries[i]->result);
             g_queries.erase(g_queries.begin() + i);
             if (then) then(r);
         } else {
@@ -3741,6 +6163,7 @@ static void frame()
     ImGui::SetCursorScreenPos(ImVec2(ca.x + in_x + floorf((1.0f - ease) * S(28)), ca.y + in_y));
     ImGui::PushStyleVar(ImGuiStyleVar_Alpha, 0.2f + 0.8f * ease);
     g_page_input = !overlay_open();
+    g_page_owns_back = false;
     ImGui::BeginChild("##page", ImVec2(cb.x - ca.x - in_x - S(34), cb.y - ca.y - in_y - S(26)), ImGuiChildFlags_NavFlattened,
                       ImGuiWindowFlags_NoBackground);
     g_page_window = ImGui::GetCurrentWindow();
@@ -3749,9 +6172,16 @@ static void frame()
     case kPlay: page_play(); break;
     case kManage: page_manage(); break;
     case kSaves: page_saves(); break;
+    case kCharacters: {
+        const Uint64 t0 = SDL_GetPerformanceCounter();
+        page_characters();
+        g_nav_page_max = std::max(g_nav_page_max, (double)(SDL_GetPerformanceCounter() - t0) * 1000.0 / SDL_GetPerformanceFrequency());
+        break;
+    }
     case kSettings: page_settings(); break;
     case kDiagnostics: page_diagnostics(); break;
     }
+    if (g_page != kCharacters && !g_previews.empty()) previews_release();   // nothing of it kept in memory
     ImGui::PopFont();
     ImGui::EndChild();
     g_page_input = true;
@@ -3767,6 +6197,7 @@ static void frame()
     overlay_confirm();
     overlay_uninstall();
     overlay_message();
+    overlay_chars();
     ImGui::PopFont();
     // the prompts
     if (!overlay_open() && !dialog_at_start && g_bg) {
@@ -3781,17 +6212,23 @@ static void frame()
         static std::string left_from;
         static int left_wait = 0;
         const bool in_menu = g_focus_label.rfind("menu: ", 0) == 0;
-        auto free_press = [owned_lr](ImGuiKey k) { return !owned_lr && !g_focus_owns_lr && ImGui::IsKeyPressed(k, false); };
+        // (a text field being typed in keeps its arrows: they move the caret)
+        const bool typing = ImGui::GetIO().WantTextInput;
+        auto free_press = [owned_lr, typing](ImGuiKey k) {
+            return !owned_lr && !g_focus_owns_lr && !(typing && k == ImGuiKey_LeftArrow) && ImGui::IsKeyPressed(k, false);
+        };
         if (in_menu && (free_press(ImGuiKey_GamepadDpadRight) || free_press(ImGuiKey_RightArrow))) g_focus_page = true;
-        if (!in_menu && (free_press(ImGuiKey_GamepadDpadLeft) || free_press(ImGuiKey_LeftArrow))) {
+        if (!in_menu && !g_nav_reaching && (free_press(ImGuiKey_GamepadDpadLeft) || free_press(ImGuiKey_LeftArrow))) {
             left_from = g_focus_label;
             left_wait = 2;
         } else if (left_wait > 0 && --left_wait == 0 && g_focus_label == left_from) {
             g_focus_menu = true;   // nothing to its left: the menu
         }
-        if (g_focus_label.rfind("menu: ", 0) != 0) {   // on a page: B goes to the menu
+        if (g_page_owns_back) {   // a page's own Back (the character details): handled by the page
+            prompt(Act::B, g_page_back_label);
+        } else if (g_focus_label.rfind("menu: ", 0) != 0) {   // on a page: B goes to the menu
             prompt(Act::B, "Menu");
-            if (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false))
+            if (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || (!typing && ImGui::IsKeyPressed(ImGuiKey_Escape, false)))
                 g_focus_menu = true;
         }
     }
@@ -3816,16 +6253,43 @@ static void frame()
         fg->AddText(g_font, S(21), ImVec2(at.x + 2, at.y + 2), col::ink, s);
         fg->AddText(g_font, S(21), at, c, s);
     };
-    {
-        const ImVec2 ds = g_font->CalcTextSizeA(S(21), FLT_MAX, 0, dev);
-        shadow_text(ImVec2(o.x + S(28), gy + (gh2 - ds.y) / 2), col::text, dev);
-    }
     float px = o.x + sz.x - S(28);
     std::set<int> seen;   // the first prompt given for a button wins
     std::vector<Prompt> listed;
     for (const Prompt& p : g_prompts)
         if (seen.insert((int)p.act).second) listed.push_back(p);
     const float gsz = floorf(S(34));
+    {   // beta.6: the device label in the room the prompts leave -- it ran into the Character Store's row (the long
+        // "Keyboard and mouse (a controller is connected)" beside its eight prompts). The prompts are measured first;
+        // the label is the longest wording that fits, else its short form cut with "..."; none when nothing fits.
+        float left = px;
+        for (auto it = listed.rbegin(); it != listed.rend(); ++it) {
+            const bool pair_next = std::next(it) != listed.rend() && std::next(it)->label.empty();
+            left -= g_font->CalcTextSizeA(S(21), FLT_MAX, 0, it->label.c_str()).x;
+            if (!it->label.empty()) left -= S(10);
+            left -= glyph(nullptr, ImVec2(0, 0), it->act, gsz);
+            left -= pair_next ? S(6) : S(30);
+        }
+        const float x0 = o.x + S(28), room = left + S(30) - S(24) - x0;   // the last gap kept clear, and S(24) more
+        std::vector<std::string> ways = { g_nav_dev_label.empty() ? std::string(dev) : g_nav_dev_label };
+        if (g_nav_dev_label.empty() && g_device != Device::Pad && g_pad_connected) ways.push_back("Keyboard and mouse");
+        std::string shown;
+        for (const std::string& w : ways)
+            if (g_font->CalcTextSizeA(S(21), FLT_MAX, 0, w.c_str()).x <= room) { shown = w; break; }
+        if (shown.empty()) {   // the short form cut to the room, "..." at its end
+            std::string w = ways.back();
+            while (!w.empty() && g_font->CalcTextSizeA(S(21), FLT_MAX, 0, (w + "...").c_str()).x > room) w.pop_back();
+            while (!w.empty() && w.back() == ' ') w.pop_back();
+            shown = w.empty() ? std::string() : w + "...";
+        }
+        float right = x0;
+        if (!shown.empty()) {
+            const ImVec2 ds = g_font->CalcTextSizeA(S(21), FLT_MAX, 0, shown.c_str());
+            shadow_text(ImVec2(x0, gy + (gh2 - ds.y) / 2), col::text, shown.c_str());
+            right = x0 + ds.x;
+        }
+        g_nav_footer = { shown, right, left + S(30) };   // the nav test's "footer" reads it
+    }
     for (auto it = listed.rbegin(); it != listed.rend(); ++it) {   // right to left: each glyph measured, then drawn
         const bool pair_next = std::next(it) != listed.rend() && std::next(it)->label.empty();   // LB, then RB "Pages"
         const ImVec2 ts = g_font->CalcTextSizeA(S(21), FLT_MAX, 0, it->label.c_str());
@@ -3877,16 +6341,44 @@ static std::string font_path()
 
 // --nav-test FILE: a controller driven by a script, inside the launcher only (no input reaches any other window): one
 // step a line -- up, down, left, right (the D-pad), a, b, x, y, lb, rb, menu, view [times]; rs FRAMES (the right
-// stick down); wait FRAMES; shot NAME (the launcher saves its own frame, NAME.bmp beside the script); quit. Each step
-// is logged with the page, any dialog and the focused item after it settles (FILE.log). expect TEXT stops the test
-// unless the focus is on TEXT; see TEXT[|TEXT2...] unless a title with one of them is wholly in view. --nav-size WxH:
+// stick down); wait FRAMES; settle FRAMES (until the worker's checks are over); type TEXT (as a keyboard types it);
+// reach FRAMES (beta.6: the page walked by the D-pad alone; the test stops unless every enabled button it drew had
+// the focus -- a control only a mouse reaches); devlabel TEXT (the footer's device label made TEXT); footer (the test
+// stops if the device label runs into the prompts); shot NAME (the launcher saves its own frame, NAME.bmp
+// beside the script); quit. Each step
+// is logged with the page, any dialog and the focused item after it settles (FILE.log). expect TEXT[|TEXT2...] stops
+// the test unless the focus is on one of them (until and seek take alternatives the same way); see TEXT[|TEXT2...]
+// unless a title with one of them is wholly in view. --nav-size WxH:
 // the test window's size (0.2.0-beta.5: the Steam Deck's 1280x800 and 1280x720 tested); a test's window placement is
 // never remembered
+// the focused item's label holds one of "A|B|...": a page whose first item depends on its content (the Characters
+// page: a card, or the empty library's Import characters...)
+static bool focus_has(const std::string& alts)
+{
+    for (size_t from = 0; from <= alts.size();) {
+        size_t bar = alts.find('|', from);
+        if (bar == std::string::npos) bar = alts.size();
+        const std::string want = alts.substr(from, bar - from);
+        if (!want.empty() && g_focus_label.find(want) != std::string::npos) return true;
+        from = bar + 1;
+    }
+    return alts.empty();
+}
+// the frames' work since the last logged step (building and submitting a frame: not the wait for VSync), for the
+// test's log -- a page's cost measured where it runs (the Characters page with 1,000 characters)
+static double g_nav_work_sum = 0, g_nav_work_max = 0;
+static int g_nav_work_n = 0;
 struct NavScript {
     struct Step { std::string op; int n = 1; std::string arg; };
     std::vector<Step> steps;
     size_t at = 0;
-    int wait = 30, phase = 0, done_n = 0, rs = 0, idle = 0, until = 0, seek = 0, seek_t = 0;
+    int wait = 30, phase = 0, done_n = 0, rs = 0, idle = 0, until = 0, seek = 0, seek_t = 0, settle = 0, quiet = 0;
+    // "reach N" (beta.6): the page walked by the D-pad alone; every enabled button it draws must take the focus
+    int reach = 0, reach_t = 0, reach_stuck = 0, reach_pass = 0;
+    char reach_dir = 0;
+    ImGuiKey reach_key = ImGuiKey_None;
+    ImGuiID reach_from = 0;
+    std::map<ImGuiID, std::string> reach_seen;
     bool seek_held = false;   // the seek's key is down (pressed, its release not yet sent)
     std::string until_text, seek_text;
     ImGuiKey seek_key = ImGuiKey_None;
@@ -3902,7 +6394,7 @@ struct NavScript {
             Step st;
             if (!(ls >> st.op) || st.op[0] == '#') continue;
             std::string rest;   // a count, or a name (a shot's name is a name, even "01-play")
-            if (st.op == "expect" || st.op == "see") {   // "expect TEXT", "see TEXT": the rest of the line
+            if (st.op == "expect" || st.op == "see" || st.op == "type" || st.op == "devlabel") {   // the rest of the line
                 std::getline(ls, rest);
                 st.arg = rest.substr(std::min(rest.size(), rest.find_first_not_of(' ')));
             } else if (st.op == "until" || st.op == "seek") {   // "until N TEXT", "seek N DIR TEXT": at most N
@@ -3934,6 +6426,8 @@ struct NavScript {
         if (op == "y") return ImGuiKey_GamepadFaceUp;
         if (op == "lb") return ImGuiKey_GamepadL1;
         if (op == "rb") return ImGuiKey_GamepadR1;
+        if (op == "lt") return ImGuiKey_GamepadL2;
+        if (op == "rt") return ImGuiKey_GamepadR2;
         if (op == "menu") return ImGuiKey_GamepadStart;
         if (op == "view") return ImGuiKey_GamepadBack;
         return ImGuiKey_None;
@@ -3944,9 +6438,15 @@ struct NavScript {
         const char* dlg = g_confirm.open ? g_confirm.title.c_str() : g_msg.open ? g_msg.title.c_str()
                         : g_browser.open ? "file browser" : g_osk.open ? "keyboard" : g_uninst.open ? "uninstall"
                         : g_op ? "operation" : "";
-        fprintf(log, "%-6s %-14s page=%-12s dialog=%-28s focus=%s%s%s\n", st.op.c_str(), st.arg.c_str(), kPageNames[g_page],
-                dlg, g_focus_label.c_str(), g_bg ? "  [preparing]" : "", g_nav_event.c_str());
+        char work[128] = "";
+        if (g_nav_work_n)
+            snprintf(work, sizeof work, "  work=%.2f/%.2fms page<=%.2f spawn<=%.2f view<=%.2f", g_nav_work_sum / g_nav_work_n,
+                     g_nav_work_max, g_nav_page_max, g_nav_spawn_max, g_nav_view_max);
+        fprintf(log, "%-6s %-14s page=%-12s dialog=%-28s focus=%s%s%s%s\n", st.op.c_str(), st.arg.c_str(), kPageNames[g_page],
+                dlg, g_focus_label.c_str(), g_bg ? "  [preparing]" : "", g_nav_event.c_str(), work);
         g_nav_event.clear();
+        g_nav_work_sum = g_nav_work_max = g_nav_page_max = g_nav_spawn_max = g_nav_view_max = 0;
+        g_nav_work_n = 0;
         fflush(log);
     }
     void inject(ImGuiIO& io)
@@ -3963,8 +6463,15 @@ struct NavScript {
             if (g_bg && --idle > 0) return;
             idle = 0;
         }
+        if (settle > 0) {   // "settle N": until no check of the worker's runs (the disc's, the keys' -- a download
+            // too) and none follows: 10 quiet frames in a row, as one's result starts the next; N frames at most.
+            // A wait for what the page waits for, however fast the frames come (Linux's offscreen ones: ~1 ms)
+            quiet = g_queries.empty() && !g_op ? quiet + 1 : 0;
+            if (quiet < 10 && --settle > 0) return;
+            settle = 0;
+        }
         if (seek > 0) {   // "seek N DIR TEXT": DIR pressed now and then until the focus is on TEXT, N frames at most
-            if (g_focus_label.find(seek_text) != std::string::npos && !g_op) seek = 0;
+            if (focus_has(seek_text) && !g_op) seek = 0;
             else {
                 --seek;
                 const int at_t = seek_t++ % 20;   // down for 2 frames, up, then the frames a move takes
@@ -3977,9 +6484,64 @@ struct NavScript {
             // Linux: onto a Settings value, which the script's next left or right then changed)
             if (seek_held) { io.AddKeyAnalogEvent(seek_key, false, 0.0f); seek_held = false; }
         }
+        if (reach > 0) {   // "reach N": a walk of the page by the D-pad alone -- down, and along each row the focus
+            // stops on, right then left -- to the bottom, then up again from there; every enabled button the page drew
+            // (in view or not, its cards' too) must have had the focus at some point, or the test stops: a control
+            // only a mouse can reach (the owner's playtest: Game Version's card skipped). N frames at most.
+            ImGuiContext& gc = *ImGui::GetCurrentContext();
+            auto press = [&](ImGuiKey k) {
+                reach_from = gc.NavId;
+                reach_key = k;
+                io.AddKeyAnalogEvent(k, true, 1.0f);
+                reach_t = 14;   // held 2 frames, then 12 for the move and the page's scroll
+            };
+            if (--reach <= 0) reach_dir = 'e';
+            else if (reach_t > 0) {
+                if (--reach_t == 12) io.AddKeyAnalogEvent(reach_key, false, 0.0f);
+                return;
+            }
+            if (reach_dir != 'e') {
+                if (gc.NavId) reach_seen[gc.NavId] = g_focus_label;
+                const bool moved = gc.NavId != reach_from;
+                const ImGuiKey vert = reach_pass == 0 ? ImGuiKey_GamepadDpadDown : ImGuiKey_GamepadDpadUp;
+                switch (reach_dir) {
+                case 0: g_nav_reaching = true; reach_dir = 'r'; press(ImGuiKey_GamepadDpadRight); break;
+                case 'r': if (moved) press(ImGuiKey_GamepadDpadRight); else { reach_dir = 'l'; press(ImGuiKey_GamepadDpadLeft); } break;
+                case 'l': if (moved) press(ImGuiKey_GamepadDpadLeft); else { reach_dir = 'v'; reach_stuck = 0; press(vert); } break;
+                case 'v':
+                    if (moved) { reach_dir = 'r'; press(ImGuiKey_GamepadDpadRight); }
+                    else if (++reach_stuck < 2) press(vert);
+                    else if (reach_pass == 0) { reach_pass = 1; reach_stuck = 0; press(ImGuiKey_GamepadDpadUp); }
+                    else reach_dir = 'e';
+                    break;
+                }
+                if (reach_dir != 'e') return;
+            }
+            // the end: what the page drew against what had the focus
+            g_nav_reaching = false;
+            reach = 0;
+            std::string missed;
+            int n = 0, got = 0;
+            for (const auto& b : g_nav_buttons) {
+                n++;
+                if (reach_seen.count(b.first)) got++;
+                else missed += (missed.empty() ? "" : ", ") + ("\"" + b.second + "\"");
+            }
+            {   // said on the next step's line, as the harness's other notes are
+                char said[160];
+                snprintf(said, sizeof said, "  [reach: %d of %d of the page's buttons had the focus]", got, n);
+                g_nav_event += said;
+            }
+            if (!missed.empty()) {
+                if (log) fprintf(log, "FAILED: buttons the D-pad never reached: %s: the test stops here\n", missed.c_str());
+                at = steps.size();
+                g_quit = true;
+                return;
+            }
+        }
         if (until > 0) {   // "until N TEXT": until the focus is on TEXT (part of its label) and no operation is on
             // screen, N frames at most -- then the script goes on (an expect after it says whether it got there)
-            if ((g_focus_label.find(until_text) == std::string::npos || g_op) && --until > 0) return;
+            if ((!focus_has(until_text) || g_op) && --until > 0) return;
             until = 0;
         }
         if (at >= steps.size()) return;
@@ -3996,8 +6558,32 @@ struct NavScript {
             wait = st.n;
         } else if (st.op == "rs") {
             rs = st.n + 1;
+        } else if (st.op == "type") {   // "type TEXT": typed as a keyboard would (into the field or keyboard on screen)
+            io.AddInputCharactersUTF8(st.arg.c_str());
+            wait = 6;
         } else if (st.op == "idle") {
             idle = st.n;
+        } else if (st.op == "settle") {
+            settle = st.n;
+            quiet = 0;
+        } else if (st.op == "devlabel") {   // "devlabel TEXT": the device label the footer is given (a long one)
+            g_nav_dev_label = st.arg;
+        } else if (st.op == "footer") {   // the footer's label clear of the prompts, or the test stops
+            char said[200];
+            snprintf(said, sizeof said, "  [footer: \"%s\" ends at %.0f, the prompts begin at %.0f]",
+                     g_nav_footer.label.c_str(), g_nav_footer.label_right, g_nav_footer.prompts_left);
+            g_nav_event += said;
+            if (g_nav_footer.label_right > g_nav_footer.prompts_left) {
+                if (log) fprintf(log, "FAILED: the device label runs into the prompts:%s: the test stops here\n", said);
+                at = steps.size();
+                g_quit = true;
+                return;
+            }
+        } else if (st.op == "reach") {
+            reach = st.n;
+            reach_t = reach_stuck = reach_pass = 0;
+            reach_dir = 0;
+            reach_seen.clear();
         } else if (st.op == "until") {
             until = st.n;
             until_text = st.arg;
@@ -4009,7 +6595,7 @@ struct NavScript {
             seek_t = 0;
         } else if (st.op == "expect") {   // the focus must be on this (part of its label), or the test stops at once:
             // a script out of step must never press A on something it didn't mean to
-            if (g_focus_label.find(st.arg) == std::string::npos) {
+            if (!focus_has(st.arg)) {
                 if (log) fprintf(log, "FAILED: expected the focus on \"%s\", it is on \"%s\": the test stops here\n",
                                  st.arg.c_str(), g_focus_label.c_str());
                 at = steps.size();
@@ -4173,6 +6759,7 @@ int main(int argc, char** argv)
     SDL_Renderer* ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_PRESENTVSYNC | SDL_RENDERER_ACCELERATED);
     if (!ren) ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_SOFTWARE);   // no GPU acceleration: still a launcher
     if (!ren) return 1;
+    g_ren = ren;   // M12: the character previews' textures
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
@@ -4201,7 +6788,7 @@ int main(int argc, char** argv)
     // --show: each dialog as a player meets it, opened once the page has settled; nothing done by it (closing it is
     // all it does)
     auto open_show = [&show] {
-        if (show == "browser") browse("Choose your disc image", false, { ".iso" }, "disc images (.iso)", "", [](const std::string&) {});
+        if (show == "browser") browse_disc([](const std::string&) {});
         if (show == "keyboard") type_text("A note for this backup", "before the boss", [](const std::string&) {});
         if (show == "confirm")
             ask("Go back to this build?", "The game starts from it next time. The build you have now is kept, so you can "
@@ -4272,15 +6859,17 @@ int main(int argc, char** argv)
                             break;
                         }
                 break;
-            case SDL_DROPFILE: {   // a disc image or a keys file dropped onto the window
+            case SDL_DROPFILE: {   // a disc image or a keys file dropped onto the window (characters: on their page)
                 std::string p = e.drop.file;
                 SDL_free(e.drop.file);
+                if (g_page == kCharacters) { g_char_drops.push_back(p); break; }
                 std::string ext = path_str(u8path(p).extension());
                 std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
                 g_page = kManage;
-                std::error_code dec;
-                if (ext == ".iso" || fs::is_directory(u8path(p), dec)) { g_wiz.disc = p; g_prefs.disc = p; probe_disc(); }
-                else { g_wiz.keys = p; g_prefs.keys = p; probe_keys(); }
+                const std::string disc_dir = disc_folder_of(p);   // the disc's folder, or PS3_GAME itself (issue #6)
+                if (!disc_dir.empty()) p = disc_dir;
+                if (ext == ".iso" || !disc_dir.empty()) { g_wiz.disc = p; g_prefs.disc = p; probe_disc(); }
+                else { g_wiz.keys = p; g_prefs.keys = p; probe_keys(); }   // a keys file, a key folder or ZIP, an EBOOT.elf
                 g_prefs.save();
                 break;
             }
@@ -4329,12 +6918,14 @@ int main(int argc, char** argv)
         g_pad_connected = SDL_NumJoysticks() > 0;
         if (g_pad_connected && !g_saw_input) g_device = Device::Pad;   // a controller at hand: its prompts from the start
         io.ConfigNavCursorVisibleAlways = g_device == Device::Pad || nav.active();
+        const Uint64 work_t0 = SDL_GetPerformanceCounter();
         ImGui_ImplSDLRenderer2_NewFrame();
         ImGui_ImplSDL2_NewFrame();
         g_prompt_choice = setting("LAUNCHER_PROMPTS", "auto");
         stick_nav(io);
         if (nav.active()) nav.inject(io);   // the scripted controller (--nav-test)
         g_nav_titles.clear();   // its "see" has read the last frame's; this frame's are gathered as they're drawn
+        g_nav_buttons.clear();  // its "reach" too
         ImGui::NewFrame();
         keep_focus_in_view();
         scroll_when_stuck();
@@ -4349,7 +6940,13 @@ int main(int argc, char** argv)
         SDL_SetRenderDrawColor(ren, 14, 18, 44, 255);
         SDL_RenderClear(ren);
         ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData(), ren);
-        if (nav.active()) nav.after_render(ren);
+        if (nav.active()) {
+            const double ms = (double)(SDL_GetPerformanceCounter() - work_t0) * 1000.0 / SDL_GetPerformanceFrequency();
+            g_nav_work_sum += ms;
+            g_nav_work_max = std::max(g_nav_work_max, ms);
+            g_nav_work_n++;
+            nav.after_render(ren);
+        }
         SDL_RenderPresent(ren);
         if (after_update && !wrote_health) {   // the new launcher is up: the update is kept (tools/updates.py)
             const std::string health = env_u8("CUBIC_UPDATE_HEALTH");   // the helper's file, waiting for this version

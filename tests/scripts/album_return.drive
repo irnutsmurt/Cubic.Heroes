@@ -1,0 +1,48 @@
+# Issue #10: a snapshot viewed in the system menu's ALBUM, then back. In play at the castle (SAVES=), START opens
+# the system menu (RESUME, SAVE, LOAD, OPTIONS, SNAPSHOT, ALBUM, ...); SNAPSHOT's shutter saves a picture, ALBUM
+# asks the system's photo picker (cellPhotoImport2) for one and shows it; CIRCLE leaves the picture.
+#! saves build/checkpoints/castle-front-2553
+#! env DOTHEROES_DEV_STATE=1
+#! secs 300
+log TitleMovie 120
+sleep 5
+press START
+sleep 3
+press START
+sleep 5
+press CROSS
+state life>0,area==17 60
+sleep 3
+press START                 # system menu, RESUME
+sleep 2
+press DOWN
+sleep 1
+press DOWN
+sleep 1
+press DOWN
+sleep 1
+press DOWN
+sleep 1
+press CROSS                 # SNAPSHOT
+sleep 3
+press CROSS                 # shutter
+sleep 6
+shot shutter
+press CIRCLE                # leave the camera: back in the system menu, on SNAPSHOT
+sleep 3
+press DOWN
+sleep 1
+shot menu-album
+press CROSS                 # ALBUM
+log cellPhotoImport 20
+sleep 5
+shot album
+press CIRCLE                # leave the picture
+sleep 5
+shot back-1
+press CIRCLE
+sleep 5
+shot back-2
+press CIRCLE
+sleep 5
+shot back-3

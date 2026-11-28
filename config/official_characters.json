@@ -1,0 +1,300 @@
+{
+ "format": "cubic.heroes.official-characters",
+ "version": 1,
+ "_comment": "Characters that come with official game content, mapped to the Character Store's catalog (docs/CHARACTER_STORE.md, 'Official content'). An installation with a package below has these characters from the game itself: the store shows the mapped catalog entries as installed, included with that package, and never downloads or imports them. Slots name where the package keeps each character; catalog_id is the store catalog's own id (null: no catalog entry -- none is made for it automatically; one can be added through the normal catalog process). match: identical (the same character file), same-model (every voxel, colour, setting and pose box the same; 'differs' says what is not), none. Verified against the player's own files privately; no hash or data of the official files is kept here.",
+ "content": [
+  {
+   "id": "BLUS30490-01.00",
+   "title_id": "BLUS30490",
+   "region": "US",
+   "version": "01.00",
+   "kind": "game",
+   "label": "Included with the game",
+   "characters": []
+  },
+  {
+   "id": "BLUS30490-01.01",
+   "title_id": "BLUS30490",
+   "region": "US",
+   "version": "01.01",
+   "kind": "update",
+   "requires": "BLUS30490-01.00",
+   "label": "Included with the official v1.01 update",
+   "characters": [
+    {
+     "slot": "addition/05_001",
+     "catalog_id": "61ac9858aa741df0",
+     "match": "identical"
+    },
+    {
+     "slot": "addition/05_002",
+     "catalog_id": "89a7aa80a47a2104",
+     "match": "identical"
+    },
+    {
+     "slot": "addition/05_003",
+     "catalog_id": null,
+     "match": "none"
+    },
+    {
+     "slot": "addition/05_004",
+     "catalog_id": "acdb4a4c478a00cd",
+     "match": "identical"
+    },
+    {
+     "slot": "addition/05_005",
+     "catalog_id": "efba76fa34056314",
+     "match": "same-model",
+     "differs": [
+      "name"
+     ]
+    },
+    {
+     "slot": "addition/05_006",
+     "catalog_id": "18ed50fff48b6812",
+     "match": "same-model",
+     "differs": [
+      "name"
+     ]
+    },
+    {
+     "slot": "addition/05_007",
+     "catalog_id": "36793723a6f974c2",
+     "match": "identical"
+    },
+    {
+     "slot": "addition/05_008",
+     "catalog_id": "5a4a27ac4bf4f0b4",
+     "match": "identical"
+    },
+    {
+     "slot": "addition/05_009",
+     "catalog_id": "4bcc24dcfe05a303",
+     "match": "identical"
+    },
+    {
+     "slot": "addition/05_010",
+     "catalog_id": "d717e107b1c1a95c",
+     "match": "identical"
+    },
+    {
+     "slot": "addition/05_011",
+     "catalog_id": "f1d2df6ccb47be9f",
+     "match": "identical"
+    },
+    {
+     "slot": "addition/05_012",
+     "catalog_id": "7e60c37c03ca94e4",
+     "match": "identical"
+    },
+    {
+     "slot": "addition/05_013",
+     "catalog_id": null,
+     "match": "none"
+    },
+    {
+     "slot": "addition/05_014",
+     "catalog_id": "ce6bb6578912a778",
+     "match": "identical"
+    },
+    {
+     "slot": "addition/05_015",
+     "catalog_id": "417ff53072bd091d",
+     "match": "identical"
+    },
+    {
+     "slot": "addition/05_016",
+     "catalog_id": null,
+     "match": "none"
+    },
+    {
+     "slot": "addition/05_017",
+     "catalog_id": "53d8d5955e75d4a7",
+     "match": "same-model",
+     "differs": [
+      "name"
+     ]
+    },
+    {
+     "slot": "addition/05_018",
+     "catalog_id": "a978cd177ffb9d41",
+     "match": "identical"
+    },
+    {
+     "slot": "addition/05_019",
+     "catalog_id": "8b922c954bdd3e00",
+     "match": "identical"
+    },
+    {
+     "slot": "addition/05_020",
+     "catalog_id": "204fe1b45ef8b34a",
+     "match": "identical"
+    },
+    {
+     "slot": "addition/05_021",
+     "catalog_id": "51ca3557d25f51bd",
+     "match": "identical"
+    },
+    {
+     "slot": "addition/05_022",
+     "catalog_id": "5b4970a9eb031124",
+     "match": "identical"
+    },
+    {
+     "slot": "addition/05_023",
+     "catalog_id": "98c5acf06c0a386b",
+     "match": "identical"
+    },
+    {
+     "slot": "addition/05_024",
+     "catalog_id": "6ce840d8b2936618",
+     "match": "identical"
+    },
+    {
+     "slot": "addition/05_025",
+     "catalog_id": "2f764f170e92288e",
+     "match": "identical"
+    },
+    {
+     "slot": "addition/05_026",
+     "catalog_id": "cb95696fe163cf19",
+     "match": "same-model",
+     "differs": [
+      "name"
+     ]
+    },
+    {
+     "slot": "addition/05_027",
+     "catalog_id": "3d948ceab0e653b6",
+     "match": "identical"
+    },
+    {
+     "slot": "addition/05_028",
+     "catalog_id": "eb766247bedade09",
+     "match": "identical"
+    },
+    {
+     "slot": "addition/05_029",
+     "catalog_id": "2d46dedc8e7192ae",
+     "match": "identical"
+    },
+    {
+     "slot": "addition/05_030",
+     "catalog_id": "5588cef7ff330e36",
+     "match": "identical"
+    },
+    {
+     "slot": "addition/05_031",
+     "catalog_id": "c32cd11ac07b57d1",
+     "match": "identical"
+    },
+    {
+     "slot": "addition/05_032",
+     "catalog_id": "3fe510633f061d6a",
+     "match": "identical"
+    },
+    {
+     "slot": "addition/05_033",
+     "catalog_id": "76ba84e62a6e48e1",
+     "match": "identical"
+    },
+    {
+     "slot": "addition/05_034",
+     "catalog_id": "55ab53fd72feb4ba",
+     "match": "identical"
+    },
+    {
+     "slot": "addition/05_035",
+     "catalog_id": "036848953db3bc6d",
+     "match": "identical"
+    },
+    {
+     "slot": "addition/05_036",
+     "catalog_id": "32909ab007b85e5c",
+     "match": "same-model",
+     "differs": [
+      "name"
+     ]
+    },
+    {
+     "slot": "addition/05_037",
+     "catalog_id": "03315b0c15c5346f",
+     "match": "identical"
+    },
+    {
+     "slot": "addition/05_038",
+     "catalog_id": null,
+     "match": "none"
+    },
+    {
+     "slot": "addition/05_039",
+     "catalog_id": "f5a821468a65c477",
+     "match": "identical"
+    },
+    {
+     "slot": "addition/05_040",
+     "catalog_id": "15c6cf4af6614a3c",
+     "match": "identical"
+    },
+    {
+     "slot": "addition/05_041",
+     "catalog_id": "80bec3edc2b3a48b",
+     "match": "identical"
+    },
+    {
+     "slot": "addition/05_042",
+     "catalog_id": null,
+     "match": "none"
+    },
+    {
+     "slot": "addition/05_043",
+     "catalog_id": "eac5b30f551aa0b0",
+     "match": "identical"
+    },
+    {
+     "slot": "addition/05_044",
+     "catalog_id": "b7b5c3789faf4497",
+     "match": "identical"
+    },
+    {
+     "slot": "addition/05_045",
+     "catalog_id": "c01f70781827c72c",
+     "match": "identical"
+    },
+    {
+     "slot": "addition/05_046",
+     "catalog_id": "a5bb6bc0074cb765",
+     "match": "identical"
+    },
+    {
+     "slot": "addition/05_047",
+     "catalog_id": "9c656801a4f2e39b",
+     "match": "identical"
+    },
+    {
+     "slot": "addition/05_048",
+     "catalog_id": "a770338a887a455e",
+     "match": "same-model",
+     "differs": [
+      "name"
+     ]
+    },
+    {
+     "slot": "addition/05_049",
+     "catalog_id": "fbc8664f7bc0cef5",
+     "match": "identical"
+    },
+    {
+     "slot": "addition/05_050",
+     "catalog_id": "2621fab06bb3dad5",
+     "match": "identical"
+    },
+    {
+     "slot": "addition/05_051",
+     "catalog_id": null,
+     "match": "none"
+    }
+   ]
+  }
+ ]
+}

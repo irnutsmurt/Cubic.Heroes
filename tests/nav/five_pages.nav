@@ -72,6 +72,11 @@ until 20000 Back up now
 expect Back up now
 rb
 wait 60
+until 20000 card:|Import
+expect card:|Import
+shot 4b-characters
+rb
+wait 60
 until 20000 Graphics
 expect Graphics
 shot 5-settings
@@ -93,6 +98,10 @@ lb
 wait 60
 lb
 wait 60
+until 20000 card:|Import
+expect card:|Import
+lb
+wait 60
 until 20000 Back up now
 expect Back up now
 lb
@@ -112,6 +121,9 @@ expect menu: Install / Manage
 down
 wait 20
 expect menu: Saves
+down
+wait 20
+expect menu: Characters
 down
 wait 20
 expect menu: Settings

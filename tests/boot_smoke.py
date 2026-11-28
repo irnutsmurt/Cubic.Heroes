@@ -112,8 +112,10 @@ if os.environ.get("SCENARIO") and not os.environ.get("DRIVE"):
 
 
 def scenario_header():
-    """A drive's `#!` lines: saves, env, secs -- applied where the environment
-    does not already say. Returns the run's length from `#! secs`, or None."""
+    """A drive's `#!` lines: saves, env, secs, fights -- applied where the environment
+    does not already say. Returns the run's length from `#! secs`, or None. `#! fights`: the run is
+    meant to fight (DRIVE_FIGHTS=1): its native gate then requires the physics to have run, natively
+    (tests/native_gate.py)."""
     secs = None
     if not os.environ.get("DRIVE"):
         return None
@@ -132,6 +134,8 @@ def scenario_header():
                 os.environ.setdefault(k, v)
         elif what == "secs":
             secs = float(rest[0])
+        elif what == "fights":
+            os.environ.setdefault("DRIVE_FIGHTS", "1")
     return secs
 
 
@@ -142,7 +146,11 @@ if SECS_ARG:
 # the game runs with its run directory as the working directory.
 BIN = os.path.join(ROOT, os.environ.get("BIN") or os.path.join("build", *(("port-win", "dotheroes.exe") if WIN
                                                                           else ("port", "dotheroes"))))
-ELF = os.path.join(ROOT, "build", "disc", "PS3_GAME", "USRDIR", "EBOOT.elf")
+# BOOT_ELF: another program of the game (the official v1.01 update's decrypted program, beside its update's files:
+# PS3_GAME_UPDATE_DIR) -- the disc stays the game's /dev_bdvd (PS3_VFS_ROOT set to it when not given)
+ELF = os.environ.get("BOOT_ELF") or os.path.join(ROOT, "build", "disc", "PS3_GAME", "USRDIR", "EBOOT.elf")
+if os.environ.get("BOOT_ELF"):
+    os.environ.setdefault("PS3_VFS_ROOT", os.path.join(ROOT, "build", "disc"))
 INSTALLED = os.path.abspath(os.environ["INSTALLED"]) if os.environ.get("INSTALLED") else ""
 # Settings a test of an install asked for itself (the scenario's or the caller's), kept.
 INSTALLED_KEEP = set(os.environ.get("INSTALLED_KEEP", "").split(","))
@@ -196,6 +204,30 @@ def game_window(pid):
         return True
     u.EnumWindows(cb, 0)
     return min(found)[1] if found else None
+
+
+def census(text):
+    """the exit's census of the SPU machinery (beta.6, the owner's v1.01 acceptance: no legacy path at work): the last
+    "[census]" line's counts (ps3emu/census.h, port/native/phys_direct.cpp's report -- spurs_task, native_decline, ...),
+    the SPU programs started lifted ("[spu-census] first lifted start of image ..."), the physics tasks native and
+    lifted ("[phys-direct] N native tasks ..., M lifted through SPURS"). A gameplay run on the native architecture
+    has spurs_task 0, native_decline 0 and no lifted SPU start; {} when the game wrote no census (it did not end in
+    order)"""
+    out = {}
+    lines = re.findall(r"^\[census\] (.*)$", text, re.M)
+    if lines:
+        toks = lines[-1].split()
+        for k, v in zip(toks[0::2], toks[1::2]):
+            if v.isdigit():
+                out[k] = int(v)
+    lifted = re.findall(r"^\[spu-census\] first lifted start of image (\d+) \(([^)]*)\)", text, re.M)
+    if lines or lifted:
+        out["lifted_spu_start"] = len(lifted)
+        out["lifted_spu_images"] = sorted({name for _n, name in lifted})
+    phys = re.findall(r"^\[phys-direct\] (\d+) native tasks issued directly .*?(\d+) lifted through SPURS", text, re.M)
+    if phys:
+        out["phys_native"], out["phys_lifted"] = int(phys[-1][0]), int(phys[-1][1])
+    return out
 
 
 def rd(path):
@@ -307,7 +339,7 @@ def build_identity(env):
 
 
 def main():
-    if not os.path.isfile(BIN):
+    if not INSTALLED and not os.path.isfile(BIN):   # an installed game runs its own program: no development build needed
         print(f"no {BIN} (build port/ first)")
         return 2
     if VISIBLE and desktop_locked():
@@ -756,6 +788,13 @@ def main():
             result[name] = [json.loads(l) for l in open(os.path.join(RUN, f"{name}.jsonl"))]
         except (OSError, ValueError):
             result[name] = []
+    result["census"] = census(rd(os.path.join(RUN, "stderr.log")))
+    # beta.6 (the owner's acceptance #7): whether the run stayed on the native architecture -- nothing through
+    # SPURS, no native replacement declining, no SPU program lifted, and for a fighting run the physics run natively
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from native_gate import native_gate
+    result["fights"] = os.environ.get("DRIVE_FIGHTS") == "1"
+    result["native_gate"] = native_gate(result["census"], result["fights"])
     with open(os.path.join(RUN, "result.json"), "w") as f:
         json.dump(result, f, indent=1)
 

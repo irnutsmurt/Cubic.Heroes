@@ -1,0 +1,11 @@
+{
+ "about": "The Ed25519 public keys the launcher trusts for the Character Store's catalog (docs/CHARACTER_STORE.md, \"The catalog key\"): the same form as config/release_keys.json, never a release key. Each: id (the first 16 hex digits of the key's SHA-256), ed25519 (the 32-byte key, base64), added, note; a revoked key is kept with \"revoked\": true. Changed with tools/char_catalog.py keys --add / --revoke, shipped in a launcher release. With no key here the store refuses every catalog.",
+ "keys": [
+  {
+   "id": "86371527bd89cf1c",
+   "ed25519": "9rUnESLfuiTMJGLMLveS+kb8u6kNFzxs6Hf2cCWAwMk=",
+   "added": "2026-11-24",
+   "note": "the owner's character catalog key"
+  }
+ ]
+}

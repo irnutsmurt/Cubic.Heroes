@@ -8,6 +8,16 @@
 // DOTHEROES_PHYS_STATS=1 marks each task with its command as it starts
 // (frame-trace kind 20; tests/solver_breakdown.py).
 //
+// DOTHEROES_PHYS_LOG=[<seconds>:]<file> (a timing aid, with the frame trace
+// off): a line for each directly issued body or manifold set-up task (commands
+// 1 and 2) as it starts, with the bodies or manifolds it covers, and for each
+// directly issued native collision task as it ends (kind 9), with the pairs
+// it processed (an object awake) and its pairs -- microseconds on the frame trace's clock, as
+// DIAG_FRAMES's frame log. Kept in memory and written <seconds> after the
+// first, at a test's stop and at exit. A hit's debris shows as a step's awake
+// pairs rising, matched to the frame log's flips without the trace's per-call
+// cost.
+//
 // DOTHEROES_SOLVER_SNAP=<step>[,<step>...]:<prefix> captures chosen steps for
 // checking the solver's structures and a native command offline: guest memory
 // (cellSpurs's SPURS_SNAP writer) when the first task of each command is
@@ -75,6 +85,7 @@
 // itself is freed by the step's end). A snapshot is ~170 MB of game memory:
 // keep it out of git.
 #include "bullet_solver_task.h"
+#include "../program_addrs.h"   /* PA_RT(): v1.00's addresses of the game, for the program this build is of */
 
 #ifdef DOTHEROES_BULLET_CD
 #include <algorithm>
@@ -112,7 +123,8 @@ extern "C" void ppu_resv_break_line(uint32_t ea);   // ppu_loader.cpp: a store b
 namespace {
 
 constexpr int kImageBulletSolver = 5;
-constexpr uint32_t kEntryCollision = 0xF63600, kEntrySolver = 0xF8EC80;
+// the physics tasks' SPU programs, where the game's executable holds them (v1.01's: +0xD00): PA_RT, the program's own
+const uint32_t kEntryCollision = PA_RT(0x00F63600u), kEntrySolver = PA_RT(0x00F8EC80u);
 constexpr uint32_t kDescBytes = 0x90;   // the slots' descriptors are this far apart
 
 uint32_t be32(const uint8_t* p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
@@ -913,9 +925,88 @@ bool bullet_solver_direct_accept(const uint32_t entry[4], uint32_t* cmd)
     return true;
 }
 
+extern "C" void (*g_dotheroes_phys_log_write)(void);   // dev_state.cpp: called at a test's stop
+
+namespace {
+
+// DOTHEROES_PHYS_LOG: one record a set-up task
+struct PhysRec { uint64_t us; uint32_t kind, a, b; };
+struct PhysLog {
+    std::atomic<int> on{-1};          // -1 not read yet, 2 being set up, 0 off, 1 on
+    std::atomic<uint32_t> n{0};
+    std::atomic<int> written{0};
+    PhysRec* buf = nullptr;
+    std::atomic<uint64_t> first_ns{0};
+    uint64_t secs_ns = 0;
+    std::string path;
+};
+constexpr uint32_t kPhysLogCap = 1u << 21;   // 32 MB: ~3 h of steps
+PhysLog g_plog;
+
+void phys_log_write()
+{
+    FILE* f = fopen(g_plog.path.c_str(), "w");
+    if (!f) return;
+    const uint32_t n = std::min(g_plog.n.load(std::memory_order_acquire), kPhysLogCap);
+    fprintf(f, "# DOTHEROES_PHYS_LOG: us on the frame trace's clock, kind (solver command 1 bodies / 2 manifolds: a = the "
+            "count; 9 collision task: a = pairs processed, b = pairs), a, b\n");
+    for (uint32_t i = 0; i < n; i++) {
+        const PhysRec& r = g_plog.buf[i];
+        fprintf(f, "%llu %u %u %u\n", (unsigned long long)r.us, r.kind, r.a, r.b);
+    }
+    fclose(f);
+}
+
+bool phys_log_on()
+{
+    int on = g_plog.on.load(std::memory_order_acquire);
+    if (on == 0 || on == 1) return on;
+    int unread = -1;
+    if (g_plog.on.compare_exchange_strong(unread, 2)) {
+        on = 0;
+        const char* e = getenv("DOTHEROES_PHYS_LOG");
+        (void)PS3_FT_ON();   // the trace's clock base set, as for DIAG_FRAMES
+        if (e && *e && (g_plog.buf = (PhysRec*)malloc(sizeof(PhysRec) * kPhysLogCap)) != nullptr) {
+            const char* colon = strchr(e, ':');
+            const char* p = e;
+            while (p < colon && ((*p >= '0' && *p <= '9') || *p == '.')) p++;
+            if (colon && p == colon && colon > e) {   // <seconds>:<file> (a drive letter is not all digits)
+                g_plog.secs_ns = (uint64_t)(atof(e) * 1e9);
+                e = colon + 1;
+            }
+            g_plog.path = e;
+            atexit(phys_log_write);
+            g_dotheroes_phys_log_write = phys_log_write;
+            on = 1;
+        }
+        g_plog.on.store(on, std::memory_order_release);
+        return on;
+    }
+    while ((on = g_plog.on.load(std::memory_order_acquire)) == 2) { }
+    return on;
+}
+
+}  // namespace
+
+void bullet_phys_log_note(uint32_t kind, uint32_t a, uint32_t b)
+{
+    if (!phys_log_on()) return;
+    const uint64_t now = ps3_ft_now();
+    const uint32_t i = g_plog.n.fetch_add(1, std::memory_order_acq_rel);
+    if (i < kPhysLogCap)
+        g_plog.buf[i] = PhysRec{ (now - g_ps3_ft.base) / 1000, kind, a, b };
+    if (i == 0) g_plog.first_ns.store(now, std::memory_order_relaxed);
+    const uint64_t first = g_plog.first_ns.load(std::memory_order_relaxed);
+    int not_yet = 0;
+    if (g_plog.secs_ns && first && now - first >= g_plog.secs_ns &&
+        g_plog.written.compare_exchange_strong(not_yet, 1))
+        phys_log_write();
+}
+
 void bullet_solver_direct_run(uint32_t slot, uint32_t desc, uint32_t cmd)
 {
     t_task_cmd = cmd;
+    if (cmd == 1 || cmd == 2) bullet_phys_log_note(cmd, command_count(vm_base + desc), 0);
     capture_task_state("start", slot, desc);
     if (g_stats && PS3_FT_ON()) {
         const uint8_t* d = vm_base + desc;
