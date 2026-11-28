@@ -255,8 +255,23 @@ long as that key is trusted. Tested in `Keys.test_rollback_protection_survives_r
 - **Offline.** Without a connection the saved catalog is shown and the tab says so. With no saved catalog, the tab
   explains and offers *Refresh*.
 - **Cache.** `<library>/store/`: `catalog.json` (the last accepted catalog), `state.json` (its ETag, its date, when
-  it was checked, any rate-limit wait) and `thumbs/` (the launcher's pictures). Thumbnails are fetched in the
-  background, a few at a time, and only the missing ones.
+  it was checked, any rate-limit wait) and `thumbs/` (the launcher's pictures). A cached picture is never fetched
+  again.
+- **Pictures.** The missing thumbnails are fetched in the background, a few at a time (`store-thumbs --id ...`, at
+  most 24 while cards on screen wait, else 48). The cards on screen go first, then the store's order as shown, then
+  the rest. After each batch the launcher chooses again, so a scroll is followed within a second or two. The store's
+  list gives each missing picture the path it will have (`thumb_pending`). Each card on screen looks for its picture
+  there a few times a second and shows it as soon as it is written, whole and checked. Pictures therefore appear one
+  by one, not all at the end. Each card shows one of three things:
+  - its picture: a cached one appears at once, decoded a few a frame;
+  - the loading blocks while its picture is fetched or decoded: eight pixel blocks round a square, one lit block
+    stepping round with a fading trail, ten steps a second from the clock. They are drawn only on a card that is
+    waiting, so nothing is drawn once every picture is there. A decode shows them only after 0.2 s, so a cached
+    picture appears without them;
+  - a placeholder (a dim picture, *NO PICTURE*) when it can't be had. A refused picture (one that doesn't match the
+    catalog, or that the repository doesn't have) gets it until *Refresh*, and is never asked for again before then.
+    A picture not fetched because there is no connection or a rate limit gets it until the store is shown again.
+    No fetch is repeated in a loop.
 - **Downloads.** A character's file is downloaded only when the player chooses *Download* or *Download and
   install*. It is never downloaded twice: when its data's SHA-256 is already in the library, the launcher makes
   no request and says so. A downloaded character is recorded in the library with `source.kind = "store"`, its
@@ -304,6 +319,8 @@ tampered files, plus one run through a real local HTTP server. The checks:
   ignored; a release key is never trusted for the catalog, and a catalog key can't sign a release; adding and
   revoking keys works; no private key in the repository and no test key shipped;
 - thumbnails are checked;
+- the worker's `store-thumbs --id` fetches only the pictures asked for. It reports those still missing and whether it
+  stopped: no connection, versus refused;
 - a download happens once, can install too, and a tampered file or one with more than a character is refused;
 - a redirect to another host is refused;
 
@@ -324,3 +341,19 @@ tampered files, plus one run through a real local HTTP server. The checks:
   - nothing publishes or uploads.
 - two local-only checks (skipped without the maintainers' files): all 352 historical records kept, with the 45
   mapped entries among them; the mapping agrees with its private verification.
+
+`tests/launcher_store_thumbs.py` drives the launcher itself (`--nav-test`, hidden) against a copy served on
+127.0.0.1. The copy has 96 made-up characters and a catalog signed with a test key; two thumbnails on the first
+screen are refused, one missing and one not matching the catalog. The launcher logs the pictures on screen with each
+step: by state, the loading blocks drawn, and whether a fetch runs or stopped. It runs at 1280x800 and 1280x720:
+- **first** (an empty cache, a slow server): the loading blocks show while the first screen is fetched. That screen
+  is asked for first, and pictures appear before the fetch ends. The refused two get the placeholder. The cards stay
+  reachable by the D-pad, and a card's details open and close. Every thumbnail is fetched exactly once;
+- **return** (to another tab or page and back): everything shows at once, with no blocks and nothing fetched again;
+- **reopen** (a new launcher, a full cache): no decoding blocks; only the refused two are asked for again, once;
+- **offline** (a full cache, no connection): the cached pictures show, the rest get the placeholder, and no blocks
+  are drawn;
+- **drop** (the connection lost after a few thumbnails): those show and the rest get the placeholder. A fetch that
+  stopped is not repeated until the store is shown again, and then only once;
+- **scroll** (a slow server, the D-pad held to the end at once): the last screen's pictures are asked for before
+  the ones scrolled past.

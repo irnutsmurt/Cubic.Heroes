@@ -2110,7 +2110,8 @@ def cmd_characters(a, ev, control):
     --char-action list (default) | import --paths P [--paths P ...] [--with-key] [--keep-key] | import-saves [--id FOLDER
     ...] [--with-key] [--keep-key] | export --id I [--id ...] --out PATH | install --id I | uninstall --id I --confirm |
     rename --id I --label L | delete --id I --confirm | previews [--id I ...] [--full] | key-forget |
-    store | store-refresh | store-thumbs | store-download --id I [--and-install] (the read-only Character Store).
+    store | store-refresh | store-thumbs [--id I ...] | store-download --id I [--and-install] (the read-only Character
+    Store; store-thumbs --id: only those pictures, in that order).
     import --with-key (with --control): the player's PS3 key is read from the control channel ("key <hex>") -- never
     from the command line; it is validated on the first encrypted character before any is decrypted, kept only with
     --keep-key and only once it decrypted a character, and never written to the events or the log. Long actions
@@ -2272,16 +2273,24 @@ def cmd_characters(a, ev, control):
         if act == "store-thumbs":
             cat, _ = st.entries(savedata)
             todo = [e for e in (cat or {}).get("characters", []) if not e["thumb_path"]]
-            made, failed = 0, 0
+            if ids:   # the launcher's few, in its order (the cards on screen first): only those
+                rank = {cid: i for i, cid in enumerate(ids)}
+                todo = sorted((e for e in todo if e["id"] in rank), key=lambda e: rank[e["id"]])
+            made, failed, stopped = 0, 0, False
             for i in range(0, len(todo), 24):
                 if control.cancel.is_set():
+                    stopped = True
                     break
                 progress(i, len(todo), "")
                 m, f = st.fetch_thumbs(todo[i:i + 24], budget=24, deadline_s=60)
                 made, failed = made + m, failed + f
                 if m + f < len(todo[i:i + 24]):
+                    stopped = True
                     break   # offline or rate limited: the rest stay placeholders
-            return {"made": made, "failed": failed, "total": len(todo)}
+            # stopped: no connection, a rate limit or the deadline (the missing ones may not have been tried); else
+            # each missing one was refused (it doesn't match the catalog, or the repository doesn't have it)
+            return {"made": made, "failed": failed, "total": len(todo), "stopped": stopped,
+                    "missing": [e["id"] for e in todo if not os.path.isfile(st.thumb_path(e))]}
         status = st.refresh(force=(act == "store-refresh"))
         cat, problems = st.entries(savedata, included=included)
         missing = sum(1 for e in (cat or {}).get("characters", []) if not e["thumb_path"])
@@ -2304,6 +2313,8 @@ def cmd_characters(a, ev, control):
                   "included_label": e["included_with"][0]["label"] if e["included_with"] else "",
                   "same_model_in_library": e["same_model_in_library"], "sources": e["sources"],
                   "thumb": e["thumb_path"],
+                  # where its picture will be once fetched (store-thumbs): the launcher looks for it there
+                  "thumb_pending": "" if e["thumb_path"] else st.thumb_path(e),
                   "views": lib.preview_path(e["in_library"], "views.rle") if e["in_library"] else "",
                   "preview_ok": True, "voxels": -1}
                  for e in (cat or {}).get("characters", [])]
