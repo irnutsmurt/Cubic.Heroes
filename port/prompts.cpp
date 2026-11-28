@@ -430,16 +430,32 @@ const char* style_name(int s) { return s >= 0 && s < S_COUNT ? kStyleNames[s] : 
 // the player's own files: every table texture's and every font's fingerprint, and the game's art of each button
 void start(const char* elf)
 {
-    std::string data = elf ? elf : "";
-    const size_t sl = data.find_last_of("/\\");
-    data = (sl == std::string::npos ? std::string(".") : data.substr(0, sl)) + "/data/";
+    // beta.6: the folders the game reads its data from, in its own order. The official update's comes first: with
+    // v1.01 the game's /dev_hdd0/game/<title>/ is the update's folder (PS3_GAME_UPDATE_DIR, port/main.cpp), holding
+    // only the files the update replaces (two fonts and the character select's picture; their button cells are the
+    // disc's, pixel for pixel). The disc's comes next (PS3_VFS_ROOT, as port/devtools does), else the program's own
+    // folder. The program's folder alone was v1.01's update folder: 2 of the 40 textures were recognised, and the
+    // naming screen and every other UI picture kept the PlayStation buttons whatever the style chosen.
+    std::vector<std::string> roots;
+    auto add_root = [&](std::string r) {
+        for (char& ch : r) if (ch == '\\') ch = '/';
+        if (std::find(roots.begin(), roots.end(), r) == roots.end()) roots.push_back(r);
+    };
+    if (const char* u = getenv("PS3_GAME_UPDATE_DIR"); u && *u) add_root(std::string(u) + "/USRDIR/data/");
+    {
+        std::string d = elf ? elf : "";
+        const size_t sl = d.find_last_of("/\\");
+        add_root((sl == std::string::npos ? std::string(".") : d.substr(0, sl)) + "/data/");
+    }
+    if (const char* v = getenv("PS3_VFS_ROOT"); v && *v) add_root(std::string(v) + "/PS3_GAME/USRDIR/data/");
     int found = 0, missing = 0;
     std::unordered_map<std::string, std::pair<std::vector<uint8_t>, std::vector<TpkEntry>>> files;
-    auto open = [&](const std::string& pkg) -> std::pair<std::vector<uint8_t>, std::vector<TpkEntry>>* {
-        auto it = files.find(pkg);
+    auto open = [&](const std::string& root, const std::string& pkg) -> std::pair<std::vector<uint8_t>, std::vector<TpkEntry>>* {
+        const std::string path = root + pkg + ".ps3.tpk";
+        auto it = files.find(path);
         if (it != files.end()) return it->second.second.empty() ? nullptr : &it->second;
-        auto& f = files[pkg];
-        if (!read_file(data + pkg + ".ps3.tpk", f.first) || !parse_tpk(f.first, f.second)) f.second.clear();
+        auto& f = files[path];
+        if (!read_file(path, f.first) || !parse_tpk(f.first, f.second)) f.second.clear();
         return f.second.empty() ? nullptr : &f;
     };
     auto level0 = [&](const std::vector<uint8_t>& b, const TpkEntry& e, uint32_t bc) -> const uint8_t* {
@@ -447,40 +463,48 @@ void start(const char* elf)
     };
     const auto& tab = table();
     for (size_t i = 0; i < tab.size(); i++) {
-        auto* f = open(tab[i].package);
-        const TpkEntry* e = nullptr;
-        if (f) for (const TpkEntry& t : f->second) if (t.name == std::string(tab[i].name) + ".dds" || t.name == tab[i].name) e = &t;
-        const uint32_t bc = e ? bc_of_tpk(e->fmt) : 0;
-        const uint8_t* p = e ? level0(f->first, *e, bc) : nullptr;
-        if (!p) { missing++; continue; }
-        const uint64_t fp = fingerprint(bc, e->w, e->h, p, level0_bytes(bc, e->w, e->h));
-        if (!g_known.count(fp)) g_known[fp].tex = (int)i;
-        g_dims.push_back(dims_key(bc, e->w, e->h));
-        found++;
-        // the game's art of each button, from the first texture showing it on a clear background
-        std::vector<uint8_t> px;
-        for (const Cell& c : tab[i].cells) {
-            if (c.button >= B_COUNT || g_ps_art[c.button].w) continue;
-            if (px.empty()) decode_bc(bc, e->w, e->h, p, px);
-            const Box cb = { c.x0, c.y0, c.x1, c.y1 };
-            uint8_t bg[4];
-            background(px, (int)e->w, (int)e->h, cb, bg);
-            Rgba art = crop(px, (int)e->w, art_box(px, (int)e->w, cb, bg));
-            if (bg[3] >= 40)   // on a panel: the panel's own colour made clear
-                for (size_t k = 0; k < art.px.size(); k += 4) if (!differs(&art.px[k], bg)) art.px[k + 3] = 0;
-            g_ps_art[c.button] = std::move(art);
+        bool any = false;
+        for (const std::string& root : roots) {   // each copy the game may upload: the update's and the disc's
+            auto* f = open(root, tab[i].package);
+            const TpkEntry* e = nullptr;
+            if (f) for (const TpkEntry& t : f->second) if (t.name == std::string(tab[i].name) + ".dds" || t.name == tab[i].name) e = &t;
+            const uint32_t bc = e ? bc_of_tpk(e->fmt) : 0;
+            const uint8_t* p = e ? level0(f->first, *e, bc) : nullptr;
+            if (!p) continue;
+            const uint64_t fp = fingerprint(bc, e->w, e->h, p, level0_bytes(bc, e->w, e->h));
+            if (!g_known.count(fp)) g_known[fp].tex = (int)i;
+            g_dims.push_back(dims_key(bc, e->w, e->h));
+            any = true;
+            // the game's art of each button, from the first texture showing it on a clear background
+            std::vector<uint8_t> px;
+            for (const Cell& c : tab[i].cells) {
+                if (c.button >= B_COUNT || g_ps_art[c.button].w) continue;
+                if (px.empty()) decode_bc(bc, e->w, e->h, p, px);
+                const Box cb = { c.x0, c.y0, c.x1, c.y1 };
+                uint8_t bg[4];
+                background(px, (int)e->w, (int)e->h, cb, bg);
+                Rgba art = crop(px, (int)e->w, art_box(px, (int)e->w, cb, bg));
+                if (bg[3] >= 40)   // on a panel: the panel's own colour made clear
+                    for (size_t k = 0; k < art.px.size(); k += 4) if (!differs(&art.px[k], bg)) art.px[k + 3] = 0;
+                g_ps_art[c.button] = std::move(art);
+            }
         }
+        any ? found++ : missing++;
     }
     for (int i = 0; i < kFontPackageCount; i++) {
-        auto* f = open(kFontPackages[i]);
-        const TpkEntry* e = f && !f->second.empty() ? &f->second[0] : nullptr;
-        const uint32_t bc = e ? bc_of_tpk(e->fmt) : 0;
-        const uint8_t* p = e ? level0(f->first, *e, bc) : nullptr;
-        if (!p) { missing++; continue; }
-        const uint64_t fp = fingerprint(bc, e->w, e->h, p, level0_bytes(bc, e->w, e->h));
-        g_known[fp].font = i;
-        g_dims.push_back(dims_key(bc, e->w, e->h));
-        found++;
+        bool any = false;
+        for (const std::string& root : roots) {
+            auto* f = open(root, kFontPackages[i]);
+            const TpkEntry* e = f && !f->second.empty() ? &f->second[0] : nullptr;
+            const uint32_t bc = e ? bc_of_tpk(e->fmt) : 0;
+            const uint8_t* p = e ? level0(f->first, *e, bc) : nullptr;
+            if (!p) continue;
+            const uint64_t fp = fingerprint(bc, e->w, e->h, p, level0_bytes(bc, e->w, e->h));
+            g_known[fp].font = i;
+            g_dims.push_back(dims_key(bc, e->w, e->h));
+            any = true;
+        }
+        any ? found++ : missing++;
     }
     std::sort(g_dims.begin(), g_dims.end());
     g_dims.erase(std::unique(g_dims.begin(), g_dims.end()), g_dims.end());
@@ -511,20 +535,25 @@ void start(const char* elf)
                     n++;
                 }
             };
+            auto first = [&](const std::string& pkg) {   // the copy the game uploads: the first folder holding it
+                for (const std::string& root : roots) if (auto* f = open(root, pkg)) return f;
+                return (std::pair<std::vector<uint8_t>, std::vector<TpkEntry>>*)nullptr;
+            };
             for (size_t i = 0; i < tab.size(); i++) {
-                auto* f = open(tab[i].package);
+                auto* f = first(tab[i].package);
                 if (f) for (const TpkEntry& t : f->second) if (t.name == std::string(tab[i].name) + ".dds") one(tab[i].package, tab[i].name, t, f->first);
             }
             for (int i = 0; i < kFontPackageCount; i++) {
-                auto* f = open(kFontPackages[i]);
+                auto* f = first(kFontPackages[i]);
                 if (f && !f->second.empty()) one(kFontPackages[i], "font", f->second[0], f->first);
             }
         }
         g_choice.store(keep);
         if (dh_log) dh_log(2, "prompts", "self-test: %d textures written to %s", n, st);
     }
-    if (dh_log) dh_log(2, "prompts", "the game's prompt textures: %d recognised from its files, %d not found (%zu kinds)", found,
-                       missing, g_dims.size());
+    if (dh_log) dh_log(2, "prompts", "the game's prompt textures: %d recognised from its files, %d not found (%zu kinds; %zu "
+                       "folder%s: %s)", found, missing, g_dims.size(), roots.size(), roots.size() == 1 ? "" : "s",
+                       getenv("PS3_GAME_UPDATE_DIR") ? "the update's, then the disc's" : "the disc's");
 }
 
 // the style and the bindings now, as one number (a change re-uploads the prompt textures)
